@@ -105,7 +105,7 @@ export interface SubstrateErrorCodeSpec {
 export const SUBSTRATE_ERROR_CODES: Readonly<Record<SubstrateErrorClass, SubstrateErrorCodeSpec>> = {
   spawn_configuration: {
     retryable: false,
-    description: 'Local REPL launch configuration is missing or cannot be prepared safely; fix the cwd or config access before retrying. This is not a provider or credential failure.',
+    description: 'Substrate configuration is missing or invalid, including REPL launch settings and configured model rows; fix the configuration before retrying. This is not a provider or credential failure.',
   },
   binary_not_found: {
     retryable: false,

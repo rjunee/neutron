@@ -1,3 +1,4 @@
+import { projectModelTier } from '@neutronai/runtime/configured-models.ts'
 /**
  * @neutronai/open — single-owner graph composer (Sprint D boot shell).
  *
@@ -269,6 +270,7 @@ export type OpenComposition = CompositionInput &
       | 'app_tasks_surface'
       | 'app_upload_surface'
       | 'app_voice_transcription_surface'
+      | 'app_email_digest_surface'
       | 'app_trident_phase_models_surface'
       | 'admin_respawn_handler'
     >
@@ -451,15 +453,18 @@ import { resolveOnboardingOpenAiKey } from '@neutronai/gateway/wiring/resolve-on
 import {
   isValidIanaTimezone,
   readOwnerTimezone,
+  readEmailDigestEnabled,
   initializeInstanceModelProvider,
   readTranscriptionBackend,
   writeTranscriptionBackend,
+  writeEmailDigestEnabled,
 } from '@neutronai/gateway/storage/owner-metadata.ts'
 import {
   WhisperInstaller,
   freeBytesAt,
 } from '@neutronai/gateway/transcription/whisper-install.ts'
 import { createVoiceTranscriptionSurface } from '@neutronai/gateway/http/voice-transcription-surface.ts'
+import { createEmailDigestSettingsSurface } from '@neutronai/gateway/http/email-digest-settings-surface.ts'
 import { createTridentPhaseModelsSurface } from '@neutronai/gateway/http/trident-phase-models-surface.ts'
 import { createAppDiagnosticsSurface } from '@neutronai/gateway/http/app-diagnostics-surface.ts'
 import { composeDiagnostics } from '@neutronai/gateway/diagnostics/diagnostics-report.ts'
@@ -850,7 +855,12 @@ export function resolveOpenConversationalProvider(
   deps: OpenConversationalProviderDeps,
 ): Pick<OpenWiringContext, 'provider' | 'openaiLlmPool' | 'bindMcpResolver' | 'toolManifest'> {
   const provider = resolveOpenModelProvider(env)
+  projectModelTier(env) // Validate project routes at boot, before accepting chat.
   assertConversationalProviderWired(provider)
+  // Configured chat uses its own credential references, independent of an OpenAI key.
+  const configuredTools = env['NEUTRON_PROJECT_MODELS'] === undefined ? {} : {
+    bindMcpResolver: deps.buildMcpResolver(), toolManifest: deps.buildToolManifest(),
+  }
   const pool = deps.resolveOpenAiPool(env)
   if (pool !== null) {
     if (provider !== 'anthropic') {
@@ -871,9 +881,9 @@ export function resolveOpenConversationalProvider(
     log.error('provider_openai_no_key', {
       note: 'NEUTRON_MODEL_PROVIDER=openai but no OPENAI_API_KEY resolved — conversational turns will FAIL LOUDLY (no silent Anthropic fallback). Set OPENAI_API_KEY.',
     })
-    return { provider }
+    return { provider, ...configuredTools }
   }
-  return { provider: 'anthropic' }
+  return { provider: 'anthropic', ...configuredTools }
 }
 
 // C3d — the two pure Open-mode app-ws routing helpers MOVED to
@@ -3966,6 +3976,11 @@ export function buildOpenGraphComposer(
       writeChoice: (backend) => writeTranscriptionBackend(db, project_slug, backend),
       keys: openAiTranscriptionKeys,
     })
+    const emailDigestSurface = createEmailDigestSettingsSurface({
+      auth: appOwnerAuth,
+      readEnabled: () => readEmailDigestEnabled(db, project_slug),
+      writeEnabled: (enabled) => writeEmailDigestEnabled(db, project_slug, enabled),
+    })
 
     // O5 (world-class-refactor) — read-only diagnostics surface. Composes
     // EXISTING per-instance state (gbrain latch, credential-pool health, REPL
@@ -5655,6 +5670,7 @@ export function buildOpenGraphComposer(
     const appWsChatTurn =
       liveAgentSubstrate !== null
         ? buildLiveAgentTurn({
+            configuredModel: (projectId) => projectModelTier(env, projectId),
             substrate: liveAgentSubstrate,
             injectActiveTurn: (turn, text) => injectPersistentReplActiveTurn({
               substrate_instance_id: `cc-agent-${owner_handle}`,
@@ -6770,6 +6786,10 @@ export function buildOpenGraphComposer(
         ...(coresScribeFanOut !== null ? { scribeFanOut: coresScribeFanOut.fanOut } : {}),
         resolveTimezone: (slug: string): string | undefined =>
           readOwnerTimezone(db, slug) ?? undefined,
+        readDigestEnabled: (slug: string): boolean => readEmailDigestEnabled(db, slug),
+        // P2 rehearsal: reads, escalation, queuing, and briefs are live while
+        // Gmail label/archive writes remain owned by the existing service.
+        mailbox_writes: 'held_back',
         register_cleanup: (fn: () => void): void => {
           realmodeCleanups.push(fn)
         },
@@ -7351,6 +7371,7 @@ export function buildOpenGraphComposer(
       // Local voice transcription (`/api/app/voice-transcription`) — the
       // Settings-tab install/remove control for the keyless whisper.cpp backend.
       app_voice_transcription_surface: { handler: voiceTranscriptionSurface.handler },
+      app_email_digest_surface: { handler: emailDigestSurface.handler },
       app_trident_phase_models_surface: { handler: tridentPhaseModelsSurface.handler },
       // O5 — read-only diagnostics (`GET /api/app/admin/diagnostics`),
       // owner-gated. Additive; mounts no write route.

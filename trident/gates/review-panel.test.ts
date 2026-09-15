@@ -23,8 +23,8 @@ test('review approves only measured configured panel with recorded synthesis', a
   f.source.seats = [f.source.seats[0]!, { ...f.source.seats[1]!, enabled: false }]
   expect(await f.check()).toEqual({ kind: 'approve' }); expect(f.reads()).toBe(3)
 })
-test('review missing source, config, malformed trailer and thrown observations stay unknown', async () => {
-  expect(await reviewPanel(undefined, approve, snapshot, 1, 'run')).toMatchObject({ kind: 'unknown' })
+test('G057 G060 missing panel facts are infrastructure blocks', async () => {
+  expect(await reviewPanel(undefined, approve, snapshot, 1, 'run')).toMatchObject({ kind: 'blocked', on: expect.stringContaining('infra-only:') })
   for (const change of [
     (f: ReturnType<typeof fixture>) => { f.source.seats = [] },
     (f: ReturnType<typeof fixture>) => { f.source.seats = [{ ...f.source.seats[0]!, modelId: '' }] },
@@ -38,15 +38,16 @@ test('review missing source, config, malformed trailer and thrown observations s
     (f: ReturnType<typeof fixture>) => { f.source.readSeat = async () => ({ ...f.seat, provider: 'anthropic' as SeatObservation['provider'] }) },
     (f: ReturnType<typeof fixture>) => { f.seat.payload = null },
     (f: ReturnType<typeof fixture>) => { f.source.readSynthesis = async () => null },
+    (f: ReturnType<typeof fixture>) => { f.source.readSynthesis = async () => { throw Error('synthesis offline') } },
     (f: ReturnType<typeof fixture>) => { f.synthesis.runId = 'other' },
     (f: ReturnType<typeof fixture>) => { f.synthesis.head = 'other' },
     (f: ReturnType<typeof fixture>) => { f.synthesis.round = 2 },
     (f: ReturnType<typeof fixture>) => { f.synthesis.checkpoint = 'review-started' },
   ]) {
-    const f = fixture(); change(f); expect(await f.check()).toMatchObject({ kind: 'unknown' })
+    const f = fixture(); change(f); expect(await f.check()).toMatchObject({ kind: 'blocked', on: expect.stringContaining('infra-only:') })
   }
-  const f = fixture(); expect(await f.check(null)).toMatchObject({ kind: 'unknown' })
-  f.synthesis.payload = null; expect(await f.check(approve)).toMatchObject({ kind: 'unknown' })
+  const f = fixture(); expect(await f.check(null)).toMatchObject({ kind: 'blocked', on: expect.stringContaining('infra-only:') })
+  f.synthesis.payload = null; expect(await f.check(approve)).toMatchObject({ kind: 'blocked', on: expect.stringContaining('infra-only:') })
 })
 test('review peer deferral or missing provider refuses by configured name and retries once', async () => {
   for (const status of ['deferred', 'unavailable', 'rate-limited'] as const) {
@@ -104,7 +105,7 @@ test('review strips reserved exemption markers before arithmetic', async () => {
 test('review malformed findings cannot authorize approval', async () => {
   for (const findings of [null, [null], ['invalid'], [{ ...finding, severity: 'mystery' }]]) {
     const f = fixture(); f.seat.payload = { verdict: 'APPROVE', findings }
-    expect(await f.check()).toMatchObject({ kind: 'unknown' })
+    expect(await f.check()).toMatchObject({ kind: 'blocked', on: expect.stringContaining('infra-only:') })
   }
 })
 

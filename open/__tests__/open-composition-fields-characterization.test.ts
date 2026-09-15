@@ -79,6 +79,10 @@ const EXPECTED_COMPOSITION_KEYS = [
   // O5 — read-only diagnostics surface (`GET /api/app/admin/diagnostics`).
   'app_diagnostics_surface',
   'app_docs_surface',
+  // The owner's twice-daily email-brief preference (`/api/app/email-digest`).
+  // Declaring it here proves the real Open composer hands the surface to the
+  // gateway graph, rather than leaving the Settings control backed by a 404.
+  'app_email_digest_surface',
   // The owner's GitHub device-flow connect surface (`/api/app/github-auth`). The
   // token storage, the github.com-scoped git helper and the credentialed host
   // runner all shipped before this key existed, and none of them could be STARTED

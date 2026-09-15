@@ -3,7 +3,7 @@ import { tmpdir } from 'node:os'
 import { join } from 'node:path'
 import { createHash } from 'node:crypto'
 import type { BuildRunDeps, BuildSnapshot, GateResult, Measurement, BuildModeHost, ResumeCheckpoint } from './build-run.ts'
-import type { CiRunObservation } from './ci-readiness.ts'
+import { classifyCiRollup, confirmConfigurationError, type CiRunObservation, type RequiredCheckObservation } from './ci-readiness.ts'
 import { briefIntegrity } from './gates/brief-integrity.ts'
 import type { AdmissionSource } from './gates/project-admission.ts'
 import { pinnedMergeReadiness, publicationReadiness } from './gates/release-readiness.ts'
@@ -12,6 +12,7 @@ import { gitRangeArgv } from './git-range.ts'
 import type { EnvCapableHostRunner } from './git-mode.ts'
 import type { TridentRun, TridentRunStore } from './store.ts'
 import { isTerminalPhase } from './state-machine.ts'
+import { TRIDENT_SCRIPT_DIR } from './script-dir.ts'
 
 const oid = /^(?:[0-9a-f]{40}|[0-9a-f]{64})$/
 const unknown = (detail: string): GateResult => ({ kind: 'unknown', detail })
@@ -26,9 +27,98 @@ export interface ProductionHostOptions {
   branch: string
   baseBranch: string
   runHost: EnvCapableHostRunner
-  /** The required workflow, as configured by the project. */
-  ciWorkflow: string
+  /** The repo's declared workflow; undefined means CI configuration is unknown. */
+  ciWorkflow: string | undefined
+  ciSource?: ProductionCiSource
+  ciNow?: () => number
   publication: { title: string; bodyFile: string }
+}
+
+export interface ProductionCiSource {
+  required(baseBranch: string): Promise<RequiredCheckObservation>
+  readiness(pr: number): Promise<{ headSha: unknown; mergeable: unknown; rows: unknown } | { unreadable: string }>
+}
+
+export type CleanupOutcome =
+  | { kind: 'cleaned'; detail: string }
+  | { kind: 'preserved'; detail: string }
+  | { kind: 'failed'; detail: string }
+
+const CI_CONFIGURATION_GRACE_MS = 600_000
+const missingResponse = (result: { exit_code: number; stderr: string; stdout: string }) =>
+  result.exit_code === 1 && /(?:HTTP 404|Not Found|Branch not protected)/i.test(`${result.stdout}\n${result.stderr}`)
+
+/** Credentialed GitHub acquisition; command results remain distinguishable from empty payloads. */
+export function productionCiSource(run: EnvCapableHostRunner, repo: string): ProductionCiSource {
+  const api = (path: string) => run(['gh', 'api', path], repo)
+  const json = (text: string): unknown => JSON.parse(text)
+  const names = (result: Awaited<ReturnType<typeof api>>, field: 'check_runs' | 'statuses', name: 'name' | 'context'): string[] | null => {
+    if (!result.ok || result.timed_out) return null
+    const value: any = json(result.stdout)
+    if (!value || !Number.isSafeInteger(value.total_count) || !Array.isArray(value[field])) return null
+    const out = value[field].map((row: any) => row?.[name])
+    return out.every((entry: unknown) => typeof entry === 'string') && out.length === value.total_count ? out : null
+  }
+  return {
+    async required(base) {
+      try {
+        const encoded = encodeURIComponent(base)
+        const [protection, branch, rules, runs, statuses] = await Promise.all([
+          api(`repos/{owner}/{repo}/branches/${encoded}/protection/required_status_checks`),
+          api(`repos/{owner}/{repo}/branches/${encoded}`),
+          api(`repos/{owner}/{repo}/rules/branches/${encoded}`),
+          api(`repos/{owner}/{repo}/commits/${encoded}/check-runs?per_page=100`),
+          api(`repos/{owner}/{repo}/commits/${encoded}/status?per_page=100`),
+        ])
+        const required: string[] = []
+        const appBound: string[] = []
+        const add = (entry: any) => {
+          const context = typeof entry === 'string' ? entry : entry?.context
+          if (typeof context !== 'string' || context === '') return
+          if (!required.includes(context)) required.push(context)
+          const binding = entry?.app_id ?? entry?.appId ?? entry?.integration_id
+          if (binding !== undefined && binding !== null && binding !== -1 && !appBound.includes(context)) appBound.push(context)
+        }
+        let branchValue: any = null
+        if (branch.ok && !branch.timed_out) branchValue = json(branch.stdout)
+        if (protection.ok && !protection.timed_out) {
+          const value: any = json(protection.stdout)
+          if (!value || !Array.isArray(value.contexts) || !Array.isArray(value.checks)) throw new Error('classic protection payload is malformed')
+          value.contexts.forEach(add); value.checks.forEach(add)
+        } else if (missingResponse(protection)) {
+          const contexts = branchValue?.protection?.required_status_checks?.contexts
+          const checks = branchValue?.protection?.required_status_checks?.checks
+          if (Array.isArray(contexts)) contexts.forEach(add)
+          if (Array.isArray(checks)) checks.forEach(add)
+        } else return { kind: 'unknown', reason: 'classic protection could not be read' }
+        if (rules.ok && !rules.timed_out) {
+          const value: any = json(rules.stdout)
+          if (!Array.isArray(value)) throw new Error('rules payload is malformed')
+          for (const rule of value) if (rule?.type === 'required_status_checks') {
+            const checks = rule?.parameters?.required_status_checks
+            if (!Array.isArray(checks)) throw new Error('required rules payload is malformed')
+            checks.forEach(add)
+          }
+        } else if (!missingResponse(rules)) return { kind: 'unknown', reason: 'branch rules could not be read' }
+        else if (missingResponse(protection) && branchValue?.protected !== false
+          && branchValue?.protection?.enabled !== false && required.length === 0) {
+          return { kind: 'unknown', reason: 'neither protection source nor independent branch evidence established required checks' }
+        }
+        const runNames = names(runs, 'check_runs', 'name')
+        const statusNames = names(statuses, 'statuses', 'context')
+        return { kind: 'resolved', required, appBound, produced: runNames === null || statusNames === null
+          ? null : [...new Set([...runNames, ...statusNames])] }
+      } catch (error) { return { kind: 'unknown', reason: String(error) } }
+    },
+    async readiness(pr) {
+      try {
+        const result = await run(['gh', 'pr', 'view', String(pr), '--json', 'headRefOid,mergeable,statusCheckRollup'], repo)
+        if (!result.ok || result.timed_out) return { unreadable: 'PR readiness could not be read' }
+        const value: any = json(result.stdout)
+        return { headSha: value?.headRefOid, mergeable: value?.mergeable, rows: value?.statusCheckRollup }
+      } catch (error) { return { unreadable: String(error) } }
+    },
+  }
 }
 
 /** The brief remains immutable; each turn reads this host-written context file. */
@@ -37,6 +127,7 @@ export const workContextPath = (briefPath: string): string => `${briefPath}.cont
 /** Additive host implementation. External write uncertainty is never a success. */
 export function createProductionHostEffects(options: ProductionHostOptions) {
   const { store, runId, repo, worktree, branch, baseBranch, runHost } = options
+  const cleanupMode = store.get(runId)?.merge_mode
   const git = (...args: string[]) => runHost(['git', '-C', repo, ...args], repo)
   function row(): TridentRun {
     const current = store.get(runId)
@@ -198,21 +289,25 @@ export function createProductionHostEffects(options: ProductionHostOptions) {
     },
   }
   function ralphIteration() { return readModeState()?.iteration ?? row().ralph_round }
+  const ciSource = options.ciSource ?? productionCiSource(runHost, repo)
+  const ciNow = options.ciNow ?? Date.now
+  let missingSince: number | null = null
   async function observeCi(snapshot: BuildSnapshot): Promise<CiRunObservation> {
     try {
       row()
-      if (!options.ciWorkflow || !oid.test(snapshot.head)) throw new Error('CI workflow or full head is missing')
-      const result = await runHost(['gh', 'run', 'list', '--workflow', options.ciWorkflow, '--commit', snapshot.head,
-        '--limit', '1', '--json', 'headSha,status,conclusion'], repo)
-      if (!result.ok || result.timed_out) throw new Error('CI run could not be read')
-      const runs: unknown = JSON.parse(result.stdout)
-      if (!Array.isArray(runs) || runs.length > 1) throw new Error('CI response is malformed')
-      if (runs.length === 0) return { kind: 'absent' }
-      const run = runs[0]
-      if (!run || typeof run.headSha !== 'string' || !oid.test(run.headSha) || !['queued', 'in_progress', 'waiting', 'pending', 'requested', 'completed'].includes(run.status)) throw new Error('CI run identity or status is missing')
-      if (run.status !== 'completed') return { kind: 'running', headSha: run.headSha }
-      if (!['success', 'failure', 'cancelled', 'timed_out', 'action_required', 'neutral', 'skipped', 'stale', 'startup_failure'].includes(run.conclusion)) throw new Error('CI conclusion is missing')
-      return { kind: 'completed', headSha: run.headSha, conclusion: run.conclusion === 'success' ? 'success' : 'failure' }
+      if (typeof options.ciWorkflow !== 'string' || options.ciWorkflow.trim() === '') throw new Error('Repository CI workflow is missing from project-repos.json')
+      if (!oid.test(snapshot.head) || !snapshot.pr) throw new Error('CI PR or full head is missing')
+      const [config, readiness] = await Promise.all([ciSource.required(baseBranch), ciSource.readiness(snapshot.pr.number)])
+      if ('unreadable' in readiness) throw new Error(readiness.unreadable)
+      if (readiness.headSha !== snapshot.head) throw new Error('CI readiness head is missing or mismatched')
+      const elapsed = missingSince === null ? 0 : Math.max(0, ciNow() - missingSince)
+      const classify = (value: RequiredCheckObservation) => classifyCiRollup(snapshot.head, readiness.mergeable, readiness.rows, value, elapsed, CI_CONFIGURATION_GRACE_MS)
+      let observed = classify(config)
+      if (observed.kind === 'absent' && missingSince === null) missingSince = ciNow()
+      if (observed.kind === 'configuration-error') observed = confirmConfigurationError(observed,
+        await ciSource.required(baseBranch), fresh => classify(fresh))
+      if (observed.kind !== 'absent') missingSince = null
+      return observed
     } catch (error) { return { kind: 'unreadable', reason: String(error) } }
   }
   const admission: AdmissionSource = {
@@ -294,6 +389,20 @@ export function createProductionHostEffects(options: ProductionHostOptions) {
       return { kind: 'allow' }
     } catch (error) { return unknown(String(error)) }
   }
+  async function cleanup(): Promise<CleanupOutcome> {
+    try {
+      if (cleanupMode !== 'pr' && cleanupMode !== 'local') return { kind: 'failed', detail: 'Cleanup mode is missing' }
+      const mode = cleanupMode === 'pr' ? 'delete-branch' : 'keep-branch'
+      const result = await runHost(['bash', join(TRIDENT_SCRIPT_DIR, 'worktree-cleanup.sh'), repo, branch, mode], repo)
+      const detail = [result.stdout, result.stderr].filter(Boolean).join('\n')
+      const summary = result.stdout.match(/^RESULT preserved=(\d+) removed=(\d+)$/m)
+      if (!result.timed_out && result.ok && result.exit_code === 0 && summary?.[1] === '0') return { kind: 'cleaned', detail }
+      if (!result.timed_out && !result.ok && result.exit_code === 3 && summary && Number(summary[1]) > 0) return { kind: 'preserved', detail }
+      return { kind: 'failed', detail: detail || `Cleanup returned exit ${result.exit_code} without evidence` }
+    } catch (error) {
+      return { kind: 'failed', detail: String(error) }
+    }
+  }
   const requireAllow = async (gate: Promise<GateResult>) => {
     const result = await gate
     if (result.kind !== 'allow') throw new Error(result.kind === 'unknown' ? result.detail : result.on)
@@ -316,5 +425,5 @@ export function createProductionHostEffects(options: ProductionHostOptions) {
     publish: snapshot => requireAllow(publishChecked(snapshot)),
     merge: snapshot => requireAllow(mergeChecked(snapshot)),
   }
-  return { effects, modes, ralphIteration, admission, observeCi, publishChecked, mergeChecked }
+  return { effects, modes, ralphIteration, admission, observeCi, publishChecked, mergeChecked, cleanup }
 }

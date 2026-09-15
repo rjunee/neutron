@@ -122,8 +122,14 @@ export function wireSubstrates(ctx: OpenWiringContext): WiredSubstrates {
   const conversationalProviderFor = (
     withToolBridge: boolean,
   ): Partial<BuildLlmCallSubstrateInput> =>
-    ctx.provider !== undefined || ctx.providerResolver !== undefined
+    ctx.provider !== undefined || ctx.providerResolver !== undefined || ctx.env['NEUTRON_PROJECT_MODELS'] !== undefined
       ? {
+          configuredChat: {
+            env: ctx.env,
+            ...(ctx.bindMcpResolver === undefined ? {} : { bindMcpResolver: ctx.bindMcpResolver }),
+            ...(withToolBridge && ctx.toolManifest !== undefined ? { toolManifest: ctx.toolManifest } : {}),
+            ...(ctx.openaiFetchImpl === undefined ? {} : { fetchImpl: ctx.openaiFetchImpl }),
+          },
           // The resolver chooses per turn, with its selection source attached.
           ...(ctx.provider !== undefined ? { provider: ctx.provider } : {}),
           ...(ctx.providerResolver !== undefined ? { providerResolver: ctx.providerResolver } : {}),
@@ -155,12 +161,15 @@ export function wireSubstrates(ctx: OpenWiringContext): WiredSubstrates {
   // tool bridge ON (mirrors enableToolBridge), so both reuse `liveAgentProvider`.
   const phaseSpecProvider = conversationalProviderFor(false)
   const liveAgentProvider = conversationalProviderFor(true)
+  const buildProvider = { ...phaseSpecProvider }
+  delete buildProvider.configuredChat
 
   // Credential availability and provider selection are independent. A live
   // resolver can exist before any credential does; that boot must retain the
   // null substrates consumed by deterministic callers. With credentials, keep
   // resolution live so project overrides and instance changes apply per turn.
-  const conversationalAvailable = llmPool !== null || openaiFullyWired
+  const harnessAvailable = llmPool !== null || openaiFullyWired
+  const conversationalAvailable = harnessAvailable || ctx.env['NEUTRON_PROJECT_MODELS'] !== undefined
   const anthropicPoolArg: Pick<BuildLlmCallSubstrateInput, 'pool' | 'resolvePool'> =
     llmPool !== null ? { pool: llmPool } : { resolvePool: async (): Promise<null> => null }
 
@@ -476,7 +485,7 @@ export function wireSubstrates(ctx: OpenWiringContext): WiredSubstrates {
     (instance_prefix: string, profile: SubstrateProfile = PROFILE_EPHEMERAL) =>
     (cwd: string): Substrate => {
       const s =
-        !conversationalAvailable
+        !harnessAvailable
           ? null
           : buildLlmCallSubstrate({
               ...anthropicPoolArg,
@@ -493,7 +502,7 @@ export function wireSubstrates(ctx: OpenWiringContext): WiredSubstrates {
               // profile rather than inheriting an unused credential.
               profile,
               ephemeral: true,
-              ...phaseSpecProvider,
+              ...buildProvider,
               ...(substrateFactory !== undefined ? { substrateFactory } : {}),
             })
       if (s === null) {
@@ -529,7 +538,7 @@ export function wireSubstrates(ctx: OpenWiringContext): WiredSubstrates {
   const makeWarmFireSubstrate = (cwd: string): Substrate => {
     const cached = fireSubstrateByCwd.get(cwd)
     if (cached !== undefined) return cached
-    if (!conversationalAvailable) throw new Error('cc-trident-fire: empty Anthropic credential pool')
+    if (!harnessAvailable) throw new Error('cc-trident-fire: empty Anthropic credential pool')
     // djb2 over the cwd → a short, stable, per-repo instance discriminator.
     let h = 5381
     for (let i = 0; i < cwd.length; i++) h = (((h << 5) + h) ^ cwd.charCodeAt(i)) >>> 0
@@ -544,7 +553,7 @@ export function wireSubstrates(ctx: OpenWiringContext): WiredSubstrates {
       // Trident v2 FIRE seam — WARM per-repo REPL. Security knobs live on the
       // profile — see substrate-profiles.ts.
       profile: PROFILE_WARM_FIRE,
-      ...phaseSpecProvider,
+      ...buildProvider,
       // #514 / #518 — the supervision watchdog and the shutdown path both know
       // when this warm launcher's child is gone. The sink stamps every still-live
       // workflow the dead generation owned (so the tick performs the normal terminal

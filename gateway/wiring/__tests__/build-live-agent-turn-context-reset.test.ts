@@ -378,3 +378,68 @@ describe('Layer B — context-reset rehydration seam', () => {
     expect(indexCalls).toBe(2) // turn 3 warm → no additional cold compose
   })
 })
+
+test('configured chat rehydrates every turn and restores cold context when returning to a harness', async () => {
+  const specs: AgentSpec[] = []
+  const sent: ChatOutbound[] = []
+  let selected: string | undefined
+  const run = buildLiveAgentTurn({
+    substrate: makeStubSubstrate(specs),
+    configuredModel: () => selected,
+    personaLoader: { async load() { return '' } },
+    memoryIndexSnapshot: async () => INDEX,
+    buttonStore: store, project_slug: 'project', owner_home: tmp, model: 'test-model', now: () => now,
+  })
+  await run(makeTurn(sent, { user_text: 'first', topic_id: 'chat' }))
+  await run(makeTurn(sent, { user_text: 'second', topic_id: 'chat' }))
+  expect(specs[1]!.prompt).not.toContain('COLD-ONLY-MARKER')
+  selected = 'glm'
+  await run(makeTurn(sent, { user_text: 'third', topic_id: 'chat' }))
+  await run(makeTurn(sent, { user_text: 'fourth', topic_id: 'chat' }))
+  selected = undefined
+  await run(makeTurn(sent, { user_text: 'fifth', topic_id: 'chat' }))
+  expect(specs.slice(2).map((s) => s.prompt.includes('COLD-ONLY-MARKER'))).toEqual([true, true, true])
+  expect(specs[2]!.model_preference).toEqual(['glm'])
+})
+
+test('configured chat failure names the selected tier in the user bubble', async () => {
+  const sent: ChatOutbound[] = []
+  const run = buildLiveAgentTurn({
+    substrate: { start() { return { ...makeStubSubstrate([]).start({ prompt: '', tools: [], model_preference: [] }),
+      events: (async function* (): AsyncGenerator<Event> { yield { kind: 'error', code: 'no_credentials', retryable: false, message: 'missing credential' } })(),
+    } } },
+    configuredModel: () => 'deepseek',
+    personaLoader: { async load() { return '' } }, buttonStore: store,
+    project_slug: 'project', owner_home: tmp, model: 'test-model', now: () => now,
+  })
+  expect((await run(makeTurn(sent, { user_text: 'hello', topic_id: 'chat' }))).outcome).toBe('failed')
+  expect(sent.some((s) => s.type === 'agent_message' && s.body.includes("Configured model 'deepseek'"))).toBe(true)
+})
+
+test('configured chat queues overlapping input instead of injecting into a warm harness', async () => {
+  let release!: () => void
+  let started!: () => void
+  const ready = new Promise<void>((resolve) => { started = resolve })
+  const gate = new Promise<void>((resolve) => { release = resolve })
+  let injected = 0
+  const sent: ChatOutbound[] = []
+  const run = buildLiveAgentTurn({
+    substrate: { start() { return {
+      ...makeStubSubstrate([]).start({ prompt: '', tools: [], model_preference: [] }),
+      events: (async function* (): AsyncGenerator<Event> {
+        started(); await gate
+        yield { kind: 'token', text: 'ok' }
+        yield { kind: 'completion', substrate_instance_id: 'stub', usage: { input_tokens: 1, output_tokens: 1 } }
+      })(),
+    } } },
+    configuredModel: () => 'glm', injectActiveTurn: async () => { injected++; return true },
+    personaLoader: { async load() { return '' } }, buttonStore: store,
+    project_slug: 'project', owner_home: tmp, model: 'test-model', now: () => now,
+  })
+  const first = run(makeTurn(sent, { user_text: 'first', topic_id: 'overlap' }))
+  await ready
+  const second = run(makeTurn(sent, { user_text: 'second', topic_id: 'overlap' }))
+  release()
+  await Promise.all([first, second])
+  expect(injected).toBe(0)
+})

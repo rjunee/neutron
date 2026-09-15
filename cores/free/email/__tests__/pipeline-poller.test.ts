@@ -106,6 +106,7 @@ function tick(
     deliver?: (topic_id: string, envelope: { body: string; durability: 'reply' }) => Promise<unknown>
     push?: { pushAll(slug: string, m: { title?: string; body: string }): Promise<unknown> } | null
     llm?: ((prompt: string) => Promise<string>) | null
+    mailbox_writes?: 'enabled' | 'held_back'
   } = {},
 ): ReturnType<typeof runEmailPipelineTick> {
   return runEmailPipelineTick({
@@ -136,6 +137,7 @@ function tick(
       project_slug: 'instance',
     },
     now: () => NOW,
+    ...(over.mailbox_writes !== undefined ? { mailbox_writes: over.mailbox_writes } : {}),
   })
 }
 
@@ -364,6 +366,20 @@ describe('runEmailPipelineTick', () => {
     } finally {
       h.close()
     }
+  })
+
+  test('pre-cutover rehearsal reads, classifies, escalates and queues while issuing no mailbox write', async () => {
+    const h = harness()
+    try {
+      await goLiveOverBacklog(h)
+      seedNewMail(h)
+      const result = await tick(h, { mailbox_writes: 'held_back' })
+      expect(result.escalated).toBe(1)
+      expect(h.store.getEmail('newsletter-1')?.handling).toBe('archive')
+      expect(h.delivered).toHaveLength(1)
+      expect(h.modified).toEqual([])
+      expect(h.ensured).toEqual([])
+    } finally { h.close() }
   })
 
   test('a throwing push does NOT prevent the escalation being marked delivered', async () => {

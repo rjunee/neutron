@@ -10,12 +10,14 @@
  * all of them. The living rationale + invariants live in `docs/INVARIANTS.md`
  * and `docs/AS_BUILT.md`.
  *
- * Substrate is the model-execution backend abstraction. Three concrete
- * implementations land in this codebase:
+ * Substrate is the model-execution backend abstraction. The concrete
+ * implementations include:
  *
  *   1. `runtime/adapters/claude-code/`        — Anthropic Messages API (P1)
  *   2. `runtime/adapters/codex-cli/`  — Codex CLI shell-out (P1)
  *   3. `runtime/adapters/openai-responses/`        — OpenAI Responses API (P1)
+ *
+ *   4. `runtime/adapters/configured-chat/` — configured chat-completions API
  *
  * The Private/open-weight adapter is deferred to P4 per `engineering-plan.md`
  * line 325. All adapters expose the same `SessionHandle` shape so Cores can be

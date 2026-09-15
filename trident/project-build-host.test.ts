@@ -6,7 +6,9 @@ import { ProjectDb } from '@neutronai/persistence/index.ts'
 import { fakeRunner, type Provider } from '@neutronai/runtime/bounded-work.ts'
 import { seedMigratedDb } from '../tests/support/migrated-db.ts'
 import { TridentRunStore } from './store.ts'
-import { createProjectBuildHost, projectBuildRunners, type ProjectBuildHostOptions } from './project-build-host.ts'
+import { TridentPhaseUsageStore } from './phase-usage.ts'
+import { createProjectBuildHost, projectBuildRunners, withProductionCleanup, type ProjectBuildHostOptions } from './project-build-host.ts'
+import type { BuildRunOutcome } from './build-run.ts'
 import { briefIntegrity } from './gates/brief-integrity.ts'
 import { workContextPath } from './production-host-effects.ts'
 import { spawnCapture } from './git-mode.ts'
@@ -45,6 +47,9 @@ async function fixture() {
   const runner = fakeRunner('pi', { supports: (_role, placement) => { placements.push(placement); return { ok: true } } })
   const options: ProjectBuildHostOptions = {
     substrate: { provider: 'pi', inRepl: runner, headless: {} },
+    // The real store over the same database, so the composition's write is the
+    // write production performs rather than a stub that cannot fail.
+    phaseUsage: new TridentPhaseUsageStore(db),
     production: { store, runId: row.id, projectSlug: 'project', repo: dir, worktree: join(dir, 'work'), branch: 'change',
       baseBranch: 'main', runHost: spawnCapture, ciWorkflow: 'ci.yml', publication: { title: 'Build', bodyFile: join(dir, 'body') } },
     policy: { leak: { scratch_dir: join(dir, 'scan') }, mutation: { readClaim: async () => null } },
@@ -107,4 +112,63 @@ test('project Ralph state read failure is unknown', async () => {
   expect(await host.run({ mode: 'ralph', start: 'resume' }, new AbortController().signal)).toMatchObject({
     kind: 'unknown', detail: expect.stringContaining('valid identity or state'),
   })
+})
+
+test('G125 cleanup runs for every build ending and a thrown or aborted build', async () => {
+  const snapshot = { head: 'a'.repeat(40), diff: 'change', pr: null }
+  const endings: BuildRunOutcome[] = [
+    { kind: 'merged', snapshot },
+    { kind: 'blocked', phase: 'review', on: 'gate', recipient: 'orchestrator' },
+    { kind: 'built', snapshot, cause: 'wave-member-built' },
+    { kind: 'continued', snapshot, remainingTasks: 1, cause: 'ralph-task-built' },
+    { kind: 'refused', reason: 'worker-unsupported', detail: 'unsupported' },
+    { kind: 'failed', phase: 'build', detail: 'worker failed', cause: 'workflow-threw' },
+    { kind: 'unknown', phase: 'fix', step_id: 'step', detail: 'unobserved' },
+  ]
+  let attempts = 0
+  for (const ending of endings) {
+    const result = await withProductionCleanup(async () => ending, async () => {
+      attempts++
+      return { kind: 'cleaned', detail: 'RESULT preserved=0 removed=0' }
+    })
+    expect(result).toEqual({ ...ending, cleanup: { kind: 'cleaned', detail: 'RESULT preserved=0 removed=0' } })
+  }
+  for (const error of [new Error('host threw'), new DOMException('aborted', 'AbortError')]) {
+    const result = await withProductionCleanup(async () => { throw error }, async () => {
+      attempts++
+      return { kind: 'preserved', detail: 'RESULT preserved=1 removed=0' }
+    })
+    expect(result).toMatchObject({ kind: 'unknown', detail: expect.stringContaining(error.message), cleanup: { kind: 'preserved' } })
+  }
+  expect(attempts).toBe(endings.length + 2)
+})
+
+test('G127 cleanup failure stays visible without changing the build verdict', async () => {
+  const build: BuildRunOutcome = { kind: 'merged', snapshot: { head: 'a'.repeat(40), diff: 'change', pr: null } }
+  expect(await withProductionCleanup(async () => build, async () => ({ kind: 'failed', detail: 'script crashed' }))).toEqual({
+    ...build, cleanup: { kind: 'failed', detail: 'script crashed' },
+  })
+})
+
+
+test('project composition binds review source to admitted run and worktree', async () => {
+  const f = await fixture()
+  const requests: { run_id: string; cwd: string }[] = []
+  f.options.policy.review = {
+    evidenceRoot: f.options.production.repo, env: {},
+    phaseModels: { review_rubric: { model: 'none' }, review_adversarial: { model: 'sol' },
+      review_codex: { model: 'none' }, review_kimi: { model: 'none' } },
+    wallMs: 1000, signal: new AbortController().signal,
+    runnerFor: (_model, seat) => ({ provider: seat.provider, supports: () => ({ ok: true }),
+      liveness: async () => 'unknown', run: async request => {
+        requests.push(request)
+        return { kind: 'completed', result: { verdict: 'APPROVE', findings: [] },
+          usage: { input_tokens: 0, output_tokens: 0 }, model_reported: request.model_id, thread_id: null }
+      } }),
+  }
+  const host = await createProjectBuildHost(f.options)
+  expect(await host.deps.reviewGate({ verdict: 'APPROVE', findings: [] },
+    { head: 'b'.repeat(40), diff: 'measured diff', pr: null }, 1, 0)).toEqual({ kind: 'approve' })
+  expect(requests).toHaveLength(2)
+  expect(requests.every(request => request.run_id === f.options.production.runId && request.cwd === f.options.production.worktree)).toBe(true)
 })

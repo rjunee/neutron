@@ -1,3 +1,5 @@
+import { reviewArtifact } from './gates/review-artifact.ts'
+import { fixLineage } from './gates/fix-lineage.ts'
 import { afterEach, expect, test } from 'bun:test'
 import { mkdtemp, readFile, rm, writeFile, symlink } from 'node:fs/promises'
 import { tmpdir } from 'node:os'
@@ -7,9 +9,11 @@ import { fakeRunner, type BoundedWorkOutcome, type BoundedWorkRequest } from '@n
 import { seedMigratedDb } from '../tests/support/migrated-db.ts'
 import { TridentRunStore } from './store.ts'
 import { spawnCapture, type EnvCapableHostRunner, type HostCommandResult } from './git-mode.ts'
-import { createProductionHostEffects, workContextPath } from './production-host-effects.ts'
+import { createProductionHostEffects, productionCiSource, workContextPath } from './production-host-effects.ts'
 import { briefIntegrity } from './gates/brief-integrity.ts'
 import { buildRun, type BuildRunDeps, type BuildRunInput, type BuildSnapshot } from './build-run.ts'
+import { readProjectRepos, resolveProjectRepo } from './project-repos.ts'
+import { ciReadinessForHead } from './ci-readiness.ts'
 
 const cleanups: (() => Promise<void>)[] = []
 afterEach(async () => { for (const cleanup of cleanups.splice(0)) await cleanup() })
@@ -48,7 +52,9 @@ async function fixture() {
   const row = await store.create({ slug: 'build', project_slug: 'project', repo_path: repo, task: 'Build' })
   await store.update(row.id, { branch: 'change', worktree, base_sha: base, merge_mode: 'pr' })
   let pr: any = null
-  let ci: unknown = [{ headSha: tip, status: 'completed', conclusion: 'success' }]
+  let ciConfig: any = { kind: 'resolved', required: ['test'], appBound: [], produced: ['test'] }
+  let ciReadiness: any = { headSha: tip, mergeable: 'MERGEABLE', rows: [{ name: 'test', status: 'COMPLETED', conclusion: 'SUCCESS' }] }
+  let now = 0
   const calls: string[][] = []
   let intercept: ((argv: string[]) => HostCommandResult | undefined | Promise<HostCommandResult | undefined>) | undefined
   const runHost: EnvCapableHostRunner = async (argv, cwd, env, timeout) => {
@@ -56,7 +62,6 @@ async function fixture() {
     const override = await intercept?.([...argv])
     if (override) return override
     if (argv[0] === 'gh') {
-      if (argv[1] === 'run') return ok(JSON.stringify(ci))
       if (argv[2] === 'list') return ok(JSON.stringify(pr ? [pr] : []))
       if (argv[2] === 'create') {
         pr = { number: 12, headRefOid: tip, state: 'OPEN', headRefName: 'change', baseRefName: 'main', isCrossRepository: false }
@@ -68,10 +73,13 @@ async function fixture() {
     return spawnCapture(argv, cwd, env, timeout)
   }
   const options = { store, runId: row.id, projectSlug: 'project', repo, worktree, branch: 'change', baseBranch: 'main', runHost,
-    ciWorkflow: 'ci.yml', publication: { title: 'Build', bodyFile: join(dir, 'body.md') } }
+    ciWorkflow: 'ci.yml', ciNow: () => now,
+    ciSource: { async required() { return structuredClone(ciConfig) }, async readiness() { return structuredClone(ciReadiness) } },
+    publication: { title: 'Build', bodyFile: join(dir, 'body.md') } }
   const host = createProductionHostEffects(options)
   return { ...host, options, db, dir, repo, worktree, store, row, base, tip, calls, command,
-    intercept(fn: typeof intercept) { intercept = fn }, setPr(value: any) { pr = value }, setCi(value: unknown) { ci = value } }
+    intercept(fn: typeof intercept) { intercept = fn }, setPr(value: any) { pr = value },
+    setCiConfig(value: unknown) { ciConfig = value }, setCiReadiness(value: unknown) { ciReadiness = value }, advance(ms: number) { now += ms } }
 }
 async function measured(f: Awaited<ReturnType<typeof fixture>>): Promise<BuildSnapshot> {
   const observation = await f.effects.measure()
@@ -79,6 +87,71 @@ async function measured(f: Awaited<ReturnType<typeof fixture>>): Promise<BuildSn
   if (observation.kind !== 'known') throw new Error(observation.detail)
   return observation.value
 }
+
+test('G126/G127 production cleanup delegates mode and classifies complete script evidence', async () => {
+  const f = await fixture()
+  f.intercept(argv => argv[1]?.endsWith('worktree-cleanup.sh')
+    ? { ok: false, stdout: 'PRESERVED worktree /build reason=dirty\nRESULT preserved=2 removed=0\n', stderr: '', exit_code: 3 }
+    : undefined)
+  expect(await f.cleanup()).toMatchObject({ kind: 'preserved', detail: expect.stringContaining('PRESERVED worktree') })
+  expect(f.calls.at(-1)).toEqual(['bash', expect.stringContaining('worktree-cleanup.sh'), f.repo, 'change', 'delete-branch'])
+
+  f.intercept(argv => argv[1]?.endsWith('worktree-cleanup.sh') ? ok('RESULT preserved=0 removed=1\n') : undefined)
+  expect(await f.cleanup()).toEqual({ kind: 'cleaned', detail: 'RESULT preserved=0 removed=1\n' })
+
+  for (const result of [
+    ok(''),
+    { ok: true, stdout: 'RESULT preserved=1 removed=0\n', stderr: '', exit_code: 0 },
+    { ok: false, stdout: 'RESULT preserved=0 removed=0\n', stderr: '', exit_code: 3 },
+    { ok: false, stdout: '', stderr: '', exit_code: 2 },
+    { ...bad(), timed_out: true },
+  ]) {
+    f.intercept(argv => argv[1]?.endsWith('worktree-cleanup.sh') ? result : undefined)
+    expect(await f.cleanup()).toMatchObject({ kind: 'failed' })
+  }
+
+  await f.store.update(f.row.id, { merge_mode: 'local' })
+  const local = createProductionHostEffects(f.options)
+  f.intercept(argv => argv[1]?.endsWith('worktree-cleanup.sh') ? ok('RESULT preserved=0 removed=0\n') : undefined)
+  expect(await local.cleanup()).toMatchObject({ kind: 'cleaned' })
+  expect(f.calls.at(-1)?.at(-1)).toBe('keep-branch')
+})
+
+test('G045 ruleset requirements survive a classic-protection 404', async () => {
+  const source = productionCiSource(async argv => {
+    const path = argv[2]!
+    if (path.includes('/protection/')) return { ...bad(), exit_code: 1, stderr: 'HTTP 404 Not Found' }
+    if (path.includes('/rules/')) return ok(JSON.stringify([{ type: 'required_status_checks', parameters: { required_status_checks: [{ context: 'test', integration_id: 7 }] } }]))
+    if (path.endsWith('/branches/main')) return ok(JSON.stringify({ protected: true, protection: {} }))
+    if (path.includes('/check-runs')) return ok(JSON.stringify({ total_count: 1, check_runs: [{ name: 'test' }] }))
+    return ok(JSON.stringify({ total_count: 0, statuses: [] }))
+  }, '.')
+  expect(await source.required('main')).toEqual({ kind: 'resolved', required: ['test'], appBound: ['test'], produced: ['test'] })
+})
+
+test('G045 unresolved protection 404 is unknown without independent branch evidence', async () => {
+  const source = productionCiSource(async argv => {
+    const path = argv[2]!
+    if (path.includes('/rules/')) return { ...bad(), exit_code: 1, stderr: 'HTTP 404 Not Found' }
+    if (path.endsWith('/branches/main')) return bad()
+    if (path.includes('/check-runs')) return ok(JSON.stringify({ total_count: 0, check_runs: [] }))
+    if (path.includes('/status?')) return ok(JSON.stringify({ total_count: 0, statuses: [] }))
+    return { ...bad(), exit_code: 1, stderr: 'HTTP 404 Not Found' }
+  }, '.')
+  expect(await source.required('main')).toMatchObject({ kind: 'unknown' })
+})
+
+test('G046 truncated producer lists are unreadable evidence', async () => {
+  const source = productionCiSource(async argv => {
+    const path = argv[2]!
+    if (path.includes('/protection/')) return ok(JSON.stringify({ contexts: ['required'], checks: [] }))
+    if (path.includes('/rules/')) return ok('[]')
+    if (path.endsWith('/branches/main')) return ok(JSON.stringify({ protected: true }))
+    if (path.includes('/check-runs')) return ok(JSON.stringify({ total_count: 2, check_runs: [{ name: 'other' }] }))
+    return ok(JSON.stringify({ total_count: 0, statuses: [] }))
+  }, '.')
+  expect(await source.required('main')).toEqual({ kind: 'resolved', required: ['required'], appBound: [], produced: null })
+})
 
 test('measurement reads complete committed diff and re-reads persisted pins', async () => {
   const f = await fixture()
@@ -123,21 +196,18 @@ test('measurement refuses malformed PR, different checkout, and timeout with out
   expect(await f.effects.measure()).toMatchObject({ kind: 'unknown' })
 })
 
-test('CI observes success, absent, running, failed and unreadable without converting unknown to green', async () => {
+test('CI combines requirements and rollup without converting unknown to green', async () => {
   const f = await fixture()
+  f.setPr({ number: 12, headRefOid: f.tip, state: 'OPEN', headRefName: 'change', baseRefName: 'main', isCrossRepository: false })
   const snapshot = await measured(f)
   expect(await f.observeCi(snapshot)).toEqual({ kind: 'completed', headSha: f.tip, conclusion: 'success' })
-  f.setCi([])
+  f.setCiReadiness({ headSha: f.tip, mergeable: 'MERGEABLE', rows: [] })
   expect(await f.observeCi(snapshot)).toEqual({ kind: 'absent' })
-  f.setCi([{ headSha: f.tip, status: 'queued', conclusion: '' }])
+  f.setCiReadiness({ headSha: f.tip, mergeable: 'MERGEABLE', rows: [{ name: 'test', status: 'IN_PROGRESS', conclusion: null }] })
   expect(await f.observeCi(snapshot)).toEqual({ kind: 'running', headSha: f.tip })
-  f.setCi([{ headSha: f.tip, status: 'completed', conclusion: 'skipped' }])
+  f.setCiReadiness({ headSha: f.tip, mergeable: 'MERGEABLE', rows: [{ name: 'test', status: 'COMPLETED', conclusion: 'FAILURE' }] })
   expect(await f.observeCi(snapshot)).toEqual({ kind: 'completed', headSha: f.tip, conclusion: 'failure' })
-  for (const value of [null, {}, [{ status: 'completed', conclusion: 'success' }], [{ headSha: f.tip, status: 'completed', conclusion: '' }]]) {
-    f.setCi(value)
-    expect(await f.observeCi(snapshot)).toMatchObject({ kind: 'unreadable' })
-  }
-  f.intercept(argv => argv[1] === 'run' ? bad() : undefined)
+  f.setCiConfig({ kind: 'unknown', reason: 'protection unavailable' })
   expect(await f.observeCi(snapshot)).toMatchObject({ kind: 'unreadable' })
 })
 
@@ -354,6 +424,33 @@ test('CI refuses absent workflow even with a successful response', async () => {
   expect(await f.observeCi(snapshot)).toMatchObject({ kind: 'unreadable', reason: expect.stringContaining('workflow') })
 })
 
+test('undeclared repo workflow is unreadable before acquisition, with valid PR and green CI available', async () => {
+  const f = await fixture()
+  f.setPr({ number: 12, headRefOid: f.tip, state: 'OPEN', headRefName: 'change', baseRefName: 'main', isCrossRepository: false })
+  const snapshot = await measured(f)
+  expect(snapshot.pr?.number).toBe(12)
+  let acquisitions = 0
+  const declared = (workflow: string | undefined) => ({
+    repos: [{ name: 'project', path: 'code', remote: null, ...(workflow === undefined ? {} : { ciWorkflow: workflow }) }],
+    default: 'project',
+  })
+  const observe = async () => {
+    const repo = resolveProjectRepo(readProjectRepos(f.dir, 'project'))
+    return createProductionHostEffects({ ...f.options, ciWorkflow: repo.ciWorkflow,
+      ciSource: { ...f.options.ciSource, async required() { acquisitions++; return f.options.ciSource.required() } },
+    }).observeCi(snapshot)
+  }
+  await writeFile(join(f.dir, 'project-repos.json'), JSON.stringify(declared(undefined)))
+  expect(await observe()).toMatchObject({ kind: 'unreadable', reason: expect.stringContaining('project-repos.json') })
+  expect(ciReadinessForHead(snapshot.head, await observe()).kind).toBe('cannot-read')
+  expect(acquisitions).toBe(0)
+  await writeFile(join(f.dir, 'project-repos.json'), JSON.stringify(declared('ci.yml')))
+  expect(ciReadinessForHead(snapshot.head, await observe()).kind).toBe('green')
+  expect(acquisitions).toBe(1)
+  f.setCiReadiness({ headSha: snapshot.head, mergeable: 'MERGEABLE', rows: [] })
+  expect(ciReadinessForHead(snapshot.head, await observe()).kind).toBe('no-run')
+})
+
 test('prepare requires a context reference and an unchanged host snapshot', async () => {
   const f = await fixture()
   const snapshot = await measured(f)
@@ -381,7 +478,7 @@ test('PR and CI OIDs must be strings, not coercible JSON values', async () => {
   const snapshot = await measured(f)
   f.setPr({ number: 12, headRefOid: [f.tip], state: 'OPEN', headRefName: 'change', baseRefName: 'main', isCrossRepository: false })
   expect(await f.effects.measure()).toMatchObject({ kind: 'unknown' })
-  f.setCi([{ headSha: [f.tip], status: 'completed', conclusion: 'success' }])
+  f.setCiReadiness({ headSha: [f.tip], mergeable: 'MERGEABLE', rows: [] })
   expect(await f.observeCi(snapshot)).toMatchObject({ kind: 'unreadable' })
 })
 
@@ -430,17 +527,29 @@ test('local-mode driver reaches merged through the real production effect', asyn
     workers: { plan: { runner, request }, build: { runner, request }, review: { runner, request }, fix: { runner, request } } }
   // Policy seams are scripted here; git measurement, preparation, landing and
   // the final ancestry witness use the real local repository.
-  const deps: BuildRunDeps = { ...f.effects,
+  // Compose the same readback gate as createBuildHost over production files.
+  const deps: BuildRunDeps = { reviewArtifact, ...f.effects,
     // The driver requires a round cap from the run row and refuses without one
     // (`trident/build-run.ts` — 'Review round cap source is missing'). Production
     // gets it from `createBuildHost`; these fixtures build deps by hand, so they
     // supply the same row value rather than a number of their own.
     readReviewCap: async () => ({ kind: 'known', max_rounds: f.row.max_rounds }),
+    // G023 refuses a build or fix whose branch assignment the host never made.
+    // `createBuildHost` derives it from the run row; these hand-built deps use
+    // the same branch the fixture's row carries.
+    assignedBranch: 'change',
+    // Phase usage is a required write, not an optional one: a run that cannot
+    // record it must stop rather than continue unmeasured. These fixtures keep
+    // the write observable and silent.
+    recordPhaseUsage: async () => {},
+    // Match createBuildHost: prove each fix with git against the host-held pin.
+    checkFixLineage: (produced, pin) => fixLineage(spawnCapture, f.repo, 'change', pin, produced.head),
     // Review readiness and suite evidence are policy seams too, and the driver now
     // refuses without them. `createBuildHost` composes both in production; these
     // fixtures script them so the assertions stay about the persistence effects.
     reviewReadiness: async () => ({ kind: 'allow' as const }),
     reviewSuite: async () => ({ kind: 'known' as const, findings: [] }),
+    reviewCi: async () => ({ kind: 'known' as const, findings: [] }),
     admissionGate: async () => ({ kind: 'allow' }),
     runLeakGatePreflight: async () => ({ status: 'clean', head: f.tip, note: '', findings: [], skipped_rules: [], attempts: 0 }),
     assessMergeDiff: () => ({ allow: true, measured_bytes: snapshot.diff.length }),
@@ -487,30 +596,55 @@ async function resumeFixture(round = 3, replansUsed = 1) {
     cwd: f.worktree, writable: true, network: false, tools: 'edit-and-run',
     brief: { path, integrity: briefIntegrity(workContextPath(path)) }, result: { schema: 'test', path: join(f.dir, 'result') },
     thread: null, budget: { wall_ms: 1000 } }
-  const runner = fakeRunner('pi', { outcomes: new Map<string, BoundedWorkOutcome>(
-    ['fix', 'review', 'plan', 'build'].flatMap(role => Array.from({ length: 7 }, (_, n) => [
-      `${f.row.id}:${role}:${n}`, { kind: 'completed', result: { ...snapshot,
-        // A resumed run has a re-plan already spent, so G075 requires the planner
-        // to return a revised execution spec; the counters stay wrong on purpose,
-        // because the host's are the ones that must win.
-        payload: role === 'plan' ? { executionSpec: 'revised execution spec', round: 0, replansUsed: 0 } : { round: 0, replansUsed: 0 },
-        round: 0, replansUsed: 0 } } as BoundedWorkOutcome] as const))) })
+  // Every role reports what the repository ACTUALLY holds at the moment it answers,
+  // because the fixer below commits for real and a trailer pinned to the fixture's
+  // opening snapshot would disagree with the host's measurement one round later.
+  // The counters stay wrong on purpose: the host's are the ones that must win, and
+  // a resumed run has a re-plan already spent, so G075 needs a revised spec.
+  const runner = fakeRunner('pi')
+  runner.run = async request => {
+    runner.calls.push(request)
+    if (request.role === 'fix') {
+      await f.command(['git', '-C', f.worktree, 'commit', '--allow-empty', '-m', `fix ${request.step_id}`])
+    }
+    const now = await measured(f)
+    const payload = request.role === 'plan'
+      ? { executionSpec: 'revised execution spec', round: 0, replansUsed: 0 }
+      : { round: 0, replansUsed: 0 }
+    return { kind: 'completed', result: { ...now, payload, round: 0, replansUsed: 0 },
+      usage: { input_tokens: 0, output_tokens: 0 }, model_reported: 'test', thread_id: null }
+  }
   const restarted = createProductionHostEffects(f.options)
   const rounds: number[][] = []
-  const deps: BuildRunDeps = { ...restarted.effects, modes: restarted.modes,
+  // Compose the same readback gate as createBuildHost over production files.
+  const deps: BuildRunDeps = { reviewArtifact, ...restarted.effects, modes: restarted.modes,
     // The driver requires a round cap from the run row and refuses without one
     // (`trident/build-run.ts` — 'Review round cap source is missing'). Production
     // gets it from `createBuildHost`; these fixtures build deps by hand, so they
     // supply the same row value rather than a number of their own.
     readReviewCap: async () => ({ kind: 'known', max_rounds: f.row.max_rounds }),
+    // G023 refuses a build or fix whose branch assignment the host never made.
+    // `createBuildHost` derives it from the run row; these hand-built deps use
+    // the same branch the fixture's row carries.
+    assignedBranch: 'change',
+    // Phase usage is a required write, not an optional one: a run that cannot
+    // record it must stop rather than continue unmeasured. These fixtures keep
+    // the write observable and silent.
+    recordPhaseUsage: async () => {},
+    // Match createBuildHost: prove each fix with git against the host-held pin.
+    checkFixLineage: (produced, pin) => fixLineage(spawnCapture, f.repo, 'change', pin, produced.head),
     // Review readiness and suite evidence are policy seams too, and the driver now
     // refuses without them. `createBuildHost` composes both in production; these
     // fixtures script them so the assertions stay about the persistence effects.
     reviewReadiness: async () => ({ kind: 'allow' as const }),
     reviewSuite: async () => ({ kind: 'known' as const, findings: [] }),
+    reviewCi: async () => ({ kind: 'known' as const, findings: [] }),
     admissionGate: async () => ({ kind: 'allow' }),
     reviewGate: async (_payload, _snapshot, round, replans, record) => { rounds.push([round, replans!]); record?.({ findings: [], blockingCount: 0 }); return { kind: 'approve' } },
-    runLeakGatePreflight: async () => ({ status: 'clean', head: f.tip, note: '', findings: [], skipped_rules: [], attempts: 0 }),
+    // The preflight reports the head it scanned, and the driver refuses to publish a
+    // revision the scan did not see. The fixer commits for real, so pinning this to
+    // the fixture's opening tip reads as the revision changing after review.
+    runLeakGatePreflight: async reviewed => ({ status: 'clean', head: reviewed.head, note: '', findings: [], skipped_rules: [], attempts: 0 }),
     assessMergeDiff: () => ({ allow: true, measured_bytes: snapshot.diff.length }),
     publishGate: async () => ({ kind: 'blocked', on: 'fixture stops before publication' }),
     mergeGate: async () => ({ kind: 'unknown', detail: 'not reached' }),
@@ -525,8 +659,12 @@ test('production resume reloads rejected state, inherits rounds, and ignores wor
   expect(await f.run()).toMatchObject({ kind: 'blocked', on: 'fixture stops before publication' })
   expect(f.runner.calls.map(c => c.step_id)).toEqual([`${f.row.id}:fix:3`, `${f.row.id}:review:4`])
   expect(f.rounds).toEqual([[4, 1]])
+  // The fix commits for real, so the approved head is the one the repository now
+  // holds, not the tip the fixture opened on — and it must not be that tip.
+  const landed = (await measured(f)).head
+  expect(landed).not.toBe(f.tip)
   expect(await createProductionHostEffects(f.options).modes.loadResume()).toMatchObject({
-    stage: 'approved', round: 4, replansUsed: 1, head: f.tip,
+    stage: 'approved', round: 4, replansUsed: 1, head: landed,
   })
 })
 

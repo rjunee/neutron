@@ -19,27 +19,33 @@ async function fixture() {
   const dir = await mkdtemp(join(tmpdir(), 'build-host-test-'))
   dirs.push(dir)
   const path = join(dir, 'brief')
-  await writeFile(path, 'build brief')
+  await writeFile(path, `${path}.context.json`)
   const request = {
     model_id: 'test-model', effort: null, cwd: dir, writable: true, network: false,
-    tools: 'edit-and-run', brief: { path, integrity: briefIntegrity('build brief') },
+    tools: 'edit-and-run', brief: { path, integrity: briefIntegrity(`${path}.context.json`) },
     result: { schema: 'test', path: join(dir, 'result') }, thread: null, budget: { wall_ms: 100 },
   } satisfies BuildRunInput['workers']['build']['request']
   const calls: string[][] = []
+  const usageRecords: Array<{ runId: string; phase: string }> = []
   let diff = 'M\0src/code.ts\0'
   let drift: 'clear' | 'overlap' | 'unreadable' = 'clear'
   let leakOutput = 'LEAK GATE: INCOMPLETE\nRULES THAT COULD NOT RUN: pii'
   let leakCode = 3
   const options: BuildHostOptions = {
     reviewReadiness: { observe: async () => ({ kind: 'known', head, configuration: { kind: 'resolved', required: ['checks'] }, mergeability: 'mergeable', checks: [{ name: 'checks', state: 'passed' }] }) },
+    reviewCi: { observe: async snapshot => ({ kind: 'known', head: snapshot.head, status: 'green', failing: [], base: null }) },
     reviewSuite: { observe: async (snapshot, round) => ({ kind: 'known', runId: 'test', head: snapshot.head, round, strategy: '', scope: 'full-suite', report: null }) },
     reviewed_head: null,
     runners: { pi: fakeRunner('pi') }, replProvider: 'pi',
     workers: Object.fromEntries(['plan', 'build', 'review', 'fix'].map(role => [role, { provider: 'pi', request }])) as BuildHostOptions['workers'],
     effects: {
-      prepareWork: async () => {}, measure: async () => ({ kind: 'known', value: snapshot }),
+      prepareWork: async (request, context) => {
+        // Match the production context materialization consumed by the host gate.
+        await writeFile(`${request.brief.path}.context.json`, JSON.stringify({ request, ...context }))
+      }, measure: async () => ({ kind: 'known', value: snapshot }),
       publish: async () => { throw new Error('unexpected publish') }, merge: async () => { throw new Error('unexpected merge') },
     },
+    phaseUsage: { list: () => [], record: async (runId, phase) => { usageRecords.push({ runId, phase }); return 'recorded' } },
     leak: {
       repo_path: dir, branch: 'change', base_sha: 'b'.repeat(40), scratch_dir: join(dir, 'scan'), gate_script: 'trusted-gate',
       run_host: async (argv) => {
@@ -72,7 +78,7 @@ async function fixture() {
   }
   const make = () => createBuildHost(options)
   const input = (host: ReturnType<typeof make>): BuildRunInput => ({ run_id: 'test', mode: 'pr', start: 'fresh', repl_provider: options.replProvider, workers: host.workers })
-  return { options, make, input, path, calls, setDrift: (value: typeof drift) => { drift = value }, prose: () => { diff = 'M\0README.md\0' }, clean: () => { leakCode = 0; leakOutput = 'LEAK GATE: SILENT' } }
+  return { options, make, input, path, calls, usageRecords, setDrift: (value: typeof drift) => { drift = value }, prose: () => { diff = 'M\0README.md\0' }, clean: () => { leakCode = 0; leakOutput = 'LEAK GATE: SILENT' } }
 }
 
 test('missing provider is refused by the driver before effects', async () => {
@@ -127,14 +133,14 @@ test('unreadable admission and missing project source stay unknown', async () =>
   expect(await host.deps.admissionGate(f.input(host))).toMatchObject({ kind: 'unknown', detail: 'plan brief could not be read' })
 })
 
-test('malformed review and missing panel evidence stay unknown', async () => {
+test('malformed review and missing panel evidence are infrastructure blocks', async () => {
   const f = await fixture()
   const { deps } = f.make()
-  expect(await deps.reviewGate(null, snapshot, 1)).toMatchObject({ kind: 'unknown', detail: 'Review trailer not-object at $' })
+  expect(await deps.reviewGate(null, snapshot, 1)).toMatchObject({ kind: 'blocked', on: 'infra-only: Review trailer not-object at $' })
   const finding = { severity: 'major', title: 'bug', evidence: 'code.ts:1', file: 'code.ts', symbol: 'f', rule: 'correctness', line: 1 }
-  expect(await deps.reviewGate({ verdict: 'APPROVE', findings: [finding] }, snapshot, 1)).toMatchObject({ kind: 'unknown' })
-  for (const severity of ['minor', 'nit']) expect(await deps.reviewGate({ verdict: 'APPROVE', findings: [{ ...finding, severity }] }, snapshot, 1)).toMatchObject({ kind: 'unknown', detail: 'Review panel observation source is missing' })
-  expect(await deps.reviewGate({ verdict: 'APPROVE', findings: [] }, snapshot, 1)).toMatchObject({ kind: 'unknown' })
+  expect(await deps.reviewGate({ verdict: 'APPROVE', findings: [finding] }, snapshot, 1)).toMatchObject({ kind: 'blocked', on: expect.stringContaining('infra-only:') })
+  for (const severity of ['minor', 'nit']) expect(await deps.reviewGate({ verdict: 'APPROVE', findings: [{ ...finding, severity }] }, snapshot, 1)).toMatchObject({ kind: 'blocked', on: 'infra-only: Review panel observation source is missing' })
+  expect(await deps.reviewGate({ verdict: 'APPROVE', findings: [] }, snapshot, 1)).toMatchObject({ kind: 'blocked', on: expect.stringContaining('infra-only:') })
 })
 
 test('leak preflight preserves incomplete and clean outcomes at snapshot head', async () => {
@@ -304,7 +310,7 @@ test('host admission and review reach authoritative policy sources', async () =>
   expect(await host.deps.reviewGate(payload, snapshot, 1, 0, value => progress.push(value))).toEqual({ kind: 'approve' })
   expect(progress).toEqual([{ findings: [], blockingCount: 0 }])
   f.options.review.readSynthesis = async () => null
-  expect(await host.deps.reviewGate(payload, snapshot, 1)).toMatchObject({ kind: 'unknown' })
+  expect(await host.deps.reviewGate(payload, snapshot, 1)).toMatchObject({ kind: 'blocked', on: expect.stringContaining('infra-only:') })
 })
 
 test('fresh null reviewed_head reaches allow and publishes through the driver', async () => {
@@ -336,6 +342,28 @@ test('fresh null reviewed_head reaches allow and publishes through the driver', 
     kind: 'blocked', phase: 'merge', on: 'Published PR does not match reviewed revision', recipient: 'orchestrator',
   })
   expect(publications).toBe(1)
+  expect(f.usageRecords).toEqual([
+    { runId: 'test', phase: 'decomposition' },
+    { runId: 'test', phase: 'build' },
+    { runId: 'test', phase: 'review_adversarial' },
+  ])
+})
+
+test('phase usage resumes from persisted absolute totals without double-counting this invocation', async () => {
+  const f = await fixture()
+  const writes: Array<{ input_tokens: number | null; observed_at: number }> = []
+  f.options.phaseUsage = {
+    list: () => [{ run_id: 'test', phase: 'build', status: 'partial', input_tokens: 100, output_tokens: 10,
+      cache_read_tokens: null, cache_creation_tokens: null, cost_usd: null, source: 'old-model', observed_at: 500 }],
+    record: async (_runId, _phase, report) => { writes.push({ input_tokens: report.input_tokens, observed_at: report.observed_at }); return 'recorded' },
+  }
+  const report = { status: 'partial', input_tokens: 20, output_tokens: 3, cache_read_tokens: 5,
+    cache_creation_tokens: null, cost_usd: null, source: 'new-model', observed_at: 100 } as const
+  const host = f.make()
+
+  await host.deps.recordPhaseUsage('test', 'build', report)
+  await host.deps.recordPhaseUsage('test', 'build', { ...report, input_tokens: 27 })
+  expect(writes).toEqual([{ input_tokens: 120, observed_at: 501 }, { input_tokens: 127, observed_at: 502 }])
 })
 
 test('host propagates G084 refusals after proof and readiness allow', async () => {
@@ -481,7 +509,10 @@ async function boundFixture(failure = false) {
   }
   f.options.runners = { pi: runner }
   f.options.effects = {
-    prepareWork: async () => {},
+    prepareWork: async (request, context) => {
+      // Match the production context materialization consumed by the host gate.
+      await writeFile(`${request.brief.path}.context.json`, JSON.stringify({ request, ...context }))
+    },
     measure: async () => ({ kind: 'known', value: structuredClone(current) }),
     publish: async () => { effects.push('publish'); current = structuredClone(published) },
     merge: async () => { effects.push('merge'); current.pr!.state = 'MERGED' },
@@ -608,16 +639,27 @@ for (const cap of [undefined, 2, 7]) {
     const f = await fixture()
     f.options.mutation.run.max_rounds = cap
     const calls: string[] = []
+    // G042 stops a fix round that leaves the measured head where it was, so this
+    // fixer moves the head the way a real one does. Without it the run ends on
+    // lost work instead of on the cap this test exists to count.
+    let landed = 0
+    const head = () => landed === 0 ? snapshot.head : `${'c'.repeat(39)}${landed % 10}`
     f.options.runners.pi = {
       ...fakeRunner('pi'),
       run: async request => {
         calls.push(request.step_id)
-        return { kind: 'completed', result: { ...snapshot, payload: { round: 0, max_rounds: 100 } },
+        if (request.role === 'fix') landed++
+        return { kind: 'completed', result: { ...snapshot, head: head(), payload: { round: 0, max_rounds: 100 } },
           usage: { input_tokens: 0, output_tokens: 0 }, model_reported: 'test', thread_id: null }
       },
     }
     const host = f.make()
     host.deps.admissionGate = async () => ({ kind: 'allow' })
+    host.deps.measure = async () => ({ kind: 'known', value: { ...snapshot, head: head() } })
+    // Readiness observes its own revision and refuses one that has moved; this
+    // test moves the head deliberately, so readiness is scripted here and is
+    // certified by its own tests instead.
+    host.deps.reviewReadiness = async () => ({ kind: 'allow' })
     // A real panel reports its findings to the host; this stub must too, or the
     // driver's progress gate has nothing to read and this test stops on that
     // instead of on the cap it exists to measure.
@@ -674,4 +716,45 @@ test('G100 composed host preserves a real Git branch before reporting conflict',
   expect(await git('rev-parse', 'refs/heads/change')).toBe(built)
   expect(await deps.checkBuildClaim!(built.slice(0, 7), { ...snapshot, head: built })).toEqual({ kind: 'allow' })
   expect(await deps.checkBuildClaim!('deadbeef', { ...snapshot, head: built })).toEqual({ kind: 'allow' })
+})
+
+test('G023 host derives branch assignment from the run', async () => {
+  const f = await fixture()
+  f.options.mutation.run.branch = 'assigned'
+  expect(f.make().deps.assignedBranch).toBe('assigned')
+  f.options.mutation.run.branch = null
+  expect(f.make().deps.assignedBranch).toBe(`trident/${f.options.mutation.run.slug}`)
+})
+
+test('G055 G056 host composes measured CI with its pinned base', async () => {
+  const f = await fixture()
+  f.options.reviewCi = { observe: async value => ({ kind: 'known', head: value.head, status: 'red', failing: ['unit'], base: { head: f.options.leak.base_sha, status: 'red', failing: ['unit'] } }) }
+  expect(await f.make().deps.reviewCi!(snapshot)).toMatchObject({ kind: 'known', findings: [{ advisory: true }] })
+  f.options.reviewCi = { observe: async () => ({ kind: 'unknown', detail: 'CI unavailable' }) }
+  expect(await f.make().deps.reviewCi!(snapshot)).toMatchObject({ kind: 'unknown' })
+})
+
+test('G084 host composes live lineage independently of the constructor pin', async () => {
+  const f = await fixture()
+  const host = f.make()
+  expect(f.options.reviewed_head).toBeNull()
+  for (const pin of ['b'.repeat(40), 'c'.repeat(40)]) {
+    expect(await host.deps.checkFixLineage!(snapshot, pin)).toEqual({ kind: 'allow' })
+    expect(f.calls.at(-1)).toEqual(['git', '-C', f.options.mutation.run.repo_path, 'merge-base', '--is-ancestor', pin, head])
+  }
+  expect(await host.deps.checkFixLineage!(snapshot, 'deadbeef')).toMatchObject({ kind: 'blocked' })
+  f.options.mutation.run_host = async () => ({ ok: false, exit_code: 1, stdout: '', stderr: '' })
+  expect(await host.deps.checkFixLineage!(snapshot, 'b'.repeat(40))).toMatchObject({ kind: 'blocked' })
+})
+
+test('G102 host composes readback of the prepared review context', async () => {
+  const f = await fixture()
+  const host = f.make()
+  const request: BoundedWorkRequest = { ...host.workers.review.request,
+    run_id: 'test', step_id: 'test:review:1', role: 'review', needs_approval_decision: false }
+  expect(await host.deps.reviewArtifact!(request, snapshot)).toMatchObject({ kind: 'unknown' })
+  await host.deps.prepareWork(request, { snapshot, previous: null, findings: [] })
+  expect(await host.deps.reviewArtifact!(request, snapshot)).toEqual({ kind: 'allow' })
+  await writeFile(`${request.brief.path}.context.json`, JSON.stringify({ request, snapshot: { ...snapshot, diff: '+stale' } }))
+  expect(await host.deps.reviewArtifact!(request, snapshot)).toMatchObject({ kind: 'unknown', detail: expect.stringContaining('measured revision') })
 })

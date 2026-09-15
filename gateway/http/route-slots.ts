@@ -589,6 +589,14 @@ export const ROUTE_SLOTS = [
   // 0h2. Project settings + list — P5.2 + ISSUES #9. AFTER every per-project
   //      child so it never claims paths a sibling already routed.
   slot({
+    key: 'appEmailDigest',
+    rung: 'app-email-digest',
+    composition: 'app_email_digest_surface',
+    gated: true,
+    promote: (c) => pluckHandler(c.app_email_digest_surface),
+    dispatch: (v: SurfaceHandler, ctx) => v.handler(ctx.req),
+  }),
+  slot({
     key: 'appProjects',
     rung: 'app-projects',
     composition: 'app_projects_surface',

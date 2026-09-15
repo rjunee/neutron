@@ -1,3 +1,5 @@
+import { applyReviewCi } from './gates/review-ci.ts'
+import { builderBranch, confirmedMerged, fixLanded } from './gates/build-transition.ts'
 import { createLogger } from '@neutronai/logger'
 import { createHash } from 'node:crypto'
 import {
@@ -12,6 +14,7 @@ import type { MergeDiffAssessment } from './merge.ts'
 import { applyReviewSuite, type SuiteAssessment } from './gates/review-suite.ts'
 import { reviewProgress, type ReviewProgress } from './gates/review-progress.ts'
 import type { TerminalCause } from './terminal-cause.ts'
+import type { PhaseUsageReport } from './phase-usage.ts'
 
 const log = createLogger('trident')
 
@@ -95,16 +98,22 @@ export interface BuildRunInput {
 export interface BuildRunDeps {
   /** Required host run-row reader; only an omitted field on a known row uses the stored default. */
   readReviewCap(runId: string): Promise<{ kind: 'known'; max_rounds?: number | undefined } | { kind: 'unknown'; detail: string }>
+  assignedBranch?: string | undefined
   modes?: BuildModeHost
   prepareWork(request: BoundedWorkRequest, context: { snapshot: BuildSnapshot; previous: unknown; findings: readonly string[]; planner?: 'full' | 'next'; committedPlan?: PlanProbe }): Promise<void>
+  /** Read back the materialized review input after preparation, before dispatch. */
+  reviewArtifact?(request: BoundedWorkRequest, snapshot: BuildSnapshot): Promise<GateResult>
   measure(): Promise<Measurement>
   /** Resolve a differing commit claim and preserve a real conflict before refusing. */
   checkBuildClaim?(claim: string, snapshot: BuildSnapshot): Promise<GateResult>
+  /** Re-measure fix ancestry against the host-held pre-fix revision. */
+  checkFixLineage?(snapshot: BuildSnapshot, reviewedHead: string): Promise<GateResult>
   admissionGate(input: BuildRunInput): Promise<GateResult>
   // Existing module vocabularies are preserved across extraction.
   runLeakGatePreflight(snapshot: BuildSnapshot): Promise<BuildLeakPreflightOutcome>
   assessMergeDiff(diff: string): MergeDiffAssessment
   reviewReadiness?(snapshot: BuildSnapshot, signal: AbortSignal, mergeMode?: 'pr' | 'local'): Promise<GateResult>
+  reviewCi?(snapshot: BuildSnapshot): Promise<SuiteAssessment>
   reviewSuite?(snapshot: BuildSnapshot, round: number): Promise<SuiteAssessment>
   // reviewGate owns panel provenance and severity, and records evidence before filtering.
   reviewGate(payload: unknown, snapshot: BuildSnapshot, round: number, replansUsed?: number, recordProgress?: (value: ReviewProgress) => void): Promise<ReviewDecision>
@@ -115,6 +124,8 @@ export interface BuildRunDeps {
   publish(snapshot: BuildSnapshot): Promise<void>
   /** Local effects must pin the reviewed head, preserve the branch and merge without rewriting it. */
   merge(snapshot: BuildSnapshot): Promise<void>
+  /** Persist absolute totals for each model phase after every completed turn. */
+  recordPhaseUsage(runId: string, phase: string, report: PhaseUsageReport): Promise<void>
   confirmLocalMerge?(snapshot: BuildSnapshot): Promise<GateResult>
 }
 
@@ -184,16 +195,18 @@ export async function buildRun(input: BuildRunInput, deps: BuildRunDeps, signal:
     const modes = deps.modes
     if ((input.mode === 'ralph' || input.start === 'resume') && !modes) return blocked('Mode host is required')
     const resume = input.start === 'resume' ? await modes!.loadResume() : null
+    phase = resume?.pending?.phase ?? phase
+    step_id = resume?.pending?.step_id ?? step_id
+    let snapshot: BuildSnapshot
+    const initial = await deps.measure()
+    if (initial.kind === 'unknown') return unknown(initial.detail)
+    snapshot = initial.value
+    if (!local && confirmedMerged(snapshot)) return { kind: 'merged', snapshot }
     if (resume?.pending) {
       phase = resume.pending.phase
       step_id = resume.pending.step_id
       return unknown('Resume awaits the existing worker observation')
     }
-
-    let snapshot: BuildSnapshot
-    const initial = await deps.measure()
-    if (initial.kind === 'unknown') return unknown(initial.detail)
-    snapshot = initial.value
     if (local && snapshot.pr !== null) return blocked('Local build has a PR')
     if (input.start === 'fresh' && snapshot.pr !== null) return blocked('Fresh build already has a PR')
 
@@ -255,6 +268,7 @@ export async function buildRun(input: BuildRunInput, deps: BuildRunDeps, signal:
     }
     let previousPayload: unknown = null
     let findings: readonly string[] = []
+    const usageTotals = new Map<string, PhaseUsageReport>()
     async function work(role: WorkPhase, round: number): Promise<{ payload: unknown } | { stop: BuildRunOutcome }> {
       phase = role
       step_id = `${input.run_id}${input.mode === 'ralph' ? `:task:${input.ralphRound ?? 0}` : ''}:${role}:${round}`
@@ -264,10 +278,16 @@ export async function buildRun(input: BuildRunInput, deps: BuildRunDeps, signal:
       }
       await checkpoint({ pending: { phase: role, step_id }, round: Math.max(durable.round, round) })
       await deps.prepareWork(boundedRequest, { snapshot: structuredClone(snapshot), previous: previousPayload, findings, planner, ...(committedPlan ? { committedPlan } : {}) })
+      if (role === 'review') {
+        if (!deps.reviewArtifact) return { stop: unknown('Review artifact host is missing') }
+        const artifact = gateStop(await deps.reviewArtifact(boundedRequest, snapshot))
+        if (artifact) return { stop: artifact }
+      }
       let outcome: BoundedWorkOutcome
       try {
         outcome = await runner.run(boundedRequest, placementFor(runner.provider, input.repl_provider), signal)
       } catch (error) {
+        if (role === 'review') return { stop: blocked('infra-only: Review round threw before producing synthesis') }
         if (role === 'plan' && replansUsed > 0) return { stop: blocked('design-gap: re-plan-failed: planner threw before producing a revised execution spec') }
         throw error
       }
@@ -278,6 +298,23 @@ export async function buildRun(input: BuildRunInput, deps: BuildRunDeps, signal:
         case 'failed': return { stop: failed(`${outcome.class}: ${outcome.detail}`) }
         case 'completed': break
       }
+      const usagePhase = role === 'plan' ? 'decomposition' : role === 'review' ? 'review_adversarial' : 'build'
+      const priorUsage = usageTotals.get(usagePhase)
+      const cacheRead = outcome.usage.cache_read_input_tokens
+      const report: PhaseUsageReport = {
+        status: 'partial',
+        input_tokens: (priorUsage?.input_tokens ?? 0) + outcome.usage.input_tokens,
+        output_tokens: (priorUsage?.output_tokens ?? 0) + outcome.usage.output_tokens,
+        cache_read_tokens: priorUsage
+          ? priorUsage.cache_read_tokens === null || cacheRead === undefined ? null : priorUsage.cache_read_tokens + cacheRead
+          : cacheRead ?? null,
+        cache_creation_tokens: null,
+        cost_usd: null,
+        source: priorUsage && priorUsage.source !== outcome.model_reported ? 'multiple-models' : outcome.model_reported,
+        observed_at: Math.max(Date.now(), (priorUsage?.observed_at ?? -1) + 1),
+      }
+      await deps.recordPhaseUsage(input.run_id, usagePhase, report)
+      usageTotals.set(usagePhase, report)
       let observation = await deps.measure()
       if (local && (role === 'build' || role === 'fix')) {
         // G032: the host owns the three-read budget; no worker sets it.
@@ -290,6 +327,19 @@ export async function buildRun(input: BuildRunInput, deps: BuildRunDeps, signal:
       }
       if (observation.kind === 'unknown') return { stop: unknown(observation.detail) }
       const measured = observation.value
+      // G036 precedes trailer and lost-round checks: merging can remove the branch.
+      if (!local && confirmedMerged(measured, snapshot.pr)) return { stop: { kind: 'merged', snapshot: measured } }
+      if (role === 'build' || role === 'fix') {
+        const payload = outcome.result && typeof outcome.result === 'object' && 'payload' in outcome.result ? outcome.result.payload : undefined
+        const branch = gateStop(builderBranch(deps.assignedBranch, payload))
+        if (branch) return { stop: branch }
+      }
+      if (role === 'fix' && !fixLanded(snapshot.head, measured.head)) return { stop: failed('Fix round did not move the measured branch head', 'round-lost-work') }
+      if (role === 'fix') {
+        if (!deps.checkFixLineage) return { stop: unknown('Fix lineage host is missing') }
+        const lineage = gateStop(await deps.checkFixLineage(measured, snapshot.head))
+        if (lineage) return { stop: lineage }
+      }
       let result = outcome.result
       if ((role === 'build' || role === 'fix') && result && typeof result === 'object'
           && 'head' in result && typeof result.head === 'string' && result.head !== measured.head
@@ -396,19 +446,26 @@ export async function buildRun(input: BuildRunInput, deps: BuildRunDeps, signal:
       if (!deps.reviewSuite) return unknown('Review suite host is missing')
       const suite = await deps.reviewSuite(snapshot, round)
       if (suite.kind === 'unknown') return unknown(suite.detail)
+      if (!deps.reviewCi) return unknown('Review CI host is missing')
+      const ciBefore = await deps.reviewCi(snapshot)
+      if (ciBefore.kind === 'unknown') return unknown(ciBefore.detail)
+      findings = [...findings, ...ciBefore.findings.map(f => `${f.title}: ${f.evidence}`)]
       findings = [...findings, ...suite.findings.map(f => `${f.title}: ${f.evidence}`)]
       const readyRevision = await deps.measure()
       if (readyRevision.kind === 'unknown') return unknown(readyRevision.detail)
       if (!corroborates(snapshot, readyRevision.value)) return blocked('Revision changed during review readiness')
       const result = await work('review', round)
       if ('stop' in result) return result.stop
+      const ci = await deps.reviewCi(snapshot)
+      if (ci.kind === 'unknown') return unknown(ci.detail)
       let currentReview: ReviewProgress | undefined
       const panel = await deps.reviewGate(result.payload, snapshot, round, replansUsed, value => {
         currentReview = { findings: [...value.findings], blockingCount: value.blockingCount }
       })
-      const decision = applyReviewSuite(panel, suite)
+      const suiteDecision = applyReviewSuite(panel, suite)
+      const decision = applyReviewCi(suiteDecision, ci)
       if (currentReview) {
-        const suiteBlockers = suite.findings.filter(f => !f.advisory)
+        const suiteBlockers = [...suite.findings, ...ci.findings].filter(f => !f.advisory)
         currentReview = { findings: [...currentReview.findings, ...suiteBlockers.map(f => `${f.title}: ${f.evidence}`)], blockingCount: currentReview.blockingCount + suiteBlockers.length }
       }
       if (decision.kind === 'blocked') return blocked(decision.on)

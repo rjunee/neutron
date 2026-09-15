@@ -33,7 +33,7 @@ describe('the Core applies its own sidecar migrations', () => {
   test('the complete checked-in migration chain applies to a fresh database', () => {
     const db = new Database(':memory:')
     try {
-      expect(applyCoreMigrations(db, MIGRATIONS_DIR).applied).toEqual([1, 2, 3])
+      expect(applyCoreMigrations(db, MIGRATIONS_DIR).applied).toEqual([1, 2, 3, 4])
       expect(
         db.query<{ name: string }, []>(
           "SELECT name FROM sqlite_master WHERE type = 'table' ORDER BY name",
