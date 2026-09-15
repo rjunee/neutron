@@ -6,6 +6,7 @@ import { PROVIDERS, type Provider } from '../provider.ts'
 import { claudeInReplRunner } from './claude-in-repl.ts'
 import { codexInReplRunner } from './codex-in-repl.ts'
 import { piInReplRunner } from './pi-in-repl.ts'
+import { unknownCause } from '../refusal-cause.ts'
 
 export interface ProjectConversation {
   readonly project_id: string
@@ -60,8 +61,8 @@ export function decodeProjectTrailer(bytes: string, request: BoundedWorkRequest,
     try { metadata = host.metadata(request) } catch { /* Telemetry cannot invalidate a validated result. */ }
     metadata ??= { usage: null, model_reported: null, thread_id: null }
     return { kind: 'completed', result: value.result, ...metadata }
-  } catch {
-    return unknown('Trailer JSON or host validation could not be read.')
+  } catch (error) {
+    return unknown(unknownCause('Trailer JSON or host validation could not be read.', error, request.run_id))
   }
 }
 

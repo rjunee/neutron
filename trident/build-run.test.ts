@@ -699,7 +699,7 @@ test('G075 thrown re-planner escalates before rebuild', async () => {
     if (request.step_id === 'run:plan:1') throw new Error('planner unavailable')
     return runner.run(request, placement, signal)
   } }
-  expect(await f.run()).toMatchObject({ kind: 'blocked', phase: 'plan', on: expect.stringContaining('design-gap: re-plan-failed: planner threw') })
+  expect(await f.run()).toMatchObject({ kind: 'blocked', phase: 'plan', on: 'design-gap: re-plan-failed: planner threw before producing a revised execution spec: Error: planner unavailable' })
   expect(f.runner.calls.filter(c => c.role === 'build')).toHaveLength(1)
   expect(f.cross.calls).toHaveLength(1)
 })
@@ -1293,7 +1293,7 @@ test('G084 missing lineage host cannot accept a fix', async () => {
 test('G060 thrown review round becomes an infrastructure block', async () => {
   const f = fixture()
   f.cross.run = async () => { throw new Error('review transport failed') }
-  expect(await f.run()).toMatchObject({ kind: 'blocked', phase: 'review', recipient: 'orchestrator', on: 'infra-only: Review round threw before producing synthesis' })
+  expect(await f.run()).toMatchObject({ kind: 'blocked', phase: 'review', recipient: 'orchestrator', on: 'infra-only: Review round threw before producing synthesis: Error: review transport failed' })
   expect(f.runner.calls.map(call => call.role)).toEqual(['plan', 'build'])
   expect(f.events).not.toContain('publish')
 })

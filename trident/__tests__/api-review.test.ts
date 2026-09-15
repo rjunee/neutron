@@ -87,8 +87,11 @@ test('network exceptions refuse without echoing key material', async () => {
   const result = await reviewConfiguredSeat(row.tier, '+changed', 'review', (async () => {
     throw new Error('test-secret')
   }) as ReviewFetch)
-  expect(result.status).toBe('deferred')
-  expect(result.reason).toContain(row.model)
+  expect(result).toEqual({
+    status: 'deferred',
+    text: '',
+    reason: `review seat ${row.model}: request failed or response was invalid`,
+  })
   expect(JSON.stringify(result)).not.toContain('test-secret')
 })
 

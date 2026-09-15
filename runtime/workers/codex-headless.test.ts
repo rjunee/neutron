@@ -180,7 +180,7 @@ test('PR number alone lacks the compared PR head and state', async () => {
 
 test('unreadable diff artifact is unknown', async () => {
   expect(await runTrailer({ DIFF: 'missing.diff' }))
-    .toEqual({ kind: 'unknown', detail: 'Codex trailer NEUTRON_CODEX_BUILD_DIFF artifact is unreadable' })
+    .toEqual({ kind: 'unknown', detail: expect.stringMatching(/^Codex trailer NEUTRON_CODEX_BUILD_DIFF artifact is unreadable: Error: ENOENT/) })
 })
 
 test('duplicate fields are ambiguous even when one value matches', async () => {
@@ -198,7 +198,7 @@ test('unreadable trailer stays unknown', async () => {
   writeFileSync(f.script, '#!/bin/bash\nexit 0\n')
   const outcome = await createCodexHeadlessRunner({ buildScript: f.script, probe: { ok: true } })
     .run(f.request(), 'headless', new AbortController().signal)
-  expect(outcome).toEqual({ kind: 'unknown', detail: 'Codex wrapper exited successfully without a readable trailer' })
+  expect(outcome).toEqual({ kind: 'unknown', detail: expect.stringMatching(/^Codex wrapper exited successfully without a readable trailer: Error: ENOENT/) })
 })
 
 for (const effort of ['xhigh', 'max'] as const) {

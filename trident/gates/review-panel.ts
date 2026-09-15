@@ -5,6 +5,7 @@ import type { BuildSnapshot, ReviewDecision } from '../build-run.ts'
 import { validateTrailer, type VerdictTrailer } from './result-contract.ts'
 import type { ReviewProgress } from './review-progress.ts'
 import { decideEscalation, findingIdentity } from './escalation.ts'
+import { unknownCause } from './unknown-cause.ts'
 
 export interface ReviewSeat {
   id: string
@@ -120,5 +121,5 @@ export async function reviewPanel(source: ReviewSource | undefined, payload: unk
     if (verdicts.some(v => v.verdict === 'COMMENT' || (v.verdict === 'REQUEST_CHANGES' && v.findings.length === 0))) return blocked('Review has an unresolved verdict without nonblocking findings')
     if (recorded.checkpoint !== 'argus-approved') return infrastructure('Review recorded approval checkpoint is missing')
     return { kind: 'approve' }
-  } catch { return infrastructure('Review panel host observation failed') }
+  } catch (error) { return infrastructure(unknownCause('Review panel host observation failed', error, runId)) }
 }

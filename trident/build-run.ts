@@ -1,6 +1,7 @@
 import { applyReviewCi } from './gates/review-ci.ts'
 import { builderBranch, confirmedMerged, fixLanded } from './gates/build-transition.ts'
 import { createLogger } from '@neutronai/logger'
+import { unknownCause } from './gates/unknown-cause.ts'
 import { createHash } from 'node:crypto'
 import {
   placementFor,
@@ -287,8 +288,8 @@ export async function buildRun(input: BuildRunInput, deps: BuildRunDeps, signal:
       try {
         outcome = await runner.run(boundedRequest, placementFor(runner.provider, input.repl_provider), signal)
       } catch (error) {
-        if (role === 'review') return { stop: blocked('infra-only: Review round threw before producing synthesis') }
-        if (role === 'plan' && replansUsed > 0) return { stop: blocked('design-gap: re-plan-failed: planner threw before producing a revised execution spec') }
+        if (role === 'review') return { stop: blocked(unknownCause('infra-only: Review round threw before producing synthesis', error, input.run_id)) }
+        if (role === 'plan' && replansUsed > 0) return { stop: blocked(unknownCause('design-gap: re-plan-failed: planner threw before producing a revised execution spec', error, input.run_id)) }
         throw error
       }
       switch (outcome.kind) {
