@@ -189,8 +189,13 @@ const MODEL_CLASS_PRICING_TARGETS: Readonly<Record<string, string>> = Object.fre
   opus: 'claude-opus-5',
   fable: 'claude-fable-5',
   sonnet: 'claude-sonnet-5',
-  haiku: 'claude-haiku-4-5',
+  haiku: 'claude-haiku-4-5-20251001',
 })
+
+/** Resolve a version-free class to the concrete catalog row used for pricing. */
+export function resolveModelPricingTarget(model_id: string): string {
+  return MODEL_CLASS_PRICING_TARGETS[model_id] ?? model_id
+}
 
 /**
  * Resolve a `ModelPricingEntry` for a model id. Throws when no pricing row
@@ -220,7 +225,7 @@ const MODEL_CLASS_PRICING_TARGETS: Readonly<Record<string, string>> = Object.fre
  *     row before pilot dispatches. Loud-fail beats silent-mis-bill.
  */
 export function resolveModelPricing(model_id: string): ModelPricingEntry {
-  const pricingId = MODEL_CLASS_PRICING_TARGETS[model_id] ?? model_id
+  const pricingId = resolveModelPricingTarget(model_id)
   const exact = MODEL_PRICING_TABLE[pricingId]
   if (exact !== undefined) return exact
 
