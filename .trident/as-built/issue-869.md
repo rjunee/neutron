@@ -11,7 +11,7 @@ retains that distinction in `docs/spec-items/instance-project-provider-resolutio
 ### Changes and decisions
 
 - Persist the instance default in its existing metadata table, with a SQL provider
-  constraint (`migrations/0148_instance_model_provider.sql:2`). SQL maintains the
+  constraint (`migrations/0149_instance_model_provider.sql:2`). SQL maintains the
   vocabulary independently of a running gateway or a cooperative writer.
 - Import the former environment default once at boot (`open/composer.ts:1031`).
   A durable initialization marker prevents a restart from resurrecting the old
@@ -48,7 +48,7 @@ failure counted as mutation evidence. Test aliases: A =
 
 | Guard / line | Mutation | Test | Mutated / restored |
 |---|---|---|---|
-| SQL vocabulary, migrations/0148_instance_model_provider.sql:3 | CHECK (1) | A: database refuses | RED / GREEN |
+| SQL vocabulary, migrations/0149_instance_model_provider.sql:3 | CHECK (1) | A: database refuses | RED / GREEN |
 | No-op result, gateway/storage/owner-metadata.ts:275 | condition false | A: live instance changes | RED / GREEN |
 | Explicit fresh inherit, gateway/storage/owner-metadata.ts:275 | remove initialized conjunct | A: explicit inheritance | RED / GREEN |
 | One-time import, gateway/storage/owner-metadata.ts:291 | = 0 becomes >= 0 | A: legacy provisioning | RED / GREEN |
