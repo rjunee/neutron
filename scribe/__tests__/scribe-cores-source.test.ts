@@ -289,7 +289,7 @@ describe('scribe phase-2 — payload composition', () => {
 describe('scribe phase-2 — no duplicate poller (static)', () => {
   const PHASE2_FILES = [
     'scribe/compose-payload.ts',
-    'gateway/cores/email-managed-wiring.ts',
+    'gateway/cores/email-pipeline-wiring.ts',
     'gateway/cores/scribe-fan-out.ts',
   ]
   // Repo root is two levels up from scribe/__tests__/.
@@ -313,5 +313,11 @@ describe('scribe phase-2 — no duplicate poller (static)', () => {
     expect(src).not.toMatch(/setTimeout/)
     // it DOES call the scribe fan-out (the only net-new behaviour)
     expect(src).toMatch(/scribeFanOut\?\.\(\s*'calendar'/)
+  })
+
+  test('the email decoration uses the existing poll handler', () => {
+    const src = readFileSync(resolve(root, 'gateway/cores/email-pipeline-wiring.ts'), 'utf8')
+    expect(src).toMatch(/on_message_processed/)
+    expect(src).toMatch(/scribeFanOut/)
   })
 })

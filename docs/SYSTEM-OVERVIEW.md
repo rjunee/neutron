@@ -467,11 +467,11 @@ no composer-threaded backend required (unlike `research_core`).
 
 ### Cores→scribe phase-2 fan-out (`gateway/cores/mount-cores-scribe-fan-out.ts`)
 
-The scheduled Calendar + Email Cores feed scribe's extract→GBrain path as
+The scheduled Calendar Core and polled Email Core feed scribe's extract→GBrain path as
 **ambient extraction sources on top of the Cores** (no new pollers): the
-pre-meeting-brief + daily-triage scheduler `fire` callbacks hand their
-already-fetched event/inbox rows to a `scribeFanOut` hook
-(`gateway/cores/{calendar,email-managed}-wiring.ts`), which the composer binds to
+pre-meeting-brief callback and email pipeline hand their already-fetched
+event/inbox rows to a `scribeFanOut` hook
+(`gateway/cores/calendar-wiring.ts`, `gateway/cores/email-pipeline-wiring.ts`), which the composer binds to
 `scribe.extractFromCoresSource(...)`. This complements the chat-turn extractor
 (`scribeOnUserTurn` → `scribe.handleUserTurn`): chat captures what the owner
 *says*; the fan-out captures what their *calendar and inbox* contain.
@@ -936,11 +936,23 @@ so a diagnostics pipeline that required a SaaS would not be the same product.
 Always on — no feature flag, no env gate, one code path.
 
 **What is covered:** JavaScript errors — an uncaught exception, an unhandled
-promise rejection, and a React render crash.
-**What is NOT covered:** **native crashes**. If the process dies before the JS
-bundle runs (e.g. an Android provider failing during process start), no JS
-executes to catch anything and there is no report. Those still need `adb
-logcat` or an emulator. This closes the JS blind spot only.
+promise rejection, and a React render crash — plus Android uncaught exceptions
+raised during process start before the JS bundle runs. The native handler stages
+the crash on the device; a later JS-capable launch puts it through the ordinary
+authenticated delivery path.
+
+- **Native process-start capture (`app/plugins/with-native-crash-reporting.js`).**
+  Expo prebuild registers an unexported `ContentProvider` at maximum init order,
+  ahead of ordinary providers and ahead of `Application.onCreate`. It installs a
+  native uncaught-exception handler that synchronously writes one bounded JSON
+  envelope to app-private files and then delegates to Android's previous handler.
+  The initializer is separate from the component that crashes, so provider
+  startup failure does not disable its own observer. `app/lib/native-crash-import.ts`
+  reads that file after server configuration hydrates, constructs a
+  `native_crash` member of the existing report vocabulary through
+  `buildClientReport` (including redaction), and removes the native file only
+  after the existing queue contains the report. The queue then delivers it with
+  the existing bearer. iOS native crashes remain outside this mechanism.
 
 - **Ring buffer (`app/lib/diagnostic-buffer.ts`).** A capped window of the last
   100 events — errors plus notable lifecycle markers — so a crash arrives with
@@ -7319,6 +7331,15 @@ immediate pickup, so a later turn reflects the new name/persona. The managed
 block is idempotently replaced and never clobbers onboarding-authored SOUL.md
 content. (`NEUTRON_AGENT_NAME` is read once at boot but never composed into the
 prompt, so it is NOT the persistence target.)
+
+**Persona-file ownership and prompt order.** The owner-wide persona editor on
+mobile and web owns exactly `persona/SOUL.md`, `persona/USER.md`, and
+`persona/priority-map.md`; all three are read together by `PersonaPromptLoader`
+as the prompt's base-persona layer. The root-level `USER.md` is a different
+file: `assembleSystemPrompt` owns it as one of the instance context files and
+appends that context after the base persona. Therefore `persona/USER.md` shapes
+the owner-wide persona first, while `<owner_home>/USER.md` supplies later
+instance context; neither editor aliases or rewrites the root-level file.
 
 ## PTY terminal-detection foundations (F1+F2+F3) — `runtime/adapters/claude-code/persistent/`
 

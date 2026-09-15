@@ -291,6 +291,20 @@ references decisions by date; none is a second home for a decision.
 
 ## Decisions Log (immutable audit trail — NOT the build spec)
 
+### 2026-09-15 — Native Android process-start crashes enter the owner's existing diagnostics queue (#528).
+
+An unexported initializer provider with maximum init order installs the native
+uncaught-exception handler before other providers run. The handler synchronously
+writes one bounded crash envelope to app-private storage and delegates to the
+previous handler; it does not send, authenticate, or run JavaScript. The next
+JS-capable launch binds that envelope to the hydrated gateway, redacts it through
+the existing client-report builder, persists it in the existing diagnostics queue,
+and removes the native file only after confirming the queue copy. Delivery remains
+authenticated to the owner's own gateway, with no third party and no second ingest
+path. This narrows the native-crash limitation in the 2026-07-27 decision below;
+JS capture and every security constraint in that entry remain unchanged.
+Acceptance: `docs/spec-items/native-crash-visibility-for-the-mobile-app.md`.
+
 ### 2026-09-14 — Forgotten ritual approvals re-raise daily, at most three times (#586).
 
 The owner chose a 24-hour interval because a weekly reminder would arrive after
@@ -547,10 +561,10 @@ SHA-256 coverage for unrelated Git helpers. Decision and acceptance:
   report is bound to the gateway it was captured against and is delivered only there**. Otherwise changing
   servers would hand one instance's diagnostics to another — the self-hosting boundary has to hold for
   diagnostics exactly as it does for everything else.
-  **Honest limit, documented in the product and the docs:** this catches JAVASCRIPT errors only. A native
-  crash (the actual 2026-07-27 blocker: an Android provider dying at process start, before any JS ran) is NOT
-  captured and still needs logcat or an emulator. — [detail: `docs/SYSTEM-OVERVIEW.md` § App remote
-  diagnostics; `docs/AS_BUILT.md` 2026-07-27]
+  **Superseded in part by the 2026-09-15 decision above:** the original implementation caught
+  JAVASCRIPT errors only. Native Android process-start crashes now stage a bounded envelope before
+  other providers and enter the same authenticated queue on the next JS-capable launch. — [detail:
+  `docs/SYSTEM-OVERVIEW.md` § App remote diagnostics; `docs/AS_BUILT.md` 2026-07-27]
 
 ### 2026-07-18
 

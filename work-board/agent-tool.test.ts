@@ -70,6 +70,19 @@ describe('work_board_* agent tools', () => {
     }
   })
 
+  test('only add exposes the validated target_project selector', () => {
+    const reg = new ToolRegistry()
+    const names = registerWorkBoardToolSurface(reg, store, {
+      removal: new WorkBoardRemovalService({ store }),
+    })
+    const add = reg.get(WORK_BOARD_ADD_TOOL)!.input_schema as { properties: Record<string, unknown> }
+    expect(Object.keys(add.properties)).toContain('target_project')
+    for (const name of names.filter((name) => name !== WORK_BOARD_ADD_TOOL)) {
+      const schema = reg.get(name)!.input_schema as { properties?: Record<string, unknown> }
+      expect(Object.keys(schema.properties ?? {})).not.toContain('target_project')
+    }
+  })
+
   test('handler keys writes by ctx.project_slug, IGNORING any project_slug in args', async () => {
     const add = registry.get(WORK_BOARD_ADD_TOOL)!
     // The model passes a bogus project_slug in args; it must be ignored.
@@ -117,6 +130,52 @@ describe('work_board_* agent tools', () => {
     )) as { ok: boolean; error?: string }
     expect(res.ok).toBe(false)
     expect(res.error).toContain('design_doc_ref')
+  })
+
+  test('add can target another live project and leaves the current board unchanged', async () => {
+    const reg = new ToolRegistry()
+    registerWorkBoardToolSurface(reg, store, {
+      projectExists: (_owner, project) => project === 'destination',
+    })
+    const add = reg.get(WORK_BOARD_ADD_TOOL)!
+
+    const res = await add.handler(
+      { title: 'shared task', target_project: 'destination' },
+      ctx('owner', 'current'),
+    ) as { ok: boolean; item?: { project_slug: string } }
+
+    expect(res.ok).toBe(true)
+    expect(res.item?.project_slug).toBe('destination')
+    expect(store.list('destination')).toHaveLength(1)
+    expect(store.list('current')).toHaveLength(0)
+  })
+
+  test('add refuses an unknown target without writing to either board', async () => {
+    const reg = new ToolRegistry()
+    registerWorkBoardToolSurface(reg, store, { projectExists: () => false })
+    const add = reg.get(WORK_BOARD_ADD_TOOL)!
+
+    const res = await add.handler(
+      { title: 'lost task', target_project: 'missing' },
+      ctx('owner', 'current'),
+    ) as { ok: boolean; error?: string }
+
+    expect(res.ok).toBe(false)
+    expect(res.error).toContain('missing')
+    expect(store.list('missing')).toHaveLength(0)
+    expect(store.list('current')).toHaveLength(0)
+  })
+
+  test('add refuses a target when no authoritative project resolver is wired', async () => {
+    const res = await registry.get(WORK_BOARD_ADD_TOOL)!.handler(
+      { title: 'unverified task', target_project: 'destination' },
+      ctx('owner', 'current'),
+    ) as { ok: boolean; error?: string }
+
+    expect(res.ok).toBe(false)
+    expect(res.error).toContain('destination')
+    expect(store.list('destination')).toHaveLength(0)
+    expect(store.list('current')).toHaveLength(0)
   })
 })
 
@@ -233,6 +292,30 @@ describe('work_board_add spec-doc routing (M1)', () => {
     expect(seen).toEqual([{ title: 'Wire it', docsProjectId: 'general', spec: 'a\nb\nc' }])
     expect(out.item?.design_doc_ref).toBe('neutron-docs:plans/x.md')
   })
+
+  test('a targeted add routes its card and spec doc to the same destination project', async () => {
+    const reg = new ToolRegistry()
+    const seen: Array<{ scope: string; docsProjectId: string }> = []
+    const specDoc = {
+      createCardWithOptionalSpec: async (scope: string, docsProjectId: string, input: { title: string }) => {
+        seen.push({ scope, docsProjectId })
+        return store.create(scope, { title: input.title })
+      },
+      resolveTaskForItem: async () => 'unused',
+    }
+    registerWorkBoardToolSurface(reg, store, {
+      projectExists: () => true,
+      specDoc: specDoc as unknown as import('./spec-doc-service.ts').WorkBoardSpecDocService,
+    })
+
+    const out = await reg.get(WORK_BOARD_ADD_TOOL)!.handler(
+      { title: 'Documented task', spec: 'full details here', target_project: 'destination' },
+      ctx('owner', 'current'),
+    ) as { ok: boolean }
+
+    expect(out.ok).toBe(true)
+    expect(seen).toEqual([{ scope: 'destination', docsProjectId: 'destination' }])
+  })
 })
 
 describe('work_board chat-ack seam (#429 task 4)', () => {
@@ -259,6 +342,21 @@ describe('work_board chat-ack seam (#429 task 4)', () => {
     expect(out.ok).toBe(true)
     expect(posts).toEqual([
       { project_id: 'acme', item_id: out.item.id, title: 'Ship it', kind: 'card_added' },
+    ])
+  })
+
+  test('a targeted add acknowledges in the destination project', async () => {
+    const reg = new ToolRegistry()
+    const { posts, ack } = spyAck()
+    registerWorkBoardToolSurface(reg, store, { chatAck: ack, projectExists: () => true })
+    const out = await reg.get(WORK_BOARD_ADD_TOOL)!.handler(
+      { title: 'Send it over', target_project: 'destination' },
+      ctx('owner', 'current'),
+    ) as { ok: boolean; item: { id: string } }
+
+    expect(out.ok).toBe(true)
+    expect(posts).toEqual([
+      { project_id: 'destination', item_id: out.item.id, title: 'Send it over', kind: 'card_added' },
     ])
   })
 
