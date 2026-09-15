@@ -320,12 +320,12 @@ function dotState(item: WorkBoardItem): DotState {
   return { cls: 'cwb-dot-upcoming', pulse: false }
 }
 
-/** `round N` for a live (non-terminal) run; null once merged/failed or when idle. */
+/** `<task>.<review>` for a live run; the persisted Ralph task counter is zero-based. */
 function roundText(rp: RunProgress | undefined): string | null {
   if (rp === undefined) return null
   const step = resolveStepLabel(rp)
   if (step === 'done' || step === 'failed') return null
-  return `round ${rp.round}`
+  return `${(rp.ralph_round ?? 0) + 1}.${rp.round}`
 }
 
 const MONTHS = [

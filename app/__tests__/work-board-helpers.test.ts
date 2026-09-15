@@ -56,6 +56,7 @@ function progress(over: Partial<RunProgress> = {}): RunProgress {
     phase_label: 'building',
     step_label: 'building',
     round: 1,
+    ralph_round: 0,
     started_at: '',
     last_advanced_at: '',
     elapsed_ms: 0,
@@ -97,28 +98,32 @@ describe('stepTag + roundText derive from step_label (M1 redesign)', () => {
   // step (see its docblock). These cases are all about the step, so the item is the
   // run wrapped in an ordinary in_progress card.
   const withRun = (rp: RunProgress): WorkBoardItem => item({ status: 'in_progress', run_progress: rp });
-  it('building → "Building" tag + round N', () => {
+  it('building → "Building" tag + task.review counters', () => {
     const rp = progress({ step_label: 'building', round: 2 });
     expect(stepTag(withRun(rp))).toEqual({ label: 'Building', colorKey: 'build' });
-    expect(roundText(rp)).toBe('round 2');
+    expect(roundText(rp)).toBe('1.2');
   });
 
   it('reviewing → "Reviewing" tag + round N', () => {
     const rp = progress({ step_label: 'reviewing', round: 3 });
     expect(stepTag(withRun(rp))).toEqual({ label: 'Reviewing', colorKey: 'review' });
-    expect(roundText(rp)).toBe('round 3');
+    expect(roundText(rp)).toBe('1.3');
+  });
+
+  it('a re-fired task renders the one-based outer task and inner review as 2.1', () => {
+    expect(roundText(progress({ ralph_round: 1, round: 1 }))).toBe('2.1');
   });
 
   it('fixing → "Fixing" tag + round N', () => {
     const rp = progress({ step_label: 'fixing', round: 4 });
     expect(stepTag(withRun(rp))).toEqual({ label: 'Fixing', colorKey: 'fix' });
-    expect(roundText(rp)).toBe('round 4');
+    expect(roundText(rp)).toBe('1.4');
   });
 
   it('merging → "Merging" tag + round N', () => {
     const rp = progress({ step_label: 'merging', round: 5 });
     expect(stepTag(withRun(rp))).toEqual({ label: 'Merging', colorKey: 'merge' });
-    expect(roundText(rp)).toBe('round 5');
+    expect(roundText(rp)).toBe('1.5');
   });
 
   it('done (terminal) → "Merged" tag, NO round', () => {
@@ -140,7 +145,7 @@ describe('stepTag + roundText derive from step_label (M1 redesign)', () => {
     const legacy = progress({ phase_label: 'reviewing', round: 2 });
     delete (legacy as { step_label?: unknown }).step_label;
     expect(stepTag(withRun(legacy))).toEqual({ label: 'Reviewing', colorKey: 'review' });
-    expect(roundText(legacy)).toBe('round 2');
+    expect(roundText(legacy)).toBe('1.2');
     const legacyMerged = progress({ phase_label: 'merged' });
     delete (legacyMerged as { step_label?: unknown }).step_label;
     expect(stepTag(withRun(legacyMerged))).toEqual({ label: 'Merged', colorKey: 'merge' });

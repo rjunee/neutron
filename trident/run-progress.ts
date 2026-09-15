@@ -69,6 +69,8 @@ export interface RunProgress {
   step_label: RunStepLabel
   /** Review/fix cycle count (1 during the first build+review; N during fix-round-N). */
   round: number
+  /** Zero-based persisted Ralph task counter; presentation adds one for the task number. */
+  ralph_round: number
   /** ISO-8601 UTC run start — the client ticks live elapsed off this. */
   started_at: string
   /** ISO-8601 UTC last checkpoint/transition — the client ticks live stall off this. */
@@ -221,6 +223,7 @@ export function deriveRunProgress(
     phase_label,
     step_label: deriveStepLabel(run.phase, run.inner_checkpoint),
     round,
+    ralph_round: run.ralph_round,
     started_at: run.started_at,
     last_advanced_at: run.last_advanced_at,
     elapsed_ms,
