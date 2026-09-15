@@ -1,0 +1,76 @@
+import { readFile, writeFile } from 'node:fs/promises'
+import { placementFor, type Provider, type WorkerRunner } from '@neutronai/runtime/bounded-work.ts'
+import type { BuildRunInput } from './build-run.ts'
+import { createBuildHost, type BuildHostOptions } from './build-host.ts'
+import { briefIntegrity } from './gates/brief-integrity.ts'
+import { createProductionHostEffects, workContextPath, type ProductionHostOptions } from './production-host-effects.ts'
+
+/** Bound by the project composition, including its live conversational runner. */
+export interface ProjectBuildSubstrate {
+  provider: Provider
+  inRepl: WorkerRunner | undefined
+  headless: Partial<Record<Provider, WorkerRunner>>
+}
+
+/** Select only the placement prescribed by the project REPL's provider. */
+export function projectBuildRunners(substrate: ProjectBuildSubstrate, providers: readonly Provider[]) {
+  const runners: Partial<Record<Provider, WorkerRunner>> = {}
+  for (const provider of providers) {
+    const candidate = placementFor(provider, substrate.provider) === 'in-repl'
+      ? substrate.inRepl : substrate.headless[provider]
+    if (candidate?.provider === provider) runners[provider] = candidate
+  }
+  return runners
+}
+
+export interface ProjectBuildHostOptions {
+  substrate: ProjectBuildSubstrate
+  production: ProductionHostOptions
+  /** Policy-specific sources remain explicit, without permissive defaults. */
+  policy: Pick<BuildHostOptions, 'review' | 'boundReview'> & {
+    leak: Pick<BuildHostOptions['leak'], 'scratch_dir' | 'gate_script'>
+    mutation: Omit<BuildHostOptions['mutation'], 'run' | 'run_host' | 'base_branch'>
+  }
+  workers: BuildHostOptions['workers']
+}
+
+/** The later launcher cutover owns invoking this additive composition. Brief paths
+ * must be new host-owned files, separate from the owner's source briefs. */
+export async function createProjectBuildHost(options: ProjectBuildHostOptions) {
+  const config = options.production
+  const run = config.store.get(config.runId)
+  if (!run || run.project_slug !== config.projectSlug || run.repo_path !== config.repo
+    || run.branch !== config.branch || run.worktree !== config.worktree || !run.base_sha) {
+    throw new Error('Project build requires an initialized run with matching identity and launch base')
+  }
+  const workers = structuredClone(options.workers)
+  for (const [role, worker] of Object.entries(workers)) {
+    // The input brief is already rendered by the project. This operation refuses
+    // an existing destination rather than modifying an admitted brief in place.
+    const path = `${worker.request.brief.path}.${role}.host`
+    const source = await readFile(worker.request.brief.path, 'utf8')
+    if (briefIntegrity(source) !== worker.request.brief.integrity) throw new Error('Project source brief integrity mismatch')
+    const text = `${source}\n\nRead the host turn context at ${workContextPath(path)} before doing this task.\n`
+    await writeFile(path, text, { flag: 'wx', mode: 0o600 })
+    worker.request = { ...worker.request, brief: { path, integrity: briefIntegrity(text) } }
+  }
+  const production = createProductionHostEffects(options.production)
+  const runners = projectBuildRunners(options.substrate, Object.values(workers).map(worker => worker.provider))
+  const host = createBuildHost({
+    ...options.policy,
+    workers, runners,
+    reviewed_head: run.inner_checkpoint_head,
+    leak: { ...options.policy.leak, run_host: config.runHost, repo_path: config.repo, branch: config.branch, base_sha: run.base_sha },
+    mutation: { ...options.policy.mutation, run, run_host: config.runHost, base_branch: config.baseBranch },
+    replProvider: options.substrate.provider,
+    effects: production.effects,
+    admission: production.admission,
+    observeCi: production.observeCi,
+    local: { baseBranch: options.production.baseBranch, worktree: options.production.worktree },
+  })
+  return {
+    runners, workers: host.workers, deps: host.deps,
+    run: (input: Omit<BuildRunInput, 'run_id' | 'workers' | 'repl_provider' | 'merge_mode'>, signal: AbortSignal) =>
+      host.run({ ...input, run_id: run.id, workers: host.workers, repl_provider: options.substrate.provider, merge_mode: run.merge_mode }, signal),
+  }
+}
