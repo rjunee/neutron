@@ -1,3 +1,4 @@
+import { awaitReviewReadiness, type ReviewReadinessSource } from './gates/review-readiness.ts'
 import { executeBoundReview, type BoundReviewOutcome } from './review-run.ts'
 import { checkBuildClaim } from './gates/build-claim.ts'
 import { fixLineage } from './gates/fix-lineage.ts'
@@ -33,6 +34,7 @@ export interface BuildHostOptions {
   reviewed_head: string | null
   local?: { baseBranch: string; worktree: string }
   admission?: AdmissionSource
+  reviewReadiness?: ReviewReadinessSource
   review?: ReviewSource
   observeCi(snapshot: BuildSnapshot): Promise<CiRunObservation>
 }
@@ -119,6 +121,9 @@ export function createBuildHost(options: BuildHostOptions): { deps: BuildRunDeps
       return result
     },
     assessMergeDiff,
+    reviewReadiness: (snapshot, signal, mergeMode) => mergeMode === 'local'
+      ? localReadiness(snapshot)
+      : awaitReviewReadiness(options.reviewReadiness, snapshot, signal),
     reviewGate: (payload, snapshot, round, replansUsed) => reviewPanel(options.review, payload, snapshot, round, options.mutation.run.id, replansUsed, { provider: options.workers.build.provider, modelId: options.workers.build.request.model_id }),
     async publishGate(snapshot, mergeMode) {
       const claim = await options.mutation.readClaim(snapshot)

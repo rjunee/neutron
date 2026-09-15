@@ -100,6 +100,7 @@ export interface BuildRunDeps {
   // Existing module vocabularies are preserved across extraction.
   runLeakGatePreflight(snapshot: BuildSnapshot): Promise<BuildLeakPreflightOutcome>
   assessMergeDiff(diff: string): MergeDiffAssessment
+  reviewReadiness?(snapshot: BuildSnapshot, signal: AbortSignal, mergeMode?: 'pr' | 'local'): Promise<GateResult>
   // reviewGate owns panel provenance, cross-model seats, severity and arbiter rules.
   reviewGate(payload: unknown, snapshot: BuildSnapshot, round: number, replansUsed?: number): Promise<ReviewDecision>
   // publishGate owns mutation proof and publication readiness; mergeGate owns CI,
@@ -347,6 +348,16 @@ export async function buildRun(input: BuildRunInput, deps: BuildRunDeps, signal:
     }
     for (let round = firstRound; !approved; round++) {
       if (round > maxRounds) return blocked('Review requires orchestrator arbitration: round ceiling')
+      phase = 'review'
+      step_id = null
+      // G035/G043: both fresh builds and fixes need a measured review artifact.
+      if (!fullOid(snapshot.head) || !snapshot.diff.trim()) return unknown('Review requires a full branch head and nonempty diff artifact')
+      if (!deps.reviewReadiness) return unknown('Review readiness host is missing')
+      const readiness = gateStop(await deps.reviewReadiness(snapshot, signal, input.merge_mode))
+      if (readiness) return readiness
+      const readyRevision = await deps.measure()
+      if (readyRevision.kind === 'unknown') return unknown(readyRevision.detail)
+      if (!corroborates(snapshot, readyRevision.value)) return blocked('Revision changed during review readiness')
       const result = await work('review', round)
       if ('stop' in result) return result.stop
       const decision = await deps.reviewGate(result.payload, snapshot, round, replansUsed)
