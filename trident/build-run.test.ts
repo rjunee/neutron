@@ -36,6 +36,7 @@ function fixture() {
     mergeGate: async () => { events.push('mergeGate'); return { kind: 'allow' } },
     publish: async () => { events.push('publish'); snapshot.pr = { number: 1, head: snapshot.head, state: 'OPEN' } },
     merge: async () => { events.push('merge'); snapshot.pr!.state = 'MERGED' },
+    recordPhaseUsage: async () => {},
   }
   return { input, deps, runner, cross, outcomes, completed, snapshot, events, decisions, reads: () => reads,
     run: () => buildRun(input, deps, new AbortController().signal) }
@@ -50,6 +51,35 @@ test('fresh to merged with a fix, host gates and fake runners', async () => {
   expect(f.events.filter(e => e !== 'measure')).toEqual(['publishGate', 'publish', 'mergeGate', 'merge'])
   expect(f.reads()).toBe(11)
   expect([...f.runner.calls, ...f.cross.calls].every(c => c.needs_approval_decision === false)).toBe(true)
+})
+
+test('production build loop records cumulative usage at every completed phase boundary', async () => {
+  const f = fixture()
+  const completedWithUsage = (input_tokens: number, output_tokens: number, cache_read_input_tokens?: number): BoundedWorkOutcome => ({
+    kind: 'completed', result: structuredClone(f.snapshot),
+    usage: { input_tokens, output_tokens, ...(cache_read_input_tokens === undefined ? {} : { cache_read_input_tokens }) },
+    model_reported: 'measured-model', thread_id: null,
+  })
+  f.outcomes.set('run:plan:0', completedWithUsage(10, 2, 4))
+  f.outcomes.set('run:build:0', completedWithUsage(20, 3, 5))
+  f.outcomes.set('run:review:1', completedWithUsage(30, 4))
+  f.outcomes.set('run:fix:1', completedWithUsage(7, 1, 2))
+  f.outcomes.set('run:review:2', completedWithUsage(11, 2, 3))
+  f.decisions.push({ kind: 'fix', findings: ['logic'] }, { kind: 'approve' })
+  const records: Array<{ runId: string; phase: string; report: Parameters<BuildRunDeps['recordPhaseUsage']>[2] }> = []
+  f.deps.recordPhaseUsage = async (runId, phase, report) => { records.push({ runId, phase, report }) }
+
+  expect((await f.run()).kind).toBe('merged')
+  expect(records.map(({ runId, phase, report }) => ({ runId, phase, input: report.input_tokens,
+    output: report.output_tokens, cache: report.cache_read_tokens, status: report.status, source: report.source }))).toEqual([
+    { runId: 'run', phase: 'decomposition', input: 10, output: 2, cache: 4, status: 'partial', source: 'measured-model' },
+    { runId: 'run', phase: 'build', input: 20, output: 3, cache: 5, status: 'partial', source: 'measured-model' },
+    { runId: 'run', phase: 'review_adversarial', input: 30, output: 4, cache: null, status: 'partial', source: 'measured-model' },
+    { runId: 'run', phase: 'build', input: 27, output: 4, cache: 7, status: 'partial', source: 'measured-model' },
+    { runId: 'run', phase: 'review_adversarial', input: 41, output: 6, cache: null, status: 'partial', source: 'measured-model' },
+  ])
+  expect(records[3]!.report.observed_at).toBeGreaterThan(records[1]!.report.observed_at)
+  expect(records[4]!.report.observed_at).toBeGreaterThan(records[2]!.report.observed_at)
 })
 
 test('placement is resolved for every role at admission and dispatch', async () => {

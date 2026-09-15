@@ -26,6 +26,7 @@ async function fixture() {
     result: { schema: 'test', path: join(dir, 'result') }, thread: null, budget: { wall_ms: 100 },
   } satisfies BuildRunInput['workers']['build']['request']
   const calls: string[][] = []
+  const usageRecords: Array<{ runId: string; phase: string }> = []
   let diff = 'M\0src/code.ts\0'
   let drift: 'clear' | 'overlap' | 'unreadable' = 'clear'
   let leakOutput = 'LEAK GATE: INCOMPLETE\nRULES THAT COULD NOT RUN: pii'
@@ -38,6 +39,7 @@ async function fixture() {
       prepareWork: async () => {}, measure: async () => ({ kind: 'known', value: snapshot }),
       publish: async () => { throw new Error('unexpected publish') }, merge: async () => { throw new Error('unexpected merge') },
     },
+    phaseUsage: { list: () => [], record: async (runId, phase) => { usageRecords.push({ runId, phase }); return 'recorded' } },
     leak: {
       repo_path: dir, branch: 'change', base_sha: 'b'.repeat(40), scratch_dir: join(dir, 'scan'), gate_script: 'trusted-gate',
       run_host: async (argv) => {
@@ -70,7 +72,7 @@ async function fixture() {
   }
   const make = () => createBuildHost(options)
   const input = (host: ReturnType<typeof make>): BuildRunInput => ({ run_id: 'test', mode: 'pr', start: 'fresh', repl_provider: options.replProvider, workers: host.workers })
-  return { options, make, input, path, calls, setDrift: (value: typeof drift) => { drift = value }, prose: () => { diff = 'M\0README.md\0' }, clean: () => { leakCode = 0; leakOutput = 'LEAK GATE: SILENT' } }
+  return { options, make, input, path, calls, usageRecords, setDrift: (value: typeof drift) => { drift = value }, prose: () => { diff = 'M\0README.md\0' }, clean: () => { leakCode = 0; leakOutput = 'LEAK GATE: SILENT' } }
 }
 
 test('missing provider is refused by the driver before effects', async () => {
@@ -332,6 +334,28 @@ test('fresh null reviewed_head reaches allow and publishes through the driver', 
     kind: 'blocked', phase: 'merge', on: 'Published PR does not match reviewed revision', recipient: 'orchestrator',
   })
   expect(publications).toBe(1)
+  expect(f.usageRecords).toEqual([
+    { runId: 'test', phase: 'decomposition' },
+    { runId: 'test', phase: 'build' },
+    { runId: 'test', phase: 'review_adversarial' },
+  ])
+})
+
+test('phase usage resumes from persisted absolute totals without double-counting this invocation', async () => {
+  const f = await fixture()
+  const writes: Array<{ input_tokens: number | null; observed_at: number }> = []
+  f.options.phaseUsage = {
+    list: () => [{ run_id: 'test', phase: 'build', status: 'partial', input_tokens: 100, output_tokens: 10,
+      cache_read_tokens: null, cache_creation_tokens: null, cost_usd: null, source: 'old-model', observed_at: 500 }],
+    record: async (_runId, _phase, report) => { writes.push({ input_tokens: report.input_tokens, observed_at: report.observed_at }); return 'recorded' },
+  }
+  const report = { status: 'partial', input_tokens: 20, output_tokens: 3, cache_read_tokens: 5,
+    cache_creation_tokens: null, cost_usd: null, source: 'new-model', observed_at: 100 } as const
+  const host = f.make()
+
+  await host.deps.recordPhaseUsage('test', 'build', report)
+  await host.deps.recordPhaseUsage('test', 'build', { ...report, input_tokens: 27 })
+  expect(writes).toEqual([{ input_tokens: 120, observed_at: 501 }, { input_tokens: 127, observed_at: 502 }])
 })
 
 test('host propagates G084 refusals after proof and readiness allow', async () => {

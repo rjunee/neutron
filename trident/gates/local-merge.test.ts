@@ -54,6 +54,7 @@ test('G109 real local worktree and branch allow, landing retains the reviewed br
     reviewGate: async () => ({ kind: 'approve' }), publishGate: async () => f.check(), mergeGate: async () => f.check(),
     publish: async () => { throw new Error('local mode must not publish') },
     merge: async () => { await f.git('merge', '--no-ff', f.head, '-m', 'land reviewed head') },
+    recordPhaseUsage: async () => {},
     confirmLocalMerge: async () => {
       const result = await host(['git', 'merge-base', '--is-ancestor', f.head, 'base'], f.repo)
       return result.ok ? { kind: 'allow' } : { kind: 'blocked', on: 'not landed' }
