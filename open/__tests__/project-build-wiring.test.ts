@@ -200,6 +200,32 @@ test('acting turn keeps ambiguity and spawn/grant outcomes distinct', async () =
   supervisedBySessionKey.set('two', config)
   pool.set('two', Promise.resolve(session as never))
   await Promise.resolve()
+  // AMBIGUITY IS REFUSED *BEFORE* THE SPAWN, and the outcome alone cannot show it:
+  // with the pre-spawn check removed the run still ends `unknown`, because the
+  // post-spawn `!== 1` catches it — after attempting a spawn that would add a THIRD
+  // session to an already-ambiguous project. So count the spawns, not just the kind.
+  let ambiguousSpawns = 0
+  f.setSpawnProjectSession(async () => { ambiguousSpawns += 1 })
   expect((await captured.actingTurn(turn)).kind).toBe('unknown')
+  expect(ambiguousSpawns).toBe(0)
   cleanup.push(() => { for (const key of ['one', 'two']) { pool.delete(key); supervisedBySessionKey.delete(key) } })
+})
+
+test('a spawned session with the wrong grants is refused, not used', async () => {
+  const f = await fixture()
+  const options = await f.prepare()
+  const captured = f.captured()
+  const request: BoundedWorkRequest = { ...options.workers.build.request, run_id: f.input.run.id, step_id: 'fixture-step', role: 'build', needs_approval_decision: false }
+  const turn = { conversation: captured.conversation, request, spec: { ...captured.conversation.spec, prompt: 'bounded work' }, timeout_ms: 50, signal: new AbortController().signal }
+  // NO candidate to begin with, so the PRE-spawn grant check cannot see anything —
+  // the only thing standing between a badly-granted spawned session and a bounded
+  // build is the check that runs AFTER the spawn. Without this case that check is
+  // unreachable from the tests and a mutation to it stays green.
+  cleanup.push(() => { pool.delete('spawned'); supervisedBySessionKey.delete('spawned') })
+  f.setSpawnProjectSession(async () => {
+    supervisedBySessionKey.set('spawned', { substrate_instance_id: 'cc-agent-fixture', project_id: f.context.projectId, skip_permissions: true, restricted: true } as never)
+    pool.set('spawned', Promise.resolve({ hasChildExited: () => false } as never))
+    await Promise.resolve()
+  })
+  expect((await captured.actingTurn(turn)).kind).toBe('refused')
 })
