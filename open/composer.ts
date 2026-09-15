@@ -7066,7 +7066,7 @@ export function buildOpenGraphComposer(
                     ),
                   })
                 } catch (err) {
-                  console.warn('[usage] transcript ingest failed:', err instanceof Error ? err.message : String(err))
+                  log.warn('usage_transcript_ingest_failed', { error: err instanceof Error ? err.message : String(err) })
                 }
               },
               on_terminal_wake: terminalBuildWake,
