@@ -19,8 +19,8 @@
  * st.mtimeMs, which on newer bun (1.3.13 local) carries sub-millisecond
  * precision, while a utimes(Date) restore is integer-ms at best — so
  * restoring a sub-ms original stamp silently changes the cache key and a
- * "same mtime" cache hit can never fire (green on CI's bun 1.3.9, where
- * mtimeMs is integer-ms; deterministically red on newer local bun).
+ * "same mtime" cache hit could never fire (green on the former CI bun 1.3.9,
+ * where mtimeMs was integer-ms; deterministically red on bun 1.3.13).
  */
 
 import { afterEach, beforeEach, describe, expect, test } from 'bun:test'

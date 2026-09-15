@@ -264,6 +264,12 @@ describe('parallel CI aggregator', () => {
     expect(yml).toMatch(/^\s+fail-fast: false$/m)
   })
 
+  test('one shard leg runs the whole app suite co-resident with per-file isolation', () => {
+    const shard = yml.match(/^ {2}shard:\n[\s\S]*?(?=^ {2}[a-z][a-z0-9-]*:\n)/m)?.[0] ?? ''
+    expect(shard).toContain('if: matrix.shard == 1')
+    expect(shard).toContain('run: bun test --isolate app/__tests__/ --max-concurrency=4')
+  })
+
   test('the layering job checks out full history for the ratchet-growth guard', () => {
     // depcruise-ratchet-guard.sh diffs the baseline against origin/main; a
     // depth-1 checkout has no origin/main and the guard degrades.
@@ -1178,7 +1184,7 @@ describe('bun install cache wiring', () => {
     ],
     [
       'bun-version is bumped without touching the key',
-      (s) => s.replace('bun-version: 1.3.9', 'bun-version: 1.4.0'),
+      (s) => s.replace('bun-version: 1.3.13', 'bun-version: 1.4.0'),
       "does not carry this job's bun version",
     ],
     [
