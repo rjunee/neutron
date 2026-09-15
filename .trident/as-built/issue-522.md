@@ -21,10 +21,14 @@ The new digest outcomes join the cron handler vocabulary: `delivered` makes the 
 | Owner timezone (`digest.ts:14`) | replaced zone with UTC | DST boundary assertion failed | digest test: 3 pass |
 | Settings input guard (`email-digest-settings-surface.ts:17`) | inverted boolean check | valid PUT assertion failed | surface test: 1 pass |
 | Rehearsal write hold (`poller.ts:738`) | inverted hold condition | no-mailbox-write assertion failed with two writes | poller rehearsal test: 1 pass |
+| Exact Open composition inventory (`open-composition-fields-characterization.test.ts:85`) | removed `app_email_digest_surface` declaration | exact-key assertion failed with the live extra field | characterization test: 1 pass |
+| Served route-slot classification (`route-slot-coverage-inventory.ts:242`) | removed the complete `app-email-digest` row | classifier failed with the live rung unclassified | route coverage: 5 pass |
 
 ### Validation
 
 Focused tests passed: 108 tests across the digest, pipeline poller, settings surface, route-slot ratchet, composition-field coverage, settings reachability, and migration snapshot. ESLint passed for every changed TypeScript/TSX file. The email, gateway, open, and root TypeScript projects passed. The repository typecheck matrix checked all 51 projects but failed only at `app/tsconfig.json` because this install cannot resolve the implicit `@types` type library; the app source was still linted and its settings reachability test passed.
+
+The inventory follow-up's original and inventory-focused command passed 87 tests across six files. The surrounding `open/__tests__` run enumerated 875 tests across 117 files: 784 passed and 91 failed, primarily where the restricted build environment refuses loopback listeners, plus one memory-index timeout; both inventory files passed within that run. The rerun typecheck matrix again checked all 51 projects, passing 50 and retaining only the same `app/tsconfig.json` implicit-type-library failure. Repository lint passed.
 
 ### Deliberately not done
 
