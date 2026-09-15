@@ -60,6 +60,21 @@ The four touched behavioral files passed 105 tests. The full activity served fil
 
 No fallback read of the former activity key was added. No alias from a real project named `general` to General was restored: `workBoardScopeKey` continues to keep that legal project id distinct (`work-board/store.test.ts:1233-1239`). No outcome vocabulary changed; these boundaries now select existing scope keys and introduce no error, verdict, state, or refusal. `SPEC.md` was not changed because this completes the existing collision-proof General decision.
 
+### Follow-up: remaining web-client fixtures
+
+The controller activity fixture addressed General with the former scope spelling (`landing/chat-react/__tests__/controller.test.ts:116-128`), while the controller compares incoming rows with the shared activity resolver (`landing/chat-react/controller.ts:1398-1403`). The fixture now emits the reserved scope key, so all six activity behaviors reach their existing label, status-detail, repeat suppression, keepalive, and new-send guards.
+
+The desktop shell fixture addressed General with the client sentinel but expected the former HTTP URL (`landing/chat-react/__tests__/project-shell.test.tsx:833-855`, `landing/chat-react/__tests__/project-shell.test.tsx:902-906`). It now resolves to the reserved HTTP segment and returns that same id in its response fixture (`landing/chat-react/__tests__/project-shell.test.tsx:825-827`).
+
+| Guard | Mutation | RED | Restored GREEN |
+| --- | --- | --- | --- |
+| Controller General activity fixtures (`landing/chat-react/__tests__/controller.test.ts:116-128`) | Restore the former scope spelling in the helper and explicit calls | Six controller activity cases failed | Controller file passed 70/70 |
+| Desktop General Work URL (`landing/chat-react/__tests__/project-shell.test.tsx:905`) | Restore the former expected URL | General Work pane case failed with the reserved URL received | Shell file passed 11/11 |
+
+The combined focused run passed 81/81. Repository lint passed every reported guard, the typecheck matrix passed all 51 configurations, the stale-prose guard passed against `origin/main`, and `git diff --check` passed.
+
+No fallback spelling or second code path was added. No outcome vocabulary changed because this follow-up corrects fixtures and documentation only. `SPEC.md` was not changed because the product ruling is unchanged.
+
 ### Enumeration before further implementation (2026-09-15)
 
 ### Historical round-three enumeration before the ruling (2026-09-15)

@@ -794,7 +794,7 @@ describe('ProjectShell desktop Work slide-out (≥1024px)', () => {
     }
 
     // Capture the board fetch so we can prove General's pane queries the General
-    // (owner_slug) board — the client maps the '' scope to the 'general' HTTP id,
+    // (owner_slug) board — the client maps the empty client scope to the reserved HTTP id,
     // NEVER the `//work-board` double-slash (which would 400).
     const boardUrls: string[] = []
     const fetchImpl = async (url: string): Promise<Response> => {
@@ -823,7 +823,7 @@ describe('ProjectShell desktop Work slide-out (≥1024px)', () => {
           completed_at: null,
         }
         return new Response(
-          JSON.stringify({ ok: true, items: [item], project_id: 'general' }),
+          JSON.stringify({ ok: true, items: [item], project_id: '~general' }),
           { status: 200, headers: { 'content-type': 'application/json' } },
         )
       }
@@ -899,10 +899,10 @@ describe('ProjectShell desktop Work slide-out (≥1024px)', () => {
     expect(handle).not.toBeNull()
     expect(handle.getAttribute('aria-label')).toBe('Show work')
 
-    // The pane's board query targets General's owner_slug board via the 'general'
+    // The pane's board query targets General's owner_slug board via the reserved
     // HTTP id — never a per-project id, never the `//work-board` double-slash.
     expect(boardUrls.length).toBeGreaterThan(0)
-    expect(boardUrls[0]).toBe('https://sam.neutron.test/api/app/projects/general/work-board')
+    expect(boardUrls[0]).toBe('https://sam.neutron.test/api/app/projects/~general/work-board')
     expect(boardUrls.every((u) => !u.includes('//work-board'))).toBe(true)
 
     // INVERTED 2026-08-09, and this is the assertion that pinned the reported bug.

@@ -1130,7 +1130,7 @@ export class NeutronChatController {
 
   /**
    * ACTIVITY INSPECTOR — subscribe to live `activity_event` rows. The callback
-   * receives the frame's `scope_key` (a project id, or `'general'`) with each row;
+   * receives the frame's `scope_key` (a project id, or the reserved General key) with each row;
    * the subscriber MUST filter on it, because the app-ws topic is per-user and a
    * sibling project's rows arrive on this same socket (identical hazard to
    * `onWorkBoardChanged`).
