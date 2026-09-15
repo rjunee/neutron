@@ -98,12 +98,8 @@ hosted every run's workflows in-process. That design's failure is #8 below.
 > bounded tasks (different model provider than the repl) should be run as new headless
 > harnesses."
 
-- **Same model as the REPL → a subagent inside it.** The warm-cache/shared-MCP
-  assumption here was about the pre-cutover harnesses, not a requirement that every
-  harness implement children without processes. Pi delegates through its extension
-  surface, whose measured example starts separate ephemeral Pi processes (Decisions
-  Log 2026-09-15, Pi bounded worker). The cost of the alternative is measured:
-  each headless `claude -p` job
+- **Same model as the REPL → a subagent inside it.** Warm cache, shared MCP connections,
+  no new process. The cost of the alternative is measured: each headless `claude -p` job
   on 2026-09-11 paid 23,799 / 23,799 / 27,603 `cache_read_input_tokens` just to warm up.
 - **Different model → a headless worker of the other harness.** A bounded function: input
   in, result back to the orchestrator. **It never talks to the owner.** If it cannot
@@ -354,6 +350,16 @@ should see the reasoning, not just the conclusions.
 - Anything about Managed hosting; this is all engine.
 
 ### Pi bounded-worker acceptance and measured boundary (2026-09-15, #938)
+
+**This measurement sits against §3.2 and does not amend it.** That section's rule
+is the placement split — same model as the REPL means a subagent inside it, and only
+a different model becomes a headless harness — and Pi satisfies that rule: the
+project conversation dispatches the child. What Pi does not satisfy is the
+*rationale* the section gives alongside it, "warm cache, shared MCP connections, no
+new process": the measured extension starts a separate ephemeral Pi process per
+child. §3.2 is left exactly as written; whether that rationale was meant as a
+constraint on every harness or as the reason the split is cheap for Claude and Codex
+is the owner's to say, and nothing here depends on the answer.
 
 The third runner is `runtime/workers/pi-in-repl.ts:35`. Placement is `in-repl` only;
 the existing project conversation dispatches the `subagent` extension tool. The

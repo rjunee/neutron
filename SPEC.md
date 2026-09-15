@@ -295,8 +295,11 @@ references decisions by date; none is a second home for a decision.
 
 Pi is the third base harness at the bounded-worker seam, as requested for the
 post-cutover increment. `in-repl` names who owns delegation; Pi 0.85.1's documented
-subagent extension starts separate ephemeral child processes. The warm-cache and
-shared-MCP assumptions in the 2026-09-11 entry are not claims about Pi. Cross-model
+subagent extension starts separate ephemeral child processes. Pi therefore meets the placement split but not the
+warm-cache/shared-MCP rationale stated beside it on 2026-09-11. That entry and
+the plan's §3.2 are left exactly as written; whether the rationale binds every
+harness or only explains why the split is cheap for Claude and Codex is the
+owner's to say, and nothing shipped here depends on the answer. Cross-model
 callouts remain headless. The new runner refuses child-thread resume, reserves
 before dispatch, and accepts results only through validated trailer files.
 Project session binding, extension provisioning and enforced child grants remain
