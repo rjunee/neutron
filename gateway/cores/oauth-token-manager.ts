@@ -702,7 +702,10 @@ export class OAuthTokenManager {
       label,
       service: parsed.service,
       account_key: parsed.account_key,
-      connected: accessRow !== null,
+      // `invalid_grant` is the token endpoint's definitive verdict that this
+      // grant is no longer usable. Other refresh errors are inconclusive, so
+      // retain the stored-row reading until a successful refresh clears them.
+      connected: accessRow !== null && meta?.last_refresh_outcome !== 'invalid_grant',
       scopes: meta?.scopes ?? [],
       email: meta?.email ?? null,
       connected_at: meta?.connected_at ?? null,

@@ -20,7 +20,7 @@ import { ToolRegistry } from '@neutronai/tools/registry.ts'
 import type { ToolCallContext, ToolRegistration } from '@neutronai/tools/registry.ts'
 import { installBundledCores, updateInstallState } from '../install-bundled.ts'
 import { CoreInstallationsStore } from '@neutronai/cores-runtime/installations-store.ts'
-import { OAuthTokenManager, GOOGLE_REVOKE_URL } from '../oauth-token-manager.ts'
+import { OAuthTokenManager, GOOGLE_REVOKE_URL, metaLabel } from '../oauth-token-manager.ts'
 import { buildIntegrationsTools } from '../integrations-tools.ts'
 
 const REPO_ROOT = join(import.meta.dir, '..', '..', '..')
@@ -125,6 +125,37 @@ test('integrations_list returns OAuth + API-key slots', async () => {
   // agent-manageable byo_api_key slot, plus the system `openai_api_key` slot
   // (ND1 — manages the OpenAI key that flips memory to semantic embeddings).
   expect(out.api_keys.map((k) => k.label).sort()).toEqual(['apify', 'openai_api_key', 'tavily'])
+})
+
+test('integrations_list reports a grant rejected by the last refresh as disconnected', async () => {
+  const b = await makeBench()
+  await b.secrets.put({
+    owner_handle: OWNER,
+    kind: 'oauth_token',
+    label: 'google_calendar',
+    plaintext: 'rejected-access-token',
+    expires_at: Date.now() + 60_000,
+  })
+  await b.secrets.put({
+    owner_handle: OWNER,
+    kind: 'oauth_token',
+    label: metaLabel('google_calendar'),
+    plaintext: JSON.stringify({
+      scopes: [],
+      email: 'calendar@example.com',
+      connected_at: Date.now(),
+      last_refresh_at: Date.now(),
+      last_refresh_outcome: 'invalid_grant',
+    }),
+  })
+
+  const out = (await byName(b.built, 'integrations_list').handler({}, CTX)) as {
+    oauth: Array<{ label: string; connected: boolean | null; last_refresh_outcome: string | null }>
+  }
+  expect(out.oauth.find((row) => row.label === 'google_calendar')).toMatchObject({
+    connected: false,
+    last_refresh_outcome: 'invalid_grant',
+  })
 })
 
 test('integrations_connect on an API-key slot stores the key (state mutation)', async () => {

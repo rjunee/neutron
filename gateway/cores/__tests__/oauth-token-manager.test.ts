@@ -309,6 +309,65 @@ test('getStatus reports not-connected when no rows exist', async () => {
   expect(status.scopes).toEqual([])
 })
 
+test('getStatus reports invalid_grant as disconnected while inconclusive errors retain row presence', async () => {
+  const mgr = new OAuthTokenManager({
+    secretsStore,
+    owner_handle: OWNER,
+    client_id: 'cid',
+    client_secret: 'csecret',
+    fetch: (async () => jsonResponse(404, {})) as unknown as (
+      input: string | URL | Request,
+      init?: RequestInit,
+    ) => Promise<Response>,
+    now: () => Date.now(),
+  })
+  await secretsStore.put({
+    owner_handle: OWNER,
+    kind: 'oauth_token',
+    label: LABEL,
+    plaintext: 'access-stale',
+    expires_at: Date.now() + 60_000,
+  })
+  await secretsStore.put({
+    owner_handle: OWNER,
+    kind: 'oauth_token',
+    label: metaLabel(LABEL),
+    plaintext: JSON.stringify({
+      scopes: [],
+      email: null,
+      connected_at: Date.now(),
+      last_refresh_at: Date.now(),
+      last_refresh_outcome: 'invalid_grant',
+    }),
+  })
+
+  expect(await mgr.getStatus(LABEL)).toMatchObject({
+    connected: false,
+    last_refresh_outcome: 'invalid_grant',
+  })
+
+  const metaRow = (await secretsStore.list({ owner_handle: OWNER, kind: 'oauth_token' }))
+    .find((row) => row.label === metaLabel(LABEL))!
+  await secretsStore.delete(metaRow.id)
+  await secretsStore.put({
+    owner_handle: OWNER,
+    kind: 'oauth_token',
+    label: metaLabel(LABEL),
+    plaintext: JSON.stringify({
+      scopes: [],
+      email: null,
+      connected_at: Date.now(),
+      last_refresh_at: Date.now(),
+      last_refresh_outcome: 'error',
+    }),
+  })
+
+  expect(await mgr.getStatus(LABEL)).toMatchObject({
+    connected: true,
+    last_refresh_outcome: 'error',
+  })
+})
+
 test('OAuthRefreshError carries no_refresh_token code when refresh row absent', async () => {
   const mgr = new OAuthTokenManager({
     secretsStore,
