@@ -39,6 +39,7 @@ import {
   resolveAmbientTier,
 } from '@neutronai/gateway/wiring/resolve-llm-credentials.ts'
 import {
+  assertConversationalProviderWired,
   normalizeProvider,
   resolveProviderSelection,
   type Provider,
@@ -759,7 +760,7 @@ export function resolveOpenOpenAiPool(env: NodeJS.ProcessEnv): CredentialPool | 
 /**
  * The conversational model provider this box booted with, from
  * `NEUTRON_MODEL_PROVIDER` (Managed-open-contract: env read stays under `open/`).
- * Absent / unknown ⇒ `'anthropic'` (Claude Code — the default).
+ * Absent ⇒ `'anthropic'` (Claude Code — the default); unknown values throw.
  */
 export function resolveOpenModelProvider(env: NodeJS.ProcessEnv): Provider {
   return normalizeProvider(env['NEUTRON_MODEL_PROVIDER'])
@@ -833,7 +834,7 @@ export interface OpenConversationalProviderDeps {
  *                                      conversational turns FAIL LOUDLY per turn
  *                                      (never a silent Anthropic fallback).
  *   - ANY OTHER declared value       → THROW a loud boot error. A declared-but-not-
- *     (`openai-codex-cli` today)       production-wired provider must refuse to boot
+ *     (`pi` today)                     production-wired provider must refuse to boot
  *                                      rather than silently dispatch Claude Code.
  *
  * The exhaustive final `throw` is the invariant: adding a new `Provider` union
@@ -845,6 +846,7 @@ export function resolveOpenConversationalProvider(
   deps: OpenConversationalProviderDeps,
 ): Pick<OpenWiringContext, 'provider' | 'openaiLlmPool' | 'bindMcpResolver' | 'toolManifest'> {
   const provider = resolveOpenModelProvider(env)
+  assertConversationalProviderWired(provider)
   const pool = deps.resolveOpenAiPool(env)
   if (pool !== null) {
     if (provider !== 'anthropic') {
@@ -859,7 +861,7 @@ export function resolveOpenConversationalProvider(
       toolManifest: deps.buildToolManifest(),
     }
   }
-  if (provider === 'openai' || provider === 'openai-codex-cli') {
+  if (provider === 'openai' || provider === 'openai-codex') {
     // Honor the explicit selection with NO key: fail loudly per turn (below),
     // never silently fall back to Anthropic.
     log.error('provider_openai_no_key', {
@@ -1031,7 +1033,7 @@ export function buildOpenGraphComposer(
     // wireSubstrates — this provider config reaches ONLY the conversational pair).
     // COHERENT PROVIDER RESOLUTION — handles EVERY declared provider value: openai
     // fully wired, openai-without-key honored (fails loud per turn), and any other
-    // declared-but-unwired value (openai-codex-cli) throws a LOUD boot error. Never
+    // declared-but-unwired value (pi) throws a LOUD boot error. Never
     // a silent Claude fallback for an explicitly-selected non-anthropic provider.
     const conversationalProviderCtx = resolveOpenConversationalProvider(env, {
       resolveOpenAiPool: resolveOpenOpenAiPool,

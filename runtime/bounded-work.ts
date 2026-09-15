@@ -41,7 +41,8 @@ export function placementFor(workerProvider: Provider, replProvider: Provider): 
   return workerProvider === replProvider ? 'in-repl' : 'headless'
 }
 
-export type Provider = 'anthropic' | 'openai-codex' | 'pi'
+export type { Provider } from './provider.ts'
+import type { Provider } from './provider.ts'
 
 export type WorkerRole =
   | 'plan' | 'build' | 'fix' | 'review' | 'synthesis'

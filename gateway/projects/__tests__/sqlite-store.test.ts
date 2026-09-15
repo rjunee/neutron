@@ -150,10 +150,10 @@ describe('SqliteProjectSettingsStore — update PATCH', () => {
   test('model provider override persists; clearing it restores inheritance', async () => {
     await seed(store, 'neutron')
     expect(store.modelProviderOverride('neutron')).toBeNull()
-    await store.update(OWNER, 'neutron', { model_provider: 'openai-codex-cli' })
-    expect(store.modelProviderOverride('neutron')).toBe('openai-codex-cli')
+    await store.update(OWNER, 'neutron', { model_provider: 'openai-codex' })
+    expect(store.modelProviderOverride('neutron')).toBe('openai-codex')
     const reopened = new SqliteProjectSettingsStore(db)
-    expect(reopened.modelProviderOverride('neutron')).toBe('openai-codex-cli')
+    expect(reopened.modelProviderOverride('neutron')).toBe('openai-codex')
     await reopened.update(OWNER, 'neutron', { model_provider: null })
     expect(reopened.modelProviderOverride('neutron')).toBeNull()
   })

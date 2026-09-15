@@ -48,6 +48,7 @@ import {
   type SizeSeverity,
 } from '@neutronai/runtime/adapters/claude-code/index.ts'
 import {
+  assertConversationalProviderWired,
   normalizeProvider,
   selectSubstrateFactory,
   type Provider,
@@ -548,7 +549,7 @@ export interface BuildLlmCallSubstrateInput {
    * orchestration backend, BYTE-IDENTICAL to the pre-provider composer: the
    * resolved factory is `createClaudeCodeSubstrateAuto` and the whole
    * credential-scrub / warm-pool / cooldown path below is unchanged. A project
-   * that opts into `'openai'` / `'openai-codex-cli'` routes each turn through the
+   * that opts into `'openai'` / `'openai-codex'` routes each turn through the
    * matching adapter (see `openai` config + `providerResolver`).
    *
    * SCOPE — every project-owned LLM turn, including build orchestration. The
@@ -566,7 +567,7 @@ export interface BuildLlmCallSubstrateInput {
    */
   providerResolver?: () => ProviderSelection | Provider | string | undefined
   /**
-   * OpenAI-family (`'openai'` / `'openai-codex-cli'`) configuration. Consumed
+   * OpenAI-family (`'openai'` / `'openai-codex'`) configuration. Consumed
    * ONLY when the resolved provider is non-anthropic; ignored for the default
    * Claude Code path. When the provider resolves non-anthropic and this is
    * absent (or, for `'openai'`, its `mcpResolver` is missing) the substrate
@@ -701,6 +702,7 @@ export function buildLlmCallSubstrate(
           ? resolvedProvider
           : input.provider
       const provider = normalizeProvider(effectiveProvider)
+      assertConversationalProviderWired(provider)
       if (provider !== 'anthropic') {
         // Conversation key mirrors the CC warm-pool key dimensions (user +
         // live active project) so continuity is scoped identically across
@@ -1195,7 +1197,7 @@ export function openAiSessionScopeKey(
 
 /**
  * Dispatch ONE turn through an OpenAI-family adapter (`'openai'` /
- * `'openai-codex-cli'`), selected via the platform-band `selectSubstrateFactory`.
+ * `'openai-codex'`), selected via the platform-band `selectSubstrateFactory`.
  *
  * Shared by BOTH `buildLlmCallSubstrate` and `buildImportSubstrate`. Mirrors the
  * anthropic path's discipline — per-turn credential selection from a LIVE pool +
@@ -1214,7 +1216,7 @@ export function openAiSessionScopeKey(
  * OpenAI pool / `mcpResolver` gets a clear failure, never a silent fallback.
  */
 export function startOpenAiFamilySession(args: {
-  provider: 'openai' | 'openai-codex-cli'
+  provider: 'openai' | 'openai-codex'
   spec: AgentSpec
   substrate_instance_id: string
   config: OpenAiFamilyProviderConfig | undefined
@@ -1389,7 +1391,7 @@ export function startOpenAiFamilySession(args: {
       if (config.max_tool_rounds !== undefined) opts.max_tool_rounds = config.max_tool_rounds
       if (config.fetchImpl !== undefined) opts.fetchImpl = config.fetchImpl
       substrate = selected.create(opts)
-    } else if (selected.provider === 'openai-codex-cli') {
+    } else if (selected.provider === 'openai-codex') {
       // codex-cli: thread the selected secret as OPENAI_API_KEY (the adapter
       // defaults env to `{}` and never reads host process.env — ISSUES #67).
       const codexEnv: Record<string, string | undefined> = {
