@@ -128,6 +128,7 @@ let harness: Harness
 
 interface Harness {
   base: string
+  fetch(request: Request): Promise<Response>
   close(): Promise<void>
 }
 
@@ -165,16 +166,12 @@ async function startHarness(): Promise<Harness> {
     throw new Error('Open composition did not expose graph.fetch/websocket')
   }
   const composedFetch = graph.fetch
-  const composedWebsocket = graph.websocket
-  const server = Bun.serve({
-    port: 0,
-    fetch: (req, srv) => composedFetch(req, srv),
-    websocket: composedWebsocket,
-  })
   return {
-    base: `http://127.0.0.1:${server.port}`,
+    // These cases exercise HTTP routing, not socket upgrades. Calling the composed
+    // fetch chain directly keeps the suite runnable where loopback binds are denied.
+    base: 'http://local.test',
+    fetch: async (request) => await composedFetch(request, undefined as never),
     close: async () => {
-      await server.stop(true)
       for (const cleanup of composition.realmode_cleanups ?? []) {
         try {
           cleanup()
@@ -196,11 +193,11 @@ async function call(
   const headers: Record<string, string> = { accept: 'application/json' }
   if (init.auth !== false) headers['authorization'] = `Bearer ${OWNER_SLUG}`
   if (init.body !== undefined) headers['content-type'] = 'application/json'
-  return await fetch(`${harness.base}${path}`, {
+  return await harness.fetch(new Request(`${harness.base}${path}`, {
     method: init.method ?? 'GET',
     headers,
     ...(init.body !== undefined ? { body: JSON.stringify(init.body) } : {}),
-  })
+  }))
 }
 
 const commentsBase = `/api/app/projects/${PROJECT}/docs/comments`
@@ -457,7 +454,8 @@ describe('link 4 — a doc edit re-anchors its comments (AnchorWalker)', () => {
         design_doc_ref: `neutron-docs:${planPath}`,
       },
     })
-    expect(create.status).toBe(200)
+    // Collection POSTs return the surface's exact created outcome.
+    expect(create.status).toBe(201)
 
     const write = await call(`/api/app/projects/${PROJECT}/docs/file`, {
       method: 'PUT',
