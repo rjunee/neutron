@@ -72,10 +72,16 @@ Repo location and selection are resolved by Decisions Log 2026-09-15 (#935).
 
 ## Acceptance
 
-- [ ] A project declares its code repos (path + remote) **as data**, rather than by their
+- [x] A project declares its code repos (path + remote) **as data**, rather than by their
       presence on disk. A project with ZERO code repos is a fully supported shape, and a
       project with several is too; assert both, since a one-repo assumption passes any
       single-repo test.
+      Delivered by #935: `trident/project-repos.ts` reads `project-repos.json`, and both
+      shapes are asserted — zero at `trident/project-repos.test.ts:34`, several at
+      `trident/project-repos.test.ts:25` (a declaration holding `code` and `repos/docs`,
+      selected by name and by default). This is the same criterion the #935 addendum below
+      already records; it was left unticked here when that section was added.
+      Verify: `bun test trident/project-repos.test.ts`.
 - [ ] The vault is committed automatically on change, with a recoverable history.
 - [ ] Nested repo working trees are excluded **by rule, not by luck**. Assert a vault
       backup of a tree containing a nested clone stores no gitlink pointing at content the
