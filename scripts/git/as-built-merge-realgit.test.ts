@@ -7,7 +7,7 @@
  * lines, and git's three-way merge sees two different insertions against identical context. A
  * stubbed merge would prove nothing about that — the whole question is what REAL git does. So this
  * file uses a real repository, real commits, a real moved base, and the publisher's own replay
- * mechanism (the `git apply --3way` in `rebaseOntoObservedBase`, `trident/orchestrator.ts`), the
+ * mechanism (the `git apply --3way` in `rebaseOntoObservedBase`, `trident/replay.ts`), the
  * way `trident/publish-rebase-realgit.test.ts` does.
  *
  * THE FAILURE IS PROVEN BEFORE THE FIX IS. `replay()` is run twice over the identical scenario:
@@ -1208,7 +1208,7 @@ describe('the installer under a locked config — the FATAL half-state must be i
 
     test('the two derivations of the driver command agree', () => {
       // There are exactly two places that build this string: `driver_command` in the installer,
-      // and `asBuiltDriverCommand` in `trident/orchestrator.ts`. The second exists because the
+      // and `asBuiltDriverCommand` in `trident/as-built-merge-driver.ts`. The second exists because the
       // publisher must NOT execute an installer script found in a checkout it does not control —
       // the credential exposure this whole change is named for — so it cannot simply shell out to
       // the first. The installer's docblock used to claim there was "deliberately no second copy",
@@ -1220,13 +1220,13 @@ describe('the installer under a locked config — the FATAL half-state must be i
       expect(run(repo, ['bash', 'scripts/install-merge-drivers.sh']).ok).toBe(true)
       const fromScript = installed(repo)
 
-      const orchestrator = readFileSync(join(REPO_ROOT, 'trident', 'orchestrator.ts'), 'utf8')
-      const template = orchestrator.match(/return `(\$\{env\}[^`]*%O %A %B %L %P)`/)
+      const publisherDriver = readFileSync(join(REPO_ROOT, 'trident', 'as-built-merge-driver.ts'), 'utf8')
+      const template = publisherDriver.match(/return `(\$\{env\}[^`]*%O %A %B %L %P)`/)
       expect(template, 'asBuiltDriverCommand no longer builds the command from a template literal').not.toBeNull()
 
       // Reduce both to their SHAPE — the interpolations on one side, the quoted absolute paths on
       // the other — so the comparison is about the hardening and not about this machine's paths.
-      const shapeFromOrchestrator = template![1]!
+      const shapeFromPublisher = template![1]!
         .replace('${env}', '<env>')
         .replace('${scrubbed}', '<scrubbed>')
         .replace('${shellQuote(process.execPath)}', '<bun>')
@@ -1238,11 +1238,11 @@ describe('the installer under a locked config — the FATAL half-state must be i
         .replace(/^\S*env /, '<env> ')
         .replace(/-u \S+( -u \S+)*/, '<scrubbed>')
 
-      expect(shapeFromScript).toBe(shapeFromOrchestrator)
+      expect(shapeFromScript).toBe(shapeFromPublisher)
 
       // …and the scrub lists themselves, which the shapes above deliberately collapsed.
       const scrubbed = fromScript.match(/(-u \S+( -u \S+)*)/)![1]!.split(' -u ').map((s) => s.replace('-u ', ''))
-      const credentialEnv = orchestrator.match(/const CREDENTIAL_ENV = \[([^\]]*)\]/s)
+      const credentialEnv = publisherDriver.match(/const CREDENTIAL_ENV = \[([^\]]*)\]/s)
       expect(credentialEnv, 'CREDENTIAL_ENV is no longer a literal array').not.toBeNull()
       const names = [...credentialEnv![1]!.matchAll(/'([^']+)'/g)].map((m) => m[1]!)
       expect(scrubbed).toEqual(names)
@@ -1258,13 +1258,14 @@ describe('the installer under a locked config — the FATAL half-state must be i
      * it wrong in the direction that flatters the change and the correction is the actual argument:
      *
      *   - `install-merge-drivers.sh` cited line 633 of `trident/orchestrator.ts` twice for the
-     *     `.exe`-stripping guard that opens `asBuiltDriverCommand`. At caf6928e line 633 IS that
+     *     `.exe`-stripping guard in `asBuiltDriverCommand` (now in `trident/as-built-merge-driver.ts`).
+     *     At caf6928e line 633 IS that
      *     guard — the citations were CORRECT. Read the same two lines in a tree that has merged
      *     current main and they are 45 lines short, because main grew above them. Neither file was
      *     touched. Nobody was careless. The citation rotted because the READER moved, which no
      *     amount of diligence at typing time can prevent.
      *   - This file's own header cited line 715 of `trident/orchestrator.ts` for the publisher's
-     *     `git apply --3way`, which is in `rebaseOntoObservedBase`. That one was genuinely wrong at
+     *     `git apply --3way` in `rebaseOntoObservedBase` (now in `trident/replay.ts`). That was wrong at
      *     caf6928e: 715 is prose about `.gitattributes` and `merge=union`, and the call sits some
      *     360 lines further down. A citation that lands on unrelated prose is worse than no
      *     citation, because it reads as though it were checked.
@@ -1435,7 +1436,7 @@ describe('the installer under a locked config — the FATAL half-state must be i
         {
           symbol: 'asBuiltDriverCommand',
           definition: /^function asBuiltDriverCommand\s*\(/m,
-          definedIn: 'trident/orchestrator.ts',
+          definedIn: 'trident/as-built-merge-driver.ts',
           citedBy: [
             { file: 'scripts/install-merge-drivers.sh', atLeast: 3 },
             { file: 'scripts/git/as-built-merge-realgit.test.ts', atLeast: 6 },
@@ -1444,13 +1445,13 @@ describe('the installer under a locked config — the FATAL half-state must be i
         {
           symbol: 'rebaseOntoObservedBase',
           definition: /^export async function rebaseOntoObservedBase\s*\(/m,
-          definedIn: 'trident/orchestrator.ts',
+          definedIn: 'trident/replay.ts',
           citedBy: [{ file: 'scripts/git/as-built-merge-realgit.test.ts', atLeast: 2 }],
         },
         {
           symbol: 'basename(process.execPath)',
           definition: /^ +if \(basename\(process\.execPath\)\.replace\(\/\\\.exe\$\/i, ''\) !== 'bun'\)/m,
-          definedIn: 'trident/orchestrator.ts',
+          definedIn: 'trident/as-built-merge-driver.ts',
           citedBy: [{ file: 'scripts/install-merge-drivers.sh', atLeast: 2 }],
         },
       ]
@@ -1646,9 +1647,13 @@ describe('the installer under a locked config — the FATAL half-state must be i
       // The floors are what was MEASURED at this commit, so adding a citation is still free and
       // losing one is not — and the assertion has already paid for itself: rewording the docblock
       // above dropped a site and this check is what said so, before the reword was committed.
+      // Extraction preserves all seven sites: installer 3; this file splits its 4 into
+      // 2 driver sites and 2 replay sites. Historical narratives retain their old paths
+      // and name the current destination alongside the symbol. Counts use targetSpans.
       const SITE_FLOORS: Record<string, number> = {
-        'scripts/install-merge-drivers.sh → trident/orchestrator.ts': 3,
-        'scripts/git/as-built-merge-realgit.test.ts → trident/orchestrator.ts': 4,
+        'scripts/install-merge-drivers.sh → trident/as-built-merge-driver.ts': 3,
+        'scripts/git/as-built-merge-realgit.test.ts → trident/as-built-merge-driver.ts': 2,
+        'scripts/git/as-built-merge-realgit.test.ts → trident/replay.ts': 2,
       }
       const thinCoverage = Object.entries(SITE_FLOORS)
         .filter(([pair, floor]) => (sitesPerPair.get(pair) ?? 0) < floor)
@@ -1670,7 +1675,7 @@ describe('the installer under a locked config — the FATAL half-state must be i
       // same-directory-segment encoding the cross-model reviewer used three rounds ago, which is
       // why that example is now described in words in the docblock instead of typed.
       // `docs/AS_BUILT.md` is in the citable set explicitly because it is the most-cited path in
-      // the cluster — 9 backticked mentions against 7 for the only anchor target — and it is
+      // the cluster — 9 backticked mentions against 7 across the anchor targets — and it is
       // neither a cluster file nor an anchor's home, so deriving the set from those two alone left
       // the most-cited path of all as the one path a mangle could not be reported on.
       //
