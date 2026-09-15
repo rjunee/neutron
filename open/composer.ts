@@ -176,6 +176,7 @@ import {
   resolveAgentSkillsDir,
 } from '@neutronai/runtime/adapters/claude-code/persistent/agent-skills.ts'
 import { TridentRunStore, type TridentRun } from '@neutronai/trident/store.ts'
+import { TridentUsageAnalytics } from '@neutronai/trident/usage-analytics.ts'
 import { probeBuildFleet } from '@neutronai/trident/active-runs.ts'
 import { DispatchHoldStore, buildDispatchHoldSweep } from '@neutronai/trident/dispatch-holds.ts'
 import {
@@ -4828,6 +4829,7 @@ export function buildOpenGraphComposer(
     // lapse, and never on a transient network failure. See
     // `credential-lapse-notice.ts` for why each of those three is load-bearing.
     const usageSamplesStore = new UsageSamplesStore({ db })
+    const tridentUsageAnalytics = new TridentUsageAnalytics(db)
     const credentialUsageMonitor = new CredentialUsageMonitor({
       env,
       // The API base is threaded from THIS composition's env, the same way the Kimi
@@ -4968,11 +4970,13 @@ export function buildOpenGraphComposer(
       // EVERY pool, every time, in the store's own order: a pool is omitted from
       // this payload only by being deleted from `USAGE_POOLS`, so a provider
       // cannot silently vanish from the screen by having no samples.
-      dashboard: () =>
-        USAGE_POOLS.map((pool) => ({
+      dashboard: () => ({
+        pools: USAGE_POOLS.map((pool) => ({
           ...usageSamplesStore.summarise(pool),
           connection: usagePoolConnection(pool),
         })),
+        analytics: tridentUsageAnalytics.read(),
+      }),
     })
 
     // `POST /api/app/system-notice` — the seam an out-of-process caller uses to

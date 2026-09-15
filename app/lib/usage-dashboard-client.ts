@@ -133,12 +133,26 @@ export interface UsagePool {
   accounts: UsageAccount[]
 }
 
+export type MeasurementState = 'unknown' | 'partial' | 'complete'
+export interface UsageAmount { unit: 'tokens'; value: number | null; state: MeasurementState }
+export interface UsageBreakdownRow { key: string; amount: UsageAmount }
+export interface UsageAnalytics {
+  spend: { total: UsageAmount; by_project: UsageBreakdownRow[]; by_phase: UsageBreakdownRow[]; by_model: { state: 'unknown'; rows: UsageBreakdownRow[] } }
+  waste: { total: UsageAmount; by_reason: UsageBreakdownRow[]; unclassified_runs: number }
+  throughput: { state: MeasurementState; runs: Array<{ project: string; seconds: number; outcome: string }> }
+}
+
 /** What the card renders from. `reachable: false` is a display state. */
 export type UsageDashboard =
-  | { reachable: true; pools: UsagePool[] }
+  | { reachable: true; pools: UsagePool[]; analytics: UsageAnalytics }
   | { reachable: false }
 
 export const DASHBOARD_UNREACHABLE: UsageDashboard = { reachable: false }
+const UNKNOWN_ANALYTICS: UsageAnalytics = {
+  spend: { total: { unit: 'tokens', value: null, state: 'unknown' }, by_project: [], by_phase: [], by_model: { state: 'unknown', rows: [] } },
+  waste: { total: { unit: 'tokens', value: null, state: 'unknown' }, by_reason: [], unclassified_runs: 0 },
+  throughput: { state: 'unknown', runs: [] },
+}
 
 const PATH = '/api/app/usage/dashboard'
 
@@ -277,7 +291,40 @@ export function decodeDashboard(raw: unknown): UsageDashboard {
   }
   // An EMPTY array is reachable-with-nothing, which is different from unreachable
   // and renders differently. Collapsing the two would hide a server that answered.
-  return { reachable: true, pools: decoded }
+  return { reachable: true, pools: decoded, analytics: decodeAnalytics((raw as Record<string, unknown>)['analytics']) }
+}
+
+function decodeAmount(raw: unknown): UsageAmount {
+  if (typeof raw !== 'object' || raw === null) return UNKNOWN_ANALYTICS.spend.total
+  const rec = raw as Record<string, unknown>; const state = rec['state']; const value = numOrNull(rec['value'])
+  if (rec['unit'] !== 'tokens' || (state !== 'unknown' && state !== 'partial' && state !== 'complete')) return UNKNOWN_ANALYTICS.spend.total
+  return { unit: 'tokens', value: state === 'unknown' ? null : value, state }
+}
+function decodeRows(raw: unknown): UsageBreakdownRow[] {
+  if (!Array.isArray(raw)) return []
+  return raw.flatMap((entry) => {
+    if (typeof entry !== 'object' || entry === null) return []
+    const rec = entry as Record<string, unknown>
+    return typeof rec['key'] === 'string' ? [{ key: rec['key'], amount: decodeAmount(rec['amount']) }] : []
+  })
+}
+function decodeAnalytics(raw: unknown): UsageAnalytics {
+  if (typeof raw !== 'object' || raw === null) return UNKNOWN_ANALYTICS
+  const rec = raw as Record<string, unknown>
+  const spend = typeof rec['spend'] === 'object' && rec['spend'] !== null ? rec['spend'] as Record<string, unknown> : {}
+  const waste = typeof rec['waste'] === 'object' && rec['waste'] !== null ? rec['waste'] as Record<string, unknown> : {}
+  const throughput = typeof rec['throughput'] === 'object' && rec['throughput'] !== null ? rec['throughput'] as Record<string, unknown> : {}
+  const state = throughput['state']
+  const runs = Array.isArray(throughput['runs']) ? throughput['runs'].flatMap((entry) => {
+    if (typeof entry !== 'object' || entry === null) return []
+    const row = entry as Record<string, unknown>
+    return typeof row['project'] === 'string' && typeof row['seconds'] === 'number' && Number.isFinite(row['seconds']) && typeof row['outcome'] === 'string' ? [{ project: row['project'], seconds: row['seconds'], outcome: row['outcome'] }] : []
+  }) : []
+  return {
+    spend: { total: decodeAmount(spend['total']), by_project: decodeRows(spend['by_project']), by_phase: decodeRows(spend['by_phase']), by_model: { state: 'unknown', rows: [] } },
+    waste: { total: decodeAmount(waste['total']), by_reason: decodeRows(waste['by_reason']), unclassified_runs: typeof waste['unclassified_runs'] === 'number' ? waste['unclassified_runs'] : 0 },
+    throughput: { state: state === 'complete' || state === 'partial' ? state : 'unknown', runs },
+  }
 }
 
 export class UsageDashboardClient {
