@@ -77,6 +77,14 @@ test('acknowledgement alone waits for the trailer until the host budget', async 
   f.input.timeout_ms = 45
   const start = Date.now()
   expect(await f.run()).toEqual({ kind: 'unknown', detail: expect.stringContaining('trailer') })
+  // WALL-CLOCK-BOUND-OK: the contract is that acknowledgement does NOT end the turn —
+  // the wait must actually be spent. The deterministic assertions above cover the
+  // outcome (`unknown` naming the trailer) and the dispatch (one submitLine), but
+  // neither can distinguish 'waited the budget' from 'returned immediately with the
+  // same answer', which is the exact shortcut this test exists to catch. It is a
+  // LOWER bound on elapsed time against a 45ms budget, margin 5ms: a loaded runner
+  // makes the run slower, never faster, so load cannot flake it — only an
+  // implementation that stopped waiting can.
   expect(Date.now() - start).toBeGreaterThanOrEqual(40)
   expect(f.commands).toHaveLength(1)
 })
