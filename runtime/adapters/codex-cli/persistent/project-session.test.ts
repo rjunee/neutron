@@ -179,6 +179,14 @@ describe('CodexProjectSessionHost', () => {
     expect(f.host.submissions).toEqual([])
   })
 
+  test('reports whether the hosted process is live before dispatch', async () => {
+    const f = fixture()
+    const session = await f.sessionHost.open(OPEN)
+    expect(session.isLive()).toBe(true)
+    f.host.exitedFlag = true
+    expect(session.isLive()).toBe(false)
+  })
+
   test('refuses a non-durable host result and closes its child', async () => {
     const f = fixture()
     const { paneHandle: _paneHandle, ...childWithoutHandle } = f.host.child
