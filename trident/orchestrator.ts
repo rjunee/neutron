@@ -1,3 +1,4 @@
+import { fixLineage } from './gates/fix-lineage.ts'
 import { unknownWorkerObservation, workerEvidence, type RunWorkerObserver, type RunWorkerObservation } from './worker-observation.ts'
 /**
  * @neutronai/trident — the orchestration step (Trident v2 · Work Board Phase 2a
@@ -2561,26 +2562,8 @@ export function buildTridentOrchestrator(
     // build abandon the reviewed branch?" is still measurable. `--is-ancestor` passes
     // on equality, so a legitimate RESUME republishing or continuing the reviewed
     // head passes with no exemption (the recovery-card interaction).
-    if (run.reviewed_head !== null) {
-      const pin = run.reviewed_head.trim().toLowerCase()
-      if (!/^(?:[0-9a-f]{40}|[0-9a-f]{64})$/.test(pin)) {
-        throw new Error(
-          `fix-round refused: the reviewed-head pin '${run.reviewed_head}' is not a full 40- or 64-hex commit; refusing to publish ${resolvedHead} unverified`,
-        )
-      }
-      const ancestry = await opts.run_host(
-        ['git', '-C', run.repo_path, 'merge-base', '--is-ancestor', pin, resolvedHead],
-        run.repo_path,
-      )
-      if (!ancestry.ok) {
-        const detail = ancestry.stderr.trim()
-        throw new Error(
-          detail === ''
-            ? `fix-round refused: produced head ${resolvedHead} of branch ${branch} does not descend from the reviewed head ${pin} — the round abandoned the reviewed branch`
-            : `fix-round refused: could not verify that produced head ${resolvedHead} descends from reviewed head ${pin} (${detail}); refusing to publish unverified`,
-        )
-      }
-    }
+    const lineage = await fixLineage(opts.run_host, run.repo_path, branch, run.reviewed_head, resolvedHead)
+    if (lineage.kind !== 'allow') throw new Error(lineage.kind === 'blocked' ? lineage.on : lineage.detail)
     const runWithRetries = async (command: string[], attempts = 3) => {
       let result = await opts.run_host(command, run.repo_path)
       for (let attempt = 1; !result.ok && attempt < attempts; attempt++) {
