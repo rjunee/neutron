@@ -1,4 +1,5 @@
 import { executeBoundReview, type BoundReviewOutcome } from './review-run.ts'
+import { checkBuildClaim } from './gates/build-claim.ts'
 import { fixLineage } from './gates/fix-lineage.ts'
 import { readFile } from 'node:fs/promises'
 import { placementFor, type Provider, type WorkerRunner } from '@neutronai/runtime/bounded-work.ts'
@@ -71,6 +72,8 @@ export function createBuildHost(options: BuildHostOptions): { deps: BuildRunDeps
     : Promise.resolve(unknown('Local merge configuration is missing'))
   const deps: BuildRunDeps = {
     ...options.effects,
+    checkBuildClaim: (claim, snapshot) => checkBuildClaim(options.mutation.run_host,
+      options.mutation.run.repo_path, options.mutation.run.branch ?? `trident/${options.mutation.run.slug}`, claim, snapshot),
     async readReviewCap(runId) {
       const row = options.mutation.run
       if (!row || row.id !== runId) return { kind: 'unknown', detail: 'Review round cap run row is missing or mismatched' }
@@ -116,7 +119,7 @@ export function createBuildHost(options: BuildHostOptions): { deps: BuildRunDeps
       return result
     },
     assessMergeDiff,
-    reviewGate: (payload, snapshot, round, replansUsed) => reviewPanel(options.review, payload, snapshot, round, options.mutation.run.id, replansUsed),
+    reviewGate: (payload, snapshot, round, replansUsed) => reviewPanel(options.review, payload, snapshot, round, options.mutation.run.id, replansUsed, { provider: options.workers.build.provider, modelId: options.workers.build.request.model_id }),
     async publishGate(snapshot, mergeMode) {
       const claim = await options.mutation.readClaim(snapshot)
       const proof = await runMutationProofGate({ ...options.mutation, claim, expected_head: snapshot.head })

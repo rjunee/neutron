@@ -1,3 +1,5 @@
+import { createLogger } from '@neutronai/logger'
+import { modelTierRegistry } from '../model-tiers.ts'
 import type { Provider } from '@neutronai/runtime/bounded-work.ts'
 import type { BuildSnapshot, ReviewDecision } from '../build-run.ts'
 import { validateTrailer, type VerdictTrailer } from './result-contract.ts'
@@ -7,6 +9,8 @@ export interface ReviewSeat {
   id: string
   provider: Provider
   modelId: string
+  /** Host-configured family for models behind a shared transport. */
+  family?: string
   role: 'core' | 'peer'
   enabled: boolean
 }
@@ -57,13 +61,20 @@ export async function readReviewSeat(source: ReviewSource, seat: ReviewSeat, sna
 }
 
 /** G057–G062, G104: re-read the recorded panel for this exact revision and round. */
-export async function reviewPanel(source: ReviewSource | undefined, payload: unknown, snapshot: BuildSnapshot, round: number, runId: string, replansUsed = 0): Promise<ReviewDecision> {
+export async function reviewPanel(source: ReviewSource | undefined, payload: unknown, snapshot: BuildSnapshot, round: number, runId: string, replansUsed = 0, builder?: Pick<ReviewSeat, 'provider' | 'modelId' | 'family'>): Promise<ReviewDecision> {
   const trailer = validateTrailer('verdict', unmarked(payload))
   if (!trailer.ok) return unknown(`Review trailer ${trailer.reason} at ${trailer.path}`)
   if (!source) return unknown('Review panel observation source is missing')
   try {
     const seats = source.seats.filter(seat => seat.enabled)
     if (seats.some(seat => !seat.id || !seat.modelId) || !seats.some(seat => seat.role === 'core') || new Set(seats.map(seat => seat.id)).size !== seats.length) return unknown('Review core seat configuration is missing or duplicated')
+    const registry = modelTierRegistry()
+    const families = [...seats, ...(builder ? [builder] : [])].map(seat => seat.family
+      ?? registry.find(model => model.model_id === seat.modelId)?.group
+      ?? (seat.provider === 'pi' ? `pi:${seat.modelId}` : seat.provider))
+    if (families.length > 1 && new Set(families).size === 1) {
+      createLogger('trident').warn('panel-single-family', { family: families[0]!, seats: families.length, 'configuration-accepted': true })
+    }
     const verdicts: VerdictTrailer[] = []
     for (const seat of seats) {
       const observed = await readReviewSeat(source, seat, snapshot, round)

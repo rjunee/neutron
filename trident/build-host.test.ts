@@ -615,3 +615,33 @@ test('G076 host refuses a missing or mismatched cap row', async () => {
     })
   }
 })
+
+test('G100 composed host preserves a real Git branch before reporting conflict', async () => {
+  const f = await fixture()
+  const repo = f.options.mutation.run.repo_path
+  const remote = join(repo, 'origin.git')
+  const run: BuildHostOptions['mutation']['run_host'] = async (argv, cwd) => {
+    const child = Bun.spawn(argv, { cwd: cwd ?? repo, stdout: 'pipe', stderr: 'pipe' })
+    const [stdout, stderr, exit_code] = await Promise.all([new Response(child.stdout).text(), new Response(child.stderr).text(), child.exited])
+    return { ok: exit_code === 0, stdout, stderr, exit_code }
+  }
+  const git = async (...args: string[]) => {
+    const result = await run(['git', ...args], repo)
+    expect(result.ok).toBe(true)
+    return result.stdout.trim()
+  }
+  await git('init', '-b', 'change')
+  await git('init', '--bare', remote)
+  await git('remote', 'add', 'origin', remote)
+  await git('-c', 'user.name=Test', '-c', 'user.email=test@example.invalid', 'commit', '--allow-empty', '-m', 'base')
+  const old = await git('rev-parse', 'HEAD')
+  await git('-c', 'user.name=Test', '-c', 'user.email=test@example.invalid', 'commit', '--allow-empty', '-m', 'built')
+  const built = await git('rev-parse', 'HEAD')
+  f.options.mutation.run_host = run
+  const deps = f.make().deps
+  expect(await deps.checkBuildClaim!(old.slice(0, 7), { ...snapshot, head: built })).toMatchObject({ kind: 'blocked' })
+  expect(await git('--git-dir', remote, 'rev-parse', 'refs/heads/change')).toBe(built)
+  expect(await git('rev-parse', 'refs/heads/change')).toBe(built)
+  expect(await deps.checkBuildClaim!(built.slice(0, 7), { ...snapshot, head: built })).toEqual({ kind: 'allow' })
+  expect(await deps.checkBuildClaim!('deadbeef', { ...snapshot, head: built })).toEqual({ kind: 'allow' })
+})
