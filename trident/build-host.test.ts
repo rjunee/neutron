@@ -32,6 +32,7 @@ async function fixture() {
   let leakCode = 3
   const options: BuildHostOptions = {
     reviewReadiness: { observe: async () => ({ kind: 'known', head, configuration: { kind: 'resolved', required: ['checks'] }, mergeability: 'mergeable', checks: [{ name: 'checks', state: 'passed' }] }) },
+    reviewSuite: { observe: async (snapshot, round) => ({ kind: 'known', runId: 'test', head: snapshot.head, round, strategy: '', scope: 'full-suite', report: null }) },
     reviewed_head: null,
     runners: { pi: fakeRunner('pi') }, replProvider: 'pi',
     workers: Object.fromEntries(['plan', 'build', 'review', 'fix'].map(role => [role, { provider: 'pi', request }])) as BuildHostOptions['workers'],
@@ -587,4 +588,15 @@ test('host review readiness uses independent facts and fails closed when unwired
   expect(await f.make().deps.reviewReadiness!(snapshot, new AbortController().signal)).toEqual({ kind: 'unknown', detail: 'required configuration unreadable' })
   delete f.options.reviewReadiness
   expect(await f.make().deps.reviewReadiness!(snapshot, new AbortController().signal)).toMatchObject({ kind: 'unknown', detail: expect.stringContaining('source is missing') })
+})
+
+test('host composes suite observations with host run and round identity', async () => {
+  const f = await fixture()
+  expect(await f.make().deps.reviewSuite!(snapshot, 2)).toEqual({ kind: 'known', findings: [] })
+  f.options.reviewSuite = { observe: async (subject, round) => ({ kind: 'known', runId: 'test', head: subject.head, round, strategy: 'full suite', scope: 'full-suite', report: { testsPassed: false, suiteOutcome: 'not-run' } }) }
+  expect(await f.make().deps.reviewSuite!(snapshot, 2)).toMatchObject({ kind: 'known', findings: [{ title: 'FULL SUITE NOT PROVEN', advisory: false }] })
+  f.options.mutation.run.id = 'other'
+  expect(await f.make().deps.reviewSuite!(snapshot, 2)).toMatchObject({ kind: 'unknown' })
+  delete f.options.reviewSuite
+  expect(await f.make().deps.reviewSuite!(snapshot, 2)).toMatchObject({ kind: 'unknown' })
 })
