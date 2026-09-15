@@ -17,6 +17,7 @@
  */
 
 import type { ProjectDb } from '@neutronai/persistence/index.ts'
+import { exhaustionReason, type DeliveryObservation, type ReminderDelivery } from './delivery.ts'
 import { RITUAL_ID_RE } from './rituals.ts'
 
 /**
@@ -152,6 +153,94 @@ const COLS =
 export class ReminderStore {
   constructor(private readonly db: ProjectDb) {}
 
+  /** Module-owned ledger: bootstrap before querying it; writes use ProjectDb's lock. */
+  async initializeDelivery(): Promise<void> {
+    await this.db.exec(`CREATE TABLE IF NOT EXISTS reminder_delivery (
+      reminder_id TEXT NOT NULL REFERENCES reminders(id) ON DELETE CASCADE,
+      fire_at REAL NOT NULL,
+      attempts INTEGER NOT NULL DEFAULT 0,
+      state TEXT NOT NULL CHECK (state IN ('delivered', 'known-not-delivered', 'not-yet-known')),
+      reason TEXT,
+      observed_at REAL,
+      delivered_at REAL,
+      next_attempt_at REAL NOT NULL,
+      exhausted_reason TEXT,
+      PRIMARY KEY (reminder_id, fire_at)
+    )`)
+  }
+
+  /** Call after initializeDelivery; historical occurrences remain queryable. */
+  getDelivery(id: string, fire_at: number): ReminderDelivery | null {
+    return this.db.prepare<ReminderDelivery, [string, number]>(
+      'SELECT * FROM reminder_delivery WHERE reminder_id = ? AND fire_at = ?',
+    ).get(id, fire_at)
+  }
+
+  listDispatchable(as_of: number, limit: number): Reminder[] {
+    return this.db.prepare<ReminderDbRow, [number, number, number]>(
+      `SELECT ${COLS} FROM reminders WHERE status = 'pending' AND fire_at <= ?
+       AND NOT EXISTS (SELECT 1 FROM reminder_delivery d
+         WHERE d.reminder_id = reminders.id AND d.fire_at = reminders.fire_at
+         AND (d.exhausted_reason IS NOT NULL OR d.state = 'delivered' OR d.next_attempt_at > ?))
+       ORDER BY fire_at ASC LIMIT ?`,
+    ).all(as_of, as_of, limit).map(rowToReminder)
+  }
+
+  /** Persist uncertainty BEFORE dispatch. A restarted loop inherits both bounds. */
+  async beginDelivery(reminder: Reminder, now: number, cadence: number, next_fire_at: number | null = null): Promise<number | null> {
+    return this.db.transaction(async () => {
+      const current = this.get(reminder.id)
+      if (current?.status !== 'pending' || current.fire_at !== reminder.fire_at) return null
+      const before = this.getDelivery(reminder.id, reminder.fire_at)
+      if (before?.exhausted_reason || before?.state === 'delivered') return null
+      const exhausted = exhaustionReason(before?.attempts ?? 0, reminder.fire_at, now)
+      if (exhausted) {
+        await this.db.run(`INSERT INTO reminder_delivery
+          (reminder_id, fire_at, state, reason, next_attempt_at, exhausted_reason)
+          VALUES (?, ?, 'not-yet-known', 'no delivery observation', ?, ?)
+          ON CONFLICT (reminder_id, fire_at) DO UPDATE SET exhausted_reason = excluded.exhausted_reason`,
+        [reminder.id, reminder.fire_at, now, exhausted])
+        if (next_fire_at !== null) await this.advanceRecurrence(reminder.id, next_fire_at)
+        return null
+      }
+      if (before && before.next_attempt_at > now) return null
+      const attempts = (before?.attempts ?? 0) + 1
+      await this.db.run(`INSERT INTO reminder_delivery
+        (reminder_id, fire_at, attempts, state, reason, next_attempt_at)
+        VALUES (?, ?, ?, 'not-yet-known', 'attempt has no delivery observation', ?)
+        ON CONFLICT (reminder_id, fire_at) DO UPDATE SET attempts = excluded.attempts,
+          state = excluded.state, reason = excluded.reason, observed_at = NULL,
+          next_attempt_at = excluded.next_attempt_at`,
+      [reminder.id, reminder.fire_at, attempts, now + cadence])
+      return attempts
+    })
+  }
+
+  /** Settle only this attempt; an old completion cannot overwrite a newer attempt. */
+  async observeDelivery(
+    reminder: Reminder, attempt: number, observation: DeliveryObservation,
+    now: number, next_fire_at: number | null,
+  ): Promise<boolean> {
+    return this.db.transaction(async () => {
+      const before = this.getDelivery(reminder.id, reminder.fire_at)
+      if (before?.attempts !== attempt || before.state === 'delivered') return false
+      const delivered = observation.state === 'delivered'
+      const exhausted = delivered ? null : exhaustionReason(attempt, reminder.fire_at, now)
+      await this.db.run(`UPDATE reminder_delivery SET state = ?, reason = ?, observed_at = ?,
+        delivered_at = ?, exhausted_reason = ? WHERE reminder_id = ? AND fire_at = ?`,
+      [observation.state, delivered ? null : observation.reason,
+        observation.state === 'not-yet-known' ? null : now, delivered ? now : null,
+        exhausted, reminder.id, reminder.fire_at])
+      const current = this.get(reminder.id)
+      if (current?.fire_at !== reminder.fire_at) return delivered
+      if (delivered || exhausted) {
+        if (next_fire_at !== null) await this.advanceRecurrence(reminder.id, next_fire_at)
+        else if (delivered) await this.markFired(reminder.id, now)
+      }
+      return delivered
+    })
+  }
+
   async create(input: CreateReminderInput): Promise<Reminder> {
     const id = input.id ?? crypto.randomUUID()
     const created_at = Date.now() / 1000
@@ -261,61 +350,12 @@ export class ReminderStore {
     return true
   }
 
-  /** Mark a reminder fired. Used by the tick loop after the dispatch returns. */
-  async markFired(id: string): Promise<void> {
-    const fired_at = Date.now() / 1000
+  /** Mark a reminder fired after an affirmative delivery observation. */
+  async markFired(id: string, fired_at = Date.now() / 1000): Promise<void> {
     await this.db.run(
       `UPDATE reminders SET status = 'fired', fired_at = ? WHERE id = ? AND status = 'pending'`,
       [fired_at, id],
     )
-  }
-
-  /**
-   * #319 — revert a row the tick loop just claimed (`markFired`) back to
-   * pending. Used ONLY when a claimed one-shot reminder's post was provably
-   * rejected (`ReminderPostRejectedError`) and must retry next tick. Guarded
-   * on `status = 'fired'` so it can never resurrect a cancelled row. Returns
-   * `true` iff a fired row was reopened.
-   */
-  async reopen(id: string): Promise<boolean> {
-    const before = this.get(id)
-    if (before === null || before.status !== 'fired') return false
-    await this.db.run(
-      `UPDATE reminders SET status = 'pending', fired_at = NULL WHERE id = ? AND status = 'fired'`,
-      [id],
-    )
-    return true
-  }
-
-  /**
-   * #319 — undo a recurring claim's `advanceRecurrence` ONLY if the row still
-   * carries the exact `fire_at` the claim wrote (`claimed_fire_at`). This is a
-   * compare-and-swap so the tick loop's revert (after a failed dispatch)
-   * cannot clobber a concurrent owner reschedule that ran during the dispatch
-   * await: if the owner changed `fire_at` to anything else, the CAS no-ops and
-   * their value survives. Returns `true` iff the row was reverted.
-   */
-  async revertRecurrenceAdvance(
-    id: string,
-    claimed_fire_at: number,
-    original_fire_at: number,
-  ): Promise<boolean> {
-    const before = this.get(id)
-    if (
-      before === null ||
-      before.status !== 'pending' ||
-      !isRecurring(before) ||
-      before.fire_at !== claimed_fire_at
-    ) {
-      return false
-    }
-    await this.db.run(
-      `UPDATE reminders SET fire_at = ?
-        WHERE id = ? AND status = 'pending'
-          AND (recurrence IS NOT NULL OR recurrence_spec IS NOT NULL) AND fire_at = ?`,
-      [original_fire_at, id, claimed_fire_at],
-    )
-    return true
   }
 
   /**
@@ -329,8 +369,8 @@ export class ReminderStore {
    *
    * Returns `true` iff the row was advanced (was `pending` AND recurring —
    * a coarse `recurrence` label OR a cron `recurrence_spec`). Returns `false`
-   * for one-shot rows or already-fired/cancelled rows — caller should fall
-   * back to `markFired` on `false`.
+   * for one-shot rows or already-fired/cancelled rows. A refusal does not
+   * establish delivery and must not manufacture a fired stamp.
    */
   async advanceRecurrence(id: string, next_fire_at: number): Promise<boolean> {
     const before = this.get(id)

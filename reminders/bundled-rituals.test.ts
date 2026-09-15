@@ -309,7 +309,7 @@ function buildFireStack(opts: {
   outbound?: ReminderOutbound
   compose?: (spec: AgentSpec) => Promise<string>
 }): {
-  dispatch: (r: Reminder) => Promise<void>
+  dispatch: (r: Reminder) => ReturnType<import('./tick.ts').ReminderDispatcher['dispatch']>
   specs: AgentSpec[]
   timeouts: (number | undefined)[]
   composeCalls: () => number
