@@ -64,13 +64,17 @@ async function fixture() {
     if (argv[0] === 'gh') {
       if (argv[2] === 'list') return ok(JSON.stringify(pr ? [pr] : []))
       if (argv[2] === 'create') {
-        pr = { number: 12, headRefOid: tip, state: 'OPEN', headRefName: 'change', baseRefName: 'main', isCrossRepository: false }
+        pr = { number: 12, headRefOid: await command(['git', '-C', repo, 'rev-parse', 'refs/heads/change']), state: 'OPEN', headRefName: 'change', baseRefName: 'main', isCrossRepository: false }
         return ok('created')
       }
       if (argv[2] === 'merge') { pr.state = 'MERGED'; return ok() }
       return ok(JSON.stringify(pr))
     }
-    return spawnCapture(argv, cwd, env, timeout)
+    const result = await spawnCapture(argv, cwd, env, timeout)
+    if (result.ok && argv.includes('push') && pr) {
+      pr.headRefOid = await command(['git', '--git-dir', remote, 'rev-parse', 'refs/heads/change'])
+    }
+    return result
   }
   const options = { store, runId: row.id, projectSlug: 'project', repo, worktree, branch: 'change', baseBranch: 'main', runHost,
     ciWorkflow: 'ci.yml', ciNow: () => now,
@@ -643,11 +647,11 @@ async function resumeFixture(round = 3, replansUsed = 1) {
     reviewGate: async (_payload, _snapshot, round, replans, record) => { rounds.push([round, replans!]); record?.({ findings: [], blockingCount: 0 }); return { kind: 'approve' } },
     // The preflight reports the head it scanned, and the driver refuses to publish a
     // revision the scan did not see. The fixer commits for real, so pinning this to
-    // the fixture's opening tip reads as the revision changing after review.
+    // the fixture's opening tip would incorrectly report publication drift.
     runLeakGatePreflight: async reviewed => ({ status: 'clean', head: reviewed.head, note: '', findings: [], skipped_rules: [], attempts: 0 }),
     assessMergeDiff: () => ({ allow: true, measured_bytes: snapshot.diff.length }),
-    publishGate: async () => ({ kind: 'blocked', on: 'fixture stops before publication' }),
-    mergeGate: async () => ({ kind: 'unknown', detail: 'not reached' }),
+    publishGate: async () => ({ kind: 'allow' }),
+    mergeGate: async () => ({ kind: 'blocked', on: 'fixture stops before merge' }),
   }
   const input: BuildRunInput = { run_id: f.row.id, mode: 'pr', start: 'resume', repl_provider: 'pi',
     workers: { plan: { runner, request }, build: { runner, request }, review: { runner, request }, fix: { runner, request } } }
@@ -656,7 +660,7 @@ async function resumeFixture(round = 3, replansUsed = 1) {
 
 test('production resume reloads rejected state, inherits rounds, and ignores worker counters', async () => {
   const f = await resumeFixture()
-  expect(await f.run()).toMatchObject({ kind: 'blocked', on: 'fixture stops before publication' })
+  expect(await f.run()).toMatchObject({ kind: 'blocked', on: 'fixture stops before merge' })
   expect(f.runner.calls.map(c => c.step_id)).toEqual([`${f.row.id}:fix:3`, `${f.row.id}:review:4`])
   expect(f.rounds).toEqual([[4, 1]])
   // The fix commits for real, so the approved head is the one the repository now
@@ -731,7 +735,7 @@ test('production fixed checkpoint survives a host crash without accepting traile
   const restarted = createProductionHostEffects(f.options)
   expect(await restarted.modes.loadResume()).toMatchObject({ stage: 'fixed', round: 4, replansUsed: 1 })
   f.deps.modes = restarted.modes
-  expect(await f.run()).toMatchObject({ kind: 'blocked', on: 'fixture stops before publication' })
+  expect(await f.run()).toMatchObject({ kind: 'blocked', on: 'fixture stops before merge' })
   expect(f.runner.calls.map(c => c.step_id)).toEqual([`${f.row.id}:fix:3`, `${f.row.id}:review:4`])
   expect(f.rounds).toEqual([[4, 1]])
 })
@@ -873,7 +877,7 @@ test('production rejected review survives a crash before the next fix', async ()
     findings: [{ kind: 'code', actionable: true, text: 'second issue' }], previousFindings: ['new issue'] })
   f.deps.modes = restarted.modes
   f.deps.reviewGate = async (_p, _s, _r, _u, record) => { record?.({ findings: [], blockingCount: 0 }); return { kind: 'approve' } }
-  expect(await f.run()).toMatchObject({ kind: 'blocked', on: 'fixture stops before publication' })
+  expect(await f.run()).toMatchObject({ kind: 'blocked', on: 'fixture stops before merge' })
   expect(f.runner.calls.map(c => c.step_id)).toEqual([`${f.row.id}:fix:1`, `${f.row.id}:review:2`, `${f.row.id}:fix:2`, `${f.row.id}:review:3`])
 })
 

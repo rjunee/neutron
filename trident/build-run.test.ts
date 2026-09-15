@@ -71,7 +71,11 @@ function fixture(landFixes = true) {
     },
     publishGate: async () => { events.push('publishGate'); return { kind: 'allow' } },
     mergeGate: async () => { events.push('mergeGate'); return { kind: 'allow' } },
-    publish: async () => { events.push('publish'); snapshot.pr = { number: 1, head: snapshot.head, state: 'OPEN' } },
+    publish: async () => { events.push('publish'); snapshot.pr = { number: 1, head: snapshot.head, state: 'OPEN' }
+      for (const outcome of outcomes.values()) {
+        if (outcome.kind === 'completed' && outcome.result && typeof outcome.result === 'object' && 'pr' in outcome.result) outcome.result.pr = structuredClone(snapshot.pr)
+      }
+    },
     merge: async () => { events.push('merge'); snapshot.pr!.state = 'MERGED' },
     recordPhaseUsage: async () => {},
   }
@@ -85,8 +89,8 @@ test('fresh to merged with a fix, host gates and fake runners', async () => {
   expect((await f.run()).kind).toBe('merged')
   expect(f.runner.calls.map(c => c.role)).toEqual(['plan', 'build', 'fix'])
   expect(f.cross.calls.map(c => c.step_id)).toEqual(['run:review:1', 'run:review:2'])
-  expect(f.events.filter(e => e !== 'measure')).toEqual(['publishGate', 'publish', 'mergeGate', 'merge'])
-  expect(f.reads()).toBe(13)
+  expect(f.events.filter(e => e !== 'measure')).toEqual(['publishGate', 'publish', 'publishGate', 'publish', 'mergeGate', 'merge'])
+  expect(f.reads()).toBe(17)
   expect([...f.runner.calls, ...f.cross.calls].every(c => c.needs_approval_decision === false)).toBe(true)
 })
 
@@ -192,11 +196,11 @@ for (const gate of ['admissionGate', 'publishGate', 'mergeGate'] as const) {
   }
 }
 for (const kind of ['unknown', 'blocked'] as const) {
-  test(`review ${kind} cannot publish`, async () => {
+  test(`review ${kind} cannot merge`, async () => {
     const f = fixture()
     f.decisions.push(kind === 'unknown' ? { kind, detail: 'unreadable' } : { kind, on: 'arbiter' })
     expect((await f.run()).kind).toBe(kind)
-    expect(f.events).not.toContain('publish')
+    expect(f.events).not.toContain('merge')
   })
 }
 
@@ -220,7 +224,7 @@ for (const read of [1, 3, 4, 5, 6, 7, 8, 9]) {
 }
 test('review cannot change its subject even with a matching trailer', async () => {
   const f = fixture(); const measure = f.deps.measure; let n = 0
-  f.deps.measure = async () => { if (++n === 5) f.snapshot.head = 'c'.repeat(40); return measure() }
+  f.deps.measure = async () => { if (++n === 8) f.snapshot.head = 'c'.repeat(40); return measure() }
   f.outcomes.set('run:review:1', f.completed({ ...f.snapshot, head: 'c'.repeat(40) }))
   expect(await f.run()).toMatchObject({ kind: 'blocked', on: 'Reviewed revision changed during review' })
 })
@@ -262,7 +266,7 @@ test('leak preflight invocation throwing stays unknown', async () => {
 test('leak fixer moving the head requires new review', async () => {
   const f = fixture(); const leak = f.deps.runLeakGatePreflight
   f.deps.runLeakGatePreflight = async s => { f.snapshot.head = 'd'.repeat(40); return { ...await leak(s), status: 'fixed' } }
-  expect(await f.run()).toMatchObject({ kind: 'blocked', on: 'Revision changed after review' })
+  expect(await f.run()).toMatchObject({ kind: 'blocked', on: 'Revision changed during publication preflight' })
 })
 test('oversized diff stops publication', async () => {
   const f = fixture(); f.deps.assessMergeDiff = () => ({ allow: false, measured_bytes: 999999, reason: 'too large' })
@@ -306,7 +310,7 @@ for (const role of ['plan', 'review', 'fix'] as const) {
     const step = `run:${role}:${role === 'plan' ? 0 : 1}`
     f.outcomes.set(step, { kind: 'unknown', detail: 'unobserved' })
     expect(await f.run()).toMatchObject({ kind: 'unknown', step_id: step, phase: role })
-    expect(f.events).not.toContain('publish')
+    expect(f.events).not.toContain('merge')
   })
 }
 test('build head and diff advance from the initial base under host observation', async () => {
@@ -336,7 +340,7 @@ for (const change of ['head', 'diff', 'pr-head', 'closed'] as const) {
       if (change === 'pr-head') f.snapshot.pr!.head = 'f'.repeat(40)
       if (change === 'closed') f.snapshot.pr!.state = 'CLOSED'
     }
-    expect(await f.run()).toMatchObject({ kind: 'blocked', on: 'Published PR does not match reviewed revision' })
+    expect(await f.run()).toMatchObject({ kind: 'blocked', on: 'Published PR does not match candidate revision' })
     expect(f.events).not.toContain('merge')
   })
 }
@@ -664,7 +668,7 @@ test('local mode rejects PR identity and changed landing revision', async () => 
 
 test('PR mode still requires a real PR after publication', async () => {
   const f = fixture(); f.deps.publish = async () => {}
-  expect(await f.run()).toMatchObject({ kind: 'blocked', on: 'Published PR does not match reviewed revision' })
+  expect(await f.run()).toMatchObject({ kind: 'blocked', on: 'Published PR does not match candidate revision' })
   expect(f.events).not.toContain('merge')
 })
 
@@ -689,7 +693,7 @@ for (const payload of [null, {}, 'not a plan', { executionSpec: 42 }, { executio
     expect(await f.run()).toMatchObject({ kind: 'blocked', phase: 'plan', recipient: 'orchestrator', on: expect.stringContaining('design-gap: re-plan-failed') })
     expect(f.runner.calls.map(c => c.step_id)).toEqual(['run:plan:0', 'run:build:0', 'run:plan:1'])
     expect(f.cross.calls).toHaveLength(1)
-    expect(f.events).not.toContain('publish')
+    expect(f.events).not.toContain('merge')
   })
 }
 test('G075 thrown re-planner escalates before rebuild', async () => {
@@ -765,7 +769,7 @@ test('design gap re-plans once and continues with fresh measurements and spent r
   expect(f.runner.calls.map(c => c.step_id)).toEqual(['run:plan:0', 'run:build:0', 'run:plan:1', 'run:build:1', 'run:fix:2'])
   expect(f.cross.calls.map(c => c.step_id)).toEqual(['run:review:1', 'run:review:2', 'run:review:3'])
   expect(counts).toEqual([0, 1, 1])
-  expect(f.reads()).toBe(17)
+  expect(f.reads()).toBe(24)
 })
 test('host refuses a second re-plan even when worker claims zero spent', async () => {
   const f = fixture()
@@ -835,7 +839,7 @@ test('G043 fix erasing the diff cannot spend another panel', async () => {
   }
   expect(await f.run()).toMatchObject({ kind: 'unknown', phase: 'review', detail: expect.stringContaining('diff artifact') })
   expect(f.cross.calls).toHaveLength(1)
-  expect(f.events).not.toContain('publish')
+  expect(f.events).not.toContain('merge')
 })
 
 test('readiness runs before each paid panel and cannot default to permission', async () => {
@@ -874,14 +878,14 @@ test('suite step feeds panel and fix briefs and overrides approving panels every
   for (const role of ['review', 'fix']) expect(briefs.find(b => b.role === role)?.findings).toContain('FULL SUITE NOT PROVEN: run full suite')
   expect(f.runner.calls.map(c => c.role)).toEqual(['plan', 'build', 'fix'])
 })
-test('suite missing or unreadable host cannot dispatch panel or publish', async () => {
+test('suite missing or unreadable host cannot dispatch panel or merge', async () => {
   for (const missing of [true, false]) {
     const f = fixture()
     if (missing) delete f.deps.reviewSuite
     else f.deps.reviewSuite = async () => ({ kind: 'unknown', detail: 'suite checkpoint unreadable' })
     expect(await f.run()).toMatchObject({ kind: 'unknown', phase: 'review', detail: expect.stringContaining('suite') })
     expect(f.cross.calls).toHaveLength(0)
-    expect(f.events).not.toContain('publish')
+    expect(f.events).not.toContain('merge')
   }
 })
 test('suite advisory transcription reaches panel before approval', async () => {
@@ -915,7 +919,7 @@ test('G070 all-minor repeated finding stops before approval after a suite-driven
   expect(briefed).toContain('code.ts:f:recurring')
   expect(f.cross.calls).toHaveLength(2)
   expect(f.runner.calls.filter(c => c.role === 'fix')).toHaveLength(1)
-  expect(f.events).not.toContain('publish')
+  expect(f.events).not.toContain('merge')
 })
 
 test('G070 resolved minor finding allows approval after a fix', async () => {
@@ -929,7 +933,7 @@ for (const second of [1, 2]) test(`G071 distinct findings with count ${second} s
   progressPanel(f, [[{ severity: 'major', rule: 'first' }], Array.from({ length: second }, (_, i) => ({ severity: 'major', rule: `new-${i}` }))])
   expect(await f.run()).toMatchObject({ kind: 'blocked', on: 'Review requires orchestrator arbitration: no-progress' })
   expect(f.runner.calls.filter(c => c.role === 'fix')).toHaveLength(1)
-  expect(f.events).not.toContain('publish')
+  expect(f.events).not.toContain('merge')
 })
 
 test('G071 decreasing distinct code counts allow the next fix', async () => {
@@ -942,7 +946,7 @@ test('G071 decreasing distinct code counts allow the next fix', async () => {
 test('progress missing observation cannot approve', async () => {
   const f = fixture(); f.deps.reviewGate = async () => ({ kind: 'approve' })
   expect(await f.run()).toMatchObject({ kind: 'unknown', detail: expect.stringContaining('Review progress needs') })
-  expect(f.events).not.toContain('publish')
+  expect(f.events).not.toContain('merge')
 })
 
 
@@ -989,7 +993,7 @@ for (const cap of [1, 2, 7, 12]) {
     expect(rounds).toEqual(Array.from({ length: cap }, (_, i) => i + 1))
     expect(f.runner.calls.filter(c => c.role === 'fix').map(c => c.step_id)).toEqual(
       Array.from({ length: cap - 1 }, (_, i) => `run:fix:${i + 1}`))
-    expect(f.events).not.toContain('publish')
+    expect(f.events).not.toContain('merge')
   })
 }
 
@@ -1119,7 +1123,7 @@ for (const role of ['build', 'fix'] as const) test(`G023 driver checks ${role} b
     if (role === 'fix') f.decisions.push({ kind: 'fix', findings: ['repair'] })
     f.outcomes.set(`run:${role}:${role === 'build' ? 0 : 1}`, f.completed({ ...f.snapshot, payload: { branch } }))
     expect(await f.run()).toMatchObject(branch === 'other' ? { kind: 'blocked', on: 'Reported builder branch disagrees with assigned branch' } : { kind: 'merged' })
-    if (branch === 'other') expect(f.events).not.toContain('publish')
+    if (branch === 'other') expect(f.events).not.toContain('merge')
   }
 })
 
@@ -1147,14 +1151,14 @@ for (const role of ['build', 'fix'] as const) test(`G036 merge during ${role} wi
   if (role === 'fix') f.decisions.push({ kind: 'fix', findings: ['repair'] })
   f.deps.prepareWork = async request => {
     if (request.role === role) {
-      f.snapshot.pr = { number: 7, head: f.snapshot.head, state: 'MERGED' }
+      f.snapshot.pr = { number: f.snapshot.pr?.number ?? 7, head: f.snapshot.head, state: 'MERGED' }
       f.snapshot.head = 'absent'
       f.snapshot.diff = ''
     }
   }
   expect(await f.run()).toMatchObject({ kind: 'merged', snapshot: { head: 'absent' } })
   expect(f.cross.calls).toHaveLength(role === 'fix' ? 1 : 0)
-  expect(f.events).not.toContain('publish')
+  expect(f.events.filter(e => e === 'publish')).toHaveLength(role === 'fix' ? 1 : 0)
 })
 
 for (const head of ['a'.repeat(40), '', 'absent']) test(`G042 driver stops lost fix with measured head ${head || 'unreadable'}`, async () => {
@@ -1163,7 +1167,7 @@ for (const head of ['a'.repeat(40), '', 'absent']) test(`G042 driver stops lost 
   f.deps.prepareWork = async request => { if (request.role === 'fix') f.snapshot.head = head }
   expect(await f.run()).toMatchObject({ kind: 'failed', cause: 'round-lost-work', phase: 'fix' })
   expect(f.cross.calls).toHaveLength(1)
-  expect(f.events).not.toContain('publish')
+  expect(f.events).not.toContain('merge')
 })
 
 test('G042 resumed fix stops before another panel when no commit lands', async () => {
@@ -1186,12 +1190,12 @@ test('G055 driver forces new CI repair despite panel approval and refreshes afte
   expect(briefs).toContain('CI FAILING: unit')
 })
 
-test('G055 advisory CI cannot publish or consume a fix', async () => {
+test('G055 advisory CI cannot merge or consume a fix', async () => {
   const f = fixture()
   f.deps.reviewCi = async () => ({ kind: 'known', findings: [{ title: 'CI FAILING', evidence: 'base red', advisory: true }] })
   expect(await f.run()).toMatchObject({ kind: 'blocked', on: expect.stringContaining('review-advisory-only') })
   expect(f.runner.calls.filter(c => c.role === 'fix')).toHaveLength(0)
-  expect(f.events).not.toContain('publish')
+  expect(f.events).not.toContain('merge')
 })
 
 test('G056 missing or deferred CI cannot approve, including changes during the panel', async () => {
@@ -1201,7 +1205,7 @@ test('G056 missing or deferred CI cannot approve, including changes during the p
     else f.deps.reviewCi = async () => ++reads === (point === 'before' ? 1 : 2) ? { kind: 'unknown', detail: 'CI deferred peer: pending' } : { kind: 'known', findings: [] }
     expect(await f.run()).toMatchObject({ kind: 'unknown', detail: expect.stringContaining('CI') })
     expect(f.cross.calls).toHaveLength(point === 'after' ? 1 : 0)
-    expect(f.events).not.toContain('publish')
+    expect(f.events).not.toContain('merge')
   }
 })
 
@@ -1263,7 +1267,7 @@ test('G084 each fix proves descent from the immediately preceding review', async
       : { kind: 'merged' })
     expect(pins).toEqual([['a'.repeat(40), 'b'.repeat(40)], ['b'.repeat(40), 'c'.repeat(40)]])
     expect(f.cross.calls).toHaveLength(abandonSecond ? 2 : 3)
-    expect(f.events.includes('publish')).toBe(!abandonSecond)
+    expect(f.events.includes('merge')).toBe(!abandonSecond)
   }
 })
 
@@ -1287,7 +1291,7 @@ test('G084 missing lineage host cannot accept a fix', async () => {
   delete f.deps.checkFixLineage
   expect(await f.run()).toMatchObject({ kind: 'unknown', phase: 'fix', detail: 'Fix lineage host is missing' })
   expect(f.cross.calls).toHaveLength(1)
-  expect(f.events).not.toContain('publish')
+  expect(f.events).not.toContain('merge')
 })
 
 test('G060 thrown review round becomes an infrastructure block', async () => {
@@ -1295,7 +1299,7 @@ test('G060 thrown review round becomes an infrastructure block', async () => {
   f.cross.run = async () => { throw new Error('review transport failed') }
   expect(await f.run()).toMatchObject({ kind: 'blocked', phase: 'review', recipient: 'orchestrator', on: 'infra-only: Review round threw before producing synthesis: Error: review transport failed' })
   expect(f.runner.calls.map(call => call.role)).toEqual(['plan', 'build'])
-  expect(f.events).not.toContain('publish')
+  expect(f.events).not.toContain('merge')
 })
 
 test('G057 G060 driver routes incomplete panel facts to the orchestrator', async () => {
@@ -1308,7 +1312,7 @@ test('G057 G060 driver routes incomplete panel facts to the orchestrator', async
       retrySeat: async () => {}, readSynthesis: async () => null,
     }, approve, snapshot, round, 'run')
     expect(await f.run()).toMatchObject({ kind: 'blocked', phase: 'review', recipient: 'orchestrator', on: expect.stringContaining('infra-only:') })
-    expect(f.events).not.toContain('publish')
+    expect(f.events).not.toContain('merge')
     expect(f.runner.calls.map(call => call.role)).toEqual(['plan', 'build'])
   }
 })
@@ -1323,7 +1327,7 @@ for (const fault of ['missing', 'unknown', 'blocked'] as const) test(`G102 drive
   expect(await f.run()).toMatchObject({ kind: fault === 'blocked' ? 'blocked' : 'unknown', phase: 'review' })
   expect(prepared).toEqual(['plan', 'build', 'review'])
   expect(f.cross.calls).toHaveLength(0)
-  expect(f.events).not.toContain('publish')
+  expect(f.events).not.toContain('merge')
 })
 
 test('G102 driver checks artifact after preparation and before every review', async () => {
@@ -1352,4 +1356,89 @@ test('null usage completes and keeps cumulative counters unknown across later fi
   expect((await f.run()).kind).toBe('merged')
   expect(records).toHaveLength(2)
   for (const report of records) expect(report).toMatchObject({ input_tokens: null, output_tokens: null, cache_read_tokens: null, source: 'unknown-model' })
+})
+
+// Keep acquisition/classification real: only the external CI transport is a fixture.
+import { createProjectObservationSources } from './project-observation-sources.ts'
+import { awaitReviewReadiness } from './gates/review-readiness.ts'
+import { assessReviewCi } from './gates/review-ci.ts'
+import { assessReviewSuite } from './gates/review-suite.ts'
+
+for (const status of ['green', 'red', 'unobserved', 'lost-after-panel'] as const) {
+  test(`fresh PR production observations: ${status}`, async () => {
+    const f = fixture()
+    f.deps.readReviewCap = async () => ({ kind: 'known', max_rounds: 1 })
+    const observed: number[] = []
+    const sources = createProjectObservationSources({
+      baseBranch: 'main', ciWorkflow: 'ci.yml', runId: 'run',
+      ci: {
+        required: async () => ({ kind: 'resolved', required: ['test'], appBound: [], produced: ['test'] }),
+        readiness: async pr => {
+          observed.push(pr)
+          if (status === 'unobserved' || (status === 'lost-after-panel' && f.cross.calls.length > 0)) return { unreadable: 'CI unavailable' }
+          return { headSha: f.snapshot.head, mergeable: 'MERGEABLE', checksComplete: true,
+            rows: [{ name: 'test', status: 'COMPLETED', conclusion: status === 'red' ? 'FAILURE' : 'SUCCESS' }] }
+        },
+      },
+      suite: { strategy: 'bun test', scope: 'full-suite', readCheckpoint: async (snapshot, round) => ({
+        runId: 'run', head: snapshot.head, round, report: { testsPassed: true, suiteOutcome: 'passed' },
+      }) },
+    })
+    f.deps.reviewReadiness = (snapshot, signal) => awaitReviewReadiness(sources.reviewReadiness, snapshot, signal)
+    f.deps.reviewCi = snapshot => assessReviewCi(sources.reviewCi, snapshot, 'f'.repeat(40), 'run')
+    f.deps.reviewSuite = (snapshot, round) => assessReviewSuite(sources.reviewSuite, snapshot, round, 'run')
+    expect(f.snapshot.pr).toBeNull()
+    // Positive control: this exact production source refuses the unpublished subject.
+    expect(await sources.reviewCi.observe(structuredClone(f.snapshot))).toMatchObject({ kind: 'unknown' })
+    const result = await f.run()
+    expect(f.events.filter(e => e === 'publish')).toHaveLength(1)
+    expect(observed.length).toBeGreaterThan(0)
+    expect(observed.every(pr => pr === 1)).toBe(true)
+    expect(f.cross.calls).toHaveLength(status === 'unobserved' ? 0 : 1)
+    if (status === 'green') expect(result.kind).toBe('merged')
+    else {
+      expect(result).toMatchObject({ kind: status === 'red' ? 'blocked' : 'unknown', phase: 'review' })
+      expect(f.events).not.toContain('merge')
+    }
+  })
+}
+
+test('publication keeps the existing PR identity on a fix', async () => {
+  const f = fixture()
+  f.decisions.push({ kind: 'fix', findings: ['repair'] })
+  const publish = f.deps.publish
+  let calls = 0
+  f.deps.publish = async snapshot => {
+    await publish(snapshot)
+    if (++calls === 2) f.snapshot.pr!.number = 2
+  }
+  expect(await f.run()).toMatchObject({ kind: 'blocked', phase: 'publish', on: 'Published PR does not match candidate revision' })
+  expect(f.cross.calls).toHaveLength(1)
+  expect(f.events).not.toContain('merge')
+})
+
+test('publication refreshes the PR head before each fix review', async () => {
+  const f = fixture()
+  f.decisions.push({ kind: 'fix', findings: ['repair'] })
+  const heads: string[] = []
+  f.deps.reviewReadiness = async snapshot => {
+    expect(snapshot.pr).toEqual({ number: 1, head: snapshot.head, state: 'OPEN' })
+    heads.push(snapshot.head)
+    return { kind: 'allow' }
+  }
+  expect((await f.run()).kind).toBe('merged')
+  expect(heads).toEqual(['a'.repeat(40), 'b'.repeat(40)])
+  expect(f.events.filter(e => e === 'publish')).toHaveLength(2)
+})
+
+test('PR identity cannot change between approval and merge', async () => {
+  const f = fixture()
+  const review = f.deps.reviewGate
+  f.deps.reviewGate = async (...args) => {
+    const result = await review(...args)
+    f.snapshot.pr!.number = 2
+    return result
+  }
+  expect(await f.run()).toMatchObject({ kind: 'blocked', phase: 'merge', on: 'Published PR does not match reviewed revision' })
+  expect(f.events).not.toContain('merge')
 })
