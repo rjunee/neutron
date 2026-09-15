@@ -15,7 +15,6 @@ import { tmpdir } from 'node:os'
 import { join } from 'node:path'
 
 import {
-  DEFAULT_SUB_AGENT_MODEL,
   PerOwnerConcurrencyGate,
   ResearchStoreResolver,
   buildCannedResearchSubstrate,
@@ -23,6 +22,8 @@ import {
   buildProjectResearchOrchestrator,
   loadManifest,
 } from '../index.ts'
+import { resolveModelPricingTarget } from '@neutronai/runtime/model-pricing.ts'
+import { SONNET_MODEL } from '@neutronai/runtime/models.ts'
 
 const ONE_TOOL_CALL = [
   { tool: 'research_web_search', success: true, elapsed_ms: 10 },
@@ -391,9 +392,8 @@ describe('buildProjectResearchOrchestrator — deep path retry + grounding (task
     expect(subAgent.calls).toHaveLength(1)
   })
 
-  // T7 — concurrency-error metadata records DEFAULT_SUB_AGENT_MODEL
-  // (proves the old hardcoded literal at :353 is gone).
-  test('T7 concurrency-rejected records DEFAULT_SUB_AGENT_MODEL', async () => {
+  // T7 — concurrency-error metadata records the resolved Sonnet class.
+  test('T7 concurrency-rejected records the resolved Sonnet class', async () => {
     const subAgent = buildCannedSubAgentDispatcher({
       responses: [{ query_match: /./, text: happyBrief(), tool_calls: ONE_TOOL_CALL, tools_available: true }],
     })
@@ -408,7 +408,9 @@ describe('buildProjectResearchOrchestrator — deep path retry + grounding (task
       .database()
       .query('SELECT model FROM research_sub_agent_runs WHERE task_id = ?')
       .get(result.task_id) as { model: string } | null
-    expect(runRow?.model).toBe(DEFAULT_SUB_AGENT_MODEL)
+    expect(resolveModelPricingTarget(runRow?.model ?? '')).toBe(
+      resolveModelPricingTarget(SONNET_MODEL),
+    )
   })
 
   // T8 — happy path: valid grounded brief on attempt 1 → single dispatch.
