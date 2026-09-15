@@ -5,6 +5,7 @@ import { describeWorkerObservation, unclassifiedObservation, type WorkerObservat
 // one-shots, and the dropped-inbound replay sink (D2 split).
 
 import { getBestModel } from '../../../models.ts'
+import { neutralizeAbandonedSettle } from '@neutronai/logger/fire-and-forget.ts'
 import type { SessionHandle } from '../../../session-handle.ts'
 import type { AgentSpec, Substrate } from '../../../substrate.ts'
 import { requireReplCwd } from './spawn-configuration-error.ts'
@@ -12,7 +13,7 @@ import { classifyThrownSpawnError } from './classify-spawn-error.ts'
 import { SUBSTRATE_ERROR_CODES } from '../../../errors.ts'
 import { EventChannel } from './event-channel.ts'
 import { type PendingRespawnEntry, enqueuePendingRespawn } from './pending-respawns-queue.ts'
-import { REPL_DEBUG, activeModelWatchdogs, activeWatchdogs, childByKey, cwdDriftAlertState, cwdDriftRespawnState, ephemeralSessions, pendingChildKills, pool, respawnGates, sink, supervisedBySessionKey, wedgeAlertState } from './pool-state.ts'
+import { REPL_DEBUG, activeModelWatchdogs, activeWatchdogs, childByKey, committedDispatches, cwdDriftAlertState, cwdDriftRespawnState, ephemeralSessions, pendingChildKills, pendingSpawns, pool, respawnGates, sink, supervisedBySessionKey, wedgeAlertState } from './pool-state.ts'
 import { getRecord } from './repl-registry.ts'
 import {
   SHUTDOWN_PENDING_SPAWN_GRACE_MS,

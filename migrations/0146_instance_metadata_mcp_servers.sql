@@ -1,4 +1,4 @@
--- 0120_instance_metadata_mcp_servers.sql
+-- 0146_instance_metadata_mcp_servers.sql
 --
 -- The owner's installed MCP servers get somewhere to live.
 --

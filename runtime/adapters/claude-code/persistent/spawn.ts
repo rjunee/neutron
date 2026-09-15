@@ -56,7 +56,7 @@ import { captureSession, makeJsonlExistsProbe } from './session-capture.ts'
 import { measurePostCompactSize, sessionJsonlPath, startSessionSizeWatchdog } from './session-size-watchdog.ts'
 import { dashifyCwd } from './session-validation.ts'
 import { createWedgedPromptDetector } from './interactive-prompt-deadlock-detector.ts'
-import { COMPACT_RESUME_FULL_RE, COMPACT_RESUME_SUMMARY_RE, DEFAULT_AGENT_BASE_PROMPT, DEFAULT_DEV_CHANNEL_PATH, DEFAULT_TOOLS_BRIDGE_PATH, DEV_CHANNEL_DISCLAIMER_RE, DISCLAIMER_BOTTOM_N, RATE_LIMIT_OPTIONS_BOTTOM_N, RATE_LIMIT_OPTIONS_DEBOUNCE_MS, RATE_LIMIT_OPTIONS_RE, RATE_LIMIT_STOP_RE, SESSION_COMPACT_IDLE_QUIESCE_MS, TOOLS_BRIDGE_SERVER_NAME, TOOL_USE_QUESTION_RE, TOOL_USE_SELECTOR_RE, ownerMcpStartupTimeoutMs, resolveTranscriptProjectsDir, runOutputScan, sendKey, surfaceSizeAlert } from './signatures.ts'
+import { DEFAULT_AGENT_BASE_PROMPT, DEFAULT_DEV_CHANNEL_PATH, DEFAULT_TOOLS_BRIDGE_PATH, SESSION_COMPACT_IDLE_QUIESCE_MS, TOOLS_BRIDGE_SERVER_NAME, ownerMcpStartupTimeoutMs, resolveTranscriptProjectsDir, runOutputScan, sendKey, surfaceSizeAlert } from './signatures.ts'
 import type { PersistentReplSubstrateOptions, ResumeDirective } from './types.ts'
 import { ReplSession, authFingerprintFor, httpHealth, mergeEnv, terminateChild, unlinkSessionConfigs } from './repl-session.ts'
 import { wireChildExit } from './child-exit-wiring.ts'
@@ -301,7 +301,7 @@ async function spawnSession(
   // turn can never bleed onto a more-privileged warm session.
   const toolSurface = spec.tools.map((t) => t.name)
   const claudeBin = options.claude_bin ?? process.env['CLAUDE_BIN'] ?? 'claude'
-  const argv = orUnlinkConfigs(() => buildReplArgv({
+  const argv = buildReplArgv({
     claudeBin,
     sessionId,
     resume: resume !== undefined,
@@ -341,7 +341,7 @@ async function spawnSession(
     ...(options.permission_mode !== undefined
       ? { permissionMode: options.permission_mode }
       : {}),
-  }))
+  })
 
   session.toolSurface = toolSurface.join(',')
   // Stamp the active project scope this REPL serves (folded into the pool key, so

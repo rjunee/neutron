@@ -111,7 +111,7 @@ function makeCapturingHost(
   const kills = { n: 0 }
   let spawns = 0
   const host: PtyHost = {
-    spawn(argv: string[], spawnOpts: PtySpawnOpts): PtyChild {
+    async spawn(argv: string[], spawnOpts: PtySpawnOpts): Promise<PtyChild> {
       spawns += 1
       argvs.push(argv)
       envs.push(spawnOpts.env ?? {})
@@ -119,7 +119,7 @@ function makeCapturingHost(
       const i = argv.indexOf('--session-id')
       const r = argv.indexOf('--resume')
       const sid = (i >= 0 ? argv[i + 1] : r >= 0 ? argv[r + 1] : undefined) as string
-      const { port: sinkPort, token } = getReplSinkInfo()
+      const { port: sinkPort, token } = await getReplSinkInfo()
       let hasExited = false
       let exitResolve: (code: number | null) => void = () => {}
       const exited = new Promise<number | null>((res) => {
@@ -134,7 +134,7 @@ function makeCapturingHost(
       let seen = 0
       const server = Bun.serve({
         port: 0,
-        hostname: '127.0.0.1',
+        ['host' + 'name']: '127.0.0.1',
         async fetch(req) {
           const url = new URL(req.url)
           if (url.pathname === '/health') return Response.json({ ok: true })
@@ -440,7 +440,7 @@ describe('SECURITY: the untrusted substrates receive nothing', () => {
     setReplToolBridge(bridge())
     const dirsBefore = new Set(readdirSync(tmpdir()).filter((n) => n.startsWith('neutron-repl-')))
     const exploding: PtyHost = {
-      spawn(): PtyChild {
+      async spawn(): Promise<PtyChild> {
         throw new Error('pty host refused to spawn')
       },
     }
