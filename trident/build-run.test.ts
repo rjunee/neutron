@@ -306,6 +306,7 @@ function modeFixture(mode: BuildRunInput['mode'] = 'ralph') {
   f.deps.prepareWork = async (request, context) => { prepared.push({ role: request.role, ...structuredClone(context) }) }
   f.deps.modes = {
     loadResume: async () => state.resume,
+    saveCheckpoint: async () => {},
     regenerateDiff: async head => { f.events.push(`diff:${head}`); return { kind: 'known', diff: state.regenerated } },
     probePlan: async () => { f.events.push('probe'); return state.probe },
     advanceRalph: async () => { state.oldResult = null; state.advances++; return { kind: 'allow' } },
@@ -687,6 +688,7 @@ test('G077 final-round design gap stops; a spare round admits replacement', asyn
       loadResume: async () => ({ head: f.snapshot.head, stage: 'built', round, findings: [], previousFindings: [] }),
       regenerateDiff: async () => ({ kind: 'known', diff: f.snapshot.diff }),
       probePlan: async () => null, advanceRalph: async () => ({ kind: 'allow' }),
+      saveCheckpoint: async () => {},
     }
     f.decisions.push(gap)
     expect(await f.run()).toMatchObject(round === 5
@@ -737,6 +739,7 @@ test('resume keeps the host re-plan count and rejects invalid counts', async () 
   for (const used of [1, 2]) {
     const f = fixture(); f.input.start = 'resume'
     f.deps.modes = {
+      saveCheckpoint: async () => {},
       loadResume: async () => ({ head: f.snapshot.head, stage: 'built', round: 2, replansUsed: used, findings: [], previousFindings: [] }),
       regenerateDiff: async () => ({ kind: 'known', diff: f.snapshot.diff }),
       probePlan: async () => null, advanceRalph: async () => ({ kind: 'allow' }),
@@ -748,6 +751,7 @@ test('resume keeps the host re-plan count and rejects invalid counts', async () 
 test('resumed rejection after re-plan stops before another fix', async () => {
   const f = fixture(); f.input.start = 'resume'
   f.deps.modes = {
+    saveCheckpoint: async () => {},
     loadResume: async () => ({ head: f.snapshot.head, stage: 'rejected', round: 2, replansUsed: 1, findings: [{ kind: 'code', actionable: true, text: 'old' }], previousFindings: ['old'] }),
     regenerateDiff: async () => ({ kind: 'known', diff: f.snapshot.diff }),
     probePlan: async () => null, advanceRalph: async () => ({ kind: 'allow' }),

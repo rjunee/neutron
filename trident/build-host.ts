@@ -20,6 +20,7 @@ type Role = keyof Workers
 const roles = ['plan', 'build', 'review', 'fix'] as const
 
 export interface BuildHostOptions {
+  modes?: BuildRunDeps['modes']
   boundReview?: { run: Parameters<typeof executeBoundReview>[0]; deps: Parameters<typeof executeBoundReview>[1] }
   runners: Partial<Record<Provider, WorkerRunner>>
   replProvider: Provider
@@ -83,6 +84,7 @@ export function createBuildHost(options: BuildHostOptions): { deps: BuildRunDeps
       if (!row || row.id !== runId) return { kind: 'unknown', detail: 'Review round cap run row is missing or mismatched' }
       return { kind: 'known', max_rounds: row.max_rounds }
     },
+    ...(options.modes ? { modes: options.modes } : {}),
     async confirmLocalMerge(snapshot) {
       if (!options.local) return unknown('Local merge configuration is missing')
       const run = options.mutation.run_host
