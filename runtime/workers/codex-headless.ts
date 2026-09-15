@@ -3,6 +3,7 @@ import { readFile } from 'node:fs/promises'
 import { resolve } from 'node:path'
 import type {
   BoundedWorkOutcome,
+  Effort,
   Placement,
   RefusalReason,
   Unsupported,
@@ -18,6 +19,9 @@ export interface CodexHeadlessRunnerOptions {
   readonly env?: NodeJS.ProcessEnv
   readonly probe?: Probe
 }
+
+// Keep the selected contract value intact when passing it to the exec wrapper.
+const CLI_EFFORTS: Record<Effort, string> = { low: 'low', medium: 'medium', high: 'high', xhigh: 'xhigh', max: 'max' }
 
 const SUPPORTED_ROLES = new Set<WorkerRole>(['build', 'fix'])
 
@@ -119,10 +123,11 @@ export function createCodexHeadlessRunner(options: CodexHeadlessRunnerOptions = 
       const refusal = unsupported(req.role, placement)
       if (refusal) return { kind: 'refused', reason: refusal.reason }
 
+      const effort = req.effort === null ? '' : CLI_EFFORTS[req.effort]
       const env = scrubGithubEnv({
         ...baseEnv,
         CODEX_BUILD_MODEL: req.model_id,
-        CODEX_BUILD_EFFORT: req.effort ?? '',
+        CODEX_BUILD_EFFORT: effort,
         CODEX_REVIEW_MODEL: req.model_id,
         NEUTRON_CODEX_BUILD_BRIEF_FILE: req.brief.path,
         NEUTRON_CODEX_BUILD_BRIEF_INTEGRITY: req.brief.integrity,

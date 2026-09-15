@@ -376,6 +376,7 @@ export interface AppWsSocketData {
    * clients that don't report one (those just aren't tracked for receipts).
    */
   device_id?: string
+  device_id_is_synthetic?: boolean
   /**
    * ISSUES #40 — the owner's IANA timezone reported on the upgrade query string
    * (`tz=America/New_York`), boundary-sanitized (`sanitizeTimezone`). The web +
@@ -661,9 +662,8 @@ export function createAppWsSurface(opts: CreateAppWsSurfaceOptions): AppWsSurfac
         // or a missing/malformed value) so every socket is always attributable;
         // a client-supplied id is stable across reconnects, a minted one isn't.
         const raw_device_id = url.searchParams.get('device_id')
-        const device_id =
-          (raw_device_id !== null ? sanitizeDeviceId(raw_device_id) : null) ??
-          `conn-${crypto.randomUUID()}`
+        const resolved_device_id = raw_device_id !== null ? sanitizeDeviceId(raw_device_id) : null
+        const device_id = resolved_device_id ?? `conn-${crypto.randomUUID()}`
         // ISSUES #40 — capture the owner's IANA `tz` from the upgrade query
         // string (the SAME connect handshake that carries platform/device_id).
         // Boundary-sanitized here; the authoritative IANA validation + de-duped
@@ -678,6 +678,7 @@ export function createAppWsSurface(opts: CreateAppWsSurfaceOptions): AppWsSurfac
           project_slug: resolved.project_slug,
           channel_topic_id,
           device_id,
+          device_id_is_synthetic: resolved_device_id === null,
           conn_id: `ws-${crypto.randomUUID()}`,
         }
         if (project_id !== null) data.project_id = project_id
@@ -733,7 +734,8 @@ export function createAppWsSurface(opts: CreateAppWsSurfaceOptions): AppWsSurfac
         // emitted first via adapter.emitDirect — that goes through the
         // registry and silently dropped because the entry wasn't
         // registered yet. Caught by app-ws-surface.test.ts WS round-trip.)
-        const registerOpts: { platform?: AppWsClientPlatform; device_id?: string } = {}
+        const registerOpts: { platform?: AppWsClientPlatform; device_id?: string; device_id_is_synthetic?: boolean } = {}
+        if (data.device_id_is_synthetic !== undefined) registerOpts.device_id_is_synthetic = data.device_id_is_synthetic
         if (data.platform !== undefined) registerOpts.platform = data.platform
         if (data.device_id !== undefined) registerOpts.device_id = data.device_id
         registry.register(data.channel_topic_id, send, registerOpts)

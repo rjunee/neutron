@@ -45,9 +45,9 @@ describe('general-scope — the one place General changes spelling', () => {
 
   it('passes a named project through untouched', () => {
     expect(httpProjectSegment('neutron')).toBe('neutron')
-    // A project literally named "general" is indistinguishable from the sentinel
-    // by design — the gateway resolves both to the same docs root. Pinned so the
-    // collision is a recorded decision rather than a latent surprise.
+    // A legal project named "general" keeps its own segment and docs root.
+    expect(httpProjectSegment('general')).toBe('general')
+    expect(httpProjectSegment('')).toBe('~general')
     expect(httpProjectSegment(GENERAL_HTTP_ID)).toBe(GENERAL_HTTP_ID)
   })
 
@@ -84,7 +84,7 @@ describe('docs-client — General reaches a real URL', () => {
     }
   }
 
-  it('requests /projects/general/docs/tree for the General scope', async () => {
+  it('requests /projects/~general/docs/tree for the General scope', async () => {
     const { client, urls } = captureUrl()
     await client.tree('')
     expect(urls).toHaveLength(1)

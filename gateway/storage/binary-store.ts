@@ -36,6 +36,7 @@ import { mkdir, readFile, rename, unlink, writeFile } from 'node:fs/promises'
 import { join } from 'node:path'
 
 import { sanitizeProjectId } from '@neutronai/channels/adapters/app-ws/envelope.ts'
+import { GENERAL_RAIL_ID } from '@neutronai/wire-types/topic-id.ts'
 import { openSidecar } from '@neutronai/persistence/index.ts'
 import {
   BINARY_EXTENSIONS,
@@ -706,7 +707,7 @@ export class BinaryStore {
   }
 
   private openHandleOrNull(project_id: string): ProjectHandle | null {
-    const cleaned = sanitizeProjectId(project_id)
+    const cleaned = project_id === GENERAL_RAIL_ID ? GENERAL_RAIL_ID : sanitizeProjectId(project_id)
     if (cleaned === null) return null
     const key = cleaned
     const cached = this.handles.get(key)
@@ -717,7 +718,7 @@ export class BinaryStore {
   }
 
   private openHandle(project_id: string, sweep: boolean): ProjectHandle {
-    const cleaned = sanitizeProjectId(project_id)
+    const cleaned = project_id === GENERAL_RAIL_ID ? GENERAL_RAIL_ID : sanitizeProjectId(project_id)
     if (cleaned === null) {
       throw new BinaryPathError(
         'invalid_project_id',

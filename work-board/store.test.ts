@@ -1229,9 +1229,11 @@ describe('WorkBoardStore — Phase 2b run binding + reconcile', () => {
 describe('workBoardScopeKey / workBoardProjectIdForKey (Bug 3 per-project scoping)', () => {
   const OWNER = 'owner'
 
-  test('General (empty / general / undefined) → the bare owner slug', () => {
+  test('General spellings use the owner key while a project named general stays distinct', () => {
     expect(workBoardScopeKey(OWNER, '')).toBe(OWNER)
-    expect(workBoardScopeKey(OWNER, GENERAL_WORK_BOARD_PROJECT_ID)).toBe(OWNER)
+    expect(GENERAL_WORK_BOARD_PROJECT_ID).toBe('~general')
+    expect(workBoardScopeKey(OWNER, '~general')).toBe(OWNER)
+    expect(workBoardScopeKey(OWNER, 'general')).toBe('general')
     expect(workBoardScopeKey(OWNER, undefined)).toBe(OWNER)
     expect(workBoardScopeKey(OWNER, null)).toBe(OWNER)
     expect(workBoardScopeKey(OWNER, '   ')).toBe(OWNER)
@@ -1250,7 +1252,7 @@ describe('workBoardScopeKey / workBoardProjectIdForKey (Bug 3 per-project scopin
     const key = workBoardScopeKey(OWNER, 'acme')
     expect(workBoardProjectIdForKey(OWNER, key)).toBe('acme')
     // round-trip General → no tag
-    const gkey = workBoardScopeKey(OWNER, 'general')
+    const gkey = workBoardScopeKey(OWNER, GENERAL_WORK_BOARD_PROJECT_ID)
     expect(workBoardProjectIdForKey(OWNER, gkey)).toBeUndefined()
   })
 

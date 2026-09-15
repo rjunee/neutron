@@ -196,6 +196,40 @@ describe('resolveEntryRoute against the gateway', () => {
     );
     expect(route).toBe(GENERAL_CHAT_ROUTE);
   });
+  /**
+   * A DEVICE ID THIS CLIENT CANNOT RESOLVE MUST NOT COST THE OWNER THEIR PROJECTS.
+   *
+   * The id scopes the per-device unread mark and nothing else. But
+   * `installationDeviceId` rethrows on a storage failure, and `resolveEntryRoute`
+   * catches EVERY fetch failure into the General route — so awaiting it
+   * unconditionally inside the list fetch turned "storage was not ready" into "you
+   * have no projects", and dropped the owner on General at launch. That is the
+   * unknown/absent collapse, in the one place the owner sees first.
+   */
+  describe('an unresolvable device id', () => {
+    it('still lists the projects, and still picks the most recent one', async () => {
+      const route = await withFetch(
+        (async () =>
+          new Response(
+            JSON.stringify({
+              projects: [
+                { id: 'willow', name: 'Willow', description: '', persona: '', privacy_mode: 'private',
+                  billing_mode: 'personal', members: [], kind: 'solo', origin_instance: 'local',
+                  last_activity_at: '2026-07-01T00:00:00.000Z' },
+                { id: 'tabs', name: 'Tabs', description: '', persona: '', privacy_mode: 'private',
+                  billing_mode: 'personal', members: [], kind: 'solo', origin_instance: 'local',
+                  last_activity_at: '2026-08-01T00:00:00.000Z' },
+              ],
+            }),
+            { status: 200, headers: { 'content-type': 'application/json' } },
+          )) as unknown as typeof fetch,
+        async () => resolveEntryRoute({ base_url: 'http://x', token: 't' }),
+      );
+      // NOT the General floor: General is for no projects or a failed fetch, and
+      // neither is true here — only the device id was unavailable.
+      expect(route).toBe('/projects/tabs/chat');
+    });
+  });
 });
 
 describe('the entry is WIRED — the list screen is gone, not merely unused', () => {
@@ -242,3 +276,4 @@ describe('the entry is WIRED — the list screen is gone, not merely unused', ()
     expect(offenders).toEqual([]);
   });
 });
+

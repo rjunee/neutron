@@ -14,9 +14,9 @@ export interface ProjectConversation {
   readonly spec: Omit<AgentSpec, 'prompt'>
 }
 
-/** Production implementation is still required. Resume this exact project session,
- * enforce the request's grants/model/effort before dispatch, and resolve only on
- * an observed end of the dispatch turn. Acceptance, empty output and child exit 0
+/** Claude implementation: createClaudeActingTurn in claude-acting-turn.ts. Resume this exact project session,
+ * verify available grants and pass model/effort in the dispatch specification.
+ * Claude observes the trailer within the host budget. Acceptance, empty output and child exit 0
  * are insufficient. Throw on uncertainty; never retry the dispatch here.
  * Pi must bind subagent to the request and supply an out-of-grant trailer writer.
  * This is dispatch-turn completion; child completion still requires the file. */
@@ -27,7 +27,7 @@ export type ProjectActingTurn = (input: {
   timeout_ms: number
   signal: AbortSignal
   subagent?: string
-}) => Promise<{ kind: 'turn-ended' } | { kind: 'unknown'; detail: string }>
+}) => Promise<{ kind: 'turn-ended' } | { kind: 'unknown'; detail: string } | (Extract<BoundedWorkOutcome, { kind: 'refused' }> & { detail: string })>
 
 type Completed = Extract<BoundedWorkOutcome, { kind: 'completed' }>
 export interface ProjectTrailerDecoder {
@@ -56,8 +56,9 @@ export function decodeProjectTrailer(bytes: string, request: BoundedWorkRequest,
     }
     if (value.kind !== 'completed') return unknown('Trailer outcome kind missing or unsupported.')
     if (!validate(value.result)) return unknown('Trailer result failed host schema validation.')
-    const metadata = host.metadata(request)
-    if (!metadata) return unknown('Host usage/model/thread observation missing.')
+    let metadata: ReturnType<ProjectTrailerDecoder['metadata']>
+    try { metadata = host.metadata(request) } catch { /* Telemetry cannot invalidate a validated result. */ }
+    metadata ??= { usage: null, model_reported: null, thread_id: null }
     return { kind: 'completed', result: value.result, ...metadata }
   } catch {
     return unknown('Trailer JSON or host validation could not be read.')
@@ -124,10 +125,15 @@ export async function createProjectRunners(options: ProjectRunnersOptions) {
     supports: admission.supports,
     async run(request, placement, signal) {
       let uncertainty: string | undefined
+      let refusal: Extract<BoundedWorkOutcome, { kind: 'refused' }> | undefined
       const runner = construct({
         ...common,
         async composeActingTurn(_topic, spec, turn: { timeout_ms: number; subagent?: string }) {
           const observation = await options.actingTurn({ conversation, request, spec, signal, ...turn })
+          if (observation.kind === 'refused') {
+            refusal = { kind: 'refused', reason: observation.reason }
+            throw new Error(observation.detail)
+          }
           if (observation.kind !== 'turn-ended') {
             uncertainty = observation.detail
             throw new Error('Dispatch turn completion unknown')
@@ -136,7 +142,7 @@ export async function createProjectRunners(options: ProjectRunnersOptions) {
         },
       })
       const outcome = await runner.run(request, placement, signal)
-      return uncertainty === undefined ? outcome : unknown(`Dispatch turn completion unknown: ${uncertainty}`)
+      return refusal ?? (uncertainty === undefined ? outcome : unknown(`Dispatch turn completion unknown: ${uncertainty}`))
     },
     liveness: async () => 'unknown',
   }) : undefined

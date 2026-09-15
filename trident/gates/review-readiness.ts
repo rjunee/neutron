@@ -8,6 +8,8 @@ export type ReviewReadinessObservation =
     head: string
     configuration: { kind: 'unknown'; detail: string } | { kind: 'resolved'; required: readonly string[] }
     mergeability: 'mergeable' | 'conflicting' | 'pending'
+    /** Missing evidence is incomplete, including older injected sources. */
+    checksComplete?: boolean
     checks: readonly { name: string; state: 'passed' | 'failed' | 'skipped' | 'running' }[]
   }
 
@@ -18,7 +20,7 @@ export type ReviewReadiness =
   | Exclude<GateResult, { kind: 'allow' }>
 
 export interface ReviewReadinessSource {
-  /** Must acquire complete configuration and check rows, or return unknown. */
+  /** Acquire configuration and revision; unreadable check lists carry incomplete evidence and wait. */
   observe(snapshot: BuildSnapshot, signal: AbortSignal): Promise<ReviewReadinessObservation>
 }
 
@@ -41,6 +43,7 @@ export function classifyReviewReadiness(snapshot: BuildSnapshot, observation: Re
     !Array.isArray(rows) || rows.some(row => !row || typeof row.name !== 'string' || !row.name.trim() || !['passed', 'failed', 'skipped', 'running'].includes(row.state))) {
     return unknown('Review check configuration or rows are malformed')
   }
+  if (observation.checksComplete !== true) return { kind: 'pending', detail: 'Review check lists are unreadable or incomplete' }
   const ran = rows.filter(row => row.state !== 'skipped')
   for (const name of required) {
     const matching = ran.filter(row => row.name === name)

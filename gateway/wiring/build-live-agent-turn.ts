@@ -68,6 +68,7 @@ import {
 } from '@neutronai/channels/button-primitive.ts'
 import type { ChatOutbound } from '@neutronai/landing/chat-protocol.ts'
 import { getBestModel } from '@neutronai/runtime/models.ts'
+import { GENERAL_RAIL_ID } from '@neutronai/wire-types/topic-id.ts'
 import { assembleSystemPrompt } from '@neutronai/runtime/system-prompt.ts'
 import type { AgentSpec, Substrate } from '@neutronai/runtime/substrate.ts'
 import type { ToolDef } from '@neutronai/cores-sdk/manifest'
@@ -1909,7 +1910,7 @@ export function buildLiveAgentTurn(
           // there is no prior reply (first message / a standing preference still
           // judges fine against an empty prior).
           agent_text: priorAgentReply ?? '',
-          scope,
+          scope: turn.project_id ?? GENERAL_RAIL_ID,
           observed_at,
         })
       } catch (err) {

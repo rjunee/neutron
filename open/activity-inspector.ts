@@ -43,14 +43,13 @@
  *      no tool events whatsoever.
  */
 
-/** Scope key for the buffer: a project id, or `'general'` for the no-project
+/** Scope key for the buffer: a project id, or `'~general'` for the no-project
  *  General topic (which is a real chat scope with a real warm session, so it gets
  *  a real buffer — never assume a project row exists). */
 export type InspectorScopeKey = string
 
-/** The General (no-project) scope key. Mirrors the `project_id ?? 'general'`
- *  convention the live-turn metering context already uses. */
-export const GENERAL_SCOPE: InspectorScopeKey = 'general'
+/** Collision-proof General (no-project) scope key. */
+export const GENERAL_SCOPE: InspectorScopeKey = '~general'
 
 /** Resolve a nullable project id to a buffer scope key. */
 export function inspectorScopeKey(project_id: string | null | undefined): InspectorScopeKey {

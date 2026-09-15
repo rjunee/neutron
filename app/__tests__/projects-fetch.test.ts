@@ -171,7 +171,13 @@ describe('fetchProjects (ISSUES #9)', () => {
     });
     const p: Project = got.projects[0]!;
     expect(p.emoji).toBe('📁');
-    expect(p.unread_count).toBe(0);
+    // UNKNOWN, NOT ZERO — and this assertion is the change, not an accident of it.
+    // A gateway that omits `unread_count` has not told us the count is zero; it has
+    // told us nothing. Reading that as 0 renders a project as CAUGHT UP when the
+    // truth is unmeasured, which is the one direction that loses the owner's
+    // attention silently. `null` is its own state and the rail renders it as such
+    // (`railBadgeLabel(null)` → '?', `railBadgeLabel(0)` → no badge).
+    expect(p.unread_count).toBeNull();
     // Missing last_activity_at falls back to `now`.
     expect(p.last_activity_ms).toBe(1_700_000_000_000);
   });

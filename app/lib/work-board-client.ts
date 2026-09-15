@@ -27,9 +27,9 @@ import {
   type GatewayHttpClientOptions,
 } from '@neutronai/client-core';
 import {
-  GENERAL_HTTP_ID,
-  httpProjectSegment,
-  httpProjectSegmentEncoded,
+  RAIL_GENERAL_ID,
+  httpScopeSegment,
+  httpScopeSegmentEncoded,
 } from './general-scope';
 
 /** `archived` = SHELVED (migration 0130): deprioritised, off the active lane,
@@ -163,13 +163,13 @@ export type WorkBoardWorkerResult =
  * The id the General board answers to ON THE SERVER.
  *
  * General is NOT a project row — it is the no-project scope — but it DOES have a
- * real, reachable board: `workBoardScopeKey(owner_slug, 'general')` collapses to
+ * real, reachable board: `workBoardScopeKey(owner_slug, '~general')` collapses to
  * the bare owner slug (`work-board/store.ts`), which is also where every
  * pre-scoping legacy row and every agent `work_board_*` write lands. So the
  * General Work tab has content to show; it just has to ask for it by the name the
  * server can spell.
  */
-export const GENERAL_WORK_BOARD_PROJECT_ID = GENERAL_HTTP_ID;
+export const GENERAL_WORK_BOARD_PROJECT_ID = RAIL_GENERAL_ID;
 
 /**
  * Map a client-side scope id to its Work Board HTTP PATH SEGMENT.
@@ -181,12 +181,12 @@ export const GENERAL_WORK_BOARD_PROJECT_ID = GENERAL_HTTP_ID;
  * with the sentinel — pass through untouched.
  */
 export function workBoardPathSegment(project_id: string): string {
-  return httpProjectSegment(project_id);
+  return httpScopeSegment(project_id);
 }
 
 /** The path segment, percent-encoded for interpolation into a URL. */
 function seg(project_id: string): string {
-  return httpProjectSegmentEncoded(project_id);
+  return httpScopeSegmentEncoded(project_id);
 }
 
 export type WorkBoardClientOptions = GatewayHttpClientOptions;

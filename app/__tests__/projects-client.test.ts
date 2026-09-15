@@ -1,3 +1,16 @@
+import { beforeAll, afterAll } from 'bun:test';
+const previousDeviceStorage = Object.getOwnPropertyDescriptor(globalThis, 'localStorage');
+beforeAll(() => {
+  const values = new Map<string, string>();
+  Object.defineProperty(globalThis, 'localStorage', { configurable: true, value: {
+    getItem: (key: string) => values.get(key) ?? null,
+    setItem: (key: string, value: string) => { values.set(key, value); },
+  } });
+});
+afterAll(() => {
+  if (previousDeviceStorage) Object.defineProperty(globalThis, 'localStorage', previousDeviceStorage);
+  else Reflect.deleteProperty(globalThis, 'localStorage');
+});
 /**
  * @neutronai/app — projects-client unit tests (P5.2).
  *
@@ -307,6 +320,7 @@ describe('ProjectsClient', () => {
     expect(call!.url).toBe('http://example.test/api/app/projects');
     expect(call!.method).toBe('GET');
     expect(call!.headers['authorization']).toBe('Bearer dev:sam');
+    expect(call!.headers['x-device-id']).toMatch(/^dev-/);
   });
 
   it('list propagates source_errors and defaults them to [] when absent (M2.3)', async () => {

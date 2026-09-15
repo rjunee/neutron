@@ -431,7 +431,8 @@ describe('app-projects surface — GET /api/app/projects (list)', () => {
     expect(neutron).toBeDefined()
     expect(typeof neutron!.emoji).toBe('string')
     expect(neutron!.emoji.length).toBeGreaterThan(0)
-    expect(neutron!.unread_count).toBe(0)
+    // This in-memory store has no chat log: unknown is not a known zero.
+    expect(neutron!.unread_count).toBeNull()
     expect(typeof neutron!.last_activity_at).toBe('string')
   })
 

@@ -24,9 +24,9 @@
  * scrollback — a restart legitimately returns an empty buffer.
  */
 
-import { sanitizeProjectId } from '@neutronai/channels/adapters/app-ws/envelope.ts'
 import type { AppWsAuthResolver } from '@neutronai/channels/adapters/app-ws/auth.ts'
 import { jsonError, jsonOk, resolveBearer } from './surface-kit.ts'
+import { resolveScopeSegment } from './scope-segment.ts'
 
 /**
  * The minimal inspector read surface this route needs. `ActivityInspector`
@@ -55,6 +55,7 @@ export interface ActivitySnapshotSource {
 export interface ActivitySurfaceOptions {
   inspector: ActivitySnapshotSource
   auth: AppWsAuthResolver
+  scopeKey: (project_id: string | null | undefined) => string
 }
 
 export interface ActivitySurface {
@@ -67,7 +68,7 @@ const PROJECT_PATH_RE = /^\/api\/app\/projects\/([^/]+)\/activity$/
 const GENERAL_PATH = '/api/app/activity'
 
 export function createActivitySurface(opts: ActivitySurfaceOptions): ActivitySurface {
-  const { inspector, auth } = opts
+  const { inspector, auth, scopeKey } = opts
   return {
     handler: async (req) => {
       const url = new URL(req.url)
@@ -80,12 +81,12 @@ export function createActivitySurface(opts: ActivitySurfaceOptions): ActivitySur
       let scope_key: string
       let project_id: string | null = null
       if (pathname === GENERAL_PATH) {
-        scope_key = 'general'
+        scope_key = scopeKey(undefined)
       } else {
         const match = PROJECT_PATH_RE.exec(pathname)
         if (match === null) return null
         const raw = match[1] ?? ''
-        project_id = sanitizeProjectId(raw)
+        project_id = resolveScopeSegment(raw)
         if (project_id === null) {
           return jsonError(
             400,

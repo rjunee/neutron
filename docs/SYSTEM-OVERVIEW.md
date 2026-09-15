@@ -4259,13 +4259,19 @@ order by `COALESCE(last_activity_at, updated_at) DESC`. **Emoji** defaults to a
 deterministic pick from the name (`gateway/projects/default-emoji.ts` — keyword
 table + hash fallback; `GENERAL_EMOJI` = 💬), resolved from NULL at serve time so
 legacy rows always show a glyph, and is editable in the Settings tab (PATCH
-`{ emoji }`). **Unread** is honest: `unread_count` = agent messages on the project
-topic (`app:<user>:<project>`) beyond the owner's highest READ receipt seq
-(`app_chat_messages` ⋈ `app_chat_receipts`; the active project's badge is zeroed
-client-side since viewing = read). No fabricated counts — the separate
-`chat-topics-surface` no-fake-unread contract is untouched. The
-`projects_changed` frame (`envelope.ts` `AppWsOutboundProjectsChanged`) carries
-`emoji` / `unread` / `last_activity_at` per project alongside id + label.
+`{ emoji }`). **Unread** counts agent messages beyond the receiving device's
+mark in `rail_device_marks` (gateway/projects/sqlite-store.ts:405-415). Per the
+2026-09-15 decision in `SPEC.md`, live frames are built per connection
+(open/composer.ts:4124-4145; channels/adapters/app-ws/session-registry.ts:158-170).
+Unresolved installation identity or a failed device read omits `unread`; page
+bootstrap also omits it (open/composer.ts:2431-2432). HTTP uses nullable
+`unread_count` (gateway/projects/sqlite-store.ts:399). Native unread continues
+through HTTP while its live overlay copies activity and live-run state only
+(app/app/projects/[id]/_layout.tsx:291-304,372-375). Web badge presentation hides
+an omitted unread value (landing/chat-react/ChatApp.tsx:1691).
+The `projects_changed` frame retains `emoji` / `last_activity_at` and optional
+`unread` alongside id + label (wire-types/app-ws-envelope.ts:368-378).
+
 
 ## Archived projects — reversible archive + global Admin restore
 

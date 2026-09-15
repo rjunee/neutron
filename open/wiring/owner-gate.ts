@@ -63,7 +63,7 @@ export interface ProjectRailRow {
   id: string
   label: string
   emoji: string
-  unread: number
+  unread?: number
   last_activity_at: string
   activity: ProjectActivity
   preview: string | null

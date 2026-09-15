@@ -39,7 +39,6 @@
 
 import { readFile } from 'node:fs/promises'
 
-import { sanitizeProjectId } from '@neutronai/channels/adapters/app-ws/envelope.ts'
 import type { AppWsAuthResolver } from '@neutronai/channels/adapters/app-ws/auth.ts'
 import type { WebChatSessionProjectRegistry } from './chat-bridge.ts'
 import {
@@ -84,6 +83,7 @@ import {
   MAX_BINARY_BYTES,
 } from '../storage/binary-types.ts'
 import { jsonError, jsonOk, ownerSlugMismatch, readJsonBody, resolveBearer } from './surface-kit.ts'
+import { resolveScopeSegment } from './scope-segment.ts'
 
 export interface AppDocsSurfaceOptions {
   store: DocStore
@@ -172,7 +172,7 @@ export function createAppDocsSurface(opts: AppDocsSurfaceOptions): AppDocsSurfac
       const commentsMatch = COMMENTS_PATH_RE.exec(pathname)
       if (commentsMatch !== null) {
         const raw_project_id = commentsMatch[1] ?? ''
-        const project_id = sanitizeProjectId(raw_project_id)
+        const project_id = resolveScopeSegment(raw_project_id)
         if (project_id === null) {
           return jsonError(
             400,
@@ -221,7 +221,7 @@ export function createAppDocsSurface(opts: AppDocsSurfaceOptions): AppDocsSurfac
 
       const raw_project_id = match[1] ?? ''
       const action = match[2] ?? ''
-      const project_id = sanitizeProjectId(raw_project_id)
+      const project_id = resolveScopeSegment(raw_project_id)
       if (project_id === null) {
         return jsonError(
           400,
@@ -1843,4 +1843,3 @@ function jsonForError(err: unknown): Response {
   }
   throw err
 }
-

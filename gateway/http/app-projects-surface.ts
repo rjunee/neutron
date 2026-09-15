@@ -115,8 +115,8 @@ export interface ProjectListEntry extends ProjectSettings {
    *  '' when unknown. The rail sorts DESC so an active project floats to top. */
   last_activity_at: string
   /** Count of agent messages on this project's topic the owner hasn't read
-   *  (0 when caught up, or when unread can't be computed — never a fake value). */
-  unread_count: number
+   *  (0 when caught up; null when the requesting device is unknown). */
+  unread_count: number | null
 }
 
 /**
@@ -221,9 +221,9 @@ export interface ProjectSettingsStore {
    * List every project in the instance scope. `user_id` (the owner) lets the
    * store form each project's chat topic (`app:<user>:<project>`) to compute
    * the per-project `unread_count`; omitted by callers that don't need unread
-   * (unread degrades to 0). Returns the richer {@link ProjectListEntry} rows.
+   * (unread is null without a device identity). Returns the richer {@link ProjectListEntry} rows.
    */
-  list(project_slug: string, user_id?: string): Promise<ProjectListEntry[]>
+  list(project_slug: string, user_id?: string, device_id?: string): Promise<ProjectListEntry[]>
   /**
    * Archive a project (migration 0095) — sets `archived_at` so it leaves the
    * rail but stays restorable from the Admin tab. Idempotent. Returns `false`
@@ -353,9 +353,9 @@ export class InMemoryProjectSettingsStore implements ProjectSettingsStore {
       // Archived projects leave the rail (twin of the SQLite `archived_at`
       // filter) — they surface only via `listArchived`.
       if (this.archived.has(key)) continue
-      // The in-memory seam has no chat log, so unread degrades to 0 and there
+      // The in-memory seam has no chat log, so unread is unknown and there
       // is no activity timestamp — the SQLite store owns the real values.
-      out.push({ ...cloneSettings(value), last_activity_at: '', unread_count: 0 })
+      out.push({ ...cloneSettings(value), last_activity_at: '', unread_count: null })
     }
     out.sort((a, b) => a.id.localeCompare(b.id))
     return out
@@ -626,7 +626,7 @@ export function createAppProjectsSurface(opts: AppProjectsSurfaceOptions): AppPr
         if (method === 'POST') {
           return handleCreate(req, createProject, resolved.project_slug, resolved.user_id)
         }
-        return handleList(store, resolved.project_slug, resolved.user_id, sharedProjects)
+        return handleList(store, resolved.project_slug, resolved.user_id, sharedProjects, req.headers.get('x-device-id') ?? undefined)
       }
 
       // GET /api/app/projects/archived — the Admin tab's restorable list of
@@ -825,11 +825,12 @@ async function handleList(
   project_slug: string,
   user_id: string,
   sharedProjects: SharedProjectsResolver | undefined,
+  device_id?: string,
 ): Promise<Response> {
   // Local solo projects — this owner's own DB. Always rendered, even
   // if the shared fan-out below fails entirely. `user_id` lets the store
   // compute each project's unread count off its chat topic.
-  const local = await store.list(project_slug, user_id)
+  const local = await store.list(project_slug, user_id, device_id)
   const soloItems: ProjectListItem[] = local.map((p) => ({
     ...p,
     kind: 'solo',
@@ -998,7 +999,7 @@ function sharedItemToListItem(item: SharedProjectItem): ProjectListItem {
     members: [],
     // No local chat log for a foreign project → no activity key / unread.
     last_activity_at: '',
-    unread_count: 0,
+    unread_count: null,
     kind: 'shared',
     origin_instance: item.owning_instance_slug,
     owning_instance_slug: item.owning_instance_slug,

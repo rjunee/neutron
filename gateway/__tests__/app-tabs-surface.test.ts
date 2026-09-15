@@ -202,6 +202,15 @@ describe('app-tabs surface — builtin-only (no Cores wired)', () => {
     expect(json.tabs.every((t) => t.source === 'builtin' && t.scope === 'project')).toBe(true)
   })
 
+  it('keeps the reserved General scope distinct from the general project', async () => {
+    const scope = await authedFetch(harness.base, '/api/app/projects/~general/tabs')
+    const project = await authedFetch(harness.base, '/api/app/projects/general/tabs')
+    expect(scope.status).toBe(200)
+    expect(project.status).toBe(200)
+    expect(((await scope.json()) as TabsPayload).project_id).toBe('~general')
+    expect(((await project.json()) as TabsPayload).project_id).toBe('general')
+  })
+
   it('returns only the builtin Admin global tab', async () => {
     const res = await authedFetch(harness.base, `/api/app/tabs`)
     expect(res.status).toBe(200)

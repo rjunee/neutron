@@ -61,7 +61,7 @@ export interface CreateReflectionDeps {
    * an owner correction reaches the build agents that re-ground on the project's
    * nexus (RC3). Fire-and-forget: it must not throw (the caller additionally
    * guards it), and it never blocks the correction write. `scope` is the turn's
-   * project scope (`turn.scope`, `general` for the General topic) — the nexus
+   * project scope (`turn.scope`, `~general` for the General topic) — the nexus
    * project the learning is filed under. Absent (default, and whenever the
    * shared perfect-recall flag is off) → no emission, unchanged behaviour.
    */

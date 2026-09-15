@@ -489,7 +489,7 @@ describe('the CARD — BLOCKED is its own lane, and the run cannot move anything
       auth: createAppWsAuthResolver({ project_slug: 'proj-1', bypass: true }),
     })
     const res = await surface.handler(new Request(
-      `http://x/api/app/projects/general/work-board/${card.id}/complete`,
+      `http://x/api/app/projects/~general/work-board/${card.id}/complete`,
       { method: 'POST', headers: { authorization: 'Bearer dev-token' } },
     ))
     expect(res?.status).toBe(409)

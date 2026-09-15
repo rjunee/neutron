@@ -225,11 +225,10 @@ export const MAX_DESIGN_DOC_REF_LEN = 2048
 /**
  * The reserved General/instance board id. The clients treat General as a
  * null/empty project id (web `ProjectShell.isGeneral = projectId == null ||
- * len === 0`; the app subscribes with `''`), and the server-wide convention
- * normalizes an absent project to `'general'` (`turn.project_id ?? 'general'`).
+ * len === 0`; the app subscribes with `''`), while HTTP uses the reserved id.
  * Any of these map onto the General board.
  */
-export const GENERAL_WORK_BOARD_PROJECT_ID = 'general'
+export const GENERAL_WORK_BOARD_PROJECT_ID = '~general'
 
 /**
  * The per-project Work Board STORAGE KEY (the `project_slug` column value),
@@ -240,7 +239,7 @@ export const GENERAL_WORK_BOARD_PROJECT_ID = 'general'
  * keyed per PROJECT — not per owner — or all projects collapse onto one board
  * (the bug this fixes). The map:
  *
- *  - General (project_id absent / `''` / `'general'`) → the bare `owner_slug`.
+ *  - General (project_id absent / `''` / `'~general'`) → the bare `owner_slug`.
  *    Deliberate: it maps every PRE-EXISTING row (all written under the instance
  *    owner slug before per-project scoping) onto the General board — the context
  *    they were created in (the chat/agent tools + the instance Plan tab), so no

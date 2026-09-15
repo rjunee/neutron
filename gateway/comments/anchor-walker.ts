@@ -37,6 +37,7 @@ import { readFile } from 'node:fs/promises'
 import { join } from 'node:path'
 
 import { sanitizeProjectId } from '@neutronai/channels/adapters/app-ws/envelope.ts'
+import { GENERAL_RAIL_ID } from '@neutronai/wire-types/topic-id.ts'
 import {
   CommentStore,
   defaultUlid,
@@ -321,7 +322,9 @@ export class AnchorWalker {
    * logged + swallowed.
    */
   readonly handle: OnMutationSuccess = async (input) => {
-    const project_id = sanitizeProjectId(input.project_id)
+    const project_id = input.project_id === GENERAL_RAIL_ID
+      ? GENERAL_RAIL_ID
+      : sanitizeProjectId(input.project_id)
     if (project_id === null) {
       this.log('anchor-walker.invalid_project_id', { project_id: input.project_id })
       return

@@ -211,7 +211,7 @@ describe('startWorkBoardLive — the activity tap rides the board socket', () =>
     startWorkBoardLive({
       base_url: 'https://t.neutron.test',
       token: 'dev:sam',
-      project_id: '', // General — scope `''` on the wire, `'general'` to the inspector
+      project_id: '', // General — scope `''` in the view, `'~general'` to the inspector
       device_id: 'd1',
       onSnapshot: () => {},
       onActivity: (r) => rows.push(r),
@@ -221,7 +221,7 @@ describe('startWorkBoardLive — the activity tap rides the board socket', () =>
         return sock;
       },
     });
-    sock!.deliver(activityFrame('general', { seq: 1, at: T0, kind: 'turn_start', label: 'turn started' }));
+    sock!.deliver(activityFrame('~general', { seq: 1, at: T0, kind: 'turn_start', label: 'turn started' }));
     expect(opened).toBe(1);
     expect(rows.map((r) => r.kind)).toEqual(['turn_start']);
   });

@@ -244,3 +244,16 @@ test('live conversational tool surface grants the CLI Task name', async () => {
   expect(names).toContain("'Read'")
   expect(names).toContain("'Task'")
 })
+
+for (const effort of ['xhigh', 'max'] as const) {
+  test(`forwards extended effort ${effort} unchanged`, async () => {
+    const f = await fixture()
+    f.options.composeActingTurn = async (_topic, spec, opts) => {
+      const args = JSON.parse(spec.prompt.slice(spec.prompt.indexOf('\n') + 1))
+      expect(args.prompt).toContain(JSON.stringify({ ...f.req, effort }))
+      await f.trailer()
+      return 'done'
+    }
+    expect(await f.run(undefined, { ...f.req, effort })).toEqual({ kind: 'blocked', on: 'file evidence' })
+  })
+}

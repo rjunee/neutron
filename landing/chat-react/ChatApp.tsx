@@ -29,6 +29,7 @@ import { Markdown } from './Markdown.tsx'
 import { ChatErrorBoundary } from './ChatErrorBoundary.tsx'
 import { PlansPane } from './PlansPane.tsx'
 import { useChatRuntime } from './useNeutronChat.ts'
+import { GENERAL_HTTP_ID } from './general-scope.ts'
 
 import type { ChatMessageOption, ChatMessageUploadAffordance, PromptKind, ReactionChip } from '@neutronai/chat-core'
 import { DeliveryIndicator } from './DeliveryIndicator.tsx'
@@ -2442,13 +2443,13 @@ function ChatSurface({
  * The General surface's per-conversation render/cache key. It MUST be a value no
  * valid project id can ever equal, so the General surface can never collide with a
  * named project's surface (share a mount + frozen-vm cache slot). The gateway's
- * `sanitizeProjectId` accepts only `[A-Za-z0-9_.-]+`, so the leading `#` (rejected)
+ * `sanitizeProjectId` accepts only `[A-Za-z0-9_.-]+`, so the leading `~` (rejected)
  * makes this collision-proof — unlike the old `__general__`, which was itself a
  * validator-legal project id and thus collided with a project literally named that
  * (Codex P1: on a General↔`__general__` switch the shared cache slot leaked one
  * scope's board/transcript into the other).
  */
-export const GENERAL_CONV_ID = '#general'
+export const GENERAL_CONV_ID = GENERAL_HTTP_ID
 
 /**
  * The stable per-conversation identity — the project id, or the collision-proof

@@ -130,6 +130,14 @@ describe('app-docs surface — auth', () => {
     const json = (await res.json()) as { code: string }
     expect(json.code).toBe('invalid_project_id')
   })
+
+  it('accepts the reserved General scope without aliasing the general project', async () => {
+    const general = await authedFetch(harness.base, '/api/app/projects/~general/docs/tree')
+    expect(general.status).toBe(200)
+    expect(harness.store.resolveDocsRoot('~general')).not.toBe(
+      harness.store.resolveDocsRoot('general'),
+    )
+  })
 })
 
 describe('app-docs surface — GET tree', () => {
