@@ -1,3 +1,4 @@
+import { fixLineage } from './gates/fix-lineage.ts'
 import { readFile } from 'node:fs/promises'
 import { placementFor, type Provider, type WorkerRunner } from '@neutronai/runtime/bounded-work.ts'
 import type { BuildRunDeps, BuildRunInput, BuildSnapshot, GateResult } from './build-run.ts'
@@ -24,6 +25,8 @@ export interface BuildHostOptions {
   mutation: Omit<MutationGateInput, 'expected_head' | 'claim'> & {
     readClaim(snapshot: BuildSnapshot): Promise<MutationGateInput['claim']>
   }
+  /** Persisted previous review pin; explicit null for a fresh first round. */
+  reviewed_head: string | null
   admission?: AdmissionSource
   review?: ReviewSource
   observeCi(snapshot: BuildSnapshot): Promise<CiRunObservation>
@@ -80,7 +83,7 @@ export function createBuildHost(options: BuildHostOptions): { deps: BuildRunDeps
       if (!proof.ok) return { kind: 'blocked', on: proof.reason }
       const readiness = await publicationReadiness(options.mutation.run_host, options.mutation.run.repo_path, options.mutation.run.branch ?? `trident/${options.mutation.run.slug}`, options.leak.base_sha, snapshot)
       if (readiness.kind !== 'allow') return readiness
-      return unknown('Publication previous reviewed-head lineage could not be established')
+      return fixLineage(options.mutation.run_host, options.mutation.run.repo_path, options.mutation.run.branch ?? `trident/${options.mutation.run.slug}`, options.reviewed_head, snapshot.head)
     },
     async mergeGate(snapshot) {
       const ci = ciReadinessForHead(snapshot.head, await options.observeCi(snapshot))

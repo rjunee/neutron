@@ -30,6 +30,7 @@ async function fixture() {
   let leakOutput = 'LEAK GATE: INCOMPLETE\nRULES THAT COULD NOT RUN: pii'
   let leakCode = 3
   const options: BuildHostOptions = {
+    reviewed_head: null,
     runners: { pi: fakeRunner('pi') }, replProvider: 'pi',
     workers: Object.fromEntries(['plan', 'build', 'review', 'fix'].map(role => [role, { provider: 'pi', request }])) as BuildHostOptions['workers'],
     effects: {
@@ -153,7 +154,7 @@ test('mutation proof blocks missing nomination and pins the reviewed head', asyn
   const { deps } = f.make()
   expect(await deps.publishGate(snapshot)).toMatchObject({ kind: 'blocked', on: expect.stringContaining('nominated no mutation') })
   f.prose()
-  expect(await deps.publishGate(snapshot)).toMatchObject({ kind: 'unknown', detail: 'Publication previous reviewed-head lineage could not be established' })
+  expect(await deps.publishGate(snapshot)).toMatchObject({ kind: 'allow' })
   expect(await deps.publishGate({ ...snapshot, head: 'c'.repeat(40) })).toMatchObject({ kind: 'blocked', on: expect.stringContaining('branch tip') })
 })
 
@@ -271,7 +272,7 @@ test('host publication readiness is reached after a measured prose exemption', a
     ? Promise.resolve(commandResult('', 1)) : baseRun(argv, cwd)
   expect(await f.make().deps.publishGate(snapshot)).toEqual({ kind: 'blocked', on: 'Publication branch does not contain the pinned launch base' })
   f.options.mutation.run_host = baseRun
-  expect(await f.make().deps.publishGate(snapshot)).toEqual({ kind: 'unknown', detail: 'Publication previous reviewed-head lineage could not be established' })
+  expect(await f.make().deps.publishGate(snapshot)).toEqual({ kind: 'allow' })
 })
 
 test('host merge eligibility is reached after green CI', async () => {
@@ -299,4 +300,52 @@ test('host admission and review reach authoritative policy sources', async () =>
   expect(await host.deps.reviewGate(payload, snapshot, 1)).toEqual({ kind: 'approve' })
   f.options.review.readSynthesis = async () => null
   expect(await host.deps.reviewGate(payload, snapshot, 1)).toMatchObject({ kind: 'unknown' })
+})
+
+test('fresh null reviewed_head reaches allow and publishes through the driver', async () => {
+  const f = await fixture()
+  f.prose()
+  f.clean()
+  const payload = { verdict: 'APPROVE', findings: [] }
+  f.options.admission = {
+    observe: async input => ({ runId: input.run_id, repo: 'repo', branch: 'change', baseBranch: 'main', prior: null }),
+    run: async argv => commandResult(argv.includes('rev-parse') ? head : ''),
+  }
+  f.options.review = {
+    seats: [{ id: 'core', provider: 'pi', modelId: 'core-model', role: 'core', enabled: true }],
+    readSeat: async (_seat, value, round) => ({ runId: 'test', head: value.head, round, provider: 'pi', modelId: 'core-model', status: 'completed', payload }),
+    retrySeat: async () => { throw Error('unexpected retry') },
+    readSynthesis: async (value, round) => ({ runId: 'test', head: value.head, round, checkpoint: 'argus-approved', payload }),
+  }
+  f.options.runners.pi = {
+    ...fakeRunner('pi'),
+    run: async () => ({ kind: 'completed', result: { ...snapshot, payload }, usage: { input_tokens: 0, output_tokens: 0 }, model_reported: 'test-model', thread_id: null }),
+  }
+  let publications = 0
+  f.options.effects.publish = async value => { expect(value).toEqual(snapshot); publications++ }
+  const host = f.make()
+  expect(f.options.reviewed_head).toBeNull()
+  expect(await host.deps.publishGate(snapshot)).toEqual({ kind: 'allow' })
+  // Stop after publication: this fixture deliberately does not create a remote PR.
+  expect(await buildRun(f.input(host), host.deps, new AbortController().signal)).toEqual({
+    kind: 'blocked', phase: 'merge', on: 'Published PR does not match reviewed revision', recipient: 'orchestrator',
+  })
+  expect(publications).toBe(1)
+})
+
+test('host propagates G084 refusals after proof and readiness allow', async () => {
+  const f = await fixture()
+  f.prose()
+  const pin = 'd'.repeat(40)
+  const baseRun = f.options.mutation.run_host
+  f.options.reviewed_head = 'deadbeef'
+  expect(await f.make().deps.publishGate(snapshot)).toMatchObject({ kind: 'blocked', on: expect.stringContaining('not a full') })
+  f.options.reviewed_head = pin
+  for (const [stderr, kind] of [['', 'blocked'], ['fatal: missing object', 'unknown']] as const) {
+    f.options.mutation.run_host = (argv, cwd) => argv.includes('--is-ancestor') && argv.includes(pin)
+      ? Promise.resolve({ ok: false, exit_code: stderr ? 128 : 1, stdout: '', stderr }) : baseRun(argv, cwd)
+    expect(await f.make().deps.publishGate(snapshot)).toMatchObject({ kind })
+  }
+  f.options.mutation.run_host = baseRun
+  expect(await f.make().deps.publishGate(snapshot)).toEqual({ kind: 'allow' })
 })
