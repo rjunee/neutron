@@ -17,6 +17,7 @@ import {
   type RuntimeSubAgentDispatcher,
 } from '../src/sub-agent.ts'
 import { SONNET_MODEL } from '@neutronai/runtime/models.ts'
+import { resolveModelPricingTarget } from '@neutronai/runtime/model-pricing.ts'
 import {
   SUB_AGENT_DEFAULT_BUDGET_MS,
   SUB_AGENT_MIN_BUDGET_MS,
@@ -203,9 +204,11 @@ describe('dispatchResearchSubAgent', () => {
 })
 
 describe('task 7 — Sonnet default + retry feedback + tools_available', () => {
-  // T9 — default sub-agent model is SONNET_MODEL, not a hardcoded Haiku.
-  test('T9 DEFAULT_SUB_AGENT_MODEL === SONNET_MODEL', () => {
-    expect(DEFAULT_SUB_AGENT_MODEL).toBe(SONNET_MODEL)
+  // T9 — default sub-agent model resolves to the Sonnet class, not Haiku.
+  test('T9 DEFAULT_SUB_AGENT_MODEL resolves from the Sonnet class', () => {
+    expect(resolveModelPricingTarget(DEFAULT_SUB_AGENT_MODEL)).toBe(
+      resolveModelPricingTarget(SONNET_MODEL),
+    )
   })
 
   // T10 — retry_feedback threading: absent → user_prompt is the raw query;

@@ -91,9 +91,13 @@ export interface BuildRunInput {
  * exports WorkerRunner but no BuildHost; keep host effects here until that lands.
  */
 export interface BuildRunDeps {
+  /** Required host run-row reader; only an omitted field on a known row uses the stored default. */
+  readReviewCap(runId: string): Promise<{ kind: 'known'; max_rounds?: number | undefined } | { kind: 'unknown'; detail: string }>
   modes?: BuildModeHost
   prepareWork(request: BoundedWorkRequest, context: { snapshot: BuildSnapshot; previous: unknown; findings: readonly string[]; planner?: 'full' | 'next'; committedPlan?: PlanProbe }): Promise<void>
   measure(): Promise<Measurement>
+  /** Resolve a differing commit claim and preserve a real conflict before refusing. */
+  checkBuildClaim?(claim: string, snapshot: BuildSnapshot): Promise<GateResult>
   admissionGate(input: BuildRunInput): Promise<GateResult>
   // Existing module vocabularies are preserved across extraction.
   runLeakGatePreflight(snapshot: BuildSnapshot): Promise<BuildLeakPreflightOutcome>
@@ -168,6 +172,12 @@ export async function buildRun(input: BuildRunInput, deps: BuildRunDeps, signal:
     if (local && !deps.confirmLocalMerge) return unknown('Local merge confirmation source is missing')
     const admission = gateStop(await deps.admissionGate(input))
     if (admission) return admission
+
+    if (!deps.readReviewCap) return unknown('Review round cap source is missing')
+    const cap = await deps.readReviewCap(input.run_id)
+    if (cap.kind === 'unknown') return unknown(cap.detail)
+    const maxRounds = cap.max_rounds === undefined ? 10 : cap.max_rounds
+    if (!Number.isSafeInteger(maxRounds) || maxRounds < 1) return unknown('Review round cap is invalid')
 
     const modes = deps.modes
     if ((input.mode === 'ralph' || input.start === 'resume') && !modes) return blocked('Mode host is required')
@@ -259,17 +269,36 @@ export async function buildRun(input: BuildRunInput, deps: BuildRunDeps, signal:
         case 'failed': return { stop: failed(`${outcome.class}: ${outcome.detail}`) }
         case 'completed': break
       }
-      const observation = await deps.measure()
+      let observation = await deps.measure()
+      if (local && (role === 'build' || role === 'fix')) {
+        // G032: the host owns the three-read budget; no worker sets it.
+        for (let attempt = 1; attempt < 3 && (observation.kind === 'unknown' || !fullOid(observation.value.head)); attempt++) {
+          observation = await deps.measure()
+        }
+        if (observation.kind === 'known' && !fullOid(observation.value.head)) {
+          return { stop: unknown('Built head is missing or not a full commit OID after 3 read attempts') }
+        }
+      }
       if (observation.kind === 'unknown') return { stop: unknown(observation.detail) }
       const measured = observation.value
-      if (!corroborates(outcome.result, measured)) return { stop: failed('Worker trailer disagrees with host measurement', 'built-head-unverified') }
+      let result = outcome.result
+      if ((role === 'build' || role === 'fix') && result && typeof result === 'object'
+          && 'head' in result && typeof result.head === 'string' && result.head !== measured.head
+          && /^[a-f0-9]{4,64}$/i.test(result.head)) {
+        if (!deps.checkBuildClaim) return { stop: unknown('Build claim resolution and preservation source is missing') }
+        const claim = await deps.checkBuildClaim(result.head, measured)
+        if (claim.kind === 'unknown') return { stop: unknown(claim.detail) }
+        if (claim.kind === 'blocked') return { stop: failed(claim.on, 'built-head-unverified') }
+        result = { ...result, head: measured.head }
+      }
+      if (!corroborates(result, measured)) return { stop: failed('Worker trailer disagrees with host measurement', 'built-head-unverified') }
       // Read-only review must describe exactly the revision sent to the panel.
       if (role === 'review' && (measured.head !== snapshot.head || measured.diff !== snapshot.diff || !samePr(measured.pr, snapshot.pr))) {
         return { stop: blocked('Reviewed revision changed during review') }
       }
       snapshot = measured
-      previousPayload = outcome.result.payload
-      return { payload: outcome.result.payload }
+      previousPayload = result.payload
+      return { payload: result.payload }
     }
 
     let plan: ExecutionPlan | null = null
@@ -327,7 +356,7 @@ export async function buildRun(input: BuildRunInput, deps: BuildRunDeps, signal:
       if (stop) return stop
     }
     if (resumeFix) {
-      if (firstRound >= 5) return blocked('Review requires orchestrator arbitration: round ceiling')
+      if (firstRound >= maxRounds) return blocked('Review requires orchestrator arbitration: round ceiling')
       findings = resume!.findings.filter(f => f.kind === 'code' && f.actionable).map(f => f.text)
       if (firstRound >= 3 && findings.some(f => previous.includes(f))) return blocked('Review requires orchestrator arbitration: repeated finding')
       if (replansUsed > 0 && (findings.some(f => previous.includes(f)) || findings.length >= previousBlockingCount)) return blocked('Review requires orchestrator arbitration: post-re-plan trigger')
@@ -339,6 +368,7 @@ export async function buildRun(input: BuildRunInput, deps: BuildRunDeps, signal:
       firstRound++
     }
     for (let round = firstRound; !approved; round++) {
+      if (round > maxRounds) return blocked('Review requires orchestrator arbitration: round ceiling')
       phase = 'review'
       step_id = null
       // G035/G043: both fresh builds and fixes need a measured review artifact.
@@ -373,7 +403,7 @@ export async function buildRun(input: BuildRunInput, deps: BuildRunDeps, signal:
       previousReview = currentReview
       if (decision.kind === 're-plan') {
         // G077: a replacement needs a subsequent review within the host's cap.
-        if (round >= 5) return blocked(`design-gap: re-plan-unreachable: ${decision.whatIsMissing}; no round left for the bounded re-plan`)
+        if (round >= maxRounds) return blocked(`design-gap: re-plan-unreachable: ${decision.whatIsMissing}; no round left for the bounded re-plan`)
         replansUsed++
         findings = [decision.whatIsMissing, ...new Set([...decision.findings, ...currentReview!.findings])]
         planner = 'full'
@@ -382,7 +412,7 @@ export async function buildRun(input: BuildRunInput, deps: BuildRunDeps, signal:
         if (stop) return stop
         continue
       }
-      if (round >= 5) return blocked('Review requires orchestrator arbitration: round ceiling')
+      if (round >= maxRounds) return blocked('Review requires orchestrator arbitration: round ceiling')
       findings = [...new Set([...decision.findings, ...currentReview!.findings])]
       const fix = await work('fix', round)
       if ('stop' in fix) return fix.stop

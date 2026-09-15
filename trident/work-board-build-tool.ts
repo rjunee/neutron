@@ -99,7 +99,7 @@ export interface TridentBuildToolDeps {
    */
   repo_path: string
   /** Resolve the per-project git workspace; defaults to `ensureProjectBuildWorkspace`. */
-  resolveBuildRepo?: (owner_home: string, project_slug: string) => Promise<string>
+  resolveBuildRepo?: (owner_home: string, project_slug: string, repo_name?: string | null) => Promise<string>
   /**
    * The merge-mode probe, NOT a resolver function. REQUIRED.
    *

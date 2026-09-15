@@ -565,7 +565,7 @@ export interface BuildLlmCallSubstrateInput {
    * `normalizeProvider` (fail-loud, never a silent Claude fallback) — production
    * only ever resolves a valid `Provider` here, so this never trips in practice.
    */
-  providerResolver?: () => ProviderSelection | Provider | string | undefined
+  providerResolver?: (projectId?: string) => ProviderSelection | Provider | string | undefined
   /**
    * OpenAI-family (`'openai'` / `'openai-codex'`) configuration. Consumed
    * ONLY when the resolved provider is non-anthropic; ignored for the default
@@ -692,7 +692,7 @@ export function buildLlmCallSubstrate(
       // straight to normalizeProvider would resolve to Anthropic and SILENTLY route
       // an explicit-openai turn to Claude (audit High). When non-anthropic, delegate
       // to the OpenAI-family path; the anthropic block below stays BYTE-IDENTICAL.
-      const resolvedSelection = input.providerResolver?.()
+      const resolvedSelection = input.providerResolver?.(input.projectIdResolver?.() ?? spec.metering_context?.project_id)
       const resolvedProvider =
         typeof resolvedSelection === 'object' ? resolvedSelection.provider : resolvedSelection
       const providerSource =
@@ -702,7 +702,7 @@ export function buildLlmCallSubstrate(
           ? resolvedProvider
           : input.provider
       const provider = normalizeProvider(effectiveProvider)
-      assertConversationalProviderWired(provider)
+      assertConversationalProviderWired(provider, providerSource)
       if (provider !== 'anthropic') {
         // Conversation key mirrors the CC warm-pool key dimensions (user +
         // live active project) so continuity is scoped identically across

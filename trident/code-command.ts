@@ -145,7 +145,7 @@ export interface TridentCodeContext {
    * workspace under `repo_path` (the HOME base), returning its absolute path.
    * Defaults to `ensureProjectBuildWorkspace`. Tests inject a stub.
    */
-  resolveBuildRepo?: (owner_home: string, project_slug: string) => Promise<string>
+  resolveBuildRepo?: (owner_home: string, project_slug: string, repo_name?: string | null) => Promise<string>
   /**
    * Resolve the git-mode for this repo (GitHub origin + an authenticated
    * publisher → `'pr'`, else `'local'`). REQUIRED — the composition root owns

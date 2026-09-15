@@ -1,6 +1,7 @@
 import { assessReviewSuite, type ReviewSuiteSource } from './gates/review-suite.ts'
 import { awaitReviewReadiness, type ReviewReadinessSource } from './gates/review-readiness.ts'
 import { executeBoundReview, type BoundReviewOutcome } from './review-run.ts'
+import { checkBuildClaim } from './gates/build-claim.ts'
 import { fixLineage } from './gates/fix-lineage.ts'
 import { readFile } from 'node:fs/promises'
 import { placementFor, type Provider, type WorkerRunner } from '@neutronai/runtime/bounded-work.ts'
@@ -27,6 +28,7 @@ export interface BuildHostOptions {
   effects: Pick<BuildRunDeps, 'prepareWork' | 'measure' | 'publish' | 'merge'>
   leak: Omit<Parameters<typeof runLeakGatePreflight>[0], 'head' | 'fixer' | 'max_fix_attempts'>
   mutation: Omit<MutationGateInput, 'expected_head' | 'claim'> & {
+    run: MutationGateInput['run'] & { max_rounds?: number | undefined }
     readClaim(snapshot: BuildSnapshot): Promise<MutationGateInput['claim']>
   }
   /** Persisted previous review pin; explicit null for a fresh first round. */
@@ -74,6 +76,13 @@ export function createBuildHost(options: BuildHostOptions): { deps: BuildRunDeps
     : Promise.resolve(unknown('Local merge configuration is missing'))
   const deps: BuildRunDeps = {
     ...options.effects,
+    checkBuildClaim: (claim, snapshot) => checkBuildClaim(options.mutation.run_host,
+      options.mutation.run.repo_path, options.mutation.run.branch ?? `trident/${options.mutation.run.slug}`, claim, snapshot),
+    async readReviewCap(runId) {
+      const row = options.mutation.run
+      if (!row || row.id !== runId) return { kind: 'unknown', detail: 'Review round cap run row is missing or mismatched' }
+      return { kind: 'known', max_rounds: row.max_rounds }
+    },
     async confirmLocalMerge(snapshot) {
       if (!options.local) return unknown('Local merge configuration is missing')
       const run = options.mutation.run_host
@@ -118,7 +127,7 @@ export function createBuildHost(options: BuildHostOptions): { deps: BuildRunDeps
       ? localReadiness(snapshot)
       : awaitReviewReadiness(options.reviewReadiness, snapshot, signal),
     reviewSuite: (snapshot, round) => assessReviewSuite(options.reviewSuite, snapshot, round, options.mutation.run.id),
-    reviewGate: (payload, snapshot, round, replansUsed, recordProgress) => reviewPanel(options.review, payload, snapshot, round, options.mutation.run.id, replansUsed, recordProgress),
+    reviewGate: (payload, snapshot, round, replansUsed, recordProgress) => reviewPanel(options.review, payload, snapshot, round, options.mutation.run.id, replansUsed, { provider: options.workers.build.provider, modelId: options.workers.build.request.model_id }, recordProgress),
     async publishGate(snapshot, mergeMode) {
       const claim = await options.mutation.readClaim(snapshot)
       const proof = await runMutationProofGate({ ...options.mutation, claim, expected_head: snapshot.head })

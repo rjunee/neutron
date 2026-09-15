@@ -256,3 +256,39 @@ export async function persistOwnerTimezoneIfChanged(
   await writeOwnerTimezone(db, project_slug, tz)
   return 'written'
 }
+
+/** Live instance default. Invalid stored values fail at the shared resolver. */
+export function readInstanceModelProvider(db: ProjectDb, instance: string): string | null {
+  return db.prepare<{ model_provider: string | null }, [string]>(
+    'SELECT model_provider FROM instance_metadata WHERE instance_slug = ?',
+  ).get(instance)?.model_provider ?? null
+}
+
+/** Used by provisioning and live configuration; SQL enforces the provider vocabulary. */
+export async function writeInstanceModelProvider(
+  db: ProjectDb, instance: string, provider: string | null,
+): Promise<'written' | 'unchanged'> {
+  const current = readInstanceModelProvider(db, instance)
+  const initialized = db.prepare<{ model_provider_initialized: number }, [string]>(
+    'SELECT model_provider_initialized FROM instance_metadata WHERE instance_slug = ?',
+  ).get(instance)?.model_provider_initialized === 1
+  if (initialized && current === provider) return 'unchanged'
+  await db.run(
+    `INSERT INTO instance_metadata (instance_slug, model_provider, model_provider_initialized) VALUES (?, ?, 1)
+     ON CONFLICT(instance_slug) DO UPDATE SET model_provider = excluded.model_provider, model_provider_initialized = 1`,
+    [instance, provider],
+  )
+  return 'written'
+}
+
+/** One-time import of the former boot setting; explicit configuration always wins. */
+export async function initializeInstanceModelProvider(
+  db: ProjectDb, instance: string, legacyProvider: string | null,
+): Promise<void> {
+  await db.run(
+    `INSERT INTO instance_metadata (instance_slug, model_provider, model_provider_initialized) VALUES (?, ?, 1)
+     ON CONFLICT(instance_slug) DO UPDATE SET model_provider = excluded.model_provider, model_provider_initialized = 1
+     WHERE instance_metadata.model_provider_initialized = 0`,
+    [instance, legacyProvider],
+  )
+}
