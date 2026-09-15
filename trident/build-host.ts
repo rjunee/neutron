@@ -21,6 +21,7 @@ type Role = keyof Workers
 const roles = ['plan', 'build', 'review', 'fix'] as const
 
 export interface BuildHostOptions {
+  modes?: BuildRunDeps['modes']
   boundReview?: { run: Parameters<typeof executeBoundReview>[0]; deps: Parameters<typeof executeBoundReview>[1] }
   runners: Partial<Record<Provider, WorkerRunner>>
   replProvider: Provider
@@ -88,6 +89,7 @@ export function createBuildHost(options: BuildHostOptions): { deps: BuildRunDeps
     // A missing run row is the cap reader's `unknown`, not a crash here: the same
     // test deletes the row to exercise that refusal.
     assignedBranch: options.mutation.run?.branch ?? (options.mutation.run?.slug ? `trident/${options.mutation.run.slug}` : undefined),
+    ...(options.modes ? { modes: options.modes } : {}),
     async confirmLocalMerge(snapshot) {
       if (!options.local) return unknown('Local merge configuration is missing')
       const run = options.mutation.run_host

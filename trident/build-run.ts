@@ -60,10 +60,12 @@ export interface ResumeCheckpoint {
   findings: readonly { kind: 'code' | 'lane'; actionable: boolean; text: string }[]
   previousFindings: readonly string[]
   /** A running/unobserved turn must be settled by its host, never dispatched again. */
-  pending?: { phase: WorkPhase; step_id: string }
+  pending?: { phase: WorkPhase; step_id: string } | undefined
 }
 export interface BuildModeHost {
   loadResume(): Promise<ResumeCheckpoint | null>
+  /** Only the driver supplies this state; never pass a worker trailer here. */
+  saveCheckpoint(checkpoint: ResumeCheckpoint): Promise<void>
   /** Diff must be generated using this exact OID, not a moving branch name. */
   regenerateDiff(head: string): Promise<{ kind: 'known'; diff: string } | { kind: 'unknown'; detail: string }>
   probePlan(head: string): Promise<PlanProbe | null>
@@ -251,6 +253,12 @@ export async function buildRun(input: BuildRunInput, deps: BuildRunDeps, signal:
       }
     }
 
+    let durable: ResumeCheckpoint = resume ?? { head: null, stage: 'built', round: 0,
+      replansUsed: 0, findings: [], previousFindings: [] }
+    async function checkpoint(patch: Partial<ResumeCheckpoint>) {
+      durable = { ...durable, replansUsed, previousFindings: previous, previousBlockingCount, ...patch }
+      await modes?.saveCheckpoint(structuredClone(durable))
+    }
     let previousPayload: unknown = null
     let findings: readonly string[] = []
     async function work(role: WorkPhase, round: number): Promise<{ payload: unknown } | { stop: BuildRunOutcome }> {
@@ -260,6 +268,7 @@ export async function buildRun(input: BuildRunInput, deps: BuildRunDeps, signal:
       const boundedRequest: BoundedWorkRequest = {
         ...request, run_id: input.run_id, step_id, role, needs_approval_decision: false,
       }
+      await checkpoint({ pending: { phase: role, step_id }, round: Math.max(durable.round, round) })
       await deps.prepareWork(boundedRequest, { snapshot: structuredClone(snapshot), previous: previousPayload, findings, planner, ...(committedPlan ? { committedPlan } : {}) })
       let outcome: BoundedWorkOutcome
       try {
@@ -311,6 +320,14 @@ export async function buildRun(input: BuildRunInput, deps: BuildRunDeps, signal:
         return { stop: blocked('Reviewed revision changed during review') }
       }
       snapshot = measured
+      // The host records the produced head before returning it, so a crash after a
+      // build or fix resumes from what was made rather than redoing it. `result` is
+      // the trailer AFTER the measured head replaced any claim, which is the value
+      // the rest of the driver uses.
+      if (role === 'build' || role === 'fix') {
+        await checkpoint({ head: measured.head, stage: role === 'fix' ? 'fixed' : 'built',
+          round: role === 'fix' ? round + 1 : Math.max(durable.round, 1, round + 1), pending: undefined, findings: [] })
+      }
       previousPayload = result.payload
       return { payload: result.payload }
     }
@@ -417,16 +434,28 @@ export async function buildRun(input: BuildRunInput, deps: BuildRunDeps, signal:
       }
       if (decision.kind === 'blocked') return blocked(decision.on)
       if (decision.kind === 'unknown') return unknown(decision.detail)
+      // The rejection is recorded BEFORE the stops below. A repeated finding or an
+      // exhausted round ends the run, and the orchestrator resumes from this row;
+      // writing it only on the paths that continue would lose exactly the rounds
+      // that need it.
+      if (decision.kind === 'fix') {
+        await checkpoint({ head: snapshot.head, stage: 'rejected', round, pending: undefined,
+          findings: decision.findings.map(text => ({ kind: 'code' as const, actionable: true, text })) })
+      }
       if (decision.kind === 're-plan' && replansUsed !== 0) return blocked('Review requires orchestrator arbitration: re-plan already spent')
       const progress = gateStop(reviewProgress(previousReview, currentReview))
       if (progress) return progress
-      if (decision.kind === 'approve') break
+      if (decision.kind === 'approve') {
+        await checkpoint({ head: snapshot.head, stage: 'approved', round, pending: undefined, findings: [] })
+        break
+      }
       previousReview = currentReview
       if (decision.kind === 're-plan') {
         // G077: a replacement needs a subsequent review within the host's cap.
         if (round >= maxRounds) return blocked(`design-gap: re-plan-unreachable: ${decision.whatIsMissing}; no round left for the bounded re-plan`)
         replansUsed++
         findings = [decision.whatIsMissing, ...new Set([...decision.findings, ...currentReview!.findings])]
+        await checkpoint({ head: null, stage: 'built', round: round + 1, pending: undefined, findings: [] })
         planner = 'full'
         committedPlan = undefined
         const stop = await planAndBuild(round)
