@@ -1442,6 +1442,9 @@ fi
 stamp_stage codex-exec-start
 start_stage_heartbeat
 
+if [ -n "${NEUTRON_CODEX_THREAD_ID:-}" ]; then
+  set -- resume "${NEUTRON_CODEX_THREAD_ID}" "$@"
+fi
 if <"$BRIEF_FILE" run_build_child \
   codex exec "$@" --sandbox danger-full-access --cd "$WORKTREE" -; then
   stop_stage_heartbeat
