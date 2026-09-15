@@ -25,6 +25,7 @@ export interface BuildHostOptions {
   effects: Pick<BuildRunDeps, 'prepareWork' | 'measure' | 'publish' | 'merge'>
   leak: Omit<Parameters<typeof runLeakGatePreflight>[0], 'head' | 'fixer' | 'max_fix_attempts'>
   mutation: Omit<MutationGateInput, 'expected_head' | 'claim'> & {
+    run: MutationGateInput['run'] & { max_rounds?: number | undefined }
     readClaim(snapshot: BuildSnapshot): Promise<MutationGateInput['claim']>
   }
   /** Persisted previous review pin; explicit null for a fresh first round. */
@@ -70,6 +71,11 @@ export function createBuildHost(options: BuildHostOptions): { deps: BuildRunDeps
     : Promise.resolve(unknown('Local merge configuration is missing'))
   const deps: BuildRunDeps = {
     ...options.effects,
+    async readReviewCap(runId) {
+      const row = options.mutation.run
+      if (!row || row.id !== runId) return { kind: 'unknown', detail: 'Review round cap run row is missing or mismatched' }
+      return { kind: 'known', max_rounds: row.max_rounds }
+    },
     async confirmLocalMerge(snapshot) {
       if (!options.local) return unknown('Local merge configuration is missing')
       const run = options.mutation.run_host

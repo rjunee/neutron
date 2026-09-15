@@ -1624,7 +1624,7 @@ CREATE TABLE "work_board_items" (
                            CHECK (ralph_round >= 0),
     max_ralph_rounds   INTEGER
                            CHECK (max_ralph_rounds IS NULL OR max_ralph_rounds >= 0)
-) STRICT
+, repo_name TEXT) STRICT
 
 [table] workspace_members (tbl=workspace_members)
 CREATE TABLE workspace_members (

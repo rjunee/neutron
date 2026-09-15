@@ -1262,3 +1262,14 @@ describe('workBoardScopeKey / workBoardProjectIdForKey (Bug 3 per-project scopin
     expect(keys).toEqual(['acme', 'owner'])
   })
 })
+
+test('card repo selection persists, changes, and clears to the default', async () => {
+  const store = new WorkBoardStore(db)
+  const card = await store.create(SLUG, { title: 'select repo', repo_name: 'widgets' })
+  expect(store.get(SLUG, card.id)?.repo_name).toBe('widgets')
+  await store.update(SLUG, card.id, { repo_name: 'docs' })
+  expect(store.get(SLUG, card.id)?.repo_name).toBe('docs')
+  await store.update(SLUG, card.id, { repo_name: null })
+  expect(store.get(SLUG, card.id)?.repo_name).toBeNull()
+  expect((await store.create(SLUG, { title: 'default repo' })).repo_name).toBeNull()
+})
