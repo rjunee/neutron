@@ -273,6 +273,17 @@ describe('wireSubstrates — instance ids + tool-bridge invariants', () => {
     expect(agent!.env!['GH_TOKEN']).toBeUndefined()
   })
 
+  test('project live-agent factory pins the cold spawn to the requested project', async () => {
+    const { ctx, captured } = makeCtx()
+    const w = wireSubstrates(ctx)
+    await drain(w.makeProjectLiveAgentSubstrate('cold-project')!)
+    const agent = captured.find((o) => o.substrate_instance_id === 'cc-agent-owner')
+    expect(agent!.project_id).toBe('cold-project')
+    expect(agent!.skip_permissions).toBe(true)
+    expect(agent!.restricted).toBeUndefined()
+    expect(agent!.enableToolBridge).toBe(true)
+  })
+
   test('makeComposeSubstrate: per-project ISOLATED compose session — keyed by project_id, distinct pool key from cc-agent, TOOLLESS (#377/#378 white-box)', async () => {
     const { ctx, captured } = makeCtx()
     const w = wireSubstrates(ctx)

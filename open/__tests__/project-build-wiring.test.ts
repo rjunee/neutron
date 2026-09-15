@@ -33,14 +33,16 @@ async function fixture() {
   const codexSpy = spyOn(codex, 'createCodexHeadlessRunner').mockReturnValue(fakeRunner('openai-codex'))
   cleanup.push(() => { runnerSpy.mockRestore(); codexSpy.mockRestore() })
   const commands: string[][] = []
+  let spawnProjectSession = async (_projectId: string): Promise<void> => {}
   const context: ProjectBuildContext = { store, phaseUsage: new TridentPhaseUsageStore(db), projectDir: dir, projectId: 'fixture-project',
-    stateRoot: join(dir, 'state'), provider: 'anthropic', env: {}, runHost: async argv => {
+    stateRoot: join(dir, 'state'), provider: 'anthropic', env: {}, spawnProjectSession: projectId => spawnProjectSession(projectId), runHost: async argv => {
       commands.push([...argv])
       return { ok: true, exit_code: 0, stdout: argv.includes('symbolic-ref') ? 'refs/heads/change' : '', stderr: '' }
     } }
   const input: InnerLoopInput = { run: store.get(row.id)!, base_branch: 'main', db_path: join(dir, 'db'), max_rounds: 3 }
   const prepare = () => prepareProjectBuild(input, context, new AbortController().signal)
-  return { dir, input, context, prepare, commands, captured: () => captured }
+  return { dir, input, context, prepare, commands, captured: () => captured,
+    setSpawnProjectSession: (spawn: (projectId: string) => Promise<void>) => { spawnProjectSession = spawn } }
 }
 
 test('option sources preserve pin, selected provider, workflow and unavailable suite evidence', async () => {
@@ -154,4 +156,76 @@ test('acting turn requires the selected live project session and observed grants
   f.context.provider = 'pi'
   await f.prepare()
   expect((await f.captured().actingTurn({ ...turn, conversation: f.captured().conversation })).kind).toBe('refused')
+})
+
+test('acting turn lazily starts and retains a cold project session', async () => {
+  const f = await fixture()
+  const options = await f.prepare()
+  const captured = f.captured()
+  const request: BoundedWorkRequest = { ...options.workers.build.request, run_id: f.input.run.id, step_id: 'fixture-step', role: 'build', needs_approval_decision: false }
+  const turn = { conversation: captured.conversation, request, spec: { ...captured.conversation.spec, prompt: 'bounded work' }, timeout_ms: 50, signal: new AbortController().signal }
+  const key = 'cold-project-launch'
+  const config = { substrate_instance_id: 'cc-agent-fixture', project_id: f.context.projectId, skip_permissions: true, extra_dirs: [f.dir] }
+  const session = { sessionId: 'fixture-session', cwd: f.dir, hasChildExited: () => false, child: { submitLine: async () => {} }, acquireTurn: async () => () => {} }
+  let spawns = 0
+  cleanup.push(() => { pool.delete(key); supervisedBySessionKey.delete(key) })
+  f.setSpawnProjectSession(async projectId => {
+    spawns += 1
+    expect(projectId).toBe(f.context.projectId)
+    supervisedBySessionKey.set(key, config)
+    pool.set(key, Promise.resolve(session as never))
+    await Promise.resolve()
+  })
+  await mkdir(join(f.dir, 'state'), { recursive: true })
+  await writeFile(request.result.path, '{}')
+  expect((await captured.actingTurn(turn)).kind).toBe('turn-ended')
+  expect((await captured.actingTurn(turn)).kind).toBe('turn-ended')
+  expect(spawns).toBe(1)
+})
+
+test('acting turn keeps ambiguity and spawn/grant outcomes distinct', async () => {
+  const f = await fixture()
+  const options = await f.prepare()
+  const captured = f.captured()
+  const request: BoundedWorkRequest = { ...options.workers.build.request, run_id: f.input.run.id, step_id: 'fixture-step', role: 'build', needs_approval_decision: false }
+  const turn = { conversation: captured.conversation, request, spec: { ...captured.conversation.spec, prompt: 'bounded work' }, timeout_ms: 50, signal: new AbortController().signal }
+  f.setSpawnProjectSession(async () => { throw new Error('spawn failed') })
+  expect((await captured.actingTurn(turn)).kind).toBe('unknown')
+  const config = { substrate_instance_id: 'cc-agent-fixture', project_id: f.context.projectId, skip_permissions: true }
+  const session = { hasChildExited: () => false }
+  supervisedBySessionKey.set('one', { ...config, restricted: true })
+  pool.set('one', Promise.resolve(session as never))
+  await Promise.resolve()
+  expect((await captured.actingTurn(turn)).kind).toBe('refused')
+  supervisedBySessionKey.set('two', config)
+  pool.set('two', Promise.resolve(session as never))
+  await Promise.resolve()
+  // AMBIGUITY IS REFUSED *BEFORE* THE SPAWN, and the outcome alone cannot show it:
+  // with the pre-spawn check removed the run still ends `unknown`, because the
+  // post-spawn `!== 1` catches it — after attempting a spawn that would add a THIRD
+  // session to an already-ambiguous project. So count the spawns, not just the kind.
+  let ambiguousSpawns = 0
+  f.setSpawnProjectSession(async () => { ambiguousSpawns += 1 })
+  expect((await captured.actingTurn(turn)).kind).toBe('unknown')
+  expect(ambiguousSpawns).toBe(0)
+  cleanup.push(() => { for (const key of ['one', 'two']) { pool.delete(key); supervisedBySessionKey.delete(key) } })
+})
+
+test('a spawned session with the wrong grants is refused, not used', async () => {
+  const f = await fixture()
+  const options = await f.prepare()
+  const captured = f.captured()
+  const request: BoundedWorkRequest = { ...options.workers.build.request, run_id: f.input.run.id, step_id: 'fixture-step', role: 'build', needs_approval_decision: false }
+  const turn = { conversation: captured.conversation, request, spec: { ...captured.conversation.spec, prompt: 'bounded work' }, timeout_ms: 50, signal: new AbortController().signal }
+  // NO candidate to begin with, so the PRE-spawn grant check cannot see anything —
+  // the only thing standing between a badly-granted spawned session and a bounded
+  // build is the check that runs AFTER the spawn. Without this case that check is
+  // unreachable from the tests and a mutation to it stays green.
+  cleanup.push(() => { pool.delete('spawned'); supervisedBySessionKey.delete('spawned') })
+  f.setSpawnProjectSession(async () => {
+    supervisedBySessionKey.set('spawned', { substrate_instance_id: 'cc-agent-fixture', project_id: f.context.projectId, skip_permissions: true, restricted: true } as never)
+    pool.set('spawned', Promise.resolve({ hasChildExited: () => false } as never))
+    await Promise.resolve()
+  })
+  expect((await captured.actingTurn(turn)).kind).toBe('refused')
 })
