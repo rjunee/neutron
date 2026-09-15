@@ -219,11 +219,12 @@ on:
   push:
     branches: [main]
 
-# Least-privilege default token: this workflow only reads the checkout, runs
-# typecheck + tests, and grants no write scopes (fixes the CodeQL alert
-# actions/missing-workflow-permissions).
+# Least-privilege default token: this workflow reads the checkout and open-PR
+# metadata, runs typecheck + tests, and grants no write scopes (fixes the CodeQL
+# alert actions/missing-workflow-permissions).
 permissions:
   contents: read
+  pull-requests: read
 
 # Cancel superseded runs to save runner minutes. Key PR runs on the PR NUMBER
 # (always slash-free) and push runs on the ref, namespaced by workflow. The
@@ -392,6 +393,11 @@ jobs:
       # .gitattributes alone, so a clone carrying the opt-in entry-aware driver
       # cannot mask a deleted floor.
       - run: bun scripts/ci/check-governed-repo-attributes.ts .
+      - name: Check migration ordinals across open PRs
+        if: github.event_name == 'pull_request'
+        env:
+          GITHUB_TOKEN: ${{ github.token }}
+        run: bun scripts/ci/open-pr-migration-ordinal-check.ts
 
   # ---- the suite, sharded across runners ---------------------------------------
   shard:
