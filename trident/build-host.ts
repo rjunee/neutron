@@ -3,8 +3,8 @@ import { placementFor, type Provider, type WorkerRunner } from '@neutronai/runti
 import type { BuildRunDeps, BuildRunInput, BuildSnapshot, GateResult } from './build-run.ts'
 import { publicationReadiness, pinnedMergeReadiness } from './gates/release-readiness.ts'
 import { briefIntegrity } from './gates/brief-integrity.ts'
-import { validateTrailer } from './gates/result-contract.ts'
-import { eligibleFixFindings } from './gates/verdict.ts'
+import { projectAdmission, type AdmissionSource } from './gates/project-admission.ts'
+import { reviewPanel, type ReviewSource } from './gates/review-panel.ts'
 import { ciReadinessForHead, type CiRunObservation } from './ci-readiness.ts'
 import { runLeakGatePreflight } from './leak-preflight.ts'
 import { assessMergeDiff } from './merge.ts'
@@ -24,6 +24,8 @@ export interface BuildHostOptions {
   mutation: Omit<MutationGateInput, 'expected_head' | 'claim'> & {
     readClaim(snapshot: BuildSnapshot): Promise<MutationGateInput['claim']>
   }
+  admission?: AdmissionSource
+  review?: ReviewSource
   observeCi(snapshot: BuildSnapshot): Promise<CiRunObservation>
 }
 
@@ -67,17 +69,11 @@ export function createBuildHost(options: BuildHostOptions): { deps: BuildRunDeps
         catch { return unknown(`${role} brief could not be read`) }
         if (briefIntegrity(text) !== brief.integrity) return { kind: 'blocked', on: `${role} brief integrity mismatch` }
       }
-      return unknown('Complete project admission policy is not wired')
+      return projectAdmission(options.admission, input)
     },
     runLeakGatePreflight: (snapshot) => runLeakGatePreflight({ ...options.leak, head: snapshot.head, max_fix_attempts: 0 }),
     assessMergeDiff,
-    async reviewGate(payload) {
-      const checked = validateTrailer('verdict', payload)
-      if (!checked.ok) return { kind: 'unknown', detail: `Review trailer ${checked.reason} at ${checked.path}` }
-      const findings = eligibleFixFindings(checked.value.findings)
-      if (findings && findings.length > 0) return { kind: 'blocked', on: 'Review has blocking findings; panel provenance is not wired' }
-      return { kind: 'unknown', detail: 'Review panel provenance, cross-model seats and arbitration are not wired' }
-    },
+    reviewGate: (payload, snapshot, round) => reviewPanel(options.review, payload, snapshot, round, options.mutation.run.id),
     async publishGate(snapshot) {
       const claim = await options.mutation.readClaim(snapshot)
       const proof = await runMutationProofGate({ ...options.mutation, claim, expected_head: snapshot.head })
