@@ -3,6 +3,7 @@ import { modelTierRegistry } from '../model-tiers.ts'
 import type { Provider } from '@neutronai/runtime/bounded-work.ts'
 import type { BuildSnapshot, ReviewDecision } from '../build-run.ts'
 import { validateTrailer, type VerdictTrailer } from './result-contract.ts'
+import type { ReviewProgress } from './review-progress.ts'
 import { decideEscalation, findingIdentity } from './escalation.ts'
 
 export interface ReviewSeat {
@@ -61,7 +62,7 @@ export async function readReviewSeat(source: ReviewSource, seat: ReviewSeat, sna
 }
 
 /** G057–G062, G104: re-read the recorded panel for this exact revision and round. */
-export async function reviewPanel(source: ReviewSource | undefined, payload: unknown, snapshot: BuildSnapshot, round: number, runId: string, replansUsed = 0, builder?: Pick<ReviewSeat, 'provider' | 'modelId' | 'family'>): Promise<ReviewDecision> {
+export async function reviewPanel(source: ReviewSource | undefined, payload: unknown, snapshot: BuildSnapshot, round: number, runId: string, replansUsed = 0, builder?: Pick<ReviewSeat, 'provider' | 'modelId' | 'family'>, recordProgress?: (value: ReviewProgress) => void): Promise<ReviewDecision> {
   const trailer = validateTrailer('verdict', unmarked(payload))
   if (!trailer.ok) return unknown(`Review trailer ${trailer.reason} at ${trailer.path}`)
   if (!source) return unknown('Review panel observation source is missing')
@@ -94,6 +95,8 @@ export async function reviewPanel(source: ReviewSource | undefined, payload: unk
     if (canonical(synthesis.value) !== canonical(trailer.value)) return blocked('Review worker trailer differs from recorded synthesis')
     verdicts.push(synthesis.value)
     const blockers = verdicts.flatMap(v => v.findings).filter(f => f.severity !== 'minor' && f.severity !== 'nit')
+    const actionable = verdicts.flatMap(v => v.findings).filter(f => f.severity !== 'nit').map(findingIdentity)
+    recordProgress?.({ findings: [...new Set(actionable)], blockingCount: blockers.length })
     let replan: ReviewDecision | undefined
     for (const verdict of verdicts) {
       if (!verdict.escalate) continue
