@@ -978,13 +978,22 @@ describe('resolveOpenConversationalProvider — every declared value dispatches 
     expect(threw).toBe(true)
   })
 
-  test('openai-codex-cli + credentials is wired instead of falling back to Claude', () => {
+  test('openai-codex + credentials is wired instead of falling back to Claude', () => {
     const ctx = resolveOpenConversationalProvider(
-      { NEUTRON_MODEL_PROVIDER: 'openai-codex-cli' } as unknown as NodeJS.ProcessEnv,
+      { NEUTRON_MODEL_PROVIDER: 'openai-codex' } as unknown as NodeJS.ProcessEnv,
       deps(true),
     )
-    expect(ctx.provider).toBe('openai-codex-cli')
+    expect(ctx.provider).toBe('openai-codex')
     expect(ctx.openaiLlmPool).toBeDefined()
+  })
+
+  test.each([false, true])('pi refuses at boot whether OpenAI credentials exist: %s', (withKey) => {
+    expect(() =>
+      resolveOpenConversationalProvider(
+        { NEUTRON_MODEL_PROVIDER: 'pi' } as unknown as NodeJS.ProcessEnv,
+        deps(withKey),
+      ),
+    ).toThrow(/pi.*no conversational substrate adapter/)
   })
 })
 

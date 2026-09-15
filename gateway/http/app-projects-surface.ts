@@ -1071,11 +1071,11 @@ async function handlePatch(
 
   if (hasModelProvider) {
     const raw = fields['model_provider']
-    if (raw !== null && raw !== 'anthropic' && raw !== 'openai' && raw !== 'openai-codex-cli') {
+    if (raw !== null && raw !== 'anthropic' && raw !== 'openai' && raw !== 'openai-codex' && raw !== 'pi') {
       return jsonError(
         400,
         'invalid_model_provider',
-        'model_provider must be null or one of: anthropic, openai, openai-codex-cli',
+        'model_provider must be null or one of: anthropic, openai, openai-codex, pi',
         { field: 'model_provider' },
       )
     }
