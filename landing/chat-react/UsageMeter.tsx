@@ -1,20 +1,20 @@
 /**
  * landing/chat-react — the usage meter.
  *
- * Two hairlines that ARE the seam between the tab band and the chat stage: the
+ * Two hairlines immediately above the chat composer: the
  * 5-hour session window on top, the 7-day window beneath it. Each fills from the
  * left, and the whole fill changes colour at once — green below 85%, amber to
  * 95%, red past it.
  *
- * WHY IT LIVES IN THE DIVIDER. The number matters constantly and deserves
- * attention almost never. A line already crossing the full width of the window
+ * WHY IT LIVES ABOVE THE COMPOSER. The number matters constantly and deserves
+ * attention almost never. A line already crossing the full width of the composer
  * costs nothing to look at, is legible from the corner of the eye, and needs no
  * label — while a badge, a pill, or a percentage in a corner would demand
  * reading. Two pixels is the entire budget.
  *
  * WHEN THERE IS NOTHING TO SHOW it renders as the plain divider: both lines are
  * the border colour, no fill at all. That is deliberately indistinguishable from
- * the divider that was there before this component existed, because "we don't
+ * the hairline that was there before this component existed, because "we don't
  * know" and "nothing to report" should both look like ordinary window chrome.
  * What it must never do is draw an empty coloured track, which reads as the very
  * specific and possibly false claim "0% used".
