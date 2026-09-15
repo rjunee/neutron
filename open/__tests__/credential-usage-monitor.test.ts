@@ -10,6 +10,7 @@
 import { describe, expect, it } from 'bun:test'
 
 import type { CredentialUsageProbeOutcome } from '@neutronai/auth/credential-usage-probe.ts'
+import { createLogger } from '@neutronai/logger'
 
 import { resolveActiveCredential, claudeCredentialsPath } from '../active-credential.ts'
 import { CredentialUsageMonitor, USAGE_MAX_AGE_MS } from '../credential-usage-monitor.ts'
@@ -84,11 +85,13 @@ describe('CredentialUsageMonitor', () => {
     outcomes?: CredentialUsageProbeOutcome[]
     now?: () => number
     onProbe?: () => void
+    token?: string
   }) {
     const queue = [...(opts.outcomes ?? [])]
     let probes = 0
+    const logLines: string[] = []
     const m = new CredentialUsageMonitor({
-      env: opts.env ?? { ...bareEnv(), CLAUDE_CODE_OAUTH_TOKEN: TOKEN },
+      env: opts.env ?? { ...bareEnv(), CLAUDE_CODE_OAUTH_TOKEN: opts.token ?? TOKEN },
       ...(opts.now !== undefined ? { now: opts.now } : {}),
       credentialDeps: noCredentialsOnDisk(),
       probe: async () => {
@@ -96,11 +99,14 @@ describe('CredentialUsageMonitor', () => {
         opts.onProbe?.()
         return queue.shift() ?? { kind: 'error', message: 'no outcome staged' }
       },
+      log: createLogger('credential-usage-test', {
+        sink: (_level, line) => logLines.push(line),
+      }),
       // Never let the real timer arm inside a unit test.
       setTimer: () => 0,
       clearTimer: () => undefined,
     })
-    return { m, probeCount: () => probes }
+    return { m, probeCount: () => probes, logLines }
   }
 
   it('reports "not measured yet" before the first tick — not zero', () => {
@@ -153,7 +159,84 @@ describe('CredentialUsageMonitor', () => {
     await m.measureOnce()
     expect(m.snapshot().available).toBe(true)
     clock += USAGE_MAX_AGE_MS + 1
-    expect(m.snapshot()).toEqual({ available: false, reason: 'probe_failed' })
+    expect(m.snapshot()).toEqual({ available: false, reason: 'reading_aged_out' })
+  })
+
+  it('keeps never-read, probe-failed, and aged-out unavailable reasons distinct', async () => {
+    const neverRead = monitor({}).m
+    expect(neverRead.snapshot()).toEqual({ available: false, reason: 'not_measured_yet' })
+
+    const failed = monitor({ outcomes: [{ kind: 'error', message: 'timeout' }] }).m
+    await failed.measureOnce()
+    expect(failed.snapshot()).toEqual({ available: false, reason: 'probe_failed' })
+
+    let clock = 10
+    const agedOut = monitor({
+      now: () => clock,
+      outcomes: [{ kind: 'ok', reading: { session: 0.1, weekly: 0.2 } }],
+    }).m
+    await agedOut.measureOnce()
+    clock += USAGE_MAX_AGE_MS + 1
+    expect(agedOut.snapshot()).toEqual({ available: false, reason: 'reading_aged_out' })
+  })
+
+  it('logs a successful probe with its measurement time', async () => {
+    const { m, logLines } = monitor({
+      now: () => 42,
+      outcomes: [{ kind: 'ok', reading: { session: 0.1, weekly: 0.2 } }],
+    })
+    await m.measureOnce()
+    expect(logLines.filter((line) => line.includes('event=usage_probe_ok'))).toEqual([
+      expect.stringContaining('measured_at=42'),
+    ])
+  })
+
+  it('logs a windowless response as its own probe outcome', async () => {
+    const { m, logLines } = monitor({ outcomes: [{ kind: 'no-windows' }] })
+    await m.measureOnce()
+    expect(logLines.filter((line) => line.includes('event=usage_probe_no_windows'))).toHaveLength(1)
+  })
+
+  it('logs upstream credential rejection with status as its own probe outcome', async () => {
+    const { m, logLines } = monitor({ outcomes: [{ kind: 'unauthorized', httpStatus: 401 }] })
+    await m.measureOnce()
+    expect(logLines.filter((line) => line.includes('event=usage_probe_unauthorized'))).toEqual([
+      expect.stringContaining('status=401'),
+    ])
+  })
+
+  it('logs a transient probe failure without unsafe exception text', async () => {
+    const { m, logLines } = monitor({
+      outcomes: [{ kind: 'error', message: `socket included ${TOKEN}` }],
+    })
+    await m.measureOnce()
+    expect(logLines.filter((line) => line.includes('event=usage_probe_failed'))).toEqual([
+      expect.stringContaining('cause=probe_error'),
+    ])
+    expect(logLines.join('\n')).not.toContain(TOKEN)
+  })
+
+  it('logs standing transitions but not identical outcomes on every tick', async () => {
+    const { m, logLines } = monitor({
+      outcomes: [
+        { kind: 'ok', reading: { session: 0.1, weekly: 0.2 } },
+        { kind: 'ok', reading: { session: 0.2, weekly: 0.3 } },
+        { kind: 'unauthorized', httpStatus: 401 },
+        { kind: 'unauthorized', httpStatus: 401 },
+      ],
+    })
+    await m.measureOnce()
+    const afterInitial = logLines.length
+    await m.measureOnce()
+    expect(logLines).toHaveLength(afterInitial)
+    await m.measureOnce()
+    expect(logLines.filter((line) => line.includes('event=credential_standing_changed'))).toEqual([
+      expect.stringContaining('to=healthy'),
+      expect.stringContaining('to=lapsed'),
+    ])
+    const afterTransition = logLines.length
+    await m.measureOnce()
+    expect(logLines).toHaveLength(afterTransition)
   })
 
   // ── WHAT THE LAST LIVE READ LEARNED ABOUT THE CREDENTIAL ──────────────────
