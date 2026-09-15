@@ -59,3 +59,246 @@ The four touched behavioral files passed 105 tests. The full activity served fil
 ### Follow-up deliberately not built
 
 No fallback read of the former activity key was added. No alias from a real project named `general` to General was restored: `workBoardScopeKey` continues to keep that legal project id distinct (`work-board/store.test.ts:1233-1239`). No outcome vocabulary changed; these boundaries now select existing scope keys and introduce no error, verdict, state, or refusal. `SPEC.md` was not changed because this completes the existing collision-proof General decision.
+
+### Enumeration before further implementation (2026-09-15)
+
+The requested recursive grep over TypeScript and TSX, excluding dependency and Git directories, returned **372 matching lines in 117 files** in the build worktree. This is an enumeration of that pattern, not all semantic scope consumers. Every hit is classified below; grouped rows list every matching line. Imports are reader bindings; fixture construction and assertions are distinguished. Diagnostic/session values are not automatically HTTP ids.
+
+```sh
+grep -rn "workBoardScopeKey\|GENERAL_HTTP_ID\|'~general'\|\"general\"\|'general'" --include='*.ts' --include='*.tsx' --exclude-dir=node_modules --exclude-dir=.git .
+```
+
+Positive controls from that same command: `work-board/store.ts:260` finds the known `workBoardScopeKey` definition; `landing/chat-react/general-scope.ts:30` finds `GENERAL_HTTP_ID`; `wire-types/topic-id.ts:43` finds the reserved literal.
+
+| File and matching lines | Classification |
+| --- | --- |
+| `agent-dispatch/service.ts:212` | documentation |
+| `agent-dispatch/tool.ts:24` | reader (binding) |
+| `agent-dispatch/tool.ts:144` | writer (scope/value construction) |
+| `app/__tests__/activity-client.test.ts:7`, `app/__tests__/activity-client.test.ts:8` | documentation |
+| `app/__tests__/activity-client.test.ts:53`, `app/__tests__/activity-client.test.ts:88`, `app/__tests__/activity-client.test.ts:89` | reader (assertion) |
+| `app/__tests__/general-rail-scope.test.ts:67` | documentation (test name) |
+| `app/__tests__/general-rail-scope.test.ts:63`, `app/__tests__/general-rail-scope.test.ts:70`, `app/__tests__/general-rail-scope.test.ts:71`, `app/__tests__/general-rail-scope.test.ts:72` | reader (assertion) |
+| `app/__tests__/general-scope.test.ts:10`, `app/__tests__/general-scope.test.ts:18` | documentation |
+| `app/__tests__/general-scope.test.ts:191`, `app/__tests__/general-scope.test.ts:242` | documentation (test name) |
+| `app/__tests__/general-scope.test.ts:63`, `app/__tests__/general-scope.test.ts:64` | reader (assertion) |
+| `app/__tests__/general-scope.test.ts:27`, `app/__tests__/general-scope.test.ts:247`, `app/__tests__/general-scope.test.ts:249`, `app/__tests__/general-scope.test.ts:250`, `app/__tests__/general-scope.test.ts:251`, `app/__tests__/general-scope.test.ts:252`, `app/__tests__/general-scope.test.ts:253` | writer (fixture/input) |
+| `app/__tests__/general-tab-set.test.tsx:10` | documentation |
+| `app/__tests__/imessage-chat-ux.test.tsx:316`, `app/__tests__/imessage-chat-ux.test.tsx:377` | writer (fixture/input) |
+| `app/__tests__/legacy-reminder-push-tap-reaches-general.test.ts:69`, `app/__tests__/legacy-reminder-push-tap-reaches-general.test.ts:113` | documentation |
+| `app/__tests__/legacy-reminder-push-tap-reaches-general.test.ts:120`, `app/__tests__/legacy-reminder-push-tap-reaches-general.test.ts:139` | reader (assertion) |
+| `app/__tests__/legacy-reminder-push-tap-reaches-general.test.ts:43` | reader (binding) |
+| `app/__tests__/legacy-reminder-push-tap-reaches-general.test.ts:58`, `app/__tests__/legacy-reminder-push-tap-reaches-general.test.ts:149` | writer (fixture/input) |
+| `app/__tests__/login-first-discovery.test.ts:93` | writer (fixture/input) |
+| `app/__tests__/project-shell-chrome-persistence.test.ts:136` | documentation |
+| `app/__tests__/project-shell-chrome-persistence.test.ts:141` | reader (assertion) |
+| `app/__tests__/project-shell-chrome-persistence.test.ts:145` | writer (fixture/input) |
+| `app/__tests__/push-foreground-policy.test.ts:120` | writer (fixture/input) |
+| `app/__tests__/rail-order.test.ts:28`, `app/__tests__/rail-order.test.ts:78` | reader (assertion) |
+| `app/__tests__/rail-order.test.ts:27` | writer (fixture/input) |
+| `app/__tests__/server-config-wiring.test.ts:322` | writer (fixture/input) |
+| `app/__tests__/server-url.test.ts:67` | writer (fixture/input) |
+| `app/__tests__/work-board-activity.test.ts:33`, `app/__tests__/work-board-activity.test.ts:214`, `app/__tests__/work-board-activity.test.ts:224`, `app/__tests__/work-board-activity.test.ts:244` | writer (fixture/input) |
+| `app/__tests__/work-board-general-scope.test.ts:8`, `app/__tests__/work-board-general-scope.test.ts:10`, `app/__tests__/work-board-general-scope.test.ts:11` | documentation |
+| `app/__tests__/work-board-general-scope.test.ts:66`, `app/__tests__/work-board-general-scope.test.ts:75`, `app/__tests__/work-board-general-scope.test.ts:87` | reader (assertion) |
+| `app/__tests__/work-board-general-scope.test.ts:83`, `app/__tests__/work-board-general-scope.test.ts:85`, `app/__tests__/work-board-general-scope.test.ts:92`, `app/__tests__/work-board-general-scope.test.ts:99`, `app/__tests__/work-board-general-scope.test.ts:103`, `app/__tests__/work-board-general-scope.test.ts:107`, `app/__tests__/work-board-general-scope.test.ts:110`, `app/__tests__/work-board-general-scope.test.ts:111`, `app/__tests__/work-board-general-scope.test.ts:115`, `app/__tests__/work-board-general-scope.test.ts:119` | writer (fixture/input) |
+| `app/__tests__/workboard-doc-link.test.tsx:67` | writer (fixture/input) |
+| `app/app/projects/[id]/_layout.tsx:205`, `app/app/projects/[id]/_layout.tsx:731`, `app/app/projects/[id]/_layout.tsx:732` | documentation |
+| `app/app/projects/[id]/_layout.tsx:775` | reader |
+| `app/app/projects/[id]/workboard.tsx:26` | documentation |
+| `app/lib/activity-client.ts:108`, `app/lib/activity-client.ts:111`, `app/lib/activity-client.ts:113`, `app/lib/activity-client.ts:118`, `app/lib/activity-client.ts:321` | documentation |
+| `app/lib/docs-client.ts:123` | documentation |
+| `app/lib/entry-route.ts:22` | documentation |
+| `app/lib/general-scope.ts:48`, `app/lib/general-scope.ts:51` | HTTP path segment |
+| `app/lib/general-scope.ts:7`, `app/lib/general-scope.ts:14` | documentation |
+| `app/lib/project-rail-view.ts:60` | client sentinel |
+| `app/lib/project-rail-view.ts:36`, `app/lib/project-rail-view.ts:38`, `app/lib/project-rail-view.ts:75` | documentation |
+| `app/lib/project-state-reducer.ts:123` | documentation |
+| `app/lib/project-state.tsx:141` | documentation |
+| `app/lib/push-foreground-policy.ts:46`, `app/lib/push-foreground-policy.ts:53` | documentation |
+| `app/lib/reminders-client.ts:12` | documentation |
+| `app/lib/tabs-client.ts:77`, `app/lib/tabs-client.ts:84` | documentation |
+| `app/lib/work-board-client.ts:166` | documentation |
+| `app/lib/work-board-live.ts:161` | documentation |
+| `cores/free/reminders/__tests__/convert-to-task-tool.test.ts:189` | reader (assertion) |
+| `cores/free/reminders/__tests__/convert-to-task-tool.test.ts:143`, `cores/free/reminders/__tests__/convert-to-task-tool.test.ts:169`, `cores/free/reminders/__tests__/convert-to-task-tool.test.ts:186` | writer (fixture/input) |
+| `gateway/__tests__/app-docs-surface.test.ts:137` | reader (assertion) |
+| `gateway/__tests__/app-docs-surface.test.ts:138` | writer (fixture/input) |
+| `gateway/__tests__/app-reminders-surface.test.ts:667`, `gateway/__tests__/app-reminders-surface.test.ts:669` | writer (fixture/input) |
+| `gateway/__tests__/app-tabs-surface.test.ts:210`, `gateway/__tests__/app-tabs-surface.test.ts:211` | reader (assertion) |
+| `gateway/__tests__/projects-read-does-not-create.test.ts:54`, `gateway/__tests__/projects-read-does-not-create.test.ts:108`, `gateway/__tests__/projects-read-does-not-create.test.ts:115` | reader (assertion) |
+| `gateway/__tests__/projects-read-does-not-create.test.ts:52`, `gateway/__tests__/projects-read-does-not-create.test.ts:111`, `gateway/__tests__/projects-read-does-not-create.test.ts:114` | writer (fixture/input) |
+| `gateway/__tests__/reset-command-wiring.test.ts:208` | documentation (test name) |
+| `gateway/__tests__/reset-command-wiring.test.ts:217` | reader (assertion) |
+| `gateway/__tests__/reset-command-wiring.test.ts:189` | writer (fixture/input) |
+| `gateway/composition/build-core-modules.ts:29` | reader (binding) |
+| `gateway/composition/build-core-modules.ts:401` | writer (scope/value construction) |
+| `gateway/cores/__tests__/mount-cores-scribe-fan-out.test.ts:180` | reader (assertion) |
+| `gateway/cores/__tests__/mount-cores-scribe-fan-out.test.ts:165`, `gateway/cores/__tests__/mount-cores-scribe-fan-out.test.ts:178`, `gateway/cores/__tests__/mount-cores-scribe-fan-out.test.ts:218`, `gateway/cores/__tests__/mount-cores-scribe-fan-out.test.ts:254` | writer (fixture/input) |
+| `gateway/docs-general-scope-migration.test.ts:32`, `gateway/docs-general-scope-migration.test.ts:33` | reader (assertion) |
+| `gateway/docs-general-scope-migration.test.ts:23`, `gateway/docs-general-scope-migration.test.ts:39`, `gateway/docs-general-scope-migration.test.ts:40` | writer (fixture/input) |
+| `gateway/docs-general-scope-migration.ts:6` | reader (migration source) |
+| `gateway/http/scope-segment.test.ts:7`, `gateway/http/scope-segment.test.ts:8`, `gateway/http/scope-segment.test.ts:9` | reader (assertion) |
+| `gateway/http/work-board-surface.test.ts:69` | documentation |
+| `gateway/http/work-board-surface.test.ts:917` | reader (assertion) |
+| `gateway/http/work-board-surface.test.ts:8` | reader (binding) |
+| `gateway/http/work-board-surface.test.ts:71` | writer (fixture/input) |
+| `gateway/http/work-board-surface.ts:25`, `gateway/http/work-board-surface.ts:398`, `gateway/http/work-board-surface.ts:649` | documentation |
+| `gateway/http/work-board-surface.ts:40` | reader (binding) |
+| `gateway/http/work-board-surface.ts:287` | writer (scope/value construction) |
+| `gateway/nexus/nexus-fragment.ts:180` | documentation |
+| `gateway/proactive/__tests__/work-wakeup-selection.test.ts:264` | reader (assertion) |
+| `gateway/proactive/work-wakeup-selection.ts:93`, `gateway/proactive/work-wakeup-selection.ts:94` | documentation |
+| `gateway/proactive/work-wakeup-selection.ts:96` | writer (scope/value construction) |
+| `gateway/proactive/work-wakeup.ts:193`, `gateway/proactive/work-wakeup.ts:194` | documentation |
+| `gateway/push/__tests__/ritual-post-notifies-as-a-chat-message.test.ts:252` | reader (assertion) |
+| `gateway/push/chat-message-push.test.ts:265` | reader (assertion) |
+| `gateway/transcription/__tests__/openai-key-store.test.ts:112` | documentation |
+| `gateway/wiring/__tests__/build-live-agent-turn-activity-inspector.test.ts:142` | documentation |
+| `gateway/wiring/__tests__/build-live-agent-turn-activity-inspector.test.ts:152`, `gateway/wiring/__tests__/build-live-agent-turn-activity-inspector.test.ts:153` | reader (assertion) |
+| `gateway/wiring/__tests__/build-live-agent-turn-overlap.test.ts:275` | reader (assertion) |
+| `gateway/wiring/__tests__/build-live-agent-turn-reflection.test.ts:109` | reader (assertion) |
+| `gateway/wiring/__tests__/build-live-agent-turn-session-isolation.test.ts:156` | documentation |
+| `gateway/wiring/__tests__/build-live-agent-turn-session-isolation.test.ts:157` | reader (assertion) |
+| `gateway/wiring/__tests__/build-live-agent-turn.test.ts:384`, `gateway/wiring/__tests__/build-live-agent-turn.test.ts:428` | reader (assertion) |
+| `gateway/wiring/__tests__/live-agent-scope-fragment.test.ts:17`, `gateway/wiring/__tests__/live-agent-scope-fragment.test.ts:27` | writer (fixture/input) |
+| `gateway/wiring/__tests__/operating-doctrine.test.ts:198` | reader (assertion) |
+| `gateway/wiring/__tests__/operating-doctrine.test.ts:19`, `gateway/wiring/__tests__/operating-doctrine.test.ts:27`, `gateway/wiring/__tests__/operating-doctrine.test.ts:40`, `gateway/wiring/__tests__/operating-doctrine.test.ts:89`, `gateway/wiring/__tests__/operating-doctrine.test.ts:109`, `gateway/wiring/__tests__/operating-doctrine.test.ts:118`, `gateway/wiring/__tests__/operating-doctrine.test.ts:156`, `gateway/wiring/__tests__/operating-doctrine.test.ts:178`, `gateway/wiring/__tests__/operating-doctrine.test.ts:187`, `gateway/wiring/__tests__/operating-doctrine.test.ts:197` | writer (fixture/input) |
+| `gateway/wiring/build-live-agent-turn.ts:39`, `gateway/wiring/build-live-agent-turn.ts:641`, `gateway/wiring/build-live-agent-turn.ts:892`, `gateway/wiring/build-live-agent-turn.ts:1816` | documentation |
+| `gateway/wiring/build-live-agent-turn.ts:1094`, `gateway/wiring/build-live-agent-turn.ts:1123`, `gateway/wiring/build-live-agent-turn.ts:1531`, `gateway/wiring/build-live-agent-turn.ts:1621`, `gateway/wiring/build-live-agent-turn.ts:2059`, `gateway/wiring/build-live-agent-turn.ts:2072`, `gateway/wiring/build-live-agent-turn.ts:2142` | writer (scope/value construction) |
+| `gateway/wiring/live-agent-scope-fragment.ts:20` | documentation (type vocabulary) |
+| `gateway/wiring/operating-doctrine.ts:45` | documentation (type vocabulary) |
+| `landing/chat-react/__tests__/activity-client.test.ts:152` | documentation |
+| `landing/chat-react/__tests__/activity-client.test.ts:154`, `landing/chat-react/__tests__/activity-client.test.ts:155` | reader (assertion) |
+| `landing/chat-react/__tests__/component.test.tsx:920`, `landing/chat-react/__tests__/component.test.tsx:1074` | writer (fixture/input) |
+| `landing/chat-react/__tests__/controller.test.ts:116`, `landing/chat-react/__tests__/controller.test.ts:148`, `landing/chat-react/__tests__/controller.test.ts:169`, `landing/chat-react/__tests__/controller.test.ts:187`, `landing/chat-react/__tests__/controller.test.ts:190`, `landing/chat-react/__tests__/controller.test.ts:249` | writer (fixture/input) |
+| `landing/chat-react/__tests__/general-docs-reachable.test.tsx:48` | documentation |
+| `landing/chat-react/__tests__/general-docs-reachable.test.tsx:41`, `landing/chat-react/__tests__/general-docs-reachable.test.tsx:42`, `landing/chat-react/__tests__/general-docs-reachable.test.tsx:43`, `landing/chat-react/__tests__/general-docs-reachable.test.tsx:51`, `landing/chat-react/__tests__/general-docs-reachable.test.tsx:94` | reader (assertion) |
+| `landing/chat-react/__tests__/general-docs-reachable.test.tsx:32` | reader (binding) |
+| `landing/chat-react/__tests__/paste-attach.test.tsx:129` | writer (fixture/input) |
+| `landing/chat-react/__tests__/project-shell.test.tsx:797`, `landing/chat-react/__tests__/project-shell.test.tsx:902` | documentation |
+| `landing/chat-react/__tests__/project-shell.test.tsx:826` | writer (fixture/input) |
+| `landing/chat-react/__tests__/stable-mount.test.tsx:276` | writer (fixture/input) |
+| `landing/chat-react/__tests__/switch-timing.test.ts:51` | reader (assertion) |
+| `landing/chat-react/__tests__/switch-timing.test.ts:35` | writer (fixture/input) |
+| `landing/chat-react/__tests__/work-board-client.test.ts:148`, `landing/chat-react/__tests__/work-board-client.test.ts:149` | documentation |
+| `landing/chat-react/__tests__/work-board-client.test.ts:151` | writer (fixture/input) |
+| `landing/chat-react/activity-client.ts:141` | documentation |
+| `landing/chat-react/activity-client.ts:145` | writer (scope/value construction) |
+| `landing/chat-react/controller.ts:1133` | documentation |
+| `landing/chat-react/general-scope.ts:30`, `landing/chat-react/general-scope.ts:41` | HTTP path segment |
+| `landing/chat-react/general-scope.ts:12`, `landing/chat-react/general-scope.ts:15`, `landing/chat-react/general-scope.ts:20` | documentation |
+| `landing/chat-react/switch-timing.ts:456`, `landing/chat-react/switch-timing.ts:457` | writer (diagnostic) |
+| `landing/chat-react/tabs-client.ts:107` | documentation |
+| `landing/chat-react/work-board-client.ts:228` | HTTP path segment |
+| `landing/chat-react/work-board-client.ts:220`, `landing/chat-react/work-board-client.ts:221`, `landing/chat-react/work-board-client.ts:224` | documentation |
+| `landing/chat-react/work-board-client.ts:36` | reader (binding) |
+| `migrations/__tests__/scope-rekey.test.ts:13`, `migrations/__tests__/scope-rekey.test.ts:168` | documentation |
+| `migrations/runner.test.ts:430` | writer (fixture/input) |
+| `migrations/scope-rekey.ts:99` | documentation |
+| `onboarding/history-import/__tests__/import-result-corrupt-policy.test.ts:53` | writer (fixture/input) |
+| `onboarding/history-import/__tests__/import-result-store.test.ts:57`, `onboarding/history-import/__tests__/import-result-store.test.ts:88`, `onboarding/history-import/__tests__/import-result-store.test.ts:96`, `onboarding/history-import/__tests__/import-result-store.test.ts:126` | writer (fixture/input) |
+| `onboarding/interview/__tests__/import-runner-hook-contract.test.ts:62` | reader (assertion) |
+| `onboarding/interview/__tests__/import-runner-hook-contract.test.ts:38` | writer (fixture/input) |
+| `onboarding/overnight/dispatcher.test.ts:192`, `onboarding/overnight/dispatcher.test.ts:199` | writer (fixture/input) |
+| `onboarding/overnight/morning-brief.test.ts:120`, `onboarding/overnight/morning-brief.test.ts:139`, `onboarding/overnight/morning-brief.test.ts:155` | reader (assertion) |
+| `onboarding/overnight/morning-brief.test.ts:114`, `onboarding/overnight/morning-brief.test.ts:134`, `onboarding/overnight/morning-brief.test.ts:150`, `onboarding/overnight/morning-brief.test.ts:180`, `onboarding/overnight/morning-brief.test.ts:195`, `onboarding/overnight/morning-brief.test.ts:206`, `onboarding/overnight/morning-brief.test.ts:219` | writer (fixture/input) |
+| `open/__tests__/activity-inspector-served.test.ts:212` | reader (assertion) |
+| `open/__tests__/memory-index-workboard-wiring.test.ts:31` | reader (binding) |
+| `open/__tests__/memory-index-workboard-wiring.test.ts:108`, `open/__tests__/memory-index-workboard-wiring.test.ts:111`, `open/__tests__/memory-index-workboard-wiring.test.ts:160` | writer (fixture/input) |
+| `open/__tests__/open-board-terminate-wiring.test.ts:39` | reader (binding) |
+| `open/__tests__/open-board-terminate-wiring.test.ts:207`, `open/__tests__/open-board-terminate-wiring.test.ts:277` | writer (fixture/input) |
+| `open/__tests__/open-terminal-build-wake-wiring.test.ts:28` | reader (binding) |
+| `open/__tests__/open-terminal-build-wake-wiring.test.ts:217`, `open/__tests__/open-terminal-build-wake-wiring.test.ts:282`, `open/__tests__/open-terminal-build-wake-wiring.test.ts:321` | writer (fixture/input) |
+| `open/__tests__/open-wiring-app-ws.test.ts:139` | writer (fixture/input) |
+| `open/__tests__/open-wiring-memory.test.ts:157`, `open/__tests__/open-wiring-memory.test.ts:161` | documentation |
+| `open/__tests__/open-wiring-memory.test.ts:162` | documentation (test name) |
+| `open/__tests__/open-wiring-memory.test.ts:184`, `open/__tests__/open-wiring-memory.test.ts:195` | reader (assertion) |
+| `open/__tests__/open-wiring-memory.test.ts:35` | reader (binding) |
+| `open/__tests__/open-wiring-memory.test.ts:178`, `open/__tests__/open-wiring-memory.test.ts:182`, `open/__tests__/open-wiring-memory.test.ts:329`, `open/__tests__/open-wiring-memory.test.ts:427` | writer (fixture/input) |
+| `open/activity-inspector.test.ts:264` | writer (fixture/input) |
+| `open/activity-inspector.ts:46` | documentation |
+| `open/activity-inspector.ts:52` | writer (scope definition) |
+| `open/composer.ts:2138`, `open/composer.ts:2266`, `open/composer.ts:4681`, `open/composer.ts:4682`, `open/composer.ts:5724`, `open/composer.ts:5757` | documentation |
+| `open/composer.ts:3074`, `open/composer.ts:4484`, `open/composer.ts:5740` | reader |
+| `open/composer.ts:532` | reader (binding) |
+| `open/composer.ts:2126`, `open/composer.ts:2269`, `open/composer.ts:2508`, `open/composer.ts:3082`, `open/composer.ts:4404`, `open/composer.ts:4457`, `open/composer.ts:4490`, `open/composer.ts:4782`, `open/composer.ts:5680` | writer (scope/value construction) |
+| `open/wiring/__tests__/nexus-reader-seam.test.ts:6`, `open/wiring/__tests__/nexus-reader-seam.test.ts:70` | documentation |
+| `open/wiring/__tests__/nexus-reader-seam.test.ts:15` | reader (binding) |
+| `open/wiring/__tests__/nexus-reader-seam.test.ts:69`, `open/wiring/__tests__/nexus-reader-seam.test.ts:71`, `open/wiring/__tests__/nexus-reader-seam.test.ts:86`, `open/wiring/__tests__/nexus-reader-seam.test.ts:93` | writer (fixture/input) |
+| `open/wiring/memory.ts:319`, `open/wiring/memory.ts:321` | documentation |
+| `open/wiring/memory.ts:50` | reader (binding) |
+| `open/wiring/memory.ts:328` | writer (scope/value construction) |
+| `open/wiring/nexus-reader-seam.ts:16`, `open/wiring/nexus-reader-seam.ts:36` | documentation |
+| `open/wiring/nexus-reader-seam.ts:43` | reader |
+| `open/wiring/nexus-reader-seam.ts:23` | reader (binding) |
+| `reflection/__tests__/index.test.ts:131`, `reflection/__tests__/index.test.ts:186`, `reflection/__tests__/index.test.ts:222` | writer (fixture/input) |
+| `reflection/corrections-store.ts:106`, `reflection/corrections-store.ts:169` | writer (scope/value construction) |
+| `reflection/index.ts:157` | writer (scope/value construction) |
+| `reminders/dispatcher.integration.test.ts:139` | reader (assertion) |
+| `reminders/dispatcher.integration.test.ts:120`, `reminders/dispatcher.integration.test.ts:131` | writer (fixture/input) |
+| `reminders/dispatcher.test.ts:130` | reader (assertion) |
+| `reminders/dispatcher.test.ts:125` | writer (fixture/input) |
+| `reminders/dispatcher.ts:336` | writer (scope/value construction) |
+| `runtime/adapters/claude-code/persistent/__tests__/persistent-repl-substrate.test.ts:209`, `runtime/adapters/claude-code/persistent/__tests__/persistent-repl-substrate.test.ts:216` | writer (fixture/input) |
+| `runtime/adapters/claude-code/persistent/context-reset.ts:44` | documentation |
+| `runtime/adapters/claude-code/persistent/context-reset.ts:381` | writer (scope/value construction) |
+| `runtime/adapters/claude-code/persistent/repl-session.ts:31` | documentation |
+| `tests/integration/reminders-tab-and-push.open.test.ts:388`, `tests/integration/reminders-tab-and-push.open.test.ts:453` | reader (assertion) |
+| `tools/registry.ts:81` | documentation |
+| `trident/dispatch-holds.ts:216` | documentation |
+| `trident/work-board-build-tool.ts:37` | reader (binding) |
+| `trident/work-board-build-tool.ts:251`, `trident/work-board-build-tool.ts:343` | writer (scope/value construction) |
+| `wire-types/app-ws-envelope.ts:618` | documentation |
+| `wire-types/topic-id.ts:43` | client sentinel |
+| `work-board/agent-tool.test.ts:292` | reader (assertion) |
+| `work-board/agent-tool.test.ts:201` | writer (fixture/input) |
+| `work-board/agent-tool.ts:234` | reader |
+| `work-board/agent-tool.ts:34` | reader (binding) |
+| `work-board/agent-tool.ts:298`, `work-board/agent-tool.ts:388`, `work-board/agent-tool.ts:450`, `work-board/agent-tool.ts:499`, `work-board/agent-tool.ts:583` | writer (scope/value construction) |
+| `work-board/inline-activity.test.ts:223` | reader (assertion) |
+| `work-board/inline-activity.test.ts:215`, `work-board/inline-activity.test.ts:230`, `work-board/inline-activity.test.ts:242`, `work-board/inline-activity.test.ts:259` | writer (fixture/input) |
+| `work-board/spec-doc-service.test.ts:169` | reader (assertion) |
+| `work-board/spec-doc-service.test.ts:167` | writer (fixture/input) |
+| `work-board/store.test.ts:1229` | documentation (test name) |
+| `work-board/store.test.ts:1233`, `work-board/store.test.ts:1234`, `work-board/store.test.ts:1235`, `work-board/store.test.ts:1236`, `work-board/store.test.ts:1237`, `work-board/store.test.ts:1238`, `work-board/store.test.ts:1239`, `work-board/store.test.ts:1243`, `work-board/store.test.ts:1244`, `work-board/store.test.ts:1245` | reader (assertion) |
+| `work-board/store.test.ts:12` | reader (binding) |
+| `work-board/store.test.ts:1252`, `work-board/store.test.ts:1255` | writer (fixture/input) |
+| `work-board/store.ts:242`, `work-board/store.ts:270` | documentation |
+| `work-board/store.ts:231`, `work-board/store.ts:260` | writer (scope definition) |
+
+### Additional edges needed to map the reported failures
+
+The original pattern misses `/general/` embedded in template URLs and constant-based consumers. A second search over the four files identified by the exact failing test names used `/general/|GENERAL_SCOPE|GENERAL_PROJECT_ID|httpScopeSegment|inspectorScopeKey|workBoardScopeKey`. Its positive control was `open/activity-inspector.test.ts:235` (`inspectorScopeKey(null)`). The five named failures occupy **four files**: both tab failures are in the mobile component test, not the web client.
+
+| Failure | Writer / client sentinel | HTTP path / reader | Classification and result |
+| --- | --- | --- | --- |
+| Blocked-card completion | `trident/escalation-block.test.ts:482` writes owner-keyed card | `trident/escalation-block.test.ts:492`; `gateway/http/work-board-surface.ts:269`; `gateway/http/work-board-surface.ts:287` | HTTP segment `general` passes unchanged into the key mapper; `work-board/store.ts:265` only maps the reserved/empty values to the owner. Lookup selects a different board before the expected refusal. |
+| Latched-dead start | `trident/liveness-death-e2e.test.ts:125` writes owner-keyed card | `trident/liveness-death-e2e.test.ts:138`; `trident/liveness-death-e2e.test.ts:141` | Same HTTP/key mismatch. HTTP assertion fails before the agent-tool assertions at `trident/liveness-death-e2e.test.ts:162`. This failure does not establish a broken orchestrator run lookup. |
+| Rail sentinel request | `app/__tests__/general-tab-set.test.tsx:249`; `app/lib/general-scope.ts:65` | `app/__tests__/general-tab-set.test.tsx:135`; `app/__tests__/general-tab-set.test.tsx:257` | Client sentinel / HTTP mapper versus fixture reader: fake gateway rejects the reserved segment, while production resolver explicitly accepts it (`gateway/http/scope-segment.ts:6`). |
+| Chat, Work, Docs order | `app/__tests__/general-tab-set.test.tsx:225` | `app/__tests__/general-tab-set.test.tsx:135`; `app/__tests__/general-tab-set.test.tsx:147`; `app/__tests__/general-tab-set.test.tsx:230` | Same rejected tabs fetch prevents reading the registry fixture. A tab-order change would not repair that boundary. |
+| Activity onRecord | `open/activity-inspector.test.ts:261`; `open/activity-inspector.ts:52` | `open/activity-inspector.test.ts:264` | Writer supplies reserved scope, assertion expects former literal. The callback forwards the supplied scope (`open/activity-inspector.ts:330`); this is a scope-value mismatch in its result, not evidence that it stopped firing. |
+
+### Contract conflict and review ceiling
+
+The current instruction declares the web three-spelling rule authoritative and forbids changing it. The web HTTP mapper returns `general` (`landing/chat-react/general-scope.ts:30`, `landing/chat-react/general-scope.ts:41`), but the branch implements reserved HTTP segments (`app/lib/general-scope.ts:65`, `gateway/http/scope-segment.ts:6`). Its existing acceptance test expressly keeps HTTP `general` and `~general` distinct (`gateway/http/scope-segment.test.ts:7`, `gateway/http/scope-segment.test.ts:9`) and the storage test protects the real project named `general` (`work-board/store.test.ts:1236`). Mapping HTTP `general` to General would restore the collision that this branch was built to remove. Retaining the reserved HTTP design requires revising the expressly protected web rule and mobile fake-gateway contract. Neither is an implementation-only choice under this brief.
+
+The docs ownership decision is implicated too: the migration moves four components to the reserved directory (`gateway/docs-general-scope-migration.ts:7`, `gateway/docs-general-scope-migration.ts:26`, `gateway/docs-general-scope-migration.ts:27`, `gateway/docs-general-scope-migration.ts:37`), while the protected web header points to the former docs root (`landing/chat-react/general-scope.ts:16`). Web activity still reads the former scope (`landing/chat-react/activity-client.ts:145`, `landing/chat-react/activity-client.ts:149`) while the inspector writes the reserved scope (`open/activity-inspector.ts:52`). The affected contracts therefore span mobile clients/fixtures, web clients/fixtures, HTTP resolution, board storage, activity push/snapshot scope, and docs migration.
+
+The earlier record's claim that reflection was the sole lagging producer is superseded by this enumeration. A whole-tree Markdown search for `sole lagging producer|All pass a nullable/reserved` found the earlier paragraph and this correction; the earlier paragraph stays as history of the previous pass, not as the current conclusion. The review is looking at the subject: concrete HTTP fixtures and mobile client mappings disagree with branch-changed resolvers. Its description of a web rail failure and an orchestrator lookup failure was broader than the named tests show, as mapped above.
+
+**BLOCKED: repeat finding after 3 rounds**, as reported in the task brief. The repeating class is incomplete General-boundary propagation. Under the standing round-three ceiling, no fourth implementation round was started. The actual disagreement is whether HTTP General remains `general` or retains the collision-proof reserved segment. A product ruling must reconcile that choice with the real project named `general`, existing docs ownership, and the protected tests before implementation resumes.
+
+### Validation of the unchanged implementation
+
+Ran `bun test trident/escalation-block.test.ts trident/liveness-death-e2e.test.ts open/activity-inspector.test.ts`: **91 pass, 3 fail**, reproducing the three named server failures. Ran `bun test app/__tests__/general-tab-set.test.tsx`: **2 pass, 2 fail**, reproducing both named mobile failures. No whole-directory or full-suite test command was run.
+
+| Guard | Mutation | RED | Restored GREEN |
+| --- | --- | --- | --- |
+| No new guard in this investigation | Not performed; implementation unchanged at the review ceiling | Five existing failures reproduced | Not claimed |
+
+Two additional existing contract controls passed: `gateway/http/scope-segment.test.ts` and `work-board/store.test.ts`, filtered to their reserved-segment and distinct-project tests (2 pass, 0 fail). This establishes that the conflicting collision-separation contract is currently green; it does not claim those full files were rerun. `bash scripts/ci/typecheck-all.sh` passed all 51 configurations. Repository lint passed. `git diff --check` passed. A local record check verified that the table represents exactly all 372 grep matches and that the record retains exactly one top-level heading. The leak gate exited 3: zero findings from available rules, but both external PII-denylist rules could not run. This is incomplete validation, not a clean leak-gate result.
+
+### Deliberately not changed in this investigation
+
+No runtime code, fixtures, assertions, spec decision, migration, or layer mapper was edited. No fallback lookup was introduced. This commit records enumeration and a blocked design review; it does not claim the five failures are fixed.
