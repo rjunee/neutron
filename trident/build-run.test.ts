@@ -27,6 +27,7 @@ function fixture() {
   let reads = 0
   const deps: BuildRunDeps = {
     readReviewCap: async () => ({ kind: 'known' }),
+    checkBuildClaim: async () => { events.push('preserve'); return { kind: 'blocked', on: 'Claim conflicts after preservation' } },
     prepareWork: async () => {},
     measure: async () => { reads++; events.push('measure'); return { kind: 'known', value: structuredClone(snapshot) } },
     admissionGate: async () => ({ kind: 'allow' }),
@@ -748,4 +749,87 @@ test('G076 re-plan cannot buy work after the final review', async () => {
   f.decisions.push({ kind: 're-plan', findings: ['gap'], whatIsMissing: 'design' })
   expect(await f.run()).toMatchObject({ kind: 'blocked', on: expect.stringContaining('round ceiling') })
   expect(f.runner.calls.map(c => c.step_id)).toEqual(['run:plan:0', 'run:build:0'])
+})
+
+test('G032 local build and fix require full heads within three observations', async () => {
+  for (const role of ['build', 'fix'] as const) {
+    for (const bad of ['short', '', 'absent', 'a'.repeat(39)]) {
+      const f = localFixture()
+      if (role === 'fix') f.decisions.push({ kind: 'fix', findings: ['repair'] })
+      const measure = f.deps.measure
+      let attempts = 0
+      f.deps.measure = async () => {
+        if (f.runner.calls.at(-1)?.role === role && (role === 'build' || f.cross.calls.length === 1)) {
+          attempts++
+          return { kind: 'known', value: { ...f.snapshot, head: bad } }
+        }
+        return measure()
+      }
+      f.outcomes.set(`run:${role}:${role === 'build' ? 0 : 1}`, f.completed({ ...f.snapshot, head: bad }))
+      expect(await f.run()).toMatchObject({ kind: 'unknown', phase: role, detail: expect.stringContaining('full commit OID') })
+      expect(attempts).toBe(3)
+      expect(f.cross.calls).toHaveLength(role === 'build' ? 0 : 1)
+      expect(f.events).not.toContain('merge')
+    }
+  }
+})
+
+test('G032 transient unreadable observations recover on the third read', async () => {
+  for (const role of ['build', 'fix'] as const) {
+    const f = localFixture()
+    if (role === 'fix') f.decisions.push({ kind: 'fix', findings: ['repair'] })
+    const measure = f.deps.measure
+    let attempts = 0
+    f.deps.measure = async () => {
+      if (f.runner.calls.at(-1)?.role === role && attempts < 3) {
+        if (++attempts < 3) return { kind: 'unknown', detail: 'head unreadable' }
+      }
+      return measure()
+    }
+    expect((await f.run()).kind).toBe('merged')
+    expect(attempts).toBe(3)
+  }
+})
+
+test('G100 waits for preservation before refusing build and fix claims', async () => {
+  for (const role of ['build', 'fix'] as const) {
+    const f = fixture()
+    if (role === 'fix') f.decisions.push({ kind: 'fix', findings: ['repair'] })
+    f.outcomes.set(`run:${role}:${role === 'build' ? 0 : 1}`, f.completed({ ...f.snapshot, head: 'b'.repeat(40) }))
+    let release!: () => void
+    const pending = new Promise<void>(resolve => { release = resolve })
+    let entered!: () => void
+    const started = new Promise<void>(resolve => { entered = resolve })
+    f.deps.checkBuildClaim = async () => { entered(); await pending; f.events.push('receipt'); return { kind: 'blocked', on: 'preserved conflict' } }
+    let done = false
+    const result = f.run().then(value => { done = true; return value })
+    await started
+    expect(done).toBe(false)
+    expect(f.cross.calls).toHaveLength(role === 'build' ? 0 : 1)
+    release()
+    expect(await result).toMatchObject({ kind: 'failed', phase: role, cause: 'built-head-unverified' })
+    expect(f.events).toContain('receipt')
+    expect(f.events).not.toContain('publish')
+  }
+})
+
+test('G100 missing preservation stays unknown and resolved same claims continue', async () => {
+  for (const resolution of ['missing', 'unknown', 'allow'] as const) {
+    const f = fixture()
+    f.outcomes.set('run:build:0', f.completed({ ...f.snapshot, head: 'aaaaaaa' }))
+    if (resolution === 'missing') delete f.deps.checkBuildClaim
+    else f.deps.checkBuildClaim = async () => resolution === 'allow' ? { kind: 'allow' } : { kind: 'unknown', detail: 'receipt missing' }
+    const result = await f.run()
+    expect(result.kind).toBe(resolution === 'allow' ? 'merged' : 'unknown')
+    if (resolution === 'missing') expect(result).toMatchObject({ detail: 'Build claim resolution and preservation source is missing' })
+    expect(f.cross.calls.length).toBe(resolution === 'allow' ? 1 : 0)
+  }
+})
+
+
+test('G032 local full SHA-256 heads remain accepted', async () => {
+  const f = localFixture()
+  f.snapshot.head = 'a'.repeat(64)
+  for (const key of f.outcomes.keys()) f.outcomes.set(key, f.completed())
+  expect((await f.run()).kind).toBe('merged')
 })
