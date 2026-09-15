@@ -9,6 +9,7 @@ import {
 } from '@neutronai/runtime/bounded-work.ts'
 import type { LeakPreflightOutcome } from './leak-preflight.ts'
 import type { MergeDiffAssessment } from './merge.ts'
+import { applyReviewSuite, type SuiteAssessment } from './gates/review-suite.ts'
 import type { TerminalCause } from './terminal-cause.ts'
 
 const log = createLogger('trident')
@@ -101,6 +102,7 @@ export interface BuildRunDeps {
   runLeakGatePreflight(snapshot: BuildSnapshot): Promise<BuildLeakPreflightOutcome>
   assessMergeDiff(diff: string): MergeDiffAssessment
   reviewReadiness?(snapshot: BuildSnapshot, signal: AbortSignal, mergeMode?: 'pr' | 'local'): Promise<GateResult>
+  reviewSuite?(snapshot: BuildSnapshot, round: number): Promise<SuiteAssessment>
   // reviewGate owns panel provenance, cross-model seats, severity and arbiter rules.
   reviewGate(payload: unknown, snapshot: BuildSnapshot, round: number, replansUsed?: number): Promise<ReviewDecision>
   // publishGate owns mutation proof and publication readiness; mergeGate owns CI,
@@ -355,12 +357,17 @@ export async function buildRun(input: BuildRunInput, deps: BuildRunDeps, signal:
       if (!deps.reviewReadiness) return unknown('Review readiness host is missing')
       const readiness = gateStop(await deps.reviewReadiness(snapshot, signal, input.merge_mode))
       if (readiness) return readiness
+      if (!deps.reviewSuite) return unknown('Review suite host is missing')
+      const suite = await deps.reviewSuite(snapshot, round)
+      if (suite.kind === 'unknown') return unknown(suite.detail)
+      findings = [...findings, ...suite.findings.map(f => `${f.title}: ${f.evidence}`)]
       const readyRevision = await deps.measure()
       if (readyRevision.kind === 'unknown') return unknown(readyRevision.detail)
       if (!corroborates(snapshot, readyRevision.value)) return blocked('Revision changed during review readiness')
       const result = await work('review', round)
       if ('stop' in result) return result.stop
-      const decision = await deps.reviewGate(result.payload, snapshot, round, replansUsed)
+      const panel = await deps.reviewGate(result.payload, snapshot, round, replansUsed)
+      const decision = applyReviewSuite(panel, suite)
       if (decision.kind === 'blocked') return blocked(decision.on)
       if (decision.kind === 'unknown') return unknown(decision.detail)
       if (decision.kind === 'approve') break

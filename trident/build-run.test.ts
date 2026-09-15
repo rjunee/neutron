@@ -34,6 +34,7 @@ function fixture() {
     runLeakGatePreflight: async () => ({ status: 'clean', head: snapshot.head, findings: [], skipped_rules: [], attempts: 0, note: '' }),
     assessMergeDiff: () => ({ allow: true, measured_bytes: 7 }),
     reviewReadiness: async () => ({ kind: 'allow' }),
+    reviewSuite: async () => ({ kind: 'known', findings: [] }),
     reviewGate: async () => decisions.shift() ?? { kind: 'approve' },
     publishGate: async () => { events.push('publishGate'); return { kind: 'allow' } },
     mergeGate: async () => { events.push('mergeGate'); return { kind: 'allow' } },
@@ -717,6 +718,38 @@ test('readiness cannot dispatch review after its measured subject changes', asyn
   f.deps.reviewReadiness = async () => { f.snapshot.head = 'b'.repeat(40); return { kind: 'allow' } }
   expect(await f.run()).toMatchObject({ kind: 'blocked', on: 'Revision changed during review readiness' })
   expect(f.cross.calls).toHaveLength(0)
+})
+
+test('suite step feeds panel and fix briefs and overrides approving panels every round', async () => {
+  const f = fixture(); const order: string[] = []
+  const briefs: { role: string; findings: readonly string[] }[] = []
+  f.deps.prepareWork = async (request, context) => { briefs.push({ role: request.role, findings: [...context.findings] }) }
+  f.deps.reviewSuite = async (snapshot, round) => {
+    expect(snapshot.head).toBe(f.snapshot.head); order.push(`suite:${round}`)
+    return { kind: 'known', findings: round === 1 ? [{ title: 'FULL SUITE NOT PROVEN', evidence: 'run full suite', advisory: false }] : [] }
+  }
+  f.deps.reviewGate = async (_, __, round) => { order.push(`panel:${round}`); return { kind: 'approve' } }
+  expect((await f.run()).kind).toBe('merged')
+  expect(order).toEqual(['suite:1', 'panel:1', 'suite:2', 'panel:2'])
+  for (const role of ['review', 'fix']) expect(briefs.find(b => b.role === role)?.findings).toContain('FULL SUITE NOT PROVEN: run full suite')
+  expect(f.runner.calls.map(c => c.role)).toEqual(['plan', 'build', 'fix'])
+})
+test('suite missing or unreadable host cannot dispatch panel or publish', async () => {
+  for (const missing of [true, false]) {
+    const f = fixture()
+    if (missing) delete f.deps.reviewSuite
+    else f.deps.reviewSuite = async () => ({ kind: 'unknown', detail: 'suite checkpoint unreadable' })
+    expect(await f.run()).toMatchObject({ kind: 'unknown', phase: 'review', detail: expect.stringContaining('suite') })
+    expect(f.cross.calls).toHaveLength(0)
+    expect(f.events).not.toContain('publish')
+  }
+})
+test('suite advisory transcription reaches panel before approval', async () => {
+  const f = fixture(); let seen: readonly string[] = []
+  f.deps.reviewSuite = async () => ({ kind: 'known', findings: [{ title: 'PRE-EXISTING', evidence: 'base comparison', advisory: true }] })
+  f.deps.prepareWork = async (request, context) => { if (request.role === 'review') seen = [...context.findings] }
+  expect((await f.run()).kind).toBe('merged')
+  expect(seen).toContain('PRE-EXISTING: base comparison')
 })
 
 for (const cap of [1, 2, 7, 12]) {
