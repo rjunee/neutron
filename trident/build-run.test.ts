@@ -605,3 +605,64 @@ test('local revision is pinned across the publication boundary', async () => {
   expect(await f.run()).toMatchObject({ kind: 'blocked', on: 'Local revision changed before merge' })
   expect(f.events).not.toContain('local-merge')
 })
+
+const gap: ReviewDecision = { kind: 're-plan', whatIsMissing: 'revise the execution spec', findings: ['old'], blockingCount: 2 }
+test('design gap re-plans once and continues with fresh measurements and spent rounds', async () => {
+  const f = fixture()
+  f.decisions.push(gap, { kind: 'fix', findings: ['new'] }, { kind: 'approve' })
+  const counts: number[] = []
+  const gate = f.deps.reviewGate
+  f.deps.reviewGate = (payload, snapshot, round, used) => { counts.push(used!); return gate(payload, snapshot, round, used) }
+  expect(await f.run()).toMatchObject({ kind: 'merged' })
+  expect(f.runner.calls.map(c => c.step_id)).toEqual(['run:plan:0', 'run:build:0', 'run:plan:1', 'run:build:1', 'run:fix:2'])
+  expect(f.cross.calls.map(c => c.step_id)).toEqual(['run:review:1', 'run:review:2', 'run:review:3'])
+  expect(counts).toEqual([0, 1, 1])
+  expect(f.reads()).toBe(14)
+})
+test('host refuses a second re-plan even when worker claims zero spent', async () => {
+  const f = fixture()
+  f.outcomes.set('run:review:2', f.completed({ ...f.snapshot, payload: { replansUsed: 0 } }))
+  f.deps.reviewGate = async (_payload, _snapshot, _round, used) => ({ ...gap, whatIsMissing: `host count ${used}` })
+  expect(await f.run()).toMatchObject({ kind: 'blocked', on: expect.stringContaining('already spent'), recipient: 'orchestrator' })
+  expect(f.runner.calls.filter(c => c.role === 'plan')).toHaveLength(2)
+})
+for (const decision of [
+  { kind: 'fix', findings: ['old'], blockingCount: 1 },
+  { kind: 'fix', findings: ['new'], blockingCount: 2 },
+] satisfies ReviewDecision[]) {
+  test(`post-re-plan trigger stops: ${decision.findings[0]}`, async () => {
+    const f = fixture(); f.decisions.push(gap, decision)
+    expect(await f.run()).toMatchObject({ kind: 'blocked', on: expect.stringContaining('post-re-plan trigger') })
+    expect(f.runner.calls.some(c => c.role === 'fix')).toBe(false)
+  })
+}
+for (const role of ['plan', 'build'] as const) {
+  test(`re-plan ${role} claim is measured again`, async () => {
+    const f = fixture(); f.decisions.push(gap)
+    f.outcomes.set(`run:${role}:1`, f.completed({ ...f.snapshot, head: 'invented' }))
+    expect(await f.run()).toMatchObject({ kind: 'failed', phase: role, cause: 'built-head-unverified' })
+  })
+}
+
+test('resume keeps the host re-plan count and rejects invalid counts', async () => {
+  for (const used of [1, 2]) {
+    const f = fixture(); f.input.start = 'resume'
+    f.deps.modes = {
+      loadResume: async () => ({ head: f.snapshot.head, stage: 'built', round: 2, replansUsed: used, findings: [], previousFindings: [] }),
+      regenerateDiff: async () => ({ kind: 'known', diff: f.snapshot.diff }),
+      probePlan: async () => null, advanceRalph: async () => ({ kind: 'allow' }),
+    }
+    f.decisions.push(gap)
+    expect(await f.run()).toMatchObject({ kind: 'blocked', on: used === 1 ? expect.stringContaining('already spent') : 'Invalid recorded re-plan count' })
+  }
+})
+test('resumed rejection after re-plan stops before another fix', async () => {
+  const f = fixture(); f.input.start = 'resume'
+  f.deps.modes = {
+    loadResume: async () => ({ head: f.snapshot.head, stage: 'rejected', round: 2, replansUsed: 1, findings: [{ kind: 'code', actionable: true, text: 'old' }], previousFindings: ['old'] }),
+    regenerateDiff: async () => ({ kind: 'known', diff: f.snapshot.diff }),
+    probePlan: async () => null, advanceRalph: async () => ({ kind: 'allow' }),
+  }
+  expect(await f.run()).toMatchObject({ kind: 'blocked', on: expect.stringContaining('post-re-plan trigger') })
+  expect(f.runner.calls).toHaveLength(0)
+})

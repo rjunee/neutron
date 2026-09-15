@@ -448,3 +448,17 @@ test('fresh local admission allows the host to provision its branch and worktree
   const composed = f.make()
   expect(await composed.deps.admissionGate({ ...f.input(composed), merge_mode: 'local' })).toEqual({ kind: 'allow' })
 })
+
+test('review composition carries host re-plan usage independently of worker data', async () => {
+  const f = await fixture()
+  const payload = { verdict: 'REQUEST_CHANGES', findings: [], escalate: { kind: 'design-gap', whatIsMissing: 'execution spec needs revision' } }
+  f.options.review = {
+    seats: [{ id: 'core', provider: 'pi', modelId: 'test', role: 'core', enabled: true }],
+    readSeat: async () => ({ runId: 'test', head, round: 1, provider: 'pi', modelId: 'test', status: 'completed', payload }),
+    retrySeat: async () => {},
+    readSynthesis: async () => ({ runId: 'test', head, round: 1, checkpoint: 'reviewed', payload }),
+  }
+  const { deps } = f.make()
+  expect(await deps.reviewGate(payload, snapshot, 1, 0)).toMatchObject({ kind: 're-plan' })
+  expect(await deps.reviewGate(payload, snapshot, 1, 1)).toMatchObject({ kind: 'blocked' })
+})

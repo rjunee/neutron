@@ -22,7 +22,8 @@ export type Measurement = { kind: 'known'; value: BuildSnapshot } | { kind: 'unk
 export type GateResult = { kind: 'allow' } | { kind: 'blocked'; on: string } | { kind: 'unknown'; detail: string }
 export type ReviewDecision =
   | { kind: 'approve' }
-  | { kind: 'fix'; findings: readonly string[] }
+  | { kind: 'fix'; findings: readonly string[]; blockingCount?: number }
+  | { kind: 're-plan'; findings: readonly string[]; whatIsMissing: string; blockingCount?: number }
   | Exclude<GateResult, { kind: 'allow' }>
 
 export interface ExecutionPlan {
@@ -42,6 +43,9 @@ export interface ResumeCheckpoint {
   head: string | null
   stage: 'built' | 'approved' | 'rejected' | 'fixed' | 'ralph-task-built' | 'ralph-task-built-deviated'
   round: number
+  /** Persisted by the host alongside the review checkpoint. */
+  replansUsed?: number
+  previousBlockingCount?: number
   findings: readonly { kind: 'code' | 'lane'; actionable: boolean; text: string }[]
   previousFindings: readonly string[]
   /** A running/unobserved turn must be settled by its host, never dispatched again. */
@@ -86,7 +90,7 @@ export interface BuildRunDeps {
   runLeakGatePreflight(snapshot: BuildSnapshot): Promise<LeakPreflightOutcome>
   assessMergeDiff(diff: string): MergeDiffAssessment
   // reviewGate owns panel provenance, cross-model seats, severity and arbiter rules.
-  reviewGate(payload: unknown, snapshot: BuildSnapshot, round: number): Promise<ReviewDecision>
+  reviewGate(payload: unknown, snapshot: BuildSnapshot, round: number, replansUsed?: number): Promise<ReviewDecision>
   // publishGate owns mutation proof and publication readiness; mergeGate owns CI,
   // base drift and pinned-head merge eligibility. Both run on host observations.
   publishGate(snapshot: BuildSnapshot, mergeMode?: 'pr' | 'local'): Promise<GateResult>
@@ -173,11 +177,14 @@ export async function buildRun(input: BuildRunInput, deps: BuildRunDeps, signal:
       }
     } else if (input.start === 'fresh' && snapshot.pr !== null) return blocked('Fresh build already has a PR')
 
+    let replansUsed = resume?.replansUsed ?? 0
+    if (replansUsed !== 0 && replansUsed !== 1) return blocked('Invalid recorded re-plan count')
     let skipBuild = false
     let approved = false
     let firstRound = 1
     let resumeFix = false
     let previous: readonly string[] = []
+    let previousBlockingCount = resume?.previousBlockingCount ?? resume?.previousFindings.length ?? 0
     if (resume) {
       if (!Number.isSafeInteger(resume.round) || resume.round < 0) return blocked('Invalid recorded review round')
       firstRound = Math.max(1, resume.round)
@@ -255,8 +262,8 @@ export async function buildRun(input: BuildRunInput, deps: BuildRunDeps, signal:
     }
 
     let plan: ExecutionPlan | null = null
-    if (!skipBuild) {
-      const planned = await work('plan', 0)
+    async function planAndBuild(round: number): Promise<BuildRunOutcome | null> {
+      const planned = await work('plan', round)
       if ('stop' in planned) return planned.stop
       if (input.mode === 'ralph' || input.mode === 'wave') {
         // G025: a completed worker with a null planner payload is still no plan.
@@ -277,7 +284,7 @@ export async function buildRun(input: BuildRunInput, deps: BuildRunDeps, signal:
         }
         previousPayload = plan
       }
-      const built = await work('build', 0)
+      const built = await work('build', round)
       if ('stop' in built) return built.stop
       if (input.mode === 'wave') {
         // G034: even a corroborated short hash cannot become a join result.
@@ -291,12 +298,19 @@ export async function buildRun(input: BuildRunInput, deps: BuildRunDeps, signal:
         if (handoff) return handoff
         return { kind: 'continued', snapshot, remainingTasks: plan!.remainingTasks, cause: 'ralph-task-built' }
       }
+      return null
+    }
+    if (!skipBuild) {
+      const stop = await planAndBuild(0)
+      if (stop) return stop
     }
     if (resumeFix) {
       if (firstRound >= 5) return blocked('Review requires orchestrator arbitration: round ceiling')
       findings = resume!.findings.filter(f => f.kind === 'code' && f.actionable).map(f => f.text)
       if (firstRound >= 3 && findings.some(f => previous.includes(f))) return blocked('Review requires orchestrator arbitration: repeated finding')
+      if (replansUsed > 0 && (findings.some(f => previous.includes(f)) || findings.length >= previousBlockingCount)) return blocked('Review requires orchestrator arbitration: post-re-plan trigger')
       previous = findings
+      previousBlockingCount = findings.length
       const fixed = await work('fix', firstRound)
       if ('stop' in fixed) return fixed.stop
       firstRound++
@@ -304,15 +318,31 @@ export async function buildRun(input: BuildRunInput, deps: BuildRunDeps, signal:
     for (let round = firstRound; !approved; round++) {
       const result = await work('review', round)
       if ('stop' in result) return result.stop
-      const decision = await deps.reviewGate(result.payload, snapshot, round)
+      const decision = await deps.reviewGate(result.payload, snapshot, round, replansUsed)
       if (decision.kind === 'blocked') return blocked(decision.on)
       if (decision.kind === 'unknown') return unknown(decision.detail)
       if (decision.kind === 'approve') break
+      if (decision.kind === 're-plan') {
+        if (replansUsed !== 0) return blocked('Review requires orchestrator arbitration: re-plan already spent')
+        replansUsed++
+        findings = [decision.whatIsMissing, ...decision.findings]
+        previous = decision.findings
+        previousBlockingCount = decision.blockingCount ?? decision.findings.length
+        planner = 'full'
+        committedPlan = undefined
+        const stop = await planAndBuild(round)
+        if (stop) return stop
+        continue
+      }
+      if (replansUsed > 0 && (decision.findings.some(finding => previous.includes(finding)) || (decision.blockingCount ?? decision.findings.length) >= previousBlockingCount)) {
+        return blocked('Review requires orchestrator arbitration: post-re-plan trigger')
+      }
       if (round >= 5 || (round >= 3 && decision.findings.some(finding => previous.includes(finding)))) {
         return blocked('Review requires orchestrator arbitration: repeated finding or round ceiling')
       }
       findings = decision.findings
       previous = decision.findings
+      previousBlockingCount = decision.blockingCount ?? decision.findings.length
       const fix = await work('fix', round)
       if ('stop' in fix) return fix.stop
     }

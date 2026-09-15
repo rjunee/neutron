@@ -72,9 +72,9 @@ test('review provenance compares recorded synthesis against worker payload', asy
 test('review severity, minority veto and stable identities drive fixes and arbitration', async () => {
   for (const severity of ['major', 'blocker', 'minor', 'nit']) {
     const f = fixture(); f.seat.payload = { verdict: 'REQUEST_CHANGES', findings: [{ ...finding, severity }] }
-    expect(await f.check()).toEqual(severity === 'major' || severity === 'blocker' ? { kind: 'fix', findings: ['code.ts:f:correctness'] } : { kind: 'approve' })
+    expect(await f.check()).toEqual(severity === 'major' || severity === 'blocker' ? { kind: 'fix', findings: ['code.ts:f:correctness'], blockingCount: 2 } : { kind: 'approve' })
     f.synthesis.payload = f.seat.payload
-    expect(await f.check()).toEqual(severity === 'major' || severity === 'blocker' ? { kind: 'fix', findings: ['code.ts:f:correctness'] } : { kind: 'approve' })
+    expect(await f.check()).toEqual(severity === 'major' || severity === 'blocker' ? { kind: 'fix', findings: ['code.ts:f:correctness'], blockingCount: 3 } : { kind: 'approve' })
   }
   const f = fixture(); f.seat.payload = { verdict: 'APPROVE', findings: [{ ...finding, symbol: '' }] }
   expect(await f.check()).toMatchObject({ kind: 'unknown' })
@@ -106,4 +106,15 @@ test('review malformed findings cannot authorize approval', async () => {
     const f = fixture(); f.seat.payload = { verdict: 'APPROVE', findings }
     expect(await f.check()).toMatchObject({ kind: 'unknown' })
   }
+})
+
+test('valid design gap buys one re-plan; later gaps and other declarations stop', async () => {
+  const f = fixture()
+  f.seat.payload = { verdict: 'REQUEST_CHANGES', findings: [finding], escalate: { kind: 'design-gap', whatIsMissing: 'execution spec lacks a requirement' } }
+  expect(await f.check()).toMatchObject({ kind: 're-plan', findings: ['code.ts:f:correctness'] })
+  expect(await reviewPanel(f.source, f.synthesis.payload, snapshot, 1, 'run', 1)).toMatchObject({ kind: 'blocked' })
+  f.seat.payload = { verdict: 'REQUEST_CHANGES', findings: [], escalate: { kind: 'design-gap', whatIsMissing: '  ' } }
+  expect(await f.check()).toMatchObject({ kind: 'blocked' })
+  f.seat.payload = { verdict: 'REQUEST_CHANGES', findings: [], escalate: { kind: 'missing-dependency', whatIsMissing: 'required dependency' } }
+  expect(await f.check()).toMatchObject({ kind: 'blocked' })
 })

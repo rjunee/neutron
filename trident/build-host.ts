@@ -95,7 +95,7 @@ export function createBuildHost(options: BuildHostOptions): { deps: BuildRunDeps
     },
     runLeakGatePreflight: (snapshot) => runLeakGatePreflight({ ...options.leak, head: snapshot.head, max_fix_attempts: 0 }),
     assessMergeDiff,
-    reviewGate: (payload, snapshot, round) => reviewPanel(options.review, payload, snapshot, round, options.mutation.run.id),
+    reviewGate: (payload, snapshot, round, replansUsed) => reviewPanel(options.review, payload, snapshot, round, options.mutation.run.id, replansUsed),
     async publishGate(snapshot, mergeMode) {
       const claim = await options.mutation.readClaim(snapshot)
       const proof = await runMutationProofGate({ ...options.mutation, claim, expected_head: snapshot.head })
