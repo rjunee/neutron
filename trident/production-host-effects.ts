@@ -150,9 +150,22 @@ export function createProductionHostEffects(options: ProductionHostOptions) {
   const git = (...args: string[]) => runHost(['git', '-C', repo, ...args], repo)
   function row(): TridentRun {
     const current = store.get(runId)
-    if (!current || current.project_slug !== options.projectSlug || current.repo_path !== repo
-      || current.worktree !== worktree || current.branch !== branch) {
-      throw new Error('Build run identity, branch or worktree is missing or changed')
+    // NAME THE FIELD, NOT THE CATEGORY. This guard compares four things, and the
+    // message used to name all four with no way to tell which one moved — so a live
+    // failure said "identity, branch or worktree is missing or changed" and left the
+    // operator to guess. That cost a whole acceptance dispatch on 2026-09-15: by the
+    // time the row could be inspected, cleanup had already nulled `worktree`, so the
+    // post-hoc state could not distinguish the field that actually mismatched from one
+    // mutated afterwards.
+    //
+    // The VALUES are deliberately not interpolated — they are filesystem paths, and this
+    // string reaches `inner_result` and the owner's chat. The field name is the fact that
+    // changes what you do next; the path is not.
+    if (!current) throw new Error('Build run row is missing')
+    const moved = (['project_slug', 'repo_path', 'worktree', 'branch'] as const).filter(field =>
+      current[field] !== ({ project_slug: options.projectSlug, repo_path: repo, worktree, branch })[field])
+    if (moved.length > 0) {
+      throw new Error(`Build run identity changed: ${moved.join(', ')} no longer match${moved.length === 1 ? 'es' : ''} the bound build`)
     }
     if (isTerminalPhase(current.phase)) throw new Error('Build run is terminal')
     return current
