@@ -275,6 +275,8 @@ const KNOWN_READERS: Readonly<Record<string, string>> = {
     'Broad regex literal at cores/free/email/src/mime.ts:52 matches an identity-name candidate; registered conservatively, without claiming an env read or trimming behavior.',
   'cores/free/email/src/pipeline/migrate.ts':
     'Broad regex literal at cores/free/email/src/pipeline/migrate.ts:55 matches an identity-name candidate; registered conservatively, without claiming an env read or trimming behavior.',
+  'cores/free/email/src/pipeline/setup.ts':
+    'Broad regex literal at cores/free/email/src/pipeline/setup.ts:54 matches the underscore in an identity-name candidate while sanitizing an observed sender domain into a proposed category; registered conservatively. No env access.',
   'cores/free/reminders/src/chat-commands.ts':
     'Broad regex literal at cores/free/reminders/src/chat-commands.ts:224 matches an identity-name candidate; registered conservatively, without claiming an env read or trimming behavior.',
   'cores/free/research/src/render-markdown.ts':

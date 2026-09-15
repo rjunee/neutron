@@ -83,6 +83,7 @@ export type {
 } from './multi-account.ts'
 
 export {
+  ClassificationSetupError,
   DraftLabelingError,
   EmailHeaderInjectionError,
   GoogleGmailApiError,
@@ -90,6 +91,7 @@ export {
   OAuthMissingError,
   ThreadNotFoundError,
 } from './errors.ts'
+export type { ClassificationSetupErrorCode } from './errors.ts'
 
 export {
   buildInMemoryGmailClient,
