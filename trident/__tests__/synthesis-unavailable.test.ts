@@ -152,7 +152,7 @@ const real = new Function(
  * exists to catch sailed through green. A hand copy of the code under test is not a test.
  *
  * Every free identifier in the arm is a parameter, so the slice can only compile if the
- * source still reads exactly those four things — a rename in production fails this file
+ * source still reads exactly those five things — a rename in production fails this file
  * loudly instead of quietly leaving it testing history.
  */
 function grabWithCiArm(): string {
@@ -168,12 +168,14 @@ const withCiArm = new Function(
   'ciFindings',
   'ciFindingsBlock',
   'severityGated',
-  `${grabWithCiArm()}\n  return withCi`,
+  'codeScanningAlerts',
+  `${grabWithCiArm()}\n  return withCodeScanning`,
 ) as (
   ci: { status: string },
   ciFindings: Finding[],
   ciFindingsBlock: (f: Finding[]) => boolean,
   severityGated: Synthesis | null,
+  codeScanningAlerts: Finding[],
 ) => Synthesis
 
 /**
@@ -184,7 +186,7 @@ const withCiArm = new Function(
  */
 function reviewAndSynthesizeTail(
   synthesisRaw: unknown,
-  { ciRed = false, ciAdvisory = false, peers = [] as Peer[] } = {},
+  { ciRed = false, ciAdvisory = false, scanAlert = false, peers = [] as Peer[] } = {},
 ): Synthesis {
   const severityGated = real.enforceSeverityGate(synthesisRaw)
   // The CI inputs are fixtures; the ARM ITSELF is the source's, evaluated. `ciAdvisory` is
@@ -200,6 +202,9 @@ function reviewAndSynthesizeTail(
     ciFindings,
     real.ciFindingsBlock,
     severityGated,
+    scanAlert
+      ? [{ severity: 'blocker', title: 'CODE SCANNING ALERT: js/sql-injection', evidence: 'src/db.ts:42' }]
+      : [],
   )
   const gated = real.enforceCrossModelGate(withCi, peers)
   // The caller's own last measurement, mirrored here because this helper rebuilds the
@@ -272,6 +277,15 @@ describe('the premise: what a dead synthesis agent ACTUALLY produces', () => {
     const out = reviewAndSynthesizeTail(null)
     expect(wouldReForge(out)).toBe(true)
     expect(JSON.stringify(out.findings)).toBeUndefined()
+  })
+
+  test('an open scanning alert changes the measured path, not the clean premise', () => {
+    const out = reviewAndSynthesizeTail(null, { scanAlert: true })
+    expect(out.verdict).toBe('REQUEST_CHANGES')
+    expect(out.blockKind).toBe('code')
+    expect(out.findings?.map((finding) => finding.title)).toEqual([
+      'CODE SCANNING ALERT: js/sql-injection',
+    ])
   })
 
   test('the source really does end in that single spread `return`', () => {
