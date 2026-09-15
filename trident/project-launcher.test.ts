@@ -124,8 +124,8 @@ test('a rejecting driver settles as inner-error rather than stranding the reserv
   // The harvest can now see it. Left pending, `step()` short-circuits ahead of the
   // in-flight ceiling and the run is immortal.
   const orch = buildTridentOrchestrator({ fire_workflow: async () => { throw Error('must not re-fire') }, db_path: f.input.db_path,
-    base_branch: 'main', run_host: honourDiffOutput(async () => ({ stdout: '', stderr: '', code: 0 })),
-    observe_run_worker: async () => ({ state: 'dead', detail: 'gone', observed_at: new Date().toISOString(), screen: '' }) })
+    base_branch: 'main', run_host: honourDiffOutput(async () => ({ ok: true, exit_code: 0, stdout: '', stderr: '' })),
+    observe_run_worker: async () => ({ state: 'unknown' as const, detail: 'gone', observed_at: new Date().toISOString(), screen: '' }) })
   const out = await orch.step(run)
   expect(out.waiting).toBe(false)
   expect(out.changed).toBe(true)

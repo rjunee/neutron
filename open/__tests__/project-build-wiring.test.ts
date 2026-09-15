@@ -55,6 +55,8 @@ test('option sources preserve pin, selected provider, workflow and unavailable s
   f.commands.length = 0
   await f.prepare()
   expect(f.commands.some(args => args.includes('add'))).toBe(false)
+  // G063's checkpoint reader. No result file yet → null, which the source turns into
+  // `unknown` and the gate refuses on. That is the correct empty state, not the wiring.
   expect(await options.policy.reviewSuite!.readCheckpoint({ head: 'a'.repeat(40), diff: '', pr: null }, 1)).toBeNull()
   const model = tiers.modelTier('fable')!
   const seat = { id: 'fixture', provider: 'anthropic' as const, family: 'anthropic', modelId: model.model_id, role: 'core' as const, enabled: true }
@@ -67,6 +69,19 @@ test('option sources preserve pin, selected provider, workflow and unavailable s
   expect(await options.policy.mutation.readClaim({ head: 'a'.repeat(40), diff: '', pr: null })).toEqual(claim)
   await writeFile(options.workers.build.request.result.path, JSON.stringify({ result: { payload: { mutationClaim: claim } } }))
   expect(await options.policy.mutation.readClaim({ head: 'a'.repeat(40), diff: '', pr: null })).toBeNull()
+  // THE SUITE CLAIM REACHES THE GATE, AND ONLY FOR THE REVISION IT DESCRIBES.
+  const head = 'a'.repeat(40)
+  const suiteForge = { ...forge, testsPassed: false, suiteOutcome: 'failed-preexisting', suiteEvidence: 'base is red too' }
+  await writeFile(options.workers.build.request.result.path, JSON.stringify({ result: { head, payload: suiteForge } }))
+  expect(await options.policy.reviewSuite!.readCheckpoint({ head, diff: '', pr: null }, 2)).toEqual({
+    runId: f.input.run.id, head, round: 2,
+    report: { testsPassed: false, suiteOutcome: 'failed-preexisting', suiteEvidence: 'base is red too' },
+  })
+  // A claim about a DIFFERENT revision answers nothing.
+  expect(await options.policy.reviewSuite!.readCheckpoint({ head: 'b'.repeat(40), diff: '', pr: null }, 2)).toBeNull()
+  // The fix round's claim is the fresher of the two and wins at the same head.
+  await writeFile(options.workers.fix.request.result.path, JSON.stringify({ result: { head, payload: { ...forge, testsPassed: true, suiteOutcome: 'passed' } } }))
+  expect((await options.policy.reviewSuite!.readCheckpoint({ head, diff: '', pr: null }, 3))?.report).toEqual({ testsPassed: true, suiteOutcome: 'passed' })
   const validators = f.captured().trailer.schemas
   const payload = { verdict: 'APPROVE', findings: [] }
   expect(validators.get('verdict')!(payload)).toBe(true)

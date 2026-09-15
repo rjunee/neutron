@@ -120,7 +120,41 @@ export async function prepareProjectBuild(input: InnerLoopInput, context: Projec
         const checked = validateTrailer('forge', value?.result?.payload)
         return checked.ok ? checked.value.mutationClaim : null
       } },
-      reviewSuite: { strategy: input.test_strategy ?? '', scope: 'full-suite', readCheckpoint: async () => null },
+      reviewSuite: { strategy: input.test_strategy ?? '', scope: 'full-suite',
+        // G063 READS THE BUILD/FIX CHECKPOINT FOR THIS REVISION. Stubbed to `null`,
+        // the source returns `unknown` (`project-observation-sources.ts:76`) for EVERY
+        // card and any strategy — measured — and `applyReviewSuite` propagates it, so
+        // the review decision is `unknown` and no dispatched card can reach `merged`.
+        //
+        // The claim is the WORKER'S, not the host's. That is deliberate and inherited:
+        // `testsPassed` is "the ONE field that is the build's own claim"
+        // (`inner-workflow.mjs:2245` pre-rebuild), and the gate's job is to classify
+        // that claim, not to re-run the suite. Replacing it with a host-side receipt is
+        // #985 — post-cutover, and explicitly NOT a rebuild change, because then a
+        // regression and an improvement would be indistinguishable.
+        //
+        // THE IDENTITY IS THE HOST'S. The original carried the claim in a round-labelled
+        // checkpoint (`forge-done` / `fix-round-N`); here each role overwrites one result
+        // file, so the revision identity is the head. A file whose own `result.head` is
+        // not the head the host just measured is a claim about a DIFFERENT revision and
+        // answers nothing — `fix` is read first because it is the fresher of the two.
+        readCheckpoint: async (snapshot, round) => {
+          for (const role of ['fix', 'build'] as const) {
+            let value: { result?: { head?: unknown; payload?: unknown } }
+            try { value = JSON.parse(await readFile(workers[role].request.result.path, 'utf8')) }
+            catch { continue }
+            if (value?.result?.head !== snapshot.head) continue
+            const checked = validateTrailer('forge', value.result.payload)
+            if (!checked.ok) continue
+            const claim = checked.value
+            return { runId: run.id, head: snapshot.head, round, report: {
+              testsPassed: claim.testsPassed,
+              ...(claim.suiteOutcome === undefined ? {} : { suiteOutcome: claim.suiteOutcome }),
+              ...(claim.suiteEvidence === undefined ? {} : { suiteEvidence: claim.suiteEvidence }),
+            } }
+          }
+          return null
+        } },
       review: { evidenceRoot: state, env: context.env, phaseModels: config, wallMs: 2_700_000, signal,
         runnerFor: (model, seat) => model.group === 'api' || model.group === 'kimi' ? undefined
           : seat.provider === substrate.provider ? substrate.inRepl : substrate.headless[seat.provider] },
