@@ -3,7 +3,7 @@ import { awaitReviewReadiness, classifyReviewReadiness, type ReviewReadinessObse
 
 const snapshot = { head: 'a'.repeat(40), diff: '+code', pr: null }
 type Known = Extract<ReviewReadinessObservation, { kind: 'known' }>
-const observation = (patch: Partial<Known> = {}): Known => ({ kind: 'known', head: snapshot.head, configuration: { kind: 'resolved', required: ['test'] }, mergeability: 'mergeable', checks: [{ name: 'test', state: 'passed' }], ...patch })
+const observation = (patch: Partial<Known> = {}): Known => ({ kind: 'known', head: snapshot.head, configuration: { kind: 'resolved', required: ['test'] }, mergeability: 'mergeable', checksComplete: true, checks: [{ name: 'test', state: 'passed' }], ...patch })
 const classify = (patch: Partial<Known>) => classifyReviewReadiness(snapshot, observation(patch))
 function clock() {
   let now = 0
@@ -83,4 +83,22 @@ test('malformed configuration tags cannot masquerade as a resolved empty set', (
   const configuration = { kind: 'garbled', required: [] } as unknown as Known['configuration']
   expect(classify({ configuration })).toEqual({ kind: 'unknown', detail: 'Required check configuration is not resolved' })
   expect(classify({})).toMatchObject({ kind: 'passed' })
+})
+
+
+test('G046 truncated evidence cannot satisfy a required name', () => {
+  expect(classify({ checksComplete: false })).toMatchObject({ kind: 'pending' })
+  const missing = observation(); delete missing.checksComplete
+  expect(classifyReviewReadiness(snapshot, missing)).toMatchObject({ kind: 'pending' })
+  expect(classify({ checksComplete: true })).toEqual({ kind: 'passed', failed: [] })
+})
+
+test('G046 unreadable evidence waits and retries rather than refusing', async () => {
+  const c = clock(); let probes = 0
+  const result = await awaitReviewReadiness({ observe: async () => observation({
+    checksComplete: ++probes > 1, checks: [{ name: 'test', state: 'failed' }],
+  }) }, snapshot, new AbortController().signal, c.time)
+  expect(c.waits).toEqual([30000])
+  expect(probes).toBe(2)
+  expect(result).toEqual({ kind: 'allow' })
 })

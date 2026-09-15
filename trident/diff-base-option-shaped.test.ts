@@ -874,6 +874,7 @@ describe('AN UNSHIELDED GIT REV-RANGE IS UNCONSTRUCTIBLE IN TYPESCRIPT — and t
    */
   const MODULES = [
     'orchestrator.ts',
+    'replay.ts',
     'inner-workflow.mjs',
     'merge.ts',
     'mutation-prover.ts',
@@ -1101,7 +1102,7 @@ describe('AN UNSHIELDED GIT REV-RANGE IS UNCONSTRUCTIBLE IN TYPESCRIPT — and t
     }
     expect(perFile).toEqual(expectedPerFile)
     // Named explicitly, because an empty key is easy to misread as "not scanned".
-    for (const gone of ['orchestrator.ts', 'merge.ts', 'mutation-prover.ts', 'git-range.ts']) {
+    for (const gone of ['orchestrator.ts', 'replay.ts', 'merge.ts', 'mutation-prover.ts', 'git-range.ts']) {
       expect({ file: gone, ranges: perFile[gone] ?? 0 }).toEqual({ file: gone, ranges: 0 })
     }
   })
@@ -1120,14 +1121,14 @@ describe('AN UNSHIELDED GIT REV-RANGE IS UNCONSTRUCTIBLE IN TYPESCRIPT — and t
       { file: 'merge.ts', base: 'base', why: "sideHistory's parameter; its callers are argued at the call site (the arbiter's conflict sides, which must denote what `git rebase <base>` used)" },
       { file: 'mutation-prover.ts', base: 'baseRef', why: 'the resolved ref the binding returned' },
       { file: 'orchestrator.ts', base: 'base_ref', why: 'the resolved ref the binding returned' },
-      { file: 'orchestrator.ts', base: 'await localForkPoint()', why: 'an object name read from git' },
+      { file: 'replay.ts', base: 'await localForkPoint()', why: 'an object name read from git' },
       { file: 'orchestrator.ts', base: 'baseRef', why: 'the resolved ref the binding returned' },
       { file: 'orchestrator.ts', base: 'seenPin', why: 'a recorded object name' },
       { file: 'orchestrator.ts', base: '`refs/heads/${base}`', why: 'qualified in full at the call site — the base-behind measurement, which is ABOUT the local ref' },
       { file: 'orchestrator.ts', base: 'base_sha', why: 'the launch-pinned sha the stage-1 strategy block measures against — a full object name' },
     ]
     const seen: string[] = []
-    for (const file of ['merge.ts', 'mutation-prover.ts', 'orchestrator.ts'] as const) {
+    for (const file of ['merge.ts', 'mutation-prover.ts', 'orchestrator.ts', 'replay.ts'] as const) {
       const lines = readFileSync(fileURLToPath(new URL(`./${file}`, import.meta.url)), 'utf8').split('\n')
       for (let i = 0; i < lines.length; i += 1) {
         if (!(lines[i] ?? '').includes('gitRangeArgv(')) continue
