@@ -145,4 +145,22 @@ test('result mappings retain driver causes and wave/Ralph handoffs', async () =>
   expect(next.publish_requested).toBe(true)
   expect(next.checkpoint).toBe('ralph-task-built')
   expect(next.remaining_tasks).toBe(2)
+  // #990 — the PR-number domain check lives in the HARVEST PARSER, so it only
+  // still applies if the driver's own terminal outcome reaches `inner_result` in
+  // the shape `parseInnerResult` reads. Round-trip the merged outcome to pin that.
+  const done = parseInnerResult(projectBuildResult(merged, f.input))!
+  expect(done.ok).toBe(true)
+  expect(done.pr_merged).toBe(true)
+  expect(done.verdict).toBe('APPROVE')
+  // The three fields the merged harvest path actually consumes (`orchestrator.ts:4200-4212`
+  // reads `pr_number`, `branch` and `checkpoint`; it does NOT read `commit_sha`, which
+  // `parseInnerResult` only decodes under `built === true`).
+  expect(done.checkpoint).toBe('merged')
+  expect(done.pr_number).toBe(12)
+  expect(done.branch).toBe('change')
+  // ...and the sentinel is still mapped to null rather than decoded as PR 0, which
+  // is the exact defect the domain check exists to stop (`inner-loop.ts:872`).
+  const noPr = parseInnerResult(projectBuildResult({ ...merged, snapshot: { ...merged.snapshot, pr: null } },
+    { ...f.input, run: { ...f.input.run, pr: 0 } }))!
+  expect(noPr.pr_number).toBeNull()
 })
