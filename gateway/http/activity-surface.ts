@@ -24,9 +24,9 @@
  * scrollback — a restart legitimately returns an empty buffer.
  */
 
-import { sanitizeProjectId } from '@neutronai/channels/adapters/app-ws/envelope.ts'
 import type { AppWsAuthResolver } from '@neutronai/channels/adapters/app-ws/auth.ts'
 import { jsonError, jsonOk, resolveBearer } from './surface-kit.ts'
+import { resolveScopeSegment } from './scope-segment.ts'
 
 /**
  * The minimal inspector read surface this route needs. `ActivityInspector`
@@ -85,7 +85,7 @@ export function createActivitySurface(opts: ActivitySurfaceOptions): ActivitySur
         const match = PROJECT_PATH_RE.exec(pathname)
         if (match === null) return null
         const raw = match[1] ?? ''
-        project_id = sanitizeProjectId(raw)
+        project_id = resolveScopeSegment(raw)
         if (project_id === null) {
           return jsonError(
             400,

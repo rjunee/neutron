@@ -48,6 +48,7 @@ import { dirname, join } from 'node:path'
 import { fileURLToPath } from 'node:url'
 
 import { sanitizeProjectId } from '@neutronai/channels/adapters/app-ws/envelope.ts'
+import { GENERAL_RAIL_ID } from '@neutronai/wire-types/topic-id.ts'
 import { applyProjectScopedMigrations } from '@neutronai/migrations/runner.ts'
 import { openSidecar, resolveNow } from '@neutronai/persistence/index.ts'
 import {
@@ -855,7 +856,7 @@ export class CommentStore {
   /* ─── internals ──────────────────────────────────────────────── */
 
   private async openHandle(project_id: string): Promise<ProjectHandle> {
-    const cleaned = sanitizeProjectId(project_id)
+    const cleaned = project_id === GENERAL_RAIL_ID ? GENERAL_RAIL_ID : sanitizeProjectId(project_id)
     if (cleaned === null) {
       throw new CommentStoreError(
         'invalid_project_id',

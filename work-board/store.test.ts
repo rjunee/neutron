@@ -1250,7 +1250,7 @@ describe('workBoardScopeKey / workBoardProjectIdForKey (Bug 3 per-project scopin
     const key = workBoardScopeKey(OWNER, 'acme')
     expect(workBoardProjectIdForKey(OWNER, key)).toBe('acme')
     // round-trip General → no tag
-    const gkey = workBoardScopeKey(OWNER, 'general')
+    const gkey = workBoardScopeKey(OWNER, GENERAL_WORK_BOARD_PROJECT_ID)
     expect(workBoardProjectIdForKey(OWNER, gkey)).toBeUndefined()
   })
 

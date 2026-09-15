@@ -33,7 +33,6 @@
  * link only); a rejected scheme surfaces here as a 400, not a 500.
  */
 
-import { sanitizeProjectId } from '@neutronai/channels/adapters/app-ws/envelope.ts'
 import type { AppWsAuthResolver } from '@neutronai/channels/adapters/app-ws/auth.ts'
 import { jsonError, jsonOk, readJsonBody, resolveBearer } from './surface-kit.ts'
 import {
@@ -54,6 +53,7 @@ import { runProgressForItem } from '@neutronai/trident/run-progress.ts'
 import type { BoardBoundBuildRejectionCode } from '@neutronai/trident/board-dispatch.ts'
 import type { TridentPhase, TridentRun } from '@neutronai/trident/store.ts'
 import type { RunWorkerObservation } from '@neutronai/trident/worker-observation.ts'
+import { resolveScopeSegment } from './scope-segment.ts'
 
 /**
  * The minimal trident-run surface the board needs (M1 trident-UX hardening):
@@ -264,7 +264,7 @@ export function createWorkBoardSurface(opts: WorkBoardSurfaceOptions): WorkBoard
       const raw_project_id = match[1] ?? ''
       const raw_item_id = match[2] ?? ''
       const action = match[3] ?? ''
-      const project_id = sanitizeProjectId(raw_project_id)
+      const project_id = resolveScopeSegment(raw_project_id)
       if (project_id === null) {
         return jsonError(
           400,

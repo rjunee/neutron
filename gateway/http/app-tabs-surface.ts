@@ -30,7 +30,6 @@
  * surfaces. The per-project route additionally validates `project_id`.
  */
 
-import { sanitizeProjectId } from '@neutronai/channels/adapters/app-ws/envelope.ts'
 import type { AppWsAuthResolver } from '@neutronai/channels/adapters/app-ws/auth.ts'
 import type { CoreInstallationsStore } from '@neutronai/cores-runtime/installations-store.ts'
 import type { CoresModuleState } from '../cores/composer-state.ts'
@@ -40,6 +39,7 @@ import {
   type CoreTabContribution,
 } from '@neutronai/tabs/registry.ts'
 import { jsonResponse, resolveBearer } from './surface-kit.ts'
+import { resolveScopeSegment } from './scope-segment.ts'
 
 export interface AppTabsSurfaceOptions {
   auth: AppWsAuthResolver
@@ -124,7 +124,7 @@ export function createAppTabsSurface(opts: AppTabsSurfaceOptions): AppTabsSurfac
 
       // Per-project route — validate the path-supplied project id.
       const raw_project_id = projectMatch![1] ?? ''
-      const project_id = sanitizeProjectId(raw_project_id)
+      const project_id = resolveScopeSegment(raw_project_id)
       if (project_id === null) {
         return jsonResponse(400, {
           ok: false,
