@@ -6,7 +6,9 @@ The existing five-minute email poll now checks owner-local 10:00 and 15:00 windo
 
 The product setting is an additive `instance_metadata.email_digest_enabled` value whose absent/NULL default is enabled (`migrations/0146_instance_email_digest_enabled.sql:1`, `gateway/storage/owner-metadata.ts:66`). The authenticated GET/PUT surface validates a boolean (`gateway/http/email-digest-settings-surface.ts:9`, `gateway/http/email-digest-settings-surface.ts:17`), and the Settings screen reads and changes it (`app/app/settings.tsx:65`, `app/app/settings.tsx:465`). The poll reads the setting and timezone on every tick, so changes do not need a restart (`gateway/cores/email-pipeline-wiring.ts:141`).
 
-The pre-cutover composition explicitly holds Gmail label/archive writes while retaining reads, classification, escalation, queuing, and email-brief delivery (`gateway/cores/email-pipeline-wiring.ts:111`, `gateway/cores/email-pipeline-wiring.ts:133`, `cores/free/email/src/pipeline/poller.ts:738`). The invariant is maintained at the single `applyMutation` seam and the retry enumerator also stays dormant (`cores/free/email/src/pipeline/poller.ts:733`, `cores/free/email/src/pipeline/poller.ts:766`); it does not depend on Gmail refusing writes.
+The pre-cutover composition explicitly holds Gmail label/archive writes while retaining reads, classification, escalation, queuing, and email-brief delivery (`open/composer.ts:6733`, `gateway/cores/email-pipeline-wiring.ts:113`, `gateway/cores/email-pipeline-wiring.ts:143`). The invariant is maintained at the single `applyMutation` seam and the retry enumerator also stays dormant (`cores/free/email/src/pipeline/poller.ts:733`, `cores/free/email/src/pipeline/poller.ts:766`); it does not depend on Gmail refusing writes.
+
+The rehearsal mode is now selected by the real Open composition instead of being hard-coded into the reusable cron handler (`open/composer.ts:6733`, `gateway/cores/email-pipeline-wiring.ts:135`). This preserves the production write hold while restoring the handler's existing enabled default, so a mutation-only recovery increments `remutated` and joins the handler's existing `ok` accounting rather than being reported as a no-op (`cores/free/email/src/pipeline/poller.ts:280`, `cores/free/email/src/pipeline/poller.ts:772`, `gateway/cores/email-pipeline-wiring.ts:161`).
 
 ### Decisions
 
@@ -24,6 +26,7 @@ The new digest outcomes join the cron handler vocabulary: `delivered` makes the 
 | Exact Open composition inventory (`open-composition-fields-characterization.test.ts:85`) | removed `app_email_digest_surface` declaration | exact-key assertion failed with the live extra field | characterization test: 1 pass |
 | Served route-slot classification (`route-slot-coverage-inventory.ts:242`) | removed the complete `app-email-digest` row | classifier failed with the live rung unclassified | route coverage: 5 pass |
 | Exhaustive migration ledger (`migrations/runner.test.ts:212`) | omitted ordinal 146 | first-apply assertion failed with received `+ 146` | migration suite: 211 pass |
+| Tick write-mode seam (`email-pipeline-wiring.ts:135`; production pin `open/composer.ts:6733`) | forced every handler to `held_back`; separately removed the production holdback | mutation-only recovery failed with `remutated=0`; production wiring expected `held_back` but received `undefined` | both targeted tests: 1 pass each |
 
 ### Validation
 
@@ -35,6 +38,10 @@ The inventory follow-up's original and inventory-focused command passed 87 tests
 
 The migration-collision follow-up passed all 211 migration tests across 25 files, including `migrations/__tests__/live-ledger-125-repair.test.ts` at 4/4. The original five changed test files passed 82 tests, and `open/__tests__/route-slot-coverage.test.ts` passed 5/5. Repository lint passed. The typecheck matrix checked all 51 projects with 50 passing and only the same environment-specific `app/tsconfig.json` implicit-type-library failure.
 
+The tick-accounting follow-up passed 126 tests across the email pipeline wiring suite and every original touched test. The full migration directory passed, and the surrounding `gateway/cores/__tests__` directory passed 135 tests across 16 files. Repository lint passed. The typecheck matrix checked all 51 projects with 50 passing and retained only the already-recorded `app/tsconfig.json` implicit-type-library failure. The public-tree scan found zero violations in every rule it could run; its local PII rule remained unavailable because the external denylist is not present in this build environment.
+
 ### Deliberately not done
 
 No chat digest path, second scheduler, hardcoded UTC schedule, or feature flag was added. Mailbox mutations remain held back for the comparison period; enabling those writes is a cutover decision outside this issue's `cutover: false` specification.
+
+The regression assertion was not loosened: a handler that performs mutation recovery must still report `ok`, while the real Open composition continues to hold mailbox writes during rehearsal (`gateway/cores/__tests__/email-pipeline-wiring.test.ts:306`, `open/__tests__/open-email-pipeline-wiring.test.ts:101`).

@@ -6728,6 +6728,9 @@ export function buildOpenGraphComposer(
         resolveTimezone: (slug: string): string | undefined =>
           readOwnerTimezone(db, slug) ?? undefined,
         readDigestEnabled: (slug: string): boolean => readEmailDigestEnabled(db, slug),
+        // P2 rehearsal: reads, escalation, queuing, and briefs are live while
+        // Gmail label/archive writes remain owned by the existing service.
+        mailbox_writes: 'held_back',
         register_cleanup: (fn: () => void): void => {
           realmodeCleanups.push(fn)
         },

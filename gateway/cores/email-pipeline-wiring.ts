@@ -73,6 +73,8 @@ export interface EmailPipelineCompositionConfig {
    */
   resolveTimezone?: (owner_slug: string) => string | undefined
   readDigestEnabled?: (owner_slug: string) => boolean
+  /** Production rehearsal holds mailbox writes; other callers retain the poller's enabled default. */
+  mailbox_writes?: 'enabled' | 'held_back'
   interval_ms?: number
   now?: () => number
   /** Register the store's close on the composer's cleanup list. */
@@ -130,7 +132,7 @@ export function buildEmailPipelinePollHandler(
         },
         now,
         activation_at: activated_at,
-        mailbox_writes: 'held_back',
+        ...(cfg.mailbox_writes !== undefined ? { mailbox_writes: cfg.mailbox_writes } : {}),
         ...(cfg.scribeFanOut !== undefined
           ? {
               on_message_processed: (message) =>
