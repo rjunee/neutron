@@ -365,6 +365,7 @@ import { createAppWsAuthResolver } from '@neutronai/channels/adapters/app-ws/aut
 import { isLoopbackBindHost, assertOwnerCredentialPolicy } from '@neutronai/gateway/boot-bind-policy.ts'
 import type { AppWsAuthResolver } from '@neutronai/channels/adapters/app-ws/auth.ts'
 import { DocStore } from '@neutronai/gateway/http/doc-store.ts'
+import { DocVersionStore } from '@neutronai/gateway/git/doc-version-store.ts'
 import { createAppDocsSurface } from '@neutronai/gateway/http/app-docs-surface.ts'
 import { CommentStore } from '@neutronai/gateway/comments/comment-store.ts'
 import { AnchorWalker } from '@neutronai/gateway/comments/anchor-walker.ts'
@@ -3660,7 +3661,12 @@ export function buildOpenGraphComposer(
     // background LLM tick loop deliberately not started. The walker is a
     // synchronous hook on a write that already happens.
     const anchorWalker = new AnchorWalker({ commentStore, owner_home })
-    const docStore = new DocStore({ owner_home, onMutationSuccess: anchorWalker.handle })
+    const docVersionStore = new DocVersionStore({ owner_home, project_slug })
+    const docStore = new DocStore({
+      owner_home,
+      versionStore: docVersionStore,
+      onMutationSuccess: anchorWalker.handle,
+    })
     const appDocsSurface = createAppDocsSurface({
       store: docStore,
       auth: appOwnerAuth,
