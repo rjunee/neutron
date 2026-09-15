@@ -209,7 +209,7 @@ describe('Activity Inspector — served end-to-end through the real Open compose
       const gen = await get('/api/app/activity')
       expect(gen?.status).toBe(200)
       const gb = (await gen!.json()) as ActivityBody
-      expect(gb.scope_key).toBe('general')
+      expect(gb.scope_key).toBe('~general')
       expect(gb.project_id).toBeNull()
     })
   })

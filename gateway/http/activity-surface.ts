@@ -55,6 +55,7 @@ export interface ActivitySnapshotSource {
 export interface ActivitySurfaceOptions {
   inspector: ActivitySnapshotSource
   auth: AppWsAuthResolver
+  scopeKey: (project_id: string | null | undefined) => string
 }
 
 export interface ActivitySurface {
@@ -67,7 +68,7 @@ const PROJECT_PATH_RE = /^\/api\/app\/projects\/([^/]+)\/activity$/
 const GENERAL_PATH = '/api/app/activity'
 
 export function createActivitySurface(opts: ActivitySurfaceOptions): ActivitySurface {
-  const { inspector, auth } = opts
+  const { inspector, auth, scopeKey } = opts
   return {
     handler: async (req) => {
       const url = new URL(req.url)
@@ -80,7 +81,7 @@ export function createActivitySurface(opts: ActivitySurfaceOptions): ActivitySur
       let scope_key: string
       let project_id: string | null = null
       if (pathname === GENERAL_PATH) {
-        scope_key = 'general'
+        scope_key = scopeKey(undefined)
       } else {
         const match = PROJECT_PATH_RE.exec(pathname)
         if (match === null) return null

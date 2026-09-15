@@ -4804,6 +4804,7 @@ export function buildOpenGraphComposer(
     )
     const activitySurface = createActivitySurface({
       inspector: activityInspector,
+      scopeKey: inspectorScopeKey,
       auth: appOwnerAuth,
     })
 

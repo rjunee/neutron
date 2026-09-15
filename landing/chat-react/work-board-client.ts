@@ -218,7 +218,7 @@ export class WorkBoardClientError extends GatewayClientError {
  * `(framePid ?? '') === projectId`, so General MUST stay '' for a no-`project_id`
  * snapshot to be applied (a General frame carries no `project_id`). But the HTTP
  * work-board surface keys General on the literal `'general'` id
- * (`workBoardScopeKey(owner_slug, 'general') → owner_slug`, `store.ts`) and 400s
+ * (`workBoardScopeKey(owner_slug, '~general') → owner_slug`, `store.ts`) and 400s
  * on an empty path segment (`sanitizeProjectId('')` → null → the `//work-board`
  * double-slash the ProjectShell Codex-P2 note calls out as wrong-scope). So we
  * normalize '' → 'general' at the URL boundary ONLY: General's board is reachable

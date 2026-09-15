@@ -106,7 +106,7 @@ describe('build-live-agent-turn — reflection wiring', () => {
     expect(completed[0]!.agent_text).toBe('') // turn 1 had no prior reply
     expect(completed[1]!.user_text).toBe('no, do not deploy to prod')
     expect(completed[1]!.agent_text).toBe('I deployed to prod.')
-    expect(completed[1]!.scope).toBe('general')
+    expect(completed[1]!.scope).toBe('~general')
   })
 
   test('passes the project id as scope for a project topic', async () => {

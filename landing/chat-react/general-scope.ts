@@ -12,7 +12,7 @@
  *   • HTTP SEGMENT  `'general'`  — the gateway's `sanitizeProjectId('')` returns null,
  *                                  so an empty segment produces `//docs/tree` and a 400.
  *                                  The surfaces key General on the literal `general`
- *                                  id (`workBoardScopeKey(owner_slug, 'general')`).
+ *                                  id (`workBoardScopeKey(owner_slug, '~general')`).
  *   • DOCS ROOT     `Projects/general/docs/` — the same `general` id, resolved by
  *                                  `doc-store.ts` as `<owner_home>/Projects/<id>/docs`.
  *

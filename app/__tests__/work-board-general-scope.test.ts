@@ -8,7 +8,7 @@
  *   - the mobile RAIL id / route segment is `'~general'` (`GENERAL_PROJECT_ID`),
  *   - the shared client-side CHAT SCOPE is `''` (`railIdToScope`),
  *   - the Work Board's HTTP path segment is `'general'`
- *     (`work-board/store.ts` `workBoardScopeKey(owner, 'general') → owner`).
+ *     (`work-board/store.ts` `workBoardScopeKey(owner, '~general') → owner`).
  *
  * `~` is NOT in the gateway's `[A-Za-z0-9_.-]` project-id alphabet
  * (`channels/adapters/app-ws/envelope.ts` `sanitizeProjectId`), so sending the

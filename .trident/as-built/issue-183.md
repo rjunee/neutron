@@ -38,3 +38,24 @@ The first mutation changed the constant to `general` but stayed green because th
 No project rename path or project-id reservation was added: the reserved segment makes both scopes coexist. No database migration was added because legacy General Work Board rows already use the owner key (`work-board/store.ts:237-243`). `SPEC.md` was not changed because the issue selected an existing direction rather than changing a product decision.
 
 No `wire-types` dependency or path mapping was added to Work Board: the store needs only the caller-provided reserved value, not wire-topic behavior.
+
+### Follow-up: complete scope-key propagation
+
+The activity tap already writes through `inspectorScopeKey` (`open/composer.ts:4768-4779`), but the General HTTP snapshot queried the former literal. The surface now accepts the same resolver (`gateway/http/activity-surface.ts:55-84`), and the composer supplies `inspectorScopeKey` (`open/composer.ts:4805-4808`). The real-composer surface assertion pins the returned reserved key (`open/__tests__/activity-inspector-served.test.ts:206-213`). There is one activity spelling and no fallback read.
+
+The reflection hook's chat scope still uses `general` for session behavior, but its nexus boundary now sends `GENERAL_RAIL_ID` when `project_id` is absent (`gateway/wiring/build-live-agent-turn.ts:1890-1905`). `wireMemory` then applies the single Work Board key function (`open/wiring/memory.ts:317-329`), whose General mapping is maintained centrally (`work-board/store.ts:260-266`). The regression proves the correction lands under the owner key and the distinct project key `general` stays empty (`open/__tests__/open-wiring-memory.test.ts:162-195`).
+
+The required caller enumeration used `grep -rn --include='*.ts' 'workBoardScopeKey' .`; its positive control was the known definition at `work-board/store.ts:260`. Production calls were accounted for in Work Board agent tools, Trident build tools, agent dispatch, the Open composer and nexus reader, the gateway Work Board surface, and core-module composition. All pass a nullable/reserved project id or an already-real project id. The sole lagging producer was reflection's semantic General value at `open/wiring/memory.ts:328`; it is now normalized before that call. Documentation/test hits were declarations, imports, assertions, or comments; the stale comments that claimed literal `general` mapped to General were corrected.
+
+### Follow-up mutation evidence
+
+| Guard | Mutation | RED | Restored GREEN |
+| --- | --- | --- | --- |
+| Activity surface resolver (`gateway/http/activity-surface.ts:84`) | Restore literal `general` | Real-composer General surface assertion received `general`, expected `~general` | Focused real-composer surface case passed |
+| Reflection boundary (`gateway/wiring/build-live-agent-turn.ts:1904`) | Pass the chat `scope` unchanged | Reflection wiring assertion received `general`, expected `~general` | Reflection wiring file passed 4/4; memory wiring file passed 12/12 |
+
+The four touched behavioral files passed 105 tests. The full activity served file passed its four non-listener cases; its four POST cases could not start the loopback sink in the build sandbox and stopped before their assertions. The repository typecheck matrix passed all 51 configurations, repository lint passed every reported guard, and `git diff --check` passed.
+
+### Follow-up deliberately not built
+
+No fallback read of the former activity key was added. No alias from a real project named `general` to General was restored: `workBoardScopeKey` continues to keep that legal project id distinct (`work-board/store.test.ts:1233-1239`). No outcome vocabulary changed; these boundaries now select existing scope keys and introduce no error, verdict, state, or refusal. `SPEC.md` was not changed because this completes the existing collision-proof General decision.
