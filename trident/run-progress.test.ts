@@ -39,6 +39,13 @@ describe('deriveRunProgress — phase/checkpoint → label', () => {
     expect(p.stalled).toBe(false)
   })
 
+  test('an infrastructure retry carries its count and never renders failed', () => {
+    const p = deriveRunProgress(run({ infra_retries: 2, phase: 'forge-init' }), T0)
+    expect(p.infra_retries).toBe(2)
+    expect(p.step_label).toBe('retrying')
+    expect(p.phase_label).not.toBe('failed')
+  })
+
   test('forge-done checkpoint → reviewing', () => {
     const p = deriveRunProgress(run({ inner_checkpoint: 'forge-done' }), T0)
     expect(p.phase_label).toBe('reviewing')

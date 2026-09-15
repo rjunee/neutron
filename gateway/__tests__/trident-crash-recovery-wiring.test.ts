@@ -30,5 +30,9 @@ describe('the COMPOSER supplies crash-recovery claims', () => {
     expect(
       src.includes('orchestratorOpts.begin_infra_retry = (id) => store.beginInfraRetry(id)'),
     ).toBe(true)
+    expect(src.includes('orchestratorOpts.on_infra_retry = (run, attempt, cause) =>')).toBe(true)
+    expect(
+      src.includes('deliverInfraRetry(tridentWiring.delivery_sink ?? router, run, attempt, cause)'),
+    ).toBe(true)
   })
 })

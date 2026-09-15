@@ -138,7 +138,7 @@ export type RunPhaseLabel =
  * (mirror of `trident/run-progress.ts` `RunStepLabel`): building → reviewing →
  * fixing → merging → terminal done/failed.
  */
-export type RunStepLabel = 'building' | 'reviewing' | 'fixing' | 'merging' | 'done' | 'failed'
+export type RunStepLabel = 'building' | 'reviewing' | 'fixing' | 'merging' | 'retrying' | 'done' | 'failed'
 
 /** Item 1 — a bound run's live progress, as the tab consumes it. */
 export interface RunProgress {
@@ -147,6 +147,8 @@ export interface RunProgress {
   /** M1 redesign — the inner-step label (building/reviewing/fixing/merging + terminal). */
   step_label: RunStepLabel
   round: number
+  /** Added after the base progress shape; absent on rolling-deploy frames. */
+  infra_retries?: number
   /** Optional only for compatibility with an older gateway frame. */
   ralph_round?: number
   started_at: string
@@ -411,6 +413,7 @@ const RUN_STEP_LABELS: readonly RunStepLabel[] = [
   'reviewing',
   'fixing',
   'merging',
+  'retrying',
   'done',
   'failed',
 ]
@@ -473,6 +476,7 @@ function parseRunProgress(raw: unknown): RunProgress | null {
     phase_label: phase_label as RunPhaseLabel,
     step_label,
     round: typeof r['round'] === 'number' ? (r['round'] as number) : 1,
+    infra_retries: typeof r['infra_retries'] === 'number' ? (r['infra_retries'] as number) : 0,
     ralph_round: typeof r['ralph_round'] === 'number' ? (r['ralph_round'] as number) : 0,
     started_at: typeof r['started_at'] === 'string' ? (r['started_at'] as string) : '',
     last_advanced_at: typeof r['last_advanced_at'] === 'string' ? (r['last_advanced_at'] as string) : '',

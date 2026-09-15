@@ -220,6 +220,8 @@ function stepTag(item: WorkBoardItem): PhaseTag | null {
       return { label: 'Fixing', cls: 'cwb-tag-fix' }
     case 'merging':
       return { label: 'Merging', cls: 'cwb-tag-merge' }
+    case 'retrying':
+      return { label: 'Retrying', cls: 'cwb-tag-build' }
     case 'done':
       return { label: 'Merged', cls: 'cwb-tag-merge' }
     case 'failed':
@@ -295,6 +297,8 @@ function dotState(item: WorkBoardItem): DotState {
         return { cls: 'cwb-dot-fix', pulse: true }
       case 'merging':
         return { cls: 'cwb-dot-merge', pulse: true }
+      case 'retrying':
+        return { cls: 'cwb-dot-build', pulse: isLinkedRunning(item) }
       case 'done':
         return { cls: 'cwb-dot-done', pulse: false }
       case 'failed':

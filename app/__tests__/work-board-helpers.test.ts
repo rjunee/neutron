@@ -106,6 +106,18 @@ describe('stepTag + roundText derive from step_label (M1 redesign)', () => {
     expect(roundText(rp)).toBe('1.2');
   });
 
+  it('retrying keeps its tag and build counters but pulses only with a fresh heartbeat', () => {
+    const rp = progress({ step_label: 'retrying', infra_retries: 2 });
+    expect(stepTag(withRun(rp))).toEqual({ label: 'Retrying', colorKey: 'build' });
+    expect(rp.infra_retries).toBe(2);
+    expect(roundText(rp)).toBe('1.1');
+    expect(dotState(withRun(rp))).toEqual({ colorKey: 'build', pulse: false });
+    expect(dotState(item({ status: 'in_progress', linked_run_id: 'r1', run_progress: rp }))).toEqual({
+      colorKey: 'build',
+      pulse: true,
+    });
+  });
+
   it('reviewing → "Reviewing" tag + round N', () => {
     const rp = progress({ step_label: 'reviewing', round: 3 });
     expect(stepTag(withRun(rp))).toEqual({ label: 'Reviewing', colorKey: 'review' });

@@ -232,6 +232,8 @@ export function stepTag(item: WorkBoardItem): PhaseTag | null {
       return { label: 'Fixing', colorKey: 'fix' };
     case 'merging':
       return { label: 'Merging', colorKey: 'merge' };
+    case 'retrying':
+      return { label: 'Retrying', colorKey: 'build' };
     case 'done':
       return { label: 'Merged', colorKey: 'merge' };
     case 'failed':
@@ -314,6 +316,8 @@ export function dotState(item: WorkBoardItem): DotState {
         return { colorKey: 'fix', pulse: true };
       case 'merging':
         return { colorKey: 'merge', pulse: true };
+      case 'retrying':
+        return { colorKey: 'build', pulse: isLinkedRunning(item) };
       case 'done':
         return { colorKey: 'merge', pulse: false };
       case 'failed':
