@@ -10060,7 +10060,7 @@ describe('sanitizeLeakAnnotation', () => {
 // reddened ten salvage/liveness tests, because `pinnedRun` feeds EVERY firer and a null
 // branch is exactly the row the salvage and no-fire paths key on.
 test('a launcher that persists branch/worktree keeps them through the post-fire write', async () => {
-  const run = await createRun({ branch: undefined })
+  const run = await createRun()
   const worktree = '/repo/.trident-worktrees/add-thing-1'
   const h = buildHarness({
     read_run: (id) => store.get(id) ?? null,
