@@ -1,4 +1,4 @@
-# 2026-08-09 — Installable MCP servers
+## 2026-08-09 — Installable MCP servers
 
 The owner can add an MCP server to his assistant, and the assistant can call its tools.
 Before this, the spawned session got exactly two MCP servers, both compiled in — the
@@ -12,7 +12,7 @@ objected to, so taken as decided: **instance-wide, not per-project** (one set se
 every project on this box, like the transcription backend and the build-model settings),
 and **each server needs approval before its first use**, the way a credential does.
 
-## What the owner sees
+### What the owner sees
 
 Settings → **MCP servers**, on both clients (web `landing/chat-react/SettingsTab.tsx`,
 mobile `app/app/mcp-servers.tsx` reached from `app/app/settings.tsx`). A name, a
@@ -20,7 +20,7 @@ one-line command, and `NAME=value` environment variables. Adding a server does n
 start it: the row lands **pending**, showing the exact request, and a separate
 **Approve** press is what permits it. Remove uninstalls.
 
-## Installing is not approving
+### Installing is not approving
 
 That separation is the entire security model, because an installed MCP server is a
 subprocess started with the owner's permissions and there is nothing underneath him.
@@ -45,7 +45,7 @@ subprocess started with the owner's permissions and there is nothing underneath 
   the same behaviour the ritual grants have: he already approved that exact program with
   those exact variables.
 
-## The prompt says exactly what the grant is
+### The prompt says exactly what the grant is
 
 `renderMcpServerGrant` (`runtime/mcp-servers.ts`) builds the text from the same fields
 the hash covers — the name, the command, every argument, and the variable NAMES, never a
@@ -83,7 +83,7 @@ the Settings copy carries the Claude-session caveat, and a parity test pins the 
 "running" OUT of every label on both clients. Extending the OpenAI path to attach MCP
 servers is a feature, not a wiring fix; the honest move was to stop claiming it.
 
-## Where the three pieces live
+### Where the three pieces live
 
 | Question | Store |
 | --- | --- |
@@ -103,7 +103,7 @@ column, return to both clients, render in a prompt, and log. Nothing on the wire
 `instance_metadata`, or in an approval row carries one; a rejected input echoes a
 variable NAME but never a value, because an error body is a log line waiting to happen.
 
-## Reaching the spawn, and the warm-session guard
+### Reaching the spawn, and the warm-session guard
 
 `runtime/adapters/claude-code/persistent/spawn.ts` merges the approved servers into
 `mcpServers` **alongside** the two built-ins and adds each `mcp__<name>` to
@@ -134,7 +134,7 @@ not even CALLED on those substrates, so an untrusted spawn never reaches into th
 credential store. The MCP config file stays 0600 in its 0700 directory, now that it
 carries installed servers' secrets as well as the sink token.
 
-## One ApprovalManager, not two
+### One ApprovalManager, not two
 
 The composer builds it and hands it to the graph as `approval_manager`;
 `build-core-modules` reuses a caller-supplied one exactly as it already does for
@@ -149,7 +149,7 @@ appear to succeed and silently never take effect — which is why
 approves through the REAL surface, and then calls the resolver the REAL live-chat
 substrate received.
 
-## What review round 2 changed
+### What review round 2 changed
 
 Eight findings, each a real hole rather than a style note. Recorded here because the
 reasoning is the durable part.
@@ -252,7 +252,7 @@ One round-2 finding is NOT addressed here, deliberately: the panel was incomplet
 one cross-model reviewer's call failed. That is a process gap, not a code defect, and
 nothing in this diff can close it.
 
-## What review round 3 changed
+### What review round 3 changed
 
 Three blockers, one major, three minor. Two of the three blockers were regressions this
 feature introduced into code that was correct before it, which is the more useful half of
@@ -378,7 +378,7 @@ and one cross-model lane failed or timed out. Nothing in this diff can close eit
 have to be re-run or explicitly waived before merge, and they are recorded here so their
 absence is visible rather than assumed.
 
-## Mutation log
+### Mutation log
 
 Each guard broken deliberately, each confirmed to fail a test, each restored
 byte-identical:
@@ -445,7 +445,7 @@ pass, a "skip if the call 401s" branch in the composer wiring test was deleted a
 turned out to be the branch actually being taken, which had quietly reduced the strongest
 assertion in the file to nothing.
 
-## Verified
+### Verified
 
 `bash scripts/ci/typecheck-all.sh` and `bash scripts/ci/lint.sh` pass; the layering gate
 reports no new cross-band edge. The new suites:
@@ -480,7 +480,7 @@ finding against unmodified `main` (README, SECURITY, `install.sh`).
 
 ---
 
-## Round-3 review fix — `decide()` was not on the write chain
+### Round-3 review fix — `decide()` was not on the write chain
 
 `install()` and `remove()` both ran inside `OwnerMcpServerStore.serialize`, the
 in-process write chain. `decide()` did not, and it performs a read-modify-write over
@@ -528,7 +528,7 @@ is a `Proxy` now: everything delegates, exactly one call is intercepted.
 
 ---
 
-## Round-3 review fix — a revocation now retires what is already RUNNING
+### Round-3 review fix — a revocation now retires what is already RUNNING
 
 Revoking a grant was durable and immediate; the subprocess spawned under the old answer
 was not. `claude` reads `mcpServers` once at startup, and `getOrSpawnSession`'s
@@ -606,7 +606,7 @@ my own edit script.
 
 ---
 
-## What review round 4 changed
+### What review round 4 changed
 
 Three lanes this round (adversarial on Opus, rubric on codex, and codex) — the Kimi lane
 was deliberately off, so the verdict is a THREE-lane one and is not the four-lane agreement
@@ -680,7 +680,7 @@ interleave begins, so what it intercepts is stated rather than inferred.
   it. Verified green at the CI timeout; noted because the local-vs-CI gap reads as a real
   failure to anyone running the file directly.
 
-## Re-review round (2026-08-10) — two of the previous round's "checked and left alone" were wrong
+### Re-review round (2026-08-10) — two of the previous round's "checked and left alone" were wrong
 
 The round above closed its findings and listed five things it had checked and deliberately
 not changed. Re-verified against the tip, two of those five did not hold.
@@ -804,7 +804,7 @@ the slot-holder test evicts a busy child.
   server even when handed the resolver — the second gate in `spawn.ts` is asserted
   independently of the wiring.
 
-## Round 5 — the two the panel found still open
+### Round 5 — the two the panel found still open
 
 Both were real, both reproduced, and both are the same class: a warm REPL replaced or retired
 without accounting for a turn already committed to it.
@@ -853,7 +853,7 @@ poison branch already strikes. `turnTail` is only ever resolved, never rejected,
 pre-wait increment cannot leak. Mutant killed — move the increment back after `await prev`
 and the queued turn dies mid-flight.
 
-## Round 6 — the eviction sweep could kill a child a committed dispatch was about to use
+### Round 6 — the eviction sweep could kill a child a committed dispatch was about to use
 
 The round-5 teardown answered "is this session busy?" from `session.activeTurn` and
 `session.turnSlotHeld`. Both live ON a `ReplSession`, and both are set by the CALLER after
@@ -1105,7 +1105,7 @@ conflicted. The branch was genuinely clean against `main` throughout (`git merge
 merged with no conflict, and `origin/main` was an ancestor of the head). A rebase onto
 current `main` cleared the stale status and the checks ran.
 
-## Round 4 — the second writer, and a deferral with no receiver
+### Round 4 — the second writer, and a deferral with no receiver
 
 Three lanes this round (adversarial on Opus, rubric on codex, codex), with the Kimi lane
 deliberately absent rather than failed. Eight findings arrived; **four were already fixed on
@@ -1251,7 +1251,7 @@ changed command, args or env-var NAMES requires re-approval; the prompt renders 
 granted and never a value; `cc-import-*` and `cc-trident-*` receive nothing; the session MCP
 config stays `0600`.
 
-## Round 7 — the advertised maximum was a number the startup bound could not honour
+### Round 7 — the advertised maximum was a number the startup bound could not honour
 
 Round 4 closed with the aggregate-startup-budget finding left open, on the reasoning quoted
 two sections up: the docblock states the tradeoff accurately, the floor exists because
