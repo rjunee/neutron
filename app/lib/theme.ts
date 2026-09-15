@@ -17,7 +17,7 @@
  * first and reference the token from the component.
  */
 
-import { StyleSheet, type ImageStyle, type TextStyle, type ViewStyle } from 'react-native';
+import type { ImageStyle, TextStyle, ViewStyle } from 'react-native';
 
 export interface NeutronTheme {
   /** Page background. */
@@ -292,6 +292,10 @@ export function createThemedStyles<T extends NamedStyles<T> | NamedStyles<unknow
       });
     }
   }
+  // Keep React Native's Flow-typed package root off pure Bun test import paths.
+  // Component tests install the existing device harness before reaching this
+  // call; device/runtime calls still use the real StyleSheet registry.
+  const { StyleSheet } = require('react-native') as typeof import('react-native');
   return StyleSheet.create(styles as NamedStyles<T>) as T;
 }
 
