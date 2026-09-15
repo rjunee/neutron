@@ -172,3 +172,145 @@ test('project composition binds review source to admitted run and worktree', asy
   expect(requests).toHaveLength(2)
   expect(requests.every(request => request.run_id === f.options.production.runId && request.cwd === f.options.production.worktree)).toBe(true)
 })
+
+// These exercise the acquisition adapters through the certified gate vocabulary.
+import { createProjectObservationSources } from './project-observation-sources.ts'
+import { classifyReviewReadiness } from './gates/review-readiness.ts'
+import { assessReviewCi } from './gates/review-ci.ts'
+import { assessReviewSuite } from './gates/review-suite.ts'
+
+const observedHead = 'b'.repeat(40)
+const observedSnapshot = { head: observedHead, diff: 'measured diff', pr: { number: 7, head: observedHead, state: 'OPEN' as const } }
+function observationFixture() {
+  const config = { kind: 'resolved' as const, required: ['test'], appBound: [] as string[], produced: ['test'] }
+  const raw = { headSha: observedHead, mergeable: 'MERGEABLE', rows: [{ name: 'test', status: 'COMPLETED', conclusion: 'SUCCESS' }] as unknown }
+  const options: Parameters<typeof createProjectObservationSources>[0] = {
+    ci: { required: async () => config, readiness: async () => raw }, baseBranch: 'main', ciWorkflow: 'ci.yml', runId: 'run',
+    suite: { strategy: 'bun test', scope: 'full-suite', readCheckpoint: async () => ({
+      runId: 'run', head: observedHead, round: 1, report: { testsPassed: true, suiteOutcome: 'passed' },
+    }) },
+  }
+  const sources = createProjectObservationSources(options)
+  const readiness = async (signal = new AbortController().signal) => sources.reviewReadiness.observe(observedSnapshot, signal)
+  return { config, raw, options, sources, readiness }
+}
+
+test('observation readiness preserves named states, app binding and conflicts', async () => {
+  const f = observationFixture()
+  expect(classifyReviewReadiness(observedSnapshot, await f.readiness())).toEqual({ kind: 'passed', failed: [] })
+  for (const [conclusion, state] of [['FAILURE', 'failed'], ['SKIPPED', 'skipped'], ['SUCCESS', 'passed']] as const) {
+    f.raw.rows = [{ name: 'test', status: 'COMPLETED', conclusion }]
+    expect(await f.readiness()).toMatchObject({ checks: [{ name: 'test', state }] })
+  }
+  f.raw.rows = [{ context: 'test', state: 'PENDING' }]
+  expect(await f.readiness()).toMatchObject({ checks: [{ name: 'test', state: 'running' }] })
+  f.config.appBound = ['test']
+  f.raw.rows = [{ context: 'test', state: 'SUCCESS' }]
+  expect(classifyReviewReadiness(observedSnapshot, await f.readiness()).kind).toBe('pending')
+  f.raw.mergeable = 'CONFLICTING'
+  expect(classifyReviewReadiness(observedSnapshot, await f.readiness()).kind).toBe('blocked')
+  f.raw.mergeable = 'UNKNOWN'
+  expect(classifyReviewReadiness(observedSnapshot, await f.readiness()).kind).toBe('pending')
+})
+
+test('observation readiness cannot turn failed acquisition into known checks', async () => {
+  const cases: [string, (f: ReturnType<typeof observationFixture>) => void][] = [
+    ['workflow', f => { f.options.ciWorkflow = undefined }],
+    ['configuration', f => { f.options.ci.required = async () => ({ kind: 'unknown', reason: 'denied' }) }],
+    ['readiness', f => { f.options.ci.readiness = async () => ({ unreadable: 'offline' }) }],
+    ['head', f => { f.raw.headSha = 'c'.repeat(40) }],
+    ['mergeability', f => { f.raw.mergeable = 'invalid' }],
+    ['rows', f => { f.raw.rows = null }],
+    ['row', f => { f.raw.rows = [{}] }],
+    ['exception', f => { f.options.ci.required = async () => { throw Error('denied') } }],
+  ]
+  for (const [name, change] of cases) {
+    const f = observationFixture(); change(f)
+    expect((await f.readiness()).kind, name).toBe('unknown')
+  }
+  const f = observationFixture()
+  expect((await f.sources.reviewReadiness.observe({ ...observedSnapshot, pr: null }, new AbortController().signal)).kind).toBe('unknown')
+  expect((await f.sources.reviewReadiness.observe({ ...observedSnapshot, head: 'short' }, new AbortController().signal)).kind).toBe('unknown')
+  const cancel = new AbortController(); cancel.abort()
+  expect((await f.readiness(cancel.signal)).kind).toBe('unknown')
+  const during = new AbortController()
+  f.options.ci.required = async () => { during.abort(); return f.config }
+  expect((await f.readiness(during.signal)).kind).toBe('unknown')
+})
+
+test('observation CI preserves unknown, pending and named actionable red without base evidence', async () => {
+  const f = observationFixture()
+  const assess = () => assessReviewCi(f.sources.reviewCi, observedSnapshot, 'a'.repeat(40))
+  expect(await assess()).toEqual({ kind: 'known', findings: [] })
+  f.raw.rows = [{ name: 'test', status: 'COMPLETED', conclusion: 'FAILURE' }]
+  expect(await assess()).toMatchObject({ kind: 'known', findings: [{ title: 'CI FAILING: test', advisory: false }] })
+  f.raw.rows = []
+  expect((await assess()).kind).toBe('unknown')
+  f.raw.rows = [{ name: 'test', status: 'IN_PROGRESS', conclusion: null }]
+  expect((await assess()).kind).toBe('unknown')
+  f.options.ci.required = async () => ({ kind: 'unknown', reason: 'denied' })
+  expect(await assess()).toMatchObject({ kind: 'unknown', detail: expect.stringContaining('denied') })
+})
+
+test('observation suite requires independently acquired identity and preserves report claims', async () => {
+  const f = observationFixture()
+  const assess = () => assessReviewSuite(f.sources.reviewSuite, observedSnapshot, 1, 'run')
+  expect(await assess()).toEqual({ kind: 'known', findings: [] })
+  const suite = f.options.suite!
+  for (const field of ['runId', 'head', 'round'] as const) {
+    suite.readCheckpoint = async () => ({ runId: 'run', head: observedHead, round: 1, report: { testsPassed: true }, [field]: field === 'round' ? 2 : 'wrong' }) as any
+    expect((await f.sources.reviewSuite.observe(observedSnapshot, 1)).kind, field).toBe('unknown')
+  }
+  suite.readCheckpoint = async () => ({ runId: 'run', head: observedHead, round: 1, report: { testsPassed: false, suiteOutcome: 'failed-new' } })
+  expect(await assess()).toMatchObject({ kind: 'known', findings: [{ title: 'FULL SUITE NOT PROVEN', advisory: false }] })
+  suite.readCheckpoint = async () => null
+  expect((await assess()).kind).toBe('unknown')
+  suite.readCheckpoint = async () => { throw Error('checkpoint offline') }
+  expect(await assess()).toMatchObject({ kind: 'unknown', detail: expect.stringContaining('checkpoint offline') })
+  f.options.suite = undefined
+  expect(await assess()).toMatchObject({ kind: 'unknown', detail: expect.stringContaining('strategy, dispatched scope and checkpoint reader') })
+})
+
+test('production composition driver reaches a review panel through all three observation sources', async () => {
+  const f = await fixture()
+  const observed = observationFixture()
+  await f.options.production.store.update(f.options.production.runId, { merge_mode: 'pr' })
+  f.options.production.ciSource = observed.options.ci
+  f.options.policy.reviewSuite = { ...observed.options.suite!, readCheckpoint: async () => ({
+    runId: f.options.production.runId, head: observedHead, round: 1, report: { testsPassed: true },
+  }) }
+  const ok = (stdout = '') => ({ ok: true, exit_code: 0, stdout, stderr: '' })
+  f.options.production.runHost = async argv => {
+    if (argv.includes('check-ref-format') || argv.includes('fetch') || argv.includes('show-ref') || argv.includes('merge-base')) return ok()
+    if (argv.includes('rev-parse')) return ok(argv.some(arg => arg.includes('origin/main')) ? 'a'.repeat(40) : observedHead)
+    if (argv.includes('diff')) {
+      const output = argv.find(arg => arg.startsWith('--output='))!
+      await writeFile(output.slice('--output='.length), observedSnapshot.diff)
+      return ok()
+    }
+    if (argv[0] === 'gh') return ok(JSON.stringify([{ number: 7, headRefOid: observedHead, state: 'OPEN',
+      headRefName: 'change', baseRefName: 'main', isCrossRepository: false }]))
+    if (argv[0] === 'bash') return ok('RESULT preserved=0 removed=0')
+    throw Error(`Unexpected host command: ${argv[0]}`)
+  }
+  f.options.workers.review.request = { ...f.options.workers.review.request, writable: false, tools: 'read-only' }
+  f.options.substrate.inRepl = { ...fakeRunner('pi'), run: async () => ({ kind: 'completed',
+    result: { ...observedSnapshot, payload: { verdict: 'APPROVE', findings: [] } },
+    usage: { input_tokens: 0, output_tokens: 0 }, model_reported: 'project-model', thread_id: null }) }
+  let panelCalls = 0
+  f.options.policy.review = {
+    evidenceRoot: f.options.production.repo, env: {},
+    phaseModels: { review_rubric: { model: 'none' }, review_adversarial: { model: 'sol' },
+      review_codex: { model: 'none' }, review_kimi: { model: 'none' } },
+    wallMs: 1000, signal: new AbortController().signal,
+    runnerFor: (_model, seat) => ({ ...fakeRunner(seat.provider), run: async () => {
+      panelCalls++
+      return { kind: 'blocked', on: 'panel reached' }
+    } }),
+  }
+  const host = await createProjectBuildHost(f.options)
+  await host.deps.modes!.saveCheckpoint({ head: observedHead, stage: 'built', round: 1, replansUsed: 0, findings: [], previousFindings: [] })
+  const result = await host.run({ mode: 'pr', start: 'resume' }, new AbortController().signal)
+  expect(panelCalls, JSON.stringify(result)).toBeGreaterThan(0)
+  expect(result.kind).toBe('blocked')
+})
