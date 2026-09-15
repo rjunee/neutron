@@ -467,11 +467,11 @@ no composer-threaded backend required (unlike `research_core`).
 
 ### Cores→scribe phase-2 fan-out (`gateway/cores/mount-cores-scribe-fan-out.ts`)
 
-The scheduled Calendar + Email Cores feed scribe's extract→GBrain path as
+The scheduled Calendar Core and polled Email Core feed scribe's extract→GBrain path as
 **ambient extraction sources on top of the Cores** (no new pollers): the
-pre-meeting-brief + daily-triage scheduler `fire` callbacks hand their
-already-fetched event/inbox rows to a `scribeFanOut` hook
-(`gateway/cores/{calendar,email-managed}-wiring.ts`), which the composer binds to
+pre-meeting-brief callback and email pipeline hand their already-fetched
+event/inbox rows to a `scribeFanOut` hook
+(`gateway/cores/calendar-wiring.ts`, `gateway/cores/email-pipeline-wiring.ts`), which the composer binds to
 `scribe.extractFromCoresSource(...)`. This complements the chat-turn extractor
 (`scribeOnUserTurn` → `scribe.handleUserTurn`): chat captures what the owner
 *says*; the fan-out captures what their *calendar and inbox* contain.

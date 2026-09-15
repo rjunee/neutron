@@ -22,12 +22,14 @@ import {
   type EmailPipelineStore,
 } from '@neutronai/email-managed-core/pipeline/store'
 import { runEmailPipelineTick } from '@neutronai/email-managed-core/pipeline/poller'
+import { composeEmailPayload } from '@neutronai/scribe/index.ts'
 
 import type { CronHandler, CronHandlerRegistry } from '@neutronai/cron/handlers.ts'
 import type { CronJobDef, CronJobRegistry } from '@neutronai/cron/jobs.ts'
 
 import type { Deliver } from '../http/deliver.ts'
 import type { PushDispatcher } from '../push/dispatcher.ts'
+import type { ScribeFanOut } from './scribe-fan-out.ts'
 
 export const EMAIL_PIPELINE_POLL_HANDLER_NAME = 'email.pipeline_poll'
 export const EMAIL_PIPELINE_POLL_JOB_NAME = 'email-pipeline-poll'
@@ -59,6 +61,8 @@ export interface EmailPipelineCompositionConfig {
    * importance patterns, sender cache) and never crashes a tick.
    */
   llm: ((prompt: string) => Promise<string>) | null
+  /** Ambient email extraction rides the existing poll; absent when scribe is unavailable. */
+  scribeFanOut?: ScribeFanOut
   /**
    * Per-fire owner-timezone resolution, the `withTickTimezone` shape the
    * proactive crons use. Accepted NOW for P2 parity: the twice-daily brief's
@@ -124,6 +128,12 @@ export function buildEmailPipelinePollHandler(
         },
         now,
         activation_at: activated_at,
+        ...(cfg.scribeFanOut !== undefined
+          ? {
+              on_message_processed: (message) =>
+                cfg.scribeFanOut!('email', composeEmailPayload(message), `email:${message.id}`),
+            }
+          : {}),
       })
       // Every kind of work the tick can do has to appear in BOTH lines. A tick
       // that only finished an owed Gmail write reported `skipped` while having
