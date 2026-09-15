@@ -9,7 +9,8 @@ function fixture() {
     kind: 'completed', result: value, usage: { input_tokens: 0, output_tokens: 0 }, model_reported: 'test', thread_id: null,
   })
   for (const role of ['plan', 'build', 'review', 'fix']) {
-    for (let round = 0; round <= 12; round++) outcomes.set(`run:${role}:${round}`, completed())
+    for (let round = 0; round <= 12; round++) outcomes.set(`run:${role}:${round}`, completed(
+      role === 'plan' && round > 0 ? { ...snapshot, payload: { executionSpec: 'revised execution spec' } } : undefined))
   }
   const runner = fakeRunner('anthropic', { outcomes })
   const cross = fakeRunner('openai-codex', { outcomes })
@@ -617,6 +618,77 @@ test('local revision is pinned across the publication boundary', async () => {
 })
 
 const gap: ReviewDecision = { kind: 're-plan', whatIsMissing: 'revise the execution spec', findings: ['old'], blockingCount: 2 }
+for (const payload of [null, {}, 'not a plan', { executionSpec: 42 }, { executionSpec: '' }, { executionSpec: ' \n ' }]) {
+  test(`G075 unusable re-plan escalates before rebuild: ${JSON.stringify(payload)}`, async () => {
+    const f = fixture(); f.decisions.push(gap)
+    f.outcomes.set('run:plan:1', f.completed({ ...f.snapshot, payload }))
+    expect(await f.run()).toMatchObject({ kind: 'blocked', phase: 'plan', recipient: 'orchestrator', on: expect.stringContaining('design-gap: re-plan-failed') })
+    expect(f.runner.calls.map(c => c.step_id)).toEqual(['run:plan:0', 'run:build:0', 'run:plan:1'])
+    expect(f.cross.calls).toHaveLength(1)
+    expect(f.events).not.toContain('publish')
+  })
+}
+test('G075 thrown re-planner escalates before rebuild', async () => {
+  const f = fixture(); f.decisions.push(gap)
+  const runner = f.input.workers.plan.runner
+  f.input.workers.plan.runner = { ...runner, run: async (request, placement, signal) => {
+    if (request.step_id === 'run:plan:1') throw new Error('planner unavailable')
+    return runner.run(request, placement, signal)
+  } }
+  expect(await f.run()).toMatchObject({ kind: 'blocked', phase: 'plan', on: expect.stringContaining('design-gap: re-plan-failed: planner threw') })
+  expect(f.runner.calls.filter(c => c.role === 'build')).toHaveLength(1)
+  expect(f.cross.calls).toHaveLength(1)
+})
+test('G075 terminal planner failure escalates while running work remains unknown', async () => {
+  for (const outcome of [
+    { kind: 'failed', class: 'infra', detail: 'planner unavailable' },
+    { kind: 'unknown', detail: 'planner still running' },
+  ] satisfies BoundedWorkOutcome[]) {
+    const f = fixture(); f.decisions.push(gap); f.outcomes.set('run:plan:1', outcome)
+    expect(await f.run()).toMatchObject(outcome.kind === 'failed'
+      ? { kind: 'blocked', on: 'design-gap: re-plan-failed: infra: planner unavailable' }
+      : { kind: 'unknown', step_id: 'run:plan:1', detail: 'planner still running' })
+    expect(f.runner.calls.map(c => c.step_id)).toEqual(['run:plan:0', 'run:build:0', 'run:plan:1'])
+    expect(f.cross.calls).toHaveLength(1)
+  }
+})
+test('G075 revised execution spec reaches rebuild', async () => {
+  const f = fixture(); f.decisions.push(gap, { kind: 'fix', findings: ['new'] }, { kind: 'approve' })
+  const prepared: unknown[] = []
+  f.deps.prepareWork = async (request, context) => {
+    if (request.step_id === 'run:build:1') prepared.push(context.previous)
+  }
+  expect((await f.run()).kind).toBe('merged')
+  expect(prepared).toEqual([{ executionSpec: 'revised execution spec' }])
+})
+test('G075 unreadable re-plan measurement remains unknown', async () => {
+  const f = fixture(); f.decisions.push(gap)
+  let replanning = false
+  f.deps.prepareWork = async request => { replanning = request.step_id === 'run:plan:1' }
+  const measure = f.deps.measure
+  f.deps.measure = async () => {
+    if (replanning) throw new Error('revision observation unavailable')
+    return measure()
+  }
+  expect(await f.run()).toMatchObject({ kind: 'unknown', phase: 'plan', step_id: 'run:plan:1', detail: 'revision observation unavailable' })
+  expect(f.runner.calls.filter(c => c.role === 'build')).toHaveLength(1)
+})
+test('G077 final-round design gap stops; a spare round admits replacement', async () => {
+  for (const round of [4, 5]) {
+    const f = fixture(); f.input.start = 'resume'
+    f.deps.modes = {
+      loadResume: async () => ({ head: f.snapshot.head, stage: 'built', round, findings: [], previousFindings: [] }),
+      regenerateDiff: async () => ({ kind: 'known', diff: f.snapshot.diff }),
+      probePlan: async () => null, advanceRalph: async () => ({ kind: 'allow' }),
+    }
+    f.decisions.push(gap)
+    expect(await f.run()).toMatchObject(round === 5
+      ? { kind: 'blocked', phase: 'review', recipient: 'orchestrator', on: `design-gap: re-plan-unreachable: ${gap.whatIsMissing}; no round left for the bounded re-plan` }
+      : { kind: 'merged' })
+    expect(f.runner.calls.map(c => c.step_id)).toEqual(round === 5 ? [] : ['run:plan:4', 'run:build:4'])
+    expect(f.cross.calls.map(c => c.step_id)).toEqual(round === 5 ? ['run:review:5'] : ['run:review:4', 'run:review:5'])
+  }
+})
 test('design gap re-plans once and continues with fresh measurements and spent rounds', async () => {
   const f = fixture()
   f.decisions.push(gap, { kind: 'fix', findings: ['new'] }, { kind: 'approve' })

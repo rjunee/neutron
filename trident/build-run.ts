@@ -253,8 +253,13 @@ export async function buildRun(input: BuildRunInput, deps: BuildRunDeps, signal:
         ...request, run_id: input.run_id, step_id, role, needs_approval_decision: false,
       }
       await deps.prepareWork(boundedRequest, { snapshot: structuredClone(snapshot), previous: previousPayload, findings, planner, ...(committedPlan ? { committedPlan } : {}) })
-      const outcome: BoundedWorkOutcome = await runner.run(
-        boundedRequest, placementFor(runner.provider, input.repl_provider), signal)
+      let outcome: BoundedWorkOutcome
+      try {
+        outcome = await runner.run(boundedRequest, placementFor(runner.provider, input.repl_provider), signal)
+      } catch (error) {
+        if (role === 'plan' && replansUsed > 0) return { stop: blocked('design-gap: re-plan-failed: planner threw before producing a revised execution spec') }
+        throw error
+      }
       switch (outcome.kind) {
         case 'unknown': return { stop: unknown(outcome.detail) }
         case 'blocked': return { stop: blocked(outcome.on) }
@@ -296,8 +301,19 @@ export async function buildRun(input: BuildRunInput, deps: BuildRunDeps, signal:
 
     let plan: ExecutionPlan | null = null
     async function planAndBuild(round: number): Promise<BuildRunOutcome | null> {
+      const replanning = replansUsed > 0
+      const replanFailed = (reason: string) => blocked(`design-gap: re-plan-failed: ${reason}`)
       const planned = await work('plan', round)
-      if ('stop' in planned) return planned.stop
+      if ('stop' in planned) {
+        // Running or unreadable work retains its identity; it is not a failed plan.
+        // Corroboration failures retain their existing measured-evidence cause.
+        if (replanning && planned.stop.kind === 'failed' && planned.stop.cause === 'workflow-threw') return replanFailed(planned.stop.detail)
+        return planned.stop
+      }
+      // G075: even PR mode must receive a usable replacement before rebuilding.
+      if (replanning && (!planned.payload || typeof planned.payload !== 'object'
+          || !('executionSpec' in planned.payload) || typeof planned.payload.executionSpec !== 'string'
+          || !planned.payload.executionSpec.trim())) return replanFailed('planner returned no executionSpec')
       if (input.mode === 'ralph' || input.mode === 'wave') {
         // G025: a completed worker with a null planner payload is still no plan.
         if (!executionPlan(planned.payload)) return blocked('Planner returned no execution plan')
@@ -374,6 +390,8 @@ export async function buildRun(input: BuildRunInput, deps: BuildRunDeps, signal:
       if (decision.kind === 're-plan') {
         if (round >= maxRounds) return blocked('Review requires orchestrator arbitration: round ceiling')
         if (replansUsed !== 0) return blocked('Review requires orchestrator arbitration: re-plan already spent')
+        // G077: a replacement needs a subsequent review within the host's cap.
+        if (round >= 5) return blocked(`design-gap: re-plan-unreachable: ${decision.whatIsMissing}; no round left for the bounded re-plan`)
         replansUsed++
         findings = [decision.whatIsMissing, ...decision.findings]
         previous = decision.findings
