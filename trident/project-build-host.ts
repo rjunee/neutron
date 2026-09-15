@@ -3,8 +3,9 @@ import { placementFor, type Provider, type WorkerRunner } from '@neutronai/runti
 import type { BuildRunInput, BuildRunOutcome } from './build-run.ts'
 import { createBuildHost, type BuildHostOptions } from './build-host.ts'
 import { createProjectReviewSource, type ProjectReviewSourceOptions } from './project-review-source.ts'
+import { createProjectObservationSources, type ProjectSuiteOptions } from './project-observation-sources.ts'
 import { briefIntegrity } from './gates/brief-integrity.ts'
-import { createProductionHostEffects, workContextPath, type CleanupOutcome, type ProductionHostOptions } from './production-host-effects.ts'
+import { createProductionHostEffects, productionCiSource, workContextPath, type CleanupOutcome, type ProductionHostOptions } from './production-host-effects.ts'
 
 /** Bound by the project composition, including its live conversational runner. */
 export interface ProjectBuildSubstrate {
@@ -32,6 +33,7 @@ export interface ProjectBuildHostOptions {
    * its store rather than let the driver run unmeasured. */
   phaseUsage: BuildHostOptions['phaseUsage']
   policy: Pick<BuildHostOptions, 'boundReview'> & {
+    reviewSuite?: ProjectSuiteOptions
     review?: Omit<ProjectReviewSourceOptions, 'runId' | 'projectSlug' | 'cwd' | 'replProvider'>
     leak: Pick<BuildHostOptions['leak'], 'scratch_dir' | 'gate_script'>
     mutation: Omit<BuildHostOptions['mutation'], 'run' | 'run_host' | 'base_branch'>
@@ -75,9 +77,12 @@ export async function createProjectBuildHost(options: ProjectBuildHostOptions) {
     }
     worker.request = { ...worker.request, brief: { path, integrity: briefIntegrity(text) } }
   }
-  const production = createProductionHostEffects(options.production)
+  const ci = config.ciSource ?? productionCiSource(config.runHost, config.repo)
+  const production = createProductionHostEffects({ ...config, ciSource: ci })
   const runners = projectBuildRunners(options.substrate, Object.values(workers).map(worker => worker.provider))
-  const { review, ...policy } = options.policy
+  const { review, reviewSuite, ...policy } = options.policy
+  const observations = createProjectObservationSources({ ci, baseBranch: config.baseBranch,
+    ciWorkflow: config.ciWorkflow, runId: run.id, suite: reviewSuite })
   const host = createBuildHost({
     ...policy,
     ...(review ? { review: createProjectReviewSource({ ...review,
@@ -91,6 +96,9 @@ export async function createProjectBuildHost(options: ProjectBuildHostOptions) {
     modes: production.modes,
     admission: production.admission,
     observeCi: production.observeCi,
+    reviewReadiness: observations.reviewReadiness,
+    reviewCi: observations.reviewCi,
+    reviewSuite: observations.reviewSuite,
     local: { baseBranch: options.production.baseBranch, worktree: options.production.worktree },
   })
   return {
