@@ -1,3 +1,4 @@
+import { projectModelTier } from '@neutronai/runtime/configured-models.ts'
 /**
  * @neutronai/open — single-owner graph composer (Sprint D boot shell).
  *
@@ -850,7 +851,12 @@ export function resolveOpenConversationalProvider(
   deps: OpenConversationalProviderDeps,
 ): Pick<OpenWiringContext, 'provider' | 'openaiLlmPool' | 'bindMcpResolver' | 'toolManifest'> {
   const provider = resolveOpenModelProvider(env)
+  projectModelTier(env) // Validate project routes at boot, before accepting chat.
   assertConversationalProviderWired(provider)
+  // Configured chat uses its own credential references, independent of an OpenAI key.
+  const configuredTools = env['NEUTRON_PROJECT_MODELS'] === undefined ? {} : {
+    bindMcpResolver: deps.buildMcpResolver(), toolManifest: deps.buildToolManifest(),
+  }
   const pool = deps.resolveOpenAiPool(env)
   if (pool !== null) {
     if (provider !== 'anthropic') {
@@ -871,9 +877,9 @@ export function resolveOpenConversationalProvider(
     log.error('provider_openai_no_key', {
       note: 'NEUTRON_MODEL_PROVIDER=openai but no OPENAI_API_KEY resolved — conversational turns will FAIL LOUDLY (no silent Anthropic fallback). Set OPENAI_API_KEY.',
     })
-    return { provider }
+    return { provider, ...configuredTools }
   }
-  return { provider: 'anthropic' }
+  return { provider: 'anthropic', ...configuredTools }
 }
 
 // C3d — the two pure Open-mode app-ws routing helpers MOVED to
@@ -5670,6 +5676,7 @@ export function buildOpenGraphComposer(
     const appWsChatTurn =
       liveAgentSubstrate !== null
         ? buildLiveAgentTurn({
+            configuredModel: (projectId) => projectModelTier(env, projectId),
             substrate: liveAgentSubstrate,
             injectActiveTurn: (turn, text) => injectPersistentReplActiveTurn({
               substrate_instance_id: `cc-agent-${owner_handle}`,

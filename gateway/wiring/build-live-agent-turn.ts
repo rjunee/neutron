@@ -622,6 +622,8 @@ export interface LiveAgentOnboardingSeam {
 }
 
 export interface BuildLiveAgentTurnInput {
+  /** Selected configured tier; these stateless turns need fresh context every time. */
+  configuredModel?: (projectId: string) => string | undefined
   /**
    * The DEDICATED conversational substrate (warm persistent CC REPL pool).
    * Built by the boot shell via `buildLlmCallSubstrate` WITHOUT `ephemeral`
@@ -1004,6 +1006,7 @@ export function buildLiveAgentTurn(
     if (
       activeTopics.has(topicKey) &&
       queuedTurnCount.get(topicKey) === 1 &&
+      input.configuredModel?.(turn.project_id ?? 'general') === undefined &&
       input.injectActiveTurn !== undefined &&
       turn.seed_turn !== true &&
       turn.button_prompt_id === undefined &&
@@ -1511,6 +1514,8 @@ export function buildLiveAgentTurn(
       (event, meta) => moduleLog.warn(event, { project: turn.project_slug, topic: turn.topic_id, ...meta }),
     )
     let prompt: string
+    const configuredTier = input.configuredModel?.(turn.project_id ?? 'general')
+    if (configuredTier !== undefined) contextSent.delete(topicKey)
     const isColdFirstTurn = !contextSent.has(topicKey)
     // THREE-POINT reset-epoch protocol (Argus r2 + r3 blocker). The scope's
     // reset-epoch is a monotonic counter bumped every time a sweep `/clear` fires
@@ -1643,7 +1648,7 @@ export function buildLiveAgentTurn(
       const s: AgentSpec = {
         prompt,
         tools,
-        model_preference: [model],
+        model_preference: [configuredTier ?? model],
         // Per-(instance, topic) warm-session key: the persistent substrate folds
         // `metering_context.project_id` into its pool key when no
         // projectIdResolver is wired on this substrate (build-llm-call-
@@ -1764,7 +1769,11 @@ export function buildLiveAgentTurn(
       //     (NEVER the misleading "AI connection may need attention" text).
       //   • any other fault → the credential/connection `FAILURE_BODY`.
       if (turn.seed_turn !== true) {
-        if (lastErrMessage.startsWith('prompt_capture_failed:')) {
+        if (configuredTier !== undefined) {
+          sendSafe(turn.send, { type: 'agent_message',
+            body: `Configured model '${configuredTier}' could not complete this turn. Check its configuration and availability.`,
+            topic_id: turn.topic_id })
+        } else if (lastErrMessage.startsWith('prompt_capture_failed:')) {
           sendSafe(turn.send, { type: 'agent_message', body: lastErrMessage, topic_id: turn.topic_id })
         } else if (isAuthInvalid(lastErrMessage)) {
           await sendAuthReconnect(input.buttonStore, turn, input.reconnectHandoff !== undefined)
@@ -1808,7 +1817,7 @@ export function buildLiveAgentTurn(
     // past the snapshot and we skip the re-mark, leaving the mark OFF so the NEXT
     // turn re-composes cold. The reset's own un-mark already cleared any prior mark,
     // so leaving it off is the correct end state.
-    if ((contextResetEpoch.get(turnScope) ?? 0) === resetEpochAtStart) {
+    if (configuredTier === undefined && (contextResetEpoch.get(turnScope) ?? 0) === resetEpochAtStart) {
       contextSent.add(topicKey)
       // Layer B — record the scope this warm topic's turns run in so a later
       // context-reset signal for that scope can un-mark it (rehydrate). MUST be
