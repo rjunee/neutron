@@ -6,6 +6,8 @@ export interface ProjectRepo {
   name: string
   path: string
   remote: string | null
+  /** Required CI workflow for this repo. Omission means CI cannot be observed. */
+  ciWorkflow?: string
 }
 export interface ProjectRepos {
   repos: ProjectRepo[]
@@ -33,6 +35,9 @@ export function parseProjectRepos(raw: unknown): ProjectRepos {
     }
     if (repo.remote !== null && (typeof repo.remote !== 'string' || repo.remote.trim() === '')) {
       throw new Error(`Invalid remote for repo "${repo.name}"`)
+    }
+    if ('ciWorkflow' in repo && (typeof repo.ciWorkflow !== 'string' || repo.ciWorkflow.trim() === '')) {
+      throw new Error(`Invalid CI workflow for repo "${repo.name}"`)
     }
   }
   if (new Set(declaration.repos.map(repo => repo.path)).size !== declaration.repos.length) {

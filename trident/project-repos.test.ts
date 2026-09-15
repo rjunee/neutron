@@ -22,6 +22,35 @@ const declaration = (): ProjectRepos => ({
   default: 'widgets',
 })
 
+test('workflow belongs to the selected repo and omission has no default', () => {
+  const { project } = fixture()
+  const repos = declaration()
+  repos.repos[0]!.ciWorkflow = 'build.yml'
+  repos.repos[1]!.ciWorkflow = 'Documentation checks'
+  writeFileSync(join(project, 'project-repos.json'), JSON.stringify(repos))
+  const read = readProjectRepos(project, 'widgets')
+  expect(resolveProjectRepo(read).ciWorkflow).toBe('build.yml')
+  expect(resolveProjectRepo(read, 'docs').ciWorkflow).toBe('Documentation checks')
+  delete repos.repos[1]!.ciWorkflow
+  writeFileSync(join(project, 'project-repos.json'), JSON.stringify(repos))
+  expect(resolveProjectRepo(readProjectRepos(project, 'widgets'), 'docs').ciWorkflow).toBeUndefined()
+  rmSync(join(project, 'project-repos.json'))
+  expect(resolveProjectRepo(readProjectRepos(project, 'widgets')).ciWorkflow).toBeUndefined()
+})
+
+for (const value of [null, false, 42, {}, [], '', ' \t\n']) {
+  test(`invalid workflow propagates from declaration read: ${JSON.stringify(value)}`, () => {
+    const { project } = fixture()
+    const repos = declaration()
+    const path = join(project, 'project-repos.json')
+    const raw = { ...repos, repos: repos.repos.map(repo => ({ ...repo, ciWorkflow: value })) }
+    writeFileSync(path, JSON.stringify(raw))
+    expect(() => readProjectRepos(project, 'widgets')).toThrow('Invalid CI workflow')
+    writeFileSync(path, JSON.stringify({ ...repos, repos: repos.repos.map(repo => ({ ...repo, ciWorkflow: 'ci.yml' })) }))
+    expect(resolveProjectRepo(readProjectRepos(project, 'widgets')).ciWorkflow).toBe('ci.yml')
+  })
+}
+
 test('select named repo, default repo, and refuse unknown name with a real default present', () => {
   const repos = declaration()
   expect(resolveProjectRepo(repos).path).toBe('code')
