@@ -195,6 +195,8 @@ describe('WorkBoardTab (happy-dom)', () => {
           round: 1,
           started_at: '2026-07-02T00:00:00Z',
           last_advanced_at: '2026-07-02T00:01:00Z',
+          heartbeat_at: '2099-01-01T00:00:00Z',
+          heartbeat_fresh_until: '2099-01-01T00:05:00Z',
           elapsed_ms: 60000,
           stalled: false,
           stalled_ms: null,
@@ -233,6 +235,7 @@ describe('WorkBoardTab (happy-dom)', () => {
           phase_label: 'building',
           step_label: 'fixing',
           round: 2,
+          ralph_round: 1,
           started_at: '2026-07-02T00:00:00Z',
           last_advanced_at: '2026-07-02T00:01:00Z',
           elapsed_ms: 120000,
@@ -250,7 +253,7 @@ describe('WorkBoardTab (happy-dom)', () => {
     expect(tag).not.toBeNull()
     expect(tag!.textContent).toBe('Fixing')
     expect(tag!.className).toContain('cwb-tag-fix')
-    expect(container.querySelector('.cwb-round')!.textContent).toBe('round 2')
+    expect(container.querySelector('.cwb-round')!.textContent).toBe('2.2')
     // No emoji glyphs, no elapsed-minutes timer, no old sub-label.
     expect(container.querySelector('.cwb-run-progress')).toBeNull()
     expect(container.textContent).not.toContain('🔨')
@@ -595,6 +598,8 @@ describe('WorkBoardTab (happy-dom)', () => {
           round: 1,
           started_at: '2026-07-02T00:00:00Z',
           last_advanced_at: '2026-07-02T00:01:00Z',
+          heartbeat_at: '2099-01-01T00:00:00Z',
+          heartbeat_fresh_until: '2099-01-01T00:05:00Z',
           elapsed_ms: 60000,
           stalled: false,
           stalled_ms: null,
@@ -616,7 +621,7 @@ describe('WorkBoardTab (happy-dom)', () => {
     const meta = buildingRow.querySelector('.cwb-row-meta')
     expect(meta).not.toBeNull()
     expect(meta!.querySelector('.cwb-tag')!.textContent).toBe('Building')
-    expect(meta!.querySelector('.cwb-round')!.textContent).toBe('round 1')
+    expect(meta!.querySelector('.cwb-round')!.textContent).toBe('1.1')
     // Queued row → its durable state, without inventing a round.
     const queuedRow = liRows[1]!
     expect(queuedRow.querySelector('.cwb-title')!.textContent).toBe('Just queued')
@@ -639,6 +644,8 @@ describe('WorkBoardTab (happy-dom)', () => {
           round: 1,
           started_at: '2026-07-02T00:00:00Z',
           last_advanced_at: '2026-07-02T00:01:00Z',
+          heartbeat_at: '2099-01-01T00:00:00Z',
+          heartbeat_fresh_until: '2099-01-01T00:05:00Z',
           elapsed_ms: 60000,
           stalled: false,
           stalled_ms: null,

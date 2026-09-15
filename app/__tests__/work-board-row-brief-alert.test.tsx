@@ -75,7 +75,7 @@ function item(over: Partial<WorkBoardItem> = {}): WorkBoardItem {
 }
 
 describe('WorkBoardRow brief alerts (mobile)', () => {
-  it('keeps the status dot inert and gives worker inspection its own labelled control', async () => {
+  it("the dot calls this row's inspector callback, while status advance stays separate", async () => {
     const opened: string[] = [];
     const advanced: string[] = [];
     const row = item({ id: 'item-a', title: 'Item A' });
@@ -86,14 +86,11 @@ describe('WorkBoardRow brief alerts (mobile)', () => {
     }));
     const indicator = screen.byTestId('wb-status-indicator-item-a');
     expect(indicator).not.toBeNull();
-    expect(indicator?.getAttribute('role')).toBeNull();
-    indicator?.dispatchEvent(new MouseEvent('click', { bubbles: true }));
-    expect(opened).toEqual([]);
-    expect(advanced).toEqual([]);
+    expect(indicator?.getAttribute('role')).toBe('button');
     await screen.press('Inspect worker for Item A');
     expect(opened).toEqual(['item-a']);
-    expect(opened).not.toContain('item-b');
     expect(advanced).toEqual([]);
+    expect(opened).not.toContain('item-b');
     screen.unmount();
   });
 

@@ -19,7 +19,7 @@
  */
 
 import type { TridentPhase, TridentRun } from './store.ts'
-import { STALLED_WARN_MS } from './liveness.ts'
+import { STAGE_HEARTBEAT_CADENCE_MS, STALLED_WARN_MS } from './liveness.ts'
 
 export { STALLED_WARN_MS }
 
@@ -69,10 +69,16 @@ export interface RunProgress {
   step_label: RunStepLabel
   /** Review/fix cycle count (1 during the first build+review; N during fix-round-N). */
   round: number
+  /** Zero-based persisted Ralph task counter; presentation adds one for the task number. */
+  ralph_round: number
   /** ISO-8601 UTC run start — the client ticks live elapsed off this. */
   started_at: string
   /** ISO-8601 UTC last checkpoint/transition — the client ticks live stall off this. */
   last_advanced_at: string
+  /** Latest wrapper heartbeat. Null means ALIVE was not established. */
+  heartbeat_at: string | null
+  /** Server-clock expiry for that ALIVE evidence; null with no valid heartbeat. */
+  heartbeat_fresh_until: string | null
   /** Server snapshot of `now - started_at` (ms). */
   elapsed_ms: number
   /** Non-terminal AND no advance for > `STALLED_WARN_MS`. */
@@ -155,12 +161,14 @@ export function deriveRunProgress(
   run: TridentRun,
   nowMs: number,
   repo_web_url?: string | null,
+  heartbeat_at: string | null = null,
 ): RunProgress {
   const startedMs = Date.parse(run.started_at)
   const advancedMs = Date.parse(run.last_advanced_at)
   const elapsed_ms = Number.isFinite(startedMs) ? Math.max(0, nowMs - startedMs) : 0
   const sinceAdvance = Number.isFinite(advancedMs) ? Math.max(0, nowMs - advancedMs) : 0
   const terminal = TERMINAL_PHASES.includes(run.phase)
+  const heartbeatMs = heartbeat_at === null ? Number.NaN : Date.parse(heartbeat_at)
 
   let phase_label = baseLabel(run.phase)
   // FIX #336 — the DISPLAYED round is the inner fix-iteration, NOT the outer
@@ -221,8 +229,13 @@ export function deriveRunProgress(
     phase_label,
     step_label: deriveStepLabel(run.phase, run.inner_checkpoint),
     round,
+    ralph_round: run.ralph_round,
     started_at: run.started_at,
     last_advanced_at: run.last_advanced_at,
+    heartbeat_at,
+    heartbeat_fresh_until: Number.isFinite(heartbeatMs)
+      ? new Date(heartbeatMs + STAGE_HEARTBEAT_CADENCE_MS).toISOString()
+      : null,
     elapsed_ms,
     stalled,
     stalled_ms: stalled ? sinceAdvance : null,
@@ -249,6 +262,7 @@ export function runProgressForItem(
   lookupRun: (run_id: string) => TridentRun | null,
   nowMs: number,
   peekRepoWebUrl?: ((repo_path: string) => string | null) | undefined,
+  latestHeartbeatAt?: ((run_id: string) => string | null) | undefined,
 ): RunProgress | null {
   const runId = item.linked_run_id
   if (runId === null || runId.length === 0) return null
@@ -261,5 +275,6 @@ export function runProgressForItem(
     run,
     nowMs,
     peekRepoWebUrl !== undefined ? peekRepoWebUrl(run.repo_path) : null,
+    latestHeartbeatAt !== undefined ? latestHeartbeatAt(run.id) : null,
   )
 }

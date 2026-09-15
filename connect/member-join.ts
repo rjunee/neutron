@@ -107,13 +107,11 @@ export type RegisterMembershipFn = (args: {
  * a REMOTE self-hosted instance the connect node has no handle on at accept time
  * (the join is browser-initiated — `landing/connect-accept.ts`). A real
  * cross-instance import is therefore gated on two not-yet-built pieces, both the
- * deferred live-fan-out trident's scope (connect-spec §7 C-E): (i) the HTTP
+ * deferred live-fan-out trident's scope (connect-spec §7 C-E): the HTTP
  * host-snapshot transport (`SharedProjectGraphSource` is `InProcessGraphSource`
- * only today), and (ii) per-project GBrain source scoping — GBrain is per-
- * instance `source=default` today (`gateway/wiring/build-gbrain-memory.ts`:
- * "project partitioning lands in M2.6"), so a host export would ship the host's
- * WHOLE cross-project memory, a privacy regression. The real collaborator-side
- * trigger point is `gateway/projects/shared-projects-resolver.ts` (shared-project
+ * only today). Per-project GBrain source scoping is provided by the gateway, so
+ * host export is restricted to the active project's partition. The real
+ * collaborator-side trigger point is `gateway/projects/shared-projects-resolver.ts` (shared-project
  * discovery). Tracked in ISSUES.md (import-on-join activation). The module +
  * ledger + real-GBrain in-process round-trip are landed and tested; only the
  * distributed activation is deferred. */

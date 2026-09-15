@@ -21,6 +21,7 @@ import {
 } from '../lib/push-deep-link-dispatch';
 import { GENERAL_PROJECT_ID } from '../lib/project-rail-view';
 import { PUSH_KINDS } from '@neutronai/wire-types/push-kind.ts';
+import { shouldSkipPushTap } from '../lib/push-tap-replay';
 
 function recordingWarn(): {
   warn: (msg: string, meta?: Record<string, unknown>) => void;
@@ -292,8 +293,24 @@ describe('installPushTapHandler wrapper (source-pin)', () => {
     expect(src).toContain('pushTapDedupeStore');
     expect(src).toContain('request.identifier');
     expect(src).toContain('store.markSeen');
-    expect(src).toContain('store.has');
+    const replaySrc = readFileSync(
+      join(__dirname, '..', 'lib', 'push-tap-replay.ts'),
+      'utf8',
+    );
+    expect(replaySrc).toContain('store.has');
     expect(src).toContain('__resetPushTapDedupeForTesting');
+  });
+
+  it('skips cached cold-start replays but routes repeated warm taps', () => {
+    const seenStore = { has: () => true };
+
+    expect(shouldSkipPushTap(seenStore, 'notification-1', 'cold-start')).toBe(true);
+    expect(shouldSkipPushTap(seenStore, 'notification-1', 'warm-listener')).toBe(false);
+
+    const src = readFileSync(join(__dirname, '..', 'lib', 'push.ts'), 'utf8');
+    expect(src).toContain("source: 'cold-start'");
+    expect(src).toContain("source: 'warm-listener'");
+    expect(src).toContain('shouldSkipPushTap(store, id, opts.source)');
   });
 
   // Argus r1 I2 round 2 — belt-and-braces: cold-start dispatch must

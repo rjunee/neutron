@@ -38,7 +38,7 @@ describe('buildWorkBoardChatAck — exact texts', () => {
     const { ack, posts } = harness({ names: { p1: 'Willow' } })
     ack.post({ project_id: 'p1', item_id: 'i1', title: 'Ship the landing page', kind: 'card_added' })
     expect(posts).toEqual([
-      { chat_id: 'chat:p1', text: '▸ On the Work Board · Willow: "Ship the landing page"' },
+      { chat_id: 'chat:p1', text: '▸ Added to work board · Willow: "Ship the landing page"' },
     ])
   })
 
@@ -62,14 +62,14 @@ describe('buildWorkBoardChatAck — exact texts', () => {
     ack.post({ project_id: 'p1', item_id: 'i1', title: long, kind: 'card_added' })
     const expectedTitle = `${'x'.repeat(95)}…`
     expect(expectedTitle.length).toBe(96)
-    expect(posts[0]?.text).toBe(`▸ On the Work Board · Willow: "${expectedTitle}"`)
+    expect(posts[0]?.text).toBe(`▸ Added to work board · Willow: "${expectedTitle}"`)
   })
 
   test('title exactly 96 chars is NOT truncated', () => {
     const { ack, posts } = harness({ names: { p1: 'Willow' } })
     const title = 'y'.repeat(96)
     ack.post({ project_id: 'p1', item_id: 'i1', title, kind: 'card_added' })
-    expect(posts[0]?.text).toBe(`▸ On the Work Board · Willow: "${title}"`)
+    expect(posts[0]?.text).toBe(`▸ Added to work board · Willow: "${title}"`)
   })
 
   // Argus r2 nit: truncation must land on a code-POINT boundary, never split an
@@ -85,7 +85,7 @@ describe('buildWorkBoardChatAck — exact texts', () => {
     // No unpaired surrogate survived (each code point round-trips).
     expect(/[\uD800-\uDBFF](?![\uDC00-\uDFFF])|(?<![\uD800-\uDBFF])[\uDC00-\uDFFF]/.test(text)).toBe(false)
     // 95 whole emoji + the ellipsis (MAX_TITLE_LEN - 1 code points, then '…').
-    expect(text).toBe(`▸ On the Work Board · Willow: "${'😀'.repeat(95)}…"`)
+    expect(text).toBe(`▸ Added to work board · Willow: "${'😀'.repeat(95)}…"`)
   })
 })
 
@@ -288,13 +288,13 @@ describe('the ack names its board', () => {
   test('a named project renders its rail name', () => {
     const { ack, posts } = harness({ names: { p1: 'Willow' } })
     ack.post({ project_id: 'p1', item_id: 'i1', title: 'Ship it', kind: 'card_added' })
-    expect(posts[0]?.text).toBe('▸ On the Work Board · Willow: "Ship it"')
+    expect(posts[0]?.text).toBe('▸ Added to work board · Willow: "Ship it"')
   })
 
   test('General is answered WITHOUT a lookup — it has no row to find', () => {
     const { ack, posts, namedWith } = harness()
     ack.post({ project_id: null, item_id: 'i1', title: 'Ship it', kind: 'card_added' })
-    expect(posts[0]?.text).toBe('▸ On the Work Board · General: "Ship it"')
+    expect(posts[0]?.text).toBe('▸ Added to work board · General: "Ship it"')
     // The point of the early return: asking would be a guaranteed miss, and a miss
     // renders as `unknown project` — for the one scope that is never unknown.
     expect(namedWith).toEqual([])
@@ -303,7 +303,7 @@ describe('the ack names its board', () => {
   test('an unnameable project degrades to a WORD, never the raw id', () => {
     const { ack, posts } = harness({ names: {} })
     ack.post({ project_id: 'deleted-mid-turn', item_id: 'i1', title: 'Ship it', kind: 'card_added' })
-    expect(posts[0]?.text).toBe('▸ On the Work Board · unknown project: "Ship it"')
+    expect(posts[0]?.text).toBe('▸ Added to work board · unknown project: "Ship it"')
     expect(posts[0]?.text).not.toContain('deleted-mid-turn')
   })
 
@@ -318,17 +318,17 @@ describe('the ack names its board', () => {
     })
     ack.post({ project_id: 'p1', item_id: 'i1', title: 'Ship it', kind: 'card_added' })
     // Naming is a nicety; the ack is the point. A failure to name must not cost it.
-    expect(posts[0]?.text).toBe('▸ On the Work Board · unknown project: "Ship it"')
+    expect(posts[0]?.text).toBe('▸ Added to work board · unknown project: "Ship it"')
   })
 
   test('an over-long board name is truncated, and a whitespace-only one is not a label', () => {
     const long = harness({ names: { p1: 'z'.repeat(80) } })
     long.ack.post({ project_id: 'p1', item_id: 'i1', title: 'x', kind: 'card_added' })
-    expect(long.posts[0]?.text).toBe(`▸ On the Work Board · ${'z'.repeat(47)}…: "x"`)
+    expect(long.posts[0]?.text).toBe(`▸ Added to work board · ${'z'.repeat(47)}…: "x"`)
 
     const blank = harness({ names: { p2: '   ' } })
     blank.ack.post({ project_id: 'p2', item_id: 'i1', title: 'x', kind: 'card_added' })
-    expect(blank.posts[0]?.text).toBe('▸ On the Work Board · unknown project: "x"')
+    expect(blank.posts[0]?.text).toBe('▸ Added to work board · unknown project: "x"')
   })
 
   test('a title is cut on GRAPHEME clusters, so a flag is never left as half a flag', () => {

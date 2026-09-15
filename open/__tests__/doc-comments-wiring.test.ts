@@ -127,7 +127,7 @@ let tmpDir: string
 let harness: Harness
 
 interface Harness {
-  base: string
+  fetch(request: Request): Promise<Response>
   close(): Promise<void>
 }
 
@@ -136,6 +136,7 @@ function mockSubstrate(): Substrate {
   return {
     start(_spec: AgentSpec): SessionHandle {
       async function* gen(): AsyncGenerator<Event> {
+        yield { kind: 'token', text: 'I handled this inline comment.' }
         yield {
           kind: 'completion',
           usage: { input_tokens: 1, output_tokens: 1 },
@@ -155,10 +156,17 @@ function mockSubstrate(): Substrate {
 async function startHarness(): Promise<Harness> {
   seedMigratedDb(process.env['NEUTRON_DB_PATH'] as string)
   const db = ProjectDb.open(process.env['NEUTRON_DB_PATH'] as string)
+  db.raw().run(
+    `INSERT INTO projects
+       (id, name, description, persona, privacy_mode, billing_mode, created_at, updated_at)
+     VALUES (?, ?, '', NULL, 'private', 'personal', ?, ?)`,
+    [PROJECT, 'Demo Project', '2026-09-15T00:00:00.000Z', '2026-09-15T00:00:00.000Z'],
+  )
   const composer = buildOpenGraphComposer({
     env: process.env,
     // eslint-disable-next-line @typescript-eslint/no-explicit-any
     substrateFactory: (() => mockSubstrate()) as any,
+    agentWatcherPollIntervalMs: 20,
   })
   const composition = await composer({ db, project_slug: OWNER_SLUG })
   const graph = await composeProductionGraph(composition)
@@ -166,16 +174,9 @@ async function startHarness(): Promise<Harness> {
     throw new Error('Open composition did not expose graph.fetch/websocket')
   }
   const composedFetch = graph.fetch
-  const composedWebsocket = graph.websocket
-  const server = Bun.serve({
-    port: 0,
-    fetch: (req, srv) => composedFetch(req, srv),
-    websocket: composedWebsocket,
-  })
   return {
-    base: `http://127.0.0.1:${server.port}`,
+    fetch: async (request) => await composedFetch(request, undefined as never),
     close: async () => {
-      await server.stop(true)
       for (const cleanup of composition.realmode_cleanups ?? []) {
         try {
           cleanup()
@@ -197,11 +198,11 @@ async function call(
   const headers: Record<string, string> = { accept: 'application/json' }
   if (init.auth !== false) headers['authorization'] = `Bearer ${OWNER_SLUG}`
   if (init.body !== undefined) headers['content-type'] = 'application/json'
-  return await fetch(`${harness.base}${path}`, {
+  return await harness.fetch(new Request(`http://127.0.0.1${path}`, {
     method: init.method ?? 'GET',
     headers,
     ...(init.body !== undefined ? { body: JSON.stringify(init.body) } : {}),
-  })
+  }))
 }
 
 const commentsBase = `/api/app/projects/${PROJECT}/docs/comments`
@@ -356,6 +357,30 @@ afterAll(async () => {
 })
 
 describe('links 1-3 — the store exists, reaches the surface, and the routes answer', () => {
+  test('a new comment wakes the production-composed AgentWatcher and receives an agent reply', async () => {
+    const { res, event_id } = await postRootComment('please respond here')
+    expect(res.status).toBe(200)
+    expect(event_id).toBeDefined()
+
+    const deadline = Date.now() + 2_000
+    while (Date.now() < deadline) {
+      const thread = await call(`${commentsBase}/${event_id as string}/thread`)
+      expect(thread.status).toBe(200)
+      const body = (await thread.json()) as {
+        thread?: { replies?: Array<{ author_kind?: string; body?: string }> }
+      }
+      const reply = body.thread?.replies?.find(
+        (event) => event.body === 'I handled this inline comment.',
+      )
+      if (reply !== undefined) {
+        expect(reply.author_kind).toBe('agent')
+        return
+      }
+      await Bun.sleep(20)
+    }
+    throw new Error('production-composed AgentWatcher did not reply before the deadline')
+  })
+
   test('POST a root comment returns 200, NOT 503 comments_unavailable', async () => {
     const { res } = await postRootComment('first thought')
     // The specific status matters more than "not an error". 503 is the exact
