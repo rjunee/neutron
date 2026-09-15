@@ -103,6 +103,13 @@ describe('stepTag + roundText derive from step_label (M1 redesign)', () => {
     expect(roundText(rp)).toBe('round 2');
   });
 
+  it('retrying → "Retrying" tag + durable attempt N', () => {
+    const rp = progress({ step_label: 'retrying', infra_retries: 2 });
+    expect(stepTag(withRun(rp))).toEqual({ label: 'Retrying', colorKey: 'build' });
+    expect(roundText(rp)).toBe('attempt 2');
+    expect(dotState(withRun(rp))).toEqual({ colorKey: 'build', pulse: true });
+  });
+
   it('reviewing → "Reviewing" tag + round N', () => {
     const rp = progress({ step_label: 'reviewing', round: 3 });
     expect(stepTag(withRun(rp))).toEqual({ label: 'Reviewing', colorKey: 'review' });

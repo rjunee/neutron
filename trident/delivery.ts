@@ -1447,6 +1447,24 @@ export function topicForRun(
   }
 }
 
+/** Notify the originating topic when a run spends its first infrastructure retry. */
+export async function deliverInfraRetry(
+  sink: OutboundSink,
+  run: TridentRun,
+  attempt: number,
+  cause: string,
+): Promise<void> {
+  const topic = topicForRun(run, run.channel_kind ?? 'telegram')
+  if (topic === null) return
+  const measured = cause.trim()
+  await sink.send({
+    topic,
+    text:
+      `Infrastructure interrupted this build. Retrying automatically (attempt ${attempt}).` +
+      (measured.length > 0 ? ` Measured cause: ${measured}` : ''),
+  })
+}
+
 /**
  * Build the `TridentTerminalHook` the tick loop fires on every terminal
  * transition. Composes the result message and posts it to the run's

@@ -50,7 +50,7 @@ export type RunPhaseLabel =
  * `fixing` = a post-review Forge fix-round (round ≥ 2); `merging` = the outer
  * loop's merge step. The redesign consumes this to show the item working live.
  */
-export type RunStepLabel = 'building' | 'reviewing' | 'fixing' | 'merging' | 'done' | 'failed'
+export type RunStepLabel = 'building' | 'reviewing' | 'fixing' | 'merging' | 'retrying' | 'done' | 'failed'
 
 /**
  * The compact run-derived progress attached to a bound board item. All fields
@@ -69,6 +69,8 @@ export interface RunProgress {
   step_label: RunStepLabel
   /** Review/fix cycle count (1 during the first build+review; N during fix-round-N). */
   round: number
+  /** Durable infrastructure retry attempts already claimed for this run. */
+  infra_retries: number
   /** ISO-8601 UTC run start — the client ticks live elapsed off this. */
   started_at: string
   /** ISO-8601 UTC last checkpoint/transition — the client ticks live stall off this. */
@@ -219,8 +221,11 @@ export function deriveRunProgress(
   return {
     run_id: run.id,
     phase_label,
-    step_label: deriveStepLabel(run.phase, run.inner_checkpoint),
+    step_label: !terminal && run.infra_retries > 0
+      ? 'retrying'
+      : deriveStepLabel(run.phase, run.inner_checkpoint),
     round,
+    infra_retries: run.infra_retries,
     started_at: run.started_at,
     last_advanced_at: run.last_advanced_at,
     elapsed_ms,
