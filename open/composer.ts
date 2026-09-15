@@ -38,7 +38,11 @@ import {
   resolveApiKeyEnvTier,
   resolveAmbientTier,
 } from '@neutronai/gateway/wiring/resolve-llm-credentials.ts'
-import { normalizeProvider, type Provider } from '@neutronai/runtime/adapters/select-substrate.ts'
+import {
+  normalizeProvider,
+  resolveProviderSelection,
+  type Provider,
+} from '@neutronai/runtime/adapters/select-substrate.ts'
 import { LoopRegistry, SupervisedLoop } from '@neutronai/loop'
 import type { McpToolResolver } from '@neutronai/contracts/mcp-tool-resolver.ts'
 import { replToolBridgeRef } from '@neutronai/runtime/adapters/claude-code/persistent/pool-state.ts'
@@ -837,34 +841,29 @@ export function resolveOpenConversationalProvider(
   deps: OpenConversationalProviderDeps,
 ): Pick<OpenWiringContext, 'provider' | 'openaiLlmPool' | 'bindMcpResolver' | 'toolManifest'> {
   const provider = resolveOpenModelProvider(env)
-  if (provider === 'anthropic') return {}
-  if (provider === 'openai') {
-    const pool = deps.resolveOpenAiPool(env)
-    if (pool !== null) {
+  const pool = deps.resolveOpenAiPool(env)
+  if (pool !== null) {
+    if (provider !== 'anthropic') {
       log.info('provider_openai_selected', {
-        note: 'conversational turns route to the GPT Responses API adapter (BYO OPENAI_API_KEY); Trident + autonomous builds stay Claude Code',
+        note: 'selected turns route to the configured OpenAI-family adapter',
       })
-      return {
-        provider: 'openai',
-        openaiLlmPool: pool,
-        bindMcpResolver: deps.buildMcpResolver(),
-        toolManifest: deps.buildToolManifest(),
-      }
     }
+    return {
+      provider,
+      openaiLlmPool: pool,
+      bindMcpResolver: deps.buildMcpResolver(),
+      toolManifest: deps.buildToolManifest(),
+    }
+  }
+  if (provider === 'openai' || provider === 'openai-codex-cli') {
     // Honor the explicit selection with NO key: fail loudly per turn (below),
     // never silently fall back to Anthropic.
     log.error('provider_openai_no_key', {
       note: 'NEUTRON_MODEL_PROVIDER=openai but no OPENAI_API_KEY resolved — conversational turns will FAIL LOUDLY (no silent Anthropic fallback). Set OPENAI_API_KEY.',
     })
-    return { provider: 'openai' }
+    return { provider }
   }
-  // Exhaustive: any OTHER declared value (openai-codex-cli today) is NOT wired
-  // for production — refuse to boot rather than silently dispatch Claude Code.
-  throw new Error(
-    `[composer] NEUTRON_MODEL_PROVIDER=${provider} is a declared but NOT production-wired provider — ` +
-      "refusing to boot rather than silently falling back to Claude Code. Use 'openai' (GPT Responses) " +
-      'or leave NEUTRON_MODEL_PROVIDER unset for Claude Code.',
-  )
+  return { provider: 'anthropic' }
 }
 
 // C3d — the two pure Open-mode app-ws routing helpers MOVED to
@@ -985,6 +984,11 @@ export function buildOpenGraphComposer(
     // Shared per-owner persona loader — splices <owner_home>/persona/*.md
     // into every onboarding + chat system prompt.
     const personaLoader = new PersonaPromptLoader({ owner_home })
+    // These two live stores feed both substrate dispatch and the later HTTP
+    // surfaces. Construct them before substrate wiring so provider resolution is
+    // live per turn, never frozen at composition.
+    const projectSettingsStore = new SqliteProjectSettingsStore(db)
+    const chatSessionProjects = new InMemoryWebChatSessionProjectRegistry()
 
     // Shared cron registry — threaded into BOTH the wow-dispatcher (via the
     // landing stack) AND CompositionInput.cron_jobs so the scheduler and the
@@ -1030,6 +1034,14 @@ export function buildOpenGraphComposer(
       buildMcpResolver: buildOpenAiMcpResolver,
       buildToolManifest: buildOpenAiToolManifest,
     })
+    const instanceProvider = env['NEUTRON_MODEL_PROVIDER']
+    const providerResolver = () => {
+      const activeProject = chatSessionProjects.getActive(OWNER_USER_ID) ?? undefined
+      return resolveProviderSelection({
+        ...(instanceProvider !== undefined ? { instance: instanceProvider } : {}),
+        project: projectSettingsStore.modelProviderOverride(activeProject),
+      })
+    }
     // O6 — NOTICE-FAMILY + RECOVERED-REPLY sinks for the owner's WARM conversational
     // substrate (`cc-agent-*`). The persistent REPL fires four DI seams on the
     // rising edge of otherwise-invisible states — a mid-turn API 5xx dead turn, a
@@ -1110,6 +1122,7 @@ export function buildOpenGraphComposer(
       db,
       prewarmSubstrate,
       ...conversationalProviderCtx,
+      providerResolver,
       ...(liveAgentNoticeSinks !== undefined ? { liveAgentNoticeSinks } : {}),
       ...(backgroundNoticeSinks !== undefined ? { backgroundNoticeSinks } : {}),
       ...(liveAgentRecoveredReplySink !== undefined
@@ -1832,8 +1845,6 @@ export function buildOpenGraphComposer(
     const commentStore = new CommentStore({ owner_home })
     // ISSUE #41 — the per-process "which project is the owner's chat pointed
     // at" pin. The escalate route sets it; the resolver's closure reads it.
-    const chatSessionProjects = new InMemoryWebChatSessionProjectRegistry()
-
     const phaseSpecResolver = await buildPhaseSpecResolver({
       substrate: llmCallSubstrate,
       env,
@@ -5070,10 +5081,14 @@ export function buildOpenGraphComposer(
     // P4 (table-ownership, 2026-07): bound to a name so the agent-reply
     // activity stamp below routes through the owning store instead of
     // inlining `UPDATE projects` SQL here (migrations/table-ownership.json).
-    const projectSettingsStore = new SqliteProjectSettingsStore(db)
     const appProjectsSurface = createAppProjectsSurface({
       store: projectSettingsStore,
       auth: appOwnerAuth,
+      resolveModelProvider: (project_id) =>
+        resolveProviderSelection({
+          ...(instanceProvider !== undefined ? { instance: instanceProvider } : {}),
+          project: projectSettingsStore.modelProviderOverride(project_id),
+        }),
       createProject: ({ name, user_id }) => createProjectAndRefresh({ name, user_id }),
       // Rail-redesign: a Settings PATCH that changes the project name or emoji is
       // rail-visible — fan a fresh `projects_changed` so every connected rail

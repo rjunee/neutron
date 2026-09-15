@@ -6,6 +6,7 @@ import {
   providerCapabilities,
   KNOWN_PROVIDERS,
   selectSubstrateFactory,
+  resolveProviderSelection,
   type Provider,
 } from './select-substrate.ts'
 import { createClaudeCodeSubstrateAuto } from './claude-code/index.ts'
@@ -89,5 +90,20 @@ describe('select-substrate', () => {
       expect(sel.provider).toBe(p)
       expect(typeof sel.create).toBe('function')
     }
+  })
+
+  test('three-level resolution keeps inheritance distinct from an explicit choice', () => {
+    expect(resolveProviderSelection({})).toEqual({ provider: 'anthropic', source: 'application' })
+    expect(resolveProviderSelection({ instance: 'openai' })).toEqual({
+      provider: 'openai',
+      source: 'instance',
+    })
+    expect(
+      resolveProviderSelection({ instance: 'openai', project: 'anthropic' }),
+    ).toEqual({ provider: 'anthropic', source: 'project' })
+    expect(resolveProviderSelection({ instance: 'openai', project: null })).toEqual({
+      provider: 'openai',
+      source: 'instance',
+    })
   })
 })

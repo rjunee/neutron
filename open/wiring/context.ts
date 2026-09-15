@@ -21,7 +21,7 @@ import type {
   ClaudeCodeSubstrateOptions,
   RecoveredReply,
 } from '@neutronai/runtime/adapters/claude-code/index.ts'
-import type { Provider } from '@neutronai/runtime/adapters/select-substrate.ts'
+import type { Provider, ProviderSelection } from '@neutronai/runtime/adapters/select-substrate.ts'
 import type { McpToolResolver } from '@neutronai/contracts/mcp-tool-resolver.ts'
 import type { ProjectDb } from '@neutronai/persistence/index.ts'
 import type { SubstrateNoticeSinks } from '@neutronai/gateway/http/substrate-notice-sink.ts'
@@ -61,12 +61,12 @@ export interface OpenWiringContext {
    * SWAPPABLE MODEL PROVIDER — the CONVERSATIONAL backend for this box. Absent ⇒
    * `'anthropic'` (Claude Code), the default. Set from `NEUTRON_MODEL_PROVIDER`
    * (read in `open/composer.ts` — a Managed-open-contract env read stays under
-   * `open/`, never `runtime/`). Applied ONLY to the conversational substrates
-   * (`cc-llm-*` phase-spec + `cc-agent-*` live chat); the trident-fire + ephemeral
-   * substrates stay Claude-Code by construction (trident's Workflow inner loop has
-   * no OpenAI analogue).
+   * `open/`, never `runtime/`). The live resolver applies the same project choice
+   * to conversation, utility, and build substrates.
    */
   provider?: Provider
+  /** Live per-turn project/instance/application resolution with provenance. */
+  providerResolver?: () => ProviderSelection
   /**
    * Resolved OpenAI credential pool (`OPENAI_API_KEY`), or null when the box has
    * no OpenAI key. Consumed ONLY when `provider === 'openai'`; when a project

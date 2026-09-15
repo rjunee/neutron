@@ -101,15 +101,13 @@ export function wireSubstrates(ctx: OpenWiringContext): WiredSubstrates {
   const { llmPool, substrateFactory, owner_handle, owner_home, project_slug, prewarmSubstrate } =
     ctx
 
-  // SWAPPABLE PROVIDER — the CONVERSATIONAL provider option bag. Applied ONLY to
-  // the `cc-llm-*` (phase-spec) + `cc-agent-*` (live chat) substrates below.
+  // SWAPPABLE PROVIDER — one live, project-aware provider option bag shared by
+  // conversational, utility, and build substrates below.
   // EXPLICIT operator selection vs FULLY-WIRED. `ctx.provider === 'openai'` is the
   // operator's explicit choice (NEUTRON_MODEL_PROVIDER=openai); it is honored even
   // when incomplete so the substrate FAILS LOUDLY rather than silently routing the
   // operator's prompts to Anthropic — the provider they did NOT select (audit High).
-  const openaiRequested = ctx.provider === 'openai'
   const openaiFullyWired =
-    openaiRequested &&
     ctx.openaiLlmPool !== null &&
     ctx.openaiLlmPool !== undefined &&
     ctx.bindMcpResolver !== undefined
@@ -126,12 +124,13 @@ export function wireSubstrates(ctx: OpenWiringContext): WiredSubstrates {
   const conversationalProviderFor = (
     withToolBridge: boolean,
   ): Partial<BuildLlmCallSubstrateInput> =>
-    openaiRequested
+    ctx.provider !== undefined || ctx.providerResolver !== undefined
       ? {
           // ALWAYS set provider='openai' for an explicit selection. When fully wired
           // the `openai` config is included; when NOT, it is omitted so the substrate
           // emits its LOUD terminal error (never a silent Anthropic fallback).
-          provider: 'openai',
+          ...(ctx.provider !== undefined ? { provider: ctx.provider } : {}),
+          ...(ctx.providerResolver !== undefined ? { providerResolver: ctx.providerResolver } : {}),
           ...(openaiFullyWired
             ? {
                 openai: {
@@ -172,7 +171,8 @@ export function wireSubstrates(ctx: OpenWiringContext): WiredSubstrates {
   // that returns null so construction still yields a non-null Substrate. When NOT
   // openai-selected this is `{ pool: llmPool }` with a non-null pool — BYTE-IDENTICAL
   // to before.
-  const conversationalAvailable = openaiRequested || llmPool !== null
+  const conversationalAvailable =
+    ctx.providerResolver !== undefined || ctx.provider !== undefined || llmPool !== null
   const anthropicPoolArg: Pick<BuildLlmCallSubstrateInput, 'pool' | 'resolvePool'> =
     llmPool !== null ? { pool: llmPool } : { resolvePool: async (): Promise<null> => null }
 
@@ -238,7 +238,9 @@ export function wireSubstrates(ctx: OpenWiringContext): WiredSubstrates {
   // pre-warming it would fire a real API call at boot; skip it whenever openai is
   // the requested provider (wired or not — an unwired openai turn just errors).
   const prewarmReady: Promise<void> | null =
-    llmCallSubstrate !== null && !openaiRequested ? prewarmSubstrate(llmCallSubstrate) : null
+    llmCallSubstrate !== null && (ctx.provider === undefined || ctx.provider === 'anthropic')
+      ? prewarmSubstrate(llmCallSubstrate)
+      : null
   // Track whether the pre-warm has SETTLED so the resolver can elevate the
   // budget for EVERY conversational dispatch in the cold window — not just the
   // first (2026-06-18 cold-start fix, round 2: the live owner-signup raced the
@@ -508,6 +510,7 @@ export function wireSubstrates(ctx: OpenWiringContext): WiredSubstrates {
               // profile rather than inheriting an unused credential.
               profile,
               ephemeral: true,
+              ...liveAgentProvider,
               ...(substrateFactory !== undefined ? { substrateFactory } : {}),
             })
       if (s === null) {
@@ -558,6 +561,7 @@ export function wireSubstrates(ctx: OpenWiringContext): WiredSubstrates {
       // Trident v2 FIRE seam — WARM per-repo REPL. Security knobs live on the
       // profile — see substrate-profiles.ts.
       profile: PROFILE_WARM_FIRE,
+      ...liveAgentProvider,
       // #514 / #518 — the supervision watchdog and the shutdown path both know
       // when this warm launcher's child is gone. The sink stamps every still-live
       // workflow the dead generation owned (so the tick performs the normal terminal

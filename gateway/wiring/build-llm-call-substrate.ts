@@ -51,6 +51,7 @@ import {
   normalizeProvider,
   selectSubstrateFactory,
   type Provider,
+  type ProviderSelection,
 } from '@neutronai/runtime/adapters/select-substrate.ts'
 import type { GptResponsesApiSubstrateOptions } from '@neutronai/runtime/adapters/openai-responses/index.ts'
 import { asOwnerHandle } from '@neutronai/persistence/index.ts'
@@ -550,10 +551,8 @@ export interface BuildLlmCallSubstrateInput {
    * that opts into `'openai'` / `'openai-codex-cli'` routes each turn through the
    * matching adapter (see `openai` config + `providerResolver`).
    *
-   * SCOPE — conversational / utility LLM turns ONLY. Trident's autonomous build
-   * loop (the native `Workflow` inner loop) has NO OpenAI analogue and MUST stay
-   * on Claude Code regardless of this setting; the trident-fire substrate is
-   * built WITHOUT a provider so it always resolves to `'anthropic'`.
+   * SCOPE — every project-owned LLM turn, including build orchestration. The
+   * construction site decides which turns share the live project resolver.
    */
   provider?: Provider
   /**
@@ -565,7 +564,7 @@ export interface BuildLlmCallSubstrateInput {
    * `normalizeProvider` (fail-loud, never a silent Claude fallback) — production
    * only ever resolves a valid `Provider` here, so this never trips in practice.
    */
-  providerResolver?: () => Provider | string | undefined
+  providerResolver?: () => ProviderSelection | Provider | string | undefined
   /**
    * OpenAI-family (`'openai'` / `'openai-codex-cli'`) configuration. Consumed
    * ONLY when the resolved provider is non-anthropic; ignored for the default
@@ -692,7 +691,11 @@ export function buildLlmCallSubstrate(
       // straight to normalizeProvider would resolve to Anthropic and SILENTLY route
       // an explicit-openai turn to Claude (audit High). When non-anthropic, delegate
       // to the OpenAI-family path; the anthropic block below stays BYTE-IDENTICAL.
-      const resolvedProvider = input.providerResolver?.()
+      const resolvedSelection = input.providerResolver?.()
+      const resolvedProvider =
+        typeof resolvedSelection === 'object' ? resolvedSelection.provider : resolvedSelection
+      const providerSource =
+        typeof resolvedSelection === 'object' ? resolvedSelection.source : undefined
       const effectiveProvider =
         resolvedProvider !== undefined && resolvedProvider !== null && resolvedProvider.trim() !== ''
           ? resolvedProvider
@@ -720,6 +723,7 @@ export function buildLlmCallSubstrate(
           sessionLedger: openaiSessions,
           sessionKey,
           failureLane,
+          ...(providerSource !== undefined ? { providerSource } : {}),
           ...(scopeProjectId !== undefined ? { projectId: scopeProjectId } : {}),
         })
       }
@@ -1230,6 +1234,8 @@ export function startOpenAiFamilySession(args: {
    *  strike ledger, plus the one prose inference this path still makes
    *  (`detectCliAuthFailure` on a legacy/unstamped event). */
   failureLane?: FailureOrigin
+  /** Resolution level that explicitly selected this provider. */
+  providerSource?: ProviderSelection['source']
 }): SessionHandle {
   const { provider, spec, substrate_instance_id, config, sessionLedger, sessionKey, projectId } = args
   const failureLane: FailureOrigin = args.failureLane ?? 'interactive'
@@ -1264,6 +1270,7 @@ export function startOpenAiFamilySession(args: {
         message:
           `model provider '${provider}' was selected but no OpenAI-family config ` +
           `was wired into the substrate (missing credential pool + mcpResolver). ` +
+          `Selection source: ${args.providerSource ?? 'unspecified'}. ` +
           `Configure OPENAI_API_KEY and thread an mcpResolver, or leave the ` +
           `provider unset to use Claude Code.`,
         retryable: false,

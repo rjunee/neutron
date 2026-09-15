@@ -294,6 +294,18 @@ test("provider='openai' but no openai config ⇒ LOUD terminal error (no silent 
   }
 })
 
+test('unwired provider refusal names the project selection level', async () => {
+  const sub = buildLlmCallSubstrate({
+    pool: anthropicPool(),
+    substrate_instance_id: 'gpt-agent',
+    providerResolver: () => ({ provider: 'openai', source: 'project' }),
+  })!
+  const events = await drain(sub.start(spec()))
+  expect(events).toHaveLength(1)
+  expect(events[0]?.kind).toBe('error')
+  if (events[0]?.kind === 'error') expect(events[0].message).toContain('Selection source: project')
+})
+
 test("provider='openai' but missing bindMcpResolver ⇒ LOUD terminal error", async () => {
   const sub = buildLlmCallSubstrate({
     pool: anthropicPool(),
