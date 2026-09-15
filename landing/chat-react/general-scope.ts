@@ -9,11 +9,11 @@
  *                                  activity filters key off `(framePid ?? '') === projectId`.
  *                                  A General frame carries NO `project_id`, so General
  *                                  must stay `''` for a snapshot to be applied at all.
- *   • HTTP SEGMENT  `'general'`  — the gateway's `sanitizeProjectId('')` returns null,
+ *   • HTTP SEGMENT  `'~general'`  — the gateway's `sanitizeProjectId('')` returns null,
  *                                  so an empty segment produces `//docs/tree` and a 400.
- *                                  The surfaces key General on the literal `general`
- *                                  id (`workBoardScopeKey(owner_slug, '~general')`).
- *   • DOCS ROOT     `Projects/general/docs/` — the same `general` id, resolved by
+ *                                  The reserved `~` cannot occur in a project slug
+ *                                  and keeps General distinct (`workBoardScopeKey(owner_slug, '~general')`).
+ *   • DOCS ROOT     `Projects/~general/docs/` — the reserved scope id, resolved by
  *                                  `doc-store.ts` as `<owner_home>/Projects/<id>/docs`.
  *
  * WHY THIS FILE EXISTS RATHER THAN A HELPER PER CLIENT. `work-board-client.ts` already
@@ -27,7 +27,7 @@
  */
 
 /** The reserved HTTP path segment + docs-root id for General. */
-export const GENERAL_HTTP_ID = 'general'
+export const GENERAL_HTTP_ID = '~general'
 
 /**
  * Map a client-side scope id to its HTTP path segment.

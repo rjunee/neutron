@@ -261,7 +261,7 @@ describe('ActivityInspector — the two clocks', () => {
     insp.record(GENERAL_SCOPE, { kind: 'error', label: 'error', detail: 'boom' })
     expect(seen).toEqual([
       { scope: 'p1', label: 'Read' },
-      { scope: 'general', label: 'error' },
+      { scope: '~general', label: 'error' },
     ])
   })
 
