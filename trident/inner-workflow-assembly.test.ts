@@ -852,18 +852,18 @@ describe('inner-workflow.mjs — code-scanning alerts join the real review-panel
     expect(synthesis).toContain('src/parser.ts:41')
   })
 
-  test('a failed alert fetch is reported as failure and refuses approval as infrastructure', async () => {
+  test('an unavailable alert fetch is unknown and does not impersonate an open alert', async () => {
     const { captured, result } = await runWorkflow(GUIDANCE, {
       approveAll: true,
       prNumber: 616,
       codeScanningProbe: { raw: 'HTTP 503 service unavailable\n___EXIT=1\n', exit_code: 1 },
     })
 
-    expect(result['verdict']).toBe('REQUEST_CHANGES')
-    expect(result['blockKind']).toBe('infra-only')
+    expect(result['verdict']).toBe('APPROVE')
+    expect(result['blockKind']).toBe('none')
     const synthesis = captured.find((call) => call.label === 'argus:synthesis')?.prompt ?? ''
-    expect(synthesis).toContain('CODE-SCANNING ALERT FETCH FAILED')
-    expect(JSON.stringify(result['findings'])).toContain('CODE SCANNING ALERTS UNREADABLE')
+    expect(synthesis).not.toContain('OPEN CODE-SCANNING ALERTS')
+    expect(JSON.stringify(result['findings'] ?? [])).not.toContain('CODE SCANNING ALERT')
   })
 })
 
