@@ -295,6 +295,9 @@ jobs:
       - run: bun install --frozen-lockfile
         env:
           BUN_INSTALL_CACHE_DIR: ${{ runner.temp }}/bun-install-cache
+      - name: Resolve deterministic commit-message base
+        id: leak-window
+        run: main="$(git rev-parse origin/main)" && head="$(git rev-parse HEAD)" && { [ "$main" != "$head" ] && base="$(git merge-base origin/main HEAD)" || base="$(git rev-parse HEAD^)"; } && echo "base=${base}" >> "$GITHUB_OUTPUT"
       # Fails the build if multi-instance vocabulary, owner PII or a Managed
       # module ever regresses into this public tree.
       - name: leak gate
@@ -310,8 +313,8 @@ jobs:
           # secrets by design. That is the ONLY context allowed to skip Tier-1;
           # leak-gate-nightly.yml re-scans the merged tree with the secret.
           LEAK_GATE_PR_HEAD_REPO: ${{ github.event.pull_request.head.repo.full_name }}
-          # Commit-message scan window: the PR base, or the pre-push sha.
-          LEAK_GATE_BASE_SHA: ${{ github.event.pull_request.base.sha || github.event.before }}
+          # Derived only from repository history, so event shape cannot change it.
+          LEAK_GATE_BASE_SHA: ${{ steps.leak-window.outputs.base }}
           # PR title/body are attacker-controlled text. Passing them through `env:`
           # is safe; interpolating `${{ github.event… }}` into `run:` would be a
           # shell-injection sink.
