@@ -1,4 +1,5 @@
 import { assessReviewCi, type ReviewCiSource } from './gates/review-ci.ts'
+import { reviewArtifact } from './gates/review-artifact.ts'
 import { assessReviewSuite, type ReviewSuiteSource } from './gates/review-suite.ts'
 import { awaitReviewReadiness, type ReviewReadinessSource } from './gates/review-readiness.ts'
 import { executeBoundReview, type BoundReviewOutcome } from './review-run.ts'
@@ -109,6 +110,7 @@ export function createBuildHost(options: BuildHostOptions): { deps: BuildRunDeps
       if (result !== 'recorded') throw new Error(`Phase usage write was ${result}`)
       usageLastObserved.set(key, absolute.observed_at)
     },
+    reviewArtifact,
     checkBuildClaim: (claim, snapshot) => checkBuildClaim(options.mutation.run_host,
       options.mutation.run.repo_path, options.mutation.run.branch ?? `trident/${options.mutation.run.slug}`, claim, snapshot),
     checkFixLineage: (snapshot, reviewedHead) => fixLineage(options.mutation.run_host,

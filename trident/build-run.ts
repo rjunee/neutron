@@ -101,6 +101,8 @@ export interface BuildRunDeps {
   assignedBranch?: string | undefined
   modes?: BuildModeHost
   prepareWork(request: BoundedWorkRequest, context: { snapshot: BuildSnapshot; previous: unknown; findings: readonly string[]; planner?: 'full' | 'next'; committedPlan?: PlanProbe }): Promise<void>
+  /** Read back the materialized review input after preparation, before dispatch. */
+  reviewArtifact?(request: BoundedWorkRequest, snapshot: BuildSnapshot): Promise<GateResult>
   measure(): Promise<Measurement>
   /** Resolve a differing commit claim and preserve a real conflict before refusing. */
   checkBuildClaim?(claim: string, snapshot: BuildSnapshot): Promise<GateResult>
@@ -276,6 +278,11 @@ export async function buildRun(input: BuildRunInput, deps: BuildRunDeps, signal:
       }
       await checkpoint({ pending: { phase: role, step_id }, round: Math.max(durable.round, round) })
       await deps.prepareWork(boundedRequest, { snapshot: structuredClone(snapshot), previous: previousPayload, findings, planner, ...(committedPlan ? { committedPlan } : {}) })
+      if (role === 'review') {
+        if (!deps.reviewArtifact) return { stop: unknown('Review artifact host is missing') }
+        const artifact = gateStop(await deps.reviewArtifact(boundedRequest, snapshot))
+        if (artifact) return { stop: artifact }
+      }
       let outcome: BoundedWorkOutcome
       try {
         outcome = await runner.run(boundedRequest, placementFor(runner.provider, input.repl_provider), signal)

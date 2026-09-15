@@ -19,10 +19,10 @@ async function fixture() {
   const dir = await mkdtemp(join(tmpdir(), 'build-host-test-'))
   dirs.push(dir)
   const path = join(dir, 'brief')
-  await writeFile(path, 'build brief')
+  await writeFile(path, `${path}.context.json`)
   const request = {
     model_id: 'test-model', effort: null, cwd: dir, writable: true, network: false,
-    tools: 'edit-and-run', brief: { path, integrity: briefIntegrity('build brief') },
+    tools: 'edit-and-run', brief: { path, integrity: briefIntegrity(`${path}.context.json`) },
     result: { schema: 'test', path: join(dir, 'result') }, thread: null, budget: { wall_ms: 100 },
   } satisfies BuildRunInput['workers']['build']['request']
   const calls: string[][] = []
@@ -39,7 +39,10 @@ async function fixture() {
     runners: { pi: fakeRunner('pi') }, replProvider: 'pi',
     workers: Object.fromEntries(['plan', 'build', 'review', 'fix'].map(role => [role, { provider: 'pi', request }])) as BuildHostOptions['workers'],
     effects: {
-      prepareWork: async () => {}, measure: async () => ({ kind: 'known', value: snapshot }),
+      prepareWork: async (request, context) => {
+        // Match the production context materialization consumed by the host gate.
+        await writeFile(`${request.brief.path}.context.json`, JSON.stringify({ request, ...context }))
+      }, measure: async () => ({ kind: 'known', value: snapshot }),
       publish: async () => { throw new Error('unexpected publish') }, merge: async () => { throw new Error('unexpected merge') },
     },
     phaseUsage: { list: () => [], record: async (runId, phase) => { usageRecords.push({ runId, phase }); return 'recorded' } },
@@ -506,7 +509,10 @@ async function boundFixture(failure = false) {
   }
   f.options.runners = { pi: runner }
   f.options.effects = {
-    prepareWork: async () => {},
+    prepareWork: async (request, context) => {
+      // Match the production context materialization consumed by the host gate.
+      await writeFile(`${request.brief.path}.context.json`, JSON.stringify({ request, ...context }))
+    },
     measure: async () => ({ kind: 'known', value: structuredClone(current) }),
     publish: async () => { effects.push('publish'); current = structuredClone(published) },
     merge: async () => { effects.push('merge'); current.pr!.state = 'MERGED' },
@@ -739,4 +745,16 @@ test('G084 host composes live lineage independently of the constructor pin', asy
   expect(await host.deps.checkFixLineage!(snapshot, 'deadbeef')).toMatchObject({ kind: 'blocked' })
   f.options.mutation.run_host = async () => ({ ok: false, exit_code: 1, stdout: '', stderr: '' })
   expect(await host.deps.checkFixLineage!(snapshot, 'b'.repeat(40))).toMatchObject({ kind: 'blocked' })
+})
+
+test('G102 host composes readback of the prepared review context', async () => {
+  const f = await fixture()
+  const host = f.make()
+  const request: BoundedWorkRequest = { ...host.workers.review.request,
+    run_id: 'test', step_id: 'test:review:1', role: 'review', needs_approval_decision: false }
+  expect(await host.deps.reviewArtifact!(request, snapshot)).toMatchObject({ kind: 'unknown' })
+  await host.deps.prepareWork(request, { snapshot, previous: null, findings: [] })
+  expect(await host.deps.reviewArtifact!(request, snapshot)).toEqual({ kind: 'allow' })
+  await writeFile(`${request.brief.path}.context.json`, JSON.stringify({ request, snapshot: { ...snapshot, diff: '+stale' } }))
+  expect(await host.deps.reviewArtifact!(request, snapshot)).toMatchObject({ kind: 'unknown', detail: expect.stringContaining('measured revision') })
 })
