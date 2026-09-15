@@ -2,30 +2,8 @@ import { afterEach, describe, expect, test } from 'bun:test'
 import { existsSync, mkdtempSync, readFileSync, rmSync, writeFileSync } from 'node:fs'
 import { tmpdir } from 'node:os'
 import { join } from 'node:path'
-import { fileURLToPath } from 'node:url'
-import { briefIntegrity, bufferIntegrity, writeBriefParts } from './brief-parts.ts'
-
-const SRC = readFileSync(fileURLToPath(new URL('./inner-workflow.mjs', import.meta.url)), 'utf8')
-
-function extract(name: string): string {
-  const start = SRC.indexOf(`function ${name}(`)
-  if (start === -1) throw new Error(`${name} not found in inner-workflow.mjs`)
-  const open = SRC.indexOf('{', start)
-  let depth = 0
-  for (let i = open; i < SRC.length; i += 1) {
-    if (SRC[i] === '{') depth += 1
-    else if (SRC[i] === '}') {
-      depth -= 1
-      if (depth === 0) return SRC.slice(start, i + 1)
-    }
-  }
-  throw new Error(`unbalanced braces extracting ${name}`)
-}
-
-const sandbox = new Function(`${extract('briefIntegrity')}\nreturn briefIntegrity`) as () => (
-  text: string,
-) => string
-const mjsBriefIntegrity = sandbox()
+import { bufferIntegrity, writeBriefParts } from './brief-parts.ts'
+import { briefIntegrity } from './gates/brief-integrity.ts'
 const scratch: string[] = []
 const large = Array.from({ length: 4000 }, (_, i) => `row ${i}: café € 漢字 😀\n`).join('')
 const integrityVectors = [
@@ -41,6 +19,19 @@ const integrityVectors = [
   "mixed `backticks` and apostrophe's text",
   large,
 ]
+const integrityReceipts = [
+  '0:811c9dc5',
+  '1:e40c292c',
+  '12:3d3d5389',
+  '2:1e9de8c1',
+  '10:0fb78ed6',
+  '4:33a29608',
+  '3:03479c4a',
+  '3:03479c4a',
+  '9:8a7a6523',
+  '39:942e3df6',
+  '126890:d52acfcb',
+]
 
 function freshDir(): string {
   const dir = mkdtempSync(join(tmpdir(), 'trident-brief-parts-'))
@@ -53,9 +44,9 @@ afterEach(() => {
 })
 
 describe('briefIntegrity', () => {
-  test('is byte-exact with the inner-workflow implementation', () => {
+  test('is byte-exact for every workflow parity vector', () => {
     expect(Buffer.byteLength(large)).toBeGreaterThan(30_000)
-    for (const vector of integrityVectors) expect(briefIntegrity(vector)).toBe(mjsBriefIntegrity(vector))
+    for (const [index, vector] of integrityVectors.entries()) expect(briefIntegrity(vector)).toBe(integrityReceipts[index]!)
   })
 
   test('matches the byte-domain receipt for every parity vector', () => {
