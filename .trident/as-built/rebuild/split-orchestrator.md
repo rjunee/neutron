@@ -107,7 +107,8 @@ implementation was introduced (`trident/orchestrator.ts:3`).
   `rg --files scripts/ci | rg 'layering|depcruise|lint'` found `depcruise.sh` and
   the positive control `lint.sh`, with no `layering.sh` filename in that checkout.
 
-No new guard was added, so **no mutation table or guard mutation experiment**.
+The initial extraction added no new guard and ran no guard mutation experiment;
+the citation follow-up below records its subsequent mutation checks.
 The proof is the unchanged behavioral tests plus declaration identity. The
 source-location test's observed red-to-green transition verifies that its
 inventory follows the move; it is not presented as a guard mutation.
@@ -130,3 +131,95 @@ anchors outside the eleven inventory rows were not comprehensively refreshed.
 The record uses the explicit lane-requested `.trident/as-built/` path rather
 than the repository standard's default shard directory. No push, PR, or merge
 is part of this lane; the orchestrator reviews the local commit.
+
+
+### Citation repair after extraction
+
+The command comparison now reads the publisher driver module, including its
+command template and credential list
+(`scripts/git/as-built-merge-realgit.test.ts:1223`,
+`scripts/git/as-built-merge-realgit.test.ts:1245`). The three definition anchors
+follow their implementations: `asBuiltDriverCommand` and the executable-name
+condition at `trident/as-built-merge-driver.ts:99` and
+`trident/as-built-merge-driver.ts:100`, and `rebaseOntoObservedBase` at
+`trident/replay.ts:168`. The anchor mappings are at
+`scripts/git/as-built-merge-realgit.test.ts:1439`,
+`scripts/git/as-built-merge-realgit.test.ts:1448`, and
+`scripts/git/as-built-merge-realgit.test.ts:1454`.
+
+A **site** is one raw source line containing at least one closed backtick span
+whose whitespace-separated words, after trailing punctuation removal, include
+the exact target path, counted once per citing-file/target pair regardless of
+how many spans match (`scripts/git/as-built-merge-realgit.test.ts:1568`,
+`scripts/git/as-built-merge-realgit.test.ts:1578`,
+`scripts/git/as-built-merge-realgit.test.ts:1581`).
+
+Comment blanking applies to definition resolution, not site counting
+(`scripts/git/as-built-merge-realgit.test.ts:1500`,
+`scripts/git/as-built-merge-realgit.test.ts:1505`). Sites are counted before the
+three-line symbol window is checked
+(`scripts/git/as-built-merge-realgit.test.ts:1613`). Single-quoted anchor and
+floor entries therefore contribute no sites. Raw path grep counts are not the
+measurement instrument.
+
+The table below enumerates all seven sites by executing the existing
+`spanWords`/`targetSpans` helper over every cluster file, first from local HEAD
+before this follow-up and then from the working source. The old test-file floor
+of four partitions into two driver sites and two replay sites; no original site
+is dropped or paid for by an unrelated addition. The floors retain independent
+buckets at `scripts/git/as-built-merge-realgit.test.ts:1653`.
+
+| Citing file | Old site lines targeting orchestrator | Current target | Current site lines / measured floor |
+| --- | --- | --- | --- |
+| `scripts/install-merge-drivers.sh` | 232, 262, 414 | `trident/as-built-merge-driver.ts` | 232, 262, 414 / 3 |
+| `scripts/git/as-built-merge-realgit.test.ts` | 1211, 1260 | `trident/as-built-merge-driver.ts` | 1211, 1261 / 2 |
+| `scripts/git/as-built-merge-realgit.test.ts` | 10, 1266 | `trident/replay.ts` | 10, 1268 / 2 |
+
+The two historical paragraphs keep their commit-scoped old paths at
+`scripts/git/as-built-merge-realgit.test.ts:1260` and
+`scripts/git/as-built-merge-realgit.test.ts:1267`; adjacent current destinations
+restore their participation in the guard. Replacing the historical paths alone
+would falsely attribute the old commit's line measurements to newly created
+files. The whole-tree search `rg -n 'only anchor target|three of four had rotted'`
+found only the positive-control historical sentence at line 1274 after updating
+the old single-target wording at line 1678. The historical claim stays because
+it explicitly describes the earlier measurement and its correction.
+
+### Citation mutation evidence and final validation
+
+Both reported tests first reproduced RED (0 pass, 2 fail). After repair they
+passed (2 pass, 0 fail). Each mutation below was applied separately, its actual
+source line printed, the focused test run, and the original bytes restored
+before a GREEN rerun. No new guard or new test was introduced.
+
+| Existing guard | Mutation and landed location | RED | Restored GREEN |
+| --- | --- | --- | --- |
+| Installer site floor | Remove only target-path backticks individually at `scripts/install-merge-drivers.sh:232`, `scripts/install-merge-drivers.sh:262`, `scripts/install-merge-drivers.sh:414` | Each: 2 sites, floor 3 | Each: 1 pass, 0 fail |
+| Test driver site floor | Same mutation individually at `scripts/git/as-built-merge-realgit.test.ts:1211`, `scripts/git/as-built-merge-realgit.test.ts:1261` | Each: 1 site, floor 2 | Each: 1 pass, 0 fail |
+| Test replay site floor | Same mutation individually at `scripts/git/as-built-merge-realgit.test.ts:10`, `scripts/git/as-built-merge-realgit.test.ts:1268` | Each: 1 site, floor 2 | Each: 1 pass, 0 fail |
+| Driver definition anchor | Append V2 to declaration at `trident/as-built-merge-driver.ts:99` | Missing anchored definition | 1 pass, 0 fail |
+| Executable-name expression anchor | Invert comparison at `trident/as-built-merge-driver.ts:100` | Missing anchored expression | 1 pass, 0 fail |
+| Replay definition anchor | Append V2 to declaration at `trident/replay.ts:168` | Missing anchored definition | 1 pass, 0 fail |
+| Command derivation agreement | Change config argument to /dev/zero at `trident/as-built-merge-driver.ts:106` | Shape equality fails | 1 pass, 0 fail |
+
+These site mutations retain the backticked symbols, so the symbol-count check
+can succeed and execution reaches the floor assertion at
+`scripts/git/as-built-merge-realgit.test.ts:1661`. They verify all seven restored
+sites individually, including both historical paragraphs.
+
+- `bun test scripts/git/as-built-merge-realgit.test.ts trident/orchestrator.test.ts`:
+  **335 pass, 0 fail**, including the unchanged orchestrator proof.
+- `bunx tsc -p trident/tsconfig.json --noEmit`: **exit 0**.
+
+- `bash scripts/ci/lint.sh`: **exit 0**.
+
+This follow-up changes source references and measured floor keys only; it adds
+no runtime outcome, invariant, product decision, or spec requirement. The
+existing citation test continuously checks definitions, symbol windows and
+coverage independently of executing either extracted function
+(`scripts/git/as-built-merge-realgit.test.ts:1503`,
+`scripts/git/as-built-merge-realgit.test.ts:1613`,
+`scripts/git/as-built-merge-realgit.test.ts:1661`). Extraction and
+`trident/orchestrator.test.ts` were deliberately preserved: `git diff --name-only`
+enumerated only the two citation files and this record, with the citation test
+as the positive control. No whole-directory test sweep was run.
