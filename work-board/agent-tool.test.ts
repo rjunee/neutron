@@ -197,8 +197,8 @@ describe('work_board_* active-project scoping (P0: named-project builds must NOT
   test('add with NO active project (General) still scopes to the owner slug (regression guard)', async () => {
     const add = registry.get(WORK_BOARD_ADD_TOOL)!
     await add.handler({ title: 'General work' }, ctx('owner', null))
-    // project_id === 'general' maps to General too.
-    await add.handler({ title: 'Also general' }, ctx('owner', 'general'))
+    // The reserved id maps to General; the legal project id `general` must not.
+    await add.handler({ title: 'Also General' }, ctx('owner', '~general'))
     expect(store.list('owner').length).toBe(2)
     expect(store.list('acme').length).toBe(0)
   })
@@ -284,12 +284,12 @@ describe('work_board_add spec-doc routing (M1)', () => {
     // General scope — and the board scope key for General collapses to the OWNER
     // SLUG. Passing that same value to `writeDoc` is what created
     // `Projects/<owner-slug>/docs/plans/`, a phantom project directory the owner's
-    // Documents tab (which reads `Projects/general/docs`) could never show.
+    // Documents tab (which reads `Projects/~general/docs`) could never show.
     //
-    // So the docs id must be `general`, not the owner slug, even though the board
+    // So the docs id must be `~general`, not the owner slug, even though the board
     // row is still scoped the old way. Board scope and docs root are allowed to
     // differ; what is not allowed is one argument pretending to be both.
-    expect(seen).toEqual([{ title: 'Wire it', docsProjectId: 'general', spec: 'a\nb\nc' }])
+    expect(seen).toEqual([{ title: 'Wire it', docsProjectId: '~general', spec: 'a\nb\nc' }])
     expect(out.item?.design_doc_ref).toBe('neutron-docs:plans/x.md')
   })
 

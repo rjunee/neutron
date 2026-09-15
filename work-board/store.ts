@@ -26,7 +26,6 @@
  */
 
 import type { ProjectDb } from '@neutronai/persistence/index.ts'
-import { GENERAL_RAIL_ID } from '@neutronai/wire-types/topic-id.ts'
 
 /** The board lane. Terminal run reconciliation keeps `linked_run_id` on BOTH
  *  outcomes so terminal evidence stays reachable: `failed` cards show the red
@@ -223,7 +222,7 @@ export const MAX_DESIGN_DOC_REF_LEN = 2048
  * len === 0`; the app subscribes with `''`), while HTTP uses the reserved id.
  * Any of these map onto the General board.
  */
-export const GENERAL_WORK_BOARD_PROJECT_ID = GENERAL_RAIL_ID
+export const GENERAL_WORK_BOARD_PROJECT_ID = '~general'
 
 /**
  * The per-project Work Board STORAGE KEY (the `project_slug` column value),
