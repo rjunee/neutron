@@ -1,12 +1,11 @@
 /**
  * @neutronai/runtime — central model resolver.
  *
- * Single source of truth for every Claude model id used in Neutron. When
- * Anthropic releases a new top-tier model, update the alias here and the
- * entire codebase picks it up.
+ * Single source of truth for every Claude model class used in Neutron. The
+ * Claude CLI resolves these class aliases to the latest model in each tier.
  *
- * **Rule:** never hardcode a Claude model id outside this file. Add a new
- * alias here if you need one. Mirrors Nova's `gateway/models.ts` pattern.
+ * **Rule:** defaults pin a model CLASS, never a version. Explicit environment
+ * overrides may still select a concrete model for an operator-controlled pin.
  *
  * Aliases:
  *   - `BEST_MODEL`   — the user's Max-subscription best model. Used for
@@ -36,21 +35,14 @@
 
 /**
  * The user's Max-subscription best model. Override via `NEUTRON_BEST_MODEL`.
- * Defaults to Claude Opus 5.
+ * Defaults to the latest Claude Opus model.
  *
- * **This constant is the FRESH-INSTALL SEED, not the live runtime value.** It
- * is bound ONCE at module load and a runtime model upgrade cannot mutate a
- * `const`. Every code path that SPAWNS a live REPL / dispatches a live-agent or
- * onboarding turn MUST resolve the model through {@link getBestModel} (the
- * dynamic accessor) so the model-update watchdog's adopted id reaches new
- * spawns — NOT through this frozen literal. A stale literal here rots into a
- * hang the moment Anthropic retires the pinned model (the opus-4-7 incident,
- * 2026-06-30): a fresh install, before the first watchdog tick, would spawn a
- * dead model and the turn produces zero tokens → the 180s per-turn timeout.
- * Keep the seed current AND route live spawns through {@link getBestModel}.
+ * This constant is bound once at module load. The default stays current because
+ * the CLI resolves `opus` at each spawn; {@link getBestModel} additionally
+ * exposes an operator's process-local concrete override when one is configured.
  */
 export const BEST_MODEL: string =
-  process.env['NEUTRON_BEST_MODEL'] ?? 'claude-opus-5'
+  process.env['NEUTRON_BEST_MODEL'] ?? 'opus'
 
 /**
  * FABLE_MODEL — the ORCHESTRATOR / max-reasoning planning model (Ryan-locked
@@ -65,14 +57,14 @@ export const BEST_MODEL: string =
  * this registry; keep the id here, the single source of truth, not a literal in
  * the workflow). Verified routable 2026-07-02 (`claude-fable-5` returns cleanly).
  *
- * Override via `NEUTRON_FABLE_MODEL`. Defaults to Claude Fable 5.
+ * Override via `NEUTRON_FABLE_MODEL`. Defaults to the latest Claude Fable model.
  */
 export const FABLE_MODEL: string =
-  process.env['NEUTRON_FABLE_MODEL'] ?? 'claude-fable-5'
+  process.env['NEUTRON_FABLE_MODEL'] ?? 'fable'
 
 /**
- * The mid-tier model. Override via `NEUTRON_SONNET_MODEL`. Defaults to Claude
- * Sonnet 5.
+ * The mid-tier model. Override via `NEUTRON_SONNET_MODEL`. Defaults to the
+ * latest Claude Sonnet model.
  *
  * WHY THE TIER EXISTS (P2-v2 S21, 2026-05-17): it draws on a different
  * Anthropic rate-limit bucket from `BEST_MODEL`, and Pass-2 synthesis was
@@ -81,30 +73,18 @@ export const FABLE_MODEL: string =
  * exhaustion on a subscription. Sonnet keeps the same prompt body, schema and
  * parser, and trades a stylistically-different result for one that arrives.
  *
- * WHY IT IS PINNED TO A GENERATION AND NOT AN ALIAS. There is no floating
- * `claude-sonnet-latest`; every tier here names an exact id, so a generation
- * bump is a code change by construction. That is deliberate — an id that moved
- * on its own would move billing with it — but it means this line is the one
- * that ROTS, and it did: it sat on 4.6 while `BEST_MODEL` and `FABLE_MODEL`
- * both moved to 5, which is what the owner saw in the model-selector pane
- * (ISSUES #564).
- *
- * WHAT MUST HAPPEN ALONGSIDE ANY FUTURE BUMP: add the new id to
- * `runtime/model-pricing.ts` FIRST. `resolveModelPricing` throws on an
- * unregistered id, by design, and it is called at composer construction — so a
- * bump here without a row there does not mis-bill quietly, it fails the boot.
- * `pricing-covers-defaults.test.ts` pins that pairing so the next bump cannot
- * ship half of itself.
+ * The class alias is deliberately version-free: the CLI, rather than a source
+ * edit, resolves the newest model available in this tier.
  */
 export const SONNET_MODEL: string =
-  process.env['NEUTRON_SONNET_MODEL'] ?? 'claude-sonnet-5'
+  process.env['NEUTRON_SONNET_MODEL'] ?? 'sonnet'
 
 /**
- * The fast/cheap model. Override via `NEUTRON_FAST_MODEL`. Defaults to
- * Claude Haiku 4.5.
+ * The fast/cheap model. Override via `NEUTRON_FAST_MODEL`. Defaults to the
+ * latest Claude Haiku model.
  */
 export const FAST_MODEL: string =
-  process.env['NEUTRON_FAST_MODEL'] ?? 'claude-haiku-4-5-20251001'
+  process.env['NEUTRON_FAST_MODEL'] ?? 'haiku'
 
 /**
  * Probe model — alias of `FAST_MODEL`. Used by `auth/max-oauth.ts` for the
@@ -120,22 +100,15 @@ export const PROBE_MODEL: string = FAST_MODEL
 // ---------------------------------------------------------------------------
 
 /**
- * Process-local override for {@link BEST_MODEL}, flipped by the model-update
- * watchdog's graceful upgrade when Anthropic ships a newer top-tier model.
- * `undefined` until an upgrade adopts a new id.
+ * Process-local override for an explicitly version-pinned {@link BEST_MODEL}.
+ * Version-free class defaults remain classes when the watchdog detects a new id.
  */
 let runtimeBestModel: string | undefined
 
 /**
- * The effective best model id: the watchdog override when one has been adopted,
- * else the env/default {@link BEST_MODEL}. This is the ONE accessor fresh
- * persistent-REPL spawns resolve their `--model` through, so once the watchdog
- * flips the override (via {@link setBestModelOverride}) every NEW session comes
- * up on the new model with no redeploy and no env change — the "auto-upgrade
- * like Claude Code, applied to the model" capability. Existing warm sessions are
- * moved separately by the idle-gated graceful respawn (which rewrites each
- * registry record's `model`), so a brand-new session and a just-respawned one
- * agree on the model.
+ * The effective best model selector: a concrete watchdog override for an
+ * explicitly pinned install, otherwise the env/default {@link BEST_MODEL} class.
+ * Fresh persistent-REPL spawns resolve their `--model` through this accessor.
  *
  * Why an accessor and not a re-export of `BEST_MODEL`: `BEST_MODEL` is bound
  * ONCE at module load from `process.env`; a runtime upgrade cannot mutate a

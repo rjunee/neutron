@@ -181,20 +181,33 @@ export const MODEL_PRICING_TABLE: Readonly<
 })
 
 /**
+ * Model-class aliases use the currently verified row for estimates. Dispatch
+ * remains version-free; this lookup is only the pricing vocabulary for the
+ * concrete models those aliases resolve to today.
+ */
+const MODEL_CLASS_PRICING_TARGETS: Readonly<Record<string, string>> = Object.freeze({
+  opus: 'claude-opus-5',
+  fable: 'claude-fable-5',
+  sonnet: 'claude-sonnet-5',
+  haiku: 'claude-haiku-4-5',
+})
+
+/**
  * Resolve a `ModelPricingEntry` for a model id. Throws when no pricing row
  * can be resolved — silently billing at a default rate is the failure mode
  * that gave us the pre-S23 incidents.
  *
  * Lookup order:
- *   1. Exact match against `MODEL_PRICING_TABLE`.
- *   2. Snapshot fallback: if the id matches `<alias>-YYYYMMDD` (Anthropic's
+ *   1. A model-class alias maps to its currently verified concrete pricing row.
+ *   2. Exact match against `MODEL_PRICING_TABLE`.
+ *   3. Snapshot fallback: if the id matches `<alias>-YYYYMMDD` (Anthropic's
  *      dated-snapshot convention) AND `<alias>` IS registered, use the alias
  *      row. This lets operators set `NEUTRON_BEST_MODEL=claude-opus-4-7-20260101`
  *      without code changes — Anthropic prices a generation identically
  *      across snapshots (the same reason `claude-haiku-4-5` and
  *      `claude-haiku-4-5-20251001` carry identical numbers in the table
  *      above), so the alias row is the correct billing rate.
- *   3. Throws — with the bad id, the known alternatives, and the
+ *   4. Throws — with the bad id, the known alternatives, and the
  *      docs.claude.com URL so the operator can self-diagnose.
  *
  * The throw covers two real failure modes:
@@ -207,14 +220,15 @@ export const MODEL_PRICING_TABLE: Readonly<
  *     row before pilot dispatches. Loud-fail beats silent-mis-bill.
  */
 export function resolveModelPricing(model_id: string): ModelPricingEntry {
-  const exact = MODEL_PRICING_TABLE[model_id]
+  const pricingId = MODEL_CLASS_PRICING_TARGETS[model_id] ?? model_id
+  const exact = MODEL_PRICING_TABLE[pricingId]
   if (exact !== undefined) return exact
 
   // Snapshot fallback. Anthropic snapshot ids end with `-YYYYMMDD` (8
   // digits, optionally preceded by other suffix segments). Strip the
   // trailing date and look up the alias. Only fires when the alias IS
   // registered — a fully unknown id still throws.
-  const snapshotMatch = model_id.match(/^(.+)-\d{8}$/)
+  const snapshotMatch = pricingId.match(/^(.+)-\d{8}$/)
   if (snapshotMatch !== null && typeof snapshotMatch[1] === 'string') {
     const alias = snapshotMatch[1]
     const aliasEntry = MODEL_PRICING_TABLE[alias]
