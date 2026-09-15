@@ -196,10 +196,44 @@ test('merge pins reviewed head and requires independent merged witness', async (
   const f = await fixture()
   expect(await f.publishChecked(await measured(f))).toEqual({ kind: 'allow' })
   const snapshot = await measured(f)
+  let attemptObserved = false
+  f.intercept(argv => {
+    if (argv[0] === 'gh' && argv[2] === 'merge') {
+      const events = f.db.prepare<{ meta: string }, []>(
+        "SELECT meta FROM code_trident_stage_events WHERE stage = 'build-remote-merge-attempt'",
+      ).all()
+      expect(events).toHaveLength(1)
+      expect(JSON.parse(events[0]!.meta)).toEqual({
+        pr: 12, head: f.tip, baseBranch: 'main', basePrecondition: 'not-enforced',
+        detail: 'Remote base may move between readiness assessment and merge; only the head is pinned',
+      })
+      attemptObserved = true
+    }
+    return undefined
+  })
   expect(await f.mergeChecked(snapshot)).toEqual({ kind: 'allow' })
+  expect(attemptObserved).toBe(true)
   const argv = f.calls.find(argv => argv[0] === 'gh' && argv[2] === 'merge')!
   expect(argv).toEqual(['gh', 'pr', 'merge', '12', '--squash', '--match-head-commit', f.tip])
   expect((await measured(f)).pr?.state).toBe('MERGED')
+})
+
+test('merge refuses when remote base-risk evidence cannot be persisted', async () => {
+  const f = await fixture()
+  expect(await f.publishChecked(await measured(f))).toEqual({ kind: 'allow' })
+  const snapshot = await measured(f)
+  let attempted = false
+  f.store.recordStageEvent = async (_runId, stage) => {
+    expect(stage).toBe('build-remote-merge-attempt')
+    attempted = true
+    throw new Error('Storage unavailable')
+  }
+  expect(await f.mergeChecked(snapshot)).toEqual({
+    kind: 'unknown', detail: 'Remote merge base-risk evidence could not be persisted',
+  })
+  expect(attempted).toBe(true)
+  expect(f.calls.filter(argv => argv[0] === 'gh' && ['create', 'merge'].includes(argv[2]!))
+    .map(argv => argv[2])).toEqual(['create'])
 })
 
 for (const failure of ['command', 'witness']) {

@@ -8,7 +8,7 @@ explicitly requires this shard location and additive delivery; those instruction
 override the general shard-location and immediate-replacement rules for this lane.
 
 The production factory supplies measurement, preparation, publication and PR merge
-adapters at `trident/production-host-effects.ts:187`. The project factory assembles
+adapters at `trident/production-host-effects.ts:203`. The project factory assembles
 those effects and existing gates at `trident/project-build-host.ts:59`. Its inputs
 are an initialized durable run, resolved project substrate bindings, role requests,
 and policy-specific sources (`trident/project-build-host.ts:26`).
@@ -17,18 +17,20 @@ Outstanding work before cutover:
 
 - Atomic local merge: the effect explicitly returns `unknown` at
   `trident/production-host-effects.ts:172`.
-- Atomic remote **base** enforcement: PR merge reuses the existing base-readiness
-  assessment and supplies `--match-head-commit` at
-  `trident/production-host-effects.ts:173`. That pins the head on the server; it
-  does not supply an atomic base precondition. Do not interpret these tests as
-  proving that a remote base cannot move between assessment and merge.
+- Remote **base** enforcement remains non-atomic. HOSTFX2 now explicitly records
+  this limitation before every PR merge attempt
+  (`trident/production-host-effects.ts:175`), and refuses if the risk evidence
+  cannot be persisted (`trident/production-host-effects.ts:189`). The installed
+  CLI exposes a head precondition only; this delivery does not establish whether
+  a different platform API could enforce the base. See the evidence and bounded
+  validation in `host-effects-2.md`. No atomic-base guarantee is claimed.
 - Resume/Ralph mode persistence and reconciliation of pending workers. The driver
   requires its mode host for these calls (`trident/build-run.ts:168`); this
   composition supplies the four effects listed at
-  `trident/production-host-effects.ts:187` and does not add that mode host.
+  `trident/production-host-effects.ts:203` and does not add that mode host.
 - Full lifecycle persistence, checkpoint transitions, and terminal-result harvest
   integration. This subset writes PR identity (`trident/production-host-effects.ts:161`)
-  and preparation stage evidence (`trident/production-host-effects.ts:200`). Those
+  and preparation stage evidence (`trident/production-host-effects.ts:216`). Those
   writes are not a terminal-result protocol.
 - Caller-side initialization and resolving actual project adapter bindings remain
   composition responsibilities. The factory requires matching initialized row
@@ -61,7 +63,7 @@ by this partial implementation.
 - Admission reads prior ownership pins from the real store
   (`trident/production-host-effects.ts:118`). Preparation verifies request identity,
   brief integrity, its context reference, and the current snapshot before writing
-  the context and recording a stage (`trident/production-host-effects.ts:189`).
+  the context and recording a stage (`trident/production-host-effects.ts:205`).
 - Project runner selection uses `placementFor` against the project's REPL provider
   (`trident/project-build-host.ts:19`). It selects the live in-REPL binding for the
   same provider and the named headless binding for another provider. It retains
@@ -79,7 +81,7 @@ by this partial implementation.
 The effects reuse `Measurement`, `GateResult`, and `CiRunObservation`, rather than
 adding a new verdict family. The driver turns `blocked` and `unknown` into stopping
 outcomes (`trident/build-run.ts:149`). Because effect callbacks return `void`, their
-adapter throws on a non-allow result (`trident/production-host-effects.ts:183`);
+adapter throws on a non-allow result (`trident/production-host-effects.ts:199`);
 the driver's catch preserves that as `unknown`, including uncertainty after an
 external write (`trident/build-run.ts:397`). This deliberately loses the
 blocked/unknown distinction at the void seam instead of falsely reporting success.
@@ -99,7 +101,10 @@ and corroborates its trailer (`trident/build-run.ts:252`). The local and remote
 base limitations above are explicit; no continuous atomic-base guarantee is
 claimed by this subset.
 
-### Validation
+### Foundation validation (historical)
+
+The validation and mutation line numbers below describe the foundation commit.
+HOSTFX2 validation and current evidence are in `host-effects-2.md`.
 
 - `bun test trident/build-host.test.ts trident/gates/ trident/production-host-effects.test.ts trident/project-build-host.test.ts`: **102 pass, 0 fail**, nine files, 470 assertions, after restoring every mutation.
 - `bunx tsc --noEmit`: **PASS**.
