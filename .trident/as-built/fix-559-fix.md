@@ -143,3 +143,77 @@ The initial resolution-error mutation survived because its fixture never entered
 No product/spec decision changed. No new backend, feature flag, alternate secret location, recursive removal, test skip, whole-directory test sweep, or full test runner was introduced. The requested production-cleanup exemplar could not be read at its supplied path in this checkout; the filesystem enumeration `rg --files .trident/as-built | rg 'production-cleanup|fix-559-fix'` returned the known-present current shard as positive control, not the exemplar. This is a checkout observation, not an absence claim about a fetched remote ref; network access was not attempted.
 
 The obsolete cleanup comments were swept with `rg -n 'existing best-effort catch|already gone / never written|spawn itself can throw, and cleanup is owned|finally owns cleanup|Filesystem errors are logged' --glob '*.ts' --glob '*.md' .`. The positive controls found the corrected helper comment and failed-spawn comment; the removed phrases had no remaining hits in that search. This extends the existing single-heading shard as explicitly requested.
+
+### 2026-09-15 — Final teardown round: handoff, failure not reproduced
+
+The starting commit was `5dfe2fc7`. No production or test change is delivered in this round. The requested final-round stop applies: the reported CI failure could not be reproduced with the available socket-free instrument, so this record hands back the measured result instead of adding an unproven fix.
+
+The exact security case awaits `shutdownAllPersistentRepls` before separately asserting file and directory removal (`runtime/adapters/claude-code/persistent/__tests__/owner-mcp-servers.test.ts:516`). Pooled teardown already calls cleanup at `runtime/adapters/claude-code/persistent/pool.ts:1536`, and the walk awaits that teardown at `runtime/adapters/claude-code/persistent/pool.ts:1542`. The child-exit route also calls cleanup at `runtime/adapters/claude-code/persistent/child-exit-wiring.ts:144`. These are observations of this checkout, not an explanation of the failing CI execution.
+
+The existing lifecycle reproduction passed 8/8 before any mutation. Its child teardown is manually wired (`runtime/adapters/claude-code/persistent/__tests__/session-config-cleanup.test.ts:50`), so I also executed the exact owner-MCP security case with a temporary in-process replacement for `Bun.serve` and `fetch`. This preserves the fixture's request handlers but changes transport scheduling; it cannot certify real socket behavior. An `unlinkSync` spy captured the actual caller stack, rather than trusting the fixture's hardcoded owner label at `runtime/adapters/claude-code/persistent/__tests__/owner-mcp-servers.test.ts:519`.
+
+Measured columns below show paths relative to the temporary directory. Every removal row was printed from the actual unlink spy immediately after removing that file, before the existing post-shutdown assertion:
+
+| Captured config | Exists afterwards | Observed cleanup owner |
+| --- | --- | --- |
+| `neutron-repl-neutron-bc8706cf9dff0318efee870fd5292b71/session-mcp.json` | false | pool teardown |
+| `neutron-repl-neutron-7696200b468a1666b46ed6bfb84b36bc/session-mcp.json` | false | child exit, with pool teardown cleanup removed |
+| `neutron-repl-neutron-ec7b57af8f95a8381562b07e8e7c9cb1/session-mcp.json` | false | pool teardown, restored |
+
+Thus this reproduction demonstrates neither a missing call nor cleanup happening after the assertion. The CI discrepancy remains unresolved. The mutation also demonstrates why the exact security case cannot isolate the pooled cleanup call under this substituted transport: child exit performs removal when that call is absent.
+
+### Final-round mutation results
+
+Both mutation locations were printed from the mutated source before running the test and restored in `finally`.
+
+| Existing cleanup | Mutation | Observed result | Restored |
+| --- | --- | --- | --- |
+| `runtime/adapters/claude-code/persistent/pool.ts:1536` | Replace only the settled pooled teardown call with a comment | Exact owner-MCP security case stayed GREEN under in-process transport; unlink spy identified child exit as the removing owner | GREEN, removing owner returned to pool teardown |
+| `runtime/adapters/claude-code/persistent/child-exit-wiring.ts:144` | Replace child-exit cleanup with a comment | Existing socket-free child teardown case RED, explicitly naming surviving `neutron-repl-cleanup-AQjcsV/session-mcp.json`; file and directory both existed | GREEN, file and directory both absent |
+
+The second mutation exercises the existing assertion at `runtime/adapters/claude-code/persistent/__tests__/session-config-cleanup.test.ts:39`. It is not a claim that the reported CI test was made red and fixed. No assertion was loosened, no unlink error was swallowed, and neither previously passing production path was edited.
+
+### Re-running the diagnostic transport
+
+Save the following as a temporary `cleanup-transport.ts` outside the tracked tree, and pass its location to `bun test --preload` with `runtime/adapters/claude-code/persistent/__tests__/owner-mcp-servers.test.ts -t 'SECRETS AND ALL'`. The substitute is deliberately a diagnostic, not a replacement for the suite's transport.
+
+```ts
+import { spyOn } from 'bun:test'
+import * as fs from 'node:fs'
+const handlers = new Map<number, Function>()
+let nextPort = 45000
+spyOn(Bun, 'serve').mockImplementation(((options: any) => {
+  const port = options.port || nextPort++
+  handlers.set(port, options.fetch)
+  return { port, stop() { handlers.delete(port) }, unref() {} }
+}) as any)
+spyOn(globalThis, 'fetch').mockImplementation((async (input: any, init: any) => {
+  const req = new Request(input, init)
+  const handler = handlers.get(Number(new URL(req.url).port))
+  if (!handler) throw new Error('no in-process handler: ' + req.url)
+  return handler(req)
+}) as any)
+const unlink = fs.unlinkSync
+spyOn(fs, 'unlinkSync').mockImplementation((path) => {
+  if (String(path).endsWith('/session-mcp.json')) {
+    const stack = new Error().stack ?? ''
+    const owner = stack.includes('child-exit-wiring.ts') ? 'wireChildExit'
+      : stack.includes('pool.ts') ? 'pool teardown' : 'spawn failure'
+    unlink(path)
+    console.info(JSON.stringify({ config: path, exists: fs.existsSync(path), owner }))
+    return
+  }
+  unlink(path)
+})
+```
+
+### Final-round validation and limits
+
+- Unmodified socket-free lifecycle file: 8 pass, zero failures. Restored child-teardown mutation selection: 1 pass.
+- Unmodified owner-MCP file selected with `-t 'fake readiness|stops dividing|is a no-op'`: 6 pass, 31 filtered out. This runner filter enumerates the six executable cases: root-credential readiness diagnosis, acknowledgement ordering, two acknowledgement refusals, startup division floor, and no-warm-child eviction.
+- Exact owner-MCP security case without transport substitution: 1 fail at the reply-sink bind, before reaching teardown (`runtime/adapters/claude-code/persistent/__tests__/owner-mcp-servers.test.ts:511`). The remaining 31 cases require the socket transport; none is certified here. The requested case passed with the diagnostic substitute, which is explicitly not a socket-suite pass.
+- A diagnostic attempt at the owner-MCP file with substituted transport was interrupted after an unrelated dispatch-before-turn-slot eviction assertion failed at `runtime/adapters/claude-code/persistent/__tests__/owner-mcp-servers.test.ts:993`. There is no completed full-file result for that experiment. It reinforces the limit on treating substituted scheduling as equivalent. No whole-directory sweep or full test runner was used.
+
+No product/spec decision, error vocabulary, new invariant, feature flag, or backend changed. The unresolved CI execution needs the orchestrator's direct investigation, per the final-round instruction; this lane stops rather than initiating another repair round.
+
+Final static validation: `bash scripts/ci/lint.sh` passed all gates; `bash scripts/ci/typecheck-all.sh` reported all 51 configurations passing. `git diff --check`, the existing shard's single-heading check, and local checks of added prose for prohibited text passed. This is not a full external leak-gate certification.
