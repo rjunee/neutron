@@ -3251,10 +3251,7 @@ export function buildTridentOrchestrator(
       const oid = resolved.stdout.trim().toLowerCase()
       if (resolved.ok && /^(?:[0-9a-f]{40}|[0-9a-f]{64})$/.test(oid)) base_sha = oid
     }
-    const pinnedRun = { ...(freshBuild ? { ...launchRun, base_sha, base_behind } : launchRun),
-      branch: launchRun.branch ?? `trident/${launchRun.slug}`,
-      worktree: launchRun.worktree ?? runWorktreePath(launchRun.repo_path, launchRun),
-    }
+    const pinnedRun = freshBuild ? { ...launchRun, base_sha, base_behind } : launchRun
 
     // THE LOCAL-BRANCH OWNERSHIP CHECK RUNS FOR EVERY ROW THAT HAS NOT FIRED, not
     // only for `freshLaunch` ones (Argus r3 blocker). It used to be gated on
