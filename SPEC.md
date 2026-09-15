@@ -291,6 +291,17 @@ references decisions by date; none is a second home for a decision.
 
 ## Decisions Log (immutable audit trail — NOT the build spec)
 
+### 2026-09-15 — Projects declare repos and a default; cards select by name (#935).
+
+A project declares a set of repositories and a default for a nonempty set. A card
+with no repo name selects the default; an undeclared name refuses by name and must
+never select the default. The repository's own name determines `repos/<repo-name>/`.
+Existing `code/` workspaces remain supported while declaration lands; renaming them
+is a separate reversible step. Zero repositories is valid project data and cannot
+resolve a build. The build driver continues to receive a single resolved path.
+The model and its acceptance criteria live in
+`docs/spec-items/project-code-repos-and-vault-split.md`.
+
 ### 2026-09-15 — Native Android process-start crashes enter the owner's existing diagnostics queue (#528).
 
 An unexported initializer provider with maximum init order installs the native
