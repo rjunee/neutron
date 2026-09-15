@@ -7,7 +7,8 @@ import { fakeRunner, type Provider } from '@neutronai/runtime/bounded-work.ts'
 import { seedMigratedDb } from '../tests/support/migrated-db.ts'
 import { TridentRunStore } from './store.ts'
 import { TridentPhaseUsageStore } from './phase-usage.ts'
-import { createProjectBuildHost, projectBuildRunners, type ProjectBuildHostOptions } from './project-build-host.ts'
+import { createProjectBuildHost, projectBuildRunners, withProductionCleanup, type ProjectBuildHostOptions } from './project-build-host.ts'
+import type { BuildRunOutcome } from './build-run.ts'
 import { briefIntegrity } from './gates/brief-integrity.ts'
 import { workContextPath } from './production-host-effects.ts'
 import { spawnCapture } from './git-mode.ts'
@@ -110,5 +111,41 @@ test('project Ralph state read failure is unknown', async () => {
   await f.options.production.store.recordStageEvent(f.options.production.runId, 'build-mode-state', '{}')
   expect(await host.run({ mode: 'ralph', start: 'resume' }, new AbortController().signal)).toMatchObject({
     kind: 'unknown', detail: expect.stringContaining('valid identity or state'),
+  })
+})
+
+test('G125 cleanup runs for every build ending and a thrown or aborted build', async () => {
+  const snapshot = { head: 'a'.repeat(40), diff: 'change', pr: null }
+  const endings: BuildRunOutcome[] = [
+    { kind: 'merged', snapshot },
+    { kind: 'blocked', phase: 'review', on: 'gate', recipient: 'orchestrator' },
+    { kind: 'built', snapshot, cause: 'wave-member-built' },
+    { kind: 'continued', snapshot, remainingTasks: 1, cause: 'ralph-task-built' },
+    { kind: 'refused', reason: 'worker-unsupported', detail: 'unsupported' },
+    { kind: 'failed', phase: 'build', detail: 'worker failed', cause: 'workflow-threw' },
+    { kind: 'unknown', phase: 'fix', step_id: 'step', detail: 'unobserved' },
+  ]
+  let attempts = 0
+  for (const ending of endings) {
+    const result = await withProductionCleanup(async () => ending, async () => {
+      attempts++
+      return { kind: 'cleaned', detail: 'RESULT preserved=0 removed=0' }
+    })
+    expect(result).toEqual({ ...ending, cleanup: { kind: 'cleaned', detail: 'RESULT preserved=0 removed=0' } })
+  }
+  for (const error of [new Error('host threw'), new DOMException('aborted', 'AbortError')]) {
+    const result = await withProductionCleanup(async () => { throw error }, async () => {
+      attempts++
+      return { kind: 'preserved', detail: 'RESULT preserved=1 removed=0' }
+    })
+    expect(result).toMatchObject({ kind: 'unknown', detail: expect.stringContaining(error.message), cleanup: { kind: 'preserved' } })
+  }
+  expect(attempts).toBe(endings.length + 2)
+})
+
+test('G127 cleanup failure stays visible without changing the build verdict', async () => {
+  const build: BuildRunOutcome = { kind: 'merged', snapshot: { head: 'a'.repeat(40), diff: 'change', pr: null } }
+  expect(await withProductionCleanup(async () => build, async () => ({ kind: 'failed', detail: 'script crashed' }))).toEqual({
+    ...build, cleanup: { kind: 'failed', detail: 'script crashed' },
   })
 })

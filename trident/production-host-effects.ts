@@ -12,6 +12,7 @@ import { gitRangeArgv } from './git-range.ts'
 import type { EnvCapableHostRunner } from './git-mode.ts'
 import type { TridentRun, TridentRunStore } from './store.ts'
 import { isTerminalPhase } from './state-machine.ts'
+import { TRIDENT_SCRIPT_DIR } from './script-dir.ts'
 
 const oid = /^(?:[0-9a-f]{40}|[0-9a-f]{64})$/
 const unknown = (detail: string): GateResult => ({ kind: 'unknown', detail })
@@ -37,6 +38,11 @@ export interface ProductionCiSource {
   required(baseBranch: string): Promise<RequiredCheckObservation>
   readiness(pr: number): Promise<{ headSha: unknown; mergeable: unknown; rows: unknown } | { unreadable: string }>
 }
+
+export type CleanupOutcome =
+  | { kind: 'cleaned'; detail: string }
+  | { kind: 'preserved'; detail: string }
+  | { kind: 'failed'; detail: string }
 
 const CI_CONFIGURATION_GRACE_MS = 600_000
 const missingResponse = (result: { exit_code: number; stderr: string; stdout: string }) =>
@@ -121,6 +127,7 @@ export const workContextPath = (briefPath: string): string => `${briefPath}.cont
 /** Additive host implementation. External write uncertainty is never a success. */
 export function createProductionHostEffects(options: ProductionHostOptions) {
   const { store, runId, repo, worktree, branch, baseBranch, runHost } = options
+  const cleanupMode = store.get(runId)?.merge_mode
   const git = (...args: string[]) => runHost(['git', '-C', repo, ...args], repo)
   function row(): TridentRun {
     const current = store.get(runId)
@@ -382,6 +389,20 @@ export function createProductionHostEffects(options: ProductionHostOptions) {
       return { kind: 'allow' }
     } catch (error) { return unknown(String(error)) }
   }
+  async function cleanup(): Promise<CleanupOutcome> {
+    try {
+      if (cleanupMode !== 'pr' && cleanupMode !== 'local') return { kind: 'failed', detail: 'Cleanup mode is missing' }
+      const mode = cleanupMode === 'pr' ? 'delete-branch' : 'keep-branch'
+      const result = await runHost(['bash', join(TRIDENT_SCRIPT_DIR, 'worktree-cleanup.sh'), repo, branch, mode], repo)
+      const detail = [result.stdout, result.stderr].filter(Boolean).join('\n')
+      const summary = result.stdout.match(/^RESULT preserved=(\d+) removed=(\d+)$/m)
+      if (!result.timed_out && result.ok && result.exit_code === 0 && summary?.[1] === '0') return { kind: 'cleaned', detail }
+      if (!result.timed_out && !result.ok && result.exit_code === 3 && summary && Number(summary[1]) > 0) return { kind: 'preserved', detail }
+      return { kind: 'failed', detail: detail || `Cleanup returned exit ${result.exit_code} without evidence` }
+    } catch (error) {
+      return { kind: 'failed', detail: String(error) }
+    }
+  }
   const requireAllow = async (gate: Promise<GateResult>) => {
     const result = await gate
     if (result.kind !== 'allow') throw new Error(result.kind === 'unknown' ? result.detail : result.on)
@@ -404,5 +425,5 @@ export function createProductionHostEffects(options: ProductionHostOptions) {
     publish: snapshot => requireAllow(publishChecked(snapshot)),
     merge: snapshot => requireAllow(mergeChecked(snapshot)),
   }
-  return { effects, modes, ralphIteration, admission, observeCi, publishChecked, mergeChecked }
+  return { effects, modes, ralphIteration, admission, observeCi, publishChecked, mergeChecked, cleanup }
 }

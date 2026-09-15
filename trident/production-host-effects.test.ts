@@ -88,6 +88,35 @@ async function measured(f: Awaited<ReturnType<typeof fixture>>): Promise<BuildSn
   return observation.value
 }
 
+test('G126/G127 production cleanup delegates mode and classifies complete script evidence', async () => {
+  const f = await fixture()
+  f.intercept(argv => argv[1]?.endsWith('worktree-cleanup.sh')
+    ? { ok: false, stdout: 'PRESERVED worktree /build reason=dirty\nRESULT preserved=2 removed=0\n', stderr: '', exit_code: 3 }
+    : undefined)
+  expect(await f.cleanup()).toMatchObject({ kind: 'preserved', detail: expect.stringContaining('PRESERVED worktree') })
+  expect(f.calls.at(-1)).toEqual(['bash', expect.stringContaining('worktree-cleanup.sh'), f.repo, 'change', 'delete-branch'])
+
+  f.intercept(argv => argv[1]?.endsWith('worktree-cleanup.sh') ? ok('RESULT preserved=0 removed=1\n') : undefined)
+  expect(await f.cleanup()).toEqual({ kind: 'cleaned', detail: 'RESULT preserved=0 removed=1\n' })
+
+  for (const result of [
+    ok(''),
+    { ok: true, stdout: 'RESULT preserved=1 removed=0\n', stderr: '', exit_code: 0 },
+    { ok: false, stdout: 'RESULT preserved=0 removed=0\n', stderr: '', exit_code: 3 },
+    { ok: false, stdout: '', stderr: '', exit_code: 2 },
+    { ...bad(), timed_out: true },
+  ]) {
+    f.intercept(argv => argv[1]?.endsWith('worktree-cleanup.sh') ? result : undefined)
+    expect(await f.cleanup()).toMatchObject({ kind: 'failed' })
+  }
+
+  await f.store.update(f.row.id, { merge_mode: 'local' })
+  const local = createProductionHostEffects(f.options)
+  f.intercept(argv => argv[1]?.endsWith('worktree-cleanup.sh') ? ok('RESULT preserved=0 removed=0\n') : undefined)
+  expect(await local.cleanup()).toMatchObject({ kind: 'cleaned' })
+  expect(f.calls.at(-1)?.at(-1)).toBe('keep-branch')
+})
+
 test('G045 ruleset requirements survive a classic-protection 404', async () => {
   const source = productionCiSource(async argv => {
     const path = argv[2]!
