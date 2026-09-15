@@ -1463,8 +1463,8 @@ export function readNumber(obj: Record<string, unknown>, key: string): number | 
  * number selects the SAME memoized option a button tap would.
  */
 export function parseBareOptionNumber(text: string): number | null {
-  const m = /^\s*(?:option\s+|number\s+|no\.?\s*|#)?(\d{1,2})\s*[.)]?\s*$/i.exec(
-    text,
+  const m = /^(?:option\s+|number\s+|no\.?\s*|#)?(\d{1,2})(?:\s*[.)])?$/i.exec(
+    text.trim(),
   )
   if (m === null) return null
   const n = Number.parseInt(m[1]!, 10)

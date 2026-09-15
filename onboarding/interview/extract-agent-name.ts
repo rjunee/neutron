@@ -146,7 +146,7 @@ export function extractAgentNameFromFreeform(input: string | null | undefined): 
   // `i-m-sam` / `im-sam` via the whole-reply fallback.
   const iAm = matchAfterPhrase(
     trimmed,
-    /\bI\s*['‘’]?\s*a?m\s+/i,
+    /\bI(?:\s*['‘’]\s*|\s*)a?m\s+/i,
     /* requireCapital */ true,
   )
   if (iAm !== null) return iAm
