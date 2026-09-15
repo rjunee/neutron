@@ -40,9 +40,9 @@
  * (`app:<user>:general`) was unreachable.
  *
  * **It must ALSO be safe as a URL PATH SEGMENT, which is where mobile differs
- * from web.** Web's `GENERAL_CONV_ID` is `#general`, but on web that value is
- * only ever a MAP KEY — it keys the conversation runtime host and the frozen-vm
- * cache, and never enters a URL. Mobile puts the rail id straight into the route
+ * from web.** Web's `GENERAL_CONV_ID` is `~general`, but that web consumer uses
+ * it only as a MAP KEY for the conversation runtime host and frozen-vm cache.
+ * Mobile puts the rail id straight into the route
  * `/projects/[id]/chat`, so the constraint set is strictly larger.
  *
  * `#general` fails that extra constraint: it needs percent-encoding (`%23`), and
