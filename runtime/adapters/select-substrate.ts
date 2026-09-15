@@ -18,12 +18,6 @@
  * `CodexCliSubstrateOptions`), so the selector returns a DISCRIMINATED result
  * (`{ provider, create }`) rather than a single unified factory signature. The
  * composer switches on `.provider` and builds the matching option bag.
- *
- * TRIDENT NOTE: this selector is for CONVERSATIONAL / utility LLM turns ONLY.
- * Trident's autonomous build loop drives the native `Workflow` tool, which has
- * NO OpenAI analogue — trident's fire substrate stays the Claude-Code warm-fire
- * singleton regardless of a project's conversational provider. Callers wiring
- * trident MUST NOT route it through this selector.
  */
 
 import type { Substrate } from '../substrate.ts'
@@ -70,8 +64,6 @@ export type SelectedSubstrateFactory =
  *    between turns and require the caller to thread `spec.session.id`
  *    (`previous_response_id` / `--resume`) — a `'session-id'` provider that is
  *    NOT given a session ledger is AMNESIAC every turn.
- *  - `detachedWorkflows` — supports the trident fire-and-settle Dynamic Workflow
- *    inner loop. ONLY Claude Code. Trident MUST gate on this.
  *  - `nativeToolBridge` — exposes Neutron tools via the native REPL tool bridge
  *    (`setReplToolBridge`). ONLY Claude Code; OpenAI-family adapters resolve
  *    tools through the neutral `AgentSpec.tools` + `mcpResolver` contract, so a
@@ -79,27 +71,24 @@ export type SelectedSubstrateFactory =
  */
 export interface ProviderCapabilities {
   continuity: 'pool-key' | 'session-id'
-  detachedWorkflows: boolean
   nativeToolBridge: boolean
 }
 
 /**
- * Static capability table. Callers (trident gate, conversational continuity
- * ledger) read this to decide whether a provider can do the work or must degrade
- * loudly.
+ * Static capability table for conversational continuity and tool wiring.
  */
 export function providerCapabilities(provider: Provider): ProviderCapabilities {
   switch (provider) {
     case 'anthropic':
-      return { continuity: 'pool-key', detachedWorkflows: true, nativeToolBridge: true }
+      return { continuity: 'pool-key', nativeToolBridge: true }
     case 'openai':
-      return { continuity: 'session-id', detachedWorkflows: false, nativeToolBridge: false }
+      return { continuity: 'session-id', nativeToolBridge: false }
     case 'openai-codex-cli':
-      return { continuity: 'session-id', detachedWorkflows: false, nativeToolBridge: false }
+      return { continuity: 'session-id', nativeToolBridge: false }
     default: {
       const _exhaustive: never = provider
       void _exhaustive
-      return { continuity: 'pool-key', detachedWorkflows: true, nativeToolBridge: true }
+      return { continuity: 'pool-key', nativeToolBridge: true }
     }
   }
 }

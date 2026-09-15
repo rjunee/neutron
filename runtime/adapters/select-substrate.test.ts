@@ -3,6 +3,8 @@ import { DEAD_HERDR_SOCKET, pinEnvSwitch } from './__tests__/env-switch.ts'
 
 import {
   normalizeProvider,
+  providerCapabilities,
+  KNOWN_PROVIDERS,
   selectSubstrateFactory,
   type Provider,
 } from './select-substrate.ts'
@@ -28,6 +30,15 @@ import { createCodexCliSubstrate } from './codex-cli/index.ts'
 pinEnvSwitch('HERDR_SOCKET_PATH', DEAD_HERDR_SOCKET)
 
 describe('select-substrate', () => {
+  test('provider capabilities describe continuity and tool wiring', () => {
+    for (const provider of KNOWN_PROVIDERS) {
+      expect(providerCapabilities(provider)).toEqual({
+        continuity: provider === 'anthropic' ? 'pool-key' : 'session-id',
+        nativeToolBridge: provider === 'anthropic',
+      })
+    }
+  })
+
   test("select('anthropic') returns the Claude Code factory VERBATIM (default backend, unchanged)", () => {
     const sel = selectSubstrateFactory('anthropic')
     expect(sel.provider).toBe('anthropic')
