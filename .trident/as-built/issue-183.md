@@ -70,7 +70,10 @@ The requested recursive grep over TypeScript and TSX, excluding dependency and G
 grep -rn "workBoardScopeKey\|GENERAL_HTTP_ID\|'~general'\|\"general\"\|'general'" --include='*.ts' --include='*.tsx' --exclude-dir=node_modules --exclude-dir=.git .
 ```
 
-Positive controls from that same command: `work-board/store.ts:260` finds the known `workBoardScopeKey` definition; `landing/chat-react/general-scope.ts:30` finds `GENERAL_HTTP_ID`; `wire-types/topic-id.ts:43` finds the reserved literal.
+Positive controls from that same command, **as measured during round three, before the ruling below changed
+the web client's HTTP-id constant**: `work-board/store.ts:260` found the known `workBoardScopeKey` definition;
+`landing/chat-react/general-scope.ts:30` found the web client's HTTP-id constant; `wire-types/topic-id.ts:43`
+found the reserved id. These are the measurements that produced the enumeration, not claims about the current tree.
 
 | File and matching lines | Classification |
 | --- | --- |
