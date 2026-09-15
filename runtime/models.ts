@@ -87,11 +87,28 @@ export const FAST_MODEL: string =
   process.env['NEUTRON_FAST_MODEL'] ?? 'haiku'
 
 /**
- * Probe model — alias of `FAST_MODEL`. Used by `auth/max-oauth.ts` for the
- * Anthropic Messages API auth-tier probe. Must be a model the user's Max
+ * Probe model — used by `auth/max-oauth.ts` and `auth/credential-usage-probe.ts`
+ * for the Anthropic Messages API probe. Must be a model the user's Max
  * subscription always exposes; Haiku is the safest choice.
+ *
+ * NOT AN ALIAS OF `FAST_MODEL`, AND THAT IS THE WHOLE POINT. `FAST_MODEL` is
+ * `'haiku'` — a CLI ALIAS, which is correct for the places that spawn a
+ * `claude`/`codex` process, because those resolve aliases themselves. This
+ * constant is sent as the `model` field of a RAW HTTPS call to
+ * `POST /v1/messages`, which resolves nothing: it answers a bare alias with
+ * `404 {"type":"not_found_error","message":"model: haiku"}`.
+ *
+ * A 404 CARRIES NO `anthropic-ratelimit-unified-*` HEADERS, so the usage probe
+ * read no windows, reported `no-windows`, and every usage surface fell back to
+ * the plain divider — the meter silently disappeared from the web app while the
+ * credential was perfectly healthy. Measured 2026-09-15: `'haiku'` → 404 with
+ * zero unified headers; `'claude-haiku-4-5-20251001'` → 200 with the full set.
+ *
+ * So the two constants have genuinely different requirements and must not be
+ * tied together. `NEUTRON_PROBE_MODEL` overrides this one on its own.
  */
-export const PROBE_MODEL: string = FAST_MODEL
+export const PROBE_MODEL: string =
+  process.env['NEUTRON_PROBE_MODEL'] ?? 'claude-haiku-4-5-20251001'
 
 // ---------------------------------------------------------------------------
 // Runtime BEST_MODEL override — the model-update watchdog's "real config path"
