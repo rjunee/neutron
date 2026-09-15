@@ -18,9 +18,8 @@
  * the REAL `buildOpenGraphComposer` output rather than a hand-built config: a literal
  * would have passed throughout the bug.
  *
- * THE DISPATCH PATH is the production reminder dispatcher, because that is a real
- * caller which composes on the owner's warm live-chat substrate (`open/composer.ts`
- * threads `LIVE_AGENT_TOOL_NAMES` into it for exactly that reason). Driving it is how
+ * THE DISPATCH PATH is the production app chat surface, because that is the real
+ * caller which composes on the owner's warm live-chat substrate. Driving it is how
  * the `cc-agent-*` option bag gets captured without standing up the HTTP graph.
  */
 
@@ -42,7 +41,6 @@ import {
   childByKey,
   pool,
 } from '@neutronai/runtime/adapters/claude-code/persistent/pool-state.ts'
-import type { Reminder } from '@neutronai/reminders/store.ts'
 import { buildOpenGraphComposer } from '../composer.ts'
 
 const HERE = dirname(fileURLToPath(import.meta.url))
@@ -101,13 +99,17 @@ afterEach(() => {
   tmpDir = undefined
 })
 
-function cannedHandle(instanceId: string): SessionHandle {
+function cannedHandle(instanceId: string, onFinished?: () => void): SessionHandle {
   const events = (async function* (): AsyncGenerator<Event, void, void> {
-    yield { kind: 'token', text: 'ready' }
-    yield {
-      kind: 'completion',
-      usage: { input_tokens: 1, output_tokens: 1 },
-      substrate_instance_id: instanceId,
+    try {
+      yield { kind: 'token', text: 'ready' }
+      yield {
+        kind: 'completion',
+        usage: { input_tokens: 1, output_tokens: 1 },
+        substrate_instance_id: instanceId,
+      }
+    } finally {
+      onFinished?.()
     }
   })()
   return {
@@ -118,22 +120,12 @@ function cannedHandle(instanceId: string): SessionHandle {
   }
 }
 
-/** A due one-shot reminder — the cheapest real dispatch onto the live-chat substrate. */
-function reminder(): Reminder {
-  return {
-    id: 'rem-mcp-wiring',
-    topic_id: null,
-    message: 'wiring probe',
-    fire_at: Math.floor(Date.now() / 1000) - 1,
-    recurrence: null,
-    recurrence_spec: null,
-    status: 'pending',
-  } as unknown as Reminder
-}
-
 interface Booted {
   composition: Record<string, unknown>
   captured: ClaudeCodeSubstrateOptions[]
+  liveAgentCaptured: Promise<ClaudeCodeSubstrateOptions>
+  liveAgentFinished: Promise<void>
+  dispatchLiveChat: () => Promise<Response>
   /** Call a mounted route on the MCP-servers surface with the owner bearer. */
   api: (method: string, path: string, body?: unknown) => Promise<Response>
   cleanup: () => void
@@ -141,9 +133,23 @@ interface Booted {
 
 async function boot(): Promise<Booted> {
   const captured: ClaudeCodeSubstrateOptions[] = []
+  let resolveLiveAgentCaptured!: (opts: ClaudeCodeSubstrateOptions) => void
+  const liveAgentCaptured = new Promise<ClaudeCodeSubstrateOptions>((resolve) => {
+    resolveLiveAgentCaptured = resolve
+  })
+  let resolveLiveAgentFinished!: () => void
+  const liveAgentFinished = new Promise<void>((resolve) => {
+    resolveLiveAgentFinished = resolve
+  })
   const substrateFactory = (opts: ClaudeCodeSubstrateOptions): Substrate => {
     captured.push(opts)
-    return { start: () => cannedHandle(opts.substrate_instance_id) }
+    if (opts.substrate_instance_id === 'cc-agent-owner') resolveLiveAgentCaptured(opts)
+    return {
+      start: () => cannedHandle(
+        opts.substrate_instance_id,
+        opts.substrate_instance_id === 'cc-agent-owner' ? resolveLiveAgentFinished : undefined,
+      ),
+    }
   }
   const db = ProjectDb.open(process.env['NEUTRON_DB_PATH']!)
   applyMigrations(db.raw())
@@ -151,6 +157,9 @@ async function boot(): Promise<Booted> {
   const composition = await composer({ db, project_slug: 'owner' })
   const rec = composition as unknown as Record<string, unknown>
   const surface = rec['app_mcp_servers_surface'] as
+    | { handler: (req: Request) => Promise<Response | null> }
+    | undefined
+  const chatSurface = rec['app_ws_surface'] as
     | { handler: (req: Request) => Promise<Response | null> }
     | undefined
   const api = async (method: string, path: string, body?: unknown): Promise<Response> => {
@@ -169,9 +178,31 @@ async function boot(): Promise<Booted> {
     if (res === null) throw new Error(`surface disclaimed ${method} ${path}`)
     return res
   }
+  const dispatchLiveChat = async (): Promise<Response> => {
+    if (chatSurface === undefined) throw new Error('app_ws_surface is not mounted')
+    const res = await chatSurface.handler(
+      new Request('http://x/api/app/chat/send', {
+        method: 'POST',
+        headers: {
+          authorization: `Bearer ${OWNER_BEARER}`,
+          'content-type': 'application/json',
+        },
+        body: JSON.stringify({
+          body: 'wiring probe',
+          project_id: null,
+          client_msg_id: 'mcp-wiring-probe',
+        }),
+      }),
+    )
+    if (res === null) throw new Error('app_ws_surface disclaimed live-chat dispatch')
+    return res
+  }
   return {
     composition: rec,
     captured,
+    liveAgentCaptured,
+    liveAgentFinished,
+    dispatchLiveChat,
     api,
     cleanup: () => {
       for (const c of (composition.realmode_cleanups ?? []) as Array<() => void>) {
@@ -188,12 +219,23 @@ async function boot(): Promise<Booted> {
 
 /** The live-chat option bag the REAL composer built, via a real dispatch. */
 async function liveAgentOptions(b: Booted): Promise<ClaudeCodeSubstrateOptions> {
-  const dispatcher = b.composition['reminder_dispatcher'] as { dispatch: (r: Reminder) => Promise<void> }
-  await dispatcher.dispatch(reminder())
-  await Bun.sleep(20)
-  const opts = b.captured.find((o) => o.substrate_instance_id === 'cc-agent-owner')
-  expect(opts).toBeDefined()
-  return opts!
+  expect((await b.dispatchLiveChat()).status).toBe(200)
+  let timeout: ReturnType<typeof setTimeout> | undefined
+  try {
+    return await Promise.race([
+      Promise.all([b.liveAgentCaptured, b.liveAgentFinished]).then(([opts]) => opts),
+      new Promise<never>((_, reject) => {
+        timeout = setTimeout(
+          () => reject(new Error(
+            `live-chat substrate was never captured after app chat dispatch; captured: ${b.captured.map((o) => o.substrate_instance_id).join(', ') || 'none'}`,
+          )),
+          15_000,
+        )
+      }),
+    ])
+  } finally {
+    if (timeout !== undefined) clearTimeout(timeout)
+  }
 }
 
 describe('the production composer wires installable MCP servers end to end', () => {
@@ -224,7 +266,7 @@ describe('the production composer wires installable MCP servers end to end', () 
     } finally {
       b.cleanup()
     }
-  })
+  }, 20_000)
 
   test('the resolver is BOUND to the real store: it answers empty, then answers the approved server', async () => {
     // The defect this is here for: an unbound holder answers "none" forever, so the
@@ -268,7 +310,7 @@ describe('the production composer wires installable MCP servers end to end', () 
     } finally {
       b.cleanup()
     }
-  })
+  }, 20_000)
 
   test('REVOKING through the real surface retires a warm child — the composer wires `onRevoked`', async () => {
     // The seam this pins is one line in `open/composer.ts` and nothing else in the suite
