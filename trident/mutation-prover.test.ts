@@ -171,6 +171,10 @@ interface HostScript {
   extraTreeEntries?: string[]
   /** the verification's own `git hash-object` fails — same. */
   hashObjectFails?: boolean
+  /** Effective shared-config keys that can execute during checkout. */
+  checkoutFilterKeys?: string[]
+  /** Reading the executable config family fails. */
+  configInspectionFails?: boolean
 }
 
 function scriptedHost(s: HostScript = {}): {
@@ -184,6 +188,11 @@ function scriptedHost(s: HostScript = {}): {
     calls,
     async run(cmd) {
       calls.push(cmd)
+      if (cmd.includes('config') && cmd.includes('--get-regexp')) {
+        if (s.configInspectionFails === true) return res(2)
+        const keys = s.checkoutFilterKeys ?? []
+        return keys.length === 0 ? res(1) : res(0, `${keys.join('\0')}\0`)
+      }
       if (cmd.includes('rev-parse')) return s.headUnresolvable === true ? res(1) : res(0, `${HEAD}\n`)
       if (cmd.includes('worktree')) {
         if (cmd.includes('add')) {
@@ -454,7 +463,7 @@ describe('the restored-guard observation is of a tree the nominated commands cou
     expect(midRemove === undefined).toBe(false)
   })
 
-  test('EVERY provisioning of the proof tree disables repository hooks', async () => {
+  test('EVERY provisioning disables the shared-config commands that checkout can execute', async () => {
     // THE FIFTEENTH ESCAPE, and it is the re-provision itself carrying the
     // forgery in. `git worktree add` runs `post-checkout`, and hooks live in
     // `$GIT_COMMON_DIR/hooks` — the shared `.git`, OUTSIDE the worktree, so a
@@ -465,7 +474,8 @@ describe('the restored-guard observation is of a tree the nominated commands cou
     // adds carry `-c core.hooksPath=<a path that cannot exist>`, which is the
     // highest-precedence config source git has and therefore beats a
     // `core.hooksPath` already set in any file.
-    const { prover, host } = proverOver()
+    const filterKeys = ['filter.guardfix.smudge', 'filter.long-running.process']
+    const { prover, host } = proverOver({ checkoutFilterKeys: filterKeys })
     const evidence = await prover.prove({ run: RUN, claim: CLAIM })
     expect(evidence.proved).toBe(true)
 
@@ -483,7 +493,20 @@ describe('the restored-guard observation is of a tree the nominated commands cou
       // …and the directory it points at must not exist, or the override would
       // hand execution to whatever does live there.
       expect(existsSync(setting.slice('core.hooksPath='.length))).toBe(false)
+      expect(argv).toContain('core.fsmonitor=false')
+      for (const key of filterKeys) expect(argv).toContain(`${key}=`)
     }
+  })
+
+  test('an unreadable shared-config command family REFUSES before either provisioning', async () => {
+    const { prover, host } = proverOver({ configInspectionFails: true })
+    const evidence = await prover.prove({ run: RUN, claim: CLAIM })
+    expect(evidence.proved).toBe(false)
+    expect(evidence.observed).toBeNull()
+    expect(evidence.reason).toContain('could not inspect git config')
+    // Positive control: the config read was reached, while no add was allowed.
+    expect(host.calls.some((c) => c.includes('config') && c.includes('--get-regexp'))).toBe(true)
+    expect(host.calls.some((c) => c.includes('worktree') && c.includes('add'))).toBe(false)
   })
 
   test('a re-provision that FAILS refuses — a tree the commands may have edited is not evidence', async () => {
