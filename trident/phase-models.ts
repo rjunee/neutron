@@ -286,6 +286,9 @@ export const TRIDENT_PHASES: ReadonlyArray<TridentPhase> = Object.freeze([
       { label: 'head-probe-round-', dynamic: true },
       { label: 'probe:codex-trailer-', dynamic: true },
       { label: 'ci-probe-round-', dynamic: true },
+      // The code-scanning twin is another fixed `gh api` read whose output is parsed
+      // by workflow code. It belongs on the same cheap mechanical seat as CI status.
+      { label: 'code-scanning-probe-round-', dynamic: true },
       // The BASE-side twin of the probe above: one `gh api` read of the same checks at
       // the commit the branch was cut from, transcribed verbatim. Same shape, same tier.
       { label: 'ci-base-probe-round-', dynamic: true },

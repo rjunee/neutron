@@ -136,6 +136,14 @@ describe('coverage — no label falls through silently', () => {
     expect(phase!.key).toBe('bookkeeping')
   })
 
+  it('code-scanning probe is declared and uses the workflow bookkeeping route', () => {
+    expect(phaseForLabel('code-scanning-probe-round-4')?.key).toBe('bookkeeping')
+    // This label is represented twice because the standalone workflow cannot import
+    // the owner-facing table. Pin the runtime half too, or configuration would claim
+    // the probe while `routeModel` silently paid for the fallback executor.
+    expect(WORKFLOW_SRC).toContain("label.startsWith('code-scanning-probe-round-')")
+  })
+
   it('every phase claims at least one label that actually exists in the workflow', () => {
     // The other direction: a phase covering nothing is DEAD configuration — the owner
     // sets it, nothing changes, and the feature looks broken rather than absent.

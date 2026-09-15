@@ -656,6 +656,10 @@ function routeModel(label, tag) {
             ? ROLE_MODEL['build-trailer-probe']
             : label.startsWith('ci-probe-round-')
               ? ROLE_MODEL['ci-probe']
+            // The code-scanning probe has the same fixed-command/transcription shape
+            // as the CI probe and is likewise interpreted by workflow code.
+            : label.startsWith('code-scanning-probe-round-')
+              ? ROLE_MODEL['ci-probe']
               // The BASE probe is the same shape as the PR probe — one `gh api` read,
               // transcribed verbatim — so it rides the same seat. Spelled out rather
               // than folded into a looser prefix because `ci-probe-round-` is NOT a
@@ -4153,6 +4157,51 @@ function ciDeferredPeer(ci) {
   }
 }
 
+/** Parse the paginated open-alert payload without asking synthesis to interpret transport
+ * output. `clean` is earned only by a successful, parseable empty array; every failure is
+ * `unknown`, which authorises neither alert findings nor an alert-derived refusal. */
+function classifyCodeScanningAlerts(probe) {
+  if (probe === null || typeof probe !== 'object') return { status: 'unknown', alerts: [], cause: '' }
+  const raw = typeof probe.raw === 'string' ? probe.raw : ''
+  const exit = typeof probe.exit_code === 'number' ? probe.exit_code : -1
+  const marker = raw.lastIndexOf('\n___EXIT=')
+  const body = (marker < 0 ? raw : raw.slice(0, marker)).trim()
+  if (exit !== 0 || body === '') return { status: 'unknown', alerts: [], cause: probeCause(raw) }
+  let pages
+  try {
+    pages = JSON.parse(body)
+  } catch {
+    return { status: 'unknown', alerts: [], cause: probeCause(raw) }
+  }
+  if (!Array.isArray(pages) || pages.some((page) => !Array.isArray(page))) {
+    return { status: 'unknown', alerts: [], cause: probeCause(raw) }
+  }
+  const alerts = pages.flat()
+  if (alerts.some((alert) => alert === null || typeof alert !== 'object' || Array.isArray(alert))) {
+    return { status: 'unknown', alerts: [], cause: probeCause(raw) }
+  }
+  return { status: alerts.length === 0 ? 'clean' : 'alerts', alerts }
+}
+
+function codeScanningFindings(scan) {
+  return scan.alerts.map((alert) => {
+    const rule = typeof alert?.rule?.id === 'string' && alert.rule.id !== '' ? alert.rule.id : 'unnamed-code-scanning-rule'
+    const location = alert?.most_recent_instance?.location
+    const file = typeof location?.path === 'string' && location.path !== '' ? location.path : 'code-scanning'
+    const line = Number.isInteger(location?.start_line) && location.start_line > 0 ? location.start_line : null
+    const link = typeof alert?.html_url === 'string' && alert.html_url !== '' ? alert.html_url : null
+    return {
+      severity: 'blocker',
+      file,
+      symbol: rule,
+      rule,
+      line,
+      title: `CODE SCANNING ALERT: ${rule}`,
+      evidence: `GitHub reports an open code-scanning alert for this PR at ${file}${line === null ? '' : `:${line}`}. Resolve or dismiss the alert before approval.${link === null ? '' : `\n${link}`}`,
+    }
+  })
+}
+
 /** The one fact the head probe returns. Deliberately just a sha — see `roundLanded`. */
 const BRANCH_HEAD_SCHEMA = {
   type: 'object',
@@ -4395,6 +4444,20 @@ ${cmd}`,
     ),
   )
   return classifyCi(res)
+}
+
+/** Fetch every page of open code-scanning alerts attached to this PR. */
+async function probeCodeScanningAlerts(prForCi, round) {
+  if (prForCi === null || prForCi === undefined) return { status: 'clean', alerts: [] }
+  const api = `api ${shSingleQuote(`repos/{owner}/{repo}/code-scanning/alerts?pr=${String(prForCi)}&state=open&per_page=100`)} --paginate --slurp`
+  const cmd = `cd ${shSingleQuote(repoPath)} && ${ghReadCommand(api)} 2>&1; echo "___EXIT=$?"`
+  const res = await seatAttempt(`code-scanning-probe-round-${round}`, () =>
+    agent(
+      `Run EXACTLY this single Bash command and report its output through the schema. Put the FULL stdout+stderr in \`raw\` VERBATIM, and the number after ___EXIT= in \`exit_code\`. Do NOT interpret the result, do NOT run anything else, do NOT modify any file.\n${cmd}`,
+      withModel({ label: `code-scanning-probe-round-${round}`, phase: 'Review', schema: CI_PROBE_SCHEMA }),
+    ),
+  )
+  return classifyCodeScanningAlerts(res)
 }
 
 function encodeRefPath(ref) {
@@ -5297,6 +5360,9 @@ TASK: ${task}`
   // wall-clock.
   const ci = await probeCi(prForCi, round)
   log(`trident-v2 ci: round=${round} status=${ci.status} failing=${ci.failing.length}`)
+  const codeScanning = await probeCodeScanningAlerts(prForCi, round)
+  log(`trident-v2 code-scanning: round=${round} status=${codeScanning.status} alerts=${codeScanning.alerts.length}`)
+  const codeScanningAlerts = codeScanning.status === 'alerts' ? codeScanningFindings(codeScanning) : []
 
   // A RED THAT PREDATES THE BRANCH IS NOT A CODE BLOCKER. The base is measured (one probe
   // seat, spent only when the PR is red) and a failing check that is ALSO failing there
@@ -5335,6 +5401,11 @@ TASK: ${task}`
     : `\nCI GATE FINDINGS (generated by the workflow from GitHub's OWN check results — the PR's checks, and the same checks measured at the base commit this branch was cut from):\n${ciFindings
       .map((finding) => redactProbeText(`[${String(finding?.severity ?? '').toUpperCase()}] ${finding?.title ?? ''}\n${finding?.evidence ?? ''}`).slice(0, 2000))
       .join('\n')}\nWeigh these like any reviewer's finding. A check excused as pre-existing is matched by NAME ONLY: the excuse buys this branch no FIX ROUND, and it does NOT clear the red — the merge is held either way — so if this diff touches what an excused check exercises, say so.`
+  const codeScanningPrompt = codeScanningAlerts.length === 0
+    ? ''
+    : `\nOPEN CODE-SCANNING ALERTS (generated by the workflow from GitHub's alert API):\n${codeScanningAlerts
+        .map((finding) => redactProbeText(`[BLOCKER] ${finding.title}\n${finding.evidence}`).slice(0, 2000))
+        .join('\n')}\nTreat each as a code blocker; the deterministic gate refuses approval while any remains open.`
 
   // PANEL COMPLETENESS IS DERIVED IN CODE. Every seat's status comes from whether it
   // was CONFIGURED (it has a slot) and whether it actually ANSWERED — never from a
@@ -5414,7 +5485,7 @@ Set \`escalate\` to \`{kind, whatIsMissing}\` only for those two. \`whatIsMissin
 ${corePanelLines}
 ${offPanelLines}
 ${codexPanel}
-${kimiPanelLine}${suiteFindingsPrompt}${ciFindingsPrompt}`,
+${kimiPanelLine}${suiteFindingsPrompt}${ciFindingsPrompt}${codeScanningPrompt}`,
       withModel({ label: 'argus:synthesis', phase: 'Synthesis', schema: VERDICT_SCHEMA }),
     )
   // THE SYNTHESIS SEAT IS RETRIED LIKE ANY OTHER, through the SAME bounded retry —
@@ -5495,6 +5566,13 @@ ${kimiPanelLine}${suiteFindingsPrompt}${ciFindingsPrompt}`,
             }
           : { findings: [...ciFindings] }
       : severityGated
+  const withCodeScanning = codeScanningAlerts.length > 0
+    ? {
+        ...(withCi && typeof withCi === 'object' ? withCi : {}),
+        verdict: 'REQUEST_CHANGES',
+        findings: [...codeScanningAlerts, ...((withCi && Array.isArray(withCi.findings)) ? withCi.findings : [])],
+      }
+    : withCi
   // EVERY EMPTY SEAT IS A PEER, whichever seat it was. The core reviewers go in FIRST
   // because a missing core seat is the most fundamental incompleteness the panel can
   // have — and note this list is assembled AFTER `enforceSeverityGate`, so its
@@ -5502,7 +5580,7 @@ ${kimiPanelLine}${suiteFindingsPrompt}${ciFindingsPrompt}`,
   const peers = ci.status === 'pending' || ci.status === 'unknown'
     ? [...missingCore, ...deferred, ciDeferredPeer(ci)]
     : [...missingCore, ...deferred]
-  const gated = enforceCrossModelGate(withCi, peers)
+  const gated = enforceCrossModelGate(withCodeScanning, peers)
   // Carry WHY this is blocked, not just that it is. The fix loop must not re-Forge
   // when the only blocker is a lane that could not run — there is nothing in the
   // code to fix, and a re-Forge then costs a fresh round of four reviewers plus a
