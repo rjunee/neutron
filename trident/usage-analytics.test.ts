@@ -57,5 +57,20 @@ test('attributes measured tokens, waste and terminal duration without inventing 
   expect(analytics.spend.by_phase[0]).toMatchObject({ key: 'build', amount: { value: 160 } })
   expect(analytics.waste.total).toEqual({ unit: 'tokens', value: 45, state: 'partial' })
   expect(analytics.waste.by_reason[0]?.key).toBe('full review budget, not approved')
+  expect(analytics.waste.bands.find((row) => row.key === 'unrecoverable')?.amount.value).toBe(45)
   expect(analytics.throughput.runs[0]).toEqual({ project: 'beta', seconds: 1800, outcome: 'failed' })
+})
+
+test('transcript attribution is visible and a surviving ahead-of-base branch is recoverable, not waste', async () => {
+  await create('saved', '/repos/gamma')
+  db.runSync(`UPDATE code_trident_runs SET phase='failed', base_sha=?, inner_checkpoint_head=? WHERE id='saved'`,
+    ['a'.repeat(40), 'b'.repeat(40)])
+  db.runSync(`INSERT INTO transcript_usage_events
+    (source_path,line_offset,observed_at,project,topic,agent,phase,run_id,input_tokens,output_tokens,cache_read_tokens,reasoning_tokens)
+    VALUES ('rollout',0,1,'gamma','dashboard','codex','build','saved',100,20,50,5)`)
+  const analytics = new TridentUsageAnalytics(db).read()
+  expect(analytics.spend.by_topic[0]).toMatchObject({ key: 'dashboard', amount: { value: 120 } })
+  expect(analytics.spend.by_agent[0]).toMatchObject({ key: 'codex', amount: { value: 120 } })
+  expect(analytics.waste.bands.find((row) => row.key === 'recoverable')?.amount.value).toBe(120)
+  expect(analytics.waste.total.value).toBeNull()
 })

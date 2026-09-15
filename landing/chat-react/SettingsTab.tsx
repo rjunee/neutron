@@ -1664,10 +1664,13 @@ function UsageAnalyticsPanel({ analytics }: { analytics: UsageAnalytics }): Reac
       <p data-testid="usage-spend-total">{formatTokenAmount(analytics.spend.total)}</p>
       {breakdown('By project', analytics.spend.by_project)}
       {breakdown('By phase', analytics.spend.by_phase)}
+      {breakdown('By topic', analytics.spend.by_topic)}
+      {breakdown('By agent', analytics.spend.by_agent)}
       {breakdown('By model', analytics.spend.by_model.rows)}
       <p className="cset-label">Wasted work</p>
       <p data-testid="usage-waste-total">{formatTokenAmount(analytics.waste.total)}</p>
       {breakdown('By reason', analytics.waste.by_reason)}
+      {breakdown('Merged / recoverable / unrecoverable', analytics.waste.bands)}
       {analytics.waste.unclassified_runs > 0 ? <p className="cset-sub">{analytics.waste.unclassified_runs} run(s) could not be classified.</p> : null}
       <p className="cset-label">Longest builds</p>
       {analytics.throughput.state === 'unknown' ? <p className="cset-sub">Unknown</p> : analytics.throughput.runs.map((run, i) => (
@@ -1761,6 +1764,11 @@ function UsagePoolCard({ pool, now }: { pool: UsagePool; now: number }): React.J
       {line !== null ? (
         <p className="cset-usage-capacity" data-testid={`usage-${view.pool}-capacity`}>
           {line}
+        </p>
+      ) : null}
+      {view.all_accounts_capped !== null ? (
+        <p className="cset-sub" data-testid={`usage-${view.pool}-all-capped-band`}>
+          All accounts capped until {new Date(view.all_accounts_capped.to).toLocaleTimeString()}
         </p>
       ) : null}
       {/* WHICH account the line above is about. The headline says WHEN; on a pool

@@ -177,6 +177,8 @@ import {
 } from '@neutronai/runtime/adapters/claude-code/persistent/agent-skills.ts'
 import { TridentRunStore, type TridentRun } from '@neutronai/trident/store.ts'
 import { TridentUsageAnalytics } from '@neutronai/trident/usage-analytics.ts'
+import { TranscriptUsageIngestor } from '@neutronai/trident/transcript-usage.ts'
+import { findNewestRollout } from '@neutronai/trident/codex-rotation-io.ts'
 import { probeBuildFleet } from '@neutronai/trident/active-runs.ts'
 import { DispatchHoldStore, buildDispatchHoldSweep } from '@neutronai/trident/dispatch-holds.ts'
 import {
@@ -7042,7 +7044,31 @@ export function buildOpenGraphComposer(
         ? {
             trident: {
               fire_inner_workflow: tridentFireInnerWorkflow,
-              on_run_terminal: tridentOnRunTerminal,
+              on_run_terminal: async (run): Promise<void> => {
+                await tridentOnRunTerminal(run)
+                const resolvedHome = codexCredentialService.resolveActiveCodexHome(
+                  asOwnerHandle(owner_handle),
+                  run.project_slug,
+                ) ?? codexHome
+                if (resolvedHome === null) return
+                const rollout = findNewestRollout(resolvedHome, Date.parse(run.started_at))
+                if (rollout === null) return
+                const project = run.repo_path.replaceAll('\\', '/').split('/').filter(Boolean).at(-1) ?? run.project_slug
+                try {
+                  await new TranscriptUsageIngestor(db).ingest(rollout, {
+                    project,
+                    topic: run.task,
+                    agent: 'codex',
+                    phase: run.inner_checkpoint?.includes('argus') ? 'review_codex' : 'build',
+                    run_id: run.id,
+                    expected_cwds: [run.repo_path, run.worktree].filter(
+                      (value): value is string => typeof value === 'string' && value.length > 0,
+                    ),
+                  })
+                } catch (err) {
+                  console.warn('[usage] transcript ingest failed:', err instanceof Error ? err.message : String(err))
+                }
+              },
               on_terminal_wake: terminalBuildWake,
               // The SAME sweep the terminal chain runs, also on the tick's own
               // cadence — the only trigger a worktree-only `branch_live` hold

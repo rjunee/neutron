@@ -230,6 +230,11 @@ function PoolCard({ pool, now }: { pool: UsagePool; now: number }) {
           {line}
         </Text>
       ) : null}
+      {view.all_accounts_capped !== null ? (
+        <Text style={styles.muted} testID={`usage-${view.pool}-all-capped-band`}>
+          All accounts capped until {new Date(view.all_accounts_capped.to).toLocaleTimeString()}
+        </Text>
+      ) : null}
       {/* WHICH account the line above is about. The headline says WHEN; on a pool
           with more than one account the owner still has to know WHOSE, because
           that is the account he routes the next build to. */}
@@ -280,11 +285,16 @@ function AnalyticsCard({ analytics }: { analytics: UsageAnalytics }) {
       {analytics.spend.by_project.length === 0 ? <Text style={styles.muted}>Unknown</Text> : analytics.spend.by_project.map((row) => <Text style={styles.muted} key={row.key}>{row.key}: {tokenAmount(row.amount)}</Text>)}
       <Text style={styles.rowLabel}>By phase</Text>
       {analytics.spend.by_phase.length === 0 ? <Text style={styles.muted}>Unknown</Text> : analytics.spend.by_phase.map((row) => <Text style={styles.muted} key={row.key}>{row.key}: {tokenAmount(row.amount)}</Text>)}
+      <Text style={styles.rowLabel}>By topic</Text>
+      {analytics.spend.by_topic.length === 0 ? <Text style={styles.muted}>Unknown</Text> : analytics.spend.by_topic.map((row) => <Text style={styles.muted} key={row.key}>{row.key}: {tokenAmount(row.amount)}</Text>)}
+      <Text style={styles.rowLabel}>By agent</Text>
+      {analytics.spend.by_agent.length === 0 ? <Text style={styles.muted}>Unknown</Text> : analytics.spend.by_agent.map((row) => <Text style={styles.muted} key={row.key}>{row.key}: {tokenAmount(row.amount)}</Text>)}
       <Text style={styles.rowLabel}>By model</Text>
       <Text style={styles.muted}>Unknown</Text>
       <Text style={styles.poolTitle}>Wasted work</Text>
       <Text>{tokenAmount(analytics.waste.total)}</Text>
       {analytics.waste.by_reason.map((row) => <Text style={styles.muted} key={row.key}>{row.key}: {tokenAmount(row.amount)}</Text>)}
+      {analytics.waste.bands.map((row) => <Text style={styles.muted} key={row.key}>{row.key}: {tokenAmount(row.amount)}</Text>)}
       <Text style={styles.poolTitle}>Longest builds</Text>
       {analytics.throughput.state === 'unknown' ? <Text style={styles.muted}>Unknown</Text> : analytics.throughput.runs.map((run, i) => <Text style={styles.muted} key={`${run.project}-${i}`}>{run.project}: {Math.round(run.seconds / 60)}m ({run.outcome})</Text>)}
     </View>
