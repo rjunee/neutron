@@ -99,7 +99,7 @@ test('provider vocabulary migration translates the obsolete Codex spelling', () 
      VALUES ('legacy', 'Legacy', '2026-09-15T00:00:00Z', '2026-09-15T00:00:00Z', 'openai-codex-cli')`,
   )
 
-  db.exec(readFileSync(join(HERE, '0146_project_provider_vocabulary.sql'), 'utf8'))
+  db.exec(readFileSync(join(HERE, '0147_project_provider_vocabulary.sql'), 'utf8'))
 
   expect(db.query<{ model_provider: string }, []>('SELECT model_provider FROM projects').get()).toEqual({
     model_provider: 'openai-codex',
