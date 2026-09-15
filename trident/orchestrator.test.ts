@@ -363,9 +363,9 @@ describe('G018 dispatch identity', () => {
 })
 
 describe('G083 publication prerequisites', () => {
-  for (const scenario of ['local-mode', 'read-failed', 'empty', 'abbreviated', 'nonhex'] as const) {
-    test(`${scenario} cannot publish or dispatch review`, async () => {
-      const head = 'a'.repeat(40)
+  for (const scenario of ['local-mode', 'read-failed', 'empty', 'abbreviated', 'nonhex', 'full-40', 'full-64'] as const) {
+    test(`${scenario} ${scenario.startsWith('full-') ? 'publishes and dispatches review' : 'cannot publish or dispatch review'}`, async () => {
+      const head = 'a'.repeat(scenario === 'full-64' ? 64 : 40)
       const local = scenario === 'empty' ? '' : scenario === 'abbreviated' ? head.slice(0, 7)
         : scenario === 'nonhex' ? 'z'.repeat(40) : head
       let fires = 0
@@ -387,6 +387,12 @@ describe('G083 publication prerequisites', () => {
         },
       })
       const final = await runToTerminal(h, (await createRun({ merge_mode: scenario === 'local-mode' ? 'local' : 'pr' })).id)
+      if (scenario === 'full-40' || scenario === 'full-64') {
+        expect(final.phase).toBe('done')
+        expect(h.hostCalls.filter((cmd) => cmd.some((arg) => arg.startsWith('--force-with-lease=')))).toHaveLength(1)
+        expect(h.inputs).toHaveLength(2)
+        return
+      }
       expect(final.phase).toBe('failed')
       expect(final.failure_reason).toContain(scenario === 'local-mode' ? 'outside pr mode' : 'could not resolve branch')
       expect(h.hostCalls.filter((cmd) => cmd.includes('push'))).toHaveLength(0)
