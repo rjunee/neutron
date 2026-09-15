@@ -50,6 +50,7 @@
  */
 
 import type { AppWsAuthResolver } from '@neutronai/channels/adapters/app-ws/auth.ts'
+import { resolveModelPricingTarget } from '@neutronai/runtime/model-pricing.ts'
 import type { CodexAvailability } from '@neutronai/trident/codex-credential.ts'
 import { modelTierRegistry } from '@neutronai/trident/model-tiers.ts'
 import {
@@ -180,7 +181,7 @@ function vocabulary(connections: CrossModelConnections): object {
       return {
         tier: t.tier,
         provider: t.provider,
-        model_id: t.model_id,
+        model_id: resolveModelPricingTarget(t.model_id),
         group: t.group,
         // WHETHER PICKING THIS TIER LEAVES THE EFFORT CELL LIVE. Shipped per tier and
         // derived here, so the rule ("a subprocess chooses its own reasoning effort")

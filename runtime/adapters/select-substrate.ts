@@ -103,9 +103,10 @@ export const KNOWN_PROVIDERS: readonly Provider[] = PROVIDERS
 
 export function assertConversationalProviderWired(
   provider: Provider,
+  source?: ProviderSelectionSource,
 ): asserts provider is Exclude<Provider, 'pi'> {
   if (provider === 'pi') {
-    throw new Error("Provider 'pi' has no conversational substrate adapter")
+    throw new Error(`Provider 'pi' has no conversational substrate adapter. Selection source: ${source ?? 'unspecified'}.`)
   }
 }
 

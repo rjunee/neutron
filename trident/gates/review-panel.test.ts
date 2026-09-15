@@ -118,3 +118,33 @@ test('valid design gap buys one re-plan; later gaps and other declarations stop'
   f.seat.payload = { verdict: 'REQUEST_CHANGES', findings: [], escalate: { kind: 'missing-dependency', whatIsMissing: 'required dependency' } }
   expect(await f.check()).toMatchObject({ kind: 'blocked' })
 })
+
+test('G140 same family warns and accepts; mixed families and disabled seats are respected', async () => {
+  const { spyOn } = await import('bun:test')
+  const warning = spyOn(console, 'warn').mockImplementation(() => {})
+  try {
+    const f = fixture()
+    f.source.seats = f.source.seats.map(seat => ({ ...seat, family: 'example-family' }))
+    expect(await f.check()).toEqual({ kind: 'approve' })
+    expect(warning.mock.calls.flat().join(' ')).toContain('panel-single-family')
+    expect(warning.mock.calls.flat().join(' ')).toContain('configuration-accepted=true')
+    warning.mockClear()
+    expect(await reviewPanel(f.source, approve, snapshot, 1, 'run', 0,
+      { provider: 'pi', modelId: 'builder', family: 'other-family' })).toEqual({ kind: 'approve' })
+    expect(warning).not.toHaveBeenCalled()
+    f.source.seats = [...f.source.seats, { id: 'disabled', provider: 'pi', modelId: 'other', family: 'other-family', role: 'peer', enabled: false }]
+    expect(await f.check()).toEqual({ kind: 'approve' })
+    expect(warning).toHaveBeenCalledTimes(1)
+  } finally { warning.mockRestore() }
+})
+
+test('G140 identical model configuration warns without family metadata', async () => {
+  const { spyOn } = await import('bun:test')
+  const warning = spyOn(console, 'warn').mockImplementation(() => {})
+  try {
+    const f = fixture()
+    f.source.seats = f.source.seats.map(seat => ({ ...seat, provider: 'pi', modelId: 'same-model' }))
+    expect(await f.check()).toEqual({ kind: 'approve' })
+    expect(warning.mock.calls.flat().join(' ')).toContain('panel-single-family')
+  } finally { warning.mockRestore() }
+})

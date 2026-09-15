@@ -1,25 +1,11 @@
-/**
- * @neutronai/trident — per-project build workspace resolver.
- *
- * A brand-new project has NO code repo. The build dispatch chokepoint
- * (`dispatchBoardBoundBuild`) used to hand the run row a single
- * composition-time constant (the owner HOME dir) as its `repo_path`, so the
- * inner workflow's `isolation:'worktree'` (`git worktree add`) fired against a
- * path that was not a git repo — the build died at forge-init before Forge ran.
- *
- * This resolver gives every project its OWN git-initialized code workspace at
- * `<owner_home>/Projects/<project_slug>/code`, WITH an initial commit (a repo
- * with no HEAD still fails `git worktree add`). It is idempotent: a workspace
- * that already exists as a repo with a commit is returned untouched, so a
- * re-dispatch (or a project a wow-moment already materialized) is a no-op.
- *
- * A fresh local project has no GitHub origin, so `detectMergeMode` correctly
- * degrades to `'local'` (branch + local merge, no PR) — the right shape for a
- * self-hoster's brand-new project.
- */
+/** Resolve the card-selected project repo before preparing a build workspace.
+ * project-repos.json declares names, paths, remotes, and the default. Projects
+ * without a declaration retain their existing code/ workspace. */
 
 import { existsSync, mkdirSync } from 'node:fs'
 import { join } from 'node:path'
+
+import { readProjectRepos, resolveProjectRepo } from './project-repos.ts'
 
 import { spawnCapture, type HostCommandResult } from './git-mode.ts'
 
@@ -53,7 +39,7 @@ export function defaultBuildWorkspaceProbe(): BuildWorkspaceProbe {
 }
 
 export interface EnsureBuildWorkspaceResult {
-  /** Absolute path: `<owner_home>/Projects/<project_slug>/code`. */
+  /** Absolute path of the selected declared workspace. */
   build_repo_path: string
   /** True iff this call initialized the repo (fresh init + initial commit). */
   created: boolean
@@ -82,9 +68,15 @@ export async function ensureProjectBuildWorkspace(
   owner_home: string,
   project_slug: string,
   probe: BuildWorkspaceProbe = defaultBuildWorkspaceProbe(),
+  requestedRepo?: string | null,
 ): Promise<EnsureBuildWorkspaceResult> {
-  const build_repo_path = join(owner_home, 'Projects', project_slug, PROJECT_CODE_DIRNAME)
+  const projectDir = join(owner_home, 'Projects', project_slug)
+  const repo = resolveProjectRepo(readProjectRepos(projectDir, project_slug), requestedRepo)
+  const build_repo_path = join(projectDir, repo.path)
 
+  if (repo.remote !== null && !probe.exists(join(build_repo_path, '.git'))) {
+    throw new Error(`Repo "${repo.name}" requires an existing checkout; remote cloning is not automatic`)
+  }
   if (!probe.exists(build_repo_path)) probe.mkdirp(build_repo_path)
 
   let hasHead = false

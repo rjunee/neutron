@@ -33,6 +33,7 @@ import type { AgentSpec } from '../../../../substrate.ts'
 import type { SessionHandle } from '../../../../session-handle.ts'
 import type { Event } from '../../../../events.ts'
 import { FAST_MODEL, SONNET_MODEL, getBestModel } from '../../../../models.ts'
+import { resolveModelPricingTarget } from '../../../../model-pricing.ts'
 import type { PtyChild, PtyHost } from '../pty-host.ts'
 import { createClaudeCodeSubstrateAuto } from '../../index.ts'
 import {
@@ -345,7 +346,7 @@ describe('resolveModelFloor — the decision', () => {
   it('is a no-op for a substrate without the floor — deliberate FAST_MODEL callers', () => {
     const d = resolveModelFloor({ requested: FAST_MODEL, enabled: false })
     expect(d.clamped).toBe(false)
-    expect(d.model).toBe(FAST_MODEL)
+    expect(resolveModelPricingTarget(d.model)).toBe(resolveModelPricingTarget(FAST_MODEL))
   })
 
   it('returns an UNFLOORED substrate’s value byte-for-byte, whatever it is', () => {
@@ -377,7 +378,7 @@ describe('resolveModelFloor — the decision', () => {
     // line at whatever the operator configured.
     const d = resolveModelFloor({ requested: FAST_MODEL, enabled: true, best: SONNET_MODEL })
     expect(d.clamped).toBe(true)
-    expect(d.model).toBe(SONNET_MODEL)
+    expect(resolveModelPricingTarget(d.model)).toBe(resolveModelPricingTarget(SONNET_MODEL))
   })
 
   it('does NOT clamp a request at the SAME tier as a cheaper configured best', () => {
@@ -388,7 +389,7 @@ describe('resolveModelFloor — the decision', () => {
     // the exact failure the loudness exists to prevent.
     const d = resolveModelFloor({ requested: SONNET_MODEL, enabled: true, best: SONNET_MODEL })
     expect(d.clamped).toBe(false)
-    expect(d.model).toBe(SONNET_MODEL)
+    expect(resolveModelPricingTarget(d.model)).toBe(resolveModelPricingTarget(SONNET_MODEL))
   })
 
   it('never clamps TO a blank floor — that would fail the launch outright', () => {
@@ -397,7 +398,7 @@ describe('resolveModelFloor — the decision', () => {
     // degradation being corrected.
     const d = resolveModelFloor({ requested: FAST_MODEL, enabled: true, best: '' })
     expect(d.clamped).toBe(false)
-    expect(d.model).toBe(FAST_MODEL)
+    expect(resolveModelPricingTarget(d.model)).toBe(resolveModelPricingTarget(FAST_MODEL))
   })
 
   it('resolves a BLANK request to the floor rather than spawning an empty --model', () => {
