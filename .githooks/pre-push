@@ -43,10 +43,13 @@ GATE="$ROOT/scripts/ci/leak-gate.sh"
 ZERO='0000000000000000000000000000000000000000'
 STATUS=0
 CHECKED=0
+REFLINES=''
 
 # git feeds one line per ref being pushed: <local_ref> <local_sha> <remote_ref> <remote_sha>
 while read -r local_ref local_sha remote_ref remote_sha; do
   [ -n "${local_sha:-}" ] || continue
+  REFLINES="${REFLINES}${local_ref:-} ${local_sha} ${remote_ref:-} ${remote_sha:-}
+"
   # A deletion pushes no commits and no messages.
   [ "$local_sha" = "$ZERO" ] && continue
   CHECKED=1
@@ -140,6 +143,12 @@ Then push again. If the finding is a false positive, the fix is the reviewable
 allowlist in scripts/ci/leak-gate-allowlist.txt — not skipping the hook.
 EOF
   exit 1
+fi
+
+# trident-verdict advisory — warns after the push scan and never blocks it.
+_tv_advisory="$ROOT/scripts/ci/trident-redeem-advisory.sh"
+if [ -f "$_tv_advisory" ]; then
+  printf '%s' "$REFLINES" | bash "$_tv_advisory" || true
 fi
 
 exit 0
