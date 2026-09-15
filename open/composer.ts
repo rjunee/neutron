@@ -3677,11 +3677,20 @@ export function buildOpenGraphComposer(
     // constructed below. The walker remains a synchronous write hook; the watcher
     // is the independently scheduled LLM reply loop.
     const anchorWalker = new AnchorWalker({ commentStore, owner_home })
+    let syncPlanDocTitle: ((projectId: string, path: string) => Promise<void>) | null = null
     const docVersionStore = new DocVersionStore({ owner_home, project_slug })
     const docStore = new DocStore({
       owner_home,
       versionStore: docVersionStore,
-      onMutationSuccess: anchorWalker.handle,
+      // Both #903's versioning and #569's title sync hang off one write: the title
+      // must travel through the SAME mutation hook that re-anchors comments, or a
+      // title written by another path leaves those anchors pointing at stale text.
+      onMutationSuccess: async (mutation) => {
+        const titleSync = mutation.op === 'write' && syncPlanDocTitle !== null
+          ? syncPlanDocTitle(mutation.project_id, mutation.path)
+          : Promise.resolve()
+        await Promise.allSettled([anchorWalker.handle(mutation), titleSync])
+      },
     })
     const agentWatcherLlmCall = buildAgentWatcherLlmCall({
       substrate: llmCallSubstrate,
@@ -4444,6 +4453,12 @@ export function buildOpenGraphComposer(
         mkdirSync(joinPath(owner_home, 'Projects', slug, 'docs'), { recursive: true })
       },
     })
+    syncPlanDocTitle = (projectId, path) =>
+      workBoardSpecDoc.syncTitleFromDoc(
+        projectId,
+        workBoardScopeKey(project_slug, projectId),
+        path,
+      )
     // #339 — the originating app-ws chat topic for a build, reconstructed from a
     // board scope. The React/Expo client subscribes to the General base topic (no
     // project) or `<base>:<project_id>` for a project — the SAME topic the

@@ -127,6 +127,7 @@ let tmpDir: string
 let harness: Harness
 
 interface Harness {
+  base: string
   fetch(request: Request): Promise<Response>
   close(): Promise<void>
 }
@@ -164,7 +165,6 @@ async function startHarness(): Promise<Harness> {
   )
   const composer = buildOpenGraphComposer({
     env: process.env,
-    // eslint-disable-next-line @typescript-eslint/no-explicit-any
     substrateFactory: (() => mockSubstrate()) as any,
     agentWatcherPollIntervalMs: 20,
   })
@@ -175,6 +175,9 @@ async function startHarness(): Promise<Harness> {
   }
   const composedFetch = graph.fetch
   return {
+    // These cases exercise HTTP routing, not socket upgrades. Calling the composed
+    // fetch chain directly keeps the suite runnable where loopback binds are denied.
+    base: 'http://local.test',
     fetch: async (request) => await composedFetch(request, undefined as never),
     close: async () => {
       for (const cleanup of composition.realmode_cleanups ?? []) {
@@ -198,7 +201,7 @@ async function call(
   const headers: Record<string, string> = { accept: 'application/json' }
   if (init.auth !== false) headers['authorization'] = `Bearer ${OWNER_SLUG}`
   if (init.body !== undefined) headers['content-type'] = 'application/json'
-  return await harness.fetch(new Request(`http://127.0.0.1${path}`, {
+  return await harness.fetch(new Request(`${harness.base}${path}`, {
     method: init.method ?? 'GET',
     headers,
     ...(init.body !== undefined ? { body: JSON.stringify(init.body) } : {}),
@@ -472,6 +475,31 @@ describe('link 4 — a doc edit re-anchors its comments (AnchorWalker)', () => {
     expect(afterAnchor?.current_start).toBe((beforeStart as number) + inserted.length)
     expect(afterAnchor?.status).not.toBe('orphaned')
     expect(afterAnchor?.status).not.toBe('dead')
+  })
+
+  test('editing a linked plan H1 updates the card title through the same mutation hook', async () => {
+    const planPath = 'plans/title-sync.md'
+    const create = await call(`/api/app/projects/${PROJECT}/work-board`, {
+      method: 'POST',
+      body: {
+        title: 'Old card title',
+        design_doc_ref: `neutron-docs:${planPath}`,
+      },
+    })
+    // Collection POSTs return the surface's exact created outcome.
+    expect(create.status).toBe(201)
+
+    const write = await call(`/api/app/projects/${PROJECT}/docs/file`, {
+      method: 'PUT',
+      body: { path: planPath, content: '# Title from the plan\n\nDetails.' },
+    })
+    expect(write.status).toBe(200)
+
+    const board = await call(`/api/app/projects/${PROJECT}/work-board`)
+    expect(board.status).toBe(200)
+    const body = (await board.json()) as { items?: Array<{ title?: string }> }
+    expect(body.items?.some((item) => item.title === 'Title from the plan')).toBe(true)
+    expect(body.items?.some((item) => item.title === 'Old card title')).toBe(false)
   })
 })
 

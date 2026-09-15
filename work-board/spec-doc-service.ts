@@ -42,6 +42,7 @@ export interface SpecDocStore {
 /** The `WorkBoardStore` slice the service needs. */
 export interface SpecDocBoardStore {
   create(project_slug: string, input: CreateWorkBoardItemInput): Promise<WorkBoardItem>
+  list(project_slug: string): WorkBoardItem[]
   update(
     project_slug: string,
     id: string,
@@ -96,6 +97,43 @@ export class WorkBoardSpecDocService {
     this.board = deps.board
     this.log = deps.log ?? { warn: (m) => specDocLog.warn(m) }
     this.ensureDocsDir = deps.ensureDocsDir ?? null
+  }
+
+  /**
+   * Keep a linked card's title aligned with the first Markdown H1 in its plan.
+   * Called from DocStore's post-write hook, so only a successfully persisted
+   * document can change the board. Docs without an H1 and unlinked docs are
+   * deliberately no-ops.
+   */
+  async syncTitleFromDoc(
+    docs_project_id: string,
+    board_scope: string,
+    path: string,
+  ): Promise<void> {
+    let content: string
+    try {
+      content = (await this.docs.readDoc(docs_project_id, path)).content
+    } catch (err) {
+      this.log.warn(
+        `[work-board] event=spec_doc_title_read_failed project=${docs_project_id} scope=${board_scope} path=${path} err=${errText(err)}`,
+      )
+      return
+    }
+
+    const title = firstMarkdownH1(content)
+    if (title === null) return
+    const ref = designDocRefForPath(path)
+    const linked = this.board.list(board_scope).filter((item) => item.design_doc_ref === ref)
+    for (const item of linked) {
+      if (item.title === title) continue
+      try {
+        await this.board.update(board_scope, item.id, { title })
+      } catch (err) {
+        this.log.warn(
+          `[work-board] event=spec_doc_title_sync_failed project=${docs_project_id} scope=${board_scope} path=${path} item=${item.id} err=${errText(err)}`,
+        )
+      }
+    }
   }
 
   /**
@@ -209,6 +247,18 @@ export class WorkBoardSpecDocService {
     }
     return item.title
   }
+}
+
+/** Return the first ATX level-one heading, ignoring YAML frontmatter. */
+export function firstMarkdownH1(raw: string): string | null {
+  const body = stripFrontmatter(raw)
+  for (const line of body.split(/\r?\n/)) {
+    const match = /^#\s+(.+?)\s*$/.exec(line)
+    if (match === null) continue
+    const title = match[1]!.replace(/\s+#+\s*$/, '').trim()
+    return title.length === 0 ? null : title
+  }
+  return null
 }
 
 /**
