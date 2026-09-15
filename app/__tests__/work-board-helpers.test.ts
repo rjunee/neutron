@@ -58,6 +58,8 @@ function progress(over: Partial<RunProgress> = {}): RunProgress {
     round: 1,
     started_at: '',
     last_advanced_at: '',
+    heartbeat_at: '2099-01-01T00:00:00Z',
+    heartbeat_fresh_until: '2099-01-01T00:05:00Z',
     elapsed_ms: 0,
     stalled: false,
     stalled_ms: null,
@@ -268,8 +270,8 @@ describe('dotState', () => {
     expect(dotState(item({ status: 'in_progress', linked_run_id: null, inline_active: true }))).toEqual({ colorKey: 'build', pulse: true });
   });
 
-  it('an in_progress card with a live bound run (no progress row yet — e.g. a research dispatch) pulses', () => {
-    expect(dotState(item({ status: 'in_progress', linked_run_id: 'r1' }))).toEqual({ colorKey: 'build', pulse: true });
+  it('an in_progress card with a binding but no heartbeat stays static', () => {
+    expect(dotState(item({ status: 'in_progress', linked_run_id: 'r1' }))).toEqual({ colorKey: 'build', pulse: false });
   });
 
   it('a failed card with NO run progress still paints the durable failed lane (static, never blue/gray)', () => {
@@ -323,8 +325,8 @@ describe('isLinkedRunning / canPlay / isRetry', () => {
     expect(isRetry(dead)).toBe(true);
   });
 
-  it('an in_progress card with a LIVE run never double-offers ▶', () => {
-    expect(canPlay(item({ status: 'in_progress', linked_run_id: 'r1' }))).toBe(false);
+  it('an in_progress card with a fresh heartbeat never double-offers ▶', () => {
+    expect(canPlay(item({ status: 'in_progress', linked_run_id: 'r1' }))).toBe(true);
     expect(canPlay(item({ status: 'in_progress', linked_run_id: 'r1', run_progress: progress({ phase_label: 'building' }) }))).toBe(false);
   });
 
@@ -496,7 +498,7 @@ describe('row/rail lockstep — the row dot and the project rail dot must agree 
     });
     expect(activity).toBe('working');
 
-    expect(dotState(item({ status: 'in_progress', linked_run_id: 'r1' })).pulse).toBe(true);
+    expect(dotState(item({ status: 'in_progress', linked_run_id: 'r1', run_progress: progress() })).pulse).toBe(true);
     expect(railDotKind(activity, false)).toBe('work');
   });
 
@@ -563,9 +565,8 @@ describe('a BLOCKED card offers neither play nor retry', () => {
     expect(blocked.run_progress).toBeUndefined();
     expect(isLinkedRunning(blocked)).toBe(false);
     expect(canPlay(blocked)).toBe(false);
-    // CONTROL: an in_progress card with the identical link and no progress IS running —
-    // so this is the lane deciding, not the absent run_progress.
-    expect(isLinkedRunning(item({ status: 'in_progress', linked_run_id: 'run-esc' }))).toBe(true);
+    // CONTROL: the same lane with positive heartbeat evidence is running.
+    expect(isLinkedRunning(item({ status: 'in_progress', linked_run_id: 'run-esc', run_progress: progress() }))).toBe(true);
   });
 
   it('isRetry is false EVEN THOUGH the card keeps its run link', () => {

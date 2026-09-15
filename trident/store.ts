@@ -1077,6 +1077,21 @@ export class TridentRunStore {
     return row === null ? null : row.at
   }
 
+  /** Latest per-run wrapper heartbeat, excluding ordinary phase/stage events. */
+  latestHeartbeatAt(run_id: string): string | null {
+    const row = this.db
+      .prepare<{ at: string }, [string]>(
+        `SELECT at
+           FROM code_trident_stage_events
+          WHERE run_id = ?
+            AND stage IN ('codex-exec-alive', 'codex-review-alive')
+          ORDER BY id DESC
+          LIMIT 1`,
+      )
+      .get(run_id)
+    return row === null ? null : row.at
+  }
+
   stageEvents(run_id: string): TridentStageEvent[] {
     return this.db
       .prepare<TridentStageEvent, [string]>(

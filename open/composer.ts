@@ -4195,6 +4195,7 @@ export function buildOpenGraphComposer(
     // the item-3 delete-cancel, now routed through the chokepoint when bound.
     const boardRunAccess = {
       get: (id: string): TridentRun | null => boardRunStore.get(id),
+      latestHeartbeatAt: (id: string): string | null => boardRunStore.latestHeartbeatAt(id),
       update: (id: string, patch: { phase: TridentRun['phase'] }): Promise<unknown> =>
         boardRunStore.update(id, patch),
       terminate: async (id: string, phase: TridentRun['phase'], reason?: string): Promise<{ won: boolean }> => {
@@ -4232,7 +4233,13 @@ export function buildOpenGraphComposer(
           type: 'work_board_changed',
           items: deriveInlineActivity(workBoardStore.list(changedKey), framePid).map((it) => {
             // Item 1 — attach the bound run's live progress (null when unbound).
-            const run_progress = runProgressForItem(it, (id) => boardRunStore.get(id), nowMs)
+            const run_progress = runProgressForItem(
+              it,
+              (id) => boardRunStore.get(id),
+              nowMs,
+              undefined,
+              (id) => boardRunStore.latestHeartbeatAt(id),
+            )
             return {
               id: it.id,
               title: it.title,
