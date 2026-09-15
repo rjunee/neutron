@@ -685,6 +685,29 @@ describe('buildWakeupPrompt', () => {
     expect(prompt).not.toContain('do NOT dispatch a second build')
   })
 
+  test('a scheduled wakeup acts inline and NEVER dispatches or restarts a background build', () => {
+    const unbound = buildWakeupPrompt({ label: 'x', items: [{ title: 't' }], now_iso: 'T' })
+    const stalled = buildWakeupPrompt({
+      label: 'x',
+      items: [{
+        title: 't',
+        stalled_run: {
+          run_id: 'run-1', phase: 'forge-init', reason: 'no-advance', since_advance_ms: 60_000,
+        },
+      }],
+      now_iso: 'T',
+    })
+
+    for (const prompt of [unbound, stalled]) {
+      expect(prompt).toContain('Never dispatch work or start/restart a background build')
+      expect(prompt).toContain('tools (read/edit files, run commands). Not a plan')
+      expect(prompt).not.toContain('run commands, dispatch work')
+      expect(prompt).not.toContain('dispatch afterwards')
+    }
+    expect(stalled).toContain('Leave it parked')
+    expect(stalled).toContain('not stop, reap, replace, or restart the run')
+  })
+
   test('THE PROMPT NO LONGER CLAIMS A PARKED RUN DOES NOT EXIST', () => {
     // The finding: an item released because its run stopped advancing was
     // described to the agent as having "no live background run". The run row is
@@ -710,9 +733,9 @@ describe('buildWakeupPrompt', () => {
     expect(prompt).toContain('still bound to background run run-1')
     expect(prompt).toContain('parked at phase "forge-init"')
     expect(prompt).toContain('no progress for 180m')
-    // ...and sends the turn at the parked run rather than around it.
-    expect(prompt).toContain('do NOT dispatch a second build')
-    expect(prompt).toContain('stop/reap the parked')
+    // ...and leaves the paused run parked while the turn works inline.
+    expect(prompt).toContain('Leave it parked')
+    expect(prompt).toContain('not stop, reap, replace, or restart the run')
   })
 
   test('an UNREADABLE stamp is not rendered as "0m" — that would read as just-moved', () => {

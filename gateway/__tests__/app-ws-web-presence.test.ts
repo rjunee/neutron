@@ -138,11 +138,11 @@ describe('app-ws surface — web presence', () => {
   it('records a WEB client that declares itself foregrounded', async () => {
     const h = await startGateway()
     const client = await openClient(h.base, 'web')
-    expect(h.presence.isForeground(OWNER)).toBe(false) // control: nothing declared yet
+    expect(h.presence.isForeground(OWNER, null)).toBe(false) // control: nothing declared yet
 
     client.ws.send(JSON.stringify({ v: 1, type: 'presence', state: 'foreground' }))
-    await waitFor(() => h.presence.isForeground(OWNER))
-    expect(h.presence.isForeground(OWNER)).toBe(true)
+    await waitFor(() => h.presence.isForeground(OWNER, null))
+    expect(h.presence.isForeground(OWNER, null)).toBe(true)
 
     await client.close()
     await h.close()
@@ -164,7 +164,7 @@ describe('app-ws surface — web presence', () => {
     await web.close()
     await waitFor(() => h.presence.size() === 0)
     // With the web socket gone, the native declaration left nothing behind.
-    expect(h.presence.isForeground(OWNER)).toBe(false)
+    expect(h.presence.isForeground(OWNER, null)).toBe(false)
 
     await native.close()
     await h.close()
@@ -178,7 +178,7 @@ describe('app-ws surface — web presence', () => {
     // its frames by driving a `ping` and waiting for the `pong`.
     client.ws.send(JSON.stringify({ v: 1, type: 'ping' }))
     await waitFor(() => client.events.some((e) => (e as { type?: string }).type === 'pong'))
-    expect(h.presence.isForeground(OWNER)).toBe(false)
+    expect(h.presence.isForeground(OWNER, null)).toBe(false)
 
     await client.close()
     await h.close()
@@ -188,11 +188,11 @@ describe('app-ws surface — web presence', () => {
     const h = await startGateway()
     const client = await openClient(h.base, 'web')
     client.ws.send(JSON.stringify({ v: 1, type: 'presence', state: 'foreground' }))
-    await waitFor(() => h.presence.isForeground(OWNER))
+    await waitFor(() => h.presence.isForeground(OWNER, null))
 
     client.ws.send(JSON.stringify({ v: 1, type: 'presence', state: 'background' }))
-    await waitFor(() => !h.presence.isForeground(OWNER))
-    expect(h.presence.isForeground(OWNER)).toBe(false)
+    await waitFor(() => !h.presence.isForeground(OWNER, null))
+    expect(h.presence.isForeground(OWNER, null)).toBe(false)
 
     await client.close()
     await h.close()
@@ -202,10 +202,10 @@ describe('app-ws surface — web presence', () => {
     const h = await startGateway()
     const client = await openClient(h.base, 'web')
     client.ws.send(JSON.stringify({ v: 1, type: 'presence', state: 'foreground' }))
-    await waitFor(() => h.presence.isForeground(OWNER))
+    await waitFor(() => h.presence.isForeground(OWNER, null))
 
     await client.close()
-    await waitFor(() => !h.presence.isForeground(OWNER))
+    await waitFor(() => !h.presence.isForeground(OWNER, null))
     expect(h.presence.size()).toBe(0)
 
     await h.close()
@@ -221,7 +221,7 @@ describe('app-ws surface — web presence', () => {
 
     await a.close()
     await waitFor(() => h.presence.size() === 1)
-    expect(h.presence.isForeground(OWNER)).toBe(true)
+    expect(h.presence.isForeground(OWNER, null)).toBe(true)
 
     await b.close()
     await waitFor(() => h.presence.size() === 0)
@@ -245,7 +245,7 @@ describe('app-ws surface — web presence', () => {
 
     await a.close()
     await waitFor(() => h.presence.size() === 1)
-    expect(h.presence.isForeground(OWNER)).toBe(true)
+    expect(h.presence.isForeground(OWNER, null)).toBe(true)
 
     await b.close()
     await waitFor(() => h.presence.size() === 0)
@@ -275,7 +275,7 @@ describe('app-ws surface — web presence', () => {
     // and it must not be swallowed either.
     client.ws.send(JSON.stringify({ v: 1, type: 'presence', state: 'visible' }))
     await waitFor(() => client.events.some((e) => (e as { type?: string }).type === 'error'))
-    expect(h.presence.isForeground(OWNER)).toBe(false)
+    expect(h.presence.isForeground(OWNER, null)).toBe(false)
 
     await client.close()
     await h.close()

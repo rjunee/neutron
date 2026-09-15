@@ -102,18 +102,8 @@ for (const kind of ['unknown', 'blocked', 'failed', 'refused'] as const) {
   })
 }
 
-for (const mode of ['ralph', 'wave', 'bound_pr'] as const) {
-  test(`admission refuses ${mode}`, async () => {
-    const f = fixture(); f.input.mode = mode
-    expect((await f.run()).kind).toBe('refused')
-    expect(f.runner.calls).toHaveLength(0)
-    expect(f.reads()).toBe(0)
-  })
-}
-test('admission refuses resume and unavailable future fix capability', async () => {
-  const f = fixture(); f.input.start = 'resume'
-  expect(await f.run()).toMatchObject({ kind: 'refused', reason: 'resume-unsupported' })
-  f.input.start = 'fresh'
+test('admission refuses unavailable future fix capability', async () => {
+  const f = fixture()
   f.input.workers.fix.runner = fakeRunner('pi', { supports: () => ({ ok: false, reason: 'placement-unavailable', detail: 'no seat' }) })
   expect(await f.run()).toMatchObject({ kind: 'refused', reason: 'worker-unsupported' })
   expect(f.runner.calls).toHaveLength(0)
@@ -260,5 +250,294 @@ for (const change of ['number', 'head'] as const) {
     const f = fixture(); const merge = f.deps.merge
     f.deps.merge = async s => { await merge(s); if (change === 'number') f.snapshot.pr!.number = 2; else f.snapshot.pr!.head = 'f'.repeat(40) }
     expect(await f.run()).toMatchObject({ kind: 'blocked', on: 'Merge not confirmed for reviewed PR' })
+  })
+}
+
+function modeFixture(mode: BuildRunInput['mode'] = 'ralph') {
+  const f = fixture()
+  f.input.mode = mode
+  const plan = { implementationPlan: '- [ ] T1: first\n- [ ] T2: second', topTask: '- [ ] T1: first', remainingTasks: 1, executionSpec: 'implement one task' }
+  const state: {
+    resume: import('./build-run.ts').ResumeCheckpoint | null
+    probe: import('./build-run.ts').PlanProbe | null
+    regenerated: string
+    oldResult: unknown
+    advances: number
+  } = { resume: null, probe: null, regenerated: f.snapshot.diff, oldResult: { built: true }, advances: 0 }
+  const prepared: { role: string; previous: unknown; planner?: string; findings: readonly string[] }[] = []
+  f.deps.prepareWork = async (request, context) => { prepared.push({ role: request.role, ...structuredClone(context) }) }
+  f.deps.modes = {
+    loadResume: async () => state.resume,
+    regenerateDiff: async head => { f.events.push(`diff:${head}`); return { kind: 'known', diff: state.regenerated } },
+    probePlan: async () => { f.events.push('probe'); return state.probe },
+    advanceRalph: async () => { state.oldResult = null; state.advances++; return { kind: 'allow' } },
+  }
+  const setPlan = (payload: unknown = plan) => f.outcomes.set('run:plan:0', f.completed({ ...f.snapshot, payload }))
+  setPlan()
+  const resume = (stage: import('./build-run.ts').ResumeCheckpoint['stage'] = 'built', round = 1) => {
+    f.input.start = 'resume'
+    state.resume = { head: f.snapshot.head, stage, round, findings: [], previousFindings: [] }
+    return state.resume
+  }
+  return { ...f, state, plan, prepared, setPlan, resume, run: () => {
+    if (f.input.mode === 'ralph') {
+      for (const [key, value] of [...f.outcomes]) {
+        if (!key.includes(':task:')) f.outcomes.set(key.replace('run:', `run:task:${f.input.ralphRound ?? 0}:`), value)
+      }
+    }
+    return f.run()
+  } }
+}
+
+for (const mode of ['ralph', 'wave'] as const) {
+  test(`G025 G024 ${mode} requires a non-null valid plan before build`, async () => {
+    for (const payload of [null, {}, { remainingTasks: -1 }]) {
+      const f = modeFixture(mode); f.setPlan(payload)
+      expect(await f.run()).toMatchObject({ kind: 'blocked', on: 'Planner returned no execution plan' })
+      expect(f.runner.calls.map(c => c.role)).toEqual(['plan'])
+    }
+  })
+}
+
+test('G024 wave selects exactly the unchecked pinned task', async () => {
+  for (const body of ['- [x] T1: first\n- [ ] T2: second', '- [ ] T2: second', '- [ ] T10: different']) {
+    const f = modeFixture('wave'); f.input.pinnedTaskId = 'T1'; f.plan.implementationPlan = body; f.setPlan()
+    expect(await f.run()).toMatchObject({ kind: 'blocked', on: 'Plan has no unchecked pinned wave task' })
+    expect(f.runner.calls.map(c => c.role)).toEqual(['plan'])
+  }
+  const f = modeFixture('wave'); f.input.pinnedTaskId = 'T2'
+  expect(await f.run()).toMatchObject({ kind: 'built', cause: 'wave-member-built' })
+  expect(f.prepared.find(p => p.role === 'build')?.previous).toMatchObject({ topTask: '- [ ] T2: second', remainingTasks: 0 })
+  expect(f.cross.calls).toHaveLength(0)
+  expect(f.events).not.toContain('publish')
+})
+
+test('G034 wave requires a measured full commit even with a matching trailer', async () => {
+  for (const head of ['short', 'absent', 'b'.repeat(64)]) {
+    const f = modeFixture('wave'); f.input.pinnedTaskId = 'T1'; f.snapshot.head = head; f.setPlan()
+    f.outcomes.set('run:build:0', f.completed())
+    expect((await f.run()).kind).toBe(head.length === 64 ? 'built' : 'failed')
+    expect(f.runner.calls.map(c => c.role)).toEqual(['plan', 'build'])
+    expect(f.cross.calls).toHaveLength(0)
+  }
+})
+
+function cheapFixture() {
+  const f = modeFixture(); f.resume('ralph-task-built'); f.input.ralphRound = 2
+  f.state.probe = { found: true, body: f.plan.implementationPlan,
+    sha256: new Bun.CryptoHasher('sha256').update(f.plan.implementationPlan).digest('hex'), uncheckedCount: 2 }
+  return f
+}
+
+test('G026 clean handoff and positive round outside refresh interval select next planner', async () => {
+  for (const round of [0, -1, 1.5, 5, 10, 2]) {
+    const f = cheapFixture(); f.input.ralphRound = round
+    await f.run()
+    expect(f.prepared[0]?.planner).toBe(round === 2 ? 'next' : 'full')
+    expect(f.events.includes('probe')).toBe(round === 2)
+  }
+  for (const stage of ['built', 'ralph-task-built-deviated'] as const) {
+    const f = cheapFixture(); f.state.resume!.stage = stage
+    await f.run()
+    expect(f.events).not.toContain('probe')
+    expect(f.prepared.every(p => p.planner !== 'next')).toBe(true)
+  }
+})
+
+test('G027 missing empty exhausted and incoherent plans use full planner', async () => {
+  for (const patch of [{ found: false }, { body: '' }, { uncheckedCount: 0 }, { uncheckedCount: 1.5 }]) {
+    const f = cheapFixture(); Object.assign(f.state.probe!, patch)
+    await f.run()
+    expect(f.prepared[0]?.planner).toBe('full')
+    expect(f.events).toContain('probe')
+  }
+})
+
+test('G028 checksum and measured unchecked count must both agree', async () => {
+  for (const patch of [{ sha256: 'wrong' }, { uncheckedCount: 1 }]) {
+    const f = cheapFixture(); Object.assign(f.state.probe!, patch)
+    await f.run()
+    expect(f.prepared[0]?.planner).toBe('full')
+    expect(f.events).toContain('probe')
+  }
+})
+
+test('G029 committed body task and count replace cheap planner claims', async () => {
+  const f = cheapFixture()
+  f.setPlan({ ...f.plan, implementationPlan: 'invented', topTask: 'wrong task', remainingTasks: 0 })
+  expect(await f.run()).toMatchObject({ kind: 'continued', remainingTasks: 1 })
+  expect(f.prepared[0]?.planner).toBe('next')
+  expect(f.prepared.find(p => p.role === 'build')?.previous).toMatchObject(f.plan)
+})
+
+test('G037 intermediate task atomically consumes old result before continuation', async () => {
+  const f = modeFixture()
+  expect(await f.run()).toMatchObject({ kind: 'continued', cause: 'ralph-task-built' })
+  expect(f.state.oldResult).toBeNull()
+  expect(f.state.advances).toBe(1)
+  expect(f.cross.calls).toHaveLength(0)
+  expect(f.events).not.toContain('publish')
+  const terminal = modeFixture(); terminal.plan.remainingTasks = 0; terminal.setPlan()
+  expect((await terminal.run()).kind).toBe('merged')
+  expect(terminal.cross.calls).toHaveLength(1)
+  expect(terminal.state.advances).toBe(0)
+})
+for (const kind of ['blocked', 'unknown'] as const) {
+  test(`G037 handoff ${kind} never acknowledges continuation`, async () => {
+    const f = modeFixture()
+    f.deps.modes!.advanceRalph = async () => kind === 'blocked' ? { kind, on: 'head moved' } : { kind, detail: 'write unobserved' }
+    expect(await f.run()).toMatchObject({ kind })
+    expect(f.state.oldResult).not.toBeNull()
+    expect(f.cross.calls).toHaveLength(0)
+  })
+}
+
+test('G038 exact full resume head skips build; moved missing and short heads rebuild', async () => {
+  for (const head of [null, 'short', 'b'.repeat(40), 'a'.repeat(40)]) {
+    const f = modeFixture('pr'); const checkpoint = f.resume('approved'); checkpoint.head = head
+    expect((await f.run()).kind).toBe('merged')
+    expect(f.runner.calls.some(c => c.role === 'build')).toBe(head !== f.snapshot.head)
+    expect(f.cross.calls.length).toBe(head === f.snapshot.head ? 0 : 1)
+  }
+})
+
+test('G038 absent live head rebuilds but unreadable required head stops', async () => {
+  for (const head of ['absent', '']) {
+    const f = modeFixture('pr'); f.resume(); f.snapshot.head = head; f.setPlan()
+    const measure = f.deps.measure; let reads = 0
+    f.deps.measure = async () => { if (++reads === 3) f.snapshot.head = 'a'.repeat(40); return measure() }
+    expect((await f.run()).kind).toBe(head === 'absent' ? 'merged' : 'failed')
+    expect(f.runner.calls.some(c => c.role === 'build')).toBe(head === 'absent')
+  }
+})
+
+test('G039 only actionable code findings buy a resumed fix', async () => {
+  for (const finding of [null, { kind: 'lane', actionable: true, text: 'seat down' },
+    { kind: 'code', actionable: false, text: 'advisory' }, { kind: 'code', actionable: true, text: 'bug' }] as const) {
+    const f = modeFixture('pr'); const checkpoint = f.resume('rejected', 2)
+    checkpoint.findings = finding ? [finding] : []
+    expect((await f.run()).kind).toBe('merged')
+    const actionable = finding?.kind === 'code' && finding.actionable
+    expect(f.runner.calls.map(c => c.role)).toEqual(actionable ? ['fix'] : [])
+    expect(f.cross.calls).toHaveLength(1)
+    if (actionable) expect(f.prepared[0]?.findings).toEqual(['bug'])
+  }
+})
+
+test('G040 resume diff is regenerated from pinned OID and empty diff rebuilds', async () => {
+  for (const diff of ['', '+built\n']) {
+    const f = modeFixture('pr'); f.resume(); f.state.regenerated = diff
+    expect((await f.run()).kind).toBe('merged')
+    expect(f.events).toContain(`diff:${'a'.repeat(40)}`)
+    expect(f.runner.calls.some(c => c.role === 'build')).toBe(diff === '')
+  }
+})
+
+test('G041 resume inherits spent rounds and cannot restart exhausted budget', async () => {
+  for (const stage of ['fixed', 'rejected'] as const) {
+    const f = modeFixture('pr'); const checkpoint = f.resume(stage, 5)
+    checkpoint.findings = [{ kind: 'code', actionable: true, text: 'bug' }]
+    f.decisions.push({ kind: 'fix', findings: ['bug'] })
+    expect(await f.run()).toMatchObject({ kind: 'blocked', recipient: 'orchestrator' })
+    expect(f.runner.calls).toHaveLength(0)
+    expect(f.cross.calls.map(c => c.step_id)).toEqual(stage === 'fixed' ? ['run:review:5'] : [])
+  }
+  const f = modeFixture('pr'); f.resume('fixed', 3)
+  f.decisions.push({ kind: 'fix', findings: ['new bug'] })
+  expect((await f.run()).kind).toBe('merged')
+  expect(f.runner.calls.map(c => c.step_id)).toEqual(['run:fix:3'])
+  expect(f.cross.calls.map(c => c.step_id)).toEqual(['run:review:3', 'run:review:4'])
+})
+
+test('resume pending worker preserves phase and exact step without dispatch', async () => {
+  const f = modeFixture('pr'); const checkpoint = f.resume()
+  checkpoint.pending = { phase: 'fix', step_id: 'original:fix:3' }
+  expect(await f.run()).toMatchObject({ kind: 'unknown', phase: 'fix', step_id: 'original:fix:3' })
+  expect(f.runner.calls).toHaveLength(0)
+  expect(f.cross.calls).toHaveLength(0)
+})
+
+test('bound PR builds reviews and merges only the requested open identity', async () => {
+  const f = modeFixture('bound_pr'); f.input.bound_pr = 1
+  f.snapshot.pr = { number: 1, head: f.snapshot.head, state: 'OPEN' }
+  for (const role of ['plan', 'build', 'review']) f.outcomes.set(`run:${role}:${role === 'review' ? 1 : 0}`, f.completed())
+  expect((await f.run()).kind).toBe('merged')
+  expect(f.cross.calls).toHaveLength(1)
+  for (const pr of [null, { number: 2, head: 'a'.repeat(40), state: 'OPEN' as const }, { number: 1, head: 'a'.repeat(40), state: 'CLOSED' as const }]) {
+    const bad = modeFixture('bound_pr'); bad.input.bound_pr = 1; bad.snapshot.pr = pr
+    expect((await bad.run()).kind).toBe('blocked')
+    expect(bad.runner.calls).toHaveLength(0)
+  }
+})
+
+for (const mode of ['ralph', 'wave', 'bound_pr'] as const) {
+  test(`${mode} still corroborates worker trailers and preserves worker unknown`, async () => {
+    for (const unknown of [false, true]) {
+      const f = modeFixture(mode); f.input.pinnedTaskId = 'T1'
+      if (mode === 'bound_pr') {
+        f.input.bound_pr = 1; f.snapshot.pr = { number: 1, head: f.snapshot.head, state: 'OPEN' }; f.setPlan()
+      }
+      f.outcomes.set('run:build:0', unknown ? { kind: 'unknown', detail: 'running' } : f.completed({ ...f.snapshot, head: 'lie' }))
+      expect(await f.run()).toMatchObject(unknown ? { kind: 'unknown', step_id: mode === 'ralph' ? 'run:task:0:build:0' : 'run:build:0' } : { kind: 'failed', cause: 'built-head-unverified' })
+      expect(f.cross.calls).toHaveLength(0)
+      expect(f.events).not.toContain('publish')
+    }
+  })
+}
+
+test('Ralph step identities include the task iteration', async () => {
+  const f = cheapFixture(); await f.run()
+  expect(f.runner.calls.map(c => c.step_id)).toEqual(['run:task:2:plan:0', 'run:task:2:build:0'])
+})
+
+test('wave resume still builds its pinned task without review', async () => {
+  const f = modeFixture('wave'); f.input.pinnedTaskId = 'T1'; f.resume('approved')
+  expect((await f.run()).kind).toBe('built')
+  expect(f.runner.calls.map(c => c.role)).toEqual(['plan', 'build'])
+  expect(f.cross.calls).toHaveLength(0)
+})
+
+test('mode host and valid recorded rounds are required', async () => {
+  const missing = modeFixture(); delete missing.deps.modes
+  expect(await missing.run()).toMatchObject({ kind: 'blocked', on: 'Mode host is required' })
+  for (const round of [-1, 1.5]) {
+    const f = modeFixture('pr'); f.resume('built', round)
+    expect(await f.run()).toMatchObject({ kind: 'blocked', on: 'Invalid recorded review round' })
+    expect(f.runner.calls).toHaveLength(0)
+  }
+})
+
+test('resume regenerated diff disagreement blocks and unreadable diff remains unknown', async () => {
+  const f = modeFixture('pr'); f.resume(); f.state.regenerated = 'different'
+  expect(await f.run()).toMatchObject({ kind: 'blocked', on: 'Regenerated diff disagrees with host measurement' })
+  expect(f.runner.calls).toHaveLength(0)
+  f.deps.modes!.regenerateDiff = async () => ({ kind: 'unknown', detail: 'read failed' })
+  expect(await f.run()).toMatchObject({ kind: 'unknown', detail: 'read failed' })
+  expect(f.cross.calls).toHaveLength(0)
+})
+
+test('resume rejection retains previous finding classes at round three', async () => {
+  const f = modeFixture('pr'); const checkpoint = f.resume('rejected', 3)
+  checkpoint.findings = [{ kind: 'code', actionable: true, text: 'same class' }]
+  checkpoint.previousFindings = ['same class']
+  expect(await f.run()).toMatchObject({ kind: 'blocked', on: 'Review requires orchestrator arbitration: repeated finding' })
+  expect(f.runner.calls).toHaveLength(0)
+})
+
+for (const at of ['worker', 'publication'] as const) {
+  test(`bound PR identity cannot change during ${at}`, async () => {
+    const f = modeFixture('bound_pr'); f.input.bound_pr = 1
+    f.snapshot.pr = { number: 1, head: f.snapshot.head, state: 'OPEN' }
+    f.setPlan()
+    for (const role of ['build', 'review']) f.outcomes.set(`run:${role}:${role === 'build' ? 0 : 1}`, f.completed())
+    if (at === 'worker') {
+      const measure = f.deps.measure; let reads = 0
+      f.deps.measure = async () => { if (++reads === 3) f.snapshot.pr!.number = 2; return measure() }
+      f.outcomes.set('run:build:0', f.completed({ ...f.snapshot, pr: { ...f.snapshot.pr, number: 2 } }))
+    } else {
+      f.deps.publish = async () => { f.snapshot.pr!.number = 2 }
+    }
+    expect(await f.run()).toMatchObject({ kind: 'blocked', on: at === 'worker' ? 'Worker changed the bound PR identity' : 'Published PR does not match reviewed revision' })
+    expect(f.events).not.toContain('merge')
   })
 }

@@ -1176,6 +1176,45 @@ describe('TridentRunStore', () => {
     })
   })
 
+  describe('beginPublishRetry — the result-preserving publish claim', () => {
+    test('spends the durable budget while preserving the completed Forge result', async () => {
+      const store = new TridentRunStore(db)
+      const run = await store.create({ slug: 'publish-claim', project_slug: 't1', repo_path: '/r', task: 't' })
+      const result = '{"publishRequested":true,"publishHead":"abcdef"}'
+      await store.update(run.id, {
+        subagent_run_id: 'wf-1',
+        subagent_status: 'completed',
+        workflow_run_id: 'generation-1',
+        inner_result: result,
+      })
+
+      const claimed = await store.beginPublishRetry(run.id)
+
+      expect(claimed).toMatchObject({
+        infra_retries: 1,
+        inner_result: result,
+        subagent_run_id: 'wf-1',
+        subagent_status: 'completed',
+        workflow_run_id: 'generation-1',
+      })
+    })
+
+    test('refuses rows without both a stored result and completed dispatch', async () => {
+      const store = new TridentRunStore(db)
+      const missing = await store.create({ slug: 'publish-missing', project_slug: 't1', repo_path: '/r', task: 't' })
+      expect(await store.beginPublishRetry(missing.id)).toBeNull()
+
+      const running = await store.create({ slug: 'publish-running', project_slug: 't1', repo_path: '/r', task: 't' })
+      await store.update(running.id, {
+        subagent_status: 'running',
+        inner_result: '{"publishRequested":true}',
+      })
+      expect(await store.beginPublishRetry(running.id)).toBeNull()
+      expect(store.get(missing.id)?.infra_retries).toBe(0)
+      expect(store.get(running.id)?.infra_retries).toBe(0)
+    })
+  })
+
   describe('terminalTransition — atomic conditional terminal write (§F6a race guard)', () => {
     test('wins on a non-terminal run: flips the phase + reason and reports won', async () => {
       const store = new TridentRunStore(db)

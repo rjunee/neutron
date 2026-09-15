@@ -261,6 +261,9 @@ export function buildCoreModules(
           // The composer-built removal chokepoint — the SAME one the UI's X
           // runs. Present → `work_board_remove` registers; absent → it does not.
           ...(input.work_board.removal !== undefined ? { removal: input.work_board.removal } : {}),
+          ...(input.work_board.project_exists !== undefined
+            ? { projectExists: input.work_board.project_exists }
+            : {}),
         })
       }
       // Work Board Phase 2b — register the agent-native board-bound build
@@ -823,6 +826,9 @@ export function buildCoreModules(
         // "An infrastructure failure must retry itself" — atomically spend the
         // durable executor/transport retry budget and release the run slot.
         orchestratorOpts.begin_infra_retry = (id) => store.beginInfraRetry(id)
+        // A credential blink happens after Forge has completed. Preserve its
+        // harvested result and retry only the outer publish step.
+        orchestratorOpts.begin_publish_retry = (id) => store.beginPublishRetry(id)
         const orchestrator = buildTridentOrchestrator(orchestratorOpts)
         loop = new TridentTickLoop({
           store,

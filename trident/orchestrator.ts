@@ -405,6 +405,13 @@ export interface BuildTridentOrchestratorOptions {
    * terminal behaviour byte-for-byte; existing callers do not opt in implicitly.
    */
   begin_infra_retry?: (run_id: string) => Promise<TridentRun | null>
+  /**
+   * PUBLISH-CREDENTIAL RETRY CLAIM — spend the shared durable infrastructure
+   * budget while preserving the harvested result. The preserved result is the
+   * publish-only checkpoint: the next tick re-enters `applyResult` and never
+   * launches Forge.
+   */
+  begin_publish_retry?: (run_id: string) => Promise<TridentRun | null>
   /** Maximum measured infrastructure failures retried for one run. */
   max_infra_retries?: number
   /** Best-effort owner/visibility seam, invoked once on durable attempt 1 only. */
@@ -2374,6 +2381,7 @@ export function buildTridentOrchestrator(
   const beginCrashRecovery = opts.begin_crash_recovery
   const maxCrashRecoveries = opts.max_crash_recoveries ?? DEFAULT_MAX_CRASH_RECOVERIES
   const beginInfraRetry = opts.begin_infra_retry
+  const beginPublishRetry = opts.begin_publish_retry
   const maxInfraRetries = opts.max_infra_retries ?? DEFAULT_MAX_INFRA_RETRIES
   const onInfraRetry = opts.on_infra_retry
   const proveMutation = opts.prove_mutation ?? runMutationProofGate
@@ -5070,6 +5078,38 @@ export function buildTridentOrchestrator(
         }
       } catch (err) {
         const reason = err instanceof Error ? err.message : String(err)
+        if (
+          beginPublishRetry !== undefined &&
+          classifyPublishFailure(reason) === PUBLISH_CREDENTIAL_CLASS
+        ) {
+          if (run.infra_retries >= maxInfraRetries) {
+            return {
+              run: failedRun(
+                run,
+                `publish credential remained unavailable after ${maxInfraRetries} automatic retries ` +
+                  `(budget ${maxInfraRetries}). Reconnect GitHub from the Integrations screen; ` +
+                  `the built commit remains on branch ${run.branch ?? `trident/${run.slug}`}. Last measured cause: ${reason}`,
+                true,
+              ),
+              changed: true,
+              waiting: false,
+              note: 'publish-credential retry budget used → failed',
+            }
+          }
+          const claimed = await beginPublishRetry(run.id)
+          if (claimed === null) {
+            return { run, changed: false, waiting: true, note: 'publish-retry claim lost — re-read next tick' }
+          }
+          const backoffMs =
+            INFRA_RETRY_BACKOFF_MS[claimed.infra_retries - 1] ?? INFRA_RETRY_BACKOFF_MS.at(-1)!
+          infraRetryNotBefore.set(run.id, Date.parse(now()) + backoffMs)
+          return {
+            run: claimed,
+            changed: true,
+            waiting: true,
+            note: `publish credential failure → publish-only retry attempt ${claimed.infra_retries} of ${maxInfraRetries} scheduled`,
+          }
+        }
         return {
           run: failedRun(run, `publish failed: ${reason}`, true),
           changed: true,
@@ -5525,6 +5565,19 @@ export function buildTridentOrchestrator(
     if (run.subagent_run_id !== null || run.subagent_status === 'crashed') {
       const result = parseInnerResult(run.inner_result)
       if (result !== null) {
+        const notBefore = infraRetryNotBefore.get(run.id)
+        if (notBefore !== undefined) {
+          const remainingMs = notBefore - Date.parse(now())
+          if (remainingMs > 0) {
+            return {
+              run,
+              changed: false,
+              waiting: true,
+              note: `publish-retry backoff (${Math.ceil(remainingMs / 1_000)}s remaining)`,
+            }
+          }
+          infraRetryNotBefore.delete(run.id)
+        }
         return applyResult(run, result)
       }
       if (worker.state === 'blocked') {

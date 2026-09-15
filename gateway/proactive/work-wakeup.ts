@@ -361,7 +361,10 @@ function bound(text: string, max: number): string {
  * the verdict lapsed. Telling the agent no run exists is the wording that turns a
  * released item into a SECOND dispatch, i.e. the double-drive the release was
  * carefully bounded to avoid. So an item released with a parked run says so, names
- * it, and the instructions send the agent at the parked run rather than around it.
+ * it, and the instructions send the agent at the work itself rather than around
+ * the paused run. A scheduled wakeup never starts or restarts a background build:
+ * that would turn the continuation tick into a second dispatcher and undo an
+ * owner's deliberate pause.
  */
 export function buildWakeupPrompt(input: {
   label: string
@@ -395,16 +398,15 @@ export function buildWakeupPrompt(input: {
       ? [
           '',
           'An item marked ↳ is STILL BOUND to a background run that stopped advancing. That',
-          'run row still exists, so do NOT dispatch a second build for it — a new run of the',
-          'same task collides with the parked one, and you would be racing it rather than',
-          'replacing it. Either do the work directly in this turn, or stop/reap the parked',
-          'run first and dispatch afterwards.',
+          'run row still exists. Leave it parked and do the work directly in this turn; do',
+          'not stop, reap, replace, or restart the run.',
         ]
       : []),
     '',
     'In THIS turn:',
     '1. Take the single most valuable CONCRETE action toward one of these items using your',
-    '   tools (read/edit files, run commands, dispatch work). Not a plan — an action.',
+    '   tools (read/edit files, run commands). Not a plan — an action.',
+    '   Never dispatch work or start/restart a background build from a scheduled wakeup.',
     '2. If an item is actually complete, update the Work Board to say so.',
     '3. Reply with 1-3 short sentences: what you just did, and the immediate next step.',
     `If you genuinely cannot act (missing access, missing decision), reply starting with`,

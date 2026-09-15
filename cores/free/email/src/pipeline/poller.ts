@@ -99,6 +99,9 @@ export interface EmailPipelineTickDeps {
   /** Everything `escalateEmail` needs except `store` / `now`, supplied here. */
   escalate: Omit<EscalateDeps, 'store' | 'now'>
   now: () => number
+  /** Best-effort observer for each newly persisted message. The gateway uses
+   * this to fan ambient email into scribe without a second inbox poll. */
+  on_message_processed?: (message: GmailMessageMeta) => void
   /**
    * WHEN THE PIPELINE BECAME RESPONSIBLE FOR THIS MAILBOX — captured at BOOT,
    * not at the first fire. The interval cron waits a full period before its
@@ -845,6 +848,7 @@ export async function runEmailPipelineTick(
           category: verdict.category,
           handling: 'escalate',
         })
+        deps.on_message_processed?.(meta)
         const outcome = await escalateEmail(
           {
             id: meta.id,
@@ -882,6 +886,7 @@ export async function runEmailPipelineTick(
         category: verdict.category,
         handling: 'archive',
       })
+      deps.on_message_processed?.(meta)
       await applyMutation({ id: meta.id, account_id, handling: 'archive' })
       result.archived++
     }

@@ -14,7 +14,7 @@
  *
  * S1 (sprint email-managed-core-tier1, 2026-05-20): production
  * Gmail v1 REST client wired through OAuthTokenManager, chat
- * commands, daily-triage + prose-brief agents, mandatory the owner
+ * commands, on-demand triage + prose-brief agents, mandatory the owner
  * 4-point draft policy, per-project Gmail-label filtering, per-
  * project SQLite sidecar.
  *
@@ -165,17 +165,6 @@ export {
   buildSubstrateEmailLlm,
   type BuildSubstrateEmailLlmDeps,
 } from './src/substrate-llm.ts'
-
-export {
-  DEFAULT_DAILY_HOUR,
-  DEFAULT_DAILY_MINUTE,
-  DEFAULT_LOOKBACK_MESSAGES,
-  buildTriageScheduler,
-  type TriageFireInput,
-  type TriageFireResult,
-  type TriageScheduler,
-  type TriageSchedulerOpts,
-} from './src/triage-scheduler.ts'
 
 export {
   executeEmailCommand,
