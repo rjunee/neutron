@@ -146,6 +146,9 @@ function buildHarness(opts: {
   list_stage_events?: (run_id: string) => ReadonlyArray<{ stage: string; at: string }>
   /** Wire the store's crash-recovery claim so the §1a-crash branch is reachable. */
   begin_crash_recovery?: boolean
+  /** Wire recovery of a reservation whose in-process project driver died with a gateway. */
+  begin_project_build_driver_recovery?: boolean
+  max_crash_recoveries?: number
   /** Wire the publish-only credential retry claim. */
   begin_publish_retry?: boolean
   max_infra_retries?: number
@@ -295,6 +298,10 @@ function buildHarness(opts: {
   if (opts.record_stage !== undefined) o.record_stage = opts.record_stage
   if (opts.list_stage_events !== undefined) o.list_stage_events = opts.list_stage_events
   if (opts.begin_crash_recovery === true) o.begin_crash_recovery = (id) => store.beginCrashRecovery(id)
+  if (opts.begin_project_build_driver_recovery === true) {
+    o.begin_project_build_driver_recovery = (id, reservation) => store.beginProjectBuildDriverRecovery(id, reservation)
+  }
+  if (opts.max_crash_recoveries !== undefined) o.max_crash_recoveries = opts.max_crash_recoveries
   if (opts.begin_publish_retry === true) o.begin_publish_retry = (id) => store.beginPublishRetry(id)
   if (opts.max_infra_retries !== undefined) o.max_infra_retries = opts.max_infra_retries
   if (opts.resolve_conflict !== undefined) o.resolve_conflict = opts.resolve_conflict
@@ -435,6 +442,75 @@ describe('G111 terminal and harvest precedence', () => {
       expect(store.get(run.id)?.crash_recoveries).toBe(0)
     })
   }
+})
+
+describe('project-driver gateway recovery', () => {
+  test('a prior gateway reservation resumes only from the durable branch/head/checkpoint', async () => {
+    const h = buildHarness({
+      plan: () => ({ fire: { status: 'fired', error: null, launcher_session_key: 'after-restart' } }),
+      begin_project_build_driver_recovery: true,
+    })
+    const run = await createRun({ merge_mode: 'pr' })
+    const reservation = JSON.stringify({
+      projectBuild: { kind: 'unknown', phase: 'build', step_id: 'build-1', detail: 'gateway ended' },
+      projectBuildReservation: { kind: 'in-process-driver', gateway_session: 'before-restart' },
+    })
+    await store.update(run.id, {
+      branch: 'trident/recovered', pr: 73, inner_checkpoint: 'forge-done',
+      inner_checkpoint_head: 'b'.repeat(40), inner_result: reservation,
+    })
+
+    await h.loop.runOnce()
+
+    expect(h.inputs).toHaveLength(1)
+    expect(h.inputs[0]!.resume_checkpoint).toBe('forge-done')
+    expect(h.inputs[0]!.run.branch).toBe('trident/recovered')
+    expect(h.inputs[0]!.run.pr).toBe(73)
+    expect(store.get(run.id)?.crash_recoveries).toBe(1)
+  })
+
+  test('an uncheckpointed prior-gateway reservation becomes terminal instead of replaying', async () => {
+    const h = buildHarness({
+      plan: () => { throw new Error('uncertain work must not be re-fired') },
+      begin_project_build_driver_recovery: true,
+    })
+    const run = await createRun({ merge_mode: 'pr' })
+    await store.update(run.id, {
+      branch: 'trident/uncertain', pr: 74,
+      inner_result: JSON.stringify({
+        projectBuild: { kind: 'unknown', phase: 'build', step_id: 'build-2', detail: 'gateway ended' },
+        projectBuildReservation: { kind: 'in-process-driver', gateway_session: 'before-restart' },
+      }),
+    })
+
+    await h.loop.runOnce()
+
+    expect(h.inputs).toHaveLength(0)
+    expect(store.get(run.id)?.phase).toBe('failed')
+    expect(store.get(run.id)?.failure_reason).toContain('refusing to replay uncertain work')
+  })
+
+  test('a prior-gateway reservation at the durable crash budget is terminal and never fires again', async () => {
+    const h = buildHarness({
+      plan: () => { throw new Error('recovery budget must prevent another fire') },
+      begin_project_build_driver_recovery: true,
+      max_crash_recoveries: 0,
+    })
+    const run = await createRun({ merge_mode: 'pr' })
+    await store.update(run.id, {
+      branch: 'trident/budgeted', pr: 75, inner_checkpoint: 'forge-done', inner_checkpoint_head: 'c'.repeat(40),
+      inner_result: JSON.stringify({
+        projectBuild: { kind: 'unknown', phase: 'build', step_id: 'build-3', detail: 'gateway ended' },
+        projectBuildReservation: { kind: 'in-process-driver', gateway_session: 'before-restart' },
+      }),
+    })
+
+    await h.loop.runOnce()
+
+    expect(h.inputs).toHaveLength(0)
+    expect(store.get(run.id)?.phase).toBe('failed')
+    expect(store.get(run.id)?.failure_reason).toContain('project driver gateway recovery budget (0) used up')
+  })
 })
 
 describe('G085 publication remote observation', () => {

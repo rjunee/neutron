@@ -1,4 +1,4 @@
-import { projectBuildPending } from './project-launcher.ts'
+import { projectBuildDriverReservation, projectBuildPending } from './project-launcher.ts'
 import { prepareLaunch } from './launch-preparation.ts'
 import {
   publishBuiltCommit as publishCommit,
@@ -404,6 +404,12 @@ export interface BuildTridentOrchestratorOptions {
    * tests): a crashed row with no harvestable result still goes terminal.
    */
   begin_crash_recovery?: (run_id: string) => Promise<TridentRun | null>
+  /**
+   * Claim the reservation a prior gateway left for an in-process project driver.
+   * It clears only the exact reservation and spends the existing durable crash budget;
+   * the continuation fields remain on the row for `launch()` to resume rather than replay.
+   */
+  begin_project_build_driver_recovery?: (run_id: string, reservation: string) => Promise<TridentRun | null>
   /**
    * INFRASTRUCTURE RETRY CLAIM — atomically clear a harvested executor/transport
    * failure and spend one durable `infra_retries` unit. Omitted means legacy
@@ -1407,6 +1413,7 @@ export function buildTridentOrchestrator(
   const gatherFireEvidence = opts.gather_fire_evidence ?? null
   const probeBranchHolderFor = opts.probe_branch_holder ?? null
   const beginCrashRecovery = opts.begin_crash_recovery
+  const beginProjectBuildDriverRecovery = opts.begin_project_build_driver_recovery
   const maxCrashRecoveries = opts.max_crash_recoveries ?? DEFAULT_MAX_CRASH_RECOVERIES
   const beginInfraRetry = opts.begin_infra_retry
   const beginPublishRetry = opts.begin_publish_retry
@@ -3357,6 +3364,51 @@ export function buildTridentOrchestrator(
   })
 
   async function step(run: TridentRun): Promise<AdvanceOutcome> {
+    const deadProjectDriverReservation = projectBuildDriverReservation(run.inner_result)
+    if (!isTerminalPhase(run.phase) && deadProjectDriverReservation !== null) {
+      // A prior gateway's driver promise is gone. Resume only from the durable build
+      // evidence, never by replaying an uncheckpointed reservation.
+      const continuationReady =
+        run.branch !== null && run.inner_checkpoint !== null && run.inner_checkpoint_head !== null
+      if (!continuationReady) {
+        return {
+          run: failedRun(
+            run,
+            'gateway restart ended the in-process project driver before a durable branch/head/checkpoint; refusing to replay uncertain work',
+            false,
+          ),
+          changed: true,
+          waiting: false,
+          note: `${run.phase} → failed (project driver restart before durable continuation)`,
+        }
+      }
+      if (run.crash_recoveries >= maxCrashRecoveries) {
+        return {
+          run: failedRun(
+            run,
+            `project driver gateway recovery budget (${maxCrashRecoveries}) used up — not relaunching; preserved branch ${run.branch}, ` +
+              `head ${run.inner_checkpoint_head}, PR ${run.pr === null ? 'none' : `#${run.pr}`}, checkpoint ${run.inner_checkpoint}`,
+            false,
+          ),
+          changed: true,
+          waiting: false,
+          note: `${run.phase} → failed (project driver recovery budget)`,
+        }
+      }
+      if (beginProjectBuildDriverRecovery === undefined) {
+        return {
+          run: failedRun(run, 'gateway restart left an in-process project driver reservation, but recovery is not wired', false),
+          changed: true,
+          waiting: false,
+          note: `${run.phase} → failed (project driver recovery unavailable)`,
+        }
+      }
+      const claimed = await beginProjectBuildDriverRecovery(run.id, deadProjectDriverReservation)
+      if (claimed === null) {
+        return { run, changed: false, waiting: true, note: 'project driver recovery claim lost — re-read next tick' }
+      }
+      return stepCore(claimed, unknownWorkerObservation('project driver restarted by gateway recovery', now()))
+    }
     if (!isTerminalPhase(run.phase) && projectBuildPending(run.inner_result)) {
       return { run, changed: false, waiting: true, note: 'Project driver outcome unknown; preserving worker and step for reconciliation' }
     }
