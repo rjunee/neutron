@@ -13,9 +13,9 @@
  *
  *   §3.1  the project REPL is the orchestrator — it holds the conversation, it runs
  *         the build, and it is the ONLY thing that asks the owner a question.
- *   §3.2  "Same model as the REPL → a subagent inside it. Warm cache, shared MCP
- *         connections, no new process." Different model → a headless worker. A
- *         worker NEVER talks to the owner; it returns "blocked on X" and the
+ *   §3.2  Same model as the REPL → a subagent managed inside it. The harness owns
+ *         child execution; Pi extensions can spawn processes. Different model →
+ *         a headless worker. A worker NEVER talks to the owner; it returns "blocked on X" and the
  *         orchestrator decides whether that is worth the owner's attention.
  *   §3.6  Neutron owns the loop, the harness owns the turn.
  *
@@ -32,9 +32,9 @@ export type Placement = 'in-repl' | 'headless'
 
 /**
  * Decided by the HOST, never by a worker or a prompt: a worker whose provider is
- * the project REPL's provider runs INSIDE it (§3.2 — warm cache, shared MCP
- * connections, no new process); anything else is a headless turn of the other
- * harness. Measured cost of getting this wrong, from §3.8: each headless job paid
+ * the project REPL's provider runs INSIDE its delegation surface (§3.2); Pi's
+ * extension can implement that with child processes. Anything else is a headless
+ * turn of the other harness. Measured cost of getting this wrong, from §3.8: each headless job paid
  * 23,799 / 23,799 / 27,603 cache-read tokens purely to warm up.
  */
 export function placementFor(workerProvider: Provider, replProvider: Provider): Placement {
