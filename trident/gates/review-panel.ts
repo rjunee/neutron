@@ -36,6 +36,7 @@ export interface ReviewSource {
 }
 const unknown = (detail: string): ReviewDecision => ({ kind: 'unknown', detail })
 const blocked = (on: string): ReviewDecision => ({ kind: 'blocked', on })
+const infrastructure = (detail: string): ReviewDecision => blocked(`infra-only: ${detail}`)
 
 /** G062: reserved host markers cannot exempt model findings. */
 function unmarked(payload: unknown): unknown {
@@ -64,11 +65,11 @@ export async function readReviewSeat(source: ReviewSource, seat: ReviewSeat, sna
 /** G057–G062, G104: re-read the recorded panel for this exact revision and round. */
 export async function reviewPanel(source: ReviewSource | undefined, payload: unknown, snapshot: BuildSnapshot, round: number, runId: string, replansUsed = 0, builder?: Pick<ReviewSeat, 'provider' | 'modelId' | 'family'>, recordProgress?: (value: ReviewProgress) => void): Promise<ReviewDecision> {
   const trailer = validateTrailer('verdict', unmarked(payload))
-  if (!trailer.ok) return unknown(`Review trailer ${trailer.reason} at ${trailer.path}`)
-  if (!source) return unknown('Review panel observation source is missing')
+  if (!trailer.ok) return infrastructure(`Review trailer ${trailer.reason} at ${trailer.path}`)
+  if (!source) return infrastructure('Review panel observation source is missing')
   try {
     const seats = source.seats.filter(seat => seat.enabled)
-    if (seats.some(seat => !seat.id || !seat.modelId) || !seats.some(seat => seat.role === 'core') || new Set(seats.map(seat => seat.id)).size !== seats.length) return unknown('Review core seat configuration is missing or duplicated')
+    if (seats.some(seat => !seat.id || !seat.modelId) || !seats.some(seat => seat.role === 'core') || new Set(seats.map(seat => seat.id)).size !== seats.length) return infrastructure('Review core seat configuration is missing or duplicated')
     const registry = modelTierRegistry()
     const families = [...seats, ...(builder ? [builder] : [])].map(seat => seat.family
       ?? registry.find(model => model.model_id === seat.modelId)?.group
@@ -79,17 +80,17 @@ export async function reviewPanel(source: ReviewSource | undefined, payload: unk
     const verdicts: VerdictTrailer[] = []
     for (const seat of seats) {
       const observed = await readReviewSeat(source, seat, snapshot, round)
-      if (!observed) return unknown(`Review seat ${seat.id} (${seat.provider}) has no recorded observation`)
-      if (observed.runId !== runId || observed.head !== snapshot.head || observed.round !== round || observed.provider !== seat.provider || observed.modelId !== seat.modelId) return unknown(`Review seat ${seat.id} (${seat.provider}) provenance does not match run, revision, round, provider or model`)
+      if (!observed) return infrastructure(`Review seat ${seat.id} (${seat.provider}) has no recorded observation`)
+      if (observed.runId !== runId || observed.head !== snapshot.head || observed.round !== round || observed.provider !== seat.provider || observed.modelId !== seat.modelId) return infrastructure(`Review seat ${seat.id} (${seat.provider}) provenance does not match run, revision, round, provider or model`)
       if (observed.status !== 'completed') return blocked(`Review seat ${seat.id} (${seat.provider}) is ${observed.status}`)
       const checked = validateTrailer('verdict', unmarked(observed.payload))
-      if (!checked.ok) return unknown(`Review seat ${seat.id} (${seat.provider}) verdict is unusable`)
+      if (!checked.ok) return infrastructure(`Review seat ${seat.id} (${seat.provider}) verdict is unusable`)
       verdicts.push(checked.value)
     }
     const recorded = await source.readSynthesis(snapshot, round)
-    if (!recorded || recorded.runId !== runId || recorded.head !== snapshot.head || recorded.round !== round) return unknown('Review synthesis provenance does not match run, revision and round')
+    if (!recorded || recorded.runId !== runId || recorded.head !== snapshot.head || recorded.round !== round) return infrastructure('Review synthesis provenance does not match run, revision and round')
     const synthesis = validateTrailer('verdict', unmarked(recorded.payload))
-    if (!synthesis.ok) return unknown('Review recorded synthesis is unusable')
+    if (!synthesis.ok) return infrastructure('Review recorded synthesis is unusable')
     // Compare decoded data, independent of object key ordering.
     const canonical = (value: VerdictTrailer) => JSON.stringify([value.verdict, value.findings.map(f => [f.severity, f.title, f.evidence, f.file, f.symbol, f.rule, f.line]), value.escalate?.kind, value.escalate?.whatIsMissing])
     if (canonical(synthesis.value) !== canonical(trailer.value)) return blocked('Review worker trailer differs from recorded synthesis')
@@ -111,7 +112,7 @@ export async function reviewPanel(source: ReviewSource | undefined, payload: unk
       return { kind: 'fix', findings: [...new Set(identities)], blockingCount: blockers.length }
     }
     if (verdicts.some(v => v.verdict === 'COMMENT' || (v.verdict === 'REQUEST_CHANGES' && v.findings.length === 0))) return blocked('Review has an unresolved verdict without nonblocking findings')
-    if (recorded.checkpoint !== 'argus-approved') return unknown('Review recorded approval checkpoint is missing')
+    if (recorded.checkpoint !== 'argus-approved') return infrastructure('Review recorded approval checkpoint is missing')
     return { kind: 'approve' }
-  } catch { return unknown('Review panel host observation failed') }
+  } catch { return infrastructure('Review panel host observation failed') }
 }

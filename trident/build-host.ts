@@ -81,6 +81,8 @@ export function createBuildHost(options: BuildHostOptions): { deps: BuildRunDeps
     ...options.effects,
     checkBuildClaim: (claim, snapshot) => checkBuildClaim(options.mutation.run_host,
       options.mutation.run.repo_path, options.mutation.run.branch ?? `trident/${options.mutation.run.slug}`, claim, snapshot),
+    checkFixLineage: (snapshot, reviewedHead) => fixLineage(options.mutation.run_host,
+      options.mutation.run.repo_path, options.mutation.run.branch ?? `trident/${options.mutation.run.slug}`, reviewedHead, snapshot.head),
     async readReviewCap(runId) {
       const row = options.mutation.run
       if (!row || row.id !== runId) return { kind: 'unknown', detail: 'Review round cap run row is missing or mismatched' }

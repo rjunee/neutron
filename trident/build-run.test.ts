@@ -1,3 +1,4 @@
+import { fixLineage } from './gates/fix-lineage.ts'
 import { expect, spyOn, test } from 'bun:test'
 import { fakeRunner, type BoundedWorkOutcome } from '@neutronai/runtime/bounded-work.ts'
 import { reviewPanel } from './gates/review-panel.ts'
@@ -48,6 +49,8 @@ function fixture(landFixes = true) {
     readReviewCap: async () => ({ kind: 'known' }),
     checkBuildClaim: async () => { events.push('preserve'); return { kind: 'blocked', on: 'Claim conflicts after preservation' } },
     assignedBranch: 'change',
+    // The host composes fixLineage; this fixture models git confirming descent.
+    checkFixLineage: (snapshot, pin) => fixLineage(async () => ({ ok: true, exit_code: 0, stdout: '', stderr: '' }), '.', 'change', pin, snapshot.head),
     prepareWork: async () => {},
     measure: async () => { reads++; events.push('measure'); return { kind: 'known', value: structuredClone(snapshot) } },
     admissionGate: async () => ({ kind: 'allow' }),
@@ -1208,4 +1211,69 @@ test('G036 merge probe uncertainty preserves the pending worker identity', async
   f.deps.measure = async () => ({ kind: 'unknown', detail: 'merge probe unavailable' })
   expect(await f.run()).toMatchObject({ kind: 'unknown', phase: 'fix', step_id: 'existing-fix' })
   expect(f.runner.calls).toHaveLength(0)
+})
+
+test('G084 each fix proves descent from the immediately preceding review', async () => {
+  for (const abandonSecond of [false, true]) {
+    const f = fixture()
+    f.decisions.push({ kind: 'fix', findings: ['first', 'second'] }, { kind: 'fix', findings: ['third'] }, { kind: 'approve' })
+    const pins: string[][] = []
+    f.deps.checkFixLineage = (produced, pin) => fixLineage(async argv => {
+      pins.push(argv.slice(-2))
+      const ok = !abandonSecond || pin !== 'b'.repeat(40)
+      return { ok, exit_code: ok ? 0 : 1, stdout: '', stderr: '' }
+    }, '.', 'change', pin, produced.head)
+    expect(await f.run()).toMatchObject(abandonSecond
+      ? { kind: 'blocked', phase: 'fix', recipient: 'orchestrator', on: expect.stringContaining('does not descend') }
+      : { kind: 'merged' })
+    expect(pins).toEqual([['a'.repeat(40), 'b'.repeat(40)], ['b'.repeat(40), 'c'.repeat(40)]])
+    expect(f.cross.calls).toHaveLength(abandonSecond ? 2 : 3)
+    expect(f.events.includes('publish')).toBe(!abandonSecond)
+  }
+})
+
+test('G084 resumed fix uses the recorded reviewed head and refuses unreadable ancestry', async () => {
+  const f = modeFixture('pr')
+  f.resume('rejected').findings = [{ kind: 'code', actionable: true, text: 'bug' }]
+  const pins: string[] = []
+  f.deps.checkFixLineage = async (_produced, pin) => {
+    pins.push(pin)
+    return { kind: 'unknown', detail: 'ancestry object unavailable' }
+  }
+  expect(await f.run()).toMatchObject({ kind: 'unknown', phase: 'fix', detail: 'ancestry object unavailable' })
+  expect(pins).toEqual(['a'.repeat(40)])
+  expect(f.cross.calls).toHaveLength(0)
+  expect(f.events).not.toContain('publish')
+})
+
+test('G084 missing lineage host cannot accept a fix', async () => {
+  const f = fixture()
+  f.decisions.push({ kind: 'fix', findings: ['bug'] })
+  delete f.deps.checkFixLineage
+  expect(await f.run()).toMatchObject({ kind: 'unknown', phase: 'fix', detail: 'Fix lineage host is missing' })
+  expect(f.cross.calls).toHaveLength(1)
+  expect(f.events).not.toContain('publish')
+})
+
+test('G060 thrown review round becomes an infrastructure block', async () => {
+  const f = fixture()
+  f.cross.run = async () => { throw new Error('review transport failed') }
+  expect(await f.run()).toMatchObject({ kind: 'blocked', phase: 'review', recipient: 'orchestrator', on: 'infra-only: Review round threw before producing synthesis' })
+  expect(f.runner.calls.map(call => call.role)).toEqual(['plan', 'build'])
+  expect(f.events).not.toContain('publish')
+})
+
+test('G057 G060 driver routes incomplete panel facts to the orchestrator', async () => {
+  for (const missing of ['seat', 'synthesis']) {
+    const f = fixture()
+    const approve = { verdict: 'APPROVE', findings: [] }
+    f.deps.reviewGate = (_payload, snapshot, round) => reviewPanel({
+      seats: [{ id: 'core', provider: 'pi', modelId: 'review-model', role: 'core', enabled: true }],
+      readSeat: async () => missing === 'seat' ? null : { runId: 'run', head: snapshot.head, round, provider: 'pi', modelId: 'review-model', status: 'completed', payload: approve },
+      retrySeat: async () => {}, readSynthesis: async () => null,
+    }, approve, snapshot, round, 'run')
+    expect(await f.run()).toMatchObject({ kind: 'blocked', phase: 'review', recipient: 'orchestrator', on: expect.stringContaining('infra-only:') })
+    expect(f.events).not.toContain('publish')
+    expect(f.runner.calls.map(call => call.role)).toEqual(['plan', 'build'])
+  }
 })

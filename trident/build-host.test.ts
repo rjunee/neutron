@@ -128,14 +128,14 @@ test('unreadable admission and missing project source stay unknown', async () =>
   expect(await host.deps.admissionGate(f.input(host))).toMatchObject({ kind: 'unknown', detail: 'plan brief could not be read' })
 })
 
-test('malformed review and missing panel evidence stay unknown', async () => {
+test('malformed review and missing panel evidence are infrastructure blocks', async () => {
   const f = await fixture()
   const { deps } = f.make()
-  expect(await deps.reviewGate(null, snapshot, 1)).toMatchObject({ kind: 'unknown', detail: 'Review trailer not-object at $' })
+  expect(await deps.reviewGate(null, snapshot, 1)).toMatchObject({ kind: 'blocked', on: 'infra-only: Review trailer not-object at $' })
   const finding = { severity: 'major', title: 'bug', evidence: 'code.ts:1', file: 'code.ts', symbol: 'f', rule: 'correctness', line: 1 }
-  expect(await deps.reviewGate({ verdict: 'APPROVE', findings: [finding] }, snapshot, 1)).toMatchObject({ kind: 'unknown' })
-  for (const severity of ['minor', 'nit']) expect(await deps.reviewGate({ verdict: 'APPROVE', findings: [{ ...finding, severity }] }, snapshot, 1)).toMatchObject({ kind: 'unknown', detail: 'Review panel observation source is missing' })
-  expect(await deps.reviewGate({ verdict: 'APPROVE', findings: [] }, snapshot, 1)).toMatchObject({ kind: 'unknown' })
+  expect(await deps.reviewGate({ verdict: 'APPROVE', findings: [finding] }, snapshot, 1)).toMatchObject({ kind: 'blocked', on: expect.stringContaining('infra-only:') })
+  for (const severity of ['minor', 'nit']) expect(await deps.reviewGate({ verdict: 'APPROVE', findings: [{ ...finding, severity }] }, snapshot, 1)).toMatchObject({ kind: 'blocked', on: 'infra-only: Review panel observation source is missing' })
+  expect(await deps.reviewGate({ verdict: 'APPROVE', findings: [] }, snapshot, 1)).toMatchObject({ kind: 'blocked', on: expect.stringContaining('infra-only:') })
 })
 
 test('leak preflight preserves incomplete and clean outcomes at snapshot head', async () => {
@@ -305,7 +305,7 @@ test('host admission and review reach authoritative policy sources', async () =>
   expect(await host.deps.reviewGate(payload, snapshot, 1, 0, value => progress.push(value))).toEqual({ kind: 'approve' })
   expect(progress).toEqual([{ findings: [], blockingCount: 0 }])
   f.options.review.readSynthesis = async () => null
-  expect(await host.deps.reviewGate(payload, snapshot, 1)).toMatchObject({ kind: 'unknown' })
+  expect(await host.deps.reviewGate(payload, snapshot, 1)).toMatchObject({ kind: 'blocked', on: expect.stringContaining('infra-only:') })
 })
 
 test('fresh null reviewed_head reaches allow and publishes through the driver', async () => {
@@ -702,4 +702,17 @@ test('G055 G056 host composes measured CI with its pinned base', async () => {
   expect(await f.make().deps.reviewCi!(snapshot)).toMatchObject({ kind: 'known', findings: [{ advisory: true }] })
   f.options.reviewCi = { observe: async () => ({ kind: 'unknown', detail: 'CI unavailable' }) }
   expect(await f.make().deps.reviewCi!(snapshot)).toMatchObject({ kind: 'unknown' })
+})
+
+test('G084 host composes live lineage independently of the constructor pin', async () => {
+  const f = await fixture()
+  const host = f.make()
+  expect(f.options.reviewed_head).toBeNull()
+  for (const pin of ['b'.repeat(40), 'c'.repeat(40)]) {
+    expect(await host.deps.checkFixLineage!(snapshot, pin)).toEqual({ kind: 'allow' })
+    expect(f.calls.at(-1)).toEqual(['git', '-C', f.options.mutation.run.repo_path, 'merge-base', '--is-ancestor', pin, head])
+  }
+  expect(await host.deps.checkFixLineage!(snapshot, 'deadbeef')).toMatchObject({ kind: 'blocked' })
+  f.options.mutation.run_host = async () => ({ ok: false, exit_code: 1, stdout: '', stderr: '' })
+  expect(await host.deps.checkFixLineage!(snapshot, 'b'.repeat(40))).toMatchObject({ kind: 'blocked' })
 })
