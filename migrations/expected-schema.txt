@@ -1283,6 +1283,21 @@ CREATE TABLE "projects" (
                              CHECK (model_provider IS NULL OR model_provider IN ('anthropic', 'openai', 'openai-codex', 'pi'))
 ) STRICT
 
+[table] rail_device_marks (tbl=rail_device_marks)
+CREATE TABLE rail_device_marks (
+    topic_id TEXT NOT NULL,
+    device_id TEXT NOT NULL,
+    seq INTEGER NOT NULL,
+    PRIMARY KEY (topic_id, device_id)
+)
+
+[table] rail_devices (tbl=rail_devices)
+CREATE TABLE rail_devices (
+    user_id TEXT NOT NULL,
+    device_id TEXT NOT NULL,
+    PRIMARY KEY (user_id, device_id)
+)
+
 [table] reminders (tbl=reminders)
 CREATE TABLE reminders (
     id TEXT PRIMARY KEY NOT NULL,
@@ -1704,6 +1719,28 @@ CREATE TRIGGER code_trident_runs_seed_usage AFTER INSERT ON code_trident_runs
 BEGIN
     INSERT INTO code_trident_phase_usage (run_id, phase)
         SELECT NEW.id, phase FROM code_trident_usage_phases;
+END
+
+[trigger] rail_message_insert (tbl=app_chat_messages)
+CREATE TRIGGER rail_message_insert AFTER INSERT ON app_chat_messages BEGIN
+    INSERT OR IGNORE INTO rail_device_marks (topic_id, device_id, seq)
+    SELECT NEW.topic_id, device_id, 0 FROM rail_devices
+    WHERE NEW.topic_id = 'app:' || user_id
+       OR substr(NEW.topic_id, 1, length(user_id) + 5) = 'app:' || user_id || ':';
+END
+
+[trigger] rail_receipt_insert (tbl=app_chat_receipts)
+CREATE TRIGGER rail_receipt_insert AFTER INSERT ON app_chat_receipts
+WHEN NEW.read_at IS NOT NULL BEGIN
+    UPDATE rail_device_marks SET seq = MAX(seq, NEW.seq)
+    WHERE topic_id = NEW.topic_id AND device_id = NEW.device_id;
+END
+
+[trigger] rail_receipt_update (tbl=app_chat_receipts)
+CREATE TRIGGER rail_receipt_update AFTER UPDATE ON app_chat_receipts
+WHEN NEW.read_at IS NOT NULL BEGIN
+    UPDATE rail_device_marks SET seq = MAX(seq, NEW.seq)
+    WHERE topic_id = NEW.topic_id AND device_id = NEW.device_id;
 END
 
 [view] onboarding_metrics (tbl=onboarding_metrics)

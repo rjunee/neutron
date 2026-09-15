@@ -1,7 +1,21 @@
+import { beforeAll, afterAll } from 'bun:test';
+const previousDeviceStorage = Object.getOwnPropertyDescriptor(globalThis, 'localStorage');
+beforeAll(() => {
+  const values = new Map<string, string>();
+  Object.defineProperty(globalThis, 'localStorage', { configurable: true, value: {
+    getItem: (key: string) => values.get(key) ?? null,
+    setItem: (key: string, value: string) => { values.set(key, value); },
+  } });
+});
+afterAll(() => {
+  if (previousDeviceStorage) Object.defineProperty(globalThis, 'localStorage', previousDeviceStorage);
+  else Reflect.deleteProperty(globalThis, 'localStorage');
+});
 import { describe, expect, it } from 'bun:test'
 
 import {
   ChatBootstrapError,
+  makeDeviceId,
   appWsTopicId,
   buildWsUrl,
   decodeJwtSub,
@@ -386,4 +400,14 @@ describe('resolveBootstrapConfig', () => {
       resolveBootstrapConfig(win({ __neutron_user_id: 'sam' })).initialDocLink,
     ).toBeUndefined()
   })
+})
+
+it('web identity survives bootstrap calls and refuses unavailable storage', () => {
+  const first = makeDeviceId()
+  expect(makeDeviceId()).toBe(first)
+  expect(globalThis.localStorage.getItem('neutron.chat.device-id')).toBe(first)
+  const descriptor = Object.getOwnPropertyDescriptor(globalThis, 'localStorage')!
+  Reflect.deleteProperty(globalThis, 'localStorage')
+  try { expect(() => makeDeviceId()).toThrow('Device storage is unavailable') }
+  finally { Object.defineProperty(globalThis, 'localStorage', descriptor) }
 })

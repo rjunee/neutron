@@ -44,7 +44,7 @@ export interface Project {
   /** Wall-clock ms of the last activity for sort + "Last opened" label. */
   last_activity_ms: number;
   /** Unread item count for the current user; drives the card badge (0 = hidden). */
-  unread_count: number;
+  unread_count: number | null;
   /** Stub members list — surfaced read-only in the project settings drawer. */
   members: ReadonlyArray<{ name: string; role: 'owner' | 'member' }>;
   /** Stub persona surfaced in the drawer. */
@@ -230,7 +230,7 @@ function listItemToProject(p: ProjectListItem, now: number): Project {
     // Default to a neutral folder glyph when an older gateway omits emoji.
     emoji: p.emoji !== undefined && p.emoji.length > 0 ? p.emoji : '📁',
     last_activity_ms: parseActivityMs(p.last_activity_at, now),
-    unread_count: typeof p.unread_count === 'number' ? p.unread_count : 0,
+    unread_count: typeof p.unread_count === 'number' ? p.unread_count : null,
     members: p.members.map((m) => ({ name: m.name, role: m.role })),
     persona: p.persona,
     privacy_mode: p.privacy_mode,

@@ -1,3 +1,4 @@
+import { installationDeviceId } from './installation-device';
 /**
  * @neutronai/app — project-settings API client (P5.2).
  *
@@ -104,7 +105,7 @@ export interface ProjectListItem extends ProjectSettings {
    *  server can't determine one (older gateway / never touched). */
   last_activity_at: string;
   /** Count of unread items for the bearer-resolved user. 0 when caught up. */
-  unread_count: number;
+  unread_count: number | null;
 }
 
 /** Per-workspace fan-out failure — surfaced as a non-blocking notice. */
@@ -235,7 +236,23 @@ export class ProjectsClient {
    * of the list still renders).
    */
   async list(): Promise<ProjectListResult> {
-    const res = await this.req<ListResponse>('/api/app/projects');
+    // A DEVICE ID THIS CLIENT CANNOT RESOLVE MUST NOT COST THE OWNER THEIR
+    // PROJECTS. The id scopes the per-device UNREAD MARK and nothing else, but
+    // `installationDeviceId` rethrows on a storage failure (installation-device.ts),
+    // and `resolveEntryRoute` catches every fetch failure into the General route —
+    // so awaiting it unconditionally here turned "storage was not ready" into "you
+    // have no projects", and dropped the owner on General at launch.
+    //
+    // Unknown device is its own state: the header is omitted, the server answers
+    // with `unread_count: null` (unknown rather than zero), and the list still
+    // arrives. That is the same rule the unread mark itself follows.
+    let device_id: string | undefined;
+    try {
+      device_id = await installationDeviceId();
+    } catch {
+      device_id = undefined;
+    }
+    const res = await this.req<ListResponse>('/api/app/projects', device_id === undefined ? {} : { device_id });
     return {
       projects: res.projects,
       source_errors: res.source_errors ?? [],
@@ -286,12 +303,13 @@ export class ProjectsClient {
 
   private async req<T>(
     path: string,
-    init: { method?: string; body?: unknown } = {},
+    init: { method?: string; body?: unknown; device_id?: string } = {},
   ): Promise<T> {
     const method = init.method ?? 'GET';
     const headers: Record<string, string> = {
       authorization: `Bearer ${this.token}`,
     };
+    if (init.device_id !== undefined) headers['x-device-id'] = init.device_id;
     let body: string | undefined;
     if (init.body !== undefined) {
       headers['content-type'] = 'application/json';

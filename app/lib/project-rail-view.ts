@@ -98,7 +98,7 @@ export interface RailProjectView {
   id: string;
   name: string;
   emoji: string;
-  unread_count: number;
+  unread_count: number | null;
   origin_instance: string;
 }
 

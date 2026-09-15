@@ -1,3 +1,4 @@
+import { installationDeviceId } from '../installation-device';
 /**
  * @neutronai/app — `useMobileChat`: the React seam between the chat-core
  * `MobileChatSession` and the FlashList UI (research doc §6/§7).
@@ -29,7 +30,6 @@ import { AppState, type AppStateStatus } from 'react-native';
 import * as Notifications from 'expo-notifications';
 
 import {
-  prefixedRandomId,
   type ChatMessage,
   type ConnStatus,
   type ReactionAction,
@@ -151,15 +151,6 @@ export interface UseMobileChatResult {
 // unit-tested `./ws-url` module (extracted so the timezone-capture path is
 // testable without react-native/expo in the bun runtime).
 
-/** A per-session device id. Stability across launches isn't required for
- *  correctness here — the mobile UI only reports reads for AGENT messages
- *  (never the user's own sends), so a freshly-minted id can never light a
- *  sender's own read tick. Uses the ONE shared generator, which does not assume
- *  a `crypto` global exists (it does not, on this runtime). */
-function makeDeviceId(): string {
-  return prefixedRandomId('dev');
-}
-
 /**
  * What the owner is told when a send could not even be QUEUED. Deliberately
  * blunt: the failure it reports used to be completely invisible (see
@@ -191,7 +182,7 @@ export function useMobileChat(railId: string): UseMobileChatResult {
   const projectId = railIdToScope(railId);
   const { user } = useAuthSession();
   const config = useMemo(() => loadAppConfig(), []);
-  const deviceId = useMemo(() => makeDeviceId(), []);
+
 
   const sessionRef = useRef<MobileChatSession | null>(null);
   const streamRef = useRef<StreamState>(emptyStreamState());
@@ -295,6 +286,7 @@ export function useMobileChat(railId: string): UseMobileChatResult {
     let retryHandle: ReturnType<typeof setTimeout> | null = null;
 
     const attach = async (): Promise<void> => {
+      const deviceId = await installationDeviceId();
       // ISSUES #399 — the SHARED topic derivation, identical to the web client.
       // General is the user-scoped topic; a project scope gets
       // `app:<user>:<project>`. Uses the shared `wire-types` helpers rather
@@ -459,7 +451,7 @@ export function useMobileChat(railId: string): UseMobileChatResult {
       setNotice(emptySystemNoticeState());
       setLiveActivity(null);
     };
-  }, [user, projectId, config.base_url, deviceId, attachAttempt]);
+  }, [user, projectId, config.base_url, attachAttempt]);
 
   // AppState → socket activity. Background severs the socket cheaply;
   // foreground reconnects + resumes (research doc §6).

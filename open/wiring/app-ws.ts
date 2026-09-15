@@ -378,7 +378,7 @@ export interface WireAppWsDeps {
   /** Diff-gated rail refresh (no-ops when the snapshot is unchanged). */
   emitProjectsChangedIfChanged: (user_id: string) => void
   /** Build the current `projects_changed` frame for a targeted seed on connect. */
-  buildProjectsChangedFrame: () => import('@neutronai/channels/adapters/app-ws/envelope.ts').AppWsOutboundProjectsChanged
+  buildProjectsChangedFrame: (device_id?: string) => Promise<import('@neutronai/channels/adapters/app-ws/envelope.ts').AppWsOutboundProjectsChanged>
   /** True while the owner is still onboarding. */
   isOnboardingActive: (user_id: string) => Promise<boolean>
   /**
@@ -1199,7 +1199,7 @@ export function wireAppWs(ctx: OpenWiringContext, deps: WireAppWsDeps): WiredApp
       // open. Targeted to this one topic (not a broadcast) and an idempotent
       // full-list apply, so a redundant delivery to a co-topic session is a
       // harmless no-op — it never disturbs the diff baseline.
-      appWsRegistry.send(channel_topic_id, buildProjectsChangedFrame())
+      await appWsRegistry.sendEach(channel_topic_id, buildProjectsChangedFrame)
       // O6 / #106 — drain any recovered replies buffered for this topic while the
       // owner was offline (the offline counterpart to the substrate's live-delivery
       // sink). Idempotent + a no-op when the store is empty, so it is safe on EVERY

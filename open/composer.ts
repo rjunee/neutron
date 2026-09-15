@@ -2437,34 +2437,10 @@ export function buildOpenGraphComposer(
     // The canonical project list (id + label) from the `projects` table — the
     // source of truth onboarding writes. Shared by the page-load bootstrap
     // injection AND the live `projects_changed` app-ws emit (FIX 1) so both
-    // surface the IDENTICAL shape/order. Best-effort: a transient read failure
+    // share project metadata and ordering. Best-effort: a transient read failure
     // degrades to an empty list rather than sinking the request.
-    // Per-project unread = agent messages on the project's chat topic
-    // (`app:<user>:<project>`) beyond the owner's highest READ receipt seq.
-    // Honest (derived from the real chat log + receipt cursor), best-effort
-    // (a read failure — e.g. chat tables absent in a minimal DB — degrades to
-    // 0 rather than sinking the rail refresh).
-    const readProjectUnread = (project_id: string): number => {
-      const topic = appWsProjectTopicId(OWNER_USER_ID, project_id)
-      try {
-        const row = db
-          .prepare<{ n: number }, [string, string]>(
-            `SELECT COUNT(*) AS n
-               FROM app_chat_messages m
-              WHERE m.topic_id = ?
-                AND m.role = 'agent'
-                AND m.seq > (
-                  SELECT COALESCE(MAX(r.seq), 0)
-                    FROM app_chat_receipts r
-                   WHERE r.topic_id = ? AND r.read_at IS NOT NULL
-                )`,
-          )
-          .get(topic, topic)
-        return row?.n ?? 0
-      } catch {
-        return 0
-      }
-    }
+    // Bootstrap has no resolved installation identity and omits unread.
+    // Live frames join these rows with the device-aware project store below.
     // M1 UX REDESIGN — the set of projects with a LIVE chat turn in progress.
     // Maintained at the `agent_typing` start/end seam (the same boundary that
     // drives the typing dots), so the rail's `working` state reflects an
@@ -2595,7 +2571,7 @@ export function buildOpenGraphComposer(
       id: string
       label: string
       emoji: string
-      unread: number
+      unread?: number
       last_activity_at: string
       activity: ProjectActivity
       preview: string | null
@@ -2618,7 +2594,6 @@ export function buildOpenGraphComposer(
             id: r.id,
             label: r.name,
             emoji: resolveProjectEmoji(r.emoji, r.name),
-            unread: readProjectUnread(r.id),
             last_activity_at: r.last_activity_at ?? r.updated_at,
             ...readProjectRailExtras(r.id),
           }))
@@ -2631,7 +2606,7 @@ export function buildOpenGraphComposer(
      *
      * NOT `readProjectRows().map(r => r.id)` (Argus round 1, confirmed x2, on two
      * counts). First, that drags the WHOLE rail computation per call —
-     * `readProjectUnread` + `readProjectRailExtras` (a `boardRunStore.get` per
+     * `readProjectRailExtras` (a `boardRunStore.get` per
      * linked work-board item, a latest-message preview query, a live-run count) —
      * O(projects x board items) of DB work to answer a membership test that is one
      * indexed SELECT. Second, and worse, `readProjectRows` catches and returns `[]`:
@@ -4163,8 +4138,20 @@ export function buildOpenGraphComposer(
     // bootstrapped with the then-current set) only seeds the baseline so we emit
     // on real CHANGES, never on the initial load.
     let lastProjectsSnapshot: string | null = null
-    const buildProjectsChangedFrame = (): AppWsOutboundProjectsChanged => {
+    const buildProjectsChangedFrame = async (device_id?: string): Promise<AppWsOutboundProjectsChanged> => {
       const projects = readProjectRows()
+      // The registry withholds synthetic receipt ids from this device-aware reader.
+      if (device_id !== undefined) {
+        try {
+          const counts = await projectSettingsStore.list(project_slug, OWNER_USER_ID, device_id)
+          for (const project of projects) {
+            const count = counts.find((row) => row.id === project.id)?.unread_count
+            if (count !== undefined && count !== null) project.unread = count
+          }
+        } catch {
+          // A failed device read leaves unread unknown; the other rail fields survive.
+        }
+      }
       return {
         v: 1,
         type: 'projects_changed',
@@ -4186,24 +4173,23 @@ export function buildOpenGraphComposer(
     // live regardless of which project socket is active. The registry is keyed by
     // exact topic string and each web socket lives on exactly one topic, so no
     // socket receives the frame twice.
-    const fanProjectsChanged = (user_id: string, frame: AppWsOutboundProjectsChanged): void => {
+    const fanProjectsChanged = (user_id: string): void => {
       const base = appWsTopicId(user_id)
-      const scopedPrefix = `${base}:`
-      appWsRegistry.send(base, frame)
       for (const topic of appWsRegistry.topics()) {
-        if (topic.startsWith(scopedPrefix)) appWsRegistry.send(topic, frame)
+        if (topic === base || topic.startsWith(`${base}:`)) {
+          fireAndForget('composer.project-rail', appWsRegistry.sendEach(topic, buildProjectsChangedFrame))
+        }
       }
     }
     const emitProjectsChangedIfChanged = (user_id: string): void => {
-      const frame = buildProjectsChangedFrame()
-      const snapshot = JSON.stringify(frame.projects)
+      const snapshot = JSON.stringify(readProjectRows())
       if (lastProjectsSnapshot === null) {
         lastProjectsSnapshot = snapshot
         return
       }
       if (snapshot === lastProjectsSnapshot) return
       lastProjectsSnapshot = snapshot
-      fanProjectsChanged(user_id, frame)
+      fanProjectsChanged(user_id)
     }
     // Unconditional fan — a KNOWN mutation (the create-project capability) just
     // changed the project set, so always push the fresh snapshot (and reseed the
@@ -4211,9 +4197,8 @@ export function buildOpenGraphComposer(
     // would no-op on a skip-import owner whose first action is "Create Project"
     // (baseline still null → diff path swallows the first emit).
     const emitProjectsChangedNow = (user_id: string): void => {
-      const frame = buildProjectsChangedFrame()
-      lastProjectsSnapshot = JSON.stringify(frame.projects)
-      fanProjectsChanged(user_id, frame)
+      lastProjectsSnapshot = JSON.stringify(readProjectRows())
+      fanProjectsChanged(user_id)
     }
     // One-shot onboarding-complete signal for the web client (Managed post-
     // onboarding claim redirect). Fanned to the base topic AND every live per-

@@ -369,7 +369,8 @@ export interface AppWsOutboundProjectsChanged {
     id: string
     label: string
     emoji: string
-    unread: number
+    /** Omitted when this connection's installation unread is unknown. */
+    unread?: number
     last_activity_at: string
     activity: 'idle' | 'working' | 'attention'
     preview: string | null

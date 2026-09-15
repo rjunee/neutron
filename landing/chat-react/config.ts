@@ -337,13 +337,19 @@ export function wsUrlForScope(config: BootstrapConfig, projectId: string | null)
   )
 }
 
-/** Mint a per-page-load device id. Stability across reloads isn't required for
- *  correctness — the web UI only reports reads for agent messages (never the
- *  user's own sends), so a fresh id can't light a sender's own read tick. */
+/** Reuse the chat identity across page loads. Storage failure refuses bootstrap. */
 export function makeDeviceId(): string {
+  const storage = globalThis.localStorage
+  if (!storage) throw new ChatBootstrapError('Device storage is unavailable')
+  const key = 'neutron.chat.device-id'
+  const saved = storage.getItem(key)
+  if (saved) return saved
   const c = (globalThis as { crypto?: { randomUUID?: () => string } }).crypto
-  if (c?.randomUUID !== undefined) return `dev-${c.randomUUID()}`
-  return `dev-${Math.floor(Math.random() * 1e9).toString(36)}`
+  const id = c?.randomUUID !== undefined
+    ? `dev-${c.randomUUID()}`
+    : `dev-${Math.floor(Math.random() * 1e9).toString(36)}`
+  storage.setItem(key, id)
+  return id
 }
 
 export class ChatBootstrapError extends Error {}

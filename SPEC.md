@@ -299,6 +299,17 @@ references decisions by date; none is a second home for a decision.
 
 ## Decisions Log (immutable audit trail — NOT the build spec)
 
+### 2026-09-15 — Live rail unread belongs to each connection's device (#627).
+
+Build each live project frame for its receiving connection using that device's
+own unread mark. If installation identity cannot be resolved, omit unread;
+unknown never borrows an account-wide count. Bootstrap likewise omits unread
+until device identity is available. Native rail unread remains on its per-device
+HTTP refresh; the native live overlay continues to copy activity and live-run
+state only. Acceptance: two connected devices with different marks receive their
+own counts; sharing a frame fails the second device assertion. An unresolved
+device receives no unread field; substituting the account-wide count fails.
+
 ### 2026-09-15 — Configured model access for review and project chat (#939).
 
 A shared API row supplies the provider label, exact model ID, endpoint and

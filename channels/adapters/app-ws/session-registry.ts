@@ -52,6 +52,8 @@ export interface AppWsRegisterOptions {
    * one — those sessions are simply omitted from the delivered set.
    */
   device_id?: string
+  /** Receipt-only fallback identity; never use it for installation unread. */
+  device_id_is_synthetic?: boolean
 }
 
 export interface AppWsSessionRegistry {
@@ -64,6 +66,7 @@ export interface AppWsSessionRegistry {
   /** Fan-out: deliver `env` to EVERY live device on the topic. Returns true
    *  if at least one device received it. */
   send(channel_topic_id: string, env: AppWsOutbound): boolean
+  sendEach(channel_topic_id: string, build: (device_id?: string) => Promise<AppWsOutbound>): Promise<void>
   has(channel_topic_id: string): boolean
   /** Returns a registered platform for a session, or `null` when the
    *  session is offline / no platform was reported (back-compat with P5.1
@@ -85,6 +88,7 @@ interface SessionEntry {
   send: (env: AppWsOutbound) => void
   platform?: AppWsClientPlatform
   device_id?: string
+  device_id_is_synthetic?: boolean
 }
 
 export class InMemoryAppWsSessionRegistry implements AppWsSessionRegistry {
@@ -100,6 +104,7 @@ export class InMemoryAppWsSessionRegistry implements AppWsSessionRegistry {
     const entry: SessionEntry = { send }
     if (opts?.platform !== undefined) entry.platform = opts.platform
     if (opts?.device_id !== undefined) entry.device_id = opts.device_id
+    if (opts?.device_id_is_synthetic !== undefined) entry.device_id_is_synthetic = opts.device_id_is_synthetic
     let set = this.entries.get(channel_topic_id)
     if (set === undefined) {
       set = new Set<SessionEntry>()
@@ -148,6 +153,21 @@ export class InMemoryAppWsSessionRegistry implements AppWsSessionRegistry {
     }
     if (set.size === 0) this.entries.delete(channel_topic_id)
     return delivered
+  }
+
+  /** Build a private frame for each connection, preserving sender isolation. */
+  async sendEach(channel_topic_id: string, build: (device_id?: string) => Promise<AppWsOutbound>): Promise<void> {
+    const set = this.entries.get(channel_topic_id)
+    if (set === undefined) return
+    for (const entry of [...set]) {
+      const frame = await build(entry.device_id_is_synthetic ? undefined : entry.device_id)
+      if (!set.has(entry)) continue
+      try {
+        entry.send(frame)
+      } catch {
+        this.unregister(channel_topic_id, entry.send)
+      }
+    }
   }
 
   has(channel_topic_id: string): boolean {

@@ -1,3 +1,4 @@
+import { createAppWsAuthResolver } from '@neutronai/channels/index.ts'
 /**
  * Unit tests for `SqliteProjectSettingsStore` (ISSUES #9).
  *
@@ -37,6 +38,7 @@ import { seedMigratedDb } from '../../../tests/support/migrated-db.ts'
 import { ProjectDb } from '@neutronai/persistence/index.ts'
 import {
   buildDefaultSettings,
+  createAppProjectsSurface,
   type ProjectSettings,
 } from '../../http/app-projects-surface.ts'
 import { SqliteProjectSettingsStore } from '../sqlite-store.ts'
@@ -399,33 +401,103 @@ describe('SqliteProjectSettingsStore — unread + activity (rail-redesign)', () 
 
   test('unread_count = agent messages beyond the highest read receipt seq', async () => {
     await seed(store, 'acme') // create the project row
+    await store.list(OWNER, USER, 'dev1')
+    await store.list(OWNER, USER, 'dev2')
     await addAgentMsg('acme', 1)
     await addAgentMsg('acme', 2)
     await addAgentMsg('acme', 3)
     // Nothing read yet → all 3 unread.
-    let list = await store.list(OWNER, USER)
+    let list = await store.list(OWNER, USER, 'dev1')
     expect(list.find((p) => p.id === 'acme')!.unread_count).toBe(3)
     // Read up to seq 2 → 1 unread (seq 3).
     await markRead('acme', 1)
     await markRead('acme', 2)
-    list = await store.list(OWNER, USER)
+    list = await store.list(OWNER, USER, 'dev1')
     expect(list.find((p) => p.id === 'acme')!.unread_count).toBe(1)
+    expect((await store.list(OWNER, USER, 'dev2'))[0]!.unread_count).toBe(3)
     // Read seq 3 → caught up.
     await markRead('acme', 3)
-    list = await store.list(OWNER, USER)
+    list = await store.list(OWNER, USER, 'dev1')
     expect(list.find((p) => p.id === 'acme')!.unread_count).toBe(0)
   })
 
-  test('unread_count is 0 when user_id is omitted (no topic to compute from)', async () => {
+  test('unread_count is unknown when user or device is missing', async () => {
     await seed(store, 'acme')
     await addAgentMsg('acme', 1)
     const list = await store.list(OWNER)
-    expect(list.find((p) => p.id === 'acme')!.unread_count).toBe(0)
+    expect(list.find((p) => p.id === 'acme')!.unread_count).toBeNull()
+    expect((await store.list(OWNER, USER))[0]!.unread_count).toBeNull()
+    expect((await store.list(OWNER, USER, 'bad id'))[0]!.unread_count).toBeNull()
+  })
+
+  test('new installation starts at head and does not reset on the next list', async () => {
+    await seed(store, 'acme')
+    await addAgentMsg('acme', 1)
+    await addAgentMsg('acme', 2)
+    expect((await store.list(OWNER, USER, 'new'))[0]!.unread_count).toBe(0)
+    await addAgentMsg('acme', 3)
+    expect((await store.list(OWNER, USER, 'new'))[0]!.unread_count).toBe(1)
+    // Different user, identical installation id: separate topic and baseline.
+    expect((await store.list(OWNER, 'u2', 'new'))[0]!.unread_count).toBe(0)
+    expect((await store.list(OWNER, USER, 'new'))[0]!.unread_count).toBe(1)
+  })
+
+  test('delivered receipts do not read; read updates advance only their device', async () => {
+    await seed(store, 'acme')
+    await store.list(OWNER, USER, 'dev1')
+    await store.list(OWNER, USER, 'dev2')
+    await addAgentMsg('acme', 1)
+    await db.run(`INSERT INTO app_chat_receipts
+      (topic_id, message_id, device_id, seq, delivered_at, read_at)
+      VALUES (?, 'm-acme-1', 'dev1', 1, 1, NULL)`, [topic('acme')])
+    expect((await store.list(OWNER, USER, 'dev1'))[0]!.unread_count).toBe(1)
+    await db.run(`UPDATE app_chat_receipts SET read_at = 2
+      WHERE topic_id = ? AND device_id = 'dev1'`, [topic('acme')])
+    expect((await store.list(OWNER, USER, 'dev1'))[0]!.unread_count).toBe(0)
+    expect((await store.list(OWNER, USER, 'dev2'))[0]!.unread_count).toBe(1)
+    await addAgentMsg('acme', 2)
+    await markRead('acme', 2)
+    await db.run(`UPDATE app_chat_receipts SET read_at = 3
+      WHERE topic_id = ? AND message_id = 'm-acme-1'`, [topic('acme')])
+    expect((await store.list(OWNER, USER, 'dev1'))[0]!.unread_count).toBe(0)
+  })
+
+  test('HTTP list forwards identity and preserves unknown', async () => {
+    await seed(store, 'acme')
+    const surface = createAppProjectsSurface({ store,
+      auth: createAppWsAuthResolver({ project_slug: OWNER, bypass: true }) })
+    async function list(device?: string) {
+      const headers: Record<string, string> = { authorization: `Bearer dev:${USER}` }
+      if (device) headers['x-device-id'] = device
+      const response = await surface.handler(new Request('http://localhost/api/app/projects', { headers }))
+      expect(response!.status).toBe(200)
+      const body = (await response!.json()) as { projects: Array<{ unread_count: number }> }
+      return body.projects[0]!.unread_count
+    }
+    expect(await list('dev1')).toBe(0)
+    expect(await list('dev2')).toBe(0)
+    await addAgentMsg('acme', 1)
+    await markRead('acme', 1)
+    expect(await list('dev1')).toBe(0)
+    expect(await list('dev2')).toBe(1)
+    expect(await list()).toBeNull()
+  })
+
+  test('delivered updates stay unread and user messages never count', async () => {
+    await seed(store, 'acme')
+    await store.list(OWNER, USER, 'dev1')
+    await addAgentMsg('acme', 1)
+    await db.run(`INSERT INTO app_chat_receipts VALUES (?, 'm-acme-1', 'dev1', 1, 1, NULL)`, [topic('acme')])
+    await db.run(`UPDATE app_chat_receipts SET delivered_at = 2 WHERE topic_id = ?`, [topic('acme')])
+    expect((await store.list(OWNER, USER, 'dev1'))[0]!.unread_count).toBe(1)
+    await db.run(`INSERT INTO app_chat_messages
+      (topic_id, seq, message_id, role, body, created_at) VALUES (?, 2, 'human', 'user', 'hi', 2)`, [topic('acme')])
+    expect((await store.list(OWNER, USER, 'dev1'))[0]!.unread_count).toBe(1)
   })
 
   test('list exposes last_activity_at (column value, else updated_at fallback)', async () => {
     await seed(store, 'acme') // the write stamps last_activity_at = now
-    const list = await store.list(OWNER, USER)
+    const list = await store.list(OWNER, USER, 'dev1')
     const acme = list.find((p) => p.id === 'acme')!
     expect(acme.last_activity_at.length).toBeGreaterThan(0)
   })
