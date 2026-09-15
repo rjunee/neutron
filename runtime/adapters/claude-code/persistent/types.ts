@@ -216,6 +216,8 @@ export interface PersistentReplSubstrateOptions {
    *  discriminator folded into the warm-pool key (`cc-llm-*` / `cc-llm-router-*`
    *  / `cc-import-*` / `cc-email-*` never share a REPL; see `poolKeyFor`). */
   substrate_instance_id: string
+  /** Human-legible pane label composed by the caller from its role and card. */
+  repl_pane_label?: string
   /** CWD for the REPL (instance home). DERIVED, not keyed (S3 #104/§2): two turns
    *  for the same (instance,user,project,credential) MUST land on the same warm
    *  REPL even if a caller computed `cwd` differently. Missing or blank cwd

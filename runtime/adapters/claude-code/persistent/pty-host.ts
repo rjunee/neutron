@@ -346,6 +346,8 @@ export interface PtyChild {
 export interface PtySpawnOpts {
   /** Working directory for the child. */
   cwd: string
+  /** Human-legible pane label. Herdr falls back to `neutron-repl` when absent. */
+  label?: string
   /**
    * Environment for the child. Passed verbatim — the caller is responsible
    * for the auth scrub (unset `ANTHROPIC_API_KEY` / set
