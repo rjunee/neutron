@@ -1500,9 +1500,17 @@ describe('orchestrator — APPROVE → done → merge (server-gated)', () => {
   })
 
   test("PR #271's string claim comparison cannot return", () => {
-    const source = readFileSync(join(import.meta.dir, 'orchestrator.ts'), 'utf8')
-    expect(source).not.toContain('startsWith(claimedHead')
-    expect(source).toContain('resolveClaimedCommit')
+    // BOTH FILES, because #999 moved the publication cluster — and G100's claim
+    // comparison with it — into `publication.ts`. A negative assertion narrows
+    // SILENTLY when its subject relocates: this kept passing while the banned
+    // pattern could have been reintroduced in the new file unseen. The positive
+    // control is asserted per file for the same reason, so an empty or renamed
+    // read fails loudly instead of satisfying `not.toContain` vacuously.
+    for (const file of ['orchestrator.ts', 'publication.ts']) {
+      const source = readFileSync(join(import.meta.dir, file), 'utf8')
+      expect(source, file).not.toContain('startsWith(claimedHead')
+      expect(source, file).toContain('resolveClaimedCommit')
+    }
   })
 
   describe('resolveClaimedCommit — real git', () => {
