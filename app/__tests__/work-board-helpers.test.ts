@@ -56,8 +56,11 @@ function progress(over: Partial<RunProgress> = {}): RunProgress {
     phase_label: 'building',
     step_label: 'building',
     round: 1,
+    ralph_round: 0,
     started_at: '',
     last_advanced_at: '',
+    heartbeat_at: '2099-01-01T00:00:00Z',
+    heartbeat_fresh_until: '2099-01-01T00:05:00Z',
     elapsed_ms: 0,
     stalled: false,
     stalled_ms: null,
@@ -97,35 +100,44 @@ describe('stepTag + roundText derive from step_label (M1 redesign)', () => {
   // step (see its docblock). These cases are all about the step, so the item is the
   // run wrapped in an ordinary in_progress card.
   const withRun = (rp: RunProgress): WorkBoardItem => item({ status: 'in_progress', run_progress: rp });
-  it('building → "Building" tag + round N', () => {
+  it('building → "Building" tag + task.review counters', () => {
     const rp = progress({ step_label: 'building', round: 2 });
     expect(stepTag(withRun(rp))).toEqual({ label: 'Building', colorKey: 'build' });
-    expect(roundText(rp)).toBe('round 2');
+    expect(roundText(rp)).toBe('1.2');
   });
 
-  it('retrying → "Retrying" tag + durable attempt N', () => {
+  it('retrying keeps its tag and build counters but pulses only with a fresh heartbeat', () => {
     const rp = progress({ step_label: 'retrying', infra_retries: 2 });
     expect(stepTag(withRun(rp))).toEqual({ label: 'Retrying', colorKey: 'build' });
-    expect(roundText(rp)).toBe('attempt 2');
-    expect(dotState(withRun(rp))).toEqual({ colorKey: 'build', pulse: true });
+    expect(rp.infra_retries).toBe(2);
+    expect(roundText(rp)).toBe('1.1');
+    expect(dotState(withRun(rp))).toEqual({ colorKey: 'build', pulse: false });
+    expect(dotState(item({ status: 'in_progress', linked_run_id: 'r1', run_progress: rp }))).toEqual({
+      colorKey: 'build',
+      pulse: true,
+    });
   });
 
   it('reviewing → "Reviewing" tag + round N', () => {
     const rp = progress({ step_label: 'reviewing', round: 3 });
     expect(stepTag(withRun(rp))).toEqual({ label: 'Reviewing', colorKey: 'review' });
-    expect(roundText(rp)).toBe('round 3');
+    expect(roundText(rp)).toBe('1.3');
+  });
+
+  it('a re-fired task renders the one-based outer task and inner review as 2.1', () => {
+    expect(roundText(progress({ ralph_round: 1, round: 1 }))).toBe('2.1');
   });
 
   it('fixing → "Fixing" tag + round N', () => {
     const rp = progress({ step_label: 'fixing', round: 4 });
     expect(stepTag(withRun(rp))).toEqual({ label: 'Fixing', colorKey: 'fix' });
-    expect(roundText(rp)).toBe('round 4');
+    expect(roundText(rp)).toBe('1.4');
   });
 
   it('merging → "Merging" tag + round N', () => {
     const rp = progress({ step_label: 'merging', round: 5 });
     expect(stepTag(withRun(rp))).toEqual({ label: 'Merging', colorKey: 'merge' });
-    expect(roundText(rp)).toBe('round 5');
+    expect(roundText(rp)).toBe('1.5');
   });
 
   it('done (terminal) → "Merged" tag, NO round', () => {
@@ -147,7 +159,7 @@ describe('stepTag + roundText derive from step_label (M1 redesign)', () => {
     const legacy = progress({ phase_label: 'reviewing', round: 2 });
     delete (legacy as { step_label?: unknown }).step_label;
     expect(stepTag(withRun(legacy))).toEqual({ label: 'Reviewing', colorKey: 'review' });
-    expect(roundText(legacy)).toBe('round 2');
+    expect(roundText(legacy)).toBe('1.2');
     const legacyMerged = progress({ phase_label: 'merged' });
     delete (legacyMerged as { step_label?: unknown }).step_label;
     expect(stepTag(withRun(legacyMerged))).toEqual({ label: 'Merged', colorKey: 'merge' });
@@ -275,8 +287,8 @@ describe('dotState', () => {
     expect(dotState(item({ status: 'in_progress', linked_run_id: null, inline_active: true }))).toEqual({ colorKey: 'build', pulse: true });
   });
 
-  it('an in_progress card with a live bound run (no progress row yet — e.g. a research dispatch) pulses', () => {
-    expect(dotState(item({ status: 'in_progress', linked_run_id: 'r1' }))).toEqual({ colorKey: 'build', pulse: true });
+  it('an in_progress card with a binding but no heartbeat stays static', () => {
+    expect(dotState(item({ status: 'in_progress', linked_run_id: 'r1' }))).toEqual({ colorKey: 'build', pulse: false });
   });
 
   it('a failed card with NO run progress still paints the durable failed lane (static, never blue/gray)', () => {
@@ -330,8 +342,8 @@ describe('isLinkedRunning / canPlay / isRetry', () => {
     expect(isRetry(dead)).toBe(true);
   });
 
-  it('an in_progress card with a LIVE run never double-offers ▶', () => {
-    expect(canPlay(item({ status: 'in_progress', linked_run_id: 'r1' }))).toBe(false);
+  it('an in_progress card with a fresh heartbeat never double-offers ▶', () => {
+    expect(canPlay(item({ status: 'in_progress', linked_run_id: 'r1' }))).toBe(true);
     expect(canPlay(item({ status: 'in_progress', linked_run_id: 'r1', run_progress: progress({ phase_label: 'building' }) }))).toBe(false);
   });
 
@@ -503,7 +515,7 @@ describe('row/rail lockstep — the row dot and the project rail dot must agree 
     });
     expect(activity).toBe('working');
 
-    expect(dotState(item({ status: 'in_progress', linked_run_id: 'r1' })).pulse).toBe(true);
+    expect(dotState(item({ status: 'in_progress', linked_run_id: 'r1', run_progress: progress() })).pulse).toBe(true);
     expect(railDotKind(activity, false)).toBe('work');
   });
 
@@ -570,9 +582,8 @@ describe('a BLOCKED card offers neither play nor retry', () => {
     expect(blocked.run_progress).toBeUndefined();
     expect(isLinkedRunning(blocked)).toBe(false);
     expect(canPlay(blocked)).toBe(false);
-    // CONTROL: an in_progress card with the identical link and no progress IS running —
-    // so this is the lane deciding, not the absent run_progress.
-    expect(isLinkedRunning(item({ status: 'in_progress', linked_run_id: 'run-esc' }))).toBe(true);
+    // CONTROL: the same lane with positive heartbeat evidence is running.
+    expect(isLinkedRunning(item({ status: 'in_progress', linked_run_id: 'run-esc', run_progress: progress() }))).toBe(true);
   });
 
   it('isRetry is false EVEN THOUGH the card keeps its run link', () => {

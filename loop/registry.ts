@@ -6,8 +6,8 @@
  * `[cron-scheduler] … N job(s) ticking` line (S15); the reminders tick loop, the
  * trident tick loop, the watchdog supervisor, and the chunked-upload sweeper all
  * started silently, and — worse — the audit (D-7) found TWO fully-built loops
- * (`ProjectBackupScheduler`, comments `AgentWatcher`) that never start in ANY
- * composition, with nothing surfacing that fact.
+ * (`ProjectBackupScheduler` and, before issue #533, comments `AgentWatcher`)
+ * that never started in ANY composition, with nothing surfacing that fact.
  *
  * `LoopRegistry` generalises cron's boot alarm to EVERY loop:
  *

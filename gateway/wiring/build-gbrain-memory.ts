@@ -46,8 +46,8 @@
  * directory from that env (`gbrain/src/core/preferences.ts`,
  * `gbrain/src/core/config.ts`). The data boundary IS the per-instance home; an
  * operator/systemd-provided `GBRAIN_BRAIN_ID` is honored when present but is not
- * required for isolation. `GBRAIN_SOURCE` defaults to `default` (single source
- * at MM; project partitioning lands in M2.6).
+ * required for isolation. `GBRAIN_SOURCE` is the project slug, so projects in
+ * the same instance address distinct source partitions inside that brain.
  *
  * **Lazy + fail-soft.** `GBrainStdioMcpClient` connects lazily on first `call`,
  * so constructing this at boot spawns nothing. The first memory op spawns
@@ -186,7 +186,7 @@ function normalizeStoredPage(res: unknown): GBrainStoredPage | null {
 /**
  * Resolve the per-instance `GBrainStdioMcpClient` options from the instance home +
  * env. Pure (no I/O, no spawn) so the scoping logic is unit-testable: the
- * `GBRAIN_HOME` data boundary, the `GBRAIN_SOURCE` default, the optional
+ * `GBRAIN_HOME` data boundary, the project-slug `GBRAIN_SOURCE`, the optional
  * operator-provided `GBRAIN_BRAIN_ID` passthrough, and the embedding-store
  * wiring.
  *
@@ -470,6 +470,7 @@ async function resolveServeEmbeddingEnv(
 
 export function resolveGbrainClientOptions(input: {
   owner_home: string
+  project_slug: string
   env?: NodeJS.ProcessEnv
   /**
    * The owner's onboarding-captured OpenAI key (from the ApiKeyStore), if any,
@@ -521,14 +522,11 @@ export function resolveGbrainClientOptions(input: {
   const env = input.env ?? process.env
   const gbrainHome = join(input.owner_home, 'gbrain')
 
-  // GBRAIN_HOME is the per-instance data boundary. Forward an
-  // operator/systemd-provided GBRAIN_SOURCE / GBRAIN_BRAIN_ID when present.
+  // GBRAIN_HOME is the per-instance data boundary. GBRAIN_SOURCE is the
+  // per-project boundary within it; GBRAIN_BRAIN_ID remains operator-provided.
   const childEnv: Record<string, string> = { GBRAIN_HOME: gbrainHome }
 
-  const source =
-    typeof env['GBRAIN_SOURCE'] === 'string' && env['GBRAIN_SOURCE']!.length > 0
-      ? env['GBRAIN_SOURCE']!
-      : 'default'
+  const source = input.project_slug
 
   // The live boot path threads a PER-CONNECT resolver for the key AND/OR the
   // brain width. In that mode the embedder seam (GBRAIN_EMBEDDING_* + provider
@@ -682,6 +680,7 @@ export function buildGBrainMemory(input: {
 
   const opts = resolveGbrainClientOptions({
     owner_home: input.owner_home,
+    project_slug: input.project_slug,
     env,
     resolveBrainWidth: conn.getBrainWidth,
     // SHARE the one per-connect Ollama health with the init guard below.

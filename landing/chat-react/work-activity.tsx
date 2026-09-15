@@ -24,6 +24,8 @@ import { useCallback, useEffect, useRef, useState } from 'react'
 
 import type { WorkBoardItem } from './work-board-client.ts'
 
+const TERMINAL_PHASE_LABELS = ['merged', 'failed', 'cancelled'] as const
+
 /** The minimal live-source surface this hook needs (the controller implements
  *  it). Kept local so a test can drive it without the whole controller. */
 export interface WorkBoardLiveSource {
@@ -32,18 +34,16 @@ export interface WorkBoardLiveSource {
   ): () => void
 }
 
-/** A run's terminal phases — a linked run in one of these is NOT live. Mirrors
- *  `WorkBoardTab`'s `TERMINAL_PHASE_LABELS` (kept local so this hook doesn't
- *  import the JSX tab module). */
-const TERMINAL_PHASE_LABELS: readonly string[] = ['merged', 'failed', 'cancelled']
-
-/** True when the item is bound to a still-live (non-terminal) run. Mirror of
- *  `WorkBoardTab.isLinkedRunning`. */
-export function itemRunning(item: WorkBoardItem): boolean {
+/** True only while this card has fresh, positive evidence from its run's own
+ * wrapper. Missing progress and a merely non-terminal phase prove no liveness. */
+export function itemRunning(item: WorkBoardItem, nowMs = Date.now()): boolean {
   const linked = item.linked_run_id !== null && item.linked_run_id.length > 0
   if (!linked) return false
   const rp = item.run_progress
-  return rp === undefined || !TERMINAL_PHASE_LABELS.includes(rp.phase_label)
+  if (rp === undefined || rp.heartbeat_fresh_until == null) return false
+  if ((TERMINAL_PHASE_LABELS as readonly string[]).includes(rp.phase_label)) return false
+  const freshUntil = Date.parse(rp.heartbeat_fresh_until)
+  return Number.isFinite(freshUntil) && nowMs <= freshUntil
 }
 
 /** The just-started job surfaced to the drawer. */

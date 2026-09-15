@@ -149,8 +149,13 @@ export interface RunProgress {
   round: number
   /** Added after the base progress shape; absent on rolling-deploy frames. */
   infra_retries?: number
+  /** Optional only for compatibility with an older gateway frame. */
+  ralph_round?: number
   started_at: string
   last_advanced_at: string
+  /** Positive ALIVE evidence from the run's own wrapper; null when unestablished. */
+  heartbeat_at?: string | null
+  heartbeat_fresh_until?: string | null
   elapsed_ms: number
   stalled: boolean
   stalled_ms: number | null
@@ -472,8 +477,12 @@ function parseRunProgress(raw: unknown): RunProgress | null {
     step_label,
     round: typeof r['round'] === 'number' ? (r['round'] as number) : 1,
     infra_retries: typeof r['infra_retries'] === 'number' ? (r['infra_retries'] as number) : 0,
+    ralph_round: typeof r['ralph_round'] === 'number' ? (r['ralph_round'] as number) : 0,
     started_at: typeof r['started_at'] === 'string' ? (r['started_at'] as string) : '',
     last_advanced_at: typeof r['last_advanced_at'] === 'string' ? (r['last_advanced_at'] as string) : '',
+    heartbeat_at: typeof r['heartbeat_at'] === 'string' ? (r['heartbeat_at'] as string) : null,
+    heartbeat_fresh_until:
+      typeof r['heartbeat_fresh_until'] === 'string' ? (r['heartbeat_fresh_until'] as string) : null,
     elapsed_ms: typeof r['elapsed_ms'] === 'number' ? (r['elapsed_ms'] as number) : 0,
     stalled: r['stalled'] === true,
     stalled_ms: typeof r['stalled_ms'] === 'number' ? (r['stalled_ms'] as number) : null,

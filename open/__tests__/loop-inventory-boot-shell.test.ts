@@ -44,6 +44,10 @@ const LANDING_DIR = join(HERE, '..', '..', 'landing')
 
 /** COMPLETE set through the boot shell — the composer/graph loops + gateway-liveness. */
 const EXPECTED_RUNNING_LOOPS = [
+  // The comments AgentWatcher — dormant until #533 started it. It reaches the
+  // boot shell through the composer, so it belongs in BOTH inventories; the
+  // composer-level list alone leaves this one red.
+  'agent-watcher',
   'chunked-upload-sweeper',
   // The usage meter's 60 s credential probe. It arms UNCONDITIONALLY — an
   // uncredentialed box does a cheap env/file check and no network call, so a
@@ -195,5 +199,6 @@ test('the real boot EMITS exactly ONE complete boot-inventory line (captured fro
   // loop reds this on the NUMBER, which says nothing about the loop.
   expect(line).toContain(`${EXPECTED_RUNNING_LOOPS.length} loop(s) running`)
   for (const name of EXPECTED_RUNNING_LOOPS) expect(line).toContain(name)
-  expect(line).toContain('2 dormant (deferred): [agent-watcher, project-backup-scheduler]')
+  // #533 started the comments AgentWatcher, so it moved from dormant to running.
+  expect(line).toContain('1 dormant (deferred): [project-backup-scheduler]')
 }, 60_000)

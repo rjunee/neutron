@@ -79,6 +79,8 @@ export interface WorkBoardLiveSource {
   ): () => void
 }
 
+const TERMINAL_PHASE_LABELS: readonly RunPhaseLabel[] = ['merged', 'failed', 'cancelled']
+
 /** Cycle an item's status forward: upcoming → in_progress → done. A failed item
  *  re-queues to upcoming on manual advance (the primary action is the ▶/↻ retry),
  *  and so does a SHELVED (archived) item — advancing it un-shelves it. */
@@ -106,28 +108,20 @@ function statusLabel(status: WorkBoardStatus): string {
   return 'Upcoming'
 }
 
-const TERMINAL_PHASE_LABELS: readonly RunPhaseLabel[] = ['merged', 'failed', 'cancelled']
-
 /**
- * Durable `status='failed'` (detachRun #340) wins over missing run_progress.
- * attachRun atomically sets in_progress with a fresh binding, so this cannot
- * mask a live run; dead-without-terminal-write detection awaits #534.
+ * A binding and non-terminal phase are identity/state, not liveness. Only the
+ * shipped wrapper heartbeat can make this predicate true; missing evidence is
+ * the retryable, non-running case.
  */
-function isLinkedRunning(item: WorkBoardItem): boolean {
+function isLinkedRunning(item: WorkBoardItem, nowMs = Date.now()): boolean {
   const linked = item.linked_run_id !== null && item.linked_run_id.length > 0
   if (!linked) return false
-  // A TERMINAL LANE WRITTEN BY THE RECONCILE BEATS AN ABSENT `run_progress`. The
-  // fall-through below reads "no progress reported" as "still running", which is right
-  // for a card whose run is live and has not reported yet — and wrong for one whose run
-  // ENDED. `failed` has said so since #340; `blocked` needs it for the same reason and
-  // one more: the reconcile deliberately KEEPS the run link on a blocked card so the
-  // reported reason stays reachable, so this is the shape that actually occurs. Without
-  // it a blocked card whose run row has aged out of `run_progress` reads as RUNNING —
-  // it pulses, it counts in the summary's `running`, and its ▶ is suppressed for the
-  // wrong reason.
   if (item.status === 'failed' || item.status === 'blocked') return false
   const rp = item.run_progress
-  return rp === undefined || !TERMINAL_PHASE_LABELS.includes(rp.phase_label)
+  if (rp === undefined || rp.heartbeat_fresh_until == null) return false
+  if (TERMINAL_PHASE_LABELS.includes(rp.phase_label)) return false
+  const freshUntil = Date.parse(rp.heartbeat_fresh_until)
+  return Number.isFinite(freshUntil) && nowMs <= freshUntil
 }
 
 /**
@@ -304,7 +298,7 @@ function dotState(item: WorkBoardItem): DotState {
       case 'merging':
         return { cls: 'cwb-dot-merge', pulse: true }
       case 'retrying':
-        return { cls: 'cwb-dot-build', pulse: true }
+        return { cls: 'cwb-dot-build', pulse: isLinkedRunning(item) }
       case 'done':
         return { cls: 'cwb-dot-done', pulse: false }
       case 'failed':
@@ -324,13 +318,12 @@ function dotState(item: WorkBoardItem): DotState {
   return { cls: 'cwb-dot-upcoming', pulse: false }
 }
 
-/** `round N` for a live (non-terminal) run; null once merged/failed or when idle. */
+/** `<task>.<review>` for a live run; the persisted Ralph task counter is zero-based. */
 function roundText(rp: RunProgress | undefined): string | null {
   if (rp === undefined) return null
   const step = resolveStepLabel(rp)
   if (step === 'done' || step === 'failed') return null
-  if (step === 'retrying') return `attempt ${rp.infra_retries ?? 0}`
-  return `round ${rp.round}`
+  return `${(rp.ralph_round ?? 0) + 1}.${rp.round}`
 }
 
 const MONTHS = [
@@ -564,12 +557,16 @@ export function WorkBoardTab({
     return unsub
   }, [liveSource, projectId, listSeq])
 
-  // While any item is bound to a LIVE (non-terminal) run, quietly re-poll the
-  // board every 15s as a FALLBACK. PR-1's tick fan pushes a `work_board_changed`
-  // snapshot on every inner-step checkpoint, so the dot + tag normally walk live;
-  // this poll only covers a dropped frame / socket blip. Gated on a LIVE link
-  // (via `isLinkedRunning`) so a finished/terminal run does NOT poll forever.
-  const hasLiveRun = useMemo(() => items.some(isLinkedRunning), [items])
+  // While any item remains bound, quietly re-poll the board every 15s. Heartbeat
+  // rows do not mutate the card, so this read is how their arrival and expiry
+  // reach the display. A binding schedules observation; it does not prove life.
+  // Poll while a run remains bound, including before its first heartbeat and after
+  // one expires. The poll discovers heartbeat writes; the binding only schedules
+  // observation and is never itself interpreted as liveness.
+  const hasBoundRun = useMemo(
+    () => items.some((it) => it.linked_run_id !== null && it.linked_run_id.length > 0),
+    [items],
+  )
 
   // …and while any card reads INLINE-ACTIVE, for the same reason in reverse. That
   // flag is now DERIVED server-side from a 90 s evidence window, so it goes stale
@@ -587,12 +584,12 @@ export function WorkBoardTab({
     onSummary?.(summarize(items))
   }, [items, onSummary])
   useEffect(() => {
-    if (!hasLiveRun && !hasInlineActive) return
+    if (!hasBoundRun && !hasInlineActive) return
     const interval = setInterval(() => {
       refresh(true)
     }, 15_000)
     return () => clearInterval(interval)
-  }, [hasLiveRun, hasInlineActive, refresh])
+  }, [hasBoundRun, hasInlineActive, refresh])
 
   const addItem = useCallback((): void => {
     const title = newTitle.trim()

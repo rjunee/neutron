@@ -135,7 +135,7 @@ function textFor(input: WorkBoardChatAckInput, board: string): string {
       // NAMES THE BOARD. Without it an ack for a card added in one project is
       // indistinguishable from one added in another, and the owner cannot tell
       // from the message which board just changed.
-      return `▸ On the Work Board · ${board}: "${t}"`
+      return `▸ Added to work board · ${board}: "${t}"`
     case 'build_dispatched':
       return `⑂ Build dispatched: "${t}" — running autonomously; the result will post here when it lands.`
     case 'inline_started':

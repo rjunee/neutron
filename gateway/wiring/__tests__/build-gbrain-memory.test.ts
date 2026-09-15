@@ -20,6 +20,8 @@ import {
   type GBrainMemoryWiring,
 } from '../build-gbrain-memory.ts'
 import { composeGbrainChildEnv, resolveGbrainCommand } from '@neutronai/gbrain-memory/index.ts'
+import { GBrainMemoryStore } from '@neutronai/gbrain-memory/gbrain-memory-store.ts'
+import type { McpClient } from '@neutronai/gbrain-memory/mcp-client.ts'
 import {
   buildOpenAiEmbedderConfig,
   resolveInitEmbeddingTarget,
@@ -55,30 +57,71 @@ describe('resolveGbrainClientOptions', () => {
     // Uses the explicit `off` opt-out so this test stays decoupled from the
     // RA3 default embedder choice — its whole point is the path boundary.
     const opts = resolveGbrainClientOptions({
+      project_slug: 'test-project',
       owner_home: '/srv/owners/acme',
       env: { NEUTRON_EMBEDDINGS: 'off' },
     })
     expect(opts.env).toEqual({ GBRAIN_HOME: '/srv/owners/acme/gbrain' })
   })
 
-  test('source defaults to "default" and brainId is omitted when env is unset', () => {
-    const opts = resolveGbrainClientOptions({ owner_home: '/t', env: {} })
-    expect(opts.source).toBe('default')
+  test('source is the project slug and brainId is omitted when env is unset', () => {
+    const opts = resolveGbrainClientOptions({ project_slug: 'test-project', owner_home: '/t', env: {} })
+    expect(opts.source).toBe('test-project')
     expect(opts.brainId).toBeUndefined()
   })
 
-  test('honors operator-provided GBRAIN_SOURCE + GBRAIN_BRAIN_ID', () => {
+  test('project slug overrides process-wide GBRAIN_SOURCE while GBRAIN_BRAIN_ID is honored', () => {
     const opts = resolveGbrainClientOptions({
+      project_slug: 'test-project',
       owner_home: '/t',
       env: { GBRAIN_SOURCE: 'projects', GBRAIN_BRAIN_ID: 'acme-brain' },
     })
-    expect(opts.source).toBe('projects')
+    expect(opts.source).toBe('test-project')
     expect(opts.brainId).toBe('acme-brain')
   })
 
-  test('blank GBRAIN_SOURCE falls back to "default"', () => {
-    const opts = resolveGbrainClientOptions({ owner_home: '/t', env: { GBRAIN_SOURCE: '' } })
-    expect(opts.source).toBe('default')
+  test('blank process-wide GBRAIN_SOURCE cannot collapse the project partition', () => {
+    const opts = resolveGbrainClientOptions({ project_slug: 'test-project', owner_home: '/t', env: { GBRAIN_SOURCE: '' } })
+    expect(opts.source).toBe('test-project')
+  })
+
+  test('two projects round-trip entities only through their own source partition', async () => {
+    const pagesBySource = new Map<string, Map<string, string>>()
+
+    class SourcePartitionClient implements McpClient {
+      constructor(private readonly source: string) {}
+
+      async call(name: string, args: Record<string, unknown>): Promise<unknown> {
+        const pages = pagesBySource.get(this.source) ?? new Map<string, string>()
+        pagesBySource.set(this.source, pages)
+        if (name === 'put_page') {
+          pages.set(String(args['slug']), String(args['content']))
+          return {}
+        }
+        if (name === 'search') {
+          const query = String(args['query'])
+          return [...pages.entries()]
+            .filter(([, content]) => content.includes(query))
+            .map(([slug, content]) => ({ slug, chunk_text: content }))
+        }
+        throw new Error(`unexpected operation: ${name}`)
+      }
+    }
+
+    const storeFor = (project_slug: string): GBrainMemoryStore => {
+      const opts = resolveGbrainClientOptions({ project_slug, owner_home: '/t', env: {} })
+      return new GBrainMemoryStore(new SourcePartitionClient(opts.source!))
+    }
+    const alpha = storeFor('alpha-project')
+    const beta = storeFor('beta-project')
+
+    await alpha.add({ content: 'alpha-only fact', metadata: { slug: 'shared-entity' } })
+    await beta.add({ content: 'beta-only fact', metadata: { slug: 'shared-entity' } })
+
+    expect(await alpha.query({ query: 'alpha-only' })).toHaveLength(1)
+    expect(await alpha.query({ query: 'beta-only' })).toEqual([])
+    expect(await beta.query({ query: 'beta-only' })).toHaveLength(1)
+    expect(await beta.query({ query: 'alpha-only' })).toEqual([])
   })
 
   // --- Conditional embedding-store init (opt-in) ---------------------------
@@ -87,6 +130,7 @@ describe('resolveGbrainClientOptions', () => {
       // RA3: the default is now the local Ollama fallback (hybrid recall out
       // of the box), not "no embedder at all".
       const opts = resolveGbrainClientOptions({
+        project_slug: 'test-project',
         owner_home: '/srv/owners/acme',
         env: {},
       })
@@ -103,6 +147,7 @@ describe('resolveGbrainClientOptions', () => {
       // LLM adapter's key) must NOT leak into the embedding seam or trigger
       // cloud embeddings — the default stays the FREE local Ollama fallback.
       const opts = resolveGbrainClientOptions({
+        project_slug: 'test-project',
         owner_home: '/srv/owners/acme',
         env: { OPENAI_API_KEY: 'sk-llm-only' },
       })
@@ -117,6 +162,7 @@ describe('resolveGbrainClientOptions', () => {
 
     test('explicit opt-out (NEUTRON_EMBEDDINGS=off) → child env is exactly GBRAIN_HOME (keyword + graph)', () => {
       const opts = resolveGbrainClientOptions({
+        project_slug: 'test-project',
         owner_home: '/srv/owners/acme',
         env: { NEUTRON_EMBEDDINGS: 'off', OPENAI_API_KEY: 'sk-llm-only' },
       })
@@ -125,6 +171,7 @@ describe('resolveGbrainClientOptions', () => {
 
     test('embedder configured (openai) → child env carries the GBrain embedding seam (universal 768 width)', () => {
       const opts = resolveGbrainClientOptions({
+        project_slug: 'test-project',
         owner_home: '/srv/owners/acme',
         env: { NEUTRON_EMBEDDINGS: 'openai', OPENAI_API_KEY: 'sk-real' },
       })
@@ -138,6 +185,7 @@ describe('resolveGbrainClientOptions', () => {
 
     test('embedder configured (ollama) → local embedding seam, GBRAIN_HOME preserved', () => {
       const opts = resolveGbrainClientOptions({
+        project_slug: 'test-project',
         owner_home: '/t',
         env: { NEUTRON_EMBEDDINGS: 'ollama' },
       })
@@ -149,8 +197,9 @@ describe('resolveGbrainClientOptions', () => {
       })
     })
 
-    test('embedder + GBRAIN_SOURCE/BRAIN_ID coexist on the same child', () => {
+    test('embedder + project source/BRAIN_ID coexist on the same child', () => {
       const opts = resolveGbrainClientOptions({
+        project_slug: 'test-project',
         owner_home: '/t',
         env: {
           NEUTRON_EMBEDDINGS: 'ollama',
@@ -158,7 +207,7 @@ describe('resolveGbrainClientOptions', () => {
           GBRAIN_BRAIN_ID: 'acme-brain',
         },
       })
-      expect(opts.source).toBe('projects')
+      expect(opts.source).toBe('test-project')
       expect(opts.brainId).toBe('acme-brain')
       expect(opts.env).toMatchObject({ GBRAIN_EMBEDDING_MODEL: 'ollama:nomic-embed-text' })
     })
@@ -173,6 +222,7 @@ describe('resolveGbrainClientOptions', () => {
     test('legacy 3072 brain, default (no key) → local Ollama fallback DROPPED (keyword+graph)', () => {
       // Ollama nomic-embed-text is fixed at 768 and cannot match a 3072 column.
       const opts = resolveGbrainClientOptions({
+        project_slug: 'test-project',
         owner_home: '/t',
         env: {},
         existingBrainDims: 3072,
@@ -182,6 +232,7 @@ describe('resolveGbrainClientOptions', () => {
 
     test('legacy 3072 brain + eager OpenAI key → cloud embedder at the brain width (in-place upgrade)', () => {
       const opts = resolveGbrainClientOptions({
+        project_slug: 'test-project',
         owner_home: '/t',
         env: {},
         openaiApiKey: 'sk-real',
@@ -197,6 +248,7 @@ describe('resolveGbrainClientOptions', () => {
 
     test('existing 768 brain, default → local fallback matches, unchanged', () => {
       const opts = resolveGbrainClientOptions({
+        project_slug: 'test-project',
         owner_home: '/t',
         env: {},
         existingBrainDims: 768,
@@ -213,6 +265,7 @@ describe('resolveGbrainClientOptions', () => {
       // composition must be seen at connect time.
       let liveWidth: import('@neutronai/gbrain-memory/index.ts').BrainEmbeddingWidth = null // absent at compose
       const opts = resolveGbrainClientOptions({
+        project_slug: 'test-project',
         owner_home: '/t',
         env: {},
         resolveOpenAiKey: async () => undefined, // default embedder, no key
@@ -230,6 +283,7 @@ describe('resolveGbrainClientOptions', () => {
 
       // A key stored later → OpenAI adopts the freshly-read 3072 width (in place).
       const keyed = resolveGbrainClientOptions({
+        project_slug: 'test-project',
         owner_home: '/t',
         env: {},
         resolveOpenAiKey: async () => 'sk-real',
@@ -249,6 +303,7 @@ describe('resolveGbrainClientOptions', () => {
       // static env bakes a stale 768 and the init guard (always live-reconciled)
       // disagrees. Repro Codex flagged: resolveBrainWidth present, resolveOpenAiKey absent.
       const opts = resolveGbrainClientOptions({
+        project_slug: 'test-project',
         owner_home: '/t',
         env: {}, // default embedder = local Ollama, no key
         resolveBrainWidth: () => 3072, // existing legacy brain
@@ -269,6 +324,7 @@ describe('resolveGbrainClientOptions', () => {
       const liveWidth: number | 'unknown' | null = 3072
       const conn = makePerConnectResolver({ resolveBrainWidth: () => liveWidth })
       const opts = resolveGbrainClientOptions({
+        project_slug: 'test-project',
         owner_home: '/t',
         env: {},
         resolveBrainWidth: conn.getBrainWidth, // per-connect, NO resolveOpenAiKey
@@ -293,6 +349,7 @@ describe('resolveGbrainClientOptions', () => {
     test('legacy 3072 brain + LAZY key → resolveDynamicEnv upgrades in place at 3072, drops to keyword+graph without a key', async () => {
       let stored: string | undefined
       const opts = resolveGbrainClientOptions({
+        project_slug: 'test-project',
         owner_home: '/t',
         env: {},
         resolveOpenAiKey: async () => stored,
@@ -397,6 +454,7 @@ describe('resolveGbrainClientOptions', () => {
       // override (NOT empty) so it WINS over any persisted embedding provider.
       let stored: string | undefined
       const opts = resolveGbrainClientOptions({
+        project_slug: 'test-project',
         owner_home: '/t',
         env: { NEUTRON_EMBEDDINGS: 'off' },
         resolveOpenAiKey: async () => stored,
@@ -413,6 +471,7 @@ describe('resolveGbrainClientOptions', () => {
       expect(w).toBe(768)
       let stored: string | undefined
       const opts = resolveGbrainClientOptions({
+        project_slug: 'test-project',
         owner_home: '/t',
         env: { NEUTRON_EMBEDDINGS: 'openai', OPENAI_API_KEY: 'sk-env' },
         resolveOpenAiKey: async () => stored,
@@ -497,6 +556,7 @@ describe('resolveGbrainClientOptions', () => {
 
     test('reachable Ollama → forwards the real ollama embed env (embeds on write)', async () => {
       const opts = resolveGbrainClientOptions({
+        project_slug: 'test-project',
         owner_home: '/t',
         env: {}, // default → local Ollama
         resolveBrainWidth: () => null, // fresh
@@ -511,6 +571,7 @@ describe('resolveGbrainClientOptions', () => {
 
     test('unreachable Ollama → parks on keyless OpenAI-latent @768 (no ollama env, key neutralized) → put_page skips embed', async () => {
       const opts = resolveGbrainClientOptions({
+        project_slug: 'test-project',
         owner_home: '/t',
         env: {},
         resolveBrainWidth: () => null,
@@ -527,6 +588,7 @@ describe('resolveGbrainClientOptions', () => {
 
     test('Ollama reachable but model NOT pulled → same keyless-latent degrade', async () => {
       const opts = resolveGbrainClientOptions({
+        project_slug: 'test-project',
         owner_home: '/t',
         env: {},
         resolveBrainWidth: () => null,
@@ -544,6 +606,7 @@ describe('resolveGbrainClientOptions', () => {
       // null before any reachability probe.
       let probed = false
       const opts = resolveGbrainClientOptions({
+        project_slug: 'test-project',
         owner_home: '/t',
         env: { NEUTRON_EMBEDDINGS: 'off' },
         resolveBrainWidth: () => 768, // persisted RA3-default (ollama@768) column
@@ -559,6 +622,7 @@ describe('resolveGbrainClientOptions', () => {
     test('CLOUD (OpenAI key) embedder is NEVER probed → forwards its env unchanged', async () => {
       let probed = false
       const opts = resolveGbrainClientOptions({
+        project_slug: 'test-project',
         owner_home: '/t',
         env: {},
         openaiApiKey: 'sk-real',
@@ -607,6 +671,7 @@ describe('resolveGbrainClientOptions', () => {
       // The serve env built from the SHARED result is the keyless disable override
       // (keyword+graph) — coherent with the skipped backfill, NOT the ollama env.
       const opts = resolveGbrainClientOptions({
+        project_slug: 'test-project',
         owner_home: '/t',
         env: {},
         resolveBrainWidth: () => 768,
@@ -629,6 +694,7 @@ describe('resolveGbrainClientOptions', () => {
   describe('lazy onboarding-key resolver (resolveOpenAiKey)', () => {
     test('static child env is GBRAIN_HOME only; the embedder is resolved per-connect via resolveDynamicEnv', () => {
       const opts = resolveGbrainClientOptions({
+        project_slug: 'test-project',
         owner_home: '/srv/owners/acme',
         env: {},
         resolveOpenAiKey: async () => 'sk-captured-later',
@@ -640,6 +706,7 @@ describe('resolveGbrainClientOptions', () => {
 
     test('resolveDynamicEnv() yields the OpenAI embedding seam, at the SHARED 768-dim width, when the key is present', async () => {
       const opts = resolveGbrainClientOptions({
+        project_slug: 'test-project',
         owner_home: '/t',
         env: {},
         resolveOpenAiKey: async () => 'sk-captured-later',
@@ -661,6 +728,7 @@ describe('resolveGbrainClientOptions', () => {
 
     test('resolveDynamicEnv() yields the local Ollama fallback (not empty) when the key is absent', async () => {
       const opts = resolveGbrainClientOptions({
+        project_slug: 'test-project',
         owner_home: '/t',
         env: {},
         resolveOpenAiKey: async () => undefined,
@@ -675,6 +743,7 @@ describe('resolveGbrainClientOptions', () => {
 
     test('a blank/whitespace key does NOT activate cloud billing (falls to the free local fallback)', async () => {
       const opts = resolveGbrainClientOptions({
+        project_slug: 'test-project',
         owner_home: '/t',
         env: {},
         resolveOpenAiKey: async () => '   ',
@@ -691,6 +760,7 @@ describe('resolveGbrainClientOptions', () => {
       // key stored since.
       let stored: string | undefined
       const opts = resolveGbrainClientOptions({
+        project_slug: 'test-project',
         owner_home: '/t',
         env: {},
         resolveOpenAiKey: async () => stored,

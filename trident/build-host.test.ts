@@ -6,10 +6,12 @@ import { fakeRunner, type Provider, type BoundedWorkRequest } from '@neutronai/r
 import { buildRun, type BuildRunInput, type BuildSnapshot } from './build-run.ts'
 import { createBuildHost, type BuildHostOptions } from './build-host.ts'
 import { briefIntegrity } from './gates/brief-integrity.ts'
+import { publicationReadiness, pinnedMergeReadiness } from './gates/release-readiness.ts'
 import { MERGE_DIFF_BYTES_MAX } from './merge.ts'
 
 const head = 'a'.repeat(40)
 const snapshot: BuildSnapshot = { head, diff: '+code', pr: null }
+const published: BuildSnapshot = { ...snapshot, pr: { number: 12, head, state: 'OPEN' } }
 const dirs: string[] = []
 afterEach(async () => { await Promise.all(dirs.splice(0).map(dir => rm(dir, { recursive: true, force: true }))) })
 async function fixture() {
@@ -28,6 +30,7 @@ async function fixture() {
   let leakOutput = 'LEAK GATE: INCOMPLETE\nRULES THAT COULD NOT RUN: pii'
   let leakCode = 3
   const options: BuildHostOptions = {
+    reviewed_head: null,
     runners: { pi: fakeRunner('pi') }, replProvider: 'pi',
     workers: Object.fromEntries(['plan', 'build', 'review', 'fix'].map(role => [role, { provider: 'pi', request }])) as BuildHostOptions['workers'],
     effects: {
@@ -47,11 +50,17 @@ async function fixture() {
       readClaim: async () => null,
       run_host: async (argv) => {
         calls.push(argv)
+        if (argv.includes('gh')) return { ok: true, exit_code: 0, stdout: JSON.stringify({ headRefName: 'change', baseRefName: 'release', isCrossRepository: false, headRefOid: head, state: 'OPEN' }), stderr: '' }
+        if (argv.includes('fetch') || argv.includes('ls-remote')) return { ok: true, exit_code: 0, stdout: '', stderr: '' }
         if (argv.includes('rev-parse') && drift === 'unreadable') return { ok: false, exit_code: 128, stdout: '', stderr: '' }
         if (argv.includes('merge-base')) return { ok: drift !== 'unreadable', exit_code: drift === 'unreadable' ? 128 : 0, stdout: drift === 'overlap' ? 'b'.repeat(40) : head, stderr: '' }
         if (argv.includes('--name-only')) return { ok: true, exit_code: 0, stdout: 'src/code.ts\n', stderr: '' }
         if (argv.includes('rev-parse')) return { ok: true, exit_code: 0, stdout: head, stderr: '' }
-        if (argv.includes('diff')) return { ok: true, exit_code: 0, stdout: diff, stderr: '' }
+        if (argv.includes('diff')) {
+          const output = argv.find(arg => arg.startsWith('--output='))
+          if (output) await writeFile(output.slice('--output='.length), diff)
+          return { ok: true, exit_code: 0, stdout: diff, stderr: '' }
+        }
         if (argv.includes('check-ref-format')) return { ok: true, exit_code: 0, stdout: '', stderr: '' }
         throw new Error(`Unexpected command: ${argv.join(' ')}`)
       },
@@ -106,22 +115,22 @@ test('brief integrity blocks changed bytes including the fix brief', async () =>
   expect(await host.deps.admissionGate(f.input(host))).toEqual({ kind: 'blocked', on: 'fix brief integrity mismatch' })
 })
 
-test('unreadable admission and complete admission policy stay unknown', async () => {
+test('unreadable admission and missing project source stay unknown', async () => {
   const f = await fixture()
   const host = f.make()
-  expect(await host.deps.admissionGate(f.input(host))).toMatchObject({ kind: 'unknown', detail: 'Complete project admission policy is not wired' })
+  expect(await host.deps.admissionGate(f.input(host))).toMatchObject({ kind: 'unknown', detail: 'Project admission observation source is missing' })
   expect(await buildRun(f.input(host), host.deps, new AbortController().signal)).toMatchObject({ kind: 'unknown', phase: 'plan' })
   await rm(f.path)
   expect(await host.deps.admissionGate(f.input(host))).toMatchObject({ kind: 'unknown', detail: 'plan brief could not be read' })
 })
 
-test('malformed review stays unknown and blocking severity blocks', async () => {
+test('malformed review and missing panel evidence stay unknown', async () => {
   const f = await fixture()
   const { deps } = f.make()
   expect(await deps.reviewGate(null, snapshot, 1)).toMatchObject({ kind: 'unknown', detail: 'Review trailer not-object at $' })
   const finding = { severity: 'major', title: 'bug', evidence: 'code.ts:1', file: 'code.ts', symbol: 'f', rule: 'correctness', line: 1 }
-  expect(await deps.reviewGate({ verdict: 'APPROVE', findings: [finding] }, snapshot, 1)).toMatchObject({ kind: 'blocked' })
-  for (const severity of ['minor', 'nit']) expect(await deps.reviewGate({ verdict: 'APPROVE', findings: [{ ...finding, severity }] }, snapshot, 1)).toMatchObject({ kind: 'unknown', detail: 'Review panel provenance, cross-model seats and arbitration are not wired' })
+  expect(await deps.reviewGate({ verdict: 'APPROVE', findings: [finding] }, snapshot, 1)).toMatchObject({ kind: 'unknown' })
+  for (const severity of ['minor', 'nit']) expect(await deps.reviewGate({ verdict: 'APPROVE', findings: [{ ...finding, severity }] }, snapshot, 1)).toMatchObject({ kind: 'unknown', detail: 'Review panel observation source is missing' })
   expect(await deps.reviewGate({ verdict: 'APPROVE', findings: [] }, snapshot, 1)).toMatchObject({ kind: 'unknown' })
 })
 
@@ -145,7 +154,7 @@ test('mutation proof blocks missing nomination and pins the reviewed head', asyn
   const { deps } = f.make()
   expect(await deps.publishGate(snapshot)).toMatchObject({ kind: 'blocked', on: expect.stringContaining('nominated no mutation') })
   f.prose()
-  expect(await deps.publishGate(snapshot)).toMatchObject({ kind: 'unknown', detail: 'Complete publication readiness is not wired' })
+  expect(await deps.publishGate(snapshot)).toMatchObject({ kind: 'allow' })
   expect(await deps.publishGate({ ...snapshot, head: 'c'.repeat(40) })).toMatchObject({ kind: 'blocked', on: expect.stringContaining('branch tip') })
 })
 
@@ -157,20 +166,285 @@ test('CI unreadable stays unknown; red, absent, running and wrong head block', a
     { kind: 'completed', headSha: 'other', conclusion: 'success' },
   ] as const) {
     f.options.observeCi = async () => observation
-    expect(await f.make().deps.mergeGate(snapshot)).toMatchObject({ kind: 'blocked' })
+    expect(await f.make().deps.mergeGate(published)).toMatchObject({ kind: 'blocked' })
   }
   f.options.observeCi = async () => ({ kind: 'unreadable', reason: 'offline' })
-  expect(await f.make().deps.mergeGate(snapshot)).toEqual({ kind: 'unknown', detail: 'offline' })
+  expect(await f.make().deps.mergeGate(published)).toEqual({ kind: 'unknown', detail: 'offline' })
   f.options.observeCi = async () => ({ kind: 'completed', headSha: head, conclusion: 'success' })
-  expect(await f.make().deps.mergeGate(snapshot)).toEqual({ kind: 'unknown', detail: 'Atomic pinned-head merge eligibility is not wired' })
+  expect(await f.make().deps.mergeGate(published)).toEqual({ kind: 'allow' })
 })
 
 test('base drift preserves uncertainty and blocks overlapping changes', async () => {
   const f = await fixture()
   f.setDrift('unreadable')
-  expect(await f.make().deps.mergeGate(snapshot)).toEqual({ kind: 'unknown', detail: 'Base drift could not be assessed' })
+  expect(await f.make().deps.mergeGate(published)).toEqual({ kind: 'unknown', detail: 'Base drift could not be assessed' })
   f.setDrift('overlap')
-  expect(await f.make().deps.mergeGate(snapshot)).toEqual({ kind: 'blocked', on: 'Base drift overlaps reviewed changes' })
+  expect(await f.make().deps.mergeGate(published)).toEqual({ kind: 'blocked', on: 'Base drift overlaps reviewed changes' })
   f.setDrift('clear')
-  expect(await f.make().deps.mergeGate(snapshot)).toEqual({ kind: 'unknown', detail: 'Atomic pinned-head merge eligibility is not wired' })
+  expect(await f.make().deps.mergeGate(published)).toEqual({ kind: 'allow' })
+})
+
+const commandResult = (stdout = '', exit_code = 0) => ({ ok: exit_code === 0, exit_code, stdout, stderr: '' })
+
+test('publication readiness measures local head, remote state and first-push ancestry', async () => {
+  const f = await fixture()
+  const baseRun = f.options.mutation.run_host
+  const check = (run = baseRun, value = snapshot) => publicationReadiness(run, 'repo', 'change', 'b'.repeat(40), value)
+  expect(await check()).toEqual({ kind: 'allow' })
+  for (const result of [commandResult('', 128), commandResult('short')]) {
+    expect(await check(async (argv, cwd) => argv.includes('rev-parse') ? result : baseRun(argv, cwd))).toMatchObject({ kind: 'unknown' })
+  }
+  expect(await check(baseRun, { ...snapshot, head: 'c'.repeat(40) })).toMatchObject({ kind: 'blocked' })
+  for (const result of [commandResult('', 128), commandResult('not-an-oid refs/heads/change'), commandResult(`${head}\trefs/heads/other`)]) {
+    expect(await check(async (argv, cwd) => argv.includes('ls-remote') ? result : baseRun(argv, cwd))).toMatchObject({ kind: 'unknown' })
+  }
+  for (const [code, kind] of [[1, 'blocked'], [128, 'unknown']] as const) {
+    expect(await check(async (argv, cwd) => argv.includes('--is-ancestor') ? commandResult('', code) : baseRun(argv, cwd))).toMatchObject({ kind })
+  }
+  let ancestryCalls = 0
+  expect(await check(async (argv, cwd) => {
+    if (argv.includes('ls-remote')) return commandResult(`${head}\trefs/heads/change\n`)
+    if (argv.includes('--is-ancestor')) { ancestryCalls++; return commandResult('', 1) }
+    return baseRun(argv, cwd)
+  })).toEqual({ kind: 'allow' })
+  expect(ancestryCalls).toBe(0)
+  expect(await check(async () => { throw new Error('offline') })).toMatchObject({ kind: 'unknown' })
+})
+
+test('merge eligibility refuses absent, malformed, closed or mismatched review pins', async () => {
+  const f = await fixture()
+  for (const value of [snapshot, { ...published, head: 'short' },
+    ...[0, -1, 1.5, NaN].map(number => ({ ...published, pr: { ...published.pr!, number } })),
+    { ...published, pr: { ...published.pr!, state: 'CLOSED' as const } },
+    { ...published, pr: { ...published.pr!, head: 'c'.repeat(40) } },
+  ]) {
+    expect(await pinnedMergeReadiness(f.options.mutation.run_host, 'repo', value)).toMatchObject({ kind: 'blocked' })
+  }
+  expect(await pinnedMergeReadiness(f.options.mutation.run_host, 'repo', published)).toEqual({ kind: 'allow' })
+})
+
+test('merge eligibility measures actual PR refs and rejects unreadable or foreign observations', async () => {
+  const f = await fixture()
+  const baseRun = f.options.mutation.run_host
+  const pr = { headRefName: 'change', baseRefName: 'release', isCrossRepository: false, headRefOid: head, state: 'OPEN' }
+  const cases = [
+    { result: commandResult('', 1), kind: 'unknown' },
+    { result: commandResult('not-json'), kind: 'unknown' },
+    ...[null, {}, { ...pr, headRefName: '' }, { ...pr, baseRefName: '' }, { ...pr, isCrossRepository: null }]
+      .map(value => ({ result: commandResult(JSON.stringify(value)), kind: 'unknown' })),
+    ...[{ ...pr, isCrossRepository: true }, { ...pr, headRefOid: 'c'.repeat(40) }, { ...pr, state: 'CLOSED' }]
+      .map(value => ({ result: commandResult(JSON.stringify(value)), kind: 'blocked' })),
+  ]
+  for (const { result, kind } of cases) {
+    const run: typeof baseRun = (argv, cwd) => argv.includes('gh') ? Promise.resolve(result) : baseRun(argv, cwd)
+    expect(await pinnedMergeReadiness(run, 'repo', published)).toMatchObject({ kind })
+  }
+  expect(await pinnedMergeReadiness(baseRun, 'repo', published)).toEqual({ kind: 'allow' })
+  expect(f.calls).toContainEqual(['git', '-C', 'repo', 'fetch', 'origin', '+refs/heads/release:refs/remotes/origin/release', '+refs/heads/change:refs/remotes/origin/change'])
+  expect(f.calls).toContainEqual(['git', '-C', 'repo', 'merge-base', 'refs/remotes/origin/release', 'refs/remotes/origin/change'])
+})
+
+test('merge eligibility preserves refresh, size and fetched-head gates', async () => {
+  const f = await fixture()
+  const baseRun = f.options.mutation.run_host
+  for (const token of ['check-ref-format', 'fetch', 'diff']) {
+    const run: typeof baseRun = (argv, cwd) => argv.includes(token) ? Promise.resolve(commandResult('', 128)) : baseRun(argv, cwd)
+    expect(await pinnedMergeReadiness(run, 'repo', published)).toMatchObject({ kind: 'unknown' })
+  }
+  expect(await pinnedMergeReadiness(async (argv, cwd) => {
+    if (!argv.includes('diff')) return baseRun(argv, cwd)
+    await writeFile(argv.find(arg => arg.startsWith('--output='))!.slice('--output='.length), 'x'.repeat(MERGE_DIFF_BYTES_MAX + 1))
+    return commandResult('truncated stdout')
+  }, 'repo', published)).toMatchObject({ kind: 'blocked' })
+  expect(await pinnedMergeReadiness(async (argv, cwd) => argv.includes('diff')
+    ? commandResult('stdout is not a written diff') : baseRun(argv, cwd), 'repo', published)).toMatchObject({ kind: 'unknown' })
+  expect(await pinnedMergeReadiness(async (argv, cwd) => argv.includes('rev-parse') && argv.some(arg => arg.includes('refs/remotes/origin/change'))
+    ? commandResult('c'.repeat(40)) : baseRun(argv, cwd), 'repo', published)).toMatchObject({ kind: 'blocked', on: 'Fetched PR head differs from reviewed head' })
+  expect(await pinnedMergeReadiness(async () => { throw new Error('offline') }, 'repo', published)).toMatchObject({ kind: 'unknown' })
+  expect(await pinnedMergeReadiness(baseRun, 'repo', published)).toEqual({ kind: 'allow' })
+})
+
+test('host publication readiness is reached after a measured prose exemption', async () => {
+  const f = await fixture()
+  f.prose()
+  const baseRun = f.options.mutation.run_host
+  f.options.mutation.run_host = (argv, cwd) => argv.includes('--is-ancestor')
+    ? Promise.resolve(commandResult('', 1)) : baseRun(argv, cwd)
+  expect(await f.make().deps.publishGate(snapshot)).toEqual({ kind: 'blocked', on: 'Publication branch does not contain the pinned launch base' })
+  f.options.mutation.run_host = baseRun
+  expect(await f.make().deps.publishGate(snapshot)).toEqual({ kind: 'allow' })
+})
+
+test('host merge eligibility is reached after green CI', async () => {
+  const f = await fixture()
+  expect(await f.make().deps.mergeGate(snapshot)).toEqual({ kind: 'blocked', on: 'Merge requires a PR number and full reviewed head OID' })
+  expect(await f.make().deps.mergeGate(published)).toEqual({ kind: 'allow' })
+})
+
+
+test('host admission and review reach authoritative policy sources', async () => {
+  const f = await fixture()
+  f.options.admission = {
+    observe: async input => ({ runId: input.run_id, repo: 'repo', branch: 'change', baseBranch: 'main', prior: null }),
+    run: async argv => commandResult(argv.includes('rev-parse') ? head : ''),
+  }
+  const payload = { verdict: 'APPROVE', findings: [] }
+  f.options.review = {
+    seats: [{ id: 'core', provider: 'pi', modelId: 'core-model', role: 'core', enabled: true }],
+    readSeat: async (_seat, value, round) => ({ runId: 'test', head: value.head, round, provider: 'pi', modelId: 'core-model', status: 'completed', payload }),
+    retrySeat: async () => { throw Error('unexpected retry') },
+    readSynthesis: async (value, round) => ({ runId: 'test', head: value.head, round, checkpoint: 'argus-approved', payload }),
+  }
+  const host = f.make()
+  expect(await host.deps.admissionGate(f.input(host))).toEqual({ kind: 'allow' })
+  expect(await host.deps.reviewGate(payload, snapshot, 1)).toEqual({ kind: 'approve' })
+  f.options.review.readSynthesis = async () => null
+  expect(await host.deps.reviewGate(payload, snapshot, 1)).toMatchObject({ kind: 'unknown' })
+})
+
+test('fresh null reviewed_head reaches allow and publishes through the driver', async () => {
+  const f = await fixture()
+  f.prose()
+  f.clean()
+  const payload = { verdict: 'APPROVE', findings: [] }
+  f.options.admission = {
+    observe: async input => ({ runId: input.run_id, repo: 'repo', branch: 'change', baseBranch: 'main', prior: null }),
+    run: async argv => commandResult(argv.includes('rev-parse') ? head : ''),
+  }
+  f.options.review = {
+    seats: [{ id: 'core', provider: 'pi', modelId: 'core-model', role: 'core', enabled: true }],
+    readSeat: async (_seat, value, round) => ({ runId: 'test', head: value.head, round, provider: 'pi', modelId: 'core-model', status: 'completed', payload }),
+    retrySeat: async () => { throw Error('unexpected retry') },
+    readSynthesis: async (value, round) => ({ runId: 'test', head: value.head, round, checkpoint: 'argus-approved', payload }),
+  }
+  f.options.runners.pi = {
+    ...fakeRunner('pi'),
+    run: async () => ({ kind: 'completed', result: { ...snapshot, payload }, usage: { input_tokens: 0, output_tokens: 0 }, model_reported: 'test-model', thread_id: null }),
+  }
+  let publications = 0
+  f.options.effects.publish = async value => { expect(value).toEqual(snapshot); publications++ }
+  const host = f.make()
+  expect(f.options.reviewed_head).toBeNull()
+  expect(await host.deps.publishGate(snapshot)).toEqual({ kind: 'allow' })
+  // Stop after publication: this fixture deliberately does not create a remote PR.
+  expect(await buildRun(f.input(host), host.deps, new AbortController().signal)).toEqual({
+    kind: 'blocked', phase: 'merge', on: 'Published PR does not match reviewed revision', recipient: 'orchestrator',
+  })
+  expect(publications).toBe(1)
+})
+
+test('host propagates G084 refusals after proof and readiness allow', async () => {
+  const f = await fixture()
+  f.prose()
+  const pin = 'd'.repeat(40)
+  const baseRun = f.options.mutation.run_host
+  f.options.reviewed_head = 'deadbeef'
+  expect(await f.make().deps.publishGate(snapshot)).toMatchObject({ kind: 'blocked', on: expect.stringContaining('not a full') })
+  f.options.reviewed_head = pin
+  for (const [stderr, kind] of [['', 'blocked'], ['fatal: missing object', 'unknown']] as const) {
+    f.options.mutation.run_host = (argv, cwd) => argv.includes('--is-ancestor') && argv.includes(pin)
+      ? Promise.resolve({ ok: false, exit_code: stderr ? 128 : 1, stdout: '', stderr }) : baseRun(argv, cwd)
+    expect(await f.make().deps.publishGate(snapshot)).toMatchObject({ kind })
+  }
+  f.options.mutation.run_host = baseRun
+  expect(await f.make().deps.publishGate(snapshot)).toEqual({ kind: 'allow' })
+})
+
+test('local host gates use local evidence without remote publication or CI', async () => {
+  const f = await fixture(); f.prose()
+  f.options.local = { baseBranch: 'base', worktree: f.options.leak.repo_path }
+  const baseRun = f.options.mutation.run_host
+  f.options.admission = {
+    observe: async () => ({ runId: 'test', repo: f.options.leak.repo_path, branch: 'change', baseBranch: 'base', prior: null }),
+    run: async (argv, cwd) => argv.includes('show-ref') ? commandResult() : baseRun(argv, cwd),
+  }
+  f.options.local.worktree = join(f.options.leak.repo_path, 'isolated')
+  f.options.mutation.run_host = async (argv, cwd) => {
+    if (argv.includes('--show-toplevel')) return commandResult(f.options.local!.worktree)
+    if (argv.includes('--git-common-dir')) return commandResult('common')
+    return baseRun(argv, cwd)
+  }
+  f.options.observeCi = async () => { throw new Error('local mode queried remote CI') }
+  const composed = f.make()
+  const { deps } = composed
+  expect(await deps.admissionGate({ ...f.input(composed), merge_mode: 'local' })).toEqual({ kind: 'allow' })
+  expect(await deps.publishGate(snapshot, 'local')).toEqual({ kind: 'allow' })
+  expect(await deps.mergeGate(snapshot, 'local')).toEqual({ kind: 'allow' })
+  expect(f.calls.some(argv => argv.includes('ls-remote') || argv.includes('gh') || argv.includes('fetch'))).toBe(false)
+  f.setDrift('overlap')
+  expect(await deps.mergeGate(snapshot, 'local')).toMatchObject({ kind: 'blocked', on: 'Local base drift overlaps reviewed changes' })
+  f.setDrift('unreadable')
+  expect(await deps.mergeGate(snapshot, 'local')).toMatchObject({ kind: 'unknown' })
+  delete f.options.local
+  expect(await deps.mergeGate(snapshot, 'local')).toMatchObject({ kind: 'unknown', detail: 'Local merge configuration is missing' })
+  delete f.options.admission
+  expect(await deps.admissionGate({ ...f.input(composed), merge_mode: 'local' })).toMatchObject({ kind: 'unknown', detail: 'Project admission observation source is missing' })
+})
+
+test('local host confirmation measures retained branch and base ancestry', async () => {
+  const f = await fixture()
+  f.options.local = { baseBranch: 'base', worktree: 'isolated' }
+  const baseRun = f.options.mutation.run_host
+  f.options.admission = {
+    observe: async () => ({ runId: 'test', repo: f.options.leak.repo_path, branch: 'change', baseBranch: 'base', prior: null }),
+    run: async (argv, cwd) => argv.includes('show-ref') ? commandResult() : baseRun(argv, cwd),
+  }
+  for (const code of [0, 1, 128]) {
+    f.options.mutation.run_host = (argv, cwd) => argv.includes('--is-ancestor') ? Promise.resolve(commandResult('', code)) : baseRun(argv, cwd)
+    expect(await f.make().deps.confirmLocalMerge!(snapshot)).toMatchObject({ kind: code === 0 ? 'allow' : code === 1 ? 'blocked' : 'unknown' })
+  }
+  f.options.mutation.run_host = async () => commandResult('b'.repeat(40))
+  expect(await f.make().deps.confirmLocalMerge!(snapshot)).toMatchObject({ kind: 'blocked' })
+  f.options.mutation.run_host = async () => commandResult('', 128)
+  expect(await f.make().deps.confirmLocalMerge!(snapshot)).toMatchObject({ kind: 'unknown', detail: 'Local branch confirmation could not be read' })
+  delete f.options.local
+  expect(await f.make().deps.confirmLocalMerge!(snapshot)).toMatchObject({ kind: 'unknown', detail: 'Local merge configuration is missing' })
+})
+
+
+test('composed local host reaches merged with no PR', async () => {
+  const f = await fixture(); f.prose(); f.clean()
+  f.options.local = { baseBranch: 'base', worktree: join(f.options.leak.repo_path, 'isolated') }
+  const baseRun = f.options.mutation.run_host
+  f.options.admission = {
+    observe: async () => ({ runId: 'test', repo: f.options.leak.repo_path, branch: 'change', baseBranch: 'base', prior: null }),
+    run: async (argv, cwd) => argv.includes('show-ref') ? commandResult() : baseRun(argv, cwd),
+  }
+  let landed = false
+  f.options.mutation.run_host = async (argv, cwd) => {
+    if (argv.includes('--show-toplevel')) return commandResult(f.options.local!.worktree)
+    if (argv.includes('--git-common-dir')) return commandResult('common')
+    if (argv.includes('--is-ancestor')) return commandResult('', landed ? 0 : 1)
+    return baseRun(argv, cwd)
+  }
+  const payload = { verdict: 'APPROVE', findings: [] }
+  const outcomes = new Map<string, import('@neutronai/runtime/bounded-work.ts').BoundedWorkOutcome>()
+  for (const [role, round] of [['plan', 0], ['build', 0], ['review', 1]] as const) {
+    outcomes.set(`test:${role}:${round}`, { kind: 'completed', result: { ...snapshot, payload },
+      usage: { input_tokens: 0, output_tokens: 0 }, model_reported: 'test-model', thread_id: null })
+  }
+  f.options.runners.pi = fakeRunner('pi', { outcomes })
+  f.options.review = {
+    seats: [{ id: 'core', provider: 'pi', modelId: 'test-model', role: 'core', enabled: true }],
+    readSeat: async () => ({ runId: 'test', head, round: 1, provider: 'pi', modelId: 'test-model', status: 'completed', payload }),
+    retrySeat: async () => {},
+    readSynthesis: async () => ({ runId: 'test', head, round: 1, checkpoint: 'argus-approved', payload }),
+  }
+  f.options.effects.merge = async () => { landed = true }
+  f.options.observeCi = async () => { throw new Error('unexpected remote CI') }
+  const composed = f.make()
+  expect(await buildRun({ ...f.input(composed), merge_mode: 'local' }, composed.deps, new AbortController().signal)).toMatchObject({ kind: 'merged', snapshot: { pr: null } })
+  expect(landed).toBe(true)
+})
+
+test('fresh local admission allows the host to provision its branch and worktree later', async () => {
+  const f = await fixture()
+  const baseRun = f.options.mutation.run_host
+  f.options.admission = {
+    observe: async () => ({ runId: 'test', repo: f.options.leak.repo_path, branch: 'new-change', baseBranch: 'base', prior: null }),
+    run: async (argv, cwd) => argv.includes('show-ref') ? commandResult('', 1) : baseRun(argv, cwd),
+  }
+  f.options.effects.measure = async () => { throw new Error('branch has not been provisioned yet') }
+  const composed = f.make()
+  expect(await composed.deps.admissionGate({ ...f.input(composed), merge_mode: 'local' })).toEqual({ kind: 'allow' })
 })

@@ -165,7 +165,19 @@ name: ci
 # putting the content in the tree under review instead of behind a fetch.
 #
 # THE `test` JOB IS LOAD-BEARING AND MUST KEEP THAT EXACT NAME. `test` is the
-# sole REQUIRED status check on `main`, with a strict up-to-date policy.
+# sole REQUIRED status check on `main`. Enforced by a RULESET, not classic branch
+# protection: `/repos/{owner}/{repo}/branches/main/protection` returns 404 and that
+# 404 means the OLD mechanism is unused, NOT that main is unprotected. The live
+# rules are at `/repos/{owner}/{repo}/rules/branches/main` — `deletion`,
+# `non_fast_forward`, `pull_request`, and `required_status_checks` naming exactly
+# one context, `test`.
+#
+# THE UP-TO-DATE POLICY IS OFF. `strict_required_status_checks_policy` is `false`,
+# so a PR can merge without being rebased onto the tip. Measured 2026-09-15; an
+# earlier version of this comment claimed the strict policy was on, and the merge
+# queue rationale further down still assumes it. That assumption is now wrong: a
+# green `test` certifies the PR's own head, not the head merged with current main,
+# so two independently-green PRs can still break main together.
 # A required context that never reports blocks every PR forever, so the shards
 # are named `shard` and `test` is an AGGREGATOR that needs them all. Renaming
 # `test`, or making it anything other than a job that fails when any gate fails,

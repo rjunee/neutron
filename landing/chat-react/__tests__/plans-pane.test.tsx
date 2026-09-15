@@ -51,6 +51,8 @@ function runProgress(over: Partial<RunProgress> = {}): RunProgress {
     round: 1,
     started_at: '2026-07-02T00:00:00Z',
     last_advanced_at: '2026-07-02T00:00:00Z',
+    heartbeat_at: '2099-01-01T00:00:00Z',
+    heartbeat_fresh_until: '2099-01-01T00:05:00Z',
     elapsed_ms: 1000,
     stalled: false,
     stalled_ms: null,
