@@ -84,6 +84,7 @@ import {
   type TranscriptionBackendChoice,
   type VoiceTranscriptionStatus,
 } from './voice-transcription-client.ts'
+import { PersonalityEditor } from './PersonalityEditor.tsx'
 
 type FetchImpl = (input: string, init?: RequestInit) => Promise<Response>
 
@@ -801,6 +802,7 @@ export function SettingsTab({
 
   return (
     <div className="cset">
+      <PersonalityEditor config={config} fetchImpl={withSignal} />
       {/* ── Credentials ── */}
       <section className="cset-section" aria-label="Credentials">
         <h2 className="cset-h">Credentials</h2>

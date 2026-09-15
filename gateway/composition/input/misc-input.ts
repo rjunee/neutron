@@ -353,8 +353,9 @@ export interface MiscCompositionInput {
    * surface + the per-turn injection use (the production composer constructs it
    * with the `work_board_changed` push hook), so an agent mutation and a human
    * HTTP write share one code path + one live-push. Omitting it leaves the
-   * surface unregistered (unchanged pre-Work-Board behaviour). `project_slug`
-   * is taken from the server-injected `ToolCallContext`, never an agent arg.
+   * surface unregistered (unchanged pre-Work-Board behaviour). The owner boundary
+   * is taken from the server-injected `ToolCallContext`, never an agent arg;
+   * `work_board_add.target_project` is checked by `project_exists` before use.
    */
   work_board?: {
     store: import('@neutronai/work-board/store.ts').WorkBoardStore
@@ -392,6 +393,8 @@ export interface MiscCompositionInput {
      * unchanged).
      */
     removal?: import('@neutronai/work-board/removal.ts').WorkBoardRemovalService
+    /** True only when the id names a live project owned by this instance. */
+    project_exists?: (owner_slug: string, project_id: string) => boolean | Promise<boolean>
   }
   /**
    * Work Board Phase 2b — when supplied, the `tools` module registers the

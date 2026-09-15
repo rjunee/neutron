@@ -175,6 +175,20 @@ describe('SettingsTab archive action (happy-dom)', () => {
   })
 })
 
+describe('SettingsTab personality editor reachability', () => {
+  it('mounts the editor and loads the shared persona routes', async () => {
+    const { container, root, act, calls } = await mount((url) => {
+      if (url.includes('/api/app/persona/file?')) {
+        return new Response('persona body', { headers: { 'x-mtime': '4' } })
+      }
+      return null
+    })
+    expect(container.querySelector('[aria-label="Personality"]')).not.toBeNull()
+    expect(new Set(calls.filter((call) => call.includes('/api/app/persona/file?')).map((call) => new URL(call.slice(4)).searchParams.get('name')))).toEqual(new Set(['SOUL.md', 'USER.md', 'priority-map.md']))
+    await act(async () => { root.unmount() })
+  })
+})
+
 describe('SettingsTab Codex override (happy-dom)', () => {
   it('renders the override section labelled optional', async () => {
     const { container, root } = await mount((url) => {
