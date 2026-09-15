@@ -53,7 +53,7 @@ export type WorkerRole =
   | 'plan' | 'build' | 'fix' | 'review' | 'synthesis'
   | 'replan' | 'probe' | 'resolve' | 'arbitrate' | 'fix-leak'
 
-export type Effort = 'low' | 'medium' | 'high'
+export type Effort = 'low' | 'medium' | 'high' | 'xhigh' | 'max'
 
 /** A named tool surface. `'none'` is the judge's — the arbiter stays toolless. */
 export type ToolGrant = 'none' | 'read-only' | 'edit' | 'edit-and-run'
@@ -101,7 +101,7 @@ export interface BoundedWorkRequest {
  * sat marked `running` while the launcher had replied, in words, NOT FIRED.
  */
 export type BoundedWorkOutcome =
-  | { kind: 'completed'; result: unknown; usage: Usage; model_reported: string; thread_id: string | null }
+  | { kind: 'completed'; result: unknown; usage: Usage | null; model_reported: string | null; thread_id: string | null }
   /** §3.2: "If it cannot proceed it returns 'blocked on X' to the orchestrator." */
   | { kind: 'blocked'; on: string }
   | { kind: 'refused'; reason: RefusalReason }

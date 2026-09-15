@@ -1342,3 +1342,14 @@ test('G102 driver checks artifact after preparation and before every review', as
   expect((await f.run()).kind).toBe('merged')
   expect(checks).toEqual(['run:review:1', 'run:review:2'])
 })
+
+test('null usage completes and keeps cumulative counters unknown across later fixes', async () => {
+  const f = fixture()
+  f.outcomes.set('run:build:0', { kind: 'completed', result: structuredClone(f.snapshot), usage: null, model_reported: null, thread_id: null })
+  f.decisions.push({ kind: 'fix', findings: ['logic'] }, { kind: 'approve' })
+  const records: Parameters<BuildRunDeps['recordPhaseUsage']>[2][] = []
+  f.deps.recordPhaseUsage = async (_run, phase, report) => { if (phase === 'build') records.push(report) }
+  expect((await f.run()).kind).toBe('merged')
+  expect(records).toHaveLength(2)
+  for (const report of records) expect(report).toMatchObject({ input_tokens: null, output_tokens: null, cache_read_tokens: null, source: 'unknown-model' })
+})

@@ -200,3 +200,12 @@ test('unreadable trailer stays unknown', async () => {
     .run(f.request(), 'headless', new AbortController().signal)
   expect(outcome).toEqual({ kind: 'unknown', detail: 'Codex wrapper exited successfully without a readable trailer' })
 })
+
+for (const effort of ['xhigh', 'max'] as const) {
+  test(`headless forwards extended effort ${effort} unchanged`, async () => {
+    const f = fixture()
+    const runner = createCodexHeadlessRunner({ buildScript: f.script, probe: { ok: true } })
+    expect((await runner.run(f.request({ effort }), 'headless', new AbortController().signal)).kind).toBe('completed')
+    expect(readFileSync(f.seen, 'utf8').split('\n').find(line => line.startsWith('CODEX_BUILD_EFFORT='))).toBe(`CODEX_BUILD_EFFORT=${effort}`)
+  })
+}

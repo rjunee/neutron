@@ -1,5 +1,5 @@
 import { stat } from 'node:fs/promises'
-import { resolve } from 'node:path'
+import { relative, resolve, sep } from 'node:path'
 import { setTimeout as delay } from 'node:timers/promises'
 import type { ToolGrant } from '../bounded-work.ts'
 import type { ReplSession } from '../adapters/claude-code/persistent/repl-session.ts'
@@ -12,7 +12,7 @@ export interface ClaudeActingSession {
   project_id: string
   topic_id: string
   session: Pick<ReplSession, 'sessionId' | 'cwd' | 'child' | 'acquireTurn'>
-  grants: { tools: ToolGrant; writable: boolean; network: boolean }
+  grants: { tools: ToolGrant; writable: boolean; network: boolean; roots: readonly string[] }
 }
 
 const toolRank: Record<ToolGrant, number> = { none: 0, 'read-only': 1, edit: 2, 'edit-and-run': 3 }
@@ -20,14 +20,18 @@ const toolRank: Record<ToolGrant, number> = { none: 0, 'read-only': 1, edit: 2, 
 /** Continue the bound project conversation. No spawn, retry or reply observation. */
 export function createClaudeActingTurn(binding: ClaudeActingSession): ProjectActingTurn {
   const { project_id, topic_id, session } = binding
-  const grants = { ...binding.grants }
+  const grants = { ...binding.grants, roots: [...binding.grants.roots] }
+  const roots = [session.cwd, ...grants.roots].map(root => resolve(root))
   const child = session.child
   return async ({ conversation, request, spec, timeout_ms, signal }) => {
     const refuse = (detail: string) => ({ kind: 'refused' as const, reason: 'capability-unsupported' as const, detail })
     if (conversation.provider !== 'anthropic') return refuse(`Claude acting turn refuses provider ${conversation.provider}.`)
     if (conversation.project_id !== project_id || conversation.topic_id !== topic_id) return refuse('Project conversation does not match the bound Claude session.')
     if (request.thread !== null && request.thread.id !== session.sessionId) return refuse('Requested thread does not match the project Claude session.')
-    if (resolve(request.cwd) !== resolve(session.cwd)) return refuse('Requested cwd does not match the project Claude session.')
+    if (!roots.some(root => {
+      const path = relative(root, resolve(request.cwd))
+      return path.split(sep)[0] !== '..'
+    })) return refuse('Requested cwd unavailable outside the granted roots of the project Claude session.')
     if (toolRank[request.tools] > toolRank[grants.tools]) return refuse(`Requested tools ${request.tools} unavailable in Claude session.`)
     if (request.writable && !grants.writable) return refuse('Requested writable access unavailable in Claude session.')
     if (request.network && !grants.network) return refuse('Requested network access unavailable in Claude session.')

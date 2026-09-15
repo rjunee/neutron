@@ -143,13 +143,13 @@ for (const [field, replacement, detail] of [
   })
 }
 
-test('decoder rejects missing validator and missing host observations', async () => {
+test('decoder rejects missing validator and accepts missing host observations', async () => {
   const f = await fixture()
   f.options.trailer.schemas = new Map()
   expect(f.decode()).toEqual({ kind: 'unknown', detail: 'Trailer schema has no host validator.' })
   f.options.trailer.schemas = new Map([['result-v1', () => true]])
   f.options.trailer.metadata = () => undefined
-  expect(f.decode()).toEqual({ kind: 'unknown', detail: 'Host usage/model/thread observation missing.' })
+  expect(f.decode()).toEqual({ kind: 'completed', result: f.envelope.result, usage: null, model_reported: null, thread_id: null })
 })
 
 test('decoder rejects malformed envelope and blocked reasons', async () => {
@@ -179,4 +179,16 @@ test('bridge exception preserves reservation and liveness stays unknown', async 
   expect((await (await createProjectRunners(f.options)).inRepl!.run(f.request, 'in-repl', signal())).kind).toBe('unknown')
   expect(f.calls).toHaveLength(1)
   expect(await built.inRepl!.liveness(f.request)).toBe('unknown')
+})
+
+test('missing or throwing telemetry preserves valid results and rejects invalid trailers', async () => {
+  const f = await fixture()
+  for (const metadata of [() => undefined, () => { throw Error('telemetry unavailable') }]) {
+    f.options.trailer.metadata = metadata
+    expect(f.decode()).toEqual({ kind: 'completed', result: f.envelope.result, usage: null, model_reported: null, thread_id: null })
+    expect(f.decode({ ...f.envelope, result: { answer: 'bad' } }).kind).toBe('unknown')
+    expect(f.decode({ ...f.envelope, step_id: 'other' }).kind).toBe('unknown')
+    expect(decodeProjectTrailer('{', f.request, f.options.trailer).kind).toBe('unknown')
+  }
+  expect((await (await createProjectRunners(f.options)).inRepl!.run(f.request, 'in-repl', signal())).kind).toBe('completed')
 })

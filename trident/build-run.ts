@@ -300,17 +300,18 @@ export async function buildRun(input: BuildRunInput, deps: BuildRunDeps, signal:
       }
       const usagePhase = role === 'plan' ? 'decomposition' : role === 'review' ? 'review_adversarial' : 'build'
       const priorUsage = usageTotals.get(usagePhase)
-      const cacheRead = outcome.usage.cache_read_input_tokens
+      const cacheRead = outcome.usage?.cache_read_input_tokens
       const report: PhaseUsageReport = {
         status: 'partial',
-        input_tokens: (priorUsage?.input_tokens ?? 0) + outcome.usage.input_tokens,
-        output_tokens: (priorUsage?.output_tokens ?? 0) + outcome.usage.output_tokens,
+        input_tokens: outcome.usage === null || priorUsage?.input_tokens === null ? null : (priorUsage?.input_tokens ?? 0) + outcome.usage.input_tokens,
+        output_tokens: outcome.usage === null || priorUsage?.output_tokens === null ? null : (priorUsage?.output_tokens ?? 0) + outcome.usage.output_tokens,
         cache_read_tokens: priorUsage
           ? priorUsage.cache_read_tokens === null || cacheRead === undefined ? null : priorUsage.cache_read_tokens + cacheRead
           : cacheRead ?? null,
         cache_creation_tokens: null,
         cost_usd: null,
-        source: priorUsage && priorUsage.source !== outcome.model_reported ? 'multiple-models' : outcome.model_reported,
+        source: outcome.model_reported === null || priorUsage?.source === 'unknown-model' ? 'unknown-model'
+          : priorUsage && priorUsage.source !== outcome.model_reported ? 'multiple-models' : outcome.model_reported,
         observed_at: Math.max(Date.now(), (priorUsage?.observed_at ?? -1) + 1),
       }
       await deps.recordPhaseUsage(input.run_id, usagePhase, report)
