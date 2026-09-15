@@ -3382,7 +3382,8 @@ export function buildOpenGraphComposer(
     // registry, and route LLM work through the SAME warm `cc-llm` substrate the
     // nudge engine / wow picker use (`buildAnthropicLlmCall`).
     const proactiveLlm =
-      llmCallSubstrate !== null
+      llmCallSubstrate !== null &&
+      (llmPool !== null || conversationalProviderCtx.openaiLlmPool !== undefined)
         ? buildAnthropicLlmCall({ substrate: llmCallSubstrate })
         : null
     // The brief posts to the General topic on the SAME app-ws delivery path
