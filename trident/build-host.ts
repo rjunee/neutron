@@ -15,6 +15,7 @@ import { ciReadinessForHead, type CiRunObservation } from './ci-readiness.ts'
 import { runLeakGatePreflight } from './leak-preflight.ts'
 import { assessMergeDiff, localMergeReadiness } from './merge.ts'
 import { runMutationProofGate, type MutationGateInput } from './mutation-prover.ts'
+import type { PhaseUsageReport, PhaseUsageRow, TridentPhaseUsageStore } from './phase-usage.ts'
 
 type Workers = BuildRunInput['workers']
 type Role = keyof Workers
@@ -28,6 +29,7 @@ export interface BuildHostOptions {
   workers: Record<Role, { provider: Provider; request: Workers[Role]['request'] }>
   /** Host observations and effects, never worker assertions or gate overrides. */
   effects: Pick<BuildRunDeps, 'prepareWork' | 'measure' | 'publish' | 'merge'>
+  phaseUsage: Pick<TridentPhaseUsageStore, 'list' | 'record'>
   leak: Omit<Parameters<typeof runLeakGatePreflight>[0], 'head' | 'fixer' | 'max_fix_attempts'>
   mutation: Omit<MutationGateInput, 'expected_head' | 'claim'> & {
     run: MutationGateInput['run'] & { max_rounds?: number | undefined }
@@ -56,6 +58,8 @@ function unavailableRunner(provider: Provider): WorkerRunner {
 
 /** Compose the kept gates and the advisory leak preflight. */
 export function createBuildHost(options: BuildHostOptions): { deps: BuildRunDeps; workers: Workers; run(input: BuildRunInput, signal: AbortSignal): Promise<BuildRunOutcome | BoundReviewOutcome> } {
+  const usageBaselines = new Map<string, PhaseUsageRow>()
+  const usageLastObserved = new Map<string, number>()
   const workers = {} as Workers
   for (const role of roles) {
     const selected = options.workers[role]
@@ -79,6 +83,32 @@ export function createBuildHost(options: BuildHostOptions): { deps: BuildRunDeps
     : Promise.resolve(unknown('Local merge configuration is missing'))
   const deps: BuildRunDeps = {
     ...options.effects,
+    recordPhaseUsage: async (runId, phase, report) => {
+      const key = `${runId}:${phase}`
+      let baseline = usageBaselines.get(key)
+      if (!baseline) {
+        const rows = options.phaseUsage.list(runId)
+        if (rows === null) throw new Error('Phase usage target run is unknown')
+        baseline = rows.find(row => row.phase === phase)
+        if (baseline) usageBaselines.set(key, baseline)
+      }
+      const known = baseline?.status !== 'unknown'
+      const add = (prior: number | null | undefined, current: number | null): number | null =>
+        current === null || (known && prior == null) ? null : (prior ?? 0) + current
+      const absolute: PhaseUsageReport = {
+        ...report,
+        input_tokens: add(baseline?.input_tokens, report.input_tokens),
+        output_tokens: add(baseline?.output_tokens, report.output_tokens),
+        cache_read_tokens: add(baseline?.cache_read_tokens, report.cache_read_tokens),
+        cache_creation_tokens: add(baseline?.cache_creation_tokens, report.cache_creation_tokens),
+        cost_usd: add(baseline?.cost_usd, report.cost_usd),
+        source: known && baseline?.source !== report.source ? 'multiple-models' : report.source,
+        observed_at: Math.max(report.observed_at, (baseline?.observed_at ?? -1) + 1, (usageLastObserved.get(key) ?? -1) + 1),
+      }
+      const result = await options.phaseUsage.record(runId, phase, absolute)
+      if (result !== 'recorded') throw new Error(`Phase usage write was ${result}`)
+      usageLastObserved.set(key, absolute.observed_at)
+    },
     checkBuildClaim: (claim, snapshot) => checkBuildClaim(options.mutation.run_host,
       options.mutation.run.repo_path, options.mutation.run.branch ?? `trident/${options.mutation.run.slug}`, claim, snapshot),
     checkFixLineage: (snapshot, reviewedHead) => fixLineage(options.mutation.run_host,

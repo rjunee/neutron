@@ -507,6 +507,10 @@ test('local-mode driver reaches merged through the real production effect', asyn
     // `createBuildHost` derives it from the run row; these hand-built deps use
     // the same branch the fixture's row carries.
     assignedBranch: 'change',
+    // Phase usage is a required write, not an optional one: a run that cannot
+    // record it must stop rather than continue unmeasured. These fixtures keep
+    // the write observable and silent.
+    recordPhaseUsage: async () => {},
     // Match createBuildHost: prove each fix with git against the host-held pin.
     checkFixLineage: (produced, pin) => fixLineage(spawnCapture, f.repo, 'change', pin, produced.head),
     // Review readiness and suite evidence are policy seams too, and the driver now
@@ -591,6 +595,10 @@ async function resumeFixture(round = 3, replansUsed = 1) {
     // `createBuildHost` derives it from the run row; these hand-built deps use
     // the same branch the fixture's row carries.
     assignedBranch: 'change',
+    // Phase usage is a required write, not an optional one: a run that cannot
+    // record it must stop rather than continue unmeasured. These fixtures keep
+    // the write observable and silent.
+    recordPhaseUsage: async () => {},
     // Match createBuildHost: prove each fix with git against the host-held pin.
     checkFixLineage: (produced, pin) => fixLineage(spawnCapture, f.repo, 'change', pin, produced.head),
     // Review readiness and suite evidence are policy seams too, and the driver now

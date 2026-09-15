@@ -27,6 +27,9 @@ export interface ProjectBuildHostOptions {
   substrate: ProjectBuildSubstrate
   production: ProductionHostOptions
   /** Policy-specific sources remain explicit, without permissive defaults. */
+  /** Phase usage is a required write for the host, so the composition must supply
+   * its store rather than let the driver run unmeasured. */
+  phaseUsage: BuildHostOptions['phaseUsage']
   policy: Pick<BuildHostOptions, 'review' | 'boundReview'> & {
     leak: Pick<BuildHostOptions['leak'], 'scratch_dir' | 'gate_script'>
     mutation: Omit<BuildHostOptions['mutation'], 'run' | 'run_host' | 'base_branch'>
@@ -60,7 +63,7 @@ export async function createProjectBuildHost(options: ProjectBuildHostOptions) {
   const runners = projectBuildRunners(options.substrate, Object.values(workers).map(worker => worker.provider))
   const host = createBuildHost({
     ...options.policy,
-    workers, runners,
+    workers, runners, phaseUsage: options.phaseUsage,
     reviewed_head: run.inner_checkpoint_head,
     leak: { ...options.policy.leak, run_host: config.runHost, repo_path: config.repo, branch: config.branch, base_sha: run.base_sha },
     mutation: { ...options.policy.mutation, run, run_host: config.runHost, base_branch: config.baseBranch },
