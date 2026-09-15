@@ -144,6 +144,8 @@ export async function buildRun(input: BuildRunInput, deps: BuildRunDeps, signal:
     if (gate.kind === 'unknown') return unknown(gate.detail)
     return null
   }
+  // G019 stays in the retained review-only executor, including on resume.
+  if (input.mode === 'bound_pr') return blocked('bound_pr requires the retained review-only executor')
   try {
     // Enumerate every reachable worker role at admission, including later fixes.
     for (const role of ['plan', 'build', 'review', 'fix'] as const) {
@@ -152,7 +154,6 @@ export async function buildRun(input: BuildRunInput, deps: BuildRunDeps, signal:
       if (!support.ok) return { kind: 'refused', reason: 'worker-unsupported', detail: `${role}: ${support.reason}: ${support.detail}` }
     }
     const local = input.merge_mode === 'local'
-    if (local && input.mode === 'bound_pr') return blocked('Bound PR cannot use local merge mode')
     if (local && !deps.confirmLocalMerge) return unknown('Local merge confirmation source is missing')
     const admission = gateStop(await deps.admissionGate(input))
     if (admission) return admission
@@ -171,11 +172,7 @@ export async function buildRun(input: BuildRunInput, deps: BuildRunDeps, signal:
     if (initial.kind === 'unknown') return unknown(initial.detail)
     snapshot = initial.value
     if (local && snapshot.pr !== null) return blocked('Local build has a PR')
-    if (input.mode === 'bound_pr') {
-      if (!Number.isSafeInteger(input.bound_pr) || snapshot.pr?.number !== input.bound_pr || snapshot.pr?.state !== 'OPEN') {
-        return blocked('Bound PR is not the requested open PR')
-      }
-    } else if (input.start === 'fresh' && snapshot.pr !== null) return blocked('Fresh build already has a PR')
+    if (input.start === 'fresh' && snapshot.pr !== null) return blocked('Fresh build already has a PR')
 
     let replansUsed = resume?.replansUsed ?? 0
     if (replansUsed !== 0 && replansUsed !== 1) return blocked('Invalid recorded re-plan count')
@@ -249,9 +246,6 @@ export async function buildRun(input: BuildRunInput, deps: BuildRunDeps, signal:
       if (observation.kind === 'unknown') return { stop: unknown(observation.detail) }
       const measured = observation.value
       if (!corroborates(outcome.result, measured)) return { stop: failed('Worker trailer disagrees with host measurement', 'built-head-unverified') }
-      if (input.mode === 'bound_pr' && (measured.pr?.number !== input.bound_pr || measured.pr?.state !== 'OPEN')) {
-        return { stop: blocked('Worker changed the bound PR identity') }
-      }
       // Read-only review must describe exactly the revision sent to the panel.
       if (role === 'review' && (measured.head !== snapshot.head || measured.diff !== snapshot.diff || !samePr(measured.pr, snapshot.pr))) {
         return { stop: blocked('Reviewed revision changed during review') }
@@ -369,7 +363,7 @@ export async function buildRun(input: BuildRunInput, deps: BuildRunDeps, signal:
     const published = await deps.measure()
     if (published.kind === 'unknown') return unknown(published.detail)
     snapshot = published.value
-    if (local ? !corroborates(reviewed, snapshot) || snapshot.pr !== null : (input.mode === 'bound_pr' && snapshot.pr?.number !== input.bound_pr) || snapshot.head !== reviewed.head || snapshot.diff !== reviewed.diff || snapshot.pr?.state !== 'OPEN' || snapshot.pr.head !== reviewed.head) {
+    if (local ? !corroborates(reviewed, snapshot) || snapshot.pr !== null : snapshot.head !== reviewed.head || snapshot.diff !== reviewed.diff || snapshot.pr?.state !== 'OPEN' || snapshot.pr.head !== reviewed.head) {
       return blocked(local ? 'Local revision changed before merge' : 'Published PR does not match reviewed revision')
     }
     const mergeGate = gateStop(await deps.mergeGate(snapshot, input.merge_mode))

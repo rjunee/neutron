@@ -1,7 +1,8 @@
+import { executeBoundReview, type BoundReviewOutcome } from './review-run.ts'
 import { fixLineage } from './gates/fix-lineage.ts'
 import { readFile } from 'node:fs/promises'
 import { placementFor, type Provider, type WorkerRunner } from '@neutronai/runtime/bounded-work.ts'
-import type { BuildRunDeps, BuildRunInput, BuildSnapshot, GateResult } from './build-run.ts'
+import { buildRun, type BuildRunOutcome, type BuildRunDeps, type BuildRunInput, type BuildSnapshot, type GateResult } from './build-run.ts'
 import { publicationReadiness, pinnedMergeReadiness } from './gates/release-readiness.ts'
 import { briefIntegrity } from './gates/brief-integrity.ts'
 import { projectAdmission, type AdmissionSource } from './gates/project-admission.ts'
@@ -16,6 +17,7 @@ type Role = keyof Workers
 const roles = ['plan', 'build', 'review', 'fix'] as const
 
 export interface BuildHostOptions {
+  boundReview?: { run: Parameters<typeof executeBoundReview>[0]; deps: Parameters<typeof executeBoundReview>[1] }
   runners: Partial<Record<Provider, WorkerRunner>>
   replProvider: Provider
   workers: Record<Role, { provider: Provider; request: Workers[Role]['request'] }>
@@ -44,7 +46,7 @@ function unavailableRunner(provider: Provider): WorkerRunner {
 }
 
 /** Compose the kept gates. Partial gate evidence never authorizes publication. */
-export function createBuildHost(options: BuildHostOptions): { deps: BuildRunDeps; workers: Workers } {
+export function createBuildHost(options: BuildHostOptions): { deps: BuildRunDeps; workers: Workers; run(input: BuildRunInput, signal: AbortSignal): Promise<BuildRunOutcome | BoundReviewOutcome> } {
   const workers = {} as Workers
   for (const role of roles) {
     const selected = options.workers[role]
@@ -112,5 +114,18 @@ export function createBuildHost(options: BuildHostOptions): { deps: BuildRunDeps
       return pinnedMergeReadiness(options.mutation.run_host, options.mutation.run.repo_path, snapshot)
     },
   }
-  return { deps, workers }
+  return {
+    deps, workers,
+    async run(input, signal) {
+      if (input.mode === 'bound_pr') {
+        const review = options.boundReview
+        if (!review || review.run.id !== input.run_id || review.run.bound_pr !== input.bound_pr) {
+          return { kind: 'blocked', phase: 'review', on: 'Bound review context is missing or mismatched', recipient: 'orchestrator' }
+        }
+        // Return both success and failure directly: neither enters buildRun.
+        return executeBoundReview(review.run, review.deps)
+      }
+      return buildRun(input, deps, signal)
+    },
+  }
 }
