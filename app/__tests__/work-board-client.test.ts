@@ -158,6 +158,7 @@ describe('parseWorkBoardItems', () => {
           phase_label: 'building',
           step_label: 'fixing',
           round: 3,
+          ralph_round: 1,
           started_at: '',
           last_advanced_at: '',
           elapsed_ms: 0,
@@ -172,6 +173,7 @@ describe('parseWorkBoardItems', () => {
     ]);
     expect(out[0]!.run_progress?.step_label).toBe('fixing');
     expect(out[0]!.run_progress?.round).toBe(3);
+    expect(out[0]!.run_progress?.ralph_round).toBe(1);
     expect(out[0]!.run_progress?.brief_alert).toContain('CODEX_BUILD_BRIEF_PART_CORRUPT');
   });
 

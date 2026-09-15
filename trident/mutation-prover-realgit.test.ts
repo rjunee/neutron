@@ -1,5 +1,5 @@
 import { afterAll, describe, expect, test } from 'bun:test'
-import { existsSync, mkdirSync, mkdtempSync, readFileSync, rmSync, symlinkSync, writeFileSync } from 'node:fs'
+import { chmodSync, existsSync, mkdirSync, mkdtempSync, readFileSync, rmSync, symlinkSync, writeFileSync } from 'node:fs'
 import { tmpdir } from 'node:os'
 import { join } from 'node:path'
 
@@ -1778,7 +1778,7 @@ describe('the mutation-proof gate against real git', () => {
     // no surviving process: the seam does the writing.
     //
     // EXPECTATION VERIFIED TO FAIL — proved:true, the forged verdict — with the
-    // `NO_HOOKS` override removed from the two `worktree add` calls in
+    // hooks-path override removed from the two `worktree add` calls in
     // mutation-prover.ts, then restored.
     const repo = await seedControlForgeryRepo()
     const out = await runMutationProofGate({
@@ -1822,10 +1822,31 @@ describe('the mutation-proof gate against real git', () => {
     expect(readFileSync(join(guarded, 'tests', 'g.test.ts'), 'utf8')).toContain('this guard asserts nothing')
   }, 120_000)
 
-  test('…and a control that leaves a checkout-time FILTER in the shared config, which the RE-PROVISION obeys, cannot either', async () => {
+  test('EVERY proof-tree add disables a shared-config fsmonitor command', async () => {
+    const repo = await seedControlForgeryRepo()
+    const scratch = mkdtempSync(join(tmpdir(), 'mutation-prover-realgit-fsmonitor-mechanism-'))
+    created.push(scratch)
+    const marker = join(scratch, 'fsmonitor-runs')
+    const monitor = join(scratch, 'monitor.sh')
+    writeFileSync(monitor, `#!/bin/sh\nprintf 'hit\\n' >> ${JSON.stringify(marker)}\nexit 0\n`)
+    chmodSync(monitor, 0o755)
+    await git(repo, 'config', 'core.fsmonitor', monitor)
+    await git(repo, 'update-index', '--fsmonitor')
+
+    // Positive control: ordinary provisioning executes the configured command.
+    await git(repo, 'worktree', 'add', '--detach', '--force', join(scratch, 'unguarded'), 'HEAD')
+    const before = readFileSync(marker, 'utf8')
+    expect(before).toContain('hit')
+
+    // The same add with the prover's override cannot append another execution.
+    await git(repo, '-c', 'core.fsmonitor=false', 'worktree', 'add', '--detach', '--force', join(scratch, 'guarded'), 'HEAD')
+    expect(readFileSync(marker, 'utf8')).toBe(before)
+  }, 120_000)
+
+  test('…and a control that leaves a checkout-time FILTER in shared config cannot make re-provision execute it', async () => {
     // THE SIXTEENTH ESCAPE, and the one that rode in on the fifteenth's fix.
-    // Disabling hooks stops provisioning EXECUTING branch-authored code; it says
-    // nothing about git rewriting what it writes. This control appends a filter
+    // Disabling hooks alone said nothing about git rewriting what it writes.
+    // This control appends a filter
     // DRIVER to the repo's shared `.git/config` — outside every worktree, so the
     // removal cannot reach it — and the branch's committed `.gitattributes`
     // routes the guard's own test file through it. The re-provision then writes
@@ -1833,8 +1854,8 @@ describe('the mutation-proof gate against real git', () => {
     // arrives green, and the restored observation passes with nothing having
     // tested `src/limit.ts`.
     //
-    // EXPECTATION VERIFIED TO FAIL — proved:true, the forged verdict — with the
-    // `checkoutIsTheCommit` call removed from the re-provision, then restored.
+    // The unit row binds the dynamic override to both production add calls; this
+    // row proves an empty command actually makes real git pass bytes through.
     const repo = await seedControlForgeryRepo()
     const out = await runMutationProofGate({
       run: { id: 'run-filter-forgery', slug: 'filter-forgery', repo_path: repo, branch: 'trident/control-forgery' },
@@ -1851,22 +1872,17 @@ describe('the mutation-proof gate against real git', () => {
     expect(out.ok).toBe(false)
     expect(out.exempt).toBe(false)
     expect(out.evidence?.proved ?? null).toBe(false)
-    // The refusal is about the TREE, not about the guard: the gate never got as
-    // far as an observation it could have believed.
-    expect(out.reason).toContain('is not the bytes')
-    expect(out.reason).toContain('tests/g.test.ts')
-    // …and it refuses with NO observations at all: the tree it was about to read
-    // is not the commit, so there is nothing here it is entitled to believe.
-    expect(out.evidence?.observed ?? null).toBeNull()
+    // The driver remains recorded outside the tree, but its smudge command was
+    // shadowed before re-provisioning: committed RED bytes return, so the guard
+    // cannot manufacture the restored GREEN observation.
+    expect(out.reason).toContain('did not return to GREEN')
+    expect(out.evidence?.observed ?? null).not.toBeNull()
     // POSITIVE CONTROLS that the forgery mechanics really executed rather than
     // this being an early refusal that never reached the tree. The control ran
     // — the stanza it appended is still in the shared config afterwards,
-    // because nothing the proof removes can reach it. And the refusal names the
-    // GUARD's file, which is the file the rewrite hit: the first provisioning
-    // verified clean (the stanza did not exist yet), so this is the
-    // re-provision's verification talking.
+    // because nothing the proof removes can reach it. The driver's survival is
+    // evidence that the command was neutralized, rather than merely deleted.
     expect(readFileSync(join(repo, '.git', 'config'), 'utf8')).toContain('guardfix')
-    expect(out.reason).not.toContain('did not return to GREEN')
 
     // …AND THE MECHANISM ITSELF, at git level, so the row above cannot pass
     // merely because the driver was inert. Same repo, same planted stanza, an

@@ -5008,8 +5008,8 @@ GBrain (`gbrain serve` over stdio MCP). Provisioned at boot by
 returns the live trio the composer threads in — the `client`, the admin
 "Memory" tab `memoryStore`, and the entity-writer `syncHook` (pages + graph
 fan-out). `resolveGbrainClientOptions` is the pure config seam: it scopes the
-`gbrain serve` child to `<owner_home>/gbrain` (`GBRAIN_HOME`) and forwards the
-optional operator `GBRAIN_SOURCE` / `GBRAIN_BRAIN_ID`.
+`gbrain serve` child to `<owner_home>/gbrain` (`GBRAIN_HOME`), sets
+`GBRAIN_SOURCE` to the project slug, and forwards optional `GBRAIN_BRAIN_ID`.
 
 - **Agent memory RECALL (P0-2) — `memory_search` (`gbrain-memory/agent-tool.ts`).**
   The scribe WRITES entities + facts to this store on every turn; `memory_search`

@@ -16,10 +16,9 @@
  * syndication bus, NO `last_seq_seen` cursor-replica, and NO write-back. Do not
  * rebuild syndication-log/-sink/-subscriber to serve it.
  *
- * SCOPING. GBrain is per-instance today (single-source `default`; per-project
- * GBRAIN_SOURCE sub-scoping is future work). The host-side export therefore
- * reads whatever the host's already-instance-scoped `McpClient` exposes —
- * scoping the client to the right instance is the caller's responsibility (the
+ * SCOPING. The gateway scopes GBrain to the active project through
+ * `GBRAIN_SOURCE`. The host-side export reads whatever that project-scoped
+ * `McpClient` exposes — scoping the client is the caller's responsibility (the
  * same contract `memory-store.ts` documents). The collaborator-side import
  * re-namespaces every imported slug under the `source` partition so a mirrored
  * page never clobbers the collaborator's own same-named page, and stamps the
