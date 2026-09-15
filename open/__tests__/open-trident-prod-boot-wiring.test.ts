@@ -55,6 +55,7 @@ const SAVED_ENV_KEYS = [
   'NEUTRON_LANDING_STATIC_DIR',
   'NEUTRON_ONBOARDING_CHAT_COOKIE_SECRET',
   'ANTHROPIC_API_KEY',
+  'OPENAI_API_KEY',
   'CLAUDE_CODE_OAUTH_TOKEN',
   'NEUTRON_DISABLE_AMBIENT_CLAUDE_AUTH',
   'NOTIFY_SOCKET',
@@ -1397,6 +1398,7 @@ describe('Open foundational-Trident prod-boot wiring', () => {
 
   test('an LLM-less boot (no credential) leaves composition.trident unset (clean degrade)', async () => {
     delete process.env['ANTHROPIC_API_KEY']
+    delete process.env['OPENAI_API_KEY']
     const composer = buildOpenGraphComposer({ env: process.env })
     const composition = await composer({ db, project_slug: 'owner' })
 
