@@ -59,6 +59,7 @@ import type { AppWsAuthResolver } from '@neutronai/channels/adapters/app-ws/auth
 import {
   ProjectCredentialValidationError,
   PROJECT_CREDENTIAL_MIN_SECRET_CHARS,
+  isReservedService,
   type CredentialScope,
   type ProjectCredentialStore,
 } from '@neutronai/project-credentials/store.ts'
@@ -259,6 +260,16 @@ async function handleSet(
   // A `token` alias is accepted alongside `plaintext` for a friendlier client.
   const rawToken = fields['plaintext'] ?? fields['token']
   const rawService = fields['service']
+  // Reserved namespaces are a stronger boundary than generic credential-shape
+  // validation. Classify the service first so a short MCP JSON payload cannot
+  // disguise an attempt to reach another module's secret rows as invalid_token.
+  if (typeof rawService === 'string' && isReservedService(rawService)) {
+    return jsonError(
+      400,
+      'reserved_service',
+      'this service namespace is managed by its own settings surface and cannot be set here',
+    )
+  }
   if (
     typeof rawService === 'string' &&
     /^[a-z0-9_.-]{1,128}$/.test(rawService.trim().toLowerCase()) &&

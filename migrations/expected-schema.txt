@@ -986,8 +986,7 @@ CREATE TABLE instance_metadata (
   -- time; an unknown identifier throws and the cron tick / surface request
   -- fails closed (which is preferable to silently picking the wrong day).
   timezone TEXT
-, transcription_backend TEXT, trident_phase_models TEXT, mcp_servers TEXT)
-, transcription_backend TEXT, trident_phase_models TEXT, model_provider TEXT
+, transcription_backend TEXT, trident_phase_models TEXT, mcp_servers TEXT, model_provider TEXT
   CHECK (model_provider IS NULL OR model_provider IN ('anthropic', 'openai', 'openai-codex', 'pi')), model_provider_initialized INTEGER NOT NULL DEFAULT 0)
 
 [table] instance_scope_ledger (tbl=instance_scope_ledger)

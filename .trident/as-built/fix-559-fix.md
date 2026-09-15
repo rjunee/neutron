@@ -31,8 +31,22 @@ For this follow-up, `bun test open/__tests__/open-mcp-servers-wiring.test.ts` pa
 
 The PTY integration file cannot bind its loopback reply sink in this sandbox; its pure startup-bound test passes, while socket-dependent cases report the bind refusal. This is recorded as an environment limitation, not converted into skipped or weakened assertions.
 
+The merged-forward repair regenerated the schema snapshot from the migration chain. The resulting `instance_metadata` definition contains the MCP column and the later provider columns in one valid definition (`migrations/expected-schema.txt:980`, `migrations/expected-schema.txt:989`). The environment-reader inventory now declares `runtime/mcp-servers.ts` as a conservative regex match (`tests/integration/identity-env-readers-registry.test.ts:242`): its matching code is the generic uppercase env-name validator (`runtime/mcp-servers.ts:138`), while the same targeted read search positively found all three identity reads in `migrations/db-path.ts:45`, `migrations/db-path.ts:47`, and `migrations/db-path.ts:80` and found none in the MCP module.
+
+The credential POST now classifies the service through the store-owned reservation predicate before applying the generic short-token rule (`gateway/http/project-credentials-surface.ts:262`, `gateway/http/project-credentials-surface.ts:266`). This joins the existing `ProjectCredentialValidationError.code` vocabulary: `reserved_service` is already the store refusal (`project-credentials/store.ts:299`, `project-credentials/store.ts:302`) and write-validation codes map to HTTP 400 (`gateway/http/project-credentials-surface.ts:406`). The route test asserts both the code and the unchanged store (`gateway/http/__tests__/project-credentials-surface-scope.test.ts:243`, `gateway/http/__tests__/project-credentials-surface-scope.test.ts:249`).
+
+The requested five-file test command passed 89 tests. `bash scripts/ci/lint.sh` passed every gate, and `bash scripts/ci/typecheck-all.sh` passed all 51 TypeScript projects.
+
+### Merged-forward repair mutation table
+
+| Guard | Mutation | Red | Restored green |
+|---|---|---|---|
+| Reserved-service classification at `gateway/http/project-credentials-surface.ts:266` | Inverted `isReservedService`; printed the mutated line 266 | Focused POST refusal failed: expected `reserved_service`, received `invalid_token` | Restored line 266; the same focused test passed |
+
 ### Deliberately not changed
 
 No shell is introduced: the saved executable and arguments remain structured. No alternate execution path or feature flag was added. Secret values are not added to metadata, prompts, logs, or responses. The frozen `docs/AS_BUILT.md` was not changed.
 
 This follow-up changes only the production wiring fixture and this existing record, enumerated with `git diff --name-only HEAD`. It does not change runtime behavior, the migration ledger, the app settings screen, or product decisions.
+
+The merged-forward repair adds no registry exclusion, does not hand-edit schema structure, and does not weaken the HTTP assertion. No product or specification decision changed. Its three implementation files were enumerated with `git diff --name-only` before this record was updated: `gateway/http/project-credentials-surface.ts`, `migrations/expected-schema.txt`, and `tests/integration/identity-env-readers-registry.test.ts`.

@@ -239,6 +239,8 @@ const KNOWN_READERS: Readonly<Record<string, string>> = {
   'migrations/runner.ts':
     'NOT a reader of its own — names NEUTRON_HOME in the migrate-owner refusal message (telling the operator which variable let a build workspace inherit the live home) and NEUTRON_HOME/NEUTRON_DB_PATH in comments describing which file the server opens. The resolution itself is delegated to migrations/db-path.ts, which is registered above.',
   // Broad regex matches: conservative membership, not evidence of an env read.
+  'runtime/mcp-servers.ts':
+    'Broad env-var-name validation regex at runtime/mcp-servers.ts:138 matches an identity-name candidate; registered conservatively, without claiming an env read or trimming behavior.',
   'agent-dispatch/command.ts':
     'Broad regex literal at agent-dispatch/command.ts:71 matches an identity-name candidate; registered conservatively, without claiming an env read or trimming behavior.',
   'app/app/projects/[id]/cores/dtc-analytics.tsx':
