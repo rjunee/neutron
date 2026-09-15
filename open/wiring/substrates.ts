@@ -103,15 +103,6 @@ export function wireSubstrates(ctx: OpenWiringContext): WiredSubstrates {
 
   // SWAPPABLE PROVIDER — the CONVERSATIONAL provider option bag. Applied ONLY to
   // the `cc-llm-*` (phase-spec) + `cc-agent-*` (live chat) substrates below.
-  //
-  // TRIDENT STAYS CLAUDE-CODE (hard constraint): the trident-fire
-  // (`makeWarmFireSubstrate`) + ephemeral (`makeEphemeralSubstrate`) substrates
-  // NEVER receive this — trident's fire-and-settle inner loop is a native CC
-  // Dynamic Workflow with no OpenAI analogue, so an autonomous build always runs
-  // on Claude Code regardless of the conversational provider. Degrade LOUDLY: if
-  // openai is selected but its pool / mcpResolver is missing, we leave the
-  // conversational config unset (→ Claude Code) rather than boot a broken path;
-  // the composer logs the fallback.
   // EXPLICIT operator selection vs FULLY-WIRED. `ctx.provider === 'openai'` is the
   // operator's explicit choice (NEUTRON_MODEL_PROVIDER=openai); it is honored even
   // when incomplete so the substrate FAILS LOUDLY rather than silently routing the
