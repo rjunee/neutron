@@ -141,6 +141,9 @@
     --gallery-label-fg: #fff;
     /* Misc controls */
     --cancel-bg: #3a3f47;
+    /* Scrollbars remain visible on platforms that paint them persistently. */
+    --scrollbar-thumb: #4b515c;
+    --scrollbar-track: transparent;
     /* BUG 1 — centered, constrained chat column width (mirrors .cint-scroll's
        760px); applied to message rows + composer + status lines so the chat is
        a centered column on wide screens, full-width (margins collapse) on mobile. */
@@ -231,8 +234,17 @@
     --gallery-label-bg: rgba(0,0,0,0.55);
     --gallery-label-fg: #fff;
     --cancel-bg: #d1d1d6;
+    --scrollbar-thumb: #a8a8ad;
+    --scrollbar-track: transparent;
   }
-  * { box-sizing: border-box; }
+  * {
+    box-sizing: border-box;
+    scrollbar-width: thin;
+    scrollbar-color: var(--scrollbar-thumb) var(--scrollbar-track);
+  }
+  *::-webkit-scrollbar { width: 8px; height: 8px; }
+  *::-webkit-scrollbar-thumb { background: var(--scrollbar-thumb); border-radius: 999px; }
+  *::-webkit-scrollbar-track { background: var(--scrollbar-track); }
   /* THE TYPE BASE. The owner compared us to Telegram: its text is "brighter and
      more vivid and easier to read", ours "more difficult", and he asked for a
      larger size. Telegram sits at ~17px; we were at 15.
