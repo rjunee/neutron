@@ -1716,7 +1716,7 @@ function AttachmentChips({ draft }: { draft: AttachmentDraft }): React.JSX.Eleme
           {it.status === 'error' ? (
             <span className="car-attach-state" title={it.error}>
               {' '}
-              · failed
+              · failed: {it.error ?? 'upload failed'}
             </span>
           ) : null}
           <button
@@ -1732,6 +1732,10 @@ function AttachmentChips({ draft }: { draft: AttachmentDraft }): React.JSX.Eleme
     </div>
   )
 }
+
+const CHAT_FILE_ACCEPT =
+  'image/png,image/jpeg,image/gif,image/webp,application/pdf,.pdf,audio/mpeg,audio/mp4,audio/wav,.mp3,.m4a,.wav,.gz,.json,.log,.csv'
+const IMPORT_FILE_ACCEPT = `${CHAT_FILE_ACCEPT},application/zip,.zip`
 
 interface ImportState {
   status: 'idle' | 'uploading' | 'done' | 'error'
@@ -1842,11 +1846,7 @@ function Composer({
         <input
           ref={fileInputRef}
           type="file"
-          accept={
-            importActive
-              ? 'image/png,image/jpeg,image/gif,image/webp,application/pdf,.pdf,audio/mpeg,audio/mp4,audio/wav,.mp3,.m4a,.wav,application/zip,.zip'
-              : 'image/png,image/jpeg,image/gif,image/webp,application/pdf,.pdf,audio/mpeg,audio/mp4,audio/wav,.mp3,.m4a,.wav'
-          }
+          accept={importActive ? IMPORT_FILE_ACCEPT : CHAT_FILE_ACCEPT}
           multiple
           hidden
           className="car-file-input"
