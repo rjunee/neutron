@@ -57,6 +57,7 @@ afterEach(() => {
 
 function harness(over: {
   wired?: boolean
+  begin_infra_retry?: (id: string) => Promise<TridentRun | null>
   max_infra_retries?: number
   on_infra_retry?: (run: TridentRun, attempt: number, cause: string) => Promise<void>
 } = {}) {
@@ -75,7 +76,7 @@ function harness(over: {
     base_branch: 'main',
     now: () => new Date(clockMs).toISOString(),
   }
-  if (over.wired !== false) opts.begin_infra_retry = (id) => store.beginInfraRetry(id)
+  if (over.wired !== false) opts.begin_infra_retry = over.begin_infra_retry ?? ((id) => store.beginInfraRetry(id))
   if (over.max_infra_retries !== undefined) opts.max_infra_retries = over.max_infra_retries
   if (over.on_infra_retry !== undefined) opts.on_infra_retry = over.on_infra_retry
   const orchestrator = buildTridentOrchestrator(opts)
@@ -301,5 +302,19 @@ describe('legacy wiring and atomic claim ownership', () => {
     expect(await store.beginInfraRetry(crashed.id)).toBeNull()
     expect(store.get(crashed.id)?.subagent_status).toBe('crashed')
     expect(store.get(crashed.id)?.infra_retries).toBe(0)
+  })
+
+  test('a lost atomic claim waits without launching another workflow', async () => {
+    const h = harness({ begin_infra_retry: async () => null })
+    const run = await createRun('claim-lost')
+    await h.loop.runOnce()
+    await writeResult(run.id, infraResult())
+
+    await h.loop.runOnce()
+
+    const after = store.get(run.id)!
+    expect(after.phase).not.toBe('failed')
+    expect(after.infra_retries).toBe(0)
+    expect(h.inputs).toHaveLength(1)
   })
 })
