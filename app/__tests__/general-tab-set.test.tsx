@@ -15,16 +15,13 @@
  * default forever. That default is precisely the legacy set in the screenshot.
  * Nothing was mis-ordering anything; the real set had never arrived.
  *
- * WHY THE STUB BELOW REPLICATES THE SERVER'S VALIDATOR RATHER THAN ANSWERING
- * EVERYTHING. A stub that serves `/projects/~general/tabs` happily would let the
- * exact shipped defect pass this test — the request would be wrong and the tab bar
- * right. So `installGateway` rejects any project id the real `sanitizeProjectId`
- * would reject, with the same code and message. Revert the client mapping and this
- * file reproduces the device screenshot instead of going green.
+ * The fake uses the production scope resolver: the reserved General segment is
+ * accepted alongside legal project ids, while malformed segments still get 400.
  */
 
 import { afterAll, afterEach, beforeAll, beforeEach, describe, expect, it } from 'bun:test';
 import { act, createElement } from 'react';
+import { resolveScopeSegment } from '@neutronai/gateway/http/scope-segment.ts';
 
 import {
   installNativeHarness,
@@ -57,8 +54,6 @@ const OWNER = {
 };
 const BASE_URL = 'https://harness.example.test';
 
-/** The gateway's own project-id alphabet (`sanitizeProjectId`). */
-const LEGAL_PROJECT_ID = /^[A-Za-z0-9_.-]{1,128}$/;
 
 function TabScreen() {
   return createElement('div', { 'data-testid': 'routed-tab-screen' });
@@ -93,7 +88,7 @@ function listRow(id: string) {
  * The engine's real per-project builtin set, in registry order — Chat (0),
  * Work (5), Documents (10), Apps (12), Settings (15). `resolveProjectTabs` is a
  * pure resolver over builtins ∪ Core contributions and never consults a project
- * row, so the live surface answers this for `general` exactly as it does for a
+ * row, so the live surface answers this for `~general` exactly as it does for a
  * named project. Apps + Settings are here ON PURPOSE: they are what General must
  * be narrowed OUT of.
  */
@@ -131,8 +126,8 @@ function installGateway(): void {
     const scoped = PROJECT_SCOPED.exec(path);
     if (scoped !== null) {
       const id = decodeURIComponent(scoped[1] ?? '');
-      // THE VALIDATOR, replicated. Without this the shipped bug passes.
-      if (!LEGAL_PROJECT_ID.test(id)) {
+      // Exercise the same scope contract as the production HTTP surfaces.
+      if (resolveScopeSegment(id) === null) {
         rejected.push(path);
         return Response.json(
           {

@@ -135,7 +135,7 @@ describe('external launcher death reaches the real orchestrator without killing 
       },
     })
     const response = await surface.handler(new Request(
-      `http://x/api/app/projects/general/work-board/${item.id}/start`,
+      `http://x/api/app/projects/~general/work-board/${item.id}/start`,
       { method: 'POST', headers: { authorization: 'Bearer dev-token' } },
     ))
     expect(response?.status).toBe(409)

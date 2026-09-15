@@ -8,7 +8,7 @@
  *   - the mobile RAIL id / route segment is `'~general'` (`GENERAL_PROJECT_ID`),
  *   - the shared client-side CHAT SCOPE is `''` (`railIdToScope`),
  *   - the Work Board's HTTP path segment is `'general'`
- *     (`work-board/store.ts` `workBoardScopeKey(owner, 'general') → owner`).
+ *     (`work-board/store.ts` `workBoardScopeKey(owner, '~general') → owner`).
  *
  * `~` is NOT in the gateway's `[A-Za-z0-9_.-]` project-id alphabet
  * (`channels/adapters/app-ws/envelope.ts` `sanitizeProjectId`), so sending the
@@ -76,49 +76,48 @@ describe('workBoardPathSegment — the URL boundary for General', () => {
   });
 });
 
-describe('WorkBoardClient — General never sends the raw rail sentinel', () => {
-  it('list() on the rail sentinel hits the general board, not `/~general/`', async () => {
+describe('WorkBoardClient — General keeps the reserved rail sentinel', () => {
+  it('list() on the rail sentinel keeps the reserved segment', async () => {
     const { client, calls } = make({
       status: 200,
       body: { ok: true, items: [item()], project_id: 'general' },
     });
     await client.list('~general');
-    expect(calls[0]).toBe(`GET ${BASE}/api/app/projects/general/work-board`);
-    // The literal shape that produced the on-device `invalid_project_id` pane.
-    expect(calls[0]).not.toContain('~general');
+    expect(calls[0]).toBe(`GET ${BASE}/api/app/projects/~general/work-board`);
+    expect(calls[0]).toContain('~general');
     expect(calls[0]).not.toContain('%7Egeneral');
   });
 
   it('list() on the empty chat scope hits the general board, not a `//` double slash', async () => {
     const { client, calls } = make({ status: 200, body: { ok: true, items: [], project_id: 'general' } });
     await client.list('');
-    expect(calls[0]).toBe(`GET ${BASE}/api/app/projects/general/work-board`);
+    expect(calls[0]).toBe(`GET ${BASE}/api/app/projects/~general/work-board`);
   });
 
   it('normalises on EVERY mutating route, not just the read', async () => {
     const created = make({ status: 201, body: { ok: true, item: item() } });
     await created.client.create('~general', { title: 'New' });
-    expect(created.calls[0]).toBe(`POST ${BASE}/api/app/projects/general/work-board`);
+    expect(created.calls[0]).toBe(`POST ${BASE}/api/app/projects/~general/work-board`);
 
     const patched = make({ status: 200, body: { ok: true, item: item() } });
     await patched.client.update('~general', 'w1', { title: 'Edited' });
-    expect(patched.calls[0]).toBe(`PATCH ${BASE}/api/app/projects/general/work-board/w1`);
+    expect(patched.calls[0]).toBe(`PATCH ${BASE}/api/app/projects/~general/work-board/w1`);
 
     const done = make({ status: 200, body: { ok: true, item: item({ status: 'done' }) } });
     await done.client.complete('~general', 'w1');
-    expect(done.calls[0]).toBe(`POST ${BASE}/api/app/projects/general/work-board/w1/complete`);
+    expect(done.calls[0]).toBe(`POST ${BASE}/api/app/projects/~general/work-board/w1/complete`);
 
     const moved = make({ status: 200, body: { ok: true, items: [], project_id: 'general' } });
     await moved.client.reorder('~general', 'w1', { before: 'w2' });
-    expect(moved.calls[0]).toBe(`POST ${BASE}/api/app/projects/general/work-board/w1/reorder`);
+    expect(moved.calls[0]).toBe(`POST ${BASE}/api/app/projects/~general/work-board/w1/reorder`);
 
     const started = make({ status: 200, body: { ok: true, run_id: 'r1' } });
     await started.client.start('~general', 'w1');
-    expect(started.calls[0]).toBe(`POST ${BASE}/api/app/projects/general/work-board/w1/start`);
+    expect(started.calls[0]).toBe(`POST ${BASE}/api/app/projects/~general/work-board/w1/start`);
 
     const gone = make({ status: 200, body: { ok: true, deleted: 'w1' } });
     await gone.client.delete('~general', 'w1');
-    expect(gone.calls[0]).toBe(`DELETE ${BASE}/api/app/projects/general/work-board/w1`);
+    expect(gone.calls[0]).toBe(`DELETE ${BASE}/api/app/projects/~general/work-board/w1`);
   });
 });
 

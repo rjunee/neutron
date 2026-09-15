@@ -17,7 +17,7 @@ import {
   GatewayHttpClient,
   type GatewayHttpClientOptions,
 } from '@neutronai/client-core';
-import { httpProjectSegmentEncoded } from './general-scope';
+import { httpScopeSegmentEncoded } from './general-scope';
 
 export type DocTreeKind = 'file' | 'folder' | 'binary';
 
@@ -128,7 +128,7 @@ export type DocsClientOptions = GatewayHttpClientOptions;
  * work-board / tabs / activity clients, each of which hit the same 400).
  */
 function seg(project_id: string): string {
-  return httpProjectSegmentEncoded(project_id);
+  return httpScopeSegmentEncoded(project_id);
 }
 
 export const BINARY_EXTENSIONS = Object.freeze([

@@ -113,7 +113,7 @@ describe('NeutronChatController — view model over chat-core', () => {
   // The re-render guard matters as much as the feature: the activity handler
   // deliberately did NOT publish() before this, so a keepalive tick could not
   // re-render the transcript. These pin both halves.
-  const activityFrame = (label: string, scope = 'general', detail?: string, kind = 'tool_start') => ({
+  const activityFrame = (label: string, scope = '~general', detail?: string, kind = 'tool_start') => ({
     v: 1,
     type: 'activity_event',
     scope_key: scope,
@@ -145,7 +145,7 @@ describe('NeutronChatController — view model over chat-core', () => {
     await tick()
     await controller.send('build the email core')
     await tick()
-    sockets[0]!.deliver(activityFrame('Reading files', 'general', 'SPEC.md'))
+    sockets[0]!.deliver(activityFrame('Reading files', '~general', 'SPEC.md'))
     await tick()
     // A tool_start's label is the humanized TOOL NAME and wins over any detail —
     // showing the file path instead would be less informative, not more.
@@ -166,7 +166,7 @@ describe('NeutronChatController — view model over chat-core', () => {
     await tick()
     await controller.send('go')
     await tick()
-    sockets[0]!.deliver(activityFrame('status', 'general', 'working', 'status'))
+    sockets[0]!.deliver(activityFrame('status', '~general', 'working', 'status'))
     await tick()
     expect(controller.getViewModel().liveActivity).toEqual({ label: 'working' })
     controller.stop()
@@ -184,10 +184,10 @@ describe('NeutronChatController — view model over chat-core', () => {
     await tick()
     await controller.send('go')
     await tick()
-    sockets[0]!.deliver(activityFrame('status', 'general', 'working', 'status'))
+    sockets[0]!.deliver(activityFrame('status', '~general', 'working', 'status'))
     await tick()
     expect(controller.getViewModel().liveActivity?.label).toBe('working')
-    sockets[0]!.deliver(activityFrame('status', 'general', 'scoping the plan', 'status'))
+    sockets[0]!.deliver(activityFrame('status', '~general', 'scoping the plan', 'status'))
     await tick()
     expect(controller.getViewModel().liveActivity?.label).toBe('scoping the plan')
     controller.stop()
@@ -246,7 +246,7 @@ describe('NeutronChatController — view model over chat-core', () => {
     await tick()
     sockets[0]!.deliver(activityFrame('Reading files'))
     await tick()
-    sockets[0]!.deliver(activityFrame('keepalive', 'general', undefined, 'keepalive'))
+    sockets[0]!.deliver(activityFrame('keepalive', '~general', undefined, 'keepalive'))
     await tick()
     // The real step survives; the heartbeat did not overwrite it.
     expect(controller.getViewModel().liveActivity?.label).toBe('Reading files')

@@ -159,7 +159,7 @@ describe('wireMemory', () => {
   // both from ONE `.nexus`. Drives the REAL `emitLearning` mapping via a
   // correction-returning judge substrate — regresses if memory.ts reverts to the
   // raw literal `'general'` scope.
-  test('a General correction lands under workBoardScopeKey(project_slug, "general") — not literal "general"', async () => {
+  test('a General correction lands under workBoardScopeKey(project_slug, "~general") — not the project named "general"', async () => {
     const substrateFactory = (opts: ClaudeCodeSubstrateOptions): Substrate => ({
       // The reflection judge parses this JSON; a token event carries it.
       start: () => correctionHandle(opts.substrate_instance_id),
@@ -171,15 +171,15 @@ describe('wireMemory', () => {
     )
     try {
       expect(w.nexus).not.toBeNull()
-      // The General topic passes scope='general' (turn.project_id ?? 'general').
+      // The General topic passes the collision-proof reserved scope.
       w.reflection.onTurnComplete({
         user_text: 'no, use tabs not spaces',
         agent_text: 'I indented with spaces.',
-        scope: 'general',
+        scope: '~general',
       })
 
       // makeCtx sets project_slug='owner'; General collapses to it on BOTH sides.
-      const canonical = workBoardScopeKey('owner', 'general')
+      const canonical = workBoardScopeKey('owner', '~general')
       expect(canonical).toBe('owner')
       expect(canonical).toBe(workBoardScopeKey('owner', undefined)) // == trident General key
       let rows: Awaited<ReturnType<NonNullable<typeof w.nexus>['readRecent']>> = []

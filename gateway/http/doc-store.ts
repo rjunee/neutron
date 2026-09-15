@@ -56,6 +56,7 @@ import {
 import { dirname, join, normalize, relative, sep } from 'node:path'
 
 import { sanitizeProjectId } from '@neutronai/channels/adapters/app-ws/envelope.ts'
+import { GENERAL_RAIL_ID } from '@neutronai/wire-types/topic-id.ts'
 import type {
   CommitKind,
   DocVersionStore,
@@ -1067,7 +1068,7 @@ export class DocStore {
   }
 
   private assertProjectId(project_id: string): string {
-    const cleaned = sanitizeProjectId(project_id)
+    const cleaned = project_id === GENERAL_RAIL_ID ? GENERAL_RAIL_ID : sanitizeProjectId(project_id)
     if (cleaned === null) {
       throw new DocPathError(
         'invalid_project_id',

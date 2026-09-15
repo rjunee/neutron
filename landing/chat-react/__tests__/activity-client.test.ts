@@ -147,18 +147,20 @@ describe('parseActivitySnapshot', () => {
 })
 
 describe('scope + path mapping', () => {
-  it('maps the web shell’s empty General id onto the server’s `general` key', () => {
+  it('maps the web shell’s empty General id onto the server’s `~general` key', () => {
     // The web shell models General as `''` (vm.projectId === null); the server keys
-    // it `'general'` (from the live turn's `project_id ?? 'general'`). This boundary
+    // it under the reserved scope. This boundary
     // is where they meet.
-    expect(activityScopeKey(null)).toBe('general')
-    expect(activityScopeKey('')).toBe('general')
+    expect(activityScopeKey(null)).toBe('~general')
+    expect(activityScopeKey('')).toBe('~general')
+    expect(activityScopeKey('general')).toBe('general')
     expect(activityScopeKey('p1')).toBe('p1')
   })
 
   it('routes General to the bare endpoint and a project to its own', () => {
     expect(activityPath(null)).toBe('/api/app/activity')
     expect(activityPath('')).toBe('/api/app/activity')
+    expect(activityPath('general')).toBe('/api/app/projects/general/activity')
     expect(activityPath('p1')).toBe('/api/app/projects/p1/activity')
     // Path-segment safety.
     expect(activityPath('a/b')).toBe('/api/app/projects/a%2Fb/activity')

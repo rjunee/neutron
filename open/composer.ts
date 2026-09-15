@@ -375,6 +375,7 @@ import { createAppWsAuthResolver } from '@neutronai/channels/adapters/app-ws/aut
 import { isLoopbackBindHost, assertOwnerCredentialPolicy } from '@neutronai/gateway/boot-bind-policy.ts'
 import type { AppWsAuthResolver } from '@neutronai/channels/adapters/app-ws/auth.ts'
 import { DocStore } from '@neutronai/gateway/http/doc-store.ts'
+import { migrateGeneralDocsScope } from '@neutronai/gateway/docs-general-scope-migration.ts'
 import { DocVersionStore } from '@neutronai/gateway/git/doc-version-store.ts'
 import { createAppDocsSurface } from '@neutronai/gateway/http/app-docs-surface.ts'
 import { CommentStore } from '@neutronai/gateway/comments/comment-store.ts'
@@ -3682,6 +3683,7 @@ export function buildOpenGraphComposer(
     // This walker also lends its per-project lock to the comments `AgentWatcher`
     // constructed below. The walker remains a synchronous write hook; the watcher
     // is the independently scheduled LLM reply loop.
+    await migrateGeneralDocsScope(owner_home)
     const anchorWalker = new AnchorWalker({ commentStore, owner_home })
     let syncPlanDocTitle: ((projectId: string, path: string) => Promise<void>) | null = null
     const docVersionStore = new DocVersionStore({ owner_home, project_slug })
@@ -4817,6 +4819,7 @@ export function buildOpenGraphComposer(
     )
     const activitySurface = createActivitySurface({
       inspector: activityInspector,
+      scopeKey: inspectorScopeKey,
       auth: appOwnerAuth,
     })
 

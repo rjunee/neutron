@@ -28,7 +28,7 @@
 // comment-only mirror of `tabs/registry.ts`); it now imports + re-exports the
 // ONE source, so the mirror-parity test is a plain import-and-use contract.
 import type { TabDescriptor } from '@neutronai/wire-types';
-import { httpProjectSegmentEncoded } from './general-scope';
+import { httpScopeSegmentEncoded } from './general-scope';
 
 export type {
   TabDescriptor,
@@ -81,13 +81,13 @@ export class TabsClient {
    * Chat/Apps/Tasks/Reminders/Docs/Settings set, no Work tab, Docs in fifth
    * place. It read as a tab-ORDER bug on device and was a failed fetch.
    *
-   * The tabs surface resolves `'general'` like any other id — `resolveProjectTabs`
+   * The tabs surface reserves `'~general'` — `resolveProjectTabs`
    * is a pure resolver over builtins ∪ Core contributions and never consults a
    * project row — so General now gets the same set every project does:
    * Chat / Work / Documents / Apps / Settings.
    */
   async listProjectTabs(project_id: string): Promise<TabDescriptor[]> {
-    const path = `/api/app/projects/${httpProjectSegmentEncoded(project_id)}/tabs`;
+    const path = `/api/app/projects/${httpScopeSegmentEncoded(project_id)}/tabs`;
     let res: Response;
     try {
       res = await fetch(`${this.base_url}${path}`, {

@@ -911,10 +911,17 @@ describe('work-board HTTP surface — per-project scoping (Bug 3)', () => {
     // A row written under the bare owner slug (how ALL rows were keyed before
     // per-project scoping) surfaces on the General board — not stranded.
     await store.create(SLUG, { title: 'legacy' })
-    const gen = await surface.handler(req('GET', '/api/app/projects/general/work-board'))
+    await store.create('general', { title: 'real project card' })
+    const gen = await surface.handler(req('GET', '/api/app/projects/~general/work-board'))
     const genBody = (await gen!.json()) as { items: { title: string }[]; project_id: string }
     expect(genBody.items.map((i) => i.title)).toEqual(['legacy'])
-    expect(genBody.project_id).toBe('general')
+    expect(genBody.project_id).toBe('~general')
+
+    const named = await surface.handler(req('GET', '/api/app/projects/general/work-board'))
+    expect(named?.status).toBe(200)
+    const namedBody = (await named!.json()) as { items: { title: string }[]; project_id: string }
+    expect(namedBody.items.map((i) => i.title)).toEqual(['real project card'])
+    expect(namedBody.project_id).toBe('general')
 
     // A real project does NOT see the legacy General rows.
     const proj = await surface.handler(req('GET', '/api/app/projects/projA/work-board'))

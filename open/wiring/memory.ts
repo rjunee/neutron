@@ -315,7 +315,7 @@ export function wireMemory(ctx: OpenWiringContext): WiredMemory {
     // small classification, which is exactly what the fast tier is for.
     model_preference: [FAST_MODEL],
     // Fire-and-forget: file the correction under the CANONICAL project nexus
-    // scope. `scope` is `turn.project_id ?? 'general'`; run it through
+    // scope. General arrives as the reserved `~general`; run it through
     // `workBoardScopeKey` (owner boundary = `project_slug`) so it matches the key
     // trident stamps on a run's `project_slug`
     // (`workBoardScopeKey(project_slug, project_id)`) — General collapses to the

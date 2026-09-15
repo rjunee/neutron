@@ -26,8 +26,6 @@ import { afterEach, describe, expect, test } from 'bun:test'
 import {
   GENERAL_HTTP_ID,
   RAIL_GENERAL_ID,
-  httpProjectSegment,
-  httpProjectSegmentEncoded,
   httpScopeSegment,
   httpScopeSegmentEncoded,
 } from '../lib/general-scope'
@@ -58,30 +56,6 @@ describe('the one mapping', () => {
     expect(GENERAL_RAIL_ID).toBe(GENERAL_PROJECT_ID)
   })
 
-  test('every client-side spelling of General collapses to the server id', () => {
-    expect(httpProjectSegment(RAIL_GENERAL_ID)).toBe(GENERAL_HTTP_ID)
-    expect(httpProjectSegment('')).toBe(GENERAL_HTTP_ID)
-    expect(httpProjectSegment(null)).toBe(GENERAL_HTTP_ID)
-    expect(httpProjectSegment(undefined)).toBe(GENERAL_HTTP_ID)
-  })
-
-  test('a named project passes through — including one literally named "general"', () => {
-    expect(httpProjectSegment('tabs')).toBe('tabs')
-    expect(httpProjectSegment(GENERAL_HTTP_ID)).toBe(GENERAL_HTTP_ID)
-  })
-
-  test('THAT PASS-THROUGH IS THE COLLISION: the scope and a real "general" alias', () => {
-    // Stated as an assertion rather than a comment so the defect cannot be
-    // rediscovered as a surprise. `httpProjectSegment` cannot tell the no-project
-    // scope from a project whose id happens to be `general`, because the segment it
-    // maps General onto is itself a legal project id. Four surfaces still share this
-    // — #183 — and TWO OF THEM MUTATE through it (`docs-client.ts` writes and deletes
-    // documents, `work-board-client.ts` creates, patches and deletes items), so #183
-    // is an open wrong-scope WRITE, not a read-only wart. The pin below is what stops
-    // the surface that HAS been split off from rejoining them by a copy-paste.
-    expect(httpProjectSegment(RAIL_GENERAL_ID)).toBe(httpProjectSegment(GENERAL_HTTP_ID))
-  })
-
   test('httpScopeSegment KEEPS the sentinel, so the scope and that project diverge', () => {
     // The whole point: `~` is outside the gateway's project-id alphabet, so these two
     // values can never be equal no matter what a project is called.
@@ -110,13 +84,8 @@ describe('the one mapping', () => {
   test('the match is EXACT, so a project merely starting with the sentinel survives', () => {
     // A prefix test here would silently redirect a real project's docs at the
     // General root — a data-visibility bug, not a 400.
-    expect(httpProjectSegment('~generalize')).toBe('~generalize')
-    expect(httpProjectSegment('~general-2')).toBe('~general-2')
-  })
-
-  test('the encoded form encodes AFTER mapping, never the sentinel', () => {
-    expect(httpProjectSegmentEncoded(RAIL_GENERAL_ID)).toBe(GENERAL_HTTP_ID)
-    expect(httpProjectSegmentEncoded('a b')).toBe('a%20b')
+    expect(httpScopeSegment('~generalize')).toBe('~generalize')
+    expect(httpScopeSegment('~general-2')).toBe('~general-2')
   })
 
   test('the two clients that already had their own copy still behave identically', () => {
@@ -125,8 +94,8 @@ describe('the one mapping', () => {
     expect(workBoardPathSegment('tabs')).toBe('tabs')
     expect(activityScopeKey(RAIL_GENERAL_ID)).toBe(GENERAL_ACTIVITY_SCOPE)
     expect(activityScopeKey('tabs')).toBe('tabs')
-    expect(GENERAL_WORK_BOARD_PROJECT_ID).toBe(GENERAL_HTTP_ID)
-    expect(GENERAL_ACTIVITY_SCOPE).toBe(GENERAL_HTTP_ID)
+    expect(GENERAL_WORK_BOARD_PROJECT_ID).toBe(RAIL_GENERAL_ID)
+    expect(GENERAL_ACTIVITY_SCOPE).toBe(RAIL_GENERAL_ID)
   })
 })
 
@@ -148,14 +117,11 @@ describe('DocsClient asks for General by a name the server can spell', () => {
     fetchImpl: recordingFetch(urls, body),
   })
 
-  test('tree() on the rail sentinel requests /projects/general/docs/tree', async () => {
+  test('tree() keeps the reserved General segment', async () => {
     const urls: string[] = []
     const client = new DocsClient(opts(urls, { ok: true, tree: [], file_count: 0 }))
     await client.tree(RAIL_GENERAL_ID)
-    expect(urls[0]).toBe('https://example.test/api/app/projects/general/docs/tree')
-    // The sentinel must not survive anywhere in the URL, encoded or raw — a
-    // percent-encoded `~` would 400 just the same.
-    expect(urls[0]).not.toContain('~')
+    expect(urls[0]).toBe('https://example.test/api/app/projects/~general/docs/tree')
     expect(urls[0]).not.toContain('%7E')
   })
 
@@ -163,7 +129,7 @@ describe('DocsClient asks for General by a name the server can spell', () => {
     const urls: string[] = []
     const client = new DocsClient(opts(urls, { ok: true, file: { path: 'a.md', content: '' } }))
     await client.writeFile(RAIL_GENERAL_ID, { path: 'a.md', content: 'hello' })
-    expect(urls[0]).toBe('https://example.test/api/app/projects/general/docs/file')
+    expect(urls[0]).toBe('https://example.test/api/app/projects/~general/docs/file')
   })
 
   test('a named project is still requested under its own id', async () => {
@@ -183,7 +149,7 @@ describe('DocsClient asks for General by a name the server can spell', () => {
     const src = Bun.file(new URL('../lib/docs-client.ts', import.meta.url)).text()
     return src.then((text) => {
       expect(text).not.toContain('encodeURIComponent(project_id)')
-      expect(text).toContain('httpProjectSegmentEncoded')
+      expect(text).toContain('httpScopeSegmentEncoded')
     })
   })
 })
@@ -194,7 +160,7 @@ describe('TabsClient asks for General by a name the server can spell', () => {
     globalThis.fetch = realFetch
   })
 
-  test('listProjectTabs on the rail sentinel requests /projects/general/tabs', async () => {
+  test('listProjectTabs keeps the reserved General segment', async () => {
     const urls: string[] = []
     // TabsClient uses the global fetch (no injection seam), so stub it.
     globalThis.fetch = ((input: string) => {
@@ -208,7 +174,7 @@ describe('TabsClient asks for General by a name the server can spell', () => {
     }) as unknown as typeof fetch
     const client = new TabsClient({ base_url: 'https://example.test', token: 't' })
     await client.listProjectTabs(RAIL_GENERAL_ID)
-    expect(urls[0]).toBe('https://example.test/api/app/projects/general/tabs')
+    expect(urls[0]).toBe('https://example.test/api/app/projects/~general/tabs')
   })
 })
 

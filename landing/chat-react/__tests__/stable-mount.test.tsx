@@ -256,7 +256,7 @@ describe('W7 stable-mount — thread/composer/pane DOM instances survive a proje
     const { NeutronChatController } = await import('../controller.ts')
     const { useNeutronChatVm } = await import('../useNeutronChat.ts')
     const { useAttachmentDraft } = await import('../useAttachmentDraft.ts')
-    const { ChatApp } = await import('../ChatApp.tsx')
+    const { ChatApp, conversationIdOf } = await import('../ChatApp.tsx')
     const React = await import('react')
 
     // The dangerous boundary: `__general__` is a validator-legal project id, and the
@@ -265,15 +265,17 @@ describe('W7 stable-mount — thread/composer/pane DOM instances survive a proje
     // With a non-empty outgoing General transcript and an empty incoming project, the
     // cached-General fallback would keep `hostVm.projectId` null → the project's pane
     // fetched General's board (and the transcript could bleed) until hydration. The
-    // collision-proof `GENERAL_CONV_ID` ('#general', rejected by `sanitizeProjectId`)
+    // collision-proof `GENERAL_CONV_ID` ('~general', rejected by `sanitizeProjectId`)
     // gives them SEPARATE surfaces; this drives the exact switch to prove it.
     const NAMED = '__general__'
+    expect(conversationIdOf(null)).toBe('~general')
+    expect(conversationIdOf(NAMED)).toBe(NAMED)
     const boardUrls: string[] = []
     const fetchImpl = async (url: string): Promise<Response> => {
       if (url.includes('/work-board')) {
         boardUrls.push(url)
         return new Response(
-          JSON.stringify({ ok: true, items: [], project_id: url.includes(NAMED) ? NAMED : 'general' }),
+          JSON.stringify({ ok: true, items: [], project_id: url.includes(NAMED) ? NAMED : '~general' }),
           { status: 200, headers: { 'content-type': 'application/json' } },
         )
       }
@@ -333,7 +335,7 @@ describe('W7 stable-mount — thread/composer/pane DOM instances survive a proje
     const container = document.createElement('div')
     document.body.appendChild(container)
     const root = createRoot(container)
-    const generalUrl = 'https://sam.neutron.test/api/app/projects/general/work-board'
+    const generalUrl = 'https://sam.neutron.test/api/app/projects/~general/work-board'
     const namedUrl = `https://sam.neutron.test/api/app/projects/${NAMED}/work-board`
     try {
       await act(async () => {
