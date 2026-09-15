@@ -7,7 +7,7 @@ import { fakeRunner, type BoundedWorkOutcome, type BoundedWorkRequest } from '@n
 import { seedMigratedDb } from '../tests/support/migrated-db.ts'
 import { TridentRunStore } from './store.ts'
 import { spawnCapture, type EnvCapableHostRunner, type HostCommandResult } from './git-mode.ts'
-import { createProductionHostEffects, workContextPath } from './production-host-effects.ts'
+import { createProductionHostEffects, productionCiSource, workContextPath } from './production-host-effects.ts'
 import { briefIntegrity } from './gates/brief-integrity.ts'
 import { buildRun, type BuildRunDeps, type BuildRunInput, type BuildSnapshot } from './build-run.ts'
 
@@ -48,7 +48,9 @@ async function fixture() {
   const row = await store.create({ slug: 'build', project_slug: 'project', repo_path: repo, task: 'Build' })
   await store.update(row.id, { branch: 'change', worktree, base_sha: base, merge_mode: 'pr' })
   let pr: any = null
-  let ci: unknown = [{ headSha: tip, status: 'completed', conclusion: 'success' }]
+  let ciConfig: any = { kind: 'resolved', required: ['test'], appBound: [], produced: ['test'] }
+  let ciReadiness: any = { headSha: tip, mergeable: 'MERGEABLE', rows: [{ name: 'test', status: 'COMPLETED', conclusion: 'SUCCESS' }] }
+  let now = 0
   const calls: string[][] = []
   let intercept: ((argv: string[]) => HostCommandResult | undefined | Promise<HostCommandResult | undefined>) | undefined
   const runHost: EnvCapableHostRunner = async (argv, cwd, env, timeout) => {
@@ -56,7 +58,6 @@ async function fixture() {
     const override = await intercept?.([...argv])
     if (override) return override
     if (argv[0] === 'gh') {
-      if (argv[1] === 'run') return ok(JSON.stringify(ci))
       if (argv[2] === 'list') return ok(JSON.stringify(pr ? [pr] : []))
       if (argv[2] === 'create') {
         pr = { number: 12, headRefOid: tip, state: 'OPEN', headRefName: 'change', baseRefName: 'main', isCrossRepository: false }
@@ -68,10 +69,13 @@ async function fixture() {
     return spawnCapture(argv, cwd, env, timeout)
   }
   const options = { store, runId: row.id, projectSlug: 'project', repo, worktree, branch: 'change', baseBranch: 'main', runHost,
-    ciWorkflow: 'ci.yml', publication: { title: 'Build', bodyFile: join(dir, 'body.md') } }
+    ciWorkflow: 'ci.yml', ciNow: () => now,
+    ciSource: { async required() { return structuredClone(ciConfig) }, async readiness() { return structuredClone(ciReadiness) } },
+    publication: { title: 'Build', bodyFile: join(dir, 'body.md') } }
   const host = createProductionHostEffects(options)
   return { ...host, options, db, dir, repo, worktree, store, row, base, tip, calls, command,
-    intercept(fn: typeof intercept) { intercept = fn }, setPr(value: any) { pr = value }, setCi(value: unknown) { ci = value } }
+    intercept(fn: typeof intercept) { intercept = fn }, setPr(value: any) { pr = value },
+    setCiConfig(value: unknown) { ciConfig = value }, setCiReadiness(value: unknown) { ciReadiness = value }, advance(ms: number) { now += ms } }
 }
 async function measured(f: Awaited<ReturnType<typeof fixture>>): Promise<BuildSnapshot> {
   const observation = await f.effects.measure()
@@ -79,6 +83,42 @@ async function measured(f: Awaited<ReturnType<typeof fixture>>): Promise<BuildSn
   if (observation.kind !== 'known') throw new Error(observation.detail)
   return observation.value
 }
+
+test('G045 ruleset requirements survive a classic-protection 404', async () => {
+  const source = productionCiSource(async argv => {
+    const path = argv[2]!
+    if (path.includes('/protection/')) return { ...bad(), exit_code: 1, stderr: 'HTTP 404 Not Found' }
+    if (path.includes('/rules/')) return ok(JSON.stringify([{ type: 'required_status_checks', parameters: { required_status_checks: [{ context: 'test', integration_id: 7 }] } }]))
+    if (path.endsWith('/branches/main')) return ok(JSON.stringify({ protected: true, protection: {} }))
+    if (path.includes('/check-runs')) return ok(JSON.stringify({ total_count: 1, check_runs: [{ name: 'test' }] }))
+    return ok(JSON.stringify({ total_count: 0, statuses: [] }))
+  }, '.')
+  expect(await source.required('main')).toEqual({ kind: 'resolved', required: ['test'], appBound: ['test'], produced: ['test'] })
+})
+
+test('G045 unresolved protection 404 is unknown without independent branch evidence', async () => {
+  const source = productionCiSource(async argv => {
+    const path = argv[2]!
+    if (path.includes('/rules/')) return { ...bad(), exit_code: 1, stderr: 'HTTP 404 Not Found' }
+    if (path.endsWith('/branches/main')) return bad()
+    if (path.includes('/check-runs')) return ok(JSON.stringify({ total_count: 0, check_runs: [] }))
+    if (path.includes('/status?')) return ok(JSON.stringify({ total_count: 0, statuses: [] }))
+    return { ...bad(), exit_code: 1, stderr: 'HTTP 404 Not Found' }
+  }, '.')
+  expect(await source.required('main')).toMatchObject({ kind: 'unknown' })
+})
+
+test('G046 truncated producer lists are unreadable evidence', async () => {
+  const source = productionCiSource(async argv => {
+    const path = argv[2]!
+    if (path.includes('/protection/')) return ok(JSON.stringify({ contexts: ['required'], checks: [] }))
+    if (path.includes('/rules/')) return ok('[]')
+    if (path.endsWith('/branches/main')) return ok(JSON.stringify({ protected: true }))
+    if (path.includes('/check-runs')) return ok(JSON.stringify({ total_count: 2, check_runs: [{ name: 'other' }] }))
+    return ok(JSON.stringify({ total_count: 0, statuses: [] }))
+  }, '.')
+  expect(await source.required('main')).toEqual({ kind: 'resolved', required: ['required'], appBound: [], produced: null })
+})
 
 test('measurement reads complete committed diff and re-reads persisted pins', async () => {
   const f = await fixture()
@@ -123,21 +163,18 @@ test('measurement refuses malformed PR, different checkout, and timeout with out
   expect(await f.effects.measure()).toMatchObject({ kind: 'unknown' })
 })
 
-test('CI observes success, absent, running, failed and unreadable without converting unknown to green', async () => {
+test('CI combines requirements and rollup without converting unknown to green', async () => {
   const f = await fixture()
+  f.setPr({ number: 12, headRefOid: f.tip, state: 'OPEN', headRefName: 'change', baseRefName: 'main', isCrossRepository: false })
   const snapshot = await measured(f)
   expect(await f.observeCi(snapshot)).toEqual({ kind: 'completed', headSha: f.tip, conclusion: 'success' })
-  f.setCi([])
+  f.setCiReadiness({ headSha: f.tip, mergeable: 'MERGEABLE', rows: [] })
   expect(await f.observeCi(snapshot)).toEqual({ kind: 'absent' })
-  f.setCi([{ headSha: f.tip, status: 'queued', conclusion: '' }])
+  f.setCiReadiness({ headSha: f.tip, mergeable: 'MERGEABLE', rows: [{ name: 'test', status: 'IN_PROGRESS', conclusion: null }] })
   expect(await f.observeCi(snapshot)).toEqual({ kind: 'running', headSha: f.tip })
-  f.setCi([{ headSha: f.tip, status: 'completed', conclusion: 'skipped' }])
+  f.setCiReadiness({ headSha: f.tip, mergeable: 'MERGEABLE', rows: [{ name: 'test', status: 'COMPLETED', conclusion: 'FAILURE' }] })
   expect(await f.observeCi(snapshot)).toEqual({ kind: 'completed', headSha: f.tip, conclusion: 'failure' })
-  for (const value of [null, {}, [{ status: 'completed', conclusion: 'success' }], [{ headSha: f.tip, status: 'completed', conclusion: '' }]]) {
-    f.setCi(value)
-    expect(await f.observeCi(snapshot)).toMatchObject({ kind: 'unreadable' })
-  }
-  f.intercept(argv => argv[1] === 'run' ? bad() : undefined)
+  f.setCiConfig({ kind: 'unknown', reason: 'protection unavailable' })
   expect(await f.observeCi(snapshot)).toMatchObject({ kind: 'unreadable' })
 })
 
@@ -381,7 +418,7 @@ test('PR and CI OIDs must be strings, not coercible JSON values', async () => {
   const snapshot = await measured(f)
   f.setPr({ number: 12, headRefOid: [f.tip], state: 'OPEN', headRefName: 'change', baseRefName: 'main', isCrossRepository: false })
   expect(await f.effects.measure()).toMatchObject({ kind: 'unknown' })
-  f.setCi([{ headSha: [f.tip], status: 'completed', conclusion: 'success' }])
+  f.setCiReadiness({ headSha: [f.tip], mergeable: 'MERGEABLE', rows: [] })
   expect(await f.observeCi(snapshot)).toMatchObject({ kind: 'unreadable' })
 })
 
