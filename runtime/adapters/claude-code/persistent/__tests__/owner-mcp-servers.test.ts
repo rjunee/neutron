@@ -43,16 +43,17 @@ import type { ResolvedOwnerMcpServer } from '../../../../mcp-servers.ts'
 import type { SessionHandle } from '../../../../session-handle.ts'
 import type { AgentSpec } from '../../../../substrate.ts'
 import type { PtyChild, PtyHost, PtySpawnOpts } from '../pty-host.ts'
-import { pool } from '../pool-state.ts'
+import { pool, ReplSink } from '../pool-state.ts'
+import { bakedChildSinkInfo } from '../repl-sink.ts'
+import { assertReplAlive } from '../post-spawn-assertion.ts'
 import { poolKeyFor } from '../pool.ts'
 // The supervision respawn's own entry point (`supervision.ts` calls exactly this), used
 // by the no-dispatch eviction test to reproduce a spawn with no turn driver behind it.
 import { getOrSpawnSession } from '../spawn.ts'
-import type { ReplSession } from '../repl-session.ts'
+import { ReplSession } from '../repl-session.ts'
 import {
   createPersistentReplSubstrate,
   evictWarmReplsForMcpSurfaceChange,
-  getReplSinkInfo,
   setReplToolBridge,
   shutdownAllPersistentRepls,
   type PersistentReplSubstrateOptions,
@@ -60,12 +61,9 @@ import {
 } from '../persistent-repl-substrate.ts'
 
 /**
- * HEADROOM, because the budgets in `opts()` are the same size as bun's default per-test
- * timeout. `readyBudgetMs`/`healthBudgetMs` are 5000 and the default timeout is 5000, so a
- * test whose fake spawn takes its full budget on a loaded machine is killed by the RUNNER
- * at the same instant the code under test would have succeeded — and the kill lands
- * mid-`afterEach`, which cascades into unrelated failures in the next test. Measured on a
- * contended box: 26 pass / 3 fail, and 29 pass / 0 fail with `--timeout 90000`.
+ * HEADROOM: keep the existing runner allowance separate from the spawn budgets.
+ * The fake now awaits acknowledged readiness before returning its child. A real
+ * budget expiry remains a failure, with elapsed time and stage state in its detail.
  *
  * Raising the runner's patience rather than lowering the budget is deliberate. The budget
  * is what lets a genuinely slow spawn succeed; shrinking it to fit the runner would make
@@ -87,16 +85,103 @@ const EXAMPLE: ResolvedOwnerMcpServer = {
   env: { EXAMPLE_API_KEY: 'sk-not-a-real-key' },
 }
 
+/** Complete the fixture handshake before host.spawn returns and starts the ready budget. */
+async function announceFakeReady(
+  post: (path: string, body: unknown) => Promise<Response | undefined>,
+  sid: string,
+  port: number,
+  pid: number,
+  readyGate?: () => Promise<void>,
+): Promise<void> {
+  if (readyGate !== undefined) await readyGate()
+  for (const [path, body] of [
+    ['/channel-ready', { session_id: sid, channel_port: port, pid }],
+    ['/channel-bound', { session_id: sid }],
+  ] as const) {
+    const response = await post(path, body)
+    if (!response?.ok) throw new Error(`fake child pid=${pid}: ${path} acknowledgement failed (${response?.status ?? 'transport error'})`)
+  }
+}
+
+it('fake readiness diagnoses a rejected root credential before accepting the child credential', async () => {
+  const localSink = new ReplSink()
+  // Supply an isolated in-memory root; invoke the real handler without a listening socket.
+  Object.assign(localSink, { tokenValue: 'fixture-root' })
+  const session = new ReplSession('fixture-key', 'fixture-generation', 'fixture-session', 'fixture-channel', '/tmp')
+  localSink.register(session.sessionId, session)
+  const handler = localSink as unknown as { handle(req: Request): Promise<Response> }
+  const postWith = (credential: string) => (path: string, body: unknown) => handler.handle(new Request(`http://127.0.0.1${path}`, {
+    method: 'POST',
+    headers: { 'Content-Type': 'application/json', 'X-Sink-Token': credential },
+    body: JSON.stringify(body),
+  }))
+  await expect(announceFakeReady(postWith(localSink.token), session.sessionId, 40000, 410001))
+    .rejects.toThrow('fake child pid=410001: /channel-ready acknowledgement failed (401)')
+  let elapsed = 0
+  const deps = {
+    isChildAlive: () => true,
+    getChannelPort: () => session.channelPort,
+    hasHttpHealth: async () => true,
+    isChannelBound: () => session.channelBound,
+    now: () => elapsed,
+    sleep: async (ms: number) => { elapsed += ms },
+  }
+  const expired = await assertReplAlive({ pid: 410001 }, deps, { readyBudgetMs: 5000, readyIntervalMs: 25 })
+  expect(expired).toEqual({ ok: false, reason: 'no-channel-ready', detail: 'pid=410001 elapsedMs=5000 budgetMs=5000 channelPort=unset childAlive=true' })
+  console.info('root-credential reproduction', expired)
+  await announceFakeReady(postWith(localSink.credentialFor(session)), session.sessionId, 40000, 410001)
+  expect(await assertReplAlive({ pid: 410001 }, deps, { readyBudgetMs: 5000, healthBudgetMs: 5000 })).toEqual({ ok: true, pid: 410001, channelPort: 40000 })
+})
+
+it('fake readiness waits for the test gate and both acknowledgements', async () => {
+  const gate = Promise.withResolvers<void>()
+  const ready = Promise.withResolvers<Response>()
+  const bound = Promise.withResolvers<Response>()
+  const readyPosted = Promise.withResolvers<void>()
+  const boundPosted = Promise.withResolvers<void>()
+  const paths: string[] = []
+  let completed = false
+  const handshake = announceFakeReady(async (path) => {
+    paths.push(path)
+    if (path === '/channel-ready') {
+      readyPosted.resolve()
+      return ready.promise
+    }
+    boundPosted.resolve()
+    return bound.promise
+  }, 'fake-session', 40000, 410001, () => gate.promise).then(() => { completed = true })
+  await Promise.resolve()
+  expect(paths).toEqual([])
+  gate.resolve()
+  await readyPosted.promise
+  expect(paths).toEqual(['/channel-ready'])
+  expect(completed).toBe(false)
+  ready.resolve(Response.json({ ok: true }))
+  await boundPosted.promise
+  expect(paths).toEqual(['/channel-ready', '/channel-bound'])
+  expect(completed).toBe(false)
+  bound.resolve(Response.json({ ok: true }))
+  await handshake
+  expect(completed).toBe(true)
+})
+
+it.each(['/channel-ready', '/channel-bound'])('fake readiness refuses a failed %s acknowledgement', async (failedPath) => {
+  const paths: string[] = []
+  await expect(announceFakeReady(async (path) => {
+    paths.push(path)
+    return new Response('', { status: path === failedPath ? 404 : 200 })
+  }, 'fake-session', 40000, 410001)).rejects.toThrow(`fake child pid=410001: ${failedPath} acknowledgement failed (404)`)
+  expect(paths).toEqual(failedPath === '/channel-ready' ? ['/channel-ready'] : ['/channel-ready', '/channel-bound'])
+})
+
 /** Echo host capturing every spawn's argv + env (mirrors `tool-bridge.test.ts`). */
 function makeCapturingHost(
   /** Awaited before the fake child posts its reply, so a test can hold a turn IN FLIGHT
    *  and observe what happens to a session that is genuinely busy. Omitted ⇒ the reply
    *  goes out immediately, which is what every other test in this file wants. */
   replyGate?: () => Promise<void>,
-  /** Awaited before the fake child announces its dev-channel, so a test can hold a COLD
-   *  SPAWN in flight — the window in which the pool holds an unresolved promise and no
-   *  `ReplSession` exists yet to carry `activeTurn` / `turnSlotHeld`. Omitted ⇒ the
-   *  channel is announced immediately, which is what every other test here wants. */
+  /** Holds a cold spawn before its acknowledged handshake. The pool promise stays
+   *  unresolved until the test opens this gate and both sink requests complete. */
   readyGate?: () => Promise<void>,
 ): {
   host: PtyHost
@@ -105,9 +190,11 @@ function makeCapturingHost(
   /** Real `PtyChild.kill()` calls. A dropped pool entry is not a dead child, so the
    *  eviction test asserts on THIS rather than on the returned counts alone. */
   kills: { n: number }
+  children: PtyChild[]
 } {
   const argvs: string[][] = []
   const envs: Array<Record<string, string | undefined>> = []
+  const children: PtyChild[] = []
   const kills = { n: 0 }
   let spawns = 0
   const host: PtyHost = {
@@ -119,13 +206,13 @@ function makeCapturingHost(
       const i = argv.indexOf('--session-id')
       const r = argv.indexOf('--resume')
       const sid = (i >= 0 ? argv[i + 1] : r >= 0 ? argv[r + 1] : undefined) as string
-      const { port: sinkPort, token } = await getReplSinkInfo()
+      const { port: sinkPort, token } = bakedChildSinkInfo(argv)
       let hasExited = false
       let exitResolve: (code: number | null) => void = () => {}
       const exited = new Promise<number | null>((res) => {
         exitResolve = res
       })
-      const post = (path: string, body: unknown): Promise<unknown> =>
+      const post = (path: string, body: unknown): Promise<Response | undefined> =>
         fetch(`http://127.0.0.1:${sinkPort}${path}`, {
           method: 'POST',
           headers: { 'Content-Type': 'application/json', 'X-Sink-Token': token },
@@ -151,15 +238,15 @@ function makeCapturingHost(
           return new Response('nf', { status: 404 })
         },
       })
-      void (async () => {
-        // Held back when a test passes `readyGate`: the post-spawn assertion waits on
-        // `/channel-ready`, so delaying it leaves the POOL holding an unresolved spawn —
-        // the cold-dispatch window. Otherwise it goes out on this tick, unchanged.
-        if (readyGate !== undefined) await readyGate()
-        await post('/channel-ready', { session_id: sid, channel_port: server.port, pid })
-        await post('/channel-bound', { session_id: sid })
-      })()
-      return {
+      // The sink is registered before spawn. Await its acknowledgements, including the
+      // test-controlled cold-spawn gate, before the production ready budget starts.
+      try {
+        await announceFakeReady(post, sid, server.port!, pid, readyGate)
+      } catch (error) {
+        server.stop(true)
+        throw error
+      }
+      const child: PtyChild = {
         pid,
         write() {},
         resize() {},
@@ -177,9 +264,11 @@ function makeCapturingHost(
         exited,
         hasExited: () => hasExited,
       }
+      children.push(child)
+      return child
     },
   }
-  return { host, argvs, envs, kills }
+  return { host, argvs, envs, kills, children }
 }
 
 function opts(
@@ -688,7 +777,7 @@ describe('a change takes effect on the next turn, and an unchanged set does not 
 
   it('an ADDED server evicts and respawns, and the new spawn carries it', async () => {
     setReplToolBridge(bridge())
-    const { host, argvs } = makeCapturingHost()
+    const { host, argvs, children } = makeCapturingHost()
     let installed: ResolvedOwnerMcpServer[] = []
     const sub = createPersistentReplSubstrate(
       opts(host, { enableToolBridge: true, resolveExtraMcpServers: async () => installed }),
@@ -697,7 +786,10 @@ describe('a change takes effect on the next turn, and an unchanged set does not 
     expect(mcpConfig(argvs[0]!).mcpServers['example-server']).toBeUndefined()
 
     installed = [EXAMPLE]
-    await drain(sub.start(spec('after')))
+    const staleChild = children[0]!
+    const reply = await drain(sub.start(spec('after')))
+    expect(staleChild.hasExited(), `stale child pid=${staleChild.pid} survived the server-set change`).toBe(true)
+    expect(reply).toContain('after')
     expect(argvs).toHaveLength(2)
     expect(mcpConfig(argvs[1]!).mcpServers['example-server']).toBeDefined()
     expect(allowedTools(argvs[1]!)).toContain('mcp__example-server')
@@ -705,14 +797,17 @@ describe('a change takes effect on the next turn, and an unchanged set does not 
 
   it('a REVOKED server evicts too — the child stops being able to reach it', async () => {
     setReplToolBridge(bridge())
-    const { host, argvs } = makeCapturingHost()
+    const { host, argvs, children } = makeCapturingHost()
     let installed: ResolvedOwnerMcpServer[] = [EXAMPLE]
     const sub = createPersistentReplSubstrate(
       opts(host, { enableToolBridge: true, resolveExtraMcpServers: async () => installed }),
     )
     await drain(sub.start(spec('before')))
     installed = []
-    await drain(sub.start(spec('after')))
+    const staleChild = children[0]!
+    const reply = await drain(sub.start(spec('after')))
+    expect(staleChild.hasExited(), `stale child pid=${staleChild.pid} survived the server-set change`).toBe(true)
+    expect(reply).toContain('after')
     expect(argvs).toHaveLength(2)
     expect(mcpConfig(argvs[1]!).mcpServers['example-server']).toBeUndefined()
     expect(allowedTools(argvs[1]!)).toEqual(['mcp__neutron'])
@@ -720,7 +815,7 @@ describe('a change takes effect on the next turn, and an unchanged set does not 
 
   it('a ROTATED VALUE evicts, because a running child holds the old one', async () => {
     setReplToolBridge(bridge())
-    const { host, argvs } = makeCapturingHost()
+    const { host, argvs, children } = makeCapturingHost()
     let secret = 'sk-first'
     const sub = createPersistentReplSubstrate(
       opts(host, {
@@ -730,7 +825,10 @@ describe('a change takes effect on the next turn, and an unchanged set does not 
     )
     await drain(sub.start(spec('before')))
     secret = 'sk-second'
-    await drain(sub.start(spec('after')))
+    const staleChild = children[0]!
+    const reply = await drain(sub.start(spec('after')))
+    expect(staleChild.hasExited(), `stale child pid=${staleChild.pid} survived the server-set change`).toBe(true)
+    expect(reply).toContain('after')
     expect(argvs).toHaveLength(2)
     expect(mcpConfig(argvs[1]!).mcpServers['example-server']!.env['EXAMPLE_API_KEY']).toBe('sk-second')
   })

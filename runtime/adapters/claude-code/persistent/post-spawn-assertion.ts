@@ -107,7 +107,8 @@ export async function assertReplAlive(
   // Stage 1 + 2: child alive AND dev-channel handshake seen, within one
   // budget. We re-check child-alive every poll so a crash during boot fails
   // fast with `dead-child` rather than waiting out the channel-ready budget.
-  const readyDeadline = deps.now() + readyBudget
+  const readyStarted = deps.now()
+  const readyDeadline = readyStarted + readyBudget
   let channelPort: number | undefined
   while (true) {
     if (!deps.isChildAlive()) {
@@ -116,21 +117,22 @@ export async function assertReplAlive(
     channelPort = deps.getChannelPort()
     if (channelPort !== undefined && channelPort > 0) break
     if (deps.now() >= readyDeadline) {
-      return { ok: false, reason: 'no-channel-ready', detail: `pid=${args.pid}` }
+      return { ok: false, reason: 'no-channel-ready', detail: `pid=${args.pid} elapsedMs=${deps.now() - readyStarted} budgetMs=${readyBudget} channelPort=${channelPort ?? 'unset'} childAlive=true` }
     }
     await deps.sleep(readyInterval)
   }
 
   // Stage 3: dev-channel HTTP /health. Confirms the loopback bridge is
   // actually serving before we POST the first /message.
-  const healthDeadline = deps.now() + healthBudget
+  const healthStarted = deps.now()
+  const healthDeadline = healthStarted + healthBudget
   while (true) {
     if (!deps.isChildAlive()) {
       return { ok: false, reason: 'dead-child', detail: `pid=${args.pid}` }
     }
     if (await deps.hasHttpHealth(channelPort)) break // health is up → run Stage 4
     if (deps.now() >= healthDeadline) {
-      return { ok: false, reason: 'no-http-health', detail: `pid=${args.pid} port=${channelPort}` }
+      return { ok: false, reason: 'no-http-health', detail: `pid=${args.pid} port=${channelPort} elapsedMs=${deps.now() - healthStarted} budgetMs=${healthBudget} httpHealth=false childAlive=true` }
     }
     await deps.sleep(healthInterval)
   }
@@ -148,7 +150,8 @@ export async function assertReplAlive(
   // bug this fix removes). Stage 4 is skipped when no bind probe is wired
   // (back-compat).
   if (deps.isChannelBound !== undefined) {
-    const boundDeadline = deps.now() + channelBoundBudget
+    const boundStarted = deps.now()
+    const boundDeadline = boundStarted + channelBoundBudget
     while (true) {
       if (!deps.isChildAlive()) {
         return { ok: false, reason: 'dead-child', detail: `pid=${args.pid}` }
@@ -158,7 +161,7 @@ export async function assertReplAlive(
         return {
           ok: false,
           reason: 'channel-wedged',
-          detail: `pid=${args.pid} port=${channelPort}`,
+          detail: `pid=${args.pid} port=${channelPort} elapsedMs=${deps.now() - boundStarted} budgetMs=${channelBoundBudget} channelBound=false httpHealth=true childAlive=true`,
         }
       }
       await deps.sleep(channelBoundInterval)

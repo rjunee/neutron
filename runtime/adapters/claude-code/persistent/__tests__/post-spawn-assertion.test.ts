@@ -56,7 +56,11 @@ describe('assertReplAlive', () => {
     }
     const r = await assertReplAlive({ pid: 42 }, deps, { readyBudgetMs: 1000, readyIntervalMs: 250 })
     expect(r.ok).toBe(false)
-    if (!r.ok) expect(r.reason).toBe('no-channel-ready')
+    if (!r.ok) {
+      expect(r.reason).toBe('no-channel-ready')
+      expect(r.detail).toBe('pid=42 elapsedMs=1200 budgetMs=1000 channelPort=unset childAlive=true')
+      console.info(r.reason, r.detail)
+    }
   })
 
   it('handshake landing mid-poll still succeeds', async () => {
@@ -87,7 +91,11 @@ describe('assertReplAlive', () => {
     }
     const r = await assertReplAlive({ pid: 7 }, deps, { healthBudgetMs: 1000, healthIntervalMs: 500 })
     expect(r.ok).toBe(false)
-    if (!r.ok) expect(r.reason).toBe('no-http-health')
+    if (!r.ok) {
+      expect(r.reason).toBe('no-http-health')
+      expect(r.detail).toBe('pid=7 port=40000 elapsedMs=1200 budgetMs=1000 httpHealth=false childAlive=true')
+      console.info(r.reason, r.detail)
+    }
   })
 
   // ── Stage 4: channel-MCP-bound gate (port row #6) ─────────────────────────
@@ -112,7 +120,11 @@ describe('assertReplAlive', () => {
       channelBoundIntervalMs: 250,
     })
     expect(r.ok).toBe(false)
-    if (!r.ok) expect(r.reason).toBe('channel-wedged')
+    if (!r.ok) {
+      expect(r.reason).toBe('channel-wedged')
+      expect(r.detail).toBe('pid=7 port=40000 elapsedMs=1200 budgetMs=1000 channelBound=false httpHealth=true childAlive=true')
+      console.info(r.reason, r.detail)
+    }
   })
 
   it('does NOT fire on a healthy channel that posts /channel-bound', async () => {
