@@ -44,24 +44,24 @@ function fakeClock(start = 1_000_000): { now: () => number; advance: (ms: number
 describe('createWebPresenceTracker', () => {
   test('a declared foreground web client reads as present', () => {
     const tracker = createWebPresenceTracker()
-    expect(tracker.isForeground(OWNER)).toBe(false) // control: nothing declared yet
-    tracker.foreground(OWNER, 'conn-1')
-    expect(tracker.isForeground(OWNER)).toBe(true)
+    expect(tracker.isForeground(OWNER, null)).toBe(false) // control: nothing declared yet
+    tracker.foreground(OWNER, null, 'conn-1')
+    expect(tracker.isForeground(OWNER, null)).toBe(true)
   })
 
   test('presence EXPIRES on its own — a browser that dies without a close frame cannot silence the owner forever', () => {
     const clock = fakeClock()
     const tracker = createWebPresenceTracker({ now: clock.now })
-    tracker.foreground(OWNER, 'conn-1')
+    tracker.foreground(OWNER, null, 'conn-1')
 
     // Control: still inside the window, still present. Without this the test
     // below would pass against a tracker that never records anything at all.
     clock.advance(WEB_PRESENCE_TTL_MS - 1)
-    expect(tracker.isForeground(OWNER)).toBe(true)
+    expect(tracker.isForeground(OWNER, null)).toBe(true)
 
     // The browser is gone; no close frame ever arrived, so nothing called `drop`.
     clock.advance(2)
-    expect(tracker.isForeground(OWNER)).toBe(false)
+    expect(tracker.isForeground(OWNER, null)).toBe(false)
   })
 
   test('the TTL leaves room for missed refreshes — a refresh that lands keeps the window open indefinitely', () => {
@@ -71,19 +71,19 @@ describe('createWebPresenceTracker', () => {
     // multiples of the TTL. If the TTL were ever set below the refresh interval
     // this loop would fail on the first iteration.
     for (let i = 0; i < 20; i++) {
-      tracker.foreground(OWNER, 'conn-1')
+      tracker.foreground(OWNER, null, 'conn-1')
       clock.advance(WEB_PRESENCE_REFRESH_MS)
-      expect(tracker.isForeground(OWNER)).toBe(true)
+      expect(tracker.isForeground(OWNER, null)).toBe(true)
     }
     // Two consecutive misses are tolerated; the third is not.
     clock.advance(WEB_PRESENCE_REFRESH_MS * 2)
-    expect(tracker.isForeground(OWNER)).toBe(false)
+    expect(tracker.isForeground(OWNER, null)).toBe(false)
   })
 
   test('an expired entry is FORGOTTEN, not just ignored — the map cannot grow without bound', () => {
     const clock = fakeClock()
     const tracker = createWebPresenceTracker({ now: clock.now })
-    for (let i = 0; i < 50; i++) tracker.foreground(OWNER, `conn-${i}`)
+    for (let i = 0; i < 50; i++) tracker.foreground(OWNER, null, `conn-${i}`)
     expect(tracker.size()).toBe(50) // control: they really were recorded
     clock.advance(WEB_PRESENCE_TTL_MS)
     expect(tracker.size()).toBe(0)
@@ -91,59 +91,84 @@ describe('createWebPresenceTracker', () => {
 
   test('background clears that screen', () => {
     const tracker = createWebPresenceTracker()
-    tracker.foreground(OWNER, 'conn-1')
-    expect(tracker.isForeground(OWNER)).toBe(true)
+    tracker.foreground(OWNER, null, 'conn-1')
+    expect(tracker.isForeground(OWNER, null)).toBe(true)
     tracker.background('conn-1')
-    expect(tracker.isForeground(OWNER)).toBe(false)
+    expect(tracker.isForeground(OWNER, null)).toBe(false)
   })
 
   test('drop clears that screen (socket close)', () => {
     const tracker = createWebPresenceTracker()
-    tracker.foreground(OWNER, 'conn-1')
+    tracker.foreground(OWNER, null, 'conn-1')
     tracker.drop('conn-1')
-    expect(tracker.isForeground(OWNER)).toBe(false)
+    expect(tracker.isForeground(OWNER, null)).toBe(false)
   })
 
   test('two tabs are two screens — closing one does not mark the owner absent', () => {
     const tracker = createWebPresenceTracker()
-    tracker.foreground(OWNER, 'conn-1')
-    tracker.foreground(OWNER, 'conn-2')
+    tracker.foreground(OWNER, null, 'conn-1')
+    tracker.foreground(OWNER, null, 'conn-2')
     tracker.drop('conn-1')
-    expect(tracker.isForeground(OWNER)).toBe(true)
+    expect(tracker.isForeground(OWNER, null)).toBe(true)
     tracker.drop('conn-2')
-    expect(tracker.isForeground(OWNER)).toBe(false)
+    expect(tracker.isForeground(OWNER, null)).toBe(false)
   })
 
   test("another user's foregrounded tab is not the owner's presence", () => {
     const tracker = createWebPresenceTracker()
-    tracker.foreground('guest', 'conn-guest')
-    expect(tracker.isForeground('guest')).toBe(true) // control: it was recorded
-    expect(tracker.isForeground(OWNER)).toBe(false)
+    tracker.foreground('guest', null, 'conn-guest')
+    expect(tracker.isForeground('guest', null)).toBe(true) // control: it was recorded
+    expect(tracker.isForeground(OWNER, null)).toBe(false)
+  })
+
+  test("another project's foregrounded tab is not this project's presence", () => {
+    const tracker = createWebPresenceTracker()
+    tracker.foreground(OWNER, 'project-a', 'conn-project-a')
+    expect(tracker.isForeground(OWNER, 'project-a')).toBe(true) // control: exact scope is present
+    expect(tracker.isForeground(OWNER, 'project-b')).toBe(false)
+    expect(tracker.isForeground(OWNER, null)).toBe(false)
   })
 
   test('an empty user or connection id is refused rather than recorded', () => {
     const tracker = createWebPresenceTracker()
-    tracker.foreground('', 'conn-1')
-    tracker.foreground(OWNER, '')
+    tracker.foreground('', null, 'conn-1')
+    tracker.foreground(OWNER, null, '')
     expect(tracker.size()).toBe(0)
-    expect(tracker.isForeground('')).toBe(false)
-    expect(tracker.isForeground(OWNER)).toBe(false)
+    expect(tracker.isForeground('', null)).toBe(false)
+    expect(tracker.isForeground(OWNER, null)).toBe(false)
   })
 
   test('a nonsense TTL falls back to the shared default instead of meaning "believe forever"', () => {
     const clock = fakeClock()
     for (const ttl of [0, -1, Number.NaN, Number.POSITIVE_INFINITY]) {
       const tracker = createWebPresenceTracker({ now: clock.now, ttl_ms: ttl })
-      tracker.foreground(OWNER, 'conn-1')
-      expect(tracker.isForeground(OWNER)).toBe(true)
+      tracker.foreground(OWNER, null, 'conn-1')
+      expect(tracker.isForeground(OWNER, null)).toBe(true)
       clock.advance(WEB_PRESENCE_TTL_MS)
-      expect(tracker.isForeground(OWNER)).toBe(false)
+      expect(tracker.isForeground(OWNER, null)).toBe(false)
       clock.advance(1)
     }
   })
 })
 
 describe('suppressPushWhileWebForeground', () => {
+  test("checks the pushed message's project, not any other foreground project", async () => {
+    const { sink, calls } = recordingSink()
+    const checked: Array<string | null> = []
+    const wrapped = suppressPushWhileWebForeground({
+      sink,
+      isWebForeground: (project_id) => {
+        checked.push(project_id)
+        return project_id === 'project-a'
+      },
+    })
+    const otherProject = { ...MSG, project_id: 'project-b' }
+
+    expect(await wrapped(otherProject)).toBe(true)
+    expect(checked).toEqual(['project-b'])
+    expect(calls).toEqual([otherProject])
+  })
+
   test('suppresses the push while the owner is foregrounded on the web', async () => {
     const { sink, calls } = recordingSink()
     const wrapped = suppressPushWhileWebForeground({ sink, isWebForeground: () => true })
@@ -208,7 +233,7 @@ describe('suppressPushWhileWebForeground', () => {
     const { sink, calls } = recordingSink()
     const wrapped = suppressPushWhileWebForeground({
       sink,
-      isWebForeground: () => tracker.isForeground(OWNER),
+      isWebForeground: (project_id) => tracker.isForeground(OWNER, project_id),
     })
 
     // Nothing declared: he gets notified. (Control — absence means notify.)
@@ -216,7 +241,7 @@ describe('suppressPushWhileWebForeground', () => {
     expect(calls).toHaveLength(1)
 
     // A tab says it is foregrounded: quiet.
-    tracker.foreground(OWNER, 'conn-1')
+    tracker.foreground(OWNER, null, 'conn-1')
     expect(await wrapped(MSG)).toBe(false)
     expect(calls).toHaveLength(1)
 

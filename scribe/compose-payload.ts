@@ -6,9 +6,9 @@
  * it calendar events + email messages by flattening an already-fetched Core row
  * into the SAME plain-text shape Nova's scribe pollers used — the *composition*
  * is lifted from `scribe-calendar-poll.sh` / `scribe-email-poll.sh`, but NOT the
- * pollers themselves (the Managed Cores' connectors + schedulers are the only
+ * pollers themselves (the Calendar scheduler and Email pipeline are the only
  * source of "when"; see `gateway/cores/calendar-wiring.ts` +
- * `gateway/cores/email-managed-wiring.ts`).
+ * `gateway/cores/email-pipeline-wiring.ts`).
  *
  * These helpers are intentionally duck-typed (structural input interfaces) so
  * `scribe/` carries NO dependency on `@neutronai/calendar-core` /

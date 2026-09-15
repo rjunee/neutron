@@ -139,7 +139,7 @@ The Core ships **two** Haiku 4.5 driven agents (production:
   the most-recent inbox metadata + the same LLM callable, returns
   a top-5 ranked list with one-line reasons. Used by the
   `email_triage` MCP tool, the `/email triage` chat command, and
-  the daily scheduler (`src/triage-scheduler.ts`).
+  the on-demand `email_triage` tool.
 
 Both agents have deterministic fallbacks: LLM call throws →
 `outcome:'llm_error'` + a heuristic ranking / bulletised

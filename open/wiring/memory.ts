@@ -339,18 +339,17 @@ export function wireMemory(ctx: OpenWiringContext): WiredMemory {
 
   // ── Cores→scribe phase-2 fan-out (the legacy harness parity gap #1 + M2-1) ──────────
   // The chat-turn extractor (`scribeOnUserTurn` above) is only HALF of scribe:
-  // the phase-2 Cores→scribe fan-out lets the scheduled Calendar + Email Cores
+  // the phase-2 Cores→scribe fan-out lets scheduled Calendar and the Email poller
   // contribute their OWN ambient extraction (today's events / inbox mail →
-  // GBrain). That seam (`scribeFanOut` in `gateway/cores/{calendar,email-managed}
-  // -wiring.ts`) was built but never threaded — its only callers were tests, so
+  // GBrain). The shared `scribeFanOut` seam is threaded into both producers, so
   // per-Core memory extraction was DEAD. CONSTRUCT it here (gated on scribe being
   // live — no extraction target otherwise, so LLM-less boxes are unaffected) and
   // register its `stop()` cleanup EARLY, but do NOT arm it yet: the schedulers
   // need the live OAuth-backed calendar/gmail clients, which `mountOpenCores`
   // builds ~100 lines LATER in the composer. So — exactly like `reflectLoop`
   // (constructed early, cleanup registered early, `start()` deferred to the end
-  // of composition) — the composer calls `coresScribeFanOut.arm({ calendarClient,
-  // gmailClient })` once `mountOpenCores` exists. Until armed nothing is started;
+  // of composition) — the composer calls `coresScribeFanOut.arm({ calendarClient })`
+  // once `mountOpenCores` exists. Until armed nothing is started;
   // `stop()` is a safe no-op, so a composition failure between here and the arm
   // leaks no scheduler. This is the M2-1 fix: pre-M2-1 the fan-out was armed here
   // with in-memory fallback clients, so even a CONNECTED Google account fed
