@@ -185,6 +185,7 @@ import { buildPersonalityCharacterSuggester } from '@neutronai/onboarding/interv
 import { buildLivePersonalitySuggestionCoordinator } from '@neutronai/onboarding/interview/live-personality-suggestions.ts'
 import { buildPersonaSummarizer } from '@neutronai/onboarding/persona-gen/summarize.ts'
 import { PersonaPromptLoader } from '@neutronai/gateway/wiring/persona-loader.ts'
+import { stampExistingUserTimezone } from './wiring/user-timezone-stamp.ts'
 import {
   USAGE_POOLS,
   UsageSamplesStore,
@@ -5622,6 +5623,9 @@ export function buildOpenGraphComposer(
                 activityInspector.turnFinished(inspectorScopeKey(scope)),
             },
             personaLoader,
+            // Resolve at dispatch time so a zone captured after boot reaches both
+            // cold and already-warm conversations on their next turn.
+            ownerTimezone: (slug) => readOwnerTimezone(db, slug),
             projectPersonaResolver,
             reflection,
             ...(onboardingSeam !== undefined ? { onboarding: onboardingSeam } : {}),
@@ -6014,6 +6018,11 @@ export function buildOpenGraphComposer(
       readProjectRows,
       activeChatProjects,
       railChatKey,
+      stampUserTimezone: async (timezone): Promise<void> => {
+        const result = await stampExistingUserTimezone(owner_home, timezone)
+        if (result === 'written') personaLoader.invalidate('USER.md')
+        if (result === 'rejected') log.warn('user_timezone_stamp_rejected', { project: project_slug })
+      },
       // O6 / #106 — drain any recovered replies buffered for a topic while the
       // owner was offline, on reconnect (deduped in the shared store). Bound to the
       // SAME `recoveredReplyStore` the live-agent substrate's `onRecoveredReply`
