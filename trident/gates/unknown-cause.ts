@@ -1,4 +1,4 @@
-import { unknownCause as refusalDetail } from '@neutronai/runtime/refusal-cause.ts'
+import { TERMINAL_CAUSE_MAX, unknownCause as refusalDetail } from '@neutronai/runtime/refusal-cause.ts'
 
 /**
  * Preserve the full host exception in the journal while bounding its relayed refusal.
@@ -14,10 +14,13 @@ import { unknownCause as refusalDetail } from '@neutronai/runtime/refusal-cause.
  * gate-facing wrapper stays (that is the contract its callers were written against) and
  * is implemented over the runtime helper (that is the home that outlives `inner-loop.ts`).
  *
- * One deliberate behaviour change from #1009's version: the cap now applies to the
- * CAUSE rather than to `message + cause`, so a long exception can no longer truncate
- * the gate's own sentence — which is the half an operator needs to know which gate spoke.
+ * THE CAP APPLIES TO THE WHOLE DETAIL, exactly as #1009 had it. I briefly "improved"
+ * this to cap only the cause so a long exception could not truncate the gate's own
+ * sentence — and two tests caught it. They are right: `TERMINAL_CAUSE_MAX` bounds WHAT
+ * IS PERSISTED, so capping only the cause lets `message + cause` exceed the bound the
+ * column relies on. A merge resolution is the worst possible place to change behaviour,
+ * because it makes a regression indistinguishable from an improvement.
  */
 export function unknownCause(message: string, error: unknown, runId: string): { kind: 'unknown'; detail: string } {
-  return { kind: 'unknown', detail: refusalDetail(message, error, runId) }
+  return { kind: 'unknown', detail: refusalDetail(message, error, runId).slice(0, TERMINAL_CAUSE_MAX) }
 }
