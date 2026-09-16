@@ -1,87 +1,66 @@
-## 2026-09-16 — Executable coverage for refused tool calls
+## 2026-09-16 — Tool-call HTTP outcomes preserve execution certainty
 
 ### Change and rationale
 
-The review finding was reproduced before editing: replacing the handler return
-at `runtime/adapters/claude-code/persistent/tools-bridge-impl.ts:126` with text
-`null`, retaining the searched delegation in a comment, left the original suite
-18/18 green. Its two source-string tests were a test defect, not evidence of an
-executable connection.
+The executable handler factory from the previous round remains wired through
+`runtime/adapters/claude-code/persistent/tools-bridge-handler.ts:53` and registered
+by `runtime/adapters/claude-code/persistent/tools-bridge-impl.ts:111`.
 
-Extracted the existing handler and HTTP helper into
-`runtime/adapters/claude-code/persistent/tools-bridge-handler.ts:11`.
-The stdio entry directly registers that factory's handler at
-`runtime/adapters/claude-code/persistent/tools-bridge-impl.ts:111`.
-The factory defaults to real fetch; tests inject an HTTP transport returning
-real Response objects. The status/body extraction is at
-`runtime/adapters/claude-code/persistent/tools-bridge-handler.ts:37`, and the
-mapper invocation is at that file's line 53. This replaces the inline handler.
+The response mapper now consults HTTP status before parsing at
+`runtime/adapters/claude-code/persistent/tools-bridge-response.ts:93-100`.
+Known denials (400, 401, and 403) join the existing `BridgeToolResult` error
+vocabulary as `tool dispatch refused`; other non-2xx statuses use the distinct
+`tool dispatch outcome indeterminate` error because the tool may have run. Both
+default to `isError: true` through the existing `fail` constructor at lines
+63-65. The raw body is bounded by the existing truncation helper at lines 58-61.
 
-Replaced the two source-string tests with four executable cases, enumerated
-by the fixture array at
-`runtime/adapters/claude-code/persistent/__tests__/tools-bridge-response.test.ts:124`:
-401 refusal, 500 with a misleading success body, successful text, and successful
-empty result. Each asserts the POST envelope and exactly one request at line 148,
-and the error flag and rendered content at lines 159-163. Existing pure mapper
-assertions remain. These tests continuously check the extracted handler without
-requiring the application sink or an agent process to work.
+Only 2xx responses proceed to JSON parsing at lines 101-110. The existing
+error-string and missing-success outcomes remain at lines 112-120, while a bare
+`null` remains reachable only from 2xx plus `ok:true` at lines 122-129.
 
-Used the review's explicitly permitted handler-factory option after an attempted
-stdio/HTTP test failed binding port zero with EADDRINUSE. No new product outcome
-or invariant was introduced. The existing vocabulary is BridgeToolResult
-(`runtime/adapters/claude-code/persistent/tools-bridge-response.ts:49`): refusal
-uses isError at lines 63-64 and 105-109, while unknown dispatch has its distinct
-message at lines 113-118. This extraction preserves those defaults.
+Targeted cases at
+`runtime/adapters/claude-code/persistent/__tests__/tools-bridge-response.test.ts:68-126`
+cover parseable and malformed 500 responses, malformed 401, malformed 2xx,
+`ok:false` with and without an error string, and the distinct messages. The
+handler fixture at lines 142-187 proves the indeterminate 500 flows through the
+executable bridge connection.
+
+### Decisions
+
+HTTP 400/401/403 are the known-denial set specified by the issue. All other
+non-2xx statuses are conservatively indeterminate; this avoids telling callers
+that a retry is safe when a server failed during or after dispatch. Raw response
+bodies are not parsed on failure status because status is authoritative and a
+malformed body must not erase it.
+
+No feature flag or parallel path was added. No product or SPEC decision changed.
 
 ### Mutation evidence
 
-The null mutation printed the retained comment at handler line 53 and the
-replacement return at line 54. The status mutation targets handler line 37.
-Both mutations must compile and execute before their test failures count.
+Every mutation below was printed at the cited line before the same targeted test
+command ran. Bun compiled and executed each mutation; the first two also passed
+`bunx tsc --noEmit --pretty false` before reddening.
 
-| Guard | Compiling mutation | Red | Restored green |
+| Guard | Compiling mutation | Observed red | Restored green |
 | --- | --- | --- | --- |
-| Handler delegates to mapper, handler:53 | Return text null at :54; keep delegation comment at :53 | 17 pass / 3 fail (401, 500, successful text) | 20 pass / 0 fail |
-| HTTP status reaches mapper, handler:37 | Replace resp.status with 200 | 19 pass / 1 fail (500 with success-shaped body) | 20 pass / 0 fail |
+| Known denial, response:96 | Replace 401 with 402 | 22 pass / 1 fail: malformed 401 was indeterminate | 23 pass / 0 fail |
+| Indeterminate outcome, response:99 | Label other non-2xx as refused | 20 pass / 3 fail: both 500 mapper cases and handler case | 23 pass / 0 fail |
+| Status before parsing, response:94 | Invert `!httpOk` to `httpOk` | 9 pass / 14 fail, including malformed 401/500 and malformed 2xx | 23 pass / 0 fail |
+| Error-string arm, response:113 | Return success with `ok(error)` | 22 pass / 1 fail: handler error lost `isError` | 23 pass / 0 fail |
+| Positive-success arm, response:114 | Change `ok !== true` to `ok !== false` | 16 pass / 7 fail, including isolated `ok:false` case | 23 pass / 0 fail |
 
-Here `handler` means `runtime/adapters/claude-code/persistent/tools-bridge-handler.ts`.
-For each mutation, `bunx tsc --noEmit --pretty false` exited 0, the changed line
-was printed, and the targeted test exited 1 for a wrong answer. The second case
-specifically bypasses the mapper's earlier missing-success guard: its body has
-ok:true, so dropping the HTTP status exposes the incorrect successful result.
-
-### Citation corrections and search
-
-The filed issue file contains only a sentence directing the reader back to the
-task brief. The supplied review's original handler line 126 and sink test lines
-246-285 were accurate at the starting commit. Extraction moves the delegation to
-`runtime/adapters/claude-code/persistent/tools-bridge-handler.ts:53` and registration
-to `runtime/adapters/claude-code/persistent/tools-bridge-impl.ts:111`.
-The original source tests at response-test lines 131-141 are replaced by the
-executable cases at lines 124-165. The sink test citations did not move.
-
-Searched the working tree with
-`rg -n 'no test can import it|therefore asserted on the source|createToolCallHandler' --glob '*.ts' --glob '*.md' .`.
-The first two obsolete phrases had no hits; the positive control found the factory,
-production import/registration and test import/invocation. Before editing,
-`git grep` against HEAD found both the CallTool registration at line 111 and
-mapper delegation at line 126; this was an existing-branch finding, not a claim
-about current main.
+Command for each red and green result:
+`bun test runtime/adapters/claude-code/persistent/__tests__/tools-bridge-response.test.ts`.
 
 ### Validation and limits
 
-- `bun test runtime/adapters/claude-code/persistent/__tests__/tools-bridge-response.test.ts`: 20 pass, 0 fail after restoration.
-- `bunx tsc --noEmit --pretty false`: exit 0 after restoration.
-- `bash scripts/ci/lint.sh`: exit 0.
-- `git diff --check`: clean.
-- Record heading check: exactly one top-level `## ` heading.
+The final targeted test, typecheck, lint, diff check, and heading-count results
+are recorded in the lane progress file. The complete affected behavior list was
+enumerated from the mapper's ordered returns at
+`runtime/adapters/claude-code/persistent/tools-bridge-response.ts:92-129` and the
+test file's `it` cases. No full suite, network action, push, PR, or merge was
+performed.
 
-The leak gate and leaf-project typechecks were not run in this lane.
-
-The separately attempted `tool-bridge.test.ts` returned 1 pass / 13 fail because
-the configured sink port could not bind. Even port zero failed in the attempted
-HTTP fixture. Socket-backed integration remains unverified here. No full suite,
-real agent session, live stdio roundtrip, remote CI, or refreshed main comparison
-was performed. No spec decision changed. No other lane's files were edited.
-The as-built location follows the explicit lane instruction, overriding the
-repository's default docs/as-built location for this delivery.
+The filed brief's implementation citation remained correct. Its malformed-body
+test citation moved from the stated lines 103-108 into the cases at lines 82-126
+after the new cases were inserted.

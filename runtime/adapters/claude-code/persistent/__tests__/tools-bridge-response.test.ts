@@ -65,7 +65,7 @@ describe('interpretSinkToolResponse — a refusal is never `null`', () => {
     })
   }
 
-  it('THE STATUS IS AUTHORITATIVE: a non-2xx that claims ok:true is still a refusal', () => {
+  it('THE STATUS IS AUTHORITATIVE: a 500 that claims ok:true is indeterminate', () => {
     // Nothing between the child and the sink is trusted to be the sink. A proxy,
     // a wrong process on the loopback port, or a future route that forgets to
     // fail its status can all answer a success-shaped body; the transport said
@@ -75,9 +75,23 @@ describe('interpretSinkToolResponse — a refusal is never `null`', () => {
       body: '{"ok":true,"result":{"run_id":"r-1"}}',
     })
     expect(r.isError).toBe(true)
-    // Flagged as a refusal naming its status — NOT handed back as the tool's
-    // result, which is what dropping the status guard would do.
-    expect(textOf(r)).toStartWith('error: tool dispatch refused (HTTP 500)')
+    expect(textOf(r)).toStartWith('error: tool dispatch outcome indeterminate (HTTP 500)')
+    expect(textOf(r)).not.toContain('dispatch refused')
+  })
+
+  it('a non-JSON 401 is classified as a refusal before parsing', () => {
+    const r = interpretSinkToolResponse({ status: 401, body: '<html>unauthorized</html>' })
+    expect(r.isError).toBe(true)
+    expect(textOf(r)).toStartWith('error: tool dispatch refused (HTTP 401)')
+    expect(textOf(r)).toContain('<html>unauthorized</html>')
+  })
+
+  it('a non-JSON 500 is indeterminate rather than a parse error or refusal', () => {
+    const r = interpretSinkToolResponse({ status: 500, body: '<html>server failed</html>' })
+    expect(r.isError).toBe(true)
+    expect(textOf(r)).toStartWith('error: tool dispatch outcome indeterminate (HTTP 500)')
+    expect(textOf(r)).not.toContain('non-JSON')
+    expect(textOf(r)).not.toContain('dispatch refused')
   })
 
   it('a 200 that does not positively claim success is UNKNOWN, not `null`', () => {
@@ -98,11 +112,17 @@ describe('interpretSinkToolResponse — a refusal is never `null`', () => {
     expect(textOf(r)).toBe('error: handler exploded')
   })
 
-  it('a non-JSON body is an infra fault, named with its status', () => {
-    const r = interpretSinkToolResponse({ status: 502, body: '<html>bad gateway</html>' })
+  it('a 200 ok:false without an error string still does not report success', () => {
+    const r = interpretSinkToolResponse({ status: 200, body: '{"ok":false}' })
+    expect(r.isError).toBe(true)
+    expect(textOf(r)).toStartWith('error: tool dispatch did not report success (HTTP 200)')
+  })
+
+  it('a 2xx non-JSON body is a parse fault, named with its status', () => {
+    const r = interpretSinkToolResponse({ status: 200, body: '<html>bad gateway</html>' })
     expect(r.isError).toBe(true)
     expect(textOf(r)).toContain('non-JSON')
-    expect(textOf(r)).toContain('502')
+    expect(textOf(r)).toContain('200')
   })
 
   it('a JSON array body is an unexpected shape, not a result', () => {
@@ -123,7 +143,7 @@ describe('the executable bridge handler uses this mapping', () => {
   // Invoke the handler factory used by the stdio bridge, including its HTTP transport.
   for (const fixture of [
     { status: 401, body: { status: 'unauthorized' }, isError: true, text: 'unauthorized' },
-    { status: 500, body: { ok: true, result: 'must not be treated as success' }, isError: true, text: 'HTTP 500' },
+    { status: 500, body: { ok: true, result: 'must not be treated as success' }, isError: true, text: 'indeterminate' },
     { status: 200, body: { ok: true, result: 'hello' }, isError: undefined, text: 'hello' },
     { status: 200, body: { ok: true }, isError: undefined, text: 'null' },
   ]) {

@@ -91,6 +91,13 @@ function reasonFrom(parsed: Record<string, unknown>, body: string): string {
  */
 export function interpretSinkToolResponse(resp: SinkToolResponse): BridgeToolResult {
   const httpOk = resp.status >= 200 && resp.status < 300
+  if (!httpOk) {
+    const reason = truncate(resp.body)
+    if (resp.status === 400 || resp.status === 401 || resp.status === 403) {
+      return fail(`tool dispatch refused (HTTP ${resp.status}): ${reason}`)
+    }
+    return fail(`tool dispatch outcome indeterminate (HTTP ${resp.status}): ${reason}`)
+  }
   let parsed: unknown
   try {
     parsed = JSON.parse(resp.body)
@@ -101,12 +108,6 @@ export function interpretSinkToolResponse(resp: SinkToolResponse): BridgeToolRes
   }
   if (!isPlainObject(parsed)) {
     return fail(`tool bridge got an unexpected response shape (HTTP ${resp.status}): ${truncate(resp.body)}`)
-  }
-  if (!httpOk) {
-    // THE CASE THAT USED TO RETURN `null`. A 401 from a sink that does not know
-    // this child, a 400, a 403, a 503 — each carries a reason the agent can act
-    // on, and none of them is "nothing to do".
-    return fail(`tool dispatch refused (HTTP ${resp.status}): ${reasonFrom(parsed, resp.body)}`)
   }
   const error = parsed['error']
   if (typeof error === 'string' && error.trim() !== '') return fail(error)
