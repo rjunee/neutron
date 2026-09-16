@@ -40,6 +40,26 @@ async function subagentCreated(directory: string, description: string): Promise<
   return false
 }
 
+type DispatchConsumption = 'consumed' | 'not-consumed' | 'unreadable'
+
+/** Read once at the dispatch boundary: polling the transcript would make its size
+ * part of the dispatch cadence. Only an exact user-message match is evidence. */
+async function dispatchConsumption(transcript: string, dispatch: string): Promise<DispatchConsumption> {
+  let bytes: string
+  try { bytes = await readFile(transcript, 'utf8') } catch { return 'unreadable' }
+  for (const line of bytes.split('\n')) {
+    try {
+      const record = JSON.parse(line) as { type?: unknown; message?: { content?: unknown } }
+      if (record.type !== 'user') continue
+      const content = record.message?.content
+      if (content === dispatch) return 'consumed'
+      if (Array.isArray(content) && content.some(block => block !== null && typeof block === 'object'
+        && (block as { type?: unknown }).type === 'text' && (block as { text?: unknown }).text === dispatch)) return 'consumed'
+    } catch { /* A partial or unrelated line is not evidence of this dispatch. */ }
+  }
+  return 'not-consumed'
+}
+
 /** Continue the bound project conversation. No spawn, retry or reply observation. */
 export function createClaudeActingTurn(binding: ClaudeActingSession, clock: ObservationClock = { now: Date.now, pause: async (ms, signal) => { await delay(ms, undefined, { signal }) } }): ProjectActingTurn {
   const { project_id, topic_id, session } = binding
@@ -75,10 +95,8 @@ export function createClaudeActingTurn(binding: ClaudeActingSession, clock: Obse
         if (expired()) return unknown()
         // JSON escapes newlines: submitLine accepts one line and owns text/Enter ordering.
         // Forward the complete dispatch spec and effort as data, not shell commands.
-        await child.submitLine!(
-          'Execute the prompt in this JSON dispatch specification: ' + JSON.stringify({ ...spec, effort: request.effort }),
-          stopped,
-        )
+        const dispatch = 'Execute the prompt in this JSON dispatch specification: ' + JSON.stringify({ ...spec, effort: request.effort })
+        await child.submitLine!(dispatch, stopped)
         const dispatchDeadline = Math.min(deadline, clock.now() + DISPATCH_TIMEOUT_MS)
         let accepted = false
         while (!expired()) {
@@ -91,7 +109,13 @@ export function createClaudeActingTurn(binding: ClaudeActingSession, clock: Obse
           }
           accepted ||= await subagentCreated(subagents, `${request.role}: ${request.step_id}`)
           if (!accepted && clock.now() >= dispatchDeadline) {
-            return { kind: 'unknown' as const, detail: 'The REPL did not accept the dispatch within its budget; subagent completion is unknown.' }
+            const consumption = await dispatchConsumption(transcript, dispatch)
+            const detail = consumption === 'consumed'
+              ? 'The REPL consumed the dispatch, but no worker was created within its budget; subagent completion is unknown.'
+              : consumption === 'not-consumed'
+                ? 'The dispatch line was never consumed by the REPL within its budget; subagent completion is unknown.'
+                : 'The session transcript could not be read at the dispatch boundary; REPL consumption and subagent completion are unknown.'
+            return { kind: 'unknown' as const, detail }
           }
           const nextDeadline = accepted ? deadline : dispatchDeadline
           await clock.pause(Math.min(25, Math.max(1, nextDeadline - clock.now())), stopped)

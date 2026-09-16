@@ -307,7 +307,7 @@ for (const effort of ['xhigh', 'max'] as const) {
 }
 
 // Logical clock assertions read the observation boundary, never elapsed wall time.
-for (const scenario of ['late trailer', 'no subagent', 'no trailer', 'throw', 'trailer without metadata'] as const) {
+for (const scenario of ['late trailer', 'dispatch not consumed', 'dispatch consumed', 'transcript unreadable', 'no trailer', 'throw', 'trailer without metadata'] as const) {
   test(`dispatch evidence: ${scenario}`, async () => {
     const f = await fixture()
     f.binding.projects_dir = join(f.dir, 'projects')
@@ -333,6 +333,10 @@ for (const scenario of ['late trailer', 'no subagent', 'no trailer', 'throw', 't
       now: () => now,
       pause: async ms => {
         now += ms
+        if (now === DISPATCH_TIMEOUT_MS && (scenario === 'dispatch not consumed' || scenario === 'dispatch consumed')) {
+          const content = scenario === 'dispatch consumed' ? f.commands[0] : 'an unrelated user turn'
+          await writeFile(transcript, JSON.stringify({ type: 'user', message: { role: 'user', content } }) + '\n')
+        }
         if (now === 25 && (scenario === 'late trailer' || scenario === 'no trailer')) {
           await writeFile(join(directory, 'agent-created.meta.json'), JSON.stringify({ description: 'build: step' }))
         }
@@ -354,9 +358,19 @@ for (const scenario of ['late trailer', 'no subagent', 'no trailer', 'throw', 't
     if (scenario === 'late trailer' || scenario === 'trailer without metadata') {
       expect(outcome).toEqual({ kind: 'blocked', on: 'review' })
       expect(now).toBe(scenario === 'late trailer' ? 50_000 : 25)
-    } else if (scenario === 'no subagent') {
+    } else if (scenario === 'dispatch not consumed') {
       expect(observation?.kind).toBe('unknown')
-      expect(outcome).toEqual({ kind: 'unknown', detail: 'Dispatch turn completion unknown: The REPL did not accept the dispatch within its budget; subagent completion is unknown.' })
+      expect(outcome).toEqual({ kind: 'unknown', detail: 'Dispatch turn completion unknown: The dispatch line was never consumed by the REPL within its budget; subagent completion is unknown.' })
+      expect(now).toBe(DISPATCH_TIMEOUT_MS)
+      expect(DISPATCH_TIMEOUT_MS).toBe(35_000)
+    } else if (scenario === 'dispatch consumed') {
+      expect(observation?.kind).toBe('unknown')
+      expect(outcome).toEqual({ kind: 'unknown', detail: 'Dispatch turn completion unknown: The REPL consumed the dispatch, but no worker was created within its budget; subagent completion is unknown.' })
+      expect(now).toBe(DISPATCH_TIMEOUT_MS)
+      expect(DISPATCH_TIMEOUT_MS).toBe(35_000)
+    } else if (scenario === 'transcript unreadable') {
+      expect(observation?.kind).toBe('unknown')
+      expect(outcome).toEqual({ kind: 'unknown', detail: 'Dispatch turn completion unknown: The session transcript could not be read at the dispatch boundary; REPL consumption and subagent completion are unknown.' })
       expect(now).toBe(DISPATCH_TIMEOUT_MS)
       expect(DISPATCH_TIMEOUT_MS).toBe(35_000)
     } else if (scenario === 'no trailer') {
