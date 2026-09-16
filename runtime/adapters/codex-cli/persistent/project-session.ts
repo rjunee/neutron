@@ -61,7 +61,11 @@ function sameArgv(left: readonly string[], right: readonly string[]): boolean {
 }
 
 function isCodexArgv(argv: readonly string[], expected: readonly string[]): boolean {
-  return argv.length > 0 && basename(argv[0] ?? '') === basename(expected[0] ?? '') && sameArgv(argv, expected)
+  if (argv.length === 0 || expected.length === 0) return false
+  if (sameArgv(argv, expected)) return true
+  if (!/^(?:node|nodejs|bun|deno)$/.test(basename(argv[0] ?? ''))) return false
+  return basename(argv[1] ?? '') === basename(expected[0] ?? '')
+    && sameArgv(argv.slice(2), expected.slice(1))
 }
 
 export class CodexProjectSession {

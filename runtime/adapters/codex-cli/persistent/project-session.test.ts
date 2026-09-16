@@ -104,6 +104,35 @@ describe('CodexProjectSessionHost', () => {
     expect(nextHost.spawned).toEqual([])
   })
 
+  test('adopts a recorded Codex pane when the live process exposes its node shim', async () => {
+    const f = fixture()
+    await f.sessionHost.open(OPEN)
+    const nextHost = new FakeHost()
+    nextHost.inspection = {
+      kind: 'live',
+      argv: ['node', '/usr/bin/codex', '--enable', 'multi_agent_v2'],
+    }
+    const restarted = new CodexProjectSessionHost({ registryPath: f.registryPath, host: nextHost })
+    const session = await restarted.open(OPEN)
+    expect(session.recovery).toBe('adopted')
+    expect(nextHost.attached).toEqual(['pane-1'])
+    expect(nextHost.spawned).toEqual([])
+  })
+
+  test('refuses a node process whose script is not the recorded Codex binary', async () => {
+    const f = fixture()
+    await f.sessionHost.open(OPEN)
+    const nextHost = new FakeHost()
+    nextHost.inspection = {
+      kind: 'live',
+      argv: ['node', '/usr/bin/other-program', '--enable', 'multi_agent_v2'],
+    }
+    const restarted = new CodexProjectSessionHost({ registryPath: f.registryPath, host: nextHost })
+    await expect(restarted.open(OPEN)).rejects.toThrow(/identity/)
+    expect(nextHost.attached).toEqual([])
+    expect(nextHost.spawned).toEqual([])
+  })
+
   test('reports positive pane loss when it starts a replacement', async () => {
     const f = fixture()
     await f.sessionHost.open(OPEN)
