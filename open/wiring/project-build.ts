@@ -1,3 +1,4 @@
+import { resolveTranscriptProjectsDir } from '@neutronai/runtime/adapters/claude-code/persistent/signatures.ts'
 import { spawnCapture } from '@neutronai/trident/git-mode.ts'
 import { runWorktreePath } from '@neutronai/trident/merge.ts'
 import { mkdir, readFile, writeFile, lstat } from 'node:fs/promises'
@@ -245,7 +246,7 @@ export async function prepareProjectBuild(input: InnerLoopInput, context: Projec
       if (!session || session.hasChildExited()) return { kind: 'unknown', detail: 'Project conversation child is unavailable' }
       // Restricted launches do not attest the edit/run grants required by this bridge.
       if (options.skip_permissions !== true || options.restricted || options.permissions) return { kind: 'refused', reason: 'capability-unsupported', detail: 'Project launch grants cannot authorize bounded build work' }
-      return createClaudeActingTurn({ project_id: context.projectId, topic_id: topic, session,
+      return createClaudeActingTurn({ project_id: context.projectId, topic_id: topic, session, projects_dir: resolveTranscriptProjectsDir(options),
         grants: { tools: 'edit-and-run', writable: true, network: true, roots: options.extra_dirs ?? [] } })(turn)
     },
     trailer: { schemas: new Map([
