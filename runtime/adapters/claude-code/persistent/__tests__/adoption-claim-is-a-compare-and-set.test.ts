@@ -226,8 +226,14 @@ async function unhealthyTickAt(
 
 /** The gateway owns this key, which is what makes the tick visit it. */
 function supervise(f: Fixture): void {
+  // The supervision record carries the fixture's OWN host. It used to carry only
+  // the registry path, so every host lookup on the supervision path fell through
+  // to the ambient `configuredPtyHost` — which made these cases depend on the
+  // process-wide default rather than on the fake this fixture installs, and they
+  // silently changed meaning when that default did.
   supervisedBySessionKey.set(KEY, {
     replRegistryPath: f.registryPath,
+    ptyHost: f.host,
   } as unknown as PersistentReplSubstrateOptions)
 }
 
