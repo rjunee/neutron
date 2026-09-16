@@ -9,14 +9,14 @@ function fixture() {
   const decide = async () => applyReviewSuite(approve, await assess())
   return { observation, source, assess, decide }
 }
-test('G063 full suite rejection and dispatched subset deferral are distinct', async () => {
+test('G063 rejects every nonzero host receipt, including an untrusted deferred claim', async () => {
   const f = fixture()
   expect(await f.decide()).toEqual(approve)
   for (const scope of ['full-suite', 'subset'] as const) {
     f.observation.scope = scope
     for (const suiteOutcome of ['not-run', 'failed-new', 'deferred', 'passed', undefined]) {
       f.observation.report = { hostExitCode: 1, ...(suiteOutcome === undefined ? {} : { suiteOutcome }) }
-      expect((await f.decide()).kind).toBe(scope === 'subset' && suiteOutcome === 'deferred' ? 'approve' : 'fix')
+      expect((await f.decide()).kind).toBe('fix')
     }
   }
   f.observation.report = null
