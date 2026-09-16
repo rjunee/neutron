@@ -49,7 +49,7 @@
  *
  * Everything this does NOT cover is enumerated at the bottom of this file.
  */
-import { afterEach, expect, test } from 'bun:test'
+import { afterEach, expect, spyOn, test } from 'bun:test'
 import { mkdir, mkdtemp, readFile, rename, rm, writeFile } from 'node:fs/promises'
 import { tmpdir } from 'node:os'
 import { join } from 'node:path'
@@ -65,7 +65,7 @@ import { pool, supervisedBySessionKey } from '@neutronai/runtime/adapters/claude
 import type { BoundedWorkRequest } from '@neutronai/runtime/bounded-work.ts'
 import { buildRun, type BuildRunOutcome } from '@neutronai/trident/build-run.ts'
 import type { InnerLoopInput } from '@neutronai/trident/inner-loop.ts'
-import { prepareProjectBuild, type ProjectBuildContext } from '../wiring/project-build.ts'
+import { PROJECT_SESSION_ACQUIRE_TIMEOUT_MS, prepareProjectBuild, type ProjectBuildContext } from '../wiring/project-build.ts'
 
 const cleanups: (() => void | Promise<void>)[] = []
 afterEach(async () => { for (const fn of cleanups.splice(0).reverse()) await fn() })
@@ -499,20 +499,33 @@ async function fixture(options: { ralph?: boolean; moreTasks?: boolean; suiteExi
 
   // The project REPL session. `spawnProjectSession` is the composition's own
   // seam; the entries it writes are the ones `prepareProjectBuild` reads back
-  // (`open/wiring/project-build.ts:62-88`).
+  // (`open/wiring/project-build.ts:214-251`).
   const key = `e2e-${row.id}`
   cleanups.push(() => { pool.delete(key); supervisedBySessionKey.delete(key) })
   const session = { sessionId: 'e2e-session', cwd: dir, hasChildExited: () => false,
     child: { submitLine: literalWorker(world) }, acquireTurn: async () => () => {} }
+
+  const register = (registration: { key?: string; projectId?: string; instanceId?: string
+    state?: 'ready' | 'pending' | 'missing' | 'empty' | 'exited' } = {}) => {
+    const sessionKey = registration.key ?? key
+    cleanups.push(() => { pool.delete(sessionKey); supervisedBySessionKey.delete(sessionKey) })
+    supervisedBySessionKey.set(sessionKey, {
+      substrate_instance_id: registration.instanceId ?? 'cc-agent-e2e',
+      project_id: registration.projectId ?? 'e2e-project',
+      skip_permissions: true, extra_dirs: [dir],
+    } as never)
+    if (registration.state === 'missing') { pool.delete(sessionKey); return }
+    pool.set(sessionKey, registration.state === 'pending' ? new Promise(() => {})
+      : Promise.resolve((registration.state === 'empty' ? undefined
+        : registration.state === 'exited' ? { ...session, hasChildExited: () => true } : session) as never))
+  }
 
   const context: ProjectBuildContext = {
     store, phaseUsage: new TridentPhaseUsageStore(db), runHost,
     stateRoot: join(dir, 'state'), projectDir: dir, projectId: 'e2e-project',
     provider: 'anthropic', providerSource: 'application', env: {},
     spawnProjectSession: async () => {
-      supervisedBySessionKey.set(key, { substrate_instance_id: 'cc-agent-e2e', project_id: 'e2e-project',
-        skip_permissions: true, extra_dirs: [dir] } as never)
-      pool.set(key, Promise.resolve(session as never))
+      register()
       await Promise.resolve()
     },
   }
@@ -536,7 +549,7 @@ async function fixture(options: { ralph?: boolean; moreTasks?: boolean; suiteExi
     return options
   }
 
-  return { dir, repo, origin, baseSha, store, row, input, context, prepare, github, commands, world }
+  return { dir, repo, origin, baseSha, store, row, input, context, prepare, github, commands, world, register, key }
 }
 
 async function drive(f: Awaited<ReturnType<typeof fixture>>, mode: 'pr' | 'ralph'): Promise<ProjectBuildOutcome> {
@@ -579,6 +592,100 @@ function why(f: Awaited<ReturnType<typeof fixture>>, outcome: BuildRunOutcome | 
 // ─────────────────────────────────────────────────────────────────────────────
 // THE TESTS
 // ─────────────────────────────────────────────────────────────────────────────
+
+// Acquisition is driven through the same composed host as the successful build.
+const acquisitionCases = [
+  ['missing', 'Project conversation session is missing or ambiguous'],
+  ['ambiguous-before', 'Project conversation session is missing or ambiguous'],
+  ['ambiguous-after', 'Project conversation session is missing or ambiguous'],
+  ['reject', 'Project conversation session could not be started'],
+  ['missing-pool', 'Project conversation is not ready'],
+  ['pending', 'Project conversation is not ready'],
+  ['empty', 'Project conversation child is unavailable'],
+  ['exited', 'Project conversation child is unavailable'],
+] as const
+
+for (const [shape, detail] of acquisitionCases) {
+  test(`session acquisition: ${shape} stops as unknown before dispatch`, async () => {
+    const f = await fixture()
+    let spawns = 0
+    const ambiguous = () => { f.register(); f.register({ key: `${f.key}-second` }) }
+    if (shape === 'ambiguous-before') ambiguous()
+    f.context.spawnProjectSession = async projectId => {
+      expect(projectId).toBe(f.context.projectId)
+      spawns++
+      if (shape === 'reject') throw new Error('start failed')
+      if (shape === 'ambiguous-after') ambiguous()
+      if (shape === 'missing-pool') f.register({ state: 'missing' })
+      if (shape === 'pending' || shape === 'empty' || shape === 'exited') f.register({ state: shape })
+    }
+    const outcome = await drive(f, 'pr')
+    expect(outcome).toMatchObject({ kind: 'unknown', phase: 'plan',
+      detail: `Dispatch turn completion unknown: ${detail}` })
+    expect(spawns).toBe(shape === 'ambiguous-before' ? 0 : 1)
+    expect(f.world.dispatches).toEqual([])
+    expect(f.github.prs).toEqual([])
+  }, 30_000)
+}
+
+for (const state of ['ready', 'exited', 'rekeyed'] as const) {
+  test(`session acquisition: ${state} session reaches merge`, async () => {
+    const f = await fixture()
+    // An adopted session can have a different map key. Selection uses its options.
+    f.register({ key: state === 'rekeyed' ? `${f.key}-adopted` : f.key,
+      state: state === 'exited' ? 'exited' : 'ready' })
+    // Both filter clauses must exclude unrelated live sessions.
+    f.register({ key: `${f.key}-other-project`, projectId: 'other-project' })
+    f.register({ key: `${f.key}-other-substrate`, instanceId: 'cc-compose-e2e' })
+    let spawns = 0
+    f.context.spawnProjectSession = async () => { spawns++; f.register() }
+    const outcome = await drive(f, 'pr')
+    expect(outcome.kind, why(f, outcome)).toBe('merged')
+    expect(spawns).toBe(state === 'exited' ? 1 : 0)
+    expect(f.world.dispatches[0]?.role).toBe('plan')
+  }, 120_000)
+}
+
+test('session acquisition: hung prewarm expires and late completion never dispatches', async () => {
+  const f = await fixture()
+  let release!: () => void
+  let started = false
+  f.context.spawnProjectSession = () => {
+    started = true
+    return new Promise<void>(resolve => { release = resolve })
+  }
+  const host = await createProjectBuildHost(await f.prepare())
+  const controller = new AbortController()
+  const nativeTimeout = globalThis.setTimeout
+  // Accelerate only the acquisition clock; keep the real worker wall and host intact.
+  const clock = spyOn(globalThis, 'setTimeout').mockImplementation(((callback: (...args: unknown[]) => void, ms?: number, ...args: unknown[]) =>
+    nativeTimeout(callback, ms === PROJECT_SESSION_ACQUIRE_TIMEOUT_MS ? 20 : ms, ...args)
+  ) as typeof setTimeout)
+  const clear = spyOn(globalThis, 'clearTimeout')
+  const watchdog = nativeTimeout(() => controller.abort(), 2_000)
+  try {
+    expect(PROJECT_SESSION_ACQUIRE_TIMEOUT_MS).toBe(35_000)
+    const outcome = await host.run({ mode: 'pr', start: 'fresh' }, controller.signal)
+    expect(started).toBe(true)
+    expect(outcome).toMatchObject({ kind: 'unknown', phase: 'plan',
+      detail: 'Dispatch turn completion unknown: Project conversation session acquisition timed out' })
+    const timerIndex = clock.mock.calls.findIndex(call => call[1] === PROJECT_SESSION_ACQUIRE_TIMEOUT_MS)
+    expect(timerIndex).toBeGreaterThanOrEqual(0)
+    const acquisitionTimer = clock.mock.results[timerIndex]!.value
+    expect(clear.mock.calls.some(([handle]) => handle === acquisitionTimer)).toBe(true)
+    f.register()
+    release()
+    await new Promise(resolve => nativeTimeout(resolve, 50))
+    expect(f.world.dispatches).toEqual([])
+    expect(f.github.prs).toEqual([])
+  } finally {
+    release?.()
+    controller.abort()
+    clearTimeout(watchdog)
+    clock.mockRestore()
+    clear.mockRestore()
+  }
+}, 30_000)
 
 test('every dispatched brief states the envelope the decoder requires', async () => {
   const f = await fixture()
@@ -942,6 +1049,8 @@ test('local merge mode reaches merged with no PR, no push and no gh call', async
 /**
  * ── WHAT THIS HARNESS DOES NOT COVER ──────────────────────────────────
  *
+ *  • REAL SESSION STARTUP AND RESTART. Acquisition shapes are injected; actual
+ *    prewarm, process creation, and boot adoption are not executed.
  *  • THE MODEL. Whether a real model reads a brief the way `literalWorker`
  *    does. See `envelopeFieldsNamedBy` for the exact strength of the claim.
  *  • THE LEAK SCANNER. `scripts/ci/leak-gate.sh` itself is stubbed; only the
