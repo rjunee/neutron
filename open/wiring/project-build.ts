@@ -54,6 +54,28 @@ export interface ProjectBuildContext {
   spawnProjectSession: (projectId: string) => Promise<void>
 }
 
+/**
+ * WATCHDOG FOR THE HOST'S OWN SUITE RUN.
+ *
+ * `runHost` defaults to `DEFAULT_HOST_COMMAND_TIMEOUT_MS` — 60 seconds
+ * (`trident/git-mode.ts:1166`), which is right for the git and gh calls it was
+ * written for and far too short for a test suite. The call below passed no budget,
+ * so the host's suite run was killed at 60s, `observed.timed_out` was always true,
+ * the exit receipt was always omitted, and G063 answered `unknown` for every card.
+ * `unknown` is fail-closed, so NO dispatched card could reach `merged`.
+ *
+ * Measured on this repo: one directory of the persistent adapter suite alone takes
+ * 81 seconds, and acceptance run 5a69ae54's full `scripts/run-tests.sh` was still
+ * going at 11 minutes. 60 seconds could never have produced a receipt here.
+ *
+ * Bounded, not unbounded: a suite that overruns this still yields no receipt and
+ * still degrades to `unknown`, which is the honest answer and authorises nothing.
+ * The cost of this call sitting on the gateway event loop is tracked separately in
+ * the review-suite-placement issue; this constant only stops the gate from being
+ * unanswerable by construction.
+ */
+export const REVIEW_SUITE_TIMEOUT_MS = 45 * 60_000
+
 function fullSuiteCommand(strategy: string | null | undefined): string | null {
   if (!strategy) return null
   const lines = strategy.split('\n')
@@ -226,7 +248,7 @@ export async function prepareProjectBuild(input: InnerLoopInput, context: Projec
             const claim = checked.value
             const command = fullSuiteCommand(input.test_strategy)
             if (!command) return { runId: run.id, head: snapshot.head, round, report: null }
-            const observed = await context.runHost(['bash', '-lc', command], run.worktree)
+            const observed = await context.runHost(['bash', '-lc', command], run.worktree, undefined, REVIEW_SUITE_TIMEOUT_MS)
             return { runId: run.id, head: snapshot.head, round, report: {
               ...(observed.timed_out ? {} : { hostExitCode: observed.exit_code }),
               ...(claim.suiteOutcome === undefined ? {} : { suiteOutcome: claim.suiteOutcome }),
