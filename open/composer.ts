@@ -1,6 +1,10 @@
 import { createProjectLauncher } from '@neutronai/trident/project-launcher.ts'
 import { TridentPhaseUsageStore } from '@neutronai/trident/phase-usage.ts'
 import { prepareProjectBuild } from './wiring/project-build.ts'
+import {
+  PROJECT_BUILD_STATE_REAP_INTERVAL_MS,
+  reapProjectBuildState,
+} from './wiring/project-build-state-reaper.ts'
 import { projectModelTier } from '@neutronai/runtime/configured-models.ts'
 /**
  * @neutronai/open — single-owner graph composer (Sprint D boot shell).
@@ -1187,7 +1191,7 @@ export function buildOpenGraphComposer(
               const providerSelection = resolveModelProvider(id)
               return prepareProjectBuild(input, {
                 store: boardRunStore, phaseUsage: new TridentPhaseUsageStore(db), runHost: tridentHostRunner,
-                stateRoot: joinPath(owner_home, '.trident', 'project-builds'),
+                stateRoot: projectBuildStateRoot,
                 projectDir: joinPath(owner_home, 'Projects', input.run.project_slug),
                 projectId: id, provider: providerSelection.provider, providerSource: providerSelection.source, env,
                 spawnProjectSession: async projectId => {
@@ -4335,6 +4339,20 @@ export function buildOpenGraphComposer(
     // phase/round/elapsed/stalled from its `linked_run_id`'s `code_trident_runs`
     // row. Stateless wrapper — a second instance elsewhere is harmless.
     const boardRunStore = new TridentRunStore(db)
+    const projectBuildStateRoot = joinPath(owner_home, '.trident', 'project-builds')
+    const projectBuildStateReaper = new SupervisedLoop({
+      name: 'project-build-state-reaper',
+      intervalMs: PROJECT_BUILD_STATE_REAP_INTERVAL_MS,
+      immediate: true,
+      tick: async () => {
+        const removed = await reapProjectBuildState({ stateRoot: projectBuildStateRoot, runs: boardRunStore })
+        if (removed.length > 0) log.info('project_build_state_reaped', { count: removed.length })
+      },
+      onError: (_name, error) => log.error('project_build_state_reap_failed', { error: String(error) }),
+    })
+    loopRegistry.register(projectBuildStateReaper.describe())
+    projectBuildStateReaper.start()
+    realmodeCleanups.push(() => projectBuildStateReaper.stop())
     // §F6a — the board X-cancel/delete terminal-write CHOKEPOINT. Deleting a card
     // bound to a LIVE build cancels its run through `terminate()`, which fires the
     // SAME terminal-observer chain (delivery + board reconcile) the tick loop fires
