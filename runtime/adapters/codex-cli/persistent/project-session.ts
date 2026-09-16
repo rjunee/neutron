@@ -7,6 +7,7 @@ import type {
   PtyChild,
   PtySpawnOpts,
 } from '../../claude-code/persistent/pty-host.ts'
+import { detectCodexScreenPrompt, type CodexScreenPrompt } from './screen-prompts.ts'
 
 export type CodexSessionRecovery = 'started' | 'adopted' | 'restarted-after-loss'
 
@@ -99,6 +100,8 @@ function matchesIdentity(argv: readonly string[], expected: readonly string[] | 
   }
 }
 
+export class CodexApprovalRefusedError extends Error {}
+
 export class CodexProjectSession {
   readonly projectId: string
   readonly paneHandle: string
@@ -110,14 +113,34 @@ export class CodexProjectSession {
     paneHandle: string,
     recovery: CodexSessionRecovery,
     private readonly child: PtyChild,
+    private readonly readScreenPrompt: () => CodexScreenPrompt | undefined = () => undefined,
   ) {
     this.projectId = projectId
     this.paneHandle = paneHandle
     this.recovery = recovery
   }
 
+  /** The interactive prompt visible on the latest rendered screen, if recognised. */
+  screenPrompt(): CodexScreenPrompt | undefined {
+    return this.readScreenPrompt()
+  }
+
+  /** Answer the currently rendered approval through the acknowledged input path. */
+  async answerApproval(decision: 'allow' | 'deny'): Promise<void> {
+    const prompt = this.readScreenPrompt()
+    if (prompt === undefined) throw new Error('codex project session approval unknown: no recognised prompt is visible')
+    if (prompt.kind !== 'approval') {
+      throw new CodexApprovalRefusedError('codex project session refused: the visible prompt is not an approval')
+    }
+    await this.submit(decision === 'allow' ? prompt.allowKey : prompt.denyKey, prompt)
+  }
+
   /** Resolves after the host acknowledges both text delivery and Enter. */
   async submitLine(line: string): Promise<void> {
+    await this.submit(line)
+  }
+
+  private async submit(line: string, expectedPrompt?: CodexScreenPrompt): Promise<void> {
     if (line.includes('\r') || line.includes('\n') || line.includes('\x1b')) {
       throw new Error('codex project session refuses embedded line terminators or escape characters')
     }
@@ -133,6 +156,9 @@ export class CodexProjectSession {
     })
     await previous
     try {
+      if (expectedPrompt !== undefined && this.readScreenPrompt() !== expectedPrompt) {
+        throw new CodexApprovalRefusedError('codex project session refused: approval prompt changed while queued')
+      }
       if (this.child.hasExited()) throw new Error('codex project session refused: session is not running')
       // End the paste explicitly before Enter so Codex does not absorb Enter
       // into its rapid-input paste buffer (on either terminal backend).
@@ -182,11 +208,12 @@ export class CodexProjectSessionHost {
     try { identity = resolveIdentity(argv, options) } catch {
       throw new Error('codex project session refused: launch identity cannot be resolved')
     }
+    let screenPrompt: CodexScreenPrompt | undefined
     const spawnOptions: PtySpawnOpts = {
       cwd: options.cwd,
       env: options.env,
       label: `neutron-codex-${options.projectId}`,
-      onScreen: () => {},
+      onScreen: (screen) => { screenPrompt = detectCodexScreenPrompt(screen) },
     }
     const registry = readRegistry(this.options.registryPath)
     const recorded = registry.sessions[options.projectId]
@@ -227,6 +254,6 @@ export class CodexProjectSessionHost {
     }
     writeRegistry(this.options.registryPath, registry)
     child.beginOutput?.()
-    return new CodexProjectSession(options.projectId, paneHandle, recovery, child)
+    return new CodexProjectSession(options.projectId, paneHandle, recovery, child, () => screenPrompt)
   }
 }
