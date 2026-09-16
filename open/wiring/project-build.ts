@@ -29,6 +29,20 @@ export interface ProjectBuildContext {
   spawnProjectSession: (projectId: string) => Promise<void>
 }
 
+function fullSuiteCommand(strategy: string | null | undefined): string | null {
+  if (!strategy) return null
+  const lines = strategy.split('\n')
+  const marker = lines.findIndex(line => line.startsWith('Full suite (stage 2), run exactly this'))
+  if (marker < 0) return null
+  const commands: string[] = []
+  for (const line of lines.slice(marker + 1)) {
+    if (commands.length === 0 && line.trim() === '') continue
+    if (!line.startsWith('  ')) break
+    commands.push(line.slice(2))
+  }
+  return commands.length > 0 ? commands.join('\n') : null
+}
+
 /** Bind one dispatched project, using the host's retained session launch options. */
 export async function prepareProjectBuild(input: InnerLoopInput, context: ProjectBuildContext, signal: AbortSignal): Promise<ProjectBuildHostOptions> {
   const run = { ...input.run, branch: input.run.branch ?? `trident/${input.run.slug}`,
@@ -162,17 +176,14 @@ export async function prepareProjectBuild(input: InnerLoopInput, context: Projec
         return checked.ok ? checked.value.mutationClaim : null
       } },
       reviewSuite: { strategy: input.test_strategy ?? '', scope: 'full-suite',
-        // G063 READS THE BUILD/FIX CHECKPOINT FOR THIS REVISION. Stubbed to `null`,
+        // G063 REQUIRES A BUILD/FIX CHECKPOINT FOR THIS REVISION. Stubbed to `null`,
         // the source returns `unknown` (`project-observation-sources.ts:76`) for EVERY
         // card and any strategy — measured — and `applyReviewSuite` propagates it, so
         // the review decision is `unknown` and no dispatched card can reach `merged`.
         //
-        // The claim is the WORKER'S, not the host's. That is deliberate and inherited:
-        // `testsPassed` is "the ONE field that is the build's own claim"
-        // (`inner-workflow.mjs:2245` pre-rebuild), and the gate's job is to classify
-        // that claim, not to re-run the suite. Replacing it with a host-side receipt is
-        // #985 — post-cutover, and explicitly NOT a rebuild change, because then a
-        // regression and an improvement would be indistinguishable.
+        // The checkpoint establishes which revision finished; its suite verdict remains
+        // untrusted. The host therefore runs the configured suite in that worktree and
+        // records the process exit code it observed. A timeout has no usable verdict.
         //
         // THE IDENTITY IS THE HOST'S. The original carried the claim in a round-labelled
         // checkpoint (`forge-done` / `fix-round-N`); here each role overwrites one result
@@ -188,8 +199,11 @@ export async function prepareProjectBuild(input: InnerLoopInput, context: Projec
             const checked = validateTrailer('forge', value.result.payload)
             if (!checked.ok) continue
             const claim = checked.value
+            const command = fullSuiteCommand(input.test_strategy)
+            if (!command) return { runId: run.id, head: snapshot.head, round, report: null }
+            const observed = await context.runHost(['bash', '-lc', command], run.worktree)
             return { runId: run.id, head: snapshot.head, round, report: {
-              testsPassed: claim.testsPassed,
+              ...(observed.timed_out ? {} : { hostExitCode: observed.exit_code }),
               ...(claim.suiteOutcome === undefined ? {} : { suiteOutcome: claim.suiteOutcome }),
               ...(claim.suiteEvidence === undefined ? {} : { suiteEvidence: claim.suiteEvidence }),
             } }

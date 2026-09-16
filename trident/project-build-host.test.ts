@@ -187,7 +187,7 @@ function observationFixture() {
   const options: Parameters<typeof createProjectObservationSources>[0] = {
     ci: { required: async () => config, readiness: async () => raw }, baseBranch: 'main', ciWorkflow: 'ci.yml', runId: 'run',
     suite: { strategy: 'bun test', scope: 'full-suite', readCheckpoint: async () => ({
-      runId: 'run', head: observedHead, round: 1, report: { testsPassed: true, suiteOutcome: 'passed' },
+      runId: 'run', head: observedHead, round: 1, report: { hostExitCode: 0, suiteOutcome: 'passed' },
     }) },
   }
   const sources = createProjectObservationSources(options)
@@ -258,10 +258,10 @@ test('observation suite requires independently acquired identity and preserves r
   expect(await assess()).toEqual({ kind: 'known', findings: [] })
   const suite = f.options.suite!
   for (const field of ['runId', 'head', 'round'] as const) {
-    suite.readCheckpoint = async () => ({ runId: 'run', head: observedHead, round: 1, report: { testsPassed: true }, [field]: field === 'round' ? 2 : 'wrong' }) as any
+    suite.readCheckpoint = async () => ({ runId: 'run', head: observedHead, round: 1, report: { hostExitCode: 0 }, [field]: field === 'round' ? 2 : 'wrong' }) as any
     expect((await f.sources.reviewSuite.observe(observedSnapshot, 1)).kind, field).toBe('unknown')
   }
-  suite.readCheckpoint = async () => ({ runId: 'run', head: observedHead, round: 1, report: { testsPassed: false, suiteOutcome: 'failed-new' } })
+  suite.readCheckpoint = async () => ({ runId: 'run', head: observedHead, round: 1, report: { hostExitCode: 1, suiteOutcome: 'failed-new' } })
   expect(await assess()).toMatchObject({ kind: 'known', findings: [{ title: 'FULL SUITE NOT PROVEN', advisory: false }] })
   suite.readCheckpoint = async () => null
   expect((await assess()).kind).toBe('unknown')
@@ -277,7 +277,7 @@ test('production composition driver reaches a review panel through all three obs
   await f.options.production.store.update(f.options.production.runId, { merge_mode: 'pr' })
   f.options.production.ciSource = observed.options.ci
   f.options.policy.reviewSuite = { ...observed.options.suite!, readCheckpoint: async () => ({
-    runId: f.options.production.runId, head: observedHead, round: 1, report: { testsPassed: true },
+    runId: f.options.production.runId, head: observedHead, round: 1, report: { hostExitCode: 0 },
   }) }
   const ok = (stdout = '') => ({ ok: true, exit_code: 0, stdout, stderr: '' })
   f.options.production.runHost = async argv => {

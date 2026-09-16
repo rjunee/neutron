@@ -701,7 +701,7 @@ test('host review readiness uses independent facts and fails closed when unwired
 test('host composes suite observations with host run and round identity', async () => {
   const f = await fixture()
   expect(await f.make().deps.reviewSuite!(snapshot, 2)).toEqual({ kind: 'known', findings: [] })
-  f.options.reviewSuite = { observe: async (subject, round) => ({ kind: 'known', runId: 'test', head: subject.head, round, strategy: 'full suite', scope: 'full-suite', report: { testsPassed: false, suiteOutcome: 'not-run' } }) }
+  f.options.reviewSuite = { observe: async (subject, round) => ({ kind: 'known', runId: 'test', head: subject.head, round, strategy: 'full suite', scope: 'full-suite', report: { hostExitCode: 1, suiteOutcome: 'not-run' } }) }
   expect(await f.make().deps.reviewSuite!(snapshot, 2)).toMatchObject({ kind: 'known', findings: [{ title: 'FULL SUITE NOT PROVEN', advisory: false }] })
   f.options.mutation.run.id = 'other'
   expect(await f.make().deps.reviewSuite!(snapshot, 2)).toMatchObject({ kind: 'unknown' })
