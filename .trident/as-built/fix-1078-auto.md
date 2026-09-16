@@ -55,11 +55,13 @@ and missing-deny refusal (`runtime/adapters/codex-cli/persistent/project-session
 | approval title | disable the title guard at `screen-prompts.ts:32` | 1 failure | 32 pass |
 | complete choices | fall back to the allow key when deny is missing at `screen-prompts.ts:35` | 1 failure | 32 pass |
 
-Final verification: `bun test runtime/adapters/codex-cli/persistent/project-session.test.ts`
-(32 pass), `bunx tsc --noEmit -p runtime/tsconfig.json`, scoped ESLint over the four touched
-TypeScript files, and `git diff --check` all completed successfully. The requested root
-`bun run typecheck` could not run because the root package defines no such script; the scoped
-runtime TypeScript project was run instead.
+The mutation edits and their RED runs were ad hoc and cannot be rerun from the committed tree;
+the table records the printed mutation locations and observed results. Reproducible final
+verification from the tree is: `bun test runtime/adapters/codex-cli/persistent/project-session.test.ts
+runtime/workers/codex-acting-turn.test.ts` (56 pass), `bash scripts/ci/typecheck-all.sh`
+(51 TypeScript projects pass), `bash scripts/ci/lint.sh`, and `git diff --check`. The requested
+root `bun run typecheck` could not run because the root package defines no such script; the
+repository's documented typecheck matrix was run instead.
 
 ### Deliberately not done and not verified
 
