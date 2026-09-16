@@ -67,26 +67,32 @@ async function runLocalBuild(f: Awaited<ReturnType<typeof fixture>>, overrides: 
       return result.ok ? { kind: 'allow' } : { kind: 'blocked', on: 'not landed' }
     },
   }
-  return buildRun({ run_id: 'run', mode: 'pr', merge_mode: 'local', start: 'fresh', repl_provider: 'pi',
+  const outcome = await buildRun({ run_id: 'run', mode: 'pr', merge_mode: 'local', start: 'fresh', repl_provider: 'pi',
     workers: { plan: worker, build: worker, review: worker, fix: worker } }, { ...deps, ...overrides }, new AbortController().signal)
+  return { outcome, calls: runner.calls }
 }
 
 test('G109 real local worktree and branch allow, landing retains the reviewed branch', async () => {
   const f = await fixture()
   expect(await f.check()).toEqual({ kind: 'allow' })
-  expect(await runLocalBuild(f)).toMatchObject({ kind: 'merged', snapshot: { pr: null, diff: '' } })
+  const { outcome, calls } = await runLocalBuild(f)
+  expect(calls.filter(call => call.role === 'review')).toHaveLength(1)
+  expect(outcome).toMatchObject({ kind: 'merged', snapshot: { pr: null, diff: '' } })
   expect(await f.git('rev-parse', 'change')).toBe(f.head)
   expect(await f.git('merge-base', '--is-ancestor', f.head, 'base')).toBe('')
 })
 
 test('local review-readiness refusal stops the no-PR run before review dispatch', async () => {
   const f = await fixture()
-  let reviewDispatched = false
-  expect(await runLocalBuild(f, {
+  let panelCalled = false
+  const { outcome, calls } = await runLocalBuild(f, {
     reviewReadiness: async () => ({ kind: 'blocked', on: 'Local review readiness refused the measured revision' }),
-    reviewGate: async () => { reviewDispatched = true; return { kind: 'approve' } },
-  })).toEqual({ kind: 'blocked', phase: 'review', on: 'Local review readiness refused the measured revision', recipient: 'orchestrator' })
-  expect(reviewDispatched).toBe(false)
+    reviewGate: async () => { panelCalled = true; return { kind: 'approve' } },
+  })
+  expect(calls.filter(call => call.role === 'review')).toHaveLength(0)
+  expect(calls.map(call => call.role)).toEqual(['plan', 'build'])
+  expect(outcome).toEqual({ kind: 'blocked', phase: 'review', on: 'Local review readiness refused the measured revision', recipient: 'orchestrator' })
+  expect(panelCalled).toBe(false)
   expect((await host(['git', 'merge-base', '--is-ancestor', f.head, 'base'], f.repo)).ok).toBe(false)
 })
 
@@ -94,11 +100,12 @@ test('local publication preflight uncertainty stops the approved no-PR run befor
   const f = await fixture()
   let reviewed = false
   let merged = false
-  expect(await runLocalBuild(f, {
+  const { outcome } = await runLocalBuild(f, {
     reviewGate: async (_payload, _snapshot, _round, _used, record) => { reviewed = true; record?.({ findings: [], blockingCount: 0 }); return { kind: 'approve' } },
     runLeakGatePreflight: async () => ({ status: 'unknown', head: f.head, findings: [], skipped_rules: [], attempts: 0, note: 'preflight observation unavailable' }),
     merge: async () => { merged = true },
-  })).toEqual({ kind: 'unknown', phase: 'publish', step_id: null, detail: 'Leak preflight did not run: preflight observation unavailable' })
+  })
+  expect(outcome).toEqual({ kind: 'unknown', phase: 'publish', step_id: null, detail: 'Leak preflight did not run: preflight observation unavailable' })
   expect(reviewed).toBe(true)
   expect(merged).toBe(false)
   expect((await host(['git', 'merge-base', '--is-ancestor', f.head, 'base'], f.repo)).ok).toBe(false)
