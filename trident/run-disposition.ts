@@ -369,7 +369,7 @@ export function builtButNeverReviewedSeed(
   // (`inner_checkpoint === null && base_sha === null`), and a seeded checkpoint
   // makes that false — so a seed carrying a null pin would create a row that can
   // NEVER acquire one, and the publish-time "branch does not contain the
-  // origin/<base> tip pinned at launch" refusal (gated on `base_sha !== null`)
+  // recorded launch base" refusal (gated on `base_sha !== null`)
   // would be permanently inert for it and for every re-seed chained off it. A
   // legacy/unpinned prior row therefore seeds NOTHING: it falls through to the
   // fresh dispatch that pins a base, which is exactly today's behaviour for it.

@@ -1132,6 +1132,10 @@ describe('AN UNSHIELDED GIT REV-RANGE IS UNCONSTRUCTIBLE IN TYPESCRIPT — and t
       { file: 'publication.ts', base: 'seenPin', why: 'a recorded object name' },
       { file: 'launch-preparation.ts', base: '`refs/heads/${base}`', why: 'qualified in full at the call site — the base-behind measurement, which is ABOUT the local ref' },
       { file: 'launch-preparation.ts', base: 'base_sha', why: 'the launch-pinned sha the stage-1 strategy block measures against — a full object name' },
+      // #1043 added the adopted-branch base measurement: when a launch ADOPTS an existing
+      // branch rather than cutting one, the distance is measured FROM that branch's tip, so
+      // the persisted pin describes the branch instead of the base branch's tip.
+      { file: 'launch-preparation.ts', base: 'branchTip', why: 'the branch tip this launch just read with `rev-parse --verify` and checked against the full-OID pattern before use — an object name, never a ref name' },
     ]
     const seen: string[] = []
     for (const file of ['launch-preparation.ts', 'merge.ts', 'mutation-prover.ts', 'orchestrator.ts', 'publication.ts', 'replay.ts'] as const) {

@@ -96,7 +96,7 @@ export class TridentIncompleteSeedError extends Error {
  * the one with teeth: `launch()` treats a run as a fresh build only when
  * `inner_checkpoint === null && base_sha === null`, so a non-null unseeded pin skips
  * the origin fetch that would have set a real one, and the publish-time "branch does
- * not contain the origin/<base> tip pinned at launch" refusal then fires against a
+ * not contain its recorded launch base" refusal then fires against a
  * value nothing ever validated. The three columns are ONE seed; none of them means
  * anything without the checkpoint that names it.
  */
@@ -472,7 +472,7 @@ export interface CreateTridentRunInput {
    * Required, not optional, for a seeded row: `launch()` pins a base only on a
    * FRESH build (`inner_checkpoint === null && base_sha === null`), so a seeded row
    * would be born with a null pin forever — and the publish-time refusal "branch
-   * does not contain the origin/<base> tip pinned at launch" is gated on
+   * does not contain its recorded launch base" is gated on
    * `base_sha !== null`, so it could never fire for a salvaged run or any re-seed
    * chained off one. Seeding the prior run's pin keeps that gate live.
    *
@@ -681,7 +681,7 @@ export class TridentRunStore {
     // `launch()` pins a base only on a FRESH build (`inner_checkpoint === null &&
     // base_sha === null`), which a seeded checkpoint makes false, so the row can
     // never acquire a pin and the publish-time "branch does not contain the
-    // origin/<base> tip pinned at launch" refusal — gated on `base_sha !== null` —
+    // recorded launch base" refusal — gated on `base_sha !== null` —
     // is disarmed for it and for every re-seed chained off it; and the launch-time
     // revalidation compares the seeded head against the live tip, so a seed with no
     // head strips the leftover-branch ownership guard off a row that still needs
