@@ -116,7 +116,7 @@ describe('the in-process Bun PTY backend is kept as a working option', () => {
       await child.submitLine!('acknowledged-line')
       // Assert the actual bytes handed to the terminal. Checking echoed screen text
       // accepts a missing Enter; waiting for a reader then turns that defect into a hang.
-      expect(writes.join('')).toBe('acknowledged-line\r')
+      expect(writes.join('')).toBe('\x1b[200~acknowledged-line\x1b[201~\r')
     } finally {
       child.kill()
       await child.exited
@@ -460,7 +460,7 @@ describe('submitLine is WIRED to the short-write guard, not merely accompanied b
     // not land submits whatever was already on the line — the exact failure the
     // acknowledged seam exists to prevent, and it is only visible here because the
     // refusal can be arranged at all.
-    expect(writes).toEqual(['/compact'])
+    expect(writes).toEqual(['\x1b[200~/compact\x1b[201~'])
   })
 
   it('a pty that takes the text but REFUSES the Enter also rejects', async () => {
@@ -475,7 +475,7 @@ describe('submitLine is WIRED to the short-write guard, not merely accompanied b
     const child = await host.spawn(['/bin/cat'], { cwd: '/tmp', env: {} })
     await child.submitLine!('/compact')
     expect(writes.length).toBe(2)
-    expect(writes[0]).toBe('/compact')
+    expect(writes[0]).toBe('\x1b[200~/compact\x1b[201~')
     expect(String(writes[1])).toBe('\r')
   })
 })

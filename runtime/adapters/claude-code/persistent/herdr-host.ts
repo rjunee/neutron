@@ -49,7 +49,14 @@
  */
 
 import type { Key } from './keystrokes.ts'
-import type { AdoptableHost, HandleInspection, PtyChild, PtyExitCause, PtySpawnOpts } from './pty-host.ts'
+import {
+  frameBracketedPaste,
+  type AdoptableHost,
+  type HandleInspection,
+  type PtyChild,
+  type PtyExitCause,
+  type PtySpawnOpts,
+} from './pty-host.ts'
 import {
   HERDR_POLL_INTERVAL_MS,
   HERDR_READ_LINE_CAP,
@@ -666,7 +673,7 @@ export class HerdrHost implements AdoptableHost {
           if (exited) throw goneAfterExit()
           if (detached) throw goneAfterDetach()
           if (command !== '') {
-            await client.call('pane.send_text', { pane_id: paneId, text: command })
+            await client.call('pane.send_text', { pane_id: paneId, text: frameBracketedPaste(command) })
           }
           // The text RPC can outlive the caller. Its late acknowledgement must not
           // authorize the submission-bearing Enter after that caller has given up.
