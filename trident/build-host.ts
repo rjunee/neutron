@@ -189,7 +189,26 @@ export function createBuildHost(options: BuildHostOptions): { deps: BuildRunDeps
     reviewReadiness: (snapshot, signal, mergeMode) => mergeMode === 'local'
       ? localReadiness(snapshot)
       : awaitReviewReadiness(options.reviewReadiness, snapshot, signal),
-    reviewCi: snapshot => assessReviewCi(options.reviewCi, snapshot, options.leak.base_sha, options.mutation.run.id),
+    // A LOCAL RUN HAS NO PR, SO IT HAS NO CI TO OBSERVE — and G055 is entirely about
+    // a PR's checks. `createProjectObservationSources`'s CI source reads its rows off
+    // `snapshot.pr` (`project-observation-sources.ts:32,66`), which `readPr` pins to
+    // `null` for a local run (`production-host-effects.ts:183-185`), so it answered
+    // `Review CI: Review readiness PR or full head is missing` — `unknown`, which is
+    // fail-closed, for EVERY local build. Measured offline end to end: with
+    // `merge_mode: 'local'` the driver planned, built, and then stopped at review with
+    // that detail and no dispatch left to make. `merge_mode` defaults to `'local'`
+    // (`store.ts:867`), so this was the default mode failing by construction.
+    //
+    // The branch is never pushed in local mode (`publishChecked` refuses anything but
+    // `pr`), so there are no checks for this revision to be red — an empty KNOWN
+    // assessment is the measurement, not an exemption. The suite evidence that does
+    // apply locally is G063's, which is the host's own suite run and is untouched.
+    //
+    // Local-awareness belongs here, beside `reviewReadiness` below, not in the driver:
+    // the host already owns what each gate means per merge mode.
+    reviewCi: (snapshot, mergeMode) => mergeMode === 'local'
+      ? Promise.resolve({ kind: 'known', findings: [] })
+      : assessReviewCi(options.reviewCi, snapshot, options.leak.base_sha, options.mutation.run.id),
     reviewSuite: (snapshot, round) => assessReviewSuite(options.reviewSuite, snapshot, round, options.mutation.run.id),
     reviewGate: (payload, snapshot, round, replansUsed, recordProgress) => reviewPanel(options.review, payload, snapshot, round, options.mutation.run.id, replansUsed, { provider: options.workers.build.provider, modelId: options.workers.build.request.model_id }, recordProgress),
     async publishGate(snapshot, mergeMode) {

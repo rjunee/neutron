@@ -815,6 +815,33 @@ test('G055 G056 host composes measured CI with its pinned base', async () => {
   expect(await f.make().deps.reviewCi!(snapshot)).toMatchObject({ kind: 'unknown' })
 })
 
+// A LOCAL RUN HAS NO PR, SO G055 MUST NOT ASK FOR ONE.
+//
+// `createProjectObservationSources`' CI source reads its rows off `snapshot.pr`
+// (`project-observation-sources.ts:32`) and `readPr` pins that to `null` for a local
+// run by construction (`production-host-effects.ts:183-185`). So G055 answered
+// `Review readiness PR or full head is missing` — `unknown`, which is fail-closed —
+// for EVERY local build. `merge_mode` defaults to `'local'` (`trident/store.ts:867`),
+// so the DEFAULT mode could not reach review at all.
+//
+// The `pr` mode arm is the positive control: the same source, the same snapshot, must
+// still be consulted and must still be able to answer `unknown`. Without it this would
+// pass just as well if local routing swallowed every mode.
+test('G055 a local run reports no CI to observe, while pr mode still consults the source', async () => {
+  const f = await fixture()
+  let consulted = 0
+  f.options.reviewCi = { observe: async () => { consulted++; return { kind: 'unknown', detail: 'CI unavailable' } } }
+  const host = f.make()
+
+  // Local: answered without consulting a source that cannot describe a local run.
+  expect(await host.deps.reviewCi!({ ...snapshot, pr: null }, 'local')).toEqual({ kind: 'known', findings: [] })
+  expect(consulted).toBe(0)
+
+  // pr: the source is consulted and its `unknown` still propagates.
+  expect(await host.deps.reviewCi!(snapshot, 'pr')).toMatchObject({ kind: 'unknown' })
+  expect(consulted).toBe(1)
+})
+
 test('G084 host composes live lineage independently of the constructor pin', async () => {
   const f = await fixture()
   const host = f.make()
