@@ -26,6 +26,7 @@ import {
 import { sink } from '../pool-state.ts'
 import { ReplSession } from '../repl-session.ts'
 import { setReplTodoSync } from '../repl-sink.ts'
+import { interpretSinkToolResponse } from '../tools-bridge-response.ts'
 import { McpServer } from '@neutronai/mcp/server.ts'
 import { ToolRegistry } from '@neutronai/tools/registry.ts'
 
@@ -250,6 +251,38 @@ describe('P0-1 native-MCP tool bridge — reply-sink dispatch routes', () => {
     })
     return { status: resp.status, json: await resp.json() }
   }
+
+  // A REFUSED TOOL CALL MUST NOT READ AS "NOTHING TO DO".
+  //
+  // Measured on the live box: a warm REPL child that outlived a gateway restart
+  // presents a credential the new sink has never seen, so EVERY `/tool-call` it
+  // makes is refused 401 — three `work_board_start` calls in a row came back to
+  // the agent as the bare text `null`, with no run row and no capability verdict,
+  // because `McpServer.dispatch` was never reached. This drives the REAL sink's
+  // refusal wire through the bridge's REAL mapping, so the two halves cannot
+  // drift apart: change either and this case fails.
+  it('an orphaned credential is refused with a REASON the bridge surfaces as isError', async () => {
+    setReplToolBridge(fakeBridge([]))
+    registerLiveSession()
+    const { port } = await getReplSinkInfo()
+    const resp = await fetch(`http://127.0.0.1:${port}/tool-call`, {
+      method: 'POST',
+      headers: { 'Content-Type': 'application/json', 'X-Sink-Token': 'f'.repeat(64) },
+      body: JSON.stringify({ session_id: LIVE_SESSION_ID, tool_name: 'work_board_start', args: {}, call_id: 'orphan' }),
+    })
+    const wire = { status: resp.status, body: await resp.text() }
+    expect(wire.status).toBe(401)
+    // The sink names WHY, not just that it said no.
+    const parsed = JSON.parse(wire.body) as { ok?: boolean; error?: string }
+    expect(parsed.ok).toBe(false)
+    expect(parsed.error).toContain('no live REPL session holds')
+    // And the bridge turns that wire into an error the model can act on.
+    const mapped = interpretSinkToolResponse(wire)
+    expect(mapped.isError).toBe(true)
+    const text = mapped.content.map((c) => c.text).join('')
+    expect(text).not.toBe('null')
+    expect(text).toContain('no live REPL session holds')
+  })
 
   it('/tools returns the wired bridge schemas (empty when unwired)', async () => {
     await getReplSinkInfo() // ensure sink is up

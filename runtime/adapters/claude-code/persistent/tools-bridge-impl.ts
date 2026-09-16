@@ -47,6 +47,7 @@ import {
   ListToolsRequestSchema,
   CallToolRequestSchema,
 } from '@modelcontextprotocol/sdk/types.js'
+import { interpretSinkToolResponse, type SinkToolResponse } from './tools-bridge-response.ts'
 
 const SINK_PORT = parseInt(process.env['SINK_PORT'] || '0', 10)
 const SINK_TOKEN = process.env['SINK_TOKEN'] || ''
@@ -111,41 +112,18 @@ mcp.setRequestHandler(CallToolRequestSchema, async (req) => {
   const toolName = req.params.name
   const args = req.params.arguments ?? {}
   try {
-    const respText = await postToSink('/tool-call', {
+    const resp = await postToSink('/tool-call', {
       session_id: SESSION_ID,
       tool_name: toolName,
       args,
       call_id: `${SESSION_ID}:${toolName}`,
     })
-    let parsed: { ok?: boolean; result?: unknown; error?: string }
-    try {
-      parsed = JSON.parse(respText) as typeof parsed
-    } catch {
-      // The sink always answers JSON; a non-JSON body is an infra fault.
-      return {
-        content: [{ type: 'text', text: `error: tool bridge got non-JSON response: ${respText}` }],
-        isError: true,
-      }
-    }
-    if (parsed.ok === false || parsed.error !== undefined) {
-      return {
-        content: [{ type: 'text', text: `error: ${parsed.error ?? 'tool dispatch failed'}` }],
-        isError: true,
-      }
-    }
-    // Return the structured result as a JSON text block so the model gets the
-    // full payload (arrays/objects) it can reason over, not a lossy summary. A
-    // handler that returns undefined (the sink's `Response.json` drops the key,
-    // so `parsed.result` is `undefined`) coalesces to the literal `null` — never
-    // a `text: undefined` block, which would serialise to MCP content with no
-    // `text` field and hand the model an empty/degraded result.
-    const payload =
-      parsed.result === undefined
-        ? 'null'
-        : typeof parsed.result === 'string'
-          ? parsed.result
-          : JSON.stringify(parsed.result, null, 2)
-    return { content: [{ type: 'text', text: payload }] }
+    // THE HTTP STATUS IS PART OF THE ANSWER. It used to be discarded here, and
+    // that is how a 401 from a sink that no longer knows this child reached the
+    // model as a bare `null` — the same thing a tool with nothing to report says.
+    // `interpretSinkToolResponse` is the whole mapping, in a module a test can
+    // import (this one connects stdio at import time and cannot be).
+    return interpretSinkToolResponse(resp)
   } catch (e) {
     const msg = e instanceof Error ? e.message : String(e)
     process.stderr.write(`neutron-tools-bridge: tool ${toolName} failed: ${msg}\n`)
@@ -164,8 +142,12 @@ mcp.setRequestHandler(CallToolRequestSchema, async (req) => {
  * `isError` tool_result the model can retry DELIBERATELY (vs. a silent duplicate).
  * This is the deliberate divergence from the dev-channel's retried `/reply`
  * (which is idempotent — turn-id correlated, and a stale re-post is rejected).
+ *
+ * RETURNS THE STATUS ALONGSIDE THE BODY. Returning only the text made every
+ * refusal look like a success whose body simply lacked the keys the caller
+ * looked for — see `tools-bridge-response.ts` for what that cost.
  */
-async function postToSink(path: string, body: Record<string, unknown>): Promise<string> {
+async function postToSink(path: string, body: Record<string, unknown>): Promise<SinkToolResponse> {
   const resp = await fetch(`http://127.0.0.1:${SINK_PORT}${path}`, {
     method: 'POST',
     headers: {
@@ -174,7 +156,7 @@ async function postToSink(path: string, body: Record<string, unknown>): Promise<
     },
     body: JSON.stringify(body),
   })
-  return await resp.text()
+  return { status: resp.status, body: await resp.text() }
 }
 
 // --- Graceful + orphan-safe shutdown (ported from dev-channel ISSUES #217) ---

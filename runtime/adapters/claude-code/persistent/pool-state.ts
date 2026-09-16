@@ -527,13 +527,33 @@ export class ReplSink {
             `[repl-sink] refusing ${url.pathname}: credential matches no live session\n`,
           )
         }
-        return Response.json({ status: 'unauthorized' }, { status: 401 })
+        // CARRIES A REASON, not just a status word. These two pre-route guards
+        // answer EVERY route, `/tool-call` included, and their `{status}`-only
+        // bodies were what the tools-bridge could not tell apart from a
+        // successful dispatch with no result — so a refused tool call reached
+        // the agent as a bare `null`. `ok`/`error` are the tool-call contract
+        // (see the `/tool-call` route below); `status` is kept because the
+        // dev-channel reply client has always read it.
+        return Response.json(
+          {
+            status: 'unauthorized',
+            ok: false,
+            error:
+              'unauthorized: this session presented a credential no live REPL session holds. ' +
+              'A child that outlived a gateway restart carries a credential minted by the dead ' +
+              'incarnation; it must be respawned before it can call tools again.',
+          },
+          { status: 401 },
+        )
       }
       let body: Record<string, unknown> = {}
       try {
         body = (await req.json()) as Record<string, unknown>
       } catch {
-        return Response.json({ status: 'bad-json' }, { status: 400 })
+        return Response.json(
+          { status: 'bad-json', ok: false, error: 'bad-json: the request body did not parse as JSON' },
+          { status: 400 },
+        )
       }
       const sessionId = typeof body['session_id'] === 'string' ? (body['session_id'] as string) : ''
       if (REPL_DEBUG) {
