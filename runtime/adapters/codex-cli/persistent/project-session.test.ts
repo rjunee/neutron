@@ -270,11 +270,11 @@ describe('CodexProjectSessionHost', () => {
     await Bun.sleep(0)
     const b = session.submitLine('second')
     await Bun.sleep(0)
-    expect(f.host.submissions).toEqual(['first'])
+    expect(f.host.submissions).toEqual(['\x1b[200~first\x1b[201~'])
     expect(f.host.maxActive).toBe(1)
     first.resolve()
     await Promise.all([a, b])
-    expect(f.host.submissions).toEqual(['first', 'second'])
+    expect(f.host.submissions).toEqual(['\x1b[200~first\x1b[201~', '\x1b[200~second\x1b[201~'])
     expect(f.host.maxActive).toBe(1)
   })
 
@@ -321,5 +321,64 @@ describe('CodexProjectSessionHost', () => {
     const f = fixture()
     await expect(f.sessionHost.open({ ...f.open, projectId: '' })).rejects.toThrow(/project id/)
     expect(f.host.spawned).toEqual([])
+  })
+})
+
+describe('Codex TUI regression controls', () => {
+  test('submits a completed bracketed paste before the host sends Enter', async () => {
+    const f = fixture()
+    const session = await f.sessionHost.open(OPEN)
+    await session.submitLine('hello')
+    expect(f.host.submissions).toEqual(['\x1b[200~hello\x1b[201~'])
+  })
+
+  test('refuses an escape that could end the paste early', async () => {
+    const f = fixture()
+    const session = await f.sessionHost.open(OPEN)
+    await expect(session.submitLine('hello\x1b[201~injected')).rejects.toThrow(/escape/)
+    expect(f.host.submissions).toEqual([])
+  })
+
+  test.each([
+    ['codex', '--enable', 'multi_agent_v2'],
+    ['/usr/bin/codex', '--enable', 'multi_agent_v2'],
+    ['node', '/usr/bin/codex', '--enable', 'multi_agent_v2'],
+    ['/usr/bin/node', '/usr/bin/codex', '--enable', 'multi_agent_v2'],
+  ].map(argv => ({ argv })))('adopts the matching launch %j', async ({ argv }) => {
+    const f = fixture()
+    await f.sessionHost.open(OPEN)
+    const nextHost = new FakeHost()
+    nextHost.inspection = { kind: 'live', argv }
+    const session = await new CodexProjectSessionHost({ registryPath: f.registryPath, host: nextHost }).open(OPEN)
+    expect(session.recovery).toBe('adopted')
+    expect(nextHost.attached).toEqual(['pane-1'])
+    expect(nextHost.spawned).toEqual([])
+  })
+
+  test.each([
+    ['node', '/usr/bin/other', 'codex', '--enable', 'multi_agent_v2'],
+    ['python', '/usr/bin/codex', '--enable', 'multi_agent_v2'],
+    ['node', '/usr/bin/codex', '--enable', 'wrong'],
+    ['node', '/usr/bin/codex', '--enable', 'multi_agent_v2', 'extra'],
+  ].map(argv => ({ argv })))('refuses an unrelated or changed launch %j', async ({ argv }) => {
+    const f = fixture()
+    await f.sessionHost.open(OPEN)
+    const nextHost = new FakeHost()
+    nextHost.inspection = { kind: 'live', argv }
+    await expect(new CodexProjectSessionHost({ registryPath: f.registryPath, host: nextHost }).open(OPEN)).rejects.toThrow(/identity/)
+    expect(nextHost.attached).toEqual([])
+    expect(nextHost.spawned).toEqual([])
+  })
+
+  test('an explicitly configured executable path must match exactly', async () => {
+    const f = fixture()
+    await new CodexProjectSessionHost({ registryPath: f.registryPath, host: f.host, bin: '/opt/codex' }).open(OPEN)
+    const nextHost = new FakeHost()
+    const restarted = new CodexProjectSessionHost({ registryPath: f.registryPath, host: nextHost, bin: '/opt/codex' })
+    nextHost.inspection = { kind: 'live', argv: ['node', '/other/codex', '--enable', 'multi_agent_v2'] }
+    await expect(restarted.open(OPEN)).rejects.toThrow(/identity/)
+    expect(nextHost.attached).toEqual([])
+    nextHost.inspection = { kind: 'live', argv: ['node', '/opt/codex', '--enable', 'multi_agent_v2'] }
+    expect((await restarted.open(OPEN)).recovery).toBe('adopted')
   })
 })

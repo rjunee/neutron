@@ -118,8 +118,8 @@ export class CodexProjectSession {
 
   /** Resolves after the host acknowledges both text delivery and Enter. */
   async submitLine(line: string): Promise<void> {
-    if (line.includes('\r') || line.includes('\n')) {
-      throw new Error('codex project session refuses embedded line terminators')
+    if (line.includes('\r') || line.includes('\n') || line.includes('\x1b')) {
+      throw new Error('codex project session refuses embedded line terminators or escape characters')
     }
     const submit = this.child.submitLine
     if (submit === undefined) {
@@ -134,7 +134,9 @@ export class CodexProjectSession {
     await previous
     try {
       if (this.child.hasExited()) throw new Error('codex project session refused: session is not running')
-      await submit.call(this.child, line)
+      // End the paste explicitly before Enter so Codex does not absorb Enter
+      // into its rapid-input paste buffer (on either terminal backend).
+      await submit.call(this.child, `\x1b[200~${line}\x1b[201~`)
     } finally {
       release()
     }
