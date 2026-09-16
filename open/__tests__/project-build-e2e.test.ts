@@ -194,6 +194,10 @@ interface WorkerWorld {
   blockRoles: ReadonlySet<string>
   /** Every dispatch this fake observed, in order — the harness's audit trail. */
   dispatches: { role: string; step_id: string; schema: string; wrote: string[] }[]
+  /** The task the host handed each build turn after planner validation. */
+  selectedTasks: string[]
+  /** The planner route the real driver wrote into each plan turn's context. */
+  plannerChoices: string[]
 }
 
 /**
@@ -290,6 +294,18 @@ async function performRole(world: WorkerWorld, request: BoundedWorkRequest, brie
 
   if (request.role === 'plan') {
     // A plan turn writes no commit, so the measured revision is unchanged.
+    world.plannerChoices.push(context.planner)
+    if (context.planner === 'next') {
+      const committed = context.committedPlan as { body: string; uncheckedCount: number }
+      const topTask = committed.body.split('\n').find((line: string) => /^\s*- \[ \]\s+/.test(line))!
+      return { ...snapshot, payload: {
+        implementationPlan: committed.body,
+        topTask,
+        executionSpec: `Complete ${topTask}`,
+        complexity: 'mechanical',
+        remainingTasks: committed.uncheckedCount - 1,
+      } }
+    }
     const more = brief.includes('MORE TASKS')
     return { ...snapshot, payload: {
       implementationPlan: `- [ ] T1 record the note\n${more ? '- [ ] T2 record another note\n' : ''}`,
@@ -301,6 +317,14 @@ async function performRole(world: WorkerWorld, request: BoundedWorkRequest, brie
   }
 
   if (request.role === 'build' || request.role === 'fix') {
+    const selected = context.previous as { implementationPlan?: string; topTask?: string }
+    const commitsPlan = request.role === 'build' && selected.topTask
+      && selected.implementationPlan?.includes('T2 record another note')
+    if (commitsPlan && selected.topTask && selected.implementationPlan) {
+      world.selectedTasks.push(selected.topTask)
+      await writeFile(join(cwd, 'IMPLEMENTATION_PLAN.md'),
+        selected.implementationPlan.replace(selected.topTask, selected.topTask.replace('- [ ]', '- [x]')))
+    }
     const branch = await gitOut(world.run, cwd, ['rev-parse', '--abbrev-ref', 'HEAD'])
     // Prose only, deliberately: `runMutationProofGate` exempts a prose-only diff
     // (`mutation-prover.ts:3814`), which is the one publish path that does not
@@ -308,7 +332,8 @@ async function performRole(world: WorkerWorld, request: BoundedWorkRequest, brie
     const notes = join(cwd, 'NOTES.md')
     const previous = await readFile(notes, 'utf8').catch(() => '')
     await writeFile(notes, `${previous}${request.step_id}\n`)
-    await gitOut(world.run, cwd, ['add', '--', 'NOTES.md'])
+    await gitOut(world.run, cwd, ['add', '--', 'NOTES.md',
+      ...(commitsPlan ? ['IMPLEMENTATION_PLAN.md'] : [])])
     await gitOut(world.run, cwd, ['-c', 'user.email=w@example.invalid', '-c', 'user.name=Worker',
       '-c', 'commit.gpgsign=false', 'commit', '-m', `work: ${request.role} ${request.step_id}`])
     // Measure the produced revision from the only base this worker was given.
@@ -475,7 +500,8 @@ async function fixture(options: { ralph?: boolean; moreTasks?: boolean; suiteExi
   await writeFile(join(repo, 'scripts', 'ci', 'leak-gate.sh'), LEAK_GATE_STUB, { mode: 0o755 })
   await writeFile(join(repo, 'scripts', 'ci', 'suite.sh'), suiteScript(options.suiteExit ?? 0), { mode: 0o755 })
   await writeFile(join(repo, 'NOTES.md'), 'seed\n')
-  await writeFile(join(repo, 'IMPLEMENTATION_PLAN.md'), '- [ ] T1 record the note\n')
+  await writeFile(join(repo, 'IMPLEMENTATION_PLAN.md'),
+    `- [ ] T1 record the note\n${options.moreTasks ? '- [ ] T2 record another note\n' : ''}`)
   await git(repo, ['add', '-A'])
   await git(repo, ['commit', '-m', 'chore: seed'])
   await git(repo, ['remote', 'add', 'origin', origin])
@@ -499,6 +525,7 @@ async function fixture(options: { ralph?: boolean; moreTasks?: boolean; suiteExi
   const github = fakeGithub({ origin, repo })
   const commands: string[][] = []
   const world: WorkerWorld = { run: spawnCapture, repo, scratch, dispatches: [],
+    selectedTasks: [], plannerChoices: [],
     blockersByRound: options.blockersByRound ?? [], replanRounds: options.replanRounds ?? [],
     blockRoles: new Set(options.blockRoles ?? []), repeatFirstFinding: options.repeatFirstFinding ?? false,
     commentRounds: new Set(options.commentRounds ?? []),
@@ -865,6 +892,30 @@ test('ralph mode with remaining tasks hands off after the build instead of mergi
   expect(f.world.dispatches.map(d => d.role)).toEqual(['plan', 'build'])
 }, 300_000)
 
+test('ralph continuation probes the committed plan and selects its next unchecked task', async () => {
+  const f = await fixture({ ralph: true, moreTasks: true })
+
+  // Keep the first process's worktree and mode checkpoint, as a real process exit
+  // would, then construct a fresh composed host over those durable artifacts.
+  const firstHost = await createProjectBuildHost(await f.prepare())
+  const first = await buildRun({ mode: 'ralph', start: 'fresh', ralphRound: 0,
+    run_id: f.row.id, workers: firstHost.workers, repl_provider: 'anthropic', merge_mode: 'pr' },
+  firstHost.deps, new AbortController().signal)
+  expect(first.kind, why(f, first)).toBe('continued')
+  expect(f.world.selectedTasks).toEqual(['- [ ] T1 record the note'])
+
+  f.world.dispatches.length = 0
+  const resumed = await createProjectBuildHost(await f.prepare())
+  const outcome = await resumed.run({ mode: 'ralph', start: 'resume' }, new AbortController().signal)
+  expect(outcome, why(f, outcome)).toMatchObject({ kind: 'blocked', phase: 'publish' })
+  expect(f.world.dispatches[0]).toMatchObject({ role: 'plan', step_id: `${f.row.id}:task:1:plan:0` })
+  expect(f.world.plannerChoices).toEqual(['full', 'next'])
+  expect(f.world.selectedTasks).toEqual([
+    '- [ ] T1 record the note',
+    '- [ ] T2 record another note',
+  ])
+}, 300_000)
+
 // ── FIX ROUNDS ───────────────────────────────────────────────────────────────
 
 test('a REQUEST_CHANGES panel dispatches a fix worker and the re-review merges', async () => {
@@ -1221,10 +1272,9 @@ test('local merge mode reaches merged with no PR, no push and no gh call', async
  *    Every ordinary round here raises fresh identities. `resumeFix` (the fix
  *    dispatched from a RESUMED rejection, `build-run.ts:461-472`) is driven
  *    alongside the fresh fix path.
- *  • THE REST OF RESUME. The cases here resume `built`, `pending`, and `rejected`
- *    checkpoints. An `approved` checkpoint, `probePlan`'s
- *    continuation planner and a regenerated diff that disagrees with the
- *    measurement are not driven.
+ *  • THE REST OF RESUME. The cases here resume `built`, `pending`, `rejected` and
+ *    `ralph-task-built` checkpoints. An `approved` checkpoint and a regenerated
+ *    diff that disagrees with the measurement are not driven.
  *  • CODEX AND KIMI SEATS, and headless placement generally: both cross-model
  *    seats are configured off.
  *  • `mode: 'wave'` and `mode: 'bound_pr'`.
