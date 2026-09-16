@@ -12,8 +12,10 @@ import {
   WAKEUP_FAILURE_POST_CADENCE,
   WORK_WAKEUP_INTERVAL_MS,
   WORK_WAKEUP_OWNER_GRACE_MS,
+  WAKEUP_UNAVAILABLE_LOG_WINDOW_MS,
   type WakeupDeferredItem,
   type WakeupProjectWork,
+  type WakeupReadiness,
   type WorkWakeupDeps,
 } from '../work-wakeup.ts'
 
@@ -70,10 +72,38 @@ function captureInfo(): { matching(event: string): string[]; clear(): void; rest
   }
 }
 
+/**
+ * Capture the logger's WARN lines (`warn` → `console.warn`, `logger/index.ts:221`).
+ * The unavailability reason is a WARN, not an INFO: nothing failed and nothing was
+ * attempted, but an operator must be able to find it.
+ */
+function captureWarn(): { matching(event: string): string[]; clear(): void; restore(): void } {
+  const lines: string[] = []
+  const originalWarn = console.warn
+  const originalLevel = process.env['NEUTRON_LOG_LEVEL']
+  process.env['NEUTRON_LOG_LEVEL'] = 'info'
+  console.warn = (...args: unknown[]): void => {
+    lines.push(args.map(String).join(' '))
+  }
+  return {
+    matching: (event: string): string[] => lines.filter((l) => l.includes(event)),
+    clear: (): void => {
+      lines.length = 0
+    },
+    restore: (): void => {
+      console.warn = originalWarn
+      if (originalLevel === undefined) delete process.env['NEUTRON_LOG_LEVEL']
+      else process.env['NEUTRON_LOG_LEVEL'] = originalLevel
+    },
+  }
+}
+
 interface Harness {
   deps: WorkWakeupDeps
   specs: AgentSpec[]
   posts: Array<{ project_key: string; body: string; loud: boolean }>
+  /** How many times `listOutstanding` was asked — 0 proves the tick returned first. */
+  selections: { count: number }
 }
 
 function harness(over: {
@@ -82,11 +112,18 @@ function harness(over: {
   composeError?: string
   activity?: number | null
   agentBusy?: (chat_scope: string) => boolean
+  readiness?: () => WakeupReadiness
+  now?: () => number
 } = {}): Harness {
   const specs: AgentSpec[] = []
   const posts: Array<{ project_key: string; body: string; loud: boolean }> = []
+  const selections = { count: 0 }
   const deps: WorkWakeupDeps = {
-    listOutstanding: () => over.projects ?? [project()],
+    ...(over.readiness === undefined ? {} : { readiness: over.readiness }),
+    listOutstanding: () => {
+      selections.count += 1
+      return over.projects ?? [project()]
+    },
     ownerActivityMs: () => over.activity ?? null,
     ...(over.agentBusy === undefined ? {} : { agentBusy: over.agentBusy }),
     llm: {
@@ -103,9 +140,9 @@ function harness(over: {
     },
     tool_names: TOOLS,
     resolveModel: () => 'model-x',
-    now: () => NOW,
+    now: over.now ?? ((): number => NOW),
   }
-  return { deps, specs, posts }
+  return { deps, specs, posts, selections }
 }
 
 describe('runWorkWakeupSweep — the wake path', () => {
@@ -113,7 +150,7 @@ describe('runWorkWakeupSweep — the wake path', () => {
     const h = harness()
     const result = await runWorkWakeupSweep(h.deps, new Map())
 
-    expect(result).toEqual({ woke: 1, skipped_active: 0, failed: 0, deferred_to_run: 0, released_stalled_run: 0, skipped_agent_busy: 0 })
+    expect(result).toEqual({ unavailable: 0, woke: 1, skipped_active: 0, failed: 0, deferred_to_run: 0, released_stalled_run: 0, skipped_agent_busy: 0 })
     expect(h.specs).toHaveLength(1)
     const spec = h.specs[0]!
     // The warm-pool key — what lands the turn ON the owner's session.
@@ -136,7 +173,7 @@ describe('runWorkWakeupSweep — the wake path', () => {
   test('owner active inside the grace window → skipped, and the session is NEVER entered', async () => {
     const h = harness({ activity: NOW - (WORK_WAKEUP_OWNER_GRACE_MS - 1) })
     const result = await runWorkWakeupSweep(h.deps, new Map())
-    expect(result).toEqual({ woke: 0, skipped_active: 1, failed: 0, deferred_to_run: 0, released_stalled_run: 0, skipped_agent_busy: 0 })
+    expect(result).toEqual({ unavailable: 0, woke: 0, skipped_active: 1, failed: 0, deferred_to_run: 0, released_stalled_run: 0, skipped_agent_busy: 0 })
     expect(h.specs).toHaveLength(0)
     expect(h.posts).toHaveLength(0)
   })
@@ -157,6 +194,7 @@ describe('runWorkWakeupSweep — the wake path', () => {
     const h = harness({ agentBusy: () => true })
     const result = await runWorkWakeupSweep(h.deps, new Map())
     expect(result).toEqual({
+      unavailable: 0,
       woke: 0,
       skipped_active: 0,
       failed: 0,
@@ -222,7 +260,7 @@ describe('runWorkWakeupSweep — the wake path', () => {
   test('a project with zero items is not woken', async () => {
     const h = harness({ projects: [project({ items: [] })] })
     const result = await runWorkWakeupSweep(h.deps, new Map())
-    expect(result).toEqual({ woke: 0, skipped_active: 0, failed: 0, deferred_to_run: 0, released_stalled_run: 0, skipped_agent_busy: 0 })
+    expect(result).toEqual({ unavailable: 0, woke: 0, skipped_active: 0, failed: 0, deferred_to_run: 0, released_stalled_run: 0, skipped_agent_busy: 0 })
     expect(h.specs).toHaveLength(0)
   })
 
@@ -244,7 +282,7 @@ describe('runWorkWakeupSweep — the wake path', () => {
       ],
     })
     const result = await runWorkWakeupSweep(h.deps, new Map())
-    expect(result).toEqual({ woke: 0, skipped_active: 0, failed: 0, deferred_to_run: 1, released_stalled_run: 0, skipped_agent_busy: 0 })
+    expect(result).toEqual({ unavailable: 0, woke: 0, skipped_active: 0, failed: 0, deferred_to_run: 1, released_stalled_run: 0, skipped_agent_busy: 0 })
     expect(h.specs).toHaveLength(0)
   })
 
@@ -564,7 +602,7 @@ describe('runWorkWakeupSweep — the wake path', () => {
       ],
     })
     const result = await runWorkWakeupSweep(h.deps, new Map())
-    expect(result).toEqual({ woke: 0, skipped_active: 1, failed: 0, deferred_to_run: 1, released_stalled_run: 0, skipped_agent_busy: 0 })
+    expect(result).toEqual({ unavailable: 0, woke: 0, skipped_active: 1, failed: 0, deferred_to_run: 1, released_stalled_run: 0, skipped_agent_busy: 0 })
   })
 
   test('an over-long report is truncated to the bound, never dropped', async () => {
@@ -652,6 +690,7 @@ describe('runWorkWakeupSweep — loud failure, bounded siren', () => {
       },
     }
     await expect(runWorkWakeupSweep(deps, new Map())).resolves.toEqual({
+      unavailable: 0,
       woke: 0,
       skipped_active: 0,
       failed: 1,
@@ -826,5 +865,144 @@ describe('buildWorkWakeupLoop', () => {
       lines.restore()
     }
     expect(lines.matching('wakeup_sweep')).toHaveLength(0)
+  })
+})
+
+/**
+ * #1085 — "NOTHING TO DO" AND "CANNOT DO ANYTHING" MUST NOT SHARE A SIGNAL.
+ *
+ * The measured failure: a card armed exactly to this sweep's eligibility sat
+ * unstarted and the loop wrote nothing at all. Nothing at all is also what a
+ * healthy instance with an empty board writes, so the observable could not answer
+ * the only question an operator had. Same defect class as ISSUES #1053 (a settled
+ * driver and a hung one byte-identical) and #1071 (a 401 rendered as a bare null).
+ *
+ * The assertions below are written as CONTRASTS on purpose — a case that only
+ * checked the unavailable tick would pass just as happily if the idle tick had
+ * started shouting too, and the property under test is that the two DIFFER.
+ */
+describe('runWorkWakeupSweep — a missing precondition is never silence (#1085)', () => {
+  const NOT_READY = (): WakeupReadiness => ({
+    ready: false,
+    reason: 'no background compose substrate on this instance (no model credential)',
+  })
+
+  test('an unavailable tick and an idle tick are DISTINGUISHABLE in the returned summary', async () => {
+    const unavailable = await runWorkWakeupSweep(harness({ readiness: NOT_READY }).deps, new Map())
+    const idle = await runWorkWakeupSweep(harness({ projects: [] }).deps, new Map())
+
+    expect(unavailable.unavailable).toBe(1)
+    expect(idle.unavailable).toBe(0)
+    // The whole point: not merely "each is right", but that they are not equal.
+    expect(unavailable).not.toEqual(idle)
+  })
+
+  test('an unavailable tick selects NOTHING, composes NOTHING and posts NOTHING', async () => {
+    const h = harness({ readiness: NOT_READY })
+    const streaks = new Map<string, number>()
+    const result = await runWorkWakeupSweep(h.deps, streaks)
+
+    // `listOutstanding` is not even asked — the precondition is answered first, so
+    // a board read cannot be what decides an unavailable tick.
+    expect(h.selections.count).toBe(0)
+    expect(h.specs).toHaveLength(0)
+    expect(h.posts).toHaveLength(0)
+    // NOT a failure: no turn was attempted, so nothing may reach the owner's phone
+    // through `WAKEUP_FAILURE_POST_CADENCE`.
+    expect(result.failed).toBe(0)
+    expect(streaks.size).toBe(0)
+    expect(result).toEqual({
+      unavailable: 1, woke: 0, skipped_active: 0, failed: 0,
+      deferred_to_run: 0, released_stalled_run: 0, skipped_agent_busy: 0,
+    })
+  })
+
+  test('the REASON is named in the journal — "unavailable" alone would be a second collapse', async () => {
+    resetLoggerStateForTests()
+    const warns = captureWarn()
+    try {
+      await runWorkWakeupSweep(harness({ readiness: NOT_READY }).deps, new Map())
+    } finally {
+      warns.restore()
+    }
+    const lines = warns.matching('wakeup_unavailable')
+    expect(lines).toHaveLength(1)
+    expect(lines[0]).toContain('no model credential')
+  })
+
+  test('the reason is rate-limited but THE COUNTER IS NOT — every tick still says it cannot act', async () => {
+    resetLoggerStateForTests()
+    const warns = captureWarn()
+    const deferralLog = new Map<string, number>()
+    let first: number
+    let second: number
+    try {
+      const h = harness({ readiness: NOT_READY })
+      first = (await runWorkWakeupSweep(h.deps, new Map(), deferralLog)).unavailable
+      warns.clear()
+      second = (await runWorkWakeupSweep(h.deps, new Map(), deferralLog)).unavailable
+    } finally {
+      warns.restore()
+    }
+    // Second tick inside the window: no repeat sentence...
+    expect(warns.matching('wakeup_unavailable')).toHaveLength(0)
+    // ...and the fact is still reported, which is what "costs volume, never the
+    // fact" has to mean for a condition that persists for hours.
+    expect(first).toBe(1)
+    expect(second).toBe(1)
+  })
+
+  test('RECOVERY RE-ARMS THE WINDOW: a ready tick in between makes the next outage loud again', async () => {
+    resetLoggerStateForTests()
+    const warns = captureWarn()
+    const deferralLog = new Map<string, number>()
+    let clock = NOW
+    try {
+      const down = harness({ readiness: NOT_READY, now: () => clock })
+      const up = harness({ projects: [], now: () => clock })
+      await runWorkWakeupSweep(down.deps, new Map(), deferralLog)
+      // A READY tick reaches the prune, which drops the unavailability key.
+      await runWorkWakeupSweep(up.deps, new Map(), deferralLog)
+      warns.clear()
+      // Well inside the half-hour window — only the intervening recovery can
+      // explain a second sentence here.
+      clock = NOW + 60_000
+      expect(clock - NOW).toBeLessThan(WAKEUP_UNAVAILABLE_LOG_WINDOW_MS)
+      await runWorkWakeupSweep(down.deps, new Map(), deferralLog)
+    } finally {
+      warns.restore()
+    }
+    expect(warns.matching('wakeup_unavailable')).toHaveLength(1)
+  })
+
+  test('THE LOOP PRINTS AN UNAVAILABLE TICK AND STAYS SILENT ON AN IDLE ONE', async () => {
+    resetLoggerStateForTests()
+    const lines = captureInfo()
+    const warns = captureWarn()
+    let idleSummaries: string[]
+    let downSummaries: string[]
+    try {
+      await buildWorkWakeupLoop(harness({ projects: [] }).deps).loop.runOnce()
+      idleSummaries = lines.matching('wakeup_sweep')
+      lines.clear()
+      await buildWorkWakeupLoop(harness({ readiness: NOT_READY }).deps).loop.runOnce()
+      downSummaries = lines.matching('wakeup_sweep')
+    } finally {
+      warns.restore()
+      lines.restore()
+    }
+    // An idle tick is 288 lines of zeros a day, so it stays quiet...
+    expect(idleSummaries).toHaveLength(0)
+    // ...and an instance that CANNOT act says so on every one of those 288 ticks.
+    expect(downSummaries).toHaveLength(1)
+    expect(downSummaries[0]).toContain('unavailable=1')
+  })
+
+  test('an absent `readiness` dep means READY — the seam is additive, not a new gate', async () => {
+    const h = harness()
+    expect(h.deps.readiness).toBeUndefined()
+    const result = await runWorkWakeupSweep(h.deps, new Map())
+    expect(result.unavailable).toBe(0)
+    expect(h.specs).toHaveLength(1)
   })
 })

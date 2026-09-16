@@ -607,16 +607,40 @@ function why(f: Awaited<ReturnType<typeof fixture>>, outcome: BuildRunOutcome | 
 // ─────────────────────────────────────────────────────────────────────────────
 
 // Acquisition is driven through the same composed host as the successful build.
+//
+// EVERY DETAIL HERE IS DISTINCT, AND THAT IS THE ASSERTION (#1085). Three of these
+// shapes — `missing`, `ambiguous-before`, `ambiguous-after` — used to answer with one
+// string, "Project conversation session is missing or ambiguous". That string is the
+// ONLY thing an operator receives: it travels out as the run's uncertainty detail via
+// `runtime/workers/project-runners.ts`. So an instance that had lost its project REPL
+// and an instance that was spawning two of them under one project id were, on the
+// wire, the same event — and the acts they call for are opposites. The table pins the
+// strings; `acquisitionDetails` below pins that no two of them are equal, so a future
+// edit cannot quietly re-merge them and stay green.
 const acquisitionCases = [
-  ['missing', 'Project conversation session is missing or ambiguous'],
-  ['ambiguous-before', 'Project conversation session is missing or ambiguous'],
-  ['ambiguous-after', 'Project conversation session is missing or ambiguous'],
-  ['reject', 'Project conversation session could not be started'],
+  ['missing', 'Project conversation session was NOT created: the spawn for project id "e2e-project" returned without error (none existed) and no live cc-agent session exists for it'],
+  ['ambiguous-before', 'Project conversation session is AMBIGUOUS: 2 live cc-agent sessions carry project id "e2e-project"'],
+  ['ambiguous-after', 'Project conversation session is AMBIGUOUS after a spawn: 2 live cc-agent sessions carry project id "e2e-project"'],
+  ['reject', 'Project conversation session could not be started (none existed): start failed'],
   ['missing-pool', 'Project conversation is not ready'],
   ['pending', 'Project conversation is not ready'],
   ['empty', 'Project conversation child is unavailable'],
   ['exited', 'Project conversation child is unavailable'],
 ] as const
+
+test('#1085 — the acquisition failures that call for different acts carry different strings', () => {
+  // `missing-pool`/`pending` and `empty`/`exited` legitimately pair up: each pair is
+  // one fact about one session reached two ways. The three that must NOT pair are the
+  // ones about how many sessions exist.
+  const distinct = ['missing', 'ambiguous-before', 'ambiguous-after', 'reject']
+    .map(shape => acquisitionCases.find(([s]) => s === shape)![1])
+  expect(new Set(distinct).size).toBe(distinct.length)
+  // And each says WHICH of the two counts it saw, so the string is actionable rather
+  // than merely unique.
+  expect(distinct[0]).toContain('NOT created')
+  expect(distinct[1]).toContain('AMBIGUOUS: 2')
+  expect(distinct[2]).toContain('AMBIGUOUS after a spawn: 2')
+})
 
 for (const [shape, detail] of acquisitionCases) {
   test(`session acquisition: ${shape} stops as unknown before dispatch`, async () => {
@@ -681,7 +705,9 @@ test('session acquisition: hung prewarm expires and late completion never dispat
     const outcome = await host.run({ mode: 'pr', start: 'fresh' }, controller.signal)
     expect(started).toBe(true)
     expect(outcome).toMatchObject({ kind: 'unknown', phase: 'plan',
-      detail: 'Dispatch turn completion unknown: Project conversation session acquisition timed out' })
+      // The timeout names the budget it blew AND what it was trying to repair, so a
+      // reader can tell a cold first spawn from a respawn after a death (#1085).
+      detail: `Dispatch turn completion unknown: Project conversation session acquisition timed out after ${PROJECT_SESSION_ACQUIRE_TIMEOUT_MS}ms (none existed)` })
     const timerIndex = clock.mock.calls.findIndex(call => call[1] === PROJECT_SESSION_ACQUIRE_TIMEOUT_MS)
     expect(timerIndex).toBeGreaterThanOrEqual(0)
     const acquisitionTimer = clock.mock.results[timerIndex]!.value

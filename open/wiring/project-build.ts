@@ -6,6 +6,7 @@ import { createProjectRunners } from '@neutronai/runtime/workers/project-runners
 import { createClaudeActingTurn } from '@neutronai/runtime/workers/claude-acting-turn.ts'
 import { createCodexHeadlessRunner } from '@neutronai/runtime/workers/codex-headless.ts'
 import { pool, supervisedBySessionKey } from '@neutronai/runtime/adapters/claude-code/persistent/pool-state.ts'
+import type { PersistentReplSubstrateOptions } from '@neutronai/runtime/adapters/claude-code/persistent/types.ts'
 import type { Provider } from '@neutronai/runtime/provider.ts'
 import type { ProviderSelectionSource } from '@neutronai/runtime/adapters/select-substrate.ts'
 import type { ProjectBuildHostOptions } from '@neutronai/trident/project-build-host.ts'
@@ -49,6 +50,20 @@ import { PROJECT_BUILD_WALL_MS } from '@neutronai/trident/project-build-budget.t
 // Cold session acquisition has its own deadline, independent of the worker wall.
 // Match the conversational prewarm allowance; a stuck prewarm cannot clear this timer.
 export const PROJECT_SESSION_ACQUIRE_TIMEOUT_MS = 35_000
+
+/**
+ * The live `cc-agent-*` supervised sessions scoped to one project id.
+ *
+ * ONE reader, called twice by the acting turn — before the spawn and after it —
+ * because the second call is the ONLY evidence a spawn produced anything (see the
+ * comment at its second call site). Extracted so the two reads cannot drift: they
+ * are the same question asked at two times, and a filter that differed between them
+ * would make "it appeared" and "I looked differently" indistinguishable.
+ */
+function liveProjectSessions(projectId: string): Array<[string, PersistentReplSubstrateOptions]> {
+  return [...supervisedBySessionKey].filter(([, options]) =>
+    options.project_id === projectId && options.substrate_instance_id.startsWith('cc-agent-'))
+}
 
 export interface ProjectBuildContext {
   store: ProjectBuildHostOptions['production']['store']
@@ -210,9 +225,17 @@ export async function prepareProjectBuild(input: InnerLoopInput, context: Projec
     run_id: run.id, state_dir: state,
     actingTurn: async turn => {
       if (context.provider !== 'anthropic') return { kind: 'refused', reason: 'capability-unsupported', detail: `No live acting-turn binding for ${context.provider} selected at ${context.providerSource} level` }
-      let candidates = [...supervisedBySessionKey].filter(([, options]) =>
-        options.project_id === context.projectId && options.substrate_instance_id.startsWith('cc-agent-'))
-      if (candidates.length > 1) return { kind: 'unknown', detail: 'Project conversation session is missing or ambiguous' }
+      let candidates = liveProjectSessions(context.projectId)
+      // MISSING AND AMBIGUOUS ARE NOT ONE FACT (#1085). Both ended here as the
+      // single string "Project conversation session is missing or ambiguous", and
+      // that string is the ONLY thing an operator gets: it travels out through
+      // `runtime/workers/project-runners.ts:145` as the run's uncertainty detail.
+      // The two call for opposite acts — none means "start one", several means
+      // "something is spawning twice under one project id" — and a reader could not
+      // tell which had happened, on the very path that goes dark when an instance
+      // loses its project REPL. Zero is not handled here at all: it is the case the
+      // spawn below EXISTS for, and returning on it would disable the recovery.
+      if (candidates.length > 1) return { kind: 'unknown', detail: `Project conversation session is AMBIGUOUS: ${candidates.length} live cc-agent sessions carry project id "${context.projectId}"` }
       if (candidates.length === 1) {
         const [, options] = candidates[0]!
         if (options.skip_permissions !== true || options.restricted || options.permissions) return { kind: 'refused', reason: 'capability-unsupported', detail: 'Project launch grants cannot authorize bounded build work' }
@@ -222,6 +245,11 @@ export async function prepareProjectBuild(input: InnerLoopInput, context: Projec
         ? await candidatePending
         : undefined
       if (candidateSession === undefined || candidateSession.hasChildExited()) {
+        // WHY WE ARE SPAWNING, captured BEFORE the attempt, so the refusal below can
+        // say whether the instance had no project REPL at all or had one whose child
+        // had gone. #1085 is the first shape ("nothing respawned it"); they are not
+        // interchangeable and the old wording covered both with neither.
+        const had = candidates.length === 0 ? 'none existed' : 'the one that existed had a dead child'
         let timer: ReturnType<typeof setTimeout> | undefined
         try {
           const expired = new Promise<true>(resolve => {
@@ -230,14 +258,22 @@ export async function prepareProjectBuild(input: InnerLoopInput, context: Projec
           const timedOut = await Promise.race([
             context.spawnProjectSession(context.projectId).then(() => false), expired,
           ])
-          if (timedOut) return { kind: 'unknown', detail: 'Project conversation session acquisition timed out' }
+          if (timedOut) return { kind: 'unknown', detail: `Project conversation session acquisition timed out after ${PROJECT_SESSION_ACQUIRE_TIMEOUT_MS}ms (${had})` }
         }
-        catch { return { kind: 'unknown', detail: 'Project conversation session could not be started' } }
+        catch (error) { return { kind: 'unknown', detail: `Project conversation session could not be started (${had}): ${error instanceof Error ? error.message : String(error)}` } }
         finally { clearTimeout(timer) }
-        candidates = [...supervisedBySessionKey].filter(([, options]) =>
-          options.project_id === context.projectId && options.substrate_instance_id.startsWith('cc-agent-'))
+        // THE RE-READ IS THE ONLY EVIDENCE THE SPAWN WORKED, and that is not a
+        // belt-and-braces re-check — it is the sole one. `spawnProjectSession`
+        // (`open/composer.ts`) awaits `prewarmSubstrate`, which swallows every error
+        // and NEVER rejects (`open/composer.ts` `prewarmSubstrate`: the catch emits a
+        // journal row and the promise still resolves). So the call resolving says
+        // nothing whatsoever about whether a REPL now exists; only the registry does.
+        // Any design that "prewarms a session and reports success" through this seam
+        // reports a success it has not observed.
+        candidates = liveProjectSessions(context.projectId)
+        if (candidates.length === 0) return { kind: 'unknown', detail: `Project conversation session was NOT created: the spawn for project id "${context.projectId}" returned without error (${had}) and no live cc-agent session exists for it` }
       }
-      if (candidates.length !== 1) return { kind: 'unknown', detail: 'Project conversation session is missing or ambiguous' }
+      if (candidates.length !== 1) return { kind: 'unknown', detail: `Project conversation session is AMBIGUOUS after a spawn: ${candidates.length} live cc-agent sessions carry project id "${context.projectId}"` }
       const [key, options] = candidates[0]!
       const pending = pool.get(key)
       if (!pending || Bun.peek.status(pending) !== 'fulfilled') return { kind: 'unknown', detail: 'Project conversation is not ready' }

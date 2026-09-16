@@ -19,11 +19,35 @@
  *     every composition and its state lives in durable rows.
  *
  *   • The fired-reminder dispatcher already proves a server-initiated turn can
- *     land ON the owner's warm project chat session: `liveAgentSubstrate` has no
- *     `projectIdResolver`, so `metering_context.project_id` reaches the warm-pool
- *     key (`build-llm-call-substrate.ts` fallback → `pool.ts poolKeyFor`), and a
- *     turn keyed `(cc-agent-<handle>, owner, <project>)` IS the owner's chat
- *     session for that project. This loop composes exactly the same way.
+ *     land on a WARM, PROJECT-SCOPED REPL: `metering_context.project_id` reaches
+ *     the warm-pool key (`build-llm-call-substrate.ts:931-932` fallback →
+ *     `pool.ts poolKeyFor`), so one child is resolved per project. This loop
+ *     composes exactly the same way, through the same seam.
+ *
+ * WHICH REPL THAT IS — AND IT IS NOT THE OWNER'S CHAT SESSION. This docblock said
+ * for a long time that the composed turn lands on `(cc-agent-<handle>, owner,
+ * <project>)`, i.e. ON the owner's project chat session. That stopped being true
+ * when the background lane was split off: both callers of `buildSubstrateReminderLlm`
+ * compose on `cc-nudge-<handle>` (`open/wiring/substrates.ts:456-488`, and the
+ * composer says so at `open/composer.ts:6687-6694`), which exists precisely so an
+ * aborted background compose cannot evict the child the owner is talking to
+ * (`open/wiring/substrates.ts:389-408`). The sentence survived the split and was
+ * then cited — in ISSUES #1085 — as the reason an instance that loses its project
+ * REPL loses its unattended path. It is not: this loop resolves its own child from
+ * its own substrate and never touches `cc-agent-*`. A stale docblock that explains
+ * an outage it cannot cause is worse than no docblock, so it is corrected here
+ * rather than softened.
+ *
+ * WHAT A MISSING PRECONDITION MUST LOOK LIKE (#1085). "Nothing to do" and "cannot
+ * do anything" must never share a signal. Before `readiness` existed the composer
+ * answered a null compose substrate by returning an EMPTY project list
+ * (`open/composer.ts`, `listOutstanding`), every counter came back zero, and the
+ * tick's summary line is guarded on a non-zero counter — so an instance with no
+ * model credential at all emitted exactly as many bytes per tick as an instance
+ * with an empty board: none. That is the defect class of ISSUES #1053 (a settled
+ * driver and a hung one byte-identical) and #1071 (a 401 rendered as a bare null).
+ * The precondition is now ASKED FIRST, named when it fails, counted in
+ * `WakeupSweepResult.unavailable`, and printed every tick it holds.
  *
  * WHAT COUNTS AS "A SESSION WITH WORK OUTSTANDING" — the Work Board, nothing
  * new: an item with `status='in_progress'` whose `linked_run_id` is absent or no
@@ -133,6 +157,36 @@ export const WAKEUP_BLOCKED_PREFIX = 'BLOCKED:'
  */
 export const WAKEUP_DEFERRAL_LOG_WINDOW_MS = 30 * 60_000
 
+/**
+ * Re-log a STANDING unavailability at most this often. Same reasoning as
+ * {@link WAKEUP_DEFERRAL_LOG_WINDOW_MS}, and the same window, because it is the
+ * same reader: a precondition that has been missing for six hours should be
+ * legible at a glance from the tail without being 288 identical lines a day.
+ *
+ * THE RATE LIMIT COSTS VOLUME AND NEVER THE FACT, and that is load-bearing here in
+ * a way it is not for a deferral. `WakeupSweepResult.unavailable` is set on EVERY
+ * unavailable tick and `buildWorkWakeupLoop` prints the summary on every tick that
+ * has anything at all to say, so the tick line reports the condition even inside
+ * the window. Only the reason string is rate-limited.
+ */
+export const WAKEUP_UNAVAILABLE_LOG_WINDOW_MS = 30 * 60_000
+
+/**
+ * CAN THIS SWEEP ACT AT ALL — asked before anything is selected.
+ *
+ * Deliberately a discriminated answer rather than a boolean, and deliberately
+ * carrying a REASON. The condition it reports is "a precondition this loop depends
+ * on is absent", which is a different fact from "the board has no outstanding
+ * work", and a boolean that only said `false` would leave an operator to guess
+ * which precondition — the same collapse one level down.
+ */
+export type WakeupReadiness =
+  /** Every precondition holds; the sweep proceeds to selection. */
+  | { ready: true }
+  /** A precondition is missing. NOT a failure of a wakeup turn — no turn ran — so
+   *  no failure streak is touched and nothing is posted to the owner's chat. */
+  | { ready: false; reason: string }
+
 /** One in-progress, un-driven Work Board item. */
 export interface WakeupWorkItem {
   title: string
@@ -219,6 +273,23 @@ export interface WakeupLlm {
 }
 
 export interface WorkWakeupDeps {
+  /**
+   * IS EVERY PRECONDITION THIS LOOP DEPENDS ON PRESENT? Asked FIRST, before
+   * {@link listOutstanding}, and a `ready: false` ends the tick with the reason
+   * counted and named.
+   *
+   * IT EXISTS BECAUSE THE ALTERNATIVE WAS INDISTINGUISHABLE FROM SUCCESS (#1085).
+   * The composer used to answer "there is no background compose substrate on this
+   * instance" by returning an EMPTY project list from `listOutstanding`, which is
+   * the same value a healthy instance with an empty board returns. Every counter
+   * then came back zero and the tick's summary is guarded on a non-zero counter, so
+   * the two states emitted the same thing: nothing. An operator asking "is the
+   * unattended path alive?" had no observable that could answer.
+   *
+   * ABSENT ⇒ READY. Tests and any caller with no precondition to state pass
+   * nothing; the sweep behaves exactly as it did before this seam existed.
+   */
+  readiness?(): WakeupReadiness | Promise<WakeupReadiness>
   /** Projects with outstanding, un-driven in-progress work. Empty ⇒ no-op tick. */
   listOutstanding(): WakeupProjectWork[] | Promise<WakeupProjectWork[]>
   /**
@@ -269,6 +340,20 @@ export interface WorkWakeupDeps {
 
 /** Per-tick outcome summary (returned for tests + logged). */
 export interface WakeupSweepResult {
+  /**
+   * 1 when the tick could not run AT ALL because {@link WorkWakeupDeps.readiness}
+   * reported a missing precondition; 0 otherwise. Every other counter is then 0 by
+   * construction — nothing was selected, so nothing could be woken, deferred,
+   * released or skipped.
+   *
+   * IT IS A SEPARATE COUNTER, NOT A ZERO, and that is the entire point of #1085.
+   * "The board is empty" and "this loop cannot act" both produce an all-zero
+   * summary, so as long as the ONLY observable was those zeros the two were one
+   * signal. A counter of its own is what `buildWorkWakeupLoop` reads to decide the
+   * tick is worth printing, which is what makes "cannot do anything" audible on
+   * every tick it holds rather than on the first one only.
+   */
+  unavailable: number
   woke: number
   skipped_active: number
   failed: number
@@ -342,6 +427,31 @@ function deferralLogKey(project_key: string, d: WakeupDeferredItem): string {
 function releaseLogKey(project_key: string, run_id: string): string {
   return `\u0000release\u0000${project_key}\u0000${run_id}`
 }
+
+/**
+ * The UNAVAILABILITY log's rate-limit key, sharing the same window map.
+ *
+ * A single constant rather than a function of the reason: an unavailability is a
+ * property of the INSTANCE, not of a project or a run, and there is at most one per
+ * tick. Keying it on the reason string would let a flapping reason defeat the
+ * window, which is the thing a window is for.
+ *
+ * Disjoint from both other key spaces by construction, for the reason
+ * {@link releaseLogKey} gives: a deferral key always begins with a project key's
+ * length digit and so can never begin with a NUL, and a release key's second
+ * character is `r` where this one's is `u`.
+ *
+ * THE SWEEP'S OWN PRUNE NEVER SEES IT WHILE THE CONDITION HOLDS, deliberately. The
+ * prune runs after selection, which an unavailable tick never reaches, so the entry
+ * survives for as long as the condition does and the window holds. The first tick
+ * after RECOVERY does reach the prune, drops the key, and the next unavailability
+ * is loud immediately instead of inheriting a window from hours ago -- edge-friendly
+ * in exactly the way the deferral window is.
+ *
+ * The separator is written as an ESCAPE for the reason {@link deferralLogKey} gives:
+ * a literal NUL makes this file binary to `scripts/ci/leak-gate.sh`.
+ */
+const UNAVAILABLE_LOG_KEY = '\u0000unavailable'
 
 /** Truncate for a prompt line / a log field — bounded, marked, never thrown. */
 function bound(text: string, max: number): string {
@@ -430,12 +540,45 @@ export async function runWorkWakeupSweep(
   const grace = deps.owner_grace_ms ?? WORK_WAKEUP_OWNER_GRACE_MS
   const turn_timeout = deps.turn_timeout_ms ?? WORK_WAKEUP_TURN_TIMEOUT_MS
   const result: WakeupSweepResult = {
+    unavailable: 0,
     woke: 0,
     skipped_active: 0,
     failed: 0,
     deferred_to_run: 0,
     released_stalled_run: 0,
     skipped_agent_busy: 0,
+  }
+
+  // THE PRECONDITION IS ASKED BEFORE ANYTHING IS SELECTED, AND ITS ABSENCE IS SAID
+  // OUT LOUD (#1085).
+  //
+  // This tick does no work either way — but the two "no work" states are different
+  // facts and must not share a signal. An empty board is the system working; a
+  // missing precondition is the system unable to work, and the owner's unattended
+  // path being dead. Before this seam the composer expressed the second as the
+  // first (an empty `listOutstanding`), so both produced an all-zero summary that
+  // `buildWorkWakeupLoop` then declined to print, and an instance whose autonomy
+  // was dead looked exactly like an instance with nothing to do. That is the
+  // #1053/#1071 collapse: "is false" and "could not find out" keyed on one value.
+  //
+  // WARN, NOT ERROR, and nothing is posted to the owner's chat. No wakeup TURN
+  // failed — none was attempted — so the failure streak and its `WAKEUP_FAILURE_
+  // POST_CADENCE` buzz are untouched. A missing credential is an operator fact,
+  // and the journal is where an operator reads.
+  //
+  // The REASON is rate-limited; the COUNTER is not. `result.unavailable` is set on
+  // every unavailable tick and the loop's summary prints on any non-zero counter,
+  // so the condition is audible every five minutes while only its sentence is
+  // written half-hourly.
+  const readiness = deps.readiness === undefined ? { ready: true as const } : await deps.readiness()
+  if (!readiness.ready) {
+    result.unavailable = 1
+    const lastLoggedAt = deferralLog.get(UNAVAILABLE_LOG_KEY)
+    if (lastLoggedAt === undefined || now() - lastLoggedAt >= WAKEUP_UNAVAILABLE_LOG_WINDOW_MS) {
+      deferralLog.set(UNAVAILABLE_LOG_KEY, now())
+      log.warn('wakeup_unavailable', { reason: bound(readiness.reason, 400) })
+    }
+    return result
   }
 
   const projects = await deps.listOutstanding()
@@ -674,7 +817,15 @@ export function buildWorkWakeupLoop(deps: WorkWakeupDeps): WorkWakeupLoop {
       // A fully idle tick stays SILENT: on a box with no outstanding work this
       // loop runs 288 times a day and a summary of zeros would drown the ticks
       // that mean something.
+      //
+      // AN UNAVAILABLE TICK IS NOT AN IDLE TICK (#1085), and this predicate is
+      // where that distinction becomes observable. `unavailable` is checked FIRST
+      // and listed first in the fields, because it is the only counter whose
+      // non-zero value means the loop could not act at all — every other number on
+      // such a tick is zero by construction, which is precisely why an all-zero
+      // summary could not be allowed to stand for it.
       if (
+        result.unavailable > 0 ||
         result.woke > 0 ||
         result.failed > 0 ||
         result.deferred_to_run > 0 ||
@@ -683,6 +834,7 @@ export function buildWorkWakeupLoop(deps: WorkWakeupDeps): WorkWakeupLoop {
         result.skipped_agent_busy > 0
       ) {
         log.info('wakeup_sweep', {
+          unavailable: result.unavailable,
           woke: result.woke,
           failed: result.failed,
           deferred_to_run: result.deferred_to_run,
