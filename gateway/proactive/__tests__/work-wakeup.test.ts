@@ -1,6 +1,7 @@
 import { describe, expect, test } from 'bun:test'
 
 import type { AgentSpec } from '@neutronai/runtime/substrate.ts'
+import { SubstrateCallError } from '@neutronai/runtime/errors.ts'
 import { resetLoggerStateForTests } from '@neutronai/logger'
 import {
   buildWakeupPrompt,
@@ -109,7 +110,7 @@ interface Harness {
 function harness(over: {
   projects?: WakeupProjectWork[]
   reply?: string | (() => string)
-  composeError?: string
+  composeError?: string | Error | (() => Error | undefined)
   activity?: number | null
   agentBusy?: (chat_scope: string) => boolean
   readiness?: () => WakeupReadiness
@@ -129,7 +130,8 @@ function harness(over: {
     llm: {
       compose: async (spec) => {
         specs.push(spec)
-        if (over.composeError !== undefined) throw new Error(over.composeError)
+        const failure = typeof over.composeError === 'function' ? over.composeError() : over.composeError
+        if (failure !== undefined) throw typeof failure === 'string' ? new Error(failure) : failure
         const r = over.reply ?? 'Pushed the fix branch; next: green CI.'
         return typeof r === 'function' ? r() : r
       },
@@ -232,6 +234,26 @@ describe('runWorkWakeupSweep — the wake path', () => {
     expect(dead.posts).toHaveLength(1)
     expect(dead.posts[0]!.loud).toBe(true)
     expect(dead.posts[0]!.body).toContain('attempt 1')
+  })
+
+  test('a vanished pane retries once on a fresh pool resolution without incrementing the failure streak', async () => {
+    let calls = 0
+    const h = harness({
+      composeError: () => {
+        calls += 1
+        return calls === 1
+          ? new SubstrateCallError('cc-llm-call: persistent-repl: pane vanished during turn', {
+              code: 'pane_vanished', retryable: true,
+            })
+          : undefined
+      },
+    })
+    const streaks = new Map<string, number>()
+    const result = await runWorkWakeupSweep(h.deps, streaks)
+    expect(h.specs).toHaveLength(2)
+    expect(result.woke).toBe(1)
+    expect(result.failed).toBe(0)
+    expect(streaks.size).toBe(0)
   })
 
   test('the gate is asked about the CHAT SCOPE — the warm-pool key, not the board key', async () => {

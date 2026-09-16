@@ -120,6 +120,14 @@ export const SUBSTRATE_ERROR_CODES: Readonly<Record<SubstrateErrorClass, Substra
     retryable: true,
     description: 'A warm REPL failed to settle a turn in time — the credential is fine.',
   },
+  compose_timeout: {
+    retryable: true,
+    description: 'The caller\'s wall-clock composition budget elapsed; retry on a fresh turn.',
+  },
+  pane_vanished: {
+    retryable: true,
+    description: 'The terminal pane positively disappeared while a turn was in flight; retry on a fresh child.',
+  },
   auth_invalid: {
     retryable: false,
     description:

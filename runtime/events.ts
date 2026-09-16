@@ -64,6 +64,8 @@ export type SubstrateErrorClass =
   | 'binary_not_found'
   | 'channel_wedged'
   | 'turn_timeout'
+  | 'compose_timeout'
+  | 'pane_vanished'
   | 'auth_invalid'
   | 'http_status'
   | 'rate_limited'

@@ -174,6 +174,13 @@ import type { PersistentReplSubstrateOptions } from './types.ts'
  * next turn. Generous on purpose — it is a pathology detector, not a latency budget.
  */
 export const BOOT_ADOPTION_BUDGET_MS = 45_000
+/** Maximum time an attached pane gets to yield one readable baseline screen. */
+export const BOOT_ADOPTION_BASELINE_MS = 5_000
+
+/** The publication decision, named so the refusal remains independently testable. */
+export function baselineAllowsAdoption(observed: boolean): boolean {
+  return observed
+}
 
 /** What the pass decided about one registry row. */
 export type RowAdoptionOutcome =
@@ -205,6 +212,8 @@ export interface BootAdoptionDeps {
   host?: unknown
   /** `/health` probe. Defaults to the real one. */
   health?: (port: number, opts: { expectedSessionId?: string; timeoutMs?: number }) => Promise<boolean>
+  /** Bound for proving the attached pane can actually be observed. */
+  baselineMs?: number
   /** The pid-table fallback for a pane the host could not speak for. */
   orphanDeps?: (record: ReplRegistryRecord, claudeBasename: string) => OrphanAdoptionDeps
   /** The whole-machine process listing behind {@link scanTranscriptOwners}. Defaults
@@ -2607,6 +2616,10 @@ async function adoptRow(
   const claimTakenAt = (deps.now ?? Date.now)()
 
   let primed = false
+  let baselineResolve: ((observed: boolean) => void) | undefined
+  const baselineObserved = new Promise<boolean>((resolve) => {
+    baselineResolve = resolve
+  })
   /** Set only when the durable claim has succeeded — the gate the ordering invariant names.
    *  Everything that can READ the pane or WRITE to it is behind this. */
   let claimConfirmed = false
@@ -2635,6 +2648,8 @@ async function adoptRow(
               (silenced.length > 0 ? ` [${silenced.join(', ')}]` : '') +
               ' — they cannot fire until they fall and rise again',
           )
+          baselineResolve?.(true)
+          baselineResolve = undefined
           // FALLS THROUGH TO THE SCAN DELIBERATELY, and the fall-through is provably
           // inert: `scan` fires only on a rising edge, every signature present in this
           // very screen was just latched by the line above, and both read the same
@@ -2814,6 +2829,24 @@ async function adoptRow(
           `wiring the adopted session failed after the claim: ${e instanceof Error ? e.message : String(e)}`,
           child,
         )
+      }
+      // ATTACHED IS NOT OBSERVABLE. `attach()` proves only that a wrapper could be
+      // constructed; adoption requires one real screen to reach the detector baseline.
+      // A pane that vanishes or never yields a readable screen is closed and cleared so
+      // the waiting dispatch can cold-resume instead of publishing a blind session.
+      if (!primed) {
+        let baselineTimer: ReturnType<typeof setTimeout> | undefined
+        const observed = await Promise.race([
+          baselineObserved,
+          child.exited.then(() => false),
+          new Promise<false>((resolve) => {
+            baselineTimer = setTimeout(() => resolve(false), deps.baselineMs ?? BOOT_ADOPTION_BASELINE_MS)
+          }),
+        ])
+        if (baselineTimer !== undefined) clearTimeout(baselineTimer)
+        if (!baselineAllowsAdoption(observed)) {
+          return await unwind('the attached pane yielded no observable baseline screen', child)
+        }
       }
       // PUBLISHED, AND THE SESSION REMEMBERS WHAT IT WAS PUBLISHED AS (r55) — the promise its
       // teardown will compare the map against.

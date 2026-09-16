@@ -98,6 +98,7 @@
 import type { RunDrivingReason } from '@neutronai/trident/run-driving.ts'
 import type { AgentSpec } from '@neutronai/runtime/substrate.ts'
 import type { ToolDef } from '@neutronai/cores-sdk/manifest'
+import { SubstrateCallError } from '@neutronai/runtime/errors.ts'
 import { SupervisedLoop, type LoopDescriptor } from '@neutronai/loop'
 import { createLogger } from '@neutronai/logger'
 
@@ -357,6 +358,9 @@ export interface WakeupSweepResult {
   woke: number
   skipped_active: number
   failed: number
+  /** Typed failure counts for the operator summary. Non-enumerable on the returned
+   * object so the longstanding counter-only object contract stays additive. */
+  readonly failed_by_reason?: Record<string, number>
   /** Items left to a live run this tick (one `wakeup_deferred_to_live_run` each). */
   deferred_to_run: number
   /**
@@ -539,7 +543,7 @@ export async function runWorkWakeupSweep(
   const now = deps.now ?? ((): number => Date.now())
   const grace = deps.owner_grace_ms ?? WORK_WAKEUP_OWNER_GRACE_MS
   const turn_timeout = deps.turn_timeout_ms ?? WORK_WAKEUP_TURN_TIMEOUT_MS
-  const result: WakeupSweepResult = {
+  const result = {
     unavailable: 0,
     woke: 0,
     skipped_active: 0,
@@ -547,7 +551,9 @@ export async function runWorkWakeupSweep(
     deferred_to_run: 0,
     released_stalled_run: 0,
     skipped_agent_busy: 0,
-  }
+  } as WakeupSweepResult
+  const failedByReason: Record<string, number> = {}
+  Object.defineProperty(result, 'failed_by_reason', { value: failedByReason, enumerable: false })
 
   // THE PRECONDITION IS ASKED BEFORE ANYTHING IS SELECTED, AND ITS ABSENCE IS SAID
   // OUT LOUD (#1085).
@@ -734,10 +740,24 @@ export async function runWorkWakeupSweep(
 
     let reply: string
     try {
-      reply = (await deps.llm.compose(spec, { timeout_ms: turn_timeout })).trim()
+      try {
+        reply = (await deps.llm.compose(spec, { timeout_ms: turn_timeout })).trim()
+      } catch (firstErr) {
+        // A vanished pane is already gone and its exit path evicts the dead pool
+        // entry. Retry this wakeup once now so it resolves a fresh child instead of
+        // converting a recoverable container loss into a failure streak.
+        if (firstErr instanceof SubstrateCallError && firstErr.code === 'pane_vanished') {
+          log.warn('wakeup_retry_fresh_pane', { project: project.project_key })
+          reply = (await deps.llm.compose(spec, { timeout_ms: turn_timeout })).trim()
+        } else {
+          throw firstErr
+        }
+      }
       if (reply.length === 0) throw new Error('the wakeup turn returned an empty reply')
     } catch (err) {
       const reason = err instanceof Error ? err.message : String(err)
+      const reasonCode = err instanceof SubstrateCallError ? err.code : 'unknown'
+      failedByReason[reasonCode] = (failedByReason[reasonCode] ?? 0) + 1
       const streak = (failureStreaks.get(project.project_key) ?? 0) + 1
       failureStreaks.set(project.project_key, streak)
       result.failed += 1
@@ -837,6 +857,9 @@ export function buildWorkWakeupLoop(deps: WorkWakeupDeps): WorkWakeupLoop {
           unavailable: result.unavailable,
           woke: result.woke,
           failed: result.failed,
+          failed_by_reason: Object.entries(result.failed_by_reason ?? {})
+            .map(([reason, count]) => `${reason}:${count}`)
+            .join(',') || 'none',
           deferred_to_run: result.deferred_to_run,
           released_stalled_run: result.released_stalled_run,
           skipped_owner_active: result.skipped_active,
