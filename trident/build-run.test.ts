@@ -138,7 +138,13 @@ test('placement is resolved for every role at admission and dispatch', async () 
   expect(placements).toEqual(['plan:in-repl', 'build:in-repl', 'review:headless', 'fix:in-repl', 'plan:in-repl', 'build:in-repl', 'review:headless'])
 })
 
-for (const [field, value] of [['head', 'b'.repeat(40)], ['diff', 'invented'], ['pr', { number: 2, head: 'fake', state: 'OPEN' }]] as const) {
+// `diff` is NOT in this list, and its absence is the point. The head pins the exact
+// commit, so with the host's own base the diff is DETERMINED — a "lying" diff cannot
+// describe a different revision, only different git output formatting, and the host
+// discards the worker's copy anyway (`snapshot = measured`). The case below covers
+// what that previously cost. `head` and `pr` remain claims a trailer really can lie
+// about: `pr` is a statement about the world the head does not determine.
+for (const [field, value] of [['head', 'b'.repeat(40)], ['pr', { number: 2, head: 'fake', state: 'OPEN' }]] as const) {
   test(`lying ${field} trailer is caught before review`, async () => {
     const f = fixture()
     f.outcomes.set('run:build:0', f.completed({ ...f.snapshot, [field]: value }))
@@ -148,6 +154,42 @@ for (const [field, value] of [['head', 'b'.repeat(40)], ['diff', 'invented'], ['
     expect(f.reads()).toBe(3)
   })
 }
+
+// A WORKER'S DIFF THAT DIFFERS ONLY IN FORMATTING MUST NOT STOP THE BUILD.
+//
+// This is the fifth acceptance dispatch's stop, reproduced. The host measures with
+// `--binary --no-ext-diff --no-textconv --full-index`; the brief never stated that
+// invocation, so the worker ran a plain `git diff` and returned an abbreviated
+// `index 00000000..3936b410` where the host had the full 40-hex pair. Run 5a69ae54:
+// 9505 bytes against the host's 9719, first difference at byte 180, in the index
+// line and nowhere else. Same commit, same content, different text — and the run
+// stopped with "Worker trailer disagrees with host measurement".
+//
+// The abbreviation below is the real shape, not a token edit: if the check ever
+// returns to comparing bytes, this goes red again.
+test('a worker diff abbreviated by git formatting still corroborates the measured head', async () => {
+  const f = fixture()
+  // The HOST's diff, in the shape `--full-index` actually produces.
+  const full = 'diff --git a/x.md b/x.md\n'
+    + 'new file mode 100644\n'
+    + `index ${'0'.repeat(40)}..${'3936b4107891673bd63e5938591a2b4c7d8e9f01'}\n`
+    + '--- /dev/null\n+++ b/x.md\n@@ -0,0 +1 @@\n+built\n'
+  f.snapshot.diff = full
+  // What a worker running a plain `git diff` returns instead: same commit, same
+  // content, abbreviated index hashes.
+  const abbreviated = full.replace(/index ([0-9a-f]{40})\.\.([0-9a-f]{40})/g,
+    (_m, a: string, b: string) => `index ${a.slice(0, 8)}..${b.slice(0, 8)}`)
+  // The regex must actually have bitten — otherwise this test asserts that an
+  // IDENTICAL diff corroborates, which is true of the old behaviour too and proves
+  // nothing. The fixture's default diff ('+built\n') has no index line at all, and
+  // that is exactly how this case was tautological on its first draft.
+  expect(abbreviated).not.toBe(full)
+  expect(abbreviated).toContain(`index ${'0'.repeat(8)}..3936b410\n`)
+  f.outcomes.set('run:build:0', f.completed({ ...f.snapshot, diff: abbreviated }))
+  const result = await f.run()
+  expect(result).not.toMatchObject({ cause: 'built-head-unverified' })
+  expect(f.events).toContain('publish')
+})
 for (const result of [null, {}, { head: 'a'.repeat(40), diff: '+built\n' }]) {
   test(`malformed trailer ${JSON.stringify(result)} is refused`, async () => {
     const f = fixture()

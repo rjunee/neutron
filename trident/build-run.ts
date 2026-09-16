@@ -147,12 +147,42 @@ function samePr(a: BuildSnapshot['pr'], b: BuildSnapshot['pr']): boolean {
   return a === null ? b === null : b !== null && a.number === b.number && a.head === b.head && a.state === b.state
 }
 
-/** A trailer is untrusted even when a harness says the turn completed. */
+/** Two HOST measurements describe the same revision. Both sides come from the same
+ *  `readDiff`, so comparing the diff bytes is exact and free, and it is the point:
+ *  these are the drift checks that catch the branch moving under a gate. */
 function corroborates(value: unknown, measured: BuildSnapshot): value is BuildSnapshot & { payload?: unknown } {
   if (typeof value !== 'object' || value === null) return false
   const claim = value as Partial<BuildSnapshot>
   return claim.head === measured.head && claim.diff === measured.diff
     && claim.pr !== undefined && samePr(claim.pr, measured.pr)
+}
+
+/**
+ * A WORKER'S trailer agrees with the host measurement. A trailer is untrusted even
+ * when a harness says the turn completed, so this still checks it — but on what the
+ * worker can actually be held to.
+ *
+ * NOT THE DIFF BYTES. This used to reuse `corroborates`, which demanded the worker
+ * reproduce the host's diff byte for byte. The host produces it with
+ * `--binary --no-ext-diff --no-textconv --full-index` and the brief never stated
+ * that invocation, so a worker running a plain `git diff` returned an abbreviated
+ * `index 00000000..3936b410` where the host had the full 40-hex pair — semantically
+ * identical, textually different, and the run stopped with "Worker trailer disagrees
+ * with host measurement". Measured on acceptance run 5a69ae54: 9505 bytes against the
+ * host's 9719, first difference at byte 180, in the index line and nowhere else.
+ *
+ * Dropping it loses no safety, because `head` pins the exact commit: with the same
+ * head and the host's own base, the diff is DETERMINED, so the only thing the byte
+ * comparison could ever detect is git's output formatting. And the worker's diff is
+ * discarded regardless — `snapshot = measured` below keeps the host's, and only
+ * `result.payload` travels on. The gate rejected a value it then threw away.
+ *
+ * `pr` stays: it is a claim about the world that the head does not determine.
+ */
+function claimMatches(value: unknown, measured: BuildSnapshot): value is BuildSnapshot & { payload?: unknown } {
+  if (typeof value !== 'object' || value === null) return false
+  const claim = value as Partial<BuildSnapshot>
+  return claim.head === measured.head && claim.pr !== undefined && samePr(claim.pr, measured.pr)
 }
 
 const fullOid = (head: string | null): head is string => typeof head === 'string' && /^(?:[a-f0-9]{40}|[a-f0-9]{64})$/i.test(head)
@@ -355,7 +385,7 @@ export async function buildRun(input: BuildRunInput, deps: BuildRunDeps, signal:
         if (claim.kind === 'blocked') return { stop: failed(claim.on, 'built-head-unverified') }
         result = { ...result, head: measured.head }
       }
-      if (!corroborates(result, measured)) return { stop: failed('Worker trailer disagrees with host measurement', 'built-head-unverified') }
+      if (!claimMatches(result, measured)) return { stop: failed('Worker trailer disagrees with host measurement', 'built-head-unverified') }
       // Read-only review must describe exactly the revision sent to the panel.
       if (role === 'review' && (measured.head !== snapshot.head || measured.diff !== snapshot.diff || !samePr(measured.pr, snapshot.pr))) {
         return { stop: blocked('Reviewed revision changed during review') }
