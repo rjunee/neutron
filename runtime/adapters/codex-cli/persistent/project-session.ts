@@ -7,6 +7,7 @@ import type {
   PtyChild,
   PtySpawnOpts,
 } from '../../claude-code/persistent/pty-host.ts'
+import { detectCodexScreenPrompt, type CodexScreenPrompt } from './screen-prompts.ts'
 
 export type CodexSessionRecovery = 'started' | 'adopted' | 'restarted-after-loss'
 
@@ -110,10 +111,26 @@ export class CodexProjectSession {
     paneHandle: string,
     recovery: CodexSessionRecovery,
     private readonly child: PtyChild,
+    private readonly readScreenPrompt: () => CodexScreenPrompt | undefined = () => undefined,
   ) {
     this.projectId = projectId
     this.paneHandle = paneHandle
     this.recovery = recovery
+  }
+
+  /** The interactive prompt visible on the latest rendered screen, if recognised. */
+  screenPrompt(): CodexScreenPrompt | undefined {
+    return this.readScreenPrompt()
+  }
+
+  /** Answer the currently rendered approval through the acknowledged input path. */
+  async answerApproval(decision: 'allow' | 'deny'): Promise<void> {
+    const prompt = this.readScreenPrompt()
+    if (prompt === undefined) throw new Error('codex project session approval unknown: no recognised prompt is visible')
+    if (prompt.kind !== 'approval') {
+      throw new Error('codex project session refused: the visible prompt is not an approval')
+    }
+    await this.submitLine(decision === 'allow' ? prompt.allowKey : prompt.denyKey)
   }
 
   /** Resolves after the host acknowledges both text delivery and Enter. */
@@ -182,11 +199,12 @@ export class CodexProjectSessionHost {
     try { identity = resolveIdentity(argv, options) } catch {
       throw new Error('codex project session refused: launch identity cannot be resolved')
     }
+    let screenPrompt: CodexScreenPrompt | undefined
     const spawnOptions: PtySpawnOpts = {
       cwd: options.cwd,
       env: options.env,
       label: `neutron-codex-${options.projectId}`,
-      onScreen: () => {},
+      onScreen: (screen) => { screenPrompt = detectCodexScreenPrompt(screen) },
     }
     const registry = readRegistry(this.options.registryPath)
     const recorded = registry.sessions[options.projectId]
@@ -227,6 +245,6 @@ export class CodexProjectSessionHost {
     }
     writeRegistry(this.options.registryPath, registry)
     child.beginOutput?.()
-    return new CodexProjectSession(options.projectId, paneHandle, recovery, child)
+    return new CodexProjectSession(options.projectId, paneHandle, recovery, child, () => screenPrompt)
   }
 }

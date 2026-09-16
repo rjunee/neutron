@@ -31,6 +31,7 @@ class FakeHost implements AdoptableHost {
   kills = 0
   exitedFlag = false
   holds: Array<ReturnType<typeof deferred>> = []
+  onScreen: ((screen: string) => void) | undefined
   child = this.makeChild('pane-1')
 
   private makeChild(handle: string): PtyChild {
@@ -54,12 +55,14 @@ class FakeHost implements AdoptableHost {
     }
   }
 
-  async spawn(argv: string[], _options: PtySpawnOpts): Promise<PtyChild> {
+  async spawn(argv: string[], options: PtySpawnOpts): Promise<PtyChild> {
     this.spawned.push(argv)
+    this.onScreen = options.onScreen
     return this.child
   }
-  async attach(handle: string, _options: PtySpawnOpts): Promise<PtyChild> {
+  async attach(handle: string, options: PtySpawnOpts): Promise<PtyChild> {
     this.attached.push(handle)
+    this.onScreen = options.onScreen
     return this.child
   }
   async inspectHandle(_handle: string): Promise<HandleInspection> { return this.inspection }
@@ -279,6 +282,61 @@ describe('CodexProjectSessionHost', () => {
     await Promise.all([a, b])
     expect(f.host.submissions).toEqual(['\x1b[200~first\x1b[201~', '\x1b[200~second\x1b[201~'])
     expect(f.host.maxActive).toBe(1)
+  })
+
+  test.each([
+    ['allow', '1'],
+    ['deny', '3'],
+  ] as const)('detects a rendered command approval and answers %s', async (decision, key) => {
+    const f = fixture()
+    const session = await f.sessionHost.open(f.open)
+    f.host.onScreen?.([
+      'Would you like to run the following command?',
+      '❯ 1. Yes, proceed',
+      "  2. Yes, and don't ask again for this command in this session",
+      '  3. No, and tell Codex what to do differently',
+      'Esc to cancel · Tab to amend',
+    ].join('\n'))
+
+    expect(session.screenPrompt()).toEqual({ kind: 'approval', allowKey: '1', denyKey: '3' })
+    await session.answerApproval(decision)
+    expect(f.host.submissions).toEqual([key])
+  })
+
+  test('recognises the first-run trust dialog as distinct from an approval', async () => {
+    const f = fixture()
+    const session = await f.sessionHost.open(f.open)
+    f.host.onScreen?.([
+      'Do you trust the contents of this directory?',
+      'Working with untrusted contents comes with higher risk of prompt injection.',
+      '❯ 1. Yes, continue',
+      '  2. No, exit',
+      'Press enter to continue',
+    ].join('\n'))
+
+    expect(session.screenPrompt()).toEqual({ kind: 'trust', continueKey: '1' })
+    await expect(session.answerApproval('allow')).rejects.toThrow(/not an approval/)
+    expect(f.host.submissions).toEqual([])
+  })
+
+  test('clears a detected approval when a later rendered screen no longer carries it', async () => {
+    const f = fixture()
+    const session = await f.sessionHost.open(f.open)
+    f.host.onScreen?.('Would you like to make the following edits?\n❯ 1. Yes, proceed\n  2. No, continue without it')
+    expect(session.screenPrompt()?.kind).toBe('approval')
+    f.host.onScreen?.('Working (10s • esc to interrupt)')
+    expect(session.screenPrompt()).toBeUndefined()
+    await expect(session.answerApproval('deny')).rejects.toThrow(/unknown/)
+  })
+
+  test.each([
+    ['options without an approval title', '❯ 1. Yes, proceed\n  2. No, continue without it'],
+    ['an approval title without a deny choice', 'Would you like to run the following command?\n❯ 1. Yes, proceed'],
+  ])('does not classify %s as an actionable approval', async (_label, screen) => {
+    const f = fixture()
+    const session = await f.sessionHost.open(f.open)
+    f.host.onScreen?.(screen)
+    expect(session.screenPrompt()).toBeUndefined()
   })
 
   test('refuses a host that cannot acknowledge a line', async () => {
