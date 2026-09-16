@@ -488,7 +488,10 @@ test('the full-suite command parses from the real generator, knob and plain shap
       return host(argv, cwd, env, timeoutMs)
     }
     const report = (await options.policy.reviewSuite!.readCheckpoint({ head, diff: '', pr: null }, 1))?.report
-    expect({ label, report }).toEqual({ label, report: { hostExitCode: 0, suiteOutcome: undefined, suiteEvidence: undefined } })
+    // Exactly the host receipt and nothing else: the spread in `readCheckpoint`
+    // omits absent keys, so an equality here also pins that no untrusted worker
+    // field crept into the report.
+    expect({ label, report }).toEqual({ label, report: { hostExitCode: 0 } })
     expect(seen).toHaveLength(1)
     // The knob case must carry its export line through: dropping it silently unsets
     // the job budget the knob render exists to deliver.
