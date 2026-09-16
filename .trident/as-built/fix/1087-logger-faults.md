@@ -12,9 +12,22 @@ A rejected logger promise is **neutralized, not observed.** `neutralizeAbandoned
 
 ### Decisions and continuous invariant
 
-I chose one factory-bound runtime wrapper over narrowing the type. TypeScript permits an async function where a void-returning callback is expected, and JavaScript callers have no static contract, so runtime containment is required. A single wrapper protects every logger use **of the registration service**; those call sites were enumerated with `rg -n "\\blog\\(" reminders/ritual-registration.ts` — lines 793, 798, 886, 962, 999, 1007, 1031, 1065, 1068, 1223, 1233 and 1240 — all bound to the wrapper at lines 425-433.
+I chose one factory-bound runtime wrapper over narrowing the type. TypeScript permits an async function where a void-returning callback is expected, and JavaScript callers have no static contract, so runtime containment is required. A single wrapper protects every logger use **of the registration service**. The
+enumeration — `rg -n "\\blog\\(" reminders/ritual-registration.ts` — returns twelve
+call sites, and they do NOT all belong to the same logger. Split by whether they
+fall inside `loadPersistedRitualDefs`, which begins at `reminders/ritual-registration.ts:1210`:
 
-**Scope limit, stated rather than implied:** this is not every injected logger in the file. A second, separately injected `log?: (msg: string) => void` remains at `reminders/ritual-registration.ts:1213` and does **not** pass through this wrapper, so an async logger injected there is still uncontained. Sibling modules carry the same unnarrowed shape — `reminders/context.ts:34`, `reminders/dispatcher.ts:325`, `reminders/bundled-rituals.ts:154`, `reminders/bundled-ritual-enable.ts:138` — and are untouched by this change. Containing them is the same edit repeated and belongs in its own change; claiming them here would be the false-coverage failure this record exists to avoid.
+| logger | call sites | contained? |
+|---|---|---|
+| the service's, bound to the wrapper at `:425-433` | 793, 798, 886, 962, 999, 1007, 1031, 1065, 1068 | yes |
+| `loadPersistedRitualDefs`'s own `opts.log`, defaulted at `:1215` | 1223, 1233, 1240 | **no** |
+
+An earlier revision of this record listed all twelve as bound to the wrapper
+while also stating that the loader's logger is independent — a record that
+contradicted itself within two paragraphs. The table is here rather than prose
+because that is the shape that failure keeps taking.
+
+**Scope limit, stated rather than implied:** this is not every injected logger in the file. `loadPersistedRitualDefs` takes its own `log?: (msg: string) => void` (`reminders/ritual-registration.ts:1213`), defaults it at `:1215`, and calls it at the three sites in the table above without passing through this wrapper — so an async logger injected there is still uncontained, and a throwing one still escapes. Sibling modules carry the same unnarrowed shape — `reminders/context.ts:34`, `reminders/dispatcher.ts:325`, `reminders/bundled-rituals.ts:154`, `reminders/bundled-ritual-enable.ts:138` — and are untouched by this change. Containing them is the same edit repeated and belongs in its own change; claiming them here would be the false-coverage failure this record exists to avoid.
 
 The wrapper at `reminders/ritual-registration.ts:425-433` continuously maintains the invariant and does not depend on the failing callback remaining operational. No new error, verdict, state, or refusal is introduced, so no outcome taxonomy changes: the existing approval lifecycle still receives `null` from the render callback (`reminders/ritual-registration.ts:786-794`), and the tests observe the malformed approval as `expired` (`reminders/ritual-registration.test.ts:1196-1199`, `reminders/ritual-registration.test.ts:1216-1220`).
 
