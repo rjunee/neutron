@@ -32,6 +32,7 @@ import { seedMigratedDb } from '../tests/support/migrated-db.ts'
 import { ProjectDb } from '@neutronai/persistence/index.ts'
 import { SubagentRegistry } from '@neutronai/runtime/subagent/registry.ts'
 import { ApprovalManager, type ApprovalNotifier } from '@neutronai/tools/approval.ts'
+import { fireAndForgetRejectionCount, resetFireAndForgetCountForTests } from '@neutronai/logger/fire-and-forget.ts'
 
 import { ReminderStore, type Reminder } from './store.ts'
 import { createRitualRegistry, GATED_WRITE_TOOLS, RITUAL_TIMEOUT_MS } from './rituals.ts'
@@ -70,6 +71,7 @@ import {
   registerBundledRituals,
   seedBundledRituals,
 } from './bundled-rituals.ts'
+import { enableBundledRitualsAtBoot } from './bundled-ritual-enable.ts'
 
 let tmp: string
 let db: ProjectDb
@@ -274,6 +276,32 @@ describe('seedBundledRituals — copy-if-absent + idempotent + never-clobber', (
     expect(seeded).toEqual([])
     expect(kept).toContain('morning-brief')
     expect(readFileSync(join(ritualsDir, 'morning-brief.md'), 'utf8')).toBe('OWNER EDIT')
+  })
+
+  test('a rejected seed logger is recorded without changing the boot-safe result', async () => {
+    resetFireAndForgetCountForTests()
+    const blocked = join(ritualsDir, 'file')
+    writeFileSync(blocked, 'not a directory')
+    expect(seedBundledRituals({ rituals_dir: join(blocked, 'child'), log: async () => { throw new Error('offline') } }))
+      .toEqual({ seeded: [], kept: [] })
+    await new Promise((resolve) => setTimeout(resolve, 0))
+    expect(fireAndForgetRejectionCount()).toBe(1)
+  })
+
+  test('a rejected boot-enable logger is recorded without changing deferral', async () => {
+    resetFireAndForgetCountForTests()
+    const registry = createRitualRegistry({ rituals_dir: ritualsDir })
+    const result = await enableBundledRitualsAtBoot({
+      service: { enable: async () => { throw new Error('unreached') }, reapprove: async () => { throw new Error('unreached') }, status: () => [] },
+      registry,
+      rituals_dir: ritualsDir,
+      time_zone: 'UTC',
+      is_onboarding_active: async () => true,
+      log: async () => { throw new Error('offline') },
+    })
+    await new Promise((resolve) => setTimeout(resolve, 0))
+    expect(result.deferred_onboarding).toBe(true)
+    expect(fireAndForgetRejectionCount()).toBe(1)
   })
 })
 

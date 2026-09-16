@@ -3,6 +3,7 @@ import { mkdirSync, mkdtempSync, rmSync, writeFileSync } from 'node:fs'
 import { tmpdir } from 'node:os'
 import { join } from 'node:path'
 
+import { fireAndForgetRejectionCount, resetFireAndForgetCountForTests } from '@neutronai/logger/fire-and-forget.ts'
 import { buildStatusMdContextSource } from './context.ts'
 import type { Reminder } from './store.ts'
 
@@ -42,6 +43,14 @@ afterEach(() => {
 })
 
 describe('buildStatusMdContextSource', () => {
+  test('a rejected diagnostic logger is recorded without changing the empty-context outcome', async () => {
+    resetFireAndForgetCountForTests()
+    const src = buildStatusMdContextSource({ owner_home, log: async () => { throw new Error('offline') } })
+    expect(src.gather(reminder(), '..')).toBe('')
+    await new Promise((resolve) => setTimeout(resolve, 0))
+    expect(fireAndForgetRejectionCount()).toBe(1)
+  })
+
   // BLOCKING fix (Argus PR #7) — the source reads the DESTINATION project's
   // STATUS.md (the project_id passed by the dispatcher), NOT the instance slug.
   test('reads the destination project STATUS.md, not the instance slug', () => {

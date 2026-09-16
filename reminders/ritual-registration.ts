@@ -47,7 +47,7 @@ import { join } from 'node:path'
 
 import type { ButtonOption } from '@neutronai/channels/button-primitive.ts'
 import { VALUE_BYTE_CAP } from '@neutronai/channels/button-primitive.ts'
-import { neutralizeAbandonedSettle } from '@neutronai/logger/fire-and-forget.ts'
+import { invokeInjectedLogger } from '@neutronai/logger/fire-and-forget.ts'
 import type { ApprovalManager } from '@neutronai/tools/approval.ts'
 
 import {
@@ -422,15 +422,8 @@ export function createRitualRegistrationService(
     approval_topic_id,
     emit,
   } = opts
-  const rawLog = opts.log ?? ((): void => undefined)
-  const log = (msg: string): void => {
-    try {
-      neutralizeAbandonedSettle(Promise.resolve(rawLog(msg)))
-    } catch {
-      // Logging is best-effort. Neither a synchronous throw nor an asynchronous
-      // rejection may replace the outcome the callback was asked to report.
-    }
-  }
+  const sink = opts.log ?? ((): void => undefined)
+  const log = (msg: string): void => invokeInjectedLogger('ritual-registration.log', sink, msg)
 
   const defJsonPath = (id: string): string => join(rituals_dir, `${id}.def.json`)
 
@@ -1210,9 +1203,10 @@ function parseRitualId(args_json: string): string | null {
 export function loadPersistedRitualDefs(opts: {
   registry: RitualRegistry
   rituals_dir: string
-  log?: (msg: string) => void
+  log?: (msg: string) => unknown
 }): { registered: string[]; skipped: string[] } {
-  const log = opts.log ?? ((): void => undefined)
+  const sink = opts.log ?? ((): void => undefined)
+  const log = (msg: string): void => invokeInjectedLogger('ritual-def-loader.log', sink, msg)
   const registered: string[] = []
   const skipped: string[] = []
   let entries: string[]

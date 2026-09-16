@@ -47,6 +47,7 @@ import {
   type RitualFirePlanner,
 } from './ritual-fire.ts'
 import { createLogger } from '@neutronai/logger'
+import { invokeInjectedLogger } from '@neutronai/logger/fire-and-forget.ts'
 import { GENERAL_RAIL_ID } from '@neutronai/wire-types/topic-id.ts'
 
 const dispatcherLog = createLogger('reminder-dispatcher')
@@ -322,7 +323,7 @@ export interface BuildReminderDispatcherInput {
    */
   resolve_ritual_model?: () => string
   now?: () => number
-  log?: (msg: string) => void
+  log?: (msg: string) => unknown
 }
 
 /**
@@ -335,7 +336,8 @@ export function buildReminderDispatcher(input: BuildReminderDispatcherInput): Re
   const max_tokens = input.max_tokens ?? DEFAULT_MAX_TOKENS
   const general_topic_id = input.general_topic_id ?? 'general'
   const now = input.now ?? ((): number => Date.now())
-  const log = input.log ?? ((msg: string): void => dispatcherLog.debug(msg))
+  const sink = input.log ?? ((msg: string): void => dispatcherLog.debug(msg))
+  const log = (msg: string): void => invokeInjectedLogger('reminder-dispatcher.log', sink, msg)
   const toolNames = input.tool_names ?? DEFAULT_TOOL_NAMES
   const ritual_planner = input.ritual_planner
   const resolveRitualModel = input.resolve_ritual_model ?? ((): string => model)

@@ -66,6 +66,8 @@
 import { existsSync } from 'node:fs'
 import { join } from 'node:path'
 
+import { invokeInjectedLogger } from '@neutronai/logger/fire-and-forget.ts'
+
 import { nextCronFireFromExpression } from '@neutronai/cron'
 
 import { BUNDLED_RITUAL_DEFS } from './bundled-rituals.ts'
@@ -135,7 +137,7 @@ export interface EnableBundledRitualsInput {
   /** Clock seam (epoch ms). Defaults to `Date.now`. */
   now?: () => number
   /** Structured-log sink. Never throws out of the sweep. */
-  log?: (msg: string) => void
+  log?: (msg: string) => unknown
 }
 
 /**
@@ -149,7 +151,8 @@ export async function enableBundledRitualsAtBoot(
 ): Promise<EnableBundledRitualsResult> {
   const { service, registry, rituals_dir, time_zone } = input
   const now = input.now ?? ((): number => Date.now())
-  const log = input.log ?? ((): void => undefined)
+  const sink = input.log ?? ((): void => undefined)
+  const log = (msg: string): void => invokeInjectedLogger('bundled-ritual-enable.log', sink, msg)
   const result: EnableBundledRitualsResult = {
     enabled: [],
     already_enabled: [],

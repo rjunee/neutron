@@ -18,6 +18,7 @@ import { join, resolve, sep } from 'node:path'
 
 import { sanitizeProjectId } from '@neutronai/channels/adapters/app-ws/envelope.ts'
 import { createLogger } from '@neutronai/logger'
+import { invokeInjectedLogger } from '@neutronai/logger/fire-and-forget.ts'
 import type { ReminderContextSource } from './dispatcher.ts'
 import type { Reminder } from './store.ts'
 
@@ -31,7 +32,7 @@ export interface BuildStatusMdContextSourceInput {
   owner_home: string
   /** Override the per-char cap (tests). */
   char_cap?: number
-  log?: (msg: string) => void
+  log?: (msg: string) => unknown
 }
 
 /**
@@ -54,7 +55,8 @@ export function buildStatusMdContextSource(
 ): ReminderContextSource {
   const cap = input.char_cap ?? STATUS_MD_CHAR_CAP
   const projectsRoot = resolve(input.owner_home, 'Projects')
-  const log = input.log ?? ((msg: string): void => contextLog.debug(msg))
+  const sink = input.log ?? ((msg: string): void => contextLog.debug(msg))
+  const log = (msg: string): void => invokeInjectedLogger('reminder-context.log', sink, msg)
   return {
     gather(_reminder: Reminder, project_id: string): string {
       const safe = sanitizeProjectId(project_id)

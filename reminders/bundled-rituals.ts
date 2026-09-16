@@ -50,6 +50,8 @@ import { copyFileSync, existsSync, mkdirSync } from 'node:fs'
 import { dirname, join } from 'node:path'
 import { fileURLToPath } from 'node:url'
 
+import { invokeInjectedLogger } from '@neutronai/logger/fire-and-forget.ts'
+
 import type { RitualDef, RitualRegistry } from './rituals.ts'
 
 const HERE = dirname(fileURLToPath(import.meta.url))
@@ -151,9 +153,12 @@ export function bundledTemplatePathFor(id: string): string {
  */
 export function seedBundledRituals(opts: {
   rituals_dir: string
-  log?: (msg: string) => void
+  log?: (msg: string) => unknown
 }): { seeded: string[]; kept: string[] } {
-  const { rituals_dir, log } = opts
+  const { rituals_dir } = opts
+  const log = opts.log === undefined
+    ? undefined
+    : (msg: string): void => invokeInjectedLogger('bundled-rituals.log', opts.log!, msg)
   const seeded: string[] = []
   const kept: string[] = []
 

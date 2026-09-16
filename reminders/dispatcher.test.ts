@@ -1,6 +1,7 @@
 import { describe, expect, spyOn, test } from 'bun:test'
 
 import type { AgentSpec } from '@neutronai/runtime/substrate.ts'
+import { fireAndForgetRejectionCount, resetFireAndForgetCountForTests } from '@neutronai/logger/fire-and-forget.ts'
 import {
   buildReminderDispatcher,
   deriveReminderProjectId,
@@ -46,6 +47,19 @@ function recordingLlm(reply: string): ReminderLlm & { specs: AgentSpec[] } {
 }
 
 describe('buildReminderDispatcher — composition + post', () => {
+  test('a rejected diagnostic logger is recorded without changing delivery', async () => {
+    resetFireAndForgetCountForTests()
+    const outbound = recordingOutbound()
+    const d = buildReminderDispatcher({
+      outbound,
+      llm: { compose: async () => { throw new Error('compose failed') } },
+      log: async () => { throw new Error('offline') },
+    })
+    await expect(d.dispatch(makeReminder())).resolves.toMatchObject({ state: 'delivered' })
+    await new Promise((resolve) => setTimeout(resolve, 0))
+    expect(fireAndForgetRejectionCount()).toBeGreaterThan(0)
+  })
+
   test('composes via the LLM and posts the composed body to the topic', async () => {
     const outbound = recordingOutbound()
     const llm = recordingLlm('Trash night — bins out front before you crash.')

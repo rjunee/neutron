@@ -9,7 +9,7 @@
  * would do on a tapped/typed reply.
  */
 import { afterEach, beforeEach, describe, expect, spyOn, test } from 'bun:test'
-import { existsSync, mkdtempSync, readFileSync, rmSync, statSync, writeFileSync } from 'node:fs'
+import { existsSync, mkdirSync, mkdtempSync, readFileSync, rmSync, statSync, writeFileSync } from 'node:fs'
 import { tmpdir } from 'node:os'
 import { join } from 'node:path'
 
@@ -22,6 +22,7 @@ import {
   type ButtonOption,
 } from '@neutronai/channels/button-primitive.ts'
 import { ApprovalManager, type ApprovalNotifier } from '@neutronai/tools/approval.ts'
+import { fireAndForgetRejectionCount, resetFireAndForgetCountForTests } from '@neutronai/logger/fire-and-forget.ts'
 
 import { ReminderStore } from './store.ts'
 import { registerBundledRituals, seedBundledRituals } from './bundled-rituals.ts'
@@ -615,6 +616,20 @@ describe('loadPersistedRitualDefs', () => {
     // 'persisted' is a duplicate → skipped, but never throws
     expect(r3.skipped.some((f) => f.startsWith('persisted'))).toBe(true)
   })
+
+  test('a rejected loader logger is recorded without changing the skipped result', async () => {
+    resetFireAndForgetCountForTests()
+    mkdirSync(rituals_dir, { recursive: true })
+    writeFileSync(join(rituals_dir, 'corrupt.def.json'), '{ broken', 'utf8')
+    const result = loadPersistedRitualDefs({
+      registry: createRitualRegistry({ rituals_dir }),
+      rituals_dir,
+      log: async () => { throw new Error('offline') },
+    })
+    await settle()
+    expect(result.skipped).toEqual(['corrupt.def.json'])
+    expect(fireAndForgetRejectionCount()).toBe(1)
+  })
 })
 
 // ── Argus r1 BLOCKER — web content token capturable across two prompts ─────────
@@ -1199,6 +1214,7 @@ describe('automatic pending approval sweep', () => {
     expect(h.emitted.filter((p) => p.metadata.ritual_id === 'weekly-review')).toHaveLength(2)
   })
   test('a rejecting async render-failure logger cannot change sweep recovery', async () => {
+    resetFireAndForgetCountForTests()
     let now = 1_000_000
     let rejectOnLog = false
     const h = makeHarness(() => now, async () => {
@@ -1218,5 +1234,6 @@ describe('automatic pending approval sweep', () => {
     expect(h.approvals.get(bad.id)?.status).toBe('expired')
     expect(h.approvals.get(good.id)?.status).toBe('pending')
     expect(h.emitted.filter((p) => p.metadata.ritual_id === 'weekly-review')).toHaveLength(2)
+    expect(fireAndForgetRejectionCount()).toBe(1)
   })
 })

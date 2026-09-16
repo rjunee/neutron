@@ -7,6 +7,7 @@ import {
   fireAndForget,
   fireAndForgetRejectionCount,
   installProcessSafetyNet,
+  invokeInjectedLogger,
   isProcessSafetyNetInstalled,
   neutralizeAbandonedSettle,
   resetFireAndForgetCountForTests,
@@ -251,6 +252,34 @@ describe('fireAndForget', () => {
     } finally {
       process.off('unhandledRejection', onUnhandled)
     }
+  })
+})
+
+describe('invokeInjectedLogger', () => {
+  test('records an asynchronous logger rejection without throwing into its caller', async () => {
+    expect(() => invokeInjectedLogger('unit.injected', async () => {
+      throw new Error('logger offline')
+    }, 'message')).not.toThrow()
+    await flush()
+    expect(fireAndForgetRejectionCount()).toBe(1)
+    expect(errorLines.find((line) => line.includes('name=unit.injected'))).toContain('logger offline')
+  })
+
+  test('records a synchronous logger throw without throwing into its caller', async () => {
+    expect(() => invokeInjectedLogger('unit.injected-sync', () => {
+      throw new Error('sink threw')
+    }, 'message')).not.toThrow()
+    await flush()
+    expect(fireAndForgetRejectionCount()).toBe(1)
+    expect(errorLines.find((line) => line.includes('name=unit.injected-sync'))).toContain('sink threw')
+  })
+
+  test('a successful logger is invoked once and is not counted', async () => {
+    const messages: string[] = []
+    invokeInjectedLogger('unit.injected-ok', (message) => messages.push(message), 'message')
+    await flush()
+    expect(messages).toEqual(['message'])
+    expect(fireAndForgetRejectionCount()).toBe(0)
   })
 })
 
