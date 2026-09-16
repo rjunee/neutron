@@ -22,7 +22,7 @@ The reviewed lineage's additional guard mutations are retained in `docs/as-built
 
 ### Verification
 
-The focused store, HTTP, validator, and client run passed 157 tests. Gateway, runtime, and Open TypeScript projects pass individually. The repository matrix reports the pre-existing app ambient-type failure; the first run also exposed merge adaptations, which were corrected before the individual green checks.
+The focused store, HTTP, validator, client, and production-composition run passed 162 tests. The composition fixture now sends a real owner chat request instead of a reminder because the current reminder path uses the background substrate; it still proves the live-chat resolver is present and bound (`open/__tests__/open-mcp-servers-wiring.test.ts:195`). Gateway, runtime, and Open TypeScript projects pass individually. The repository matrix reports the pre-existing app ambient-type failure; the first run also exposed merge adaptations, which were corrected before the individual green checks.
 
 The PTY integration file cannot bind its loopback reply sink in this sandbox; its pure startup-bound test passes, while socket-dependent cases report the bind refusal. This is recorded as an environment limitation, not converted into skipped or weakened assertions.
 

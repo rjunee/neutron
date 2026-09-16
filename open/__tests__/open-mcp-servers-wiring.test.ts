@@ -42,7 +42,6 @@ import {
   childByKey,
   pool,
 } from '@neutronai/runtime/adapters/claude-code/persistent/pool-state.ts'
-import type { Reminder } from '@neutronai/reminders/store.ts'
 import { buildOpenGraphComposer } from '../composer.ts'
 
 const HERE = dirname(fileURLToPath(import.meta.url))
@@ -118,24 +117,13 @@ function cannedHandle(instanceId: string): SessionHandle {
   }
 }
 
-/** A due one-shot reminder — the cheapest real dispatch onto the live-chat substrate. */
-function reminder(): Reminder {
-  return {
-    id: 'rem-mcp-wiring',
-    topic_id: null,
-    message: 'wiring probe',
-    fire_at: Math.floor(Date.now() / 1000) - 1,
-    recurrence: null,
-    recurrence_spec: null,
-    status: 'pending',
-  } as unknown as Reminder
-}
-
 interface Booted {
   composition: Record<string, unknown>
   captured: ClaudeCodeSubstrateOptions[]
   /** Call a mounted route on the MCP-servers surface with the owner bearer. */
   api: (method: string, path: string, body?: unknown) => Promise<Response>
+  /** Send one real owner chat turn, which starts the live-chat substrate. */
+  chat: () => Promise<Response>
   cleanup: () => void
 }
 
@@ -169,10 +157,29 @@ async function boot(): Promise<Booted> {
     if (res === null) throw new Error(`surface disclaimed ${method} ${path}`)
     return res
   }
+  const appWsSurface = rec['app_ws_surface'] as
+    | { handler: (req: Request) => Promise<Response | null> }
+    | undefined
+  const chat = async (): Promise<Response> => {
+    if (appWsSurface === undefined) throw new Error('app_ws_surface is not mounted')
+    const res = await appWsSurface.handler(
+      new Request('http://x/api/app/chat/send', {
+        method: 'POST',
+        headers: {
+          authorization: `Bearer ${OWNER_BEARER}`,
+          'content-type': 'application/json',
+        },
+        body: JSON.stringify({ body: 'wiring probe', client_msg_id: 'mcp-wiring-probe' }),
+      }),
+    )
+    if (res === null) throw new Error('app_ws_surface disclaimed owner chat')
+    return res
+  }
   return {
     composition: rec,
     captured,
     api,
+    chat,
     cleanup: () => {
       for (const c of (composition.realmode_cleanups ?? []) as Array<() => void>) {
         try {
@@ -188,10 +195,13 @@ async function boot(): Promise<Booted> {
 
 /** The live-chat option bag the REAL composer built, via a real dispatch. */
 async function liveAgentOptions(b: Booted): Promise<ClaudeCodeSubstrateOptions> {
-  const dispatcher = b.composition['reminder_dispatcher'] as { dispatch: (r: Reminder) => Promise<void> }
-  await dispatcher.dispatch(reminder())
-  await Bun.sleep(20)
-  const opts = b.captured.find((o) => o.substrate_instance_id === 'cc-agent-owner')
+  expect((await b.chat()).status).toBe(200)
+  let opts: ClaudeCodeSubstrateOptions | undefined
+  for (let i = 0; i < 100; i++) {
+    opts = b.captured.find((o) => o.substrate_instance_id.startsWith('cc-agent-'))
+    if (opts !== undefined) break
+    await Bun.sleep(10)
+  }
   expect(opts).toBeDefined()
   return opts!
 }
@@ -218,7 +228,7 @@ describe('the production composer wires installable MCP servers end to end', () 
       // Every other substrate the composer built — including the boot pre-warm's
       // `cc-llm-*` — must omit it. An installed subprocess belongs to the owner's own
       // session and nothing else.
-      const others = b.captured.filter((o) => o.substrate_instance_id !== 'cc-agent-owner')
+      const others = b.captured.filter((o) => !o.substrate_instance_id.startsWith('cc-agent-'))
       expect(others.length).toBeGreaterThan(0)
       for (const o of others) expect(o.resolveExtraMcpServers).toBeUndefined()
     } finally {
