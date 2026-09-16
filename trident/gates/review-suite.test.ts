@@ -9,16 +9,27 @@ function fixture() {
   const decide = async () => applyReviewSuite(approve, await assess())
   return { observation, source, assess, decide }
 }
-test('G063 full suite rejection and dispatched subset deferral are distinct', async () => {
+test('G063 rejects a nonzero host receipt — advisory only for an EVIDENCED failed-preexisting claim — and never accepts a deferred claim', async () => {
   const f = fixture()
   expect(await f.decide()).toEqual(approve)
   for (const scope of ['full-suite', 'subset'] as const) {
     f.observation.scope = scope
     for (const suiteOutcome of ['not-run', 'failed-new', 'deferred', 'passed', undefined]) {
       f.observation.report = { hostExitCode: 1, ...(suiteOutcome === undefined ? {} : { suiteOutcome }) }
-      expect((await f.decide()).kind).toBe(scope === 'subset' && suiteOutcome === 'deferred' ? 'approve' : 'fix')
+      expect((await f.decide()).kind).toBe('fix')
     }
   }
+  // THE ONE DELIBERATE EXCEPTION, asserted in both directions so the title cannot
+  // drift from the code again. This loop used to skip `failed-preexisting`
+  // entirely, which is how a title claiming "every nonzero receipt rejects" sat
+  // green over a gate that does not do that — and the gate inventory copied the
+  // claim. The gates are the spec; the prose describes them, not the other way.
+  f.observation.scope = 'full-suite'
+  f.observation.report = { hostExitCode: 1, suiteOutcome: 'failed-preexisting' }
+  expect(await f.decide()).toMatchObject({ kind: 'fix', findings: [expect.stringContaining('WITHOUT EVIDENCE')] })
+  f.observation.report = { hostExitCode: 1, suiteOutcome: 'failed-preexisting', suiteEvidence: 'base red on x.test.ts; re-ran at merge-base: red' }
+  // Evidenced: advisory, so the panel's approve stands — the human verifies the comparison.
+  expect(await f.decide()).toEqual(approve)
   f.observation.report = null
   expect((await f.decide()).kind).toBe('unknown')
   f.observation.strategy = ''

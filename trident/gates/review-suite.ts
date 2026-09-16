@@ -41,7 +41,6 @@ export async function assessReviewSuite(source: ReviewSuiteSource | undefined, s
     if (!report || typeof report.hostExitCode !== 'number' || !Number.isInteger(report.hostExitCode)) return unknown('Host-observed review suite exit code is missing or unreadable')
     if ((report.suiteOutcome !== undefined && typeof report.suiteOutcome !== 'string') || (report.suiteEvidence !== undefined && typeof report.suiteEvidence !== 'string')) return unknown('Review suite report is malformed')
     if (report.hostExitCode === 0) return known()
-    if (report?.suiteOutcome === 'deferred' && value.scope === 'subset') return known()
     const evidence = typeof report?.suiteEvidence === 'string' ? report.suiteEvidence.trim() : ''
     if (report?.suiteOutcome === 'failed-preexisting') {
       if (!evidence) return blocker('FAILED-PREEXISTING CLAIMED WITHOUT EVIDENCE', 'Re-run the failing files at the base and record the comparison')
