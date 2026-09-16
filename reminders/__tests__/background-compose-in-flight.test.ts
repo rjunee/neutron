@@ -105,14 +105,17 @@ describe('isBackgroundComposeInFlight', () => {
     expect(isBackgroundComposeInFlight('proj-a')).toBe(false)
   })
 
-  test('RELEASED ON THE ABORT PATH — the timeout is what produced `cc-llm-call: aborted`', async () => {
+  test('RELEASED ON COMPOSE TIMEOUT — expiry retains its typed reason', async () => {
     resetBackgroundComposeStateForTests()
     const held = heldSubstrate()
     const llm = buildSubstrateReminderLlm(held.substrate, { timeout_ms: 5 })
 
     const pending = llm.compose(spec('proj-a'))
     expect(isBackgroundComposeInFlight('proj-a')).toBe(true)
-    await expect(pending).rejects.toThrow(/abort/i)
+    await expect(pending).rejects.toMatchObject({
+      code: 'compose_timeout',
+      message: 'cc-llm-call: compose timeout',
+    })
     expect(isBackgroundComposeInFlight('proj-a')).toBe(false)
   })
 
