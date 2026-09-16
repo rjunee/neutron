@@ -16,7 +16,8 @@ import * as codex from '@neutronai/runtime/workers/codex-headless.ts'
 import { pool, supervisedBySessionKey } from '@neutronai/runtime/adapters/claude-code/persistent/pool-state.ts'
 import { fakeRunner, type BoundedWorkRequest } from '@neutronai/runtime/bounded-work.ts'
 import { prepareProjectBuild, suiteScript, type ProjectBuildContext } from '../wiring/project-build.ts'
-import { spawnCapture } from '@neutronai/trident/git-mode.ts'
+import { makeLazyCredentialedHostRunner, spawnCapture } from '@neutronai/trident/git-mode.ts'
+import { githubProcessEnv } from '@neutronai/github/credential.ts'
 import { renderTestStrategy } from '@neutronai/trident/test-strategy.ts'
 
 const cleanup: (() => void | Promise<void>)[] = []
@@ -44,6 +45,7 @@ async function fixture() {
       commands.push([...argv])
       return { ok: true, exit_code: 0, stdout: argv.includes('symbolic-ref') ? 'refs/heads/change' : '', stderr: '' }
     } }
+  context.runSuite = context.runHost
   const input: InnerLoopInput = { run: store.get(row.id)!, base_branch: 'main', db_path: join(dir, 'db'), max_rounds: 3 }
   const prepare = () => prepareProjectBuild(input, context, new AbortController().signal)
   return { dir, input, context, prepare, commands, captured: () => captured,
@@ -102,12 +104,12 @@ test('option sources preserve pin, selected provider, workflow and unavailable s
   f.input.test_strategy = strategy
   // The fix round's claim is the fresher of the two and wins at the same head.
   await writeFile(options.workers.fix.request.result.path, JSON.stringify({ result: { head, payload: { ...forge, testsPassed: true, suiteOutcome: 'passed' } } }))
-  const host = f.context.runHost
-  f.context.runHost = async argv => argv[0] === 'bash'
+  const host = f.context.runSuite!
+  f.context.runSuite = async argv => argv[0] === 'bash'
     ? { ok: false, exit_code: 7, stdout: '', stderr: 'suite failed' }
     : host(argv)
   expect((await options.policy.reviewSuite!.readCheckpoint({ head, diff: '', pr: null }, 3))?.report).toEqual({ hostExitCode: 7, suiteOutcome: 'passed' })
-  f.context.runHost = async argv => argv[0] === 'bash'
+  f.context.runSuite = async argv => argv[0] === 'bash'
     ? { ok: false, exit_code: 124, stdout: '', stderr: '', timed_out: true }
     : host(argv)
   expect((await options.policy.reviewSuite!.readCheckpoint({ head, diff: '', pr: null }, 3))?.report).toEqual({ suiteOutcome: 'passed' })
@@ -430,8 +432,8 @@ test('the host suite observation is given a budget far larger than the 60s host 
   }
   await writeFile(options.workers.build.request.result.path, JSON.stringify({ result: { head, payload } }))
   const budgets: Array<number | undefined> = []
-  const host = f.context.runHost
-  f.context.runHost = async (argv, cwd, env, timeoutMs) => {
+  const host = f.context.runSuite!
+  f.context.runSuite = async (argv, cwd, env, timeoutMs) => {
     if (argv[0] === 'bash') {
       budgets.push(timeoutMs)
       return { ok: true, exit_code: 0, stdout: '', stderr: '' }
@@ -469,8 +471,8 @@ test('the host suite receipt is an exit code, never the transcript, and an unwri
   // suite has, small enough to stay a unit test.
   const script = (code: number) => `head -c 8388608 /dev/zero | tr '\\0' 'x'\necho "trailing diagnostic" >&2\nexit ${code}\n`
   const captured: Array<{ stdout: number; stderr: number }> = []
-  const host = f.context.runHost
-  f.context.runHost = async (argv, cwd, env, timeoutMs) => {
+  const host = f.context.runSuite!
+  f.context.runSuite = async (argv, cwd, env, timeoutMs) => {
     if (argv[0] !== 'bash') return host(argv, cwd, env, timeoutMs)
     const result = await spawnCapture(argv, cwd, env, timeoutMs)
     captured.push({ stdout: result.stdout.length, stderr: result.stderr.length })
@@ -547,8 +549,8 @@ test('the full-suite command parses from the real generator, knob and plain shap
     }
     await writeFile(options.workers.build.request.result.path, JSON.stringify({ result: { head, payload } }))
     const seen: string[] = []
-    const host = f.context.runHost
-    f.context.runHost = async (argv, cwd, env, timeoutMs) => {
+    const host = f.context.runSuite!
+    f.context.runSuite = async (argv, cwd, env, timeoutMs) => {
       if (argv[0] === 'bash') { seen.push(argv[2]!); return { ok: true, exit_code: 0, stdout: '', stderr: '' } }
       return host(argv, cwd, env, timeoutMs)
     }
@@ -562,4 +564,45 @@ test('the full-suite command parses from the real generator, knob and plain shap
     // the job budget the knob render exists to deliver.
     expect({ label, cmd: seen[0] }).toMatchObject({ label, cmd: expect.stringContaining(expected) })
   }
+})
+
+
+test('suite child excludes the stored GitHub credential while git push retains it', async () => {
+  const f = await fixture()
+  f.input.test_strategy = 'Full suite (stage 2), run exactly this:\n\n  bash inspect-env.sh\n'
+  const credential = githubProcessEnv('fixture-github-credential')
+  const credentialed = makeLazyCredentialedHostRunner(async () => credential)
+  const preparationHost = f.context.runHost
+  f.context.runHost = (argv, ...args) => argv[0] === 'bash' || argv.includes('push')
+    ? credentialed(argv, ...args) : preparationHost(argv, ...args)
+  const options = await f.prepare()
+  delete f.context.runSuite // Exercise the production default, not a test runner.
+  const worktree = options.production.worktree
+  await mkdir(worktree, { recursive: true })
+  const head = 'a'.repeat(40)
+  await writeFile(options.workers.build.request.result.path, JSON.stringify({ result: { head, payload: {
+    mutationClaim: { file: 'guard.ts', find: 'before', replace: 'after', guard: ['bun', 'test'], control: ['bun', 'test'] },
+    worktreePath: worktree, branch: 'change', commitSha: head,
+    prNumber: null, diffFile: 'diff', testsPassed: true,
+  } } }))
+  // Inspect every field supplied by githubProcessEnv, not just the token itself.
+  await writeFile(join(worktree, 'inspect-env.sh'),
+    Object.keys(credential).map(key => `printf '%s\\n' "${key}=\${${key}-ABSENT}"`).join('\n'))
+  const receipt = await options.policy.reviewSuite!.readCheckpoint({ head, diff: '', pr: null }, 1)
+  expect(receipt?.report).toEqual({ hostExitCode: 0 })
+  const transcript = await readFile(join(f.dir, 'state', encodeURIComponent(f.input.run.id), 'suite-round-1.log'), 'utf8')
+  expect(transcript.trim().split('\n')).toEqual(Object.keys(credential).map(key => `${key}=ABSENT`))
+
+  // Real local push: the hook witnesses the environment of git and its children.
+  const origin = join(f.dir, 'origin.git')
+  for (const argv of [
+    ['git', 'init', '--bare', origin],
+    ['git', 'init', worktree],
+    ['git', '-C', worktree, '-c', 'user.name=Fixture', '-c', 'user.email=fixture@example.test', 'commit', '--allow-empty', '-m', 'fixture'],
+  ]) expect((await spawnCapture(argv)).ok).toBe(true)
+  await writeFile(join(worktree, '.git', 'hooks', 'pre-push'),
+    '#!/bin/sh\nprintf "%s" "$GH_TOKEN" > push-env.txt\n', { mode: 0o755 })
+  const pushed = await options.production.runHost(['git', '-C', worktree, 'push', origin, 'HEAD:refs/heads/check'])
+  expect(pushed.ok).toBe(true)
+  expect(await readFile(join(worktree, 'push-env.txt'), 'utf8')).toBe(credential.GH_TOKEN!)
 })
