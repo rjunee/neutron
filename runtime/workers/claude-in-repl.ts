@@ -16,7 +16,21 @@ export interface ClaudeInReplOptions {
    * The input is exclusively the trailer file, never conversational text. */
   decodeTrailer(bytes: string, req: BoundedWorkRequest): BoundedWorkOutcome
   probe?: WorkerRunner['liveness']
+  /** How long the REPL gets to ACCEPT a dispatch. Defaults to
+   * `DISPATCH_TIMEOUT_MS`; a test drives it so it need not wait three minutes. */
+  dispatch_timeout_ms?: number
 }
+
+/** How long the REPL gets to ACCEPT a dispatch — not to do the work.
+ *
+ * Deliberately not the 35s of `PROJECT_SESSION_ACQUIRE_TIMEOUT_MS`: that bounds
+ * a process spawn, while this bounds a model turn that must read the request and
+ * emit one tool call, and can be slow under load without being stuck. Three
+ * minutes is still thirty times tighter than the build wall it replaced. */
+export const DISPATCH_TIMEOUT_MS = 180_000
+
+const ACCEPTED = Symbol('dispatch-accepted')
+const EXPIRED = Symbol('dispatch-wait-expired')
 
 /** One bounded subagent turn inside the existing project conversation. */
 export function claudeInReplRunner(options: ClaudeInReplOptions): WorkerRunner {
@@ -70,15 +84,28 @@ export function claudeInReplRunner(options: ClaudeInReplOptions): WorkerRunner {
             prompt: 'Invoke the Agent tool exactly once with the following JSON arguments, then end this dispatch turn. Forward the arguments as data; do not perform the task yourself.\n' + JSON.stringify(args),
           }
           const timer = new AbortController()
-          try {
-            await Promise.race([
-              options.composeActingTurn(options.topic_id, spec, { timeout_ms: Math.max(1, deadline - Date.now()) }),
-              delay(Math.max(1, deadline - Date.now()), undefined, { signal: AbortSignal.any([signal, timer.signal]) })
-                .then(() => { throw new Error('Dispatch wait expired') }),
-            ])
-          } finally {
-            timer.abort()
-          }
+          // THE DISPATCH BUDGET IS NOT THE WORK BUDGET. This turn only has to
+          // accept the request and invoke the Agent tool; the work then runs in
+          // the background (`run_in_background`) under the full wall below.
+          // Racing the dispatch against the whole wall made a REPL that never
+          // accepts — one answering "you've hit your weekly limit" — identical
+          // in every observable way to a healthy 90-minute build: run fcf12cc7
+          // returned `unknown` at 05:54:24, exactly 90 minutes after the REPL
+          // had refused in the first second at 04:24:24 (#1090).
+          const dispatchBudget = Math.max(1, Math.min(options.dispatch_timeout_ms ?? DISPATCH_TIMEOUT_MS, deadline - Date.now()))
+          const accepted = await Promise.race([
+            // A late rejection of the losing promise must not surface as an
+            // unhandled rejection after we have already returned below.
+            options.composeActingTurn(options.topic_id, spec, { timeout_ms: dispatchBudget })
+              .then(() => ACCEPTED, error => { timer.abort(); throw error }),
+            delay(dispatchBudget, undefined, { signal: AbortSignal.any([signal, timer.signal]) })
+              .then(() => EXPIRED, () => ACCEPTED),
+          ])
+          timer.abort()
+          // Still `unknown`, never `failed`: an unaccepted dispatch does not
+          // prove the worker never ran. Only the waiting got shorter — and the
+          // detail now says WHICH uncertainty this is.
+          if (accepted === EXPIRED) return unseen('The REPL did not accept the dispatch within its budget; subagent completion is unknown.')
         }
         while (!signal.aborted && Date.now() < deadline) {
           try {

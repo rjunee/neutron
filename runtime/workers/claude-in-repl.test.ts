@@ -5,7 +5,7 @@ import { createHash } from 'node:crypto'
 import { join } from 'node:path'
 import type { AgentSpec } from '../substrate.ts'
 import type { BoundedWorkOutcome, BoundedWorkRequest } from '../bounded-work.ts'
-import { claudeInReplRunner, type ClaudeInReplOptions } from './claude-in-repl.ts'
+import { claudeInReplRunner, DISPATCH_TIMEOUT_MS, type ClaudeInReplOptions } from './claude-in-repl.ts'
 
 const directories: string[] = []
 afterEach(async () => {
@@ -257,3 +257,84 @@ for (const effort of ['xhigh', 'max'] as const) {
     expect(await f.run(undefined, { ...f.req, effort })).toEqual({ kind: 'blocked', on: 'file evidence' })
   })
 }
+
+// #1090. A REPL that never accepts the dispatch used to be indistinguishable
+// from a healthy background build, because the dispatch turn was raced against
+// the WHOLE worker wall. Production run fcf12cc7 reported `unknown` exactly 90
+// minutes after the REPL had already answered the dispatch with "you've hit your
+// weekly limit" and made no Agent tool call.
+//
+// These drive `dispatch_timeout_ms` so the suite need not wait three real
+// minutes. The DEFAULT is pinned separately below, so shrinking the constant to
+// make a test pass cannot go unnoticed.
+
+const NEVER_ACCEPTS = () => new Promise<string>(() => {})
+
+test('the default dispatch budget is the constant, and the constant is far below a build wall', () => {
+  expect(DISPATCH_TIMEOUT_MS).toBe(180_000)
+  // A build's wall is 90 minutes (`trident/project-build-budget.ts`). The whole
+  // point is that the dispatch bound is a small fraction of it.
+  expect(DISPATCH_TIMEOUT_MS).toBeLessThan(90 * 60_000 / 10)
+})
+
+test('a dispatch the REPL never accepts is bounded by the DISPATCH budget, not the work wall', async () => {
+  const f = await fixture()
+  f.options.dispatch_timeout_ms = 60
+  f.options.composeActingTurn = NEVER_ACCEPTS
+  // The wall is far longer than the dispatch budget, as a build's really is.
+  const wall = 4_000
+  const started = Date.now()
+  const outcome = await f.run(undefined, { ...f.req, budget: { wall_ms: wall } })
+  const waited = Date.now() - started
+  expect(outcome.kind).toBe('unknown')
+  // THE BOUND IS THE CLAIM. Pre-#1090 this waited the whole `wall`.
+  expect(waited).toBeLessThan(wall / 2)
+})
+
+test('an unaccepted dispatch stays unknown and says WHICH uncertainty it is', async () => {
+  const f = await fixture()
+  f.options.dispatch_timeout_ms = 60
+  f.options.composeActingTurn = NEVER_ACCEPTS
+  const outcome = await f.run(undefined, { ...f.req, budget: { wall_ms: 4_000 } })
+  // Never `failed`: not accepting a dispatch does not prove the worker never ran.
+  expect(outcome.kind).toBe('unknown')
+  expect((outcome as { detail: string }).detail).toContain('did not accept the dispatch')
+  // Distinct from the interrupted-observation detail, which is a different state.
+  expect((outcome as { detail: string }).detail).not.toContain('Dispatch or observation interrupted')
+})
+
+test('a dispatch that throws keeps the interrupted-observation detail, not the timeout one', async () => {
+  const f = await fixture()
+  f.options.dispatch_timeout_ms = 60
+  f.options.composeActingTurn = async () => { throw new Error('compose exploded') }
+  const outcome = await f.run(undefined, { ...f.req, budget: { wall_ms: 4_000 } })
+  expect(outcome.kind).toBe('unknown')
+  expect((outcome as { detail: string }).detail).toContain('Dispatch or observation interrupted')
+})
+
+test('the WORK keeps the full wall after the dispatch is accepted', async () => {
+  const f = await fixture()
+  f.options.dispatch_timeout_ms = 60
+  let budget = 0
+  // Accept immediately, then make the trailer appear well AFTER the dispatch
+  // budget would have expired. Shortening the dispatch must not shorten this.
+  f.options.composeActingTurn = async (_topic, _spec, opts) => {
+    budget = opts.timeout_ms
+    setTimeout(() => { void f.trailer() }, 200)
+    return 'accepted'
+  }
+  const outcome = await f.run(undefined, { ...f.req, budget: { wall_ms: 4_000 } })
+  expect(outcome).toEqual({ kind: 'blocked', on: 'file evidence' })
+  // The dispatch TURN was given the dispatch budget, not the wall.
+  expect(budget).toBe(60)
+})
+
+test('a wall shorter than the dispatch budget still bounds the dispatch', async () => {
+  const f = await fixture()
+  f.options.dispatch_timeout_ms = 10_000
+  f.options.composeActingTurn = NEVER_ACCEPTS
+  const started = Date.now()
+  const outcome = await f.run(undefined, { ...f.req, budget: { wall_ms: 80 } })
+  expect(outcome.kind).toBe('unknown')
+  expect(Date.now() - started).toBeLessThan(3_000)
+})
