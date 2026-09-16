@@ -572,7 +572,7 @@ function lastCheckpoint(f: Awaited<ReturnType<typeof fixture>>) {
 }
 
 /** The outcome plus the dispatch trail — a stop is only legible with both. */
-function why(f: Awaited<ReturnType<typeof fixture>>, outcome: ProjectBuildOutcome): string {
+function why(f: Awaited<ReturnType<typeof fixture>>, outcome: BuildRunOutcome | ProjectBuildOutcome): string {
   return JSON.stringify({ outcome, dispatches: f.world.dispatches })
 }
 
@@ -888,6 +888,47 @@ test('a driver restarted during a worker turn refuses to re-fire it', async () =
   expect(f.github.prs[0]!.state).toBe('OPEN')
 }, 300_000)
 
+// ── LOCAL MERGE MODE ─────────────────────────────────────────────────────────
+
+test('local merge mode reaches merged with no PR, no push and no gh call', async () => {
+  // `merge_mode` DEFAULTS TO 'local' (`trident/store.ts:867`), and nothing here had
+  // ever driven it. It could not reach review at all: `reviewCi`'s project source
+  // reads its rows off `snapshot.pr`, which is `null` by construction for a local
+  // run, so G055 answered `unknown` — fail-closed — for every local build. That is
+  // the fix this case guards; see `build-host.ts`'s `reviewCi`.
+  const f = await fixture({ mergeMode: 'local' })
+  const outcome = await drive(f, 'pr')
+  expect(outcome.kind, why(f, outcome)).toBe('merged')
+  expect(f.world.dispatches.map(dispatch => dispatch.role))
+    .toEqual(['plan', 'build', 'review', 'review', 'synthesis'])
+
+  // NOTHING WENT TO GITHUB. No PR record, and — the stronger claim — the driver
+  // never invoked `gh` at all, so the mode is genuinely offline-by-construction
+  // rather than merely tolerant of a fake that answered.
+  expect(f.github.prs).toEqual([])
+  expect(f.commands.filter(argv => argv[0] === 'gh')).toEqual([])
+  // Nor did it push: `origin/main` and the branch on the origin are untouched.
+  const originMain = await spawnCapture(['git', '-C', f.origin, 'rev-parse', 'refs/heads/main'], f.origin)
+  expect(originMain.stdout).toBe(f.baseSha)
+  const originBranch = await spawnCapture(['git', '-C', f.origin, 'rev-parse', '--verify', 'refs/heads/trident/card'], f.origin)
+  expect(originBranch.ok).toBe(false)
+
+  // THE LOCAL BASE MOVED, by a real merge commit with the reviewed head as a
+  // parent, and the branch survives it (`mergeLocalReviewed` keeps the branch).
+  const localMain = await spawnCapture(['git', '-C', f.repo, 'rev-parse', 'refs/heads/main'], f.repo)
+  expect(localMain.stdout).not.toBe(f.baseSha)
+  const parents = await spawnCapture(['git', '-C', f.repo, 'rev-list', '--parents', '-n', '1', 'refs/heads/main'], f.repo)
+  const built = await spawnCapture(['git', '-C', f.repo, 'rev-parse', 'refs/heads/trident/card'], f.repo)
+  expect(parents.stdout.split(' ').slice(1)).toEqual([f.baseSha, built.stdout])
+  const notes = await spawnCapture(['git', '-C', f.repo, 'show', 'refs/heads/main:NOTES.md'], f.repo)
+  expect(notes.stdout).toBe(`seed\n${f.row.id}:build:0`)
+  // Local cleanup runs `keep-branch` (`production-host-effects.ts:427`), so the
+  // branch itself survives — asserted on the ref, not on the script's prose.
+  expect(built.ok).toBe(true)
+  expect(outcome.cleanup.kind).toBe('cleaned')
+  expect(outcome.cleanup.detail).not.toContain('DELETED branch')
+}, 300_000)
+
 /**
  * ── WHAT THIS HARNESS DOES NOT COVER ──────────────────────────────────
  *
@@ -918,5 +959,8 @@ test('a driver restarted during a worker turn refuses to re-fire it', async () =
  *    regenerated diff that disagrees with the measurement are not driven.
  *  • CODEX AND KIMI SEATS, and headless placement generally: both cross-model
  *    seats are configured off.
- *  • `merge_mode: 'local'`, `mode: 'wave'` and `mode: 'bound_pr'`.
+ *  • `mode: 'wave'` and `mode: 'bound_pr'`.
+ *  • LOCAL MODE'S REFUSALS. The local case merges; `localMergeReadiness`'s dirty
+ *    worktree, base-drift overlap, moved-branch and non-isolated-worktree stops
+ *    are not driven, nor is `confirmLocalMerge` failing after a merge.
  */
