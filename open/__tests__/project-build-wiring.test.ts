@@ -16,6 +16,7 @@ import * as codex from '@neutronai/runtime/workers/codex-headless.ts'
 import { pool, supervisedBySessionKey } from '@neutronai/runtime/adapters/claude-code/persistent/pool-state.ts'
 import { fakeRunner, type BoundedWorkRequest } from '@neutronai/runtime/bounded-work.ts'
 import { prepareProjectBuild, type ProjectBuildContext } from '../wiring/project-build.ts'
+import { renderTestStrategy } from '@neutronai/trident/test-strategy.ts'
 
 const cleanup: (() => void | Promise<void>)[] = []
 afterEach(async () => { for (const fn of cleanup.splice(0).reverse()) await fn() })
@@ -433,4 +434,67 @@ test('the host suite observation is given a budget far larger than the 60s host 
   expect(budgets).toHaveLength(1)
   expect(typeof budgets[0]).toBe('number')
   expect(budgets[0]!).toBeGreaterThan(60_000)
+})
+
+// THE SUITE COMMAND MUST PARSE OUT OF THE STRATEGY THE GENERATOR ACTUALLY EMITS.
+//
+// The marker sentence WRAPS when the project has a jobs knob, so the line after the
+// marker is unindented PROSE. The parser used to break on it, return null, and
+// `readCheckpoint` then reported `report: null` — which G063 answers as `unknown`.
+// `unknown` is fail-closed, so on any project WITH a jobs knob (this repo included)
+// no card could reach `merged`.
+//
+// THE INPUT COMES FROM `renderTestStrategy` ITSELF, NOT A HAND-WRITTEN LOOKALIKE.
+// My first version of this test pasted a copy of the generator's wording. A review
+// lane broke it: renaming the real marker in `trident/test-strategy.ts` from
+// "Full suite" to "Complete suite" left production unable to find any command —
+// and this test still passed 17/17, because it was asserting against its own copy.
+// A guard that cannot see its subject is not a guard. Binding to the real renderer
+// means a wording or shape change in the producer reds the consumer's test.
+test('the full-suite command parses from the real generator, knob and plain shapes', async () => {
+  const KNOBS = { jobs_env: 'NEUTRON_TEST_JOBS', concurrency_env: 'NEUTRON_TEST_CONCURRENCY',
+    probed_file: 'scripts/run-tests.sh', pinned_by_command: false }
+  const NO_KNOBS = { jobs_env: null, concurrency_env: null, probed_file: null, pinned_by_command: false }
+  const knobStrategy = renderTestStrategy({
+    resolution: { command: 'bash scripts/run-tests.sh', source: 'package-json' },
+    knobs: KNOBS, jobs: 4, concurrency: 2, base_branch: 'main',
+  })
+  const plainStrategy = renderTestStrategy({
+    resolution: { command: 'pytest -q', source: 'agent-docs' },
+    knobs: NO_KNOBS, jobs: 4, base_branch: 'main',
+  })
+  // The wrapped marker is the thing under test — assert the producer really still
+  // emits it, so this cannot quietly become a test of the plain shape twice.
+  expect(knobStrategy).toContain('Full suite (stage 2), run exactly this — the export lines FIRST')
+
+  for (const [label, strategy, expected] of [
+    ['knob', knobStrategy, 'export NEUTRON_TEST_JOBS=4'],
+    ['plain', plainStrategy, 'pytest -q'],
+  ] as Array<[string, string, string]>) {
+    const f = await fixture()
+    f.input.test_strategy = strategy
+    const options = await f.prepare()
+    const head = 'a'.repeat(40)
+    const payload = {
+      mutationClaim: { file: 'guard.ts', find: 'before', replace: 'after', guard: ['bun', 'test'], control: ['bun', 'test'] },
+      worktreePath: options.production.worktree, branch: 'change', commitSha: head,
+      prNumber: null, diffFile: 'diff', testsPassed: true,
+    }
+    await writeFile(options.workers.build.request.result.path, JSON.stringify({ result: { head, payload } }))
+    const seen: string[] = []
+    const host = f.context.runHost
+    f.context.runHost = async (argv, cwd, env, timeoutMs) => {
+      if (argv[0] === 'bash') { seen.push(argv[2]!); return { ok: true, exit_code: 0, stdout: '', stderr: '' } }
+      return host(argv, cwd, env, timeoutMs)
+    }
+    const report = (await options.policy.reviewSuite!.readCheckpoint({ head, diff: '', pr: null }, 1))?.report
+    // Exactly the host receipt and nothing else: the spread in `readCheckpoint`
+    // omits absent keys, so an equality here also pins that no untrusted worker
+    // field crept into the report.
+    expect({ label, report }).toEqual({ label, report: { hostExitCode: 0 } })
+    expect(seen).toHaveLength(1)
+    // The knob case must carry its export line through: dropping it silently unsets
+    // the job budget the knob render exists to deliver.
+    expect({ label, cmd: seen[0] }).toMatchObject({ label, cmd: expect.stringContaining(expected) })
+  }
 })

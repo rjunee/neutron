@@ -90,10 +90,39 @@ function fullSuiteCommand(strategy: string | null | undefined): string | null {
   const lines = strategy.split('\n')
   const marker = lines.findIndex(line => line.startsWith('Full suite (stage 2), run exactly this'))
   if (marker < 0) return null
+  // THE MARKER SENTENCE CAN WRAP, AND PROSE FOLLOWS IT BEFORE THE COMMANDS.
+  //
+  // This used to `break` on the first line that was not indented, which assumed the
+  // marker line was the whole sentence. It is not: when the project has a jobs knob,
+  // `trident/test-strategy.ts:789-796` emits
+  //
+  //     Full suite (stage 2), run exactly this — the export lines FIRST, on their own lines, so a
+  //     compound test command inherits them:
+  //
+  //       export <JOBS_ENV>=<n>
+  //       <command>
+  //
+  // so the line straight after the marker is unindented prose. The scan broke on it
+  // immediately, returned null, and `readCheckpoint` then reported `report: null`,
+  // which G063 answers as `unknown`. `unknown` is fail-closed, so on any project
+  // WITH a jobs knob — this repo included — no card could reach `merged`.
+  //
+  // Measured against the two real shapes: the knob form parsed to `null`, the plain
+  // form to `bun test`.
+  //
+  // So prose BEFORE the block is skipped, and only once collection has started does
+  // an unindented line end it — the command block is still the first indented run,
+  // never a later one. The scan also stops at a following section heading, so a
+  // marker with no block of its own cannot reach down and adopt the next section's.
   const commands: string[] = []
   for (const line of lines.slice(marker + 1)) {
-    if (commands.length === 0 && line.trim() === '') continue
-    if (!line.startsWith('  ')) break
+    const indented = line.startsWith('  ')
+    if (commands.length === 0) {
+      if (indented) commands.push(line.slice(2))
+      else if (/^(?:STAGE\b|Stage\b|Full suite\b)/.test(line)) break
+      continue
+    }
+    if (!indented) break
     commands.push(line.slice(2))
   }
   return commands.length > 0 ? commands.join('\n') : null
