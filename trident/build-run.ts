@@ -252,6 +252,14 @@ export async function buildRun(input: BuildRunInput, deps: BuildRunDeps, signal:
     let approved = false
     let firstRound = 1
     let resumeFix = false
+    // A resume whose recorded head is a real commit that the branch has since LEFT.
+    // Only this shape must not reuse the round-0 result identities: the retained
+    // `plan:0` / `build:0` files describe the checkpointed revision, and movement
+    // deliberately invalidates that revision and everything derived from it. An
+    // absent head, a wave task, or a ralph task rebuild reuse round 0 as before —
+    // four existing cases pin that, and the first draft of this fix broke all four
+    // by treating every resume as a moved one.
+    let headMoved = false
     let previous: readonly string[] = []
     let previousReview: ReviewProgress | undefined
     let previousBlockingCount = resume?.previousBlockingCount ?? resume?.previousFindings.length ?? 0
@@ -262,6 +270,7 @@ export async function buildRun(input: BuildRunInput, deps: BuildRunDeps, signal:
       if (fullOid(resume.head) && snapshot.head !== 'absent' && !fullOid(snapshot.head)) {
         return failed('Required resume head is unreadable', 'resume-head-unreadable')
       }
+      headMoved = fullOid(resume.head) && fullOid(snapshot.head) && resume.head !== snapshot.head
       // G038: absence/movement rebuilds; only an exact full OID opens a fast path.
       if (fullOid(resume.head) && resume.head === snapshot.head
           && input.mode !== 'wave' && !resume.stage.startsWith('ralph-task-built')) {
@@ -457,7 +466,9 @@ export async function buildRun(input: BuildRunInput, deps: BuildRunDeps, signal:
       return null
     }
     if (!skipBuild) {
-      const stop = await planAndBuild(0)
+      // A rebuild after the head MOVED must not reuse the round-0 result identities
+      // (see `headMoved`). Every other rebuild keeps them.
+      const stop = await planAndBuild(headMoved ? firstRound : 0)
       if (stop) return stop
     }
     if (resumeFix) {
