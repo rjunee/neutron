@@ -164,6 +164,7 @@ test('measurement reads complete committed diff and re-reads persisted pins', as
   expect(snapshot.diff.match(/\+payload/g)?.length).toBe(1000)
   expect(snapshot.diff.endsWith('\n')).toBe(true)
   expect(snapshot.pr).toBeNull()
+  expect(f.calls.some(argv => argv.includes(`${f.base}...${f.tip}`))).toBe(true)
   await f.store.update(f.row.id, { base_sha: null })
   expect(await f.effects.measure()).toMatchObject({ kind: 'unknown', detail: expect.stringContaining('launch base') })
 })

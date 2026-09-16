@@ -447,8 +447,9 @@ export async function detectBaseBranch(
  *
  * THE ORDER IS EVIDENCE-FIRST, and it is the same order `inner-workflow.mjs`'s
  * `diffBase` and `probeCiBase`'s ref use:
- *  1. `base_sha` — the sha `origin/<base>` held AT LAUNCH, which the launcher observed
- *     and cut the build branch from. A sha cannot go stale and it IS the cut point.
+ *  1. `base_sha` — the immutable cut point recorded at launch: the fetched
+ *     `origin/<base>` tip for a new branch, or the proven merge-base when launch adopts an
+ *     existing branch. A sha cannot go stale and it IS the cut point.
  *  2. `refs/remotes/origin/<base>` WHENEVER THAT REF RESOLVES — the remote-tracking ref, in
  *     either merge mode. In pr mode the launch path fetches
  *     `+refs/heads/<base>:refs/remotes/origin/<base>` and REFUSES to start the build

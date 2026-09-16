@@ -146,7 +146,7 @@ export async function publishBuiltCommit(
     if (!cutFromPinnedBase.ok) {
       const base = await resolveBase(run)
       throw new Error(
-        `branch ${branch} does not contain the origin/${base} tip pinned at launch (${run.base_sha.slice(0, 7)}) — not cut from origin/${base}; refusing to publish work built on another lane's branch. Verify the card instead of rebuilding.`,
+        `branch ${branch} does not contain its recorded launch base for origin/${base} (${run.base_sha.slice(0, 7)}) — not based on the launch record; refusing to publish work built on another lane's branch. Verify the card instead of rebuilding.`,
       )
     }
   }
@@ -373,7 +373,7 @@ export async function publishBuiltCommit(
   // straight back to `resolveBase(run)` — `detectBaseBranch`'s bare `main` — on the theory
   // that "there is no remote base at all" is the one case where the name is the best
   // available answer. Two of those three fallback worlds still have a better answer:
-  // `run.base_sha` is the launch-observed tip, and `origin/<base>` is a remote-tracking
+  // `run.base_sha` is the launch-recorded cut point, and `origin/<base>` is a remote-tracking
   // ref the launch path fetches (and, in pr mode, refuses to start without). `diffBaseRef`
   // picks whichever exists and falls back to `refs/heads/<base>` whenever
   // `refs/remotes/origin/<base>` does not resolve — NOT "only in local mode", which is the

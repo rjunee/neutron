@@ -3241,9 +3241,9 @@ describe('orchestrator — APPROVE → done → merge (server-gated)', () => {
 
     expect(final.phase).toBe('failed')
     expect(final.failure_reason).toBe(
-      `publish failed: branch feat-x does not contain the origin/main tip pinned at launch (${base.slice(0, 7)}) — not cut from origin/main; refusing to publish work built on another lane's branch. Verify the card instead of rebuilding.`,
+      `publish failed: branch feat-x does not contain its recorded launch base for origin/main (${base.slice(0, 7)}) — not based on the launch record; refusing to publish work built on another lane's branch. Verify the card instead of rebuilding.`,
     )
-    expect(final.failure_reason).toContain('not cut from origin/')
+    expect(final.failure_reason).toContain('not based on the launch record')
     expect(final.failure_reason).toContain("refusing to publish work built on another lane's branch")
     expect(final.failure_reason).toContain('Verify the card instead of rebuilding')
     expect(final.failure_reason).toContain(base.slice(0, 7))
@@ -7953,6 +7953,29 @@ describe('orchestrator — the resume live head is read in code, never relayed b
     expect(calls.some((c) => c.includes('rev-parse --verify --quiet refs/heads/trident/add-thing'))).toBe(true)
   })
 
+  test('a fresh launch that adopts an older branch records its real base and matching distance', async () => {
+    const BRANCH_BASE = 'a'.repeat(40)
+    const FETCHED_BASE = 'b'.repeat(40)
+    const h = buildHarness({
+      plan: () => ({ result: { verdict: 'APPROVE', branch: 'trident/add-thing' } }),
+      local_branch_tip: BRANCH_BASE,
+      hostResponder: (cmd) => {
+        const joined = cmd.join(' ')
+        if (joined.includes('rev-parse --verify refs/remotes/origin/main^{commit}')) return ok(FETCHED_BASE)
+        if (joined.includes(`merge-base --is-ancestor ${BRANCH_BASE} ${FETCHED_BASE}`)) return ok()
+        if (joined.includes(`rev-list --count --end-of-options ${BRANCH_BASE}..${FETCHED_BASE}`)) return ok('2')
+        return ok()
+      },
+    })
+    const run = await createRun({ merge_mode: 'pr' as MergeMode, branch: 'trident/add-thing' })
+    await launchOnce(h)
+
+    expect(h.inputs).toHaveLength(1)
+    expect(h.inputs[0]!.base_sha).toBe(BRANCH_BASE)
+    expect(store.get(run.id)?.base_sha).toBe(BRANCH_BASE)
+    expect(store.get(run.id)?.base_behind).toBe(2)
+  })
+
   test("a fresh launch refuses another lane's local branch without firing", async () => {
     const BASE = 'b'.repeat(40)
     const TIP = 'c'.repeat(40)
@@ -8421,7 +8444,7 @@ describe('orchestrator — the resume live head is read in code, never relayed b
       // `freshBuild = freshLaunch && base_sha === null`, and `freshLaunch` is false
       // for any seeded row — so `launch()` will NEVER pin a base here. A seed that
       // omitted `base_sha` would leave it null forever, and the publish-time
-      // "does not contain the origin/<base> tip pinned at launch" refusal is gated
+      // "does not contain its recorded launch base" refusal is gated
       // on `run.base_sha !== null`: it could never fire for a salvaged run, nor for
       // any run re-seeded off one. The dispatch chokepoint carries the PRIOR run's
       // pin, which describes this exact head — it only seeds after proving the
