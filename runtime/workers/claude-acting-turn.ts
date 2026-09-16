@@ -27,17 +27,33 @@ interface ObservationClock {
 }
 
 /** Metadata proves creation, not current liveness or completion. */
-async function subagentCreated(directory: string, description: string): Promise<boolean> {
+/** What the poll actually saw. A bare boolean could not say WHY it was false,
+ * and that single bit cost two wrong root causes on #1100: "the directory does
+ * not exist", "it exists and holds other work", and "it holds our worker" are
+ * three different failures that read identically as `false`. */
+interface SubagentObservation {
+  /** The directory was readable. `false` means it does not exist yet. */
+  readonly directoryExists: boolean
+  /** `agent-*.meta.json` files present, whatever work they describe. */
+  readonly metaFiles: number
+  /** One of them names THIS step. */
+  readonly matched: boolean
+}
+
+async function observeSubagents(directory: string, description: string): Promise<SubagentObservation> {
+  let metaFiles = 0
+  let matched = false
   try {
     for (const name of await readdir(directory)) {
       if (!/^agent-.+\.meta\.json$/.test(name)) continue
+      metaFiles += 1
       try {
         const meta = JSON.parse(await readFile(join(directory, name), 'utf8'))
-        if (meta?.description === description) return true
+        if (meta?.description === description) matched = true
       } catch { /* Partial writes and unreadable metadata are not proof. */ }
     }
-  } catch { /* Missing or unreadable directory is not proof. */ }
-  return false
+  } catch { /* Missing or unreadable directory is not proof. */ return { directoryExists: false, metaFiles: 0, matched: false } }
+  return { directoryExists: true, metaFiles, matched }
 }
 
 /** Continue the bound project conversation. No spawn, retry or reply observation. */
@@ -75,12 +91,18 @@ export function createClaudeActingTurn(binding: ClaudeActingSession, clock: Obse
         if (expired()) return unknown()
         // JSON escapes newlines: submitLine accepts one line and owns text/Enter ordering.
         // Forward the complete dispatch spec and effort as data, not shell commands.
+        // A submit that THREW propagates, by an existing contract the suite pins
+        // (`claude-acting-turn.test.ts` — a lost acknowledgement REJECTS). It is
+        // already distinguishable downstream: the outer catch reports "Dispatch
+        // or observation interrupted", not "did not accept the dispatch". Do not
+        // swallow it here to add a detail that already exists.
         await child.submitLine!(
           'Execute the prompt in this JSON dispatch specification: ' + JSON.stringify({ ...spec, effort: request.effort }),
           stopped,
         )
         const dispatchDeadline = Math.min(deadline, clock.now() + DISPATCH_TIMEOUT_MS)
         let accepted = false
+        let seen: SubagentObservation = { directoryExists: false, metaFiles: 0, matched: false }
         while (!expired()) {
           try {
             const trailer = await stat(request.result.path)
@@ -89,9 +111,13 @@ export function createClaudeActingTurn(binding: ClaudeActingSession, clock: Obse
           } catch (error) {
             if ((error as NodeJS.ErrnoException).code !== 'ENOENT') throw error
           }
-          accepted ||= await subagentCreated(subagents, `${request.role}: ${request.step_id}`)
+          seen = await observeSubagents(subagents, `${request.role}: ${request.step_id}`)
+          accepted ||= seen.matched
           if (!accepted && clock.now() >= dispatchDeadline) {
-            return { kind: 'unknown' as const, detail: 'The REPL did not accept the dispatch within its budget; subagent completion is unknown.' }
+            // SAY WHAT WAS OBSERVED, NOT JUST THAT TIME RAN OUT. Still `unknown`:
+            // none of this proves the worker did or did not run. It says WHICH
+            // uncertainty this is, which the bare sentence could not.
+            return { kind: 'unknown' as const, detail: `The REPL did not accept the dispatch within its budget; subagent completion is unknown. submitLine resolved; polled ${subagents} — ${seen.directoryExists ? `directory exists with ${seen.metaFiles} agent metadata file(s), none naming this step` : 'directory does not exist'}.` }
           }
           const nextDeadline = accepted ? deadline : dispatchDeadline
           await clock.pause(Math.min(25, Math.max(1, nextDeadline - clock.now())), stopped)

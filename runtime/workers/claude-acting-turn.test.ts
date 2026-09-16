@@ -356,7 +356,16 @@ for (const scenario of ['late trailer', 'no subagent', 'no trailer', 'throw', 't
       expect(now).toBe(scenario === 'late trailer' ? 50_000 : 25)
     } else if (scenario === 'no subagent') {
       expect(observation?.kind).toBe('unknown')
-      expect(outcome).toEqual({ kind: 'unknown', detail: 'Dispatch turn completion unknown: The REPL did not accept the dispatch within its budget; subagent completion is unknown.' })
+      // THE COUNT IS THE POINT (#1100). The fixture plants two files matching
+      // `agent-*.meta.json` — `agent-other` (valid, wrong step) and
+      // `agent-partial` (malformed) — plus `other.json`, which must NOT be
+      // counted. A counter that cannot reach 2 cannot tell "nothing was
+      // created" from "other work is running here", and that single bit cost
+      // two wrong root causes on this issue.
+      expect(observation).toEqual({ kind: 'unknown', detail: expect.stringContaining('directory exists with 2 agent metadata file(s), none naming this step') })
+      const seen = observation as { kind: 'unknown'; detail: string }
+      expect(seen.detail).toContain('submitLine resolved')
+      expect(seen.detail).toContain(directory)
       expect(now).toBe(DISPATCH_TIMEOUT_MS)
       expect(DISPATCH_TIMEOUT_MS).toBe(35_000)
     } else if (scenario === 'no trailer') {
@@ -368,3 +377,30 @@ for (const scenario of ['late trailer', 'no subagent', 'no trailer', 'throw', 't
     }
   })
 }
+
+// #1100. My own mutation table caught this branch untested: flipping the
+// missing-directory arm to report `directoryExists: true` left every test green.
+// "The transcript directory does not exist" and "it exists and holds other
+// work" are the two facts an operator most needs separated here, so the absent
+// case needs its own case.
+test('dispatch evidence names an ABSENT subagent directory, distinctly from an empty one', async () => {
+  const f = await fixture()
+  f.binding.projects_dir = join(f.dir, 'projects')
+  const transcript = sessionJsonlPath('session', f.dir, f.binding.projects_dir)
+  const directory = join(transcript.slice(0, -'.jsonl'.length), 'subagents')
+  // Deliberately NOT created: this is the case where no worker has ever spawned.
+  let now = 0
+  f.input.request = { ...f.input.request, budget: { wall_ms: 90_000 } }
+  // The wall must exceed DISPATCH_TIMEOUT_MS or the outer deadline wins and this
+  // asserts the trailer message instead of the dispatch one.
+  f.input.timeout_ms = 90_000
+  f.binding.session.child.submitLine = async text => { f.commands.push(text) }
+  const actingTurn = createClaudeActingTurn(f.binding, { now: () => now, pause: async ms => { now += ms } })
+  const observation = await actingTurn(f.input) as { kind: string; detail: string }
+  expect(observation.kind).toBe('unknown')
+  expect(observation.detail).toContain('directory does not exist')
+  expect(observation.detail).toContain(directory)
+  // NOT the phrasing used when the directory is present but holds other work.
+  expect(observation.detail).not.toContain('directory exists with')
+  expect(now).toBe(DISPATCH_TIMEOUT_MS)
+})
