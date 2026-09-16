@@ -16,6 +16,31 @@ import { modelTier } from '@neutronai/trident/model-tiers.ts'
 import { readProjectRepos } from '@neutronai/trident/project-repos.ts'
 import { buildReflectionGuidance } from '@neutronai/trident/reflection-guidance.ts'
 
+/**
+ * WALL BUDGET PER ROLE. This was ONE flat 45 minutes for all four roles, which is
+ * the wrong shape: the roles do not cost remotely the same thing.
+ *
+ * Measured on the fourth acceptance run (5a69ae54) against this repo:
+ *   - `plan` finished in 4m28s. It reads and writes a plan; it runs no suite.
+ *   - `build` was still inside its FIRST suite run at 32 minutes and had not yet
+ *     started the second. A builder runs the suite twice — a baseline before its
+ *     change and a verification after — so 45 minutes could not fit even one
+ *     honest build, and the wall, not the work, decided the outcome.
+ *
+ * `review` is read-only with no write and no network, so it stays close to plan.
+ * `fix` is a builder and gets the builder's budget.
+ *
+ * A budget is a stop, not a target: raising the builder's does not invite a slower
+ * build, it stops a correct build being killed mid-suite and reported as a failure
+ * of the work. It is deliberately not unbounded — a wedged builder must still die.
+ */
+const WALL_MS: Record<'plan' | 'build' | 'review' | 'fix', number> = {
+  plan: 15 * 60_000,
+  review: 15 * 60_000,
+  build: 90 * 60_000,
+  fix: 90 * 60_000,
+}
+
 export interface ProjectBuildContext {
   store: ProjectBuildHostOptions['production']['store']
   phaseUsage: ProjectBuildHostOptions['phaseUsage']
@@ -155,7 +180,7 @@ export async function prepareProjectBuild(input: InnerLoopInput, context: Projec
       tools: role === 'review' ? 'read-only' : 'edit-and-run',
       brief: { path, integrity: briefIntegrity(brief) },
       result: { schema: role === 'plan' ? 'project-plan' : role === 'review' ? 'project-review' : 'project-build', path: join(state, `${role}.result`) },
-      thread: null, budget: { wall_ms: 2_700_000 },
+      thread: null, budget: { wall_ms: WALL_MS[role] },
     } }
   }
   const bodyFile = join(state, 'publication.md')

@@ -357,3 +357,33 @@ test('every role brief names the envelope fields the decoder actually requires',
     expect(brief, `${role} brief must offer blocked`).toContain('blocked')
   }
 })
+
+// THE BUILDER'S WALL MUST OUTLAST THE WORK THE BUILDER IS TOLD TO DO.
+//
+// All four roles used to share one 45-minute wall. A builder runs the suite TWICE
+// — a baseline before its change and a verification after — and on the fourth
+// acceptance run (5a69ae54) the build worker was still inside its FIRST suite run
+// at 32 minutes. The wall, not the work, would have decided that outcome, and a
+// build killed mid-suite is reported as a failure of the change rather than of
+// the budget.
+//
+// Pinned as EXACT values, not a relation. "build > plan" would still pass at
+// 46 minutes, which is the number that could not fit one honest build; the
+// numbers are the claim, so the numbers are what this asserts.
+test('each role carries its own wall budget, and a builder gets room for two suite runs', async () => {
+  const f = await fixture()
+  const options = await f.prepare()
+  const roles = ['plan', 'build', 'review', 'fix'] as const
+  const walls = Object.fromEntries(
+    roles.map(role => [role, options.workers[role].request.budget.wall_ms]),
+  ) as Record<(typeof roles)[number], number>
+  expect(walls).toEqual({
+    plan: 900_000,
+    review: 900_000,
+    build: 5_400_000,
+    fix: 5_400_000,
+  })
+  // The two builders agree, and a builder is not on the reader's budget.
+  expect(walls.build).toBe(walls.fix)
+  expect(walls.build).toBeGreaterThan(walls.plan)
+})
