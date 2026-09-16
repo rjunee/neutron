@@ -628,7 +628,12 @@ export class HerdrHost implements AdoptableHost {
             )
           }
         }
-        throwIfAbandoned()
+        // No abandonment check HERE. There was one, and it was redundant: the guard at the
+        // head of the enqueued work below catches an already-abandoned caller a tick
+        // later, and removing this one left every case green while removing both went
+        // red — two guards for one property. The enqueued guard is the one that also
+        // covers abandonment that lands WHILE a prior actuation holds the queue, so it
+        // is the one that stays.
         if (exited) throw goneAfterExit()
         if (detached) throw goneAfterDetach()
         if (command.includes('\r') || command.includes('\n')) {
