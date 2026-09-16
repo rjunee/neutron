@@ -38,9 +38,7 @@ async function fixture() {
   return { repo, wt, head, git, check }
 }
 
-test('G109 real local worktree and branch allow, landing retains the reviewed branch', async () => {
-  const f = await fixture()
-  expect(await f.check()).toEqual({ kind: 'allow' })
+async function runLocalBuild(f: Awaited<ReturnType<typeof fixture>>, overrides: Partial<BuildRunDeps> = {}) {
   const snapshot = { head: f.head, diff: await f.git('diff', 'base...change'), pr: null }
   const completed: BoundedWorkOutcome = { kind: 'completed', result: snapshot,
     usage: { input_tokens: 0, output_tokens: 0 }, model_reported: 'test', thread_id: null }
@@ -51,9 +49,8 @@ test('G109 real local worktree and branch allow, landing retains the reviewed br
   const deps: BuildRunDeps = {
     readReviewCap: async () => ({ kind: 'known' }),
     assignedBranch: 'change',
-    // Compose the host gate with a simulated prepared context read.
-    reviewArtifact: (request, snapshot) => reviewArtifact(request, snapshot, async path =>
-      path === request.brief.path ? 'brief.context.json' : JSON.stringify({ request, snapshot })),
+    reviewArtifact: (request, measured) => reviewArtifact(request, measured, async path =>
+      path === request.brief.path ? 'brief.context.json' : JSON.stringify({ request, snapshot: measured })),
     prepareWork: async () => {}, admissionGate: async () => f.check(),
     measure: async () => ({ kind: 'known', value: { ...snapshot, head: await f.git('rev-parse', 'change'), diff: await f.git('diff', 'base...change') } }),
     runLeakGatePreflight: async () => ({ status: 'clean', head: f.head, findings: [], skipped_rules: [], attempts: 0, note: '' }),
@@ -70,10 +67,41 @@ test('G109 real local worktree and branch allow, landing retains the reviewed br
       return result.ok ? { kind: 'allow' } : { kind: 'blocked', on: 'not landed' }
     },
   }
-  expect(await buildRun({ run_id: 'run', mode: 'pr', merge_mode: 'local', start: 'fresh', repl_provider: 'pi',
-    workers: { plan: worker, build: worker, review: worker, fix: worker } }, deps, new AbortController().signal)).toMatchObject({ kind: 'merged', snapshot: { pr: null, diff: '' } })
+  return buildRun({ run_id: 'run', mode: 'pr', merge_mode: 'local', start: 'fresh', repl_provider: 'pi',
+    workers: { plan: worker, build: worker, review: worker, fix: worker } }, { ...deps, ...overrides }, new AbortController().signal)
+}
+
+test('G109 real local worktree and branch allow, landing retains the reviewed branch', async () => {
+  const f = await fixture()
+  expect(await f.check()).toEqual({ kind: 'allow' })
+  expect(await runLocalBuild(f)).toMatchObject({ kind: 'merged', snapshot: { pr: null, diff: '' } })
   expect(await f.git('rev-parse', 'change')).toBe(f.head)
   expect(await f.git('merge-base', '--is-ancestor', f.head, 'base')).toBe('')
+})
+
+test('local review-readiness refusal stops the no-PR run before review dispatch', async () => {
+  const f = await fixture()
+  let reviewDispatched = false
+  expect(await runLocalBuild(f, {
+    reviewReadiness: async () => ({ kind: 'blocked', on: 'Local review readiness refused the measured revision' }),
+    reviewGate: async () => { reviewDispatched = true; return { kind: 'approve' } },
+  })).toEqual({ kind: 'blocked', phase: 'review', on: 'Local review readiness refused the measured revision', recipient: 'orchestrator' })
+  expect(reviewDispatched).toBe(false)
+  expect((await host(['git', 'merge-base', '--is-ancestor', f.head, 'base'], f.repo)).ok).toBe(false)
+})
+
+test('local publication preflight uncertainty stops the approved no-PR run before merge', async () => {
+  const f = await fixture()
+  let reviewed = false
+  let merged = false
+  expect(await runLocalBuild(f, {
+    reviewGate: async (_payload, _snapshot, _round, _used, record) => { reviewed = true; record?.({ findings: [], blockingCount: 0 }); return { kind: 'approve' } },
+    runLeakGatePreflight: async () => ({ status: 'unknown', head: f.head, findings: [], skipped_rules: [], attempts: 0, note: 'preflight observation unavailable' }),
+    merge: async () => { merged = true },
+  })).toEqual({ kind: 'unknown', phase: 'publish', step_id: null, detail: 'Leak preflight did not run: preflight observation unavailable' })
+  expect(reviewed).toBe(true)
+  expect(merged).toBe(false)
+  expect((await host(['git', 'merge-base', '--is-ancestor', f.head, 'base'], f.repo)).ok).toBe(false)
 })
 
 test('G109 branch, isolation, repository identity, dirt and head gates refuse', async () => {
