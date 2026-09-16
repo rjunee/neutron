@@ -170,6 +170,8 @@ interface WorkerWorld {
    * array — is an APPROVE with no findings.
    */
   blockersByRound: readonly number[]
+  /** Keep the first finding's identity stable across rounds to exercise G070. */
+  repeatFirstFinding: boolean
   /**
    * ROUNDS WHOSE VERDICT ALSO DECLARES `escalate: { kind: 'design-gap', … }`.
    * That declaration — and only that declaration, with a nonempty `whatIsMissing`
@@ -212,7 +214,8 @@ function verdictFor(world: WorkerWorld, round: number) {
       severity: 'major',
       title: `NOTES.md is missing the round ${round} marker (${index})`,
       evidence: `NOTES.md carries no marker for round ${round}, finding ${index}`,
-      file: 'NOTES.md', symbol: `note-r${round}-f${index}`, rule: 'harness-round-blocker', line: 1,
+      file: 'NOTES.md', symbol: world.repeatFirstFinding && index === 0 ? 'note-repeated-f0' : `note-r${round}-f${index}`,
+      rule: 'harness-round-blocker', line: 1,
     })),
     ...(world.replanRounds.includes(round)
       ? { escalate: { kind: 'design-gap', whatIsMissing: `the round ${round} spec never said where the marker goes` } }
@@ -440,7 +443,8 @@ const suiteStrategy = 'TEST EXECUTION: run the card regression.\n\n'
 
 async function fixture(options: { ralph?: boolean; moreTasks?: boolean; suiteExit?: number
   blockersByRound?: readonly number[]; replanRounds?: readonly number[]
-  maxRounds?: number; mergeMode?: 'pr' | 'local'; blockRoles?: readonly string[] } = {}) {
+  maxRounds?: number; mergeMode?: 'pr' | 'local'; blockRoles?: readonly string[]
+  repeatFirstFinding?: boolean } = {}) {
   const dir = await mkdtemp(join(tmpdir(), 'project-build-e2e-'))
   cleanups.push(() => rm(dir, { recursive: true, force: true }))
   const origin = join(dir, 'origin.git')
@@ -489,7 +493,7 @@ async function fixture(options: { ralph?: boolean; moreTasks?: boolean; suiteExi
   const commands: string[][] = []
   const world: WorkerWorld = { run: spawnCapture, repo, scratch, dispatches: [],
     blockersByRound: options.blockersByRound ?? [], replanRounds: options.replanRounds ?? [],
-    blockRoles: new Set(options.blockRoles ?? []) }
+    blockRoles: new Set(options.blockRoles ?? []), repeatFirstFinding: options.repeatFirstFinding ?? false }
   const runHost = Object.assign(async (argv: string[], cwd?: string, env?: Record<string, string>, timeout?: number) => {
     commands.push([...argv])
     if (argv[0] === 'gh') return github.handle(argv)
@@ -549,7 +553,7 @@ async function fixture(options: { ralph?: boolean; moreTasks?: boolean; suiteExi
     return options
   }
 
-  return { dir, repo, origin, baseSha, store, row, input, context, prepare, github, commands, world, register, key }
+  return { dir, repo, origin, baseSha, db, store, row, input, context, prepare, github, commands, world, register, key }
 }
 
 async function drive(f: Awaited<ReturnType<typeof fixture>>, mode: 'pr' | 'ralph'): Promise<ProjectBuildOutcome> {
@@ -925,6 +929,21 @@ test('a second unconverged round stops at the row-configured ceiling, not at a v
   expect(originMain.stdout).toBe(f.baseSha)
 }, 300_000)
 
+test('a finding repeated after a fix stops before another fix is dispatched', async () => {
+  const f = await fixture({ blockersByRound: [0, 2, 1], repeatFirstFinding: true })
+  const outcome = await drive(f, 'pr')
+  expect(outcome.kind, why(f, outcome)).toBe('blocked')
+  if (outcome.kind === 'blocked') {
+    expect(outcome.on).toBe('Review requires orchestrator arbitration: repeated finding')
+    expect(outcome.phase).toBe('review')
+    expect(outcome.recipient).toBe('orchestrator')
+  }
+  expect(f.world.dispatches.filter(dispatch => dispatch.role === 'fix').map(d => d.step_id))
+    .toEqual([`${f.row.id}:fix:1`])
+  expect(lastCheckpoint(f)).toMatchObject({ stage: 'rejected', round: 2 })
+  expect(f.github.prs[0]!.state).toBe('OPEN')
+}, 300_000)
+
 // ── RESUME ACROSS A DRIVER RESTART ───────────────────────────────────────────
 
 test('a driver restarted between the build and review re-adopts the build instead of redoing it', async () => {
@@ -1005,6 +1024,29 @@ test('a driver restarted during a worker turn refuses to re-fire it', async () =
   expect(f.github.prs[0]!.state).toBe('OPEN')
 }, 300_000)
 
+test('a driver resumed from a rejected checkpoint dispatches the deferred fix', async () => {
+  const f = await fixture({ blockersByRound: [0, 1], maxRounds: 1 })
+
+  const first = await driveUntilTheProcessDies(f, 'fresh')
+  expect(first.kind, why(f, first)).toBe('blocked')
+  if (first.kind === 'blocked') expect(first.on).toBe('Review requires orchestrator arbitration: round ceiling')
+  expect(lastCheckpoint(f)).toMatchObject({ stage: 'rejected', round: 1 })
+  expect(f.world.dispatches.filter(dispatch => dispatch.role === 'fix')).toEqual([])
+
+  f.db.raw().query('UPDATE code_trident_runs SET max_rounds = ? WHERE id = ?').run(3, f.row.id)
+  f.input.run = f.store.get(f.row.id)!
+  f.world.dispatches.length = 0
+  const resumed = await createProjectBuildHost(await f.prepare())
+  const outcome = await resumed.run({ mode: 'pr', start: 'resume' }, new AbortController().signal)
+  expect(outcome.kind, why(f, outcome)).toBe('merged')
+  expect(f.world.dispatches.map(dispatch => dispatch.role)).toEqual([
+    'fix', 'review', 'review', 'synthesis',
+  ])
+  expect(f.world.dispatches[0]!.step_id).toBe(`${f.row.id}:fix:1`)
+  const merged = await spawnCapture(['git', '-C', f.origin, 'show', 'refs/heads/main:NOTES.md'], f.origin)
+  expect(merged.stdout).toBe(`seed\n${f.row.id}:build:0\n${f.row.id}:fix:1`)
+}, 300_000)
+
 // ── LOCAL MERGE MODE ─────────────────────────────────────────────────────────
 
 test('local merge mode reaches merged with no PR, no push and no gh call', async () => {
@@ -1066,14 +1108,13 @@ test('local merge mode reaches merged with no PR, no push and no gh call', async
  *    `recordPhaseUsage` skips the write (`build-host.ts:128`). The skip is
  *    covered; the write is not.
  *  • THE PANEL'S OTHER STOPS. `blockersByRound` drives `fix`, `re-plan` and the
- *    round ceiling, but not G070's repeated-finding stop, a `COMMENT` verdict, a
+ *    round ceiling and G070's repeated-finding stop, but not a `COMMENT` verdict, a
  *    seat that is `deferred`/`unavailable`, or a synthesis that disagrees with the
  *    review worker's trailer — every round here raises fresh identities and every
  *    seat completes. `resumeFix` (the fix dispatched from a RESUMED rejection,
- *    `build-run.ts:461-472`) is also not driven: the resume case below resumes a
- *    `built` checkpoint, not a `rejected` one.
- *  • THE REST OF RESUME. The two cases here resume a `built` checkpoint and a
- *    `pending` one. A `rejected` or `approved` checkpoint, `probePlan`'s
+ *    `build-run.ts:461-472`) is driven alongside the fresh fix path.
+ *  • THE REST OF RESUME. The cases here resume `built`, `pending`, and `rejected`
+ *    checkpoints. An `approved` checkpoint, `probePlan`'s
  *    continuation planner, a resume whose head MOVED since the checkpoint, and a
  *    regenerated diff that disagrees with the measurement are not driven.
  *  • CODEX AND KIMI SEATS, and headless placement generally: both cross-model
