@@ -1,4 +1,4 @@
-# 2026-08-09 — Installable MCP servers
+## 2026-08-09 — Installable MCP servers
 
 The owner can add an MCP server to his assistant, and the assistant can call its tools.
 Before this, the spawned session got exactly two MCP servers, both compiled in — the
