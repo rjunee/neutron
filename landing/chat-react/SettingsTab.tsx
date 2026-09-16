@@ -55,6 +55,14 @@ import {
   type PhaseOverride,
 } from './phase-models-client.ts'
 import {
+  McpServersClientError,
+  WebMcpServersClient,
+  parseEnvLines,
+  serverSummary,
+  splitCommandLine,
+  type McpServersPayload,
+} from './mcp-servers-client.ts'
+import {
   USAGE_POLL_MS,
   WebUsageDashboardClient,
   accountCapacityNote,
@@ -288,6 +296,90 @@ export function SettingsTab({
         setPhaseBusy(false)
       })
   }, [phaseModelsClient, phaseOverrides, phaseBusy])
+
+  // ── installable MCP servers ──
+  // The programs the assistant may start. Every route answers with the whole picture,
+  // so a mutation re-renders from its own reply and there is no local model of the
+  // list to drift — which matters more here than for the settings above, because the
+  // state that changes on approval is not something the client could compute.
+  const mcpClient = useMemo(
+    () => new WebMcpServersClient({ base_url: config.origin, token: config.token, fetchImpl: withSignal }),
+    [config.origin, config.token, withSignal],
+  )
+  const [mcp, setMcp] = useState<McpServersPayload | null>(null)
+  const [mcpBusy, setMcpBusy] = useState(false)
+  const [mcpError, setMcpError] = useState<string | null>(null)
+  const [mcpName, setMcpName] = useState('')
+  const [mcpCommand, setMcpCommand] = useState('')
+  const [mcpEnv, setMcpEnv] = useState('')
+
+  const loadMcp = useCallback((): void => {
+    void mcpClient
+      .load()
+      .then((next) => {
+        if (!mountedRef.current) return
+        setMcp(next)
+        setMcpError(null)
+      })
+      .catch((err: unknown) => {
+        if (!mountedRef.current) return
+        // Reported, never rendered as an empty list: "nothing installed" and "we
+        // could not ask" are different facts, and only one of them is actionable.
+        setMcp(null)
+        setMcpError(err instanceof Error ? err.message : 'could not load your MCP servers')
+      })
+  }, [mcpClient])
+
+  /** Run one mutation and replace the whole payload from its reply. */
+  const mcpMutate = useCallback(
+    (call: () => Promise<McpServersPayload>, onDone?: () => void): void => {
+      if (mcpBusy) return
+      setMcpBusy(true)
+      setMcpError(null)
+      void call()
+        .then((next) => {
+          if (!mountedRef.current) return
+          setMcp(next)
+          setMcpBusy(false)
+          onDone?.()
+        })
+        .catch((err: unknown) => {
+          if (!mountedRef.current) return
+          // The draft is KEPT so a rejected command can be corrected in place.
+          setMcpError(err instanceof Error ? err.message : 'could not save the MCP server')
+          // A REFUSED DECISION CARRIES THE CURRENT LIST — apply it. Otherwise the card
+          // keeps rendering the prompt that was refused for being stale, right next to
+          // the message saying it was stale, and the only way out is a page reload.
+          if (err instanceof McpServersClientError && err.servers !== null) {
+            const servers = err.servers
+            setMcp((prev) => (prev === null ? prev : { ...prev, servers }))
+          }
+          setMcpBusy(false)
+        })
+    },
+    [mcpBusy],
+  )
+
+  const addMcpServer = useCallback((): void => {
+    const { command, args } = splitCommandLine(mcpCommand)
+    const { env, errors } = parseEnvLines(mcpEnv)
+    // A LINE HE MEANT AS A VARIABLE IS NOT DROPPED. Refuse the whole save and say which
+    // line is wrong, rather than installing a server missing a variable it needs — the
+    // reply would then list only the names that saved, and the absent one reads as a
+    // display quirk instead of the reason nothing works.
+    if (errors.length > 0) {
+      setMcpError(errors.join('; '))
+      return
+    }
+    mcpMutate(
+      () => mcpClient.install({ name: mcpName.trim().toLowerCase(), command, args, env }),
+      () => {
+        setMcpName('')
+        setMcpCommand('')
+        setMcpEnv('')
+      },
+    )
+  }, [mcpClient, mcpMutate, mcpName, mcpCommand, mcpEnv])
 
   // ── credentials ──
   const [projectCreds, setProjectCreds] = useState<Rec[]>([])
@@ -653,6 +745,7 @@ export function SettingsTab({
     loadPhaseModels()
     loadAsr()
     loadUsage()
+    loadMcp()
   }, [
     loadCreds,
     loadAccounts,
@@ -661,6 +754,7 @@ export function SettingsTab({
     loadPhaseModels,
     loadAsr,
     loadUsage,
+    loadMcp,
     projectId,
   ])
 
@@ -1222,6 +1316,181 @@ export function SettingsTab({
             >
               {phaseBusy ? 'Saving…' : 'Save'}
             </button>
+          </>
+        )}
+      </section>
+
+      {/* ── MCP servers ───────────────────────────────────────────────────────
+          Machine-scoped like the two settings around it: one installed set serves
+          every project on this box.
+
+          INSTALLING IS NOT APPROVING, and the two controls are deliberately apart.
+          Adding records what the owner wants and shows him what it would do; Approve
+          is a separate press on text the SERVER rendered. Until that press the server
+          is not in the assistant's session at all — which is the entire security
+          model, because an MCP server is a program running with the owner's
+          permissions and he is the only gate.
+
+          `grant_prompt` IS DISPLAYED VERBATIM. Nothing here rebuilds or summarises
+          it: a prompt assembled client-side could describe a command other than the
+          one the server hashed and would run, and an approval prompt that misstates
+          what it grants is worse than no prompt. */}
+      <section className="cset-section" aria-label="MCP servers">
+        <h2 className="cset-h">MCP servers</h2>
+        <p className="cset-sub">
+          Extra tools for your assistant, each one a program on this machine. Adding a
+          server does not start it — you approve it here first, and the request shows
+          exactly what it would run. One set serves every project, and an approved server
+          is attached when your assistant next starts a Claude session.
+        </p>
+
+        {mcpError !== null ? (
+          <p className="cset-error" data-testid="mcp-error">
+            {mcpError}
+          </p>
+        ) : null}
+
+        {mcp === null ? (
+          <div className="cset-empty">
+            {mcpError === null ? 'Loading…' : 'MCP servers unavailable.'}
+          </div>
+        ) : (
+          <>
+            {mcp.servers.length === 0 ? (
+              <div className="cset-empty" data-testid="mcp-empty">
+                Nothing installed yet.
+              </div>
+            ) : null}
+            <ul className="cset-cred-ul">
+              {mcp.servers.map((row) => {
+                const summary = serverSummary(row)
+                return (
+                  <li className="cset-mcp-row" key={row.name} data-testid={`mcp-${row.name}`}>
+                    <div className="cset-mcp-head">
+                      <span className="cset-mcp-name">{row.name}</span>
+                      {row.active ? (
+                        <span className="cset-cred-badge" data-testid={`mcp-${row.name}-active`}>
+                          approved
+                        </span>
+                      ) : null}
+                      {summary.needs_owner ? (
+                        <span className="cset-cred-badge" data-testid={`mcp-${row.name}-attention`}>
+                          needs you
+                        </span>
+                      ) : null}
+                    </div>
+                    <div className="cset-note" data-testid={`mcp-${row.name}-status`}>
+                      {summary.label}
+                    </div>
+                    {/* ONE LINE PER ARGV ENTRY. A space-joined command line renders
+                        `{command:'a b'}` and `{command:'a',args:['b']}` identically
+                        though they run different programs — see `renderMcpServerGrant`.
+                        The row summary must not be less honest than the prompt. */}
+                    <div className="cset-mcp-argv" data-testid={`mcp-${row.name}-command`}>
+                      {row.command}
+                    </div>
+                    {row.args.map((arg, i) => (
+                      <div
+                        className="cset-mcp-argv cset-mcp-arg"
+                        key={`${row.name}-arg-${String(i)}`}
+                        data-testid={`mcp-${row.name}-arg-${String(i)}`}
+                      >
+                        {`arg ${String(i + 1)}  ${arg}`}
+                      </div>
+                    ))}
+                    {row.env_names.length > 0 ? (
+                      <div className="cset-note">Variables: {row.env_names.join(', ')}</div>
+                    ) : null}
+                    {row.approval !== 'approved' ? (
+                      <pre className="cset-mcp-grant" data-testid={`mcp-${row.name}-grant`}>
+                        {row.grant_prompt}
+                      </pre>
+                    ) : null}
+                    <div className="cset-mcp-actions">
+                      {row.approval !== 'approved' ? (
+                        <button
+                          type="button"
+                          className="cset-btn cset-btn-primary"
+                          disabled={mcpBusy}
+                          data-testid={`mcp-${row.name}-approve`}
+                          onClick={() =>
+                            mcpMutate(() => mcpClient.decide(row.name, 'approve', row.grant_hash))
+                          }
+                        >
+                          Approve
+                        </button>
+                      ) : null}
+                      {row.approval === 'pending' ? (
+                        <button
+                          type="button"
+                          className="cset-btn"
+                          disabled={mcpBusy}
+                          data-testid={`mcp-${row.name}-deny`}
+                          onClick={() =>
+                            mcpMutate(() => mcpClient.decide(row.name, 'deny', row.grant_hash))
+                          }
+                        >
+                          Deny
+                        </button>
+                      ) : null}
+                      <button
+                        type="button"
+                        className="cset-btn cset-btn-danger"
+                        disabled={mcpBusy}
+                        data-testid={`mcp-${row.name}-remove`}
+                        onClick={() => mcpMutate(() => mcpClient.remove(row.name))}
+                      >
+                        Remove
+                      </button>
+                    </div>
+                  </li>
+                )
+              })}
+            </ul>
+
+            <fieldset className="cset-field" data-testid="mcp-form">
+              <legend className="cset-label">Add a server</legend>
+              <input
+                className="cset-input"
+                placeholder="example-server"
+                aria-label="MCP server name"
+                data-testid="mcp-form-name"
+                value={mcpName}
+                onChange={(e) => setMcpName(e.target.value)}
+              />
+              <input
+                className="cset-input"
+                placeholder="/usr/local/bin/example-mcp --stdio"
+                aria-label="MCP server command"
+                data-testid="mcp-form-command"
+                value={mcpCommand}
+                onChange={(e) => setMcpCommand(e.target.value)}
+              />
+              <textarea
+                className="cset-input"
+                placeholder={'EXAMPLE_API_KEY=…\nEXAMPLE_REGION=…'}
+                aria-label="MCP server environment variables"
+                data-testid="mcp-form-env"
+                rows={3}
+                value={mcpEnv}
+                onChange={(e) => setMcpEnv(e.target.value)}
+              />
+              <p className="cset-note">
+                One NAME=value per line. Values are stored encrypted and never shown again,
+                so re-saving a server means re-entering them.
+              </p>
+              <div className="cset-form-actions">
+                <button
+                  type="button"
+                  className="cset-btn cset-btn-primary"
+                  disabled={mcpBusy}
+                  data-testid="mcp-form-save"
+                  onClick={addMcpServer}
+                >
+                  {mcpBusy ? 'Saving…' : 'Add'}
+                </button>
+              </div>
+            </fieldset>
           </>
         )}
       </section>

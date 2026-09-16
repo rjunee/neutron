@@ -49,6 +49,7 @@ import {
   type SettingsPermissions,
   type SizeSeverity,
 } from '@neutronai/runtime/adapters/claude-code/index.ts'
+import type { ResolvedOwnerMcpServer } from '@neutronai/runtime/mcp-servers.ts'
 import {
   assertConversationalProviderWired,
   normalizeProvider,
@@ -451,6 +452,20 @@ export interface BuildLlmCallSubstrateInput {
    */
   profile?: SubstrateProfile
   /**
+   * OWNER-INSTALLED MCP servers, resolved PER DISPATCH.
+   *
+   * Forwarded verbatim onto `ClaudeCodeSubstrateOptions.resolveExtraMcpServers`, whose
+   * docblock carries the contract. A THUNK, and re-evaluated on every dispatch for the
+   * same reason `projectIdResolver` is: the substrate is constructed once at boot, so a
+   * captured list would freeze whatever was installed then and the owner's install
+   * would silently do nothing until a restart.
+   *
+   * Set ONLY on the owner's live-chat substrate (`cc-agent-*`). `spawn.ts` requires
+   * `enableToolBridge` as well, so the untrusted import and disposable Trident REPLs
+   * receive nothing regardless.
+   */
+  resolveExtraMcpServers?: () => Promise<ReadonlyArray<ResolvedOwnerMcpServer>>
+  /**
    * Substrate-construction seam. Defaults to `createClaudeCodeSubstrateAuto`
    * (the persistent interactive-REPL substrate — the SOLE production path).
    * Tests inject a fake `Substrate` so composer logic (credential selection +
@@ -725,6 +740,17 @@ export function buildLlmCallSubstrate(
       const provider = normalizeProvider(effectiveProvider)
       assertConversationalProviderWired(provider, providerSource)
       if (provider !== 'anthropic') {
+        // OWNER-INSTALLED MCP SERVERS DO NOT REACH THIS PATH, and the UI says so.
+        // `resolveExtraMcpServers` is forwarded onto the Claude REPL options below,
+        // where `--mcp-config` is what attaches a server; this branch speaks the
+        // OpenAI-family wire protocol and advertises ONLY the in-process tool manifest
+        // (see the HONEST TOOL MANIFEST block in the generator further down). There is
+        // no MCP client here to hand a stdio subprocess to. Extending it would mean
+        // implementing one, which is a feature, not a wiring fix — so the honest move
+        // is that neither client claims an approved server is "running": both say it is
+        // attached when the assistant next starts a CLAUDE session
+        // (`serverSummary` in both mcp-servers clients, and the Settings copy).
+        //
         // Conversation key mirrors the CC warm-pool key dimensions (user +
         // live active project) so continuity is scoped identically across
         // providers.
@@ -945,6 +971,12 @@ export function buildLlmCallSubstrate(
         // P0-1 — native-MCP tool bridge opt-in (conversational substrate only).
         if (input.enableToolBridge !== undefined) {
           opts.enableToolBridge = input.enableToolBridge
+        }
+        // The owner's installed MCP servers, re-resolved by the substrate on every
+        // spawn AND on every warm-reuse check. Forwarding the THUNK (not a resolved
+        // list) is what lets a server installed mid-session reach the next turn.
+        if (input.resolveExtraMcpServers !== undefined) {
+          opts.resolveExtraMcpServers = input.resolveExtraMcpServers
         }
         // Task 6 (T5 write-containment) — forward the ritual write-containment
         // knobs as DIRECT call-args (never through SubstrateProfile, whose

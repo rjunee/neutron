@@ -10,6 +10,22 @@ import type { WatchdogNotifier } from '@neutronai/watchdog/types.ts'
 export interface NotifierCompositionInput {
   /** Approval surface (Telegram inline-keyboard) — supplied by the boot shell. */
   approval_notifier: ApprovalNotifier
+  /**
+   * The `ApprovalManager` the graph should EXPOSE, when the boot shell already built
+   * one. Reused rather than re-constructed, exactly as `channel_router` is: the
+   * manager holds an in-memory map of pending decisions alongside the durable
+   * `tool_approvals` rows, so two instances over one database would disagree about
+   * which requests are still waiting — one would resolve a promise nobody is holding
+   * while the other's caller waited for a decision that had already been made.
+   *
+   * Open supplies it because the MCP-server settings surface
+   * (`gateway/http/app-mcp-servers-surface.ts`) needs the SAME manager the graph's
+   * tool approvals use — approving an installed server and approving a tool call are
+   * the same act on the same table, and a second concept there was explicitly not
+   * wanted. Omitted ⇒ the graph builds its own from `db` + `approval_notifier`,
+   * unchanged for every existing caller.
+   */
+  approval_manager?: ApprovalManager
   /** Watchdog alert surface — app-ws + `system_events` for production (F4). */
   watchdog_notifier: WatchdogNotifier
   /** Reminder dispatcher — substrate-spawn for production, stub for dev. */

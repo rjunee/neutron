@@ -4,7 +4,7 @@
 
 import { dropLocalOwnership, noteLocalOwnership } from './local-ownership.ts'
 import { createHash, randomBytes } from 'node:crypto'
-import { realpathSync, unlinkSync } from 'node:fs'
+import { realpathSync, rmdirSync, unlinkSync } from 'node:fs'
 import { tmpdir } from 'node:os'
 import { dirname, resolve, sep } from 'node:path'
 import type { LiveProcessHandle } from '@neutronai/tools/process-registry.ts'
@@ -51,6 +51,42 @@ export class ReplSession {
    *  explicitly (`buildReadPrompt` runningProjects/runningPeople), not only the
    *  REPL's in-context memory. */
   poisoned = false
+  /**
+   * How many callers hold this session's turn slot OR are queued for it (see
+   * {@link acquireTurn}). Zero means no committed turn is left on this session.
+   *
+   * BUSY STARTS HERE, NOT AT `activeTurn`. A dispatch takes the slot and only later
+   * assigns `activeTurn` — and between the two it does real async work: `await ready`,
+   * and on the import path the whole `/clear` context-reset interstitial, which itself
+   * awaits the REPL going idle. Anything reading ONLY `activeTurn` therefore sees an
+   * idle session during a window that can be seconds long and belongs to a COMMITTED
+   * turn. {@link evictWarmReplsForMcpSurfaceChange} read exactly that, so a revocation
+   * landing in the window terminated the child a dispatch was about to inject into —
+   * stranding the turn, which is the one thing that eviction path is documented as
+   * refusing to do.
+   *
+   * A COUNTER, not a boolean, because `acquireTurn` is a queue: releases are not
+   * strictly nested and a boolean would be cleared by whichever caller finished first.
+   * The release is idempotent so a double-release cannot drive it negative.
+   */
+  turnSlotHeld = 0
+  /**
+   * Set when this session must be torn down as soon as it stops being busy, rather than
+   * merely respawned at the next dispatch.
+   *
+   * DISTINCT FROM `poisoned` ON PURPOSE. `poisoned` says "the next dispatch must not reuse
+   * this child"; it is satisfied lazily and correctly by the abandon-poison paths, where
+   * the child is merely unfit for REUSE and there is no harm in it idling until then. This
+   * flag says "this child must not keep RUNNING", which is a different claim and the one an
+   * MCP revocation makes: the process holds env values under a grant the owner has just
+   * withdrawn. Nothing in this build reaps an idle warm session, so left to the next
+   * dispatch a revoked child survives for as long as the owner stays quiet — unbounded.
+   *
+   * Only {@link evictWarmReplsForMcpSurfaceChange} sets it, and only for a session it found
+   * BUSY (an idle one it retires on the spot). Keeping it separate from `poisoned` is what
+   * stops the abandon-poison paths from acquiring an eager teardown they never asked for.
+   */
+  retireOnIdle = false
   /** Timestamp of the last byte the REPL's PTY emitted. Used to gate the NEXT
    *  turn's inject on the REPL going idle — injecting a channel notification
    *  while claude is still finishing the prior turn drops the notification
@@ -154,6 +190,17 @@ export class ReplSession {
    *  authenticates via `claudeConfigDir`'s credentials.json and self-refreshes,
    *  so there is nothing to fingerprint and the guard is correctly inert. */
   authFingerprint = ''
+  /** Fingerprint of the OWNER-INSTALLED MCP servers this REPL was SPAWNED with
+   *  ({@link mcpSurfaceFingerprint}); `''` when none were wired. `claude` reads
+   *  `--mcp-config` once at startup, so a warm child cannot learn about a server the
+   *  owner installed, approved, revoked or re-keyed since — the reuse guard compares
+   *  this against the CURRENT dispatch's fingerprint and evicts + respawns (resuming
+   *  the transcript) on a change, which is what makes a Settings change take effect
+   *  on the next turn. Deterministic over equal configuration, so an unchanged set
+   *  reuses the warm child and the pool does not thrash. Derived from the servers'
+   *  env VALUES (so a rotated secret reaches the subprocess) and therefore never
+   *  logged or persisted, exactly like {@link authFingerprint}. */
+  mcpFingerprint = ''
   /** Per-session temp config files (`neutron-repl-*-mcp.json` + `*-settings.json`)
    *  this REPL was spawned with. Stashed so teardown can unlink them — an ephemeral
    *  one-shot spawns a fresh pair per call, so without cleanup they accumulate in
@@ -464,8 +511,32 @@ export class ReplSession {
     this.turnTail = new Promise<void>((res) => {
       release = res
     })
+    // COUNTED FROM BEFORE THE WAIT, deliberately. A caller QUEUED behind the active
+    // turn is already committed work on this session: it has passed
+    // `getOrSpawnSession`'s freshness guards and bound itself to THIS child. Counting
+    // only post-wait holders made the count read zero the instant the last active turn
+    // released — so the turn-completion path's `retireOnIdle` check saw an idle session
+    // and killed the child, and the queued caller then resumed from `await prev` into a
+    // dead REPL. That is the stranded turn `evictWarmReplsForMcpSurfaceChange` is
+    // documented as refusing to cause, arriving by the other door.
+    //
+    // The revoked child is therefore retired when the QUEUE drains rather than when the
+    // active turn ends. That is the same bargain the poison-instead-of-kill branch
+    // already strikes: a turn admitted under a grant that was in force runs to
+    // completion, and the teardown happens the moment no committed turn is left.
+    this.turnSlotHeld += 1
     await prev
-    return release
+    let released = false
+    return () => {
+      // IDEMPOTENT. Several of `start`'s early-return paths call the release they were
+      // handed, and a plain `res()` tolerated being called twice because re-resolving a
+      // promise is a no-op — a bare decrement would not, and would drive the count
+      // negative, which reads as "idle" to the evictor.
+      if (released) return
+      released = true
+      this.turnSlotHeld -= 1
+      release()
+    }
   }
 }
 
@@ -552,10 +623,12 @@ async function waitForPidExit(pid: number, budgetMs: number): Promise<boolean> {
 }
 
 /**
- * Unlink a session's temp config files (`neutron-repl-*-mcp.json` + `*-settings.json`).
+ * Unlink a session's temp config files (`neutron-repl-*-mcp.json` + `*-settings.json`)
+ * AND the per-spawn 0700 directory that held them.
  * Best-effort + idempotent (ENOENT ignored), so it is safe to call from both the dispose
  * path and the child-exit handler. Without this, every ephemeral one-shot leaves two
- * permanent files in `tmpdir()` (Argus r5).
+ * permanent files in `tmpdir()` (Argus r5) — and, until the directory went too, an empty
+ * `neutron-repl-<channel>/` per spawn for the life of the box.
  *
  * THE FILESYSTEM CHECK LIVES HERE, NOT IN THE PATH BUILDER (#539, Argus r28).
  * `replSessionConfigPaths` resolves its path textually — it is a pure builder called at
@@ -642,6 +715,22 @@ export function unlinkSessionConfigs(session: ReplSession): void {
       unlinkSync(p)
     } catch {
       /* already gone / never written */
+    }
+    // AND THE 0700 DIRECTORY THAT HELD IT. Unlinking only the files left one empty
+    // `neutron-repl-<channel>/` behind per spawn, forever, in `tmpdir()` — which is not
+    // merely untidy now that the mcp-config carries every owner-installed server's env
+    // VALUES: the directory name is the per-spawn channel name, so the residue is a
+    // public record of how many children this box has run and under which channels.
+    //
+    // `rmdirSync`, NEVER a recursive remove. It fails with ENOTEMPTY on a directory that
+    // still holds something, which is the safe direction: a file in here that is not one
+    // of ours is a file we have no business deleting, and the last unlink of the set is
+    // the only call that finds the directory empty. `real` is the RESOLVED directory that
+    // just passed the beneath-`tmpdir()` test above, so this cannot follow a symlink out.
+    try {
+      rmdirSync(real)
+    } catch {
+      /* not empty yet (an earlier path in this set is still there), or already gone */
     }
   }
 }

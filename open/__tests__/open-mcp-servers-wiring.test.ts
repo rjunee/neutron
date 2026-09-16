@@ -1,0 +1,362 @@
+/**
+ * THE OWNER'S INSTALLED MCP SERVERS REACH THE REAL LIVE-CHAT SPAWN.
+ *
+ * This is the only test in the set that boots the PRODUCTION composer, and it exists
+ * because every other layer of this feature can be complete and correct while the
+ * owner still gets nothing. Three joins have to hold at once, none of them visible
+ * from a unit test of any single module:
+ *
+ *   1. the composer must MOUNT the settings surface (otherwise the owner cannot
+ *      install or, more importantly, APPROVE — and approval is the gate);
+ *   2. the composer must BIND its late store into the resolver the live-chat
+ *      substrate was handed at boot (an unbound holder answers "no servers" forever,
+ *      so an install would appear to succeed and silently never take effect);
+ *   3. the resolver must be threaded onto the live-chat substrate — and ONLY it.
+ *
+ * "The module exists and its tests pass, and the composer never wires it" is this
+ * repo's single most repeated defect, which is why the assertions below run against
+ * the REAL `buildOpenGraphComposer` output rather than a hand-built config: a literal
+ * would have passed throughout the bug.
+ *
+ * THE DISPATCH PATH is the production reminder dispatcher, because that is a real
+ * caller which composes on the owner's warm live-chat substrate (`open/composer.ts`
+ * threads `LIVE_AGENT_TOOL_NAMES` into it for exactly that reason). Driving it is how
+ * the `cc-agent-*` option bag gets captured without standing up the HTTP graph.
+ */
+
+import { afterEach, beforeEach, describe, expect, test } from 'bun:test'
+import { mkdtempSync, rmSync } from 'node:fs'
+import { tmpdir } from 'node:os'
+import { dirname, join } from 'node:path'
+import { fileURLToPath } from 'node:url'
+
+import { applyMigrations } from '@neutronai/migrations/runner.ts'
+import { ProjectDb } from '@neutronai/persistence/index.ts'
+import type { Event } from '@neutronai/runtime/events.ts'
+import type { SessionHandle } from '@neutronai/runtime/session-handle.ts'
+import type { Substrate } from '@neutronai/runtime/substrate.ts'
+import type { ClaudeCodeSubstrateOptions } from '@neutronai/runtime/adapters/claude-code/index.ts'
+import type { ReplSession } from '@neutronai/runtime/adapters/claude-code/persistent/repl-session.ts'
+import type { PtyChild } from '@neutronai/runtime/adapters/claude-code/persistent/pty-host.ts'
+import {
+  childByKey,
+  pool,
+} from '@neutronai/runtime/adapters/claude-code/persistent/pool-state.ts'
+import { buildOpenGraphComposer } from '../composer.ts'
+
+const HERE = dirname(fileURLToPath(import.meta.url))
+const LANDING_DIR = join(HERE, '..', '..', 'landing')
+const SECRET = 'sk-not-a-real-key'
+
+/**
+ * A fixed owner bearer, so the surface can actually be CALLED here.
+ *
+ * The composer mints a random one when this is unset, and there is no way to read it
+ * back from the composition — which would leave every call 401ing and the strongest
+ * assertion in this file quietly testing nothing. Long and diverse enough to pass the
+ * entropy floor in `open/owner-bearer.ts`; it is a per-test value in a temp instance,
+ * never a real credential.
+ */
+const OWNER_BEARER = 'nbt_test_q7Xz-Kd9m2Vp4Rw8Ty6Bn1Cs3Ej5Gh'
+
+const SAVED_ENV_KEYS = [
+  'NEUTRON_OWNER_BEARER',
+  'NEUTRON_HOME',
+  'OWNER_HOME',
+  'NEUTRON_DB_PATH',
+  'NEUTRON_INSTANCE_SLUG',
+  'NEUTRON_LANDING_STATIC_DIR',
+  'NEUTRON_ONBOARDING_CHAT_COOKIE_SECRET',
+  'ANTHROPIC_API_KEY',
+  'CLAUDE_CODE_OAUTH_TOKEN',
+  'NOTIFY_SOCKET',
+] as const
+
+let savedEnv: Record<string, string | undefined> = {}
+let tmpDir: string | undefined
+
+beforeEach(() => {
+  savedEnv = {}
+  for (const k of SAVED_ENV_KEYS) savedEnv[k] = process.env[k]
+  tmpDir = mkdtempSync(join(tmpdir(), 'neutron-open-mcp-wiring-'))
+  process.env['NEUTRON_OWNER_BEARER'] = OWNER_BEARER
+  process.env['NEUTRON_HOME'] = tmpDir
+  process.env['OWNER_HOME'] = tmpDir
+  process.env['NEUTRON_DB_PATH'] = join(tmpDir, 'project.db')
+  process.env['NEUTRON_INSTANCE_SLUG'] = 'owner'
+  process.env['NEUTRON_LANDING_STATIC_DIR'] = LANDING_DIR
+  process.env['NEUTRON_ONBOARDING_CHAT_COOKIE_SECRET'] = 'open-test-secret-0123456789'
+  process.env['ANTHROPIC_API_KEY'] = 'sk-ant-test-mcp-wiring'
+  delete process.env['CLAUDE_CODE_OAUTH_TOKEN']
+  delete process.env['NOTIFY_SOCKET']
+})
+
+afterEach(() => {
+  for (const k of SAVED_ENV_KEYS) {
+    if (savedEnv[k] === undefined) delete process.env[k]
+    else process.env[k] = savedEnv[k]
+  }
+  if (tmpDir !== undefined) rmSync(tmpDir, { recursive: true, force: true })
+  tmpDir = undefined
+})
+
+function cannedHandle(instanceId: string): SessionHandle {
+  const events = (async function* (): AsyncGenerator<Event, void, void> {
+    yield { kind: 'token', text: 'ready' }
+    yield {
+      kind: 'completion',
+      usage: { input_tokens: 1, output_tokens: 1 },
+      substrate_instance_id: instanceId,
+    }
+  })()
+  return {
+    events,
+    async respondToTool(): Promise<void> {},
+    async cancel(): Promise<void> {},
+    tool_resolution: 'internal',
+  }
+}
+
+interface Booted {
+  composition: Record<string, unknown>
+  captured: ClaudeCodeSubstrateOptions[]
+  /** Call a mounted route on the MCP-servers surface with the owner bearer. */
+  api: (method: string, path: string, body?: unknown) => Promise<Response>
+  /** Send one real owner chat turn, which starts the live-chat substrate. */
+  chat: () => Promise<Response>
+  cleanup: () => void
+}
+
+async function boot(): Promise<Booted> {
+  const captured: ClaudeCodeSubstrateOptions[] = []
+  const substrateFactory = (opts: ClaudeCodeSubstrateOptions): Substrate => {
+    captured.push(opts)
+    return { start: () => cannedHandle(opts.substrate_instance_id) }
+  }
+  const db = ProjectDb.open(process.env['NEUTRON_DB_PATH']!)
+  applyMigrations(db.raw())
+  const composer = buildOpenGraphComposer({ env: process.env, substrateFactory })
+  const composition = await composer({ db, project_slug: 'owner' })
+  const rec = composition as unknown as Record<string, unknown>
+  const surface = rec['app_mcp_servers_surface'] as
+    | { handler: (req: Request) => Promise<Response | null> }
+    | undefined
+  const api = async (method: string, path: string, body?: unknown): Promise<Response> => {
+    if (surface === undefined) throw new Error('app_mcp_servers_surface is not mounted')
+    // Through the composer's OWN owner-bearer resolver — the real gate, not a stub.
+    const res = await surface.handler(
+      new Request(`http://x${path}`, {
+        method,
+        headers: {
+          authorization: `Bearer ${OWNER_BEARER}`,
+          ...(body !== undefined ? { 'content-type': 'application/json' } : {}),
+        },
+        ...(body !== undefined ? { body: JSON.stringify(body) } : {}),
+      }),
+    )
+    if (res === null) throw new Error(`surface disclaimed ${method} ${path}`)
+    return res
+  }
+  const appWsSurface = rec['app_ws_surface'] as
+    | { handler: (req: Request) => Promise<Response | null> }
+    | undefined
+  const chat = async (): Promise<Response> => {
+    if (appWsSurface === undefined) throw new Error('app_ws_surface is not mounted')
+    const res = await appWsSurface.handler(
+      new Request('http://x/api/app/chat/send', {
+        method: 'POST',
+        headers: {
+          authorization: `Bearer ${OWNER_BEARER}`,
+          'content-type': 'application/json',
+        },
+        body: JSON.stringify({ body: 'wiring probe', client_msg_id: 'mcp-wiring-probe' }),
+      }),
+    )
+    if (res === null) throw new Error('app_ws_surface disclaimed owner chat')
+    return res
+  }
+  return {
+    composition: rec,
+    captured,
+    api,
+    chat,
+    cleanup: () => {
+      for (const c of (composition.realmode_cleanups ?? []) as Array<() => void>) {
+        try {
+          c()
+        } catch {
+          /* best-effort */
+        }
+      }
+      db.close()
+    },
+  }
+}
+
+/** The live-chat option bag the REAL composer built, via a real dispatch. */
+async function liveAgentOptions(b: Booted): Promise<ClaudeCodeSubstrateOptions> {
+  expect((await b.chat()).status).toBe(200)
+  let opts: ClaudeCodeSubstrateOptions | undefined
+  for (let i = 0; i < 100; i++) {
+    opts = b.captured.find((o) => o.substrate_instance_id.startsWith('cc-agent-'))
+    if (opts !== undefined) break
+    await Bun.sleep(10)
+  }
+  expect(opts).toBeDefined()
+  return opts!
+}
+
+describe('the production composer wires installable MCP servers end to end', () => {
+  test('the settings surface is MOUNTED — without it nothing can be approved', async () => {
+    const b = await boot()
+    try {
+      expect(b.composition['app_mcp_servers_surface']).toBeDefined()
+      // And it really answers: an unauthenticated shape still routes (401), which
+      // proves the handler is the MCP one rather than an unrelated surface.
+      const res = await b.api('GET', '/api/app/mcp-servers')
+      expect([200, 401]).toContain(res.status)
+    } finally {
+      b.cleanup()
+    }
+  })
+
+  test('the live-chat substrate CARRIES the resolver, and no other substrate does', async () => {
+    const b = await boot()
+    try {
+      const agent = await liveAgentOptions(b)
+      expect(typeof agent.resolveExtraMcpServers).toBe('function')
+      // Every other substrate the composer built — including the boot pre-warm's
+      // `cc-llm-*` — must omit it. An installed subprocess belongs to the owner's own
+      // session and nothing else.
+      const others = b.captured.filter((o) => !o.substrate_instance_id.startsWith('cc-agent-'))
+      expect(others.length).toBeGreaterThan(0)
+      for (const o of others) expect(o.resolveExtraMcpServers).toBeUndefined()
+    } finally {
+      b.cleanup()
+    }
+  })
+
+  test('the resolver is BOUND to the real store: it answers empty, then answers the approved server', async () => {
+    // The defect this is here for: an unbound holder answers "none" forever, so the
+    // owner installs a server, sees it listed as approved, and it never appears in
+    // his session. Nothing else in the suite can see that.
+    const b = await boot()
+    try {
+      const agent = await liveAgentOptions(b)
+      const resolve = agent.resolveExtraMcpServers!
+      expect(await resolve()).toEqual([])
+
+      // Install + approve through the REAL surface, whatever auth it demands.
+      const installed = await b.api('POST', '/api/app/mcp-servers', {
+        name: 'example-server',
+        command: '/usr/local/bin/example-mcp',
+        args: ['--stdio'],
+        env: { EXAMPLE_API_KEY: SECRET },
+      })
+      // Asserted, not branched on: a 401 here would silently reduce the rest of this
+      // test to nothing, which is the failure mode a "skip if unauthenticated" guard
+      // creates. The composer binds loopback by default, so the owner bearer resolves.
+      expect(installed.status).toBe(200)
+      // Still nothing wired: installing is not approving.
+      expect(await resolve()).toEqual([])
+
+      // The decision echoes the grant hash off the row the install returned — the server
+      // refuses a press that does not name the spec it is about.
+      const rows = ((await installed.json()) as { servers: Array<{ grant_hash: string }> }).servers
+      expect(rows).toHaveLength(1)
+      const decided = await b.api('POST', '/api/app/mcp-servers/decision', {
+        name: 'example-server',
+        decision: 'approve',
+        grant_hash: rows[0]!.grant_hash,
+      })
+      expect(decided.status).toBe(200)
+
+      const wired = await resolve()
+      expect(wired).toHaveLength(1)
+      expect(wired[0]!.name).toBe('example-server')
+      expect(wired[0]!.env).toEqual({ EXAMPLE_API_KEY: SECRET })
+    } finally {
+      b.cleanup()
+    }
+  })
+
+  test('REVOKING through the real surface retires a warm child — the composer wires `onRevoked`', async () => {
+    // The seam this pins is one line in `open/composer.ts` and nothing else in the suite
+    // touches it. The store is persistence-layer and cannot import the REPL pool, so it
+    // announces a revocation through an `onRevoked` callback the composer supplies; delete
+    // that property and every store test still passes (they construct their own store with
+    // their own spy), every pool test still passes (they call the evictor directly), and a
+    // revoked server's stdio child keeps running with the environment it was handed until
+    // some later dispatch happens to evict it. Built-but-never-wired, in the one place
+    // where the consequence is a live subprocess outliving its grant.
+    //
+    // Asserted through the real HTTP surface and against the real module-level pool — the
+    // composer imports the evictor from the same `pool-state` graph this test does, so a
+    // pool entry planted here is one the production callback can actually see. A test
+    // double for the callback would prove only that a double was called.
+    const b = await boot()
+    try {
+      const installed = await b.api('POST', '/api/app/mcp-servers', {
+        name: 'example-server',
+        command: '/usr/local/bin/example-mcp',
+        args: ['--stdio'],
+        env: { EXAMPLE_API_KEY: SECRET },
+      })
+      expect(installed.status).toBe(200)
+
+      // A warm IDLE session, hand-built rather than spawned: this test is about the
+      // composer's wiring, and standing up a real pty child would make it a pool test
+      // that happens to boot a composer. `hasChildExited` reports the kill so the
+      // assertion is that the CHILD DIED, not merely that a map entry moved.
+      let killed = false
+      const child = {
+        hasExited: (): boolean => killed,
+        kill: (): void => {
+          killed = true
+        },
+        exited: Promise.resolve(0),
+      }
+      const session = {
+        sessionId: 'wiring-probe',
+        child,
+        activeTurn: undefined,
+        turnSlotHeld: 0,
+        poisoned: false,
+        retireOnIdle: false,
+        configPaths: [] as string[],
+        configDir: '',
+        hasChildExited: (): boolean => killed,
+      }
+      const KEY = 'mcp-wiring-probe'
+      pool.set(KEY, Promise.resolve(session as unknown as ReplSession))
+      childByKey.set(KEY, child as unknown as PtyChild)
+
+      // Uninstall — a revocation, which is what has to reach the pool.
+      const removed = await b.api('DELETE', '/api/app/mcp-servers?name=example-server')
+      expect(removed.status).toBe(200)
+      // The callback is awaited inside `remove()`, so by here it has run.
+      expect(killed).toBe(true)
+      expect(pool.has(KEY)).toBe(false)
+      expect(childByKey.has(KEY)).toBe(false)
+    } finally {
+      pool.delete('mcp-wiring-probe')
+      childByKey.delete('mcp-wiring-probe')
+      b.cleanup()
+    }
+  })
+
+  test('the graph is handed the composer\'s OWN ApprovalManager', async () => {
+    // Two managers over one `tool_approvals` table would each hold their own map of
+    // pending decisions. The settings surface approves through the composer's; the
+    // graph must expose that same object or the two disagree about what is waiting.
+    const b = await boot()
+    try {
+      expect(b.composition['approval_manager']).toBeDefined()
+      expect(typeof (b.composition['approval_manager'] as { respondApproval?: unknown }).respondApproval).toBe(
+        'function',
+      )
+    } finally {
+      b.cleanup()
+    }
+  })
+})

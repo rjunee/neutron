@@ -5,6 +5,7 @@ import { describeWorkerObservation, unclassifiedObservation, type WorkerObservat
 // one-shots, and the dropped-inbound replay sink (D2 split).
 
 import { getBestModel } from '../../../models.ts'
+import { neutralizeAbandonedSettle } from '@neutronai/logger/fire-and-forget.ts'
 import type { SessionHandle } from '../../../session-handle.ts'
 import type { AgentSpec, Substrate } from '../../../substrate.ts'
 import { requireReplCwd } from './spawn-configuration-error.ts'
@@ -12,7 +13,7 @@ import { classifyThrownSpawnError } from './classify-spawn-error.ts'
 import { SUBSTRATE_ERROR_CODES } from '../../../errors.ts'
 import { EventChannel } from './event-channel.ts'
 import { type PendingRespawnEntry, enqueuePendingRespawn } from './pending-respawns-queue.ts'
-import { REPL_DEBUG, activeModelWatchdogs, activeWatchdogs, childByKey, cwdDriftAlertState, cwdDriftRespawnState, ephemeralSessions, pendingChildKills, pool, respawnGates, sink, supervisedBySessionKey, wedgeAlertState } from './pool-state.ts'
+import { REPL_DEBUG, activeModelWatchdogs, activeWatchdogs, childByKey, committedDispatches, cwdDriftAlertState, cwdDriftRespawnState, ephemeralSessions, pendingChildKills, pendingSpawns, pool, respawnGates, sink, supervisedBySessionKey, wedgeAlertState } from './pool-state.ts'
 import { getRecord } from './repl-registry.ts'
 import {
   SHUTDOWN_PENDING_SPAWN_GRACE_MS,
@@ -435,6 +436,19 @@ export function createPersistentReplSubstrate(options: PersistentReplSubstrateOp
       // permanently: the exact mirror image of the bug this replaces.
       let watchdogTurnId: string | undefined
       const driver = (async (): Promise<void> => {
+       // COMMITTED TO THIS KEY FROM HERE, and released in the `finally` below. Between the
+       // get-or-spawn and `acquireTurn()` neither `activeTurn` nor `turnSlotHeld` is set,
+       // so a concurrent MCP revocation read this session as idle and killed the child
+       // this dispatch was about to inject into. See {@link committedDispatches}; the
+       // window is not microtask-sized, because the warm-reuse freshness check awaits the
+       // owner-MCP resolver, which reads and decrypts from the database.
+       //
+       // Held for the whole turn rather than dropped the instant the slot is won: from
+       // that point `turnSlotHeld` says the same thing, so releasing early would buy
+       // nothing and add an exit path that can forget to.
+       if (!ephemeral) {
+         committedDispatches.set(sessionKey, (committedDispatches.get(sessionKey) ?? 0) + 1)
+       }
        try {
         try {
           requireReplCwd(options.cwd)
@@ -893,7 +907,35 @@ export function createPersistentReplSubstrate(options: PersistentReplSubstrateOp
         }
         if (session.activeTurn === turn) session.activeTurn = undefined
         if (release) release()
+        // A REVOKED-SURFACE SESSION IS RETIRED HERE, now that it is idle. It was BUSY when
+        // the revocation landed, so `evictWarmReplsForMcpSurfaceChange` could only poison
+        // it — killing it mid-turn would have stranded a turn running under a grant that
+        // WAS in force. That turn has now ended, and waiting for the next dispatch to
+        // respawn is not good enough: nothing reaps an idle warm session, so a child whose
+        // MCP grant was withdrawn would keep its env resident for as long as the owner
+        // stayed quiet. Checked AFTER `release()` so `turnSlotHeld` has already dropped.
+        //
+        // Ephemeral sessions are skipped — the `finally` below disposes them outright.
+        if (
+          !ephemeral &&
+          session.retireOnIdle &&
+          session.activeTurn === undefined &&
+          session.turnSlotHeld === 0 &&
+          childByKey.get(sessionKey) === session.child
+        ) {
+          await retireWarmSession(sessionKey, session)
+        }
        } finally {
+         // RELEASE THE COMMIT FIRST, so the key stops reading as busy before the teardown
+         // below can run. Deleting at zero keeps the map the size of the in-flight set
+         // rather than of every key ever dispatched; a floor at zero because several early
+         // returns above unwind through here and a double decrement would read as a
+         // NEGATIVE count, which `> 0` would then treat as idle.
+         if (!ephemeral) {
+           const outstanding = (committedDispatches.get(sessionKey) ?? 0) - 1
+           if (outstanding > 0) committedDispatches.set(sessionKey, outstanding)
+           else committedDispatches.delete(sessionKey)
+         }
          // LEAK PREVENTION (the crux). Settle the watchdog's outstanding-turn
          // marker on EVERY exit path — normal completion, early return, thrown
          // error, cancellation, or timeout. Turn-id-guarded inside the registry,
@@ -1013,17 +1055,237 @@ export function createPersistentReplSubstrate(options: PersistentReplSubstrateOp
  * because of the 632-orphan / ~19 GB incident, and what replaces it is the guarantee
  * that a surviving pane is always reachable from a row the next boot reads.
  */
+/**
+ * The owner changed WHICH MCP SERVERS MAY RUN — retire the warm children that were
+ * spawned under the old answer, now rather than eventually.
+ *
+ * `getOrSpawnSession`'s `freshMcpServers` guard already evicts a stale child, but it
+ * only runs ON A DISPATCH. A warm REPL can sit idle for hours, so revoking a server
+ * left its stdio subprocess alive that whole time — still holding the copied
+ * environment it was handed, which for a server configured with a secret means that
+ * secret stays resident in a process the owner has just said must not run. The durable
+ * grant is revoked immediately and correctly; it is the PROCESS that lingered.
+ *
+ * IDLE CHILDREN DIE NOW; A BUSY ONE IS POISONED INSTEAD. Killing a child mid-turn
+ * would strand the turn and desync the dev-channel correlation — the cascade the
+ * abandon-poison guard exists for. So a session with an active turn is marked
+ * `poisoned`, which `getOrSpawnSession` already treats like a failed freshness guard:
+ * it evicts and respawns at the next dispatch boundary, resuming the transcript. The
+ * in-flight turn is not made safer by killing it either — it is running under a grant
+ * that WAS in force when it started.
+ *
+ * A COMMITTED DISPATCH COUNTS AS BUSY EVEN BEFORE IT HOLDS THE TURN SLOT, and that takes
+ * two signals neither of the session fields can supply:
+ *
+ *   `committedDispatches` — a dispatch between `getOrSpawnSession` and `acquireTurn()`.
+ *     `activeTurn` is assigned later still, and the slot is taken in the CALLER's
+ *     continuation, so for that whole span a warm session reads as idle. This was the
+ *     real, reproduced failure: a revocation landing in the window killed the child the
+ *     dispatch was about to inject into and the turn failed with a drain error. The window
+ *     is not microtask-sized — an earlier revision of this comment said it was, and was
+ *     wrong. The warm-reuse branch computes the MCP freshness fingerprint by awaiting
+ *     `options.resolveExtraMcpServers()`, which in the real composition reads the
+ *     installed list from the database and decrypts every env value.
+ *
+ *   `pendingSpawns` — a spawn nobody is waiting on. The supervision crash/wedge respawn
+ *     calls `getOrSpawnSession` with no dispatch behind it, so the counter above never
+ *     sees it; without this the evictor would `await` the unresolved promise and block the
+ *     revocation for the whole ready budget.
+ *
+ * Both are read SYNCHRONOUSLY in the snapshot below, and NEITHER IS AWAITED, so no branch
+ * of this function can be made to wait on a spawn.
+ *
+ * WHAT THEY ARE ANSWERED WITH DIFFERS, AND THE DIFFERENCE WAS A HOLE. Marking both
+ * `poisoned` + `retireOnIdle` and stopping there was correct for `committed` — a dispatch
+ * is behind that spawn and its `finally` retires the child the moment it goes idle. It was
+ * NOT correct for `spawning`, whose second population (the supervision respawn, an admin
+ * respawn) has no dispatch and therefore NO TURN DRIVER TO EVER READ THOSE FLAGS: the
+ * resolved child kept running under the revoked configuration, env resident, until some
+ * future dispatch arrived. So the callback now DECIDES on resolution rather than merely
+ * marking — it retires a session that is genuinely idle, and defers only where the
+ * deferral has a receiver. The flags are still set first, so a retire that fails still
+ * leaves the next dispatch refusing to reuse the child.
+ *
+ * WHAT REMAINS, STATED RATHER THAN IMPLIED: nothing between commit and slot, and from the
+ * slot onward `turnSlotHeld` covers it. A turn already RUNNING is still deliberately not
+ * killed — it is poisoned and retired the moment it ends, for the reason two paragraphs
+ * up. That is a choice, not a gap.
+ *
+ * Instance-wide on purpose. Installed servers are instance-wide (one set serves every
+ * project on this box), so a revocation invalidates every warm child, not one key's.
+ * Returns the counts so the caller can log what it retired; never throws — an eviction
+ * failure must not turn into a failed revocation.
+ */
+export async function evictWarmReplsForMcpSurfaceChange(): Promise<{
+  evicted: number
+  poisoned: number
+}> {
+  let evicted = 0
+  let poisoned = 0
+  // SNAPSHOT BOTH BUSY SIGNALS SYNCHRONOUSLY, in the same tick as the pool read. The loop
+  // below awaits, so a lookup taken inside it would be answering about a later moment than
+  // the entry it is deciding about — and for `committed` that is the whole point: the state
+  // being protected is one that changes across exactly such an await.
+  const entries = [...pool.entries()].map(([key, p]) => ({
+    key,
+    p,
+    spawning: pendingSpawns.get(key) === p,
+    committed: (committedDispatches.get(key) ?? 0) > 0,
+  }))
+  for (const { key, p, spawning, committed } of entries) {
+    // A DISPATCH THAT IS COMMITTED BUT NOT YET SERVING IS BUSY, AND IS NOT AWAITED HERE.
+    // Two populations reach this branch and neither can speak through the two session
+    // fields below:
+    //
+    //   `committed` — a dispatch past `getOrSpawnSession` and short of `acquireTurn()`. The
+    //     session exists and looks perfectly idle; killing its child strands the turn with
+    //     a drain error. Reproduced by holding the owner-MCP resolver open, which is inside
+    //     this very window on the warm-reuse path.
+    //   `spawning`  — a spawn that has not resolved, so there is no session to ask at all.
+    //
+    // NEITHER IS AWAITED, and that is deliberate twice over: awaiting is what broke the
+    // cold case (the evictor's continuation resumes several await-hops before the caller's,
+    // so it read a brand-new session as idle and killed the child the dispatch was about to
+    // inject into), and awaiting a cold spawn would also make a deny or an uninstall block
+    // for the whole ready budget.
+    //
+    // So DECIDE on resolution instead: `poisoned` keeps the NEXT dispatch from reusing a
+    // child spawned under a withdrawn grant, `retireOnIdle` has a waiting dispatch's own
+    // completion path tear the child down the moment the queue drains, and — for a spawn
+    // with NO dispatch behind it, where nothing would ever read that flag — the callback
+    // retires the child itself. For an already-resolved warm session the `.then` runs on
+    // the next microtask, which is early enough: the flags are read at turn boundaries,
+    // never mid-turn, and the self-retire re-checks every busy signal before it fires.
+    if (spawning || committed) {
+      // NEUTRALIZED, NOT FIRE-AND-FORGOTTEN. The only way this derived promise rejects is
+      // that the SPAWN failed, which is neither news nor this function's business: the
+      // spawn's own `spawning.catch` already un-pools it and logs, so routing it through
+      // `fireAndForget` would count and log an expected failure a second time. A spawn that
+      // rejected has no child for anyone to retire.
+      neutralizeAbandonedSettle(
+        p.then(async (session) => {
+          session.poisoned = true
+          session.retireOnIdle = true
+          // A SPAWN NOBODY IS WAITING ON HAS NO TURN DRIVER TO HONOUR `retireOnIdle`.
+          //
+          // The two flags above are a message to a turn's completion path, and for the
+          // `committed` population that is exactly right — a dispatch is behind this
+          // spawn, and its `finally` retires the child the moment it goes idle. But
+          // `spawning` catches a SECOND population with no dispatch behind it at all:
+          // the supervision crash/wedge respawn and an admin respawn both call
+          // `getOrSpawnSession` directly, so `committedDispatches` never counted them
+          // and no `finally` will ever read these flags. The freshly-resolved child
+          // then survived under the REVOKED configuration — still holding the env it
+          // was handed — until some future dispatch happened to arrive, which for a
+          // quiet instance is unbounded. That is the same hazard as the idle-warm-child
+          // case this function was written for, reached through the one door where the
+          // deferral had no receiver.
+          //
+          // So retire it HERE when it is genuinely idle, and defer only when something
+          // will actually honour the deferral. The gates are the turn-completion
+          // path's own, re-read AFTER the spawn resolved rather than trusted from the
+          // synchronous snapshot: a dispatch that committed while the spawn was in
+          // flight is caught by the counter and left to its `finally`, and
+          // `childByKey` identity keeps a respawn that already replaced this child
+          // from being torn down by its predecessor's decision.
+          if (
+            (committedDispatches.get(key) ?? 0) === 0 &&
+            session.activeTurn === undefined &&
+            session.turnSlotHeld === 0 &&
+            childByKey.get(key) === session.child
+          ) {
+            await retireWarmSession(key, session)
+          }
+        }),
+      )
+      // COUNTED AS `poisoned`, which is what was DECIDED synchronously. Whether this
+      // entry ends up retired instead is only knowable after the spawn resolves, and
+      // this function must not await that — see the paragraph above the branch. The
+      // counts describe the decision, not the eventual disposal.
+      poisoned += 1
+      continue
+    }
+    let session: ReplSession
+    try {
+      session = await p
+    } catch {
+      // A spawn that rejected is not a child anyone has to retire; its own
+      // `spawning.catch` already removes it from the pool.
+      continue
+    }
+    // BUSY IS `session.activeTurn`, NOT AN `activeTurnRoutes` LOOKUP. Both are cleared
+    // on the same completion path, one line apart, but the route delete is guarded on a
+    // RECOMPUTED key (`activeTurnRoutes.get(activeTurnRouteKey(options))?.turn === turn`)
+    // while the session field is plain identity. A key that does not recompute to the
+    // one used at insert leaves a route entry behind for a session that is idle — and
+    // reading that as "busy" would poison a child this function is supposed to evict,
+    // deferring the kill to the next dispatch and doing nothing beyond the freshness
+    // guard it exists to pre-empt. The first draft did read the routes; `activeTurn` is
+    // the strictly safer signal, so it is the one used.
+    //
+    // THE DIFFERENCE IS NOT COVERED, and an earlier revision of this comment wrongly
+    // said it was. Substituting the routes lookup back in leaves the whole suite —
+    // including the idle-eviction test in `__tests__/owner-mcp-servers.test.ts` —
+    // passing, because in every scenario exercised there the key DOES recompute and the
+    // route entry is duly deleted. The `evicted=0, poisoned=1` reading that was
+    // attributed to the routes lookup turned out to have a different cause entirely: an
+    // evict issued on the same tick `drain` returns, when `activeTurn` has legitimately
+    // not been cleared yet. That is this function answering correctly about a session
+    // that is still, for one more tick, mid-turn.
+    //
+    // BUSY ALSO MEANS "HOLDS THE TURN SLOT". `session.activeTurn` is assigned well after
+    // `acquireTurn()` returns — `await session.ready` sits between them, and on the import
+    // path so does the entire `/clear` context-reset interstitial, which awaits the REPL
+    // going idle. A revocation landing in that window read the session as idle and killed
+    // the child a COMMITTED dispatch was about to inject into, stranding the turn: exactly
+    // the outcome the paragraph above says this function refuses. `turnSlotHeld` is taken
+    // the instant the slot is won, so it covers the gap.
+    if (session.activeTurn !== undefined || session.turnSlotHeld > 0) {
+      session.poisoned = true
+      // AND RETIRED THE MOMENT THE TURN ENDS, not merely at the next dispatch. `poisoned`
+      // alone is a promise the NEXT dispatch will respawn cleanly — and nothing in this
+      // build reaps an idle warm session, so if no next message ever arrives there is no
+      // next dispatch and the child outlives the grant indefinitely, still holding the env
+      // it was handed. That is the very hazard this function exists to close, merely
+      // narrowed to the sessions that happened to be busy at revocation time. The turn's
+      // own completion path honours this flag once the session is genuinely idle.
+      session.retireOnIdle = true
+      poisoned += 1
+      continue
+    }
+    await retireWarmSession(key, session)
+    evicted += 1
+  }
+  return { evicted, poisoned }
+}
+
+/**
+ * Tear one warm session out of the pool and kill its child. Best effort; never throws.
+ *
+ * Extracted so {@link evictWarmReplsForMcpSurfaceChange} and the turn-completion path's
+ * `retireOnIdle` check cannot drift into two different notions of "retired" — the second
+ * caller exists precisely because a session that was BUSY at revocation time still has to
+ * be torn down, and doing that with a copy of this teardown is how the two come to
+ * disagree about, say, unregistering the reply sink.
+ */
+async function retireWarmSession(key: string, session: ReplSession): Promise<void> {
+  pool.delete(key)
+  if (childByKey.get(key) === session.child) childByKey.delete(key)
+  try {
+    session.sizeWatchdog?.stop()
+    if (!session.hasChildExited()) await terminateChild(session.child)
+    sink.unregister(session.sessionId)
+    unlinkSessionConfigs(session)
+  } catch {
+    // ignore — best effort, and the entry is already out of the pool
+  }
+}
+
+/** Test/operator helper: SIGTERM every warm REPL and clear the pool. */
 export async function shutdownAllPersistentRepls(
   opts: {
-    /** Test seam for {@link SHUTDOWN_PENDING_SPAWN_GRACE_MS}. Production takes the
-     *  default; a case that pins the traversal passes a small one so it does not spend
-     *  the real budget proving a spawn never settles. */
     pendingSpawnGraceMs?: number
-    /** Test seam for {@link SHUTDOWN_ADOPTION_GRACE_MS}, same argument. */
     adoptionGraceMs?: number
-    /** Fires once the adoption settle has latched and snapshotted, before it waits — the
-     *  seam a concurrency case needs to act inside that window rather than pace it with a
-     *  sleep. Production passes nothing. */
     onAdoptionSnapshot?: () => void
   } = {},
 ): Promise<void> {

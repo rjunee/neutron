@@ -9,6 +9,7 @@ import { dropLocalOwnership } from './local-ownership.ts'
 import { randomUUID, randomBytes } from 'node:crypto'
 import { mkdirSync, writeFileSync } from 'node:fs'
 import { join } from 'node:path'
+import { mcpSurfaceFingerprint } from '../../../mcp-servers.ts'
 import type { AgentSpec } from '../../../substrate.ts'
 import { type DeadTurnNotice, startApi5xxDeadTurnWatcher } from './api5xx-dead-turn-watcher.ts'
 import { buildReplArgv, resolveReplEffort } from './build-repl-argv.ts'
@@ -21,7 +22,7 @@ import type { SubstrateClassed } from './classify-spawn-error.ts'
 import { paneClaimBlocksUs, spawnReservationBlocksUs } from './signatures.ts'
 import { applyModelFloor } from './model-floor.ts'
 import { type InFlightGate, makeInFlightGate } from './in-flight-gate.ts'
-import { childByKey, pool, replToolBridgeRef, respawnGates, sink } from './pool-state.ts'
+import { childByKey, pendingSpawns, pool, replToolBridgeRef, respawnGates, sink } from './pool-state.ts'
 import {
   registerLiveProcessSafe,
   type LiveProcessHandle,
@@ -55,7 +56,7 @@ import { captureSession, makeJsonlExistsProbe } from './session-capture.ts'
 import { measurePostCompactSize, sessionJsonlPath, startSessionSizeWatchdog } from './session-size-watchdog.ts'
 import { dashifyCwd } from './session-validation.ts'
 import { createWedgedPromptDetector } from './interactive-prompt-deadlock-detector.ts'
-import { DEFAULT_AGENT_BASE_PROMPT, DEFAULT_DEV_CHANNEL_PATH, DEFAULT_TOOLS_BRIDGE_PATH, SESSION_COMPACT_IDLE_QUIESCE_MS, TOOLS_BRIDGE_SERVER_NAME, resolveTranscriptProjectsDir, runOutputScan, sendKey, surfaceSizeAlert } from './signatures.ts'
+import { DEFAULT_AGENT_BASE_PROMPT, DEFAULT_DEV_CHANNEL_PATH, DEFAULT_TOOLS_BRIDGE_PATH, SESSION_COMPACT_IDLE_QUIESCE_MS, TOOLS_BRIDGE_SERVER_NAME, mcpStartupTimeoutMs, resolveTranscriptProjectsDir, runOutputScan, sendKey, surfaceSizeAlert } from './signatures.ts'
 import type { PersistentReplSubstrateOptions, ResumeDirective } from './types.ts'
 import { ReplSession, authFingerprintFor, httpHealth, mergeEnv, terminateChild, unlinkSessionConfigs } from './repl-session.ts'
 import { wireChildExit } from './child-exit-wiring.ts'
@@ -214,6 +215,50 @@ async function spawnSession(
     }
   }
 
+  // OWNER-INSTALLED MCP SERVERS — every approved server the owner added in Settings,
+  // merged in ALONGSIDE the two compiled-in entries above. Before this, the agent's
+  // session got exactly those two and nothing could add a third, so the whole MCP
+  // ecosystem was unreachable from the owner's own assistant (a cutover-parity gap).
+  //
+  // GATED TWICE, and both gates are load-bearing. `resolveExtraMcpServers` is wired
+  // ONLY onto the owner's warm conversational substrate, and `enableToolBridge` is
+  // required here as well — the same trust class the in-process tool bridge rides.
+  // The untrusted history-import (`cc-import-*`) and disposable Trident
+  // (`cc-trident-*`) REPLs run `tools: []` default-deny precisely to close a
+  // prompt-injection vector, and an owner-installed subprocess is a strictly larger
+  // capability than a built-in tool. Two independent conditions mean a future wiring
+  // mistake on either one alone cannot open that vector.
+  //
+  // Gated on the OPT-IN (`options.enableToolBridge`) rather than on `toolBridgeActive`
+  // (whether a bridge was actually attached): an empty tool registry must not silently
+  // switch off the owner's MCP servers, which are unrelated to it.
+  const extraMcpServers =
+    options.enableToolBridge === true && options.resolveExtraMcpServers !== undefined
+      ? await options.resolveExtraMcpServers()
+      : []
+  const wiredExtraNames: string[] = []
+  for (const server of extraMcpServers) {
+    // Defence in depth behind the name validator, which already reserves `neutron`
+    // and the `neutron-` prefix: never let an installed server take a key the
+    // built-ins hold. A collision would either shadow the agent's only way to reply
+    // or be dropped, decided by merge order — the worst kind of coin flip.
+    if (Object.prototype.hasOwnProperty.call(mcpServers, server.name)) {
+      process.stderr.write(
+        `[repl] skipping owner MCP server '${server.name}': name collides with a built-in server\n`,
+      )
+      continue
+    }
+    mcpServers[server.name] = {
+      command: server.command,
+      args: [...server.args],
+      env: { ...server.env },
+    }
+    wiredExtraNames.push(server.name)
+  }
+
+  // The config carries the dev-channel token AND (now) every installed server's
+  // secrets, so the 0600 mode on this write and the 0700 mode on `cfgDir` above are
+  // what keeps them owner-readable. Nothing logs the file's contents.
   writeFileSync(mcpConfigPath, JSON.stringify({ mcpServers }, null, 2), { mode: 0o600 })
   // Task 6 (T5 write-containment) — forward the optional `permissions` block onto
   // the per-session settings write so a ritual write-containment REPL's deny rules
@@ -277,7 +322,20 @@ async function spawnSession(
     // `--tools` only gates the BUILT-IN set, so the security-critical
     // `--tools ""` for untrusted-content REPLs is untouched; this allow-list is
     // the MCP-tool permission grant (`mcp__neutron`), added ONLY here.
-    ...(toolBridgeActive ? { allowedMcpTools: [`mcp__${TOOLS_BRIDGE_SERVER_NAME}`] } : {}),
+    //
+    // Each owner-installed server needs its OWN `mcp__<name>` entry: being present
+    // in `mcpServers` only makes a server START, and its tools would then hit a
+    // per-call permission prompt no headless REPL can answer. Wiring the config and
+    // granting the namespace are two separate links, and a server is only usable
+    // when BOTH hold — which is why the tests assert them separately.
+    ...(toolBridgeActive || wiredExtraNames.length > 0
+      ? {
+          allowedMcpTools: [
+            ...(toolBridgeActive ? [`mcp__${TOOLS_BRIDGE_SERVER_NAME}`] : []),
+            ...wiredExtraNames.map((n) => `mcp__${n}`),
+          ],
+        }
+      : {}),
     ...(options.skip_permissions !== undefined ? { skipPermissions: options.skip_permissions } : {}),
     ...(options.restricted !== undefined ? { restricted: options.restricted } : {}),
     ...(options.permission_mode !== undefined
@@ -293,6 +351,15 @@ async function spawnSession(
   // P0-1 — stamp the bridge attachment so the reuse guard can refuse a
   // bridge-mismatched turn (matches the `requestedToolBridge` computation).
   session.toolBridgeActive = toolBridgeActive
+  // Stamp the installed-MCP-server surface this child was SPAWNED with. `mcpServers`
+  // is read once by `claude` at startup, so a warm child physically cannot learn
+  // about a server installed afterwards — the reuse guard below evicts + respawns
+  // (resuming the transcript) when the fingerprint moves, which is what makes an
+  // install take effect on the next turn. Equal config yields an equal fingerprint,
+  // so an unchanged set reuses the warm child rather than paying a cold spawn per
+  // message. The digest is in-memory only; it is derived from secret values and is
+  // never logged or persisted.
+  session.mcpFingerprint = mcpSurfaceFingerprint(extraMcpServers)
   // Stash the temp config paths so teardown can unlink them (Argus r5 IMPORTANT —
   // ephemeral one-shots write a fresh pair per call; leaked otherwise). The tools
   // manifest is only written when the bridge is active; include it when so.
@@ -330,6 +397,43 @@ async function spawnSession(
   // UNCONDITIONALLY so a host-leaked `MCP_CONNECTION_NONBLOCKING=true` can't
   // re-introduce an async-load window.
   childEnv['MCP_CONNECTION_NONBLOCKING'] = 'false'
+  // …AND BOUND HOW LONG THAT BLOCKING LOAD MAY WAIT, once the config holds a server
+  // Neutron did not write.
+  //
+  // The blocking load above was safe when `--mcp-config` contained only our own two
+  // entries: both are `bun` scripts in this repo that hand-shake in milliseconds, so
+  // "wait for the handshake" could not wait long. An owner-installed server is a
+  // third-party program, and a program that accepts a connection and then never
+  // completes `initialize` would hold the blocking load open — inside the 30 s
+  // `readyBudgetMs` of the post-spawn assertion, on the owner's PRIMARY conversational
+  // REPL. The failure would present as `channel-wedged` and take the bounded-respawn
+  // ladder with it, all because of one badly-behaved MCP server.
+  //
+  // `MCP_TIMEOUT` is `claude`'s own MCP-startup timeout (verified present in the CLI's
+  // env-var table in 2.1.223, alongside `MCP_CONNECTION_NONBLOCKING` itself). Bounding
+  // it well under the assertion's ready budget means a hung server costs one slow
+  // spawn and is reported by `claude` as a server that failed to start, instead of
+  // taking the session down. Set ONLY when an installed server is actually wired, so
+  // the no-MCP-servers spawn keeps exactly the startup behaviour it has today.
+  //
+  // The bound is PER SERVER while the ready budget covers the whole spawn, so it is
+  // divided across the servers actually wired rather than being a flat 10 s that N
+  // hung servers could each honour while collectively blowing the budget.
+  //
+  // DIVIDED BY EVERY ENTRY IN THE CONFIG, NOT BY THE OWNER'S COUNT. `MCP_TIMEOUT` is
+  // process-wide: `claude` applies it to each server in `--mcp-config`, and this config
+  // always also holds the dev-channel reply sink and (when attached) the tools bridge.
+  // Passing `wiredExtraNames.length` here therefore understated the serial worst case by
+  // the built-ins on every spawn — two owner servers got 20 s / 2 = 10 s each across FOUR
+  // configured servers, 40 s against the assertion's 30 s ready budget.
+  //
+  // `Object.keys(mcpServers).length` is the exact count that is about to be serialised
+  // one screen above, so this cannot drift if a third built-in is ever added — unlike
+  // `wiredExtraNames.length + 2`, which would be a copy of a fact this object already
+  // holds. See `mcpStartupTimeoutMs` for what the floor does not fix.
+  if (wiredExtraNames.length > 0) {
+    childEnv['MCP_TIMEOUT'] = String(mcpStartupTimeoutMs(Object.keys(mcpServers).length))
+  }
   if (options.skipTrustSeed !== true) {
     const trustInput: Parameters<typeof ensureClaudeTrust>[0] = { cwd }
     if (options.claudeConfigDir !== undefined) trustInput.configDir = options.claudeConfigDir
@@ -1349,6 +1453,33 @@ export async function getOrSpawnSession(
   // fires; it survives a future edit that varies the bridge at a finer grain).
   const requestedToolBridge =
     options.enableToolBridge === true && replToolBridgeRef.current !== undefined
+  // ── THE COLD PATH MUST NOT SUSPEND, AND "READ FIRST" IS NOT ENOUGH ──────────
+  // Two concurrent dispatches on one key de-duplicate onto a single spawn only
+  // because NOTHING SUSPENDS between this read and the `pool.set` at the end of the
+  // function: the second caller's `pool.get` observes the first's in-flight promise
+  // and awaits it. That is a property of the WHOLE cold path, not of the read's
+  // position — an `await` placed after this line and before the `pool.set` reopens
+  // the window just as widely, because the second caller then reads a pool the first
+  // has not written yet and both spawn.
+  //
+  // An earlier revision of this function got that wrong. It hoisted the pool read
+  // above an unconditional `await options.resolveExtraMcpServers()` and a comment
+  // here claimed the hoist "restores the await-free window" — which was a claim about
+  // a mode the code did not enter. The resolver is awaited for the WARM-REUSE
+  // COMPARISON only, and the fingerprint of zero installed servers is `''`, so the
+  // suspension fired on every cold start for every owner: two `claude` children on
+  // one transcript (the one-owner-per-transcript violation `open/composer.ts`
+  // documents a real second concurrent producer for), one of which outlived
+  // `shutdownAllPersistentRepls()` still holding an open MCP config file.
+  //
+  // So the resolve now happens INSIDE the warm branch, where the function has
+  // already awaited `existing` and a concurrent caller is therefore looking at the
+  // same warm session rather than at an empty pool. The cold path is once again
+  // straight-line from read to set. `__tests__/owner-mcp-servers.test.ts` pins both
+  // halves: two concurrent cold dispatches spawn exactly ONE child, and a cold start
+  // calls the resolver exactly ONCE — `spawnSession`'s own read, which it has always
+  // done. A second call there would mean this await is back above the branch.
+  const existing = pool.get(sessionKey)
   // A resume-session-picker recovery (row #7) poisons the warm session AND records
   // the disk-recovered session id on it; captured below (for BOTH the alive-evict
   // and already-exited paths) so the clean respawn resumes THAT transcript (Codex
@@ -1359,7 +1490,6 @@ export async function getOrSpawnSession(
   // registry `has_session: false` instead of re-`--resume`ing the stale id into the
   // picker (Codex P2). Captured alongside `evictedResume` below.
   let evictedForceFresh = false
-  const existing = pool.get(sessionKey)
   if (existing !== undefined) {
     const session = await existing
     // Capture the resume-picker recovery's directives BEFORE the alive/exited branch
@@ -1374,9 +1504,10 @@ export async function getOrSpawnSession(
       evictedForceFresh = true
     }
     if (!session.hasChildExited()) {
-      // Two reuse guards gate serving a turn on the warm child; BOTH must pass or
+      // Reuse guards gate serving a turn on the warm child; EVERY one must pass or
       // the child is evicted + respawned (resuming the captured session when
-      // supervised, so conversational context survives the respawn):
+      // supervised, so conversational context survives the respawn). The third,
+      // `freshMcpServers`, is documented at its own declaration below:
       //
       //   1. SECURITY-CRITICAL (Codex-r1-P1) tool-surface guard: a warm REPL is
       //      locked to the tool surface it was SPAWNED with. A turn requesting a
@@ -1420,6 +1551,30 @@ export async function getOrSpawnSession(
       // P0-1 defense-in-depth: never serve a bridge-mismatched warm child.
       const freshBridge = session.toolBridgeActive === requestedToolBridge
       const freshCredential = session.authFingerprint === authFingerprintFor(options.env)
+      // INSTALLED-MCP-SERVER guard: `mcpServers` is read once by `claude` at
+      // startup, so a warm child cannot learn about a server the owner installed
+      // (or approved, or revoked, or re-keyed) since it spawned. Evicting +
+      // respawning here is what makes a settings change take effect on the very
+      // next turn; because the fingerprint is deterministic over equal
+      // configuration, an unchanged set never fires it, so the pool does not
+      // thrash. The respawn resumes the captured session, so the conversation
+      // survives the swap.
+      //
+      // RESOLVED HERE, not at the top of the function: the resolver is async, and on
+      // the COLD path an await between the `pool.get` above and the `pool.set` below
+      // double-spawns (see the block at the `pool.get`). Inside this branch the
+      // function has already awaited `existing`, so a concurrent caller is looking at
+      // the same warm session, not at an empty pool. Computed with the identical
+      // double gate `spawnSession` applies, so the fingerprint compared here is
+      // exactly the one a spawn would stamp — a mismatch in the gating would mean
+      // either a warm child that never picks up an install, or one evicted on every
+      // single turn.
+      const requestedMcpFingerprint = mcpSurfaceFingerprint(
+        options.enableToolBridge === true && options.resolveExtraMcpServers !== undefined
+          ? await options.resolveExtraMcpServers()
+          : [],
+      )
+      const freshMcpServers = session.mcpFingerprint === requestedMcpFingerprint
       // ABANDON-POISON guard (2026-06-18 warm-session hang fix): a session whose
       // prior turn was abandoned (caller timeout / substrate turn-timeout) is left
       // with a RUNAWAY turn still executing on the warm child + a desynced
@@ -1428,7 +1583,9 @@ export async function getOrSpawnSession(
       // never delivers (the cascade). Evict + respawn a clean REPL instead, exactly
       // like the freshness guards below. NOT silent — log so the eviction is
       // observable in prod.
-      if (freshSurface && freshBridge && freshCredential && !session.poisoned) return session
+      if (freshSurface && freshBridge && freshCredential && freshMcpServers && !session.poisoned) {
+        return session
+      }
       // Set when the poisoned child was QUARANTINED rather than evicted: it stays
       // alive (it hosts live work) and must not be terminated or reported dead.
       let quarantined = false
@@ -1563,6 +1720,20 @@ export async function getOrSpawnSession(
   }
   const spawning = spawnWithChannelWedgeRespawn(sessionKey, options, spec, resume)
   pool.set(sessionKey, spawning)
+  // MARKED PENDING FOR AS LONG AS IT IS PENDING. A cold spawn is a dispatch that has
+  // already committed to this child — it just cannot say so through `activeTurn` /
+  // `turnSlotHeld` yet, because the session those live on does not exist until this
+  // promise resolves. `evictWarmReplsForMcpSurfaceChange` reads this map to tell a
+  // committed cold spawn apart from a genuinely idle warm child; see its docblock. A
+  // `Promise` cannot be asked whether it has settled, and asking by awaiting it is the
+  // one observation that changes the answer — so the answer is recorded here instead.
+  // Cleared on BOTH outcomes, and identity-guarded so a settle from a superseded spawn
+  // cannot clear the entry of the one that replaced it.
+  pendingSpawns.set(sessionKey, spawning)
+  const clearPending = (): void => {
+    if (pendingSpawns.get(sessionKey) === spawning) pendingSpawns.delete(sessionKey)
+  }
+  spawning.then(clearPending, clearPending)
   // THE SESSION REMEMBERS THE PROMISE IT WAS PUBLISHED UNDER (r55). It cannot do this itself:
   // the promise exists before the session does, and this is the only scope that holds both.
   spawning.then(
