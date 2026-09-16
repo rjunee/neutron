@@ -47,6 +47,7 @@ import {
   ListToolsRequestSchema,
   CallToolRequestSchema,
 } from '@modelcontextprotocol/sdk/types.js'
+import { createToolCallHandler } from './tools-bridge-handler.ts'
 
 const SINK_PORT = parseInt(process.env['SINK_PORT'] || '0', 10)
 const SINK_TOKEN = process.env['SINK_TOKEN'] || ''
@@ -107,75 +108,11 @@ mcp.setRequestHandler(ListToolsRequestSchema, async () => ({
   })),
 }))
 
-mcp.setRequestHandler(CallToolRequestSchema, async (req) => {
-  const toolName = req.params.name
-  const args = req.params.arguments ?? {}
-  try {
-    const respText = await postToSink('/tool-call', {
-      session_id: SESSION_ID,
-      tool_name: toolName,
-      args,
-      call_id: `${SESSION_ID}:${toolName}`,
-    })
-    let parsed: { ok?: boolean; result?: unknown; error?: string }
-    try {
-      parsed = JSON.parse(respText) as typeof parsed
-    } catch {
-      // The sink always answers JSON; a non-JSON body is an infra fault.
-      return {
-        content: [{ type: 'text', text: `error: tool bridge got non-JSON response: ${respText}` }],
-        isError: true,
-      }
-    }
-    if (parsed.ok === false || parsed.error !== undefined) {
-      return {
-        content: [{ type: 'text', text: `error: ${parsed.error ?? 'tool dispatch failed'}` }],
-        isError: true,
-      }
-    }
-    // Return the structured result as a JSON text block so the model gets the
-    // full payload (arrays/objects) it can reason over, not a lossy summary. A
-    // handler that returns undefined (the sink's `Response.json` drops the key,
-    // so `parsed.result` is `undefined`) coalesces to the literal `null` — never
-    // a `text: undefined` block, which would serialise to MCP content with no
-    // `text` field and hand the model an empty/degraded result.
-    const payload =
-      parsed.result === undefined
-        ? 'null'
-        : typeof parsed.result === 'string'
-          ? parsed.result
-          : JSON.stringify(parsed.result, null, 2)
-    return { content: [{ type: 'text', text: payload }] }
-  } catch (e) {
-    const msg = e instanceof Error ? e.message : String(e)
-    process.stderr.write(`neutron-tools-bridge: tool ${toolName} failed: ${msg}\n`)
-    return { content: [{ type: 'text', text: `error: ${msg}` }], isError: true }
-  }
-})
-
-// --- Helper: POST to the substrate reply-sink (same loopback as dev-channel) ---
-
-/**
- * SINGLE attempt — NO retry. Tool calls are NON-idempotent: a write tool
- * (reminder_create, note, dispatch_agent, …) ran by the sink handler must not
- * be re-executed if the loopback connection drops AFTER the handler ran but
- * BEFORE the response is read (fetch would reject and a retry would double-write).
- * `/tool-call` carries no idempotency key, so a failed POST surfaces as an
- * `isError` tool_result the model can retry DELIBERATELY (vs. a silent duplicate).
- * This is the deliberate divergence from the dev-channel's retried `/reply`
- * (which is idempotent — turn-id correlated, and a stale re-post is rejected).
- */
-async function postToSink(path: string, body: Record<string, unknown>): Promise<string> {
-  const resp = await fetch(`http://127.0.0.1:${SINK_PORT}${path}`, {
-    method: 'POST',
-    headers: {
-      'Content-Type': 'application/json',
-      ...(SINK_TOKEN ? { 'X-Sink-Token': SINK_TOKEN } : {}),
-    },
-    body: JSON.stringify(body),
-  })
-  return await resp.text()
-}
+mcp.setRequestHandler(CallToolRequestSchema, createToolCallHandler({
+  port: SINK_PORT,
+  token: SINK_TOKEN,
+  sessionId: SESSION_ID,
+}))
 
 // --- Graceful + orphan-safe shutdown (ported from dev-channel ISSUES #217) ---
 // When the spawning `claude` dies, the stdio transport closes; without these
