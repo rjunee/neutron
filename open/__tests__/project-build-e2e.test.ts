@@ -179,6 +179,10 @@ interface WorkerWorld {
    * turns the panel into `{ kind: 're-plan' }` instead of `{ kind: 'fix' }`.
    */
   replanRounds: readonly number[]
+  /** ROUNDS WHOSE REVIEWER AND SYNTHESIS ANSWER WITH AN UNRESOLVED COMMENT. */
+  commentRounds: ReadonlySet<number>
+  /** ROUNDS WHOSE ADVERSARIAL PANEL SEAT CANNOT PRODUCE A VERDICT. */
+  unavailableSeatRounds: ReadonlySet<number>
   /**
    * ROLES THIS WORKER REPORTS AS BLOCKED. Every role brief sanctions exactly this:
    * `"kind" — "completed" when you finished the role, or "blocked" when you could
@@ -209,7 +213,7 @@ interface WorkerWorld {
 function verdictFor(world: WorkerWorld, round: number) {
   const blockers = world.blockersByRound[round] ?? 0
   return {
-    verdict: blockers > 0 ? 'REQUEST_CHANGES' : 'APPROVE',
+    verdict: world.commentRounds.has(round) ? 'COMMENT' : blockers > 0 ? 'REQUEST_CHANGES' : 'APPROVE',
     findings: Array.from({ length: blockers }, (_, index) => ({
       severity: 'major',
       title: `NOTES.md is missing the round ${round} marker (${index})`,
@@ -246,7 +250,9 @@ function literalWorker(world: WorkerWorld) {
     const request: BoundedWorkRequest = JSON.parse(requestLine.slice(marker.length))
 
     const brief = await readFile(request.brief.path, 'utf8')
+    const panelRound = request.result.schema === 'verdict' ? JSON.parse(brief).round as number : undefined
     const stopped = world.blockRoles.has(request.role)
+      || (request.role === 'review' && panelRound !== undefined && world.unavailableSeatRounds.has(panelRound))
     const inner = stopped ? undefined : await performRole(world, request, brief)
 
     // Write ONLY what the brief asked for. See `envelopeFieldsNamedBy`. A blocked
@@ -444,7 +450,8 @@ const suiteStrategy = 'TEST EXECUTION: run the card regression.\n\n'
 async function fixture(options: { ralph?: boolean; moreTasks?: boolean; suiteExit?: number
   blockersByRound?: readonly number[]; replanRounds?: readonly number[]
   maxRounds?: number; mergeMode?: 'pr' | 'local'; blockRoles?: readonly string[]
-  repeatFirstFinding?: boolean } = {}) {
+  repeatFirstFinding?: boolean; commentRounds?: readonly number[]
+  unavailableSeatRounds?: readonly number[] } = {}) {
   const dir = await mkdtemp(join(tmpdir(), 'project-build-e2e-'))
   cleanups.push(() => rm(dir, { recursive: true, force: true }))
   const origin = join(dir, 'origin.git')
@@ -493,7 +500,9 @@ async function fixture(options: { ralph?: boolean; moreTasks?: boolean; suiteExi
   const commands: string[][] = []
   const world: WorkerWorld = { run: spawnCapture, repo, scratch, dispatches: [],
     blockersByRound: options.blockersByRound ?? [], replanRounds: options.replanRounds ?? [],
-    blockRoles: new Set(options.blockRoles ?? []), repeatFirstFinding: options.repeatFirstFinding ?? false }
+    blockRoles: new Set(options.blockRoles ?? []), repeatFirstFinding: options.repeatFirstFinding ?? false,
+    commentRounds: new Set(options.commentRounds ?? []),
+    unavailableSeatRounds: new Set(options.unavailableSeatRounds ?? []) }
   const runHost = Object.assign(async (argv: string[], cwd?: string, env?: Record<string, string>, timeout?: number) => {
     commands.push([...argv])
     if (argv[0] === 'gh') return github.handle(argv)
@@ -875,6 +884,39 @@ test('a REQUEST_CHANGES panel dispatches a fix worker and the re-review merges',
   expect(f.github.prs[0]!.state).toBe('MERGED')
 }, 300_000)
 
+test('a COMMENT panel stops as an unresolved verdict and never merges', async () => {
+  const f = await fixture({ commentRounds: [1] })
+  const outcome = await drive(f, 'pr')
+  expect(outcome, why(f, outcome)).toMatchObject({
+    kind: 'blocked', phase: 'review', recipient: 'orchestrator',
+    on: 'Review has an unresolved verdict without nonblocking findings',
+  })
+  expect(f.world.dispatches.map(dispatch => dispatch.role))
+    .toEqual(['plan', 'build', 'review', 'review', 'synthesis'])
+  expect(f.world.dispatches.filter(dispatch => dispatch.role === 'fix')).toEqual([])
+  expect(f.github.prs).toHaveLength(1)
+  expect(f.github.prs[0]!.state).toBe('OPEN')
+  const originMain = await spawnCapture(['git', '-C', f.origin, 'rev-parse', 'refs/heads/main'], f.origin)
+  expect(originMain.stdout).toBe(f.baseSha)
+}, 300_000)
+
+test('an unavailable panel seat stops by configured seat and never synthesizes or merges', async () => {
+  const f = await fixture({ unavailableSeatRounds: [1] })
+  const outcome = await drive(f, 'pr')
+  expect(outcome, why(f, outcome)).toMatchObject({
+    kind: 'blocked', phase: 'review', recipient: 'orchestrator',
+    on: 'Review seat review_adversarial (anthropic) is unavailable',
+  })
+  expect(f.world.dispatches.map(dispatch => dispatch.role))
+    .toEqual(['plan', 'build', 'review', 'review'])
+  expect(f.world.dispatches.some(dispatch => dispatch.role === 'synthesis')).toBe(false)
+  expect(f.world.dispatches.some(dispatch => dispatch.role === 'fix')).toBe(false)
+  expect(f.github.prs).toHaveLength(1)
+  expect(f.github.prs[0]!.state).toBe('OPEN')
+  const originMain = await spawnCapture(['git', '-C', f.origin, 'rev-parse', 'refs/heads/main'], f.origin)
+  expect(originMain.stdout).toBe(f.baseSha)
+}, 300_000)
+
 test('a design-gap escalation re-plans and rebuilds instead of dispatching a fix', async () => {
   // THE RE-PLAN BRANCH (`build-run.ts:564-574`). The panel reaches it only through a
   // valid self-declared claim: `escalate.kind === 'design-gap'`, a nonempty
@@ -1147,11 +1189,12 @@ test('local merge mode reaches merged with no PR, no push and no gh call', async
  *    `recordPhaseUsage` skips the write (`build-host.ts:128`). The skip is
  *    covered; the write is not.
  *  • THE PANEL'S OTHER STOPS. `blockersByRound` drives `fix`, `re-plan` and the
- *    round ceiling and G070's repeated-finding stop, but not a `COMMENT` verdict, a
- *    seat that is `deferred`/`unavailable`, or a synthesis that disagrees with the
- *    review worker's trailer — every round here raises fresh identities and every
- *    seat completes. `resumeFix` (the fix dispatched from a RESUMED rejection,
- *    `build-run.ts:461-472`) is driven alongside the fresh fix path.
+ *    round ceiling and G070's repeated-finding stop; separate cases drive a
+ *    `COMMENT` verdict and an `unavailable` seat. A seat that remains `deferred`,
+ *    or a synthesis that disagrees with the review worker's trailer, is not driven.
+ *    Every ordinary round here raises fresh identities. `resumeFix` (the fix
+ *    dispatched from a RESUMED rejection, `build-run.ts:461-472`) is driven
+ *    alongside the fresh fix path.
  *  • THE REST OF RESUME. The cases here resume `built`, `pending`, and `rejected`
  *    checkpoints. An `approved` checkpoint, `probePlan`'s
  *    continuation planner and a regenerated diff that disagrees with the
