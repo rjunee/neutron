@@ -150,7 +150,17 @@ test('mapped claim agrees with independent host measurement', async () => {
   expect(await compare(await runTrailer(), measured)).toMatchObject({ kind: 'unknown', phase: 'review' })
 })
 
-for (const field of ['head', 'diff', 'pr'] as const) {
+// `diff` is NOT here, and its absence is deliberate. The head pins the exact commit,
+// so with the host's own base the diff is DETERMINED — a differing diff cannot
+// describe a different revision, only different git output formatting. Acceptance
+// run 5a69ae54 stopped on exactly that: the host measures with `--full-index` and the
+// worker returned an abbreviated `index 00000000..3936b410`, same commit, same
+// content. The host discards the worker's copy regardless (`snapshot = measured`).
+//
+// A MISSING or EMPTY diff is a different thing and is still caught — see the
+// `missing ${field} stays unknown` and `empty ${field} is unknown` loops below,
+// which keep DIFF. Malformed is not the same as formatted differently.
+for (const field of ['head', 'pr'] as const) {
   test(`mapped claim disagrees when host ${field} differs`, async () => {
     const different = { ...measured, [field]: field === 'pr' ? { number: 9, head: 'other', state: 'OPEN' } : 'other' }
     expect(await compare(await runTrailer(), different))
