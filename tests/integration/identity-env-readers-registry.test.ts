@@ -381,6 +381,8 @@ const KNOWN_READERS: Readonly<Record<string, string>> = {
     'Broad regex literal at runtime/entity-format.ts:152 matches an identity-name candidate; registered conservatively, without claiming an env read or trimming behavior.',
   'runtime/entity-slug.ts':
     'Broad regex literal at runtime/entity-slug.ts:35 matches an identity-name candidate; registered conservatively, without claiming an env read or trimming behavior.',
+  'runtime/mcp-servers.ts':
+    'Broad regex literal at runtime/mcp-servers.ts:138 (MCP_SERVER_ENV_NAME_RE, the POSIX env-var-NAME shape) matches every identity-name candidate, because those names are legal env-var names. NOT a reader: the regex validates the names an owner types into an installed MCP server spec and the file never touches process.env. Pinned in runtime/__tests__/mcp-servers.test.ts.',
   'runtime/slug-grammar.ts':
     'Broad regex literal at runtime/slug-grammar.ts:160 matches an identity-name candidate; registered conservatively, without claiming an env read or trimming behavior.',
   'scribe/reflect/jaccard.ts':
