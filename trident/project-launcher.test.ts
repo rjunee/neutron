@@ -11,6 +11,7 @@ import {
   createProjectLauncher,
   projectBuildDriverReservation,
   projectBuildDriverReservationFromPriorGateway,
+  projectBuildMeasuredUnknown,
   projectBuildPending,
   projectBuildResult,
 } from './project-launcher.ts'
@@ -61,15 +62,67 @@ test('launch returns before completion and hands terminal result to the existing
   expect(f.errors).toEqual([])
 })
 
-test('unknown persists step and worker across a new outer loop despite blocked observation', async () => {
+/**
+ * THE PARK, AND WHY IT IS A FAILURE RATHER THAN A WAIT.
+ *
+ * This case used to assert `waiting: true, changed: false` — it PINNED the park.
+ * The reasoning was that a measured `unknown` is "preserved for reconciliation",
+ * but nothing reconciles it, and this test itself proves the three doors are shut:
+ * the launcher refuses to re-fire over a pending row (asserted below), the only
+ * key that can rewrite `inner_result` is the reservation string no reader holds
+ * any more (`store.ts:1044`), and the `max_inflight_ms` reaper is never reached
+ * because the pending short-circuit is checked ahead of it.
+ *
+ * So a driver that measured and could not find out made its run IMMORTAL, and
+ * silently: the outcome write moves neither `last_advanced_at` nor the stage
+ * events, so the row looks exactly like one whose driver never returned. Two live
+ * acceptance runs parked in `forge-init` on this, each after its plan dispatch
+ * reported `unknown` at the worker wall.
+ *
+ * A settled `unknown` now FAILS VISIBLY. The reservation case — a promise this
+ * gateway really is still running — is the next case, and still waits.
+ */
+test('a settled driver unknown fails the run instead of parking it forever', async () => {
   const f = await fixture()
   await createProjectLauncher(f.options)(f.input)
   f.complete(unknown)
   await settle()
   const run = f.store.get(f.input.run.id)!
   expect(JSON.parse(run.inner_result!).projectBuild).toEqual(unknown)
-  // The driver's measured uncertainty has no gateway ownership marker, so it
-  // remains pending across a restart rather than being mistaken for a dead promise.
+  // Still `pending`, and still not a PRIOR gateway's promise: the fact that
+  // separates it from a live driver is the absence of a reservation, not the kind.
+  expect(projectBuildPending(run.inner_result)).toBe(true)
+  expect(projectBuildDriverReservationFromPriorGateway(run.inner_result)).toBe(false)
+  expect(projectBuildMeasuredUnknown(run.inner_result)).toBe('Transport uncertain')
+  // The driver settling is now OBSERVABLE. Without this event the wall firing and
+  // the wall never firing are the same row.
+  expect(f.store.stageEvents(f.input.run.id).map(event => event.stage)).toContain('build-driver-settled')
+  expect(JSON.parse(f.store.stageEvents(f.input.run.id).find(event => event.stage === 'build-driver-settled')!.meta!))
+    .toEqual({ kind: 'unknown', detail: 'Transport uncertain' })
+
+  const orch = buildTridentOrchestrator({ fire_workflow: async () => { throw Error('must not re-fire') }, db_path: f.input.db_path,
+    base_branch: 'main', run_host: honourDiffOutput(async () => ({ ok: true, exit_code: 0, stdout: '', stderr: '' })),
+    observe_run_worker: async () => ({ state: 'blocked', detail: 'prompt', observed_at: new Date().toISOString(), screen: 'prompt' }) })
+  const out = await orch.step(run)
+  expect(out.waiting).toBe(false)
+  expect(out.changed).toBe(true)
+  expect(out.run.phase).toBe('failed')
+  // The driver's own cause survives onto the row, so the stop is diagnosable.
+  expect(out.run.failure_reason).toContain('Transport uncertain')
+  // And the reason the park was fatal rather than merely slow: nothing re-fires
+  // over a pending row, so a run left waiting here can never be restarted either.
+  expect(await createProjectLauncher(f.options)(f.input)).toEqual({ status: 'unconfirmed', error: 'Existing project build requires reconciliation' })
+  expect(f.starts()).toBe(1)
+})
+
+test('a live reservation from this gateway still waits rather than being reaped', async () => {
+  const f = await fixture()
+  // Fired, reserved, and the driver promise deliberately left unresolved.
+  expect((await createProjectLauncher(f.options)(f.input)).status).toBe('fired')
+  const run = f.store.get(f.input.run.id)!
+  expect(projectBuildPending(run.inner_result)).toBe(true)
+  // A reservation is present, so this is NOT the settled-unknown shape.
+  expect(projectBuildMeasuredUnknown(run.inner_result)).toBeNull()
   expect(projectBuildDriverReservationFromPriorGateway(run.inner_result)).toBe(false)
   const orch = buildTridentOrchestrator({ fire_workflow: async () => { throw Error('must not re-fire') }, db_path: f.input.db_path,
     base_branch: 'main', run_host: honourDiffOutput(async () => { throw Error('must not reap') }),
@@ -79,8 +132,6 @@ test('unknown persists step and worker across a new outer loop despite blocked o
   expect(out.changed).toBe(false)
   expect(out.run.subagent_run_id).toBe('worker-7')
   expect(out.run.inner_result).toBe(run.inner_result)
-  expect(await createProjectLauncher(f.options)(f.input)).toEqual({ status: 'unconfirmed', error: 'Existing project build requires reconciliation' })
-  expect(f.starts()).toBe(1)
 })
 
 test('competing launchers reserve once and stopped rows reject both reservation and completion', async () => {

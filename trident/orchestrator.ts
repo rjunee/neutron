@@ -1,4 +1,4 @@
-import { projectBuildDriverReservation, projectBuildPending } from './project-launcher.ts'
+import { projectBuildDriverReservation, projectBuildMeasuredUnknown, projectBuildPending } from './project-launcher.ts'
 import {
   DEFAULT_MAX_INFRA_RETRIES,
   INFRA_RETRY_BACKOFF_MS,
@@ -2952,6 +2952,31 @@ export function buildTridentOrchestrator(
         return { run, changed: false, waiting: true, note: 'project driver recovery claim lost — re-read next tick' }
       }
       return stepCore(claimed, unknownWorkerObservation('project driver restarted by gateway recovery', now()))
+    }
+    // A DRIVER THAT SETTLED `unknown` IS NOT A DRIVER THAT IS STILL RUNNING.
+    //
+    // `projectBuildPending` is true for both, and the branch below waits on both.
+    // For a settled `unknown` that wait never ends: the promise is gone, the
+    // reservation bytes no reader holds any more are the only key that can rewrite
+    // `inner_result`, the launcher refuses to re-fire over a pending row
+    // (`project-launcher.ts:82`), and the `max_inflight_ms` reaper is never reached
+    // because this short-circuit is checked ahead of it. The word "reconciliation"
+    // in the note below names something that does not exist.
+    //
+    // Measured: two live acceptance runs parked in `forge-init` here, and neither
+    // `last_advanced_at` nor the stage events moved when the outcome was written
+    // (`store.ts:1044-1051`), so both looked like runs that never dispatched at all.
+    // `unknown` must fail visibly, not park — and failing routes the row through
+    // `reconcile_stranded` below, which is the salvage a preserved branch or an open
+    // PR actually needs.
+    const measuredProjectDriverUnknown = projectBuildMeasuredUnknown(run.inner_result)
+    if (!isTerminalPhase(run.phase) && measuredProjectDriverUnknown !== null) {
+      return {
+        run: failedRun(run, `project driver settled without determining the outcome: ${measuredProjectDriverUnknown}`, false),
+        changed: true,
+        waiting: false,
+        note: `${run.phase} → failed (project driver outcome unknown)`,
+      }
     }
     if (!isTerminalPhase(run.phase) && projectBuildPending(run.inner_result)) {
       return { run, changed: false, waiting: true, note: 'Project driver outcome unknown; preserving worker and step for reconciliation' }

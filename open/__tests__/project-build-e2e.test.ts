@@ -1083,3 +1083,69 @@ test('local merge mode reaches merged with no PR, no push and no gh call', async
  *    worktree, base-drift overlap, moved-branch and non-isolated-worktree stops
  *    are not driven, nor is `confirmLocalMerge` failing after a merge.
  */
+
+// ─────────────────────────────────────────────────────────────────────────────
+// A DISPATCH SEAM THAT NEVER RETURNS MUST STOP AT THE WORKER WALL
+// ─────────────────────────────────────────────────────────────────────────────
+
+/**
+ * WHY THESE EXIST, AND WHAT THEY RULED OUT.
+ *
+ * Two live acceptance runs parked in `forge-init` immediately after
+ * `build-work-prepared`, with no failure and no subagent, and the first reading
+ * was that the plan step's 15-minute wall had not fired — `last_advanced_at` was
+ * frozen 18 minutes deep and no stage event had followed.
+ *
+ * These three cases hang each seam between `build-work-prepared` and the worker's
+ * result, one at a time, on a 1.5s wall:
+ *
+ *   • `submitLine`   — the herdr RPC never acknowledges the dispatch line;
+ *   • `acquireTurn`  — the session's turn mutex is never granted;
+ *   • silent worker  — the line lands and no result file is ever written.
+ *
+ * All three stop, in ~1.6s, as a measured `unknown` naming which seam it was. So
+ * the wall DOES fire, the dispatch path IS bounded, and a park cannot be produced
+ * here — which is what moved the investigation downstream, to what the LAUNCHER
+ * does with an `unknown` (`trident/project-launcher.ts`) rather than to what the
+ * dispatch does. Keep these: they are the control that says a future park is not
+ * in this path.
+ *
+ * WHAT THEY DO NOT COVER: a seam that hangs the event loop itself, and the real
+ * herdr transport. Both are faked here by construction.
+ */
+function registerSession(f: Awaited<ReturnType<typeof fixture>>, session: Record<string, unknown>) {
+  supervisedBySessionKey.set(f.key, { substrate_instance_id: 'cc-agent-e2e',
+    project_id: 'e2e-project', skip_permissions: true, extra_dirs: [f.dir] } as never)
+  pool.set(f.key, Promise.resolve(session as never))
+  cleanups.push(() => { pool.delete(f.key); supervisedBySessionKey.delete(f.key) })
+}
+
+const neverSettles = () => new Promise<never>(() => {})
+
+for (const seam of ['submitLine', 'acquireTurn', 'silent-worker'] as const) {
+  test(`a hung ${seam} stops the plan step at its wall as a measured unknown`, async () => {
+    const f = await fixture()
+    const options = await f.prepare()
+    // The real wall is 15 minutes (`PROJECT_BUILD_WALL_MS.plan`); only its LENGTH is
+    // shortened here, not the mechanism that enforces it.
+    options.workers.plan.request = { ...options.workers.plan.request, budget: { wall_ms: 1_500 } }
+    registerSession(f, {
+      sessionId: 'e2e-session', cwd: f.dir, hasChildExited: () => false,
+      child: { submitLine: seam === 'submitLine' ? neverSettles : async () => {} },
+      acquireTurn: seam === 'acquireTurn' ? neverSettles : async () => () => {},
+    })
+    const host = await createProjectBuildHost(options)
+    const started = Date.now()
+    const outcome = await host.run({ mode: 'pr', start: 'fresh' }, new AbortController().signal)
+    // It STOPS — the load-bearing half. A park would hit the test timeout instead.
+    expect(Date.now() - started, why(f, outcome)).toBeLessThan(30_000)
+    expect(outcome, why(f, outcome)).toMatchObject({ kind: 'unknown', phase: 'plan' })
+    // WHICH uncertainty is deliberately not pinned. `claudeInReplRunner`'s dispatch
+    // wall (`claude-in-repl.ts:76`) and `createClaudeActingTurn`'s own
+    // (`claude-acting-turn.ts:73`) are armed from the SAME budget microseconds apart,
+    // so either may win the race and each words its stop differently. Both are
+    // `unknown`; nothing here depends on which one spoke.
+    expect((outcome as { detail: string }).detail, why(f, outcome)).toMatch(/unknown/)
+    expect(f.github.prs).toEqual([])
+  }, 60_000)
+}
