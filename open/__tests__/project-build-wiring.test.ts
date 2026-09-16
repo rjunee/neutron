@@ -88,7 +88,12 @@ test('option sources preserve pin, selected provider, workflow and unavailable s
   // The command still reaches the shell verbatim; what is new is that the child's
   // own output goes to the run's transcript file instead of into the gateway's heap.
   expect(f.commands.at(-1)!.slice(0, 2)).toEqual(['bash', '-lc'])
-  expect(f.commands.at(-1)![2]!).toBe(suiteScript('bun test', join(f.dir, 'state', encodeURIComponent(f.input.run.id), 'suite-round-2.log')))
+  const log = join(f.dir, 'state', encodeURIComponent(f.input.run.id), 'suite-round-2.log')
+  expect(f.commands.at(-1)![2]!).toBe(suiteScript('bun test', log))
+  // Not only "whatever `suiteScript` says" — the log the round writes to is named
+  // here independently, and the redirect and the command are both asserted present.
+  expect(f.commands.at(-1)![2]!).toContain(`>>'${log}' 2>&1`)
+  expect(f.commands.at(-1)![2]!).toContain('\nbun test\n')
   // A claim about a DIFFERENT revision answers nothing.
   expect(await options.policy.reviewSuite!.readCheckpoint({ head: 'b'.repeat(40), diff: '', pr: null }, 2)).toBeNull()
   const strategy = f.input.test_strategy
