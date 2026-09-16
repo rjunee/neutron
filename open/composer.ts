@@ -6632,9 +6632,11 @@ export function buildOpenGraphComposer(
     // re-entered with a continue-work turn (same substrate entry + tool surface
     // as a fired reminder — `gateway/proactive/work-wakeup.ts` for why this must
     // be server-side, never a session-scheduled wakeup). Registered
-    // UNCONDITIONALLY (like the kimi gauge): on an LLM-less box
-    // `listOutstanding` returns [] and every tick is a cheap no-op, so a
-    // credential added later starts waking work without a restart.
+    // UNCONDITIONALLY (like the kimi gauge), so a credential added later starts
+    // waking work without a restart. On an LLM-less box the tick is NOT a silent
+    // no-op: `readiness` below returns not-ready, the sweep returns before
+    // selection with `unavailable = 1`, and the loop logs it. A tick that
+    // CANNOT act must never look like one with NOTHING to do (#1085).
     const workWakeup = buildWorkWakeupLoop({
       // An item a live run is driving already has a wakeup driver (the trident
       // tick) — waking it here would double-drive one work item. "Live" is
