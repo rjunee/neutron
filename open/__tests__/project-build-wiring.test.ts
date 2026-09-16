@@ -373,9 +373,10 @@ test('every role brief names the envelope fields the decoder actually requires',
 test('each role carries its own wall budget, and a builder gets room for two suite runs', async () => {
   const f = await fixture()
   const options = await f.prepare()
+  const roles = ['plan', 'build', 'review', 'fix'] as const
   const walls = Object.fromEntries(
-    (['plan', 'build', 'review', 'fix'] as const).map(role => [role, options.workers[role].request.budget.wall_ms]),
-  )
+    roles.map(role => [role, options.workers[role].request.budget.wall_ms]),
+  ) as Record<(typeof roles)[number], number>
   expect(walls).toEqual({
     plan: 900_000,
     review: 900_000,
