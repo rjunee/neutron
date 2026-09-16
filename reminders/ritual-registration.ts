@@ -781,7 +781,12 @@ export function createRitualRegistrationService(
             // when the cause was a throw, so name the real cause here: without
             // this line an approval that never appears is indistinguishable from
             // one that was never due.
-            log(`ritual approval render failed id=${row.id} ritual=${match[2]}: ${(err as Error).message}`)
+            try {
+              log(`ritual approval render failed id=${row.id} ritual=${match[2]}: ${(err as Error).message}`)
+            } catch {
+              // Reporting is best-effort: a broken logger must not replace the
+              // render failure or prevent reraisePending from expiring this row.
+            }
             return null
           }
         })

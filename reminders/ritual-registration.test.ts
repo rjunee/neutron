@@ -1178,4 +1178,24 @@ describe('automatic pending approval sweep', () => {
     expect(reraised.idempotency_key).toBe(`ritual-reminder:${good.id}:1`)
     expect(h.approvals.get(good.id)?.status).toBe('pending')
   })
+  test('a throwing render-failure logger cannot change sweep recovery', async () => {
+    let now = 1_000_000
+    let throwOnLog = false
+    const h = makeHarness(() => now, () => {
+      if (throwOnLog) throw new Error('logger unavailable')
+    })
+    await h.service.propose(proposal())
+    await h.service.propose(proposal({ id: 'weekly-review', prompt: 'Summarise the week.' }))
+    await settle()
+    const bad = h.approvals.findByToolName(SLUG, 'ritual:daily-digest')[0]!
+    const good = h.approvals.findByToolName(SLUG, 'ritual:weekly-review')[0]!
+    await db.run(`UPDATE tool_approvals SET args_json = ? WHERE id = ?`, ['{not json', bad.id])
+    now += 86_400_000
+    throwOnLog = true
+
+    await expect(h.service.sweepPendingApprovals()).resolves.toBeUndefined()
+    expect(h.approvals.get(bad.id)?.status).toBe('expired')
+    expect(h.approvals.get(good.id)?.status).toBe('pending')
+    expect(h.emitted.filter((p) => p.metadata.ritual_id === 'weekly-review')).toHaveLength(2)
+  })
 })
