@@ -296,14 +296,20 @@ async function performRole(world: WorkerWorld, request: BoundedWorkRequest, brie
     // A plan turn writes no commit, so the measured revision is unchanged.
     world.plannerChoices.push(context.planner)
     if (context.planner === 'next') {
-      const committed = context.committedPlan as { body: string; uncheckedCount: number }
-      const topTask = committed.body.split('\n').find((line: string) => /^\s*- \[ \]\s+/.test(line))!
+      // THE WORKER MUST NOT DO G029'S JOB. This used to read `context.committedPlan`
+      // and emit the first unchecked task and the remaining count itself — so the
+      // case passed whether or not `build-run.ts:438` replaced them, and a review
+      // lane proved it by deleting that guard and watching the test stay green.
+      //
+      // The worker is a MODEL: it returns a plausible, UNTRUSTED claim, and here a
+      // deliberately wrong one. Only the host's measured replacement can turn that
+      // into the real task, so the assertions below now have exactly one source.
       return { ...snapshot, payload: {
-        implementationPlan: committed.body,
-        topTask,
-        executionSpec: `Complete ${topTask}`,
+        implementationPlan: 'WORKER CLAIM — not the committed plan',
+        topTask: '- [ ] WORKER INVENTED a task that is not in the committed plan',
+        executionSpec: 'Complete the worker-invented task',
         complexity: 'mechanical',
-        remainingTasks: committed.uncheckedCount - 1,
+        remainingTasks: 99,
       } }
     }
     const more = brief.includes('MORE TASKS')
