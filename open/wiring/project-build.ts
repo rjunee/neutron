@@ -85,6 +85,55 @@ export interface ProjectBuildContext {
  */
 export const REVIEW_SUITE_TIMEOUT_MS = 45 * 60_000
 
+/**
+ * THE SUITE TRANSCRIPT MUST NOT TRAVEL THROUGH THE GATEWAY'S HEAP.
+ *
+ * The other half of #1042. The placement worry was stated as "the suite runs on
+ * the gateway event loop", and the WAIT is not what occupies it — measured on this
+ * box, a 5s child under `spawnCapture` let a 100ms timer fire 49 times in 5017ms,
+ * because `Bun.spawn` + `await proc.exited` is ordinary non-blocking I/O.
+ *
+ * What occupies the loop is the CAPTURE. `spawnCapture` pipes the child and reads
+ * both streams into JS strings (`trident/git-mode.ts:1215-1218`) with no cap, and
+ * `readCheckpoint` below reads NOTHING from them — only `exit_code` and
+ * `timed_out`. Measured with the same helper: 256 MiB of child stdout cost one
+ * 523ms event-loop stall (longest gap between 100ms ticks; 6 ticks in 1025ms) and
+ * took the process from 37 MB to 832 MB RSS. Both scale with transcript size and
+ * neither is bounded.
+ *
+ * And this suite is the one command on that seam whose transcript is unbounded:
+ * `scripts/run-tests.sh` `cat`s every chunk and every isolation lane's log to its
+ * own stdout (`scripts/run-tests.sh:628` serial, the `JOBS -gt 1` emit block, and
+ * `run_pglite_lane`/`run_device_lane`/`run_http_lane`), and it is largest in
+ * exactly the case this gate exists for — a red suite, with every failure's output
+ * and stack attached.
+ *
+ * So the child's own stdout and stderr go to a file in the run's state directory
+ * and the gateway keeps O(1) of them. The receipt G063 classifies — the exit code
+ * — is unchanged, and the transcript is still on disk for a human.
+ *
+ * `: >LOG` FIRST, AND A MARKER, BECAUSE A REDIRECT THAT CANNOT OPEN IS `unknown`.
+ * A bare `{ … } >LOG` whose redirect fails exits 1 with no output, which reaches
+ * `assessReviewSuite` as a red suite (`trident/gates/review-suite.ts:50`, "FULL
+ * SUITE NOT PROVEN") — a "the answer is no" manufactured out of "could not find
+ * out". The probe is a simple command, so a failure leaves the shell alive to
+ * print the marker and exit 97, and the caller omits `hostExitCode` for it, which
+ * is the same honest `unknown` a timeout gets.
+ */
+const SUITE_LOG_UNAVAILABLE = 'NEUTRON_SUITE_LOG_UNAVAILABLE'
+
+const singleQuote = (value: string): string => `'${value.replaceAll("'", "'\\''")}'`
+
+export function suiteScript(command: string, logPath: string): string {
+  const quoted = singleQuote(logPath)
+  return [
+    `: >${quoted} || { printf '%s\\n' ${SUITE_LOG_UNAVAILABLE}; exit 97; }`,
+    '{',
+    command,
+    `} >>${quoted} 2>&1`,
+  ].join('\n')
+}
+
 function fullSuiteCommand(strategy: string | null | undefined): string | null {
   if (!strategy) return null
   const lines = strategy.split('\n')
@@ -286,9 +335,13 @@ export async function prepareProjectBuild(input: InnerLoopInput, context: Projec
             const claim = checked.value
             const command = fullSuiteCommand(input.test_strategy)
             if (!command) return { runId: run.id, head: snapshot.head, round, report: null }
-            const observed = await context.runHost(['bash', '-lc', command], run.worktree, undefined, REVIEW_SUITE_TIMEOUT_MS)
+            const logPath = join(state, `suite-round-${round}.log`)
+            const observed = await context.runHost(['bash', '-lc', suiteScript(command, logPath)], run.worktree, undefined, REVIEW_SUITE_TIMEOUT_MS)
+            // A shell that could not open the transcript never ran the suite; its
+            // exit code is about the redirect, not about the tests. `unknown`, not red.
+            const unopenable = observed.stdout.trimStart().startsWith(SUITE_LOG_UNAVAILABLE)
             return { runId: run.id, head: snapshot.head, round, report: {
-              ...(observed.timed_out ? {} : { hostExitCode: observed.exit_code }),
+              ...(observed.timed_out || unopenable ? {} : { hostExitCode: observed.exit_code }),
               ...(claim.suiteOutcome === undefined ? {} : { suiteOutcome: claim.suiteOutcome }),
               ...(claim.suiteEvidence === undefined ? {} : { suiteEvidence: claim.suiteEvidence }),
             } }

@@ -15,7 +15,8 @@ import * as runners from '@neutronai/runtime/workers/project-runners.ts'
 import * as codex from '@neutronai/runtime/workers/codex-headless.ts'
 import { pool, supervisedBySessionKey } from '@neutronai/runtime/adapters/claude-code/persistent/pool-state.ts'
 import { fakeRunner, type BoundedWorkRequest } from '@neutronai/runtime/bounded-work.ts'
-import { prepareProjectBuild, type ProjectBuildContext } from '../wiring/project-build.ts'
+import { prepareProjectBuild, suiteScript, type ProjectBuildContext } from '../wiring/project-build.ts'
+import { spawnCapture } from '@neutronai/trident/git-mode.ts'
 import { renderTestStrategy } from '@neutronai/trident/test-strategy.ts'
 
 const cleanup: (() => void | Promise<void>)[] = []
@@ -84,7 +85,15 @@ test('option sources preserve pin, selected provider, workflow and unavailable s
     runId: f.input.run.id, head, round: 2,
     report: { hostExitCode: 0, suiteOutcome: 'failed-preexisting', suiteEvidence: 'base is red too' },
   })
-  expect(f.commands.at(-1)).toEqual(['bash', '-lc', 'bun test'])
+  // The command still reaches the shell verbatim; what is new is that the child's
+  // own output goes to the run's transcript file instead of into the gateway's heap.
+  expect(f.commands.at(-1)!.slice(0, 2)).toEqual(['bash', '-lc'])
+  const log = join(f.dir, 'state', encodeURIComponent(f.input.run.id), 'suite-round-2.log')
+  expect(f.commands.at(-1)![2]!).toBe(suiteScript('bun test', log))
+  // Not only "whatever `suiteScript` says" — the log the round writes to is named
+  // here independently, and the redirect and the command are both asserted present.
+  expect(f.commands.at(-1)![2]!).toContain(`>>'${log}' 2>&1`)
+  expect(f.commands.at(-1)![2]!).toContain('\nbun test\n')
   // A claim about a DIFFERENT revision answers nothing.
   expect(await options.policy.reviewSuite!.readCheckpoint({ head: 'b'.repeat(40), diff: '', pr: null }, 2)).toBeNull()
   const strategy = f.input.test_strategy
@@ -435,6 +444,62 @@ test('the host suite observation is given a budget far larger than the 60s host 
   expect(typeof budgets[0]).toBe('number')
   expect(budgets[0]!).toBeGreaterThan(60_000)
 })
+
+// #1042 — THE SUITE'S TRANSCRIPT MUST NOT REACH THE GATEWAY, AND AN UNWRITABLE
+// TRANSCRIPT MUST BE `unknown` RATHER THAN A RED SUITE.
+//
+// The run uses the REAL `spawnCapture`, not a double: the thing under test is what
+// the production host runner brings back from a real child, and a stubbed runner
+// cannot show that. Measured with the same helper before this change: 256 MiB of
+// child stdout cost one 523ms event-loop stall and took the process from 37 MB to
+// 832 MB RSS; after it, 0 bytes captured, a 105ms worst gap and +2 MB.
+test('the host suite receipt is an exit code, never the transcript, and an unwritable log is unknown', async () => {
+  const f = await fixture()
+  f.input.test_strategy = 'TEST EXECUTION\n\nFull suite (stage 2), run exactly this:\n\n  bash out.sh\n'
+  const options = await f.prepare()
+  await mkdir(options.production.worktree, { recursive: true })
+  const head = 'a'.repeat(40)
+  const payload = {
+    mutationClaim: { file: 'guard.ts', find: 'before', replace: 'after', guard: ['bun', 'test'], control: ['bun', 'test'] },
+    worktreePath: options.production.worktree, branch: 'change', commitSha: head,
+    prNumber: null, diffFile: 'diff', testsPassed: true,
+  }
+  await writeFile(options.workers.build.request.result.path, JSON.stringify({ result: { head, payload } }))
+  // 8 MiB on stdout and a line on stderr, then a chosen exit code — the shape a
+  // suite has, small enough to stay a unit test.
+  const script = (code: number) => `head -c 8388608 /dev/zero | tr '\\0' 'x'\necho "trailing diagnostic" >&2\nexit ${code}\n`
+  const captured: Array<{ stdout: number; stderr: number }> = []
+  const host = f.context.runHost
+  f.context.runHost = async (argv, cwd, env, timeoutMs) => {
+    if (argv[0] !== 'bash') return host(argv, cwd, env, timeoutMs)
+    const result = await spawnCapture(argv, cwd, env, timeoutMs)
+    captured.push({ stdout: result.stdout.length, stderr: result.stderr.length })
+    return result
+  }
+  const state = join(f.dir, 'state', encodeURIComponent(f.input.run.id))
+
+  // GREEN. The receipt is the exit code; the 8 MiB is on disk, not in this process.
+  await writeFile(join(options.production.worktree, 'out.sh'), script(0))
+  expect((await options.policy.reviewSuite!.readCheckpoint({ head, diff: '', pr: null }, 1))?.report).toEqual({ hostExitCode: 0 })
+  expect(captured.at(-1)).toEqual({ stdout: 0, stderr: 0 })
+  const green = await readFile(join(state, 'suite-round-1.log'), 'utf8')
+  expect(green.length).toBe(8 * 1024 * 1024 + 'trailing diagnostic\n'.length)
+
+  // RED. A real nonzero exit still crosses the seam — the redirect must not swallow
+  // the status the gate classifies.
+  await writeFile(join(options.production.worktree, 'out.sh'), script(3))
+  expect((await options.policy.reviewSuite!.readCheckpoint({ head, diff: '', pr: null }, 2))?.report).toEqual({ hostExitCode: 3 })
+  expect(captured.at(-1)).toEqual({ stdout: 0, stderr: 0 })
+
+  // UNWRITABLE TRANSCRIPT. A directory sitting on the log path defeats the redirect
+  // for any uid, root included. The shell exits nonzero without running one test, so
+  // `hostExitCode` is OMITTED — `unknown`, the same answer a timeout gets — rather
+  // than reported as a suite that ran and failed.
+  await mkdir(join(state, 'suite-round-4.log'), { recursive: true })
+  const report = (await options.policy.reviewSuite!.readCheckpoint({ head, diff: '', pr: null }, 4))?.report
+  expect(report).toEqual({})
+  expect(report).not.toHaveProperty('hostExitCode')
+}, 120_000)
 
 // THE SUITE COMMAND MUST PARSE OUT OF THE STRATEGY THE GENERATOR ACTUALLY EMITS.
 //

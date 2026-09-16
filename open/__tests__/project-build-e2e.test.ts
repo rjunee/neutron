@@ -610,9 +610,19 @@ test('pr mode drives plan, build, review, publish and merge to a terminal merged
   }
 
   // G063's receipt is the HOST'S OWN suite run (#1040), not the builder's claim:
-  // once, in the run worktree, of exactly the command the strategy named.
-  const suiteRuns = f.commands.filter(argv => argv.join(' ') === 'bash -lc bash scripts/ci/suite.sh')
+  // once, in the run worktree, of the command the strategy named.
+  //
+  // Matched by CONTENT, not by exact argv. The host no longer passes the bare
+  // command: it wraps it so the child's stdout and stderr are redirected to the
+  // run's own log instead of being captured into gateway memory, which the gateway
+  // never reads and which `run-tests.sh` makes unbounded. An equality assertion here
+  // pinned the WRAPPER's shape as if it were the contract; what this case actually
+  // owns is that the named command ran exactly once, in the worktree.
+  const suiteRuns = f.commands.filter(argv =>
+    argv[0] === 'bash' && argv[1] === '-lc' && (argv[2] ?? '').includes('bash scripts/ci/suite.sh'))
   expect(suiteRuns).toHaveLength(1)
+  // And the transcript is redirected away from the gateway rather than captured.
+  expect(suiteRuns[0]![2]).toMatch(/>>.*suite-round-\d+\.log.* 2>&1/)
 
   // Publication and merge really happened: real push, real PR, real base move.
   expect(f.github.prs).toHaveLength(1)
