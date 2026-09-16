@@ -318,6 +318,7 @@ import { buildTerminalDeployWakeObserver, TERMINAL_DEPLOY_WAKE_TURN_TIMEOUT_MS }
 import {
   buildWorkWakeupLoop,
   type WakeupProjectWork,
+  type WakeupReadiness,
 } from '@neutronai/gateway/proactive/work-wakeup.ts'
 import { selectWakeupWork } from '@neutronai/gateway/proactive/work-wakeup-selection.ts'
 import { resolveLocalTimezone } from '@neutronai/gateway/proactive/local-timezone.ts'
@@ -6631,22 +6632,45 @@ export function buildOpenGraphComposer(
     // re-entered with a continue-work turn (same substrate entry + tool surface
     // as a fired reminder — `gateway/proactive/work-wakeup.ts` for why this must
     // be server-side, never a session-scheduled wakeup). Registered
-    // UNCONDITIONALLY (like the kimi gauge): on an LLM-less box
-    // `listOutstanding` returns [] and every tick is a cheap no-op, so a
-    // credential added later starts waking work without a restart.
+    // UNCONDITIONALLY (like the kimi gauge), so a credential added later starts
+    // waking work without a restart. On an LLM-less box the tick is NOT a silent
+    // no-op: `readiness` below returns not-ready, the sweep returns before
+    // selection with `unavailable = 1`, and the loop logs it. A tick that
+    // CANNOT act must never look like one with NOTHING to do (#1085).
     const workWakeup = buildWorkWakeupLoop({
       // An item a live run is driving already has a wakeup driver (the trident
       // tick) — waking it here would double-drive one work item. "Live" is
       // measured, not assumed: a run that has stopped advancing is not a driver,
       // and deferring to one is how this loop went silent after a single firing.
       // The policy + the evidence live in `work-wakeup-selection.ts`.
+      // THE LLM-LESS PROBE, PROMOTED OUT OF `listOutstanding` (#1085).
+      //
+      // It used to live inside the selector as `if (reminderComposeSubstrate ===
+      // null) return []`, which expressed "this instance cannot run a wakeup at
+      // all" in the SAME value a healthy instance with an empty board returns. The
+      // sweep then came back all-zero and `buildWorkWakeupLoop` prints nothing on
+      // an all-zero tick, so a box whose unattended path was dead emitted exactly
+      // the same thing — nothing — as a box with no outstanding work. Two states,
+      // one signal: ISSUES #1053 and #1071 in a third place.
+      //
+      // Asked as a PRECONDITION, the same condition is counted (`unavailable`) and
+      // named in the journal, and the selector below goes back to answering only
+      // the question it is named for.
+      //
+      // It probes `reminderComposeSubstrate` — the substrate this loop actually
+      // composes on (`cc-nudge-*`), not the owner's chat REPL. This loop is
+      // timer-driven, so it moved onto the background lane along with the fired
+      // reminder; probing `liveAgentSubstrate` would read a different substrate's
+      // availability than the one the compose needs.
+      readiness: (): WakeupReadiness =>
+        reminderComposeSubstrate === null
+          ? {
+              ready: false,
+              reason:
+                'no background compose substrate on this instance (no model credential), so no wakeup turn can be composed — this is NOT an empty Work Board',
+            }
+          : { ready: true },
       listOutstanding: (): WakeupProjectWork[] => {
-        // LLM-less probe — read the substrate this loop actually composes on.
-        // It is `cc-nudge-*`, not the owner's chat REPL: this loop is
-        // timer-driven, so it moved onto the background lane along with the fired
-        // reminder. Probing `liveAgentSubstrate` here would be reading a
-        // different substrate's availability than the one the compose needs.
-        if (reminderComposeSubstrate === null) return []
         return selectWakeupWork({
           items: workBoardStore.listAllActive(),
           lookupRun: (run_id: string) => boardRunStore.get(run_id),
