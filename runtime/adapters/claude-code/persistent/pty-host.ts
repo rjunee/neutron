@@ -188,7 +188,9 @@ export interface PtyChild {
    * Optional only because a host may predate it; `submitCommand` refuses to guess
    * with `write` + `writeKey` when it is absent rather than fabricate an ack.
    */
-  submitLine?(command: string): Promise<void>
+  /** Submit one line and acknowledge its text and Enter. If `signal` aborts before
+   *  the submission-bearing operation, the implementation must not actuate it. */
+  submitLine?(command: string, signal?: AbortSignal): Promise<void>
   /**
    * Resize the terminal (cols × rows). No-op-safe after exit.
    *

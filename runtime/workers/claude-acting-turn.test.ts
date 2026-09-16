@@ -184,6 +184,29 @@ test('real HerdrHost child submits text then Enter in the existing pane', async 
   expect(calls).toEqual(['pane.send_text', 'pane.send_keys'])
 })
 
+test('host budget abandonment prevents a late herdr text acknowledgement from submitting Enter', async () => {
+  const f = await fixture()
+  const server = new FakeHerdrServer()
+  let releaseText!: () => void
+  const textHeld = new Promise<void>(resolve => { releaseText = resolve })
+  const calls: string[] = []
+  const host = new HerdrHost({ connect: async () => ({ call: async (method, params) => {
+    if (method === 'pane.send_text') await textHeld
+    const result = await server.call(method, params)
+    if (method === 'pane.send_text' || method === 'pane.send_keys') calls.push(method)
+    return result
+  } }), pollIntervalMs: 10 })
+  const child = await host.attach(server.paneId, { cwd: f.dir, env: {} })
+  cleanups.push(async () => { child.detach?.() })
+  f.binding.session = { ...f.binding.session, child }
+  f.input.timeout_ms = 20
+
+  expect(await f.run()).toEqual({ kind: 'unknown', detail: expect.stringContaining('trailer') })
+  releaseText()
+  await Bun.sleep(20)
+  expect(calls).toEqual(['pane.send_text'])
+})
+
 for (const cwd of ['/a/b', '/a/b/worktree', '/a/b/../b/worktree']) {
   test(`granted root accepts ${cwd}`, async () => {
     const f = await fixture()

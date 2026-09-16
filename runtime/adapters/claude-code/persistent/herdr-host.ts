@@ -597,7 +597,7 @@ export class HerdrHost implements AdoptableHost {
         if (keys.length === 0) return
         send('herdr-host.writeKeys', 'pane.send_keys', { pane_id: paneId, keys: herdrKeyNames(keys) })
       },
-      async submitLine(command) {
+      async submitLine(command, signal) {
         // ACKNOWLEDGED, IN ORDER, AND NOT NO-OP-SAFE. `write`/`writeKey` are
         // fire-and-forget by interface; this is the variant a caller may build a
         // claim on, so every way it can fail has to reach the caller — including
@@ -620,6 +620,15 @@ export class HerdrHost implements AdoptableHost {
               'up the pane and must not type into it. The pane is still running and belongs to ' +
               'whichever incarnation adopted it; nothing was submitted.',
           )
+        const throwIfAbandoned = (): void => {
+          if (signal?.aborted) {
+            throw new DOMException(
+              `herdr-host: submitLine(${JSON.stringify(command)}) was abandoned before submission`,
+              'AbortError',
+            )
+          }
+        }
+        throwIfAbandoned()
         if (exited) throw goneAfterExit()
         if (detached) throw goneAfterDetach()
         if (command.includes('\r') || command.includes('\n')) {
@@ -648,11 +657,15 @@ export class HerdrHost implements AdoptableHost {
           // acknowledged seam a caller REPORTS an outcome from, so "the child went while
           // you were waiting" has to reach that caller. Resolving quietly would record a
           // context reset that never happened — the defect this whole method exists for.
+          throwIfAbandoned()
           if (exited) throw goneAfterExit()
           if (detached) throw goneAfterDetach()
           if (command !== '') {
             await client.call('pane.send_text', { pane_id: paneId, text: command })
           }
+          // The text RPC can outlive the caller. Its late acknowledgement must not
+          // authorize the submission-bearing Enter after that caller has given up.
+          throwIfAbandoned()
           await client.call('pane.send_keys', { pane_id: paneId, keys: herdrKeyNames(['enter']) })
         })
       },

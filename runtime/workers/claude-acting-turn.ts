@@ -50,7 +50,10 @@ export function createClaudeActingTurn(binding: ClaudeActingSession): ProjectAct
         if (expired()) return unknown()
         // JSON escapes newlines: submitLine accepts one line and owns text/Enter ordering.
         // Forward the complete dispatch spec and effort as data, not shell commands.
-        await child.submitLine!('Execute the prompt in this JSON dispatch specification: ' + JSON.stringify({ ...spec, effort: request.effort }))
+        await child.submitLine!(
+          'Execute the prompt in this JSON dispatch specification: ' + JSON.stringify({ ...spec, effort: request.effort }),
+          stopped,
+        )
         while (!expired()) {
           try {
             const trailer = await stat(request.result.path)
