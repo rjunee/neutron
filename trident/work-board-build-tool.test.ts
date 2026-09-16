@@ -409,6 +409,33 @@ describe('work_board_start tool (▶ agent-native parity)', () => {
     expect(tool.input_schema.required).toEqual(['board_item_id'])
   })
 
+  // A WITNESS MUST NOT BE ABLE TO FALSIFY WHAT IT WITNESSES.
+  //
+  // By the time the stage event is written the dispatch has already succeeded:
+  // `board-dispatch.ts` selected the created row and bound it to the board. An
+  // awaited telemetry write here would report a run that REALLY STARTED as a failed
+  // tool call — the caller would retry, and the second dispatch would collide with
+  // the first. A review lane caught exactly this, with a throwing recordStageEvent.
+  test('a failing dispatch-witness write does not fail a dispatch that started', async () => {
+    const original = store.recordStageEvent.bind(store)
+    let attempted = 0
+    ;(store as { recordStageEvent: unknown }).recordStageEvent = async () => {
+      attempted += 1
+      throw new Error('injected ledger failure')
+    }
+    try {
+      const out = (await startToolFor().handler({ board_item_id: 'ready' }, ctx)) as Record<string, unknown>
+      // The dispatch is reported as what it is: started.
+      expect(out.ok).toBe(true)
+      expect(typeof out.run_id).toBe('string')
+      const run = store.get(out.run_id as string)
+      expect(run, 'the run row exists even though its witness could not be written').toBeTruthy()
+      expect(attempted, 'the witness was attempted, not skipped').toBe(1)
+    } finally {
+      ;(store as { recordStageEvent: unknown }).recordStageEvent = original
+    }
+  })
+
   test('starts a ready item using its title (no resolve_task wired)', async () => {
     const out = (await startToolFor().handler({ board_item_id: 'ready' }, ctx)) as Record<string, unknown>
     expect(out.ok).toBe(true)
@@ -417,6 +444,12 @@ describe('work_board_start tool (▶ agent-native parity)', () => {
     // Falls back to the item title as the task.
     expect(run.task).toContain('wire the CSV export button')
     expect(attached).toEqual([{ id: 'ready', run_id: out.run_id as string }])
+    expect(store.stageEvents(run.id)).toEqual([
+      expect.objectContaining({
+        stage: 'work-board-start-dispatched',
+        meta: JSON.stringify({ board_item_id: 'ready' }),
+      }),
+    ])
   })
 
   test('resolve_task supplies the saved spec as the task', async () => {
