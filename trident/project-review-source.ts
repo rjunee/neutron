@@ -75,8 +75,25 @@ export function createProjectReviewSource(input: ProjectReviewSourceOptions): Re
     const supported = runner.supports(role, placement)
     if (!supported.ok) return unavailable(supported.reason)
     const directory = await mkdtemp(join(options.evidenceRoot, 'review-'))
+    // THE PANEL BRIEF MUST STATE THE ENVELOPE TOO. `decodeProjectTrailer`
+    // (`runtime/workers/project-runners.ts:44-58`) reads
+    // `{ schema, run_id, step_id, kind, result }` off EVERY project result file,
+    // a panel seat's included, and refuses unless `run_id`, `step_id` and
+    // `schema` each match the request exactly.
+    //
+    // This brief used to describe only the verdict payload, so a seat that
+    // obeyed it wrote the bare `{verdict, findings}` object and the decode
+    // returned "Trailer run_id missing or mismatched." — the SAME stop that
+    // ended the third acceptance dispatch at the plan worker, which #1033 fixed
+    // for the four role briefs and not for this one. Found by the offline
+    // end-to-end harness (`open/__tests__/project-build-e2e.test.ts`) rather
+    // than by a fourth dispatch.
+    //
+    // The ids cannot be baked in: `step_id` here is per directory, round AND
+    // attempt (below), so the brief points at the request the seat was handed.
     const text = JSON.stringify({ project: options.projectSlug, seat: seat.id, snapshot, round, panel,
-      instruction: 'Review the measured diff. Return the verdict schema with findings and file/line evidence. Synthesis must account for every supplied seat.' })
+      instruction: 'Review the measured diff. Return the verdict schema with findings and file/line evidence. Synthesis must account for every supplied seat.',
+      resultFile: 'Write your result file as a JSON object with EXACTLY these five fields: "schema", "run_id" and "step_id", each copied verbatim from this dispatch\'s request (`request.result.schema`, `request.run_id`, `request.step_id`) — do not invent or reformat them; "kind", which is "completed" when you produced a verdict or "blocked" when you could not; and "result", the verdict payload itself, omitted when blocked. When blocked, add "on": a non-empty sentence saying what stopped you. Report blocked rather than inventing a verdict.' })
     const briefPath = join(directory, 'brief.json')
     await writeFile(briefPath, text, { mode: 0o600, flag: 'wx' })
     const request: BoundedWorkRequest = { run_id: options.runId, step_id: `${directory.split('/').at(-1)}:${round}:${attempt}`,

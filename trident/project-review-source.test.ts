@@ -3,6 +3,7 @@ import { mkdtemp, readFile, rm } from 'node:fs/promises'
 import { tmpdir } from 'node:os'
 import { join } from 'node:path'
 import type { BoundedWorkOutcome, BoundedWorkRequest, WorkerRunner } from '@neutronai/runtime/bounded-work.ts'
+import { decodeProjectTrailer } from '@neutronai/runtime/workers/project-runners.ts'
 import { createProjectReviewSource, type ProjectReviewSourceOptions } from './project-review-source.ts'
 import { reviewPanel } from './gates/review-panel.ts'
 const approve = { verdict: 'APPROVE', findings: [] }
@@ -161,4 +162,44 @@ test('null model telemetry preserves completion and reports unknown panel family
     expect(warning.mock.calls.flat().join(' ')).toContain('panel-unknown-family')
     expect(warning.mock.calls.flat().join(' ')).not.toContain('panel-single-family')
   } finally { warning.mockRestore() }
+})
+
+// A PANEL SEAT THAT OBEYS ITS BRIEF LITERALLY MUST PRODUCE A DECODABLE TRAILER.
+//
+// `decodeProjectTrailer` reads `{ schema, run_id, step_id, kind, result }` off
+// every project result file, a panel seat's included, and refuses unless the
+// three ids match the request. The panel brief used to describe only the verdict
+// payload, so a seat that obeyed it wrote a bare `{verdict, findings}` and the
+// decode answered "Trailer run_id missing or mismatched." — the same stop that
+// ended the third acceptance dispatch at the plan worker.
+//
+// The seat below does NOT hardcode the envelope: it DERIVES the field list from
+// the quoted names in the brief's own `resultFile` instruction and populates
+// each from the request. A brief that stops naming `run_id` therefore stops
+// producing it, and this test goes red — which is the property under test, not
+// the presence of a particular sentence.
+test('a seat obeying the panel brief literally writes a trailer the host decoder accepts', async () => {
+  const f = await fixture()
+  let decoded: BoundedWorkOutcome | undefined
+  let namedFields: string[] = []
+  f.answer(async request => {
+    const brief = JSON.parse(await readFile(request.brief.path, 'utf8'))
+    const instruction = String(brief.resultFile ?? '')
+    namedFields = [...instruction.matchAll(/"([a-z_]+)"/g)].map(m => m[1]!)
+    const source: Record<string, unknown> = {
+      schema: request.result.schema, run_id: request.run_id, step_id: request.step_id,
+      kind: 'completed', result: approve, on: 'unused',
+    }
+    const written: Record<string, unknown> = {}
+    for (const field of namedFields) if (field in source && field !== 'on') written[field] = source[field]
+    decoded = decodeProjectTrailer(JSON.stringify(written), request, {
+      schemas: new Map([[request.result.schema, () => true]]), metadata: () => undefined,
+    })
+    return completed()
+  })
+  await f.check()
+  // The brief names the whole envelope, not just the payload.
+  expect(namedFields).toEqual(expect.arrayContaining(['schema', 'run_id', 'step_id', 'kind', 'result']))
+  // And obeying it produces something the REAL decoder accepts.
+  expect(decoded).toMatchObject({ kind: 'completed', result: approve })
 })
