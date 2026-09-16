@@ -18,6 +18,11 @@
  * `CodexCliSubstrateOptions`), so the selector returns a DISCRIMINATED result
  * (`{ provider, create }`) rather than a single unified factory signature. The
  * composer switches on `.provider` and builds the matching option bag.
+ *
+ * This selector owns the conversational/headless `Substrate` factory seam. A
+ * project build's persistent in-REPL acting turn is selected separately by the
+ * project composition (`open/wiring/project-build.ts`); selecting Codex here is
+ * not evidence that bounded work can enter the live project conversation.
  */
 
 import type { Substrate } from '../substrate.ts'
