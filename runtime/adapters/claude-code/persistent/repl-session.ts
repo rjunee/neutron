@@ -4,7 +4,7 @@
 
 import { dropLocalOwnership, noteLocalOwnership } from './local-ownership.ts'
 import { createHash, randomBytes } from 'node:crypto'
-import { realpathSync, unlinkSync } from 'node:fs'
+import { realpathSync, rmdirSync, unlinkSync } from 'node:fs'
 import { tmpdir } from 'node:os'
 import { dirname, resolve, sep } from 'node:path'
 import type { LiveProcessHandle } from '@neutronai/tools/process-registry.ts'
@@ -623,10 +623,12 @@ async function waitForPidExit(pid: number, budgetMs: number): Promise<boolean> {
 }
 
 /**
- * Unlink a session's temp config files (`neutron-repl-*-mcp.json` + `*-settings.json`).
+ * Unlink a session's temp config files (`neutron-repl-*-mcp.json` + `*-settings.json`)
+ * AND the per-spawn 0700 directory that held them.
  * Best-effort + idempotent (ENOENT ignored), so it is safe to call from both the dispose
  * path and the child-exit handler. Without this, every ephemeral one-shot leaves two
- * permanent files in `tmpdir()` (Argus r5).
+ * permanent files in `tmpdir()` (Argus r5) — and, until the directory went too, an empty
+ * `neutron-repl-<channel>/` per spawn for the life of the box.
  *
  * THE FILESYSTEM CHECK LIVES HERE, NOT IN THE PATH BUILDER (#539, Argus r28).
  * `replSessionConfigPaths` resolves its path textually — it is a pure builder called at
@@ -713,6 +715,22 @@ export function unlinkSessionConfigs(session: ReplSession): void {
       unlinkSync(p)
     } catch {
       /* already gone / never written */
+    }
+    // AND THE 0700 DIRECTORY THAT HELD IT. Unlinking only the files left one empty
+    // `neutron-repl-<channel>/` behind per spawn, forever, in `tmpdir()` — which is not
+    // merely untidy now that the mcp-config carries every owner-installed server's env
+    // VALUES: the directory name is the per-spawn channel name, so the residue is a
+    // public record of how many children this box has run and under which channels.
+    //
+    // `rmdirSync`, NEVER a recursive remove. It fails with ENOTEMPTY on a directory that
+    // still holds something, which is the safe direction: a file in here that is not one
+    // of ours is a file we have no business deleting, and the last unlink of the set is
+    // the only call that finds the directory empty. `real` is the RESOLVED directory that
+    // just passed the beneath-`tmpdir()` test above, so this cannot follow a symlink out.
+    try {
+      rmdirSync(real)
+    } catch {
+      /* not empty yet (an earlier path in this set is still there), or already gone */
     }
   }
 }

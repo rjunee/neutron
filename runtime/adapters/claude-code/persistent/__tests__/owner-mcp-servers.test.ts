@@ -52,7 +52,7 @@ import type { ReplSession } from '../repl-session.ts'
 import {
   createPersistentReplSubstrate,
   evictWarmReplsForMcpSurfaceChange,
-  getReplSinkInfo,
+  bakedChildSinkInfo,
   setReplToolBridge,
   shutdownAllPersistentRepls,
   type PersistentReplSubstrateOptions,
@@ -119,7 +119,13 @@ function makeCapturingHost(
       const i = argv.indexOf('--session-id')
       const r = argv.indexOf('--resume')
       const sid = (i >= 0 ? argv[i + 1] : r >= 0 ? argv[r + 1] : undefined) as string
-      const { port: sinkPort, token } = await getReplSinkInfo()
+      // THE CHILD'S OWN CREDENTIAL, read the way the child reads it. `getReplSinkInfo()`
+      // hands back the instance ROOT token, and the sink authorizes credential → session
+      // (`pool-state.ts:522`), so a root-token POST is a 401 and `/channel-ready` never
+      // lands — every case in this file then dies on `no-channel-ready`. Every other
+      // fake-PtyHost fixture in this directory reads `bakedChildSinkInfo(argv)` for
+      // exactly this reason (`tool-bridge.test.ts:50`, `repl-sink.ts:161-180`).
+      const { port: sinkPort, token } = bakedChildSinkInfo(argv)
       let hasExited = false
       let exitResolve: (code: number | null) => void = () => {}
       const exited = new Promise<number | null>((res) => {

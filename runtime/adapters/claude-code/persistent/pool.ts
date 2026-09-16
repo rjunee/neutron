@@ -436,6 +436,19 @@ export function createPersistentReplSubstrate(options: PersistentReplSubstrateOp
       // permanently: the exact mirror image of the bug this replaces.
       let watchdogTurnId: string | undefined
       const driver = (async (): Promise<void> => {
+       // COMMITTED TO THIS KEY FROM HERE, and released in the `finally` below. Between the
+       // get-or-spawn and `acquireTurn()` neither `activeTurn` nor `turnSlotHeld` is set,
+       // so a concurrent MCP revocation read this session as idle and killed the child
+       // this dispatch was about to inject into. See {@link committedDispatches}; the
+       // window is not microtask-sized, because the warm-reuse freshness check awaits the
+       // owner-MCP resolver, which reads and decrypts from the database.
+       //
+       // Held for the whole turn rather than dropped the instant the slot is won: from
+       // that point `turnSlotHeld` says the same thing, so releasing early would buy
+       // nothing and add an exit path that can forget to.
+       if (!ephemeral) {
+         committedDispatches.set(sessionKey, (committedDispatches.get(sessionKey) ?? 0) + 1)
+       }
        try {
         try {
           requireReplCwd(options.cwd)
@@ -913,6 +926,16 @@ export function createPersistentReplSubstrate(options: PersistentReplSubstrateOp
           await retireWarmSession(sessionKey, session)
         }
        } finally {
+         // RELEASE THE COMMIT FIRST, so the key stops reading as busy before the teardown
+         // below can run. Deleting at zero keeps the map the size of the in-flight set
+         // rather than of every key ever dispatched; a floor at zero because several early
+         // returns above unwind through here and a double decrement would read as a
+         // NEGATIVE count, which `> 0` would then treat as idle.
+         if (!ephemeral) {
+           const outstanding = (committedDispatches.get(sessionKey) ?? 0) - 1
+           if (outstanding > 0) committedDispatches.set(sessionKey, outstanding)
+           else committedDispatches.delete(sessionKey)
+         }
          // LEAK PREVENTION (the crux). Settle the watchdog's outstanding-turn
          // marker on EVERY exit path — normal completion, early return, thrown
          // error, cancellation, or timeout. Turn-id-guarded inside the registry,
