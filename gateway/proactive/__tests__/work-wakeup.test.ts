@@ -1,6 +1,7 @@
 import { describe, expect, test } from 'bun:test'
 
 import type { AgentSpec } from '@neutronai/runtime/substrate.ts'
+import { SubstrateCallError } from '@neutronai/runtime/errors.ts'
 import { resetLoggerStateForTests } from '@neutronai/logger'
 import {
   buildWakeupPrompt,
@@ -12,6 +13,8 @@ import {
   WAKEUP_FAILURE_POST_CADENCE,
   WORK_WAKEUP_INTERVAL_MS,
   WORK_WAKEUP_OWNER_GRACE_MS,
+  WORK_WAKEUP_TURN_ABSOLUTE_CEILING_MS,
+  WORK_WAKEUP_TURN_TIMEOUT_MS,
   WAKEUP_UNAVAILABLE_LOG_WINDOW_MS,
   type WakeupDeferredItem,
   type WakeupProjectWork,
@@ -98,9 +101,24 @@ function captureWarn(): { matching(event: string): string[]; clear(): void; rest
   }
 }
 
+function captureError(): { matching(event: string): string[]; restore(): void } {
+  const lines: string[] = []
+  const originalError = console.error
+  console.error = (...args: unknown[]): void => {
+    lines.push(args.map(String).join(' '))
+  }
+  return {
+    matching: (event: string): string[] => lines.filter((l) => l.includes(event)),
+    restore: (): void => {
+      console.error = originalError
+    },
+  }
+}
+
 interface Harness {
   deps: WorkWakeupDeps
   specs: AgentSpec[]
+  composeOpts: Array<{ timeout_ms?: number } | undefined>
   posts: Array<{ project_key: string; body: string; loud: boolean }>
   /** How many times `listOutstanding` was asked — 0 proves the tick returned first. */
   selections: { count: number }
@@ -110,12 +128,14 @@ function harness(over: {
   projects?: WakeupProjectWork[]
   reply?: string | (() => string)
   composeError?: string
+  compose?: (spec: AgentSpec, opts?: { timeout_ms?: number }) => Promise<string>
   activity?: number | null
   agentBusy?: (chat_scope: string) => boolean
   readiness?: () => WakeupReadiness
   now?: () => number
 } = {}): Harness {
   const specs: AgentSpec[] = []
+  const composeOpts: Array<{ timeout_ms?: number } | undefined> = []
   const posts: Array<{ project_key: string; body: string; loud: boolean }> = []
   const selections = { count: 0 }
   const deps: WorkWakeupDeps = {
@@ -127,8 +147,10 @@ function harness(over: {
     ownerActivityMs: () => over.activity ?? null,
     ...(over.agentBusy === undefined ? {} : { agentBusy: over.agentBusy }),
     llm: {
-      compose: async (spec) => {
+      compose: async (spec, opts) => {
         specs.push(spec)
+        composeOpts.push(opts)
+        if (over.compose !== undefined) return over.compose(spec, opts)
         if (over.composeError !== undefined) throw new Error(over.composeError)
         const r = over.reply ?? 'Pushed the fix branch; next: green CI.'
         return typeof r === 'function' ? r() : r
@@ -142,7 +164,7 @@ function harness(over: {
     resolveModel: () => 'model-x',
     now: over.now ?? ((): number => NOW),
   }
-  return { deps, specs, posts, selections }
+  return { deps, specs, composeOpts, posts, selections }
 }
 
 describe('runWorkWakeupSweep — the wake path', () => {
@@ -150,7 +172,7 @@ describe('runWorkWakeupSweep — the wake path', () => {
     const h = harness()
     const result = await runWorkWakeupSweep(h.deps, new Map())
 
-    expect(result).toEqual({ unavailable: 0, woke: 1, skipped_active: 0, failed: 0, deferred_to_run: 0, released_stalled_run: 0, skipped_agent_busy: 0 })
+    expect(result).toEqual({ unavailable: 0, woke: 1, skipped_active: 0, failed: 0, failed_no_progress: 0, failed_budget_ceiling: 0, deferred_to_run: 0, released_stalled_run: 0, skipped_agent_busy: 0 })
     expect(h.specs).toHaveLength(1)
     const spec = h.specs[0]!
     // The warm-pool key — what lands the turn ON the owner's session.
@@ -158,10 +180,31 @@ describe('runWorkWakeupSweep — the wake path', () => {
     expect(spec.model_preference).toEqual(['model-x'])
     expect(spec.prompt).toContain('Ship the importer')
     expect(spec.prompt).toContain('CONCRETE action')
+    expect(spec.turn_timeout_ms).toBe(WORK_WAKEUP_TURN_TIMEOUT_MS)
+    expect(spec.turn_absolute_ceiling_ms).toBe(WORK_WAKEUP_TURN_ABSOLUTE_CEILING_MS)
+    expect(h.composeOpts).toEqual([{ timeout_ms: WORK_WAKEUP_TURN_ABSOLUTE_CEILING_MS }])
     // The report is posted QUIET (durable + visible, no buzz).
     expect(h.posts).toEqual([
       { project_key: 'acme', body: 'Pushed the fix branch; next: green CI.', loud: false },
     ])
+  })
+
+  test('a progressing turn may outlive the inactivity window but remains bounded by the absolute ceiling', async () => {
+    const h = harness({
+      compose: async (spec, opts) => {
+        // This fake models the contract at the seam: a four-minute collector wall
+        // would kill the live turn, while the inactivity field lets the REPL extend
+        // it and the separate collector ceiling remains finite.
+        expect(spec.turn_timeout_ms).toBe(WORK_WAKEUP_TURN_TIMEOUT_MS)
+        expect(opts?.timeout_ms).toBe(WORK_WAKEUP_TURN_ABSOLUTE_CEILING_MS)
+        expect(opts!.timeout_ms!).toBeGreaterThan(spec.turn_timeout_ms!)
+        return 'Completed after sustained visible progress.'
+      },
+    })
+
+    const result = await runWorkWakeupSweep(h.deps, new Map())
+    expect(result.woke).toBe(1)
+    expect(result.failed).toBe(0)
   })
 
   test('SAFETY — the compose turn presents the injected tool surface VERBATIM (a differing surface would evict the owner chat REPL)', async () => {
@@ -173,7 +216,7 @@ describe('runWorkWakeupSweep — the wake path', () => {
   test('owner active inside the grace window → skipped, and the session is NEVER entered', async () => {
     const h = harness({ activity: NOW - (WORK_WAKEUP_OWNER_GRACE_MS - 1) })
     const result = await runWorkWakeupSweep(h.deps, new Map())
-    expect(result).toEqual({ unavailable: 0, woke: 0, skipped_active: 1, failed: 0, deferred_to_run: 0, released_stalled_run: 0, skipped_agent_busy: 0 })
+    expect(result).toEqual({ unavailable: 0, woke: 0, skipped_active: 1, failed: 0, failed_no_progress: 0, failed_budget_ceiling: 0, deferred_to_run: 0, released_stalled_run: 0, skipped_agent_busy: 0 })
     expect(h.specs).toHaveLength(0)
     expect(h.posts).toHaveLength(0)
   })
@@ -198,6 +241,8 @@ describe('runWorkWakeupSweep — the wake path', () => {
       woke: 0,
       skipped_active: 0,
       failed: 0,
+      failed_no_progress: 0,
+      failed_budget_ceiling: 0,
       deferred_to_run: 0,
       released_stalled_run: 0,
       skipped_agent_busy: 1,
@@ -260,7 +305,7 @@ describe('runWorkWakeupSweep — the wake path', () => {
   test('a project with zero items is not woken', async () => {
     const h = harness({ projects: [project({ items: [] })] })
     const result = await runWorkWakeupSweep(h.deps, new Map())
-    expect(result).toEqual({ unavailable: 0, woke: 0, skipped_active: 0, failed: 0, deferred_to_run: 0, released_stalled_run: 0, skipped_agent_busy: 0 })
+    expect(result).toEqual({ unavailable: 0, woke: 0, skipped_active: 0, failed: 0, failed_no_progress: 0, failed_budget_ceiling: 0, deferred_to_run: 0, released_stalled_run: 0, skipped_agent_busy: 0 })
     expect(h.specs).toHaveLength(0)
   })
 
@@ -282,7 +327,7 @@ describe('runWorkWakeupSweep — the wake path', () => {
       ],
     })
     const result = await runWorkWakeupSweep(h.deps, new Map())
-    expect(result).toEqual({ unavailable: 0, woke: 0, skipped_active: 0, failed: 0, deferred_to_run: 1, released_stalled_run: 0, skipped_agent_busy: 0 })
+    expect(result).toEqual({ unavailable: 0, woke: 0, skipped_active: 0, failed: 0, failed_no_progress: 0, failed_budget_ceiling: 0, deferred_to_run: 1, released_stalled_run: 0, skipped_agent_busy: 0 })
     expect(h.specs).toHaveLength(0)
   })
 
@@ -602,7 +647,7 @@ describe('runWorkWakeupSweep — the wake path', () => {
       ],
     })
     const result = await runWorkWakeupSweep(h.deps, new Map())
-    expect(result).toEqual({ unavailable: 0, woke: 0, skipped_active: 1, failed: 0, deferred_to_run: 1, released_stalled_run: 0, skipped_agent_busy: 0 })
+    expect(result).toEqual({ unavailable: 0, woke: 0, skipped_active: 1, failed: 0, failed_no_progress: 0, failed_budget_ceiling: 0, deferred_to_run: 1, released_stalled_run: 0, skipped_agent_busy: 0 })
   })
 
   test('an over-long report is truncated to the bound, never dropped', async () => {
@@ -615,6 +660,61 @@ describe('runWorkWakeupSweep — the wake path', () => {
 })
 
 describe('runWorkWakeupSweep — loud failure, bounded siren', () => {
+  test('no-progress and budget-ceiling kills have distinct counters and logs with dropped duration', async () => {
+    const errors = captureError()
+    let clock = NOW
+    const noProgress = harness({
+      now: () => clock,
+      compose: async () => {
+        clock += WORK_WAKEUP_TURN_TIMEOUT_MS
+        throw new SubstrateCallError('cc-llm-call: persistent-repl: turn timeout', {
+          code: 'turn_timeout', retryable: true,
+        })
+      },
+    })
+    const ceiling = harness({
+      now: () => clock,
+      compose: async () => {
+        clock += WORK_WAKEUP_TURN_ABSOLUTE_CEILING_MS
+        throw new SubstrateCallError('cc-llm-call: aborted', {
+          code: 'aborted', retryable: false,
+        })
+      },
+    })
+    const substrateCeiling = harness({
+      now: () => clock,
+      compose: async () => {
+        clock += WORK_WAKEUP_TURN_ABSOLUTE_CEILING_MS
+        throw new SubstrateCallError('cc-llm-call: persistent-repl: turn timeout', {
+          code: 'turn_timeout', retryable: true,
+        })
+      },
+    })
+
+    try {
+      const stalled = await runWorkWakeupSweep(noProgress.deps, new Map())
+      const bounded = await runWorkWakeupSweep(ceiling.deps, new Map())
+      const substrateBounded = await runWorkWakeupSweep(substrateCeiling.deps, new Map())
+      expect(stalled.failed_no_progress).toBe(1)
+      expect(stalled.failed_budget_ceiling).toBe(0)
+      expect(bounded.failed_no_progress).toBe(0)
+      expect(bounded.failed_budget_ceiling).toBe(1)
+      // The substrate and collector race at the same wall; elapsed time keeps a
+      // substrate-produced `turn_timeout` from being mislabeled as inactivity.
+      expect(substrateBounded.failed_no_progress).toBe(0)
+      expect(substrateBounded.failed_budget_ceiling).toBe(1)
+    } finally {
+      errors.restore()
+    }
+    const lines = errors.matching('wakeup_turn_failed')
+    expect(lines).toHaveLength(3)
+    expect(lines[0]).toContain('failure_kind=no_progress')
+    expect(lines[0]).toContain(`dropped_work_ms=${WORK_WAKEUP_TURN_TIMEOUT_MS}`)
+    expect(lines[1]).toContain('failure_kind=budget_ceiling')
+    expect(lines[1]).toContain(`dropped_work_ms=${WORK_WAKEUP_TURN_ABSOLUTE_CEILING_MS}`)
+    expect(lines[2]).toContain('failure_kind=budget_ceiling')
+  })
+
   test('first failure posts LOUD with the cause; streak 2..N-1 stay off the chat; the Nth posts again', async () => {
     const streaks = new Map<string, number>()
     const h = harness({ composeError: 'substrate down' })
@@ -694,6 +794,8 @@ describe('runWorkWakeupSweep — loud failure, bounded siren', () => {
       woke: 0,
       skipped_active: 0,
       failed: 1,
+      failed_no_progress: 0,
+      failed_budget_ceiling: 0,
       deferred_to_run: 0,
       released_stalled_run: 0,
       skipped_agent_busy: 0,
@@ -913,6 +1015,7 @@ describe('runWorkWakeupSweep — a missing precondition is never silence (#1085)
     expect(streaks.size).toBe(0)
     expect(result).toEqual({
       unavailable: 1, woke: 0, skipped_active: 0, failed: 0,
+      failed_no_progress: 0, failed_budget_ceiling: 0,
       deferred_to_run: 0, released_stalled_run: 0, skipped_agent_busy: 0,
     })
   })

@@ -113,11 +113,18 @@ export const WORK_WAKEUP_INTERVAL_MS = 5 * 60_000
 export const WORK_WAKEUP_OWNER_GRACE_MS = 30 * 60_000
 
 /**
- * Per-turn wall-clock budget. Below the 5-min cadence so a hung turn cannot
- * make the single-flight loop skip forever; above the reminder default because
- * a wakeup turn does real tool work, not one-line composition.
+ * Per-turn INACTIVITY window. The persistent REPL resets this deadline on PTY
+ * activity and also spares a classified working control, so a live turn may run
+ * beyond four minutes. A silent turn is still abandoned promptly.
  */
 export const WORK_WAKEUP_TURN_TIMEOUT_MS = 4 * 60_000
+
+/**
+ * Absolute backstop for one wakeup turn. Forty-five minutes matches the runtime
+ * default and is nine sweep cadences: enough for substantial tool work, while a
+ * noisy livelock still has a finite lifetime.
+ */
+export const WORK_WAKEUP_TURN_ABSOLUTE_CEILING_MS = 45 * 60_000
 
 /** Reply budget — the report is 1–3 sentences; the WORK happens in the turn. */
 export const WORK_WAKEUP_MAX_TOKENS = 4096
@@ -335,7 +342,10 @@ export interface WorkWakeupDeps {
   now?: () => number
   interval_ms?: number
   owner_grace_ms?: number
+  /** Per-turn inactivity window; activity or a working observation extends it. */
   turn_timeout_ms?: number
+  /** Hard wall-clock backstop, even for a turn that remains visibly working. */
+  turn_absolute_ceiling_ms?: number
 }
 
 /** Per-tick outcome summary (returned for tests + logged). */
@@ -357,6 +367,10 @@ export interface WakeupSweepResult {
   woke: number
   skipped_active: number
   failed: number
+  /** Turns abandoned after the inactivity window with no measured progress. */
+  failed_no_progress: number
+  /** Turns abandoned at the absolute wall-clock backstop. */
+  failed_budget_ceiling: number
   /** Items left to a live run this tick (one `wakeup_deferred_to_live_run` each). */
   deferred_to_run: number
   /**
@@ -539,11 +553,15 @@ export async function runWorkWakeupSweep(
   const now = deps.now ?? ((): number => Date.now())
   const grace = deps.owner_grace_ms ?? WORK_WAKEUP_OWNER_GRACE_MS
   const turn_timeout = deps.turn_timeout_ms ?? WORK_WAKEUP_TURN_TIMEOUT_MS
+  const turn_absolute_ceiling =
+    deps.turn_absolute_ceiling_ms ?? WORK_WAKEUP_TURN_ABSOLUTE_CEILING_MS
   const result: WakeupSweepResult = {
     unavailable: 0,
     woke: 0,
     skipped_active: 0,
     failed: 0,
+    failed_no_progress: 0,
+    failed_budget_ceiling: 0,
     deferred_to_run: 0,
     released_stalled_run: 0,
     skipped_agent_busy: 0,
@@ -727,24 +745,49 @@ export async function runWorkWakeupSweep(
       tools,
       model_preference: [deps.resolveModel()],
       max_tokens: WORK_WAKEUP_MAX_TOKENS,
+      turn_timeout_ms: turn_timeout,
+      turn_absolute_ceiling_ms: turn_absolute_ceiling,
       // The warm-pool key — what lands this turn ON the owner's chat session
       // for this project rather than a parallel one.
       metering_context: { project_id: project.chat_scope },
     }
 
     let reply: string
+    const turnStartedAt = now()
     try {
-      reply = (await deps.llm.compose(spec, { timeout_ms: turn_timeout })).trim()
+      // The collector is bounded by the absolute ceiling. The shorter timeout is
+      // carried on AgentSpec, where the REPL interprets it as INACTIVITY and can
+      // extend a demonstrably working turn.
+      reply = (await deps.llm.compose(spec, { timeout_ms: turn_absolute_ceiling })).trim()
       if (reply.length === 0) throw new Error('the wakeup turn returned an empty reply')
     } catch (err) {
       const reason = err instanceof Error ? err.message : String(err)
       const streak = (failureStreaks.get(project.project_key) ?? 0) + 1
       failureStreaks.set(project.project_key, streak)
       result.failed += 1
-      // The journal line carries the full cause; the chat notice a bounded one.
+      const code =
+        typeof err === 'object' && err !== null && 'code' in err && typeof err.code === 'string'
+          ? err.code
+          : undefined
+      const dropped_work_ms = Math.max(0, now() - turnStartedAt)
+      // The substrate and collector share the same absolute deadline, so either
+      // may win that race. Elapsed time disambiguates a substrate `turn_timeout`
+      // at the ceiling from the same code emitted by the shorter inactivity gate.
+      const reachedCeiling = dropped_work_ms >= turn_absolute_ceiling
+      const failure_kind = code === 'aborted' || (code === 'turn_timeout' && reachedCeiling)
+        ? 'budget_ceiling'
+        : code === 'turn_timeout'
+          ? 'no_progress'
+          : 'other'
+      if (failure_kind === 'no_progress') result.failed_no_progress += 1
+      if (failure_kind === 'budget_ceiling') result.failed_budget_ceiling += 1
+      // The journal line carries the full cause and says how much unfinished work
+      // was discarded; the chat notice carries a bounded reason.
       log.error('wakeup_turn_failed', {
         project: project.project_key,
         streak,
+        failure_kind,
+        dropped_work_ms,
         reason: bound(reason, 400),
       })
       if (streak === 1 || streak % WAKEUP_FAILURE_POST_CADENCE === 0) {
@@ -837,6 +880,8 @@ export function buildWorkWakeupLoop(deps: WorkWakeupDeps): WorkWakeupLoop {
           unavailable: result.unavailable,
           woke: result.woke,
           failed: result.failed,
+          failed_no_progress: result.failed_no_progress,
+          failed_budget_ceiling: result.failed_budget_ceiling,
           deferred_to_run: result.deferred_to_run,
           released_stalled_run: result.released_stalled_run,
           skipped_owner_active: result.skipped_active,
