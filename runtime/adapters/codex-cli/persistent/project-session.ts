@@ -64,7 +64,10 @@ function isCodexArgv(argv: readonly string[], expected: readonly string[]): bool
   if (argv.length === 0 || expected.length === 0) return false
   if (sameArgv(argv, expected)) return true
   if (!/^(?:node|nodejs|bun|deno)$/.test(basename(argv[0] ?? ''))) return false
-  return basename(argv[1] ?? '') === basename(expected[0] ?? '')
+  const script = basename(argv[1] ?? '')
+  const launcher = basename(expected[0] ?? '')
+  // The packaged Codex launcher resolves to bin/codex.js.
+  return (script === launcher || (launcher === 'codex' && script === 'codex.js'))
     && sameArgv(argv.slice(2), expected.slice(1))
 }
 

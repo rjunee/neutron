@@ -119,6 +119,37 @@ describe('CodexProjectSessionHost', () => {
     expect(nextHost.spawned).toEqual([])
   })
 
+  test('adopts the packaged codex.js entry point with the default recorded launcher', async () => {
+    const f = fixture()
+    await f.sessionHost.open(OPEN)
+    const nextHost = new FakeHost()
+    nextHost.inspection = {
+      kind: 'live',
+      argv: ['node', '/usr/lib/node_modules/@openai/codex/bin/codex.js', '--enable', 'multi_agent_v2'],
+    }
+    const restarted = new CodexProjectSessionHost({ registryPath: f.registryPath, host: nextHost })
+    const session = await restarted.open(OPEN)
+    expect(session.recovery).toBe('adopted')
+    expect(nextHost.attached).toEqual(['pane-1'])
+    expect(nextHost.spawned).toEqual([])
+  })
+
+  test.each([
+    { label: 'different launcher', bin: 'custom-codex', runtime: 'node', script: 'codex.js', args: ['--enable', 'multi_agent_v2'] },
+    { label: 'different runtime', bin: 'codex', runtime: 'python', script: 'codex.js', args: ['--enable', 'multi_agent_v2'] },
+    { label: 'different script', bin: 'codex', runtime: 'node', script: 'other.js', args: ['--enable', 'multi_agent_v2'] },
+    { label: 'different arguments', bin: 'codex', runtime: 'node', script: 'codex.js', args: ['--enable', 'other_feature'] },
+  ])('refuses a packaged entry point with $label', async ({ bin, runtime, script, args }) => {
+    const f = fixture()
+    await new CodexProjectSessionHost({ registryPath: f.registryPath, host: f.host, bin }).open(OPEN)
+    const nextHost = new FakeHost()
+    nextHost.inspection = { kind: 'live', argv: [runtime, `/package/bin/${script}`, ...args] }
+    const restarted = new CodexProjectSessionHost({ registryPath: f.registryPath, host: nextHost, bin })
+    await expect(restarted.open(OPEN)).rejects.toThrow(/identity/)
+    expect(nextHost.attached).toEqual([])
+    expect(nextHost.spawned).toEqual([])
+  })
+
   test('refuses a node process whose script is not the recorded Codex binary', async () => {
     const f = fixture()
     await f.sessionHost.open(OPEN)
