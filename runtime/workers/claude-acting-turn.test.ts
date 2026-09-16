@@ -1,9 +1,10 @@
 import { afterEach, expect, test } from 'bun:test'
-import { mkdtemp, rm, writeFile } from 'node:fs/promises'
+import { mkdir, mkdtemp, rm, writeFile } from 'node:fs/promises'
 import { tmpdir } from 'node:os'
 import { join } from 'node:path'
-import { createClaudeActingTurn, type ClaudeActingSession } from './claude-acting-turn.ts'
+import { createClaudeActingTurn, DISPATCH_TIMEOUT_MS, type ClaudeActingSession } from './claude-acting-turn.ts'
 import { createProjectRunners, type ProjectActingTurn } from './project-runners.ts'
+import { sessionJsonlPath } from '../adapters/claude-code/persistent/jsonl-resumability.ts'
 import { PROVIDERS } from '../provider.ts'
 import { HerdrHost } from '../adapters/claude-code/persistent/herdr-host.ts'
 import { FakeHerdrServer } from '../adapters/claude-code/persistent/__tests__/herdr-fake-server.ts'
@@ -302,5 +303,68 @@ for (const effort of ['xhigh', 'max'] as const) {
     f.input.request = { ...f.input.request, effort }
     expect(await f.run()).toEqual({ kind: 'turn-ended' })
     expect(JSON.parse(f.commands[0]!.slice(f.commands[0]!.indexOf('{'))).effort).toBe(effort)
+  })
+}
+
+// Logical clock assertions read the observation boundary, never elapsed wall time.
+for (const scenario of ['late trailer', 'no subagent', 'no trailer', 'throw', 'trailer without metadata'] as const) {
+  test(`dispatch evidence: ${scenario}`, async () => {
+    const f = await fixture()
+    f.binding.projects_dir = join(f.dir, 'projects')
+    const transcript = sessionJsonlPath('session', f.dir, f.binding.projects_dir)
+    const directory = join(transcript.slice(0, -'.jsonl'.length), 'subagents')
+    await mkdir(directory, { recursive: true })
+    // Decoys must not buy a full wall: wrong step, wrong filename, wrong session,
+    // malformed metadata. The valid row appears only after submission.
+    await writeFile(join(directory, 'agent-other.meta.json'), JSON.stringify({ description: 'build: other' }))
+    await writeFile(join(directory, 'other.json'), JSON.stringify({ description: 'build: step' }))
+    await writeFile(join(directory, 'agent-partial.meta.json'), '{')
+    const otherSession = join(directory, '../../other-session/subagents')
+    await mkdir(otherSession, { recursive: true })
+    await writeFile(join(otherSession, 'agent-valid.meta.json'), JSON.stringify({ description: 'build: step' }))
+    let now = 0
+    const wall = 90_000
+    f.input.request = { ...f.input.request, budget: { wall_ms: wall } }
+    f.binding.session.child.submitLine = async text => {
+      f.commands.push(text)
+      if (scenario === 'throw') throw new Error('lost observation')
+    }
+    const actingTurn = createClaudeActingTurn(f.binding, {
+      now: () => now,
+      pause: async ms => {
+        now += ms
+        if (now === 25 && (scenario === 'late trailer' || scenario === 'no trailer')) {
+          await writeFile(join(directory, 'agent-created.meta.json'), JSON.stringify({ description: 'build: step' }))
+        }
+        if (now === 50) await rm(join(directory, 'agent-created.meta.json'), { force: true })
+        if ((scenario === 'late trailer' && now === 50_000) || (scenario === 'trailer without metadata' && now === 25)) {
+          await writeFile(f.input.request.result.path, JSON.stringify({ run_id: 'run', step_id: 'step', schema: 'v1', kind: 'blocked', on: 'review' }))
+        }
+      },
+    })
+    let offered = 0
+    let observation: Awaited<ReturnType<ProjectActingTurn>> | undefined
+    const runners = await createProjectRunners({ conversation: f.input.conversation, run_id: 'run', state_dir: f.dir,
+      actingTurn: async input => { offered = input.timeout_ms; observation = await actingTurn(input); return observation }, headless: {},
+      trailer: { schemas: new Map([['v1', () => true]]), metadata: () => undefined } })
+    const outcome = await runners.inRepl!.run(f.input.request, 'in-repl', f.input.signal)
+    expect(offered).toBeGreaterThan(50_000)
+    expect(f.commands).toHaveLength(1)
+    expect(f.released()).toBe(1)
+    if (scenario === 'late trailer' || scenario === 'trailer without metadata') {
+      expect(outcome).toEqual({ kind: 'blocked', on: 'review' })
+      expect(now).toBe(scenario === 'late trailer' ? 50_000 : 25)
+    } else if (scenario === 'no subagent') {
+      expect(observation?.kind).toBe('unknown')
+      expect(outcome).toEqual({ kind: 'unknown', detail: 'Dispatch turn completion unknown: The REPL did not accept the dispatch within its budget; subagent completion is unknown.' })
+      expect(now).toBe(DISPATCH_TIMEOUT_MS)
+      expect(DISPATCH_TIMEOUT_MS).toBe(35_000)
+    } else if (scenario === 'no trailer') {
+      expect(outcome).toEqual({ kind: 'unknown', detail: 'Dispatch turn completion unknown: Claude trailer not observed before cancellation or host budget expiry.' })
+      expect(now).toBeGreaterThanOrEqual(offered)
+      expect(now).toBeLessThanOrEqual(wall)
+    } else {
+      expect(outcome).toEqual({ kind: 'unknown', detail: 'Dispatch or observation interrupted; subagent completion is unknown.' })
+    }
   })
 }
