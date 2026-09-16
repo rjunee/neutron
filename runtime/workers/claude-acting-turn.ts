@@ -129,6 +129,10 @@ export function createClaudeActingTurn(binding: ClaudeActingSession, clock: Obse
             // SAY WHAT WAS OBSERVED, NOT JUST THAT TIME RAN OUT. Still `unknown`:
             // none of this proves the worker did or did not run. It says WHICH
             // uncertainty this is, which the bare sentence could not.
+            // SAY WHAT WAS OBSERVED, NOT WHAT THE REPL DID. The old wording
+            // ("the REPL did not accept the dispatch") is a VERDICT this code
+            // cannot reach: the REPL may have read the line and then declined or
+            // failed before Agent creation, which looks identical from here.
             // `submitLine` resolving means the TERMINAL acknowledged text and
             // Enter — `pty-host.ts:194-195` says explicitly that neither backend
             // asserts the REPL acted. So this must not be reported as acceptance.
@@ -137,7 +141,7 @@ export function createClaudeActingTurn(binding: ClaudeActingSession, clock: Obse
               : seen.directory === 'absent'
                 ? 'directory does not exist'
                 : `directory could not be read (${seen.reason})`
-            return { kind: 'unknown' as const, detail: `The REPL did not accept the dispatch within its budget; subagent completion is unknown. Terminal acknowledged text and Enter, which is not evidence the REPL acted; polled ${subagents} — ${where}.` }
+            return { kind: 'unknown' as const, detail: `No worker was observed for this dispatch within its budget; subagent completion is unknown. Terminal acknowledged text and Enter, which is not evidence the REPL acted; polled ${subagents} — ${where}.` }
           }
           const nextDeadline = accepted ? deadline : dispatchDeadline
           await clock.pause(Math.min(25, Math.max(1, nextDeadline - clock.now())), stopped)

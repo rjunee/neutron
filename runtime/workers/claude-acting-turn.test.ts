@@ -365,6 +365,12 @@ for (const scenario of ['late trailer', 'no subagent', 'no trailer', 'throw', 't
       expect(observation).toEqual({ kind: 'unknown', detail: expect.stringContaining('directory exists with 2 agent metadata file(s), none naming this step') })
       const seen = observation as { kind: 'unknown'; detail: string }
       expect(seen.detail).toContain('not evidence the REPL acted')
+      // The detail must REPORT, not RULE. "the REPL did not accept the dispatch"
+      // is a verdict this seam cannot reach: the REPL may have read the line and
+      // then declined or failed before Agent creation, which looks identical
+      // from here. Say what was observed — no worker appeared.
+      expect(seen.detail).toContain('No worker was observed')
+      expect(seen.detail).not.toContain('did not accept')
       expect(seen.detail).toContain(directory)
       expect(now).toBe(DISPATCH_TIMEOUT_MS)
       expect(DISPATCH_TIMEOUT_MS).toBe(35_000)
