@@ -163,12 +163,12 @@ test('X6 production wiring: a McpServer built by buildCoreModules scopes credent
 
   // Dispatching for the project → the project's own token. This ONLY resolves
   // per-project because mcpModule.init wired `bindActiveProject: runWithActiveProject`.
-  // Deleting that line makes this line resolve 'global-drive' → RED (mutation-kill).
+  // Deleting that line makes this line resolve null → RED (mutation-kill).
   expect(await dispatchToken(server, PROJECT)).toBe('project-drive')
   // A different project with no row → the global default.
   expect(await dispatchToken(server, 'proj-beta')).toBe('global-drive')
-  // No project (General / system dispatch) → the global default.
-  expect(await dispatchToken(server, null)).toBe('global-drive')
+  // No project → refuse, including the global default.
+  expect(await dispatchToken(server, null)).toBeNull()
 })
 
 test('X6 production wiring: the frame bound at the boundary does not leak across dispatches', async () => {
@@ -193,5 +193,5 @@ test('X6 production wiring: the frame bound at the boundary does not leak across
   // First dispatch binds PROJECT for its own lifetime only; a later unbound
   // dispatch must NOT see a leaked frame.
   expect(await dispatchToken(server, PROJECT)).toBe('project-drive')
-  expect(await dispatchToken(server, null)).toBe('global-drive')
+  expect(await dispatchToken(server, null)).toBeNull()
 })

@@ -42,6 +42,7 @@ import {
   serviceAccountLabel,
 } from '../oauth-token-manager.ts'
 import { CoreCredentialResolver } from '../core-credential-resolver.ts'
+import { runWithActiveProject } from '../active-project-context.ts'
 import { mountOpenCores, GOOGLE_CLIENT_ID_ENV } from '../mount-open-cores.ts'
 
 const OWNER = asOwnerHandle('multi-account-test')
@@ -232,7 +233,7 @@ test('UPGRADE PATH — a pre-existing un-keyed grant keeps working with no migra
     oauthTokens: tokens,
     accountSelection: bench.projectAccountSelectionStore,
   })
-  const accounts = await resolver.accountsFor(CALENDAR_LABEL)
+  const accounts = await resolver.accountsFor(CALENDAR_LABEL, { projectId: 'project-alpha' })
   expect(accounts).toHaveLength(1)
   expect(accounts[0]?.account_email).toBe(WORK)
   expect(await accounts[0]?.accessToken()).toBe('legacy-access')
@@ -294,11 +295,11 @@ test('UPGRADE PATH — an ANONYMOUS un-keyed grant (ISSUES #494) still resolves 
     oauthTokens: tokens,
     accountSelection: bench.projectAccountSelectionStore,
   })
-  const accounts = await resolver.accountsFor(CALENDAR_LABEL)
+  const accounts = await resolver.accountsFor(CALENDAR_LABEL, { projectId: 'project-alpha' })
   expect(accounts).toHaveLength(1)
   expect(accounts[0]?.account_email).toBeNull()
   expect(await accounts[0]?.accessToken()).toBe('anonymous-access')
-  expect(await resolver.resolve(CALENDAR_LABEL)).toBe('anonymous-access')
+  expect(await resolver.resolve(CALENDAR_LABEL, { projectId: 'project-alpha' })).toBe('anonymous-access')
 })
 
 test('UPGRADE PATH — adding a SECOND account alongside a legacy grant yields two accounts, legacy still readable', async () => {
@@ -521,10 +522,10 @@ test('PRODUCTION COMPOSITION — a calendar read spans BOTH accounts, merged in 
   )
 
   const mounted = await mount(bench)
-  const events = await mounted.calendarClient.list({
+  const events = await runWithActiveProject('project-alpha', () => mounted.calendarClient.list({
     range_start: '2026-08-03T00:00:00Z',
     range_end: '2026-08-04T00:00:00Z',
-  })
+  }))
 
   // All three, from both accounts — not one account's worth.
   expect(events.map((e) => e.id)).toEqual(['p2', 'w1', 'p1'])
@@ -548,10 +549,10 @@ test('PRODUCTION COMPOSITION — an event present in BOTH accounts appears once'
   )
 
   const mounted = await mount(bench)
-  const events = await mounted.calendarClient.list({
+  const events = await runWithActiveProject('project-alpha', () => mounted.calendarClient.list({
     range_start: '2026-08-03T00:00:00Z',
     range_end: '2026-08-04T00:00:00Z',
-  })
+  }))
   expect(events).toHaveLength(1)
   expect(events[0]?.id).toBe('shared-1')
 }, 120_000)
@@ -572,10 +573,10 @@ test('PRODUCTION COMPOSITION — one broken account degrades to PARTIAL results 
   const mounted = await mount(bench)
   const across = mounted.calendarClient.listAcrossAccounts
   expect(across).toBeDefined()
-  const out = await (across as NonNullable<typeof across>).call(mounted.calendarClient, {
+  const out = await runWithActiveProject('project-alpha', () => (across as NonNullable<typeof across>).call(mounted.calendarClient, {
     range_start: '2026-08-03T00:00:00Z',
     range_end: '2026-08-04T00:00:00Z',
-  })
+  }))
 
   // The healthy account still answers — a broken grant must not blank the day.
   expect(out.events.map((e) => e.id)).toEqual(['p1'])
@@ -597,10 +598,10 @@ test('PRODUCTION COMPOSITION — when EVERY account fails the read throws rather
   const mounted = await mount(bench)
   // An empty array here would be indistinguishable from a genuinely clear day.
   await expect(
-    mounted.calendarClient.list({
+    runWithActiveProject('project-alpha', () => mounted.calendarClient.list({
       range_start: '2026-08-03T00:00:00Z',
       range_end: '2026-08-04T00:00:00Z',
-    }),
+    })),
   ).rejects.toThrow()
 }, 120_000)
 
@@ -618,7 +619,7 @@ test('PRODUCTION COMPOSITION — an inbox read spans BOTH accounts, newest first
   )
 
   const mounted = await mount(bench)
-  const { results } = await mounted.gmailClient.listMessages({ label: 'INBOX' })
+  const { results } = await runWithActiveProject('project-alpha', () => mounted.gmailClient.listMessages({ label: 'INBOX' }))
   expect(results.map((m) => m.id)).toEqual(['m-home', 'm-work'])
   const byId = new Map(results.map((m) => [m.id, m]))
   expect(byId.get('m-work')?.account_email).toBe(WORK)
@@ -641,9 +642,9 @@ test('PRODUCTION COMPOSITION — one broken mailbox degrades to partial mail plu
   const mounted = await mount(bench)
   const across = mounted.gmailClient.listMessagesAcrossAccounts
   expect(across).toBeDefined()
-  const out = await (across as NonNullable<typeof across>).call(mounted.gmailClient, {
+  const out = await runWithActiveProject('project-alpha', () => (across as NonNullable<typeof across>).call(mounted.gmailClient, {
     label: 'INBOX',
-  })
+  }))
   expect(out.results.map((m) => m.id)).toEqual(['m-home'])
   const failed = out.accounts.filter((a) => !a.ok)
   expect(failed).toHaveLength(1)

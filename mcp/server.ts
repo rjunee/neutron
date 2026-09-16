@@ -145,7 +145,7 @@ export class McpServer {
     // X6 — bind the resolved ACTIVE project (from the bound TopicContext or the
     // caller-threaded fallback) as ambient context for the handler's lifetime, so
     // a Core tool's credential accessor scopes per-project on the native tool
-    // path. A null project_id binds '' → global scope (the pre-X6 behavior). The
+    // path. A null project_id binds '' → credential reads refuse. The
     // frame propagates through the handler's `await` chain (bound synchronously).
     return this.bindActiveProject(ctx.project_id, () =>
       reg.handler(input.args, {

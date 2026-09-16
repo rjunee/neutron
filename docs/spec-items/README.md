@@ -108,7 +108,7 @@ branch is cut (standard §3.1, §3.2).
 
 | Item | Title | Priority | Cutover |
 |---|---|---|---|
-| [`a-build-process-must-not-decrypt-secrets-it-was-not-given`](a-build-process-must-not-decrypt-secrets-it-was-not-given.md) | Stop a build process reading the owner's encryption keyfile | P1 | — |
+| [`a-build-process-must-not-decrypt-secrets-it-was-not-given`](a-build-process-must-not-decrypt-secrets-it-was-not-given.md) | Scope build credential reads to the bound project | P1 | — |
 | [`connect-auth-session-nonce`](connect-auth-session-nonce.md) | Bind connect callbacks to the initiating login session | P1 | — |
 | [`merge-message-pii-and-a-deterministic-leak-window`](merge-message-pii-and-a-deterministic-leak-window.md) | Keep denylisted identities out of merge commit messages | P1 | — |
 | [`persisted-secret-staging-identity`](persisted-secret-staging-identity.md) | Persist secrets despite staging remnants after PID reuse | P1 | — |

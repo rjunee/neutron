@@ -293,24 +293,23 @@ the GLOBAL sentinel when choosing which credential STORE supplies the material,
 but the selection filter uses the REAL active project id even for global-scope
 services. Email and Calendar are exactly the services an owner connects several
 accounts to, so forcing the sentinel there would make the feature a no-op for the
-only services that need it. A blank project id (General topic, cron, system
-dispatch) has no selection and filters nothing.
+only services that need it. The selection store has no rows for a blank project
+id, but credential resolution refuses that unknown identity before reading any
+token (`gateway/cores/core-credential-resolver.ts:287`).
 
-**Active-project plumbing.** The per-instance Core clients are built once at boot
-with a `() => Promise<string|null>` accessor that carries no per-call project
-argument, so the active project is bound as **ambient async context**
-(`gateway/cores/active-project-context.ts`, an `AsyncLocalStorage`) at the
-in-process chat-command boundary (`gateway/http/chat-bridge.ts` wraps
-`chatCommandFilter.match(...)` in `runWithActiveProject(project_id, …)`). The
-resolver reads it back when the accessor fires — the single in-process `await`
-chain propagates the frame straight through. When no frame is bound (the General
-topic, or the CC-spawn MCP-tool path, which crosses a process + loopback-HTTP
-boundary the frame can't follow) the active project resolves to `''` → **global
-scope**, i.e. the exact pre-D2 per-instance behavior (safe, no regression).
+**Active-project plumbing.** Core clients read lazy accessors under the async
+project frame bound at MCP dispatch (`mcp/server.ts:150`), wired by production
+composition (`gateway/composition/build-core-modules.ts:368`). The credential
+resolver treats that frame as authoritative: conflicting requested projects and
+unknown identity refuse before either the encrypted store or OAuth fallback is
+read (`gateway/cores/core-credential-resolver.ts:282`). Calls outside a frame
+must supply a known project explicitly. Missing context does not inherit global
+credentials. Explicit shared rows and Google grants retain their documented
+scope; see the [credential scoping policy](spec-items/a-build-process-must-not-decrypt-secrets-it-was-not-given.md).
+This is API scoping only: direct reads of the shared key still bypass it.
 
 **Active-project scope over the CC-spawn MCP-tool path (work-board / trident-build
-tools).** The credential-resolution slice above still resolves global on the MCP-tool
-path, but the **work-board + trident-build tools now DO carry the active project**.
+tools).** Credentials and tool-state reads receive the active project at dispatch.
 The warm conversational REPL is keyed per-project (`poolKeyFor` folds
 `metering_context.project_id`), so a given session serves exactly one project
 scope; the substrate stamps that scope onto the `ReplSession` and the topic-agnostic

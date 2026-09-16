@@ -22,17 +22,15 @@
  * with `bindActiveProject: runWithActiveProject`), so a Core tool's credential
  * accessor resolves per-project on the agent's native tool path.
  *
- * When NO frame is bound (the General topic, a system/cron dispatch, or the
- * in-process chat-command Core filters which call their Core client directly and
- * do NOT cross `McpServer.dispatch`) the active project id resolves to '' →
- * GLOBAL scope, which is exactly the pre-D2 per-instance behavior: safe, no
- * regression.
+ * Credential reads require a known project. Missing or blank context refuses
+ * access, including instance-wide fallback. This is API scoping only: code with
+ * the readable shared key can still decrypt stored envelopes directly.
  */
 
 import { AsyncLocalStorage } from 'node:async_hooks'
 
 interface ActiveProjectFrame {
-  /** '' == no project (General topic) → global scope. */
+  /** '' == unknown project; credential reads refuse. */
   readonly project_id: string
 }
 
@@ -40,7 +38,7 @@ const storage = new AsyncLocalStorage<ActiveProjectFrame>()
 
 /**
  * Run `fn` with `project_id` bound as the ambient active project. A missing /
- * blank id binds '' (the General topic → global scope). The frame propagates to
+ * blank id binds '' (credential reads refuse). The frame propagates to
  * every `await` `fn` roots synchronously — including a Core client's lazy
  * `accessToken()` closure.
  */
@@ -48,7 +46,12 @@ export function runWithActiveProject<T>(project_id: string | null | undefined, f
   return storage.run({ project_id: (project_id ?? '').trim() }, fn)
 }
 
-/** The ambient active project id, or '' when no frame is bound (→ global scope). */
+/** The ambient active project id, or '' when no frame is bound. */
 export function currentActiveProjectId(): string {
   return storage.getStore()?.project_id ?? ''
+}
+
+/** Preserve the difference between an absent host frame and a bound unknown id. */
+export function currentActiveProjectFrame(): Readonly<ActiveProjectFrame> | undefined {
+  return storage.getStore()
 }

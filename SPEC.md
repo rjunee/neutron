@@ -147,6 +147,12 @@ enforcement lives in `depcruise` + the per-package `tsconfig` matrix.
 
 ### 2.3 — Substrate (spawn-and-stdio)
 
+Core tool credential reads require a known project bound by dispatch; a requested
+project cannot override that binding. Unknown refuses, including global fallback.
+Explicit shared credentials retain their documented scope. Same-process code can
+still read the shared encryption key and decrypt other projects' envelopes; this
+is API scoping, not process isolation (Decisions Log 2026-09-16, #515).
+
 Claude judgment turns run as spawned `claude` CLI processes over stdio (not an
 in-process API client in the parent). A persistent REPL pool keeps warm
 sessions; the credential pool threads each spawn's auth into that child's
@@ -303,6 +309,18 @@ references decisions by date; none is a second home for a decision.
 | `docs/plans/*` | Per-sprint mechanics briefs (referenced from `docs/spec-items/`) |
 
 ## Decisions Log (immutable audit trail — NOT the build spec)
+
+### 2026-09-16 — API credential scoping; readable shared key accepted (#515).
+
+Owner ruling: accept the reach, narrow the blast radius. Same-model bounded work
+remains inside the REPL process; preventing a deliberate read of the shared AES
+key is not the contract. Normal Core tool credential reads use the dispatch-bound
+project, refuse unknown project identity, and refuse a conflicting requested
+project. Explicit global rows and the existing shared Google grants remain
+instance-wide exceptions; host publishing and model authentication remain host
+services. The acceptance test must demonstrate both API refusal and the readable
+key bypass, so it cannot be mistaken for isolation. Detailed policy and checks:
+[the credential scoping item](docs/spec-items/a-build-process-must-not-decrypt-secrets-it-was-not-given.md).
 
 ### 2026-09-15 — Bounded worker roots, telemetry and effort contract (#871).
 

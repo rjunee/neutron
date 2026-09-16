@@ -19,15 +19,12 @@ legacy_ref: "SPEC.md § Phases → Steps (2026-09-12 split)"
 > 1. **An acceptance list is written** — enumerate the specific tool-state surfaces
 >    that still resolve globally, each with the file and the call path, so "done" is
 >    countable; or
-> 2. **It is DECIDED that the current terminal state is intended.** The gap is not
->    accidental and the code already argues it is safe: where no frame is bound (the
->    General topic, a system/cron dispatch, or the in-process chat-command Core
->    filters that call their Core client directly and never cross
->    `McpServer.dispatch`), the active project id resolves to `''` → GLOBAL scope,
->    *"which is exactly the pre-D2 per-instance behavior: safe, no regression"*
->    (`gateway/cores/active-project-context.ts:25-29`). If those `''`-binds-global
->    paths ARE the intended terminal state, this item closes as won't-do rather than
->    staying open forever.
+> 2. **It is DECIDED that the remaining tool-state behavior is intended.**
+>    Credential reads are now governed separately by the 2026-09-16 API scoping
+>    decision in `SPEC.md`: unknown project context refuses, rather than inheriting
+>    global credentials (`gateway/cores/core-credential-resolver.ts:287`). The old
+>    claim that a missing frame safely implies global access is superseded. This
+>    does not specify or close the unenumerated non-credential tool-state work.
 >
 > Until one of those is written down, `needs_spec` stays on.
 

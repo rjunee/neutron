@@ -101,8 +101,8 @@ export class ProjectAccountSelectionStore {
    *
    * A blank `project_id` (the General topic / a cron or system dispatch) is not
    * a project and therefore has no selection — it returns an empty set, which
-   * filters nothing. That is the same "no frame → global, no regression"
-   * posture the active-project context already has.
+   * filters nothing. This metadata lookup is not credential authorization:
+   * CoreCredentialResolver refuses unknown project identity before token reads.
    */
   disabledAccountIds(
     owner_slug: OwnerHandle,
