@@ -33,7 +33,9 @@ test('reaps expired terminal state while retaining live, recent, and unknown sta
   }
   await writeFile(join(root, 'not-a-directory'), 'keep')
 
-  expect(await reapProjectBuildState({ stateRoot: root, runs: { get: id => rows.get(id) ?? null }, now }))
+  // Directory enumeration order varies across filesystems; assert exact membership.
+  const removed = await reapProjectBuildState({ stateRoot: root, runs: { get: id => rows.get(id) ?? null }, now })
+  expect(removed.sort())
     .toEqual(['done-old', 'failed-old'])
 
   const present = async (id: string): Promise<boolean> =>

@@ -2,18 +2,15 @@
  * §F2 defect #1 — the COMPLETE loop inventory, driven through the real
  * `boot()` shell (gateway/index.ts), which is the ONLY boundary that starts the
  * gateway-liveness loop (the sd_notify systemd watchdog + `onGatewayTick` pulse
- * at `gateway/index.ts`). The composer/graph boundary starts 7 loops (memory
- * consolidation is ON by default — managed SPEC Decisions Log 2026-07-20, P0-4 —
- * so reflect-consolidation always arms); the boot shell adds the 8th and emits
- * the ONE complete boot inventory line.
+ * at `gateway/index.ts`). The composer/graph boundary starts the loops listed
+ * in EXPECTED_RUNNING_LOOPS below except gateway-liveness; the boot shell adds
+ * gateway-liveness and emits the ONE complete boot inventory line.
  *
  * This test boots the REAL Open server in-process (real Bun.serve, real
  * `buildOpenGraphComposer`, credentialed via a canned substrate so the dispatch
  * service + its lifecycle watchdog wire up) and asserts `graph.loopRegistry`
- * holds the truly-complete set including `gateway-liveness`:
- *
- *   chunked-upload-sweeper, cron, dispatch-lifecycle-watchdog,
- *   gateway-liveness, reflect-consolidation, reminders, trident, watchdog
+ * holds the truly-complete set including `gateway-liveness`.
+ * The expected list below is shared by the registry and log assertions.
  *
  * MUTATION-VERIFIED: deleting the gateway-liveness registration in
  * `gateway/index.ts` drops it from the set and this test goes red.
@@ -62,6 +59,8 @@ const EXPECTED_RUNNING_LOOPS = [
   // The Kimi gauge — the second pool's poller, armed on the same unconditional
   // terms as the credential probe above.
   'kimi-usage',
+  // #1060 — immediate boot sweep and hourly cleanup of expired build state.
+  'project-build-state-reaper',
   'reflect-consolidation',
   'reminders',
   // #586 — the approval re-raise sweep. A pending approval nobody answers is
