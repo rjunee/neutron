@@ -61,7 +61,15 @@ function sameArgv(left: readonly string[], right: readonly string[]): boolean {
 }
 
 function isCodexArgv(argv: readonly string[], expected: readonly string[]): boolean {
-  return argv.length > 0 && basename(argv[0] ?? '') === basename(expected[0] ?? '') && sameArgv(argv, expected)
+  // A shebang launch is reported as `node /path/to/codex ...` by herdr.
+  // Only the script slot may identify Codex; later arguments are not executables.
+  const offset = /^(?:node|nodejs|bun|deno)$/.test(basename(argv[0] ?? '')) ? 1 : 0
+  const executable = argv[offset] ?? ''
+  const configured = expected[0] ?? ''
+  const matches = configured.includes('/')
+    ? executable === configured
+    : basename(executable) === configured
+  return matches && sameArgv(argv.slice(offset + 1), expected.slice(1))
 }
 
 export class CodexProjectSession {
@@ -86,6 +94,9 @@ export class CodexProjectSession {
     if (line.includes('\r') || line.includes('\n')) {
       throw new Error('codex project session refuses embedded line terminators')
     }
+    if (line.includes('\x1b')) {
+      throw new Error('codex project session refused: input contains a terminal escape')
+    }
     const submit = this.child.submitLine
     if (submit === undefined) {
       throw new Error('codex project session refused: terminal host cannot acknowledge submission')
@@ -99,7 +110,9 @@ export class CodexProjectSession {
     await previous
     try {
       if (this.child.hasExited()) throw new Error('codex project session refused: session is not running')
-      await submit.call(this.child, line)
+      // End the paste explicitly before the host sends Enter. Otherwise Codex's
+      // paste-burst detector can swallow that Enter into the composer.
+      await submit.call(this.child, `\x1b[200~${line}\x1b[201~`)
     } finally {
       release()
     }

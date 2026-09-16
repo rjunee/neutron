@@ -66,11 +66,11 @@ class FakeHost implements AdoptableHost {
   async closeHandle(_handle: string): Promise<void> {}
 }
 
-function fixture(host = new FakeHost()) {
+function fixture(host = new FakeHost(), bin = 'codex') {
   const dir = mkdtempSync(join(tmpdir(), 'codex-project-session-'))
   dirs.push(dir)
   const registryPath = join(dir, 'sessions.json')
-  const sessionHost = new CodexProjectSessionHost({ registryPath, host })
+  const sessionHost = new CodexProjectSessionHost({ registryPath, host, bin })
   return { host, registryPath, sessionHost }
 }
 
@@ -102,6 +102,55 @@ describe('CodexProjectSessionHost', () => {
     expect(session.recovery).toBe('adopted')
     expect(nextHost.attached).toEqual(['pane-1'])
     expect(nextHost.spawned).toEqual([])
+  })
+
+  test.each([
+    ['codex'], ['/usr/bin/codex'], ['node', '/usr/bin/codex'],
+    ['/usr/bin/node', '/usr/bin/codex'], ['nodejs', '/usr/bin/codex'],
+    ['bun', '/usr/bin/codex'], ['deno', '/usr/bin/codex'],
+  ].map((prefix) => ({ prefix })))('adopts a verified launcher shape %j', async ({ prefix }) => {
+    const f = fixture()
+    await f.sessionHost.open(OPEN)
+    const nextHost = new FakeHost()
+    nextHost.inspection = { kind: 'live', argv: [...prefix, '--enable', 'multi_agent_v2'] }
+    const restarted = new CodexProjectSessionHost({ registryPath: f.registryPath, host: nextHost })
+    expect((await restarted.open(OPEN)).recovery).toBe('adopted')
+    expect(nextHost.attached).toEqual(['pane-1'])
+    expect(nextHost.spawned).toEqual([])
+  })
+
+  test.each([
+    ['node', '/opt/runner.js', '/usr/bin/codex', '--enable', 'multi_agent_v2'],
+    ['python', '/usr/bin/codex', '--enable', 'multi_agent_v2'],
+    ['node', '/opt/codex-tools/runner.js', '--enable', 'multi_agent_v2'],
+    ['node', '/usr/bin/codex', '--enable', 'different'],
+    ['node', '/usr/bin/codex', '--enable', 'multi_agent_v2', 'extra'],
+    ['node', '/usr/bin/codex'],
+    [],
+  ].map((argv) => ({ argv })))('refuses an unrelated launcher or changed flags %j', async ({ argv }) => {
+    const f = fixture()
+    await f.sessionHost.open(OPEN)
+    const nextHost = new FakeHost()
+    nextHost.inspection = { kind: 'live', argv }
+    const restarted = new CodexProjectSessionHost({ registryPath: f.registryPath, host: nextHost })
+    await expect(restarted.open(OPEN)).rejects.toThrow(/identity/)
+    expect(nextHost.attached).toEqual([])
+    expect(nextHost.spawned).toEqual([])
+  })
+
+  test('a configured executable path remains exact through the interpreter', async () => {
+    const f = fixture(new FakeHost(), '/opt/pinned/codex')
+    await f.sessionHost.open(OPEN)
+    const nextHost = new FakeHost()
+    const restart = () => new CodexProjectSessionHost({
+      registryPath: f.registryPath, host: nextHost, bin: '/opt/pinned/codex',
+    }).open(OPEN)
+    nextHost.inspection = { kind: 'live', argv: ['node', '/other/codex', '--enable', 'multi_agent_v2'] }
+    await expect(restart()).rejects.toThrow(/identity/)
+    expect(nextHost.attached).toEqual([])
+    nextHost.inspection = { kind: 'live', argv: ['node', '/opt/pinned/codex', '--enable', 'multi_agent_v2'] }
+    expect((await restart()).recovery).toBe('adopted')
+    expect(nextHost.attached).toEqual(['pane-1'])
   })
 
   test('reports positive pane loss when it starts a replacement', async () => {
@@ -148,12 +197,50 @@ describe('CodexProjectSessionHost', () => {
     await Bun.sleep(0)
     const b = session.submitLine('second')
     await Bun.sleep(0)
-    expect(f.host.submissions).toEqual(['first'])
+    expect(f.host.submissions).toEqual(['\x1b[200~first\x1b[201~'])
     expect(f.host.maxActive).toBe(1)
     first.resolve()
     await Promise.all([a, b])
-    expect(f.host.submissions).toEqual(['first', 'second'])
+    expect(f.host.submissions).toEqual(['\x1b[200~first\x1b[201~', '\x1b[200~second\x1b[201~'])
     expect(f.host.maxActive).toBe(1)
+  })
+
+  test('frames a paste before the acknowledged Enter, including empty and Unicode input', async () => {
+    const f = fixture()
+    const session = await f.sessionHost.open(OPEN)
+    await session.submitLine('hello 世界')
+    await session.submitLine('')
+    expect(f.host.submissions).toEqual(['\x1b[200~hello 世界\x1b[201~', '\x1b[200~\x1b[201~'])
+  })
+
+  test('escape input cannot terminate the paste frame', async () => {
+    const f = fixture()
+    const session = await f.sessionHost.open(OPEN)
+    await expect(session.submitLine('one\x1b[201~two')).rejects.toThrow(/terminal escape/)
+    expect(f.host.submissions).toEqual([])
+  })
+
+  test('a failed acknowledgement rejects its caller and releases the next submission', async () => {
+    const f = fixture()
+    const failure = deferred()
+    let calls = 0
+    f.host.child.submitLine = async () => {
+      calls += 1
+      if (calls === 1) {
+        await failure.promise
+        throw new Error('Enter refused')
+      }
+    }
+    const session = await f.sessionHost.open(OPEN)
+    const first = session.submitLine('first')
+    const rejected = first.catch((error: unknown) => error)
+    const second = session.submitLine('second')
+    await Bun.sleep(0)
+    expect(calls).toBe(1)
+    failure.resolve()
+    expect(await rejected).toEqual(new Error('Enter refused'))
+    await second
+    expect(calls).toBe(2)
   })
 
   test('refuses a host that cannot acknowledge a line', async () => {
