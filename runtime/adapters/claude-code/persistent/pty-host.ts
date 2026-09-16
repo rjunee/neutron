@@ -64,6 +64,15 @@ import type { Key } from './keystrokes.ts'
 export const PTY_OUTPUT_GATE_MAX_MS = 5000
 
 /**
+ * Frame programmatic line input as one terminal paste. Interactive TUIs use the
+ * bracketed-paste markers to distinguish an intentional text payload from a burst of
+ * individual keystrokes. The submission-bearing Enter stays outside the frame.
+ */
+export function frameBracketedPaste(text: string): string {
+  return `\x1b[200~${text}\x1b[201~`
+}
+
+/**
  * WHY a child became terminal, IN HERDR'S TERMS. herdr reports no exit status (see
  * {@link PtyChild.exited}), so this is the only thing that distinguishes its routes.
  *

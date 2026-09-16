@@ -423,7 +423,7 @@ describe('write() and the fact that send_text never submits', () => {
       server.delivered
         .filter((c) => c.method === 'pane.send_text' || c.method === 'pane.send_keys')
         .map((c) => (c.method === 'pane.send_text' ? c.params['text'] : c.params['keys'])),
-    ).toEqual(['/compact', ['enter'], ['esc']])
+    ).toEqual(['\x1b[200~/compact\x1b[201~', ['enter'], ['esc']])
     child.kill()
   })
 
@@ -500,7 +500,7 @@ describe('submitting a slash command REFUSES rather than silently skipping the s
     // the two `toEqual`s below would read an empty call log. No polling here for
     // exactly that reason — `until()` would hide the difference.
     await submitCommand(child, '/clear')
-    expect(server.callsTo('pane.send_text')[0]!.params['text']).toBe('/clear')
+    expect(server.callsTo('pane.send_text')[0]!.params['text']).toBe('\x1b[200~/clear\x1b[201~')
     expect(server.callsTo('pane.send_keys')[0]!.params['keys']).toEqual(['enter'])
     child.kill()
   })
@@ -536,7 +536,7 @@ describe('submitting a slash command REFUSES rather than silently skipping the s
     // The text DID land — this is the case the old fire-and-forget pair reported as
     // a completed reset: '/clear' typed at the prompt, never submitted, the context
     // fully intact, and `{status:'reset'}` returned.
-    expect(server.callsTo('pane.send_text')[0]!.params['text']).toBe('/clear')
+    expect(server.callsTo('pane.send_text')[0]!.params['text']).toBe('\x1b[200~/clear\x1b[201~')
     child.kill()
   })
 

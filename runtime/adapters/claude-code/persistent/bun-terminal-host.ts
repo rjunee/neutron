@@ -35,7 +35,13 @@
 import { stripPtyNoise, newDcsStripState, type DcsStripState } from './pty-noise.ts'
 import { encodeKey, encodeKeys, type Key } from './keystrokes.ts'
 import { clampLeadingLines, DEFAULT_RING_MAX_BYTES } from './pty-ring.ts'
-import { PTY_OUTPUT_GATE_MAX_MS, type PtyChild, type PtyHost, type PtySpawnOpts } from './pty-host.ts'
+import {
+  frameBracketedPaste,
+  PTY_OUTPUT_GATE_MAX_MS,
+  type PtyChild,
+  type PtyHost,
+  type PtySpawnOpts,
+} from './pty-host.ts'
 import { fireAndForget } from '@neutronai/logger/fire-and-forget.ts'
 
 /**
@@ -505,10 +511,14 @@ export class BunTerminalHost implements PtyHost {
               'gone, so the command was not submitted.',
           )
         }
-        // TEXT FIRST, THEN THE SUBMIT, each checked: an unacknowledged text followed
-        // by a blind Enter submits whatever was already at the prompt.
+        // PASTE FIRST, THEN THE SUBMIT, each checked: bracketed paste prevents a TUI
+        // from classifying the immediately-following Enter as part of a paste burst.
+        // An unacknowledged paste followed by a blind Enter would submit whatever was
+        // already at the prompt.
         const write = (d: string | Uint8Array): number => terminal.write(d)
-        if (command !== '') writeAllOrThrow(write, command, JSON.stringify(command))
+        if (command !== '') {
+          writeAllOrThrow(write, frameBracketedPaste(command), JSON.stringify(command))
+        }
         writeAllOrThrow(write, encodeKey('enter'), "the 'enter' key")
       },
       resize(cols, rows) {
