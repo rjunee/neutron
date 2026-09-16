@@ -100,6 +100,8 @@ function matchesIdentity(argv: readonly string[], expected: readonly string[] | 
   }
 }
 
+export class CodexApprovalRefusedError extends Error {}
+
 export class CodexProjectSession {
   readonly projectId: string
   readonly paneHandle: string
@@ -128,13 +130,17 @@ export class CodexProjectSession {
     const prompt = this.readScreenPrompt()
     if (prompt === undefined) throw new Error('codex project session approval unknown: no recognised prompt is visible')
     if (prompt.kind !== 'approval') {
-      throw new Error('codex project session refused: the visible prompt is not an approval')
+      throw new CodexApprovalRefusedError('codex project session refused: the visible prompt is not an approval')
     }
-    await this.submitLine(decision === 'allow' ? prompt.allowKey : prompt.denyKey)
+    await this.submit(decision === 'allow' ? prompt.allowKey : prompt.denyKey, prompt)
   }
 
   /** Resolves after the host acknowledges both text delivery and Enter. */
   async submitLine(line: string): Promise<void> {
+    await this.submit(line)
+  }
+
+  private async submit(line: string, expectedPrompt?: CodexScreenPrompt): Promise<void> {
     if (line.includes('\r') || line.includes('\n') || line.includes('\x1b')) {
       throw new Error('codex project session refuses embedded line terminators or escape characters')
     }
@@ -150,6 +156,9 @@ export class CodexProjectSession {
     })
     await previous
     try {
+      if (expectedPrompt !== undefined && this.readScreenPrompt() !== expectedPrompt) {
+        throw new CodexApprovalRefusedError('codex project session refused: approval prompt changed while queued')
+      }
       if (this.child.hasExited()) throw new Error('codex project session refused: session is not running')
       // End the paste explicitly before Enter so Codex does not absorb Enter
       // into its rapid-input paste buffer (on either terminal backend).

@@ -2,8 +2,8 @@ import { afterEach, expect, test } from 'bun:test'
 import { mkdtemp, rm, writeFile } from 'node:fs/promises'
 import { tmpdir } from 'node:os'
 import { join } from 'node:path'
-import type { PtyChild } from '../adapters/claude-code/persistent/pty-host.ts'
-import { CodexProjectSession } from '../adapters/codex-cli/persistent/project-session.ts'
+import type { AdoptableHost, PtyChild, PtySpawnOpts } from '../adapters/claude-code/persistent/pty-host.ts'
+import { CodexApprovalRefusedError, CodexProjectSession, CodexProjectSessionHost } from '../adapters/codex-cli/persistent/project-session.ts'
 import { PROVIDERS } from '../provider.ts'
 import { createCodexActingTurn, type CodexActingSession } from './codex-acting-turn.ts'
 import type { ProjectActingTurn } from './project-runners.ts'
@@ -26,6 +26,7 @@ async function fixture() {
   }
   const session: NonNullable<CodexActingSession['session']> = {
     projectId: 'project', isLive: () => live,
+    screenPrompt: () => undefined, answerApproval: async () => { throw new Error('unexpected approval') },
     submitLine: async text => { commands.push(text); await writeFile(input.request.result.path, '{}') },
   }
   const binding: CodexActingSession = {
@@ -158,3 +159,56 @@ for (const cwd of ['/a/bc', '/a/b/../outside', '/a']) {
     expect(f.commands).toHaveLength(0)
   })
 }
+
+for (const when of ['before dispatch', 'after dispatch'] as const) {
+  for (const kind of ['approval', 'trust'] as const) {
+    test(`worker handles rendered ${kind} ${when}`, async () => {
+      const f = await fixture()
+      const screen = kind === 'approval'
+        ? 'Would you like to run the following command?\n1. Yes, proceed\n3. No, stop'
+        : 'Do you trust the contents of this directory?\n1. Yes, continue'
+      let onScreen: PtySpawnOpts['onScreen']
+      const child: PtyChild = {
+        pid: 123, paneHandle: 'pane', write() {}, kill() {}, exited: new Promise(() => {}), hasExited: () => false,
+        submitLine: async text => {
+          f.commands.push(text)
+          onScreen?.(screen)
+        },
+      }
+      const host: AdoptableHost = {
+        spawn: async (_argv, options) => { onScreen = options.onScreen; return child },
+        attach: async (_handle, options) => { onScreen = options.onScreen; return child },
+        inspectHandle: async () => ({ kind: 'gone' }), closeHandle: async () => {},
+      }
+      const sessions = new CodexProjectSessionHost({ host, bin: process.execPath, registryPath: join(f.dir, 'sessions.json') })
+      f.binding.session = await sessions.open({ projectId: 'project', cwd: f.dir, env: {} })
+      if (when === 'before dispatch') onScreen?.(screen)
+      expect(await f.run()).toEqual({
+        kind: 'refused', reason: 'capability-unsupported',
+        detail: kind === 'approval'
+          ? 'Codex requested approval outside the bounded worker grants; denied.'
+          : 'Codex directory trust requires setup outside the bounded worker.',
+      })
+      const answers = when === 'after dispatch' ? f.commands.slice(1) : f.commands
+      expect(answers).toEqual(kind === 'approval' ? ['\x1b[200~3\x1b[201~'] : [])
+      expect(f.commands).toHaveLength((when === 'after dispatch' ? 1 : 0) + (kind === 'approval' ? 1 : 0))
+    })
+  }
+}
+
+test('worker preserves a queued approval refusal as a refusal outcome', async () => {
+  const f = await fixture()
+  f.binding.session!.screenPrompt = () => ({ kind: 'approval', allowKey: '1', denyKey: '3' })
+  f.binding.session!.answerApproval = async () => { throw new CodexApprovalRefusedError('approval prompt changed while queued') }
+  expect(await f.run()).toEqual({ kind: 'refused', reason: 'capability-unsupported', detail: 'approval prompt changed while queued' })
+  expect(f.commands).toEqual([])
+})
+
+test('cancellation during the initial screen observation prevents dispatch', async () => {
+  const f = await fixture()
+  const controller = new AbortController()
+  f.input.signal = controller.signal
+  f.binding.session!.screenPrompt = () => { controller.abort(); return undefined }
+  expect(await f.run()).toMatchObject({ kind: 'unknown' })
+  expect(f.commands).toEqual([])
+})

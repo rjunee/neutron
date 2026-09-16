@@ -2,7 +2,7 @@ import { stat } from 'node:fs/promises'
 import { relative, resolve, sep } from 'node:path'
 import { setTimeout as delay } from 'node:timers/promises'
 import type { ToolGrant } from '../bounded-work.ts'
-import type { CodexProjectSession } from '../adapters/codex-cli/persistent/project-session.ts'
+import { CodexApprovalRefusedError, type CodexProjectSession } from '../adapters/codex-cli/persistent/project-session.ts'
 import type { ProjectActingTurn } from './project-runners.ts'
 
 /** Host-owned session observation. The bound thread is supplied by the host that
@@ -12,7 +12,7 @@ export interface CodexActingSession {
   topic_id: string
   thread_id: string
   cwd: string
-  session?: Pick<CodexProjectSession, 'projectId' | 'submitLine' | 'isLive'> | undefined
+  session?: Pick<CodexProjectSession, 'projectId' | 'submitLine' | 'isLive' | 'screenPrompt' | 'answerApproval'> | undefined
   grants: { tools: ToolGrant; writable: boolean; network: boolean; roots: readonly string[] }
 }
 
@@ -45,11 +45,31 @@ export function createCodexActingTurn(binding: CodexActingSession): ProjectActin
     const stopped = AbortSignal.any([signal, timer.signal])
     const expired = () => stopped.aborted || Date.now() >= deadline
     const unknown = () => ({ kind: 'unknown' as const, detail: 'Codex trailer not observed before cancellation or host budget expiry.' })
+    const answerPrompt = async () => {
+      const prompt = session.screenPrompt()
+      if (prompt?.kind === 'trust') return refuse('Codex directory trust requires setup outside the bounded worker.')
+      if (prompt?.kind === 'approval') {
+        // Bounded workers cannot request owner decisions or grant escalation.
+        // Deny explicitly so the pane does not remain stuck awaiting a key.
+        try { await session.answerApproval('deny') }
+        catch (error) {
+          if (error instanceof CodexApprovalRefusedError) return refuse(error.message)
+          throw error
+        }
+        return refuse('Codex requested approval outside the bounded worker grants; denied.')
+      }
+      return undefined
+    }
     const observe = async () => {
+      if (expired()) return unknown()
+      const initialPrompt = await answerPrompt()
+      if (initialPrompt) return initialPrompt
       if (expired()) return unknown()
       // JSON escapes newlines; CodexProjectSession owns serialized text/Enter acknowledgement.
       await session.submitLine('Execute the prompt in this JSON dispatch specification: ' + JSON.stringify({ ...spec, effort: request.effort }))
       while (!expired()) {
+        const approval = await answerPrompt()
+        if (approval) return approval
         try {
           const trailer = await stat(request.result.path)
           if (trailer.isFile()) return { kind: 'turn-ended' as const }

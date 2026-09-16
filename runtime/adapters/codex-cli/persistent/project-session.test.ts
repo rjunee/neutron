@@ -300,7 +300,27 @@ describe('CodexProjectSessionHost', () => {
 
     expect(session.screenPrompt()).toEqual({ kind: 'approval', allowKey: '1', denyKey: '3' })
     await session.answerApproval(decision)
-    expect(f.host.submissions).toEqual([key])
+    expect(f.host.submissions).toEqual([`\x1b[200~${key}\x1b[201~`])
+  })
+
+  test('refuses an approval replaced by trust while its answer waits in the queue', async () => {
+    const f = fixture()
+    const session = await f.sessionHost.open(f.open)
+    const held = deferred()
+    f.host.holds.push(held)
+    const dispatch = session.submitLine('dispatch')
+    await Bun.sleep(0)
+    f.host.onScreen?.('Would you like to run the following command?\n1. Yes, proceed\n3. No, stop')
+    const answer = session.answerApproval('allow')
+    f.host.onScreen?.('Do you trust the contents of this directory?\n1. Yes, continue')
+    expect(session.screenPrompt()).toEqual({ kind: 'trust', continueKey: '1' })
+    const result = answer.then(() => 'answered', error => (error as Error).message)
+    held.resolve()
+    await dispatch
+    expect(await result).toContain('prompt changed')
+    expect(f.host.submissions).toEqual(['\x1b[200~dispatch\x1b[201~'])
+    await session.submitLine('after refusal')
+    expect(f.host.submissions).toHaveLength(2)
   })
 
   test('recognises the first-run trust dialog as distinct from an approval', async () => {
