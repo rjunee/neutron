@@ -270,11 +270,14 @@ describe('CodexProjectSessionHost', () => {
     await Bun.sleep(0)
     const b = session.submitLine('second')
     await Bun.sleep(0)
-    expect(f.host.submissions).toEqual(['first'])
+    // Framed as a bracketed paste (#978) — the serialization claim is about
+    // ORDER and one-at-a-time, not about the wire format, but the format is
+    // what reaches the pane and so is what this must assert.
+    expect(f.host.submissions).toEqual(['\x1b[200~first\x1b[201~'])
     expect(f.host.maxActive).toBe(1)
     first.resolve()
     await Promise.all([a, b])
-    expect(f.host.submissions).toEqual(['first', 'second'])
+    expect(f.host.submissions).toEqual(['\x1b[200~first\x1b[201~', '\x1b[200~second\x1b[201~'])
     expect(f.host.maxActive).toBe(1)
   })
 
@@ -321,5 +324,27 @@ describe('CodexProjectSessionHost', () => {
     const f = fixture()
     await expect(f.sessionHost.open({ ...f.open, projectId: '' })).rejects.toThrow(/project id/)
     expect(f.host.spawned).toEqual([])
+  })
+})
+
+// #978. herdr delivers a submitted line to the Codex TUI as ordinary keystrokes,
+// so a multi-line or escape-bearing payload could be interpreted as editor input
+// rather than submitted text. Framing it as a completed bracketed paste makes the
+// TUI take the whole payload as one literal insertion before Enter.
+describe('Codex TUI regression controls', () => {
+  test('submits a completed bracketed paste before the host sends Enter', async () => {
+    const f = await fixture()
+    const session = await f.sessionHost.open(f.open)
+    await session.submitLine('hello')
+    expect(f.host.submissions).toEqual(['\x1b[200~hello\x1b[201~'])
+  })
+
+  test('refuses an escape that could end the paste early', async () => {
+    const f = await fixture()
+    const session = await f.sessionHost.open(f.open)
+    // A payload carrying the paste terminator would close the bracket early and
+    // leave the remainder to be read as keystrokes. Refuse rather than frame it.
+    await expect(session.submitLine('hello\x1b[201~injected')).rejects.toThrow(/escape/)
+    expect(f.host.submissions).toEqual([])
   })
 })
