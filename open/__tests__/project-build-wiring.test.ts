@@ -19,6 +19,8 @@ import { prepareProjectBuild, suiteScript, type ProjectBuildContext } from '../w
 import { makeLazyCredentialedHostRunner, spawnCapture } from '@neutronai/trident/git-mode.ts'
 import { githubProcessEnv } from '@neutronai/github/credential.ts'
 import { renderTestStrategy } from '@neutronai/trident/test-strategy.ts'
+import { CodexProjectSessionHost } from '@neutronai/runtime/adapters/codex-cli/persistent/project-session.ts'
+import type { AdoptableHost, PtyChild, PtySpawnOpts } from '@neutronai/runtime/adapters/claude-code/persistent/pty-host.ts'
 
 const cleanup: (() => void | Promise<void>)[] = []
 afterEach(async () => { for (const fn of cleanup.splice(0).reverse()) await fn() })
@@ -185,6 +187,47 @@ test('acting turn requires the selected live project session and observed grants
   f.context.provider = 'pi'
   await f.prepare()
   expect((await f.captured().actingTurn({ ...turn, conversation: f.captured().conversation })).kind).toBe('refused')
+})
+
+test('Codex-selected project denies an approval through the composed acting turn', async () => {
+  const f = await fixture()
+  f.context.provider = 'openai-codex'
+  f.input.codex_home = join(f.dir, 'codex-home')
+  let onScreen: PtySpawnOpts['onScreen']
+  let spawnedEnv: Record<string, string | undefined> | undefined
+  const submissions: string[] = []
+  const child: PtyChild = {
+    pid: 123, paneHandle: 'codex-pane', write() {}, kill() {}, exited: new Promise(() => {}), hasExited: () => false,
+    submitLine: async text => {
+      submissions.push(text)
+      onScreen?.('Would you like to run the following command?\n1. Yes, proceed\n3. No, stop')
+    },
+  }
+  const host: AdoptableHost = {
+    spawn: async (_argv, options) => { onScreen = options.onScreen; spawnedEnv = options.env; return child },
+    attach: async (_handle, options) => { onScreen = options.onScreen; return child },
+    inspectHandle: async () => ({ kind: 'gone' }), closeHandle: async () => {},
+  }
+  f.context.codexSessionHost = new CodexProjectSessionHost({
+    host, bin: process.execPath, registryPath: join(f.dir, 'codex-project-sessions.json'),
+  })
+  const options = await f.prepare()
+  const captured = f.captured()
+  const request: BoundedWorkRequest = { ...options.workers.build.request, run_id: f.input.run.id, step_id: 'fixture-step', role: 'build', needs_approval_decision: false }
+  const outcome = await captured.actingTurn({
+    conversation: captured.conversation,
+    request,
+    spec: { ...captured.conversation.spec, prompt: 'bounded work' },
+    timeout_ms: 100,
+    signal: new AbortController().signal,
+  })
+  expect(outcome).toEqual({
+    kind: 'refused', reason: 'capability-unsupported',
+    detail: 'Codex requested approval outside the bounded worker grants; denied.',
+  })
+  expect(submissions).toHaveLength(2)
+  expect(submissions[1]).toBe('\x1b[200~3\x1b[201~')
+  expect(spawnedEnv?.CODEX_HOME).toBe(f.input.codex_home)
 })
 
 test('unwired provider refusal names the project, instance, and application selection levels', async () => {

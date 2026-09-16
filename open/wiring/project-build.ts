@@ -5,7 +5,9 @@ import { mkdir, readFile, writeFile, lstat } from 'node:fs/promises'
 import { join, resolve } from 'node:path'
 import { createProjectRunners } from '@neutronai/runtime/workers/project-runners.ts'
 import { createClaudeActingTurn } from '@neutronai/runtime/workers/claude-acting-turn.ts'
+import { createCodexActingTurn } from '@neutronai/runtime/workers/codex-acting-turn.ts'
 import { createCodexHeadlessRunner } from '@neutronai/runtime/workers/codex-headless.ts'
+import { CodexProjectSessionHost } from '@neutronai/runtime/adapters/codex-cli/persistent/project-session.ts'
 import { pool, supervisedBySessionKey } from '@neutronai/runtime/adapters/claude-code/persistent/pool-state.ts'
 import type { PersistentReplSubstrateOptions } from '@neutronai/runtime/adapters/claude-code/persistent/types.ts'
 import type { Provider } from '@neutronai/runtime/provider.ts'
@@ -80,6 +82,8 @@ export interface ProjectBuildContext {
   providerSource: ProviderSelectionSource
   env: NodeJS.ProcessEnv
   spawnProjectSession: (projectId: string) => Promise<void>
+  /** Test seam. Production constructs the durable Herdr-backed host. */
+  codexSessionHost?: CodexProjectSessionHost
 }
 
 /**
@@ -220,11 +224,22 @@ export async function prepareProjectBuild(input: InnerLoopInput, context: Projec
   const state = join(context.stateRoot, encodeURIComponent(run.id))
   await mkdir(state, { recursive: true })
   const topic = run.chat_id ?? context.projectId
+  const codexSessions = context.codexSessionHost ?? new CodexProjectSessionHost({
+    registryPath: join(context.stateRoot, 'codex-project-sessions.json'),
+  })
+  const codexEnv = { ...context.env, ...(input.codex_home ? { CODEX_HOME: input.codex_home } : {}) }
   const substrate = await createProjectRunners({
     conversation: { project_id: context.projectId, topic_id: topic, provider: context.provider,
       spec: { tools: [], model_preference: [], metering_context: { project_id: context.projectId } } },
     run_id: run.id, state_dir: state,
     actingTurn: async turn => {
+      if (context.provider === 'openai-codex') {
+        const session = await codexSessions.open({ projectId: context.projectId, cwd: context.projectDir, env: codexEnv })
+        return createCodexActingTurn({
+          project_id: context.projectId, topic_id: topic, thread_id: topic, cwd: context.projectDir, session,
+          grants: { tools: 'edit-and-run', writable: true, network: true, roots: [run.worktree] },
+        })(turn)
+      }
       if (context.provider !== 'anthropic') return { kind: 'refused', reason: 'capability-unsupported', detail: `No live acting-turn binding for ${context.provider} selected at ${context.providerSource} level` }
       let candidates = liveProjectSessions(context.projectId)
       // MISSING AND AMBIGUOUS ARE NOT ONE FACT (#1085). Both ended here as the
@@ -291,7 +306,7 @@ export async function prepareProjectBuild(input: InnerLoopInput, context: Projec
       ['project-review', (value: unknown) => validSnapshot(value, 'verdict')],
       ['verdict', (value: unknown) => validateTrailer('verdict', value).ok],
     ]), metadata: () => undefined },
-    headless: { 'openai-codex': createCodexHeadlessRunner({ env: { ...context.env, ...(input.codex_home ? { CODEX_HOME: input.codex_home } : {}) } }) },
+    headless: { 'openai-codex': createCodexHeadlessRunner({ env: codexEnv }) },
   })
   const parsed = parsePhaseModelConfig(input.phase_models ?? {})
   if (parsed.errors.length) throw Error(`Invalid project phase models: ${parsed.errors.join('; ')}`)
