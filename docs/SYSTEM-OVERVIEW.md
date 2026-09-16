@@ -691,7 +691,8 @@ gateway's in-process tool surface — Cores (`/cal` `/email` `/remind`
 a slash-command.
 
 - **The transport.** At spawn the substrate writes a per-session `--mcp-config`
-  with TWO `mcpServers`: the dev-channel (the reply sink) **and** a `neutron`
+  with two COMPILED-IN `mcpServers` (plus any the owner installed — see
+  "Owner-installable MCP servers" below): the dev-channel (the reply sink) **and** a `neutron`
   tools-bridge (`tools-bridge.ts`). The bridge is a stdio MCP server that
   advertises the registry's tools (from a manifest the substrate snapshots at
   spawn time) and forwards each `CallTool` to the substrate's reply-sink HTTP
@@ -747,6 +748,220 @@ a slash-command.
   the agent must act and `dontAsk` for the tool-less arbiter; other profiles retain
   their prior policy); the split into distinct constants is what lets the
   coming permission migration diverge per caller-trust-class as N constant edits.
+
+### Owner-installable MCP servers (2026-08-09) — a THIRD `mcpServers` entry, gated on his approval
+
+The two entries above are compiled in, and until this landed nothing could add a
+third: the whole published MCP ecosystem was unreachable from the owner's own
+instance. He can now install one from Settings → **MCP servers** on either client,
+and the assistant can call its tools.
+
+**Installing is not approving,** and that separation is the whole security model —
+an installed MCP server is a subprocess started with the owner's permissions and
+there is nothing underneath him.
+
+- **The grant** is an ordinary `tool_approvals` row under `mcp-server:<name>`,
+  bound to a SHA-256 over `[name, command, args, sorted env NAMES]`. Same
+  content-hash mechanism as the ritual grants (`reminders/ritual-approval.ts`),
+  deliberately not a second approval concept; `approve` resolves through
+  `ApprovalManager.respondApproval`. Change the command, an arg or the set of
+  variable names and the hash moves, the old row stops matching, and the server
+  drops out of the spawn until he approves the new request — so **a program cannot
+  widen what it runs after approval**. Rotating a VALUE does not re-ask: what was
+  granted is which program runs with which variables set. Recomputed every resolve,
+  never cached. There is no `auto` policy and no pre-approved server, and a missing
+  or garbled `decision` is a 400 rather than a default in either direction.
+- **The decision itself carries the hash it is about.** `POST …/decision` requires
+  `grant_hash`, read off the row that rendered the prompt, and a value that does not
+  match the installed spec is refused (409, with the current list attached so the
+  client re-renders the prompt he now has to read). Without it the store bound the
+  press to whatever was installed at that instant, so editing the server from the
+  other client while a prompt sat on screen turned an Approve for the command he read
+  into an Approve for one he never saw. Given a matching hash the decision applies
+  whether or not a pending row exists — a fresh grant is opened and resolved in the
+  same call — which is what makes deny-then-approve one press instead of a 409 and an
+  unexplained retry.
+- **Uninstalling REVOKES, and revokes FIRST.** `remove()` cancels pending prompts and
+  calls `ApprovalManager.revokeApproved`, transitioning approved rows to `expired`.
+  Otherwise the hash-match alone meant reinstalling a byte-identical command
+  re-matched the old grant and the server came back wired, never shown to him a
+  second time. Editing is different and deliberately leaves the old row alone: he is
+  still curating it. The revoked rows survive with their `args_json` and decider, so
+  the trail still records what was approved. The ORDER is revoke → forget the secrets →
+  drop the spec: dropping the spec first left an approved grant for a server that no
+  longer existed, which a retry could not heal (it re-reads the list, finds nothing, and
+  answers `removed: false`) while the live grant waited for a byte-identical reinstall
+  to re-match it. Revoking first makes every partial outcome unapproved-but-installed —
+  not wired, still visible, and the retry has a target.
+- **DENY revokes too.** `approvalStateFor` tests `approved` before `denied` (safe
+  precedence for a read), so recording a denial alongside a live approved row left the
+  server WIRED while the surface answered 200 and the list said "denied". With two
+  clients that is ordinary: the phone approves, the tab still shows the pending prompt,
+  and the tab's Deny is the only stop button he has. `decide` revokes any approval in
+  force before it records the denial, and reads the rows AFTER the revoke so a repeated
+  deny cannot short-circuit on its own earlier row while an approval opened in between
+  stays live. Approving after a deny still works — deny is a stop, not a permanent block.
+- **One writer at a time.** `install`/`remove` read the whole installed list, do
+  async secret work, then rewrite it, so two of them interleaved (the web tab and the
+  phone) lost one of the writes. Both run inside an in-process promise chain and
+  re-read the list within it. `install`'s write ORDER is spec-then-secrets, chosen for
+  what a crash in the middle leaves: an unapproved spec with no secrets (doubly not
+  wired), never the old APPROVED command paired with the new secrets. `remove`'s order is
+  the mirror image of the same test, for the same reason.
+- **An unreadable secret fails ONE server closed.** `ProjectCredentialStore.resolve`
+  decrypts inline and AES-GCM throws on a malformed envelope or a failed tag check — a
+  truncated write, a restored backup, a `secrets_key` this box no longer holds. That call
+  sat outside `readSecrets`' `try`, so one bad `mcp_env.*` row threw out of `list()` and
+  `resolveApproved()`: a 500 on the Settings GET, a rejection on every chat turn's spawn
+  resolve, and no way to UNINSTALL the offending server, because the fault was on the read
+  path the uninstall needs. Every failure now lands on the same answer — no secrets — which
+  `resolveApproved` already treats as fail-closed and logs, so the row shows as installed
+  with its secrets missing and re-entering the value heals it with no second prompt.
+- **The audit row names the decider.** `tool_approvals.decided_by` is the user_id of the
+  person who pressed the button — the bearer the decision surface has already resolved in
+  order to authorize the request. It briefly recorded this instance's slug instead, so
+  every MCP decision read as having been made by the box; the slug survives only as the
+  fallback for a caller with no authenticated actor.
+- **The prompt is rendered by code** (`renderMcpServerGrant`,
+  `runtime/mcp-servers.ts`) from the same fields the hash covers — the name, the
+  command, every argument, the variable NAMES, never a value — and states that
+  approving starts the program on this machine. Both clients display it
+  **verbatim**; neither assembles or summarises it, because a prompt that
+  misstates what it grants is worse than no prompt (this repo shipped exactly that
+  once — see the 2026-08-09 live-agent web-tools entry in `docs/AS_BUILT.md`).
+  **The program and each argument get their own line**, numbered in argv order and
+  wrapped in `⟦…⟧`. A space-joined command line rendered `{command:'a b'}` and
+  `{command:'a', args:['b']}` identically — two different programs, two different
+  hashes, one displayed text — so the test asserts that two specs which hash
+  differently never render the same, not merely that every field appears. Neither
+  client's row summary joins argv either. The banned-character set is every INVISIBLE, not
+  just the bidi controls and zero-widths it originally listed: three specs differing only
+  by a WORD JOINER measured to the same pixel width in a browser, so two grants the hash
+  distinguishes were indistinguishable on screen. NEL, SOFT HYPHEN, ARABIC LETTER MARK,
+  MONGOLIAN VOWEL SEPARATOR, LINE/PARAGRAPH SEPARATOR, WORD JOINER and the invisible math
+  operators, the deprecated format controls, the interlinear annotation marks and the TAG
+  block are all refused outright. It stays a denylist of invisibles rather than an allowlist
+  of printable ASCII, because a real path or argument can carry non-ASCII text.
+- **Three stores, one join.** `instance_metadata.mcp_servers` (migration 0120)
+  holds names/command/args/`env_names`; the VALUES live in the AES-256-GCM
+  `project_credentials` store at global scope under `mcp_env.<name>`; the
+  permission lives in `tool_approvals`. `gateway/mcp-servers/store.ts` is the only
+  place that joins them, and `resolveApproved()` returns a server only when it is
+  installed and valid, hash-matched approved, AND has a stored value for every
+  variable it declares — fail-closed, because starting the program with a promised
+  variable unset is not what was approved. Keeping values out of the spec is what
+  makes the spec safe to store in a plain metadata column, return to both clients,
+  render in a prompt and log.
+- **`mcp_env.*` is a RESERVED namespace, so that join has exactly one writer.** Sharing
+  the credential table meant the generic credential CRUD could reach those rows —
+  `service` accepts `.`, so `POST /api/app/credentials` and
+  `DELETE /api/app/credentials/mcp_env.<name>` were both valid requests. Reaching them
+  there skipped the `onRevoked` announcement, so a rotation left the warm child holding
+  the OLD secret alive. `ProjectCredentialStore.set` / `delete` / `resolve` now refuse the
+  namespace (400 `reserved_service`) and `gateway/mcp-servers/store.ts` uses the explicit
+  `setReserved` / `deleteReserved` / `resolveReserved` methods. The list surfaces omit
+  reserved rows, so Admin does not render a credential it cannot author and the
+  `<available_services>` block does not advertise a secret blob as a usable service.
+- **Two independent gates confine it to the owner's session.**
+  `resolveExtraMcpServers` is wired onto `cc-agent-*` alone
+  (`open/wiring/substrates.ts`), AND `spawn.ts` requires `enableToolBridge` as
+  well — the same trust class the in-process bridge rides. The untrusted import and
+  disposable Trident REPLs satisfy neither, and the resolver is not even CALLED
+  there, so an untrusted spawn never reaches into the credential store. Each
+  installed server also needs its own `mcp__<name>` in `--allowedTools`: presence
+  in `mcpServers` only makes it START, and its tools would then hit a per-call
+  permission prompt no headless REPL can answer. A name colliding with a built-in
+  is skipped, not merged.
+- **Only the Claude-backed session gets them, and the UI says so.**
+  `resolveExtraMcpServers` is forwarded onto the Claude REPL options; a project whose
+  provider resolves to a non-Anthropic backend takes the early branch in
+  `gateway/wiring/build-llm-call-substrate.ts`, which speaks the OpenAI-family wire
+  protocol, advertises only the in-process tool manifest, and has no MCP client to
+  hand a stdio subprocess to. So no label claims a server is "running" — an approved
+  row reads "starts it with its next session", and a parity test pins the word out of
+  both clients. Extending that path is a feature, not a wiring fix.
+- **A hung third-party handshake cannot wedge the live chat.**
+  `MCP_CONNECTION_NONBLOCKING=false` makes `claude` await the MCP handshake before
+  accepting input — safe while the config held only our own two `bun` scripts, but an
+  installed program that never completes `initialize` would hold that wait open inside
+  the post-spawn assertion's 30 s ready budget and surface as `channel-wedged`. The
+  load stays blocking and is now bounded by `MCP_TIMEOUT` whenever an installed server is
+  wired; a spawn with none sets nothing and behaves exactly as before. The bound is PER
+  SERVER while the budget covers the whole spawn, so `mcpStartupTimeoutMs` divides a
+  stated 20 s share of the budget across the servers actually wired rather than letting N
+  hung servers each honour 10 s and collectively blow it. Whether the CLI's blocking
+  connect group loads serially is NOT verified, so it is sized for the worse case. **The
+  divisor is EVERY entry in `--mcp-config`, not the owner's count**: `MCP_TIMEOUT` is
+  process-wide, and the config always also holds the dev-channel reply sink and (when
+  attached) the tools bridge, so dividing by the owner's count alone understated the
+  serial worst case by two servers on every spawn — two installed servers got 10 s each
+  across FOUR configured ones, 40 s against a 30 s ready budget. `spawn.ts` now passes
+  `Object.keys(mcpServers).length`, the exact count it is about to serialise, so one
+  installed server means 20 s / 3 = 6.6 s rather than a flat 10 s. Past ten CONFIGURED
+  servers a 2 s floor wins, because a timeout short enough to keep dividing would fail
+  HEALTHY servers — so the floor is not allowed to over-subscribe the budget and
+  `MCP_SERVERS_MAX` is DERIVED from the constants (20 s budget / 2 s floor, less the two
+  built-ins = **8 installed servers**, the number `max_servers` advertises and the store
+  enforces). It was 24, which permitted 48 s of startup against the 30 s ready budget, and
+  then 10, which permitted 24 s once the built-ins were counted; a test sweeps every count
+  from 1 to the cap WITH the built-ins added in, so raising one without the other fails
+  CI.
+- **The config, secrets and all, is cleaned up on EVERY path.** The MCP config carries
+  the dev-channel token and each server's env values at 0600 inside a 0700 per-spawn
+  directory. A throw between writing it and having a child (the child-exit handler owns
+  cleanup, and there is no child yet) used to strand it; each writer and the spawn now
+  remove the directory on failure. `unlinkSessionConfigs` removes the DIRECTORY as well
+  as the files, which it never did — one empty directory per session had been
+  accumulating in `tmpdir()`.
+- **A change reaches the next turn** by joining the warm-pool freshness guards.
+  `claude` reads `--mcp-config` once at startup, so a warm child cannot learn about
+  a later install; `mcpSurfaceFingerprint` → `ReplSession.mcpFingerprint` makes the
+  installed set comparable the way `authFingerprintFor` makes a rotated credential
+  comparable, and a change evicts + respawns with `--resume` (conversation
+  survives). Equal configuration yields an equal fingerprint, so an unchanged set
+  reuses the warm child instead of paying a cold spawn per message. Env VALUES are
+  hashed in — never logged or persisted — so a rotated secret actually reaches the
+  subprocess. A resolver REJECTION propagates and fails the turn deliberately:
+  treating it as "no servers" would lose his tools invisibly, and because the guard
+  and the spawn resolve separately, an intermittent failure would then evict the
+  child every turn. **The resolve happens INSIDE the warm-reuse branch**, which is the only
+  place its value is used: the resolver is async, and awaiting it anywhere between
+  `getOrSpawnSession`'s `pool.get` and its `pool.set` reopens the window two concurrent
+  dispatches de-duplicate through, so every cold start spawned TWO `claude` children on one
+  transcript — and the loser never entered the pool, so `shutdownAllPersistentRepls()`
+  could not kill it and it outlived the process holding an open 0600 config full of
+  plaintext secrets. Hoisting the `pool.get` above the await does NOT fix that; the
+  invariant is that nothing suspends BETWEEN the read and the set, which is a property of
+  the whole cold path rather than of the read's position.
+- **Surfaces.** HTTP `gateway/http/app-mcp-servers-surface.ts` — machine-scoped
+  `/api/app/mcp-servers` (GET the whole picture, POST install-or-replace, DELETE
+  `?name=`) plus `POST …/mcp-servers/decision` (`{ name, decision, grant_hash }`). Every route
+  answers with the same `{ servers, reserved_names, max_servers }` object, so a
+  client re-renders from the reply. The two paths are matched by string EQUALITY,
+  never prefix — the collection path is a prefix of the decision path, and a prefix
+  match would answer one with the other's handler, a 200 carrying the wrong body
+  that no client can detect. Clients: web
+  `landing/chat-react/mcp-servers-client.ts` → `SettingsTab.tsx` § "MCP servers";
+  mobile `app/lib/mcp-servers-client.ts` → `app/app/mcp-servers.tsx`, reached from
+  `app/app/settings.tsx`. `splitCommandLine`, `serverSummary` and `parseEnvLines` are
+  duplicated across the two bundles (no browser package in Metro) and held in sync by
+  `gateway/__tests__/mcp-servers-client-parity.test.ts` — `splitCommandLine`
+  decides what argv a server is installed WITH, so two copies disagreeing would
+  build two different programs from the same pasted line. Both helpers were also
+  wrong in the same way once, which parity alone cannot catch, so the VALUES are
+  pinned too: a quote only quotes at the START of a segment (`/srv/it's/example-mcp`
+  used to lose the apostrophe and become a different path), and a non-empty env line
+  with no `=` is an ERROR rather than a silently dropped variable.
+- **The web card is a COLUMN, structurally.** It has its own `.cset-mcp-*` classes
+  rather than reusing `.cset-cred-row`, a single-line flex row with no wrap that
+  pushed Approve/Deny off-screen behind an unshrinkable `<pre>` — rendered, correct,
+  and unreachable, which `happy-dom` cannot see. The layout contract (column
+  direction, per-block `overflow-x`, a wrapping action row, every emitted class
+  declared) is asserted against `landing/chat-react.html` itself.
+- **The ApprovalManager is built ONCE** by the composer and handed to the graph as
+  `approval_manager`; `build-core-modules` reuses a caller-supplied one exactly as
+  it already does for `ChannelRouter`. Two instances over one `tool_approvals`
+  table would each hold their own map of pending decisions.
 
 ### Native SKILL.md discovery for the agent (P1-5)
 

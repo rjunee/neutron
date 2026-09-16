@@ -59,6 +59,8 @@ import type { AppWsAuthResolver } from '@neutronai/channels/adapters/app-ws/auth
 import {
   ProjectCredentialValidationError,
   PROJECT_CREDENTIAL_MIN_SECRET_CHARS,
+  isReservedService,
+  RESERVED_SERVICE_PREFIXES,
   type CredentialScope,
   type ProjectCredentialStore,
 } from '@neutronai/project-credentials/store.ts'
@@ -259,6 +261,24 @@ async function handleSet(
   // A `token` alias is accepted alongside `plaintext` for a friendlier client.
   const rawToken = fields['plaintext'] ?? fields['token']
   const rawService = fields['service']
+  // THE RESERVED NAMESPACE IS REFUSED ON THE SERVICE, BEFORE THE TOKEN IS JUDGED.
+  //
+  // `store.set` already checks this first (`project-credentials/store.ts:295-307`),
+  // ahead of `sanitizeToken` — but the surface judged the token first, so a request
+  // naming a reserved service with a short token came back `invalid_token`. That is
+  // the wrong refusal: it answers about the secret when the namespace is what was
+  // rejected, and it makes the reply depend on token shape, so the same reserved
+  // service reports two different errors for two equally-refused requests.
+  //
+  // The security property held either way — a VALID token with a reserved service
+  // was still refused — so this is about which refusal the surface gives, not a hole.
+  if (typeof rawService === 'string' && isReservedService(rawService)) {
+    return jsonError(
+      400,
+      'reserved_service',
+      `service '${RESERVED_SERVICE_PREFIXES[0]}*' is managed by its own settings surface and cannot be set here`,
+    )
+  }
   if (
     typeof rawService === 'string' &&
     /^[a-z0-9_.-]{1,128}$/.test(rawService.trim().toLowerCase()) &&
@@ -301,7 +321,17 @@ async function handleDelete(
   if (requested !== null && requested !== scope) {
     return jsonError(400, 'scope_not_allowed', SCOPE_NOT_ALLOWED)
   }
-  const removed = await store.delete(owner_slug, project_id ?? '', service)
+  // WRAPPED, because this path can now be REFUSED and not merely miss. The store
+  // reserves the namespaces it hosts for other modules (`mcp_env.*` — an installed
+  // MCP server's secret), and an unwrapped throw would answer 500 for what is a
+  // 400: the caller asked for something this surface must not do. See § RESERVED
+  // NAMESPACES in `project-credentials/store.ts`.
+  let removed: boolean
+  try {
+    removed = await store.delete(owner_slug, project_id ?? '', service)
+  } catch (err) {
+    return mapWriteError(err)
+  }
   if (!removed) {
     return jsonError(404, 'credential_not_found', `service=${service} scope=${scope}`)
   }

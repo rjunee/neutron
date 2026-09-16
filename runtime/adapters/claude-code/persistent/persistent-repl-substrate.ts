@@ -82,6 +82,7 @@ export {
   createPersistentReplSubstrate,
   injectPersistentReplActiveTurn,
   shutdownAllPersistentRepls,
+  evictWarmReplsForMcpSurfaceChange,
 } from './pool.ts'
 export {
   registerSupervisedSubstrate,

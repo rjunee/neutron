@@ -111,6 +111,14 @@ export class ApprovalManager {
     if (req.policy === 'auto') {
       return 'approved'
     }
+    const row = await this.openApproval(req)
+    return new Promise<ApprovalDecision>((resolve, reject) => {
+      this.pending.set(row.id, { resolve, reject })
+    })
+  }
+
+  /** Persist and surface a non-auto request without waiting for its decision. */
+  async openApproval(req: ApprovalRequest): Promise<ApprovalRow> {
     const id = req.id ?? crypto.randomUUID()
     const requested_at = this.now() / 1000
     const args_json = JSON.stringify(req.args ?? null)
@@ -142,9 +150,7 @@ export class ApprovalManager {
       log.error('notifier_failed', { error: err instanceof Error ? (err.stack ?? err.message) : String(err) })
     })
 
-    return new Promise<ApprovalDecision>((resolve, reject) => {
-      this.pending.set(id, { resolve, reject })
-    })
+    return row
   }
 
   /**
@@ -459,5 +465,12 @@ export class ApprovalManager {
       )
       return res.changes > 0
     })
+  }
+
+  /** Expire every approved grant for one namespaced tool. */
+  async revokeApprovedForTool(project_slug: string, tool_name: string): Promise<number> {
+    const approved = this.findApproved(project_slug, tool_name)
+    for (const row of approved) await this.revokeApproved(row.id)
+    return approved.length
   }
 }

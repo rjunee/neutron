@@ -333,7 +333,7 @@ export function buildCoreModules(
     name: 'approval',
     deps: ['tools'],
     init: () => {
-      const manager = new ApprovalManager(input.db, input.approval_notifier)
+      const manager = input.approval_manager ?? new ApprovalManager(input.db, input.approval_notifier)
       // Host deploy — hand the service THIS manager instance (the one whose
       // `tool_approvals` rows the owner's in-chat tap resolves). Installed here
       // rather than passed as a value because the `tools` module, which
