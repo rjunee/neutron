@@ -90,7 +90,7 @@ interface Harness {
   createSpy: ReturnType<typeof spyOn>
 }
 
-function makeHarness(now: () => number = Date.now, log?: (msg: string) => void): Harness {
+function makeHarness(now: () => number = Date.now, log?: (msg: string) => unknown): Harness {
   const registry = createRitualRegistry({ rituals_dir })
   const approvals = new ApprovalManager(db, noopNotifier, { now })
   const store = new ReminderStore(db)
@@ -1194,6 +1194,27 @@ describe('automatic pending approval sweep', () => {
     throwOnLog = true
 
     await expect(h.service.sweepPendingApprovals()).resolves.toBeUndefined()
+    expect(h.approvals.get(bad.id)?.status).toBe('expired')
+    expect(h.approvals.get(good.id)?.status).toBe('pending')
+    expect(h.emitted.filter((p) => p.metadata.ritual_id === 'weekly-review')).toHaveLength(2)
+  })
+  test('a rejecting async render-failure logger cannot change sweep recovery', async () => {
+    let now = 1_000_000
+    let rejectOnLog = false
+    const h = makeHarness(() => now, async () => {
+      if (rejectOnLog) throw new Error('async logger unavailable')
+    })
+    await h.service.propose(proposal())
+    await h.service.propose(proposal({ id: 'weekly-review', prompt: 'Summarise the week.' }))
+    await settle()
+    const bad = h.approvals.findByToolName(SLUG, 'ritual:daily-digest')[0]!
+    const good = h.approvals.findByToolName(SLUG, 'ritual:weekly-review')[0]!
+    await db.run(`UPDATE tool_approvals SET args_json = ? WHERE id = ?`, ['{not json', bad.id])
+    now += 86_400_000
+    rejectOnLog = true
+
+    await expect(h.service.sweepPendingApprovals()).resolves.toBeUndefined()
+    await settle()
     expect(h.approvals.get(bad.id)?.status).toBe('expired')
     expect(h.approvals.get(good.id)?.status).toBe('pending')
     expect(h.emitted.filter((p) => p.metadata.ritual_id === 'weekly-review')).toHaveLength(2)
