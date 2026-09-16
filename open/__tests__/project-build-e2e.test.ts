@@ -990,6 +990,45 @@ test('a driver restarted between the build and review re-adopts the build instea
   expect(f.github.prs[0]!.state).toBe('MERGED')
 }, 300_000)
 
+test('a driver resumed after the branch head moved rebuilds instead of adopting the moved revision', async () => {
+  const f = await fixture()
+
+  // PROCESS 1 reaches a durable built checkpoint, then dies while publishing.
+  f.github.refuse.add('create')
+  const first = await driveUntilTheProcessDies(f, 'fresh')
+  expect(first.kind, why(f, first)).toBe('unknown')
+  if (first.kind === 'unknown') expect(first.phase).toBe('publish')
+  const checkpoint = lastCheckpoint(f)
+  expect(checkpoint).toMatchObject({ stage: 'built', round: 1 })
+
+  // While the driver is down, another writer advances the assigned branch. The
+  // resume checkpoint still names process 1's build, not this new revision.
+  const worktree = f.store.get(f.row.id)!.worktree!
+  await writeFile(join(worktree, 'MOVED.md'), 'advanced while driver was down\n')
+  await gitOut(f.world.run, worktree, ['add', 'MOVED.md'])
+  await gitOut(f.world.run, worktree, ['commit', '-m', 'advance assigned branch'])
+  const moved = await gitOut(f.world.run, f.repo, ['rev-parse', 'refs/heads/trident/card'])
+  expect(moved).not.toBe(checkpoint.head)
+
+  // PROCESS 2 must rebuild from the newly measured revision. Re-adopting it would
+  // skip both these turns and send someone else's unbuilt commit straight to review.
+  f.github.refuse.delete('create')
+  f.world.dispatches.length = 0
+  const resumed = await createProjectBuildHost(await f.prepare())
+  const outcome = await resumed.run({ mode: 'pr', start: 'resume' }, new AbortController().signal)
+  expect(outcome.kind, why(f, outcome)).toBe('merged')
+  expect(f.world.dispatches.map(dispatch => dispatch.role)).toEqual([
+    'plan', 'build', 'review', 'review', 'synthesis',
+  ])
+  expect(f.world.dispatches[0]!.step_id).toBe(`${f.row.id}:plan:1`)
+  expect(f.world.dispatches[1]!.step_id).toBe(`${f.row.id}:build:1`)
+
+  const mergedMove = await spawnCapture(['git', '-C', f.origin, 'show', 'refs/heads/main:MOVED.md'], f.origin)
+  expect(mergedMove.stdout).toBe('advanced while driver was down')
+  const mergedNotes = await spawnCapture(['git', '-C', f.origin, 'show', 'refs/heads/main:NOTES.md'], f.origin)
+  expect(mergedNotes.stdout).toBe(`seed\n${f.row.id}:build:0\n${f.row.id}:build:1`)
+}, 300_000)
+
 test('a driver restarted during a worker turn refuses to re-fire it', async () => {
   // THE OTHER HALF OF THE CONTRACT. `work()` writes `pending` BEFORE it dispatches
   // (`build-run.ts:313`), so a process that dies inside a turn leaves a checkpoint
@@ -1115,8 +1154,8 @@ test('local merge mode reaches merged with no PR, no push and no gh call', async
  *    `build-run.ts:461-472`) is driven alongside the fresh fix path.
  *  • THE REST OF RESUME. The cases here resume `built`, `pending`, and `rejected`
  *    checkpoints. An `approved` checkpoint, `probePlan`'s
- *    continuation planner, a resume whose head MOVED since the checkpoint, and a
- *    regenerated diff that disagrees with the measurement are not driven.
+ *    continuation planner and a regenerated diff that disagrees with the
+ *    measurement are not driven.
  *  • CODEX AND KIMI SEATS, and headless placement generally: both cross-model
  *    seats are configured off.
  *  • `mode: 'wave'` and `mode: 'bound_pr'`.

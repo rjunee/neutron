@@ -457,7 +457,10 @@ export async function buildRun(input: BuildRunInput, deps: BuildRunDeps, signal:
       return null
     }
     if (!skipBuild) {
-      const stop = await planAndBuild(0)
+      // A resumed rebuild must not reuse the fresh process's result identities.
+      // The retained files for `plan:0` / `build:0` describe the checkpointed
+      // revision; movement deliberately invalidates that revision and its results.
+      const stop = await planAndBuild(resume ? firstRound : 0)
       if (stop) return stop
     }
     if (resumeFix) {
