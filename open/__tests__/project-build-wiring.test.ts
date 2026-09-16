@@ -274,8 +274,13 @@ for (const role of ['plan', 'build', 'review', 'fix'] as const) {
     expect(brief.includes(strategy)).toBe(builder)
     expect(brief.includes('<owner_reflection>')).toBe(builder)
     const contract = [f.input.run.task, builder ? strategy : '',
-      `Perform the ${role} role. Return a result object with head, diff, pr and payload.`,
-      `Read the host context for the measured snapshot. Payload must satisfy the ${role === 'plan' ? 'plan' : role === 'review' ? 'verdict' : 'forge'} trailer contract.`,
+      `Perform the ${role} role.`,
+      'Write your result file as a JSON object with EXACTLY these five fields:',
+      '  "schema", "run_id", "step_id"  — copy each verbatim from the host context: `request.result.schema`, `request.run_id`, `request.step_id`. Do not invent or reformat them.',
+      '  "kind"   — "completed" when you finished the role, or "blocked" when you could not.',
+      '  "result" — when completed: { head, diff, pr, payload }. Omit when blocked.',
+      'When blocked, add "on": a non-empty sentence saying what stopped you. Report blocked rather than inventing a result; a fabricated result is worse than a stopped run.',
+      `\`result.payload\` must satisfy the ${role === 'plan' ? 'plan' : role === 'review' ? 'verdict' : 'forge'} trailer contract below. Read the host context for the measured snapshot.`,
       JSON.stringify(role === 'plan' ? PLAN_SCHEMA : role === 'review' ? VERDICT_SCHEMA : FORGE_SCHEMA),
       'Never publish or merge; the host owns those actions.',
     ].join('\n\n')
@@ -309,5 +314,32 @@ test('rebuilt builder briefs cap escaped correction data', async () => {
     const brief = await readFile(options.workers[role].request.brief.path, 'utf8')
     const data = brief.split(REFLECTION_GUIDANCE_FRAMING + '\n')[1]!
     expect(data).toBe('&lt;'.repeat(MAX_REFLECTION_GUIDANCE_CHARS / 4) + '\n… (owner corrections truncated)\n</owner_reflection>')
+  }
+})
+
+// THE BRIEF AND THE DECODER MUST AGREE, AND NOTHING COMPARED THEM.
+// `decodeProjectTrailer` refuses a trailer whose `run_id`, `step_id` or `schema` does
+// not match the request. The brief used to ask only for "a result object with head,
+// diff, pr and payload" — so a worker that obeyed it precisely wrote the inner object
+// and the host rejected it with "Trailer run_id missing or mismatched". That is what
+// stopped the third acceptance dispatch, after it had already got past admission,
+// spawned its REPL and dispatched the plan turn.
+//
+// The ids cannot be baked into the brief: `step_id` is per role AND round
+// (`trident/build-run.ts:278`) while the brief is written once at prepare time. So the
+// brief must point at the per-dispatch host context, and this test pins that it does.
+test('every role brief names the envelope fields the decoder actually requires', async () => {
+  const f = await fixture()
+  const options = await f.prepare()
+  for (const role of ['plan', 'build', 'review', 'fix'] as const) {
+    const brief = await readFile(options.workers[role].request.brief.path, 'utf8')
+    // The three fields the decoder compares against the request, by name.
+    for (const field of ['schema', 'run_id', 'step_id']) {
+      expect(brief, `${role} brief must name ${field}`).toContain(field)
+    }
+    // ...and where to get values that are correct for THIS dispatch.
+    expect(brief, `${role} brief must point at the host context`).toContain('request.step_id')
+    // The blocked path must be reachable, or a stuck worker invents a result.
+    expect(brief, `${role} brief must offer blocked`).toContain('blocked')
   }
 })
