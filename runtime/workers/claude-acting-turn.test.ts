@@ -208,14 +208,14 @@ test('host budget abandonment prevents a late herdr text acknowledgement from su
 })
 
 // THE OTHER THREE GUARDS, ARMED. A review lane measured that the branch added four
-// cancellation checks and proved only one: `herdr-host.ts:668` (the case above).
-// Deleting `:660` or the bun host's `:496` outright left every test green — guards
+// cancellation checks and proved only one: the post-acknowledgement guard (the case above).
+// Deleting the enqueued-work guard or the bun host's own check outright left every test green — guards
 // nothing could ever see fire. A fourth, ahead of the enqueue, proved redundant with
-// `:660` (removing either alone stayed green; removing both went red) and was removed. Each case below holds a DIFFERENT
+// the enqueued-work guard (removing either alone stayed green; removing both went red) and was removed. Each case below holds a DIFFERENT
 // earlier actuation so the caller's abandonment lands at a different guard, and
 // each was shown red with its guard removed before being kept.
 
-test('abandonment while a PRIOR actuation holds the herdr queue stops before send_text (:660)', async () => {
+test('abandonment while a PRIOR actuation holds the herdr queue stops before send_text', async () => {
   const f = await fixture()
   const server = new FakeHerdrServer()
   let releasePrior!: () => void
@@ -259,7 +259,7 @@ test('an already-abandoned herdr submitLine is refused before any RPC is sent', 
   expect(calls).toEqual([])
 })
 
-test('the bun host refuses an already-abandoned submitLine before writing (:496)', async () => {
+test('the bun host refuses an already-abandoned submitLine before writing', async () => {
   const { bunTerminalHost } = await import('@neutronai/runtime/adapters/claude-code/persistent/bun-terminal-host.ts')
   const child = await bunTerminalHost.spawn(['/bin/cat'], { cwd: '/tmp', env: {}, onExit: () => {} })
   cleanups.push(async () => { child.kill() })
