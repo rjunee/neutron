@@ -108,8 +108,28 @@ export async function prepareProjectBuild(input: InnerLoopInput, context: Projec
     // Owner guidance and test execution instructions belong only to the builders.
     const isBuilder = role === 'build' || role === 'fix'
     const brief = [run.task, isBuilder ? input.test_strategy ?? '' : '',
-      `Perform the ${role} role. Return a result object with head, diff, pr and payload.`,
-      `Read the host context for the measured snapshot. Payload must satisfy the ${role === 'plan' ? 'plan' : role === 'review' ? 'verdict' : 'forge'} trailer contract.`,
+      // THE BRIEF MUST STATE THE ENVELOPE, AND THE WORKER MUST COPY ITS IDS.
+      // `decodeProjectTrailer` (`runtime/workers/project-runners.ts:44-58`) reads
+      // `{ schema, run_id, step_id, kind, result }` and refuses unless `run_id`,
+      // `step_id` and `schema` each match the request EXACTLY.
+      //
+      // The brief used to ask only for "a result object with head, diff, pr and
+      // payload". A worker that obeyed it precisely wrote the INNER object, and the
+      // host rejected it: "Trailer run_id missing or mismatched." Observed on the
+      // third acceptance dispatch — the plan worker did exactly what it was told.
+      //
+      // The ids CANNOT be baked in here. `step_id` is computed per role AND round
+      // (`trident/build-run.ts:278`), while this brief is written once at prepare
+      // time, before any round exists. They are, however, already in the per-dispatch
+      // host context (`request.run_id`, `request.step_id`, `request.result.schema`),
+      // so the brief points the worker at the copy that is correct for ITS dispatch.
+      `Perform the ${role} role.`,
+      'Write your result file as a JSON object with EXACTLY these five fields:',
+      '  "schema", "run_id", "step_id"  — copy each verbatim from the host context: `request.result.schema`, `request.run_id`, `request.step_id`. Do not invent or reformat them.',
+      '  "kind"   — "completed" when you finished the role, or "blocked" when you could not.',
+      '  "result" — when completed: { head, diff, pr, payload }. Omit when blocked.',
+      'When blocked, add "on": a non-empty sentence saying what stopped you. Report blocked rather than inventing a result; a fabricated result is worse than a stopped run.',
+      `\`result.payload\` must satisfy the ${role === 'plan' ? 'plan' : role === 'review' ? 'verdict' : 'forge'} trailer contract below. Read the host context for the measured snapshot.`,
       JSON.stringify(role === 'plan' ? PLAN_SCHEMA : role === 'review' ? VERDICT_SCHEMA : FORGE_SCHEMA),
       'Never publish or merge; the host owns those actions.',
     ].join('\n\n') + (isBuilder ? buildReflectionGuidance(input.reflection_context) : '')
