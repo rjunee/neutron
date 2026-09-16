@@ -682,6 +682,51 @@ export const SUITE_OUTCOME_VOCABULARY = [
 ].join('\n')
 
 /**
+ * HOW MANY FULL-SUITE RUNS THE BUILDER MAY SPEND BEFORE IT HAS EDITED ANYTHING: ZERO.
+ *
+ * MEASURED, acceptance run 5a69ae54 (#1044): `plan` finished in 4m28s; `build` opened
+ * with `scripts/run-tests.sh` as a BASELINE, was still inside that first run at 32
+ * minutes, and died at its wall having never started the verification run. #1039 raised
+ * the builder's wall to 90 minutes, which accommodates that shape rather than ending it.
+ *
+ * The block is where the shape came from. Nothing in this repo ever INSTRUCTED a
+ * pre-change suite run — the prohibition below is new precisely because no rule existed
+ * — but `SUITE_OUTCOME_VOCABULARY` prices `failed-preexisting` on proving that a red is
+ * "red WITHOUT your diff", and a builder that cannot yet know WHICH tests will be red
+ * reads that as "measure the whole suite first". Given no budget, running it twice is
+ * the cautious reading, so the budget is stated.
+ *
+ * THE PRE-CHANGE BASELINE BUYS NOTHING. The only tests whose base result is ever needed
+ * are the ones that come back red in the run AFTER the change; a test green at the base
+ * and green at the head is information nobody consumes. So the same guarantee — a red
+ * attributed to the diff or to the base — is available at the price of the red files
+ * alone, which is what `SUITE_OUTCOME_VOCABULARY` already asks for and all it asks for.
+ *
+ * WHY THE COUNT IS "BEFORE YOUR CHANGE", NOT "PER ITERATION". A red stage 2 is fixed and
+ * the suite re-run — that is the iterate-until-green loop working, and capping the total
+ * would forbid it. The defect is strictly the run that happens BEFORE any edit exists,
+ * and that is the number pinned here.
+ */
+export const BASELINE_FULL_SUITE_RUNS = 0
+
+/**
+ * The prohibition itself, pinned verbatim, and carried by EVERY render including the
+ * subset one — a deferred stage 2 removes the verification run, not the temptation to
+ * open with a baseline.
+ */
+export const NO_BASELINE_SUITE_RUN = [
+  `SUITE RUN BUDGET — ${BASELINE_FULL_SUITE_RUNS} full-suite runs before your change.`,
+  'Do NOT open by running the full suite as a "baseline" to see what is already red. It is the',
+  'single most expensive thing available to you, and it buys nothing: a test that is green at the',
+  'base and green at your head is read by no one, and the only base results anyone ever needs are',
+  'for the tests that come back RED after your change — which you cannot name until then.',
+  'The baseline is therefore TARGETED and CONDITIONAL, and it is the one already described under',
+  '`failed-preexisting`: if the suite is green there is no comparison to make, and if it is red you',
+  're-run ONLY the named failing files at the base. Nothing wider is evidence and nothing wider is',
+  'budgeted. A whole-suite run before your first edit is a budget overrun, not diligence.',
+].join('\n')
+
+/**
  * Acceptance criterion 7's resolution: the `timeout 590` wrapper is banned.
  *
  * THE HANG BUDGET IS 25 MINUTES, AND THAT NUMBER IS RECONCILED, not picked. Round-3
@@ -760,6 +805,7 @@ export function renderTestStrategy(input: TestStrategyInput): string {
       '',
       'STAGE 2 — DEFERRED (do NOT run the full suite this iteration).',
       INTERMEDIATE_REPORT_RULE,
+      NO_BASELINE_SUITE_RUN,
       "A red stage 1 is fixed before you hand back; a green stage 1 is this iteration's gate.",
       '',
       ...REDIRECT_DISCIPLINE_LINES,
@@ -823,6 +869,7 @@ export function renderTestStrategy(input: TestStrategyInput): string {
     'STAGE 2 — the full suite, REQUIRED.',
     `${FULL_SUITE_REQUIRED}`,
     'A green stage 1 buys you nothing except the right to start stage 2.',
+    NO_BASELINE_SUITE_RUN,
     SUITE_OUTCOME_VOCABULARY,
     '',
     'TIMEOUT.',
