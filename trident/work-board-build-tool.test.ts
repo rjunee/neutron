@@ -417,6 +417,12 @@ describe('work_board_start tool (▶ agent-native parity)', () => {
     // Falls back to the item title as the task.
     expect(run.task).toContain('wire the CSV export button')
     expect(attached).toEqual([{ id: 'ready', run_id: out.run_id as string }])
+    expect(store.stageEvents(run.id)).toEqual([
+      expect.objectContaining({
+        stage: 'work-board-start-dispatched',
+        meta: JSON.stringify({ board_item_id: 'ready' }),
+      }),
+    ])
   })
 
   test('resolve_task supplies the saved spec as the task', async () => {

@@ -403,6 +403,16 @@ export function registerTridentBuildToolSurface(
       if (!result.ok) {
         return { ok: false, error: result.message }
       }
+      // The REPL accepting this tool call proves only that a message reached the
+      // handler. Stamp the durable run ledger only AFTER the dispatch chokepoint
+      // has returned the row it created, and await the stamp before reporting the
+      // run as dispatched. The event's run_id is the witness operators can use
+      // without inferring a dispatch from the surrounding agent conversation.
+      await deps.store.recordStageEvent(
+        result.run.id,
+        'work-board-start-dispatched',
+        JSON.stringify({ board_item_id }),
+      )
       // #429 task 4 — ack the chat immediately for an agent-native ▶ start.
       deps.chat_ack?.post({
         project_id: ctx.project_id,
