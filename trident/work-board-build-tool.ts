@@ -37,6 +37,7 @@ import { detectMergeMode, type EnvCapableHostRunner, type GitModeProbe } from '.
 import { workBoardScopeKey } from '@neutronai/work-board/store.ts'
 import type { WorkBoardChatAck } from '@neutronai/work-board/chat-ack.ts'
 import type { TridentRunStore } from './store.ts'
+import { fireAndForget } from '@neutronai/logger/fire-and-forget.ts'
 
 export const WORK_BOARD_DISPATCH_BUILD_TOOL = 'work_board_dispatch_build'
 export const WORK_BOARD_START_TOOL = 'work_board_start'
@@ -404,14 +405,20 @@ export function registerTridentBuildToolSurface(
         return { ok: false, error: result.message }
       }
       // The REPL accepting this tool call proves only that a message reached the
-      // handler. Stamp the durable run ledger only AFTER the dispatch chokepoint
-      // has returned the row it created, and await the stamp before reporting the
-      // run as dispatched. The event's run_id is the witness operators can use
-      // without inferring a dispatch from the surrounding agent conversation.
-      await deps.store.recordStageEvent(
-        result.run.id,
-        'work-board-start-dispatched',
-        JSON.stringify({ board_item_id }),
+      // handler. Stamp the durable run ledger AFTER the dispatch chokepoint has
+      // returned the row it created, so the event's run_id is a witness operators
+      // can use without inferring a dispatch from the agent conversation.
+      //
+      // NOT AWAITED, and that is the point. By this line the dispatch has already
+      // succeeded: `board-dispatch.ts` selected the created row and bound it to the
+      // board. Awaiting a telemetry write here would let a ledger failure report a
+      // run that REALLY STARTED as a failed tool call — the caller would retry, and
+      // the second dispatch would collide with the first. A witness must never be
+      // able to falsify the thing it witnesses. The orchestrator already treats its
+      // analogous stamp as best effort for the same reason.
+      fireAndForget(
+        'work_board_start.dispatch_witness',
+        deps.store.recordStageEvent(result.run.id, 'work-board-start-dispatched', JSON.stringify({ board_item_id })),
       )
       // #429 task 4 — ack the chat immediately for an agent-native ▶ start.
       deps.chat_ack?.post({
