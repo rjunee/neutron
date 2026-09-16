@@ -63,6 +63,7 @@ import { gitRangeArgv } from '@neutronai/trident/git-range.ts'
 import { workContextPath } from '@neutronai/trident/production-host-effects.ts'
 import { pool, supervisedBySessionKey } from '@neutronai/runtime/adapters/claude-code/persistent/pool-state.ts'
 import type { BoundedWorkRequest } from '@neutronai/runtime/bounded-work.ts'
+import { buildRun, type BuildRunOutcome } from '@neutronai/trident/build-run.ts'
 import type { InnerLoopInput } from '@neutronai/trident/inner-loop.ts'
 import { prepareProjectBuild, type ProjectBuildContext } from '../wiring/project-build.ts'
 
@@ -160,9 +161,68 @@ interface WorkerWorld {
   run: Runner
   repo: string
   scratch: string
+  /**
+   * BLOCKING FINDINGS THIS PANEL RAISES, BY HOST ROUND (1-based; index 0 unused).
+   * Every seat and the synthesis read the SAME entry for the round they were
+   * dispatched at, because `reviewPanel` compares the review worker's trailer with
+   * the recorded synthesis field by field (`gates/review-panel.ts:104-105`) and
+   * blocks on any disagreement. `0` — including every round past the end of this
+   * array — is an APPROVE with no findings.
+   */
+  blockersByRound: readonly number[]
+  /**
+   * ROUNDS WHOSE VERDICT ALSO DECLARES `escalate: { kind: 'design-gap', … }`.
+   * That declaration — and only that declaration, with a nonempty `whatIsMissing`
+   * and a verdict that is not APPROVE (`gates/escalation.ts:85-96,140`) — is what
+   * turns the panel into `{ kind: 're-plan' }` instead of `{ kind: 'fix' }`.
+   */
+  replanRounds: readonly number[]
+  /**
+   * ROLES THIS WORKER REPORTS AS BLOCKED. Every role brief sanctions exactly this:
+   * `"kind" — "completed" when you finished the role, or "blocked" when you could
+   * not` plus `"on"` (`open/wiring/project-build.ts:190-192`), and
+   * `decodeProjectTrailer` turns it into `{ kind: 'blocked', on }`
+   * (`runtime/workers/project-runners.ts:54-57`). It does no role work first,
+   * because a blocked worker did none.
+   */
+  blockRoles: ReadonlySet<string>
   /** Every dispatch this fake observed, in order — the harness's audit trail. */
   dispatches: { role: string; step_id: string; schema: string; wrote: string[] }[]
 }
+
+/**
+ * ONE PANEL VERDICT FOR ONE ROUND, shared by the review role, the adversarial seat
+ * and the synthesis.
+ *
+ * `severity: 'major'` is what makes a finding BLOCKING (`review-panel.ts:107` keeps
+ * everything that is not `minor`/`nit`), which is what turns the decision into
+ * `{ kind: 'fix' }` (`review-panel.ts:118-121`).
+ *
+ * THE IDENTITY CARRIES THE ROUND. `findingIdentity` is `file:symbol:rule`
+ * (`gates/escalation.ts:25-31`), and G070 blocks the run if a finding from the
+ * previous panel reappears (`gates/review-progress.ts:16`). A harness whose rounds
+ * all raised the same finding would therefore stop on `repeated finding` and never
+ * reach a second fix — so the symbol names the round it came from.
+ */
+function verdictFor(world: WorkerWorld, round: number) {
+  const blockers = world.blockersByRound[round] ?? 0
+  return {
+    verdict: blockers > 0 ? 'REQUEST_CHANGES' : 'APPROVE',
+    findings: Array.from({ length: blockers }, (_, index) => ({
+      severity: 'major',
+      title: `NOTES.md is missing the round ${round} marker (${index})`,
+      evidence: `NOTES.md carries no marker for round ${round}, finding ${index}`,
+      file: 'NOTES.md', symbol: `note-r${round}-f${index}`, rule: 'harness-round-blocker', line: 1,
+    })),
+    ...(world.replanRounds.includes(round)
+      ? { escalate: { kind: 'design-gap', whatIsMissing: `the round ${round} spec never said where the marker goes` } }
+      : {}),
+  }
+}
+
+/** The host round a dispatch belongs to, taken from the identity the HOST assigned:
+ *  `build-run.ts:308` ends every role step id with `:${role}:${round}`. */
+const roundOfStep = (step_id: string): number => Number(step_id.split(':').at(-1))
 
 /**
  * THE ONLY FAKE MODEL IN THIS FILE.
@@ -183,13 +243,19 @@ function literalWorker(world: WorkerWorld) {
     const request: BoundedWorkRequest = JSON.parse(requestLine.slice(marker.length))
 
     const brief = await readFile(request.brief.path, 'utf8')
-    const inner = await performRole(world, request, brief)
+    const stopped = world.blockRoles.has(request.role)
+    const inner = stopped ? undefined : await performRole(world, request, brief)
 
-    // Write ONLY what the brief asked for. See `envelopeFieldsNamedBy`.
+    // Write ONLY what the brief asked for. See `envelopeFieldsNamedBy`. A blocked
+    // answer OMITS `result` and ADDS `on`, exactly as the brief words it.
     const named = envelopeFieldsNamedBy(brief)
     const envelope: Record<string, unknown> = { schema: request.result.schema, run_id: request.run_id,
-      step_id: request.step_id, kind: 'completed', result: inner }
-    const body = named.size === 0 ? inner : Object.fromEntries([...named].map(field => [field, envelope[field]]))
+      step_id: request.step_id, kind: stopped ? 'blocked' : 'completed', result: inner }
+    const body = named.size === 0 ? inner : {
+      ...Object.fromEntries([...named].filter(field => !(stopped && field === 'result'))
+        .map(field => [field, envelope[field]])),
+      ...(stopped ? { on: `harness: the ${request.role} worker was stopped mid-turn` } : {}),
+    }
     world.dispatches.push({ role: request.role, step_id: request.step_id,
       schema: request.result.schema, wrote: Object.keys(body as object).sort() })
     // The dispatch prompt asks for a temporary file and a rename, so do that.
@@ -201,8 +267,10 @@ function literalWorker(world: WorkerWorld) {
 /** What each role produces, done for real in the real worktree. */
 async function performRole(world: WorkerWorld, request: BoundedWorkRequest, brief: string): Promise<unknown> {
   // A review-panel seat (`createProjectReviewSource`) dispatches under the bare
-  // `verdict` schema, and its brief is the panel's own JSON, not a role brief.
-  if (request.result.schema === 'verdict') return { verdict: 'APPROVE', findings: [] }
+  // `verdict` schema, and its brief is the panel's own JSON, not a role brief. Its
+  // step id is per DIRECTORY, round and attempt (`project-review-source.ts:99`), so
+  // the round comes from the brief the source wrote, not from the step id.
+  if (request.result.schema === 'verdict') return verdictFor(world, JSON.parse(brief).round)
 
   // Every role brief points at the host turn context, which the host wrote in
   // `prepareWork` (`production-host-effects.ts:451`) and whose path the brief
@@ -234,13 +302,21 @@ async function performRole(world: WorkerWorld, request: BoundedWorkRequest, brie
     await gitOut(world.run, cwd, ['add', '--', 'NOTES.md'])
     await gitOut(world.run, cwd, ['-c', 'user.email=w@example.invalid', '-c', 'user.name=Worker',
       '-c', 'commit.gpgsign=false', 'commit', '-m', `work: ${request.role} ${request.step_id}`])
-    // Measure the produced revision exactly as the host will.
+    // Measure the produced revision from the only base this worker was given.
     //
-    // THE BASE IS THE PRE-DISPATCH HEAD, which is the launch pin on the FIRST
-    // build because `prepareProjectBuild` cut the branch at it. It would NOT be
-    // the launch pin on a fix round — and the host turn context carries no
-    // `base_sha`, so a fix worker has nothing to reconstruct the host's diff
-    // from. That gap is recorded in the coverage list at the foot of this file.
+    // THE BASE IS THE PRE-DISPATCH HEAD. On the FIRST build that happens to be the
+    // launch pin, because `prepareProjectBuild` cut the branch at it — so the diff
+    // coincides with the host's. ON A FIX ROUND IT IS NOT: the pre-dispatch head is
+    // the reviewed commit, and the host still measures from `base_sha`
+    // (`production-host-effects.ts:223`), so this diff covers the fix commit alone
+    // while the host's covers the whole branch. The host turn context carries no
+    // `base_sha` (`prepareWork` writes `{request, snapshot, previous, findings, …}`,
+    // `production-host-effects.ts:453`), so a fix worker CANNOT reconstruct it.
+    //
+    // That is exactly the disagreement #1041 removed: the trailer is corroborated
+    // on `head` and `pr`, not on diff bytes (`claimMatches`, `build-run.ts:182-186`).
+    // Leaving this measurement deliberately wrong on a fix round is what gives the
+    // fix-round case its teeth — restore `corroborates` there and it goes red.
     const head = await gitOut(world.run, world.repo, ['rev-parse', '--verify', `refs/heads/${branch}^{commit}`])
     const diff = await measureDiff(world.run, world.repo, snapshot.head, head, world.scratch)
     return { head, diff, pr: snapshot.pr, payload: {
@@ -249,8 +325,10 @@ async function performRole(world: WorkerWorld, request: BoundedWorkRequest, brie
     } }
   }
 
-  // review: read-only, so the measured revision must be the one it was handed.
-  return { ...snapshot, payload: { verdict: 'APPROVE', findings: [] } }
+  // review: read-only, so the measured revision must be the one it was handed. Its
+  // payload must equal the recorded synthesis field for field, so both read
+  // `verdictFor` at the round the host stamped into this dispatch's step id.
+  return { ...snapshot, payload: verdictFor(world, roundOfStep(request.step_id)) }
 }
 
 // ─────────────────────────────────────────────────────────────────────────────
@@ -261,6 +339,10 @@ interface FakePr { number: number; state: 'OPEN' | 'CLOSED' | 'MERGED'; headRefN
 
 function fakeGithub(input: { origin: string; repo: string }) {
   const prs: FakePr[] = []
+  /** `gh pr <verb>`s this fake refuses, so a case can stop the driver at a chosen
+   *  point without touching the driver. Mutable so one fixture can refuse and
+   *  then relent, which is what a restarted build meets. */
+  const refuse = new Set<string>()
   const ok = (stdout = ''): HostCommandResult => ({ ok: true, exit_code: 0, stdout, stderr: '' })
   const json = (value: unknown) => ok(JSON.stringify(value))
   const headOf = async (branch: string) => {
@@ -274,7 +356,7 @@ function fakeGithub(input: { origin: string; repo: string }) {
   }
   const checkRuns = { total_count: 1, check_runs: [{ name: 'test', status: 'COMPLETED', conclusion: 'SUCCESS' }] }
   return {
-    prs,
+    prs, refuse,
     async handle(argv: string[]): Promise<HostCommandResult> {
       const [, verb, ...rest] = argv
       if (verb === 'api') {
@@ -288,6 +370,9 @@ function fakeGithub(input: { origin: string; repo: string }) {
       }
       if (verb !== 'pr') throw new Error(`fake gh does not implement: ${argv.join(' ')}`)
       const action = rest[0]
+      if (action !== undefined && refuse.has(action)) {
+        return { ok: false, exit_code: 1, stdout: '', stderr: `fake gh refuses pr ${action}` }
+      }
       const fields = (rest[rest.indexOf('--json') + 1] ?? '').split(',').filter(Boolean)
       if (action === 'list') {
         const branch = rest[rest.indexOf('--head') + 1]
@@ -330,7 +415,32 @@ function fakeGithub(input: { origin: string; repo: string }) {
 
 const LEAK_GATE_STUB = '#!/usr/bin/env bash\necho "LEAK GATE: SILENT"\nexit 0\n'
 
-async function fixture(options: { ralph?: boolean; moreTasks?: boolean } = {}) {
+/**
+ * THE HOST'S OWN SUITE RUN, AND WHY THIS FIXTURE PINS IT.
+ *
+ * G063 needs a HOST-observed suite receipt, not the builder's claim. `readCheckpoint`
+ * (`open/wiring/project-build.ts:249-253`) pulls the command out of the test strategy
+ * with `fullSuiteCommand`, which takes the indented lines under the exact marker
+ * `Full suite (stage 2), run exactly this` (`project-build.ts:82`), runs it in the run
+ * worktree, and records the process exit code. With no such marker there is no command,
+ * the report is `null`, and `assessReviewSuite` returns
+ * `Host-observed review suite exit code is missing or unreadable`
+ * (`gates/review-suite.ts:41`) for every card — measured: that is exactly how this
+ * harness failed when #1040 landed after it was written.
+ *
+ * PINNED, NOT AMBIENT, in two ways. The command is a script COMMITTED TO THIS
+ * FIXTURE'S OWN REPO and named by a RELATIVE path, so it resolves only if the host
+ * really runs it in the worktree; and its exit status is `suiteExit` and nothing
+ * else, so a green receipt here is this fixture's decision rather than whatever
+ * `bun test` would have done to a temporary directory.
+ */
+const suiteScript = (exit: number) => `#!/usr/bin/env bash\necho "HARNESS SUITE ran in $PWD"\nexit ${exit}\n`
+const suiteStrategy = 'TEST EXECUTION: run the card regression.\n\n'
+  + 'Full suite (stage 2), run exactly this:\n\n  bash scripts/ci/suite.sh\n'
+
+async function fixture(options: { ralph?: boolean; moreTasks?: boolean; suiteExit?: number
+  blockersByRound?: readonly number[]; replanRounds?: readonly number[]
+  maxRounds?: number; mergeMode?: 'pr' | 'local'; blockRoles?: readonly string[] } = {}) {
   const dir = await mkdtemp(join(tmpdir(), 'project-build-e2e-'))
   cleanups.push(() => rm(dir, { recursive: true, force: true }))
   const origin = join(dir, 'origin.git')
@@ -352,6 +462,7 @@ async function fixture(options: { ralph?: boolean; moreTasks?: boolean } = {}) {
   // The repo OPTS IN to the leak gate; `runLeakGatePreflight` probes for exactly
   // this path before it runs anything (`leak-preflight.ts:281`).
   await writeFile(join(repo, 'scripts', 'ci', 'leak-gate.sh'), LEAK_GATE_STUB, { mode: 0o755 })
+  await writeFile(join(repo, 'scripts', 'ci', 'suite.sh'), suiteScript(options.suiteExit ?? 0), { mode: 0o755 })
   await writeFile(join(repo, 'NOTES.md'), 'seed\n')
   await writeFile(join(repo, 'IMPLEMENTATION_PLAN.md'), '- [ ] T1 record the note\n')
   await git(repo, ['add', '-A'])
@@ -368,12 +479,17 @@ async function fixture(options: { ralph?: boolean; moreTasks?: boolean } = {}) {
   cleanups.push(() => db.close())
   const store = new TridentRunStore(db)
   const row = await store.create({ slug: 'card', project_slug: 'project', repo_path: repo,
-    task: `Record a note in NOTES.md.${options.moreTasks ? '\nMORE TASKS' : ''}`, ralph: options.ralph ?? false })
-  await store.update(row.id, { merge_mode: 'pr', base_sha: baseSha })
+    task: `Record a note in NOTES.md.${options.moreTasks ? '\nMORE TASKS' : ''}`, ralph: options.ralph ?? false,
+    // The review round ceiling is read off THIS row (`build-host.ts:140-144`), so a
+    // ceiling case pins its own rather than leaning on the schema default of 8/10.
+    ...(options.maxRounds === undefined ? {} : { max_rounds: options.maxRounds }) })
+  await store.update(row.id, { merge_mode: options.mergeMode ?? 'pr', base_sha: baseSha })
 
   const github = fakeGithub({ origin, repo })
   const commands: string[][] = []
-  const world: WorkerWorld = { run: spawnCapture, repo, scratch, dispatches: [] }
+  const world: WorkerWorld = { run: spawnCapture, repo, scratch, dispatches: [],
+    blockersByRound: options.blockersByRound ?? [], replanRounds: options.replanRounds ?? [],
+    blockRoles: new Set(options.blockRoles ?? []) }
   const runHost = Object.assign(async (argv: string[], cwd?: string, env?: Record<string, string>, timeout?: number) => {
     commands.push([...argv])
     if (argv[0] === 'gh') return github.handle(argv)
@@ -405,8 +521,9 @@ async function fixture(options: { ralph?: boolean; moreTasks?: boolean } = {}) {
     run: store.get(row.id)!, base_branch: 'main', db_path: join(dir, 'project.db'), max_rounds: 3,
     // A nonempty strategy is what makes `assessReviewSuite` actually read the
     // build's recorded claim; an empty one returns `known()` vacuously
-    // (`gates/review-suite.ts:39`).
-    test_strategy: 'TEST EXECUTION\n\nFull suite (stage 2), run exactly this:\n\n  true\n',
+    // (`gates/review-suite.ts:39`). The stage-2 block is what gives the host a
+    // command to run for its own receipt — see `suiteStrategy`.
+    test_strategy: suiteStrategy,
     // Only the adversarial core seat stays on; the cross-model seats need real
     // Codex and Kimi credentials, and the rubric seat adds nothing here.
     phase_models: { review_rubric: { model: 'none' }, review_codex: { model: 'none' }, review_kimi: { model: 'none' } },
@@ -426,6 +543,32 @@ async function drive(f: Awaited<ReturnType<typeof fixture>>, mode: 'pr' | 'ralph
   const options = await f.prepare()
   const host = await createProjectBuildHost(options)
   return host.run({ mode, start: 'fresh' }, new AbortController().signal)
+}
+
+/**
+ * ONE DRIVER PROCESS THAT DOES NOT LIVE TO CLEAN UP.
+ *
+ * `createProjectBuildHost(...).run` wraps every build in `withProductionCleanup`
+ * (`project-build-host.ts:104-112`), whose `finally` removes the worktree and
+ * deletes the branch. A gateway that is KILLED mid-run never reaches that finally,
+ * and the whole point of resume is what the next process finds on disk — so this
+ * drives the same `buildRun` state machine over the same real `host.deps` and
+ * `host.workers` and simply stops when the driver returns.
+ *
+ * The four fields below are the ONLY thing reconstructed here; they are exactly
+ * what `project-build-host.ts:107` passes, read from the same places.
+ */
+async function driveUntilTheProcessDies(f: Awaited<ReturnType<typeof fixture>>, start: 'fresh' | 'resume'): Promise<BuildRunOutcome> {
+  const host = await createProjectBuildHost(await f.prepare())
+  return buildRun({ mode: 'pr', start, run_id: f.row.id, workers: host.workers,
+    repl_provider: 'anthropic', merge_mode: f.store.get(f.row.id)!.merge_mode },
+  host.deps, new AbortController().signal)
+}
+
+/** The state a restarted driver actually reads back (`production-host-effects.ts:235`). */
+function lastCheckpoint(f: Awaited<ReturnType<typeof fixture>>) {
+  const events = f.store.stageEvents(f.row.id).filter(event => event.stage === 'build-mode-state')
+  return JSON.parse(events.at(-1)!.meta!).checkpoint as Record<string, unknown>
 }
 
 /** The outcome plus the dispatch trail — a stop is only legible with both. */
@@ -465,6 +608,11 @@ test('pr mode drives plan, build, review, publish and merge to a terminal merged
   for (const dispatch of f.world.dispatches) {
     expect(dispatch.wrote, `${dispatch.role} ${dispatch.step_id}`).toEqual([...ENVELOPE_FIELDS].sort())
   }
+
+  // G063's receipt is the HOST'S OWN suite run (#1040), not the builder's claim:
+  // once, in the run worktree, of exactly the command the strategy named.
+  const suiteRuns = f.commands.filter(argv => argv.join(' ') === 'bash -lc bash scripts/ci/suite.sh')
+  expect(suiteRuns).toHaveLength(1)
 
   // Publication and merge really happened: real push, real PR, real base move.
   expect(f.github.prs).toHaveLength(1)
@@ -561,6 +709,185 @@ test('ralph mode with remaining tasks hands off after the build instead of mergi
   expect(f.world.dispatches.map(d => d.role)).toEqual(['plan', 'build'])
 }, 300_000)
 
+// ── FIX ROUNDS ───────────────────────────────────────────────────────────────
+
+test('a REQUEST_CHANGES panel dispatches a fix worker and the re-review merges', async () => {
+  // THE ROUND THE DRIVER SPENDS MOST OF ITS LIFE IN, and the first case here that
+  // reaches `work('fix')`, `checkFixLineage`, `reviewProgress` and a second pass
+  // through publication.
+  const f = await fixture({ blockersByRound: [0, 1] })
+  const outcome = await drive(f, 'pr')
+  expect(outcome.kind, why(f, outcome)).toBe('merged')
+
+  // The exact sequence, not merely the ending. `work('review')` dispatches the
+  // review ROLE first; `reviewGate` then reads the adversarial seat and the
+  // synthesis through the same transport (`gates/review-panel.ts:85,99`).
+  expect(f.world.dispatches.map(d => d.role)).toEqual([
+    'plan', 'build', 'review', 'review', 'synthesis',
+    'fix', 'review', 'review', 'synthesis',
+  ])
+  // The fix carries the host's round-1 identity (`build-run.ts:308`).
+  const fix = f.world.dispatches.find(dispatch => dispatch.role === 'fix')!
+  expect(fix.step_id).toBe(`${f.row.id}:fix:1`)
+  expect(fix.schema).toBe('project-build')
+  // Every dispatch still wrote the whole envelope, fix and second panel included.
+  for (const dispatch of f.world.dispatches) {
+    expect(dispatch.wrote, `${dispatch.role} ${dispatch.step_id}`).toEqual([...ENVELOPE_FIELDS].sort())
+  }
+
+  // THE FIX COMMIT IS WHAT LANDED. Three notes reached the base branch: the seed,
+  // the round-0 build and the round-1 fix — so the merged revision is the FIXED
+  // one, not the reviewed-then-rejected one.
+  // (`spawnCapture` trims its stdout — `trident/git-mode.ts:1223` — so the file's
+  // real trailing newline is not part of this comparison.)
+  const merged = await spawnCapture(['git', '-C', f.origin, 'show', 'refs/heads/main:NOTES.md'], f.origin)
+  expect(merged.stdout).toBe(`seed\n${f.row.id}:build:0\n${f.row.id}:fix:1`)
+
+  // The driver recorded the rejection BEFORE dispatching the fix, and the fix
+  // before the approval (`build-run.ts:553`, `:399`, `:560`).
+  const stages = f.store.stageEvents(f.row.id).filter(event => event.stage === 'build-mode-state')
+    .map(event => JSON.parse(event.meta!).checkpoint.stage)
+  expect(stages.filter((stage, index) => stage !== stages[index - 1]))
+    .toEqual(['built', 'rejected', 'fixed', 'approved'])
+
+  expect(f.github.prs).toHaveLength(1)
+  expect(f.github.prs[0]!.state).toBe('MERGED')
+}, 300_000)
+
+test('a design-gap escalation re-plans and rebuilds instead of dispatching a fix', async () => {
+  // THE RE-PLAN BRANCH (`build-run.ts:564-574`). The panel reaches it only through a
+  // valid self-declared claim: `escalate.kind === 'design-gap'`, a nonempty
+  // `whatIsMissing`, a verdict that is not APPROVE, and no re-plan already spent
+  // (`gates/escalation.ts:85-96,140`). It then runs plan AND build again rather
+  // than a fix, which is the whole difference between the two branches.
+  const f = await fixture({ blockersByRound: [0, 1], replanRounds: [1] })
+  const outcome = await drive(f, 'pr')
+  expect(outcome.kind, why(f, outcome)).toBe('merged')
+
+  expect(f.world.dispatches.map(dispatch => dispatch.role)).toEqual([
+    'plan', 'build', 'review', 'review', 'synthesis',
+    'plan', 'build', 'review', 'review', 'synthesis',
+  ])
+  // NO fix worker ran, and the replacement pair carries round 1's identity.
+  expect(f.world.dispatches.map(dispatch => dispatch.step_id).filter(id => id.startsWith(f.row.id)))
+    .toEqual([`${f.row.id}:plan:0`, `${f.row.id}:build:0`, `${f.row.id}:review:1`,
+      `${f.row.id}:plan:1`, `${f.row.id}:build:1`, `${f.row.id}:review:2`])
+
+  // What landed is the REBUILD on top of the reviewed commit, not a fix.
+  const merged = await spawnCapture(['git', '-C', f.origin, 'show', 'refs/heads/main:NOTES.md'], f.origin)
+  expect(merged.stdout).toBe(`seed\n${f.row.id}:build:0\n${f.row.id}:build:1`)
+  expect(f.github.prs[0]!.state).toBe('MERGED')
+}, 300_000)
+
+test('a second unconverged round stops at the row-configured ceiling, not at a verdict', async () => {
+  // G071 AND THE CEILING, TOGETHER. Round 1 raises two blockers and round 2 raises
+  // one: `reviewProgress` allows the second round because the count strictly fell
+  // (`gates/review-progress.ts:20`) and the identities differ, so the run reaches
+  // `round >= maxRounds` with work still outstanding (`build-run.ts:576`) instead of
+  // being stopped earlier by progress arithmetic. The cap is this ROW's
+  // (`build-host.ts:140-144`), pinned here at 2.
+  const f = await fixture({ blockersByRound: [0, 2, 1], maxRounds: 2 })
+  const outcome = await drive(f, 'pr')
+  expect(outcome.kind, why(f, outcome)).toBe('blocked')
+  if (outcome.kind === 'blocked') {
+    expect(outcome.on).toBe('Review requires orchestrator arbitration: round ceiling')
+    expect(outcome.phase).toBe('review')
+    expect(outcome.recipient).toBe('orchestrator')
+  }
+  // Exactly one fix ran — the round-1 one. Round 2 was rejected and then stopped.
+  expect(f.world.dispatches.filter(dispatch => dispatch.role === 'fix').map(d => d.step_id))
+    .toEqual([`${f.row.id}:fix:1`])
+  // The rejection is recorded BEFORE the ceiling stop, so the orchestrator resumes
+  // from a row that knows round 2 was rejected (`build-run.ts:548-555`).
+  const last = f.store.stageEvents(f.row.id).filter(event => event.stage === 'build-mode-state').at(-1)!
+  expect(JSON.parse(last.meta!).checkpoint.stage).toBe('rejected')
+  expect(JSON.parse(last.meta!).checkpoint.round).toBe(2)
+  // Nothing merged: the PR was published for review but the base never moved.
+  expect(f.github.prs[0]!.state).toBe('OPEN')
+  const originMain = await spawnCapture(['git', '-C', f.origin, 'rev-parse', 'refs/heads/main'], f.origin)
+  expect(originMain.stdout).toBe(f.baseSha)
+}, 300_000)
+
+// ── RESUME ACROSS A DRIVER RESTART ───────────────────────────────────────────
+
+test('a driver restarted between the build and review re-adopts the build instead of redoing it', async () => {
+  // GATEWAY RESTARTS HAPPEN MID-RUN, and a build is the most expensive thing to
+  // redo. What the next process has is the run row, the mode-state checkpoint and
+  // the previous process's worker result files — nothing else.
+  const f = await fixture()
+
+  // ── PROCESS 1: plan, build, then the publication the restart interrupts.
+  f.github.refuse.add('create')
+  const first = await driveUntilTheProcessDies(f, 'fresh')
+  expect(first.kind, why(f, first)).toBe('unknown')
+  if (first.kind === 'unknown') expect(first.phase).toBe('publish')
+  expect(f.world.dispatches.map(dispatch => dispatch.role)).toEqual(['plan', 'build'])
+
+  // The exact state the restart will find. `pending` MUST be absent: a checkpoint
+  // that still names a running turn is settled by its host, never re-dispatched
+  // (`build-run.ts:239-243`), and that is the other resume case below.
+  const built = await spawnCapture(['git', '-C', f.repo, 'rev-parse', 'refs/heads/trident/card'], f.repo)
+  expect(lastCheckpoint(f)).toEqual({ head: built.stdout, stage: 'built', round: 1,
+    replansUsed: 0, previousFindings: [], previousBlockingCount: 0, findings: [], pending: undefined })
+
+  // …and the build worker's result file, which the next process reads back as the
+  // suite checkpoint for this revision (`open/wiring/project-build.ts:243-247`).
+  const buildResult = JSON.parse(await readFile(join(f.dir, 'state', f.row.id, 'build.result'), 'utf8'))
+  expect(buildResult.step_id).toBe(`${f.row.id}:build:0`)
+  expect(buildResult.result.head).toBe(built.stdout)
+
+  // ── PROCESS 2: a brand-new prepare, host and driver over the same row and disk.
+  f.github.refuse.delete('create')
+  f.world.dispatches.length = 0
+  const host = await createProjectBuildHost(await f.prepare())
+  const outcome = await host.run({ mode: 'pr', start: 'resume' }, new AbortController().signal)
+  expect(outcome.kind, why(f, outcome)).toBe('merged')
+
+  // RE-ADOPTED, NOT REDONE: no plan and no build in the second process, and the
+  // review it did run is round 1 — the round the first process had reached.
+  expect(f.world.dispatches.map(dispatch => dispatch.role)).toEqual(['review', 'review', 'synthesis'])
+  expect(f.world.dispatches[0]!.step_id).toBe(`${f.row.id}:review:1`)
+  // The merged revision is the one process 1 built: one note, not two.
+  const merged = await spawnCapture(['git', '-C', f.origin, 'show', 'refs/heads/main:NOTES.md'], f.origin)
+  expect(merged.stdout).toBe(`seed\n${f.row.id}:build:0`)
+  expect(f.github.prs).toHaveLength(1)
+  expect(f.github.prs[0]!.state).toBe('MERGED')
+}, 300_000)
+
+test('a driver restarted during a worker turn refuses to re-fire it', async () => {
+  // THE OTHER HALF OF THE CONTRACT. `work()` writes `pending` BEFORE it dispatches
+  // (`build-run.ts:313`), so a process that dies inside a turn leaves a checkpoint
+  // naming a turn whose outcome nobody observed. Re-dispatching it would run the
+  // same step id twice; the driver instead returns `unknown` with that identity
+  // preserved, for the orchestrator to settle (`build-run.ts:239-243`).
+  // PROCESS 1 stops INSIDE the review turn: the worker reports `blocked`, which is
+  // what every role brief tells it to do when it cannot finish. The driver has
+  // already written `pending` and nothing on that path clears it.
+  const f = await fixture({ blockRoles: ['review'] })
+  const first = await driveUntilTheProcessDies(f, 'fresh')
+  expect(first.kind, why(f, first)).toBe('blocked')
+  if (first.kind === 'blocked') expect(first.on).toBe('harness: the review worker was stopped mid-turn')
+  // The blocked answer really went through the decoder as a blocked envelope.
+  expect(f.world.dispatches.at(-1)!.wrote).toEqual(['kind', 'on', 'run_id', 'schema', 'step_id'])
+  expect(lastCheckpoint(f).pending).toEqual({ phase: 'review', step_id: `${f.row.id}:review:1` })
+
+  f.world.dispatches.length = 0
+  const resumed = await createProjectBuildHost(await f.prepare())
+  const outcome = await resumed.run({ mode: 'pr', start: 'resume' }, new AbortController().signal)
+  expect(outcome.kind, why(f, outcome)).toBe('unknown')
+  if (outcome.kind === 'unknown') {
+    expect(outcome.detail).toBe('Resume awaits the existing worker observation')
+    // The identity is PRESERVED, which is what lets the orchestrator settle it.
+    expect(outcome.phase).toBe('review')
+    expect(outcome.step_id).toBe(`${f.row.id}:review:1`)
+  }
+  // Nothing was dispatched by the second process, and the PR process 1 opened for
+  // review is untouched — no merge, no second PR.
+  expect(f.world.dispatches).toEqual([])
+  expect(f.github.prs).toHaveLength(1)
+  expect(f.github.prs[0]!.state).toBe('OPEN')
+}, 300_000)
+
 /**
  * ── WHAT THIS HARNESS DOES NOT COVER ──────────────────────────────────
  *
@@ -578,12 +905,17 @@ test('ralph mode with remaining tasks hands off after the build instead of mergi
  *    composition, so every worker outcome reports null usage and
  *    `recordPhaseUsage` skips the write (`build-host.ts:128`). The skip is
  *    covered; the write is not.
- *  • THE FIX AND RE-PLAN ROUNDS. The panel approves on round 1, so `work('fix')`,
- *    `checkFixLineage`, the round ceiling and the re-plan branch are not driven.
- *    A fix worker also could not reproduce the host's diff from the host turn
- *    context, which carries no launch pin — see `performRole`.
- *  • RESUME. Every case starts `fresh`; `loadResume`, `probePlan` and the
- *    crash-resume fast path are covered elsewhere.
+ *  • THE PANEL'S OTHER STOPS. `blockersByRound` drives `fix`, `re-plan` and the
+ *    round ceiling, but not G070's repeated-finding stop, a `COMMENT` verdict, a
+ *    seat that is `deferred`/`unavailable`, or a synthesis that disagrees with the
+ *    review worker's trailer — every round here raises fresh identities and every
+ *    seat completes. `resumeFix` (the fix dispatched from a RESUMED rejection,
+ *    `build-run.ts:461-472`) is also not driven: the resume case below resumes a
+ *    `built` checkpoint, not a `rejected` one.
+ *  • THE REST OF RESUME. The two cases here resume a `built` checkpoint and a
+ *    `pending` one. A `rejected` or `approved` checkpoint, `probePlan`'s
+ *    continuation planner, a resume whose head MOVED since the checkpoint, and a
+ *    regenerated diff that disagrees with the measurement are not driven.
  *  • CODEX AND KIMI SEATS, and headless placement generally: both cross-model
  *    seats are configured off.
  *  • `merge_mode: 'local'`, `mode: 'wave'` and `mode: 'bound_pr'`.
