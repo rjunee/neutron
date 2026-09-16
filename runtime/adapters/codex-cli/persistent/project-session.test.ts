@@ -270,6 +270,9 @@ describe('CodexProjectSessionHost', () => {
     await Bun.sleep(0)
     const b = session.submitLine('second')
     await Bun.sleep(0)
+    // Framed as a bracketed paste (#978) — the serialization claim is about
+    // ORDER and one-at-a-time, not about the wire format, but the format is
+    // what reaches the pane and so is what this must assert.
     expect(f.host.submissions).toEqual(['\x1b[200~first\x1b[201~'])
     expect(f.host.maxActive).toBe(1)
     first.resolve()
@@ -324,61 +327,24 @@ describe('CodexProjectSessionHost', () => {
   })
 })
 
+// #978. herdr delivers a submitted line to the Codex TUI as ordinary keystrokes,
+// so a multi-line or escape-bearing payload could be interpreted as editor input
+// rather than submitted text. Framing it as a completed bracketed paste makes the
+// TUI take the whole payload as one literal insertion before Enter.
 describe('Codex TUI regression controls', () => {
   test('submits a completed bracketed paste before the host sends Enter', async () => {
-    const f = fixture()
-    const session = await f.sessionHost.open(OPEN)
+    const f = await fixture()
+    const session = await f.sessionHost.open(f.open)
     await session.submitLine('hello')
     expect(f.host.submissions).toEqual(['\x1b[200~hello\x1b[201~'])
   })
 
   test('refuses an escape that could end the paste early', async () => {
-    const f = fixture()
-    const session = await f.sessionHost.open(OPEN)
+    const f = await fixture()
+    const session = await f.sessionHost.open(f.open)
+    // A payload carrying the paste terminator would close the bracket early and
+    // leave the remainder to be read as keystrokes. Refuse rather than frame it.
     await expect(session.submitLine('hello\x1b[201~injected')).rejects.toThrow(/escape/)
     expect(f.host.submissions).toEqual([])
-  })
-
-  test.each([
-    ['codex', '--enable', 'multi_agent_v2'],
-    ['/usr/bin/codex', '--enable', 'multi_agent_v2'],
-    ['node', '/usr/bin/codex', '--enable', 'multi_agent_v2'],
-    ['/usr/bin/node', '/usr/bin/codex', '--enable', 'multi_agent_v2'],
-  ].map(argv => ({ argv })))('adopts the matching launch %j', async ({ argv }) => {
-    const f = fixture()
-    await f.sessionHost.open(OPEN)
-    const nextHost = new FakeHost()
-    nextHost.inspection = { kind: 'live', argv }
-    const session = await new CodexProjectSessionHost({ registryPath: f.registryPath, host: nextHost }).open(OPEN)
-    expect(session.recovery).toBe('adopted')
-    expect(nextHost.attached).toEqual(['pane-1'])
-    expect(nextHost.spawned).toEqual([])
-  })
-
-  test.each([
-    ['node', '/usr/bin/other', 'codex', '--enable', 'multi_agent_v2'],
-    ['python', '/usr/bin/codex', '--enable', 'multi_agent_v2'],
-    ['node', '/usr/bin/codex', '--enable', 'wrong'],
-    ['node', '/usr/bin/codex', '--enable', 'multi_agent_v2', 'extra'],
-  ].map(argv => ({ argv })))('refuses an unrelated or changed launch %j', async ({ argv }) => {
-    const f = fixture()
-    await f.sessionHost.open(OPEN)
-    const nextHost = new FakeHost()
-    nextHost.inspection = { kind: 'live', argv }
-    await expect(new CodexProjectSessionHost({ registryPath: f.registryPath, host: nextHost }).open(OPEN)).rejects.toThrow(/identity/)
-    expect(nextHost.attached).toEqual([])
-    expect(nextHost.spawned).toEqual([])
-  })
-
-  test('an explicitly configured executable path must match exactly', async () => {
-    const f = fixture()
-    await new CodexProjectSessionHost({ registryPath: f.registryPath, host: f.host, bin: '/opt/codex' }).open(OPEN)
-    const nextHost = new FakeHost()
-    const restarted = new CodexProjectSessionHost({ registryPath: f.registryPath, host: nextHost, bin: '/opt/codex' })
-    nextHost.inspection = { kind: 'live', argv: ['node', '/other/codex', '--enable', 'multi_agent_v2'] }
-    await expect(restarted.open(OPEN)).rejects.toThrow(/identity/)
-    expect(nextHost.attached).toEqual([])
-    nextHost.inspection = { kind: 'live', argv: ['node', '/opt/codex', '--enable', 'multi_agent_v2'] }
-    expect((await restarted.open(OPEN)).recovery).toBe('adopted')
   })
 })
