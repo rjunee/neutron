@@ -364,7 +364,7 @@ for (const scenario of ['late trailer', 'no subagent', 'no trailer', 'throw', 't
       // two wrong root causes on this issue.
       expect(observation).toEqual({ kind: 'unknown', detail: expect.stringContaining('directory exists with 2 agent metadata file(s), none naming this step') })
       const seen = observation as { kind: 'unknown'; detail: string }
-      expect(seen.detail).toContain('submitLine resolved')
+      expect(seen.detail).toContain('not evidence the REPL acted')
       expect(seen.detail).toContain(directory)
       expect(now).toBe(DISPATCH_TIMEOUT_MS)
       expect(DISPATCH_TIMEOUT_MS).toBe(35_000)
@@ -403,4 +403,31 @@ test('dispatch evidence names an ABSENT subagent directory, distinctly from an e
   // NOT the phrasing used when the directory is present but holds other work.
   expect(observation.detail).not.toContain('directory exists with')
   expect(now).toBe(DISPATCH_TIMEOUT_MS)
+})
+
+// #1105 review. An earlier revision caught EVERY readdir failure and called it
+// absence — so a regular file at the subagents path (ENOTDIR), a permissions
+// error or an I/O fault all reported "directory does not exist", asserting a
+// fact the host never established. That is the same collapse of "is false" with
+// "could not find out" that this whole change exists to remove, one level down.
+test('an UNREADABLE subagent path is not reported as an absent one', async () => {
+  const f = await fixture()
+  f.binding.projects_dir = join(f.dir, 'projects')
+  const transcript = sessionJsonlPath('session', f.dir, f.binding.projects_dir)
+  const directory = join(transcript.slice(0, -'.jsonl'.length), 'subagents')
+  // A regular FILE where the directory should be: readdir raises ENOTDIR.
+  await mkdir(join(directory, '..'), { recursive: true })
+  await writeFile(directory, 'not a directory')
+  let now = 0
+  f.input.request = { ...f.input.request, budget: { wall_ms: 90_000 } }
+  f.input.timeout_ms = 90_000
+  f.binding.session.child.submitLine = async text => { f.commands.push(text) }
+  const actingTurn = createClaudeActingTurn(f.binding, { now: () => now, pause: async ms => { now += ms } })
+  const observation = await actingTurn(f.input) as { kind: string; detail: string }
+  expect(observation.kind).toBe('unknown')
+  expect(observation.detail).toContain('could not be read')
+  expect(observation.detail).toContain('ENOTDIR')
+  // NEITHER of the two claims the host cannot support here.
+  expect(observation.detail).not.toContain('does not exist')
+  expect(observation.detail).not.toContain('directory exists with')
 })

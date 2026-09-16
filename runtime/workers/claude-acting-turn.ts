@@ -32,8 +32,13 @@ interface ObservationClock {
  * not exist", "it exists and holds other work", and "it holds our worker" are
  * three different failures that read identically as `false`. */
 interface SubagentObservation {
-  /** The directory was readable. `false` means it does not exist yet. */
-  readonly directoryExists: boolean
+  /** ABSENT and UNREADABLE are not one fact. `absent` is a real ENOENT — no
+   * worker has ever spawned here. `unreadable` is any other readdir failure
+   * (ENOTDIR, permissions, I/O): the host could not find out, and reporting
+   * that as absence asserts something it never established. */
+  readonly directory: 'readable' | 'absent' | 'unreadable'
+  /** Why it was unreadable, when it was. */
+  readonly reason?: string
   /** `agent-*.meta.json` files present, whatever work they describe. */
   readonly metaFiles: number
   /** One of them names THIS step. */
@@ -43,17 +48,24 @@ interface SubagentObservation {
 async function observeSubagents(directory: string, description: string): Promise<SubagentObservation> {
   let metaFiles = 0
   let matched = false
+  let names: string[]
   try {
-    for (const name of await readdir(directory)) {
-      if (!/^agent-.+\.meta\.json$/.test(name)) continue
-      metaFiles += 1
-      try {
-        const meta = JSON.parse(await readFile(join(directory, name), 'utf8'))
-        if (meta?.description === description) matched = true
-      } catch { /* Partial writes and unreadable metadata are not proof. */ }
-    }
-  } catch { /* Missing or unreadable directory is not proof. */ return { directoryExists: false, metaFiles: 0, matched: false } }
-  return { directoryExists: true, metaFiles, matched }
+    names = await readdir(directory)
+  } catch (error) {
+    // KEY ON THE CODE, NOT ON THE FACT THAT IT THREW. Only ENOENT is absence.
+    const code = (error as NodeJS.ErrnoException).code
+    if (code === 'ENOENT') return { directory: 'absent', metaFiles: 0, matched: false }
+    return { directory: 'unreadable', reason: code ?? (error instanceof Error ? error.message : String(error)), metaFiles: 0, matched: false }
+  }
+  for (const name of names) {
+    if (!/^agent-.+\.meta\.json$/.test(name)) continue
+    metaFiles += 1
+    try {
+      const meta = JSON.parse(await readFile(join(directory, name), 'utf8'))
+      if (meta?.description === description) matched = true
+    } catch { /* Partial writes and unreadable metadata are not proof. */ }
+  }
+  return { directory: 'readable', metaFiles, matched }
 }
 
 /** Continue the bound project conversation. No spawn, retry or reply observation. */
@@ -102,7 +114,7 @@ export function createClaudeActingTurn(binding: ClaudeActingSession, clock: Obse
         )
         const dispatchDeadline = Math.min(deadline, clock.now() + DISPATCH_TIMEOUT_MS)
         let accepted = false
-        let seen: SubagentObservation = { directoryExists: false, metaFiles: 0, matched: false }
+        let seen: SubagentObservation = { directory: 'absent', metaFiles: 0, matched: false }
         while (!expired()) {
           try {
             const trailer = await stat(request.result.path)
@@ -117,7 +129,15 @@ export function createClaudeActingTurn(binding: ClaudeActingSession, clock: Obse
             // SAY WHAT WAS OBSERVED, NOT JUST THAT TIME RAN OUT. Still `unknown`:
             // none of this proves the worker did or did not run. It says WHICH
             // uncertainty this is, which the bare sentence could not.
-            return { kind: 'unknown' as const, detail: `The REPL did not accept the dispatch within its budget; subagent completion is unknown. submitLine resolved; polled ${subagents} — ${seen.directoryExists ? `directory exists with ${seen.metaFiles} agent metadata file(s), none naming this step` : 'directory does not exist'}.` }
+            // `submitLine` resolving means the TERMINAL acknowledged text and
+            // Enter — `pty-host.ts:194-195` says explicitly that neither backend
+            // asserts the REPL acted. So this must not be reported as acceptance.
+            const where = seen.directory === 'readable'
+              ? `directory exists with ${seen.metaFiles} agent metadata file(s), none naming this step`
+              : seen.directory === 'absent'
+                ? 'directory does not exist'
+                : `directory could not be read (${seen.reason})`
+            return { kind: 'unknown' as const, detail: `The REPL did not accept the dispatch within its budget; subagent completion is unknown. Terminal acknowledged text and Enter, which is not evidence the REPL acted; polled ${subagents} — ${where}.` }
           }
           const nextDeadline = accepted ? deadline : dispatchDeadline
           await clock.pause(Math.min(25, Math.max(1, nextDeadline - clock.now())), stopped)
