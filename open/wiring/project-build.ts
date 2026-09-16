@@ -23,9 +23,18 @@ import { buildReflectionGuidance } from '@neutronai/trident/reflection-guidance.
  * Measured on the fourth acceptance run (5a69ae54) against this repo:
  *   - `plan` finished in 4m28s. It reads and writes a plan; it runs no suite.
  *   - `build` was still inside its FIRST suite run at 32 minutes and had not yet
- *     started the second. A builder runs the suite twice — a baseline before its
- *     change and a verification after — so 45 minutes could not fit even one
- *     honest build, and the wall, not the work, decided the outcome.
+ *     started the second. That builder ran the suite twice — a baseline before its
+ *     change and a verification after — so 45 minutes could not fit even one honest
+ *     build, and the wall, not the work, decided the outcome.
+ *
+ * The two-run shape was never DESIGNED; it was what a builder did when the TEST
+ * EXECUTION block stated no run budget. #1044 states one (`BASELINE_FULL_SUITE_RUNS`,
+ * `trident/test-strategy.ts`): zero full-suite runs before the change, and the
+ * pre-existing/new distinction taken from re-running only the files that came back
+ * red. These walls are NOT re-cut on that: one suite run on this repo was measured at
+ * over 32 minutes and a builder still has to edit, fail, fix and re-run inside its
+ * wall — 90 minutes is now headroom for one honest build instead of a bare fit for
+ * two, which is the direction a stop should err in.
  *
  * `review` is read-only with no write and no network, so it stays close to plan.
  * `fix` is a builder and gets the builder's budget.

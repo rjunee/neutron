@@ -360,17 +360,21 @@ test('every role brief names the envelope fields the decoder actually requires',
 
 // THE BUILDER'S WALL MUST OUTLAST THE WORK THE BUILDER IS TOLD TO DO.
 //
-// All four roles used to share one 45-minute wall. A builder runs the suite TWICE
-// — a baseline before its change and a verification after — and on the fourth
-// acceptance run (5a69ae54) the build worker was still inside its FIRST suite run
-// at 32 minutes. The wall, not the work, would have decided that outcome, and a
-// build killed mid-suite is reported as a failure of the change rather than of
-// the budget.
+// All four roles used to share one 45-minute wall. On the fourth acceptance run
+// (5a69ae54) the build worker ran the suite TWICE — a baseline before its change and
+// a verification after — and was still inside its FIRST suite run at 32 minutes. The
+// wall, not the work, would have decided that outcome, and a build killed mid-suite
+// is reported as a failure of the change rather than of the budget.
+//
+// #1044 removed the baseline run itself (`BASELINE_FULL_SUITE_RUNS`,
+// `trident/test-strategy.ts`), so the builder is no longer TOLD to fit two suites in
+// here. These numbers stand anyway: one run of this repo's suite was measured at over
+// 32 minutes and the builder still edits, fails, fixes and re-runs inside its wall.
 //
 // Pinned as EXACT values, not a relation. "build > plan" would still pass at
 // 46 minutes, which is the number that could not fit one honest build; the
 // numbers are the claim, so the numbers are what this asserts.
-test('each role carries its own wall budget, and a builder gets room for two suite runs', async () => {
+test('each role carries its own wall budget, and a builder gets room for a suite run and a fix round', async () => {
   const f = await fixture()
   const options = await f.prepare()
   const roles = ['plan', 'build', 'review', 'fix'] as const

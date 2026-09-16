@@ -37,6 +37,8 @@ import {
   FULL_SUITE_REQUIRED,
   INTERMEDIATE_REPORT_RULE,
   INTERMEDIATE_SUITE_DEFERRED,
+  BASELINE_FULL_SUITE_RUNS,
+  NO_BASELINE_SUITE_RUN,
   NO_KNOBS_LINE,
   NO_TIMEOUT_WRAPPER,
   PINNED_KNOBS_LINE,
@@ -598,6 +600,7 @@ describe('renderTestStrategy', () => {
     expect(block).toContain(FULL_SUITE_REQUIRED)
     expect(block).toContain(NO_TIMEOUT_WRAPPER)
     expect(block).toContain(SUITE_OUTCOME_VOCABULARY)
+    expect(block).toContain(NO_BASELINE_SUITE_RUN)
   })
 
   // ── THE GATE'S ESCAPE HATCH IS TAUGHT HERE (round-3 review, two reviewers) ──
@@ -616,6 +619,35 @@ describe('renderTestStrategy', () => {
     expect(knobBranch).toContain('the outcome is failed-new')
     // `passed` stays welded to testsPassed=true — criterion 5 is not weakened by this.
     expect(knobBranch).toContain('The ONLY value that may')
+  })
+
+  // ── #1044: THE RUN THAT HAPPENS BEFORE ANY EDIT EXISTS ──
+  // Acceptance run 5a69ae54: the builder opened with `scripts/run-tests.sh` as a
+  // baseline, was still inside it at 32 minutes, and died at its wall having never
+  // started the verification run. Nothing instructed that run; nothing forbade it
+  // either, and `failed-preexisting`'s price reads like it needs a before/after. The
+  // budget is now stated, and the number is BEFORE-your-change, not per-iteration, so
+  // the legitimate fix-and-re-run loop is untouched.
+  test('the pre-change baseline budget is ZERO, and the number is in the text the builder reads', () => {
+    // The exact constant, not a relation: "fewer than two" is still one whole suite.
+    expect(BASELINE_FULL_SUITE_RUNS).toBe(0)
+    expect(NO_BASELINE_SUITE_RUN).toContain('SUITE RUN BUDGET — 0 full-suite runs before your change.')
+    expect(NO_BASELINE_SUITE_RUN).not.toContain('1 full-suite runs before your change')
+  })
+
+  test('the prohibition names the act, says what it costs, and keeps the same guarantee', () => {
+    // The act, in the words the builder would use for it.
+    expect(NO_BASELINE_SUITE_RUN).toContain('Do NOT open by running the full suite as a "baseline"')
+    // WHY it is free to drop: nobody consumes a test that is green at base and green at head.
+    expect(NO_BASELINE_SUITE_RUN).toContain('green at your head is read by no one')
+    // The guarantee is NOT deleted — it is re-pointed at the cheap, targeted comparison
+    // `SUITE_OUTCOME_VOCABULARY` already asks for, and that vocabulary still ships.
+    expect(NO_BASELINE_SUITE_RUN).toContain('re-run ONLY the named failing files at the base')
+    expect(knobBranch).toContain('re-run the failing files at the base branch')
+    expect(knobBranch).toContain('failed-preexisting')
+    // The cap is on the pre-change run alone: iterate-until-green must stay legal.
+    expect(NO_BASELINE_SUITE_RUN).not.toContain('per iteration')
+    expect(knobBranch).toContain('A green stage 1 buys you nothing except the right to start stage 2.')
   })
 
   test('the hang budget is RECONCILED with the round ceiling, not just generous', () => {
@@ -671,6 +703,9 @@ describe('per-plan suite scope (subset render)', () => {
     expect(subsetBlock).toContain("suiteOutcome='deferred'")
     expect(subsetBlock).not.toContain("suiteOutcome='not-run'")
     expect(subsetBlock).toContain('the tail — never let raw test output flood your context.')
+    // A DEFERRED stage 2 removes the verification run, not the temptation to open with a
+    // baseline — the subset builder is the one with the most room to spend on one.
+    expect(subsetBlock).toContain(NO_BASELINE_SUITE_RUN)
     expect(subsetBlock).not.toContain(FULL_SUITE_REQUIRED)
     expect(subsetBlock).not.toContain('Full suite (stage 2), run exactly this')
     expect(subsetBlock).not.toContain('passed              —')
@@ -719,6 +754,12 @@ describe('per-plan suite scope (subset render)', () => {
     expect(detail.block).toContain(FULL_SUITE_REQUIRED)
     expect(detail.intermediate_block).toContain(INTERMEDIATE_SUITE_DEFERRED)
     expect(detail.intermediate_block).not.toContain(FULL_SUITE_REQUIRED)
+    // #1044 — this is the call the ORCHESTRATOR makes (`trident/orchestrator.ts:1940`)
+    // and `detail.block` is the exact string spliced into the builder's brief
+    // (`open/wiring/project-build.ts:180`). Asserting it here is the only place the
+    // producer the launcher actually uses is checked, for BOTH dispatched scopes.
+    expect(detail.block).toContain(NO_BASELINE_SUITE_RUN)
+    expect(detail.intermediate_block).toContain(NO_BASELINE_SUITE_RUN)
     expect(detail.summary).toBe(
       'test-strategy: source=package-json knob=NEUTRON_TEST_JOBS cores=8 active_runs=2 divisor=4 jobs=2 concurrency=4',
     )
