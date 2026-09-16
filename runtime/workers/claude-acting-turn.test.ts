@@ -184,6 +184,89 @@ test('real HerdrHost child submits text then Enter in the existing pane', async 
   expect(calls).toEqual(['pane.send_text', 'pane.send_keys'])
 })
 
+test('host budget abandonment prevents a late herdr text acknowledgement from submitting Enter', async () => {
+  const f = await fixture()
+  const server = new FakeHerdrServer()
+  let releaseText!: () => void
+  const textHeld = new Promise<void>(resolve => { releaseText = resolve })
+  const calls: string[] = []
+  const host = new HerdrHost({ connect: async () => ({ call: async (method, params) => {
+    if (method === 'pane.send_text') await textHeld
+    const result = await server.call(method, params)
+    if (method === 'pane.send_text' || method === 'pane.send_keys') calls.push(method)
+    return result
+  } }), pollIntervalMs: 10 })
+  const child = await host.attach(server.paneId, { cwd: f.dir, env: {} })
+  cleanups.push(async () => { child.detach?.() })
+  f.binding.session = { ...f.binding.session, child }
+  f.input.timeout_ms = 20
+
+  expect(await f.run()).toEqual({ kind: 'unknown', detail: expect.stringContaining('trailer') })
+  releaseText()
+  await Bun.sleep(20)
+  expect(calls).toEqual(['pane.send_text'])
+})
+
+// THE OTHER THREE GUARDS, ARMED. A review lane measured that the branch added four
+// cancellation checks and proved only one: the post-acknowledgement guard (the case above).
+// Deleting the enqueued-work guard or the bun host's own check outright left every test green — guards
+// nothing could ever see fire. A fourth, ahead of the enqueue, proved redundant with
+// the enqueued-work guard (removing either alone stayed green; removing both went red) and was removed. Each case below holds a DIFFERENT
+// earlier actuation so the caller's abandonment lands at a different guard, and
+// each was shown red with its guard removed before being kept.
+
+test('abandonment while a PRIOR actuation holds the herdr queue stops before send_text', async () => {
+  const f = await fixture()
+  const server = new FakeHerdrServer()
+  let releasePrior!: () => void
+  const priorHeld = new Promise<void>(resolve => { releasePrior = resolve })
+  const calls: string[] = []
+  const host = new HerdrHost({ connect: async () => ({ call: async (method, params) => {
+    // The FIRST send_keys is a prior actuation that never acknowledges; the dispatch
+    // enqueues behind it, so its work runs only after the caller has given up.
+    if (method === 'pane.send_keys' && calls.length === 0) { calls.push('prior'); await priorHeld }
+    const result = await server.call(method, params)
+    if (method === 'pane.send_text' || method === 'pane.send_keys') calls.push(method)
+    return result
+  } }), pollIntervalMs: 10 })
+  const child = await host.attach(server.paneId, { cwd: f.dir, env: {} })
+  cleanups.push(async () => { child.detach?.() })
+  child.writeKey?.('enter')
+  f.binding.session = { ...f.binding.session, child }
+  f.input.timeout_ms = 20
+
+  expect(await f.run()).toEqual({ kind: 'unknown', detail: expect.stringContaining('trailer') })
+  releasePrior()
+  await Bun.sleep(30)
+  // The dispatch's own text was never sent: the queued work saw the abandonment first.
+  expect(calls.filter(c => c === 'pane.send_text')).toEqual([])
+})
+
+test('an already-abandoned herdr submitLine is refused before any RPC is sent', async () => {
+  const f = await fixture()
+  const server = new FakeHerdrServer()
+  const calls: string[] = []
+  const host = new HerdrHost({ connect: async () => ({ call: async (method, params) => {
+    const result = await server.call(method, params)
+    if (method === 'pane.send_text' || method === 'pane.send_keys') calls.push(method)
+    return result
+  } }), pollIntervalMs: 10 })
+  const child = await host.attach(server.paneId, { cwd: f.dir, env: {} })
+  cleanups.push(async () => { child.detach?.() })
+  // An already-aborted signal: the caller gave up before ever reaching the host.
+  const aborted = new AbortController(); aborted.abort()
+  await expect(child.submitLine!('never', aborted.signal)).rejects.toMatchObject({ name: 'AbortError' })
+  expect(calls).toEqual([])
+})
+
+test('the bun host refuses an already-abandoned submitLine before writing', async () => {
+  const { bunTerminalHost } = await import('@neutronai/runtime/adapters/claude-code/persistent/bun-terminal-host.ts')
+  const child = await bunTerminalHost.spawn(['/bin/cat'], { cwd: '/tmp', env: {}, onExit: () => {} })
+  cleanups.push(async () => { child.kill() })
+  const aborted = new AbortController(); aborted.abort()
+  await expect(child.submitLine!('never', aborted.signal)).rejects.toMatchObject({ name: 'AbortError' })
+})
+
 for (const cwd of ['/a/b', '/a/b/worktree', '/a/b/../b/worktree']) {
   test(`granted root accepts ${cwd}`, async () => {
     const f = await fixture()

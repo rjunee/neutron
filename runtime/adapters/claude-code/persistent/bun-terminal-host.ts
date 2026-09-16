@@ -492,7 +492,13 @@ export class BunTerminalHost implements PtyHost {
        * implementations look so different for the same method.
        */
       // eslint-disable-next-line @typescript-eslint/require-await
-      async submitLine(command: string): Promise<void> {
+      async submitLine(command: string, signal?: AbortSignal): Promise<void> {
+        if (signal?.aborted) {
+          throw new DOMException(
+            `bun-terminal-host: submitLine(${JSON.stringify(command)}) was abandoned before submission`,
+            'AbortError',
+          )
+        }
         if (exited) {
           throw new Error(
             `bun-terminal-host: submitLine(${JSON.stringify(command)}) after exit — the child is ` +
