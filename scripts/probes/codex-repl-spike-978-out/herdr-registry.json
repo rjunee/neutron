@@ -1,0 +1,14 @@
+{
+  "version": 1,
+  "sessions": {
+    "spike978-herdr": {
+      "project_id": "spike978-herdr",
+      "pane_handle": "w6:p1TK",
+      "argv": [
+        "codex",
+        "--enable",
+        "multi_agent_v2"
+      ]
+    }
+  }
+}
