@@ -1135,10 +1135,14 @@ for (const seam of ['submitLine', 'acquireTurn', 'silent-worker'] as const) {
       acquireTurn: seam === 'acquireTurn' ? neverSettles : async () => () => {},
     })
     const host = await createProjectBuildHost(options)
-    const started = Date.now()
+    // IT STOPS is the load-bearing half, and the TEST TIMEOUT is what asserts it.
+    // A wall-clock `expect(elapsed).toBeLessThan(...)` here would be a second, worse
+    // instrument for the same contract: it reddens when the runner is loaded rather
+    // than when the code is wrong, and it cannot fire at all in the case that matters
+    // — a genuine park never reaches the assertion. The 60s timeout on this test does
+    // fire, and was observed doing so: forcing both walls to an hour (the control for
+    // this case) fails it with `timed out after 60000ms`.
     const outcome = await host.run({ mode: 'pr', start: 'fresh' }, new AbortController().signal)
-    // It STOPS — the load-bearing half. A park would hit the test timeout instead.
-    expect(Date.now() - started, why(f, outcome)).toBeLessThan(30_000)
     expect(outcome, why(f, outcome)).toMatchObject({ kind: 'unknown', phase: 'plan' })
     // WHICH uncertainty is deliberately not pinned. `claudeInReplRunner`'s dispatch
     // wall (`claude-in-repl.ts:76`) and `createClaudeActingTurn`'s own
