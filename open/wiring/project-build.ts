@@ -15,6 +15,7 @@ import { phaseByKey, parsePhaseModelConfig } from '@neutronai/trident/phase-mode
 import { modelTier } from '@neutronai/trident/model-tiers.ts'
 import { readProjectRepos } from '@neutronai/trident/project-repos.ts'
 import { buildReflectionGuidance } from '@neutronai/trident/reflection-guidance.ts'
+import { PROJECT_BUILD_WALL_MS } from '@neutronai/trident/project-build-budget.ts'
 
 /**
  * WALL BUDGET PER ROLE. This was ONE flat 45 minutes for all four roles, which is
@@ -43,13 +44,6 @@ import { buildReflectionGuidance } from '@neutronai/trident/reflection-guidance.
  * build, it stops a correct build being killed mid-suite and reported as a failure
  * of the work. It is deliberately not unbounded — a wedged builder must still die.
  */
-const WALL_MS: Record<'plan' | 'build' | 'review' | 'fix', number> = {
-  plan: 15 * 60_000,
-  review: 15 * 60_000,
-  build: 90 * 60_000,
-  fix: 90 * 60_000,
-}
-
 export interface ProjectBuildContext {
   store: ProjectBuildHostOptions['production']['store']
   phaseUsage: ProjectBuildHostOptions['phaseUsage']
@@ -289,7 +283,7 @@ export async function prepareProjectBuild(input: InnerLoopInput, context: Projec
       tools: role === 'review' ? 'read-only' : 'edit-and-run',
       brief: { path, integrity: briefIntegrity(brief) },
       result: { schema: role === 'plan' ? 'project-plan' : role === 'review' ? 'project-review' : 'project-build', path: join(state, `${role}.result`) },
-      thread: null, budget: { wall_ms: WALL_MS[role] },
+      thread: null, budget: { wall_ms: PROJECT_BUILD_WALL_MS[role] },
     } }
   }
   const bodyFile = join(state, 'publication.md')
