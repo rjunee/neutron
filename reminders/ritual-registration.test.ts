@@ -90,7 +90,7 @@ interface Harness {
   createSpy: ReturnType<typeof spyOn>
 }
 
-function makeHarness(now: () => number = Date.now): Harness {
+function makeHarness(now: () => number = Date.now, log?: (msg: string) => void): Harness {
   const registry = createRitualRegistry({ rituals_dir })
   const approvals = new ApprovalManager(db, noopNotifier, { now })
   const store = new ReminderStore(db)
@@ -106,6 +106,7 @@ function makeHarness(now: () => number = Date.now): Harness {
     project_slug: SLUG,
     owner_user_id: OWNER,
     approval_topic_id: TOPIC,
+    ...(log === undefined ? {} : { log }),
     emit: async (p) => {
       const prompt = buildButtonPrompt({
         body: p.body,
@@ -1139,5 +1140,42 @@ describe('automatic pending approval sweep', () => {
     await h.service.sweepPendingApprovals()
     expect(h.approvals.get('other')?.status).toBe('pending')
     expect(h.emitted).toHaveLength(0)
+  })
+  test('a row whose render throws is logged with its id and cause; a healthy row in the same batch still emits', async () => {
+    let now = 1_000_000
+    const logged: string[] = []
+    const h = makeHarness(() => now, (msg) => logged.push(msg))
+    await h.service.propose(proposal())
+    await h.service.propose(proposal({ id: 'weekly-review', prompt: 'Read ~/STATUS.md and list the week.' }))
+    await settle()
+    const originals = [...h.emitted]
+    expect(originals).toHaveLength(2)
+    const bad = h.approvals.findByToolName(SLUG, 'ritual:daily-digest')[0]!
+    const good = h.approvals.findByToolName(SLUG, 'ritual:weekly-review')[0]!
+    // The card's own example: a malformed args_json. reraisePending tolerates it
+    // for its OWN bookkeeping, so the row is still selected and render is still
+    // called — and render's JSON.parse of the same column is what throws.
+    await db.run(`UPDATE tool_approvals SET args_json = ? WHERE id = ?`, ['{not json', bad.id])
+    now += 86_400_000
+    await h.service.sweepPendingApprovals()
+
+    // The bad row is still skipped and still expires — the catch was not widened.
+    expect(h.approvals.get(bad.id)?.status).toBe('expired')
+    // …but the drop is now VISIBLE: one line naming the row, the ritual and the cause.
+    const renderLines = logged.filter((l) => l.includes('render failed'))
+    expect(renderLines).toHaveLength(1)
+    expect(renderLines[0]).toContain(`id=${bad.id}`)
+    expect(renderLines[0]).toContain('ritual=daily-digest')
+    expect(renderLines[0]).toMatch(/JSON/)
+    // Positive control: the healthy row in the same batch still emits, and its
+    // payload is byte-identical to what a good row emitted before this change.
+    expect(h.emitted).toHaveLength(3)
+    const reraised = h.emitted[2]!
+    const original = originals.find((p) => p.metadata.ritual_id === 'weekly-review')!
+    expect(reraised.body).toBe(original.body)
+    expect(reraised.options).toEqual(original.options)
+    expect(reraised.metadata).toEqual(original.metadata)
+    expect(reraised.idempotency_key).toBe(`ritual-reminder:${good.id}:1`)
+    expect(h.approvals.get(good.id)?.status).toBe('pending')
   })
 })

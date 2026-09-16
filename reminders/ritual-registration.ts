@@ -774,7 +774,16 @@ export function createRitualRegistrationService(
               metadata: { kind: egress ? 'ritual-egress-approval' : 'ritual-approval', ritual_id: def.id },
             }
             return () => emit(p)
-          } catch { return null }
+          } catch (err) {
+            // One bad row must not suppress every other ritual's prompt, so this
+            // still returns null — which reraisePending records as "content no
+            // longer available" and EXPIRES the grant. That expiry reason is a lie
+            // when the cause was a throw, so name the real cause here: without
+            // this line an approval that never appears is indistinguishable from
+            // one that was never due.
+            log(`ritual approval render failed id=${row.id} ritual=${match[2]}: ${(err as Error).message}`)
+            return null
+          }
         })
       } catch (err) {
         log(`ritual approval reminder failed id=${row.id}: ${(err as Error).message}`)
