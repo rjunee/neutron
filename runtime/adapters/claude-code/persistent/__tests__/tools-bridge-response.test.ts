@@ -16,10 +16,8 @@
  */
 
 import { describe, it, expect } from 'bun:test'
-import { readFileSync } from 'node:fs'
+import { createToolCallHandler } from '../tools-bridge-handler.ts'
 import { interpretSinkToolResponse } from '../tools-bridge-response.ts'
-
-const IMPL_SRC = readFileSync(new URL('../tools-bridge-impl.ts', import.meta.url), 'utf8')
 
 function textOf(r: { content: { type: 'text'; text: string }[] }): string {
   return r.content.map((c) => c.text).join('')
@@ -121,25 +119,51 @@ describe('interpretSinkToolResponse — a refusal is never `null`', () => {
   })
 })
 
-describe('the bridge entry actually uses this mapping', () => {
-  // `tools-bridge-impl.ts` connects a StdioServerTransport at import time, so no
-  // test can import it and drive its handler. Its two load-bearing lines are
-  // therefore asserted on the source: the plumbing that carries `resp.status` out
-  // of `postToSink`, and the delegation to the single mapping above. Without
-  // these, the mapping could be perfect and unreached — which is the shape the
-  // original bug had (a status that was read and then dropped).
-  it('postToSink returns the HTTP status alongside the body', () => {
-    expect(IMPL_SRC).toContain('Promise<SinkToolResponse>')
-    expect(IMPL_SRC).toContain('return { status: resp.status, body: await resp.text() }')
-  })
-
-  it('the CallTool handler delegates to interpretSinkToolResponse and re-implements nothing', () => {
-    expect(IMPL_SRC).toContain('return interpretSinkToolResponse(resp)')
-    // The old inline mapping — the one that produced `null` for a refusal — must
-    // not come back alongside the shared one.
-    expect(IMPL_SRC).not.toContain("parsed.ok === false")
-    expect(IMPL_SRC).not.toContain("? 'null'")
-  })
+describe('the executable bridge handler uses this mapping', () => {
+  // Invoke the handler factory used by the stdio bridge, including its HTTP transport.
+  for (const fixture of [
+    { status: 401, body: { status: 'unauthorized' }, isError: true, text: 'unauthorized' },
+    { status: 500, body: { ok: true, result: 'must not be treated as success' }, isError: true, text: 'HTTP 500' },
+    { status: 200, body: { ok: true, result: 'hello' }, isError: undefined, text: 'hello' },
+    { status: 200, body: { ok: true }, isError: undefined, text: 'null' },
+  ]) {
+    it(`carries HTTP ${fixture.status} (${fixture.text}) through the bridge handler`, async () => {
+      const requests: { path: string; method: string; token: string | null; body: unknown }[] = []
+      const fetchImpl = (async (url, init) => {
+        const req = new Request(String(url), init)
+        requests.push({
+          path: new URL(req.url).pathname,
+          method: req.method,
+          token: req.headers.get('X-Sink-Token'),
+          body: await req.json(),
+        })
+        return Response.json(fixture.body, { status: fixture.status })
+      }) as typeof fetch
+      const handler = createToolCallHandler({
+        port: 12345,
+        token: 'test-credential',
+        sessionId: 'test-session',
+      }, fetchImpl)
+      const result = await handler({ method: 'tools/call', params: { name: 'test_tool', arguments: { value: 7 } } })
+      expect(requests).toEqual([{
+        path: '/tool-call',
+        method: 'POST',
+        token: 'test-credential',
+        body: {
+          session_id: 'test-session',
+          tool_name: 'test_tool',
+          args: { value: 7 },
+          call_id: 'test-session:test_tool',
+        },
+      }])
+      expect(result.isError).toBe(fixture.isError)
+      if (fixture.isError) {
+        expect(result.content).toEqual([{ type: 'text', text: expect.stringContaining(fixture.text) }])
+      } else {
+        expect(result.content).toEqual([{ type: 'text', text: fixture.text }])
+      }
+    })
+  }
 })
 
 describe('interpretSinkToolResponse — a dispatched call is unchanged', () => {
