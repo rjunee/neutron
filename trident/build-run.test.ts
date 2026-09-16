@@ -1390,7 +1390,7 @@ for (const status of ['green', 'red', 'unobserved', 'lost-after-panel'] as const
         },
       },
       suite: { strategy: 'bun test', scope: 'full-suite', readCheckpoint: async (snapshot, round) => ({
-        runId: 'run', head: snapshot.head, round, report: { testsPassed: true, suiteOutcome: 'passed' },
+        runId: 'run', head: snapshot.head, round, report: { hostExitCode: 0, suiteOutcome: 'passed' },
       }) },
     })
     f.deps.reviewReadiness = (snapshot, signal) => awaitReviewReadiness(sources.reviewReadiness, snapshot, signal)

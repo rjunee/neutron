@@ -18,8 +18,8 @@ export interface SuiteObservation {
   /** Read from host configuration and the dispatched task, never the report. */
   strategy: string
   scope: 'full-suite' | 'subset'
-  /** Independently read build/fix checkpoint for this revision. Still an untrusted claim. */
-  report: { testsPassed?: boolean; suiteOutcome?: string; suiteEvidence?: string } | null
+  /** Host-observed suite exit plus untrusted diagnostic detail from the build/fix checkpoint. */
+  report: { hostExitCode?: number; suiteOutcome?: string; suiteEvidence?: string } | null
 }
 export interface ReviewSuiteSource {
   observe(snapshot: BuildSnapshot, round: number): Promise<SuiteObservation | { kind: 'unknown'; detail: string }>
@@ -28,7 +28,7 @@ const known = (findings: readonly SuiteFinding[] = []): SuiteAssessment => ({ ki
 const unknown = (detail: string): SuiteAssessment => ({ kind: 'unknown', detail })
 const blocker = (title: string, evidence: string): SuiteAssessment => known([{ title, evidence, advisory: false }])
 
-/** G063–G065: classify the recorded claim, without treating its transcription as verified tests. */
+/** G063–G065: classify the host receipt, using checkpoint detail only for diagnostics. */
 export async function assessReviewSuite(source: ReviewSuiteSource | undefined, snapshot: BuildSnapshot, round: number, runId: string): Promise<SuiteAssessment> {
   if (!source) return unknown('Review suite observation source is missing')
   try {
@@ -38,9 +38,9 @@ export async function assessReviewSuite(source: ReviewSuiteSource | undefined, s
     if (typeof value.strategy !== 'string' || !['full-suite', 'subset'].includes(value.scope)) return unknown('Review suite strategy or dispatched scope is unreadable')
     if (value.strategy === '') return known()
     const report = value.report
-    if (report && ((report.testsPassed !== undefined && typeof report.testsPassed !== 'boolean') || (report.suiteOutcome !== undefined && typeof report.suiteOutcome !== 'string') || (report.suiteEvidence !== undefined && typeof report.suiteEvidence !== 'string'))) return unknown('Review suite report is malformed')
-    if (report?.testsPassed === true && typeof report.suiteOutcome === 'string' && report.suiteOutcome !== 'passed') return blocker('CONTRADICTORY SUITE CLAIM', 'testsPassed=true requires a passed suite outcome')
-    if (report?.testsPassed === true) return known()
+    if (!report || typeof report.hostExitCode !== 'number' || !Number.isInteger(report.hostExitCode)) return unknown('Host-observed review suite exit code is missing or unreadable')
+    if ((report.suiteOutcome !== undefined && typeof report.suiteOutcome !== 'string') || (report.suiteEvidence !== undefined && typeof report.suiteEvidence !== 'string')) return unknown('Review suite report is malformed')
+    if (report.hostExitCode === 0) return known()
     if (report?.suiteOutcome === 'deferred' && value.scope === 'subset') return known()
     const evidence = typeof report?.suiteEvidence === 'string' ? report.suiteEvidence.trim() : ''
     if (report?.suiteOutcome === 'failed-preexisting') {
