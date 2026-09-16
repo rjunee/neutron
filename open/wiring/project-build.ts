@@ -1,3 +1,4 @@
+import { spawnCapture } from '@neutronai/trident/git-mode.ts'
 import { runWorktreePath } from '@neutronai/trident/merge.ts'
 import { mkdir, readFile, writeFile, lstat } from 'node:fs/promises'
 import { join, resolve } from 'node:path'
@@ -53,6 +54,9 @@ export interface ProjectBuildContext {
   store: ProjectBuildHostOptions['production']['store']
   phaseUsage: ProjectBuildHostOptions['phaseUsage']
   runHost: ProjectBuildHostOptions['production']['runHost']
+  /** Test seam for suite execution. Production uses plain spawnCapture, without
+   * the GitHub environment loaded by the publication runner. */
+  runSuite?: ProjectBuildHostOptions['production']['runHost']
   stateRoot: string
   projectDir: string
   projectId: string
@@ -345,7 +349,7 @@ export async function prepareProjectBuild(input: InnerLoopInput, context: Projec
             const command = fullSuiteCommand(input.test_strategy)
             if (!command) return { runId: run.id, head: snapshot.head, round, report: null }
             const logPath = join(state, `suite-round-${round}.log`)
-            const observed = await context.runHost(['bash', '-lc', suiteScript(command, logPath)], run.worktree, undefined, REVIEW_SUITE_TIMEOUT_MS)
+            const observed = await (context.runSuite ?? spawnCapture)(['bash', '-lc', suiteScript(command, logPath)], run.worktree, undefined, REVIEW_SUITE_TIMEOUT_MS)
             // A shell that could not open the transcript never ran the suite; its
             // exit code is about the redirect, not about the tests. `unknown`, not red.
             const unopenable = observed.stdout.trimStart().startsWith(SUITE_LOG_UNAVAILABLE)

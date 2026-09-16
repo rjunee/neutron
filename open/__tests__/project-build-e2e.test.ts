@@ -521,7 +521,7 @@ async function fixture(options: { ralph?: boolean; moreTasks?: boolean; suiteExi
   }
 
   const context: ProjectBuildContext = {
-    store, phaseUsage: new TridentPhaseUsageStore(db), runHost,
+    store, phaseUsage: new TridentPhaseUsageStore(db), runHost, runSuite: runHost,
     stateRoot: join(dir, 'state'), projectDir: dir, projectId: 'e2e-project',
     provider: 'anthropic', providerSource: 'application', env: {},
     spawnProjectSession: async () => {
