@@ -434,3 +434,48 @@ test('the host suite observation is given a budget far larger than the 60s host 
   expect(typeof budgets[0]).toBe('number')
   expect(budgets[0]!).toBeGreaterThan(60_000)
 })
+
+// THE SUITE COMMAND MUST PARSE OUT OF THE STRATEGY THE GENERATOR ACTUALLY EMITS.
+//
+// The marker sentence WRAPS when the project has a jobs knob: `test-strategy.ts`
+// emits "…run exactly this — the export lines FIRST, on their own lines, so a" /
+// "compound test command inherits them:" and only then the indented block. The
+// parser used to break on that unindented second line, return null, and
+// `readCheckpoint` then reported `report: null` — which G063 answers as `unknown`.
+// `unknown` is fail-closed, so on any project WITH a jobs knob (this repo included)
+// no card could reach `merged`.
+//
+// Both shapes are asserted, and the plain one is the positive control: if the
+// parser broke entirely, the control would fail too and this would not look like a
+// knob-specific fix.
+test('the full-suite command parses from both the plain and the wrapped generator shapes', async () => {
+  const f = await fixture()
+  const knobStrategy = [
+    'TEST EXECUTION', '',
+    'Full suite (stage 2), run exactly this — the export lines FIRST, on their own lines, so a',
+    'compound test command inherits them:', '',
+    '  export BUN_JOBS=4',
+    '  bun test', '',
+    'The runner honours BUN_JOBS (found by static scan).',
+  ].join('\n')
+  f.input.test_strategy = knobStrategy
+  const options = await f.prepare()
+  const head = 'a'.repeat(40)
+  const payload = {
+    mutationClaim: { file: 'guard.ts', find: 'before', replace: 'after', guard: ['bun', 'test'], control: ['bun', 'test'] },
+    worktreePath: options.production.worktree, branch: 'change', commitSha: head,
+    prNumber: null, diffFile: 'diff', testsPassed: true,
+  }
+  await writeFile(options.workers.build.request.result.path, JSON.stringify({ result: { head, payload } }))
+  const seen: string[] = []
+  const host = f.context.runHost
+  f.context.runHost = async (argv, cwd, env, timeoutMs) => {
+    if (argv[0] === 'bash') { seen.push(argv[2]!); return { ok: true, exit_code: 0, stdout: '', stderr: '' } }
+    return host(argv, cwd, env, timeoutMs)
+  }
+  // The wrapped shape yields the commands, INCLUDING the export line that the knob
+  // render exists to deliver — dropping it would silently unset the job budget.
+  expect((await options.policy.reviewSuite!.readCheckpoint({ head, diff: '', pr: null }, 1))?.report)
+    .toMatchObject({ hostExitCode: 0 })
+  expect(seen).toEqual(['export BUN_JOBS=4\nbun test'])
+})
