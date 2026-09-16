@@ -178,7 +178,7 @@ type Settled = { ok: true; value: ReplSession } | { ok: false; error: unknown }
  */
 async function evictWithReplacementMidAwait(
   options: PersistentReplSubstrateOptions,
-  sessionOpts: { poisoned?: boolean; exited?: boolean } = {},
+  sessionOpts: Parameters<typeof warmSession>[0] = {},
   /** The session the concurrent turn's entry resolves to. Defaults to one that satisfies this
    *  request, so the re-entering loser reuses it. */
   winner: ReplSession = winnerSession(),
@@ -305,6 +305,25 @@ describe('an eviction deletes only the entry it resolved through', () => {
  * that any arriving turn asks of any pooled candidate.
  */
 describe('a turn that loses the pool is still subject to the reuse guards', () => {
+  it('re-enters after credential-freshness eviction and reuses the concurrent winner', async () => {
+    // Match the requested tool surface so credential freshness is the sole refusal that sends
+    // this turn through eviction. `warmSession` stamps a deliberately stale fingerprint, while
+    // the concurrently published winner carries the empty fingerprint these options request.
+    const winner = winnerSession()
+    const { returned, pooledAfter, replacement } = await evictWithReplacementMidAwait(
+      optionsFor(),
+      { surface: 'Write' },
+      winner,
+    )
+
+    // The helper's original warm promise resolves after the concurrent winner is published;
+    // the surface override above makes that original warm session stale on credentials alone.
+    // The assertions below prove the old lock's outcome: the loser neither overwrites nor
+    // duplicates the winner, and returns only after the winner passes the reuse guards.
+    expect(returned).toEqual({ ok: true, value: winner })
+    expect(pooledAfter).toBe(replacement)
+  })
+
   it('is not handed a winner whose tool surface it never asked for', async () => {
     // The winner here is a `Read,Bash` session, and the request is for `Write`.
     const mismatched = warmSession({ surface: 'Read,Bash', generation: 'gen-r58-mismatch' })
