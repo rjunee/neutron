@@ -387,3 +387,46 @@ test('each role carries its own wall budget, and a builder gets room for two sui
   expect(walls.build).toBe(walls.fix)
   expect(walls.build).toBeGreaterThan(walls.plan)
 })
+
+// THE HOST'S SUITE RUN MUST CARRY ITS OWN WATCHDOG, NOT THE 60-SECOND DEFAULT.
+//
+// `runHost` defaults to DEFAULT_HOST_COMMAND_TIMEOUT_MS = 60_000, which suits the
+// git/gh calls it was written for. The suite call passed no budget, so the host's
+// own suite run was killed at 60s, `timed_out` was always true, the exit receipt
+// was always omitted, and G063 answered `unknown` for EVERY card. `unknown` is
+// fail-closed, so no dispatched card could reach `merged` — the gate was
+// unanswerable by construction.
+//
+// Measured on this repo: one directory of the persistent adapter suite alone takes
+// 81s, and acceptance run 5a69ae54's full run-tests.sh was still going at 11
+// minutes. This asserts the budget EXCEEDS the default rather than pinning 45
+// minutes exactly, because the claim is "long enough for a real suite", and it
+// asserts the argument is actually PRESENT — an omitted 4th argument is precisely
+// the bug, and `toBeGreaterThan(undefined)` would throw rather than fail clearly.
+test('the host suite observation is given a budget far larger than the 60s host default', async () => {
+  const f = await fixture()
+  // Without a resolvable full-suite command there is no bash call to budget at all.
+  f.input.test_strategy = 'TEST EXECUTION\n\nFull suite (stage 2), run exactly this:\n\n  bun test\n\nSTAGE 2 — the full suite, REQUIRED.'
+  const options = await f.prepare()
+  const head = 'a'.repeat(40)
+  const payload = {
+    mutationClaim: { file: 'guard.ts', find: 'before', replace: 'after', guard: ['bun', 'test'], control: ['bun', 'test'] },
+    worktreePath: options.production.worktree, branch: 'change', commitSha: head,
+    prNumber: null, diffFile: 'diff', testsPassed: true,
+  }
+  await writeFile(options.workers.build.request.result.path, JSON.stringify({ result: { head, payload } }))
+  const budgets: Array<number | undefined> = []
+  const host = f.context.runHost
+  f.context.runHost = async (argv, cwd, env, timeoutMs) => {
+    if (argv[0] === 'bash') {
+      budgets.push(timeoutMs)
+      return { ok: true, exit_code: 0, stdout: '', stderr: '' }
+    }
+    return host(argv, cwd, env, timeoutMs)
+  }
+  const observed = await options.policy.reviewSuite!.readCheckpoint({ head, diff: '', pr: null }, 1)
+  expect(observed?.report).toMatchObject({ hostExitCode: 0 })
+  expect(budgets).toHaveLength(1)
+  expect(typeof budgets[0]).toBe('number')
+  expect(budgets[0]!).toBeGreaterThan(60_000)
+})
