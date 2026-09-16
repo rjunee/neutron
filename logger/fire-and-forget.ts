@@ -137,6 +137,25 @@ export function fireAndForget(
 }
 
 /**
+ * Invoke a caller-supplied logging callback without letting either a synchronous
+ * throw or an asynchronous rejection change the operation being reported.
+ * Callback failures join the normal fire-and-forget rejection vocabulary, so
+ * the process-owned logger and counter observe them without calling the broken
+ * callback again.
+ */
+export function invokeInjectedLogger(
+  name: string,
+  log: (message: string) => unknown,
+  message: string,
+): void {
+  try {
+    fireAndForget(name, Promise.resolve(log(message)))
+  } catch (err) {
+    fireAndForget(name, Promise.reject(err))
+  }
+}
+
+/**
  * Invoke a best-effort `onError` callback so it can NEVER break the safety path:
  * a SYNC throw is caught, and — because `onError` may be `async` (returning a
  * promise even against a `void`-return-typed slot) — a returned thenable's
