@@ -178,3 +178,18 @@ describe('a pane that is quiet when we adopt it', () => {
     expect(child.keysSent).toEqual([['1', 'enter']])
   })
 })
+
+describe('an attached pane whose screen cannot be observed', () => {
+  it.each([{ screens: [] as string[] }, { screens: ['   '] }])('refuses adoption without a readable screen: %j', async ({ screens }) => {
+    const { options, host } = fixtureWithScreens([...screens])
+    const outcome = await reconcileOwnRepl(options, KEY, {
+      host,
+      health: async () => true,
+      baselineMs: 1,
+      log: () => {},
+    })
+    expect(outcome.kind).toBe('closed-unadoptable')
+    expect(host.closed).toEqual([HANDLE])
+    expect(pool.has(KEY)).toBe(false)
+  })
+})

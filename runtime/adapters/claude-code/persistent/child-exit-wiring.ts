@@ -64,7 +64,7 @@ export function wireChildExit(args: ChildExitWiring): void {
   fireAndForget(
     args.label,
     child.exited.then(async (exitCode) => {
-      session.onDeath()
+      session.onDeath(child.exitCause?.())
       // Detach the row-#11 dead-turn JSONL watcher — this child's transcript is now
       // terminal; a respawn starts a fresh watcher for the new child.
       session.deadTurnWatcher?.stop()

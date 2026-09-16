@@ -24,6 +24,8 @@ const ALL_CLASSES: readonly SubstrateErrorClass[] = [
   'binary_not_found',
   'channel_wedged',
   'turn_timeout',
+  'compose_timeout',
+  'pane_vanished',
   'auth_invalid',
   'http_status',
   'rate_limited',
@@ -146,6 +148,18 @@ describe('collectTokensToString — typed error surfacing', () => {
 })
 
 describe('collectTokensToString — abort paths carry the typed `aborted` class', () => {
+  test('a composition deadline carries a distinct class and message', async () => {
+    const ac = new AbortController()
+    ac.abort()
+    const e = (await collectTokensToString(fakeHandle([]), ac.signal, undefined, undefined, {
+      code: 'compose_timeout',
+      message: 'cc-llm-call: compose timeout',
+    }).catch((x: unknown) => x)) as SubstrateCallError
+    expect(e.code).toBe('compose_timeout')
+    expect(e.retryable).toBe(true)
+    expect(e.message).toBe('cc-llm-call: compose timeout')
+  })
+
   test('pre-fired signal → SubstrateCallError{code:aborted}, message preserved', async () => {
     const ac = new AbortController()
     ac.abort()

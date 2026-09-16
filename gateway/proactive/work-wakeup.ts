@@ -95,6 +95,7 @@
  * outcome.
  */
 
+import { SubstrateCallError } from '@neutronai/runtime/errors.ts'
 import type { RunDrivingReason } from '@neutronai/trident/run-driving.ts'
 import type { AgentSpec } from '@neutronai/runtime/substrate.ts'
 import type { ToolDef } from '@neutronai/cores-sdk/manifest'
@@ -367,6 +368,7 @@ export interface WakeupSweepResult {
   woke: number
   skipped_active: number
   failed: number
+  failed_by_reason: Record<string, number>
   /** Turns abandoned after the inactivity window with no measured progress. */
   failed_no_progress: number
   /** Turns abandoned at the absolute wall-clock backstop. */
@@ -553,6 +555,9 @@ export async function runWorkWakeupSweep(
   const now = deps.now ?? ((): number => Date.now())
   const grace = deps.owner_grace_ms ?? WORK_WAKEUP_OWNER_GRACE_MS
   const turn_timeout = deps.turn_timeout_ms ?? WORK_WAKEUP_TURN_TIMEOUT_MS
+  const interval = deps.interval_ms ?? WORK_WAKEUP_INTERVAL_MS
+  const first_timeout = Math.min(turn_timeout, interval * 0.8)
+  const retry_timeout = Math.min(turn_timeout, interval * 0.1)
   const turn_absolute_ceiling =
     deps.turn_absolute_ceiling_ms ?? WORK_WAKEUP_TURN_ABSOLUTE_CEILING_MS
   const result: WakeupSweepResult = {
@@ -560,6 +565,7 @@ export async function runWorkWakeupSweep(
     woke: 0,
     skipped_active: 0,
     failed: 0,
+    failed_by_reason: {},
     failed_no_progress: 0,
     failed_budget_ceiling: 0,
     deferred_to_run: 0,
@@ -745,7 +751,7 @@ export async function runWorkWakeupSweep(
       tools,
       model_preference: [deps.resolveModel()],
       max_tokens: WORK_WAKEUP_MAX_TOKENS,
-      turn_timeout_ms: turn_timeout,
+      turn_timeout_ms: first_timeout,
       turn_absolute_ceiling_ms: turn_absolute_ceiling,
       // The warm-pool key — what lands this turn ON the owner's chat session
       // for this project rather than a parallel one.
@@ -754,11 +760,26 @@ export async function runWorkWakeupSweep(
 
     let reply: string
     const turnStartedAt = now()
+    let attemptCeilingAt = turnStartedAt + turn_absolute_ceiling
     try {
       // The collector is bounded by the absolute ceiling. The shorter timeout is
       // carried on AgentSpec, where the REPL interprets it as INACTIVITY and can
       // extend a demonstrably working turn.
-      reply = (await deps.llm.compose(spec, { timeout_ms: turn_absolute_ceiling })).trim()
+      try {
+        reply = (await deps.llm.compose(spec, { timeout_ms: turn_absolute_ceiling })).trim()
+      } catch (firstErr) {
+        // Progress may exceed the cadence; recovery may not. A late loss waits
+        // for the next sweep instead of extending an already overdue tick.
+        if (!(firstErr instanceof SubstrateCallError) || firstErr.code !== 'pane_vanished' ||
+            now() - turnStartedAt > first_timeout) throw firstErr
+        attemptCeilingAt = now() + Math.min(retry_timeout, turn_absolute_ceiling)
+        log.warn('wakeup_retry_fresh_pane', { project: project.project_key })
+        reply = (await deps.llm.compose({
+          ...spec,
+          turn_timeout_ms: retry_timeout,
+          turn_absolute_ceiling_ms: Math.min(retry_timeout, turn_absolute_ceiling),
+        }, { timeout_ms: Math.min(retry_timeout, turn_absolute_ceiling) })).trim()
+      }
       if (reply.length === 0) throw new Error('the wakeup turn returned an empty reply')
     } catch (err) {
       const reason = err instanceof Error ? err.message : String(err)
@@ -769,12 +790,14 @@ export async function runWorkWakeupSweep(
         typeof err === 'object' && err !== null && 'code' in err && typeof err.code === 'string'
           ? err.code
           : undefined
+      const failureReason = code ?? 'unknown'
+      result.failed_by_reason[failureReason] = (result.failed_by_reason[failureReason] ?? 0) + 1
       const dropped_work_ms = Math.max(0, now() - turnStartedAt)
       // The substrate and collector share the same absolute deadline, so either
       // may win that race. Elapsed time disambiguates a substrate `turn_timeout`
       // at the ceiling from the same code emitted by the shorter inactivity gate.
-      const reachedCeiling = dropped_work_ms >= turn_absolute_ceiling
-      const failure_kind = code === 'aborted' || (code === 'turn_timeout' && reachedCeiling)
+      const reachedCeiling = now() >= attemptCeilingAt
+      const failure_kind = code === 'compose_timeout' || (code === 'turn_timeout' && reachedCeiling)
         ? 'budget_ceiling'
         : code === 'turn_timeout'
           ? 'no_progress'
@@ -880,6 +903,7 @@ export function buildWorkWakeupLoop(deps: WorkWakeupDeps): WorkWakeupLoop {
           unavailable: result.unavailable,
           woke: result.woke,
           failed: result.failed,
+          failed_by_reason: JSON.stringify(result.failed_by_reason),
           failed_no_progress: result.failed_no_progress,
           failed_budget_ceiling: result.failed_budget_ceiling,
           deferred_to_run: result.deferred_to_run,

@@ -98,6 +98,7 @@ branch is cut (standard §3.1, §3.2).
 | [`configured-models-for-review-and-chat`](configured-models-for-review-and-chat.md) | Configure models once for review and project chat | P1 | — |
 | [`instance-project-provider-resolution`](instance-project-provider-resolution.md) | Resolve the model provider per instance and project | P1 | — |
 | [`live-agent-turn-must-know-the-owner-timezone`](live-agent-turn-must-know-the-owner-timezone.md) | Give the live agent turn the owner's timezone and local time | P1 | — |
+| [`observable-pane-adoption`](observable-pane-adoption.md) | Require observable pane adoption and bounded pane-loss recovery | P1 | — |
 | [`project-code-repos-and-vault-split`](project-code-repos-and-vault-split.md) | Split a project into declared code repos and a versioned vault | P1 | — |
 | [`owner-installable-mcp-servers`](owner-installable-mcp-servers.md) | Owner-installable MCP servers | P2 | yes |
 | [`per-project-context-for-agent-tools`](per-project-context-for-agent-tools.md) | Scope agent tool state to the active project everywhere | P2 | — · needs-spec |

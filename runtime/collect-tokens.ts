@@ -20,7 +20,7 @@
  * (the reminders / live-agent callers pass a signal and expect the turn abandoned).
  */
 
-import type { Event } from './events.ts'
+import type { Event, SubstrateErrorClass } from './events.ts'
 import type { SessionHandle } from './session-handle.ts'
 import { drainToText } from './substrate-text.ts'
 
@@ -34,7 +34,8 @@ import { drainToText } from './substrate-text.ts'
  * AgentWatcherLlmCall).
  *
  * If a `signal: AbortSignal` is supplied, the handle is cancelled when it fires
- * and a `SubstrateCallError('cc-llm-call: aborted', code:'aborted')` is thrown.
+ * and a `SubstrateCallError('cc-llm-call: aborted', code:'aborted')` is thrown
+ * by default. Callers with their own deadline may override that typed cause.
  *
  * `onFirstToken` (FIX #347) is invoked once, the moment the FIRST reply token
  * arrives — lets a caller cancel the delayed cold-start "Waking up…" ack as soon
@@ -51,14 +52,16 @@ export async function collectTokensToString(
   signal?: AbortSignal,
   onFirstToken?: () => void,
   onEvent?: (ev: Event) => void,
+  abort?: { code: SubstrateErrorClass; message: string; beforeDispatchMessage?: string },
 ): Promise<string> {
   return drainToText(handle, {
     ...(signal !== undefined ? { signal } : {}),
     ...(onFirstToken !== undefined ? { onFirstToken } : {}),
     ...(onEvent !== undefined ? { onEvent } : {}),
     errorPrefix: 'cc-llm-call: ',
-    abortMessage: 'cc-llm-call: aborted',
-    abortBeforeDispatchMessage: 'cc-llm-call: aborted before dispatch',
+    abortMessage: abort?.message ?? 'cc-llm-call: aborted',
+    abortBeforeDispatchMessage: abort?.beforeDispatchMessage ?? abort?.message ?? 'cc-llm-call: aborted before dispatch',
+    ...(abort !== undefined ? { abortCode: abort.code } : {}),
     // Preserve the pre-O8 watchdog: a fired signal cancels the handle so the turn
     // is actually abandoned (the reminders / live-agent callers rely on this).
     keepAliveExempt: true,
