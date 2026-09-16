@@ -45,6 +45,13 @@
  *   - NEUTRON_BUN_BIN     which `bun` the runner + the scripts/ci guard tests
  *                         invoke; scrubbed, a non-default toolchain silently
  *                         becomes bare `bun`.
+ *   - NEUTRON_REPL_HOST   the ONLY way `configured-pty-host.test.ts` can cover
+ *                         both PTY transports. It spawns a child `bun test` per
+ *                         transport with the var set, and the child runs THIS
+ *                         preload — so scrubbing it deleted the parameter and
+ *                         both arms silently ran the same host. The `bun` arm
+ *                         had never executed; it was a false green, found when
+ *                         the test-runner default changed underneath it.
  * None of them names a database, a home, an identity or a credential, so
  * keeping them cannot reach the live instance. Add to this list only vars with
  * that same property.
@@ -82,7 +89,7 @@ import { join } from 'node:path'
 /** Harness namespaces that survive the scrub — see the header for each. */
 const KEEP_PREFIXES = ['NEUTRON_TEST_']
 /** Individual harness/opt-in vars that survive the scrub. */
-const KEEP_EXACT = new Set(['NEUTRON_PTY_E2E', 'NEUTRON_E2E_NETWORK', 'NEUTRON_BUN_BIN'])
+const KEEP_EXACT = new Set(['NEUTRON_PTY_E2E', 'NEUTRON_E2E_NETWORK', 'NEUTRON_BUN_BIN', 'NEUTRON_REPL_HOST'])
 
 function isHarnessVar(key: string): boolean {
   return KEEP_EXACT.has(key) || KEEP_PREFIXES.some((prefix) => key.startsWith(prefix))

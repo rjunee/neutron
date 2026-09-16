@@ -21,6 +21,7 @@
 import { describe, it, expect, afterEach, spyOn } from 'bun:test'
 import { herdrHost } from '../herdr-host.ts'
 import { bunTerminalHost } from '../bun-terminal-host.ts'
+import { configuredPtyHost } from '../configured-pty-host.ts'
 import type { AgentSpec } from '../../../../substrate.ts'
 import type { SessionHandle } from '../../../../session-handle.ts'
 import type { Event } from '../../../../events.ts'
@@ -1132,7 +1133,13 @@ describe('a malformed error STAMP cannot crash the error path (#539 r43)', () =>
 
 // Run in separate processes with NEUTRON_REPL_HOST=herdr and =bun.
 it('configured production host carries a complete REPL turn', async () => {
-  const selected = process.env['NEUTRON_REPL_HOST'] === 'bun' ? bunTerminalHost : herdrHost
+  // Read the host the module ACTUALLY bound, rather than re-deriving it from the
+  // environment. The re-derivation was a second copy of the selection rule, and a
+  // copy can disagree with the original: `NEUTRON_REPL_HOST` is scrubbed by the
+  // test preload, so both parameterised runs saw `undefined` and this case only
+  // ever exercised ONE host — the `bun` arm had never run. Asking
+  // `configuredPtyHost` cannot drift from what production does.
+  const selected = configuredPtyHost === bunTerminalHost ? bunTerminalHost : herdrHost
   const other = selected === bunTerminalHost ? herdrHost : bunTerminalHost
   const fake = makeFakeReplHost((_history, incoming) => `selected:${incoming}`)
   const used = spyOn(selected, 'spawn').mockImplementation(fake.host.spawn)
