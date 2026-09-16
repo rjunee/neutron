@@ -333,7 +333,7 @@ export async function prepareLaunch(
     const oid = resolved.stdout.trim().toLowerCase()
     if (resolved.ok && /^(?:[0-9a-f]{40}|[0-9a-f]{64})$/.test(oid)) base_sha = oid
   }
-  const pinnedRun = freshBuild ? { ...launchRun, base_sha, base_behind } : launchRun
+  let pinnedRun = freshBuild ? { ...launchRun, base_sha, base_behind } : launchRun
 
   // THE LOCAL-BRANCH OWNERSHIP CHECK RUNS FOR EVERY ROW THAT HAS NOT FIRED, not
   // only for `freshLaunch` ones (Argus r3 blocker). It used to be gated on
@@ -569,6 +569,28 @@ export async function prepareLaunch(
           waiting: false,
           note: `${launchRun.phase} → failed (ancestry probe UNKNOWN — no fire)`,
         }
+      }
+      // A fresh launch can find the branch left by an earlier dispatch. When that tip is
+      // contained in the newly fetched base, the ancestry proof above also proves that the
+      // branch tip is their merge-base. Adopt the branch's real pin instead of claiming it
+      // was cut from today's base tip, and measure how far that same pin is behind today's
+      // fetched base. The no-branch path keeps the fetched tip pinned as before.
+      if (contained === 'yes' && freshBuild && launchRun.merge_mode === 'pr') {
+        const fetchedBaseSha = base_sha
+        const behind = await opts.run_host(
+          gitRangeArgv({
+            repo_path: launchRun.repo_path,
+            subcommand: 'rev-list',
+            flags: ['--count'],
+            base: branchTip,
+            head: fetchedBaseSha,
+          }),
+          launchRun.repo_path,
+        )
+        const count = Number.parseInt(behind.stdout.trim(), 10)
+        base_sha = branchTip
+        base_behind = behind.ok && Number.isFinite(count) ? count : null
+        pinnedRun = { ...launchRun, base_sha, base_behind }
       }
       let ownCrashLeftover = false
       if (contained === 'no' && priorBaseSha !== null) {

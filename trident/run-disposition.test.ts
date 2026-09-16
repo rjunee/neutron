@@ -251,7 +251,7 @@ describe('builtButNeverReviewedSeed — what may be handed to the next dispatch'
     // `launch()` re-pins only on a FRESH build (`inner_checkpoint === null &&
     // base_sha === null`), and a seeded checkpoint makes that false. So a seed
     // carrying a null pin would create a row pinned NEVER — and the publish-time
-    // "branch does not contain the origin/<base> tip pinned at launch" refusal is
+    // "branch does not contain its recorded launch base" refusal is
     // gated on `base_sha !== null`, so it could not fire for that run or for any
     // re-seed chained off it. A legacy/unpinned prior row therefore seeds nothing
     // and falls through to the fresh dispatch that DOES pin, which is exactly the
