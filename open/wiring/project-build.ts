@@ -50,6 +50,10 @@ const WALL_MS: Record<'plan' | 'build' | 'review' | 'fix', number> = {
   fix: 90 * 60_000,
 }
 
+// Cold session acquisition has its own deadline, independent of the worker wall.
+// Match the conversational prewarm allowance; a stuck prewarm cannot clear this timer.
+export const PROJECT_SESSION_ACQUIRE_TIMEOUT_MS = 35_000
+
 export interface ProjectBuildContext {
   store: ProjectBuildHostOptions['production']['store']
   phaseUsage: ProjectBuildHostOptions['phaseUsage']
@@ -219,8 +223,18 @@ export async function prepareProjectBuild(input: InnerLoopInput, context: Projec
         ? await candidatePending
         : undefined
       if (candidateSession === undefined || candidateSession.hasChildExited()) {
-        try { await context.spawnProjectSession(context.projectId) }
+        let timer: ReturnType<typeof setTimeout> | undefined
+        try {
+          const expired = new Promise<true>(resolve => {
+            timer = setTimeout(() => resolve(true), PROJECT_SESSION_ACQUIRE_TIMEOUT_MS)
+          })
+          const timedOut = await Promise.race([
+            context.spawnProjectSession(context.projectId).then(() => false), expired,
+          ])
+          if (timedOut) return { kind: 'unknown', detail: 'Project conversation session acquisition timed out' }
+        }
         catch { return { kind: 'unknown', detail: 'Project conversation session could not be started' } }
+        finally { clearTimeout(timer) }
         candidates = [...supervisedBySessionKey].filter(([, options]) =>
           options.project_id === context.projectId && options.substrate_instance_id.startsWith('cc-agent-'))
       }
