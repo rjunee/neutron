@@ -23,6 +23,7 @@ import { tmpdir } from 'node:os'
 import { join } from 'node:path'
 import { fileURLToPath } from 'node:url'
 import { spawnSync } from 'node:child_process'
+import { PROJECT_BUILD_WALL_MS } from './project-build-budget.ts'
 
 import {
   buildTestStrategy,
@@ -650,12 +651,15 @@ describe('renderTestStrategy', () => {
     expect(knobBranch).toContain('A green stage 1 buys you nothing except the right to start stage 2.')
   })
 
-  test('the hang budget is RECONCILED with the round ceiling, not just generous', () => {
-    // 40 minutes for one suite run could not fit inside the codex bridge's 45-minute
-    // polling ceiling alongside edit + stage 1 + fix + re-run.
-    expect(NO_TIMEOUT_WRAPPER).toContain('25 minutes')
-    expect(NO_TIMEOUT_WRAPPER).toContain('45-minute ceiling')
-    expect(NO_TIMEOUT_WRAPPER).not.toContain('40 minutes')
+  test('the rendered timeout prose derives both builder ceilings from the enforced walls', () => {
+    const buildMinutes = PROJECT_BUILD_WALL_MS.build / 60_000
+    const fixMinutes = PROJECT_BUILD_WALL_MS.fix / 60_000
+    expect(buildMinutes).toBe(90)
+    expect(fixMinutes).toBe(90)
+    expect(NO_TIMEOUT_WRAPPER).toContain(`build round has a ${buildMinutes}-minute ceiling`)
+    expect(NO_TIMEOUT_WRAPPER).toContain(`fix round has a ${fixMinutes}-minute ceiling`)
+    expect(NO_TIMEOUT_WRAPPER).not.toContain('25 minutes')
+    expect(NO_TIMEOUT_WRAPPER).not.toContain('45-minute ceiling')
     // Still emphatically not the 590 s cap that killed complete runs.
     expect(NO_TIMEOUT_WRAPPER).toContain('590 s')
     // Running out of patience is reported as a non-pass, never as a pass.
