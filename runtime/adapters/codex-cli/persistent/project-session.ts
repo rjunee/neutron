@@ -1,5 +1,5 @@
-import { readFileSync } from 'node:fs'
-import { basename } from 'node:path'
+import { closeSync, openSync, readFileSync, readSync, realpathSync } from 'node:fs'
+import { resolve } from 'node:path'
 import { atomicWriteFileSync } from '../../../atomic-write.ts'
 import { HerdrHost } from '../../claude-code/persistent/herdr-host.ts'
 import type {
@@ -14,6 +14,7 @@ interface RegistryEntry {
   readonly project_id: string
   readonly pane_handle: string
   readonly argv: readonly string[]
+  readonly identity?: readonly string[]
 }
 
 interface RegistryFile {
@@ -60,8 +61,42 @@ function sameArgv(left: readonly string[], right: readonly string[]): boolean {
   return left.length === right.length && left.every((part, index) => part === right[index])
 }
 
-function isCodexArgv(argv: readonly string[], expected: readonly string[]): boolean {
-  return argv.length > 0 && basename(argv[0] ?? '') === basename(expected[0] ?? '') && sameArgv(argv, expected)
+/** Canonical exec vector: real executable, real script (for a shebang), arguments. */
+function resolveIdentity(argv: readonly string[], options: OpenCodexProjectSessionOptions): string[] {
+  const executable = (name: string): string => {
+    const path = name.includes('/') ? resolve(options.cwd, name)
+      : Bun.which(name, { PATH: options.env.PATH ?? process.env.PATH ?? '', cwd: options.cwd })
+    if (!path) throw new Error('executable unavailable')
+    return realpathSync(path)
+  }
+  const program = executable(argv[0] ?? '')
+  const fd = openSync(program, 'r')
+  const header = Buffer.alloc(256)
+  let size: number
+  try { size = readSync(fd, header, 0, header.length, 0) } finally { closeSync(fd) }
+  const firstLine = header.subarray(0, size).toString().split('\n')[0] ?? ''
+  if (firstLine.startsWith('#!')) {
+    const words = firstLine.slice(2).trim().split(/\s+/)
+    // env is a launcher, not the process identity left after exec.
+    const command = words[0] === '/usr/bin/env' ? words.slice(1) : words
+    if (command.length !== 1) throw new Error('unsupported executable shebang')
+    return [executable(command[0]!), program, ...argv.slice(1)]
+  }
+  // Resolve a script operand without guessing interpreter or script basenames.
+  let args = argv.slice(1)
+  if (args[0] && !args[0].startsWith('-')) {
+    args = [realpathSync(resolve(options.cwd, args[0])), ...args.slice(1)]
+  }
+  return [program, ...args]
+}
+
+function matchesIdentity(argv: readonly string[], expected: readonly string[] | undefined,
+  options: OpenCodexProjectSessionOptions): boolean {
+  try {
+    return expected !== undefined && sameArgv(resolveIdentity(argv, options), expected)
+  } catch {
+    return false
+  }
 }
 
 export class CodexProjectSession {
@@ -141,6 +176,10 @@ export class CodexProjectSessionHost {
   private async openOne(options: OpenCodexProjectSessionOptions): Promise<CodexProjectSession> {
     const argv = [this.bin, '--enable', 'multi_agent_v2']
     if (options.model !== undefined) argv.push('--model', options.model)
+    let identity: string[]
+    try { identity = resolveIdentity(argv, options) } catch {
+      throw new Error('codex project session refused: launch identity cannot be resolved')
+    }
     const spawnOptions: PtySpawnOpts = {
       cwd: options.cwd,
       env: options.env,
@@ -158,17 +197,18 @@ export class CodexProjectSessionHost {
         throw new Error(`codex project session recovery unknown: ${inspection.reason}`)
       }
       if (inspection.kind === 'live') {
-        if (!isCodexArgv(inspection.argv, recorded.argv) || !sameArgv(recorded.argv, argv)) {
+        if (!matchesIdentity(inspection.argv, recorded.identity, options) || !sameArgv(recorded.argv, argv)
+          || (recorded.identity !== undefined && !sameArgv(recorded.identity, identity))) {
           throw new Error('codex project session refused: recorded pane identity does not match this project session')
         }
         child = await this.host.attach(recorded.pane_handle, spawnOptions)
         recovery = 'adopted'
       } else {
-        child = await this.host.spawn(argv, spawnOptions)
+        child = await this.host.spawn(identity, spawnOptions)
         recovery = 'restarted-after-loss'
       }
     } else {
-      child = await this.host.spawn(argv, spawnOptions)
+      child = await this.host.spawn(identity, spawnOptions)
       recovery = 'started'
     }
 
@@ -181,6 +221,7 @@ export class CodexProjectSessionHost {
       project_id: options.projectId,
       pane_handle: paneHandle,
       argv,
+      identity,
     }
     writeRegistry(this.options.registryPath, registry)
     child.beginOutput?.()
