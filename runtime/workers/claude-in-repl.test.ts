@@ -280,15 +280,20 @@ test('the default dispatch budget is the constant, and the constant is far below
 test('a dispatch the REPL never accepts is bounded by the DISPATCH budget, not the work wall', async () => {
   const f = await fixture()
   f.options.dispatch_timeout_ms = 60
-  f.options.composeActingTurn = NEVER_ACCEPTS
   // The wall is far longer than the dispatch budget, as a build's really is.
   const wall = 4_000
-  const started = Date.now()
+  // The budget handed to the turn IS the budget the wait uses — one value, read
+  // deterministically rather than timed. Pre-#1090 this was `wall`.
+  let offered = -1
+  f.options.composeActingTurn = (_topic, _spec, opts) => {
+    offered = opts.timeout_ms
+    return NEVER_ACCEPTS()
+  }
   const outcome = await f.run(undefined, { ...f.req, budget: { wall_ms: wall } })
-  const waited = Date.now() - started
   expect(outcome.kind).toBe('unknown')
-  // THE BOUND IS THE CLAIM. Pre-#1090 this waited the whole `wall`.
-  expect(waited).toBeLessThan(wall / 2)
+  // THE BOUND IS THE CLAIM.
+  expect(offered).toBe(60)
+  expect(offered).not.toBe(wall)
 })
 
 test('an unaccepted dispatch stays unknown and says WHICH uncertainty it is', async () => {
@@ -332,9 +337,15 @@ test('the WORK keeps the full wall after the dispatch is accepted', async () => 
 test('a wall shorter than the dispatch budget still bounds the dispatch', async () => {
   const f = await fixture()
   f.options.dispatch_timeout_ms = 10_000
-  f.options.composeActingTurn = NEVER_ACCEPTS
-  const started = Date.now()
+  let offered = -1
+  f.options.composeActingTurn = (_topic, _spec, opts) => {
+    offered = opts.timeout_ms
+    return NEVER_ACCEPTS()
+  }
   const outcome = await f.run(undefined, { ...f.req, budget: { wall_ms: 80 } })
   expect(outcome.kind).toBe('unknown')
-  expect(Date.now() - started).toBeLessThan(3_000)
+  // `min` picked the WALL, so a nearly-expired request is not handed a budget
+  // it cannot have. Read, not timed.
+  expect(offered).toBeLessThanOrEqual(80)
+  expect(offered).not.toBe(10_000)
 })
