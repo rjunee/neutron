@@ -105,6 +105,11 @@ export class CodexProjectSession {
     }
   }
 
+  /** A pre-dispatch observation only; submission can still fail after this check. */
+  isLive(): boolean {
+    return !this.child.hasExited()
+  }
+
   /** Stops this gateway from polling or writing while leaving the herdr pane alive. */
   detach(): void {
     this.child.detach?.()
