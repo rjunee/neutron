@@ -1,0 +1,7 @@
+[+0.1s] codex: codex-cli 0.154.0; bun 1.3.13; cwd=$PROJECT
+[+0.1s] MODE refuse — CodexProjectSessionHost.open() with the in-process host, real binary
+[+0.1s] hostSupportsAdoption(BunTerminalHost) = false  (pty-host.ts:474-482)
+[+0.1s] open() rejected: codex project session refused: host returned no restart-survival handle
+[+1.7s] codex processes new since open(): [] (empty = the refused child was killed, project-session.ts:177)
+[+1.7s] registry file written: false
+[+1.7s] PROBE END

@@ -1,0 +1,50 @@
+[gap=0ms +0.0s] spawned pid=1019595
+[gap=0ms +3.1s] composer ready
+[gap=0ms +3.1s] wrote text "Reply with exactly: GAP-0"; waiting 0ms before Enter
+[gap=0ms +3.1s] sent Enter (\r)
+[gap=0ms +33.2s] thread started: NO; composer line now: "› Reply with exactly: GAP-0"
+[gap=0ms +33.2s] done
+[gap=500ms +0.0s] spawned pid=1023795
+[gap=500ms +3.0s] composer ready
+[gap=500ms +3.1s] wrote text "Reply with exactly: GAP-500"; waiting 500ms before Enter
+[gap=500ms +3.6s] sent Enter (\r)
+[gap=500ms +4.1s] thread started: 01a0abd9-3d40-76a0-bb2c-eede3d88cffc; composer line now: "› Reply with exactly: GAP-500"
+[gap=500ms +6.6s]   item userMessage: {"type":"userMessage","id":"01a0abd9-4b42-7b52-8f47-d6922719dc90","clientId":"5f6bada6-7468-4a3d-b1d9-3af8056a5aa8","content":[{"type":"text","text":"Reply with exactly: GAP-500","text_elements":[]}]}
+[gap=500ms +6.6s]   item agentMessage: {"type":"agentMessage","id":"msg_0201c5bd42fc1df5016aaaf8251c2c87d1bfc4ff81f53b1cf9","text":"GAP-500","phase":"final_answer","memoryCitation":null,"delivery":null,"questions":null}
+[gap=500ms +6.6s] done
+[gap=0ms +0.0s] spawned pid=1025743
+[gap=0ms +3.3s] composer ready
+[gap=0ms +3.3s] wrote text "Reply with exactly: GAP-0"; waiting 0ms before Enter
+[gap=0ms +3.3s] sent Enter (\r)
+[gap=0ms +33.4s] thread started: NO; composer line now: "› Reply with exactly: GAP-0"
+[gap=0ms +33.4s] done
+[gap=50ms +0.0s] spawned pid=1029795
+[gap=50ms +3.3s] composer ready
+[gap=50ms +3.3s] wrote text "Reply with exactly: GAP-50"; waiting 50ms before Enter
+[gap=50ms +3.3s] sent Enter (\r)
+[gap=50ms +3.9s] thread started: 01a0abd9-ff98-7171-9c24-7476f1595a28; composer line now: "› Reply with exactly: GAP-50"
+[gap=50ms +6.9s]   item userMessage: {"type":"userMessage","id":"01a0abda-0be9-7063-93a3-932d4f7adeb6","clientId":"d0159ff6-e97e-41b1-94a6-f6c2587781fd","content":[{"type":"text","text":"Reply with exactly: GAP-50","text_elements":[]}]}
+[gap=50ms +6.9s]   item agentMessage: {"type":"agentMessage","id":"msg_0976c91bc1b5679d016aaaf857699487d1bcf3674cc0dab1d8","text":"GAP-50","phase":"final_answer","memoryCitation":null,"delivery":null,"questions":null}
+[gap=50ms +6.9s] done
+[gap=150ms +0.0s] spawned pid=1031113
+[gap=150ms +3.3s] composer ready
+[gap=150ms +3.3s] wrote text "Reply with exactly: GAP-150"; waiting 150ms before Enter
+[gap=150ms +3.5s] sent Enter (\r)
+[gap=150ms +4.0s] thread started: 01a0abda-1acd-7070-8a82-0cec2a7a819a; composer line now: "› Reply with exactly: GAP-150"
+[gap=150ms +6.0s]   item userMessage: {"type":"userMessage","id":"01a0abda-27aa-7111-a19f-03be988c7a6c","clientId":"ec460d1c-160a-43f7-b043-69f736cde247","content":[{"type":"text","text":"Reply with exactly: GAP-150","text_elements":[]}]}
+[gap=150ms +6.0s]   item agentMessage: {"type":"agentMessage","id":"msg_02fb7d8acd07339f016aaaf85de7a087d1a28821fd91898067","text":"GAP-150","phase":"final_answer","memoryCitation":null,"delivery":null,"questions":null}
+[gap=150ms +6.0s] done
+[gap=0ms +0.0s] spawned pid=1106417
+[gap=0ms +3.3s] composer ready
+[gap=0ms +3.3s] wrote text "Reply with exactly: GAP-0-lf" (mode lf); waiting 0ms before the submit
+[gap=0ms +3.3s] sent submit (\n)
+[gap=0ms +33.4s] thread started: NO; composer line now: "› Reply with exactly: GAP-0-lf"
+[gap=0ms +33.4s] done
+[gap=0ms +0.0s] spawned pid=1117396
+[gap=0ms +3.0s] composer ready
+[gap=0ms +3.0s] wrote text "Reply with exactly: GAP-0-paste" (mode paste); waiting 0ms before the submit
+[gap=0ms +3.0s] sent submit (\r)
+[gap=0ms +3.6s] thread started: 01a0abe2-55ce-7881-8dba-7c4ef5a96c51; composer line now: "› Reply with exactly: GAP-0-paste"
+[gap=0ms +5.6s]   item userMessage: {"type":"userMessage","id":"01a0abe2-611d-7e10-a52e-2e04f5578f30","clientId":"b41f8c35-2d76-4991-ac87-ffc794564d68","content":[{"type":"text","text":"Reply with exactly: GAP-0-paste","text_elements":[
+[gap=0ms +5.6s]   item agentMessage: {"type":"agentMessage","id":"msg_0d8d557ea4f201f4016aaafa7875b487d198555f3a8f7c773d","text":"GAP-0-paste","phase":"final_answer","memoryCitation":null,"delivery":null,"questions":null}
+[gap=0ms +5.6s] done

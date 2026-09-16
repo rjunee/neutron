@@ -1,0 +1,26 @@
+[phase1 +0.0s] hostSupportsAdoption(HerdrHost) = true
+[phase1 +0.0s] open() -> recovery=started paneHandle=w6:p1TK isLive=true
+[phase1 +6.0s] session.submitLine (PRODUCTION PATH): "Remember this token: HERDR-4242. Reply with exactly the single word STORED and nothing else."
+[phase1 +6.0s] submitLine resolved in 2ms
+[phase1 +36.1s] turn started from the PRODUCTION submitLine alone: false
+[phase1 +36.1s] nothing started; nothing further to measure on this pane for (a) — recording and continuing to (b)
+[phase1 +36.1s] session.detach() called; process exits WITHOUT killing the pane (this is the gateway "restart")
+[phase1 +36.1s] registry now: { "version": 1, "sessions": { "spike978-herdr": { "project_id": "spike978-herdr", "pane_handle": "w6:p1TK", "argv": [ "codex", "--enable", "multi_agent_v2" ] } } } 
+[phase2 +0.0s] hostSupportsAdoption(HerdrHost) = true
+[phase2 +0.0s] registry records pane w6:p1TK; inspectHandle says: {"kind":"live","argv":["node","/usr/bin/codex","--enable","multi_agent_v2"],"pid":1063504,"label":"neutron-codex-spike978-herdr"}
+[phase2 +0.1s] (captured from this run's stderr, which threw before the next log line could be written:)
+[phase2 +0.1s]   error: codex project session refused: recorded pane identity does not match this project session
+[phase2 +0.1s]     at openOne (runtime/adapters/codex-cli/persistent/project-session.ts:162:21)
+[phase2 +0.1s]   -- herdr reports argv ["node","/usr/bin/codex",...]; the registry recorded ["codex",...];
+[phase2 +0.1s]   -- isCodexArgv (project-session.ts:63-65) compares basename(argv[0]): "node" != "codex".
+[phase2b +0.0s] hostSupportsAdoption(HerdrHost) = true
+[phase2b +0.0s] inspectHandle(w6:p1TK) = {"kind":"live","argv":["node","/usr/bin/codex","--enable","multi_agent_v2"],"pid":1063504,"label":"neutron-codex-spike978-herdr"}
+[phase2b +0.0s] host.attach() succeeded: pid=1063504 paneHandle=w6:p1TK hasExited=false
+[phase2b +0.0s] session.submitLine on the ATTACHED session (production submitLine): "What token did I ask you to remember? Reply with exactly that token and nothing else."
+[phase2b +8.0s] turn started from submitLine alone: false
+[phase2b +8.0s] [probe workaround] standalone Enter to pane w6:p1TK via the herdr CLI (the measured submit fix)
+[phase2b +10.0s] a SECOND turn completed in the SAME thread 01a0abde-5488-71b1-923c-24231fc0f14e from the RE-ATTACHED process: true
+[phase2b +10.0s] answers in that thread now: ["STORED","HERDR-4242"]
+[close +0.0s] hostSupportsAdoption(HerdrHost) = true
+[close +0.0s] closing pane w6:p1TK
+[close +0.1s] after close, inspectHandle: {"kind":"gone"}
