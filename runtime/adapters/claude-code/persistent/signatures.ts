@@ -54,17 +54,18 @@ export const TOOLS_BRIDGE_SERVER_NAME = 'neutron'
  * So the per-server bound is DIVIDED across the servers actually wired, against
  * {@link OWNER_MCP_STARTUP_BUDGET_MS} — the share of the ready budget the MCP load may
  * consume, held well under 30 s so the rest of startup (trust seed, PTY, channel
- * handshake) still fits. One or two servers get the same 10 s they got before, so the
- * ordinary case is unchanged.
+ * handshake) still fits. The flat 10 s survives only where the division cannot reach it:
+ * a config of one or two entries, which is the no-owner-servers spawn that never sets
+ * `MCP_TIMEOUT` at all.
  *
  * {@link OWNER_MCP_STARTUP_TIMEOUT_FLOOR_MS} is the other half of the bound: past ten
- * servers, dividing the budget further would produce a timeout so short that HEALTHY
- * servers fail to start, which trades a rare slow spawn for a permanently broken one.
- * The floor wins there — so the floor is not permitted to over-subscribe the budget, and
- * `runtime/mcp-servers.ts`'s `MCP_SERVERS_MAX` is DERIVED from these two constants
- * (budget / floor = 10) rather than chosen independently. That derivation is what makes
- * "the serial worst case fits the budget" true at EVERY count the owner can reach
- * instead of only at small ones.
+ * CONFIGURED servers, dividing the budget further would produce a timeout so short that
+ * HEALTHY servers fail to start, which trades a rare slow spawn for a permanently broken
+ * one. The floor wins there — so the floor is not permitted to over-subscribe the budget,
+ * and `runtime/mcp-servers.ts`'s `MCP_SERVERS_MAX` is DERIVED from these constants
+ * (budget / floor, less {@link BUILTIN_MCP_SERVER_COUNT}) rather than chosen
+ * independently. That derivation is what makes "the serial worst case fits the budget"
+ * true at EVERY count the owner can reach instead of only at small ones.
  *
  * It did not used to be. The cap was 24, and 24 x the 2 s floor is 48 s against a 30 s
  * ready budget: the floor won, the aggregate ran to 2.4x its share, and the docblock here
@@ -72,47 +73,71 @@ export const TOOLS_BRIDGE_SERVER_NAME = 'neutron'
  * honour. Raising the cap again without raising the budget re-opens it, and the sweep in
  * `__tests__/owner-mcp-servers.test.ts` fails when it does.
  *
- * ── THE DIVISOR COUNTS OWNER SERVERS; THE VARIABLE GOVERNS TWO MORE ─────────
- * `MCP_TIMEOUT` is PROCESS-WIDE. It applies to every server in the spawn's
- * `--mcp-config`, which always includes the two compiled-in ones — the in-process tools
- * bridge ({@link TOOLS_BRIDGE_SERVER_NAME}) and the per-session dev-channel reply sink —
- * while `spawn.ts` divides by the count of OWNER servers alone. So the serial worst case
- * is (N + 2) x the per-server timeout, not N x, and the "share of the ready budget"
- * below is short by two servers' worth: at N=1 the arithmetic reserves 20 s and the true
- * worst case is 3 x 10 s = the whole 30 s budget.
+ * ── THE DIVISOR COUNTS EVERY SERVER IN THE CONFIG, NOT THE OWNER'S ─────────
+ * `MCP_TIMEOUT` is PROCESS-WIDE: `claude` applies it to every entry in the spawn's
+ * `--mcp-config`, and that file always also holds the compiled-in pair — the per-session
+ * dev-channel reply sink and, when the spawn opts in, the in-process tools bridge
+ * ({@link TOOLS_BRIDGE_SERVER_NAME}). So the serial worst case is the TOTAL entry count
+ * times the per-server bound, and a divisor counting only the owner's servers understates
+ * it by the built-ins every single time.
  *
- * Left as it is, DELIBERATELY, and documented rather than corrected in the code. Making
- * the divisor N+2 would shrink the healthy one-server case from 10 s to ~6.6 s in order
- * to bound two servers that are local to this box and effectively never slow — the
- * bridge is in-process and the sink is a bun script on loopback — and if either of them
- * really does take 10 s to answer `initialize`, the spawn has a worse problem than its
- * MCP budget. The cost of the undercount is a BOUNDED, VISIBLE failure — the spawn fails
- * the post-spawn assertion and takes the bounded-respawn ladder, with `claude` reporting
- * which server did not start, not a silent wedge — while the cost of the correction would
- * be paid on every ordinary spawn. This is the one part of the arithmetic the derived cap
- * above does NOT close, and it is stated here rather than left to be rediscovered.
+ * That undercount used to be documented here as accepted. It is not survivable at the
+ * count it matters most: with 2 owner servers the old arithmetic handed out 20 s / 2 =
+ * 10 s to FOUR configured servers — 40 s of serial worst case against a 30 s
+ * `readyBudgetMs`, i.e. a bound that cannot fail the way it promises to, on the owner's
+ * primary conversational REPL. Even N=1 sat exactly on the limit (3 x 10 s = 30 s), which
+ * is not a margin. The divisor is therefore the count of servers ACTUALLY WIRED INTO THE
+ * CONFIG, read at the call site from the object `spawn.ts` is about to serialise rather
+ * than reconstructed from an assumption about how many built-ins there are.
+ *
+ * WHAT IT COSTS, SAID PLAINLY: the healthy one-server spawn drops from 10 s per server to
+ * 20 s / 3 = 6.6 s. That is still more than three times the floor, and the two built-ins
+ * it now budgets for are a bun script on loopback and an in-process bridge — if either
+ * needs 6.6 s to answer `initialize` the spawn has a worse problem than its MCP budget.
+ * The alternative was to keep a number that reads generous and a bound that does not
+ * hold.
+ *
+ * {@link BUILTIN_MCP_SERVER_COUNT} is the worst-case built-in count, and it is what
+ * `MCP_SERVERS_MAX` is derived against — the call site uses the exact count, but the
+ * ADVERTISED maximum has to be safe for the spawn that carries both built-ins.
  */
 export const OWNER_MCP_STARTUP_TIMEOUT_MS = 10_000
 /**
- * The share of the 30 s `readyBudgetMs` the owner-MCP load may consume.
- *
- * Counts the OWNER's servers only. `MCP_TIMEOUT` is process-wide and also governs the two
- * compiled-in servers, so the real serial worst case is (N + 2) shares — see § THE DIVISOR
- * COUNTS OWNER SERVERS on {@link OWNER_MCP_STARTUP_TIMEOUT_MS} for why that undercount is
- * accepted rather than corrected here.
+ * The share of the 30 s `readyBudgetMs` the MCP load may consume on a spawn that carries
+ * owner-installed servers. Covers EVERY entry in `--mcp-config`, the two compiled-in ones
+ * included — see § THE DIVISOR on {@link OWNER_MCP_STARTUP_TIMEOUT_MS}. Held well under
+ * the ready budget so the rest of startup (trust seed, PTY, channel handshake) still fits
+ * after a worst-case MCP load has eaten its whole share.
  */
 export const OWNER_MCP_STARTUP_BUDGET_MS = 20_000
+/**
+ * How many entries `spawn.ts` puts in `--mcp-config` before the owner's servers: the
+ * per-session dev-channel reply sink (ALWAYS) and the in-process tools bridge (when the
+ * spawn opted in and a bridge was wired). Two is the WORST case, which is the one an
+ * advertised maximum must be safe for; the live call site divides by the real count.
+ *
+ * Exported so `runtime/mcp-servers.ts`'s `MCP_SERVERS_MAX` derivation and the sweep in
+ * `__tests__/owner-mcp-servers.test.ts` read the same number this file does, rather than
+ * each spelling `2` and drifting when a third built-in arrives.
+ */
+export const BUILTIN_MCP_SERVER_COUNT = 2
 /** Shortest per-server timeout worth setting — below this, healthy servers fail. */
 export const OWNER_MCP_STARTUP_TIMEOUT_FLOOR_MS = 2_000
 
 /**
- * `MCP_TIMEOUT` for a spawn wiring `serverCount` owner-installed servers: the
- * aggregate budget divided between them, clamped to the flat per-server maximum above
- * and the floor below. See {@link OWNER_MCP_STARTUP_TIMEOUT_MS}.
+ * `MCP_TIMEOUT` for a spawn whose `--mcp-config` carries `configuredServerCount` entries
+ * IN TOTAL — the owner's servers plus the compiled-in ones, because `claude` applies the
+ * variable to every one of them. The aggregate budget divided between them, clamped to
+ * the flat per-server maximum above and the floor below.
+ *
+ * TOTAL, NOT THE OWNER'S COUNT, and the parameter is named for it. The previous name
+ * (`serverCount`, on a function called `ownerMcp…`) is what let the call site pass the
+ * owner-only count: two owner servers were handed 10 s each across four configured
+ * servers. See § THE DIVISOR on {@link OWNER_MCP_STARTUP_TIMEOUT_MS}.
  */
-export function ownerMcpStartupTimeoutMs(serverCount: number): number {
-  if (serverCount <= 0) return OWNER_MCP_STARTUP_TIMEOUT_MS
-  const share = Math.floor(OWNER_MCP_STARTUP_BUDGET_MS / serverCount)
+export function mcpStartupTimeoutMs(configuredServerCount: number): number {
+  if (configuredServerCount <= 0) return OWNER_MCP_STARTUP_TIMEOUT_MS
+  const share = Math.floor(OWNER_MCP_STARTUP_BUDGET_MS / configuredServerCount)
   return Math.max(
     OWNER_MCP_STARTUP_TIMEOUT_FLOOR_MS,
     Math.min(OWNER_MCP_STARTUP_TIMEOUT_MS, share),

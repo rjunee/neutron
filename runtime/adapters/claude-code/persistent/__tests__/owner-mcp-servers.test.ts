@@ -31,10 +31,11 @@ import { tmpdir } from 'node:os'
 import { dirname } from 'node:path'
 
 import {
+  BUILTIN_MCP_SERVER_COUNT,
   OWNER_MCP_STARTUP_BUDGET_MS,
   OWNER_MCP_STARTUP_TIMEOUT_FLOOR_MS,
   OWNER_MCP_STARTUP_TIMEOUT_MS,
-  ownerMcpStartupTimeoutMs,
+  mcpStartupTimeoutMs,
 } from '../signatures.ts'
 import { MCP_SERVERS_MAX } from '../../../../mcp-servers.ts'
 
@@ -470,7 +471,7 @@ describe('a THIRD-PARTY handshake cannot wedge the owner\'s live chat', () => {
     // `initialize` would hold that wait open inside the post-spawn assertion's 30 s ready
     // budget, on the PRIMARY conversational REPL, and present as `channel-wedged`.
     setReplToolBridge(bridge())
-    const { host, envs } = makeCapturingHost()
+    const { host, argvs, envs } = makeCapturingHost()
     const sub = createPersistentReplSubstrate(
       opts(host, { enableToolBridge: true, resolveExtraMcpServers: async () => [EXAMPLE] }),
     )
@@ -478,9 +479,19 @@ describe('a THIRD-PARTY handshake cannot wedge the owner\'s live chat', () => {
 
     // Still blocking — the dev-channel bind guarantee is unchanged…
     expect(envs[0]!['MCP_CONNECTION_NONBLOCKING']).toBe('false')
-    // …but now BOUNDED, and well under the ready budget.
-    expect(envs[0]!['MCP_TIMEOUT']).toBe(String(OWNER_MCP_STARTUP_TIMEOUT_MS))
-    expect(OWNER_MCP_STARTUP_TIMEOUT_MS).toBeLessThan(30_000)
+    // …but now BOUNDED against what is ACTUALLY IN THE CONFIG, which for one installed
+    // server is three entries: the sink, the bridge, and the owner's. Counted out of the
+    // written file rather than assumed, so a test that stops attaching the bridge
+    // measures the config it produced instead of silently asserting the wrong divisor.
+    const configured = Object.keys(mcpConfig(argvs[0]!).mcpServers).length
+    expect(configured).toBe(1 + BUILTIN_MCP_SERVER_COUNT)
+    expect(envs[0]!['MCP_TIMEOUT']).toBe(String(mcpStartupTimeoutMs(configured)))
+    // THE WHOLE LOAD, not one server's share, is what has to fit the ready budget — the
+    // comparison the flat 10 s could not survive.
+    expect(Number(envs[0]!['MCP_TIMEOUT']) * configured).toBeLessThanOrEqual(
+      OWNER_MCP_STARTUP_BUDGET_MS,
+    )
+    expect(OWNER_MCP_STARTUP_BUDGET_MS).toBeLessThan(30_000)
   })
 
   it('DIVIDES the bound across servers, because MCP_TIMEOUT is per-server', async () => {
@@ -490,8 +501,8 @@ describe('a THIRD-PARTY handshake cannot wedge the owner\'s live chat', () => {
     // collectively blowing the budget — and whether `claude` loads them serially is
     // not something this repo has verified, so the bound is sized for the worse case.
     setReplToolBridge(bridge())
-    const { host, envs } = makeCapturingHost()
-    const many: ResolvedOwnerMcpServer[] = Array.from({ length: 8 }, (_, i) => ({
+    const { host, argvs, envs } = makeCapturingHost()
+    const many: ResolvedOwnerMcpServer[] = Array.from({ length: 6 }, (_, i) => ({
       ...EXAMPLE,
       name: `example-${i}`,
     }))
@@ -502,41 +513,69 @@ describe('a THIRD-PARTY handshake cannot wedge the owner\'s live chat', () => {
 
     const perServer = Number(envs[0]!['MCP_TIMEOUT'])
     expect(perServer).toBeLessThan(OWNER_MCP_STARTUP_TIMEOUT_MS)
+    // AGAINST THE CONFIG AS WRITTEN, which is the fix this assertion used to miss. It
+    // read `perServer * many.length` — the OWNER cardinality — and so stayed green while
+    // `MCP_TIMEOUT` was being handed to two more servers than the arithmetic counted. The
+    // file on disk is the only thing that knows how many entries `claude` will apply the
+    // variable to, so it is what the multiplication uses.
+    const servers = Object.keys(mcpConfig(argvs[0]!).mcpServers)
+    expect(servers).toHaveLength(many.length + BUILTIN_MCP_SERVER_COUNT)
+    // …AND THE BUILT-INS ARE NAMED, not merely counted: a count alone would be satisfied
+    // by two extra owner servers. The sink is keyed by the per-spawn channel name, so it
+    // is identified as "the entry that is neither the bridge nor an owner's".
+    expect(servers).toContain('neutron')
+    expect(servers.filter((n) => n !== 'neutron' && !n.startsWith('example-'))).toHaveLength(1)
     // The SERIAL worst case fits the share of the ready budget the load may take.
-    expect(perServer * many.length).toBeLessThanOrEqual(OWNER_MCP_STARTUP_BUDGET_MS)
+    expect(perServer * servers.length).toBeLessThanOrEqual(OWNER_MCP_STARTUP_BUDGET_MS)
   })
 
   it('stops dividing at a floor, and the installed maximum is DERIVED so the floor fits', () => {
-    // One or two servers keep exactly the bound they had, so the ordinary case is
-    // untouched by the division.
-    expect(ownerMcpStartupTimeoutMs(1)).toBe(OWNER_MCP_STARTUP_TIMEOUT_MS)
-    expect(ownerMcpStartupTimeoutMs(2)).toBe(OWNER_MCP_STARTUP_TIMEOUT_MS)
-    expect(ownerMcpStartupTimeoutMs(4)).toBe(OWNER_MCP_STARTUP_BUDGET_MS / 4)
-    // At the installed maximum the floor wins — and the maximum is derived from the floor
-    // so that winning does not over-subscribe the budget. These two lines used to read
-    // `toBeGreaterThan`, DOCUMENTING the gap instead of closing it: the cap was 24, 24 x
-    // the 2 s floor is 48 s against a 30 s ready budget, and an owner who installed up to
-    // the advertised `max_servers` was handed a bound the arithmetic could not honour.
-    expect(ownerMcpStartupTimeoutMs(MCP_SERVERS_MAX)).toBe(OWNER_MCP_STARTUP_TIMEOUT_FLOOR_MS)
-    expect(OWNER_MCP_STARTUP_TIMEOUT_FLOOR_MS * MCP_SERVERS_MAX).toBe(
-      OWNER_MCP_STARTUP_BUDGET_MS,
+    // THE ARGUMENT IS THE CONFIGURED COUNT, not the owner's. A config of one or two
+    // entries is the no-owner-servers spawn, which never sets `MCP_TIMEOUT` at all —
+    // those two lines pin the flat maximum where the division cannot reach it.
+    expect(mcpStartupTimeoutMs(1)).toBe(OWNER_MCP_STARTUP_TIMEOUT_MS)
+    expect(mcpStartupTimeoutMs(2)).toBe(OWNER_MCP_STARTUP_TIMEOUT_MS)
+    expect(mcpStartupTimeoutMs(4)).toBe(OWNER_MCP_STARTUP_BUDGET_MS / 4)
+    // THE CASE THE OLD ARITHMETIC GOT WRONG, pinned as a number rather than as prose. One
+    // installed server is THREE configured servers, and the previous divisor handed each
+    // of them the flat 10 s — 30 s of serial worst case against a 30 s ready budget, with
+    // no margin at all. Two installed servers made it 4 x 10 s = 40 s, a bound that could
+    // not fail the way it promised to.
+    expect(mcpStartupTimeoutMs(1 + BUILTIN_MCP_SERVER_COUNT)).toBeLessThan(
+      OWNER_MCP_STARTUP_TIMEOUT_MS,
     )
+    expect(mcpStartupTimeoutMs(2 + BUILTIN_MCP_SERVER_COUNT) * (2 + BUILTIN_MCP_SERVER_COUNT))
+      .toBeLessThanOrEqual(OWNER_MCP_STARTUP_BUDGET_MS)
+    // At the installed maximum the floor wins — and the maximum is derived from the floor
+    // AND the built-in count so that winning does not over-subscribe the budget. This line
+    // used to read `toBeGreaterThan`, DOCUMENTING the gap instead of closing it (the cap
+    // was 24, and 24 x the 2 s floor is 48 s against a 30 s ready budget); it then closed
+    // it for the owner's servers only, which left the same shape two servers smaller.
+    expect(mcpStartupTimeoutMs(MCP_SERVERS_MAX + BUILTIN_MCP_SERVER_COUNT)).toBe(
+      OWNER_MCP_STARTUP_TIMEOUT_FLOOR_MS,
+    )
+    expect(
+      OWNER_MCP_STARTUP_TIMEOUT_FLOOR_MS * (MCP_SERVERS_MAX + BUILTIN_MCP_SERVER_COUNT),
+    ).toBe(OWNER_MCP_STARTUP_BUDGET_MS)
     // SWEPT, not spot-checked at the endpoints. The serial worst case fits the budget at
     // EVERY count the owner can actually reach, including the counts between the flat
-    // maximum and the floor where the division is what bounds it. Raising `MCP_SERVERS_MAX`
-    // without raising the budget fails HERE, which is the guard that keeps the advertised
-    // maximum and the startup arithmetic from drifting apart again.
+    // maximum and the floor where the division is what bounds it — and at every one of
+    // them the built-ins are in the multiplication, because they are in the config.
+    // Raising `MCP_SERVERS_MAX` without raising the budget fails HERE, which is the guard
+    // that keeps the advertised maximum and the startup arithmetic from drifting apart
+    // again.
     for (let n = 1; n <= MCP_SERVERS_MAX; n += 1) {
-      expect(ownerMcpStartupTimeoutMs(n) * n).toBeLessThanOrEqual(OWNER_MCP_STARTUP_BUDGET_MS)
+      const configured = n + BUILTIN_MCP_SERVER_COUNT
+      expect(mcpStartupTimeoutMs(configured) * configured).toBeLessThanOrEqual(
+        OWNER_MCP_STARTUP_BUDGET_MS,
+      )
     }
-    // WHAT THIS STILL DOES NOT CLOSE, stated rather than implied. `MCP_TIMEOUT` is
-    // process-wide and also governs the two compiled-in servers (the tools bridge and the
-    // dev-channel sink), so the true serial worst case is (n + 2) shares, not n — at n=1
-    // that is 3 x 10 s = the whole 30 s ready budget. See § THE DIVISOR COUNTS OWNER
-    // SERVERS in `signatures.ts` for why correcting the divisor is refused: it would
-    // shrink the healthy one-server case to bound two local processes that are never slow.
-    // The failure it can still produce is the bounded, visible one — a failed post-spawn
-    // assertion into the respawn ladder — not a silent wedge.
+    // AND THE BUDGET ITSELF FITS THE READY WINDOW, which no line above checks: every
+    // assertion here is against `OWNER_MCP_STARTUP_BUDGET_MS`, so a budget raised to 40 s
+    // would keep them all green while re-opening the very failure they exist to stop. The
+    // 30 s is `post-spawn-assertion.ts`'s `readyBudgetMs` default, and the MCP load is
+    // only one stage of that window.
+    expect(OWNER_MCP_STARTUP_BUDGET_MS).toBeLessThan(30_000)
   })
 
   it('leaves the no-installed-servers spawn exactly as it was', async () => {

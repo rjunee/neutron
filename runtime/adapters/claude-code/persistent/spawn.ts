@@ -56,7 +56,7 @@ import { captureSession, makeJsonlExistsProbe } from './session-capture.ts'
 import { measurePostCompactSize, sessionJsonlPath, startSessionSizeWatchdog } from './session-size-watchdog.ts'
 import { dashifyCwd } from './session-validation.ts'
 import { createWedgedPromptDetector } from './interactive-prompt-deadlock-detector.ts'
-import { DEFAULT_AGENT_BASE_PROMPT, DEFAULT_DEV_CHANNEL_PATH, DEFAULT_TOOLS_BRIDGE_PATH, SESSION_COMPACT_IDLE_QUIESCE_MS, TOOLS_BRIDGE_SERVER_NAME, ownerMcpStartupTimeoutMs, resolveTranscriptProjectsDir, runOutputScan, sendKey, surfaceSizeAlert } from './signatures.ts'
+import { DEFAULT_AGENT_BASE_PROMPT, DEFAULT_DEV_CHANNEL_PATH, DEFAULT_TOOLS_BRIDGE_PATH, SESSION_COMPACT_IDLE_QUIESCE_MS, TOOLS_BRIDGE_SERVER_NAME, mcpStartupTimeoutMs, resolveTranscriptProjectsDir, runOutputScan, sendKey, surfaceSizeAlert } from './signatures.ts'
 import type { PersistentReplSubstrateOptions, ResumeDirective } from './types.ts'
 import { ReplSession, authFingerprintFor, httpHealth, mergeEnv, terminateChild, unlinkSessionConfigs } from './repl-session.ts'
 import { wireChildExit } from './child-exit-wiring.ts'
@@ -418,11 +418,21 @@ async function spawnSession(
   //
   // The bound is PER SERVER while the ready budget covers the whole spawn, so it is
   // divided across the servers actually wired rather than being a flat 10 s that N
-  // hung servers could each honour while collectively blowing the budget. One or two
-  // servers still get 10 s; see `ownerMcpStartupTimeoutMs` for what the floor does not
-  // fix.
+  // hung servers could each honour while collectively blowing the budget.
+  //
+  // DIVIDED BY EVERY ENTRY IN THE CONFIG, NOT BY THE OWNER'S COUNT. `MCP_TIMEOUT` is
+  // process-wide: `claude` applies it to each server in `--mcp-config`, and this config
+  // always also holds the dev-channel reply sink and (when attached) the tools bridge.
+  // Passing `wiredExtraNames.length` here therefore understated the serial worst case by
+  // the built-ins on every spawn — two owner servers got 20 s / 2 = 10 s each across FOUR
+  // configured servers, 40 s against the assertion's 30 s ready budget.
+  //
+  // `Object.keys(mcpServers).length` is the exact count that is about to be serialised
+  // one screen above, so this cannot drift if a third built-in is ever added — unlike
+  // `wiredExtraNames.length + 2`, which would be a copy of a fact this object already
+  // holds. See `mcpStartupTimeoutMs` for what the floor does not fix.
   if (wiredExtraNames.length > 0) {
-    childEnv['MCP_TIMEOUT'] = String(ownerMcpStartupTimeoutMs(wiredExtraNames.length))
+    childEnv['MCP_TIMEOUT'] = String(mcpStartupTimeoutMs(Object.keys(mcpServers).length))
   }
   if (options.skipTrustSeed !== true) {
     const trustInput: Parameters<typeof ensureClaudeTrust>[0] = { cwd }

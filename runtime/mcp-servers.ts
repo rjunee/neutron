@@ -100,28 +100,34 @@ export const MCP_SERVER_ENV_TOTAL_MAX = 8000
 /**
  * Most servers one instance may install.
  *
- * DERIVED, not picked. The spawn divides a fixed startup budget between the servers it
- * wires and stops dividing at a floor, so this cap is the only thing that keeps those
- * two numbers agreeing: it is `OWNER_MCP_STARTUP_BUDGET_MS / OWNER_MCP_STARTUP_TIMEOUT_
- * FLOOR_MS` (20 s / 2 s, both in `runtime/adapters/claude-code/persistent/signatures.ts`),
- * the largest count whose serial worst case still fits the share of the ready budget the
- * MCP load may take.
+ * DERIVED, not picked. The spawn divides a fixed startup budget between the servers in
+ * `--mcp-config` and stops dividing at a floor, so this cap is the only thing that keeps
+ * those two numbers agreeing: it is `OWNER_MCP_STARTUP_BUDGET_MS /
+ * OWNER_MCP_STARTUP_TIMEOUT_FLOOR_MS` (20 s / 2 s) LESS `BUILTIN_MCP_SERVER_COUNT` (2),
+ * all three in `runtime/adapters/claude-code/persistent/signatures.ts` — the largest
+ * OWNER count whose serial worst case still fits the share of the ready budget the MCP
+ * load may take.
  *
- * It was 24, a count the floor could not honour: 24 x the 2 s floor is 48 s of
- * owner-server startup against a 30 s `readyBudgetMs`, so an owner who installed up to
- * the ADVERTISED maximum — the number `GET /api/app/mcp-servers` returns as
- * `max_servers` — was promised a bound the arithmetic could not deliver. Lowering the
+ * SUBTRACTING THE BUILT-INS IS THE POINT OF THE LAST REVISION. `MCP_TIMEOUT` is
+ * process-wide, so it also bounds the dev-channel reply sink and the tools bridge: a cap
+ * of 10 meant 12 configured servers at the 2 s floor, 24 s against a 20 s share. The same
+ * class of error as the 24 below, one step smaller and one layer further in.
+ *
+ * It was 24 before that, a count the floor could not honour even ignoring the built-ins:
+ * 24 x the 2 s floor is 48 s of startup against a 30 s `readyBudgetMs`, so an owner who
+ * installed up to the ADVERTISED maximum — the number `GET /api/app/mcp-servers` returns
+ * as `max_servers` — was promised a bound the arithmetic could not deliver. Lowering the
  * cap was chosen over raising the budget because the budget is a share of the ready
  * window on the owner's PRIMARY conversational REPL, and over lowering the floor because
- * a shorter floor fails HEALTHY servers.
+ * a shorter floor fails HEALTHY servers. The same two reasons decided 10 -> 8.
  *
  * A literal rather than an import, because this module is substrate-neutral and those
- * two constants belong to one adapter. The equality is pinned instead by
+ * constants belong to one adapter. The equality is pinned instead by
  * `runtime/adapters/claude-code/persistent/__tests__/owner-mcp-servers.test.ts`, which
- * sweeps every count from 1 to this maximum — so raising this number without raising the
- * budget fails CI rather than silently re-opening the gap.
+ * sweeps every count from 1 to this maximum WITH the built-ins added in — so raising this
+ * number without raising the budget fails CI rather than silently re-opening the gap.
  */
-export const MCP_SERVERS_MAX = 10
+export const MCP_SERVERS_MAX = 8
 
 /**
  * A legal server name: lowercase, starts alphanumeric, `[a-z0-9-]` after.

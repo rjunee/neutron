@@ -887,21 +887,25 @@ there is nothing underneath him.
   the post-spawn assertion's 30 s ready budget and surface as `channel-wedged`. The
   load stays blocking and is now bounded by `MCP_TIMEOUT` whenever an installed server is
   wired; a spawn with none sets nothing and behaves exactly as before. The bound is PER
-  SERVER while the budget covers the whole spawn, so `ownerMcpStartupTimeoutMs` divides a
-  stated 20 s share of the budget across the servers actually wired (one or two still get
-  the full 10 s) rather than letting N hung servers each honour 10 s and collectively blow
-  it. Whether the CLI's blocking connect group loads serially is NOT verified, so it is
-  sized for the worse case. Past ten servers a 2 s floor wins, because a timeout short
-  enough to keep dividing would fail HEALTHY servers — so the floor is not allowed to
-  over-subscribe the budget and `MCP_SERVERS_MAX` is DERIVED from the two constants
-  (20 s budget / 2 s floor = **10 installed servers**, the number `max_servers` advertises
-  and the store enforces). It was 24, which permitted 48 s of startup against the 30 s
-  ready budget; a test sweeps every count from 1 to the cap so raising one without the
-  other fails CI. What that does NOT cover, stated rather than implied: `MCP_TIMEOUT` is
-  process-wide and also governs the two compiled-in servers, so the true serial worst case
-  is (N + 2) shares — correcting the divisor is deliberately refused because it would
-  shrink the healthy one-server case to bound two local processes that are never slow, and
-  the residual failure is a bounded, visible assertion failure into the respawn ladder.
+  SERVER while the budget covers the whole spawn, so `mcpStartupTimeoutMs` divides a
+  stated 20 s share of the budget across the servers actually wired rather than letting N
+  hung servers each honour 10 s and collectively blow it. Whether the CLI's blocking
+  connect group loads serially is NOT verified, so it is sized for the worse case. **The
+  divisor is EVERY entry in `--mcp-config`, not the owner's count**: `MCP_TIMEOUT` is
+  process-wide, and the config always also holds the dev-channel reply sink and (when
+  attached) the tools bridge, so dividing by the owner's count alone understated the
+  serial worst case by two servers on every spawn — two installed servers got 10 s each
+  across FOUR configured ones, 40 s against a 30 s ready budget. `spawn.ts` now passes
+  `Object.keys(mcpServers).length`, the exact count it is about to serialise, so one
+  installed server means 20 s / 3 = 6.6 s rather than a flat 10 s. Past ten CONFIGURED
+  servers a 2 s floor wins, because a timeout short enough to keep dividing would fail
+  HEALTHY servers — so the floor is not allowed to over-subscribe the budget and
+  `MCP_SERVERS_MAX` is DERIVED from the constants (20 s budget / 2 s floor, less the two
+  built-ins = **8 installed servers**, the number `max_servers` advertises and the store
+  enforces). It was 24, which permitted 48 s of startup against the 30 s ready budget, and
+  then 10, which permitted 24 s once the built-ins were counted; a test sweeps every count
+  from 1 to the cap WITH the built-ins added in, so raising one without the other fails
+  CI.
 - **The config, secrets and all, is cleaned up on EVERY path.** The MCP config carries
   the dev-channel token and each server's env values at 0600 inside a 0700 per-spawn
   directory. A throw between writing it and having a child (the child-exit handler owns

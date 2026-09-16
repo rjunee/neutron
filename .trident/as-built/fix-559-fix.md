@@ -29,3 +29,63 @@ The PTY integration file cannot bind its loopback reply sink in this sandbox; it
 ### Deliberately not changed
 
 No shell is introduced: the saved executable and arguments remain structured. No alternate execution path or feature flag was added. Secret values are not added to metadata, prompts, logs, or responses. The frozen `docs/AS_BUILT.md` was not changed.
+
+### Rescue round — what the rebase dropped, and the divisor it left wrong
+
+Four CI failures and one reviewed blocker, none of them in main.
+
+**The whole `owner-mcp-servers` file was failing on a 5 s `no-channel-ready`.** Three
+independent causes. Its fake `PtyHost` presented the instance ROOT token from
+`getReplSinkInfo()`, but the sink authorizes credential to session (`pool-state.ts:522`)
+and a child carries `HMAC(root, childGeneration)` — every POST was a 401, measured by
+logging the response status rather than inferred; the fixture now reads
+`bakedChildSinkInfo(argv)` like every sibling fixture in the directory. `pendingSpawns`
+and `committedDispatches` were declared in `pool-state.ts` and read by the evictor while
+NOTHING wrote them: the rebase carried the declarations and the reads but dropped the
+writer hunks in `spawn.ts` and `pool.ts`, so both busy signals were permanently false and
+a revocation fell through to awaiting an unresolved spawn. And `unlinkSessionConfigs`
+removed the 0600 files but never the 0700 directory holding them, which the security
+tests assert and the system overview already claimed.
+
+**The blocker: `MCP_TIMEOUT` was divided by the owner's count.** `claude` applies the
+variable to every entry in `--mcp-config`, which always also holds the reply sink and
+(when attached) the tools bridge. Two installed servers were handed 20 s / 2 = 10 s each
+across FOUR configured servers — 40 s of serial worst case against a 30 s `readyBudgetMs`
+— and even one server sat exactly on the limit at 3 x 10 s. The divisor is now
+`Object.keys(mcpServers).length`, the exact object about to be serialised, so it cannot
+drift if a third built-in is ever added. `MCP_SERVERS_MAX` is re-derived as
+budget / floor less the built-ins and drops 10 to 8, by the same reasoning that took it
+24 to 10: the budget is a share of the ready window on the primary conversational REPL,
+and a shorter floor fails healthy servers. The two client fixtures advertising the cap
+follow it down.
+
+The test that was supposed to see this admitted in its own comment that it could not: it
+multiplied the per-server bound by the OWNER cardinality. Both spawn-level assertions now
+count the entries in the config file as written, and name the built-ins rather than only
+counting them, so two extra owner servers cannot satisfy them.
+
+### Rescue-round mutation table
+
+| Guard | Mutation | Red |
+|---|---|---|
+| `pendingSpawns.set` (`spawn.ts`) | Deleted the set | `retires a revoked child that NO DISPATCH is waiting on` — the evictor awaits the gated spawn and dies on `no-channel-ready` |
+| `committedDispatches` increment (`pool.ts`) | Counted for `ephemeral` only | `spares the child of a dispatch parked BEFORE its turn slot` — `evicted=1`, the committed turn's child killed |
+| `committedDispatches` release (`pool.ts`) | Never released | `TERMINATES a warm IDLE child` — `poisoned=1` where it must evict |
+| `rmdirSync` (`repl-session.ts`) | Deleted the call | `the config — SECRETS AND ALL — is gone once the session is torn down` |
+| `MCP_TIMEOUT` divisor (`spawn.ts`) | Back to `wiredExtraNames.length` | both spawn-level `MCP_TIMEOUT` tests |
+| `MCP_SERVERS_MAX` | Back to 10 | `Expected: 20000, Received: 24000` on the derivation |
+| Budget / flat-max pair | 20 s to 45 s with a matching floor | `Expected: < 30000, Received: 45000` — proving the ready-window line is armed and not implied by its neighbours |
+
+### Rescue-round verification
+
+`owner-mcp-servers.test.ts` 33/33; the migration snapshot and the 125-repair ledger 4/4
+each; the identity-env registry 21/21; the store, HTTP surface and validator suites
+110/110; the two client suites green when run in separate processes (running both in one
+bun process double-registers happy-dom, which is a harness limit, not a failure of
+either). Typecheck 50/51 — `app/tsconfig.json` reports `TS2688 Cannot find type
+definition file for '@types'` both with and without this branch's one-line fixture edit,
+the same pre-existing ambient-type failure recorded above. Lint green.
+
+Not proven: the full suite was not run (it spawns real REPLs into the operator's live
+terminal session), so this reports the files named above and the gates, not a whole-tree
+green.
