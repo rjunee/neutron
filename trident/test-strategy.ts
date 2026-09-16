@@ -37,6 +37,7 @@
 import { readFileSync, statSync } from 'node:fs'
 import * as os from 'node:os'
 import { isAbsolute, resolve } from 'node:path'
+import { PROJECT_BUILD_WALL_MS } from './project-build-budget.ts'
 
 // ─────────────────────────────────────────────────────────────────────────────
 // 1. Discover the project's test command
@@ -729,22 +730,17 @@ export const NO_BASELINE_SUITE_RUN = [
 /**
  * Acceptance criterion 7's resolution: the `timeout 590` wrapper is banned.
  *
- * THE HANG BUDGET IS 25 MINUTES, AND THAT NUMBER IS RECONCILED, not picked. Round-3
- * review found the previous 40 minutes unreconciled with the ceiling that actually binds
- * a build round: the codex build bridge polls at most 45 minutes total (five 540 s waits,
- * `trident/inner-workflow.mjs`), after which it reports `codexStatus='deferred'` with
- * `testsPassed=false` — which now ALSO trips the full-suite gate. A round is edit +
- * stage 1 + suite + fix + re-run, so a 40-minute patience budget for ONE suite run could
- * not fit inside 45 minutes with anything else in it.
- *
- * 25 minutes is ~1.8× the measured 13.7-minute parallel run (docs/AS_BUILT.md) and leaves
- * ~20 minutes of the bridge ceiling for the rest of the round. It is still far above the
- * 590 s cap that killed complete runs. The final sentence is the other half of criterion
- * 5: a build that runs out of patience says the suite did not finish rather than
- * reporting a pass it never observed.
+ * The host owns the build and fix walls in `PROJECT_BUILD_WALL_MS`. The rendered
+ * numbers come from that same record: duplicating them here left the worker acting
+ * on an obsolete 25/45-minute instruction after the enforced walls became 90 minutes.
+ * The final sentence is the other half of criterion 5: a build that runs out of its
+ * wall says the suite did not finish rather than reporting a pass it never observed.
  */
+const buildWallMinutes = PROJECT_BUILD_WALL_MS.build / 60_000
+const fixWallMinutes = PROJECT_BUILD_WALL_MS.fix / 60_000
+
 export const NO_TIMEOUT_WRAPPER =
-  'Do NOT wrap the suite in a timeout wrapper (a 590 s cap has killed complete runs mid-flight and read them as failures). Start the full suite in the background redirected to a log file and poll the log tail until the runner prints its final summary line; budget up to 25 minutes before declaring a hang — your whole round has a 45-minute ceiling and the suite is not the only thing in it. If the budget runs out, report testsPassed=false and say the suite did not complete; never report a pass you did not observe.'
+  `Do NOT wrap the suite in a timeout wrapper (a 590 s cap has killed complete runs mid-flight and read them as failures). Start the full suite in the background redirected to a log file and poll the log tail until the runner prints its final summary line; your build round has a ${buildWallMinutes}-minute ceiling and your fix round has a ${fixWallMinutes}-minute ceiling. Use the wall you are actually given before declaring a hang. If the budget runs out, report testsPassed=false and say the suite did not complete; never report a pass you did not observe.`
 
 function stage1Lines(baseBranch: string): string[] {
   return [
