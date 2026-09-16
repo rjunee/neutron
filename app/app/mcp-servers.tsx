@@ -169,7 +169,7 @@ export default function McpServersScreen() {
         </View>
       </View>
 
-      <ScrollView contentContainerStyle={styles.scroll}>
+      <ScrollView contentContainerStyle={styles.scroll} keyboardShouldPersistTaps="handled">
         <Text style={styles.muted}>
           Extra tools for your assistant, each one a program on this machine. Adding a
           server does not start it — you approve it here first, and the request below
