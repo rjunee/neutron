@@ -11,7 +11,8 @@
  * stub — and pins the complete set:
  *
  *   chunked-upload-sweeper, cron, credential-usage,
- *   dispatch-lifecycle-watchdog, kimi-usage, reminders, trident, watchdog
+ *   dispatch-lifecycle-watchdog, kimi-usage, project-build-state-reaper,
+ *   reminders, trident, watchdog
  *
  * A loop that silently stops starting (a wiring regression) OR a silently-added
  * new loop breaks this. MUTATION-VERIFIED: deleting any `loopRegistry.register`
@@ -60,6 +61,10 @@ const EXPECTED_RUNNING_LOOPS = [
   // probe: a tick with no key stored does one cheap store read and no network
   // call, so a key entered in Settings starts being metered without a restart.
   'kimi-usage',
+  // #1060 — hourly age-based cleanup for retained per-run project-build state,
+  // with an immediate boot sweep. Registered here so a built-but-unwired reaper
+  // cannot pass on its direct unit tests alone.
+  'project-build-state-reaper',
   // Memory consolidation is ON by default (managed SPEC Decisions Log 2026-07-20,
   // P0-4), so the reflect-consolidation loop always arms.
   'reflect-consolidation',
