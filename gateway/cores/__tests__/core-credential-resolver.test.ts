@@ -235,9 +235,9 @@ test('accessorFor reads the ACTIVE project from the ambient runWithActiveProject
   const inProject = await runWithActiveProject(PROJECT, () => accessor())
   expect(inProject).toBe('project-drive')
 
-  // No frame (General topic) → global default.
+  // No frame → unknown project → refuse.
   const noFrame = await accessor()
-  expect(noFrame).toBe('global-drive')
+  expect(noFrame).toBeNull()
 
   // Bound to a different project with no row → global default.
   const otherProject = await runWithActiveProject('proj-beta', () => accessor())
@@ -261,7 +261,7 @@ test('accessorFor fail-soft: a resolver throw becomes null (Core degrades, never
     accountSelection: selection,
   })
   // google_workspace has no project_credentials row → hits the throwing OAuth fallback.
-  expect(await resolver.accessorFor('google_workspace')()).toBeNull()
+  expect(await runWithActiveProject(PROJECT, () => resolver.accessorFor('google_workspace')())).toBeNull()
 })
 
 // ── 2026-05-12 rename-regression (behavioral) ────────────────────────────────
@@ -284,7 +284,7 @@ test('rename regression: a credential written under the frozen handle is NOT rea
     oauthTokens: null,
     accountSelection: selection,
   })
-  expect(await frozenResolver.resolve('meta_ads')).toBe('secret-token')
+  expect(await frozenResolver.resolve('meta_ads', { projectId: PROJECT })).toBe('secret-token')
 
   // The resolver keyed on the RENAMED url_slug misses entirely — the 2026-05-12
   // outage. The brand makes constructing this wrong resolver require an explicit
@@ -296,7 +296,7 @@ test('rename regression: a credential written under the frozen handle is NOT rea
     oauthTokens: null,
     accountSelection: selection,
   })
-  expect(await renamedResolver.resolve('meta_ads')).toBeNull()
+  expect(await renamedResolver.resolve('meta_ads', { projectId: PROJECT })).toBeNull()
 
   // And the store itself keys on the exact handle (direct assertion).
   expect(store.resolve(FROZEN, undefined, 'meta_ads')?.plaintext).toBe('secret-token')

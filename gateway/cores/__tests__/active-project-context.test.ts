@@ -8,7 +8,7 @@
 import { expect, test } from 'bun:test'
 import { currentActiveProjectId, runWithActiveProject } from '../active-project-context.ts'
 
-test('no frame bound → currentActiveProjectId() is "" (→ global scope)', () => {
+test('no frame bound → currentActiveProjectId() is "" (unknown project)', () => {
   expect(currentActiveProjectId()).toBe('')
 })
 
@@ -19,7 +19,7 @@ test('runWithActiveProject binds the id for the duration of the callback', () =>
   expect(currentActiveProjectId()).toBe('')
 })
 
-test('undefined / blank project id binds "" (General topic → global scope)', () => {
+test('undefined / blank project id binds "" (unknown project)', () => {
   expect(runWithActiveProject(undefined, () => currentActiveProjectId())).toBe('')
   expect(runWithActiveProject('   ', () => currentActiveProjectId())).toBe('')
 })

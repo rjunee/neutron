@@ -136,7 +136,7 @@ test('a project with NO selection configured reads EVERY connected account', asy
   ])
 })
 
-test('the no-project frame (General topic / cron) is never narrowed', async () => {
+test('the no-project frame refuses even globally connected accounts', async () => {
   const bench = makeBench()
   // Narrow the WORK project hard — every account off.
   for (const key of ['aaaa1111', 'bbbb2222']) {
@@ -149,9 +149,10 @@ test('the no-project frame (General topic / cron) is never narrowed', async () =
   }
   const resolver = makeResolver(bench, [PERSONAL, WORK])
 
-  // No ambient frame bound → '' → no selection applies.
+  // No ambient frame bound → unknown → refuse.
   const unbound = await resolver.accountsFor(CALENDAR)
-  expect(unbound.map((a) => a.account_id)).toEqual(['aaaa1111', 'bbbb2222'])
+  expect(unbound).toEqual([])
+  expect((await resolver.accountsFor(CALENDAR, { projectId: OTHER_PROJECT })).length).toBe(2)
 
   // And explicitly inside the narrowed project, it DOES apply — proving the
   // line above is about the absent frame, not about the filter being inert.

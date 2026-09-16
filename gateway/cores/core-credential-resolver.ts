@@ -49,7 +49,7 @@ import type { OAuthTokenManager } from './oauth-token-manager.ts'
 import type { ProjectCredentialStore } from '@neutronai/project-credentials/store.ts'
 import type { ProjectAccountSelectionStore } from '@neutronai/project-credentials/account-selection-store.ts'
 import type { OwnerHandle } from '@neutronai/persistence/index.ts'
-import { currentActiveProjectId } from './active-project-context.ts'
+import { currentActiveProjectId, currentActiveProjectFrame } from './active-project-context.ts'
 
 /**
  * A service's effective credential scope.
@@ -212,7 +212,7 @@ export class CoreCredentialResolver {
    * so every consumer honours the selection automatically and none can drift.
    *
    * Unset means enabled — see `ProjectAccountSelectionStore`. A blank project id
-   * (General topic, cron, system dispatch) has no selection and filters nothing.
+   * refuses credential reads, including global defaults.
    */
   async accountsFor(
     service: string,
@@ -265,8 +265,9 @@ export class CoreCredentialResolver {
   /**
    * Every account CONNECTED for `service`, before the per-project selection is
    * applied. The active project id is read from the ambient
-   * `runWithActiveProject` frame unless `opts.projectId` overrides it;
-   * GLOBAL-scope services ignore it entirely.
+   * `runWithActiveProject` frame. Host calls outside a frame must supply
+   * `opts.projectId`; within a frame that option may only match the binding.
+   * GLOBAL-scope services still require a known project before reading.
    *
    * A per-project / global `project_credentials` row is a MANUALLY supplied
    * token for one account, so it yields exactly one account and short-circuits
@@ -278,7 +279,13 @@ export class CoreCredentialResolver {
     opts?: { projectId?: string },
   ): Promise<ResolvedAccount[]> {
     const scope = scopeForService(service)
-    const activeProjectId = opts?.projectId ?? currentActiveProjectId()
+    const frame = currentActiveProjectFrame()
+    const activeProjectId = (frame?.project_id ?? opts?.projectId ?? '').trim()
+    // The dispatch binding owns identity; a requested id cannot widen it.
+    // Unknown refuses BEFORE either the store or OAuth fallback is consulted.
+    // [] joins the existing uncredentialed result; resolve/accessors yield null.
+    if (activeProjectId.length === 0) return []
+    if (frame !== undefined && opts?.projectId !== undefined && opts.projectId.trim() !== activeProjectId) return []
     // GLOBAL-scope services (Email/Calendar) resolve instance-wide: force the
     // global sentinel so a stray per-project row can never shadow the shared grant.
     const effectiveProjectId = scope === 'global' ? '' : activeProjectId
