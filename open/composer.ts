@@ -65,8 +65,8 @@ import { resolveLandingStaticDir } from '@neutronai/gateway/wiring/build-landing
 import { DEFAULT_LISTEN_PORT } from '@neutronai/gateway/boot-listener-registry.ts'
 import {
   buildLiveAgentTurn,
-  builtinToolDefs,
   LIVE_AGENT_TOOL_NAMES,
+  PROJECT_REPL_TOOL_DEFS,
 } from '@neutronai/gateway/wiring/build-live-agent-turn.ts'
 import type { LiveAgentOnboardingSeam } from '@neutronai/gateway/wiring/build-live-agent-turn.ts'
 import { buildProjectDocComposer } from '@neutronai/gateway/wiring/build-project-doc-composer.ts'
@@ -1201,7 +1201,7 @@ export function buildOpenGraphComposer(
                   if (projectSubstrate === null) throw new Error('Project conversation substrate is unavailable')
                   // Match the acting turn's surface (`project-build.ts`), or the
                   // first dispatch evicts this child and lands in a respawn.
-                  await prewarmSubstrate(projectSubstrate, builtinToolDefs(LIVE_AGENT_TOOL_NAMES))
+                  await prewarmSubstrate(projectSubstrate, PROJECT_REPL_TOOL_DEFS)
                 },
               }, signal)
             },

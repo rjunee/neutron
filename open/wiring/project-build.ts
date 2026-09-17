@@ -7,7 +7,7 @@ import { createProjectRunners } from '@neutronai/runtime/workers/project-runners
 import { createClaudeActingTurn } from '@neutronai/runtime/workers/claude-acting-turn.ts'
 import { createCodexActingTurn } from '@neutronai/runtime/workers/codex-acting-turn.ts'
 import { createCodexHeadlessRunner } from '@neutronai/runtime/workers/codex-headless.ts'
-import { builtinToolDefs, LIVE_AGENT_TOOL_NAMES } from '@neutronai/gateway/wiring/build-live-agent-turn.ts'
+import { PROJECT_REPL_TOOL_DEFS } from '@neutronai/gateway/wiring/build-live-agent-turn.ts'
 import { CodexProjectSessionHost } from '@neutronai/runtime/adapters/codex-cli/persistent/project-session.ts'
 import { pool, supervisedBySessionKey } from '@neutronai/runtime/adapters/claude-code/persistent/pool-state.ts'
 import type { PersistentReplSubstrateOptions } from '@neutronai/runtime/adapters/claude-code/persistent/types.ts'
@@ -240,7 +240,7 @@ export async function prepareProjectBuild(input: InnerLoopInput, context: Projec
       // AND `Bash` both reported "disabled for this session" on exactly those
       // turns, while wake turns on the SAME session id ran Bash fine. Three
       // card-dispatched runs died this way and surfaced only as a timeout (#1112).
-      spec: { tools: builtinToolDefs(LIVE_AGENT_TOOL_NAMES), model_preference: [], metering_context: { project_id: context.projectId } } },
+      spec: { tools: PROJECT_REPL_TOOL_DEFS, model_preference: [], metering_context: { project_id: context.projectId } } },
     run_id: run.id, state_dir: state,
     actingTurn: async turn => {
       if (context.provider === 'openai-codex') {

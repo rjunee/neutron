@@ -376,6 +376,16 @@ export const LIVE_AGENT_TOOL_NAMES = [
   'WebFetch',
 ] as const
 
+/** The project REPL's built-in surface as ToolDefs — ONE value, so the prewarm
+ * and the dispatch cannot request different surfaces and evict each other.
+ *
+ * Two call sites naming the same surface independently IS #1112: the dispatch
+ * asked for the live list while the prewarm hardcoded `[]`, and the reuse guard
+ * (`spawn.ts:1550`) respawned the child on the mismatch. A test that
+ * string-matches both call sites can only notice drift after it happens; one
+ * shared value makes the drift unrepresentable. */
+export const PROJECT_REPL_TOOL_DEFS: ToolDef[] = builtinToolDefs(LIVE_AGENT_TOOL_NAMES)
+
 /**
  * EXPORTED (ISSUES #504) because the warm REPL's `--tools` surface is a
  * PROPERTY OF THE SESSION, not of this one caller, and every other turn that

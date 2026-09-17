@@ -1,4 +1,4 @@
-import { LIVE_AGENT_TOOL_NAMES } from '@neutronai/gateway/wiring/build-live-agent-turn.ts'
+import { LIVE_AGENT_TOOL_NAMES, PROJECT_REPL_TOOL_DEFS } from '@neutronai/gateway/wiring/build-live-agent-turn.ts'
 import { SUBAGENT_TOOL_NAME } from '@neutronai/runtime/workers/claude-tool-contract.ts'
 import { REFLECTION_GUIDANCE_FRAMING, MAX_REFLECTION_GUIDANCE_CHARS } from '@neutronai/trident/reflection-guidance.ts'
 import { PLAN_SCHEMA, FORGE_SCHEMA, VERDICT_SCHEMA } from '@neutronai/trident/gates/result-contract.ts'
@@ -672,19 +672,35 @@ test('the acting-turn conversation requests the real project tool surface, not a
   expect(names).toEqual([...LIVE_AGENT_TOOL_NAMES])
 })
 
-// #1112 BLOCKER 1. Fixing only the acting turn was not enough — and briefly made
-// it worse. `spec.tools` IS the `--tools` surface (`spawn.ts:302`), and the reuse
-// guard evicts on a mismatch (`spawn.ts:1550`, `:1637-1641`). A project prewarm
-// hardcoding `tools: []` while the dispatch requests the live surface forces the
-// respawn this issue is about, just from the other side. The two must agree, so
-// the agreement is asserted rather than left to a reader comparing two files.
-test('the project prewarm requests the SAME surface the dispatch will request', async () => {
+// #1112 BLOCKER 1. The prewarm and the dispatch must request the SAME surface:
+// `spec.tools` IS the `--tools` surface (`spawn.ts:302`) and the reuse guard
+// evicts on a mismatch (`spawn.ts:1550`, `:1637-1641`), so two independently
+// written lists respawn the child either way round. A review found my first
+// attempt asserted this by string-matching both call sites — which can only
+// notice drift AFTER it happens. They now share one exported value, so the
+// drift is unrepresentable, and this asserts the dispatch uses that value by
+// IDENTITY rather than by spelling.
+test('the dispatch requests the shared project surface, by identity', async () => {
+  const f = await fixture()
+  await f.prepare()
+  const tools = f.captured().conversation.spec.tools
+  // The same object the prewarm is handed — not an equal-looking copy.
+  expect(tools).toBe(PROJECT_REPL_TOOL_DEFS)
+  const names = (tools as ReadonlyArray<{ name: string }>).map(t => t.name)
+  expect(names.length).toBeGreaterThan(0)
+  expect(names).toContain(SUBAGENT_TOOL_NAME)
+  expect(names).toEqual([...LIVE_AGENT_TOOL_NAMES])
+})
+
+// The prewarm half. THIS IS A SOURCE-LEVEL GUARD, not a behavioural one, and a
+// review was right to say so about its predecessor: it cannot establish that no
+// `--tools ""` respawn occurs, because reaching that sequence needs a real
+// persistent spawn (`spawn.ts:1447-1655`) which this fixture deliberately fakes.
+// What it CAN do is stop the prewarm silently drifting back to the default empty
+// surface — the exact regression that made the dispatch fix one-sided. The
+// behavioural gap is recorded on #1112 rather than papered over here.
+test('the project prewarm is handed the shared surface, not the empty default', async () => {
   const source = await readFile(new URL('../composer.ts', import.meta.url), 'utf8')
-  // The project prewarm passes a surface explicitly; it does not take the default.
-  expect(source).toContain('prewarmSubstrate(projectSubstrate, builtinToolDefs(LIVE_AGENT_TOOL_NAMES))')
-  // And the dispatch composes the same one.
-  const wiring = await readFile(new URL('../wiring/project-build.ts', import.meta.url), 'utf8')
-  expect(wiring).toContain('builtinToolDefs(LIVE_AGENT_TOOL_NAMES)')
-  // Neither may fall back to the empty surface that caused #1112.
+  expect(source).toContain('prewarmSubstrate(projectSubstrate, PROJECT_REPL_TOOL_DEFS)')
   expect(source).not.toContain('prewarmSubstrate(projectSubstrate)')
 })
