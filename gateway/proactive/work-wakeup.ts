@@ -99,6 +99,7 @@ import { SubstrateCallError } from '@neutronai/runtime/errors.ts'
 import type { RunDrivingReason } from '@neutronai/trident/run-driving.ts'
 import type { AgentSpec } from '@neutronai/runtime/substrate.ts'
 import type { ToolDef } from '@neutronai/cores-sdk/manifest'
+import { builtinToolDefs } from '../wiring/build-live-agent-turn.ts'
 import { SupervisedLoop, type LoopDescriptor } from '@neutronai/loop'
 import { createLogger } from '@neutronai/logger'
 
@@ -735,13 +736,7 @@ export async function runWorkWakeupSweep(
       continue
     }
 
-    const tools: ToolDef[] = deps.tool_names.map((name) => ({
-      name,
-      description: `Built-in Claude Code tool '${name}' (work-wakeup surface)`,
-      input_schema: { type: 'object' },
-      output_schema: { type: 'object' },
-      capability_required: 'fs:project_data',
-    }))
+    const tools: ToolDef[] = builtinToolDefs(deps.tool_names)
     const spec: AgentSpec = {
       prompt: buildWakeupPrompt({
         label: project.label,
