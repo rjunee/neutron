@@ -307,7 +307,7 @@ test('production composition driver reaches a review panel through all three obs
       return ok()
     }
     if (argv[0] === 'gh') return ok(JSON.stringify([{ number: 7, headRefOid: observedHead, state: 'OPEN',
-      headRefName: 'change', baseRefName: 'main', isCrossRepository: false }]))
+      headRefName: 'change', baseRefName: 'main', isCrossRepository: false, body: '' }]))
     if (argv[0] === 'bash') return ok('RESULT preserved=0 removed=0')
     throw Error(`Unexpected host command: ${argv[0]}`)
   }

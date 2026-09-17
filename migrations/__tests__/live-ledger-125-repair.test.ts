@@ -90,12 +90,13 @@ test('the live 0125 incident boots, applies later migrations, and leaves row 125
 
   const result = applyMigrations(db, fullDir)
 
-  expect(result.applied).toEqual([127, 130, 131, 132, 133, 134, 135, 136, 137, 138, 139, 140, 141, 142, 143, 144, 145, 146, 147, 148, 149, 150, 151, 152, 153])
+  expect(result.applied).toEqual([127, 130, 131, 132, 133, 134, 135, 136, 137, 138, 139, 140, 141, 142, 143, 144, 145, 146, 147, 148, 149, 150, 151, 152, 153, 154])
   expect(result.skipped).toContain(125)
   const columns = columnNames(db, 'code_trident_runs')
   expect(columns).toContain('base_sha')
   expect(columns).toContain('base_behind')
   expect(columns).toContain('agent_waked_at')
+  expect(columns).toContain('publication_token')
   // WAS `not.toContain`, and flipping it is the point of migration 0139 rather
   // than a concession to it. The column was dropped from this replica by a table
   // rebuild that copied only the columns it named; main then had no migration
@@ -174,9 +175,10 @@ test('without the 125 entry the run no longer needs one — it applies 0125 and 
   const result = applyMigrations(db, fullDir)
 
   // It applied the migration itself, instead of demanding to be told about it.
-  expect(result.applied).toEqual([125, 127, 130, 131, 132, 133, 134, 135, 136, 137, 138, 139, 140, 141, 142, 143, 144, 145, 146, 147, 148, 149, 150, 151, 152, 153])
+  expect(result.applied).toEqual([125, 127, 130, 131, 132, 133, 134, 135, 136, 137, 138, 139, 140, 141, 142, 143, 144, 145, 146, 147, 148, 149, 150, 151, 152, 153, 154])
   expect(columnNames(db, 'code_trident_runs')).toContain('base_sha')
   expect(columnNames(db, 'code_trident_runs')).toContain('base_behind')
+  expect(columnNames(db, 'code_trident_runs')).toContain('publication_token')
   // The incident row is untouched — never renamed, never renumbered, never deleted.
   expect(
     db
