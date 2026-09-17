@@ -330,7 +330,7 @@ export async function prepareProjectBuild(input: InnerLoopInput, context: Projec
     const provider: Provider = descriptor.group === 'claude' ? 'anthropic' : descriptor.group === 'codex' ? 'openai-codex' : 'pi'
     // Owner guidance and test execution instructions belong only to the builders.
     const isBuilder = role === 'build' || role === 'fix'
-    const brief = [run.task, isBuilder ? input.test_strategy ?? '' : '',
+    const brief = [run.task, isBuilder ? input.test_strategy_intermediate ?? input.test_strategy ?? '' : '',
       // THE BRIEF MUST STATE THE ENVELOPE, AND THE WORKER MUST COPY ITS IDS.
       // `decodeProjectTrailer` (`runtime/workers/project-runners.ts:44-58`) reads
       // `{ schema, run_id, step_id, kind, result }` and refuses unless `run_id`,
@@ -423,15 +423,16 @@ export async function prepareProjectBuild(input: InnerLoopInput, context: Projec
         const checked = validateTrailer('forge', value?.result?.payload)
         return checked.ok ? checked.value.mutationClaim : null
       } },
-      reviewSuite: { strategy: input.test_strategy ?? '', scope: 'full-suite',
+      reviewSuite: { strategy: input.test_strategy_intermediate ?? input.test_strategy ?? '',
+        scope: input.test_strategy_intermediate ? 'subset' : 'full-suite',
         // G063 REQUIRES A BUILD/FIX CHECKPOINT FOR THIS REVISION. Stubbed to `null`,
         // the source returns `unknown` (`project-observation-sources.ts:76`) for EVERY
         // card and any strategy — measured — and `applyReviewSuite` propagates it, so
         // the review decision is `unknown` and no dispatched card can reach `merged`.
         //
-        // The checkpoint establishes which revision finished; its suite verdict remains
-        // untrusted. The host therefore runs the configured suite in that worktree and
-        // records the process exit code it observed. A timeout has no usable verdict.
+        // The checkpoint establishes which revision finished. An intermediate strategy
+        // deliberately defers its full suite; without one, the host retains the original
+        // full-suite observation in that worktree. A timeout has no usable verdict.
         //
         // THE IDENTITY IS THE HOST'S. The original carried the claim in a round-labelled
         // checkpoint (`forge-done` / `fix-round-N`); here each role overwrites one result
@@ -447,12 +448,14 @@ export async function prepareProjectBuild(input: InnerLoopInput, context: Projec
             const checked = validateTrailer('forge', value.result.payload)
             if (!checked.ok) continue
             const claim = checked.value
+            if (input.test_strategy_intermediate) return { runId: run.id, head: snapshot.head, round, report: {
+              ...(claim.suiteOutcome === undefined ? {} : { suiteOutcome: claim.suiteOutcome }),
+              ...(claim.suiteEvidence === undefined ? {} : { suiteEvidence: claim.suiteEvidence }),
+            } }
             const command = fullSuiteCommand(input.test_strategy)
             if (!command) return { runId: run.id, head: snapshot.head, round, report: null }
             const logPath = join(state, `suite-round-${round}.log`)
             const observed = await (context.runSuite ?? spawnCapture)(['bash', '-lc', suiteScript(command, logPath)], run.worktree, undefined, REVIEW_SUITE_TIMEOUT_MS)
-            // A shell that could not open the transcript never ran the suite; its
-            // exit code is about the redirect, not about the tests. `unknown`, not red.
             const unopenable = observed.stdout.trimStart().startsWith(SUITE_LOG_UNAVAILABLE)
             return { runId: run.id, head: snapshot.head, round, report: {
               ...(observed.timed_out || unopenable ? {} : { hostExitCode: observed.exit_code }),
@@ -461,6 +464,16 @@ export async function prepareProjectBuild(input: InnerLoopInput, context: Projec
             } }
           }
           return null
+        } },
+      publicationSuite: { strategy: input.test_strategy ?? '', scope: 'full-suite',
+        readCheckpoint: async (snapshot, round) => {
+          const command = fullSuiteCommand(input.test_strategy)
+          if (!command) return { runId: run.id, head: snapshot.head, round, report: null }
+          const logPath = join(state, 'suite-publication.log')
+          const observed = await (context.runSuite ?? spawnCapture)(['bash', '-lc', suiteScript(command, logPath)], run.worktree, undefined, REVIEW_SUITE_TIMEOUT_MS)
+          const unopenable = observed.stdout.trimStart().startsWith(SUITE_LOG_UNAVAILABLE)
+          return { runId: run.id, head: snapshot.head, round, report:
+            observed.timed_out || unopenable ? {} : { hostExitCode: observed.exit_code } }
         } },
       review: { evidenceRoot: state, env: context.env, phaseModels: config, wallMs: 2_700_000, signal,
         runnerFor: (model, seat) => model.group === 'api' || model.group === 'kimi' ? undefined

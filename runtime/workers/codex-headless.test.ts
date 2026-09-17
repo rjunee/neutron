@@ -134,6 +134,8 @@ async function compare(outcome: BoundedWorkOutcome, measured: BuildSnapshot) {
   const build = fakeRunner('openai-codex', { outcomes: new Map([['run:build:0', outcome]]) })
   let reads = 0
   const deps: BuildRunDeps = {
+    // Terminal full-suite evidence; the driver refuses to merge without a source.
+    publicationSuite: async () => ({ kind: 'known' as const, findings: [] }),
     readReviewCap: async () => ({ kind: 'known' }),
     // G023: the builder's branch is the host's assignment, and a missing one is
     // `unknown` rather than agreement. Production takes it from the run row; this

@@ -2,6 +2,14 @@ import { expect, test } from 'bun:test'
 import { applyReviewSuite, assessReviewSuite, type SuiteObservation } from './review-suite.ts'
 const snapshot = { head: 'a'.repeat(40), diff: '+code', pr: null }
 const approve = { kind: 'approve' } as const
+
+test('a deliberately deferred subset is known, while the same full-suite report is not', async () => {
+  const observe = async () => ({ kind: 'known' as const, runId: 'run', head: snapshot.head, round: 2,
+    strategy: 'subset instructions', scope: 'subset' as const, report: { suiteOutcome: 'deferred' } })
+  expect(await assessReviewSuite({ observe }, snapshot, 2, 'run')).toEqual({ kind: 'known', findings: [] })
+  const full = async () => ({ ...(await observe()), scope: 'full-suite' as const })
+  expect(await assessReviewSuite({ observe: full }, snapshot, 2, 'run')).toMatchObject({ kind: 'unknown' })
+})
 function fixture() {
   const observation: SuiteObservation = { kind: 'known', runId: 'run', head: snapshot.head, round: 2, strategy: 'run full suite', scope: 'full-suite', report: { hostExitCode: 0, suiteOutcome: 'passed' } }
   const source = { observe: async () => observation }

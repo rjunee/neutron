@@ -35,6 +35,9 @@ async function fixture() {
     reviewReadiness: { observe: async () => ({ kind: 'known', head, configuration: { kind: 'resolved', required: ['checks'] }, mergeability: 'mergeable', checksComplete: true, checks: [{ name: 'checks', state: 'passed' }] }) },
     reviewCi: { observe: async snapshot => ({ kind: 'known', head: snapshot.head, status: 'green', failing: [], base: null }) },
     reviewSuite: { observe: async (snapshot, round) => ({ kind: 'known', runId: 'test', head: snapshot.head, round, strategy: '', scope: 'full-suite', report: null }) },
+    // Terminal full-suite evidence. The driver refuses to merge without it, so the
+    // fixture must decide what this host reports rather than leave it unwired.
+    publicationSuite: { observe: async (snapshot, round) => ({ kind: 'known', runId: 'test', head: snapshot.head, round, strategy: '', scope: 'full-suite', report: null }) },
     reviewed_head: null,
     runners: { pi: fakeRunner('pi') }, replProvider: 'pi',
     workers: Object.fromEntries(['plan', 'build', 'review', 'fix'].map(role => [role, { provider: 'pi', request }])) as BuildHostOptions['workers'],

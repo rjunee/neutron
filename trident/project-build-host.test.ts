@@ -347,3 +347,54 @@ test('G046 observation carries incomplete evidence into waiting', async () => {
   f.raw.checksComplete = true
   expect(classifyReviewReadiness(observedSnapshot, await f.readiness()).kind).toBe('passed')
 })
+
+for (const scenario of ['same head', 'changed head', 'subset', 'different strategy', 'missing publication source', 'wrong run', 'wrong round', 'red suite', 'later subset', 'later unknown', 'publication subset'] as const) {
+  test(`publication reuses review evidence: ${scenario}`, async () => {
+    const f = await fixture()
+    const subject = { head: 'b'.repeat(40), diff: '+code', pr: null }
+    let reviewRuns = 0
+    let publicationRuns = 0
+    f.options.policy.reviewSuite = {
+      strategy: 'bun test', scope: scenario === 'subset' ? 'subset' : 'full-suite',
+      readCheckpoint: async (snapshot, round) => {
+        reviewRuns++
+        return { runId: scenario === 'wrong run' ? 'wrong' : f.options.production.runId,
+          head: snapshot.head, round: scenario === 'wrong round' ? round + 1 : round,
+          report: { hostExitCode: scenario === 'red suite' ? 1 : 0 } }
+      },
+    }
+    if (scenario !== 'missing publication source') f.options.policy.publicationSuite = {
+      strategy: scenario === 'different strategy' ? 'bash full.sh' : 'bun test', scope: scenario === 'publication subset' ? 'subset' : 'full-suite',
+      readCheckpoint: async (snapshot, round) => {
+        publicationRuns++
+        return { runId: f.options.production.runId, head: snapshot.head, round, report: { hostExitCode: 0 } }
+      },
+    }
+    const host = await createProjectBuildHost(f.options)
+    await host.deps.reviewSuite!(subject, 2)
+    if (scenario === 'subset') {
+      subject.head = 'c'.repeat(40)
+      await host.deps.reviewSuite!(subject, 3)
+    }
+    if (scenario === 'later subset') {
+      f.options.policy.reviewSuite.scope = 'subset'
+      await host.deps.reviewSuite!(subject, 3)
+    }
+    if (scenario === 'later unknown') {
+      f.options.policy.reviewSuite.readCheckpoint = async () => null
+      await host.deps.reviewSuite!(subject, 3)
+    }
+    const result = await host.deps.publicationSuite(scenario === 'changed head' ? { ...subject, head: 'c'.repeat(40) } : subject)
+    expect(reviewRuns).toBe(scenario === 'later subset' || scenario === 'subset' ? 2 : 1)
+    if (scenario === 'missing publication source') {
+      expect(result.kind).toBe('unknown')
+      expect(publicationRuns).toBe(0)
+    } else if (scenario === 'red suite') {
+      expect(result).toMatchObject({ kind: 'known', findings: [{ advisory: false, title: 'FULL SUITE NOT PROVEN' }] })
+      expect(publicationRuns).toBe(0)
+    } else {
+      expect(result).toEqual({ kind: 'known', findings: [] })
+      expect(publicationRuns).toBe(scenario === 'same head' ? 0 : 1)
+    }
+  })
+}
