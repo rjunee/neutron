@@ -3,6 +3,7 @@ import { mkdtemp, readFile, rename, rm, writeFile } from 'node:fs/promises'
 import { tmpdir } from 'node:os'
 import { createHash } from 'node:crypto'
 import { join } from 'node:path'
+import { reserveTrailerSlot } from './trailer-slot.ts'
 import type { AgentSpec } from '../substrate.ts'
 import type { BoundedWorkOutcome, BoundedWorkRequest } from '../bounded-work.ts'
 import { piInReplRunner, type PiInReplOptions } from './pi-in-repl.ts'
@@ -66,7 +67,8 @@ test('dispatches one explicitly modeled subagent and reads its file, never the r
   const f = await fixture()
   const compose = f.options.composeActingTurn
   f.options.composeActingTurn = async (topic, spec, opts) => {
-    expect(await readFile(f.reservation, 'utf8')).toBe(JSON.stringify(f.req))
+    // Armed by dispatch time, so the identity is a prefix rather than the whole file.
+    expect(await readFile(f.reservation, 'utf8')).toStartWith(JSON.stringify(f.req))
     const args = JSON.parse(spec.prompt.slice(spec.prompt.indexOf('\n') + 1))
     expect(opts.request).toBe(f.req)
     expect(args.agent).toMatch(/^host-bounded-worker-[a-f0-9]{64}$/); expect(opts.subagent).toBe(args.agent)
@@ -367,10 +369,30 @@ test("a second round of the same role is not answered by the previous round's tr
 
 test('a resumed step keeps the trailer already written for it', async () => {
   const f = await fixture()
-  // The reservation exists, so this is the SAME step re-entered after a gateway
-  // replacement — not a new round. Its own validated answer must survive.
-  await writeFile(f.reservation, JSON.stringify(f.req))
+  // A real resume: the step was dispatched — which is what ARMS its reservation and
+  // clears its slot — its worker wrote the trailer, and the gateway was then replaced.
+  // Its own validated answer must survive, and it must not be dispatched again.
+  expect(await reserveTrailerSlot(f.reservation, JSON.stringify(f.req), f.req.result.path)).toEqual({ kind: 'dispatch' })
   await f.trailer()
   expect(await f.run()).toEqual({ kind: 'blocked', on: 'file evidence' })
   expect(f.calls).toHaveLength(0)
+})
+
+test('a replacement arriving between reservation and clear still clears the slot', async () => {
+  const f = await fixture()
+  // Round two reserved its step and the process was replaced BEFORE the slot was
+  // cleared. That reservation is UNARMED, which proves no dispatch was ever
+  // submitted for this step — so the trailer in the slot can only be round one's,
+  // and the replacement must clear it rather than read it as an answer.
+  await writeFile(f.reservation, JSON.stringify(f.req))
+  await writeFile(f.req.result.path, JSON.stringify({ run_id: f.req.run_id, step_id: 'build-0', schema: f.req.result.schema, on: 'round one' }))
+  let slotAtDispatch: string | undefined
+  const compose = f.options.composeActingTurn
+  f.options.composeActingTurn = (async (...args: Parameters<typeof compose>) => {
+    slotAtDispatch = await readFile(f.req.result.path, 'utf8').catch((error: NodeJS.ErrnoException) => error.code)
+    setTimeout(() => { void f.trailer() }, 60)
+    return compose(...args)
+  }) as typeof compose
+  expect(await f.run()).toEqual({ kind: 'blocked', on: 'file evidence' })
+  expect(slotAtDispatch).toBe('ENOENT')
 })

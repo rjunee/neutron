@@ -1,5 +1,5 @@
 import { spawn, spawnSync, type ChildProcess } from 'node:child_process'
-import { readFile, writeFile } from 'node:fs/promises'
+import { readFile } from 'node:fs/promises'
 import { createHash } from 'node:crypto'
 import { dirname, join, resolve } from 'node:path'
 import type {
@@ -13,7 +13,7 @@ import type {
   WorkerRunner,
 } from '../bounded-work.ts'
 import { unknownCause } from '../refusal-cause.ts'
-import { clearTrailerSlot } from './trailer-slot.ts'
+import { reserveTrailerSlot } from './trailer-slot.ts'
 
 type Probe = { ok: true } | { ok: false; reason: RefusalReason; detail: string }
 
@@ -134,16 +134,9 @@ export function createCodexHeadlessRunner(options: CodexHeadlessRunnerOptions = 
       const key = createHash('sha256').update(JSON.stringify([req.run_id, req.step_id])).digest('hex')
       const reservation = join(dirname(req.result.path), `codex-headless-step-${key}.json`)
       const identity = JSON.stringify(req)
-      let dispatch = true
-      try {
-        await writeFile(reservation, identity, { flag: 'wx', mode: 0o600 })
-      } catch {
-        if (await readFile(reservation, 'utf8').catch(() => null) !== identity) {
-          return { kind: 'unknown', detail: 'Step is reserved for a different request.' }
-        }
-        dispatch = false
-      }
-      if (dispatch) {
+      const held = await reserveTrailerSlot(reservation, identity, req.result.path)
+      if (held.kind === 'unknown') return { kind: 'unknown', detail: held.detail }
+      if (held.kind === 'dispatch') {
         const effort = req.effort === null ? '' : CLI_EFFORTS[req.effort]
         const env = scrubGithubEnv({
           ...baseEnv,
@@ -155,11 +148,6 @@ export function createCodexHeadlessRunner(options: CodexHeadlessRunnerOptions = 
           NEUTRON_CODEX_BUILD_TRAILER_FILE: req.result.path,
           NEUTRON_CODEX_THREAD_ID: req.thread?.id ?? '',
         })
-        // The wrapper reads this same path back after exit. A role's slot is reused
-        // across rounds, so an uncleared slot lets an exit-0 child that wrote nothing
-        // be credited with the PREVIOUS round's trailer.
-        const slot = await clearTrailerSlot(req.result.path)
-        if (!slot.ok) return { kind: 'unknown', detail: slot.detail }
         const child = spawn('/bin/bash', [buildScript], { cwd: req.cwd, env, stdio: 'ignore' })
         live.set(req.step_id, child)
         let timedOut = false
