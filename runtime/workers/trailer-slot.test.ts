@@ -91,3 +91,29 @@ test('an absent slot is cleared successfully; an unclearable one is reported', a
   expect(outcome.ok).toBe(false)
   expect(outcome).toHaveProperty('detail', expect.stringContaining(asDirectory))
 })
+
+test('a step whose owner died between create and arm recovers on a later attempt, and never dispatches twice', async () => {
+  // #1122's acceptance, end to end. THE DEATH IS REPRODUCED EXACTLY, not approximated:
+  // the exclusive `wx` create writes the bare identity, and the owner dies before
+  // `identity + ARMED` is written, so this IS the byte state it leaves behind.
+  const s = await slot()
+  await writeFile(s.reservation, s.identity, { flag: 'wx', mode: 0o600 })
+
+  // The wedge #1122 reports. A replacement cannot tell a dead owner from one that is
+  // microseconds away from arming, so it refuses instead of dispatching the bounded task
+  // a second time against one shared trailer. Refusing is correct and is not recovery.
+  const wedged = await reserveTrailerSlot(s.reservation, s.identity, s.result)
+  expect(wedged.kind).toBe('unknown')
+
+  // The host is the only party that knows the run stopped, so it is the only one that may
+  // clear this. Nothing about the worker-side rules above changed.
+  expect(await reconcileStoppedTrailerReservations(dirname(s.reservation))).toEqual({ ok: true })
+
+  // Acceptance 1: the later attempt makes progress.
+  expect(await reserveTrailerSlot(s.reservation, s.identity, s.result)).toEqual({ kind: 'dispatch' })
+
+  // Acceptance 2: "without the bounded task ever running twice" — recovery must not have
+  // reopened the door it exists to keep shut.
+  const sibling = await reserveTrailerSlot(s.reservation, s.identity, s.result)
+  expect(sibling.kind).not.toBe('dispatch')
+})
