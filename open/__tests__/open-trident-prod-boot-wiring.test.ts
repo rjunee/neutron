@@ -5,6 +5,7 @@ import * as codexWorker from '@neutronai/runtime/workers/codex-headless.ts'
 import { fakeRunner } from '@neutronai/runtime/bounded-work.ts'
 import { TridentRunStore } from '@neutronai/trident/store.ts'
 import { executeBoundReview } from '@neutronai/trident/review-run.ts'
+import { honourDiffOutput } from '@neutronai/trident/testing/diff-output-host.ts'
 import { makeTridentRun } from '@neutronai/trident/testing/make-trident-run.ts'
 import { spyOn } from 'bun:test'
 import { asOwnerHandle } from '@neutronai/persistence/index.ts'
@@ -20,6 +21,7 @@ import { fileURLToPath } from 'node:url'
 import { seedMigratedDb } from '../../tests/support/migrated-db.ts'
 import { ProjectDb } from '@neutronai/persistence/index.ts'
 import { buildOpenGraphComposer } from '../composer.ts'
+import { buildCoreModules } from '@neutronai/gateway/composition/build-core-modules.ts'
 import type { AgentSpec, Substrate } from '@neutronai/runtime/substrate.ts'
 import type { SessionHandle } from '@neutronai/runtime/session-handle.ts'
 import type { Event } from '@neutronai/runtime/events.ts'
@@ -204,6 +206,55 @@ test('production composition completes a bound review through its isolated panel
   )
 
   expect(result).toMatchObject({ status: 'success', verdict: 'APPROVE', reviewed_sha: head })
+})
+
+test('production module tick completes a bound review through the forwarded panel firer', async () => {
+  process.env['ANTHROPIC_API_KEY'] = 'sk-ant-synthetic-trident-test'
+  const composition = await buildOpenGraphComposer({
+    env: process.env,
+    substrateFactory: (() => panelCompletingSubstrate()) as any,
+  })({ db, project_slug: 'owner' })
+  const repo = join(tmpDir, 'bound-review-repo')
+  const worktree = join(repo, '.trident-worktrees', 'bound-review-tick-bound')
+  const head = 'a'.repeat(40)
+  const host = async (cmd: string[]) => {
+    const joined = cmd.join(' ')
+    if (joined.startsWith('gh pr view 515 ')) return { ok: true, stdout: JSON.stringify({ headRefOid: head, headRefName: 'reviewed', baseRefName: 'main' }), stderr: '', exit_code: 0 }
+    if (joined === 'gh pr diff 515') return { ok: true, stdout: 'diff --git a/a.ts b/a.ts\n-old\n+new\n', stderr: '', exit_code: 0 }
+    if (joined.includes('worktree add --detach')) { mkdirSync(worktree, { recursive: true }); return { ok: true, stdout: '', stderr: '', exit_code: 0 } }
+    if (joined.includes('worktree remove')) { rmSync(worktree, { recursive: true, force: true }); return { ok: true, stdout: '', stderr: '', exit_code: 0 } }
+    if (joined.includes(' merge-base ')) return { ok: true, stdout: `${'b'.repeat(40)}\n`, stderr: '', exit_code: 0 }
+    return { ok: true, stdout: '', stderr: '', exit_code: 0 }
+  }
+
+  // Keep the composer's firers intact; replace only external host commands.
+  const modules = buildCoreModules({
+    ...composition,
+    trident: { ...composition.trident!, run_host: honourDiffOutput(host) },
+  })
+  const instance = await modules.tridentModule.init({
+    graph: { get: () => composition.channel_router as never, names: () => ['channels'] },
+    config: {},
+  })
+  try {
+    await instance.loop.stop()
+    await instance.stranded_sweep
+    const run = await instance.store.create({
+      id: 'tick-bound', slug: 'tick-bound', project_slug: 'owner',
+      repo_path: repo, task: 'Review the bound PR', bound_pr: 515,
+    })
+    await instance.loop.runOnce()
+    await instance.drain!()
+    await instance.loop.runOnce()
+    const completed = instance.store.get(run.id)!
+    expect(completed.failure_reason).toBeNull()
+    expect(completed.phase).toBe('done')
+    expect(completed.inner_verdict).toBe('APPROVE')
+    expect(completed.inner_checkpoint).toBe(`bound-review-complete:${head}:absent`)
+    expect(completed.pr).toBe(515)
+  } finally {
+    await modules.tridentModule.shutdown!(instance)
+  }
 })
 
 describe('Open foundational-Trident prod-boot wiring', () => {
