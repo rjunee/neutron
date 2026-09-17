@@ -49,6 +49,25 @@ New regression `an EDITED same card still carries its own published-PR provenanc
 
 That fix exposed a latent defect in the MOVED-tip mutant guard. Its control was documented as "a different card with no history whatsoever" but dispatched through the shared `board`, which still carries `cardLink` — the SAME card by the ladder's rule. It only read as history-free because the task gate masked the carry. The control now uses a board with `linked_run_id: null`. Verified that guard still fires for its own purpose: deleting the head-equality comparison at `trident/board-dispatch.ts:1445` turns it RED.
 
+### Earlier-round mutation evidence, folded in from the second record
+
+`AGENTS.md:28` requires one as-built record per change. This branch had grown two
+describing the same change, so the other (`fix-1142-auto090810.md`) is removed and its
+unique evidence is kept here. **Line numbers in this table are the ones that were
+current when each mutation ran; several have since moved.** It records the initial
+durable-provenance implementation, not the receipt binding above.
+
+| Guard | Compiling mutation | RED | Restored GREEN |
+|---|---|---|---|
+| Owned-versus-foreign admission, `trident/build-run.ts:262-265` | Removed `!ownsMeasuredPr`, restoring unconditional fresh refusal | Owned retry received `blocked` instead of `merged` | 1 pass, 0 fail |
+| Observation is not provenance, `trident/board-dispatch.ts:1516-1519` | Substituted `prior.pr` for `prior.published_pr` | Foreign observed PR produced `published_pr: 73` instead of null | 1 pass, 0 fail |
+| Provenance carry, `trident/board-dispatch.ts:1519` | Removed the carry spread | Owned retry received null instead of PR 7 | 1 pass, 0 fail |
+| Publication persistence, `trident/production-host-effects.ts:389` | Removed `published_pr` from the atomic update | Published row retained null instead of PR 12 | 1 pass, 0 fail |
+
+That round's run: `bun test trident/build-run.test.ts trident/board-dispatch.test.ts trident/production-host-effects.test.ts trident/store.test.ts trident/project-build-host.test.ts trident/stranded-salvage-realgit.test.ts` — 523 pass, 0 fail; `scripts/ci/typecheck-all.sh` all 51 configurations passed; lint passed; `git diff --check` passed.
+
+Two limits carried over from that record: no cleanup-on-failure behaviour was added, so reviewed work is retained; and no `SPEC.md` or spec-item decision changed, because this implements the issue's selected durable-provenance reclaim behaviour without moving the product target.
+
 ### Record corrections and limits
 
 The filed fresh-admission citation is now `trident/build-run.ts:269-270`; launch discovery remains `trident/launch-preparation.ts:201-204`. The earlier implementation record overstated what observation proved; its behavior and invariant sections have been rewritten. The previous migration-repair record at this path is superseded by this account of the complete publication correction; the reviewed migration repair remains in the branch.
