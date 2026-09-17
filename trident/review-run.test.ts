@@ -311,7 +311,7 @@ describe('executeBoundReview', () => {
     const run = makeTridentRun({ id: 'bound-adapter', bound_pr: 515, repo_path: '/repo' })
 
     const result = await executeBoundReview(run, {
-      run_host: host.run,
+      run_host: honourDiffOutput(host.run),
       scratch_path: worktree,
       fire_workflow: async (input) => {
         firedInputs.push(input)
@@ -374,6 +374,49 @@ function panelInputsDiff(panelId: string): string {
 }
 
 describe('orchestrator bound-review dispatch', () => {
+  test('a bound run fires its isolated panel, never the composition build launcher', async () => {
+    const repo = scratch('isolated-panel-composition')
+    const worktree = join(repo, '.trident-worktrees', 'bound-review-bound-isolated-panel')
+    const host = recordingHost({ worktree, gate: 'absent' })
+    let buildFires = 0
+    let panelFires = 0
+    const { step } = buildTridentOrchestrator({
+      fire_workflow: async () => {
+        buildFires += 1
+        return { status: 'fired', error: null }
+      },
+      fire_review_panel: async (input) => {
+        panelFires += 1
+        const db = ProjectDb.open(input.db_path)
+        try {
+          await db.run(
+            `UPDATE code_trident_runs
+                SET inner_checkpoint = 'argus-approved',
+                    inner_checkpoint_head = ?,
+                    inner_checkpoint_findings = ?,
+                    inner_result = ?
+              WHERE id = ?`,
+            [HEAD, '[]', JSON.stringify({ ok: true, verdict: 'APPROVE', checkpoint: 'argus-approved', blockKind: 'none' }), input.run.id],
+          )
+        } finally {
+          db.close()
+        }
+        return { status: 'fired', error: null }
+      },
+      db_path: '/tmp/not-used-bound-isolated-panel.db',
+      run_host: honourDiffOutput(host.run),
+    })
+
+    const outcome = await step(makeTridentRun({
+      id: 'bound-isolated-panel', bound_pr: 515, repo_path: repo,
+      subagent_run_id: null, subagent_status: null,
+    }))
+
+    expect(outcome.run).toMatchObject({ phase: 'done', inner_verdict: 'APPROVE' })
+    expect(panelFires).toBe(1)
+    expect(buildFires).toBe(0)
+  })
+
   test('a bound run lands done without a build fire or host fallthrough', async () => {
     let reviewCalls = 0
     let buildFires = 0

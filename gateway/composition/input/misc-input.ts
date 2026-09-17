@@ -62,6 +62,9 @@ export interface MiscCompositionInput {
    * Omission retains the credential-free boot's inactive advance dependencies. */
   trident?: {
     fire_inner_workflow: import('@neutronai/trident/inner-loop.ts').TridentWorkflowFirer
+    /** The retained dynamic-workflow firer for an isolated bound-review panel.
+     * Its input's db_path is the panel database, never the composition store. */
+    fire_review_panel?: import('@neutronai/trident/inner-loop.ts').TridentWorkflowFirer
     run_host?: import('@neutronai/trident/git-mode.ts').DiffOutputHost
     on_orphaned_session?: 'redispatch' | 'wait' | 'fail'
     /**

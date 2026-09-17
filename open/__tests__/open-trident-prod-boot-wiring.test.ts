@@ -4,6 +4,8 @@ import * as projectHost from '@neutronai/trident/project-build-host.ts'
 import * as codexWorker from '@neutronai/runtime/workers/codex-headless.ts'
 import { fakeRunner } from '@neutronai/runtime/bounded-work.ts'
 import { TridentRunStore } from '@neutronai/trident/store.ts'
+import { executeBoundReview } from '@neutronai/trident/review-run.ts'
+import { makeTridentRun } from '@neutronai/trident/testing/make-trident-run.ts'
 import { spyOn } from 'bun:test'
 import { asOwnerHandle } from '@neutronai/persistence/index.ts'
 /** Production boot and typed project-launch composition checks. */
@@ -99,6 +101,39 @@ function recordingSubstrate(prompts: string[]): Substrate {
   }
 }
 
+function panelCompletingSubstrate(): Substrate {
+  return {
+    start(spec: AgentSpec): SessionHandle {
+      async function* gen(): AsyncGenerator<Event> {
+        const match = /\n   args = (.+)\n   Pass `args`/.exec(spec.prompt)
+        if (match === null) throw new Error('bound panel launch prompt did not contain structured workflow args')
+        const args = JSON.parse(match[1]!) as { dbPath: string; runId: string }
+        const panel = ProjectDb.open(args.dbPath)
+        try {
+          await panel.run(
+            `UPDATE code_trident_runs
+                SET inner_checkpoint = 'argus-approved',
+                    inner_checkpoint_head = ?,
+                    inner_checkpoint_findings = '[]',
+                    inner_result = ?
+              WHERE id = ?`,
+            ['a'.repeat(40), JSON.stringify({ ok: true, verdict: 'APPROVE', checkpoint: 'argus-approved', blockKind: 'none' }), args.runId],
+          )
+        } finally {
+          panel.close()
+        }
+        yield { kind: 'completion', usage: { input_tokens: 1, output_tokens: 1 }, substrate_instance_id: 'bound-panel-test' }
+      }
+      return {
+        events: gen(),
+        async respondToTool(): Promise<void> { throw new Error('mock substrate: no external tools') },
+        async cancel(): Promise<void> {},
+        tool_resolution: 'internal',
+      }
+    },
+  }
+}
+
 test.each(['anthropic', 'pi'] as const)('production composition constructs project host and starts its typed run for %s', async provider => {
   process.env['ANTHROPIC_API_KEY'] = 'sk-ant-synthetic-trident-test'
   const original = projectHost.createProjectBuildHost
@@ -142,6 +177,33 @@ test.each(['anthropic', 'pi'] as const)('production composition constructs proje
     expect(result.projectBuild.kind).toBe(provider === 'anthropic' ? 'unknown' : 'refused')
     expect(result.projectBuild.cleanup).toBeDefined()
   } finally { construct.mockRestore(); codex.mockRestore() }
+})
+
+test('production composition completes a bound review through its isolated panel firer', async () => {
+  process.env['ANTHROPIC_API_KEY'] = 'sk-ant-synthetic-trident-test'
+  const composition = await buildOpenGraphComposer({
+    env: process.env,
+    substrateFactory: (() => panelCompletingSubstrate()) as any,
+  })({ db, project_slug: 'owner' })
+  const repo = join(tmpDir, 'bound-review-repo')
+  const worktree = join(repo, '.trident-worktrees', 'bound-review-composed-bound')
+  const head = 'a'.repeat(40)
+  const host = async (cmd: string[]) => {
+    const joined = cmd.join(' ')
+    if (joined.startsWith('gh pr view 515 ')) return { ok: true, stdout: JSON.stringify({ headRefOid: head, headRefName: 'reviewed', baseRefName: 'main' }), stderr: '', exit_code: 0 }
+    if (joined === 'gh pr diff 515') return { ok: true, stdout: 'diff --git a/a.ts b/a.ts\n-old\n+new\n', stderr: '', exit_code: 0 }
+    if (joined.includes('worktree add --detach')) { mkdirSync(worktree, { recursive: true }); return { ok: true, stdout: '', stderr: '', exit_code: 0 } }
+    if (joined.includes('worktree remove')) { rmSync(worktree, { recursive: true, force: true }); return { ok: true, stdout: '', stderr: '', exit_code: 0 } }
+    if (joined.includes(' merge-base ')) return { ok: true, stdout: `${'b'.repeat(40)}\n`, stderr: '', exit_code: 0 }
+    return { ok: true, stdout: '', stderr: '', exit_code: 0 }
+  }
+
+  const result = await executeBoundReview(
+    makeTridentRun({ id: 'composed-bound', bound_pr: 515, repo_path: repo }),
+    { run_host: host, scratch_path: worktree, fire_workflow: composition.trident!.fire_review_panel! },
+  )
+
+  expect(result).toMatchObject({ status: 'success', verdict: 'APPROVE', reviewed_sha: head })
 })
 
 describe('Open foundational-Trident prod-boot wiring', () => {

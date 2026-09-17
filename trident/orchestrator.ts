@@ -185,6 +185,9 @@ export interface BuildTridentOrchestratorOptions {
   /** The inner-workflow FIRER (Phase 2a). Fires the inner CC Dynamic Workflow on
    *  a warm substrate + settles the launching turn; see `buildWorkflowFirer`. */
   fire_workflow: TridentWorkflowFirer
+  /** Retained review-panel firer. Unlike `fire_workflow`, it writes the isolated
+   * panel database supplied by `review-run.ts`, not the composition run store. */
+  fire_review_panel?: TridentWorkflowFirer
   /** Absolute sqlite file path threaded to the workflow's checkpoint +
    *  terminal-result Bash steps. */
   db_path: string
@@ -1824,7 +1827,7 @@ export function buildTridentOrchestrator(
     }
     const boundReview = await advanceBoundReview(run, {
       run_host: opts.run_host,
-      fire_workflow: fireWorkflow,
+      ...(opts.fire_review_panel !== undefined ? { fire_review_panel: opts.fire_review_panel } : {}),
       ...(opts.execute_bound_review !== undefined ? { execute_bound_review: opts.execute_bound_review } : {}),
       ...(opts.codex_home !== undefined ? { codex_home: opts.codex_home } : {}),
       ...(opts.resolve_codex_home !== undefined ? { resolve_codex_home: opts.resolve_codex_home } : {}),

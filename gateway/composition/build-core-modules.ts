@@ -629,10 +629,13 @@ export function buildCoreModules(
           run_host: runHost,
           refs_ready: () => strandedSweepSettled,
         })
-        // Pass typed run context directly to the project launcher.
+        // The project launcher owns ordinary builds. Bound reviews retain the
+        // dynamic workflow because their panel row lives in an isolated database.
         const fire_workflow = tridentWiring.fire_inner_workflow
+        const fire_review_panel = tridentWiring.fire_review_panel
         const orchestratorOpts: Parameters<typeof buildTridentOrchestrator>[0] = {
           fire_workflow,
+          ...(fire_review_panel !== undefined ? { fire_review_panel } : {}),
           db_path: input.db.path,
           run_host: runHost,
           // The hang watchdog's positive-liveness reader (see `latest_stage_event_at`
