@@ -241,6 +241,8 @@ export interface TridentRun {
   /** How many commits local <base> was behind origin/<base> at cut time; observability only. */
   base_behind: number | null
   pr: number | null
+  /** PR whose publication by this card's run lineage was durably witnessed. */
+  published_pr: number | null
   merge_mode: MergeMode
   subagent_run_id: string | null
   subagent_status: SubagentStatus | null
@@ -434,6 +436,8 @@ export interface CreateTridentRunInput {
   /** Defaults to 'local'; set by `detectMergeMode` at creation. */
   merge_mode?: MergeMode
   branch?: string | null
+  /** Durable publication provenance carried through the board's exact prior-run link. */
+  published_pr?: number | null
   worktree?: string | null
   chat_id?: string | null
   thread_id?: string | null
@@ -515,6 +519,7 @@ export interface TridentRunUpdate {
   base_sha?: string | null
   base_behind?: number | null
   pr?: number | null
+  published_pr?: number | null
   merge_mode?: MergeMode
   subagent_run_id?: string | null
   subagent_status?: SubagentStatus | null
@@ -548,6 +553,7 @@ interface TridentRunDbRow {
   base_sha: string | null
   base_behind: number | null
   pr: number | null
+  published_pr: number | null
   merge_mode: MergeMode
   subagent_run_id: string | null
   subagent_status: SubagentStatus | null
@@ -581,7 +587,7 @@ interface TridentRunDbRow {
 /** Exported solely so tests can pin the column-count invariant. */
 export const COLS =
   'id, slug, project_slug, phase, round, max_rounds, ralph, ralph_round, ' +
-  'max_ralph_rounds, branch, pr, merge_mode, subagent_run_id, subagent_status, ' +
+  'max_ralph_rounds, branch, pr, published_pr, merge_mode, subagent_run_id, subagent_status, ' +
   'repo_path, worktree, task, chat_id, thread_id, channel_kind, failure_reason, brief_alert, ' +
   'workflow_run_id, inner_checkpoint, inner_checkpoint_head, ' +
   'inner_checkpoint_findings, inner_verdict, inner_result, ' +
@@ -860,10 +866,10 @@ export class TridentRunStore {
       // the raw argument (Argus r3).
       base_sha: seededBase !== '' ? seededBase : null,
       base_behind: null,
-      // NEVER seeded: `launch()` resolves the PR with
-      // `run.pr ?? await detectExistingPr(run)`, and a carried-over number would
-      // short-circuit that probe onto a PR that may since have been closed.
+      // Observation remains empty until launch measures the branch. Publication
+      // provenance is separate so discovery can never manufacture ownership.
       pr: null,
+      published_pr: input.published_pr ?? null,
       merge_mode: input.merge_mode ?? 'local',
       subagent_run_id: null,
       subagent_status: null,
@@ -916,6 +922,7 @@ export class TridentRunStore {
         run.max_ralph_rounds,
         run.branch,
         run.pr,
+        run.published_pr,
         run.merge_mode,
         run.subagent_run_id,
         run.subagent_status,
@@ -1667,6 +1674,7 @@ export class TridentRunStore {
     if (patch.base_sha !== undefined) push('base_sha', patch.base_sha)
     if (patch.base_behind !== undefined) push('base_behind', patch.base_behind)
     if (patch.pr !== undefined) push('pr', patch.pr)
+    if (patch.published_pr !== undefined) push('published_pr', patch.published_pr)
     if (patch.merge_mode !== undefined) push('merge_mode', patch.merge_mode)
     if (patch.subagent_run_id !== undefined) push('subagent_run_id', patch.subagent_run_id)
     if (patch.subagent_status !== undefined) push('subagent_status', patch.subagent_status)
@@ -2235,6 +2243,7 @@ function rowToRun(row: TridentRunDbRow): TridentRun {
     base_sha: row.base_sha,
     base_behind: row.base_behind ?? null,
     pr: row.pr,
+    published_pr: row.published_pr,
     merge_mode: row.merge_mode,
     subagent_run_id: row.subagent_run_id,
     subagent_status: row.subagent_status,

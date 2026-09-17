@@ -1438,6 +1438,7 @@ describe('dispatch seeds a resume from a built-but-never-reviewed prior run', ()
     head?: string | null
     findings?: string | null
     pr?: number | null
+    published_pr?: number | null
     task?: string
     base_sha?: string | null
   }) {
@@ -1457,6 +1458,7 @@ describe('dispatch seeds a resume from a built-but-never-reviewed prior run', ()
       inner_verdict: over.verdict === undefined ? 'REVIEW_NOT_RUN' : over.verdict,
       base_sha: over.base_sha === undefined ? BASE : over.base_sha,
       ...(over.pr === undefined ? {} : { pr: over.pr }),
+      ...(over.published_pr === undefined ? {} : { published_pr: over.published_pr }),
     })
     // A genuine re-dispatch of THIS card names the run it just produced — since #340
     // the terminal reconcile keeps `linked_run_id` on failure, which is exactly the
@@ -1708,7 +1710,7 @@ describe('dispatch seeds a resume from a built-but-never-reviewed prior run', ()
   })
 
   test('a forge-done prior on an UNCHANGED tip seeds checkpoint, head, findings and BASE', async () => {
-    await priorRun({ findings: FINDINGS, pr: 7 })
+    await priorRun({ findings: FINDINGS, pr: 7, published_pr: 7 })
 
     const { result, tipReads } = await dispatchSeeding(async () => HEAD)
 
@@ -1723,10 +1725,10 @@ describe('dispatch seeds a resume from a built-but-never-reviewed prior run', ()
     // `base_sha !== null`, could never fire for a salvaged run.
     expect(result.run.base_sha).toBe(BASE)
     expect(store.get(result.run.id)?.base_sha).toBe(BASE)
-    // THE PR DOES NOT TRAVEL. `launch()` reads `run.pr ?? detectExistingPr(run)`, so
-    // a carried number short-circuits that probe — onto a PR that may since have been
-    // CLOSED. Asking gh for the branch's OPEN PRs is the question actually being asked.
+    // Ownership travels from the exact card link; the build driver still measures
+    // whether this number is the live OPEN PR before it proceeds.
     expect(result.run.pr).toBeNull()
+    expect(result.run.published_pr).toBe(7)
     // No verdict travels with the evidence — the run is going TO review.
     expect(result.run.inner_verdict).toBeNull()
     // `bound_pr` means review-only-never-publish; the seed must not set it.
@@ -1737,6 +1739,30 @@ describe('dispatch seeds a resume from a built-but-never-reviewed prior run', ()
     expect(result.run.round).toBe(1)
     // The read is against THIS card's branch, in the RESOLVED build repo.
     expect(tipReads).toEqual([[tmp, BRANCH]])
+  })
+
+  test('an EDITED same card still carries its own published-PR provenance', async () => {
+    // The ladder's rule is that the LINK decides identity and the TEXT decides only
+    // whether the COMMIT may be adopted. The provenance carry used to add
+    // `prior.task === input.task`, so an owner clarifying the design doc between two
+    // presses dropped it — and the retry then reached fresh admission with no
+    // `owned_pr` and was refused against ITS OWN published PR. Clarifying the doc is
+    // the most likely thing an owner does, which made this the common path.
+    await priorRun({ phase: 'failed', pr: 7, published_pr: 7 })
+
+    const { result } = await dispatchSeeding(async () => HEAD, { task: `${TASK} — now with the acceptance spelled out` })
+
+    expect(result.ok).toBe(true)
+    if (!result.ok) return
+    // The provenance travels on the LINK, not on the text.
+    expect(result.run.published_pr).toBe(7)
+    expect(store.get(result.run.id)?.published_pr).toBe(7)
+    // The OBSERVATIONAL field still does not travel: discovery cannot establish
+    // ownership, and only publication provenance is allowed through the link.
+    expect(result.run.pr).toBeNull()
+    // The edited text still declines the COMMIT carry — the asymmetry is the point,
+    // so this test cannot pass by weakening the commit rule instead.
+    expect(result.run.inner_checkpoint).toBeNull()
   })
 
   test("a card BOUND TO A DIFFERENT RUN does not inherit that run's commit, byte-identical task text and all", async () => {
@@ -1886,6 +1912,7 @@ describe('dispatch seeds a resume from a built-but-never-reviewed prior run', ()
       checkpoint: `outer-published:${HEAD}:0:1`,
       head: null,
       pr: 512,
+      published_pr: 512,
     })
 
     const { result } = await dispatchSeeding(async () => HEAD)
@@ -1894,10 +1921,8 @@ describe('dispatch seeds a resume from a built-but-never-reviewed prior run', ()
     if (!result.ok) return
     expect(result.run.inner_checkpoint).toBe(`outer-published:${HEAD}:0:1`)
     expect(result.run.inner_checkpoint_head).toBe(HEAD)
-    // Still no PR, even though the prior run had published one: the resumed run
-    // asks gh which PRs are OPEN on the branch instead of inheriting a number that
-    // may since have been closed.
     expect(result.run.pr).toBeNull()
+    expect(result.run.published_pr).toBe(512)
   })
 
   /**
@@ -1991,15 +2016,23 @@ describe('dispatch seeds a resume from a built-but-never-reviewed prior run', ()
    * harmless" cannot pass either.
    */
   test('MUTANT GUARD: a MOVED tip seeds nothing — byte-identical to a no-prior dispatch', async () => {
-    await priorRun({ findings: FINDINGS, pr: 7 })
+    await priorRun({ findings: FINDINGS, pr: 7, published_pr: 7 })
     const { result: moved } = await dispatchSeeding(async () => MOVED)
     expect(moved.ok).toBe(true)
     if (!moved.ok) return
 
-    // Control: a different card with no history whatsoever.
+    // Control: a different card with no history whatsoever. It must NAME NO RUN —
+    // this used to be a different-TASK dispatch through the shared `board`, which
+    // still carries `cardLink` and so is the SAME card by the ladder's own rule
+    // (the LINK decides identity, not the text). It only read as history-free while
+    // the provenance carry was gated on task text; once that gate went, the
+    // "control" inherited the prior's PR and proved nothing.
     const control = await dispatchBoardBoundBuild(
       { task: 'build a different thing entirely', board_item_id: 'ready' },
-      localDeps(),
+      localDeps({
+        get: () => ({ id: 'ready', title: 'add a CSV import endpoint with validation and tests', design_doc_ref: null, linked_run_id: null }),
+        attachRun: async () => {},
+      }),
     )
     expect(control.ok).toBe(true)
     if (!control.ok) return
@@ -2008,8 +2041,23 @@ describe('dispatch seeds a resume from a built-but-never-reviewed prior run', ()
       expect(run.inner_checkpoint).toBeNull()
       expect(run.inner_checkpoint_head).toBeNull()
       expect(run.inner_checkpoint_findings).toBeNull()
-      expect(run.pr).toBeNull()
     }
+    // The exact card still owns its prior PR even when the branch moved; the
+    // different-task control does not. The driver will measure and refuse a PR
+    // whose live head no longer matches the branch snapshot.
+    expect(moved.run.published_pr).toBe(7)
+    expect(control.run.published_pr).toBeNull()
+  })
+
+  test('an observed foreign PR has no publication provenance to carry', async () => {
+    await priorRun({ findings: FINDINGS, pr: 73, published_pr: null })
+
+    const { result } = await dispatchSeeding(async () => HEAD)
+
+    expect(result.ok).toBe(true)
+    if (!result.ok) return
+    expect(result.run.pr).toBeNull()
+    expect(result.run.published_pr).toBeNull()
   })
 
   test('an unreadable or absent ref seeds nothing and still dispatches', async () => {

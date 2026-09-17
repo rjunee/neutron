@@ -206,6 +206,7 @@ function makeRun(checkout: string, overrides: Partial<TridentRun> = {}): Trident
     base_sha: null,
     base_behind: null,
     pr: null,
+    published_pr: null,
     merge_mode: 'pr',
     subagent_run_id: null,
     subagent_status: null,

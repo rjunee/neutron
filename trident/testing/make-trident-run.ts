@@ -30,6 +30,7 @@ export function makeTridentRun(over: Partial<TridentRun> = {}): TridentRun {
     base_sha: null,
     base_behind: null,
     pr: null,
+    published_pr: null,
     merge_mode: 'local',
     subagent_run_id: 'agent-1',
     subagent_status: 'running',

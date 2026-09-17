@@ -65,7 +65,7 @@ async function fixture() {
       if (argv[2] === 'list') return ok(JSON.stringify(pr ? [pr] : []))
       if (argv[2] === 'create') {
         pr = { number: 12, headRefOid: await command(['git', '-C', repo, 'rev-parse', 'refs/heads/change']), state: 'OPEN', headRefName: 'change', baseRefName: 'main', isCrossRepository: false }
-        return ok('created')
+        return ok('https://example.invalid/project/repo/pull/12\n')
       }
       if (argv[2] === 'merge') { pr.state = 'MERGED'; return ok() }
       return ok(JSON.stringify(pr))
@@ -230,11 +230,58 @@ test('publication pushes the pinned commit with a lease, witnesses PR, and persi
   const snapshot = await measured(f)
   expect(await f.publishChecked(snapshot)).toEqual({ kind: 'allow' })
   expect(f.store.get(f.row.id)?.pr).toBe(12)
+  expect(f.store.get(f.row.id)?.published_pr).toBe(12)
   expect(f.calls.find(argv => argv.includes('push'))).toContain(`${f.tip}:refs/heads/change`)
   expect(f.calls.find(argv => argv.includes('push'))).toContain('--force-with-lease=refs/heads/change:')
   expect(await f.command(['git', '-C', f.repo, 'ls-remote', '--heads', 'origin', 'change'])).toContain(f.tip)
   expect((await measured(f)).pr).toEqual({ number: 12, head: f.tip, state: 'OPEN' })
 })
+
+test('publication refuses a foreign PR appearing during push', async () => {
+  const f = await fixture()
+  const snapshot = await measured(f)
+  f.intercept(argv => {
+    if (argv.includes('push')) f.setPr({ number: 73, headRefOid: f.tip, state: 'OPEN', headRefName: 'change', baseRefName: 'main', isCrossRepository: false })
+    return undefined
+  })
+  expect(await f.publishChecked(snapshot)).toEqual({ kind: 'blocked', on: 'Discovered PR has no publication provenance' })
+  expect(f.store.get(f.row.id)?.published_pr).toBeNull()
+  expect(f.store.get(f.row.id)?.pr).toBeNull()
+  expect(f.calls.some(argv => argv[2] === 'create')).toBe(false)
+})
+
+test('publication uses the create receipt even when branch lookup returns a different PR', async () => {
+  const f = await fixture()
+  const snapshot = await measured(f)
+  let created = false
+  f.intercept(argv => {
+    if (argv[2] === 'create') created = true
+    if (created && argv[2] === 'list') return ok(JSON.stringify([{ number: 73, headRefOid: f.tip, state: 'OPEN', headRefName: 'change', baseRefName: 'main', isCrossRepository: false }]))
+  })
+  expect(await f.publishChecked(snapshot)).toEqual({ kind: 'allow' })
+  expect(f.store.get(f.row.id)?.published_pr).toBe(12)
+  expect(f.store.get(f.row.id)?.pr).toBe(12)
+  expect(f.calls.some(argv => argv[2] === 'view' && argv[3] === '12')).toBe(true)
+})
+
+test('publication preserves existing provenance without another create receipt', async () => {
+  const f = await fixture()
+  await f.store.update(f.row.id, { pr: 12, published_pr: 12 })
+  f.setPr({ number: 12, headRefOid: f.tip, state: 'OPEN', headRefName: 'change', baseRefName: 'main', isCrossRepository: false })
+  expect(await f.publishChecked(await measured(f))).toEqual({ kind: 'allow' })
+  expect(f.store.get(f.row.id)?.published_pr).toBe(12)
+  expect(f.calls.some(argv => argv[2] === 'create')).toBe(false)
+})
+
+for (const receipt of ['', 'created', 'https://example.invalid/project/repo/pull/0', 'https://example.invalid/project/repo/pull/9007199254740992']) {
+  test(`publication refuses malformed create receipt ${receipt}`, async () => {
+    const f = await fixture()
+    const snapshot = await measured(f)
+    f.intercept(argv => argv[2] === 'create' ? ok(receipt) : undefined)
+    expect(await f.publishChecked(snapshot)).toEqual({ kind: 'unknown', detail: 'PR creation receipt is malformed' })
+    expect(f.store.get(f.row.id)?.published_pr).toBeNull()
+  })
+}
 
 test('publication refuses changed snapshot without push', async () => {
   const f = await fixture()
@@ -260,7 +307,7 @@ for (const stage of ['lease', 'push', 'witness', 'create', 'pr-witness']) {
         created = true
         if (stage === 'create') return bad()
       }
-      if (stage === 'pr-witness' && created && argv[2] === 'list') return ok('[]')
+      if (stage === 'pr-witness' && created && argv[2] === 'view') return ok('[]')
     })
     expect(await f.publishChecked(snapshot)).toMatchObject({ kind: 'unknown' })
     expect(f.store.get(f.row.id)?.pr).toBeNull()

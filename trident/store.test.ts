@@ -2101,7 +2101,7 @@ describe('terminalTransition retracts a stale in-flight claim', () => {
 })
 
 describe('INSERT column/placeholder/bound-array alignment — the silent-corruption guard (BLOCKING addendum)', () => {
-  test('COLS matches the 41 snapshot-writable table columns', () => {
+  test('COLS matches the 42 readable run columns', () => {
     // The INSERT placeholder list is derived from COLS, so placeholder count =
     // column count by construction. What is NOT free is COLS agreeing with the
     // TABLE: a column added, dropped or renamed by a migration without touching
@@ -2115,10 +2115,10 @@ describe('INSERT column/placeholder/bound-array alignment — the silent-corrupt
       .prepare<{ name: string }, []>(`PRAGMA table_info(code_trident_runs)`)
       .all()
 
-    expect(cols).toHaveLength(41)
+    expect(cols).toHaveLength(42)
     // agent_waked_at is deliberately absent from COLS: claimAgentWake is its sole
     // writer, so a full snapshot can never clear an already-won delivery claim.
-    // The table therefore has 42 columns and COLS has 41 — compare against the
+    // The table therefore has 43 columns and COLS has 42 — compare against the
     // snapshot-writable set, not the raw pragma count.
     const snapshotWritable = pragma.filter((c) => c.name !== 'agent_waked_at')
     expect(cols).toHaveLength(snapshotWritable.length)
