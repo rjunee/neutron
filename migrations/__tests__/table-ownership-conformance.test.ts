@@ -27,7 +27,7 @@
  * empty scan.
  */
 import { describe, expect, test } from 'bun:test'
-import { readFileSync, readdirSync } from 'node:fs'
+import { mkdirSync, readFileSync, readdirSync, rmSync, writeFileSync } from 'node:fs'
 import { join, relative, sep } from 'node:path'
 import { fileURLToPath } from 'node:url'
 
@@ -149,6 +149,31 @@ function toRepoRel(abs: string): string {
   return relative(REPO_ROOT, abs).split(sep).join('/')
 }
 
+/**
+ * A concurrent test can remove an untracked source file after the walk found
+ * it. It cannot then be a writer, so omit only that vanished candidate; every
+ * other read error remains a failure.
+ */
+function readSourceFile(file: string): string | undefined {
+  try {
+    return readFileSync(file, 'utf8')
+  } catch (error) {
+    if ((error as NodeJS.ErrnoException).code === 'ENOENT') return undefined
+    throw error
+  }
+}
+
+function findWriters(table: string, files: readonly string[] = sourceFiles): Set<string> {
+  const patterns = writePatterns(table)
+  const found = new Set<string>()
+  for (const file of files) {
+    const source = readSourceFile(file)
+    if (source === undefined) continue
+    if (patterns.some((re) => re.test(stripComments(source)))) found.add(toRepoRel(file))
+  }
+  return found
+}
+
 const sourceFiles = collectSourceFiles(REPO_ROOT)
 
 describe('table-ownership conformance (migrations/table-ownership.json)', () => {
@@ -206,6 +231,38 @@ describe('table-ownership conformance (migrations/table-ownership.json)', () => 
     expect(pats.some((re) => re.test(stripComments('const s = "a // b"; db.run(`UPDATE projects SET x = 1`)')))).toBe(true)
   })
 
+  test('scanner skips a source file deleted after enumeration, while retaining real writers', () => {
+    const probe = join(REPO_ROOT, 'gateway', '__table_ownership_deleted_before_read__.ts')
+    const knownWriter = ownership.tables.projects!.writers[0]!
+    writeFileSync(probe, 'db.run(`UPDATE projects SET last_activity_at = ?`)\n')
+    try {
+      const enumerated = collectSourceFiles(REPO_ROOT)
+      expect(enumerated).toContain(probe)
+      rmSync(probe)
+      expect(readSourceFile(probe)).toBeUndefined()
+
+      const found = findWriters('projects', [probe, join(REPO_ROOT, knownWriter)])
+      expect(found).toEqual(new Set([knownWriter]))
+    } finally {
+      rmSync(probe, { force: true })
+    }
+  })
+
+  test('scanner propagates a read error that is NOT a missing file', () => {
+    // A vanished file cannot be a writer, so skipping it is sound. Anything else —
+    // a permission error, a directory where a file was expected — is a real
+    // failure. Swallowing it would read as "this file contains no writers", which
+    // is how a genuine unauthorised writer would pass unseen. Absent and
+    // unreadable must not share a branch.
+    const probe = join(REPO_ROOT, 'gateway', '__table_ownership_unreadable__.ts')
+    mkdirSync(probe, { recursive: true })
+    try {
+      expect(() => readSourceFile(probe)).toThrow()
+    } finally {
+      rmSync(probe, { recursive: true, force: true })
+    }
+  })
+
   test('every mapped table exists in expected-schema.txt', () => {
     const schema = readFileSync(SCHEMA_PATH, 'utf8')
     const declared = new Set(
@@ -230,12 +287,7 @@ describe('table-ownership conformance (migrations/table-ownership.json)', () => 
 
   for (const [table, entry] of Object.entries(ownership.tables)) {
     test(`'${table}' writers = committed allowlist (both directions)`, () => {
-      const patterns = writePatterns(table)
-      const found = new Set<string>()
-      for (const file of sourceFiles) {
-        const text = stripComments(readFileSync(file, 'utf8'))
-        if (patterns.some((re) => re.test(text))) found.add(toRepoRel(file))
-      }
+      const found = findWriters(table)
       const allow = new Set(entry.writers)
 
       const strays = [...found].filter((f) => !allow.has(f)).sort()
