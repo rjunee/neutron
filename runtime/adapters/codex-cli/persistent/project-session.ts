@@ -14,6 +14,7 @@ export type CodexSessionRecovery = 'started' | 'adopted' | 'restarted-after-loss
 interface RegistryEntry {
   readonly project_id: string
   readonly pane_handle: string
+  readonly cwd?: string
   readonly argv: readonly string[]
   readonly identity?: readonly string[]
 }
@@ -182,22 +183,28 @@ export class CodexProjectSession {
 export class CodexProjectSessionHost {
   private readonly host: AdoptableHost
   private readonly bin: string
-  private readonly opening = new Map<string, Promise<CodexProjectSession>>()
+  private readonly opening = new Map<string, { cwd: string; session: Promise<CodexProjectSession> }>()
 
   constructor(private readonly options: CodexProjectSessionHostOptions) {
     this.host = options.host ?? new HerdrHost()
     this.bin = options.bin ?? 'codex'
   }
 
-  open(options: OpenCodexProjectSessionOptions): Promise<CodexProjectSession> {
+  async open(options: OpenCodexProjectSessionOptions): Promise<CodexProjectSession> {
     if (options.projectId === '') return Promise.reject(new Error('codex project session requires a project id'))
+    const cwd = realpathSync(options.cwd)
     const existing = this.opening.get(options.projectId)
-    if (existing !== undefined) return existing
-    const pending = this.openOne(options).catch((error) => {
+    if (existing !== undefined) {
+      if (existing.cwd !== cwd) throw new Error(
+        'codex project session refused: project working directory changed',
+      )
+      return existing.session
+    }
+    const pending = this.openOne({ ...options, cwd }).catch((error) => {
       this.opening.delete(options.projectId)
       throw error
     })
-    this.opening.set(options.projectId, pending)
+    this.opening.set(options.projectId, { cwd, session: pending })
     return pending
   }
 
@@ -226,6 +233,12 @@ export class CodexProjectSessionHost {
         throw new Error(`codex project session recovery unknown: ${inspection.reason}`)
       }
       if (inspection.kind === 'live') {
+        if (recorded.cwd === undefined) {
+          throw new Error('codex project session recovery unknown: recorded working directory is missing')
+        }
+        if (recorded.cwd !== options.cwd) {
+          throw new Error('codex project session refused: project working directory changed')
+        }
         if (!matchesIdentity(inspection.argv, recorded.identity, options) || !sameArgv(recorded.argv, argv)
           || (recorded.identity !== undefined && !sameArgv(recorded.identity, identity))) {
           throw new Error('codex project session refused: recorded pane identity does not match this project session')
@@ -248,6 +261,7 @@ export class CodexProjectSessionHost {
     }
     registry.sessions[options.projectId] = {
       project_id: options.projectId,
+      cwd: options.cwd,
       pane_handle: paneHandle,
       argv,
       identity,
