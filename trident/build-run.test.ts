@@ -1,13 +1,3 @@
-import { mkdtemp, rm } from 'node:fs/promises'
-import { tmpdir } from 'node:os'
-import { join } from 'node:path'
-import { ProjectDb } from '@neutronai/persistence/index.ts'
-import { seedMigratedDb } from '../tests/support/migrated-db.ts'
-import { TridentRunStore } from './store.ts'
-import { createProductionHostEffects } from './production-host-effects.ts'
-import { projectBuildResult } from './project-launcher.ts'
-import { buildTridentOrchestrator } from './orchestrator.ts'
-import { honourDiffOutput } from './testing/diff-output-host.ts'
 import { reviewArtifact } from './gates/review-artifact.ts'
 import { briefIntegrity } from './gates/brief-integrity.ts'
 import { fixLineage } from './gates/fix-lineage.ts'
@@ -58,7 +48,6 @@ function fixture(landFixes = true) {
   const decisions: ReviewDecision[] = []
   let reads = 0
   const deps: BuildRunDeps = {
-    recordReviewApproval: async () => {},
     readReviewCap: async () => ({ kind: 'known' }),
     checkBuildClaim: async () => { events.push('preserve'); return { kind: 'blocked', on: 'Claim conflicts after preservation' } },
     assignedBranch: 'change',
@@ -1510,70 +1499,3 @@ test('PR identity cannot change between approval and merge', async () => {
   expect(await f.run()).toMatchObject({ kind: 'blocked', phase: 'merge', on: 'Published PR does not match reviewed revision' })
   expect(f.events).not.toContain('merge')
 })
-
-
-test('validated approval survives exhausted post-review readiness in the terminal row', async () => {
-  const dir = await mkdtemp(join(tmpdir(), 'review-verdict-'))
-  seedMigratedDb(join(dir, 'project.db'))
-  const db = ProjectDb.open(join(dir, 'project.db'))
-  try {
-    const store = new TridentRunStore(db)
-    const row = await store.create({ slug: 'review', project_slug: 'project', repo_path: dir, task: 'Build' })
-    await store.update(row.id, { branch: 'change', worktree: dir, base_sha: 'a'.repeat(40) })
-    const f = fixture()
-    const runHost = honourDiffOutput(async () => ({ ok: true, exit_code: 0, stdout: '', stderr: '' }))
-    const production = createProductionHostEffects({ store, runId: row.id, projectSlug: 'project', repo: dir,
-      worktree: dir, branch: 'change', baseBranch: 'main', runHost, ciWorkflow: 'ci.yml',
-      publication: async () => ({ title: 'Build', bodyFile: 'body.md' }) })
-    Object.assign(f.deps, { recordReviewApproval: production.effects.recordReviewApproval })
-    f.outcomes.set('run:review:1', f.completed({ ...f.snapshot, payload: { verdict: 'APPROVE', findings: [] } }))
-    let elapsed = 0
-    let polls = 0
-    const sources = createProjectObservationSources({ runId: row.id, baseBranch: 'main', ciWorkflow: 'ci.yml', suite: undefined,
-      reviewReadinessClock: { now: () => elapsed, wait: async ms => { elapsed += ms } },
-      ci: { required: async () => ({ kind: 'resolved', required: ['test'], appBound: [], produced: ['test'] }),
-        readiness: async () => { polls++; return { headSha: f.snapshot.head, mergeable: 'UNKNOWN', checksComplete: true,
-          rows: [{ name: 'test', status: 'COMPLETED', conclusion: 'SUCCESS' }] } } } })
-    let reads = 0
-    f.deps.reviewCi = async (snapshot, _mode, signal) => ++reads === 1 ? { kind: 'known', findings: [] }
-      : assessReviewCi(sources.reviewCi, snapshot, 'a'.repeat(40), row.id, signal)
-    const outcome = await f.run()
-    expect(structuredClone(outcome)).toMatchObject({ kind: 'unknown', phase: 'review', detail: expect.stringContaining('budget exhausted') })
-    expect(polls).toBeGreaterThan(1)
-    expect(f.cross.calls).toHaveLength(1)
-    expect(f.events).not.toContain('merge')
-    const input = { run: store.get(row.id)!, base_branch: 'main', db_path: join(dir, 'project.db'), max_rounds: 3 }
-    await store.update(row.id, { inner_result: projectBuildResult({ ...outcome, cleanup: { kind: 'preserved', detail: 'review timeout' } }, input) })
-    const orch = buildTridentOrchestrator({ fire_workflow: async () => { throw Error('must not re-fire') },
-      db_path: input.db_path, base_branch: 'main', run_host: runHost,
-      observe_run_worker: async () => ({ state: 'blocked', detail: 'prompt', observed_at: new Date().toISOString(), screen: 'prompt' }) })
-    const terminal = await orch.step(store.get(row.id)!)
-    expect(terminal.run.phase).toBe('failed')
-    expect(terminal.run.failure_reason).toContain('budget exhausted')
-    expect(terminal.run.inner_verdict).toBe('APPROVE')
-    expect(await store.saveIfActive(terminal.run)).toBe(true)
-    const saved = store.get(row.id)!
-    expect(saved.phase).toBe('failed')
-    expect(saved.failure_reason).toContain('budget exhausted')
-    expect(saved.inner_verdict).toBe('APPROVE')
-  } finally { db.close(); await rm(dir, { recursive: true, force: true }) }
-})
-
-
-for (const [name, payload] of [
-  ['malformed approval', { verdict: 'APPROVE' }],
-  ['non-approval', { verdict: 'COMMENT', findings: [] }],
-] as const) {
-  test(`review evidence does not record ${name} as approval`, async () => {
-    const f = fixture()
-    let saved: string | null = null
-    f.deps.recordReviewApproval = async () => { saved = 'APPROVE' }
-    f.outcomes.set('run:review:1', f.completed({ ...f.snapshot, payload }))
-    let reads = 0
-    f.deps.reviewCi = async () => ++reads === 1 ? { kind: 'known', findings: [] }
-      : { kind: 'unknown', detail: 'readiness budget exhausted' }
-    expect((await f.run()).kind).toBe('unknown')
-    expect(f.cross.calls).toHaveLength(1)
-    expect(saved).toBeNull()
-  })
-}

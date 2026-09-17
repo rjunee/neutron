@@ -39,7 +39,6 @@ async function fixture() {
     runners: { pi: fakeRunner('pi') }, replProvider: 'pi',
     workers: Object.fromEntries(['plan', 'build', 'review', 'fix'].map(role => [role, { provider: 'pi', request }])) as BuildHostOptions['workers'],
     effects: {
-      recordReviewApproval: async () => {},
       prepareWork: async (request, context) => {
         // Match the production context materialization consumed by the host gate.
         await writeFile(`${request.brief.path}.context.json`, JSON.stringify({ request, ...context }))
@@ -585,7 +584,6 @@ async function boundFixture(failure = false) {
   }
   f.options.runners = { pi: runner }
   f.options.effects = {
-    recordReviewApproval: async () => {},
     prepareWork: async (request, context) => {
       // Match the production context materialization consumed by the host gate.
       await writeFile(`${request.brief.path}.context.json`, JSON.stringify({ request, ...context }))

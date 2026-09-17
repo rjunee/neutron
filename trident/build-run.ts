@@ -5,7 +5,7 @@ import { createLogger } from '@neutronai/logger'
 // wrapper in `./gates/unknown-cause.ts`, which returns a `GateResult`.
 import { TERMINAL_CAUSE_MAX, unknownCause } from '@neutronai/runtime/refusal-cause.ts'
 import { createHash } from 'node:crypto'
-import { clampPlanBranchBrief, validateTrailer } from './gates/result-contract.ts'
+import { clampPlanBranchBrief } from './gates/result-contract.ts'
 import {
   placementFor,
   type BoundedWorkOutcome,
@@ -130,8 +130,6 @@ export interface BuildRunDeps {
   publish(snapshot: BuildSnapshot): Promise<void>
   /** Local effects must pin the reviewed head, preserve the branch and merge without rewriting it. */
   merge(snapshot: BuildSnapshot): Promise<void>
-  /** Preserve the worker approval as evidence, independently of merge eligibility. */
-  recordReviewApproval(): Promise<void>
   /** Persist absolute totals for each model phase after every completed turn. */
   recordPhaseUsage(runId: string, phase: string, report: PhaseUsageReport): Promise<void>
   confirmLocalMerge?(snapshot: BuildSnapshot): Promise<GateResult>
@@ -402,10 +400,6 @@ export async function buildRun(input: BuildRunInput, deps: BuildRunDeps, signal:
       // Read-only review must describe exactly the revision sent to the panel.
       if (role === 'review' && (measured.head !== snapshot.head || measured.diff !== snapshot.diff || !samePr(measured.pr, snapshot.pr))) {
         return { stop: blocked('Reviewed revision changed during review') }
-      }
-      if (role === 'review') {
-        const verdict = validateTrailer('verdict', result.payload)
-        if (verdict.ok && verdict.value.verdict === 'APPROVE') await deps.recordReviewApproval()
       }
       snapshot = measured
       // The host records the produced head before returning it, so a crash after a
