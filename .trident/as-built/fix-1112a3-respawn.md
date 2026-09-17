@@ -80,3 +80,30 @@ No live CLI/model invocation, real worker launch, production fixes, full-suite
 run, push, PR creation, or merge. The branch record is staged here per the lane
 instructions for orchestrator review and publication. This is an unverified
 instrument, not a claim that the requested red/green proof has been obtained.
+
+
+## Mutation VERIFIED on the box (completing the record above)
+
+The lane could not bind a local listener, so it correctly reported the mutation
+as unverified rather than claiming a red it had not seen — and proved the cause
+was environmental with an independent `Bun.serve` port-zero control. That
+verification has now been performed where listeners are permitted.
+
+One fixture gap was fixed first: the test was red on
+`persistent-repl: model_preference is empty`. That is not the behaviour under
+test — the conversation spec carries `model_preference: []` by design and
+`runtime/workers/claude-in-repl.ts` overrides it with `[req.model_id]` on every
+dispatch — so both turns now supply a model the way production does.
+
+| Guard | Mutation and printed line | Mutated | Restored |
+| --- | --- | --- | --- |
+| Dispatch retains live tools and one child | `open/wiring/project-build.ts:243` → `spec: { tools: [], … }` | **RED**: `(fail) project dispatch reuses the wake REPL without a tools-less respawn`, alongside the two source-level guards | **24 pass, 0 fail** |
+
+`import-warm-session-reset.test.ts` still passes (4 pass) after the recording
+host was extracted to a shared helper.
+
+**What this establishes and what it does not.** It establishes that a project
+dispatch composed by `prepareProjectBuild` reuses the wake REPL and that no spawn
+requests an empty tool surface — observed through a real persistent spawn, not a
+fake runner. It does not exercise a live Claude binary; the recording host is a
+PTY double, and a reply is not evidence that a model created a worker.
