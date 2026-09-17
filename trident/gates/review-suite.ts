@@ -27,6 +27,11 @@ export interface ReviewSuiteSource {
 const known = (findings: readonly SuiteFinding[] = []): SuiteAssessment => ({ kind: 'known', findings })
 const unknown = (detail: string): SuiteAssessment => ({ kind: 'unknown', detail })
 const blocker = (title: string, evidence: string): SuiteAssessment => known([{ title, evidence, advisory: false }])
+const failedPreexisting = (report: { suiteOutcome?: string; suiteEvidence?: string }): SuiteAssessment => {
+  const evidence = typeof report.suiteEvidence === 'string' ? report.suiteEvidence.trim() : ''
+  if (!evidence) return blocker('FAILED-PREEXISTING CLAIMED WITHOUT EVIDENCE', 'Re-run the failing files at the base and record the comparison')
+  return known([{ title: 'FULL SUITE RED FOR PRE-EXISTING REASONS', evidence: `Untrusted build transcription; verify the base comparison and named failures before approving:\n${evidence}`, advisory: true }])
+}
 
 /** G063–G065: classify the host receipt, using checkpoint detail only for diagnostics. */
 export async function assessReviewSuite(source: ReviewSuiteSource | undefined, snapshot: BuildSnapshot, round: number, runId: string): Promise<SuiteAssessment> {
@@ -38,15 +43,16 @@ export async function assessReviewSuite(source: ReviewSuiteSource | undefined, s
     if (typeof value.strategy !== 'string' || !['full-suite', 'subset'].includes(value.scope)) return unknown('Review suite strategy or dispatched scope is unreadable')
     if (value.strategy === '') return known()
     const report = value.report
-    if (value.scope === 'subset' && report?.suiteOutcome === 'deferred' && report.hostExitCode === undefined) return known()
+    if (value.scope === 'subset' && report?.hostExitCode === undefined) {
+      if (report?.suiteOutcome === 'failed-preexisting') return failedPreexisting(report)
+      return known()
+    }
     if (!report) return unknown('No full-suite command is derivable from the test strategy')
     if (typeof report.hostExitCode !== 'number' || !Number.isInteger(report.hostExitCode)) return unknown('Host-observed review suite exit code is missing or unreadable')
     if ((report.suiteOutcome !== undefined && typeof report.suiteOutcome !== 'string') || (report.suiteEvidence !== undefined && typeof report.suiteEvidence !== 'string')) return unknown('Review suite report is malformed')
     if (report.hostExitCode === 0) return known()
-    const evidence = typeof report?.suiteEvidence === 'string' ? report.suiteEvidence.trim() : ''
     if (report?.suiteOutcome === 'failed-preexisting') {
-      if (!evidence) return blocker('FAILED-PREEXISTING CLAIMED WITHOUT EVIDENCE', 'Re-run the failing files at the base and record the comparison')
-      return known([{ title: 'FULL SUITE RED FOR PRE-EXISTING REASONS', evidence: `Untrusted build transcription; verify the base comparison and named failures before approving:\n${evidence}`, advisory: true }])
+      return failedPreexisting(report)
     }
     return blocker('FULL SUITE NOT PROVEN', 'Run the required full suite and record its result')
   } catch (error) { return unknownCause('Review suite host observation failed', error, runId) }

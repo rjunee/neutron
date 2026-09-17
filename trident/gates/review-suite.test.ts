@@ -3,12 +3,28 @@ import { applyReviewSuite, assessReviewSuite, type SuiteObservation } from './re
 const snapshot = { head: 'a'.repeat(40), diff: '+code', pr: null }
 const approve = { kind: 'approve' } as const
 
-test('a deliberately deferred subset is known, while the same full-suite report is not', async () => {
+test('a deferred subset trusts host scope, while a full-suite unreadable receipt is unknown', async () => {
   const observe = async () => ({ kind: 'known' as const, runId: 'run', head: snapshot.head, round: 2,
     strategy: 'subset instructions', scope: 'subset' as const, report: { suiteOutcome: 'deferred' } })
   expect(await assessReviewSuite({ observe }, snapshot, 2, 'run')).toEqual({ kind: 'known', findings: [] })
   const full = async () => ({ ...(await observe()), scope: 'full-suite' as const })
-  expect(await assessReviewSuite({ observe: full }, snapshot, 2, 'run')).toMatchObject({ kind: 'unknown' })
+  expect(await assessReviewSuite({ observe: full }, snapshot, 2, 'run')).toEqual({ kind: 'unknown', detail: 'Host-observed review suite exit code is missing or unreadable' })
+})
+test('a deferred subset carries failed-preexisting evidence without trusting its outcome to select scope', async () => {
+  const f = fixture()
+  f.observation.scope = 'subset'
+  f.observation.report = { suiteOutcome: 'failed-preexisting', suiteEvidence: 'base red on named.test.ts' }
+  expect(await f.assess()).toEqual({ kind: 'known', findings: [{
+    title: 'FULL SUITE RED FOR PRE-EXISTING REASONS',
+    evidence: 'Untrusted build transcription; verify the base comparison and named failures before approving:\nbase red on named.test.ts',
+    advisory: true,
+  }] })
+  for (const suiteOutcome of [undefined, 'deferred', 'failed-new', 'unexpected-worker-value']) {
+    f.observation.report = suiteOutcome === undefined ? {} : { suiteOutcome }
+    expect(await f.assess()).toEqual({ kind: 'known', findings: [] })
+  }
+  f.observation.report = { suiteOutcome: 'failed-preexisting' }
+  expect(await f.assess()).toMatchObject({ kind: 'known', findings: [{ title: 'FAILED-PREEXISTING CLAIMED WITHOUT EVIDENCE', advisory: false }] })
 })
 function fixture() {
   const observation: SuiteObservation = { kind: 'known', runId: 'run', head: snapshot.head, round: 2, strategy: 'run full suite', scope: 'full-suite', report: { hostExitCode: 0, suiteOutcome: 'passed' } }
