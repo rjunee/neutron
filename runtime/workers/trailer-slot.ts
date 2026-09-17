@@ -6,10 +6,16 @@ import { readFile, unlink, writeFile } from 'node:fs/promises'
  * composes `<state>/<role>.result` once at prepare time, before any round exists, while
  * `trident/build-run.ts:319` gives every round of that role its own `step_id`. A second
  * round therefore dispatches against a path that STILL HOLDS the previous round's
- * trailer, and both readers take it for this round's answer:
- * `decodeProjectTrailer` (`runtime/workers/project-runners.ts:50`) rejects the stale ids
- * as `Trailer step_id missing or mismatched`, and `claude-acting-turn.ts:200` reads the
- * file's mere existence as the dispatch having already ended — before any worker ran.
+ * trailer. That USED to be taken for this round's answer by both readers, and was the
+ * defect this clear was written for.
+ *
+ * Both readers are now step-aware as well (#1123): `decodeProjectTrailer` returns
+ * `not-current-step` for a well-formed identity belonging to another request rather than
+ * a terminal `unknown`, and the acting turns continue past a trailer that is not theirs
+ * instead of reporting the dispatch ended. The two guards are deliberately independent —
+ * the reader means a missed clear cannot produce a WRONG ANSWER, only a wait; this clear
+ * means the wait is not spent on a slot that will never be overwritten. Neither replaces
+ * the other, and removing either re-opens a real failure.
  *
  * Absence is the ordinary first-round case and is success. Any other failure leaves a
  * foreign trailer in place, which the caller would otherwise read as its own result, so
