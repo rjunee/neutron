@@ -376,7 +376,7 @@ async function performRole(world: WorkerWorld, request: BoundedWorkRequest, brie
 // THE FAKE GITHUB
 // ─────────────────────────────────────────────────────────────────────────────
 
-interface FakePr { number: number; state: 'OPEN' | 'CLOSED' | 'MERGED'; headRefName: string; baseRefName: string }
+interface FakePr { number: number; state: 'OPEN' | 'CLOSED' | 'MERGED'; headRefName: string; baseRefName: string; body: string }
 
 function fakeGithub(input: { origin: string; repo: string }) {
   const prs: FakePr[] = []
@@ -392,7 +392,12 @@ function fakeGithub(input: { origin: string; repo: string }) {
   }
   const project = async (pr: FakePr, fields: string[]) => {
     const all: Record<string, unknown> = { number: pr.number, state: pr.state, headRefName: pr.headRefName,
-      baseRefName: pr.baseRefName, isCrossRepository: false, headRefOid: await headOf(pr.headRefName), mergeable: 'MERGEABLE' }
+      baseRefName: pr.baseRefName, isCrossRepository: false, headRefOid: await headOf(pr.headRefName), mergeable: 'MERGEABLE',
+      // `gh pr create --body-file X` makes the PR body X's contents, so the fake stores what
+      // it was handed. Publication writes a durable-intent proof into that body and reads it
+      // back to recognise a PR this run created, so a fake that dropped it could not see the
+      // mechanism at all.
+      body: pr.body }
     return Object.fromEntries(fields.map(field => [field, all[field]]))
   }
   const checkRuns = { total_count: 1, check_runs: [{ name: 'test', status: 'COMPLETED', conclusion: 'SUCCESS' }] }
@@ -426,8 +431,10 @@ function fakeGithub(input: { origin: string; repo: string }) {
         return json(await project(pr, fields))
       }
       if (action === 'create') {
+        const bodyFile = rest[rest.indexOf('--body-file') + 1]
         const pr: FakePr = { number: prs.length + 1, state: 'OPEN',
-          headRefName: rest[rest.indexOf('--head') + 1]!, baseRefName: rest[rest.indexOf('--base') + 1]! }
+          headRefName: rest[rest.indexOf('--head') + 1]!, baseRefName: rest[rest.indexOf('--base') + 1]!,
+          body: bodyFile === undefined ? '' : await readFile(bodyFile, 'utf8') }
         prs.push(pr)
         // Real `gh pr create` prints the owner/repo URL; publication parses it for provenance.
         return ok(`https://example.invalid/project/repo/pull/${pr.number}`)
