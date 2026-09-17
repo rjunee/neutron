@@ -1,5 +1,5 @@
 import { afterEach, expect, test } from 'bun:test'
-import { mkdtemp, readFile, rename, rm, writeFile } from 'node:fs/promises'
+import { mkdir, mkdtemp, readFile, rename, rm, writeFile } from 'node:fs/promises'
 import { tmpdir } from 'node:os'
 import { createHash } from 'node:crypto'
 import { join } from 'node:path'
@@ -344,4 +344,19 @@ test('a step held by another instance is unknown, not answered from the stale sl
   expect(outcome).toHaveProperty('detail', expect.stringContaining('not yet dispatched'))
   expect(f.calls).toHaveLength(0)
   expect(JSON.parse(await readFile(f.req.result.path, 'utf8')).on).toBe('round one')
+})
+
+test('a trailer that becomes unreadable after the dispatch is unknown', async () => {
+  const f = await fixture()
+  // The pre-dispatch refusal above covers a slot that can never hold a trailer. This
+  // covers the other one: the dispatch happened, and what turned up at the path could
+  // not be read back. Both are unknown, for different reasons, and neither is silence.
+  const compose = f.options.composeActingTurn
+  f.options.composeActingTurn = (async (...args: Parameters<typeof compose>) => {
+    await mkdir(f.req.result.path)
+    return compose(...args)
+  }) as typeof compose
+  const outcome = await f.run()
+  expect(outcome.kind).toBe('unknown')
+  expect(f.calls).toHaveLength(1)
 })

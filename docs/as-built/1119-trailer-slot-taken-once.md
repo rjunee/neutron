@@ -25,8 +25,10 @@ readers took it for this round's answer:
 
 1. `runtime/workers/project-runners.ts:50` — the exact terminal string above.
 2. `runtime/workers/claude-acting-turn.ts:200-202` — returns `turn-ended` the
-   instant the path exists, which on round two is true before the dispatch is
-   even submitted. No worker of that round had run.
+   instant the path exists. The dispatch IS submitted first (`submitLine` at
+   `:194` precedes the `stat` at `:200`); what the occupied slot short-circuits
+   is the wait that exists to observe the worker, so the turn reports itself
+   ended before any worker of that round has run.
 
 Same defect class as #1111: an outcome judged on history rather than on what
 arrived after the dispatch.
