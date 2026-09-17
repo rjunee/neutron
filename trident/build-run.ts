@@ -264,8 +264,10 @@ export async function buildRun(input: BuildRunInput, deps: BuildRunDeps, signal:
       return unknown('Resume awaits the existing worker observation')
     }
     if (local && snapshot.pr !== null) return blocked('Local build has a PR')
+    // Receipt provenance establishes ownership; a fresh checkout can still be at base.
+    // Publication and merge enforce equality with the reviewed head later.
     const ownsMeasuredPr = snapshot.pr !== null && snapshot.pr.number === input.owned_pr
-      && snapshot.pr.state === 'OPEN' && snapshot.pr.head === snapshot.head
+      && snapshot.pr.state === 'OPEN'
     if (input.start === 'fresh' && snapshot.pr !== null && !ownsMeasuredPr) {
       return blocked('Fresh build already has a PR')
     }

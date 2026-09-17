@@ -256,13 +256,55 @@ test('fresh retry continues on the PR proven to belong to its prior run', async 
   expect(f.runner.calls.map(call => call.role)).toEqual(['plan', 'build'])
 })
 
-for (const mismatch of ['closed', 'moved'] as const) test(`owned PR is still refused when ${mismatch}`, async () => {
-  const f = fixture(); f.snapshot.pr = { number: 17, head: f.snapshot.head, state: 'OPEN' }
+test('fresh retry admits its prior published PR when checkout is still at base', async () => {
+  const f = fixture()
+  f.snapshot.pr = { number: 17, head: 'b'.repeat(40), state: 'OPEN' }
   f.input.owned_pr = 17
-  if (mismatch === 'closed') f.snapshot.pr.state = 'CLOSED'
-  else f.snapshot.pr.head = 'b'.repeat(40)
+  expect(f.input.start).toBe('fresh')
+  expect(f.snapshot.pr.head).not.toBe(f.snapshot.head)
+  for (const outcome of f.outcomes.values()) {
+    if (outcome.kind === 'completed' && outcome.result && typeof outcome.result === 'object' && 'pr' in outcome.result) {
+      outcome.result.pr = structuredClone(f.snapshot.pr)
+    }
+  }
+  // Model republication advancing the existing PR to this run's reviewed head.
+  f.deps.publish = async () => {
+    f.events.push('publish')
+    f.snapshot.pr!.head = f.snapshot.head
+    for (const outcome of f.outcomes.values()) {
+      if (outcome.kind === 'completed' && outcome.result && typeof outcome.result === 'object' && 'pr' in outcome.result) {
+        outcome.result.pr = structuredClone(f.snapshot.pr)
+      }
+    }
+  }
+  expect(await f.run()).toMatchObject({ kind: 'merged', snapshot: { pr: { number: 17 } } })
+  expect(f.runner.calls.map(call => call.role)).toEqual(['plan', 'build'])
+  expect(f.events).toContain('publish')
+})
+
+for (const head of ['a', 'b']) test(`foreign PR with different provenance refuses fresh admission at head ${head}`, async () => {
+  const f = fixture()
+  f.snapshot.pr = { number: 18, head: head.repeat(40), state: 'OPEN' }
+  f.input.owned_pr = 17
+  expect(await f.run()).toMatchObject({ kind: 'blocked', phase: 'plan', on: 'Fresh build already has a PR' })
+  expect(f.runner.calls).toHaveLength(0)
+})
+
+for (const head of ['a', 'b']) test(`owned closed PR is still refused at head ${head}`, async () => {
+  const f = fixture(); f.snapshot.pr = { number: 17, head: head.repeat(40), state: 'CLOSED' }
+  f.input.owned_pr = 17
   expect(await f.run()).toMatchObject({ kind: 'blocked', on: 'Fresh build already has a PR' })
   expect(f.runner.calls).toHaveLength(0)
+})
+
+test('owned merged PR remains terminal without admitting fresh work', async () => {
+  const f = fixture()
+  f.snapshot.pr = { number: 17, head: 'b'.repeat(40), state: 'MERGED' }
+  f.input.owned_pr = 17
+  expect(await f.run()).toMatchObject({ kind: 'merged' })
+  expect(f.runner.calls).toHaveLength(0)
+  expect(f.cross.calls).toHaveLength(0)
+  expect(f.events).toEqual(['measure'])
 })
 
 for (const gate of ['admissionGate', 'publishGate', 'mergeGate'] as const) {
