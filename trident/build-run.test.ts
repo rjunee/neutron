@@ -98,7 +98,7 @@ test('fresh to merged with a fix, host gates and fake runners', async () => {
 test('terminal publication cannot proceed when the full-suite gate is missing or red', async () => {
   for (const state of ['missing', 'red'] as const) {
     const f = fixture()
-    if (state === 'missing') delete f.deps.publicationSuite
+    if (state === 'missing') delete (f.deps as { publicationSuite?: unknown }).publicationSuite
     else f.deps.publicationSuite = async () => ({ kind: 'known', findings: [
       { title: 'FULL SUITE NOT PROVEN', evidence: 'terminal run failed', advisory: false },
     ] })

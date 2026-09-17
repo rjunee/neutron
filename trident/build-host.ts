@@ -44,7 +44,11 @@ export interface BuildHostOptions {
   reviewReadiness?: ReviewReadinessSource
   reviewCi?: ReviewCiSource
   reviewSuite?: ReviewSuiteSource
-  publicationSuite?: ReviewSuiteSource
+  /** REQUIRED, not optional. A host that cannot produce terminal full-suite evidence
+   * must not reach merge, and making this optional moved that decision from
+   * construction time — where the type can enforce it — to a runtime `unknown` that
+   * every caller had to remember to wire. Supply a source, or supply one that refuses. */
+  publicationSuite: ReviewSuiteSource
   review?: ReviewSource
   observeCi(snapshot: BuildSnapshot): Promise<CiRunObservation>
 }

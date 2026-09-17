@@ -553,6 +553,9 @@ test('local-mode driver reaches merged through the real production effect', asyn
     // refuses without them. `createBuildHost` composes both in production; these
     // fixtures script them so the assertions stay about the persistence effects.
     reviewReadiness: async () => ({ kind: 'allow' as const }),
+    // Terminal full-suite evidence. The driver refuses to merge without a source,
+    // so the fixture states what this run reports rather than leaving it unwired.
+    publicationSuite: async () => ({ kind: 'known' as const, findings: [] }),
     reviewSuite: async () => ({ kind: 'known' as const, findings: [] }),
     reviewCi: async () => ({ kind: 'known' as const, findings: [] }),
     admissionGate: async () => ({ kind: 'allow' }),
@@ -623,6 +626,9 @@ async function resumeFixture(round = 3, replansUsed = 1) {
   const rounds: number[][] = []
   // Compose the same readback gate as createBuildHost over production files.
   const deps: BuildRunDeps = { reviewArtifact, ...restarted.effects, modes: restarted.modes,
+    // Terminal full-suite evidence. The driver refuses to merge without a source,
+    // so this fixture states what the run reports rather than leaving it unwired.
+    publicationSuite: async () => ({ kind: 'known' as const, findings: [] }),
     // The driver requires a round cap from the run row and refuses without one
     // (`trident/build-run.ts` — 'Review round cap source is missing'). Production
     // gets it from `createBuildHost`; these fixtures build deps by hand, so they

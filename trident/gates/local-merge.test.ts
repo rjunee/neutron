@@ -57,6 +57,9 @@ async function runLocalBuild(f: Awaited<ReturnType<typeof fixture>>, overrides: 
     assessMergeDiff: () => ({ allow: true, measured_bytes: snapshot.diff.length }),
     reviewReadiness: async () => ({ kind: 'allow' }),
     reviewCi: async () => ({ kind: 'known', findings: [] }),
+    // Terminal full-suite evidence. The driver refuses to merge without a source,
+    // so the fixture states what this run reports rather than leaving it unwired.
+    publicationSuite: async () => ({ kind: 'known' as const, findings: [] }),
     reviewSuite: async () => ({ kind: 'known', findings: [] }),
     reviewGate: async (_payload, _snapshot, _round, _used, record) => { record?.({ findings: [], blockingCount: 0 }); return { kind: 'approve' } }, publishGate: async () => f.check(), mergeGate: async () => f.check(),
     publish: async () => { throw new Error('local mode must not publish') },

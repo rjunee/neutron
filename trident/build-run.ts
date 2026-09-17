@@ -122,7 +122,10 @@ export interface BuildRunDeps {
   reviewCi?(snapshot: BuildSnapshot, mergeMode?: 'pr' | 'local', signal?: AbortSignal): Promise<ReviewCiAssessment>
   reviewSuite?(snapshot: BuildSnapshot, round: number): Promise<SuiteAssessment>
   /** Terminal full-suite evidence, measured before final publication/merge progression. */
-  publicationSuite?(snapshot: BuildSnapshot): Promise<SuiteAssessment>
+  /** REQUIRED. Terminal full-suite evidence, measured before merge. A driver with no
+   * source for it cannot establish that the cumulative branch passes, so the decision
+   * belongs at construction rather than as a runtime `unknown` each caller must recall. */
+  publicationSuite(snapshot: BuildSnapshot): Promise<SuiteAssessment>
   // reviewGate owns panel provenance and severity, and records evidence before filtering.
   reviewGate(payload: unknown, snapshot: BuildSnapshot, round: number, replansUsed?: number, recordProgress?: (value: ReviewProgress) => void): Promise<ReviewDecision>
   // publishGate owns mutation proof and publication readiness; mergeGate owns CI,
