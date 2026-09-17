@@ -267,7 +267,7 @@ describe('background composition runs on its own REPL', () => {
     expect(keyFor(nudgeTwo)).not.toBe(keyFor(nudgeOne))
   })
 
-  test('an ABORTED reminder compose leaves the warm chat session usable', async () => {
+  test('a TIMED-OUT reminder compose leaves the warm chat session usable', async () => {
     const { ctx } = makeCtx()
     const w = wireSubstrates(ctx)
 
@@ -275,9 +275,11 @@ describe('background composition runs on its own REPL', () => {
     expect(await turn(w.liveAgentSubstrate!, 'hello')).toBe('gen1')
 
     // A reminder comes due and its composition times out — the exact shape of the
-    // incident: `cc-llm-call: aborted`, produced by the drain's own abort watchdog.
+    // incident. This asserted /aborted/ while the substrate collapsed expiry and
+    // cancellation into one string; #1095 types them apart, so a TIMEOUT now says
+    // so. `aborted` is reserved for a genuine caller cancellation.
     const llm = buildSubstrateReminderLlm(w.reminderComposeSubstrate!, { timeout_ms: 5 })
-    await expect(llm.compose(specFor(HANG))).rejects.toThrow(/aborted/)
+    await expect(llm.compose(specFor(HANG))).rejects.toThrow(/compose timeout/)
 
     // His NEXT chat turn must land on the SAME warm child. `gen2` here would mean
     // the background failure evicted and respawned the session he is talking to —
@@ -330,7 +332,9 @@ describe('background composition runs on its own REPL', () => {
     const { ctx } = makeCtx()
     const w = wireSubstrates(ctx)
     const llm = buildSubstrateReminderLlm(w.reminderComposeSubstrate!, { timeout_ms: 5 })
-    await expect(llm.compose(specFor(HANG))).rejects.toThrow(/aborted/)
+    // A TIMEOUT, typed as such since #1095. The claim here is the isolation, not
+    // the wording — but the wording has to name what actually happened.
+    await expect(llm.compose(specFor(HANG))).rejects.toThrow(/compose timeout/)
     // Its own next turn respawns a clean child (the designed self-heal)…
     expect(await turn(w.reminderComposeSubstrate!, 'compose')).toBe('gen2')
     // …while the owner's chat has never respawned at all.

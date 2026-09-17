@@ -199,7 +199,6 @@ class CountingAdoptableHost implements AdoptableHost {
     const exitedPromise = new Promise<number | null>((res) => {
       resolveExit = res
     })
-    opts.onScreen?.('')
     return {
       pid: SURVIVOR_PID,
       paneHandle: handle,
@@ -221,6 +220,8 @@ class CountingAdoptableHost implements AdoptableHost {
       wasKilledByUs: () => true,
       beginOutput: () => {
         survivor.outputReleased = true
+        // Deliver the baseline only after the adopter owns the output gate.
+        opts.onScreen?.('❯ ')
       },
     }
   }

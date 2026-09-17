@@ -261,7 +261,10 @@ export function buildSubstrateReminderLlm(
       const ac = new AbortController()
       const timer = setTimeout(() => ac.abort(), timeout_ms)
       try {
-        return await collectTokensToString(handle, ac.signal)
+        return await collectTokensToString(handle, ac.signal, undefined, undefined, {
+          code: 'compose_timeout',
+          message: 'cc-llm-call: compose timeout',
+        })
       } finally {
         clearTimeout(timer)
         // Released on EVERY exit — resolve, throw, abort, timeout. A counter that

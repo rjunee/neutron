@@ -10,7 +10,7 @@ import { dirname, resolve, sep } from 'node:path'
 import type { LiveProcessHandle } from '@neutronai/tools/process-registry.ts'
 import type { Api5xxWatcherHandle } from './api5xx-dead-turn-watcher.ts'
 import { OutputScanner } from './output-scan.ts'
-import type { PtyChild } from './pty-host.ts'
+import type { PtyChild, PtyExitCause } from './pty-host.ts'
 import { PtyRing, type RecentOutputOpts, type RingMark } from './pty-ring.ts'
 import type { SessionSizeWatchdog } from './session-size-watchdog.ts'
 import { CHILD_KILL_GRACE_MS, ZERO_USAGE, defaultIsPidAlive } from './signatures.ts'
@@ -493,12 +493,14 @@ export class ReplSession {
   }
 
   /** Fail the in-flight turn (process death). Retryable so the caller respawns. */
-  onDeath(): void {
+  onDeath(cause?: PtyExitCause): void {
     const t = this.activeTurn
     if (t === undefined || t.settled) return
     t.settled = true
     t.diedMidTurn = true
-    t.channel.push({ kind: 'error', message: 'persistent-repl: REPL process exited', retryable: true })
+    t.channel.push(cause === 'pane-vanished'
+      ? { kind: 'error', message: 'persistent-repl: pane vanished during turn', retryable: true, code: 'pane_vanished' }
+      : { kind: 'error', message: 'persistent-repl: REPL process exited', retryable: true })
     t.channel.close()
     t.settle()
   }

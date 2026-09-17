@@ -174,6 +174,13 @@ import type { PersistentReplSubstrateOptions } from './types.ts'
  * next turn. Generous on purpose — it is a pathology detector, not a latency budget.
  */
 export const BOOT_ADOPTION_BUDGET_MS = 45_000
+/** Maximum time an attached pane gets to yield one readable baseline screen. */
+export const BOOT_ADOPTION_BASELINE_MS = 5_000
+
+/** The publication decision, named so the refusal remains independently testable. */
+export function baselineAllowsAdoption(observed: boolean): boolean {
+  return observed
+}
 
 /** What the pass decided about one registry row. */
 export type RowAdoptionOutcome =
@@ -205,6 +212,8 @@ export interface BootAdoptionDeps {
   host?: unknown
   /** `/health` probe. Defaults to the real one. */
   health?: (port: number, opts: { expectedSessionId?: string; timeoutMs?: number }) => Promise<boolean>
+  /** Bound for proving the attached pane can actually be observed. */
+  baselineMs?: number
   /** The pid-table fallback for a pane the host could not speak for. */
   orphanDeps?: (record: ReplRegistryRecord, claudeBasename: string) => OrphanAdoptionDeps
   /** The whole-machine process listing behind {@link scanTranscriptOwners}. Defaults
@@ -285,7 +294,7 @@ const LOCK_UNACQUIRED_REASON =
  */
 
 const shutdownAbandonReason = (
-  at: 'before the attach' | 'with the attach in flight' | 'at the row claim',
+  at: 'before the attach' | 'with the attach in flight' | 'at the row claim' | 'while awaiting the baseline',
   boundExpired = false,
 ): string =>
   boundExpired
@@ -2517,7 +2526,7 @@ async function adoptRow(
    * the key is not cached against a later pass.
    */
   const release = (
-    at: 'with the attach in flight' | 'at the row claim',
+    at: 'with the attach in flight' | 'at the row claim' | 'while awaiting the baseline',
     attached?: PtyChild,
   ): RowAdoptionOutcome => {
     const reason = shutdownAbandonReason(at, signal.boundExpired)
@@ -2607,6 +2616,10 @@ async function adoptRow(
   const claimTakenAt = (deps.now ?? Date.now)()
 
   let primed = false
+  let baselineResolve: ((observed: boolean) => void) | undefined
+  const baselineObserved = new Promise<boolean>((resolve) => {
+    baselineResolve = resolve
+  })
   /** Set only when the durable claim has succeeded — the gate the ordering invariant names.
    *  Everything that can READ the pane or WRITE to it is behind this. */
   let claimConfirmed = false
@@ -2622,7 +2635,7 @@ async function adoptRow(
         // by a detector — `1`+Enter into a session another gateway owns. Until the claim is
         // confirmed this wrapper is blind and mute: nothing is recorded, nothing is primed,
         // nothing is scanned.
-        if (!claimConfirmed) return
+        if (!claimConfirmed || (!primed && screen.trim().length === 0)) return
         session.ring.replace(screen)
         const now = Date.now()
         session.lastDataAt = now
@@ -2635,6 +2648,8 @@ async function adoptRow(
               (silenced.length > 0 ? ` [${silenced.join(', ')}]` : '') +
               ' — they cannot fire until they fall and rise again',
           )
+          baselineResolve?.(true)
+          baselineResolve = undefined
           // FALLS THROUGH TO THE SCAN DELIBERATELY, and the fall-through is provably
           // inert: `scan` fires only on a rising edge, every signature present in this
           // very screen was just latched by the line above, and both read the same
@@ -2815,6 +2830,30 @@ async function adoptRow(
           child,
         )
       }
+      // ATTACHED IS NOT OBSERVABLE. `attach()` proves only that a wrapper could be
+      // constructed; adoption requires one real screen to reach the detector baseline.
+      // A pane that vanishes or never yields a readable screen is closed and cleared so
+      // the waiting dispatch can cold-resume instead of publishing a blind session.
+      let observed = primed
+      if (!primed) {
+        let baselineTimer: ReturnType<typeof setTimeout> | undefined
+        observed = await Promise.race([
+          baselineObserved,
+          child.exited.then(() => false),
+          new Promise<false>((resolve) => {
+            baselineTimer = setTimeout(() => resolve(false), deps.baselineMs ?? BOOT_ADOPTION_BASELINE_MS)
+          }),
+        ])
+        if (baselineTimer !== undefined) clearTimeout(baselineTimer)
+      }
+      if (signal.abandoned) {
+        if (signal.cause === 'shutdown') return release('while awaiting the baseline', child)
+        return await unwind('the evidence bound elapsed awaiting the baseline', child)
+      }
+      if (!baselineAllowsAdoption(observed)) {
+        return await unwind('the attached pane yielded no observable baseline screen', child)
+      }
+      if (child.hasExited()) return await unwind('the pane exited before publication', child)
       // PUBLISHED, AND THE SESSION REMEMBERS WHAT IT WAS PUBLISHED AS (r55) — the promise its
       // teardown will compare the map against.
       //

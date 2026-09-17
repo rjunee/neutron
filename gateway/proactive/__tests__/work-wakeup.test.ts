@@ -172,7 +172,7 @@ describe('runWorkWakeupSweep — the wake path', () => {
     const h = harness()
     const result = await runWorkWakeupSweep(h.deps, new Map())
 
-    expect(result).toEqual({ unavailable: 0, woke: 1, skipped_active: 0, failed: 0, failed_no_progress: 0, failed_budget_ceiling: 0, deferred_to_run: 0, released_stalled_run: 0, skipped_agent_busy: 0 })
+    expect(result).toEqual({ unavailable: 0, woke: 1, skipped_active: 0, failed: 0, failed_by_reason: {}, failed_no_progress: 0, failed_budget_ceiling: 0, deferred_to_run: 0, released_stalled_run: 0, skipped_agent_busy: 0 })
     expect(h.specs).toHaveLength(1)
     const spec = h.specs[0]!
     // The warm-pool key — what lands the turn ON the owner's session.
@@ -216,7 +216,7 @@ describe('runWorkWakeupSweep — the wake path', () => {
   test('owner active inside the grace window → skipped, and the session is NEVER entered', async () => {
     const h = harness({ activity: NOW - (WORK_WAKEUP_OWNER_GRACE_MS - 1) })
     const result = await runWorkWakeupSweep(h.deps, new Map())
-    expect(result).toEqual({ unavailable: 0, woke: 0, skipped_active: 1, failed: 0, failed_no_progress: 0, failed_budget_ceiling: 0, deferred_to_run: 0, released_stalled_run: 0, skipped_agent_busy: 0 })
+    expect(result).toEqual({ unavailable: 0, woke: 0, skipped_active: 1, failed: 0, failed_by_reason: {}, failed_no_progress: 0, failed_budget_ceiling: 0, deferred_to_run: 0, released_stalled_run: 0, skipped_agent_busy: 0 })
     expect(h.specs).toHaveLength(0)
     expect(h.posts).toHaveLength(0)
   })
@@ -240,7 +240,7 @@ describe('runWorkWakeupSweep — the wake path', () => {
       unavailable: 0,
       woke: 0,
       skipped_active: 0,
-      failed: 0,
+      failed: 0, failed_by_reason: {},
       failed_no_progress: 0,
       failed_budget_ceiling: 0,
       deferred_to_run: 0,
@@ -279,6 +279,92 @@ describe('runWorkWakeupSweep — the wake path', () => {
     expect(dead.posts[0]!.body).toContain('attempt 1')
   })
 
+  test.each([
+    [300_000, 240_000, 240_000, 30_000],
+    [100_000, 200_000, 80_000, 10_000],
+    [300_000, 5_000, 5_000, 5_000],
+  ])('early pane loss respects cadence budgets (%s, %s)', async (interval, timeout, first, retry) => {
+    let clock = NOW
+    let attempts = 0
+    const h = harness({ now: () => clock, compose: async (spec, opts) => {
+      attempts++
+      if (attempts === 1) {
+        expect(spec.turn_timeout_ms).toBe(first)
+        expect(opts?.timeout_ms).toBe(WORK_WAKEUP_TURN_ABSOLUTE_CEILING_MS)
+        clock += first!
+        throw new SubstrateCallError('pane vanished', { code: 'pane_vanished', retryable: true })
+      }
+      expect(opts?.timeout_ms).toBe(retry)
+      expect(spec.turn_absolute_ceiling_ms).toBe(retry)
+      expect(spec.turn_timeout_ms).toBe(retry)
+      clock += retry!
+      return 'Recovered on a fresh pane.'
+    } })
+    h.deps.interval_ms = interval
+    h.deps.turn_timeout_ms = timeout
+    const result = await runWorkWakeupSweep(h.deps, new Map())
+    expect(attempts).toBe(2)
+    expect(clock - NOW).toBeLessThan(interval!)
+    expect(result.woke).toBe(1)
+    expect(result.failed_by_reason).toEqual({})
+  })
+
+  test.each(['pane_vanished', 'aborted'] as const)('late pane loss and cancellation are not retried: %s', async (code) => {
+    let clock = NOW
+    let attempts = 0
+    const h = harness({ now: () => clock, compose: async () => {
+      attempts++
+      clock += WORK_WAKEUP_TURN_TIMEOUT_MS + 1
+      throw new SubstrateCallError(code, { code, retryable: code === 'pane_vanished' })
+    } })
+    const result = await runWorkWakeupSweep(h.deps, new Map())
+    expect(attempts).toBe(1)
+    expect(result.failed_by_reason).toEqual({ [code]: 1 })
+    expect(result.failed_budget_ceiling).toBe(0)
+  })
+
+  test('an early genuine cancellation is neither retried nor counted as budget expiry', async () => {
+    let attempts = 0
+    const h = harness({ compose: async () => {
+      attempts++
+      throw new SubstrateCallError('cancelled', { code: 'aborted', retryable: false })
+    } })
+    const result = await runWorkWakeupSweep(h.deps, new Map())
+    expect(attempts).toBe(1)
+    expect(result.failed_by_reason).toEqual({ aborted: 1 })
+    expect(result.failed_budget_ceiling).toBe(0)
+  })
+
+  test('the retry substrate timeout is classified against its own ceiling', async () => {
+    let clock = NOW
+    let attempts = 0
+    const h = harness({ now: () => clock, compose: async (_spec, opts) => {
+      attempts++
+      if (attempts === 1) throw new SubstrateCallError('gone', { code: 'pane_vanished', retryable: true })
+      clock += opts!.timeout_ms!
+      throw new SubstrateCallError('timeout', { code: 'turn_timeout', retryable: true })
+    } })
+    const result = await runWorkWakeupSweep(h.deps, new Map())
+    expect(attempts).toBe(2)
+    expect(result.failed_budget_ceiling).toBe(1)
+    expect(result.failed_no_progress).toBe(0)
+  })
+
+  test('a second pane loss is terminal for this sweep', async () => {
+    let attempts = 0
+    const h = harness({ compose: async () => {
+      attempts++
+      throw new SubstrateCallError('pane vanished', { code: 'pane_vanished', retryable: true })
+    } })
+    const streaks = new Map<string, number>()
+    const result = await runWorkWakeupSweep(h.deps, streaks)
+    expect(attempts).toBe(2)
+    expect(result.failed_by_reason).toEqual({ pane_vanished: 1 })
+    expect(result.failed).toBe(1)
+    expect(streaks.get('acme')).toBe(1)
+    expect(h.posts).toHaveLength(1)
+  })
+
   test('the gate is asked about the CHAT SCOPE — the warm-pool key, not the board key', async () => {
     const asked: string[] = []
     const h = harness({
@@ -305,7 +391,7 @@ describe('runWorkWakeupSweep — the wake path', () => {
   test('a project with zero items is not woken', async () => {
     const h = harness({ projects: [project({ items: [] })] })
     const result = await runWorkWakeupSweep(h.deps, new Map())
-    expect(result).toEqual({ unavailable: 0, woke: 0, skipped_active: 0, failed: 0, failed_no_progress: 0, failed_budget_ceiling: 0, deferred_to_run: 0, released_stalled_run: 0, skipped_agent_busy: 0 })
+    expect(result).toEqual({ unavailable: 0, woke: 0, skipped_active: 0, failed: 0, failed_by_reason: {}, failed_no_progress: 0, failed_budget_ceiling: 0, deferred_to_run: 0, released_stalled_run: 0, skipped_agent_busy: 0 })
     expect(h.specs).toHaveLength(0)
   })
 
@@ -327,7 +413,7 @@ describe('runWorkWakeupSweep — the wake path', () => {
       ],
     })
     const result = await runWorkWakeupSweep(h.deps, new Map())
-    expect(result).toEqual({ unavailable: 0, woke: 0, skipped_active: 0, failed: 0, failed_no_progress: 0, failed_budget_ceiling: 0, deferred_to_run: 1, released_stalled_run: 0, skipped_agent_busy: 0 })
+    expect(result).toEqual({ unavailable: 0, woke: 0, skipped_active: 0, failed: 0, failed_by_reason: {}, failed_no_progress: 0, failed_budget_ceiling: 0, deferred_to_run: 1, released_stalled_run: 0, skipped_agent_busy: 0 })
     expect(h.specs).toHaveLength(0)
   })
 
@@ -647,7 +733,7 @@ describe('runWorkWakeupSweep — the wake path', () => {
       ],
     })
     const result = await runWorkWakeupSweep(h.deps, new Map())
-    expect(result).toEqual({ unavailable: 0, woke: 0, skipped_active: 1, failed: 0, failed_no_progress: 0, failed_budget_ceiling: 0, deferred_to_run: 1, released_stalled_run: 0, skipped_agent_busy: 0 })
+    expect(result).toEqual({ unavailable: 0, woke: 0, skipped_active: 1, failed: 0, failed_by_reason: {}, failed_no_progress: 0, failed_budget_ceiling: 0, deferred_to_run: 1, released_stalled_run: 0, skipped_agent_busy: 0 })
   })
 
   test('an over-long report is truncated to the bound, never dropped', async () => {
@@ -676,8 +762,8 @@ describe('runWorkWakeupSweep — loud failure, bounded siren', () => {
       now: () => clock,
       compose: async () => {
         clock += WORK_WAKEUP_TURN_ABSOLUTE_CEILING_MS
-        throw new SubstrateCallError('cc-llm-call: aborted', {
-          code: 'aborted', retryable: false,
+        throw new SubstrateCallError('cc-llm-call: compose timeout', {
+          code: 'compose_timeout', retryable: true,
         })
       },
     })
@@ -794,6 +880,7 @@ describe('runWorkWakeupSweep — loud failure, bounded siren', () => {
       woke: 0,
       skipped_active: 0,
       failed: 1,
+      failed_by_reason: { unknown: 1 },
       failed_no_progress: 0,
       failed_budget_ceiling: 0,
       deferred_to_run: 0,
@@ -1014,7 +1101,7 @@ describe('runWorkWakeupSweep — a missing precondition is never silence (#1085)
     expect(result.failed).toBe(0)
     expect(streaks.size).toBe(0)
     expect(result).toEqual({
-      unavailable: 1, woke: 0, skipped_active: 0, failed: 0,
+      unavailable: 1, woke: 0, skipped_active: 0, failed: 0, failed_by_reason: {},
       failed_no_progress: 0, failed_budget_ceiling: 0,
       deferred_to_run: 0, released_stalled_run: 0, skipped_agent_busy: 0,
     })
@@ -1108,4 +1195,22 @@ describe('runWorkWakeupSweep — a missing precondition is never silence (#1085)
     expect(result.unavailable).toBe(0)
     expect(h.specs).toHaveLength(1)
   })
+})
+
+test('terminal typed failure counts reach the sweep log', async () => {
+  resetLoggerStateForTests()
+  const lines = captureInfo()
+  try {
+    const h = harness({ compose: async () => {
+      throw new SubstrateCallError('cancelled', { code: 'aborted', retryable: false })
+    } })
+    await buildWorkWakeupLoop(h.deps).loop.runOnce()
+  } finally {
+    lines.restore()
+  }
+  const summaries = lines.matching('wakeup_sweep')
+  expect(summaries).toHaveLength(1)
+  expect(summaries[0]).toContain('failed=1')
+  expect(summaries[0]).toContain('failed_by_reason=')
+  expect(summaries[0]).toContain('aborted')
 })

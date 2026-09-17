@@ -399,12 +399,14 @@ test('G6 · isFreezeTimeout matches the REAL turn-timeout AND composer-abort pro
   // `SubstrateCallError` (code: 'aborted'). O8 then folded the drain LOOP into the
   // one `drainToText` (runtime/substrate-text.ts), so `collectTokensToString` no
   // longer inlines the `throw` — it passes the abort wording as the `abortMessage`
-  // policy flag that `drainToText` throws. The message LITERAL is unchanged, so
+  // policy flag that `drainToText` throws. #1095 adds a caller override; extract
+  // the unchanged default literal after that override.
+  // The message LITERAL is unchanged, so
   // the extraction still fails loudly the moment `cc-llm-call: aborted` is
   // reworded; only the FORM it appears in moved (inline throw → option value).
   const composerAbort = extractFromSource(
     COLLECT_TOKENS_SRC_PATH,
-    /abortMessage: '(cc-llm-call: aborted)',/,
+    /abortMessage: abort\?\.message \?\? '(cc-llm-call: aborted)',/,
     'the `cc-llm-call: aborted` composer-abort producer literal',
   )
   expect(isFreezeTimeout(turnTimeout)).toBe(true)

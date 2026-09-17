@@ -71,9 +71,9 @@
  *     default drain (`keepAliveExempt` unset) aborts WITHOUT cancelling.
  */
 
-import type { Event } from './events.ts'
+import type { Event, SubstrateErrorClass } from './events.ts'
 import type { SessionHandle } from './session-handle.ts'
-import { SubstrateCallError } from './errors.ts'
+import { SUBSTRATE_ERROR_CODES, SubstrateCallError } from './errors.ts'
 import { neutralizeAbandonedSettle } from '@neutronai/logger/fire-and-forget.ts'
 
 /** Why the drain stopped. */
@@ -107,6 +107,8 @@ export interface DrainOptions {
   /** Message when `signal` was ALREADY aborted at entry (before dispatch).
    *  Defaults to `abortMessage`. */
   abortBeforeDispatchMessage?: string
+  /** Typed class for this caller's watchdog abort. Defaults to genuine cancellation. */
+  abortCode?: SubstrateErrorClass
   /**
    * ACTIVITY-INSPECTOR TEE. Invoked for EVERY event pulled off the stream — in
    * arrival order, including the ones this drain otherwise discards (`status`,
@@ -137,8 +139,8 @@ export interface DrainOutcome {
   error?: SubstrateCallError
 }
 
-const abortError = (message: string): SubstrateCallError =>
-  new SubstrateCallError(message, { code: 'aborted', retryable: false })
+const abortError = (message: string, code: SubstrateErrorClass): SubstrateCallError =>
+  new SubstrateCallError(message, { code, retryable: SUBSTRATE_ERROR_CODES[code].retryable })
 
 const errorEventError = (
   ev: Extract<Event, { kind: 'error' }>,
@@ -191,6 +193,7 @@ export async function drainToOutcome(
     errorPrefix = '',
     abortMessage = 'substrate drain: aborted',
     abortBeforeDispatchMessage = abortMessage,
+    abortCode = 'aborted',
     keepAliveExempt = false,
   } = opts
 
@@ -205,7 +208,7 @@ export async function drainToOutcome(
         /* best-effort teardown — the aborted outcome must survive a cancel throw */
       }
     }
-    return { text: '', status: 'aborted', error: abortError(abortBeforeDispatchMessage) }
+    return { text: '', status: 'aborted', error: abortError(abortBeforeDispatchMessage, abortCode) }
   }
 
   const iter = handle.events[Symbol.asyncIterator]()
@@ -240,7 +243,7 @@ export async function drainToOutcome(
 
   try {
     for (;;) {
-      if (aborted) return { text, status: 'aborted', error: abortError(abortMessage) }
+      if (aborted) return { text, status: 'aborted', error: abortError(abortMessage, abortCode) }
 
       let nextP: Promise<IteratorResult<Event>> | undefined
       let res: IteratorResult<Event> | typeof ABORTED
@@ -258,7 +261,7 @@ export async function drainToOutcome(
         // The pull threw — a SYNC `next()` throw, an async rejection, an external
         // `cancel()` (timeout timer), or a transport fault. A concurrent watchdog
         // abort wins the classification.
-        if (aborted) return { text, status: 'aborted', error: abortError(abortMessage) }
+        if (aborted) return { text, status: 'aborted', error: abortError(abortMessage, abortCode) }
         return {
           text,
           status: 'error',
@@ -277,12 +280,12 @@ export async function drainToOutcome(
         // eventual settle so a late resolve/reject is never an unhandled rejection.
         // We deliberately do NOT call iter.return() here (see `settled`).
         neutralizeAbandonedSettle(Promise.resolve(nextP))
-        return { text, status: 'aborted', error: abortError(abortMessage) }
+        return { text, status: 'aborted', error: abortError(abortMessage, abortCode) }
       }
 
       if (res.done === true) {
         // ABORT WINS A TIE: a natural end that raced the signal is still an abort.
-        if (aborted) return { text, status: 'aborted', error: abortError(abortMessage) }
+        if (aborted) return { text, status: 'aborted', error: abortError(abortMessage, abortCode) }
         return { text, status: 'exhausted' }
       }
 
@@ -321,7 +324,7 @@ export async function drainToOutcome(
         // `completion` must be reported `aborted`, NOT `completed` — otherwise a
         // cancelled subprocess is shown as finished. Re-check the signal BEFORE
         // returning the terminal outcome.
-        if (aborted) return { text, status: 'aborted', error: abortError(abortMessage) }
+        if (aborted) return { text, status: 'aborted', error: abortError(abortMessage, abortCode) }
         // `completion` is the terminal, already-settled event → return the text.
         // (No "keep draining past completion" mode exists: it had no consumer and
         // its only theoretical use — the un-converged email Core — is blocked by
@@ -332,7 +335,7 @@ export async function drainToOutcome(
       }
       if (ev.kind === 'error') {
         // Abort wins a tie against a raced terminal error too.
-        if (aborted) return { text, status: 'aborted', error: abortError(abortMessage) }
+        if (aborted) return { text, status: 'aborted', error: abortError(abortMessage, abortCode) }
         settled = true
         return { text, status: 'error', error: errorEventError(ev, errorPrefix) }
       }
