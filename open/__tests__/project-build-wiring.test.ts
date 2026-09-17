@@ -231,7 +231,16 @@ test('Codex-selected project denies an approval through the composed acting turn
     detail: 'Codex requested approval outside the bounded worker grants; denied.',
   })
   expect(submissions).toHaveLength(2)
-  expect(submissions[1]).toBe('\x1b[200~3\x1b[201~')
+// FRAMING MOVED TO THE HOST (#1117). The session now passes plain text and the
+  // terminal boundary wraps it — `bun-terminal-host.ts:520` / `herdr-host.ts:676`
+  // call the unconditional wrapper at `pty-host.ts:71`. This fixture's host is a
+  // double that records what the SESSION sent, so it sees the unframed key.
+  //
+  // The claim here is unchanged and is NOT about framing: a Codex-selected
+  // project must reach the codex acting turn and deny the approval. Framing has
+  // its own two-backend regression at
+  // `runtime/adapters/codex-cli/persistent/project-session.test.ts:419-453`.
+  expect(submissions[1]).toBe('3')
   expect(spawnedEnv?.CODEX_HOME).toBe(f.input.codex_home)
 })
 
