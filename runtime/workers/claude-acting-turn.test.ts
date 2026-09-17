@@ -652,3 +652,21 @@ test('an empty tool surface is refused, and says it was empty', async () => {
   expect(outcome.detail).toContain('<empty>')
   expect(f.commands).toHaveLength(0)
 })
+
+// Review finding on #1114: the known-incapability arm was pinned, this one was
+// not. "Lacks the tool" and "cannot read the surface" are different facts — the
+// first is something the host establishes, the second is something it admits it
+// cannot. Adding a branch without a test for it is how the first draft's crash
+// survived until the wiring mocks happened to hit it.
+test('an UNREADABLE tool surface refuses with its own detail, distinct from lacking the tool', async () => {
+  const f = await fixture()
+  // Not a string: the shape a stale or partially-constructed session presents.
+  ;(f.binding.session as { toolSurface?: unknown }).toolSurface = undefined
+  const outcome = await createClaudeActingTurn(f.binding)(f.input) as { kind: string; detail: string }
+  expect(outcome.kind).toBe('refused')
+  expect(outcome.detail).toContain('unreadable')
+  // It must NOT claim the session lacks the tool — that is a fact it cannot establish.
+  expect(outcome.detail).not.toContain('does not carry')
+  // And nothing is submitted on this path either.
+  expect(f.commands).toHaveLength(0)
+})
