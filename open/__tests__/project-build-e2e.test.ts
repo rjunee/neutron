@@ -49,6 +49,7 @@
  *
  * Everything this does NOT cover is enumerated at the bottom of this file.
  */
+import { LIVE_AGENT_TOOL_NAMES } from '@neutronai/gateway/wiring/build-live-agent-turn.ts'
 import { afterEach, expect, spyOn, test } from 'bun:test'
 import { mkdir, mkdtemp, readFile, rename, rm, writeFile } from 'node:fs/promises'
 import { tmpdir } from 'node:os'
@@ -548,7 +549,7 @@ async function fixture(options: { ralph?: boolean; moreTasks?: boolean; suiteExi
   // (`open/wiring/project-build.ts:214-251`).
   const key = `e2e-${row.id}`
   cleanups.push(() => { pool.delete(key); supervisedBySessionKey.delete(key) })
-  const session = { sessionId: 'e2e-session', cwd: dir, hasChildExited: () => false,
+  const session = { sessionId: 'e2e-session', toolSurface: LIVE_AGENT_TOOL_NAMES.join(','), cwd: dir, hasChildExited: () => false,
     child: { submitLine: literalWorker(world) }, acquireTurn: async () => () => {} }
 
   const register = (registration: { key?: string; projectId?: string; instanceId?: string
@@ -1335,7 +1336,7 @@ for (const seam of ['submitLine', 'acquireTurn', 'silent-worker'] as const) {
     // shortened here, not the mechanism that enforces it.
     options.workers.plan.request = { ...options.workers.plan.request, budget: { wall_ms: 1_500 } }
     registerSession(f, {
-      sessionId: 'e2e-session', cwd: f.dir, hasChildExited: () => false,
+      sessionId: 'e2e-session', toolSurface: LIVE_AGENT_TOOL_NAMES.join(','), cwd: f.dir, hasChildExited: () => false,
       child: { submitLine: seam === 'submitLine' ? neverSettles : async () => {} },
       acquireTurn: seam === 'acquireTurn' ? neverSettles : async () => () => {},
     })

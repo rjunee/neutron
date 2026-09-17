@@ -166,7 +166,7 @@ test('acting turn requires the selected live project session and observed grants
   expect((await act()).kind).toBe('unknown')
   const key = 'fixture-project-launch'
   const config = { substrate_instance_id: 'cc-agent-fixture', project_id: f.context.projectId, skip_permissions: true, extra_dirs: [f.dir] }
-  const session = { sessionId: 'fixture-session', cwd: f.dir, hasChildExited: () => false, child: { submitLine: async () => {} }, acquireTurn: async () => () => {} }
+  const session = { sessionId: 'fixture-session', toolSurface: LIVE_AGENT_TOOL_NAMES.join(','), cwd: f.dir, hasChildExited: () => false, child: { submitLine: async () => {} }, acquireTurn: async () => () => {} }
   cleanup.push(() => { pool.delete(key); supervisedBySessionKey.delete(key); supervisedBySessionKey.delete(key + '-other') })
   supervisedBySessionKey.set(key, config)
   expect((await act()).kind).toBe('unknown')
@@ -265,7 +265,7 @@ test('acting turn lazily starts and retains a cold project session', async () =>
   const turn = { conversation: captured.conversation, request, spec: { ...captured.conversation.spec, prompt: 'bounded work' }, timeout_ms: 50, signal: new AbortController().signal }
   const key = 'cold-project-launch'
   const config = { substrate_instance_id: 'cc-agent-fixture', project_id: f.context.projectId, skip_permissions: true, extra_dirs: [f.dir] }
-  const session = { sessionId: 'fixture-session', cwd: f.dir, hasChildExited: () => false, child: { submitLine: async () => {} }, acquireTurn: async () => () => {} }
+  const session = { sessionId: 'fixture-session', toolSurface: LIVE_AGENT_TOOL_NAMES.join(','), cwd: f.dir, hasChildExited: () => false, child: { submitLine: async () => {} }, acquireTurn: async () => () => {} }
   let spawns = 0
   cleanup.push(() => { pool.delete(key); supervisedBySessionKey.delete(key) })
   f.setSpawnProjectSession(async projectId => {

@@ -1,4 +1,5 @@
 import { open, readdir, readFile, stat } from 'node:fs/promises'
+import { SUBAGENT_TOOL_NAME } from './claude-tool-contract.ts'
 import { join, relative, resolve, sep } from 'node:path'
 import { setTimeout as delay } from 'node:timers/promises'
 import { sessionJsonlPath } from '../adapters/claude-code/persistent/jsonl-resumability.ts'
@@ -12,7 +13,7 @@ import type { ProjectActingTurn } from './project-runners.ts'
 export interface ClaudeActingSession {
   project_id: string
   topic_id: string
-  session: Pick<ReplSession, 'sessionId' | 'cwd' | 'child' | 'acquireTurn'>
+  session: Pick<ReplSession, 'sessionId' | 'cwd' | 'child' | 'acquireTurn' | 'toolSurface'>
   projects_dir?: string
   grants: { tools: ToolGrant; writable: boolean; network: boolean; roots: readonly string[] }
 }
@@ -150,6 +151,23 @@ export function createClaudeActingTurn(binding: ClaudeActingSession, clock: Obse
     if (request.writable && !grants.writable) return refuse('Requested writable access unavailable in Claude session.')
     if (request.network && !grants.network) return refuse('Requested network access unavailable in Claude session.')
     if (!child.submitLine) return refuse('Claude session lacks acknowledged submitLine.')
+    // A SESSION THAT CANNOT SPAWN A SUBAGENT IS A REFUSAL, NOT AN UNKNOWN. The
+    // dispatch submits directly to the pooled child, so this inspects the very
+    // session that will receive the line. `toolSurface` is the comma-joined
+    // spawn-time surface (`repl-session.ts:172-176`); if it lacks the subagent
+    // tool, no worker can be created and polling for one until the budget
+    // expires only converts a KNOWN failure into an unknown. Three runs spent
+    // 35s each learning nothing this way (#1112).
+    // ABSENT IS NOT THE SAME AS LACKING. A surface the host cannot read does not
+    // establish that the session is incapable — it establishes that the host
+    // cannot tell. Both refuse (dispatching blind is worse), but they are
+    // different facts and an operator acts on them differently.
+    if (typeof session.toolSurface !== 'string') {
+      return refuse(`Claude session tool surface is unreadable (${typeof session.toolSurface}); cannot establish whether ${SUBAGENT_TOOL_NAME} is available.`)
+    }
+    if (!session.toolSurface.split(',').includes(SUBAGENT_TOOL_NAME)) {
+      return refuse(`Claude session cannot create a subagent: its tool surface (${session.toolSurface || '<empty>'}) does not carry ${SUBAGENT_TOOL_NAME}.`)
+    }
 
     const deadline = clock.now() + Math.min(timeout_ms, request.budget.wall_ms)
     const timer = new AbortController()

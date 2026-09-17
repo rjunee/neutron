@@ -1,3 +1,5 @@
+import { LIVE_AGENT_TOOL_NAMES } from '@neutronai/gateway/wiring/build-live-agent-turn.ts'
+import { SUBAGENT_TOOL_NAME } from './claude-tool-contract.ts'
 import { afterEach, expect, spyOn, test } from 'bun:test'
 import * as fs from 'node:fs/promises'
 import { appendFile, mkdir, mkdtemp, rename, rm, writeFile } from 'node:fs/promises'
@@ -28,7 +30,7 @@ async function fixture() {
   }
   const binding: ClaudeActingSession = {
     project_id: 'project', topic_id: 'topic', grants: { roots: [], tools: 'edit-and-run', writable: true, network: true },
-    session: { sessionId: 'session', cwd: dir, acquireTurn: async () => { acquired++; return () => { released++ } },
+    session: { sessionId: 'session', cwd: dir, toolSurface: LIVE_AGENT_TOOL_NAMES.join(','), acquireTurn: async () => { acquired++; return () => { released++ } },
       child: { pid: 123, write() {}, kill() {}, hasExited: () => false, exited: new Promise(() => {}),
         submitLine: async text => { commands.push(text); await writeFile(input.request.result.path, '{}') } } },
   }
@@ -618,3 +620,53 @@ for (const phase of ['open', 'stat', 'read'] as const) {
     })
   }
 }
+
+// #1112 acceptance 2. A session that CANNOT create a subagent is a refusal the
+// host can make before acting — not an uncertainty to discover by waiting. Three
+// card-dispatched runs each spent 35s polling a tool-less child for a worker that
+// could never exist, and reported `{kind:'unknown'}`: the weakest possible answer
+// to a question the host could have answered immediately.
+test('a session whose surface lacks the subagent tool is REFUSED before any submission', async () => {
+  const f = await fixture()
+  f.binding.session.toolSurface = 'Read,Bash'
+  const outcome = await createClaudeActingTurn(f.binding)(f.input) as { kind: string; reason?: string; detail: string }
+  expect(outcome.kind).toBe('refused')
+  expect(outcome.reason).toBe('capability-unsupported')
+  // The detail names the surface AND the missing tool, so an operator is not
+  // left inferring which of the two facts is wrong.
+  expect(outcome.detail).toContain('Read,Bash')
+  expect(outcome.detail).toContain(SUBAGENT_TOOL_NAME)
+  // NOTHING was submitted: this is a pre-actuation refusal, not a late verdict.
+  expect(f.commands).toHaveLength(0)
+  // And it is NOT the unknown this replaces — a refusal is a decision.
+  expect(outcome.kind).not.toBe('unknown')
+})
+
+test('an empty tool surface is refused, and says it was empty', async () => {
+  const f = await fixture()
+  f.binding.session.toolSurface = ''
+  const outcome = await createClaudeActingTurn(f.binding)(f.input) as { kind: string; detail: string }
+  expect(outcome.kind).toBe('refused')
+  // `--tools ""` is the exact shape #1112 produced; an operator reading this must
+  // not see a blank where the surface should be.
+  expect(outcome.detail).toContain('<empty>')
+  expect(f.commands).toHaveLength(0)
+})
+
+// Review finding on #1114: the known-incapability arm was pinned, this one was
+// not. "Lacks the tool" and "cannot read the surface" are different facts — the
+// first is something the host establishes, the second is something it admits it
+// cannot. Adding a branch without a test for it is how the first draft's crash
+// survived until the wiring mocks happened to hit it.
+test('an UNREADABLE tool surface refuses with its own detail, distinct from lacking the tool', async () => {
+  const f = await fixture()
+  // Not a string: the shape a stale or partially-constructed session presents.
+  ;(f.binding.session as { toolSurface?: unknown }).toolSurface = undefined
+  const outcome = await createClaudeActingTurn(f.binding)(f.input) as { kind: string; detail: string }
+  expect(outcome.kind).toBe('refused')
+  expect(outcome.detail).toContain('unreadable')
+  // It must NOT claim the session lacks the tool — that is a fact it cannot establish.
+  expect(outcome.detail).not.toContain('does not carry')
+  // And nothing is submitted on this path either.
+  expect(f.commands).toHaveLength(0)
+})
