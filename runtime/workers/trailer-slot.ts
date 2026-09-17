@@ -1,4 +1,5 @@
-import { readFile, unlink, writeFile } from 'node:fs/promises'
+import { readdir, readFile, unlink, writeFile } from 'node:fs/promises'
+import { join } from 'node:path'
 
 /** Clear the result slot a step is about to dispatch against.
  *
@@ -43,6 +44,47 @@ export type SlotReservation =
  * recognises the request, and so the armed and unarmed states are distinguishable
  * from the file alone after any restart. */
 const ARMED = '\n#dispatch-armed\n'
+
+const RESERVATION_FILE = /^(?:claude|codex|pi|codex-headless)-step-[a-f0-9]{64}\.json$/
+
+/** Reconcile reservations after the host has observed that the prior run attempt stopped.
+ *
+ * The containing directory is exclusively bound to one run by `createProjectRunners`, so a
+ * recognised reservation without the armed suffix can only describe work that was never
+ * submitted. Armed reservations are durable evidence of a possibly submitted task and are
+ * never removed here. This is intentionally a host action: a competing dispatcher cannot
+ * establish that the owner is dead. The caller must establish exclusive admission first;
+ * this helper does not authorize restarting a pending or terminal driver. */
+export async function reconcileStoppedTrailerReservations(stateDir: string): Promise<{ ok: true } | { ok: false; detail: string }> {
+  let names: string[]
+  try {
+    names = await readdir(stateDir)
+  } catch (error) {
+    const code = (error as NodeJS.ErrnoException).code
+    return { ok: false, detail: `Stopped-run reservations in ${stateDir} could not be listed (${code ?? String(error)}); dispatch ownership is unknown.` }
+  }
+  for (const name of names) {
+    if (!RESERVATION_FILE.test(name)) continue
+    const path = join(stateDir, name)
+    let bytes: string
+    try {
+      bytes = await readFile(path, 'utf8')
+    } catch (error) {
+      const code = (error as NodeJS.ErrnoException).code
+      if (code === 'ENOENT') continue
+      return { ok: false, detail: `Stopped-run reservation ${path} could not be read (${code ?? String(error)}); dispatch ownership is unknown.` }
+    }
+    if (bytes.endsWith(ARMED)) continue
+    try {
+      await unlink(path)
+    } catch (error) {
+      const code = (error as NodeJS.ErrnoException).code
+      if (code === 'ENOENT') continue
+      return { ok: false, detail: `Unarmed stopped-run reservation ${path} could not be cleared (${code ?? String(error)}); the step was not recovered.` }
+    }
+  }
+  return { ok: true }
+}
 
 /** Take ownership of a step, clearing its result slot exactly once.
  *

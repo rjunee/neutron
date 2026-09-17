@@ -1,8 +1,8 @@
 import { afterEach, expect, test } from 'bun:test'
 import { mkdtemp, readFile, rm, writeFile } from 'node:fs/promises'
 import { tmpdir } from 'node:os'
-import { join } from 'node:path'
-import { clearTrailerSlot, reserveTrailerSlot } from './trailer-slot.ts'
+import { dirname, join } from 'node:path'
+import { clearTrailerSlot, reconcileStoppedTrailerReservations, reserveTrailerSlot } from './trailer-slot.ts'
 
 const directories: string[] = []
 afterEach(async () => {
@@ -12,7 +12,7 @@ afterEach(async () => {
 async function slot() {
   const dir = await mkdtemp(join(tmpdir(), 'trailer-slot-'))
   directories.push(dir)
-  return { reservation: join(dir, 'step.json'), result: join(dir, 'build.result'), identity: 'the-request' }
+  return { reservation: join(dir, `claude-step-${'a'.repeat(64)}.json`), result: join(dir, 'build.result'), identity: 'the-request' }
 }
 
 test('exactly one of many concurrent callers may dispatch a step', async () => {
@@ -57,6 +57,24 @@ test('a step held but never armed is unknown, and its stale slot is not read', a
   expect(await readFile(s.result, 'utf8')).toBe('the previous round')
 })
 
+test('a stopped host clears an unarmed reservation so a later attempt dispatches once', async () => {
+  const s = await slot()
+  // The first owner died after exclusive create and before arming or dispatch.
+  await writeFile(s.reservation, s.identity)
+  expect((await reserveTrailerSlot(s.reservation, s.identity, s.result)).kind).toBe('unknown')
+
+  expect(await reconcileStoppedTrailerReservations(dirname(s.reservation))).toEqual({ ok: true })
+  expect(await reserveTrailerSlot(s.reservation, s.identity, s.result)).toEqual({ kind: 'dispatch' })
+  expect(await reserveTrailerSlot(s.reservation, s.identity, s.result)).toEqual({ kind: 'resume' })
+})
+
+test('stopped-host reconciliation preserves an armed reservation', async () => {
+  const s = await slot()
+  expect(await reserveTrailerSlot(s.reservation, s.identity, s.result)).toEqual({ kind: 'dispatch' })
+  expect(await reconcileStoppedTrailerReservations(dirname(s.reservation))).toEqual({ ok: true })
+  expect(await reserveTrailerSlot(s.reservation, s.identity, s.result)).toEqual({ kind: 'resume' })
+})
+
 test('a reservation for a different request is refused, not adopted', async () => {
   const s = await slot()
   await writeFile(s.reservation, 'a different request')
@@ -72,4 +90,30 @@ test('an absent slot is cleared successfully; an unclearable one is reported', a
   const outcome = await clearTrailerSlot(asDirectory)
   expect(outcome.ok).toBe(false)
   expect(outcome).toHaveProperty('detail', expect.stringContaining(asDirectory))
+})
+
+test('a step whose owner died between create and arm recovers on a later attempt, and never dispatches twice', async () => {
+  // Protocol-level fixture only: this bypasses launcher admission and does not close #1122.
+  // the exclusive `wx` create writes the bare identity, and the owner dies before
+  // `identity + ARMED` is written, so this IS the byte state it leaves behind.
+  const s = await slot()
+  await writeFile(s.reservation, s.identity, { flag: 'wx', mode: 0o600 })
+
+  // The wedge #1122 reports. A replacement cannot tell a dead owner from one that is
+  // microseconds away from arming, so it refuses instead of dispatching the bounded task
+  // a second time against one shared trailer. Refusing is correct and is not recovery.
+  const wedged = await reserveTrailerSlot(s.reservation, s.identity, s.result)
+  expect(wedged.kind).toBe('unknown')
+
+  // The host is the only party that knows the run stopped, so it is the only one that may
+  // clear this. Nothing about the worker-side rules above changed.
+  expect(await reconcileStoppedTrailerReservations(dirname(s.reservation))).toEqual({ ok: true })
+
+  // After explicit cleanup the slot permits a dispatch.
+  expect(await reserveTrailerSlot(s.reservation, s.identity, s.result)).toEqual({ kind: 'dispatch' })
+
+  // A second reservation must not grant another dispatch. This does not exercise
+  // the driver or its launcher admission guard.
+  const sibling = await reserveTrailerSlot(s.reservation, s.identity, s.result)
+  expect(sibling.kind).not.toBe('dispatch')
 })
