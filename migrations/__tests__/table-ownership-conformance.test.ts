@@ -27,7 +27,7 @@
  * empty scan.
  */
 import { describe, expect, test } from 'bun:test'
-import { readFileSync, readdirSync, rmSync, writeFileSync } from 'node:fs'
+import { mkdirSync, readFileSync, readdirSync, rmSync, writeFileSync } from 'node:fs'
 import { join, relative, sep } from 'node:path'
 import { fileURLToPath } from 'node:url'
 
@@ -245,6 +245,21 @@ describe('table-ownership conformance (migrations/table-ownership.json)', () => 
       expect(found).toEqual(new Set([knownWriter]))
     } finally {
       rmSync(probe, { force: true })
+    }
+  })
+
+  test('scanner propagates a read error that is NOT a missing file', () => {
+    // A vanished file cannot be a writer, so skipping it is sound. Anything else —
+    // a permission error, a directory where a file was expected — is a real
+    // failure. Swallowing it would read as "this file contains no writers", which
+    // is how a genuine unauthorised writer would pass unseen. Absent and
+    // unreadable must not share a branch.
+    const probe = join(REPO_ROOT, 'gateway', '__table_ownership_unreadable__.ts')
+    mkdirSync(probe, { recursive: true })
+    try {
+      expect(() => readSourceFile(probe)).toThrow()
+    } finally {
+      rmSync(probe, { recursive: true, force: true })
     }
   })
 
