@@ -461,13 +461,13 @@ const LEAK_GATE_STUB = '#!/usr/bin/env bash\necho "LEAK GATE: SILENT"\nexit 0\n'
  * THE HOST'S OWN SUITE RUN, AND WHY THIS FIXTURE PINS IT.
  *
  * G063 needs a HOST-observed suite receipt, not the builder's claim. `readCheckpoint`
- * (`open/wiring/project-build.ts:249-253`) pulls the command out of the test strategy
+ * (`open/wiring/project-build.ts:461-467`) pulls the command out of the test strategy
  * with `fullSuiteCommand`, which takes the indented lines under the exact marker
- * `Full suite (stage 2), run exactly this` (`project-build.ts:82`), runs it in the run
+ * `Full suite (stage 2), run exactly this` (`project-build.ts:162`), runs it in the run
  * worktree, and records the process exit code. With no such marker there is no command,
- * the report is `null`, and `assessReviewSuite` returns
- * `Host-observed review suite exit code is missing or unreadable`
- * (`gates/review-suite.ts:41`) for every card — measured: that is exactly how this
+ * the report is `null`, and `assessReviewSuite` reports that no full-suite command
+ * is derivable from the strategy (`gates/review-suite.ts:42`) for every card —
+ * measured: that is exactly how this
  * harness failed when #1040 landed after it was written.
  *
  * PINNED, NOT AMBIENT, in two ways. The command is a script COMMITTED TO THIS
@@ -480,7 +480,7 @@ const suiteScript = (exit: number) => `#!/usr/bin/env bash\necho "HARNESS SUITE 
 const suiteStrategy = 'TEST EXECUTION: run the card regression.\n\n'
   + 'Full suite (stage 2), run exactly this:\n\n  bash scripts/ci/suite.sh\n'
 
-async function fixture(options: { ralph?: boolean; moreTasks?: boolean; suiteExit?: number
+async function fixture(options: { ralph?: boolean; moreTasks?: boolean; suiteExit?: number; testStrategy?: string
   blockersByRound?: readonly number[]; replanRounds?: readonly number[]
   maxRounds?: number; mergeMode?: 'pr' | 'local'; blockRoles?: readonly string[]
   repeatFirstFinding?: boolean; commentRounds?: readonly number[]
@@ -584,7 +584,7 @@ async function fixture(options: { ralph?: boolean; moreTasks?: boolean; suiteExi
     // build's recorded claim; an empty one returns `known()` vacuously
     // (`gates/review-suite.ts:39`). The stage-2 block is what gives the host a
     // command to run for its own receipt — see `suiteStrategy`.
-    test_strategy: suiteStrategy,
+    test_strategy: options.testStrategy ?? suiteStrategy,
     // Only the adversarial core seat stays on; the cross-model seats need real
     // Codex and Kimi credentials, and the rubric seat adds nothing here.
     phase_models: { review_rubric: { model: 'none' }, review_codex: { model: 'none' }, review_kimi: { model: 'none' } },
@@ -812,6 +812,18 @@ test('pr mode drives plan, build, review, publish and merge to a terminal merged
   expect(originMain.stdout.trim()).not.toBe(f.baseSha)
   expect(f.store.get(f.row.id)!.pr).toBe(1)
   expect(['cleaned', 'preserved']).toContain(outcome.cleanup.kind)
+}, 300_000)
+
+test('a missing full-suite command stops with its own cause and runs no suite', async () => {
+  const f = await fixture({ testStrategy: 'TEST EXECUTION: stage 1 only\n' })
+  const outcome = await drive(f, 'pr')
+  expect(outcome.kind, why(f, outcome)).toBe('unknown')
+  if (outcome.kind === 'unknown') {
+    expect(outcome.phase).toBe('review')
+    expect(outcome.detail).toContain('No full-suite command is derivable from the test strategy')
+    expect(outcome.detail).not.toContain('Host-observed review suite exit code is missing or unreadable')
+  }
+  expect(f.commands.filter(argv => argv[0] === 'bash' && argv[1] === '-lc' && (argv[2] ?? '').includes('suite.sh'))).toEqual([])
 }, 300_000)
 
 test('ralph mode with a single task reaches the same terminal merged outcome', async () => {

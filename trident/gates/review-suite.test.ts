@@ -39,22 +39,24 @@ test('G063 rejects a nonzero host receipt — advisory only for an EVIDENCED fai
   // Evidenced: advisory, so the panel's approve stands — the human verifies the comparison.
   expect(await f.decide()).toEqual(approve)
   f.observation.report = null
-  expect((await f.decide()).kind).toBe('unknown')
+  expect(await f.assess()).toEqual({ kind: 'unknown', detail: 'No full-suite command is derivable from the test strategy' })
   f.observation.strategy = ''
   expect(await f.decide()).toEqual(approve)
   f.observation.strategy = 'run full suite'
   f.observation.report = { hostExitCode: 0 }
   expect(await f.decide()).toEqual(approve)
 })
-test('G063 distinguishes host-observed pass, failure, and unknown', async () => {
+test('G063 distinguishes no derivable command from an unreadable host receipt', async () => {
   const f = fixture()
   f.observation.report = { hostExitCode: 0 }
   expect(await f.decide()).toEqual(approve)
   f.observation.report = { hostExitCode: 1 }
   expect(await f.decide()).toMatchObject({ kind: 'fix', findings: [expect.stringContaining('FULL SUITE NOT PROVEN')] })
-  for (const report of [null, {}, { hostExitCode: 1.5 }]) {
+  f.observation.report = null
+  expect(await f.assess()).toEqual({ kind: 'unknown', detail: 'No full-suite command is derivable from the test strategy' })
+  for (const report of [{}, { hostExitCode: 1.5 }]) {
     f.observation.report = report
-    expect(await f.decide()).toMatchObject({ kind: 'unknown', detail: expect.stringContaining('Host-observed') })
+    expect(await f.assess()).toEqual({ kind: 'unknown', detail: 'Host-observed review suite exit code is missing or unreadable' })
   }
 })
 test('G065 evidence earns an advisory finding and never waives panel rejection', async () => {
