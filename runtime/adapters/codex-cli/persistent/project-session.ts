@@ -160,9 +160,9 @@ export class CodexProjectSession {
         throw new CodexApprovalRefusedError('codex project session refused: approval prompt changed while queued')
       }
       if (this.child.hasExited()) throw new Error('codex project session refused: session is not running')
-      // End the paste explicitly before Enter so Codex does not absorb Enter
-      // into its rapid-input paste buffer (on either terminal backend).
-      await submit.call(this.child, `\x1b[200~${line}\x1b[201~`)
+      // The terminal host frames the paste and sends Enter. Passing a frame here
+      // would nest paste markers in the terminal payload.
+      await submit.call(this.child, line)
     } finally {
       release()
     }

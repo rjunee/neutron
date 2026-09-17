@@ -190,7 +190,7 @@ for (const when of ['before dispatch', 'after dispatch'] as const) {
           : 'Codex directory trust requires setup outside the bounded worker.',
       })
       const answers = when === 'after dispatch' ? f.commands.slice(1) : f.commands
-      expect(answers).toEqual(kind === 'approval' ? ['\x1b[200~3\x1b[201~'] : [])
+      expect(answers).toEqual(kind === 'approval' ? ['3'] : [])
       expect(f.commands).toHaveLength((when === 'after dispatch' ? 1 : 0) + (kind === 'approval' ? 1 : 0))
     })
   }
