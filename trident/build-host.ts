@@ -30,7 +30,7 @@ export interface BuildHostOptions {
   replProvider: Provider
   workers: Record<Role, { provider: Provider; request: Workers[Role]['request'] }>
   /** Host observations and effects, never worker assertions or gate overrides. */
-  effects: Pick<BuildRunDeps, 'prepareWork' | 'measure' | 'publish' | 'merge'>
+  effects: Pick<BuildRunDeps, 'prepareWork' | 'measure' | 'publish' | 'merge' | 'recordReviewApproval'>
   phaseUsage: Pick<TridentPhaseUsageStore, 'list' | 'record'>
   leak: Omit<Parameters<typeof runLeakGatePreflight>[0], 'head' | 'fixer' | 'max_fix_attempts'>
   mutation: Omit<MutationGateInput, 'expected_head' | 'claim'> & {

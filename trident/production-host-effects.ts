@@ -440,8 +440,12 @@ export function createProductionHostEffects(options: ProductionHostOptions) {
     const result = await gate
     if (result.kind !== 'allow') throw new Error(result.kind === 'unknown' ? result.detail : result.on)
   }
-  const effects: Pick<BuildRunDeps, 'prepareWork' | 'measure' | 'publish' | 'merge'> = {
+  const effects: Pick<BuildRunDeps, 'prepareWork' | 'measure' | 'publish' | 'merge' | 'recordReviewApproval'> = {
     measure,
+    async recordReviewApproval() {
+      row()
+      await store.update(runId, { inner_verdict: 'APPROVE' })
+    },
     async prepareWork(request, context) {
       row()
       if (request.run_id !== runId || request.cwd !== worktree) throw new Error('Worker request does not belong to this build')

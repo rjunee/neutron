@@ -47,6 +47,7 @@ async function runLocalBuild(f: Awaited<ReturnType<typeof fixture>>, overrides: 
     tools: 'edit-and-run', brief: { path: 'brief', integrity: briefIntegrity('brief.context.json') }, result: { path: 'result', schema: 'test' }, thread: null, budget: { wall_ms: 1000 } } as const
   const worker = { runner, request }
   const deps: BuildRunDeps = {
+    recordReviewApproval: async () => {},
     readReviewCap: async () => ({ kind: 'known' }),
     assignedBranch: 'change',
     reviewArtifact: (request, measured) => reviewArtifact(request, measured, async path =>
