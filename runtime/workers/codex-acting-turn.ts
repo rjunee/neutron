@@ -1,9 +1,9 @@
-import { stat } from 'node:fs/promises'
+import { readFile, stat } from 'node:fs/promises'
 import { relative, resolve, sep } from 'node:path'
 import { setTimeout as delay } from 'node:timers/promises'
 import type { ToolGrant } from '../bounded-work.ts'
 import { CodexApprovalRefusedError, type CodexProjectSession } from '../adapters/codex-cli/persistent/project-session.ts'
-import type { ProjectActingTurn } from './project-runners.ts'
+import { projectTrailerStep, type ProjectActingTurn } from './project-runners.ts'
 
 /** Host-owned session observation. The bound thread is supplied by the host that
  * owns conversation continuity; pane handles are not Codex thread identifiers. */
@@ -72,8 +72,13 @@ export function createCodexActingTurn(binding: CodexActingSession): ProjectActin
         if (approval) return approval
         try {
           const trailer = await stat(request.result.path)
-          if (trailer.isFile()) return { kind: 'turn-ended' as const }
-          throw new Error('Codex trailer path is not a file')
+          if (trailer.isFile()) {
+            if (projectTrailerStep(await readFile(request.result.path, 'utf8'), request) !== 'not-current-step') {
+              return { kind: 'turn-ended' as const }
+            }
+          } else {
+            throw new Error('Codex trailer path is not a file')
+          }
         } catch (error) {
           if ((error as NodeJS.ErrnoException).code !== 'ENOENT') throw error
         }

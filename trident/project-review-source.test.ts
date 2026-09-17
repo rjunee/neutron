@@ -3,7 +3,7 @@ import { mkdtemp, readFile, rm } from 'node:fs/promises'
 import { tmpdir } from 'node:os'
 import { join } from 'node:path'
 import type { BoundedWorkOutcome, BoundedWorkRequest, WorkerRunner } from '@neutronai/runtime/bounded-work.ts'
-import { decodeProjectTrailer } from '@neutronai/runtime/workers/project-runners.ts'
+import { decodeProjectTrailer, type ProjectTrailerOutcome } from '@neutronai/runtime/workers/project-runners.ts'
 import { createProjectReviewSource, type ProjectReviewSourceOptions } from './project-review-source.ts'
 import { reviewPanel } from './gates/review-panel.ts'
 const approve = { verdict: 'APPROVE', findings: [] }
@@ -180,7 +180,7 @@ test('null model telemetry preserves completion and reports unknown panel family
 // the presence of a particular sentence.
 test('a seat obeying the panel brief literally writes a trailer the host decoder accepts', async () => {
   const f = await fixture()
-  let decoded: BoundedWorkOutcome | undefined
+  let decoded: ProjectTrailerOutcome | undefined
   let namedFields: string[] = []
   f.answer(async request => {
     const brief = JSON.parse(await readFile(request.brief.path, 'utf8'))
