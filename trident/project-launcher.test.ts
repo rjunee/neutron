@@ -16,12 +16,16 @@ import {
   projectBuildResult,
 } from './project-launcher.ts'
 import { buildTridentOrchestrator } from './orchestrator.ts'
+import { terminalRunDisposition } from './run-disposition.ts'
 import { parseInnerResult, type InnerLoopInput } from './inner-loop.ts'
 import type { ProjectBuildOutcome } from './project-build-host.ts'
 
 const cleanup: (() => Promise<void> | void)[] = []
 afterEach(async () => { for (const fn of cleanup.splice(0).reverse()) await fn() })
 const unknown: ProjectBuildOutcome = { kind: 'unknown', phase: 'build', step_id: 'step-7', detail: 'Transport uncertain', cleanup: { kind: 'preserved', detail: 'live branch' } }
+const approvedButUnverified: ProjectBuildOutcome = { kind: 'unknown', phase: 'review', step_id: 'run:review:1',
+  detail: 'Review readiness deferred: Review PR mergeability is not established; budget exhausted. Review worker reported APPROVE; host receipt not obtained.',
+  cleanup: { kind: 'preserved', detail: 'live branch' } }
 const merged: ProjectBuildOutcome = { kind: 'merged', snapshot: { head: 'b'.repeat(40), diff: 'diff', pr: { number: 12, head: 'b'.repeat(40), state: 'MERGED' } }, cleanup: { kind: 'cleaned', detail: '' } }
 
 async function fixture() {
@@ -82,6 +86,29 @@ test('launch returns before completion and hands terminal result to the existing
  * A settled `unknown` now FAILS VISIBLY. The reservation case — a promise this
  * gateway really is still running — is the next case, and still waits.
  */
+test('an unverified worker APPROVE still ends REVIEW_NOT_RUN and is not classified approved', async () => {
+  // The criterion names THIS path specifically: the review worker claimed APPROVE, the
+  // host never obtained its receipt, and the claim survives only in the detail. The
+  // verdict column must still say no host-verified review happened, because
+  // `run-disposition.ts:193` maps ANY terminal APPROVE to `approved` — which would drop
+  // this row out of failure analytics and report a dead build as an approved one.
+  const f = await fixture()
+  await createProjectLauncher(f.options)(f.input)
+  f.complete(approvedButUnverified)
+  await settle()
+  const run = f.store.get(f.input.run.id)!
+  const orch = buildTridentOrchestrator({ fire_workflow: async () => { throw Error('must not re-fire') }, db_path: f.input.db_path,
+    base_branch: 'main', run_host: honourDiffOutput(async () => ({ ok: true, exit_code: 0, stdout: '', stderr: '' })),
+    observe_run_worker: async () => ({ state: 'blocked', detail: 'prompt', observed_at: new Date().toISOString(), screen: 'prompt' }) })
+  const out = await orch.step(run)
+  expect(out.run.phase).toBe('failed')
+  // The claim is visible...
+  expect(out.run.failure_reason).toContain('Review worker reported APPROVE; host receipt not obtained')
+  // ...and the verdict still refuses to assert it.
+  expect(out.run.inner_verdict).toBe('REVIEW_NOT_RUN')
+  expect(terminalRunDisposition(out.run)).not.toBe('approved')
+})
+
 test('a settled driver unknown fails the run instead of parking it forever', async () => {
   const f = await fixture()
   await createProjectLauncher(f.options)(f.input)
@@ -109,6 +136,14 @@ test('a settled driver unknown fails the run instead of parking it forever', asy
   expect(out.run.phase).toBe('failed')
   // The driver's own cause survives onto the row, so the stop is diagnosable.
   expect(out.run.failure_reason).toContain('Transport uncertain')
+  // THE VERDICT COLUMN MUST NOT SAY APPROVED FOR A RUN THAT FAILED.
+  // `run-disposition.ts:193` maps ANY terminal APPROVE to `approved`, which drops the
+  // row out of failure analytics and narrates a dead build to the owner as an approved
+  // one. Cross-model arbitration reverted an earlier change for exactly this, and the
+  // property was left unpinned: mutating `orchestrator.ts` REVIEW_NOT_RUN -> APPROVE
+  // kept this file green.
+  expect(out.run.inner_verdict).toBe('REVIEW_NOT_RUN')
+  expect(terminalRunDisposition(out.run)).not.toBe('approved')
   // And the reason the park was fatal rather than merely slow: nothing re-fires
   // over a pending row, so a run left waiting here can never be restarted either.
   expect(await createProjectLauncher(f.options)(f.input)).toEqual({ status: 'unconfirmed', error: 'Existing project build requires reconciliation' })

@@ -5,7 +5,7 @@ import { createLogger } from '@neutronai/logger'
 // wrapper in `./gates/unknown-cause.ts`, which returns a `GateResult`.
 import { TERMINAL_CAUSE_MAX, unknownCause } from '@neutronai/runtime/refusal-cause.ts'
 import { createHash } from 'node:crypto'
-import { clampPlanBranchBrief } from './gates/result-contract.ts'
+import { clampPlanBranchBrief, validateTrailer } from './gates/result-contract.ts'
 import {
   placementFor,
   type BoundedWorkOutcome,
@@ -189,6 +189,19 @@ function claimMatches(value: unknown, measured: BuildSnapshot): value is BuildSn
 
 const fullOid = (head: string | null): head is string => typeof head === 'string' && /^(?:[a-f0-9]{40}|[a-f0-9]{64})$/i.test(head)
 const unchecked = (body: string): string[] => body.split('\n').filter(line => /^\s*- \[ \]\s+/.test(line))
+
+/**
+ * A worker trailer is a claim, not a panel verdict. Keep a schema-valid APPROVE
+ * visible when the host cannot obtain its CI receipt, while leaving every verdict
+ * consumer on the host-verified REVIEW_NOT_RUN path.
+ */
+function ciUnknownDetail(payload: unknown, detail: string): string {
+  const trailer = validateTrailer('verdict', payload)
+  return trailer.ok && trailer.value.verdict === 'APPROVE'
+    ? `${detail}. Review worker reported APPROVE; host receipt not obtained.`
+    : detail
+}
+
 function executionPlan(value: unknown): value is ExecutionPlan {
   if (!value || typeof value !== 'object') return false
   const plan = value as ExecutionPlan
@@ -546,7 +559,7 @@ export async function buildRun(input: BuildRunInput, deps: BuildRunDeps, signal:
       const result = await work('review', round)
       if ('stop' in result) return result.stop
       const ci = await deps.reviewCi(snapshot, input.merge_mode, signal)
-      if (ci.kind === 'unknown') return unknown(ci.detail)
+      if (ci.kind === 'unknown') return unknown(ciUnknownDetail(result.payload, ci.detail))
       if (ci.kind === 'blocked') return blocked(ci.on)
       let currentReview: ReviewProgress | undefined
       const panel = await deps.reviewGate(result.payload, snapshot, round, replansUsed, value => {
