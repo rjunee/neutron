@@ -1,96 +1,88 @@
-## 2026-09-17 — Bound dispatch consumption to the current submission (#1106)
+## 2026-09-17 — Bound dispatch consumption to the current turn (#1106)
 
 ### Change and evidence
 
-A persistent transcript can already contain the exact dispatch from an earlier attempt.
-Capture its byte size and file identity under the acquired turn slot before submission
-(`runtime/workers/claude-acting-turn.ts:76`, `runtime/workers/claude-acting-turn.ts:142`,
-`runtime/workers/claude-acting-turn.ts:153`). After capture, recheck expiry before actuation
-(`runtime/workers/claude-acting-turn.ts:154`). The host maintains this boundary for every
-invocation; it does not require the REPL to cooperate with the observation mechanism.
+The branch captures transcript size and identity before submission, under the turn
+slot (`runtime/workers/claude-acting-turn.ts:76`, :163, :174). Only subsequent exact
+user string/text-block matches prove consumption (:107–119). The existing three
+states remain `consumed`, `not-consumed`, and `unreadable` (:71).
 
-At dispatch expiry, classify only bytes after that boundary as `consumed`, `not-consumed`
-or `unreadable`. Exact user string or text-block matches establish consumption; failures
-to establish/read the boundary stay unreadable (`runtime/workers/claude-acting-turn.ts:71`,
-`runtime/workers/claude-acting-turn.ts:87`, `runtime/workers/claude-acting-turn.ts:102`).
-File replacement and observed size shrink invalidate the baseline
-(`runtime/workers/claude-acting-turn.ts:94`). There is one transcript read at expiry,
-not in the polling loop (`runtime/workers/claude-acting-turn.ts:169`).
+Reproduced the blocking review finding before editing production: the held-open
+caller regression expected two submitted commands after 40ms and received one.
+The baseline open at :91 could keep the slot until the held operation completed;
+the baseline outer race returned unknown without releasing that slot (:193–199).
+Those review citations were accurate on the starting branch. The filed issue's
+transcript-path citation (:49–50) now resolves to :138.
 
-All three states join the existing `unknown` outcome vocabulary
-(`runtime/workers/claude-acting-turn.ts:181`, `runtime/workers/project-runners.ts:31`).
-The caller preserves that detail in its explicit non-ended branch and returns unknown,
-without a new outcome falling through a default (`runtime/workers/project-runners.ts:138`,
-`runtime/workers/project-runners.ts:146`). The existing three-state subagent observation
-is retained (`runtime/workers/claude-acting-turn.ts:48`); `grep -c observeSubagents
-runtime/workers/claude-acting-turn.ts` returned **2**.
+The diagnostic now races its entire open/stat/read/close operation against caller
+cancellation and the remaining host budget (:89–96, :125). Cancellation is
+`unreadable` (:94). An outer interruption during the diagnostic cancels it and waits
+for that bounded observation to release the slot, preserving the diagnostic detail
+(:217–219, :210). Normal string/block/negative classification remains at :115–122.
+
+Reading starts under the slot. Late open/stat completion checks cancellation before
+starting another operation (:104, :106); readFile receives the abort signal (:109).
+A late handle is closed (:110), even though the cancelled observation already
+released the slot. The timer/race is host-owned and does not require the REPL or a
+stalled filesystem operation to complete. Open itself cannot be forcibly cancelled
+by this API: a permanently stalled open retains its pending cleanup continuation,
+but cannot retain the turn slot or initiate a later transcript read.
+
+The vocabulary is unchanged: consumption states map explicitly to the existing
+`unknown` outcome (:193–203). `runtime/workers/project-runners.ts:31` declares it;
+:138 and :146 preserve its detail through the non-ended branch. There is no new
+outcome relying on an implicit default. `grep -c observeSubagents
+runtime/workers/claude-acting-turn.ts` returned **2**; the observer's readable,
+absent, and unreadable vocabulary remains at :39 and :57–68.
 
 ### Acceptance and decisions
 
-The table-driven fixture at `runtime/workers/claude-acting-turn.test.ts:439` enumerates
-11 scenarios. It pre-seeds identical production-form dispatch text and multibyte history
-at :445–450. Current string/block consumption, historical-only non-consumption, decoys,
-missing/unreadable transcripts, failed baseline capture, replacement and truncation are
-asserted at :490–495. Every case stays unknown. Transcript access occurs only at the
-logical deadline (:496), and expiry during baseline capture prevents dispatch (:504).
+The existing table at `runtime/workers/claude-acting-turn.test.ts:439` enumerates
+11 normal/boundary scenarios and still checks one expiry-only open (:496).
+The new nested table (:522–524) enumerates seven cases: open/stat/read crossed with
+caller/deadline, plus cancellation at diagnostic entry for open. Its serial slot
+queue (:533) holds the first operation unresolved (:564, :571, :576). Assertions
+prove that the second dispatch submits and both slots release before unblocking
+the first operation (:602–605). Late completion checks no new stat/read is started
+and the interrupted read actually rejects with AbortError (:608–610).
 
-Use bytes rather than timestamps to avoid timestamp precision and transcript clock
-assumptions. Treat initial ENOENT as offset zero so a newly created transcript can prove
-consumption (:81); inability to read at expiry remains unreadable (:98). Say no worker
-was *observed*, because even consumed text does not prove the worker did not run (:172).
-The mechanism assumes an append-only transcript between observations; it detects visible
-shrink/replacement, not an in-place rewrite that regrows on the same inode. The file is
-read once in full, then sliced (:96); this adds an expiry-only size cost, not per-poll I/O.
+Use the remaining host budget, not a fresh dispatch budget. Keep the diagnostic
+inside turn ownership; detach only cancellation cleanup. A read can use remaining
+budget after dispatch observation expires, so expiry-only I/O is not a claim of
+zero timing cost. It cannot keep the slot waiting for stalled I/O after that bound.
+A distinctive-phrase search across runtime, docs and hidden records used
+`expiry-only|not per-poll I/O|does not alter dispatch timing|timing characteristics|One read at expiry`.
+It found this branch's previous size-cost sentence and the positive-control source
+comment at :85. This record replaces the former timing claim with the bound above.
 
-No spec/product decision changed. Did not change terminal acknowledgement, retry behavior,
-worker creation evidence, host timeout semantics, or add a flag/alternate execution path.
-The staged issue's transcript-path citation moved from :49–50 to pre-change :77, now :118;
-its backend citation remains `runtime/adapters/claude-code/persistent/pty-host.ts:194`.
-The prior implementation was inspected with `git show dee42d86`; only its matching idea
-was reused. The current directory observer was retained rather than reverting #1105.
+No product/spec decision changed. Deliberately did not add retries, flags, an
+alternate dispatch path, new outcome values, or move transcript observation outside
+the slot. Boundary capture and subagent polling cancellation are outside this fix.
+Re-read docs/process/work-tracking.md before updating this record; the task explicitly
+selects this staging path rather than the normal docs/as-built path.
 
-Updated the adjacent obsolete observation comment in the test (:368). A phrase search
-for `REPL did not accept|cannot reach: the REPL|No worker was observed` across runtime,
-docs and hidden records returned the positive-control current message at worker :181
-and test assertion at :370. Frozen historical records were not edited.
+### Mutation proof for this revision
 
-### Mutation proof
+Each changed line was printed before running. Command for every row:
+`bun test runtime/workers/claude-acting-turn.test.ts -t 'stalled transcript <filter>'`.
+Every mutation exited **1**, and restoration with the same filter exited **0**.
+Lines refer to `runtime/workers/claude-acting-turn.ts`.
 
-Every row ran `bun test runtime/workers/claude-acting-turn.test.ts -t '<filter>'`.
-The mutated source line was printed before running. Each mutation exited **1** with the
-named test failing; restoring the source made the same command exit **0**. These are
-classification/control-flow mutations, not message edits. Lines below refer to
-`runtime/workers/claude-acting-turn.ts`; the ordering mutation adds a line after :155.
-
-| Guard / line | Mutation actually applied | Filter | Observed |
+| Guard | Printed mutation | Filter | Observed RED; restored GREEN |
 |---|---|---|---|
-| String :104 | return not-consumed on exact match | dispatch consumption: string | RED → GREEN |
-| Blocks :106 | return not-consumed on exact block | dispatch consumption: blocks | RED → GREEN |
-| Negative :109 | return consumed after unmatched scan | dispatch consumption: historical only | RED → GREEN |
-| Read error :98 | catch returns not-consumed | dispatch consumption: read failure | RED → GREEN |
-| Boundary :96 | subarray(0) | dispatch consumption: historical only | RED → GREEN |
-| Ordering :153/:156 | mutable boundary, recaptured after submitLine | dispatch consumption: string | RED → GREEN |
-| User type :102 | if (false) continue | dispatch consumption: decoys | RED → GREEN |
-| Text type :106 | replace block type condition with true | dispatch consumption: decoys | RED → GREEN |
-| Exact match :104 | use string includes(dispatch) | dispatch consumption: decoys | RED → GREEN |
-| Initial ENOENT :81 | return undefined for missing file | dispatch consumption: created after boundary | RED → GREEN |
-| Initial EIO :81 | return offset zero for other errors | dispatch consumption: stat failure | RED → GREEN |
-| Regular file :79 | replace isFile() with true | dispatch consumption: bad boundary | RED → GREEN (unexpected open) |
-| Unknown baseline :88 | return not-consumed | dispatch consumption: bad boundary | RED → GREEN |
-| Shrink :94 | replace size comparison with false | dispatch consumption: truncated | RED → GREEN |
-| Identity :95 | replace identity comparison with false | dispatch consumption: replaced | RED → GREEN |
-| Expiry :154 | remove post-stat expiry check | expiry during boundary capture | RED → GREEN (submitted) |
-| Poll cost :167 | insert await dispatchConsumption before each observation | dispatch consumption: string | RED → GREEN (extra opens) |
-| #1105 :58 | unreadable directory returns absent | an UNREADABLE subagent path | RED → GREEN (lost ENOTDIR detail) |
-| Outcome :181 | unknown becomes turn-ended | dispatch consumption: | 11 RED → 11 GREEN |
+| Race :125 | `return await read()` | open releases the slot on caller | one command instead of two; 1 pass |
+| Deadline :91 | timer delay becomes 60000 | open releases the slot on deadline | one command instead of two; 1 pass |
+| Classification :94 | resolve not-consumed | open releases the slot on caller | false never-consumed detail; 1 pass |
+| Already cancelled :96 | `if (false) cancel()` | open releases the slot on already cancelled | one command instead of two; 1 pass |
+| Late open :104 | remove abort check | open releases the slot on caller | one late stat instead of zero; 1 pass |
+| Late stat :106 | remove abort check | stat releases the slot on caller | one late read instead of zero; 1 pass |
+| Read cancellation :109 | remove readFile signal | read releases the slot on caller | read did not reject with AbortError; 1 pass |
+| Outer detail :217 | `if (false)` | open releases the slot on caller | generic trailer detail instead of unreadable; 1 pass |
 
-### Final verification
+### Verification
 
-- `bun test runtime/workers/claude-acting-turn.test.ts`: **53 pass, 0 fail**, 190 assertions.
-- `bunx tsc --noEmit`: exit **0** (root server configuration).
-- `bash scripts/ci/lint.sh`: every listed gate green.
+- `bun run typecheck`: script unavailable; used `bunx tsc --noEmit`, exit **0**.
+- `bun test runtime/workers/claude-acting-turn.test.ts`: **60 pass, 0 fail**, 239 assertions.
+- `bash scripts/ci/lint.sh`: exit **0**, all listed gates green.
 - `git diff --check`: exit **0**.
-
-No whole-suite run or network operation. The task explicitly requests this staging path
-instead of the normal docs/as-built location. Commit locally for orchestrator review;
-do not push, open a PR, or merge from this lane.
+- Exactly one `## ` heading in this shard. No whole-suite or network operation.

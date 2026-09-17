@@ -518,3 +518,103 @@ test('expiry during boundary capture prevents submission', async () => {
     expect(f.released()).toBe(1)
   } finally { probe.mockRestore() }
 })
+
+for (const phase of ['open', 'stat', 'read'] as const) {
+  for (const stop of ['caller', 'deadline', 'already cancelled'] as const) {
+    if (stop === 'already cancelled' && phase !== 'open') continue
+    test(`stalled transcript ${phase} releases the slot on ${stop}`, async () => {
+      const f = await fixture()
+      f.binding.projects_dir = join(f.dir, 'projects')
+      const transcript = sessionJsonlPath('session', f.dir, f.binding.projects_dir)
+      await mkdir(join(transcript, '..'), { recursive: true })
+      await writeFile(transcript, '')
+      let queue = Promise.resolve()
+      let releases = 0
+      f.binding.session.acquireTurn = async () => {
+        const prior = queue
+        let release!: () => void
+        queue = new Promise<void>(resolve => { release = resolve })
+        await prior
+        return () => { releases++; release() }
+      }
+      f.binding.session.child.submitLine = async text => {
+        f.commands.push(text)
+        await appendFile(transcript, JSON.stringify({ type: 'user', message: { content: text } }) + '\n')
+        if (f.commands.length === 2) await writeFile(f.input.request.result.path, '{}')
+      }
+      let now = 0
+      const controller = new AbortController()
+      const budget = DISPATCH_TIMEOUT_MS + 60
+      const firstInput = { ...f.input, signal: controller.signal, timeout_ms: budget,
+        request: { ...f.input.request, budget: { wall_ms: budget } } }
+      let entered!: () => void
+      const opening = new Promise<void>(resolve => { entered = resolve })
+      let unblock!: () => void
+      const held = new Promise<void>(resolve => { unblock = resolve })
+      const realOpen = fs.open
+      let firstOpen = true
+      let lateStats = 0
+      let lateReads = 0
+      let readAborted = false
+      let closed!: () => void
+      const fileClosed = new Promise<void>(resolve => { closed = resolve })
+      const probe = spyOn(fs, 'open').mockImplementation(async (...args: Parameters<typeof fs.open>) => {
+        if (args[0] !== transcript || !firstOpen) return realOpen(...args)
+        firstOpen = false
+        if (phase === 'open') { entered(); await held }
+        const file = await realOpen(...args)
+        const realStat = file.stat.bind(file)
+        const realRead = file.readFile.bind(file)
+        const realClose = file.close.bind(file)
+        file.stat = (async () => {
+          lateStats++
+          if (phase === 'stat') { entered(); await held }
+          return realStat()
+        }) as typeof file.stat
+        file.readFile = (async (options: Parameters<typeof file.readFile>[0]) => {
+          lateReads++
+          if (phase === 'read') { entered(); await held }
+          try { return await realRead(options) } catch (error) {
+            readAborted = (error as Error).name === 'AbortError'
+            throw error
+          }
+        }) as typeof file.readFile
+        file.close = async () => { try { await realClose() } finally { closed() } }
+        return file
+      })
+      let expiryReads = 0
+      const run = createClaudeActingTurn(f.binding, {
+        now: () => {
+          // Cancel when the remaining diagnostic budget is computed, after entry.
+          if (stop === 'already cancelled' && now === DISPATCH_TIMEOUT_MS && ++expiryReads === 3) controller.abort()
+          return now
+        },
+        pause: async ms => { now += ms },
+      })
+      const first = run(firstInput)
+      let second: ReturnType<typeof run> | undefined
+      try {
+        await opening
+        if (stop === 'caller') controller.abort()
+        const result = await Promise.race([first, Bun.sleep(stop === 'deadline' ? 150 : 20).then(() => undefined)])
+        second = run({ ...f.input, timeout_ms: 1000, request: { ...f.input.request, budget: { wall_ms: 1000 } } })
+        await Promise.race([second, Bun.sleep(40)])
+        expect(f.commands).toHaveLength(2)
+        expect(releases).toBe(2)
+        expect(result).toEqual({ kind: 'unknown', detail: expect.stringContaining('transcript could not be read') })
+        expect(await second).toEqual({ kind: 'turn-ended' })
+        unblock()
+        await fileClosed
+        expect(lateStats).toBe(phase === 'open' ? 0 : 1)
+        expect(lateReads).toBe(phase === 'read' ? 1 : 0)
+        expect(readAborted).toBe(phase === 'read')
+      } finally {
+        unblock()
+        await first
+        await second
+        await fileClosed
+        probe.mockRestore()
+      }
+    })
+  }
+}

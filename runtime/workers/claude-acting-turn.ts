@@ -84,29 +84,49 @@ async function transcriptBoundary(transcript: string): Promise<TranscriptBoundar
 
 /** One read at expiry, never per poll. Persistent history is not evidence of
  * this submission. Replacement or truncation invalidates the captured boundary. */
-async function dispatchConsumption(transcript: string, dispatch: string, boundary: TranscriptBoundary): Promise<DispatchConsumption> {
+async function dispatchConsumption(transcript: string, dispatch: string, boundary: TranscriptBoundary, signal: AbortSignal, remainingMs: number): Promise<DispatchConsumption> {
   if (!boundary) return 'unreadable'
-  let bytes: Buffer
-  try {
-    const file = await open(transcript, 'r')
+  const controller = new AbortController()
+  const stopped = AbortSignal.any([signal, controller.signal])
+  const timeout = setTimeout(() => controller.abort(), Math.max(1, remainingMs))
+  let cancel!: () => void
+  const cancelled = new Promise<DispatchConsumption>(resolve => {
+    cancel = () => resolve('unreadable')
+    stopped.addEventListener('abort', cancel, { once: true })
+    if (stopped.aborted) cancel()
+  })
+  const read = async (): Promise<DispatchConsumption> => {
+    let bytes: Buffer
     try {
-      const info = await file.stat()
-      if (info.size < boundary.offset || (boundary.identity &&
-        (info.dev !== boundary.identity.dev || info.ino !== boundary.identity.ino))) return 'unreadable'
-      bytes = (await file.readFile()).subarray(boundary.offset)
-    } finally { await file.close() }
-  } catch { return 'unreadable' }
-  for (const line of bytes.toString('utf8').split('\n')) {
-    try {
-      const record = JSON.parse(line) as { type?: unknown; message?: { content?: unknown } }
-      if (record.type !== 'user') continue
-      const content = record.message?.content
-      if (content === dispatch) return 'consumed'
-      if (Array.isArray(content) && content.some(block => block !== null && typeof block === 'object'
-        && block.type === 'text' && block.text === dispatch)) return 'consumed'
-    } catch { /* Partial and unrelated records do not prove consumption. */ }
+      const file = await open(transcript, 'r')
+      try {
+        // A late open owns only cleanup, never a read after the slot was released.
+        stopped.throwIfAborted()
+        const info = await file.stat()
+        stopped.throwIfAborted()
+        if (info.size < boundary.offset || (boundary.identity &&
+          (info.dev !== boundary.identity.dev || info.ino !== boundary.identity.ino))) return 'unreadable'
+        bytes = (await file.readFile({ signal: stopped })).subarray(boundary.offset)
+      } finally { await file.close() }
+    } catch { return 'unreadable' }
+    for (const line of bytes.toString('utf8').split('\n')) {
+      try {
+        const record = JSON.parse(line) as { type?: unknown; message?: { content?: unknown } }
+        if (record.type !== 'user') continue
+        const content = record.message?.content
+        if (content === dispatch) return 'consumed'
+        if (Array.isArray(content) && content.some(block => block !== null && typeof block === 'object'
+          && block.type === 'text' && block.text === dispatch)) return 'consumed'
+      } catch { /* Partial and unrelated records do not prove consumption. */ }
+    }
+    return 'not-consumed'
   }
-  return 'not-consumed'
+  try {
+    return await Promise.race([read(), cancelled])
+  } finally {
+    clearTimeout(timeout)
+    stopped.removeEventListener('abort', cancel)
+  }
 }
 
 /** Continue the bound project conversation. No spawn, retry or reply observation. */
@@ -138,6 +158,7 @@ export function createClaudeActingTurn(binding: ClaudeActingSession, clock: Obse
     const unknown = () => ({ kind: 'unknown' as const, detail: 'Claude trailer not observed before cancellation or host budget expiry.' })
     // The late-acquired slot releases itself, and checks the deadline before any
     // actuation. Racing acquisition must never dispatch after the caller times out.
+    let readingConsumption = false
     const observe = async () => {
       const release = await session.acquireTurn()
       try {
@@ -167,7 +188,8 @@ export function createClaudeActingTurn(binding: ClaudeActingSession, clock: Obse
           seen = await observeSubagents(subagents, `${request.role}: ${request.step_id}`)
           accepted ||= seen.matched
           if (!accepted && clock.now() >= dispatchDeadline) {
-            const consumption = await dispatchConsumption(transcript, dispatch, boundary)
+            readingConsumption = true
+            const consumption = await dispatchConsumption(transcript, dispatch, boundary, stopped, deadline - clock.now())
             const detail = consumption === 'consumed'
               ? 'The REPL consumed the dispatch, but no worker was observed within its budget.'
               : consumption === 'not-consumed'
@@ -190,10 +212,18 @@ export function createClaudeActingTurn(binding: ClaudeActingSession, clock: Obse
     }
     try {
       if (expired()) return unknown()
+      const observation = observe()
+      const interrupted = () => {
+        if (readingConsumption) {
+          timer.abort()
+          return observation
+        }
+        return unknown()
+      }
       return await Promise.race([
-        observe(),
-        delay(Math.max(1, deadline - clock.now()), undefined, { signal: stopped }).then(unknown, () => {
-          if (signal.aborted) return unknown()
+        observation,
+        delay(Math.max(1, deadline - clock.now()), undefined, { signal: stopped }).then(interrupted, () => {
+          if (signal.aborted) return interrupted()
           throw new Error('Claude trailer wait interrupted')
         }),
       ])
