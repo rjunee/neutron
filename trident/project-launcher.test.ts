@@ -16,6 +16,7 @@ import {
   projectBuildResult,
 } from './project-launcher.ts'
 import { buildTridentOrchestrator } from './orchestrator.ts'
+import { terminalRunDisposition } from './run-disposition.ts'
 import { parseInnerResult, type InnerLoopInput } from './inner-loop.ts'
 import type { ProjectBuildOutcome } from './project-build-host.ts'
 
@@ -109,6 +110,14 @@ test('a settled driver unknown fails the run instead of parking it forever', asy
   expect(out.run.phase).toBe('failed')
   // The driver's own cause survives onto the row, so the stop is diagnosable.
   expect(out.run.failure_reason).toContain('Transport uncertain')
+  // THE VERDICT COLUMN MUST NOT SAY APPROVED FOR A RUN THAT FAILED.
+  // `run-disposition.ts:193` maps ANY terminal APPROVE to `approved`, which drops the
+  // row out of failure analytics and narrates a dead build to the owner as an approved
+  // one. Cross-model arbitration reverted an earlier change for exactly this, and the
+  // property was left unpinned: mutating `orchestrator.ts` REVIEW_NOT_RUN -> APPROVE
+  // kept this file green.
+  expect(out.run.inner_verdict).toBe('REVIEW_NOT_RUN')
+  expect(terminalRunDisposition(out.run)).not.toBe('approved')
   // And the reason the park was fatal rather than merely slow: nothing re-fires
   // over a pending row, so a run left waiting here can never be restarted either.
   expect(await createProjectLauncher(f.options)(f.input)).toEqual({ status: 'unconfirmed', error: 'Existing project build requires reconciliation' })
