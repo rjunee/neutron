@@ -6819,6 +6819,29 @@ lifecycle/manifest, and the Managed graph composer. See
 
 ## Foundational Trident — state machine + tick + git-mode + the loop (`trident/`)
 
+> **Operator note — a run stuck on `Existing project build requires reconciliation` is
+> recovered by RE-DISPATCHING THE CARD, not by deleting files.** When a driver settles
+> `unknown`, the row keeps `inner_result.projectBuild.kind === 'unknown'`, and
+> `trident/project-launcher.ts:116-117` then refuses that run *before* it reaches
+> `options.prepare(...)` at `:123`. So no amount of clearing on-disk state helps: host
+> preparation, and with it the reservation cleanup at `open/wiring/project-build.ts:231`,
+> is never reached for that run.
+>
+> That refusal is deliberate, not a defect — `trident/orchestrator.ts:2916-2917`: *"Resume
+> only from the durable build evidence, never by replaying an uncheckpointed
+> reservation."* An uncertain dispatch is never replayed, because the bounded task is not
+> idempotent and a replay could run it twice.
+>
+> The supported recovery is a re-dispatch, which
+> `docs/spec-items/a-retry-must-resume-from-the-checkpoint.md:10` defines as creating **a
+> NEW run row**. Reservation state is keyed by run id (`open/wiring/project-build.ts:226`),
+> so the new row gets a clean directory and cannot inherit the old one's wedge.
+>
+> Earlier guidance to delete the reservation file named in the `unknown` detail and re-run
+> is superseded: it addresses a different state (one where preparation is still reachable),
+> and #1149 now clears unarmed reservations there automatically.
+
+
 The `trident/` module (package `@neutronai/trident`) is the durable runtime
 for the autonomous Forge → Argus → merge pipeline, ported from the legacy harness's
 `/trident` skill. It is foundational runtime, not a Core. PR-2 landed the
