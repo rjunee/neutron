@@ -37,6 +37,18 @@ Consumer selection used `rg -n 'production-host-effects|createProductionHostEffe
 
 That enumeration was in fact incomplete, and the gap was real. Scoping the search to `trident/` missed `open/__tests__/project-build-e2e.test.ts`, whose fake `gh` returned `https://example.invalid/pull/<n>` — a host-plus-`pull` path with no owner/repo segments. Nothing parsed that stdout before this change, so its shape was unconstrained; requiring a receipt made all 15 end-to-end publication tests fail with `PR creation receipt is malformed`. Real `gh pr create` prints an owner/repo URL, so the fixture was the incorrect party and was corrected at `open/__tests__/project-build-e2e.test.ts:433`; the parser was not loosened. Re-running the consuming set including that file: 215 pass, 0 fail across 5 files. The initial new foreign-refusal test used the wrong field `detail`; corrected to the existing `on` vocabulary without relaxing the assertion.
 
+### Adversarial review finding: the carry was gated on task text
+
+A review lane blocked the merge on `trident/board-dispatch.ts:1519`, and it was right. The provenance carry read `prior?.task === input.task && prior.published_pr !== null`. But the ladder directly above states the rule it violates: *"the LINK decides identity and the TEXT decides only whether the COMMIT may be adopted"* (`:1352`), and `:1374` says that past the link check "THIS CARD *IS* THIS RUN'S CARD, so the budget travels and nothing below can veto it."
+
+So an owner clarifying a card's design doc between two presses — which `:1345-1350` calls "the most likely thing an owner does" — dropped the carry. The retry then reached `trident/project-build-host.ts:133` with no `owned_pr`, and its own OPEN same-head PR was refused at fresh admission as `Fresh build already has a PR`. That defeats the acceptance this branch exists for: retrying a run on its own published PR.
+
+The task conjunct is removed. The value cannot authorise anything foreign — `prior` is already proven same-project, same-card and terminal at `:1364-1376`, and `published_pr` is receipt-minted. This is the same asymmetry the ladder describes for the budget carry.
+
+New regression `an EDITED same card still carries its own published-PR provenance` (`trident/board-dispatch.test.ts`). Mutation: restoring the task conjunct gives `Expected: 7, Received: null`, while the unchanged-text control at `:1712` stays GREEN — so the test is specific to the edited-text path, not observing an ambient null.
+
+That fix exposed a latent defect in the MOVED-tip mutant guard. Its control was documented as "a different card with no history whatsoever" but dispatched through the shared `board`, which still carries `cardLink` — the SAME card by the ladder's rule. It only read as history-free because the task gate masked the carry. The control now uses a board with `linked_run_id: null`. Verified that guard still fires for its own purpose: deleting the head-equality comparison at `trident/board-dispatch.ts:1445` turns it RED.
+
 ### Record corrections and limits
 
 The filed fresh-admission citation is now `trident/build-run.ts:269-270`; launch discovery remains `trident/launch-preparation.ts:201-204`. The earlier implementation record overstated what observation proved; its behavior and invariant sections have been rewritten. The previous migration-repair record at this path is superseded by this account of the complete publication correction; the reviewed migration repair remains in the branch.

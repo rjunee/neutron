@@ -1741,6 +1741,30 @@ describe('dispatch seeds a resume from a built-but-never-reviewed prior run', ()
     expect(tipReads).toEqual([[tmp, BRANCH]])
   })
 
+  test('an EDITED same card still carries its own published-PR provenance', async () => {
+    // The ladder's rule is that the LINK decides identity and the TEXT decides only
+    // whether the COMMIT may be adopted. The provenance carry used to add
+    // `prior.task === input.task`, so an owner clarifying the design doc between two
+    // presses dropped it — and the retry then reached fresh admission with no
+    // `owned_pr` and was refused against ITS OWN published PR. Clarifying the doc is
+    // the most likely thing an owner does, which made this the common path.
+    await priorRun({ phase: 'failed', pr: 7, published_pr: 7 })
+
+    const { result } = await dispatchSeeding(async () => HEAD, { task: `${TASK} — now with the acceptance spelled out` })
+
+    expect(result.ok).toBe(true)
+    if (!result.ok) return
+    // The provenance travels on the LINK, not on the text.
+    expect(result.run.published_pr).toBe(7)
+    expect(store.get(result.run.id)?.published_pr).toBe(7)
+    // The OBSERVATIONAL field still does not travel: discovery cannot establish
+    // ownership, and only publication provenance is allowed through the link.
+    expect(result.run.pr).toBeNull()
+    // The edited text still declines the COMMIT carry — the asymmetry is the point,
+    // so this test cannot pass by weakening the commit rule instead.
+    expect(result.run.inner_checkpoint).toBeNull()
+  })
+
   test("a card BOUND TO A DIFFERENT RUN does not inherit that run's commit, byte-identical task text and all", async () => {
     // The identity hole in the task-text comparison: `slugifyTask` truncates at 35
     // characters, so two cards can share a branch, and two cards CAN carry the same
@@ -1997,10 +2021,18 @@ describe('dispatch seeds a resume from a built-but-never-reviewed prior run', ()
     expect(moved.ok).toBe(true)
     if (!moved.ok) return
 
-    // Control: a different card with no history whatsoever.
+    // Control: a different card with no history whatsoever. It must NAME NO RUN —
+    // this used to be a different-TASK dispatch through the shared `board`, which
+    // still carries `cardLink` and so is the SAME card by the ladder's own rule
+    // (the LINK decides identity, not the text). It only read as history-free while
+    // the provenance carry was gated on task text; once that gate went, the
+    // "control" inherited the prior's PR and proved nothing.
     const control = await dispatchBoardBoundBuild(
       { task: 'build a different thing entirely', board_item_id: 'ready' },
-      localDeps(),
+      localDeps({
+        get: () => ({ id: 'ready', title: 'add a CSV import endpoint with validation and tests', design_doc_ref: null, linked_run_id: null }),
+        attachRun: async () => {},
+      }),
     )
     expect(control.ok).toBe(true)
     if (!control.ok) return
