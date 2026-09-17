@@ -5,6 +5,7 @@ import { createBuildHost, type BuildHostOptions } from './build-host.ts'
 import { createProjectReviewSource, type ProjectReviewSourceOptions } from './project-review-source.ts'
 import { createProjectObservationSources, type ProjectSuiteOptions } from './project-observation-sources.ts'
 import { briefIntegrity } from './gates/brief-integrity.ts'
+import { assessReviewSuite, type SuiteObservation } from './gates/review-suite.ts'
 import { createProductionHostEffects, productionCiSource, workContextPath, type CleanupOutcome, type ProductionHostOptions } from './production-host-effects.ts'
 
 /** Bound by the project composition, including its live conversational runner. */
@@ -86,6 +87,7 @@ export async function createProjectBuildHost(options: ProjectBuildHostOptions) {
     ciWorkflow: config.ciWorkflow, runId: run.id, suite: reviewSuite })
   const publicationObservations = createProjectObservationSources({ ci, baseBranch: config.baseBranch,
     ciWorkflow: config.ciWorkflow, runId: run.id, suite: publicationSuite })
+  let reviewReceipt: SuiteObservation | undefined
   const host = createBuildHost({
     ...policy,
     ...(review ? { review: createProjectReviewSource({ ...review,
@@ -101,10 +103,28 @@ export async function createProjectBuildHost(options: ProjectBuildHostOptions) {
     observeCi: production.observeCi,
     reviewReadiness: observations.reviewReadiness,
     reviewCi: observations.reviewCi,
-    reviewSuite: observations.reviewSuite,
+    reviewSuite: { async observe(snapshot, round) {
+      reviewReceipt = undefined
+      const receipt = await observations.reviewSuite.observe(snapshot, round)
+      if (receipt.kind === 'known') reviewReceipt = structuredClone(receipt)
+      return receipt
+    } },
     publicationSuite: publicationObservations.reviewSuite,
     local: { baseBranch: options.production.baseBranch, worktree: options.production.worktree },
   })
+  const observePublicationSuite = host.deps.publicationSuite
+  host.deps.publicationSuite = async snapshot => {
+    const receipt = reviewReceipt
+    // Reassess the original run/head/round receipt; do not relabel it as a
+    // terminal measurement. Missing configuration and subset evidence still
+    // require the publication source, as does any different strategy or head.
+    if (publicationSuite && receipt?.scope === 'full-suite'
+      && publicationSuite.scope === 'full-suite' && receipt.strategy === publicationSuite.strategy
+      && receipt.head === snapshot.head) {
+      return assessReviewSuite({ observe: async () => receipt }, snapshot, receipt.round, run.id)
+    }
+    return observePublicationSuite(snapshot)
+  }
   return {
     runners, workers: host.workers, deps: host.deps,
     async run(input: Omit<BuildRunInput, 'run_id' | 'workers' | 'repl_provider' | 'merge_mode'>, signal: AbortSignal): Promise<ProjectBuildOutcome> {
