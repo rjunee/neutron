@@ -99,9 +99,19 @@ export async function awaitSettledReviewReadiness(source: ReviewReadinessSource 
     return await Promise.race([timeout, cancelled, (async (): Promise<SettledReviewReadiness> => {
       while (!controller.signal.aborted && time.now() < deadline) {
         const readiness = classifyReviewReadiness(snapshot, await source.observe(snapshot, controller.signal))
+        // RECORD THE CONDITION BEFORE CONSULTING THE CLOCK. A pending observation
+        // that lands exactly at the deadline still tells us WHAT was unsettled, and
+        // that is the fact the run record needs; assigning after the deadline check
+        // silently dropped it.
+        //
+        // The late-observation rejection below is deliberate and stays: an
+        // acquisition that consumed the whole budget may describe a world that has
+        // since moved, so its verdict is not accepted (pinned by `readiness cannot
+        // outlive cancellation or accept late and wrong-head observations`). Only
+        // the DETAIL is salvaged from it, never the verdict.
+        if (readiness.kind === 'pending') lastPending = readiness.detail
         if (time.now() >= deadline) break
         if (readiness.kind !== 'pending') return readiness
-        lastPending = readiness.detail
         await time.wait(Math.min(REVIEW_READINESS_RETRY_MS, deadline - time.now()), controller.signal)
       }
       return deferred('budget exhausted or cancelled')
