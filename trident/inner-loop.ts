@@ -84,6 +84,8 @@ export { parseCheckpointFindings } from './checkpoint-findings.ts'
 
 export interface InnerLoopInput {
   run: TridentRun
+  /** Stable launcher cwd for a bound panel; workflow args keep the disposable worktree. */
+  launcher_repo_path?: string
   base_branch: string
   /** The origin/<base> tip the launcher fetched and resolved IN CODE at fire time; the workflow pins branch creation and the forge diff to it. Absent/null → legacy behavior. */
   base_sha?: string | null
@@ -983,7 +985,7 @@ export function buildWorkflowFirer(opts: BuildWorkflowFirerOptions): TridentWork
   const writeParts = opts.write_brief_parts ?? writeBriefParts
 
   return async function fireWorkflow(input: InnerLoopInput): Promise<FireOutcome> {
-    const cwd = input.run.worktree ?? input.run.repo_path
+    const cwd = input.launcher_repo_path ?? input.run.worktree ?? input.run.repo_path
     // Compose the guidance exactly once: the same string is written as the
     // authoritative disk part and carried in args for the Claude route.
     const reflectionGuidance = buildReflectionGuidance(input.reflection_context)
@@ -1012,13 +1014,13 @@ export interface BuildSubstrateWorkflowFireOptions {
    * session (the verified parallelism model). Its cwd is a stable repo root (the
    * workflow's Forge agent makes its OWN worktree), so it does NOT need to be
    * rebuilt per run. Exactly one of `substrate` / `build_substrate` is required;
-   * `substrate` (the warm singleton) is the production shape.
+   * `substrate` is the singleton shape; bound panels use the cached factory.
    */
   substrate?: Substrate
   /**
-   * Per-cwd factory (tests / niche callers that want a fresh substrate per fire).
-   * NOT the production shape — a fresh substrate per fire would dispose the warm
-   * session and the background workflow would die on settle. Prefer `substrate`.
+   * Per-cwd factory, including production bound panels cached by stable repository.
+   * Background workflows require warm substrates: an ephemeral session would
+   * die on launcher settle before its workflow completes.
    */
   build_substrate?: (cwd: string) => Substrate
   /** `--model` for the launcher turn. Default `opus`. */
@@ -1045,7 +1047,7 @@ export function buildSubstrateWorkflowFire(
 ): FireInnerWorkflow {
   if (opts.substrate === undefined && opts.build_substrate === undefined) {
     throw new Error(
-      'buildSubstrateWorkflowFire: exactly one of `substrate` (warm singleton, production) or `build_substrate` (per-cwd factory, tests) must be supplied',
+      'buildSubstrateWorkflowFire: exactly one of `substrate` (warm singleton) or `build_substrate` (per-cwd factory) must be supplied',
     )
   }
   const model = opts.model ?? 'opus'

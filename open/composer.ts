@@ -1214,6 +1214,8 @@ export function buildOpenGraphComposer(
     // (`review-run.ts`), so it cannot use the project launcher whose durable
     // reservation belongs to the composition store. This is the retained
     // review-only executor; ordinary build runs have no alternate launcher.
+    // Bound panels supply their stable launcher_repo_path so this warm cache
+    // never retains disposable review worktrees; workflow args keep those paths.
     const tridentFireReviewPanel =
       liveAgentSubstrate !== null
         ? buildWorkflowFirer({ fire: buildSubstrateWorkflowFire({ build_substrate: makeWarmFireSubstrate }) })

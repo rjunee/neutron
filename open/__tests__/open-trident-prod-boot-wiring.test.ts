@@ -13,7 +13,7 @@ import { asOwnerHandle } from '@neutronai/persistence/index.ts'
 
 import { afterEach, beforeEach, describe, expect, test } from 'bun:test'
 import ts from 'typescript'
-import { mkdirSync, writeFileSync, mkdtempSync, readFileSync, rmSync } from 'node:fs'
+import { mkdirSync, writeFileSync, mkdtempSync, readFileSync, rmSync, existsSync } from 'node:fs'
 import { tmpdir } from 'node:os'
 import { dirname, join } from 'node:path'
 import { fileURLToPath } from 'node:url'
@@ -206,6 +206,59 @@ test('production composition completes a bound review through its isolated panel
   )
 
   expect(result).toMatchObject({ status: 'success', verdict: 'APPROVE', reviewed_sha: head })
+})
+
+test('two bound runs retain only a stable repo launcher, never disposable worktree substrates', async () => {
+  process.env['ANTHROPIC_API_KEY'] = 'sk-ant-synthetic-trident-test'
+  const launches: Array<{ cwd: string | undefined; id: string; ephemeral: boolean | undefined }> = []
+  const panelRepos: string[] = []
+  const composition = await buildOpenGraphComposer({
+    env: process.env,
+    substrateFactory: options => ({
+      start(spec) {
+        // Filter by the structured panel prompt, not the expected launcher id/cwd:
+        // a regressed launcher must still be observed by this fixture.
+        const match = /\n   args = (.+)\n   Pass `args`/.exec(spec.prompt)
+        if (match !== null) {
+          panelRepos.push((JSON.parse(match[1]!) as { repoPath: string }).repoPath)
+          launches.push({ cwd: options.cwd, id: options.substrate_instance_id, ephemeral: options.ephemeral })
+          return panelCompletingSubstrate().start(spec)
+        }
+        return recordingSubstrate([]).start(spec)
+      },
+    }),
+  })({ db, project_slug: 'owner' })
+  const repo = join(tmpDir, 'bound-review-repo')
+  const removed: string[] = []
+  const host = async (cmd: string[]) => {
+    const joined = cmd.join(' ')
+    if (joined.startsWith('gh pr view 515 ')) return { ok: true, stdout: JSON.stringify({ headRefOid: 'a'.repeat(40), headRefName: 'reviewed', baseRefName: 'main' }), stderr: '', exit_code: 0 }
+    if (joined === 'gh pr diff 515') return { ok: true, stdout: 'diff --git a/a.ts b/a.ts\n-old\n+new\n', stderr: '', exit_code: 0 }
+    if (cmd.includes('--detach')) mkdirSync(cmd[cmd.indexOf('--detach') + 1]!, { recursive: true })
+    if (cmd[3] === 'worktree' && cmd[4] === 'remove') {
+      removed.push(cmd[5]!)
+      rmSync(cmd[5]!, { recursive: true, force: true })
+    }
+    if (joined.includes(' merge-base ')) return { ok: true, stdout: `${'b'.repeat(40)}\n`, stderr: '', exit_code: 0 }
+    return { ok: true, stdout: '', stderr: '', exit_code: 0 }
+  }
+  for (const id of ['bound-first', 'bound-recovery']) {
+    const result = await executeBoundReview(
+      makeTridentRun({ id, bound_pr: 515, repo_path: repo }),
+      { run_host: host, fire_workflow: composition.trident!.fire_review_panel! },
+    )
+    expect(result).toMatchObject({ status: 'success', verdict: 'APPROVE' })
+  }
+  const worktrees = ['bound-first', 'bound-recovery'].map(id => join(repo, '.trident-worktrees', `bound-review-${id}`))
+  expect(panelRepos).toEqual(worktrees)
+  expect(removed).toEqual(worktrees)
+  expect(worktrees.map(path => existsSync(path))).toEqual([false, false])
+  // The real warm factory caches by cwd. Both dispatches must use the stable
+  // repo key/instance, with zero keys rooted at either deleted worktree.
+  expect(launches).toHaveLength(2)
+  expect(launches.map(launch => launch.cwd)).toEqual([repo, repo])
+  expect(new Set(launches.map(launch => launch.id)).size).toBe(1)
+  expect(launches.every(launch => launch.ephemeral !== true)).toBe(true)
 })
 
 test('production module tick completes a bound review through the forwarded panel firer', async () => {

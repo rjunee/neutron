@@ -272,6 +272,7 @@ async function runExistingReviewPanel(
   try {
     const fired = await deps.fire_workflow({
       run: panelRun,
+      launcher_repo_path: input.run.repo_path,
       base_branch: input.merge_base,
       base_sha: input.merge_base,
       db_path: dbPath,
