@@ -86,6 +86,8 @@ export interface BuildRunInput {
   start: 'fresh' | 'resume'
   merge_mode?: 'pr' | 'local'
   bound_pr?: number
+  /** PR proven by dispatch to belong to this card's prior terminal run. */
+  owned_pr?: number
   pinnedTaskId?: string
   ralphRound?: number
   repl_provider: Provider
@@ -244,7 +246,11 @@ export async function buildRun(input: BuildRunInput, deps: BuildRunDeps, signal:
       return unknown('Resume awaits the existing worker observation')
     }
     if (local && snapshot.pr !== null) return blocked('Local build has a PR')
-    if (input.start === 'fresh' && snapshot.pr !== null) return blocked('Fresh build already has a PR')
+    const ownsMeasuredPr = snapshot.pr !== null && snapshot.pr.number === input.owned_pr
+      && snapshot.pr.state === 'OPEN' && snapshot.pr.head === snapshot.head
+    if (input.start === 'fresh' && snapshot.pr !== null && !ownsMeasuredPr) {
+      return blocked('Fresh build already has a PR')
+    }
 
     let replansUsed = resume?.replansUsed ?? 0
     if (replansUsed !== 0 && replansUsed !== 1) return blocked('Invalid recorded re-plan count')

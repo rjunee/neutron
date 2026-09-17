@@ -1723,10 +1723,9 @@ describe('dispatch seeds a resume from a built-but-never-reviewed prior run', ()
     // `base_sha !== null`, could never fire for a salvaged run.
     expect(result.run.base_sha).toBe(BASE)
     expect(store.get(result.run.id)?.base_sha).toBe(BASE)
-    // THE PR DOES NOT TRAVEL. `launch()` reads `run.pr ?? detectExistingPr(run)`, so
-    // a carried number short-circuits that probe — onto a PR that may since have been
-    // CLOSED. Asking gh for the branch's OPEN PRs is the question actually being asked.
-    expect(result.run.pr).toBeNull()
+    // Ownership travels from the exact card link; the build driver still measures
+    // whether this number is the live OPEN PR before it proceeds.
+    expect(result.run.pr).toBe(7)
     // No verdict travels with the evidence — the run is going TO review.
     expect(result.run.inner_verdict).toBeNull()
     // `bound_pr` means review-only-never-publish; the seed must not set it.
@@ -1894,10 +1893,7 @@ describe('dispatch seeds a resume from a built-but-never-reviewed prior run', ()
     if (!result.ok) return
     expect(result.run.inner_checkpoint).toBe(`outer-published:${HEAD}:0:1`)
     expect(result.run.inner_checkpoint_head).toBe(HEAD)
-    // Still no PR, even though the prior run had published one: the resumed run
-    // asks gh which PRs are OPEN on the branch instead of inheriting a number that
-    // may since have been closed.
-    expect(result.run.pr).toBeNull()
+    expect(result.run.pr).toBe(512)
   })
 
   /**
@@ -2008,8 +2004,12 @@ describe('dispatch seeds a resume from a built-but-never-reviewed prior run', ()
       expect(run.inner_checkpoint).toBeNull()
       expect(run.inner_checkpoint_head).toBeNull()
       expect(run.inner_checkpoint_findings).toBeNull()
-      expect(run.pr).toBeNull()
     }
+    // The exact card still owns its prior PR even when the branch moved; the
+    // different-task control does not. The driver will measure and refuse a PR
+    // whose live head no longer matches the branch snapshot.
+    expect(moved.run.pr).toBe(7)
+    expect(control.run.pr).toBeNull()
   })
 
   test('an unreadable or absent ref seeds nothing and still dispatches', async () => {

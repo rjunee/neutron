@@ -1513,6 +1513,9 @@ export async function dispatchBoardBoundBuild(
       // query against live state rather than an inference.
       claimed_paths: paths,
       ...(input.bound_pr !== undefined && input.bound_pr !== null ? { bound_pr: input.bound_pr } : {}),
+      // The exact card link above proves ownership. This is not `bound_pr`: the
+      // retry remains a build, and the driver must still measure the open PR.
+      ...(prior?.task === input.task && prior.pr !== null ? { owned_pr: prior.pr } : {}),
       // The salvage-resume seed, or nothing at all. `bound_pr` is deliberately NOT
       // seeded (it means review-only-never-publish) and no verdict is seeded — the
       // resumed run is going to review, it has not been to one. `base_sha` IS

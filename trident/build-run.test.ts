@@ -221,9 +221,31 @@ test('admission refuses unavailable future fix capability', async () => {
   expect(await f.run()).toMatchObject({ kind: 'refused', reason: 'worker-unsupported' })
   expect(f.runner.calls).toHaveLength(0)
 })
-test('existing PR refuses fresh admission', async () => {
+test('foreign existing PR refuses fresh admission', async () => {
   const f = fixture(); f.snapshot.pr = { number: 1, head: f.snapshot.head, state: 'OPEN' }
-  expect(await f.run()).toMatchObject({ kind: 'blocked', phase: 'plan' })
+  expect(await f.run()).toMatchObject({ kind: 'blocked', phase: 'plan', on: 'Fresh build already has a PR' })
+  expect(f.runner.calls).toHaveLength(0)
+})
+
+test('fresh retry continues on the PR proven to belong to its prior run', async () => {
+  const f = fixture(); f.snapshot.pr = { number: 17, head: f.snapshot.head, state: 'OPEN' }
+  f.input.owned_pr = 17
+  for (const outcome of f.outcomes.values()) {
+    if (outcome.kind === 'completed' && outcome.result && typeof outcome.result === 'object' && 'pr' in outcome.result) {
+      outcome.result.pr = structuredClone(f.snapshot.pr)
+    }
+  }
+  f.deps.publish = async () => { f.events.push('publish') }
+  expect(await f.run()).toMatchObject({ kind: 'merged' })
+  expect(f.runner.calls.map(call => call.role)).toEqual(['plan', 'build'])
+})
+
+for (const mismatch of ['closed', 'moved'] as const) test(`owned PR is still refused when ${mismatch}`, async () => {
+  const f = fixture(); f.snapshot.pr = { number: 17, head: f.snapshot.head, state: 'OPEN' }
+  f.input.owned_pr = 17
+  if (mismatch === 'closed') f.snapshot.pr.state = 'CLOSED'
+  else f.snapshot.pr.head = 'b'.repeat(40)
+  expect(await f.run()).toMatchObject({ kind: 'blocked', on: 'Fresh build already has a PR' })
   expect(f.runner.calls).toHaveLength(0)
 })
 

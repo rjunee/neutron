@@ -106,7 +106,7 @@ export async function createProjectBuildHost(options: ProjectBuildHostOptions) {
     async run(input: Omit<BuildRunInput, 'run_id' | 'workers' | 'repl_provider' | 'merge_mode'>, signal: AbortSignal): Promise<ProjectBuildOutcome> {
       return withProductionCleanup(
         async () => {
-          const result = await host.run({ ...input, ...(input.mode === 'ralph' ? { ralphRound: production.ralphIteration() } : {}), run_id: run.id, workers: host.workers, repl_provider: options.substrate.provider, merge_mode: run.merge_mode }, signal)
+          const result = await host.run({ ...input, ...(run.pr !== null ? { owned_pr: run.pr } : {}), ...(input.mode === 'ralph' ? { ralphRound: production.ralphIteration() } : {}), run_id: run.id, workers: host.workers, repl_provider: options.substrate.provider, merge_mode: run.merge_mode }, signal)
           if (!('kind' in result)) throw new Error('Project build returned a review-only outcome')
           return result
         },

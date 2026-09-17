@@ -434,6 +434,8 @@ export interface CreateTridentRunInput {
   /** Defaults to 'local'; set by `detectMergeMode` at creation. */
   merge_mode?: MergeMode
   branch?: string | null
+  /** PR ownership proven by the board's exact prior-run link; omitted for first attempts. */
+  owned_pr?: number | null
   worktree?: string | null
   chat_id?: string | null
   thread_id?: string | null
@@ -860,10 +862,9 @@ export class TridentRunStore {
       // the raw argument (Argus r3).
       base_sha: seededBase !== '' ? seededBase : null,
       base_behind: null,
-      // NEVER seeded: `launch()` resolves the PR with
-      // `run.pr ?? await detectExistingPr(run)`, and a carried-over number would
-      // short-circuit that probe onto a PR that may since have been closed.
-      pr: null,
+      // A retry may carry only the prior run's PR ownership proof. Consumers still
+      // measure the live PR and reject a missing, closed, moved, or different PR.
+      pr: input.owned_pr ?? null,
       merge_mode: input.merge_mode ?? 'local',
       subagent_run_id: null,
       subagent_status: null,
