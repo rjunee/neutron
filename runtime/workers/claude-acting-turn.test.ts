@@ -1,5 +1,6 @@
-import { afterEach, expect, test } from 'bun:test'
-import { mkdir, mkdtemp, rm, writeFile } from 'node:fs/promises'
+import { afterEach, expect, spyOn, test } from 'bun:test'
+import * as fs from 'node:fs/promises'
+import { appendFile, mkdir, mkdtemp, rename, rm, writeFile } from 'node:fs/promises'
 import { tmpdir } from 'node:os'
 import { join } from 'node:path'
 import { createClaudeActingTurn, DISPATCH_TIMEOUT_MS, type ClaudeActingSession } from './claude-acting-turn.ts'
@@ -365,10 +366,7 @@ for (const scenario of ['late trailer', 'no subagent', 'no trailer', 'throw', 't
       expect(observation).toEqual({ kind: 'unknown', detail: expect.stringContaining('directory exists with 2 agent metadata file(s), none naming this step') })
       const seen = observation as { kind: 'unknown'; detail: string }
       expect(seen.detail).toContain('not evidence the REPL acted')
-      // The detail must REPORT, not RULE. "the REPL did not accept the dispatch"
-      // is a verdict this seam cannot reach: the REPL may have read the line and
-      // then declined or failed before Agent creation, which looks identical
-      // from here. Say what was observed — no worker appeared.
+      // Without a readable transcript the terminal ack alone remains inconclusive.
       expect(seen.detail).toContain('No worker was observed')
       expect(seen.detail).not.toContain('did not accept')
       expect(seen.detail).toContain(directory)
@@ -437,3 +435,186 @@ test('an UNREADABLE subagent path is not reported as an absent one', async () =>
   expect(observation.detail).not.toContain('does not exist')
   expect(observation.detail).not.toContain('directory exists with')
 })
+
+for (const scenario of ['string', 'blocks', 'historical only', 'decoys', 'missing', 'read failure', 'bad boundary', 'stat failure', 'truncated', 'replaced', 'created after boundary'] as const) {
+  test(`dispatch consumption: ${scenario}`, async () => {
+    const f = await fixture()
+    f.binding.projects_dir = join(f.dir, 'projects')
+    const transcript = sessionJsonlPath('session', f.dir, f.binding.projects_dir)
+    await mkdir(join(transcript, '..'), { recursive: true })
+    const dispatch = 'Execute the prompt in this JSON dispatch specification: ' + JSON.stringify({ ...f.input.spec, effort: f.input.request.effort })
+    const record = (content: unknown, type = 'user') => JSON.stringify({ type, message: { content } }) + '\n'
+    // Pre-seed the exact production dispatch, including a multibyte record to
+    // distinguish byte offsets from string indices. Every normal case has history.
+    if (scenario !== 'missing' && scenario !== 'created after boundary') {
+      await writeFile(transcript, record('earlier ☃') + record(dispatch))
+    }
+    if (scenario === 'bad boundary') {
+      await rm(transcript)
+      await mkdir(transcript)
+    }
+    let now = 0
+    f.input.timeout_ms = 90_000
+    f.input.request = { ...f.input.request, budget: { wall_ms: 90_000 } }
+    f.binding.session.child.submitLine = async text => {
+      expect(text).toBe(dispatch)
+      f.commands.push(text)
+      if (scenario === 'string' || scenario === 'created after boundary' || scenario === 'stat failure') await appendFile(transcript, record(text))
+      if (scenario === 'blocks') await appendFile(transcript, record([{ type: 'text', text }]))
+      if (scenario === 'decoys') await appendFile(transcript,
+        record(text, 'assistant') + record('prefix ' + text) + record([{ type: 'tool_result', text }]) + '{partial')
+      if (scenario === 'read failure') await rm(transcript)
+      if (scenario === 'bad boundary') {
+        await rm(transcript, { recursive: true })
+        await writeFile(transcript, record(text))
+      }
+      if (scenario === 'truncated') await writeFile(transcript, record(text))
+      if (scenario === 'replaced') {
+        await rename(transcript, transcript + '.old')
+        await writeFile(transcript, record('replacement padding'.repeat(50)) + record(text))
+      }
+    }
+    const realStat = fs.stat
+    const statProbe = spyOn(fs, 'stat').mockImplementation(((...args: Parameters<typeof fs.stat>) => {
+      if (scenario === 'stat failure' && args[0] === transcript) return Promise.reject(Object.assign(new Error('read failed'), { code: 'EIO' }))
+      return realStat(...args)
+    }) as typeof fs.stat)
+    const realOpen = fs.open
+    const reads: number[] = []
+    const opened = spyOn(fs, 'open').mockImplementation((...args: Parameters<typeof fs.open>) => {
+      if (args[0] === transcript) reads.push(now)
+      return realOpen(...args)
+    })
+    try {
+      const result = await createClaudeActingTurn(f.binding, { now: () => now, pause: async ms => { now += ms } })(f.input)
+      const expected = ['string', 'blocks', 'created after boundary'].includes(scenario)
+        ? 'The REPL consumed the dispatch, but no worker was observed'
+        : ['historical only', 'decoys'].includes(scenario)
+          ? 'The dispatch line was never consumed by the REPL'
+          : 'The session transcript could not be read across the dispatch boundary'
+      expect(result).toEqual({ kind: 'unknown', detail: expect.stringContaining(expected) })
+      expect(reads).toEqual(['bad boundary', 'stat failure'].includes(scenario) ? [] : [DISPATCH_TIMEOUT_MS])
+      expect(now).toBe(DISPATCH_TIMEOUT_MS)
+      expect(f.commands).toHaveLength(1)
+      expect(f.released()).toBe(1)
+    } finally { opened.mockRestore(); statProbe.mockRestore() }
+  })
+}
+
+test('expiry during boundary capture prevents submission', async () => {
+  const f = await fixture()
+  f.binding.projects_dir = join(f.dir, 'projects')
+  const transcript = sessionJsonlPath('session', f.dir, f.binding.projects_dir)
+  let now = 0
+  const realStat = fs.stat
+  const probe = spyOn(fs, 'stat').mockImplementation(((...args: Parameters<typeof fs.stat>) => {
+    if (args[0] === transcript) now = 1000
+    return realStat(...args)
+  }) as typeof fs.stat)
+  try {
+    const result = await createClaudeActingTurn(f.binding, { now: () => now, pause: async ms => { now += ms } })(f.input)
+    expect(result.kind).toBe('unknown')
+    expect(f.commands).toEqual([])
+    expect(f.released()).toBe(1)
+  } finally { probe.mockRestore() }
+})
+
+for (const phase of ['open', 'stat', 'read'] as const) {
+  for (const stop of ['caller', 'deadline', 'already cancelled'] as const) {
+    if (stop === 'already cancelled' && phase !== 'open') continue
+    test(`stalled transcript ${phase} releases the slot on ${stop}`, async () => {
+      const f = await fixture()
+      f.binding.projects_dir = join(f.dir, 'projects')
+      const transcript = sessionJsonlPath('session', f.dir, f.binding.projects_dir)
+      await mkdir(join(transcript, '..'), { recursive: true })
+      await writeFile(transcript, '')
+      let queue = Promise.resolve()
+      let releases = 0
+      f.binding.session.acquireTurn = async () => {
+        const prior = queue
+        let release!: () => void
+        queue = new Promise<void>(resolve => { release = resolve })
+        await prior
+        return () => { releases++; release() }
+      }
+      f.binding.session.child.submitLine = async text => {
+        f.commands.push(text)
+        await appendFile(transcript, JSON.stringify({ type: 'user', message: { content: text } }) + '\n')
+        if (f.commands.length === 2) await writeFile(f.input.request.result.path, '{}')
+      }
+      let now = 0
+      const controller = new AbortController()
+      const budget = DISPATCH_TIMEOUT_MS + 60
+      const firstInput = { ...f.input, signal: controller.signal, timeout_ms: budget,
+        request: { ...f.input.request, budget: { wall_ms: budget } } }
+      let entered!: () => void
+      const opening = new Promise<void>(resolve => { entered = resolve })
+      let unblock!: () => void
+      const held = new Promise<void>(resolve => { unblock = resolve })
+      const realOpen = fs.open
+      let firstOpen = true
+      let lateStats = 0
+      let lateReads = 0
+      let readAborted = false
+      let closed!: () => void
+      const fileClosed = new Promise<void>(resolve => { closed = resolve })
+      const probe = spyOn(fs, 'open').mockImplementation(async (...args: Parameters<typeof fs.open>) => {
+        if (args[0] !== transcript || !firstOpen) return realOpen(...args)
+        firstOpen = false
+        if (phase === 'open') { entered(); await held }
+        const file = await realOpen(...args)
+        const realStat = file.stat.bind(file)
+        const realRead = file.readFile.bind(file)
+        const realClose = file.close.bind(file)
+        file.stat = (async () => {
+          lateStats++
+          if (phase === 'stat') { entered(); await held }
+          return realStat()
+        }) as typeof file.stat
+        file.readFile = (async (options: Parameters<typeof file.readFile>[0]) => {
+          lateReads++
+          if (phase === 'read') { entered(); await held }
+          try { return await realRead(options) } catch (error) {
+            readAborted = (error as Error).name === 'AbortError'
+            throw error
+          }
+        }) as typeof file.readFile
+        file.close = async () => { try { await realClose() } finally { closed() } }
+        return file
+      })
+      let expiryReads = 0
+      const run = createClaudeActingTurn(f.binding, {
+        now: () => {
+          // Cancel when the remaining diagnostic budget is computed, after entry.
+          if (stop === 'already cancelled' && now === DISPATCH_TIMEOUT_MS && ++expiryReads === 3) controller.abort()
+          return now
+        },
+        pause: async ms => { now += ms },
+      })
+      const first = run(firstInput)
+      let second: ReturnType<typeof run> | undefined
+      try {
+        await opening
+        if (stop === 'caller') controller.abort()
+        const result = await Promise.race([first, Bun.sleep(stop === 'deadline' ? 150 : 20).then(() => undefined)])
+        second = run({ ...f.input, timeout_ms: 1000, request: { ...f.input.request, budget: { wall_ms: 1000 } } })
+        await Promise.race([second, Bun.sleep(40)])
+        expect(f.commands).toHaveLength(2)
+        expect(releases).toBe(2)
+        expect(result).toEqual({ kind: 'unknown', detail: expect.stringContaining('transcript could not be read') })
+        expect(await second).toEqual({ kind: 'turn-ended' })
+        unblock()
+        await fileClosed
+        expect(lateStats).toBe(phase === 'open' ? 0 : 1)
+        expect(lateReads).toBe(phase === 'read' ? 1 : 0)
+        expect(readAborted).toBe(phase === 'read')
+      } finally {
+        unblock()
+        await first
+        await second
+        await fileClosed
+        probe.mockRestore()
+      }
+    })
+  }
+}
