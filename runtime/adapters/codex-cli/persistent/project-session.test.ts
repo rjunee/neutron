@@ -144,6 +144,48 @@ describe('CodexProjectSessionHost', () => {
     expect(f.host.spawned).toHaveLength(1)
   })
 
+  test('refuses concurrent opens that bind one project to different directories', async () => {
+    const f = fixture()
+    const first = f.sessionHost.open(f.open)
+    await expect(f.sessionHost.open({ ...f.open, cwd: f.unrelated })).rejects.toThrow(/working directory changed/)
+    await first
+    expect(f.host.spawned).toHaveLength(1)
+  })
+
+  test.each(['changed', 'missing'] as const)('does not adopt a pane with a %s directory binding', async (kind) => {
+    const f = fixture()
+    await f.sessionHost.open(f.open)
+    if (kind === 'missing') {
+      const registry = JSON.parse(readFileSync(f.registryPath, 'utf8'))
+      delete registry.sessions['project-a'].cwd
+      writeFileSync(f.registryPath, JSON.stringify(registry))
+    }
+    const before = readFileSync(f.registryPath, 'utf8')
+    const nextHost = new FakeHost()
+    nextHost.inspection = { kind: 'live', argv: [f.node, f.script, '--enable', 'multi_agent_v2'] }
+    const restarted = new CodexProjectSessionHost({ registryPath: f.registryPath, host: nextHost })
+    await expect(restarted.open({ ...f.open, cwd: kind === 'changed' ? f.unrelated : f.dir })).rejects.toThrow(
+      kind === 'changed' ? /refused: project working directory changed/ : /recovery unknown: recorded working directory is missing/,
+    )
+    expect(nextHost.attached).toEqual([])
+    expect(nextHost.spawned).toEqual([])
+    expect(readFileSync(f.registryPath, 'utf8')).toBe(before)
+  })
+
+  test('canonical directory aliases reuse and recover the same project binding', async () => {
+    const f = fixture()
+    const alias = join(f.dir, 'alias')
+    symlinkSync(f.unrelated, alias)
+    const first = await f.sessionHost.open({ ...f.open, cwd: alias })
+    expect(await f.sessionHost.open({ ...f.open, cwd: f.unrelated })).toBe(first)
+    expect(JSON.parse(readFileSync(f.registryPath, 'utf8')).sessions['project-a'].cwd).toBe(realpathSync(f.unrelated))
+    const nextHost = new FakeHost()
+    nextHost.inspection = { kind: 'live', argv: [f.node, f.script, '--enable', 'multi_agent_v2'] }
+    const restarted = new CodexProjectSessionHost({ registryPath: f.registryPath, host: nextHost })
+    expect((await restarted.open({ ...f.open, cwd: f.unrelated })).recovery).toBe('adopted')
+    expect(nextHost.attached).toEqual(['pane-1'])
+  })
+
   test('adopts the same verified pane after a gateway restart', async () => {
     const f = fixture()
     await f.sessionHost.open(f.open)
