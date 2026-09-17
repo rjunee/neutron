@@ -429,7 +429,8 @@ function fakeGithub(input: { origin: string; repo: string }) {
         const pr: FakePr = { number: prs.length + 1, state: 'OPEN',
           headRefName: rest[rest.indexOf('--head') + 1]!, baseRefName: rest[rest.indexOf('--base') + 1]! }
         prs.push(pr)
-        return ok(`https://example.invalid/pull/${pr.number}`)
+        // Real `gh pr create` prints the owner/repo URL; publication parses it for provenance.
+        return ok(`https://example.invalid/project/repo/pull/${pr.number}`)
       }
       if (action === 'merge') {
         const pr = prs.find(row => row.number === Number(rest[1]))

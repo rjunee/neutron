@@ -379,14 +379,21 @@ export function createProductionHostEffects(options: ProductionHostOptions) {
       const witness = await git('ls-remote', '--heads', 'origin', `refs/heads/${branch}`)
       if (!witness.ok || witness.timed_out || witness.stdout.trim().split(/\s+/).join(' ') !== `${snapshot.head} refs/heads/${branch}`) return unknown('Published head was not witnessed')
       let pr = await readPr(current)
+      let createdNumber: number | null = null
       if (pr === null) {
         const created = await runHost(['gh', 'pr', 'create', '--head', branch, '--base', baseBranch,
           '--title', publication.title, '--body-file', publication.bodyFile], repo)
         if (!created.ok || created.timed_out) return unknown('PR creation was not confirmed')
-        pr = await readPr(current)
+        // gh pr create prints the created URL. Only this receipt can mint provenance.
+        const receipt = /^https:\/\/[^/\s]+\/[^/\s]+\/[^/\s]+\/pull\/([1-9]\d*)$/.exec(created.stdout.trim())
+        createdNumber = receipt ? Number(receipt[1]) : null
+        if (createdNumber === null || !Number.isSafeInteger(createdNumber)) return unknown('PR creation receipt is malformed')
+        pr = await readPr({ ...current, pr: createdNumber })
+      } else if (pr.number !== current.published_pr) {
+        return blocked('Discovered PR has no publication provenance')
       }
       if (!pr || pr.state !== 'OPEN' || pr.head !== snapshot.head) return unknown('Published PR does not match the reviewed head')
-      if (!await store.update(runId, { pr: pr.number, published_pr: pr.number })) return unknown('Published PR could not be persisted')
+      if (!await store.update(runId, { pr: pr.number, ...(createdNumber !== null ? { published_pr: createdNumber } : {}) })) return unknown('Published PR could not be persisted')
       return { kind: 'allow' }
     } catch (error) { return unknown(String(error)) }
   }

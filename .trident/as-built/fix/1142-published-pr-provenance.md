@@ -1,37 +1,48 @@
-## 2026-09-17 — Repair migration expectations for publication provenance
+## 2026-09-17 — Bind publication provenance to the create receipt
 
 ### Change and evidence
 
-This CI repair preserves the existing implementation in commit 51fceffa. Its deliberate new migration adds `published_pr` at `migrations/0153_trident_published_pr_provenance.sql:1`. The three reported failures were test defects: their exact expected migration sequences still ended at 152. Added 153 at `migrations/runner.test.ts:220` and `migrations/__tests__/live-ledger-125-repair.test.ts:93,177`.
+Publication now obtains the PR number from successful `gh pr create` stdout, validates the URL and positive safe integer, and views that exact number before persisting it (`trident/production-host-effects.ts:384-396`). The view checks branch, base, repository relationship, and number (`trident/production-host-effects.ts:187-200`); publication additionally checks open state and reviewed head (:395). A branch lookup can no longer supply a new `published_pr` value. Existing provenance is preserved without rewriting it; a discovered foreign PR returns a refusal (:392-396).
 
-Kept exhaustive equality rather than deriving expected values from the loader: the explicit-list rationale is recorded at `migrations/runner.test.ts:204-208`. Ledger equality remains checked at `migrations/runner.test.ts:224-229`. No new production outcome or guard was introduced by this repair.
+The installed `gh pr create --help` states that success prints the created PR URL. This is the locally verified command contract, not a live creation capture: the lane is offline. The fixture now emits a URL plus newline (`trident/production-host-effects.test.ts:68`). Parsing its number and using the existing identity-checked view avoids inventing an unsupported JSON output flag. The parser accepts an HTTPS PR URL and fails closed on unexpected output (:388-390).
 
-The two test files were enumerated by searching the three supplied test titles. Before editing, `git grep` against cached `origin/main` found the same lists ending at 152 (`migrations/runner.test.ts:219`, `migrations/__tests__/live-ledger-125-repair.test.ts:93,177`); the branch diff identifies migration 153 as this branch's addition. The comparison does not establish remote freshness.
+The durable column remains the migration at `migrations/0153_trident_published_pr_provenance.sql:1`. Dispatch carries existing provenance at `trident/board-dispatch.ts:1516-1519`; fresh admission checks it at `trident/build-run.ts:267-270`. The continuously enforced boundary is the publication writer (:396), backed by the database after process failure; it does not require the failed worker to cooperate. A crash between external creation and durable persistence still leaves uncertain ownership; this change does not infer ownership to bridge that gap.
+
+### Outcome vocabulary and decisions
+
+The refusal joins existing `GateResult` values `blocked` and `unknown` (`trident/production-host-effects.ts:19-20`). Foreign discovery returns `blocked/on`; malformed receipts return `unknown/detail`. The production adapter throws either refusal through `requireAllow` (:446-448), and the build runner converts host exceptions to `unknown` (`trident/build-run.ts:659-661`). Thus the direct publication gate refuses the foreign PR, while the enclosing build preserves uncertainty after external writes.
+
+The selected durable-provenance reclaim behavior is unchanged; no product decision in SPEC.md or a spec item changed. Preserve the reviewed schema, migration expectations, dispatch carry, and retry admission. The explicit lane instruction determines this record's location and authorizes rewriting the two unmerged branch records.
 
 ### Mutation table
 
-These are expectation rollback mutations, not changes to production guards. Each executed successfully and returned the wrong expected sequence; all three mutated sites were printed before running the tests.
+Each mutation was applied separately, its actual source line printed, its focused regression run RED, then the original restored and the same regression run GREEN.
 
-| Check | Mutation | RED | Restored GREEN |
+| Guard or binding | Mutation and printed site | RED | Restored GREEN |
 | --- | --- | --- | --- |
-| Fresh migration sequence, `migrations/runner.test.ts:220` | Remove 153; printed previous terminal entry at :219 | First-apply test failed on received extra 153 | First-apply test passed |
-| Repaired live ledger, `migrations/__tests__/live-ledger-125-repair.test.ts:93` | Remove 153 from exact list; printed :93 | Live incident test failed on received extra 153 | Live incident test passed |
-| Live ledger without repair entry, `migrations/__tests__/live-ledger-125-repair.test.ts:177` | Remove 153 from exact list; printed :177 | Missing-entry test failed on received extra 153 | Missing-entry test passed |
+| Receipt supplies provenance | Replace receipt parse assignment with `(await readPr(current))?.number ?? null`, :389 | Receipt/lookup disagreement regression fails | 1 pass |
+| Receipt selects witness | Replace keyed view with `readPr(current)`, :391 | Disagreement regression persists observed 73 instead of receipt 12 in `pr` | 1 pass |
+| Foreign discovery refused | Replace ownership mismatch with `false`, :392 | Mid-push foreign PR returns allow | 1 pass |
+| Existing ownership allowed | Invert ownership mismatch, :392 | Owned PR incorrectly refused | 1 pass |
+| Receipt validation | Remove validation, :390 | All four malformed-receipt regressions fail on wrong refusal evidence | 4 pass |
+| Valid receipt allowed | Replace validation condition with `true`, :390 | Successful publication refused | 1 pass |
 
-Initial isolated reproduction: runner file 21 pass / 1 fail; live-ledger file 2 pass / 2 fail. Combined mutation run: 23 pass / 3 fail. Restored `bun test migrations/runner.test.ts migrations/__tests__/live-ledger-125-repair.test.ts`: 26 pass / 0 fail, 276 assertions.
+Regression fixtures use differing nonempty PR numbers (12 and 73), not an empty observation (`trident/production-host-effects.test.ts:252-263`). The mid-push fixture installs a foreign PR while real git push executes (:240-249). Owned republication remains allowed without another create (:266-272). Malformed receipts have explicit refusal assertions (:275-282).
 
-### Local gates
+### Verification
 
-`bash scripts/ci/typecheck-all.sh` exited 0: all 51 configurations passed. `bash scripts/ci/lint.sh` exited 0. `git diff --check` passed. `bash scripts/ci/leak-gate.sh --tree .` exited 3: zero findings from executed rules, but the external PII denylist was unavailable for files and messages. That gate is incomplete, not clean.
+Real `bun install` succeeded. `readlink -f node_modules/@neutronai/trident` resolved to the build worktree's package. Root `bunx tsc --noEmit -p tsconfig.json` passed. The combined consuming run passed 815 tests across 33 files, with 7,942 assertions: `bun test migrations/ trident/build-run.test.ts trident/board-dispatch.test.ts trident/production-host-effects.test.ts trident/store.test.ts trident/project-build-host.test.ts trident/stranded-salvage-realgit.test.ts trident/build-host.test.ts`.
 
-### Citation corrections
+Consumer selection used `rg -n 'production-host-effects|createProductionHostEffects' trident --glob '*.test.ts'`, plus the prior provenance consuming set and migrations. This enumerates direct test references, not every possible transitive consumer.
 
-The filed issue's fresh-build refusal citation moves from `trident/build-run.ts:247` to `trident/build-run.ts:269-270` on this checkout; cached main has it at :265. The filed discovery citation remains `trident/launch-preparation.ts:201`, with the resulting observed PR assignment at :203-204. Earlier implementation records describe their own revision, not this repair's current line positions.
+That enumeration was in fact incomplete, and the gap was real. Scoping the search to `trident/` missed `open/__tests__/project-build-e2e.test.ts`, whose fake `gh` returned `https://example.invalid/pull/<n>` — a host-plus-`pull` path with no owner/repo segments. Nothing parsed that stdout before this change, so its shape was unconstrained; requiring a receipt made all 15 end-to-end publication tests fail with `PR creation receipt is malformed`. Real `gh pr create` prints an owner/repo URL, so the fixture was the incorrect party and was corrected at `open/__tests__/project-build-e2e.test.ts:433`; the parser was not loosened. Re-running the consuming set including that file: 215 pass, 0 fail across 5 files. The initial new foreign-refusal test used the wrong field `detail`; corrected to the existing `on` vocabulary without relaxing the assertion.
 
-### Decisions and limits
+### Record corrections and limits
 
-Used the lane-requested `.trident/as-built/` location. No product decision changed; no spec update was needed. Deliberately did not rebuild or alter the provenance implementation, migration runner, historical ledger behavior, or existing assertions beyond the three expected ordinals. Did not run the full suite, fetch, push, open a PR, or merge.
+The filed fresh-admission citation is now `trident/build-run.ts:269-270`; launch discovery remains `trident/launch-preparation.ts:201-204`. The earlier implementation record overstated what observation proved; its behavior and invariant sections have been rewritten. The previous migration-repair record at this path is superseded by this account of the complete publication correction; the reviewed migration repair remains in the branch.
 
-Could not verify hosted CI, the historical hosted run, or freshness of cached main in this offline lane. The prior implementation's ownership mutations were not rerun for this test-only repair.
+Deliberately did not rebuild durable storage, change the schema snapshot, introduce flags, close PRs after failure, or alter dispatch. No full-suite run, live GitHub creation, hosted CI verification, network fetch, push, PR creation, or merge was performed. Only a local commit is delivered.
 
-The repair file list was enumerated with `git diff --name-only` and `git ls-files --others --exclude-standard`: the two cited test files and this record.
+The standalone migration run passed 219 tests with 5,551 assertions. Lint passed. `git diff --check` passed. The correction file set was enumerated with `git diff --name-only`: the host implementation, its tests, and the two requested records. A whole-tree hidden-file search for the superseded phrases included `receipt boundary` as a positive control, found the corrected original record, and found only unrelated discovery wording in the walkthrough record; that unrelated test-registration statement stays.
+
+The leak gate reported zero findings from executed rules, but the external PII denylist was unavailable for files and commit messages. Its result is INCOMPLETE, not clean. The orchestrator must supply that gate before publication.
