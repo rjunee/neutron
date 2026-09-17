@@ -53,7 +53,8 @@ const RESERVATION_FILE = /^(?:claude|codex|pi|codex-headless)-step-[a-f0-9]{64}\
  * recognised reservation without the armed suffix can only describe work that was never
  * submitted. Armed reservations are durable evidence of a possibly submitted task and are
  * never removed here. This is intentionally a host action: a competing dispatcher cannot
- * establish that the owner is dead, while the host starting a later attempt already has. */
+ * establish that the owner is dead. The caller must establish exclusive admission first;
+ * this helper does not authorize restarting a pending or terminal driver. */
 export async function reconcileStoppedTrailerReservations(stateDir: string): Promise<{ ok: true } | { ok: false; detail: string }> {
   let names: string[]
   try {

@@ -225,9 +225,9 @@ export async function prepareProjectBuild(input: InnerLoopInput, context: Projec
   if (!checked.ok || checked.timed_out || checked.stdout.trim() !== `refs/heads/${run.branch}`) throw Error('Build worktree does not hold the assigned branch')
   const state = join(context.stateRoot, encodeURIComponent(run.id))
   await mkdir(state, { recursive: true })
-  // Reaching a new host preparation means the prior driver attempt is no longer live.
-  // Only the host has that fact; competing workers must keep treating an unarmed file
-  // as unknown. Armed files remain durable evidence that work may have been submitted.
+  // Launcher admission must precede preparation. Same-run gateway recovery requires
+  // a durable checkpoint (orchestrator.ts); a pending unknown cannot reach this cleanup.
+  // Armed files remain durable evidence that work may have been submitted.
   const reconciled = await reconcileStoppedTrailerReservations(state)
   if (!reconciled.ok) throw new Error(reconciled.detail)
   const topic = run.chat_id ?? context.projectId

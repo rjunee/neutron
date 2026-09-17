@@ -93,7 +93,7 @@ test('an absent slot is cleared successfully; an unclearable one is reported', a
 })
 
 test('a step whose owner died between create and arm recovers on a later attempt, and never dispatches twice', async () => {
-  // #1122's acceptance, end to end. THE DEATH IS REPRODUCED EXACTLY, not approximated:
+  // Protocol-level fixture only: this bypasses launcher admission and does not close #1122.
   // the exclusive `wx` create writes the bare identity, and the owner dies before
   // `identity + ARMED` is written, so this IS the byte state it leaves behind.
   const s = await slot()
@@ -109,11 +109,11 @@ test('a step whose owner died between create and arm recovers on a later attempt
   // clear this. Nothing about the worker-side rules above changed.
   expect(await reconcileStoppedTrailerReservations(dirname(s.reservation))).toEqual({ ok: true })
 
-  // Acceptance 1: the later attempt makes progress.
+  // After explicit cleanup the slot permits a dispatch.
   expect(await reserveTrailerSlot(s.reservation, s.identity, s.result)).toEqual({ kind: 'dispatch' })
 
-  // Acceptance 2: "without the bounded task ever running twice" — recovery must not have
-  // reopened the door it exists to keep shut.
+  // A second reservation must not grant another dispatch. This does not exercise
+  // the driver or its launcher admission guard.
   const sibling = await reserveTrailerSlot(s.reservation, s.identity, s.result)
   expect(sibling.kind).not.toBe('dispatch')
 })
