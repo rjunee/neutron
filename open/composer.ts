@@ -66,6 +66,7 @@ import { DEFAULT_LISTEN_PORT } from '@neutronai/gateway/boot-listener-registry.t
 import {
   buildLiveAgentTurn,
   LIVE_AGENT_TOOL_NAMES,
+  PROJECT_REPL_TOOL_DEFS,
 } from '@neutronai/gateway/wiring/build-live-agent-turn.ts'
 import type { LiveAgentOnboardingSeam } from '@neutronai/gateway/wiring/build-live-agent-turn.ts'
 import { buildProjectDocComposer } from '@neutronai/gateway/wiring/build-project-doc-composer.ts'
@@ -1198,7 +1199,9 @@ export function buildOpenGraphComposer(
                 spawnProjectSession: async projectId => {
                   const projectSubstrate = makeProjectLiveAgentSubstrate(projectId)
                   if (projectSubstrate === null) throw new Error('Project conversation substrate is unavailable')
-                  await prewarmSubstrate(projectSubstrate)
+                  // Match the acting turn's surface (`project-build.ts`), or the
+                  // first dispatch evicts this child and lands in a respawn.
+                  await prewarmSubstrate(projectSubstrate, PROJECT_REPL_TOOL_DEFS)
                 },
               }, signal)
             },
@@ -7554,10 +7557,16 @@ const PREWARM_PROMPT = 'Reply with the single word: ready'
  * blocks on it at build, and a caller that ignores the return value gets the
  * prior behaviour. Exported for the composer unit test.
  */
-export function prewarmSubstrate(substrate: Substrate): Promise<void> {
+export function prewarmSubstrate(substrate: Substrate, tools: AgentSpec['tools'] = []): Promise<void> {
   const spec: AgentSpec = {
     prompt: PREWARM_PROMPT,
-    tools: [],
+    // THE PREWARM'S SURFACE MUST MATCH THE FIRST REAL TURN'S, or this warm child
+    // is evicted the moment that turn arrives. `spec.tools` IS the `--tools`
+    // surface (`spawn.ts:302`), and the reuse guard evicts on a mismatch
+    // (`spawn.ts:1550`, `:1637-1641`). A project prewarm that hardcodes `[]`
+    // while its dispatch requests the live surface forces exactly the respawn
+    // #1112 is about — so the caller passes the surface it will actually use.
+    tools,
     // Resolve the warm-pool model PER-PREWARM via the dynamic accessor. This is
     // the spawn that HEATS the onboarding REPL (it stamps the warm record's
     // `model`, which the first real turn then reuses): a frozen id here is what
