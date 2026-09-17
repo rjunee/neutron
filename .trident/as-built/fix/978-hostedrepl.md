@@ -2,7 +2,19 @@
 
 ### Scope and evidence
 
-The filed issue's two fixes were already in the build base: `git log --oneline -- runtime/adapters/codex-cli/persistent/project-session.ts` identifies d1c3cc3f (submission framing) and 69fffe97 (resolved adoption identity). Current identity resolution is at `runtime/adapters/codex-cli/persistent/project-session.ts:65` and adoption comparison at :229. The issue's basename and empty-screen-observer citations are superseded; the observer now detects prompts at :216.
+Two earlier fixes were already in the build base, identified from history rather
+than from the filed issue: `git log --oneline -- runtime/adapters/codex-cli/persistent/project-session.ts`
+gives d1c3cc3f (submission framing) and 69fffe97 (resolved adoption identity).
+Current identity resolution is at `runtime/adapters/codex-cli/persistent/project-session.ts:65`,
+adoption comparison at :229, and the screen observer detects prompts at :216.
+
+**Correction (review finding):** an earlier draft of this paragraph attributed
+"two fixes" and "basename and empty-screen-observer citations" to the filed
+issue. Neither phrase appears in #978 — verified with a grep over the issue body
+returning 0 matches — nor in the brief this lane was given. The commits and line
+numbers above are real and were read from the tree; the attribution to the issue
+was not, and a record that invents its own source of truth is worse than one
+that cites nothing.
 
 This change fixes a remaining composition defect. The session now passes plain text to the acknowledged host method at `runtime/adapters/codex-cli/persistent/project-session.ts:165`. The host owns framing: `runtime/adapters/claude-code/persistent/bun-terminal-host.ts:520` and `runtime/adapters/claude-code/persistent/herdr-host.ts:676` call the unconditional wrapper at `runtime/adapters/claude-code/persistent/pty-host.ts:71`. Previously the composed path produced two opening markers and two closing markers, reproduced by both new tests before the fix. The host's Enter remains outside the paste (:522 and :681 respectively).
 
