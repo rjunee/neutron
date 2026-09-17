@@ -48,7 +48,18 @@ async function fixture() {
     await writeFile(`${req.result.path}.tmp`, JSON.stringify({ run_id: req.run_id, step_id: req.step_id, schema: req.result.schema, on: 'file evidence' }))
     await rename(`${req.result.path}.tmp`, req.result.path)
   }
-  return { req, options, calls, run, trailer, reservation }
+  // A worker writes its trailer DURING its dispatch turn; the slot is empty before it,
+  // because a role's slot is reused across rounds and is cleared at dispatch
+  // (`runtime/workers/trailer-slot.ts`). Seeding therefore goes through compose.
+  const seed = (bytes?: string) => {
+    const compose = options.composeActingTurn
+    options.composeActingTurn = (async (...args: Parameters<typeof compose>) => {
+      if (bytes === undefined) await trailer()
+      else await writeFile(req.result.path, bytes)
+      return compose(...args)
+    }) as typeof compose
+  }
+  return { req, options, calls, run, trailer, seed, reservation }
 }
 
 test('dispatches one explicitly modeled subagent and reads its file, never the reply', async () => {
@@ -134,7 +145,7 @@ test('an unreadable reservation is unknown and cannot dispatch', async () => {
 
 test('changing a trailer path cannot dispatch the same step twice', async () => {
   const f = await fixture()
-  await f.trailer()
+  f.seed()
   expect((await f.run()).kind).toBe('blocked')
   const req = { ...f.req, result: { ...f.req.result, path: join(f.req.cwd, 'different.json') } }
   expect((await f.run(piInReplRunner(f.options), req)).kind).toBe('unknown')
@@ -150,13 +161,13 @@ test('a missing trailer is unknown even when the reply claims completion', async
 
 test.each(['not json', '{"step_id":"wrong","schema":"test-result-v1"}'])('invalid trailer %s is unknown', async bytes => {
   const f = await fixture()
-  await writeFile(f.req.result.path, bytes)
+  f.seed(bytes)
   expect(await f.run()).toEqual({ kind: 'unknown', detail: 'Trailer could not be read or validated.' })
 })
 
 test('host decoder owns completed result and measured metadata', async () => {
   const f = await fixture()
-  await f.trailer()
+  f.seed()
   const completed: BoundedWorkOutcome = {
     kind: 'completed', result: { verified: true }, usage: { input_tokens: 17, output_tokens: 4 },
     model_reported: f.req.model_id, thread_id: 'observed-thread',
@@ -291,16 +302,21 @@ test.each(['FINAL_ANSWER: completed', 'child died', 'interrupted', 'spawn reject
 test('an unreadable trailer is unknown', async () => {
   const f = await fixture()
   const request = { ...f.req, result: { ...f.req.result, path: f.req.cwd } }
-  expect((await f.run(piInReplRunner(f.options), request)).kind).toBe('unknown')
-  expect(f.calls).toHaveLength(1)
+  const outcome = await f.run(piInReplRunner(f.options), request)
+  expect(outcome.kind).toBe('unknown')
+  // Caught while clearing the slot, BEFORE dispatch: a path that is a directory can
+  // never hold this step's trailer, and the detail says so rather than reporting the
+  // silence of a worker that was never worth spawning.
+  expect(f.calls).toHaveLength(0)
+  expect(outcome).toHaveProperty('detail', expect.stringContaining(request.result.path))
 })
 
 test.each(['run_id', 'step_id', 'schema'])('decoder rejects mismatched trailer %s', async field => {
   const f = await fixture()
-  await f.trailer()
-  const value = JSON.parse(await readFile(f.req.result.path, 'utf8'))
+  // The worker writes a trailer whose <field> does not match its own request.
+  const value: Record<string, unknown> = { run_id: f.req.run_id, step_id: f.req.step_id, schema: f.req.result.schema, on: 'file evidence' }
   value[field] = 'wrong'
-  await writeFile(f.req.result.path, JSON.stringify(value))
+  f.seed(JSON.stringify(value))
   expect((await f.run()).kind).toBe('unknown')
 })
 
@@ -325,3 +341,36 @@ for (const effort of ['xhigh', 'max'] as const) {
     expect(await f.run(undefined, { ...f.req, effort })).toEqual({ kind: 'blocked', on: 'file evidence' })
   })
 }
+
+test("a second round of the same role is not answered by the previous round's trailer", async () => {
+  const f = await fixture()
+  // `open/wiring/project-build.ts:366` keys the result slot by ROLE, while
+  // `trident/build-run.ts:319` gives every ROUND of that role its own `step_id`. Round
+  // two therefore dispatches against the path round one already wrote. Seed it with a
+  // trailer that was perfectly valid for round one.
+  await writeFile(f.req.result.path, JSON.stringify({ run_id: f.req.run_id, step_id: 'build-0', schema: f.req.result.schema, on: 'round one' }))
+  let slotAtDispatch: string | undefined
+  const compose = f.options.composeActingTurn
+  f.options.composeActingTurn = async (topic, spec, opts) => {
+    // Must be absent here: a slot still holding round one makes the acting turn read
+    // the dispatch as already ended before any worker of this round has run
+    // (`runtime/workers/claude-acting-turn.ts:200`).
+    slotAtDispatch = await readFile(f.req.result.path, 'utf8').catch((error: NodeJS.ErrnoException) => error.code)
+    // This round's worker takes a moment, as a real one does. The poll must not
+    // answer from whatever is in the slot before it lands.
+    setTimeout(() => { void f.trailer() }, 60)
+    return compose(topic, spec, opts)
+  }
+  expect(await f.run()).toEqual({ kind: 'blocked', on: 'file evidence' })
+  expect(slotAtDispatch).toBe('ENOENT')
+})
+
+test('a resumed step keeps the trailer already written for it', async () => {
+  const f = await fixture()
+  // The reservation exists, so this is the SAME step re-entered after a gateway
+  // replacement — not a new round. Its own validated answer must survive.
+  await writeFile(f.reservation, JSON.stringify(f.req))
+  await f.trailer()
+  expect(await f.run()).toEqual({ kind: 'blocked', on: 'file evidence' })
+  expect(f.calls).toHaveLength(0)
+})

@@ -1,6 +1,7 @@
 import { readFile, writeFile } from 'node:fs/promises'
 import { createHash } from 'node:crypto'
 import { join } from 'node:path'
+import { clearTrailerSlot } from './trailer-slot.ts'
 import { setTimeout as delay } from 'node:timers/promises'
 import type { AgentSpec } from '../substrate.ts'
 import type { BoundedWorkOutcome, BoundedWorkRequest, WorkerRunner } from '../bounded-work.ts'
@@ -51,6 +52,8 @@ export function claudeInReplRunner(options: ClaudeInReplOptions): WorkerRunner {
         }
         if (dispatch) {
           if (signal.aborted || Date.now() >= deadline) return unseen('Cancelled or out of time before dispatch.')
+          const cleared = await clearTrailerSlot(req.result.path)
+          if (!cleared.ok) return unseen(cleared.detail)
           const args = {
             subagent_type: 'general-purpose',
             description: `${req.role}: ${req.step_id}`,

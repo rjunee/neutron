@@ -12,6 +12,7 @@ import type {
   WorkerRunner,
 } from '../bounded-work.ts'
 import { unknownCause } from '../refusal-cause.ts'
+import { clearTrailerSlot } from './trailer-slot.ts'
 
 type Probe = { ok: true } | { ok: false; reason: RefusalReason; detail: string }
 
@@ -135,6 +136,11 @@ export function createCodexHeadlessRunner(options: CodexHeadlessRunnerOptions = 
         NEUTRON_CODEX_BUILD_TRAILER_FILE: req.result.path,
         NEUTRON_CODEX_THREAD_ID: req.thread?.id ?? '',
       })
+      // The wrapper reads this same path back after exit. A role's slot is reused
+      // across rounds, so an uncleared slot lets an exit-0 child that wrote nothing
+      // be credited with the PREVIOUS round's trailer.
+      const cleared = await clearTrailerSlot(req.result.path)
+      if (!cleared.ok) return { kind: 'unknown', detail: cleared.detail }
       const child = spawn('/bin/bash', [buildScript], { cwd: req.cwd, env, stdio: 'ignore' })
       live.set(req.step_id, child)
       let timedOut = false
