@@ -386,7 +386,7 @@ export function createProductionHostEffects(options: ProductionHostOptions) {
         pr = await readPr(current)
       }
       if (!pr || pr.state !== 'OPEN' || pr.head !== snapshot.head) return unknown('Published PR does not match the reviewed head')
-      if (!await store.update(runId, { pr: pr.number })) return unknown('Published PR could not be persisted')
+      if (!await store.update(runId, { pr: pr.number, published_pr: pr.number })) return unknown('Published PR could not be persisted')
       return { kind: 'allow' }
     } catch (error) { return unknown(String(error)) }
   }

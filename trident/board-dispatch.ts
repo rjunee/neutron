@@ -1513,6 +1513,10 @@ export async function dispatchBoardBoundBuild(
       // query against live state rather than an inference.
       claimed_paths: paths,
       ...(input.bound_pr !== undefined && input.bound_pr !== null ? { bound_pr: input.bound_pr } : {}),
+      // Only publication provenance travels through the exact card link. The
+      // observational `pr` field may have been filled by discovery and cannot
+      // establish ownership of a branch's existing PR.
+      ...(prior?.task === input.task && prior.published_pr !== null ? { published_pr: prior.published_pr } : {}),
       // The salvage-resume seed, or nothing at all. `bound_pr` is deliberately NOT
       // seeded (it means review-only-never-publish) and no verdict is seeded — the
       // resumed run is going to review, it has not been to one. `base_sha` IS

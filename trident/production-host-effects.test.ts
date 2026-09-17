@@ -230,6 +230,7 @@ test('publication pushes the pinned commit with a lease, witnesses PR, and persi
   const snapshot = await measured(f)
   expect(await f.publishChecked(snapshot)).toEqual({ kind: 'allow' })
   expect(f.store.get(f.row.id)?.pr).toBe(12)
+  expect(f.store.get(f.row.id)?.published_pr).toBe(12)
   expect(f.calls.find(argv => argv.includes('push'))).toContain(`${f.tip}:refs/heads/change`)
   expect(f.calls.find(argv => argv.includes('push'))).toContain('--force-with-lease=refs/heads/change:')
   expect(await f.command(['git', '-C', f.repo, 'ls-remote', '--heads', 'origin', 'change'])).toContain(f.tip)
