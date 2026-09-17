@@ -242,6 +242,7 @@ test('publication refuses a foreign PR appearing during push', async () => {
   const snapshot = await measured(f)
   f.intercept(argv => {
     if (argv.includes('push')) f.setPr({ number: 73, headRefOid: f.tip, state: 'OPEN', headRefName: 'change', baseRefName: 'main', isCrossRepository: false })
+    return undefined
   })
   expect(await f.publishChecked(snapshot)).toEqual({ kind: 'blocked', on: 'Discovered PR has no publication provenance' })
   expect(f.store.get(f.row.id)?.published_pr).toBeNull()
