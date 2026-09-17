@@ -5,7 +5,7 @@ import { setTimeout as delay } from 'node:timers/promises'
 import { sessionJsonlPath } from '../adapters/claude-code/persistent/jsonl-resumability.ts'
 import type { ToolGrant } from '../bounded-work.ts'
 import type { ReplSession } from '../adapters/claude-code/persistent/repl-session.ts'
-import type { ProjectActingTurn } from './project-runners.ts'
+import { projectTrailerStep, type ProjectActingTurn } from './project-runners.ts'
 
 /** Host-owned launch observation, bound to this exact live session. The host must
  * replace this binding when the session is replaced; never derive it from a request.
@@ -198,8 +198,13 @@ export function createClaudeActingTurn(binding: ClaudeActingSession, clock: Obse
         while (!expired()) {
           try {
             const trailer = await stat(request.result.path)
-            if (trailer.isFile()) return { kind: 'turn-ended' as const }
-            throw new Error('Claude trailer path is not a file')
+            if (trailer.isFile()) {
+              if (projectTrailerStep(await readFile(request.result.path, 'utf8'), request) !== 'not-current-step') {
+                return { kind: 'turn-ended' as const }
+              }
+            } else {
+              throw new Error('Claude trailer path is not a file')
+            }
           } catch (error) {
             if ((error as NodeJS.ErrnoException).code !== 'ENOENT') throw error
           }

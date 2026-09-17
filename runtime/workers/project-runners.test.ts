@@ -58,6 +58,21 @@ for (const provider of ['anthropic', 'openai-codex', 'pi'] as const) {
   })
 }
 
+for (const provider of ['anthropic', 'openai-codex', 'pi'] as const) {
+  test(`${provider} waits past another step's trailer`, async () => {
+    const f = await fixture(provider)
+    const request = { ...f.request, budget: { wall_ms: 500 } }
+    f.options.actingTurn = async input => {
+      f.calls.push(input)
+      await writeFile(f.request.result.path, JSON.stringify({ ...f.envelope, step_id: 'older-step' }))
+      void Bun.sleep(25).then(() => writeFile(f.request.result.path, JSON.stringify(f.envelope)))
+      return { kind: 'turn-ended' }
+    }
+    expect(await (await createProjectRunners(f.options)).inRepl!.run(request, 'in-repl', signal()))
+      .toEqual({ kind: 'completed', result: f.envelope.result, ...f.metadata })
+  })
+}
+
 test('headless selection follows project provider and underlying supports', async () => {
   for (const provider of PROVIDERS) {
     const f = await fixture(provider)
@@ -134,7 +149,7 @@ test('decoder accepts valid payload with host metadata and valid blocked reason'
 })
 
 for (const [field, replacement, detail] of [
-  ['run_id', 'other', 'run_id'], ['step_id', 'other', 'step_id'], ['schema', 'other', 'schema'],
+  ['schema', 'other', 'schema'],
   ['kind', 'failed', 'outcome kind'], ['result', { answer: 'bad' }, 'schema validation'],
 ] as const) {
   test(`decoder rejects ${field}`, async () => {
@@ -142,6 +157,13 @@ for (const [field, replacement, detail] of [
     expect(f.decode({ ...f.envelope, [field]: replacement })).toEqual({ kind: 'unknown', detail: expect.stringContaining(detail) })
   })
 }
+
+test('decoder separates another step from an unreadable identity', async () => {
+  const f = await fixture()
+  expect(f.decode({ ...f.envelope, run_id: 'other' })).toEqual({ kind: 'not-current-step' })
+  expect(f.decode({ ...f.envelope, step_id: 'other' })).toEqual({ kind: 'not-current-step' })
+  expect(f.decode({ ...f.envelope, step_id: undefined })).toEqual({ kind: 'unknown', detail: 'Trailer step_id missing or unreadable.' })
+})
 
 test('decoder rejects missing validator and accepts missing host observations', async () => {
   const f = await fixture()
@@ -199,7 +221,7 @@ test('missing or throwing telemetry preserves valid results and rejects invalid 
     f.options.trailer.metadata = metadata
     expect(f.decode()).toEqual({ kind: 'completed', result: f.envelope.result, usage: null, model_reported: null, thread_id: null })
     expect(f.decode({ ...f.envelope, result: { answer: 'bad' } }).kind).toBe('unknown')
-    expect(f.decode({ ...f.envelope, step_id: 'other' }).kind).toBe('unknown')
+    expect(f.decode({ ...f.envelope, step_id: 'other' }).kind).toBe('not-current-step')
     expect(decodeProjectTrailer('{', f.request, f.options.trailer).kind).toBe('unknown')
   }
   expect((await (await createProjectRunners(f.options)).inRepl!.run(f.request, 'in-repl', signal())).kind).toBe('completed')

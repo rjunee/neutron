@@ -38,16 +38,31 @@ export interface ProjectTrailerDecoder {
   metadata(request: BoundedWorkRequest): Omit<Completed, 'kind' | 'result'> | undefined
 }
 
+export type ProjectTrailerOutcome = BoundedWorkOutcome | { kind: 'not-current-step' }
+
 const unknown = (detail: string): BoundedWorkOutcome => ({ kind: 'unknown', detail })
+
+/** A well-formed identity for another request is stale, not unreadable. */
+export function projectTrailerStep(bytes: string, request: BoundedWorkRequest): 'current-or-unreadable' | 'not-current-step' {
+  try {
+    const value = JSON.parse(bytes)
+    if (value === null || typeof value !== 'object' || Array.isArray(value)) return 'current-or-unreadable'
+    if (typeof value.run_id !== 'string' || typeof value.step_id !== 'string') return 'current-or-unreadable'
+    return value.run_id === request.run_id && value.step_id === request.step_id ? 'current-or-unreadable' : 'not-current-step'
+  } catch {
+    return 'current-or-unreadable'
+  }
+}
 
 /** Common envelope: { schema, run_id, step_id, kind, result? , on? }.
  * Schema names and domain payload validators are supplied by the host. */
-export function decodeProjectTrailer(bytes: string, request: BoundedWorkRequest, host: ProjectTrailerDecoder): BoundedWorkOutcome {
+export function decodeProjectTrailer(bytes: string, request: BoundedWorkRequest, host: ProjectTrailerDecoder): ProjectTrailerOutcome {
   try {
     const value = JSON.parse(bytes)
     if (value === null || typeof value !== 'object' || Array.isArray(value)) return unknown('Trailer object missing.')
-    if (value.run_id !== request.run_id) return unknown('Trailer run_id missing or mismatched.')
-    if (value.step_id !== request.step_id) return unknown('Trailer step_id missing or mismatched.')
+    if (typeof value.run_id !== 'string') return unknown('Trailer run_id missing or unreadable.')
+    if (typeof value.step_id !== 'string') return unknown('Trailer step_id missing or unreadable.')
+    if (value.run_id !== request.run_id || value.step_id !== request.step_id) return { kind: 'not-current-step' }
     if (value.schema !== request.result.schema) return unknown('Trailer schema missing or mismatched.')
     const validate = host.schemas.get(request.result.schema)
     if (!validate) return unknown('Trailer schema has no host validator.')

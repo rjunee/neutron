@@ -101,6 +101,17 @@ test('trailer appearing after acknowledgement establishes observation', async ()
   await write
 })
 
+test('a valid trailer for another step does not end the acting turn', async () => {
+  const f = await fixture()
+  let replaced = false
+  f.binding.session.child.submitLine = async () => {
+    await writeFile(f.input.request.result.path, JSON.stringify({ run_id: 'run', step_id: 'older-step' }))
+    void Bun.sleep(35).then(async () => { await writeFile(f.input.request.result.path, '{}'); replaced = true })
+  }
+  expect(await f.run()).toEqual({ kind: 'turn-ended' })
+  expect(replaced).toBe(true)
+})
+
 test('unreadable trailer and dispatch uncertainty throw without retry', async () => {
   const f = await fixture()
   f.input.request = { ...f.input.request, result: { ...f.input.request.result, path: f.dir } }

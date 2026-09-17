@@ -6,6 +6,7 @@ import { setTimeout as delay } from 'node:timers/promises'
 import type { AgentSpec } from '../substrate.ts'
 import type { BoundedWorkOutcome, BoundedWorkRequest, WorkerRunner } from '../bounded-work.ts'
 import { SUBAGENT_TOOL_NAME } from './claude-tool-contract.ts'
+import type { ProjectTrailerOutcome } from './project-runners.ts'
 
 
 export interface ClaudeInReplOptions {
@@ -17,7 +18,7 @@ export interface ClaudeInReplOptions {
   composeActingTurn(topic: string, spec: AgentSpec, opts: { timeout_ms: number }): Promise<string>
   /** Host validates the requested schema and identity, and supplies measured outcome metadata.
    * The input is exclusively the trailer file, never conversational text. */
-  decodeTrailer(bytes: string, req: BoundedWorkRequest): BoundedWorkOutcome
+  decodeTrailer(bytes: string, req: BoundedWorkRequest): ProjectTrailerOutcome
   probe?: WorkerRunner['liveness']
 }
 
@@ -81,7 +82,8 @@ export function claudeInReplRunner(options: ClaudeInReplOptions): WorkerRunner {
         }
         while (!signal.aborted && Date.now() < deadline) {
           try {
-            return options.decodeTrailer(await readFile(req.result.path, 'utf8'), req)
+            const outcome = options.decodeTrailer(await readFile(req.result.path, 'utf8'), req)
+            if (outcome.kind !== 'not-current-step') return outcome
           } catch (error) {
             if ((error as NodeJS.ErrnoException).code !== 'ENOENT') {
               return unseen('Trailer could not be read or validated.')
