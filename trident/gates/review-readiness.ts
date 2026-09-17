@@ -80,24 +80,31 @@ export async function awaitSettledReviewReadiness(source: ReviewReadinessSource 
   const deadline = time.now() + REVIEW_READINESS_BUDGET_MS
   // Wall-clock watchdog also bounds an observer or injected wait that never settles.
   let timer: ReturnType<typeof setTimeout> | undefined
+  // WHICHEVER RESOLVER WINS MUST CARRY THE LAST PENDING CONDITION. The watchdog
+  // aborts before it resolves, so the abort listener below wins the race and its
+  // string is what production records. Reporting a generic "budget exhausted"
+  // there loses the one fact the record needs: WHAT was unsettled — mergeability,
+  // an incomplete list, a still-running required check, or no check at all.
+  let lastPending = 'Review checks have not settled'
+  const deferred = (why: string): SettledReviewReadiness =>
+    ({ kind: 'unknown', detail: `Review readiness deferred: ${lastPending}; ${why}` })
   const timeout = new Promise<SettledReviewReadiness>(resolve => {
-    timer = setTimeout(() => { controller.abort(); resolve({ kind: 'unknown', detail: 'Review readiness budget exhausted' }) }, REVIEW_READINESS_BUDGET_MS)
+    timer = setTimeout(() => { controller.abort(); resolve(deferred('budget exhausted')) }, REVIEW_READINESS_BUDGET_MS)
   })
   const cancelled = new Promise<SettledReviewReadiness>(resolve => {
-    controller.signal.addEventListener('abort', () => resolve({ kind: 'unknown', detail: 'Review readiness cancelled or budget exhausted' }), { once: true })
+    controller.signal.addEventListener('abort', () => resolve(deferred('cancelled or budget exhausted')), { once: true })
   })
   try {
     if (signal.aborted) controller.abort()
     return await Promise.race([timeout, cancelled, (async (): Promise<SettledReviewReadiness> => {
-      let detail = 'Review checks have not settled'
       while (!controller.signal.aborted && time.now() < deadline) {
         const readiness = classifyReviewReadiness(snapshot, await source.observe(snapshot, controller.signal))
         if (time.now() >= deadline) break
         if (readiness.kind !== 'pending') return readiness
-        detail = readiness.detail
+        lastPending = readiness.detail
         await time.wait(Math.min(REVIEW_READINESS_RETRY_MS, deadline - time.now()), controller.signal)
       }
-      return { kind: 'unknown', detail: `Review readiness deferred: ${detail}; budget exhausted or cancelled` }
+      return deferred('budget exhausted or cancelled')
     })()])
   } catch (error) {
     return { kind: 'unknown', detail: `Review readiness observation failed: ${error instanceof Error ? error.message : String(error)}` }
