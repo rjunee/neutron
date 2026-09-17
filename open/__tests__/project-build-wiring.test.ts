@@ -151,13 +151,13 @@ test('intermediate reviews defer the full suite and terminal publication runs it
   const payload = {
     mutationClaim: { file: 'guard.ts', find: 'before', replace: 'after', guard: ['bun', 'test'], control: ['bun', 'test'] },
     worktreePath: options.production.worktree, branch: 'change', commitSha: head,
-    prNumber: null, diffFile: 'diff', testsPassed: false, suiteOutcome: 'deferred',
+    prNumber: null, diffFile: 'diff', testsPassed: false, suiteOutcome: 'failed-preexisting', suiteEvidence: 'base red on named.test.ts',
   }
   await writeFile(options.workers.build.request.result.path, JSON.stringify({ result: { head, payload } }))
   const before = f.commands.length
   expect(options.policy.reviewSuite?.scope).toBe('subset')
   expect((await options.policy.reviewSuite!.readCheckpoint({ head, diff: '+one', pr: null }, 1))?.report)
-    .toEqual({ suiteOutcome: 'deferred' })
+    .toEqual({ suiteOutcome: 'failed-preexisting', suiteEvidence: 'base red on named.test.ts' })
   expect(f.commands.slice(before).filter(argv => argv[0] === 'bash')).toHaveLength(0)
 
   expect(options.policy.publicationSuite?.scope).toBe('full-suite')

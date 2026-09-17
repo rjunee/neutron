@@ -3,12 +3,41 @@ import { applyReviewSuite, assessReviewSuite, type SuiteObservation } from './re
 const snapshot = { head: 'a'.repeat(40), diff: '+code', pr: null }
 const approve = { kind: 'approve' } as const
 
-test('a deliberately deferred subset is known, while the same full-suite report is not', async () => {
+test('a deferred subset trusts host scope, while a full-suite unreadable receipt is unknown', async () => {
   const observe = async () => ({ kind: 'known' as const, runId: 'run', head: snapshot.head, round: 2,
     strategy: 'subset instructions', scope: 'subset' as const, report: { suiteOutcome: 'deferred' } })
   expect(await assessReviewSuite({ observe }, snapshot, 2, 'run')).toEqual({ kind: 'known', findings: [] })
   const full = async () => ({ ...(await observe()), scope: 'full-suite' as const })
-  expect(await assessReviewSuite({ observe: full }, snapshot, 2, 'run')).toMatchObject({ kind: 'unknown' })
+  expect(await assessReviewSuite({ observe: full }, snapshot, 2, 'run')).toEqual({ kind: 'unknown', detail: 'Host-observed review suite exit code is missing or unreadable' })
+})
+test('a deferred subset carries failed-preexisting evidence without trusting its outcome to select scope', async () => {
+  const f = fixture()
+  f.observation.scope = 'subset'
+  f.observation.report = { suiteOutcome: 'failed-preexisting', suiteEvidence: 'base red on named.test.ts' }
+  expect(await f.assess()).toEqual({ kind: 'known', findings: [{
+    title: 'FULL SUITE RED FOR PRE-EXISTING REASONS',
+    evidence: 'Untrusted build transcription; verify the base comparison and named failures before approving:\nbase red on named.test.ts',
+    advisory: true,
+  }] })
+  for (const suiteOutcome of [undefined, 'deferred', 'failed-new', 'unexpected-worker-value']) {
+    f.observation.report = suiteOutcome === undefined ? {} : { suiteOutcome }
+    expect(await f.assess()).toEqual({ kind: 'known', findings: [] })
+  }
+  f.observation.report = { suiteOutcome: 'failed-preexisting' }
+  expect(await f.assess()).toMatchObject({ kind: 'known', findings: [{ title: 'FAILED-PREEXISTING CLAIMED WITHOUT EVIDENCE', advisory: false }] })
+})
+test('a NULL report keeps its own diagnostic even on a subset round', async () => {
+  // ORDERING REGRESSION. `report?.hostExitCode === undefined` is also true when `report` is
+  // null, so putting the subset exemption first silently turns "no command was derivable"
+  // into "this round deferred its suite" — collapsing the two states a sibling commit exists
+  // to separate. Adversarial review caught exactly that; this pins the order.
+  const f = fixture()
+  f.observation.scope = 'subset'
+  f.observation.report = null
+  expect(await f.assess()).toEqual({ kind: 'unknown', detail: 'No full-suite command is derivable from the test strategy' })
+  // And the full-suite round keeps the same diagnostic, so the fix is about the state, not the scope.
+  f.observation.scope = 'full-suite'
+  expect(await f.assess()).toEqual({ kind: 'unknown', detail: 'No full-suite command is derivable from the test strategy' })
 })
 function fixture() {
   const observation: SuiteObservation = { kind: 'known', runId: 'run', head: snapshot.head, round: 2, strategy: 'run full suite', scope: 'full-suite', report: { hostExitCode: 0, suiteOutcome: 'passed' } }
@@ -39,22 +68,24 @@ test('G063 rejects a nonzero host receipt — advisory only for an EVIDENCED fai
   // Evidenced: advisory, so the panel's approve stands — the human verifies the comparison.
   expect(await f.decide()).toEqual(approve)
   f.observation.report = null
-  expect((await f.decide()).kind).toBe('unknown')
+  expect(await f.assess()).toEqual({ kind: 'unknown', detail: 'No full-suite command is derivable from the test strategy' })
   f.observation.strategy = ''
   expect(await f.decide()).toEqual(approve)
   f.observation.strategy = 'run full suite'
   f.observation.report = { hostExitCode: 0 }
   expect(await f.decide()).toEqual(approve)
 })
-test('G063 distinguishes host-observed pass, failure, and unknown', async () => {
+test('G063 distinguishes no derivable command from an unreadable host receipt', async () => {
   const f = fixture()
   f.observation.report = { hostExitCode: 0 }
   expect(await f.decide()).toEqual(approve)
   f.observation.report = { hostExitCode: 1 }
   expect(await f.decide()).toMatchObject({ kind: 'fix', findings: [expect.stringContaining('FULL SUITE NOT PROVEN')] })
-  for (const report of [null, {}, { hostExitCode: 1.5 }]) {
+  f.observation.report = null
+  expect(await f.assess()).toEqual({ kind: 'unknown', detail: 'No full-suite command is derivable from the test strategy' })
+  for (const report of [{}, { hostExitCode: 1.5 }]) {
     f.observation.report = report
-    expect(await f.decide()).toMatchObject({ kind: 'unknown', detail: expect.stringContaining('Host-observed') })
+    expect(await f.assess()).toEqual({ kind: 'unknown', detail: 'Host-observed review suite exit code is missing or unreadable' })
   }
 })
 test('G065 evidence earns an advisory finding and never waives panel rejection', async () => {
