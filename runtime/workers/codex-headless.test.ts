@@ -38,6 +38,39 @@ function fixture(change: Partial<Record<'HEAD' | 'DIFF' | 'PR', string | null>> 
 }
 
 describe('Codex headless WorkerRunner', () => {
+  test('a resumed step keeps its own receipt instead of re-dispatching', async () => {
+    const f = fixture()
+    const runner = createCodexHeadlessRunner({ buildScript: f.script, probe: { ok: true } })
+    const request = f.request()
+    expect((await runner.run(request, 'headless', new AbortController().signal)).kind).toBe('completed')
+    const receipt = readFileSync(request.result.path, 'utf8')
+    // The gateway is replaced and the step re-entered. Its child is long gone, so a
+    // wrapper that exits 0 without writing is all a replay could produce. The receipt
+    // already written for THIS step is the answer, and must survive.
+    const silent = join(request.cwd, 'silent.sh')
+    writeFileSync(silent, '#!/bin/bash\nexit 0\n')
+    chmodSync(silent, 0o755)
+    const resumed = createCodexHeadlessRunner({ buildScript: silent, probe: { ok: true } })
+    expect((await resumed.run(request, 'headless', new AbortController().signal)).kind).toBe('completed')
+    expect(readFileSync(request.result.path, 'utf8')).toBe(receipt)
+  })
+
+  test('a first dispatch clears a slot left by an earlier round', async () => {
+    const f = fixture()
+    const request = f.request()
+    // `open/wiring/project-build.ts:366` keys the slot by ROLE, so round two of a role
+    // meets round one's trailer. An exit-0 child that writes nothing must not be
+    // credited with it.
+    writeFileSync(request.result.path, 'NEUTRON_CODEX_BUILD_HEAD=round-one-head\n')
+    const silent = join(request.cwd, 'silent.sh')
+    writeFileSync(silent, '#!/bin/bash\nexit 0\n')
+    chmodSync(silent, 0o755)
+    const runner = createCodexHeadlessRunner({ buildScript: silent, probe: { ok: true } })
+    const outcome = await runner.run(request, 'headless', new AbortController().signal)
+    expect(outcome.kind).toBe('unknown')
+    expect(outcome).toHaveProperty('detail', expect.stringContaining('without a readable trailer'))
+  })
+
   test('maps the wrapper claim and referenced diff rather than stdout', async () => {
     const f = fixture()
     const runner = createCodexHeadlessRunner({ buildScript: f.script, probe: { ok: true } })

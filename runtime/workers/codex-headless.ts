@@ -1,6 +1,7 @@
 import { spawn, spawnSync, type ChildProcess } from 'node:child_process'
-import { readFile } from 'node:fs/promises'
-import { resolve } from 'node:path'
+import { readFile, writeFile } from 'node:fs/promises'
+import { createHash } from 'node:crypto'
+import { dirname, join, resolve } from 'node:path'
 import type {
   BoundedWorkOutcome,
   Effort,
@@ -125,38 +126,57 @@ export function createCodexHeadlessRunner(options: CodexHeadlessRunnerOptions = 
       const refusal = unsupported(req.role, placement)
       if (refusal) return { kind: 'refused', reason: refusal.reason }
 
-      const effort = req.effort === null ? '' : CLI_EFFORTS[req.effort]
-      const env = scrubGithubEnv({
-        ...baseEnv,
-        CODEX_BUILD_MODEL: req.model_id,
-        CODEX_BUILD_EFFORT: effort,
-        CODEX_REVIEW_MODEL: req.model_id,
-        NEUTRON_CODEX_BUILD_BRIEF_FILE: req.brief.path,
-        NEUTRON_CODEX_BUILD_BRIEF_INTEGRITY: req.brief.integrity,
-        NEUTRON_CODEX_BUILD_TRAILER_FILE: req.result.path,
-        NEUTRON_CODEX_THREAD_ID: req.thread?.id ?? '',
-      })
-      // The wrapper reads this same path back after exit. A role's slot is reused
-      // across rounds, so an uncleared slot lets an exit-0 child that wrote nothing
-      // be credited with the PREVIOUS round's trailer.
-      const cleared = await clearTrailerSlot(req.result.path)
-      if (!cleared.ok) return { kind: 'unknown', detail: cleared.detail }
-      const child = spawn('/bin/bash', [buildScript], { cwd: req.cwd, env, stdio: 'ignore' })
-      live.set(req.step_id, child)
-      let timedOut = false
-      const timer = setTimeout(() => {
-        timedOut = true
-        child.kill('SIGTERM')
-      }, req.budget.wall_ms)
-      const settled = await waitFor(child, signal)
-      clearTimeout(timer)
-      live.delete(req.step_id)
-      if (settled.killed || signal.aborted) return { kind: 'failed', class: 'killed', detail: 'Codex worker was cancelled' }
-      if (timedOut) return { kind: 'failed', class: 'timeout', detail: 'Codex worker exceeded its wall-clock budget' }
-      if (settled.code !== 0) {
-        if (settled.code === 10 || settled.code === 11) return { kind: 'refused', reason: 'provider-not-connected' }
-        if (settled.code === 3) return { kind: 'refused', reason: 'cli-contract' }
-        return { kind: 'failed', class: 'infra', detail: `Codex wrapper exited ${settled.code ?? 'without status'}` }
+      // Same atomic reservation the in-repl runners use. It is what separates a
+      // FIRST dispatch of this step from a RESUME after a gateway replacement, and
+      // the slot may only be cleared on the first: on a resume the trailer sitting
+      // there is this step's own receipt, and the child that wrote it is long gone,
+      // so destroying it would replay work whose outcome was already known.
+      const key = createHash('sha256').update(JSON.stringify([req.run_id, req.step_id])).digest('hex')
+      const reservation = join(dirname(req.result.path), `codex-headless-step-${key}.json`)
+      const identity = JSON.stringify(req)
+      let dispatch = true
+      try {
+        await writeFile(reservation, identity, { flag: 'wx', mode: 0o600 })
+      } catch {
+        if (await readFile(reservation, 'utf8').catch(() => null) !== identity) {
+          return { kind: 'unknown', detail: 'Step is reserved for a different request.' }
+        }
+        dispatch = false
+      }
+      if (dispatch) {
+        const effort = req.effort === null ? '' : CLI_EFFORTS[req.effort]
+        const env = scrubGithubEnv({
+          ...baseEnv,
+          CODEX_BUILD_MODEL: req.model_id,
+          CODEX_BUILD_EFFORT: effort,
+          CODEX_REVIEW_MODEL: req.model_id,
+          NEUTRON_CODEX_BUILD_BRIEF_FILE: req.brief.path,
+          NEUTRON_CODEX_BUILD_BRIEF_INTEGRITY: req.brief.integrity,
+          NEUTRON_CODEX_BUILD_TRAILER_FILE: req.result.path,
+          NEUTRON_CODEX_THREAD_ID: req.thread?.id ?? '',
+        })
+        // The wrapper reads this same path back after exit. A role's slot is reused
+        // across rounds, so an uncleared slot lets an exit-0 child that wrote nothing
+        // be credited with the PREVIOUS round's trailer.
+        const slot = await clearTrailerSlot(req.result.path)
+        if (!slot.ok) return { kind: 'unknown', detail: slot.detail }
+        const child = spawn('/bin/bash', [buildScript], { cwd: req.cwd, env, stdio: 'ignore' })
+        live.set(req.step_id, child)
+        let timedOut = false
+        const timer = setTimeout(() => {
+          timedOut = true
+          child.kill('SIGTERM')
+        }, req.budget.wall_ms)
+        const settled = await waitFor(child, signal)
+        clearTimeout(timer)
+        live.delete(req.step_id)
+        if (settled.killed || signal.aborted) return { kind: 'failed', class: 'killed', detail: 'Codex worker was cancelled' }
+        if (timedOut) return { kind: 'failed', class: 'timeout', detail: 'Codex worker exceeded its wall-clock budget' }
+        if (settled.code !== 0) {
+          if (settled.code === 10 || settled.code === 11) return { kind: 'refused', reason: 'provider-not-connected' }
+          if (settled.code === 3) return { kind: 'refused', reason: 'cli-contract' }
+          return { kind: 'failed', class: 'infra', detail: `Codex wrapper exited ${settled.code ?? 'without status'}` }
+        }
       }
       let trailerText: string
       try {
