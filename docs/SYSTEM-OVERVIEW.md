@@ -6820,35 +6820,40 @@ lifecycle/manifest, and the Managed graph composer. See
 ## Foundational Trident — state machine + tick + git-mode + the loop (`trident/`)
 
 > **Operator note — "project driver outcome unknown" is usually NOT yours to fix.**
-> Two review rounds corrected an earlier version of this note that told operators to
-> intervene in states the service recovers by itself. What follows is only what is pinned
-> by a test.
+> Three review rounds falsified three successive versions of this note. What survives is
+> only what a test pins, and the omissions are deliberate.
 >
 > - **A measured unknown terminalizes on its own** — `trident/orchestrator.ts:2975-2982`
->   returns `waiting: false`, `changed: true`, `phase: failed`.
+>   returns `waiting: false`, `changed: true`, `phase: failed`. Pinned by
+>   `trident/project-launcher.test.ts:112-150`, which supplies the reservation-free shape
+>   and asserts the terminalization.
 > - **A prior-gateway reservation with a durable branch, checkpoint and checkpoint head is
 >   resumed automatically** — `trident/orchestrator.ts:2913-2957` claims it and re-fires,
 >   demonstrated at `trident/liveness-death-e2e.test.ts:224-253` (one new fire, resume data
 >   preserved). It gives up only when the crash-recovery budget is spent (`:2932`), and then
->   it terminalizes with the branch, head and PR named in the reason.
-> - **A pending row with no recovery transition is the one that sits** —
->   `trident/orchestrator.ts:2984-2985` keeps it `waiting: true`, and
->   `trident/project-launcher.test.ts:147-150` pins the consequence: *"nothing re-fires over
->   a pending row, so a run left waiting here can never be restarted either."*
+>   terminalizes naming the branch, head and PR.
+> - **A live same-gateway reservation waits on purpose** — `trident/orchestrator.ts:2984-2985`
+>   keeps `waiting: true` and retains the worker and result while the in-process promise is
+>   unresolved (`trident/project-launcher.test.ts:153-169`). That is an in-flight run, not a
+>   stuck one. Do not intervene.
 >
-> **Do not reach for a re-dispatch as a fix.** While the linked run is non-terminal it owns
-> the branch, and dispatch refuses with `branch_live` without creating a row
-> (`trident/board-dispatch.ts`, pinned at `trident/retry-resumes-checkpoint.test.ts:1826-1853`).
-> A re-dispatch is what you do *after* a run has terminalized, and it creates a NEW run row
+> **No wedged state is documented here, because none was demonstrated.** Earlier versions of
+> this note asserted one and cited fixtures that turn out to exercise the terminalizing
+> branch instead. If you find a genuinely unrecoverable row, add it here with the test that
+> reaches it.
+>
+> **Re-dispatch is not a repair.** While the linked run is non-terminal it owns the branch
+> and dispatch refuses with `branch_live` without creating a row
+> (`trident/retry-resumes-checkpoint.test.ts:1826-1853`). Re-dispatch after a run has
+> terminalized; it creates a NEW run row
 > (`docs/spec-items/a-retry-must-resume-from-the-checkpoint.md:10`) whose reservation
 > directory is keyed by run id (`open/wiring/project-build.ts:226`), so it starts clean.
 >
 > **Deleting reservation files does not help.** `trident/project-launcher.ts:116-117`
 > refuses a pending row *before* `options.prepare(...)` at `:123`, so the cleanup at
-> `open/wiring/project-build.ts:231` is never reached for that run. Earlier guidance to
-> delete the file named in the `unknown` detail is superseded on both halves: it addressed a
-> state where preparation is still reachable, and #1149 now clears unarmed reservations
-> there automatically.
+> `open/wiring/project-build.ts:231` is never reached. Earlier guidance to delete the file
+> named in the `unknown` detail is superseded; #1149 clears unarmed reservations where
+> preparation is reachable.
 
 
 The `trident/` module (package `@neutronai/trident`) is the durable runtime
