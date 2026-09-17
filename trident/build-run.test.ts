@@ -1260,6 +1260,43 @@ test('G056 missing or deferred CI cannot approve, including changes during the p
   }
 })
 
+test('G056 records an unverified worker APPROVE only in deferred CI detail', async () => {
+  const f = fixture(); let reads = 0
+  f.outcomes.set('run:review:1', f.completed({
+    ...f.snapshot,
+    payload: { verdict: 'APPROVE', findings: [] },
+  }))
+  f.deps.reviewCi = async () => ++reads === 2
+    ? { kind: 'unknown', detail: 'Review CI readiness deferred: Review PR mergeability is not established; budget exhausted' }
+    : { kind: 'known', findings: [] }
+
+  expect(await f.run()).toEqual({
+    kind: 'unknown',
+    phase: 'review',
+    step_id: 'run:review:1',
+    detail: 'Review CI readiness deferred: Review PR mergeability is not established; budget exhausted. Review worker reported APPROVE; host receipt not obtained.',
+  })
+  expect(f.events).not.toContain('merge')
+})
+
+test('G056 does not attribute a non-APPROVE worker trailer to deferred CI', async () => {
+  const f = fixture(); let reads = 0
+  f.outcomes.set('run:review:1', f.completed({
+    ...f.snapshot,
+    payload: { verdict: 'REQUEST_CHANGES', findings: [] },
+  }))
+  f.deps.reviewCi = async () => ++reads === 2
+    ? { kind: 'unknown', detail: 'Review CI readiness deferred: Review PR mergeability is not established; budget exhausted' }
+    : { kind: 'known', findings: [] }
+
+  expect(await f.run()).toEqual({
+    kind: 'unknown',
+    phase: 'review',
+    step_id: 'run:review:1',
+    detail: 'Review CI readiness deferred: Review PR mergeability is not established; budget exhausted',
+  })
+})
+
 test('G100 missing preservation stays unknown and resolved same claims continue', async () => {
   for (const resolution of ['missing', 'unknown', 'allow'] as const) {
     const f = fixture()
