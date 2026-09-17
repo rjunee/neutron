@@ -69,8 +69,10 @@ const clock: ReadinessClock = {
   }),
 }
 
+type SettledReviewReadiness = Exclude<ReviewReadiness, { kind: 'pending' }>
+
 /** G053/G054: host-owned elapsed budget; a hung observer cannot hold the host forever. */
-export async function awaitReviewReadiness(source: ReviewReadinessSource | undefined, snapshot: BuildSnapshot, signal: AbortSignal, time: ReadinessClock = clock): Promise<GateResult> {
+export async function awaitSettledReviewReadiness(source: ReviewReadinessSource | undefined, snapshot: BuildSnapshot, signal: AbortSignal, time: ReadinessClock = clock): Promise<SettledReviewReadiness> {
   if (!source) return { kind: 'unknown', detail: 'Review readiness observation source is missing' }
   const controller = new AbortController()
   const cancel = () => controller.abort()
@@ -78,25 +80,41 @@ export async function awaitReviewReadiness(source: ReviewReadinessSource | undef
   const deadline = time.now() + REVIEW_READINESS_BUDGET_MS
   // Wall-clock watchdog also bounds an observer or injected wait that never settles.
   let timer: ReturnType<typeof setTimeout> | undefined
-  const timeout = new Promise<GateResult>(resolve => {
-    timer = setTimeout(() => { controller.abort(); resolve({ kind: 'unknown', detail: 'Review readiness budget exhausted' }) }, REVIEW_READINESS_BUDGET_MS)
+  // WHICHEVER RESOLVER WINS MUST CARRY THE LAST PENDING CONDITION. The watchdog
+  // aborts before it resolves, so the abort listener below wins the race and its
+  // string is what production records. Reporting a generic "budget exhausted"
+  // there loses the one fact the record needs: WHAT was unsettled — mergeability,
+  // an incomplete list, a still-running required check, or no check at all.
+  let lastPending = 'Review checks have not settled'
+  const deferred = (why: string): SettledReviewReadiness =>
+    ({ kind: 'unknown', detail: `Review readiness deferred: ${lastPending}; ${why}` })
+  const timeout = new Promise<SettledReviewReadiness>(resolve => {
+    timer = setTimeout(() => { controller.abort(); resolve(deferred('budget exhausted')) }, REVIEW_READINESS_BUDGET_MS)
   })
-  const cancelled = new Promise<GateResult>(resolve => {
-    controller.signal.addEventListener('abort', () => resolve({ kind: 'unknown', detail: 'Review readiness cancelled or budget exhausted' }), { once: true })
+  const cancelled = new Promise<SettledReviewReadiness>(resolve => {
+    controller.signal.addEventListener('abort', () => resolve(deferred('cancelled or budget exhausted')), { once: true })
   })
   try {
     if (signal.aborted) controller.abort()
-    return await Promise.race([timeout, cancelled, (async (): Promise<GateResult> => {
-      let detail = 'Review checks have not settled'
+    return await Promise.race([timeout, cancelled, (async (): Promise<SettledReviewReadiness> => {
       while (!controller.signal.aborted && time.now() < deadline) {
         const readiness = classifyReviewReadiness(snapshot, await source.observe(snapshot, controller.signal))
+        // RECORD THE CONDITION BEFORE CONSULTING THE CLOCK. A pending observation
+        // that lands exactly at the deadline still tells us WHAT was unsettled, and
+        // that is the fact the run record needs; assigning after the deadline check
+        // silently dropped it.
+        //
+        // The late-observation rejection below is deliberate and stays: an
+        // acquisition that consumed the whole budget may describe a world that has
+        // since moved, so its verdict is not accepted (pinned by `readiness cannot
+        // outlive cancellation or accept late and wrong-head observations`). Only
+        // the DETAIL is salvaged from it, never the verdict.
+        if (readiness.kind === 'pending') lastPending = readiness.detail
         if (time.now() >= deadline) break
-        if (readiness.kind === 'passed' || readiness.kind === 'failed') return { kind: 'allow' }
-        if (readiness.kind === 'unknown' || readiness.kind === 'blocked') return readiness
-        detail = readiness.detail
+        if (readiness.kind !== 'pending') return readiness
         await time.wait(Math.min(REVIEW_READINESS_RETRY_MS, deadline - time.now()), controller.signal)
       }
-      return { kind: 'unknown', detail: `Review readiness deferred: ${detail}; budget exhausted or cancelled` }
+      return deferred('budget exhausted or cancelled')
     })()])
   } catch (error) {
     return { kind: 'unknown', detail: `Review readiness observation failed: ${error instanceof Error ? error.message : String(error)}` }
@@ -105,4 +123,9 @@ export async function awaitReviewReadiness(source: ReviewReadinessSource | undef
     controller.abort()
     signal.removeEventListener('abort', cancel)
   }
+}
+
+export async function awaitReviewReadiness(source: ReviewReadinessSource | undefined, snapshot: BuildSnapshot, signal: AbortSignal, time: ReadinessClock = clock): Promise<GateResult> {
+  const readiness = await awaitSettledReviewReadiness(source, snapshot, signal, time)
+  return readiness.kind === 'passed' || readiness.kind === 'failed' ? { kind: 'allow' } : readiness
 }

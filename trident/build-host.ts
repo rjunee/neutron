@@ -206,9 +206,9 @@ export function createBuildHost(options: BuildHostOptions): { deps: BuildRunDeps
     //
     // Local-awareness belongs here, beside `reviewReadiness` below, not in the driver:
     // the host already owns what each gate means per merge mode.
-    reviewCi: (snapshot, mergeMode) => mergeMode === 'local'
+    reviewCi: (snapshot, mergeMode, signal) => mergeMode === 'local'
       ? Promise.resolve({ kind: 'known', findings: [] })
-      : assessReviewCi(options.reviewCi, snapshot, options.leak.base_sha, options.mutation.run.id),
+      : assessReviewCi(options.reviewCi, snapshot, options.leak.base_sha, options.mutation.run.id, signal),
     reviewSuite: (snapshot, round) => assessReviewSuite(options.reviewSuite, snapshot, round, options.mutation.run.id),
     reviewGate: (payload, snapshot, round, replansUsed, recordProgress) => reviewPanel(options.review, payload, snapshot, round, options.mutation.run.id, replansUsed, { provider: options.workers.build.provider, modelId: options.workers.build.request.model_id }, recordProgress),
     async publishGate(snapshot, mergeMode) {

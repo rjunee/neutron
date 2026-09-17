@@ -1,5 +1,5 @@
 import { expect, spyOn, test } from 'bun:test'
-import { awaitReviewReadiness, classifyReviewReadiness, type ReviewReadinessObservation, type ReadinessClock } from './review-readiness.ts'
+import { awaitSettledReviewReadiness, awaitReviewReadiness, classifyReviewReadiness, type ReviewReadinessObservation, type ReadinessClock } from './review-readiness.ts'
 
 const snapshot = { head: 'a'.repeat(40), diff: '+code', pr: null }
 type Known = Extract<ReviewReadinessObservation, { kind: 'known' }>
@@ -63,6 +63,48 @@ test('readiness cannot outlive cancellation or accept late and wrong-head observ
   expect(await pending).toMatchObject({ kind: 'unknown' })
 })
 
+
+test('G053 a pending observation landing AT the deadline still names its condition', async () => {
+  // The acquisition itself consumes the budget. Its verdict is correctly rejected as
+  // late, but the condition it reported is still the fact the run record needs.
+  // Assigning it after the deadline check dropped it — the third path by which this
+  // detail escaped, which is why it is now recorded before any clock is consulted.
+  const c = clock()
+  const settled = await awaitSettledReviewReadiness(
+    { observe: async () => { c.advance(900000); return { kind: 'known' as const, head: snapshot.head,
+      checksComplete: true, configuration: { kind: 'resolved' as const, required: [] },
+      mergeability: 'pending' as const, checks: [] } } },
+    snapshot, new AbortController().signal, c.time)
+  expect(settled.kind).toBe('unknown')
+  expect(settled).toHaveProperty('detail', expect.stringContaining('mergeability is not established'))
+})
+
+test('G053 watchdog reports WHICH condition was unsettled, not just that it expired', async () => {
+  // The watchdog aborts before it resolves, so the abort listener wins the race and
+  // its string is what production records. A generic "budget exhausted" there loses
+  // the one fact the run record needs: what was actually unsettled. #1137 exists
+  // because that detail was discarded; losing it again in the real path would be the
+  // same defect wearing the fix's clothes.
+  const original = globalThis.setTimeout
+  let expire: (() => void) | undefined
+  const timer = spyOn(globalThis, 'setTimeout').mockImplementation(((callback: () => void, ms: number) => {
+    if (ms === 900000) expire = callback
+    return original(callback, ms)
+  }) as typeof setTimeout)
+  try {
+    // Always pending on mergeability — the condition the record must name.
+    const result = awaitSettledReviewReadiness(
+      { observe: async () => ({ kind: 'known', head: snapshot.head, checksComplete: true,
+        configuration: { kind: 'resolved', required: [] }, mergeability: 'pending', checks: [] }) },
+      snapshot, new AbortController().signal)
+    await new Promise(r => original(r, 5))
+    expect(expire).toBeDefined()
+    expire!()
+    const settled = await result
+    expect(settled.kind).toBe('unknown')
+    expect(settled).toHaveProperty('detail', expect.stringContaining('mergeability is not established'))
+  } finally { timer.mockRestore() }
+})
 
 test('G053 watchdog defers even when the observation never settles', async () => {
   const original = globalThis.setTimeout

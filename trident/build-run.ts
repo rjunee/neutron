@@ -1,4 +1,4 @@
-import { applyReviewCi } from './gates/review-ci.ts'
+import { applyReviewCi, type ReviewCiAssessment } from './gates/review-ci.ts'
 import { builderBranch, confirmedMerged, fixLanded } from './gates/build-transition.ts'
 import { createLogger } from '@neutronai/logger'
 // `blocked()` takes a STRING, so this uses the runtime helper rather than the gate
@@ -119,7 +119,7 @@ export interface BuildRunDeps {
   reviewReadiness?(snapshot: BuildSnapshot, signal: AbortSignal, mergeMode?: 'pr' | 'local'): Promise<GateResult>
   /** Local runs never publish a branch, so the host decides what CI evidence
    *  means for them, exactly as it does for `reviewReadiness`/`publishGate`. */
-  reviewCi?(snapshot: BuildSnapshot, mergeMode?: 'pr' | 'local'): Promise<SuiteAssessment>
+  reviewCi?(snapshot: BuildSnapshot, mergeMode?: 'pr' | 'local', signal?: AbortSignal): Promise<ReviewCiAssessment>
   reviewSuite?(snapshot: BuildSnapshot, round: number): Promise<SuiteAssessment>
   // reviewGate owns panel provenance and severity, and records evidence before filtering.
   reviewGate(payload: unknown, snapshot: BuildSnapshot, round: number, replansUsed?: number, recordProgress?: (value: ReviewProgress) => void): Promise<ReviewDecision>
@@ -535,8 +535,9 @@ export async function buildRun(input: BuildRunInput, deps: BuildRunDeps, signal:
       const suite = await deps.reviewSuite(snapshot, round)
       if (suite.kind === 'unknown') return unknown(suite.detail)
       if (!deps.reviewCi) return unknown('Review CI host is missing')
-      const ciBefore = await deps.reviewCi(snapshot, input.merge_mode)
+      const ciBefore = await deps.reviewCi(snapshot, input.merge_mode, signal)
       if (ciBefore.kind === 'unknown') return unknown(ciBefore.detail)
+      if (ciBefore.kind === 'blocked') return blocked(ciBefore.on)
       findings = [...findings, ...ciBefore.findings.map(f => `${f.title}: ${f.evidence}`)]
       findings = [...findings, ...suite.findings.map(f => `${f.title}: ${f.evidence}`)]
       const readyRevision = await deps.measure()
@@ -544,8 +545,9 @@ export async function buildRun(input: BuildRunInput, deps: BuildRunDeps, signal:
       if (!corroborates(snapshot, readyRevision.value)) return blocked('Revision changed during review readiness')
       const result = await work('review', round)
       if ('stop' in result) return result.stop
-      const ci = await deps.reviewCi(snapshot, input.merge_mode)
+      const ci = await deps.reviewCi(snapshot, input.merge_mode, signal)
       if (ci.kind === 'unknown') return unknown(ci.detail)
+      if (ci.kind === 'blocked') return blocked(ci.on)
       let currentReview: ReviewProgress | undefined
       const panel = await deps.reviewGate(result.payload, snapshot, round, replansUsed, value => {
         currentReview = { findings: [...value.findings], blockingCount: value.blockingCount }
