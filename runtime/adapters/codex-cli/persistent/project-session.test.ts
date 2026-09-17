@@ -8,7 +8,10 @@ import type {
   PtyChild,
   PtySpawnOpts,
 } from '../../claude-code/persistent/pty-host.ts'
-import { CodexProjectSessionHost } from './project-session.ts'
+import { BunTerminalHost } from '../../claude-code/persistent/bun-terminal-host.ts'
+import { HerdrHost } from '../../claude-code/persistent/herdr-host.ts'
+import { FakeHerdrServer } from '../../claude-code/persistent/__tests__/herdr-fake-server.ts'
+import { CodexProjectSession, CodexProjectSessionHost } from './project-session.ts'
 
 const dirs: string[] = []
 afterEach(() => {
@@ -273,14 +276,12 @@ describe('CodexProjectSessionHost', () => {
     await Bun.sleep(0)
     const b = session.submitLine('second')
     await Bun.sleep(0)
-    // Framed as a bracketed paste (#978) — the serialization claim is about
-    // ORDER and one-at-a-time, not about the wire format, but the format is
-    // what reaches the pane and so is what this must assert.
-    expect(f.host.submissions).toEqual(['\x1b[200~first\x1b[201~'])
+    // The host receives plain text; its terminal boundary owns paste framing.
+    expect(f.host.submissions).toEqual(['first'])
     expect(f.host.maxActive).toBe(1)
     first.resolve()
     await Promise.all([a, b])
-    expect(f.host.submissions).toEqual(['\x1b[200~first\x1b[201~', '\x1b[200~second\x1b[201~'])
+    expect(f.host.submissions).toEqual(['first', 'second'])
     expect(f.host.maxActive).toBe(1)
   })
 
@@ -300,7 +301,7 @@ describe('CodexProjectSessionHost', () => {
 
     expect(session.screenPrompt()).toEqual({ kind: 'approval', allowKey: '1', denyKey: '3' })
     await session.answerApproval(decision)
-    expect(f.host.submissions).toEqual([`\x1b[200~${key}\x1b[201~`])
+    expect(f.host.submissions).toEqual([key])
   })
 
   test('refuses an approval replaced by trust while its answer waits in the queue', async () => {
@@ -318,7 +319,7 @@ describe('CodexProjectSessionHost', () => {
     held.resolve()
     await dispatch
     expect(await result).toContain('prompt changed')
-    expect(f.host.submissions).toEqual(['\x1b[200~dispatch\x1b[201~'])
+    expect(f.host.submissions).toEqual(['dispatch'])
     await session.submitLine('after refusal')
     expect(f.host.submissions).toHaveLength(2)
   })
@@ -405,16 +406,51 @@ describe('CodexProjectSessionHost', () => {
   })
 })
 
-// #978. herdr delivers a submitted line to the Codex TUI as ordinary keystrokes,
-// so a multi-line or escape-bearing payload could be interpreted as editor input
-// rather than submitted text. Framing it as a completed bracketed paste makes the
-// TUI take the whole payload as one literal insertion before Enter.
+// #978. Exercise session-to-host composition: a fake child alone cannot detect
+// duplicated paste framing at the actual terminal boundary.
 describe('Codex TUI regression controls', () => {
-  test('submits a completed bracketed paste before the host sends Enter', async () => {
+  test('passes plain text to the host that owns framing and Enter', async () => {
     const f = await fixture()
     const session = await f.sessionHost.open(f.open)
     await session.submitLine('hello')
-    expect(f.host.submissions).toEqual(['\x1b[200~hello\x1b[201~'])
+    expect(f.host.submissions).toEqual(['hello'])
+  })
+
+  test.each(['bun', 'herdr'] as const)('frames exactly once through the %s host', async (backend) => {
+    const writes: string[] = []
+    const exit = Promise.withResolvers<number>()
+    const server = new FakeHerdrServer()
+    const host = backend === 'herdr'
+      ? new HerdrHost({ connect: async () => server, workspaceId: 'w9', pollIntervalMs: 10_000 })
+      : new BunTerminalHost({
+        createTerminal: () => ({
+          write(data) {
+            const bytes = typeof data === 'string' ? new TextEncoder().encode(data)
+              : new Uint8Array(data.buffer, data.byteOffset, data.byteLength)
+            writes.push(new TextDecoder().decode(bytes))
+            return bytes.byteLength
+          },
+          resize: () => undefined,
+          close: () => undefined,
+        }),
+        spawn: () => ({ pid: 77, exited: exit.promise, exitCode: null, kill: () => exit.resolve(0) }),
+      })
+    const child = await host.spawn(['codex'], { cwd: '/tmp', env: {} })
+    child.beginOutput?.()
+    const session = new CodexProjectSession('project-a', 'pane', 'started', child)
+    try {
+      await session.submitLine('hello')
+      if (backend === 'herdr') {
+        expect(server.callsTo('pane.send_text').map(call => call.params['text']))
+          .toEqual(['\x1b[200~hello\x1b[201~'])
+        expect(server.callsTo('pane.send_keys').map(call => call.params['keys'])).toEqual([['enter']])
+      } else {
+        expect(writes.join('')).toBe('\x1b[200~hello\x1b[201~\r')
+      }
+    } finally {
+      child.kill()
+      child.detach?.()
+    }
   })
 
   test('refuses an escape that could end the paste early', async () => {
