@@ -259,14 +259,17 @@ export class CodexProjectSessionHost {
       child.kill()
       throw new Error('codex project session refused: host returned no restart-survival handle')
     }
-    registry.sessions[options.projectId] = {
+    // Another project can finish opening while spawn/attach is awaited. Merge
+    // into the latest registry, with no await between this read and the write.
+    const latestRegistry = readRegistry(this.options.registryPath)
+    latestRegistry.sessions[options.projectId] = {
       project_id: options.projectId,
       cwd: options.cwd,
       pane_handle: paneHandle,
       argv,
       identity,
     }
-    writeRegistry(this.options.registryPath, registry)
+    writeRegistry(this.options.registryPath, latestRegistry)
     child.beginOutput?.()
     return new CodexProjectSession(options.projectId, paneHandle, recovery, child, () => screenPrompt)
   }

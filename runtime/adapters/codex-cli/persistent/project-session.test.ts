@@ -144,6 +144,44 @@ describe('CodexProjectSessionHost', () => {
     expect(f.host.spawned).toHaveLength(1)
   })
 
+  test('concurrent project opens preserve both restart handles when the first spawn finishes last', async () => {
+    const f = fixture()
+    const entered = deferred()
+    const finish = deferred()
+    const spawn = f.host.spawn.bind(f.host)
+    f.host.spawn = async (argv, options) => {
+      const child = await spawn(argv, options)
+      if (options.label === 'neutron-codex-project-a') {
+        entered.resolve()
+        await finish.promise
+        return { ...child, paneHandle: 'pane-a' }
+      }
+      return { ...child, paneHandle: 'pane-b' }
+    }
+    const first = f.sessionHost.open(f.open)
+    await entered.promise
+    try {
+      const second = await f.sessionHost.open({ ...f.open, projectId: 'project-b' })
+      expect(second.paneHandle).toBe('pane-b')
+    } finally {
+      finish.resolve()
+    }
+    expect((await first).paneHandle).toBe('pane-a')
+    const records = JSON.parse(readFileSync(f.registryPath, 'utf8')).sessions
+    expect(Object.keys(records).sort()).toEqual(['project-a', 'project-b'])
+    expect(records['project-a'].pane_handle).toBe('pane-a')
+    expect(records['project-b'].pane_handle).toBe('pane-b')
+
+    const nextHost = new FakeHost()
+    nextHost.inspection = { kind: 'live', argv: [f.node, f.script, '--enable', 'multi_agent_v2'] }
+    const restarted = new CodexProjectSessionHost({ registryPath: f.registryPath, host: nextHost })
+    for (const projectId of ['project-a', 'project-b']) {
+      expect((await restarted.open({ ...f.open, projectId })).recovery).toBe('adopted')
+    }
+    expect(nextHost.attached).toEqual(['pane-a', 'pane-b'])
+    expect(nextHost.spawned).toEqual([])
+  })
+
   test('refuses concurrent opens that bind one project to different directories', async () => {
     const f = fixture()
     const first = f.sessionHost.open(f.open)
