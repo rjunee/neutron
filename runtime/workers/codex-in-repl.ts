@@ -1,6 +1,7 @@
-import { readFile, writeFile } from 'node:fs/promises'
+import { readFile } from 'node:fs/promises'
 import { createHash } from 'node:crypto'
 import { join } from 'node:path'
+import { reserveTrailerSlot } from './trailer-slot.ts'
 import { setTimeout as delay } from 'node:timers/promises'
 import type { AgentSpec } from '../substrate.ts'
 import type { BoundedWorkOutcome, BoundedWorkRequest, WorkerRunner } from '../bounded-work.ts'
@@ -41,16 +42,12 @@ export function codexInReplRunner(options: CodexInReplOptions): WorkerRunner {
         const key = createHash('sha256').update(JSON.stringify([req.run_id, req.step_id])).digest('hex')
         const reservation = join(options.state_dir, `codex-step-${key}.json`)
         const identity = JSON.stringify(req)
-        let dispatch = true
-        try {
-          await writeFile(reservation, identity, { flag: 'wx' })
-        } catch {
-          if (await readFile(reservation, 'utf8') !== identity) {
-            return unseen('Step is reserved for a different request.')
-          }
-          dispatch = false
-        }
-        if (dispatch) {
+        // Ownership and the slot clear are one operation: see `reserveTrailerSlot`.
+        // Reserving and clearing in either order leaves a restart window that either
+        // reads the previous round's trailer or destroys this step's own receipt.
+        const held = await reserveTrailerSlot(reservation, identity, req.result.path)
+        if (held.kind === 'unknown') return unseen(held.detail)
+        if (held.kind === 'dispatch') {
           if (signal.aborted || Date.now() >= deadline) return unseen('Cancelled or out of time before dispatch.')
           const args = {
             task_name: `bounded_${key}`,
