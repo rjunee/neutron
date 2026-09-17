@@ -38,6 +38,7 @@ export async function assessReviewSuite(source: ReviewSuiteSource | undefined, s
     if (typeof value.strategy !== 'string' || !['full-suite', 'subset'].includes(value.scope)) return unknown('Review suite strategy or dispatched scope is unreadable')
     if (value.strategy === '') return known()
     const report = value.report
+    if (value.scope === 'subset' && report?.suiteOutcome === 'deferred' && report.hostExitCode === undefined) return known()
     if (!report || typeof report.hostExitCode !== 'number' || !Number.isInteger(report.hostExitCode)) return unknown('Host-observed review suite exit code is missing or unreadable')
     if ((report.suiteOutcome !== undefined && typeof report.suiteOutcome !== 'string') || (report.suiteEvidence !== undefined && typeof report.suiteEvidence !== 'string')) return unknown('Review suite report is malformed')
     if (report.hostExitCode === 0) return known()

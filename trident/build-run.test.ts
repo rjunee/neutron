@@ -64,6 +64,7 @@ function fixture(landFixes = true) {
     reviewReadiness: async () => ({ kind: 'allow' }),
     reviewCi: async () => ({ kind: 'known', findings: [] }),
     reviewSuite: async () => ({ kind: 'known', findings: [] }),
+    publicationSuite: async () => { events.push('publicationSuite'); return { kind: 'known', findings: [] } },
     reviewGate: async (_payload, _snapshot, _round, _used, record) => {
       const decision = decisions.shift() ?? { kind: 'approve' as const }
       record?.('findings' in decision ? { findings: decision.findings, blockingCount: decision.blockingCount ?? decision.findings.length } : { findings: [], blockingCount: 0 })
@@ -89,9 +90,24 @@ test('fresh to merged with a fix, host gates and fake runners', async () => {
   expect((await f.run()).kind).toBe('merged')
   expect(f.runner.calls.map(c => c.role)).toEqual(['plan', 'build', 'fix'])
   expect(f.cross.calls.map(c => c.step_id)).toEqual(['run:review:1', 'run:review:2'])
-  expect(f.events.filter(e => e !== 'measure')).toEqual(['publishGate', 'publish', 'publishGate', 'publish', 'mergeGate', 'merge'])
+  expect(f.events.filter(e => e !== 'measure')).toEqual(['publishGate', 'publish', 'publishGate', 'publish', 'publicationSuite', 'mergeGate', 'merge'])
   expect(f.reads()).toBe(17)
   expect([...f.runner.calls, ...f.cross.calls].every(c => c.needs_approval_decision === false)).toBe(true)
+})
+
+test('terminal publication cannot proceed when the full-suite gate is missing or red', async () => {
+  for (const state of ['missing', 'red'] as const) {
+    const f = fixture()
+    if (state === 'missing') delete f.deps.publicationSuite
+    else f.deps.publicationSuite = async () => ({ kind: 'known', findings: [
+      { title: 'FULL SUITE NOT PROVEN', evidence: 'terminal run failed', advisory: false },
+    ] })
+    expect(await f.run()).toMatchObject(state === 'missing'
+      ? { kind: 'unknown', phase: 'publish', detail: 'Publication suite host is missing' }
+      : { kind: 'blocked', phase: 'publish', on: expect.stringContaining('FULL SUITE NOT PROVEN') })
+    expect(f.events.filter(event => event === 'publish')).toHaveLength(1)
+    expect(f.events).not.toContain('merge')
+  }
 })
 
 test('production build loop records cumulative usage at every completed phase boundary', async () => {
@@ -684,7 +700,7 @@ function localFixture() {
 test('local mode reaches merged with no PR and no publication effect', async () => {
   const f = localFixture()
   expect(await f.run()).toMatchObject({ kind: 'merged', snapshot: { pr: null } })
-  expect(f.events.filter(e => e !== 'measure')).toEqual(['publishGate', 'mergeGate', 'local-merge'])
+  expect(f.events.filter(e => e !== 'measure')).toEqual(['publicationSuite', 'publishGate', 'mergeGate', 'local-merge'])
 })
 
 test('local mode requires independent merge confirmation', async () => {

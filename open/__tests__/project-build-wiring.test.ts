@@ -130,6 +130,32 @@ test('option sources preserve pin, selected provider, workflow and unavailable s
   expect(f.captured().trailer.metadata({} as BoundedWorkRequest)).toBeUndefined()
 })
 
+test('intermediate reviews defer the full suite and terminal publication runs it once', async () => {
+  const f = await fixture()
+  f.input.test_strategy = 'TEST EXECUTION\n\nFull suite (stage 2), run exactly this:\n\n  bun test\n'
+  f.input.test_strategy_intermediate = 'TEST EXECUTION\n\nSTAGE 2 — DEFERRED (do NOT run the full suite this iteration).'
+  const options = await f.prepare()
+  const head = 'a'.repeat(40)
+  const payload = {
+    mutationClaim: { file: 'guard.ts', find: 'before', replace: 'after', guard: ['bun', 'test'], control: ['bun', 'test'] },
+    worktreePath: options.production.worktree, branch: 'change', commitSha: head,
+    prNumber: null, diffFile: 'diff', testsPassed: false, suiteOutcome: 'deferred',
+  }
+  await writeFile(options.workers.build.request.result.path, JSON.stringify({ result: { head, payload } }))
+  const before = f.commands.length
+  expect(options.policy.reviewSuite?.scope).toBe('subset')
+  expect((await options.policy.reviewSuite!.readCheckpoint({ head, diff: '+one', pr: null }, 1))?.report)
+    .toEqual({ suiteOutcome: 'deferred' })
+  expect(f.commands.slice(before).filter(argv => argv[0] === 'bash')).toHaveLength(0)
+
+  expect(options.policy.publicationSuite?.scope).toBe('full-suite')
+  expect((await options.policy.publicationSuite!.readCheckpoint({ head, diff: '+one', pr: null }, -1))?.report)
+    .toEqual({ hostExitCode: 0 })
+  const suites = f.commands.slice(before).filter(argv => argv[0] === 'bash')
+  expect(suites).toHaveLength(1)
+  expect(suites[0]![2]).toContain('\nbun test\n')
+})
+
 test('publication describes the completed change and retains the card as supporting context', async () => {
   const f = await fixture()
   f.input.run.task = '# DISPATCH THIS THROUGH TRIDENT\n\nCall the build tool; do not build inline.'

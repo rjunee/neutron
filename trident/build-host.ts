@@ -44,6 +44,7 @@ export interface BuildHostOptions {
   reviewReadiness?: ReviewReadinessSource
   reviewCi?: ReviewCiSource
   reviewSuite?: ReviewSuiteSource
+  publicationSuite?: ReviewSuiteSource
   review?: ReviewSource
   observeCi(snapshot: BuildSnapshot): Promise<CiRunObservation>
 }
@@ -210,6 +211,7 @@ export function createBuildHost(options: BuildHostOptions): { deps: BuildRunDeps
       ? Promise.resolve({ kind: 'known', findings: [] })
       : assessReviewCi(options.reviewCi, snapshot, options.leak.base_sha, options.mutation.run.id, signal),
     reviewSuite: (snapshot, round) => assessReviewSuite(options.reviewSuite, snapshot, round, options.mutation.run.id),
+    publicationSuite: snapshot => assessReviewSuite(options.publicationSuite, snapshot, -1, options.mutation.run.id),
     reviewGate: (payload, snapshot, round, replansUsed, recordProgress) => reviewPanel(options.review, payload, snapshot, round, options.mutation.run.id, replansUsed, { provider: options.workers.build.provider, modelId: options.workers.build.request.model_id }, recordProgress),
     async publishGate(snapshot, mergeMode) {
       const claim = await options.mutation.readClaim(snapshot)

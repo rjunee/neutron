@@ -121,6 +121,8 @@ export interface BuildRunDeps {
    *  means for them, exactly as it does for `reviewReadiness`/`publishGate`. */
   reviewCi?(snapshot: BuildSnapshot, mergeMode?: 'pr' | 'local', signal?: AbortSignal): Promise<ReviewCiAssessment>
   reviewSuite?(snapshot: BuildSnapshot, round: number): Promise<SuiteAssessment>
+  /** Terminal full-suite evidence, measured before final publication/merge progression. */
+  publicationSuite?(snapshot: BuildSnapshot): Promise<SuiteAssessment>
   // reviewGate owns panel provenance and severity, and records evidence before filtering.
   reviewGate(payload: unknown, snapshot: BuildSnapshot, round: number, replansUsed?: number, recordProgress?: (value: ReviewProgress) => void): Promise<ReviewDecision>
   // publishGate owns mutation proof and publication readiness; mergeGate owns CI,
@@ -606,6 +608,14 @@ export async function buildRun(input: BuildRunInput, deps: BuildRunDeps, signal:
       const fix = await work('fix', round)
       if ('stop' in fix) return fix.stop
     }
+
+    phase = 'publish'
+    step_id = null
+    if (!deps.publicationSuite) return unknown('Publication suite host is missing')
+    const publicationSuite = await deps.publicationSuite(snapshot)
+    if (publicationSuite.kind === 'unknown') return unknown(publicationSuite.detail)
+    const suiteBlockers = publicationSuite.findings.filter(f => !f.advisory)
+    if (suiteBlockers.length > 0) return blocked(suiteBlockers.map(f => `${f.title}: ${f.evidence}`).join('\n'))
 
     if (local || approved) {
       const stop = await publishCandidate()

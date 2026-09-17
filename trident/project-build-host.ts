@@ -34,6 +34,7 @@ export interface ProjectBuildHostOptions {
   phaseUsage: BuildHostOptions['phaseUsage']
   policy: Pick<BuildHostOptions, 'boundReview'> & {
     reviewSuite?: ProjectSuiteOptions
+    publicationSuite?: ProjectSuiteOptions
     review?: Omit<ProjectReviewSourceOptions, 'runId' | 'projectSlug' | 'cwd' | 'replProvider'>
     leak: Pick<BuildHostOptions['leak'], 'scratch_dir' | 'gate_script'>
     mutation: Omit<BuildHostOptions['mutation'], 'run' | 'run_host' | 'base_branch'>
@@ -80,9 +81,11 @@ export async function createProjectBuildHost(options: ProjectBuildHostOptions) {
   const ci = config.ciSource ?? productionCiSource(config.runHost, config.repo)
   const production = createProductionHostEffects({ ...config, ciSource: ci })
   const runners = projectBuildRunners(options.substrate, Object.values(workers).map(worker => worker.provider))
-  const { review, reviewSuite, ...policy } = options.policy
+  const { review, reviewSuite, publicationSuite, ...policy } = options.policy
   const observations = createProjectObservationSources({ ci, baseBranch: config.baseBranch,
     ciWorkflow: config.ciWorkflow, runId: run.id, suite: reviewSuite })
+  const publicationObservations = createProjectObservationSources({ ci, baseBranch: config.baseBranch,
+    ciWorkflow: config.ciWorkflow, runId: run.id, suite: publicationSuite })
   const host = createBuildHost({
     ...policy,
     ...(review ? { review: createProjectReviewSource({ ...review,
@@ -99,6 +102,7 @@ export async function createProjectBuildHost(options: ProjectBuildHostOptions) {
     reviewReadiness: observations.reviewReadiness,
     reviewCi: observations.reviewCi,
     reviewSuite: observations.reviewSuite,
+    publicationSuite: publicationObservations.reviewSuite,
     local: { baseBranch: options.production.baseBranch, worktree: options.production.worktree },
   })
   return {
