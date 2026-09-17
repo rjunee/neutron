@@ -49,21 +49,25 @@ const ARMED = '\n#dispatch-armed\n'
  *   was then replaced — has its own completed receipt destroyed, and the step is replayed
  *   with its outcome already lost.
  *
- * So the clear is made part of taking ownership. A reservation is ARMED only after the
- * slot has been cleared and immediately before the work is submitted. An unarmed
- * reservation therefore proves no dispatch was ever submitted for this step, which makes
- * both clearing the slot and submitting the work safe; that is not an uncertain dispatch
- * being replayed, it is one that provably never happened. An armed reservation means the
- * slot was already cleared for this step, so anything in it now belongs to this step. */
+ * So the clear is made part of taking ownership. The exclusive `wx` create is the only
+ * thing that confers it: exactly one caller can create the reservation, and only that
+ * caller clears the slot, arms the reservation and dispatches. Arming happens after the
+ * clear and immediately before the work is submitted, so an ARMED reservation proves the
+ * slot was already cleared for this step and anything in it now belongs to this step.
+ *
+ * A reservation that exists but is UNARMED is NOT taken over. A second caller cannot tell
+ * "the owner died between creating and arming" from "the owner is a few milliseconds from
+ * arming", and taking over on that guess dispatches the bounded task twice against one
+ * shared trailer. It is reported as unknown instead, which is what it is, and matches the
+ * standing contract that an uncertain dispatch is never replayed — the host reconciles the
+ * original step. Crucially the stale slot is still never read as this step's answer. */
 export async function reserveTrailerSlot(
   reservation: string,
   identity: string,
   resultPath: string,
 ): Promise<SlotReservation> {
-  let held: string
   try {
     await writeFile(reservation, identity, { flag: 'wx', mode: 0o600 })
-    held = identity
   } catch {
     let existing: string
     try {
@@ -72,12 +76,12 @@ export async function reserveTrailerSlot(
       const code = (error as NodeJS.ErrnoException).code
       return { kind: 'unknown', detail: `Step reservation ${reservation} could not be created or read (${code ?? String(error)}); whether this step was already dispatched is unknown.` }
     }
-    if (existing !== identity && existing !== identity + ARMED) {
-      return { kind: 'unknown', detail: 'Step is reserved for a different request.' }
+    if (existing === identity + ARMED) return { kind: 'resume' }
+    if (existing === identity) {
+      return { kind: 'unknown', detail: `Step ${reservation} is held by another instance that has not yet dispatched it; its dispatch state is unknown and it is not replayed here.` }
     }
-    held = existing
+    return { kind: 'unknown', detail: 'Step is reserved for a different request.' }
   }
-  if (held === identity + ARMED) return { kind: 'resume' }
   const cleared = await clearTrailerSlot(resultPath)
   if (!cleared.ok) return { kind: 'unknown', detail: cleared.detail }
   try {

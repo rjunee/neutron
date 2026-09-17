@@ -332,21 +332,16 @@ test('a resumed step keeps the trailer already written for it', async () => {
   expect(f.calls).toHaveLength(0)
 })
 
-test('a replacement arriving between reservation and clear still clears the slot', async () => {
+test('a step held by another instance is unknown, not answered from the stale slot', async () => {
   const f = await fixture()
-  // Round two reserved its step and the process was replaced BEFORE the slot was
-  // cleared. That reservation is UNARMED, which proves no dispatch was ever
-  // submitted for this step — so the trailer in the slot can only be round one's,
-  // and the replacement must clear it rather than read it as an answer.
+  // Its owner reserved the step and has not armed it. Taking it over on that guess would
+  // run the bounded task twice against one trailer, so this instance reports what it
+  // actually knows — and never hands back the round-one trailer sitting in the slot.
   await writeFile(f.reservation, JSON.stringify(f.req))
   await writeFile(f.req.result.path, JSON.stringify({ step_id: 'build-0', schema: f.req.result.schema, on: 'round one' }))
-  let slotAtDispatch: string | undefined
-  const compose = f.options.composeActingTurn
-  f.options.composeActingTurn = (async (...args: Parameters<typeof compose>) => {
-    slotAtDispatch = await readFile(f.req.result.path, 'utf8').catch((error: NodeJS.ErrnoException) => error.code)
-    setTimeout(() => { void f.trailer() }, 60)
-    return compose(...args)
-  }) as typeof compose
-  expect(await f.run()).toEqual({ kind: 'blocked', on: 'file evidence' })
-  expect(slotAtDispatch).toBe('ENOENT')
+  const outcome = await f.run()
+  expect(outcome.kind).toBe('unknown')
+  expect(outcome).toHaveProperty('detail', expect.stringContaining('not yet dispatched'))
+  expect(f.calls).toHaveLength(0)
+  expect(JSON.parse(await readFile(f.req.result.path, 'utf8')).on).toBe('round one')
 })
