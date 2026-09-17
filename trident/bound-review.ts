@@ -96,7 +96,8 @@ export function recordedTerminalVerdict(
 
 export interface BoundReviewDeps {
   run_host: DiffOutputHost
-  fire_workflow: TridentWorkflowFirer
+  /** The isolated panel cannot use the composition's project-build launcher. */
+  fire_review_panel?: TridentWorkflowFirer
   execute_bound_review?: typeof executeBoundReview
   codex_home?: string | null
   resolve_codex_home?: (run: TridentRun) => string | null
@@ -147,7 +148,7 @@ export async function advanceBoundReview(run: TridentRun, deps: BoundReviewDeps)
     }
     const reviewDeps = {
       run_host: deps.run_host,
-      fire_workflow: deps.fire_workflow,
+      ...(deps.fire_review_panel !== undefined ? { fire_workflow: deps.fire_review_panel } : {}),
       codex_home: codexHome,
       gh_data_dir: deps.gh_data_dir ?? null,
       gh_owner_handle: deps.gh_owner_handle ?? null,

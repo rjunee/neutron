@@ -1,5 +1,6 @@
 import { createProjectLauncher } from '@neutronai/trident/project-launcher.ts'
 import { TridentPhaseUsageStore } from '@neutronai/trident/phase-usage.ts'
+import { buildSubstrateWorkflowFire, buildWorkflowFirer } from '@neutronai/trident/inner-loop.ts'
 import { prepareProjectBuild } from './wiring/project-build.ts'
 import {
   PROJECT_BUILD_STATE_REAP_INTERVAL_MS,
@@ -1180,6 +1181,7 @@ export function buildOpenGraphComposer(
       makeComposeSubstrate,
       reminderComposeSubstrate,
       makeEphemeralSubstrate,
+      makeWarmFireSubstrate,
       prewarmReady,
       prewarmSettledRef,
       cleanups: substrateCleanups,
@@ -1207,6 +1209,16 @@ export function buildOpenGraphComposer(
             },
             onError: error => log.error('project_build_outcome_write_failed', { error: String(error) }),
           })
+        : null
+    // A bound review deliberately writes a throwaway panel database
+    // (`review-run.ts`), so it cannot use the project launcher whose durable
+    // reservation belongs to the composition store. This is the retained
+    // review-only executor; ordinary build runs have no alternate launcher.
+    // Bound panels supply their stable launcher_repo_path so this warm cache
+    // never retains disposable review worktrees; workflow args keep those paths.
+    const tridentFireReviewPanel =
+      liveAgentSubstrate !== null
+        ? buildWorkflowFirer({ fire: buildSubstrateWorkflowFire({ build_substrate: makeWarmFireSubstrate }) })
         : null
 
     // Agent-dispatch family (parity gap #3) — the general named-specialist +
@@ -7184,6 +7196,7 @@ export function buildOpenGraphComposer(
         ? {
             trident: {
               fire_inner_workflow: tridentFireInnerWorkflow,
+              fire_review_panel: tridentFireReviewPanel!,
               on_run_terminal: async (run): Promise<void> => {
                 await tridentOnRunTerminal(run)
                 const resolvedHome = codexCredentialService.resolveActiveCodexHome(
