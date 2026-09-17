@@ -7,6 +7,7 @@ import { createProjectRunners } from '@neutronai/runtime/workers/project-runners
 import { createClaudeActingTurn } from '@neutronai/runtime/workers/claude-acting-turn.ts'
 import { createCodexActingTurn } from '@neutronai/runtime/workers/codex-acting-turn.ts'
 import { createCodexHeadlessRunner } from '@neutronai/runtime/workers/codex-headless.ts'
+import { reconcileStoppedTrailerReservations } from '@neutronai/runtime/workers/trailer-slot.ts'
 import { PROJECT_REPL_TOOL_DEFS } from '@neutronai/gateway/wiring/build-live-agent-turn.ts'
 import { CodexProjectSessionHost } from '@neutronai/runtime/adapters/codex-cli/persistent/project-session.ts'
 import { pool, supervisedBySessionKey } from '@neutronai/runtime/adapters/claude-code/persistent/pool-state.ts'
@@ -224,6 +225,11 @@ export async function prepareProjectBuild(input: InnerLoopInput, context: Projec
   if (!checked.ok || checked.timed_out || checked.stdout.trim() !== `refs/heads/${run.branch}`) throw Error('Build worktree does not hold the assigned branch')
   const state = join(context.stateRoot, encodeURIComponent(run.id))
   await mkdir(state, { recursive: true })
+  // Reaching a new host preparation means the prior driver attempt is no longer live.
+  // Only the host has that fact; competing workers must keep treating an unarmed file
+  // as unknown. Armed files remain durable evidence that work may have been submitted.
+  const reconciled = await reconcileStoppedTrailerReservations(state)
+  if (!reconciled.ok) throw new Error(reconciled.detail)
   const topic = run.chat_id ?? context.projectId
   const codexSessions = context.codexSessionHost ?? new CodexProjectSessionHost({
     registryPath: join(context.stateRoot, 'codex-project-sessions.json'),

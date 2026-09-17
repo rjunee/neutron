@@ -130,6 +130,18 @@ test('option sources preserve pin, selected provider, workflow and unavailable s
   expect(f.captured().trailer.metadata({} as BoundedWorkRequest)).toBeUndefined()
 })
 
+test('a later host attempt clears a dead unarmed reservation before rebuilding runners', async () => {
+  const f = await fixture()
+  await f.prepare()
+  const state = join(f.context.stateRoot, encodeURIComponent(f.input.run.id))
+  const reservation = join(state, `claude-step-${'a'.repeat(64)}.json`)
+  await writeFile(reservation, JSON.stringify({ run_id: f.input.run.id, step_id: 'dead-step' }))
+
+  await f.prepare()
+
+  await expect(readFile(reservation)).rejects.toMatchObject({ code: 'ENOENT' })
+})
+
 test('intermediate reviews defer the full suite and terminal publication runs it once', async () => {
   const f = await fixture()
   f.input.test_strategy = 'TEST EXECUTION\n\nFull suite (stage 2), run exactly this:\n\n  bun test\n'

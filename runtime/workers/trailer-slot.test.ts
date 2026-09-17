@@ -1,8 +1,8 @@
 import { afterEach, expect, test } from 'bun:test'
 import { mkdtemp, readFile, rm, writeFile } from 'node:fs/promises'
 import { tmpdir } from 'node:os'
-import { join } from 'node:path'
-import { clearTrailerSlot, reserveTrailerSlot } from './trailer-slot.ts'
+import { dirname, join } from 'node:path'
+import { clearTrailerSlot, reconcileStoppedTrailerReservations, reserveTrailerSlot } from './trailer-slot.ts'
 
 const directories: string[] = []
 afterEach(async () => {
@@ -12,7 +12,7 @@ afterEach(async () => {
 async function slot() {
   const dir = await mkdtemp(join(tmpdir(), 'trailer-slot-'))
   directories.push(dir)
-  return { reservation: join(dir, 'step.json'), result: join(dir, 'build.result'), identity: 'the-request' }
+  return { reservation: join(dir, `claude-step-${'a'.repeat(64)}.json`), result: join(dir, 'build.result'), identity: 'the-request' }
 }
 
 test('exactly one of many concurrent callers may dispatch a step', async () => {
@@ -55,6 +55,24 @@ test('a step held but never armed is unknown, and its stale slot is not read', a
   expect(held.kind).toBe('unknown')
   expect(held).toHaveProperty('detail', expect.stringContaining('not yet dispatched'))
   expect(await readFile(s.result, 'utf8')).toBe('the previous round')
+})
+
+test('a stopped host clears an unarmed reservation so a later attempt dispatches once', async () => {
+  const s = await slot()
+  // The first owner died after exclusive create and before arming or dispatch.
+  await writeFile(s.reservation, s.identity)
+  expect((await reserveTrailerSlot(s.reservation, s.identity, s.result)).kind).toBe('unknown')
+
+  expect(await reconcileStoppedTrailerReservations(dirname(s.reservation))).toEqual({ ok: true })
+  expect(await reserveTrailerSlot(s.reservation, s.identity, s.result)).toEqual({ kind: 'dispatch' })
+  expect(await reserveTrailerSlot(s.reservation, s.identity, s.result)).toEqual({ kind: 'resume' })
+})
+
+test('stopped-host reconciliation preserves an armed reservation', async () => {
+  const s = await slot()
+  expect(await reserveTrailerSlot(s.reservation, s.identity, s.result)).toEqual({ kind: 'dispatch' })
+  expect(await reconcileStoppedTrailerReservations(dirname(s.reservation))).toEqual({ ok: true })
+  expect(await reserveTrailerSlot(s.reservation, s.identity, s.result)).toEqual({ kind: 'resume' })
 })
 
 test('a reservation for a different request is refused, not adopted', async () => {
