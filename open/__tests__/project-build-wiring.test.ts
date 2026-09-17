@@ -671,3 +671,20 @@ test('the acting-turn conversation requests the real project tool surface, not a
   // respawns the session out from under the dispatch.
   expect(names).toEqual([...LIVE_AGENT_TOOL_NAMES])
 })
+
+// #1112 BLOCKER 1. Fixing only the acting turn was not enough — and briefly made
+// it worse. `spec.tools` IS the `--tools` surface (`spawn.ts:302`), and the reuse
+// guard evicts on a mismatch (`spawn.ts:1550`, `:1637-1641`). A project prewarm
+// hardcoding `tools: []` while the dispatch requests the live surface forces the
+// respawn this issue is about, just from the other side. The two must agree, so
+// the agreement is asserted rather than left to a reader comparing two files.
+test('the project prewarm requests the SAME surface the dispatch will request', async () => {
+  const source = await readFile(new URL('../composer.ts', import.meta.url), 'utf8')
+  // The project prewarm passes a surface explicitly; it does not take the default.
+  expect(source).toContain('prewarmSubstrate(projectSubstrate, builtinToolDefs(LIVE_AGENT_TOOL_NAMES))')
+  // And the dispatch composes the same one.
+  const wiring = await readFile(new URL('../wiring/project-build.ts', import.meta.url), 'utf8')
+  expect(wiring).toContain('builtinToolDefs(LIVE_AGENT_TOOL_NAMES)')
+  // Neither may fall back to the empty surface that caused #1112.
+  expect(source).not.toContain('prewarmSubstrate(projectSubstrate)')
+})
