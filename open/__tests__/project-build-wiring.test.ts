@@ -740,14 +740,18 @@ test('project dispatch reuses the wake REPL without a tools-less respawn', async
     throw new Error('Persistent turn ended without completion')
   }
   const wake = 'Project wake: ready for work'
-  expect(await turn({ prompt: wake, tools: PROJECT_REPL_TOOL_DEFS, model_preference: [] }))
+  // A model is required per turn. Production supplies it the same way: the
+  // conversation spec carries `model_preference: []` and `claude-in-repl.ts`
+  // overrides it with `[req.model_id]` on each dispatch, so an empty list here
+  // is a fixture gap, not the behaviour under test.
+  expect(await turn({ prompt: wake, tools: PROJECT_REPL_TOOL_DEFS, model_preference: ['claude-sonnet-4-6'] }))
     .toBe(`seen=0 got=${wake}`)
   expect(spawnCount()).toBe(1)
   // Positive control: a real spawn requested the live tools, including Agent.
   expect(spawnArgv[0]![spawnArgv[0]!.indexOf('--tools') + 1]).toBe(LIVE_AGENT_TOOL_NAMES.join(','))
 
   const dispatch = 'Dispatch project build: fixture-step'
-  const reply = await turn({ ...f.captured().conversation.spec, prompt: dispatch })
+  const reply = await turn({ ...f.captured().conversation.spec, prompt: dispatch, model_preference: ['claude-sonnet-4-6'] })
   expect(timeline.filter(event => event.kind === 'message')).toEqual([
     { kind: 'message', text: wake }, { kind: 'message', text: dispatch },
   ])
