@@ -1,4 +1,4 @@
-import { readdir, readFile, stat } from 'node:fs/promises'
+import { open, readdir, readFile, stat } from 'node:fs/promises'
 import { join, relative, resolve, sep } from 'node:path'
 import { setTimeout as delay } from 'node:timers/promises'
 import { sessionJsonlPath } from '../adapters/claude-code/persistent/jsonl-resumability.ts'
@@ -68,6 +68,47 @@ async function observeSubagents(directory: string, description: string): Promise
   return { directory: 'readable', metaFiles, matched }
 }
 
+type DispatchConsumption = 'consumed' | 'not-consumed' | 'unreadable'
+type TranscriptBoundary = { offset: number; identity?: { dev: number; ino: number } } | undefined
+
+/** Capture under the turn lock, before Enter. Missing files can start at zero;
+ * other failures cannot establish a boundary. */
+async function transcriptBoundary(transcript: string): Promise<TranscriptBoundary> {
+  try {
+    const info = await stat(transcript)
+    return info.isFile() ? { offset: info.size, identity: { dev: info.dev, ino: info.ino } } : undefined
+  } catch (error) {
+    return (error as NodeJS.ErrnoException).code === 'ENOENT' ? { offset: 0 } : undefined
+  }
+}
+
+/** One read at expiry, never per poll. Persistent history is not evidence of
+ * this submission. Replacement or truncation invalidates the captured boundary. */
+async function dispatchConsumption(transcript: string, dispatch: string, boundary: TranscriptBoundary): Promise<DispatchConsumption> {
+  if (!boundary) return 'unreadable'
+  let bytes: Buffer
+  try {
+    const file = await open(transcript, 'r')
+    try {
+      const info = await file.stat()
+      if (info.size < boundary.offset || (boundary.identity &&
+        (info.dev !== boundary.identity.dev || info.ino !== boundary.identity.ino))) return 'unreadable'
+      bytes = (await file.readFile()).subarray(boundary.offset)
+    } finally { await file.close() }
+  } catch { return 'unreadable' }
+  for (const line of bytes.toString('utf8').split('\n')) {
+    try {
+      const record = JSON.parse(line) as { type?: unknown; message?: { content?: unknown } }
+      if (record.type !== 'user') continue
+      const content = record.message?.content
+      if (content === dispatch) return 'consumed'
+      if (Array.isArray(content) && content.some(block => block !== null && typeof block === 'object'
+        && block.type === 'text' && block.text === dispatch)) return 'consumed'
+    } catch { /* Partial and unrelated records do not prove consumption. */ }
+  }
+  return 'not-consumed'
+}
+
 /** Continue the bound project conversation. No spawn, retry or reply observation. */
 export function createClaudeActingTurn(binding: ClaudeActingSession, clock: ObservationClock = { now: Date.now, pause: async (ms, signal) => { await delay(ms, undefined, { signal }) } }): ProjectActingTurn {
   const { project_id, topic_id, session } = binding
@@ -108,10 +149,10 @@ export function createClaudeActingTurn(binding: ClaudeActingSession, clock: Obse
         // already distinguishable downstream: the outer catch reports "Dispatch
         // or observation interrupted", not "did not accept the dispatch". Do not
         // swallow it here to add a detail that already exists.
-        await child.submitLine!(
-          'Execute the prompt in this JSON dispatch specification: ' + JSON.stringify({ ...spec, effort: request.effort }),
-          stopped,
-        )
+        const dispatch = 'Execute the prompt in this JSON dispatch specification: ' + JSON.stringify({ ...spec, effort: request.effort })
+        const boundary = await transcriptBoundary(transcript)
+        if (expired()) return unknown()
+        await child.submitLine!(dispatch, stopped)
         const dispatchDeadline = Math.min(deadline, clock.now() + DISPATCH_TIMEOUT_MS)
         let accepted = false
         let seen: SubagentObservation = { directory: 'absent', metaFiles: 0, matched: false }
@@ -126,22 +167,18 @@ export function createClaudeActingTurn(binding: ClaudeActingSession, clock: Obse
           seen = await observeSubagents(subagents, `${request.role}: ${request.step_id}`)
           accepted ||= seen.matched
           if (!accepted && clock.now() >= dispatchDeadline) {
-            // SAY WHAT WAS OBSERVED, NOT JUST THAT TIME RAN OUT. Still `unknown`:
-            // none of this proves the worker did or did not run. It says WHICH
-            // uncertainty this is, which the bare sentence could not.
-            // SAY WHAT WAS OBSERVED, NOT WHAT THE REPL DID. The old wording
-            // ("the REPL did not accept the dispatch") is a VERDICT this code
-            // cannot reach: the REPL may have read the line and then declined or
-            // failed before Agent creation, which looks identical from here.
-            // `submitLine` resolving means the TERMINAL acknowledged text and
-            // Enter — `pty-host.ts:194-195` says explicitly that neither backend
-            // asserts the REPL acted. So this must not be reported as acceptance.
+            const consumption = await dispatchConsumption(transcript, dispatch, boundary)
+            const detail = consumption === 'consumed'
+              ? 'The REPL consumed the dispatch, but no worker was observed within its budget.'
+              : consumption === 'not-consumed'
+                ? 'The dispatch line was never consumed by the REPL within its budget.'
+                : 'The session transcript could not be read across the dispatch boundary; REPL consumption is unknown.'
             const where = seen.directory === 'readable'
               ? `directory exists with ${seen.metaFiles} agent metadata file(s), none naming this step`
               : seen.directory === 'absent'
                 ? 'directory does not exist'
                 : `directory could not be read (${seen.reason})`
-            return { kind: 'unknown' as const, detail: `No worker was observed for this dispatch within its budget; subagent completion is unknown. Terminal acknowledged text and Enter, which is not evidence the REPL acted; polled ${subagents} — ${where}.` }
+            return { kind: 'unknown' as const, detail: `${detail} No worker was observed for this dispatch within its budget; subagent completion is unknown. Terminal acknowledged text and Enter, which is not evidence the REPL acted; polled ${subagents} — ${where}.` }
           }
           const nextDeadline = accepted ? deadline : dispatchDeadline
           await clock.pause(Math.min(25, Math.max(1, nextDeadline - clock.now())), stopped)
