@@ -382,7 +382,18 @@ export async function prepareProjectBuild(input: InnerLoopInput, context: Projec
       } catch { continue }
     }
     if (!forge?.ok) throw new Error('Publication build result is missing or does not match the reviewed head')
-    const summary = plan.value.branchBrief?.trim() || plan.value.topTask.trim()
+    // `result.head` and `payload.commitSha` are INDEPENDENT worker-reported values —
+    // `trident/gates/result-contract.ts:33` types commitSha as a bare string with no
+    // equality rule — so matching one does not vouch for the other. Publishing the
+    // payload's sha unchecked would state a commit the host never reviewed.
+    if (forge.value.commitSha !== snapshot.head) {
+      throw new Error('Publication build result reports a commit that is not the reviewed head')
+    }
+    // `topTask` is THIS round's selected work item (`trident/inner-workflow.mjs:2018`).
+    // `branchBrief` is deliberately a digest of what the branch ALREADY carried before
+    // this round (`:2022`, "BUILT: what the previous tasks built"), so titling from it
+    // describes prior state, not the change being published.
+    const summary = plan.value.topTask.trim()
     const title = summary.split(/\r?\n/).find(line => line.trim() !== '')
       ?.replace(/^\s*(?:#{1,6}\s*|[-*+]\s+|\[[ xX]\]\s*)+/, '').trim().slice(0, 100)
     if (!title) throw new Error('Publication change title is missing')
@@ -391,7 +402,9 @@ export async function prepareProjectBuild(input: InnerLoopInput, context: Projec
       : `Guard: \`${claim.guard.join(' ')}\`\n\nControl: \`${claim.control.join(' ')}\``
     const tests = forge.value.suiteEvidence?.trim()
       || (forge.value.testsPassed ? 'The worker reported its required test suite passed.' : `Worker suite outcome: ${forge.value.suiteOutcome ?? 'not reported'}.`)
-    const body = `## What changed\n\n${summary}\n\n## Commit\n\n\`${forge.value.commitSha}\`\n\n## Test and mutation evidence\n\n${tests}\n\n${mutation}\n\n<details>\n<summary>Original card design document</summary>\n\n${run.task}\n\n</details>\n`
+    const context = plan.value.branchBrief?.trim()
+    const priorState = context ? `\n\n<details>\n<summary>Branch state before this change</summary>\n\n${context}\n\n</details>` : ''
+    const body = `## What changed\n\n${summary}${priorState}\n\n## Commit\n\n\`${forge.value.commitSha}\`\n\n## Test and mutation evidence\n\n${tests}\n\n${mutation}\n\n<details>\n<summary>Original card design document</summary>\n\n${run.task}\n\n</details>\n`
     await writeFile(bodyFile, body, { mode: 0o600 })
     return { title, bodyFile }
   }

@@ -147,9 +147,10 @@ test('publication describes the completed change and retains the card as support
 
   const publication = await options.production.publication({ head, diff: 'diff', pr: null })
   const body = await readFile(publication.bodyFile, 'utf8')
-  expect(publication.title).toBe('Omit empty failure reasons from wakeup logs')
+  expect(publication.title).toBe('Omit the empty field')
   expect(publication.title).not.toStartWith('#')
-  expect(body).toContain('## What changed\n\n# Omit empty failure reasons from wakeup logs')
+  expect(body).toContain('## What changed\n\n- [x] Omit the empty field')
+  expect(body).toContain('<summary>Branch state before this change</summary>')
   expect(body).toContain(`## Commit\n\n\`${head}\``)
   expect(body).toContain('Targeted guard and mutation control passed.')
   expect(body).toContain('Guard: `bun test guard.test.ts`')
@@ -179,6 +180,47 @@ test('publication refuses a build result belonging to a different head', async (
 
   await expect(options.production.publication({ head: reviewedHead, diff: 'diff', pr: null }))
     .rejects.toThrow(/does not match the reviewed head/)
+})
+
+test('publication refuses a build result whose commitSha is not the reviewed head', async () => {
+  // `result.head` and `payload.commitSha` are independent worker-reported values with
+  // no equality rule in the contract, so matching one does not vouch for the other.
+  // Publishing the payload's sha unchecked would state a commit the host never reviewed.
+  const f = await fixture()
+  const options = await f.prepare()
+  const head = 'b'.repeat(40)
+  await writeFile(options.workers.plan.request.result.path, JSON.stringify({ result: { payload: {
+    implementationPlan: '- [x] Omit the empty field', topTask: '- [x] Omit the empty field',
+    executionSpec: 'Change the log payload.', complexity: 'mechanical', remainingTasks: 0, branchBrief: '',
+  } } }))
+  await writeFile(options.workers.build.request.result.path, JSON.stringify({ result: { head, payload: {
+    mutationClaim: null, worktreePath: options.production.worktree, branch: 'change',
+    commitSha: 'c'.repeat(40), prNumber: null, diffFile: 'diff', testsPassed: true,
+  } } }))
+
+  await expect(options.production.publication({ head, diff: 'diff', pr: null }))
+    .rejects.toThrow(/not the reviewed head/)
+})
+
+test('publication titles from this round\'s task, never the prior-branch digest', async () => {
+  // `branchBrief` is a digest of what the branch ALREADY carried before this round
+  // (`trident/inner-workflow.mjs:2022`). Titling from it describes prior state.
+  const f = await fixture()
+  const options = await f.prepare()
+  const head = 'b'.repeat(40)
+  await writeFile(options.workers.plan.request.result.path, JSON.stringify({ result: { payload: {
+    implementationPlan: '- [x] Current change', topTask: '- [x] Current change',
+    executionSpec: 'Change it.', complexity: 'mechanical', remainingTasks: 0,
+    branchBrief: 'BUILT: Prior branch state only',
+  } } }))
+  await writeFile(options.workers.build.request.result.path, JSON.stringify({ result: { head, payload: {
+    mutationClaim: null, worktreePath: options.production.worktree, branch: 'change',
+    commitSha: head, prNumber: null, diffFile: 'diff', testsPassed: true,
+  } } }))
+
+  const publication = await options.production.publication({ head, diff: 'diff', pr: null })
+  expect(publication.title).toBe('Current change')
+  expect(publication.title).not.toContain('Prior branch state')
 })
 
 test('preparation refuses missing pins, missing rows, unknown branches, failed adds and wrong worktrees', async () => {
