@@ -340,6 +340,25 @@ const ATTACHMENT_TRANSCRIPT_MAX_CHARS = 4000
  * that reason only: it is a bigger CONSTANT, not a varying one. The first turn after
  * a deploy respawns the warm child once, as any deploy does.
  */
+/** The REPL `--tools` allow-list only consumes `t.name`; the rest of the ToolDef
+ * shape is contract filler for the locked AgentSpec interface.
+ *
+ * EXPORTED because `spec.tools` IS the `--tools` surface — `spawn.ts:302` derives
+ * it as `spec.tools.map(t => t.name)` and the reuse guard at `:1550` respawns the
+ * session when it differs. A caller that passes `tools: []` therefore gets
+ * `--tools ""` ("disables every built-in") and a respawned, tool-less child.
+ * That is #1112: the trident acting turn did exactly that, so the dispatch asked
+ * a child with no tools to invoke a subagent. */
+export function builtinToolDefs(names: ReadonlyArray<string>): ToolDef[] {
+  return names.map((name) => ({
+    name,
+    description: `Built-in Claude Code tool '${name}' (live-agent read surface)`,
+    input_schema: { type: 'object' },
+    output_schema: { type: 'object' },
+    capability_required: 'fs:project_data', // C4-a § 2.3 (was fs:owner_data; alias still accepted)
+  }))
+}
+
 export const LIVE_AGENT_TOOL_NAMES = [
   'Read',
   'Glob',
@@ -989,13 +1008,7 @@ export function buildLiveAgentTurn(
 
   // The REPL `--tools` allow-list only consumes `t.name`; the rest of the
   // ToolDef shape is contract filler for the locked AgentSpec interface.
-  const tools: ToolDef[] = tool_names.map((name) => ({
-    name,
-    description: `Built-in Claude Code tool '${name}' (live-agent read surface)`,
-    input_schema: { type: 'object' },
-    output_schema: { type: 'object' },
-    capability_required: 'fs:project_data', // C4-a § 2.3 (was fs:owner_data; alias still accepted)
-  }))
+  const tools: ToolDef[] = builtinToolDefs(tool_names)
 
   /**
    * Public entry: serialize this turn behind any in-flight turn for the same

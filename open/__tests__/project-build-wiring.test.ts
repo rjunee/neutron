@@ -1,3 +1,5 @@
+import { LIVE_AGENT_TOOL_NAMES } from '@neutronai/gateway/wiring/build-live-agent-turn.ts'
+import { SUBAGENT_TOOL_NAME } from '@neutronai/runtime/workers/claude-tool-contract.ts'
 import { REFLECTION_GUIDANCE_FRAMING, MAX_REFLECTION_GUIDANCE_CHARS } from '@neutronai/trident/reflection-guidance.ts'
 import { PLAN_SCHEMA, FORGE_SCHEMA, VERDICT_SCHEMA } from '@neutronai/trident/gates/result-contract.ts'
 import { briefIntegrity } from '@neutronai/trident/gates/brief-integrity.ts'
@@ -648,4 +650,24 @@ test('suite child excludes the stored GitHub credential while git push retains i
   const pushed = await options.production.runHost(['git', '-C', worktree, 'push', origin, 'HEAD:refs/heads/check'])
   expect(pushed.ok).toBe(true)
   expect(await readFile(join(worktree, 'push-env.txt'), 'utf8')).toBe(credential.GH_TOKEN!)
+})
+
+// #1112. `spec.tools` IS the `--tools` surface — `spawn.ts:302` derives it as
+// `spec.tools.map(t => t.name)` and the reuse guard at `spawn.ts:1550` respawns
+// the session when it differs. The acting turn passed `tools: []`, which
+// `build-repl-argv.ts:150-152` maps to `--tools ""` ("disables every built-in"),
+// so every dispatch landed in a tool-less respawn and no worker could exist.
+// Three card-dispatched runs died this way, visible only as a timeout.
+test('the acting-turn conversation requests the real project tool surface, not an empty one', async () => {
+  const f = await fixture()
+  await f.prepare()
+  const tools = f.captured().conversation.spec.tools as ReadonlyArray<{ name: string }>
+  // NOT empty: an empty list is the defect, and it is silent at every layer.
+  expect(tools.length).toBeGreaterThan(0)
+  const names = tools.map(t => t.name)
+  // It must carry the subagent tool, or a dispatch cannot create a worker at all.
+  expect(names).toContain(SUBAGENT_TOOL_NAME)
+  // And it must match the surface the working wake turns use, or the reuse guard
+  // respawns the session out from under the dispatch.
+  expect(names).toEqual([...LIVE_AGENT_TOOL_NAMES])
 })

@@ -7,6 +7,7 @@ import { createProjectRunners } from '@neutronai/runtime/workers/project-runners
 import { createClaudeActingTurn } from '@neutronai/runtime/workers/claude-acting-turn.ts'
 import { createCodexActingTurn } from '@neutronai/runtime/workers/codex-acting-turn.ts'
 import { createCodexHeadlessRunner } from '@neutronai/runtime/workers/codex-headless.ts'
+import { builtinToolDefs, LIVE_AGENT_TOOL_NAMES } from '@neutronai/gateway/wiring/build-live-agent-turn.ts'
 import { CodexProjectSessionHost } from '@neutronai/runtime/adapters/codex-cli/persistent/project-session.ts'
 import { pool, supervisedBySessionKey } from '@neutronai/runtime/adapters/claude-code/persistent/pool-state.ts'
 import type { PersistentReplSubstrateOptions } from '@neutronai/runtime/adapters/claude-code/persistent/types.ts'
@@ -230,7 +231,16 @@ export async function prepareProjectBuild(input: InnerLoopInput, context: Projec
   const codexEnv = { ...context.env, ...(input.codex_home ? { CODEX_HOME: input.codex_home } : {}) }
   const substrate = await createProjectRunners({
     conversation: { project_id: context.projectId, topic_id: topic, provider: context.provider,
-      spec: { tools: [], model_preference: [], metering_context: { project_id: context.projectId } } },
+      // THE SURFACE MUST MATCH THE SESSION'S, OR THE REUSE GUARD RESPAWNS IT.
+      // `spec.tools` IS the `--tools` surface: `spawn.ts:302` derives it as
+      // `spec.tools.map(t => t.name)`, and the reuse guard at `spawn.ts:1550`
+      // respawns when it differs from the live session's. `tools: []` therefore
+      // became `--tools ""` — "disables every built-in" (`build-repl-argv.ts:150-152`)
+      // — so the dispatch asked a tool-less respawn to invoke a subagent. `Agent`
+      // AND `Bash` both reported "disabled for this session" on exactly those
+      // turns, while wake turns on the SAME session id ran Bash fine. Three
+      // card-dispatched runs died this way and surfaced only as a timeout (#1112).
+      spec: { tools: builtinToolDefs(LIVE_AGENT_TOOL_NAMES), model_preference: [], metering_context: { project_id: context.projectId } } },
     run_id: run.id, state_dir: state,
     actingTurn: async turn => {
       if (context.provider === 'openai-codex') {
