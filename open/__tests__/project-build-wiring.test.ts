@@ -157,6 +157,30 @@ test('publication describes the completed change and retains the card as support
   expect(body).toContain('# DISPATCH THIS THROUGH TRIDENT')
 })
 
+test('publication refuses a build result belonging to a different head', async () => {
+  // The slot is keyed by ROLE, so a build result from an EARLIER round can still be
+  // sitting there when a later head is published. Describing this change with that
+  // round's mutation claim and evidence would attribute work to the wrong commit —
+  // the same stale-artifact class as #1119. Refuse loudly instead.
+  const f = await fixture()
+  const options = await f.prepare()
+  const reviewedHead = 'b'.repeat(40)
+  const earlierHead = 'c'.repeat(40)
+  await writeFile(options.workers.plan.request.result.path, JSON.stringify({ result: { payload: {
+    implementationPlan: '- [x] Omit the empty field', topTask: '- [x] Omit the empty field',
+    executionSpec: 'Change the log payload.', complexity: 'mechanical', remainingTasks: 0,
+    branchBrief: '# Omit empty failure reasons from wakeup logs\n\nThe log now leaves out an empty field.',
+  } } }))
+  await writeFile(options.workers.build.request.result.path, JSON.stringify({ result: { head: earlierHead, payload: {
+    mutationClaim: { file: 'guard.ts', find: 'fixed', replace: 'broken', guard: ['bun', 'test', 'guard.test.ts'], control: ['bun', 'test', 'guard.test.ts'] },
+    worktreePath: options.production.worktree, branch: 'change', commitSha: earlierHead,
+    prNumber: null, diffFile: 'diff', testsPassed: true, suiteOutcome: 'passed', suiteEvidence: 'Earlier round.',
+  } } }))
+
+  await expect(options.production.publication({ head: reviewedHead, diff: 'diff', pr: null }))
+    .rejects.toThrow(/does not match the reviewed head/)
+})
+
 test('preparation refuses missing pins, missing rows, unknown branches, failed adds and wrong worktrees', async () => {
   const f = await fixture()
   f.input.run.base_sha = null
