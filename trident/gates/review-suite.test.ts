@@ -26,6 +26,19 @@ test('a deferred subset carries failed-preexisting evidence without trusting its
   f.observation.report = { suiteOutcome: 'failed-preexisting' }
   expect(await f.assess()).toMatchObject({ kind: 'known', findings: [{ title: 'FAILED-PREEXISTING CLAIMED WITHOUT EVIDENCE', advisory: false }] })
 })
+test('a NULL report keeps its own diagnostic even on a subset round', async () => {
+  // ORDERING REGRESSION. `report?.hostExitCode === undefined` is also true when `report` is
+  // null, so putting the subset exemption first silently turns "no command was derivable"
+  // into "this round deferred its suite" — collapsing the two states a sibling commit exists
+  // to separate. Adversarial review caught exactly that; this pins the order.
+  const f = fixture()
+  f.observation.scope = 'subset'
+  f.observation.report = null
+  expect(await f.assess()).toEqual({ kind: 'unknown', detail: 'No full-suite command is derivable from the test strategy' })
+  // And the full-suite round keeps the same diagnostic, so the fix is about the state, not the scope.
+  f.observation.scope = 'full-suite'
+  expect(await f.assess()).toEqual({ kind: 'unknown', detail: 'No full-suite command is derivable from the test strategy' })
+})
 function fixture() {
   const observation: SuiteObservation = { kind: 'known', runId: 'run', head: snapshot.head, round: 2, strategy: 'run full suite', scope: 'full-suite', report: { hostExitCode: 0, suiteOutcome: 'passed' } }
   const source = { observe: async () => observation }

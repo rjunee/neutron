@@ -43,11 +43,16 @@ export async function assessReviewSuite(source: ReviewSuiteSource | undefined, s
     if (typeof value.strategy !== 'string' || !['full-suite', 'subset'].includes(value.scope)) return unknown('Review suite strategy or dispatched scope is unreadable')
     if (value.strategy === '') return known()
     const report = value.report
-    if (value.scope === 'subset' && report?.hostExitCode === undefined) {
-      if (report?.suiteOutcome === 'failed-preexisting') return failedPreexisting(report)
+    // NULL IS ITS OWN STATE AND IS TESTED FIRST. `report?.hostExitCode === undefined` is also
+    // true for a null report, so ordering the subset exemption above this line would collapse
+    // "no command was derivable" back into "the round deferred its suite" — the exact split
+    // the previous commit exists to make. Not reachable through today's composition, since the
+    // intermediate path always returns a present report, but the type permits it.
+    if (!report) return unknown('No full-suite command is derivable from the test strategy')
+    if (value.scope === 'subset' && report.hostExitCode === undefined) {
+      if (report.suiteOutcome === 'failed-preexisting') return failedPreexisting(report)
       return known()
     }
-    if (!report) return unknown('No full-suite command is derivable from the test strategy')
     if (typeof report.hostExitCode !== 'number' || !Number.isInteger(report.hostExitCode)) return unknown('Host-observed review suite exit code is missing or unreadable')
     if ((report.suiteOutcome !== undefined && typeof report.suiteOutcome !== 'string') || (report.suiteEvidence !== undefined && typeof report.suiteEvidence !== 'string')) return unknown('Review suite report is malformed')
     if (report.hostExitCode === 0) return known()
