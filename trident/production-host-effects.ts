@@ -32,7 +32,7 @@ export interface ProductionHostOptions {
   ciWorkflow: string | undefined
   ciSource?: ProductionCiSource
   ciNow?: () => number
-  publication: { title: string; bodyFile: string }
+  publication: (snapshot: BuildSnapshot) => Promise<{ title: string; bodyFile: string }>
 }
 
 export interface ProductionCiSource {
@@ -368,6 +368,7 @@ export function createProductionHostEffects(options: ProductionHostOptions) {
       if (fresh.kind !== 'allow') return fresh
       const ready = await publicationReadiness(runHost, repo, branch, current.base_sha!, snapshot, runId)
       if (ready.kind !== 'allow') return ready
+      const publication = await options.publication(snapshot)
       const remote = await git('ls-remote', '--heads', 'origin', `refs/heads/${branch}`)
       if (!remote.ok || remote.timed_out) return unknown('Publication lease is unreadable')
       const lines = remote.stdout.trim()
@@ -380,7 +381,7 @@ export function createProductionHostEffects(options: ProductionHostOptions) {
       let pr = await readPr(current)
       if (pr === null) {
         const created = await runHost(['gh', 'pr', 'create', '--head', branch, '--base', baseBranch,
-          '--title', options.publication.title, '--body-file', options.publication.bodyFile], repo)
+          '--title', publication.title, '--body-file', publication.bodyFile], repo)
         if (!created.ok || created.timed_out) return unknown('PR creation was not confirmed')
         pr = await readPr(current)
       }

@@ -51,7 +51,7 @@ async function fixture() {
     // write production performs rather than a stub that cannot fail.
     phaseUsage: new TridentPhaseUsageStore(db),
     production: { store, runId: row.id, projectSlug: 'project', repo: dir, worktree: join(dir, 'work'), branch: 'change',
-      baseBranch: 'main', runHost: spawnCapture, ciWorkflow: 'ci.yml', publication: { title: 'Build', bodyFile: join(dir, 'body') } },
+      baseBranch: 'main', runHost: spawnCapture, ciWorkflow: 'ci.yml', publication: async () => ({ title: 'Build', bodyFile: join(dir, 'body') }) },
     policy: { leak: { scratch_dir: join(dir, 'scan') }, mutation: { readClaim: async () => null } },
     workers: { plan: { provider: 'pi', request }, build: { provider: 'pi', request },
       review: { provider: 'pi', request }, fix: { provider: 'pi', request } },

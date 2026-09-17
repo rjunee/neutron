@@ -368,7 +368,46 @@ export async function prepareProjectBuild(input: InnerLoopInput, context: Projec
     } }
   }
   const bodyFile = join(state, 'publication.md')
-  await writeFile(bodyFile, run.task, { mode: 0o600 })
+  const publication = async (snapshot: { head: string }) => {
+    const planEnvelope = JSON.parse(await readFile(workers.plan.request.result.path, 'utf8'))
+    const plan = validateTrailer('plan', planEnvelope?.result?.payload)
+    if (!plan.ok) throw new Error(`Publication plan result is invalid: ${plan.reason} at ${plan.path}`)
+    let forge: ReturnType<typeof validateTrailer<'forge'>> | null = null
+    for (const role of ['fix', 'build'] as const) {
+      try {
+        const envelope = JSON.parse(await readFile(workers[role].request.result.path, 'utf8'))
+        if (envelope?.result?.head !== snapshot.head) continue
+        const checked = validateTrailer('forge', envelope?.result?.payload)
+        if (checked.ok) { forge = checked; break }
+      } catch { continue }
+    }
+    if (!forge?.ok) throw new Error('Publication build result is missing or does not match the reviewed head')
+    // `result.head` and `payload.commitSha` are INDEPENDENT worker-reported values —
+    // `trident/gates/result-contract.ts:33` types commitSha as a bare string with no
+    // equality rule — so matching one does not vouch for the other. Publishing the
+    // payload's sha unchecked would state a commit the host never reviewed.
+    if (forge.value.commitSha !== snapshot.head) {
+      throw new Error('Publication build result reports a commit that is not the reviewed head')
+    }
+    // `topTask` is THIS round's selected work item (`trident/inner-workflow.mjs:2018`).
+    // `branchBrief` is deliberately a digest of what the branch ALREADY carried before
+    // this round (`:2022`, "BUILT: what the previous tasks built"), so titling from it
+    // describes prior state, not the change being published.
+    const summary = plan.value.topTask.trim()
+    const title = summary.split(/\r?\n/).find(line => line.trim() !== '')
+      ?.replace(/^\s*(?:#{1,6}\s*|[-*+]\s+|\[[ xX]\]\s*)+/, '').trim().slice(0, 100)
+    if (!title) throw new Error('Publication change title is missing')
+    const claim = forge.value.mutationClaim
+    const mutation = claim === null ? 'No mutation evidence was reported.'
+      : `Guard: \`${claim.guard.join(' ')}\`\n\nControl: \`${claim.control.join(' ')}\``
+    const tests = forge.value.suiteEvidence?.trim()
+      || (forge.value.testsPassed ? 'The worker reported its required test suite passed.' : `Worker suite outcome: ${forge.value.suiteOutcome ?? 'not reported'}.`)
+    const context = plan.value.branchBrief?.trim()
+    const priorState = context ? `\n\n<details>\n<summary>Branch state before this change</summary>\n\n${context}\n\n</details>` : ''
+    const body = `## What changed\n\n${summary}${priorState}\n\n## Commit\n\n\`${forge.value.commitSha}\`\n\n## Test and mutation evidence\n\n${tests}\n\n${mutation}\n\n<details>\n<summary>Original card design document</summary>\n\n${run.task}\n\n</details>\n`
+    await writeFile(bodyFile, body, { mode: 0o600 })
+    return { title, bodyFile }
+  }
   const declaration = readProjectRepos(context.projectDir, run.project_slug)
   const repo = declaration.repos.find(row => resolve(context.projectDir, row.path) === resolve(run.repo_path))
   return {
@@ -376,7 +415,7 @@ export async function prepareProjectBuild(input: InnerLoopInput, context: Projec
     production: { store: context.store, runId: run.id, projectSlug: run.project_slug,
       repo: run.repo_path, worktree: run.worktree, branch: run.branch, baseBranch: input.base_branch,
       runHost: context.runHost, ciWorkflow: repo?.ciWorkflow,
-      publication: { title: run.task.split('\n')[0]!, bodyFile } },
+      publication },
     policy: {
       leak: { scratch_dir: join(state, 'leak') },
       mutation: { readClaim: async () => {
