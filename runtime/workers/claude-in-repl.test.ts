@@ -5,7 +5,7 @@ import { createHash } from 'node:crypto'
 import { join } from 'node:path'
 import type { AgentSpec } from '../substrate.ts'
 import type { BoundedWorkOutcome, BoundedWorkRequest } from '../bounded-work.ts'
-import { claudeInReplRunner, type ClaudeInReplOptions } from './claude-in-repl.ts'
+import { claudeInReplRunner, SUBAGENT_TOOL_NAME, type ClaudeInReplOptions } from './claude-in-repl.ts'
 
 const directories: string[] = []
 afterEach(async () => {
@@ -238,11 +238,33 @@ test.each(['activity', 'nothing', 'unknown'] as const)('preserves an observed li
   expect(await claudeInReplRunner(f.options).liveness({ run_id: f.req.run_id, step_id: f.req.step_id })).toBe(answer)
 })
 
-test('live conversational tool surface grants the CLI Task name', async () => {
+// #1109. This test USED to assert the list contains `'Task'` — and so it passed
+// precisely BECAUSE the bug existed: Claude Code 2.1.273 renamed the subagent
+// tool to `Agent`, the grant list still said `Task`, and every trident dispatch
+// was refused with `No such tool available: Agent`. A guard cannot catch a rename
+// it is pinning. It now asserts the two AGREE, derived from one constant, so a
+// future rename breaks the test instead of the product.
+test('the granted tool surface carries the very tool the dispatch asks for', async () => {
   const source = await readFile(new URL('../../gateway/wiring/build-live-agent-turn.ts', import.meta.url), 'utf8')
-  const names = source.match(/export const LIVE_AGENT_TOOL_NAMES = \[([\s\S]*?)\] as const/)![1]!
+  const block = source.match(/export const LIVE_AGENT_TOOL_NAMES = \[([\s\S]*?)\] as const/)![1]!
+  // Assert about the ENTRIES, not the prose: a comment explaining the old name
+  // would otherwise fail the negative below, which says nothing about the grant.
+  const names = block.split('\n').filter(l => !l.trim().startsWith('//')).join('\n')
   expect(names).toContain("'Read'")
-  expect(names).toContain("'Task'")
+  // The grant imports the constant rather than restating the name.
+  expect(names).toContain('SUBAGENT_TOOL_NAME')
+  expect(names).not.toContain("'Task'")
+  // And the dispatch prompt asks for that same constant, not a literal.
+  const worker = await readFile(new URL('./claude-in-repl.ts', import.meta.url), 'utf8')
+  expect(worker).toContain('Invoke the ${SUBAGENT_TOOL_NAME} tool exactly once')
+  expect(worker).not.toContain('Invoke the Agent tool exactly once')
+})
+
+test('the subagent tool name is the one this CLI actually exposes', () => {
+  // Pinned as a constant, not a relation: 2.1.273 exposes `Agent`. If a later
+  // release renames it again, this is the line that has to change, and the
+  // dispatch prompt and grant list follow it automatically.
+  expect(SUBAGENT_TOOL_NAME).toBe('Agent')
 })
 
 for (const effort of ['xhigh', 'max'] as const) {

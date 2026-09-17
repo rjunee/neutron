@@ -67,6 +67,7 @@ import {
   VALUE_BYTE_CAP,
 } from '@neutronai/channels/button-primitive.ts'
 import type { ChatOutbound } from '@neutronai/landing/chat-protocol.ts'
+import { SUBAGENT_TOOL_NAME } from '@neutronai/runtime/workers/claude-in-repl.ts'
 import { getBestModel } from '@neutronai/runtime/models.ts'
 import { GENERAL_RAIL_ID } from '@neutronai/wire-types/topic-id.ts'
 import { assembleSystemPrompt } from '@neutronai/runtime/system-prompt.ts'
@@ -347,7 +348,10 @@ export const LIVE_AGENT_TOOL_NAMES = [
   'Edit',
   'Bash',
   'Skill',
-  'Task',
+  // THE CLI'S SUBAGENT TOOL, imported rather than restated. This said 'Task'
+  // while the dispatch asked for 'Agent' (renamed in 2.1.273), so every trident
+  // dispatch was refused for a night. One definition, one place (#1109).
+  SUBAGENT_TOOL_NAME,
   'Workflow',
   'WebSearch',
   'WebFetch',

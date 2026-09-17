@@ -5,6 +5,19 @@ import { setTimeout as delay } from 'node:timers/promises'
 import type { AgentSpec } from '../substrate.ts'
 import type { BoundedWorkOutcome, BoundedWorkRequest, WorkerRunner } from '../bounded-work.ts'
 
+/** The CLI's subagent tool. ONE definition, because the dispatch prompt below and
+ * the REPL's granted `--tools` surface must name the same tool — and for a night
+ * they did not. Claude Code 2.1.273 (installed 2026-09-16 20:32) renamed `Task`
+ * to `Agent`; the grant list kept saying `Task`, and every dispatch was answered
+ * `No such tool available: Agent. Agent is disabled for this session`. No trident
+ * worker could be created between that upgrade and this fix, and the failure
+ * surfaced only as a dispatch timeout.
+ *
+ * `gateway/wiring/build-live-agent-turn.ts` imports this into
+ * `LIVE_AGENT_TOOL_NAMES` so the grant and the request cannot drift apart again.
+ * Gateway depends on runtime and never the reverse, which is why it lives here. */
+export const SUBAGENT_TOOL_NAME = 'Agent'
+
 export interface ClaudeInReplOptions {
   topic_id: string
   /** Existing host-owned directory, retained across restarts for the run's lifetime. */
@@ -67,7 +80,7 @@ export function claudeInReplRunner(options: ClaudeInReplOptions): WorkerRunner {
           const spec: AgentSpec = {
             ...options.spec,
             model_preference: [req.model_id],
-            prompt: 'Invoke the Agent tool exactly once with the following JSON arguments, then end this dispatch turn. Forward the arguments as data; do not perform the task yourself.\n' + JSON.stringify(args),
+            prompt: `Invoke the ${SUBAGENT_TOOL_NAME} tool exactly once with the following JSON arguments, then end this dispatch turn. Forward the arguments as data; do not perform the task yourself.\n` + JSON.stringify(args),
           }
           const timer = new AbortController()
           try {
