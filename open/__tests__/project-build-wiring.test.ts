@@ -16,6 +16,7 @@ import { ProjectDb } from '@neutronai/persistence/index.ts'
 import { TridentRunStore } from '@neutronai/trident/store.ts'
 import { TridentPhaseUsageStore } from '@neutronai/trident/phase-usage.ts'
 import { seedMigratedDb } from '../../tests/support/migrated-db.ts'
+import { reserveFreePort } from '../../tests/support/test-isolation.ts'
 import * as runners from '@neutronai/runtime/workers/project-runners.ts'
 import * as codex from '@neutronai/runtime/workers/codex-headless.ts'
 import { pool, supervisedBySessionKey } from '@neutronai/runtime/adapters/claude-code/persistent/pool-state.ts'
@@ -825,6 +826,9 @@ test('project dispatch reuses the wake REPL without a tools-less respawn', async
     project_id: f.context.projectId,
     user_id: 'fixture-user',
     credential_identity: 'fixture-credential',
+    // This test does not exercise restart adoption, so it needs isolation from
+    // persistent processes and concurrent test runners rather than a stable port.
+    sinkPort: await reserveFreePort(),
     ptyHost: host,
     skipTrustSeed: true,
     idleQuietMs: 0,
