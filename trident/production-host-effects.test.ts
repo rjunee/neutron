@@ -79,7 +79,7 @@ async function fixture() {
   const options = { store, runId: row.id, projectSlug: 'project', repo, worktree, branch: 'change', baseBranch: 'main', runHost,
     ciWorkflow: 'ci.yml', ciNow: () => now,
     ciSource: { async required() { return structuredClone(ciConfig) }, async readiness() { return structuredClone(ciReadiness) } },
-    publication: { title: 'Build', bodyFile: join(dir, 'body.md') } }
+    publication: async () => ({ title: 'Build', bodyFile: join(dir, 'body.md') }) }
   const host = createProductionHostEffects(options)
   return { ...host, options, db, dir, repo, worktree, store, row, base, tip, calls, command,
     intercept(fn: typeof intercept) { intercept = fn }, setPr(value: any) { pr = value },

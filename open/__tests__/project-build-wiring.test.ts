@@ -129,6 +129,34 @@ test('option sources preserve pin, selected provider, workflow and unavailable s
   expect(f.captured().trailer.metadata({} as BoundedWorkRequest)).toBeUndefined()
 })
 
+test('publication describes the completed change and retains the card as supporting context', async () => {
+  const f = await fixture()
+  f.input.run.task = '# DISPATCH THIS THROUGH TRIDENT\n\nCall the build tool; do not build inline.'
+  const options = await f.prepare()
+  const head = 'b'.repeat(40)
+  await writeFile(options.workers.plan.request.result.path, JSON.stringify({ result: { payload: {
+    implementationPlan: '- [x] Omit the empty field', topTask: '- [x] Omit the empty field',
+    executionSpec: 'Change the log payload.', complexity: 'mechanical', remainingTasks: 0,
+    branchBrief: '# Omit empty failure reasons from wakeup logs\n\nThe log now leaves out an empty field.',
+  } } }))
+  await writeFile(options.workers.build.request.result.path, JSON.stringify({ result: { head, payload: {
+    mutationClaim: { file: 'guard.ts', find: 'fixed', replace: 'broken', guard: ['bun', 'test', 'guard.test.ts'], control: ['bun', 'test', 'guard.test.ts'] },
+    worktreePath: options.production.worktree, branch: 'change', commitSha: head,
+    prNumber: null, diffFile: 'diff', testsPassed: true, suiteOutcome: 'passed', suiteEvidence: 'Targeted guard and mutation control passed.',
+  } } }))
+
+  const publication = await options.production.publication({ head, diff: 'diff', pr: null })
+  const body = await readFile(publication.bodyFile, 'utf8')
+  expect(publication.title).toBe('Omit empty failure reasons from wakeup logs')
+  expect(publication.title).not.toStartWith('#')
+  expect(body).toContain('## What changed\n\n# Omit empty failure reasons from wakeup logs')
+  expect(body).toContain(`## Commit\n\n\`${head}\``)
+  expect(body).toContain('Targeted guard and mutation control passed.')
+  expect(body).toContain('Guard: `bun test guard.test.ts`')
+  expect(body).toContain('<summary>Original card design document</summary>')
+  expect(body).toContain('# DISPATCH THIS THROUGH TRIDENT')
+})
+
 test('preparation refuses missing pins, missing rows, unknown branches, failed adds and wrong worktrees', async () => {
   const f = await fixture()
   f.input.run.base_sha = null

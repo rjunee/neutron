@@ -10,7 +10,7 @@ export type PolicySourceResult<T> = { kind: 'known'; value: T } | { kind: 'unkno
 /** The callback must await publication before returning. The body contains the
  * owner's persisted request and host pins, never a worker's completion claim. */
 export async function withProjectPublication<T>(identity: Identity, root: string,
-  publish: (publication: ProductionHostOptions['publication']) => Promise<T>,
+  publish: (publication: Awaited<ReturnType<ProductionHostOptions['publication']>>) => Promise<T>,
 ): Promise<PolicySourceResult<T>> {
   try {
     return await withProjectPolicyDirectory(root, async directory => {
