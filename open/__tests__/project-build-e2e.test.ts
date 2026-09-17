@@ -466,7 +466,7 @@ const LEAK_GATE_STUB = '#!/usr/bin/env bash\necho "LEAK GATE: SILENT"\nexit 0\n'
  * `Full suite (stage 2), run exactly this` (`project-build.ts:162`), runs it in the run
  * worktree, and records the process exit code. With no such marker there is no command,
  * the report is `null`, and `assessReviewSuite` reports that no full-suite command
- * is derivable from the strategy (`gates/review-suite.ts:42`) for every card —
+ * is derivable from the strategy (`gates/review-suite.ts:51`) for every card —
  * measured: that is exactly how this
  * harness failed when #1040 landed after it was written.
  *
