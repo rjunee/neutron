@@ -1,7 +1,7 @@
 import { mkdtemp, readFile, rm, writeFile, rename, lstat } from 'node:fs/promises'
 import { tmpdir } from 'node:os'
 import { join } from 'node:path'
-import { createHash } from 'node:crypto'
+import { createHash, randomUUID } from 'node:crypto'
 import type { BuildRunDeps, BuildSnapshot, GateResult, Measurement, BuildModeHost, ResumeCheckpoint } from './build-run.ts'
 import { classifyCiRollup, confirmConfigurationError, type CiRunObservation, type RequiredCheckObservation } from './ci-readiness.ts'
 import { briefIntegrity } from './gates/brief-integrity.ts'
@@ -16,6 +16,8 @@ import { isTerminalPhase } from './state-machine.ts'
 import { TRIDENT_SCRIPT_DIR } from './script-dir.ts'
 
 const oid = /^(?:[0-9a-f]{40}|[0-9a-f]{64})$/
+const publicationToken = /^[0-9a-f]{8}-[0-9a-f]{4}-4[0-9a-f]{3}-[89ab][0-9a-f]{3}-[0-9a-f]{12}$/
+const publicationProof = (token: string) => `<!-- trident-publication:${token} -->`
 const unknown = (detail: string): GateResult => ({ kind: 'unknown', detail })
 const blocked = (on: string): GateResult => ({ kind: 'blocked', on })
 
@@ -179,12 +181,12 @@ export function createProductionHostEffects(options: ProductionHostOptions) {
     if (!result.ok || result.timed_out || !oid.test(result.stdout.trim())) throw new Error('Build branch head is unreadable')
     return result.stdout.trim()
   }
-  async function readPr(current: TridentRun): Promise<BuildSnapshot['pr']> {
+  async function readPr(current: TridentRun): Promise<(NonNullable<BuildSnapshot['pr']> & { body: string }) | null> {
     if (current.merge_mode === 'local') {
       if (current.pr !== null) throw new Error('Local run unexpectedly has a persisted PR')
       return null
     }
-    const fields = 'number,headRefOid,state,headRefName,baseRefName,isCrossRepository'
+    const fields = 'number,headRefOid,state,headRefName,baseRefName,isCrossRepository,body'
     const result = await runHost(current.pr === null
       ? ['gh', 'pr', 'list', '--head', branch, '--state', 'all', '--limit', '100', '--json', fields]
       : ['gh', 'pr', 'view', String(current.pr), '--json', fields], repo)
@@ -196,9 +198,9 @@ export function createProductionHostEffects(options: ProductionHostOptions) {
     const pr = candidates[0]
     if (!pr || !Number.isSafeInteger(pr.number) || pr.number <= 0 || typeof pr.headRefOid !== 'string' || !oid.test(pr.headRefOid)
       || !['OPEN', 'CLOSED', 'MERGED'].includes(pr.state) || pr.headRefName !== branch
-      || pr.baseRefName !== baseBranch || pr.isCrossRepository !== false
+      || pr.baseRefName !== baseBranch || pr.isCrossRepository !== false || typeof pr.body !== 'string'
       || (current.pr !== null && current.pr !== pr.number)) throw new Error('PR identity or revision is malformed or mismatched')
-    return { number: pr.number, head: pr.headRefOid, state: pr.state }
+    return { number: pr.number, head: pr.headRefOid, state: pr.state, body: pr.body }
   }
   async function readDiff(base: string, tip: string): Promise<string> {
     const directory = await mkdtemp(join(tmpdir(), 'build-observation-'))
@@ -212,16 +214,18 @@ export function createProductionHostEffects(options: ProductionHostOptions) {
       return await readFile(output, 'utf8')
     } finally { await rm(directory, { recursive: true, force: true }) }
   }
+  const snapshotPr = (pr: Awaited<ReturnType<typeof readPr>>): BuildSnapshot['pr'] => pr === null
+    ? null : { number: pr.number, head: pr.head, state: pr.state }
   async function measure(): Promise<Measurement> {
     try {
       const current = row()
       if (!current.base_sha || !oid.test(current.base_sha)) throw new Error('Pinned launch base is missing')
       const tip = await head()
-      if (tip === 'absent') return { kind: 'known', value: { head: tip, diff: '', pr: await readPr(current) } }
+      if (tip === 'absent') return { kind: 'known', value: { head: tip, diff: '', pr: snapshotPr(await readPr(current)) } }
       const checkedOut = await runHost(['git', '-C', worktree, 'rev-parse', '--verify', 'HEAD^{commit}'], worktree)
       if (!checkedOut.ok || checkedOut.timed_out || checkedOut.stdout.trim() !== tip) throw new Error('Worktree head does not match the build branch')
       const diff = await readDiff(current.base_sha, tip)
-      const pr = await readPr(current)
+      const pr = snapshotPr(await readPr(current))
       if (await head() !== tip) throw new Error('Build branch moved during measurement')
       const after = row()
       if (after.base_sha !== current.base_sha || after.pr !== current.pr || after.merge_mode !== current.merge_mode) throw new Error('Persisted pins changed during measurement')
@@ -381,8 +385,17 @@ export function createProductionHostEffects(options: ProductionHostOptions) {
       let pr = await readPr(current)
       let createdNumber: number | null = null
       if (pr === null) {
-        const created = await runHost(['gh', 'pr', 'create', '--head', branch, '--base', baseBranch,
-          '--title', publication.title, '--body-file', publication.bodyFile], repo)
+        const token = current.publication_token ?? randomUUID()
+        if (!publicationToken.test(token)) return unknown('Publication intent is malformed')
+        if (current.publication_token === null && !await store.update(runId, { publication_token: token })) return unknown('Publication intent could not be persisted')
+        const directory = await mkdtemp(join(tmpdir(), 'pr-publication-'))
+        const bodyFile = join(directory, 'body.md')
+        await writeFile(bodyFile, `${await readFile(publication.bodyFile, 'utf8')}\n${publicationProof(token)}\n`, { mode: 0o600 })
+        let created
+        try {
+          created = await runHost(['gh', 'pr', 'create', '--head', branch, '--base', baseBranch,
+            '--title', publication.title, '--body-file', bodyFile], repo)
+        } finally { await rm(directory, { recursive: true, force: true }) }
         if (!created.ok || created.timed_out) return unknown('PR creation was not confirmed')
         // gh pr create prints the created URL. Only this receipt can mint provenance.
         const receipt = /^https:\/\/[^/\s]+\/[^/\s]+\/[^/\s]+\/pull\/([1-9]\d*)$/.exec(created.stdout.trim())
@@ -390,7 +403,11 @@ export function createProductionHostEffects(options: ProductionHostOptions) {
         if (createdNumber === null || !Number.isSafeInteger(createdNumber)) return unknown('PR creation receipt is malformed')
         pr = await readPr({ ...current, pr: createdNumber })
       } else if (pr.number !== current.published_pr) {
-        return blocked('Discovered PR has no publication provenance')
+        if (current.publication_token === null || !publicationToken.test(current.publication_token)
+          || !pr.body.includes(publicationProof(current.publication_token))) {
+          return blocked('Discovered PR does not match durable publication intent')
+        }
+        createdNumber = pr.number
       }
       if (!pr || pr.state !== 'OPEN' || pr.head !== snapshot.head) return unknown('Published PR does not match the reviewed head')
       if (!await store.update(runId, { pr: pr.number, ...(createdNumber !== null ? { published_pr: createdNumber } : {}) })) return unknown('Published PR could not be persisted')

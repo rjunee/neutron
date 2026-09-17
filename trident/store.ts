@@ -243,6 +243,8 @@ export interface TridentRun {
   pr: number | null
   /** PR whose publication by this card's run lineage was durably witnessed. */
   published_pr: number | null
+  /** Durable nonce written before PR creation and embedded in the created PR body. */
+  publication_token: string | null
   merge_mode: MergeMode
   subagent_run_id: string | null
   subagent_status: SubagentStatus | null
@@ -520,6 +522,7 @@ export interface TridentRunUpdate {
   base_behind?: number | null
   pr?: number | null
   published_pr?: number | null
+  publication_token?: string | null
   merge_mode?: MergeMode
   subagent_run_id?: string | null
   subagent_status?: SubagentStatus | null
@@ -554,6 +557,7 @@ interface TridentRunDbRow {
   base_behind: number | null
   pr: number | null
   published_pr: number | null
+  publication_token: string | null
   merge_mode: MergeMode
   subagent_run_id: string | null
   subagent_status: SubagentStatus | null
@@ -587,7 +591,7 @@ interface TridentRunDbRow {
 /** Exported solely so tests can pin the column-count invariant. */
 export const COLS =
   'id, slug, project_slug, phase, round, max_rounds, ralph, ralph_round, ' +
-  'max_ralph_rounds, branch, pr, published_pr, merge_mode, subagent_run_id, subagent_status, ' +
+  'max_ralph_rounds, branch, pr, published_pr, publication_token, merge_mode, subagent_run_id, subagent_status, ' +
   'repo_path, worktree, task, chat_id, thread_id, channel_kind, failure_reason, brief_alert, ' +
   'workflow_run_id, inner_checkpoint, inner_checkpoint_head, ' +
   'inner_checkpoint_findings, inner_verdict, inner_result, ' +
@@ -870,6 +874,7 @@ export class TridentRunStore {
       // provenance is separate so discovery can never manufacture ownership.
       pr: null,
       published_pr: input.published_pr ?? null,
+      publication_token: null,
       merge_mode: input.merge_mode ?? 'local',
       subagent_run_id: null,
       subagent_status: null,
@@ -923,6 +928,7 @@ export class TridentRunStore {
         run.branch,
         run.pr,
         run.published_pr,
+        run.publication_token,
         run.merge_mode,
         run.subagent_run_id,
         run.subagent_status,
@@ -1675,6 +1681,7 @@ export class TridentRunStore {
     if (patch.base_behind !== undefined) push('base_behind', patch.base_behind)
     if (patch.pr !== undefined) push('pr', patch.pr)
     if (patch.published_pr !== undefined) push('published_pr', patch.published_pr)
+    if (patch.publication_token !== undefined) push('publication_token', patch.publication_token)
     if (patch.merge_mode !== undefined) push('merge_mode', patch.merge_mode)
     if (patch.subagent_run_id !== undefined) push('subagent_run_id', patch.subagent_run_id)
     if (patch.subagent_status !== undefined) push('subagent_status', patch.subagent_status)
@@ -2244,6 +2251,7 @@ function rowToRun(row: TridentRunDbRow): TridentRun {
     base_behind: row.base_behind ?? null,
     pr: row.pr,
     published_pr: row.published_pr,
+    publication_token: row.publication_token,
     merge_mode: row.merge_mode,
     subagent_run_id: row.subagent_run_id,
     subagent_status: row.subagent_status,

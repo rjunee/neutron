@@ -48,6 +48,7 @@ async function fixture() {
   await writeFile(join(worktree, 'code.txt'), 'after\n' + 'stable\n'.repeat(20) + 'payload\n'.repeat(1000))
   await command(['git', '-C', worktree, 'commit', '-am', 'Build fixture'])
   const tip = await command(['git', '-C', worktree, 'rev-parse', 'HEAD'])
+  await writeFile(join(dir, 'body.md'), 'Build body\n')
   const store = new TridentRunStore(db)
   const row = await store.create({ slug: 'build', project_slug: 'project', repo_path: repo, task: 'Build' })
   await store.update(row.id, { branch: 'change', worktree, base_sha: base, merge_mode: 'pr' })
@@ -64,7 +65,8 @@ async function fixture() {
     if (argv[0] === 'gh') {
       if (argv[2] === 'list') return ok(JSON.stringify(pr ? [pr] : []))
       if (argv[2] === 'create') {
-        pr = { number: 12, headRefOid: await command(['git', '-C', repo, 'rev-parse', 'refs/heads/change']), state: 'OPEN', headRefName: 'change', baseRefName: 'main', isCrossRepository: false }
+        const bodyFile = argv[argv.indexOf('--body-file') + 1]!
+        pr = { number: 12, headRefOid: await command(['git', '-C', repo, 'rev-parse', 'refs/heads/change']), state: 'OPEN', headRefName: 'change', baseRefName: 'main', isCrossRepository: false, body: await readFile(bodyFile, 'utf8') }
         return ok('https://example.invalid/project/repo/pull/12\n')
       }
       if (argv[2] === 'merge') { pr.state = 'MERGED'; return ok() }
@@ -82,7 +84,7 @@ async function fixture() {
     publication: async () => ({ title: 'Build', bodyFile: join(dir, 'body.md') }) }
   const host = createProductionHostEffects(options)
   return { ...host, options, db, dir, repo, worktree, store, row, base, tip, calls, command,
-    intercept(fn: typeof intercept) { intercept = fn }, setPr(value: any) { pr = value },
+    intercept(fn: typeof intercept) { intercept = fn }, setPr(value: any) { pr = value === null ? null : { body: '', ...value } },
     setCiConfig(value: unknown) { ciConfig = value }, setCiReadiness(value: unknown) { ciReadiness = value }, advance(ms: number) { now += ms } }
 }
 async function measured(f: Awaited<ReturnType<typeof fixture>>): Promise<BuildSnapshot> {
@@ -244,10 +246,69 @@ test('publication refuses a foreign PR appearing during push', async () => {
     if (argv.includes('push')) f.setPr({ number: 73, headRefOid: f.tip, state: 'OPEN', headRefName: 'change', baseRefName: 'main', isCrossRepository: false })
     return undefined
   })
-  expect(await f.publishChecked(snapshot)).toEqual({ kind: 'blocked', on: 'Discovered PR has no publication provenance' })
+  expect(await f.publishChecked(snapshot)).toEqual({ kind: 'blocked', on: 'Discovered PR does not match durable publication intent' })
   expect(f.store.get(f.row.id)?.published_pr).toBeNull()
   expect(f.store.get(f.row.id)?.pr).toBeNull()
   expect(f.calls.some(argv => argv[2] === 'create')).toBe(false)
+})
+
+test('publication resumes after creation succeeds but provenance persistence crashes', async () => {
+  const f = await fixture()
+  const originalUpdate = f.store.update.bind(f.store)
+  let crash = true
+  f.store.update = async (id, patch) => {
+    if (crash && patch.pr !== undefined) {
+      crash = false
+      throw new Error('simulated persistence crash')
+    }
+    return originalUpdate(id, patch)
+  }
+
+  expect(await f.publishChecked(await measured(f))).toEqual({ kind: 'unknown', detail: 'Error: simulated persistence crash' })
+  expect(f.store.get(f.row.id)?.publication_token).toMatch(/^[0-9a-f-]{36}$/)
+  expect(f.store.get(f.row.id)?.published_pr).toBeNull()
+
+  expect(await f.publishChecked(await measured(f))).toEqual({ kind: 'allow' })
+  expect(f.store.get(f.row.id)?.published_pr).toBe(12)
+  expect(f.calls.filter(argv => argv[2] === 'create')).toHaveLength(1)
+})
+
+test('publication intent cannot adopt a foreign PR on the same branch', async () => {
+  const f = await fixture()
+  await f.store.update(f.row.id, { publication_token: '11111111-1111-4111-8111-111111111111' })
+  f.setPr({ number: 73, headRefOid: f.tip, state: 'OPEN', headRefName: 'change', baseRefName: 'main', isCrossRepository: false,
+    body: '<!-- trident-publication:22222222-2222-4222-8222-222222222222 -->' })
+
+  expect(await f.publishChecked(await measured(f))).toEqual({
+    kind: 'blocked', on: 'Discovered PR does not match durable publication intent',
+  })
+  expect(f.store.get(f.row.id)?.published_pr).toBeNull()
+})
+
+test('publication refuses malformed durable intent before creating a PR', async () => {
+  const f = await fixture()
+  await f.store.update(f.row.id, { publication_token: 'not-a-token' })
+
+  expect(await f.publishChecked(await measured(f))).toEqual({ kind: 'unknown', detail: 'Publication intent is malformed' })
+  expect(f.calls.some(argv => argv[2] === 'create')).toBe(false)
+})
+
+test('publication does not create a PR before durable intent is persisted', async () => {
+  const f = await fixture()
+  const originalUpdate = f.store.update.bind(f.store)
+  f.store.update = async (id, patch) => patch.publication_token !== undefined ? null : originalUpdate(id, patch)
+
+  expect(await f.publishChecked(await measured(f))).toEqual({ kind: 'unknown', detail: 'Publication intent could not be persisted' })
+  expect(f.calls.some(argv => argv[2] === 'create')).toBe(false)
+})
+
+test('measurement refuses a PR whose publication body is unreadable', async () => {
+  const f = await fixture()
+  f.intercept(argv => argv[2] === 'list' ? ok(JSON.stringify([{
+    number: 73, headRefOid: f.tip, state: 'OPEN', headRefName: 'change', baseRefName: 'main', isCrossRepository: false,
+  }])) : undefined)
+
+  expect(await f.effects.measure()).toEqual({ kind: 'unknown', detail: 'Error: PR identity or revision is malformed or mismatched' })
 })
 
 test('publication uses the create receipt even when branch lookup returns a different PR', async () => {
@@ -256,7 +317,7 @@ test('publication uses the create receipt even when branch lookup returns a diff
   let created = false
   f.intercept(argv => {
     if (argv[2] === 'create') created = true
-    if (created && argv[2] === 'list') return ok(JSON.stringify([{ number: 73, headRefOid: f.tip, state: 'OPEN', headRefName: 'change', baseRefName: 'main', isCrossRepository: false }]))
+    if (created && argv[2] === 'list') return ok(JSON.stringify([{ number: 73, headRefOid: f.tip, state: 'OPEN', headRefName: 'change', baseRefName: 'main', isCrossRepository: false, body: '' }]))
   })
   expect(await f.publishChecked(snapshot)).toEqual({ kind: 'allow' })
   expect(f.store.get(f.row.id)?.published_pr).toBe(12)
