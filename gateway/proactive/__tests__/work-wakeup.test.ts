@@ -1214,3 +1214,26 @@ test('terminal typed failure counts reach the sweep log', async () => {
   expect(summaries[0]).toContain('failed_by_reason=')
   expect(summaries[0]).toContain('aborted')
 })
+
+test('a sweep with no failures omits `failed_by_reason` and still prints the zero counters', async () => {
+  // The default harness wakes one project cleanly (woke=1, nothing failed), so
+  // the summary line prints. The reason map is `{}` on such a tick and must be
+  // ABSENT from the line; the three scalar failure counters must still print as
+  // zeros — a counter that disappears at zero cannot be distinguished from one
+  // that was never computed. Making the map unconditional again turns the
+  // `not.toContain` assertion red.
+  resetLoggerStateForTests()
+  const lines = captureInfo()
+  try {
+    await buildWorkWakeupLoop(harness().deps).loop.runOnce()
+  } finally {
+    lines.restore()
+  }
+  const summaries = lines.matching('wakeup_sweep')
+  expect(summaries).toHaveLength(1)
+  expect(summaries[0]).toContain('woke=1')
+  expect(summaries[0]).toContain('failed=0')
+  expect(summaries[0]).toContain('failed_no_progress=0')
+  expect(summaries[0]).toContain('failed_budget_ceiling=0')
+  expect(summaries[0]).not.toContain('failed_by_reason')
+})

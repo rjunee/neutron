@@ -898,7 +898,15 @@ export function buildWorkWakeupLoop(deps: WorkWakeupDeps): WorkWakeupLoop {
           unavailable: result.unavailable,
           woke: result.woke,
           failed: result.failed,
-          failed_by_reason: JSON.stringify(result.failed_by_reason),
+          // The reason map is OMITTED when empty: `undefined` fields are dropped by
+          // the formatter (logger/index.ts `formatLogLine`), and `failed_by_reason="{}"`
+          // on a clean sweep is noise. The three scalar failure counters above and
+          // below stay UNCONDITIONAL, zeros included — a counter that vanishes at
+          // zero cannot be told apart from one that was never computed.
+          failed_by_reason:
+            Object.keys(result.failed_by_reason).length > 0
+              ? JSON.stringify(result.failed_by_reason)
+              : undefined,
           failed_no_progress: result.failed_no_progress,
           failed_budget_ceiling: result.failed_budget_ceiling,
           deferred_to_run: result.deferred_to_run,
