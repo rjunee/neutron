@@ -6830,8 +6830,11 @@ lifecycle/manifest, and the Managed graph composer. See
 > - **A prior-gateway reservation with a durable branch, checkpoint and checkpoint head is
 >   resumed automatically** — `trident/orchestrator.ts:2913-2957` claims it and re-fires,
 >   demonstrated at `trident/liveness-death-e2e.test.ts:224-253` (one new fire, resume data
->   preserved). It gives up only when the crash-recovery budget is spent (`:2932`), and then
->   terminalizes naming the branch, head and PR.
+>   preserved) with the recovery callback installed, as production installs it
+>   (`gateway/composition/build-core-modules.ts:814-816`). It has several terminal exits —
+>   a missing durable-continuation field (`trident/orchestrator.ts:2918-2930`), recovery not
+>   wired (`:2945-2951`), and a spent crash-recovery budget (`:2932`) — so do not assume any
+>   one of them.
 > - **A live same-gateway reservation waits on purpose** — `trident/orchestrator.ts:2984-2985`
 >   keeps `waiting: true` and retains the worker and result while the in-process promise is
 >   unresolved (`trident/project-launcher.test.ts:153-169`). That is an in-flight run, not a
