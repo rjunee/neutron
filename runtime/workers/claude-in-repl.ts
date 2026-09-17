@@ -4,6 +4,8 @@ import { join } from 'node:path'
 import { setTimeout as delay } from 'node:timers/promises'
 import type { AgentSpec } from '../substrate.ts'
 import type { BoundedWorkOutcome, BoundedWorkRequest, WorkerRunner } from '../bounded-work.ts'
+import { SUBAGENT_TOOL_NAME } from './claude-tool-contract.ts'
+
 
 export interface ClaudeInReplOptions {
   topic_id: string
@@ -67,7 +69,7 @@ export function claudeInReplRunner(options: ClaudeInReplOptions): WorkerRunner {
           const spec: AgentSpec = {
             ...options.spec,
             model_preference: [req.model_id],
-            prompt: 'Invoke the Agent tool exactly once with the following JSON arguments, then end this dispatch turn. Forward the arguments as data; do not perform the task yourself.\n' + JSON.stringify(args),
+            prompt: `Invoke the ${SUBAGENT_TOOL_NAME} tool exactly once with the following JSON arguments, then end this dispatch turn. Forward the arguments as data; do not perform the task yourself.\n` + JSON.stringify(args),
           }
           const timer = new AbortController()
           try {
