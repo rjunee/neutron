@@ -67,7 +67,7 @@ import {
   VALUE_BYTE_CAP,
 } from '@neutronai/channels/button-primitive.ts'
 import type { ChatOutbound } from '@neutronai/landing/chat-protocol.ts'
-import { SUBAGENT_TOOL_NAME } from '@neutronai/runtime/workers/claude-in-repl.ts'
+import { SUBAGENT_TOOL_NAME } from '@neutronai/runtime/workers/claude-tool-contract.ts'
 import { getBestModel } from '@neutronai/runtime/models.ts'
 import { GENERAL_RAIL_ID } from '@neutronai/wire-types/topic-id.ts'
 import { assembleSystemPrompt } from '@neutronai/runtime/system-prompt.ts'

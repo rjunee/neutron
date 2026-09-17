@@ -5,7 +5,8 @@ import { createHash } from 'node:crypto'
 import { join } from 'node:path'
 import type { AgentSpec } from '../substrate.ts'
 import type { BoundedWorkOutcome, BoundedWorkRequest } from '../bounded-work.ts'
-import { claudeInReplRunner, SUBAGENT_TOOL_NAME, type ClaudeInReplOptions } from './claude-in-repl.ts'
+import { claudeInReplRunner, type ClaudeInReplOptions } from './claude-in-repl.ts'
+import { SUBAGENT_TOOL_NAME } from './claude-tool-contract.ts'
 
 const directories: string[] = []
 afterEach(async () => {
@@ -257,6 +258,11 @@ test('the granted tool surface carries the very tool the dispatch asks for', asy
   // And the dispatch prompt asks for that same constant, not a literal.
   const worker = await readFile(new URL('./claude-in-repl.ts', import.meta.url), 'utf8')
   expect(worker).toContain('Invoke the ${SUBAGENT_TOOL_NAME} tool exactly once')
+  // The grant must import the CONTRACT module, not the worker implementation:
+  // pulling claude-in-repl.ts into the gateway drags node:fs/promises and
+  // node:crypto along for one string.
+  const grantSource = await readFile(new URL('../../gateway/wiring/build-live-agent-turn.ts', import.meta.url), 'utf8')
+  expect(grantSource).toContain("from '@neutronai/runtime/workers/claude-tool-contract.ts'")
   expect(worker).not.toContain('Invoke the Agent tool exactly once')
 })
 
