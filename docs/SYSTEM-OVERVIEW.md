@@ -6819,27 +6819,35 @@ lifecycle/manifest, and the Managed graph composer. See
 
 ## Foundational Trident — state machine + tick + git-mode + the loop (`trident/`)
 
-> **Operator note — a run stuck on `Existing project build requires reconciliation` is
-> recovered by RE-DISPATCHING THE CARD, not by deleting files.** When a driver settles
-> `unknown`, the row keeps `inner_result.projectBuild.kind === 'unknown'`, and
-> `trident/project-launcher.ts:116-117` then refuses that run *before* it reaches
-> `options.prepare(...)` at `:123`. So no amount of clearing on-disk state helps: host
-> preparation, and with it the reservation cleanup at `open/wiring/project-build.ts:231`,
-> is never reached for that run.
+> **Operator note — two different "outcome unknown" states, and only one of them needs you.**
+> Adversarial review caught an earlier version of this note conflating them.
 >
-> That refusal is deliberate, not a defect — `trident/orchestrator.ts:2916-2917`: *"Resume
-> only from the durable build evidence, never by replaying an uncheckpointed
-> reservation."* An uncertain dispatch is never replayed, because the bounded task is not
-> idempotent and a replay could run it twice.
+> **A MEASURED unknown terminalizes on its own.** If the driver settled and reported an
+> unknown outcome, the orchestrator fails the run without help
+> (`trident/orchestrator.ts:2975-2982`, `waiting: false`, `changed: true`,
+> `phase: failed`). Nothing is stuck; re-dispatch the card normally.
 >
-> The supported recovery is a re-dispatch, which
+> **A PENDING row is the one that wedges.** If the driver never produced a measured
+> outcome, the row is preserved for reconciliation
+> (`trident/orchestrator.ts:2984-2985`, `waiting: true`) — and nothing ever re-fires over
+> it. `trident/project-launcher.test.ts:147-150` states the consequence and pins it:
+> *"nothing re-fires over a pending row, so a run left waiting here can never be restarted
+> either"*, with the launcher returning `Existing project build requires reconciliation`.
+>
+> **Deleting files does not help either state.** `trident/project-launcher.ts:116-117`
+> refuses a pending row *before* `options.prepare(...)` at `:123`, so host preparation —
+> and with it the reservation cleanup at `open/wiring/project-build.ts:231` — is never
+> reached for that run.
+>
+> **The recovery is a re-dispatch**, which
 > `docs/spec-items/a-retry-must-resume-from-the-checkpoint.md:10` defines as creating **a
-> NEW run row**. Reservation state is keyed by run id (`open/wiring/project-build.ts:226`),
-> so the new row gets a clean directory and cannot inherit the old one's wedge.
+> NEW run row**. Reservation state is keyed by run id
+> (`open/wiring/project-build.ts:226`), so the new row starts clean and cannot inherit the
+> wedge.
 >
 > Earlier guidance to delete the reservation file named in the `unknown` detail and re-run
-> is superseded: it addresses a different state (one where preparation is still reachable),
-> and #1149 now clears unarmed reservations there automatically.
+> is superseded: it addresses a state where preparation is still reachable, and #1149 now
+> clears unarmed reservations there automatically.
 
 
 The `trident/` module (package `@neutronai/trident`) is the durable runtime
