@@ -6819,35 +6819,36 @@ lifecycle/manifest, and the Managed graph composer. See
 
 ## Foundational Trident — state machine + tick + git-mode + the loop (`trident/`)
 
-> **Operator note — two different "outcome unknown" states, and only one of them needs you.**
-> Adversarial review caught an earlier version of this note conflating them.
+> **Operator note — "project driver outcome unknown" is usually NOT yours to fix.**
+> Two review rounds corrected an earlier version of this note that told operators to
+> intervene in states the service recovers by itself. What follows is only what is pinned
+> by a test.
 >
-> **A MEASURED unknown terminalizes on its own.** If the driver settled and reported an
-> unknown outcome, the orchestrator fails the run without help
-> (`trident/orchestrator.ts:2975-2982`, `waiting: false`, `changed: true`,
-> `phase: failed`). Nothing is stuck; re-dispatch the card normally.
+> - **A measured unknown terminalizes on its own** — `trident/orchestrator.ts:2975-2982`
+>   returns `waiting: false`, `changed: true`, `phase: failed`.
+> - **A prior-gateway reservation with a durable branch, checkpoint and checkpoint head is
+>   resumed automatically** — `trident/orchestrator.ts:2913-2957` claims it and re-fires,
+>   demonstrated at `trident/liveness-death-e2e.test.ts:224-253` (one new fire, resume data
+>   preserved). It gives up only when the crash-recovery budget is spent (`:2932`), and then
+>   it terminalizes with the branch, head and PR named in the reason.
+> - **A pending row with no recovery transition is the one that sits** —
+>   `trident/orchestrator.ts:2984-2985` keeps it `waiting: true`, and
+>   `trident/project-launcher.test.ts:147-150` pins the consequence: *"nothing re-fires over
+>   a pending row, so a run left waiting here can never be restarted either."*
 >
-> **A PENDING row is the one that wedges.** If the driver never produced a measured
-> outcome, the row is preserved for reconciliation
-> (`trident/orchestrator.ts:2984-2985`, `waiting: true`) — and nothing ever re-fires over
-> it. `trident/project-launcher.test.ts:147-150` states the consequence and pins it:
-> *"nothing re-fires over a pending row, so a run left waiting here can never be restarted
-> either"*, with the launcher returning `Existing project build requires reconciliation`.
+> **Do not reach for a re-dispatch as a fix.** While the linked run is non-terminal it owns
+> the branch, and dispatch refuses with `branch_live` without creating a row
+> (`trident/board-dispatch.ts`, pinned at `trident/retry-resumes-checkpoint.test.ts:1826-1853`).
+> A re-dispatch is what you do *after* a run has terminalized, and it creates a NEW run row
+> (`docs/spec-items/a-retry-must-resume-from-the-checkpoint.md:10`) whose reservation
+> directory is keyed by run id (`open/wiring/project-build.ts:226`), so it starts clean.
 >
-> **Deleting files does not help either state.** `trident/project-launcher.ts:116-117`
-> refuses a pending row *before* `options.prepare(...)` at `:123`, so host preparation —
-> and with it the reservation cleanup at `open/wiring/project-build.ts:231` — is never
-> reached for that run.
->
-> **The recovery is a re-dispatch**, which
-> `docs/spec-items/a-retry-must-resume-from-the-checkpoint.md:10` defines as creating **a
-> NEW run row**. Reservation state is keyed by run id
-> (`open/wiring/project-build.ts:226`), so the new row starts clean and cannot inherit the
-> wedge.
->
-> Earlier guidance to delete the reservation file named in the `unknown` detail and re-run
-> is superseded: it addresses a state where preparation is still reachable, and #1149 now
-> clears unarmed reservations there automatically.
+> **Deleting reservation files does not help.** `trident/project-launcher.ts:116-117`
+> refuses a pending row *before* `options.prepare(...)` at `:123`, so the cleanup at
+> `open/wiring/project-build.ts:231` is never reached for that run. Earlier guidance to
+> delete the file named in the `unknown` detail is superseded on both halves: it addressed a
+> state where preparation is still reachable, and #1149 now clears unarmed reservations
+> there automatically.
 
 
 The `trident/` module (package `@neutronai/trident`) is the durable runtime
