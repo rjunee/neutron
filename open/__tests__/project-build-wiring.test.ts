@@ -1,3 +1,6 @@
+import { makeRecordingHost } from '@neutronai/runtime/adapters/claude-code/persistent/__tests__/recording-host.ts'
+import { createPersistentReplSubstrate, shutdownAllPersistentRepls } from '@neutronai/runtime/adapters/claude-code/persistent/persistent-repl-substrate.ts'
+import type { AgentSpec } from '@neutronai/runtime/substrate.ts'
 import { LIVE_AGENT_TOOL_NAMES, PROJECT_REPL_TOOL_DEFS } from '@neutronai/gateway/wiring/build-live-agent-turn.ts'
 import { SUBAGENT_TOOL_NAME } from '@neutronai/runtime/workers/claude-tool-contract.ts'
 import { REFLECTION_GUIDANCE_FRAMING, MAX_REFLECTION_GUIDANCE_CHARS } from '@neutronai/trident/reflection-guidance.ts'
@@ -698,9 +701,63 @@ test('the dispatch requests the shared project surface, by identity', async () =
 // persistent spawn (`spawn.ts:1447-1655`) which this fixture deliberately fakes.
 // What it CAN do is stop the prewarm silently drifting back to the default empty
 // surface — the exact regression that made the dispatch fix one-sided. The
-// behavioural gap is recorded on #1112 rather than papered over here.
+// dispatch lifecycle is exercised by the persistent-session test below; this
+// guard still only checks the prewarm call site.
 test('the project prewarm is handed the shared surface, not the empty default', async () => {
   const source = await readFile(new URL('../composer.ts', import.meta.url), 'utf8')
   expect(source).toContain('prewarmSubstrate(projectSubstrate, PROJECT_REPL_TOOL_DEFS)')
   expect(source).not.toContain('prewarmSubstrate(projectSubstrate)')
 })
+
+// #1112 acceptance 3: exercise the real pool, reuse guard and argv builder with
+// prepareProjectBuild's output. Only the CLI/PTY is simulated by the recording
+// host; a reply is not evidence that a real model created a worker.
+test('project dispatch reuses the wake REPL without a tools-less respawn', async () => {
+  const f = await fixture()
+  await f.prepare()
+  const { host, spawnCount, spawnArgv, timeline } = makeRecordingHost()
+  const substrate = createPersistentReplSubstrate({
+    substrate_instance_id: 'cc-project-dispatch-regression',
+    cwd: f.dir,
+    project_id: f.context.projectId,
+    user_id: 'fixture-user',
+    credential_identity: 'fixture-credential',
+    ptyHost: host,
+    skipTrustSeed: true,
+    idleQuietMs: 0,
+    idleMaxMs: 50,
+    captureConfig: { maxAttempts: 1, attemptDelayMs: 1 },
+    assertConfig: { readyBudgetMs: 5000, readyIntervalMs: 25, healthBudgetMs: 5000, healthIntervalMs: 25 },
+  })
+  cleanup.push(() => shutdownAllPersistentRepls())
+  const turn = async (spec: AgentSpec) => {
+    let reply = ''
+    for await (const event of substrate.start(spec).events) {
+      if (event.kind === 'error') throw new Error(event.message)
+      if (event.kind === 'token') reply += event.text
+      if (event.kind === 'completion') return reply
+    }
+    throw new Error('Persistent turn ended without completion')
+  }
+  const wake = 'Project wake: ready for work'
+  // A model is required per turn. Production supplies it the same way: the
+  // conversation spec carries `model_preference: []` and `claude-in-repl.ts`
+  // overrides it with `[req.model_id]` on each dispatch, so an empty list here
+  // is a fixture gap, not the behaviour under test.
+  expect(await turn({ prompt: wake, tools: PROJECT_REPL_TOOL_DEFS, model_preference: ['claude-sonnet-4-6'] }))
+    .toBe(`seen=0 got=${wake}`)
+  expect(spawnCount()).toBe(1)
+  // Positive control: a real spawn requested the live tools, including Agent.
+  expect(spawnArgv[0]![spawnArgv[0]!.indexOf('--tools') + 1]).toBe(LIVE_AGENT_TOOL_NAMES.join(','))
+
+  const dispatch = 'Dispatch project build: fixture-step'
+  const reply = await turn({ ...f.captured().conversation.spec, prompt: dispatch, model_preference: ['claude-sonnet-4-6'] })
+  expect(timeline.filter(event => event.kind === 'message')).toEqual([
+    { kind: 'message', text: wake }, { kind: 'message', text: dispatch },
+  ])
+  // Check every recorded spawn, so the mutation reports the actual empty argv
+  // before the spawn-count assertion. Never overwrite the composed tools here.
+  expect(spawnArgv.filter(argv => argv.some((arg, i) => arg === '--tools' && argv[i + 1] === ''))).toEqual([])
+  expect(spawnCount()).toBe(1)
+  expect(reply).toBe(`seen=1 got=${dispatch}`)
+}, 20_000)
