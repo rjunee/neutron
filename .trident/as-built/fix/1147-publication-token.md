@@ -29,3 +29,50 @@ Before editing, `git grep -n -E 'publicationToken|Discovered PR has no publicati
 `bun test trident/project-build-host.test.ts migrations/__tests__/live-ledger-125-repair.test.ts trident/production-host-effects.test.ts`: 109 pass, 0 fail, 511 assertions. The two changed files also passed individually. `bash scripts/ci/lint.sh` passed. The repository typecheck gate, `bash scripts/ci/typecheck-all.sh`, passed all 51 configurations. The leak gate exited 3 with zero findings in runnable rules; its file and commit-message PII checks could not run because the private denylist was unavailable, so this is an incomplete result. The focused restored provenance checks passed after the final mutation.
 
 Deliberately unchanged: production implementation, migration SQL, existing publication guards, product decisions, and `SPEC.md`. No full-suite launcher, directory-wide test sweep, network operation, push, PR creation, merge, or history rewrite was performed. Hosted PR creation and a real external crash could not be verified offline. Remote CI status and freshness of the supplied landing ref could not be verified without network access.
+
+### Build-round mutation evidence, folded in from the second record
+
+`AGENTS.md:28` requires one as-built record per change; this branch had grown two for the
+same change, so the other is removed and its unique evidence kept here. Line numbers are
+the ones current when each mutation ran.
+
+### Mutation table
+| Guard | Compiling mutation and printed line | RED result | Restored GREEN |
+|---|---|---|---|
+| Token shape, `trident/production-host-effects.ts:19` | Replaced the UUID expression with `/^.*$/`; printed line 19 | malformed-intent test received `allow` instead of `unknown` | focused recovery/refusal set: 5 pass, 0 fail |
+| Pre-create durability, `trident/production-host-effects.ts:390` | Inverted `!await store.update` to `await store.update`; printed line 390 | failed-persistence test received `allow` instead of `unknown` | focused recovery/refusal set: 5 pass, 0 fail |
+| Exact PR proof, `trident/production-host-effects.ts:406-408` | Inverted `!pr.body.includes` to `pr.body.includes`; printed lines 403-410 | foreign PR received `allow` instead of `blocked` | recovery plus foreign test: 2 pass, 0 fail |
+| Readable body evidence, `trident/production-host-effects.ts:199-202` | Removed the string-body clause; printed lines 196-204 | malformed observation became `known` instead of `unknown` | focused recovery/refusal set: 5 pass, 0 fail |
+
+**These prove the guards read their inputs. They do NOT establish that the body proof means
+what it claims** — see the replay finding below, which no mutation in this table could have
+caught, because every one of them varies the guard rather than the evidence it trusts.
+
+### BLOCKING: the proof is replayable — this branch is not mergeable as it stands
+
+An adversarial review reproduced it: a foreign PR on the same branch and head whose body
+carries a **copied** `<!-- trident-publication:<token> -->` is adopted as this run's
+provenance — expected `blocked`, received `allow`.
+
+The marker is published in a public PR body, so it is not evidence of who created the PR.
+Anything able to put that string in another same-repo PR inherits the provenance. This
+narrows the #1144 door from "any discovered PR" to "any discovered PR carrying a copyable
+string"; it does not close it.
+
+Scope, stated so the finding is not over-read: `readPr` already requires
+`isCrossRepository === false`, so a fork PR cannot reach this path. The exposure is
+same-repo PRs, which need write access — the accidental-adoption class, not the open
+internet.
+
+The mutation table above could not have caught this. Every entry inverts a guard and
+watches it go red, which proves the guard reads its input; none asks whether the input
+means what the guard assumes. That is the "instrument narrower than its subject" failure,
+and it is the second time this class has appeared on this line of work.
+
+Two acceptable resolutions, neither of which is "ship it and file a follow-up":
+
+1. A non-replayable ownership proof — something a second party cannot copy from public
+   output.
+2. Close #1147 as by-design. The conservative permanent refusal already on `main` is safe,
+   and the issue itself argued that: *"That refusal is the conservative direction … so it is
+   not a blocker on this branch."* An honest refusal beats a weak proof.
