@@ -11,16 +11,17 @@ export interface ReviewCiObservation {
   base: { head: string; status: 'red' | 'green' | 'pending' | 'unknown'; failing: readonly string[] } | null
 }
 export interface ReviewCiSource {
-  observe(snapshot: BuildSnapshot): Promise<ReviewCiObservation | { kind: 'unknown'; detail: string }>
+  observe(snapshot: BuildSnapshot, signal?: AbortSignal): Promise<ReviewCiObservation | { kind: 'unknown'; detail: string } | { kind: 'blocked'; on: string }>
 }
+export type ReviewCiAssessment = SuiteAssessment | { kind: 'blocked'; on: string }
 const unknown = (detail: string): SuiteAssessment => ({ kind: 'unknown', detail })
 
 /** G055 acquisition and comparison; unknown base evidence excuses no branch failure. */
-export async function assessReviewCi(source: ReviewCiSource | undefined, snapshot: BuildSnapshot, baseHead: string, runId: string): Promise<SuiteAssessment> {
+export async function assessReviewCi(source: ReviewCiSource | undefined, snapshot: BuildSnapshot, baseHead: string, runId: string, signal?: AbortSignal): Promise<ReviewCiAssessment> {
   if (!source) return unknown('Review CI observation source is missing')
   try {
-    const value = await source.observe(snapshot)
-    if (value.kind === 'unknown') return value
+    const value = await source.observe(snapshot, signal)
+    if (value.kind === 'unknown' || value.kind === 'blocked') return value
     if (value.head !== snapshot.head) return unknown('Review CI head does not match reviewed revision')
     // G056 is a distinct deferral step, before interpreting red or green evidence.
     const deferred = deferReviewCi(value.status)
@@ -45,7 +46,8 @@ export function deferReviewCi(status: string): SuiteAssessment | null {
 }
 
 /** G055: force actionable red into repair; base-only red holds without spending a fix. */
-export function applyReviewCi(panel: ReviewDecision, ci: SuiteAssessment): ReviewDecision {
+export function applyReviewCi(panel: ReviewDecision, ci: ReviewCiAssessment): ReviewDecision {
+  if (ci.kind === 'blocked') return ci
   const decision = applyReviewSuite(panel, ci)
   if (decision.kind === 'approve' && ci.kind === 'known' && ci.findings.length > 0) return { kind: 'blocked', on: 'review-advisory-only: CI remains red at the pinned base' }
   return decision

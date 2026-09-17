@@ -182,10 +182,12 @@ import { assessReviewSuite } from './gates/review-suite.ts'
 const observedHead = 'b'.repeat(40)
 const observedSnapshot = { head: observedHead, diff: 'measured diff', pr: { number: 7, head: observedHead, state: 'OPEN' as const } }
 function observationFixture() {
+  let now = 0
   const config = { kind: 'resolved' as const, required: ['test'], appBound: [] as string[], produced: ['test'] }
   const raw = { checksComplete: true, headSha: observedHead, mergeable: 'MERGEABLE', rows: [{ name: 'test', status: 'COMPLETED', conclusion: 'SUCCESS' }] as unknown }
   const options: Parameters<typeof createProjectObservationSources>[0] = {
     ci: { required: async () => config, readiness: async () => raw }, baseBranch: 'main', ciWorkflow: 'ci.yml', runId: 'run',
+    reviewReadinessClock: { now: () => now, wait: async ms => { now += ms } },
     suite: { strategy: 'bun test', scope: 'full-suite', readCheckpoint: async () => ({
       runId: 'run', head: observedHead, round: 1, report: { hostExitCode: 0, suiteOutcome: 'passed' },
     }) },
@@ -245,11 +247,27 @@ test('observation CI preserves unknown, pending and named actionable red without
   f.raw.rows = [{ name: 'test', status: 'COMPLETED', conclusion: 'FAILURE' }]
   expect(await assess()).toMatchObject({ kind: 'known', findings: [{ title: 'CI FAILING: test', advisory: false }] })
   f.raw.rows = []
-  expect((await assess()).kind).toBe('unknown')
+  expect(await assess()).toMatchObject({ kind: 'unknown', detail: expect.stringContaining('Required check test has not run and settled') })
   f.raw.rows = [{ name: 'test', status: 'IN_PROGRESS', conclusion: null }]
-  expect((await assess()).kind).toBe('unknown')
+  expect(await assess()).toMatchObject({ kind: 'unknown', detail: expect.stringContaining('Required check test has not run and settled') })
   f.options.ci.required = async () => ({ kind: 'unknown', reason: 'denied' })
   expect(await assess()).toMatchObject({ kind: 'unknown', detail: expect.stringContaining('denied') })
+})
+
+test('observation CI re-observes pending readiness and preserves terminal classifications', async () => {
+  const f = observationFixture()
+  let now = 0
+  const waits: number[] = []
+  f.options.reviewReadinessClock = { now: () => now, wait: async ms => { waits.push(ms); now += ms } }
+  let observations = 0
+  f.options.ci.readiness = async () => ({ ...f.raw, mergeable: ++observations === 1 ? 'UNKNOWN' : 'MERGEABLE' })
+  expect(await assessReviewCi(f.sources.reviewCi, observedSnapshot, 'a'.repeat(40), 'run')).toEqual({ kind: 'known', findings: [] })
+  expect(waits).toEqual([30000])
+
+  f.options.ci.readiness = async () => ({ ...f.raw, mergeable: 'CONFLICTING' })
+  expect(await assessReviewCi(f.sources.reviewCi, observedSnapshot, 'a'.repeat(40), 'run')).toEqual({ kind: 'blocked', on: 'Review PR conflicts with base' })
+  f.options.ci.required = async () => ({ kind: 'unknown', reason: 'configuration denied' })
+  expect(await assessReviewCi(f.sources.reviewCi, observedSnapshot, 'a'.repeat(40), 'run')).toEqual({ kind: 'unknown', detail: 'Review CI: Review readiness configuration: configuration denied' })
 })
 
 test('observation suite requires independently acquired identity and preserves report claims', async () => {

@@ -69,8 +69,10 @@ const clock: ReadinessClock = {
   }),
 }
 
+type SettledReviewReadiness = Exclude<ReviewReadiness, { kind: 'pending' }>
+
 /** G053/G054: host-owned elapsed budget; a hung observer cannot hold the host forever. */
-export async function awaitReviewReadiness(source: ReviewReadinessSource | undefined, snapshot: BuildSnapshot, signal: AbortSignal, time: ReadinessClock = clock): Promise<GateResult> {
+export async function awaitSettledReviewReadiness(source: ReviewReadinessSource | undefined, snapshot: BuildSnapshot, signal: AbortSignal, time: ReadinessClock = clock): Promise<SettledReviewReadiness> {
   if (!source) return { kind: 'unknown', detail: 'Review readiness observation source is missing' }
   const controller = new AbortController()
   const cancel = () => controller.abort()
@@ -78,21 +80,20 @@ export async function awaitReviewReadiness(source: ReviewReadinessSource | undef
   const deadline = time.now() + REVIEW_READINESS_BUDGET_MS
   // Wall-clock watchdog also bounds an observer or injected wait that never settles.
   let timer: ReturnType<typeof setTimeout> | undefined
-  const timeout = new Promise<GateResult>(resolve => {
+  const timeout = new Promise<SettledReviewReadiness>(resolve => {
     timer = setTimeout(() => { controller.abort(); resolve({ kind: 'unknown', detail: 'Review readiness budget exhausted' }) }, REVIEW_READINESS_BUDGET_MS)
   })
-  const cancelled = new Promise<GateResult>(resolve => {
+  const cancelled = new Promise<SettledReviewReadiness>(resolve => {
     controller.signal.addEventListener('abort', () => resolve({ kind: 'unknown', detail: 'Review readiness cancelled or budget exhausted' }), { once: true })
   })
   try {
     if (signal.aborted) controller.abort()
-    return await Promise.race([timeout, cancelled, (async (): Promise<GateResult> => {
+    return await Promise.race([timeout, cancelled, (async (): Promise<SettledReviewReadiness> => {
       let detail = 'Review checks have not settled'
       while (!controller.signal.aborted && time.now() < deadline) {
         const readiness = classifyReviewReadiness(snapshot, await source.observe(snapshot, controller.signal))
         if (time.now() >= deadline) break
-        if (readiness.kind === 'passed' || readiness.kind === 'failed') return { kind: 'allow' }
-        if (readiness.kind === 'unknown' || readiness.kind === 'blocked') return readiness
+        if (readiness.kind !== 'pending') return readiness
         detail = readiness.detail
         await time.wait(Math.min(REVIEW_READINESS_RETRY_MS, deadline - time.now()), controller.signal)
       }
@@ -105,4 +106,9 @@ export async function awaitReviewReadiness(source: ReviewReadinessSource | undef
     controller.abort()
     signal.removeEventListener('abort', cancel)
   }
+}
+
+export async function awaitReviewReadiness(source: ReviewReadinessSource | undefined, snapshot: BuildSnapshot, signal: AbortSignal, time: ReadinessClock = clock): Promise<GateResult> {
+  const readiness = await awaitSettledReviewReadiness(source, snapshot, signal, time)
+  return readiness.kind === 'passed' || readiness.kind === 'failed' ? { kind: 'allow' } : readiness
 }

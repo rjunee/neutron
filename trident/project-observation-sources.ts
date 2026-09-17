@@ -1,6 +1,6 @@
 import type { BuildSnapshot } from './build-run.ts'
 import { classifyCiRollup } from './ci-readiness.ts'
-import { classifyReviewReadiness, type ReviewReadinessSource } from './gates/review-readiness.ts'
+import { awaitSettledReviewReadiness, classifyReviewReadiness, type ReadinessClock, type ReviewReadinessSource } from './gates/review-readiness.ts'
 import type { ReviewCiSource } from './gates/review-ci.ts'
 import type { ReviewSuiteSource, SuiteObservation } from './gates/review-suite.ts'
 import type { ProductionCiSource } from './production-host-effects.ts'
@@ -23,6 +23,7 @@ export function createProjectObservationSources(options: {
   ciWorkflow: string | undefined
   runId: string
   suite: ProjectSuiteOptions | undefined
+  reviewReadinessClock?: ReadinessClock
 }) {
   const reviewReadiness: ReviewReadinessSource = {
     async observe(snapshot, signal) {
@@ -56,14 +57,14 @@ export function createProjectObservationSources(options: {
     },
   }
   const reviewCi: ReviewCiSource = {
-    async observe(snapshot) {
-      const value = await reviewReadiness.observe(snapshot, new AbortController().signal)
-      if (value.kind === 'unknown') return unknown(`Review CI: ${value.detail}`)
-      const readiness = classifyReviewReadiness(snapshot, value)
-      if (readiness.kind !== 'passed' && readiness.kind !== 'failed') return unknown('Review CI configuration, mergeability or checks have not settled')
+    async observe(snapshot, outerSignal) {
+      const signal = outerSignal ?? new AbortController().signal
+      const readiness = await awaitSettledReviewReadiness(reviewReadiness, snapshot, signal, options.reviewReadinessClock)
+      if (readiness.kind === 'unknown') return unknown(`Review CI: ${readiness.detail}`)
+      if (readiness.kind === 'blocked') return readiness
       // ProductionCiSource has no pinned-base check acquisition. null supplies no
       // advisory exemption; named branch failures remain actionable in G055.
-      return { kind: 'known', head: value.head, status: readiness.kind === 'passed' ? 'green' : 'red',
+      return { kind: 'known', head: snapshot.head, status: readiness.kind === 'passed' ? 'green' : 'red',
         failing: readiness.failed, base: null }
     },
   }

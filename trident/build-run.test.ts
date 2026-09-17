@@ -1415,19 +1415,24 @@ import { awaitReviewReadiness } from './gates/review-readiness.ts'
 import { assessReviewCi } from './gates/review-ci.ts'
 import { assessReviewSuite } from './gates/review-suite.ts'
 
-for (const status of ['green', 'red', 'unobserved', 'lost-after-panel'] as const) {
+for (const status of ['green', 'red', 'unobserved', 'lost-after-panel', 'pending-after-panel'] as const) {
   test(`fresh PR production observations: ${status}`, async () => {
     const f = fixture()
     f.deps.readReviewCap = async () => ({ kind: 'known', max_rounds: 1 })
     const observed: number[] = []
+    let now = 0
+    const readinessWaits: number[] = []
+    let postPanelPending = true
     const sources = createProjectObservationSources({
       baseBranch: 'main', ciWorkflow: 'ci.yml', runId: 'run',
+      reviewReadinessClock: { now: () => now, wait: async ms => { readinessWaits.push(ms); now += ms } },
       ci: {
         required: async () => ({ kind: 'resolved', required: ['test'], appBound: [], produced: ['test'] }),
         readiness: async pr => {
           observed.push(pr)
           if (status === 'unobserved' || (status === 'lost-after-panel' && f.cross.calls.length > 0)) return { unreadable: 'CI unavailable' }
-          return { headSha: f.snapshot.head, mergeable: 'MERGEABLE', checksComplete: true,
+          const mergeable = status === 'pending-after-panel' && f.cross.calls.length > 0 && postPanelPending ? (postPanelPending = false, 'UNKNOWN') : 'MERGEABLE'
+          return { headSha: f.snapshot.head, mergeable, checksComplete: true,
             rows: [{ name: 'test', status: 'COMPLETED', conclusion: status === 'red' ? 'FAILURE' : 'SUCCESS' }] }
         },
       },
@@ -1446,11 +1451,12 @@ for (const status of ['green', 'red', 'unobserved', 'lost-after-panel'] as const
     expect(observed.length).toBeGreaterThan(0)
     expect(observed.every(pr => pr === 1)).toBe(true)
     expect(f.cross.calls).toHaveLength(status === 'unobserved' ? 0 : 1)
-    if (status === 'green') expect(result.kind).toBe('merged')
+    if (status === 'green' || status === 'pending-after-panel') expect(result.kind).toBe('merged')
     else {
       expect(result).toMatchObject({ kind: status === 'red' ? 'blocked' : 'unknown', phase: 'review' })
       expect(f.events).not.toContain('merge')
     }
+    expect(readinessWaits).toEqual(status === 'pending-after-panel' ? [30000] : [])
   })
 }
 
