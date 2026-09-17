@@ -82,7 +82,7 @@ instructions for orchestrator review and publication. This is an unverified
 instrument, not a claim that the requested red/green proof has been obtained.
 
 
-## Mutation VERIFIED on the box (completing the record above)
+### Mutation VERIFIED on the box (completing the record above)
 
 The lane could not bind a local listener, so it correctly reported the mutation
 as unverified rather than claiming a red it had not seen — and proved the cause
