@@ -8,6 +8,7 @@ import { PLAN_SCHEMA, FORGE_SCHEMA, VERDICT_SCHEMA } from '@neutronai/trident/ga
 import { briefIntegrity } from '@neutronai/trident/gates/brief-integrity.ts'
 import * as tiers from '@neutronai/trident/model-tiers.ts'
 import type { InnerLoopInput } from '@neutronai/trident/inner-loop.ts'
+import type { ResumeCheckpoint } from '@neutronai/trident/build-run.ts'
 import { afterEach, expect, spyOn, test } from 'bun:test'
 import { mkdtemp, mkdir, readFile, rm, writeFile } from 'node:fs/promises'
 import { tmpdir } from 'node:os'
@@ -33,10 +34,12 @@ import type { AdoptableHost, PtyChild, PtySpawnOpts } from '@neutronai/runtime/a
 const cleanup: (() => void | Promise<void>)[] = []
 afterEach(async () => { for (const fn of cleanup.splice(0).reverse()) await fn() })
 
-/** Model a completed worker at the host boundary, not an identity-free payload.
- * Use the real checkpoint writer so these focused wiring fixtures retain the
- * same reservation/completion format as the driver exercised by the E2E suite. */
-async function writeCompleted(options: ProjectBuildHostOptions, role: 'build' | 'fix', text: string) {
+type CompletionShape = 'valid' | 'pending' | 'wrong-stage' | 'wrong-head'
+
+/** Model a worker attempt at the host boundary, including deliberately invalid
+ * completion transitions used to prove each provenance predicate independently. */
+async function writeWorkerAttempt(options: ProjectBuildHostOptions, role: 'build' | 'fix', text: string,
+  completionShape: CompletionShape, reservationPhase: 'build' | 'fix' = role) {
   const { result } = JSON.parse(text)
   if (typeof result?.head !== 'string') throw new Error('Fixture completion requires an explicit head')
   const { store, runId } = options.production
@@ -47,12 +50,22 @@ async function writeCompleted(options: ProjectBuildHostOptions, role: 'build' | 
   const step_id = `${runId}:${role}:${round}`
   const checkpoint = prior ?? { head: null, stage: 'built' as const, round: 0,
     replansUsed: 0, findings: [], previousFindings: [] }
-  await modes.saveCheckpoint({ ...checkpoint, pending: { phase: role, step_id } })
+  await modes.saveCheckpoint({ ...checkpoint, pending: { phase: reservationPhase, step_id } })
   await writeFile(options.workers[role].request.result.path, JSON.stringify({
     schema: 'project-build', run_id: runId, step_id, kind: 'completed', result,
   }))
-  await modes.saveCheckpoint({ ...checkpoint, head: result.head,
-    stage: role === 'fix' ? 'fixed' : 'built', round: round + 1, pending: undefined })
+  const completion: ResumeCheckpoint = { ...checkpoint, head: result.head,
+    stage: role === 'fix' ? 'fixed' : 'built', round: round + 1, pending: undefined }
+  if (completionShape === 'pending') completion.pending = { phase: role, step_id }
+  if (completionShape === 'wrong-stage') completion.stage = role === 'fix' ? 'built' : 'fixed'
+  if (completionShape === 'wrong-head') completion.head = 'c'.repeat(40)
+  await modes.saveCheckpoint(completion)
+}
+
+/** Use the real checkpoint writer so positive focused wiring fixtures retain the
+ * same reservation/completion format as the driver exercised by the E2E suite. */
+async function writeCompleted(options: ProjectBuildHostOptions, role: 'build' | 'fix', text: string) {
+  await writeWorkerAttempt(options, role, text, 'valid')
 }
 async function fixture() {
   const dir = await mkdtemp(join(tmpdir(), 'project-options-'))
@@ -156,8 +169,10 @@ test('option sources preserve pin, selected provider, workflow and unavailable s
   expect(f.captured().trailer.metadata({} as BoundedWorkRequest)).toBeUndefined()
 })
 
-test('publication, mutation and suite consumers require completed original worker provenance', async () => {
-  for (const scenario of ['no-host-completion', 'wrong-run', 'wrong-step', 'wrong-head', 'missing-envelope-identity'] as const) {
+test('publication, mutation and suite consumers require every completed original worker provenance field', async () => {
+  for (const scenario of ['no-host-completion', 'wrong-run', 'wrong-step', 'wrong-head',
+    'missing-envelope-identity', 'wrong-kind', 'wrong-schema', 'wrong-reservation-phase',
+    'next-state-pending', 'wrong-completion-stage', 'wrong-completion-head'] as const) {
     const f = await fixture()
     f.input.test_strategy = 'Full suite (stage 2), run exactly this:\n\n  bun test\n'
     const options = await f.prepare()
@@ -172,13 +187,21 @@ test('publication, mutation and suite consumers require completed original worke
       complexity: 'mechanical', remainingTasks: 0, branchBrief: '',
     } } }))
     const path = options.workers.build.request.result.path
-    if (scenario !== 'no-host-completion') await writeCompleted(options, 'build', JSON.stringify({ result }))
+    const completionShape: CompletionShape = scenario === 'next-state-pending' ? 'pending'
+      : scenario === 'wrong-completion-stage' ? 'wrong-stage'
+        : scenario === 'wrong-completion-head' ? 'wrong-head' : 'valid'
+    if (scenario !== 'no-host-completion') {
+      await writeWorkerAttempt(options, 'build', JSON.stringify({ result }), completionShape,
+        scenario === 'wrong-reservation-phase' ? 'fix' : 'build')
+    }
     const envelope = scenario === 'no-host-completion'
       ? { schema: 'project-build', run_id: f.input.run.id, step_id: `${f.input.run.id}:build:0`, kind: 'completed', result }
       : JSON.parse(await readFile(path, 'utf8'))
     if (scenario === 'wrong-run') envelope.run_id = 'other-run'
     if (scenario === 'wrong-step') envelope.step_id = `${f.input.run.id}:build:99`
     if (scenario === 'wrong-head') envelope.result.head = 'c'.repeat(40)
+    if (scenario === 'wrong-kind') envelope.kind = 'blocked'
+    if (scenario === 'wrong-schema') envelope.schema = 'project-review'
     await writeFile(path, JSON.stringify(scenario === 'missing-envelope-identity' ? { result } : envelope))
     const before = f.commands.length
     expect(await options.policy.mutation.readClaim(snapshot)).toBeNull()
@@ -193,6 +216,34 @@ test('publication, mutation and suite consumers require completed original worke
     expect((await options.policy.reviewSuite!.readCheckpoint(snapshot, 1))?.report).toEqual({ hostExitCode: 0 })
     expect((await options.production.publication(snapshot)).title).toBe('Change')
   }
+})
+
+test('fix artifact consumers require a fixed completion rather than a built completion', async () => {
+  const f = await fixture()
+  f.input.test_strategy = 'Full suite (stage 2), run exactly this:\n\n  bun test\n'
+  const options = await f.prepare()
+  const head = 'b'.repeat(40)
+  const snapshot = { head, diff: '+production', pr: null }
+  const claim = { file: 'guard.ts', find: 'before', replace: 'after',
+    guard: ['bun', 'test', 'guard.test.ts'], control: ['bun', 'test', 'control.test.ts'] }
+  const result = { head, payload: { mutationClaim: claim, worktreePath: options.production.worktree,
+    branch: 'change', commitSha: head, prNumber: null, diffFile: 'diff', testsPassed: true } }
+  await writeFile(options.workers.plan.request.result.path, JSON.stringify({ result: { payload: {
+    implementationPlan: '- [x] Fix', topTask: '- [x] Fix', executionSpec: 'Fix the code.',
+    complexity: 'mechanical', remainingTasks: 0, branchBrief: '',
+  } } }))
+
+  await writeWorkerAttempt(options, 'fix', JSON.stringify({ result }), 'wrong-stage')
+  const before = f.commands.length
+  expect(await options.policy.mutation.readClaim(snapshot)).toBeNull()
+  expect(await options.policy.reviewSuite!.readCheckpoint(snapshot, 1)).toBeNull()
+  await expect(options.production.publication(snapshot)).rejects.toThrow('does not match the reviewed head')
+  expect(f.commands.slice(before).some(argv => argv[0] === 'bash')).toBe(false)
+
+  await writeCompleted(options, 'fix', JSON.stringify({ result }))
+  expect(await options.policy.mutation.readClaim(snapshot)).toEqual(claim)
+  expect((await options.policy.reviewSuite!.readCheckpoint(snapshot, 1))?.report).toEqual({ hostExitCode: 0 })
+  expect((await options.production.publication(snapshot)).title).toBe('Fix')
 })
 
 test('a later host attempt clears a dead unarmed reservation before rebuilding runners', async () => {
