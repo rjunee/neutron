@@ -607,6 +607,33 @@ async function drive(f: Awaited<ReturnType<typeof fixture>>, mode: 'pr' | 'ralph
 }
 
 /**
+ * Recreate what a fresh retry sees after its prior process published and then
+ * died: the new worktree is still at the pinned base, while the real remote
+ * branch and its open PR point at the prior process's different commit.
+ */
+async function seedPriorPublication(f: Awaited<ReturnType<typeof fixture>>, publishedPr: number) {
+  const options = await f.prepare()
+  const run = f.store.get(f.row.id)!
+  if (!run.branch || !run.worktree) throw new Error('prepared run has no branch or worktree')
+  const setup = async (args: string[]) => {
+    const result = await spawnCapture(['git', '-C', f.repo, ...args], f.repo)
+    if (!result.ok) throw new Error(`prior publication setup failed: ${result.stderr}`)
+    return result.stdout.trim()
+  }
+  await setup(['switch', '-c', 'prior-publication', 'main'])
+  await writeFile(join(f.repo, 'NOTES.md'), 'seed\nprior publication\n')
+  await setup(['add', '--', 'NOTES.md'])
+  await setup(['commit', '-m', 'test: prior publication'])
+  const priorHead = await setup(['rev-parse', 'HEAD^{commit}'])
+  await setup(['push', f.origin, `${priorHead}:refs/heads/${run.branch}`])
+  await setup(['switch', 'main'])
+  await setup(['branch', '-D', 'prior-publication'])
+  f.github.prs.push({ number: 1, state: 'OPEN', headRefName: run.branch, baseRefName: 'main' })
+  await f.store.update(f.row.id, { published_pr: publishedPr })
+  return { options, branch: run.branch, worktree: run.worktree, priorHead }
+}
+
+/**
  * ONE DRIVER PROCESS THAT DOES NOT LIVE TO CLEAN UP.
  *
  * `createProjectBuildHost(...).run` wraps every build in `withProductionCleanup`
@@ -812,6 +839,42 @@ test('pr mode drives plan, build, review, publish and merge to a terminal merged
   expect(originMain.stdout.trim()).not.toBe(f.baseSha)
   expect(f.store.get(f.row.id)!.pr).toBe(1)
   expect(['cleaned', 'preserved']).toContain(outcome.cleanup.kind)
+}, 300_000)
+
+test('fresh retry rebuilds and republishes its prior open PR from a different real head', async () => {
+  const f = await fixture()
+  const seeded = await seedPriorPublication(f, 1)
+  expect(await gitOut(spawnCapture, seeded.worktree, ['rev-parse', 'HEAD^{commit}'])).toBe(f.baseSha)
+  expect(seeded.priorHead).not.toBe(f.baseSha)
+
+  const host = await createProjectBuildHost(seeded.options)
+  const outcome = await host.run({ mode: 'pr', start: 'fresh' }, new AbortController().signal)
+  expect(outcome.kind, why(f, outcome)).toBe('merged')
+
+  const finalHead = await gitOut(spawnCapture, f.origin, ['rev-parse', `refs/heads/${seeded.branch}^{commit}`])
+  expect(finalHead).not.toBe(seeded.priorHead)
+  expect(await gitOut(spawnCapture, f.origin, ['rev-parse', 'refs/heads/main^{commit}'])).toBe(finalHead)
+  expect(f.github.prs).toEqual([{ number: 1, state: 'MERGED', headRefName: seeded.branch, baseRefName: 'main' }])
+  expect(f.store.get(f.row.id)).toMatchObject({ pr: 1, published_pr: 1 })
+  const roles = f.world.dispatches.map(dispatch => dispatch.role)
+  expect(roles.slice(0, 3)).toEqual(['plan', 'build', 'review'])
+  expect(roles.filter(role => role === 'review').length).toBeGreaterThanOrEqual(2)
+  expect(roles).toContain('synthesis')
+  expect(f.commands.filter(argv => argv[0] === 'bash' && argv[1] === '-lc'
+    && (argv[2] ?? '').includes('bash scripts/ci/suite.sh'))).toHaveLength(1)
+}, 300_000)
+
+test('fresh retry refuses an open PR whose durable publication provenance names another PR', async () => {
+  const f = await fixture()
+  const seeded = await seedPriorPublication(f, 2)
+  const host = await createProjectBuildHost(seeded.options)
+  const outcome = await host.run({ mode: 'pr', start: 'fresh' }, new AbortController().signal)
+
+  expect(outcome).toMatchObject({ kind: 'blocked', phase: 'plan', on: 'Fresh build already has a PR' })
+  expect(f.world.dispatches).toEqual([])
+  expect(f.github.prs).toEqual([{ number: 1, state: 'OPEN', headRefName: seeded.branch, baseRefName: 'main' }])
+  expect(await gitOut(spawnCapture, f.origin, ['rev-parse', `refs/heads/${seeded.branch}^{commit}`])).toBe(seeded.priorHead)
+  expect(f.store.get(f.row.id)).toMatchObject({ pr: null, published_pr: 2 })
 }, 300_000)
 
 test('a missing full-suite command stops with its own cause and runs no suite', async () => {
