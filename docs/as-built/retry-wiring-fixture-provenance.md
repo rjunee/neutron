@@ -30,11 +30,10 @@ accepted by all three consumers after the valid transition is restored.
 Verification passed all 32 tests (270 assertions) in
 `open/__tests__/project-build-wiring.test.ts` and all 61 tests (620 assertions)
 in `open/__tests__/project-build-e2e.test.ts`. Root and Trident TypeScript
-project checks and changed-file ESLint also passed. No full suite was rerun for
-this test-only follow-up; no production guard, acceptance requirement, deployed
-state or saved live artifact changed.
+project checks and changed-file ESLint also passed. No production guard,
+acceptance requirement, deployed state or saved live artifact changed.
 
-The preceding integrated retry batch passed `bash scripts/run-tests.sh`:
+The final integrated retry batch passed `bash scripts/run-tests.sh`:
 all 1,595 discovered files executed across 17 bounded-memory lanes, with
-23,434 passing tests, 23 skips, zero failures and 99,378 assertions. The skipped
+23,435 passing tests, 23 skips, zero failures and 99,427 assertions. The skipped
 checks are not counted as live-provider or served-instance verification.
