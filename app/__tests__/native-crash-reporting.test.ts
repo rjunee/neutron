@@ -2,12 +2,20 @@ import { afterEach, describe, expect, it } from 'bun:test';
 import { join } from 'node:path';
 
 import { buildNativeCrashReport, readNativeCrashReport } from '../lib/native-crash-import';
-import {
+import { readQueue, type DiagnosticQueueStore } from '../lib/diagnostic-queue';
+import { installNativeHarness } from './support/native-harness';
+
+// `importNativeCrashReport` deliberately resolves Expo/React Native app context.
+// Install the device-shaped aliases before loading that runtime. Mentioning this
+// harness also places the file in run-tests.sh's isolated device lane, away from
+// process-global module mocks owned by ordinary app fixtures.
+installNativeHarness();
+
+const {
   __resetDiagnosticsForTests,
   __setDiagnosticsQueueStoreForTests,
   importNativeCrashReport,
-} from '../lib/diagnostics';
-import { readQueue, type DiagnosticQueueStore } from '../lib/diagnostic-queue';
+} = await import('../lib/diagnostics');
 
 const plugin = require(join(import.meta.dir, '..', 'plugins', 'with-native-crash-reporting.js')) as {
   addCrashInitProvider(manifest: Record<string, unknown>): Record<string, unknown>;
