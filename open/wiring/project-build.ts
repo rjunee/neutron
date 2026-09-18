@@ -23,6 +23,7 @@ import { modelTier } from '@neutronai/trident/model-tiers.ts'
 import { readProjectRepos } from '@neutronai/trident/project-repos.ts'
 import { buildReflectionGuidance } from '@neutronai/trident/reflection-guidance.ts'
 import { PROJECT_BUILD_WALL_MS } from '@neutronai/trident/project-build-budget.ts'
+import { parseBuildModeState, readBuildRetrySource } from '@neutronai/trident/build-mode-state.ts'
 
 /**
  * WALL BUDGET PER ROLE. This was ONE flat 45 minutes for all four roles, which is
@@ -208,6 +209,7 @@ export async function prepareProjectBuild(input: InnerLoopInput, context: Projec
     worktree: input.run.worktree ?? runWorktreePath(input.run.repo_path, input.run) }
   if (!run.base_sha) throw Error('Dispatched build has no pinned base')
   const git = async (args: string[]) => context.runHost(['git', '-C', run.repo_path, ...args], run.repo_path)
+  await context.store.invalidateRetrySource(run)
   const saved = await context.store.update(run.id, { branch: run.branch, worktree: run.worktree, base_sha: run.base_sha })
   if (!saved) throw Error('Dispatched build row disappeared')
   let exists = false
@@ -216,9 +218,28 @@ export async function prepareProjectBuild(input: InnerLoopInput, context: Projec
   if (!exists) {
     const branch = await git(['show-ref', '--verify', '--quiet', `refs/heads/${run.branch}`])
     if (branch.timed_out || (!branch.ok && branch.exit_code !== 1)) throw Error('Build branch existence is unknown')
+    let start = run.base_sha
+    if (!branch.ok) {
+      const source = readBuildRetrySource(context.store, saved)
+      if (source) {
+        const expected = source.state.checkpoint.head!
+        // PR cleanup deletes a local branch only after proving origin holds it.
+        // Re-fetch that branch and pin the observed commit before restoring it;
+        // a moved remote must not be silently reset to the predecessor's head.
+        if (run.merge_mode === 'pr') {
+          const fetched = await git(['fetch', '--no-tags', 'origin', `refs/heads/${run.branch}`])
+          if (!fetched.ok || fetched.timed_out) throw Error('Retry branch could not be fetched')
+          const observed = await git(['rev-parse', '--verify', 'FETCH_HEAD^{commit}'])
+          if (!observed.ok || observed.timed_out || observed.stdout.trim() !== expected) throw Error('Retry branch moved after dispatch')
+        }
+        const object = await git(['rev-parse', '--verify', `${expected}^{commit}`])
+        if (!object.ok || object.timed_out || object.stdout.trim() !== expected) throw Error('Retry commit is unavailable')
+        start = expected
+      }
+    }
     const added = await git(branch.ok
       ? ['worktree', 'add', '--', run.worktree, run.branch]
-      : ['worktree', 'add', '-b', run.branch, '--', run.worktree, run.base_sha])
+      : ['worktree', 'add', '-b', run.branch, '--', run.worktree, start])
     if (!added.ok || added.timed_out) throw Error('Build worktree creation was not confirmed')
   }
   const checked = await context.runHost(['git', '-C', run.worktree, 'symbolic-ref', '--quiet', 'HEAD'], run.worktree)
@@ -374,14 +395,53 @@ export async function prepareProjectBuild(input: InnerLoopInput, context: Projec
     } }
   }
   const bodyFile = join(state, 'publication.md')
+  // A retried build keeps its completed worker artifacts under the ORIGINAL
+  // run's directory. Read through the dispatch-minted source chain; never move
+  // receipts or relabel worker envelopes as if this run had produced them.
+  const readArtifact = async (role: 'plan' | 'build' | 'fix', head?: string): Promise<string> => {
+    let current = context.store.get(run.id)!
+    const seen = new Set<string>()
+    for (;;) {
+      if (seen.has(current.id)) throw new Error('Retry artifact source cycle')
+      seen.add(current.id)
+      try {
+        const text = await readFile(join(context.stateRoot, encodeURIComponent(current.id), `${role}.result`), 'utf8')
+        if (role !== 'plan' && head !== undefined) {
+          const envelope = JSON.parse(text)
+          if (envelope?.result?.head !== head) throw new Error('Completed artifact does not match this revision')
+          const states = context.store.stageEvents(current.id).filter(event => event.stage === 'build-mode-state')
+            .map(event => parseBuildModeState(event.meta, current, true).checkpoint)
+          // A matching SHA alone does not turn a copied result into a completed
+          // fix. Require the original run's reservation and its host-observed
+          // completion, in that order, without importing any worker identity.
+          const completed = states.some((state, index) => state.pending?.phase === role
+            && state.pending.step_id === envelope?.step_id
+            && states[index + 1]?.pending === undefined
+            && states[index + 1]?.stage === (role === 'fix' ? 'fixed' : 'built')
+            && states[index + 1]?.head === head)
+          if (envelope?.run_id !== current.id || envelope?.kind !== 'completed'
+            || envelope?.schema !== 'project-build' || !completed) {
+            throw new Error('Completed artifact is missing original host-observed worker identity')
+          }
+        }
+        return text
+      }
+      catch (error) { if ((error as NodeJS.ErrnoException).code !== 'ENOENT') throw error }
+      const source = readBuildRetrySource(context.store, current)
+      if (!source || (role !== 'plan' && head !== undefined && source.state.checkpoint.head !== head)) {
+        throw new Error(`Completed ${role} artifact is missing for this revision`)
+      }
+      current = source.prior
+    }
+  }
   const publication = async (snapshot: { head: string }) => {
-    const planEnvelope = JSON.parse(await readFile(workers.plan.request.result.path, 'utf8'))
+    const planEnvelope = JSON.parse(await readArtifact('plan', snapshot.head))
     const plan = validateTrailer('plan', planEnvelope?.result?.payload)
     if (!plan.ok) throw new Error(`Publication plan result is invalid: ${plan.reason} at ${plan.path}`)
     let forge: ReturnType<typeof validateTrailer<'forge'>> | null = null
     for (const role of ['fix', 'build'] as const) {
       try {
-        const envelope = JSON.parse(await readFile(workers[role].request.result.path, 'utf8'))
+        const envelope = JSON.parse(await readArtifact(role, snapshot.head))
         if (envelope?.result?.head !== snapshot.head) continue
         const checked = validateTrailer('forge', envelope?.result?.payload)
         if (checked.ok) { forge = checked; break }
@@ -424,10 +484,14 @@ export async function prepareProjectBuild(input: InnerLoopInput, context: Projec
       publication },
     policy: {
       leak: { scratch_dir: join(state, 'leak') },
-      mutation: { readClaim: async () => {
-        const value = JSON.parse(await readFile(workers.build.request.result.path, 'utf8'))
-        const checked = validateTrailer('forge', value?.result?.payload)
-        return checked.ok ? checked.value.mutationClaim : null
+      mutation: { readClaim: async snapshot => {
+        for (const role of ['fix', 'build'] as const) {
+          let value
+          try { value = JSON.parse(await readArtifact(role, snapshot.head)) } catch { continue }
+          const checked = validateTrailer('forge', value?.result?.payload)
+          if (checked.ok && checked.value.commitSha === snapshot.head) return checked.value.mutationClaim
+        }
+        return null
       } },
       reviewSuite: { strategy: input.test_strategy_intermediate ?? input.test_strategy ?? '',
         scope: input.test_strategy_intermediate ? 'subset' : 'full-suite',
@@ -448,7 +512,7 @@ export async function prepareProjectBuild(input: InnerLoopInput, context: Projec
         readCheckpoint: async (snapshot, round) => {
           for (const role of ['fix', 'build'] as const) {
             let value: { result?: { head?: unknown; payload?: unknown } }
-            try { value = JSON.parse(await readFile(workers[role].request.result.path, 'utf8')) }
+            try { value = JSON.parse(await readArtifact(role, snapshot.head)) }
             catch { continue }
             if (value?.result?.head !== snapshot.head) continue
             const checked = validateTrailer('forge', value.result.payload)

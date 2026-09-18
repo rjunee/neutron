@@ -93,6 +93,7 @@ import {
 } from './git-mode.ts'
 import { ensureProjectBuildWorkspace } from './build-workspace.ts'
 import { builtButNeverReviewedSeed, carriedRalphBudget } from './run-disposition.ts'
+import { retryModeSource } from './build-mode-state.ts'
 import { detectBaseBranch } from './merge.ts'
 import { slugifyTask } from './slugify-task.ts'
 import { isTerminalPhase } from './state-machine.ts'
@@ -1246,6 +1247,7 @@ export async function dispatchBoardBoundBuild(
   // asks about NON-terminal rows and live worktree locks, this one about the card's
   // latest TERMINAL row — so neither can mask the other.
   let seed: ReturnType<typeof builtButNeverReviewedSeed> = null
+  let typedSource: ReturnType<typeof retryModeSource> = null
   // WHY THE SEED DECISION IS NAMED OUT LOUD (#519). Every arm below that declines
   // falls back to a byte-identical FRESH dispatch, and a fresh dispatch looks
   // exactly like a first attempt: a row with a null checkpoint and `ralph_round`
@@ -1425,7 +1427,23 @@ export async function dispatchBoardBoundBuild(
       // disagreed rather than claiming this is a different card.
       seedReason = 'prior_run_task_text_differs'
     } else {
-      const candidate = builtButNeverReviewedSeed(prior, { ralph })
+      // Typed driver state, including a source-only retry that failed during
+      // preparation, is validated under every predecessor's original identity.
+      let source: ReturnType<typeof retryModeSource>
+      try {
+        source = prior.repo_path === repo_path && prior.branch === branch
+          && prior.merge_mode === merge_mode && prior.ralph === ralph
+          ? retryModeSource(deps.store, prior) : null
+      } catch {
+        return { ok: false, code: 'backend_error', message: 'The previous run has an invalid retry checkpoint. Nothing was dispatched.' }
+      }
+      // Typed state or a source link supersedes an inherited legacy projection.
+      // An ineligible successor cannot revive its old fix-round seed.
+      const candidate = source !== null ? {
+        checkpoint: `fix-round-${source.state.checkpoint.round}`,
+        head: source.state.checkpoint.head!, findings: null, base_sha: prior.base_sha!,
+      } : deps.store.stageEvents(prior.id).some(event => event.stage === 'build-mode-state' || event.stage === 'build-retry-source')
+        ? null : builtButNeverReviewedSeed(prior, { ralph })
       if (candidate === null) {
         seedReason = 'prior_run_has_no_resumable_build'
       } else {
@@ -1444,6 +1462,7 @@ export async function dispatchBoardBoundBuild(
         const observed = tip.trim().toLowerCase()
         if (observed === candidate.head) {
           seed = candidate
+          typedSource = source
           seedReason = 'resumed'
         } else {
           // THE TWO FAILURES ARE DIFFERENT FACTS AND ARE REPORTED AS SUCH. A 40-hex
@@ -1558,6 +1577,9 @@ export async function dispatchBoardBoundBuild(
       ...(deps.chat_id !== undefined ? { chat_id: deps.chat_id } : {}),
       ...(deps.thread_id !== undefined ? { thread_id: deps.thread_id } : {}),
       ...(deps.channel_kind !== undefined ? { channel_kind: deps.channel_kind } : {}),
+    }, typedSource === null ? undefined : {
+      priorRunId: typedSource.prior.id, eventId: typedSource.eventId,
+      head: typedSource.state.checkpoint.head!,
     })
     if (!admission.ok) {
       if (admission.conflict === 'branch') {

@@ -26,7 +26,7 @@
 
 import { describe, expect, test } from 'bun:test'
 import { spawnSync } from 'node:child_process'
-import { chmodSync, mkdtempSync, mkdirSync, writeFileSync } from 'node:fs'
+import { chmodSync, existsSync, mkdtempSync, mkdirSync, symlinkSync, writeFileSync } from 'node:fs'
 import { tmpdir } from 'node:os'
 import { delimiter, dirname, join } from 'node:path'
 import { fileURLToPath } from 'node:url'
@@ -55,14 +55,34 @@ interface RunOpts {
   preinstalled?: boolean
 }
 
+/** Supply only the real support utilities the installer seam needs. */
+function isolatedPath(cwd: string, excluded: string): string {
+  const shadow = join(cwd, 'shadowbin')
+  mkdirSync(shadow, { recursive: true })
+  const supportCommands = [
+    'bun', 'cat', 'chmod', 'dirname', 'mkdir', 'mktemp', 'rm', 'sh', 'sleep', 'tput', 'uname',
+  ]
+  for (const name of supportCommands) {
+    const source = name === 'bun' ? process.execPath : Bun.which(name)
+    if (source === null || existsSync(join(shadow, name))) continue
+    symlinkSync(source, join(shadow, name))
+  }
+  const discovered = spawnSync('/bin/sh', ['-c', 'command -v "$1"', 'sh', excluded], {
+    encoding: 'utf8',
+    env: { PATH: shadow },
+  }).stdout.trim()
+  expect(discovered).toBe('')
+  return shadow
+}
+
 function runGbrainSeam(
   env: Record<string, string | undefined>,
   opts: RunOpts = {},
 ): GbrainSeamResult {
   const cwd = mkdtempSync(join(tmpdir(), 'neutron-install-gbrain-'))
-  // Inherit the real PATH so `ensure_bun` (which runs before the seam) finds the
-  // bun this test suite is itself running under, then prepend our own bins.
-  let path = process.env['PATH'] ?? '/usr/bin:/bin'
+  // Preserve the host's support commands without allowing a host-installed
+  // gbrain to satisfy the fixture's deliberately absent world.
+  let path = isolatedPath(cwd, 'gbrain')
   // BUN_INSTALL controls where ensure_gbrain looks for the global bin dir; point
   // it at the throwaway home so a real ~/.bun/bin never interferes.
   const bunInstall = join(cwd, '.bun')
@@ -73,6 +93,11 @@ function runGbrainSeam(
     writeFileSync(stub, '#!/bin/sh\nexit 0\n')
     chmodSync(stub, 0o755)
     path = `${bunBin}${delimiter}${path}`
+    const discovered = spawnSync('/bin/sh', ['-c', 'command -v "$1"', 'sh', 'gbrain'], {
+      encoding: 'utf8',
+      env: { PATH: path },
+    }).stdout.trim()
+    expect(discovered).toBe(stub)
   }
   const args = [INSTALL_SH, '--yes', '--dir', join(cwd, 'no-checkout'), ...(opts.args ?? [])]
   const res = spawnSync('sh', args, {

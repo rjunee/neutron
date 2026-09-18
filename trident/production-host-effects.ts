@@ -2,7 +2,7 @@ import { mkdtemp, readFile, rm, writeFile, rename, lstat } from 'node:fs/promise
 import { tmpdir } from 'node:os'
 import { join } from 'node:path'
 import { createHash } from 'node:crypto'
-import type { BuildRunDeps, BuildSnapshot, GateResult, Measurement, BuildModeHost, ResumeCheckpoint } from './build-run.ts'
+import type { BuildRunDeps, BuildSnapshot, GateResult, Measurement, BuildModeHost } from './build-run.ts'
 import { classifyCiRollup, confirmConfigurationError, type CiRunObservation, type RequiredCheckObservation } from './ci-readiness.ts'
 import { briefIntegrity } from './gates/brief-integrity.ts'
 import type { AdmissionSource } from './gates/project-admission.ts'
@@ -14,6 +14,7 @@ import type { EnvCapableHostRunner } from './git-mode.ts'
 import type { TridentRun, TridentRunStore } from './store.ts'
 import { isTerminalPhase } from './state-machine.ts'
 import { TRIDENT_SCRIPT_DIR } from './script-dir.ts'
+import { parseBuildModeState, readBuildRetrySource, type BuildModeState } from './build-mode-state.ts'
 
 const oid = /^(?:[0-9a-f]{40}|[0-9a-f]{64})$/
 const unknown = (detail: string): GateResult => ({ kind: 'unknown', detail })
@@ -228,7 +229,7 @@ export function createProductionHostEffects(options: ProductionHostOptions) {
       return { kind: 'known', value: { head: tip, diff, pr } }
     } catch (error) { return { kind: 'unknown', detail: String(error) } }
   }
-  type ModeState = { checkpoint: ResumeCheckpoint; iteration: number; consumed?: { round: number; head: string } }
+  type ModeState = BuildModeState
   let modeVersion: number | null = null
   let modeState: ModeState | null = null
   const latestModeEvent = () => store.stageEvents(runId).filter(event => event.stage === 'build-mode-state').at(-1)
@@ -236,21 +237,7 @@ export function createProductionHostEffects(options: ProductionHostOptions) {
     row()
     const event = latestModeEvent()
     if (!event) return null
-    const state = JSON.parse(event.meta ?? 'null')
-    const c = state?.checkpoint
-    if (state?.runId !== runId || state?.branch !== branch || state?.base !== row().base_sha || state.repo !== repo || state.worktree !== worktree || state.projectSlug !== options.projectSlug || state.mergeMode !== row().merge_mode
-      || !Number.isSafeInteger(state.iteration) || state.iteration < 0
-      || !c || (c.head !== null && (typeof c.head !== 'string' || !oid.test(c.head)))
-      || !['built', 'approved', 'rejected', 'fixed', 'ralph-task-built', 'ralph-task-built-deviated'].includes(c.stage)
-      || !Number.isSafeInteger(c.round) || c.round < 0 || ![0, 1].includes(c.replansUsed)
-      || !Array.isArray(c.findings) || !c.findings.every((f: any) => f && ['code', 'lane'].includes(f.kind) && typeof f.actionable === 'boolean' && typeof f.text === 'string')
-      || !Array.isArray(c.previousFindings) || !c.previousFindings.every((f: unknown) => typeof f === 'string')
-      || (c.previousBlockingCount !== undefined && (!Number.isSafeInteger(c.previousBlockingCount) || c.previousBlockingCount < 0))
-      || (state.consumed !== undefined && (!Number.isSafeInteger(state.consumed?.round) || state.consumed.round < 0
-        || typeof state.consumed.head !== 'string' || !oid.test(state.consumed.head)))
-      || (c.pending !== undefined && (!c.pending || !['plan', 'build', 'review', 'fix'].includes(c.pending.phase) || typeof c.pending.step_id !== 'string' || !c.pending.step_id.startsWith(`${runId}:`)))) {
-      throw new Error('Host mode checkpoint is missing valid identity or state')
-    }
+    const state = parseBuildModeState(event.meta, row())
     modeVersion = event.id
     return state
   }
@@ -265,6 +252,16 @@ export function createProductionHostEffects(options: ProductionHostOptions) {
   const modes: BuildModeHost = {
     async loadResume() {
       modeState = readModeState()
+      if (!modeState) {
+        const source = readBuildRetrySource(store, row())
+        if (source) {
+          // Mint this run's own state through the normal compare-and-append.
+          // Only completed checkpoint data crosses runs; no worker reservation,
+          // approval, CI receipt or publication receipt is copied.
+          await saveModeState({ checkpoint: source.state.checkpoint,
+            iteration: Math.max(source.state.iteration, row().ralph_round) })
+        }
+      }
       if (!modeState) throw new Error('Host resume checkpoint is missing')
       return structuredClone(modeState.checkpoint)
     },

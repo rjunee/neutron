@@ -8,6 +8,7 @@ import { PLAN_SCHEMA, FORGE_SCHEMA, VERDICT_SCHEMA } from '@neutronai/trident/ga
 import { briefIntegrity } from '@neutronai/trident/gates/brief-integrity.ts'
 import * as tiers from '@neutronai/trident/model-tiers.ts'
 import type { InnerLoopInput } from '@neutronai/trident/inner-loop.ts'
+import type { ResumeCheckpoint } from '@neutronai/trident/build-run.ts'
 import { afterEach, expect, spyOn, test } from 'bun:test'
 import { mkdtemp, mkdir, readFile, rm, writeFile } from 'node:fs/promises'
 import { tmpdir } from 'node:os'
@@ -25,11 +26,47 @@ import { prepareProjectBuild, suiteScript, type ProjectBuildContext } from '../w
 import { makeLazyCredentialedHostRunner, spawnCapture } from '@neutronai/trident/git-mode.ts'
 import { githubProcessEnv } from '@neutronai/github/credential.ts'
 import { renderTestStrategy } from '@neutronai/trident/test-strategy.ts'
+import { createProductionHostEffects } from '@neutronai/trident/production-host-effects.ts'
+import type { ProjectBuildHostOptions } from '@neutronai/trident/project-build-host.ts'
 import { CodexProjectSessionHost } from '@neutronai/runtime/adapters/codex-cli/persistent/project-session.ts'
 import type { AdoptableHost, PtyChild, PtySpawnOpts } from '@neutronai/runtime/adapters/claude-code/persistent/pty-host.ts'
 
 const cleanup: (() => void | Promise<void>)[] = []
 afterEach(async () => { for (const fn of cleanup.splice(0).reverse()) await fn() })
+
+type CompletionShape = 'valid' | 'pending' | 'wrong-stage' | 'wrong-head'
+
+/** Model a worker attempt at the host boundary, including deliberately invalid
+ * completion transitions used to prove each provenance predicate independently. */
+async function writeWorkerAttempt(options: ProjectBuildHostOptions, role: 'build' | 'fix', text: string,
+  completionShape: CompletionShape, reservationPhase: 'build' | 'fix' = role) {
+  const { result } = JSON.parse(text)
+  if (typeof result?.head !== 'string') throw new Error('Fixture completion requires an explicit head')
+  const { store, runId } = options.production
+  const { modes } = createProductionHostEffects(options.production)
+  const hasState = store.stageEvents(runId).some(event => event.stage === 'build-mode-state')
+  const prior = hasState ? await modes.loadResume() : null
+  const round = prior?.round ?? 0
+  const step_id = `${runId}:${role}:${round}`
+  const checkpoint = prior ?? { head: null, stage: 'built' as const, round: 0,
+    replansUsed: 0, findings: [], previousFindings: [] }
+  await modes.saveCheckpoint({ ...checkpoint, pending: { phase: reservationPhase, step_id } })
+  await writeFile(options.workers[role].request.result.path, JSON.stringify({
+    schema: 'project-build', run_id: runId, step_id, kind: 'completed', result,
+  }))
+  const completion: ResumeCheckpoint = { ...checkpoint, head: result.head,
+    stage: role === 'fix' ? 'fixed' : 'built', round: round + 1, pending: undefined }
+  if (completionShape === 'pending') completion.pending = { phase: role, step_id }
+  if (completionShape === 'wrong-stage') completion.stage = role === 'fix' ? 'built' : 'fixed'
+  if (completionShape === 'wrong-head') completion.head = 'c'.repeat(40)
+  await modes.saveCheckpoint(completion)
+}
+
+/** Use the real checkpoint writer so positive focused wiring fixtures retain the
+ * same reservation/completion format as the driver exercised by the E2E suite. */
+async function writeCompleted(options: ProjectBuildHostOptions, role: 'build' | 'fix', text: string) {
+  await writeWorkerAttempt(options, role, text, 'valid')
+}
 async function fixture() {
   const dir = await mkdtemp(join(tmpdir(), 'project-options-'))
   cleanup.push(() => rm(dir, { recursive: true, force: true }))
@@ -83,14 +120,14 @@ test('option sources preserve pin, selected provider, workflow and unavailable s
   expect(options.policy.review!.runnerFor({ ...model, group: 'kimi' }, seat)).toBeUndefined()
   const claim = { file: 'guard.ts', find: 'before', replace: 'after', guard: ['bun', 'test'], control: ['bun', 'test'] }
   const forge = { mutationClaim: claim, worktreePath: options.production.worktree, branch: 'change', commitSha: 'a'.repeat(40), prNumber: null, diffFile: 'diff', testsPassed: true }
-  await writeFile(options.workers.build.request.result.path, JSON.stringify({ result: { payload: forge } }))
+  await writeCompleted(options, 'build', JSON.stringify({ result: { head: forge.commitSha, payload: forge } }))
   expect(await options.policy.mutation.readClaim({ head: 'a'.repeat(40), diff: '', pr: null })).toEqual(claim)
   await writeFile(options.workers.build.request.result.path, JSON.stringify({ result: { payload: { mutationClaim: claim } } }))
   expect(await options.policy.mutation.readClaim({ head: 'a'.repeat(40), diff: '', pr: null })).toBeNull()
   // THE HOST RUNS THE SUITE FOR THE REVISION THE CHECKPOINT DESCRIBES.
   const head = 'a'.repeat(40)
   const suiteForge = { ...forge, testsPassed: false, suiteOutcome: 'failed-preexisting', suiteEvidence: 'base is red too' }
-  await writeFile(options.workers.build.request.result.path, JSON.stringify({ result: { head, payload: suiteForge } }))
+  await writeCompleted(options, 'build', JSON.stringify({ result: { head, payload: suiteForge } }))
   expect(await options.policy.reviewSuite!.readCheckpoint({ head, diff: '', pr: null }, 2)).toEqual({
     runId: f.input.run.id, head, round: 2,
     report: { hostExitCode: 0, suiteOutcome: 'failed-preexisting', suiteEvidence: 'base is red too' },
@@ -110,17 +147,19 @@ test('option sources preserve pin, selected provider, workflow and unavailable s
   f.input.test_strategy = 'TEST EXECUTION\n\nThe project test command could NOT be resolved.'
   expect((await options.policy.reviewSuite!.readCheckpoint({ head, diff: '', pr: null }, 2))?.report).toBeNull()
   f.input.test_strategy = strategy
-  // The fix round's claim is the fresher of the two and wins at the same head.
-  await writeFile(options.workers.fix.request.result.path, JSON.stringify({ result: { head, payload: { ...forge, testsPassed: true, suiteOutcome: 'passed' } } }))
+  // The fix advances the head; the old build artifact must not describe it.
+  const fixedHead = 'b'.repeat(40)
+  await writeCompleted(options, 'fix', JSON.stringify({ result: { head: fixedHead,
+    payload: { ...forge, commitSha: fixedHead, testsPassed: true, suiteOutcome: 'passed' } } }))
   const host = f.context.runSuite!
   f.context.runSuite = async argv => argv[0] === 'bash'
     ? { ok: false, exit_code: 7, stdout: '', stderr: 'suite failed' }
     : host(argv)
-  expect((await options.policy.reviewSuite!.readCheckpoint({ head, diff: '', pr: null }, 3))?.report).toEqual({ hostExitCode: 7, suiteOutcome: 'passed' })
+  expect((await options.policy.reviewSuite!.readCheckpoint({ head: fixedHead, diff: '', pr: null }, 3))?.report).toEqual({ hostExitCode: 7, suiteOutcome: 'passed' })
   f.context.runSuite = async argv => argv[0] === 'bash'
     ? { ok: false, exit_code: 124, stdout: '', stderr: '', timed_out: true }
     : host(argv)
-  expect((await options.policy.reviewSuite!.readCheckpoint({ head, diff: '', pr: null }, 3))?.report).toEqual({ suiteOutcome: 'passed' })
+  expect((await options.policy.reviewSuite!.readCheckpoint({ head: fixedHead, diff: '', pr: null }, 3))?.report).toEqual({ suiteOutcome: 'passed' })
   const validators = f.captured().trailer.schemas
   const payload = { verdict: 'APPROVE', findings: [] }
   expect(validators.get('verdict')!(payload)).toBe(true)
@@ -128,6 +167,83 @@ test('option sources preserve pin, selected provider, workflow and unavailable s
   expect(validate({ head: 'a'.repeat(40), diff: '', pr: null, payload })).toBe(true)
   for (const value of [null, 1, {}, { head: 1, diff: '', pr: null, payload }, { head: 'a', diff: 3, pr: null, payload }, { head: 'a', diff: '', pr: 2, payload }, { head: 'a', diff: '', pr: null, payload: {} }]) expect(validate(value)).toBe(false)
   expect(f.captured().trailer.metadata({} as BoundedWorkRequest)).toBeUndefined()
+})
+
+test('publication, mutation and suite consumers require every completed original worker provenance field', async () => {
+  for (const scenario of ['no-host-completion', 'wrong-run', 'wrong-step', 'wrong-head',
+    'missing-envelope-identity', 'wrong-kind', 'wrong-schema', 'wrong-reservation-phase',
+    'next-state-pending', 'wrong-completion-stage', 'wrong-completion-head'] as const) {
+    const f = await fixture()
+    f.input.test_strategy = 'Full suite (stage 2), run exactly this:\n\n  bun test\n'
+    const options = await f.prepare()
+    const head = 'b'.repeat(40)
+    const snapshot = { head, diff: '+production', pr: null }
+    const claim = { file: 'guard.ts', find: 'before', replace: 'after',
+      guard: ['bun', 'test', 'guard.test.ts'], control: ['bun', 'test', 'control.test.ts'] }
+    const result = { head, payload: { mutationClaim: claim, worktreePath: options.production.worktree,
+      branch: 'change', commitSha: head, prNumber: null, diffFile: 'diff', testsPassed: true } }
+    await writeFile(options.workers.plan.request.result.path, JSON.stringify({ result: { payload: {
+      implementationPlan: '- [x] Change', topTask: '- [x] Change', executionSpec: 'Change the code.',
+      complexity: 'mechanical', remainingTasks: 0, branchBrief: '',
+    } } }))
+    const path = options.workers.build.request.result.path
+    const completionShape: CompletionShape = scenario === 'next-state-pending' ? 'pending'
+      : scenario === 'wrong-completion-stage' ? 'wrong-stage'
+        : scenario === 'wrong-completion-head' ? 'wrong-head' : 'valid'
+    if (scenario !== 'no-host-completion') {
+      await writeWorkerAttempt(options, 'build', JSON.stringify({ result }), completionShape,
+        scenario === 'wrong-reservation-phase' ? 'fix' : 'build')
+    }
+    const envelope = scenario === 'no-host-completion'
+      ? { schema: 'project-build', run_id: f.input.run.id, step_id: `${f.input.run.id}:build:0`, kind: 'completed', result }
+      : JSON.parse(await readFile(path, 'utf8'))
+    if (scenario === 'wrong-run') envelope.run_id = 'other-run'
+    if (scenario === 'wrong-step') envelope.step_id = `${f.input.run.id}:build:99`
+    if (scenario === 'wrong-head') envelope.result.head = 'c'.repeat(40)
+    if (scenario === 'wrong-kind') envelope.kind = 'blocked'
+    if (scenario === 'wrong-schema') envelope.schema = 'project-review'
+    await writeFile(path, JSON.stringify(scenario === 'missing-envelope-identity' ? { result } : envelope))
+    const before = f.commands.length
+    expect(await options.policy.mutation.readClaim(snapshot)).toBeNull()
+    expect(await options.policy.reviewSuite!.readCheckpoint(snapshot, 1)).toBeNull()
+    await expect(options.production.publication(snapshot)).rejects.toThrow('does not match the reviewed head')
+    expect(f.commands.slice(before).some(argv => argv[0] === 'bash')).toBe(false)
+
+    // Restoring the actual host reservation/completion and envelope restores all
+    // three consumers; none of the negatives passes just because it is unwired.
+    await writeCompleted(options, 'build', JSON.stringify({ result }))
+    expect(await options.policy.mutation.readClaim(snapshot)).toEqual(claim)
+    expect((await options.policy.reviewSuite!.readCheckpoint(snapshot, 1))?.report).toEqual({ hostExitCode: 0 })
+    expect((await options.production.publication(snapshot)).title).toBe('Change')
+  }
+})
+
+test('fix artifact consumers require a fixed completion rather than a built completion', async () => {
+  const f = await fixture()
+  f.input.test_strategy = 'Full suite (stage 2), run exactly this:\n\n  bun test\n'
+  const options = await f.prepare()
+  const head = 'b'.repeat(40)
+  const snapshot = { head, diff: '+production', pr: null }
+  const claim = { file: 'guard.ts', find: 'before', replace: 'after',
+    guard: ['bun', 'test', 'guard.test.ts'], control: ['bun', 'test', 'control.test.ts'] }
+  const result = { head, payload: { mutationClaim: claim, worktreePath: options.production.worktree,
+    branch: 'change', commitSha: head, prNumber: null, diffFile: 'diff', testsPassed: true } }
+  await writeFile(options.workers.plan.request.result.path, JSON.stringify({ result: { payload: {
+    implementationPlan: '- [x] Fix', topTask: '- [x] Fix', executionSpec: 'Fix the code.',
+    complexity: 'mechanical', remainingTasks: 0, branchBrief: '',
+  } } }))
+
+  await writeWorkerAttempt(options, 'fix', JSON.stringify({ result }), 'wrong-stage')
+  const before = f.commands.length
+  expect(await options.policy.mutation.readClaim(snapshot)).toBeNull()
+  expect(await options.policy.reviewSuite!.readCheckpoint(snapshot, 1)).toBeNull()
+  await expect(options.production.publication(snapshot)).rejects.toThrow('does not match the reviewed head')
+  expect(f.commands.slice(before).some(argv => argv[0] === 'bash')).toBe(false)
+
+  await writeCompleted(options, 'fix', JSON.stringify({ result }))
+  expect(await options.policy.mutation.readClaim(snapshot)).toEqual(claim)
+  expect((await options.policy.reviewSuite!.readCheckpoint(snapshot, 1))?.report).toEqual({ hostExitCode: 0 })
+  expect((await options.production.publication(snapshot)).title).toBe('Fix')
 })
 
 test('a later host attempt clears a dead unarmed reservation before rebuilding runners', async () => {
@@ -153,7 +269,7 @@ test('intermediate reviews defer the full suite and terminal publication runs it
     worktreePath: options.production.worktree, branch: 'change', commitSha: head,
     prNumber: null, diffFile: 'diff', testsPassed: false, suiteOutcome: 'failed-preexisting', suiteEvidence: 'base red on named.test.ts',
   }
-  await writeFile(options.workers.build.request.result.path, JSON.stringify({ result: { head, payload } }))
+  await writeCompleted(options, 'build', JSON.stringify({ result: { head, payload } }))
   const before = f.commands.length
   expect(options.policy.reviewSuite?.scope).toBe('subset')
   expect((await options.policy.reviewSuite!.readCheckpoint({ head, diff: '+one', pr: null }, 1))?.report)
@@ -178,7 +294,7 @@ test('publication describes the completed change and retains the card as support
     executionSpec: 'Change the log payload.', complexity: 'mechanical', remainingTasks: 0,
     branchBrief: '# Omit empty failure reasons from wakeup logs\n\nThe log now leaves out an empty field.',
   } } }))
-  await writeFile(options.workers.build.request.result.path, JSON.stringify({ result: { head, payload: {
+  await writeCompleted(options, 'build', JSON.stringify({ result: { head, payload: {
     mutationClaim: { file: 'guard.ts', find: 'fixed', replace: 'broken', guard: ['bun', 'test', 'guard.test.ts'], control: ['bun', 'test', 'guard.test.ts'] },
     worktreePath: options.production.worktree, branch: 'change', commitSha: head,
     prNumber: null, diffFile: 'diff', testsPassed: true, suiteOutcome: 'passed', suiteEvidence: 'Targeted guard and mutation control passed.',
@@ -211,7 +327,7 @@ test('publication refuses a build result belonging to a different head', async (
     executionSpec: 'Change the log payload.', complexity: 'mechanical', remainingTasks: 0,
     branchBrief: '# Omit empty failure reasons from wakeup logs\n\nThe log now leaves out an empty field.',
   } } }))
-  await writeFile(options.workers.build.request.result.path, JSON.stringify({ result: { head: earlierHead, payload: {
+  await writeCompleted(options, 'build', JSON.stringify({ result: { head: earlierHead, payload: {
     mutationClaim: { file: 'guard.ts', find: 'fixed', replace: 'broken', guard: ['bun', 'test', 'guard.test.ts'], control: ['bun', 'test', 'guard.test.ts'] },
     worktreePath: options.production.worktree, branch: 'change', commitSha: earlierHead,
     prNumber: null, diffFile: 'diff', testsPassed: true, suiteOutcome: 'passed', suiteEvidence: 'Earlier round.',
@@ -232,7 +348,7 @@ test('publication refuses a build result whose commitSha is not the reviewed hea
     implementationPlan: '- [x] Omit the empty field', topTask: '- [x] Omit the empty field',
     executionSpec: 'Change the log payload.', complexity: 'mechanical', remainingTasks: 0, branchBrief: '',
   } } }))
-  await writeFile(options.workers.build.request.result.path, JSON.stringify({ result: { head, payload: {
+  await writeCompleted(options, 'build', JSON.stringify({ result: { head, payload: {
     mutationClaim: null, worktreePath: options.production.worktree, branch: 'change',
     commitSha: 'c'.repeat(40), prNumber: null, diffFile: 'diff', testsPassed: true,
   } } }))
@@ -252,7 +368,7 @@ test('publication titles from this round\'s task, never the prior-branch digest'
     executionSpec: 'Change it.', complexity: 'mechanical', remainingTasks: 0,
     branchBrief: 'BUILT: Prior branch state only',
   } } }))
-  await writeFile(options.workers.build.request.result.path, JSON.stringify({ result: { head, payload: {
+  await writeCompleted(options, 'build', JSON.stringify({ result: { head, payload: {
     mutationClaim: null, worktreePath: options.production.worktree, branch: 'change',
     commitSha: head, prNumber: null, diffFile: 'diff', testsPassed: true,
   } } }))
@@ -620,7 +736,7 @@ test('the host suite observation is given a budget far larger than the 60s host 
     worktreePath: options.production.worktree, branch: 'change', commitSha: head,
     prNumber: null, diffFile: 'diff', testsPassed: true,
   }
-  await writeFile(options.workers.build.request.result.path, JSON.stringify({ result: { head, payload } }))
+  await writeCompleted(options, 'build', JSON.stringify({ result: { head, payload } }))
   const budgets: Array<number | undefined> = []
   const host = f.context.runSuite!
   f.context.runSuite = async (argv, cwd, env, timeoutMs) => {
@@ -656,7 +772,7 @@ test('the host suite receipt is an exit code, never the transcript, and an unwri
     worktreePath: options.production.worktree, branch: 'change', commitSha: head,
     prNumber: null, diffFile: 'diff', testsPassed: true,
   }
-  await writeFile(options.workers.build.request.result.path, JSON.stringify({ result: { head, payload } }))
+  await writeCompleted(options, 'build', JSON.stringify({ result: { head, payload } }))
   // 8 MiB on stdout and a line on stderr, then a chosen exit code — the shape a
   // suite has, small enough to stay a unit test.
   const script = (code: number) => `head -c 8388608 /dev/zero | tr '\\0' 'x'\necho "trailing diagnostic" >&2\nexit ${code}\n`
@@ -737,7 +853,7 @@ test('the full-suite command parses from the real generator, knob and plain shap
       worktreePath: options.production.worktree, branch: 'change', commitSha: head,
       prNumber: null, diffFile: 'diff', testsPassed: true,
     }
-    await writeFile(options.workers.build.request.result.path, JSON.stringify({ result: { head, payload } }))
+    await writeCompleted(options, 'build', JSON.stringify({ result: { head, payload } }))
     const seen: string[] = []
     const host = f.context.runSuite!
     f.context.runSuite = async (argv, cwd, env, timeoutMs) => {
@@ -770,7 +886,7 @@ test('suite child excludes the stored GitHub credential while git push retains i
   const worktree = options.production.worktree
   await mkdir(worktree, { recursive: true })
   const head = 'a'.repeat(40)
-  await writeFile(options.workers.build.request.result.path, JSON.stringify({ result: { head, payload: {
+  await writeCompleted(options, 'build', JSON.stringify({ result: { head, payload: {
     mutationClaim: { file: 'guard.ts', find: 'before', replace: 'after', guard: ['bun', 'test'], control: ['bun', 'test'] },
     worktreePath: worktree, branch: 'change', commitSha: head,
     prNumber: null, diffFile: 'diff', testsPassed: true,

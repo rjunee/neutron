@@ -1,15 +1,24 @@
 import { beforeAll, afterAll } from 'bun:test';
 const previousDeviceStorage = Object.getOwnPropertyDescriptor(globalThis, 'localStorage');
+const previousDeviceWindow = Object.getOwnPropertyDescriptor(globalThis, 'window');
 beforeAll(() => {
   const values = new Map<string, string>();
-  Object.defineProperty(globalThis, 'localStorage', { configurable: true, value: {
+  const storage = {
     getItem: (key: string) => values.get(key) ?? null,
     setItem: (key: string, value: string) => { values.set(key, value); },
-  } });
+  };
+  // An earlier entry-route test can select AsyncStorage before this suite runs.
+  // Its web implementation reads window.localStorage; the direct browser path
+  // reads globalThis.localStorage. Both must see this fixture, even when the
+  // installation-device module has already cached its backing.
+  Object.defineProperty(globalThis, 'localStorage', { configurable: true, value: storage });
+  Object.defineProperty(globalThis, 'window', { configurable: true, value: { localStorage: storage } });
 });
 afterAll(() => {
   if (previousDeviceStorage) Object.defineProperty(globalThis, 'localStorage', previousDeviceStorage);
   else Reflect.deleteProperty(globalThis, 'localStorage');
+  if (previousDeviceWindow) Object.defineProperty(globalThis, 'window', previousDeviceWindow);
+  else Reflect.deleteProperty(globalThis, 'window');
 });
 /**
  * @neutronai/app — projects-client unit tests (P5.2).

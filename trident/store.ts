@@ -25,6 +25,7 @@ import { resultCarriesEscalation } from './escalation-evidence.ts'
 import { phaseForCheckpoint } from './checkpoint-phase.ts'
 import { checkpointRound } from './checkpoint-round.ts'
 import { trimAsciiWs } from './ascii-trim.ts'
+import { readBuildRetrySource, retrySourceIdentity } from './build-mode-state.ts'
 import { reviewCapableCheckpoint } from './run-disposition.ts'
 import { carryableRalphRound, DEFAULT_MAX_RALPH_ROUNDS, isRalphCap } from './ralph-budget.ts'
 
@@ -225,6 +226,8 @@ export class TridentEmptyFindingsRejectionError extends Error {
 export type SubagentStatus = 'pending' | 'running' | 'completed' | 'failed' | 'crashed'
 
 export interface TridentRun {
+  /** Launch-only measured intent; persisted as a source invalidation event, never a row column. */
+  retry_seed_falsified?: { recordedHead: string; observedHead: string; baseSha: string | null }
   id: string
   slug: string
   project_slug: string
@@ -992,6 +995,7 @@ export class TridentRunStore {
    */
   async createIfClaimsAvailable(
     input: CreateTridentRunInput,
+    retrySource?: { priorRunId: string; eventId: number; head: string },
   ): Promise<
     | { ok: true; run: TridentRun }
     | { ok: false; conflict: 'path'; holding_run: TridentRun; path: string }
@@ -1011,7 +1015,15 @@ export class TridentRunStore {
       if (branchHolder !== null) {
         return { ok: false as const, conflict: 'branch' as const, holding_run: branchHolder }
       }
-      return { ok: true as const, run: await this.create(input) }
+      const run = await this.create(input)
+      if (retrySource) {
+        // The row and its resume source must survive a crash together. Validate
+        // the relationship inside this transaction so a future caller cannot
+        // mint a source link for a different task or a changed checkpoint.
+        await this.recordStageEvent(run.id, 'build-retry-source', JSON.stringify({ ...retrySource, runId: run.id }))
+        readBuildRetrySource(this, run)
+      }
+      return { ok: true as const, run }
     })
   }
 
@@ -1082,6 +1094,37 @@ export class TridentRunStore {
        VALUES (?, ?, ?, ?)`,
       [run_id, stage, this.now(), meta ?? null],
     )
+  }
+
+  private retrySourceInvalidation(run: TridentRun): string | null {
+    const intent = run.retry_seed_falsified
+    if (!intent) return null
+    const current = this.get(run.id)
+    if (!current) throw new Error('Retry seed row disappeared')
+    const source = readBuildRetrySource(this, current)
+    // No link is the legacy path; an already validated tombstone is idempotent.
+    if (!source) return null
+    if (!/^(?:[0-9a-f]{40}|[0-9a-f]{64})$/.test(intent.observedHead)
+      || intent.observedHead === intent.recordedHead
+      || intent.recordedHead !== current.inner_checkpoint_head || intent.baseSha !== current.base_sha
+      || current.inner_checkpoint === null || current.workflow_run_id !== null
+      || current.crash_recoveries !== 0 || current.infra_retries !== 0
+      || retrySourceIdentity(current) !== retrySourceIdentity(run)
+      || this.stageEvents(run.id).some(event => event.stage === 'build-mode-state')) {
+      throw new Error('Retry seed falsification does not match the dispatched source')
+    }
+    const link = this.stageEvents(run.id).filter(event => event.stage === 'build-retry-source').at(-1)!
+    return JSON.stringify({ ...intent, runId: run.id, sourceEventId: link.id, sourceMeta: link.meta,
+      identity: retrySourceIdentity(current) })
+  }
+
+  /** Revoke only a validated seed before preparation can re-pin its base. */
+  async invalidateRetrySource(run: TridentRun): Promise<void> {
+    if (!run.retry_seed_falsified) return
+    await this.db.transaction(async () => {
+      const meta = this.retrySourceInvalidation(run)
+      if (meta !== null) await this.recordStageEvent(run.id, 'build-retry-source-invalidated', meta)
+    })
   }
 
   /**
@@ -2062,6 +2105,7 @@ export class TridentRunStore {
     const verdictBinds: (string | null)[] =
       seen === undefined ? [run.inner_verdict] : [seen.inner_verdict, run.inner_verdict]
     return this.db.transaction((tx) => {
+      const sourceInvalidation = this.retrySourceInvalidation(run)
       if (run.inner_verdict === 'REQUEST_CHANGES') {
         // VALIDATE WHAT WILL BE PERSISTED, NOT ONLY WHAT IS ALREADY THERE. This used to
         // read `inner_checkpoint_findings` from the STORED row while the UPDATE below
@@ -2203,6 +2247,10 @@ export class TridentRunStore {
             [crash.failure_reason, this.now(), run.id],
           )
         }
+      }
+      if (res.changes > 0 && sourceInvalidation !== null) {
+        tx.runSync('INSERT INTO code_trident_stage_events (run_id, stage, at, meta) VALUES (?, ?, ?, ?)',
+          [run.id, 'build-retry-source-invalidated', this.now(), sourceInvalidation])
       }
       return res.changes > 0
     })

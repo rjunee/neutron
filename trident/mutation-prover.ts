@@ -4050,6 +4050,8 @@ export async function spawnGuardCommand(
 // ── The gate the merge path calls ────────────────────────────────────────────
 
 export interface MutationGateOutcome {
+  /** A deterministic nomination refusal, never a proof or infrastructure failure. */
+  repair?: { kind: 'invalid-nomination'; detail: string }
   /** May this APPROVE proceed to merge? */
   ok: boolean
   /**
@@ -4748,7 +4750,13 @@ export async function runMutationProofGate(input: MutationGateInput): Promise<Mu
     // through to `verify`'s generic wording would replace a diagnosis with a
     // shrug. `verify` is still the authority on whether the merge proceeds.
     const reason = evidence.proved ? verified.reason : evidence.reason
-    return { ok: false, reason: `mutation proof rejected: ${reason}`, exempt: false, evidence }
+    const invalid = validateClaim(input.claim)
+    const repair = invalid !== null && !evidence.proved && evidence.observed === null
+      && evidence.run_id === input.run.id && evidence.reason === invalid
+      && JSON.stringify(evidence.claimed) === JSON.stringify(input.claim)
+      ? { kind: 'invalid-nomination' as const, detail: invalid } : undefined
+    return { ok: false, reason: `mutation proof rejected: ${reason}`, exempt: false, evidence,
+      ...(repair ? { repair } : {}) }
   }
   return { ok: true, reason: `mutation proved: ${evidence.reason}`, exempt: false, evidence }
 }

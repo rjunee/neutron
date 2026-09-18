@@ -57,6 +57,10 @@ import { join } from 'node:path'
 import { ProjectDb } from '@neutronai/persistence/index.ts'
 import { seedMigratedDb } from '../../tests/support/migrated-db.ts'
 import { TridentRunStore } from '@neutronai/trident/store.ts'
+import { dispatchBoardBoundBuild } from '@neutronai/trident/board-dispatch.ts'
+import { buildTridentOrchestrator } from '@neutronai/trident/orchestrator.ts'
+import { createProjectLauncher } from '@neutronai/trident/project-launcher.ts'
+import { slugifyTask } from '@neutronai/trident/slugify-task.ts'
 import { TridentPhaseUsageStore } from '@neutronai/trident/phase-usage.ts'
 import { createProjectBuildHost, type ProjectBuildOutcome } from '@neutronai/trident/project-build-host.ts'
 import { spawnCapture, type HostCommandResult } from '@neutronai/trident/git-mode.ts'
@@ -159,6 +163,7 @@ async function measureDiff(run: Runner, repo: string, base: string, head: string
 }
 
 interface WorkerWorld {
+  mutationArgv?: 'bare' | 'valid'
   run: Runner
   repo: string
   scratch: string
@@ -339,6 +344,14 @@ async function performRole(world: WorkerWorld, request: BoundedWorkRequest, brie
     const notes = join(cwd, 'NOTES.md')
     const previous = await readFile(notes, 'utf8').catch(() => '')
     await writeFile(notes, `${previous}${request.step_id}\n`)
+    if (world.mutationArgv) {
+      await mkdir(join(cwd, 'src'), { recursive: true })
+      await mkdir(join(cwd, 'tests'), { recursive: true })
+      await writeFile(join(cwd, 'src/limit.ts'), 'export const limit = (n: number, max: number) => n > max ? max : n\n')
+      await writeFile(join(cwd, 'tests/limit.test.ts'), "import { test, expect } from 'bun:test'\nimport { limit } from '../src/limit.ts'\ntest('clamps', () => expect(limit(7, 3)).toBe(3))\n")
+      await writeFile(join(cwd, 'tests/control.test.ts'), "import { test, expect } from 'bun:test'\nimport { limit } from '../src/limit.ts'\ntest('preserves', () => expect(limit(2, 3)).toBe(2))\n")
+      await gitOut(world.run, cwd, ['add', '--', 'src/limit.ts', 'tests/limit.test.ts', 'tests/control.test.ts'])
+    }
     await gitOut(world.run, cwd, ['add', '--', 'NOTES.md',
       ...(commitsPlan ? ['IMPLEMENTATION_PLAN.md'] : [])])
     await gitOut(world.run, cwd, ['-c', 'user.email=w@example.invalid', '-c', 'user.name=Worker',
@@ -361,7 +374,10 @@ async function performRole(world: WorkerWorld, request: BoundedWorkRequest, brie
     const head = await gitOut(world.run, world.repo, ['rev-parse', '--verify', `refs/heads/${branch}^{commit}`])
     const diff = await measureDiff(world.run, world.repo, snapshot.head, head, world.scratch)
     return { head, diff, pr: snapshot.pr, payload: {
-      mutationClaim: null, worktreePath: cwd, branch, commitSha: head, prNumber: null,
+      mutationClaim: world.mutationArgv ? { file: 'src/limit.ts', find: 'n > max ? max : n', replace: 'n',
+        guard: [...(world.mutationArgv === 'valid' ? ['bun', 'test'] : []), 'tests/limit.test.ts'],
+        control: [...(world.mutationArgv === 'valid' ? ['bun', 'test'] : []), 'tests/control.test.ts'] } : null,
+      worktreePath: cwd, branch, commitSha: head, prNumber: null,
       diffFile: '', testsPassed: true, suiteOutcome: 'passed', suiteEvidence: 'harness stub suite',
     } }
   }
@@ -481,6 +497,7 @@ const suiteStrategy = 'TEST EXECUTION: run the card regression.\n\n'
   + 'Full suite (stage 2), run exactly this:\n\n  bash scripts/ci/suite.sh\n'
 
 async function fixture(options: { ralph?: boolean; moreTasks?: boolean; suiteExit?: number; testStrategy?: string
+  dispatchTask?: string
   blockersByRound?: readonly number[]; replanRounds?: readonly number[]
   maxRounds?: number; mergeMode?: 'pr' | 'local'; blockRoles?: readonly string[]
   repeatFirstFinding?: boolean; commentRounds?: readonly number[]
@@ -523,8 +540,8 @@ async function fixture(options: { ralph?: boolean; moreTasks?: boolean; suiteExi
   const db = ProjectDb.open(join(dir, 'project.db'))
   cleanups.push(() => db.close())
   const store = new TridentRunStore(db)
-  const row = await store.create({ slug: 'card', project_slug: 'project', repo_path: repo,
-    task: `Record a note in NOTES.md.${options.moreTasks ? '\nMORE TASKS' : ''}`, ralph: options.ralph ?? false,
+  const row = await store.create({ slug: options.dispatchTask ? slugifyTask(options.dispatchTask) : 'card', project_slug: 'project', repo_path: repo,
+    task: options.dispatchTask ?? `Record a note in NOTES.md.${options.moreTasks ? '\nMORE TASKS' : ''}`, ralph: options.ralph ?? false,
     // The review round ceiling is read off THIS row (`build-host.ts:140-144`), so a
     // ceiling case pins its own rather than leaning on the schema default of 8/10.
     ...(options.maxRounds === undefined ? {} : { max_rounds: options.maxRounds }) })
@@ -604,6 +621,33 @@ async function drive(f: Awaited<ReturnType<typeof fixture>>, mode: 'pr' | 'ralph
   const options = await f.prepare()
   const host = await createProjectBuildHost(options)
   return host.run({ mode, start: 'fresh' }, new AbortController().signal)
+}
+
+/**
+ * Recreate what a fresh retry sees after its prior process published and then
+ * died: the new worktree is still at the pinned base, while the real remote
+ * branch and its open PR point at the prior process's different commit.
+ */
+async function seedPriorPublication(f: Awaited<ReturnType<typeof fixture>>, publishedPr: number) {
+  const options = await f.prepare()
+  const run = f.store.get(f.row.id)!
+  if (!run.branch || !run.worktree) throw new Error('prepared run has no branch or worktree')
+  const setup = async (args: string[]) => {
+    const result = await spawnCapture(['git', '-C', f.repo, ...args], f.repo)
+    if (!result.ok) throw new Error(`prior publication setup failed: ${result.stderr}`)
+    return result.stdout.trim()
+  }
+  await setup(['switch', '-c', 'prior-publication', 'main'])
+  await writeFile(join(f.repo, 'NOTES.md'), 'seed\nprior publication\n')
+  await setup(['add', '--', 'NOTES.md'])
+  await setup(['commit', '-m', 'test: prior publication'])
+  const priorHead = await setup(['rev-parse', 'HEAD^{commit}'])
+  await setup(['push', f.origin, `${priorHead}:refs/heads/${run.branch}`])
+  await setup(['switch', 'main'])
+  await setup(['branch', '-D', 'prior-publication'])
+  f.github.prs.push({ number: 1, state: 'OPEN', headRefName: run.branch, baseRefName: 'main' })
+  await f.store.update(f.row.id, { published_pr: publishedPr })
+  return { options, branch: run.branch, worktree: run.worktree, priorHead }
 }
 
 /**
@@ -812,6 +856,42 @@ test('pr mode drives plan, build, review, publish and merge to a terminal merged
   expect(originMain.stdout.trim()).not.toBe(f.baseSha)
   expect(f.store.get(f.row.id)!.pr).toBe(1)
   expect(['cleaned', 'preserved']).toContain(outcome.cleanup.kind)
+}, 300_000)
+
+test('fresh retry rebuilds and republishes its prior open PR from a different real head', async () => {
+  const f = await fixture()
+  const seeded = await seedPriorPublication(f, 1)
+  expect(await gitOut(spawnCapture, seeded.worktree, ['rev-parse', 'HEAD^{commit}'])).toBe(f.baseSha)
+  expect(seeded.priorHead).not.toBe(f.baseSha)
+
+  const host = await createProjectBuildHost(seeded.options)
+  const outcome = await host.run({ mode: 'pr', start: 'fresh' }, new AbortController().signal)
+  expect(outcome.kind, why(f, outcome)).toBe('merged')
+
+  const finalHead = await gitOut(spawnCapture, f.origin, ['rev-parse', `refs/heads/${seeded.branch}^{commit}`])
+  expect(finalHead).not.toBe(seeded.priorHead)
+  expect(await gitOut(spawnCapture, f.origin, ['rev-parse', 'refs/heads/main^{commit}'])).toBe(finalHead)
+  expect(f.github.prs).toEqual([{ number: 1, state: 'MERGED', headRefName: seeded.branch, baseRefName: 'main' }])
+  expect(f.store.get(f.row.id)).toMatchObject({ pr: 1, published_pr: 1 })
+  const roles = f.world.dispatches.map(dispatch => dispatch.role)
+  expect(roles.slice(0, 3)).toEqual(['plan', 'build', 'review'])
+  expect(roles.filter(role => role === 'review').length).toBeGreaterThanOrEqual(2)
+  expect(roles).toContain('synthesis')
+  expect(f.commands.filter(argv => argv[0] === 'bash' && argv[1] === '-lc'
+    && (argv[2] ?? '').includes('bash scripts/ci/suite.sh'))).toHaveLength(1)
+}, 300_000)
+
+test('fresh retry refuses an open PR whose durable publication provenance names another PR', async () => {
+  const f = await fixture()
+  const seeded = await seedPriorPublication(f, 2)
+  const host = await createProjectBuildHost(seeded.options)
+  const outcome = await host.run({ mode: 'pr', start: 'fresh' }, new AbortController().signal)
+
+  expect(outcome).toMatchObject({ kind: 'blocked', phase: 'plan', on: 'Fresh build already has a PR' })
+  expect(f.world.dispatches).toEqual([])
+  expect(f.github.prs).toEqual([{ number: 1, state: 'OPEN', headRefName: seeded.branch, baseRefName: 'main' }])
+  expect(await gitOut(spawnCapture, f.origin, ['rev-parse', `refs/heads/${seeded.branch}^{commit}`])).toBe(seeded.priorHead)
+  expect(f.store.get(f.row.id)).toMatchObject({ pr: null, published_pr: 2 })
 }, 300_000)
 
 test('a missing full-suite command stops with its own cause and runs no suite', async () => {
@@ -1084,6 +1164,307 @@ test('a finding repeated after a fix stops before another fix is dispatched', as
 }, 300_000)
 
 // ── RESUME ACROSS A DRIVER RESTART ───────────────────────────────────────────
+
+for (const scenario of ['bare', 'valid', 'repeated', 'exhausted', 'forged-fix', 'wrong-head-fix', 'wrong-run', 'wrong-step'] as const)
+test(`unchanged-tip retry consumes prior ${scenario} mutation nomination despite new worker brief`, async () => {
+  const argv = scenario === 'valid' ? 'valid' : 'bare'
+  const task = 'Implement a bounded numeric limit and verify clamping and below-limit preservation with separate behavioural regression tests'
+  const f = await fixture({ dispatchTask: task, maxRounds: scenario === 'exhausted' ? 1 : 5 })
+  f.world.mutationArgv = argv
+  f.github.refuse.add('create')
+  const priorHost = await createProjectBuildHost(await f.prepare())
+  // Reconstruct the old host's terminal refusal without altering the saved
+  // worker result or the unchanged checkpoint that a real retry must carry.
+  const priorGate = priorHost.deps.publishGate
+  priorHost.deps.publishGate = async (...args) => {
+    const result = await priorGate(...args)
+    return result.kind === 'repair-nomination' ? { kind: 'blocked', on: result.finding } : result
+  }
+  const first = await priorHost.run({ mode: 'pr', start: 'fresh' }, new AbortController().signal)
+  expect(first.kind, why(f, first)).toBe(argv === 'bare' ? 'blocked' : 'unknown')
+  const checkpoint = lastCheckpoint(f)
+  expect(checkpoint).toMatchObject({ stage: 'built', round: 1 })
+  expect(checkpoint.pending).toBeUndefined()
+  const prior = f.store.get(f.row.id)!
+  // Seed the historical publication boundary already observed on the failed
+  // prior: its exact checkpoint is the open remote PR's head. No live PR exists.
+  const pushed = await spawnCapture(['git', '-C', f.repo, 'push', 'origin', `${checkpoint.head}:refs/heads/${prior.branch}`], f.repo)
+  expect(pushed.ok).toBe(true)
+  f.github.prs.push({ number: 1, state: 'OPEN', headRefName: prior.branch!, baseRefName: 'main' })
+  await f.store.update(prior.id, { phase: 'failed', worktree: null, pr: 1, published_pr: 1 })
+  const originalArtifact = await readFile(join(f.context.stateRoot, prior.id, 'build.result'), 'utf8')
+  expect(JSON.parse(originalArtifact).result.payload.mutationClaim.guard)
+    .toEqual(argv === 'bare' ? ['tests/limit.test.ts'] : ['bun', 'test', 'tests/limit.test.ts'])
+  if (scenario === 'forged-fix' || scenario === 'wrong-head-fix') {
+    const forged = JSON.parse(originalArtifact)
+    forged.step_id = `${prior.id}:fix:1`
+    if (scenario === 'wrong-head-fix') forged.result.head = f.baseSha
+    forged.result.payload.mutationClaim.guard = ['bun', 'test', 'tests/limit.test.ts']
+    forged.result.payload.mutationClaim.control = ['bun', 'test', 'tests/control.test.ts']
+    await writeFile(join(f.context.stateRoot, prior.id, 'fix.result'), JSON.stringify(forged))
+  }
+  const invalidIdentity = scenario === 'wrong-run' || scenario === 'wrong-step'
+  if (invalidIdentity) {
+    const envelope = JSON.parse(originalArtifact)
+    if (scenario === 'wrong-run') envelope.run_id = 'unrelated-run'
+    else envelope.step_id = `${prior.id}:build:42`
+    await writeFile(join(f.context.stateRoot, prior.id, 'build.result'), JSON.stringify(envelope))
+  }
+  const retainedArtifact = await readFile(join(f.context.stateRoot, prior.id, 'build.result'), 'utf8')
+  const dispatched = await dispatchBoardBoundBuild({ task, board_item_id: 'retry-card' }, {
+    store: f.store, project_slug: 'project', repo_path: f.repo,
+    max_rounds: scenario === 'exhausted' ? 1 : 5,
+    board: { get: () => ({ id: 'retry-card', title: task, design_doc_ref: null, linked_run_id: prior.id }), attachRun: async () => {} },
+    resolveBuildRepo: async () => f.repo, resolveMergeMode: async () => 'pr', resolveRalph: async () => false,
+  })
+  expect(dispatched.ok, JSON.stringify(dispatched)).toBe(true)
+  if (!dispatched.ok) return
+  expect(dispatched.run.inner_checkpoint_head).toBe(String(checkpoint.head))
+  expect(dispatched.run.published_pr).toBe(1)
+  f.world.dispatches.length = 0
+  f.github.refuse.delete('create')
+  // Any genuinely requested new worker could return the corrected executable
+  // nomination; the reproduction proves whether the loop ever asks one.
+  f.world.mutationArgv = scenario === 'repeated' ? 'bare' : 'valid'
+  let settled!: () => void
+  const completion = new Promise<void>(resolve => { settled = resolve })
+  const record = f.store.recordStageEvent.bind(f.store)
+  const recording = spyOn(f.store, 'recordStageEvent').mockImplementation(async (...args) => {
+    await record(...args)
+    if (args[1] === 'build-driver-settled') settled()
+  })
+  cleanups.push(() => recording.mockRestore())
+  const launcher = createProjectLauncher({ store: f.store, onError: () => {}, prepare: async input => {
+    f.input.run = input.run
+    const options = await f.prepare()
+    expect(await readFile(options.workers.fix.request.brief.path, 'utf8')).toContain('executable argv arrays')
+    return options
+  } })
+  const orch = buildTridentOrchestrator({ fire_workflow: launcher, db_path: f.input.db_path,
+    base_branch: 'main', run_host: Object.assign(f.context.runHost, { writesDiffOutput: true as const }),
+    read_run: id => f.store.get(id), sleep: async () => {} })
+  const advanced = await orch.step(dispatched.run)
+  expect(await f.store.saveIfActive(advanced.run)).toBe(true)
+  await completion
+  const terminal = await orch.step(f.store.get(dispatched.run.id)!)
+  expect(await f.store.saveIfActive(terminal.run)).toBe(true)
+  const result = JSON.parse(f.store.get(dispatched.run.id)!.inner_result!).projectBuild
+  const blocked = scenario === 'repeated' || scenario === 'exhausted' || invalidIdentity
+  expect(result.kind, JSON.stringify(result)).toBe(blocked ? 'blocked' : 'merged')
+  if (blocked) expect(result.on).toContain(invalidIdentity ? 'mutation' : scenario === 'repeated' ? 'repeated finding' : 'round ceiling')
+  expect(f.world.dispatches.some(dispatch => ['plan', 'build'].includes(dispatch.role))).toBe(false)
+  expect(f.world.dispatches.filter(dispatch => dispatch.role === 'fix').map(dispatch => dispatch.step_id))
+    .toEqual(argv === 'bare' && scenario !== 'exhausted' && !invalidIdentity ? [`${dispatched.run.id}:fix:1`] : [])
+  expect(f.github.prs[0]!.state).toBe(blocked ? 'OPEN' : 'MERGED')
+  const checkpoints = f.store.stageEvents(dispatched.run.id).filter(event => event.stage === 'build-mode-state')
+    .map(event => JSON.parse(event.meta!).checkpoint)
+  if (argv === 'bare' && !invalidIdentity) expect(checkpoints).toContainEqual(expect.objectContaining({ stage: 'rejected', head: checkpoint.head, round: 1 }))
+  if (scenario === 'repeated') expect(checkpoints.at(-1)).toMatchObject({ stage: 'rejected', round: 2 })
+  expect(await readFile(join(f.context.stateRoot, prior.id, 'build.result'), 'utf8')).toBe(retainedArtifact)
+}, 300_000)
+
+test('local invalid nomination gets one bounded fix and a fresh review before local merge', async () => {
+  const f = await fixture({ mergeMode: 'local', maxRounds: 3 })
+  f.world.mutationArgv = 'bare'
+  const host = await createProjectBuildHost(await f.prepare())
+  const prepare = host.deps.prepareWork
+  host.deps.prepareWork = async (request, context) => {
+    if (request.role === 'fix') {
+      expect(context.findings.join('\n')).toContain('not a test runner on the prover allowlist')
+      f.world.mutationArgv = 'valid'
+    }
+    await prepare(request, context)
+  }
+  const outcome = await host.run({ mode: 'pr', start: 'fresh' }, new AbortController().signal)
+  expect(outcome.kind, why(f, outcome)).toBe('merged')
+  expect(f.world.dispatches.filter(dispatch => dispatch.step_id.startsWith(`${f.row.id}:`)
+    && ['review', 'fix'].includes(dispatch.role)).map(dispatch => dispatch.step_id))
+    .toEqual([`${f.row.id}:review:1`, `${f.row.id}:fix:1`, `${f.row.id}:review:2`])
+  expect(f.github.prs).toEqual([])
+}, 300_000)
+
+for (const mergeMode of ['pr', 'local'] as const)
+for (const scenario of ['unmoved', 'branch', 'branch-and-base', 'before-dispatch', ...(mergeMode === 'pr' ? ['pre-fire'] as const : [])] as const)
+test(`an orchestrated ${mergeMode} retry survives launch falsification: ${scenario}`, async () => {
+  const task = 'Record a note in NOTES.md and verify the resulting change with the complete regression suite'
+  const f = await fixture({ dispatchTask: task, mergeMode })
+  f.github.refuse.add('create')
+  const priorHost = await createProjectBuildHost(await f.prepare())
+  if (mergeMode === 'local') priorHost.deps.reviewReadiness = async () => ({ kind: 'unknown', detail: 'Simulated stop before review' })
+  const first = await priorHost.run({ mode: 'pr', start: 'fresh' }, new AbortController().signal)
+  expect(first.kind, why(f, first)).toBe('unknown')
+  const checkpoint = lastCheckpoint(f)
+  await f.store.update(f.row.id, { phase: 'failed', worktree: null })
+  const redispatch = (priorId: string) => dispatchBoardBoundBuild({ task, board_item_id: 'retry-card' }, {
+    store: f.store, project_slug: 'project', repo_path: f.repo,
+    board: { get: () => ({ id: 'retry-card', title: task, design_doc_ref: null, linked_run_id: priorId }), attachRun: async () => {} },
+    resolveBuildRepo: async () => f.repo, resolveMergeMode: async () => mergeMode, resolveRalph: async () => false,
+  })
+  const advanceBranch = async () => {
+  const committed = await spawnCapture(['git', '-C', f.repo, 'commit-tree', `${checkpoint.head}^{tree}`,
+    '-p', String(checkpoint.head), '-m', 'test: advance before launch'], f.repo)
+  expect(committed.ok).toBe(true)
+  const branch = `refs/heads/${f.store.get(f.row.id)!.branch}`
+  expect((await spawnCapture(['git', '-C', f.repo, ...(mergeMode === 'pr'
+    ? ['push', 'origin', `${committed.stdout.trim()}:${branch}`] : ['update-ref', branch, committed.stdout.trim()])], f.repo)).ok).toBe(true)
+  }
+  if (scenario === 'before-dispatch') await advanceBranch()
+  const dispatched = await redispatch(f.row.id)
+  expect(dispatched.ok, JSON.stringify(dispatched)).toBe(true)
+  if (!dispatched.ok) return
+  expect(dispatched.run.inner_checkpoint_head).toBe(scenario === 'before-dispatch' ? null : String(checkpoint.head))
+  if (scenario !== 'unmoved' && scenario !== 'before-dispatch') await advanceBranch()
+  if (scenario === 'branch-and-base' || scenario === 'pre-fire') {
+    const base = await spawnCapture(['git', '-C', f.repo, 'commit-tree', `${f.baseSha}^{tree}`,
+      '-p', f.baseSha, '-m', 'test: advance base before launch'], f.repo)
+    expect(base.ok).toBe(true)
+    expect((await spawnCapture(['git', '-C', f.repo, ...(mergeMode === 'pr'
+      ? ['push', 'origin', `${base.stdout.trim()}:refs/heads/main`] : ['update-ref', 'refs/heads/main', base.stdout.trim()])], f.repo)).ok).toBe(true)
+  }
+  f.world.dispatches.length = 0
+  f.github.refuse.delete('create')
+  let fired = 0
+  let settled!: () => void
+  const completion = new Promise<void>(resolve => { settled = resolve })
+  const record = f.store.recordStageEvent.bind(f.store)
+  const recording = spyOn(f.store, 'recordStageEvent').mockImplementation(async (...args) => {
+    await record(...args)
+    if (args[1] === 'build-driver-settled') settled()
+  })
+  cleanups.push(() => recording.mockRestore())
+  const launcher = createProjectLauncher({ store: f.store, onError: () => {}, prepare: async input => {
+    fired++
+    f.input.run = input.run
+    const options = await f.prepare()
+    if (scenario !== 'unmoved') throw Error('Simulated failure after preparation')
+    return options
+  } })
+  const runHost = Object.assign(async (...args: Parameters<typeof f.context.runHost>) =>
+    scenario === 'pre-fire' && args[0].includes('fetch') && args[0].some(arg => arg.includes('refs/heads/main:'))
+      ? { ok: false, stdout: '', stderr: 'Simulated base fetch failure', exit_code: 1, timed_out: false }
+      : f.context.runHost(...args), { writesDiffOutput: true as const })
+  const orch = buildTridentOrchestrator({ fire_workflow: launcher, db_path: f.input.db_path,
+    base_branch: 'main', run_host: runHost, read_run: id => f.store.get(id), sleep: async () => {} })
+  const advanced = await orch.step(dispatched.run)
+  expect(await f.store.saveIfActive(advanced.run)).toBe(true)
+  if (scenario === 'unmoved') {
+    await completion
+    const terminal = await orch.step(f.store.get(dispatched.run.id)!)
+    expect(await f.store.saveIfActive(terminal.run)).toBe(true)
+    expect(terminal.run.phase, JSON.stringify(terminal)).toBe('done')
+    expect(f.world.dispatches.some(d => d.role === 'plan' || d.role === 'build' || d.role === 'fix')).toBe(false)
+    expect(f.world.dispatches[0]!.step_id).toBe(`${dispatched.run.id}:review:1`)
+    return
+  }
+  const failed = f.store.get(dispatched.run.id)!
+  expect(fired).toBe(scenario === 'pre-fire' || mergeMode === 'local' ? 0 : 1)
+  expect(failed.phase, JSON.stringify(advanced)).toBe('failed')
+  expect(advanced.run.inner_checkpoint_head).toBeNull()
+  expect(f.world.dispatches).toHaveLength(0)
+  const invalidations = f.store.stageEvents(failed.id).filter(event => event.stage === 'build-retry-source-invalidated')
+  expect(invalidations).toHaveLength(scenario === 'before-dispatch' ? 0 : 1)
+  await f.store.invalidateRetrySource(advanced.run)
+  expect(f.store.stageEvents(failed.id).filter(event => event.stage === 'build-retry-source-invalidated')).toHaveLength(invalidations.length)
+  const next = await redispatch(failed.id)
+  expect(next.ok, JSON.stringify({ failed: failed.failure_reason, next })).toBe(true)
+  if (!next.ok) return
+  expect(next.run.inner_checkpoint).toBeNull()
+  expect(next.run.ralph_round).toBe(dispatched.run.ralph_round)
+  expect(next.run.max_ralph_rounds).toBe(dispatched.run.max_ralph_rounds)
+}, 300_000)
+
+for (const { mergeMode, fixed, moved, preparationFailure } of [
+  { mergeMode: 'pr', fixed: false, moved: false, preparationFailure: false },
+  { mergeMode: 'local', fixed: false, moved: false, preparationFailure: false },
+  { mergeMode: 'pr', fixed: true, moved: false, preparationFailure: false },
+  { mergeMode: 'pr', fixed: false, moved: true, preparationFailure: false },
+  { mergeMode: 'pr', fixed: true, moved: false, preparationFailure: true },
+  { mergeMode: 'local', fixed: false, moved: false, preparationFailure: true },
+] as const)
+test(`a cross-run ${mergeMode} retry ${moved ? 'refuses remote movement after dispatch' : `reviews the prior ${fixed ? 'fix' : 'build'} and reaches merged without rebuilding`}${preparationFailure ? ' after a preparation failure' : ''}`, async () => {
+  const task = 'Record a note in NOTES.md and verify the resulting change with the complete regression suite'
+  const f = await fixture({ dispatchTask: task, mergeMode, ralph: fixed,
+    ...(fixed ? { blockersByRound: [0, 1, 0] } : {}) })
+  const firstHost = await createProjectBuildHost(await f.prepare())
+  if (fixed) {
+    const readiness = firstHost.deps.reviewReadiness!
+    let calls = 0
+    firstHost.deps.reviewReadiness = async (...args) => ++calls === 2
+      ? { kind: 'unknown', detail: 'Simulated process death after publishing the fix' } : readiness(...args)
+  } else if (mergeMode === 'pr') f.github.refuse.add('create')
+  else firstHost.deps.reviewReadiness = async () => ({ kind: 'unknown', detail: 'Simulated process death before review' })
+  const first = await firstHost.run({ mode: fixed ? 'ralph' : 'pr', start: 'fresh' }, new AbortController().signal)
+  expect(first.kind, why(f, first)).toBe('unknown')
+  expect(f.world.dispatches.filter(dispatch => ['plan', 'build', 'fix'].includes(dispatch.role)).map(dispatch => dispatch.role))
+    .toEqual(fixed ? ['plan', 'build', 'fix'] : ['plan', 'build'])
+  const checkpoint = lastCheckpoint(f)
+  expect(checkpoint).toMatchObject({ stage: fixed ? 'fixed' : 'built', round: fixed ? 2 : 1 })
+  const prior = f.store.get(f.row.id)!
+  expect(prior.worktree).not.toBeNull()
+  // Exercise the actual host cleanup: a pushed PR branch is disposable locally;
+  // local mode retains its only copy. The retry must recover both shapes.
+  const branchAfterCleanup = await spawnCapture(['git', '-C', f.repo, 'show-ref', '--verify', '--quiet', `refs/heads/${prior.branch}`], f.repo)
+  expect(branchAfterCleanup.ok).toBe(mergeMode === 'local')
+  await f.store.update(prior.id, { phase: 'failed', worktree: null })
+
+  const redispatch = (priorId: string) => dispatchBoardBoundBuild({ task, board_item_id: 'retry-card' }, {
+    store: f.store, project_slug: 'project', repo_path: f.repo,
+    board: { get: () => ({ id: 'retry-card', title: task, design_doc_ref: null, linked_run_id: priorId }),
+      attachRun: async () => {} },
+    resolveBuildRepo: async () => f.repo, resolveMergeMode: async () => mergeMode, resolveRalph: async () => fixed,
+  })
+  let dispatched = await redispatch(prior.id)
+  expect(dispatched.ok, JSON.stringify(dispatched)).toBe(true)
+  if (!dispatched.ok) return
+  expect(dispatched.run.id).not.toBe(prior.id)
+  expect(checkpoint.head).toBe(dispatched.run.inner_checkpoint_head)
+  f.input.run = dispatched.run
+  f.github.refuse.delete('create')
+  f.world.dispatches.length = 0
+  if (preparationFailure) {
+    const runHost = f.context.runHost
+    f.context.runHost = async (...args) => args[0].includes('worktree') && args[0].includes('add')
+      ? { ok: false, stdout: '', stderr: 'Simulated worktree preparation failure', exit_code: 1, timed_out: false }
+      : runHost(...args)
+    try { await expect(f.prepare()).rejects.toThrow('Build worktree creation was not confirmed') }
+    finally { f.context.runHost = runHost }
+    const failed = f.store.get(dispatched.run.id)!
+    expect(f.store.stageEvents(failed.id).filter(event => event.stage === 'build-mode-state')).toHaveLength(0)
+    expect(f.store.stageEvents(failed.id).some(event => event.stage === 'build-retry-source')).toBe(true)
+    expect(f.world.dispatches).toHaveLength(0)
+    await f.store.update(failed.id, { phase: 'failed', worktree: null })
+    dispatched = await redispatch(failed.id)
+    expect(dispatched.ok, JSON.stringify(dispatched)).toBe(true)
+    if (!dispatched.ok) return
+    expect(dispatched.run.ralph_round).toBe(failed.ralph_round)
+    expect(dispatched.run.max_ralph_rounds).toBe(failed.max_ralph_rounds)
+    f.input.run = dispatched.run
+  }
+  if (moved) {
+    const committed = await spawnCapture(['git', '-C', f.repo, 'commit-tree', `${checkpoint.head}^{tree}`,
+      '-p', String(checkpoint.head), '-m', 'test: remote advances after dispatch'], f.repo)
+    expect(committed.ok).toBe(true)
+    const pushed = await spawnCapture(['git', '-C', f.repo, 'push', 'origin', `${committed.stdout.trim()}:refs/heads/${prior.branch}`], f.repo)
+    expect(pushed.ok).toBe(true)
+    await expect(f.prepare()).rejects.toThrow('Retry branch moved after dispatch')
+    expect(f.world.dispatches).toHaveLength(0)
+    const local = await spawnCapture(['git', '-C', f.repo, 'show-ref', '--verify', '--quiet', `refs/heads/${prior.branch}`], f.repo)
+    expect(local.exit_code).toBe(1)
+    return
+  }
+  const host = await createProjectBuildHost(await f.prepare())
+  const outcome = await host.run({ mode: fixed ? 'ralph' : 'pr', start: 'resume' }, new AbortController().signal)
+  expect(outcome.kind, why(f, outcome)).toBe('merged')
+  expect(f.world.dispatches.some(dispatch => dispatch.role === 'plan' || dispatch.role === 'build' || dispatch.role === 'fix')).toBe(false)
+  expect(f.world.dispatches[0]).toMatchObject({ role: 'review', step_id: `${dispatched.run.id}:${fixed ? 'task:0:' : ''}review:${fixed ? 2 : 1}` })
+  expect(f.world.dispatches.some(dispatch => dispatch.step_id.startsWith(`${prior.id}:`))).toBe(false)
+  const saved = f.store.stageEvents(dispatched.run.id).filter(event => event.stage === 'build-mode-state')
+  expect(JSON.parse(saved[0]!.meta!).checkpoint).toEqual(checkpoint)
+  expect(JSON.parse(saved[0]!.meta!).runId).toBe(dispatched.run.id)
+  const merged = await spawnCapture(['git', '-C', mergeMode === 'pr' ? f.origin : f.repo, 'show', 'refs/heads/main:NOTES.md'], f.repo)
+  expect(merged.stdout).toBe(fixed ? `seed\n${prior.id}:task:0:build:0\n${prior.id}:task:0:fix:1` : `seed\n${prior.id}:build:0`)
+  if (mergeMode === 'local') expect(f.commands.some(argv => argv[0] === 'gh')).toBe(false)
+}, 300_000)
 
 test('a driver restarted between the build and review re-adopts the build instead of redoing it', async () => {
   // GATEWAY RESTARTS HAPPEN MID-RUN, and a build is the most expensive thing to

@@ -74,19 +74,23 @@ export function gbrainProbePaths(env: NodeJS.ProcessEnv = process.env): string[]
 /**
  * Resolve an ABSOLUTE path to the `gbrain` executable, or `null` if none is
  * found. PATH is honored FIRST (`Bun.which` — if the service PATH already
- * resolves gbrain, use exactly that), then the ordered probe list. The returned
- * path is always absolute, so spawning it does not depend on the child's PATH
- * for the binary itself (only the `bun` shebang re-resolution, which
- * {@link resolveGbrainChildPath} covers).
+ * resolves gbrain, use exactly that), then the ordered probe list. Tests may
+ * supply an isolated probe list; production omits it and therefore always uses
+ * {@link gbrainProbePaths}. The returned path is always absolute, so spawning
+ * it does not depend on the child's PATH for the binary itself (only the `bun`
+ * shebang re-resolution, which {@link resolveGbrainChildPath} covers).
  */
-export function resolveGbrainCommand(env: NodeJS.ProcessEnv = process.env): string | null {
+export function resolveGbrainCommand(
+  env: NodeJS.ProcessEnv = process.env,
+  absoluteProbePaths: readonly string[] = gbrainProbePaths(env),
+): string | null {
   // Honor the GIVEN env's PATH (not the ambient process PATH) so the doctor's
   // injected env + the unit test are deterministic; in the real boot path
   // `env` IS `process.env`, so this matches today's `Bun.which` behavior.
   const pathEnv = typeof env['PATH'] === 'string' ? env['PATH'] : ''
   const onPath = pathEnv.length > 0 ? Bun.which('gbrain', { PATH: pathEnv }) : null
   if (onPath !== null && isExecutableFile(onPath)) return onPath
-  for (const candidate of gbrainProbePaths(env)) {
+  for (const candidate of absoluteProbePaths) {
     if (isExecutableFile(candidate)) return candidate
   }
   return null
