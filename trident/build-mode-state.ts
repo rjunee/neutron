@@ -5,6 +5,9 @@ const oid = /^(?:[0-9a-f]{40}|[0-9a-f]{64})$/
 export type BuildModeState = { checkpoint: ResumeCheckpoint; iteration: number; consumed?: { round: number; head: string } }
 type BuildRetrySource = { prior: TridentRun; eventId: number; state: BuildModeState }
 
+export const retrySourceIdentity = (run: TridentRun): string =>
+  JSON.stringify([run.id, run.project_slug, run.repo_path, run.branch, run.task, run.merge_mode, run.ralph])
+
 /** Validate the original writer's identity before any state is consumed. */
 export function parseBuildModeState(meta: string | null, run: TridentRun, terminalSource = false): BuildModeState {
   const state = JSON.parse(meta ?? 'null')
@@ -59,6 +62,19 @@ export function readBuildRetrySource(store: TridentRunStore, run: TridentRun, se
   const link = JSON.parse(event.meta ?? 'null')
   if (link?.runId !== run.id || typeof link?.priorRunId !== 'string') throw new Error('Retry source identity is invalid')
   const prior = store.get(link.priorRunId)
+  const invalidated = store.stageEvents(run.id).filter(event => event.stage === 'build-retry-source-invalidated').at(-1)
+  if (invalidated) {
+    // The host validated this exact source before re-pinning a falsified seed.
+    // Its old base no longer describes the fresh run. Only that explicit intent,
+    // never an unreadable or replaced link, permits dropping source adoption.
+    const proof = JSON.parse(invalidated.meta ?? 'null')
+    if (proof?.runId !== run.id || proof.sourceEventId !== event.id || proof.sourceMeta !== event.meta
+      || proof.identity !== retrySourceIdentity(run) || proof.recordedHead !== link.head
+      || typeof proof.baseSha !== 'string' || !oid.test(proof.baseSha) || proof.baseSha !== prior?.base_sha
+      || typeof proof.observedHead !== 'string' || !oid.test(proof.observedHead)
+      || proof.observedHead === proof.recordedHead) throw new Error('Retry source invalidation is invalid')
+    return null
+  }
   if (!prior || prior.id === run.id || prior.project_slug !== run.project_slug || prior.repo_path !== run.repo_path
     || prior.branch !== run.branch || prior.task !== run.task || prior.merge_mode !== run.merge_mode || prior.ralph !== run.ralph
     || prior.base_sha !== run.base_sha) throw new Error('Retry source no longer matches the dispatched run')

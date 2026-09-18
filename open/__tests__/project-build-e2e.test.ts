@@ -58,6 +58,8 @@ import { ProjectDb } from '@neutronai/persistence/index.ts'
 import { seedMigratedDb } from '../../tests/support/migrated-db.ts'
 import { TridentRunStore } from '@neutronai/trident/store.ts'
 import { dispatchBoardBoundBuild } from '@neutronai/trident/board-dispatch.ts'
+import { buildTridentOrchestrator } from '@neutronai/trident/orchestrator.ts'
+import { createProjectLauncher } from '@neutronai/trident/project-launcher.ts'
 import { slugifyTask } from '@neutronai/trident/slugify-task.ts'
 import { TridentPhaseUsageStore } from '@neutronai/trident/phase-usage.ts'
 import { createProjectBuildHost, type ProjectBuildOutcome } from '@neutronai/trident/project-build-host.ts'
@@ -1150,6 +1152,96 @@ test('a finding repeated after a fix stops before another fix is dispatched', as
 }, 300_000)
 
 // ── RESUME ACROSS A DRIVER RESTART ───────────────────────────────────────────
+
+for (const mergeMode of ['pr', 'local'] as const)
+for (const scenario of ['unmoved', 'branch', 'branch-and-base', 'before-dispatch', ...(mergeMode === 'pr' ? ['pre-fire'] as const : [])] as const)
+test(`an orchestrated ${mergeMode} retry survives launch falsification: ${scenario}`, async () => {
+  const task = 'Record a note in NOTES.md and verify the resulting change with the complete regression suite'
+  const f = await fixture({ dispatchTask: task, mergeMode })
+  f.github.refuse.add('create')
+  const priorHost = await createProjectBuildHost(await f.prepare())
+  if (mergeMode === 'local') priorHost.deps.reviewReadiness = async () => ({ kind: 'unknown', detail: 'Simulated stop before review' })
+  const first = await priorHost.run({ mode: 'pr', start: 'fresh' }, new AbortController().signal)
+  expect(first.kind, why(f, first)).toBe('unknown')
+  const checkpoint = lastCheckpoint(f)
+  await f.store.update(f.row.id, { phase: 'failed', worktree: null })
+  const redispatch = (priorId: string) => dispatchBoardBoundBuild({ task, board_item_id: 'retry-card' }, {
+    store: f.store, project_slug: 'project', repo_path: f.repo,
+    board: { get: () => ({ id: 'retry-card', title: task, design_doc_ref: null, linked_run_id: priorId }), attachRun: async () => {} },
+    resolveBuildRepo: async () => f.repo, resolveMergeMode: async () => mergeMode, resolveRalph: async () => false,
+  })
+  const advanceBranch = async () => {
+  const committed = await spawnCapture(['git', '-C', f.repo, 'commit-tree', `${checkpoint.head}^{tree}`,
+    '-p', String(checkpoint.head), '-m', 'test: advance before launch'], f.repo)
+  expect(committed.ok).toBe(true)
+  const branch = `refs/heads/${f.store.get(f.row.id)!.branch}`
+  expect((await spawnCapture(['git', '-C', f.repo, ...(mergeMode === 'pr'
+    ? ['push', 'origin', `${committed.stdout.trim()}:${branch}`] : ['update-ref', branch, committed.stdout.trim()])], f.repo)).ok).toBe(true)
+  }
+  if (scenario === 'before-dispatch') await advanceBranch()
+  const dispatched = await redispatch(f.row.id)
+  expect(dispatched.ok, JSON.stringify(dispatched)).toBe(true)
+  if (!dispatched.ok) return
+  expect(dispatched.run.inner_checkpoint_head).toBe(scenario === 'before-dispatch' ? null : String(checkpoint.head))
+  if (scenario !== 'unmoved' && scenario !== 'before-dispatch') await advanceBranch()
+  if (scenario === 'branch-and-base' || scenario === 'pre-fire') {
+    const base = await spawnCapture(['git', '-C', f.repo, 'commit-tree', `${f.baseSha}^{tree}`,
+      '-p', f.baseSha, '-m', 'test: advance base before launch'], f.repo)
+    expect(base.ok).toBe(true)
+    expect((await spawnCapture(['git', '-C', f.repo, ...(mergeMode === 'pr'
+      ? ['push', 'origin', `${base.stdout.trim()}:refs/heads/main`] : ['update-ref', 'refs/heads/main', base.stdout.trim()])], f.repo)).ok).toBe(true)
+  }
+  f.world.dispatches.length = 0
+  f.github.refuse.delete('create')
+  let fired = 0
+  let settled!: () => void
+  const completion = new Promise<void>(resolve => { settled = resolve })
+  const record = f.store.recordStageEvent.bind(f.store)
+  const recording = spyOn(f.store, 'recordStageEvent').mockImplementation(async (...args) => {
+    await record(...args)
+    if (args[1] === 'build-driver-settled') settled()
+  })
+  cleanups.push(() => recording.mockRestore())
+  const launcher = createProjectLauncher({ store: f.store, onError: () => {}, prepare: async input => {
+    fired++
+    f.input.run = input.run
+    const options = await f.prepare()
+    if (scenario !== 'unmoved') throw Error('Simulated failure after preparation')
+    return options
+  } })
+  const runHost = Object.assign(async (...args: Parameters<typeof f.context.runHost>) =>
+    scenario === 'pre-fire' && args[0].includes('fetch') && args[0].some(arg => arg.includes('refs/heads/main:'))
+      ? { ok: false, stdout: '', stderr: 'Simulated base fetch failure', exit_code: 1, timed_out: false }
+      : f.context.runHost(...args), { writesDiffOutput: true as const })
+  const orch = buildTridentOrchestrator({ fire_workflow: launcher, db_path: f.input.db_path,
+    base_branch: 'main', run_host: runHost, read_run: id => f.store.get(id), sleep: async () => {} })
+  const advanced = await orch.step(dispatched.run)
+  expect(await f.store.saveIfActive(advanced.run)).toBe(true)
+  if (scenario === 'unmoved') {
+    await completion
+    const terminal = await orch.step(f.store.get(dispatched.run.id)!)
+    expect(await f.store.saveIfActive(terminal.run)).toBe(true)
+    expect(terminal.run.phase, JSON.stringify(terminal)).toBe('done')
+    expect(f.world.dispatches.some(d => d.role === 'plan' || d.role === 'build' || d.role === 'fix')).toBe(false)
+    expect(f.world.dispatches[0]!.step_id).toBe(`${dispatched.run.id}:review:1`)
+    return
+  }
+  const failed = f.store.get(dispatched.run.id)!
+  expect(fired).toBe(scenario === 'pre-fire' || mergeMode === 'local' ? 0 : 1)
+  expect(failed.phase, JSON.stringify(advanced)).toBe('failed')
+  expect(advanced.run.inner_checkpoint_head).toBeNull()
+  expect(f.world.dispatches).toHaveLength(0)
+  const invalidations = f.store.stageEvents(failed.id).filter(event => event.stage === 'build-retry-source-invalidated')
+  expect(invalidations).toHaveLength(scenario === 'before-dispatch' ? 0 : 1)
+  await f.store.invalidateRetrySource(advanced.run)
+  expect(f.store.stageEvents(failed.id).filter(event => event.stage === 'build-retry-source-invalidated')).toHaveLength(invalidations.length)
+  const next = await redispatch(failed.id)
+  expect(next.ok, JSON.stringify({ failed: failed.failure_reason, next })).toBe(true)
+  if (!next.ok) return
+  expect(next.run.inner_checkpoint).toBeNull()
+  expect(next.run.ralph_round).toBe(dispatched.run.ralph_round)
+  expect(next.run.max_ralph_rounds).toBe(dispatched.run.max_ralph_rounds)
+}, 300_000)
 
 for (const { mergeMode, fixed, moved, preparationFailure } of [
   { mergeMode: 'pr', fixed: false, moved: false, preparationFailure: false },

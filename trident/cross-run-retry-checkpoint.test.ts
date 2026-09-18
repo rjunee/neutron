@@ -47,8 +47,90 @@ async function fixture(over: { checkpoint?: Partial<ResumeCheckpoint>; phase?: '
     resolveBuildRepo: async () => dir, resolveMergeMode: async () => 'local', resolveRalph: async () => true,
     readBranchTip: async () => tip,
   })
-  return { dir, store, prior, options, checkpoint, dispatch }
+  return { dir, db, store, prior, options, checkpoint, dispatch }
 }
+
+test('intentional source invalidation carries the Ralph budget without carrying a checkpoint', async () => {
+  const f = await fixture()
+  const result = await f.dispatch()
+  expect(result.ok).toBe(true)
+  if (!result.ok) return
+  const falsified = { ...result.run, phase: 'failed' as const, inner_checkpoint: null, inner_checkpoint_head: null,
+    base_sha: 'd'.repeat(40), retry_seed_falsified: { recordedHead: HEAD, observedHead: 'c'.repeat(40), baseSha: BASE } }
+  expect(await f.store.saveIfActive(falsified)).toBe(true)
+  expect(readBuildRetrySource(f.store, f.store.get(result.run.id)!)).toBeNull()
+  await f.store.invalidateRetrySource(falsified)
+  expect(f.store.stageEvents(result.run.id).filter(e => e.stage === 'build-retry-source-invalidated')).toHaveLength(1)
+  const next = await f.dispatch('c'.repeat(40), result.run.id)
+  expect(next.ok, JSON.stringify(next)).toBe(true)
+  if (!next.ok) return
+  expect(next.run.inner_checkpoint).toBeNull()
+  expect(next.run.ralph_round).toBe(4)
+  expect(next.run.max_ralph_rounds).toBe(8)
+})
+
+for (const fault of ['unchanged head', 'unknown head', 'wrong base', 'copied source', 'recovered run'] as const)
+test(`source invalidation refuses ${fault}`, async () => {
+  const f = await fixture()
+  const result = await f.dispatch()
+  expect(result.ok).toBe(true)
+  if (!result.ok) return
+  const run = { ...result.run, retry_seed_falsified: { recordedHead: HEAD, observedHead: 'c'.repeat(40), baseSha: BASE } }
+  if (fault === 'unchanged head') run.retry_seed_falsified.observedHead = HEAD
+  if (fault === 'unknown head') run.retry_seed_falsified.observedHead = ''
+  if (fault === 'wrong base') run.retry_seed_falsified.baseSha = 'd'.repeat(40)
+  if (fault === 'recovered run') await f.store.update(run.id, { workflow_run_id: 'already-fired' })
+  if (fault === 'copied source') {
+    const link = f.store.stageEvents(run.id).find(e => e.stage === 'build-retry-source')!
+    await f.store.recordStageEvent(run.id, 'build-retry-source', JSON.stringify({ ...JSON.parse(link.meta!), runId: 'foreign' }))
+  }
+  await expect(f.store.invalidateRetrySource(run)).rejects.toThrow()
+  expect(f.store.stageEvents(run.id).filter(e => e.stage === 'build-retry-source-invalidated')).toHaveLength(0)
+})
+
+test('invalidation cannot hide a replaced source link', async () => {
+  const f = await fixture()
+  const result = await f.dispatch()
+  expect(result.ok).toBe(true)
+  if (!result.ok) return
+  const run = { ...result.run, retry_seed_falsified: { recordedHead: HEAD, observedHead: 'c'.repeat(40), baseSha: BASE } }
+  await f.store.invalidateRetrySource(run)
+  expect(readBuildRetrySource(f.store, result.run)).toBeNull()
+  const link = f.store.stageEvents(run.id).find(e => e.stage === 'build-retry-source')!
+  await f.store.recordStageEvent(run.id, 'build-retry-source', link.meta)
+  expect(() => readBuildRetrySource(f.store, result.run)).toThrow('Retry source invalidation is invalid')
+})
+
+test('invalidation refuses a changed recorded base', async () => {
+  const f = await fixture()
+  const result = await f.dispatch()
+  expect(result.ok).toBe(true)
+  if (!result.ok) return
+  await f.store.invalidateRetrySource({ ...result.run,
+    retry_seed_falsified: { recordedHead: HEAD, observedHead: 'c'.repeat(40), baseSha: BASE } })
+  const proof = f.store.stageEvents(result.run.id).find(e => e.stage === 'build-retry-source-invalidated')!
+  await f.store.recordStageEvent(result.run.id, proof.stage, JSON.stringify({ ...JSON.parse(proof.meta!), baseSha: 'd'.repeat(40) }))
+  expect(() => readBuildRetrySource(f.store, result.run)).toThrow('Retry source invalidation is invalid')
+})
+
+test('terminal base mutation and source invalidation roll back together', async () => {
+  const f = await fixture()
+  const result = await f.dispatch()
+  expect(result.ok).toBe(true)
+  if (!result.ok) return
+  const run = { ...result.run, phase: 'failed' as const, inner_checkpoint: null, base_sha: 'd'.repeat(40),
+    retry_seed_falsified: { recordedHead: HEAD, observedHead: 'c'.repeat(40), baseSha: BASE } }
+  await f.db.run("CREATE TEMP TRIGGER reject_invalidation BEFORE INSERT ON code_trident_stage_events WHEN NEW.stage = 'build-retry-source-invalidated' BEGIN SELECT RAISE(ABORT, 'invalidation write failed'); END", [])
+  await expect(f.store.invalidateRetrySource(run)).rejects.toThrow('invalidation write failed')
+  await expect(f.store.saveIfActive(run)).rejects.toThrow('invalidation write failed')
+  expect(f.store.get(run.id)!.base_sha).toBe(BASE)
+  expect(f.store.get(run.id)!.phase).toBe(result.run.phase)
+  expect(readBuildRetrySource(f.store, result.run)).not.toBeNull()
+  await f.db.run('DROP TRIGGER reject_invalidation', [])
+  expect(await f.store.saveIfActive(run)).toBe(true)
+  expect(f.store.get(run.id)!.base_sha).toBe('d'.repeat(40))
+  expect(readBuildRetrySource(f.store, f.store.get(run.id)!)).toBeNull()
+})
 
 test('a new run dispatched from a completed typed checkpoint resumes its review round', async () => {
   const { dir, store, prior, options, checkpoint, dispatch } = await fixture()

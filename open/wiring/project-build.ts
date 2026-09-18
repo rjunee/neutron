@@ -209,6 +209,7 @@ export async function prepareProjectBuild(input: InnerLoopInput, context: Projec
     worktree: input.run.worktree ?? runWorktreePath(input.run.repo_path, input.run) }
   if (!run.base_sha) throw Error('Dispatched build has no pinned base')
   const git = async (args: string[]) => context.runHost(['git', '-C', run.repo_path, ...args], run.repo_path)
+  await context.store.invalidateRetrySource(run)
   const saved = await context.store.update(run.id, { branch: run.branch, worktree: run.worktree, base_sha: run.base_sha })
   if (!saved) throw Error('Dispatched build row disappeared')
   let exists = false

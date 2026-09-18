@@ -148,6 +148,8 @@ export async function prepareLaunch(
     typeof resume_live_head === 'string' &&
     /^(?:[0-9a-f]{40}|[0-9a-f]{64})$/.test(resume_live_head) &&
     resume_live_head !== recorded
+  const falsification = seed_falsified
+    ? { recordedHead: recorded, observedHead: resume_live_head!, baseSha: run.base_sha } : undefined
   if (seed_falsified) {
     resume_checkpoint = null
     resume_checkpoint_head = null
@@ -157,6 +159,7 @@ export async function prepareLaunch(
   const seedCheckedRun: TridentRun = seed_falsified
     ? {
         ...run,
+        retry_seed_falsified: falsification!,
         inner_checkpoint: null,
         inner_checkpoint_head: null,
         inner_checkpoint_findings: null,
