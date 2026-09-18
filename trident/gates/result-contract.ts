@@ -80,12 +80,16 @@ type MultiRule = {
   required?: readonly string[]
   properties?: Record<string, Rule>
 }
-type Rule =
+type Rule = {
+  /** JSON Schema annotations travel with the contract into worker briefs. */
+  description?: string
+  examples?: readonly unknown[]
+} & (
   | { type: 'string'; enum?: readonly string[] }
   | { type: 'number' | 'integer' | 'boolean' }
   | MultiRule
   | { type: 'array'; items: Rule }
-  | ({ type: 'object' } & Shape)
+  | ({ type: 'object' } & Shape))
 
 const findingRule: Rule = {
   type: 'object',
@@ -104,14 +108,20 @@ const findingRule: Rule = {
 
 const mutationClaimRule: Rule = {
   type: 'object',
+  description: 'Nominate a mutation of changed production behaviour. guard and control are executable argv arrays: the first element is an allowed test runner, followed by its arguments and an explicit repo-relative test path. They are not arrays of filenames or shell command strings. Use separate tests and distinct commands: guard must fail under the mutation and pass restored; control must pass under the mutation. Adapt the example to real files and a real behavioural assertion in this repository; the host proves the claim and enforces runner/path restrictions.',
+  examples: [{ file: 'src/limit.ts', find: 'n > max ? max : n', replace: 'n',
+    guard: ['bun', 'test', 'tests/limit.test.ts'],
+    control: ['bun', 'test', 'tests/other-control.test.ts'] }],
   additionalProperties: false,
   required: ['file', 'find', 'replace', 'guard', 'control'],
   properties: {
     file: { type: 'string' },
     find: { type: 'string' },
     replace: { type: 'string' },
-    guard: { type: 'array', items: { type: 'string' } },
-    control: { type: 'array', items: { type: 'string' } },
+    guard: { type: 'array', items: { type: 'string' },
+      description: 'Executable argv for the separate behavioural test that goes RED mutated and GREEN restored. Include the runner and subcommand, for example ["bun", "test", "tests/limit.test.ts"], never ["tests/limit.test.ts"].' },
+    control: { type: 'array', items: { type: 'string' },
+      description: 'Executable argv for a distinct control test that stays GREEN mutated, for example ["bun", "test", "tests/other-control.test.ts"]. Include the runner; do not repeat guard or run the mutated production file as the test.' },
     rationale: { type: 'string' },
   },
 }
