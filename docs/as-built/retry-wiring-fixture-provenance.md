@@ -24,3 +24,8 @@ Verification runs both complete `open/__tests__/project-build-wiring.test.ts`
 and `open/__tests__/project-build-e2e.test.ts`, both TypeScript project checks,
 and changed-file lint. No production guard, acceptance requirement, deployed
 state or saved live artifact changed.
+
+The integrated retry batch subsequently passed `bash scripts/run-tests.sh`:
+all 1,595 discovered files executed across 17 bounded-memory lanes, with
+23,434 passing tests, 23 skips, zero failures and 99,378 assertions. The skipped
+checks are not counted as live-provider or served-instance verification.
