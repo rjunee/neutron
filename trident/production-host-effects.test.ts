@@ -273,6 +273,87 @@ test('publication preserves existing provenance without another create receipt',
   expect(f.calls.some(argv => argv[2] === 'create')).toBe(false)
 })
 
+async function publicationLagFixture() {
+  const f = await fixture()
+  await f.command(['git', '-C', f.repo, 'push', 'origin', `${f.base}:refs/heads/change`])
+  await f.store.update(f.row.id, { pr: 12, published_pr: 12 })
+  const oldPr = { number: 12, headRefOid: f.base, state: 'OPEN', headRefName: 'change', baseRefName: 'main', isCrossRepository: false }
+  f.setPr({ ...oldPr })
+  const snapshot = await measured(f)
+  const waits: number[] = []
+  let onWait: (() => Promise<void>) | undefined
+  const host = createProductionHostEffects({ ...f.options, publicationSleep: async ms => { waits.push(ms); await onWait?.() } })
+  return { ...f, ...host, snapshot, oldPr, waits, onWait(fn: () => Promise<void>) { onWait = fn } }
+}
+
+for (const staleReads of [0, 1, 4, 5]) {
+  test(`publication bounds witnessed old-head propagation: ${staleReads} stale reads`, async () => {
+    const f = await publicationLagFixture()
+    let pushed = false
+    let reads = 0
+    f.intercept(argv => {
+      if (argv.includes('push')) pushed = true
+      if (pushed && argv[2] === 'view' && ++reads <= staleReads) return ok(JSON.stringify(f.oldPr))
+    })
+    const result = await f.publishChecked(f.snapshot)
+    expect(result.kind).toBe(staleReads <= 4 ? 'allow' : 'unknown')
+    expect(reads).toBe(Math.min(staleReads + 1, 5))
+    expect(f.waits).toEqual([1000, 2000, 4000, 8000].slice(0, Math.min(staleReads, 4)))
+    expect(f.calls.filter(argv => argv.includes('push'))).toHaveLength(1)
+    expect(f.calls.some(argv => argv[2] === 'create')).toBe(false)
+    expect(f.store.get(f.row.id)?.published_pr).toBe(12)
+  })
+}
+
+for (const mismatch of ['different-head', 'closed', 'merged', 'foreign', 'malformed', 'unreadable']) {
+  test(`publication propagation cannot conceal ${mismatch}`, async () => {
+    const f = await publicationLagFixture()
+    let pushed = false
+    let reads = 0
+    f.intercept(argv => {
+      if (argv.includes('push')) pushed = true
+      if (pushed && argv[2] === 'view') {
+        reads++
+        if (reads === 1) return ok(JSON.stringify(f.oldPr))
+        if (reads > 2) return undefined // A later valid response must not erase the refusal.
+        if (mismatch === 'unreadable') return bad()
+        return ok(JSON.stringify({ ...f.oldPr,
+          ...(mismatch === 'different-head' ? { headRefOid: 'b'.repeat(40) } : {}),
+          ...(mismatch === 'closed' ? { state: 'CLOSED' } : {}),
+          ...(mismatch === 'merged' ? { state: 'MERGED' } : {}),
+          ...(mismatch === 'foreign' ? { number: 73 } : {}),
+          ...(mismatch === 'malformed' ? { headRefOid: 'bad' } : {}),
+        }))
+      }
+    })
+    expect(await f.publishChecked(f.snapshot)).toMatchObject({ kind: 'unknown' })
+    expect(reads).toBe(2)
+    expect(f.waits).toEqual([1000])
+  })
+}
+
+for (const changed of ['remote', 'local', 'provenance', 'base', 'terminal']) {
+  test(`publication propagation refuses changed ${changed} while waiting`, async () => {
+    const f = await publicationLagFixture()
+    let pushed = false
+    let reads = 0
+    f.intercept(argv => {
+      if (argv.includes('push')) pushed = true
+      if (pushed && argv[2] === 'view' && ++reads === 1) return ok(JSON.stringify(f.oldPr))
+      if (changed === 'remote' && f.waits.length > 0 && argv.includes('ls-remote')) return ok(`${f.base}\trefs/heads/change`)
+      if (changed === 'local' && f.waits.length > 0 && argv.includes('refs/heads/change^{commit}')) return ok(f.base)
+    })
+    f.onWait(async () => {
+      if (changed === 'provenance') await f.store.update(f.row.id, { published_pr: 73 })
+      if (changed === 'base') await f.store.update(f.row.id, { base_sha: f.tip })
+      if (changed === 'terminal') await f.store.update(f.row.id, { phase: 'failed' })
+    })
+    expect(await f.publishChecked(f.snapshot)).toMatchObject({ kind: 'unknown' })
+    expect(reads).toBe(1)
+    expect(f.waits).toEqual([1000])
+  })
+}
+
 for (const receipt of ['', 'created', 'https://example.invalid/project/repo/pull/0', 'https://example.invalid/project/repo/pull/9007199254740992']) {
   test(`publication refuses malformed create receipt ${receipt}`, async () => {
     const f = await fixture()
@@ -710,6 +791,34 @@ async function resumeFixture(round = 3, replansUsed = 1) {
   const input: BuildRunInput = { run_id: f.row.id, mode: 'pr', start: 'resume', repl_provider: 'pi',
     workers: { plan: { runner, request }, build: { runner, request }, review: { runner, request }, fix: { runner, request } } }
   return { ...f, restarted, runner, rounds, deps, input, run: () => buildRun(input, deps, new AbortController().signal) }
+}
+
+for (const regresses of [false, true]) {
+  test(`driver independently remeasures PR after propagation, regression=${regresses}`, async () => {
+    const f = await resumeFixture()
+    await f.command(['git', '-C', f.repo, 'push', 'origin', `${f.base}:refs/heads/change`])
+    await f.store.update(f.row.id, { pr: 12, published_pr: 12 })
+    const oldPr = { number: 12, headRefOid: f.base, state: 'OPEN', headRefName: 'change', baseRefName: 'main', isCrossRepository: false }
+    f.setPr({ ...oldPr })
+    await f.modes.saveCheckpoint!({ head: f.tip, stage: 'built', round: 0, replansUsed: 0, findings: [], previousFindings: [] })
+    const waits: number[] = []
+    Object.assign(f.deps, createProductionHostEffects({ ...f.options, publicationSleep: async ms => { waits.push(ms) } }).effects)
+    let pushed = false
+    let reads = 0
+    f.intercept(argv => {
+      if (argv.includes('push')) pushed = true
+      if (pushed && argv[2] === 'view') {
+        reads++
+        if (reads === 1 || (regresses && reads === 3)) return ok(JSON.stringify(oldPr))
+      }
+    })
+    expect(await f.run()).toMatchObject(regresses
+      ? { kind: 'blocked', on: 'Published PR does not match candidate revision' }
+      : { kind: 'blocked', on: 'fixture stops before merge' })
+    expect(waits).toEqual([1000])
+    expect(f.calls.filter(argv => argv.includes('push'))).toHaveLength(1)
+    expect(f.runner.calls.filter(call => call.role === 'review')).toHaveLength(regresses ? 0 : 1)
+  })
 }
 
 test('production resume reloads rejected state, inherits rounds, and ignores worker counters', async () => {

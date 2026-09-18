@@ -33,6 +33,8 @@ export interface ProductionHostOptions {
   ciWorkflow: string | undefined
   ciSource?: ProductionCiSource
   ciNow?: () => number
+  /** Injectable wait for bounded post-push PR propagation reads. */
+  publicationSleep?: (ms: number) => Promise<void>
   publication: (snapshot: BuildSnapshot) => Promise<{ title: string; bodyFile: string }>
 }
 
@@ -47,6 +49,7 @@ export type CleanupOutcome =
   | { kind: 'failed'; detail: string }
 
 const CI_CONFIGURATION_GRACE_MS = 600_000
+const PUBLICATION_PR_RETRY_DELAYS_MS = [1000, 2000, 4000, 8000] as const
 const missingResponse = (result: { exit_code: number; stderr: string; stdout: string }) =>
   result.exit_code === 1 && /(?:HTTP 404|Not Found|Branch not protected)/i.test(`${result.stdout}\n${result.stderr}`)
 
@@ -388,6 +391,21 @@ export function createProductionHostEffects(options: ProductionHostOptions) {
         pr = await readPr({ ...current, pr: createdNumber })
       } else if (pr.number !== current.published_pr) {
         return blocked('Discovered PR has no publication provenance')
+      }
+      // GitHub's PR projection may still expose the witnessed pre-push remote
+      // revision. Only that known stale OPEN observation earns a bounded retry;
+      // a different head, identity or terminal state is never propagation evidence.
+      for (const delay of PUBLICATION_PR_RETRY_DELAYS_MS) {
+        if (!pr || pr.state !== 'OPEN' || pr.head === snapshot.head || pr.head !== expected) break
+        await (options.publicationSleep ?? (ms => new Promise(resolve => setTimeout(resolve, ms))))(delay)
+        const after = row()
+        if (after.base_sha !== current.base_sha || after.pr !== current.pr
+          || after.published_pr !== current.published_pr || after.merge_mode !== current.merge_mode
+          || await head() !== snapshot.head) return unknown('Publication pins changed while awaiting PR propagation')
+        const retryWitness = await git('ls-remote', '--heads', 'origin', `refs/heads/${branch}`)
+        if (!retryWitness.ok || retryWitness.timed_out
+          || retryWitness.stdout.trim().split(/\s+/).join(' ') !== `${snapshot.head} refs/heads/${branch}`) return unknown('Published head was not witnessed during PR propagation')
+        pr = await readPr({ ...current, pr: pr.number })
       }
       if (!pr || pr.state !== 'OPEN' || pr.head !== snapshot.head) return unknown('Published PR does not match the reviewed head')
       if (!await store.update(runId, { pr: pr.number, ...(createdNumber !== null ? { published_pr: createdNumber } : {}) })) return unknown('Published PR could not be persisted')
