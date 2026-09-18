@@ -1151,9 +1151,15 @@ test('a finding repeated after a fix stops before another fix is dispatched', as
 
 // ── RESUME ACROSS A DRIVER RESTART ───────────────────────────────────────────
 
-for (const { mergeMode, fixed, moved } of [{ mergeMode: 'pr', fixed: false, moved: false }, { mergeMode: 'local', fixed: false, moved: false },
-  { mergeMode: 'pr', fixed: true, moved: false }, { mergeMode: 'pr', fixed: false, moved: true }] as const)
-test(`a cross-run ${mergeMode} retry ${moved ? 'refuses remote movement after dispatch' : `reviews the prior ${fixed ? 'fix' : 'build'} and reaches merged without rebuilding`}`, async () => {
+for (const { mergeMode, fixed, moved, preparationFailure } of [
+  { mergeMode: 'pr', fixed: false, moved: false, preparationFailure: false },
+  { mergeMode: 'local', fixed: false, moved: false, preparationFailure: false },
+  { mergeMode: 'pr', fixed: true, moved: false, preparationFailure: false },
+  { mergeMode: 'pr', fixed: false, moved: true, preparationFailure: false },
+  { mergeMode: 'pr', fixed: true, moved: false, preparationFailure: true },
+  { mergeMode: 'local', fixed: false, moved: false, preparationFailure: true },
+] as const)
+test(`a cross-run ${mergeMode} retry ${moved ? 'refuses remote movement after dispatch' : `reviews the prior ${fixed ? 'fix' : 'build'} and reaches merged without rebuilding`}${preparationFailure ? ' after a preparation failure' : ''}`, async () => {
   const task = 'Record a note in NOTES.md and verify the resulting change with the complete regression suite'
   const f = await fixture({ dispatchTask: task, mergeMode, ralph: fixed,
     ...(fixed ? { blockersByRound: [0, 1, 0] } : {}) })
@@ -1179,12 +1185,13 @@ test(`a cross-run ${mergeMode} retry ${moved ? 'refuses remote movement after di
   expect(branchAfterCleanup.ok).toBe(mergeMode === 'local')
   await f.store.update(prior.id, { phase: 'failed', worktree: null })
 
-  const dispatched = await dispatchBoardBoundBuild({ task, board_item_id: 'retry-card' }, {
+  const redispatch = (priorId: string) => dispatchBoardBoundBuild({ task, board_item_id: 'retry-card' }, {
     store: f.store, project_slug: 'project', repo_path: f.repo,
-    board: { get: () => ({ id: 'retry-card', title: task, design_doc_ref: null, linked_run_id: prior.id }),
+    board: { get: () => ({ id: 'retry-card', title: task, design_doc_ref: null, linked_run_id: priorId }),
       attachRun: async () => {} },
     resolveBuildRepo: async () => f.repo, resolveMergeMode: async () => mergeMode, resolveRalph: async () => fixed,
   })
+  let dispatched = await redispatch(prior.id)
   expect(dispatched.ok, JSON.stringify(dispatched)).toBe(true)
   if (!dispatched.ok) return
   expect(dispatched.run.id).not.toBe(prior.id)
@@ -1192,6 +1199,25 @@ test(`a cross-run ${mergeMode} retry ${moved ? 'refuses remote movement after di
   f.input.run = dispatched.run
   f.github.refuse.delete('create')
   f.world.dispatches.length = 0
+  if (preparationFailure) {
+    const runHost = f.context.runHost
+    f.context.runHost = async (...args) => args[0].includes('worktree') && args[0].includes('add')
+      ? { ok: false, stdout: '', stderr: 'Simulated worktree preparation failure', exit_code: 1, timed_out: false }
+      : runHost(...args)
+    try { await expect(f.prepare()).rejects.toThrow('Build worktree creation was not confirmed') }
+    finally { f.context.runHost = runHost }
+    const failed = f.store.get(dispatched.run.id)!
+    expect(f.store.stageEvents(failed.id).filter(event => event.stage === 'build-mode-state')).toHaveLength(0)
+    expect(f.store.stageEvents(failed.id).some(event => event.stage === 'build-retry-source')).toBe(true)
+    expect(f.world.dispatches).toHaveLength(0)
+    await f.store.update(failed.id, { phase: 'failed', worktree: null })
+    dispatched = await redispatch(failed.id)
+    expect(dispatched.ok, JSON.stringify(dispatched)).toBe(true)
+    if (!dispatched.ok) return
+    expect(dispatched.run.ralph_round).toBe(failed.ralph_round)
+    expect(dispatched.run.max_ralph_rounds).toBe(failed.max_ralph_rounds)
+    f.input.run = dispatched.run
+  }
   if (moved) {
     const committed = await spawnCapture(['git', '-C', f.repo, 'commit-tree', `${checkpoint.head}^{tree}`,
       '-p', String(checkpoint.head), '-m', 'test: remote advances after dispatch'], f.repo)

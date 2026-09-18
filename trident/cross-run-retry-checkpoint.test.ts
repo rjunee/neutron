@@ -10,6 +10,7 @@ import { createProductionHostEffects } from './production-host-effects.ts'
 import { spawnCapture } from './git-mode.ts'
 import { slugifyTask } from './slugify-task.ts'
 import type { ResumeCheckpoint } from './build-run.ts'
+import { readBuildRetrySource } from './build-mode-state.ts'
 
 const cleanups: (() => void)[] = []
 afterEach(() => { for (const cleanup of cleanups.splice(0)) cleanup() })
@@ -64,6 +65,87 @@ test('a new run dispatched from a completed typed checkpoint resumes its review 
   expect(JSON.parse(ownEvents[0]!.meta!).worktree).toBe(join(dir, 'retry-work'))
   expect(result.run.ralph_round).toBe(4)
   expect(result.run.max_ralph_rounds).toBe(8)
+})
+
+test('a retry that fails before importing its checkpoint remains a typed source for the next retry', async () => {
+  const f = await fixture()
+  let previous = f.prior
+  // More than one preparation failure must keep the immediate named lineage.
+  for (let attempt = 0; attempt < 3; attempt++) {
+    const result = await f.dispatch(HEAD, previous.id)
+    expect(result.ok, JSON.stringify(result)).toBe(true)
+    if (!result.ok) return
+    const source = f.store.stageEvents(result.run.id).find(event => event.stage === 'build-retry-source')
+    expect(source).toBeDefined()
+    expect(JSON.parse(source!.meta!).priorRunId).toBe(previous.id)
+    expect(result.run.ralph_round).toBe(4)
+    expect(result.run.max_ralph_rounds).toBe(8)
+    expect(f.store.stageEvents(result.run.id).filter(event => event.stage === 'build-mode-state')).toHaveLength(0)
+    if (attempt < 2) await f.store.update(result.run.id, { phase: 'failed', worktree: null })
+    previous = f.store.get(result.run.id)!
+  }
+  const worktree = join(f.dir, 'final-work')
+  await f.store.update(previous.id, { worktree })
+  const host = createProductionHostEffects({ ...f.options, runId: previous.id, worktree })
+  expect(await host.modes.loadResume()).toEqual(f.checkpoint)
+  expect(host.ralphIteration()).toBe(4)
+})
+
+for (const fault of ['foreign ancestor', 'changed source', 'copied link', 'stopped predecessor', 'changed merge mode', 'moved head'] as const)
+test(`a source-only retry cannot launder a ${fault}`, async () => {
+  const f = await fixture()
+  const first = await f.dispatch()
+  expect(first.ok).toBe(true)
+  if (!first.ok) return
+  await f.store.update(first.run.id, { phase: 'failed', worktree: null })
+  if (fault === 'foreign ancestor') {
+    const foreign = await f.store.create({ slug: 'foreign', project_slug: 'project', repo_path: f.dir,
+      task: `${TASK} for another card`, branch: f.options.branch, merge_mode: 'local', ralph: true })
+    await f.store.update(foreign.id, { phase: 'failed', base_sha: BASE })
+    const event = f.store.stageEvents(first.run.id).find(event => event.stage === 'build-retry-source')!
+    await f.store.recordStageEvent(first.run.id, 'build-retry-source', JSON.stringify({ ...JSON.parse(event.meta!), priorRunId: foreign.id }))
+  }
+  if (fault === 'changed source') {
+    const event = f.store.stageEvents(f.prior.id).find(event => event.stage === 'build-mode-state')!
+    await f.store.recordStageEvent(f.prior.id, 'build-mode-state', event.meta)
+  }
+  if (fault === 'copied link') {
+    const event = f.store.stageEvents(first.run.id).find(event => event.stage === 'build-retry-source')!
+    await f.store.recordStageEvent(first.run.id, 'build-retry-source', JSON.stringify({ ...JSON.parse(event.meta!), runId: f.prior.id }))
+  }
+  if (fault === 'stopped predecessor') await f.store.update(first.run.id, { phase: 'stopped' })
+  if (fault === 'changed merge mode') await f.store.update(first.run.id, { merge_mode: 'pr' })
+  const result = await f.dispatch(fault === 'moved head' ? 'c'.repeat(40) : HEAD, first.run.id)
+  if (fault === 'stopped predecessor' || fault === 'changed merge mode' || fault === 'moved head') {
+    expect(result.ok).toBe(true)
+    if (!result.ok) return
+    expect(result.run.inner_checkpoint).toBeNull()
+    expect(f.store.stageEvents(result.run.id)).toHaveLength(0)
+    expect(result.run.ralph_round).toBe(4)
+  } else {
+    expect(result).toMatchObject({ ok: false, code: 'backend_error' })
+    expect(f.store.listNonTerminal()).toHaveLength(0)
+  }
+})
+
+test('a cyclic source-only lineage is refused before a new retry is created', async () => {
+  const f = await fixture()
+  const first = await f.dispatch()
+  expect(first.ok).toBe(true)
+  if (!first.ok) return
+  await f.store.update(first.run.id, { phase: 'failed', worktree: null })
+  const second = await f.dispatch(HEAD, first.run.id)
+  expect(second.ok).toBe(true)
+  if (!second.ok) return
+  await f.store.update(second.run.id, { phase: 'failed', worktree: null })
+  const secondLink = f.store.stageEvents(second.run.id).find(event => event.stage === 'build-retry-source')!
+  // Both rows otherwise match. Close the chain back onto the immediate child.
+  await f.store.recordStageEvent(first.run.id, 'build-retry-source', JSON.stringify({
+    runId: first.run.id, priorRunId: second.run.id, eventId: secondLink.id, head: HEAD,
+  }))
+  expect(() => readBuildRetrySource(f.store, f.store.get(second.run.id)!)).toThrow('Retry source cycle')
+  expect(await f.dispatch(HEAD, second.run.id)).toMatchObject({ ok: false, code: 'backend_error' })
+  expect(f.store.listNonTerminal()).toHaveLength(0)
 })
 
 for (const tip of ['', 'c'.repeat(40)]) test(`a ${tip ? 'moved' : 'missing'} branch tip cannot authorize typed checkpoint adoption`, async () => {

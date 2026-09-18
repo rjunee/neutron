@@ -1427,8 +1427,8 @@ export async function dispatchBoardBoundBuild(
       // disagreed rather than claiming this is a different card.
       seedReason = 'prior_run_task_text_differs'
     } else {
-      // Typed driver state is independently validated under its original run's
-      // identity. It does not rely on the legacy inner-checkpoint projection.
+      // Typed driver state, including a source-only retry that failed during
+      // preparation, is validated under every predecessor's original identity.
       let source: ReturnType<typeof retryModeSource>
       try {
         source = prior.repo_path === repo_path && prior.branch === branch
@@ -1437,12 +1437,12 @@ export async function dispatchBoardBoundBuild(
       } catch {
         return { ok: false, code: 'backend_error', message: 'The previous run has an invalid retry checkpoint. Nothing was dispatched.' }
       }
-      // A new typed checkpoint supersedes an inherited legacy projection. An
-      // approved/rejected/pending successor cannot revive its old fix-round seed.
+      // Typed state or a source link supersedes an inherited legacy projection.
+      // An ineligible successor cannot revive its old fix-round seed.
       const candidate = source !== null ? {
         checkpoint: `fix-round-${source.state.checkpoint.round}`,
         head: source.state.checkpoint.head!, findings: null, base_sha: prior.base_sha!,
-      } : deps.store.stageEvents(prior.id).some(event => event.stage === 'build-mode-state')
+      } : deps.store.stageEvents(prior.id).some(event => event.stage === 'build-mode-state' || event.stage === 'build-retry-source')
         ? null : builtButNeverReviewedSeed(prior, { ralph })
       if (candidate === null) {
         seedReason = 'prior_run_has_no_resumable_build'

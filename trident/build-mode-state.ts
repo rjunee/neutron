@@ -3,6 +3,7 @@ import type { TridentRun, TridentRunStore } from './store.ts'
 
 const oid = /^(?:[0-9a-f]{40}|[0-9a-f]{64})$/
 export type BuildModeState = { checkpoint: ResumeCheckpoint; iteration: number; consumed?: { round: number; head: string } }
+type BuildRetrySource = { prior: TridentRun; eventId: number; state: BuildModeState }
 
 /** Validate the original writer's identity before any state is consumed. */
 export function parseBuildModeState(meta: string | null, run: TridentRun, terminalSource = false): BuildModeState {
@@ -29,10 +30,19 @@ export function parseBuildModeState(meta: string | null, run: TridentRun, termin
   return state
 }
 
-export function retryModeSource(store: TridentRunStore, prior: TridentRun) {
+export function retryModeSource(store: TridentRunStore, prior: TridentRun, seen = new Set<string>()): BuildRetrySource | null {
+  if (seen.has(prior.id)) throw new Error('Retry source cycle')
+  seen.add(prior.id)
   if (prior.phase !== 'failed' || !prior.base_sha || !oid.test(prior.base_sha)) return null
   const event = store.stageEvents(prior.id).filter(event => event.stage === 'build-mode-state').at(-1)
-  if (!event) return null
+  if (!event) {
+    // Preparation can fail before loadResume writes this run's own mode state.
+    // Keep that immediate predecessor and pin its source event; every older edge
+    // is still validated, and a real mode event below always supersedes the link.
+    const inherited = readBuildRetrySource(store, prior, seen)
+    const link = store.stageEvents(prior.id).filter(event => event.stage === 'build-retry-source').at(-1)
+    return inherited && link ? { prior, eventId: link.id, state: inherited.state } : null
+  }
   const state = parseBuildModeState(event.meta, prior, true)
   const checkpoint = state.checkpoint
   // Never inherit approval or an unresolved worker reservation. A bare Ralph
@@ -43,7 +53,7 @@ export function retryModeSource(store: TridentRunStore, prior: TridentRun) {
 }
 
 /** The dispatch-minted link authorizes importing state, never prior receipts. */
-export function readBuildRetrySource(store: TridentRunStore, run: TridentRun) {
+export function readBuildRetrySource(store: TridentRunStore, run: TridentRun, seen = new Set<string>()): BuildRetrySource | null {
   const event = store.stageEvents(run.id).filter(event => event.stage === 'build-retry-source').at(-1)
   if (!event) return null
   const link = JSON.parse(event.meta ?? 'null')
@@ -52,7 +62,7 @@ export function readBuildRetrySource(store: TridentRunStore, run: TridentRun) {
   if (!prior || prior.id === run.id || prior.project_slug !== run.project_slug || prior.repo_path !== run.repo_path
     || prior.branch !== run.branch || prior.task !== run.task || prior.merge_mode !== run.merge_mode || prior.ralph !== run.ralph
     || prior.base_sha !== run.base_sha) throw new Error('Retry source no longer matches the dispatched run')
-  const source = retryModeSource(store, prior)
+  const source = retryModeSource(store, prior, seen)
   if (!source || source.eventId !== link.eventId || source.state.checkpoint.head !== link.head
     || run.inner_checkpoint_head !== link.head) throw new Error('Retry source checkpoint changed after dispatch')
   return source
