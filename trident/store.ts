@@ -25,6 +25,7 @@ import { resultCarriesEscalation } from './escalation-evidence.ts'
 import { phaseForCheckpoint } from './checkpoint-phase.ts'
 import { checkpointRound } from './checkpoint-round.ts'
 import { trimAsciiWs } from './ascii-trim.ts'
+import { readBuildRetrySource } from './build-mode-state.ts'
 import { reviewCapableCheckpoint } from './run-disposition.ts'
 import { carryableRalphRound, DEFAULT_MAX_RALPH_ROUNDS, isRalphCap } from './ralph-budget.ts'
 
@@ -992,6 +993,7 @@ export class TridentRunStore {
    */
   async createIfClaimsAvailable(
     input: CreateTridentRunInput,
+    retrySource?: { priorRunId: string; eventId: number; head: string },
   ): Promise<
     | { ok: true; run: TridentRun }
     | { ok: false; conflict: 'path'; holding_run: TridentRun; path: string }
@@ -1011,7 +1013,15 @@ export class TridentRunStore {
       if (branchHolder !== null) {
         return { ok: false as const, conflict: 'branch' as const, holding_run: branchHolder }
       }
-      return { ok: true as const, run: await this.create(input) }
+      const run = await this.create(input)
+      if (retrySource) {
+        // The row and its resume source must survive a crash together. Validate
+        // the relationship inside this transaction so a future caller cannot
+        // mint a source link for a different task or a changed checkpoint.
+        await this.recordStageEvent(run.id, 'build-retry-source', JSON.stringify({ ...retrySource, runId: run.id }))
+        readBuildRetrySource(this, run)
+      }
+      return { ok: true as const, run }
     })
   }
 

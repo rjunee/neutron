@@ -23,6 +23,7 @@ import { modelTier } from '@neutronai/trident/model-tiers.ts'
 import { readProjectRepos } from '@neutronai/trident/project-repos.ts'
 import { buildReflectionGuidance } from '@neutronai/trident/reflection-guidance.ts'
 import { PROJECT_BUILD_WALL_MS } from '@neutronai/trident/project-build-budget.ts'
+import { readBuildRetrySource } from '@neutronai/trident/build-mode-state.ts'
 
 /**
  * WALL BUDGET PER ROLE. This was ONE flat 45 minutes for all four roles, which is
@@ -216,9 +217,28 @@ export async function prepareProjectBuild(input: InnerLoopInput, context: Projec
   if (!exists) {
     const branch = await git(['show-ref', '--verify', '--quiet', `refs/heads/${run.branch}`])
     if (branch.timed_out || (!branch.ok && branch.exit_code !== 1)) throw Error('Build branch existence is unknown')
+    let start = run.base_sha
+    if (!branch.ok) {
+      const source = readBuildRetrySource(context.store, saved)
+      if (source) {
+        const expected = source.state.checkpoint.head!
+        // PR cleanup deletes a local branch only after proving origin holds it.
+        // Re-fetch that branch and pin the observed commit before restoring it;
+        // a moved remote must not be silently reset to the predecessor's head.
+        if (run.merge_mode === 'pr') {
+          const fetched = await git(['fetch', '--no-tags', 'origin', `refs/heads/${run.branch}`])
+          if (!fetched.ok || fetched.timed_out) throw Error('Retry branch could not be fetched')
+          const observed = await git(['rev-parse', '--verify', 'FETCH_HEAD^{commit}'])
+          if (!observed.ok || observed.timed_out || observed.stdout.trim() !== expected) throw Error('Retry branch moved after dispatch')
+        }
+        const object = await git(['rev-parse', '--verify', `${expected}^{commit}`])
+        if (!object.ok || object.timed_out || object.stdout.trim() !== expected) throw Error('Retry commit is unavailable')
+        start = expected
+      }
+    }
     const added = await git(branch.ok
       ? ['worktree', 'add', '--', run.worktree, run.branch]
-      : ['worktree', 'add', '-b', run.branch, '--', run.worktree, run.base_sha])
+      : ['worktree', 'add', '-b', run.branch, '--', run.worktree, start])
     if (!added.ok || added.timed_out) throw Error('Build worktree creation was not confirmed')
   }
   const checked = await context.runHost(['git', '-C', run.worktree, 'symbolic-ref', '--quiet', 'HEAD'], run.worktree)
@@ -374,14 +394,32 @@ export async function prepareProjectBuild(input: InnerLoopInput, context: Projec
     } }
   }
   const bodyFile = join(state, 'publication.md')
+  // A retried build keeps its completed worker artifacts under the ORIGINAL
+  // run's directory. Read through the dispatch-minted source chain; never move
+  // receipts or relabel worker envelopes as if this run had produced them.
+  const readArtifact = async (role: 'plan' | 'build' | 'fix', head?: string): Promise<string> => {
+    let current = context.store.get(run.id)!
+    const seen = new Set<string>()
+    for (;;) {
+      if (seen.has(current.id)) throw new Error('Retry artifact source cycle')
+      seen.add(current.id)
+      try { return await readFile(join(context.stateRoot, encodeURIComponent(current.id), `${role}.result`), 'utf8') }
+      catch (error) { if ((error as NodeJS.ErrnoException).code !== 'ENOENT') throw error }
+      const source = readBuildRetrySource(context.store, current)
+      if (!source || (role !== 'plan' && head !== undefined && source.state.checkpoint.head !== head)) {
+        throw new Error(`Completed ${role} artifact is missing for this revision`)
+      }
+      current = source.prior
+    }
+  }
   const publication = async (snapshot: { head: string }) => {
-    const planEnvelope = JSON.parse(await readFile(workers.plan.request.result.path, 'utf8'))
+    const planEnvelope = JSON.parse(await readArtifact('plan', snapshot.head))
     const plan = validateTrailer('plan', planEnvelope?.result?.payload)
     if (!plan.ok) throw new Error(`Publication plan result is invalid: ${plan.reason} at ${plan.path}`)
     let forge: ReturnType<typeof validateTrailer<'forge'>> | null = null
     for (const role of ['fix', 'build'] as const) {
       try {
-        const envelope = JSON.parse(await readFile(workers[role].request.result.path, 'utf8'))
+        const envelope = JSON.parse(await readArtifact(role, snapshot.head))
         if (envelope?.result?.head !== snapshot.head) continue
         const checked = validateTrailer('forge', envelope?.result?.payload)
         if (checked.ok) { forge = checked; break }
@@ -425,7 +463,7 @@ export async function prepareProjectBuild(input: InnerLoopInput, context: Projec
     policy: {
       leak: { scratch_dir: join(state, 'leak') },
       mutation: { readClaim: async () => {
-        const value = JSON.parse(await readFile(workers.build.request.result.path, 'utf8'))
+        const value = JSON.parse(await readArtifact('build'))
         const checked = validateTrailer('forge', value?.result?.payload)
         return checked.ok ? checked.value.mutationClaim : null
       } },
@@ -448,7 +486,7 @@ export async function prepareProjectBuild(input: InnerLoopInput, context: Projec
         readCheckpoint: async (snapshot, round) => {
           for (const role of ['fix', 'build'] as const) {
             let value: { result?: { head?: unknown; payload?: unknown } }
-            try { value = JSON.parse(await readFile(workers[role].request.result.path, 'utf8')) }
+            try { value = JSON.parse(await readArtifact(role, snapshot.head)) }
             catch { continue }
             if (value?.result?.head !== snapshot.head) continue
             const checked = validateTrailer('forge', value.result.payload)

@@ -57,6 +57,8 @@ import { join } from 'node:path'
 import { ProjectDb } from '@neutronai/persistence/index.ts'
 import { seedMigratedDb } from '../../tests/support/migrated-db.ts'
 import { TridentRunStore } from '@neutronai/trident/store.ts'
+import { dispatchBoardBoundBuild } from '@neutronai/trident/board-dispatch.ts'
+import { slugifyTask } from '@neutronai/trident/slugify-task.ts'
 import { TridentPhaseUsageStore } from '@neutronai/trident/phase-usage.ts'
 import { createProjectBuildHost, type ProjectBuildOutcome } from '@neutronai/trident/project-build-host.ts'
 import { spawnCapture, type HostCommandResult } from '@neutronai/trident/git-mode.ts'
@@ -481,6 +483,7 @@ const suiteStrategy = 'TEST EXECUTION: run the card regression.\n\n'
   + 'Full suite (stage 2), run exactly this:\n\n  bash scripts/ci/suite.sh\n'
 
 async function fixture(options: { ralph?: boolean; moreTasks?: boolean; suiteExit?: number; testStrategy?: string
+  dispatchTask?: string
   blockersByRound?: readonly number[]; replanRounds?: readonly number[]
   maxRounds?: number; mergeMode?: 'pr' | 'local'; blockRoles?: readonly string[]
   repeatFirstFinding?: boolean; commentRounds?: readonly number[]
@@ -523,8 +526,8 @@ async function fixture(options: { ralph?: boolean; moreTasks?: boolean; suiteExi
   const db = ProjectDb.open(join(dir, 'project.db'))
   cleanups.push(() => db.close())
   const store = new TridentRunStore(db)
-  const row = await store.create({ slug: 'card', project_slug: 'project', repo_path: repo,
-    task: `Record a note in NOTES.md.${options.moreTasks ? '\nMORE TASKS' : ''}`, ralph: options.ralph ?? false,
+  const row = await store.create({ slug: options.dispatchTask ? slugifyTask(options.dispatchTask) : 'card', project_slug: 'project', repo_path: repo,
+    task: options.dispatchTask ?? `Record a note in NOTES.md.${options.moreTasks ? '\nMORE TASKS' : ''}`, ralph: options.ralph ?? false,
     // The review round ceiling is read off THIS row (`build-host.ts:140-144`), so a
     // ceiling case pins its own rather than leaning on the schema default of 8/10.
     ...(options.maxRounds === undefined ? {} : { max_rounds: options.maxRounds }) })
@@ -1147,6 +1150,73 @@ test('a finding repeated after a fix stops before another fix is dispatched', as
 }, 300_000)
 
 // ── RESUME ACROSS A DRIVER RESTART ───────────────────────────────────────────
+
+for (const { mergeMode, fixed, moved } of [{ mergeMode: 'pr', fixed: false, moved: false }, { mergeMode: 'local', fixed: false, moved: false },
+  { mergeMode: 'pr', fixed: true, moved: false }, { mergeMode: 'pr', fixed: false, moved: true }] as const)
+test(`a cross-run ${mergeMode} retry ${moved ? 'refuses remote movement after dispatch' : `reviews the prior ${fixed ? 'fix' : 'build'} and reaches merged without rebuilding`}`, async () => {
+  const task = 'Record a note in NOTES.md and verify the resulting change with the complete regression suite'
+  const f = await fixture({ dispatchTask: task, mergeMode, ralph: fixed,
+    ...(fixed ? { blockersByRound: [0, 1, 0] } : {}) })
+  const firstHost = await createProjectBuildHost(await f.prepare())
+  if (fixed) {
+    const readiness = firstHost.deps.reviewReadiness!
+    let calls = 0
+    firstHost.deps.reviewReadiness = async (...args) => ++calls === 2
+      ? { kind: 'unknown', detail: 'Simulated process death after publishing the fix' } : readiness(...args)
+  } else if (mergeMode === 'pr') f.github.refuse.add('create')
+  else firstHost.deps.reviewReadiness = async () => ({ kind: 'unknown', detail: 'Simulated process death before review' })
+  const first = await firstHost.run({ mode: fixed ? 'ralph' : 'pr', start: 'fresh' }, new AbortController().signal)
+  expect(first.kind, why(f, first)).toBe('unknown')
+  expect(f.world.dispatches.filter(dispatch => ['plan', 'build', 'fix'].includes(dispatch.role)).map(dispatch => dispatch.role))
+    .toEqual(fixed ? ['plan', 'build', 'fix'] : ['plan', 'build'])
+  const checkpoint = lastCheckpoint(f)
+  expect(checkpoint).toMatchObject({ stage: fixed ? 'fixed' : 'built', round: fixed ? 2 : 1 })
+  const prior = f.store.get(f.row.id)!
+  expect(prior.worktree).not.toBeNull()
+  // Exercise the actual host cleanup: a pushed PR branch is disposable locally;
+  // local mode retains its only copy. The retry must recover both shapes.
+  const branchAfterCleanup = await spawnCapture(['git', '-C', f.repo, 'show-ref', '--verify', '--quiet', `refs/heads/${prior.branch}`], f.repo)
+  expect(branchAfterCleanup.ok).toBe(mergeMode === 'local')
+  await f.store.update(prior.id, { phase: 'failed', worktree: null })
+
+  const dispatched = await dispatchBoardBoundBuild({ task, board_item_id: 'retry-card' }, {
+    store: f.store, project_slug: 'project', repo_path: f.repo,
+    board: { get: () => ({ id: 'retry-card', title: task, design_doc_ref: null, linked_run_id: prior.id }),
+      attachRun: async () => {} },
+    resolveBuildRepo: async () => f.repo, resolveMergeMode: async () => mergeMode, resolveRalph: async () => fixed,
+  })
+  expect(dispatched.ok, JSON.stringify(dispatched)).toBe(true)
+  if (!dispatched.ok) return
+  expect(dispatched.run.id).not.toBe(prior.id)
+  expect(checkpoint.head).toBe(dispatched.run.inner_checkpoint_head)
+  f.input.run = dispatched.run
+  f.github.refuse.delete('create')
+  f.world.dispatches.length = 0
+  if (moved) {
+    const committed = await spawnCapture(['git', '-C', f.repo, 'commit-tree', `${checkpoint.head}^{tree}`,
+      '-p', String(checkpoint.head), '-m', 'test: remote advances after dispatch'], f.repo)
+    expect(committed.ok).toBe(true)
+    const pushed = await spawnCapture(['git', '-C', f.repo, 'push', 'origin', `${committed.stdout.trim()}:refs/heads/${prior.branch}`], f.repo)
+    expect(pushed.ok).toBe(true)
+    await expect(f.prepare()).rejects.toThrow('Retry branch moved after dispatch')
+    expect(f.world.dispatches).toHaveLength(0)
+    const local = await spawnCapture(['git', '-C', f.repo, 'show-ref', '--verify', '--quiet', `refs/heads/${prior.branch}`], f.repo)
+    expect(local.exit_code).toBe(1)
+    return
+  }
+  const host = await createProjectBuildHost(await f.prepare())
+  const outcome = await host.run({ mode: fixed ? 'ralph' : 'pr', start: 'resume' }, new AbortController().signal)
+  expect(outcome.kind, why(f, outcome)).toBe('merged')
+  expect(f.world.dispatches.some(dispatch => dispatch.role === 'plan' || dispatch.role === 'build' || dispatch.role === 'fix')).toBe(false)
+  expect(f.world.dispatches[0]).toMatchObject({ role: 'review', step_id: `${dispatched.run.id}:${fixed ? 'task:0:' : ''}review:${fixed ? 2 : 1}` })
+  expect(f.world.dispatches.some(dispatch => dispatch.step_id.startsWith(`${prior.id}:`))).toBe(false)
+  const saved = f.store.stageEvents(dispatched.run.id).filter(event => event.stage === 'build-mode-state')
+  expect(JSON.parse(saved[0]!.meta!).checkpoint).toEqual(checkpoint)
+  expect(JSON.parse(saved[0]!.meta!).runId).toBe(dispatched.run.id)
+  const merged = await spawnCapture(['git', '-C', mergeMode === 'pr' ? f.origin : f.repo, 'show', 'refs/heads/main:NOTES.md'], f.repo)
+  expect(merged.stdout).toBe(fixed ? `seed\n${prior.id}:task:0:build:0\n${prior.id}:task:0:fix:1` : `seed\n${prior.id}:build:0`)
+  if (mergeMode === 'local') expect(f.commands.some(argv => argv[0] === 'gh')).toBe(false)
+}, 300_000)
 
 test('a driver restarted between the build and review re-adopts the build instead of redoing it', async () => {
   // GATEWAY RESTARTS HAPPEN MID-RUN, and a build is the most expensive thing to
