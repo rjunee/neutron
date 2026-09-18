@@ -73,14 +73,15 @@ describe('resolveGbrainCommand', () => {
 
   test('nothing anywhere → null (fail-soft, no throw)', () => {
     const env = { PATH: join(scratch, 'empty'), HOME: join(scratch, 'emptyhome') }
-    expect(resolveGbrainCommand(env)).toBeNull()
+    const absentProbe = join(scratch, 'absent', 'gbrain')
+    expect(resolveGbrainCommand(env, [absentProbe])).toBeNull()
   })
 
   test('a non-executable file at a probe path is NOT accepted', () => {
     const bunInstall = join(scratch, 'bun')
-    nonExe(join(bunInstall, 'bin'), 'gbrain') // exists but 0644
+    const probe = nonExe(join(bunInstall, 'bin'), 'gbrain') // exists but 0644
     const env = { PATH: join(scratch, 'empty'), HOME: scratch, BUN_INSTALL: bunInstall }
-    expect(resolveGbrainCommand(env)).toBeNull()
+    expect(resolveGbrainCommand(env, [probe])).toBeNull()
   })
 })
 

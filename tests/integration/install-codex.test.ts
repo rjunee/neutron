@@ -22,7 +22,7 @@
 
 import { describe, expect, test } from 'bun:test'
 import { spawnSync } from 'node:child_process'
-import { chmodSync, mkdtempSync, mkdirSync, symlinkSync, writeFileSync } from 'node:fs'
+import { chmodSync, existsSync, mkdtempSync, mkdirSync, symlinkSync, writeFileSync } from 'node:fs'
 import { tmpdir } from 'node:os'
 import { delimiter, dirname, join } from 'node:path'
 import { fileURLToPath } from 'node:url'
@@ -44,13 +44,24 @@ interface RunOpts {
   preinstalled?: boolean
 }
 
-// Resolve the bun this suite runs under so the shadow PATH still finds it (the
-// install script's PATH hygiene needs a working shell, and ensure_bun ran earlier
-// in a real install). Falls back to the process execPath dir.
-function bunDir(): string {
-  const which = spawnSync('command', ['-v', 'bun'], { shell: true, encoding: 'utf8' })
-  const p = (which.stdout ?? '').trim()
-  return p !== '' ? dirname(p) : dirname(process.execPath)
+/** Supply only the real support utilities the installer seam needs. */
+function isolatedPath(cwd: string, excluded: string): string {
+  const shadow = join(cwd, 'shadowbin')
+  mkdirSync(shadow, { recursive: true })
+  const supportCommands = [
+    'bun', 'cat', 'chmod', 'dirname', 'mkdir', 'mktemp', 'rm', 'sh', 'sleep', 'tput', 'uname',
+  ]
+  for (const name of supportCommands) {
+    const source = name === 'bun' ? process.execPath : Bun.which(name)
+    if (source === null || existsSync(join(shadow, name))) continue
+    symlinkSync(source, join(shadow, name))
+  }
+  const discovered = spawnSync('/bin/sh', ['-c', 'command -v "$1"', 'sh', excluded], {
+    encoding: 'utf8',
+    env: { PATH: shadow },
+  }).stdout.trim()
+  expect(discovered).toBe('')
+  return shadow
 }
 
 function runCodexSeam(
@@ -58,16 +69,10 @@ function runCodexSeam(
   opts: RunOpts = {},
 ): CodexSeamResult {
   const cwd = mkdtempSync(join(tmpdir(), 'neutron-install-codex-'))
-  // SHADOW PATH: a dir with ONLY a `bun` symlink + minimal system dirs, so a real
+  // SHADOW PATH: only the explicitly named support tools above, so a real
   // machine-wide `codex` is invisible and the install branches actually run.
-  const shadow = join(cwd, 'shadowbin')
-  mkdirSync(shadow, { recursive: true })
-  try {
-    symlinkSync(join(bunDir(), 'bun'), join(shadow, 'bun'))
-  } catch {
-    // symlink may already exist / be unsupported — best effort.
-  }
-  let path = `${shadow}${delimiter}/usr/bin${delimiter}/bin`
+  const shadow = isolatedPath(cwd, 'codex')
+  let path = shadow
   const bunInstall = join(cwd, '.bun')
   const bunBin = join(bunInstall, 'bin')
   mkdirSync(bunBin, { recursive: true })
@@ -76,6 +81,11 @@ function runCodexSeam(
     writeFileSync(stub, '#!/bin/sh\nexit 0\n')
     chmodSync(stub, 0o755)
     path = `${bunBin}${delimiter}${path}`
+    const discovered = spawnSync('/bin/sh', ['-c', 'command -v "$1"', 'sh', 'codex'], {
+      encoding: 'utf8',
+      env: { PATH: path },
+    }).stdout.trim()
+    expect(discovered).toBe(stub)
   }
   const args = [INSTALL_SH, '--yes', '--dir', join(cwd, 'no-checkout'), ...(opts.args ?? [])]
   const res = spawnSync('sh', args, {
