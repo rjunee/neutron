@@ -36,6 +36,8 @@ export interface BuildSnapshot {
 }
 export type Measurement = { kind: 'known'; value: BuildSnapshot } | { kind: 'unknown'; detail: string }
 export type GateResult = { kind: 'allow' } | { kind: 'blocked'; on: string } | { kind: 'unknown'; detail: string }
+export type NominationRepair = { kind: 'repair-nomination'; finding: string }
+export type PublicationGateResult = GateResult | NominationRepair
 export type ReviewDecision =
   | { kind: 'approve' }
   | { kind: 'fix'; findings: readonly string[]; blockingCount?: number }
@@ -132,7 +134,7 @@ export interface BuildRunDeps {
   reviewGate(payload: unknown, snapshot: BuildSnapshot, round: number, replansUsed?: number, recordProgress?: (value: ReviewProgress) => void): Promise<ReviewDecision>
   // publishGate owns mutation proof and publication readiness; mergeGate owns CI,
   // base drift and pinned-head merge eligibility. Both run on host observations.
-  publishGate(snapshot: BuildSnapshot, mergeMode?: 'pr' | 'local'): Promise<GateResult>
+  publishGate(snapshot: BuildSnapshot, mergeMode?: 'pr' | 'local'): Promise<PublicationGateResult>
   mergeGate(snapshot: BuildSnapshot, mergeMode?: 'pr' | 'local'): Promise<GateResult>
   publish(snapshot: BuildSnapshot): Promise<void>
   /** Local effects must pin the reviewed head, preserve the branch and merge without rewriting it. */
@@ -509,7 +511,22 @@ export async function buildRun(input: BuildRunInput, deps: BuildRunDeps, signal:
       if ('stop' in fixed) return fixed.stop
       firstRound++
     }
-    async function publishCandidate(): Promise<BuildRunOutcome | null> {
+    async function repairNomination(repair: NominationRepair, round: number): Promise<BuildRunOutcome | null> {
+      findings = [repair.finding]
+      await checkpoint({ head: snapshot.head, stage: 'rejected', round, pending: undefined,
+        findings: findings.map(text => ({ kind: 'code' as const, actionable: true, text })) })
+      if (round >= maxRounds) return blocked('Review requires orchestrator arbitration: round ceiling')
+      const current = { findings, blockingCount: 1 }
+      const progress = gateStop(reviewProgress(previousReview, current))
+      if (progress) return progress
+      previousReview = current
+      previous = [...findings]
+      previousBlockingCount = current.blockingCount
+      approved = false
+      const fix = await work('fix', round)
+      return 'stop' in fix ? fix.stop : null
+    }
+    async function publishCandidate(): Promise<BuildRunOutcome | NominationRepair | null> {
       const candidate = snapshot
       phase = 'publish'
       step_id = null
@@ -525,7 +542,9 @@ export async function buildRun(input: BuildRunInput, deps: BuildRunDeps, signal:
       if (leak.head !== candidate.head || !corroborates(candidate, snapshot)) return blocked('Revision changed during publication preflight')
       const diff = deps.assessMergeDiff(snapshot.diff)
       if (!diff.allow) return blocked(diff.reason)
-      const publishGate = gateStop(await deps.publishGate(snapshot, input.merge_mode))
+      const assessment = await deps.publishGate(snapshot, input.merge_mode)
+      if (assessment.kind === 'repair-nomination') return assessment
+      const publishGate = gateStop(assessment)
       if (publishGate) return publishGate
       const beforePublish = await deps.measure()
       if (beforePublish.kind === 'unknown') return unknown(beforePublish.detail)
@@ -543,94 +562,109 @@ export async function buildRun(input: BuildRunInput, deps: BuildRunDeps, signal:
       return null
     }
 
-    for (let round = firstRound; !approved; round++) {
-      if (round > maxRounds) return blocked('Review requires orchestrator arbitration: round ceiling')
-      phase = 'review'
-      step_id = null
-      // G035/G043: both fresh builds and fixes need a measured review artifact.
-      if (!fullOid(snapshot.head) || !snapshot.diff.trim()) return unknown('Review requires a full branch head and nonempty diff artifact')
-      if (!local) {
-        const stop = await publishCandidate()
-        if (stop) return stop
+    for (;;) {
+      for (let round = firstRound; !approved; round++) {
+        if (round > maxRounds) return blocked('Review requires orchestrator arbitration: round ceiling')
         phase = 'review'
+        step_id = null
+        // G035/G043: both fresh builds and fixes need a measured review artifact.
+        if (!fullOid(snapshot.head) || !snapshot.diff.trim()) return unknown('Review requires a full branch head and nonempty diff artifact')
+        if (!local) {
+          const stop = await publishCandidate()
+          if (stop?.kind === 'repair-nomination') {
+            const refusal = await repairNomination(stop, round)
+            if (refusal) return refusal
+            continue
+          }
+          if (stop) return stop
+          phase = 'review'
+        }
+        if (!deps.reviewReadiness) return unknown('Review readiness host is missing')
+        const readiness = gateStop(await deps.reviewReadiness(snapshot, signal, input.merge_mode))
+        if (readiness) return readiness
+        if (!deps.reviewSuite) return unknown('Review suite host is missing')
+        const suite = await deps.reviewSuite(snapshot, round)
+        if (suite.kind === 'unknown') return unknown(suite.detail)
+        if (!deps.reviewCi) return unknown('Review CI host is missing')
+        const ciBefore = await deps.reviewCi(snapshot, input.merge_mode, signal)
+        if (ciBefore.kind === 'unknown') return unknown(ciBefore.detail)
+        if (ciBefore.kind === 'blocked') return blocked(ciBefore.on)
+        findings = [...findings, ...ciBefore.findings.map(f => `${f.title}: ${f.evidence}`)]
+        findings = [...findings, ...suite.findings.map(f => `${f.title}: ${f.evidence}`)]
+        const readyRevision = await deps.measure()
+        if (readyRevision.kind === 'unknown') return unknown(readyRevision.detail)
+        if (!corroborates(snapshot, readyRevision.value)) return blocked('Revision changed during review readiness')
+        const result = await work('review', round)
+        if ('stop' in result) return result.stop
+        const ci = await deps.reviewCi(snapshot, input.merge_mode, signal)
+        if (ci.kind === 'unknown') return unknown(ciUnknownDetail(result.payload, ci.detail))
+        if (ci.kind === 'blocked') return blocked(ci.on)
+        let currentReview: ReviewProgress | undefined
+        const panel = await deps.reviewGate(result.payload, snapshot, round, replansUsed, value => {
+          currentReview = { findings: [...value.findings], blockingCount: value.blockingCount }
+        })
+        const suiteDecision = applyReviewSuite(panel, suite)
+        const decision = applyReviewCi(suiteDecision, ci)
+        if (currentReview) {
+          const suiteBlockers = [...suite.findings, ...ci.findings].filter(f => !f.advisory)
+          currentReview = { findings: [...currentReview.findings, ...suiteBlockers.map(f => `${f.title}: ${f.evidence}`)], blockingCount: currentReview.blockingCount + suiteBlockers.length }
+        }
+        if (decision.kind === 'blocked') return blocked(decision.on)
+        if (decision.kind === 'unknown') return unknown(decision.detail)
+        // The rejection is recorded BEFORE the stops below. A repeated finding or an
+        // exhausted round ends the run, and the orchestrator resumes from this row;
+        // writing it only on the paths that continue would lose exactly the rounds
+        // that need it.
+        if (decision.kind === 'fix') {
+          await checkpoint({ head: snapshot.head, stage: 'rejected', round, pending: undefined,
+            findings: decision.findings.map(text => ({ kind: 'code' as const, actionable: true, text })) })
+        }
+        if (decision.kind === 're-plan' && replansUsed !== 0) return blocked('Review requires orchestrator arbitration: re-plan already spent')
+        const progress = gateStop(reviewProgress(previousReview, currentReview))
+        if (progress) return progress
+        if (decision.kind === 'approve') {
+          await checkpoint({ head: snapshot.head, stage: 'approved', round, pending: undefined, findings: [] })
+          firstRound = round
+          break
+        }
+        previousReview = currentReview
+        if (decision.kind === 're-plan') {
+          // G077: a replacement needs a subsequent review within the host's cap.
+          if (round >= maxRounds) return blocked(`design-gap: re-plan-unreachable: ${decision.whatIsMissing}; no round left for the bounded re-plan`)
+          replansUsed++
+          findings = [decision.whatIsMissing, ...new Set([...decision.findings, ...currentReview!.findings])]
+          await checkpoint({ head: null, stage: 'built', round: round + 1, pending: undefined, findings: [] })
+          planner = 'full'
+          committedPlan = undefined
+          const stop = await planAndBuild(round)
+          if (stop) return stop
+          continue
+        }
+        if (round >= maxRounds) return blocked('Review requires orchestrator arbitration: round ceiling')
+        findings = [...new Set([...decision.findings, ...currentReview!.findings])]
+        const fix = await work('fix', round)
+        if ('stop' in fix) return fix.stop
       }
-      if (!deps.reviewReadiness) return unknown('Review readiness host is missing')
-      const readiness = gateStop(await deps.reviewReadiness(snapshot, signal, input.merge_mode))
-      if (readiness) return readiness
-      if (!deps.reviewSuite) return unknown('Review suite host is missing')
-      const suite = await deps.reviewSuite(snapshot, round)
-      if (suite.kind === 'unknown') return unknown(suite.detail)
-      if (!deps.reviewCi) return unknown('Review CI host is missing')
-      const ciBefore = await deps.reviewCi(snapshot, input.merge_mode, signal)
-      if (ciBefore.kind === 'unknown') return unknown(ciBefore.detail)
-      if (ciBefore.kind === 'blocked') return blocked(ciBefore.on)
-      findings = [...findings, ...ciBefore.findings.map(f => `${f.title}: ${f.evidence}`)]
-      findings = [...findings, ...suite.findings.map(f => `${f.title}: ${f.evidence}`)]
-      const readyRevision = await deps.measure()
-      if (readyRevision.kind === 'unknown') return unknown(readyRevision.detail)
-      if (!corroborates(snapshot, readyRevision.value)) return blocked('Revision changed during review readiness')
-      const result = await work('review', round)
-      if ('stop' in result) return result.stop
-      const ci = await deps.reviewCi(snapshot, input.merge_mode, signal)
-      if (ci.kind === 'unknown') return unknown(ciUnknownDetail(result.payload, ci.detail))
-      if (ci.kind === 'blocked') return blocked(ci.on)
-      let currentReview: ReviewProgress | undefined
-      const panel = await deps.reviewGate(result.payload, snapshot, round, replansUsed, value => {
-        currentReview = { findings: [...value.findings], blockingCount: value.blockingCount }
-      })
-      const suiteDecision = applyReviewSuite(panel, suite)
-      const decision = applyReviewCi(suiteDecision, ci)
-      if (currentReview) {
-        const suiteBlockers = [...suite.findings, ...ci.findings].filter(f => !f.advisory)
-        currentReview = { findings: [...currentReview.findings, ...suiteBlockers.map(f => `${f.title}: ${f.evidence}`)], blockingCount: currentReview.blockingCount + suiteBlockers.length }
-      }
-      if (decision.kind === 'blocked') return blocked(decision.on)
-      if (decision.kind === 'unknown') return unknown(decision.detail)
-      // The rejection is recorded BEFORE the stops below. A repeated finding or an
-      // exhausted round ends the run, and the orchestrator resumes from this row;
-      // writing it only on the paths that continue would lose exactly the rounds
-      // that need it.
-      if (decision.kind === 'fix') {
-        await checkpoint({ head: snapshot.head, stage: 'rejected', round, pending: undefined,
-          findings: decision.findings.map(text => ({ kind: 'code' as const, actionable: true, text })) })
-      }
-      if (decision.kind === 're-plan' && replansUsed !== 0) return blocked('Review requires orchestrator arbitration: re-plan already spent')
-      const progress = gateStop(reviewProgress(previousReview, currentReview))
-      if (progress) return progress
-      if (decision.kind === 'approve') {
-        await checkpoint({ head: snapshot.head, stage: 'approved', round, pending: undefined, findings: [] })
-        break
-      }
-      previousReview = currentReview
-      if (decision.kind === 're-plan') {
-        // G077: a replacement needs a subsequent review within the host's cap.
-        if (round >= maxRounds) return blocked(`design-gap: re-plan-unreachable: ${decision.whatIsMissing}; no round left for the bounded re-plan`)
-        replansUsed++
-        findings = [decision.whatIsMissing, ...new Set([...decision.findings, ...currentReview!.findings])]
-        await checkpoint({ head: null, stage: 'built', round: round + 1, pending: undefined, findings: [] })
-        planner = 'full'
-        committedPlan = undefined
-        const stop = await planAndBuild(round)
+
+      phase = 'publish'
+      step_id = null
+      if (!deps.publicationSuite) return unknown('Publication suite host is missing')
+      const publicationSuite = await deps.publicationSuite(snapshot)
+      if (publicationSuite.kind === 'unknown') return unknown(publicationSuite.detail)
+      const suiteBlockers = publicationSuite.findings.filter(f => !f.advisory)
+      if (suiteBlockers.length > 0) return blocked(suiteBlockers.map(f => `${f.title}: ${f.evidence}`).join('\n'))
+
+      if (local || approved) {
+        const stop = await publishCandidate()
+        if (stop?.kind === 'repair-nomination') {
+          const refusal = await repairNomination(stop, firstRound)
+          if (refusal) return refusal
+          firstRound++
+          continue
+        }
         if (stop) return stop
-        continue
       }
-      if (round >= maxRounds) return blocked('Review requires orchestrator arbitration: round ceiling')
-      findings = [...new Set([...decision.findings, ...currentReview!.findings])]
-      const fix = await work('fix', round)
-      if ('stop' in fix) return fix.stop
-    }
-
-    phase = 'publish'
-    step_id = null
-    if (!deps.publicationSuite) return unknown('Publication suite host is missing')
-    const publicationSuite = await deps.publicationSuite(snapshot)
-    if (publicationSuite.kind === 'unknown') return unknown(publicationSuite.detail)
-    const suiteBlockers = publicationSuite.findings.filter(f => !f.advisory)
-    if (suiteBlockers.length > 0) return blocked(suiteBlockers.map(f => `${f.title}: ${f.evidence}`).join('\n'))
-
-    if (local || approved) {
-      const stop = await publishCandidate()
-      if (stop) return stop
+      break
     }
 
     const reviewed = snapshot

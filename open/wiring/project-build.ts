@@ -23,7 +23,7 @@ import { modelTier } from '@neutronai/trident/model-tiers.ts'
 import { readProjectRepos } from '@neutronai/trident/project-repos.ts'
 import { buildReflectionGuidance } from '@neutronai/trident/reflection-guidance.ts'
 import { PROJECT_BUILD_WALL_MS } from '@neutronai/trident/project-build-budget.ts'
-import { readBuildRetrySource } from '@neutronai/trident/build-mode-state.ts'
+import { parseBuildModeState, readBuildRetrySource } from '@neutronai/trident/build-mode-state.ts'
 
 /**
  * WALL BUDGET PER ROLE. This was ONE flat 45 minutes for all four roles, which is
@@ -404,7 +404,28 @@ export async function prepareProjectBuild(input: InnerLoopInput, context: Projec
     for (;;) {
       if (seen.has(current.id)) throw new Error('Retry artifact source cycle')
       seen.add(current.id)
-      try { return await readFile(join(context.stateRoot, encodeURIComponent(current.id), `${role}.result`), 'utf8') }
+      try {
+        const text = await readFile(join(context.stateRoot, encodeURIComponent(current.id), `${role}.result`), 'utf8')
+        if (role !== 'plan' && head !== undefined) {
+          const envelope = JSON.parse(text)
+          if (envelope?.result?.head !== head) throw new Error('Completed artifact does not match this revision')
+          const states = context.store.stageEvents(current.id).filter(event => event.stage === 'build-mode-state')
+            .map(event => parseBuildModeState(event.meta, current, true).checkpoint)
+          // A matching SHA alone does not turn a copied result into a completed
+          // fix. Require the original run's reservation and its host-observed
+          // completion, in that order, without importing any worker identity.
+          const completed = states.some((state, index) => state.pending?.phase === role
+            && state.pending.step_id === envelope?.step_id
+            && states[index + 1]?.pending === undefined
+            && states[index + 1]?.stage === (role === 'fix' ? 'fixed' : 'built')
+            && states[index + 1]?.head === head)
+          if (envelope?.run_id !== current.id || envelope?.kind !== 'completed'
+            || envelope?.schema !== 'project-build' || !completed) {
+            throw new Error('Completed artifact is missing original host-observed worker identity')
+          }
+        }
+        return text
+      }
       catch (error) { if ((error as NodeJS.ErrnoException).code !== 'ENOENT') throw error }
       const source = readBuildRetrySource(context.store, current)
       if (!source || (role !== 'plan' && head !== undefined && source.state.checkpoint.head !== head)) {
@@ -463,10 +484,14 @@ export async function prepareProjectBuild(input: InnerLoopInput, context: Projec
       publication },
     policy: {
       leak: { scratch_dir: join(state, 'leak') },
-      mutation: { readClaim: async () => {
-        const value = JSON.parse(await readArtifact('build'))
-        const checked = validateTrailer('forge', value?.result?.payload)
-        return checked.ok ? checked.value.mutationClaim : null
+      mutation: { readClaim: async snapshot => {
+        for (const role of ['fix', 'build'] as const) {
+          let value
+          try { value = JSON.parse(await readArtifact(role, snapshot.head)) } catch { continue }
+          const checked = validateTrailer('forge', value?.result?.payload)
+          if (checked.ok && checked.value.commitSha === snapshot.head) return checked.value.mutationClaim
+        }
+        return null
       } },
       reviewSuite: { strategy: input.test_strategy_intermediate ?? input.test_strategy ?? '',
         scope: input.test_strategy_intermediate ? 'subset' : 'full-suite',

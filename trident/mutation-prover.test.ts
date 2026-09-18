@@ -5165,6 +5165,31 @@ describe('runMutationProofGate — the phase between APPROVE and merge', () => {
     }
   }
 
+  test('only deterministic invalid nominations are repairable; proof and infrastructure refusals stay terminal', async () => {
+    for (const scenario of ['bare', 'valid', 'infrastructure', 'behaviour', 'missing', 'moved'] as const) {
+      const fs = memFs({ [join(proofWorktreePath('/repo', RUN), CLAIM.file)]: SRC_BEFORE })
+      const claim = scenario === 'missing' ? null : scenario === 'bare' || scenario === 'moved'
+        ? { ...CLAIM, guard: ['src/limit.test.ts'] } : CLAIM
+      const deps = gateDeps('src/limit.ts\0', scenario === 'infrastructure' ? { worktreeAddFails: true }
+        : scenario === 'behaviour' ? { guardMutated: 0 } : {})
+      let heads = 0
+      const original = deps.run_host
+      if (scenario === 'moved') deps.run_host = async (...args) => {
+        if (args[0].includes('rev-parse') && ++heads > 1) return res(0, 'b'.repeat(40))
+        return original(...args)
+      }
+      const out = await runMutationProofGate({ run: RUN, claim, base_branch: 'main', ...deps, fs })
+      expect(out.ok).toBe(scenario === 'valid')
+      if (scenario === 'bare') {
+        expect(out.repair).toMatchObject({ kind: 'invalid-nomination', detail: expect.stringContaining('not a test runner on the prover allowlist') })
+        expect(out.evidence).toMatchObject({ proved: false, observed: null })
+      } else expect(out.repair).toBeUndefined()
+      if (scenario === 'infrastructure') expect(out.reason).toContain('worktree')
+      if (scenario === 'behaviour') expect(out.evidence?.observed).not.toBeNull()
+      if (scenario === 'moved') expect(out.reason).toContain('branch moved')
+    }
+  })
+
   test('a proved mutation opens the gate', async () => {
     const fs = memFs({ [join(proofWorktreePath('/repo', RUN), CLAIM.file)]: SRC_BEFORE })
     const out = await runMutationProofGate({

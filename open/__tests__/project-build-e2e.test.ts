@@ -163,6 +163,7 @@ async function measureDiff(run: Runner, repo: string, base: string, head: string
 }
 
 interface WorkerWorld {
+  mutationArgv?: 'bare' | 'valid'
   run: Runner
   repo: string
   scratch: string
@@ -343,6 +344,14 @@ async function performRole(world: WorkerWorld, request: BoundedWorkRequest, brie
     const notes = join(cwd, 'NOTES.md')
     const previous = await readFile(notes, 'utf8').catch(() => '')
     await writeFile(notes, `${previous}${request.step_id}\n`)
+    if (world.mutationArgv) {
+      await mkdir(join(cwd, 'src'), { recursive: true })
+      await mkdir(join(cwd, 'tests'), { recursive: true })
+      await writeFile(join(cwd, 'src/limit.ts'), 'export const limit = (n: number, max: number) => n > max ? max : n\n')
+      await writeFile(join(cwd, 'tests/limit.test.ts'), "import { test, expect } from 'bun:test'\nimport { limit } from '../src/limit.ts'\ntest('clamps', () => expect(limit(7, 3)).toBe(3))\n")
+      await writeFile(join(cwd, 'tests/control.test.ts'), "import { test, expect } from 'bun:test'\nimport { limit } from '../src/limit.ts'\ntest('preserves', () => expect(limit(2, 3)).toBe(2))\n")
+      await gitOut(world.run, cwd, ['add', '--', 'src/limit.ts', 'tests/limit.test.ts', 'tests/control.test.ts'])
+    }
     await gitOut(world.run, cwd, ['add', '--', 'NOTES.md',
       ...(commitsPlan ? ['IMPLEMENTATION_PLAN.md'] : [])])
     await gitOut(world.run, cwd, ['-c', 'user.email=w@example.invalid', '-c', 'user.name=Worker',
@@ -365,7 +374,10 @@ async function performRole(world: WorkerWorld, request: BoundedWorkRequest, brie
     const head = await gitOut(world.run, world.repo, ['rev-parse', '--verify', `refs/heads/${branch}^{commit}`])
     const diff = await measureDiff(world.run, world.repo, snapshot.head, head, world.scratch)
     return { head, diff, pr: snapshot.pr, payload: {
-      mutationClaim: null, worktreePath: cwd, branch, commitSha: head, prNumber: null,
+      mutationClaim: world.mutationArgv ? { file: 'src/limit.ts', find: 'n > max ? max : n', replace: 'n',
+        guard: [...(world.mutationArgv === 'valid' ? ['bun', 'test'] : []), 'tests/limit.test.ts'],
+        control: [...(world.mutationArgv === 'valid' ? ['bun', 'test'] : []), 'tests/control.test.ts'] } : null,
+      worktreePath: cwd, branch, commitSha: head, prNumber: null,
       diffFile: '', testsPassed: true, suiteOutcome: 'passed', suiteEvidence: 'harness stub suite',
     } }
   }
@@ -1152,6 +1164,124 @@ test('a finding repeated after a fix stops before another fix is dispatched', as
 }, 300_000)
 
 // ── RESUME ACROSS A DRIVER RESTART ───────────────────────────────────────────
+
+for (const scenario of ['bare', 'valid', 'repeated', 'exhausted', 'forged-fix', 'wrong-head-fix', 'wrong-run', 'wrong-step'] as const)
+test(`unchanged-tip retry consumes prior ${scenario} mutation nomination despite new worker brief`, async () => {
+  const argv = scenario === 'valid' ? 'valid' : 'bare'
+  const task = 'Implement a bounded numeric limit and verify clamping and below-limit preservation with separate behavioural regression tests'
+  const f = await fixture({ dispatchTask: task, maxRounds: scenario === 'exhausted' ? 1 : 5 })
+  f.world.mutationArgv = argv
+  f.github.refuse.add('create')
+  const priorHost = await createProjectBuildHost(await f.prepare())
+  // Reconstruct the old host's terminal refusal without altering the saved
+  // worker result or the unchanged checkpoint that a real retry must carry.
+  const priorGate = priorHost.deps.publishGate
+  priorHost.deps.publishGate = async (...args) => {
+    const result = await priorGate(...args)
+    return result.kind === 'repair-nomination' ? { kind: 'blocked', on: result.finding } : result
+  }
+  const first = await priorHost.run({ mode: 'pr', start: 'fresh' }, new AbortController().signal)
+  expect(first.kind, why(f, first)).toBe(argv === 'bare' ? 'blocked' : 'unknown')
+  const checkpoint = lastCheckpoint(f)
+  expect(checkpoint).toMatchObject({ stage: 'built', round: 1 })
+  expect(checkpoint.pending).toBeUndefined()
+  const prior = f.store.get(f.row.id)!
+  // Seed the historical publication boundary already observed on the failed
+  // prior: its exact checkpoint is the open remote PR's head. No live PR exists.
+  const pushed = await spawnCapture(['git', '-C', f.repo, 'push', 'origin', `${checkpoint.head}:refs/heads/${prior.branch}`], f.repo)
+  expect(pushed.ok).toBe(true)
+  f.github.prs.push({ number: 1, state: 'OPEN', headRefName: prior.branch!, baseRefName: 'main' })
+  await f.store.update(prior.id, { phase: 'failed', worktree: null, pr: 1, published_pr: 1 })
+  const originalArtifact = await readFile(join(f.context.stateRoot, prior.id, 'build.result'), 'utf8')
+  expect(JSON.parse(originalArtifact).result.payload.mutationClaim.guard)
+    .toEqual(argv === 'bare' ? ['tests/limit.test.ts'] : ['bun', 'test', 'tests/limit.test.ts'])
+  if (scenario === 'forged-fix' || scenario === 'wrong-head-fix') {
+    const forged = JSON.parse(originalArtifact)
+    forged.step_id = `${prior.id}:fix:1`
+    if (scenario === 'wrong-head-fix') forged.result.head = f.baseSha
+    forged.result.payload.mutationClaim.guard = ['bun', 'test', 'tests/limit.test.ts']
+    forged.result.payload.mutationClaim.control = ['bun', 'test', 'tests/control.test.ts']
+    await writeFile(join(f.context.stateRoot, prior.id, 'fix.result'), JSON.stringify(forged))
+  }
+  const invalidIdentity = scenario === 'wrong-run' || scenario === 'wrong-step'
+  if (invalidIdentity) {
+    const envelope = JSON.parse(originalArtifact)
+    if (scenario === 'wrong-run') envelope.run_id = 'unrelated-run'
+    else envelope.step_id = `${prior.id}:build:42`
+    await writeFile(join(f.context.stateRoot, prior.id, 'build.result'), JSON.stringify(envelope))
+  }
+  const retainedArtifact = await readFile(join(f.context.stateRoot, prior.id, 'build.result'), 'utf8')
+  const dispatched = await dispatchBoardBoundBuild({ task, board_item_id: 'retry-card' }, {
+    store: f.store, project_slug: 'project', repo_path: f.repo,
+    max_rounds: scenario === 'exhausted' ? 1 : 5,
+    board: { get: () => ({ id: 'retry-card', title: task, design_doc_ref: null, linked_run_id: prior.id }), attachRun: async () => {} },
+    resolveBuildRepo: async () => f.repo, resolveMergeMode: async () => 'pr', resolveRalph: async () => false,
+  })
+  expect(dispatched.ok, JSON.stringify(dispatched)).toBe(true)
+  if (!dispatched.ok) return
+  expect(dispatched.run.inner_checkpoint_head).toBe(String(checkpoint.head))
+  expect(dispatched.run.published_pr).toBe(1)
+  f.world.dispatches.length = 0
+  f.github.refuse.delete('create')
+  // Any genuinely requested new worker could return the corrected executable
+  // nomination; the reproduction proves whether the loop ever asks one.
+  f.world.mutationArgv = scenario === 'repeated' ? 'bare' : 'valid'
+  let settled!: () => void
+  const completion = new Promise<void>(resolve => { settled = resolve })
+  const record = f.store.recordStageEvent.bind(f.store)
+  const recording = spyOn(f.store, 'recordStageEvent').mockImplementation(async (...args) => {
+    await record(...args)
+    if (args[1] === 'build-driver-settled') settled()
+  })
+  cleanups.push(() => recording.mockRestore())
+  const launcher = createProjectLauncher({ store: f.store, onError: () => {}, prepare: async input => {
+    f.input.run = input.run
+    const options = await f.prepare()
+    expect(await readFile(options.workers.fix.request.brief.path, 'utf8')).toContain('executable argv arrays')
+    return options
+  } })
+  const orch = buildTridentOrchestrator({ fire_workflow: launcher, db_path: f.input.db_path,
+    base_branch: 'main', run_host: Object.assign(f.context.runHost, { writesDiffOutput: true as const }),
+    read_run: id => f.store.get(id), sleep: async () => {} })
+  const advanced = await orch.step(dispatched.run)
+  expect(await f.store.saveIfActive(advanced.run)).toBe(true)
+  await completion
+  const terminal = await orch.step(f.store.get(dispatched.run.id)!)
+  expect(await f.store.saveIfActive(terminal.run)).toBe(true)
+  const result = JSON.parse(f.store.get(dispatched.run.id)!.inner_result!).projectBuild
+  const blocked = scenario === 'repeated' || scenario === 'exhausted' || invalidIdentity
+  expect(result.kind, JSON.stringify(result)).toBe(blocked ? 'blocked' : 'merged')
+  if (blocked) expect(result.on).toContain(invalidIdentity ? 'mutation' : scenario === 'repeated' ? 'repeated finding' : 'round ceiling')
+  expect(f.world.dispatches.some(dispatch => ['plan', 'build'].includes(dispatch.role))).toBe(false)
+  expect(f.world.dispatches.filter(dispatch => dispatch.role === 'fix').map(dispatch => dispatch.step_id))
+    .toEqual(argv === 'bare' && scenario !== 'exhausted' && !invalidIdentity ? [`${dispatched.run.id}:fix:1`] : [])
+  expect(f.github.prs[0]!.state).toBe(blocked ? 'OPEN' : 'MERGED')
+  const checkpoints = f.store.stageEvents(dispatched.run.id).filter(event => event.stage === 'build-mode-state')
+    .map(event => JSON.parse(event.meta!).checkpoint)
+  if (argv === 'bare' && !invalidIdentity) expect(checkpoints).toContainEqual(expect.objectContaining({ stage: 'rejected', head: checkpoint.head, round: 1 }))
+  if (scenario === 'repeated') expect(checkpoints.at(-1)).toMatchObject({ stage: 'rejected', round: 2 })
+  expect(await readFile(join(f.context.stateRoot, prior.id, 'build.result'), 'utf8')).toBe(retainedArtifact)
+}, 300_000)
+
+test('local invalid nomination gets one bounded fix and a fresh review before local merge', async () => {
+  const f = await fixture({ mergeMode: 'local', maxRounds: 3 })
+  f.world.mutationArgv = 'bare'
+  const host = await createProjectBuildHost(await f.prepare())
+  const prepare = host.deps.prepareWork
+  host.deps.prepareWork = async (request, context) => {
+    if (request.role === 'fix') {
+      expect(context.findings.join('\n')).toContain('not a test runner on the prover allowlist')
+      f.world.mutationArgv = 'valid'
+    }
+    await prepare(request, context)
+  }
+  const outcome = await host.run({ mode: 'pr', start: 'fresh' }, new AbortController().signal)
+  expect(outcome.kind, why(f, outcome)).toBe('merged')
+  expect(f.world.dispatches.filter(dispatch => dispatch.step_id.startsWith(`${f.row.id}:`)
+    && ['review', 'fix'].includes(dispatch.role)).map(dispatch => dispatch.step_id))
+    .toEqual([`${f.row.id}:review:1`, `${f.row.id}:fix:1`, `${f.row.id}:review:2`])
+  expect(f.github.prs).toEqual([])
+}, 300_000)
 
 for (const mergeMode of ['pr', 'local'] as const)
 for (const scenario of ['unmoved', 'branch', 'branch-and-base', 'before-dispatch', ...(mergeMode === 'pr' ? ['pre-fire'] as const : [])] as const)
