@@ -285,15 +285,13 @@ describe('what the screen shows, and what it never shows', () => {
     await mountScreenUnderTest();
     expect(byTestId('mcp-example-server-approve')).toBeNull();
     expect(byTestId('mcp-example-server-grant')).toBeNull();
-    // NOT "running": the server is attached when the assistant next starts a session, and
-    // only on its Claude sessions. Overstating the wiring is the failure this feature
-    // exists to avoid.
+    // Approval describes availability in supported conversations, not a running process.
     const status = byTestId('mcp-example-server-status')!.textContent ?? '';
-    expect(status).toContain('next session');
+    expect(status).toBe('Approved — available in supported conversations');
     expect(status.toLowerCase()).not.toContain('running');
     // ASSERTED ON THE WHOLE CARD, not just the status line. This test's comment already
     // said NOT "running" and it still shipped: the badge beside the server name rendered
-    // exactly that word while the status line underneath said "next session", and reading
+    // exactly that word while the status line underneath avoided it, and reading
     // only the status element could not see it. The word is `approved`, matching the web
     // surface's badge for the same `active` field.
     const card = byTestId('mcp-example-server')!.textContent ?? '';
