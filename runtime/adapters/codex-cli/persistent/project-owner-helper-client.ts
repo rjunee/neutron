@@ -2,7 +2,7 @@ import { randomBytes } from 'node:crypto'
 import { isDeepStrictEqual } from 'node:util'
 import { fireAndForget } from '@neutronai/logger/fire-and-forget.ts'
 import type { CodexOwnerBindingFacts } from './project-control-bootstrap.ts'
-import type { ProjectControlBroker, ProjectControlGateway, ProjectControlState } from './project-control-broker.ts'
+import { ReviewPermissionBusy, type ProjectControlBroker, type ProjectControlGateway, type ProjectControlState } from './project-control-broker.ts'
 import { BROKER_MAX_MESSAGE_BYTES } from './project-control-broker-transport.ts'
 import { exactFacts, object, readOwnerHelperDescriptor, socketIdentity, type Rpc } from './project-owner-helper-protocol.ts'
 import { MAX_REVIEW_SETTLEMENT_WAIT_MS, type ReviewPermissionLease, type ReviewPermissionRequest } from './project-review-permissions.ts'
@@ -101,7 +101,7 @@ export async function connectCodexOwnerHelper(options: { descriptorPath: string;
       try { return await call(body, deadlineMs) } catch (error) { close(error as Error); throw error }
     }
     const ready = await reviewCall({ operation: 'reviewPrepare', grant, stageDir: request.stageDir, network: request.network, epoch: expectedEpoch })
-    if (ready.refused === 'busy') throw new Error('Native review busy; current owner turn remains attached')
+    if (ready.refused === 'busy') throw new ReviewPermissionBusy('Native review busy; current owner turn remains attached')
     if (typeof ready.lease !== 'string' || !/^[a-f0-9]{64}$/.test(ready.lease)) { close(new Error('Invalid private review lease')); throw closed }
     const lease = ready.lease
     let phase: 'ready' | 'started' | 'waiting' | 'settled' | 'restoring' | 'restored' | 'releasing' | 'released' | 'abandoned' = 'ready'

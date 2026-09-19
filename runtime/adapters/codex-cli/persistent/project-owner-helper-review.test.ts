@@ -3,7 +3,7 @@ import { Database } from 'bun:sqlite'
 import { chmodSync, mkdirSync, mkdtempSync, rmSync, writeFileSync } from 'node:fs'
 import { join } from 'node:path'
 import type { CodexOwnerBindingFacts } from './project-control-bootstrap.ts'
-import { createProjectControlBroker } from './project-control-broker.ts'
+import { createProjectControlBroker, ReviewPermissionBusy } from './project-control-broker.ts'
 import { connectCodexOwnerHelper } from './project-owner-helper-client.ts'
 import { helperIdentity, socketIdentity, type Rpc } from './project-owner-helper-protocol.ts'
 import { OwnerHelperRegistry } from './project-owner-helper-registry.ts'
@@ -152,7 +152,9 @@ for (const drop of ['reviewPrepare', 'reviewStart', 'reviewRestore', 'reviewAckn
     const lease = await connection.reviewPrepare({ stageDir: f.stageDir, network: false }, connection.broker.state().epoch)
     await lease.start([]); f.settle(); await lease.restore(); await lease.release()
   }
-  await expect(operation()).rejects.toThrow('outcome may be unknown')
+  const outcome = operation()
+  await expect(outcome).rejects.toThrow('outcome may be unknown')
+  expect(await outcome.catch(error => error)).not.toBeInstanceOf(ReviewPermissionBusy)
   expect(connection.broker.state().phase).toBe('closed')
   expect(() => f.registry.attach()).toThrow('reconciliation')
   await expect(f.connect()).rejects.toThrow('reconciliation')
@@ -273,7 +275,9 @@ test('known busy preparation preserves the active helper owner, its approval rep
   const approvals: Rpc[] = []
   writer.subscribe(message => { if (message.id === 'approval-during-busy') approvals.push(message) })
   await writer.request('turn/start', { threadId: 'owner', input: [] }, connection.broker.state().epoch)
-  await expect(connection.reviewPrepare({ stageDir: f.stageDir, network: false }, connection.broker.state().epoch)).rejects.toThrow('busy')
+  const refused = connection.reviewPrepare({ stageDir: f.stageDir, network: false }, connection.broker.state().epoch)
+  await expect(refused).rejects.toBeInstanceOf(ReviewPermissionBusy)
+  await expect(refused).rejects.toThrow('busy')
   expect(connection.broker.state().phase).toBe('turn')
   f.receive({ id: 'approval-during-busy', method: 'item/commandExecution/requestApproval', params: { threadId: 'owner', turnId: 'parent-turn' } })
   for (let attempt = 0; attempt < 100 && !approvals.length; attempt++) await Bun.sleep(5)
@@ -306,7 +310,9 @@ test('generic preparation failure after native reservation retains its unknown l
     await prepare(request, epoch)
     throw new Error('Unknown native preparation receipt')
   }
-  await expect(connection.reviewPrepare({ stageDir: f.stageDir, network: false }, connection.broker.state().epoch)).rejects.toThrow('Unknown native')
+  const failed = connection.reviewPrepare({ stageDir: f.stageDir, network: false }, connection.broker.state().epoch)
+  await expect(failed).rejects.toThrow('Unknown native')
+  expect(await failed.catch(error => error)).not.toBeInstanceOf(ReviewPermissionBusy)
   expect(f.sent.some(message => message.method === 'config/batchWrite')).toBe(true)
   const journal = new Database(f.journalPath, { readonly: true })
   try { expect(journal.query('SELECT unresolved FROM broker WHERE id=1').get()).toEqual({ unresolved: 'review-permissions' }) }

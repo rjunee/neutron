@@ -66,7 +66,8 @@ Cross-model review found that retaining a local lease before native admission
 could wedge an already-active owner after a known clean busy refusal. The native
 broker now brands only its pre-reservation refusal as `ReviewPermissionBusy`.
 The helper catches only that class, removes the unissued local reservation and
-returns an explicit busy result; the client reports it without closing the owner
+returns an explicit busy result; the client reports the same `ReviewPermissionBusy`
+class without closing the owner
 connection (`runtime/adapters/codex-cli/persistent/project-owner-helper-review.ts:39`,
 `runtime/adapters/codex-cli/persistent/project-owner-helper-client.ts:104`). Tests
 keep an active approval reply and subsequent owner chat usable, including a
