@@ -1,4 +1,4 @@
-import { afterEach, describe, expect, test } from 'bun:test'
+import { afterEach, describe, expect, spyOn, test } from 'bun:test'
 import { mkdtempSync, readFileSync, rmSync } from 'node:fs'
 import { tmpdir } from 'node:os'
 import { join } from 'node:path'
@@ -62,6 +62,79 @@ async function eventually(check: () => boolean, attempts = 200): Promise<void> {
 }
 
 describe('approved installed MCP broker', () => {
+  test.each([
+    ['remove', 'request'], ['rotate', 'request'], ['remove', 'notification'], ['rotate', 'notification'],
+  ] as const)('real store %s gap retires B without cancelling unchanged A before the callback: %s', async (change, trigger) => {
+    const dir = mkdtempSync(join(tmpdir(), 'broker-store-gap-'))
+    const db = ProjectDb.open(join(dir, 'project.db'))
+    applyMigrations(db.raw())
+    const credentials = new ProjectCredentialStore(db, { crypto: new SecretsStore({ data_dir: dir, db }) })
+    const approvals = new ApprovalManager(db, { notify: async () => {} })
+    const a = fixture(), b = fixture()
+    let callbacks = 0
+    const store = new OwnerMcpServerStore({ db, project_slug: 'owner', owner_slug: asOwnerHandle('owner'),
+      credentials, approvals: () => approvals, onRevoked: async () => { callbacks++; await a.broker.retireRevoked() } })
+    let release = () => {}, entered = () => {}, restore = () => {}
+    const held = new Promise<void>(resolve => { release = resolve })
+    const reached = new Promise<void>(resolve => { entered = resolve })
+    let mutation: Promise<unknown> | undefined
+    const servers = [{ ...a.servers[0]!, name: 'a' }, { ...b.servers[0]!, name: 'b' }]
+    try {
+      for (const server of servers) {
+        expect((await store.install({ name: server.name, command: server.command, args: server.args, env: server.env })).ok).toBe(true)
+        const hash = (await store.list()).find(row => row.name === server.name)!.grant_hash
+        expect((await store.decide(server.name, 'approve', hash)).ok).toBe(true)
+      }
+      a.setResolver(() => store.resolveApproved())
+      await a.broker.bind(a.context)
+      expect(a.peerAlive()).toBe(true)
+      expect(b.peerAlive()).toBe(true)
+      if (trigger === 'notification') await a.broker.request(a.context, 'a', {
+        method: 'tools/call', params: { name: 'inspect', arguments: { notifyAfter: 150 } },
+      })
+      if (change === 'remove') {
+        const original = credentials.deleteReserved.bind(credentials)
+        const spy = spyOn(credentials, 'deleteReserved').mockImplementation(async (...args) => {
+          entered(); await held; return original(...args)
+        })
+        restore = () => spy.mockRestore()
+        mutation = store.remove('b')
+      } else {
+        const original = credentials.setReserved.bind(credentials)
+        const spy = spyOn(credentials, 'setReserved').mockImplementation(async (...args) => {
+          const result = await original(...args)
+          entered(); await held; return result
+        })
+        restore = () => spy.mockRestore()
+        const server = servers[1]!
+        mutation = store.install({ name: server.name, command: server.command, args: server.args,
+          env: { ...server.env, BROKER_TEST_SECRET: 'rotated' } })
+      }
+      await reached
+      expect(callbacks).toBe(0)
+      if (trigger === 'notification') {
+        expect(a.notifications).toEqual([])
+        await eventually(() => a.notifications.length > 0)
+      }
+      expect((await a.broker.request(a.context, 'a', { method: 'tools/list' })).tools).toHaveLength(1)
+      await expect(a.broker.request(a.context, 'b', { method: 'tools/call', params: { name: 'inspect' } })).rejects.toThrow()
+      expect(a.peerAlive()).toBe(true)
+      expect(b.peerAlive()).toBe(false)
+      expect(b.operations()).toEqual(['spawn'])
+      expect(callbacks).toBe(0)
+      release()
+      await mutation
+      expect(callbacks).toBe(1)
+      expect((await a.broker.request(a.context, 'a', { method: 'tools/list' })).tools).toHaveLength(1)
+      expect(a.operations().filter(operation => operation === 'spawn')).toHaveLength(1)
+    } finally {
+      release(); await mutation?.catch(() => {}); restore()
+      await a.broker.close()
+      db.close()
+      rmSync(dir, { recursive: true, force: true })
+    }
+  })
+
   test.each([
     ['cold', 'remove'], ['cold', 'rotate'], ['established', 'remove'], ['established', 'rotate'],
   ] as const)('revoking a handshaking candidate preserves the unchanged %s peer: %s', async (state, change) => {

@@ -129,31 +129,37 @@ export class ApprovedMcpBroker {
         try { live = snapshot(await this.options.resolveApproved({ ...binding.context })) }
         catch { await this.dispose(binding); continue }
         if (this.binding !== binding && this.pending !== binding) continue
-        const approved = new Map(live.servers.map(server => [server.name, snapshot([server]).fingerprint]))
-        // Fence the entire reserved admission set, including candidates that
-        // have not spawned while another peer's handshake is awaiting IO.
-        for (const [name, fingerprint] of binding.serverFingerprints) {
-          if (approved.get(name) !== fingerprint) binding.serverFingerprints.delete(name)
-        }
-        const closing: Promise<void>[] = []
-        for (const [name, client] of binding.clients) {
-          if (approved.has(name) && approved.get(name) === binding.serverFingerprints.get(name)) continue
-          binding.clients.delete(name)
-          binding.serverFingerprints.delete(name)
-          binding.metadata = binding.metadata.filter(entry => entry.name !== name)
-          binding.subscriptions.delete(name)
-          for (const [id, consumer] of binding.consumers) if (consumer.server === name) {
-            consumer.closed = true; consumer.abort.abort(); binding.consumers.delete(id)
-          }
-          this.options.onServerRetired?.(name)
-          closing.push(client.close().catch(() => {}))
-        }
-        // Record the checked approval surface, but admit missing peers only at
-        // the next explicit idle owner preparation.
-        binding.fingerprint = live.fingerprint
-        await Promise.all(closing)
+        await this.retireChanged(binding, live)
       }
     } finally { this.reconciling-- }
+  }
+
+  /** An execution-time read can observe a durable revoke before its store hook. */
+  private async retireChanged(binding: Binding, live: ReturnType<typeof snapshot>): Promise<void> {
+    const approved = new Map(live.servers.map(server => [server.name, snapshot([server]).fingerprint]))
+    // Fence the entire reserved admission set, including unspawned candidates.
+    for (const [name, fingerprint] of binding.serverFingerprints) {
+      if (approved.get(name) !== fingerprint) binding.serverFingerprints.delete(name)
+    }
+    const closing: Promise<void>[] = []
+    for (const [name, client] of binding.clients) {
+      if (approved.has(name) && approved.get(name) === binding.serverFingerprints.get(name)) continue
+      binding.clients.delete(name)
+      binding.serverFingerprints.delete(name)
+      binding.metadata = binding.metadata.filter(entry => entry.name !== name)
+      binding.subscriptions.delete(name)
+      for (const [id, consumer] of binding.consumers) if (consumer.server === name) {
+        consumer.closed = true; consumer.abort.abort(); binding.consumers.delete(id)
+      }
+      this.options.onServerRetired?.(name)
+      closing.push(client.close().catch(() => {}))
+    }
+    // Retire only: new/replacement peers require explicit idle preparation.
+    binding.fingerprint = live.fingerprint
+    await Promise.all(closing)
+    // Preserve the existing unavailable-surface contract when nothing remains;
+    // a still-reserved unchanged admission candidate is not an empty surface.
+    if (!binding.clients.size && !binding.serverFingerprints.size) await this.dispose(binding)
   }
 
   private requireScope(context: ApprovedMcpContext, idle = false): void {
@@ -194,8 +200,10 @@ export class ApprovedMcpBroker {
       if (identity(context) !== identity(binding.context)) throw refused()
       const live = snapshot(await this.options.resolveApproved({ ...context }))
       this.requireContext(context, idle)
-      if (live.fingerprint !== binding.fingerprint
-        || (this.binding !== binding && this.pending !== binding)) throw refused()
+      if (this.binding !== binding && this.pending !== binding) throw refused()
+      if (live.fingerprint !== binding.fingerprint) await this.retireChanged(binding, live)
+      this.requireContext(context, idle)
+      if (this.binding !== binding && this.pending !== binding) throw refused()
     } catch {
       await this.dispose(binding)
       throw refused()
@@ -212,7 +220,11 @@ export class ApprovedMcpBroker {
       const live = snapshot(await this.options.resolveApproved({ ...current }))
       const latest = this.options.currentContext()
       if (!latest || latest.phase !== 'active' || identity(latest) !== identity(binding.context)
-        || live.fingerprint !== binding.fingerprint || this.binding !== binding) throw refused()
+        || this.binding !== binding) throw refused()
+      if (live.fingerprint !== binding.fingerprint) await this.retireChanged(binding, live)
+      const after = this.options.currentContext()
+      if (!after || after.phase !== 'active' || identity(after) !== identity(binding.context)
+        || this.binding !== binding) throw refused()
     } catch {
       await this.dispose(binding)
       return false
