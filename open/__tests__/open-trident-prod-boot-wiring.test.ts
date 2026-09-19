@@ -2,6 +2,7 @@ import { SqliteProjectSettingsStore } from '@neutronai/gateway/projects/sqlite-s
 import { execFileSync } from 'node:child_process'
 import * as projectHost from '@neutronai/trident/project-build-host.ts'
 import * as codexWorker from '@neutronai/runtime/workers/codex-headless.ts'
+import * as claudeWorker from '@neutronai/runtime/workers/claude-headless.ts'
 import { fakeRunner } from '@neutronai/runtime/bounded-work.ts'
 import { TridentRunStore } from '@neutronai/trident/store.ts'
 import { executeBoundReview } from '@neutronai/trident/review-run.ts'
@@ -140,12 +141,24 @@ function panelCompletingSubstrate(): Substrate {
   }
 }
 
-test.each(['anthropic', 'pi'] as const)('production composition constructs project host and starts its typed run for %s', async provider => {
+test.each([
+  ['anthropic with headless available', 'anthropic', true],
+  ['pi with headless available', 'pi', true],
+  ['pi with headless unavailable', 'pi', false],
+] as const)('production composition constructs project host and starts its typed run for %s', async (_case, provider, claudeConnected) => {
   process.env['ANTHROPIC_API_KEY'] = 'sk-ant-synthetic-trident-test'
   const original = projectHost.createProjectBuildHost
   const starts: unknown[] = []
   const optionsSeen: projectHost.ProjectBuildHostOptions[] = []
+  const claudeAdmissions: string[] = []
   const codex = spyOn(codexWorker, 'createCodexHeadlessRunner').mockReturnValue(fakeRunner('openai-codex'))
+  // A Pi project still needs the cross-provider Claude review seat at admission.
+  // Exercise that production placement without depending on a host-installed CLI.
+  const claudeHeadless = fakeRunner('anthropic', { supports: (role, placement) => {
+    claudeAdmissions.push(`${role}:${placement}`)
+    return claudeConnected ? { ok: true } : { ok: false, reason: 'provider-not-connected', detail: 'fixture Claude CLI unavailable' }
+  } })
+  const claude = spyOn(claudeWorker, 'createClaudeHeadlessRunner').mockReturnValue(claudeHeadless)
   const construct = spyOn(projectHost, 'createProjectBuildHost').mockImplementation(async options => {
     optionsSeen.push(options)
     const host = await original({ ...options, production: { ...options.production,
@@ -170,19 +183,28 @@ test.each(['anthropic', 'pi'] as const)('production composition constructs proje
     await store.update(created.id, { branch: 'change', worktree: join(tmpDir, 'work'), base_sha: base })
     const run = store.get(created.id)!
     const fired = await composition.trident!.fire_inner_workflow({ run, base_branch: 'main', db_path: join(tmpDir, 'project.db'), max_rounds: 3, test_strategy: 'Run the configured suite' })
+    if (!claudeConnected) {
+      expect(fired).toEqual({ status: 'failed', error: 'Error: Review seat review_rubric: provider-not-connected: fixture Claude CLI unavailable' })
+      expect(optionsSeen).toHaveLength(1)
+      expect(starts).toEqual([])
+      expect(claudeAdmissions).toContain('review:headless')
+      return
+    }
     expect(fired).toEqual({ status: 'fired', error: null })
     expect(optionsSeen).toHaveLength(1)
     expect(starts).toEqual([{ mode: 'pr', start: 'fresh' }])
     expect(optionsSeen[0]!.production.runId).toBe(run.id)
     expect(optionsSeen[0]!.substrate.provider).toBe(provider)
+    expect(optionsSeen[0]!.substrate.headless.anthropic?.provider).toBe(provider === 'pi' ? 'anthropic' : undefined)
+    expect(claudeAdmissions.includes('review:headless')).toBe(provider === 'pi')
     expect(optionsSeen[0]!.production.ciWorkflow).toBe('project-ci.yml')
     expect(optionsSeen[0]!.policy.reviewSuite?.strategy).toBe('Run the configured suite')
     expect(optionsSeen[0]!.policy.reviewSuite?.scope).toBe('full-suite')
     for (let i = 0; i < 100 && !store.get(run.id)!.inner_result?.includes('cleanup'); i++) await Bun.sleep(1)
     const result = JSON.parse(store.get(run.id)!.inner_result!)
-    expect(result.projectBuild.kind).toBe(provider === 'anthropic' ? 'unknown' : 'refused')
+    expect(result.projectBuild.kind).toBe('unknown')
     expect(result.projectBuild.cleanup).toBeDefined()
-  } finally { construct.mockRestore(); codex.mockRestore() }
+  } finally { construct.mockRestore(); claude.mockRestore(); codex.mockRestore() }
 })
 
 test('production composition completes a bound review through its isolated panel firer', async () => {
