@@ -37,7 +37,7 @@ export interface ReviewSource {
   retrySeat(seat: ReviewSeat, snapshot: BuildSnapshot, round: number): Promise<void>
   readSynthesis(snapshot: BuildSnapshot, round: number): Promise<{
     runId: string; head: string; round: number; checkpoint: string; payload: unknown
-  } | null>
+  } | { runId: string; head: string; round: number; unavailable: string } | null>
 }
 const unknown = (detail: string): ReviewDecision => ({ kind: 'unknown', detail })
 const blocked = (on: string): ReviewDecision => ({ kind: 'blocked', on })
@@ -100,6 +100,7 @@ export async function reviewPanel(source: ReviewSource | undefined, payload: unk
     }
     const recorded = await source.readSynthesis(snapshot, round)
     if (!recorded || recorded.runId !== runId || recorded.head !== snapshot.head || recorded.round !== round) return infrastructure('Review synthesis provenance does not match run, revision and round')
+    if ('unavailable' in recorded) return infrastructure(`Review synthesis unavailable: ${recorded.unavailable.slice(0, TERMINAL_CAUSE_MAX)}`)
     const synthesis = validateTrailer('verdict', unmarked(recorded.payload))
     if (!synthesis.ok) return infrastructure('Review recorded synthesis is unusable')
     verdicts.push(synthesis.value)

@@ -217,7 +217,9 @@ export function createProjectReviewSource(input: ProjectReviewSourceOptions): Re
           panel.push(observed)
         }
         const observed = await dispatch(synthesisRoute, structuredClone(snapshot), round, 0, panel)
-        if (observed.status !== 'completed') return null
+        if (observed.status !== 'completed') return { runId: options.runId, head: snapshot.head, round,
+          unavailable: typeof observed.payload === 'object' && observed.payload !== null && 'reason' in observed.payload
+            && typeof observed.payload.reason === 'string' ? observed.payload.reason : 'Review synthesis is unavailable' }
         const checked = validateTrailer('verdict', observed.payload)
         return { runId: options.runId, head: snapshot.head, round,
           checkpoint: checked.ok && checked.value.verdict === 'APPROVE' ? 'argus-approved' : 'review-recorded', payload: observed.payload }

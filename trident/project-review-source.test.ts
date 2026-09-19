@@ -118,7 +118,7 @@ test('unreadable seat and thrown round block infrastructure; refusal stays unava
 test('missing and unusable synthesis are separate infrastructure answers', async () => {
   const f = await fixture()
   f.answer(async req => req.role === 'synthesis' ? { kind: 'refused', reason: 'provider-not-connected' } : completed())
-  expect(await f.check()).toMatchObject({ kind: 'blocked', on: expect.stringContaining('synthesis provenance') })
+  expect(await f.check()).toMatchObject({ kind: 'blocked', on: expect.stringContaining('synthesis unavailable: Review seat synthesis: provider-not-connected') })
   f.answer(async req => completed(req.role === 'synthesis' ? null : approve))
   expect(await f.check()).toMatchObject({ kind: 'blocked', on: expect.stringContaining('synthesis is unusable') })
   f.answer(async () => completed()); expect(await f.check()).toEqual({ kind: 'approve' })
@@ -278,7 +278,7 @@ for (const missing of [true, false]) {
       const source = f.source()
       expect(f.calls).toHaveLength(0)
       expect(await f.check(source)).toMatchObject({ kind: 'blocked',
-        on: expect.stringContaining(target === 'synthesis' ? 'synthesis provenance' : 'unavailable') })
+        on: expect.stringContaining(target === 'synthesis' ? 'synthesis unavailable' : 'unavailable') })
       expect(f.calls.filter(call => call.role === (target === 'synthesis' ? 'synthesis' : 'review'))).toHaveLength(0)
       expect(supportCalls).toHaveLength(0)
       // The same panel with a matching, available transport must still approve.

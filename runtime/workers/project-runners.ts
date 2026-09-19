@@ -20,7 +20,8 @@ export interface ProjectConversation {
  * Claude observes the trailer within the host budget. Acceptance, empty output and child exit 0
  * are insufficient. Throw on uncertainty; never retry the dispatch here.
  * Pi must bind subagent to the request and supply an out-of-grant trailer writer.
- * This is dispatch-turn completion; child completion still requires the file. */
+ * Child success still requires the file; a correlated provider terminal error
+ * can establish a block without authoring a worker result. */
 export type ProjectActingTurn = (input: {
   conversation: ProjectConversation
   request: BoundedWorkRequest
@@ -28,7 +29,7 @@ export type ProjectActingTurn = (input: {
   timeout_ms: number
   signal: AbortSignal
   subagent?: string
-}) => Promise<{ kind: 'turn-ended' } | { kind: 'unknown'; detail: string } | (Extract<BoundedWorkOutcome, { kind: 'refused' }> & { detail: string })>
+}) => Promise<{ kind: 'turn-ended' } | { kind: 'unknown'; detail: string } | Extract<BoundedWorkOutcome, { kind: 'blocked' }> | (Extract<BoundedWorkOutcome, { kind: 'refused' }> & { detail: string })>
 
 type Completed = Extract<BoundedWorkOutcome, { kind: 'completed' }>
 export interface ProjectTrailerDecoder {
@@ -144,6 +145,7 @@ export async function createProjectRunners(options: ProjectRunnersOptions) {
     async run(request, placement, signal) {
       let uncertainty: string | undefined
       let refusal: Extract<BoundedWorkOutcome, { kind: 'refused' }> | undefined
+      let blocked: Extract<BoundedWorkOutcome, { kind: 'blocked' }> | undefined
       const runner = construct({
         ...common,
         ...(conversation.provider === 'openai-codex' && options.codexResultTransport ? { resultTransport: options.codexResultTransport } : {}),
@@ -152,6 +154,10 @@ export async function createProjectRunners(options: ProjectRunnersOptions) {
             ? { ...request, result: { ...request.result, path: turn.childResultPath } } : request
           const observation = await options.actingTurn({ conversation, request: actingRequest, spec, signal, timeout_ms: turn.timeout_ms,
             ...(turn.subagent === undefined ? {} : { subagent: turn.subagent }) })
+          if (observation.kind === 'blocked') {
+            blocked = observation
+            throw new Error('Provider observed a blocked child')
+          }
           if (observation.kind === 'refused') {
             refusal = { kind: 'refused', reason: observation.reason }
             throw new Error(observation.detail)
@@ -164,7 +170,7 @@ export async function createProjectRunners(options: ProjectRunnersOptions) {
         },
       })
       const outcome = await runner.run(request, placement, signal)
-      return refusal ?? (uncertainty === undefined ? outcome : unknown(`Dispatch turn completion unknown: ${uncertainty}`))
+      return blocked ?? refusal ?? (uncertainty === undefined ? outcome : unknown(`Dispatch turn completion unknown: ${uncertainty}`))
     },
     liveness: async () => 'unknown',
   }) : undefined

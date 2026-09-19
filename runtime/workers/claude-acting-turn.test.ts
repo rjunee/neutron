@@ -179,6 +179,34 @@ test('project runner preserves refusal and reservation after uncertain dispatch'
   expect(f.commands).toHaveLength(1)
 })
 
+test('project runner preserves the correlated provider block and never replays the reserved child', async () => {
+  const f = await fixture()
+  f.binding.projects_dir = join(f.dir, 'projects')
+  const transcript = sessionJsonlPath('session', f.dir, f.binding.projects_dir)
+  const directory = join(transcript.slice(0, -'.jsonl'.length), 'subagents')
+  f.binding.session.child.submitLine = async text => {
+    f.commands.push(text)
+    const spec = JSON.parse(text.slice(text.indexOf('{')))
+    const args = JSON.parse(spec.prompt.slice(spec.prompt.indexOf('{')))
+    await mkdir(directory, { recursive: true })
+    await writeFile(join(directory, 'agent-quota.meta.json'), JSON.stringify({ description: args.description, toolUseId: 'tool-quota' }))
+    const identity = { agentId: 'quota', sessionId: 'session', isSidechain: true }
+    await writeFile(join(directory, 'agent-quota.jsonl'), [
+      { ...identity, type: 'user', message: { role: 'user', content: args.prompt } },
+      { ...identity, type: 'assistant', message: { role: 'assistant', model: '<synthetic>' },
+        error: 'rate_limit', isApiErrorMessage: true, apiErrorStatus: 429, quotaLimits: { status: 'rejected' }, requestId: 'request' },
+    ].map(row => JSON.stringify(row)).join('\n') + '\n')
+  }
+  const build = () => createProjectRunners({ conversation: f.input.conversation, run_id: 'run', state_dir: f.dir,
+    actingTurn: createClaudeActingTurn(f.binding), headless: {}, trailer: { schemas: new Map(), metadata: () => undefined } })
+  expect(await (await build()).inRepl!.run(f.input.request, 'in-repl', f.input.signal)).toEqual({
+    kind: 'blocked', on: 'Claude child stopped at the provider rate limit (HTTP 429).' })
+  expect((await (await build()).inRepl!.run(f.input.request, 'in-repl', f.input.signal)).kind).toBe('unknown')
+  expect(f.commands).toHaveLength(1)
+  expect(f.released()).toBe(1)
+  expect(await fs.stat(f.input.request.result.path).catch(error => error.code)).toBe('ENOENT')
+})
+
 test('real HerdrHost child submits text then Enter in the existing pane', async () => {
   const f = await fixture()
   const server = new FakeHerdrServer()

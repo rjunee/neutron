@@ -57,6 +57,18 @@ test('review host exceptions retain their cause without changing the infrastruct
     on: 'infra-only: Review panel host observation failed: Error: synthesis transport offline',
   })
 })
+test('host synthesis unavailability preserves its reason only after exact provenance validation', async () => {
+  const f = fixture()
+  const unavailable = { runId: 'run', head: snapshot.head, round: 1, unavailable: 'provider rate limit (HTTP 429)' }
+  f.source.readSynthesis = async () => unavailable
+  expect(await f.check()).toEqual({ kind: 'blocked', on: 'infra-only: Review synthesis unavailable: provider rate limit (HTTP 429)' })
+  for (const change of [{ runId: 'other' }, { head: 'b'.repeat(40) }, { round: 2 }]) {
+    f.source.readSynthesis = async () => ({ ...unavailable, ...change })
+    expect(await f.check()).toEqual({ kind: 'blocked', on: 'infra-only: Review synthesis provenance does not match run, revision and round' })
+  }
+  f.source.readSynthesis = async () => f.synthesis
+  expect(await f.check()).toEqual({ kind: 'approve' })
+})
 test('review peer deferral or missing provider refuses by configured name and retries once', async () => {
   for (const status of ['deferred', 'unavailable', 'rate-limited'] as const) {
     const f = fixture()
