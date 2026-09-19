@@ -27,8 +27,9 @@ function fixture(history = ''): { identity: CodexRolloutIdentity; append: (text:
   const cwd = mkdtempSync(join(tmpdir(), 'codex-rollout-test-'))
   directories.push(cwd)
   const rolloutPath = join(cwd, 'rollout.jsonl')
-  const identity = { projectId: 'project-one', paneHandle: 'pane-one', threadId: 'thread-one', rolloutPath, cwd }
-  writeFileSync(rolloutPath, line('session_meta', { id: identity.threadId, cwd, source: 'cli', originator: 'codex-tui' }) + history)
+  const identity = { projectId: 'project-one', paneHandle: 'pane-one', threadId: 'thread-one', rolloutPath, cwd,
+    bindingRevision: 'binding-one', nativeMetadata: { sessionId: 'session-one', source: 'vscode', originator: 'owner-bootstrap-probe' } }
+  writeFileSync(rolloutPath, metadata(identity) + history)
   return { identity, append: (text) => appendFileSync(rolloutPath, text), observe: (prompt = 'Hello') => {
     const observer = new CodexRolloutObserver(identity, prompt)
     observers.push(observer)
@@ -36,7 +37,62 @@ function fixture(history = ''): { identity: CodexRolloutIdentity; append: (text:
   } }
 }
 
+function metadata(identity: CodexRolloutIdentity): string {
+  return line('session_meta', { id: identity.threadId, cwd: identity.cwd,
+    source: identity.nativeMetadata?.source ?? 'cli', originator: identity.nativeMetadata?.originator ?? 'codex-tui',
+    session_id: identity.nativeMetadata?.sessionId })
+}
+
 describe('native Codex rollout observation', () => {
+  test('preserves materialized local TUI attachment without remote metadata', () => {
+    const f = fixture()
+    const { nativeMetadata: _metadata, bindingRevision: _revision, ...identity } = f.identity
+    writeFileSync(identity.rolloutPath, metadata(identity))
+    const observer = new CodexRolloutObserver(identity, 'Hello')
+    observers.push(observer)
+    f.append(start() + user() + complete())
+    expect(observer.read().at(-1)?.kind).toBe('completion')
+  })
+
+  test.each(['sessionId', 'source', 'originator'] as const)('refuses incorrect attested native metadata %s', field => {
+    const f = fixture()
+    expect(() => new CodexRolloutObserver({ ...f.identity,
+      nativeMetadata: { ...f.identity.nativeMetadata!, [field]: 'different' } }, 'Hello')).toThrow('identity mismatch')
+  })
+
+  test('deferred materialization requires a receipt even when a matching turn appears', () => {
+    const f = fixture()
+    rmSync(f.identity.rolloutPath)
+    const observer = f.observe()
+    expect(() => observer.bindReceipt()).toThrow('unknown delivery')
+    expect(() => observer.read()).toThrow('unknown delivery')
+  })
+
+  test('deferred construction requires attested metadata and binding revision', () => {
+    const f = fixture()
+    rmSync(f.identity.rolloutPath)
+    const { nativeMetadata: _metadata, ...withoutMetadata } = f.identity
+    const { bindingRevision: _revision, ...withoutRevision } = f.identity
+    expect(() => new CodexRolloutObserver(withoutMetadata, 'Hello')).toThrow('attested native metadata')
+    expect(() => new CodexRolloutObserver(withoutRevision, 'Hello')).toThrow('attested native metadata')
+  })
+
+  test.each(['threadId', 'rolloutPath', 'turnId', 'bindingRevision'] as const)('deferred observation refuses a mismatched receipt %s', field => {
+    const f = fixture()
+    rmSync(f.identity.rolloutPath)
+    const observer = f.observe()
+    const receipt = { threadId: f.identity.threadId, rolloutPath: f.identity.rolloutPath, turnId: 'turn-one', bindingRevision: 'binding-one', [field]: 'other' }
+    if (field !== 'turnId') {
+      expect(() => observer.bindReceipt(receipt)).toThrow('receipt identity')
+    } else {
+      observer.bindReceipt(receipt)
+      writeFileSync(f.identity.rolloutPath,
+        metadata(f.identity)
+        + start() + user() + complete())
+      expect(() => observer.read()).toThrow('stale or concurrent')
+    }
+  })
+
   test('accepts a correlated reply and a follow-up in the same thread', () => {
     const f = fixture()
     const first = f.observe()
@@ -146,6 +202,39 @@ function bridge(f: ReturnType<typeof fixture>, submit: () => Promise<void>, iden
 }
 
 describe('hosted conversational SessionHandle bridge', () => {
+  test('deferred delivery without a native receipt is unknown and releases refused', async () => {
+    const f = fixture()
+    rmSync(f.identity.rolloutPath)
+    let submitted = false
+    const b = bridge(f, async () => { submitted = true })
+    const events = await Array.fromAsync(b.handle.events)
+    expect(submitted).toBe(true)
+    expect(events).toEqual([{ kind: 'error', retryable: false,
+      message: expect.stringContaining('unknown delivery') }])
+    expect(b.releases).toEqual(['refused'])
+  })
+
+  test('first real multiline turn binds its deferred rollout from the native receipt', async () => {
+    const f = fixture()
+    rmSync(f.identity.rolloutPath)
+    const prompt = 'Hello\nKeep this second line'
+    const releases: string[] = []
+    const substrate = createCodexConversationalSubstrate({ projectId: f.identity.projectId, cwd: f.identity.cwd,
+      env: {}, pollMs: 1, timeoutMs: 50, host: { acquireTurn: async () => ({
+        identity: f.identity, isLive: () => true,
+        submitLine: async (text: string) => {
+          expect(text).toBe(prompt)
+          setTimeout(() => writeFileSync(f.identity.rolloutPath,
+            metadata(f.identity)
+            + start() + user(prompt) + complete()), 2)
+          return { threadId: f.identity.threadId, turnId: 'turn-one', rolloutPath: f.identity.rolloutPath, bindingRevision: 'binding-one' }
+        }, interrupt: async () => {}, release: async (outcome: string) => { releases.push(outcome) },
+      }) } })
+    const events = await Array.fromAsync(substrate.start({ prompt, tools: [], model_preference: [] }).events)
+    expect(events.map(e => e.kind)).toEqual(['status', 'token', 'completion'])
+    expect(releases).toEqual(['completed'])
+  })
+
   test('bridges native completion, preserving identity and releasing the lease', async () => {
     const f = fixture()
     const b = bridge(f, async () => { f.append(start() + user() + complete()) })

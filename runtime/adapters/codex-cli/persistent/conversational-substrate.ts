@@ -2,12 +2,12 @@ import type { Event } from '../../../events.ts'
 import type { SessionHandle } from '../../../session-handle.ts'
 import type { Substrate } from '../../../substrate.ts'
 import type { OpenCodexProjectSessionOptions } from './project-session.ts'
-import { CodexRolloutObserver, type CodexRolloutIdentity } from './rollout-observer.ts'
+import { CodexRolloutObserver, type CodexRolloutIdentity, type CodexTurnReceipt } from './rollout-observer.ts'
 
 /** Shared with build and model control; release(refused) must quarantine reuse. */
 export interface CodexConversationLease {
   readonly identity: CodexRolloutIdentity
-  submitLine(prompt: string): Promise<void>
+  submitLine(prompt: string): Promise<void | CodexTurnReceipt>
   /** Must interrupt only this native turn, never a successor or the whole pane. */
   interrupt(turnId: string): Promise<void>
   isLive(): boolean
@@ -68,8 +68,8 @@ export function createCodexConversationalSubstrate(options: CodexConversationalS
       const events = (async function* (): AsyncGenerator<Event> {
         try {
           if (abort.signal.aborted) throw new Error('codex conversation cancelled')
-          if (!spec.prompt || /[\r\n\x1b]/.test(spec.prompt)) {
-            throw new Error('codex conversation refused: prompt requires one nonempty terminal line')
+          if (!spec.prompt || /\x1b/.test(spec.prompt)) {
+            throw new Error('codex conversation refused: prompt must be nonempty and contain no terminal escape')
           }
           const ceiling = spec.turn_absolute_ceiling_ms ?? timeoutMs
           if (!(ceiling > 0) || !Number.isFinite(ceiling)) throw new Error('codex conversation refused: invalid turn bound')
@@ -99,7 +99,7 @@ export function createCodexConversationalSubstrate(options: CodexConversationalS
           }
           observer = new CodexRolloutObserver(lease.identity, spec.prompt)
           if (!lease.isLive()) throw new Error('codex conversation refused: pane is not live')
-          await untilAborted(lease.submitLine(spec.prompt), abort.signal)
+          observer.bindReceipt(await untilAborted(lease.submitLine(spec.prompt), abort.signal))
           // Acknowledgement is delivery only; the rollout alone can finish.
           yield { kind: 'status', message: 'Waiting for the native Codex turn' }
           while (true) {

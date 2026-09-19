@@ -8,6 +8,16 @@ export interface CodexRolloutIdentity {
   readonly threadId: string
   readonly rolloutPath: string
   readonly cwd: string
+  readonly nativeMetadata?: { readonly sessionId: string; readonly source: string; readonly originator: string }
+  readonly bindingRevision?: string
+}
+
+/** Exact native turn/start receipt, enriched with the same thread's rollout path. */
+export interface CodexTurnReceipt {
+  readonly threadId: string
+  readonly turnId: string
+  readonly rolloutPath: string
+  readonly bindingRevision?: string
 }
 
 type RecordValue = Record<string, unknown>
@@ -30,12 +40,17 @@ const auxiliaryEvents = new Set([
  * turn_aborted shapes were measured in native CLI rollouts; this is NOT the
  * different `codex exec --json` protocol. Unknown lifecycle records refuse.
  *
- * Construction validates the complete baseline before the host submits input.
- * Only appended records can answer this turn. The host must hold an exclusive
+ * Construction validates an existing baseline before input. An absent first
+ * rollout requires exact host metadata and a native delivery receipt before
+ * reading its initial records. The host must hold an exclusive
  * turn lease throughout construction, submission, observation and cancellation.
  */
 export class CodexRolloutObserver {
-  private readonly fd: number
+  private fd: number | undefined
+  private rolloutPath: string | undefined
+  private expectedTurn: string | undefined
+  private deferred = false
+  private metaValidated = false
   private offset = 0
   private pending = Buffer.alloc(0)
   private readonly seenTurns = new Set<string>()
@@ -44,16 +59,24 @@ export class CodexRolloutObserver {
   private terminal = false
   private closed = false
   private usage: TokenUsage = { input_tokens: 0, output_tokens: 0 }
-  private readonly device: number
-  private readonly inode: number
+  private device: number | undefined
+  private inode: number | undefined
 
   constructor(readonly identity: CodexRolloutIdentity, private readonly prompt: string) {
-    if (Object.values(identity).some((value) => value.length === 0)) {
+    if ([identity.projectId, identity.paneHandle, identity.threadId, identity.cwd, identity.rolloutPath].some(value => !value)) {
       throw new Error('codex rollout refused: incomplete native identity')
     }
-    this.fd = openSync(identity.rolloutPath, constants.O_RDONLY | constants.O_NOFOLLOW)
+    this.rolloutPath = identity.rolloutPath
+    if (!this.open()) {
+      if (!identity.bindingRevision || !identity.nativeMetadata?.sessionId
+        || !identity.nativeMetadata.source || !identity.nativeMetadata.originator) {
+        throw new Error('codex rollout refused: deferred rollout requires attested native metadata')
+      }
+      this.deferred = true
+      return
+    }
     try {
-      const info = fstatSync(this.fd)
+      const info = fstatSync(this.fd!)
       if (!info.isFile() || info.size > MAX_BASELINE_BYTES) {
         throw new Error('codex rollout refused: unsupported baseline')
       }
@@ -64,13 +87,42 @@ export class CodexRolloutObserver {
         throw new Error('codex rollout refused: incomplete baseline')
       }
       this.validateMeta(baseline[0])
+      this.metaValidated = true
       for (const record of baseline.slice(1)) this.consume(record, true)
       if (this.activeTurn !== undefined) throw new Error('codex rollout refused: native turn already active')
       this.terminal = false
     } catch (error) {
-      closeSync(this.fd)
+      this.close()
       throw error
     }
+  }
+
+  /** A missing rollout is safe only with a native receipt, never a latest-file lookup. */
+  bindReceipt(receipt: CodexTurnReceipt | void): void {
+    if (!receipt) {
+      if (this.deferred) throw new Error('codex rollout refused: unknown delivery; native receipt required')
+      return
+    }
+    if (this.expectedTurn !== undefined || receipt.threadId !== this.identity.threadId || !receipt.turnId
+      || receipt.bindingRevision !== this.identity.bindingRevision
+      || !receipt.rolloutPath || (this.rolloutPath !== undefined && receipt.rolloutPath !== this.rolloutPath)) {
+      throw new Error('codex rollout refused: native receipt identity mismatch')
+    }
+    this.expectedTurn = receipt.turnId
+    this.rolloutPath = receipt.rolloutPath
+  }
+
+  private open(): boolean {
+    if (!this.rolloutPath) return false
+    try { this.fd = openSync(this.rolloutPath, constants.O_RDONLY | constants.O_NOFOLLOW) }
+    catch (error) {
+      if ((error as NodeJS.ErrnoException).code === 'ENOENT') return false
+      throw error
+    }
+    const info = fstatSync(this.fd)
+    this.device = info.dev
+    this.inode = info.ino
+    return true
   }
 
   /** Cancellation is safe only after the exact submitted prompt is attested. */
@@ -81,10 +133,15 @@ export class CodexRolloutObserver {
     if (this.closed) throw new Error('codex rollout refused: observer closed')
     if (this.terminal) return []
     try {
+      if (this.deferred && !this.expectedTurn) throw new Error('codex rollout refused: unknown delivery; native receipt required')
+      if (this.fd === undefined && !this.open()) return []
       const events: Event[] = []
       // Parse the entire append before returning success: a second start in the
       // same append is concurrent input, not permission to release the lease.
-      for (const record of this.readAppend()) events.push(...this.consume(record, false))
+      for (const record of this.readAppend()) {
+        if (!this.metaValidated) { this.validateMeta(record); this.metaValidated = true }
+        else events.push(...this.consume(record, false))
+      }
       return events
     } catch (error) {
       this.close()
@@ -95,12 +152,13 @@ export class CodexRolloutObserver {
   close(): void {
     if (this.closed) return
     this.closed = true
-    closeSync(this.fd)
+    if (this.fd !== undefined) closeSync(this.fd)
   }
 
   private readAppend(): unknown[] {
-    const named = statSync(this.identity.rolloutPath)
-    const info = fstatSync(this.fd)
+    const named = statSync(this.rolloutPath!)
+    const info = fstatSync(this.fd!)
+    if (!info.isFile()) throw new Error('codex rollout refused: unsupported rollout')
     if (named.dev !== this.device || named.ino !== this.inode || info.size < this.offset) {
       throw new Error('codex rollout refused: file replaced or truncated')
     }
@@ -108,7 +166,7 @@ export class CodexRolloutObserver {
     const records: unknown[] = []
     while (this.offset < info.size) {
       const chunk = Buffer.alloc(Math.min(64 * 1024, info.size - this.offset))
-      const count = readSync(this.fd, chunk, 0, chunk.length, this.offset)
+      const count = readSync(this.fd!, chunk, 0, chunk.length, this.offset)
       if (count === 0) throw new Error('codex rollout refused: file changed during read')
       this.offset += count
       this.pending = Buffer.concat([this.pending, chunk.subarray(0, count)])
@@ -127,8 +185,11 @@ export class CodexRolloutObserver {
   private validateMeta(value: unknown): void {
     const record = object(value)
     const meta = object(record.payload)
+    const native = this.identity.nativeMetadata
     if (record.type !== 'session_meta' || meta.id !== this.identity.threadId
-      || meta.cwd !== this.identity.cwd || meta.source !== 'cli' || meta.originator !== 'codex-tui') {
+      || meta.cwd !== this.identity.cwd || meta.source !== (native?.source ?? 'cli')
+      || meta.originator !== (native?.originator ?? 'codex-tui')
+      || (native !== undefined && meta.session_id !== native.sessionId)) {
       throw new Error('codex rollout refused: native session identity mismatch')
     }
   }
@@ -170,6 +231,7 @@ export class CodexRolloutObserver {
       case 'task_started': {
         const id = payload.turn_id
         if (typeof id !== 'string' || id.length === 0 || this.activeTurn !== undefined
+          || (!baseline && this.expectedTurn !== undefined && id !== this.expectedTurn)
           || (!baseline && this.terminal) || this.seenTurns.has(id)) {
           throw new Error('codex rollout refused: stale or concurrent native turn')
         }
