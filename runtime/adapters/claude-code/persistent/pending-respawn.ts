@@ -6,6 +6,7 @@ import { clearPendingRespawns, loadPendingRespawns, planZombieRespawns, removeEn
 import { supervisedBySessionKey } from './pool-state.ts'
 import type { PersistentReplSubstrateOptions } from './types.ts'
 import { replayPendingInbound } from './pool.ts'
+import { getRecord, registryConversationScopeMatches } from './repl-registry.ts'
 
 export interface DrainPendingRespawnsOptions {
   /** Stagger base (ms) between entry replays — `planZombieRespawns(entries,
@@ -103,6 +104,11 @@ export async function drainPendingRespawns(
     const currentEntry = currentEntries.find((e) => e.sessionKey === entry.sessionKey)
     if (currentEntry === undefined) {
       results.push({ sessionKey: entry.sessionKey, replayed: false, skipped: 'already-drained' })
+      continue
+    }
+    const record = owner.replRegistryPath === undefined ? undefined : getRecord(owner.replRegistryPath, entry.sessionKey)
+    if (record !== undefined && !registryConversationScopeMatches(record, owner)) {
+      results.push({ sessionKey: entry.sessionKey, replayed: false, skipped: 'scope-refused' })
       continue
     }
     savePendingRespawns(path, removeEntryBySessionKey(currentEntries, entry.sessionKey))

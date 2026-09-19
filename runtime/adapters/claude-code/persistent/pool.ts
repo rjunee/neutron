@@ -313,6 +313,13 @@ export function poolKeyFor(options: PersistentReplSubstrateOptions): string {
   return `${options.substrate_instance_id}${SESSION_KEY_SEP}${options.cwd ?? ''}`
 }
 
+/** Classification only, never attribution: this pre-scope shape could name
+ * either General or a literal project. Consumers must not guess which. */
+export function isLegacyGeneralPoolKey(key: string): boolean {
+  const parts = key.split(SESSION_KEY_SEP)
+  return parts.length === 4 && parts[2] === 'general'
+}
+
 /**
  * Spawn a FRESH, never-pooled, disposable REPL for one stateless one-shot turn
  * (Argus r4 BLOCKER). The key is `poolKeyFor(options)` suffixed with a unique
