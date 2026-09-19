@@ -17,8 +17,10 @@ export interface ReviewPermissionRequest {
 export interface ReviewPermissionLease {
   /** The only native start admitted by this lease. No caller permission overrides. */
   start(input: readonly unknown[]): Promise<{ turnId: string }>
-  /** Requires measured parent and child completion, then restores and re-reads policy. */
+  /** Restores and verifies policy after the whole tree settles; retains exclusivity. */
   restore(): Promise<void>
+  /** Host acknowledgement only: releases the journal after verified restoration. */
+  release(): Promise<void>
   /** Uncertain work never releases the project writer or its durable journal. */
   abandon(): void
 }
@@ -54,9 +56,11 @@ export function createReviewPermissionTransaction(host: ReviewPermissionHost, re
     || !lstatSync(request.stageDir).isDirectory()) throw new Error('Exact native review stage required')
   const initialStage = lstatSync(request.stageDir)
   const profile = `neutron_review_${randomBytes(16).toString('hex')}`
-  let parentTurn: string | undefined, used = false, released = false, restoring = false, phase = 'snapshot'
-  const completed = new Set<string>(), children = new Set<string>(), childTurns = new Map<string, string>()
-  const fail = (): never => { host.fence(); throw new Error(`Native review permissions require reconciliation (${phase})`) }
+  let parentTurn: string | undefined, used = false, released = false, restoring = false, restored = false, phase = 'snapshot'
+  const completed = new Set<string>(), turns = new Map<string, Set<string>>()
+  const spawns = new Map<string, { parent: string; turn: string; child: string }>()
+  let observationUncertain = false
+  const fail = (): never => { observationUncertain = true; host.fence(); throw new Error(`Native review permissions require reconciliation (${phase})`) }
   const assertStage = (): void => {
     const now = lstatSync(request.stageDir)
     if (realpathSync(request.stageDir) !== request.stageDir || !now.isDirectory() || now.dev !== initialStage.dev || now.ino !== initialStage.ino) fail()
@@ -66,17 +70,49 @@ export function createReviewPermissionTransaction(host: ReviewPermissionHost, re
       || !object(value.sandbox) || value.approvalPolicy === undefined || value.approvalsReviewer === undefined) return fail()
     return value
   }
+  const treeSettled = (): boolean => {
+    if (observationUncertain || !parentTurn || !completed.has(JSON.stringify([host.threadId, parentTurn]))) return false
+    const tree = new Set([host.threadId]), parents = new Map<string, string>(), direct = new Set<string>()
+    let changed = true
+    while (changed) {
+      changed = false
+      for (const edge of spawns.values()) {
+        if (!tree.has(edge.parent)) continue
+        if (edge.parent === host.threadId ? edge.turn !== parentTurn : !turns.get(edge.parent)?.has(edge.turn)) return false
+        if (edge.child === host.threadId || edge.child === edge.parent || parents.has(edge.child) && parents.get(edge.child) !== edge.parent) return false
+        parents.set(edge.child, edge.parent)
+        if (edge.parent === host.threadId) direct.add(edge.child)
+        if (!tree.has(edge.child)) { tree.add(edge.child); changed = true }
+      }
+    }
+    if (direct.size !== 1 || [...spawns.values()].some(edge => !tree.has(edge.parent))) return false
+    // A started thread lacking a spawn edge is unknown correlation, not proof
+    // of an unrelated worker. Preserve events that arrive before their edge.
+    for (const [thread, observed] of turns) {
+      if (!tree.has(thread) || thread === host.threadId && [...observed].some(turn => turn !== parentTurn)) return false
+      for (const turn of observed) if (!completed.has(JSON.stringify([thread, turn]))) return false
+    }
+    return [...tree].every(thread => thread === host.threadId || !!turns.get(thread)?.size)
+  }
   return {
     observe(message) {
       if (!used || released || !object(message.params)) return
       const params = message.params
-      if (message.method === 'item/completed' && params.threadId === host.threadId && params.turnId === parentTurn
-        && object(params.item) && params.item.type === 'subAgentActivity' && params.item.kind === 'started'
-        && typeof params.item.agentThreadId === 'string') children.add(params.item.agentThreadId)
+      const spawn = message.method === 'item/completed' && object(params.item) && params.item.type === 'subAgentActivity' && params.item.kind === 'started'
+      if (spawn) {
+        const item = params.item as Rpc
+        if (typeof params.threadId !== 'string' || typeof params.turnId !== 'string' || typeof item.agentThreadId !== 'string') observationUncertain = true
+        else spawns.set(JSON.stringify([params.threadId, params.turnId, item.agentThreadId]), { parent: params.threadId, turn: params.turnId, child: item.agentThreadId })
+      }
+      if (phase === 'restoration' && (spawn || message.method === 'turn/started')) {
+        observationUncertain = true
+        host.fence()
+      }
       if (typeof params.threadId !== 'string' || !object(params.turn) || typeof params.turn.id !== 'string') return
       if (message.method === 'turn/started') {
         if (params.threadId === host.threadId) parentTurn ??= params.turn.id
-        else childTurns.set(params.threadId, params.turn.id)
+        const observed = turns.get(params.threadId) ?? new Set<string>()
+        observed.add(params.turn.id); turns.set(params.threadId, observed)
       }
       if (message.method === 'turn/completed') completed.add(JSON.stringify([params.threadId, params.turn.id]))
     },
@@ -121,11 +157,7 @@ export function createReviewPermissionTransaction(host: ReviewPermissionHost, re
             restoring = true
             phase = 'settlement'
             try {
-              if (!parentTurn || !completed.has(JSON.stringify([host.threadId, parentTurn])) || children.size !== 1) return fail()
-              for (const child of children) {
-                const turn = childTurns.get(child)
-                if (!turn || !completed.has(JSON.stringify([child, turn]))) return fail()
-              }
+              if (!treeSettled()) return fail()
               assertStage()
               phase = 'restoration'
               const active = before.activePermissionProfile
@@ -145,11 +177,21 @@ export function createReviewPermissionTransaction(host: ReviewPermissionHost, re
               for (const key of ['sandbox', 'activePermissionProfile', 'approvalPolicy', 'approvalsReviewer', 'runtimeWorkspaceRoots']) {
                 if (!isDeepStrictEqual(after[key], before[key])) return fail()
               }
-              released = true
-              host.finish()
+              if (!treeSettled()) return fail()
+              restored = true
             } catch { return fail() }
           },
-          abandon() { if (!released) host.fence() },
+          async release() {
+            if (released) throw new Error('Native review lease already released')
+            phase = 'release'
+            if (!restored || !treeSettled()) return fail()
+            try {
+              assertStage()
+              host.finish()
+              released = true
+            } catch { return fail() }
+          },
+          abandon() { if (!released) { observationUncertain = true; host.fence() } },
         }
       } catch { return fail() }
     },

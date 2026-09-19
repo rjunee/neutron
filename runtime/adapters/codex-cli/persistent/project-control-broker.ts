@@ -321,7 +321,7 @@ export async function createProjectControlBroker(options: {
     async reviewPermissions(request, expectedEpoch) {
       if (closed || review || active || current || queue.length || journal.unresolved !== null || expectedEpoch !== epoch) throw refusal('Native review requires the idle current project writer')
       review = createReviewPermissionTransaction({ cwd: options.cwd, codexHome: options.codexHome, threadId: options.threadId, rpc: native,
-        finish() { journal.settle(); review = undefined },
+        finish() { if (closed) throw closed; journal.assertOwned(); journal.settle(); review = undefined },
         fence() { close(new Error('Native review permissions unresolved; project owner fenced')) },
       }, structuredClone(request))
       try {

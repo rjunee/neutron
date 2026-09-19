@@ -60,6 +60,8 @@ test('exact profile survives config readback, native child correlation, then res
   expect(f.config.permissions[params.permissions]).toEqual({ filesystem: { ':root': 'read', [f.stageDir]: 'write' }, network: { enabled: false } })
   expect(f.finished()).toBe(0)
   f.settle(); await lease.restore()
+  expect(f.finished()).toBe(0)
+  await lease.release()
   expect(f.finished()).toBe(1); expect(f.fenced()).toBe(0)
   expect(f.config.permissions).toEqual({}); expect(f.config.default_permissions).toBeNull()
   await expect(lease.start([])).rejects.toThrow('already used')
@@ -94,6 +96,57 @@ test('parent completion and unrelated child completion cannot restore or release
   await expect(lease.restore()).rejects.toThrow('settlement')
   expect(f.calls.some(call => call.method === 'thread/settings/update')).toBe(false)
   expect(f.finished()).toBe(0)
+})
+
+test('restoration requires the transitive child tree: a live grandchild fences, a settled grandchild releases', async () => {
+  for (const grandchildSettled of [false, true]) {
+    const f = fixture(), lease = await f.transaction.prepare()
+    await lease.start([]); f.settle()
+    f.transaction.observe({ method: 'turn/started', params: { threadId: 'grandchild', turn: { id: 'grandchild-turn' } } })
+    f.transaction.observe({ method: 'item/completed', params: { threadId: 'child', turnId: 'child-turn',
+      item: { type: 'subAgentActivity', kind: 'started', agentThreadId: 'grandchild' } } })
+    if (grandchildSettled) {
+      f.transaction.observe({ method: 'turn/completed', params: { threadId: 'grandchild', turn: { id: 'grandchild-turn' } } })
+      await lease.restore()
+      expect(f.finished()).toBe(0)
+      await lease.release()
+      expect(f.finished()).toBe(1); expect(f.fenced()).toBe(0)
+    } else {
+      await expect(lease.restore()).rejects.toThrow('settlement')
+      expect(f.finished()).toBe(0); expect(f.fenced()).toBeGreaterThan(0)
+      expect(f.calls.some(call => call.method === 'thread/settings/update')).toBe(false)
+    }
+  }
+})
+
+test('an observed native thread without a correlated spawn edge cannot be assumed unrelated', async () => {
+  const f = fixture(), lease = await f.transaction.prepare()
+  await lease.start([]); f.settle()
+  for (const method of ['turn/started', 'turn/completed']) f.transaction.observe({ method, params: { threadId: 'unclassified', turn: { id: 'unknown-turn' } } })
+  await expect(lease.restore()).rejects.toThrow('settlement')
+  expect(f.finished()).toBe(0)
+})
+
+test('restored policy stays exclusive until acknowledgement; abandonment or late activity prevents release', async () => {
+  for (const lateActivity of [false, true]) {
+    const f = fixture(), lease = await f.transaction.prepare()
+    await lease.start([]); f.settle(); await lease.restore()
+    expect(f.finished()).toBe(0)
+    if (lateActivity) f.transaction.observe({ method: 'turn/started', params: { threadId: 'child', turn: { id: 'late-turn' } } })
+    else lease.abandon()
+    await expect(lease.release()).rejects.toThrow('release')
+    expect(f.finished()).toBe(0); expect(f.fenced()).toBeGreaterThan(0)
+  }
+})
+
+test('failed journal release remains fenced and cannot be retried into success', async () => {
+  const f = fixture(), lease = await f.transaction.prepare()
+  await lease.start([]); f.settle(); await lease.restore()
+  f.host.finish = () => { throw new Error('broker closed or journal unavailable') }
+  await expect(lease.release()).rejects.toThrow('release')
+  f.host.finish = () => { throw new Error('must not reach host after uncertainty') }
+  await expect(lease.release()).rejects.toThrow('release')
+  expect(f.finished()).toBe(0); expect(f.fenced()).toBeGreaterThan(0)
 })
 
 test('restoration mismatch and lost start receipt fence instead of returning an idle owner', async () => {
