@@ -205,7 +205,7 @@ interface WorkerWorld {
   selectedTasks: string[]
   /** The planner route the real driver wrote into each plan turn's context. */
   plannerChoices: string[]
-  synthesisShape: 'legacy' | 'schema-guided' | 'malformed'
+  synthesisShape: 'legacy' | 'schema-guided' | 'malformed' | 'independent'
   synthesisSchemaSeen: boolean[]
 }
 
@@ -296,6 +296,17 @@ async function performRole(world: WorkerWorld, request: BoundedWorkRequest, brie
     const panelBrief = JSON.parse(brief)
     const verdict = verdictFor(world, panelBrief.round)
     if (request.role !== 'synthesis' || world.synthesisShape === 'legacy') return verdict
+    if (world.synthesisShape === 'independent') {
+      // The synthesis is a separate worker, not an echo of the top-level review
+      // worker. In the live failure both returned valid REQUEST_CHANGES verdicts
+      // but the synthesis added independently reasoned findings. A different
+      // finding identity is enough to exercise the real trailer comparison.
+      return panelBrief.round === 1 && verdict.findings.length > 0
+        ? { ...verdict, findings: verdict.findings.map(finding => ({ ...finding,
+            title: `Synthesis independently found: ${finding.title}`,
+            symbol: `synthesis-${finding.symbol}` })) }
+        : verdict
+    }
     const hasSchema = JSON.stringify(panelBrief.verdictSchema) === JSON.stringify(VERDICT_SCHEMA)
     world.synthesisSchemaSeen.push(hasSchema)
     // A worker told only to account for each seat can plausibly add a summary.
@@ -948,6 +959,20 @@ test('a synthesis worker guided by the exact verdict schema reaches MERGED unatt
   expect(outcome.kind, why(f, outcome)).toBe('merged')
   expect(f.github.prs).toHaveLength(1)
   expect(f.github.prs[0]!.state).toBe('MERGED')
+}, 300_000)
+
+test('independent valid synthesis findings enter the fix loop instead of stopping at a trailer mismatch', async () => {
+  // The review-role worker and the recorded synthesis are separate model turns.
+  // Round 1 gives both a valid major finding, but synthesis independently names
+  // its finding. This reproduces the live stop without relying on its private
+  // run data. The recorded panel must request a fix without requiring the
+  // unrelated review worker to produce a byte-for-byte echo.
+  const f = await fixture({ blockersByRound: [0, 1, 0], synthesisShape: 'independent' })
+  const outcome = await drive(f, 'pr')
+  expect(outcome.kind, why(f, outcome)).toBe('merged')
+  expect(f.world.dispatches.some(dispatch => dispatch.role === 'synthesis')).toBe(true)
+  expect(f.world.dispatches.some(dispatch => dispatch.role === 'fix')).toBe(true)
+  expect(f.github.prs[0]?.state).toBe('MERGED')
 }, 300_000)
 
 test('an extra synthesis payload field still blocks review and leaves the PR open', async () => {
