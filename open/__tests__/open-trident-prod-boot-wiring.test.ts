@@ -41,6 +41,8 @@ const SAVED_ENV_KEYS = [
   'NEUTRON_ONBOARDING_CHAT_COOKIE_SECRET',
   'ANTHROPIC_API_KEY',
   'OPENAI_API_KEY',
+  'NEUTRON_MODEL_PROVIDER',
+  'NEUTRON_PROJECT_MODELS',
   'CLAUDE_CODE_OAUTH_TOKEN',
   'NEUTRON_DISABLE_AMBIENT_CLAUDE_AUTH',
   'NOTIFY_SOCKET',
@@ -60,6 +62,8 @@ beforeEach(() => {
   process.env['NEUTRON_INSTANCE_SLUG'] = 'owner'
   process.env['NEUTRON_LANDING_STATIC_DIR'] = LANDING_DIR
   process.env['NEUTRON_ONBOARDING_CHAT_COOKIE_SECRET'] = 'open-trident-test-secret-0123456789'
+  process.env['NEUTRON_MODEL_PROVIDER'] = 'anthropic'
+  delete process.env['NEUTRON_PROJECT_MODELS']
   delete process.env['CLAUDE_CODE_OAUTH_TOKEN']
   process.env['NEUTRON_DISABLE_AMBIENT_CLAUDE_AUTH'] = '1' // force handoff default: ignore any host `claude` login (#101 Keychain probe)
   delete process.env['NOTIFY_SOCKET']
@@ -166,7 +170,7 @@ test.each(['anthropic', 'pi'] as const)('production composition constructs proje
     await store.update(created.id, { branch: 'change', worktree: join(tmpDir, 'work'), base_sha: base })
     const run = store.get(created.id)!
     const fired = await composition.trident!.fire_inner_workflow({ run, base_branch: 'main', db_path: join(tmpDir, 'project.db'), max_rounds: 3, test_strategy: 'Run the configured suite' })
-    expect(fired.status).toBe('fired')
+    expect(fired).toEqual({ status: 'fired', error: null })
     expect(optionsSeen).toHaveLength(1)
     expect(starts).toEqual([{ mode: 'pr', start: 'fresh' }])
     expect(optionsSeen[0]!.production.runId).toBe(run.id)
