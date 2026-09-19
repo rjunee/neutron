@@ -54,6 +54,7 @@ import { afterEach, expect, spyOn, test } from 'bun:test'
 import { chmod, mkdir, mkdtemp, readFile, readdir, rename, rm, symlink, writeFile } from 'node:fs/promises'
 import { tmpdir } from 'node:os'
 import { join } from 'node:path'
+import { fileURLToPath } from 'node:url'
 import { ProjectDb } from '@neutronai/persistence/index.ts'
 import { seedMigratedDb } from '../../tests/support/migrated-db.ts'
 import { TridentRunStore } from '@neutronai/trident/store.ts'
@@ -853,6 +854,38 @@ test('Bun workspace preparation uses the host verifier without executing the bra
   const executed = await spawnCapture(['bun', 'scripts/ci/verify-workspace-deps.ts'], worktree)
   expect(executed.ok).toBe(true)
   expect(await readFile(join(worktree, 'branch-verifier-ran'), 'utf8')).toBe('executed')
+}, 30_000)
+
+test('Bun workspace preparation cannot execute branch bunfig preloads through the host verifier', async () => {
+  const f = await fixture({ bunWorkspace: true })
+  await f.prepare()
+  const worktree = f.store.get(f.row.id)!.worktree!
+  const marker = join(f.dir, 'branch-preload-ran')
+  await writeFile(join(worktree, 'preload.ts'), `await Bun.write(${JSON.stringify(marker)}, "executed")\n`)
+  await writeFile(join(worktree, 'bunfig.toml'), 'preload = ["./preload.ts"]\n[install]\nlinker = "isolated"\n')
+  const verifier = fileURLToPath(new URL('../../scripts/ci/verify-workspace-deps.ts', import.meta.url))
+  // Positive control reproduces the old invocation: a trusted absolute script
+  // still runs the worktree's preload before checking any dependencies.
+  const oldInvocation = await spawnCapture(['bun', verifier, worktree], worktree)
+  expect(oldInvocation.ok, oldInvocation.stderr).toBe(true)
+  expect(await readFile(marker, 'utf8')).toBe('executed')
+  await rm(marker)
+  const original = f.context.runInstall!
+  const observed: string[] = []
+  f.context.runInstall = Object.assign(async (argv: string[], cwd?: string, env?: Record<string, string>, timeout?: number) => {
+    const result = await original(argv, cwd, env, timeout)
+    // Observe each exact production command separately, including bun install
+    // from the worktree; --ignore-scripts is not a runtime preload boundary.
+    await expect(readFile(marker)).rejects.toMatchObject({ code: 'ENOENT' })
+    observed.push(argv[2]?.includes('verify-workspace-deps.ts') ? 'verify' : 'install')
+    return result
+  }, { writesDiffOutput: true as const })
+  await f.prepare()
+  expect(observed).toEqual(['install', 'verify'])
+  await expect(readFile(marker)).rejects.toMatchObject({ code: 'ENOENT' })
+  const log = await readFile(join(f.context.stateRoot, encodeURIComponent(f.row.id), 'dependencies.log'), 'utf8')
+  expect(log.match(/workspace dependency verification: exit=0; timed_out=false/g)).toHaveLength(2)
+  expect(f.world.dispatches).toEqual([])
 }, 30_000)
 
 for (const [kind, manifest] of [

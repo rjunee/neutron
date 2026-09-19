@@ -36,12 +36,12 @@ export async function prepareProjectDependencies(worktree: string, state: string
   if (await exists(modules) && !(await lstat(modules)).isDirectory()) {
     await refuse('node_modules must be a worktree-local directory')
   }
-  const execute = async (argv: string[], label: string) => {
+  const execute = async (argv: string[], label: string, cwd = worktree) => {
     await appendFile(log, `${label}\n`)
     // exec makes the bounded host child the installer itself. Its transcript goes
     // straight to disk, and installation never borrows the publisher's credentials.
     const result = await run(['bash', '-c', `exec ${argv.map(quote).join(' ')} >>${quote(log)} 2>&1`],
-      worktree, undefined, PROJECT_DEPENDENCIES_TIMEOUT_MS)
+      cwd, undefined, PROJECT_DEPENDENCIES_TIMEOUT_MS)
     await appendFile(log, `${label}: exit=${result.exit_code}; timed_out=${result.timed_out === true}\n`)
     if (!result.ok || result.exit_code !== 0 || result.timed_out) await refuse(`${label} did not complete successfully`)
   }
@@ -55,9 +55,12 @@ export async function prepareProjectDependencies(worktree: string, state: string
   }
   const verifier = join(worktree, 'scripts', 'ci', 'verify-workspace-deps.ts')
   // A repository carrying this verifier opts into the workspace readiness contract.
-  // Run the HOST's copy against the worktree; branch-owned scripts must not gain
-  // a new execution path in pre-worker preparation.
-  if (await exists(verifier)) await execute(['bun', fileURLToPath(new URL('../../scripts/ci/verify-workspace-deps.ts', import.meta.url)), worktree],
-    'workspace dependency verification')
+  // Both the script AND its runtime configuration must belong to the host.
+  // A worktree cwd lets bunfig.toml preload branch code before even an absolute
+  // host script. Keep that tree as data only, with an explicit empty config and
+  // no dotenv loading; resolution inside the verifier still uses its root arg.
+  if (await exists(verifier)) await execute(['bun', '--config=/dev/null', '--no-env-file',
+    fileURLToPath(new URL('../../scripts/ci/verify-workspace-deps.ts', import.meta.url)), worktree],
+    'workspace dependency verification', fileURLToPath(new URL('../../', import.meta.url)))
   await appendFile(log, 'Worktree-local dependency preparation completed\n')
 }

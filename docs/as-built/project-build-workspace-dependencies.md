@@ -16,9 +16,12 @@ an absent/empty install, and a shared root `node_modules` symlink refuse prepara
 
 For repositories carrying the workspace verifier contract, preparation executes
 the host-owned verifier against the worktree, never the branch-owned script
-(`open/wiring/project-build-dependencies.ts:56`). Lifecycle scripts are suppressed
-at this new host preparation boundary. This may leave script-generated artifacts
-for the project's build workflow; it never turns their absence into a passing
+(`open/wiring/project-build-dependencies.ts:56`). Verification also uses the host
+checkout as its working directory, an explicit empty Bun config, and disabled
+dotenv loading. An absolute trusted script alone is insufficient: Bun loads a
+worktree's configured preload before that script when launched from the worktree.
+Lifecycle scripts are suppressed at this new host preparation boundary. This may
+leave script-generated artifacts for the project's build workflow; it never turns their absence into a passing
 suite. The existing host-observed full-suite receipt remains the merge authority.
 
 This implements the gate-preservation requirement in
@@ -27,13 +30,17 @@ This implements the gate-preservation requirement in
 `docs/trident-gates-inventory.md:137`. It does not establish the spec item's live
 unattended-MERGED acceptance criterion; the end-to-end evidence here is offline.
 
-`open/__tests__/project-build-e2e.test.ts:739` adds a real local tarball dependency,
+`open/__tests__/project-build-e2e.test.ts:740` adds a real local tarball dependency,
 a committed Bun lockfile, package-local import, and the real workspace verifier
 to the prepare → worker → publication → merge fixture. Fresh preparation and
 recovery reach MERGED. Complementary cases cover failed installation even after
 files were installed, zero-but-empty installation, an empty Bun store, timeout
 receipts, an actually killed hung child, shared symlinks, lifecycle suppression,
 and the host-owned verifier with an executable branch-script positive control.
+A branch `bunfig.toml` preload writes an absolute marker under the old verifier
+invocation; both the real install and isolated verifier commands leave it absent
+during preparation. Restoring the old verifier invocation fails this regression
+while the dependency-consuming merge fixture still passes.
 Removing dependencies after preparation leaves the PR open and the base unchanged.
 Dependency-free non-Bun fixtures prove only that setup is correctly a no-op.
 
@@ -44,7 +51,7 @@ passes; ignoring failure/timeout receipts fails both installed-but-unsuccessful
 controls while the successful-install case passes. Each mutation was restored.
 
 Verification: both root and Trident `tsc --noEmit` projects passed; focused
-`bun test` passed 142 tests (zero failures) over `open/__tests__/project-build-e2e.test.ts`,
+`bun test` passed 143 tests (zero failures) over `open/__tests__/project-build-e2e.test.ts`,
 `open/__tests__/project-build-wiring.test.ts`,
 `scripts/ci/verify-workspace-deps.test.ts`, and
 `trident/gates/review-suite.test.ts`. The existing REPL wiring case requires local
