@@ -5,6 +5,7 @@ import { useFocusEffect } from 'expo-router';
 
 import { ReplModelClient, type ReplModelState } from '../lib/repl-model-client';
 import { createThemedStyles, SPACING, THEME } from '../lib/theme';
+import { NativeOwnerControl } from './NativeOwnerControl';
 
 export function ReplModelControl({ projectId, baseUrl, token }: {
   projectId: string;
@@ -18,12 +19,14 @@ export function ReplModelControl({ projectId, baseUrl, token }: {
   const [switching, setSwitching] = useState(false);
   const [open, setOpen] = useState(false);
   const switchInFlight = useRef(false);
+  const refreshInFlight = useRef(false);
   // Focus/refresh replaces the authoritative session snapshot. Older GET or
   // POST completions must never repaint the model of the newly focused session.
   const generation = useRef(0);
 
   const refresh = useCallback(async (alive: () => boolean): Promise<void> => {
     const requestGeneration = ++generation.current;
+    refreshInFlight.current = true;
     const current = () => alive() && generation.current === requestGeneration;
     setLoading(true);
     setSwitching(false);
@@ -40,19 +43,34 @@ export function ReplModelControl({ projectId, baseUrl, token }: {
         setError(cause instanceof Error ? cause.message : 'Could not load the current model.');
       }
     } finally {
-      if (current()) setLoading(false);
+      if (current()) { refreshInFlight.current = false; setLoading(false); }
     }
   }, [client, projectId]);
 
   useFocusEffect(useCallback(() => {
     let active = true;
+    let reading = false;
     void refresh(() => active);
-    return () => { active = false; generation.current += 1; };
-  }, [refresh]));
+    // A cold owner can become available after the first chat turn; terminal
+    // model changes and completed turns also need to reach this focused view.
+    const timer = setInterval(() => {
+      if (reading || refreshInFlight.current || switchInFlight.current) return;
+      reading = true;
+      const version = generation.current;
+      void client.get(projectId).then(next => {
+        if (active && version === generation.current && !switchInFlight.current) {
+          setState(next);
+          setError(null);
+        }
+      }).catch(() => { /* The explicit read/action owns the visible error. */ })
+        .finally(() => { reading = false; });
+    }, 5_000);
+    return () => { active = false; generation.current += 1; clearInterval(timer); };
+  }, [refresh, client, projectId]));
 
   const choose = async (model: string): Promise<void> => {
     if (switchInFlight.current || state?.status !== 'ready' || model === state.currentModel) return;
-    const switchGeneration = generation.current;
+    const switchGeneration = ++generation.current;
     const current = () => generation.current === switchGeneration;
     switchInFlight.current = true;
     setSwitching(true);
@@ -127,6 +145,9 @@ export function ReplModelControl({ projectId, baseUrl, token }: {
             </Pressable>
           ))}
         </View>
+      )}
+      {projectId.length > 0 && state?.harness === 'codex' && (state.status === 'ready' || state.status === 'busy') && (
+        <NativeOwnerControl key={projectId} projectId={projectId} baseUrl={baseUrl} token={token} />
       )}
     </View>
   );

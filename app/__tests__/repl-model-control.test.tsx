@@ -41,6 +41,10 @@ beforeEach(() => {
   getCount = 0;
   completeGet = null;
   globalThis.fetch = (async (input, init) => {
+    if (String(input).endsWith('/repl-control')) {
+      return Response.json({ projectId: decodeURIComponent(String(input).split('/').at(-2)!), threadId: 'native-thread',
+        bindingRevision: 'binding-one', generation: 1, epoch: 0, turnId: null, status: 'idle', pending: [] });
+    }
     const method = init?.method ?? 'GET';
     const responseBody = method === 'POST' ? postBody : getBody;
     if (method === 'GET') getCount += 1;
@@ -78,6 +82,29 @@ async function press(id: string) {
 }
 
 describe('conversation REPL model on phone', () => {
+  it('discovers an owner started after the screen opened and mounts native controls', async () => {
+    getBody = { ...states.cheap, sessionId: '', currentModel: null, availableModels: [], status: 'unsupported' };
+    const screen = await mount();
+    expect(document.querySelector('[data-testid="native-owner-control"]')).toBeNull();
+    getBody = states.cheap;
+    await act(async () => { await new Promise(resolve => setTimeout(resolve, 5_100)); });
+    expect(document.querySelector('[data-testid="repl-model-open"]')?.textContent).toContain('cheap');
+    expect(document.querySelector('[data-testid="native-owner-control"]')).not.toBeNull();
+    screen.unmount();
+  }, 10_000);
+
+  it('does not let a background model read roll back an acknowledged switch', async () => {
+    const screen = await mount();
+    deferGetAt = 2;
+    await act(async () => { await new Promise(resolve => setTimeout(resolve, 5_100)); });
+    expect(completeGet).not.toBeNull();
+    await press('repl-model-open');
+    await press('repl-model-option-frontier');
+    await act(async () => { completeGet!(); }); await settle();
+    expect(document.querySelector('[data-testid="repl-model-open"]')?.textContent).toContain('frontier');
+    screen.unmount();
+  }, 10_000);
+
   it('accepts a new conditional revision on the same native conversation and uses it next time', async () => {
     getBody = { ...states.cheap, sessionId: 'revision-1', conversationId: 'native-thread-one' };
     postBody = { ...states.frontier, sessionId: 'revision-2', conversationId: 'native-thread-one' };
