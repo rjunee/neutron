@@ -2,6 +2,7 @@ import { createHash, randomBytes } from 'node:crypto'
 import { lstatSync, realpathSync } from 'node:fs'
 import { dirname, isAbsolute, join } from 'node:path'
 import type { ServerWebSocket } from 'bun'
+import type { PtyHost } from '../../claude-code/persistent/pty-host.ts'
 import { createProjectControlBroker, classifyProjectControlMethod, type ProjectControlBroker, type ProjectControlGateway } from './project-control-broker.ts'
 import { openProjectControlJournal } from './project-control-broker-journal.ts'
 import { BROKER_MAX_MESSAGE_BYTES, createProjectControlStdioTransport, type ProjectControlTransport } from './project-control-broker-transport.ts'
@@ -43,6 +44,29 @@ export function readCodexOwnerBinding(handle: CodexOwnerBinding): CodexOwnerBind
   return entry.facts
 }
 
+/** Attach to an already running helper. No launch, journal claim, or fallback. */
+export interface CodexOwnerAttachment extends CodexOwnerBootstrap {
+  /** broker.state() is a cached observation. Await this before deciding that a
+   * native turn has settled; writes are independently fenced by the helper. */
+  refreshState(): Promise<ReturnType<ProjectControlBroker['state']>>
+  /** Resolves only after the exact retained native writer accepts the reply. */
+  replyApproval(clientId: string, id: string | number, result: unknown, expectedEpoch: number): Promise<void>
+}
+export async function attachCodexOwner(options: {
+  descriptorPath: string
+  expected: CodexOwnerBindingFacts
+  timeoutMs?: number
+}): Promise<CodexOwnerAttachment> {
+  const { connectCodexOwnerHelper } = await import('./project-owner-helper-client.ts')
+  const connection = await connectCodexOwnerHelper(options)
+  const handle = Object.freeze({}) as CodexOwnerBinding
+  bindings.set(handle, { facts: connection.facts, assertCurrent: connection.assertCurrent })
+  return { binding: handle, broker: connection.broker,
+    refreshState: connection.refreshState, replyApproval: connection.replyApproval,
+    writeTerminal() { throw new Error('Use the native owner pane for terminal input') },
+    async close() { connection.close() } }
+}
+
 export interface CodexOwnerBootstrap {
   readonly binding: CodexOwnerBinding
   readonly broker: ProjectControlBroker
@@ -65,6 +89,9 @@ export async function bootstrapCodexOwner(options: {
   configOverrides?: readonly string[]
   timeoutMs?: number
   onTerminalData?(bytes: Uint8Array): void
+  /** Existing host boundary; Herdr gives the native TUI its own visible pane. */
+  terminalHost?: PtyHost
+  onTerminalScreen?(screen: string): void
 }): Promise<CodexOwnerBootstrap> {
   options = { ...options, env: { ...options.env }, configOverrides: [...options.configOverrides ?? [], 'features.multi_agent_v2=true'] }
   const timeout = options.timeoutMs ?? 15_000
@@ -81,7 +108,7 @@ export async function bootstrapCodexOwner(options: {
   let upstream: ProjectControlTransport | undefined
   let broker: ProjectControlBroker | undefined
   let gateway: ProjectControlGateway | undefined
-  let tui: ReturnType<typeof Bun.spawn> | undefined
+  let tui: { pid: number; paneHandle?: string | undefined; hasExited(): boolean; exited: Promise<number | null>; write(bytes: string): void; kill(): void; dispose(): void } | undefined
   let server: ReturnType<typeof Bun.serve<undefined>> | undefined
   let socket: ServerWebSocket<undefined> | undefined
   let closed = false
@@ -121,7 +148,7 @@ export async function bootstrapCodexOwner(options: {
     })
   }
   const assertCurrent = (): void => {
-    if (closed || !tui || tui.exitCode !== null || !broker || broker.state().phase === 'closed') throw new Error('Stale owner binding')
+    if (closed || !tui || tui.hasExited() || !broker || broker.state().phase === 'closed') throw new Error('Stale owner binding')
     journal.assertOwned()
   }
   try {
@@ -158,7 +185,8 @@ export async function bootstrapCodexOwner(options: {
     const token = randomBytes(32).toString('hex')
     const bind = async (response: Rpc): Promise<void> => {
       const thread = response.thread
-      while (!nativeThread && !closed) await Bun.sleep(5)
+      while ((!nativeThread || !tui) && !closed) await Bun.sleep(5)
+      if (closed) throw new Error('Owner closed before terminal binding')
       validateBootstrapThread(thread, nativeThread, options.cwd, options.codexHome)
       validateBootstrapMultiAgent(await native('experimentalFeature/list', { threadId: thread.id, limit: 1000 }))
       const transport: ProjectControlTransport = {
@@ -174,7 +202,7 @@ export async function bootstrapCodexOwner(options: {
       broker = await createProjectControlBroker({ ...options, threadId: thread.id, upstream: transport })
       const facts: CodexOwnerBindingFacts = Object.freeze({ threadId: thread.id, sessionId: thread.sessionId,
         cwd: options.cwd, codexHome: options.codexHome, rolloutPath: thread.path,
-        paneHandle: `owned-pty:${tui!.pid}`, bindingRevision: randomBytes(32).toString('hex'),
+        paneHandle: tui!.paneHandle ?? `owned-pty:${tui!.pid}`, bindingRevision: randomBytes(32).toString('hex'),
         generation: journal.generation, brokerGeneration: broker.state().generation, credentialFingerprint,
         modelProvider: thread.modelProvider, controlSocketPath: options.socketPath,
         capabilities: Object.freeze({ multiAgentV2: true, evidence: 'native-thread-feature-report' }),
@@ -189,8 +217,8 @@ export async function bootstrapCodexOwner(options: {
       for (const event of held.splice(0)) {
         if (object(event.params) && object(event.params.thread) && event.params.thread.id === thread.id) emit(event)
       }
-      resolveReady({ binding: handle, broker, writeTerminal(bytes) { assertCurrent(); tui!.terminal?.write(bytes) },
-        async close() { stop(); await tui?.exited; tui?.terminal?.close() } })
+      resolveReady({ binding: handle, broker, writeTerminal(bytes) { assertCurrent(); tui!.write(bytes) },
+        async close() { stop(); await tui?.exited; tui?.dispose() } })
     }
     const handleRequest = async (raw: Rpc): Promise<void> => {
       const id = raw.id
@@ -255,19 +283,33 @@ export async function bootstrapCodexOwner(options: {
         close(client) { if (client === socket) stop(new Error('Owned TUI disconnected')) },
       },
     })
-    tui = Bun.spawn([options.binary, '--remote', `ws://127.0.0.1:${server.port}`, '--remote-auth-token-env', 'NEUTRON_OWNER_TOKEN',
-      ...(options.configOverrides ?? []).flatMap(value => ['-c', value])], {
+    const argv = [options.binary, '--remote', `ws://127.0.0.1:${server.port}`, '--remote-auth-token-env', 'NEUTRON_OWNER_TOKEN',
+      ...(options.configOverrides ?? []).flatMap(value => ['-c', value])]
+    const launch = {
       cwd: options.cwd, env: { ...options.env, CODEX_HOME: options.codexHome, NEUTRON_OWNER_TOKEN: token },
-      terminal: { cols: 100, rows: 30, data(terminal, bytes) {
-        if (new TextDecoder().decode(bytes).includes('\x1b[6n')) terminal.write('\x1b[1;1R')
-        options.onTerminalData?.(bytes)
-      } },
-    })
+    }
+    if (options.terminalHost) {
+      const terminal = await options.terminalHost.spawn(argv, { ...launch, label: 'codex-native-owner',
+        onScreen(screen) { options.onTerminalScreen?.(screen) } })
+      tui = { pid: terminal.pid, paneHandle: terminal.paneHandle, hasExited: terminal.hasExited,
+        exited: terminal.exited, write: bytes => terminal.write(bytes), kill: () => terminal.kill(), dispose: () => terminal.detach?.() }
+      terminal.beginOutput?.()
+      if (closed) { tui.kill(); throw new Error('Owner closed during terminal launch') }
+    } else {
+      const terminal = Bun.spawn(argv, { ...launch,
+        terminal: { cols: 100, rows: 30, data(terminal, bytes) {
+          if (new TextDecoder().decode(bytes).includes('\x1b[6n')) terminal.write('\x1b[1;1R')
+          options.onTerminalData?.(bytes)
+        } },
+      })
+      tui = { pid: terminal.pid, hasExited: () => terminal.exitCode !== null, exited: terminal.exited,
+        write: bytes => { terminal.terminal?.write(bytes) }, kill: () => terminal.kill(), dispose: () => terminal.terminal?.close() }
+    }
     tui.exited.then(() => stop(new Error('Owned TUI exited')))
     return await ready
   } catch (error) {
     stop(error as Error)
-    await tui?.exited; tui?.terminal?.close()
+    await tui?.exited; tui?.dispose()
     throw error
   }
 }
