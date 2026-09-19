@@ -1187,6 +1187,7 @@ export function buildOpenGraphComposer(
     const mcpServerStoreHolder: { store?: OwnerMcpServerStore } = {}
     const resolveMcpServers = async (): Promise<ReadonlyArray<ResolvedOwnerMcpServer>> =>
       mcpServerStoreHolder.store === undefined ? [] : await mcpServerStoreHolder.store.resolveApproved()
+    codexOwnerBindings.resolveApprovedServers = () => resolveMcpServers()
     const wiringCtx: OpenWiringContext = {
       llmPool,
       owner_handle,

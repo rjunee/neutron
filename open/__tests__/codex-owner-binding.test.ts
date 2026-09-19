@@ -23,6 +23,20 @@ const spec = (prompt: string): AgentSpec => ({ prompt, tools: [], model_preferen
 async function collect(handle: SessionHandle) { const events = []; for await (const event of handle.events) events.push(event); return events }
 const line = (type: string, payload: unknown) => JSON.stringify({ type, payload }) + '\n'
 
+test('pre-gateway owner survives an explicit installed-MCP upgrade refusal without replacement', async () => {
+  const f = fixture()
+  f.bindings.resolveApprovedServers = async () => []
+  expect((await collect(f.bindings.start('project-one', spec('before')))).at(-1)?.kind).toBe('completion')
+  f.bindings.resolveApprovedServers = async () => [{ name: 'approved', command: 'must-not-execute', args: [], env_names: [], env: {} }]
+  const refused = await collect(f.bindings.start('project-one', spec('unavailable gateway')))
+  expect(refused).toContainEqual(expect.objectContaining({ kind: 'error', message: expect.stringContaining('explicit upgrade') }))
+  expect(f.calls).toHaveLength(1)
+  f.bindings.resolveApprovedServers = async () => []
+  expect((await collect(f.bindings.start('project-one', spec('after')))).at(-1)?.kind).toBe('completion')
+  expect(f.launched).toEqual(['project-one'])
+  await f.bindings.close()
+})
+
 function fixture(remote = false) {
   const dir = mkdtempSync(join(tmpdir(), 'owner-binding-test-')); dirs.push(dir)
   const facts = new Map<CodexOwnerBinding, CodexOwnerBindingFacts>()

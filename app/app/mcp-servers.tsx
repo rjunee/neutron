@@ -174,7 +174,7 @@ export default function McpServersScreen() {
           Extra tools for your assistant, each one a program on this machine. Adding a
           server does not start it — you approve it here first, and the request below
           shows exactly what it would run. One set serves every project, and an approved
-          server is attached when your assistant next starts a Claude session.
+          server is available in Claude conversations and supported Codex project chats.
         </Text>
 
         {error !== null ? (
@@ -201,16 +201,9 @@ export default function McpServersScreen() {
                 <View key={row.name} style={styles.card} testID={`mcp-${row.name}`}>
                   <View style={styles.cardHead}>
                     <Text style={styles.cardTitle}>{row.name}</Text>
-                    {/* "approved", NOT "running" — and the same word the web settings
-                        surface uses for this same field, the two being held to parity by
-                        `mcp-servers-client-parity.test.ts`. `active` means the next Claude
-                        session will ATTACH this server (approved for this exact spec, with
-                        its secrets present); `mcpServers` is read once at startup, so
-                        nothing is running between turns. The status line directly below
-                        says "starts it with its next session", and this badge contradicted
-                        it — overstating the wiring is the one failure this feature exists to
-                        avoid, and it is why `McpServerStatus.active`'s own docblock spells
-                        out that it is not a claim about a process. */}
+                    {/* The parity-tested badge reports approval for this exact spec
+                        with secrets present. It does not report whether a native
+                        conversation has admitted the server or a process is running. */}
                     {row.active ? (
                       <Text style={styles.tagOk} testID={`mcp-${row.name}-active`}>
                         approved

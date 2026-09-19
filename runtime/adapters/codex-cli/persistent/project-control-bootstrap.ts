@@ -8,6 +8,7 @@ import { openProjectControlJournal } from './project-control-broker-journal.ts'
 import { BROKER_MAX_MESSAGE_BYTES, createProjectControlStdioTransport, type ProjectControlTransport } from './project-control-broker-transport.ts'
 import { validateProjectControlScope } from './project-control-broker-scope.ts'
 import { admitsBootstrapConfig, admitsOwnerTui, OWNER_BOOTSTRAP_ORIGINATOR as ORIGINATOR, validateBootstrapMultiAgent, validateBootstrapThread } from './project-control-bootstrap-validation.ts'
+import { OWNER_INSTALLED_GATEWAY_TOOL } from './owner-installed-gateway.ts'
 
 type Rpc = Record<string, unknown>
 const object = (value: unknown): value is Rpc => typeof value === 'object' && value !== null && !Array.isArray(value)
@@ -34,7 +35,7 @@ export interface CodexOwnerBindingFacts {
   readonly controlSocketPath: string
   readonly nativeMetadata: Readonly<{ sessionId: string; source: string; originator: string }>
   /** Native thread feature report, observed before sealing; no model turn is seeded. */
-  readonly capabilities: Readonly<{ multiAgentV2: true; evidence: 'native-thread-feature-report' }>
+  readonly capabilities: Readonly<{ multiAgentV2: true; evidence: 'native-thread-feature-report'; ownerInstalledMcp?: true }>
 }
 const bindings = new WeakMap<object, { facts: CodexOwnerBindingFacts; assertCurrent(): void }>()
 export function readCodexOwnerBinding(handle: CodexOwnerBinding): CodexOwnerBindingFacts {
@@ -205,7 +206,7 @@ export async function bootstrapCodexOwner(options: {
         paneHandle: tui!.paneHandle ?? `owned-pty:${tui!.pid}`, bindingRevision: randomBytes(32).toString('hex'),
         generation: journal.generation, brokerGeneration: broker.state().generation, credentialFingerprint,
         modelProvider: thread.modelProvider, controlSocketPath: options.socketPath,
-        capabilities: Object.freeze({ multiAgentV2: true, evidence: 'native-thread-feature-report' }),
+        capabilities: Object.freeze({ multiAgentV2: true, evidence: 'native-thread-feature-report', ownerInstalledMcp: true }),
         nativeMetadata: Object.freeze({ sessionId: thread.sessionId, source: thread.source, originator: thread.originator }) })
       journal.sealAttestation(JSON.stringify(facts))
       journal.settle()
@@ -249,6 +250,11 @@ export async function bootstrapCodexOwner(options: {
           throw new Error('Bootstrap thread scope refused')
         }
         validateProjectControlScope('thread/start', params, options.cwd, message => new Error(message))
+        // Preserve authenticated native TUI tools, but reserve our fixed route.
+        // Registration occurs once on the root, never through a resume override.
+        const nativeTools = params.dynamicTools ?? []
+        if (!Array.isArray(nativeTools) || nativeTools.some(tool => !object(tool) || tool.name === OWNER_INSTALLED_GATEWAY_TOOL.name)) throw new Error('Reserved owner dynamic tool')
+        params.dynamicTools = [...nativeTools, { type: 'function', ...structuredClone(OWNER_INSTALLED_GATEWAY_TOOL) }]
         started = true; journal.record('thread/start')
         const response = await native(raw.method, params)
         await bind(response)

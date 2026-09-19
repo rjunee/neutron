@@ -16,7 +16,7 @@ const READS = new Set(['account/read', 'model/list', 'config/read', 'configRequi
   'thread/loaded/list', 'thread/list', 'thread/goal/get'])
 const MUTATIONS = new Set(['thread/resume', 'turn/start', 'thread/settings/update', 'config/batchWrite', 'turn/interrupt'])
 const APPROVALS = new Set(['item/commandExecution/requestApproval', 'item/fileChange/requestApproval',
-  'item/permissions/requestApproval', 'item/tool/requestUserInput', 'mcpServer/elicitation/request'])
+  'item/permissions/requestApproval', 'item/tool/requestUserInput', 'mcpServer/elicitation/request', 'item/tool/call'])
 export function classifyProjectControlMethod(method: string): 'read' | 'mutation' | 'refuse' {
   return READS.has(method) ? 'read' : MUTATIONS.has(method) ? 'mutation' : 'refuse'
 }
@@ -151,7 +151,12 @@ export async function createProjectControlBroker(options: {
       send({ id: raw.id, error: { code: -32001, message: 'Review permission lease forbids approvals' } }); return
     }
     const threadId = params.threadId ?? (object(params.thread) ? params.thread.id : undefined)
-    if (threadId !== undefined && threadId !== options.threadId) return
+    if (threadId !== undefined && threadId !== options.threadId) {
+      // Native children may inherit the fixed tool declaration, never its grant.
+      // Reject requests explicitly so a child cannot hang awaiting an owner tool.
+      if (id(raw.id)) send({ id: raw.id, error: { code: -32001, message: 'No matching project turn owner' } })
+      return
+    }
     if (params.threadId !== undefined && object(params.thread) && params.thread.id !== undefined && params.thread.id !== params.threadId) return
     if (id(raw.id)) {
       if (!APPROVALS.has(raw.method) || threadId !== options.threadId || !active || active.client.closed

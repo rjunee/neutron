@@ -285,9 +285,10 @@ export function wireSubstrates(ctx: OpenWiringContext): WiredSubstrates {
           // `tools-bridge.ts`). The untrusted import (`cc-import-*`) and
           // disposable Trident (`cc-trident-*`) substrates deliberately omit it.
           enableToolBridge: true,
-          // The owner's APPROVED installed MCP servers — the ONE substrate that gets
-          // them, mirroring `enableToolBridge` exactly. A server the owner installs in
-          // Settings becomes reachable from THIS session and nowhere else: the
+          // The owner's APPROVED installed MCP servers on Claude, mirroring
+          // `enableToolBridge`. Codex owner chat uses CodexOwnerBindings instead.
+          // A server the owner installs in
+          // Settings becomes reachable from the trusted owner session: the
           // untrusted import, the per-project compose and the disposable Trident
           // substrates omit the resolver, and `spawn.ts` also refuses to apply it
           // without the tool-bridge opt-in, so a prompt-injection in imported content

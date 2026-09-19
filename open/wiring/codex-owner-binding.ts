@@ -17,6 +17,8 @@ import { fireAndForget } from '@neutronai/logger/fire-and-forget.ts'
 import type { ReviewPermissionLease } from '@neutronai/runtime/adapters/codex-cli/persistent/project-review-permissions.ts'
 import { ReviewPermissionBusy } from '@neutronai/runtime/adapters/codex-cli/persistent/project-control-broker.ts'
 import { CodexRolloutObserver } from '@neutronai/runtime/adapters/codex-cli/persistent/rollout-observer.ts'
+import { DurableOwnerMcp } from '@neutronai/runtime/adapters/codex-cli/persistent/durable-owner-mcp.ts'
+import type { ResolvedOwnerMcpServer } from '@neutronai/runtime/mcp-servers.ts'
 
 export interface CodexOwnerProject {
   cwd: string
@@ -34,6 +36,8 @@ async function refreshOwner(owner: CodexOwnerBootstrap): Promise<void> {
  * Production attaches only to an independently hosted durable native owner.
  */
 export class CodexOwnerBindings {
+  resolveApprovedServers?: (projectId: string) => Promise<readonly ResolvedOwnerMcpServer[]>
+  private readonly installedMcp = new Map<string, DurableOwnerMcp>()
   private readonly owners = new Map<string, Promise<{ owner: CodexOwnerBootstrap; project: CodexOwnerProject }>>()
   private readonly busy = new Set<string>()
   private readonly refused = new Set<string>()
@@ -94,11 +98,36 @@ export class CodexOwnerBindings {
       let submitted = false
       let deliveryAttempted = false
       let turnId: string | undefined
+      let receiptReady!: () => void
+      const receipt = new Promise<void>(resolve => { receiptReady = resolve })
+      let mcp: DurableOwnerMcp | undefined
       const control = this.controls.register(options.projectId, owner, gateway, question => {
         this.questionSinks.get(options.projectId)?.(question)
         if (this.onOwnerQuestion) fireAndForget('codex-owner.question', Promise.resolve().then(() => this.onOwnerQuestion!(options.projectId, question)),
           () => { this.fence(options.projectId) })
-      }, clientId)
+      }, clientId, request => {
+        fireAndForget('codex-owner.installed-tool', (async () => {
+          await receipt
+          const assertTurn = () => {
+            signal.throwIfAborted()
+            if (!current() || !turnId || request.params.turnId !== turnId || owner.broker.state().activeTurnId !== turnId
+              || this.builds.get(options.projectId)?.input || this.decodingBuilds.has(options.projectId)) throw new Error('Owner MCP requires the exact conversational turn')
+          }
+          let result: unknown
+          try {
+            assertTurn()
+            if (!mcp) throw new Error('Owner MCP is unavailable on this binding')
+            result = await mcp.handle(request, clientId, assertTurn)
+          } catch {
+            result = { success: false, contentItems: [{ type: 'inputText', text: 'Owner MCP authority is unavailable or the request was refused.' }] }
+          }
+          // Even a refusal belongs only to its original native writer/turn.
+          if (!current() || request.params.turnId !== turnId || owner.broker.state().activeTurnId !== turnId) return
+          const attachment = owner as Partial<CodexOwnerAttachment>
+          if (attachment.replyApproval) await attachment.replyApproval(clientId, request.id, result, owner.broker.state().epoch)
+          else gateway.reply(request.id, result, owner.broker.state().epoch)
+        })(), () => { if (current()) this.fence(options.projectId) })
+      })
       const current = (): boolean => {
         try {
           if (JSON.parse(readFileSync(join(project.codexHome, 'project-owner.json'), 'utf8')) !== options.projectId) return false
@@ -106,6 +135,31 @@ export class CodexOwnerBindings {
           return !released && now.bindingRevision === facts.bindingRevision
             && owner.broker.state().phase !== 'closed' && !this.refused.has(options.projectId)
         } catch { return false }
+      }
+      try {
+        if (this.resolveApprovedServers && !this.builds.get(options.projectId)?.input && !this.decodingBuilds.has(options.projectId)) {
+          if (facts.capabilities.ownerInstalledMcp !== true) {
+            if ((await this.resolveApprovedServers(options.projectId)).length) throw new Error('Existing native owner lacks the installed MCP gateway; explicit upgrade is required')
+          } else {
+            mcp = this.installedMcp.get(options.projectId)
+            if (!mcp) {
+              mcp = new DurableOwnerMcp(() => this.resolveApprovedServers!(options.projectId))
+              this.installedMcp.set(options.projectId, mcp)
+            }
+            const assertOwner = () => {
+              signal.throwIfAborted()
+              if (!current() || this.builds.get(options.projectId)?.input || this.decodingBuilds.has(options.projectId)) throw new Error('Owner MCP conversation authority changed')
+            }
+            const epoch = owner.broker.state().epoch
+            await mcp.prepare({ projectId: options.projectId, sessionId: facts.sessionId, threadId: facts.threadId,
+              generation: facts.bindingRevision, leaseId: clientId, phase: 'active', idle: true }, signal,
+              () => { assertOwner(); if (owner.broker.state().phase !== 'idle' || owner.broker.state().epoch !== epoch) throw new Error('Owner MCP preparation lost native idle binding') },
+              () => { assertOwner(); if (owner.broker.state().phase !== 'turn' || !turnId || owner.broker.state().activeTurnId !== turnId) throw new Error('Owner MCP turn is not active') })
+          }
+        }
+      } catch (error) {
+        released = true; receiptReady(); control.close(); gateway.close(); this.busy.delete(options.projectId)
+        throw error
       }
       return {
         identity: { projectId: options.projectId, ...facts },
@@ -157,6 +211,7 @@ export class CodexOwnerBindings {
           if (typeof response.turn?.id !== 'string' || !response.turn.id) throw new Error('Codex native turn receipt missing')
           turnId = response.turn.id
           control.receipt(turnId)
+          receiptReady()
           return { threadId: facts.threadId, turnId, rolloutPath: facts.rolloutPath, bindingRevision: facts.bindingRevision }
         },
         interrupt: async id => {
@@ -168,6 +223,8 @@ export class CodexOwnerBindings {
         release: async outcome => {
           if (released) return
           released = true
+          receiptReady()
+          mcp?.retireTurn(clientId)
           try {
             // Only an acknowledged owner control may make a correlated native
             // abort reusable. Build cancellation never proves child settlement.
@@ -257,6 +314,7 @@ export class CodexOwnerBindings {
 
   async close(): Promise<void> {
     this.closed = true
+    await Promise.allSettled([...this.installedMcp.values()].map(surface => surface.close()))
     await Promise.allSettled([...this.owners.values()].map(async pending => { await (await pending).owner.close() }))
   }
 

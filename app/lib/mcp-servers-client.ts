@@ -42,11 +42,9 @@ export interface McpServerRow {
   grant_hash: string;
   secrets_present: boolean;
   /**
-   * Approved AND usable: the assistant attaches this server the next time it starts a
-   * session. NOT "a process is running right now" — the servers are attached to the
-   * Claude-backed conversational session, and a project pointed at a different model
-   * provider does not get them. The screen copy says so; `serverSummary` below is
-   * careful not to claim otherwise.
+   * Approved with usable secrets, not proof of a running process. Claude owner
+   * sessions and gateway-owned Codex chats admit servers at their next turn;
+   * other providers and bounded work do not receive installed-server authority.
    */
   active: boolean;
 }
@@ -260,12 +258,8 @@ export function splitCommandLine(line: string): { command: string; args: string[
  * THE APPROVED LABEL DOES NOT SAY "RUNNING", and that is a correction rather than a
  * style choice. It used to read "Approved and running with your assistant", which
  * claimed more than the code does twice over: the server is attached when the
- * conversational session next STARTS (nothing is running while the assistant is idle),
- * and it is attached to the Claude-backed session only — a project configured for
- * another model provider never sees it (`gateway/wiring/build-llm-call-substrate.ts`
- * takes its non-Claude branch before any of this wiring). Overstating a grant is the
- * failure this whole feature was built to avoid, so the label states the fact that is
- * actually true and the screen copy carries the provider caveat.
+ * supported conversation admits it; approval alone is not runtime evidence.
+ * The label states approval and the screen copy names supported conversations.
  *
  * MUST MATCH `landing/chat-react/mcp-servers-client.ts#serverSummary`.
  */
@@ -278,7 +272,7 @@ export function serverSummary(row: McpServerRow): { label: string; needs_owner: 
   if (!row.secrets_present) {
     return { label: 'Approved, but a stored value is missing — save it again', needs_owner: false };
   }
-  return { label: 'Approved — your assistant starts it with its next session', needs_owner: false };
+  return { label: 'Approved — available in supported conversations', needs_owner: false };
 }
 
 /**

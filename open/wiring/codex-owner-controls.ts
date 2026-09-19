@@ -135,7 +135,8 @@ export class CodexOwnerControls {
     } finally { gateway.close(); if (request) this.switching.delete(projectId) }
   }
 
-  register(projectId: string, owner: CodexOwnerBootstrap, gateway: ProjectControlGateway, onQuestion: (question: NativeOwnerQuestion) => void, clientId?: string) {
+  register(projectId: string, owner: CodexOwnerBootstrap, gateway: ProjectControlGateway, onQuestion: (question: NativeOwnerQuestion) => void, clientId?: string,
+    onTool?: (request: { id: string | number; method: string; params: Record<string, unknown> }) => void) {
     const active: ActiveTurn = { owner, gateway, clientId, facts: this.deps.facts(owner), pending: new Map(), seen: new Set() }
     this.active.set(projectId, active)
     const unsubscribe = gateway.subscribe(message => {
@@ -144,6 +145,10 @@ export class CodexOwnerControls {
       if (!object(params) || params.threadId !== active.facts.threadId || !nonempty(params.turnId)
         || params.turnId !== owner.broker.state().activeTurnId || active.turnId && active.turnId !== params.turnId
         || !nonempty(message.method)) { this.deps.fence(projectId); return }
+      if (message.method === 'item/tool/call') {
+        onTool?.({ id: message.id, method: message.method, params })
+        return
+      }
       if (active.seen.has(message.id) || active.seen.size >= 64) { this.deps.fence(projectId); return }
       active.seen.add(message.id)
       const question = { requestId: message.id, method: message.method, params: structuredClone(params) }

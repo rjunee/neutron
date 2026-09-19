@@ -26,6 +26,8 @@ export async function restrictedOwnerFixture(options: {
   foreignRollout?: boolean
   modelFault?: 'busy' | 'native-refusal' | 'lost'
   wrongSchema?: boolean
+  ownerMcp?: boolean
+  ownerTurn?: (call: (args: Rpc, scope?: Rpc) => Promise<Rpc>, prompt: string) => Promise<void>
 }) {
   const root = mkdtempSync('/tmp/open-review-owner-'), codexHome = join(root, 'home')
   mkdirSync(codexHome, { mode: 0o700 })
@@ -43,10 +45,12 @@ export async function restrictedOwnerFixture(options: {
     activePermissionProfile: { id: ':workspace' }, approvalPolicy: 'on-request', approvalsReviewer: 'user', runtimeWorkspaceRoots: [options.cwd] }
   const event = (method: string, threadId: string, id: string) => receive({ method, params: { threadId, turn: { id } } })
   const pending = new Set<Promise<void>>()
+  const toolReplies = new Map<string, (value: Rpc) => void>()
+  let toolSequence = 0
   const broker = await createProjectControlBroker({ socketPath: join(root, 'broker.sock'), cwd: options.cwd, codexHome, threadId: 'owner', upstream: {
     close() {}, listen(fn) { receive = fn }, send(message) {
       native.push(message)
-      if (!message.method) return
+      if (!message.method) { toolReplies.get(String(message.id))?.(message); return }
       const params = message.params as Rpc
       let result: unknown = {}
       if (message.method === 'model/list') result = { data: [{ model: 'small', displayName: 'Small' }, { model: 'large', displayName: 'Large' }], nextCursor: null }
@@ -86,6 +90,14 @@ export async function restrictedOwnerFixture(options: {
             receive({ method: 'item/completed', params: { threadId: 'owner', turnId,
               item: { type: 'subAgentActivity', kind: 'started', agentThreadId: childId } } })
           }
+          await options.ownerTurn?.(async (args, scope) => {
+            const id = `tool-${++toolSequence}`
+            return await new Promise<Rpc>((resolve, reject) => {
+              const timer = setTimeout(() => { toolReplies.delete(id); reject(new Error('Native tool response timed out')) }, 4000)
+              toolReplies.set(id, value => { clearTimeout(timer); toolReplies.delete(id); resolve(value) })
+              receive({ id, method: 'item/tool/call', params: { threadId: 'owner', turnId, callId: id, tool: 'neutron_owner_mcp', arguments: args, ...scope } })
+            })
+          }, prompt).catch(error => { errors.push(error) })
           appendFileSync(rolloutPath, line('event_msg', { type: 'task_complete', turn_id: turnId, last_agent_message: 'dispatch complete' }))
           event('turn/completed', 'owner', turnId)
           if (child) {
@@ -151,7 +163,7 @@ export async function restrictedOwnerFixture(options: {
     paneHandle: 'test-pane', bindingRevision: 'a'.repeat(64), generation: 1, brokerGeneration: broker.state().generation,
     credentialFingerprint: 'b'.repeat(64), modelProvider: 'fixture', controlSocketPath: join(root, 'broker.sock'),
     nativeMetadata: { sessionId: 'owner-session', source: 'vscode', originator: 'fixture' },
-    capabilities: { multiAgentV2: true, evidence: 'native-thread-feature-report' } }
+    capabilities: { multiAgentV2: true, evidence: 'native-thread-feature-report', ...(options.ownerMcp ? { ownerInstalledMcp: true as const } : {}) } }
   const helper = helperIdentity(), token = 'c'.repeat(64), socketPath = join(root, 'helper.sock'), descriptorPath = join(root, 'helper.json')
   const server = Bun.serve({ unix: socketPath, async fetch(request) {
     if (request.method !== 'POST' || new URL(request.url).pathname !== '/owner' || request.headers.has('origin')

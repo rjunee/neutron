@@ -81,6 +81,64 @@ import { PROJECT_SNAPSHOT_SCHEMA } from '../wiring/project-build-snapshot.ts'
 const cleanups: (() => void | Promise<void>)[] = []
 afterEach(async () => { for (const fn of cleanups.splice(0).reverse()) await fn() })
 
+test('durable Open owner MCP reaches approved SDK peer, retains successor handles and refuses bounded turns', async () => {
+  const f = await codexOwnerWithClaude()
+  const log = join(f.context.projectDir, 'mcp-peer.log')
+  let handle = '', ownerTurns = 0, boundedRefusals = 0, approved = true
+  const native = await restrictedOwnerFixture({ projectId: f.context.projectId, cwd: f.context.projectDir,
+    execute: literalWorker(f.world), ownerMcp: true,
+    ownerTurn: async (call, prompt) => {
+      const result = async (args: Record<string, unknown>) => {
+        const envelope = await call(args)
+        const value = envelope.result as { success: boolean; contentItems: Array<{ text: string }> }
+        expect(value.success).toBe(true)
+        return JSON.parse(value.contentItems[0]!.text)
+      }
+      if (prompt.startsWith('Execute the prompt in this JSON dispatch specification: ')) {
+        const envelope = await call({ action: 'discover' })
+        expect(envelope.error !== undefined || (envelope.result as { success?: boolean })?.success === false).toBe(true)
+        boundedRefusals++
+        return
+      }
+      ownerTurns++
+      expect((await call({ action: 'discover' }, { threadId: 'native-child' })).error).toMatchObject({ code: -32001 })
+      expect((await call({ action: 'discover' }, { turnId: 'predecessor-turn' })).error).toMatchObject({ code: -32001 })
+      expect((await result({ action: 'discover' })).servers[0].name).toBe('approved')
+      if (!handle) handle = (await result({ action: 'open', server: 'approved' })).handle
+      expect((await result({ action: 'request', handle, method: 'resources/read', params: { uri: 'fixture://one' } })).contents[0].text).toBe('fixture text')
+      await result({ action: 'request', handle, method: 'tools/call', params: { name: 'inspect', arguments: { progress: true }, _meta: { progressToken: `turn-${ownerTurns}` } } })
+      if (ownerTurns === 2) {
+        const received = await result({ action: 'receive', handle })
+        expect(received.notifications.map((event: { params: { progressToken: string } }) => event.params.progressToken)).toEqual(['turn-2'])
+      }
+      if (ownerTurns === 3) {
+        approved = false
+        expect((await call({ action: 'request', handle, method: 'tools/list' })).result).toMatchObject({ success: false })
+      }
+    },
+  })
+  cleanups.push(() => native.close())
+  native.bindings.resolveApprovedServers = async () => approved ? [{ name: 'approved', command: process.execPath,
+    args: [fileURLToPath(new URL('../../runtime/adapters/codex-cli/persistent/fixtures/approved-mcp-server.ts', import.meta.url))],
+    env_names: ['BROKER_TEST_LOG'], env: { BROKER_TEST_LOG: log } }] : []
+  f.context.codexOwnerBindings = native.bindings
+  const chat = async () => {
+    const events = []
+    for await (const event of native.bindings.start(f.context.projectId, { prompt: 'owner chat', tools: [], model_preference: [] }).events) events.push(event)
+    expect(events.at(-1)?.kind).toBe('completion')
+    expect(native.errors).toEqual([])
+  }
+  await chat()
+  await chat()
+  const outcome = await drive(f, 'pr')
+  expect(outcome.kind, why(f, outcome)).toBe('merged')
+  expect(boundedRefusals).toBeGreaterThan(0)
+  await chat()
+  expect(native.opens()).toBe(1)
+  expect((await readFile(log, 'utf8')).split('\n').filter(line => line === 'spawn')).toHaveLength(1)
+  expect(native.native.some(message => message.method === 'thread/start')).toBe(false)
+}, 60_000)
+
 // ─────────────────────────────────────────────────────────────────────────────
 // THE LITERAL-MINDED WORKER
 // ─────────────────────────────────────────────────────────────────────────────

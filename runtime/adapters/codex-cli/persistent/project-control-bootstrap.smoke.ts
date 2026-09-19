@@ -23,13 +23,18 @@ async function run(): Promise<void> {
   mkdirSync(cwd); mkdirSync(codexHome, { mode: 0o700 })
   const inputs: string[] = []
   let spawned = false, childReplied = false, ownerReceivedChild = false
+  let mcpCalled = false, mcpReplied = false
   const provider = Bun.serve({ hostname: '127.0.0.1', port: 0, async fetch(request) {
     inputs.push(await request.text())
     const body = JSON.parse(inputs.at(-1)!) as Rpc
     const child = JSON.stringify(body.input).includes('NATIVE_CHILD_TASK') && !JSON.stringify(body.input).includes('NATIVE_OWNER_SPAWN')
     const delegation = JSON.stringify(body.input).includes('NATIVE_OWNER_SPAWN')
     let item: Rpc
-    if (delegation && !spawned) {
+    if (JSON.stringify(body.input).includes('FIRST_REAL_OWNER_MESSAGE') && !mcpCalled) {
+      mcpCalled = true
+      item = { type: 'function_call', id: 'native-installed', call_id: 'native-installed-call',
+        name: 'neutron_owner_mcp', arguments: JSON.stringify({ action: 'discover' }), status: 'completed' }
+    } else if (delegation && !spawned) {
       assert(body.tools.some((tool: Rpc) => tool.type === 'namespace' && tool.name === 'collaboration'
         && tool.tools.some((nested: Rpc) => nested.name === 'spawn_agent')))
       spawned = true
@@ -77,7 +82,7 @@ async function run(): Promise<void> {
     const facts = readCodexOwnerBinding(owner.binding)
     assert.equal(facts.cwd, cwd)
     assert.equal(facts.codexHome, codexHome)
-    assert.deepEqual(facts.capabilities, { multiAgentV2: true, evidence: 'native-thread-feature-report' })
+    assert.deepEqual(facts.capabilities, { multiAgentV2: true, evidence: 'native-thread-feature-report', ownerInstalledMcp: true })
     assert.equal(inputs.length, 0)
     assert(!existsSync(facts.rolloutPath))
     assert.throws(() => readCodexOwnerBinding({} as never), /Unattested/)
@@ -85,6 +90,15 @@ async function run(): Promise<void> {
     await assert.rejects(bootstrapCodexOwner(options), /still live/)
     await assert.rejects(bootstrapCodexOwner({ ...options, socketPath: join(dir, 'other-socket') }), /still live/)
     const gateway = owner.broker.gateway('fixture-owner')
+    gateway.subscribe(message => {
+      if (message.method !== 'item/tool/call') return
+      const params = message.params as Rpc
+      assert.equal(params.threadId, facts.threadId)
+      assert.equal(params.tool, 'neutron_owner_mcp')
+      assert.equal(params.turnId, owner!.broker.state().activeTurnId)
+      mcpReplied = true
+      gateway.reply(message.id as string, { success: true, contentItems: [{ type: 'inputText', text: '{"servers":[]}' }] }, owner!.broker.state().epoch)
+    })
     for (const params of [
       { threadId: 'foreign', input: [] },
       { threadId: facts.threadId, cwd: dir, input: [] },
@@ -103,6 +117,9 @@ async function run(): Promise<void> {
       bindingRevision: facts.bindingRevision })
     await until(() => output.includes('OWNER_BOOTSTRAP_REPLY') && owner!.broker.state().phase === 'idle', 'gateway reply in TUI')
     assert(inputs[0]!.includes('FIRST_REAL_OWNER_MESSAGE'))
+    assert(mcpCalled && mcpReplied, 'fixed gateway request and reply cross the native owner broker')
+    assert(JSON.parse(inputs[0]!).tools.some((tool: Rpc) => tool.name === 'neutron_owner_mcp'
+      || tool.tools?.some((nested: Rpc) => nested.name === 'neutron_owner_mcp')), 'fixed installed MCP gateway reaches the native model tool surface')
     if (observer) {
       await until(() => { observer.read(); return observer.completed }, 'first native rollout')
       observer.close()

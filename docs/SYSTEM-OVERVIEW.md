@@ -874,14 +874,25 @@ there is nothing underneath him.
   in `mcpServers` only makes it START, and its tools would then hit a per-call
   permission prompt no headless REPL can answer. A name colliding with a built-in
   is skipped, not merged.
-- **Only the Claude-backed session gets them, and the UI says so.**
-  `resolveExtraMcpServers` is forwarded onto the Claude REPL options; a project whose
-  provider resolves to a non-Anthropic backend takes the early branch in
-  `gateway/wiring/build-llm-call-substrate.ts`, which speaks the OpenAI-family wire
-  protocol, advertises only the in-process tool manifest, and has no MCP client to
-  hand a stdio subprocess to. So no label claims a server is "running" — an approved
-  row reads "starts it with its next session", and a parity test pins the word out of
-  both clients. Extending that path is a feature, not a wiring fix.
+- **Claude conversations and gateway-owned durable Codex conversations receive approved servers.**
+  Claude receives `resolveExtraMcpServers` on its owner REPL. Codex registers the
+  fixed `neutron_owner_mcp` dynamic tool once on its native root, preserving the
+  TUI's own tools. `CodexOwnerBindings` prepares an approved SDK broker before
+  the owner turn and routes tool calls and replies through that exact helper
+  writer, thread and turn. Builds, restricted reviews, child threads and other
+  providers receive no installed-server authority. Direct native TUI-owned
+  turns do not use the gateway's installed-server handler.
+  Discovery, resources, prompts, completion and concurrent progress/notifications
+  preserve MCP results. Handles survive ordinary owner turns; predecessor
+  notifications do not replay. Approval or secret changes retire the old peer
+  and handles. There are no installed-server HTTP aliases or configuration-bearing
+  resumes. An older durable root without the fixed gateway explicitly refuses
+  a conversation requiring approved servers, without replacing its thread;
+  ordinary chat remains available when no installed servers are approved.
+  The client label describes approval, never a running process. Verification:
+  `open/__tests__/project-build-e2e.test.ts` and the native local-provider
+  `project-control-bootstrap.smoke.ts` probe; this is not a live-account or
+  physical-device acceptance claim.
 - **A hung third-party handshake cannot wedge the live chat.**
   `MCP_CONNECTION_NONBLOCKING=false` makes `claude` await the MCP handshake before
   accepting input — safe while the config held only our own two `bun` scripts, but an
