@@ -200,6 +200,135 @@ test("#1133: a failed commit propagates git's exit code, and nothing is amended"
   expect(git(tree, 'reflog', 'show', '--format=%gs', branch)).not.toContain('commit (amend)')
 })
 
+test('#1133: the strip amend rewrites the MESSAGE only -- a pathspec commit does not absorb the other staged file', () => {
+  const { tree, branch, parent } = fixture()
+  writeFileSync(join(tree, 'second.txt'), 'second\n')
+  git(tree, 'add', 'second.txt')
+
+  // Positive control, plain git: a pathspec commit takes change.txt alone and leaves
+  // second.txt staged. That commit's tree is exactly the tree the wrapper must land.
+  expect(run(tree, 'git', ['commit', '-q', '-m', 'control', '--', 'change.txt']).status).toBe(0)
+  const controlTree = git(tree, 'rev-parse', 'HEAD^{tree}')
+  expect(git(tree, 'show', '--stat', '--format=', 'HEAD')).not.toContain('second.txt')
+  expect(git(tree, 'diff', '--cached', '--name-only')).toBe('second.txt')
+  git(tree, 'reset', '-q', '--soft', parent)
+
+  // Without `--only`, `git commit --amend` snapshots the CURRENT index, so the strip would
+  // fold second.txt into the published commit with exit 0 and no marker.
+  const result = run(tree, 'bash', [guard, branch, '-m', 'feat: only change', '-m', SESSION, '-m', CO_AUTHOR, '--', 'change.txt'])
+
+  expect(result.status, result.stderr || result.stdout).toBe(0)
+  const body = git(tree, 'log', '-1', '--format=%B')
+  expect(body).not.toContain('Claude-Session')
+  expect(body).toContain(CO_AUTHOR)
+  expect(git(tree, 'rev-parse', 'HEAD^')).toBe(parent)
+  expect(git(tree, 'rev-parse', 'HEAD^{tree}')).toBe(controlTree)
+  expect(git(tree, 'show', '--stat', '--format=', 'HEAD')).not.toContain('second.txt')
+  expect(git(tree, 'diff', '--cached', '--name-only')).toBe('second.txt')
+})
+
+// A guard that promises "no loop-authored commit carries the trailer" must fail CLOSED: the
+// wrapper commits WITH the trailer and only then amends it out, so an amend that fails for
+// any reason must withdraw that commit rather than report an error and leave it at HEAD,
+// where the outer loop's publish would carry it to the PR.
+test('#1133: an amend that git refuses withdraws the trailer-bearing commit (fail closed, real git)', () => {
+  const { tree, branch, parent } = fixture()
+
+  // A message that is ONLY the trailer strips to nothing, and git refuses an empty amend.
+  const result = run(tree, 'bash', [guard, branch, '-m', SESSION])
+
+  expect(result.status).toBe(1)
+  expect(result.stderr).toContain('could not be stripped')
+  expect(result.stderr).toContain('was withdrawn')
+  expect(result.stderr).toContain(`HEAD is back at ${parent}`)
+  expect(git(tree, 'rev-parse', 'HEAD')).toBe(parent)
+  expect(git(tree, 'log', '-1', '--format=%B')).toBe('base')
+  // Forge can retry: the staged change is still staged, nothing was lost.
+  expect(git(tree, 'diff', '--cached', '--name-only')).toBe('change.txt')
+})
+
+test('#1133: an amend that fails for ANY reason withdraws the commit and propagates the exit code (fail closed, shimmed amend)', () => {
+  const { tree, branch, parent } = fixture()
+  const bin = mkdtempSync(join(tmpdir(), 'trident-head-amend-shim-'))
+  roots.push(bin)
+  const realGit = run(bin, 'sh', ['-c', 'command -v git']).stdout.trim()
+  // Stands in for a signing or ref-lock failure: every git call is real EXCEPT `--amend`.
+  writeFileSync(
+    join(bin, 'git'),
+    `#!/bin/sh\n` +
+      `for a in "$@"; do if [ "$a" = "--amend" ]; then echo "shim: amend refused" >&2; exit 128; fi; done\n` +
+      `exec ${realGit} "$@"\n`,
+    { mode: 0o755 },
+  )
+
+  const result = spawnSync('bash', [guard, branch, '-m', 'feat: subject', '-m', SESSION, '-m', CO_AUTHOR], {
+    cwd: tree,
+    encoding: 'utf8',
+    env: { ...process.env, PATH: `${bin}:${process.env.PATH ?? ''}` },
+  })
+
+  expect(result.status).toBe(128)
+  // The first commit DID land (the shim only refuses the amend) -- and was then withdrawn.
+  expect(result.stderr).toContain('shim: amend refused')
+  expect(result.stderr).toContain('was withdrawn')
+  expect(git(tree, 'rev-parse', 'HEAD')).toBe(parent)
+  expect(git(tree, 'log', '-1', '--format=%B')).toBe('base')
+  expect(git(tree, 'diff', '--cached', '--name-only')).toBe('change.txt')
+  // Nothing with the trailer is reachable from the branch; the withdrawn commit survives
+  // only in the reflog.
+  expect(run(tree, 'git', ['log', '--format=%B', branch]).stdout).not.toContain('Claude-Session')
+})
+
+test('#1133: --allow-empty-message on the agent\'s commit is honoured by the strip amend', () => {
+  const { tree, branch, parent } = fixture()
+
+  // The same only-trailer message the fail-closed test refuses, now with the flag the agent
+  // gave the first commit: the amend must repeat it, or a commit git accepted is withdrawn.
+  const result = run(tree, 'bash', [guard, branch, '--allow-empty-message', '-m', SESSION])
+
+  expect(result.status, result.stderr || result.stdout).toBe(0)
+  expect(git(tree, 'log', '-1', '--format=%B')).toBe('')
+  expect(git(tree, 'rev-parse', 'HEAD^')).toBe(parent)
+  expect(result.stdout).toContain('HEAD is now')
+})
+
+test("#1133: an explicit --cleanup=<mode> on the agent's commit wins over the amend's default", () => {
+  const { tree, branch, parent } = fixture()
+
+  // Positive control: under the default cleanup a `-m` paragraph loses its trailing spaces.
+  // (The paragraph sits ABOVE Co-Authored-By so the spaces are interior to the body and the
+  // helper's trim cannot eat them.)
+  const control = run(tree, 'bash', [guard, branch, '-m', 'feat: v', '-m', 'trailing   ', '-m', SESSION, '-m', CO_AUTHOR])
+  expect(control.status, control.stderr || control.stdout).toBe(0)
+  expect(git(tree, 'log', '-1', '--format=%B')).toBe(`feat: v\n\ntrailing\n\n${CO_AUTHOR}`)
+  git(tree, 'reset', '-q', '--soft', parent)
+
+  const result = run(tree, 'bash', [guard, branch, '-m', 'feat: v', '-m', 'trailing   ', '-m', SESSION, '-m', CO_AUTHOR, '--cleanup=verbatim'])
+
+  expect(result.status, result.stderr || result.stdout).toBe(0)
+  const body = git(tree, 'log', '-1', '--format=%B')
+  expect(body).not.toContain('Claude-Session')
+  expect(body).toContain(CO_AUTHOR)
+  // Verbatim survived the amend: the trailing spaces are still there.
+  expect(body).toContain('trailing   \n')
+  expect(git(tree, 'rev-parse', 'HEAD^')).toBe(parent)
+})
+
+test("#1133: a -m paragraph that begins with -S is a message, not a signing flag for the amend", () => {
+  const { tree, branch, parent } = fixture()
+
+  // A flag scan that cannot tell an option's VALUE from an option would forward
+  // `-Signed by hand` as `-S<keyid>`, the amend would try to gpg-sign, fail, and the
+  // commit would be withdrawn (or, before fail-closed, left with the trailer).
+  const result = run(tree, 'bash', [guard, branch, '-m', 'feat: s', '-m', '-Signed by hand', '-m', SESSION])
+
+  expect(result.status, result.stderr || result.stdout).toBe(0)
+  const body = git(tree, 'log', '-1', '--format=%B')
+  expect(body).not.toContain('Claude-Session')
+  expect(body).toContain('-Signed by hand')
+  expect(git(tree, 'rev-parse', 'HEAD^')).toBe(parent)
+})
+
 // THE OTHER TWO ANSWERS, AND WHY THEY NEED A SHIM.
 //
 // The refusal exists to keep three facts apart: the query FAILED, the query SUCCEEDED and

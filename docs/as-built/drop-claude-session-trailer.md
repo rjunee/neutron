@@ -76,7 +76,11 @@ at the one deterministic place every Forge commit passes through: the commit wra
    `git commit "$@"`; it runs the commit as a child and, on success and ONLY when HEAD moved
    (so `--dry-run` and a no-op commit never amend an older commit), removes every line
    matching `^Claude-Session:` from the message and amends the commit in place with
-   `--cleanup=whitespace` (author, parent, tree and `Co-Authored-By` untouched). The refusal
+   `--amend --only --cleanup=whitespace` (author, parent, tree and `Co-Authored-By`
+   untouched; `--only` is what keeps the TREE untouched, see the review findings below). If
+   the amend fails for any reason the wrapper fails closed: it withdraws the commit it just
+   made (`git reset --soft` to the HEAD the probe found, index and worktree kept) and exits
+   with git's code, so a trailer-bearing commit is never left on the branch. The refusal
    exits 64-67 are byte-for-byte unchanged. `trident/commit-with-resolved-head-realgit.test.ts`
    runs the real script against real git: the trailer arrives the way the CLI makes the agent
    write it (its own `-m` paragraph), and the commit that lands is one commit with the
@@ -124,7 +128,72 @@ with three findings.
   line.** Deliberately left as is: the string is machine-composed, no prose line legitimately
   starts with it, and a trailer-block parser is code the card does not ask for.
 
+### Review findings on this round's first head (`1244b2b6`), and how each was closed
+
+The head above went out for review and came back REQUEST_CHANGES from every seat (two Opus
+seats, the Codex seat, and the synthesis). Each finding was reproduced against the real
+script in a scratch repo before anything was changed.
+
+- **MAJOR — the strip amend re-committed the whole index.** `git commit --amend` without
+  paths snapshots the CURRENT index, so a pathspec commit (`-m ... -- a.txt` with `b.txt`
+  also staged) landed `a.txt` alone on the first commit and then the amend folded `b.txt`
+  in: exit 0, `git show --stat HEAD` listing both files, `git diff --cached` empty. That
+  contradicted this record's own "tree untouched" and no test could see it, because every
+  #1133 test staged exactly one file. Closed: the amend runs `--only` (git: "If used
+  together with --amend, then no paths need to be specified, which can be used to amend
+  the last commit without committing changes that have already been staged"). Real-git
+  test: two staged files, an in-test positive control with plain `git commit -- change.txt`
+  captures the tree a pathspec commit is supposed to produce, then the wrapper's commit
+  must have exactly that tree (`git rev-parse HEAD^{tree}`), name only `change.txt` in its
+  stat, and leave `second.txt` staged. Removing `--only` turns exactly that test red
+  (18 pass / 1 fail); this is the nominated mutation.
+- **MAJOR — an amend failure left the trailer-bearing commit at HEAD.** The wrapper commits
+  WITH the trailer and only then amends it out; when the amend failed for any reason other
+  than the hook case `--no-verify` closed, it printed an error and exited non-zero with
+  HEAD advanced to exactly the commit the guard promises can never reach the branch. In pr
+  mode the outer loop publishes the branch head, so a later successful commit on top would
+  have carried it to the PR. Closed: on amend failure the wrapper runs
+  `git reset --soft "$head_oid"` (the HEAD the probe found before the commit), which
+  withdraws the commit while keeping the index and worktree exactly as the first commit
+  left them, so Forge can retry; the withdrawn commit survives only in the reflog. Stderr
+  now says `commit refused: ... the commit <sha> was withdrawn, HEAD is back at <sha> and
+  the index still holds the staged changes`; if the reset itself fails, stderr says so and
+  names the sha that is on the branch WITH the trailer. Two real-git tests: (a) a message
+  that is ONLY the trailer strips to nothing and git refuses the amend — exit 1, HEAD back
+  at the fixture parent, `change.txt` still staged; (b) a git shim that is real for every
+  call except `--amend`, which it refuses with 128 (standing in for a signing or ref-lock
+  failure) — exit 128, HEAD back at the parent, index intact, no `Claude-Session` anywhere
+  in `git log <branch>`. Replacing the reset with `true` turns exactly those two red
+  (17 pass / 2 fail).
+- **NIT — a message that is only the trailer landed with the trailer and exited 1.** The
+  degenerate case of the major above; closed by the same fail-closed reset. And because the
+  amend must repeat the flags of the commit it rewrites, `--allow-empty-message` is now
+  forwarded too: with it on the agent's argv, the only-trailer message lands as the
+  empty-bodied commit git already accepted, rather than being withdrawn (real-git test).
+- **NIT — an explicit `--cleanup=<mode>` was not forwarded; the amend always applied
+  `whitespace`.** Closed: `--cleanup=*` (and `--cleanup <mode>`) is forwarded after the
+  default, so the explicit mode wins. Real-git test with the positive control first: under
+  the default cleanup a paragraph `trailing   ` loses its spaces; with `--cleanup=verbatim`
+  on the agent's commit the amended body still contains `trailing   \n`.
+- **NIT (previous synthesis) — the flag scan could not tell an option's VALUE from an
+  option.** A `-m` paragraph beginning with `-S` was forwarded to the amend as `-S<keyid>`,
+  gpg failed, and (before fail-closed) the trailer stayed. Closed: the scan skips the value
+  of every git-commit option that takes one as the next argv element (`-m`, `-F`, `-C`,
+  `-c`, `-t`, `--message`, `--file`, `--author`, `--date`, `--template`, `--fixup`,
+  `--squash`, `--reuse-message`, `--reedit-message`, `--trailer`, `--pathspec-from-file`).
+  Real-git test: `-m '-Signed by hand'` lands as prose, exit 0. Deleting the skip list turns
+  exactly that test red with `gpg failed to sign the data` (18 pass / 1 fail).
+
 ### Mutation, proven by hand before nomination
+
+`grep -c 'git commit --amend --only --no-verify' trident/commit-with-resolved-head.sh` = 1.
+`sed -i 's/git commit --amend --only --no-verify/git commit --amend --no-verify/'` on that
+file (the amend re-snapshots the index again) turns the pathspec test in
+`commit-with-resolved-head-realgit.test.ts` red (18 pass / 1 fail) while
+`runtime/adapters/claude-code/persistent/__tests__/build-settings.test.ts`, which never runs
+the wrapper, stays green (15 pass); restoring the line returns the guard to 19 / 0.
+
+The previous nomination still holds and is kept as a by-hand check:
 
 `grep -c "\-e '^Claude-Session:'" trident/commit-with-resolved-head.sh` = 1.
 `sed -i "s/-e '^Claude-Session:'/-e '^Never-Matches-Trailer:'/"` on that file (the trailer
@@ -141,6 +210,10 @@ guard to green.
   knob for the same switch. The wrapper strip is the second mechanism because it is provable
   from this repository; a second CLI knob is not.
 - The body-wide `^Claude-Session:` pattern (the nit above).
+- Refusing BEFORE the first commit when the message would strip to nothing: the message is
+  only known after git has composed it (`-m`, `-F`, `-C`, the editor), so the wrapper lets
+  the commit land and withdraws it instead, which is the same fail-closed path every other
+  amend failure takes.
 - `docs/AS_BUILT.md` and every existing shard: frozen; this record is a new shard.
 
 ### Effect after merge
@@ -168,4 +241,6 @@ failed". Round 7 (`e0bf4fc2`, the first round with the wrapper strip, CI 12/12 g
 "Review worker trailer differs from recorded synthesis" with the REQUEST_CHANGES findings
 closed above. This round carries `e0bf4fc2` forward verbatim (`git cherry-pick --no-commit`,
 merge-tree clean, main touched none of the seven files since its base), closes the three
-findings, and restores this record, which round 7 dropped.
+findings, and restores this record, which round 7 dropped. Its first head `1244b2b6` was
+reviewed and came back REQUEST_CHANGES; the fix commit on top closes those findings (the
+section above) without touching the settings switch or the Forge brief.

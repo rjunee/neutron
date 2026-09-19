@@ -58,27 +58,56 @@ if [ -n "$new_head" ] && [ "$new_head" != "$head_oid" ]; then
   stripped=$(printf '%s\n' "$message" | grep -v -e '^Claude-Session:')
   if [ "$stripped" != "$message" ]; then
     # The amend must repeat the flags of the commit it rewrites, or the two halves
-    # disagree: a `-S`/`--gpg-sign` commit would be amended unsigned, `--allow-empty`
-    # would be refused the second time round. Scan the original argv for exactly those
-    # and forward them; a bare `--` ends the options, so stop there.
+    # disagree: a `-S`/`--gpg-sign` commit would be amended unsigned, `--allow-empty` or
+    # `--allow-empty-message` would be refused the second time round, and an explicit
+    # `--cleanup=<mode>` would be overridden by the default below. Scan the original argv
+    # for exactly those and forward them; a bare `--` ends the options, so stop there.
+    # An option that takes its VALUE as the next argv element (`-m`, `-F`, `--author`, ...)
+    # has that value skipped, so a paragraph that happens to begin with `-S` is never
+    # mistaken for a signing flag and handed to the amend as a key id.
     amend_flags=()
+    value_of=''
     for arg in "$@"; do
+      if [ -n "$value_of" ]; then
+        [ "$value_of" = forward ] && amend_flags+=("$arg")
+        value_of=''
+        continue
+      fi
       case "$arg" in
         --) break ;;
-        -S|-S?*|--gpg-sign|--gpg-sign=*|--no-gpg-sign|--allow-empty) amend_flags+=("$arg") ;;
+        -S|-S?*|--gpg-sign|--gpg-sign=*|--no-gpg-sign|--allow-empty|--allow-empty-message|--cleanup=*) amend_flags+=("$arg") ;;
+        --cleanup) amend_flags+=("$arg"); value_of=forward ;;
+        -m|-F|-C|-c|-t|--message|--file|--author|--date|--template|--fixup|--squash|--reuse-message|--reedit-message|--trailer|--pathspec-from-file) value_of=skip ;;
       esac
     done
-    # `--cleanup=whitespace` collapses the blank line the removed trailer leaves and is
-    # the same cleanup a `-m` commit already had; `--amend` keeps the author. `--no-verify`
-    # because the hooks already vetted this exact tree seconds ago and the amend changes
-    # only the message: re-running a hook that the first commit skipped with `--no-verify`
-    # (an unlinked managed hook exits 68) would fail the amend and leave the trailer in.
-    # Not `-q`: git's second `[branch sha] subject` line names the commit that is actually
-    # on the branch, and the line printed below spells out both shas in full.
-    printf '%s\n' "$stripped" | git commit --amend --no-verify --cleanup=whitespace -F - ${amend_flags[@]+"${amend_flags[@]}"}
+    # `--only`: an amend without paths re-snapshots the CURRENT index, so a pathspec commit
+    # (`git commit -m ... -- a.txt` with b.txt also staged) would silently absorb every other
+    # staged file into the published commit. `--only --amend` with no paths rewrites the
+    # message over the tree the first commit already has; the index is left as it was.
+    # `--cleanup=whitespace` collapses the blank line the removed trailer leaves and is the
+    # same cleanup a `-m` commit already had (a forwarded `--cleanup=<mode>` comes later on
+    # the line and wins); `--amend` keeps the author. `--no-verify` because the hooks already
+    # vetted this exact tree seconds ago and the amend changes only the message: re-running a
+    # hook that the first commit skipped with `--no-verify` (an unlinked managed hook exits
+    # 68) would fail the amend and leave the trailer in. Not `-q`: git's second
+    # `[branch sha] subject` line names the commit that is actually on the branch, and the
+    # line printed below spells out both shas in full.
+    printf '%s\n' "$stripped" | git commit --amend --only --no-verify --cleanup=whitespace -F - ${amend_flags[@]+"${amend_flags[@]}"}
     amend_exit=$?
     if [ "$amend_exit" -ne 0 ]; then
-      echo "commit landed but the Claude-Session trailer could not be stripped (git commit --amend exited $amend_exit)" >&2
+      # Fail CLOSED. The commit that landed a moment ago is exactly the one this guard
+      # promises can never reach the branch, and in pr mode the outer loop publishes the
+      # branch head, so it must not be left at HEAD for a later commit to carry along.
+      # `reset --soft` moves the branch back to where the probe found it and keeps the
+      # index and worktree as the first commit left them, so Forge can retry; the
+      # trailer-bearing commit survives only in the reflog.
+      git reset -q --soft "$head_oid"
+      reset_exit=$?
+      if [ "$reset_exit" -ne 0 ]; then
+        echo "commit refused: the Claude-Session trailer could not be stripped (git commit --amend exited $amend_exit) AND the commit could not be withdrawn (git reset --soft $head_oid exited $reset_exit); $new_head is on the branch WITH the trailer" >&2
+        exit "$amend_exit"
+      fi
+      echo "commit refused: the Claude-Session trailer could not be stripped (git commit --amend exited $amend_exit); the commit $new_head was withdrawn, HEAD is back at $head_oid and the index still holds the staged changes" >&2
       exit "$amend_exit"
     fi
     # The first summary line git printed names the PRE-strip commit, which the amend just
