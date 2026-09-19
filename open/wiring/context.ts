@@ -28,6 +28,9 @@ import type { ProjectDb } from '@neutronai/persistence/index.ts'
 import type { SubstrateNoticeSinks } from '@neutronai/gateway/http/substrate-notice-sink.ts'
 
 export interface OpenWiringContext {
+  startCodexOwner?: import('@neutronai/gateway/wiring/build-llm-call-substrate.ts').BuildLlmCallSubstrateInput['startCodexOwner']
+  /** Stored native-provider projects at boot; keeps their shared chat intake reachable without API pools. */
+  codexOwnerProjects?: readonly string[]
   /**
    * Resolved single-owner Anthropic credential pool (`resolveOpenLlmPool(env)`),
    * or `null` when the box boots LLM-less. Every substrate construction gates on

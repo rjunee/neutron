@@ -103,6 +103,14 @@ describe('wireLandingStack — synthesis opt-in + surface wiring', () => {
 })
 
 describe('wireLandingStack — chatAuthGate closes over live env, evaluated per request', () => {
+  test('a configured native project can load chat without a Claude/API credential', async () => {
+    const { landing } = wireLandingStack(makeCtx({}, {
+      codexOwnerProjects: ['native-project'], startCodexOwner: () => { throw new Error('Page load must not start an owner') },
+    }), makeDeps({ resolveOpenLlmPool: () => null, resolveOpenOpenAiPool: () => null }))
+    const response = await landing.fetch(new Request('http://localhost/chat'), {} as never)
+    expect(response.status).not.toBe(503)
+  })
+
   test('GET /chat drives the threaded resolveOpenLlmPool against ctx.env each request', async () => {
     const seenEnv: Array<NodeJS.ProcessEnv> = []
     const env = { MARKER: 'live' } as unknown as NodeJS.ProcessEnv

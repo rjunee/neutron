@@ -1111,6 +1111,22 @@ describe('wireSubstrates — pre-warm live reference', () => {
     expect(w.prewarmSettledRef.settled).toBe(true)
   })
 
+  test('owner Codex binding availability preserves credential-less Claude and admits selected Codex', async () => {
+    const { ctx } = makeCtx({ llmPool: null, startCodexOwner: () => cannedHandle('native-owner'),
+      providerResolver: projectId => ({ provider: projectId === 'codex-project' ? 'openai-codex' : 'anthropic', source: 'project' }) })
+    const wired = wireSubstrates(ctx)
+    expect(wired.liveAgentSubstrate).toBeNull()
+    expect(wired.makeProjectLiveAgentSubstrate('claude-project')).toBeNull()
+    const codex = wired.makeProjectLiveAgentSubstrate('codex-project')
+    expect(codex).not.toBeNull()
+    const events = []
+    for await (const event of codex!.start(SESSIONLESS_SPEC).events) events.push(event)
+    expect(events.at(-1)).toMatchObject({ kind: 'completion', substrate_instance_id: 'native-owner' })
+    const inventoried = wireSubstrates({ ...ctx, codexOwnerProjects: ['codex-project'] })
+    expect(inventoried.liveAgentSubstrate).not.toBeNull()
+    expect(inventoried.makeProjectLiveAgentSubstrate('claude-project')).toBeNull()
+  })
+
   test('LLM-less: warm substrates null, prewarm skipped (settled true), factories throw', () => {
     const { ctx } = makeCtx({ llmPool: null })
     const w = wireSubstrates(ctx)

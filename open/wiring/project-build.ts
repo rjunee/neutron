@@ -3,13 +3,14 @@ import { spawnCapture } from '@neutronai/trident/git-mode.ts'
 import { runWorktreePath } from '@neutronai/trident/merge.ts'
 import { mkdir, readFile, writeFile, lstat } from 'node:fs/promises'
 import { join, resolve } from 'node:path'
-import { createProjectRunners } from '@neutronai/runtime/workers/project-runners.ts'
+import { createProjectRunners, type ProjectTrailerDecoder } from '@neutronai/runtime/workers/project-runners.ts'
 import { createClaudeActingTurn } from '@neutronai/runtime/workers/claude-acting-turn.ts'
-import { createCodexActingTurn } from '@neutronai/runtime/workers/codex-acting-turn.ts'
 import { createCodexHeadlessRunner } from '@neutronai/runtime/workers/codex-headless.ts'
+import { createClaudeHeadlessRunner } from '@neutronai/runtime/workers/claude-headless.ts'
 import { reconcileStoppedTrailerReservations } from '@neutronai/runtime/workers/trailer-slot.ts'
 import { PROJECT_REPL_TOOL_DEFS } from '@neutronai/gateway/wiring/build-live-agent-turn.ts'
-import { CodexProjectSessionHost } from '@neutronai/runtime/adapters/codex-cli/persistent/project-session.ts'
+import type { CodexOwnerBindings } from './codex-owner-binding.ts'
+import { codexBuildResultTransport } from './codex-build-result.ts'
 import { pool, supervisedBySessionKey } from '@neutronai/runtime/adapters/claude-code/persistent/pool-state.ts'
 import type { PersistentReplSubstrateOptions } from '@neutronai/runtime/adapters/claude-code/persistent/types.ts'
 import type { Provider } from '@neutronai/runtime/provider.ts'
@@ -89,8 +90,8 @@ export interface ProjectBuildContext {
   providerSource: ProviderSelectionSource
   env: NodeJS.ProcessEnv
   spawnProjectSession: (projectId: string) => Promise<void>
-  /** Test seam. Production constructs the durable Herdr-backed host. */
-  codexSessionHost?: CodexProjectSessionHost
+  /** The same host-owned resolver consumed by owner chat. Never creates a build session. */
+  codexOwnerBindings?: Pick<CodexOwnerBindings, 'actingTurn' | 'guardBuildRunner'> & Partial<Pick<CodexOwnerBindings, 'prepareReview'>>
 }
 
 /**
@@ -257,10 +258,23 @@ export async function prepareProjectBuild(input: InnerLoopInput, context: Projec
   if (!reconciled.ok) throw new Error(reconciled.detail)
   await prepareProjectDependencies(run.worktree, state, context.runInstall)
   const topic = run.chat_id ?? context.projectId
-  const codexSessions = context.codexSessionHost ?? new CodexProjectSessionHost({
-    registryPath: join(context.stateRoot, 'codex-project-sessions.json'),
-  })
   const codexEnv = { ...context.env, ...(input.codex_home ? { CODEX_HOME: input.codex_home } : {}) }
+  const trailer: ProjectTrailerDecoder = { schemas: new Map([
+    ['project-plan', (value: unknown) => validSnapshot(value, 'plan')],
+    ['project-build', (value: unknown) => validSnapshot(value, 'forge')],
+    ['project-review', (value: unknown) => validSnapshot(value, 'verdict')],
+    ['verdict', (value: unknown) => validateTrailer('verdict', value).ok],
+  ]), metadata: () => undefined }
+  const parsed = parsePhaseModelConfig(input.phase_models ?? {})
+  if (parsed.errors.length) throw Error(`Invalid project phase models: ${parsed.errors.join('; ')}`)
+  const config = parsed.config
+  if (context.provider === 'openai-codex' && ['review_rubric', 'review_adversarial', 'review_codex', 'review_kimi', 'synthesis'].some(key => {
+    const phase = phaseByKey(key)
+    return phase && modelTier(config[phase.key]?.model ?? phase.default.tier)?.group === 'codex'
+  })) {
+    if (!context.codexOwnerBindings?.prepareReview) throw new Error('Codex owner lacks attested read-only child execution with isolated result output')
+    await context.codexOwnerBindings.prepareReview(context.projectId)
+  }
   const substrate = await createProjectRunners({
     conversation: { project_id: context.projectId, topic_id: topic, provider: context.provider,
       // THE SURFACE MUST MATCH THE SESSION'S, OR THE REUSE GUARD RESPAWNS IT.
@@ -276,11 +290,8 @@ export async function prepareProjectBuild(input: InnerLoopInput, context: Projec
     run_id: run.id, state_dir: state,
     actingTurn: async turn => {
       if (context.provider === 'openai-codex') {
-        const session = await codexSessions.open({ projectId: context.projectId, cwd: context.projectDir, env: codexEnv })
-        return createCodexActingTurn({
-          project_id: context.projectId, topic_id: topic, thread_id: topic, cwd: context.projectDir, session,
-          grants: { tools: 'edit-and-run', writable: true, network: true, roots: [run.worktree] },
-        })(turn)
+        if (!context.codexOwnerBindings) return { kind: 'refused', reason: 'capability-unsupported', detail: 'Shared Codex owner binding is unavailable' }
+        return context.codexOwnerBindings.actingTurn(context.projectId, topic, context.projectDir, [run.worktree])(turn)
       }
       if (context.provider !== 'anthropic') return { kind: 'refused', reason: 'capability-unsupported', detail: `No live acting-turn binding for ${context.provider} selected at ${context.providerSource} level` }
       let candidates = liveProjectSessions(context.projectId)
@@ -342,22 +353,22 @@ export async function prepareProjectBuild(input: InnerLoopInput, context: Projec
       return createClaudeActingTurn({ project_id: context.projectId, topic_id: topic, session, projects_dir: resolveTranscriptProjectsDir(options),
         grants: { tools: 'edit-and-run', writable: true, network: true, roots: options.extra_dirs ?? [] } })(turn)
     },
-    trailer: { schemas: new Map([
-      ['project-plan', (value: unknown) => validSnapshot(value, 'plan')],
-      ['project-build', (value: unknown) => validSnapshot(value, 'forge')],
-      ['project-review', (value: unknown) => validSnapshot(value, 'verdict')],
-      ['verdict', (value: unknown) => validateTrailer('verdict', value).ok],
-    ]), metadata: () => undefined },
-    headless: { 'openai-codex': createCodexHeadlessRunner({ env: codexEnv, reviewBriefIntegrity: briefIntegrity, reviewContracts: new Map([
+    trailer,
+    ...(context.provider === 'openai-codex' ? { codexResultTransport: codexBuildResultTransport({
+      projectId: context.projectId, projectDir: context.projectDir, stateDir: state, runId: run.id, trailer,
+    }) } : {}),
+    headless: { anthropic: createClaudeHeadlessRunner({ env: context.env, cwd: run.worktree,
+      state_dir: state, schemas: trailer.schemas }),
+      'openai-codex': createCodexHeadlessRunner({ env: codexEnv, reviewBriefIntegrity: briefIntegrity, reviewContracts: new Map([
       ['verdict', { jsonSchema: VERDICT_SCHEMA, validate: (value: unknown) => validateTrailer('verdict', value).ok }],
       ['project-review', { jsonSchema: { ...PROJECT_SNAPSHOT_SCHEMA,
         properties: { ...PROJECT_SNAPSHOT_SCHEMA.properties, payload: VERDICT_SCHEMA },
       }, validate: (value: unknown) => validSnapshot(value, 'verdict') }],
     ]) }) },
   })
-  const parsed = parsePhaseModelConfig(input.phase_models ?? {})
-  if (parsed.errors.length) throw Error(`Invalid project phase models: ${parsed.errors.join('; ')}`)
-  const config = parsed.config
+  if (context.provider === 'openai-codex' && context.codexOwnerBindings && substrate.inRepl) {
+    substrate.inRepl = context.codexOwnerBindings.guardBuildRunner(context.projectId, substrate.inRepl)
+  }
   const workers = {} as ProjectBuildHostOptions['workers']
   for (const role of ['plan', 'build', 'review', 'fix'] as const) {
     const phase = phaseByKey(role === 'plan' ? 'decomposition' : role === 'review' ? 'review_adversarial' : 'build')!

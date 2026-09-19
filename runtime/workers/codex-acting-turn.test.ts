@@ -1,4 +1,4 @@
-import { afterEach, expect, test } from 'bun:test'
+import { afterEach, expect, spyOn, test } from 'bun:test'
 import { mkdtemp, rm, writeFile } from 'node:fs/promises'
 import { tmpdir } from 'node:os'
 import { join } from 'node:path'
@@ -222,4 +222,245 @@ test('cancellation during the initial screen observation prevents dispatch', asy
   f.binding.session!.screenPrompt = () => { controller.abort(); return undefined }
   expect(await f.run()).toMatchObject({ kind: 'unknown' })
   expect(f.commands).toEqual([])
+})
+
+function deferred() {
+  let resolve!: () => void
+  let reject!: (error: Error) => void
+  const promise = new Promise<void>((yes, no) => { resolve = yes; reject = no })
+  return { promise, resolve, reject }
+}
+
+for (const ending of ['cancel', 'timeout'] as const) {
+  test(`${ending} reaches the native submission before its parent settles and fences another writer`, async () => {
+    const f = await fixture()
+    const parent = deferred()
+    const submitted = deferred()
+    const controller = new AbortController()
+    f.input.signal = controller.signal
+    f.input.timeout_ms = ending === 'timeout' ? 45 : 2_000
+    f.input.request = { ...f.input.request, budget: { wall_ms: f.input.timeout_ms } }
+    let turnSignal: AbortSignal | undefined
+    let cancellations = 0
+    f.binding.session!.submitLine = async (text, turn) => {
+      f.commands.push(text)
+      turnSignal = turn.signal
+      turn.signal.addEventListener('abort', () => { cancellations++ }, { once: true })
+      await writeFile(f.input.request.result.path, '{}')
+      submitted.resolve()
+      await parent.promise
+    }
+    const first = f.run()
+    try {
+      await submitted.promise
+      expect(turnSignal?.aborted).toBe(false)
+      if (ending === 'cancel') controller.abort()
+      expect(await first).toMatchObject({ kind: 'unknown' })
+      expect(turnSignal?.aborted).toBe(true)
+      expect(cancellations).toBe(1)
+      f.input.signal = new AbortController().signal
+      f.input.request = { ...f.input.request, step_id: 'next-step' }
+      expect(await f.run()).toMatchObject({ kind: 'unknown', detail: expect.stringContaining('reconciliation') })
+      expect(f.commands).toHaveLength(1)
+    } finally {
+      parent.resolve()
+      await first
+    }
+  })
+}
+
+test('queued native submission receives its remaining deadline and a live signal', async () => {
+  const f = await fixture()
+  const parent = deferred()
+  const submitted = deferred()
+  f.input.timeout_ms = 2_000
+  f.input.request = { ...f.input.request, budget: { wall_ms: 1_000 } }
+  let now = 10_000
+  const clock = spyOn(Date, 'now').mockImplementation(() => now)
+  const controls: { timeout_ms: number; aborted: boolean }[] = []
+  f.binding.session!.submitLine = async (text, turn) => {
+    f.commands.push(text)
+    controls.push({ timeout_ms: turn.timeout_ms, aborted: turn.signal.aborted })
+    if (controls.length === 1) { submitted.resolve(); await parent.promise }
+    await writeFile(f.input.request.result.path, '{}')
+  }
+  const first = f.run()
+  let second: ReturnType<ProjectActingTurn> | undefined
+  try {
+    await submitted.promise
+    second = createCodexActingTurn(f.binding)({ ...f.input, request: { ...f.input.request, step_id: 'next-step' } })
+    now += 400
+    parent.resolve()
+    expect(await first).toEqual({ kind: 'turn-ended' })
+    expect(await second).toEqual({ kind: 'turn-ended' })
+    expect(controls).toEqual([{ timeout_ms: 1_000, aborted: false }, { timeout_ms: 600, aborted: false }])
+    expect(f.commands).toHaveLength(2)
+  } finally {
+    clock.mockRestore()
+    parent.resolve()
+    await Promise.all([first, second])
+  }
+})
+
+test('child trailer cannot settle a pending native parent, then a distinct step can run', async () => {
+  const f = await fixture()
+  const parent = deferred()
+  const submitted = deferred()
+  f.input.timeout_ms = 2_000
+  f.input.request = { ...f.input.request, budget: { wall_ms: 2_000 } }
+  f.binding.session!.submitLine = async text => {
+    f.commands.push(text)
+    await writeFile(f.input.request.result.path, '{}')
+    submitted.resolve()
+    await parent.promise
+  }
+  let ended = false
+  const first = f.run().then(result => { ended = true; return result })
+  await submitted.promise
+  await Bun.sleep(0)
+  expect(ended).toBe(false)
+  parent.resolve()
+  expect(await first).toEqual({ kind: 'turn-ended' })
+  expect(await f.run()).toMatchObject({ kind: 'unknown', detail: expect.stringContaining('already dispatched') })
+  expect(f.commands).toHaveLength(1)
+  f.input.request = { ...f.input.request, step_id: 'next-step' }
+  expect(await f.run()).toEqual({ kind: 'turn-ended' })
+  expect(f.commands).toHaveLength(2)
+})
+
+for (const ending of ['cancel', 'timeout', 'lost acknowledgement'] as const) {
+  test(`${ending} fences reuse even when a child trailer exists and submission later settles`, async () => {
+    const f = await fixture()
+    const parent = deferred()
+    const submitted = deferred()
+    const controller = new AbortController()
+    f.input.signal = controller.signal
+    f.input.timeout_ms = ending === 'timeout' ? 45 : 2_000
+    f.input.request = { ...f.input.request, budget: { wall_ms: f.input.timeout_ms } }
+    f.binding.session!.submitLine = async text => {
+      f.commands.push(text)
+      await writeFile(f.input.request.result.path, '{}')
+      submitted.resolve()
+      await parent.promise
+    }
+    const first = f.run()
+    await submitted.promise
+    if (ending === 'cancel') controller.abort()
+    if (ending === 'lost acknowledgement') parent.reject(new Error('receipt lost after delivery'))
+    expect(await first).toMatchObject({ kind: 'unknown' })
+    parent.resolve()
+    await Bun.sleep(0)
+    f.input.signal = new AbortController().signal
+    f.input.request = { ...f.input.request, step_id: 'next-step' }
+    expect(await f.run()).toMatchObject({ kind: 'unknown', detail: expect.stringContaining('reconciliation') })
+    expect(f.commands).toHaveLength(1)
+  })
+}
+
+test('missing child trailer fences reuse after parent completion', async () => {
+  const f = await fixture()
+  f.binding.session!.submitLine = async text => { f.commands.push(text) }
+  f.input.timeout_ms = 30
+  expect(await f.run()).toMatchObject({ kind: 'unknown' })
+  f.input.request = { ...f.input.request, step_id: 'next-step' }
+  expect(await f.run()).toMatchObject({ kind: 'unknown', detail: expect.stringContaining('reconciliation') })
+  expect(f.commands).toHaveLength(1)
+})
+
+test('a canceled queued call never submits after the preceding turn settles', async () => {
+  const f = await fixture()
+  const parent = deferred()
+  const submitted = deferred()
+  f.input.timeout_ms = 2_000
+  f.input.request = { ...f.input.request, budget: { wall_ms: 2_000 } }
+  f.binding.session!.submitLine = async text => {
+    f.commands.push(text)
+    submitted.resolve()
+    await parent.promise
+    await writeFile(f.input.request.result.path, '{}')
+  }
+  const first = f.run()
+  await submitted.promise
+  const controller = new AbortController()
+  const secondInput = { ...f.input, signal: controller.signal, request: { ...f.input.request, step_id: 'queued-step' } }
+  const second = createCodexActingTurn(f.binding)(secondInput)
+  controller.abort()
+  expect(await second).toMatchObject({ kind: 'unknown' })
+  parent.resolve()
+  expect(await first).toEqual({ kind: 'turn-ended' })
+  await Bun.sleep(0)
+  expect(f.commands).toHaveLength(1)
+  // Cancellation before delivery does not spend the step or fence the session.
+  secondInput.signal = new AbortController().signal
+  expect(await createCodexActingTurn(f.binding)(secondInput)).toEqual({ kind: 'turn-ended' })
+  expect(f.commands).toHaveLength(2)
+})
+
+test('queued dispatch rechecks liveness after the preceding turn', async () => {
+  const f = await fixture()
+  const parent = deferred()
+  const submitted = deferred()
+  f.input.timeout_ms = 2_000
+  f.input.request = { ...f.input.request, budget: { wall_ms: 2_000 } }
+  f.binding.session!.submitLine = async text => {
+    f.commands.push(text)
+    submitted.resolve()
+    await parent.promise
+    await writeFile(f.input.request.result.path, '{}')
+  }
+  const first = f.run()
+  await submitted.promise
+  const second = createCodexActingTurn(f.binding)({ ...f.input, request: { ...f.input.request, step_id: 'queued-step' } })
+  f.setLive(false)
+  parent.resolve()
+  expect(await first).toEqual({ kind: 'turn-ended' })
+  expect(await second).toMatchObject({ kind: 'refused', detail: expect.stringContaining('not live') })
+  expect(f.commands).toHaveLength(1)
+})
+
+test('the next parent waits until the preceding child trailer has been observed', async () => {
+  const f = await fixture()
+  const submitted = deferred()
+  f.input.timeout_ms = 2_000
+  f.input.request = { ...f.input.request, budget: { wall_ms: 2_000 } }
+  f.binding.session!.submitLine = async text => { f.commands.push(text); submitted.resolve() }
+  const first = f.run()
+  await submitted.promise
+  const second = createCodexActingTurn(f.binding)({ ...f.input, request: { ...f.input.request, step_id: 'queued-step' } })
+  await Bun.sleep(0)
+  expect(f.commands).toHaveLength(1)
+  await writeFile(f.input.request.result.path, '{}')
+  expect(await first).toEqual({ kind: 'turn-ended' })
+  expect(await second).toEqual({ kind: 'turn-ended' })
+  expect(f.commands).toHaveLength(2)
+})
+
+test('lost acknowledgement fences an already queued distinct dispatch before releasing it', async () => {
+  const f = await fixture()
+  const parent = deferred()
+  const submitted = deferred()
+  f.input.timeout_ms = 2_000
+  f.input.request = { ...f.input.request, budget: { wall_ms: 2_000 } }
+  f.binding.session!.submitLine = async text => {
+    f.commands.push(text)
+    submitted.resolve()
+    await parent.promise
+  }
+  const first = f.run()
+  await submitted.promise
+  const second = createCodexActingTurn(f.binding)({ ...f.input, request: { ...f.input.request, step_id: 'queued-step' } })
+  parent.reject(new Error('receipt lost'))
+  expect(await first).toMatchObject({ kind: 'unknown' })
+  expect(await second).toMatchObject({ kind: 'unknown', detail: expect.stringContaining('reconciliation') })
+  expect(f.commands).toHaveLength(1)
+})
+
+test('an already canceled invocation does not strand the next live invocation', async () => {
+  const f = await fixture()
+  f.input.signal = AbortSignal.abort()
+  expect(await f.run()).toMatchObject({ kind: 'unknown' })
+  expect(f.commands).toHaveLength(0)
+  f.input.signal = new AbortController().signal
+  expect(await f.run()).toEqual({ kind: 'turn-ended' })
+  expect(f.commands).toHaveLength(1)
 })

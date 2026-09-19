@@ -2,6 +2,8 @@
 export interface ReplModelState {
   harness: 'claude-code' | 'codex'
   sessionId: string
+  /** Stable conversation identity when sessionId is a conditional revision token. */
+  conversationId?: string
   currentModel: string | null
   availableModels: { id: string; label: string }[]
   status: 'ready' | 'busy' | 'unsupported' | 'unknown'

@@ -1,0 +1,9 @@
+## 2026-09-19 — Isolate the Open Trident boot fixture and expose launch failures
+
+The production-composition test now fixes and restores the instance model provider and clears project model routes while it runs. Its launch assertion compares the complete result, so a future `failed` response shows the launcher's error instead of only a status mismatch.
+
+CI shard 4 had one `pi` launch fail before host construction, but the launcher error was not printed. The failure did not reproduce in an isolated run, twenty repetitions, or a local replay of the exact 100-file shard chunk. That first step was diagnostic, not a verified production root-cause fix; the subsequent CI run exposed the cause below.
+
+Both provider arms pass with deliberately hostile ambient model settings; replacing the project selection with `anthropic` fails the `pi` arm, and replacing it with `pi` fails the `anthropic` arm. The consuming project-build end-to-end file passed all 100 tests, and the Open TypeScript project type-checked.
+
+The next CI run supplied the missing cause: the `pi` project's default Claude rubric review was correctly assigned to a headless cross-provider runner, but the fixture had left the real Claude CLI probe in place. CI has no Claude CLI, so admission refused with `provider-not-connected`; a developer machine with Claude installed made the same test falsely green. The test now injects a fake Claude headless runner at its constructor seam, as it already did for Codex, and asserts that `pi` admission asks for `review:headless` while the Anthropic project does not. A negative case makes that runner refuse and confirms the production composition still rejects the card before starting a driver. Production routing and the fail-closed CLI probe are unchanged. With the connected fixture, both launches settle to the deliberately unknown observation instead of treating missing local software as a product refusal.
