@@ -260,10 +260,12 @@ export function wireSubstrates(ctx: OpenWiringContext): WiredSubstrates {
   // Dedicated WARM conversational substrate for post-onboarding live chat
   // turns (no `ephemeral`; keyed per-dispatch on metering_context).
   const makeLiveAgentSubstrate = (projectIdResolver?: () => string): LlmCallSubstrate | null =>
-    conversationalAvailable
+    (conversationalAvailable || ctx.startCodexOwner !== undefined)
       ? buildLlmCallSubstrate({
           ...anthropicPoolArg,
           substrate_instance_id: `cc-agent-${owner_handle}`,
+          ownerConversation: true,
+          ...(ctx.startCodexOwner === undefined ? {} : { startCodexOwner: ctx.startCodexOwner }),
           repl_pane_label: `chat · ${project_slug}`,
           cwd: owner_home,
           owner_handle,

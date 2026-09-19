@@ -2,6 +2,7 @@ import { createProjectLauncher } from '@neutronai/trident/project-launcher.ts'
 import { TridentPhaseUsageStore } from '@neutronai/trident/phase-usage.ts'
 import { buildSubstrateWorkflowFire, buildWorkflowFirer } from '@neutronai/trident/inner-loop.ts'
 import { prepareProjectBuild } from './wiring/project-build.ts'
+import { CodexOwnerBindings } from './wiring/codex-owner-binding.ts'
 import {
   PROJECT_BUILD_STATE_REAP_INTERVAL_MS,
   reapProjectBuildState,
@@ -1082,6 +1083,14 @@ export function buildOpenGraphComposer(
     const providerResolver = createOpenConversationProviderResolver(
       resolveModelProvider, () => chatSessionProjects.getActive(OWNER_USER_ID),
     )
+    const codexOwnerBindings = new CodexOwnerBindings(async projectId => {
+      if (!(await projectSettingsStore.list(project_slug)).some(project => project.id === projectId)) {
+        throw new Error('Codex owner project is unavailable')
+      }
+      const home = codexCredentialService.resolveActiveCodexHome(asOwnerHandle(owner_handle), projectId)
+      if (!home) throw new Error('Codex owner requires a connected project credential')
+      return { cwd: joinPath(owner_home, 'Projects', projectId), codexHome: home, env }
+    })
     // O6 — NOTICE-FAMILY + RECOVERED-REPLY sinks for the owner's WARM conversational
     // substrate (`cc-agent-*`). The persistent REPL fires four DI seams on the
     // rising edge of otherwise-invisible states — a mid-turn API 5xx dead turn, a
@@ -1174,6 +1183,7 @@ export function buildOpenGraphComposer(
       prewarmSubstrate,
       ...conversationalProviderCtx,
       providerResolver,
+      startCodexOwner: (projectId, spec) => codexOwnerBindings.start(projectId, spec),
       ...(liveAgentNoticeSinks !== undefined ? { liveAgentNoticeSinks } : {}),
       ...(backgroundNoticeSinks !== undefined ? { backgroundNoticeSinks } : {}),
       ...(liveAgentRecoveredReplySink !== undefined
@@ -1213,6 +1223,7 @@ export function buildOpenGraphComposer(
                 stateRoot: projectBuildStateRoot,
                 projectDir: joinPath(owner_home, 'Projects', input.run.project_slug),
                 projectId: id, provider: providerSelection.provider, providerSource: providerSelection.source, env,
+                codexOwnerBindings,
                 spawnProjectSession: async projectId => {
                   const projectSubstrate = makeProjectLiveAgentSubstrate(projectId)
                   if (projectSubstrate === null) throw new Error('Project conversation substrate is unavailable')
@@ -1507,6 +1518,7 @@ export function buildOpenGraphComposer(
     // §F1 — a cleanup may be async (e.g. the upload sweeper's quiescing
     // `stop()`); the gateway shutdown runner awaits each before `db.close()`.
     const realmodeCleanups: Array<() => void | Promise<void>> = []
+    realmodeCleanups.push(() => codexOwnerBindings.close())
     // §F2 — the SINGLE loop inventory for this Open boot. The Open composer
     // starts long-lived loops OUTSIDE `composeProductionGraph` (the
     // `ChunkedUploadSweeper` in `wireUploads`, the `dispatch-lifecycle-watchdog`

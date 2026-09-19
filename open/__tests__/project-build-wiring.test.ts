@@ -28,8 +28,6 @@ import { githubProcessEnv } from '@neutronai/github/credential.ts'
 import { renderTestStrategy } from '@neutronai/trident/test-strategy.ts'
 import { createProductionHostEffects } from '@neutronai/trident/production-host-effects.ts'
 import type { ProjectBuildHostOptions } from '@neutronai/trident/project-build-host.ts'
-import { CodexProjectSessionHost } from '@neutronai/runtime/adapters/codex-cli/persistent/project-session.ts'
-import type { AdoptableHost, PtyChild, PtySpawnOpts } from '@neutronai/runtime/adapters/claude-code/persistent/pty-host.ts'
 
 const cleanup: (() => void | Promise<void>)[] = []
 afterEach(async () => { for (const fn of cleanup.splice(0).reverse()) await fn() })
@@ -443,28 +441,15 @@ test('acting turn requires the selected live project session and observed grants
   expect((await f.captured().actingTurn({ ...turn, conversation: f.captured().conversation })).kind).toBe('refused')
 })
 
-test('Codex-selected project denies an approval through the composed acting turn', async () => {
+test('Codex-selected build consumes the shared owner resolver and refuses when it is missing', async () => {
   const f = await fixture()
   f.context.provider = 'openai-codex'
   f.input.codex_home = join(f.dir, 'codex-home')
-  let onScreen: PtySpawnOpts['onScreen']
-  let spawnedEnv: Record<string, string | undefined> | undefined
-  const submissions: string[] = []
-  const child: PtyChild = {
-    pid: 123, paneHandle: 'codex-pane', write() {}, kill() {}, exited: new Promise(() => {}), hasExited: () => false,
-    submitLine: async text => {
-      submissions.push(text)
-      onScreen?.('Would you like to run the following command?\n1. Yes, proceed\n3. No, stop')
-    },
-  }
-  const host: AdoptableHost = {
-    spawn: async (_argv, options) => { onScreen = options.onScreen; spawnedEnv = options.env; return child },
-    attach: async (_handle, options) => { onScreen = options.onScreen; return child },
-    inspectHandle: async () => ({ kind: 'gone' }), closeHandle: async () => {},
-  }
-  f.context.codexSessionHost = new CodexProjectSessionHost({
-    host, bin: process.execPath, registryPath: join(f.dir, 'codex-project-sessions.json'),
-  })
+  const bindings: unknown[][] = []
+  f.context.codexOwnerBindings = { actingTurn: (...binding) => {
+    bindings.push(binding)
+    return async () => ({ kind: 'turn-ended' })
+  } }
   const options = await f.prepare()
   const captured = f.captured()
   const request: BoundedWorkRequest = { ...options.workers.build.request, run_id: f.input.run.id, step_id: 'fixture-step', role: 'build', needs_approval_decision: false }
@@ -475,22 +460,12 @@ test('Codex-selected project denies an approval through the composed acting turn
     timeout_ms: 100,
     signal: new AbortController().signal,
   })
-  expect(outcome).toEqual({
-    kind: 'refused', reason: 'capability-unsupported',
-    detail: 'Codex requested approval outside the bounded worker grants; denied.',
-  })
-  expect(submissions).toHaveLength(2)
-// FRAMING MOVED TO THE HOST (#1117). The session now passes plain text and the
-  // terminal boundary wraps it — `bun-terminal-host.ts:520` / `herdr-host.ts:676`
-  // call the unconditional wrapper at `pty-host.ts:71`. This fixture's host is a
-  // double that records what the SESSION sent, so it sees the unframed key.
-  //
-  // The claim here is unchanged and is NOT about framing: a Codex-selected
-  // project must reach the codex acting turn and deny the approval. Framing has
-  // its own two-backend regression at
-  // `runtime/adapters/codex-cli/persistent/project-session.test.ts:419-453`.
-  expect(submissions[1]).toBe('3')
-  expect(spawnedEnv?.CODEX_HOME).toBe(f.input.codex_home)
+  expect(outcome.kind).toBe('turn-ended')
+  expect(bindings).toEqual([[f.context.projectId, f.input.run.chat_id ?? f.context.projectId, f.context.projectDir, [expect.stringContaining('/.trident-worktrees/')]]])
+  delete f.context.codexOwnerBindings
+  expect(await captured.actingTurn({ conversation: captured.conversation, request,
+    spec: { ...captured.conversation.spec, prompt: 'bounded work' }, timeout_ms: 100,
+    signal: new AbortController().signal })).toMatchObject({ kind: 'refused', detail: 'Shared Codex owner binding is unavailable' })
 })
 
 test('unwired provider refusal names the project, instance, and application selection levels', async () => {

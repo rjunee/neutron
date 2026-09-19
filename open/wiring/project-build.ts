@@ -5,11 +5,10 @@ import { mkdir, readFile, writeFile, lstat } from 'node:fs/promises'
 import { join, resolve } from 'node:path'
 import { createProjectRunners } from '@neutronai/runtime/workers/project-runners.ts'
 import { createClaudeActingTurn } from '@neutronai/runtime/workers/claude-acting-turn.ts'
-import { createCodexActingTurn } from '@neutronai/runtime/workers/codex-acting-turn.ts'
 import { createCodexHeadlessRunner } from '@neutronai/runtime/workers/codex-headless.ts'
 import { reconcileStoppedTrailerReservations } from '@neutronai/runtime/workers/trailer-slot.ts'
 import { PROJECT_REPL_TOOL_DEFS } from '@neutronai/gateway/wiring/build-live-agent-turn.ts'
-import { CodexProjectSessionHost } from '@neutronai/runtime/adapters/codex-cli/persistent/project-session.ts'
+import type { CodexOwnerBindings } from './codex-owner-binding.ts'
 import { pool, supervisedBySessionKey } from '@neutronai/runtime/adapters/claude-code/persistent/pool-state.ts'
 import type { PersistentReplSubstrateOptions } from '@neutronai/runtime/adapters/claude-code/persistent/types.ts'
 import type { Provider } from '@neutronai/runtime/provider.ts'
@@ -88,8 +87,8 @@ export interface ProjectBuildContext {
   providerSource: ProviderSelectionSource
   env: NodeJS.ProcessEnv
   spawnProjectSession: (projectId: string) => Promise<void>
-  /** Test seam. Production constructs the durable Herdr-backed host. */
-  codexSessionHost?: CodexProjectSessionHost
+  /** The same host-owned resolver consumed by owner chat. Never creates a build session. */
+  codexOwnerBindings?: Pick<CodexOwnerBindings, 'actingTurn'>
 }
 
 /**
@@ -256,9 +255,6 @@ export async function prepareProjectBuild(input: InnerLoopInput, context: Projec
   if (!reconciled.ok) throw new Error(reconciled.detail)
   await prepareProjectDependencies(run.worktree, state, context.runInstall)
   const topic = run.chat_id ?? context.projectId
-  const codexSessions = context.codexSessionHost ?? new CodexProjectSessionHost({
-    registryPath: join(context.stateRoot, 'codex-project-sessions.json'),
-  })
   const codexEnv = { ...context.env, ...(input.codex_home ? { CODEX_HOME: input.codex_home } : {}) }
   const substrate = await createProjectRunners({
     conversation: { project_id: context.projectId, topic_id: topic, provider: context.provider,
@@ -275,11 +271,8 @@ export async function prepareProjectBuild(input: InnerLoopInput, context: Projec
     run_id: run.id, state_dir: state,
     actingTurn: async turn => {
       if (context.provider === 'openai-codex') {
-        const session = await codexSessions.open({ projectId: context.projectId, cwd: context.projectDir, env: codexEnv })
-        return createCodexActingTurn({
-          project_id: context.projectId, topic_id: topic, thread_id: topic, cwd: context.projectDir, session,
-          grants: { tools: 'edit-and-run', writable: true, network: true, roots: [run.worktree] },
-        })(turn)
+        if (!context.codexOwnerBindings) return { kind: 'refused', reason: 'capability-unsupported', detail: 'Shared Codex owner binding is unavailable' }
+        return context.codexOwnerBindings.actingTurn(context.projectId, topic, context.projectDir, [run.worktree])(turn)
       }
       if (context.provider !== 'anthropic') return { kind: 'refused', reason: 'capability-unsupported', detail: `No live acting-turn binding for ${context.provider} selected at ${context.providerSource} level` }
       let candidates = liveProjectSessions(context.projectId)
