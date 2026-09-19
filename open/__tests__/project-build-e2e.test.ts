@@ -51,7 +51,7 @@
  */
 import { LIVE_AGENT_TOOL_NAMES } from '@neutronai/gateway/wiring/build-live-agent-turn.ts'
 import { afterEach, expect, spyOn, test } from 'bun:test'
-import { mkdir, mkdtemp, readFile, rename, rm, writeFile } from 'node:fs/promises'
+import { chmod, mkdir, mkdtemp, readFile, readdir, rename, rm, writeFile } from 'node:fs/promises'
 import { tmpdir } from 'node:os'
 import { join } from 'node:path'
 import { ProjectDb } from '@neutronai/persistence/index.ts'
@@ -496,18 +496,63 @@ const suiteScript = (exit: number) => `#!/usr/bin/env bash\necho "HARNESS SUITE 
 const suiteStrategy = 'TEST EXECUTION: run the card regression.\n\n'
   + 'Full suite (stage 2), run exactly this:\n\n  bash scripts/ci/suite.sh\n'
 
+/**
+ * A LOCAL CODEX EXECUTABLE, NOT A FAKE RUNNER. Production composition still
+ * constructs `createCodexHeadlessRunner`, probes the CLI contract and routes the
+ * configured cross-provider seat through it. This executable replaces only the
+ * final network boundary: it records the exact process request and writes the
+ * structured final message a successful Codex turn would have written.
+ */
+const fakeCodex = (calls: string, identity: 'valid' | 'wrong-run') => `#!/usr/bin/env bun
+import { appendFileSync, readFileSync, writeFileSync } from 'node:fs'
+const argv = process.argv.slice(2)
+if (argv[0] === '--version' || (argv[0] === 'login' && argv[1] === 'status')) process.exit(0)
+if (argv.includes('--help')) {
+  console.log('--output-schema --json --output-last-message --ignore-rules')
+  process.exit(0)
+}
+const prompt = readFileSync(0, 'utf8')
+const requestLine = prompt.split('\\n').find(line => line.startsWith('Request (data): '))
+if (!requestLine) process.exit(91)
+const request = JSON.parse(requestLine.slice('Request (data): '.length))
+const brief = JSON.parse(readFileSync(request.brief.path, 'utf8'))
+appendFileSync(${JSON.stringify(calls)}, JSON.stringify({ argv, cwd: process.cwd(), request, brief }) + '\\n')
+const output = argv[argv.indexOf('-o') + 1]
+const envelope = { schema: request.result.schema,
+  run_id: ${identity === 'wrong-run' ? "'some-other-run'" : 'request.run_id'}, step_id: request.step_id,
+  kind: 'completed', result: { verdict: 'APPROVE', findings: [] } }
+writeFileSync(output, JSON.stringify({ envelope }))
+console.log(JSON.stringify({ type: 'thread.started', thread_id: 'e2e-codex-thread' }))
+console.log(JSON.stringify({ type: 'turn.completed', usage: { input_tokens: 7, output_tokens: 3 } }))
+`
+
 async function fixture(options: { ralph?: boolean; moreTasks?: boolean; suiteExit?: number; testStrategy?: string
   dispatchTask?: string
   blockersByRound?: readonly number[]; replanRounds?: readonly number[]
   maxRounds?: number; mergeMode?: 'pr' | 'local'; blockRoles?: readonly string[]
   repeatFirstFinding?: boolean; commentRounds?: readonly number[]
-  unavailableSeatRounds?: readonly number[] } = {}) {
+  unavailableSeatRounds?: readonly number[]; codexReview?: 'valid' | 'wrong-run' } = {}) {
   const dir = await mkdtemp(join(tmpdir(), 'project-build-e2e-'))
   cleanups.push(() => rm(dir, { recursive: true, force: true }))
   const origin = join(dir, 'origin.git')
   const repo = join(dir, 'code')
   const scratch = join(dir, 'scratch')
   await mkdir(scratch, { recursive: true })
+  const codexCalls = join(dir, 'codex-calls.jsonl')
+  let codexHome: string | undefined
+  let codexBin: string | undefined
+  if (options.codexReview) {
+    codexHome = join(dir, 'codex-home')
+    codexBin = join(dir, 'bin')
+    await mkdir(codexHome, { recursive: true })
+    await mkdir(codexBin, { recursive: true })
+    await writeFile(join(codexHome, 'auth.json'), JSON.stringify({ OPENAI_API_KEY: null,
+      tokens: { access_token: 'fixture-access', refresh_token: 'fixture-refresh' },
+      last_refresh: '2026-01-01T00:00:00.000Z' }), { mode: 0o600 })
+    const executable = join(codexBin, 'codex')
+    await writeFile(executable, fakeCodex(codexCalls, options.codexReview))
+    await chmod(executable, 0o755)
+  }
 
   const git = async (cwd: string, args: string[]) => {
     const result = await spawnCapture(['git', '-C', cwd, ...args], cwd)
@@ -588,7 +633,8 @@ async function fixture(options: { ralph?: boolean; moreTasks?: boolean; suiteExi
   const context: ProjectBuildContext = {
     store, phaseUsage: new TridentPhaseUsageStore(db), runHost, runSuite: runHost,
     stateRoot: join(dir, 'state'), projectDir: dir, projectId: 'e2e-project',
-    provider: 'anthropic', providerSource: 'application', env: {},
+    provider: 'anthropic', providerSource: 'application',
+    env: codexBin ? { PATH: `${codexBin}:${process.env.PATH ?? ''}` } : {},
     spawnProjectSession: async () => {
       register()
       await Promise.resolve()
@@ -597,14 +643,16 @@ async function fixture(options: { ralph?: boolean; moreTasks?: boolean; suiteExi
 
   const input: InnerLoopInput = {
     run: store.get(row.id)!, base_branch: 'main', db_path: join(dir, 'project.db'), max_rounds: 3,
+    ...(codexHome ? { codex_home: codexHome } : {}),
     // A nonempty strategy is what makes `assessReviewSuite` actually read the
     // build's recorded claim; an empty one returns `known()` vacuously
     // (`gates/review-suite.ts:39`). The stage-2 block is what gives the host a
     // command to run for its own receipt — see `suiteStrategy`.
     test_strategy: options.testStrategy ?? suiteStrategy,
-    // Only the adversarial core seat stays on; the cross-model seats need real
-    // Codex and Kimi credentials, and the rubric seat adds nothing here.
-    phase_models: { review_rubric: { model: 'none' }, review_codex: { model: 'none' }, review_kimi: { model: 'none' } },
+    // Only the adversarial core seat stays on by default. A Codex case supplies a
+    // local subscription-shaped home and CLI boundary; Kimi remains out of scope.
+    phase_models: { review_rubric: { model: 'none' },
+      review_codex: { model: options.codexReview ? 'sol' : 'none' }, review_kimi: { model: 'none' } },
   }
 
   const prepare = async () => {
@@ -614,13 +662,27 @@ async function fixture(options: { ralph?: boolean; moreTasks?: boolean; suiteExi
     return options
   }
 
-  return { dir, repo, origin, baseSha, db, store, row, input, context, prepare, github, commands, world, register, key }
+  return { dir, repo, origin, baseSha, db, store, row, input, context, prepare, github, commands, world,
+    register, key, codexCalls }
 }
 
 async function drive(f: Awaited<ReturnType<typeof fixture>>, mode: 'pr' | 'ralph'): Promise<ProjectBuildOutcome> {
   const options = await f.prepare()
   const host = await createProjectBuildHost(options)
   return host.run({ mode, start: 'fresh' }, new AbortController().signal)
+}
+
+async function codexReviewEvidence(f: Awaited<ReturnType<typeof fixture>>) {
+  const calls = (await readFile(f.codexCalls, 'utf8')).trim().split('\n').filter(Boolean).map(line => JSON.parse(line))
+  const state = join(f.context.stateRoot, encodeURIComponent(f.row.id))
+  for (const entry of await readdir(state, { withFileTypes: true })) {
+    if (!entry.isDirectory() || !entry.name.startsWith('review-')) continue
+    const directory = join(state, entry.name)
+    const brief = JSON.parse(await readFile(join(directory, 'brief.json'), 'utf8'))
+    if (brief.seat !== 'review_codex') continue
+    return { calls, brief, envelope: JSON.parse(await readFile(join(directory, 'result.json'), 'utf8')) }
+  }
+  throw new Error('Codex review evidence directory was not retained')
 }
 
 /**
@@ -892,6 +954,61 @@ test('fresh retry refuses an open PR whose durable publication provenance names 
   expect(f.github.prs).toEqual([{ number: 1, state: 'OPEN', headRefName: seeded.branch, baseRefName: 'main' }])
   expect(await gitOut(spawnCapture, f.origin, ['rev-parse', `refs/heads/${seeded.branch}^{commit}`])).toBe(seeded.priorHead)
   expect(f.store.get(f.row.id)).toMatchObject({ pr: null, published_pr: 2 })
+}, 300_000)
+
+test('configured Codex review uses the production read-only headless runner and its exact verdict merges', async () => {
+  const f = await fixture({ codexReview: 'valid' })
+  const outcome = await drive(f, 'pr')
+  expect(outcome.kind, why(f, outcome)).toBe('merged')
+
+  const evidence = await codexReviewEvidence(f)
+  expect(evidence.calls).toHaveLength(1)
+  const call = evidence.calls[0] as {
+    argv: string[]
+    cwd: string
+    request: BoundedWorkRequest
+    brief: { seat: string; snapshot: { head: string }; round: number }
+  }
+  const run = f.store.get(f.row.id)!
+  expect(call.argv).toEqual([
+    'exec', '--json', '--ignore-user-config', '--ignore-rules', '-m', 'gpt-5.6-sol',
+    '-c', 'sandbox_mode="read-only"', '-c', 'approval_policy="never"',
+    '-c', 'model_reasoning_effort="high"', '--output-schema', expect.any(String),
+    '-o', expect.any(String), '-',
+  ])
+  expect(call.argv.join(' ')).not.toMatch(/danger-full-access|workspace-write|approve-for-me|auto_review/)
+  expect(run.worktree).not.toBeNull()
+  expect(call.cwd).toBe(run.worktree!)
+  expect(call.request).toMatchObject({ run_id: f.row.id, role: 'review', model_id: 'gpt-5.6-sol',
+    writable: false, network: true, tools: 'read-only', needs_approval_decision: false,
+    result: { schema: 'verdict' } })
+  expect(call.brief).toMatchObject({ seat: 'review_codex', round: 1,
+    snapshot: { head: evidence.brief.snapshot.head } })
+  expect(evidence.envelope).toEqual({ schema: 'verdict', run_id: f.row.id,
+    step_id: call.request.step_id, kind: 'completed', result: { verdict: 'APPROVE', findings: [] } })
+  expect(Object.keys(evidence.envelope).sort()).toEqual([...ENVELOPE_FIELDS].sort())
+
+  expect(f.github.prs).toHaveLength(1)
+  expect(f.github.prs[0]!.state).toBe('MERGED')
+  const originMain = await spawnCapture(['git', '-C', f.origin, 'rev-parse', 'refs/heads/main'], f.origin)
+  expect(originMain.stdout.trim()).toBe(evidence.brief.snapshot.head)
+  expect(originMain.stdout.trim()).not.toBe(f.baseSha)
+}, 300_000)
+
+test('a Codex review envelope for another run is observed but cannot merge', async () => {
+  const f = await fixture({ codexReview: 'wrong-run' })
+  const outcome = await drive(f, 'pr')
+  expect(outcome.kind, why(f, outcome)).not.toBe('merged')
+
+  // Positive control: this is a rejected RESULT, not an unavailable seat or a
+  // fake that never ran. The production runner reached the local CLI exactly once.
+  const calls = (await readFile(f.codexCalls, 'utf8')).trim().split('\n').filter(Boolean).map(line => JSON.parse(line))
+  expect(calls).toHaveLength(1)
+  expect(calls[0]!.request).toMatchObject({ run_id: f.row.id, role: 'review', result: { schema: 'verdict' } })
+  expect(f.github.prs).toHaveLength(1)
+  expect(f.github.prs[0]!.state).toBe('OPEN')
+  const originMain = await spawnCapture(['git', '-C', f.origin, 'rev-parse', 'refs/heads/main'], f.origin)
+  expect(originMain.stdout.trim()).toBe(f.baseSha)
 }, 300_000)
 
 test('a missing full-suite command stops with its own cause and runs no suite', async () => {
@@ -1676,8 +1793,9 @@ test('local merge mode reaches merged with no PR, no push and no gh call', async
  *  • THE REST OF RESUME. The cases here resume `built`, `pending`, `rejected` and
  *    `ralph-task-built` checkpoints. An `approved` checkpoint and a regenerated
  *    diff that disagrees with the measurement are not driven.
- *  • CODEX AND KIMI SEATS, and headless placement generally: both cross-model
- *    seats are configured off.
+ *  • KIMI AND THE REST OF HEADLESS PLACEMENT. Codex review's successful first
+ *    call and wrong-run envelope are driven above; resume and concurrency are
+ *    owned by the runner suite. Kimi remains configured off here.
  *  • `mode: 'wave'` and `mode: 'bound_pr'`.
  *  • LOCAL MODE'S REFUSALS. The local case merges; `localMergeReadiness`'s dirty
  *    worktree, base-drift overlap, moved-branch and non-isolated-worktree stops
