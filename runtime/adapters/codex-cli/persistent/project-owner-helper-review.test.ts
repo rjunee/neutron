@@ -1,4 +1,5 @@
 import { afterEach, expect, test } from 'bun:test'
+import { Database } from 'bun:sqlite'
 import { chmodSync, mkdirSync, mkdtempSync, rmSync, writeFileSync } from 'node:fs'
 import { join } from 'node:path'
 import type { CodexOwnerBindingFacts } from './project-control-bootstrap.ts'
@@ -72,8 +73,8 @@ async function fixture(options: { drop?: string; badRestore?: boolean } = {}) {
   cleanup.push(() => server.stop(true))
   chmodSync(socketPath, 0o600)
   writeFileSync(descriptorPath, JSON.stringify({ version: 1, facts, helper, socketPath, socketIdentity: socketIdentity(socketPath), token }), { mode: 0o600 })
-  const connect = async () => {
-    const connection = await connectCodexOwnerHelper({ descriptorPath, expected: facts, timeoutMs: 2000 })
+  const connect = async (timeoutMs = 2000) => {
+    const connection = await connectCodexOwnerHelper({ descriptorPath, expected: facts, timeoutMs })
     cleanup.push(() => connection.close())
     return connection
   }
@@ -81,7 +82,8 @@ async function fixture(options: { drop?: string; badRestore?: boolean } = {}) {
   const identifyChild = () => receive({ method: 'item/completed', params: { threadId: 'owner', turnId: 'parent-turn',
     item: { type: 'subAgentActivity', kind: 'started', agentThreadId: 'child' } } })
   const settle = () => { event('turn/started', 'child', 'child-turn'); identifyChild(); event('turn/completed', 'child', 'child-turn'); event('turn/completed', 'owner', 'parent-turn') }
-  return { broker, registry, connect, stageDir, sent, wire, profiles, event, identifyChild, settle, invalidate() { bindingCurrent = false } }
+  return { broker, registry, connect, stageDir, sent, wire, profiles, event, identifyChild, settle, receive,
+    journalPath: join(root, 'broker.sock.sqlite'), invalidate() { bindingCurrent = false } }
 }
 
 test('private helper transport prepares exact permissions, restores native readback, and permits the next owner turn', async () => {
@@ -137,7 +139,7 @@ test('stale frontend grant, foreign lease, stale epoch and caller policy fields 
 test('owner RPC cannot forge private review methods, with an ordinary native read as positive control', async () => {
   const f = await fixture(), connection = await f.connect(), writer = connection.broker.gateway('owner-rpc')
   expect(await writer.request('thread/read', { threadId: 'owner' })).toEqual({})
-  for (const method of ['reviewPrepare', 'reviewStart', 'reviewRestore', 'reviewAbandon', 'reviewAcknowledge', 'reviewRelease', 'review/prepare']) {
+  for (const method of ['reviewPrepare', 'reviewStart', 'reviewRestore', 'reviewAbandon', 'reviewAcknowledge', 'reviewRelease', 'reviewWaitSettled', 'review/prepare']) {
     await expect(writer.request(method, { threadId: 'owner', stageDir: f.stageDir, network: false, input: [] }, connection.broker.state().epoch)).rejects.toThrow('Unclassified')
   }
   expect(f.sent.some(message => message.method === 'thread/read')).toBe(true)
@@ -209,4 +211,108 @@ test('abandon synchronously fences the proxy even when its helper response is lo
   for (let attempt = 0; attempt < 20 && !f.wire.some(message => message.operation === 'reviewAbandon'); attempt++) await Bun.sleep(5)
   expect(f.wire.filter(message => message.operation === 'reviewAbandon')).toHaveLength(1)
   expect(f.broker.state().phase).toBe('closed')
+})
+
+test('private settlement wait survives the ordinary transport deadline and waits for delayed exact child completion', async () => {
+  const f = await fixture(), connection = await f.connect(250)
+  const lease = await connection.reviewPrepare({ stageDir: f.stageDir, network: false }, connection.broker.state().epoch)
+  await lease.start([])
+  f.event('turn/started', 'child', 'child-turn'); f.identifyChild(); f.event('turn/completed', 'owner', 'parent-turn')
+  const timer = setTimeout(() => f.event('turn/completed', 'child', 'child-turn'), 350)
+  try { expect(await lease.waitSettled(1500)).toBe(true) } finally { clearTimeout(timer) }
+  await expect(lease.waitSettled(1500)).rejects.toThrow('wait')
+  expect(f.wire.filter(message => message.operation === 'reviewWaitSettled')).toHaveLength(1)
+  await lease.restore(); await lease.release()
+  const writer = connection.broker.gateway('after-delayed-child')
+  expect(await writer.request('turn/start', { threadId: 'owner', input: [] }, connection.broker.state().epoch)).toEqual({ turn: { id: 'next-owner-turn' } })
+})
+
+for (const wrongChild of [false, true]) test(`private settlement wait fences on ${wrongChild ? 'wrong' : 'absent'} child completion timeout`, async () => {
+  const f = await fixture(), connection = await f.connect()
+  const lease = await connection.reviewPrepare({ stageDir: f.stageDir, network: false }, connection.broker.state().epoch)
+  await lease.start([]); f.event('turn/completed', 'owner', 'parent-turn')
+  if (wrongChild) { f.event('turn/started', 'child', 'child-turn'); f.identifyChild(); f.event('turn/completed', 'foreign', 'child-turn') }
+  await expect(lease.waitSettled(20)).rejects.toThrow()
+  expect(connection.broker.state().phase).toBe('closed')
+  expect(f.broker.state().phase).toBe('closed')
+  await expect(lease.restore()).rejects.toThrow()
+  expect(f.sent.some(message => message.method === 'thread/settings/update')).toBe(false)
+})
+
+test('private settlement wait rejects unsafe bounds and foreign lease, grant or epoch before observing completion', async () => {
+  const f = await fixture(), signal = AbortSignal.abort(), grant = f.registry.attach().grant
+  const ready = await f.registry.handle({ operation: 'reviewPrepare', grant, stageDir: f.stageDir, network: false, epoch: f.broker.state().epoch }, signal)
+  await f.registry.handle({ operation: 'reviewStart', grant, lease: ready.lease, input: [] }, signal)
+  const wait = { operation: 'reviewWaitSettled', grant, lease: ready.lease, timeoutMs: 20 }
+  for (const timeoutMs of [0, -1, 60_001, 1.5, Infinity, NaN, '20']) await expect(f.registry.handle({ ...wait, timeoutMs }, signal)).rejects.toThrow('wait')
+  await expect(f.registry.handle({ ...wait, grant: 'foreign' }, signal)).rejects.toThrow('grant')
+  await expect(f.registry.handle({ ...wait, lease: 'foreign' }, signal)).rejects.toThrow('lease')
+  const state = f.broker.state
+  f.broker.state = () => ({ ...state(), epoch: state().epoch + 1 })
+  await expect(f.registry.handle(wait, signal)).rejects.toThrow('epoch')
+  f.broker.state = state
+  f.settle()
+  expect(await f.registry.handle(wait, signal)).toEqual({ settled: true })
+})
+
+test('lost settlement wait response fences the proxy, retains the native writer lock, and is never replayed', async () => {
+  const f = await fixture({ drop: 'reviewWaitSettled' }), connection = await f.connect()
+  const lease = await connection.reviewPrepare({ stageDir: f.stageDir, network: false }, connection.broker.state().epoch)
+  await lease.start([]); f.settle()
+  await expect(lease.waitSettled(20)).rejects.toThrow('outcome may be unknown')
+  expect(connection.broker.state().phase).toBe('closed')
+  expect(() => f.registry.attach()).toThrow('reconciliation')
+  await expect(lease.waitSettled(20)).rejects.toThrow('outcome may be unknown')
+  const nativeTui = f.broker.gateway('native-after-lost-wait')
+  await expect(nativeTui.request('turn/start', { threadId: 'owner', input: [] }, f.broker.state().epoch)).rejects.toThrow('review')
+  expect(f.wire.filter(message => message.operation === 'reviewWaitSettled')).toHaveLength(1)
+})
+
+test('known busy preparation preserves the active helper owner, its approval reply, and subsequent owner chat', async () => {
+  const f = await fixture(), connection = await f.connect(), writer = connection.broker.gateway('active-owner')
+  const approvals: Rpc[] = []
+  writer.subscribe(message => { if (message.id === 'approval-during-busy') approvals.push(message) })
+  await writer.request('turn/start', { threadId: 'owner', input: [] }, connection.broker.state().epoch)
+  await expect(connection.reviewPrepare({ stageDir: f.stageDir, network: false }, connection.broker.state().epoch)).rejects.toThrow('busy')
+  expect(connection.broker.state().phase).toBe('turn')
+  f.receive({ id: 'approval-during-busy', method: 'item/commandExecution/requestApproval', params: { threadId: 'owner', turnId: 'parent-turn' } })
+  for (let attempt = 0; attempt < 100 && !approvals.length; attempt++) await Bun.sleep(5)
+  expect(approvals).toHaveLength(1)
+  await connection.replyApproval('active-owner', 'approval-during-busy', { decision: 'accept' }, connection.broker.state().epoch)
+  expect(f.sent).toContainEqual({ id: 'approval-during-busy', result: { decision: 'accept' } })
+  f.event('turn/completed', 'owner', 'parent-turn'); await connection.refreshState()
+  expect(await writer.request('turn/start', { threadId: 'owner', input: [] }, connection.broker.state().epoch)).toEqual({ turn: { id: 'parent-turn' } })
+  expect(f.sent.some(message => message.method === 'config/batchWrite')).toBe(false)
+})
+
+test('a native owner claims idle after helper preflight without leaving a phantom review reservation', async () => {
+  const f = await fixture(), connection = await f.connect(), nativeOwner = f.broker.gateway('racing-native-owner')
+  const prepare = f.broker.reviewPermissions.bind(f.broker)
+  f.broker.reviewPermissions = async (request, epoch) => {
+    await nativeOwner.request('turn/start', { threadId: 'owner', input: [] }, epoch)
+    return prepare(request, epoch)
+  }
+  await expect(connection.reviewPrepare({ stageDir: f.stageDir, network: false }, connection.broker.state().epoch)).rejects.toThrow('busy')
+  expect(connection.broker.state().phase).toBe('turn')
+  expect(f.sent.some(message => message.method === 'config/batchWrite')).toBe(false)
+  f.event('turn/completed', 'owner', 'parent-turn'); await connection.refreshState()
+  const next = await f.connect(), writer = next.broker.gateway('after-native-race')
+  expect(await writer.request('turn/start', { threadId: 'owner', input: [] }, next.broker.state().epoch)).toEqual({ turn: { id: 'parent-turn' } })
+})
+
+test('generic preparation failure after native reservation retains its unknown lease and native writer fence', async () => {
+  const f = await fixture(), connection = await f.connect(), prepare = f.broker.reviewPermissions.bind(f.broker)
+  f.broker.reviewPermissions = async (request, epoch) => {
+    await prepare(request, epoch)
+    throw new Error('Unknown native preparation receipt')
+  }
+  await expect(connection.reviewPrepare({ stageDir: f.stageDir, network: false }, connection.broker.state().epoch)).rejects.toThrow('Unknown native')
+  expect(f.sent.some(message => message.method === 'config/batchWrite')).toBe(true)
+  const journal = new Database(f.journalPath, { readonly: true })
+  try { expect(journal.query('SELECT unresolved FROM broker WHERE id=1').get()).toEqual({ unresolved: 'review-permissions' }) }
+  finally { journal.close() }
+  expect(connection.broker.state().phase).toBe('closed')
+  expect(() => f.registry.attach()).toThrow('reconciliation')
+  const nativeTui = f.broker.gateway('after-unknown-prepare')
+  await expect(nativeTui.request('turn/start', { threadId: 'owner', input: [] }, f.broker.state().epoch)).rejects.toThrow('review')
 })

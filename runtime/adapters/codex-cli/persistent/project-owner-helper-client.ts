@@ -5,7 +5,7 @@ import type { CodexOwnerBindingFacts } from './project-control-bootstrap.ts'
 import type { ProjectControlBroker, ProjectControlGateway, ProjectControlState } from './project-control-broker.ts'
 import { BROKER_MAX_MESSAGE_BYTES } from './project-control-broker-transport.ts'
 import { exactFacts, object, readOwnerHelperDescriptor, socketIdentity, type Rpc } from './project-owner-helper-protocol.ts'
-import type { ReviewPermissionLease, ReviewPermissionRequest } from './project-review-permissions.ts'
+import { MAX_REVIEW_SETTLEMENT_WAIT_MS, type ReviewPermissionLease, type ReviewPermissionRequest } from './project-review-permissions.ts'
 
 /** A lost response body is an unknown request outcome, just like a lost socket. */
 export async function decodeOwnerHelperResponse(response: Response, fail: (error: Error) => void): Promise<Rpc> {
@@ -40,7 +40,7 @@ export async function connectCodexOwnerHelper(options: { descriptorPath: string;
     if (closed) throw closed
     if (socketIdentity(descriptor.socketPath) !== descriptor.socketIdentity) { close(new Error('Owner helper socket replaced')); throw closed }
   }
-  const call = async (body: Rpc): Promise<Rpc> => {
+  const call = async (body: Rpc, deadlineMs = timeout): Promise<Rpc> => {
     assertCurrent()
     const json = JSON.stringify(body)
     if (Buffer.byteLength(json) > BROKER_MAX_MESSAGE_BYTES) throw new Error('Oversized helper request')
@@ -48,7 +48,7 @@ export async function connectCodexOwnerHelper(options: { descriptorPath: string;
     try {
       response = await fetch('http://localhost/owner', { unix: descriptor.socketPath, method: 'POST',
         headers: { authorization: `Bearer ${descriptor.token}`, 'content-type': 'application/json' }, body: json,
-        signal: AbortSignal.any([abort.signal, AbortSignal.timeout(timeout)]) })
+        signal: AbortSignal.any([abort.signal, AbortSignal.timeout(deadlineMs)]) })
     } catch { close(new Error('Owner helper transport failed; request outcome may be unknown')); throw closed }
     const raw = await decodeOwnerHelperResponse(response, close)
     if (!response.ok) throw new Error(typeof raw.error === 'string' ? raw.error : 'Owner helper refused')
@@ -97,13 +97,14 @@ export async function connectCodexOwnerHelper(options: { descriptorPath: string;
     writer.approvals.delete(id)
   }
   const reviewPrepare = async (request: ReviewPermissionRequest, expectedEpoch: number): Promise<ReviewPermissionLease> => {
-    const reviewCall = async (body: Rpc) => {
-      try { return await call(body) } catch (error) { close(error as Error); throw error }
+    const reviewCall = async (body: Rpc, deadlineMs = timeout) => {
+      try { return await call(body, deadlineMs) } catch (error) { close(error as Error); throw error }
     }
     const ready = await reviewCall({ operation: 'reviewPrepare', grant, stageDir: request.stageDir, network: request.network, epoch: expectedEpoch })
+    if (ready.refused === 'busy') throw new Error('Native review busy; current owner turn remains attached')
     if (typeof ready.lease !== 'string' || !/^[a-f0-9]{64}$/.test(ready.lease)) { close(new Error('Invalid private review lease')); throw closed }
     const lease = ready.lease
-    let phase: 'ready' | 'started' | 'restoring' | 'restored' | 'releasing' | 'released' | 'abandoned' = 'ready'
+    let phase: 'ready' | 'started' | 'waiting' | 'settled' | 'restoring' | 'restored' | 'releasing' | 'released' | 'abandoned' = 'ready'
     return {
       async start(input) {
         assertCurrent()
@@ -115,11 +116,21 @@ export async function connectCodexOwnerHelper(options: { descriptorPath: string;
       },
       async restore() {
         assertCurrent()
-        if (phase !== 'started') throw new Error('Review restoration lease unavailable')
+        if (phase !== 'started' && phase !== 'settled') throw new Error('Review restoration lease unavailable')
         phase = 'restoring'
         const restored = await reviewCall({ operation: 'reviewRestore', grant, lease })
         if (restored.restored !== true) { close(new Error('Unverified review restoration')); throw closed }
         phase = 'restored'
+      },
+      async waitSettled(timeoutMs) {
+        assertCurrent()
+        if (phase !== 'started' || !Number.isSafeInteger(timeoutMs) || timeoutMs <= 0
+          || timeoutMs > MAX_REVIEW_SETTLEMENT_WAIT_MS) throw new Error('Invalid private review settlement wait')
+        phase = 'waiting'
+        const result = await reviewCall({ operation: 'reviewWaitSettled', grant, lease, timeoutMs }, timeoutMs + timeout)
+        if (result.settled !== true) { close(new Error('Native review settlement unknown')); throw closed }
+        phase = 'settled'
+        return true
       },
       async release() {
         assertCurrent()
