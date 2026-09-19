@@ -16,11 +16,13 @@ async function fixture(mode = 'valid') {
   const home = join(dir, 'account'); await mkdir(home)
   await writeFile(join(home, 'auth.json'), JSON.stringify({ tokens: { access_token: 'fixture-access', refresh_token: 'fixture-refresh' } }))
   await writeFile(join(dir, 'mode'), mode)
+  await writeFile(join(dir, 'invocations'), '')
   await writeFile(join(dir, 'brief'), 'Review the bounded diff. A long prompt stays on stdin.')
   await writeFile(join(dir, 'codex'), `#!/usr/bin/env node
 const { readFileSync, writeFileSync, appendFileSync } = require('node:fs');
 (async () => {
 const args = process.argv.slice(2);
+appendFileSync(process.env.FIXTURE_DIR + '/invocations', JSON.stringify(args)+'\\n');
 if (args.includes('--version') || args[0] === 'login') process.exit(0);
 const mode = readFileSync(process.env.FIXTURE_DIR + '/mode', 'utf8');
 if (args.includes('--help')) {
@@ -53,12 +55,14 @@ process.exit(mode === 'nonzero' ? 2 : 0);
     ...Object.fromEntries(CODEX_CLI_AUTH_ENV_VARS.map(key => [key, 'secret'])) }
   const contracts = new Map([['verdict', { jsonSchema: VERDICT_SCHEMA, validate: (value: unknown) => validateTrailer('verdict', value).ok }]])
   const runner = () => createCodexHeadlessRunner({ env, reviewContracts: contracts, reviewBriefIntegrity: briefIntegrity, probe: { ok: true } })
+  const productionRunner = () => createCodexHeadlessRunner({ env, reviewContracts: contracts, reviewBriefIntegrity: briefIntegrity })
   const req: BoundedWorkRequest = { run_id: 'run', step_id: 'review-1', role: 'review', model_id: 'requested-model', effort: 'xhigh',
     cwd: dir, writable: false, network: true, tools: 'read-only', brief: { path: join(dir, 'brief'), integrity: briefIntegrity('Review the bounded diff. A long prompt stays on stdin.') },
     result: { path: join(dir, 'result'), schema: 'verdict' }, thread: null, budget: { wall_ms: 2000 }, needs_approval_decision: false }
   const run = (request = req, signal = new AbortController().signal) => runner().run(request, 'headless', signal)
   const calls = async () => (await readFile(join(dir, 'calls'), 'utf8')).trim().split('\n').map(row => JSON.parse(row))
-  return { dir, home, env, req, runner, run, calls }
+  const invocations = async () => (await readFile(join(dir, 'invocations'), 'utf8')).trim().split('\n').filter(Boolean).map(row => JSON.parse(row))
+  return { dir, home, env, req, runner, productionRunner, run, calls, invocations }
 }
 
 test('review and synthesis use read-only Codex exec with stdin, host schema, selected home and observed usage', async () => {
@@ -178,11 +182,26 @@ for (const [label, bytes] of invalidAccounts) {
     const f = await fixture(); const admitted = f.runner()
     expect(admitted.supports('review', 'headless')).toEqual({ ok: true })
     await writeFile(join(f.home, 'auth.json'), bytes)
-    expect(f.runner().supports('review', 'headless')).toMatchObject({ ok: false, reason: 'provider-not-connected' })
+    await writeFile(join(f.dir, 'invocations'), '')
+    expect(f.productionRunner().supports('review', 'headless')).toMatchObject({ ok: false, reason: 'provider-not-connected' })
     expect(await admitted.run(f.req, 'headless', new AbortController().signal)).toEqual({ kind: 'refused', reason: 'provider-not-connected' })
     await expect(f.calls()).rejects.toThrow()
+    expect(await f.invocations()).toEqual([])
   })
 }
+
+test('clean subscription production admission launches version, login and contract probes before its model turn', async () => {
+  const f = await fixture(); const runner = f.productionRunner()
+  expect(runner.supports('review', 'headless')).toEqual({ ok: true })
+  const startup = await f.invocations()
+  expect(startup).toHaveLength(5)
+  expect(startup).toContainEqual(['--version'])
+  expect(startup).toContainEqual(['login', 'status'])
+  expect(startup).toContainEqual(['exec', 'resume', '--help'])
+  expect(startup.some(args => args.includes('--strict-config'))).toBe(true)
+  expect((await runner.run(f.req, 'headless', new AbortController().signal)).kind).toBe('completed')
+  expect(await f.invocations()).toHaveLength(6)
+})
 
 test('pre-cancelled review does not consume the step reservation', async () => {
   const f = await fixture(); const ac = new AbortController(); ac.abort()

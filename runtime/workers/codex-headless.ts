@@ -100,11 +100,15 @@ function waitFor(child: ChildProcess, signal: AbortSignal): Promise<{ code: numb
 
 export function createCodexHeadlessRunner(options: CodexHeadlessRunnerOptions = {}): WorkerRunner {
   const baseEnv = options.env ?? process.env
-  const probe = options.probe ?? startupProbe(baseEnv)
   const buildScript = options.buildScript ?? resolve(import.meta.dir, '../../trident/codex-build.sh')
   const live = new Map<string, { readonly exitCode: number | null }>()
   const review = createCodexReviewTransport({ env: baseEnv, contracts: options.reviewContracts ?? new Map(),
     briefIntegrity: options.reviewBriefIntegrity, live })
+  // A production runner with review contracts must reject metered/malformed
+  // account files before even --version or login-status launches Codex.
+  const probe: Probe = options.probe ?? (options.reviewContracts?.size && !review.connected
+    ? { ok: false, reason: 'provider-not-connected', detail: 'Codex review subscription credentials are unavailable' }
+    : startupProbe(baseEnv))
 
   const unsupported = (role: WorkerRole, placement: Placement): Unsupported | null => {
     if (placement !== 'headless') {

@@ -506,6 +506,7 @@ const suiteStrategy = 'TEST EXECUTION: run the card regression.\n\n'
 const fakeCodex = (calls: string, identity: 'valid' | 'wrong-run') => `#!/usr/bin/env bun
 import { appendFileSync, readFileSync, writeFileSync } from 'node:fs'
 const argv = process.argv.slice(2)
+appendFileSync(${JSON.stringify(`${calls}.invocations`)}, JSON.stringify(argv) + '\\n')
 if (argv[0] === '--version' || (argv[0] === 'login' && argv[1] === 'status')) process.exit(0)
 if (argv.includes('--help')) {
   console.log('--output-schema --json --output-last-message --ignore-rules')
@@ -966,6 +967,9 @@ test('configured Codex review uses the production read-only headless runner and 
   expect(outcome.kind, why(f, outcome)).toBe('merged')
 
   const evidence = await codexReviewEvidence(f)
+  const invocations = (await readFile(`${f.codexCalls}.invocations`, 'utf8')).trim().split('\n').map(row => JSON.parse(row))
+  expect(invocations).toContainEqual(['--version'])
+  expect(invocations).toContainEqual(['login', 'status'])
   expect(evidence.calls).toHaveLength(1)
   const call = evidence.calls[0] as {
     argv: string[]
@@ -999,6 +1003,7 @@ test('configured Codex review uses the production read-only headless runner and 
 }, 300_000)
 
 for (const [label, auth] of [
+  ['bare key', 'sk-fixture'],
   ['API key', JSON.stringify({ OPENAI_API_KEY: 'metered' })],
   ['mixed OAuth and API key', JSON.stringify({ OPENAI_API_KEY: 'metered', tokens: { access_token: 'fixture', refresh_token: 'fixture' } })],
   ['malformed account', '{'],
@@ -1010,6 +1015,7 @@ for (const [label, auth] of [
     expect(f.world.dispatches).toHaveLength(0)
     expect(f.github.prs).toHaveLength(0)
     await expect(readFile(f.codexCalls, 'utf8')).rejects.toThrow()
+    await expect(readFile(`${f.codexCalls}.invocations`, 'utf8')).rejects.toThrow()
   }, 300_000)
 }
 
