@@ -130,3 +130,68 @@ test('ordinary unregistered project crash notification remains supported', async
   registerSupervisedSubstrate(options)
   expect(supervisedBySessionKey.has(key)).toBe(true)
 })
+
+for (const kind of ['legacy', 'mismatch', 'project'] as const) {
+test(`unregistered ${kind} key with contradictory scope remains inert in every watchdog`, async () => {
+  const { options, key, row, paths } = fixture(kind)
+  saveRegistry(paths.replRegistryPath, { [key]: { ...row, conversationProjectId: 'other' } })
+  registerSupervisedSubstrate(options)
+  expect(supervisedBySessionKey.has(key)).toBe(false)
+  const before = readFileSync(paths.replRegistryPath, 'utf8')
+  let notices = 0, probes = 0
+  const result = await runReplWatchdogTick({ ...options, onChildCrash: () => { notices++ } }, {
+    now: () => 120_000, isPidAlive: () => { probes++; return false },
+    healthProbe: async () => { probes++; return false },
+  })
+  expect(result).toEqual([{ sessionKey: key, action: 'scope-refused', respawned: false }])
+  expect(notices).toBe(0); expect(probes).toBe(0)
+  // Even a stale pool entry does not confer ownership on other watchdogs.
+  pool.set(key, Promise.resolve({ hasChildExited: () => false, child: { pid: 31337 } } as ReplSession))
+  await runCwdDriftWatchdogTick(options, { cwdDriftProbeCwd: async () => { probes++; return '/wrong' } })
+  setBestModelOverride('opus')
+  writeFileSync(paths.modelUpdateStatePath, JSON.stringify({ last_known_model: 'claude-opus-98' }))
+  let updates = 0
+  const watchdog = startModelUpdateWatchdogForInstance({ ...options,
+    modelUpdateStatePath: paths.modelUpdateStatePath,
+    modelProbe: async () => ({ ok: true, model: 'claude-opus-99' }),
+    onModelUpdate: () => { updates++ },
+  })
+  await watchdog.tick()
+  expect(updates).toBe(1)
+  expect(probes).toBe(0)
+  expect(readFileSync(paths.replRegistryPath, 'utf8')).toBe(before)
+})
+}
+
+for (const scope of [null, 'general', 'project'] as const) {
+test(`unregistered explicit scope ${JSON.stringify(scope)} with matching durable scope still reports crashes`, async () => {
+  const seeded = fixture('mismatch')
+  const { row, paths } = seeded
+  const options = { ...seeded.options, project_id: scope ?? 'general', conversationProjectId: scope }
+  const key = poolKeyFor(options)
+  saveRegistry(paths.replRegistryPath, { [key]: { ...row, sessionKey: key, conversationProjectId: scope } })
+  let notices = 0
+  const result = await runReplWatchdogTick({ ...options, onChildCrash: () => { notices++ } }, {
+    now: () => 120_000, isPidAlive: () => false, healthProbe: async () => false,
+  })
+  expect(notices).toBe(1)
+  expect(result).toEqual([{ sessionKey: key, action: 'unregistered-skip', respawned: false }])
+  registerSupervisedSubstrate(options)
+  expect(supervisedBySessionKey.has(key)).toBe(true)
+})
+}
+
+test('pending replay retains inbound when its registered owner has no durable row', async () => {
+  const { options, key, row, paths } = fixture('project')
+  registerSupervisedSubstrate(options)
+  expect(supervisedBySessionKey.has(key)).toBe(true)
+  saveRegistry(paths.replRegistryPath, {})
+  // No inbound payload is needed to prove the destructive queue claim: replay
+  // returns immediately, so a red test cannot accidentally launch a real child.
+  enqueuePendingRespawn(paths.pendingRespawnsPath, { sessionKey: key, sessionId: row.sessionId, cwd: row.cwd })
+  const before = readFileSync(paths.pendingRespawnsPath, 'utf8')
+  expect(await drainPendingRespawns(options, { baseDelayMs: 0 })).toEqual([
+    { sessionKey: key, replayed: false, skipped: 'scope-refused' },
+  ])
+  expect(readFileSync(paths.pendingRespawnsPath, 'utf8')).toBe(before)
+})

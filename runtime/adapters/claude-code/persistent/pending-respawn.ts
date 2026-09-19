@@ -107,7 +107,9 @@ export async function drainPendingRespawns(
       continue
     }
     const record = owner.replRegistryPath === undefined ? undefined : getRecord(owner.replRegistryPath, entry.sessionKey)
-    if (record !== undefined && !registryConversationScopeMatches(record, owner)) {
+    // A registration alone cannot recover a conversation whose durable identity
+    // has disappeared or become unreadable. Keep the inbound for recovery.
+    if (record === undefined || !registryConversationScopeMatches(record, owner)) {
       results.push({ sessionKey: entry.sessionKey, replayed: false, skipped: 'scope-refused' })
       continue
     }

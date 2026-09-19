@@ -28,7 +28,7 @@ import type { PersistentReplSubstrateOptions } from './types.ts'
 import { type ReplSession, httpHealth, terminateChild, terminatePidGracefully } from './repl-session.ts'
 import { clearRespawnInFlight, gateFor, getOrSpawnSession } from './spawn.ts'
 import { drainPendingRespawns } from './pending-respawn.ts'
-import { isLegacyGeneralPoolKey, poolKeyFor } from './pool.ts'
+import { isUnregisteredPoolScopeConsistent, poolKeyFor } from './pool.ts'
 import { createLogger } from '@neutronai/logger'
 import { fireAndForget } from '@neutronai/logger/fire-and-forget.ts'
 
@@ -513,7 +513,7 @@ export async function runReplWatchdogTick(
     // probing, crash notification, or any durable annotation of that row.
     if (record !== undefined && (keyOptions !== undefined
       ? !registryConversationScopeMatches(record, keyOptions)
-      : isLegacyGeneralPoolKey(sessionKey) && record.conversationProjectId === undefined)) {
+      : !isUnregisteredPoolScopeConsistent(sessionKey, record))) {
       results.push({ sessionKey, action: 'scope-refused', respawned: false })
       continue
     }

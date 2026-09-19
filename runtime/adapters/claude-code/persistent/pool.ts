@@ -14,7 +14,7 @@ import { SUBSTRATE_ERROR_CODES } from '../../../errors.ts'
 import { EventChannel } from './event-channel.ts'
 import { type PendingRespawnEntry, enqueuePendingRespawn } from './pending-respawns-queue.ts'
 import { REPL_DEBUG, activeModelWatchdogs, activeWatchdogs, childByKey, committedDispatches, cwdDriftAlertState, cwdDriftRespawnState, ephemeralSessions, pendingChildKills, pendingSpawns, pool, respawnGates, sink, supervisedBySessionKey, wedgeAlertState } from './pool-state.ts'
-import { getRecord } from './repl-registry.ts'
+import { getRecord, registryConversationScopeMatches, type ReplRegistryRecord } from './repl-registry.ts'
 import {
   SHUTDOWN_PENDING_SPAWN_GRACE_MS,
   cancellableWait,
@@ -313,11 +313,28 @@ export function poolKeyFor(options: PersistentReplSubstrateOptions): string {
   return `${options.substrate_instance_id}${SESSION_KEY_SEP}${options.cwd ?? ''}`
 }
 
-/** Classification only, never attribution: this pre-scope shape could name
- * either General or a literal project. Consumers must not guess which. */
-export function isLegacyGeneralPoolKey(key: string): boolean {
+/** Validate an unregistered row against the identity encoded by this module.
+ * This permits crash reporting, never adoption or assignment of an owner. */
+export function isUnregisteredPoolScopeConsistent(key: string, record: ReplRegistryRecord): boolean {
   const parts = key.split(SESSION_KEY_SEP)
-  return parts.length === 4 && parts[2] === 'general'
+  if (parts.length === 4) {
+    // No marker alone proves which owner wrote the historical ambiguous key.
+    return parts[2] !== 'general' && registryConversationScopeMatches(record, { project_id: parts[2]! })
+  }
+  if (parts.length === 5) {
+    if (parts[4] === 'general-conversation') {
+      return registryConversationScopeMatches(record, { conversationProjectId: null })
+    }
+    if (parts[4] === 'literal-project') {
+      return parts[2] === 'general' && registryConversationScopeMatches(record, {
+        project_id: 'general', conversationProjectId: 'general',
+      })
+    }
+    return false
+  }
+  // Platform/older non-project keys carry no encoded conversation scope;
+  // retain their existing crash-reporting behavior, without assigning one.
+  return true
 }
 
 /**
