@@ -3,7 +3,7 @@ import { mkdirSync, mkdtempSync, rmSync, statSync } from 'node:fs'
 import { tmpdir } from 'node:os'
 import { join } from 'node:path'
 import { createConnection, createServer, type Socket } from 'node:net'
-import { createProjectControlBroker, classifyProjectControlMethod } from './project-control-broker.ts'
+import { createProjectControlBroker, classifyProjectControlMethod, ReviewPermissionBusy } from './project-control-broker.ts'
 import type { ProjectControlTransport } from './project-control-broker-transport.ts'
 
 type Rpc = Record<string, any>
@@ -68,6 +68,26 @@ async function terminal(socketPath: string) {
 }
 
 describe('project control broker', () => {
+  test('active owner review admission is typed and mutation-free; the same owner remains usable', async () => {
+    const f = await fixture(), gateway = f.broker.gateway('owner')
+    const start = gateway.request('turn/start', { threadId: 'project-thread', input: [] }, 0)
+    f.response('turn/start', { turn: { id: 'owner-turn' } })
+    await start; await tick()
+    const before = f.broker.state(), sentBefore = f.sent.length
+    expect(before.phase).toBe('turn')
+    await expect(f.broker.reviewPermissions({ stageDir: f.dir, network: false }, before.epoch)).rejects.toBeInstanceOf(ReviewPermissionBusy)
+    expect(f.broker.state()).toEqual(before)
+    expect(f.sent).toHaveLength(sentBefore)
+    expect(f.closeCount()).toBe(0)
+    f.receive({ method: 'turn/completed', params: { threadId: 'project-thread', turn: { id: 'owner-turn' } } })
+    expect(f.broker.state().phase).toBe('idle')
+    expect(f.broker.state().unresolved).toBeNull()
+    const next = gateway.request('thread/settings/update', { threadId: 'project-thread', model: 'next' }, f.broker.state().epoch)
+    f.response('thread/settings/update'); await next
+    expect(f.broker.state().phase).toBe('idle')
+    expect(f.closeCount()).toBe(0)
+  })
+
   test('host review lease excludes socket and gateway writers; abandonment persists the recovery fence', async () => {
     const f = await fixture()
     const stageDir = join(f.dir, '.neutron', 'build-results', 'a'.repeat(64))
@@ -83,7 +103,9 @@ describe('project control broker', () => {
     f.receive({ id: 'review-approval', method: 'item/fileChange/requestApproval', params: { threadId: 'project-thread', turnId: 'review-turn' } })
     expect(f.sent.find(message => message.id === 'review-approval')?.error.message).toContain('forbids approvals')
     f.response('thread/resume', {})
-    expect(await rejected).toBeInstanceOf(Error)
+    const error = await rejected
+    expect(error).toBeInstanceOf(Error)
+    expect(error).not.toBeInstanceOf(ReviewPermissionBusy)
     expect(f.broker.state().phase).toBe('closed')
     expect(f.sent.filter(message => message.method === 'turn/start')).toHaveLength(0)
     const upstream: ProjectControlTransport = { listen(onMessage) { this.send = message => { if (message.method === 'initialize') queueMicrotask(() => onMessage({ id: message.id, result: {} })) } }, send() {}, close() {} }

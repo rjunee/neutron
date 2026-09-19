@@ -24,6 +24,8 @@ export function classifyProjectControlMethod(method: string): 'read' | 'mutation
 export class ProjectControlRefusal extends Error {
   readonly code = -32001
 }
+/** This review attempt was refused before any reservation, journal or native mutation. */
+export class ReviewPermissionBusy extends ProjectControlRefusal {}
 export interface ProjectControlState {
   generation: number
   epoch: number
@@ -319,7 +321,7 @@ export async function createProjectControlBroker(options: {
   return {
     state: () => ({ generation: journal.generation, epoch, phase: closed ? 'closed' : journal.unresolved !== null ? 'recovery' : active ? 'turn' : review || current || queue.length ? 'mutation' : 'idle', activeTurnId: active?.turnId ?? null, unresolved: journal.unresolved }),
     async reviewPermissions(request, expectedEpoch) {
-      if (closed || review || active || current || queue.length || journal.unresolved !== null || expectedEpoch !== epoch) throw refusal('Native review requires the idle current project writer')
+      if (closed || review || active || current || queue.length || journal.unresolved !== null || expectedEpoch !== epoch) throw new ReviewPermissionBusy('Native review requires the idle current project writer')
       review = createReviewPermissionTransaction({ cwd: options.cwd, codexHome: options.codexHome, threadId: options.threadId, rpc: native,
         assertCurrent() { if (closed) throw closed; journal.assertOwned() },
         finish() { if (closed) throw closed; journal.assertOwned(); journal.settle(); review = undefined },
