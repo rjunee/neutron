@@ -31,6 +31,56 @@ async function fixture() {
   const check = (s = source()) => reviewPanel(s, approve, snapshot, 1, 'host-run')
   return { options, calls, bindings, source, check, answer: (fn: typeof answer) => { answer = fn } }
 }
+
+test('cross-provider review persists one observed thread per seat across source replacement', async () => {
+  const f = await fixture()
+  f.options.replProvider = 'anthropic'
+  f.options.phaseModels = { ...f.options.phaseModels, review_codex: { model: 'sol' } }
+  f.answer(async req => ({ ...completed(), thread_id: req.thread?.id ?? `thread-${f.calls.length}` } as BoundedWorkOutcome))
+  let source = f.source()
+  const adversarial = source.seats.find(seat => seat.id === 'review_adversarial')!
+  const peer = source.seats.find(seat => seat.id === 'review_codex')!
+  await source.readSeat(adversarial, snapshot, 1)
+  await source.readSeat(peer, snapshot, 1)
+  expect(f.calls.map(call => call.thread)).toEqual([null, null])
+  source = f.source()
+  await source.readSeat(source.seats.find(seat => seat.id === 'review_adversarial')!, snapshot, 2)
+  await source.readSeat(source.seats.find(seat => seat.id === 'review_codex')!, snapshot, 2)
+  expect(f.calls.slice(2).map(call => call.thread)).toEqual([{ id: 'thread-1' }, { id: 'thread-2' }])
+})
+
+test('cross-provider thread disappearance does not silently begin a fresh conversation', async () => {
+  const f = await fixture(); f.options.replProvider = 'anthropic'
+  const source = f.source()
+  await expect(source.readSeat(source.seats[1]!, snapshot, 1)).rejects.toThrow('host dispatch or observation failed')
+  expect(f.calls).toHaveLength(1)
+})
+
+test('overlapping rounds in one source queue and resume the first observed thread', async () => {
+  const f = await fixture(); f.options.replProvider = 'anthropic'
+  f.answer(async () => {
+    await new Promise(resolve => setTimeout(resolve, 15))
+    return { ...completed(), thread_id: 'owned-thread' } as BoundedWorkOutcome
+  })
+  const source = f.source()
+  await Promise.all([source.readSeat(source.seats[1]!, snapshot, 1), source.readSeat(source.seats[1]!, snapshot, 2)])
+  expect(f.calls.map(call => call.thread)).toEqual([null, { id: 'owned-thread' }])
+})
+
+test('another source cannot take an in-flight seat thread', async () => {
+  const f = await fixture(); f.options.replProvider = 'anthropic'
+  let finish!: () => void
+  f.answer(async () => {
+    await new Promise<void>(resolve => { finish = resolve })
+    return { ...completed(), thread_id: 'owned-thread' } as BoundedWorkOutcome
+  })
+  const first = f.source(); const second = f.source()
+  const pending = first.readSeat(first.seats[1]!, snapshot, 1)
+  for (let count = 0; !finish && count < 100; count++) await new Promise(resolve => setTimeout(resolve, 5))
+  await expect(second.readSeat(second.seats[1]!, snapshot, 2)).rejects.toThrow('thread ownership conflict')
+  finish(); await pending
+  expect(f.calls).toHaveLength(1)
+})
 test('non-Claude core and explicit configured peer reach selected transport with host identity', async () => {
   const f = await fixture()
   f.options.env = { NEUTRON_REVIEW_SEATS: JSON.stringify([{ tier: 'custom', provider: 'independent', model: 'review-model', endpoint: 'https://192.0.2.1/review', credential: 'REVIEW_KEY' }]) }
@@ -113,13 +163,47 @@ test('configuration and dispatch admission reject unsupported values with valid 
   f.options.runnerFor = (model, seat) => ({ ...binding(model, seat)!, provider: 'openai' })
   expect(await f.check()).toMatchObject({ kind: 'blocked', on: expect.stringContaining('unavailable') })
   f.options.runnerFor = (model, seat) => ({ ...binding(model, seat)!, supports: () => ({ ok: false, reason: 'capability-unsupported', detail: 'unsupported' }) })
-  expect(await f.check()).toMatchObject({ kind: 'blocked', on: expect.stringContaining('unavailable') })
+  expect(f.source).toThrow('capability-unsupported')
   expect(f.calls).toHaveLength(0)
   f.options.runnerFor = binding
   const controller = new AbortController(); controller.abort(); f.options.signal = controller.signal
   expect(await f.check()).toMatchObject({ kind: 'blocked', on: expect.stringContaining('unavailable') })
   expect(f.calls).toHaveLength(0)
 })
+
+test('admission preflights synthesis as well as every enabled review route', async () => {
+  const f = await fixture(); const binding = f.options.runnerFor
+  f.options.runnerFor = (model, seat) => ({ ...binding(model, seat)!, supports: role => role === 'synthesis'
+    ? { ok: false, reason: 'capability-unsupported', detail: 'synthesis unavailable' } : { ok: true } })
+  expect(f.source).toThrow('Review seat synthesis: capability-unsupported')
+  expect(f.calls).toHaveLength(0)
+})
+
+for (const missing of [true, false]) {
+  for (const target of ['review_adversarial', 'synthesis'] as const) {
+    test(`${missing ? 'absent' : 'mismatched'} ${target} transport permits construction but cannot approve`, async () => {
+      const f = await fixture(); const binding = f.options.runnerFor
+      const supportCalls: string[] = []
+      f.options.runnerFor = (model, seat) => {
+        const runner = binding(model, seat)!
+        if (seat.id !== target) return runner
+        return missing ? undefined : { ...runner, provider: 'openai', supports: role => {
+          supportCalls.push(role)
+          return { ok: false, reason: 'capability-unsupported', detail: 'wrong provider' }
+        } }
+      }
+      const source = f.source()
+      expect(f.calls).toHaveLength(0)
+      expect(await f.check(source)).toMatchObject({ kind: 'blocked',
+        on: expect.stringContaining(target === 'synthesis' ? 'synthesis provenance' : 'unavailable') })
+      expect(f.calls.filter(call => call.role === (target === 'synthesis' ? 'synthesis' : 'review'))).toHaveLength(0)
+      expect(supportCalls).toHaveLength(0)
+      // The same panel with a matching, available transport must still approve.
+      f.options.runnerFor = binding
+      expect(await f.check()).toEqual({ kind: 'approve' })
+    })
+  }
+}
 test('synthesis requires prior completed seats and never fabricates checkpoint approval', async () => {
   const f = await fixture(); const source = f.source()
   expect(await source.readSynthesis(snapshot, 1)).toBeNull()

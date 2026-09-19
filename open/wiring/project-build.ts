@@ -343,7 +343,16 @@ export async function prepareProjectBuild(input: InnerLoopInput, context: Projec
       ['project-review', (value: unknown) => validSnapshot(value, 'verdict')],
       ['verdict', (value: unknown) => validateTrailer('verdict', value).ok],
     ]), metadata: () => undefined },
-    headless: { 'openai-codex': createCodexHeadlessRunner({ env: codexEnv }) },
+    headless: { 'openai-codex': createCodexHeadlessRunner({ env: codexEnv, reviewBriefIntegrity: briefIntegrity, reviewContracts: new Map([
+      ['verdict', { jsonSchema: VERDICT_SCHEMA, validate: (value: unknown) => validateTrailer('verdict', value).ok }],
+      ['project-review', { jsonSchema: { type: 'object', additionalProperties: false,
+        required: ['head', 'diff', 'pr', 'payload'], properties: {
+          head: { type: 'string' }, diff: { type: 'string' },
+          pr: { type: ['object', 'null'], additionalProperties: false, required: ['number', 'head', 'state'],
+            properties: { number: { type: 'integer' }, head: { type: 'string' }, state: { type: 'string' } } },
+          payload: VERDICT_SCHEMA,
+        } }, validate: (value: unknown) => validSnapshot(value, 'verdict') }],
+    ]) }) },
   })
   const parsed = parsePhaseModelConfig(input.phase_models ?? {})
   if (parsed.errors.length) throw Error(`Invalid project phase models: ${parsed.errors.join('; ')}`)
@@ -545,7 +554,7 @@ export async function prepareProjectBuild(input: InnerLoopInput, context: Projec
           return { runId: run.id, head: snapshot.head, round, report:
             observed.timed_out || unopenable ? {} : { hostExitCode: observed.exit_code } }
         } },
-      review: { evidenceRoot: state, env: context.env, phaseModels: config, wallMs: 2_700_000, signal,
+      review: { evidenceRoot: state, env: codexEnv, phaseModels: config, wallMs: 2_700_000, signal,
         runnerFor: (model, seat) => model.group === 'api' || model.group === 'kimi' ? undefined
           : seat.provider === substrate.provider ? substrate.inRepl : substrate.headless[seat.provider] },
     },
