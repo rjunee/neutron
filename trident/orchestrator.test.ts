@@ -143,7 +143,7 @@ function buildHarness(opts: {
   resolve_reflection_context?: (run: TridentRun) => string | null
   resolve_active_runs?: () => number
   record_stage?: (run_id: string, stage: string, meta?: string | null) => void
-  list_stage_events?: (run_id: string) => ReadonlyArray<{ stage: string; at: string }>
+  list_stage_events?: Parameters<typeof buildTridentOrchestrator>[0]['list_stage_events']
   /** Wire the store's crash-recovery claim so the §1a-crash branch is reachable. */
   begin_crash_recovery?: boolean
   read_run?: (id: string) => TridentRun | null
@@ -268,6 +268,7 @@ function buildHarness(opts: {
   const o: Parameters<typeof buildTridentOrchestrator>[0] = {
     fire_workflow: sim.fire_workflow,
     db_path: join(tmp, 'project.db'),
+    list_stage_events: id => store.stageEvents(id),
     run_host: writingHost,
     now,
     // The resume head-read retries are SPACED in production (a `pr`-mode read is a
@@ -447,6 +448,16 @@ describe('G111 terminal and harvest precedence', () => {
 })
 
 describe('project-driver gateway recovery', () => {
+  async function checkpoint(id: string, change: Record<string, unknown> = {}) {
+    await store.update(id, { base_sha: 'a'.repeat(40), worktree: '/repo/worktree' })
+    const run = store.get(id)!
+    const state = { runId: id, branch: run.branch, base: run.base_sha, repo: run.repo_path,
+      worktree: run.worktree, projectSlug: run.project_slug, mergeMode: run.merge_mode,
+      iteration: 0, checkpoint: { head: 'b'.repeat(40), stage: 'built', round: 1,
+        replansUsed: 0, findings: [], previousFindings: [] }, ...change }
+    await store.recordStageEvent(id, 'build-mode-state', JSON.stringify(state))
+  }
+
   test('a prior gateway reservation resumes only from the durable branch/head/checkpoint', async () => {
     const h = buildHarness({
       plan: () => ({ fire: { status: 'fired', error: null, launcher_session_key: 'after-restart' } }),
@@ -458,16 +469,64 @@ describe('project-driver gateway recovery', () => {
       projectBuildReservation: { kind: 'in-process-driver', gateway_session: 'before-restart' },
     })
     await store.update(run.id, {
-      branch: 'trident/recovered', pr: 73, inner_checkpoint: 'forge-done',
-      inner_checkpoint_head: 'b'.repeat(40), inner_result: reservation,
+      branch: 'trident/recovered', pr: 73, inner_result: reservation,
     })
+    await checkpoint(run.id)
 
     await h.loop.runOnce()
 
     expect(h.inputs).toHaveLength(1)
-    expect(h.inputs[0]!.resume_checkpoint).toBe('forge-done')
+    expect(h.inputs[0]!.resume_checkpoint).toBe('built')
+    expect(h.inputs[0]!.resume_checkpoint_head).toBe('b'.repeat(40))
     expect(h.inputs[0]!.run.branch).toBe('trident/recovered')
     expect(h.inputs[0]!.run.pr).toBe(73)
+    expect(store.get(run.id)?.crash_recoveries).toBe(1)
+    expect(store.get(run.id)?.inner_checkpoint).toBeNull()
+    expect(store.get(run.id)?.inner_checkpoint_head).toBeNull()
+  })
+
+  for (const field of ['runId', 'branch', 'base', 'repo', 'worktree', 'projectSlug', 'mergeMode', 'checkpoint',
+    'head', 'headless-complete', 'pending-run', 'legacy-only']) {
+    test(`restart refuses ${field} without falling back to older or legacy evidence`, async () => {
+      const h = buildHarness({ plan: () => { throw new Error('invalid continuation must not fire') },
+        begin_project_build_driver_recovery: true })
+      const run = await createRun({ merge_mode: 'pr' })
+      await store.update(run.id, { branch: 'trident/invalid', inner_checkpoint: 'forge-done',
+        inner_checkpoint_head: 'b'.repeat(40), inner_result: JSON.stringify({
+          projectBuild: { kind: 'unknown', phase: 'build', step_id: null, detail: 'gateway ended' },
+          projectBuildReservation: { kind: 'in-process-driver', gateway_session: 'before-restart' },
+        }) })
+      if (field !== 'legacy-only') {
+        await checkpoint(run.id)
+        const valid = JSON.parse(store.stageEvents(run.id).at(-1)!.meta!).checkpoint
+        const change = field === 'head' ? { checkpoint: { ...valid, head: 'abbreviated' } }
+          : field === 'headless-complete' ? { checkpoint: { ...valid, head: null } }
+          : field === 'pending-run' ? { checkpoint: { ...valid, pending: { phase: 'review', step_id: 'other-run:review:1' } } }
+          : { [field]: 'invalid' }
+        await checkpoint(run.id, change)
+      }
+      await h.loop.runOnce()
+      expect(h.inputs).toHaveLength(0)
+      expect(store.get(run.id)?.phase).toBe('failed')
+      expect(store.get(run.id)?.failure_reason).toContain('refusing to replay uncertain work')
+      expect(store.get(run.id)?.crash_recoveries).toBe(0)
+    })
+  }
+
+  test('a canonical pending first provider step permits resume without claiming a built head', async () => {
+    const h = buildHarness({ plan: () => ({ fire: { status: 'fired', error: null } }),
+      begin_project_build_driver_recovery: true })
+    const run = await createRun({ merge_mode: 'pr' })
+    await store.update(run.id, { branch: 'trident/pending', inner_result: JSON.stringify({
+      projectBuild: { kind: 'unknown', phase: 'plan', step_id: null, detail: 'gateway ended' },
+      projectBuildReservation: { kind: 'in-process-driver', gateway_session: 'before-restart' },
+    }) })
+    await checkpoint(run.id, { checkpoint: { head: null, stage: 'built', round: 0,
+      replansUsed: 0, findings: [], previousFindings: [], pending: { phase: 'plan', step_id: `${run.id}:plan:0` } } })
+    await h.loop.runOnce()
+    expect(h.inputs).toHaveLength(1)
+    expect(h.inputs[0]!.resume_checkpoint).toBe('built')
+    expect(h.inputs[0]!.resume_checkpoint_head).toBeNull()
     expect(store.get(run.id)?.crash_recoveries).toBe(1)
   })
 
@@ -500,12 +559,13 @@ describe('project-driver gateway recovery', () => {
     })
     const run = await createRun({ merge_mode: 'pr' })
     await store.update(run.id, {
-      branch: 'trident/budgeted', pr: 75, inner_checkpoint: 'forge-done', inner_checkpoint_head: 'c'.repeat(40),
+      branch: 'trident/budgeted', pr: 75,
       inner_result: JSON.stringify({
         projectBuild: { kind: 'unknown', phase: 'build', step_id: 'build-3', detail: 'gateway ended' },
         projectBuildReservation: { kind: 'in-process-driver', gateway_session: 'before-restart' },
       }),
     })
+    await checkpoint(run.id)
 
     await h.loop.runOnce()
 

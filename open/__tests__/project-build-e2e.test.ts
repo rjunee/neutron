@@ -1273,6 +1273,43 @@ function lastCheckpoint(f: Awaited<ReturnType<typeof fixture>>) {
   return JSON.parse(events.at(-1)!.meta!).checkpoint as Record<string, unknown>
 }
 
+/** Recover through the outer gateway and its actual project launcher. */
+async function restartThroughGateway(f: Awaited<ReturnType<typeof fixture>>) {
+  const before = f.store.get(f.row.id)!
+  expect(before.inner_checkpoint).toBeNull()
+  expect(before.inner_checkpoint_head).toBeNull()
+  await f.store.update(f.row.id, { inner_result: JSON.stringify({
+    projectBuild: { kind: 'unknown', phase: 'plan', step_id: null, detail: 'prior gateway ended' },
+    projectBuildReservation: { kind: 'in-process-driver', gateway_session: 'prior-gateway' },
+  }) })
+  let settled!: () => void
+  const completion = new Promise<void>(resolve => { settled = resolve })
+  const record = f.store.recordStageEvent.bind(f.store)
+  const recording = spyOn(f.store, 'recordStageEvent').mockImplementation(async (...args) => {
+    await record(...args)
+    if (args[1] === 'build-driver-settled') settled()
+  })
+  cleanups.push(() => recording.mockRestore())
+  const launcher = createProjectLauncher({ store: f.store, onError: error => { throw error }, prepare: async input => {
+    expect(lastCheckpoint(f).stage).toBe(input.resume_checkpoint)
+    expect(lastCheckpoint(f).head).toBe(input.resume_checkpoint_head)
+    f.input.run = input.run
+    return f.prepare()
+  } })
+  const orch = buildTridentOrchestrator({ fire_workflow: launcher, db_path: f.input.db_path,
+    base_branch: 'main', run_host: Object.assign(f.context.runHost, { writesDiffOutput: true as const }),
+    read_run: id => f.store.get(id), list_stage_events: id => f.store.stageEvents(id),
+    begin_project_build_driver_recovery: (id, reservation) => f.store.beginProjectBuildDriverRecovery(id, reservation),
+    sleep: async () => {} })
+  const advanced = await orch.step(f.store.get(f.row.id)!)
+  expect(advanced.run.phase, advanced.run.failure_reason ?? advanced.note).not.toBe('failed')
+  expect(await f.store.saveIfActive(advanced.run)).toBe(true)
+  await completion
+  expect(f.store.get(f.row.id)!.crash_recoveries).toBe(1)
+  expect(f.store.get(f.row.id)!.base_sha).toBe(before.base_sha)
+  return JSON.parse(f.store.get(f.row.id)!.inner_result!).projectBuild as ProjectBuildOutcome
+}
+
 /** The outcome plus the dispatch trail — a stop is only legible with both. */
 function why(f: Awaited<ReturnType<typeof fixture>>, outcome: BuildRunOutcome | ProjectBuildOutcome): string {
   return JSON.stringify({ outcome, dispatches: f.world.dispatches })
@@ -2237,8 +2274,7 @@ test('a driver restarted between the build and review re-adopts the build instea
   // ── PROCESS 2: a brand-new prepare, host and driver over the same row and disk.
   f.github.refuse.delete('create')
   f.world.dispatches.length = 0
-  const host = await createProjectBuildHost(await f.prepare())
-  const outcome = await host.run({ mode: 'pr', start: 'resume' }, new AbortController().signal)
+  const outcome = await restartThroughGateway(f)
   expect(outcome.kind, why(f, outcome)).toBe('merged')
 
   // RE-ADOPTED, NOT REDONE: no plan and no build in the second process, and the
@@ -2276,8 +2312,7 @@ test('a driver resumed after the branch head moved rebuilds instead of adopting 
   // skip both these turns and send someone else's unbuilt commit straight to review.
   f.github.refuse.delete('create')
   f.world.dispatches.length = 0
-  const resumed = await createProjectBuildHost(await f.prepare())
-  const outcome = await resumed.run({ mode: 'pr', start: 'resume' }, new AbortController().signal)
+  const outcome = await restartThroughGateway(f)
   expect(outcome.kind, why(f, outcome)).toBe('merged')
   expect(f.world.dispatches.map(dispatch => dispatch.role)).toEqual([
     'plan', 'build', 'review', 'review', 'synthesis',
@@ -2309,8 +2344,7 @@ test('a driver restarted during a worker turn refuses to re-fire it', async () =
   expect(lastCheckpoint(f).pending).toEqual({ phase: 'review', step_id: `${f.row.id}:review:1` })
 
   f.world.dispatches.length = 0
-  const resumed = await createProjectBuildHost(await f.prepare())
-  const outcome = await resumed.run({ mode: 'pr', start: 'resume' }, new AbortController().signal)
+  const outcome = await restartThroughGateway(f)
   expect(outcome.kind, why(f, outcome)).toBe('unknown')
   if (outcome.kind === 'unknown') {
     expect(outcome.detail).toBe('Resume awaits the existing worker observation')

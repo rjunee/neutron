@@ -102,6 +102,7 @@ import { createLogger } from '@neutronai/logger'
 import { fireAndForget } from '@neutronai/logger/fire-and-forget.ts'
 import { gitRangeArgv } from './git-range.ts'
 import { hasArgusProvenance, phaseForCheckpoint } from './checkpoint-phase.ts'
+import { readBuildModeState } from './build-mode-state.ts'
 import { ralphCapFailureReason } from './ralph-budget.ts'
 import { checkpointRoundField } from './checkpoint-round.ts'
 import { advanceBoundReview, recordedTerminalVerdict } from './bound-review.ts'
@@ -195,12 +196,13 @@ export interface BuildTridentOrchestratorOptions {
   run_host: DiffOutputHost
   /** Best-effort pre-build stage stamp (latency instrumentation, 2026-08-18 card). Appends one row to the append-only code_trident_stage_events ledger. Must never throw and never fail a launch; omitted → no-op. */
   record_stage?: (run_id: string, stage: string, meta?: string | null) => void
-  /** The stage ledger READ, in ledger order — consulted ONLY for a run whose fire
-   *  came back `unconfirmed` (the launcher turn overran the settle budget and was
-   *  left draining). A `fire-settled` or `plan-start` stamped after the
+  /** The stage ledger READ, in ledger order — supplies canonical project-driver
+   *  checkpoints and confirms a fire that came back `unconfirmed` (the launcher
+   *  turn overran the settle budget and was left draining). A `fire-settled` or `plan-start` stamped after the
    *  `fire-unconfirmed` event confirms the fire without waiting for the turn.
-   *  Omitted → only the late settle can confirm; absence never fails a run early. */
-  list_stage_events?: (run_id: string) => ReadonlyArray<{ stage: string; at: string }>
+   *  Omitted → only the late settle can confirm an unconfirmed fire, and an
+   *  abandoned project-driver reservation cannot establish continuation. */
+  list_stage_events?: (run_id: string) => ReadonlyArray<{ stage: string; at: string; meta?: string | null }>
   /** Review-only executor seam. Production uses `executeBoundReview`; tests may
    *  inject a recording executor without running a live review panel. */
   execute_bound_review?: typeof executeBoundReview
@@ -416,7 +418,7 @@ export interface BuildTridentOrchestratorOptions {
   /**
    * Claim the reservation a prior gateway left for an in-process project driver.
    * It clears only the exact reservation and spends the existing durable crash budget;
-   * the continuation fields remain on the row for `launch()` to resume rather than replay.
+   * the canonical stage checkpoint remains for `launch()` to resume rather than replay.
    */
   begin_project_build_driver_recovery?: (run_id: string, reservation: string) => Promise<TridentRun | null>
   /**
@@ -2915,13 +2917,21 @@ export function buildTridentOrchestrator(
     if (!isTerminalPhase(run.phase) && deadProjectDriverReservation !== null) {
       // A prior gateway's driver promise is gone. Resume only from the durable build
       // evidence, never by replaying an uncheckpointed reservation.
+      let continuation: ReturnType<typeof readBuildModeState> = null
+      try {
+        continuation = readBuildModeState(listStageEvents?.(run.id) ?? [], run)
+      } catch {
+        // An unreadable or mismatched latest checkpoint cannot authorize replay.
+      }
       const continuationReady =
-        run.branch !== null && run.inner_checkpoint !== null && run.inner_checkpoint_head !== null
+        typeof run.branch === 'string' && run.branch.length > 0 &&
+        /^(?:[0-9a-f]{40}|[0-9a-f]{64})$/.test(run.base_sha ?? '') &&
+        continuation !== null && (continuation.checkpoint.head !== null || continuation.checkpoint.pending !== undefined)
       if (!continuationReady) {
         return {
           run: failedRun(
             run,
-            'gateway restart ended the in-process project driver before a durable branch/head/checkpoint; refusing to replay uncertain work',
+            'gateway restart left no valid canonical project driver checkpoint with a durable head or pending provider step; refusing to replay uncertain work',
             false,
           ),
           changed: true,
@@ -2934,7 +2944,7 @@ export function buildTridentOrchestrator(
           run: failedRun(
             run,
             `project driver gateway recovery budget (${maxCrashRecoveries}) used up — not relaunching; preserved branch ${run.branch}, ` +
-              `head ${run.inner_checkpoint_head}, PR ${run.pr === null ? 'none' : `#${run.pr}`}, checkpoint ${run.inner_checkpoint}`,
+              `head ${continuation!.checkpoint.head}, PR ${run.pr === null ? 'none' : `#${run.pr}`}, checkpoint ${continuation!.checkpoint.stage}`,
             false,
           ),
           changed: true,
