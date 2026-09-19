@@ -111,8 +111,8 @@ test('a resolving HEAD still commits with the expected parent, and leaves no scr
 // "no loop-authored commit carries a `Claude-Session:` trailer" is enforced, whatever the
 // model was told. These run the real script against real git: the trailer arrives exactly
 // the way the CLI's attribution reminder makes the agent write it (its own `-m` paragraph),
-// and the commit that lands must be the same single commit -- amended in place, parent
-// unchanged, author unchanged, Co-Authored-By byte-identical.
+// and the commit that lands must be the same single commit -- rebuilt in place from the
+// object's own tree, parents, author and committer, Co-Authored-By byte-identical.
 const CO_AUTHOR = 'Co-Authored-By: Claude Fable 5.1 <noreply@anthropic.com>'
 const SESSION = 'Claude-Session: https://claude.ai/code/session_01TEST'
 
@@ -127,18 +127,18 @@ test("#1133: a Claude-Session trailer on the agent's message never reaches the c
   expect(body).toContain(CO_AUTHOR)
   expect(body.startsWith('feat: subject')).toBe(true)
   // One commit, rewritten in place: the parent is still the fixture's base commit, the
-  // author survived the amend, and the tree is what the agent staged.
+  // author survived the rewrite, and the tree is what the agent staged.
   expect(git(tree, 'rev-parse', 'HEAD^')).toBe(parent)
   expect(git(tree, 'log', '-1', '--format=%an')).toBe('Test')
   expect(git(tree, 'show', '--stat', '--format=', 'HEAD')).toContain('change.txt')
-  // The strip AMENDS, so git's first `[branch sha] subject` line names a commit that is no
-  // longer on the branch. The wrapper must name the commit that IS, in full, on stdout --
+  // The strip REPLACES the commit, so git's `[branch sha] subject` line names a commit that
+  // is no longer on the branch. The wrapper must name the commit that IS, in full, on stdout --
   // a Forge that copied the first line would trip the head-claim gate downstream.
   expect(result.stdout).toContain('HEAD is now')
   expect(result.stdout).toContain(git(tree, 'rev-parse', 'HEAD'))
 })
 
-test("#1133: --no-verify on the agent's commit is honoured by the strip amend (a refusing pre-commit hook cannot leave the trailer behind)", () => {
+test("#1133: --no-verify on the agent's commit cannot be undone by the strip (a refusing pre-commit hook cannot leave the trailer behind: the rebuild runs no hook)", () => {
   const { tree, branch, parent } = fixture()
   const refusing = mkdtempSync(join(tmpdir(), 'trident-head-refusing-hooks-'))
   roots.push(refusing)
@@ -152,7 +152,7 @@ test("#1133: --no-verify on the agent's commit is honoured by the strip amend (a
   expect(refused.stderr).toContain('hook refuses')
   expect(git(tree, 'rev-parse', 'HEAD')).toBe(parent)
 
-  // The agent skipped the hook on its commit; the amend must not re-run it, or the commit
+  // The agent skipped the hook on its commit; the rebuild must not re-run it, or the commit
   // lands with the trailer still in it and the wrapper exits non-zero.
   const result = run(tree, 'bash', [guard, branch, '--no-verify', '-m', 'feat: subject', '-m', SESSION, '-m', CO_AUTHOR])
 
@@ -177,7 +177,7 @@ test('#1133: a session trailer that is NOT the last paragraph is still the only 
   expect(body.startsWith('fix: middle')).toBe(true)
 })
 
-test('#1133: a message without the trailer is committed once and left untouched (no amend)', () => {
+test('#1133: a message without the trailer is committed once and left untouched (no rewrite)', () => {
   const { tree, branch, parent } = fixture()
 
   const result = run(tree, 'bash', [guard, branch, '-m', 'feat: plain', '-m', CO_AUTHOR])
@@ -187,13 +187,13 @@ test('#1133: a message without the trailer is committed once and left untouched 
   expect(git(tree, 'log', '-1', '--format=%B')).toBe(`feat: plain\n\n${CO_AUTHOR}`)
   expect(git(tree, 'rev-parse', 'HEAD^')).toBe(parent)
   // The strip path must be SKIPPED when there is nothing to strip: the branch reflog
-  // holds the one commit and no `commit (amend)` entry.
+  // holds the one commit and no strip entry.
   const reflog = git(tree, 'reflog', 'show', '--format=%gs', branch)
-  expect(reflog).not.toContain('commit (amend)')
+  expect(reflog).not.toContain('strip Claude-Session')
   expect(reflog.split('\n').filter((l) => l.startsWith('commit:'))).toHaveLength(1)
 })
 
-test("#1133: a failed commit propagates git's exit code, and nothing is amended", () => {
+test("#1133: a failed commit propagates git's exit code, and nothing is rewritten", () => {
   const { tree, branch, parent } = fixture()
   git(tree, 'reset', '-q') // nothing staged -> git commit refuses
   const before = git(tree, 'rev-parse', 'HEAD')
@@ -204,10 +204,10 @@ test("#1133: a failed commit propagates git's exit code, and nothing is amended"
   expect(result.status).toBe(1)
   expect(git(tree, 'rev-parse', 'HEAD')).toBe(parent)
   expect(git(tree, 'log', '-1', '--format=%B')).toBe('base')
-  expect(git(tree, 'reflog', 'show', '--format=%gs', branch)).not.toContain('commit (amend)')
+  expect(git(tree, 'reflog', 'show', '--format=%gs', branch)).not.toContain('strip Claude-Session')
 })
 
-test('#1133: the strip amend rewrites the MESSAGE only -- a pathspec commit does not absorb the other staged file', () => {
+test('#1133: the strip rewrites the MESSAGE only -- a pathspec commit does not absorb the other staged file', () => {
   const { tree, branch, parent } = fixture()
   writeFileSync(join(tree, 'second.txt'), 'second\n')
   git(tree, 'add', 'second.txt')
@@ -220,8 +220,8 @@ test('#1133: the strip amend rewrites the MESSAGE only -- a pathspec commit does
   expect(git(tree, 'diff', '--cached', '--name-only')).toBe('second.txt')
   git(tree, 'reset', '-q', '--soft', parent)
 
-  // Without `--only`, `git commit --amend` snapshots the CURRENT index, so the strip would
-  // fold second.txt into the published commit with exit 0 and no marker.
+  // An amend without `--only` snapshotted the CURRENT index, so the strip folded second.txt
+  // into the published commit with exit 0 and no marker; the rebuild reads no index at all.
   const result = run(tree, 'bash', [guard, branch, '-m', 'feat: only change', '-m', SESSION, '-m', CO_AUTHOR, '--', 'change.txt'])
 
   expect(result.status, result.stderr || result.stdout).toBe(0)
@@ -235,35 +235,37 @@ test('#1133: the strip amend rewrites the MESSAGE only -- a pathspec commit does
 })
 
 // A guard that promises "no loop-authored commit carries the trailer" must fail CLOSED: the
-// wrapper commits WITH the trailer and only then amends it out, so an amend that fails for
-// any reason must withdraw that commit rather than report an error and leave it at HEAD,
-// where the outer loop's publish would carry it to the PR.
-test('#1133: an amend that git refuses withdraws the trailer-bearing commit (fail closed, real git)', () => {
+// wrapper commits WITH the trailer and only then rebuilds it without, so a rebuild that
+// fails for any reason must withdraw that commit rather than report an error and leave it
+// on the branch, where the outer loop's publish would carry it to the PR.
+test('#1133: a message that is only the trailer is refused and the trailer-bearing commit withdrawn (fail closed, real git)', () => {
   const { tree, branch, parent } = fixture()
 
-  // A message that is ONLY the trailer strips to nothing, and git refuses an empty amend.
+  // A message that is ONLY the trailer strips to nothing. `commit-tree` would accept an
+  // empty message, but `git commit` would not have without `--allow-empty-message`, so the
+  // wrapper refuses exactly as git would (exit 1) and withdraws.
   const result = run(tree, 'bash', [guard, branch, '-m', SESSION])
 
   expect(result.status).toBe(1)
   expect(result.stderr).toContain('could not be stripped')
   expect(result.stderr).toContain('was withdrawn')
-  expect(result.stderr).toContain(`HEAD is back at ${parent}`)
+  expect(result.stderr).toContain(`refs/heads/${branch} is back at ${parent}`)
   expect(git(tree, 'rev-parse', 'HEAD')).toBe(parent)
   expect(git(tree, 'log', '-1', '--format=%B')).toBe('base')
   // Forge can retry: the staged change is still staged, nothing was lost.
   expect(git(tree, 'diff', '--cached', '--name-only')).toBe('change.txt')
 })
 
-test('#1133: an amend that fails for ANY reason withdraws the commit and propagates the exit code (fail closed, shimmed amend)', () => {
+test('#1133: a rebuild that fails for ANY reason withdraws the commit and propagates the exit code (fail closed, shimmed commit-tree)', () => {
   const { tree, branch, parent } = fixture()
-  const bin = mkdtempSync(join(tmpdir(), 'trident-head-amend-shim-'))
+  const bin = mkdtempSync(join(tmpdir(), 'trident-head-rebuild-shim-'))
   roots.push(bin)
   const realGit = run(bin, 'sh', ['-c', 'command -v git']).stdout.trim()
-  // Stands in for a signing or ref-lock failure: every git call is real EXCEPT `--amend`.
+  // Stands in for a signing or object-store failure: every git call is real EXCEPT `commit-tree`.
   writeFileSync(
     join(bin, 'git'),
     `#!/bin/sh\n` +
-      `for a in "$@"; do if [ "$a" = "--amend" ]; then echo "shim: amend refused" >&2; exit 128; fi; done\n` +
+      `if [ "$1" = "commit-tree" ]; then echo "shim: commit-tree refused" >&2; exit 128; fi\n` +
       `exec ${realGit} "$@"\n`,
     { mode: 0o755 },
   )
@@ -275,8 +277,8 @@ test('#1133: an amend that fails for ANY reason withdraws the commit and propaga
   })
 
   expect(result.status).toBe(128)
-  // The first commit DID land (the shim only refuses the amend) -- and was then withdrawn.
-  expect(result.stderr).toContain('shim: amend refused')
+  // The first commit DID land (the shim only refuses the rebuild) -- and was then withdrawn.
+  expect(result.stderr).toContain('shim: commit-tree refused')
   expect(result.stderr).toContain('was withdrawn')
   expect(git(tree, 'rev-parse', 'HEAD')).toBe(parent)
   expect(git(tree, 'log', '-1', '--format=%B')).toBe('base')
@@ -286,11 +288,11 @@ test('#1133: an amend that fails for ANY reason withdraws the commit and propaga
   expect(run(tree, 'git', ['log', '--format=%B', branch]).stdout).not.toContain('Claude-Session')
 })
 
-test('#1133: --allow-empty-message on the agent\'s commit is honoured by the strip amend', () => {
+test('#1133: --allow-empty-message on the agent\'s commit is honoured by the strip', () => {
   const { tree, branch, parent } = fixture()
 
   // The same only-trailer message the fail-closed test refuses, now with the flag the agent
-  // gave the first commit: the amend must repeat it, or a commit git accepted is withdrawn.
+  // gave the first commit: the rebuild must honour it, or a commit git accepted is withdrawn.
   const result = run(tree, 'bash', [guard, branch, '--allow-empty-message', '-m', SESSION])
 
   expect(result.status, result.stderr || result.stdout).toBe(0)
@@ -299,11 +301,11 @@ test('#1133: --allow-empty-message on the agent\'s commit is honoured by the str
   expect(result.stdout).toContain('HEAD is now')
 })
 
-test("#1133: an explicit --cleanup=<mode> on the agent's commit is what the amended message keeps (the amend runs no cleanup of its own)", () => {
+test("#1133: an explicit --cleanup=<mode> on the agent's commit is what the rebuilt message keeps (the rebuild runs no cleanup of its own)", () => {
   const { tree, branch, parent } = fixture()
 
   // Positive control: under the default cleanup a `-m` paragraph loses its trailing spaces
-  // on the FIRST commit, and the amend stores that cleaned message minus the trailer. (The
+  // on the FIRST commit, and the rebuild stores that cleaned message minus the trailer. (The
   // paragraph sits ABOVE Co-Authored-By so the spaces are interior to the body and the
   // helper's trim cannot eat them.)
   const control = run(tree, 'bash', [guard, branch, '-m', 'feat: v', '-m', 'trailing   ', '-m', SESSION, '-m', CO_AUTHOR])
@@ -317,17 +319,17 @@ test("#1133: an explicit --cleanup=<mode> on the agent's commit is what the amen
   const body = git(tree, 'log', '-1', '--format=%B')
   expect(body).not.toContain('Claude-Session')
   expect(body).toContain(CO_AUTHOR)
-  // Verbatim survived the amend: the trailing spaces the first commit stored are still there.
+  // Verbatim survived the rebuild: the trailing spaces the first commit stored are still there.
   expect(body).toContain('trailing   \n')
   expect(git(tree, 'rev-parse', 'HEAD^')).toBe(parent)
 })
 
-test("#1133: a -m paragraph that begins with -S is a message, not a signing flag for the amend", () => {
+test("#1133: a -m paragraph that begins with -S is a message, not a signing flag for the rebuild", () => {
   const { tree, branch, parent } = fixture()
 
-  // A flag scan that cannot tell an option's VALUE from an option would forward
-  // `-Signed by hand` as `-S<keyid>`, the amend would try to gpg-sign, fail, and the
-  // commit would be withdrawn (or, before fail-closed, left with the trailer).
+  // A flag scan that cannot tell an option's VALUE from an option would read
+  // `-Signed by hand` as `-S<keyid>`; the rebuild signs only when the object it rewrites is
+  // signed, but a signed first commit would then be re-signed with a key id that is prose.
   const result = run(tree, 'bash', [guard, branch, '-m', 'feat: s', '-m', '-Signed by hand', '-m', SESSION])
 
   expect(result.status, result.stderr || result.stdout).toBe(0)
@@ -360,6 +362,7 @@ function withShimmedGit(headAnswer: string): { status: number | null; stderr: st
     join(bin, 'git'),
     `#!/bin/sh\n` +
       `if [ "$1" = "rev-parse" ]; then printf '%s' "$SHIM_HEAD"; exit 0; fi\n` +
+      `if [ "$1" = "symbolic-ref" ]; then exit 1; fi\n` +
       `if [ "$1" = "commit" ]; then : > "${marker}"; exit 0; fi\n` +
       `exec ${realGit} "$@"\n`,
     { mode: 0o755 },
@@ -443,7 +446,7 @@ test('#1133: the filter is byte-safe -- a body that is not valid UTF-8 is not re
   const { tree, branch, parent } = fixture()
   // A latin1 e-acute on its own is invalid UTF-8. With `i18n.commitEncoding` naming that
   // encoding, git stores the byte as is (and records the encoding on the object) instead of
-  // transcoding it; the amend must carry that byte through untouched.
+  // transcoding it; the rebuild must carry that byte through untouched.
   git(tree, 'config', 'i18n.commitEncoding', 'ISO-8859-1')
   const bodyFile = join(tree, '..', 'message.txt')
   writeFileSync(bodyFile, Buffer.from(`fix: latin1\n\ncaf\xe9 body\n${SESSION}\n${CO_AUTHOR}\n`, 'latin1'))
@@ -477,12 +480,12 @@ test('#1133: the match is case-insensitive, as git trailer tokens are', () => {
   expect(git(tree, 'rev-parse', 'HEAD^')).toBe(parent)
 })
 
-test('#1133: the amend stores the filtered bytes verbatim -- a config-level commit.cleanup is not overridden, and a missing final newline stays missing', () => {
+test('#1133: the rebuild stores the filtered bytes verbatim -- a config-level commit.cleanup is not overridden, and a missing final newline stays missing', () => {
   const { tree, branch, parent } = fixture()
   git(tree, 'config', 'commit.cleanup', 'verbatim')
 
   // Positive control: with that config and no --cleanup on argv, git keeps the trailing
-  // spaces on the first commit. The amend must keep them too.
+  // spaces on the first commit. The rebuild must keep them too.
   const cleanup = run(tree, 'bash', [guard, branch, '-m', 'feat: v', '-m', 'trailing   ', '-m', SESSION, '-m', CO_AUTHOR])
   expect(cleanup.status, cleanup.stderr || cleanup.stdout).toBe(0)
   expect(storedMessage(tree)).toBe(`feat: v\n\ntrailing   \n\n${CO_AUTHOR}\n`)
@@ -562,7 +565,7 @@ test('#1133: a read-back that fails AND a withdrawal that fails is reported as t
   expect(result.status).toBe(3)
   expect(result.stderr).toContain('shim: update-ref refused')
   expect(result.stderr).toContain('could not be withdrawn')
-  expect(result.stderr).toContain('may carry the trailer')
+  expect(result.stderr).toContain('carries the trailer if the message had one')
   expect(result.stderr).not.toContain('was withdrawn')
   // The truth the message states: the commit really is still on the branch, trailer and all.
   expect(git(tree, 'rev-parse', 'HEAD')).not.toBe(parent)
@@ -584,14 +587,7 @@ test('#1133: a withdrawal after a merge in progress names the sequencer state it
   git(tree, 'merge', '-q', '--no-commit', '--no-ff', 'side')
   // Positive control: the merge really is in progress before the wrapper runs.
   expect(run(tree, 'git', ['rev-parse', '-q', '--verify', 'MERGE_HEAD']).status).toBe(0)
-  const bin = shimmedGitFailing({})
-  writeFileSync(
-    join(bin, 'git'),
-    `#!/bin/sh\n` +
-      `for a in "$@"; do if [ "$a" = "--amend" ]; then echo "shim: amend refused" >&2; exit 128; fi; done\n` +
-      `exec ${run(bin, 'sh', ['-c', 'command -v git']).stdout.trim()} "$@"\n`,
-    { mode: 0o755 },
-  )
+  const bin = shimmedGitFailing({ 'commit-tree': 128 })
 
   const result = spawnSync('bash', [guard, branch, '-m', 'merge: side', '-m', SESSION], {
     cwd: tree,
@@ -610,11 +606,11 @@ test('#1133: a withdrawal after a merge in progress names the sequencer state it
   expect(git(tree, 'diff', '--cached', '--name-only')).toBe('side.txt')
 })
 
-test('#1133: a cluster of short options ending in -m (-am) hides its message from the amend-flag scan', () => {
+test('#1133: a cluster of short options ending in -m (-am) hides its message from the flag scan', () => {
   const { tree, branch, parent } = fixture()
 
   // `-am <msg>` is one argv element the scan must read as `-a -m`: the paragraph beginning
-  // `-S` is the VALUE of that -m, not a signing flag for the amend.
+  // `-S` is the VALUE of that -m, not a signing flag for the rebuild.
   const result = run(tree, 'bash', [guard, branch, '-am', `-Signed by hand\n\n${SESSION}`])
 
   expect(result.status, result.stderr || result.stdout).toBe(0)
@@ -624,15 +620,16 @@ test('#1133: a cluster of short options ending in -m (-am) hides its message fro
   expect(git(tree, 'rev-parse', 'HEAD^')).toBe(parent)
 })
 
-test('#1133: an attached option value (-F<file>) is not a cluster -- the flag after it is still forwarded to the amend', () => {
+test('#1133: an attached option value (-F<file>) is not a cluster -- an empty commit with the trailer in its -F file is rebuilt empty', () => {
   const { tree, branch, parent } = fixture()
-  git(tree, 'reset', '-q') // nothing staged: the commit needs --allow-empty, and so does the amend
+  git(tree, 'reset', '-q') // nothing staged: the commit needs --allow-empty; the rebuild reads no index
   const bodyFile = join(tree, '..', 'attached.txt')
   writeFileSync(bodyFile, `feat: attached\n\n${SESSION}\n`)
 
   // A scan that read `-F<file>` as a cluster ending in a value-taking letter would skip
-  // `--allow-empty` as its value; the amend would then refuse to make the commit empty and
-  // the wrapper would withdraw a commit git had accepted.
+  // `--allow-empty` as its value. The rebuild needs no such flag (commit-tree takes the
+  // object's own tree), so this pins that an attached value is not read as a cluster AND
+  // that an empty commit is rebuilt as the same empty commit.
   const result = run(tree, 'bash', [guard, branch, `-F${bodyFile}`, '--allow-empty'])
 
   expect(result.status, result.stderr || result.stdout).toBe(0)
@@ -674,7 +671,7 @@ test('#1133: a signing letter inside a short-flag cluster (-aS) is forwarded, so
   writeFileSync(join(tree, 'change.txt'), 'changed again\n') // -a has something to pick up
 
   // Positive control: the standalone form the scan already forwards. Signed once for the
-  // first commit and once for the amend, and the commit on the branch carries the signature.
+  // first commit and once for the rebuild, and the commit on the branch carries the signature.
   const control = run(tree, 'bash', [guard, branch, '-a', '-S', '-m', 'feat: control', '-m', SESSION])
   expect(control.status, control.stderr || control.stdout).toBe(0)
   expect(gpgsigHeaders(tree, 'HEAD')).toBe(1)
@@ -682,8 +679,9 @@ test('#1133: a signing letter inside a short-flag cluster (-aS) is forwarded, so
   git(tree, 'reset', '-q', '--soft', parent)
   writeFileSync(log, '')
 
-  // Git reads `-aS` as `-a -S`: the first commit is signed. A scan that only knows the
-  // standalone `-S` forwards nothing, and the amend re-stores the commit UNSIGNED.
+  // Git reads `-aS` as `-a -S`: the first commit is signed. The rebuild signs because the
+  // object is signed; a scan that only knows the standalone `-S` would sign with the
+  // configured default key instead of the one argv named.
   const result = run(tree, 'bash', [guard, branch, '-aS', '-m', 'feat: clustered', '-m', SESSION])
 
   expect(result.status, result.stderr || result.stdout).toBe(0)
@@ -701,7 +699,7 @@ test('#1133: a clustered signing letter with an attached key id (-sSkey) forward
   git(tree, 'config', 'user.signingkey', 'DEFAULTKEY')
 
   // `-sSARGVKEY` is `-s -SARGVKEY`: signoff, then sign with the key attached to the S. The
-  // amend must sign with THAT key, not fall back to user.signingkey.
+  // rebuild must sign with THAT key, not fall back to user.signingkey.
   const signed = run(tree, 'bash', [guard, branch, '-sSARGVKEY', '-m', 'feat: keyed', '-m', SESSION])
   expect(signed.status, signed.stderr || signed.stdout).toBe(0)
   expect(git(tree, 'log', '-1', '--format=%B')).toBe('feat: keyed\n\nSigned-off-by: Test <test@example.test>')
@@ -723,9 +721,11 @@ test('#1133: a clustered signing letter with an attached key id (-sSkey) forward
 
 // Round 13 (#1133). A shim that is real git except that the Nth `<sub>` it is asked for
 // runs `arm` first (refuse, answer nothing, or land a commit of its own). The wrapper's FIRST
-// rev-parse is the pre-commit probe, its SECOND the post-commit re-probe and its THIRD the
-// post-amend re-read, so N=2 faults exactly the re-probe and the commit has really landed by
-// then. The count file is the positive control: it must read N afterwards, proving the probe
+// rev-parse is the pre-commit probe and its SECOND the post-commit re-probe of the captured
+// ref (there is no third: the compare-and-swap publish IS the post-condition on the ref), so
+// N=2 faults exactly the re-probe and the commit has really landed by then. Its FIRST
+// cat-file reads the commit it made, its SECOND the rebuilt candidate.
+// The count file is the positive control: it must read N afterwards, proving the probe
 // passed through the same shim and the fault hit the call it was aimed at. (git runs its own
 // subcommands from GIT_EXEC_PATH, not PATH, so no internal call of git's own ever reaches
 // this shim: a pass-through run counts exactly the wrapper's own.) `arm` sees REAL_GIT.
@@ -773,7 +773,7 @@ function subjects(tree: string, branch: string): string[] {
   return git(tree, 'log', '--format=%s', branch).split('\n')
 }
 
-test('#1133: THE CONTROL for the counting shim: with no fault armed, the wrapper makes exactly three rev-parse calls and strips the trailer', () => {
+test('#1133: THE CONTROL for the counting shim: with no fault armed, the wrapper makes exactly two rev-parse calls and strips the trailer', () => {
   const { tree, branch, parent } = fixture()
   const { bin, count } = shimmedGitFailingNthRevParse(0, 'exit 5')
 
@@ -782,8 +782,10 @@ test('#1133: THE CONTROL for the counting shim: with no fault armed, the wrapper
   expect(result.status, result.stderr || result.stdout).toBe(0)
   expect(git(tree, 'log', '-1', '--format=%B')).toBe(`feat: subject\n\n${CO_AUTHOR}`)
   expect(git(tree, 'rev-parse', 'HEAD^')).toBe(parent)
-  // Probe, re-probe, post-amend re-read: the second one is the post-commit re-probe.
-  expect(readFileSync(count, 'utf8').trim()).toBe('3')
+  // Probe, re-probe: the second one is the post-commit re-probe of the captured ref. The
+  // publish is a compare-and-swap against the object that re-probe named, so nothing is
+  // re-read afterwards.
+  expect(readFileSync(count, 'utf8').trim()).toBe('2')
 })
 
 test('#1133: a post-commit HEAD re-probe that FAILS is refused WITHOUT rewriting the branch (fail closed, no blind reset; second rev-parse only)', () => {
@@ -797,13 +799,14 @@ test('#1133: a post-commit HEAD re-probe that FAILS is refused WITHOUT rewriting
   expect(result.stderr).toContain('could not be re-read')
   expect(result.stderr).toContain('exited 5')
   expect(result.stderr).toContain('was NOT reset')
-  expect(result.stderr).toContain('may carry the trailer')
+  expect(result.stderr).toContain(`is on refs/heads/${branch} and carries the trailer if the message had one`)
+  expect(result.stderr).not.toContain('may carry')
   expect(result.stderr).not.toContain('was withdrawn')
   // The pre-commit probe's own refusal (exit 65) never fired: the fault hit the re-probe.
   expect(result.stderr).not.toContain('HEAD does not resolve')
-  // With no readable HEAD there is no value to compare against, so the wrapper refuses and
+  // With no readable value there is nothing to compare against, so the wrapper refuses and
   // touches nothing: the commit it made is exactly where git put it, trailer and all, and
-  // the caller is told so. The index was consumed by that commit and is clean.
+  // the caller is told so, naming the ref. The index was consumed by that commit and is clean.
   expect(git(tree, 'rev-parse', 'HEAD^')).toBe(parent)
   expect(git(tree, 'log', '-1', '--format=%B')).toContain(SESSION)
   expect(git(tree, 'diff', '--cached', '--name-only')).toBe('')
@@ -846,22 +849,22 @@ test('#1133: a failed re-probe never rewrites the branch -- a commit another wri
   expect(readFileSync(count, 'utf8').trim()).toBe('2')
 })
 
-test('#1133: a failed re-probe on a HEAD that became a dangling symref does not conjure the missing branch (the blind reset did)', () => {
+test('#1133: a HEAD that became a dangling symref after the commit neither conjures the missing branch nor stops the strip -- the CAPTURED ref is rewritten', () => {
   const { tree, branch, parent } = fixture()
   // The measured hazard: after the agent's commit HEAD points at a branch that does not
-  // exist; `rev-parse` fails, and `git reset --soft <probed>` SUCCEEDED by creating that
-  // branch at the probed oid while the real branch kept the trailer commit -- and the
-  // wrapper then said "was withdrawn".
+  // exist. Round 13's `git reset --soft <probed>` SUCCEEDED by creating that branch at the
+  // probed oid while the real branch kept the trailer commit; round 14 refused (exit 69)
+  // and left the trailer on the branch. The wrapper now reads and rewrites the ref it
+  // captured BEFORE the commit, so where HEAD points afterwards does not matter.
   const { bin, count } = shimmedGitFailingNthRevParse(2, '$REAL_GIT symbolic-ref HEAD refs/heads/orphan')
 
   const result = runGuardWithShim(tree, branch, bin)
 
-  expect(result.status).toBe(69)
-  expect(result.stderr).toContain('was NOT reset')
-  expect(result.stderr).not.toContain('was withdrawn')
+  expect(result.status, result.stderr || result.stdout).toBe(0)
+  expect(result.stdout).toContain(`refs/heads/${branch} moved from`)
   expect(run(tree, 'git', ['rev-parse', '--verify', '-q', 'refs/heads/orphan']).status).not.toBe(0)
   expect(git(tree, 'rev-parse', `${branch}^`)).toBe(parent)
-  expect(git(tree, 'log', '-1', '--format=%B', branch)).toContain(SESSION)
+  expect(git(tree, 'log', '-1', '--format=%B', branch)).toBe(`feat: subject\n\n${CO_AUTHOR}`)
   expect(readFileSync(count, 'utf8').trim()).toBe('2')
 })
 
@@ -875,30 +878,21 @@ test('#1133: a read-back that fails withdraws by compare-and-swap -- a commit an
   expect(result.stderr).toContain('shim: cat-file refused')
   expect(result.stderr).toContain('could not be withdrawn')
   expect(result.stderr).toContain('nothing was rewritten')
-  expect(result.stderr).toContain('may carry the trailer')
+  expect(result.stderr).toContain('carries the trailer if the message had one')
   expect(result.stderr).not.toContain('was withdrawn')
   expect(subjects(tree, branch)).toEqual([CONCURRENT, 'feat: subject', 'base'])
   expect(git(tree, 'rev-parse', `${branch}^^`)).toBe(parent)
   expect(readFileSync(count, 'utf8').trim()).toBe('1')
 })
 
-test('#1133: an amend that fails withdraws by compare-and-swap -- a commit another writer landed first is refused, not reset away', () => {
+test('#1133: a rebuild that fails withdraws by compare-and-swap -- a commit another writer landed first is refused, not reset away', () => {
   const { tree, branch, parent } = fixture()
-  const bin = shimmedGitFailing({})
-  const realGit = run(bin, 'sh', ['-c', 'command -v git']).stdout.trim()
-  writeFileSync(
-    join(bin, 'git'),
-    `#!/bin/sh\n` +
-      `REAL_GIT=${realGit}\n` +
-      `for a in "$@"; do if [ "$a" = "--amend" ]; then ${CONCURRENT_ARM}; echo "shim: amend refused" >&2; exit 128; fi; done\n` +
-      `exec ${realGit} "$@"\n`,
-    { mode: 0o755 },
-  )
+  const { bin } = shimmedGitFailingNth('commit-tree', 1, `${CONCURRENT_ARM}; echo "shim: commit-tree refused" >&2; exit 128`)
 
   const result = runGuardWithShim(tree, branch, bin)
 
   expect(result.status).toBe(128)
-  expect(result.stderr).toContain('shim: amend refused')
+  expect(result.stderr).toContain('shim: commit-tree refused')
   expect(result.stderr).toContain('could not be withdrawn')
   expect(result.stderr).toContain('nothing was rewritten')
   expect(result.stderr).toContain('WITH the trailer')
@@ -907,9 +901,12 @@ test('#1133: an amend that fails withdraws by compare-and-swap -- a commit anoth
   expect(git(tree, 'rev-parse', `${branch}^^`)).toBe(parent)
 })
 
-// Round 14 (#1133). The strip's post-condition is measured, not inferred from a zero-exit
-// amend: `--no-verify` skips pre-commit and commit-msg only, so a `prepare-commit-msg` hook
-// still runs on the amend and can put the trailer straight back.
+// Round 14 (#1133) measured the strip's post-condition after an amend, because `--no-verify`
+// skips pre-commit and commit-msg only and a `prepare-commit-msg` hook still ran on the
+// amend and put the trailer straight back. Round 15 removed the amend: the stripped commit
+// is built with `commit-tree`, on which no hook of any kind runs, so the hook cannot fire
+// on the rewrite at all. The positive control below stays, to show the hook IS live on a
+// plain `--amend --no-verify`.
 
 function trailerRestoringHooks(): string {
   const dir = mkdtempSync(join(tmpdir(), 'trident-head-restoring-hooks-'))
@@ -918,7 +915,7 @@ function trailerRestoringHooks(): string {
   return dir
 }
 
-test('#1133: a prepare-commit-msg hook that puts the trailer back on the amend is caught by the read-back, and the commit is withdrawn (exit 73)', () => {
+test('#1133: a prepare-commit-msg hook that put the trailer back on the amend cannot reach the rebuild -- exit 0 and the branch is clean', () => {
   const { tree, branch, parent } = fixture()
   git(tree, 'config', 'core.hooksPath', trailerRestoringHooks())
 
@@ -933,39 +930,17 @@ test('#1133: a prepare-commit-msg hook that puts the trailer back on the amend i
 
   const result = run(tree, 'bash', [guard, branch, '-m', 'feat: subject', '-m', CO_AUTHOR])
 
-  // The round-13 wrapper exited 0 here and printed "trailer stripped; HEAD is now <sha>
-  // (pre-strip commit <the same sha> was amended away" -- the hook restored the bytes and the
-  // amend stored the identical object.
-  expect(result.status).toBe(73)
-  expect(result.stderr).toContain('STILL on the amended commit')
-  expect(result.stderr).toContain('prepare-commit-msg')
-  expect(result.stderr).toContain('was withdrawn')
-  expect(result.stdout).not.toContain('trailer stripped')
-  expect(git(tree, 'rev-parse', 'HEAD')).toBe(parent)
-  expect(git(tree, 'diff', '--cached', '--name-only')).toBe('change.txt')
+  // Round 13 exited 0 with the trailer on the branch; round 14 caught it and withdrew with
+  // exit 73 (the agent's commit was lost to the hook). Now the hook fires once, on the
+  // agent's commit, and the rebuilt commit is exactly that commit minus the line it added.
+  expect(result.status, result.stderr || result.stdout).toBe(0)
+  expect(result.stdout).toContain('trailer stripped')
+  expect(git(tree, 'rev-parse', 'HEAD^')).toBe(parent)
+  expect(git(tree, 'log', '-1', '--format=%B')).toBe(`feat: subject\n\n${CO_AUTHOR}`)
   expect(run(tree, 'git', ['log', '--format=%B', branch]).stdout).not.toContain('Claude-Session')
 })
 
-test('#1133: a post-amend HEAD re-read that fails is refused without rewriting the branch (exit 71, third rev-parse only)', () => {
-  const { tree, branch, parent } = fixture()
-  const { bin, count } = shimmedGitFailingNthRevParse(3, 'echo "shim: rev-parse refused" >&2; exit 5')
-
-  const result = runGuardWithShim(tree, branch, bin)
-
-  expect(result.status).toBe(71)
-  expect(result.stderr).toContain('shim: rev-parse refused')
-  expect(result.stderr).toContain('after the Claude-Session strip amend')
-  expect(result.stderr).toContain('was NOT reset')
-  expect(result.stderr).toContain('was not verified')
-  expect(result.stdout).not.toContain('trailer stripped')
-  // The amend itself succeeded, so what is on the branch is in fact stripped; the wrapper
-  // could not measure that and says so rather than claiming it.
-  expect(git(tree, 'rev-parse', 'HEAD^')).toBe(parent)
-  expect(git(tree, 'log', '-1', '--format=%B')).toBe(`feat: subject\n\n${CO_AUTHOR}`)
-  expect(readFileSync(count, 'utf8').trim()).toBe('3')
-})
-
-test('#1133: a post-amend read-back that fails withdraws the amended commit by compare-and-swap (second cat-file only)', () => {
+test('#1133: a candidate read-back that fails withdraws the trailer commit by compare-and-swap and references the candidate by nothing (second cat-file only)', () => {
   const { tree, branch, parent } = fixture()
   const { bin, count } = shimmedGitFailingNth('cat-file', 2, 'echo "shim: cat-file refused" >&2; exit 4')
 
@@ -975,8 +950,318 @@ test('#1133: a post-amend read-back that fails withdraws the amended commit by c
   expect(result.stderr).toContain('shim: cat-file refused')
   expect(result.stderr).toContain('to verify the Claude-Session strip')
   expect(result.stderr).toContain('was withdrawn')
+  expect(result.stderr).toContain('referenced by nothing')
   expect(git(tree, 'rev-parse', 'HEAD')).toBe(parent)
   expect(git(tree, 'diff', '--cached', '--name-only')).toBe('change.txt')
   expect(run(tree, 'git', ['log', '--format=%B', branch]).stdout).not.toContain('Claude-Session')
   expect(readFileSync(count, 'utf8').trim()).toBe('2')
+  // The candidate was built (it is a real object) and nothing names it.
+  const candidate = result.stderr.match(/the rebuilt commit ([0-9a-f]{40})/)?.[1]
+  expect(candidate).toBeDefined()
+  expect(git(tree, 'cat-file', '-t', candidate!)).toBe('commit')
+  expect(git(tree, 'for-each-ref', '--points-at', candidate!)).toBe('')
+})
+
+// Round 15 (#1133). The wrapper acts on the REF it committed on and the OBJECT it created,
+// never on "whatever HEAD names now". Each test below is one mode of the reviewer's
+// adversarial fixture: another writer, a hook, or a branch switch between the agent's
+// commit and the strip. The rewrite is `commit-tree` + a compare-and-swap `update-ref`;
+// the CAS's expected-value argument is the nominated mutation (drop it and the swap goes
+// blind: the lost-swap test below sees exit 0 and the other writer's commit gone).
+
+function readBack(tree: string, rev: string): string {
+  return git(tree, 'cat-file', 'commit', rev)
+}
+
+test('#1133: a commit another writer landed on top BEFORE the re-probe is recognised by its parent and refused without any rewrite (exit 76)', () => {
+  const { tree, branch, parent } = fixture()
+  const { bin, count } = shimmedGitFailingNthRevParse(2, CONCURRENT_ARM)
+
+  const result = runGuardWithShim(tree, branch, bin)
+
+  // The ref now names the other writer's commit, whose first parent is the wrapper's
+  // commit, not the probed HEAD. Round 14 read that commit as its own and stripped it
+  // (exit 73 when it carried a trailer, both commits withdrawn). Nothing is touched now.
+  expect(result.status).toBe(76)
+  expect(result.stderr).toContain('made by another writer')
+  expect(result.stderr).toContain('nothing was rewritten and nothing was withdrawn')
+  expect(result.stderr).toContain('carries the trailer if the message had one')
+  expect(result.stdout).not.toContain('trailer stripped')
+  expect(subjects(tree, branch)).toEqual([CONCURRENT, 'feat: subject', 'base'])
+  expect(git(tree, 'rev-parse', `${branch}^^`)).toBe(parent)
+  // The truth stderr states: the wrapper's own commit is still there, trailer and all.
+  expect(git(tree, 'log', '-1', '--format=%B', `${branch}^`)).toContain(SESSION)
+  expect(git(tree, 'log', '-1', '--format=%B', branch)).toBe(CONCURRENT)
+  expect(readFileSync(count, 'utf8').trim()).toBe('2')
+})
+
+test('#1133: a commit another writer landed INSIDE the read-back loses the publish compare-and-swap: exit 74, both commits survive, the candidate is referenced by nothing', () => {
+  const { tree, branch, parent } = fixture()
+
+  // Positive control: the same counting shim with no arm lands the stripped commit.
+  const control = shimmedGitFailingNth('cat-file', 0, CONCURRENT_ARM)
+  const clean = runGuardWithShim(tree, branch, control.bin)
+  expect(clean.status, clean.stderr || clean.stdout).toBe(0)
+  expect(subjects(tree, branch)).toEqual(['feat: subject', 'base'])
+  expect(git(tree, 'log', '-1', '--format=%B')).toBe(`feat: subject\n\n${CO_AUTHOR}`)
+  expect(readFileSync(control.count, 'utf8').trim()).toBe('2')
+  git(tree, 'reset', '-q', '--soft', parent)
+
+  // The other writer lands between the wrapper's read of its own commit and the swap. The
+  // amend at this point rewrote THEIR commit's message over their tree (round 14); the CAS
+  // names the exact object it read and is refused.
+  const { bin, count } = shimmedGitFailingNth('cat-file', 1, CONCURRENT_ARM)
+  const result = runGuardWithShim(tree, branch, bin)
+
+  expect(result.status).toBe(74)
+  expect(result.stderr).toContain('moved while the Claude-Session strip was being built')
+  expect(result.stderr).toContain('nothing was rewritten and nothing was withdrawn')
+  expect(result.stderr).toContain('referenced by nothing')
+  expect(result.stdout).not.toContain('trailer stripped')
+  expect(subjects(tree, branch)).toEqual([CONCURRENT, 'feat: subject', 'base'])
+  expect(git(tree, 'rev-parse', `${branch}^^`)).toBe(parent)
+  expect(git(tree, 'log', '-1', '--format=%B', `${branch}^`)).toContain(SESSION)
+  // stderr names all three objects: the candidate (built, unreferenced), the wrapper's own
+  // commit (still reachable, with the trailer) and what the ref names now.
+  const candidate = result.stderr.match(/the stripped commit ([0-9a-f]{40}) was built/)?.[1]
+  expect(candidate).toBeDefined()
+  expect(git(tree, 'cat-file', '-t', candidate!)).toBe('commit')
+  expect(git(tree, 'for-each-ref', '--points-at', candidate!)).toBe('')
+  expect(readBack(tree, candidate!)).not.toContain('Claude-Session')
+  expect(result.stderr).toContain(`the commit ${git(tree, 'rev-parse', `${branch}^`)} this invocation created`)
+  expect(result.stderr).toContain(`now names ${git(tree, 'rev-parse', branch)}`)
+  expect(readFileSync(count, 'utf8').trim()).toBe('2')
+})
+
+test('#1133: a branch switch after the commit cannot redirect the withdrawal -- the CAPTURED branch is withdrawn and the other branch left alone', () => {
+  const { tree, branch, parent } = fixture()
+  // The reviewer's `switched-before-withdraw` mode: inside the read-back, HEAD is moved
+  // to a new branch at the same commit, then the read-back fails. Round 14 withdrew
+  // `HEAD`, i.e. rolled back the WRONG branch while the original kept the trailer.
+  const { bin, count } = shimmedGitFailingNth('cat-file', 1, '$REAL_GIT checkout -q -b other HEAD; echo "shim: cat-file refused" >&2; exit 8')
+
+  const result = runGuardWithShim(tree, branch, bin)
+
+  expect(result.status).toBe(8)
+  expect(result.stderr).toContain('shim: cat-file refused')
+  expect(result.stderr).toContain(`was withdrawn, refs/heads/${branch} is back at ${parent}`)
+  expect(git(tree, 'rev-parse', branch)).toBe(parent)
+  // `other` is where the switch left it: at the trailer commit, which is not the wrapper's
+  // ref and not its business. HEAD still points there.
+  expect(git(tree, 'symbolic-ref', 'HEAD')).toBe('refs/heads/other')
+  expect(git(tree, 'rev-parse', 'other^')).toBe(parent)
+  expect(git(tree, 'log', '-1', '--format=%B', 'other')).toContain(SESSION)
+  expect(run(tree, 'git', ['log', '--format=%B', branch]).stdout).not.toContain('Claude-Session')
+  expect(readFileSync(count, 'utf8').trim()).toBe('1')
+})
+
+// The reviewer's `hook-clean-followup` mode: a prepare-commit-msg hook that re-adds the
+// trailer whenever it is missing, plus a post-commit hook that lands a clean follow-up
+// commit on its Nth firing. `nested` keeps the follow-up from re-triggering either hook.
+function followupHooks(fireOn: number): { dir: string; count: string } {
+  const dir = mkdtempSync(join(tmpdir(), 'trident-head-followup-hooks-'))
+  roots.push(dir)
+  const count = join(dir, 'post-commit.count')
+  writeFileSync(
+    join(dir, 'prepare-commit-msg'),
+    `#!/bin/sh\nif [ -z "$HOOK_NESTED" ] && ! grep -q '^Claude-Session:' "$1"; then printf '\\n%s\\n' '${SESSION}' >> "$1"; fi\n`,
+    { mode: 0o755 },
+  )
+  writeFileSync(
+    join(dir, 'post-commit'),
+    `#!/bin/sh\n` +
+      `if [ -n "$HOOK_NESTED" ]; then exit 0; fi\n` +
+      `n=$(( $(cat "${count}" 2>/dev/null || echo 0) + 1 )); echo "$n" > "${count}"\n` +
+      `if [ "$n" -eq ${fireOn} ]; then HOOK_NESTED=1 git commit -q --allow-empty -m 'legitimate followup'; fi\n`,
+    { mode: 0o755 },
+  )
+  return { dir, count }
+}
+
+test('#1133: a post-commit hook that fired on the amend no longer fires -- the rebuild runs no hook, exit 0 and nothing reachable carries the trailer', () => {
+  const { tree, branch, parent } = fixture()
+  const { dir, count } = followupHooks(2)
+  git(tree, 'config', 'core.hooksPath', dir)
+
+  const result = run(tree, 'bash', [guard, branch, '-m', 'feat: subject', '-m', CO_AUTHOR])
+
+  // Round 14: the amend re-ran prepare-commit-msg (trailer back) AND post-commit (second
+  // firing, follow-up landed on top), the wrapper's read-back saw the clean follow-up at
+  // HEAD and exited 0 with its own trailer commit as the follow-up's parent.
+  expect(result.status, result.stderr || result.stdout).toBe(0)
+  expect(readFileSync(count, 'utf8').trim()).toBe('1')
+  expect(subjects(tree, branch)).toEqual(['feat: subject', 'base'])
+  expect(git(tree, 'rev-parse', `${branch}^`)).toBe(parent)
+  expect(run(tree, 'git', ['log', '--format=%B', branch]).stdout).not.toContain('Claude-Session')
+})
+
+test("#1133: a post-commit hook that lands a follow-up on the agent's OWN commit is refused by provenance (exit 76) -- the wrapper never exits 0 with its trailer reachable", () => {
+  const { tree, branch, parent } = fixture()
+  const { dir, count } = followupHooks(1)
+  git(tree, 'config', 'core.hooksPath', dir)
+
+  const result = run(tree, 'bash', [guard, branch, '-m', 'feat: subject', '-m', CO_AUTHOR])
+
+  expect(result.status).toBe(76)
+  expect(result.stderr).toContain('made by another writer')
+  expect(result.stdout).not.toContain('trailer stripped')
+  expect(readFileSync(count, 'utf8').trim()).toBe('1')
+  expect(subjects(tree, branch)).toEqual(['legitimate followup', 'feat: subject', 'base'])
+  expect(git(tree, 'rev-parse', `${branch}^^`)).toBe(parent)
+  // The truth stderr states: the hook-restored trailer is reachable from the branch, in
+  // the wrapper's own commit, and the wrapper said so instead of exiting 0.
+  expect(git(tree, 'log', '-1', '--format=%B', `${branch}^`)).toContain(SESSION)
+})
+
+test('#1133: a candidate that still carries the trailer is never referenced -- the trailer commit is withdrawn (exit 73, shimmed commit-tree)', () => {
+  const { tree, branch, parent } = fixture()
+  // A commit-tree that appends the trailer to whatever message it is given stands in for
+  // any way the rebuilt object could differ from the bytes the wrapper meant to store.
+  const { bin, count } = shimmedGitFailingNth('commit-tree', 1, `exec $REAL_GIT "$@" -m '${SESSION}'`)
+
+  const result = runGuardWithShim(tree, branch, bin)
+
+  expect(result.status).toBe(73)
+  expect(result.stderr).toContain('STILL on the rebuilt commit')
+  expect(result.stderr).toContain('was withdrawn')
+  expect(result.stderr).toContain('referenced by nothing')
+  expect(result.stdout).not.toContain('trailer stripped')
+  expect(git(tree, 'rev-parse', 'HEAD')).toBe(parent)
+  expect(git(tree, 'diff', '--cached', '--name-only')).toBe('change.txt')
+  expect(run(tree, 'git', ['log', '--format=%B', branch]).stdout).not.toContain('Claude-Session')
+  const candidate = result.stderr.match(/STILL on the rebuilt commit ([0-9a-f]{40})/)?.[1]
+  expect(candidate).toBeDefined()
+  expect(readBack(tree, candidate!)).toContain(SESSION)
+  expect(git(tree, 'for-each-ref', '--points-at', candidate!)).toBe('')
+  expect(readFileSync(count, 'utf8').trim()).toBe('1')
+})
+
+test('#1133: a config-signed first commit (commit.gpgsign) is rebuilt signed -- the signature is decided by the object, not by argv', () => {
+  const { tree, branch, parent } = fixture()
+  const { program, log } = fakeGpg()
+  git(tree, 'config', 'gpg.program', program)
+  git(tree, 'config', 'user.signingkey', 'CONFIGKEY')
+  git(tree, 'config', 'commit.gpgsign', 'true')
+
+  // Positive control: `commit-tree` ignores commit.gpgsign (that is why the wrapper must
+  // decide from the object). A plain commit-tree under this config stores no signature.
+  const treeOid = git(tree, 'write-tree')
+  const plain = git(tree, 'commit-tree', treeOid, '-p', parent, '-m', 'control')
+  expect(gpgsigHeaders(tree, plain)).toBe(0)
+  expect(readFileSync(log, 'utf8')).toBe('')
+
+  const result = run(tree, 'bash', [guard, branch, '-m', 'feat: config-signed', '-m', SESSION])
+
+  expect(result.status, result.stderr || result.stdout).toBe(0)
+  expect(git(tree, 'log', '-1', '--format=%B')).toBe('feat: config-signed')
+  expect(git(tree, 'rev-parse', 'HEAD^')).toBe(parent)
+  expect(gpgsigHeaders(tree, 'HEAD')).toBe(1)
+  // Signed twice with the configured key: the first commit and the rebuild.
+  expect(readFileSync(log, 'utf8').trim().split('\n')).toEqual(['--status-fd=2 -bsau CONFIGKEY', '--status-fd=2 -bsau CONFIGKEY'])
+})
+
+test('#1133: the rebuilt commit keeps the author and committer lines byte-for-byte (no committer-date bump)', () => {
+  const { tree, branch, parent } = fixture()
+  const env = {
+    ...process.env,
+    GIT_AUTHOR_NAME: 'Ada Author',
+    GIT_AUTHOR_EMAIL: 'ada@example.test',
+    GIT_AUTHOR_DATE: '1700000000 +0130',
+    GIT_COMMITTER_NAME: 'Cy Committer',
+    GIT_COMMITTER_EMAIL: 'cy@example.test',
+    GIT_COMMITTER_DATE: '1700000001 -0500',
+  }
+
+  const result = spawnSync('bash', [guard, branch, '-m', 'feat: idents', '-m', SESSION], { cwd: tree, encoding: 'utf8', env })
+
+  expect(result.status, result.stderr || result.stdout).toBe(0)
+  const object = readBack(tree, 'HEAD')
+  expect(object).toContain('\nauthor Ada Author <ada@example.test> 1700000000 +0130\n')
+  expect(object).toContain('\ncommitter Cy Committer <cy@example.test> 1700000001 -0500\n')
+  expect(object).not.toContain('Claude-Session')
+  expect(git(tree, 'rev-parse', 'HEAD^')).toBe(parent)
+})
+
+test('#1133: --amend through the wrapper: the expected parent is the amended commit\'s parent, and the strip lands', () => {
+  const { tree, branch, parent } = fixture()
+  git(tree, 'commit', '-q', '-m', 'first')
+  const first = git(tree, 'rev-parse', 'HEAD')
+  writeFileSync(join(tree, 'change.txt'), 'changed again\n')
+  git(tree, 'add', 'change.txt')
+
+  const result = run(tree, 'bash', [guard, branch, '--amend', '-m', 'feat: amended', '-m', SESSION, '-m', CO_AUTHOR])
+
+  expect(result.status, result.stderr || result.stdout).toBe(0)
+  expect(subjects(tree, branch)).toEqual(['feat: amended', 'base'])
+  expect(git(tree, 'rev-parse', 'HEAD^')).toBe(parent)
+  expect(git(tree, 'log', '-1', '--format=%B')).toBe(`feat: amended\n\n${CO_AUTHOR}`)
+  expect(git(tree, 'show', '--format=', 'HEAD:change.txt')).toBe('changed again')
+  expect(git(tree, 'for-each-ref', '--points-at', first)).toBe('')
+})
+
+test('#1133: a merge in progress concluded through the wrapper keeps BOTH parents on the stripped commit', () => {
+  const { repo, tree, branch, parent } = fixture()
+  git(repo, 'branch', 'side', parent)
+  git(repo, 'checkout', '-q', 'side')
+  writeFileSync(join(repo, 'side.txt'), 'side\n')
+  git(repo, 'add', 'side.txt')
+  git(repo, 'commit', '-q', '-m', 'side')
+  const side = git(repo, 'rev-parse', 'HEAD')
+  git(repo, 'checkout', '-q', 'main')
+  git(tree, 'reset', '-q')
+  rmSync(join(tree, 'change.txt'))
+  git(tree, 'merge', '-q', '--no-commit', '--no-ff', 'side')
+  expect(run(tree, 'git', ['rev-parse', '-q', '--verify', 'MERGE_HEAD']).status).toBe(0)
+
+  const result = run(tree, 'bash', [guard, branch, '-m', 'merge: side', '-m', SESSION])
+
+  expect(result.status, result.stderr || result.stdout).toBe(0)
+  expect(git(tree, 'rev-list', '--parents', '-1', 'HEAD').split(' ').slice(1)).toEqual([parent, side])
+  expect(git(tree, 'log', '-1', '--format=%B')).toBe('merge: side')
+  expect(run(tree, 'git', ['rev-parse', '-q', '--verify', 'MERGE_HEAD']).status).not.toBe(0)
+  expect(git(tree, 'show', '--format=', 'HEAD:side.txt')).toBe('side')
+})
+
+test('#1133: a commit with a header the rebuild cannot carry (mergetag) is refused and withdrawn (exit 75)', () => {
+  const { tree, branch, parent } = fixture()
+  const bin = shimmedGitFailing({})
+  const realGit = run(bin, 'sh', ['-c', 'command -v git']).stdout.trim()
+  // The shim lets the agent's commit land, then replaces it on the ref with the same commit
+  // plus a `mergetag` header (what a signed-tag merge produces), written with hash-object.
+  writeFileSync(
+    join(bin, 'git'),
+    `#!/bin/sh\n` +
+      `if [ "$1" = "commit" ]; then\n` +
+      `  ${realGit} "$@" || exit $?\n` +
+      `  oid=$(${realGit} cat-file commit HEAD | awk 'BEGIN{h=1} h&&/^$/{print "mergetag object 0000000000000000000000000000000000000000"; print " type commit"; print " tag v1"; print " tagger T <t@t> 1700000000 +0000"; print " "; print " v1"; h=0} {print}' | ${realGit} hash-object -t commit -w --stdin --literally)\n` +
+      `  exec ${realGit} update-ref HEAD "$oid"\n` +
+      `fi\n` +
+      `exec ${realGit} "$@"\n`,
+    { mode: 0o755 },
+  )
+
+  const result = runGuardWithShim(tree, branch, bin)
+
+  expect(result.status).toBe(75)
+  expect(result.stderr).toContain("'mergetag' header")
+  expect(result.stderr).toContain('was withdrawn')
+  expect(result.stdout).not.toContain('trailer stripped')
+  expect(git(tree, 'rev-parse', 'HEAD')).toBe(parent)
+  expect(git(tree, 'diff', '--cached', '--name-only')).toBe('change.txt')
+  expect(run(tree, 'git', ['log', '--format=%B', branch]).stdout).not.toContain('Claude-Session')
+})
+
+test('#1133: a detached HEAD is rewritten in place and no branch is touched', () => {
+  const { tree, branch, parent } = fixture()
+  git(tree, 'checkout', '-q', '--detach')
+
+  const result = run(tree, 'bash', [guard, branch, '-m', 'feat: detached', '-m', SESSION, '-m', CO_AUTHOR])
+
+  expect(result.status, result.stderr || result.stdout).toBe(0)
+  expect(result.stdout).toContain('HEAD is now')
+  expect(result.stdout).toContain('(HEAD moved from')
+  expect(run(tree, 'git', ['symbolic-ref', '-q', 'HEAD']).status).toBe(1)
+  expect(git(tree, 'rev-parse', 'HEAD^')).toBe(parent)
+  expect(git(tree, 'log', '-1', '--format=%B')).toBe(`feat: detached\n\n${CO_AUTHOR}`)
+  expect(git(tree, 'rev-parse', branch)).toBe(parent)
 })

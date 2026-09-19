@@ -83,43 +83,56 @@ at the one deterministic place every Forge commit passes through: the commit wra
    trailer-bearing commits on main (`51e5b16f`, `d9e415d9`, `0fc6cb83`) came from.
 
 2. **The wrapper strip.** `trident/commit-with-resolved-head.sh` no longer `exec`s
-   `git commit "$@"`; it runs the commit as a child and, on success and ONLY when HEAD moved
-   (so `--dry-run` and a no-op commit never amend an older commit), reads the new commit
-   back as the raw OBJECT (`git cat-file commit`, headers up to the first empty line, then
-   the message), removes every line beginning `Claude-Session:` (a bash-3.2 bracket pattern,
-   ASCII case-insensitive, compared under the C locale so every byte is a byte) and amends
-   the commit in place with
-   `--amend --only --no-verify --cleanup=verbatim -F <file>` (author, parent, tree and
-   `Co-Authored-By` untouched; `--only` is what keeps the TREE untouched, see the review
-   findings below). The stored message is byte-exact: the first commit's message minus the
-   removed line and, when that line was a paragraph of its own (the way the CLI reminder
-   makes the agent write it), the one empty line that separated that paragraph; a missing
-   final newline stays missing and no cleanup pass runs a second time. The post-condition
-   is then MEASURED: the commit now on the branch is read back as the raw object and run
-   through the same filter, and a trailer still there (a `prepare-commit-msg` hook, which
-   `--no-verify` does not skip, can put it back on the amend) withdraws the commit with
-   exit 73. If either read-back or the amend fails the wrapper fails closed too: it withdraws
-   the commit it just made and exits with git's code. Every withdrawal is a compare-and-swap
-   (`git update-ref HEAD <probed HEAD> <the commit being withdrawn>`, index and worktree
-   kept), never a blind reset, so a commit another writer landed on top is refused rather
-   than reset away and the refusal is reported as the commit remaining. A HEAD that cannot
-   be re-read -- after the commit (exit 69 failed / 70 named nothing) or after the amend
-   (71 / 72) -- is refused WITHOUT any rewrite, because there is no value to compare
-   against; stderr then says the commit is on the branch and may carry the trailer. So a
-   trailer-bearing commit is never left on the branch by a path that can measure the
-   branch, and no path ever moves a branch it cannot measure. The refusal exits 64-67 are
-   byte-for-byte unchanged. `trident/commit-with-resolved-head-realgit.test.ts`
-   runs the real script against real git: the trailer arrives the way the CLI makes the agent
-   write it (its own `-m` paragraph), and the commit that lands is one commit with the
-   fixture's parent, the same author, no `Claude-Session`, and `Co-Authored-By` byte-identical;
-   a trailer that is not the last paragraph is still the only line removed; a message without
-   the trailer is committed once and never amended (reflog has no `commit (amend)`); a failed
-   commit propagates git's exit code and amends nothing.
+   `git commit "$@"`; it runs the commit as a child and, on success and ONLY when the ref
+   moved (so `--dry-run` and a no-op commit never rewrite an older commit), rewrites the
+   commit it created without the trailer. Since round 15 it acts on the REF it committed on
+   and the OBJECT it created, never on whatever HEAD names afterwards. Before the commit it
+   captures the ref (`git symbolic-ref -q HEAD`, or the literal `HEAD` when detached) and
+   the parent the new commit must have (the probed HEAD, or for an `--amend` that commit's
+   own first parent). After the commit it re-reads that ref, reads the commit back as the
+   raw OBJECT (`git cat-file commit`, headers up to the first empty line, then the message)
+   and requires its first parent to be the expected one: any other first parent is another
+   writer's commit, refused with exit 76 and nothing rewritten or withdrawn. It removes
+   every line beginning `Claude-Session:` (a bash-3.2 bracket pattern, ASCII
+   case-insensitive, compared under the C locale so every byte is a byte) and BUILDS the
+   stripped commit with `git commit-tree` from the object's own tree, parents, author,
+   committer (raw `<epoch> <tz>` dates through the environment, so no committer-date bump)
+   and encoding, signed if and only if the object carries a `gpgsig` header (the key from
+   the argv scan, else the configured default). No hook of any kind runs on the rebuild and
+   no index is read, so a pathspec commit keeps its tree and a `prepare-commit-msg` hook
+   cannot put the trailer back. The stored message is byte-exact: the first commit's message
+   minus the removed line and, when that line was a paragraph of its own (the way the CLI
+   reminder makes the agent write it), the one empty line that separated that paragraph; a
+   missing final newline stays missing and no cleanup pass runs a second time. The
+   candidate is verified as an OBJECT before any ref names it -- read back raw, the same
+   filter must remove nothing and the tree and parents must equal the first commit's (exit
+   73 otherwise) -- and then published by compare-and-swap:
+   `git update-ref <ref> <candidate> <the exact commit read>`. A lost swap (exit 74) rewrites
+   nothing and names all three objects. Every withdrawal is the same compare-and-swap against
+   the captured ref (`git update-ref <ref> <probed HEAD> <the commit being withdrawn>`, index
+   and worktree kept), never a blind reset, so a commit another writer landed on top is
+   refused rather than reset away, the refusal is reported as the commit remaining, and a
+   branch switch after the commit cannot redirect a withdrawal onto another branch. A ref
+   that cannot be re-read after the commit (exit 69 failed / 70 named nothing) is refused
+   WITHOUT any rewrite, because there is no value to compare against; stderr then names the
+   ref and says the commit is on it and carries the trailer if the message had one. A header
+   commit-tree cannot carry (`mergetag`) is refused with exit 75; a message that is empty
+   without the trailer is refused as git would (exit 1) unless `--allow-empty-message` was
+   given. So exit 0 is reached only with no trailer in a provenance-checked commit, or after
+   the swap moved the captured ref from that exact commit to a candidate verified clean; no
+   path ever moves a ref it cannot measure. The refusal exits 64-67 are byte-for-byte
+   unchanged. `trident/commit-with-resolved-head-realgit.test.ts` runs the real script
+   against real git: the trailer arrives the way the CLI makes the agent write it (its own
+   `-m` paragraph), and the commit that lands is one commit with the fixture's parent, the
+   same author, no `Claude-Session`, and `Co-Authored-By` byte-identical; a trailer that is
+   not the last paragraph is still the only line removed; a message without the trailer is
+   committed once and never rewritten (reflog has no strip entry); a failed commit
+   propagates git's exit code and rewrites nothing.
 
 3. **The advisory half.** The Forge brief in `trident/inner-workflow.mjs` (`guardedCommit`)
    tells the model not to write the trailer and to keep `Co-Authored-By`, pinned in
    `trident/inner-workflow.test.ts`. The wrapper is the enforcement; the sentence only spares
-   an amend.
+   a rewrite.
 
 ### Review findings on the previous round, and how each was closed
 
@@ -493,6 +506,168 @@ round-13 script in a scratch repo (`GIT_CONFIG_GLOBAL=/dev/null`) before the cha
   `:301`, its withdrawal `:302`; tests at `realgit.test.ts:776`, `:789`, `:813`, `:834`,
   `:849`, `:868`, `:885`, `:921`, `:949`, `:968`.
 
+### Review findings on round 14 (`c80d4b92`, all seats APPROVE, the independent reviewer REQUEST_CHANGES with one major; the run stopped on a host progress-gate tie), and how each was closed
+
+The independent reviewer's adversarial real-git fixture (`/tmp/review-c80-adversarial.mjs`,
+ten modes) was re-run by the orchestrator against `c80d4b92` and again by this round before
+any change, with the same answers: `reprobe-fault` exit 69 and the trailer on `main`;
+`concurrent-before-reread` exit 73 with `concurrentLost: true` (the other writer's commit AND
+the wrapper's own stripped commit both withdrawn); `hook-clean-followup` and
+`ambiguous-reflog` exit 0 with the trailer on `main` (the wrapper's amended commit, now the
+parent of the hook's follow-up, still carried it); `switched-before-withdraw` exit 8 with
+`refs/heads/other` rolled back and `main` still carrying the trailer; `hook-readd` 73 and
+restored; `ordinary`, `detached`, `no-reflog` 0 and clean; `cherry-dry` 69 with
+`CHERRY_PICK_HEAD` kept. The five findings are one defect: the wrapper acted on "whatever
+HEAD names now" instead of the ref it committed on and the object it created. Round 15
+closes them with one provenance model rather than one at a time. The git 2.43 primitives
+it rests on were probed in a scratch repo first: `git commit-tree -F <file>` stores the
+message bytes verbatim (a missing final newline stays missing); an EMPTY `-F` file makes
+`commit-tree` read its message from STDIN (it blocked on the terminal in the probe -- the
+plan's "an empty -F is accepted, rc 0" holds only with stdin closed, so the wrapper runs it
+`</dev/null`); `GIT_AUTHOR_DATE` / `GIT_COMMITTER_DATE` accept the raw `<epoch> <tz>` form
+from the object header byte-for-byte (`author A <a@a> 1700000000 +0130` round-trips);
+`git -c i18n.commitEncoding=ISO-8859-1 commit-tree` writes `encoding ISO-8859-1`;
+`commit-tree` ignores `commit.gpgsign` (rc 0, zero `gpgsig` headers with
+`commit.gpgsign=true` and `gpg.program=/bin/false`) but honours `-S` (one header with the
+fake gpg) and `--no-gpg-sign` (zero); `git update-ref <ref> <new> <expected>` refuses a lost
+compare-and-swap with rc 128 `cannot lock ref '<ref>': is at <X> but expected <Y>`;
+`git symbolic-ref -q HEAD` exits 1 with no output when detached, and `git update-ref HEAD
+<new> <old>` then moves the detached HEAD itself and leaves every branch alone.
+
+The model, in the order the wrapper runs it:
+
+1. **Provenance captured BEFORE the commit.** `target_ref` = `git symbolic-ref -q HEAD`
+   (`refs/heads/<x>`) or the literal `HEAD` when detached (exit 77 when neither: the
+   symref query failed with something other than "detached", or the commit to amend could
+   not be read). `expected_parent` = the probed HEAD, or, only when argv before `--`
+   carries `--amend`, the first `parent` header of that commit (empty for a root amend).
+   Every later read and every ref update names `$target_ref`, never HEAD.
+2. **Re-probe on THAT ref**, still the wrapper's second `rev-parse`, so the counting shims
+   keep their meaning. Failed / empty stays fail-closed with exit 69 / 70 and NO rewrite (a
+   compare-and-swap needs an expected value the wrapper does not have; the blind reset is
+   what round 14 removed); stderr names `$target_ref` and says the commit this invocation
+   created is on it and carries the trailer if the message had one -- no "may". Unchanged
+   ref (`--dry-run`, no-op) exits 0 as before.
+3. **Provenance CHECK.** The commit is read back raw (first `cat-file`; a failure withdraws
+   by CAS on `$target_ref` as before) and its first `parent` must equal `expected_parent`.
+   A mismatch means another writer moved the ref after the commit: exit 76, nothing
+   rewritten (amending would replace their message), nothing withdrawn (that would discard
+   their work), both objects named.
+4. **The rewrite is BUILT, not amended.** From the raw object: tree, every parent in
+   order, the author and committer lines (name, email, `<epoch> <tz>` handed to
+   `commit-tree` through `GIT_AUTHOR_*` / `GIT_COMMITTER_*`, so the candidate's ident
+   lines are byte-identical -- the committer date is no longer bumped the way `--amend`
+   bumped it), the optional `encoding` header (forwarded as `-c i18n.commitEncoding=`),
+   and whether a `gpgsig` / `gpgsig-sha256` header is present. Any OTHER header
+   (`mergetag`, or one the wrapper does not know) is refused fail-closed: withdraw by CAS,
+   exit 75 naming the header. `candidate = git commit-tree <tree> -p <parent>... -F
+   <stripped message> [-S<key>|-S] </dev/null`, signed iff the ORIGINAL object carries a
+   signature (measured, not inferred from argv or config -- `commit-tree` ignores
+   `commit.gpgsign`, so a config-signed first commit would otherwise come out unsigned);
+   the key id comes from the existing argv scan (`-S<key>`, `--gpg-sign=<key>`, the
+   clustered `-aS<key>` / `-sSkey` arms, value-taking options skipped exactly as before) or
+   a bare `-S` for the default key. The `--allow-empty` forwarding arm is gone
+   (`commit-tree` takes the object's own tree); `--allow-empty-message` is still noted,
+   because a message that is empty without the trailer is refused as git would have
+   refused it (exit 1, withdrawn) unless the agent gave that flag -- the plan had dropped
+   this arm too, on the probe that `commit-tree` accepts an empty message, but a commit git
+   would not have made is not one the wrapper should make on its behalf. The
+   `git commit --amend --only --no-verify --cleanup=verbatim` line is DELETED: no hook of
+   any kind runs on the rewrite, so a `prepare-commit-msg` hook cannot put the trailer back
+   and a `post-commit` hook cannot land a follow-up on top of a trailer commit (finding 2
+   closed at the root, not by detection). A failed `commit-tree` withdraws by CAS and exits
+   its code.
+5. **Post-condition measured on the OBJECT before it is referenced.** The candidate is
+   read back raw (second `cat-file`); the same filter must remove nothing and its tree and
+   parent lines must equal the first commit's. Otherwise the trailer commit is withdrawn
+   by CAS and the wrapper exits 73 (or `cat-file`'s code); the candidate is never
+   referenced, so no ref ever names a trailer-bearing object the wrapper built.
+6. **Publish by compare-and-swap.** `git update-ref -m "commit-with-resolved-head: strip
+   Claude-Session (rewrite <new_head>)" "$target_ref" "$candidate" "$new_head"`. A lost
+   swap exits 74, rewrites nothing, and names the three objects (the candidate, built and
+   referenced by nothing; the wrapper's own commit, still reachable with the trailer; what
+   the ref names now). Every withdrawal keeps its CAS but on `$target_ref` ("`<ref>` is
+   back at `<probed>`"), never HEAD. Exit 0 is reached ONLY with no trailer in a
+   provenance-checked commit, or after this CAS moved `$target_ref` from the exact object
+   the provenance check read to a candidate verified clean. Exit codes 71 / 72 retire with
+   the post-amend re-read (there is nothing to re-read: the CAS is the post-condition on
+   the ref); 73, 74, 75, 76, 77 are the refusal codes above; 64-67, 69, 70 unchanged. On
+   the success path the wrapper makes exactly two `rev-parse` calls, two `cat-file` calls
+   and one `update-ref` (an `--amend` adds one `cat-file` before the commit).
+
+Each finding, before and after, measured with the fixture per mode (`REVIEW_MODE=<mode>`;
+`/tmp` was not edited):
+
+- **Finding 0 -- the 69/70 refusal left a trailer-bearing commit on the branch and said
+  "may carry".** `reprobe-fault`: exit 69 before and after; the trailer is on `main` in
+  both. This is the one residual the model keeps on purpose: with no readable value there
+  is nothing to compare against, and the alternative -- a blind reset -- is the round-13
+  defect. What changed is the sentence: stderr now names the ref and states, without
+  "may", that the commit is on it and carries the trailer if the message had one. The
+  acceptance line holds through this path only with a publish-side scan, named under Not
+  changed as the remaining task.
+- **Finding 1 -- a concurrent commit landing before the third `rev-parse` was mistaken for
+  the wrapper's own amend and withdrawn.** `concurrent-before-reread`: exit 73 with
+  `concurrentLost: true` before; exit 0 and clean after -- there is no third `rev-parse`
+  for the fixture's arm to fire on. The same race at the wrapper's other two seams is
+  pinned by real-git tests: a foreign commit landed before the re-probe is refused by its
+  parent (exit 76, `[concurrent, feat: subject, base]` all kept, the wrapper's own commit
+  still carrying the trailer and stderr saying so); a foreign commit landed inside the
+  first `cat-file` loses the publish swap (exit 74, both commits kept, the candidate a real
+  object that `for-each-ref --points-at` finds nothing for, stderr naming all three), with
+  the same shim and no arm as the positive control (exit 0, clean).
+- **Finding 2 -- a `prepare-commit-msg` hook re-added the trailer on the amend and a
+  `post-commit` hook appended a clean commit; exit 0 with the trailer in the ancestor.**
+  `hook-clean-followup` and `ambiguous-reflog`: exit 0 with the trailer on `main` before;
+  exit 0 with NO trailer reachable after (the post-commit hook fires once, on the agent's
+  commit; its count file reads 1). `hook-readd`: 73 and withdrawn before; 0 and clean
+  after (the fixture's own assertion `status!==73` throws there -- it encodes the round-14
+  model; the new outcome is the stronger one). Real-git tests: the round-14
+  prepare-commit-msg test now asserts exit 0 and a clean branch (its plain-git positive
+  control stays); a follow-up hook on the SECOND firing never fires; a follow-up hook on
+  the FIRST firing (the agent's own commit) is refused by provenance with exit 76 -- the
+  trailer the hook restored IS reachable, and the wrapper says so instead of exiting 0.
+- **Finding 3 -- a branch switch at the same observed head made the withdrawal roll back
+  the WRONG branch.** `switched-before-withdraw`: exit 8, `refs/heads/other` rolled back
+  and `main` with the trailer before; exit 8, `main` at `before` and `other` left where
+  the switch put it (at the trailer commit, which is not the wrapper's ref) after. Real-git
+  test with the fixture's arm inside the first `cat-file`. The dangling-symref test is
+  rewritten the same way: HEAD re-pointed at a missing branch after the commit no longer
+  refuses (69) but strips the CAPTURED branch, exit 0, `refs/heads/orphan` still absent.
+  The residual the plan names is kept and NOT claimed closed: `git commit` returns no oid,
+  so a SIBLING commit another writer landed from the same parent inside the gap is
+  indistinguishable from the wrapper's own; because the rewrite is content-preserving, the
+  worst case is that such a sibling loses a `Claude-Session:` line of its own.
+- **Finding 4 (major) -- the `git commit --amend` itself was the one remaining rewrite
+  with no expected-value check.** Closed by steps 4-6: the amend is deleted, the candidate
+  is built from `$new_head`'s own headers and published only by a CAS whose expected value
+  is the exact object the provenance check read. The lost-swap test above is the mutation.
+- **Rewritten and added tests**, all real git: the counting-shim control now counts two
+  `rev-parse` calls; the 69/70 wording tests expect "is on refs/heads/<branch> and carries
+  the trailer if the message had one" and reject "may carry"; the amend-refusing shims
+  (`--amend` in argv) became `commit-tree`-refusing shims (single fault, merge in progress,
+  concurrent writer); the 71/72 tests retire, the second-`cat-file` test asserts the
+  withdrawal AND that the named candidate is a real object referenced by nothing; new:
+  candidate carrying the trailer (shimmed `commit-tree` appends it -> 73, withdrawn,
+  candidate unreferenced), config-signed first commit (`commit.gpgsign=true` -> one
+  `gpgsig` header on the rebuilt commit, the fake gpg called twice with the configured key;
+  in-test positive control that a plain `commit-tree` under that config stores none),
+  author/committer lines byte-for-byte (`1700000000 +0130` / `1700000001 -0500` survive),
+  `--amend` through the wrapper (expected parent is the amended commit's parent; the
+  amended-away commit is referenced by nothing), a merge in progress concluded through the
+  wrapper (both parents kept), a `mergetag` header (written with `hash-object --literally`
+  by a shim on `commit` -> 75, withdrawn), and a detached HEAD (rewritten in place, the
+  branch untouched). 52 tests, all green; `npx tsc --noEmit -p trident/tsconfig.json` 0
+  errors.
+- **The G135 anchors were re-measured** at the round-15 tree: the filter `:19`, the ref
+  capture `:108`, the expected parent `:125`, `withdraw_commit` `:176` and its `update-ref`
+  `:177`, `parse_commit_object` `:188`, the re-probe `:244` and its check `:246`, the first
+  `cat-file` `:264`, the provenance check `:291`, the strip call `:296`, the header refusal
+  `:297`, `commit-tree` `:392`, the candidate read-back `:422`, the post-condition `:438`
+  and `:440`, the publish CAS `:457`; tests at `realgit.test.ts:776`, `:791`, `:816`,
+  `:837`, `:852`, `:871`, `:888`, `:918`, `:943`, `:976`, `:998`, `:1036`, `:1081`,
+  `:1098`, `:1116`, `:1139`, `:1163`, `:1185`, `:1202`, `:1225`, `:1254`.
+
 ### Mutation, proven by hand before nomination
 
 `grep -c '\[Cc\]\[Ll\]\[Aa\]\[Uu\]\[Dd\]\[Ee\]-\[Ss\]\[Ee\]\[Ss\]\[Ss\]\[Ii\]\[Oo\]\[Nn\]:\*) drop\[i\]=1; removed=1 ;;'
@@ -504,16 +679,33 @@ red (every strip test, including three added this round) while
 the wrapper, stays green (15 pass); restoring the arm returns the guard to 29 / 0. That was
 round 10's nomination.
 
-Round 14 nominates the measured post-condition (the round-13 section above).
+Round 15 nominates the publish compare-and-swap's expected value (step 6 of the round-14
+section above). `grep -c 'git update-ref -m "commit-with-resolved-head: strip Claude-Session
+(rewrite $new_head)" "$target_ref" "$candidate" "$new_head"' trident/commit-with-resolved-head.sh`
+= 1. Dropping the trailing `"$new_head"` argument (`sed 's|"$target_ref" "$candidate"
+"$new_head" 2>|"$target_ref" "$candidate" 2>|'`) makes the swap blind: the ref is moved
+to the candidate whatever it names. Measured: guard
+`commit-with-resolved-head-realgit.test.ts` 51 pass / 1 fail mutated -- exactly the
+lost-swap test ("a commit another writer landed INSIDE the read-back loses the publish
+compare-and-swap"), which sees exit 0 and `[feat: subject, base]` with the other writer's
+commit gone from the branch -- and 52 / 0 restored; control `trident/inner-workflow.test.ts`
+153 / 0 either way. The same-shim positive control inside that test (no arm, exit 0) is
+what keeps the shim from being mistaken for the cause.
+
+Round 14 nominated the measured post-condition (the round-13 section above).
 `grep -cF 'if strip_session_trailer <"$raw_after" >/dev/null; then'
 trident/commit-with-resolved-head.sh` = 1. Replacing that line with `if false; then`
 restores the round-13 behaviour exactly: the read-back runs but its answer is never acted
 on, so a `prepare-commit-msg` hook that puts the trailer back on the amend leaves the
 wrapper exiting 0 with "trailer stripped" on stdout and the trailer on the branch.
-Measured: guard `commit-with-resolved-head-realgit.test.ts` 40 pass / 1 fail mutated
-(exactly the prepare-commit-msg test at `:921`: it sees exit 0 instead of 73 and the
+Measured at the round-14 tree: guard `commit-with-resolved-head-realgit.test.ts` 40 pass /
+1 fail mutated (exactly the prepare-commit-msg test: it saw exit 0 instead of 73 and the
 trailer in the branch log) and 41 / 0 restored; control `trident/inner-workflow.test.ts`
-153 / 0 either way.
+153 / 0 either way. At the round-15 tree that anchor line is gone with the amend (the
+post-condition is now `if strip_session_trailer <"$raw_after" >/dev/null; then` over the
+CANDIDATE object, before any ref names it; the fixture's `REVIEW_MUTATION=bypass` on that
+same anchor reds the shimmed-commit-tree test, which sees exit 0 and the trailer on the
+branch).
 
 The earlier nominations still hold and are kept as by-hand checks:
 
@@ -530,12 +722,11 @@ Round 12 nominated the clustered-`-S` forward (the round-11 section above:
 `trident/inner-workflow.test.ts` 153 / 0 either way).
 
 
-`grep -c 'git commit --amend --only --no-verify' trident/commit-with-resolved-head.sh` = 1.
-`sed -i 's/git commit --amend --only --no-verify/git commit --amend --no-verify/'` on that
-file (the amend re-snapshots the index again) turns the pathspec test in
-`commit-with-resolved-head-realgit.test.ts` red while the build-settings control stays
-green; restoring the line returns the guard to green. (The round-8 pattern mutation on
-`-e '^Claude-Session:'` no longer applies: that grep is gone.)
+Round 8 nominated `--only` on the amend (`git commit --amend --only --no-verify` -> without
+`--only`, the pathspec test red). At the round-15 tree the amend is gone: the rebuild
+reads no index at all (`commit-tree` takes the object's own tree), and the pathspec test
+stands as the guard that it never does. (The round-8 pattern mutation on
+`-e '^Claude-Session:'` no longer applies either: that grep is gone.)
 
 ### Not changed, deliberately
 
@@ -549,12 +740,28 @@ green; restoring the line returns the guard to green. (The round-8 pattern mutat
 - Refusing BEFORE the first commit when the message would strip to nothing: the message is
   only known after git has composed it (`-m`, `-F`, `-C`, the editor), so the wrapper lets
   the commit land and withdraws it instead, which is the same fail-closed path every other
-  amend failure takes.
-- A hex check on the re-probe and post-amend re-read answers: not added. Those answers are
-  only ever compared with the probed HEAD or handed back to git as the expected value of a
-  compare-and-swap, which git validates itself; they are never used as a sha by the wrapper.
-  (Round 13 also left the post-amend `rev-parse` unchecked, arguing that a successful amend
-  means the trailer is gone; round 14 withdrew that entry -- see the round-13 findings.)
+  rebuild failure takes.
+- A hex check on the re-probe answer: not added. It is only ever compared with the probed
+  HEAD or handed to git as the expected value of a compare-and-swap, which git validates
+  itself; it is never used as a sha by the wrapper. (The `commit-tree` answer IS checked
+  for hex, because it becomes the new value of the ref.)
+- The same-parent SIBLING residual (round-14 finding 3): `git commit` returns no oid, so a
+  commit another writer landed from the same parent inside the gap, replacing this
+  invocation's, cannot be told from the wrapper's own. Not claimed closed. The rewrite is
+  content-preserving, so the worst case is that such a sibling loses a `Claude-Session:`
+  line of its own.
+- A commit with a `mergetag` header (a signed-tag merge concluded through the wrapper) is
+  refused with exit 75 rather than rebuilt: `commit-tree` cannot carry the header, and a
+  rebuild that dropped it would publish a different commit than the one git made. Forge
+  never concludes a signed-tag merge.
+- An `encoding UTF-8` header, if an object ever carried one, is not reproduced (git itself
+  never writes it; `commit-tree` writes `encoding` only for a non-UTF-8 value). The
+  post-condition compares tree and parents, not the encoding header.
+- A publish-side range scan (`trident/gates/release-readiness.ts:publicationReadiness`
+  refusing to publish when any commit in base..head has a line matching the same bracket
+  pattern): NOT in this round. It is what makes the acceptance hold through a 69 / 70 / 74
+  / 76 refusal that Forge then ignores, and it is the remaining task of this plan, in its
+  own PR with its own real-git test.
 - Snapshotting and restoring the sequencer state a withdrawn commit consumed: still not
   done; the loss is named on stderr (unchanged from round 10).
 - `docs/AS_BUILT.md` and every existing shard: frozen; this record is a new shard.
@@ -623,3 +830,14 @@ seat), on the same base `a1be24e0`, in the same worktree with no fast-forward ne
 replaces every blind withdrawal with a compare-and-swap, refuses without rewriting where
 there is nothing to compare against, measures the strip's post-condition, and closes the
 nits. It touches only the wrapper, its real-git tests, the G135 row and this record.
+
+Round 15 is the fix commit on top of round 14 (`c80d4b92`, all seats APPROVE, the
+independent reviewer REQUEST_CHANGES with the one major above; the run was stopped by a
+host progress-gate tie, not by the work), on the same base `a1be24e0`: the fresh worktree
+was fast-forwarded to the published head (`git merge --ff-only`, no cherry-pick, no
+conflict) and one commit replaces the post-commit half of the wrapper with the ref+object
+provenance model. It touches only the wrapper, its real-git tests, the G135 row and this
+record; the settings switch, the Forge brief, the strip filter and the Co-Authored-By
+handling are untouched. The full suite is deferred to this plan's terminal task by the
+host's instruction; this round ran the wrapper's own real-git file and the Forge-brief file
+(52 + 153, all green) and the trident typecheck.
