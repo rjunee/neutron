@@ -1677,10 +1677,10 @@ export function buildLiveAgentTurn(
         prompt,
         tools,
         model_preference: [configuredTier ?? model],
-        // Per-(instance, topic) warm-session key: the persistent substrate folds
-        // `metering_context.project_id` into its pool key when no
-        // projectIdResolver is wired on this substrate (build-llm-call-
-        // substrate.ts). Per-dispatch ⇒ race-free across concurrent topics.
+        // Keep the legacy metering id, plus exact conversation scope for
+        // session/provider resolution: General (null) must remain distinct
+        // from a project literally named 'general'. Per-dispatch ⇒ race-free
+        // across concurrent topics (build-llm-call-substrate.ts).
         metering_context: { project_id: scope, conversationProjectId: turn.project_id ?? null },
         turn_timeout_ms: CHAT_TURN_INACTIVITY_MS,
         turn_absolute_ceiling_ms: absoluteCeilingMs,

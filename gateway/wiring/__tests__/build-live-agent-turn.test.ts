@@ -376,20 +376,29 @@ describe('build-live-agent-turn — reply path', () => {
     expect(sent.filter((e) => e.type === 'agent_message')).toHaveLength(1)
   })
 
-  test('per-(project, topic) session keying rides metering_context.project_id', async () => {
+  test('session keying preserves legacy metering id and exact conversation scope', async () => {
     const specs: AgentSpec[] = []
     const sent: ChatOutbound[] = []
     const run = makeRunner({ substrate: makeStubSubstrate({ specs }) })
     await run(makeTurn({ sent }))
-    expect(specs[0]!.metering_context).toEqual({ project_id: 'general' })
+    expect(specs[0]!.metering_context).toEqual({
+      project_id: 'general', conversationProjectId: null,
+    })
     await run(
       makeTurn({ sent, topic_id: 'web:u-1:minas-tirith', project_id: 'minas-tirith' }),
     )
     expect(specs[1]!.metering_context).toEqual({
       project_id: 'minas-tirith',
+      conversationProjectId: 'minas-tirith',
     })
     // Project topics get their own first-turn context (scoped fragment).
     expect(specs[1]!.prompt).toContain('minas-tirith')
+    // The legacy id alone collides with General; consumers need the explicit
+    // marker to select the right live session, provider, and configured tier.
+    await run(makeTurn({ sent, topic_id: 'web:u-1:general', project_id: 'general' }))
+    expect(specs[2]!.metering_context).toEqual({
+      project_id: 'general', conversationProjectId: 'general',
+    })
   })
 
   test('declares the built-in tool surface (read + native Skill mechanism) on every spec', async () => {
