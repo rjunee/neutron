@@ -16,6 +16,15 @@ const user = (prompt = 'Hello', turn = 'turn-one', thread = 'thread-one'): strin
   item: { type: 'UserMessage', id: 'item-one', content: [{ type: 'text', text: prompt, text_elements: [] }] },
 })
 const complete = (turn = 'turn-one', reply = 'Hi'): string => event({ type: 'task_complete', turn_id: turn, last_agent_message: reply })
+// Native child completion retains its dispatching parent turn even after that
+// parent completes and a subsequent owner turn starts.
+const childActivity = (kind: string, turn = 'parent-turn', child = 'child-thread', path = '/root/child', thread = 'thread-one'): string => event({
+  type: 'item_completed', thread_id: thread, turn_id: turn,
+  item: { type: 'SubAgentActivity', id: kind === 'started' ? 'spawn' : 'subagent-completed-child-turn',
+    kind, agent_thread_id: child, agent_path: path },
+})
+const parentHistory = (): string => start('parent-turn') + user('Dispatch child', 'parent-turn')
+  + childActivity('started') + complete('parent-turn', 'Dispatched')
 const directories: string[] = []
 const observers: CodexRolloutObserver[] = []
 afterEach(() => {
@@ -118,6 +127,80 @@ describe('native Codex rollout observation', () => {
     expect(observer.read()).toEqual([])
     f.append('\n')
     expect(observer.read().at(-1)?.kind).toBe('completion')
+  })
+
+  test.each(['before start', 'before echo', 'after echo', 'after completion', 'baseline'])(
+    'correlates late child completion %s without completing or changing the owner turn', placement => {
+      const f = fixture(parentHistory() + (placement === 'baseline' ? childActivity('completed') : ''))
+      const observer = f.observe()
+      observer.bindReceipt({ ...f.identity, turnId: 'turn-one' })
+      if (placement === 'before start') {
+        f.append(childActivity('completed'))
+        expect(observer.read()).toEqual([])
+        expect(observer.turnId).toBeUndefined()
+      }
+      f.append(start() + (placement === 'before echo' ? childActivity('completed') : ''))
+      expect(observer.read()).toEqual([])
+      expect(observer.turnId).toBeUndefined()
+      f.append(user() + (placement === 'after echo' ? childActivity('completed') : ''))
+      expect(observer.read()).toEqual([])
+      expect(observer.turnId).toBe('turn-one')
+      expect(observer.completed).toBe(false)
+      f.append(complete() + (placement === 'after completion' ? childActivity('completed') : ''))
+      expect(observer.read()).toEqual([
+        { kind: 'token', text: 'Hi' },
+        expect.objectContaining({ kind: 'completion', substrate_instance_id: 'thread-one' }),
+      ])
+      expect(observer.turnId).toBeUndefined()
+    },
+  )
+
+  test('tracks a native child started and completed in the current append', () => {
+    const f = fixture()
+    const observer = f.observe()
+    f.append(start() + user() + childActivity('started', 'turn-one')
+      + childActivity('completed', 'turn-one') + complete())
+    expect(observer.read().at(-1)?.kind).toBe('completion')
+  })
+
+  test.each([
+    ['foreign owner thread', childActivity('completed', 'parent-turn', 'child-thread', '/root/child', 'foreign')],
+    ['wrong parent turn', childActivity('completed', 'foreign-turn')],
+    ['wrong child thread', childActivity('completed', 'parent-turn', 'foreign-child')],
+    ['wrong child path', childActivity('completed', 'parent-turn', 'child-thread', '/root/foreign')],
+    ['missing child identity', childActivity('completed', 'parent-turn', '')],
+    ['unknown child status', childActivity('future-status')],
+    ['late start', childActivity('started')],
+    ['stale user item', user('Hello', 'parent-turn')],
+    ['stale assistant item', event({ type: 'item_completed', thread_id: 'thread-one', turn_id: 'parent-turn', item: { type: 'AgentMessage' } })],
+    ['duplicate child completion', childActivity('completed') + childActivity('completed')],
+  ])('refuses %s amid a current owner turn', (_name, notification) => {
+    const f = fixture(parentHistory())
+    const observer = f.observe()
+    f.append(start() + notification + user() + complete())
+    expect(() => observer.read()).toThrow('codex rollout refused')
+  })
+
+  test('refuses a child completion without its observed dispatch', () => {
+    const f = fixture(start('parent-turn') + user('Earlier', 'parent-turn') + complete('parent-turn'))
+    const observer = f.observe()
+    f.append(start() + childActivity('completed') + user() + complete())
+    expect(() => observer.read()).toThrow('codex rollout refused')
+  })
+
+  test('does not reuse a child completion already settled in the baseline', () => {
+    const f = fixture(parentHistory() + childActivity('completed'))
+    const observer = f.observe()
+    f.append(start() + childActivity('completed') + user() + complete())
+    expect(() => observer.read()).toThrow('unmatched native child completion')
+  })
+
+  test.each([
+    ['start outside a parent turn', childActivity('started')],
+    ['foreign start', start('parent-turn') + childActivity('started', 'parent-turn', 'child-thread', '/root/child', 'foreign')],
+    ['unmatched completion', start('parent-turn') + complete('parent-turn') + childActivity('completed')],
+  ])('refuses baseline child evidence with %s', (_name, history) => {
+    expect(() => fixture(history).observe()).toThrow('codex rollout refused')
   })
 
   test.each([

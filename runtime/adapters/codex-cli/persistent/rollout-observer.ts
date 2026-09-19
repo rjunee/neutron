@@ -54,6 +54,7 @@ export class CodexRolloutObserver {
   private offset = 0
   private pending = Buffer.alloc(0)
   private readonly seenTurns = new Set<string>()
+  private readonly pendingChildren = new Set<string>()
   private activeTurn: string | undefined
   private echoed = false
   private terminal = false
@@ -240,10 +241,29 @@ export class CodexRolloutObserver {
         return []
       }
       case 'item_completed': {
+        const item = object(payload.item)
+        if (item.type === 'SubAgentActivity' && (item.kind === 'started' || item.kind === 'completed')) {
+          if (payload.thread_id !== this.identity.threadId
+            || [payload.turn_id, item.agent_thread_id, item.agent_path].some(value => typeof value !== 'string' || value.length === 0)) {
+            throw new Error('codex rollout refused: incomplete native child identity')
+          }
+          const child = JSON.stringify([payload.turn_id, item.agent_thread_id, item.agent_path])
+          if (item.kind === 'started') {
+            if (this.activeTurn === undefined || payload.turn_id !== this.activeTurn || this.pendingChildren.has(child)) {
+              throw new Error('codex rollout refused: stale or duplicate native child start')
+            }
+            this.pendingChildren.add(child)
+          } else {
+            // Native completion notifications retain the dispatching parent turn,
+            // even while a later owner turn is running. Only that observed child
+            // can settle its activity; it cannot echo or complete the owner turn.
+            if (!this.pendingChildren.delete(child)) throw new Error('codex rollout refused: unmatched native child completion')
+            return []
+          }
+        }
         if (!baseline && (payload.turn_id !== this.activeTurn || payload.thread_id !== this.identity.threadId)) {
           throw new Error('codex rollout refused: wrong native item identity')
         }
-        const item = object(payload.item)
         if (!baseline && item.type === 'UserMessage') {
           const content = item.content
           if (this.activeTurn === undefined || this.echoed || !Array.isArray(content) || content.length !== 1
