@@ -5,6 +5,7 @@ import { fireAndForget } from '@neutronai/logger/fire-and-forget.ts'
 import { BROKER_MAX_MESSAGE_BYTES, type ProjectControlTransport } from './project-control-broker-transport.ts'
 import { validateProjectControlScope } from './project-control-broker-scope.ts'
 import { openProjectControlJournal } from './project-control-broker-journal.ts'
+import { createReviewPermissionTransaction, type ReviewPermissionLease, type ReviewPermissionRequest } from './project-review-permissions.ts'
 
 type Rpc = Record<string, unknown>
 type Id = string | number
@@ -39,6 +40,8 @@ export interface ProjectControlGateway {
 export interface ProjectControlBroker {
   state(): ProjectControlState
   gateway(clientId: string): ProjectControlGateway
+  /** Host-only exact-stage transaction; never exposed through the control socket. */
+  reviewPermissions?(request: ReviewPermissionRequest, expectedEpoch: number): Promise<ReviewPermissionLease>
   close(): void
 }
 type Client = { name: string; initialized: boolean; emit(message: Rpc): void; closed: boolean }
@@ -55,7 +58,7 @@ export async function createProjectControlBroker(options: {
   codexHome: string
   upstream: ProjectControlTransport
   requestTimeoutMs?: number
-}): Promise<ProjectControlBroker> {
+}): Promise<ProjectControlBroker & { reviewPermissions(request: ReviewPermissionRequest, expectedEpoch: number): Promise<ReviewPermissionLease> }> {
   const { upstream } = options
   let upstreamClosed = false
   const closeUpstream = (): void => {
@@ -83,6 +86,7 @@ export async function createProjectControlBroker(options: {
   let closed: Error | undefined
   let current: Work | undefined
   let active: { client: Client; epoch: number; turnId: string | null; completed: boolean } | undefined
+  let review: ReturnType<typeof createReviewPermissionTransaction> | undefined
   let server: ReturnType<typeof Bun.serve<{ client: Client }>> | undefined
   const refusal = (message: string): ProjectControlRefusal => new ProjectControlRefusal(message)
   const close = (error = new Error('Project broker closed')): void => {
@@ -125,6 +129,7 @@ export async function createProjectControlBroker(options: {
     if (closed) return
     try { journal.assertOwned() } catch { close(new Error('Stale broker generation')); return }
     if (!object(raw)) { close(new Error('Invalid native envelope')); return }
+    review?.observe(raw)
     if (typeof raw.method !== 'string') {
       if (typeof raw.id !== 'string') return
       const entry = pending.get(raw.id)
@@ -137,6 +142,9 @@ export async function createProjectControlBroker(options: {
       return
     }
     const params = object(raw.params) ? raw.params : {}
+    if (review && id(raw.id)) {
+      send({ id: raw.id, error: { code: -32001, message: 'Review permission lease forbids approvals' } }); return
+    }
     const threadId = params.threadId ?? (object(params.thread) ? params.thread.id : undefined)
     if (threadId !== undefined && threadId !== options.threadId) return
     if (params.threadId !== undefined && object(params.thread) && params.thread.id !== undefined && params.thread.id !== params.threadId) return
@@ -232,6 +240,7 @@ export async function createProjectControlBroker(options: {
       params = structuredClone(params)
       validate(method, params)
       if (classifyProjectControlMethod(method) === 'read') return native(method, params).then(result => filter(method, result))
+      if (review) throw refusal('Project writer busy with native review permissions')
       if (journal.unresolved !== null) throw refusal('Prior broker mutation unresolved; recovery inspection required')
       if (expectedEpoch !== undefined && expectedEpoch !== epoch) throw refusal('Stale broker epoch')
       if (method === 'turn/interrupt') {
@@ -308,7 +317,19 @@ export async function createProjectControlBroker(options: {
     journal.bound()
   } catch (error) { close(); throw error }
   return {
-    state: () => ({ generation: journal.generation, epoch, phase: closed ? 'closed' : journal.unresolved !== null ? 'recovery' : active ? 'turn' : current || queue.length ? 'mutation' : 'idle', activeTurnId: active?.turnId ?? null, unresolved: journal.unresolved }),
+    state: () => ({ generation: journal.generation, epoch, phase: closed ? 'closed' : journal.unresolved !== null ? 'recovery' : active ? 'turn' : review || current || queue.length ? 'mutation' : 'idle', activeTurnId: active?.turnId ?? null, unresolved: journal.unresolved }),
+    async reviewPermissions(request, expectedEpoch) {
+      if (closed || review || active || current || queue.length || journal.unresolved !== null || expectedEpoch !== epoch) throw refusal('Native review requires the idle current project writer')
+      review = createReviewPermissionTransaction({ cwd: options.cwd, codexHome: options.codexHome, threadId: options.threadId, rpc: native,
+        finish() { journal.settle(); review = undefined },
+        fence() { close(new Error('Native review permissions unresolved; project owner fenced')) },
+      }, structuredClone(request))
+      try {
+        epoch = journal.reserve()
+        journal.record('review-permissions')
+        return await review.prepare()
+      } catch (error) { close(new Error('Native review permissions unresolved; project owner fenced')); throw error }
+    },
     gateway(clientId) {
       if (closed || !clientId || [...clients].some(client => client.name === clientId)) throw refusal('Gateway identity unavailable')
       const listeners = new Set<(message: Rpc) => void>()

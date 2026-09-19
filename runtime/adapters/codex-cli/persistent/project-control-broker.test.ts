@@ -1,5 +1,5 @@
 import { afterEach, describe, expect, test } from 'bun:test'
-import { mkdtempSync, rmSync, statSync } from 'node:fs'
+import { mkdirSync, mkdtempSync, rmSync, statSync } from 'node:fs'
 import { tmpdir } from 'node:os'
 import { join } from 'node:path'
 import { createConnection, createServer, type Socket } from 'node:net'
@@ -68,6 +68,38 @@ async function terminal(socketPath: string) {
 }
 
 describe('project control broker', () => {
+  test('host review lease excludes socket and gateway writers; abandonment persists the recovery fence', async () => {
+    const f = await fixture()
+    const stageDir = join(f.dir, '.neutron', 'build-results', 'a'.repeat(64))
+    mkdirSync(stageDir, { recursive: true })
+    const gateway = f.broker.gateway('normal-owner')
+    const tui = await terminal(f.socketPath)
+    const preparing = f.broker.reviewPermissions({ stageDir, network: false }, 0)
+    const rejected = preparing.catch(error => error as Error)
+    expect(f.broker.state().phase).toBe('mutation')
+    await expect(gateway.request('turn/start', { threadId: 'project-thread', input: [] }, f.broker.state().epoch)).rejects.toThrow('busy')
+    tui.send({ id: 'review-bypass', method: 'thread/settings/update', params: { threadId: 'project-thread', sandboxPolicy: { type: 'dangerFullAccess' } } })
+    expect((await tui.wait(message => message.id === 'review-bypass')).error.message).toContain('busy')
+    f.receive({ id: 'review-approval', method: 'item/fileChange/requestApproval', params: { threadId: 'project-thread', turnId: 'review-turn' } })
+    expect(f.sent.find(message => message.id === 'review-approval')?.error.message).toContain('forbids approvals')
+    f.response('thread/resume', {})
+    expect(await rejected).toBeInstanceOf(Error)
+    expect(f.broker.state().phase).toBe('closed')
+    expect(f.sent.filter(message => message.method === 'turn/start')).toHaveLength(0)
+    const upstream: ProjectControlTransport = { listen(onMessage) { this.send = message => { if (message.method === 'initialize') queueMicrotask(() => onMessage({ id: message.id, result: {} })) } }, send() {}, close() {} }
+    const recovered = await createProjectControlBroker({ ...f.options, upstream })
+    cleanup.push(() => recovered.close())
+    expect(recovered.state().phase).toBe('recovery')
+    expect(recovered.state().unresolved).toBe('review-permissions')
+  })
+
+  test('review profile provisioning remains unavailable to arbitrary RPC clients', async () => {
+    const f = await fixture(), gateway = f.broker.gateway('normal-owner')
+    await expect(gateway.request('config/batchWrite', { edits: [{ keyPath: 'permissions.neutron_review_fake', value: { filesystem: { ':root': 'write' } }, mergeStrategy: 'replace' }] }, 0)).rejects.toThrow('Unclassified')
+    await expect(gateway.request('reviewPermissions', { stageDir: f.dir }, 0)).rejects.toThrow('Unclassified')
+    expect(f.sent.filter(message => message.method === 'config/batchWrite')).toHaveLength(0)
+  })
+
   test('explicit mutation classification includes native model persistence and refuses new methods', () => {
     for (const method of ['turn/start', 'thread/settings/update', 'config/batchWrite', 'turn/interrupt', 'thread/resume']) expect(classifyProjectControlMethod(method)).toBe('mutation')
     expect(classifyProjectControlMethod('thread/read')).toBe('read')
