@@ -596,8 +596,10 @@ export interface BuildLlmCallSubstrateInput {
    * `provider`, then to `'anthropic'`. An UNKNOWN non-empty string THROWS via
    * `normalizeProvider` (fail-loud, never a silent Claude fallback) — production
    * only ever resolves a valid `Provider` here, so this never trips in practice.
+   * `scope: 'conversation'` attests an exact scope: undefined project means
+   * General, not permission for the resolver to fall back to an active project.
    */
-  providerResolver?: (projectId?: string) => ProviderSelection | Provider | string | undefined
+  providerResolver?: (projectId?: string, scope?: 'conversation') => ProviderSelection | Provider | string | undefined
   /**
    * OpenAI-family (`'openai'` / `'openai-codex'`) configuration. Consumed
    * ONLY when the resolved provider is non-anthropic; ignored for the default
@@ -960,7 +962,9 @@ export function buildLlmCallSubstrate(
           ...(chat!.fetchImpl === undefined ? {} : { fetchImpl: chat!.fetchImpl }),
         }).start({ ...spec, tools })
       }
-      const resolvedSelection = input.providerResolver?.(projectId)
+      const resolvedSelection = conversationProjectId !== undefined
+        ? input.providerResolver?.(projectId, 'conversation')
+        : input.providerResolver?.(projectId)
       const resolvedProvider =
         typeof resolvedSelection === 'object' ? resolvedSelection.provider : resolvedSelection
       const providerSource =

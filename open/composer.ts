@@ -844,6 +844,17 @@ export function buildOpenAiToolManifest(): () => ReadonlyArray<{
   return () => replToolBridgeRef.current?.listToolSchemas() ?? []
 }
 
+/** Explicit conversation scope (including General) must not inherit a docs
+ * escalation's active-project pointer. Unscoped legacy callers still do. */
+export function createOpenConversationProviderResolver(
+  resolve: ReturnType<typeof createModelProviderResolver>,
+  activeProject: () => string | null | undefined,
+): NonNullable<OpenWiringContext['providerResolver']> {
+  return (projectId, scope) => resolve(
+    scope === 'conversation' ? projectId : projectId ?? activeProject() ?? undefined,
+  )
+}
+
 /** Deps for {@link resolveOpenConversationalProvider} (injected for testing). */
 export interface OpenConversationalProviderDeps {
   resolveOpenAiPool: (env: NodeJS.ProcessEnv) => CredentialPool | null
@@ -1068,8 +1079,8 @@ export function buildOpenGraphComposer(
       buildToolManifest: buildOpenAiToolManifest,
     })
     const resolveModelProvider = createModelProviderResolver(db, project_slug, projectSettingsStore)
-    const providerResolver = (projectId?: string) => resolveModelProvider(
-      projectId ?? chatSessionProjects.getActive(OWNER_USER_ID) ?? undefined,
+    const providerResolver = createOpenConversationProviderResolver(
+      resolveModelProvider, () => chatSessionProjects.getActive(OWNER_USER_ID),
     )
     // O6 — NOTICE-FAMILY + RECOVERED-REPLY sinks for the owner's WARM conversational
     // substrate (`cc-agent-*`). The persistent REPL fires four DI seams on the

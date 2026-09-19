@@ -657,7 +657,7 @@ export interface LiveAgentOnboardingSeam {
 
 export interface BuildLiveAgentTurnInput {
   /** Selected configured tier; these stateless turns need fresh context every time. */
-  configuredModel?: (projectId: string) => string | undefined
+  configuredModel?: (projectId: string | undefined) => string | undefined
   /**
    * The DEDICATED conversational substrate (warm persistent CC REPL pool).
    * Built by the boot shell via `buildLlmCallSubstrate` WITHOUT `ephemeral`
@@ -1034,7 +1034,7 @@ export function buildLiveAgentTurn(
     if (
       activeTopics.has(topicKey) &&
       queuedTurnCount.get(topicKey) === 1 &&
-      input.configuredModel?.(turn.project_id ?? 'general') === undefined &&
+      input.configuredModel?.(turn.project_id) === undefined &&
       input.injectActiveTurn !== undefined &&
       turn.seed_turn !== true &&
       turn.button_prompt_id === undefined &&
@@ -1542,7 +1542,7 @@ export function buildLiveAgentTurn(
       (event, meta) => moduleLog.warn(event, { project: turn.project_slug, topic: turn.topic_id, ...meta }),
     )
     let prompt: string
-    const configuredTier = input.configuredModel?.(turn.project_id ?? 'general')
+    const configuredTier = input.configuredModel?.(turn.project_id)
     if (configuredTier !== undefined) contextSent.delete(topicKey)
     const isColdFirstTurn = !contextSent.has(topicKey)
     // THREE-POINT reset-epoch protocol (Argus r2 + r3 blocker). The scope's

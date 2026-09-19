@@ -29,6 +29,7 @@ import type { SessionHandle } from '@neutronai/runtime/session-handle.ts'
 import { buildLiveAgentTurn } from '../build-live-agent-turn.ts'
 import type { LiveAgentTurnRequest } from '../../http/chat-bridge.ts'
 import { BEST_MODEL, getBestModel, setBestModelOverride } from '@neutronai/runtime/models.ts'
+import { projectModelTier } from '@neutronai/runtime/configured-models.ts'
 
 let tmp: string
 let db: ProjectDb
@@ -100,6 +101,24 @@ function makeTurn(sent: ChatOutbound[], over?: Partial<LiveAgentTurnRequest>): L
 }
 
 describe('build-live-agent-turn — dynamic model resolution (always-latest)', () => {
+  for (const configuredProject of ['general', 'other']) {
+    test(`configured tier for ${configuredProject} never captures General`, async () => {
+      const specs: AgentSpec[] = []
+      const env = { NEUTRON_PROJECT_MODELS: JSON.stringify({ [configuredProject]: 'glm' }) }
+      const run = buildLiveAgentTurn({
+        substrate: makeStubSubstrate(specs), configuredModel: id => projectModelTier(env, id),
+        personaLoader: { async load() { return '' } }, buttonStore: store,
+        project_slug: 'alice', owner_home: tmp, now: () => now,
+      })
+      for (const id of [undefined, 'general', 'other']) {
+        await run(makeTurn([], { topic_id: `scope-${id}`, ...(id === undefined ? {} : { project_id: id }) }))
+      }
+      expect(specs.map(s => s.model_preference[0])).toEqual([
+        getBestModel(), configuredProject === 'general' ? 'glm' : getBestModel(),
+        configuredProject === 'other' ? 'glm' : getBestModel(),
+      ])
+    })
+  }
   test('carries distinct General and literal general conversation scope through dispatch', async () => {
     const specs: AgentSpec[] = []
     const run = makeDefaultModelRunner(makeStubSubstrate(specs))
