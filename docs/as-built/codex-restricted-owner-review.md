@@ -38,13 +38,23 @@ native errors and lost replies still fence
 (`open/wiring/codex-owner-controls.ts:116-133`). The tests distinguish known
 zero-mutation refusal from unknown mutation rather than matching error text.
 
-Synthesis selection now admits Claude and Codex, while the runtime still
-requires the structured verdict and isolated lease (`trident/phase-models.ts:271-279`).
-Decomposition remains explicitly Claude-only. This supersedes the historical
-Claude-only synthesis limitation recorded in
-`docs/as-built/claude-cross-provider-headless.md`, not its cross-provider routing
-or its immutable record. Unavailable isolation, unsupported synthesis providers,
-and malformed schemas still refuse; there is no silent Claude fallback.
+Synthesis selection admits Claude and Codex for the project runner, whose
+same-provider Codex path requires the structured verdict and isolated native
+review lease (`trident/phase-models.ts:271-279`). Decomposition remains explicitly
+Claude-only. This supersedes the project runner's historical Claude-only synthesis
+limitation recorded in `docs/as-built/claude-cross-provider-headless.md`, not its
+cross-provider routing or its immutable record. Unavailable isolation,
+unsupported synthesis providers, and malformed schemas still refuse.
+
+The legacy workflow has no Codex synthesis dispatch. Its routing table explicitly
+refuses that group, and admission throws an error naming the phase, selected tier,
+and group before invoking the Claude synthesis agent
+(`trident/inner-workflow.mjs:465,561-563`). Claude synthesis remains executable.
+The shared catalog's Codex option therefore cannot silently fall back to Claude
+in the legacy workflow. The coverage test requires every offered group either
+to have a legacy dispatch or this explicit refusal, and executes the shipped
+synthesis call site to prove both outcomes
+(`trident/__tests__/phase-model-coverage.test.ts`).
 
 Actual native continuation exposed a top-level
 `inter_agent_communication_metadata` record. The observer accepts only its
@@ -67,6 +77,12 @@ record; unknown types and other shapes still refuse
   publication cannot release the lease early. Known busy and cold capability
   refusals preserve later chat; corrupt or foreign rollout identity, unknown
   preparation, and delivered model errors preserve durable refusal.
+- Legacy workflow and phase coverage: 199 passed. Two additional semantic
+  mutations were killed and restored: removing the Codex synthesis refusal
+  exposed silent Claude fallback; refusing every synthesis group rejected the
+  valid Claude call. The consuming Open suite still passes all 100 tests,
+  including the project runner's restricted native Codex synthesis success.
+  Root and Trident TypeScript checks and scoped ESLint also pass for this fix.
 - Root and runtime TypeScript checks and scoped ESLint passed.
 - Fifteen semantic mutations were killed, then restored: reject valid review;
   accept foreign staging; skip native settlement; accept lost restoration;
