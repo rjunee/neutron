@@ -4295,6 +4295,7 @@ export function buildOpenGraphComposer(
       // that edge), so the composer, which owns both, connects them. Without this line
       // the seam exists and nothing calls it: built-but-never-wired.
       onRevoked: async () => {
+        await codexOwnerBindings.retireRevokedMcpServers()
         const { evicted, poisoned } = await evictWarmReplsForMcpSurfaceChange()
         if (evicted > 0 || poisoned > 0) {
           log.info('mcp_revocation_retired_warm_repls', { evicted, poisoned })

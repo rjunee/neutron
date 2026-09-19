@@ -884,8 +884,10 @@ there is nothing underneath him.
   turns do not use the gateway's installed-server handler.
   Discovery, resources, prompts, completion and concurrent progress/notifications
   preserve MCP results. Handles survive ordinary owner turns; predecessor
-  notifications do not replay. Approval or secret changes retire the old peer
-  and handles. There are no installed-server HTTP aliases or configuration-bearing
+  notifications do not replay. The approval store's revocation callback retires
+  changed or removed Codex peers and their handles even while idle, without
+  closing unchanged peers or the native owner conversation. Replacement peers
+  start only at the next idle owner preparation. There are no installed-server HTTP aliases or configuration-bearing
   resumes. An older durable root without the fixed gateway explicitly refuses
   a conversation requiring approved servers, without replacing its thread;
   ordinary chat remains available when no installed servers are approved.

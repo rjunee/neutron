@@ -81,6 +81,54 @@ import { PROJECT_SNAPSHOT_SCHEMA } from '../wiring/project-build-snapshot.ts'
 const cleanups: (() => void | Promise<void>)[] = []
 afterEach(async () => { for (const fn of cleanups.splice(0).reverse()) await fn() })
 
+test.each(['denied', 'secret-rotation'] as const)('idle Codex MCP revocation kills only the quiet revoked peer and preserves successor chat and unrelated handles: %s', async change => {
+  const cwd = await mkdtemp(join(tmpdir(), 'idle-owner-mcp-'))
+  cleanups.push(() => rm(cwd, { recursive: true, force: true }))
+  let revoked = false, turn = 0
+  const handles = new Map<string, string>()
+  const native = await restrictedOwnerFixture({ projectId: 'idle-project', cwd, execute: async () => {}, ownerMcp: true,
+    ownerTurn: async call => {
+      turn++
+      const invoke = async (args: Record<string, unknown>) => {
+        const response = (await call(args)).result as { success: boolean; contentItems: Array<{ text: string }> }
+        expect(response.success).toBe(true)
+        return JSON.parse(response.contentItems[0]!.text)
+      }
+      for (const name of revoked ? ['survivor'] : ['revoked', 'survivor']) {
+        if (!handles.has(name)) handles.set(name, (await invoke({ action: 'open', server: name })).handle)
+        expect((await invoke({ action: 'request', handle: handles.get(name), method: 'resources/read', params: { uri: 'fixture://one' } })).contents[0].text).toBe('fixture text')
+      }
+      if (revoked) expect((await call({ action: 'request', handle: handles.get('revoked'), method: 'tools/list' })).result).toMatchObject({ success: false })
+    } })
+  cleanups.push(() => native.close())
+  native.bindings.resolveApprovedServers = async () => (revoked && change === 'denied' ? ['survivor'] : ['revoked', 'survivor']).map(name => ({ name, command: process.execPath,
+    args: [fileURLToPath(new URL('../../runtime/adapters/codex-cli/persistent/fixtures/approved-mcp-server.ts', import.meta.url))],
+    env_names: ['BROKER_TEST_LOG', 'BROKER_TEST_VALUE'], env: { BROKER_TEST_LOG: join(cwd, name), BROKER_TEST_VALUE: name === 'revoked' && revoked ? 'rotated' : 'initial' } }))
+  const chat = async () => {
+    const events = []
+    for await (const event of native.bindings.start('idle-project', { prompt: 'chat', tools: [], model_preference: [] }).events) events.push(event)
+    expect(events.at(-1)?.kind).toBe('completion')
+    expect(native.errors).toEqual([])
+  }
+  await chat()
+  const pid = async (name: string) => Number((await readFile(join(cwd, `${name}.pid`), 'utf8')).trim())
+  const revokedPid = await pid('revoked'), survivorPid = await pid('survivor')
+  const alive = (id: number) => { try { process.kill(id, 0); return true } catch { return false } }
+  expect(alive(revokedPid)).toBe(true)
+  expect(alive(survivorPid)).toBe(true)
+  await native.bindings.retireRevokedMcpServers()
+  expect(alive(revokedPid)).toBe(true)
+  expect(alive(survivorPid)).toBe(true)
+  revoked = true
+  await native.bindings.retireRevokedMcpServers()
+  expect(alive(revokedPid)).toBe(false)
+  expect(alive(survivorPid)).toBe(true)
+  expect(turn).toBe(1) // No request, notification or successor turn triggered retirement.
+  await chat()
+  expect(await pid('survivor')).toBe(survivorPid)
+  expect(native.opens()).toBe(1)
+})
+
 test('durable Open owner MCP reaches approved SDK peer, retains successor handles and refuses bounded turns', async () => {
   const f = await codexOwnerWithClaude()
   const log = join(f.context.projectDir, 'mcp-peer.log')

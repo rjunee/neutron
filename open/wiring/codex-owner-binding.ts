@@ -318,6 +318,10 @@ export class CodexOwnerBindings {
     await Promise.allSettled([...this.owners.values()].map(async pending => { await (await pending).owner.close() }))
   }
 
+  async retireRevokedMcpServers(): Promise<void> {
+    await Promise.all([...this.installedMcp.values()].map(surface => surface.retireRevoked()))
+  }
+
   /** Boot recovery never creates cold owners. Missing journals remain lazy. */
   async reconcile(projectIds: readonly string[]): Promise<void> {
     for (const projectId of projectIds) {

@@ -173,6 +173,10 @@ export class CodexOwnerInstalledGateway {
     for (const [handle, consumer] of this.consumers) this.retire(handle, consumer)
   }
 
+  retireServer(name: string): void {
+    for (const [handle, consumer] of this.consumers) if (consumer.server === name) this.retire(handle, consumer)
+  }
+
   async close(): Promise<void> {
     this.closed = true
     this.retireConsumers()

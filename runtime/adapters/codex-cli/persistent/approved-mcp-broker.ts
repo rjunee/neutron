@@ -39,6 +39,7 @@ export interface ApprovedMcpBrokerOptions {
     consumerIds?: readonly string[]): Promise<void>
   /** Downstream routing must retire with the exact approved subprocess surface. */
   onRetired?(): void
+  onServerRetired?(name: string): void
   connectTimeoutMs?: number
   requestTimeoutMs?: number
 }
@@ -46,6 +47,7 @@ export interface ApprovedMcpBrokerOptions {
 interface Binding {
   context: ApprovedMcpContext
   fingerprint: string
+  serverFingerprints: Map<string, string>
   clients: Map<string, Client>
   metadata: ApprovedMcpServerMetadata[]
   consumers: Map<string, Consumer>
@@ -54,7 +56,7 @@ interface Binding {
   retirement?: Promise<void>
 }
 
-interface Consumer { id: string; closed: boolean; abort: AbortController }
+interface Consumer { id: string; server: string; closed: boolean; abort: AbortController }
 interface Subscription { consumers: Set<Consumer>; upstream: boolean; confirmed: boolean }
 
 export interface ApprovedMcpRequestHooks {
@@ -113,8 +115,41 @@ export class ApprovedMcpBroker {
   private inFlight = 0
   private admitting = false
   private retiring: Promise<void> = Promise.resolve()
+  private reconciling = 0
 
   constructor(private readonly options: ApprovedMcpBrokerOptions) {}
+
+  /** Store-triggered retirement needs no active turn and never starts a peer. */
+  async retireRevoked(): Promise<void> {
+    this.reconciling++
+    try {
+      for (const binding of new Set([this.binding, this.pending])) {
+        if (!binding) continue
+        let live: ReturnType<typeof snapshot>
+        try { live = snapshot(await this.options.resolveApproved({ ...binding.context })) }
+        catch { await this.dispose(binding); continue }
+        if (this.binding !== binding && this.pending !== binding) continue
+        const approved = new Map(live.servers.map(server => [server.name, snapshot([server]).fingerprint]))
+        const closing: Promise<void>[] = []
+        for (const [name, client] of binding.clients) {
+          if (approved.get(name) === binding.serverFingerprints.get(name)) continue
+          binding.clients.delete(name)
+          binding.serverFingerprints.delete(name)
+          binding.metadata = binding.metadata.filter(entry => entry.name !== name)
+          binding.subscriptions.delete(name)
+          for (const [id, consumer] of binding.consumers) if (consumer.server === name) {
+            consumer.closed = true; consumer.abort.abort(); binding.consumers.delete(id)
+          }
+          this.options.onServerRetired?.(name)
+          closing.push(client.close().catch(() => {}))
+        }
+        // Record the checked approval surface, but admit missing peers only at
+        // the next explicit idle owner preparation.
+        binding.fingerprint = live.fingerprint
+        await Promise.all(closing)
+      }
+    } finally { this.reconciling-- }
+  }
 
   private requireScope(context: ApprovedMcpContext, idle = false): void {
     const current = this.options.currentContext()
@@ -180,8 +215,8 @@ export class ApprovedMcpBroker {
     return true
   }
 
-  private async notify(binding: Binding, serverName: string, notification: Notification): Promise<void> {
-    if (!await this.notificationSurfaceCurrent(binding)) return
+  private async notify(binding: Binding, serverName: string, client: Client, notification: Notification): Promise<void> {
+    if (!await this.notificationSurfaceCurrent(binding) || binding.clients.get(serverName) !== client) return
     try {
       this.requireContext(binding.context)
       let consumers: string[] | undefined
@@ -201,7 +236,7 @@ export class ApprovedMcpBroker {
     context = { ...context }
     this.requireContext(context, true)
     signal?.throwIfAborted()
-    if (this.admitting || this.inFlight) throw refused()
+    if (this.admitting || this.inFlight || this.reconciling) throw refused()
     this.admitting = true
     try {
       return await this.admit(context, signal)
@@ -219,7 +254,7 @@ export class ApprovedMcpBroker {
         this.requireContext(context, true)
         signal?.throwIfAborted()
         if (this.binding !== previous || identity(context) !== identity(previous.context)) throw refused()
-        if (live.fingerprint === previous.fingerprint) {
+        if (live.fingerprint === previous.fingerprint && live.servers.every(server => previous.clients.has(server.name))) {
           await this.reconcileOrphans(previous, context, signal)
           await this.verify(previous, context, true)
           previous.context = { ...context }
@@ -227,7 +262,7 @@ export class ApprovedMcpBroker {
         }
         // This explicit, idle owner admission may replace grants. An ordinary
         // operation only retires a changed binding and NEVER takes this path.
-        await this.dispose(previous)
+        if (live.fingerprint !== previous.fingerprint) await this.dispose(previous)
         this.requireContext(context, true)
         signal?.throwIfAborted()
       } catch {
@@ -236,7 +271,7 @@ export class ApprovedMcpBroker {
       }
     }
     // Reserve before the first asynchronous authority read, excluding parallel binds.
-    const binding: Binding = { context: { ...context }, fingerprint: '', clients: new Map(), metadata: [],
+    const binding: Binding = this.binding ?? { context: { ...context }, fingerprint: '', serverFingerprints: new Map(), clients: new Map(), metadata: [],
       consumers: new Map(), subscriptions: new Map(), subscriptionTail: Promise.resolve() }
     this.pending = binding
     try {
@@ -246,6 +281,7 @@ export class ApprovedMcpBroker {
       if (this.pending !== binding) throw refused()
       binding.fingerprint = approved.fingerprint
       for (const server of approved.servers) {
+        if (binding.clients.has(server.name)) continue
         await this.verify(binding, context, true)
         signal?.throwIfAborted()
         const client = new Client({ name: 'neutron-approved-mcp-broker', version: '1.0.0' }, { capabilities: {} })
@@ -254,8 +290,11 @@ export class ApprovedMcpBroker {
         // Never log provider stderr: installed programs may print credentials.
         transport.stderr?.on('data', () => {})
         binding.clients.set(server.name, client)
-        client.onclose = () => { this.dispose(binding).catch(() => {}) }
-        client.fallbackNotificationHandler = (notification) => this.notify(binding, server.name, notification)
+        binding.serverFingerprints.set(server.name, snapshot([server]).fingerprint)
+        client.onclose = () => { if (binding.clients.get(server.name) === client) this.dispose(binding).catch(() => {}) }
+        client.fallbackNotificationHandler = async (notification) => {
+          if (binding.clients.get(server.name) === client) await this.notify(binding, server.name, client, notification)
+        }
         await client.connect(transport, { ...(signal ? { signal } : {}), timeout: this.options.connectTimeoutMs ?? 10_000 })
         await this.verify(binding, context, true)
         signal?.throwIfAborted()
@@ -295,6 +334,7 @@ export class ApprovedMcpBroker {
       await this.verify(binding, context, true)
       signal?.throwIfAborted()
       this.pending = null
+      binding.context = { ...context }
       this.binding = binding
       return structuredClone(binding.metadata)
     } catch {
@@ -323,7 +363,7 @@ export class ApprovedMcpBroker {
     if (hooks) {
       consumer = binding.consumers.get(hooks.consumerId)
       if (!consumer) {
-        consumer = { id: hooks.consumerId, closed: false, abort: new AbortController() }
+        consumer = { id: hooks.consumerId, server: serverName, closed: false, abort: new AbortController() }
         binding.consumers.set(consumer.id, consumer)
       }
       signal = AbortSignal.any([consumer.abort.signal, ...(signal ? [signal] : [])])
@@ -331,6 +371,7 @@ export class ApprovedMcpBroker {
     const requestSignal = signal
     const perform = async (): Promise<Result> => {
       await this.verify(binding, context)
+      if (binding.clients.get(serverName) !== client) throw refused()
       requestSignal?.throwIfAborted()
       const result = await client.request(parsed.data, ResultSchema, {
         ...(requestSignal ? { signal: requestSignal } : {}), timeout: this.options.requestTimeoutMs ?? 60_000,
@@ -339,6 +380,7 @@ export class ApprovedMcpBroker {
         } } : {}),
       })
       await this.verify(binding, context)
+      if (binding.clients.get(serverName) !== client) throw refused()
       requestSignal?.throwIfAborted()
       return result
     }

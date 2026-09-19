@@ -18,6 +18,7 @@ export class DurableOwnerMcp {
       assertOwnerConversation: () => this.assertConversation(),
       resolveApproved,
       onRetired: () => this.gateway.retireConsumers(),
+      onServerRetired: name => this.gateway.retireServer(name),
       onNotification: (context, server, notification, consumers) => this.gateway.notify(context, server, notification, consumers),
     })
     this.gateway = new CodexOwnerInstalledGateway({ broker: this.broker,
@@ -42,4 +43,5 @@ export class DurableOwnerMcp {
     if (this.context?.leaseId === leaseId) this.context.idle = true
   }
   close(): Promise<void> { this.context = undefined; return this.gateway.close() }
+  retireRevoked(): Promise<void> { return this.broker.retireRevoked() }
 }
