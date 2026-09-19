@@ -323,6 +323,36 @@ reproduced or measured against the real script before the change.
   the byte-exact contract -- the filter removes only the one separator of a trailer-only
   paragraph; any other blank line the first commit stored is kept as it is.
 
+### Review findings on round 11 (`9e9ad881`, APPROVE with nits), and how each was closed
+
+- **NIT -- a signing letter inside a short-flag cluster (`-aS`, `-sS`) was not forwarded to
+  the strip amend.** The forward arm matched `-S`, `-S<key>` and the long forms only as whole
+  argv elements; git reads `-aS` as `-a -S`, so the first commit was signed and the
+  `--amend --only` re-store was not (unless `commit.gpgsign` is set). Forge never signs, so
+  nothing on the branch was affected, but the scan's stated contract ("repeat the flags of
+  the commit it rewrites") was one cluster short. Closed: one more `case` arm before the
+  `-am`-style value-skip arm, `-[!-]*S*)`, which forwards `-S<everything after the first S>`
+  when every letter before that `S` is a boolean short flag (`-*[!apqvnseioz]*` on the
+  prefix forwards nothing, so `-mS` stays `-m S` -- the S is that option's attached value,
+  exactly as git reads it). `-aS` forwards `-S`; `-sSkey` forwards `-Skey`; `-asS` forwards
+  `-S`. Two real-git tests with a stand-in `gpg.program` (it prints git's expected
+  `[GNUPG:] SIG_CREATED` status line, a fake armour block, and logs the key id it was handed):
+  `-aS` after a `-a -S` positive control -- both land with exactly one `gpgsig` header on the
+  commit that is on the branch and two signing calls with `user.signingkey` in the log; and
+  `-sSARGVKEY` -- one `gpgsig` header, `Signed-off-by` kept, both signing calls with
+  `ARGVKEY` (not the configured key), then `-mS` -- message `S`, no `gpgsig`, an empty log.
+  Replacing the arm's forward with `*) ;;` reds exactly those two tests (29 pass / 2 fail)
+  while `trident/inner-workflow.test.ts` stays green (153 pass); restoring it returns 31 / 0.
+- **NIT -- `attribution.sessionUrl: false` also drops the PR-body session link, which the
+  card did not ask about.** Not a code change; the review asked for the owner's one-line
+  awareness, which the "What was built" section above already carries: the CLI ties the
+  commit trailer and the PR-body `https://claude.ai/code/session_...` footer to the one
+  boolean (schema text: "Set to false to omit the Claude-Session trailer and PR-body link";
+  `attribution?.sessionUrl===!1` in the installed 2.1.278 binary returns null from the
+  session-attribution composer), so PR descriptions the loop opens will no longer carry the
+  link either. Kept as is: it is the same session URL on the same public machine-authored
+  history that #1133 objects to, and the boolean is the only CLI switch for the trailer.
+
 ### Mutation, proven by hand before nomination
 
 `grep -c '\[Cc\]\[Ll\]\[Aa\]\[Uu\]\[Dd\]\[Ee\]-\[Ss\]\[Ee\]\[Ss\]\[Ss\]\[Ii\]\[Oo\]\[Nn\]:\*) drop\[i\]=1; removed=1 ;;'
@@ -331,8 +361,11 @@ trident/commit-with-resolved-head.sh` = 1. Replacing that case arm with
 matched and kept) turns 16 of the 29 tests in `commit-with-resolved-head-realgit.test.ts`
 red (every strip test, including three added this round) while
 `runtime/adapters/claude-code/persistent/__tests__/build-settings.test.ts`, which never runs
-the wrapper, stays green (15 pass); restoring the arm returns the guard to 29 / 0. This is
-the nominated mutation.
+the wrapper, stays green (15 pass); restoring the arm returns the guard to 29 / 0. That was
+round 10's nomination. Round 12 nominates the clustered-`-S` forward (the round-11 section
+above: `*) amend_flags+=("-S${arg#*S}") ;;` replaced by `*) ;;`, guard
+`commit-with-resolved-head-realgit.test.ts` 29 / 2 mutated and 31 / 0 restored, control
+`trident/inner-workflow.test.ts` 153 / 0 either way).
 
 The earlier nominations still hold and are kept as by-hand checks:
 
@@ -407,3 +440,7 @@ review-progress gate after the round-10 panel returned REQUEST_CHANGES a second 
 ("Review requires orchestrator arbitration: no-progress"); the change had not been approved
 as a whole, so those findings are what this round closes. It touches only the wrapper, its
 real-git tests, the G135 row and this record.
+
+Round 12 is the fix commit on top of round 11 (`9e9ad881`, APPROVE with the two nits closed
+in the section above): the clustered-`-S` forward arm, its two real-git tests, the G135 row
+and this record. The settings switch, the Forge brief and the strip filter are untouched.

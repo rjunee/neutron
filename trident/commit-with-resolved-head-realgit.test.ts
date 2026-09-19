@@ -632,3 +632,84 @@ test('#1133: an attached option value (-F<file>) is not a cluster -- the flag af
   expect(git(tree, 'log', '-1', '--format=%B')).toBe('feat: attached')
   expect(git(tree, 'rev-parse', 'HEAD^')).toBe(parent)
 })
+
+// A stand-in `gpg.program`: it answers the way git's gpg-interface expects (a
+// `[GNUPG:] SIG_CREATED` status line on fd 2, the signature on stdout) and records the key
+// id it was asked to sign with, so a test can tell WHICH commit was signed and with what
+// key. No real key material, no gpg on PATH needed.
+function fakeGpg(): { program: string; log: string } {
+  const root = mkdtempSync(join(tmpdir(), 'trident-head-fakegpg-'))
+  roots.push(root)
+  const program = join(root, 'gpg')
+  const log = join(root, 'signed.log')
+  writeFileSync(
+    program,
+    `#!/bin/sh\n` +
+      `cat >/dev/null\n` +
+      `echo "$*" >> "${log}"\n` +
+      `printf '\\n[GNUPG:] SIG_CREATED D 1 8 00 1700000000 FAKEFINGERPRINT\\n' >&2\n` +
+      `printf -- '-----BEGIN PGP SIGNATURE-----\\nfake\\n-----END PGP SIGNATURE-----\\n'\n`,
+    { mode: 0o755 },
+  )
+  writeFileSync(log, '')
+  return { program, log }
+}
+
+function gpgsigHeaders(tree: string, rev: string): number {
+  return git(tree, 'cat-file', 'commit', rev).split('\n').filter((line) => line.startsWith('gpgsig ')).length
+}
+
+test('#1133: a signing letter inside a short-flag cluster (-aS) is forwarded, so the stripped commit is still signed', () => {
+  const { tree, branch, parent } = fixture()
+  const { program, log } = fakeGpg()
+  git(tree, 'config', 'gpg.program', program)
+  git(tree, 'config', 'user.signingkey', 'CLUSTERKEY')
+  writeFileSync(join(tree, 'change.txt'), 'changed again\n') // -a has something to pick up
+
+  // Positive control: the standalone form the scan already forwards. Signed once for the
+  // first commit and once for the amend, and the commit on the branch carries the signature.
+  const control = run(tree, 'bash', [guard, branch, '-a', '-S', '-m', 'feat: control', '-m', SESSION])
+  expect(control.status, control.stderr || control.stdout).toBe(0)
+  expect(gpgsigHeaders(tree, 'HEAD')).toBe(1)
+  expect(readFileSync(log, 'utf8').trim().split('\n')).toEqual(['--status-fd=2 -bsau CLUSTERKEY', '--status-fd=2 -bsau CLUSTERKEY'])
+  git(tree, 'reset', '-q', '--soft', parent)
+  writeFileSync(log, '')
+
+  // Git reads `-aS` as `-a -S`: the first commit is signed. A scan that only knows the
+  // standalone `-S` forwards nothing, and the amend re-stores the commit UNSIGNED.
+  const result = run(tree, 'bash', [guard, branch, '-aS', '-m', 'feat: clustered', '-m', SESSION])
+
+  expect(result.status, result.stderr || result.stdout).toBe(0)
+  const body = git(tree, 'log', '-1', '--format=%B')
+  expect(body).toBe('feat: clustered')
+  expect(git(tree, 'rev-parse', 'HEAD^')).toBe(parent)
+  expect(gpgsigHeaders(tree, 'HEAD')).toBe(1)
+  expect(readFileSync(log, 'utf8').trim().split('\n')).toEqual(['--status-fd=2 -bsau CLUSTERKEY', '--status-fd=2 -bsau CLUSTERKEY'])
+})
+
+test('#1133: a clustered signing letter with an attached key id (-sSkey) forwards that key, and a value-taking letter before S (-mS) is not a signing flag', () => {
+  const { tree, branch, parent } = fixture()
+  const { program, log } = fakeGpg()
+  git(tree, 'config', 'gpg.program', program)
+  git(tree, 'config', 'user.signingkey', 'DEFAULTKEY')
+
+  // `-sSARGVKEY` is `-s -SARGVKEY`: signoff, then sign with the key attached to the S. The
+  // amend must sign with THAT key, not fall back to user.signingkey.
+  const signed = run(tree, 'bash', [guard, branch, '-sSARGVKEY', '-m', 'feat: keyed', '-m', SESSION])
+  expect(signed.status, signed.stderr || signed.stdout).toBe(0)
+  expect(git(tree, 'log', '-1', '--format=%B')).toBe('feat: keyed\n\nSigned-off-by: Test <test@example.test>')
+  expect(git(tree, 'rev-parse', 'HEAD^')).toBe(parent)
+  expect(gpgsigHeaders(tree, 'HEAD')).toBe(1)
+  expect(readFileSync(log, 'utf8').trim().split('\n')).toEqual(['--status-fd=2 -bsau ARGVKEY', '--status-fd=2 -bsau ARGVKEY'])
+  git(tree, 'reset', '-q', '--soft', parent)
+  writeFileSync(log, '')
+
+  // `-mS` is `-m S`: the S is the message, not a signing flag. Nothing is signed, nothing
+  // is forwarded, and the trailer paragraph after it is still stripped.
+  const unsigned = run(tree, 'bash', [guard, branch, '-mS', '-m', SESSION])
+  expect(unsigned.status, unsigned.stderr || unsigned.stdout).toBe(0)
+  expect(git(tree, 'log', '-1', '--format=%B')).toBe('S')
+  expect(git(tree, 'rev-parse', 'HEAD^')).toBe(parent)
+  expect(gpgsigHeaders(tree, 'HEAD')).toBe(0)
+  expect(readFileSync(log, 'utf8')).toBe('')
+})

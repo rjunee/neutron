@@ -146,7 +146,10 @@ if [ -n "$new_head" ] && [ "$new_head" != "$head_oid" ]; then
     # `commit.cleanup` asked for, and the amend below stores the filtered bytes verbatim.
     # An option that takes its VALUE as the next argv element (`-m`, `-F`, `--author`, ...)
     # has that value skipped, so a paragraph that happens to begin with `-S` is never
-    # mistaken for a signing flag and handed to the amend as a key id.
+    # mistaken for a signing flag and handed to the amend as a key id. Short flags cluster:
+    # git reads `-aS` as `-a -S` and `-sSkey` as `-s -Skey`, so a signing letter inside a
+    # cluster of boolean short flags is forwarded as its own `-S[<keyid>]`, or a signed
+    # first commit would be re-stored unsigned.
     amend_flags=()
     value_of=''
     for arg in "$@"; do
@@ -159,6 +162,17 @@ if [ -n "$new_head" ] && [ "$new_head" != "$head_oid" ]; then
         --) break ;;
         -S|-S?*|--gpg-sign|--gpg-sign=*|--no-gpg-sign|--allow-empty|--allow-empty-message) amend_flags+=("$arg") ;;
         -m|-F|-C|-c|-t|--message|--file|--author|--date|--template|--fixup|--squash|--reuse-message|--reedit-message|--trailer|--pathspec-from-file|--cleanup) value_of=skip ;;
+        # A cluster of boolean short flags with `S` inside it (-aS, -sS, -asS, -aSkeyid). Git
+        # reads every letter before the first `S` as its own flag and everything after it as
+        # the optional key id, so the signing half is forwarded alone as `-S<rest>`; the
+        # boolean half means nothing to an `--only` amend with no paths. A value-taking
+        # letter before the `S` (`-mS`, `-CS`) makes the `S` that option's attached value,
+        # not a flag, so such a cluster forwards nothing.
+        -[!-]*S*)
+          case "${arg%%S*}" in
+            -*[!apqvnseioz]*) ;;
+            *) amend_flags+=("-S${arg#*S}") ;;
+          esac ;;
         # A cluster of boolean short flags whose LAST letter takes the next argv element
         # (-am, -qm, -sm, -nm, -om, -aF, ...). An attached value (`-Ffile.txt`, `-Cabc`) is
         # not a cluster: a non-flag letter before the last one leaves the next arg alone.
