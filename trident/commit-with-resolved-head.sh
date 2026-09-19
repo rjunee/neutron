@@ -110,10 +110,10 @@ if [ -n "$new_head" ] && [ "$new_head" != "$head_oid" ]; then
       echo "commit refused: the Claude-Session trailer could not be stripped (git commit --amend exited $amend_exit); the commit $new_head was withdrawn, HEAD is back at $head_oid and the index still holds the staged changes" >&2
       exit "$amend_exit"
     fi
-    # The first summary line git printed names the PRE-strip commit, which the amend just
-    # replaced (it survives only in the reflog). Anyone copying a sha from stdout must take
-    # this one; Forge is told to `git rev-parse HEAD` instead of reading either.
+    # The pre-strip commit $new_head was amended away and survives only in the reflog; a
+    # `[branch sha]` summary line naming it (printed unless the commit ran `-q`) is stale.
+    # Anyone copying a sha from stdout must take this one; Forge is told to `git rev-parse HEAD`.
     stripped_head=$(git rev-parse --verify HEAD)
-    echo "commit-with-resolved-head: Claude-Session trailer stripped; HEAD is now $stripped_head (the summary line above named the pre-strip commit $new_head)"
+    echo "commit-with-resolved-head: Claude-Session trailer stripped; HEAD is now $stripped_head (pre-strip commit $new_head was amended away; a [branch sha] summary line naming it is stale)"
   fi
 fi

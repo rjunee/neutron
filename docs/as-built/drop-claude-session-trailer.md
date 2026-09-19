@@ -48,12 +48,15 @@ the settings-schema text for `attribution.sessionUrl` is present verbatim:
 with the merge code `if(e.attribution?.sessionUrl===!1)s.attribution={...s.attribution,sessionUrl:!1}`
 reading the merged settings, whose source list includes the `--settings` file every spawn
 passes. `attribution.commit` is a separate field, so the default `Co-Authored-By` line is
-untouched by this setting.
+untouched by this setting. Re-measured in round 9 on the installed 2.1.278 (`claude --version`;
+real path `/usr/lib/node_modules/@anthropic-ai/claude-code/bin/claude.exe`): `grep -a -c
+sessionUrl` = 26, `grep -a -c 'Claude-Session'` = 6, and the guard text
+`attribution?.sessionUrl===!1` is present (2 occurrences). The version moved; the key did not.
 
 ### The single seam, and why there are two mechanisms
 
 Every Claude Code process the loop spawns goes through the persistent pool's `spawn.ts`,
-whose one call to `buildSettings(...)` (`runtime/adapters/claude-code/persistent/spawn.ts:266`,
+whose one call to `buildSettings(...)` (`runtime/adapters/claude-code/persistent/spawn.ts:278`,
 the sole production caller) writes the per-session `--settings` JSON. That is the one place
 that reaches every commit the loop authors at the source. But it is a switch the CLI honours,
 not one this repository can prove from the outside: a CLI upgrade that renamed the key, or a
@@ -107,7 +110,11 @@ with three findings.
   `trident/publication.ts` `resolvedClaim !== resolvedHead`). Closed: the amend runs without
   `-q`, so git prints the second summary line naming the commit that is on the branch, and
   the wrapper then prints one explicit line —
-  `commit-with-resolved-head: Claude-Session trailer stripped; HEAD is now <full new sha> (the summary line above named the pre-strip commit <full pre-strip sha>)`.
+  `commit-with-resolved-head: Claude-Session trailer stripped; HEAD is now <full new sha> (...)`.
+  Round 9 reworded the parenthetical: it claimed "the summary line above named the pre-strip
+  commit", which is false when the agent's commit ran `-q` (then the only `[branch sha]` line
+  came from the amend and already names the post-strip commit); it now states only what is
+  always true (the pre-strip commit was amended away; any summary line naming it is stale).
   The Forge brief now also says: after the wrapper returns, read commitSha with
   `git rev-parse HEAD`, never from a `[branch sha]` summary line. The first #1133 real-git
   test asserts the wrapper's stdout contains `HEAD is now` and the full `git rev-parse HEAD`;
@@ -244,3 +251,10 @@ merge-tree clean, main touched none of the seven files since its base), closes t
 findings, and restores this record, which round 7 dropped. Its first head `1244b2b6` was
 reviewed and came back REQUEST_CHANGES; the fix commit on top closes those findings (the
 section above) without touching the settings switch or the Forge brief.
+
+Round 9 is on base `a1be24e0` (origin/main at #1169) and replays `2a4cbb5a` by cherry-pick
+(merge-tree clean against main). Round 8 (`2a4cbb5a`, CI 12/12 green) was APPROVED with one
+nit (the `-q` wording above, closed this round) and then died because the host's own
+`scripts/run-tests.sh` refused to run in that worktree (`node_modules/.bun` absent, exit 3;
+fixed by #1168); the run after it died because the build wrote `result.pr` as a bare number
+instead of the snapshot object. Neither was a defect in the change.
