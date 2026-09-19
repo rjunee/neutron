@@ -3,12 +3,13 @@ import { spawnCapture } from '@neutronai/trident/git-mode.ts'
 import { runWorktreePath } from '@neutronai/trident/merge.ts'
 import { mkdir, readFile, writeFile, lstat } from 'node:fs/promises'
 import { join, resolve } from 'node:path'
-import { createProjectRunners } from '@neutronai/runtime/workers/project-runners.ts'
+import { createProjectRunners, type ProjectTrailerDecoder } from '@neutronai/runtime/workers/project-runners.ts'
 import { createClaudeActingTurn } from '@neutronai/runtime/workers/claude-acting-turn.ts'
 import { createCodexHeadlessRunner } from '@neutronai/runtime/workers/codex-headless.ts'
 import { reconcileStoppedTrailerReservations } from '@neutronai/runtime/workers/trailer-slot.ts'
 import { PROJECT_REPL_TOOL_DEFS } from '@neutronai/gateway/wiring/build-live-agent-turn.ts'
 import type { CodexOwnerBindings } from './codex-owner-binding.ts'
+import { codexBuildResultTransport } from './codex-build-result.ts'
 import { pool, supervisedBySessionKey } from '@neutronai/runtime/adapters/claude-code/persistent/pool-state.ts'
 import type { PersistentReplSubstrateOptions } from '@neutronai/runtime/adapters/claude-code/persistent/types.ts'
 import type { Provider } from '@neutronai/runtime/provider.ts'
@@ -257,6 +258,12 @@ export async function prepareProjectBuild(input: InnerLoopInput, context: Projec
   await prepareProjectDependencies(run.worktree, state, context.runInstall)
   const topic = run.chat_id ?? context.projectId
   const codexEnv = { ...context.env, ...(input.codex_home ? { CODEX_HOME: input.codex_home } : {}) }
+  const trailer: ProjectTrailerDecoder = { schemas: new Map([
+    ['project-plan', (value: unknown) => validSnapshot(value, 'plan')],
+    ['project-build', (value: unknown) => validSnapshot(value, 'forge')],
+    ['project-review', (value: unknown) => validSnapshot(value, 'verdict')],
+    ['verdict', (value: unknown) => validateTrailer('verdict', value).ok],
+  ]), metadata: () => undefined }
   const substrate = await createProjectRunners({
     conversation: { project_id: context.projectId, topic_id: topic, provider: context.provider,
       // THE SURFACE MUST MATCH THE SESSION'S, OR THE REUSE GUARD RESPAWNS IT.
@@ -335,12 +342,10 @@ export async function prepareProjectBuild(input: InnerLoopInput, context: Projec
       return createClaudeActingTurn({ project_id: context.projectId, topic_id: topic, session, projects_dir: resolveTranscriptProjectsDir(options),
         grants: { tools: 'edit-and-run', writable: true, network: true, roots: options.extra_dirs ?? [] } })(turn)
     },
-    trailer: { schemas: new Map([
-      ['project-plan', (value: unknown) => validSnapshot(value, 'plan')],
-      ['project-build', (value: unknown) => validSnapshot(value, 'forge')],
-      ['project-review', (value: unknown) => validSnapshot(value, 'verdict')],
-      ['verdict', (value: unknown) => validateTrailer('verdict', value).ok],
-    ]), metadata: () => undefined },
+    trailer,
+    ...(context.provider === 'openai-codex' ? { codexResultTransport: codexBuildResultTransport({
+      projectId: context.projectId, projectDir: context.projectDir, stateDir: state, runId: run.id, trailer,
+    }) } : {}),
     headless: { 'openai-codex': createCodexHeadlessRunner({ env: codexEnv, reviewBriefIntegrity: briefIntegrity, reviewContracts: new Map([
       ['verdict', { jsonSchema: VERDICT_SCHEMA, validate: (value: unknown) => validateTrailer('verdict', value).ok }],
       ['project-review', { jsonSchema: { ...PROJECT_SNAPSHOT_SCHEMA,

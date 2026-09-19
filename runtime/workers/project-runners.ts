@@ -4,7 +4,7 @@ import type { AgentSpec } from '../substrate.ts'
 import { placementFor, type BoundedWorkOutcome, type BoundedWorkRequest, type WorkerRunner } from '../bounded-work.ts'
 import { PROVIDERS, type Provider } from '../provider.ts'
 import { claudeInReplRunner } from './claude-in-repl.ts'
-import { codexInReplRunner } from './codex-in-repl.ts'
+import { codexInReplRunner, type CodexResultTransport } from './codex-in-repl.ts'
 import { piInReplRunner } from './pi-in-repl.ts'
 import { unknownCause } from '../refusal-cause.ts'
 
@@ -90,6 +90,8 @@ export interface ProjectRunnersOptions {
   state_dir: string
   actingTurn: ProjectActingTurn
   trailer: ProjectTrailerDecoder
+  /** Codex child-only file transport; canonical request/reservation stays intact. */
+  codexResultTransport?: CodexResultTransport
   /** Explicitly constructed headless runners. Missing capabilities stay unavailable. */
   headless: Partial<Record<Provider, WorkerRunner>>
 }
@@ -144,8 +146,12 @@ export async function createProjectRunners(options: ProjectRunnersOptions) {
       let refusal: Extract<BoundedWorkOutcome, { kind: 'refused' }> | undefined
       const runner = construct({
         ...common,
-        async composeActingTurn(_topic, spec, turn: { timeout_ms: number; subagent?: string }) {
-          const observation = await options.actingTurn({ conversation, request, spec, signal, ...turn })
+        ...(conversation.provider === 'openai-codex' && options.codexResultTransport ? { resultTransport: options.codexResultTransport } : {}),
+        async composeActingTurn(_topic, spec, turn: { timeout_ms: number; subagent?: string; childResultPath?: string }) {
+          const actingRequest = conversation.provider === 'openai-codex' && turn.childResultPath
+            ? { ...request, result: { ...request.result, path: turn.childResultPath } } : request
+          const observation = await options.actingTurn({ conversation, request: actingRequest, spec, signal, timeout_ms: turn.timeout_ms,
+            ...(turn.subagent === undefined ? {} : { subagent: turn.subagent }) })
           if (observation.kind === 'refused') {
             refusal = { kind: 'refused', reason: observation.reason }
             throw new Error(observation.detail)

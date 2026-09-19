@@ -73,6 +73,7 @@ import type { BoundedWorkRequest } from '@neutronai/runtime/bounded-work.ts'
 import { buildRun, type BuildRunOutcome } from '@neutronai/trident/build-run.ts'
 import type { InnerLoopInput } from '@neutronai/trident/inner-loop.ts'
 import { PROJECT_SESSION_ACQUIRE_TIMEOUT_MS, prepareProjectBuild, type ProjectBuildContext } from '../wiring/project-build.ts'
+import { CodexOwnerBindings } from '../wiring/codex-owner-binding.ts'
 import { PROJECT_DEPENDENCIES_TIMEOUT_MS } from '../wiring/project-build-dependencies.ts'
 import { PROJECT_SNAPSHOT_SCHEMA } from '../wiring/project-build-snapshot.ts'
 
@@ -262,7 +263,7 @@ function literalWorker(world: WorkerWorld) {
     const spec = JSON.parse(line.slice(line.indexOf('{')))
     const args = JSON.parse(String(spec.prompt).slice(String(spec.prompt).indexOf('{')))
     const marker = 'Request (data): '
-    const requestLine = String(args.prompt).split('\n').find((row: string) => row.startsWith(marker))
+    const requestLine = String(args.prompt ?? args.message).split('\n').find((row: string) => row.startsWith(marker))
     if (!requestLine) throw new Error('dispatch prompt carried no request')
     const request: BoundedWorkRequest = JSON.parse(requestLine.slice(marker.length))
 
@@ -739,6 +740,49 @@ async function drive(f: Awaited<ReturnType<typeof fixture>>, mode: 'pr' | 'ralph
   const host = await createProjectBuildHost(options)
   return host.run({ mode, start: 'fresh' }, new AbortController().signal)
 }
+
+test('prepared Codex build/fix transport publishes canonical artifacts while unattested review remains unavailable', async () => {
+  const f = await fixture()
+  const ownerHome = await mkdtemp(join(tmpdir(), 'project-build-owner-home-'))
+  cleanups.push(() => rm(ownerHome, { recursive: true, force: true }))
+  f.context.stateRoot = join(ownerHome, '.trident', 'project-builds')
+  f.context.provider = 'openai-codex'
+  f.input.phase_models = { ...f.input.phase_models, build: { model: 'sol' }, review_adversarial: { model: 'sol' } }
+  const children: BoundedWorkRequest[] = []
+  const execute = literalWorker(f.world)
+  const guard = new CodexOwnerBindings(async () => ({ cwd: f.context.projectDir, codexHome: ownerHome, env: {} }))
+  f.context.codexOwnerBindings = {
+    guardBuildRunner: (project, worker) => guard.guardBuildRunner(project, worker),
+    actingTurn: project => async turn => {
+      expect(project).toBe(f.context.projectId)
+      expect(turn.request.result.path.startsWith(join(f.context.projectDir, '.neutron', 'build-results'))).toBe(true)
+      expect(turn.request.brief.path.startsWith(f.context.stateRoot)).toBe(true)
+      children.push(turn.request)
+      await execute('Execute the prompt in this JSON dispatch specification: ' + JSON.stringify(turn.spec))
+      return { kind: 'turn-ended' }
+    },
+  }
+  const prepared = await f.prepare()
+  await expect(createProjectBuildHost(prepared)).rejects.toThrow('lacks attested read-only child execution')
+  for (const role of ['build', 'fix'] as const) {
+    const request: BoundedWorkRequest = { ...prepared.workers[role].request, run_id: f.row.id, step_id: `${f.row.id}:${role}:0`, role, needs_approval_decision: false }
+    // Exercise the prepared build runner without bypassing the full host's
+    // review admission refusal. This is fixture-owned measured turn context.
+    const snapshot = { head: await gitOut(f.world.run, request.cwd, ['rev-parse', 'HEAD']), diff: '', pr: null }
+    await writeFile(workContextPath(request.brief.path), JSON.stringify({ request, snapshot, previous: {}, findings: [] }))
+    expect((await prepared.substrate.inRepl!.run(request, 'in-repl', new AbortController().signal)).kind).toBe('completed')
+  }
+  expect(children.map(request => request.role)).toEqual(['build', 'fix'])
+  const state = join(f.context.stateRoot, encodeURIComponent(f.row.id))
+  for (const role of ['build', 'fix']) {
+    const artifact = JSON.parse(await readFile(join(state, `${role}.result`), 'utf8'))
+    expect(artifact.run_id).toBe(f.row.id)
+    expect(artifact.kind).toBe('completed')
+  }
+  expect(prepared.substrate.inRepl!.supports('review', 'in-repl')).toMatchObject({ ok: false, reason: 'capability-unsupported' })
+  expect(prepared.substrate.inRepl!.supports('synthesis', 'in-repl')).toMatchObject({ ok: false, reason: 'capability-unsupported' })
+  await guard.close()
+})
 
 test('Bun workspace dependencies are local before workers and publication consumes them', async () => {
   const f = await fixture({ bunWorkspace: true })

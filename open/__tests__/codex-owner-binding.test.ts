@@ -9,6 +9,7 @@ import type { SessionHandle } from '@neutronai/runtime/session-handle.ts'
 import type { CodexOwnerBinding, CodexOwnerBindingFacts, CodexOwnerBootstrap } from '@neutronai/runtime/adapters/codex-cli/persistent/project-control-bootstrap.ts'
 import type { BoundedWorkRequest } from '@neutronai/runtime/bounded-work.ts'
 import { createProjectRunners } from '@neutronai/runtime/workers/project-runners.ts'
+import { codexBuildResultTransport } from '../wiring/codex-build-result.ts'
 import { composeReplModelSurface } from '@neutronai/gateway/composition/repl-model.ts'
 import { createAppNativeOwnerControlSurface } from '@neutronai/gateway/http/app-native-owner-control-surface.ts'
 import type { ReplModelState } from '@neutronai/runtime/repl-model.ts'
@@ -154,17 +155,103 @@ function fixture(remote = false) {
     onPrompt: (fn: (prompt: string) => void) => { onPrompt = fn } }
 }
 
-async function consumingBuild(f: ReturnType<typeof fixture>, options: { cwd?: string; roots?: string[]; wall?: number } = {}) {
+async function consumingBuild(f: ReturnType<typeof fixture>, options: { cwd?: string; roots?: string[]; wall?: number; transport?: boolean } = {}) {
   const cwd = join(f.dir, 'project-one')
   mkdirSync(cwd, { recursive: true })
+  const state = options.transport ? join(f.dir, 'owner-home', '.trident', 'project-builds', 'run') : cwd
+  mkdirSync(state, { recursive: true })
   const request: BoundedWorkRequest = { run_id: 'run', step_id: 'preflight', role: 'build', model_id: 'gpt-5.5', effort: null,
     cwd, writable: true, network: true, tools: 'edit-and-run', brief: { path: join(cwd, 'brief'), integrity: 'fixture' },
-    result: { path: join(cwd, 'result.json'), schema: 'fixture' }, thread: null, budget: { wall_ms: options.wall ?? 1000 }, needs_approval_decision: false }
+    result: { path: join(state, options.transport ? 'build.result' : 'result.json'), schema: 'fixture' }, thread: null, budget: { wall_ms: options.wall ?? 1000 }, needs_approval_decision: false }
+  const trailer = { schemas: new Map([['fixture', (value: unknown) => !!value && typeof value === 'object' && 'answer' in value && typeof value.answer === 'string']]), metadata: () => undefined }
   const runners = await createProjectRunners({ conversation: { project_id: 'project-one', topic_id: 'topic', provider: 'openai-codex', spec: spec('') },
-    run_id: 'run', state_dir: cwd, actingTurn: f.bindings.actingTurn('project-one', 'topic', options.cwd ?? cwd, options.roots ?? [cwd]),
-    trailer: { schemas: new Map([['fixture', () => true]]), metadata: () => undefined }, headless: {} })
-  return { request, worker: f.bindings.guardBuildRunner('project-one', runners.inRepl!) }
+    run_id: 'run', state_dir: state, actingTurn: f.bindings.actingTurn('project-one', 'topic', options.cwd ?? cwd, options.roots ?? [cwd]),
+    ...(options.transport ? { codexResultTransport: codexBuildResultTransport({ projectId: 'project-one', projectDir: cwd, stateDir: state, runId: 'run', trailer }) } : {}),
+    trailer, headless: {} })
+  return { request, rawWorker: runners.inRepl!, worker: f.bindings.guardBuildRunner('project-one', runners.inRepl!) }
 }
+
+test.each([false, true])('real owner consumer publishes child result before accepting outcome (transfer failure %s)', async failTransfer => {
+  const f = fixture(true)
+  const { request, worker, rawWorker } = await consumingBuild(f, { transport: true })
+  let childPath = ''
+  f.onPrompt(prompt => {
+    const dispatch = JSON.parse(prompt.slice('Execute the prompt in this JSON dispatch specification: '.length))
+    const args = JSON.parse(dispatch.prompt.slice(dispatch.prompt.indexOf('\n') + 1))
+    const child = JSON.parse(args.message.split('\n').find((line: string) => line.startsWith('Request (data): ')).slice('Request (data): '.length))
+    childPath = child.result.path
+    expect(childPath.startsWith(join(f.dir, 'project-one', '.neutron'))).toBe(true)
+    writeFileSync(childPath, JSON.stringify({ schema: 'fixture', run_id: request.run_id, step_id: request.step_id, kind: 'completed', result: { answer: 'native child' } }))
+    if (failTransfer) mkdirSync(request.result.path)
+  })
+  expect((await worker.run(request, 'in-repl', new AbortController().signal)).kind).toBe(failTransfer ? 'unknown' : 'completed')
+  expect(childPath).not.toBe(request.result.path)
+  expect(existsSync(join(f.homes.get('project-one')!, '.neutron-owner-work.json'))).toBe(failTransfer)
+  if (failTransfer) {
+    rmSync(request.result.path, { recursive: true })
+    expect((await worker.run(request, 'in-repl', new AbortController().signal)).kind).toBe('unknown')
+    expect(existsSync(request.result.path)).toBe(false)
+    const replacement = f.restart()
+    const guarded = replacement.guardBuildRunner('project-one', rawWorker)
+    expect((await guarded.run(request, 'in-repl', new AbortController().signal)).kind).toBe('unknown')
+    expect(existsSync(request.result.path)).toBe(false)
+    expect(existsSync(join(f.homes.get('project-one')!, '.neutron-owner-work.json'))).toBe(true)
+    await replacement.close()
+  }
+  f.onPrompt(() => {})
+  expect((await collect(f.bindings.start('project-one', spec('chat after transfer')))).at(-1)?.kind).toBe(failTransfer ? 'error' : 'completion')
+  const restarted = f.restart()
+  if (!failTransfer) {
+    writeFileSync(join(f.homes.get('project-one')!, '.neutron-owner-launch.json'), '{}')
+    expect((await restarted.guardBuildRunner('project-one', rawWorker).run(request, 'in-repl', new AbortController().signal)).kind).toBe('unknown')
+  }
+  expect((await collect(restarted.start('project-one', spec('restart after transfer')))).at(-1)?.kind).toBe(failTransfer ? 'error' : 'completion')
+  if (!failTransfer) expect((await restarted.guardBuildRunner('project-one', rawWorker).run(request, 'in-repl', new AbortController().signal)).kind).toBe('completed')
+  expect(f.calls).toHaveLength(failTransfer ? 1 : 3)
+  await restarted.close()
+})
+
+test('build admission during a known active owner chat does not fence that live conversation', async () => {
+  const f = fixture(true)
+  f.hold(true)
+  const chatting = collect(f.bindings.start('project-one', spec('live chat')))
+  while (f.calls.length === 0) await Bun.sleep(1)
+  const { request, worker } = await consumingBuild(f, { transport: true })
+  expect((await worker.run(request, 'in-repl', new AbortController().signal)).kind).toBe('unknown')
+  expect(f.calls).toHaveLength(1)
+  f.hold(false); f.finish()
+  expect((await chatting).at(-1)?.kind).toBe('completion')
+  expect(existsSync(join(f.homes.get('project-one')!, '.neutron-owner-work.json'))).toBe(false)
+  expect((await collect(f.bindings.start('project-one', spec('chat after concurrent admission')))).at(-1)?.kind).toBe('completion')
+  expect(f.calls).toHaveLength(2)
+})
+
+test('marker-free warm TUI activity refuses build without poisoning the next owner chat', async () => {
+  const f = fixture(true)
+  await collect(f.bindings.start('project-one', spec('warm owner')))
+  f.hold(true); await f.nativeTurn()
+  const { request, worker } = await consumingBuild(f, { transport: true })
+  expect((await worker.run(request, 'in-repl', new AbortController().signal)).kind).toBe('unknown')
+  expect(f.calls).toHaveLength(2)
+  expect(existsSync(join(f.homes.get('project-one')!, '.neutron-owner-work.json'))).toBe(false)
+  f.hold(false); f.finish()
+  expect((await collect(f.bindings.start('project-one', spec('chat after terminal')))).at(-1)?.kind).toBe('completion')
+  expect(f.calls).toHaveLength(3)
+})
+
+test.each(['review', 'synthesis'] as const)('unattested Codex %s isolation refuses admission and direct dispatch without opening an owner', async role => {
+  const f = fixture(true)
+  const { request, worker } = await consumingBuild(f, { transport: true })
+  const readonly = { ...request, role, writable: false, tools: 'read-only' as const }
+  expect(worker.supports(role, 'in-repl')).toMatchObject({ ok: false, reason: 'capability-unsupported' })
+  expect((await worker.run(readonly, 'in-repl', new AbortController().signal)).kind).toBe('refused')
+  expect((await f.bindings.actingTurn('project-one', 'topic', request.cwd, [request.cwd])({
+    conversation: { project_id: 'project-one', topic_id: 'topic', provider: 'openai-codex', spec: spec('') },
+    request: readonly, spec: spec('must not dispatch'), timeout_ms: 1000, signal: new AbortController().signal,
+  })).kind).toBe('refused')
+  expect(f.launched).toHaveLength(0); expect(f.calls).toHaveLength(0)
+  expect((await collect(f.bindings.start('project-one', spec('ordinary owner chat')))).at(-1)?.kind).toBe('completion')
+})
 
 test('missing-credential consuming build can connect then chat without gateway restart', async () => {
   const f = fixture(true)

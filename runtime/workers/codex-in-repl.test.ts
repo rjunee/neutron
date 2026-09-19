@@ -378,6 +378,69 @@ test('a step held by another instance is unknown, not answered from the stale sl
   expect(JSON.parse(await readFile(f.req.result.path, 'utf8')).on).toBe('round one')
 })
 
+test('child result transport waits after parent return while preserving the exact canonical reservation', async () => {
+  const f = await fixture()
+  const stage = join(f.req.cwd, 'child-stage.json')
+  let preparations = 0, closed = 0, pendingReads = 0
+  let childWrite: Promise<void> | undefined
+  f.options.resultTransport = { async prepare(request) {
+    expect(request).toEqual(f.req); preparations++
+    return { resultPath: stage, async clearForDispatch() {}, close() { closed++ }, async publish() {
+      let bytes: string
+      try { bytes = await readFile(stage, 'utf8') }
+      catch (error) { if ((error as NodeJS.ErrnoException).code === 'ENOENT') { pendingReads++; return false }; throw error }
+      expect(f.options.decodeTrailer(bytes, request).kind).toBe('blocked')
+      await writeFile(request.result.path, bytes)
+      return true
+    } }
+  } }
+  const compose = f.options.composeActingTurn
+  f.options.composeActingTurn = async (topic, spec, options) => {
+    expect(options.childResultPath).toBe(stage)
+    const args = JSON.parse(spec.prompt.slice(spec.prompt.indexOf('\n') + 1))
+    expect(args.message).toContain(JSON.stringify({ ...f.req, result: { ...f.req.result, path: stage } }))
+    childWrite = Bun.sleep(25).then(() => writeFile(stage, JSON.stringify({ run_id: f.req.run_id, step_id: f.req.step_id, schema: f.req.result.schema, on: 'child result' })))
+    return compose(topic, spec, options)
+  }
+  expect((await f.run()).kind).toBe('blocked')
+  await childWrite
+  expect(pendingReads).toBeGreaterThan(0)
+  expect(await readFile(f.reservation, 'utf8')).toBe(JSON.stringify(f.req) + '\n#dispatch-armed\n')
+  expect(f.calls).toHaveLength(1); expect(closed).toBe(1)
+  expect((await f.run()).kind).toBe('blocked')
+  expect(f.calls).toHaveLength(1); expect(preparations).toBe(2)
+})
+
+test('transport preparation failure leaves no armed reservation and a corrected attempt can dispatch once', async () => {
+  const f = await fixture()
+  let fail = true
+  f.options.resultTransport = { async prepare() {
+    if (fail) throw new Error('Transient stage preparation failure')
+    return { resultPath: f.req.result.path, async clearForDispatch() {}, async publish() { return true }, close() {} }
+  } }
+  f.seed()
+  expect((await f.run()).kind).toBe('unknown')
+  await expect(readFile(f.reservation, 'utf8')).rejects.toMatchObject({ code: 'ENOENT' })
+  expect(f.calls).toHaveLength(0)
+  fail = false
+  expect((await f.run()).kind).toBe('blocked')
+  expect((await f.run()).kind).toBe('blocked')
+  expect(f.calls).toHaveLength(1)
+})
+
+test('failed child publication stays unknown and never replays the canonical armed request', async () => {
+  const f = await fixture()
+  const request = { ...f.req, budget: { wall_ms: 35 } }
+  let closed = 0
+  f.options.resultTransport = { async prepare() {
+    return { resultPath: join(f.req.cwd, 'child-stage.json'), async clearForDispatch() {}, async publish() { throw new Error('Host transfer failed') }, close() { closed++ } }
+  } }
+  expect((await f.run(undefined, request)).kind).toBe('unknown')
+  expect((await f.run(undefined, request)).kind).toBe('unknown')
+  expect(f.calls).toHaveLength(1); expect(closed).toBe(2)
+  expect(await readFile(f.reservation, 'utf8')).toBe(JSON.stringify(request) + '\n#dispatch-armed\n')
+})
+
 test('a trailer that becomes unreadable after the dispatch is unknown', async () => {
   const f = await fixture()
   // The pre-dispatch refusal above covers a slot that can never hold a trailer. This

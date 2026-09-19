@@ -1,5 +1,6 @@
 import { existsSync, readFileSync, realpathSync, unlinkSync, writeFileSync } from 'node:fs'
 import { join, relative, sep } from 'node:path'
+import { setTimeout as delay } from 'node:timers/promises'
 import { readCodexOwnerBinding, type CodexOwnerBootstrap, type CodexOwnerAttachment } from '@neutronai/runtime/adapters/codex-cli/persistent/project-control-bootstrap.ts'
 import { openDurableCodexOwner, type OwnerLaunch } from './codex-durable-owner.ts'
 import { createCodexConversationalSubstrate, type CodexConversationHost } from '@neutronai/runtime/adapters/codex-cli/persistent/conversational-substrate.ts'
@@ -253,15 +254,56 @@ export class CodexOwnerBindings {
   /** The host schema decoder runs after the acting bridge. Its uncertainty
    * must fence this same owner even when native parent/envelope checks passed. */
   guardBuildRunner(projectId: string, worker: WorkerRunner): WorkerRunner {
-    return { ...worker, run: async (request, placement, signal) => {
+    const supports: WorkerRunner['supports'] = (role, placement) => role === 'review' || role === 'synthesis'
+      ? { ok: false, reason: 'capability-unsupported', detail: 'Codex owner lacks attested read-only child execution with isolated result output' }
+      : worker.supports(role, placement)
+    return { ...worker, supports, run: async (request, placement, signal) => {
+      const supported = supports(request.role, placement)
+      if (!supported.ok) return { kind: 'refused', reason: supported.reason }
+      if (this.closed || this.refused.has(projectId)) return { kind: 'unknown', detail: 'Codex owner requires native reconciliation' }
       // Positive no-dispatch proof: no runner/acting-turn call has occurred.
       // A cancelled admission must not create a durable owner uncertainty marker.
       if (signal.aborted || request.budget.wall_ms <= 0) return { kind: 'unknown', detail: 'Cancelled or out of time before owner dispatch.' }
       if (this.decodingBuilds.has(projectId)) return { kind: 'unknown', detail: 'Codex owner build result is still pending' }
+      if (this.busy.has(projectId)) return { kind: 'unknown', detail: 'Codex owner has an active host turn' }
       this.decodingBuilds.add(projectId)
       const observation = { attempted: false, terminal: false, closed: false }
       this.buildObservations.set(projectId, observation)
       try {
+        // A canonical ARMED reservation can resume without an acting turn. Check
+        // host authority here too; a trailer never reconciles uncertain owner work.
+        let project: CodexOwnerProject
+        const admissionTimer = new AbortController()
+        try {
+          project = await Promise.race([
+            this.project(projectId),
+            delay(request.budget.wall_ms, undefined, { signal: AbortSignal.any([signal, admissionTimer.signal]) })
+              .then(() => { throw new Error('Owner admission expired') }),
+          ])
+        } catch { return { kind: 'unknown', detail: 'Owner authority was unavailable before dispatch' } }
+        finally { admissionTimer.abort() }
+        if (this.closed || this.refused.has(projectId)) return { kind: 'unknown', detail: 'Codex owner requires native reconciliation' }
+        if (this.busy.has(projectId)) return { kind: 'unknown', detail: 'Codex owner has an active host turn' }
+        if (existsSync(join(project.codexHome, '.neutron-owner-work.json'))) {
+          this.refused.add(projectId)
+          return { kind: 'unknown', detail: 'Codex interrupted host work requires native reconciliation' }
+        }
+        const owner = this.resolvedOwners.get(projectId)
+        if (!owner && existsSync(join(project.codexHome, '.neutron-owner-launch.json'))) {
+          return { kind: 'unknown', detail: 'Existing Codex owner must be reattached before build admission' }
+        }
+        if (owner) {
+          this.readBinding(owner.binding)
+          await refreshOwner(owner)
+          if (this.busy.has(projectId)) return { kind: 'unknown', detail: 'Codex owner has an active host turn' }
+          if (owner.broker.state().phase === 'turn' || owner.broker.state().phase === 'mutation') {
+            return { kind: 'unknown', detail: 'Codex native owner is busy' }
+          }
+          if (owner.broker.state().phase !== 'idle') {
+            this.fence(projectId)
+            return { kind: 'unknown', detail: 'Codex surviving turn requires native reconciliation' }
+          }
+        }
         const outcome = await worker.run(request, placement, signal)
         if (outcome.kind === 'unknown' || outcome.kind === 'failed') {
           // Tags alone cannot establish delivery or terminal settlement. No
@@ -359,6 +401,11 @@ export class CodexOwnerBindings {
         }
       }
       preflight()
+      // Native children currently inherit the parent's project-write profile.
+      // Prompt-only read-only requests cannot claim enforced review isolation.
+      if (turn.request.writable === false || turn.request.tools === 'read-only' || turn.request.tools === 'none') {
+        return { kind: 'refused', reason: 'capability-unsupported', detail: 'Codex owner lacks attested read-only child execution with isolated result output' }
+      }
       const { owner, project } = await this.resolve(projectId, canonicalProject => {
         preflight()
         validatePaths(canonicalProject)
