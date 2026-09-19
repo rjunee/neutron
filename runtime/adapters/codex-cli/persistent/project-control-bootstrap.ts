@@ -96,7 +96,7 @@ export async function bootstrapCodexOwner(options: {
   let rejectReady!: (error: Error) => void
   const ready = new Promise<CodexOwnerBootstrap>((resolve, reject) => { resolveReady = resolve; rejectReady = reject })
   // Avoid an unhandled rejection if initialization fails before awaiting ready.
-  void ready.catch(() => {})
+  ready.catch(() => {})
   const stop = (error = new Error('Owner bootstrap closed')): void => {
     if (closed) return
     closed = true; failure = error
@@ -243,7 +243,7 @@ export async function bootstrapCodexOwner(options: {
           let raw: Rpc
           try { const parsed: unknown = JSON.parse(data.toString()); if (!object(parsed)) throw new Error(); raw = parsed }
           catch { stop(new Error('Malformed TUI request')); return }
-          void handleRequest(raw).catch(error => {
+          handleRequest(raw).catch(error => {
             emit({ id: raw.id, error: { code: -32001, message: 'Owner request refused' } })
             if (raw.method === 'thread/start' && !gateway) stop(error as Error)
           })
@@ -259,7 +259,7 @@ export async function bootstrapCodexOwner(options: {
         options.onTerminalData?.(bytes)
       } },
     })
-    void tui.exited.then(() => stop(new Error('Owned TUI exited')))
+    tui.exited.then(() => stop(new Error('Owned TUI exited')))
     return await ready
   } catch (error) {
     stop(error as Error)

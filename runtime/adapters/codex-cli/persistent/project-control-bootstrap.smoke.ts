@@ -91,9 +91,9 @@ async function run(): Promise<void> {
     await owner.close()
     assert.throws(() => readCodexOwnerBinding(handle), /Stale|generation/)
     await assert.rejects(bootstrapCodexOwner(options), /explicit recovery/)
-    console.log('PASS: owned authenticated TUI bootstrap, sealed binding, gateway and TUI turns, foreign/scope/stale/forged controls')
+    process.stdout.write('PASS: owned authenticated TUI bootstrap, sealed binding, gateway and TUI turns, foreign/scope/stale/forged controls\n')
   } catch (error) {
-    console.error(output.slice(-2000).replace(/\x1b\[[0-?]*[ -/]*[@-~]/g, ''))
+    process.stderr.write(`${output.slice(-2000).replace(/\x1b\[[0-?]*[ -/]*[@-~]/g, '')}\n`)
     throw error
   } finally {
     await owner?.close()

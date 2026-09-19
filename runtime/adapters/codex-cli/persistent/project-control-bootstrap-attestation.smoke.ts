@@ -124,7 +124,7 @@ async function run(): Promise<void> {
     }, 'FIRST_REAL_OWNER_MESSAGE\nwith ordinary multiline text') : undefined
     assert.equal(thread.source, 'vscode')
     assert.equal(thread.originator, 'owner-bootstrap-probe')
-    console.log(`Fresh TUI started exact thread; rollout exists before first user message: ${before}`)
+    process.stdout.write(`Fresh TUI started exact thread; rollout exists before first user message: ${before}\n`)
     // The proxy is a feasibility probe. Production must admit this through its
     // fenced broker, not copy this unguarded transport access.
     transport.send({ id: 'probe-gateway-first-turn', method: 'turn/start', params: {
@@ -140,21 +140,21 @@ async function run(): Promise<void> {
     await until(() => completed && inputs.length > 0, 'first real owner completion')
     await until(() => output.includes('OWNER_BOOTSTRAP_REPLY'), 'first gateway reply rendered by native TUI')
     // The native TUI may make a separate title-generation provider request.
-    console.log('Native TUI ancillary mutations:', JSON.stringify(requests.filter(message =>
+    process.stdout.write(`Native TUI ancillary mutations: ${JSON.stringify(requests.filter(message =>
       ['thread/start', 'turn/start'].includes(message.method)).map(message => ({ method: message.method,
-        sameOwnerThread: message.params?.threadId === thread?.id, ephemeral: message.params?.ephemeral }))))
+        sameOwnerThread: message.params?.threadId === thread?.id, ephemeral: message.params?.ephemeral })))}\n`)
     assert.equal(requests.filter(message => message.method === 'turn/start' && message.params.threadId === thread!.id).length, 0)
     assert(inputs[0]!.includes('FIRST_REAL_OWNER_MESSAGE'))
     assert(existsSync(thread.path))
     if (observer) {
       await until(() => { observer.read(); return observer.completed }, 'native rollout observer completion')
       observer.close()
-      console.log('PASS: actual native first-turn rollout consumed by deferred observer')
+      process.stdout.write('PASS: actual native first-turn rollout consumed by deferred observer\n')
     }
-    console.log('PASS: fresh native remote TUI and gateway shared the first real multiline owner turn; no seed or second app-server.')
-    console.log('LIMIT: authentication probe only; consuming factory smoke separately verifies generation and binding guards.')
+    process.stdout.write('PASS: fresh native remote TUI and gateway shared the first real multiline owner turn; no seed or second app-server.\n')
+    process.stdout.write('LIMIT: authentication probe only; consuming factory smoke separately verifies generation and binding guards.\n')
   } catch (error) {
-    console.error(output.slice(-2000).replace(/\x1b\[[0-?]*[ -/]*[@-~]/g, ''))
+    process.stderr.write(`${output.slice(-2000).replace(/\x1b\[[0-?]*[ -/]*[@-~]/g, '')}\n`)
     throw error
   } finally {
     tui.kill(); await tui.exited; tui.terminal?.close()
