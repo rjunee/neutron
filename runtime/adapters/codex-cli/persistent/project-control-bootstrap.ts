@@ -6,7 +6,7 @@ import { createProjectControlBroker, classifyProjectControlMethod, type ProjectC
 import { openProjectControlJournal } from './project-control-broker-journal.ts'
 import { BROKER_MAX_MESSAGE_BYTES, createProjectControlStdioTransport, type ProjectControlTransport } from './project-control-broker-transport.ts'
 import { validateProjectControlScope } from './project-control-broker-scope.ts'
-import { admitsOwnerTui, OWNER_BOOTSTRAP_ORIGINATOR as ORIGINATOR, validateBootstrapThread } from './project-control-bootstrap-validation.ts'
+import { admitsBootstrapConfig, admitsOwnerTui, OWNER_BOOTSTRAP_ORIGINATOR as ORIGINATOR, validateBootstrapMultiAgent, validateBootstrapThread } from './project-control-bootstrap-validation.ts'
 
 type Rpc = Record<string, unknown>
 const object = (value: unknown): value is Rpc => typeof value === 'object' && value !== null && !Array.isArray(value)
@@ -32,6 +32,8 @@ export interface CodexOwnerBindingFacts {
   readonly modelProvider: string
   readonly controlSocketPath: string
   readonly nativeMetadata: Readonly<{ sessionId: string; source: string; originator: string }>
+  /** Native thread feature report, observed before sealing; no model turn is seeded. */
+  readonly capabilities: Readonly<{ multiAgentV2: true; evidence: 'native-thread-feature-report' }>
 }
 const bindings = new WeakMap<object, { facts: CodexOwnerBindingFacts; assertCurrent(): void }>()
 export function readCodexOwnerBinding(handle: CodexOwnerBinding): CodexOwnerBindingFacts {
@@ -64,7 +66,7 @@ export async function bootstrapCodexOwner(options: {
   timeoutMs?: number
   onTerminalData?(bytes: Uint8Array): void
 }): Promise<CodexOwnerBootstrap> {
-  options = { ...options, env: { ...options.env }, configOverrides: [...options.configOverrides ?? []] }
+  options = { ...options, env: { ...options.env }, configOverrides: [...options.configOverrides ?? [], 'features.multi_agent_v2=true'] }
   const timeout = options.timeoutMs ?? 15_000
   if (!Number.isFinite(timeout) || timeout <= 0) throw new Error('Invalid bootstrap deadline')
   for (const path of [options.cwd, options.codexHome, dirname(options.socketPath)]) {
@@ -158,6 +160,7 @@ export async function bootstrapCodexOwner(options: {
       const thread = response.thread
       while (!nativeThread && !closed) await Bun.sleep(5)
       validateBootstrapThread(thread, nativeThread, options.cwd, options.codexHome)
+      validateBootstrapMultiAgent(await native('experimentalFeature/list', { threadId: thread.id, limit: 1000 }))
       const transport: ProjectControlTransport = {
         listen(receive, disconnect) { upstreamReceive = receive; upstreamDisconnect = disconnect },
         send(message) {
@@ -174,6 +177,7 @@ export async function bootstrapCodexOwner(options: {
         paneHandle: `owned-pty:${tui!.pid}`, bindingRevision: randomBytes(32).toString('hex'),
         generation: journal.generation, brokerGeneration: broker.state().generation, credentialFingerprint,
         modelProvider: thread.modelProvider, controlSocketPath: options.socketPath,
+        capabilities: Object.freeze({ multiAgentV2: true, evidence: 'native-thread-feature-report' }),
         nativeMetadata: Object.freeze({ sessionId: thread.sessionId, source: thread.source, originator: thread.originator }) })
       journal.sealAttestation(JSON.stringify(facts))
       journal.settle()
@@ -213,7 +217,7 @@ export async function bootstrapCodexOwner(options: {
           || params.sessionStartSource != null || params.threadSource !== 'user'
           || params.modelProvider != null || params.baseInstructions != null || params.developerInstructions != null
           || params.permissions != null || params.selectedCapabilityRoots != null
-          || object(params.config) && Object.keys(params.config).some(key => !['personality', 'web_search'].includes(key))) {
+          || !admitsBootstrapConfig(params.config)) {
           throw new Error('Bootstrap thread scope refused')
         }
         validateProjectControlScope('thread/start', params, options.cwd, message => new Error(message))

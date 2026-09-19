@@ -6,6 +6,20 @@ type Rpc = Record<string, unknown>
 const object = (value: unknown): value is Rpc => typeof value === 'object' && value !== null && !Array.isArray(value)
 export const OWNER_BOOTSTRAP_ORIGINATOR = 'neutron-owner-bootstrap'
 
+/** Only the native TUI's exact required feature override is admissible. */
+export function admitsBootstrapConfig(config: unknown): boolean {
+  if (!object(config) || Object.keys(config).some(key => !['personality', 'web_search', 'features'].includes(key))) return false
+  return object(config.features) && Object.keys(config.features).length === 1 && config.features.multi_agent_v2 === true
+}
+
+/** Evidence of native support and enablement, not proof that a child has run. */
+export function validateBootstrapMultiAgent(features: unknown): void {
+  if (!object(features) || !Array.isArray(features.data) || features.nextCursor !== null
+    || features.data.filter(feature => object(feature) && feature.name === 'multi_agent_v2').length !== 1
+    || !features.data.some(feature => object(feature) && feature.name === 'multi_agent_v2'
+      && feature.enabled === true && ['beta', 'underDevelopment', 'stable'].includes(String(feature.stage)))) throw new Error('Native multi-agent capability unavailable')
+}
+
 /** Internal validation, never a constructor for an authoritative binding handle. */
 export function validateBootstrapThread(thread: unknown, event: Rpc | undefined, cwd: string, codexHome: string): asserts thread is Rpc & {
   id: string; sessionId: string; path: string; source: string; originator: string; modelProvider: string

@@ -3,11 +3,33 @@ import { Database } from 'bun:sqlite'
 import { mkdirSync, mkdtempSync, rmSync, symlinkSync } from 'node:fs'
 import { tmpdir } from 'node:os'
 import { join } from 'node:path'
-import { admitsOwnerTui, OWNER_BOOTSTRAP_ORIGINATOR, validateBootstrapThread } from './project-control-bootstrap-validation.ts'
+import { admitsBootstrapConfig, admitsOwnerTui, OWNER_BOOTSTRAP_ORIGINATOR, validateBootstrapMultiAgent, validateBootstrapThread } from './project-control-bootstrap-validation.ts'
 import { openProjectControlJournal } from './project-control-broker-journal.ts'
 import { readCodexOwnerBinding } from './project-control-bootstrap.ts'
 
 describe('owner bootstrap attestation', () => {
+  test('only the exact required native feature can cross the bootstrap config boundary', () => {
+    expect(admitsBootstrapConfig({ features: { multi_agent_v2: true }, personality: 'pragmatic', web_search: 'cached' })).toBe(true)
+    for (const config of [null, [], {}, { features: {} }, { features: { multi_agent_v2: false } },
+      { features: { multi_agent_v2: 'true' } }, { 'features.multi_agent_v2': true },
+      { features: { multi_agent_v2: true, shell_tool: true } },
+      { features: { multi_agent_v2: true }, cwd: '/foreign' },
+      { features: { multi_agent_v2: true }, model_provider: 'foreign' }]) expect(admitsBootstrapConfig(config)).toBe(false)
+  })
+
+  test('native feature evidence must affirm one supported enabled feature in a complete response', () => {
+    const feature = { name: 'multi_agent_v2', enabled: true, stage: 'underDevelopment' }
+    expect(() => validateBootstrapMultiAgent({ data: [feature], nextCursor: null })).not.toThrow()
+    for (const response of [null, {}, { data: [] }, { data: [feature], nextCursor: 'more' },
+      { data: [feature, feature] }, { data: [{ ...feature, enabled: false }] },
+      { data: [{ ...feature, enabled: 'true' }] }, { data: [{ ...feature, name: 'multi_agent' }] },
+      { data: [{ ...feature, stage: 'removed' }] }, { data: [{ ...feature, stage: 'deprecated' }] },
+      { data: [{ ...feature, stage: 'future' }] }, { data: [{ ...feature, stage: undefined }] }]) {
+      expect(() => validateBootstrapMultiAgent(response === null ? null : { nextCursor: null, ...response })).toThrow('capability unavailable')
+    }
+    expect(() => validateBootstrapMultiAgent({ data: [feature] })).toThrow('capability unavailable')
+  })
+
   test('native event and response agree on exact identity and project namespace', () => {
     const dir = mkdtempSync(join(tmpdir(), 'bootstrap-binding-test-'))
     const cwd = join(dir, 'project'), codexHome = join(dir, 'home')
