@@ -62,6 +62,24 @@ async function eventually(check: () => boolean): Promise<void> {
 }
 
 describe('approved installed MCP broker', () => {
+  test.each(['remove', 'rotate'] as const)('revocation during cold admission cannot spawn a stale candidate or cancel its unchanged peer: %s', async change => {
+    const a = fixture({ BROKER_TEST_CONNECT_DELAY: '500' })
+    const b = fixture()
+    a.setServers([{ ...a.servers[0]!, name: 'a' }, { ...b.servers[0]!, name: 'b' }])
+    const binding = a.broker.bind(a.context)
+    await eventually(() => a.operations().includes('spawn'))
+    a.setServers(change === 'remove' ? a.servers.filter(server => server.name === 'a')
+      : a.servers.map(server => server.name === 'a' ? server : { ...server, env: { ...server.env, BROKER_TEST_SECRET: 'rotated' } }))
+    await a.broker.retireRevoked()
+    expect(a.peerAlive()).toBe(true)
+    expect((await binding).map(server => server.name)).toEqual(['a'])
+    expect(b.operations()).toEqual([])
+    expect((await a.broker.request(a.context, 'a', { method: 'tools/list' })).tools).toHaveLength(1)
+    await expect(a.broker.request(a.context, 'b', { method: 'tools/list' })).rejects.toThrow()
+    expect(a.operations()).toEqual(['spawn'])
+    expect(a.peerAlive()).toBe(true)
+  })
+
   test('cancelled unsubscribe after peer result cannot lend an uncertain subscription to a successor', async () => {
     const f = fixture()
     await f.broker.bind(f.context)

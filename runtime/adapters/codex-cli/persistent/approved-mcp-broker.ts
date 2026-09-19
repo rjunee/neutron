@@ -130,9 +130,14 @@ export class ApprovedMcpBroker {
         catch { await this.dispose(binding); continue }
         if (this.binding !== binding && this.pending !== binding) continue
         const approved = new Map(live.servers.map(server => [server.name, snapshot([server]).fingerprint]))
+        // Fence the entire reserved admission set, including candidates that
+        // have not spawned while another peer's handshake is awaiting IO.
+        for (const [name, fingerprint] of binding.serverFingerprints) {
+          if (approved.get(name) !== fingerprint) binding.serverFingerprints.delete(name)
+        }
         const closing: Promise<void>[] = []
         for (const [name, client] of binding.clients) {
-          if (approved.get(name) === binding.serverFingerprints.get(name)) continue
+          if (approved.has(name) && approved.get(name) === binding.serverFingerprints.get(name)) continue
           binding.clients.delete(name)
           binding.serverFingerprints.delete(name)
           binding.metadata = binding.metadata.filter(entry => entry.name !== name)
@@ -280,10 +285,12 @@ export class ApprovedMcpBroker {
       signal?.throwIfAborted()
       if (this.pending !== binding) throw refused()
       binding.fingerprint = approved.fingerprint
+      for (const server of approved.servers) binding.serverFingerprints.set(server.name, snapshot([server]).fingerprint)
       for (const server of approved.servers) {
         if (binding.clients.has(server.name)) continue
         await this.verify(binding, context, true)
         signal?.throwIfAborted()
+        if (binding.serverFingerprints.get(server.name) !== snapshot([server]).fingerprint) continue
         const client = new Client({ name: 'neutron-approved-mcp-broker', version: '1.0.0' }, { capabilities: {} })
         const transport = new StdioClientTransport({ command: server.command, args: [...server.args],
           env: declaredEnvironment(server), stderr: 'pipe' })
