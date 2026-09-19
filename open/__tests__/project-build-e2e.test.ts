@@ -1185,12 +1185,12 @@ test('pr mode drives plan, build, review, publish and merge to a terminal merged
 test('clean worker commit publication still reaches MERGED', async () => {
   const f = await fixture({ commitBody: 'Discuss Claude-Session: as data, not a trailer.\n\nCo-Authored-By: Fixture <fixture@example.invalid>' })
   const outcome = await drive(f, 'pr')
+  expect(outcome.kind, why(f, outcome)).toBe('merged')
   const branch = f.store.get(f.row.id)!.branch!
   const message = await gitOut(spawnCapture, f.origin, ['show', '-s', '--format=%B', `refs/heads/${branch}`])
   expect(message).toContain('Discuss Claude-Session: as data, not a trailer.')
   expect(message).toContain('Co-Authored-By: Fixture <fixture@example.invalid>')
   expect(message).not.toMatch(/^Claude-Session:/m)
-  expect(outcome.kind, why(f, outcome)).toBe('merged')
   expect(f.github.prs).toHaveLength(1)
   expect(f.github.prs[0]!.state).toBe('MERGED')
   expect(await gitOut(spawnCapture, f.origin, ['rev-parse', 'refs/heads/main'])).not.toBe(f.baseSha)
@@ -1199,15 +1199,15 @@ test('clean worker commit publication still reaches MERGED', async () => {
 test('Claude-Session trailer publication refuses before a fresh push or PR creation', async () => {
   const f = await fixture({ commitClaudeSessionTrailer: true })
   const outcome = await drive(f, 'pr')
+  expect(outcome.kind, why(f, outcome)).not.toBe('merged')
   expect(f.world.authoredHeads).toHaveLength(1)
   const message = await gitOut(spawnCapture, f.repo, ['show', '-s', '--format=%B', f.world.authoredHeads[0]!])
   expect(message).toContain('Claude-Session: https://claude.ai/session/fixture')
-  // A decoded build, review and APPROVE synthesis reached publication; a parser
-  // failure before publication cannot satisfy the dispatch assertions below.
+  // Publication precedes review. Require the specific host refusal so a parser
+  // failure before publication cannot satisfy this negative control.
   const roles = f.world.dispatches.map(dispatch => dispatch.role)
-  expect(roles.slice(0, 3)).toEqual(['plan', 'build', 'review'])
-  expect(roles).toContain('synthesis')
-  expect(outcome.kind, why(f, outcome)).not.toBe('merged')
+  expect(roles).toEqual(['plan', 'build'])
+  expect(JSON.stringify(outcome)).toContain('Commit-message admission refuses a Claude-Session trailer')
   expect(f.github.prs).toEqual([])
   expect(await gitOut(spawnCapture, f.origin, ['rev-parse', 'refs/heads/main'])).toBe(f.baseSha)
 }, 300_000)
@@ -1239,14 +1239,14 @@ test('published PR with a Claude-Session ancestor and clean worker tip stays ope
     .toContain('Claude-Session: https://claude.ai/session/fixture')
 
   const outcome = await (await createProjectBuildHost(options)).run({ mode: 'pr', start: 'fresh' }, new AbortController().signal)
+  expect(outcome.kind, why(f, outcome)).not.toBe('merged')
   const roles = f.world.dispatches.map(dispatch => dispatch.role)
-  expect(roles.slice(0, 3)).toEqual(['plan', 'build', 'review'])
-  expect(roles).toContain('synthesis')
+  expect(roles).toEqual(['plan', 'build'])
+  expect(JSON.stringify(outcome)).toContain('Commit-message admission refuses a Claude-Session trailer')
   expect(f.world.authoredHeads).toHaveLength(1)
   expect(await gitOut(spawnCapture, f.repo, ['show', '-s', '--format=%B', f.world.authoredHeads[0]!]))
     .not.toContain('Claude-Session:')
   expect((await spawnCapture(['git', '-C', f.repo, 'merge-base', '--is-ancestor', dirtyHead, f.world.authoredHeads[0]!], f.repo)).ok).toBe(true)
-  expect(outcome.kind, why(f, outcome)).not.toBe('merged')
   expect(f.github.prs).toEqual([{ number: 1, state: 'OPEN', headRefName: branch, baseRefName: 'main' }])
   expect(await gitOut(spawnCapture, f.origin, ['rev-parse', 'refs/heads/main'])).toBe(f.baseSha)
 }, 300_000)
