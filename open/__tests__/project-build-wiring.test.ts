@@ -892,8 +892,9 @@ test('suite child excludes the stored GitHub credential while git push retains i
     prNumber: null, diffFile: 'diff', testsPassed: true,
   } } }))
   // Inspect every field supplied by githubProcessEnv, not just the token itself.
+  // Emit presence only: a failing assertion must never render a credential.
   await writeFile(join(worktree, 'inspect-env.sh'),
-    Object.keys(credential).map(key => `printf '%s\\n' "${key}=\${${key}-ABSENT}"`).join('\n'))
+    Object.keys(credential).map(key => `if [ "\${${key}+x}" = x ]; then printf '%s\\n' '${key}=PRESENT'; else printf '%s\\n' '${key}=ABSENT'; fi`).join('\n'))
   const receipt = await options.policy.reviewSuite!.readCheckpoint({ head, diff: '', pr: null }, 1)
   expect(receipt?.report).toEqual({ hostExitCode: 0 })
   const transcript = await readFile(join(f.dir, 'state', encodeURIComponent(f.input.run.id), 'suite-round-1.log'), 'utf8')
@@ -907,10 +908,10 @@ test('suite child excludes the stored GitHub credential while git push retains i
     ['git', '-C', worktree, '-c', 'user.name=Fixture', '-c', 'user.email=fixture@example.test', 'commit', '--allow-empty', '-m', 'fixture'],
   ]) expect((await spawnCapture(argv)).ok).toBe(true)
   await writeFile(join(worktree, '.git', 'hooks', 'pre-push'),
-    '#!/bin/sh\nprintf "%s" "$GH_TOKEN" > push-env.txt\n', { mode: 0o755 })
+    '#!/bin/sh\nif [ "$GH_TOKEN" = "fixture-github-credential" ]; then printf match; else printf mismatch; fi > push-env.txt\n', { mode: 0o755 })
   const pushed = await options.production.runHost(['git', '-C', worktree, 'push', origin, 'HEAD:refs/heads/check'])
   expect(pushed.ok).toBe(true)
-  expect(await readFile(join(worktree, 'push-env.txt'), 'utf8')).toBe(credential.GH_TOKEN!)
+  expect(await readFile(join(worktree, 'push-env.txt'), 'utf8')).toBe('match')
 })
 
 // #1112. `spec.tools` IS the `--tools` surface — `spawn.ts:302` derives it as
