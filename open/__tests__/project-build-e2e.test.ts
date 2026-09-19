@@ -51,9 +51,10 @@
  */
 import { LIVE_AGENT_TOOL_NAMES } from '@neutronai/gateway/wiring/build-live-agent-turn.ts'
 import { afterEach, expect, spyOn, test } from 'bun:test'
-import { chmod, mkdir, mkdtemp, readFile, readdir, rename, rm, writeFile } from 'node:fs/promises'
+import { chmod, mkdir, mkdtemp, readFile, readdir, rename, rm, symlink, writeFile } from 'node:fs/promises'
 import { tmpdir } from 'node:os'
 import { join } from 'node:path'
+import { fileURLToPath } from 'node:url'
 import { ProjectDb } from '@neutronai/persistence/index.ts'
 import { seedMigratedDb } from '../../tests/support/migrated-db.ts'
 import { TridentRunStore } from '@neutronai/trident/store.ts'
@@ -72,6 +73,7 @@ import type { BoundedWorkRequest } from '@neutronai/runtime/bounded-work.ts'
 import { buildRun, type BuildRunOutcome } from '@neutronai/trident/build-run.ts'
 import type { InnerLoopInput } from '@neutronai/trident/inner-loop.ts'
 import { PROJECT_SESSION_ACQUIRE_TIMEOUT_MS, prepareProjectBuild, type ProjectBuildContext } from '../wiring/project-build.ts'
+import { PROJECT_DEPENDENCIES_TIMEOUT_MS } from '../wiring/project-build-dependencies.ts'
 
 const cleanups: (() => void | Promise<void>)[] = []
 afterEach(async () => { for (const fn of cleanups.splice(0).reverse()) await fn() })
@@ -557,6 +559,8 @@ console.log(JSON.stringify({ type: 'turn.completed', usage: { input_tokens: 7, o
 `
 
 async function fixture(options: { ralph?: boolean; moreTasks?: boolean; suiteExit?: number; testStrategy?: string
+  bunWorkspace?: boolean
+  manifest?: Record<string, unknown>
   dispatchTask?: string
   blockersByRound?: readonly number[]; replanRounds?: readonly number[]
   maxRounds?: number; mergeMode?: 'pr' | 'local'; blockRoles?: readonly string[]
@@ -600,6 +604,32 @@ async function fixture(options: { ralph?: boolean; moreTasks?: boolean; suiteExi
   // this path before it runs anything (`leak-preflight.ts:281`).
   await writeFile(join(repo, 'scripts', 'ci', 'leak-gate.sh'), LEAK_GATE_STUB, { mode: 0o755 })
   await writeFile(join(repo, 'scripts', 'ci', 'suite.sh'), suiteScript(options.suiteExit ?? 0), { mode: 0o755 })
+  if (options.manifest) await writeFile(join(repo, 'package.json'), JSON.stringify(options.manifest))
+  if (options.bunWorkspace) {
+    // A real tarball dependency keeps this fixture offline while exercising Bun's
+    // isolated store and package-local resolution, just like the production suite.
+    await mkdir(join(repo, 'app'), { recursive: true })
+    await mkdir(join(repo, 'vendor', 'package'), { recursive: true })
+    await writeFile(join(repo, '.gitignore'), 'node_modules/\n')
+    await writeFile(join(repo, 'package.json'), JSON.stringify({ name: 'fixture', private: true, workspaces: ['app'],
+      scripts: { postinstall: 'touch lifecycle-ran' } }))
+    await writeFile(join(repo, 'bunfig.toml'), '[install]\nlinker = "isolated"\n')
+    await writeFile(join(repo, 'vendor', 'package', 'package.json'), JSON.stringify({ name: 'fixture-dependency', version: '1.0.0', main: 'index.js' }))
+    await writeFile(join(repo, 'vendor', 'package', 'index.js'), 'exports.message = "dependency consumed"\n')
+    const packed = await spawnCapture(['tar', '-czf', 'dependency.tgz', 'package'], join(repo, 'vendor'))
+    expect(packed.ok).toBe(true)
+    await writeFile(join(repo, 'app', 'package.json'), JSON.stringify({ name: 'fixture-app', dependencies: { 'fixture-dependency': 'file:../vendor/dependency.tgz' } }))
+    await writeFile(join(repo, 'app', 'check.ts'), 'import { message } from "fixture-dependency"; if (message !== "dependency consumed") throw Error("wrong dependency"); console.log(message)\n')
+    await writeFile(join(repo, 'scripts', 'ci', 'verify-workspace-deps.ts'), await readFile(new URL('../../scripts/ci/verify-workspace-deps.ts', import.meta.url), 'utf8'))
+    await writeFile(join(repo, 'scripts', 'ci', 'suite.sh'), '#!/usr/bin/env bash\nset -e\nbun scripts/ci/verify-workspace-deps.ts\nbun app/check.ts\n')
+    const installed = await spawnCapture(['bun', 'install'], repo, { BUN_INSTALL_CACHE_DIR: join(dir, 'bun-cache') })
+    expect(installed.ok, installed.stderr).toBe(true)
+    // Positive control: this lifecycle script really runs without --ignore-scripts.
+    expect(await readFile(join(repo, 'lifecycle-ran'), 'utf8')).toBe('')
+    await rm(join(repo, 'lifecycle-ran'))
+    await rm(join(repo, 'node_modules'), { recursive: true, force: true })
+    await rm(join(repo, 'app', 'node_modules'), { recursive: true, force: true })
+  }
   await writeFile(join(repo, 'NOTES.md'), 'seed\n')
   await writeFile(join(repo, 'IMPLEMENTATION_PLAN.md'),
     `- [ ] T1 record the note\n${options.moreTasks ? '- [ ] T2 record another note\n' : ''}`)
@@ -664,6 +694,9 @@ async function fixture(options: { ralph?: boolean; moreTasks?: boolean; suiteExi
 
   const context: ProjectBuildContext = {
     store, phaseUsage: new TridentPhaseUsageStore(db), runHost, runSuite: runHost,
+    runInstall: Object.assign((argv: string[], cwd?: string, env?: Record<string, string>, timeout?: number) =>
+      spawnCapture(argv, cwd, { ...env, BUN_INSTALL_CACHE_DIR: join(dir, 'bun-cache') }, timeout),
+    { writesDiffOutput: true as const }),
     stateRoot: join(dir, 'state'), projectDir: dir, projectId: 'e2e-project',
     provider: 'anthropic', providerSource: 'application',
     env: codexBin ? { PATH: `${codexBin}:${process.env.PATH ?? ''}` } : {},
@@ -702,6 +735,176 @@ async function drive(f: Awaited<ReturnType<typeof fixture>>, mode: 'pr' | 'ralph
   const options = await f.prepare()
   const host = await createProjectBuildHost(options)
   return host.run({ mode, start: 'fresh' }, new AbortController().signal)
+}
+
+test('Bun workspace dependencies are local before workers and publication consumes them', async () => {
+  const f = await fixture({ bunWorkspace: true })
+  f.input.test_strategy_intermediate = 'Run targeted checks only.'
+  const prepared = await f.prepare()
+  const worktree = f.store.get(f.row.id)!.worktree!
+  const consumed = await spawnCapture(['bun', 'app/check.ts'], worktree)
+  expect(consumed.stdout).toBe('dependency consumed')
+  expect(consumed.ok).toBe(true)
+  await expect(readFile(join(worktree, 'lifecycle-ran'))).rejects.toMatchObject({ code: 'ENOENT' })
+  expect(f.world.dispatches).toEqual([])
+  const host = await createProjectBuildHost(prepared)
+  const outcome = await host.run({ mode: 'pr', start: 'fresh' }, new AbortController().signal)
+  expect(outcome.kind, why(f, outcome)).toBe('merged')
+  const state = join(f.context.stateRoot, encodeURIComponent(f.row.id))
+  expect(await readFile(join(state, 'dependencies.log'), 'utf8')).toContain('Worktree-local dependency preparation completed')
+  expect(await readFile(join(state, 'suite-publication.log'), 'utf8')).toContain('dependency consumed')
+}, 120_000)
+
+test('Bun workspace recovery repairs missing dependencies before workers', async () => {
+  const f = await fixture({ bunWorkspace: true })
+  await f.prepare()
+  const worktree = f.store.get(f.row.id)!.worktree!
+  await rm(join(worktree, 'node_modules'), { recursive: true })
+  await rm(join(worktree, 'app', 'node_modules'), { recursive: true })
+  const broken = await spawnCapture(['bun', 'scripts/ci/verify-workspace-deps.ts'], worktree)
+  expect(broken.ok).toBe(false)
+  expect(broken.stderr).toContain('node_modules/.bun does not exist')
+  f.input.run = f.store.get(f.row.id)!
+  const outcome = await drive(f, 'pr')
+  expect(outcome.kind, why(f, outcome)).toBe('merged')
+  const log = await readFile(join(f.context.stateRoot, encodeURIComponent(f.row.id), 'dependencies.log'), 'utf8')
+  expect(log.match(/Worktree-local dependency preparation completed/g)).toHaveLength(2)
+}, 120_000)
+
+for (const shape of ['failure', 'failure-installed', 'empty-success', 'empty-store', 'timeout', 'timeout-installed'] as const) {
+  test(`Bun workspace install ${shape} cannot dispatch or publish`, async () => {
+    const f = await fixture({ bunWorkspace: true })
+    let installs = 0
+    const original = f.context.runInstall!
+    f.context.runInstall = Object.assign(async (argv: string[], cwd?: string, env?: Record<string, string>, timeout?: number) => {
+      if (argv[2]?.includes('verify-workspace-deps.ts')) return original(argv, cwd, env, timeout)
+      installs++
+      expect(timeout).toBe(PROJECT_DEPENDENCIES_TIMEOUT_MS)
+      if (shape === 'empty-store') await mkdir(join(cwd!, 'node_modules', '.bun'), { recursive: true })
+      if (shape.endsWith('-installed')) expect((await original(argv, cwd, env, timeout)).ok).toBe(true)
+      const failed = shape.startsWith('failure')
+      return { ok: !failed, exit_code: failed ? 1 : 0,
+        stdout: '', stderr: '', ...(shape.startsWith('timeout') ? { timed_out: true } : {}) }
+    }, { writesDiffOutput: true as const })
+    await expect(drive(f, 'pr')).rejects.toThrow('Build dependency preparation failed')
+    expect(installs).toBe(1)
+    expect(f.world.dispatches).toEqual([])
+    expect(f.github.prs).toEqual([])
+    const log = await readFile(join(f.context.stateRoot, encodeURIComponent(f.row.id), 'dependencies.log'), 'utf8')
+    expect(log).toContain('REFUSED:')
+  }, 30_000)
+}
+
+test('Bun workspace publication suite still refuses merge when dependencies disappear', async () => {
+  const f = await fixture({ bunWorkspace: true })
+  f.input.test_strategy_intermediate = 'Run targeted checks only.'
+  const prepared = await f.prepare()
+  const worktree = f.store.get(f.row.id)!.worktree!
+  await rm(join(worktree, 'node_modules'), { recursive: true })
+  const host = await createProjectBuildHost(prepared)
+  const outcome = await host.run({ mode: 'pr', start: 'fresh' }, new AbortController().signal)
+  expect(outcome.kind).not.toBe('merged')
+  expect(f.world.dispatches.some(dispatch => dispatch.role === 'build')).toBe(true)
+  expect(f.github.prs).toHaveLength(1)
+  expect(f.github.prs[0]!.state).toBe('OPEN')
+  expect(await gitOut(spawnCapture, f.origin, ['rev-parse', 'refs/heads/main'])).toBe(f.baseSha)
+  expect(await readFile(join(f.context.stateRoot, encodeURIComponent(f.row.id), 'suite-publication.log'), 'utf8'))
+    .toContain('node_modules/.bun does not exist')
+}, 120_000)
+
+test('Bun workspace recovery rejects a shared node_modules symlink before installation', async () => {
+  const f = await fixture({ bunWorkspace: true })
+  await f.prepare()
+  const worktree = f.store.get(f.row.id)!.worktree!
+  await rm(join(worktree, 'node_modules'), { recursive: true })
+  await mkdir(join(f.repo, 'node_modules'))
+  await symlink(join(f.repo, 'node_modules'), join(worktree, 'node_modules'))
+  f.context.runInstall = Object.assign(async () => { throw new Error('must reject before install') }, { writesDiffOutput: true as const })
+  await expect(f.prepare()).rejects.toThrow('node_modules must be a worktree-local directory')
+  expect(f.world.dispatches).toEqual([])
+  expect(f.github.prs).toEqual([])
+}, 30_000)
+
+test('Bun workspace hung installer is killed by the bounded host watchdog', async () => {
+  const f = await fixture({ bunWorkspace: true })
+  f.context.runInstall = Object.assign((_argv: string[], cwd?: string, env?: Record<string, string>, timeout?: number) =>
+    spawnCapture(['bash', '-c', 'exec sleep 60'], cwd, env, timeout), { writesDiffOutput: true as const })
+  const nativeTimeout = globalThis.setTimeout
+  const clock = spyOn(globalThis, 'setTimeout').mockImplementation(((callback: (...args: unknown[]) => void, ms?: number, ...args: unknown[]) =>
+    nativeTimeout(callback, ms === PROJECT_DEPENDENCIES_TIMEOUT_MS ? 20 : ms, ...args)
+  ) as typeof setTimeout)
+  try {
+    await expect(drive(f, 'pr')).rejects.toThrow('Build dependency preparation failed')
+    const log = await readFile(join(f.context.stateRoot, encodeURIComponent(f.row.id), 'dependencies.log'), 'utf8')
+    expect(log).toContain('timed_out=true')
+    expect(f.world.dispatches).toEqual([])
+    expect(f.github.prs).toEqual([])
+  } finally { clock.mockRestore() }
+}, 30_000)
+
+test('Bun workspace preparation uses the host verifier without executing the branch verifier', async () => {
+  const f = await fixture({ bunWorkspace: true })
+  await f.prepare()
+  const worktree = f.store.get(f.row.id)!.worktree!
+  await writeFile(join(worktree, 'scripts', 'ci', 'verify-workspace-deps.ts'),
+    'await Bun.write("branch-verifier-ran", "executed"); process.exit(0)\n')
+  await f.prepare()
+  await expect(readFile(join(worktree, 'branch-verifier-ran'))).rejects.toMatchObject({ code: 'ENOENT' })
+  // Positive control: the replaced branch script is executable and produces the marker.
+  const executed = await spawnCapture(['bun', 'scripts/ci/verify-workspace-deps.ts'], worktree)
+  expect(executed.ok).toBe(true)
+  expect(await readFile(join(worktree, 'branch-verifier-ran'), 'utf8')).toBe('executed')
+}, 30_000)
+
+test('Bun workspace preparation cannot execute branch bunfig preloads through the host verifier', async () => {
+  const f = await fixture({ bunWorkspace: true })
+  await f.prepare()
+  const worktree = f.store.get(f.row.id)!.worktree!
+  const marker = join(f.dir, 'branch-preload-ran')
+  await writeFile(join(worktree, 'preload.ts'), `await Bun.write(${JSON.stringify(marker)}, "executed")\n`)
+  await writeFile(join(worktree, 'bunfig.toml'), 'preload = ["./preload.ts"]\n[install]\nlinker = "isolated"\n')
+  const verifier = fileURLToPath(new URL('../../scripts/ci/verify-workspace-deps.ts', import.meta.url))
+  // Positive control reproduces the old invocation: a trusted absolute script
+  // still runs the worktree's preload before checking any dependencies.
+  const oldInvocation = await spawnCapture(['bun', verifier, worktree], worktree)
+  expect(oldInvocation.ok, oldInvocation.stderr).toBe(true)
+  expect(await readFile(marker, 'utf8')).toBe('executed')
+  await rm(marker)
+  const original = f.context.runInstall!
+  const observed: string[] = []
+  f.context.runInstall = Object.assign(async (argv: string[], cwd?: string, env?: Record<string, string>, timeout?: number) => {
+    const result = await original(argv, cwd, env, timeout)
+    // Observe each exact production command separately, including bun install
+    // from the worktree; --ignore-scripts is not a runtime preload boundary.
+    await expect(readFile(marker)).rejects.toMatchObject({ code: 'ENOENT' })
+    observed.push(argv[2]?.includes('verify-workspace-deps.ts') ? 'verify' : 'install')
+    return result
+  }, { writesDiffOutput: true as const })
+  await f.prepare()
+  expect(observed).toEqual(['install', 'verify'])
+  await expect(readFile(marker)).rejects.toMatchObject({ code: 'ENOENT' })
+  const log = await readFile(join(f.context.stateRoot, encodeURIComponent(f.row.id), 'dependencies.log'), 'utf8')
+  expect(log.match(/workspace dependency verification: exit=0; timed_out=false/g)).toHaveLength(2)
+  expect(f.world.dispatches).toEqual([])
+}, 30_000)
+
+for (const [kind, manifest] of [
+  ['no manifest', undefined],
+  ['npm workspace', { workspaces: ['app'], packageManager: 'npm@10.0.0' }],
+  ['unmarked workspace', { workspaces: ['app'] }],
+  ['Bun single package', { packageManager: 'bun@1.3.13' }],
+] as const) {
+  test(`non-Bun-workspace repository (${kind}) never invokes dependency installation and can merge`, async () => {
+    const f = await fixture(manifest ? { manifest } : {})
+    let installs = 0
+    f.context.runInstall = Object.assign(async () => {
+      installs++
+      throw new Error('non-Bun repository must not be installed with Bun')
+    }, { writesDiffOutput: true as const })
+    const outcome = await drive(f, 'pr')
+    expect(outcome.kind, why(f, outcome)).toBe('merged')
+    expect(installs).toBe(0)
+  }, 120_000)
 }
 
 async function codexReviewEvidence(f: Awaited<ReturnType<typeof fixture>>) {
