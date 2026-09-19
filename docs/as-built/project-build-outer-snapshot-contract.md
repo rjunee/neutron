@@ -25,12 +25,21 @@ checked for the full shared schema (`:1108`). Focused decoding controls prove
 valid objects survive unchanged and null remains valid independently of the
 payload's PR number (`open/__tests__/project-build-snapshot.test.ts:15`).
 
-Validation: the explicit consuming E2E file plus focused snapshot tests passed
-103 tests. Root and Trident TypeScript checks, focused ESLint and whitespace
+The existing wiring consumer also asserts the field-specific outer-contract
+throw, separately from a false role-payload validation result, with valid PR
+object and null controls (`open/__tests__/project-build-wiring.test.ts:164`).
+Its exact brief fixtures retain all four roles' strategy/reflection boundaries
+while including the new outer contract (`:613`). No production refusal was
+weakened to accommodate the older test expectations.
+
+Validation: the complete wiring consumer, explicit consuming E2E file and
+focused snapshot tests passed 135 tests with loopback access for the simulated
+REPL fixture. Root and Trident TypeScript checks, focused ESLint and whitespace
 checks passed. Three restored semantic mutations were rejected: accepting
 numeric PRs failed the refusal guard; rejecting valid PR objects failed the
 object control while null passed; rejecting null failed its control while
-objects passed. The restored focused suite passed all 14 tests. A content
+objects passed. The updated wiring consumer also rejected all three mutations;
+the complete 135-test run passed after restoration. A content
 search for the removed inline PR schema found the shared validator and schema
 references as its positive control. No live run artifact, PR, deployment or
 publication was changed; this is offline evidence for the contract repair.

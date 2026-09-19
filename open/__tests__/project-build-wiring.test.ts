@@ -23,6 +23,7 @@ import * as codex from '@neutronai/runtime/workers/codex-headless.ts'
 import { pool, supervisedBySessionKey } from '@neutronai/runtime/adapters/claude-code/persistent/pool-state.ts'
 import { fakeRunner, type BoundedWorkRequest } from '@neutronai/runtime/bounded-work.ts'
 import { prepareProjectBuild, suiteScript, type ProjectBuildContext } from '../wiring/project-build.ts'
+import { PROJECT_SNAPSHOT_SCHEMA } from '../wiring/project-build-snapshot.ts'
 import { makeLazyCredentialedHostRunner, spawnCapture } from '@neutronai/trident/git-mode.ts'
 import { githubProcessEnv } from '@neutronai/github/credential.ts'
 import { renderTestStrategy } from '@neutronai/trident/test-strategy.ts'
@@ -165,7 +166,11 @@ test('option sources preserve pin, selected provider, workflow and unavailable s
   expect(validators.get('verdict')!(payload)).toBe(true)
   const validate = validators.get('project-review')!
   expect(validate({ head: 'a'.repeat(40), diff: '', pr: null, payload })).toBe(true)
-  for (const value of [null, 1, {}, { head: 1, diff: '', pr: null, payload }, { head: 'a', diff: 3, pr: null, payload }, { head: 'a', diff: '', pr: 2, payload }, { head: 'a', diff: '', pr: null, payload: {} }]) expect(validate(value)).toBe(false)
+  expect(validate({ head: 'a'.repeat(40), diff: '', pr: { number: 2, head: 'a'.repeat(40), state: 'OPEN' }, payload })).toBe(true)
+  for (const value of [undefined, null, 1, {}, { head: 1, diff: '', pr: null, payload }, { head: 'a', diff: 3, pr: null, payload }, { head: 'a', diff: '', pr: 2, payload }]) {
+    expect(() => validate(value)).toThrow('Project snapshot contract:')
+  }
+  expect(validate({ head: 'a', diff: '', pr: null, payload: {} })).toBe(false)
   expect(f.captured().trailer.metadata({} as BoundedWorkRequest)).toBeUndefined()
 })
 
@@ -612,6 +617,8 @@ for (const role of ['plan', 'build', 'review', 'fix'] as const) {
       '  "kind"   — "completed" when you finished the role, or "blocked" when you could not.',
       '  "result" — when completed: { head, diff, pr, payload }. Omit when blocked.',
       'When blocked, add "on": a non-empty sentence saying what stopped you. Report blocked rather than inventing a result; a fabricated result is worse than a stopped run.',
+      'The completed result must satisfy this outer snapshot contract. Copy `snapshot.pr` from the host context unchanged: null or { "number": positive integer, "head": string, "state": "OPEN" | "CLOSED" | "MERGED" }. Never replace it with a number or URL. The forge payload field `result.payload.prNumber` is separately a number or null; it does not replace `result.pr`. Measure head and diff for the resulting revision; the host independently checks the claim.',
+      JSON.stringify(PROJECT_SNAPSHOT_SCHEMA),
       `\`result.payload\` must satisfy the ${role === 'plan' ? 'plan' : role === 'review' ? 'verdict' : 'forge'} trailer contract below. Read the host context for the measured snapshot.`,
       JSON.stringify(role === 'plan' ? PLAN_SCHEMA : role === 'review' ? VERDICT_SCHEMA : FORGE_SCHEMA),
       'Never publish or merge; the host owns those actions.',
