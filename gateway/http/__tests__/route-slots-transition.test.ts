@@ -86,6 +86,7 @@ const EXPECTED_LADDER: ReadonlyArray<[string, string, string | null, boolean]> =
   ['app-tasks', 'appTasks', 'app_tasks_surface', true],
   ['app-reminders', 'appReminders', 'app_reminders_surface', true],
   ['app-tabs', 'appTabs', 'app_tabs_surface', true],
+  ['app-repl-model', 'appReplModel', 'app_repl_model_surface', true],
   ['app-work-board', 'appWorkBoard', 'app_work_board_surface', true],
   // SPEC § WAVE 3.5 — the Activity Inspector snapshot surface. RATCHET EXTENSION
   // (the documented "adding a surface" step), NOT a relaxed assertion: it sits
@@ -204,6 +205,7 @@ const DISCLAIMING_ORDER = [
   'app-tasks',
   'app-reminders',
   'app-tabs',
+  'app-repl-model',
   'app-work-board',
   'app-project-credentials',
   'app-codex-credential',
@@ -295,6 +297,7 @@ function fullyWiredInput(calls: string[]): ComposeHttpHandlerInput {
     appTasks: disclaim('app-tasks'),
     appReminders: disclaim('app-reminders'),
     appTabs: disclaim('app-tabs'),
+    appReplModel: disclaim('app-repl-model'),
     appWorkBoard: disclaim('app-work-board'),
     appProjectCredentials: disclaim('app-project-credentials'),
     appCodexCredential: disclaim('app-codex-credential'),
@@ -489,6 +492,7 @@ function fullComposition(): RouteSlotComposition {
     app_devices_surface: { handler: h() },
     app_docs_surface: { handler: h() },
     app_tabs_surface: { handler: h() },
+    app_repl_model_surface: { handler: h() },
     app_work_board_surface: { handler: h() },
     app_activity_surface: { handler: h() },
     app_usage_surface: { handler: h() },
@@ -544,6 +548,7 @@ const GATE_FIELDS: readonly (keyof RouteSlotComposition)[] = [
   'app_devices_surface',
   'app_docs_surface',
   'app_tabs_surface',
+  'app_repl_model_surface',
   'app_work_board_surface',
   // SPEC § WAVE 3.5 — Activity Inspector snapshot surface (ratchet extension).
   'app_activity_surface',
@@ -620,6 +625,7 @@ describe('C4 transition — generated mapping equals the pre-C4 literal mapping'
     expect(out.appTasks?.handler).toBe(c.app_tasks_surface!.handler)
     expect(out.appReminders?.handler).toBe(c.app_reminders_surface!.handler)
     expect(out.appTabs?.handler).toBe(c.app_tabs_surface!.handler)
+    expect(out.appReplModel?.handler).toBe(c.app_repl_model_surface!.handler)
     expect(out.appWorkBoard?.handler).toBe(c.app_work_board_surface!.handler)
     expect(out.appProjectCredentials?.handler).toBe(c.app_project_credentials_surface!.handler)
     expect(out.appCodexCredential?.handler).toBe(c.app_codex_credential_surface!.handler)

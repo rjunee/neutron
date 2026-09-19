@@ -520,6 +520,14 @@ export const ROUTE_SLOTS = [
     promote: (c) => pluckHandler(c.app_tabs_surface),
     dispatch: (v: SurfaceHandler, ctx) => v.handler(ctx.req),
   }),
+  slot({
+    key: 'appReplModel',
+    rung: 'app-repl-model',
+    composition: 'app_repl_model_surface',
+    gated: true,
+    promote: (c) => pluckHandler(c.app_repl_model_surface),
+    dispatch: (v: SurfaceHandler, ctx) => v.handler(ctx.req),
+  }),
   // 0h1b. Work Board (Phase 1a) — `/api/app/projects/<id>/work-board[…]`.
   slot({
     key: 'appWorkBoard',

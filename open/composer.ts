@@ -268,6 +268,7 @@ export type OpenComposition = CompositionInput &
       | 'app_ws_surface'
       | 'app_docs_surface'
       | 'app_tabs_surface'
+      | 'app_repl_model_surface'
       | 'app_projects_surface'
       | 'app_work_board_surface'
       | 'app_activity_surface'
@@ -395,6 +396,8 @@ import { AgentWatcher } from '@neutronai/gateway/comments/agent-watcher.ts'
 import { buildAgentWatcherLlmCall } from '@neutronai/gateway/wiring/build-agent-watcher-llm-call.ts'
 import { InMemoryWebChatSessionProjectRegistry } from '@neutronai/gateway/http/chat-bridge.ts'
 import { createAppTabsSurface } from '@neutronai/gateway/http/app-tabs-surface.ts'
+import { composeReplModelSurface } from '@neutronai/gateway/composition/repl-model.ts'
+import { getPersistentReplModel, switchPersistentReplModel } from '@neutronai/runtime/adapters/claude-code/persistent/model-control.ts'
 import {
   BROKER_CALLBACK_PATH,
   createCoresOAuthBroker,
@@ -3806,6 +3809,16 @@ export function buildOpenGraphComposer(
       auth: appOwnerAuth,
       cores: () => coresState,
       installations: new CoreInstallationsStore({ db }),
+    })
+
+    const appReplModelSurface = composeReplModelSurface({
+      auth: appOwnerAuth,
+      ownerUserId: OWNER_USER_ID,
+      ownerSlug: project_slug,
+      projectExists: async (projectId) => (await projectSettingsStore.list(project_slug)).some((project) => project.id === projectId),
+      provider: (projectId) => resolveModelProvider(projectId ?? undefined).provider,
+      readClaude: ({ userId, ownerSlug, projectId }) => getPersistentReplModel({ userId, instanceSlug: ownerSlug, projectId }),
+      switchClaude: ({ userId, ownerSlug, projectId }, request) => switchPersistentReplModel({ userId, instanceSlug: ownerSlug, projectId }, request),
     })
 
     // The Apps launcher backend (`/api/app/projects/<id>/launcher[*]`). The Apps
@@ -7468,6 +7481,7 @@ export function buildOpenGraphComposer(
       // P1b — the tab resolver so the React ProjectShell shows the Documents/Tasks
       // tabs (without it, it falls back to Chat-only and the docs tab is hidden).
       app_tabs_surface: { handler: appTabsSurface.handler },
+      app_repl_model_surface: { handler: appReplModelSurface.handler },
       // The Apps launcher backend. Without this line the tab the resolver above
       // returns leads to four 404s (ISSUES #447).
       app_launcher_surface: { handler: appLauncherSurface.handler },
