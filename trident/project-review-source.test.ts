@@ -6,6 +6,7 @@ import type { BoundedWorkOutcome, BoundedWorkRequest, WorkerRunner } from '@neut
 import { decodeProjectTrailer, type ProjectTrailerOutcome } from '@neutronai/runtime/workers/project-runners.ts'
 import { createProjectReviewSource, type ProjectReviewSourceOptions } from './project-review-source.ts'
 import { reviewPanel } from './gates/review-panel.ts'
+import { validateTrailer, VERDICT_SCHEMA } from './gates/result-contract.ts'
 const approve = { verdict: 'APPROVE', findings: [] }
 const snapshot = { head: 'a'.repeat(40), diff: 'actual diff', pr: null }
 const dirs: string[] = []
@@ -120,6 +121,64 @@ test('missing and unusable synthesis are separate infrastructure answers', async
   f.answer(async req => completed(req.role === 'synthesis' ? null : approve))
   expect(await f.check()).toMatchObject({ kind: 'blocked', on: expect.stringContaining('synthesis is unusable') })
   f.answer(async () => completed()); expect(await f.check()).toEqual({ kind: 'approve' })
+})
+test('every review and synthesis brief delivers the exact authoritative verdict schema', async () => {
+  const f = await fixture()
+  f.options.phaseModels = {}
+  expect(await f.check()).toEqual({ kind: 'approve' })
+  const briefs = await Promise.all(f.calls.map(async request => ({
+    request, brief: JSON.parse(await readFile(request.brief.path, 'utf8')),
+  })))
+  expect(briefs.map(({ brief }) => brief.seat)).toEqual([
+    'review_rubric', 'review_adversarial', 'review_codex', 'review_kimi', 'synthesis',
+  ])
+  for (const { request, brief } of briefs) {
+    expect(brief.verdictSchema).toEqual(VERDICT_SCHEMA)
+    expect(request.result.schema).toBe('verdict')
+    expect(brief.instruction).toContain('result must conform exactly to verdictSchema')
+    expect(brief.instruction).toContain('Do not add fields')
+  }
+})
+for (const role of ['review', 'synthesis'] as const) {
+  test(`${role} with an extra result field fails the host decoder and infrastructure-blocks`, async () => {
+    const f = await fixture()
+    let malformed = true
+    const decoded: ProjectTrailerOutcome[] = []
+    f.answer(async request => {
+      const result = malformed && request.role === role ? { ...approve, synthesis: 'extra summary' } : approve
+      const outcome = decodeProjectTrailer(JSON.stringify({
+        schema: request.result.schema, run_id: request.run_id, step_id: request.step_id,
+        kind: 'completed', result,
+      }), request, {
+        schemas: new Map([['verdict', result => validateTrailer('verdict', result).ok]]),
+        metadata: () => ({ usage: null, model_reported: 'observed-model', thread_id: null }),
+      })
+      decoded.push(outcome)
+      if (outcome.kind === 'not-current-step') throw Error('Unexpected stale fixture result')
+      return outcome
+    })
+    expect(validateTrailer('verdict', { ...approve, synthesis: 'extra summary' })).toEqual({
+      ok: false, reason: 'unexpected-field', path: '$.synthesis',
+    })
+    expect(await f.check()).toMatchObject({ kind: 'blocked', on: expect.stringContaining('infra-only:') })
+    expect(decoded.at(-1)).toEqual({ kind: 'unknown', detail: 'Trailer result failed host schema validation.' })
+    // Removing only the extra field produces a decodable result and panel approval.
+    malformed = false
+    expect(await f.check()).toEqual({ kind: 'approve' })
+    expect(decoded.at(-1)).toMatchObject({ kind: 'completed', result: approve })
+  })
+}
+test('an out-of-schema completed synthesis cannot create an approval checkpoint or bypass G060', async () => {
+  const f = await fixture()
+  const malformed = { ...approve, synthesis: 'extra summary' }
+  f.answer(async request => completed(request.role === 'synthesis' ? malformed : approve))
+  const source = f.source()
+  expect(await f.check(source)).toEqual({ kind: 'blocked', on: 'infra-only: Review recorded synthesis is unusable' })
+  expect(await source.readSynthesis(snapshot, 1)).toMatchObject({ checkpoint: 'review-recorded', payload: malformed })
+  f.answer(async () => completed())
+  const valid = f.source()
+  expect(await f.check(valid)).toEqual({ kind: 'approve' })
+  expect(await valid.readSynthesis(snapshot, 1)).toMatchObject({ checkpoint: 'argus-approved', payload: approve })
 })
 test('deferred retry is bounded and cannot replace a completed observation', async () => {
   const f = await fixture(); let attempts = 0
@@ -277,7 +336,7 @@ test('a seat obeying the panel brief literally writes a trailer the host decoder
     const written: Record<string, unknown> = {}
     for (const field of namedFields) if (field in source && field !== 'on') written[field] = source[field]
     decoded = decodeProjectTrailer(JSON.stringify(written), request, {
-      schemas: new Map([[request.result.schema, () => true]]), metadata: () => undefined,
+      schemas: new Map([[request.result.schema, result => validateTrailer('verdict', result).ok]]), metadata: () => undefined,
     })
     return completed()
   })
