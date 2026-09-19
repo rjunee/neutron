@@ -6,6 +6,7 @@ import { join, resolve } from 'node:path'
 import { createProjectRunners, type ProjectTrailerDecoder } from '@neutronai/runtime/workers/project-runners.ts'
 import { createClaudeActingTurn } from '@neutronai/runtime/workers/claude-acting-turn.ts'
 import { createCodexHeadlessRunner } from '@neutronai/runtime/workers/codex-headless.ts'
+import { createClaudeHeadlessRunner } from '@neutronai/runtime/workers/claude-headless.ts'
 import { reconcileStoppedTrailerReservations } from '@neutronai/runtime/workers/trailer-slot.ts'
 import { PROJECT_REPL_TOOL_DEFS } from '@neutronai/gateway/wiring/build-live-agent-turn.ts'
 import type { CodexOwnerBindings } from './codex-owner-binding.ts'
@@ -346,7 +347,9 @@ export async function prepareProjectBuild(input: InnerLoopInput, context: Projec
     ...(context.provider === 'openai-codex' ? { codexResultTransport: codexBuildResultTransport({
       projectId: context.projectId, projectDir: context.projectDir, stateDir: state, runId: run.id, trailer,
     }) } : {}),
-    headless: { 'openai-codex': createCodexHeadlessRunner({ env: codexEnv, reviewBriefIntegrity: briefIntegrity, reviewContracts: new Map([
+    headless: { anthropic: createClaudeHeadlessRunner({ env: context.env, cwd: run.worktree,
+      state_dir: state, schemas: trailer.schemas }),
+      'openai-codex': createCodexHeadlessRunner({ env: codexEnv, reviewBriefIntegrity: briefIntegrity, reviewContracts: new Map([
       ['verdict', { jsonSchema: VERDICT_SCHEMA, validate: (value: unknown) => validateTrailer('verdict', value).ok }],
       ['project-review', { jsonSchema: { ...PROJECT_SNAPSHOT_SCHEMA,
         properties: { ...PROJECT_SNAPSHOT_SCHEMA.properties, payload: VERDICT_SCHEMA },

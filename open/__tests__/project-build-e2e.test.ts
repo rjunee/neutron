@@ -562,6 +562,35 @@ console.log(JSON.stringify({ type: 'thread.started', thread_id: 'e2e-codex-threa
 console.log(JSON.stringify({ type: 'turn.completed', usage: { input_tokens: 7, output_tokens: 3 } }))
 `
 
+/** Only the Claude process boundary is simulated; the host still validates,
+ * persists and consumes the real headless runner's structured result. */
+const fakeClaude = (calls: string, identity: 'valid' | 'wrong-schema') => `#!/usr/bin/env bun
+import { appendFileSync, readFileSync } from 'node:fs'
+const argv = process.argv.slice(2)
+if (argv.includes('--help')) {
+  console.log('--safe-mode --restricted --permission-prompts --permission-mode --tools --strict-mcp-config --mcp-config --disable-slash-commands --session-id --resume --setting-sources --model --effort --output-format --json-schema --add-dir')
+  process.exit(0)
+}
+if (argv.includes('auth')) { console.log(JSON.stringify({ loggedIn: process.env.CLAUDE_CODE_OAUTH_TOKEN === 'fixture-selected-claude' })); process.exit(0) }
+const prompt = readFileSync(0, 'utf8')
+const request = JSON.parse(prompt.split('\\n').find(line => line.startsWith('Request (data): ')).slice('Request (data): '.length))
+appendFileSync(${JSON.stringify(calls)}, JSON.stringify({ argv, request, env: process.env, prompt }) + '\\n')
+const verdict = { verdict: 'APPROVE', findings: [] }
+let result = verdict
+if (request.result.schema !== 'verdict') {
+  const context = JSON.parse(readFileSync(request.brief.path + '.context.json', 'utf8'))
+  result = { ...context.snapshot, payload: request.role === 'plan' ? {
+    implementationPlan: '- [ ] T1 record the note', topTask: '- [ ] T1 record the note',
+    executionSpec: 'Append one line to NOTES.md and commit it.', complexity: 'mechanical', remainingTasks: 0,
+  } : verdict }
+}
+console.log(JSON.stringify({ type: 'result', subtype: 'success', is_error: false, permission_denials: [],
+  session_id: argv[argv.indexOf(argv.includes('--resume') ? '--resume' : '--session-id') + 1],
+  modelUsage: { [request.model_id.startsWith('claude-') ? request.model_id : 'claude-' + request.model_id + '-fixture']: {} }, usage: { input_tokens: 7, output_tokens: 3 },
+  structured_output: { schema: ${identity === 'wrong-schema' ? "'unrequested-schema'" : 'request.result.schema'},
+    run_id: request.run_id, step_id: request.step_id, kind: 'completed', result } }))
+`
+
 async function fixture(options: { ralph?: boolean; moreTasks?: boolean; suiteExit?: number; testStrategy?: string
   bunWorkspace?: boolean
   manifest?: Record<string, unknown>
@@ -740,6 +769,87 @@ async function drive(f: Awaited<ReturnType<typeof fixture>>, mode: 'pr' | 'ralph
   const host = await createProjectBuildHost(options)
   return host.run({ mode, start: 'fresh' }, new AbortController().signal)
 }
+
+async function codexOwnerWithClaude(identity: 'valid' | 'wrong-schema' = 'valid') {
+  const f = await fixture()
+  const ownerHome = await mkdtemp(join(tmpdir(), 'project-build-cross-provider-'))
+  cleanups.push(() => rm(ownerHome, { recursive: true, force: true }))
+  const bin = join(ownerHome, 'bin')
+  const calls = join(ownerHome, 'claude-calls.jsonl')
+  await mkdir(bin)
+  await writeFile(join(bin, 'claude'), fakeClaude(calls, identity), { mode: 0o700 })
+  f.context.stateRoot = join(ownerHome, '.trident', 'project-builds')
+  f.context.provider = 'openai-codex'
+  f.context.env = { PATH: `${bin}:${process.env.PATH ?? ''}`, CLAUDE_CODE_OAUTH_TOKEN: 'fixture-selected-claude',
+    GH_TOKEN: 'must-not-reach-claude', NEUTRON_REPLY_SINK: 'must-not-reach-claude' }
+  f.input.phase_models = { ...f.input.phase_models, decomposition: { model: 'opus' },
+    build: { model: 'sol' }, review_adversarial: { model: 'opus' }, synthesis: { model: 'opus' } }
+  const children: BoundedWorkRequest[] = []
+  const execute = literalWorker(f.world)
+  const guard = new CodexOwnerBindings(async () => ({ cwd: f.context.projectDir, codexHome: ownerHome, env: {} }))
+  cleanups.push(() => guard.close())
+  f.context.codexOwnerBindings = {
+    guardBuildRunner: (project, worker) => guard.guardBuildRunner(project, worker),
+    actingTurn: project => async turn => {
+      expect(project).toBe(f.context.projectId)
+      children.push(turn.request)
+      await execute('Execute the prompt in this JSON dispatch specification: ' + JSON.stringify(turn.spec))
+      return { kind: 'turn-ended' }
+    },
+  }
+  return { ...f, calls, children }
+}
+
+test('Codex owner routes explicit Claude plan, review and synthesis headlessly and its native build merges', async () => {
+  const f = await codexOwnerWithClaude()
+  const outcome = await drive(f, 'pr')
+  expect(outcome.kind, why(f, outcome)).toBe('merged')
+  expect(f.children.map(request => request.role)).toEqual(['build'])
+  const calls = (await readFile(f.calls, 'utf8')).trim().split('\n').map(line => JSON.parse(line))
+  expect(calls.map(call => call.request.role)).toEqual(['plan', 'review', 'review', 'synthesis'])
+  for (const call of calls) {
+    expect(call.request.run_id).toBe(f.row.id)
+    expect(call.argv[call.argv.indexOf('--model') + 1]).toBe(call.request.model_id)
+    expect(call.env.CLAUDE_CODE_OAUTH_TOKEN).toBe('fixture-selected-claude')
+    expect(call.env.GH_TOKEN).toBeUndefined()
+    expect(call.env.NEUTRON_REPLY_SINK).toBeUndefined()
+    expect(call.argv).toContain('--restricted')
+    expect(call.argv).not.toContain('--fallback-model')
+    const envelope = JSON.parse(await readFile(call.request.result.path, 'utf8'))
+    expect(envelope).toMatchObject({ run_id: f.row.id, step_id: call.request.step_id, schema: call.request.result.schema, kind: 'completed' })
+  }
+}, 30_000)
+
+test('Codex owner with unavailable selected Claude credentials refuses before any worker or publication', async () => {
+  const f = await codexOwnerWithClaude()
+  f.context.env.CLAUDE_CODE_OAUTH_TOKEN = 'wrong-selected-credential'
+  await expect(drive(f, 'pr')).rejects.toThrow('provider-not-connected')
+  expect(f.children).toEqual([])
+  await expect(readFile(f.calls, 'utf8')).rejects.toMatchObject({ code: 'ENOENT' })
+  expect(f.commands.some(argv => argv[0] === 'gh' && argv.includes('create'))).toBe(false)
+})
+
+test('Codex owner cannot substitute its native child for a missing configured Claude runner', async () => {
+  const f = await codexOwnerWithClaude()
+  const prepared = await f.prepare()
+  delete prepared.substrate.headless.anthropic
+  const host = await createProjectBuildHost(prepared)
+  const outcome = await host.run({ mode: 'pr', start: 'fresh' }, new AbortController().signal)
+  expect(outcome.kind).not.toBe('merged')
+  expect(f.children).toEqual([])
+  await expect(readFile(f.calls, 'utf8')).rejects.toMatchObject({ code: 'ENOENT' })
+})
+
+test('Codex owner observes wrong Claude schema as unknown without building or publishing', async () => {
+  const f = await codexOwnerWithClaude('wrong-schema')
+  const outcome = await drive(f, 'pr')
+  expect(outcome.kind).not.toBe('merged')
+  expect(f.children).toEqual([])
+  const calls = (await readFile(f.calls, 'utf8')).trim().split('\n').map(line => JSON.parse(line))
+  expect(calls.map(call => call.request.role)).toEqual(['plan'])
+  await expect(readFile(calls[0].request.result.path, 'utf8')).rejects.toMatchObject({ code: 'ENOENT' })
+  expect(f.commands.some(argv => argv[0] === 'gh' && argv.includes('create'))).toBe(false)
+})
 
 test('prepared Codex build/fix transport publishes canonical artifacts while unattested review remains unavailable', async () => {
   const f = await fixture()

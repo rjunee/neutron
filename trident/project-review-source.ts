@@ -79,8 +79,14 @@ export function createProjectReviewSource(input: ProjectReviewSourceOptions): Re
     // §3.3: one stored thread per recurring cross-provider seat, never a shared
     // newest-thread heuristic. An abandoned lock is uncertainty, not permission
     // to start another writer after a host replacement.
-    if (route.seat.provider !== 'openai-codex' || options.replProvider === 'openai-codex') return dispatchTurn(route, snapshot, round, attempt, panel)
-    const owner = JSON.stringify([options.runId, options.projectSlug, options.cwd, route.seat.id, route.seat.modelId, options.env.CODEX_HOME ?? null])
+    if (!['openai-codex', 'anthropic'].includes(route.seat.provider) || route.seat.provider === options.replProvider) return dispatchTurn(route, snapshot, round, attempt, panel)
+    // Hash selected Claude authentication; neither a receipt nor a filename may
+    // expose its secret. Codex keeps its existing home-bound receipt identity.
+    const credential = route.seat.provider === 'anthropic'
+      ? createHash('sha256').update(JSON.stringify(['CLAUDE_CODE_OAUTH_TOKEN', 'ANTHROPIC_AUTH_TOKEN',
+        'ANTHROPIC_API_KEY', 'CLAUDE_CONFIG_DIR', 'HOME'].map(key => options.env[key] ?? null))).digest('hex')
+      : options.env.CODEX_HOME ?? null
+    const owner = JSON.stringify([options.runId, options.projectSlug, options.cwd, route.seat.id, route.seat.modelId, credential])
     const path = join(options.evidenceRoot, `review-thread-${createHash('sha256').update(owner).digest('hex')}.json`)
     const prior = threadQueues.get(owner) ?? Promise.resolve()
     let release!: () => void
@@ -105,7 +111,7 @@ export function createProjectReviewSource(input: ProjectReviewSourceOptions): Re
         thread = { id: stored.id }
       } catch (error) { if ((error as NodeJS.ErrnoException).code !== 'ENOENT') throw error }
       const observed = await dispatchTurn(route, snapshot, round, attempt, panel, thread, async id => {
-        if (!id || (thread && thread.id !== id)) throw Error('Codex review did not preserve its observed thread')
+        if (!id || (thread && thread.id !== id)) throw Error('Headless review did not preserve its observed thread')
         await writeFile(`${path}.tmp`, JSON.stringify({ owner, id }), { mode: 0o600 })
         await rename(`${path}.tmp`, path)
       })

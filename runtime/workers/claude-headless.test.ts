@@ -51,6 +51,8 @@ const receipt={type:'result',subtype:'success',is_error:false,permission_denials
 if(mode==='text-only') delete receipt.structured_output;
 if(mode==='error') receipt.is_error=true;
 if(mode==='wrong-model') receipt.modelUsage={'claude-unrequested-model':{}};
+if(mode==='class-model') receipt.modelUsage={['claude-'+req.model_id+'-fixture']:{}};
+if(mode==='wrong-class') receipt.modelUsage={'claude-sonnet-fixture':{}};
 if(mode==='wrong-session') receipt.session_id='00000000-0000-0000-0000-000000000000';
 if(mode==='permission') receipt.permission_denials=[{tool_name:'AskUserQuestion'}];
 if(mode==='no-permissions') delete receipt.permission_denials;
@@ -100,7 +102,7 @@ test('narrow role and placement admission has runnable positive controls', async
   expect(f.runner.supports('plan', 'in-repl')).toMatchObject({ ok: false, reason: 'placement-unavailable' })
   expect(f.runner.supports('build', 'headless')).toMatchObject({ ok: false, reason: 'capability-unsupported' })
   expect(await f.runner.run(f.req, 'in-repl', new AbortController().signal)).toMatchObject({ kind: 'refused' })
-  for (const changes of [{ thread: { id: 'retained-session' } }, { model_id: 'opus' }, { result: { ...f.req.result, schema: 'unregistered' } }]) {
+  for (const changes of [{ thread: { id: 'retained-session' } }, { model_id: 'unrequested-alias' }, { result: { ...f.req.result, schema: 'unregistered' } }]) {
     expect(await f.run({ ...f.req, ...changes })).toMatchObject({ kind: 'refused', reason: 'capability-unsupported' })
   }
   expect(await f.run()).toMatchObject({ kind: 'completed' })
@@ -112,6 +114,37 @@ test('credentials and installed CLI contract fail closed before admission', asyn
   expect((await fixture('no-auth')).runner.supports('plan', 'headless')).toMatchObject({ ok: false, reason: 'provider-not-connected' })
   expect((await fixture('old-cli')).runner.supports('plan', 'headless')).toMatchObject({ ok: false, reason: 'cli-contract' })
   expect(f.runner.supports('plan', 'headless')).toEqual({ ok: true })
+})
+
+test('explicit model classes require reported concrete models in that same class', async () => {
+  for (const model_id of ['opus', 'sonnet', 'haiku', 'fable']) {
+    const f = await fixture('class-model')
+    expect(await f.run({ ...f.req, model_id })).toMatchObject({ kind: 'completed', model_reported: `claude-${model_id}-fixture` })
+  }
+  const wrong = await fixture('wrong-class')
+  expect(await wrong.run({ ...wrong.req, model_id: 'opus' })).toMatchObject({ kind: 'unknown' })
+  await expect(readFile(wrong.req.result.path)).rejects.toMatchObject({ code: 'ENOENT' })
+})
+
+test('selected config credentials are bound by bytes and checked again on same-path rotation', async () => {
+  const f = await fixture()
+  const config = join(f.root, 'selected-config')
+  await mkdir(config)
+  const credentials = join(config, '.credentials.json')
+  await writeFile(credentials, JSON.stringify({ account: 'fixture-account-a', token: 'fixture-token-a' }))
+  const options = { ...f.options, env: { PATH: '/usr/bin:/bin', HOME: f.root, CLAUDE_CONFIG_DIR: config } }
+  const runner = createClaudeHeadlessRunner(options)
+  const first = await runner.run(f.req, 'headless', new AbortController().signal)
+  if (first.kind !== 'completed' || !first.thread_id) throw Error('Expected selected config completion')
+  const resumed = { ...f.req, step_id: 'review:2', thread: { id: first.thread_id } }
+  expect(await createClaudeHeadlessRunner(options).run(resumed, 'headless', new AbortController().signal)).toMatchObject({ kind: 'completed', thread_id: first.thread_id })
+  await writeFile(credentials, JSON.stringify({ account: 'fixture-account-b', token: 'fixture-token-b' }))
+  const rotated = { ...resumed, step_id: 'review:3' }
+  expect(await runner.run(rotated, 'headless', new AbortController().signal)).toMatchObject({ kind: 'refused' })
+  expect(await createClaudeHeadlessRunner(options).run(rotated, 'headless', new AbortController().signal)).toMatchObject({ kind: 'refused' })
+  expect(await readFile(f.counter, 'utf8')).toBe('call\ncall\n')
+  await unlink(credentials)
+  expect(createClaudeHeadlessRunner(options).supports('plan', 'headless')).toMatchObject({ ok: false, reason: 'provider-not-connected' })
 })
 
 for (const mode of ['text-only', 'stale', 'wrong-schema', 'invalid-payload', 'extra', 'error', 'wrong-model', 'wrong-session']) {

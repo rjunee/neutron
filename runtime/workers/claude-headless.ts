@@ -1,4 +1,5 @@
 import { spawnSync } from 'node:child_process'
+import { readFileSync } from 'node:fs'
 import { createHash, randomUUID } from 'node:crypto'
 import { readFile, realpath, rename, writeFile, unlink } from 'node:fs/promises'
 import { isAbsolute, join, relative, resolve, sep } from 'node:path'
@@ -21,6 +22,7 @@ const FLAGS = ['--safe-mode', '--restricted', '--permission-prompts', '--permiss
   '--strict-mcp-config', '--mcp-config', '--disable-slash-commands', '--session-id', '--resume',
   '--setting-sources', '--model', '--effort', '--output-format', '--json-schema', '--add-dir']
 const MAX_OUTPUT_BYTES = 8 * 1024 * 1024
+const MODEL_CLASSES = new Set(['opus', 'sonnet', 'haiku', 'fable'])
 const unknown = (detail: string): BoundedWorkOutcome => ({ kind: 'unknown', detail })
 const within = (root: string, path: string) => {
   const suffix = relative(root, path)
@@ -42,6 +44,21 @@ function childEnvironment(options: ClaudeHeadlessRunnerOptions): NodeJS.ProcessE
     CLAUDE_CODE_DISABLE_NONESSENTIAL_TRAFFIC: '1', CLAUDE_CODE_SAFE_MODE: '1' }
   if (tokenName) env[tokenName] = source[tokenName]
   return env
+}
+
+/** Config paths can change accounts without changing names. When the selected
+ * CLI cannot attest stable account identity, bind the credential bytes and
+ * conservatively refuse refresh/rotation. Never persist the credential itself. */
+function credentialIdentity(env: NodeJS.ProcessEnv | undefined): string | undefined {
+  if (!env) return undefined
+  const token = ['CLAUDE_CODE_OAUTH_TOKEN', 'ANTHROPIC_AUTH_TOKEN', 'ANTHROPIC_API_KEY']
+    .find(name => env[name])
+  if (token) return createHash('sha256').update(JSON.stringify([token, env[token]])).digest('hex')
+  try {
+    const bytes = readFileSync(join(env.CLAUDE_CONFIG_DIR!, '.credentials.json'))
+    if (!bytes.length) return undefined
+    return createHash('sha256').update(bytes).digest('hex')
+  } catch { return undefined }
 }
 
 function probe(cli: string, env: NodeJS.ProcessEnv | undefined): ReturnType<WorkerRunner['supports']> {
@@ -119,8 +136,10 @@ function decode(bytes: string, req: BoundedWorkRequest, sessionId: string, valid
       return { outcome: unknown('Claude structured result failed host payload validation.') }
     }
     const reported = Object.keys(receipt.modelUsage ?? {})
-    if (reported.length !== 1 || reported[0] !== req.model_id) {
-      return { outcome: unknown('Claude did not attest the exact requested model.') }
+    if (reported.length !== 1 || (MODEL_CLASSES.has(req.model_id)
+      ? !new RegExp(`^claude-${req.model_id}-[a-z0-9.-]+$`).test(reported[0]!)
+      : reported[0] !== req.model_id)) {
+      return { outcome: unknown('Claude did not attest the selected model or model class.') }
     }
     const measured = receipt.usage
     const count = (value: unknown): value is number => typeof value === 'number' && Number.isSafeInteger(value) && value >= 0
@@ -193,7 +212,9 @@ export function createClaudeHeadlessRunner(input: ClaudeHeadlessRunnerOptions): 
   const options = { ...input, env: { ...input.env }, schemas: new Map(input.schemas), readable_roots: [...input.readable_roots ?? []] }
   const cli = options.cliPath ?? 'claude'
   const env = childEnvironment(options)
-  const startup = probe(cli, env)
+  const credential = credentialIdentity(env)
+  const startup = credential ? probe(cli, env) : { ok: false as const, reason: 'provider-not-connected' as const,
+    detail: 'Selected Claude credential identity is unavailable.' }
   const live = new Map<string, { pid: number; exitCode: number | null }>()
   const keyFor = (req: { run_id: string; step_id: string }) => createHash('sha256').update(JSON.stringify([req.run_id, req.step_id])).digest('hex')
   const supports: WorkerRunner['supports'] = (role, placement) => placement !== 'headless'
@@ -205,7 +226,7 @@ export function createClaudeHeadlessRunner(input: ClaudeHeadlessRunnerOptions): 
       if (!supported.ok) return { kind: 'refused', reason: supported.reason }
       const validate = options.schemas.get(req.result.schema)
       if (!validate || (req.thread !== null && !/^[0-9a-f]{8}-(?:[0-9a-f]{4}-){3}[0-9a-f]{12}$/.test(req.thread.id)) || req.needs_approval_decision !== false
-        || !/^claude-[a-z0-9.-]+$/.test(req.model_id)
+        || (!MODEL_CLASSES.has(req.model_id) && !/^claude-[a-z0-9.-]+$/.test(req.model_id))
         || !['none', 'read-only', 'edit', 'edit-and-run'].includes(req.tools)
         || (req.effort !== null && !['low', 'medium', 'high', 'xhigh', 'max'].includes(req.effort))
         || !Number.isSafeInteger(req.budget.wall_ms) || req.budget.wall_ms <= 0) {
@@ -214,6 +235,9 @@ export function createClaudeHeadlessRunner(input: ClaudeHeadlessRunnerOptions): 
       const deadline = Date.now() + req.budget.wall_ms
       const expired = () => signal.aborted || Date.now() >= deadline
       if (expired()) return unknown('Claude dispatch expired before reservation.')
+      if (credentialIdentity(env) !== credential || !probe(cli, env).ok) {
+        return { kind: 'refused', reason: 'provider-not-connected' }
+      }
       try {
         const cwd = await realpath(options.cwd)
         const state = await realpath(options.state_dir)
@@ -228,7 +252,7 @@ export function createClaudeHeadlessRunner(input: ClaudeHeadlessRunnerOptions): 
         if (expired()) return unknown('Claude dispatch expired before reservation.')
         const key = keyFor(req)
         const sessionPath = join(state, `claude-headless-session-${key}.json`)
-        const binding = JSON.stringify([req.run_id, cwd, req.model_id, createHash('sha256').update(JSON.stringify(env)).digest('hex')])
+        const binding = JSON.stringify([req.run_id, cwd, req.model_id, createHash('sha256').update(JSON.stringify([env, credential])).digest('hex')])
         const threadPath = (session: string) => join(state, `claude-headless-thread-${session}.json`)
         if (req.thread && await readFile(threadPath(req.thread.id), 'utf8').catch(() => '') !== binding) {
           return { kind: 'refused', reason: 'capability-unsupported' }
