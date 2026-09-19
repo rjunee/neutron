@@ -207,13 +207,46 @@ describe('conversation REPL model on phone', () => {
     screen.unmount();
   });
 
-  it('surfaces unsupported state without an inert model picker', async () => {
-    getBody = { ...states.cheap, status: 'unsupported', detail: 'No active REPL' };
+  it('renders the exact no-session unsupported DTO without offering a switch', async () => {
+    getBody = { harness: 'codex', sessionId: '', currentModel: null,
+      availableModels: [], status: 'unsupported', detail: 'No hosted Codex session' };
     const screen = await mount('');
     expect(calls[0]?.url).toEndWith('/api/app/projects/~general/repl-model');
-    expect(document.querySelector('[data-testid="repl-model-status"]')?.textContent).toContain('No active REPL');
+    expect(document.querySelector('[data-testid="repl-model-status"]')?.textContent).toContain('No hosted Codex session');
+    expect(document.querySelector('[data-testid="repl-model-error"]')).toBeNull();
     await press('repl-model-open');
     expect(document.querySelector('[data-testid="repl-model-list"]')).toBeNull();
+    expect(calls.filter((call) => call.method === 'POST')).toHaveLength(0);
     screen.unmount();
+  });
+
+  it('accepts unknown without a session as non-switchable', async () => {
+    getBody = { harness: 'codex', sessionId: '', currentModel: null,
+      availableModels: [], status: 'unknown', detail: 'Unable to identify the REPL' };
+    const screen = await mount();
+    expect(document.querySelector('[data-testid="repl-model-status"]')?.textContent).toContain('unknown');
+    expect(document.querySelector('[data-testid="repl-model-error"]')).toBeNull();
+    expect(document.querySelector('[data-testid="repl-model-list"]')).toBeNull();
+    screen.unmount();
+  });
+
+  for (const status of ['ready', 'busy'] as const) {
+    it(`rejects an empty session ID on ${status} rather than suggesting a switch`, async () => {
+      getBody = { ...states.cheap, status, sessionId: '' };
+      const screen = await mount();
+      expect(document.querySelector('[data-testid="repl-model-error"]')?.textContent).toContain('invalid model state');
+      expect(document.querySelector('[data-testid="repl-model-status"]')).toBeNull();
+      await press('repl-model-open');
+      expect(document.querySelector('[data-testid="repl-model-list"]')).toBeNull();
+      expect(calls.filter((call) => call.method === 'POST')).toHaveLength(0);
+      screen.unmount();
+    });
+  }
+
+  it('refuses a direct switch call with an empty session ID before the wire', async () => {
+    const { ReplModelClient } = await import('../lib/repl-model-client');
+    const client = new ReplModelClient('https://example.test', 'test-token');
+    await expect(client.switch('willow', 'frontier', '')).rejects.toThrow('No active REPL session');
+    expect(calls).toHaveLength(0);
   });
 });

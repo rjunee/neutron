@@ -29,6 +29,9 @@ export class ReplModelClient {
   }
 
   switch(projectId: string, model: string, sessionId: string): Promise<ReplModelState> {
+    if (sessionId.trim().length === 0) {
+      return Promise.reject(new ReplModelError('invalid_session', 'No active REPL session is available to switch.', 0));
+    }
     return this.request(projectId, 'POST', { model, sessionId });
   }
 
@@ -92,6 +95,7 @@ function isModelState(value: unknown): value is ReplModelState {
   if (!isRecord(value)) return false;
   return (value.harness === 'claude-code' || value.harness === 'codex') &&
     typeof value.sessionId === 'string' &&
+    ((value.status === 'unsupported' || value.status === 'unknown') || value.sessionId.trim().length > 0) &&
     (value.currentModel === null || typeof value.currentModel === 'string') &&
     Array.isArray(value.availableModels) &&
     value.availableModels.every((item: unknown) => isRecord(item) &&
