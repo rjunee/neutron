@@ -58,7 +58,8 @@ try {
   const first = await turn('one', 'OWNER_ONE_FIRST')
   assert.equal(await turn('one', 'OWNER_ONE_SECOND'), first)
   const cwd = join(dir, 'one'), result = join(cwd, 'result.json')
-  // A trailer cannot authorize a build when native subagent capability is absent.
+  // The native model is a literal reply fixture: the trailer is host fixture data.
+  // This proves native dispatch continuity, not that a model actually spawned a child.
   writeFileSync(result, JSON.stringify({ schema: 'fixture', run_id: 'run', step_id: 'step', kind: 'completed', result: {} }))
   const request: BoundedWorkRequest = { run_id: 'run', step_id: 'step', role: 'build', model_id: 'gpt-5.5', effort: null,
     cwd, writable: true, network: true, tools: 'edit-and-run', brief: { path: join(cwd, 'brief'), integrity: 'fixture' },
@@ -66,16 +67,16 @@ try {
   assert.equal((await bindings.actingTurn('one', 'topic-is-not-thread', cwd, [cwd])({
     conversation: { project_id: 'one', topic_id: 'topic-is-not-thread', provider: 'openai-codex', spec: { tools: [], model_preference: [] } },
     request, spec: { prompt: 'BUILD_DISPATCH', tools: [], model_preference: [] }, timeout_ms: 25_000, signal: new AbortController().signal,
-  })).kind, 'refused')
+  })).kind, 'turn-ended')
   assert.equal(await turn('one', 'OWNER_ONE_AFTER_BUILD'), first)
   const second = await turn('two', 'OWNER_TWO_FIRST')
   assert.notEqual(first, second)
   assert.equal(launches, 2)
-  assert.equal(nativeInputs.length, 4)
-  assert(nativeInputs[2]!.includes('OWNER_ONE_FIRST') && !nativeInputs[2]!.includes('BUILD_DISPATCH'))
-  assert(!nativeInputs[3]!.includes('OWNER_ONE_FIRST'))
-  assert(!nativeInputs[0]!.includes('spawn_agent'))
-  process.stdout.write('PASS: native owner chat/chat/refused-build/chat continuity and second-project isolation; one factory launch per project\n')
+  assert.equal(nativeInputs.length, 5)
+  assert(nativeInputs[3]!.includes('OWNER_ONE_FIRST') && nativeInputs[3]!.includes('BUILD_DISPATCH'))
+  assert(!nativeInputs[4]!.includes('OWNER_ONE_FIRST'))
+  assert(nativeInputs[0]!.includes('spawn_agent'))
+  process.stdout.write('PASS: native owner chat/chat/build/chat continuity and second-project isolation; one factory launch per project\n')
 } finally {
   await bindings.close(); provider.stop(true); rmSync(dir, { recursive: true, force: true })
 }

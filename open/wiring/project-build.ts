@@ -88,7 +88,7 @@ export interface ProjectBuildContext {
   env: NodeJS.ProcessEnv
   spawnProjectSession: (projectId: string) => Promise<void>
   /** The same host-owned resolver consumed by owner chat. Never creates a build session. */
-  codexOwnerBindings?: Pick<CodexOwnerBindings, 'actingTurn'>
+  codexOwnerBindings?: Pick<CodexOwnerBindings, 'actingTurn' | 'guardBuildRunner'>
 }
 
 /**
@@ -351,6 +351,9 @@ export async function prepareProjectBuild(input: InnerLoopInput, context: Projec
         } }, validate: (value: unknown) => validSnapshot(value, 'verdict') }],
     ]) }) },
   })
+  if (context.provider === 'openai-codex' && context.codexOwnerBindings && substrate.inRepl) {
+    substrate.inRepl = context.codexOwnerBindings.guardBuildRunner(context.projectId, substrate.inRepl)
+  }
   const parsed = parsePhaseModelConfig(input.phase_models ?? {})
   if (parsed.errors.length) throw Error(`Invalid project phase models: ${parsed.errors.join('; ')}`)
   const config = parsed.config

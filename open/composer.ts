@@ -1091,6 +1091,9 @@ export function buildOpenGraphComposer(
       if (!home) throw new Error('Codex owner requires a connected project credential')
       return { cwd: joinPath(owner_home, 'Projects', projectId), codexHome: home, env }
     })
+    const codexOwnerProjects = (await projectSettingsStore.list(project_slug))
+      .filter(project => resolveModelProvider(project.id).provider === 'openai-codex')
+      .map(project => project.id)
     // O6 — NOTICE-FAMILY + RECOVERED-REPLY sinks for the owner's WARM conversational
     // substrate (`cc-agent-*`). The persistent REPL fires four DI seams on the
     // rising edge of otherwise-invisible states — a mid-turn API 5xx dead turn, a
@@ -1184,6 +1187,7 @@ export function buildOpenGraphComposer(
       ...conversationalProviderCtx,
       providerResolver,
       startCodexOwner: (projectId, spec) => codexOwnerBindings.start(projectId, spec),
+      codexOwnerProjects,
       ...(liveAgentNoticeSinks !== undefined ? { liveAgentNoticeSinks } : {}),
       ...(backgroundNoticeSinks !== undefined ? { backgroundNoticeSinks } : {}),
       ...(liveAgentRecoveredReplySink !== undefined
@@ -2432,8 +2436,8 @@ export function buildOpenGraphComposer(
     // (the late-bound routers, install-token handler, onboarding LLM hooks, the
     // synthesis import substrate, the shared GBrain sync hook) thread through the
     // typed `deps` bag. `importUseSynthesis: true` and the per-request
-    // `chatAuthGate` (via `resolveOpenLlmPool` + live `env`) are preserved
-    // verbatim inside the wiring module. The returned `landing` is consumed
+    // `chatAuthGate` (via live `env` and native project inventory) lives
+    // inside the wiring module. The returned `landing` is consumed
     // downstream via `landing.*` exactly as today.
     const { landing } = wireLandingStack(wiringCtx, {
       installTokenHandler,

@@ -6,6 +6,7 @@ import { createCodexActingTurn, type CodexActingSession } from '@neutronai/runti
 import type { ProjectActingTurn } from '@neutronai/runtime/workers/project-runners.ts'
 import type { AgentSpec } from '@neutronai/runtime/substrate.ts'
 import type { SessionHandle } from '@neutronai/runtime/session-handle.ts'
+import type { WorkerRunner } from '@neutronai/runtime/bounded-work.ts'
 import { CODEX_CLI_AUTH_ENV_VARS } from '@neutronai/runtime/adapters/codex-cli/auth.ts'
 
 export interface CodexOwnerProject {
@@ -22,6 +23,7 @@ export class CodexOwnerBindings {
   private readonly owners = new Map<string, Promise<{ owner: CodexOwnerBootstrap; project: CodexOwnerProject }>>()
   private readonly busy = new Set<string>()
   private readonly refused = new Set<string>()
+  private readonly decodingBuilds = new Set<string>()
   private readonly builds = new Map<string, {
     session: NonNullable<CodexActingSession['session']>
     input?: Parameters<ProjectActingTurn>[0]
@@ -132,14 +134,41 @@ export class CodexOwnerBindings {
     await Promise.allSettled([...this.owners.values()].map(async pending => { await (await pending).owner.close() }))
   }
 
+  /** The host schema decoder runs after the acting bridge. Its uncertainty
+   * must fence this same owner even when native parent/envelope checks passed. */
+  guardBuildRunner(projectId: string, worker: WorkerRunner): WorkerRunner {
+    return { ...worker, run: async (request, placement, signal) => {
+      if (this.decodingBuilds.has(projectId)) return { kind: 'unknown', detail: 'Codex owner build result is still pending' }
+      this.decodingBuilds.add(projectId)
+      try {
+        const outcome = await worker.run(request, placement, signal)
+        if (outcome.kind === 'unknown' || outcome.kind === 'failed') this.refused.add(projectId)
+        return outcome
+      } catch (error) {
+        this.refused.add(projectId)
+        throw error
+      } finally { this.decodingBuilds.delete(projectId) }
+    } }
+  }
+
   start(projectId: string | undefined, spec: AgentSpec): SessionHandle {
+    return this.startTurn(projectId, spec)
+  }
+
+  private startTurn(projectId: string | undefined, spec: AgentSpec, buildDispatch = false): SessionHandle {
     const abort = new AbortController()
     let inner: SessionHandle | undefined
     const events = (async function* (bindings: CodexOwnerBindings) {
       try {
         if (projectId === undefined) throw new Error('Codex owner chat requires a project selection')
+        if (!buildDispatch && (bindings.builds.get(projectId)?.input || bindings.decodingBuilds.has(projectId))) {
+          throw new Error('Codex owner build result is still pending')
+        }
         const { project } = await bindings.resolve(projectId)
         abort.signal.throwIfAborted()
+        if (!buildDispatch && (bindings.builds.get(projectId)?.input || bindings.decodingBuilds.has(projectId))) {
+          throw new Error('Codex owner build result is still pending')
+        }
         inner = createCodexConversationalSubstrate({ projectId, cwd: project.cwd, env: project.env, host: bindings.host }).start(spec)
         yield* inner.events
       } catch (error) {
@@ -158,10 +187,11 @@ export class CodexOwnerBindings {
         throw new Error('Codex build worktree is outside the owner workspace grants')
       }
       const facts = this.readBinding(owner.binding)
-      // The fresh-owner factory does not yet attest native subagent availability.
-      // Accept only affirmative host authority, never a requested feature flag.
+      // Native feature evidence is sealed by the factory before the first turn.
+      // A requested feature flag is not an attestation of native availability.
       if (!('capabilities' in facts) || typeof facts.capabilities !== 'object' || facts.capabilities === null
-        || !('multiAgentV2' in facts.capabilities) || facts.capabilities.multiAgentV2 !== true) {
+        || !('multiAgentV2' in facts.capabilities) || facts.capabilities.multiAgentV2 !== true
+        || !('evidence' in facts.capabilities) || facts.capabilities.evidence !== 'native-thread-feature-report') {
         return { kind: 'refused', reason: 'capability-unsupported', detail: 'Codex owner lacks attested native subagent capability' }
       }
       let build = this.builds.get(projectId)
@@ -172,8 +202,8 @@ export class CodexOwnerBindings {
           submitLine: async prompt => {
             const active = this.builds.get(projectId)?.input
             if (!active) throw new Error('Codex build session has no active dispatch')
-            const handle = this.start(projectId, { ...active.spec, prompt, session: { id: facts.threadId, last_active_at: Date.now() },
-              turn_absolute_ceiling_ms: Math.min(active.timeout_ms, active.request.budget.wall_ms) })
+            const handle = this.startTurn(projectId, { ...active.spec, prompt, session: { id: facts.threadId, last_active_at: Date.now() },
+              turn_absolute_ceiling_ms: Math.min(active.timeout_ms, active.request.budget.wall_ms) }, true)
             const cancel = (): void => { void handle.cancel().catch(() => {}) }
             active.signal.addEventListener('abort', cancel, { once: true })
             try {

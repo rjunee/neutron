@@ -8,6 +8,7 @@ import type { AgentSpec } from '@neutronai/runtime/substrate.ts'
 import type { SessionHandle } from '@neutronai/runtime/session-handle.ts'
 import type { CodexOwnerBinding, CodexOwnerBindingFacts, CodexOwnerBootstrap } from '@neutronai/runtime/adapters/codex-cli/persistent/project-control-bootstrap.ts'
 import type { BoundedWorkRequest } from '@neutronai/runtime/bounded-work.ts'
+import { createProjectRunners } from '@neutronai/runtime/workers/project-runners.ts'
 
 const dirs: string[] = []
 afterEach(() => { for (const dir of dirs.splice(0)) rmSync(dir, { recursive: true, force: true }) })
@@ -38,11 +39,12 @@ function fixture() {
     expect(options.env.OPENAI_API_KEY).toBeUndefined()
     if (fail) throw new Error('Existing owner needs explicit recovery')
     const binding = {} as CodexOwnerBinding
-    const identity: CodexOwnerBindingFacts & { capabilities: { multiAgentV2: boolean } } = { capabilities: { multiAgentV2: capability }, threadId: `native-${project}`, sessionId: `session-${project}`,
+    const identity: CodexOwnerBindingFacts = { capabilities: { multiAgentV2: true, evidence: 'native-thread-feature-report' }, threadId: `native-${project}`, sessionId: `session-${project}`,
       cwd: options.cwd, codexHome: options.codexHome, rolloutPath: join(options.codexHome, 'rollout.jsonl'),
       paneHandle: `pane-${project}`, bindingRevision: `revision-${project}`, generation: 1, brokerGeneration: 1,
       credentialFingerprint: 'fixture', modelProvider: 'fixture', controlSocketPath: options.socketPath,
       nativeMetadata: { sessionId: `session-${project}`, source: 'vscode', originator: 'owner-bootstrap-probe' } }
+    if (!capability) Reflect.deleteProperty(identity, 'capabilities')
     facts.set(binding, identity)
     let count = 0
     let phase: 'idle' | 'turn' = 'idle'
@@ -141,6 +143,51 @@ test('missing child trailer fences later chat even when the native parent comple
   expect(f.calls).toHaveLength(2)
   expect((await collect(f.bindings.start('project-one', spec('must not dispatch')))).at(-1)?.kind).toBe('error')
   expect(f.calls).toHaveLength(2)
+})
+
+test.each(['valid', 'invalid-payload', 'malformed-envelope'] as const)('host-decoded child %s controls later chat and distinct-step dispatch', async result => {
+  const valid = result === 'valid'
+  const f = fixture()
+  await collect(f.bindings.start('project-one', spec('hello')))
+  const cwd = join(f.dir, 'project-one')
+  const request: BoundedWorkRequest = { run_id: 'run', step_id: 'first', role: 'build', model_id: 'gpt-5.5', effort: null,
+    cwd, writable: true, network: true, tools: 'edit-and-run', brief: { path: join(cwd, 'brief'), integrity: 'fixture' },
+    result: { path: join(cwd, 'result.json'), schema: 'fixture' }, thread: null, budget: { wall_ms: 2000 }, needs_approval_decision: false }
+  f.onPrompt(() => writeFileSync(request.result.path, result === 'malformed-envelope' ? '{}' : JSON.stringify({ schema: 'fixture', run_id: 'run', step_id: 'first', kind: 'completed', result: valid ? { accepted: true } : {} })))
+  const runners = await createProjectRunners({
+    conversation: { project_id: 'project-one', topic_id: 'topic', provider: 'openai-codex', spec: spec('') },
+    run_id: 'run', state_dir: cwd, actingTurn: f.bindings.actingTurn('project-one', 'topic', cwd, [cwd]),
+    trailer: { schemas: new Map([['fixture', value => (value as { accepted?: boolean })?.accepted === true]]), metadata: () => undefined }, headless: {},
+  })
+  const worker = f.bindings.guardBuildRunner('project-one', runners.inRepl!)
+  expect((await worker.run(request, 'in-repl', new AbortController().signal)).kind).toBe(valid ? 'completed' : 'unknown')
+  expect(f.calls).toHaveLength(2)
+  expect((await collect(f.bindings.start('project-one', spec('after payload')))).at(-1)?.kind).toBe(valid ? 'completion' : 'error')
+  expect(f.calls).toHaveLength(valid ? 3 : 2)
+  if (!valid) {
+    expect((await worker.run({ ...request, step_id: 'second', result: { ...request.result, path: join(cwd, 'second.json') } }, 'in-repl', new AbortController().signal)).kind).not.toBe('completed')
+    expect(f.calls).toHaveLength(2)
+  }
+})
+
+test('chat cannot interleave while a completed native parent awaits its child result', async () => {
+  const f = fixture()
+  await collect(f.bindings.start('project-one', spec('hello')))
+  const cwd = join(f.dir, 'project-one')
+  const request: BoundedWorkRequest = { run_id: 'run', step_id: 'pending', role: 'build', model_id: 'gpt-5.5', effort: null,
+    cwd, writable: true, network: true, tools: 'edit-and-run', brief: { path: join(cwd, 'brief'), integrity: 'fixture' },
+    result: { path: join(cwd, 'pending.json'), schema: 'fixture' }, thread: null, budget: { wall_ms: 2000 }, needs_approval_decision: false }
+  const pending = f.bindings.actingTurn('project-one', 'topic', cwd, [cwd])({
+    conversation: { project_id: 'project-one', topic_id: 'topic', provider: 'openai-codex', spec: spec('') },
+    request, spec: spec('dispatch'), timeout_ms: 2000, signal: new AbortController().signal,
+  })
+  for (let attempt = 0; f.calls.length < 2 && attempt < 100; attempt++) await Bun.sleep(1)
+  expect(f.calls).toHaveLength(2)
+  expect((await collect(f.bindings.start('project-one', spec('must wait')))).at(-1)).toMatchObject({ kind: 'error', message: 'Codex owner build result is still pending' })
+  expect(f.calls).toHaveLength(2)
+  writeFileSync(request.result.path, JSON.stringify({ schema: 'fixture', run_id: 'run', step_id: 'pending', kind: 'completed', result: {} }))
+  expect(await pending).toEqual({ kind: 'turn-ended' })
+  expect((await collect(f.bindings.start('project-one', spec('now ready')))).at(-1)?.kind).toBe('completion')
 })
 
 test.each(['wrongReceipt', 'approval'] as const)('%s quarantines the shared binding for chat and build', async mode => {

@@ -446,11 +446,13 @@ test('Codex-selected build consumes the shared owner resolver and refuses when i
   f.context.provider = 'openai-codex'
   f.input.codex_home = join(f.dir, 'codex-home')
   const bindings: unknown[][] = []
+  const guarded: string[] = []
   f.context.codexOwnerBindings = { actingTurn: (...binding) => {
     bindings.push(binding)
     return async () => ({ kind: 'turn-ended' })
-  } }
+  }, guardBuildRunner: (projectId, worker) => { guarded.push(projectId); return worker } }
   const options = await f.prepare()
+  expect(guarded).toEqual([f.context.projectId])
   const captured = f.captured()
   const request: BoundedWorkRequest = { ...options.workers.build.request, run_id: f.input.run.id, step_id: 'fixture-step', role: 'build', needs_approval_decision: false }
   const outcome = await captured.actingTurn({
