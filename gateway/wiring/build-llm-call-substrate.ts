@@ -938,7 +938,13 @@ export function buildLlmCallSubstrate(
       // an explicit-openai turn to Claude (audit High). When non-anthropic, delegate
       // to the OpenAI-family path; the anthropic block below stays BYTE-IDENTICAL.
       const chat = input.configuredChat
-      const projectId = input.projectIdResolver?.() ?? spec.metering_context?.project_id
+      // General is explicitly null in the conversation scope. The legacy pool's
+      // 'general' sentinel must never select a real project's provider override.
+      const conversationProjectId = input.conversationProjectId !== undefined
+        ? input.conversationProjectId : spec.metering_context?.conversationProjectId
+      const projectId = conversationProjectId !== undefined
+        ? conversationProjectId ?? undefined
+        : input.projectIdResolver?.() ?? spec.metering_context?.project_id
       const tier = chat?.env === undefined ? undefined : projectModelTier(chat.env, projectId)
       if (tier !== undefined) {
         openaiSessions.delete(openAiSessionScopeKey(input.user_id ?? '_platform', projectId))
@@ -954,7 +960,7 @@ export function buildLlmCallSubstrate(
           ...(chat!.fetchImpl === undefined ? {} : { fetchImpl: chat!.fetchImpl }),
         }).start({ ...spec, tools })
       }
-      const resolvedSelection = input.providerResolver?.(input.projectIdResolver?.() ?? spec.metering_context?.project_id)
+      const resolvedSelection = input.providerResolver?.(projectId)
       const resolvedProvider =
         typeof resolvedSelection === 'object' ? resolvedSelection.provider : resolvedSelection
       const providerSource =
@@ -986,7 +992,7 @@ export function buildLlmCallSubstrate(
         // structural encoding. Also thread the raw projectId for tool scoping so an
         // absent project binds to null (not the string 'default').
         const scopeUserId = input.user_id ?? '_platform'
-        const rawProjectId = input.projectIdResolver?.() ?? spec.metering_context?.project_id
+        const rawProjectId = projectId
         const scopeProjectId =
           rawProjectId !== undefined && rawProjectId.length > 0 ? rawProjectId : undefined
         const sessionKey = openAiSessionScopeKey(scopeUserId, scopeProjectId)
@@ -1043,7 +1049,7 @@ export function buildLlmCallSubstrate(
         const opts = await claudeOptionsFor(
           input, resolved,
           () => input.projectIdResolver?.() ?? spec.metering_context?.project_id,
-          projectId => {
+          () => {
             // A Claude turn invalidates this scope's OpenAI continuation before
             // remaining option getters, so switching back replays full history.
             openaiSessions.delete(openAiSessionScopeKey(
@@ -1056,8 +1062,6 @@ export function buildLlmCallSubstrate(
         // interactive-REPL substrate (the sole spawn shape post-S3-rip-replace).
         // The `substrateFactory` seam lets tests inject a fake substrate.
         const factory = input.substrateFactory ?? createClaudeCodeSubstrateAuto
-        const conversationProjectId = input.conversationProjectId !== undefined
-          ? input.conversationProjectId : spec.metering_context?.conversationProjectId
         if (conversationProjectId !== undefined) opts.conversationProjectId = conversationProjectId
         innerHandle = factory(opts).start(spec)
         if (cancelled) {

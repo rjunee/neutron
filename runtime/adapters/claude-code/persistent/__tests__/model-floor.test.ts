@@ -52,9 +52,10 @@ import {
   type PersistentReplSubstrateOptions,
 } from '../persistent-repl-substrate.ts'
 import { poolKeyFor, replayPendingInbound } from '../pool.ts'
-import { supervisedBySessionKey } from '../pool-state.ts'
+import { pool, supervisedBySessionKey } from '../pool-state.ts'
 import { registerSupervisedSubstrate, respawnReplSession } from '../supervision.ts'
 import { getRecord, patchRecord, upsertRecord } from '../repl-registry.ts'
+import { switchPersistentReplModel } from '../model-control.ts'
 
 /** The EXACT id measured in the owner's live REPL registry on the degraded row. */
 const LIVE_HAIKU_ID = 'claude-haiku-4-5-20251001'
@@ -628,6 +629,55 @@ function modelArg(argv: string[]): string | undefined {
 }
 
 describe('the frontier-model floor holds at the spawn chokepoint', () => {
+  it('an acknowledged native switch writes the preference actually consumed by same-session resume', async () => {
+    const base = makeCapturingHost()
+    const host: PtyHost = {
+      async spawn(argv, spawnOptions) {
+        const child = await base.host.spawn(argv, spawnOptions)
+        let picker = false, current = 'opus', focused = 'opus'
+        return { ...child,
+          async readScreen() {
+            if (!picker) return '❯ \n? for shortcuts'
+            return 'Select model\n' + ['opus', 'haiku'].map((model, index) =>
+              `${focused === model ? '❯' : ' '} ${index + 1}. ${model === 'opus' ? 'Opus' : 'Haiku'}${current === model ? ' ✔' : ''}  ${model === 'opus' ? 'Opus 5' : 'Haiku 4.5'}`,
+            ).join('\n') + '\nEnter to set as default · s to use this session only · Esc to cancel'
+          },
+          async submitLine(command) {
+            if (command !== '/model') throw new Error('unexpected prompt/reset command')
+            picker = true; focused = current
+          },
+          async sendKeys(keys) {
+            for (const key of keys) {
+              if (key === 'up' || key === 'down') focused = focused === 'opus' ? 'haiku' : 'opus'
+              if (key === 'escape') picker = false
+              if (key === 's') { current = focused; picker = false }
+            }
+          },
+        }
+      },
+    }
+    const registryPath = join(tempDir('neutron-model-writer-reg-'), 'repl-registry.json')
+    const options = opts(host, { user_id: 'switch-owner', project_id: 'project', conversationProjectId: 'project',
+      credential_identity: 'cred-1', replRegistryPath: registryPath, frontierModelFloor: true, jsonlExistsProbe: () => true })
+    registerSupervisedSubstrate(options)
+    await drain(createPersistentReplSubstrate(options).start(spec(getBestModel())))
+    const key = poolKeyFor(options)
+    const sessionId = getRecord(registryPath, key)!.sessionId
+    const session = await pool.get(key)!
+    for (let i = 0; i < 200 && session.turnSlotHeld > 0; i++) await Bun.sleep(15)
+    expect(session.turnSlotHeld).toBe(0)
+    const scope = { userId: 'switch-owner', projectId: 'project' }
+    await expect(switchPersistentReplModel(scope, { sessionId, model: 'unoffered' })).rejects.toMatchObject({ code: 'invalid-model' })
+    expect(getRecord(registryPath, key)?.owner_selected_model).toBeUndefined()
+    expect((await switchPersistentReplModel(scope, { sessionId, model: 'haiku' })).currentModel).toBe('haiku')
+    expect(getRecord(registryPath, key)?.owner_selected_model).toBe('haiku')
+    for (let i = 0; i < 200 && !getRecord(registryPath, key)?.has_session; i++) await Bun.sleep(15)
+    expect(respawnReplSession(options, key, 'wedge-watchdog', 'model-switch-test').ok).toBe(true)
+    for (let i = 0; i < 200 && base.argvs.length < 2; i++) await Bun.sleep(15)
+    expect(modelArg(base.argvs[1]!)).toBe('haiku')
+    expect(base.argvs[1]![base.argvs[1]!.indexOf('--resume') + 1]).toBe(sessionId)
+  }, SPAWN_TEST_TIMEOUT_MS)
+
   it('an explicit owner model survives same-conversation resume without changing its UUID', async () => {
     const { host, argvs } = makeCapturingHost()
     const registryPath = join(tempDir('neutron-model-selection-reg-'), 'repl-registry.json')
