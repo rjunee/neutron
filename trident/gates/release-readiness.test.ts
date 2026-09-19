@@ -2,7 +2,7 @@ import { expect, test } from 'bun:test'
 import { mkdtemp, rm, appendFile, writeFile } from 'node:fs/promises'
 import { tmpdir } from 'node:os'
 import { join } from 'node:path'
-import { publicationReadiness } from './release-readiness.ts'
+import { publicationReadiness, sessionTrailerReadiness } from './release-readiness.ts'
 import type { RunHostCommand } from '../merge.ts'
 import type { BuildSnapshot } from '../build-run.ts'
 
@@ -178,4 +178,40 @@ test('#1133 G166: a fake host — a raw object with the trailer is refused; a ma
     .toEqual({ kind: 'blocked', on: carrierText([carrier]) })
   expect(await publicationReadiness(fake('not-a-sha\n'), 'repo', 'change', 'b'.repeat(40), snapshot, 'run'))
     .toEqual({ kind: 'unknown', detail: 'Publication commit range listing is malformed' })
+})
+
+test('#1133 G166: a commit with an EMPTY message is measured clean, not refused as unreadable', async () => {
+  // The wrapper honours `--allow-empty-message` and rebuilds such a commit empty; the publisher
+  // must accept the same shape. The host runner trims stdout, so the raw object arrives as its
+  // headers with no separator at all — that is a measured empty message, and no line of it can
+  // carry the trailer.
+  const { dir, repo, launchBase } = await scratch()
+  try {
+    await appendFile(join(repo, 'f'), 'empty\n')
+    await git(repo, 'add', 'f')
+    await git(repo, 'commit', '-q', '--allow-empty-message', '-m', '')
+    const sha = await git(repo, 'rev-parse', 'HEAD')
+    expect((await run(['git', '-C', repo, 'cat-file', 'commit', sha], repo)).stdout.trim()).not.toContain('\n\n')
+    expect(await readiness(repo, launchBase)).toEqual({ kind: 'allow' })
+    // And an empty-message commit BESIDE a carrier does not hide the carrier.
+    const carrier = await commit(repo, 'feat: subject', 'Claude-Session: https://claude.ai/code/session_01TEST')
+    expect(await readiness(repo, launchBase)).toEqual({ kind: 'blocked', on: carrierText([carrier]) })
+  } finally { await rm(dir, { recursive: true, force: true }) }
+})
+
+test('#1133 G166: sessionTrailerReadiness is the shared scan — the salvage publisher gets the same three answers', async () => {
+  const { dir, repo, launchBase } = await scratch()
+  try {
+    const clean = await commit(repo, 'feat: one', 'Co-Authored-By: Fixture <fixture@example.invalid>')
+    expect(await sessionTrailerReadiness(run, repo, launchBase, clean)).toEqual({ kind: 'allow' })
+    const carrier = await commit(repo, 'feat: two', 'Claude-Session: https://claude.ai/code/session_01TEST')
+    expect(await sessionTrailerReadiness(run, repo, launchBase, carrier)).toEqual({ kind: 'blocked', on: carrierText([carrier]) })
+    // The window is the caller's: measured up to `clean`, the later carrier is not in range.
+    expect(await sessionTrailerReadiness(run, repo, launchBase, clean)).toEqual({ kind: 'allow' })
+    expect(await sessionTrailerReadiness(run, repo, '', carrier)).toEqual({ kind: 'unknown', detail: 'Publication launch base is not a full OID' })
+    const unreadable: RunHostCommand = async (argv, cwd) => argv.includes('cat-file')
+      ? { ok: false, exit_code: 128, stdout: '', stderr: '' }
+      : run(argv, cwd)
+    expect(await sessionTrailerReadiness(unreadable, repo, launchBase, clean)).toEqual({ kind: 'unknown', detail: `Publication commit ${clean} could not be read` })
+  } finally { await rm(dir, { recursive: true, force: true }) }
 })

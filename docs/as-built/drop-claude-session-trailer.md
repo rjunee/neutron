@@ -709,8 +709,9 @@ message.
    full OID -> `unknown('Publication commit range listing is malformed')`; then, per sha in
    rev-list order, `git cat-file commit <sha>` -- the RAW object, the bytes the wrapper
    strips, never `git log` porcelain -- `!ok` -> `unknown('Publication commit <sha> could not
-   be read')`, no `\n\n` separator -> `unknown('Publication commit <sha> has no message')`,
-   and any message line matching `sessionTrailerLine` makes the sha a carrier.
+   be read')`, no `\n\n` separator -> `unknown('Publication commit <sha> has no message')`
+   (round 17 below: an empty message is now measured clean instead), and any message line
+   matching `sessionTrailerLine` makes the sha a carrier.
 3. In `publicationReadiness`, after the first-push ancestry block and immediately before
    `return { kind: 'allow' }` (`:84`), unconditionally -- a re-publication with the remote
    branch present is scanned the same as a first push: `unknown` is returned as is; carriers
@@ -792,6 +793,132 @@ pushed to the public repository), indexed under "Publication and replay"; the su
 literals move 165 -> 166 entries and 155 -> 156 Silent (the awk enumeration in that
 paragraph prints `166 3 156 10`); `trident/gates-inventory-citations.test.ts:10`
 `toHaveLength(165)` -> `166` (1 / 0).
+
+### Round 17: the third publisher scans too (`trident/publication.ts` `publishBuiltCommit`), and the two halves agree on an empty message
+
+The round-16 head (`aae49bb8`) came back REQUEST_CHANGES from the independent reviewer
+with one major, one minor and one nit. Each was reproduced against the real code before
+anything was changed.
+
+**MAJOR -- a third push site with no scan, and it is the path a refused wrapper commit
+takes.** Round 16 said `publicationReadiness` is "called by BOTH publishers". Enumerating
+push sites instead of publishers -- `grep -n "'push'" trident/*.ts` excluding tests -- gives
+three origin-facing lease pushes: `production-host-effects.ts` `publishChecked` (gated),
+`build-host.ts` `publishGate` (gated), and `trident/publication.ts` `publishBuiltCommit`,
+which had no scan at all (`grep -n 'release-readiness\|publicationReadiness\|claude-session'
+trident/publication.ts` = 0 before this round). `publishBuiltCommit` is live on two
+orchestrator paths: the `publish_requested` handoff (`orchestrator.ts:2379`) and
+`reconcile_stranded` (`orchestrator.ts:1583`), which fires for every pr-mode run whose phase
+becomes `failed` with commits above the base and records "branch <b> pushed to origin as PR
+#N, unreviewed". That is exactly the trajectory of the defect G166 was added for: the
+wrapper refuses (exit 69/70/74/76) and leaves the trailer commit on the branch; the build
+fails or `publishChecked` blocks on G166; the run is recorded `failed`; `reconcile_stranded`
+pushes the very commit the gate refused, as an unreviewed PR. And the replay
+(`replay.ts:552-556`) re-commits the ORIGINAL message plus a replay note first, so the
+trailer rides onto the replayed head. Reproduced with real git (the test file below, before
+the fix): a branch whose one commit carries `Claude-Session:` was pushed to the bare origin
+and `gh pr create` was issued.
+
+Closed by ONE scan shared by every push site. `release-readiness.ts` now exports
+`sessionTrailerReadiness(run, repo, launchBase, head): Promise<GateResult>` (`:63`), the
+carrier scan folded into the gate result (`blocked` naming every carrier, `unknown` for a
+range or object that could not be measured); `publicationReadiness` returns it verbatim at
+the point where it used to inline the same three branches (`:104`, behaviour and text
+unchanged, 11 / 0 in its own file). `publishBuiltCommit` calls it (`publication.ts:259`)
+after the replay and the purity preflight -- so it measures the head that will be pushed,
+`headToPublish`, not the pre-replay one -- and before the lease push, and THROWS on anything
+but `allow`: `outer publisher refused to push branch <b>: <the gate's own text> -- nothing
+was pushed; the branch stays local for inspection`. It is unconditional (the
+already-at-head no-op path is after it, so a remote already at this head is scanned the
+same as a first push, as the checked gate does) and fails closed (a range that cannot be
+measured throws the same way as a carrier). In `reconcile_stranded` the throw lands in its
+`catch`, which records the reason in the step note as `stranded build salvage failed:
+<reason>` and leaves the run at "stranded work recorded without a publish" -- its ordinary
+no-push outcome, not a publish. On the `publish_requested` path it is a publish failure
+like any other, with the carrier shas in the reason.
+
+The window is the review diff's own. `rebased.baseSha` (the observed base tip the head now
+sits on) when the replay observed one; otherwise `resolvedDiffBase(run)` -- the same
+left-hand side the review diff below is taken against (the launch pin, else the qualified
+base ref) -- resolved to the commit it names by a new `commitOf` (`publication.ts:72`:
+a 40/64-hex operand as given, else `git rev-parse --verify --quiet <ref>^{commit}`, '' when
+it names none, so the scan refuses it as "not a full OID"). This is a superset of the
+reviewer's proposed `rebased.baseSha || run.base_sha`: identical whenever a pin exists, and
+still measurable for an unpinned legacy row where a hard `run.base_sha ?? ''` would have
+refused every such publish as unmeasurable (measured: `orchestrator.test.ts` "a null base
+pin skips the first-publish cut assertion" went red under the first cut for exactly that
+reason, and is green under this one, 312 / 0).
+
+**MINOR -- G166 refused a legitimately empty-message commit.** `spawnCapture` trims stdout,
+so a commit made with `--allow-empty-message` (headers, `\n\n`, nothing) arrives with no
+separator, and round 16 returned `unknown('Publication commit <sha> has no message')` --
+a fail-closed refusal with a false detail, on a commit shape the wrapper in the same PR
+deliberately preserves (`--allow-empty-message` honoured; "an empty commit with the trailer
+in its -F file is rebuilt empty"). Closed at `release-readiness.ts:50`: a missing separator
+after the trim IS an empty message (`const message = separator < 0 ? '' : ...`), which no
+line of can carry the trailer, so it is measured clean. Every header line is `name value`
+or a space-continued `gpgsig` line, so the first `\n\n` is always the header/message
+boundary and never inside the headers; the `unknown` for an unreadable object is unchanged.
+
+**NIT -- the Forge brief and its test said the wrapper "amends".** Since round 15 it rebuilds
+with `commit-tree` and swaps the ref. `inner-workflow.mjs` `forgePushStep` now ends "...
+because the wrapper may replace the commit it just created with a rebuilt one (the same
+tree, parents and author, the trailer removed) and swap the branch onto it"; the
+instruction itself (read commitSha with `git rev-parse HEAD`, never from a `[branch sha]`
+line) is unchanged. `inner-workflow.test.ts` pins `rebuilt one` present and `may amend`
+absent (153 / 0 in that file).
+
+**Tests.** NEW `trident/publication-session-trailer-realgit.test.ts` runs the real
+`publishBuiltCommit` against real git: a bare origin holding `main`, a full clone on
+`trident/card-trailer` with one branch commit whose `-m` paragraphs are the fixture's
+(the trailer as its own paragraph beside `Co-Authored-By`, the way the CLI reminder makes
+the agent write it), `spawnCapture` for every command except `gh` (answered ok locally;
+the PR probe reports 7 after `gh pr create`), the purity preflight stood down
+(`skipped-no-gate`) so the scan is the only thing between the replay and the push:
+
+- (a) `:127` POSITIVE CONTROL: only `Co-Authored-By` -> `{ pr: 7, head, push: 'pushed' }`,
+  origin holds the head, `gh pr create` issued, and the `cat-file` of the branch commit
+  precedes the `--force-with-lease` push in the recorded argv.
+- (b) `:142` the trailer on the branch head -> throws naming the branch, the G166 text with
+  the sha, and "nothing was pushed"; origin never saw the branch (`ls-remote` ''), no `push`
+  and no `gh` argv, local branch and worktree untouched.
+- (c) `:162` `main` moves after the cut so the publisher REPLAYS the branch: the replayed
+  head (parent = the moved tip, message carrying the trailer through `replay.ts`) is the
+  sha the refusal names; origin unchanged. This is the "replay carries the trailer" half of
+  the finding, closed by scanning `headToPublish`.
+- (d) `:188` a host that fails every `cat-file commit` -> throws `Publication commit <sha>
+  could not be read`; nothing pushed.
+- (e) `:206` origin loses `main` after the clone (the bare repo's HEAD is moved off it
+  first, then `push --delete`), the run has no pin: `resolvedDiffBase` = `refs/heads/main`
+  is resolved and the carrier is refused; `resolvedDiffBase` = a ref naming no commit ->
+  `Publication launch base is not a full OID`, nothing pushed either way.
+
+`trident/gates/release-readiness.test.ts` gains (j) `:183` an `--allow-empty-message`
+commit (its raw object verified to contain no `\n\n` after the trim) -> `allow`, and an
+empty commit beside a carrier still names the carrier; (k) `:202` `sessionTrailerReadiness`
+directly: `allow` / `blocked` naming the carrier / the window is the caller's (measured to
+the clean head, the later carrier is out of range) / '' base -> `unknown` 'not a full OID' /
+a failing `cat-file` -> `unknown` naming the sha.
+
+**Inventory.** The G166 row now states the guarantee for every push site (checked
+publishers through `publicationReadiness`; the salvage push through the same exported scan
+after the replay and before its lease push, failing closed on an unmeasurable range; an
+empty message measured clean); production anchors `release-readiness.ts:22`, `:31`, `:63`,
+`:104`, `publication.ts:259`; test anchors add `release-readiness.test.ts:183`, `:202` and
+the five tests of the new file. Row count unchanged (166; the awk enumeration still prints
+`166 3 156 10`; citations 1 / 0).
+
+**Mutation, proven by hand before nomination (round 17).**
+`grep -c 'sessionTrailerReadiness(opts.run_host, run.repo_path, trailerBase, headToPublish)'
+trident/publication.ts` = 1. Replacing `trailerBase, headToPublish)` with `headToPublish,
+headToPublish)` makes the salvage scan measure the empty range `head..head`: it runs, reads
+nothing, and allows every branch. Measured: guard
+`bun test trident/publication-session-trailer-realgit.test.ts` 0 pass / 5 fail mutated --
+(b), (c), (d) and (e) see a push and a PR where they expected a refusal, and the positive
+control (a) fails on its own assertion that the branch commit was read before the push --
+and 5 / 0 restored; control `bun test trident/gates/release-readiness.test.ts` 11 / 0
+either way (it never imports `publication.ts`). The window IS the guarantee on this path:
+with it collapsed, the very commit G166 refused is pushed as an unreviewed PR.
 
 ### Mutation, proven by hand before nomination
 
@@ -998,3 +1125,21 @@ a multi-task plan ... do NOT run the full suite this iteration"), which contradi
 plan step's "terminal, remainingTasks 0"; the brief is the contract the host verifies, so
 the full suite was not run here and the result reports `suiteOutcome: deferred` -- CI on
 the published head is the whole-branch run.
+
+Round 17 is the fix commit on top of round 16 (`aae49bb8`, REQUEST_CHANGES from the
+independent reviewer with the three findings above), on the same base `a1be24e0`, in the
+same worktree. It touches `trident/gates/release-readiness.ts` (the exported scan, the
+empty-message case), `trident/publication.ts` (the salvage-path scan and `commitOf`), their
+tests (the new `publication-session-trailer-realgit.test.ts`, two cases in
+`release-readiness.test.ts`), the Forge brief sentence in `trident/inner-workflow.mjs` and
+its pin in `inner-workflow.test.ts`, the G166 row, and this record. The wrapper, its 52
+tests, the settings switch and the Co-Authored-By handling are untouched. Stage 1
+(file-scoped, the branch's seven changed test files: `build-settings.test.ts`,
+`build-host.test.ts`, `commit-with-resolved-head-realgit.test.ts`,
+`gates-inventory-citations.test.ts`, `release-readiness.test.ts`, `inner-workflow.test.ts`
+and the new file) = 290 pass / 0 fail in 11.4s; beyond the stage-1 budget, the three
+fake-host consumers of `publishBuiltCommit` were run because the new throw could have
+reached them -- `orchestrator.test.ts` 312 / 0, `production-host-effects.test.ts` and
+`publish-rebase-realgit.test.ts` green (424 / 0 across the three); `tsc --noEmit -p
+trident/tsconfig.json` exit 0. The full suite stays deferred to the terminal task by the
+host's instruction.

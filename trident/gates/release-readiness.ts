@@ -40,13 +40,35 @@ async function sessionTrailerCarriers(
   for (const sha of shas) {
     const object = await run(['git', '-C', repo, 'cat-file', 'commit', sha], repo)
     if (!object.ok) return { kind: 'unknown', detail: `Publication commit ${sha} could not be read` }
-    // A commit object is headers, one blank line, then the message; the blank line is always there.
+    // A commit object is headers, one blank line, then the message. The host runner trims
+    // stdout, so a commit whose message is EMPTY (`--allow-empty-message`, which the wrapper
+    // honours) arrives as its headers alone with no separator left: that is a measured empty
+    // message — no line can carry the trailer — not an unreadable object, and it is allowed.
+    // Every header line is `name value` or a ` `-continued gpgsig line, so the first `\n\n` is
+    // always the header/message boundary and never falls inside the headers.
     const separator = object.stdout.indexOf('\n\n')
-    if (separator < 0) return { kind: 'unknown', detail: `Publication commit ${sha} has no message` }
-    const message = object.stdout.slice(separator + 2)
+    const message = separator < 0 ? '' : object.stdout.slice(separator + 2)
     if (message.split('\n').some(line => sessionTrailerLine.test(line))) carriers.push(sha)
   }
   return { kind: 'carriers', shas: carriers }
+}
+
+/** #1133 (G166) as one gate result, shared by EVERY path that pushes a build branch to origin:
+ * the checked publishers (`publicationReadiness` below) and the stranded-work salvage push
+ * (`trident/publication.ts` `publishBuiltCommit`). `blocked` names every carrier in
+ * `launchBase..head`; `unknown` is a range or commit that could not be measured, and a caller
+ * must refuse on it the same as on `blocked` — a push on the strength of what was not seen is
+ * the defect this gate exists to close.
+ */
+export async function sessionTrailerReadiness(
+  run: RunHostCommand, repo: string, launchBase: string, head: string,
+): Promise<GateResult> {
+  const trailers = await sessionTrailerCarriers(run, repo, launchBase, head)
+  if (trailers.kind === 'unknown') return unknown(trailers.detail)
+  if (trailers.shas.length > 0) {
+    return blocked(`Publication branch carries a Claude-Session trailer on ${trailers.shas.length} commit(s) above the launch base: ${trailers.shas.join(', ')}`)
+  }
+  return { kind: 'allow' }
 }
 
 /** G083, G085, G086, G166: measure the branch, launch ancestry and commit messages before
@@ -77,13 +99,9 @@ export async function publicationReadiness(
     // or a commit that reached the branch any other way, is caught HERE — the last measurement
     // before `git push` — so "no loop-authored commit carries the trailer" is a property of the
     // published history, not of one process's exit code. Unconditional: a re-publication with
-    // the remote branch already present is scanned the same as a first push.
-    const trailers = await sessionTrailerCarriers(run, repo, launchBase, head)
-    if (trailers.kind === 'unknown') return unknown(trailers.detail)
-    if (trailers.shas.length > 0) {
-      return blocked(`Publication branch carries a Claude-Session trailer on ${trailers.shas.length} commit(s) above the launch base: ${trailers.shas.join(', ')}`)
-    }
-    return { kind: 'allow' }
+    // the remote branch already present is scanned the same as a first push. The stranded-work
+    // salvage push (`publishBuiltCommit`) runs the same scan itself — it never reaches this gate.
+    return sessionTrailerReadiness(run, repo, launchBase, head)
   } catch (error) { return unknownCause('Publication host observation failed', error, runId) }
 }
 

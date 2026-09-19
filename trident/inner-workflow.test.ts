@@ -767,10 +767,14 @@ describe('inner-workflow.mjs — parallel adversarial review + asymmetric synthe
     const pushStep = grabFunction('forgePushStep')
     expect(pushStep).toContain('Do not add a \\`Claude-Session:\\` trailer')
     expect(pushStep).toContain('keep the Co-Authored-By trailer')
-    // The strip amends, so the sha git prints first is not the branch head: the brief
-    // must send Forge to `git rev-parse HEAD` for commitSha or the head-claim gate trips.
+    // The strip rebuilds the commit (`git commit-tree`) and swaps the ref onto it, so the
+    // sha git prints first is not the branch head: the brief must send Forge to
+    // `git rev-parse HEAD` for commitSha or the head-claim gate trips — and it must state
+    // the mechanism that exists, not the amend the wrapper stopped doing in round 15.
     expect(pushStep).toContain('git rev-parse HEAD')
     expect(pushStep).toContain('never copy it from a')
+    expect(pushStep).toContain('rebuilt one')
+    expect(pushStep).not.toContain('may amend')
   })
 })
 
