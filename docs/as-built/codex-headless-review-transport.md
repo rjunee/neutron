@@ -29,8 +29,12 @@ from configuration: a strict invocation ignores user config and places a bogus
 sentinel after the sole relied-on key, `sandbox_mode`. It must fail naming the
 sentinel, so a rejected real key or silently accepted unknown key cannot pass
 (`runtime/workers/codex-review.ts:59`). Host construction preflights every enabled
-review route and synthesis, preserving disabled peers as optional; failures
-therefore stop before plan/build worker turns (`trident/project-review-source.ts:55`).
+review or synthesis route that resolves to a provider-matching transport; a present
+transport's stable capability or credential refusal therefore stops before
+plan/build worker turns (`trident/project-review-source.ts:55`). An absent or
+provider-mismatched transport retains the panel gate's fail-closed behavior: it is
+recorded as unavailable when review dispatch reaches that seat and cannot approve.
+Disabled peers remain optional.
 
 The CLI writes a candidate response to a host-chosen `-o` path. The structured
 response has one `envelope` field so completed and blocked trailers can remain
@@ -51,12 +55,14 @@ overlap queues under the configured wall setting, while another source's lock
 fails closed (`trident/project-review-source.ts:77`). An uncertain dispatch keeps
 its ownership lock: automatic lock recovery is deliberately not claimed.
 
-Verification: the focused runner/source/host tests and the entire consuming
-`open/__tests__/project-build-e2e.test.ts` surface pass together (174 tests).
+Verification: the focused runner/source/host/production-boot tests and the entire
+consuming `open/__tests__/project-build-e2e.test.ts` surface pass (162 tests).
 The consuming fixture enables the real production Codex runner and substitutes
 only the CLI process's model answer: the valid peer reaches merge and a wrong-run
-envelope blocks it. Invalid credentials and a missing required runner refuse
-before any plan, build or model call. Both root and Trident TypeScript checks pass.
+envelope blocks it. Invalid credentials refuse before any plan, build or model call.
+A missing required runner permits construction but is observed as unavailable at
+review, before synthesis, fix or merge; the consuming control leaves the PR open and
+the base branch unchanged. Both root and Trident TypeScript checks pass.
 Eleven executable
 mutations were restored after producing expected failures: removing review role
 support blocks the consuming merge; weakening read-only to workspace-write fails
