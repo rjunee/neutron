@@ -33,7 +33,7 @@ test('composition preserves owner and General scopes and reads provider selectio
   provider = 'openai'
   const unrelated = (await request())!
   expect(unrelated.status).toBe(503)
-  expect(await unrelated.json()).toMatchObject({ error: 'unsupported' })
+  expect(await unrelated.json()).toMatchObject({ ok: false, code: 'unsupported' })
   expect(scopes).toHaveLength(2)
   provider = 'anthropic'
   expect((await request('project-a', 'owner', 'POST'))!.status).toBe(200)
