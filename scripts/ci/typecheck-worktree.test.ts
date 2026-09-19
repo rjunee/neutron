@@ -1,6 +1,7 @@
 import { afterAll, describe, expect, test } from 'bun:test'
 import { spawnSync } from 'node:child_process'
 import { chmodSync, copyFileSync, cpSync, mkdirSync, mkdtempSync, realpathSync, rmSync, symlinkSync, writeFileSync } from 'node:fs'
+import { tmpdir } from 'node:os'
 import { join } from 'node:path'
 
 const HERE = import.meta.dir
@@ -31,7 +32,7 @@ function run(cwd: string, command: string, args: string[]) {
 }
 
 function fixture(): { repo: string; fresh: string; linked: string; stale: string } {
-  const root = mkdtempSync(join(REPO_ROOT, '.typecheck-worktree-'))
+  const root = mkdtempSync(join(tmpdir(), 'typecheck-worktree-'))
   scratch.push(root)
   const repo = join(root, 'repo')
   mkdirSync(join(repo, 'scripts', 'ci'), { recursive: true })
@@ -39,7 +40,7 @@ function fixture(): { repo: string; fresh: string; linked: string; stale: string
   cpSync(realpathSync(join(REPO_ROOT, 'node_modules', 'typescript')), join(repo, 'vendor', 'typescript'), { recursive: true })
   writeFileSync(
     join(repo, 'vendor', 'typescript', 'package.json'),
-    JSON.stringify({ name: 'typescript', version: '5.9.3', bin: { tsc: './bin/tsc' } }),
+    JSON.stringify({ name: 'typescript', version: '5.9.3', main: './lib/typescript.js', bin: { tsc: './bin/tsc' } }),
   )
   copyFileSync(join(HERE, 'typecheck-all.sh'), join(repo, 'scripts', 'ci', 'typecheck-all.sh'))
   copyFileSync(join(HERE, 'verify-workspace-deps.ts'), join(repo, 'scripts', 'ci', 'verify-workspace-deps.ts'))
@@ -48,7 +49,14 @@ function fixture(): { repo: string; fresh: string; linked: string; stale: string
   const localTypeScript = 'file:vendor/typescript'
   writeFileSync(join(repo, 'package.json'), JSON.stringify({ private: true, workspaces: ['app'], devDependencies: { typescript: localTypeScript } }))
   writeFileSync(join(repo, 'app', 'package.json'), JSON.stringify({ name: '@fixture/app', dependencies: { typescript: 'file:../vendor/typescript' } }))
-  writeFileSync(join(repo, 'app', 'tsconfig.json'), JSON.stringify({ compilerOptions: { strict: true }, include: ['index.ts'] }))
+  // Model the invalid ancestor entry from the live failure without depending on
+  // the invoking checkout. Removing `types: []` must reproduce TS2688 for @types.
+  mkdirSync(join(repo, 'app', 'fixture-types', '@types'), { recursive: true })
+  writeFileSync(join(repo, 'app', 'fixture-types', '@types', 'package.json'), JSON.stringify({ name: '@types/@types', version: '0.0.0' }))
+  writeFileSync(
+    join(repo, 'app', 'tsconfig.json'),
+    JSON.stringify({ compilerOptions: { strict: true, typeRoots: ['./fixture-types'], types: [] }, include: ['index.ts'] }),
+  )
   writeFileSync(join(repo, 'app', 'index.ts'), 'export const answer: number = 42\n')
 
   expect(run(repo, 'git', ['init', '-q', '-b', 'main']).code).toBe(0)
