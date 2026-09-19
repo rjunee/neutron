@@ -2,6 +2,7 @@
 export interface ReplModelState {
   harness: 'claude-code' | 'codex';
   sessionId: string;
+  conversationId?: string;
   currentModel: string | null;
   availableModels: { id: string; label: string }[];
   status: 'ready' | 'busy' | 'unsupported' | 'unknown';
@@ -95,6 +96,7 @@ function isModelState(value: unknown): value is ReplModelState {
   if (!isRecord(value)) return false;
   return (value.harness === 'claude-code' || value.harness === 'codex') &&
     typeof value.sessionId === 'string' &&
+    (value.conversationId === undefined || typeof value.conversationId === 'string' && value.conversationId.length > 0) &&
     ((value.status === 'unsupported' || value.status === 'unknown') || value.sessionId.trim().length > 0) &&
     (value.currentModel === null || typeof value.currentModel === 'string') &&
     Array.isArray(value.availableModels) &&

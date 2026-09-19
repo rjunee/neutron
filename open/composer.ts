@@ -1096,6 +1096,7 @@ export function buildOpenGraphComposer(
     const codexOwnerProjects = (await projectSettingsStore.list(project_slug))
       .filter(project => resolveModelProvider(project.id).provider === 'openai-codex')
       .map(project => project.id)
+    await codexOwnerBindings.reconcile(codexOwnerProjects)
     // O6 — NOTICE-FAMILY + RECOVERED-REPLY sinks for the owner's WARM conversational
     // substrate (`cc-agent-*`). The persistent REPL fires four DI seams on the
     // rising edge of otherwise-invisible states — a mid-turn API 5xx dead turn, a

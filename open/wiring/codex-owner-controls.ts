@@ -1,5 +1,5 @@
 import { ReplModelError, type ReplModelState, type ReplModelSwitch } from '@neutronai/runtime/repl-model.ts'
-import type { CodexOwnerBindingFacts, CodexOwnerBootstrap } from '@neutronai/runtime/adapters/codex-cli/persistent/project-control-bootstrap.ts'
+import type { CodexOwnerBindingFacts, CodexOwnerBootstrap, CodexOwnerAttachment } from '@neutronai/runtime/adapters/codex-cli/persistent/project-control-bootstrap.ts'
 import type { ProjectControlGateway } from '@neutronai/runtime/adapters/codex-cli/persistent/project-control-broker.ts'
 import type { NativeOwnerAction, NativeOwnerIdentity } from '@neutronai/gateway/http/app-native-owner-control-surface.ts'
 
@@ -26,6 +26,7 @@ interface ActiveTurn {
   pending: Map<RequestId, NativeOwnerQuestion>
   seen: Set<RequestId>
   interrupted?: boolean
+  clientId?: string | undefined
 }
 
 /** Controls consume the same opaque owner and original turn writer as chat.
@@ -51,6 +52,7 @@ export class CodexOwnerControls {
   }
   private async owner(projectId: string): Promise<CodexOwnerBootstrap> {
     const owner = await this.deps.lookup(projectId)
+    if (owner && 'refreshState' in owner) await (owner as CodexOwnerAttachment).refreshState()
     if (!owner || this.deps.refused(projectId) || ['closed', 'recovery'].includes(owner.broker.state().phase)) {
       throw new ReplModelError('unavailable', 'The native project owner is unavailable or needs reconciliation.')
     }
@@ -122,7 +124,8 @@ export class CodexOwnerControls {
         this.assertIdentity(acknowledged, projectId, owner)
         if (currentModel !== request.model) throw new ReplModelError('unknown', 'Native model switch was not confirmed.')
       }
-      return { harness: 'codex', sessionId: this.token(this.identity(projectId, owner)), currentModel, availableModels,
+      return { harness: 'codex', sessionId: this.token(this.identity(projectId, owner)),
+        conversationId: JSON.stringify([projectId, before.threadId, before.bindingRevision, before.generation]), currentModel, availableModels,
         status: this.deps.busy(projectId) || owner.broker.state().phase !== 'idle' ? 'busy' : 'ready' }
     } catch (error) {
       if (dispatched) this.deps.fence(projectId)
@@ -130,8 +133,8 @@ export class CodexOwnerControls {
     } finally { gateway.close(); if (request) this.switching.delete(projectId) }
   }
 
-  register(projectId: string, owner: CodexOwnerBootstrap, gateway: ProjectControlGateway, onQuestion: (question: NativeOwnerQuestion) => void) {
-    const active: ActiveTurn = { owner, gateway, facts: this.deps.facts(owner), pending: new Map(), seen: new Set() }
+  register(projectId: string, owner: CodexOwnerBootstrap, gateway: ProjectControlGateway, onQuestion: (question: NativeOwnerQuestion) => void, clientId?: string) {
+    const active: ActiveTurn = { owner, gateway, clientId, facts: this.deps.facts(owner), pending: new Map(), seen: new Set() }
     this.active.set(projectId, active)
     const unsubscribe = gateway.subscribe(message => {
       if (!(typeof message.id === 'string' || typeof message.id === 'number' && Number.isSafeInteger(message.id))) return
@@ -180,7 +183,12 @@ export class CodexOwnerControls {
       // An uncertain reply may have reached native code. Consume before sending,
       // fence on transport failure, and never replay the answer.
       active.pending.delete(action.requestId)
-      try { await active.gateway.reply(action.requestId, result, action.epoch) }
+      try {
+        if ('replyApproval' in owner) {
+          if (!active.clientId) throw new Error('Native approval writer identity missing')
+          await (owner as CodexOwnerAttachment).replyApproval(active.clientId, action.requestId, result, action.epoch)
+        } else await active.gateway.reply(action.requestId, result, action.epoch)
+      }
       catch (error) { this.deps.fence(projectId); throw error }
     }
     return this.state(projectId)

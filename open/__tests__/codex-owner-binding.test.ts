@@ -1,5 +1,5 @@
 import { afterEach, expect, test } from 'bun:test'
-import { appendFileSync, mkdirSync, mkdtempSync, rmSync, writeFileSync } from 'node:fs'
+import { appendFileSync, existsSync, mkdirSync, mkdtempSync, rmSync, writeFileSync } from 'node:fs'
 import { tmpdir } from 'node:os'
 import { join } from 'node:path'
 import { CodexOwnerBindings } from '../wiring/codex-owner-binding.ts'
@@ -20,9 +20,10 @@ const spec = (prompt: string): AgentSpec => ({ prompt, tools: [], model_preferen
 async function collect(handle: SessionHandle) { const events = []; for await (const event of handle.events) events.push(event); return events }
 const line = (type: string, payload: unknown) => JSON.stringify({ type, payload }) + '\n'
 
-function fixture() {
+function fixture(remote = false) {
   const dir = mkdtempSync(join(tmpdir(), 'owner-binding-test-')); dirs.push(dir)
   const facts = new Map<CodexOwnerBinding, CodexOwnerBindingFacts>()
+  const owners = new Map<string, CodexOwnerBootstrap>()
   const calls: { project: string; thread: string; prompt: string }[] = []
   const launched: string[] = []
   const rpc: { client: string; method: string; params: Record<string, unknown>; epoch: number | undefined }[] = []
@@ -34,11 +35,13 @@ function fixture() {
   let failReply = false
   const homes = new Map<string, string>()
   let fail = false
+  let authorized = true
   let wrongReceipt = false
   let approval = false
   let capability = true
   let onPrompt: ((prompt: string) => void) | undefined
   const bindings = new CodexOwnerBindings(async projectId => {
+    if (!authorized) throw new Error('No connected project credential')
     const cwd = join(dir, projectId), codexHome = join(cwd, 'home')
     mkdirSync(codexHome, { recursive: true, mode: 0o700 })
     writeFileSync(join(codexHome, 'project-owner.json'), JSON.stringify(projectId))
@@ -61,16 +64,19 @@ function fixture() {
     let epoch = 0
     let model = 'small'
     let phase: 'idle' | 'turn' = 'idle'
+    let completedRemotely = false
     let listener: ((message: Record<string, unknown>) => void) | undefined
     emitters.set(project, (method, params) => listener?.({ id: 'approval', method, params: { threadId: identity.threadId, turnId: `turn-${count}`, ...params } }))
     const finish = (): void => {
       appendFileSync(identity.rolloutPath, line('event_msg', { type: 'task_complete', turn_id: `turn-${count}`, last_agent_message: `reply-${count}` }))
-      phase = 'idle'
+      if (remote) completedRemotely = true
+      else phase = 'idle'
     }
     finishers.set(project, finish)
     const owner: CodexOwnerBootstrap = { binding, writeTerminal() { throw new Error('Unexpected terminal delivery') }, async close() {},
       broker: { state: () => ({ phase, generation: 1, epoch, activeTurnId: phase === 'turn' ? `turn-${count}` : null, unresolved: null }),
         close() {}, gateway: client => ({ close() {}, reply(id, result, expectedEpoch) {
+          if (remote) throw new Error('Remote approval requires awaited replyApproval')
           replies.push({ client, id, result, epoch: expectedEpoch }); if (failReply) throw new Error('Reply delivery unknown')
         }, subscribe(fn) { listener = fn; return () => { listener = undefined } },
           async request(method, params, expectedEpoch) {
@@ -102,6 +108,15 @@ function fixture() {
         }),
       },
     }
+    if (remote) Object.assign(owner, {
+      async refreshState() { if (completedRemotely) { phase = 'idle'; completedRemotely = false }; return owner.broker.state() },
+      async replyApproval(client: string, id: string | number, result: unknown, expectedEpoch: number) {
+        await Bun.sleep(1)
+        replies.push({ client, id, result, epoch: expectedEpoch })
+        if (failReply) throw new Error('Reply delivery unknown')
+      },
+    })
+    owners.set(options.codexHome, owner)
     return owner
   }, binding => {
     const identity = facts.get(binding)
@@ -113,6 +128,13 @@ function fixture() {
     configuredChat: { env: { NEUTRON_PROJECT_MODELS: '{"project-one":"glm"}' }, fetchImpl: (() => { throw new Error('Unexpected configured API call') }) as unknown as typeof fetch },
   })!
   return { dir, calls, launched, homes, bindings, chat,
+    nativeTurn: async (projectId = 'project-one') => {
+      const owner = owners.get(homes.get(projectId)!)!, identity = facts.get(owner.binding)!
+      return owner.broker.gateway('terminal-native').request('turn/start', { threadId: identity.threadId, input: [{ text: 'terminal input' }] }, owner.broker.state().epoch)
+    },
+    authorize: (value: boolean) => { authorized = value },
+    restart: () => new CodexOwnerBindings(async projectId => ({ cwd: join(dir, projectId), codexHome: homes.get(projectId)!, env: {} }),
+      async options => owners.get(options.codexHome)!, binding => facts.get(binding)!),
     rpc, replies, hold: (value: boolean) => { held = value }, finish: (project = 'project-one') => finishers.get(project)!(),
     question: (method: string, params: Record<string, unknown>, project = 'project-one') => emitters.get(project)!(method, params),
     wrongModel: () => { wrongModel = true },
@@ -121,6 +143,57 @@ function fixture() {
     noCapability: () => { capability = false },
     onPrompt: (fn: (prompt: string) => void) => { onPrompt = fn } }
 }
+
+test('cold boot without credentials does not fence a later connected native owner', async () => {
+  const f = fixture(true)
+  f.authorize(false)
+  await f.bindings.reconcile(['project-one'])
+  expect(f.launched).toHaveLength(0)
+  f.authorize(true)
+  expect((await collect(f.bindings.start('project-one', spec('first authorized turn')))).at(-1)?.kind).toBe('completion')
+  expect(f.launched).toEqual(['project-one'])
+})
+
+test('an actual uncertain owner journal at boot stays fenced before any later launch', async () => {
+  const f = fixture(true)
+  const home = join(f.dir, 'project-one', 'home')
+  mkdirSync(home, { recursive: true, mode: 0o700 })
+  writeFileSync(join(home, '.neutron-owner-launch.json'), '{}', { mode: 0o600 })
+  f.fail()
+  await f.bindings.reconcile(['project-one'])
+  expect(f.launched).toHaveLength(1)
+  expect((await collect(f.bindings.start('project-one', spec('must refuse')))).at(-1)?.kind).toBe('error')
+  expect(f.launched).toHaveLength(1)
+  expect(f.calls).toHaveLength(0)
+})
+
+test('remote completion refreshes terminal state before releasing and clearing the durable work marker', async () => {
+  const f = fixture(true)
+  for (const prompt of ['one', 'two']) {
+    expect((await collect(f.bindings.start('project-one', spec(prompt)))).at(-1)?.kind).toBe('completion')
+    expect(existsSync(join(f.homes.get('project-one')!, '.neutron-owner-work.json'))).toBe(false)
+  }
+  expect(f.launched).toEqual(['project-one'])
+  await f.bindings.close()
+})
+
+test('remote owner approval awaits the retained helper writer rather than the synchronous gateway shim', async () => {
+  const f = fixture(true)
+  f.hold(true)
+  const events = collect(f.bindings.start('project-one', spec('approval')))
+  while (!f.calls.length) await Bun.sleep(1)
+  f.question('item/commandExecution/requestApproval', { availableDecisions: ['accept'] })
+  const before = await f.bindings.controls.state('project-one')
+  expect(before.pending).toHaveLength(1)
+  await f.bindings.controls.act('project-one', { ...before, turnId: before.turnId!, action: 'reply', requestId: 'approval', result: { decision: 'accept' } })
+  expect(f.replies).toHaveLength(1)
+  expect(f.replies[0]?.client).toBe(f.rpc.find(call => call.method === 'turn/start')?.client)
+  await expect(f.bindings.controls.act('project-one', { ...before, turnId: before.turnId!, action: 'reply', requestId: 'approval', result: { decision: 'accept' } })).rejects.toThrow()
+  f.finish()
+  expect((await events).at(-1)?.kind).toBe('completion')
+  expect(existsSync(join(f.homes.get('project-one')!, '.neutron-owner-work.json'))).toBe(false)
+  await f.bindings.close()
+})
 
 test('two owner turns, build dispatch and another turn share one native owner; second project is isolated', async () => {
   const f = fixture()
@@ -177,7 +250,7 @@ test('missing child trailer fences later chat even when the native parent comple
 
 test.each(['valid', 'invalid-payload', 'malformed-envelope'] as const)('host-decoded child %s controls later chat and distinct-step dispatch', async result => {
   const valid = result === 'valid'
-  const f = fixture()
+  const f = fixture(true)
   await collect(f.bindings.start('project-one', spec('hello')))
   const cwd = join(f.dir, 'project-one')
   const request: BoundedWorkRequest = { run_id: 'run', step_id: 'first', role: 'build', model_id: 'gpt-5.5', effort: null,
@@ -198,10 +271,16 @@ test.each(['valid', 'invalid-payload', 'malformed-envelope'] as const)('host-dec
     expect((await worker.run({ ...request, step_id: 'second', result: { ...request.result, path: join(cwd, 'second.json') } }, 'in-repl', new AbortController().signal)).kind).not.toBe('completed')
     expect(f.calls).toHaveLength(2)
   }
+  await f.bindings.close()
+  const restarted = f.restart()
+  expect((await collect(restarted.start('project-one', spec('after gateway restart')))).at(-1)?.kind).toBe(valid ? 'completion' : 'error')
+  expect(f.calls).toHaveLength(valid ? 4 : 2)
+  expect(f.launched).toHaveLength(1)
+  await restarted.close()
 })
 
 test('chat cannot interleave while a completed native parent awaits its child result', async () => {
-  const f = fixture()
+  const f = fixture(true)
   await collect(f.bindings.start('project-one', spec('hello')))
   const cwd = join(f.dir, 'project-one')
   const request: BoundedWorkRequest = { run_id: 'run', step_id: 'pending', role: 'build', model_id: 'gpt-5.5', effort: null,
@@ -213,11 +292,68 @@ test('chat cannot interleave while a completed native parent awaits its child re
   })
   for (let attempt = 0; f.calls.length < 2 && attempt < 100; attempt++) await Bun.sleep(1)
   expect(f.calls).toHaveLength(2)
+  // Wait for the actual parent lease release, not merely its dispatch receipt.
+  while ((await f.bindings.controls.state('project-one')).status !== 'idle') await Bun.sleep(1)
+  expect(existsSync(join(f.homes.get('project-one')!, '.neutron-owner-work.json'))).toBe(true)
+  const restartWhileChildPending = f.restart()
+  expect((await collect(restartWhileChildPending.start('project-one', spec('must not replay pending child')))).at(-1)?.kind).toBe('error')
+  await restartWhileChildPending.close()
   expect((await collect(f.bindings.start('project-one', spec('must wait')))).at(-1)).toMatchObject({ kind: 'error', message: 'Codex owner build result is still pending' })
   expect(f.calls).toHaveLength(2)
   writeFileSync(request.result.path, JSON.stringify({ schema: 'fixture', run_id: 'run', step_id: 'pending', kind: 'completed', result: {} }))
   expect(await pending).toEqual({ kind: 'turn-ended' })
   expect((await collect(f.bindings.start('project-one', spec('now ready')))).at(-1)?.kind).toBe('completion')
+  const after = f.restart()
+  expect((await collect(after.start('project-one', spec('restart after completed child')))).at(-1)?.kind).toBe('completion')
+  expect(f.launched).toHaveLength(1)
+  await after.close()
+})
+
+test('remote outer decoder pending keeps the durable marker after native parent and child finish', async () => {
+  const f = fixture(true)
+  await collect(f.bindings.start('project-one', spec('hello')))
+  const cwd = join(f.dir, 'project-one')
+  const request: BoundedWorkRequest = { run_id: 'run', step_id: 'pending-decoder', role: 'build', model_id: 'gpt-5.5', effort: null,
+    cwd, writable: true, network: true, tools: 'edit-and-run', brief: { path: join(cwd, 'brief'), integrity: 'fixture' },
+    result: { path: join(cwd, 'result.json'), schema: 'fixture' }, thread: null, budget: { wall_ms: 2000 }, needs_approval_decision: false }
+  f.onPrompt(() => writeFileSync(request.result.path, JSON.stringify({ schema: 'fixture', run_id: 'run', step_id: request.step_id, kind: 'completed', result: { accepted: true } })))
+  const runners = await createProjectRunners({ conversation: { project_id: 'project-one', topic_id: 'topic', provider: 'openai-codex', spec: spec('') },
+    run_id: 'run', state_dir: cwd, actingTurn: f.bindings.actingTurn('project-one', 'topic', cwd, [cwd]),
+    trailer: { schemas: new Map([['fixture', () => true]]), metadata: () => undefined }, headless: {} })
+  let release!: () => void, decoding = false
+  const barrier = new Promise<void>(resolve => { release = resolve })
+  const worker = f.bindings.guardBuildRunner('project-one', { ...runners.inRepl!, async run(...args) {
+    const outcome = await runners.inRepl!.run(...args)
+    decoding = true
+    await barrier
+    return outcome
+  } })
+  const result = worker.run(request, 'in-repl', new AbortController().signal)
+  while (!decoding) await Bun.sleep(1)
+  expect((await f.bindings.controls.state('project-one')).status).toBe('idle')
+  expect(existsSync(join(f.homes.get('project-one')!, '.neutron-owner-work.json'))).toBe(true)
+  const restarted = f.restart()
+  expect((await collect(restarted.start('project-one', spec('must not replay before host acceptance')))).at(-1)?.kind).toBe('error')
+  expect(f.calls).toHaveLength(2)
+  release()
+  expect((await result).kind).toBe('completed')
+  expect(existsSync(join(f.homes.get('project-one')!, '.neutron-owner-work.json'))).toBe(false)
+  const after = f.restart()
+  expect((await collect(after.start('project-one', spec('host accepted')))).at(-1)?.kind).toBe('completion')
+  expect(f.launched).toHaveLength(1)
+  await restarted.close(); await after.close(); await f.bindings.close()
+})
+
+test('marker-free native terminal turn still refuses restart adoption while active', async () => {
+  const f = fixture(true)
+  await collect(f.bindings.start('project-one', spec('hello')))
+  f.hold(true)
+  await f.nativeTurn()
+  expect(existsSync(join(f.homes.get('project-one')!, '.neutron-owner-work.json'))).toBe(false)
+  const restarted = f.restart()
+  expect((await collect(restarted.start('project-one', spec('must not interrupt terminal')))).at(-1)).toMatchObject({ kind: 'error', message: 'Codex surviving turn requires native reconciliation' })
+  expect(f.calls).toHaveLength(2)
+  await restarted.close(); await f.bindings.close()
 })
 
 test.each(['wrongReceipt', 'foreignApproval'] as const)('%s quarantines the shared binding for chat and build', async mode => {
@@ -282,11 +418,13 @@ test('native model API authenticates, lists all native pages, switches both dire
   let state = await (await api('model')).json() as ReplModelState
   expect(state).toMatchObject({ harness: 'codex', currentModel: 'small', status: 'ready', availableModels: [{ id: 'small', label: 'Small' }, { id: 'large', label: 'Large' }] })
   const old = state.sessionId
+  const conversation = state.conversationId
   expect((await api('model', { model: 'invented', sessionId: old })).status).toBe(400)
   expect(f.rpc.filter(call => call.method === 'thread/settings/update')).toHaveLength(0)
   const up = await api('model', { model: 'large', sessionId: old })
   expect(up.status).toBe(200); state = await up.json() as ReplModelState
   expect(state.currentModel).toBe('large'); expect(state.sessionId).not.toBe(old)
+  expect(state.conversationId).toBe(conversation)
   expect((await api('model', { model: 'small', sessionId: old })).status).toBe(409)
   await collect(f.bindings.start('project-one', spec('use larger model')))
   expect(f.rpc.findLast(call => call.method === 'turn/start')?.params.model).toBe('large')

@@ -78,6 +78,35 @@ async function press(id: string) {
 }
 
 describe('conversation REPL model on phone', () => {
+  it('accepts a new conditional revision on the same native conversation and uses it next time', async () => {
+    getBody = { ...states.cheap, sessionId: 'revision-1', conversationId: 'native-thread-one' };
+    postBody = { ...states.frontier, sessionId: 'revision-2', conversationId: 'native-thread-one' };
+    const screen = await mount();
+    await press('repl-model-open');
+    await press('repl-model-option-frontier');
+    expect(document.querySelector('[data-testid="repl-model-error"]')).toBeNull();
+    expect(document.querySelector('[data-testid="repl-model-open"]')?.textContent).toContain('frontier');
+    postBody = { ...states.cheap, sessionId: 'revision-3', conversationId: 'native-thread-one' };
+    await press('repl-model-open');
+    await press('repl-model-option-cheap');
+    expect(calls.filter(call => call.method === 'POST').map(call => call.body)).toEqual([
+      { model: 'frontier', sessionId: 'revision-1' }, { model: 'cheap', sessionId: 'revision-2' },
+    ]);
+    expect(document.querySelector('[data-testid="repl-model-error"]')).toBeNull();
+    screen.unmount();
+  });
+
+  it('refuses a different native conversation even when the selected model is confirmed', async () => {
+    getBody = { ...states.cheap, sessionId: 'revision-1', conversationId: 'native-thread-one' };
+    postBody = { ...states.frontier, sessionId: 'revision-2', conversationId: 'native-thread-two' };
+    const screen = await mount();
+    await press('repl-model-open');
+    await press('repl-model-option-frontier');
+    expect(document.querySelector('[data-testid="repl-model-error"]')?.textContent).toContain('conversation changed');
+    expect(document.querySelector('[data-testid="repl-model-open"]')?.textContent).toContain('cheap');
+    screen.unmount();
+  });
+
   it('renders authoritative current/list and switches in the same session', async () => {
     const screen = await mount();
     expect(calls[0]).toMatchObject({ url: 'https://example.test/api/app/projects/willow/repl-model',

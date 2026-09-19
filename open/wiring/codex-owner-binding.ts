@@ -1,6 +1,7 @@
-import { readFileSync, realpathSync } from 'node:fs'
+import { existsSync, readFileSync, realpathSync, unlinkSync, writeFileSync } from 'node:fs'
 import { join, relative, sep } from 'node:path'
-import { bootstrapCodexOwner, readCodexOwnerBinding, type CodexOwnerBootstrap } from '@neutronai/runtime/adapters/codex-cli/persistent/project-control-bootstrap.ts'
+import { readCodexOwnerBinding, type CodexOwnerBootstrap, type CodexOwnerAttachment } from '@neutronai/runtime/adapters/codex-cli/persistent/project-control-bootstrap.ts'
+import { openDurableCodexOwner, type OwnerLaunch } from './codex-durable-owner.ts'
 import { createCodexConversationalSubstrate, type CodexConversationHost } from '@neutronai/runtime/adapters/codex-cli/persistent/conversational-substrate.ts'
 import { createCodexActingTurn, type CodexActingSession } from '@neutronai/runtime/workers/codex-acting-turn.ts'
 import type { ProjectActingTurn } from '@neutronai/runtime/workers/project-runners.ts'
@@ -18,9 +19,14 @@ export interface CodexOwnerProject {
   env: NodeJS.ProcessEnv
 }
 
+async function refreshOwner(owner: CodexOwnerBootstrap): Promise<void> {
+  const remote = owner as Partial<CodexOwnerAttachment>
+  if (remote.refreshState) await remote.refreshState()
+}
+
 /** One host-owned authority per full project id, shared by chat and builds.
  * Failed opening and uncertain delivery remain fenced for this host's lifetime.
- * The frozen factory refuses existing journals: this draft cannot recover owners.
+ * Production attaches only to an independently hosted durable native owner.
  */
 export class CodexOwnerBindings {
   private readonly owners = new Map<string, Promise<{ owner: CodexOwnerBootstrap; project: CodexOwnerProject }>>()
@@ -33,6 +39,7 @@ export class CodexOwnerBindings {
   }>()
   private closed = false
   private readonly ownerProjects = new WeakMap<CodexOwnerBootstrap, string>()
+  private readonly resolvedOwners = new Map<string, CodexOwnerBootstrap>()
   private readonly questionSinks = new Map<string, (question: NativeOwnerQuestion) => void>()
   onOwnerQuestion?: (projectId: string, question: NativeOwnerQuestion) => Promise<void>
   readonly controls = new CodexOwnerControls({
@@ -53,27 +60,30 @@ export class CodexOwnerBindings {
     },
     busy: projectId => this.busy.has(projectId) || !!this.builds.get(projectId)?.input || this.decodingBuilds.has(projectId),
     refused: projectId => this.closed || this.refused.has(projectId),
-    fence: projectId => { this.refused.add(projectId) },
+    fence: projectId => { this.fence(projectId) },
   })
   readonly host: CodexConversationHost = {
     acquireTurn: async (options, signal) => {
       signal.throwIfAborted()
       const { owner, project } = await this.resolve(options.projectId)
+      await refreshOwner(owner)
       signal.throwIfAborted()
       if (realpathSync(options.cwd) !== project.cwd) throw new Error('Codex owner project directory changed')
       if (this.refused.has(options.projectId)) throw new Error('Codex owner requires native reconciliation')
       if (this.busy.has(options.projectId) || this.controls.isSwitching(options.projectId) || owner.broker.state().phase !== 'idle') throw new Error('Codex owner is busy or requires recovery')
       const facts = this.readBinding(owner.binding)
-      const gateway = owner.broker.gateway(`owner-turn-${++this.sequence}`)
+      const clientId = `owner-turn-${++this.sequence}`
+      const gateway = owner.broker.gateway(clientId)
       this.busy.add(options.projectId)
+      this.beginWork(owner)
       let released = false
       let submitted = false
       let turnId: string | undefined
       const control = this.controls.register(options.projectId, owner, gateway, question => {
         this.questionSinks.get(options.projectId)?.(question)
         if (this.onOwnerQuestion) fireAndForget('codex-owner.question', Promise.resolve().then(() => this.onOwnerQuestion!(options.projectId, question)),
-          () => { this.refused.add(options.projectId) })
-      })
+          () => { this.fence(options.projectId) })
+      }, clientId)
       const current = (): boolean => {
         try {
           if (JSON.parse(readFileSync(join(project.codexHome, 'project-owner.json'), 'utf8')) !== options.projectId) return false
@@ -112,8 +122,12 @@ export class CodexOwnerBindings {
         release: async outcome => {
           if (released) return
           released = true
-          if (outcome !== 'completed' || owner.broker.state().phase !== 'idle') this.refused.add(options.projectId)
-          control.close(); gateway.close(); this.busy.delete(options.projectId)
+          try {
+            await refreshOwner(owner)
+            if (outcome !== 'completed' || owner.broker.state().phase !== 'idle') this.refused.add(options.projectId)
+          } catch (error) { this.refused.add(options.projectId); throw error }
+          finally { control.close(); gateway.close(); this.busy.delete(options.projectId) }
+          if (!this.builds.get(options.projectId)?.input && !this.decodingBuilds.has(options.projectId)) this.finishWork(options.projectId, owner)
         },
       }
     },
@@ -121,11 +135,12 @@ export class CodexOwnerBindings {
   private sequence = 0
 
   constructor(private readonly project: (projectId: string) => Promise<CodexOwnerProject>,
-    private readonly bootstrap: typeof bootstrapCodexOwner = bootstrapCodexOwner,
+    private readonly bootstrap: (options: OwnerLaunch) => Promise<CodexOwnerBootstrap> = openDurableCodexOwner,
     private readonly readBinding: typeof readCodexOwnerBinding = readCodexOwnerBinding) {}
 
   private resolve(projectId: string): Promise<{ owner: CodexOwnerBootstrap; project: CodexOwnerProject }> {
     if (this.closed) return Promise.reject(new Error('Codex owner host is closed'))
+    if (this.refused.has(projectId)) return Promise.reject(new Error('Codex owner requires native reconciliation'))
     if (!/^[A-Za-z0-9_.-]{1,128}$/.test(projectId)) return Promise.reject(new Error('Codex owner requires a full project id'))
     let pending = this.owners.get(projectId)
     if (!pending) {
@@ -140,10 +155,15 @@ export class CodexOwnerBindings {
           if (value !== undefined && !CODEX_CLI_AUTH_ENV_VARS.includes(key)) env[key] = value
         }
         env.CODEX_HOME = project.codexHome
-        const owner = await this.bootstrap({ binary: 'codex', socketPath: join(project.codexHome, 'owner.sock'),
+        const owner = await this.bootstrap({ projectId, binary: 'codex', socketPath: join(project.codexHome, 'owner.sock'),
           cwd: project.cwd, codexHome: project.codexHome, env })
         try {
           const facts = this.readBinding(owner.binding)
+          if (existsSync(join(project.codexHome, '.neutron-owner-work.json'))) throw new Error('Codex interrupted host work requires native reconciliation')
+          await refreshOwner(owner)
+          // Active work after restart has no reconstructed host consumer. Never
+          // replay a prompt or approval, and never create a replacement owner.
+          if (owner.broker.state().phase !== 'idle') throw new Error('Codex surviving turn requires native reconciliation')
           if (this.closed || facts.cwd !== project.cwd || facts.codexHome !== project.codexHome) {
             throw new Error('Codex factory returned a foreign or closed project binding')
           }
@@ -152,6 +172,7 @@ export class CodexOwnerBindings {
           throw error
         }
         this.ownerProjects.set(owner, projectId)
+        this.resolvedOwners.set(projectId, owner)
         return { owner, project }
       })()
       this.owners.set(projectId, pending)
@@ -164,6 +185,38 @@ export class CodexOwnerBindings {
     await Promise.allSettled([...this.owners.values()].map(async pending => { await (await pending).owner.close() }))
   }
 
+  /** Boot recovery never creates cold owners. Missing journals remain lazy. */
+  async reconcile(projectIds: readonly string[]): Promise<void> {
+    for (const projectId of projectIds) {
+      let project: CodexOwnerProject
+      try { project = await this.project(projectId) }
+      catch { continue } // No authorized home is not evidence of an uncertain owner.
+      if (!existsSync(join(project.codexHome, '.neutron-owner-launch.json'))) continue
+      try { await this.resolve(projectId) }
+      catch { this.refused.add(projectId) }
+    }
+  }
+
+  private beginWork(owner: CodexOwnerBootstrap): void {
+    if (!('refreshState' in owner)) return
+    const facts = this.readBinding(owner.binding)
+    const path = join(facts.codexHome, '.neutron-owner-work.json')
+    if (!existsSync(path)) writeFileSync(path, JSON.stringify({ threadId: facts.threadId, bindingRevision: facts.bindingRevision }), { flag: 'wx', mode: 0o600 })
+  }
+
+  private finishWork(projectId: string, owner: CodexOwnerBootstrap): void {
+    if (!('refreshState' in owner) || this.refused.has(projectId)) return
+    const path = join(this.readBinding(owner.binding).codexHome, '.neutron-owner-work.json')
+    if (existsSync(path)) unlinkSync(path)
+  }
+
+  private fence(projectId: string): void {
+    this.refused.add(projectId)
+    // Capture failures in owner controls as well as active build/chat leases.
+    const owner = this.resolvedOwners.get(projectId)
+    if (owner) this.beginWork(owner)
+  }
+
   /** The host schema decoder runs after the acting bridge. Its uncertainty
    * must fence this same owner even when native parent/envelope checks passed. */
   guardBuildRunner(projectId: string, worker: WorkerRunner): WorkerRunner {
@@ -172,7 +225,8 @@ export class CodexOwnerBindings {
       this.decodingBuilds.add(projectId)
       try {
         const outcome = await worker.run(request, placement, signal)
-        if (outcome.kind === 'unknown' || outcome.kind === 'failed') this.refused.add(projectId)
+        if (outcome.kind === 'unknown' || outcome.kind === 'failed') this.fence(projectId)
+        else { const entry = await this.owners.get(projectId); if (entry) this.finishWork(projectId, entry.owner) }
         return outcome
       } catch (error) {
         this.refused.add(projectId)
@@ -277,12 +331,14 @@ export class CodexOwnerBindings {
       }
       if (build.input) return { kind: 'unknown', detail: 'Codex owner build dispatch is already awaiting its child trailer' }
       build.input = turn
+      this.beginWork(owner)
       try {
         const outcome = await createCodexActingTurn({ project_id: projectId, topic_id: topicId, thread_id: facts.threadId, cwd: project.cwd,
           grants: { tools: 'edit-and-run', writable: true, network: true, roots }, session: build.session })(turn)
         // A native parent can finish while its child remains unresolved. Fence
         // chat as well as subsequent builds until the host reconciles that child.
         if (outcome.kind !== 'turn-ended') this.refused.add(projectId)
+        else if (!this.decodingBuilds.has(projectId)) this.finishWork(projectId, owner)
         return outcome
       } catch (error) {
         this.refused.add(projectId)

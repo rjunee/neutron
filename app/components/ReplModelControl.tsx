@@ -61,7 +61,8 @@ export function ReplModelControl({ projectId, baseUrl, token }: {
       const next = await client.switch(projectId, model, state.sessionId);
       if (!current()) return;
       // A successful HTTP response is not permission to show a guessed model.
-      if (next.sessionId !== state.sessionId) {
+      if (next.harness !== state.harness ||
+        (next.conversationId ?? next.sessionId) !== (state.conversationId ?? state.sessionId)) {
         throw new Error('The conversation changed while switching models. Refresh and try again.');
       }
       if (next.currentModel !== model) {
