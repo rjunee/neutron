@@ -136,6 +136,41 @@ describe('web REPL model switch', () => {
     host.remove()
   })
 
+  it('renders the empty-session Codex unsupported HTTP state as unsupported', async () => {
+    const { createRoot } = await import('react-dom/client')
+    const { act } = await import('react')
+    const { ReplModelControl } = await import('../ReplModelControl.tsx')
+    const fetchImpl = async (): Promise<Response> => json({
+      harness: 'codex', sessionId: '', currentModel: null,
+      availableModels: [], status: 'unsupported',
+    })
+    const host = document.createElement('div')
+    document.body.appendChild(host)
+    const root = createRoot(host)
+    await act(async () => { root.render(<ReplModelControl projectId="a" origin="https://test.example" token="secret" fetchImpl={fetchImpl} />); await tick() })
+    const select = host.querySelector('select') as HTMLSelectElement
+    expect(select.disabled).toBe(true)
+    expect(select.selectedOptions[0]?.textContent).toBe('Unsupported')
+    expect(host.querySelector('[role="alert"]')).toBeNull()
+    await act(async () => { root.unmount() })
+    host.remove()
+  })
+
+  it('refuses an empty session on a switchable ready response', async () => {
+    const { createRoot } = await import('react-dom/client')
+    const { act } = await import('react')
+    const { ReplModelControl } = await import('../ReplModelControl.tsx')
+    const fetchImpl = async (): Promise<Response> => json({ ...state('cheap'), sessionId: '' })
+    const host = document.createElement('div')
+    document.body.appendChild(host)
+    const root = createRoot(host)
+    await act(async () => { root.render(<ReplModelControl projectId="a" origin="https://test.example" token="secret" fetchImpl={fetchImpl} />); await tick() })
+    expect((host.querySelector('select') as HTMLSelectElement).disabled).toBe(true)
+    expect(host.querySelector('[role="alert"]')?.textContent).toBe('Invalid model response')
+    await act(async () => { root.unmount() })
+    host.remove()
+  })
+
   it('refreshes a busy reading to ready in the mounted control', async () => {
     const { createRoot } = await import('react-dom/client')
     const { act } = await import('react')

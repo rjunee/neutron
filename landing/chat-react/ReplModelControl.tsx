@@ -99,7 +99,7 @@ export function ReplModelControl({ projectId, origin, token, fetchImpl }: {
         onChange={(event) => { void change(event.target.value) }}
         style={{ maxWidth: '100%', background: 'var(--surface)', color: 'var(--fg)', border: '1px solid var(--border)', borderRadius: 6 }}
       >
-        {!currentListed && <option value={current}>{current || (state === null ? error === null ? 'Loading…' : 'Unavailable' : 'Unknown model')}</option>}
+        {!currentListed && <option value={current}>{current || (state === null ? error === null ? 'Loading…' : 'Unavailable' : state.status === 'unsupported' ? 'Unsupported' : 'Unknown model')}</option>}
         {state?.availableModels.map((option) => <option key={option.id} value={option.id}>{option.label}</option>)}
       </select>
       {switching && <span role="status">Switching model…</span>}

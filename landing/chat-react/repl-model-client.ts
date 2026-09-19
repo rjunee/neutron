@@ -22,7 +22,8 @@ function decodeState(raw: unknown): ReplModelState {
   const r = raw as Record<string, unknown>
   if (
     (r['harness'] !== 'claude-code' && r['harness'] !== 'codex') ||
-    typeof r['sessionId'] !== 'string' || !r['sessionId'] ||
+    typeof r['sessionId'] !== 'string' ||
+    (!r['sessionId'] && (r['status'] === 'ready' || r['status'] === 'busy')) ||
     (r['currentModel'] !== null && typeof r['currentModel'] !== 'string') ||
     !Array.isArray(r['availableModels']) ||
     !r['availableModels'].every((v: unknown) => typeof v === 'object' && v !== null &&
