@@ -273,8 +273,10 @@ export const TRIDENT_PHASES: ReadonlyArray<TridentPhase> = Object.freeze([
     description: 'Merges every reviewer’s verdict into one, and decides what blocks a merge.',
     labels: [{ label: 'argus:synthesis' }],
     default: { tier: 'fable', effort: 'high' },
-    dispatchGroups: ['claude'],
-    dispatchConstraint: 'This step stays on Claude until the structured synthesis schema has a CLI arbitration wrapper.',
+    // The project runner validates the registered verdict schema. A Codex-owned
+    // conversation additionally requires the isolated native review lease;
+    // model selection alone never grants writable synthesis authority.
+    dispatchGroups: ['claude', 'codex'],
   },
   {
     key: 'bookkeeping',

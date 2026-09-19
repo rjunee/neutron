@@ -1,7 +1,8 @@
-import { existsSync, readFileSync, realpathSync, unlinkSync, writeFileSync } from 'node:fs'
-import { join, relative, sep } from 'node:path'
+import { existsSync, lstatSync, readFileSync, realpathSync, unlinkSync, writeFileSync } from 'node:fs'
+import { dirname, join, relative, sep } from 'node:path'
+import { createHash } from 'node:crypto'
 import { setTimeout as delay } from 'node:timers/promises'
-import { readCodexOwnerBinding, type CodexOwnerBootstrap, type CodexOwnerAttachment } from '@neutronai/runtime/adapters/codex-cli/persistent/project-control-bootstrap.ts'
+import { readCodexOwnerBinding, type CodexOwnerBootstrap, type CodexOwnerAttachment, type CodexOwnerBindingFacts } from '@neutronai/runtime/adapters/codex-cli/persistent/project-control-bootstrap.ts'
 import { openDurableCodexOwner, type OwnerLaunch } from './codex-durable-owner.ts'
 import { createCodexConversationalSubstrate, type CodexConversationHost } from '@neutronai/runtime/adapters/codex-cli/persistent/conversational-substrate.ts'
 import { createCodexActingTurn, type CodexActingSession } from '@neutronai/runtime/workers/codex-acting-turn.ts'
@@ -13,6 +14,9 @@ import { CODEX_CLI_AUTH_ENV_VARS } from '@neutronai/runtime/adapters/codex-cli/a
 import { CodexOwnerControls, type NativeOwnerQuestion } from './codex-owner-controls.ts'
 import type { Event } from '@neutronai/runtime/events.ts'
 import { fireAndForget } from '@neutronai/logger/fire-and-forget.ts'
+import type { ReviewPermissionLease } from '@neutronai/runtime/adapters/codex-cli/persistent/project-review-permissions.ts'
+import { ReviewPermissionBusy } from '@neutronai/runtime/adapters/codex-cli/persistent/project-control-broker.ts'
+import { CodexRolloutObserver } from '@neutronai/runtime/adapters/codex-cli/persistent/rollout-observer.ts'
 
 export interface CodexOwnerProject {
   cwd: string
@@ -34,6 +38,10 @@ export class CodexOwnerBindings {
   private readonly busy = new Set<string>()
   private readonly refused = new Set<string>()
   private readonly decodingBuilds = new Set<string>()
+  private readonly reviewReady = new Set<string>()
+  private readonly reviews = new Map<string, ReviewPermissionLease>()
+  private readonly reviewQueue = new Map<string, Promise<void>>()
+  private readonly cleanReviewRefusals = new Set<string>()
   private readonly buildObservations = new Map<string, { attempted: boolean; terminal: boolean; closed: boolean }>()
   private readonly nativeDispatches = new Map<string, number>()
   private readonly conversationHosts = new Map<string, CodexConversationHost>()
@@ -43,6 +51,7 @@ export class CodexOwnerBindings {
   }>()
   private closed = false
   private readonly ownerProjects = new WeakMap<CodexOwnerBootstrap, string>()
+  private readonly ownerFacts = new WeakMap<CodexOwnerBootstrap, CodexOwnerBindingFacts>()
   private readonly resolvedOwners = new Map<string, CodexOwnerBootstrap>()
   private readonly questionSinks = new Map<string, (question: NativeOwnerQuestion) => void>()
   onOwnerQuestion?: (projectId: string, question: NativeOwnerQuestion) => Promise<void>
@@ -110,15 +119,41 @@ export class CodexOwnerBindings {
           signal.throwIfAborted()
           if (!current() || owner.broker.state().epoch !== epoch) throw new Error('Codex native model selection changed before dispatch')
           if (observation?.closed) throw new Error('Codex build preflight is no longer current')
+          const priorAttempt = observation?.attempted ?? false
           this.beginWork(owner)
           deliveryAttempted = true
           if (observation) observation.attempted = true
-          this.nativeDispatches.set(options.projectId, (this.nativeDispatches.get(options.projectId) ?? 0) + 1)
-          const response = await gateway.request('turn/start', {
-            threadId: facts.threadId, model, input: [{ type: 'text', text: prompt }],
-            cwd: project.cwd, approvalPolicy: 'on-request',
-            sandboxPolicy: { type: 'workspaceWrite', writableRoots: [project.cwd], networkAccess: true },
-          }, epoch) as { turn?: { id?: unknown } }
+          const bounded = this.builds.get(options.projectId)?.input
+          const restricted = bounded && (bounded.request.role === 'review' || bounded.request.role === 'synthesis')
+          let response: { turn?: { id?: unknown } }
+          if (restricted) {
+            const prepare = owner.broker.reviewPermissions
+            if (!prepare || !this.reviewReady.has(options.projectId)) throw new Error('Native restricted review capability unavailable')
+            let lease: ReviewPermissionLease
+            try { lease = await prepare({ stageDir: dirname(bounded.request.result.path), network: bounded.request.network }, epoch) }
+            catch (error) {
+              if (error instanceof ReviewPermissionBusy) {
+                deliveryAttempted = false
+                if (observation) observation.attempted = priorAttempt
+                this.finishWork(options.projectId, owner)
+                this.cleanReviewRefusals.add(options.projectId)
+              }
+              throw error
+            }
+            this.reviews.set(options.projectId, lease)
+            signal.throwIfAborted()
+            if (observation?.closed) throw new Error('Restricted review admission expired')
+            this.nativeDispatches.set(options.projectId, (this.nativeDispatches.get(options.projectId) ?? 0) + 1)
+            const receipt = await lease.start([{ type: 'text', text: prompt }])
+            response = { turn: { id: receipt.turnId } }
+          } else {
+            this.nativeDispatches.set(options.projectId, (this.nativeDispatches.get(options.projectId) ?? 0) + 1)
+            response = await gateway.request('turn/start', {
+              threadId: facts.threadId, model, input: [{ type: 'text', text: prompt }],
+              cwd: project.cwd, approvalPolicy: 'on-request',
+              sandboxPolicy: { type: 'workspaceWrite', writableRoots: [project.cwd], networkAccess: true },
+            }, epoch) as { turn?: { id?: unknown } }
+          }
           if (typeof response.turn?.id !== 'string' || !response.turn.id) throw new Error('Codex native turn receipt missing')
           turnId = response.turn.id
           control.receipt(turnId)
@@ -144,8 +179,8 @@ export class CodexOwnerBindings {
               await Bun.sleep(25)
               await refreshOwner(owner)
             }
-            if (deliveryAttempted && (outcome !== 'completed' || owner.broker.state().phase !== 'idle')) this.refused.add(options.projectId)
-          } catch (error) { if (deliveryAttempted) this.refused.add(options.projectId); throw error }
+            if (deliveryAttempted && (outcome !== 'completed' || !this.reviews.has(options.projectId) && owner.broker.state().phase !== 'idle')) this.fence(options.projectId)
+          } catch (error) { if (deliveryAttempted) this.fence(options.projectId); throw error }
           finally { control.close(); gateway.close(); this.busy.delete(options.projectId) }
           if (!deliveryAttempted && !this.refused.has(options.projectId) && owner.broker.state().phase === 'idle') {
             this.readBinding(owner.binding)
@@ -196,6 +231,7 @@ export class CodexOwnerBindings {
           if (this.closed || facts.cwd !== project.cwd || facts.codexHome !== project.codexHome) {
             throw new Error('Codex factory returned a foreign or closed project binding')
           }
+          this.ownerFacts.set(owner, facts)
         } catch (error) {
           await owner.close()
           throw error
@@ -233,7 +269,9 @@ export class CodexOwnerBindings {
 
   private beginWork(owner: CodexOwnerBootstrap): void {
     if (!('refreshState' in owner)) return
-    const facts = this.readBinding(owner.binding)
+    // Quarantine must remain durable even when a lost helper response closes its
+    // live attestation. This is the already-attested home, never a new authority.
+    const facts = this.ownerFacts.get(owner) ?? this.readBinding(owner.binding)
     const path = join(facts.codexHome, '.neutron-owner-work.json')
     if (!existsSync(path)) writeFileSync(path, JSON.stringify({ threadId: facts.threadId, bindingRevision: facts.bindingRevision }), { flag: 'wx', mode: 0o600 })
   }
@@ -246,6 +284,7 @@ export class CodexOwnerBindings {
 
   private fence(projectId: string): void {
     this.refused.add(projectId)
+    this.reviews.get(projectId)?.abandon()
     // Capture failures in owner controls as well as active build/chat leases.
     const owner = this.resolvedOwners.get(projectId)
     if (owner) this.beginWork(owner)
@@ -254,10 +293,11 @@ export class CodexOwnerBindings {
   /** The host schema decoder runs after the acting bridge. Its uncertainty
    * must fence this same owner even when native parent/envelope checks passed. */
   guardBuildRunner(projectId: string, worker: WorkerRunner): WorkerRunner {
-    const supports: WorkerRunner['supports'] = (role, placement) => role === 'review' || role === 'synthesis'
+    const supports: WorkerRunner['supports'] = (role, placement) => (role === 'review' || role === 'synthesis') && !this.reviewReady.has(projectId)
       ? { ok: false, reason: 'capability-unsupported', detail: 'Codex owner lacks attested read-only child execution with isolated result output' }
       : worker.supports(role, placement)
-    return { ...worker, supports, run: async (request, placement, signal) => {
+    const guarded: WorkerRunner = { ...worker, supports, run: async (request, placement, signal) => {
+      const deadline = Date.now() + request.budget.wall_ms
       const supported = supports(request.role, placement)
       if (!supported.ok) return { kind: 'refused', reason: supported.reason }
       if (this.closed || this.refused.has(projectId)) return { kind: 'unknown', detail: 'Codex owner requires native reconciliation' }
@@ -304,6 +344,21 @@ export class CodexOwnerBindings {
             return { kind: 'unknown', detail: 'Codex surviving turn requires native reconciliation' }
           }
         }
+        if (request.role === 'review' || request.role === 'synthesis') {
+          if (!owner) return { kind: 'refused', reason: 'capability-unsupported' }
+          const facts = this.readBinding(owner.binding)
+          try { lstatSync(facts.rolloutPath) }
+          catch (error) {
+            if ((error as NodeJS.ErrnoException).code === 'ENOENT') return { kind: 'refused', reason: 'capability-unsupported' }
+            this.fence(projectId)
+            return { kind: 'unknown', detail: 'Restricted review owner rollout is unreadable' }
+          }
+          try { new CodexRolloutObserver({ projectId, ...facts }, 'restricted review preflight').close() }
+          catch {
+            this.fence(projectId)
+            return { kind: 'unknown', detail: 'Restricted review owner rollout does not attest this conversation' }
+          }
+        }
         const outcome = await worker.run(request, placement, signal)
         if (outcome.kind === 'unknown' || outcome.kind === 'failed') {
           // Tags alone cannot establish delivery or terminal settlement. No
@@ -321,17 +376,70 @@ export class CodexOwnerBindings {
           }
           this.fence(projectId)
         }
-        else { const entry = await this.owners.get(projectId); if (entry) this.finishWork(projectId, entry.owner) }
+        else {
+          const review = this.reviews.get(projectId)
+          if (review) {
+            if ((outcome.kind !== 'completed' && outcome.kind !== 'blocked') || signal.aborted || this.refused.has(projectId)) {
+              this.fence(projectId)
+              return { kind: 'unknown', detail: 'Restricted review outcome requires reconciliation' }
+            }
+            try {
+              const remaining = Math.min(60_000, deadline - Date.now())
+              if (remaining <= 0) throw new Error('Restricted review tree is unsettled')
+              const timer = new AbortController()
+              try {
+                const settled = await Promise.race([review.waitSettled(remaining), delay(remaining, false,
+                  { signal: AbortSignal.any([signal, timer.signal]) })])
+                if (!settled) throw new Error('Restricted review tree is unsettled')
+              } finally { timer.abort() }
+              signal.throwIfAborted()
+              await review.restore()
+              signal.throwIfAborted()
+              await review.release()
+              signal.throwIfAborted()
+              if (Date.now() >= deadline) throw new Error('Restricted review acknowledgement exceeded the host budget')
+              this.reviews.delete(projectId)
+            } catch {
+              this.fence(projectId)
+              return { kind: 'unknown', detail: 'Restricted review restoration or acknowledgement is uncertain' }
+            }
+          }
+          const entry = await this.owners.get(projectId); if (entry) this.finishWork(projectId, entry.owner)
+        }
         return outcome
       } catch (error) {
         if (observation.attempted) this.fence(projectId)
         throw error
       } finally { observation.closed = true; this.decodingBuilds.delete(projectId); this.buildObservations.delete(projectId) }
     } }
+    return { ...guarded, run: async (request, placement, signal) => {
+      if (request.role !== 'review' && request.role !== 'synthesis') return guarded.run(request, placement, signal)
+      const previous = this.reviewQueue.get(projectId) ?? Promise.resolve()
+      let release!: () => void
+      const gate = new Promise<void>(resolve => { release = resolve })
+      const tail = previous.then(() => gate)
+      this.reviewQueue.set(projectId, tail)
+      const timer = new AbortController()
+      const stopped = AbortSignal.any([signal, AbortSignal.timeout(Math.max(1, request.budget.wall_ms))])
+      try {
+        await Promise.race([previous, delay(Math.max(1, request.budget.wall_ms), undefined, { signal: AbortSignal.any([stopped, timer.signal]) })
+          .then(() => { throw new Error('Review queue budget expired') })])
+        stopped.throwIfAborted()
+        return await guarded.run(request, placement, stopped)
+      } catch { return { kind: 'unknown', detail: 'Restricted review queue or execution was interrupted' } }
+      finally { timer.abort(); release(); if (this.reviewQueue.get(projectId) === tail) this.reviewQueue.delete(projectId) }
+    } }
   }
 
   start(projectId: string | undefined, spec: AgentSpec): SessionHandle {
     return this.startTurn(projectId, spec)
+  }
+
+  /** Readiness attests the existing owner capability; it does not grant permissions. */
+  async prepareReview(projectId: string): Promise<void> {
+    const { owner } = await this.resolve(projectId)
+    if (!owner.broker.reviewPermissions) throw new Error('Codex owner lacks attested read-only child execution with isolated result output')
+    this.reviewReady.add(projectId)
   }
 
   private startTurn(projectId: string | undefined, spec: AgentSpec, buildDispatch = false): SessionHandle {
@@ -345,6 +453,14 @@ export class CodexOwnerBindings {
         }
         const { project } = await bindings.resolve(projectId)
         abort.signal.throwIfAborted()
+        if (bindings.cleanReviewRefusals.has(projectId)) {
+          const owner = bindings.resolvedOwners.get(projectId)!
+          await refreshOwner(owner)
+          if (!bindings.busy.has(projectId) && owner.broker.state().phase === 'idle') {
+            bindings.conversationHosts.delete(projectId)
+            bindings.cleanReviewRefusals.delete(projectId)
+          }
+        }
         if (!buildDispatch && (bindings.builds.get(projectId)?.input || bindings.decodingBuilds.has(projectId))) {
           throw new Error('Codex owner build result is still pending')
         }
@@ -401,9 +517,9 @@ export class CodexOwnerBindings {
         }
       }
       preflight()
-      // Native children currently inherit the parent's project-write profile.
-      // Prompt-only read-only requests cannot claim enforced review isolation.
-      if (turn.request.writable === false || turn.request.tools === 'read-only' || turn.request.tools === 'none') {
+      const restricted = turn.request.role === 'review' || turn.request.role === 'synthesis'
+      if (restricted ? !this.reviewReady.has(projectId) || !observation || turn.request.writable || turn.request.tools !== 'read-only'
+        : turn.request.writable === false || turn.request.tools === 'read-only' || turn.request.tools === 'none') {
         return { kind: 'refused', reason: 'capability-unsupported', detail: 'Codex owner lacks attested read-only child execution with isolated result output' }
       }
       const { owner, project } = await this.resolve(projectId, canonicalProject => {
@@ -414,6 +530,13 @@ export class CodexOwnerBindings {
       preflight()
       // Recheck after asynchronous attachment, and for an already-resolved owner.
       validatePaths(project)
+      if (restricted) {
+        const key = createHash('sha256').update(JSON.stringify([projectId, turn.request.run_id, turn.request.step_id])).digest('hex')
+        const stage = join(project.cwd, '.neutron', 'build-results', key)
+        if (turn.request.result.path !== join(stage, 'result.json') || realpathSync(stage) !== stage || !owner.broker.reviewPermissions) {
+          return { kind: 'refused', reason: 'capability-unsupported', detail: 'Restricted review requires the exact host-staged result path' }
+        }
+      }
       const facts = this.readBinding(owner.binding)
       // Native feature evidence is sealed by the factory before the first turn.
       // A requested feature flag is not an attestation of native availability.

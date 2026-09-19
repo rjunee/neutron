@@ -1,6 +1,6 @@
 import { ReplModelError, type ReplModelState, type ReplModelSwitch } from '@neutronai/runtime/repl-model.ts'
 import type { CodexOwnerBindingFacts, CodexOwnerBootstrap, CodexOwnerAttachment } from '@neutronai/runtime/adapters/codex-cli/persistent/project-control-bootstrap.ts'
-import type { ProjectControlGateway } from '@neutronai/runtime/adapters/codex-cli/persistent/project-control-broker.ts'
+import { ProjectControlAdmissionRefusal, type ProjectControlGateway } from '@neutronai/runtime/adapters/codex-cli/persistent/project-control-broker.ts'
 import type { NativeOwnerAction, NativeOwnerIdentity } from '@neutronai/gateway/http/app-native-owner-control-surface.ts'
 
 type RecordValue = Record<string, unknown>
@@ -128,6 +128,7 @@ export class CodexOwnerControls {
         conversationId: JSON.stringify([projectId, before.threadId, before.bindingRevision, before.generation]), currentModel, availableModels,
         status: this.deps.busy(projectId) || owner.broker.state().phase !== 'idle' ? 'busy' : 'ready' }
     } catch (error) {
+      if (error instanceof ProjectControlAdmissionRefusal) throw new ReplModelError('busy', 'Native model switch was not admitted; refresh the current owner state.')
       if (dispatched) this.deps.fence(projectId)
       throw error
     } finally { gateway.close(); if (request) this.switching.delete(projectId) }

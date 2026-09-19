@@ -74,6 +74,7 @@ import { buildRun, type BuildRunOutcome } from '@neutronai/trident/build-run.ts'
 import type { InnerLoopInput } from '@neutronai/trident/inner-loop.ts'
 import { PROJECT_SESSION_ACQUIRE_TIMEOUT_MS, prepareProjectBuild, type ProjectBuildContext } from '../wiring/project-build.ts'
 import { CodexOwnerBindings } from '../wiring/codex-owner-binding.ts'
+import { restrictedOwnerFixture } from './fixtures/codex-owner-review.ts'
 import { PROJECT_DEPENDENCIES_TIMEOUT_MS } from '../wiring/project-build-dependencies.ts'
 import { PROJECT_SNAPSHOT_SCHEMA } from '../wiring/project-build-snapshot.ts'
 
@@ -872,8 +873,9 @@ test('prepared Codex build/fix transport publishes canonical artifacts while una
       return { kind: 'turn-ended' }
     },
   }
+  await expect(f.prepare()).rejects.toThrow('lacks attested read-only child execution')
+  f.input.phase_models = { ...f.input.phase_models, review_adversarial: { model: 'opus' } }
   const prepared = await f.prepare()
-  await expect(createProjectBuildHost(prepared)).rejects.toThrow('lacks attested read-only child execution')
   for (const role of ['build', 'fix'] as const) {
     const request: BoundedWorkRequest = { ...prepared.workers[role].request, run_id: f.row.id, step_id: `${f.row.id}:${role}:0`, role, needs_approval_decision: false }
     // Exercise the prepared build runner without bypassing the full host's
@@ -893,6 +895,41 @@ test('prepared Codex build/fix transport publishes canonical artifacts while una
   expect(prepared.substrate.inRepl!.supports('synthesis', 'in-repl')).toMatchObject({ ok: false, reason: 'capability-unsupported' })
   await guard.close()
 })
+
+test.each(['valid', 'forbidden-edit', 'wrong-schema', 'restore-lost', 'ack-lost', 'restore-mismatch'] as const)('Codex owner restricted same-provider panel and synthesis: %s', async fault => {
+  const f = await codexOwnerWithClaude()
+  f.input.phase_models = { ...f.input.phase_models, review_adversarial: { model: 'sol' }, review_codex: { model: 'sol' }, synthesis: { model: 'sol' } }
+  const native = await restrictedOwnerFixture({ projectId: f.context.projectId, cwd: f.context.projectDir, execute: literalWorker(f.world), childSettlesAfterMs: 30,
+    ...(fault === 'forbidden-edit' ? { forbiddenEdit: true } : {}),
+    ...(fault === 'wrong-schema' ? { wrongSchema: true } : {}),
+    ...(fault === 'restore-lost' ? { drop: 'reviewRestore' } : {}),
+    ...(fault === 'ack-lost' ? { drop: 'reviewAcknowledge' } : {}),
+    ...(fault === 'restore-mismatch' ? { badRestore: true } : {}),
+  })
+  cleanups.push(() => native.close())
+  f.context.codexOwnerBindings = native.bindings
+  const before = await gitOut(f.world.run, f.origin, ['rev-parse', 'refs/heads/main'])
+  const outcome = await drive(f, 'pr')
+  expect(native.errors).toEqual([])
+  expect(native.opens()).toBe(1)
+  if (fault === 'valid') {
+    expect(outcome.kind, why(f, outcome)).toBe('merged')
+    expect(native.children.map(child => child.role)).toEqual(['build', 'review', 'review', 'review', 'synthesis'])
+    expect(native.wire.filter(message => message.operation === 'reviewRelease')).toHaveLength(4)
+    expect(await gitOut(f.world.run, f.origin, ['rev-parse', 'refs/heads/main'])).not.toBe(before)
+    expect(f.github.prs[0]?.state).toBe('MERGED')
+    const events = []
+    for await (const event of native.bindings.start(f.context.projectId, { prompt: 'next owner chat', tools: [], model_preference: [] }).events) events.push(event)
+    expect(events.at(-1)?.kind).toBe('completion')
+  } else {
+    expect(outcome.kind, why(f, outcome)).not.toBe('merged')
+    expect(await gitOut(f.world.run, f.origin, ['rev-parse', 'refs/heads/main'])).toBe(before)
+    expect(f.github.prs.some(pr => pr.state === 'MERGED')).toBe(false)
+    expect(native.wire.filter(message => message.operation === 'reviewRelease')).toHaveLength(0)
+  }
+  const claude = (await readFile(f.calls, 'utf8')).trim().split('\n').map(line => JSON.parse(line))
+  expect(claude.map(call => call.request.role)).toEqual(['plan'])
+}, 30_000)
 
 test('Bun workspace dependencies are local before workers and publication consumes them', async () => {
   const f = await fixture({ bunWorkspace: true })

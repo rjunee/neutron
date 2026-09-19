@@ -10,6 +10,7 @@ import type { CodexOwnerBinding, CodexOwnerBindingFacts, CodexOwnerBootstrap } f
 import type { BoundedWorkRequest } from '@neutronai/runtime/bounded-work.ts'
 import { createProjectRunners } from '@neutronai/runtime/workers/project-runners.ts'
 import { codexBuildResultTransport } from '../wiring/codex-build-result.ts'
+import { restrictedOwnerFixture } from './fixtures/codex-owner-review.ts'
 import { composeReplModelSurface } from '@neutronai/gateway/composition/repl-model.ts'
 import { createAppNativeOwnerControlSurface } from '@neutronai/gateway/http/app-native-owner-control-surface.ts'
 import type { ReplModelState } from '@neutronai/runtime/repl-model.ts'
@@ -237,6 +238,58 @@ test('marker-free warm TUI activity refuses build without poisoning the next own
   f.hold(false); f.finish()
   expect((await collect(f.bindings.start('project-one', spec('chat after terminal')))).at(-1)?.kind).toBe('completion')
   expect(f.calls).toHaveLength(3)
+})
+
+test.each(['valid', 'busy', 'unknown-prepare', 'restore-lost', 'ack-lost', 'cold', 'corrupt', 'foreign', 'foreign-stage'] as const)('private helper restricts review, waits and restores before next chat: %s', async fault => {
+  const dir = mkdtempSync(join(tmpdir(), 'owner-review-consumer-')); dirs.push(dir)
+  const cwd = join(dir, 'project'), state = join(dir, 'home', 'run')
+  mkdirSync(cwd); mkdirSync(state, { recursive: true })
+  const native = await restrictedOwnerFixture({ projectId: 'review-project', cwd, childSettlesAfterMs: 80,
+    ...(fault === 'busy' ? { busyPrepare: true } : {}), ...(fault === 'unknown-prepare' ? { drop: 'reviewPrepare' } : {}),
+    ...(fault === 'restore-lost' ? { drop: 'reviewRestore' } : {}), ...(fault === 'ack-lost' ? { drop: 'reviewAcknowledge' } : {}), async execute(prompt) {
+    const spec = JSON.parse(prompt.slice('Execute the prompt in this JSON dispatch specification: '.length))
+    const args = JSON.parse(spec.prompt.slice(spec.prompt.indexOf('\n') + 1))
+    const child = JSON.parse(args.message.split('\n').find((line: string) => line.startsWith('Request (data): ')).slice('Request (data): '.length))
+    writeFileSync(child.result.path, JSON.stringify({ run_id: child.run_id, step_id: child.step_id, schema: child.result.schema, kind: 'completed', result: { answer: 'reviewed' } }))
+  }, ...(fault === 'cold' ? { coldRollout: true } : {}), ...(fault === 'corrupt' ? { corruptRollout: true } : {}), ...(fault === 'foreign' ? { foreignRollout: true } : {}) })
+  try {
+    await native.bindings.prepareReview('review-project')
+    const trailer = { schemas: new Map([['fixture', (value: unknown) => !!value && typeof value === 'object' && 'answer' in value && typeof value.answer === 'string']]), metadata: () => undefined }
+    const request: BoundedWorkRequest = { run_id: 'run', step_id: 'review-one', role: 'review', model_id: 'gpt-5.5', effort: null,
+      cwd, writable: false, network: false, tools: 'read-only', brief: { path: join(state, 'review.brief'), integrity: 'fixture' },
+      result: { path: join(state, 'review.result'), schema: 'fixture' }, thread: null, budget: { wall_ms: 2000 }, needs_approval_decision: false }
+    const acting = native.bindings.actingTurn('review-project', 'topic', cwd, [cwd])
+    const foreignStage = join(cwd, '.neutron', 'build-results', 'f'.repeat(64))
+    if (fault === 'foreign-stage') mkdirSync(foreignStage, { recursive: true })
+    const runners = await createProjectRunners({ conversation: { project_id: 'review-project', topic_id: 'topic', provider: 'openai-codex', spec: spec('') },
+      run_id: 'run', state_dir: state, trailer, headless: {}, actingTurn: turn => acting(fault === 'foreign-stage'
+        ? { ...turn, request: { ...turn.request, result: { ...turn.request.result, path: join(foreignStage, 'result.json') } } } : turn),
+      codexResultTransport: codexBuildResultTransport({ projectId: 'review-project', projectDir: cwd, stateDir: state, runId: 'run', trailer }) })
+    const worker = native.bindings.guardBuildRunner('review-project', runners.inRepl!)
+    if (fault !== 'valid') {
+      expect((await worker.run(request, 'in-repl', new AbortController().signal)).kind).toBe(['cold', 'foreign-stage'].includes(fault) ? 'refused' : 'unknown')
+      expect(native.children).toHaveLength(fault === 'restore-lost' || fault === 'ack-lost' ? 1 : 0)
+      expect(existsSync(join(native.codexHome, '.neutron-owner-work.json'))).toBe(!['busy', 'cold', 'foreign-stage'].includes(fault))
+      await Bun.sleep(20)
+      expect((await collect(native.bindings.start('review-project', spec('chat after admission race')))).at(-1)?.kind)
+        .toBe(['busy', 'cold', 'foreign-stage'].includes(fault) ? 'completion' : 'error')
+      if (fault === 'busy' || fault === 'cold') expect((await worker.run({ ...request, step_id: fault === 'cold' ? request.step_id : 'review-after-busy' }, 'in-repl', new AbortController().signal)).kind).toBe('completed')
+      expect(native.opens()).toBe(1)
+      return
+    }
+    const results = await Promise.all([worker.run(request, 'in-repl', new AbortController().signal),
+      worker.run({ ...request, step_id: 'review-two' }, 'in-repl', new AbortController().signal)])
+    expect(results.map(result => result.kind)).toEqual(['completed', 'completed'])
+    expect(native.errors).toEqual([])
+    expect(native.children).toHaveLength(2)
+    expect(native.wire.filter(message => String(message.operation).startsWith('review')).map(message => message.operation)).toEqual([
+      'reviewPrepare', 'reviewStart', 'reviewWaitSettled', 'reviewRestore', 'reviewAcknowledge', 'reviewRelease',
+      'reviewPrepare', 'reviewStart', 'reviewWaitSettled', 'reviewRestore', 'reviewAcknowledge', 'reviewRelease',
+    ])
+    expect(existsSync(join(native.codexHome, '.neutron-owner-work.json'))).toBe(false)
+    expect((await collect(native.bindings.start('review-project', spec('next chat')))).at(-1)?.kind).toBe('completion')
+    expect(native.opens()).toBe(1)
+  } finally { await native.close() }
 })
 
 test.each(['review', 'synthesis'] as const)('unattested Codex %s isolation refuses admission and direct dispatch without opening an owner', async role => {
@@ -691,6 +744,22 @@ function controlSurfaces(f: ReturnType<typeof fixture>) {
     return (await (kind === 'model' ? model : turn).handler(request))!
   }
 }
+
+test.each(['busy', 'native-refusal', 'lost'] as const)('model switch through helper distinguishes zero-reservation admission from native uncertainty: %s', async modelFault => {
+  const dir = mkdtempSync(join(tmpdir(), 'owner-model-race-')); dirs.push(dir)
+  const native = await restrictedOwnerFixture({ projectId: 'model-project', cwd: dir, modelFault, async execute() {} })
+  try {
+    expect((await collect(native.bindings.start('model-project', spec('warm chat')))).at(-1)?.kind).toBe('completion')
+    const current = await native.bindings.controls.model('model-project')
+    await expect(native.bindings.controls.model('model-project', { sessionId: current.sessionId, model: 'large' })).rejects.toThrow()
+    await Bun.sleep(20)
+    expect(existsSync(join(native.codexHome, '.neutron-owner-work.json'))).toBe(modelFault !== 'busy')
+    expect(native.native.filter(message => message.method === 'thread/settings/update' && (message.params as Record<string, unknown>).model === 'large'))
+      .toHaveLength(modelFault === 'busy' ? 0 : 1)
+    expect((await collect(native.bindings.start('model-project', spec('next valid chat')))).at(-1)?.kind).toBe(modelFault === 'busy' ? 'completion' : 'error')
+    expect(native.opens()).toBe(1)
+  } finally { await native.close() }
+})
 
 test('native model API authenticates, lists all native pages, switches both directions and preserves exact owner', async () => {
   const f = fixture(), api = controlSurfaces(f)

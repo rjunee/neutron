@@ -53,6 +53,27 @@ function metadata(identity: CodexRolloutIdentity): string {
 }
 
 describe('native Codex rollout observation', () => {
+  test.each([false, true])('exact inter-agent scheduling marker trigger_turn=%s cannot complete or change a turn', trigger_turn => {
+    const f = fixture(line('inter_agent_communication_metadata', { trigger_turn }))
+    const observer = f.observe()
+    f.append(start() + user() + line('inter_agent_communication_metadata', { trigger_turn }))
+    expect(observer.read().some(event => event.kind === 'completion')).toBe(false)
+    f.append(complete())
+    expect(observer.read().at(-1)?.kind).toBe('completion')
+  })
+  test.each([{}, { trigger_turn: 'false' }, { trigger_turn: false, turn_id: 'turn-one' }, { trigger_turn: false, thread_id: 'thread-one' }])(
+    'unrecognized inter-agent metadata shape refuses', payload => {
+      const f = fixture(), observer = f.observe()
+      f.append(start() + user() + line('inter_agent_communication_metadata', payload))
+      expect(() => observer.read()).toThrow('malformed inter-agent metadata')
+    })
+  test('arbitrary unknown top-level record still refuses with a valid marker as positive control', () => {
+    const f = fixture(), observer = f.observe()
+    f.append(start() + user() + line('inter_agent_communication_metadata', { trigger_turn: false }))
+    expect(() => observer.read()).not.toThrow()
+    f.append(line('future_unknown_native_record', { trigger_turn: false }))
+    expect(() => observer.read()).toThrow('unknown native record')
+  })
   test('preserves materialized local TUI attachment without remote metadata', () => {
     const f = fixture()
     const { nativeMetadata: _metadata, bindingRevision: _revision, ...identity } = f.identity

@@ -220,6 +220,14 @@ export class CodexRolloutObserver {
       return []
     }
     if (record.type !== 'event_msg') {
+      if (record.type === 'inter_agent_communication_metadata') {
+        // Native child messages carry this non-authoritative scheduling marker.
+        // It neither identifies a turn nor proves user input or completion.
+        if (Object.keys(payload).length !== 1 || typeof payload.trigger_turn !== 'boolean') {
+          throw new Error('codex rollout refused: malformed inter-agent metadata')
+        }
+        return []
+      }
       if (!['response_item', 'turn_context', 'world_state', 'compacted'].includes(String(record.type))) {
         throw new Error('codex rollout refused: unknown native record')
       }

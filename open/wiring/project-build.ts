@@ -91,7 +91,7 @@ export interface ProjectBuildContext {
   env: NodeJS.ProcessEnv
   spawnProjectSession: (projectId: string) => Promise<void>
   /** The same host-owned resolver consumed by owner chat. Never creates a build session. */
-  codexOwnerBindings?: Pick<CodexOwnerBindings, 'actingTurn' | 'guardBuildRunner'>
+  codexOwnerBindings?: Pick<CodexOwnerBindings, 'actingTurn' | 'guardBuildRunner'> & Partial<Pick<CodexOwnerBindings, 'prepareReview'>>
 }
 
 /**
@@ -265,6 +265,16 @@ export async function prepareProjectBuild(input: InnerLoopInput, context: Projec
     ['project-review', (value: unknown) => validSnapshot(value, 'verdict')],
     ['verdict', (value: unknown) => validateTrailer('verdict', value).ok],
   ]), metadata: () => undefined }
+  const parsed = parsePhaseModelConfig(input.phase_models ?? {})
+  if (parsed.errors.length) throw Error(`Invalid project phase models: ${parsed.errors.join('; ')}`)
+  const config = parsed.config
+  if (context.provider === 'openai-codex' && ['review_rubric', 'review_adversarial', 'review_codex', 'review_kimi', 'synthesis'].some(key => {
+    const phase = phaseByKey(key)
+    return phase && modelTier(config[phase.key]?.model ?? phase.default.tier)?.group === 'codex'
+  })) {
+    if (!context.codexOwnerBindings?.prepareReview) throw new Error('Codex owner lacks attested read-only child execution with isolated result output')
+    await context.codexOwnerBindings.prepareReview(context.projectId)
+  }
   const substrate = await createProjectRunners({
     conversation: { project_id: context.projectId, topic_id: topic, provider: context.provider,
       // THE SURFACE MUST MATCH THE SESSION'S, OR THE REUSE GUARD RESPAWNS IT.
@@ -359,9 +369,6 @@ export async function prepareProjectBuild(input: InnerLoopInput, context: Projec
   if (context.provider === 'openai-codex' && context.codexOwnerBindings && substrate.inRepl) {
     substrate.inRepl = context.codexOwnerBindings.guardBuildRunner(context.projectId, substrate.inRepl)
   }
-  const parsed = parsePhaseModelConfig(input.phase_models ?? {})
-  if (parsed.errors.length) throw Error(`Invalid project phase models: ${parsed.errors.join('; ')}`)
-  const config = parsed.config
   const workers = {} as ProjectBuildHostOptions['workers']
   for (const role of ['plan', 'build', 'review', 'fix'] as const) {
     const phase = phaseByKey(role === 'plan' ? 'decomposition' : role === 'review' ? 'review_adversarial' : 'build')!
