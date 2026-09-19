@@ -233,5 +233,7 @@ test('cancellation stops a live review and liveness returns to nothing', async (
 test('wall budget kills a process ignoring TERM and never commits its output', async () => {
   const f = await fixture('hang'); const start = Date.now()
   expect(await f.run({ ...f.req, budget: { wall_ms: 80 } })).toMatchObject({ kind: 'failed', class: 'timeout' })
+  // WALL-CLOCK-BOUND-OK: process-group termination within the configured budget is the
+  // property; 1.5s is 18.75x the 80ms budget and 6x the 250ms TERM-to-KILL allowance.
   expect(Date.now() - start).toBeLessThan(1500)
 })
