@@ -15,22 +15,19 @@
 import { describe, expect, test } from 'bun:test'
 import { dirname, join } from 'node:path'
 import { fileURLToPath } from 'node:url'
-import { CHAT_REACT_BUNDLE_BUILD_OPTIONS } from '../server.ts'
+import { buildChatReactBundle } from '../server.ts'
 
 const HERE = dirname(fileURLToPath(import.meta.url))
 const ENTRY = join(dirname(HERE), 'chat-react', 'main.tsx')
 
 describe('the web chat bundle', () => {
   test('builds from chat-react/main.tsx for the browser', async () => {
-    const result = await Bun.build({
-      entrypoints: [ENTRY],
-      ...CHAT_REACT_BUNDLE_BUILD_OPTIONS,
-    })
+    const result = await buildChatReactBundle(ENTRY)
     if (!result.success) {
       // Not decoration: this is the whole reason the test exists.
       for (const log of result.logs) console.error('[chat-react bundle]', String(log))
     }
     expect(result.success).toBe(true)
-    expect(result.outputs.length).toBeGreaterThan(0)
+    expect(result.output).not.toBeNull()
   }, 120_000)
 })
