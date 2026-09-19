@@ -121,6 +121,7 @@ const TABS = [
 
 let restoreCrypto: (() => void) | null = null;
 let realFetch: typeof fetch;
+let activeReplModel = 'cheap';
 
 function settingsDoc(id: string) {
   return {
@@ -152,13 +153,26 @@ function listRow(id: string) {
  * Anything unlisted 404s — exactly as an older gateway would, and never a hang.
  */
 function installGateway(): void {
-  (globalThis as { fetch: typeof fetch }).fetch = (async (input: RequestInfo | URL) => {
+  (globalThis as { fetch: typeof fetch }).fetch = (async (input: RequestInfo | URL, init?: RequestInit) => {
     const url = typeof input === 'string' ? input : input instanceof URL ? input.href : input.url;
     const path = url.replace(BASE_URL, '').split('?')[0] ?? '';
     if (path === '/api/app/projects') {
       return Response.json({ ok: true, projects: PROJECTS.map(listRow), project_slug: 'local' });
     }
     if (path === '/api/app/usage') return Response.json(USAGE_READING);
+    if (/^\/api\/app\/projects\/[^/]+\/repl-model$/.test(path)) {
+      if (init?.method === 'POST') {
+        const body = JSON.parse(String(init.body)) as { model: string; sessionId: string };
+        if (body.sessionId !== 'reachability-session') {
+          return Response.json({ error: 'session_changed' }, { status: 409 });
+        }
+        activeReplModel = body.model;
+      }
+      return Response.json({ harness: 'codex', sessionId: 'reachability-session',
+        currentModel: activeReplModel,
+        availableModels: [{ id: 'cheap', label: 'Cheap' }, { id: 'frontier', label: 'Frontier' }],
+        status: 'ready' });
+    }
     const settings = /^\/api\/app\/projects\/([^/]+)\/settings$/.exec(path);
     if (settings !== null) {
       const id = decodeURIComponent(settings[1] ?? '');
@@ -176,6 +190,7 @@ function installGateway(): void {
 beforeAll(installNativeHarness);
 
 beforeEach(() => {
+  activeReplModel = 'cheap';
   // THE DEVICE RUNTIME: React Native installs no `crypto` global, and a gate
   // that runs on one that HAS WebCrypto is testing a machine the owner does not
   // own — that difference is what hid a `crypto.randomUUID()` in `SendQueue`

@@ -156,6 +156,16 @@ export const OTHER_TAB = { label: 'Documents', leaf: 'docs' } as const;
 
 export const OWNER_AFFORDANCES: readonly OwnerAffordance[] = [
   {
+    id: 'repl-model-switch',
+    can: 'See and switch the active conversation REPL model',
+    broken: 'You cannot switch the conversation model from this phone, or the model shown did not change after a confirmed switch.',
+    exercise: async (p) => {
+      await p.press('Current model: cheap. Show available models');
+      await p.press('Switch to Frontier');
+    },
+    landed: (p) => p.has('Current model: frontier. Show available models'),
+  },
+  {
     id: 'compose',
     can: 'Type a message',
     broken: 'You cannot type a message — the composer does not take input on this phone.',
