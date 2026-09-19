@@ -106,6 +106,15 @@ export class CodexOwnerBindings {
         if (this.onOwnerQuestion) fireAndForget('codex-owner.question', Promise.resolve().then(() => this.onOwnerQuestion!(options.projectId, question)),
           () => { this.fence(options.projectId) })
       }, clientId, request => {
+        const reply = (result: unknown): void => {
+          fireAndForget('codex-owner.installed-tool.reply', (async () => {
+            // Even a refusal belongs only to its original native writer/turn.
+            if (!current() || request.params.turnId !== turnId || owner.broker.state().activeTurnId !== turnId) return
+            const attachment = owner as Partial<CodexOwnerAttachment>
+            if (attachment.replyApproval) await attachment.replyApproval(clientId, request.id, result, owner.broker.state().epoch)
+            else gateway.reply(request.id, result, owner.broker.state().epoch)
+          })(), () => { if (current()) this.fence(options.projectId) })
+        }
         fireAndForget('codex-owner.installed-tool', (async () => {
           await receipt
           const assertTurn = () => {
@@ -113,20 +122,12 @@ export class CodexOwnerBindings {
             if (!current() || !turnId || request.params.turnId !== turnId || owner.broker.state().activeTurnId !== turnId
               || this.builds.get(options.projectId)?.input || this.decodingBuilds.has(options.projectId)) throw new Error('Owner MCP requires the exact conversational turn')
           }
-          let result: unknown
-          try {
-            assertTurn()
-            if (!mcp) throw new Error('Owner MCP is unavailable on this binding')
-            result = await mcp.handle(request, clientId, assertTurn)
-          } catch {
-            result = { success: false, contentItems: [{ type: 'inputText', text: 'Owner MCP authority is unavailable or the request was refused.' }] }
-          }
-          // Even a refusal belongs only to its original native writer/turn.
-          if (!current() || request.params.turnId !== turnId || owner.broker.state().activeTurnId !== turnId) return
-          const attachment = owner as Partial<CodexOwnerAttachment>
-          if (attachment.replyApproval) await attachment.replyApproval(clientId, request.id, result, owner.broker.state().epoch)
-          else gateway.reply(request.id, result, owner.broker.state().epoch)
-        })(), () => { if (current()) this.fence(options.projectId) })
+          assertTurn()
+          if (!mcp) throw new Error('Owner MCP is unavailable on this binding')
+          reply(await mcp.handle(request, clientId, assertTurn))
+        })(), () => {
+          reply({ success: false, contentItems: [{ type: 'inputText', text: 'Owner MCP authority is unavailable or the request was refused.' }] })
+        })
       })
       const current = (): boolean => {
         try {
