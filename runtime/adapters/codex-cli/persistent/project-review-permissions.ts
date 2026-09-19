@@ -14,9 +14,12 @@ export interface ReviewPermissionRequest {
   stageDir: string
   network: boolean
 }
+export const MAX_REVIEW_SETTLEMENT_WAIT_MS = 60_000
 export interface ReviewPermissionLease {
   /** The only native start admitted by this lease. No caller permission overrides. */
   start(input: readonly unknown[]): Promise<{ turnId: string }>
+  /** Waits at most 60 seconds for exact tree settlement; false permanently fences. */
+  waitSettled(timeoutMs: number): Promise<boolean>
   /** Restores and verifies policy after the whole tree settles; retains exclusivity. */
   restore(): Promise<void>
   /** Host acknowledgement only: releases the journal after verified restoration. */
@@ -37,6 +40,7 @@ export interface ReviewPermissionHost {
   codexHome: string
   threadId: string
   rpc(method: string, params: Rpc): Promise<unknown>
+  assertCurrent(): void
   finish(): void
   fence(): void
 }
@@ -60,7 +64,9 @@ export function createReviewPermissionTransaction(host: ReviewPermissionHost, re
   const completed = new Set<string>(), turns = new Map<string, Set<string>>()
   const spawns = new Map<string, { parent: string; turn: string; child: string }>()
   let observationUncertain = false
-  const fail = (): never => { observationUncertain = true; host.fence(); throw new Error(`Native review permissions require reconciliation (${phase})`) }
+  let checkSettlement: (() => void) | undefined
+  const fence = (): void => { observationUncertain = true; checkSettlement?.(); host.fence() }
+  const fail = (): never => { fence(); throw new Error(`Native review permissions require reconciliation (${phase})`) }
   const assertStage = (): void => {
     const now = lstatSync(request.stageDir)
     if (realpathSync(request.stageDir) !== request.stageDir || !now.isDirectory() || now.dev !== initialStage.dev || now.ino !== initialStage.ino) fail()
@@ -105,16 +111,17 @@ export function createReviewPermissionTransaction(host: ReviewPermissionHost, re
         else spawns.set(JSON.stringify([params.threadId, params.turnId, item.agentThreadId]), { parent: params.threadId, turn: params.turnId, child: item.agentThreadId })
       }
       if (phase === 'restoration' && (spawn || message.method === 'turn/started')) {
-        observationUncertain = true
-        host.fence()
+        fence()
       }
-      if (typeof params.threadId !== 'string' || !object(params.turn) || typeof params.turn.id !== 'string') return
-      if (message.method === 'turn/started') {
-        if (params.threadId === host.threadId) parentTurn ??= params.turn.id
-        const observed = turns.get(params.threadId) ?? new Set<string>()
-        observed.add(params.turn.id); turns.set(params.threadId, observed)
+      if (typeof params.threadId === 'string' && object(params.turn) && typeof params.turn.id === 'string') {
+        if (message.method === 'turn/started') {
+          if (params.threadId === host.threadId) parentTurn ??= params.turn.id
+          const observed = turns.get(params.threadId) ?? new Set<string>()
+          observed.add(params.turn.id); turns.set(params.threadId, observed)
+        }
+        if (message.method === 'turn/completed') completed.add(JSON.stringify([params.threadId, params.turn.id]))
       }
-      if (message.method === 'turn/completed') completed.add(JSON.stringify([params.threadId, params.turn.id]))
+      checkSettlement?.()
     },
     async prepare() {
       try {
@@ -181,6 +188,23 @@ export function createReviewPermissionTransaction(host: ReviewPermissionHost, re
               restored = true
             } catch { return fail() }
           },
+          async waitSettled(timeoutMs) {
+            if (!Number.isSafeInteger(timeoutMs) || timeoutMs < 1 || timeoutMs > MAX_REVIEW_SETTLEMENT_WAIT_MS) throw new Error('Native review settlement timeout must be 1..60000 milliseconds')
+            if (!parentTurn || released || restoring || checkSettlement) throw new Error('Native review settlement wait unavailable')
+            phase = 'settlement wait'
+            return new Promise<boolean>(resolve => {
+              const deadline = performance.now() + timeoutMs
+              const timer = setTimeout(() => { fence() }, timeoutMs)
+              const finish = (settled: boolean): void => { clearTimeout(timer); checkSettlement = undefined; resolve(settled) }
+              checkSettlement = () => {
+                if (observationUncertain) { finish(false); host.fence(); return }
+                if (performance.now() >= deadline) { fence(); return }
+                try { host.assertCurrent(); assertStage() } catch { fence(); return }
+                if (treeSettled()) finish(true)
+              }
+              checkSettlement()
+            })
+          },
           async release() {
             if (released) throw new Error('Native review lease already released')
             phase = 'release'
@@ -191,7 +215,7 @@ export function createReviewPermissionTransaction(host: ReviewPermissionHost, re
               released = true
             } catch { return fail() }
           },
-          abandon() { if (!released) { observationUncertain = true; host.fence() } },
+          abandon() { if (!released) fence() },
         }
       } catch { return fail() }
     },

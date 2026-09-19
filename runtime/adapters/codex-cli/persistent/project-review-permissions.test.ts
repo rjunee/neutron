@@ -16,7 +16,7 @@ function fixture(options: { alteredGrant?: boolean; mcp?: boolean; badRestore?: 
   const before = { thread: { id: 'owner' }, cwd, sandbox: { type: 'workspaceWrite', writableRoots: [cwd], networkAccess: false },
     activePermissionProfile: { id: ':workspace', extends: null }, approvalPolicy: 'on-request', approvalsReviewer: 'user', runtimeWorkspaceRoots: [cwd] }
   let finished = 0, fenced = 0, restored = false
-  const host: ReviewPermissionHost = { cwd, codexHome, threadId: 'owner', finish() { finished++ }, fence() { fenced++ },
+  const host: ReviewPermissionHost = { cwd, codexHome, threadId: 'owner', assertCurrent() {}, finish() { finished++ }, fence() { fenced++ },
     async rpc(method, params) {
       calls.push({ method, params })
       if (method === 'thread/resume') return options.badRestore && restored ? { ...before, approvalPolicy: 'never' } : structuredClone(before)
@@ -59,7 +59,9 @@ test('exact profile survives config readback, native child correlation, then res
   expect(params).not.toHaveProperty('sandboxPolicy')
   expect(f.config.permissions[params.permissions]).toEqual({ filesystem: { ':root': 'read', [f.stageDir]: 'write' }, network: { enabled: false } })
   expect(f.finished()).toBe(0)
-  f.settle(); await lease.restore()
+  f.settle()
+  expect(await lease.waitSettled(10)).toBe(true)
+  await lease.restore()
   expect(f.finished()).toBe(0)
   await lease.release()
   expect(f.finished()).toBe(1); expect(f.fenced()).toBe(0)
@@ -125,6 +127,47 @@ test('an observed native thread without a correlated spawn edge cannot be assume
   for (const method of ['turn/started', 'turn/completed']) f.transaction.observe({ method, params: { threadId: 'unclassified', turn: { id: 'unknown-turn' } } })
   await expect(lease.restore()).rejects.toThrow('settlement')
   expect(f.finished()).toBe(0)
+})
+
+test('bounded settlement waits for delayed correlated completion without restoring early', async () => {
+  const f = fixture(), lease = await f.transaction.prepare()
+  await lease.start([])
+  const waiting = lease.waitSettled(1000)
+  expect(f.calls.some(call => call.method === 'thread/settings/update')).toBe(false)
+  expect(f.finished()).toBe(0)
+  setTimeout(() => f.settle(), 5)
+  expect(await waiting).toBe(true)
+  expect(f.fenced()).toBe(0)
+  await lease.restore(); await lease.release()
+  expect(f.finished()).toBe(1)
+})
+
+test('missing or wrong child times out fenced; late correct completion cannot revive the lease', async () => {
+  for (const wrongChild of [false, true]) {
+    const f = fixture(), lease = await f.transaction.prepare()
+    await lease.start([])
+    const waiting = lease.waitSettled(10)
+    if (wrongChild) {
+      for (const method of ['turn/started', 'turn/completed']) f.transaction.observe({ method, params: { threadId: 'stale-child', turn: { id: 'other-turn' } } })
+      f.transaction.observe({ method: 'turn/completed', params: { threadId: 'owner', turn: { id: 'parent-turn' } } })
+    }
+    expect(await waiting).toBe(false)
+    expect(f.fenced()).toBeGreaterThan(0)
+    f.settle()
+    await expect(lease.restore()).rejects.toThrow('settlement')
+    expect(f.calls.some(call => call.method === 'thread/settings/update')).toBe(false)
+    expect(f.finished()).toBe(0)
+  }
+})
+
+test('settlement wait enforces finite bounds and current host identity', async () => {
+  const f = fixture(), lease = await f.transaction.prepare()
+  await lease.start([]); f.settle()
+  for (const timeout of [0, -1, 60_001, NaN, Infinity, 1.5]) await expect(lease.waitSettled(timeout)).rejects.toThrow('timeout')
+  expect(f.fenced()).toBe(0)
+  f.host.assertCurrent = () => { throw new Error('stale owner generation') }
+  expect(await lease.waitSettled(10)).toBe(false)
+  expect(f.fenced()).toBeGreaterThan(0); expect(f.finished()).toBe(0)
 })
 
 test('restored policy stays exclusive until acknowledgement; abandonment or late activity prevents release', async () => {

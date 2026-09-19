@@ -136,7 +136,9 @@ try {
     assert.equal(broker.state().phase, 'closed', 'active native grandchild keeps the owner fenced')
     process.stdout.write('PASS: real native grandchild outlived direct child and parent; attempted restoration fenced the broker\n')
   } else {
+    const settlement = lease.waitSettled(10_000)
     releaseGrandchild()
+    assert.equal(await settlement, true, 'staged result can precede native descendant settlement')
     await until(() => notifications.some(message => message.method === 'turn/completed' && message.params.threadId === grandchildId))
     await lease.restore()
     await assert.rejects(gateway.request('turn/start', { threadId, input: [{ type: 'text', text: 'PARENT_RESTORED_PROBE' }] }, broker.state().epoch))
