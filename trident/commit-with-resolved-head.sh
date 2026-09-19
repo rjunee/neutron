@@ -116,7 +116,37 @@ fi
 # `Co-Authored-By:` trailer, the subject, the author and the parent are left untouched.
 # Only rewrite the commit THIS invocation created: `--dry-run` or a no-op commit leaves
 # HEAD where the probe found it, and an older commit must never be amended by mistake.
-new_head=$(git rev-parse --verify HEAD 2>/dev/null)
+# The re-probe is checked on BOTH its exit status and its output. An unchecked answer let a
+# failing `rev-parse` read as "HEAD did not move" (the `--dry-run`/no-op case above), which
+# skipped the strip and exited 0 with the trailer on the branch -- fail OPEN. It now fails
+# CLOSED exactly like the cat-file read-back below: withdraw to the probed HEAD (a no-op on
+# the branch when this invocation created no commit; the index is kept either way), check
+# the withdrawal, and exit a code of this path's own -- 69 when the re-probe failed, 70 when
+# it succeeded and named no object -- so the two are told apart on stderr and in tests.
+reprobe_err=$(mktemp)
+trap 'rm -f "$reprobe_err"' EXIT
+new_head=$(git rev-parse --verify HEAD 2>"$reprobe_err")
+reprobe_exit=$?
+if [ "$reprobe_exit" -ne 0 ] || [ -z "$new_head" ]; then
+  if [ "$reprobe_exit" -ne 0 ]; then
+    detail=$(tr '\n' ' ' <"$reprobe_err" | sed 's/[[:space:]]*$//')
+    reprobe_why="git rev-parse --verify HEAD exited $reprobe_exit${detail:+: $detail}"
+    reprobe_code=69
+  else
+    reprobe_why="git rev-parse --verify HEAD named no object"
+    reprobe_code=70
+  fi
+  git reset -q --soft "$head_oid"
+  reset_exit=$?
+  if [ "$reset_exit" -ne 0 ]; then
+    echo "commit refused: HEAD could not be re-read after the commit for the Claude-Session check ($reprobe_why) AND the commit could not be withdrawn (git reset --soft $head_oid exited $reset_exit); the commit this invocation created, if any, is on the branch and may carry the trailer" >&2
+    exit "$reprobe_code"
+  fi
+  echo "commit refused: HEAD could not be re-read after the commit for the Claude-Session check ($reprobe_why); the commit this invocation created, if any, was withdrawn, HEAD is back at $head_oid and the index still holds the staged changes; an in-progress merge, cherry-pick or revert that the withdrawn commit concluded is not restored (MERGE_HEAD and its siblings are gone) -- re-run it before retrying" >&2
+  exit "$reprobe_code"
+fi
+rm -f "$reprobe_err"
+trap - EXIT
 if [ -n "$new_head" ] && [ "$new_head" != "$head_oid" ]; then
   # Raw object bytes in, raw message bytes out (see strip_session_trailer); the files, not
   # shell variables, carry them, so no trailing newline is lost on the way to `-F`.

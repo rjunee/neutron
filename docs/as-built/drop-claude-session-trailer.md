@@ -323,7 +323,7 @@ reproduced or measured against the real script before the change.
   the byte-exact contract -- the filter removes only the one separator of a trailer-only
   paragraph; any other blank line the first commit stored is kept as it is.
 
-### Review findings on round 11 (`9e9ad881`, APPROVE with nits), and how each was closed
+### Review findings on round 11 (`9e9ad881`), and how each was closed
 
 - **NIT -- a signing letter inside a short-flag cluster (`-aS`, `-sS`) was not forwarded to
   the strip amend.** The forward arm matched `-S`, `-S<key>` and the long forms only as whole
@@ -353,6 +353,52 @@ reproduced or measured against the real script before the change.
   link either. Kept as is: it is the same session URL on the same public machine-authored
   history that #1133 objects to, and the boolean is the only CLI switch for the trailer.
 
+### Review findings on round 12 (`2d60f0c2`, REQUEST_CHANGES twice: run d582beae, syntheses review-3V5Xiy and review-ZEAIoK), and how each was closed
+
+- **MAJOR -- the post-commit HEAD re-probe (`:119` at `2d60f0c2`) failed OPEN.**
+  `new_head=$(git rev-parse --verify HEAD 2>/dev/null)` discarded the exit status (the
+  `$(...)` capture drops it, `2>/dev/null` drops the reason), and the guard on the next line,
+  `[ -n "$new_head" ] && [ "$new_head" != "$head_oid" ]`, read an EMPTY answer as "HEAD did
+  not move" -- the `--dry-run`/no-op case. A re-probe that failed therefore skipped the strip
+  and the wrapper exited 0 (no `set -e`; the last command was a false `if`) with the
+  trailer-bearing commit on the branch. That contradicted the script's own "Fail CLOSED"
+  comments, the G135 row ("an amend (or read-back) that fails withdraws the trailer-bearing
+  commit") and this record. Closed: the re-probe is now checked on both its status and its
+  output and fails CLOSED exactly like the cat-file read-back one step later -- `reset --soft`
+  to the probed HEAD (a no-op on the branch when this invocation created no commit; the index
+  is kept either way), the withdrawal checked and the truth reported when the reset fails
+  ("the commit this invocation created, if any, is on the branch and may carry the trailer"),
+  with an exit code of this path's own: 69 when `rev-parse` exited non-zero (its stderr is
+  quoted in the refusal), 70 when it exited 0 and named no object. The "if any" wording is
+  deliberate: a `--dry-run` invocation reaches this line having created no commit. The codes
+  are pinned in the tests, the same split the pre-commit probe draws with 65/66 (an unpinned
+  code split was silently collapsible once before). Tested with a counting shim
+  (`shimmedGitFailingNthRevParse`): real git except that the Nth `rev-parse` it sees runs an
+  arm first, with a count file as the positive control. The wrapper's first `rev-parse` is
+  the pre-commit probe and its second the post-commit re-probe, so N=2 faults exactly the
+  re-probe after the commit has really landed; the pass-through control measures the count
+  at 3 (git runs its own subcommands from `GIT_EXEC_PATH`, so no internal `rev-parse` ever
+  reaches a PATH shim) and the trailer stripped. Three tests then cover the arm: second
+  `rev-parse` exits 5 -> status 69, `could not be re-read`, `exited 5`, `was withdrawn`, HEAD
+  back at the parent, `change.txt` still staged, branch log free of the trailer, count file
+  `2`, and no `HEAD does not resolve` (the probe's 65 message never fired); second `rev-parse`
+  exits 0 with no output -> status 70, `named no object`, withdrawn, count `2`; double fault
+  (`rev-parse` exit 5 and `reset` exit 9) -> status 69, `could not be withdrawn`, `may carry
+  the trailer`, never `was withdrawn`, and HEAD really is one commit past the parent with the
+  trailer on it. Mutation: see the next section (guard 32 / 3 mutated, 35 / 0 restored).
+- **The G135 enforcement anchors `:186` and `:199` pointed at comments** (the amend is
+  `:200` at `2d60f0c2`, the amend-path reset `:213`), and the row carried no pin for the
+  round-12 tests. Closed: every `commit-with-resolved-head.sh:` anchor was re-measured with
+  `grep -n` at the final tree and verified with `sed -n` to land on a command line -- the
+  strip function `:19`, the checked re-probe `:130`, its reset `:139`, the cat-file read
+  `:156`, its reset `:161`, the strip call `:170`, the amend `:230`, the amend-path reset
+  `:243` -- and the row now pins the round-12 tests (`realgit.test.ts:662`, `:690`) and the
+  four re-probe tests (`:754`, `:767`, `:786`, `:801`). The prose names the third fail-closed
+  path and its codes.
+- **The round-11 section title claimed "APPROVE with nits"** and this record omitted the
+  finding above. Closed: retitled without a verdict claim; the Re-landed paragraph for round
+  12 no longer says "APPROVE"; this section records the round-12 verdict.
+
 ### Mutation, proven by hand before nomination
 
 `grep -c '\[Cc\]\[Ll\]\[Aa\]\[Uu\]\[Dd\]\[Ee\]-\[Ss\]\[Ee\]\[Ss\]\[Ss\]\[Ii\]\[Oo\]\[Nn\]:\*) drop\[i\]=1; removed=1 ;;'
@@ -362,12 +408,24 @@ matched and kept) turns 16 of the 29 tests in `commit-with-resolved-head-realgit
 red (every strip test, including three added this round) while
 `runtime/adapters/claude-code/persistent/__tests__/build-settings.test.ts`, which never runs
 the wrapper, stays green (15 pass); restoring the arm returns the guard to 29 / 0. That was
-round 10's nomination. Round 12 nominates the clustered-`-S` forward (the round-11 section
-above: `*) amend_flags+=("-S${arg#*S}") ;;` replaced by `*) ;;`, guard
-`commit-with-resolved-head-realgit.test.ts` 29 / 2 mutated and 31 / 0 restored, control
-`trident/inner-workflow.test.ts` 153 / 0 either way).
+round 10's nomination.
+
+Round 13 nominates the checked re-probe arm (the round-12 section above).
+`grep -cF 'if [ "$reprobe_exit" -ne 0 ] || [ -z "$new_head" ]; then'
+trident/commit-with-resolved-head.sh` = 1. Replacing that line with `if false; then`
+restores the pre-fix behaviour exactly: the checked arm is dead, the next line's `-n` guard
+is intact, so a failed or empty re-probe skips the strip and the wrapper exits 0 with the
+trailer on the branch. Measured: guard `commit-with-resolved-head-realgit.test.ts` 32 pass /
+3 fail mutated (exactly the three faulting re-probe tests: they see exit 0 instead of 69/70,
+HEAD not withdrawn, the trailer in the branch log) and 35 / 0 restored; control
+`trident/inner-workflow.test.ts` 153 / 0 either way.
 
 The earlier nominations still hold and are kept as by-hand checks:
+
+Round 12 nominated the clustered-`-S` forward (the round-11 section above:
+`*) amend_flags+=("-S${arg#*S}") ;;` replaced by `*) ;;`, guard
+`commit-with-resolved-head-realgit.test.ts` 29 / 2 mutated and 31 / 0 restored, control
+`trident/inner-workflow.test.ts` 153 / 0 either way).
 
 
 `grep -c 'git commit --amend --only --no-verify' trident/commit-with-resolved-head.sh` = 1.
@@ -390,6 +448,13 @@ green; restoring the line returns the guard to green. (The round-8 pattern mutat
   only known after git has composed it (`-m`, `-F`, `-C`, the editor), so the wrapper lets
   the commit land and withdraws it instead, which is the same fail-closed path every other
   amend failure takes.
+- The third `rev-parse` (the `stripped_head=` line that feeds the stdout report after the
+  amend): left unchecked on purpose. It runs only after a successful amend, so by then the
+  trailer is gone; a failure there can only blank one report line, never leave the trailer
+  on the branch, and Forge is told to `git rev-parse HEAD` itself rather than copy the line.
+  The round-12 finding named status and emptiness on the re-probe; no hex check was added
+  to it either, for the same reason: the re-probe's answer is only ever compared with the
+  probed HEAD, never used as a sha.
 - `docs/AS_BUILT.md` and every existing shard: frozen; this record is a new shard.
 
 ### Effect after merge
@@ -441,6 +506,11 @@ review-progress gate after the round-10 panel returned REQUEST_CHANGES a second 
 as a whole, so those findings are what this round closes. It touches only the wrapper, its
 real-git tests, the G135 row and this record.
 
-Round 12 is the fix commit on top of round 11 (`9e9ad881`, APPROVE with the two nits closed
-in the section above): the clustered-`-S` forward arm, its two real-git tests, the G135 row
-and this record. The settings switch, the Forge brief and the strip filter are untouched.
+Round 12 is the fix commit on top of round 11 (`9e9ad881`, with the two nits closed in the
+section above): the clustered-`-S` forward arm, its two real-git tests, the G135 row and
+this record. The settings switch, the Forge brief and the strip filter are untouched.
+
+Round 13 is the fix commit on top of round 12 (`2d60f0c2`, REQUEST_CHANGES on the one
+finding above), on the same base `a1be24e0`: the worktree was fast-forwarded to the
+published head (no cherry-pick, no conflict) and one commit closes the finding. It touches
+only the wrapper, its real-git tests, the G135 row and this record.

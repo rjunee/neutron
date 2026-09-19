@@ -713,3 +713,104 @@ test('#1133: a clustered signing letter with an attached key id (-sSkey) forward
   expect(gpgsigHeaders(tree, 'HEAD')).toBe(0)
   expect(readFileSync(log, 'utf8')).toBe('')
 })
+
+// Round 13 (#1133). A shim that is real git except that the Nth `rev-parse` it is asked for
+// runs `arm` first (refuse, or answer nothing). The wrapper's FIRST rev-parse is the
+// pre-commit probe and its SECOND is the post-commit re-probe, so N=2 faults exactly the
+// re-probe and the commit has really landed by then. The count file is the positive control:
+// it must read N afterwards, proving the probe passed through the same shim and the fault hit
+// the call it was aimed at. (git runs its own subcommands from GIT_EXEC_PATH, not PATH, so no
+// internal rev-parse of git's own ever reaches this shim: a pass-through run counts exactly
+// the wrapper's three.)
+function shimmedGitFailingNthRevParse(nth: number, arm: string, extra: Record<string, number> = {}): { bin: string; count: string } {
+  const bin = mkdtempSync(join(tmpdir(), 'trident-head-nth-shim-'))
+  roots.push(bin)
+  const realGit = run(bin, 'sh', ['-c', 'command -v git']).stdout.trim()
+  const count = join(bin, 'rev-parse.count')
+  const extraArms = Object.entries(extra)
+    .map(([sub, code]) => `if [ "$1" = "${sub}" ]; then echo "shim: ${sub} refused" >&2; exit ${code}; fi\n`)
+    .join('')
+  writeFileSync(
+    join(bin, 'git'),
+    `#!/bin/sh\n` +
+      `if [ "$1" = "rev-parse" ]; then\n` +
+      `  n=$(( $(cat "${count}" 2>/dev/null || echo 0) + 1 )); echo "$n" > "${count}"\n` +
+      `  if [ "$n" -eq ${nth} ]; then ${arm}; fi\n` +
+      `fi\n` +
+      `${extraArms}exec ${realGit} "$@"\n`,
+    { mode: 0o755 },
+  )
+  return { bin, count }
+}
+
+function runGuardWithShim(tree: string, branch: string, bin: string) {
+  return spawnSync('bash', [guard, branch, '-m', 'feat: subject', '-m', SESSION, '-m', CO_AUTHOR], {
+    cwd: tree,
+    encoding: 'utf8',
+    env: { ...process.env, PATH: `${bin}:${process.env.PATH ?? ''}` },
+  })
+}
+
+test('#1133: THE CONTROL for the counting shim: with no fault armed, the wrapper makes exactly three rev-parse calls and strips the trailer', () => {
+  const { tree, branch, parent } = fixture()
+  const { bin, count } = shimmedGitFailingNthRevParse(0, 'exit 5')
+
+  const result = runGuardWithShim(tree, branch, bin)
+
+  expect(result.status, result.stderr || result.stdout).toBe(0)
+  expect(git(tree, 'log', '-1', '--format=%B')).toBe(`feat: subject\n\n${CO_AUTHOR}`)
+  expect(git(tree, 'rev-parse', 'HEAD^')).toBe(parent)
+  // Probe, re-probe, stripped_head report: the second one is the post-commit re-probe.
+  expect(readFileSync(count, 'utf8').trim()).toBe('3')
+})
+
+test('#1133: a post-commit HEAD re-probe that FAILS withdraws the commit instead of skipping the strip (fail closed, second rev-parse only)', () => {
+  const { tree, branch, parent } = fixture()
+  const { bin, count } = shimmedGitFailingNthRevParse(2, 'echo "shim: rev-parse refused" >&2; exit 5')
+
+  const result = runGuardWithShim(tree, branch, bin)
+
+  expect(result.status).toBe(69)
+  expect(result.stderr).toContain('shim: rev-parse refused')
+  expect(result.stderr).toContain('could not be re-read')
+  expect(result.stderr).toContain('exited 5')
+  expect(result.stderr).toContain('was withdrawn')
+  // The pre-commit probe's own refusal (exit 65) never fired: the fault hit the re-probe.
+  expect(result.stderr).not.toContain('HEAD does not resolve')
+  expect(git(tree, 'rev-parse', 'HEAD')).toBe(parent)
+  expect(git(tree, 'diff', '--cached', '--name-only')).toBe('change.txt')
+  expect(run(tree, 'git', ['log', '--format=%B', branch]).stdout).not.toContain('Claude-Session')
+  expect(readFileSync(count, 'utf8').trim()).toBe('2')
+})
+
+test('#1133: a post-commit HEAD re-probe that succeeds and names NOTHING is refused and withdrawn, distinctly from a failed re-probe', () => {
+  const { tree, branch, parent } = fixture()
+  const { bin, count } = shimmedGitFailingNthRevParse(2, 'exit 0')
+
+  const result = runGuardWithShim(tree, branch, bin)
+
+  expect(result.status).toBe(70)
+  expect(result.stderr).toContain('named no object')
+  expect(result.stderr).toContain('was withdrawn')
+  expect(git(tree, 'rev-parse', 'HEAD')).toBe(parent)
+  expect(git(tree, 'diff', '--cached', '--name-only')).toBe('change.txt')
+  expect(run(tree, 'git', ['log', '--format=%B', branch]).stdout).not.toContain('Claude-Session')
+  expect(readFileSync(count, 'utf8').trim()).toBe('2')
+})
+
+test('#1133: a failed re-probe AND a failed withdrawal is reported as the commit remaining, never as withdrawn (double fault on the re-probe path)', () => {
+  const { tree, branch, parent } = fixture()
+  const { bin } = shimmedGitFailingNthRevParse(2, 'echo "shim: rev-parse refused" >&2; exit 5', { reset: 9 })
+
+  const result = runGuardWithShim(tree, branch, bin)
+
+  expect(result.status).toBe(69)
+  expect(result.stderr).toContain('shim: reset refused')
+  expect(result.stderr).toContain('could not be withdrawn')
+  expect(result.stderr).toContain('may carry the trailer')
+  expect(result.stderr).not.toContain('was withdrawn')
+  // The truth the message states: the commit really is still on the branch, trailer and all.
+  expect(git(tree, 'rev-parse', 'HEAD')).not.toBe(parent)
+  expect(git(tree, 'rev-parse', 'HEAD^')).toBe(parent)
+  expect(git(tree, 'log', '-1', '--format=%B')).toContain(SESSION)
+})
