@@ -10,19 +10,32 @@ while retaining required-seat and missing-synthesis stops G057–G060.
 
 Open supplies verdict and project-review schemas and host validators
 (`open/wiring/project-build.ts:346`). The review process receives the brief on
-stdin, an explicit model and requested effort, process cwd, read-only sandbox,
-never-approval policy, and a structured-output schema. Its selected account home
+stdin, an explicit model, process cwd, read-only sandbox and a structured-output
+schema. CLI review effort remains inert as specified by
+`trident/phase-models.ts:245`; work needing an approval decision is refused at
+the request boundary, and no approval-routing arguments are built, as required
+by the thread-continuity spec item's no-escalation criterion. Its selected account home
 is retained; the transport reads subscription credentials there and does not
 materialize credentials elsewhere. GitHub and Codex API-key override variables
-are scrubbed from child environments (`runtime/workers/codex-review.ts:17`, `:63`).
+are scrubbed from child environments (`runtime/workers/codex-review.ts:18`, `:28`).
+
+Admission verifies subscription credential shape, including rejecting mixed
+OAuth/API-key bundles, before any review is supported; dispatch rechecks the
+same predicate. The startup probe checks the exec/resume help surfaces separately
+from configuration: a strict invocation ignores user config and places a bogus
+sentinel after the sole relied-on key, `sandbox_mode`. It must fail naming the
+sentinel, so a rejected real key or silently accepted unknown key cannot pass
+(`runtime/workers/codex-review.ts:59`). Host construction preflights every enabled
+review route and synthesis, preserving disabled peers as optional; failures
+therefore stop before plan/build worker turns (`trident/project-review-source.ts:55`).
 
 The CLI writes a candidate response to a host-chosen `-o` path. The structured
 response has one `envelope` field so completed and blocked trailers can remain
 distinct five-field objects inside a schema with an object root. The host checks
 the exact run, step, schema, envelope fields and domain payload independently
-(`runtime/workers/codex-review.ts:76`). Only exit zero plus observed thread and
-completed-turn events can promote it to an atomic durable receipt (`:170`,
-`:187`). Restart reads that receipt without replaying the step; malformed output,
+(`runtime/workers/codex-review.ts:92`). Only exit zero plus observed thread and
+completed-turn events can promote it to an atomic durable receipt (`:185`,
+`:202`). Restart reads that receipt without replaying the step; malformed output,
 missing completion and nonzero-after-output cannot be laundered into approval.
 Usage comes from turn telemetry; the reported model remains unknown because the
 event stream does not attest it. Cancellation and wall expiry terminate the
@@ -32,19 +45,26 @@ Each recurring cross-provider seat stores its observed thread under run, project
 cwd, seat, model and selected-account identity. Later rounds, including a rebuilt
 source, pass the stored id to `exec resume`; seats never share a thread. In-source
 overlap queues under the configured wall setting, while another source's lock
-fails closed (`trident/project-review-source.ts:69`). An uncertain dispatch keeps
+fails closed (`trident/project-review-source.ts:77`). An uncertain dispatch keeps
 its ownership lock: automatic lock recovery is deliberately not claimed.
 
-Verification: the focused runner/source tests and the entire consuming
-`open/__tests__/project-build-e2e.test.ts` surface pass together (125 tests).
+Verification: the focused runner/source/host tests and the entire consuming
+`open/__tests__/project-build-e2e.test.ts` surface pass together (172 tests).
 The consuming fixture enables the real production Codex runner and substitutes
 only the CLI process's model answer: the valid peer reaches merge and a wrong-run
-envelope blocks it. Both root and Trident TypeScript checks pass. Four executable
+envelope blocks it. Invalid credentials and a missing required runner refuse
+before any plan, build or model call. Both root and Trident TypeScript checks pass.
+Nine executable
 mutations were restored after producing expected failures: removing review role
 support blocks the consuming merge; weakening read-only to workspace-write fails
 the argv guard; bypassing the run-id comparison makes the wrong-run consuming
 case merge and fail its guard; accepting writable review requests fails the
-grant-refusal test. The disabled-peer/default build remains a passing control.
+grant-refusal test. The new probe/admission mutations also fail: putting the
+sentinel first, accepting any nonzero probe without its sentinel diagnosis,
+accepting a mixed OAuth/API-key account, bypassing admission preflight, and
+preflighting deliberately disabled peers. The disabled-peer/default build remains
+a passing control. A no-model-call probe against the installed CLI also rejected
+the sentinel with exit 1 and named that exact unknown key.
 
 Limits: these are offline executable and consuming tests, not a live provider or
 deployment acceptance run. The broader thread-continuity spec item remains open:

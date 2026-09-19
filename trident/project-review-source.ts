@@ -52,6 +52,14 @@ export function createProjectReviewSource(input: ProjectReviewSourceOptions): Re
   const routes = [resolve('review_rubric', 'core'), resolve('review_adversarial', 'core'),
     resolve('review_codex', 'peer'), resolve('review_kimi', 'peer')]
   const synthesisRoute = resolve('synthesis', 'core')
+  // Stable capability failures belong at host admission, before a planner or
+  // builder spends a turn. Dispatch still rechecks to catch later disconnects.
+  for (const route of [...routes, synthesisRoute].filter(route => route.seat.enabled)) {
+    const runner = options.runnerFor(route.model, route.seat)
+    if (!runner || runner.provider !== route.seat.provider) throw Error(`Review seat ${route.seat.id}: configured runner is missing or mismatched`)
+    const support = runner.supports(route === synthesisRoute ? 'synthesis' : 'review', placementFor(route.seat.provider, options.replProvider))
+    if (!support.ok) throw Error(`Review seat ${route.seat.id}: ${support.reason}: ${support.detail}`)
+  }
   const seats = Object.freeze(routes.map(route => route.seat))
   const records = new Map<string, Promise<SeatObservation>>()
   const retried = new Set<string>()

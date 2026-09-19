@@ -24,7 +24,14 @@ const args = process.argv.slice(2);
 if (args.includes('--version') || args[0] === 'login') process.exit(0);
 const mode = readFileSync(process.env.FIXTURE_DIR + '/mode', 'utf8');
 if (args.includes('--help')) {
+  if (mode === 'missing-resume' && args[1] === 'resume') process.exit(2);
   writeFileSync(1, mode === 'bad-cli' ? '--json' : '--output-schema --json --output-last-message --ignore-rules'); process.exit(0);
+}
+if (args.includes('--strict-config')) {
+  appendFileSync(process.env.FIXTURE_DIR + '/probes', JSON.stringify(args)+'\\n');
+  const key = mode === 'bad-sandbox' ? 'sandbox_mode' : mode === 'missing-sentinel' ? 'another_key' : 'neutron_codex_contract_probe_sentinel';
+  writeFileSync(2, 'unknown configuration field ' + key + ' in -c/--config override');
+  process.exit(mode === 'sentinel-zero' ? 0 : 1);
 }
 const prompt = readFileSync(0, 'utf8');
 const req = JSON.parse(prompt.split('\\n')[0].slice('Request (data): '.length));
@@ -63,12 +70,13 @@ test('review and synthesis use read-only Codex exec with stdin, host schema, sel
     const [call] = await f.calls()
     expect(call.args.slice(0, 2)).toEqual(['exec', '--json'])
     expect(call.args).toEqual(['exec', '--json', '--ignore-user-config', '--ignore-rules', '-m', 'requested-model',
-      '-c', 'sandbox_mode="read-only"', '-c', 'approval_policy="never"', '-c', 'model_reasoning_effort="xhigh"',
+      '-c', 'sandbox_mode="read-only"',
       '--output-schema', expect.any(String), '-o', expect.any(String), '-'])
     expect(call.cwd).toBe(f.req.cwd)
     expect(call.prompt).toContain('Review the bounded diff.')
     expect(call.env.CODEX_HOME).toBe(f.home)
     expect(call.env.CONTROL).toBe('visible')
+    expect(call.args.join(' ')).not.toMatch(/approval_policy|approvals_reviewer|approve-for-me|model_reasoning_effort/)
     for (const key of [...CODEX_CLI_AUTH_ENV_VARS, 'GH_TOKEN', 'GH_ENTERPRISE_TOKEN', 'GITHUB_TOKEN']) expect(call.env[key]).toBeUndefined()
     expect(call.args[call.args.indexOf('-o') + 1]).not.toBe(f.req.result.path)
     const schema = JSON.parse(await readFile(call.args[call.args.indexOf('--output-schema') + 1], 'utf8'))
@@ -134,6 +142,47 @@ test('missing CLI contract and non-subscription account refuse before dispatch',
   await writeFile(join(f.home, 'auth.json'), JSON.stringify({ OPENAI_API_KEY: 'metered' }))
   expect(await f.run()).toEqual({ kind: 'refused', reason: 'provider-not-connected' })
 })
+
+test('startup validates sandbox before a final sentinel and ignores user config', async () => {
+  const f = await fixture()
+  await writeFile(join(f.home, 'config.toml'), 'unknown_user_field = true\n')
+  expect(f.runner().supports('review', 'headless')).toEqual({ ok: true })
+  const probes = (await readFile(join(f.dir, 'probes'), 'utf8')).trim().split('\n').map(row => JSON.parse(row))
+  expect(probes).toEqual([['exec', '--strict-config', '--ignore-user-config', '-c', 'sandbox_mode="read-only"',
+    '-c', 'neutron_codex_contract_probe_sentinel=true']])
+  expect(probes[0].at(-1)).toBe('neutron_codex_contract_probe_sentinel=true')
+  expect(probes[0]).not.toContain('--help')
+  await expect(f.calls()).rejects.toThrow()
+})
+
+for (const mode of ['missing-resume', 'bad-sandbox', 'missing-sentinel', 'sentinel-zero']) {
+  test(`startup ${mode} refuses admission without any model turn`, async () => {
+    const f = await fixture(mode); const runner = f.runner()
+    expect(runner.supports('review', 'headless')).toMatchObject({ ok: false, reason: 'cli-contract' })
+    expect(await runner.run(f.req, 'headless', new AbortController().signal)).toEqual({ kind: 'refused', reason: 'cli-contract' })
+    await expect(f.calls()).rejects.toThrow()
+  })
+}
+
+const invalidAccounts = [
+  ['bare key', 'sk-fixture'],
+  ['key only', JSON.stringify({ OPENAI_API_KEY: 'metered' })],
+  ['mixed key and OAuth', JSON.stringify({ OPENAI_API_KEY: 'metered', tokens: { access_token: 'fixture', refresh_token: 'fixture' } })],
+  ['API-key mode with OAuth', JSON.stringify({ auth_mode: 'apikey', tokens: { access_token: 'fixture', refresh_token: 'fixture' } })],
+  ['malformed', '{'], ['missing tokens', '{}'],
+  ['missing refresh token', JSON.stringify({ tokens: { access_token: 'fixture' } })],
+  ['invalid token types', JSON.stringify({ tokens: { access_token: 42, refresh_token: 'fixture' } })],
+] as const
+for (const [label, bytes] of invalidAccounts) {
+  test(`${label} refuses both startup admission and a previously admitted runner`, async () => {
+    const f = await fixture(); const admitted = f.runner()
+    expect(admitted.supports('review', 'headless')).toEqual({ ok: true })
+    await writeFile(join(f.home, 'auth.json'), bytes)
+    expect(f.runner().supports('review', 'headless')).toMatchObject({ ok: false, reason: 'provider-not-connected' })
+    expect(await admitted.run(f.req, 'headless', new AbortController().signal)).toEqual({ kind: 'refused', reason: 'provider-not-connected' })
+    await expect(f.calls()).rejects.toThrow()
+  })
+}
 
 test('pre-cancelled review does not consume the step reservation', async () => {
   const f = await fixture(); const ac = new AbortController(); ac.abort()

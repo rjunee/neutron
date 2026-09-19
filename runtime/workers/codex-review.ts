@@ -1,5 +1,6 @@
 import { createHash } from 'node:crypto'
 import { readFile, writeFile, rename } from 'node:fs/promises'
+import { readFileSync } from 'node:fs'
 import { dirname, join } from 'node:path'
 import type { BoundedWorkOutcome, BoundedWorkRequest, Usage } from '../bounded-work.ts'
 import { CODEX_CLI_AUTH_ENV_VARS } from '../adapters/codex-cli/auth.ts'
@@ -12,6 +13,17 @@ export interface CodexReviewContract {
 
 const unknown = (detail: string): BoundedWorkOutcome => ({ kind: 'unknown', detail })
 const refused = (): BoundedWorkOutcome => ({ kind: 'refused', reason: 'capability-unsupported' })
+const PROBE_SENTINEL = 'neutron_codex_contract_probe_sentinel'
+
+function subscriptionReady(env: NodeJS.ProcessEnv): boolean {
+  if (!env.CODEX_HOME) return false
+  try {
+    const auth = JSON.parse(readFileSync(join(env.CODEX_HOME, 'auth.json'), 'utf8'))
+    return auth !== null && typeof auth === 'object' && !auth.OPENAI_API_KEY && auth.auth_mode !== 'apikey'
+      && typeof auth.tokens?.access_token === 'string' && auth.tokens.access_token.trim() !== ''
+      && typeof auth.tokens?.refresh_token === 'string' && auth.tokens.refresh_token.trim() !== ''
+  } catch { return false }
+}
 
 export function codexWorkerEnv(source: NodeJS.ProcessEnv): NodeJS.ProcessEnv {
   return Object.fromEntries(Object.entries(source).filter(([key]) =>
@@ -44,14 +56,24 @@ export function createCodexReviewTransport(options: {
   live: Map<string, { readonly exitCode: number | null }>
 }) {
   const env = codexWorkerEnv(options.env)
-  const cliReady = options.contracts.size > 0 && [false, true].every(resume => {
+  const connected = subscriptionReady(env)
+  const cliReady = connected && options.contracts.size > 0 && [false, true].every(resume => {
     try {
-      const probe = Bun.spawnSync(['codex', 'exec', ...(resume ? ['resume'] : []), '--strict-config', '--ignore-user-config',
-        '-c', 'sandbox_mode="read-only"', '-c', 'approval_policy="never"', '--help'], { env, timeout: 5_000 })
+      const probe = Bun.spawnSync(['codex', 'exec', ...(resume ? ['resume'] : []), '--help'], { env, timeout: 5_000 })
       return probe.exitCode === 0 && ['--output-schema', '--json', '--output-last-message', '--ignore-rules']
         .every(flag => probe.stdout.toString().includes(flag))
     } catch { return false }
-  })
+  }) && (() => {
+    try {
+      // --help bypasses config validation. The deliberately unknown LAST key
+      // makes this invocation stop before any model call, after checking every
+      // real override. Codex reports only the first unknown key.
+      const probe = Bun.spawnSync(['codex', 'exec', '--strict-config', '--ignore-user-config',
+        '-c', 'sandbox_mode="read-only"', '-c', `${PROBE_SENTINEL}=true`],
+      { env, stdin: 'ignore', timeout: 5_000 })
+      return probe.exitCode !== 0 && new RegExp(`unknown configuration field [\x60'"]?${PROBE_SENTINEL}[\x60'"]? in -c/--config override`).test(probe.stderr.toString())
+    } catch { return false }
+  })()
 
   const run = async (req: BoundedWorkRequest, signal: AbortSignal): Promise<BoundedWorkOutcome> => {
     const contract = options.contracts.get(req.result.schema)
@@ -60,13 +82,7 @@ export function createCodexReviewTransport(options: {
       || !req.model_id || req.thread?.id === '') return refused()
     if (signal.aborted) return { kind: 'failed', class: 'killed', detail: 'Codex review was cancelled before dispatch' }
     // No per-call credential materialisation, ambient key billing, or fallback account.
-    if (!env.CODEX_HOME) return { kind: 'refused', reason: 'provider-not-connected' }
-    try {
-      const auth = JSON.parse(await readFile(join(env.CODEX_HOME, 'auth.json'), 'utf8'))
-      if (auth.OPENAI_API_KEY || auth.auth_mode === 'apikey' || !auth.tokens?.access_token || !auth.tokens?.refresh_token) {
-        return { kind: 'refused', reason: 'provider-not-connected' }
-      }
-    } catch { return { kind: 'refused', reason: 'provider-not-connected' } }
+    if (!subscriptionReady(env)) return { kind: 'refused', reason: 'provider-not-connected' }
     if (!cliReady) return { kind: 'refused', reason: 'cli-contract' }
 
     const key = createHash('sha256').update(JSON.stringify([req.run_id, req.step_id])).digest('hex')
@@ -116,8 +132,7 @@ export function createCodexReviewTransport(options: {
     catch { return unknown('Codex review brief could not be read') }
     if (options.briefIntegrity(brief) !== req.brief.integrity) return unknown('Codex review brief integrity mismatched')
     const args = ['exec', ...(req.thread ? ['resume', req.thread.id] : []), '--json', '--ignore-user-config', '--ignore-rules',
-      '-m', req.model_id, '-c', 'sandbox_mode="read-only"', '-c', 'approval_policy="never"',
-      ...(req.effort ? ['-c', `model_reasoning_effort=${JSON.stringify(req.effort)}`] : []),
+      '-m', req.model_id, '-c', 'sandbox_mode="read-only"',
       '--output-schema', schemaPath, '-o', candidate, '-']
     let thread: string | null = null
     let usage: Usage | null = null
@@ -190,5 +205,5 @@ export function createCodexReviewTransport(options: {
       return outcome.kind === 'completed' ? { ...outcome, thread_id: thread, usage } : outcome
     } catch { return unknown('Codex review result could not be committed') }
   }
-  return Object.assign(run, { ready: cliReady })
+  return Object.assign(run, { ready: cliReady, connected })
 }

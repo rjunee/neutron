@@ -511,6 +511,10 @@ if (argv.includes('--help')) {
   console.log('--output-schema --json --output-last-message --ignore-rules')
   process.exit(0)
 }
+if (argv.includes('--strict-config')) {
+  console.error('unknown configuration field neutron_codex_contract_probe_sentinel in -c/--config override')
+  process.exit(1)
+}
 const prompt = readFileSync(0, 'utf8')
 const requestLine = prompt.split('\\n').find(line => line.startsWith('Request (data): '))
 if (!requestLine) process.exit(91)
@@ -972,11 +976,10 @@ test('configured Codex review uses the production read-only headless runner and 
   const run = f.store.get(f.row.id)!
   expect(call.argv).toEqual([
     'exec', '--json', '--ignore-user-config', '--ignore-rules', '-m', 'gpt-5.6-sol',
-    '-c', 'sandbox_mode="read-only"', '-c', 'approval_policy="never"',
-    '-c', 'model_reasoning_effort="high"', '--output-schema', expect.any(String),
+    '-c', 'sandbox_mode="read-only"', '--output-schema', expect.any(String),
     '-o', expect.any(String), '-',
   ])
-  expect(call.argv.join(' ')).not.toMatch(/danger-full-access|workspace-write|approve-for-me|auto_review/)
+  expect(call.argv.join(' ')).not.toMatch(/danger-full-access|workspace-write|approve-for-me|auto_review|approval_policy|approvals_reviewer|model_reasoning_effort/)
   expect(run.worktree).not.toBeNull()
   expect(call.cwd).toBe(run.worktree!)
   expect(call.request).toMatchObject({ run_id: f.row.id, role: 'review', model_id: 'gpt-5.6-sol',
@@ -993,6 +996,31 @@ test('configured Codex review uses the production read-only headless runner and 
   const originMain = await spawnCapture(['git', '-C', f.origin, 'rev-parse', 'refs/heads/main'], f.origin)
   expect(originMain.stdout.trim()).toBe(evidence.brief.snapshot.head)
   expect(originMain.stdout.trim()).not.toBe(f.baseSha)
+}, 300_000)
+
+for (const [label, auth] of [
+  ['API key', JSON.stringify({ OPENAI_API_KEY: 'metered' })],
+  ['mixed OAuth and API key', JSON.stringify({ OPENAI_API_KEY: 'metered', tokens: { access_token: 'fixture', refresh_token: 'fixture' } })],
+  ['malformed account', '{'],
+] as const) {
+  test(`Codex review ${label} fails admission before plan or build`, async () => {
+    const f = await fixture({ codexReview: 'valid' })
+    await writeFile(join(f.input.codex_home!, 'auth.json'), auth)
+    await expect(drive(f, 'pr')).rejects.toThrow('Review seat review_codex: provider-not-connected')
+    expect(f.world.dispatches).toHaveLength(0)
+    expect(f.github.prs).toHaveLength(0)
+    await expect(readFile(f.codexCalls, 'utf8')).rejects.toThrow()
+  }, 300_000)
+}
+
+test('missing Codex review runner fails admission before plan or build', async () => {
+  const f = await fixture({ codexReview: 'valid' })
+  const options = await f.prepare()
+  const runnerFor = options.policy.review!.runnerFor
+  options.policy.review!.runnerFor = (model, seat) => seat.id === 'review_codex' ? undefined : runnerFor(model, seat)
+  await expect(createProjectBuildHost(options)).rejects.toThrow('Review seat review_codex: configured runner is missing or mismatched')
+  expect(f.world.dispatches).toHaveLength(0)
+  await expect(readFile(f.codexCalls, 'utf8')).rejects.toThrow()
 }, 300_000)
 
 test('a Codex review envelope for another run is observed but cannot merge', async () => {

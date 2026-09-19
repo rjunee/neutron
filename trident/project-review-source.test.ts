@@ -111,7 +111,7 @@ test('unreadable seat and thrown round block infrastructure; refusal stays unava
   f.answer(async () => ({ kind: 'refused', reason: 'provider-not-connected' }))
   expect(await f.check()).toMatchObject({ kind: 'blocked', on: expect.stringContaining('unavailable') })
   f.options.runnerFor = () => undefined
-  expect(await f.check()).toMatchObject({ kind: 'blocked', on: expect.stringContaining('unavailable') })
+  expect(f.source).toThrow('configured runner is missing or mismatched')
 })
 test('missing and unusable synthesis are separate infrastructure answers', async () => {
   const f = await fixture()
@@ -161,13 +161,21 @@ test('configuration and dispatch admission reject unsupported values with valid 
   f.options.phaseModels = { ...f.options.phaseModels, review_adversarial: { model: 'sol' } }
   const binding = f.options.runnerFor
   f.options.runnerFor = (model, seat) => ({ ...binding(model, seat)!, provider: 'openai' })
-  expect(await f.check()).toMatchObject({ kind: 'blocked', on: expect.stringContaining('unavailable') })
+  expect(f.source).toThrow('configured runner is missing or mismatched')
   f.options.runnerFor = (model, seat) => ({ ...binding(model, seat)!, supports: () => ({ ok: false, reason: 'capability-unsupported', detail: 'unsupported' }) })
-  expect(await f.check()).toMatchObject({ kind: 'blocked', on: expect.stringContaining('unavailable') })
+  expect(f.source).toThrow('capability-unsupported')
   expect(f.calls).toHaveLength(0)
   f.options.runnerFor = binding
   const controller = new AbortController(); controller.abort(); f.options.signal = controller.signal
   expect(await f.check()).toMatchObject({ kind: 'blocked', on: expect.stringContaining('unavailable') })
+  expect(f.calls).toHaveLength(0)
+})
+
+test('admission preflights synthesis as well as every enabled review route', async () => {
+  const f = await fixture(); const binding = f.options.runnerFor
+  f.options.runnerFor = (model, seat) => ({ ...binding(model, seat)!, supports: role => role === 'synthesis'
+    ? { ok: false, reason: 'capability-unsupported', detail: 'synthesis unavailable' } : { ok: true } })
+  expect(f.source).toThrow('Review seat synthesis: capability-unsupported')
   expect(f.calls).toHaveLength(0)
 })
 test('synthesis requires prior completed seats and never fabricates checkpoint approval', async () => {

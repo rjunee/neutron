@@ -163,7 +163,7 @@ test('project composition binds review source to admitted run and worktree', asy
       liveness: async () => 'unknown', run: async request => {
         requests.push(request)
         return { kind: 'completed', result: { verdict: 'APPROVE', findings: [] },
-          usage: { input_tokens: 0, output_tokens: 0 }, model_reported: request.model_id, thread_id: null }
+          usage: { input_tokens: 0, output_tokens: 0 }, model_reported: request.model_id, thread_id: request.thread?.id ?? 'fixture-review-thread' }
       } }),
   }
   const host = await createProjectBuildHost(f.options)

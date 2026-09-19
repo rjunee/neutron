@@ -115,7 +115,7 @@ export function createCodexHeadlessRunner(options: CodexHeadlessRunnerOptions = 
     }
     if (role === 'review' || role === 'synthesis') {
       if (!options.reviewContracts?.size || !options.reviewBriefIntegrity) return { ok: false, reason: 'capability-unsupported', detail: 'Codex review requires host result and brief validators' }
-      if (!baseEnv.CODEX_HOME) return { ok: false, reason: 'provider-not-connected', detail: 'Codex review requires its selected account home' }
+      if (!review.connected) return { ok: false, reason: 'provider-not-connected', detail: 'Codex review requires subscription credentials in its selected account home' }
       if (!review.ready) return { ok: false, reason: 'cli-contract', detail: 'Codex review CLI contract is unavailable' }
     }
     return probe.ok ? null : probe
