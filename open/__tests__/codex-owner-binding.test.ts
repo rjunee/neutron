@@ -40,8 +40,12 @@ function fixture(remote = false) {
   let approval = false
   let capability = true
   let terminalLag = 0
+  let projectGate: Promise<void> | undefined
+  let openingGate: Promise<void> | undefined
+  let modelGate: Promise<void> | undefined
   let onPrompt: ((prompt: string) => void) | undefined
   const bindings = new CodexOwnerBindings(async projectId => {
+    await projectGate
     if (!authorized) throw new Error('No connected project credential')
     const cwd = join(dir, projectId), codexHome = join(cwd, 'home')
     mkdirSync(codexHome, { recursive: true, mode: 0o700 })
@@ -51,6 +55,7 @@ function fixture(remote = false) {
   }, async options => {
     const project = JSON.parse(await Bun.file(join(options.codexHome, 'project-owner.json')).text()) as string
     launched.push(project)
+    await openingGate
     expect(options.env.OPENAI_API_KEY).toBeUndefined()
     if (fail) throw new Error('Existing owner needs explicit recovery')
     const binding = {} as CodexOwnerBinding
@@ -85,7 +90,7 @@ function fixture(remote = false) {
             if (method === 'model/list') return params.cursor ? { data: [{ model: 'large', displayName: 'Large' }], nextCursor: null }
               : { data: [{ model: 'small', displayName: 'Small' }], nextCursor: 'second' }
             expect(params.threadId).toBe(identity.threadId)
-            if (method === 'thread/read') return { thread: { ...identity, id: identity.threadId, model } }
+            if (method === 'thread/read') { await modelGate; return { thread: { ...identity, id: identity.threadId, model } } }
             if (method === 'thread/settings/update') { epoch++; if (!wrongModel) model = params.model as string; return {} }
             if (method === 'turn/interrupt') { finish(); return {} }
             expect(method).toBe('turn/start')
@@ -135,16 +140,156 @@ function fixture(remote = false) {
     },
     authorize: (value: boolean) => { authorized = value },
     delayTerminalState: (reads: number) => { terminalLag = reads },
+    gateProject: (gate: Promise<void> | undefined) => { projectGate = gate },
+    gateOpening: (gate: Promise<void> | undefined) => { openingGate = gate },
+    gateModel: (gate: Promise<void> | undefined) => { modelGate = gate },
     restart: () => new CodexOwnerBindings(async projectId => ({ cwd: join(dir, projectId), codexHome: homes.get(projectId)!, env: {} }),
       async options => owners.get(options.codexHome)!, binding => facts.get(binding)!),
     rpc, replies, hold: (value: boolean) => { held = value }, finish: (project = 'project-one') => finishers.get(project)!(),
     question: (method: string, params: Record<string, unknown>, project = 'project-one') => emitters.get(project)!(method, params),
     wrongModel: () => { wrongModel = true },
     failReply: () => { failReply = true },
-    fail: () => { fail = true }, wrongReceipt: () => { wrongReceipt = true }, foreignApproval: () => { approval = true },
+    fail: () => { fail = true }, recoverOpening: () => { fail = false }, wrongReceipt: () => { wrongReceipt = true }, foreignApproval: () => { approval = true },
     noCapability: () => { capability = false },
     onPrompt: (fn: (prompt: string) => void) => { onPrompt = fn } }
 }
+
+async function consumingBuild(f: ReturnType<typeof fixture>, options: { cwd?: string; roots?: string[]; wall?: number } = {}) {
+  const cwd = join(f.dir, 'project-one')
+  mkdirSync(cwd, { recursive: true })
+  const request: BoundedWorkRequest = { run_id: 'run', step_id: 'preflight', role: 'build', model_id: 'gpt-5.5', effort: null,
+    cwd, writable: true, network: true, tools: 'edit-and-run', brief: { path: join(cwd, 'brief'), integrity: 'fixture' },
+    result: { path: join(cwd, 'result.json'), schema: 'fixture' }, thread: null, budget: { wall_ms: options.wall ?? 1000 }, needs_approval_decision: false }
+  const runners = await createProjectRunners({ conversation: { project_id: 'project-one', topic_id: 'topic', provider: 'openai-codex', spec: spec('') },
+    run_id: 'run', state_dir: cwd, actingTurn: f.bindings.actingTurn('project-one', 'topic', options.cwd ?? cwd, options.roots ?? [cwd]),
+    trailer: { schemas: new Map([['fixture', () => true]]), metadata: () => undefined }, headless: {} })
+  return { request, worker: f.bindings.guardBuildRunner('project-one', runners.inRepl!) }
+}
+
+test('missing-credential consuming build can connect then chat without gateway restart', async () => {
+  const f = fixture(true)
+  f.authorize(false)
+  const { request, worker } = await consumingBuild(f)
+  expect((await worker.run(request, 'in-repl', new AbortController().signal)).kind).toBe('unknown')
+  expect(f.launched).toHaveLength(0); expect(f.calls).toHaveLength(0)
+  f.authorize(true)
+  expect((await collect(f.bindings.start('project-one', spec('connected after build preflight')))).at(-1)?.kind).toBe('completion')
+  expect(f.launched).toHaveLength(1)
+  expect(existsSync(join(f.homes.get('project-one')!, '.neutron-owner-work.json'))).toBe(false)
+})
+
+test.each(['cwd', 'roots'] as const)('known idle owner survives consuming wrong %s preflight without a work marker', async field => {
+  const f = fixture(true)
+  await collect(f.bindings.start('project-one', spec('warm owner')))
+  const { request, worker } = await consumingBuild(f, field === 'cwd' ? { cwd: f.dir } : { roots: [f.dir] })
+  expect((await worker.run(request, 'in-repl', new AbortController().signal)).kind).toBe('unknown')
+  expect(f.calls).toHaveLength(1)
+  expect(existsSync(join(f.homes.get('project-one')!, '.neutron-owner-work.json'))).toBe(false)
+  expect((await collect(f.bindings.start('project-one', spec('correct owner chat')))).at(-1)?.kind).toBe('completion')
+  expect(f.launched).toHaveLength(1)
+})
+
+test('uncertain consuming build opening stays fenced even after the opener becomes healthy', async () => {
+  const f = fixture(true); f.fail()
+  const { request, worker } = await consumingBuild(f)
+  expect((await worker.run(request, 'in-repl', new AbortController().signal)).kind).toBe('unknown')
+  expect(f.launched).toHaveLength(1); expect(f.calls).toHaveLength(0)
+  f.recoverOpening()
+  expect((await collect(f.bindings.start('project-one', spec('must not reopen')))).at(-1)).toMatchObject({ kind: 'error', message: 'Codex owner requires native reconciliation' })
+  expect(f.launched).toHaveLength(1)
+})
+
+test('uncertain consuming build native submission stays fenced across chat and restart', async () => {
+  const f = fixture(true)
+  await collect(f.bindings.start('project-one', spec('warm owner')))
+  f.wrongReceipt()
+  const { request, worker } = await consumingBuild(f)
+  expect((await worker.run(request, 'in-repl', new AbortController().signal)).kind).toBe('unknown')
+  expect(f.calls).toHaveLength(2)
+  expect(existsSync(join(f.homes.get('project-one')!, '.neutron-owner-work.json'))).toBe(true)
+  expect((await collect(f.bindings.start('project-one', spec('must not reuse')))).at(-1)?.kind).toBe('error')
+  const restarted = f.restart()
+  expect((await collect(restarted.start('project-one', spec('must not replay')))).at(-1)?.kind).toBe('error')
+  expect(f.calls).toHaveLength(2)
+  await restarted.close()
+})
+
+test('a resolver finishing after consuming worker timeout cannot open an owner later', async () => {
+  const f = fixture(true)
+  let release!: () => void
+  f.gateProject(new Promise<void>(resolve => { release = resolve }))
+  const { request, worker } = await consumingBuild(f, { wall: 25 })
+  expect((await worker.run(request, 'in-repl', new AbortController().signal)).kind).toBe('unknown')
+  expect(f.launched).toHaveLength(0)
+  release(); f.gateProject(undefined)
+  await Bun.sleep(5)
+  expect(f.launched).toHaveLength(0)
+  expect((await collect(f.bindings.start('project-one', spec('new legitimate chat')))).at(-1)).toMatchObject({ kind: 'completion' })
+  expect(f.launched).toHaveLength(1)
+})
+
+test('an opening already attempted before consuming timeout stays fenced after it returns', async () => {
+  const f = fixture(true)
+  let release!: () => void
+  f.gateOpening(new Promise<void>(resolve => { release = resolve }))
+  const { request, worker } = await consumingBuild(f, { wall: 25 })
+  expect((await worker.run(request, 'in-repl', new AbortController().signal)).kind).toBe('unknown')
+  expect(f.launched).toHaveLength(1); expect(f.calls).toHaveLength(0)
+  release(); f.gateOpening(undefined)
+  await Bun.sleep(10)
+  expect((await collect(f.bindings.start('project-one', spec('must not renew after opening')))).at(-1)).toMatchObject({ kind: 'error', message: 'Codex owner requires native reconciliation' })
+  expect(f.launched).toHaveLength(1); expect(f.calls).toHaveLength(0)
+})
+
+test('a native model read finishing after consuming timeout cannot deliver a late turn', async () => {
+  const f = fixture(true)
+  await collect(f.bindings.start('project-one', spec('warm owner')))
+  let release!: () => void
+  f.gateModel(new Promise<void>(resolve => { release = resolve }))
+  const { request, worker } = await consumingBuild(f, { wall: 25 })
+  expect((await worker.run(request, 'in-repl', new AbortController().signal)).kind).toBe('unknown')
+  expect(f.calls).toHaveLength(1)
+  release(); f.gateModel(undefined)
+  await Bun.sleep(10)
+  expect(f.calls).toHaveLength(1)
+  expect(existsSync(join(f.homes.get('project-one')!, '.neutron-owner-work.json'))).toBe(false)
+  expect((await collect(f.bindings.start('project-one', spec('new legitimate chat')))).at(-1)).toMatchObject({ kind: 'completion' })
+  expect(f.launched).toHaveLength(1)
+})
+
+test('zero managed delivery does not renew a host view when a foreign native turn became active', async () => {
+  const f = fixture(true)
+  await collect(f.bindings.start('project-one', spec('warm owner')))
+  let release!: () => void
+  f.gateModel(new Promise<void>(resolve => { release = resolve }))
+  const reads = f.rpc.filter(call => call.method === 'thread/read').length
+  const { request, worker } = await consumingBuild(f, { wall: 60 })
+  const pending = worker.run(request, 'in-repl', new AbortController().signal)
+  while (f.rpc.filter(call => call.method === 'thread/read').length === reads) await Bun.sleep(1)
+  f.hold(true)
+  await f.nativeTurn()
+  expect((await pending).kind).toBe('unknown')
+  release(); f.gateModel(undefined)
+  await Bun.sleep(10)
+  expect(f.calls).toHaveLength(2)
+  expect((await collect(f.bindings.start('project-one', spec('must not replace native turn')))).at(-1)?.kind).toBe('error')
+  f.finish(); f.hold(false)
+  expect((await f.bindings.controls.state('project-one')).status).toBe('idle')
+  expect((await collect(f.bindings.start('project-one', spec('must not renew refused view')))).at(-1)?.kind).toBe('error')
+  expect(f.calls).toHaveLength(2); expect(f.launched).toHaveLength(1)
+})
+
+test('actual successful native delivery retains its stable conversation host view', async () => {
+  const f = fixture(true)
+  const views = Reflect.get(f.bindings, 'conversationHosts') as Map<string, unknown>
+  expect((await collect(f.bindings.start('project-one', spec('one')))).at(-1)?.kind).toBe('completion')
+  const before = views.get('project-one')
+  expect(before).toBeDefined()
+  expect((await collect(f.bindings.start('project-one', spec('two')))).at(-1)?.kind).toBe('completion')
+  expect(views.get('project-one')).toBe(before)
+  expect(f.calls.map(call => call.thread)).toEqual(['native-project-one', 'native-project-one'])
+  expect(f.launched).toHaveLength(1)
+})
 
 test('cold boot without credentials does not fence a later connected native owner', async () => {
   const f = fixture(true)
@@ -231,7 +376,7 @@ test('recovery refusal is sticky and never retries a fresh owner or another prov
 test('unattested native subagent capability refuses build while owner chat remains usable', async () => {
   const f = fixture(); f.noCapability()
   expect((await collect(f.bindings.start('project-one', spec('hello')))).at(-1)?.kind).toBe('completion')
-  const outcome = await f.bindings.actingTurn('project-one', 'topic', join(f.dir, 'project-one'), [])({} as Parameters<ReturnType<CodexOwnerBindings['actingTurn']>>[0])
+  const outcome = await f.bindings.actingTurn('project-one', 'topic', join(f.dir, 'project-one'), [])({ timeout_ms: 1000, request: { budget: { wall_ms: 1000 } }, signal: new AbortController().signal } as Parameters<ReturnType<CodexOwnerBindings['actingTurn']>>[0])
   expect(outcome).toEqual({ kind: 'refused', reason: 'capability-unsupported', detail: 'Codex owner lacks attested native subagent capability' })
   expect((await collect(f.bindings.start('project-one', spec('again')))).at(-1)?.kind).toBe('completion')
   expect(f.calls).toHaveLength(2); expect(f.launched).toHaveLength(1)

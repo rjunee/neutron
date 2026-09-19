@@ -33,7 +33,9 @@ export class CodexOwnerBindings {
   private readonly busy = new Set<string>()
   private readonly refused = new Set<string>()
   private readonly decodingBuilds = new Set<string>()
-  private readonly buildObservations = new Map<string, { invoked: boolean; terminal: boolean }>()
+  private readonly buildObservations = new Map<string, { attempted: boolean; terminal: boolean; closed: boolean }>()
+  private readonly nativeDispatches = new Map<string, number>()
+  private readonly conversationHosts = new Map<string, CodexConversationHost>()
   private readonly builds = new Map<string, {
     session: NonNullable<CodexActingSession['session']>
     input?: Parameters<ProjectActingTurn>[0]
@@ -65,6 +67,8 @@ export class CodexOwnerBindings {
   })
   readonly host: CodexConversationHost = {
     acquireTurn: async (options, signal) => {
+      const observation = this.buildObservations.get(options.projectId)
+      const conversationHost = this.conversationHosts.get(options.projectId)
       signal.throwIfAborted()
       const { owner, project } = await this.resolve(options.projectId)
       await refreshOwner(owner)
@@ -76,9 +80,9 @@ export class CodexOwnerBindings {
       const clientId = `owner-turn-${++this.sequence}`
       const gateway = owner.broker.gateway(clientId)
       this.busy.add(options.projectId)
-      this.beginWork(owner)
       let released = false
       let submitted = false
+      let deliveryAttempted = false
       let turnId: string | undefined
       const control = this.controls.register(options.projectId, owner, gateway, question => {
         this.questionSinks.get(options.projectId)?.(question)
@@ -104,6 +108,11 @@ export class CodexOwnerBindings {
           const model = await this.controls.turnModel(owner, gateway)
           signal.throwIfAborted()
           if (!current() || owner.broker.state().epoch !== epoch) throw new Error('Codex native model selection changed before dispatch')
+          if (observation?.closed) throw new Error('Codex build preflight is no longer current')
+          this.beginWork(owner)
+          deliveryAttempted = true
+          if (observation) observation.attempted = true
+          this.nativeDispatches.set(options.projectId, (this.nativeDispatches.get(options.projectId) ?? 0) + 1)
           const response = await gateway.request('turn/start', {
             threadId: facts.threadId, model, input: [{ type: 'text', text: prompt }],
             cwd: project.cwd, approvalPolicy: 'on-request',
@@ -134,9 +143,15 @@ export class CodexOwnerBindings {
               await Bun.sleep(25)
               await refreshOwner(owner)
             }
-            if (outcome !== 'completed' || owner.broker.state().phase !== 'idle') this.refused.add(options.projectId)
-          } catch (error) { this.refused.add(options.projectId); throw error }
+            if (deliveryAttempted && (outcome !== 'completed' || owner.broker.state().phase !== 'idle')) this.refused.add(options.projectId)
+          } catch (error) { if (deliveryAttempted) this.refused.add(options.projectId); throw error }
           finally { control.close(); gateway.close(); this.busy.delete(options.projectId) }
+          if (!deliveryAttempted && !this.refused.has(options.projectId) && owner.broker.state().phase === 'idle') {
+            this.readBinding(owner.binding)
+            // The runtime fences a failed lease's host view. This lease proved
+            // zero native delivery, so renew only its view, not the native owner.
+            if (this.conversationHosts.get(options.projectId) === conversationHost) this.conversationHosts.delete(options.projectId)
+          }
           if (!this.builds.get(options.projectId)?.input && !this.decodingBuilds.has(options.projectId)) this.finishWork(options.projectId, owner)
         },
       }
@@ -148,7 +163,7 @@ export class CodexOwnerBindings {
     private readonly bootstrap: (options: OwnerLaunch) => Promise<CodexOwnerBootstrap> = openDurableCodexOwner,
     private readonly readBinding: typeof readCodexOwnerBinding = readCodexOwnerBinding) {}
 
-  private resolve(projectId: string): Promise<{ owner: CodexOwnerBootstrap; project: CodexOwnerProject }> {
+  private resolve(projectId: string, beforeOpening?: () => void): Promise<{ owner: CodexOwnerBootstrap; project: CodexOwnerProject }> {
     if (this.closed) return Promise.reject(new Error('Codex owner host is closed'))
     if (this.refused.has(projectId)) return Promise.reject(new Error('Codex owner requires native reconciliation'))
     if (!/^[A-Za-z0-9_.-]{1,128}$/.test(projectId)) return Promise.reject(new Error('Codex owner requires a full project id'))
@@ -166,6 +181,7 @@ export class CodexOwnerBindings {
           if (value !== undefined && !CODEX_CLI_AUTH_ENV_VARS.includes(key)) env[key] = value
         }
         env.CODEX_HOME = project.codexHome
+        beforeOpening?.()
         openingAttempted = true
         const owner = await this.bootstrap({ projectId, binary: 'codex', socketPath: join(project.codexHome, 'owner.sock'),
           cwd: project.cwd, codexHome: project.codexHome, env })
@@ -243,16 +259,16 @@ export class CodexOwnerBindings {
       if (signal.aborted || request.budget.wall_ms <= 0) return { kind: 'unknown', detail: 'Cancelled or out of time before owner dispatch.' }
       if (this.decodingBuilds.has(projectId)) return { kind: 'unknown', detail: 'Codex owner build result is still pending' }
       this.decodingBuilds.add(projectId)
-      const observation = { invoked: false, terminal: false }
+      const observation = { attempted: false, terminal: false, closed: false }
       this.buildObservations.set(projectId, observation)
       try {
         const outcome = await worker.run(request, placement, signal)
         if (outcome.kind === 'unknown' || outcome.kind === 'failed') {
           // Tags alone cannot establish delivery or terminal settlement. No
-          // acting-turn invocation is positive no-dispatch evidence. A failed
+          // opening/native-delivery attempt is positive no-side-effect evidence. A failed
           // host result after exact parent + child terminal evidence is safe
           // only if no independent uncertainty fence or active lease remains.
-          if (!observation.invoked) return outcome
+          if (!observation.attempted) return outcome
           const owner = this.resolvedOwners.get(projectId)
           if (outcome.kind === 'failed' && observation.terminal && owner && !this.refused.has(projectId)) {
             await refreshOwner(owner)
@@ -266,9 +282,9 @@ export class CodexOwnerBindings {
         else { const entry = await this.owners.get(projectId); if (entry) this.finishWork(projectId, entry.owner) }
         return outcome
       } catch (error) {
-        this.refused.add(projectId)
+        if (observation.attempted) this.fence(projectId)
         throw error
-      } finally { this.decodingBuilds.delete(projectId); this.buildObservations.delete(projectId) }
+      } finally { observation.closed = true; this.decodingBuilds.delete(projectId); this.buildObservations.delete(projectId) }
     } }
   }
 
@@ -290,7 +306,9 @@ export class CodexOwnerBindings {
         if (!buildDispatch && (bindings.builds.get(projectId)?.input || bindings.decodingBuilds.has(projectId))) {
           throw new Error('Codex owner build result is still pending')
         }
-        inner = createCodexConversationalSubstrate({ projectId, cwd: project.cwd, env: project.env, host: bindings.host }).start(spec)
+        let host = bindings.conversationHosts.get(projectId)
+        if (!host) { host = { acquireTurn: bindings.host.acquireTurn }; bindings.conversationHosts.set(projectId, host) }
+        inner = createCodexConversationalSubstrate({ projectId, cwd: project.cwd, env: project.env, host }).start(spec)
         const pending: Event[] = []
         let wake: (() => void) | undefined
         const sink = (question: NativeOwnerQuestion): void => {
@@ -329,8 +347,17 @@ export class CodexOwnerBindings {
   actingTurn(projectId: string, topicId: string, cwd: string, roots: readonly string[]): ProjectActingTurn {
     return async turn => {
       const observation = this.buildObservations.get(projectId)
-      if (observation) observation.invoked = true
-      const { owner, project } = await this.resolve(projectId)
+      const deadline = Date.now() + Math.min(turn.timeout_ms, turn.request.budget.wall_ms)
+      const preflight = (): void => {
+        turn.signal.throwIfAborted()
+        if (observation?.closed || Date.now() >= deadline) throw new Error('Codex build preflight is no longer current')
+      }
+      preflight()
+      const { owner, project } = await this.resolve(projectId, () => {
+        preflight()
+        if (observation) observation.attempted = true
+      })
+      preflight()
       if (realpathSync(cwd) !== project.cwd) throw new Error('Codex build project directory changed')
       if (roots.some(root => relative(project.cwd, realpathSync(root)).split(sep)[0] === '..')) {
         throw new Error('Codex build worktree is outside the owner workspace grants')
@@ -370,13 +397,14 @@ export class CodexOwnerBindings {
       }
       if (build.input) return { kind: 'unknown', detail: 'Codex owner build dispatch is already awaiting its child trailer' }
       build.input = turn
-      this.beginWork(owner)
+      const beforeDispatch = this.nativeDispatches.get(projectId) ?? 0
+      const dispatched = () => (this.nativeDispatches.get(projectId) ?? 0) !== beforeDispatch
       try {
         const outcome = await createCodexActingTurn({ project_id: projectId, topic_id: topicId, thread_id: facts.threadId, cwd: project.cwd,
           grants: { tools: 'edit-and-run', writable: true, network: true, roots }, session: build.session })(turn)
         // A native parent can finish while its child remains unresolved. Fence
         // chat as well as subsequent builds until the host reconciles that child.
-        if (outcome.kind !== 'turn-ended') this.refused.add(projectId)
+        if (outcome.kind !== 'turn-ended') { if (dispatched()) this.fence(projectId) }
         else {
           if (observation) {
             const terminal = decodeProjectTrailer(readFileSync(turn.request.result.path, 'utf8'), turn.request,
@@ -387,9 +415,14 @@ export class CodexOwnerBindings {
         }
         return outcome
       } catch (error) {
-        this.refused.add(projectId)
+        if (dispatched()) this.fence(projectId)
         throw error
-      } finally { delete build.input }
+      } finally {
+        delete build.input
+        // The bridge may fence its wrapper before native delivery. A new wrapper
+        // is safe only after host-observed zero native attempts, never after a write.
+        if (!dispatched() && this.builds.get(projectId) === build) this.builds.delete(projectId)
+      }
     }
   }
 }
