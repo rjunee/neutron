@@ -134,7 +134,21 @@ async function run(): Promise<void> {
     assert(requests.filter(message => message.method === 'initialize').length === 1)
     assert(requests.filter(message => message.method === 'turn/start').length === 2)
     assert(requests.filter(message => message.method === 'turn/start').every(message => (message.params as Record<string, unknown>).threadId === threadId))
-    console.log('PASS: foreign environment refused before forwarding; valid project environment, native TUI and gateway shared one thread; local provider only.')
+    const oldEpoch = broker.state().epoch
+    const oldGeneration = broker.state().generation
+    tui.kill(); await tui.exited; tui.terminal?.close(); tui = undefined
+    broker.close()
+    transport = createProjectControlStdioTransport(transportOptions)
+    broker = await createProjectControlBroker({ socketPath, cwd, codexHome, threadId, upstream: observed })
+    assert.equal(broker.state().generation, oldGeneration + 1)
+    const recovered = broker.gateway('recovered-gateway')
+    await assert.rejects(recovered.request('thread/settings/update', { threadId, model: 'gpt-5.5' }, oldEpoch), /Stale/)
+    await recovered.request('thread/resume', { threadId, cwd }, broker.state().epoch)
+    await until(() => broker?.state().phase === 'idle', 'recovered resume')
+    await recovered.request('turn/start', { threadId, input: [{ type: 'text', text: 'RECOVERED_BROKER_MARKER' }] }, broker.state().epoch)
+    await until(() => broker?.state().phase === 'idle' && inputs.some(input => input.includes('RECOVERED_BROKER_MARKER')), 'recovered native completion')
+    for (const marker of ['DISPOSABLE_SEED', 'NATIVE_BROKER_MARKER', 'GATEWAY_BROKER_MARKER']) assert(inputs.at(-1)?.includes(marker))
+    console.log('PASS: scope fencing, native TUI and gateway shared one thread; restart fenced stale epoch and retained native history; local provider only.')
   } catch (error) {
     console.error(output.slice(-4000).replace(/\x1b\[[0-?]*[ -/]*[@-~]/g, ''))
     throw error

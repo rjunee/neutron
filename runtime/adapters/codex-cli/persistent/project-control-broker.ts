@@ -3,6 +3,7 @@ import { dirname, isAbsolute, join } from 'node:path'
 import type { ServerWebSocket } from 'bun'
 import { BROKER_MAX_MESSAGE_BYTES, type ProjectControlTransport } from './project-control-broker-transport.ts'
 import { validateProjectControlScope } from './project-control-broker-scope.ts'
+import { openProjectControlJournal } from './project-control-broker-journal.ts'
 
 type Rpc = Record<string, unknown>
 type Id = string | number
@@ -22,9 +23,11 @@ export class ProjectControlRefusal extends Error {
   readonly code = -32001
 }
 export interface ProjectControlState {
+  generation: number
   epoch: number
-  phase: 'idle' | 'mutation' | 'turn' | 'closed'
+  phase: 'idle' | 'mutation' | 'turn' | 'recovery' | 'closed'
   activeTurnId: string | null
+  unresolved: string | null
 }
 export interface ProjectControlGateway {
   request(method: string, params: Rpc, expectedEpoch?: number): Promise<unknown>
@@ -40,7 +43,7 @@ export interface ProjectControlBroker {
 type Client = { name: string; initialized: boolean; emit(message: Rpc): void; closed: boolean }
 type Work = { client: Client; method: string; params: Rpc; epoch: number; resolve(value: unknown): void; reject(error: Error): void }
 
-/** Bounded transport/fencing primitive, not a project lifecycle or durable journal.
+/** Bounded transport/fencing primitive, not a project lifecycle manager.
  * One project-specific child must be supplied. A timeout closes the broker because
  * a lost acknowledgement cannot prove a mutation did not execute upstream.
  */
@@ -63,19 +66,18 @@ export async function createProjectControlBroker(options: {
   try {
     if (!Number.isFinite(timeout) || timeout <= 0 || !options.threadId || !isAbsolute(options.socketPath)
       || !isAbsolute(options.cwd) || !isAbsolute(options.codexHome)) throw new Error('Invalid broker binding')
-    // No unlink-on-start: an existing socket belongs to another broker until proven otherwise.
     const parent = lstatSync(dirname(options.socketPath))
     if (!parent.isDirectory() || (parent.mode & 0o077) !== 0 || parent.uid !== process.getuid?.()
       || realpathSync(dirname(options.socketPath)) !== dirname(options.socketPath)) throw new Error('Broker socket needs a private owned directory')
-    try { lstatSync(options.socketPath); throw new Error('Broker socket already exists') }
-    catch (error) { if ((error as NodeJS.ErrnoException).code !== 'ENOENT') throw error }
   } catch (error) { closeUpstream(); throw error }
+  let journal: ReturnType<typeof openProjectControlJournal>
+  try { journal = openProjectControlJournal(options) } catch (error) { closeUpstream(); throw error }
   const clients = new Set<Client>()
   const sockets = new Set<ServerWebSocket<{ client: Client }>>()
   const pending = new Map<string, { method: string; resolve(value: unknown): void; reject(error: Error): void; timer: ReturnType<typeof setTimeout> }>()
   const approvals = new Map<Id, { client: Client; epoch: number }>()
   const queue: Work[] = []
-  let epoch = 0
+  let epoch = journal.epoch
   let sequence = 0
   let closed: Error | undefined
   let current: Work | undefined
@@ -92,10 +94,15 @@ export async function createProjectControlBroker(options: {
     for (const socket of sockets) socket.close(1011, 'Project broker closed')
     server?.stop(true)
     closeUpstream()
+    journal.close()
   }
   const send = (message: Rpc): void => {
     if (closed) throw closed
-    try { upstream.send(message) } catch { close(new Error('Native transport failed')); throw closed }
+    try {
+      journal.assertOwned()
+      if (typeof message.method === 'string' && classifyProjectControlMethod(message.method) === 'mutation') journal.record(message.method)
+      upstream.send(message)
+    } catch { close(new Error('Native transport or broker generation failed')); throw closed }
   }
   const native = (method: string, params: Rpc): Promise<unknown> => {
     if (closed) return Promise.reject(closed)
@@ -108,10 +115,14 @@ export async function createProjectControlBroker(options: {
     })
   }
   const releaseCompletedTurn = (): void => {
-    if (active?.completed && !current) { active = undefined; approvals.clear() }
+    if (active?.completed && !current && !closed) {
+      active = undefined; approvals.clear()
+      try { journal.settle() } catch { close(new Error('Broker journal settlement failed; outcome unknown')) }
+    }
   }
   try { upstream.listen(raw => {
     if (closed) return
+    try { journal.assertOwned() } catch { close(new Error('Stale broker generation')); return }
     if (!object(raw)) { close(new Error('Invalid native envelope')); return }
     if (typeof raw.method !== 'string') {
       if (typeof raw.id !== 'string') return
@@ -201,6 +212,9 @@ export async function createProjectControlBroker(options: {
     }).finally(() => {
       current = undefined
       releaseCompletedTurn()
+      if (!closed && !active) {
+        try { journal.settle() } catch { close(new Error('Broker journal settlement failed; outcome unknown')) }
+      }
       pump()
     })
   }
@@ -210,6 +224,7 @@ export async function createProjectControlBroker(options: {
       params = structuredClone(params)
       validate(method, params)
       if (classifyProjectControlMethod(method) === 'read') return native(method, params).then(result => filter(method, result))
+      if (journal.unresolved !== null) throw refusal('Prior broker mutation unresolved; recovery inspection required')
       if (expectedEpoch !== undefined && expectedEpoch !== epoch) throw refusal('Stale broker epoch')
       if (method === 'turn/interrupt') {
         if (!active || active.client !== client || active.turnId === null || params.turnId !== active.turnId) throw refusal('Exact active turn owner required')
@@ -217,7 +232,7 @@ export async function createProjectControlBroker(options: {
       }
       if (active || current && current.client !== client || queue.some(work => work.client !== client)) throw refusal('Project writer busy')
       if (queue.length >= 32) throw refusal('Project mutation queue full')
-      const reserved = ++epoch
+      const reserved = epoch = journal.reserve()
       return new Promise((resolve, reject) => { queue.push({ client, method, params, epoch: reserved, resolve, reject }); pump() })
     } catch (error) { return Promise.reject(error) }
   }
@@ -282,9 +297,10 @@ export async function createProjectControlBroker(options: {
       },
     })
     chmodSync(options.socketPath, 0o600)
+    journal.bound()
   } catch (error) { close(); throw error }
   return {
-    state: () => ({ epoch, phase: closed ? 'closed' : active ? 'turn' : current || queue.length ? 'mutation' : 'idle', activeTurnId: active?.turnId ?? null }),
+    state: () => ({ generation: journal.generation, epoch, phase: closed ? 'closed' : journal.unresolved !== null ? 'recovery' : active ? 'turn' : current || queue.length ? 'mutation' : 'idle', activeTurnId: active?.turnId ?? null, unresolved: journal.unresolved }),
     gateway(clientId) {
       if (closed || !clientId || [...clients].some(client => client.name === clientId)) throw refusal('Gateway identity unavailable')
       const listeners = new Set<(message: Rpc) => void>()
