@@ -186,6 +186,7 @@ export interface ClaudeCodeSubstrateOptions {
    */
   user_id?: string
   project_id?: string
+  conversationProjectId?: string | null
   credential_identity?: string
   /** S3 §2 — owning instance slug (advisory: redelivery logging / scoping). */
   instance_slug?: string
@@ -533,6 +534,7 @@ function prepareClaudeCodeOptions(options: ClaudeCodeSubstrateOptions) {
   // pool key (closes #104; makes the substrate instance-isolation-SAFE).
   if (options.user_id !== undefined) p.user_id = options.user_id
   if (options.project_id !== undefined) p.project_id = options.project_id
+  if (options.conversationProjectId !== undefined) p.conversationProjectId = options.conversationProjectId
   if (options.credential_identity !== undefined) p.credential_identity = options.credential_identity
   // S3 #106 — redelivery routing + injected sink.
   if (options.instance_slug !== undefined) p.instance_slug = options.instance_slug

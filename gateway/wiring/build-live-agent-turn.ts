@@ -1681,7 +1681,7 @@ export function buildLiveAgentTurn(
         // `metering_context.project_id` into its pool key when no
         // projectIdResolver is wired on this substrate (build-llm-call-
         // substrate.ts). Per-dispatch ⇒ race-free across concurrent topics.
-        metering_context: { project_id: scope },
+        metering_context: { project_id: scope, conversationProjectId: turn.project_id ?? null },
         turn_timeout_ms: CHAT_TURN_INACTIVITY_MS,
         turn_absolute_ceiling_ms: absoluteCeilingMs,
       }

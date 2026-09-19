@@ -628,6 +628,38 @@ function modelArg(argv: string[]): string | undefined {
 }
 
 describe('the frontier-model floor holds at the spawn chokepoint', () => {
+  it('an explicit owner model survives same-conversation resume without changing its UUID', async () => {
+    const { host, argvs } = makeCapturingHost()
+    const registryPath = join(tempDir('neutron-model-selection-reg-'), 'repl-registry.json')
+    const options = opts(host, { user_id: 'selection-owner', project_id: 'project',
+      credential_identity: 'cred-1', replRegistryPath: registryPath, frontierModelFloor: true })
+    const sessionKey = poolKeyFor(options)
+    const sessionId = '00000000-0000-4000-8000-000000000001'
+    upsertRecord(registryPath, { sessionKey, sessionId, cwd: options.cwd!,
+      channelName: 'neutron-c0d22d2bc2480944a2ed4102d84abc5e', has_session: true,
+      model: LIVE_HAIKU_ID, owner_selected_model: LIVE_HAIKU_ID })
+    await drain(createPersistentReplSubstrate(options).start(spec(getBestModel())))
+    expect(modelArg(argvs[0]!)).toBe(LIVE_HAIKU_ID)
+    expect(argvs[0]![argvs[0]!.indexOf('--resume') + 1]).toBe(sessionId)
+    expect(getRecord(registryPath, sessionKey)?.model).toBe(LIVE_HAIKU_ID)
+    expect(getRecord(registryPath, sessionKey)?.owner_selected_model).toBe(LIVE_HAIKU_ID)
+  }, SPAWN_TEST_TIMEOUT_MS)
+
+  it('a selection from a lost conversation cannot lower a fresh conversation floor', async () => {
+    const { host, argvs } = makeCapturingHost()
+    const registryPath = join(tempDir('neutron-model-selection-reg-'), 'repl-registry.json')
+    const options = opts(host, { user_id: 'selection-owner', project_id: 'project',
+      credential_identity: 'cred-1', replRegistryPath: registryPath, frontierModelFloor: true })
+    const sessionKey = poolKeyFor(options)
+    upsertRecord(registryPath, { sessionKey, sessionId: '00000000-0000-4000-8000-000000000002', cwd: options.cwd!,
+      channelName: 'neutron-c0d22d2bc2480944a2ed4102d84abc5e', has_session: false,
+      model: LIVE_HAIKU_ID, owner_selected_model: LIVE_HAIKU_ID })
+    await drain(createPersistentReplSubstrate(options).start(spec(LIVE_HAIKU_ID)))
+    expect(modelArg(argvs[0]!)).toBe(getBestModel())
+    expect(argvs[0]).not.toContain('--resume')
+    expect(getRecord(registryPath, sessionKey)?.owner_selected_model).toBeUndefined()
+  }, SPAWN_TEST_TIMEOUT_MS)
+
   it('a Haiku record on the owner’s chat substrate spawns the FRONTIER model', async () => {
     // THE LIVE DEFECT, reproduced: a registry row naming Haiku is what
     // `pool.ts` / `supervision.ts` hand to the spawn as `record.model`.
@@ -817,10 +849,12 @@ describe('createClaudeCodeSubstrateAuto forwards frontier_model_floor', () => {
       substrate_instance_id: instanceId,
       cwd,
       frontier_model_floor: true,
+      conversationProjectId: null,
     })
     const reg = registeredFor(instanceId)
     expect(reg).toBeDefined()
     expect(reg!.frontierModelFloor).toBe(true)
+    expect(reg!.conversationProjectId).toBeNull()
   })
 
   it('leaves it unset when the caller omits it (every utility substrate)', () => {

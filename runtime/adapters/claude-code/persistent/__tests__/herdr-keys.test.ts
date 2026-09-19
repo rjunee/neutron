@@ -95,6 +95,15 @@ describe('the herdr key table', () => {
 })
 
 describe('writeKey / writeKeys over the wire', () => {
+  it('acknowledges session-only picker keys and refuses detached input', async () => {
+    const server = new FakeHerdrServer()
+    const child = await spawn(server)
+    await child.sendKeys!(['down', 's', 'escape'])
+    expect(server.callsTo('pane.send_keys')[0]!.params['keys']).toEqual(['down', 's', 'esc'])
+    child.detach!()
+    await expect(child.sendKeys!(['s'])).rejects.toThrow('exit or detach')
+    expect(server.callsTo('pane.send_keys')).toHaveLength(1)
+  })
   it('sends herdr names, not our own', async () => {
     const server = new FakeHerdrServer()
     const child = await spawn(server)

@@ -304,6 +304,7 @@ export function poolKeyFor(options: PersistentReplSubstrateOptions): string {
       options.user_id ?? '_platform',
       options.project_id ?? 'default',
       options.credential_identity ?? '_nocred',
+      ...(options.conversationProjectId === 'general' ? ['literal-project'] : []),
     ].join(SESSION_KEY_SEP)
   }
   return `${options.substrate_instance_id}${SESSION_KEY_SEP}${options.cwd ?? ''}`

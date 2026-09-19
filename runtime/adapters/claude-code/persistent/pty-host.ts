@@ -166,6 +166,8 @@ export interface PtyChild {
    *  of an arrow-driven picker). No-op-safe after exit. OPTIONAL (see
    *  `writeKey`). */
   writeKeys?(keys: readonly Key[]): void
+  /** Acknowledged native picker input. Delivery is not a model-change acknowledgement. */
+  sendKeys?(keys: readonly (Key | 's')[]): Promise<void>
 
   /**
    * Submit `command` as a line, and RESOLVE ONLY WHEN THE BACKEND HAS ACKNOWLEDGED

@@ -256,6 +256,8 @@ export interface ReplRegistryRecord {
   /** Model id the REPL spawned with — replayed on `--resume` so a respawn keeps
    *  the same `--model`. */
   model?: string
+  /** Explicit native session selection; only this exact model bypasses the default floor. */
+  owner_selected_model?: string
   /** Epoch ms the REPL first reached `/health` ok — the boot-grace gate input. */
   first_ready_at?: number
   /** Epoch ms of the last respawn — the cooldown gate input. */

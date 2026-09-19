@@ -957,7 +957,8 @@ export function startModelUpdateWatchdogForInstance(
       // Target only the warm sessions this instance owns (pool keys whose owning
       // substrate points at this registry) — never another instance's sessions.
       const ownedKeys = [...pool.keys()].filter(
-        (k) => supervisedBySessionKey.get(k)?.replRegistryPath === registryPath,
+        (k) => supervisedBySessionKey.get(k)?.replRegistryPath === registryPath &&
+          getRecord(registryPath, k)?.owner_selected_model === undefined,
       )
       if (isModelClass(upgradeModel)) {
         // The running child already resolved this class when it spawned. Keep

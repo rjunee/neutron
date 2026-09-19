@@ -56,6 +56,15 @@ async function terminalFixture() {
 }
 
 describe('the in-process Bun PTY backend is kept as a working option', () => {
+  it('acknowledges native model picker keys and refuses them after exit', async () => {
+    const { child, writes } = await terminalFixture()
+    await child.sendKeys!(['down', 's', 'escape'])
+    expect(writes).toEqual(['\x1b[Bs\x1b'])
+    child.kill()
+    await child.exited
+    await expect(child.sendKeys!(['s'])).rejects.toThrow('after exit')
+    expect(writes).toHaveLength(1)
+  })
   it('spawns on a real pty, reports a real pid, and resolves a REAL exit code', async () => {
     // The child checks its actual descriptors. A pipe-backed spawn exits 1 instead.
     // Await process completion, not a deadline for terminal output. Nonzero success

@@ -379,6 +379,7 @@ export interface BuildLlmCallSubstrateInput {
    * project_id`, then to the substrate's `'default'` namespace.
    */
   projectIdResolver?: () => string | undefined
+  conversationProjectId?: string | null
   /** S3 §2 — owning instance slug (advisory: redelivery logging / scoping). */
   project_slug?: string
   /** S3 #106 — the user's reconnect channel (`web:<user_id>`); recorded on a
@@ -1055,6 +1056,9 @@ export function buildLlmCallSubstrate(
         // interactive-REPL substrate (the sole spawn shape post-S3-rip-replace).
         // The `substrateFactory` seam lets tests inject a fake substrate.
         const factory = input.substrateFactory ?? createClaudeCodeSubstrateAuto
+        const conversationProjectId = input.conversationProjectId !== undefined
+          ? input.conversationProjectId : spec.metering_context?.conversationProjectId
+        if (conversationProjectId !== undefined) opts.conversationProjectId = conversationProjectId
         innerHandle = factory(opts).start(spec)
         if (cancelled) {
           await innerHandle.cancel()

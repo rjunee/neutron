@@ -269,7 +269,7 @@ export function wireSubstrates(ctx: OpenWiringContext): WiredSubstrates {
           owner_handle,
           user_id: OWNER_USER_ID,
           project_slug,
-          ...(projectIdResolver === undefined ? {} : { projectIdResolver }),
+          ...(projectIdResolver === undefined ? {} : { projectIdResolver, conversationProjectId: projectIdResolver() }),
           // Owner's WARM conversational REPL (cc-agent) — TRUSTED live chat.
           // Security knobs live on the profile — see substrate-profiles.ts. Kept
           // DISTINCT from the untrusted-import profile even though identical today.

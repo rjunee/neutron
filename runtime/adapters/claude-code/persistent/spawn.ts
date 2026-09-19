@@ -34,6 +34,7 @@ import { createAuthFailureDetector } from './auth-failure-signature.ts'
 import {
   type ReplRegistryRecord,
   disownPane,
+  getRecord,
   normaliseRecord,
   readRegistryState,
   ownPane,
@@ -87,6 +88,8 @@ async function spawnSession(
   if (requestedModel === undefined) {
     throw new Error('persistent-repl: model_preference is empty; at least one model required')
   }
+  // The default frontier floor excludes the exact native model explicitly selected
+  // by this conversation's owner. A marker from a different conversation grants nothing.
   // FRONTIER-MODEL FLOOR (`model-floor.ts`). THE reason this lives here and not
   // at the two `record.model ?? getBestModel()` call sites: this line is the ONE
   // place a model id becomes a spawned child, and the same `model` binding feeds
@@ -97,9 +100,14 @@ async function spawnSession(
   // the floor is returned verbatim — the deliberate FAST_MODEL utility callers
   // are untouched. The module header records the writer that was found (#340)
   // and the two reasons the floor is still load-bearing without it.
+  const previousModel = options.replRegistryPath === undefined ? undefined
+    : getRecord(options.replRegistryPath, sessionKey)
+  const selected = resume !== undefined && previousModel?.sessionId === resume.sessionId &&
+    typeof previousModel.owner_selected_model === 'string' && previousModel.owner_selected_model.trim() !== ''
+    ? previousModel.owner_selected_model : undefined
   const model = applyModelFloor({
-    requested: requestedModel,
-    enabled: options.frontierModelFloor === true,
+    requested: selected ?? requestedModel,
+    enabled: options.frontierModelFloor === true && selected === undefined,
     sessionKey,
     source: resume !== undefined ? 'resume' : 'spawn',
     // The half of "make it loud" that leaves the box. Without this the clamp is
@@ -816,6 +824,7 @@ async function spawnSession(
             // `record` when this spawn actually produced one.
             ...merged
           } = prev ? { ...prev, ...record } : record
+          if (selected === undefined) delete merged.owner_selected_model
           // #539 — OWNERSHIP IS NOT MERGED, IT IS RE-STATED, and the handle and its claim
           // move together. A spread carries the PRIOR row's `pane_handle` through whenever
           // this spawn produced none (the in-process host, a test double), so the row would

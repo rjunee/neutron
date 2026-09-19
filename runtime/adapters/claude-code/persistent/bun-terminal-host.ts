@@ -478,6 +478,11 @@ export class BunTerminalHost implements PtyHost {
         if (keys.length === 0) return
         terminal.write(encodeKeys(keys))
       },
+      async sendKeys(keys) {
+        if (exited) throw new Error('bun-terminal-host: picker input refused after exit')
+        writeAllOrThrow(data => terminal.write(data),
+          keys.map(key => key === 's' ? 's' : encodeKey(key)).join(''), 'picker keys')
+      },
       /**
        * THE HONEST ACKNOWLEDGEMENT THIS BACKEND CAN ACTUALLY MAKE, and no more.
        *

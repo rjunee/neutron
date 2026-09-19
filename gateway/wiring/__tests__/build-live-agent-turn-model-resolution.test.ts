@@ -100,6 +100,14 @@ function makeTurn(sent: ChatOutbound[], over?: Partial<LiveAgentTurnRequest>): L
 }
 
 describe('build-live-agent-turn — dynamic model resolution (always-latest)', () => {
+  test('carries distinct General and literal general conversation scope through dispatch', async () => {
+    const specs: AgentSpec[] = []
+    const run = makeDefaultModelRunner(makeStubSubstrate(specs))
+    await run(makeTurn([]))
+    await run(makeTurn([], { project_id: 'general', topic_id: 'web:u-1:literal-general' }))
+    expect(specs[0]?.metering_context).toEqual({ project_id: 'general', conversationProjectId: null })
+    expect(specs[1]?.metering_context).toEqual({ project_id: 'general', conversationProjectId: 'general' })
+  })
   test('omitting input.model resolves the spawn spec via getBestModel() (NOT a frozen literal)', async () => {
     const specs: AgentSpec[] = []
     const sent: ChatOutbound[] = []
