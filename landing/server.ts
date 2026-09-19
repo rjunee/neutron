@@ -654,21 +654,22 @@ export const CHAT_REACT_BUNDLE_BUILD_OPTIONS = {
  * through stale resolver state. A child process owns a new descriptor table and
  * resolver, which is also the production build CLI's normal execution model.
  */
-async function buildChatReactBundle(entrypoint: string): Promise<{
+export async function buildChatReactBundle(entrypoint: string): Promise<{
   success: boolean
   output: string | null
   logs: string[]
 }> {
+  const defineArgs = Object.entries(CHAT_REACT_BUNDLE_BUILD_OPTIONS.define)
+    .flatMap(([key, value]) => ['--define', `${key}=${value}`])
   const child = Bun.spawn([
     process.execPath,
     'build',
     entrypoint,
-    '--target=browser',
-    '--format=esm',
-    '--minify',
-    '--sourcemap=none',
-    '--define',
-    'process.env.NODE_ENV="production"',
+    `--target=${CHAT_REACT_BUNDLE_BUILD_OPTIONS.target}`,
+    `--format=${CHAT_REACT_BUNDLE_BUILD_OPTIONS.format}`,
+    ...(CHAT_REACT_BUNDLE_BUILD_OPTIONS.minify ? ['--minify'] : []),
+    `--sourcemap=${CHAT_REACT_BUNDLE_BUILD_OPTIONS.sourcemap}`,
+    ...defineArgs,
   ], {
     stdout: 'pipe',
     stderr: 'pipe',

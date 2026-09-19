@@ -1,7 +1,7 @@
 /**
  * The web chat bundle must ship React's PRODUCTION JSX runtime.
  *
- * `resolveChatReactJs` (landing/server.ts) builds the SPA with `Bun.build`.
+ * `resolveChatReactJs` (landing/server.ts) builds the SPA with the Bun CLI.
  * Without `define: { 'process.env.NODE_ENV': '"production"' }`, React core
  * resolves to its production build but the JSX transform does not: Bun emits
  * the DEVELOPMENT runtime, every element is created by `jsxDEV`, and each one
@@ -9,16 +9,15 @@
  * project-switch profile (1.4 s self time in `Run console task`) and ~240 KB
  * of extra bundle.
  *
- * This test builds the SAME entrypoint with the SAME exported options the
- * server uses — imported, not copied, so someone editing the server config
- * cannot silently diverge from what is asserted here — and asserts on the
- * BUILT BUNDLE TEXT.
+ * This test calls the SAME fresh-process build helper the server uses —
+ * imported, not copied, so the test cannot silently diverge from the served
+ * fallback bundle — and asserts on the BUILT BUNDLE TEXT.
  */
 
 import { describe, expect, test } from 'bun:test'
 import { dirname, join } from 'node:path'
 import { fileURLToPath } from 'node:url'
-import { CHAT_REACT_BUNDLE_BUILD_OPTIONS } from '../server.ts'
+import { buildChatReactBundle } from '../server.ts'
 
 const HERE = dirname(fileURLToPath(import.meta.url))
 const ENTRY = join(dirname(HERE), 'chat-react', 'main.tsx')
@@ -29,17 +28,13 @@ function count(haystack: string, needle: string): number {
 
 describe('the web chat bundle', () => {
   test('ships the production JSX runtime, not jsxDEV owner-stack tracking', async () => {
-    const result = await Bun.build({
-      entrypoints: [ENTRY],
-      ...CHAT_REACT_BUNDLE_BUILD_OPTIONS,
-    })
+    const result = await buildChatReactBundle(ENTRY)
     if (!result.success) {
       for (const log of result.logs) console.error('[chat-react prod bundle]', String(log))
     }
     expect(result.success).toBe(true)
-    const out = result.outputs[0]
-    if (out === undefined) throw new Error('bundle build produced no outputs')
-    const js = await out.text()
+    const js = result.output
+    if (js === null) throw new Error('bundle build produced no output')
 
     // POSITIVE CONTROL first: `car-conv` is a className the real app bundle
     // always carries (ChatApp.tsx conversation surface). An empty or
