@@ -24,6 +24,7 @@ import { buildReflectionGuidance } from '@neutronai/trident/reflection-guidance.
 import { PROJECT_BUILD_WALL_MS } from '@neutronai/trident/project-build-budget.ts'
 import { prepareProjectDependencies } from './project-build-dependencies.ts'
 import { parseBuildModeState, readBuildRetrySource } from '@neutronai/trident/build-mode-state.ts'
+import { assertProjectSnapshot, PROJECT_SNAPSHOT_SCHEMA } from './project-build-snapshot.ts'
 
 /**
  * WALL BUDGET PER ROLE. This was ONE flat 45 minutes for all four roles, which is
@@ -342,13 +343,9 @@ export async function prepareProjectBuild(input: InnerLoopInput, context: Projec
     ]), metadata: () => undefined },
     headless: { 'openai-codex': createCodexHeadlessRunner({ env: codexEnv, reviewBriefIntegrity: briefIntegrity, reviewContracts: new Map([
       ['verdict', { jsonSchema: VERDICT_SCHEMA, validate: (value: unknown) => validateTrailer('verdict', value).ok }],
-      ['project-review', { jsonSchema: { type: 'object', additionalProperties: false,
-        required: ['head', 'diff', 'pr', 'payload'], properties: {
-          head: { type: 'string' }, diff: { type: 'string' },
-          pr: { type: ['object', 'null'], additionalProperties: false, required: ['number', 'head', 'state'],
-            properties: { number: { type: 'integer' }, head: { type: 'string' }, state: { type: 'string' } } },
-          payload: VERDICT_SCHEMA,
-        } }, validate: (value: unknown) => validSnapshot(value, 'verdict') }],
+      ['project-review', { jsonSchema: { ...PROJECT_SNAPSHOT_SCHEMA,
+        properties: { ...PROJECT_SNAPSHOT_SCHEMA.properties, payload: VERDICT_SCHEMA },
+      }, validate: (value: unknown) => validSnapshot(value, 'verdict') }],
     ]) }) },
   })
   if (context.provider === 'openai-codex' && context.codexOwnerBindings && substrate.inRepl) {
@@ -388,6 +385,8 @@ export async function prepareProjectBuild(input: InnerLoopInput, context: Projec
       '  "kind"   — "completed" when you finished the role, or "blocked" when you could not.',
       '  "result" — when completed: { head, diff, pr, payload }. Omit when blocked.',
       'When blocked, add "on": a non-empty sentence saying what stopped you. Report blocked rather than inventing a result; a fabricated result is worse than a stopped run.',
+      'The completed result must satisfy this outer snapshot contract. Copy `snapshot.pr` from the host context unchanged: null or { "number": positive integer, "head": string, "state": "OPEN" | "CLOSED" | "MERGED" }. Never replace it with a number or URL. The forge payload field `result.payload.prNumber` is separately a number or null; it does not replace `result.pr`. Measure head and diff for the resulting revision; the host independently checks the claim.',
+      JSON.stringify(PROJECT_SNAPSHOT_SCHEMA),
       `\`result.payload\` must satisfy the ${role === 'plan' ? 'plan' : role === 'review' ? 'verdict' : 'forge'} trailer contract below. Read the host context for the measured snapshot.`,
       JSON.stringify(role === 'plan' ? PLAN_SCHEMA : role === 'review' ? VERDICT_SCHEMA : FORGE_SCHEMA),
       'Never publish or merge; the host owns those actions.',
@@ -561,10 +560,7 @@ export async function prepareProjectBuild(input: InnerLoopInput, context: Projec
   }
 }
 
-function validSnapshot(value: unknown, kind: 'plan' | 'forge' | 'verdict'): boolean {
-  if (!value || typeof value !== 'object') return false
-  const snapshot = value as Record<string, unknown>
-  return typeof snapshot.head === 'string' && typeof snapshot.diff === 'string'
-    && (snapshot.pr === null || (typeof snapshot.pr === 'object' && snapshot.pr !== null))
-    && validateTrailer(kind, snapshot.payload).ok
+export function validSnapshot(value: unknown, kind: 'plan' | 'forge' | 'verdict'): boolean {
+  assertProjectSnapshot(value)
+  return validateTrailer(kind, value.payload).ok
 }

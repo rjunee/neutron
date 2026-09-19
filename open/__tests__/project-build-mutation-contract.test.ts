@@ -58,9 +58,14 @@ for (const role of ['build', 'fix'] as const) {
     const f = await fixture()
     // Consume what the worker receives on disk, not the source schema constant.
     const brief = await readFile(f.options.workers[role].request.brief.path, 'utf8')
-    const schemaLine = brief.split('\n').find(line => line.startsWith('{"type":"object"'))
-    if (!schemaLine) throw new Error('worker brief has no payload schema')
-    const schema = JSON.parse(schemaLine)
+    const schemas = brief.split('\n')
+      .filter(line => line.startsWith('{"type":"object"'))
+      .map(line => JSON.parse(line))
+    // The brief also carries the outer snapshot schema; consume the Forge
+    // payload schema that actually supplies the mutation-claim example.
+    const payloadSchemas = schemas.filter(schema => Object.hasOwn(schema.properties ?? {}, 'mutationClaim'))
+    expect(payloadSchemas).toHaveLength(1)
+    const schema = payloadSchemas[0]!
     const claim: MutationClaim = schema.properties.mutationClaim.examples[0]
     const payload = { mutationClaim: claim, worktreePath: f.options.production.worktree,
       branch: f.run.branch!, commitSha: f.head, prNumber: null, diffFile: '', testsPassed: true }

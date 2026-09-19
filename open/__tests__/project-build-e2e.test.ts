@@ -74,6 +74,7 @@ import { buildRun, type BuildRunOutcome } from '@neutronai/trident/build-run.ts'
 import type { InnerLoopInput } from '@neutronai/trident/inner-loop.ts'
 import { PROJECT_SESSION_ACQUIRE_TIMEOUT_MS, prepareProjectBuild, type ProjectBuildContext } from '../wiring/project-build.ts'
 import { PROJECT_DEPENDENCIES_TIMEOUT_MS } from '../wiring/project-build-dependencies.ts'
+import { PROJECT_SNAPSHOT_SCHEMA } from '../wiring/project-build-snapshot.ts'
 
 const cleanups: (() => void | Promise<void>)[] = []
 afterEach(async () => { for (const fn of cleanups.splice(0).reverse()) await fn() })
@@ -166,6 +167,7 @@ async function measureDiff(run: Runner, repo: string, base: string, head: string
 }
 
 interface WorkerWorld {
+  numericBuildPr?: boolean
   mutationArgv?: 'bare' | 'valid'
   run: Runner
   repo: string
@@ -268,7 +270,8 @@ function literalWorker(world: WorkerWorld) {
     const panelRound = request.result.schema === 'verdict' ? JSON.parse(brief).round as number : undefined
     const stopped = world.blockRoles.has(request.role)
       || (request.role === 'review' && panelRound !== undefined && world.unavailableSeatRounds.has(panelRound))
-    const inner = stopped ? undefined : await performRole(world, request, brief)
+    let inner = stopped ? undefined : await performRole(world, request, brief)
+    if (world.numericBuildPr && request.role === 'build') inner = { ...(inner as object), pr: 17 }
 
     // Write ONLY what the brief asked for. See `envelopeFieldsNamedBy`. A blocked
     // answer OMITS `result` and ADDS `on`, exactly as the brief words it.
@@ -1112,8 +1115,21 @@ test('every dispatched brief states the envelope the decoder requires', async ()
     // decoder accepts. Reverting the brief to "Return a result object with head,
     // diff, pr and payload" empties this set and this assertion fails first.
     expect([...envelopeFieldsNamedBy(brief)].sort(), `${role} brief`).toEqual([...ENVELOPE_FIELDS].sort())
+    const schemas = brief.split('\n\n').filter(part => part.startsWith('{"type":"object"')).map(part => JSON.parse(part))
+    expect(schemas, `${role} outer snapshot contract`).toContainEqual(PROJECT_SNAPSHOT_SCHEMA)
+    expect(brief).toContain('Copy `snapshot.pr` from the host context unchanged')
+    expect(brief).toContain('result.payload.prNumber')
   }
 }, 120_000)
+
+test('numeric outer PR stops a valid build payload before review or publication', async () => {
+  const f = await fixture()
+  f.world.numericBuildPr = true
+  const outcome = await drive(f, 'pr')
+  expect(outcome).toMatchObject({ kind: 'unknown', detail: expect.stringContaining('result.pr must be null or an object') })
+  expect(f.world.dispatches.map(dispatch => dispatch.role)).toEqual(['plan', 'build'])
+  expect(f.github.prs).toEqual([])
+}, 30_000)
 
 test('pr mode drives plan, build, review, publish and merge to a terminal merged outcome', async () => {
   const f = await fixture()
