@@ -15,13 +15,14 @@ async function fixture(timeout = 500) {
   const dir = mkdtempSync(join(tmpdir(), 'project-broker-test-'))
   cleanup.push(() => rmSync(dir, { recursive: true, force: true }))
   const sent: Rpc[] = []
+  let closeCount = 0
   let receive: (message: unknown) => void = () => {}
   const upstream: ProjectControlTransport = {
     listen(onMessage) { receive = onMessage },
     send(message) {
       sent.push(message)
       if (message.method === 'initialize') queueMicrotask(() => receive({ id: message.id, result: { userAgent: 'test', platformFamily: 'unix', platformOs: 'linux' } }))
-    }, close() {},
+    }, close() { closeCount++ },
   }
   const socketPath = join(dir, 'control.sock')
   const options = { socketPath, threadId: 'project-thread', cwd: dir, codexHome: dir, upstream, requestTimeoutMs: timeout }
@@ -32,7 +33,7 @@ async function fixture(timeout = 500) {
     if (!message) throw new Error(`Missing ${method}`)
     receive({ id: message.id, result })
   }
-  return { broker, dir, socketPath, sent, receive: (message: Rpc) => receive(message), response, options }
+  return { broker, dir, socketPath, sent, receive: (message: Rpc) => receive(message), response, options, closeCount: () => closeCount }
 }
 
 // A disposable TCP-to-Unix relay only supplies the test client's missing Unix
@@ -205,5 +206,68 @@ describe('project control broker', () => {
     await expect(b.request('thread/settings/update', { threadId: 'project-thread', model: 'second' }, 0)).rejects.toThrow('Stale')
     expect(f.sent.filter(message => message.method === 'thread/settings/update')).toHaveLength(1)
     f.response('thread/settings/update'); await first
+  })
+
+  test('nested environment and sandbox scope overrides cannot bypass project admission', async () => {
+    const f = await fixture()
+    const gateway = f.broker.gateway('gateway')
+    for (const environments of [
+      [{ environmentId: 'local', cwd: '/foreign', runtimeWorkspaceRoots: ['/foreign'] }],
+      [{ environmentId: 'local', cwd: f.dir, runtimeWorkspaceRoots: ['/foreign'] }],
+      [{ environmentId: 'local', cwd: f.dir }, { environmentId: 'remote', cwd: '/foreign' }],
+      [{ environmentId: 'remote', cwd: f.dir }], [{ environmentId: 'local' }],
+      [{ environmentId: 'local', cwd: f.dir, futureScope: '/foreign' }],
+      { environmentId: 'local', cwd: f.dir }, [null],
+    ]) await expect(gateway.request('turn/start', { threadId: 'project-thread', environments }, 0)).rejects.toThrow('scope')
+    for (const method of ['turn/start', 'thread/settings/update']) {
+      await expect(gateway.request(method, { threadId: 'project-thread', sandboxPolicy: {
+        type: 'workspaceWrite', writableRoots: ['/foreign'], networkAccess: false, excludeTmpdirEnvVar: true, excludeSlashTmp: true,
+      } }, 0)).rejects.toThrow('scope')
+    }
+    await expect(gateway.request('turn/start', { threadId: 'project-thread', futureEnvironment: { cwd: '/foreign' } }, 0)).rejects.toThrow('scope')
+    expect(f.sent.filter(message => message.id)).toHaveLength(1)
+    expect(f.broker.state().epoch).toBe(0)
+  })
+
+  test('schema traversal permits valid project environments and opaque user data with scope-like keys', async () => {
+    const f = await fixture()
+    const gateway = f.broker.gateway('gateway')
+    const params = {
+      threadId: 'project-thread', environments: [{ environmentId: 'local', cwd: f.dir, runtimeWorkspaceRoots: [f.dir] }],
+      sandboxPolicy: { type: 'workspaceWrite', writableRoots: [f.dir], networkAccess: false, excludeTmpdirEnvVar: true, excludeSlashTmp: true },
+      input: [{ type: 'text', text: '{"cwd":"/foreign"}' }],
+      outputSchema: { type: 'object', properties: { cwd: { const: '/foreign' }, environments: { type: 'array' } } },
+      additionalContext: { cwd: { kind: 'text', value: '/foreign' } }, responsesapiClientMetadata: { cwd: '/foreign' },
+    }
+    const start = gateway.request('turn/start', params, 0)
+    expect(f.sent.findLast(message => message.method === 'turn/start')?.params).toEqual(params)
+    f.response('turn/start', { turn: { id: 'turn-a' } }); await start
+  })
+
+  test('constructor failure closes its supplied upstream exactly once, as successful shutdown does', async () => {
+    const f = await fixture()
+    for (const override of [{ socketPath: f.socketPath }, { socketPath: 'relative' }, { requestTimeoutMs: -1 }, { socketPath: join(f.dir, 'missing', 'control.sock') }]) {
+      let closed = 0
+      const upstream: ProjectControlTransport = { send() {}, listen() {}, close() { closed++ } }
+      await expect(createProjectControlBroker({ ...f.options, ...override, upstream })).rejects.toThrow()
+      expect(closed).toBe(1)
+    }
+    f.broker.close(); f.broker.close()
+    expect(f.closeCount()).toBe(1)
+  })
+
+  test('listen and initialization failures also close the supplied transport once', async () => {
+    const f = await fixture()
+    for (const failAt of ['listen', 'initialize']) {
+      let closed = 0
+      let receive: (message: unknown) => void = () => {}
+      const upstream: ProjectControlTransport = {
+        listen(onMessage) { if (failAt === 'listen') throw new Error('Listen failure'); receive = onMessage },
+        send(message) { receive({ id: message.id, error: { code: -32000, message: 'Initialize failure' } }) },
+        close() { closed++ },
+      }
+      await expect(createProjectControlBroker({ ...f.options, socketPath: join(f.dir, `${failAt}.sock`), upstream })).rejects.toThrow()
+      expect(closed).toBe(1)
+    }
   })
 })

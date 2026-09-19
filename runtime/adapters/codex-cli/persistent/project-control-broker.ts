@@ -2,6 +2,7 @@ import { chmodSync, lstatSync, realpathSync } from 'node:fs'
 import { dirname, isAbsolute, join } from 'node:path'
 import type { ServerWebSocket } from 'bun'
 import { BROKER_MAX_MESSAGE_BYTES, type ProjectControlTransport } from './project-control-broker-transport.ts'
+import { validateProjectControlScope } from './project-control-broker-scope.ts'
 
 type Rpc = Record<string, unknown>
 type Id = string | number
@@ -52,15 +53,23 @@ export async function createProjectControlBroker(options: {
   requestTimeoutMs?: number
 }): Promise<ProjectControlBroker> {
   const { upstream } = options
+  let upstreamClosed = false
+  const closeUpstream = (): void => {
+    if (upstreamClosed) return
+    upstreamClosed = true
+    upstream.close()
+  }
   const timeout = options.requestTimeoutMs ?? 10_000
-  if (!Number.isFinite(timeout) || timeout <= 0 || !options.threadId || !isAbsolute(options.socketPath)
-    || !isAbsolute(options.cwd) || !isAbsolute(options.codexHome)) throw new Error('Invalid broker binding')
-  // No unlink-on-start: an existing socket belongs to another broker until proven otherwise.
-  const parent = lstatSync(dirname(options.socketPath))
-  if (!parent.isDirectory() || (parent.mode & 0o077) !== 0 || parent.uid !== process.getuid?.()
-    || realpathSync(dirname(options.socketPath)) !== dirname(options.socketPath)) throw new Error('Broker socket needs a private owned directory')
-  try { lstatSync(options.socketPath); throw new Error('Broker socket already exists') }
-  catch (error) { if ((error as NodeJS.ErrnoException).code !== 'ENOENT') throw error }
+  try {
+    if (!Number.isFinite(timeout) || timeout <= 0 || !options.threadId || !isAbsolute(options.socketPath)
+      || !isAbsolute(options.cwd) || !isAbsolute(options.codexHome)) throw new Error('Invalid broker binding')
+    // No unlink-on-start: an existing socket belongs to another broker until proven otherwise.
+    const parent = lstatSync(dirname(options.socketPath))
+    if (!parent.isDirectory() || (parent.mode & 0o077) !== 0 || parent.uid !== process.getuid?.()
+      || realpathSync(dirname(options.socketPath)) !== dirname(options.socketPath)) throw new Error('Broker socket needs a private owned directory')
+    try { lstatSync(options.socketPath); throw new Error('Broker socket already exists') }
+    catch (error) { if ((error as NodeJS.ErrnoException).code !== 'ENOENT') throw error }
+  } catch (error) { closeUpstream(); throw error }
   const clients = new Set<Client>()
   const sockets = new Set<ServerWebSocket<{ client: Client }>>()
   const pending = new Map<string, { method: string; resolve(value: unknown): void; reject(error: Error): void; timer: ReturnType<typeof setTimeout> }>()
@@ -82,7 +91,7 @@ export async function createProjectControlBroker(options: {
     approvals.clear()
     for (const socket of sockets) socket.close(1011, 'Project broker closed')
     server?.stop(true)
-    upstream.close()
+    closeUpstream()
   }
   const send = (message: Rpc): void => {
     if (closed) throw closed
@@ -101,7 +110,7 @@ export async function createProjectControlBroker(options: {
   const releaseCompletedTurn = (): void => {
     if (active?.completed && !current) { active = undefined; approvals.clear() }
   }
-  upstream.listen(raw => {
+  try { upstream.listen(raw => {
     if (closed) return
     if (!object(raw)) { close(new Error('Invalid native envelope')); return }
     if (typeof raw.method !== 'string') {
@@ -138,7 +147,7 @@ export async function createProjectControlBroker(options: {
     }
     // Project events only. Unknown global notifications are not a cross-project feed.
     if (threadId === options.threadId) for (const client of clients) if (client.initialized && !client.closed) client.emit(raw)
-  }, error => close(error))
+  }, error => close(error)) } catch (error) { close(); throw error }
 
   let initialized: unknown
   try {
@@ -152,10 +161,7 @@ export async function createProjectControlBroker(options: {
     if (method.startsWith('thread/') && !['thread/list', 'thread/loaded/list'].includes(method) || method.startsWith('turn/')) {
       if (params.threadId !== options.threadId) throw refusal('Exact project thread required')
     }
-    if (params.cwd != null && params.cwd !== options.cwd) throw refusal('Project cwd mismatch')
-    if (params.runtimeWorkspaceRoots != null && (!Array.isArray(params.runtimeWorkspaceRoots)
-      || params.runtimeWorkspaceRoots.length !== 1 || params.runtimeWorkspaceRoots[0] !== options.cwd)) throw refusal('Project roots mismatch')
-    if (params.cwds != null && (!Array.isArray(params.cwds) || params.cwds.some(path => path !== options.cwd))) throw refusal('Project cwd mismatch')
+    validateProjectControlScope(method, params, options.cwd, refusal)
     if (method === 'thread/resume' && (params.path != null || params.history != null)) throw refusal('Thread replacement refused')
     if (method === 'thread/resume' && params.config != null && (!object(params.config)
       || Object.keys(params.config).some(key => !['personality', 'web_search'].includes(key)))) throw refusal('Unclassified resume config refused')

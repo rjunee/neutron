@@ -21,7 +21,8 @@ async function run(): Promise<void> {
   const dir = mkdtempSync(join(tmpdir(), 'project-broker-native-'))
   const cwd = join(dir, 'project')
   const codexHome = join(dir, 'home')
-  mkdirSync(cwd); mkdirSync(codexHome)
+  const foreign = join(dir, 'foreign')
+  mkdirSync(cwd); mkdirSync(codexHome); mkdirSync(foreign)
   const inputs: string[] = []
   const provider = Bun.serve({ hostname: '127.0.0.1', port: 0, async fetch(request) {
     inputs.push(await request.text())
@@ -101,15 +102,39 @@ async function run(): Promise<void> {
     await until(() => broker?.state().phase === 'idle' && output.slice(beforeNativeTurn).includes('BROKER_NATIVE_REPLY'), 'native completion render')
     const gateway = broker.gateway('smoke-gateway')
     const epoch = broker.state().epoch
-    await gateway.request('turn/start', { threadId, input: [{ type: 'text', text: 'GATEWAY_BROKER_MARKER' }] }, epoch)
+    const sentBeforeRefusal = requests.filter(message => message.method === 'turn/start').length
+    let refused = false
+    try {
+      await gateway.request('turn/start', { threadId, input: [{ type: 'text', text: 'FORBIDDEN_ENVIRONMENT_MARKER' }],
+        environments: [{ environmentId: 'local', cwd: foreign, runtimeWorkspaceRoots: [foreign] }],
+      }, epoch)
+    } catch (error) {
+      if (!(error instanceof Error) || !error.message.includes('scope')) throw error
+      refused = true
+    }
+    if (!refused) {
+      await until(() => broker?.state().phase === 'idle', 'bypass native completion')
+      const snapshot = await gateway.request('thread/read', { threadId }) as { thread: { cwd: string; environments?: unknown } }
+      console.error('BYPASS: native thread after foreign environment mutation', JSON.stringify(snapshot.thread.environments))
+      throw new Error('Foreign environment reached native app-server')
+    }
+    assert.equal(requests.filter(message => message.method === 'turn/start').length, sentBeforeRefusal)
+    assert.equal(broker.state().epoch, epoch)
+    assert(inputs.every(input => !input.includes('FORBIDDEN_ENVIRONMENT_MARKER')))
+    await gateway.request('turn/start', { threadId, input: [{ type: 'text', text: 'GATEWAY_BROKER_MARKER' }],
+      environments: [{ environmentId: 'local', cwd, runtimeWorkspaceRoots: [cwd] }],
+    }, epoch)
     await until(() => broker?.state().phase === 'idle' && inputs.some(input => input.includes('GATEWAY_BROKER_MARKER')), 'gateway with attached TUI')
     await until(() => output.includes('GATEWAY_BROKER_MARKER'), 'gateway turn rendered in native TUI')
     assert(inputs.at(-1)?.includes('NATIVE_BROKER_MARKER'))
     assert(inputs.at(-1)?.includes('DISPOSABLE_SEED'))
+    const finalSnapshot = await gateway.request('thread/read', { threadId, includeTurns: false }) as { thread: { cwd: string; environments: unknown } }
+    assert.equal(finalSnapshot.thread.cwd, cwd)
+    assert.deepEqual(finalSnapshot.thread.environments, [{ environmentId: 'local', cwd, runtimeWorkspaceRoots: [cwd] }])
     assert(requests.filter(message => message.method === 'initialize').length === 1)
     assert(requests.filter(message => message.method === 'turn/start').length === 2)
     assert(requests.filter(message => message.method === 'turn/start').every(message => (message.params as Record<string, unknown>).threadId === threadId))
-    console.log('PASS: unmodified native TUI and gateway used the same broker-bound thread with an idle TUI attached; local provider only.')
+    console.log('PASS: foreign environment refused before forwarding; valid project environment, native TUI and gateway shared one thread; local provider only.')
   } catch (error) {
     console.error(output.slice(-4000).replace(/\x1b\[[0-?]*[ -/]*[@-~]/g, ''))
     throw error
