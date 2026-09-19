@@ -73,14 +73,27 @@ at the one deterministic place every Forge commit passes through: the commit wra
    `includeCoAuthoredBy` are deliberately left unset so `Co-Authored-By` is exactly what the
    CLI composes today. `__tests__/build-settings.test.ts` pins the exact object, that the
    sibling keys are undefined, and that the block is present on every variant (the top-level
-   key set is now `['hooks', 'attribution']`).
+   key set is now `['hooks', 'attribution']`). Accepted side effect, which the card did not
+   ask about: the CLI ties the commit trailer and the PR-body session link to this one
+   boolean ("Set to false to omit the Claude-Session trailer and PR-body link"), so PR
+   descriptions the loop opens will no longer carry the `https://claude.ai/code/session_...`
+   link either. That is consistent with #1133's intent (a public repository should not
+   carry session URLs on machine-authored history), and the alternative of a wrapper-only
+   fix would not have covered inline orchestrator commits, which is where the three
+   trailer-bearing commits on main (`51e5b16f`, `d9e415d9`, `0fc6cb83`) came from.
 
 2. **The wrapper strip.** `trident/commit-with-resolved-head.sh` no longer `exec`s
    `git commit "$@"`; it runs the commit as a child and, on success and ONLY when HEAD moved
-   (so `--dry-run` and a no-op commit never amend an older commit), removes every line
-   matching `^Claude-Session:` from the message and amends the commit in place with
-   `--amend --only --cleanup=whitespace` (author, parent, tree and `Co-Authored-By`
-   untouched; `--only` is what keeps the TREE untouched, see the review findings below). If
+   (so `--dry-run` and a no-op commit never amend an older commit), reads the new commit
+   back as the raw OBJECT (`git cat-file commit`, headers up to the first empty line, then
+   the message), removes every line beginning `Claude-Session:` (ASCII case-insensitive,
+   compared under the C locale so every byte is a byte) and amends the commit in place with
+   `--amend --only --no-verify --cleanup=verbatim -F <file>` (author, parent, tree and
+   `Co-Authored-By` untouched; `--only` is what keeps the TREE untouched, see the review
+   findings below). The stored message is byte-exact: the first commit's message minus the
+   removed line and, when that line was a paragraph of its own (the way the CLI reminder
+   makes the agent write it), the one empty line that separated that paragraph; a missing
+   final newline stays missing and no cleanup pass runs a second time. If the read-back or
    the amend fails for any reason the wrapper fails closed: it withdraws the commit it just
    made (`git reset --soft` to the HEAD the probe found, index and worktree kept) and exits
    with git's code, so a trailer-bearing commit is never left on the branch. The refusal
@@ -178,10 +191,11 @@ script in a scratch repo before anything was changed.
   forwarded too: with it on the agent's argv, the only-trailer message lands as the
   empty-bodied commit git already accepted, rather than being withdrawn (real-git test).
 - **NIT — an explicit `--cleanup=<mode>` was not forwarded; the amend always applied
-  `whitespace`.** Closed: `--cleanup=*` (and `--cleanup <mode>`) is forwarded after the
-  default, so the explicit mode wins. Real-git test with the positive control first: under
-  the default cleanup a paragraph `trailing   ` loses its spaces; with `--cleanup=verbatim`
-  on the agent's commit the amended body still contains `trailing   \n`.
+  `whitespace`.** Closed at the time by forwarding `--cleanup=*`; superseded in round 10
+  (below) by an amend that runs no cleanup at all. The real-git test stands, positive
+  control first: under the default cleanup a paragraph `trailing   ` loses its spaces on
+  the first commit; with `--cleanup=verbatim` on the agent's commit the amended body still
+  contains `trailing   \n`.
 - **NIT (previous synthesis) — the flag scan could not tell an option's VALUE from an
   option.** A `-m` paragraph beginning with `-S` was forwarded to the amend as `-S<keyid>`,
   gpg failed, and (before fail-closed) the trailer stayed. Closed: the scan skips the value
@@ -191,23 +205,72 @@ script in a scratch repo before anything was changed.
   Real-git test: `-m '-Signed by hand'` lands as prose, exit 0. Deleting the skip list turns
   exactly that test red with `gpg failed to sign the data` (18 pass / 1 fail).
 
+### Review findings on round 9 (`bb653667`, APPROVE with nits), and how each was closed
+
+The round-9 head was APPROVED; the recorded findings ask that the message rewrite be
+byte-exact except for the line it removes, with the read side on raw object bytes and a
+byte-safe filter, and that the G135 inventory row state what is always true of the gate in
+the terms of the code it cites. Each was reproduced against the real script before the
+change.
+
+- **The read side was porcelain.** `git log -1 --format=%B` is shaped by config the wrapper
+  does not control: with `i18n.logOutputEncoding=ISO-8859-1` it hands back a re-encoded body
+  (one latin1 byte per accented letter where the object holds two UTF-8 bytes), which the
+  old wrapper would then have stored back as the amended message. Closed: the message is
+  read as the raw commit object, `git cat-file commit <new head>`, split at the first empty
+  line (a multi-line `gpgsig` header continues with a leading space, never an empty line).
+  Real-git test with the positive control first: under that config `%B` really does differ
+  from the stored bytes; after the wrapper the stored bytes are exactly the first commit's
+  message minus the trailer line.
+- **The filter was not byte-safe.** `grep -v` in the UTF-8 locale every REPL runs under
+  drops a line that is not valid UTF-8 and prints `binary file matches` in its place: on
+  this host, a body `caf\xe9 body` (a latin1 e-acute, stored raw under
+  `i18n.commitEncoding=ISO-8859-1`) vanished from the filtered message. Closed: the filter
+  is a bash function running under `LC_ALL=C` (`read -r` with an empty IFS, `printf '%s'`),
+  so every comparison is a byte comparison and a final line without a newline is written
+  back without one; the bytes travel through files, never `$(...)`, which would drop the
+  trailing newline. Real-git test with the positive control first (this host's grep loses
+  the line and reports `binary`); after the wrapper the stored message holds the raw byte
+  and the object still carries its `encoding ISO-8859-1` header.
+- **The amend ran a cleanup of its own.** `--cleanup=whitespace` on the amend trimmed every
+  line's trailing spaces and overrode a config-level `commit.cleanup` the agent never
+  overrode on argv (the reviewer's second nit: `commit.cleanup=verbatim`, `trailing   ` kept
+  by the first commit, trimmed by the amend). Closed: the amend runs `--cleanup=verbatim`
+  and `--cleanup` is no longer forwarded (the first commit already applied whatever mode
+  argv or config asked for; the amend stores the filtered bytes as they are). The empty
+  line that a trailer-only paragraph leaves behind is removed by the filter itself, not by
+  a cleanup pass, so the rewrite is deterministic and the only bytes that change are the
+  trailer line and, when it stood alone, the one empty line that separated it. Real-git
+  test: with `commit.cleanup=verbatim` in config the trailing spaces survive the amend, and
+  a `-F` file whose last line has no newline is stored without one.
+- **The match was case-sensitive** (the reviewer's first nit; git trailer tokens are not).
+  Closed: `${line,,}` under the C locale folds ASCII only, so `claude-session:` is removed
+  and no non-ASCII byte is touched. Real-git test.
+- **The G135 row described the old amend.** Closed: the row now states the invariant in the
+  terms of the code it cites (raw object read, byte filter, verbatim amend, fail-closed
+  withdrawal) and its anchors point at the current lines of the script and the tests,
+  including the four added this round; two test anchors that had drifted by one line
+  (`:60`, `:72` for tests starting at 59 and 71) are corrected.
+
 ### Mutation, proven by hand before nomination
+
+`grep -c 'claude-session:\*) drop\[i\]=1; removed=1 ;;' trident/commit-with-resolved-head.sh`
+= 1. Replacing that case arm with `claude-session:*) drop[i]=0 ;;` (the trailer is matched
+and kept) turns 13 of the 23 tests in `commit-with-resolved-head-realgit.test.ts` red
+(every strip test, including the four added this round) while
+`runtime/adapters/claude-code/persistent/__tests__/build-settings.test.ts`, which never runs
+the wrapper, stays green (15 pass); restoring the arm returns the guard to 23 / 0. This is
+the nominated mutation.
+
+The earlier nominations still hold and are kept as by-hand checks:
+
 
 `grep -c 'git commit --amend --only --no-verify' trident/commit-with-resolved-head.sh` = 1.
 `sed -i 's/git commit --amend --only --no-verify/git commit --amend --no-verify/'` on that
 file (the amend re-snapshots the index again) turns the pathspec test in
-`commit-with-resolved-head-realgit.test.ts` red (18 pass / 1 fail) while
-`runtime/adapters/claude-code/persistent/__tests__/build-settings.test.ts`, which never runs
-the wrapper, stays green (15 pass); restoring the line returns the guard to 19 / 0.
-
-The previous nomination still holds and is kept as a by-hand check:
-
-`grep -c "\-e '^Claude-Session:'" trident/commit-with-resolved-head.sh` = 1.
-`sed -i "s/-e '^Claude-Session:'/-e '^Never-Matches-Trailer:'/"` on that file (the trailer
-comes back) turns the strip tests in `commit-with-resolved-head-realgit.test.ts` red while
-`runtime/adapters/claude-code/persistent/__tests__/build-settings.test.ts`, which never runs
-the wrapper, stays green; `git checkout -- trident/commit-with-resolved-head.sh` returns the
-guard to green.
+`commit-with-resolved-head-realgit.test.ts` red while the build-settings control stays
+green; restoring the line returns the guard to green. (The round-8 pattern mutation on
+`-e '^Claude-Session:'` no longer applies: that grep is gone.)
 
 ### Not changed, deliberately
 
@@ -216,7 +279,8 @@ guard to green.
 - The `CLAUDE_CODE_SUPPRESS_SESSION_ATTRIBUTION` environment variable: an undocumented second
   knob for the same switch. The wrapper strip is the second mechanism because it is provable
   from this repository; a second CLI knob is not.
-- The body-wide `^Claude-Session:` pattern (the nit above).
+- The body-wide `Claude-Session:` line match (the nit above): still any line beginning
+  with the token, not only a trailer-block line.
 - Refusing BEFORE the first commit when the message would strip to nothing: the message is
   only known after git has composed it (`-m`, `-F`, `-C`, the editor), so the wrapper lets
   the commit land and withdraws it instead, which is the same fail-closed path every other
@@ -254,7 +318,9 @@ section above) without touching the settings switch or the Forge brief.
 
 Round 9 is on base `a1be24e0` (origin/main at #1169) and replays `2a4cbb5a` by cherry-pick
 (merge-tree clean against main). Round 8 (`2a4cbb5a`, CI 12/12 green) was APPROVED with one
-nit (the `-q` wording above, closed this round) and then died because the host's own
+nit (the `-q` wording above, closed in round 9) and then died because the host's own
 `scripts/run-tests.sh` refused to run in that worktree (`node_modules/.bun` absent, exit 3;
 fixed by #1168); the run after it died because the build wrote `result.pr` as a bare number
-instead of the snapshot object. Neither was a defect in the change.
+instead of the snapshot object. Neither was a defect in the change. Round 9 (`bb653667`) was
+APPROVED with the byte-exactness findings closed in round 10 (the section above), which
+touches only the wrapper, its real-git tests, the G135 row and this record.

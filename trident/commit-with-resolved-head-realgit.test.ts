@@ -292,11 +292,12 @@ test('#1133: --allow-empty-message on the agent\'s commit is honoured by the str
   expect(result.stdout).toContain('HEAD is now')
 })
 
-test("#1133: an explicit --cleanup=<mode> on the agent's commit wins over the amend's default", () => {
+test("#1133: an explicit --cleanup=<mode> on the agent's commit is what the amended message keeps (the amend runs no cleanup of its own)", () => {
   const { tree, branch, parent } = fixture()
 
-  // Positive control: under the default cleanup a `-m` paragraph loses its trailing spaces.
-  // (The paragraph sits ABOVE Co-Authored-By so the spaces are interior to the body and the
+  // Positive control: under the default cleanup a `-m` paragraph loses its trailing spaces
+  // on the FIRST commit, and the amend stores that cleaned message minus the trailer. (The
+  // paragraph sits ABOVE Co-Authored-By so the spaces are interior to the body and the
   // helper's trim cannot eat them.)
   const control = run(tree, 'bash', [guard, branch, '-m', 'feat: v', '-m', 'trailing   ', '-m', SESSION, '-m', CO_AUTHOR])
   expect(control.status, control.stderr || control.stdout).toBe(0)
@@ -309,7 +310,7 @@ test("#1133: an explicit --cleanup=<mode> on the agent's commit wins over the am
   const body = git(tree, 'log', '-1', '--format=%B')
   expect(body).not.toContain('Claude-Session')
   expect(body).toContain(CO_AUTHOR)
-  // Verbatim survived the amend: the trailing spaces are still there.
+  // Verbatim survived the amend: the trailing spaces the first commit stored are still there.
   expect(body).toContain('trailing   \n')
   expect(git(tree, 'rev-parse', 'HEAD^')).toBe(parent)
 })
@@ -393,4 +394,99 @@ test('a missing expected-branch argument is refused before any git call', () => 
   const result = spawnSync('bash', [guard], { cwd: root, encoding: 'utf8' })
   expect(result.status).toBe(64)
   expect(result.stderr).toContain('expected branch was not supplied')
+})
+
+// The rewrite must be byte-exact except for the line it removes. These read the commit
+// OBJECT back (`git cat-file commit`, one byte per latin1 char) rather than `git log`, so
+// the assertions see the stored bytes and not a porcelain rendering of them.
+function storedMessage(tree: string): string {
+  const object = spawnSync('git', ['cat-file', 'commit', 'HEAD'], { cwd: tree, encoding: 'latin1' })
+  expect(object.status, object.stderr).toBe(0)
+  const headersEnd = object.stdout.indexOf('\n\n')
+  expect(headersEnd).toBeGreaterThan(0)
+  return object.stdout.slice(headersEnd + 2)
+}
+
+const latin1 = (utf8: string) => Buffer.from(utf8, 'utf8').toString('latin1')
+
+test('#1133: the strip reads the raw object, not `git log` porcelain -- i18n.logOutputEncoding cannot re-encode the body', () => {
+  const { tree, branch, parent } = fixture()
+  git(tree, 'config', 'i18n.logOutputEncoding', 'ISO-8859-1')
+  const subject = 'feat: café über'
+
+  // Positive control: under that config `git log --format=%B` really does hand back a
+  // re-encoded body (one latin1 byte per accented letter, not the two UTF-8 bytes the
+  // object holds). A wrapper that read its message from there would store those bytes back.
+  git(tree, 'commit', '-q', '-m', subject)
+  const porcelain = spawnSync('git', ['log', '-1', '--format=%B'], { cwd: tree, encoding: 'latin1' })
+  expect(porcelain.stdout).toContain('café über')
+  expect(porcelain.stdout).not.toBe(latin1(subject) + '\n')
+  expect(storedMessage(tree)).toBe(latin1(subject) + '\n')
+  git(tree, 'reset', '-q', '--soft', parent)
+
+  const result = run(tree, 'bash', [guard, branch, '-m', subject, '-m', `${SESSION}\n${CO_AUTHOR}`])
+
+  expect(result.status, result.stderr || result.stdout).toBe(0)
+  // Exactly the bytes git stored for the first commit, minus the one trailer line.
+  expect(storedMessage(tree)).toBe(latin1(`${subject}\n\n${CO_AUTHOR}\n`))
+  expect(git(tree, 'rev-parse', 'HEAD^')).toBe(parent)
+})
+
+test('#1133: the filter is byte-safe -- a body that is not valid UTF-8 is not read as "binary" under a UTF-8 locale', () => {
+  const { tree, branch, parent } = fixture()
+  // A latin1 e-acute on its own is invalid UTF-8. With `i18n.commitEncoding` naming that
+  // encoding, git stores the byte as is (and records the encoding on the object) instead of
+  // transcoding it; the amend must carry that byte through untouched.
+  git(tree, 'config', 'i18n.commitEncoding', 'ISO-8859-1')
+  const bodyFile = join(tree, '..', 'message.txt')
+  writeFileSync(bodyFile, Buffer.from(`fix: latin1\n\ncaf\xe9 body\n${SESSION}\n${CO_AUTHOR}\n`, 'latin1'))
+
+  // Positive control: this host's grep, in the UTF-8 locale the test forces below, drops
+  // the line holding the invalid byte and reports "binary file matches" in its place -- the
+  // loss a text-mode filter would have baked into the amended message.
+  const grepped = spawnSync('bash', ['-c', `LC_ALL=C.UTF-8 grep -v -e '^Claude-Session:' <"$0" 2>&1`, bodyFile], { encoding: 'latin1' })
+  expect(grepped.stdout).not.toContain('caf\xe9 body')
+  expect(grepped.stdout.toLowerCase()).toContain('binary')
+
+  const result = spawnSync('bash', [guard, branch, '--cleanup=verbatim', '-F', bodyFile], {
+    cwd: tree,
+    encoding: 'latin1',
+    env: { ...process.env, LC_ALL: 'C.UTF-8', LANG: 'C.UTF-8' },
+  })
+
+  expect(result.status, result.stderr || result.stdout).toBe(0)
+  expect(storedMessage(tree)).toBe(`fix: latin1\n\ncaf\xe9 body\n${CO_AUTHOR}\n`)
+  expect(spawnSync('git', ['cat-file', 'commit', 'HEAD'], { cwd: tree, encoding: 'latin1' }).stdout).toContain('\nencoding ISO-8859-1\n')
+  expect(git(tree, 'rev-parse', 'HEAD^')).toBe(parent)
+})
+
+test('#1133: the match is case-insensitive, as git trailer tokens are', () => {
+  const { tree, branch, parent } = fixture()
+
+  const result = run(tree, 'bash', [guard, branch, '-m', 'feat: cased', '-m', `${CO_AUTHOR}\nclaude-session: https://claude.ai/code/session_01LOWER`])
+
+  expect(result.status, result.stderr || result.stdout).toBe(0)
+  expect(storedMessage(tree)).toBe(`feat: cased\n\n${CO_AUTHOR}\n`)
+  expect(git(tree, 'rev-parse', 'HEAD^')).toBe(parent)
+})
+
+test('#1133: the amend stores the filtered bytes verbatim -- a config-level commit.cleanup is not overridden, and a missing final newline stays missing', () => {
+  const { tree, branch, parent } = fixture()
+  git(tree, 'config', 'commit.cleanup', 'verbatim')
+
+  // Positive control: with that config and no --cleanup on argv, git keeps the trailing
+  // spaces on the first commit. The amend must keep them too.
+  const cleanup = run(tree, 'bash', [guard, branch, '-m', 'feat: v', '-m', 'trailing   ', '-m', SESSION, '-m', CO_AUTHOR])
+  expect(cleanup.status, cleanup.stderr || cleanup.stdout).toBe(0)
+  expect(storedMessage(tree)).toBe(`feat: v\n\ntrailing   \n\n${CO_AUTHOR}\n`)
+  git(tree, 'reset', '-q', '--soft', parent)
+
+  // The trailer in the MIDDLE of its paragraph is the only line removed; the paragraph's
+  // other lines and the file's missing final newline are stored exactly as given.
+  const bodyFile = join(tree, '..', 'no-final-newline.txt')
+  writeFileSync(bodyFile, `feat: nl\n\n${CO_AUTHOR}\n${SESSION}\nRefs #1133`)
+  const result = run(tree, 'bash', [guard, branch, '-F', bodyFile])
+  expect(result.status, result.stderr || result.stdout).toBe(0)
+  expect(storedMessage(tree)).toBe(`feat: nl\n\n${CO_AUTHOR}\nRefs #1133`)
+  expect(git(tree, 'rev-parse', 'HEAD^')).toBe(parent)
 })

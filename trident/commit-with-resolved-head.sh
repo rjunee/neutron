@@ -1,6 +1,68 @@
 #!/usr/bin/env bash
 set -uo pipefail
 
+# #1133 -- the message rewrite below must be byte-exact except for the line it removes, so
+# this filter works on the raw commit OBJECT (`git cat-file commit`, headers up to the first
+# empty line, then the message) and never on `git log` output, which is porcelain: re-encoded
+# per `i18n.logOutputEncoding` and decorated per `log.showSignature`. `LC_ALL=C` makes every
+# comparison a byte comparison (a UTF-8 locale would make `grep` call a latin1 body "binary"
+# and print a summary line in place of it); `read -r` with an empty IFS keeps every byte but
+# the newline, and a final line without one is written back without one. `${line,,}` under
+# the C locale folds ASCII only, so the match is case-insensitive the way git's own trailer
+# tokens are and no non-ASCII byte is touched. Removed: every line beginning
+# `Claude-Session:` and, when that emptied its paragraph (the CLI reminder makes the agent
+# write the trailer as its own `-m` paragraph), the one empty line that separated that
+# paragraph -- the next one, or the previous one when it was last -- so the rewrite leaves
+# no doubled or trailing blank line. Nothing else changes. Returns 0 when a line was removed.
+strip_session_trailer() {
+  local LC_ALL=C
+  local line in_message=0 ended_with_newline=1
+  local -a lines=() drop=()
+  while IFS= read -r line; do
+    if [ "$in_message" -eq 0 ]; then
+      [ -z "$line" ] && in_message=1
+      continue
+    fi
+    lines+=("$line")
+  done
+  if [ "$in_message" -eq 1 ] && [ -n "$line" ]; then
+    lines+=("$line")
+    ended_with_newline=0
+  fi
+  local n=${#lines[@]} i removed=0
+  for ((i = 0; i < n; i++)); do
+    case "${lines[i],,}" in
+      claude-session:*) drop[i]=1; removed=1 ;;
+      *) drop[i]=0 ;;
+    esac
+  done
+  i=0
+  while ((i < n)); do
+    if [ -z "${lines[i]}" ]; then ((i++)); continue; fi
+    local start=$i whole=1
+    while ((i < n)) && [ -n "${lines[i]}" ]; do
+      [ "${drop[i]}" -eq 0 ] && whole=0
+      ((i++))
+    done
+    if ((whole)); then
+      if ((i < n)) && [ -z "${lines[i]}" ]; then drop[i]=1
+      elif ((start > 0)) && [ -z "${lines[start - 1]}" ]; then drop[start - 1]=1
+      fi
+    fi
+  done
+  local last=-1
+  for ((i = 0; i < n; i++)); do [ "${drop[i]}" -eq 0 ] && last=$i; done
+  for ((i = 0; i <= last; i++)); do
+    [ "${drop[i]}" -eq 1 ] && continue
+    if ((i < last)) || [ "$ended_with_newline" -eq 1 ] || ((last < n - 1)); then
+      printf '%s\n' "${lines[i]}"
+    else
+      printf '%s' "${lines[i]}"
+    fi
+  done
+  return $((1 - removed))
+}
+
 expected_branch=${1-}
 if [ -z "$expected_branch" ]; then
   echo "commit refused: expected branch was not supplied" >&2
@@ -54,14 +116,25 @@ fi
 # HEAD where the probe found it, and an older commit must never be amended by mistake.
 new_head=$(git rev-parse --verify HEAD 2>/dev/null)
 if [ -n "$new_head" ] && [ "$new_head" != "$head_oid" ]; then
-  message=$(git log -1 --format=%B)
-  stripped=$(printf '%s\n' "$message" | grep -v -e '^Claude-Session:')
-  if [ "$stripped" != "$message" ]; then
+  # Raw object bytes in, raw message bytes out (see strip_session_trailer); the files, not
+  # shell variables, carry them, so no trailing newline is lost on the way to `-F`.
+  raw_object=$(mktemp)
+  stripped_message=$(mktemp)
+  trap 'rm -f "$raw_object" "$stripped_message"' EXIT
+  git cat-file commit "$new_head" >"$raw_object"
+  cat_exit=$?
+  if [ "$cat_exit" -ne 0 ]; then
+    git reset -q --soft "$head_oid"
+    echo "commit refused: the commit $new_head could not be read back for the Claude-Session check (git cat-file exited $cat_exit); the commit was withdrawn, HEAD is back at $head_oid and the index still holds the staged changes" >&2
+    exit "$cat_exit"
+  fi
+  if strip_session_trailer <"$raw_object" >"$stripped_message"; then
     # The amend must repeat the flags of the commit it rewrites, or the two halves
-    # disagree: a `-S`/`--gpg-sign` commit would be amended unsigned, `--allow-empty` or
-    # `--allow-empty-message` would be refused the second time round, and an explicit
-    # `--cleanup=<mode>` would be overridden by the default below. Scan the original argv
+    # disagree: a `-S`/`--gpg-sign` commit would be amended unsigned, and `--allow-empty` or
+    # `--allow-empty-message` would be refused the second time round. Scan the original argv
     # for exactly those and forward them; a bare `--` ends the options, so stop there.
+    # `--cleanup` is NOT forwarded: the first commit already applied whatever mode argv or
+    # `commit.cleanup` asked for, and the amend below stores the filtered bytes verbatim.
     # An option that takes its VALUE as the next argv element (`-m`, `-F`, `--author`, ...)
     # has that value skipped, so a paragraph that happens to begin with `-S` is never
     # mistaken for a signing flag and handed to the amend as a key id.
@@ -75,24 +148,25 @@ if [ -n "$new_head" ] && [ "$new_head" != "$head_oid" ]; then
       fi
       case "$arg" in
         --) break ;;
-        -S|-S?*|--gpg-sign|--gpg-sign=*|--no-gpg-sign|--allow-empty|--allow-empty-message|--cleanup=*) amend_flags+=("$arg") ;;
-        --cleanup) amend_flags+=("$arg"); value_of=forward ;;
-        -m|-F|-C|-c|-t|--message|--file|--author|--date|--template|--fixup|--squash|--reuse-message|--reedit-message|--trailer|--pathspec-from-file) value_of=skip ;;
+        -S|-S?*|--gpg-sign|--gpg-sign=*|--no-gpg-sign|--allow-empty|--allow-empty-message) amend_flags+=("$arg") ;;
+        -m|-F|-C|-c|-t|--message|--file|--author|--date|--template|--fixup|--squash|--reuse-message|--reedit-message|--trailer|--pathspec-from-file|--cleanup) value_of=skip ;;
       esac
     done
     # `--only`: an amend without paths re-snapshots the CURRENT index, so a pathspec commit
     # (`git commit -m ... -- a.txt` with b.txt also staged) would silently absorb every other
     # staged file into the published commit. `--only --amend` with no paths rewrites the
     # message over the tree the first commit already has; the index is left as it was.
-    # `--cleanup=whitespace` collapses the blank line the removed trailer leaves and is the
-    # same cleanup a `-m` commit already had (a forwarded `--cleanup=<mode>` comes later on
-    # the line and wins); `--amend` keeps the author. `--no-verify` because the hooks already
+    # `--cleanup=verbatim`: the bytes in $stripped_message are the first commit's message
+    # minus the trailer, already cleaned by whatever mode that commit ran under, so the amend
+    # must not clean them again (`whitespace` would trim every line's trailing spaces and
+    # override a `commit.cleanup` the agent never overrode on argv). `--amend` keeps the
+    # author. `--no-verify` because the hooks already
     # vetted this exact tree seconds ago and the amend changes only the message: re-running a
     # hook that the first commit skipped with `--no-verify` (an unlinked managed hook exits
     # 68) would fail the amend and leave the trailer in. Not `-q`: git's second
     # `[branch sha] subject` line names the commit that is actually on the branch, and the
     # line printed below spells out both shas in full.
-    printf '%s\n' "$stripped" | git commit --amend --only --no-verify --cleanup=whitespace -F - ${amend_flags[@]+"${amend_flags[@]}"}
+    git commit --amend --only --no-verify --cleanup=verbatim -F "$stripped_message" ${amend_flags[@]+"${amend_flags[@]}"}
     amend_exit=$?
     if [ "$amend_exit" -ne 0 ]; then
       # Fail CLOSED. The commit that landed a moment ago is exactly the one this guard
