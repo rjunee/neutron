@@ -53,7 +53,7 @@ import { buildTridentChildCrashSink } from './trident-child-crash-sink.ts'
 import { fireAndForget } from '@neutronai/logger/fire-and-forget.ts'
 
 export interface WiredSubstrates {
-  adoptLiveAgentRepls: (projectIds: readonly string[]) => Promise<void>
+  adoptLiveAgentRepls: (projectIds: readonly (string | null)[]) => Promise<void>
   /** Warm onboarding phase-spec substrate (`cc-llm-*`); null when LLM-less. */
   llmCallSubstrate: Substrate | null
   /** Warm live-chat substrate (`cc-agent-*`, tool-bridge on); null LLM-less. */

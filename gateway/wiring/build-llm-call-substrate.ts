@@ -847,8 +847,9 @@ async function claudeOptionsFor(
 }
 
 export interface LlmCallSubstrate extends Substrate {
-  /** Reconcile durable Claude survivors for authoritative project identities. No turns. */
-  adoptExisting(projectIds: readonly string[]): Promise<void>
+  /** Reconcile durable Claude survivors without turns. Exact conversation scopes:
+   * null is General; strings are actual project ids (never sentinel aliases). */
+  adoptExisting(projectIds: readonly (string | null)[]): Promise<void>
 }
 
 /**
@@ -892,11 +893,12 @@ export function buildLlmCallSubstrate(
   return {
     async adoptExisting(projectIds): Promise<void> {
       if (input.ephemeral === true) return
-      for (const projectId of new Set(projectIds)) {
+      for (const conversationProjectId of new Set(projectIds)) {
+        const projectId = conversationProjectId ?? undefined
         // Mirror dispatch precedence: configured models never use a Claude REPL.
         if (input.configuredChat?.env !== undefined &&
             projectModelTier(input.configuredChat.env, projectId) !== undefined) continue
-        const selection = input.providerResolver?.(projectId)
+        const selection = input.providerResolver?.(projectId, 'conversation')
         const selected = typeof selection === 'object' ? selection.provider : selection
         const provider = normalizeProvider(selected?.trim() ? selected : input.provider)
         if (provider !== 'anthropic') continue
@@ -909,7 +911,8 @@ export function buildLlmCallSubstrate(
             substrate_instance_id: input.substrate_instance_id,
             ...(input.cwd === undefined ? {} : { cwd: input.cwd }),
             ...(input.user_id === undefined ? {} : { user_id: input.user_id }),
-            project_id: projectId, credential_identity: credential.id,
+            project_id: conversationProjectId ?? 'general', conversationProjectId,
+            credential_identity: credential.id,
           }
           try {
             if (existingClaudeRepl(identity) === undefined) continue
@@ -919,7 +922,8 @@ export function buildLlmCallSubstrate(
               ...(input.oauthRefresh === undefined ? {} : { oauthRefresh: input.oauthRefresh }),
               ...(input.owner_handle === undefined ? {} : { owner_handle: input.owner_handle }),
             }, pool, credential)
-            const opts = await claudeOptionsFor(input, resolved, () => projectId)
+            const opts = await claudeOptionsFor(input, resolved, () => conversationProjectId ?? 'general')
+            opts.conversationProjectId = conversationProjectId
             await reconcileExistingClaudeRepl(opts)
           } catch (error) {
             substrateLog.warn('boot_repl_adoption_unavailable', {

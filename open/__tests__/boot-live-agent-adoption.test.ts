@@ -9,6 +9,7 @@ import { ProjectDb } from '@neutronai/persistence/index.ts'
 import { composeProductionGraph } from '@neutronai/gateway/composition.ts'
 import { LIVE_AGENT_TOOL_NAMES } from '@neutronai/gateway/wiring/build-live-agent-turn.ts'
 import { buildLlmCallSubstrate } from '@neutronai/gateway/wiring/build-llm-call-substrate.ts'
+import { writeInstanceModelProvider } from '@neutronai/gateway/storage/owner-metadata.ts'
 import { deriveReplSupervisionPaths } from '@neutronai/runtime/adapters/claude-code/index.ts'
 import { configuredPtyHost } from '@neutronai/runtime/adapters/claude-code/persistent/configured-pty-host.ts'
 import { poolKeyFor } from '@neutronai/runtime/adapters/claude-code/persistent/pool.ts'
@@ -46,6 +47,7 @@ const ENV_KEYS = [
   'NEUTRON_IDENTITY_JWKS_URL', 'NEUTRON_IDENTITY_AUDIENCE',
   'NEUTRON_CORES_GOOGLE_CLIENT_ID', 'NEUTRON_CORES_GOOGLE_CLIENT_SECRET',
   'NEUTRON_CONNECT_PUBLIC_BASE_URL',
+  'NEUTRON_PROJECT_MODELS',
 ] as const
 
 let savedEnv: Record<string, string | undefined> = {}
@@ -322,6 +324,74 @@ test('production graph grants two project survivors only after bridge wiring, wi
     for (const cleanup of composition.realmode_cleanups ?? []) await cleanup()
   }
 }, 60_000)
+
+test('adoption supplies explicit conversation provenance for General and ordinary project callers', async () => {
+  const resolved: Array<[string | undefined, string | undefined]> = []
+  const wrapper = buildLlmCallSubstrate({
+    pool: newCredentialPool({ strategy: 'fill_first', credentials: [
+      { id: 'test', kind: 'api_key', secret: API_KEY },
+    ] }),
+    substrate_instance_id: 'cc-agent-owner',
+    providerResolver: (id, scope) => { resolved.push([id, scope]); return 'openai-codex' },
+  })!
+  await wrapper.adoptExisting([null, 'general', PROJECT, null])
+  expect(resolved).toEqual([
+    [undefined, 'conversation'], ['general', 'conversation'], [PROJECT, 'conversation'],
+  ])
+})
+
+for (const selection of ['general-claude', 'project-claude', 'project-configured'] as const) {
+test(`production boot isolates General and literal-general survivors (${selection})`, async () => {
+  process.env['NEUTRON_DB_PATH'] = join(home!, `${selection}.db`)
+  seedMigratedDb(process.env['NEUTRON_DB_PATH']!)
+  db = ProjectDb.open(process.env['NEUTRON_DB_PATH']!)
+  await writeInstanceModelProvider(db, 'owner', selection === 'project-claude' ? 'openai-codex' : 'anthropic')
+  seedProject('general', { provider: selection === 'general-claude' ? 'openai-codex' : 'anthropic' })
+  if (selection === 'project-configured') process.env['NEUTRON_PROJECT_MODELS'] = '{"general":"glm"}'
+  const host = patchHost()
+  devChannel = Bun.serve({ hostname: '127.0.0.1', port: 0, fetch() {
+    return Response.json({ ok: true, session_id: SESSION })
+  } })
+  secondDevChannel = Bun.serve({ hostname: '127.0.0.1', port: 0, fetch() {
+    return Response.json({ ok: true, session_id: SECOND_SESSION })
+  } })
+  const paths = deriveReplSupervisionPaths(home!)
+  mkdirSync(paths.stateDir, { recursive: true })
+  const keyFor = (conversationProjectId: string | null) => poolKeyFor({
+    substrate_instance_id: 'cc-agent-owner', cwd: home!, user_id: 'owner',
+    project_id: 'general', conversationProjectId, credential_identity: 'anthropic:ANTHROPIC_API_KEY',
+  })
+  const generalKey = keyFor(null)
+  const projectKey = keyFor('general')
+  expect(generalKey).not.toBe(projectKey)
+  writeFileSync(paths.replRegistryPath, JSON.stringify({
+    [generalKey]: registryRow(generalKey, HANDLE, GENERATION, devChannel.port!),
+    [projectKey]: registryRow(projectKey, SECOND_HANDLE, SECOND_GENERATION, secondDevChannel.port!,
+      { session: SECOND_SESSION, channel: SECOND_CHANNEL, pid: SECOND_PID }),
+  }))
+  const composer = buildOpenGraphComposer({ env: process.env, substrateFactory: options => ({
+    start: () => ({
+      events: (async function* () { yield { kind: 'completion' as const,
+        usage: { input_tokens: 0, output_tokens: 0 }, substrate_instance_id: options.substrate_instance_id } })(),
+      respondToTool: async () => {}, cancel: async () => {}, tool_resolution: 'internal',
+    }),
+  }) })
+  const composition = await composer({ db, project_slug: 'owner' })
+  expect(host.attached).toEqual([])
+  graph = await composeProductionGraph(composition)
+  const isProject = selection === 'project-claude'
+  const selectedKey = isProject ? projectKey : generalKey
+  const rejectedKey = isProject ? generalKey : projectKey
+  expect(host.attached).toEqual([isProject ? SECOND_HANDLE : HANDLE])
+  expect((await pool.get(selectedKey))?.child.paneHandle).toBe(isProject ? SECOND_HANDLE : HANDLE)
+  expect(supervisedBySessionKey.get(selectedKey)?.conversationProjectId).toBe(isProject ? 'general' : null)
+  expect(pool.has(rejectedKey)).toBe(false)
+  expect(supervisedBySessionKey.has(rejectedKey)).toBe(false)
+  expect(host.inspections).not.toContain(isProject ? HANDLE : SECOND_HANDLE)
+  expect(host.spawns()).toBe(0)
+  expect(host.closed).toEqual([])
+}, 30_000)
+}
 
 test('the first actual wrapper turn joins an in-flight boot adoption instead of spawning over its pane', async () => {
   const host = patchHost(HANDLE)
