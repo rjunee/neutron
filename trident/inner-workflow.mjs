@@ -425,8 +425,9 @@ const claudeReviewRoute = (route, modelId, effort) => ({
 // tests, a single-file edit) → cheap Sonnet executor; '[reasoning]' / missing /
 // ambiguous → Opus (bias to Opus — Argus + Codex are the backstop).
 //
-// `dispatchGroups` mirrors the phase table (`trident/phase-models.ts`): every group this
-// route can use under an owner override. Both build phases carry
+// `dispatchGroups` names the groups this legacy workflow can dispatch. Together
+// with explicitly refused groups it covers the shared phase table; the project
+// runner can support groups whose dispatch is unavailable here. Both build phases carry
 // it because they are the same dispatch under two complexity tags — but carrying it
 // only makes the move POSSIBLE for each key independently, and the owner sets one.
 // What actually keeps a `[mechanical]` task off Claude when the build moves to codex
@@ -461,7 +462,7 @@ const ROLE_MODEL = {
   'plan:next': { model: MODELS.fable, effort: 'max', phaseKey: 'decomposition', dispatchGroups: ['claude'] },
   'argus:claude': { model: MODELS.opus, effort: 'high', phaseKey: 'review_rubric', dispatchGroups: ['none', 'claude'] },
   'argus:adversarial': { model: MODELS.opus, effort: 'high', phaseKey: 'review_adversarial', group: 'claude', dispatchGroups: ['none', 'claude', 'codex'], codexWrapper: 'review' },
-  'argus:synthesis': { model: MODELS.fable, effort: 'high', phaseKey: 'synthesis', dispatchGroups: ['claude'] },
+  'argus:synthesis': { model: MODELS.fable, effort: 'high', phaseKey: 'synthesis', dispatchGroups: ['claude'], refusedGroups: ['codex'] },
   // THE TWO CROSS-MODEL LANES ARE ROUTED NOW. They used to be listed as deliberately
   // unconfigurable ("the reviewing model is the CLI's own configuration"), which was
   // true only while nothing threaded a model IN. Both wrappers read an env knob, so
@@ -557,6 +558,9 @@ function applyPhaseOverride(route, phaseKey) {
   if (typeof override.model === 'string' && override.model.trim()) {
     const requested = override.model.trim()
     const tier = resolveTier(requested)
+    if (tier && route.refusedGroups?.includes(tier.group)) {
+      throw new Error(`Legacy workflow cannot dispatch phase=${phaseKey} tier=${requested} group=${tier.group}; use the project runner with its required native review lease.`)
+    }
     if (phaseKey === 'review_codex' || phaseKey === 'review_kimi') {
       if (!tier) return { ...route, group: 'api', model: requested, refusal: `review seat ${requested}: unknown model tier` }
       if (tier.group === 'api') return { ...route, group: 'api', transport: 'cli', effort: null, model: tier.model_id, tier: requested,

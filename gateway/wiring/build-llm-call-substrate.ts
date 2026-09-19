@@ -248,6 +248,9 @@ async function resolveCredentialAuthEnv(
 }
 
 export interface BuildLlmCallSubstrateInput {
+  /** Owner chat uses the composition's shared native binding, before tier routing. */
+  ownerConversation?: boolean
+  startCodexOwner?: (projectId: string | undefined, spec: AgentSpec) => SessionHandle
   /**
    * Resolved by `resolveLlmCredentials({provider:'anthropic',...})`. When
    * supplied (and `resolvePool` is absent), the substrate uses this pool
@@ -951,6 +954,28 @@ export function buildLlmCallSubstrate(
       const projectId = conversationProjectId !== undefined
         ? conversationProjectId ?? undefined
         : input.projectIdResolver?.() ?? spec.metering_context?.project_id
+      const resolvedSelection = conversationProjectId !== undefined
+        ? input.providerResolver?.(projectId, 'conversation')
+        : input.providerResolver?.(projectId)
+      const resolvedProvider =
+        typeof resolvedSelection === 'object' ? resolvedSelection.provider : resolvedSelection
+      const providerSource =
+        typeof resolvedSelection === 'object' ? resolvedSelection.source : undefined
+      const effectiveProvider =
+        resolvedProvider !== undefined && resolvedProvider !== null && resolvedProvider.trim() !== ''
+          ? resolvedProvider
+          : input.provider
+      const provider = normalizeProvider(effectiveProvider)
+      if (input.ownerConversation && provider === 'openai-codex') {
+        openaiSessions.delete(openAiSessionScopeKey(input.user_id ?? '_platform', projectId))
+        if (input.startCodexOwner) return input.startCodexOwner(projectId, spec)
+        return {
+          events: (async function* () { yield { kind: 'error' as const, retryable: false,
+            message: 'Codex owner conversation binding is unavailable' } })(),
+          tool_resolution: 'internal', async cancel() {},
+          async respondToTool() { throw new Error('Codex owner conversation binding is unavailable') },
+        }
+      }
       const tier = chat?.env === undefined ? undefined : projectModelTier(chat.env, projectId)
       if (tier !== undefined) {
         openaiSessions.delete(openAiSessionScopeKey(input.user_id ?? '_platform', projectId))
@@ -966,18 +991,6 @@ export function buildLlmCallSubstrate(
           ...(chat!.fetchImpl === undefined ? {} : { fetchImpl: chat!.fetchImpl }),
         }).start({ ...spec, tools })
       }
-      const resolvedSelection = conversationProjectId !== undefined
-        ? input.providerResolver?.(projectId, 'conversation')
-        : input.providerResolver?.(projectId)
-      const resolvedProvider =
-        typeof resolvedSelection === 'object' ? resolvedSelection.provider : resolvedSelection
-      const providerSource =
-        typeof resolvedSelection === 'object' ? resolvedSelection.source : undefined
-      const effectiveProvider =
-        resolvedProvider !== undefined && resolvedProvider !== null && resolvedProvider.trim() !== ''
-          ? resolvedProvider
-          : input.provider
-      const provider = normalizeProvider(effectiveProvider)
       assertConversationalProviderWired(provider, providerSource)
       if (provider !== 'anthropic') {
         // OWNER-INSTALLED MCP SERVERS DO NOT REACH THIS PATH, and the UI says so.

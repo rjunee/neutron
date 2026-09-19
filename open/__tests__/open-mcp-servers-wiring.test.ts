@@ -24,7 +24,7 @@
  * the `cc-agent-*` option bag gets captured without standing up the HTTP graph.
  */
 
-import { afterEach, beforeEach, describe, expect, test } from 'bun:test'
+import { afterEach, beforeEach, describe, expect, spyOn, test } from 'bun:test'
 import { mkdtempSync, rmSync } from 'node:fs'
 import { tmpdir } from 'node:os'
 import { dirname, join } from 'node:path'
@@ -43,6 +43,7 @@ import {
   pool,
 } from '@neutronai/runtime/adapters/claude-code/persistent/pool-state.ts'
 import { buildOpenGraphComposer } from '../composer.ts'
+import { CodexOwnerBindings } from '../wiring/codex-owner-binding.ts'
 
 const HERE = dirname(fileURLToPath(import.meta.url))
 const LANDING_DIR = join(HERE, '..', '..', 'landing')
@@ -281,6 +282,7 @@ describe('the production composer wires installable MCP servers end to end', () 
   })
 
   test('REVOKING through the real surface retires a warm child — the composer wires `onRevoked`', async () => {
+    const codexRetirement = spyOn(CodexOwnerBindings.prototype, 'retireRevokedMcpServers')
     // The seam this pins is one line in `open/composer.ts` and nothing else in the suite
     // touches it. The store is persistence-layer and cannot import the REPL pool, so it
     // announces a revocation through an `onRevoked` callback the composer supplies; delete
@@ -334,6 +336,7 @@ describe('the production composer wires installable MCP servers end to end', () 
       // Uninstall — a revocation, which is what has to reach the pool.
       const removed = await b.api('DELETE', '/api/app/mcp-servers?name=example-server')
       expect(removed.status).toBe(200)
+      expect(codexRetirement).toHaveBeenCalled()
       // The callback is awaited inside `remove()`, so by here it has run.
       expect(killed).toBe(true)
       expect(pool.has(KEY)).toBe(false)
@@ -342,6 +345,7 @@ describe('the production composer wires installable MCP servers end to end', () 
       pool.delete('mcp-wiring-probe')
       childByKey.delete('mcp-wiring-probe')
       b.cleanup()
+      codexRetirement.mockRestore()
     }
   })
 

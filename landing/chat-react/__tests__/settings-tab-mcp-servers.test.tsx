@@ -285,11 +285,9 @@ describe('SettingsTab — MCP servers (happy-dom)', () => {
     )
     expect(byTestId(container, 'mcp-example-server-approve')).toBeNull()
     expect(byTestId(container, 'mcp-example-server-grant')).toBeNull()
-    // NOT "running": the server is attached when the assistant next starts a session, and
-    // only on its Claude sessions. Overstating the wiring is the failure this whole
-    // feature exists to avoid.
+    // Approval describes availability in supported conversations, not a running process.
     const status = byTestId(container, 'mcp-example-server-status')!.textContent ?? ''
-    expect(status).toContain('next session')
+    expect(status).toBe('Approved — available in supported conversations')
     expect(status.toLowerCase()).not.toContain('running')
     root.unmount()
   })

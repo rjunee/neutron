@@ -2,6 +2,8 @@ import { createProjectLauncher } from '@neutronai/trident/project-launcher.ts'
 import { TridentPhaseUsageStore } from '@neutronai/trident/phase-usage.ts'
 import { buildSubstrateWorkflowFire, buildWorkflowFirer } from '@neutronai/trident/inner-loop.ts'
 import { prepareProjectBuild } from './wiring/project-build.ts'
+import { CodexOwnerBindings } from './wiring/codex-owner-binding.ts'
+import { nativeOwnerQuestionText } from './wiring/codex-owner-controls.ts'
 import {
   PROJECT_BUILD_STATE_REAP_INTERVAL_MS,
   reapProjectBuildState,
@@ -397,6 +399,7 @@ import { buildAgentWatcherLlmCall } from '@neutronai/gateway/wiring/build-agent-
 import { InMemoryWebChatSessionProjectRegistry } from '@neutronai/gateway/http/chat-bridge.ts'
 import { createAppTabsSurface } from '@neutronai/gateway/http/app-tabs-surface.ts'
 import { composeReplModelSurface } from '@neutronai/gateway/composition/repl-model.ts'
+import { createAppNativeOwnerControlSurface } from '@neutronai/gateway/http/app-native-owner-control-surface.ts'
 import { getPersistentReplModel, switchPersistentReplModel } from '@neutronai/runtime/adapters/claude-code/persistent/model-control.ts'
 import {
   BROKER_CALLBACK_PATH,
@@ -1082,6 +1085,17 @@ export function buildOpenGraphComposer(
     const providerResolver = createOpenConversationProviderResolver(
       resolveModelProvider, () => chatSessionProjects.getActive(OWNER_USER_ID),
     )
+    const codexOwnerBindings = new CodexOwnerBindings(async projectId => {
+      if (!(await projectSettingsStore.list(project_slug)).some(project => project.id === projectId)) {
+        throw new Error('Codex owner project is unavailable')
+      }
+      const home = codexCredentialService.resolveActiveCodexHome(asOwnerHandle(owner_handle), projectId)
+      if (!home) throw new Error('Codex owner requires a connected project credential')
+      return { cwd: joinPath(owner_home, 'Projects', projectId), codexHome: home, env }
+    })
+    const codexOwnerProjects = (await projectSettingsStore.list(project_slug))
+      .filter(project => resolveModelProvider(project.id).provider === 'openai-codex')
+      .map(project => project.id)
     // O6 — NOTICE-FAMILY + RECOVERED-REPLY sinks for the owner's WARM conversational
     // substrate (`cc-agent-*`). The persistent REPL fires four DI seams on the
     // rising edge of otherwise-invisible states — a mid-turn API 5xx dead turn, a
@@ -1102,6 +1116,15 @@ export function buildOpenGraphComposer(
     // unconditionally, and an LLM-less box never produces a proposal anyway
     // because the auto-propose trigger hangs off the Trident terminal hook.
     const noticeDeliverHolder: { deliver?: Deliver } = {}
+    codexOwnerBindings.onOwnerQuestion = async (projectId, question) => {
+      const deliver = noticeDeliverHolder.deliver
+      if (!deliver) throw new Error('Native owner question delivery is unavailable')
+      const receipt = await deliver(appWsProjectTopicId(OWNER_USER_ID, projectId), {
+        body: nativeOwnerQuestionText(question), durability: 'reply',
+        idempotency_key: `codex-question:${projectId}:${String(question.params.turnId)}:${String(question.requestId)}`,
+      })
+      if (!receipt.persisted) throw new Error('Native owner question was not durably delivered')
+    }
     // O6 — the recovered-reply sink/drain need the REAL (async) app-ws delivery
     // result, not the fire-and-forget bridge's unconditional `true`. Bound after
     // the adapter exists (below); resolved lazily at call time.
@@ -1164,6 +1187,7 @@ export function buildOpenGraphComposer(
     const mcpServerStoreHolder: { store?: OwnerMcpServerStore } = {}
     const resolveMcpServers = async (): Promise<ReadonlyArray<ResolvedOwnerMcpServer>> =>
       mcpServerStoreHolder.store === undefined ? [] : await mcpServerStoreHolder.store.resolveApproved()
+    codexOwnerBindings.resolveApprovedServers = () => resolveMcpServers()
     const wiringCtx: OpenWiringContext = {
       llmPool,
       owner_handle,
@@ -1174,6 +1198,8 @@ export function buildOpenGraphComposer(
       prewarmSubstrate,
       ...conversationalProviderCtx,
       providerResolver,
+      startCodexOwner: (projectId, spec) => codexOwnerBindings.start(projectId, spec),
+      codexOwnerProjects,
       ...(liveAgentNoticeSinks !== undefined ? { liveAgentNoticeSinks } : {}),
       ...(backgroundNoticeSinks !== undefined ? { backgroundNoticeSinks } : {}),
       ...(liveAgentRecoveredReplySink !== undefined
@@ -1213,6 +1239,7 @@ export function buildOpenGraphComposer(
                 stateRoot: projectBuildStateRoot,
                 projectDir: joinPath(owner_home, 'Projects', input.run.project_slug),
                 projectId: id, provider: providerSelection.provider, providerSource: providerSelection.source, env,
+                codexOwnerBindings,
                 spawnProjectSession: async projectId => {
                   const projectSubstrate = makeProjectLiveAgentSubstrate(projectId)
                   if (projectSubstrate === null) throw new Error('Project conversation substrate is unavailable')
@@ -1507,6 +1534,7 @@ export function buildOpenGraphComposer(
     // §F1 — a cleanup may be async (e.g. the upload sweeper's quiescing
     // `stop()`); the gateway shutdown runner awaits each before `db.close()`.
     const realmodeCleanups: Array<() => void | Promise<void>> = []
+    realmodeCleanups.push(() => codexOwnerBindings.close())
     // §F2 — the SINGLE loop inventory for this Open boot. The Open composer
     // starts long-lived loops OUTSIDE `composeProductionGraph` (the
     // `ChunkedUploadSweeper` in `wireUploads`, the `dispatch-lifecycle-watchdog`
@@ -1814,6 +1842,10 @@ export function buildOpenGraphComposer(
     } catch (err) {
       log.warn('codex_ensure_materialized_failed', { error: err instanceof Error ? err.message : String(err) })
     }
+    // Recovery reads this credential service through the shared owner resolver.
+    // Reconcile only after materialization; an earlier lookup is caught as an
+    // unavailable credential and silently skips surviving project owners.
+    await codexOwnerBindings.reconcile(codexOwnerProjects)
     const coresSubstrate =
       llmPool !== null ? makeEphemeralSubstrate('cc-cores')(owner_home) : null
     // Plan task 8 — the agent-callable ritual registration service. Assigned LATE
@@ -2420,8 +2452,8 @@ export function buildOpenGraphComposer(
     // (the late-bound routers, install-token handler, onboarding LLM hooks, the
     // synthesis import substrate, the shared GBrain sync hook) thread through the
     // typed `deps` bag. `importUseSynthesis: true` and the per-request
-    // `chatAuthGate` (via `resolveOpenLlmPool` + live `env`) are preserved
-    // verbatim inside the wiring module. The returned `landing` is consumed
+    // `chatAuthGate` (via live `env` and native project inventory) lives
+    // inside the wiring module. The returned `landing` is consumed
     // downstream via `landing.*` exactly as today.
     const { landing } = wireLandingStack(wiringCtx, {
       installTokenHandler,
@@ -3830,6 +3862,16 @@ export function buildOpenGraphComposer(
       provider: (projectId) => resolveModelProvider(projectId ?? undefined).provider,
       readClaude: ({ userId, ownerSlug, projectId }) => getPersistentReplModel({ userId, instanceSlug: ownerSlug, projectId }),
       switchClaude: ({ userId, ownerSlug, projectId }, request) => switchPersistentReplModel({ userId, instanceSlug: ownerSlug, projectId }, request),
+      readCodex: projectId => codexOwnerBindings.controls.model(projectId),
+      switchCodex: (projectId, request) => codexOwnerBindings.controls.model(projectId, request),
+    })
+    const appNativeOwnerControlSurface = createAppNativeOwnerControlSurface({
+      auth: appOwnerAuth,
+      canAccess: async (userId, ownerSlug, projectId) => userId === OWNER_USER_ID && ownerSlug === project_slug
+        && resolveModelProvider(projectId).provider === 'openai-codex'
+        && (await projectSettingsStore.list(project_slug)).some(project => project.id === projectId),
+      read: projectId => codexOwnerBindings.controls.state(projectId),
+      act: (projectId, request) => codexOwnerBindings.controls.act(projectId, request),
     })
 
     // The Apps launcher backend (`/api/app/projects/<id>/launcher[*]`). The Apps
@@ -4253,6 +4295,7 @@ export function buildOpenGraphComposer(
       // that edge), so the composer, which owns both, connects them. Without this line
       // the seam exists and nothing calls it: built-but-never-wired.
       onRevoked: async () => {
+        await codexOwnerBindings.retireRevokedMcpServers()
         const { evicted, poisoned } = await evictWarmReplsForMcpSurfaceChange()
         if (evicted > 0 || poisoned > 0) {
           log.info('mcp_revocation_retired_warm_repls', { evicted, poisoned })
@@ -7492,7 +7535,7 @@ export function buildOpenGraphComposer(
       // P1b — the tab resolver so the React ProjectShell shows the Documents/Tasks
       // tabs (without it, it falls back to Chat-only and the docs tab is hidden).
       app_tabs_surface: { handler: appTabsSurface.handler },
-      app_repl_model_surface: { handler: appReplModelSurface.handler },
+      app_repl_model_surface: { handler: async req => await appReplModelSurface.handler(req) ?? appNativeOwnerControlSurface.handler(req) },
       // The Apps launcher backend. Without this line the tab the resolver above
       // returns leads to four 404s (ISSUES #447).
       app_launcher_surface: { handler: appLauncherSurface.handler },

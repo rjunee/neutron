@@ -32,7 +32,7 @@
  * the fire-and-forget HTTP proof (#5) is deterministic.
  */
 
-import { afterEach, beforeEach, describe, expect, test } from 'bun:test'
+import { afterEach, beforeEach, describe, expect, spyOn, test } from 'bun:test'
 import { mkdtempSync, rmSync } from 'node:fs'
 import { tmpdir } from 'node:os'
 import { dirname, join } from 'node:path'
@@ -42,6 +42,10 @@ import { seedMigratedDb } from '../../tests/support/migrated-db.ts'
 import { ProjectDb } from '@neutronai/persistence/index.ts'
 import { composeProductionGraph } from '@neutronai/gateway/composition.ts'
 import { buildOpenGraphComposer } from '../composer.ts'
+import * as ambientAuth from '../ambient-claude-auth.ts'
+import { CodexOwnerBindings } from '../wiring/codex-owner-binding.ts'
+import { CodexOwnerControls } from '../wiring/codex-owner-controls.ts'
+import { SqliteProjectSettingsStore } from '@neutronai/gateway/projects/sqlite-store.ts'
 import type { AgentSpec, Substrate } from '@neutronai/runtime/substrate.ts'
 import type { SessionHandle } from '@neutronai/runtime/session-handle.ts'
 import type { Event } from '@neutronai/runtime/events.ts'
@@ -65,6 +69,7 @@ const SAVED_ENV_KEYS = [
   // tests here fail at `ws.onerror`. The two sibling app-ws harnesses that cite
   // this file as their pattern source already scrub both.
   'NEUTRON_IDENTITY_JWKS_URL', 'NEUTRON_IDENTITY_AUDIENCE',
+  'OPENAI_API_KEY', 'NEUTRON_MODEL_PROVIDER', 'NEUTRON_PROJECT_MODELS',
 ] as const
 
 let savedEnv: Record<string, string | undefined> = {}
@@ -129,13 +134,15 @@ async function waitFor(pred: () => boolean, timeoutMs = 15_000): Promise<void> {
   }
 }
 
-async function startHarness(): Promise<Harness> {
+async function startHarness(options: { nativeProject?: boolean } = {}): Promise<Harness> {
   seedMigratedDb(process.env['NEUTRON_DB_PATH']!)
   const db = ProjectDb.open(process.env['NEUTRON_DB_PATH']!)
+  if (options.nativeProject !== undefined) await new SqliteProjectSettingsStore(db).update('owner', 'native-project', {
+    name: 'Native project', model_provider: options.nativeProject ? 'openai-codex' : 'anthropic',
+  })
   const composer = buildOpenGraphComposer({
     env: process.env,
-    // eslint-disable-next-line @typescript-eslint/no-explicit-any
-    substrateFactory: (() => recordingSubstrate()) as any,
+    substrateFactory: () => recordingSubstrate(),
   })
   const composition = await composer({ db, project_slug: 'owner' })
   const graph = await composeProductionGraph(composition)
@@ -175,6 +182,88 @@ const framesOfType = (frames: Array<Record<string, unknown>>, type: string): Arr
   frames.filter((f) => f['type'] === type)
 
 describe('Open app-ws durable chat-log + typing (real instance)', () => {
+  test('composed native model and turn-control routes require owner scope and share the selected project binding', async () => {
+    const calls: unknown[][] = []
+    const identity = { projectId: 'native-project', threadId: 'native-thread', bindingRevision: 'revision', generation: 1, epoch: 2, turnId: 'turn' }
+    const model = spyOn(CodexOwnerControls.prototype, 'model').mockImplementation(async (...args) => {
+      calls.push(['model', ...args])
+      return { harness: 'codex', sessionId: 'conditional-native-state', currentModel: args[1]?.model ?? 'small', availableModels: [{ id: 'small', label: 'Small' }, { id: 'large', label: 'Large' }], status: 'ready' }
+    })
+    const read = spyOn(CodexOwnerControls.prototype, 'state').mockImplementation(async projectId => {
+      calls.push(['state', projectId]); return { ...identity, status: 'turn', pending: [] }
+    })
+    const act = spyOn(CodexOwnerControls.prototype, 'act').mockImplementation(async (...args) => {
+      calls.push(['act', ...args]); return { ...identity, status: 'idle', pending: [] }
+    })
+    try {
+      harness = await startHarness({ nativeProject: true })
+      const request = (path: string, body?: unknown, token = 'dev:owner') => fetch(`${harness!.base}/api/app/projects/${path}`, {
+        headers: { authorization: `Bearer ${token}`, 'content-type': 'application/json' },
+        ...(body === undefined ? {} : { method: 'POST', body: JSON.stringify(body) }),
+      })
+      expect((await request('native-project/repl-model', undefined, 'invalid')).status).toBe(401)
+      expect((await request('missing/repl-control')).status).toBe(404)
+      expect(calls).toHaveLength(0)
+      expect(await (await request('native-project/repl-model')).json()).toMatchObject({ currentModel: 'small' })
+      expect(await (await request('native-project/repl-model', { model: 'large', sessionId: 'conditional-native-state' })).json()).toMatchObject({ currentModel: 'large' })
+      expect((await request('native-project/repl-control')).status).toBe(200)
+      expect((await request('native-project/repl-control', { ...identity, action: 'interrupt' })).status).toBe(200)
+      expect(calls).toEqual([
+        ['model', 'native-project'], ['model', 'native-project', { model: 'large', sessionId: 'conditional-native-state' }],
+        ['state', 'native-project'], ['act', 'native-project', { ...identity, action: 'interrupt' }],
+      ])
+    } finally { model.mockRestore(); read.mockRestore(); act.mockRestore() }
+  }, 30_000)
+
+  for (const nativeProject of [false, true]) test(`credential-less composed chat uses ${nativeProject ? 'the selected native project' : 'the honest Claude-null refusal'}`, async () => {
+    delete process.env.ANTHROPIC_API_KEY
+    delete process.env.OPENAI_API_KEY
+    delete process.env.CLAUDE_CODE_OAUTH_TOKEN
+    delete process.env.NEUTRON_PROJECT_MODELS
+    process.env.NEUTRON_MODEL_PROVIDER = 'anthropic'
+    const ambient = spyOn(ambientAuth, 'detectAmbientClaudeAuthCached').mockReturnValue(false)
+    const nativeCalls: Array<string | undefined> = []
+    let nativeOwner: CodexOwnerBindings | undefined
+    const native = spyOn(CodexOwnerBindings.prototype, 'start').mockImplementation(function (this: CodexOwnerBindings, projectId, spec) {
+      nativeOwner = this
+      nativeCalls.push(projectId)
+      return recordingSubstrate().start(spec)
+    })
+    let socket: OpenSocket | undefined
+    let mobile: OpenSocket | undefined
+    try {
+      harness = await startHarness({ nativeProject })
+      socket = await openSocket(harness.base, 'token=dev:owner&platform=web&device_id=native&project_id=native-project')
+      await waitFor(() => framesOfType(socket!.frames, 'session_ready').length > 0)
+      socket.ws.send(JSON.stringify({ v: 1, type: 'user_message', body: 'native chat intake', client_msg_id: 'native-ws' }))
+      await waitFor(() => framesOfType(socket!.frames, 'agent_message').length > 0)
+      const reply = framesOfType(socket.frames, 'agent_message').map(frame => String(frame.body)).join('\n')
+      if (nativeProject) {
+        expect(reply).toContain(AGENT_REPLY_BODY)
+        expect(nativeCalls).toEqual(['native-project'])
+        await nativeOwner!.onOwnerQuestion!('native-project', { requestId: 'native-approval', method: 'item/commandExecution/requestApproval',
+          params: { threadId: 'native-thread', turnId: 'native-turn', command: 'echo bounded', reason: 'Native owner needs a decision' } })
+        await waitFor(() => framesOfType(socket!.frames, 'agent_message').some(frame => String(frame.body).includes('Native owner needs a decision')))
+        const question = framesOfType(socket.frames, 'agent_message').find(frame => String(frame.body).includes('Native owner needs a decision'))!
+        expect(question.body).toContain('echo bounded')
+        expect(question.seq).toBeGreaterThan(0)
+        expect(question.project_id).toBe('native-project')
+        mobile = await openSocket(harness.base, 'token=dev:owner&platform=ios&device_id=native-mobile')
+        await waitFor(() => framesOfType(mobile!.frames, 'session_ready').length > 0)
+        const response = await fetch(`${harness.base}/api/app/chat/send`, { method: 'POST',
+          headers: { authorization: 'Bearer dev:owner', 'content-type': 'application/json' },
+          body: JSON.stringify({ body: 'native HTTP intake', client_msg_id: 'native-http', project_id: 'native-project' }) })
+        expect(response.status).toBe(200)
+        await waitFor(() => nativeCalls.length === 2)
+        expect(nativeCalls).toEqual(['native-project', 'native-project'])
+        await waitFor(() => framesOfType(mobile!.frames, 'agent_message').some(frame => String(frame.body).includes(AGENT_REPLY_BODY)))
+      } else {
+        expect(reply).toContain('no AI credential configured')
+        expect(nativeCalls).toEqual([])
+      }
+    } finally { socket?.close(); mobile?.close(); native.mockRestore(); ambient.mockRestore() }
+  }, 30_000)
+
   test('connect-time typing is targeted, non-durable, and leaves the next turn usable', async () => {
     harness = await startHarness()
     const projectQuery = 'token=dev:owner&platform=web&device_id=devA&project_id=typing-project'

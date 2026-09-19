@@ -69,13 +69,30 @@ test('a pane dying while delivering its baseline cannot be published', async () 
   expect(pool.has(key)).toBe(false)
 })
 test.each([true, false])('shutdown during the baseline wait releases ownership: screen=%s', async (screen) => {
-  const pending = adopt([])
-  while (host.attached.length === 0 || !childByKey.has(key)) await Bun.sleep(0)
-  await settleBootAdoptionsForShutdown(0, () => {})
-  if (screen) host.attached[0]!.push('❯ ')
-  expect((await pending).kind).not.toBe('adopted')
-  expect(pool.has(key)).toBe(false)
-  expect(host.closed).toEqual([])
+  // Hold only the adoption baseline callback. Polling for the attached child can
+  // otherwise let its 10 ms timeout win before shutdown even begins.
+  const realSetTimeout = globalThis.setTimeout
+  let releaseBaseline: (() => void) | undefined
+  const intercepted = ((callback: (...args: unknown[]) => void, delay?: number, ...args: unknown[]) => {
+    if (delay === 10) {
+      releaseBaseline = () => callback(...args)
+      return realSetTimeout(() => {}, delay)
+    }
+    return realSetTimeout(callback, delay, ...args)
+  }) as typeof setTimeout
+  const timers = spyOn(globalThis, 'setTimeout').mockImplementation(intercepted)
+  try {
+    const pending = adopt([])
+    while (releaseBaseline === undefined || host.attached.length === 0 || !childByKey.has(key)) await Bun.sleep(0)
+    await settleBootAdoptionsForShutdown(0, () => {})
+    if (screen) host.attached[0]!.push('❯ ')
+    releaseBaseline()
+    expect((await pending).kind).not.toBe('adopted')
+    expect(pool.has(key)).toBe(false)
+    expect(host.closed).toEqual([])
+  } finally {
+    timers.mockRestore()
+  }
 })
 test('a cleared screen after adoption resets the baseline latches', async () => {
   const prompt = 'Do you want to proceed?\n❯ 1. Yes\n  2. No'

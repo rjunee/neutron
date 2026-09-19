@@ -156,13 +156,10 @@ describe('serverSummary — the phone and the browser show the same row', () => 
     expect(label).toContain('missing')
   })
 
-  test('NO label claims a server is RUNNING — because none of them is', () => {
+  test('NO approval label claims runtime execution', () => {
     // The old approved label read "Approved and running with your assistant", which
-    // overstated the wiring twice: nothing runs while the assistant is idle, and the
-    // servers reach the Claude-backed session only — a project on another model provider
-    // never gets them (`gateway/wiring/build-llm-call-substrate.ts` returns before this
-    // wiring). Overstating a grant is the failure this feature exists to avoid, so the
-    // claim is pinned OUT of both copies.
+    // overstated a grant as runtime evidence. Both clients describe approval and
+    // supported conversations, independently of whether a process is running.
     for (const row of ROWS) {
       expect(web.serverSummary(row).label.toLowerCase()).not.toContain('running')
       expect(
@@ -171,7 +168,7 @@ describe('serverSummary — the phone and the browser show the same row', () => 
     }
     expect(
       web.serverSummary({ ...ROWS[0]!, approval: 'approved', secrets_present: true }).label,
-    ).toContain('next session')
+    ).toContain('supported conversations')
   })
 })
 

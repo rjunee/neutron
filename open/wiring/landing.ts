@@ -16,7 +16,8 @@
  *   - `importUseSynthesis: true` is passed VERBATIM — it opts the single-owner
  *     composer onto the accumulating-synthesis import runner (`buildSynthesis
  *     Session` → `buildSynthesisImportJobRunner`), NOT the retired per-chunk one.
- *   - `chatAuthGate.isUnauthenticated` closes over `ctx.env` and calls
+ *   - Native-provider project inventory keeps chat reachable without API pools.
+ *     Otherwise `chatAuthGate.isUnauthenticated` closes over `ctx.env` and calls
  *     `deps.resolveOpenLlmPool(ctx.env)` PER REQUEST (evaluated on each `/chat`
  *     hit, reads live env) — `resolveOpenLlmPool` is threaded as a function
  *     reference so the wiring never imports upward into the composer.
@@ -66,8 +67,8 @@ export interface WireLandingStackDeps {
   cookieToUserClaim: NonNullable<BuildLandingStackInput['cookieToUserClaim']>
   /**
    * The composer's `resolveOpenLlmPool` — threaded as a function reference so the
-   * `chatAuthGate.isUnauthenticated` closure is byte-identical (evaluated per
-   * request against live `ctx.env`) without an upward import into the composer.
+   * Claude branch of `chatAuthGate.isUnauthenticated` reads live `ctx.env` per
+   * request without an upward import into the composer.
    */
   resolveOpenLlmPool: (env: NodeJS.ProcessEnv) => CredentialPool | null
   /**
@@ -125,6 +126,11 @@ export function wireLandingStack(
     // composer's substrate wiring uses (`resolveOpenLlmPool`).
     chatAuthGate: {
       isUnauthenticated: (): boolean => {
+        // This is the legacy Claude credential setup page, not app identity
+        // authentication. Native projects authenticate at the shared binding;
+        // their chat UI must remain reachable without an Anthropic/API pool.
+        if (ctx.startCodexOwner !== undefined && ((ctx.codexOwnerProjects?.length ?? 0) > 0
+          || (ctx.providerResolver?.(undefined, 'conversation')?.provider ?? ctx.provider) === 'openai-codex')) return false
         // SWAPPABLE PROVIDER (audit Medium) — key on the SELECTED provider's
         // credentials FIRST. When openai is selected, the OpenAI key is what gates
         // auth: a present Claude key is IRRELEVANT (every turn would still fail for

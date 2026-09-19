@@ -73,11 +73,119 @@ import type { BoundedWorkRequest } from '@neutronai/runtime/bounded-work.ts'
 import { buildRun, type BuildRunOutcome } from '@neutronai/trident/build-run.ts'
 import type { InnerLoopInput } from '@neutronai/trident/inner-loop.ts'
 import { PROJECT_SESSION_ACQUIRE_TIMEOUT_MS, prepareProjectBuild, type ProjectBuildContext } from '../wiring/project-build.ts'
+import { CodexOwnerBindings } from '../wiring/codex-owner-binding.ts'
+import { restrictedOwnerFixture } from './fixtures/codex-owner-review.ts'
 import { PROJECT_DEPENDENCIES_TIMEOUT_MS } from '../wiring/project-build-dependencies.ts'
 import { PROJECT_SNAPSHOT_SCHEMA } from '../wiring/project-build-snapshot.ts'
 
 const cleanups: (() => void | Promise<void>)[] = []
 afterEach(async () => { for (const fn of cleanups.splice(0).reverse()) await fn() })
+
+test.each(['denied', 'secret-rotation'] as const)('idle Codex MCP revocation kills only the quiet revoked peer and preserves successor chat and unrelated handles: %s', async change => {
+  const cwd = await mkdtemp(join(tmpdir(), 'idle-owner-mcp-'))
+  cleanups.push(() => rm(cwd, { recursive: true, force: true }))
+  let revoked = false, turn = 0
+  const handles = new Map<string, string>()
+  const native = await restrictedOwnerFixture({ projectId: 'idle-project', cwd, execute: async () => {}, ownerMcp: true,
+    ownerTurn: async call => {
+      turn++
+      const invoke = async (args: Record<string, unknown>) => {
+        const response = (await call(args)).result as { success: boolean; contentItems: Array<{ text: string }> }
+        expect(response.success).toBe(true)
+        return JSON.parse(response.contentItems[0]!.text)
+      }
+      for (const name of revoked ? ['survivor'] : ['revoked', 'survivor']) {
+        if (!handles.has(name)) handles.set(name, (await invoke({ action: 'open', server: name })).handle)
+        expect((await invoke({ action: 'request', handle: handles.get(name), method: 'resources/read', params: { uri: 'fixture://one' } })).contents[0].text).toBe('fixture text')
+      }
+      if (revoked) expect((await call({ action: 'request', handle: handles.get('revoked'), method: 'tools/list' })).result).toMatchObject({ success: false })
+    } })
+  cleanups.push(() => native.close())
+  native.bindings.resolveApprovedServers = async () => (revoked && change === 'denied' ? ['survivor'] : ['revoked', 'survivor']).map(name => ({ name, command: process.execPath,
+    args: [fileURLToPath(new URL('../../runtime/adapters/codex-cli/persistent/fixtures/approved-mcp-server.ts', import.meta.url))],
+    env_names: ['BROKER_TEST_LOG', 'BROKER_TEST_VALUE'], env: { BROKER_TEST_LOG: join(cwd, name), BROKER_TEST_VALUE: name === 'revoked' && revoked ? 'rotated' : 'initial' } }))
+  const chat = async () => {
+    const events = []
+    for await (const event of native.bindings.start('idle-project', { prompt: 'chat', tools: [], model_preference: [] }).events) events.push(event)
+    expect(events.at(-1)?.kind).toBe('completion')
+    expect(native.errors).toEqual([])
+  }
+  await chat()
+  const pid = async (name: string) => Number((await readFile(join(cwd, `${name}.pid`), 'utf8')).trim())
+  const revokedPid = await pid('revoked'), survivorPid = await pid('survivor')
+  const alive = (id: number) => { try { process.kill(id, 0); return true } catch { return false } }
+  expect(alive(revokedPid)).toBe(true)
+  expect(alive(survivorPid)).toBe(true)
+  await native.bindings.retireRevokedMcpServers()
+  expect(alive(revokedPid)).toBe(true)
+  expect(alive(survivorPid)).toBe(true)
+  revoked = true
+  await native.bindings.retireRevokedMcpServers()
+  expect(alive(revokedPid)).toBe(false)
+  expect(alive(survivorPid)).toBe(true)
+  expect(turn).toBe(1) // No request, notification or successor turn triggered retirement.
+  await chat()
+  expect(await pid('survivor')).toBe(survivorPid)
+  expect(native.opens()).toBe(1)
+})
+
+test('durable Open owner MCP reaches approved SDK peer, retains successor handles and refuses bounded turns', async () => {
+  const f = await codexOwnerWithClaude()
+  const log = join(f.context.projectDir, 'mcp-peer.log')
+  let handle = '', ownerTurns = 0, boundedRefusals = 0, approved = true
+  const native = await restrictedOwnerFixture({ projectId: f.context.projectId, cwd: f.context.projectDir,
+    execute: literalWorker(f.world), ownerMcp: true,
+    ownerTurn: async (call, prompt) => {
+      const result = async (args: Record<string, unknown>) => {
+        const envelope = await call(args)
+        const value = envelope.result as { success: boolean; contentItems: Array<{ text: string }> }
+        expect(value.success).toBe(true)
+        return JSON.parse(value.contentItems[0]!.text)
+      }
+      if (prompt.startsWith('Execute the prompt in this JSON dispatch specification: ')) {
+        const envelope = await call({ action: 'discover' })
+        expect(envelope.error !== undefined || (envelope.result as { success?: boolean })?.success === false).toBe(true)
+        boundedRefusals++
+        return
+      }
+      ownerTurns++
+      expect((await call({ action: 'discover' }, { threadId: 'native-child' })).error).toMatchObject({ code: -32001 })
+      expect((await call({ action: 'discover' }, { turnId: 'predecessor-turn' })).error).toMatchObject({ code: -32001 })
+      expect((await result({ action: 'discover' })).servers[0].name).toBe('approved')
+      if (!handle) handle = (await result({ action: 'open', server: 'approved' })).handle
+      expect((await result({ action: 'request', handle, method: 'resources/read', params: { uri: 'fixture://one' } })).contents[0].text).toBe('fixture text')
+      await result({ action: 'request', handle, method: 'tools/call', params: { name: 'inspect', arguments: { progress: true }, _meta: { progressToken: `turn-${ownerTurns}` } } })
+      if (ownerTurns === 2) {
+        const received = await result({ action: 'receive', handle })
+        expect(received.notifications.map((event: { params: { progressToken: string } }) => event.params.progressToken)).toEqual(['turn-2'])
+      }
+      if (ownerTurns === 3) {
+        approved = false
+        expect((await call({ action: 'request', handle, method: 'tools/list' })).result).toMatchObject({ success: false })
+      }
+    },
+  })
+  cleanups.push(() => native.close())
+  native.bindings.resolveApprovedServers = async () => approved ? [{ name: 'approved', command: process.execPath,
+    args: [fileURLToPath(new URL('../../runtime/adapters/codex-cli/persistent/fixtures/approved-mcp-server.ts', import.meta.url))],
+    env_names: ['BROKER_TEST_LOG'], env: { BROKER_TEST_LOG: log } }] : []
+  f.context.codexOwnerBindings = native.bindings
+  const chat = async () => {
+    const events = []
+    for await (const event of native.bindings.start(f.context.projectId, { prompt: 'owner chat', tools: [], model_preference: [] }).events) events.push(event)
+    expect(events.at(-1)?.kind).toBe('completion')
+    expect(native.errors).toEqual([])
+  }
+  await chat()
+  await chat()
+  const outcome = await drive(f, 'pr')
+  expect(outcome.kind, why(f, outcome)).toBe('merged')
+  expect(boundedRefusals).toBeGreaterThan(0)
+  await chat()
+  expect(native.opens()).toBe(1)
+  expect((await readFile(log, 'utf8')).split('\n').filter(line => line === 'spawn')).toHaveLength(1)
+  expect(native.native.some(message => message.method === 'thread/start')).toBe(false)
+}, 60_000)
 
 // ─────────────────────────────────────────────────────────────────────────────
 // THE LITERAL-MINDED WORKER
@@ -262,7 +370,7 @@ function literalWorker(world: WorkerWorld) {
     const spec = JSON.parse(line.slice(line.indexOf('{')))
     const args = JSON.parse(String(spec.prompt).slice(String(spec.prompt).indexOf('{')))
     const marker = 'Request (data): '
-    const requestLine = String(args.prompt).split('\n').find((row: string) => row.startsWith(marker))
+    const requestLine = String(args.prompt ?? args.message).split('\n').find((row: string) => row.startsWith(marker))
     if (!requestLine) throw new Error('dispatch prompt carried no request')
     const request: BoundedWorkRequest = JSON.parse(requestLine.slice(marker.length))
 
@@ -561,6 +669,35 @@ console.log(JSON.stringify({ type: 'thread.started', thread_id: 'e2e-codex-threa
 console.log(JSON.stringify({ type: 'turn.completed', usage: { input_tokens: 7, output_tokens: 3 } }))
 `
 
+/** Only the Claude process boundary is simulated; the host still validates,
+ * persists and consumes the real headless runner's structured result. */
+const fakeClaude = (calls: string, identity: 'valid' | 'wrong-schema') => `#!/usr/bin/env bun
+import { appendFileSync, readFileSync } from 'node:fs'
+const argv = process.argv.slice(2)
+if (argv.includes('--help')) {
+  console.log('--safe-mode --restricted --permission-prompts --permission-mode --tools --strict-mcp-config --mcp-config --disable-slash-commands --session-id --resume --setting-sources --model --effort --output-format --json-schema --add-dir')
+  process.exit(0)
+}
+if (argv.includes('auth')) { console.log(JSON.stringify({ loggedIn: process.env.CLAUDE_CODE_OAUTH_TOKEN === 'fixture-selected-claude' })); process.exit(0) }
+const prompt = readFileSync(0, 'utf8')
+const request = JSON.parse(prompt.split('\\n').find(line => line.startsWith('Request (data): ')).slice('Request (data): '.length))
+appendFileSync(${JSON.stringify(calls)}, JSON.stringify({ argv, request, env: process.env, prompt }) + '\\n')
+const verdict = { verdict: 'APPROVE', findings: [] }
+let result = verdict
+if (request.result.schema !== 'verdict') {
+  const context = JSON.parse(readFileSync(request.brief.path + '.context.json', 'utf8'))
+  result = { ...context.snapshot, payload: request.role === 'plan' ? {
+    implementationPlan: '- [ ] T1 record the note', topTask: '- [ ] T1 record the note',
+    executionSpec: 'Append one line to NOTES.md and commit it.', complexity: 'mechanical', remainingTasks: 0,
+  } : verdict }
+}
+console.log(JSON.stringify({ type: 'result', subtype: 'success', is_error: false, permission_denials: [],
+  session_id: argv[argv.indexOf(argv.includes('--resume') ? '--resume' : '--session-id') + 1],
+  modelUsage: { [request.model_id.startsWith('claude-') ? request.model_id : 'claude-' + request.model_id + '-fixture']: {} }, usage: { input_tokens: 7, output_tokens: 3 },
+  structured_output: { schema: ${identity === 'wrong-schema' ? "'unrequested-schema'" : 'request.result.schema'},
+    run_id: request.run_id, step_id: request.step_id, kind: 'completed', result } }))
+`
+
 async function fixture(options: { ralph?: boolean; moreTasks?: boolean; suiteExit?: number; testStrategy?: string
   bunWorkspace?: boolean
   manifest?: Record<string, unknown>
@@ -739,6 +876,166 @@ async function drive(f: Awaited<ReturnType<typeof fixture>>, mode: 'pr' | 'ralph
   const host = await createProjectBuildHost(options)
   return host.run({ mode, start: 'fresh' }, new AbortController().signal)
 }
+
+async function codexOwnerWithClaude(identity: 'valid' | 'wrong-schema' = 'valid') {
+  const f = await fixture()
+  const ownerHome = await mkdtemp(join(tmpdir(), 'project-build-cross-provider-'))
+  cleanups.push(() => rm(ownerHome, { recursive: true, force: true }))
+  const bin = join(ownerHome, 'bin')
+  const calls = join(ownerHome, 'claude-calls.jsonl')
+  await mkdir(bin)
+  await writeFile(join(bin, 'claude'), fakeClaude(calls, identity), { mode: 0o700 })
+  f.context.stateRoot = join(ownerHome, '.trident', 'project-builds')
+  f.context.provider = 'openai-codex'
+  f.context.env = { PATH: `${bin}:${process.env.PATH ?? ''}`, CLAUDE_CODE_OAUTH_TOKEN: 'fixture-selected-claude',
+    GH_TOKEN: 'must-not-reach-claude', NEUTRON_REPLY_SINK: 'must-not-reach-claude' }
+  f.input.phase_models = { ...f.input.phase_models, decomposition: { model: 'opus' },
+    build: { model: 'sol' }, review_adversarial: { model: 'opus' }, synthesis: { model: 'opus' } }
+  const children: BoundedWorkRequest[] = []
+  const execute = literalWorker(f.world)
+  const guard = new CodexOwnerBindings(async () => ({ cwd: f.context.projectDir, codexHome: ownerHome, env: {} }))
+  cleanups.push(() => guard.close())
+  f.context.codexOwnerBindings = {
+    guardBuildRunner: (project, worker) => guard.guardBuildRunner(project, worker),
+    actingTurn: project => async turn => {
+      expect(project).toBe(f.context.projectId)
+      children.push(turn.request)
+      await execute('Execute the prompt in this JSON dispatch specification: ' + JSON.stringify(turn.spec))
+      return { kind: 'turn-ended' }
+    },
+  }
+  return { ...f, calls, children }
+}
+
+test('Codex owner routes explicit Claude plan, review and synthesis headlessly and its native build merges', async () => {
+  const f = await codexOwnerWithClaude()
+  const outcome = await drive(f, 'pr')
+  expect(outcome.kind, why(f, outcome)).toBe('merged')
+  expect(f.children.map(request => request.role)).toEqual(['build'])
+  const calls = (await readFile(f.calls, 'utf8')).trim().split('\n').map(line => JSON.parse(line))
+  expect(calls.map(call => call.request.role)).toEqual(['plan', 'review', 'review', 'synthesis'])
+  for (const call of calls) {
+    expect(call.request.run_id).toBe(f.row.id)
+    expect(call.argv[call.argv.indexOf('--model') + 1]).toBe(call.request.model_id)
+    expect(call.env.CLAUDE_CODE_OAUTH_TOKEN).toBe('fixture-selected-claude')
+    expect(call.env.GH_TOKEN).toBeUndefined()
+    expect(call.env.NEUTRON_REPLY_SINK).toBeUndefined()
+    expect(call.argv).toContain('--restricted')
+    expect(call.argv).not.toContain('--fallback-model')
+    const envelope = JSON.parse(await readFile(call.request.result.path, 'utf8'))
+    expect(envelope).toMatchObject({ run_id: f.row.id, step_id: call.request.step_id, schema: call.request.result.schema, kind: 'completed' })
+  }
+}, 30_000)
+
+test('Codex owner with unavailable selected Claude credentials refuses before any worker or publication', async () => {
+  const f = await codexOwnerWithClaude()
+  f.context.env.CLAUDE_CODE_OAUTH_TOKEN = 'wrong-selected-credential'
+  await expect(drive(f, 'pr')).rejects.toThrow('provider-not-connected')
+  expect(f.children).toEqual([])
+  await expect(readFile(f.calls, 'utf8')).rejects.toMatchObject({ code: 'ENOENT' })
+  expect(f.commands.some(argv => argv[0] === 'gh' && argv.includes('create'))).toBe(false)
+})
+
+test('Codex owner cannot substitute its native child for a missing configured Claude runner', async () => {
+  const f = await codexOwnerWithClaude()
+  const prepared = await f.prepare()
+  delete prepared.substrate.headless.anthropic
+  const host = await createProjectBuildHost(prepared)
+  const outcome = await host.run({ mode: 'pr', start: 'fresh' }, new AbortController().signal)
+  expect(outcome.kind).not.toBe('merged')
+  expect(f.children).toEqual([])
+  await expect(readFile(f.calls, 'utf8')).rejects.toMatchObject({ code: 'ENOENT' })
+})
+
+test('Codex owner observes wrong Claude schema as unknown without building or publishing', async () => {
+  const f = await codexOwnerWithClaude('wrong-schema')
+  const outcome = await drive(f, 'pr')
+  expect(outcome.kind).not.toBe('merged')
+  expect(f.children).toEqual([])
+  const calls = (await readFile(f.calls, 'utf8')).trim().split('\n').map(line => JSON.parse(line))
+  expect(calls.map(call => call.request.role)).toEqual(['plan'])
+  await expect(readFile(calls[0].request.result.path, 'utf8')).rejects.toMatchObject({ code: 'ENOENT' })
+  expect(f.commands.some(argv => argv[0] === 'gh' && argv.includes('create'))).toBe(false)
+})
+
+test('prepared Codex build/fix transport publishes canonical artifacts while unattested review remains unavailable', async () => {
+  const f = await fixture()
+  const ownerHome = await mkdtemp(join(tmpdir(), 'project-build-owner-home-'))
+  cleanups.push(() => rm(ownerHome, { recursive: true, force: true }))
+  f.context.stateRoot = join(ownerHome, '.trident', 'project-builds')
+  f.context.provider = 'openai-codex'
+  f.input.phase_models = { ...f.input.phase_models, build: { model: 'sol' }, review_adversarial: { model: 'sol' } }
+  const children: BoundedWorkRequest[] = []
+  const execute = literalWorker(f.world)
+  const guard = new CodexOwnerBindings(async () => ({ cwd: f.context.projectDir, codexHome: ownerHome, env: {} }))
+  f.context.codexOwnerBindings = {
+    guardBuildRunner: (project, worker) => guard.guardBuildRunner(project, worker),
+    actingTurn: project => async turn => {
+      expect(project).toBe(f.context.projectId)
+      expect(turn.request.result.path.startsWith(join(f.context.projectDir, '.neutron', 'build-results'))).toBe(true)
+      expect(turn.request.brief.path.startsWith(f.context.stateRoot)).toBe(true)
+      children.push(turn.request)
+      await execute('Execute the prompt in this JSON dispatch specification: ' + JSON.stringify(turn.spec))
+      return { kind: 'turn-ended' }
+    },
+  }
+  await expect(f.prepare()).rejects.toThrow('lacks attested read-only child execution')
+  f.input.phase_models = { ...f.input.phase_models, review_adversarial: { model: 'opus' } }
+  const prepared = await f.prepare()
+  for (const role of ['build', 'fix'] as const) {
+    const request: BoundedWorkRequest = { ...prepared.workers[role].request, run_id: f.row.id, step_id: `${f.row.id}:${role}:0`, role, needs_approval_decision: false }
+    // Exercise the prepared build runner without bypassing the full host's
+    // review admission refusal. This is fixture-owned measured turn context.
+    const snapshot = { head: await gitOut(f.world.run, request.cwd, ['rev-parse', 'HEAD']), diff: '', pr: null }
+    await writeFile(workContextPath(request.brief.path), JSON.stringify({ request, snapshot, previous: {}, findings: [] }))
+    expect((await prepared.substrate.inRepl!.run(request, 'in-repl', new AbortController().signal)).kind).toBe('completed')
+  }
+  expect(children.map(request => request.role)).toEqual(['build', 'fix'])
+  const state = join(f.context.stateRoot, encodeURIComponent(f.row.id))
+  for (const role of ['build', 'fix']) {
+    const artifact = JSON.parse(await readFile(join(state, `${role}.result`), 'utf8'))
+    expect(artifact.run_id).toBe(f.row.id)
+    expect(artifact.kind).toBe('completed')
+  }
+  expect(prepared.substrate.inRepl!.supports('review', 'in-repl')).toMatchObject({ ok: false, reason: 'capability-unsupported' })
+  expect(prepared.substrate.inRepl!.supports('synthesis', 'in-repl')).toMatchObject({ ok: false, reason: 'capability-unsupported' })
+  await guard.close()
+})
+
+test.each(['valid', 'forbidden-edit', 'wrong-schema', 'restore-lost', 'ack-lost', 'restore-mismatch'] as const)('Codex owner restricted same-provider panel and synthesis: %s', async fault => {
+  const f = await codexOwnerWithClaude()
+  f.input.phase_models = { ...f.input.phase_models, review_adversarial: { model: 'sol' }, review_codex: { model: 'sol' }, synthesis: { model: 'sol' } }
+  const native = await restrictedOwnerFixture({ projectId: f.context.projectId, cwd: f.context.projectDir, execute: literalWorker(f.world), childSettlesAfterMs: 30,
+    ...(fault === 'forbidden-edit' ? { forbiddenEdit: true } : {}),
+    ...(fault === 'wrong-schema' ? { wrongSchema: true } : {}),
+    ...(fault === 'restore-lost' ? { drop: 'reviewRestore' } : {}),
+    ...(fault === 'ack-lost' ? { drop: 'reviewAcknowledge' } : {}),
+    ...(fault === 'restore-mismatch' ? { badRestore: true } : {}),
+  })
+  cleanups.push(() => native.close())
+  f.context.codexOwnerBindings = native.bindings
+  const before = await gitOut(f.world.run, f.origin, ['rev-parse', 'refs/heads/main'])
+  const outcome = await drive(f, 'pr')
+  expect(native.errors).toEqual([])
+  expect(native.opens()).toBe(1)
+  if (fault === 'valid') {
+    expect(outcome.kind, why(f, outcome)).toBe('merged')
+    expect(native.children.map(child => child.role)).toEqual(['build', 'review', 'review', 'review', 'synthesis'])
+    expect(native.wire.filter(message => message.operation === 'reviewRelease')).toHaveLength(4)
+    expect(await gitOut(f.world.run, f.origin, ['rev-parse', 'refs/heads/main'])).not.toBe(before)
+    expect(f.github.prs[0]?.state).toBe('MERGED')
+    const events = []
+    for await (const event of native.bindings.start(f.context.projectId, { prompt: 'next owner chat', tools: [], model_preference: [] }).events) events.push(event)
+    expect(events.at(-1)?.kind).toBe('completion')
+  } else {
+    expect(outcome.kind, why(f, outcome)).not.toBe('merged')
+    expect(await gitOut(f.world.run, f.origin, ['rev-parse', 'refs/heads/main'])).toBe(before)
+    expect(f.github.prs.some(pr => pr.state === 'MERGED')).toBe(false)
+    expect(native.wire.filter(message => message.operation === 'reviewRelease')).toHaveLength(0)
+  }
+  const claude = (await readFile(f.calls, 'utf8')).trim().split('\n').map(line => JSON.parse(line))
+  expect(claude.map(call => call.request.role)).toEqual(['plan'])
+}, 30_000)
 
 test('Bun workspace dependencies are local before workers and publication consumes them', async () => {
   const f = await fixture({ bunWorkspace: true })

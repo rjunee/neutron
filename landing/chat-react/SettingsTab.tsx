@@ -1341,7 +1341,7 @@ export function SettingsTab({
           Extra tools for your assistant, each one a program on this machine. Adding a
           server does not start it — you approve it here first, and the request shows
           exactly what it would run. One set serves every project, and an approved server
-          is attached when your assistant next starts a Claude session.
+          is available in Claude conversations and supported Codex project chats.
         </p>
 
         {mcpError !== null ? (

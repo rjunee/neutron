@@ -332,7 +332,7 @@ describe('the HTTP surface', () => {
     // Every row still includes its own default — a row that omitted it could not
     // offer the model it already runs (pinned by the loop below).
     expect(phases.find((p) => p.key === 'review_codex')!.groups).toEqual(['none', 'claude', 'codex', 'kimi', 'api'])
-    expect(phases.find((p) => p.key === 'synthesis')!.groups).toEqual(['claude'])
+    expect(phases.find((p) => p.key === 'synthesis')!.groups).toEqual(['claude', 'codex'])
     expect(phases.find((p) => p.key === 'synthesis')!.groups).not.toContain('none')
     for (const p of phases) expect(p.groups).toContain(p.group)
   })

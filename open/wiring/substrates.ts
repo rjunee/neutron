@@ -260,10 +260,14 @@ export function wireSubstrates(ctx: OpenWiringContext): WiredSubstrates {
   // Dedicated WARM conversational substrate for post-onboarding live chat
   // turns (no `ephemeral`; keyed per-dispatch on metering_context).
   const makeLiveAgentSubstrate = (projectIdResolver?: () => string): LlmCallSubstrate | null =>
-    conversationalAvailable
+    (conversationalAvailable || ctx.startCodexOwner !== undefined
+      && ((ctx.providerResolver?.(projectIdResolver?.(), 'conversation')?.provider ?? ctx.provider) === 'openai-codex'
+        || projectIdResolver === undefined && (ctx.codexOwnerProjects?.length ?? 0) > 0))
       ? buildLlmCallSubstrate({
           ...anthropicPoolArg,
           substrate_instance_id: `cc-agent-${owner_handle}`,
+          ownerConversation: true,
+          ...(ctx.startCodexOwner === undefined ? {} : { startCodexOwner: ctx.startCodexOwner }),
           repl_pane_label: `chat · ${project_slug}`,
           cwd: owner_home,
           owner_handle,
@@ -281,9 +285,10 @@ export function wireSubstrates(ctx: OpenWiringContext): WiredSubstrates {
           // `tools-bridge.ts`). The untrusted import (`cc-import-*`) and
           // disposable Trident (`cc-trident-*`) substrates deliberately omit it.
           enableToolBridge: true,
-          // The owner's APPROVED installed MCP servers — the ONE substrate that gets
-          // them, mirroring `enableToolBridge` exactly. A server the owner installs in
-          // Settings becomes reachable from THIS session and nowhere else: the
+          // The owner's APPROVED installed MCP servers on Claude, mirroring
+          // `enableToolBridge`. Codex owner chat uses CodexOwnerBindings instead.
+          // A server the owner installs in
+          // Settings becomes reachable from the trusted owner session: the
           // untrusted import, the per-project compose and the disposable Trident
           // substrates omit the resolver, and `spawn.ts` also refuses to apply it
           // without the tool-bridge opt-in, so a prompt-injection in imported content

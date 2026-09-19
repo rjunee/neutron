@@ -40,9 +40,36 @@ import {
   phaseForLabel,
   phaseModelDefaults,
 } from '../phase-models.ts'
-import { TIER_GROUPS } from '../model-tiers.ts'
+import { TIER_GROUPS, modelTierRegistry } from '../model-tiers.ts'
 
 const WORKFLOW_SRC = await Bun.file(new URL('../inner-workflow.mjs', import.meta.url)).text()
+
+// Execute the shipped router and synthesis call site. The workflow runtime owns
+// agent(); observing that boundary catches a guard that exists but is never used.
+function legacySynthesis(model: string, agent: (prompt: string, opts: Record<string, unknown>) => unknown) {
+  const routingStart = WORKFLOW_SRC.indexOf('const MODELS =')
+  const routingEnd = WORKFLOW_SRC.indexOf('function crossModelEnvPrefix(')
+  const synthesisStart = WORKFLOW_SRC.indexOf('  const runSynthesis = () =>')
+  const synthesisEnd = WORKFLOW_SRC.indexOf('  // THE SYNTHESIS SEAT IS RETRIED', synthesisStart)
+  expect(routingStart).toBeGreaterThan(-1)
+  expect(routingEnd).toBeGreaterThan(routingStart)
+  expect(synthesisStart).toBeGreaterThan(routingEnd)
+  expect(synthesisEnd).toBeGreaterThan(synthesisStart)
+  return new Function('pickModel', 'modelTiers', 'phaseModels', 'log', 'agent', `
+    const codexConfigured = true, kimiConfigured = true;
+    ${WORKFLOW_SRC.slice(routingStart, routingEnd)}
+    const VERDICT_SCHEMA = {};
+    const NO_PATTERN_KILL_RULE = '', corePanelLines = '', offPanelLines = '',
+      codexPanel = '', kimiPanelLine = '', suiteFindingsPrompt = '',
+      ciFindingsPrompt = '', codeScanningPrompt = '';
+    ${WORKFLOW_SRC.slice(synthesisStart, synthesisEnd)}
+    return runSynthesis;
+  `)(
+    (_key: string, alias: string) => alias,
+    Object.fromEntries(modelTierRegistry().map(tier => [tier.tier, tier])),
+    { synthesis: { model } }, () => {}, agent,
+  ) as () => unknown
+}
 
 /**
  * Every `label:` literal in the workflow source, with `${…}` interpolations reduced to
@@ -237,12 +264,11 @@ describe('the workflow reads the argument this module produces', () => {
     }
   })
 
-  it('offers exactly every dispatch group the workflow accepts, for every phase', () => {
-    // THE SECOND RULE THAT LIVES IN TWO PLACES, and it had no guard while the module
-    // header claimed one. `alsoRunsOn` is what makes a tier from another executor
-    // SELECTABLE for a phase; the workflow's route for that phase has to carry the
-    // same list, or `applyPhaseOverride` logs IGNORED and the owner's pick dispatches
-    // nowhere — a settable option that does nothing, which is worse than a greyed one.
+  it('every offered group is dispatched or explicitly refused by the legacy workflow', () => {
+    // The project runner supports Codex synthesis via its native review lease.
+    // The legacy workflow must refuse that choice, never silently run Claude.
+    // All other phases retain exact dispatch parity; refusal behavior is exercised
+    // through the real synthesis call site below and native success in Open E2E.
     for (const phase of TRIDENT_PHASES) {
       const route = new RegExp(
         `phaseKey: '${phase.key}'[^\\n]*dispatchGroups: \\[([^\\]]*)\\]`,
@@ -252,14 +278,35 @@ describe('the workflow reads the argument this module produces', () => {
         .split(',')
         .map((g) => g.trim().replace(/^'|'$/g, ''))
         .filter((g) => g.length > 0)
-      expect({ key: phase.key, groups }).toEqual({ key: phase.key, groups: [...phase.dispatchGroups] })
-      // …and every group named is one the workflow can actually DISPATCH: it needs a
-      // route of its own carrying that group, or the move lands on nothing.
-      for (const group of phase.dispatchGroups) {
-        expect(TIER_GROUPS).toContain(group)
+      const routeLine = WORKFLOW_SRC.slice(route!.index).split('\n')[0]!
+      const refused = /refusedGroups: \[([^\]]*)\]/.exec(routeLine)?.[1]
+        ?.split(',').map(g => g.trim().replace(/^'|'$/g, '')) ?? []
+      expect({ key: phase.key, refused }).toEqual({ key: phase.key, refused: phase.key === 'synthesis' ? ['codex'] : [] })
+      expect(groups.filter(group => refused.includes(group))).toEqual([])
+      expect({ key: phase.key, groups: [...groups, ...refused] }).toEqual({ key: phase.key, groups: [...phase.dispatchGroups] })
+      for (const group of phase.dispatchGroups) expect(TIER_GROUPS).toContain(group)
+      // Every executable group still needs a route of its own.
+      for (const group of groups) {
         if (group !== 'none') expect(new RegExp(`group: '${group}'`).test(WORKFLOW_SRC)).toBe(true)
       }
     }
+  })
+
+  it('legacy Codex synthesis refuses the selected tier before any Claude agent invocation', () => {
+    const calls: unknown[] = []
+    expect(parsePhaseModelConfig({ synthesis: { model: 'sol' } }).errors).toEqual([])
+    const run = legacySynthesis('sol', (...args) => { calls.push(args) })
+    expect(run).toThrow('Legacy workflow cannot dispatch phase=synthesis tier=sol group=codex')
+    expect(calls).toEqual([])
+  })
+
+  it('legacy Claude synthesis still dispatches the selected model and returns its verdict', () => {
+    const calls: Record<string, unknown>[] = []
+    const verdict = { verdict: 'REQUEST_CHANGES', findings: [{ rule: 'fixture-blocker' }] }
+    const run = legacySynthesis('opus', (_prompt, opts) => { calls.push(opts); return verdict })
+    expect(run()).toEqual(verdict)
+    expect(calls).toHaveLength(1)
+    expect(calls[0]).toMatchObject({ label: 'argus:synthesis', model: modelTierRegistry().find(tier => tier.tier === 'opus')!.model_id })
   })
 })
 

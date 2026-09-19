@@ -11,7 +11,7 @@ const approve = { verdict: 'APPROVE', findings: [] }
 const snapshot = { head: 'a'.repeat(40), diff: 'actual diff', pr: null }
 const dirs: string[] = []
 afterEach(async () => { await Promise.all(dirs.splice(0).map(dir => rm(dir, { recursive: true, force: true }))) })
-const completed = (result: unknown = approve): BoundedWorkOutcome => ({ kind: 'completed', result, model_reported: 'untrusted-model-claim', usage: { input_tokens: 0, output_tokens: 0 }, thread_id: null })
+const completed = (result: unknown = approve): BoundedWorkOutcome => ({ kind: 'completed', result, model_reported: 'untrusted-model-claim', usage: { input_tokens: 0, output_tokens: 0 }, thread_id: 'fixture-thread' })
 async function fixture() {
   const dir = await mkdtemp(join(tmpdir(), 'review-source-test-')); dirs.push(dir)
   const calls: BoundedWorkRequest[] = []
@@ -52,6 +52,7 @@ test('cross-provider review persists one observed thread per seat across source 
 
 test('cross-provider thread disappearance does not silently begin a fresh conversation', async () => {
   const f = await fixture(); f.options.replProvider = 'anthropic'
+  f.answer(async () => ({ ...completed(), thread_id: null } as BoundedWorkOutcome))
   const source = f.source()
   await expect(source.readSeat(source.seats[1]!, snapshot, 1)).rejects.toThrow('host dispatch or observation failed')
   expect(f.calls).toHaveLength(1)
@@ -151,7 +152,7 @@ for (const role of ['review', 'synthesis'] as const) {
         kind: 'completed', result,
       }), request, {
         schemas: new Map([['verdict', result => validateTrailer('verdict', result).ok]]),
-        metadata: () => ({ usage: null, model_reported: 'observed-model', thread_id: null }),
+        metadata: () => ({ usage: null, model_reported: 'observed-model', thread_id: 'fixture-thread' }),
       })
       decoded.push(outcome)
       if (outcome.kind === 'not-current-step') throw Error('Unexpected stale fixture result')
@@ -162,8 +163,11 @@ for (const role of ['review', 'synthesis'] as const) {
     })
     expect(await f.check()).toMatchObject({ kind: 'blocked', on: expect.stringContaining('infra-only:') })
     expect(decoded.at(-1)).toEqual({ kind: 'unknown', detail: 'Trailer result failed host schema validation.' })
-    // Removing only the extra field produces a decodable result and panel approval.
+    // An unknown headless result retains its lock. A separate run-owned evidence
+    // directory is the positive control; uncertainty cannot authorize redispatch.
     malformed = false
+    f.options.evidenceRoot = await mkdtemp(join(tmpdir(), 'review-source-valid-'))
+    dirs.push(f.options.evidenceRoot)
     expect(await f.check()).toEqual({ kind: 'approve' })
     expect(decoded.at(-1)).toMatchObject({ kind: 'completed', result: approve })
   })
@@ -179,6 +183,26 @@ test('an out-of-schema completed synthesis cannot create an approval checkpoint 
   const valid = f.source()
   expect(await f.check(valid)).toEqual({ kind: 'approve' })
   expect(await valid.readSynthesis(snapshot, 1)).toMatchObject({ checkpoint: 'argus-approved', payload: approve })
+})
+
+test('Claude review and synthesis resume independent observed threads across source replacement', async () => {
+  const f = await fixture()
+  f.options.phaseModels = { ...f.options.phaseModels, review_adversarial: { model: 'opus' }, synthesis: { model: 'opus' } }
+  f.options.env = { CLAUDE_CODE_OAUTH_TOKEN: 'selected-fixture-token' }
+  f.answer(async req => ({ ...completed(), thread_id: req.thread?.id ?? `claude-${req.role}` } as BoundedWorkOutcome))
+  let source = f.source()
+  await source.readSeat(source.seats[1]!, snapshot, 1)
+  await source.readSynthesis(snapshot, 1)
+  source = f.source()
+  await source.readSeat(source.seats[1]!, snapshot, 2)
+  await source.readSynthesis(snapshot, 2)
+  expect(f.calls.map(call => [call.role, call.thread])).toEqual([
+    ['review', null], ['synthesis', null], ['review', { id: 'claude-review' }], ['synthesis', { id: 'claude-synthesis' }],
+  ])
+  expect(f.calls.every(call => call.run_id === 'host-run' && call.result.schema === 'verdict')).toBe(true)
+  f.answer(async () => ({ ...completed(), thread_id: 'another-thread' } as BoundedWorkOutcome))
+  source = f.source()
+  await expect(source.readSeat(source.seats[1]!, snapshot, 3)).rejects.toThrow('host dispatch or observation failed')
 })
 test('deferred retry is bounded and cannot replace a completed observation', async () => {
   const f = await fixture(); let attempts = 0
@@ -296,7 +320,7 @@ for (const effort of ['xhigh', 'max'] as const) {
 test('null model telemetry preserves completion and reports unknown panel family', async () => {
   const f = await fixture()
   f.options.phaseModels = { ...f.options.phaseModels, review_codex: { model: 'sol' } }
-  f.answer(async () => ({ kind: 'completed', result: approve, usage: null, model_reported: null, thread_id: null }))
+  f.answer(async () => ({ kind: 'completed', result: approve, usage: null, model_reported: null, thread_id: 'fixture-thread' }))
   const warning = spyOn(console, 'warn').mockImplementation(() => {})
   try {
     const source = f.source()

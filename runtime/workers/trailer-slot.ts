@@ -113,6 +113,7 @@ export async function reserveTrailerSlot(
   reservation: string,
   identity: string,
   resultPath: string,
+  beforeArm?: () => Promise<void>,
 ): Promise<SlotReservation> {
   try {
     await writeFile(reservation, identity, { flag: 'wx', mode: 0o600 })
@@ -132,6 +133,13 @@ export async function reserveTrailerSlot(
   }
   const cleared = await clearTrailerSlot(resultPath)
   if (!cleared.ok) return { kind: 'unknown', detail: cleared.detail }
+  try {
+    // Only the exclusive creator can clear an additional child-facing slot.
+    // A failure stays UNARMED; resume and concurrent losers never run this hook.
+    await beforeArm?.()
+  } catch {
+    return { kind: 'unknown', detail: 'Child result slot could not be cleared before arming; this step was not dispatched.' }
+  }
   try {
     await writeFile(reservation, identity + ARMED, { mode: 0o600 })
   } catch (error) {
