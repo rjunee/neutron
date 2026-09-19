@@ -7,13 +7,13 @@ runner inherits its parent's environment when no extra environment is supplied
 (`trident/git-mode.ts:1193`); omitting the stored credential is not the same as
 removing an inherited one.
 
-`scripts/run-tests.sh:138` now removes GitHub CLI token variables and injected
+`scripts/run-tests.sh:144` now removes GitHub CLI token variables and injected
 git configuration before dependency verification, discovery, or any test lane
 starts. This changes only the test runner's child environment. Publishing still
 uses the credentialed host runner, and tests can explicitly install synthetic
 connected credentials. Ordinary CI metadata is retained.
 
-The credential probes in `open/__tests__/project-build-wiring.test.ts:894` and
+The credential probes in `open/__tests__/project-build-wiring.test.ts:903` and
 `tests/integration/github-credential-wired.open.test.ts:99` now emit only
 presence or equality outcomes. Unexpected credentials still fail the
 assertions, without rendering their values. Per-test deletion alone was

@@ -15,11 +15,11 @@ rejects malformed numbers, arrays and incomplete objects
 (`open/wiring/project-build-snapshot.ts:28`). Role payload validation and the
 driver's independent snapshot corroboration remain in place (`:567`).
 
-Outer-contract failures name only the field and expected shape. The decoder
-still returns unknown, with no worker-controlled values or suite evidence
-included in the diagnostic. A consuming driver regression supplies a valid
-build payload with numeric outer `pr`, then asserts the specific refusal,
-only plan/build dispatches, and no publication
+In the project worker decoder, outer-contract failures name only the field and
+expected shape. The decoder still returns unknown, with no worker-controlled
+values or suite evidence included in the diagnostic. A consuming driver
+regression supplies a valid build payload with numeric outer `pr`, then asserts
+the specific refusal, only plan/build dispatches, and no publication
 (`open/__tests__/project-build-e2e.test.ts:1125`). Every emitted role brief is
 checked for the full shared schema (`:1108`). Focused decoding controls prove
 valid objects survive unchanged and null remains valid independently of the
@@ -29,7 +29,7 @@ The existing wiring consumer also asserts the field-specific outer-contract
 throw, separately from a false role-payload validation result, with valid PR
 object and null controls (`open/__tests__/project-build-wiring.test.ts:164`).
 Its exact brief fixtures retain all four roles' strategy/reflection boundaries
-while including the new outer contract (`:613`). No production refusal was
+while including the new outer contract (`:620`). No production refusal was
 weakened to accommodate the older test expectations.
 
 Validation: the complete wiring consumer, explicit consuming E2E file and
