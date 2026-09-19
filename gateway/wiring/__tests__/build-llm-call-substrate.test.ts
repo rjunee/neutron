@@ -300,6 +300,30 @@ test('projectIdResolver folds the LIVE active project into the pool key → dist
   expect(poolKeyFor(seen[0]!.opts)).toBe(poolKeyFor({ ...seen[0]!.opts }))
 })
 
+test('normal dispatch resolves the live project after asynchronous spawn environment resolution', async () => {
+  const pool = newCredentialPool({
+    strategy: 'fill_first', credentials: [{ id: 'k1', kind: 'api_key', secret: 'sk-test' }],
+  })
+  const { substrateFactory, seen } = captureFactory()
+  let activeProject = 'before-env'
+  let enter!: () => void
+  let release!: () => void
+  const entered = new Promise<void>(resolve => { enter = resolve })
+  const held = new Promise<void>(resolve => { release = resolve })
+  const sub = buildLlmCallSubstrate({
+    pool, substrate_instance_id: 'cc-llm-acme', cwd: workdir, substrateFactory,
+    projectIdResolver: () => activeProject,
+    extra_env: async () => { enter(); await held; return {} },
+  })!
+  const turn = collectTokensToString(sub.start(runSpec()))
+  await entered
+  activeProject = 'after-env'
+  release()
+  await turn
+  expect(seen).toHaveLength(1)
+  expect(seen[0]!.opts.project_id).toBe('after-env')
+})
+
 test('absent projectIdResolver falls back to spec.metering_context.project_id, then to default', async () => {
   const pool = newCredentialPool({
     strategy: 'fill_first',

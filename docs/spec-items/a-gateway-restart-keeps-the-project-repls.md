@@ -21,35 +21,20 @@ legacy_ref: "GitHub issue #539 (herdr step 2c)"
 The owner's acceptance criterion, verbatim: *a gateway restart brings every project
 REPL back with its conversation intact.*
 
-**What "every" means here, stated so it is checkable:**
+**What "every" means here, stated so it is checkable:** Open boot reconciles
+General and each non-deleted project's durable live-chat (`cc-agent-*`) pane rows
+whose provider is Claude and whose credential identity is currently authorized.
+It derives exact pool keys from those authoritative inputs; it never parses
+opaque registry keys or assigns another row's options. Reconciliation is awaited
+after the production graph binds the tool bridge and before it accepts traffic.
+No app message or synthetic chat turn is needed, and missing/dead rows do not
+become cold spawns or watchdog registrations.
 
-> Every project REPL whose substrate this gateway constructs is reconciled before that
-> substrate's first turn, and **no row is ever reconciled under another row's options**.
-
-**That restatement is NOT equivalent to the criterion above, and saying so is the point.**
-An earlier revision of this paragraph introduced it as "without weakening what it asks
-for". As quantified statements they differ — "every project REPL" and "every project REPL
-whose substrate this gateway constructs" are not the same set — and this very file
-documents the gap two sections down. Asserting equivalence while documenting the
-difference is precisely the overclaim this item's own record catalogues, so the honest
-version is three separate statements:
-
-- **As a claim about boot-time mechanism it is narrower, explicitly.** Nothing is
-  reconciled at boot for a project this gateway has not been asked to serve yet. A REPL
-  exists, its row names it, and no pass has run.
-- **As a claim about what the owner experiences it is equivalent, and that is the
-  load-bearing half.** Reconciliation happens before that substrate's first turn, so no
-  turn is ever served by a fresh process where a survivor existed. The criterion asks that
-  a restart bring every project REPL back with its conversation intact; it does not say at
-  what point in the boot that has to happen.
-- **The observable difference is the window between the restart and first use**, in which
-  the pane is alive, unreconciled and unreaped. That is stated in full under *Residual,
-  named rather than hidden* below, and it is cross-referenced here so a reader meets the
-  gap in the same place they meet the claim.
-
-The second clause of the restatement is not a caveat on the first — it is the reason the
-first is phrased by substrate rather than by registry; see *Why reconciliation is per key*.
-The verbatim criterion above is unchanged and is what this item is answering.
+Other substrate families retain reconciliation before their first turn. Foreign
+identities, deleted projects, revoked credential identities and non-Claude
+project routes are not boot-adopted. These are deliberate scope boundaries,
+not evidence that those panes have been reconciled or reaped. See the residual
+below and Decisions Log 2026-09-19.
 
 **Say which process restarted, always.** A REPL is a pane of the **herdr server**, so:
 
@@ -115,7 +100,8 @@ credential still gets a 401). The fixture deliberately writes **B's row first**,
 pass that reconciled whichever row it found would land on the wrong one and the cases
 red rather than passing against broken code.
 
-**A row whose substrate this process never constructs.** Its pane keeps running, its row
+**A row outside the authorized boot-adoption scope whose substrate this process
+never constructs.** Its pane keeps running, its row
 stays exactly as it is, and the next construction of that substrate reconciles it — which
 is the same pass, at the moment there are options to run it under.
 
@@ -142,6 +128,25 @@ would be the worse defect — but it is a gap, not a covered case.
 Bidirectional throughout: an adoption path that refuses everything satisfies every
 refusal criterion and delivers nothing, so each refusal is paired with the acceptance
 it must not swallow.
+
+- [ ] **BOOT RESTORES AUTHORIZED LIVE-CHAT SURVIVORS WITHOUT AN APP TURN.** The
+      production graph installs its tool bridge before adoption, then awaits
+      reconciliation for General and current projects on Claude routes. The
+      survivor keeps its pane, pid and session; its credential authorizes a real
+      project-scoped tool call. No synthetic turn or fresh spawn occurs. Foreign
+      owners, deleted projects, revoked identities, non-Claude routes, unknown
+      registry state and absent/dead candidates never gain authority or a
+      watchdog registration. A real first turn joining adoption retains its own
+      supervision options and waits for the same pass.
+      Stable credential IDs also require the survivor's recorded auth fingerprint
+      to match the final current environment, including explicit empty ambient
+      fingerprints; missing or changed evidence refuses without closing or claiming.
+      The claim rechecks that evidence under the registry lock. A proactive caller
+      cannot inherit an unguarded or differently guarded cached pass as a verified
+      adoption; equal guarded policies can share the pass.
+      *Verified by* `open/__tests__/boot-live-agent-adoption.test.ts`.
+      Claim races and cached-policy controls:
+      `runtime/adapters/claude-code/persistent/__tests__/boot-adoption.test.ts`.
 
 - [ ] **A TURN AFTER THE RESTART IS SERVED BY THE SAME CHILD.** Not "a REPL answers" —
       no `claude` is launched, and the answer is one only the ATTACHED child could have
@@ -449,10 +454,13 @@ refusing.
 
 ## Residual, named rather than hidden
 
-**A row is reconciled when its substrate is constructed, not at process boot.** Stated
-above under *Why reconciliation is per key*; repeated here because it is a residual and a
-reader should not have to infer it. Nothing is reconciled for a project this gateway has
-not been asked to serve yet.
+**Boot adoption is scoped to authorized live-chat identities.** General and
+non-deleted projects on Claude routes with currently authorized credential IDs
+are reconciled without an app turn once graph tools are ready. Other substrate
+families retain lazy reconciliation. A row excluded by ownership, project,
+provider or credential eligibility is left untouched and is not claimed as
+reconciled or reaped. Missing registry evidence is reported as unknown rather
+than silently treated as successful recovery.
 
 **The close is licensed by the row as well as the process, but the window is narrowed
 rather than eliminated.** A pane is only closed when the row still names it — checked

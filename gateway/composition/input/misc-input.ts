@@ -3,6 +3,8 @@ import type { LoopRegistry } from '@neutronai/loop'
 import type { ProjectDb } from '@neutronai/persistence/index.ts'
 
 export interface MiscCompositionInput {
+  /** Awaited after graph tools and HTTP wiring exist, before accepting traffic. */
+  on_graph_ready?: () => Promise<void>
   db: ProjectDb
   project_slug: string
   /**

@@ -40,6 +40,8 @@ import { createConfiguredChatSubstrate } from '@neutronai/runtime/adapters/confi
 
 import {
   createClaudeCodeSubstrateAuto,
+  existingClaudeRepl,
+  reconcileExistingClaudeRepl,
   type ChildCrashInfo,
   type ClaudeCodeSubstrateOptions,
   type RecoveredReply,
@@ -67,6 +69,7 @@ import {
   reportSuccess,
   selectCredential,
   type CredentialPool,
+  type PooledCredential,
   type FailureOrigin,
 } from '@neutronai/runtime/credential-pool.ts'
 import type { Event, SubstrateErrorClass } from '@neutronai/runtime/events.ts'
@@ -187,6 +190,15 @@ export async function resolveScrubbedAuthEnv(
         'Retry once the rate-limit window passes.',
     )
   }
+  return resolveCredentialAuthEnv(input, pool, cred)
+}
+
+/** Resolve one already-authorized identity without credential selection/accounting. */
+async function resolveCredentialAuthEnv(
+  input: ResolveScrubbedAuthEnvInput,
+  pool: CredentialPool,
+  cred: PooledCredential,
+): Promise<ResolveScrubbedAuthEnvResult> {
   let activeSecret = cred.secret
   const isOauthLike = cred.kind === 'oauth' || cred.kind === 'codex_oauth'
   if (
@@ -663,6 +675,179 @@ export interface OpenAiFamilyProviderConfig {
   spawnImpl?: CodexCliSubstrateOptions['spawnImpl']
 }
 
+/** Shared option composition; normal turns resolve their project after env awaits. */
+async function claudeOptionsFor(
+  input: BuildLlmCallSubstrateInput,
+  resolved: ResolveScrubbedAuthEnvResult,
+  projectIdFor: () => string | undefined,
+  onProjectResolved?: (projectId: string | undefined) => void,
+): Promise<ClaudeCodeSubstrateOptions> {
+  // SECURITY-PROFILE resolution (tool-security redesign Step 0). The
+  // security knobs (permission policy / `claude_config_dir` / `extra_env`)
+  // now live on a single-source `profile`; a profile field WINS over the
+  // matching legacy per-call input, an absent profile field falls back to
+  // it. BEHAVIOUR-PRESERVING today: no profile sets the reserved fields and
+  // no live site sets these per-call inputs, so each `??` resolves to the
+  // same value except for the deliberately narrowed Trident profiles. The reserved
+  // `profile.sandbox` remains shape-only. Interactive permission mode is
+  // applied here for the narrowed Trident profiles.
+  const effectiveSkipPermissions = input.profile?.skip_permissions ?? input.skip_permissions
+  const effectiveRestricted = input.profile?.restricted
+  const effectiveExtraDirs = input.profile?.extra_dirs
+  const effectivePermissionMode = input.profile?.permission_mode
+  const effectiveClaudeConfigDir = input.profile?.claude_config_dir ?? input.claude_config_dir
+  // THE PROFILE DECIDES, THE INSTANCE SUPPLIES. A profile that opts into the
+  // GitHub credential gets `GH_TOKEN` + the git credential helper; one that
+  // does not is byte-for-byte unchanged. The decision lives on the profile so
+  // a new substrate inherits it rather than re-deciding at a tenth call site
+  // nobody rereads — the failure that produced ISSUES #576 and a private-repo
+  // build dying at `fatal: could not read Username`.
+  //
+  // RESOLVED HERE, INSIDE THE PER-SPAWN CLOSURE — never hoisted. A credential
+  // read once outside this is the boot-time snapshot that misses a GitHub
+  // connected after boot and goes stale on rotation.
+  // A CREDENTIAL READ THAT FAILS MUST NOT KILL THE SPAWN. Surfaced by CI:
+  // the resolver threw and took the whole substrate down with it, which in
+  // production would mean a locked store or an unreadable secret turning a
+  // chat turn into a dead session. Degrading to "no credential" is strictly
+  // better — `gh` then fails with git's own message, which is the behaviour
+  // of an instance that never connected GitHub, and the log says why.
+  let githubEnv: Record<string, string | undefined> | undefined
+  if (input.profile?.github_credential === true && githubSpawnEnvRef.resolve !== undefined) {
+    try {
+      githubEnv = await githubSpawnEnvRef.resolve()
+    } catch (err) {
+      substrateLog.warn('github_credential_unavailable', {
+        substrate_instance_id: input.substrate_instance_id,
+        reason: err instanceof Error ? err.message : String(err),
+      })
+      githubEnv = undefined
+    }
+  }
+  const extraEnvResolver = input.profile?.extra_env ?? input.extra_env
+  const resolvedExtraEnv = extraEnvResolver === undefined ? undefined : await extraEnvResolver()
+  // `extra_env` wins over the credential on collision: it is the explicit
+  // per-call knob, and a caller that deliberately unsets a var must not be
+  // overridden by an instance-wide default.
+  const effectiveExtraEnv =
+    githubEnv === undefined && resolvedExtraEnv === undefined
+      ? undefined
+      : { ...(githubEnv ?? {}), ...(resolvedExtraEnv ?? {}) }
+  // The one profile field that is APPLIED rather than reserved. A profile
+  // hosting detached work (`PROFILE_WARM_FIRE`) must not be judged by PTY
+  // chatter — see that profile's docblock for the two builds this killed.
+  // Absent ⇒ the pool's own DEFAULT_TURN_INACTIVITY_MS, so every other
+  // profile is byte-for-byte unaffected.
+  const effectiveTurnInactivityMs = input.profile?.turn_inactivity_ms
+  // The frontier-model floor — the second APPLIED profile field. Only
+  // `PROFILE_WARM_CHAT` sets it; every other profile is byte-for-byte
+  // unaffected, which is what keeps the deliberate FAST_MODEL callers
+  // (scribe / reflection / phase-spec) on the tier they chose. See the
+  // field's docblock in `substrate-profiles.ts` for the live defect.
+  const effectiveFrontierModelFloor = input.profile?.frontier_model_floor
+  // Layer the optional `extra_env` overlay AFTER the auth-scrub env so
+  // per-substrate spawn knobs (e.g. a `MAX_THINKING_TOKENS=0` classifier
+  // knob) win over inherited vars without disturbing the auth scrubbing. The
+  // `undefined`-deletes contract is preserved downstream by the REPL spawn
+  // env merge.
+  const spawnEnv: Record<string, string | undefined> =
+    effectiveExtraEnv !== undefined ? { ...resolved.env, ...effectiveExtraEnv } : resolved.env
+  const opts: ClaudeCodeSubstrateOptions = {
+    substrate_instance_id: input.substrate_instance_id,
+    env: spawnEnv,
+  }
+  if (input.repl_pane_label !== undefined) opts.repl_pane_label = input.repl_pane_label
+  if (input.cwd !== undefined) opts.cwd = input.cwd
+  // Ritual executor (plan task 4) — a non-default system prompt file so the
+  // scheduled REPL runs as an unattended executor rather than the chat
+  // persona. Absent ⇒ the substrate's `repl-agent-base.md` default.
+  if (input.append_system_prompt_file !== undefined) {
+    opts.appendSystemPromptFile = input.append_system_prompt_file
+  }
+  if (effectiveClaudeConfigDir !== undefined) opts.claude_config_dir = effectiveClaudeConfigDir
+  if (input.claude_bin !== undefined) opts.claude_bin = input.claude_bin
+  if (effectiveSkipPermissions !== undefined) opts.skip_permissions = effectiveSkipPermissions
+  if (effectiveRestricted !== undefined) opts.restricted = effectiveRestricted
+  if (effectiveExtraDirs !== undefined) opts.extra_dirs = effectiveExtraDirs
+  if (effectivePermissionMode !== undefined) opts.permission_mode = effectivePermissionMode
+  if (effectiveTurnInactivityMs !== undefined) {
+    opts.turn_inactivity_ms = effectiveTurnInactivityMs
+  }
+  // Set ONLY when the profile opts IN. `false` and absent mean the same
+  // thing downstream (`frontier_model_floor?: boolean`, absent ⇒ off), so
+  // emitting `false` would add a key to every option bag for no behaviour —
+  // and the byte-identity net in `__tests__/substrate-profiles.test.ts`
+  // exists precisely to catch a field quietly appearing on all eight sites.
+  if (effectiveFrontierModelFloor === true) {
+    opts.frontier_model_floor = true
+  }
+  // S3 §2 — fold the SELECTED credential id (#104) + the conversational
+  // identity into the warm-pool key. `cred.id` is the `PooledCredential.id`
+  // (never the secret); a rotation changes it → re-keys to a fresh REPL under
+  // the new env so cooldown attribution matches the child. `user_id` is
+  // per-instance (input).
+  opts.credential_identity = resolved.cred_id
+  if (input.user_id !== undefined) opts.user_id = input.user_id
+  // S3 §2 / Argus r3 BLOCKER — the LIVE per-turn project id. `spec.
+  // metering_context?.project_id` is a DEAD dimension on the CC adapter
+  // (Private-substrate-only; never populated by conversational call sites),
+  // so keying off it collapsed an owner's every project into one warm REPL =
+  // cross-project context bleed. Resolve the live active-chat project via
+  // the injected resolver (re-evaluated per dispatch) and fall back to the
+  // metering field only for any caller that genuinely populates it.
+  const projectId = projectIdFor()
+  if (projectId !== undefined && projectId.length > 0) opts.project_id = projectId
+  onProjectResolved?.(projectId)
+  if (input.project_slug !== undefined) opts.instance_slug = input.project_slug
+  if (input.delivery_topic_id !== undefined) opts.delivery_topic_id = input.delivery_topic_id
+  if (input.onRecoveredReply !== undefined) opts.onRecoveredReply = input.onRecoveredReply
+  // O6 — forward the notice-family sinks so the substrate delivers a
+  // rising-edge dead-turn / size-alert / rate-limit-banner notice to the
+  // gateway's chat surface instead of only stderr. Unset on every non-
+  // conversational substrate (they keep the stderr-only default).
+  if (input.onDeadTurnNotice !== undefined) opts.onDeadTurnNotice = input.onDeadTurnNotice
+  if (input.onChildCrash !== undefined) opts.onChildCrash = input.onChildCrash
+  if (input.hostsLiveWork !== undefined) opts.hostsLiveWork = input.hostsLiveWork
+  if (input.onSizeAlert !== undefined) opts.onSizeAlert = input.onSizeAlert
+  if (input.onRateLimitBanner !== undefined) opts.onRateLimitBanner = input.onRateLimitBanner
+  if (input.onModelFloorApplied !== undefined) {
+    opts.onModelFloorApplied = input.onModelFloorApplied
+  }
+  // Argus r4 BLOCKER — stateless one-shot disposable-REPL mode: a session-
+  // less dispatch on this substrate gets a fresh REPL terminated after the
+  // turn, so distinct one-shot purposes never share a `--resume` transcript.
+  if (input.ephemeral !== undefined) opts.ephemeral = input.ephemeral
+  // Import warm-session — per-turn `/clear` reset on a reused warm REPL so
+  // each chunk runs on a fresh context (ONE warm process, isolated turns).
+  if (input.reset_context_per_turn !== undefined) {
+    opts.reset_context_per_turn = input.reset_context_per_turn
+  }
+  // P0-1 — native-MCP tool bridge opt-in (conversational substrate only).
+  if (input.enableToolBridge !== undefined) {
+    opts.enableToolBridge = input.enableToolBridge
+  }
+  // The owner's installed MCP servers, re-resolved by the substrate on every
+  // spawn AND on every warm-reuse check. Forwarding the THUNK (not a resolved
+  // list) is what lets a server installed mid-session reach the next turn.
+  if (input.resolveExtraMcpServers !== undefined) {
+    opts.resolveExtraMcpServers = input.resolveExtraMcpServers
+  }
+  // Task 6 (T5 write-containment) — forward the ritual write-containment
+  // knobs as DIRECT call-args (never through SubstrateProfile, whose
+  // equivalence net froze PROFILE_RITUAL, deleted by #504). A writing-agent factory
+  // sets these so the deny rule fails closed instead of being auto-approved.
+  if (input.disableToolUseAutoApprove !== undefined) {
+    opts.disableToolUseAutoApprove = input.disableToolUseAutoApprove
+  }
+  if (input.permissions !== undefined) opts.permissions = input.permissions
+  return opts
+}
+
+export interface LlmCallSubstrate extends Substrate {
+  /** Reconcile durable Claude survivors for authoritative project identities. No turns. */
+  adoptExisting(projectIds: readonly string[]): Promise<void>
+}
+
 /**
  * Construct a CC-subprocess Substrate that delegates each `start(spec)`
  * call to a freshly-selected credential from the resolved pool. Returns
@@ -678,7 +863,7 @@ export interface OpenAiFamilyProviderConfig {
  */
 export function buildLlmCallSubstrate(
   input: BuildLlmCallSubstrateInput,
-): Substrate | null {
+): LlmCallSubstrate | null {
   if (input.pool === undefined && input.resolvePool === undefined) {
     throw new Error(
       'buildLlmCallSubstrate: exactly one of `pool` (eager) or `resolvePool` (lazy) must be supplied',
@@ -702,6 +887,46 @@ export function buildLlmCallSubstrate(
   // Absent ⇒ `'interactive'`, which is what every pre-existing call site meant.
   const failureLane: FailureOrigin = input.credential_failure_lane ?? 'interactive'
   return {
+    async adoptExisting(projectIds): Promise<void> {
+      if (input.ephemeral === true) return
+      for (const projectId of new Set(projectIds)) {
+        // Mirror dispatch precedence: configured models never use a Claude REPL.
+        if (input.configuredChat?.env !== undefined &&
+            projectModelTier(input.configuredChat.env, projectId) !== undefined) continue
+        const selection = input.providerResolver?.(projectId)
+        const selected = typeof selection === 'object' ? selection.provider : selection
+        const provider = normalizeProvider(selected?.trim() ? selected : input.provider)
+        if (provider !== 'anthropic') continue
+        const pool = input.pool ?? await input.resolvePool?.()
+        if (pool === undefined || pool === null) continue
+        for (const credential of pool.credentials) {
+          // Discovery reads identities only. An absent/revoked key never reaches
+          // credential resolution, adapter registration or watchdog construction.
+          const identity = {
+            substrate_instance_id: input.substrate_instance_id,
+            ...(input.cwd === undefined ? {} : { cwd: input.cwd }),
+            ...(input.user_id === undefined ? {} : { user_id: input.user_id }),
+            project_id: projectId, credential_identity: credential.id,
+          }
+          try {
+            if (existingClaudeRepl(identity) === undefined) continue
+            // Adoption authorizes an existing identity, never selects a new turn
+            // credential or changes the rotation/cooldown accounting.
+            const resolved = await resolveCredentialAuthEnv({
+              ...(input.oauthRefresh === undefined ? {} : { oauthRefresh: input.oauthRefresh }),
+              ...(input.owner_handle === undefined ? {} : { owner_handle: input.owner_handle }),
+            }, pool, credential)
+            const opts = await claudeOptionsFor(input, resolved, () => projectId)
+            await reconcileExistingClaudeRepl(opts)
+          } catch (error) {
+            substrateLog.warn('boot_repl_adoption_unavailable', {
+              substrate_instance_id: input.substrate_instance_id, project_id: projectId,
+              reason: error instanceof Error ? error.message : String(error),
+            })
+          }
+        }
+      }
+    },
     start(spec: AgentSpec): SessionHandle {
       // SWAPPABLE PROVIDER — resolve the backend for THIS turn. A NON-EMPTY per-turn
       // resolver value wins (active-project provider); an EMPTY/whitespace resolver
@@ -812,180 +1037,20 @@ export function buildLlmCallSubstrate(
           }
           throw err
         }
-        const { env, pool } = resolved
+        const { pool } = resolved
         const cred = { id: resolved.cred_id }
-        // SECURITY-PROFILE resolution (tool-security redesign Step 0). The
-        // security knobs (permission policy / `claude_config_dir` / `extra_env`)
-        // now live on a single-source `profile`; a profile field WINS over the
-        // matching legacy per-call input, an absent profile field falls back to
-        // it. BEHAVIOUR-PRESERVING today: no profile sets the reserved fields and
-        // no live site sets these per-call inputs, so each `??` resolves to the
-        // same value except for the deliberately narrowed Trident profiles. The reserved
-        // `profile.sandbox` remains shape-only. Interactive permission mode is
-        // applied here for the narrowed Trident profiles.
-        const effectiveSkipPermissions = input.profile?.skip_permissions ?? input.skip_permissions
-        const effectiveRestricted = input.profile?.restricted
-        const effectiveExtraDirs = input.profile?.extra_dirs
-        const effectivePermissionMode = input.profile?.permission_mode
-        const effectiveClaudeConfigDir = input.profile?.claude_config_dir ?? input.claude_config_dir
-        // THE PROFILE DECIDES, THE INSTANCE SUPPLIES. A profile that opts into the
-        // GitHub credential gets `GH_TOKEN` + the git credential helper; one that
-        // does not is byte-for-byte unchanged. The decision lives on the profile so
-        // a new substrate inherits it rather than re-deciding at a tenth call site
-        // nobody rereads — the failure that produced ISSUES #576 and a private-repo
-        // build dying at `fatal: could not read Username`.
-        //
-        // RESOLVED HERE, INSIDE THE PER-SPAWN CLOSURE — never hoisted. A credential
-        // read once outside this is the boot-time snapshot that misses a GitHub
-        // connected after boot and goes stale on rotation.
-        // A CREDENTIAL READ THAT FAILS MUST NOT KILL THE SPAWN. Surfaced by CI:
-        // the resolver threw and took the whole substrate down with it, which in
-        // production would mean a locked store or an unreadable secret turning a
-        // chat turn into a dead session. Degrading to "no credential" is strictly
-        // better — `gh` then fails with git's own message, which is the behaviour
-        // of an instance that never connected GitHub, and the log says why.
-        let githubEnv: Record<string, string | undefined> | undefined
-        if (input.profile?.github_credential === true && githubSpawnEnvRef.resolve !== undefined) {
-          try {
-            githubEnv = await githubSpawnEnvRef.resolve()
-          } catch (err) {
-            substrateLog.warn('github_credential_unavailable', {
-              substrate_instance_id: input.substrate_instance_id,
-              reason: err instanceof Error ? err.message : String(err),
-            })
-            githubEnv = undefined
-          }
-        }
-        const extraEnvResolver = input.profile?.extra_env ?? input.extra_env
-        const resolvedExtraEnv = extraEnvResolver === undefined ? undefined : await extraEnvResolver()
-        // `extra_env` wins over the credential on collision: it is the explicit
-        // per-call knob, and a caller that deliberately unsets a var must not be
-        // overridden by an instance-wide default.
-        const effectiveExtraEnv =
-          githubEnv === undefined && resolvedExtraEnv === undefined
-            ? undefined
-            : { ...(githubEnv ?? {}), ...(resolvedExtraEnv ?? {}) }
-        // The one profile field that is APPLIED rather than reserved. A profile
-        // hosting detached work (`PROFILE_WARM_FIRE`) must not be judged by PTY
-        // chatter — see that profile's docblock for the two builds this killed.
-        // Absent ⇒ the pool's own DEFAULT_TURN_INACTIVITY_MS, so every other
-        // profile is byte-for-byte unaffected.
-        const effectiveTurnInactivityMs = input.profile?.turn_inactivity_ms
-        // The frontier-model floor — the second APPLIED profile field. Only
-        // `PROFILE_WARM_CHAT` sets it; every other profile is byte-for-byte
-        // unaffected, which is what keeps the deliberate FAST_MODEL callers
-        // (scribe / reflection / phase-spec) on the tier they chose. See the
-        // field's docblock in `substrate-profiles.ts` for the live defect.
-        const effectiveFrontierModelFloor = input.profile?.frontier_model_floor
-        // Layer the optional `extra_env` overlay AFTER the auth-scrub env so
-        // per-substrate spawn knobs (e.g. a `MAX_THINKING_TOKENS=0` classifier
-        // knob) win over inherited vars without disturbing the auth scrubbing. The
-        // `undefined`-deletes contract is preserved downstream by the REPL spawn
-        // env merge.
-        const spawnEnv: Record<string, string | undefined> =
-          effectiveExtraEnv !== undefined ? { ...env, ...effectiveExtraEnv } : env
-        const opts: ClaudeCodeSubstrateOptions = {
-          substrate_instance_id: input.substrate_instance_id,
-          env: spawnEnv,
-        }
-        if (input.repl_pane_label !== undefined) opts.repl_pane_label = input.repl_pane_label
-        if (input.cwd !== undefined) opts.cwd = input.cwd
-        // Ritual executor (plan task 4) — a non-default system prompt file so the
-        // scheduled REPL runs as an unattended executor rather than the chat
-        // persona. Absent ⇒ the substrate's `repl-agent-base.md` default.
-        if (input.append_system_prompt_file !== undefined) {
-          opts.appendSystemPromptFile = input.append_system_prompt_file
-        }
-        if (effectiveClaudeConfigDir !== undefined) opts.claude_config_dir = effectiveClaudeConfigDir
-        if (input.claude_bin !== undefined) opts.claude_bin = input.claude_bin
-        if (effectiveSkipPermissions !== undefined) opts.skip_permissions = effectiveSkipPermissions
-        if (effectiveRestricted !== undefined) opts.restricted = effectiveRestricted
-        if (effectiveExtraDirs !== undefined) opts.extra_dirs = effectiveExtraDirs
-        if (effectivePermissionMode !== undefined) opts.permission_mode = effectivePermissionMode
-        if (effectiveTurnInactivityMs !== undefined) {
-          opts.turn_inactivity_ms = effectiveTurnInactivityMs
-        }
-        // Set ONLY when the profile opts IN. `false` and absent mean the same
-        // thing downstream (`frontier_model_floor?: boolean`, absent ⇒ off), so
-        // emitting `false` would add a key to every option bag for no behaviour —
-        // and the byte-identity net in `__tests__/substrate-profiles.test.ts`
-        // exists precisely to catch a field quietly appearing on all eight sites.
-        if (effectiveFrontierModelFloor === true) {
-          opts.frontier_model_floor = true
-        }
-        // S3 §2 — fold the SELECTED credential id (#104) + the conversational
-        // identity into the warm-pool key. `cred.id` is the `PooledCredential.id`
-        // (never the secret); a rotation changes it → re-keys to a fresh REPL under
-        // the new env so cooldown attribution matches the child. `user_id` is
-        // per-instance (input).
-        opts.credential_identity = cred.id
-        if (input.user_id !== undefined) opts.user_id = input.user_id
-        // S3 §2 / Argus r3 BLOCKER — the LIVE per-turn project id. `spec.
-        // metering_context?.project_id` is a DEAD dimension on the CC adapter
-        // (Private-substrate-only; never populated by conversational call sites),
-        // so keying off it collapsed an owner's every project into one warm REPL =
-        // cross-project context bleed. Resolve the live active-chat project via
-        // the injected resolver (re-evaluated per dispatch) and fall back to the
-        // metering field only for any caller that genuinely populates it.
-        const projectId =
-          input.projectIdResolver?.() ?? spec.metering_context?.project_id
-        if (projectId !== undefined && projectId.length > 0) opts.project_id = projectId
-        // CROSS-PROVIDER CONTINUITY (audit round 14) — this Claude turn is handling
-        // the scope, so INVALIDATE any stored OpenAI continuation for it: a later
-        // OpenAI turn on this scope must replay the FULL history (`spec.messages`)
-        // instead of resuming a `previous_response_id` that predates (and can't see)
-        // this intervening Claude turn — otherwise this turn silently vanishes from
-        // the OpenAI-side conversation. Pure ledger bookkeeping — the CC option bag,
-        // spec, and factory are UNTOUCHED (Claude path stays byte-identical). The
-        // scope key matches the openai path's exactly (same user + project transform).
-        openaiSessions.delete(
-          openAiSessionScopeKey(
-            input.user_id ?? '_platform',
-            projectId !== undefined && projectId.length > 0 ? projectId : undefined,
-          ),
+        const opts = await claudeOptionsFor(
+          input, resolved,
+          () => input.projectIdResolver?.() ?? spec.metering_context?.project_id,
+          projectId => {
+            // A Claude turn invalidates this scope's OpenAI continuation before
+            // remaining option getters, so switching back replays full history.
+            openaiSessions.delete(openAiSessionScopeKey(
+              input.user_id ?? '_platform',
+              projectId !== undefined && projectId.length > 0 ? projectId : undefined,
+            ))
+          },
         )
-        if (input.project_slug !== undefined) opts.instance_slug = input.project_slug
-        if (input.delivery_topic_id !== undefined) opts.delivery_topic_id = input.delivery_topic_id
-        if (input.onRecoveredReply !== undefined) opts.onRecoveredReply = input.onRecoveredReply
-        // O6 — forward the notice-family sinks so the substrate delivers a
-        // rising-edge dead-turn / size-alert / rate-limit-banner notice to the
-        // gateway's chat surface instead of only stderr. Unset on every non-
-        // conversational substrate (they keep the stderr-only default).
-        if (input.onDeadTurnNotice !== undefined) opts.onDeadTurnNotice = input.onDeadTurnNotice
-        if (input.onChildCrash !== undefined) opts.onChildCrash = input.onChildCrash
-        if (input.hostsLiveWork !== undefined) opts.hostsLiveWork = input.hostsLiveWork
-        if (input.onSizeAlert !== undefined) opts.onSizeAlert = input.onSizeAlert
-        if (input.onRateLimitBanner !== undefined) opts.onRateLimitBanner = input.onRateLimitBanner
-        if (input.onModelFloorApplied !== undefined) {
-          opts.onModelFloorApplied = input.onModelFloorApplied
-        }
-        // Argus r4 BLOCKER — stateless one-shot disposable-REPL mode: a session-
-        // less dispatch on this substrate gets a fresh REPL terminated after the
-        // turn, so distinct one-shot purposes never share a `--resume` transcript.
-        if (input.ephemeral !== undefined) opts.ephemeral = input.ephemeral
-        // Import warm-session — per-turn `/clear` reset on a reused warm REPL so
-        // each chunk runs on a fresh context (ONE warm process, isolated turns).
-        if (input.reset_context_per_turn !== undefined) {
-          opts.reset_context_per_turn = input.reset_context_per_turn
-        }
-        // P0-1 — native-MCP tool bridge opt-in (conversational substrate only).
-        if (input.enableToolBridge !== undefined) {
-          opts.enableToolBridge = input.enableToolBridge
-        }
-        // The owner's installed MCP servers, re-resolved by the substrate on every
-        // spawn AND on every warm-reuse check. Forwarding the THUNK (not a resolved
-        // list) is what lets a server installed mid-session reach the next turn.
-        if (input.resolveExtraMcpServers !== undefined) {
-          opts.resolveExtraMcpServers = input.resolveExtraMcpServers
-        }
-        // Task 6 (T5 write-containment) — forward the ritual write-containment
-        // knobs as DIRECT call-args (never through SubstrateProfile, whose
-        // equivalence net froze PROFILE_RITUAL, deleted by #504). A writing-agent factory
-        // sets these so the deny rule fails closed instead of being auto-approved.
-        if (input.disableToolUseAutoApprove !== undefined) {
-          opts.disableToolUseAutoApprove = input.disableToolUseAutoApprove
-        }
-        if (input.permissions !== undefined) opts.permissions = input.permissions
         // `createClaudeCodeSubstrateAuto` UNCONDITIONALLY builds the persistent
         // interactive-REPL substrate (the sole spawn shape post-S3-rip-replace).
         // The `substrateFactory` seam lets tests inject a fake substrate.

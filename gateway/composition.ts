@@ -364,6 +364,7 @@ export async function composeProductionGraph(
   // above, so a failure here would leak the started graph — now covered by the
   // single whole-composition try/catch (§F2) that wraps compose() through here.
   composedHttp = await buildComposedHttpFromComposition(input)
+  await input.on_graph_ready?.()
   } catch (err) {
     // §F2 — ANY failure after `graph.register(...)` (a module-init loop-register
     // collision during compose(), the cron register/start, Cores/connect wiring,

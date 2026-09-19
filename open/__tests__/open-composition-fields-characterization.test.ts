@@ -204,6 +204,7 @@ const EXPECTED_COMPOSITION_KEYS = [
   'on_cores_ready',
   // F4 — the gateway-tick hook that pulses the supervision-watchdog heartbeat.
   'on_gateway_tick',
+  'on_graph_ready',
   'onboarding_import_running_cron',
   // ISSUES #443 — the overnight-work morning brief's delivery surface. The
   // overnight ENGINE always registered, so the work ran; without this key the
