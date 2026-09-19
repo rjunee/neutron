@@ -52,12 +52,16 @@ export function openProjectControlJournal(options: Binding) {
   try {
     chmodSync(path, 0o600)
     const file = lstatSync(path)
-    db.exec('PRAGMA busy_timeout=5000; PRAGMA synchronous=FULL; CREATE TABLE IF NOT EXISTS broker (id INTEGER PRIMARY KEY CHECK(id=1), binding TEXT NOT NULL, generation INTEGER NOT NULL, epoch INTEGER NOT NULL, pid INTEGER, boot TEXT NOT NULL, start TEXT NOT NULL, unresolved TEXT, socketIdentity TEXT)')
+    db.exec('PRAGMA busy_timeout=5000; PRAGMA synchronous=FULL')
     const own = identity(process.pid)
     const read = () => db.query<Row, []>('SELECT * FROM broker WHERE id=1').get()
     const row = db.transaction(() => {
+      // Schema and first ownership become durable together. A killed bootstrap
+      // may leave a database file, but must not leave an ownerless broker table.
+      const table = db.query("SELECT name FROM sqlite_master WHERE type='table' AND name='broker'").get()
+      db.exec('CREATE TABLE IF NOT EXISTS broker (id INTEGER PRIMARY KEY CHECK(id=1), binding TEXT NOT NULL, generation INTEGER NOT NULL, epoch INTEGER NOT NULL, pid INTEGER, boot TEXT NOT NULL, start TEXT NOT NULL, unresolved TEXT, socketIdentity TEXT)')
       const previous = read()
-      if (existing && !previous) throw new Error('Broker journal identity missing')
+      if ((table || socketExists) && !previous) throw new Error('Broker journal identity missing')
       if (previous) {
         if (previous.binding !== binding) throw new Error('Broker journal binding mismatch')
         requireDead(previous)
