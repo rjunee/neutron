@@ -1019,13 +1019,26 @@ for (const [label, auth] of [
   }, 300_000)
 }
 
-test('missing Codex review runner fails admission before plan or build', async () => {
+test('missing Codex review runner constructs but blocks the consuming build before merge', async () => {
   const f = await fixture({ codexReview: 'valid' })
   const options = await f.prepare()
   const runnerFor = options.policy.review!.runnerFor
   options.policy.review!.runnerFor = (model, seat) => seat.id === 'review_codex' ? undefined : runnerFor(model, seat)
-  await expect(createProjectBuildHost(options)).rejects.toThrow('Review seat review_codex: configured runner is missing or mismatched')
-  expect(f.world.dispatches).toHaveLength(0)
+  const host = await createProjectBuildHost(options)
+  const outcome = await host.run({ mode: 'pr', start: 'fresh' }, new AbortController().signal)
+
+  expect(outcome, why(f, outcome)).toMatchObject({
+    kind: 'blocked', phase: 'review', recipient: 'orchestrator',
+    on: 'Review seat review_codex (openai-codex) is unavailable',
+  })
+  expect(f.world.dispatches.map(dispatch => dispatch.role))
+    .toEqual(['plan', 'build', 'review', 'review'])
+  expect(f.world.dispatches.some(dispatch => dispatch.role === 'synthesis')).toBe(false)
+  expect(f.world.dispatches.some(dispatch => dispatch.role === 'fix')).toBe(false)
+  expect(f.github.prs).toHaveLength(1)
+  expect(f.github.prs[0]!.state).toBe('OPEN')
+  const originMain = await spawnCapture(['git', '-C', f.origin, 'rev-parse', 'refs/heads/main'], f.origin)
+  expect(originMain.stdout.trim()).toBe(f.baseSha)
   await expect(readFile(f.codexCalls, 'utf8')).rejects.toThrow()
 }, 300_000)
 
