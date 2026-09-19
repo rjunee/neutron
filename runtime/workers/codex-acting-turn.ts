@@ -13,7 +13,11 @@ export interface CodexActingSession {
   topic_id: string
   thread_id: string
   cwd: string
-  session?: Pick<CodexProjectSession, 'projectId' | 'submitLine' | 'isLive' | 'screenPrompt' | 'answerApproval'> | undefined
+  session?: (Pick<CodexProjectSession, 'projectId' | 'isLive' | 'screenPrompt' | 'answerApproval'> & {
+    /** Resolve only after native parent completion. The host owns exact-turn
+     * cancellation and must retain uncertain delivery until reconciliation. */
+    submitLine(prompt: string, turn: { signal: AbortSignal; timeout_ms: number }): Promise<void>
+  }) | undefined
   grants: { tools: ToolGrant; writable: boolean; network: boolean; roots: readonly string[] }
 }
 
@@ -98,7 +102,9 @@ export function createCodexActingTurn(binding: CodexActingSession): ProjectActin
       // JSON escapes newlines. The native owner adapter resolves submission only
       // after parent completion; the legacy pane adapter only acknowledges input.
       // A child trailer must never bypass whichever submission is still pending.
-      await session.submitLine('Execute the prompt in this JSON dispatch specification: ' + JSON.stringify({ ...spec, effort: request.effort }))
+      await session.submitLine('Execute the prompt in this JSON dispatch specification: ' + JSON.stringify({ ...spec, effort: request.effort }), {
+        signal: stopped, timeout_ms: Math.max(1, deadline - Date.now()),
+      })
       while (!expired()) {
         const approval = await answerPrompt()
         if (approval) return approval

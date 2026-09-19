@@ -1,4 +1,4 @@
-import { afterEach, expect, test } from 'bun:test'
+import { afterEach, expect, spyOn, test } from 'bun:test'
 import { mkdtemp, rm, writeFile } from 'node:fs/promises'
 import { tmpdir } from 'node:os'
 import { join } from 'node:path'
@@ -230,6 +230,77 @@ function deferred() {
   const promise = new Promise<void>((yes, no) => { resolve = yes; reject = no })
   return { promise, resolve, reject }
 }
+
+for (const ending of ['cancel', 'timeout'] as const) {
+  test(`${ending} reaches the native submission before its parent settles and fences another writer`, async () => {
+    const f = await fixture()
+    const parent = deferred()
+    const submitted = deferred()
+    const controller = new AbortController()
+    f.input.signal = controller.signal
+    f.input.timeout_ms = ending === 'timeout' ? 45 : 2_000
+    f.input.request = { ...f.input.request, budget: { wall_ms: f.input.timeout_ms } }
+    let turnSignal: AbortSignal | undefined
+    let cancellations = 0
+    f.binding.session!.submitLine = async (text, turn) => {
+      f.commands.push(text)
+      turnSignal = turn.signal
+      turn.signal.addEventListener('abort', () => { cancellations++ }, { once: true })
+      await writeFile(f.input.request.result.path, '{}')
+      submitted.resolve()
+      await parent.promise
+    }
+    const first = f.run()
+    try {
+      await submitted.promise
+      expect(turnSignal?.aborted).toBe(false)
+      if (ending === 'cancel') controller.abort()
+      expect(await first).toMatchObject({ kind: 'unknown' })
+      expect(turnSignal?.aborted).toBe(true)
+      expect(cancellations).toBe(1)
+      f.input.signal = new AbortController().signal
+      f.input.request = { ...f.input.request, step_id: 'next-step' }
+      expect(await f.run()).toMatchObject({ kind: 'unknown', detail: expect.stringContaining('reconciliation') })
+      expect(f.commands).toHaveLength(1)
+    } finally {
+      parent.resolve()
+      await first
+    }
+  })
+}
+
+test('queued native submission receives its remaining deadline and a live signal', async () => {
+  const f = await fixture()
+  const parent = deferred()
+  const submitted = deferred()
+  f.input.timeout_ms = 2_000
+  f.input.request = { ...f.input.request, budget: { wall_ms: 1_000 } }
+  let now = 10_000
+  const clock = spyOn(Date, 'now').mockImplementation(() => now)
+  const controls: { timeout_ms: number; aborted: boolean }[] = []
+  f.binding.session!.submitLine = async (text, turn) => {
+    f.commands.push(text)
+    controls.push({ timeout_ms: turn.timeout_ms, aborted: turn.signal.aborted })
+    if (controls.length === 1) { submitted.resolve(); await parent.promise }
+    await writeFile(f.input.request.result.path, '{}')
+  }
+  const first = f.run()
+  let second: ReturnType<ProjectActingTurn> | undefined
+  try {
+    await submitted.promise
+    second = createCodexActingTurn(f.binding)({ ...f.input, request: { ...f.input.request, step_id: 'next-step' } })
+    now += 400
+    parent.resolve()
+    expect(await first).toEqual({ kind: 'turn-ended' })
+    expect(await second).toEqual({ kind: 'turn-ended' })
+    expect(controls).toEqual([{ timeout_ms: 1_000, aborted: false }, { timeout_ms: 600, aborted: false }])
+    expect(f.commands).toHaveLength(2)
+  } finally {
+    clock.mockRestore()
+    parent.resolve()
+    await Promise.all([first, second])
+  }
+})
 
 test('child trailer cannot settle a pending native parent, then a distinct step can run', async () => {
   const f = await fixture()
