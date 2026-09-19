@@ -181,4 +181,42 @@ describe('web REPL model switch', () => {
     await act(async () => { root.unmount() })
     host.remove()
   })
+
+  it('does not let a pending refresh overwrite a later switch', async () => {
+    const { createRoot } = await import('react-dom/client')
+    const { act } = await import('react')
+    const { ReplModelControl } = await import('../ReplModelControl.tsx')
+    let reads = 0
+    let posts = 0
+    let resolveRefresh!: (response: Response) => void
+    const fetchImpl = async (_url: string, init?: RequestInit): Promise<Response> => {
+      if (init?.method === 'POST') {
+        posts++
+        return posts === 1 ? json({ error: 'busy', detail: 'Try again' }, 409) : json(state('deep'))
+      }
+      reads++
+      if (reads === 3) return new Promise<Response>((resolve) => { resolveRefresh = resolve })
+      return json(state('cheap'))
+    }
+    const host = document.createElement('div')
+    document.body.appendChild(host)
+    const root = createRoot(host)
+    await act(async () => { root.render(<ReplModelControl projectId="a" origin="https://test.example" token="secret" fetchImpl={fetchImpl} />); await tick() })
+    const select = host.querySelector('select') as HTMLSelectElement
+    await act(async () => { select.value = 'deep'; select.dispatchEvent(new Event('change', { bubbles: true })); await tick() })
+    expect(posts).toBe(1)
+    expect(host.querySelector('[role="alert"]')?.textContent).toBe('Try again')
+    await act(async () => { (host.querySelector('button') as HTMLButtonElement).click(); await tick() })
+    expect(reads).toBe(3)
+    expect(select.disabled).toBe(true)
+    await act(async () => { select.value = 'deep'; select.dispatchEvent(new Event('change', { bubbles: true })); await tick() })
+    expect(posts).toBe(1)
+    await act(async () => { resolveRefresh(json(state('cheap'))); await tick() })
+    expect(select.disabled).toBe(false)
+    await act(async () => { select.value = 'deep'; select.dispatchEvent(new Event('change', { bubbles: true })); await tick() })
+    expect(posts).toBe(2)
+    expect(select.value).toBe('deep')
+    await act(async () => { root.unmount() })
+    host.remove()
+  })
 })

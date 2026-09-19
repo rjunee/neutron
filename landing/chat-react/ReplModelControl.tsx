@@ -1,4 +1,4 @@
-import { useEffect, useMemo, useState } from 'react'
+import { useEffect, useMemo, useRef, useState } from 'react'
 import { WebReplModelClient, type ReplModelState } from './repl-model-client.ts'
 
 type FetchImpl = (input: string, init?: RequestInit) => Promise<Response>
@@ -17,51 +17,72 @@ export function ReplModelControl({ projectId, origin, token, fetchImpl }: {
   const [error, setError] = useState<string | null>(null)
   const [switching, setSwitching] = useState(false)
   const [refreshing, setRefreshing] = useState(false)
+  // Each request supersedes older reads. In particular, a GET that started
+  // before a confirmed POST must never paint over that POST's model.
+  const requestGeneration = useRef(0)
+  const refreshingRef = useRef(false)
 
   useEffect(() => {
-    let live = true
+    const generation = ++requestGeneration.current
     setState(null)
     setError(null)
+    setSwitching(false)
+    setRefreshing(false)
+    refreshingRef.current = false
     void client.current(projectId).then(
-      (next) => { if (live) setState(next) },
-      (err: unknown) => { if (live) setError(err instanceof Error ? err.message : 'Could not load model') },
+      (next) => { if (generation === requestGeneration.current) setState(next) },
+      (err: unknown) => { if (generation === requestGeneration.current) setError(err instanceof Error ? err.message : 'Could not load model') },
     )
-    return () => { live = false }
+    return () => { requestGeneration.current++ }
   }, [client, projectId])
 
   async function refresh(): Promise<void> {
-    if (refreshing || switching) return
+    if (refreshingRef.current || switching) return
+    const generation = ++requestGeneration.current
+    refreshingRef.current = true
     setRefreshing(true)
     try {
-      setState(await client.current(projectId))
-      setError(null)
+      const next = await client.current(projectId)
+      if (generation === requestGeneration.current) {
+        setState(next)
+        setError(null)
+      }
     } catch (err) {
-      setError(err instanceof Error ? err.message : 'Could not load model')
+      if (generation === requestGeneration.current) setError(err instanceof Error ? err.message : 'Could not load model')
     } finally {
-      setRefreshing(false)
+      if (generation === requestGeneration.current) {
+        refreshingRef.current = false
+        setRefreshing(false)
+      }
     }
   }
 
   async function change(model: string): Promise<void> {
-    if (state === null || state.status !== 'ready' || switching || model === state.currentModel) return
+    if (state === null || state.status !== 'ready' || switching || refreshing || refreshingRef.current || model === state.currentModel) return
     if (!state.availableModels.some((option) => option.id === model)) return
+    const generation = ++requestGeneration.current
     setSwitching(true)
     setError(null)
     try {
       const requestedSessionId = state.sessionId
       const next = await client.switch(projectId, model, requestedSessionId)
+      if (generation !== requestGeneration.current) return
       if (next.sessionId !== requestedSessionId) {
         throw new Error('Session changed before the model switch was confirmed')
       }
       setState(next)
       if (next.currentModel !== model) setError(`Switch not confirmed; current model is ${next.currentModel ?? 'unknown'}.`)
     } catch (err) {
+      if (generation !== requestGeneration.current) return
       setError(err instanceof Error ? err.message : 'Could not switch model')
       // A failed switch may be a stale session or busy state. Refresh the
       // authoritative reading, but retain the actionable error for the owner.
-      try { setState(await client.current(projectId)) } catch { /* keep last known state */ }
+      try {
+        const next = await client.current(projectId)
+        if (generation === requestGeneration.current) setState(next)
+      } catch { /* keep last known state */ }
     } finally {
-      setSwitching(false)
+      if (generation === requestGeneration.current) setSwitching(false)
     }
   }
 
@@ -74,7 +95,7 @@ export function ReplModelControl({ projectId, origin, token, fetchImpl }: {
         id="car-repl-model"
         aria-label="Conversation model"
         value={current}
-        disabled={state === null || state.status !== 'ready' || switching}
+        disabled={state === null || state.status !== 'ready' || switching || refreshing}
         onChange={(event) => { void change(event.target.value) }}
         style={{ maxWidth: '100%', background: 'var(--surface)', color: 'var(--fg)', border: '1px solid var(--border)', borderRadius: 6 }}
       >
