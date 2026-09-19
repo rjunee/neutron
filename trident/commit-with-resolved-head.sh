@@ -116,55 +116,66 @@ fi
 # `Co-Authored-By:` trailer, the subject, the author and the parent are left untouched.
 # Only rewrite the commit THIS invocation created: `--dry-run` or a no-op commit leaves
 # HEAD where the probe found it, and an older commit must never be amended by mistake.
+#
+# Every withdrawal below is a compare-and-swap, never a blind `reset --soft`: the branch is
+# moved back to the probed HEAD ONLY if it still names the commit this wrapper is
+# withdrawing (`git update-ref HEAD <probed> <expected>`; git refuses with `cannot lock ref`
+# when it names anything else, and rewrites nothing). A blind reset withdrew whatever HEAD
+# named, so a commit some other writer landed on top would have gone with it, and when HEAD
+# was a dangling symref the reset "succeeded" by creating the missing branch at the probed
+# oid while the real branch kept the trailer commit. The index and worktree are untouched
+# either way (update-ref moves the ref only), so Forge can retry from the staged change.
+# The reflog entry names the withdrawn commit.
+withdraw_commit() {
+  git update-ref -m "commit-with-resolved-head: withdraw $1 (Claude-Session check)" HEAD "$head_oid" "$1"
+}
+UNRESTORED='an in-progress merge, cherry-pick or revert that the withdrawn commit concluded is not restored (MERGE_HEAD and its siblings are gone) -- re-run it before retrying'
+
+scratch_err=$(mktemp)
+raw_object=$(mktemp)
+stripped_message=$(mktemp)
+raw_after=$(mktemp)
+trap 'rm -f "$scratch_err" "$raw_object" "$stripped_message" "$raw_after"' EXIT
+
 # The re-probe is checked on BOTH its exit status and its output. An unchecked answer let a
 # failing `rev-parse` read as "HEAD did not move" (the `--dry-run`/no-op case above), which
 # skipped the strip and exited 0 with the trailer on the branch -- fail OPEN. It now fails
-# CLOSED exactly like the cat-file read-back below: withdraw to the probed HEAD (a no-op on
-# the branch when this invocation created no commit; the index is kept either way), check
-# the withdrawal, and exit a code of this path's own -- 69 when the re-probe failed, 70 when
-# it succeeded and named no object -- so the two are told apart on stderr and in tests.
-reprobe_err=$(mktemp)
-trap 'rm -f "$reprobe_err"' EXIT
-new_head=$(git rev-parse --verify HEAD 2>"$reprobe_err")
+# CLOSED with a code of this path's own -- 69 when the re-probe failed, 70 when it succeeded
+# and named no object -- so the two are told apart on stderr and in tests. It does NOT
+# withdraw: with no readable HEAD there is no expected value to compare against, so any
+# rewrite of the ref would be blind (see withdraw_commit), and the wrapper refuses to move
+# a branch it cannot read. The commit this invocation created, if any, stays where git put
+# it and is named as possibly carrying the trailer; the caller inspects before retrying.
+new_head=$(git rev-parse --verify HEAD 2>"$scratch_err")
 reprobe_exit=$?
 if [ "$reprobe_exit" -ne 0 ] || [ -z "$new_head" ]; then
   if [ "$reprobe_exit" -ne 0 ]; then
-    detail=$(tr '\n' ' ' <"$reprobe_err" | sed 's/[[:space:]]*$//')
+    detail=$(tr '\n' ' ' <"$scratch_err" | sed 's/[[:space:]]*$//')
     reprobe_why="git rev-parse --verify HEAD exited $reprobe_exit${detail:+: $detail}"
     reprobe_code=69
   else
     reprobe_why="git rev-parse --verify HEAD named no object"
     reprobe_code=70
   fi
-  git reset -q --soft "$head_oid"
-  reset_exit=$?
-  if [ "$reset_exit" -ne 0 ]; then
-    echo "commit refused: HEAD could not be re-read after the commit for the Claude-Session check ($reprobe_why) AND the commit could not be withdrawn (git reset --soft $head_oid exited $reset_exit); the commit this invocation created, if any, is on the branch and may carry the trailer" >&2
-    exit "$reprobe_code"
-  fi
-  echo "commit refused: HEAD could not be re-read after the commit for the Claude-Session check ($reprobe_why); the commit this invocation created, if any, was withdrawn, HEAD is back at $head_oid and the index still holds the staged changes; an in-progress merge, cherry-pick or revert that the withdrawn commit concluded is not restored (MERGE_HEAD and its siblings are gone) -- re-run it before retrying" >&2
+  echo "commit refused: HEAD could not be re-read after the commit for the Claude-Session check ($reprobe_why); nothing was rewritten and the branch was NOT reset, because without a readable HEAD there is no value to compare against and a blind reset could discard a commit this invocation did not make; the commit this invocation created, if any, is on the branch and may carry the trailer (HEAD was $head_oid before the commit) -- inspect the branch before retrying" >&2
   exit "$reprobe_code"
 fi
-rm -f "$reprobe_err"
-trap - EXIT
-if [ -n "$new_head" ] && [ "$new_head" != "$head_oid" ]; then
+if [ "$new_head" != "$head_oid" ]; then
   # Raw object bytes in, raw message bytes out (see strip_session_trailer); the files, not
   # shell variables, carry them, so no trailing newline is lost on the way to `-F`.
-  raw_object=$(mktemp)
-  stripped_message=$(mktemp)
-  trap 'rm -f "$raw_object" "$stripped_message"' EXIT
   git cat-file commit "$new_head" >"$raw_object"
   cat_exit=$?
   if [ "$cat_exit" -ne 0 ]; then
-    # Fail CLOSED, and check the withdrawal (see the amend path below for why): a reset
-    # that fails must be reported as the commit REMAINING, never as "was withdrawn".
-    git reset -q --soft "$head_oid"
-    reset_exit=$?
-    if [ "$reset_exit" -ne 0 ]; then
-      echo "commit refused: the commit $new_head could not be read back for the Claude-Session check (git cat-file exited $cat_exit) AND the commit could not be withdrawn (git reset --soft $head_oid exited $reset_exit); $new_head is on the branch and may carry the trailer" >&2
+    # Fail CLOSED, and check the withdrawal (see the amend path below for why): a
+    # compare-and-swap that is refused must be reported as the commit REMAINING, never as
+    # "was withdrawn".
+    withdraw_commit "$new_head"
+    withdraw_exit=$?
+    if [ "$withdraw_exit" -ne 0 ]; then
+      echo "commit refused: the commit $new_head could not be read back for the Claude-Session check (git cat-file exited $cat_exit) AND the commit could not be withdrawn (git update-ref HEAD $head_oid $new_head exited $withdraw_exit -- the branch no longer names $new_head, or the ref could not be locked; nothing was rewritten); $new_head is on the branch and may carry the trailer" >&2
       exit "$cat_exit"
     fi
-    echo "commit refused: the commit $new_head could not be read back for the Claude-Session check (git cat-file exited $cat_exit); the commit was withdrawn, HEAD is back at $head_oid and the index still holds the staged changes; an in-progress merge, cherry-pick or revert that the withdrawn commit concluded is not restored (MERGE_HEAD and its siblings are gone) -- re-run it before retrying" >&2
+    echo "commit refused: the commit $new_head could not be read back for the Claude-Session check (git cat-file exited $cat_exit); the commit was withdrawn, HEAD is back at $head_oid and the index still holds the staged changes; $UNRESTORED" >&2
     exit "$cat_exit"
   fi
   if strip_session_trailer <"$raw_object" >"$stripped_message"; then
@@ -176,22 +187,23 @@ if [ -n "$new_head" ] && [ "$new_head" != "$head_oid" ]; then
     # `commit.cleanup` asked for, and the amend below stores the filtered bytes verbatim.
     # An option that takes its VALUE as the next argv element (`-m`, `-F`, `--author`, ...)
     # has that value skipped, so a paragraph that happens to begin with `-S` is never
-    # mistaken for a signing flag and handed to the amend as a key id. Short flags cluster:
-    # git reads `-aS` as `-a -S` and `-sSkey` as `-s -Skey`, so a signing letter inside a
-    # cluster of boolean short flags is forwarded as its own `-S[<keyid>]`, or a signed
-    # first commit would be re-stored unsigned.
+    # mistaken for a signing flag and handed to the amend as a key id. No option's value is
+    # ever forwarded: the amend keeps the first commit's author, date and message source,
+    # so the scan only ever skips. Short flags cluster: git reads `-aS` as `-a -S` and
+    # `-sSkey` as `-s -Skey`, so a signing letter inside a cluster of boolean short flags is
+    # forwarded as its own `-S[<keyid>]`, or a signed first commit would be re-stored
+    # unsigned.
     amend_flags=()
-    value_of=''
+    skip_value=0
     for arg in "$@"; do
-      if [ -n "$value_of" ]; then
-        [ "$value_of" = forward ] && amend_flags+=("$arg")
-        value_of=''
+      if [ "$skip_value" -eq 1 ]; then
+        skip_value=0
         continue
       fi
       case "$arg" in
         --) break ;;
         -S|-S?*|--gpg-sign|--gpg-sign=*|--no-gpg-sign|--allow-empty|--allow-empty-message) amend_flags+=("$arg") ;;
-        -m|-F|-C|-c|-t|--message|--file|--author|--date|--template|--fixup|--squash|--reuse-message|--reedit-message|--trailer|--pathspec-from-file|--cleanup) value_of=skip ;;
+        -m|-F|-C|-c|-t|--message|--file|--author|--date|--template|--fixup|--squash|--reuse-message|--reedit-message|--trailer|--pathspec-from-file|--cleanup) skip_value=1 ;;
         # A cluster of boolean short flags with `S` inside it (-aS, -sS, -asS, -aSkeyid). Git
         # reads every letter before the first `S` as its own flag and everything after it as
         # the optional key id, so the signing half is forwarded alone as `-S<rest>`; the
@@ -209,7 +221,7 @@ if [ -n "$new_head" ] && [ "$new_head" != "$head_oid" ]; then
         -[!-]*[mFCct])
           case "${arg%?}" in
             -*[!apqvnseioz]*) ;;
-            *) value_of=skip ;;
+            *) skip_value=1 ;;
           esac ;;
       esac
     done
@@ -233,26 +245,74 @@ if [ -n "$new_head" ] && [ "$new_head" != "$head_oid" ]; then
       # Fail CLOSED. The commit that landed a moment ago is exactly the one this guard
       # promises can never reach the branch, and in pr mode the outer loop publishes the
       # branch head, so it must not be left at HEAD for a later commit to carry along.
-      # `reset --soft` moves the branch back to where the probe found it and keeps the
-      # index and worktree as the first commit left them, so Forge can retry; the
-      # trailer-bearing commit survives only in the reflog. What it cannot restore is the
-      # sequencer state the first commit CONSUMED: a merge, cherry-pick or revert in
-      # progress (MERGE_HEAD, MERGE_MSG, CHERRY_PICK_HEAD, REVERT_HEAD) is concluded by that
-      # commit and gone after the reset. The loss is named on stderr rather than snapshotted
-      # and restored: the wrapper's contract is the trailer, not the sequencer.
-      git reset -q --soft "$head_oid"
-      reset_exit=$?
-      if [ "$reset_exit" -ne 0 ]; then
-        echo "commit refused: the Claude-Session trailer could not be stripped (git commit --amend exited $amend_exit) AND the commit could not be withdrawn (git reset --soft $head_oid exited $reset_exit); $new_head is on the branch WITH the trailer" >&2
+      # The compare-and-swap moves the branch back to where the probe found it, if and only
+      # if it still names the commit being withdrawn, and keeps the index and worktree as
+      # the first commit left them, so Forge can retry; the trailer-bearing commit survives
+      # only in the reflog. What it cannot restore is the sequencer state the first commit
+      # CONSUMED: a merge, cherry-pick or revert in progress (MERGE_HEAD, MERGE_MSG,
+      # CHERRY_PICK_HEAD, REVERT_HEAD) is concluded by that commit and gone. The loss is
+      # named on stderr rather than snapshotted and restored: the wrapper's contract is the
+      # trailer, not the sequencer.
+      withdraw_commit "$new_head"
+      withdraw_exit=$?
+      if [ "$withdraw_exit" -ne 0 ]; then
+        echo "commit refused: the Claude-Session trailer could not be stripped (git commit --amend exited $amend_exit) AND the commit could not be withdrawn (git update-ref HEAD $head_oid $new_head exited $withdraw_exit -- the branch no longer names $new_head, or the ref could not be locked; nothing was rewritten); $new_head is on the branch WITH the trailer" >&2
         exit "$amend_exit"
       fi
-      echo "commit refused: the Claude-Session trailer could not be stripped (git commit --amend exited $amend_exit); the commit $new_head was withdrawn, HEAD is back at $head_oid and the index still holds the staged changes; an in-progress merge, cherry-pick or revert that the withdrawn commit concluded is not restored (MERGE_HEAD and its siblings are gone) -- re-run it before retrying" >&2
+      echo "commit refused: the Claude-Session trailer could not be stripped (git commit --amend exited $amend_exit); the commit $new_head was withdrawn, HEAD is back at $head_oid and the index still holds the staged changes; $UNRESTORED" >&2
       exit "$amend_exit"
+    fi
+    # A zero exit from the amend is not evidence the trailer is gone: `--no-verify` skips
+    # pre-commit and commit-msg only, so a `prepare-commit-msg` hook still runs on the amend
+    # and can hand git a message with the trailer put back (measured: the amend then stores
+    # an object identical to the pre-strip one and exits 0). The post-condition is therefore
+    # MEASURED, not inferred: read the commit that is on the branch now as the raw object and
+    # run the same filter over it; a filter that finds a line to remove means the trailer is
+    # still there, and the commit is withdrawn (compare-and-swap against the head just read)
+    # with exit 73. A HEAD that cannot be re-read here is refused without any rewrite, as
+    # after the first commit (71 failed, 72 named nothing); a read-back that fails withdraws
+    # against the head just read and exits git's code, as on the pre-amend path.
+    stripped_head=$(git rev-parse --verify HEAD 2>"$scratch_err")
+    after_exit=$?
+    if [ "$after_exit" -ne 0 ] || [ -z "$stripped_head" ]; then
+      if [ "$after_exit" -ne 0 ]; then
+        detail=$(tr '\n' ' ' <"$scratch_err" | sed 's/[[:space:]]*$//')
+        after_why="git rev-parse --verify HEAD exited $after_exit${detail:+: $detail}"
+        after_code=71
+      else
+        after_why="git rev-parse --verify HEAD named no object"
+        after_code=72
+      fi
+      echo "commit refused: HEAD could not be re-read after the Claude-Session strip amend ($after_why); nothing was rewritten and the branch was NOT reset, because without a readable HEAD there is no value to compare against; the amended commit is on the branch and its message was not verified, so it may carry the trailer (HEAD was $head_oid before the commit, $new_head before the amend) -- inspect the branch before retrying" >&2
+      exit "$after_code"
+    fi
+    git cat-file commit "$stripped_head" >"$raw_after"
+    after_cat_exit=$?
+    if [ "$after_cat_exit" -ne 0 ]; then
+      withdraw_commit "$stripped_head"
+      withdraw_exit=$?
+      if [ "$withdraw_exit" -ne 0 ]; then
+        echo "commit refused: the amended commit $stripped_head could not be read back to verify the Claude-Session strip (git cat-file exited $after_cat_exit) AND the commit could not be withdrawn (git update-ref HEAD $head_oid $stripped_head exited $withdraw_exit -- the branch no longer names $stripped_head, or the ref could not be locked; nothing was rewritten); $stripped_head is on the branch and may carry the trailer" >&2
+        exit "$after_cat_exit"
+      fi
+      echo "commit refused: the amended commit $stripped_head could not be read back to verify the Claude-Session strip (git cat-file exited $after_cat_exit); the commit was withdrawn, HEAD is back at $head_oid and the index still holds the staged changes; $UNRESTORED" >&2
+      exit "$after_cat_exit"
+    fi
+    if strip_session_trailer <"$raw_after" >/dev/null; then
+      withdraw_commit "$stripped_head"
+      withdraw_exit=$?
+      if [ "$withdraw_exit" -ne 0 ]; then
+        echo "commit refused: the Claude-Session trailer is STILL on the amended commit $stripped_head (a prepare-commit-msg hook, which --no-verify does not skip, can put it back) AND the commit could not be withdrawn (git update-ref HEAD $head_oid $stripped_head exited $withdraw_exit -- the branch no longer names $stripped_head, or the ref could not be locked; nothing was rewritten); $stripped_head is on the branch WITH the trailer" >&2
+        exit 73
+      fi
+      echo "commit refused: the Claude-Session trailer is STILL on the amended commit $stripped_head (a prepare-commit-msg hook, which --no-verify does not skip, can put it back); the commit was withdrawn, HEAD is back at $head_oid and the index still holds the staged changes; $UNRESTORED" >&2
+      exit 73
     fi
     # The pre-strip commit $new_head was amended away and survives only in the reflog; a
     # `[branch sha]` summary line naming it (printed unless the commit ran `-q`) is stale.
     # Anyone copying a sha from stdout must take this one; Forge is told to `git rev-parse HEAD`.
-    stripped_head=$(git rev-parse --verify HEAD)
+    # The two shas differ by construction: an amend that stored the same object stored the
+    # same message, trailer included, and was withdrawn just above.
     echo "commit-with-resolved-head: Claude-Session trailer stripped; HEAD is now $stripped_head (pre-strip commit $new_head was amended away; a [branch sha] summary line naming it is stale)"
   fi
 fi

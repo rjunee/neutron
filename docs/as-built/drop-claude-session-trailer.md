@@ -94,11 +94,21 @@ at the one deterministic place every Forge commit passes through: the commit wra
    findings below). The stored message is byte-exact: the first commit's message minus the
    removed line and, when that line was a paragraph of its own (the way the CLI reminder
    makes the agent write it), the one empty line that separated that paragraph; a missing
-   final newline stays missing and no cleanup pass runs a second time. If the read-back or
-   the amend fails for any reason the wrapper fails closed: it withdraws the commit it just
-   made (`git reset --soft` to the HEAD the probe found, index and worktree kept) and exits
-   with git's code, so a trailer-bearing commit is never left on the branch. The refusal
-   exits 64-67 are byte-for-byte unchanged. `trident/commit-with-resolved-head-realgit.test.ts`
+   final newline stays missing and no cleanup pass runs a second time. The post-condition
+   is then MEASURED: the commit now on the branch is read back as the raw object and run
+   through the same filter, and a trailer still there (a `prepare-commit-msg` hook, which
+   `--no-verify` does not skip, can put it back on the amend) withdraws the commit with
+   exit 73. If either read-back or the amend fails the wrapper fails closed too: it withdraws
+   the commit it just made and exits with git's code. Every withdrawal is a compare-and-swap
+   (`git update-ref HEAD <probed HEAD> <the commit being withdrawn>`, index and worktree
+   kept), never a blind reset, so a commit another writer landed on top is refused rather
+   than reset away and the refusal is reported as the commit remaining. A HEAD that cannot
+   be re-read -- after the commit (exit 69 failed / 70 named nothing) or after the amend
+   (71 / 72) -- is refused WITHOUT any rewrite, because there is no value to compare
+   against; stderr then says the commit is on the branch and may carry the trailer. So a
+   trailer-bearing commit is never left on the branch by a path that can measure the
+   branch, and no path ever moves a branch it cannot measure. The refusal exits 64-67 are
+   byte-for-byte unchanged. `trident/commit-with-resolved-head-realgit.test.ts`
    runs the real script against real git: the trailer arrives the way the CLI makes the agent
    write it (its own `-m` paragraph), and the commit that lands is one commit with the
    fixture's parent, the same author, no `Claude-Session`, and `Co-Authored-By` byte-identical;
@@ -174,9 +184,10 @@ script in a scratch repo before anything was changed.
   HEAD advanced to exactly the commit the guard promises can never reach the branch. In pr
   mode the outer loop publishes the branch head, so a later successful commit on top would
   have carried it to the PR. Closed: on amend failure the wrapper runs
-  `git reset --soft "$head_oid"` (the HEAD the probe found before the commit), which
-  withdraws the commit while keeping the index and worktree exactly as the first commit
-  left them, so Forge can retry; the withdrawn commit survives only in the reflog. Stderr
+  `git reset --soft "$head_oid"` (the HEAD the probe found before the commit; since round
+  14 a compare-and-swap `git update-ref HEAD "$head_oid" <sha>`, see the round-13 findings),
+  which withdraws the commit while keeping the index and worktree exactly as the first
+  commit left them, so Forge can retry; the withdrawn commit survives only in the reflog. Stderr
   now says `commit refused: ... the commit <sha> was withdrawn, HEAD is back at <sha> and
   the index still holds the staged changes`; if the reset itself fails, stderr says so and
   names the sha that is on the branch WITH the trailer. Two real-git tests: (a) a message
@@ -399,6 +410,89 @@ reproduced or measured against the real script before the change.
   finding above. Closed: retitled without a verdict claim; the Re-landed paragraph for round
   12 no longer says "APPROVE"; this section records the round-12 verdict.
 
+### Review findings on round 13 (`d8754625`, APPROVE from the synthesis and both Opus seats, REQUEST_CHANGES from the Codex seat), and how each was closed
+
+Round 14 closes the two carried findings and the nits. Each was reproduced against the
+round-13 script in a scratch repo (`GIT_CONFIG_GLOBAL=/dev/null`) before the change.
+
+- **The fail-closed `reset --soft` was blind (Codex, major; synthesis, minor).** On a
+  failed re-probe the wrapper ran `git reset -q --soft "$head_oid"` with no evidence that
+  HEAD still named the commit it had just made. Measured: a shim that lands one more commit
+  ("concurrent advance by another writer") before failing the second `rev-parse` left the
+  round-13 wrapper exiting 69 with "was withdrawn" and `git log` showing ONLY the base --
+  the reset withdrew two commits, the other writer's included. And with HEAD turned into a
+  dangling symref after the agent's commit, the reset SUCCEEDED by creating the missing
+  branch at the probed oid while the real branch kept the trailer commit, and the wrapper
+  said "was withdrawn". The same unchecked reset sat on the cat-file path (`:161` at
+  `d8754625`) and the amend path (`:243`), where the commit to withdraw IS known. Closed:
+  one `withdraw_commit <sha>` function runs
+  `git update-ref -m "commit-with-resolved-head: withdraw <sha> (Claude-Session check)" HEAD "$head_oid" <sha>`
+  -- git's compare-and-swap; with a concurrent commit on top it refuses with
+  `cannot lock ref 'HEAD': is at <concurrent> but expected <sha>` (exit 128) and rewrites
+  nothing, and on a dangling symref it refuses with `unable to resolve reference`. The
+  cat-file and amend paths use it and report a refusal as "could not be withdrawn ...
+  nothing was rewritten ... is on the branch and may carry the trailer" / "WITH the
+  trailer". The re-probe path, where there is no known value to compare against, no longer
+  mutates at all: exit 69/70, stderr "nothing was rewritten and the branch was NOT reset,
+  because without a readable HEAD there is no value to compare against and a blind reset
+  could discard a commit this invocation did not make; the commit this invocation created,
+  if any, is on the branch and may carry the trailer (HEAD was <probed> before the commit)
+  -- inspect the branch before retrying". The index is untouched by `update-ref` exactly as
+  it was by `reset --soft`, so "Forge can retry from the staged change" still holds, and the
+  sequencer-state sentence is unchanged (the first commit consumed MERGE_HEAD either way).
+  Real-git tests: the two re-probe tests now assert the commit REMAINS (HEAD^ is the parent,
+  the log carries the trailer, never "was withdrawn"); a concurrent-writer arm on the
+  second `rev-parse` leaves `[concurrent, feat: subject, base]` on the branch; the dangling
+  symref arm leaves `refs/heads/orphan` non-existent and the branch at the trailer commit;
+  a concurrent-writer arm before a refused `cat-file` and before a refused `--amend` each
+  exits with git's code, says "could not be withdrawn" and "nothing was rewritten", and
+  keeps all three commits. By-hand check: putting `git reset -q --soft "$head_oid"` back
+  into `withdraw_commit` reds exactly those two CAS tests plus the cat-file double fault
+  (38 pass / 3 fail); restored 41 / 0.
+- **The strip never verified its post-condition (Opus seat B, minor; synthesis, minor).**
+  `--no-verify` bypasses `pre-commit` and `commit-msg` only; a `prepare-commit-msg` hook
+  still runs on the amend. Measured on the round-13 script with a hook that appends the
+  trailer to `$1`: exit 0, the stored message ends in `Claude-Session: ...`, and stdout
+  said "HEAD is now <sha> (pre-strip commit <the same sha> was amended away" -- the hook
+  restored the original bytes and the amend stored the identical object. No such hook
+  exists in this repository or on any trident worktree, so it could not fire today; the
+  contract was hook-dependent rather than model-independent. Closed: after the amend the
+  wrapper re-reads HEAD (checked: 71 failed / 72 named nothing, no rewrite, "its message was
+  not verified, so it may carry the trailer"), reads the commit back as the raw object
+  (a failed read-back withdraws by compare-and-swap against the head just read and exits
+  git's code, as on the pre-amend path) and runs `strip_session_trailer` over it: a line
+  removed means the trailer is still there, and the commit is withdrawn by compare-and-swap
+  with exit 73 ("the Claude-Session trailer is STILL on the amended commit <sha> (a
+  prepare-commit-msg hook, which --no-verify does not skip, can put it back); the commit
+  was withdrawn"). The success line is printed only after that read-back, so its two shas
+  differ by construction (an amend that stored the same object stored the same message,
+  trailer included, and was withdrawn). Real-git test with the positive control first: a
+  plain `git commit --amend --only --no-verify -F <clean file>` under that hook stores the
+  trailer; then the wrapper exits 73, "STILL on the amended commit", HEAD back at the
+  parent, `change.txt` still staged, no `Claude-Session` in the branch log, and no "trailer
+  stripped" on stdout. Two more: the third `rev-parse` failing -> 71, no rewrite, the
+  (in fact stripped) commit left in place and "was not verified"; the second `cat-file`
+  failing -> exit 4, withdrawn, HEAD at the parent. This is the nominated mutation (below).
+  The "third `rev-parse` left unchecked on purpose" entry under Not done is withdrawn: it
+  argued from "a successful amend means the trailer is gone", which is the inference this
+  finding refutes.
+- **NIT -- the `-n "$new_head"` half of the strip guard was dead** after the round-13
+  check. Closed: the guard is `[ "$new_head" != "$head_oid" ]` alone.
+- **NIT -- the `forward` arm of the amend-flag scan was dead** (`value_of` was only ever
+  `skip` or empty). Closed: the sentinel is a boolean `skip_value`; the comment says no
+  option's value is ever forwarded and why.
+- **NIT -- the real-git tests inherited the operator's global git config.** Closed: the
+  file sets `GIT_CONFIG_GLOBAL=/dev/null` and `GIT_CONFIG_NOSYSTEM=1` on `process.env`
+  once, which every spawn in the file (the fixture's git, the wrapper, the shims) inherits.
+- **NIT -- the Re-landed section opened with "round eight"; item 2 of What was built
+  described two fail-closed paths and "git's code".** Both rewritten above and below.
+- **The G135 anchors were re-measured** at the round-14 tree: `withdraw_commit` `:129`,
+  its `update-ref` `:130`, the checked re-probe `:151`, the cat-file read `:166`, its
+  withdrawal `:172`, the strip call `:181`, the amend `:242`, the amend-path withdrawal
+  `:256`, the post-amend re-read check `:277`, its read-back `:289`, the post-condition
+  `:301`, its withdrawal `:302`; tests at `realgit.test.ts:776`, `:789`, `:813`, `:834`,
+  `:849`, `:868`, `:885`, `:921`, `:949`, `:968`.
+
 ### Mutation, proven by hand before nomination
 
 `grep -c '\[Cc\]\[Ll\]\[Aa\]\[Uu\]\[Dd\]\[Ee\]-\[Ss\]\[Ee\]\[Ss\]\[Ss\]\[Ii\]\[Oo\]\[Nn\]:\*) drop\[i\]=1; removed=1 ;;'
@@ -410,17 +504,25 @@ red (every strip test, including three added this round) while
 the wrapper, stays green (15 pass); restoring the arm returns the guard to 29 / 0. That was
 round 10's nomination.
 
-Round 13 nominates the checked re-probe arm (the round-12 section above).
-`grep -cF 'if [ "$reprobe_exit" -ne 0 ] || [ -z "$new_head" ]; then'
+Round 14 nominates the measured post-condition (the round-13 section above).
+`grep -cF 'if strip_session_trailer <"$raw_after" >/dev/null; then'
 trident/commit-with-resolved-head.sh` = 1. Replacing that line with `if false; then`
-restores the pre-fix behaviour exactly: the checked arm is dead, the next line's `-n` guard
-is intact, so a failed or empty re-probe skips the strip and the wrapper exits 0 with the
-trailer on the branch. Measured: guard `commit-with-resolved-head-realgit.test.ts` 32 pass /
-3 fail mutated (exactly the three faulting re-probe tests: they see exit 0 instead of 69/70,
-HEAD not withdrawn, the trailer in the branch log) and 35 / 0 restored; control
-`trident/inner-workflow.test.ts` 153 / 0 either way.
+restores the round-13 behaviour exactly: the read-back runs but its answer is never acted
+on, so a `prepare-commit-msg` hook that puts the trailer back on the amend leaves the
+wrapper exiting 0 with "trailer stripped" on stdout and the trailer on the branch.
+Measured: guard `commit-with-resolved-head-realgit.test.ts` 40 pass / 1 fail mutated
+(exactly the prepare-commit-msg test at `:921`: it sees exit 0 instead of 73 and the
+trailer in the branch log) and 41 / 0 restored; control `trident/inner-workflow.test.ts`
+153 / 0 either way.
 
 The earlier nominations still hold and are kept as by-hand checks:
+
+Round 13 nominated the checked re-probe arm (the round-12 section above):
+`if [ "$reprobe_exit" -ne 0 ] || [ -z "$new_head" ]; then` replaced by `if false; then`.
+At the round-14 tree that line occurs once at `:151` (the post-amend re-read at `:277`
+checks `$after_exit`/`$stripped_head`, a different line) and the mutation reds the two
+re-probe tests and the two concurrent-writer/dangling-symref tests on that path (they see
+exit 0 and "trailer stripped" instead of 69/70 and "was NOT reset").
 
 Round 12 nominated the clustered-`-S` forward (the round-11 section above:
 `*) amend_flags+=("-S${arg#*S}") ;;` replaced by `*) ;;`, guard
@@ -448,13 +550,13 @@ green; restoring the line returns the guard to green. (The round-8 pattern mutat
   only known after git has composed it (`-m`, `-F`, `-C`, the editor), so the wrapper lets
   the commit land and withdraws it instead, which is the same fail-closed path every other
   amend failure takes.
-- The third `rev-parse` (the `stripped_head=` line that feeds the stdout report after the
-  amend): left unchecked on purpose. It runs only after a successful amend, so by then the
-  trailer is gone; a failure there can only blank one report line, never leave the trailer
-  on the branch, and Forge is told to `git rev-parse HEAD` itself rather than copy the line.
-  The round-12 finding named status and emptiness on the re-probe; no hex check was added
-  to it either, for the same reason: the re-probe's answer is only ever compared with the
-  probed HEAD, never used as a sha.
+- A hex check on the re-probe and post-amend re-read answers: not added. Those answers are
+  only ever compared with the probed HEAD or handed back to git as the expected value of a
+  compare-and-swap, which git validates itself; they are never used as a sha by the wrapper.
+  (Round 13 also left the post-amend `rev-parse` unchecked, arguing that a successful amend
+  means the trailer is gone; round 14 withdrew that entry -- see the round-13 findings.)
+- Snapshotting and restoring the sequencer state a withdrawn commit consumed: still not
+  done; the loss is named on stderr (unchanged from round 10).
 - `docs/AS_BUILT.md` and every existing shard: frozen; this record is a new shard.
 
 ### Effect after merge
@@ -469,8 +571,8 @@ wrapper without such a paragraph and carries none. Merged is not shipped.
 
 ### Re-landed
 
-This is round eight of the same card, on base `274c5b3e` (origin/main at #1162). Every earlier
-round built correctly and died on a host defect. Round 1 (PR #1152 head `d7717e6c`) died at
+Rounds 1-8 were on base `274c5b3e` (origin/main at #1162); round 8 is the one this
+paragraph narrates. Every earlier round built correctly and died on a host defect. Round 1 (PR #1152 head `d7717e6c`) died at
 review on a missing suite exit code read as a failure (#1154). Round 2 (`2cf05aa6`) went 12/12
 green but the host refused "Fresh build already has a PR" for the branch it had itself
 published. Round 3 (`b56d449f`) went green and its mutation nomination used bare filenames
@@ -514,3 +616,10 @@ Round 13 is the fix commit on top of round 12 (`2d60f0c2`, REQUEST_CHANGES on th
 finding above), on the same base `a1be24e0`: the worktree was fast-forwarded to the
 published head (no cherry-pick, no conflict) and one commit closes the finding. It touches
 only the wrapper, its real-git tests, the G135 row and this record.
+
+Round 14 is the fix commit on top of round 13 (`d8754625`, APPROVE from the synthesis and
+both Opus seats with the two findings carried as minor, REQUEST_CHANGES from the Codex
+seat), on the same base `a1be24e0`, in the same worktree with no fast-forward needed. It
+replaces every blind withdrawal with a compare-and-swap, refuses without rewriting where
+there is nothing to compare against, measures the strip's post-condition, and closes the
+nits. It touches only the wrapper, its real-git tests, the G135 row and this record.
