@@ -43,3 +43,11 @@ the complete 135-test run passed after restoration. A content
 search for the removed inline PR schema found the shared validator and schema
 references as its positive control. No live run artifact, PR, deployment or
 publication was changed; this is offline evidence for the contract repair.
+
+The consuming mutation-claim test had selected the first JSON object in a
+worker brief. The outer schema now precedes the Forge payload schema, so that
+fixture selected the wrong object and failed before exercising its guard. It
+now requires exactly one payload schema carrying `mutationClaim`
+(`open/__tests__/project-build-mutation-contract.test.ts:61`). Both build and
+fix cases were red before the correction, then passed with the real mutation
+execution and bare-filename refusals intact.
