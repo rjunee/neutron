@@ -178,6 +178,16 @@ test('missing-credential consuming build can connect then chat without gateway r
   expect(existsSync(join(f.homes.get('project-one')!, '.neutron-owner-work.json'))).toBe(false)
 })
 
+test.each(['cwd', 'roots'] as const)('cold owner rejects consuming wrong %s before opening and permits correct chat', async field => {
+  const f = fixture(true)
+  const { request, worker } = await consumingBuild(f, field === 'cwd' ? { cwd: f.dir } : { roots: [f.dir] })
+  expect((await worker.run(request, 'in-repl', new AbortController().signal)).kind).toBe('unknown')
+  expect(f.launched).toHaveLength(0); expect(f.calls).toHaveLength(0)
+  expect(existsSync(join(f.homes.get('project-one')!, '.neutron-owner-work.json'))).toBe(false)
+  expect((await collect(f.bindings.start('project-one', spec('correct first owner chat')))).at(-1)?.kind).toBe('completion')
+  expect(f.launched).toHaveLength(1); expect(f.calls).toHaveLength(1)
+})
+
 test.each(['cwd', 'roots'] as const)('known idle owner survives consuming wrong %s preflight without a work marker', async field => {
   const f = fixture(true)
   await collect(f.bindings.start('project-one', spec('warm owner')))

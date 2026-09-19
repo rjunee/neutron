@@ -163,7 +163,7 @@ export class CodexOwnerBindings {
     private readonly bootstrap: (options: OwnerLaunch) => Promise<CodexOwnerBootstrap> = openDurableCodexOwner,
     private readonly readBinding: typeof readCodexOwnerBinding = readCodexOwnerBinding) {}
 
-  private resolve(projectId: string, beforeOpening?: () => void): Promise<{ owner: CodexOwnerBootstrap; project: CodexOwnerProject }> {
+  private resolve(projectId: string, beforeOpening?: (project: CodexOwnerProject) => void): Promise<{ owner: CodexOwnerBootstrap; project: CodexOwnerProject }> {
     if (this.closed) return Promise.reject(new Error('Codex owner host is closed'))
     if (this.refused.has(projectId)) return Promise.reject(new Error('Codex owner requires native reconciliation'))
     if (!/^[A-Za-z0-9_.-]{1,128}$/.test(projectId)) return Promise.reject(new Error('Codex owner requires a full project id'))
@@ -181,7 +181,7 @@ export class CodexOwnerBindings {
           if (value !== undefined && !CODEX_CLI_AUTH_ENV_VARS.includes(key)) env[key] = value
         }
         env.CODEX_HOME = project.codexHome
-        beforeOpening?.()
+        beforeOpening?.(project)
         openingAttempted = true
         const owner = await this.bootstrap({ projectId, binary: 'codex', socketPath: join(project.codexHome, 'owner.sock'),
           cwd: project.cwd, codexHome: project.codexHome, env })
@@ -352,16 +352,21 @@ export class CodexOwnerBindings {
         turn.signal.throwIfAborted()
         if (observation?.closed || Date.now() >= deadline) throw new Error('Codex build preflight is no longer current')
       }
+      const validatePaths = (project: CodexOwnerProject): void => {
+        if (realpathSync(cwd) !== project.cwd) throw new Error('Codex build project directory changed')
+        if (roots.some(root => relative(project.cwd, realpathSync(root)).split(sep)[0] === '..')) {
+          throw new Error('Codex build worktree is outside the owner workspace grants')
+        }
+      }
       preflight()
-      const { owner, project } = await this.resolve(projectId, () => {
+      const { owner, project } = await this.resolve(projectId, canonicalProject => {
         preflight()
+        validatePaths(canonicalProject)
         if (observation) observation.attempted = true
       })
       preflight()
-      if (realpathSync(cwd) !== project.cwd) throw new Error('Codex build project directory changed')
-      if (roots.some(root => relative(project.cwd, realpathSync(root)).split(sep)[0] === '..')) {
-        throw new Error('Codex build worktree is outside the owner workspace grants')
-      }
+      // Recheck after asynchronous attachment, and for an already-resolved owner.
+      validatePaths(project)
       const facts = this.readBinding(owner.binding)
       // Native feature evidence is sealed by the factory before the first turn.
       // A requested feature flag is not an attestation of native availability.
