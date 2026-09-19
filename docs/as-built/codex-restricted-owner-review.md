@@ -99,3 +99,29 @@ all provider/network configurations. No deployment, served cutover, public push,
 or completion of the entire governing spec is claimed. Disposable native smoke
 scripts are excluded from this change. Privacy verification is scoped to this
 change's additions and commit message; it does not certify the inherited tree.
+
+### Shared-owner build fixture correction
+
+The shared-owner wiring fixture omitted `prepareReview` after restricted review
+admission became mandatory (`open/wiring/project-build.ts:271-276`), so its
+resolver assertion never ran. It now proves that missing or rejected capability
+prevents runner construction, then verifies that preparation and the acting turn
+consume the same project's owner
+(`open/__tests__/project-build-wiring.test.ts:449-485`). This preserves the locked
+one-project owner contract (`docs/plans/harness-orchestrator-pivot-2026-09-11.md:87-105`)
+and retained-gates criterion (`docs/spec-items/the-orchestrator-owns-the-build-loop.md:56-59`).
+Production behavior is unchanged.
+
+The original focused failure reproduced before the correction. Complete wiring
+and consuming `open/__tests__/project-build-e2e.test.ts` suites then passed
+together: 132 tests and 1,203 assertions. Root, Open, and Trident TypeScript checks and
+scoped ESLint passed. The passing suite run had local socket permission after
+the initial sandboxed run could not open its test TCP/Unix sockets.
+
+Both semantic mutations were killed: bypassing review admission admitted the
+missing-capability owner; rejecting an owner after successful admission broke
+the positive case. Both were restored, the focused test passed again, and the
+production file's diff was empty.
+
+The full-tree privacy scan reported 454 findings; this local correction does
+not claim that gate passed.

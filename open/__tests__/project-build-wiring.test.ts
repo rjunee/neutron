@@ -456,7 +456,17 @@ test('Codex-selected build consumes the shared owner resolver and refuses when i
     bindings.push(binding)
     return async () => ({ kind: 'turn-ended' })
   }, guardBuildRunner: (projectId, worker) => { guarded.push(projectId); return worker } }
+  // Default Codex review must pass the shared owner's admission before any
+  // build runner can be constructed, just as in the consuming E2E fixture.
+  await expect(f.prepare()).rejects.toThrow('lacks attested read-only child execution')
+  expect(guarded).toEqual([])
+  f.context.codexOwnerBindings.prepareReview = async () => { throw new Error('review capability refused') }
+  await expect(f.prepare()).rejects.toThrow('review capability refused')
+  expect(guarded).toEqual([])
+  const prepared: string[] = []
+  f.context.codexOwnerBindings.prepareReview = async projectId => { prepared.push(projectId) }
   const options = await f.prepare()
+  expect(prepared).toEqual([f.context.projectId])
   expect(guarded).toEqual([f.context.projectId])
   const captured = f.captured()
   const request: BoundedWorkRequest = { ...options.workers.build.request, run_id: f.input.run.id, step_id: 'fixture-step', role: 'build', needs_approval_decision: false }
