@@ -1,5 +1,6 @@
 /** Explicit durable-host entry point; never spawn this as a gateway child. */
 import { readFileSync } from 'node:fs'
+import { fireAndForget } from '@neutronai/logger/fire-and-forget.ts'
 import { HerdrHost } from '../../claude-code/persistent/herdr-host.ts'
 import { createHerdrRpc } from '../../claude-code/persistent/herdr-client.ts'
 import { privatePath } from './project-owner-helper-protocol.ts'
@@ -18,7 +19,7 @@ if (import.meta.main) {
   const stop = () => {
     if (stopping) return
     stopping = true
-    void helper.destroy().then(() => process.exit(0), () => process.exit(1))
+    fireAndForget('codex-owner-helper.stop', helper.destroy().then(() => process.exit(0)), () => process.exit(1))
   }
   process.once('SIGTERM', stop); process.once('SIGINT', stop)
 }

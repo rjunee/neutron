@@ -432,7 +432,7 @@ export class CodexOwnerBindings {
             if (!active) throw new Error('Codex build session has no active dispatch')
             const handle = this.startTurn(projectId, { ...active.spec, prompt, session: { id: facts.threadId, last_active_at: Date.now() },
               turn_absolute_ceiling_ms: Math.min(active.timeout_ms, active.request.budget.wall_ms) }, true)
-            const cancel = (): void => { void handle.cancel().catch(() => {}) }
+            const cancel = (): void => { fireAndForget('codex-owner-binding.cancel', handle.cancel()) }
             active.signal.addEventListener('abort', cancel, { once: true })
             try {
               if (active.signal.aborted) await handle.cancel()
