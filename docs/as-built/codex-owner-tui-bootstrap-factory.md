@@ -35,7 +35,7 @@ does not prove a token's value or isolate a same-UID credential writer.
 The existing broker takes over all subsequent requests before the factory
 returns. The frozen binding records both generations and a random revision,
 plus native metadata; journal sealing commits it durably before exposing an
-opaque WeakMap-backed handle (`project-control-bootstrap.ts:171`). Plain objects
+opaque WeakMap-backed handle (`project-control-bootstrap.ts:178`). Plain objects
 and spread copies cannot mint authority. The journal refuses replacement or a
 missing attestation row (`project-control-broker-journal.ts:90`).
 
