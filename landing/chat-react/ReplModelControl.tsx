@@ -16,6 +16,7 @@ export function ReplModelControl({ projectId, origin, token, fetchImpl }: {
   const [state, setState] = useState<ReplModelState | null>(null)
   const [error, setError] = useState<string | null>(null)
   const [switching, setSwitching] = useState(false)
+  const [refreshing, setRefreshing] = useState(false)
 
   useEffect(() => {
     let live = true
@@ -28,13 +29,30 @@ export function ReplModelControl({ projectId, origin, token, fetchImpl }: {
     return () => { live = false }
   }, [client, projectId])
 
+  async function refresh(): Promise<void> {
+    if (refreshing || switching) return
+    setRefreshing(true)
+    try {
+      setState(await client.current(projectId))
+      setError(null)
+    } catch (err) {
+      setError(err instanceof Error ? err.message : 'Could not load model')
+    } finally {
+      setRefreshing(false)
+    }
+  }
+
   async function change(model: string): Promise<void> {
     if (state === null || state.status !== 'ready' || switching || model === state.currentModel) return
     if (!state.availableModels.some((option) => option.id === model)) return
     setSwitching(true)
     setError(null)
     try {
-      const next = await client.switch(projectId, model, state.sessionId)
+      const requestedSessionId = state.sessionId
+      const next = await client.switch(projectId, model, requestedSessionId)
+      if (next.sessionId !== requestedSessionId) {
+        throw new Error('Session changed before the model switch was confirmed')
+      }
       setState(next)
       if (next.currentModel !== model) setError(`Switch not confirmed; current model is ${next.currentModel ?? 'unknown'}.`)
     } catch (err) {
@@ -60,12 +78,17 @@ export function ReplModelControl({ projectId, origin, token, fetchImpl }: {
         onChange={(event) => { void change(event.target.value) }}
         style={{ maxWidth: '100%', background: 'var(--surface)', color: 'var(--fg)', border: '1px solid var(--border)', borderRadius: 6 }}
       >
-        {!currentListed && <option value={current}>{current || (state === null ? 'Loading…' : 'Unknown model')}</option>}
+        {!currentListed && <option value={current}>{current || (state === null ? error === null ? 'Loading…' : 'Unavailable' : 'Unknown model')}</option>}
         {state?.availableModels.map((option) => <option key={option.id} value={option.id}>{option.label}</option>)}
       </select>
       {switching && <span role="status">Switching model…</span>}
       {!switching && state?.status !== 'ready' && state !== null && <span role="status">{state.detail ?? `Model switch ${state.status}`}</span>}
       {error && <span role="alert" style={{ color: 'var(--danger, #b33)', fontSize: '0.72rem' }}>{error}</span>}
+      {(error !== null || (state !== null && state.status !== 'ready')) && (
+        <button type="button" disabled={refreshing || switching} onClick={() => { void refresh() }}>
+          {refreshing ? 'Refreshing…' : 'Refresh model'}
+        </button>
+      )}
     </div>
   )
 }
