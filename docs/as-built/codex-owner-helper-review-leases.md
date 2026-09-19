@@ -75,6 +75,18 @@ native TUI claiming idle between helper preflight and native admission. Generic
 errors after real journal reservation remain unknown and fenced; the test reads
 the durable SQLite marker and refuses another frontend attachment.
 
+A separate model-switch race could over-fence the current owner: the switch
+preflight may see idle, then a native TUI turn can win before the gateway's
+settings update is admitted. The broker now brands only its local pre-journal
+gateway refusal as `ProjectControlAdmissionRefusal`; the private helper carries
+that brand only after its ordinary owner/grant readback. The Open model control
+consumer may report the busy refusal without quarantining the current owner.
+A native response error after journal reservation remains an unbranded refusal
+and must still fence. Socket-backed tests prove both classifications and a
+subsequent owner turn, and temporary mutations in both directions made the
+classification test fail (`runtime/adapters/codex-cli/persistent/project-control-broker.test.ts`,
+`runtime/adapters/codex-cli/persistent/project-owner-helper-review.test.ts`).
+
 Verification used the real helper client, registry, broker and permission
 transaction through disposable Unix transport fixtures with scripted native
 responses. The five focused helper/broker/permission test files passed 61 tests,

@@ -1,5 +1,5 @@
 import { randomBytes } from 'node:crypto'
-import type { ProjectControlBroker } from './project-control-broker.ts'
+import { ProjectControlAdmissionRefusal, type ProjectControlBroker } from './project-control-broker.ts'
 import { OwnerHelperSession } from './project-owner-helper-session.ts'
 import { object, type Rpc } from './project-owner-helper-protocol.ts'
 import { OwnerHelperReview } from './project-owner-helper-review.ts'
@@ -51,7 +51,13 @@ export class OwnerHelperRegistry {
     switch (raw.operation) {
       case 'request':
         if (typeof raw.method !== 'string' || !object(raw.params) || raw.epoch !== undefined && !Number.isSafeInteger(raw.epoch)) throw new Error('Invalid native request')
-        result = await writer.request(raw.writerGrant, raw.method, raw.params, raw.epoch as number | undefined)
+        try { result = await writer.request(raw.writerGrant, raw.method, raw.params, raw.epoch as number | undefined) }
+        catch (error) {
+          if (!(error instanceof ProjectControlAdmissionRefusal)) throw error
+          // The broker refused before journal reservation or native delivery.
+          // Complete the normal helper identity/grant readback before reporting it.
+          result = { refused: 'admission' }
+        }
         break
       case 'reply':
         if (typeof raw.id !== 'string' && !Number.isSafeInteger(raw.id) || !Number.isSafeInteger(raw.epoch)) throw new Error('Invalid approval reply')

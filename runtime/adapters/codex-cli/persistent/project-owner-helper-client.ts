@@ -2,7 +2,7 @@ import { randomBytes } from 'node:crypto'
 import { isDeepStrictEqual } from 'node:util'
 import { fireAndForget } from '@neutronai/logger/fire-and-forget.ts'
 import type { CodexOwnerBindingFacts } from './project-control-bootstrap.ts'
-import { ReviewPermissionBusy, type ProjectControlBroker, type ProjectControlGateway, type ProjectControlState } from './project-control-broker.ts'
+import { ProjectControlAdmissionRefusal, ReviewPermissionBusy, type ProjectControlBroker, type ProjectControlGateway, type ProjectControlState } from './project-control-broker.ts'
 import { BROKER_MAX_MESSAGE_BYTES } from './project-control-broker-transport.ts'
 import { exactFacts, object, readOwnerHelperDescriptor, socketIdentity, type Rpc } from './project-owner-helper-protocol.ts'
 import { MAX_REVIEW_SETTLEMENT_WAIT_MS, type ReviewPermissionLease, type ReviewPermissionRequest } from './project-review-permissions.ts'
@@ -178,7 +178,12 @@ export async function connectCodexOwnerHelper(options: { descriptorPath: string;
       return {
         async request(method, params, expectedEpoch) {
           current(); await writer.ready; current()
-          return (await writerCall(clientId, writer, { operation: 'request', method, params, epoch: expectedEpoch })).result
+          const response = await writerCall(clientId, writer, { operation: 'request', method, params, epoch: expectedEpoch })
+          if (response.refused === 'admission' && !('result' in response)) {
+            throw new ProjectControlAdmissionRefusal('Native project writer admission refused before delivery')
+          }
+          if ('refused' in response || !('result' in response)) { close(new Error('Invalid native gateway response')); throw closed }
+          return response.result
         },
         reply() { throw new Error('Remote approval requires awaited replyApproval(clientId, id, result, epoch)') },
         subscribe(listener) {

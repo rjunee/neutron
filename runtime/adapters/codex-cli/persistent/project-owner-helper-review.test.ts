@@ -3,7 +3,7 @@ import { Database } from 'bun:sqlite'
 import { chmodSync, mkdirSync, mkdtempSync, rmSync, writeFileSync } from 'node:fs'
 import { join } from 'node:path'
 import type { CodexOwnerBindingFacts } from './project-control-bootstrap.ts'
-import { createProjectControlBroker, ReviewPermissionBusy } from './project-control-broker.ts'
+import { createProjectControlBroker, ProjectControlAdmissionRefusal, ReviewPermissionBusy } from './project-control-broker.ts'
 import { connectCodexOwnerHelper } from './project-owner-helper-client.ts'
 import { helperIdentity, socketIdentity, type Rpc } from './project-owner-helper-protocol.ts'
 import { OwnerHelperRegistry } from './project-owner-helper-registry.ts'
@@ -11,7 +11,7 @@ import { OwnerHelperRegistry } from './project-owner-helper-registry.ts'
 const cleanup: (() => void)[] = []
 afterEach(() => { for (const close of cleanup.splice(0).reverse()) close() })
 
-async function fixture(options: { drop?: string; badRestore?: boolean } = {}) {
+async function fixture(options: { drop?: string; badRestore?: boolean; nativeRefuseSettings?: boolean } = {}) {
   const root = mkdtempSync('/tmp/helper-review-test-'), cwd = join(root, 'project'), codexHome = join(root, 'home')
   const stageDir = join(cwd, '.neutron', 'build-results', 'a'.repeat(64))
   mkdirSync(stageDir, { recursive: true }); mkdirSync(codexHome, { mode: 0o700 })
@@ -38,7 +38,8 @@ async function fixture(options: { drop?: string; badRestore?: boolean } = {}) {
         else profiles[key.slice('permissions.'.length)] = structuredClone(edit.value)
       }
       if (message.method === 'turn/start') result = { turn: { id: settingsRestored ? 'next-owner-turn' : 'parent-turn' } }
-      queueMicrotask(() => receive({ id: message.id, result }))
+      queueMicrotask(() => receive(options.nativeRefuseSettings && message.method === 'thread/settings/update'
+        ? { id: message.id, error: { code: -32001, message: 'native refusal' } } : { id: message.id, result }))
     },
   } })
   cleanup.push(() => broker.close())
@@ -102,6 +103,33 @@ test('private helper transport prepares exact permissions, restores native readb
   expect(await writer.request('turn/start', { threadId: 'owner', input: [] }, connection.broker.state().epoch)).toEqual({ turn: { id: 'next-owner-turn' } })
   expect(f.wire.filter(message => String(message.operation).startsWith('review')).map(message => message.operation))
     .toEqual(['reviewPrepare', 'reviewStart', 'reviewRestore', 'reviewAcknowledge', 'reviewRelease'])
+})
+
+test('authenticated local admission refusal stays typed across the helper, but native refusal does not', async () => {
+  const f = await fixture(), connection = await f.connect()
+  const nativeOwner = f.broker.gateway('native-owner')
+  await nativeOwner.request('turn/start', { threadId: 'owner', input: [] }, f.broker.state().epoch)
+  const before = f.broker.state(), sentBefore = f.sent.length
+  const switcher = connection.broker.gateway('model-switch')
+  await expect(switcher.request('thread/settings/update', { threadId: 'owner', model: 'next' }, before.epoch))
+    .rejects.toBeInstanceOf(ProjectControlAdmissionRefusal)
+  expect(f.broker.state()).toEqual(before)
+  expect(f.sent).toHaveLength(sentBefore)
+  expect(connection.broker.state().phase).toBe('turn')
+  f.event('turn/completed', 'owner', 'parent-turn')
+  await expect(switcher.request('thread/settings/update', { threadId: 'owner', model: 'next' }, f.broker.state().epoch))
+    .resolves.toEqual({})
+  const nextOwner = connection.broker.gateway('next-owner')
+  await expect(nextOwner.request('turn/start', { threadId: 'owner', input: [] }, f.broker.state().epoch))
+    .resolves.toEqual({ turn: { id: 'next-owner-turn' } })
+
+  const unknown = await fixture({ nativeRefuseSettings: true }), other = await unknown.connect()
+  const pending = other.broker.gateway('uncertain-switch').request('thread/settings/update', { threadId: 'owner', model: 'next' }, unknown.broker.state().epoch)
+  const error = await pending.catch(cause => cause)
+  expect(error).toBeInstanceOf(Error)
+  expect(error).not.toBeInstanceOf(ProjectControlAdmissionRefusal)
+  expect(unknown.broker.state().epoch).toBe(1)
+  expect(unknown.sent.some(message => message.method === 'thread/settings/update')).toBe(true)
 })
 
 test('a restored helper supports a second review without treating a previous acknowledgement as a new lease', async () => {

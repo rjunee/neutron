@@ -3,7 +3,7 @@ import { mkdirSync, mkdtempSync, rmSync, statSync } from 'node:fs'
 import { tmpdir } from 'node:os'
 import { join } from 'node:path'
 import { createConnection, createServer, type Socket } from 'node:net'
-import { createProjectControlBroker, classifyProjectControlMethod, ReviewPermissionBusy } from './project-control-broker.ts'
+import { createProjectControlBroker, classifyProjectControlMethod, ProjectControlAdmissionRefusal, ProjectControlRefusal, ReviewPermissionBusy } from './project-control-broker.ts'
 import type { ProjectControlTransport } from './project-control-broker-transport.ts'
 
 type Rpc = Record<string, any>
@@ -68,6 +68,25 @@ async function terminal(socketPath: string) {
 }
 
 describe('project control broker', () => {
+  test('only local pre-reservation gateway refusals carry the admission type', async () => {
+    const f = await fixture(), owner = f.broker.gateway('owner'), contender = f.broker.gateway('model-switch')
+    const started = owner.request('turn/start', { threadId: 'project-thread', input: [] }, 0)
+    f.response('turn/start', { turn: { id: 'owner-turn' } })
+    await started
+    const before = f.broker.state(), sentBefore = f.sent.length
+    await expect(contender.request('thread/settings/update', { threadId: 'project-thread', model: 'next' }, before.epoch)).rejects.toBeInstanceOf(ProjectControlAdmissionRefusal)
+    expect(f.broker.state()).toEqual(before)
+    expect(f.sent).toHaveLength(sentBefore)
+    f.receive({ method: 'turn/completed', params: { threadId: 'project-thread', turn: { id: 'owner-turn' } } })
+    const update = contender.request('thread/settings/update', { threadId: 'project-thread', model: 'next' }, f.broker.state().epoch)
+    const sent = f.sent.findLast(message => message.method === 'thread/settings/update')!
+    f.receive({ id: sent.id, error: { code: -32001, message: 'native refusal' } })
+    const nativeError = await update.catch(error => error)
+    expect(nativeError).toBeInstanceOf(ProjectControlRefusal)
+    expect(nativeError).not.toBeInstanceOf(ProjectControlAdmissionRefusal)
+    expect(f.broker.state().epoch).toBe(before.epoch + 1)
+  })
+
   test('active owner review admission is typed and mutation-free; the same owner remains usable', async () => {
     const f = await fixture(), gateway = f.broker.gateway('owner')
     const start = gateway.request('turn/start', { threadId: 'project-thread', input: [] }, 0)

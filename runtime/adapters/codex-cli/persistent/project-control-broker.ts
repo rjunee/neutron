@@ -24,6 +24,8 @@ export function classifyProjectControlMethod(method: string): 'read' | 'mutation
 export class ProjectControlRefusal extends Error {
   readonly code = -32001
 }
+/** A local gateway refusal before journal reservation or native delivery. */
+export class ProjectControlAdmissionRefusal extends ProjectControlRefusal {}
 /** This review attempt was refused before any reservation, journal or native mutation. */
 export class ReviewPermissionBusy extends ProjectControlRefusal {}
 export interface ProjectControlState {
@@ -91,6 +93,7 @@ export async function createProjectControlBroker(options: {
   let review: ReturnType<typeof createReviewPermissionTransaction> | undefined
   let server: ReturnType<typeof Bun.serve<{ client: Client }>> | undefined
   const refusal = (message: string): ProjectControlRefusal => new ProjectControlRefusal(message)
+  const admissionRefusal = (message: string): ProjectControlAdmissionRefusal => new ProjectControlAdmissionRefusal(message)
   const close = (error = new Error('Project broker closed')): void => {
     if (closed) return
     closed = error
@@ -242,15 +245,15 @@ export async function createProjectControlBroker(options: {
       params = structuredClone(params)
       validate(method, params)
       if (classifyProjectControlMethod(method) === 'read') return native(method, params).then(result => filter(method, result))
-      if (review) throw refusal('Project writer busy with native review permissions')
-      if (journal.unresolved !== null) throw refusal('Prior broker mutation unresolved; recovery inspection required')
-      if (expectedEpoch !== undefined && expectedEpoch !== epoch) throw refusal('Stale broker epoch')
+      if (review) throw admissionRefusal('Project writer busy with native review permissions')
+      if (journal.unresolved !== null) throw admissionRefusal('Prior broker mutation unresolved; recovery inspection required')
+      if (expectedEpoch !== undefined && expectedEpoch !== epoch) throw admissionRefusal('Stale broker epoch')
       if (method === 'turn/interrupt') {
         if (!active || active.client !== client || active.turnId === null || params.turnId !== active.turnId) throw refusal('Exact active turn owner required')
         return native(method, params)
       }
-      if (active || current && current.client !== client || queue.some(work => work.client !== client)) throw refusal('Project writer busy')
-      if (queue.length >= 32) throw refusal('Project mutation queue full')
+      if (active || current && current.client !== client || queue.some(work => work.client !== client)) throw admissionRefusal('Project writer busy')
+      if (queue.length >= 32) throw admissionRefusal('Project mutation queue full')
       const reserved = epoch = journal.reserve()
       return new Promise((resolve, reject) => { queue.push({ client, method, params, epoch: reserved, resolve, reject }); pump() })
     } catch (error) { return Promise.reject(error) }
