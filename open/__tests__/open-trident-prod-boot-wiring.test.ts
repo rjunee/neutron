@@ -136,11 +136,7 @@ function panelCompletingSubstrate(): Substrate {
   }
 }
 
-test.each([
-  { label: 'starts the Anthropic typed run with the unavailable Kimi peer explicitly disabled', provider: 'anthropic', kimi: 'none', refusedSeat: null },
-  { label: 'rejects the same Anthropic run with the unavailable Kimi peer enabled', provider: 'anthropic', kimi: 'k3', refusedSeat: 'review_kimi' },
-  { label: 'rejects Pi before starting a run when its Anthropic review transport is unavailable', provider: 'pi', kimi: 'none', refusedSeat: 'review_rubric' },
-] as const)('production composition $label', async ({ provider, kimi, refusedSeat }) => {
+test.each(['anthropic', 'pi'] as const)('production composition constructs project host and starts its typed run for %s', async provider => {
   process.env['ANTHROPIC_API_KEY'] = 'sk-ant-synthetic-trident-test'
   const original = projectHost.createProjectBuildHost
   const starts: unknown[] = []
@@ -169,30 +165,18 @@ test.each([
     const created = await store.create({ slug: 'launch', project_slug: 'project-one', repo_path: repo, task: 'Build the card' })
     await store.update(created.id, { branch: 'change', worktree: join(tmpDir, 'work'), base_sha: base })
     const run = store.get(created.id)!
-    // An enabled seat without a transport must fail before host.run. Explicit NONE
-    // is the positive control: unavailable infrastructure cannot veto a disabled seat.
-    const fired = await composition.trident!.fire_inner_workflow({ run, base_branch: 'main', db_path: join(tmpDir, 'project.db'), max_rounds: 3, test_strategy: 'Run the configured suite',
-      phase_models: { review_kimi: { model: kimi } } })
+    const fired = await composition.trident!.fire_inner_workflow({ run, base_branch: 'main', db_path: join(tmpDir, 'project.db'), max_rounds: 3, test_strategy: 'Run the configured suite' })
+    expect(fired.status).toBe('fired')
     expect(optionsSeen).toHaveLength(1)
+    expect(starts).toEqual([{ mode: 'pr', start: 'fresh' }])
     expect(optionsSeen[0]!.production.runId).toBe(run.id)
     expect(optionsSeen[0]!.substrate.provider).toBe(provider)
     expect(optionsSeen[0]!.production.ciWorkflow).toBe('project-ci.yml')
     expect(optionsSeen[0]!.policy.reviewSuite?.strategy).toBe('Run the configured suite')
     expect(optionsSeen[0]!.policy.reviewSuite?.scope).toBe('full-suite')
-    if (refusedSeat !== null) {
-      const reason = `Review seat ${refusedSeat}: configured runner is missing or mismatched`
-      expect(fired).toMatchObject({ status: 'failed', error: expect.stringContaining(reason) })
-      expect(starts).toHaveLength(0)
-      expect(JSON.parse(store.get(run.id)!.inner_result!)).toEqual({
-        ok: false, checkpoint: 'inner-error', terminalCause: expect.stringContaining(reason),
-      })
-      return
-    }
-    expect(fired.status).toBe('fired')
-    expect(starts).toEqual([{ mode: 'pr', start: 'fresh' }])
     for (let i = 0; i < 100 && !store.get(run.id)!.inner_result?.includes('cleanup'); i++) await Bun.sleep(1)
     const result = JSON.parse(store.get(run.id)!.inner_result!)
-    expect(result.projectBuild.kind).toBe('unknown')
+    expect(result.projectBuild.kind).toBe(provider === 'anthropic' ? 'unknown' : 'refused')
     expect(result.projectBuild.cleanup).toBeDefined()
   } finally { construct.mockRestore(); codex.mockRestore() }
 })

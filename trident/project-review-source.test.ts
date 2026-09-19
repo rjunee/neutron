@@ -111,7 +111,7 @@ test('unreadable seat and thrown round block infrastructure; refusal stays unava
   f.answer(async () => ({ kind: 'refused', reason: 'provider-not-connected' }))
   expect(await f.check()).toMatchObject({ kind: 'blocked', on: expect.stringContaining('unavailable') })
   f.options.runnerFor = () => undefined
-  expect(f.source).toThrow('configured runner is missing or mismatched')
+  expect(await f.check()).toMatchObject({ kind: 'blocked', on: expect.stringContaining('unavailable') })
 })
 test('missing and unusable synthesis are separate infrastructure answers', async () => {
   const f = await fixture()
@@ -161,7 +161,7 @@ test('configuration and dispatch admission reject unsupported values with valid 
   f.options.phaseModels = { ...f.options.phaseModels, review_adversarial: { model: 'sol' } }
   const binding = f.options.runnerFor
   f.options.runnerFor = (model, seat) => ({ ...binding(model, seat)!, provider: 'openai' })
-  expect(f.source).toThrow('configured runner is missing or mismatched')
+  expect(await f.check()).toMatchObject({ kind: 'blocked', on: expect.stringContaining('unavailable') })
   f.options.runnerFor = (model, seat) => ({ ...binding(model, seat)!, supports: () => ({ ok: false, reason: 'capability-unsupported', detail: 'unsupported' }) })
   expect(f.source).toThrow('capability-unsupported')
   expect(f.calls).toHaveLength(0)
@@ -178,6 +178,32 @@ test('admission preflights synthesis as well as every enabled review route', asy
   expect(f.source).toThrow('Review seat synthesis: capability-unsupported')
   expect(f.calls).toHaveLength(0)
 })
+
+for (const missing of [true, false]) {
+  for (const target of ['review_adversarial', 'synthesis'] as const) {
+    test(`${missing ? 'absent' : 'mismatched'} ${target} transport permits construction but cannot approve`, async () => {
+      const f = await fixture(); const binding = f.options.runnerFor
+      const supportCalls: string[] = []
+      f.options.runnerFor = (model, seat) => {
+        const runner = binding(model, seat)!
+        if (seat.id !== target) return runner
+        return missing ? undefined : { ...runner, provider: 'openai', supports: role => {
+          supportCalls.push(role)
+          return { ok: false, reason: 'capability-unsupported', detail: 'wrong provider' }
+        } }
+      }
+      const source = f.source()
+      expect(f.calls).toHaveLength(0)
+      expect(await f.check(source)).toMatchObject({ kind: 'blocked',
+        on: expect.stringContaining(target === 'synthesis' ? 'synthesis provenance' : 'unavailable') })
+      expect(f.calls.filter(call => call.role === (target === 'synthesis' ? 'synthesis' : 'review'))).toHaveLength(0)
+      expect(supportCalls).toHaveLength(0)
+      // The same panel with a matching, available transport must still approve.
+      f.options.runnerFor = binding
+      expect(await f.check()).toEqual({ kind: 'approve' })
+    })
+  }
+}
 test('synthesis requires prior completed seats and never fabricates checkpoint approval', async () => {
   const f = await fixture(); const source = f.source()
   expect(await source.readSynthesis(snapshot, 1)).toBeNull()
