@@ -87,6 +87,22 @@ export function openProjectControlJournal(options: Binding) {
     return {
       generation: row.generation, epoch: row.epoch, unresolved: row.unresolved,
       assertOwned,
+      attestation(): string | null {
+        assertOwned()
+        const table = db.query("SELECT name FROM sqlite_master WHERE type='table' AND name='attestation'").get()
+        if (!table) return null
+        const record = db.query<{ value: string }, []>('SELECT value FROM attestation WHERE id=1').get()
+        if (!record) throw new Error('Native attestation identity missing')
+        return record.value
+      },
+      sealAttestation(value: string): void {
+        db.transaction(() => {
+          assertOwned()
+          db.exec('CREATE TABLE IF NOT EXISTS attestation (id INTEGER PRIMARY KEY CHECK(id=1), value TEXT NOT NULL)')
+          if (db.query('SELECT id FROM attestation WHERE id=1').get()) throw new Error('Native binding already sealed')
+          db.query('INSERT INTO attestation VALUES (1, ?)').run(value)
+        }).immediate()
+      },
       bound(): void {
         db.transaction(() => { assertOwned(); db.query('UPDATE broker SET socketIdentity=? WHERE id=1').run(socketIdentity(options.socketPath)) }).immediate()
       },
