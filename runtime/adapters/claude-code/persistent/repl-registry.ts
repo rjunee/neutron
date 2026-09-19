@@ -243,15 +243,14 @@ export interface ReplRegistryRecord {
    * write as its pid, generation and pane handle. That is what keeps them from
    * drifting: one child, one row, one write, and a respawn replaces all of it.
    *
-   * ON `auth_fingerprint` SPECIFICALLY, since it is derived from a secret: it is the
-   * first 16 hex chars of `sha256(<the env auth secret>)` (`authFingerprintFor`) —
-   * never the secret, and already the form the in-memory guard compares. The file it
-   * lands in is written 0600 in the instance state dir, which is the SAME directory
-   * as `sinkTokenPath` — the actual reply-sink secret. So the marginal exposure is a
-   * truncated hash stored beside the plaintext key it is a hash of; what it buys is
-   * that a rotated token still EVICTS (fingerprints differ) instead of being
-   * unanswerable. Empty string where the instance has no env auth secret (the
-   * interactive-login model), which is exactly what the in-memory guard holds there.
+   * ON `auth_fingerprint` SPECIFICALLY: `authFingerprintFor` produces a versioned,
+   * full scrypt digest with the protected instance sink root as its independent
+   * salt and a separate auth-fingerprint domain. Neither that salt nor the auth
+   * token is copied into this 0600 registry. The in-memory guard uses the same tag,
+   * so rotation still evicts. Legacy nonempty unkeyed fingerprints deliberately
+   * fail parity; deriving a replacement from today's credential alone would erase
+   * evidence of a same-ID rotation. The explicit empty string remains the ambient
+   * interactive-login sentinel and is compatible across the representation change.
    */
   reuse?: ReplReuseProperties
   /** Model id the REPL spawned with — replayed on `--resume` so a respawn keeps

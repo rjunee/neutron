@@ -493,7 +493,9 @@ export function renderMcpServerGrant(spec: OwnerMcpServerSpec): string {
 /**
  * The warm-session identity of an installed set — see § REUSE in the file header.
  *
- * 16 hex chars of SHA-256, matching `authFingerprintFor`'s shape for the same job.
+ * This in-memory MCP-surface value remains 16 hex chars of SHA-256. Unlike the
+ * separately persisted, versioned auth fingerprint, it is not used to authorize
+ * adoption of a child across a gateway restart.
  * Equal configuration MUST yield an equal value or the pool thrashes, so the input
  * is canonicalised: sorted by name, args positional, env sorted by name.
  *

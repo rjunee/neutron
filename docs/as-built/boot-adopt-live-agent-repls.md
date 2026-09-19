@@ -39,6 +39,34 @@ invalidation occurs before the remaining option getters. A held-environment
 regression fails when project resolution is moved early (expected `after-env`,
 received `before-env`); restoring the original ordering passes.
 
+The first published head's CodeQL check failed on the pre-existing
+unkeyed, truncated auth fingerprint, already alerted on the base branch.
+The replacement is a versioned, full-width scrypt derivation with explicit
+memory-hard parameters and a domain-prefixed, persisted per-instance salt.
+Spawn, warm reuse and boot adoption compute the same format from the same
+resolved instance path; the empty ambient-auth sentinel is unchanged and
+performs no salt I/O. This is a rotation-equality value for opaque provider
+tokens, not a human-password verifier. This pre-cutover format replacement
+does not include a legacy verifier: computing the new value from today's token
+alone cannot justify relabeling old child evidence after a same-ID rotation.
+Nonempty legacy rows are therefore refused without claiming or closing the
+child. There is no silent compatibility path or automatic relabeling. The only
+pane-bearing agent survivor measured on this pre-cutover instance uses the
+empty ambient sentinel, so that particular row requires no format migration.
+Deployment and a fresh live run are still required to prove it is adopted and
+can dispatch.
+
+The replacement's focused tests passed 185 cases. Independent reruns passed
+164 cases across fingerprint, boot adoption, credential rotation, live Open
+composition and the consuming `open/__tests__/project-build-e2e.test.ts` suite
+(68 cases). Both root and Trident typechecks, lint and dependency layering
+passed. In an isolated copy, bypassing final credential parity admitted stale
+panes, over-applying it rejected the valid survivor, and fixing the salt made
+different instances' tags equal; each mutation made its intended test red,
+then restored controls passed. Independent security and bounded cross-model
+reviews found no code blocker. Final-head CI and deployment remain separate
+gates.
+
 Verification includes the production-graph survivor regression, existing
 adoption/fencing suites, provider/profile regressions, composition field guards,
 and `open/__tests__/project-build-e2e.test.ts`. The project-build and composition
@@ -57,6 +85,5 @@ then restoring it passed. Dependency checks reported no new violations.
 The full local leak scan exited 1 on 465 tree findings, predominantly existing
 denylist matches. Scoped added-lines/new-files and proposed publication metadata
 scans were silent; the changed-file copy's three denylist matches were verified
-against unchanged base lines. This record does not claim a clean full-tree purity gate or a
-completed partitioned repository test run; publication still requires those
-checks at the final reviewed head.
+against unchanged base lines. This record does not claim a clean local full-tree
+purity scan; publication requires the canonical final-head CI gates.

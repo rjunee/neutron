@@ -115,7 +115,7 @@ function registryRow(key: string, pane: string, generation: string, port: number
     child_generation: generation,
     reuse: {
       tool_surface: LIVE_AGENT_TOOL_NAMES.join(','), tool_bridge: true,
-      auth_fingerprint: authFingerprintFor({ ANTHROPIC_API_KEY: API_KEY }),
+      auth_fingerprint: authFingerprintFor({ ANTHROPIC_API_KEY: API_KEY }, deriveReplSupervisionPaths(home!).sinkTokenPath),
     },
   }
 }
@@ -351,7 +351,7 @@ test('the first actual wrapper turn joins an in-flight boot adoption instead of 
   writeFileSync(paths.replRegistryPath, JSON.stringify({
     [key]: { ...registryRow(key, HANDLE, GENERATION, devChannel.port!),
       reuse: { tool_surface: '', tool_bridge: false,
-        auth_fingerprint: authFingerprintFor({ ANTHROPIC_API_KEY: API_KEY }) } },
+        auth_fingerprint: authFingerprintFor({ ANTHROPIC_API_KEY: API_KEY }, paths.sinkTokenPath) } },
   }))
   let optionOwner = 'boot-discovery'
   const wrapper = buildLlmCallSubstrate({
@@ -414,6 +414,7 @@ test('stable credential IDs adopt only when the surviving child still has the cu
   const staleId = 'anthropic:rotated'
   const missingId = 'anthropic:missing-fingerprint'
   const unusedId = 'anthropic:no-row'
+  const legacyId = 'anthropic:legacy-fingerprint'
   const firstSecret = 'sk-ant-current-first'
   const secondSecret = 'sk-ant-current-second'
   const staleCurrentSecret = 'sk-ant-rotated-new'
@@ -421,11 +422,12 @@ test('stable credential IDs adopt only when the surviving child still has the cu
   const secondKey = keyForCredential(secondId)
   const staleKey = keyForCredential(staleId)
   const missingKey = keyForCredential(missingId)
+  const legacyKey = keyForCredential(legacyId)
   const rowWithFingerprint = (key: string, pane: string, generation: string, port: number,
     session: string, channel: string, pid: number, secret: string): ReplRegistryRecord => ({
       ...registryRow(key, pane, generation, port, { session, channel, pid }),
       reuse: { tool_surface: '', tool_bridge: true,
-        auth_fingerprint: authFingerprintFor({ ANTHROPIC_API_KEY: secret }) },
+        auth_fingerprint: authFingerprintFor({ ANTHROPIC_API_KEY: secret }, paths.sinkTokenPath) },
     })
   const firstRow = rowWithFingerprint(firstKey, HANDLE, GENERATION, devChannel.port!,
     SESSION, CHANNEL, PID, firstSecret)
@@ -438,7 +440,15 @@ test('stable credential IDs adopt only when the surviving child still has the cu
       'ffffffff-1111-2222-3333-444444444444', CHANNEL, 31340, firstSecret),
     reuse: { tool_surface: '', tool_bridge: true },
   } as ReplRegistryRecord
-  const badRows = { [staleKey]: staleRow, [missingKey]: missingRow }
+  // The actual old 16-hex fingerprint of firstSecret, recorded by an older
+  // gateway. Even an unchanged current token cannot upgrade this evidence by
+  // assertion; only independently verified migration could authorize that row.
+  const legacyRow = {
+    ...rowWithFingerprint(legacyKey, 'pane:legacy', 'gen-legacy', devChannel.port!,
+      'bbbbbbbb-1111-2222-3333-444444444444', CHANNEL, 31341, firstSecret),
+    reuse: { tool_surface: '', tool_bridge: true, auth_fingerprint: '50750548bf570144' },
+  }
+  const badRows = { [staleKey]: staleRow, [missingKey]: missingRow, [legacyKey]: legacyRow }
   writeFileSync(paths.replRegistryPath, JSON.stringify({ ...badRows,
     [firstKey]: firstRow, [secondKey]: secondRow }, null, 2))
 
@@ -448,6 +458,7 @@ test('stable credential IDs adopt only when the surviving child still has the cu
     { id: staleId, kind: 'api_key', secret: staleCurrentSecret },
     { id: missingId, kind: 'api_key', secret: firstSecret },
     { id: unusedId, kind: 'api_key', secret: 'must never be read' },
+    { id: legacyId, kind: 'api_key', secret: firstSecret },
   ] })
   let unmatchedSecretReads = 0
   Object.defineProperty(credentials.credentials[4]!, 'secret', { get() {
@@ -481,7 +492,7 @@ test('stable credential IDs adopt only when the surviving child still has the cu
   expect(dispatched).toEqual([{ project_id: PROJECT }, { project_id: PROJECT }])
 
   // A rotated secret under the SAME STABLE ID is not the child's credential;
-  // missing fingerprint is unknown, not permission to grant. Neither pane is
+  // missing or legacy fingerprint is unknown, not permission to grant. No pane is
   // inspected, closed, attached, registered, or able to call a tool.
   for (const row of Object.values(badRows)) {
     expect(host.inspections).not.toContain(row.pane_handle)

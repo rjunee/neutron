@@ -444,7 +444,7 @@ export async function reconcileExistingClaudeRepl(
   const paths = deriveReplSupervisionPaths(resolved.home)
   applySupervisionPaths(p, paths)
   const outcome = await beginBootAdoption(p, existing.sessionKey, {
-    expectedAuthFingerprint: authFingerprintFor(p.env),
+    expectedAuthFingerprint: authFingerprintFor(p.env, p.sinkTokenPath),
   })
   // Only a proved survivor becomes supervised. Registering dead candidates even
   // briefly would let another registry watchdog turn boot discovery into a spawn.
