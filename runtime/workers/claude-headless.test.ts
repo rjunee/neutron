@@ -26,7 +26,7 @@ async function fixture(mode = 'success') {
   const counter = join(root, 'calls')
   // A process fixture exercises argv/stdin/environment, exit and durable receipts.
   // CLI capabilities are probed exactly as in production; no injected green probe.
-  await writeFile(cliPath, `#!/usr/bin/node
+  await writeFile(cliPath, `#!${process.execPath}
 const {writeFileSync,appendFileSync,readFileSync}=require('node:fs');
 const args=process.argv.slice(2);
 if(args.includes('--help')) { writeFileSync(1,${JSON.stringify(mode === 'old-cli' ? flags.replace('--restricted', '') : flags)}); process.exit(0); }
@@ -110,6 +110,9 @@ test('narrow role and placement admission has runnable positive controls', async
 
 test('credentials and installed CLI contract fail closed before admission', async () => {
   const f = await fixture()
+  expect(createClaudeHeadlessRunner({ ...f.options, cliPath: join(f.root, 'missing-cli') }).supports('plan', 'headless')).toMatchObject({
+    ok: false, reason: 'provider-not-connected', detail: 'Claude CLI is unavailable.',
+  })
   expect(createClaudeHeadlessRunner({ ...f.options, env: {} }).supports('plan', 'headless')).toMatchObject({ ok: false, reason: 'provider-not-connected' })
   expect((await fixture('no-auth')).runner.supports('plan', 'headless')).toMatchObject({ ok: false, reason: 'provider-not-connected' })
   expect((await fixture('old-cli')).runner.supports('plan', 'headless')).toMatchObject({ ok: false, reason: 'cli-contract' })
