@@ -1265,3 +1265,28 @@ test('#1133: a detached HEAD is rewritten in place and no branch is touched', ()
   expect(git(tree, 'log', '-1', '--format=%B')).toBe(`feat: detached\n\n${CO_AUTHOR}`)
   expect(git(tree, 'rev-parse', branch)).toBe(parent)
 })
+
+test("#1133: a message paragraph that is literally '--amend' is a VALUE, not the flag -- the commit is provenance-checked against the probed HEAD and lands stripped", () => {
+  const { tree, branch, parent } = fixture()
+  // Positive control for the scan: the same paragraph delivered where git reads it as the
+  // flag (bare, no `-m` before it) turns the invocation into an amend of `parent`, and the
+  // wrapper's expected parent is then `parent`'s own first parent (none: it is the root).
+  const asFlag = run(tree, 'bash', [guard, branch, '--amend', '--no-edit', '-m', 'amended base', '-m', SESSION])
+  expect(asFlag.status, asFlag.stderr || asFlag.stdout).toBe(0)
+  expect(git(tree, 'rev-list', '--parents', '-1', 'HEAD').split(' ')).toHaveLength(1)
+  git(tree, 'reset', '-q', '--soft', parent)
+  git(tree, 'update-ref', `refs/heads/${branch}`, parent)
+  expect(git(tree, 'rev-parse', 'HEAD')).toBe(parent)
+  expect(git(tree, 'diff', '--cached', '--name-only')).toBe('change.txt')
+
+  // Now the paragraph is the VALUE of `-m`: an ordinary commit on top of `parent`. A scan that
+  // read every argv element as an option would set amending=1, expect a root commit, see
+  // `parent` as the first parent instead, and refuse with exit 76 -- trailer left on the ref.
+  const result = run(tree, 'bash', [guard, branch, '-m', '--amend', '-m', SESSION, '-m', CO_AUTHOR])
+
+  expect(result.status, result.stderr || result.stdout).toBe(0)
+  expect(result.stdout).toContain('HEAD is now')
+  expect(git(tree, 'rev-list', '--parents', '-1', 'HEAD').split(' ').slice(1)).toEqual([parent])
+  expect(git(tree, 'log', '-1', '--format=%B')).toBe(`--amend\n\n${CO_AUTHOR}`)
+  expect(run(tree, 'git', ['log', '--format=%B', branch]).stdout).not.toContain('Claude-Session')
+})

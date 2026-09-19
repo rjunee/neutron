@@ -138,8 +138,10 @@ export function createBuildHost(options: BuildHostOptions): { deps: BuildRunDeps
       usageLastObserved.set(key, absolute.observed_at)
     },
     reviewArtifact,
+    // #1133 (G166): the preservation push scans launch-base..head for the session trailer; the
+    // launch base is the same pin `publishGate` hands `publicationReadiness` below.
     checkBuildClaim: (claim, snapshot) => checkBuildClaim(options.mutation.run_host,
-      options.mutation.run.repo_path, options.mutation.run.branch ?? `trident/${options.mutation.run.slug}`, claim, snapshot, options.mutation.run.id),
+      options.mutation.run.repo_path, options.mutation.run.branch ?? `trident/${options.mutation.run.slug}`, options.leak.base_sha, claim, snapshot, options.mutation.run.id),
     checkFixLineage: (snapshot, reviewedHead) => fixLineage(options.mutation.run_host,
       options.mutation.run.repo_path, options.mutation.run.branch ?? `trident/${options.mutation.run.slug}`, reviewedHead, snapshot.head),
     async readReviewCap(runId) {

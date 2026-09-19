@@ -803,7 +803,8 @@ anything was changed.
 **MAJOR -- a third push site with no scan, and it is the path a refused wrapper commit
 takes.** Round 16 said `publicationReadiness` is "called by BOTH publishers". Enumerating
 push sites instead of publishers -- `grep -n "'push'" trident/*.ts` excluding tests -- gives
-three origin-facing lease pushes: `production-host-effects.ts` `publishChecked` (gated),
+three origin-facing lease pushes (CORRECTED in round 18, below: that grep did not recurse
+into `trident/gates/`, and there are four): `production-host-effects.ts` `publishChecked` (gated),
 `build-host.ts` `publishGate` (gated), and `trident/publication.ts` `publishBuiltCommit`,
 which had no scan at all (`grep -n 'release-readiness\|publicationReadiness\|claude-session'
 trident/publication.ts` = 0 before this round). `publishBuiltCommit` is live on two
@@ -920,6 +921,126 @@ and 5 / 0 restored; control `bun test trident/gates/release-readiness.test.ts` 1
 either way (it never imports `publication.ts`). The window IS the guarantee on this path:
 with it collapsed, the very commit G166 refused is pushed as an unreviewed PR.
 
+### Round 18: the FOURTH push site scans too (`trident/gates/build-claim.ts` `checkBuildClaim`, G100), the salvage push names the object, and the wrapper runs one argv scan
+
+The round-17 head (`6818b39a`) came back REQUEST_CHANGES from the independent reviewer
+with one major, one minor and one nit. Each was reproduced against the real code before
+anything was changed.
+
+**MAJOR -- a fourth origin-facing push with no scan: G100's preservation push.** Round 17
+enumerated push sites with `grep -n "'push'" trident/*.ts`, which does not recurse, so it
+never saw `trident/gates/build-claim.ts:32`. The card's own criterion is a grep WITH a
+positive control, not memory, so the enumeration was redone recursively:
+`grep -rn "'push'" trident --include=*.ts | grep -v '\.test\.'` at this head lists
+`production-host-effects.ts:377` (the checked publisher, gated), `publication.ts:304`
+(the salvage publisher, gated since round 17), `gates/build-claim.ts:50` (THIS finding),
+`merge.ts:1686` (the local-mode merge, which pushes the merge commit to `main` -- commits
+already published through G166 -- not a build branch), `merge.ts:2147` (`push origin
+--delete <branch>` after a merge: a delete, nothing published) and
+`wrong-base-remedy.ts:536` (a token index in a command scrubber, not a push). The positive
+control is that the grep names the three sites the previous rounds gated. So there are
+FOUR origin-facing pushes of a build branch, and `checkBuildClaim` was the one with no
+scan: `grep -rn 'sessionTrailerReadiness\|publicationReadiness' trident --include=*.ts |
+grep -v '\.test\.'` before this round = `build-host.ts:226`, `production-host-effects.ts:369`,
+`publication.ts:259` and nothing under `gates/build-claim.ts`.
+
+Why it matters: G100 fires when a build or fix worker's claimed head resolves to a commit
+other than the measured head (`build-run.ts:418-424` -> `deps.checkBuildClaim`), and it
+pushes the measured head to origin BEFORE refusing, so the work is preserved. That is
+exactly the state the wrapper's exit 76 leaves: its stderr tells Forge "the commit this
+invocation created is reachable from $new_head", Forge reports its own sha, the host
+measures the later one, and G100 preserves the branch -- with the wrapper's trailer commit
+reachable from it -- onto the public remote. Reproduced with real git before the fix
+(`trident/gates/build-claim-realgit.test.ts`, the carrier test): branch `trident/card` =
+base <- own(`subject`, `Claude-Session: ...`) <- foreign(`foreign on top`);
+`checkBuildClaim(host, repo, 'trident/card', own.slice(0, 7), { head: foreign })` returned
+`blocked 'Build claim ... branch preserved on origin'` and origin's `refs/heads/trident/card`
+held `foreign` with `own` (`cat-file commit` containing `\nClaude-Session:`) reachable.
+
+Closed in the round-17 shape: `checkBuildClaim` takes the run's launch base as a new
+parameter (`checkBuildClaim(run, repo, branch, launchBase, claim, snapshot, runId)`;
+`build-host.ts:143` threads `options.leak.base_sha`, the same pin `publishGate` hands
+`publicationReadiness` two lines below) and calls
+`sessionTrailerReadiness(run, repo, launchBase, snapshot.head)` (`build-claim.ts:45`)
+after the lease observation and IMMEDIATELY before the push. On anything but `allow` it
+does NOT push and returns `blocked` with the gate's own text appended:
+`Build claim <c> resolves to <r> but measured head is <h>; branch NOT preserved on origin:
+<Publication branch carries a Claude-Session trailer on N commit(s) above the launch base:
+<shas> | the unknown detail>`. `blocked`, not `unknown`, on an unmeasurable range: the
+claim conflict is a MEASURED fact whichever way the scan goes, so the run's outcome
+(`failed`, `built-head-unverified`) is the same; only the side effect -- the push -- is
+withheld, and the reason is in the text. The successful path is byte-identical to before
+(`...; branch preserved on origin`), and a remote already holding the measured head still
+needs neither scan nor push (there is no push to guard).
+
+**Tests.** NEW `trident/gates/build-claim-realgit.test.ts` runs the real gate against real
+git and a bare origin, `spawnCapture` for every command with the argv recorded: (a) `:90`
+POSITIVE CONTROL, a claim conflict on clean history -> `blocked '...; branch preserved on
+origin'`, origin holds `foreign`, the push argv is exactly
+`push --force-with-lease=refs/heads/trident/card: origin <foreign>:refs/heads/trident/card`,
+and the `cat-file` of BOTH branch commits precedes it; (b) `:108` the carrier -> `blocked
+'...; branch NOT preserved on origin: ...1 commit(s) above the launch base: <own>'`, no
+`push` argv at all, origin `ls-remote` empty, local branch untouched; (c) `:124` a launch
+base naming no object -> `blocked '... NOT preserved on origin: Publication commit range
+could not be listed'`, nothing pushed. `trident/gates/build-claim.test.ts` (fake host)
+threads the base through every existing call, pins the new call order (`check-ref-format`,
+`rev-parse`, `ls-remote`, `rev-list`, `cat-file`, `push`, `ls-remote`) and the rev-list argv
+(`--end-of-options <base>..<head>`), and adds `:79` a carrier -> the exact blocked text and
+no push; `:91` '' / failing rev-list / failing cat-file -> the exact blocked text naming
+each detail and no push; `:106` a remote already at the head -> no rev-list and no push.
+`trident/build-host.test.ts` `:811` runs the COMPOSED host against real git with a
+trailer-bearing built commit and `leak.base_sha` = the base: the deps' `checkBuildClaim`
+refuses `NOT preserved` and origin has no `refs/heads/change`; the existing composed G100
+test sets `leak.base_sha` to its real base (the fixture default `'b' * 40` names no
+object, which the scan now refuses) and pins the `preserved on origin` text.
+
+**MINOR -- the salvage push sent the REF, the scan measured the OBJECT.** `publication.ts`
+scanned `headToPublish` but pushed `refs/heads/<branch>:refs/heads/<branch>`, so a writer
+moving the local branch between the scan and the push published an unscanned commit and
+the witness (`remoteHead !== headToPublish`) threw only after it was on origin. Closed: the
+refspec is `${headToPublish}:refs/heads/${branch}` (`publication.ts:307`), the shape the
+checked publisher and G100 already use; the scanned object is the pushed object by
+construction. Pinned in `publication-session-trailer-realgit.test.ts` (a) (the recorded
+push argv is exactly `push --force-with-lease=refs/heads/<b>: origin <tip>:refs/heads/<b>`),
+`orchestrator.test.ts` "pr mode publishes and re-fires review" (the fake-host argv now
+carries `<head>:refs/heads/feat-x`), and `publish-rebase-realgit.test.ts` `leasePush`, the
+replica of this push, which now takes the head and pushes it (its lease-refusal test
+still refuses: the lease, not the refspec, is what a third-party advance trips).
+
+**NIT -- the wrapper's `--amend` detection read option values as options.** The signing
+scan skipped the value of `-m`, `-F`, `--author`, ... (round 10); the `--amend` loop did
+not, so `-m '--amend'` set `amending=1`, derived the expected parent as HEAD's parent, saw
+HEAD as the new commit's first parent, and refused a legitimate commit with exit 76 and the
+trailer left on the ref. Closed by ONE scan: `scan_commit_argv` (`:131`), run once before
+the commit (`:169`), decides `amending`, `sign_flag` and `allow_empty_message` by the same
+value-skipping and cluster rules; the second loop inside the strip block is gone and the
+rebuild reads the three variables. Real-git test `:1269`: positive control first (the same
+paragraph delivered BARE is an amend of the root commit -- one word in `rev-list
+--parents`), then `-m '--amend' -m <trailer> -m <co-author>` lands as an ordinary commit
+whose first parent is the fixture parent, message `--amend\n\n<Co-Authored-By>`, exit 0.
+Restoring the old loop after the scan (`for arg in "$@"; do [ "$arg" = --amend ] &&
+amending=1; done`) reds exactly that test (52 / 1); restored 53 / 0.
+
+**Inventory.** G166 now names all four push sites, the object-not-ref refspec, and the
+recursive grep with its exclusions; production anchors add `publication.ts:307`,
+`gates/build-claim.ts:45-46`; test anchors add the three new real-git tests, the two
+fake-host tests and the composed-host test. G135 gains the one-scan sentence and
+`commit-with-resolved-head.sh:131`; its wrapper code anchors are re-numbered for the moved
+scan (`:125` -> `:170`, `:176` -> `:221`, ...) and the new test is cited. Row count unchanged
+(166; citations 1 / 0).
+
+**Mutation, proven by hand before nomination (round 18).**
+`grep -c 'const trailers = await sessionTrailerReadiness(run, repo, launchBase, snapshot.head)'
+trident/gates/build-claim.ts` = 1. Replacing that line with
+`const trailers: GateResult = { kind: 'allow' }` is the pre-round-18 gate: the scan never
+runs and every claim conflict is preserved. Measured: guard
+`bun test trident/gates/build-claim-realgit.test.ts` 0 pass / 3 fail mutated -- the carrier
+test sees a push and origin at `foreign`, the unmeasurable-range test sees a push, and the
+positive control fails on its own assertion that both commits were read before the push --
+and 3 / 0 restored; control `bun test trident/gates/release-readiness.test.ts` 11 / 0
+either way (it never imports `build-claim.ts`). The fake-host `build-claim.test.ts` also
+goes 6 / 3 under the mutation, which is why it is not the control.
+
 ### Mutation, proven by hand before nomination
 
 `grep -c '\[Cc\]\[Ll\]\[Aa\]\[Uu\]\[Dd\]\[Ee\]-\[Ss\]\[Ee\]\[Ss\]\[Ss\]\[Ii\]\[Oo\]\[Nn\]:\*) drop\[i\]=1; removed=1 ;;'
@@ -1022,6 +1143,14 @@ stands as the guard that it never does. (The round-8 pattern mutation on
   main that once carried one (`0fc6cb83` does).
 - Snapshotting and restoring the sequencer state a withdrawn commit consumed: still not
   done; the loss is named on stderr (unchanged from round 10).
+- `merge.ts:1686` (the local-mode merge push of the merge commit to the base branch) and
+  `merge.ts:2147` (`push origin --delete <branch>` after a merge) do NOT scan: the first
+  pushes commits already published through G166 to `main`, the second publishes nothing.
+  They are in the recursive enumeration above so the next reader does not have to
+  re-derive why.
+- `unknown` vs `blocked` when G100's scan cannot measure the range: `blocked`, because the
+  claim conflict is already measured and the outcome is the same; the withheld push is
+  named in the text. An `unknown` here would re-run a refusal that is already certain.
 - `docs/AS_BUILT.md` and every existing shard: frozen; this record is a new shard.
 
 ### Effect after merge

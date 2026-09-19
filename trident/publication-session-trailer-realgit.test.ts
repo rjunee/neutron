@@ -137,6 +137,11 @@ test('#1133 G166 salvage: positive control — a branch with only Co-Authored-By
   const push = d.calls.findIndex(cmd => cmd.some(arg => arg.startsWith('--force-with-lease=')))
   expect(catFile).toBeGreaterThanOrEqual(0)
   expect(push).toBeGreaterThan(catFile)
+  // And the push names the OBJECT the scan read, not the local ref — a ref can move between
+  // the scan and the push; the object cannot (#1133 round 18).
+  expect(d.calls[push]).toEqual([
+    'git', '-C', world.checkout, 'push', `--force-with-lease=refs/heads/${BRANCH}:`, 'origin', `${world.branchTip}:refs/heads/${BRANCH}`,
+  ])
 })
 
 test('#1133 G166 salvage: a branch head carrying the trailer is NOT pushed — origin unchanged, no PR, the sha named', async () => {

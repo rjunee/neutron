@@ -289,6 +289,12 @@ export async function publishBuiltCommit(
   // pre-rebase tip while the replay produced a new head still needs the real lease push.
   // The genuine "nothing was built" outcome keeps its guard where it belongs: the empty
   // base..head diff refusal below, which measures CONTENT against the base.
+  // PUSH THE OBJECT, NOT THE REF (#1133 round 18). The scans above measured `headToPublish`;
+  // a refspec of `refs/heads/<branch>:...` would send whatever the local ref names at push
+  // time, so a writer moving the branch between the scan and the push would publish an
+  // unscanned commit and the witness below would only notice after it was on origin. Naming
+  // the object makes the pushed commit the scanned commit by construction, the same shape the
+  // checked publisher (`production-host-effects.ts`) and G100's preservation push use.
   const alreadyPublished = remoteAlreadyAtPublishHead(expected, headToPublish)
   if (!alreadyPublished) {
     const pushed = await runWithRetries([
@@ -298,7 +304,7 @@ export async function publishBuiltCommit(
       'push',
       `--force-with-lease=refs/heads/${branch}:${expected}`,
       'origin',
-      `refs/heads/${branch}:refs/heads/${branch}`,
+      `${headToPublish}:refs/heads/${branch}`,
     ])
     // NOTE the lease is deliberately NOT re-observed between retries. Re-reading it would adopt
     // whatever moved and turn the retry into the force this code exists to avoid.

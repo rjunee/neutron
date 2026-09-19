@@ -115,13 +115,58 @@ elif [ "$symref_exit" -ne 0 ] || [ -z "$target_ref" ]; then
   exit 77
 fi
 
-amending=0
-for arg in "$@"; do
-  case "$arg" in
-    --) break ;;
-    --amend) amending=1 ;;
-  esac
-done
+# THE ONE ARGV SCAN. Everything this wrapper needs to know about the agent's `git commit`
+# argv is read here, once, before the commit, by one set of rules: whether this is an
+# `--amend` (decides the expected parent for the provenance check below), the signing key
+# to repeat on the rebuilt commit (`-S<key>`, `--gpg-sign=<key>`, the signing letter inside
+# a boolean short-flag cluster such as `-aS<key>` / `-sSkey`; a bare `-S` for the
+# configured default key when argv named none), and `--allow-empty-message` (commit-tree
+# accepts an empty message, git commit does not, and the rebuilt commit must not be one
+# git would have refused). An option that takes its VALUE as the next argv element (`-m`,
+# `-F`, `--author`, ...) has that value skipped, so a paragraph that happens to be `--amend`
+# or to begin with `-S` is never read as the flag it spells: the former would derive the
+# wrong expected parent and refuse a legitimate commit with the trailer left on the ref,
+# the latter would hand commit-tree a key id. Short flags cluster: git reads `-aS` as
+# `-a -S` and `-sSkey` as `-s -Skey`. A bare `--` ends the options, so the scan stops there.
+scan_commit_argv() {
+  local arg skip_value=0
+  amending=0
+  sign_flag=-S
+  allow_empty_message=0
+  for arg in "$@"; do
+    if [ "$skip_value" -eq 1 ]; then
+      skip_value=0
+      continue
+    fi
+    case "$arg" in
+      --) break ;;
+      --amend) amending=1 ;;
+      -S|--gpg-sign|--no-gpg-sign) sign_flag=-S ;;
+      -S?*) sign_flag=$arg ;;
+      --gpg-sign=*) sign_flag="-S${arg#--gpg-sign=}" ;;
+      --allow-empty-message) allow_empty_message=1 ;;
+      -m|-F|-C|-c|-t|--message|--file|--author|--date|--template|--fixup|--squash|--reuse-message|--reedit-message|--trailer|--pathspec-from-file|--cleanup) skip_value=1 ;;
+      # A cluster of boolean short flags with `S` inside it (-aS, -sS, -asS, -aSkeyid). Git
+      # reads every letter before the first `S` as its own flag and everything after it as
+      # the optional key id. A value-taking letter before the `S` (`-mS`, `-CS`) makes the
+      # `S` that option's attached value, not a flag, so such a cluster forwards nothing.
+      -[!-]*S*)
+        case "${arg%%S*}" in
+          -*[!apqvnseioz]*) ;;
+          *) sign_flag="-S${arg#*S}" ;;
+        esac ;;
+      # A cluster of boolean short flags whose LAST letter takes the next argv element
+      # (-am, -qm, -sm, -nm, -om, -aF, ...). An attached value (`-Ffile.txt`, `-Cabc`) is
+      # not a cluster: a non-flag letter before the last one leaves the next arg alone.
+      -[!-]*[mFCct])
+        case "${arg%?}" in
+          -*[!apqvnseioz]*) ;;
+          *) skip_value=1 ;;
+        esac ;;
+    esac
+  done
+}
+scan_commit_argv "$@"
 expected_parent=$head_oid
 if [ "$amending" -eq 1 ]; then
   amend_raw=$(git cat-file commit "$head_oid" 2>"$probe_err")
@@ -311,50 +356,9 @@ if strip_session_trailer <"$raw_object" >"$stripped_message"; then
   # The rebuilt commit must repeat what the first one was given, or the two halves
   # disagree. The signature is decided by the OBJECT (a `gpgsig` header on $new_head; a
   # `commit.gpgsign` config signs the first commit but `commit-tree` ignores that config,
-  # so a config-signed commit would otherwise come out unsigned); the KEY comes from the
-  # argv scan (`-S<key>`, `--gpg-sign=<key>`, the signing letter inside a boolean short-flag
-  # cluster such as `-aS<key>` / `-sSkey`), or a bare `-S` for the configured default key
-  # when argv named none. `--allow-empty-message` is noted too (commit-tree accepts an
-  # empty message, git commit does not, and the rebuilt commit must not be one git would
-  # have refused). An option that takes its VALUE as the next argv element (`-m`, `-F`,
-  # `--author`, ...) has that value skipped, so a paragraph that happens to begin with `-S`
-  # is never mistaken for a signing flag and handed to commit-tree as a key id. Short flags
-  # cluster: git reads `-aS` as `-a -S` and `-sSkey` as `-s -Skey`. A bare `--` ends the
-  # options, so the scan stops there.
-  sign_flag=-S
-  allow_empty_message=0
-  skip_value=0
-  for arg in "$@"; do
-    if [ "$skip_value" -eq 1 ]; then
-      skip_value=0
-      continue
-    fi
-    case "$arg" in
-      --) break ;;
-      -S|--gpg-sign|--no-gpg-sign) sign_flag=-S ;;
-      -S?*) sign_flag=$arg ;;
-      --gpg-sign=*) sign_flag="-S${arg#--gpg-sign=}" ;;
-      --allow-empty-message) allow_empty_message=1 ;;
-      -m|-F|-C|-c|-t|--message|--file|--author|--date|--template|--fixup|--squash|--reuse-message|--reedit-message|--trailer|--pathspec-from-file|--cleanup) skip_value=1 ;;
-      # A cluster of boolean short flags with `S` inside it (-aS, -sS, -asS, -aSkeyid). Git
-      # reads every letter before the first `S` as its own flag and everything after it as
-      # the optional key id. A value-taking letter before the `S` (`-mS`, `-CS`) makes the
-      # `S` that option's attached value, not a flag, so such a cluster forwards nothing.
-      -[!-]*S*)
-        case "${arg%%S*}" in
-          -*[!apqvnseioz]*) ;;
-          *) sign_flag="-S${arg#*S}" ;;
-        esac ;;
-      # A cluster of boolean short flags whose LAST letter takes the next argv element
-      # (-am, -qm, -sm, -nm, -om, -aF, ...). An attached value (`-Ffile.txt`, `-Cabc`) is
-      # not a cluster: a non-flag letter before the last one leaves the next arg alone.
-      -[!-]*[mFCct])
-        case "${arg%?}" in
-          -*[!apqvnseioz]*) ;;
-          *) skip_value=1 ;;
-        esac ;;
-    esac
-  done
+  # so a config-signed commit would otherwise come out unsigned); the KEY ($sign_flag) and
+  # `--allow-empty-message` ($allow_empty_message) come from the one argv scan that ran
+  # before the commit (scan_commit_argv, above).
 
   if [ ! -s "$stripped_message" ] && [ "$allow_empty_message" -eq 0 ]; then
     withdraw_commit "$new_head"
