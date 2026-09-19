@@ -1,6 +1,7 @@
 import { chmodSync, lstatSync, realpathSync } from 'node:fs'
 import { dirname, isAbsolute, join } from 'node:path'
 import type { ServerWebSocket } from 'bun'
+import { fireAndForget } from '@neutronai/logger/fire-and-forget.ts'
 import { BROKER_MAX_MESSAGE_BYTES, type ProjectControlTransport } from './project-control-broker-transport.ts'
 import { validateProjectControlScope } from './project-control-broker-scope.ts'
 import { openProjectControlJournal } from './project-control-broker-journal.ts'
@@ -203,7 +204,7 @@ export async function createProjectControlBroker(options: {
         try { journal.settle() } catch { close(new Error('Broker journal settlement failed; outcome unknown')) }
       }
     }
-    void native(work.method, work.params).then(result => {
+    fireAndForget('codex-cli.project-control-broker.mutation', native(work.method, work.params).then(result => {
       if (work.method === 'turn/start') {
         if (!object(result) || !object(result.turn) || typeof result.turn.id !== 'string' || !active
           || active.turnId !== null && active.turnId !== result.turn.id) { close(new Error('Native turn identity unknown')); work.reject(closed!); return }
@@ -215,7 +216,7 @@ export async function createProjectControlBroker(options: {
       if (closed) work.reject(closed)
       else work.resolve(result)
       pump()
-    }, error => {
+    }), error => {
       if (work.method === 'turn/start') {
         if (active && active.turnId !== null) close(new Error('Native turn started before refusal; outcome unknown'))
         else active = undefined
@@ -298,7 +299,7 @@ export async function createProjectControlBroker(options: {
             else client.emit({ id: requestId, result: {} })
             return
           }
-          void request(client, raw.method, object(raw.params) ? raw.params : {}).then(result => client.emit({ id: requestId, result }), respondError)
+          fireAndForget('codex-cli.project-control-broker.response', request(client, raw.method, object(raw.params) ? raw.params : {}).then(result => client.emit({ id: requestId, result })), respondError)
         },
         close(socket) { sockets.delete(socket); detach(socket.data.client) },
       },

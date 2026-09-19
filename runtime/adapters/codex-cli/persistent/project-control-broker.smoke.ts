@@ -115,7 +115,7 @@ async function run(): Promise<void> {
     if (!refused) {
       await until(() => broker?.state().phase === 'idle', 'bypass native completion')
       const snapshot = await gateway.request('thread/read', { threadId }) as { thread: { cwd: string; environments?: unknown } }
-      console.error('BYPASS: native thread after foreign environment mutation', JSON.stringify(snapshot.thread.environments))
+      process.stderr.write(`BYPASS: native thread after foreign environment mutation ${JSON.stringify(snapshot.thread.environments)}\n`)
       throw new Error('Foreign environment reached native app-server')
     }
     assert.equal(requests.filter(message => message.method === 'turn/start').length, sentBeforeRefusal)
@@ -148,9 +148,9 @@ async function run(): Promise<void> {
     await recovered.request('turn/start', { threadId, input: [{ type: 'text', text: 'RECOVERED_BROKER_MARKER' }] }, broker.state().epoch)
     await until(() => broker?.state().phase === 'idle' && inputs.some(input => input.includes('RECOVERED_BROKER_MARKER')), 'recovered native completion')
     for (const marker of ['DISPOSABLE_SEED', 'NATIVE_BROKER_MARKER', 'GATEWAY_BROKER_MARKER']) assert(inputs.at(-1)?.includes(marker))
-    console.log('PASS: scope fencing, native TUI and gateway shared one thread; restart fenced stale epoch and retained native history; local provider only.')
+    process.stdout.write('PASS: scope fencing, native TUI and gateway shared one thread; restart fenced stale epoch and retained native history; local provider only.\n')
   } catch (error) {
-    console.error(output.slice(-4000).replace(/\x1b\[[0-?]*[ -/]*[@-~]/g, ''))
+    process.stderr.write(`${output.slice(-4000).replace(/\x1b\[[0-?]*[ -/]*[@-~]/g, '')}\n`)
     throw error
   } finally {
     tui?.kill(); tui?.terminal?.close()
