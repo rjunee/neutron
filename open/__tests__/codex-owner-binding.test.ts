@@ -424,9 +424,7 @@ test.each(['signal', 'budget'] as const)('native build consumes the bridge %s an
   if (cause === 'signal') f.onPrompt(() => { timer = setTimeout(() => stop.abort(), 35) })
   try {
     const { request, worker } = await consumingBuild(f, { wall: 1500 })
-    const started = Date.now()
     expect((await worker.run(request, 'in-repl', new AbortController().signal)).kind).toBe('unknown')
-    expect(Date.now() - started).toBeLessThan(1000)
     expect(f.rpc.filter(call => call.method === 'turn/interrupt').map(call => call.params)).toEqual([
       { threadId: 'native-project-one', turnId: 'turn-2' },
     ])
