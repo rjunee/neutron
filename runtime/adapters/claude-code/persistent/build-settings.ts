@@ -167,6 +167,17 @@ export function buildSettings(input: BuildSettingsInput): string {
     ]
   }
   const settings: Record<string, unknown> = { hooks }
+  // #1133 — every REPL Neutron spawns is machine-driven, and a public repository
+  // should not carry a claude.ai session URL on every loop-authored commit. The
+  // CLI (2.1.277 settings schema, `attribution.sessionUrl`): "Whether to append
+  // the claude.ai session link to commits and PRs created from web or Remote
+  // Control sessions (default: true). Set to false to omit the Claude-Session
+  // trailer and PR-body link." It is a sibling of `attribution.commit` (the
+  // Co-Authored-By text), so this drops ONLY the session line; `attribution.commit`,
+  // `attribution.pr` and `includeCoAuthoredBy` are deliberately left unset so the
+  // Co-Authored-By trailer is exactly what the CLI composes today. Unconditional:
+  // no human commits through one of these sessions.
+  settings['attribution'] = { sessionUrl: false }
   // Task 6 (T5 write-containment) — emit a `permissions` block ALONGSIDE the Stop
   // hook when the caller provides one (the ritual write-containment variant). Only
   // the sub-keys actually set are written, so a deny-only ritual doesn't emit an

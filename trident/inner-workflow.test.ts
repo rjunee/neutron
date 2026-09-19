@@ -760,6 +760,18 @@ describe('inner-workflow.mjs — parallel adversarial review + asymmetric synthe
     expect(pushStep).toContain('never invoke \\`git commit\\` directly')
     expect(pushStep.match(/\$\{guardedCommit\}/g)).toHaveLength(3)
   })
+
+  test('#1133: the Forge commit instruction forbids the Claude-Session trailer and keeps Co-Authored-By', () => {
+    // Advisory half of #1133 — the wrapper strip is the enforcement; this pins the
+    // brief so the model is told, in every mode, not to write the trailer at all.
+    const pushStep = grabFunction('forgePushStep')
+    expect(pushStep).toContain('Do not add a \\`Claude-Session:\\` trailer')
+    expect(pushStep).toContain('keep the Co-Authored-By trailer')
+    // The strip amends, so the sha git prints first is not the branch head: the brief
+    // must send Forge to `git rev-parse HEAD` for commitSha or the head-claim gate trips.
+    expect(pushStep).toContain('git rev-parse HEAD')
+    expect(pushStep).toContain('never copy it from a')
+  })
 })
 
 describe('inner-workflow.mjs — codex cross-model review panelist', () => {

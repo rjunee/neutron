@@ -100,6 +100,106 @@ test('a resolving HEAD still commits with the expected parent, and leaves no scr
   expect(readdirSync(scratch)).toEqual([])
 })
 
+// #1133 -- the wrapper is the one place every Forge commit passes through, so it is where
+// "no loop-authored commit carries a `Claude-Session:` trailer" is enforced, whatever the
+// model was told. These run the real script against real git: the trailer arrives exactly
+// the way the CLI's attribution reminder makes the agent write it (its own `-m` paragraph),
+// and the commit that lands must be the same single commit -- amended in place, parent
+// unchanged, author unchanged, Co-Authored-By byte-identical.
+const CO_AUTHOR = 'Co-Authored-By: Claude Fable 5.1 <noreply@anthropic.com>'
+const SESSION = 'Claude-Session: https://claude.ai/code/session_01TEST'
+
+test("#1133: a Claude-Session trailer on the agent's message never reaches the commit", () => {
+  const { tree, branch, parent } = fixture()
+
+  const result = run(tree, 'bash', [guard, branch, '-m', 'feat: subject', '-m', SESSION, '-m', CO_AUTHOR])
+
+  expect(result.status, result.stderr || result.stdout).toBe(0)
+  const body = git(tree, 'log', '-1', '--format=%B')
+  expect(body).not.toContain('Claude-Session')
+  expect(body).toContain(CO_AUTHOR)
+  expect(body.startsWith('feat: subject')).toBe(true)
+  // One commit, rewritten in place: the parent is still the fixture's base commit, the
+  // author survived the amend, and the tree is what the agent staged.
+  expect(git(tree, 'rev-parse', 'HEAD^')).toBe(parent)
+  expect(git(tree, 'log', '-1', '--format=%an')).toBe('Test')
+  expect(git(tree, 'show', '--stat', '--format=', 'HEAD')).toContain('change.txt')
+  // The strip AMENDS, so git's first `[branch sha] subject` line names a commit that is no
+  // longer on the branch. The wrapper must name the commit that IS, in full, on stdout --
+  // a Forge that copied the first line would trip the head-claim gate downstream.
+  expect(result.stdout).toContain('HEAD is now')
+  expect(result.stdout).toContain(git(tree, 'rev-parse', 'HEAD'))
+})
+
+test("#1133: --no-verify on the agent's commit is honoured by the strip amend (a refusing pre-commit hook cannot leave the trailer behind)", () => {
+  const { tree, branch, parent } = fixture()
+  const refusing = mkdtempSync(join(tmpdir(), 'trident-head-refusing-hooks-'))
+  roots.push(refusing)
+  writeFileSync(join(refusing, 'pre-commit'), '#!/bin/sh\necho "hook refuses" >&2\nexit 1\n', { mode: 0o755 })
+  git(tree, 'config', 'core.hooksPath', refusing)
+
+  // Positive control: the hook really does refuse, so a commit WITHOUT --no-verify never
+  // lands. Without this, a hooks dir git silently ignored would pass the assertion below.
+  const refused = run(tree, 'bash', [guard, branch, '-m', 'refused'])
+  expect(refused.status).not.toBe(0)
+  expect(refused.stderr).toContain('hook refuses')
+  expect(git(tree, 'rev-parse', 'HEAD')).toBe(parent)
+
+  // The agent skipped the hook on its commit; the amend must not re-run it, or the commit
+  // lands with the trailer still in it and the wrapper exits non-zero.
+  const result = run(tree, 'bash', [guard, branch, '--no-verify', '-m', 'feat: subject', '-m', SESSION, '-m', CO_AUTHOR])
+
+  expect(result.status, result.stderr || result.stdout).toBe(0)
+  const body = git(tree, 'log', '-1', '--format=%B')
+  expect(body).not.toContain('Claude-Session')
+  expect(body).toContain(CO_AUTHOR)
+  expect(git(tree, 'rev-parse', 'HEAD^')).toBe(parent)
+  expect(result.stdout).toContain(git(tree, 'rev-parse', 'HEAD'))
+})
+
+test('#1133: a session trailer that is NOT the last paragraph is still the only line removed', () => {
+  const { tree, branch } = fixture()
+
+  const result = run(tree, 'bash', [guard, branch, '-m', 'fix: middle', '-m', `${SESSION}\n${CO_AUTHOR}`, '-m', 'Refs #1133'])
+
+  expect(result.status, result.stderr || result.stdout).toBe(0)
+  const body = git(tree, 'log', '-1', '--format=%B')
+  expect(body).not.toContain('Claude-Session')
+  expect(body).toContain(CO_AUTHOR)
+  expect(body).toContain('Refs #1133')
+  expect(body.startsWith('fix: middle')).toBe(true)
+})
+
+test('#1133: a message without the trailer is committed once and left untouched (no amend)', () => {
+  const { tree, branch, parent } = fixture()
+
+  const result = run(tree, 'bash', [guard, branch, '-m', 'feat: plain', '-m', CO_AUTHOR])
+
+  expect(result.status, result.stderr || result.stdout).toBe(0)
+  // Byte-equal to what git itself produces for the same -m arguments.
+  expect(git(tree, 'log', '-1', '--format=%B')).toBe(`feat: plain\n\n${CO_AUTHOR}`)
+  expect(git(tree, 'rev-parse', 'HEAD^')).toBe(parent)
+  // The strip path must be SKIPPED when there is nothing to strip: the branch reflog
+  // holds the one commit and no `commit (amend)` entry.
+  const reflog = git(tree, 'reflog', 'show', '--format=%gs', branch)
+  expect(reflog).not.toContain('commit (amend)')
+  expect(reflog.split('\n').filter((l) => l.startsWith('commit:'))).toHaveLength(1)
+})
+
+test("#1133: a failed commit propagates git's exit code, and nothing is amended", () => {
+  const { tree, branch, parent } = fixture()
+  git(tree, 'reset', '-q') // nothing staged -> git commit refuses
+  const before = git(tree, 'rev-parse', 'HEAD')
+  expect(before).toBe(parent)
+
+  const result = run(tree, 'bash', [guard, branch, '-m', 'feat: nothing staged', '-m', SESSION])
+
+  expect(result.status).toBe(1)
+  expect(git(tree, 'rev-parse', 'HEAD')).toBe(parent)
+  expect(git(tree, 'log', '-1', '--format=%B')).toBe('base')
+  expect(git(tree, 'reflog', 'show', '--format=%gs', branch)).not.toContain('commit (amend)')
+})
+
 // THE OTHER TWO ANSWERS, AND WHY THEY NEED A SHIM.
 //
 // The refusal exists to keep three facts apart: the query FAILED, the query SUCCEEDED and

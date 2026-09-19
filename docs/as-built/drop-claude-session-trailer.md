@@ -1,0 +1,171 @@
+## 2026-09-19 — Loop-authored commits no longer carry the Claude-Session trailer
+
+### What was wrong
+
+Every commit the loop authored ended with a `Claude-Session: https://claude.ai/code/session_...`
+trailer beside the `Co-Authored-By` line. No human-authored commit carries one, and this is a
+public repository, so the loop was attaching a session URL to every commit it would ever
+author (issue #1133). It is not a spec violation and not a leak: the purity gate passes on
+such commits and the trailer names no host, user, path or private repository. It is a
+publicly visible difference between machine- and human-authored history that nobody decided
+on.
+
+### Where the trailer comes from (measured on `274c5b3e`, not remembered)
+
+Positive control first. `git log --all --grep='^Claude-Session:'` returns three commits
+(`0fc6cb83`, the squash of #1131 onto main, and its two branch commits `51e5b16f` and
+`d9e415d9`), each ending in the trailer next to a `Co-Authored-By: Claude Opus 5` line. So
+the pattern does match real trailers in this history. The anchor matters: the unanchored
+form `--grep='Claude-Session'` returns five, because it also matches the SUBJECTS of this
+fix's own earlier-round commits (`e0bf4fc2`, `2cf05aa6`: "... the Claude-Session trailer
+(#1133)"), which carry no trailer. On the base this change lands on,
+`git log -60 --format=%B 274c5b3e | grep -c '^Claude-Session:'` returns 1: the #1131 squash
+`0fc6cb83`, whose message GitHub derived from the single loop-authored branch commit. No
+human-authored commit in that window carries the trailer.
+
+The same string over the repository source — `git grep -l -I 'Claude-Session' 274c5b3e`
+excluding `docs/AS_BUILT.md` and `docs/as-built/` — returns zero files, and `Co-Authored-By`
+returns zero outside `docs/`. No file in this repo composes either trailer. The host-composed
+commit messages are fixed text or carried text (`trident/leak-preflight.ts:438`,
+`trident/build-workspace.ts:118`, `trident/replay.ts:566` which forwards the model's original
+message plus a replay note, and the `gateway/git/*` backup and doc-version messages) and add no
+trailer. The squash merge (`trident/merge.ts:2127`, `trident/production-host-effects.ts:439`)
+runs `gh pr merge --squash` with no `--body`, so GitHub derives the squash message from the
+branch's single commit: a branch commit that carries the trailer puts it on main (that is
+`0fc6cb83`), and a branch commit that does not yields a clean squash. Nothing on the merge
+path needs to change.
+
+The emitter is Claude Code itself. The installed CLI (`claude --version` = 2.1.277) injects
+an attribution system-reminder into the session ("End git commit messages with:
+Co-Authored-By: ... Claude-Session: https://claude.ai/code/session_...") and the model obeys
+it. In the installed binary `grep -c sessionUrl` = 26 and `grep -c 'Claude-Session'` = 6, and
+the settings-schema text for `attribution.sessionUrl` is present verbatim:
+
+> Whether to append the claude.ai session link to commits and PRs created from web or Remote
+> Control sessions (default: true). Set to false to omit the Claude-Session trailer and
+> PR-body link.
+
+with the merge code `if(e.attribution?.sessionUrl===!1)s.attribution={...s.attribution,sessionUrl:!1}`
+reading the merged settings, whose source list includes the `--settings` file every spawn
+passes. `attribution.commit` is a separate field, so the default `Co-Authored-By` line is
+untouched by this setting.
+
+### The single seam, and why there are two mechanisms
+
+Every Claude Code process the loop spawns goes through the persistent pool's `spawn.ts`,
+whose one call to `buildSettings(...)` (`runtime/adapters/claude-code/persistent/spawn.ts:266`,
+the sole production caller) writes the per-session `--settings` JSON. That is the one place
+that reaches every commit the loop authors at the source. But it is a switch the CLI honours,
+not one this repository can prove from the outside: a CLI upgrade that renamed the key, or a
+session whose settings file did not reach the composer, would bring the trailer back with no
+test in this repo going red. So the guarantee is enforced a second time, model-independently,
+at the one deterministic place every Forge commit passes through: the commit wrapper.
+
+### What was built
+
+1. **The source-side switch.** `runtime/adapters/claude-code/persistent/build-settings.ts`
+   writes `attribution: { sessionUrl: false }` into every settings file it produces,
+   unconditionally (the disposable trident build REPLs are exactly the sessions that commit,
+   so it is not gated on any option). `attribution.commit`, `attribution.pr` and
+   `includeCoAuthoredBy` are deliberately left unset so `Co-Authored-By` is exactly what the
+   CLI composes today. `__tests__/build-settings.test.ts` pins the exact object, that the
+   sibling keys are undefined, and that the block is present on every variant (the top-level
+   key set is now `['hooks', 'attribution']`).
+
+2. **The wrapper strip.** `trident/commit-with-resolved-head.sh` no longer `exec`s
+   `git commit "$@"`; it runs the commit as a child and, on success and ONLY when HEAD moved
+   (so `--dry-run` and a no-op commit never amend an older commit), removes every line
+   matching `^Claude-Session:` from the message and amends the commit in place with
+   `--cleanup=whitespace` (author, parent, tree and `Co-Authored-By` untouched). The refusal
+   exits 64-67 are byte-for-byte unchanged. `trident/commit-with-resolved-head-realgit.test.ts`
+   runs the real script against real git: the trailer arrives the way the CLI makes the agent
+   write it (its own `-m` paragraph), and the commit that lands is one commit with the
+   fixture's parent, the same author, no `Claude-Session`, and `Co-Authored-By` byte-identical;
+   a trailer that is not the last paragraph is still the only line removed; a message without
+   the trailer is committed once and never amended (reflog has no `commit (amend)`); a failed
+   commit propagates git's exit code and amends nothing.
+
+3. **The advisory half.** The Forge brief in `trident/inner-workflow.mjs` (`guardedCommit`)
+   tells the model not to write the trailer and to keep `Co-Authored-By`, pinned in
+   `trident/inner-workflow.test.ts`. The wrapper is the enforcement; the sentence only spares
+   an amend.
+
+### Review findings on the previous round, and how each was closed
+
+The round that added the wrapper strip (PR #1152 head `e0bf4fc2`) came back REQUEST_CHANGES
+with three findings.
+
+- **MAJOR — the amend hid the real head.** The strip ran `git commit -q --amend`, so the
+  wrapper's only stdout was git's first `[branch abbrev] subject` line, which names the
+  PRE-strip commit (still in the object store via the reflog, no longer on the branch). A
+  Forge that copied commitSha from that line would trip the head-claim gates (local mode
+  `forge:build reported commit X but refs/heads/<branch> resolves to Y`; pr mode
+  `trident/publication.ts` `resolvedClaim !== resolvedHead`). Closed: the amend runs without
+  `-q`, so git prints the second summary line naming the commit that is on the branch, and
+  the wrapper then prints one explicit line —
+  `commit-with-resolved-head: Claude-Session trailer stripped; HEAD is now <full new sha> (the summary line above named the pre-strip commit <full pre-strip sha>)`.
+  The Forge brief now also says: after the wrapper returns, read commitSha with
+  `git rev-parse HEAD`, never from a `[branch sha]` summary line. The first #1133 real-git
+  test asserts the wrapper's stdout contains `HEAD is now` and the full `git rev-parse HEAD`;
+  `inner-workflow.test.ts` pins the brief sentence.
+- **MINOR — the amend did not inherit the first commit's flags.** With `--no-verify` on argv
+  and a refusing pre-commit hook (an unlinked managed hook exits 68), the first commit landed,
+  the amend re-ran the hook and failed, the wrapper exited non-zero and the trailer STAYED.
+  Same asymmetry for `-S`/`--gpg-sign`. Closed: the amend runs `--no-verify` unconditionally
+  (the same hooks vetted the same tree seconds earlier; the amend changes only the message)
+  and forwards `-S`, `-S<key>`, `--gpg-sign`, `--gpg-sign=<key>`, `--no-gpg-sign` and
+  `--allow-empty` found in the original argv (the scan stops at a bare `--`). Covered by a
+  real-git test with a `core.hooksPath` dir whose `pre-commit` exits 1: the in-test positive
+  control first shows that without `--no-verify` the hook refuses and HEAD does not move;
+  then with `--no-verify` the commit lands stripped, `Co-Authored-By` intact, exit 0, and
+  stdout names the final HEAD. Removing `--no-verify` from the amend turns exactly that test
+  red (12 pass / 1 fail); restoring it returns 13 / 0.
+- **NIT — the strip drops ANY line beginning `Claude-Session:`, not only a trailer-block
+  line.** Deliberately left as is: the string is machine-composed, no prose line legitimately
+  starts with it, and a trailer-block parser is code the card does not ask for.
+
+### Mutation, proven by hand before nomination
+
+`grep -c "\-e '^Claude-Session:'" trident/commit-with-resolved-head.sh` = 1.
+`sed -i "s/-e '^Claude-Session:'/-e '^Never-Matches-Trailer:'/"` on that file (the trailer
+comes back) turns the strip tests in `commit-with-resolved-head-realgit.test.ts` red while
+`runtime/adapters/claude-code/persistent/__tests__/build-settings.test.ts`, which never runs
+the wrapper, stays green; `git checkout -- trident/commit-with-resolved-head.sh` returns the
+guard to green.
+
+### Not changed, deliberately
+
+- `attribution.commit`, `attribution.pr`, `includeCoAuthoredBy`: untouched, so
+  `Co-Authored-By` is unchanged (acceptance).
+- The `CLAUDE_CODE_SUPPRESS_SESSION_ATTRIBUTION` environment variable: an undocumented second
+  knob for the same switch. The wrapper strip is the second mechanism because it is provable
+  from this repository; a second CLI knob is not.
+- The body-wide `^Claude-Session:` pattern (the nit above).
+- `docs/AS_BUILT.md` and every existing shard: frozen; this record is a new shard.
+
+### Effect after merge
+
+The settings switch takes effect on the next REPL spawn from a deployed tree that carries
+it; warm REPLs keep their old `--settings` file until they respawn. The wrapper strip takes
+effect on the next Forge commit from a checkout that carries it, whatever the REPL's settings
+say. The commit that lands this change was itself authored through the wrapper with a
+deliberate `Claude-Session: https://claude.ai/code/session_01PROOF` paragraph on its argv,
+and carries none. Merged is not shipped.
+
+### Re-landed
+
+This is round eight of the same card, on base `274c5b3e` (origin/main at #1162). Every earlier
+round built correctly and died on a host defect. Round 1 (PR #1152 head `d7717e6c`) died at
+review on a missing suite exit code read as a failure (#1154). Round 2 (`2cf05aa6`) went 12/12
+green but the host refused "Fresh build already has a PR" for the branch it had itself
+published. Round 3 (`b56d449f`) went green and its mutation nomination used bare filenames
+where the contract wants runner-prefixed argv. Round 4 (`cb7b0d6f`) was published, went green
+and was APPROVED by both Claude seats, then the host refused its own receipt because GitHub's
+PR projection still showed the pre-push head (#1157). Round 5 was stopped because the Codex
+review seat resolved to the headless build runner (#1158). Round 6 (settings-only shape,
+APPROVED by the Claude seats) died on "Review seat synthesis: host dispatch or observation
+failed". Round 7 (`e0bf4fc2`, the first round with the wrapper strip, CI 12/12 green) died on
+"Review worker trailer differs from recorded synthesis" with the REQUEST_CHANGES findings
+closed above. This round carries `e0bf4fc2` forward verbatim (`git cherry-pick --no-commit`,
+merge-tree clean, main touched none of the seven files since its base), closes the three
+findings, and restores this record, which round 7 dropped.
