@@ -168,6 +168,8 @@ async function measureDiff(run: Runner, repo: string, base: string, head: string
 
 interface WorkerWorld {
   numericBuildPr?: boolean
+  commitClaudeSessionTrailer?: boolean
+  commitBody?: string
   mutationArgv?: 'bare' | 'valid'
   run: Runner
   repo: string
@@ -205,6 +207,8 @@ interface WorkerWorld {
   blockRoles: ReadonlySet<string>
   /** Every dispatch this fake observed, in order — the harness's audit trail. */
   dispatches: { role: string; step_id: string; schema: string; wrote: string[] }[]
+  /** Real git objects authored by the fake model, retained after worktree cleanup. */
+  authoredHeads: string[]
   /** The task the host handed each build turn after planner validation. */
   selectedTasks: string[]
   /** The planner route the real driver wrote into each plan turn's context. */
@@ -385,7 +389,9 @@ async function performRole(world: WorkerWorld, request: BoundedWorkRequest, brie
     await gitOut(world.run, cwd, ['add', '--', 'NOTES.md',
       ...(commitsPlan ? ['IMPLEMENTATION_PLAN.md'] : [])])
     await gitOut(world.run, cwd, ['-c', 'user.email=w@example.invalid', '-c', 'user.name=Worker',
-      '-c', 'commit.gpgsign=false', 'commit', '-m', `work: ${request.role} ${request.step_id}`])
+      '-c', 'commit.gpgsign=false', 'commit', '-m', `work: ${request.role} ${request.step_id}`,
+      ...(world.commitBody ? ['-m', world.commitBody] : []),
+      ...(world.commitClaudeSessionTrailer ? ['-m', 'Claude-Session: https://claude.ai/session/fixture'] : [])])
     // Measure the produced revision from the only base this worker was given.
     //
     // THE BASE IS THE PRE-DISPATCH HEAD. On the FIRST build that happens to be the
@@ -402,6 +408,7 @@ async function performRole(world: WorkerWorld, request: BoundedWorkRequest, brie
     // Leaving this measurement deliberately wrong on a fix round is what gives the
     // fix-round case its teeth — restore `corroborates` there and it goes red.
     const head = await gitOut(world.run, world.repo, ['rev-parse', '--verify', `refs/heads/${branch}^{commit}`])
+    world.authoredHeads.push(head)
     const diff = await measureDiff(world.run, world.repo, snapshot.head, head, world.scratch)
     return { head, diff, pr: snapshot.pr, payload: {
       mutationClaim: world.mutationArgv ? { file: 'src/limit.ts', find: 'n > max ? max : n', replace: 'n',
@@ -562,6 +569,8 @@ console.log(JSON.stringify({ type: 'turn.completed', usage: { input_tokens: 7, o
 `
 
 async function fixture(options: { ralph?: boolean; moreTasks?: boolean; suiteExit?: number; testStrategy?: string
+  commitClaudeSessionTrailer?: boolean
+  commitBody?: string
   bunWorkspace?: boolean
   manifest?: Record<string, unknown>
   dispatchTask?: string
@@ -658,7 +667,9 @@ async function fixture(options: { ralph?: boolean; moreTasks?: boolean; suiteExi
 
   const github = fakeGithub({ origin, repo })
   const commands: string[][] = []
-  const world: WorkerWorld = { run: spawnCapture, repo, scratch, dispatches: [],
+  const world: WorkerWorld = { run: spawnCapture, repo, scratch, dispatches: [], authoredHeads: [],
+    commitClaudeSessionTrailer: options.commitClaudeSessionTrailer ?? false,
+    ...(options.commitBody ? { commitBody: options.commitBody } : {}),
     selectedTasks: [], plannerChoices: [],
     synthesisShape: options.synthesisShape ?? 'legacy', synthesisSchemaSeen: [],
     blockersByRound: options.blockersByRound ?? [], replanRounds: options.replanRounds ?? [],
@@ -1169,6 +1180,75 @@ test('pr mode drives plan, build, review, publish and merge to a terminal merged
   expect(originMain.stdout.trim()).not.toBe(f.baseSha)
   expect(f.store.get(f.row.id)!.pr).toBe(1)
   expect(['cleaned', 'preserved']).toContain(outcome.cleanup.kind)
+}, 300_000)
+
+test('clean worker commit publication still reaches MERGED', async () => {
+  const f = await fixture({ commitBody: 'Discuss Claude-Session: as data, not a trailer.\n\nCo-Authored-By: Fixture <fixture@example.invalid>' })
+  const outcome = await drive(f, 'pr')
+  expect(outcome.kind, why(f, outcome)).toBe('merged')
+  const branch = f.store.get(f.row.id)!.branch!
+  const message = await gitOut(spawnCapture, f.origin, ['show', '-s', '--format=%B', `refs/heads/${branch}`])
+  expect(message).toContain('Discuss Claude-Session: as data, not a trailer.')
+  expect(message).toContain('Co-Authored-By: Fixture <fixture@example.invalid>')
+  expect(message).not.toMatch(/^Claude-Session:/m)
+  expect(f.github.prs).toHaveLength(1)
+  expect(f.github.prs[0]!.state).toBe('MERGED')
+  expect(await gitOut(spawnCapture, f.origin, ['rev-parse', 'refs/heads/main'])).not.toBe(f.baseSha)
+}, 300_000)
+
+test('Claude-Session trailer publication refuses before a fresh push or PR creation', async () => {
+  const f = await fixture({ commitClaudeSessionTrailer: true })
+  const outcome = await drive(f, 'pr')
+  expect(outcome.kind, why(f, outcome)).not.toBe('merged')
+  expect(f.world.authoredHeads).toHaveLength(1)
+  const message = await gitOut(spawnCapture, f.repo, ['show', '-s', '--format=%B', f.world.authoredHeads[0]!])
+  expect(message).toContain('Claude-Session: https://claude.ai/session/fixture')
+  // Publication precedes review. Require the specific host refusal so a parser
+  // failure before publication cannot satisfy this negative control.
+  const roles = f.world.dispatches.map(dispatch => dispatch.role)
+  expect(roles).toEqual(['plan', 'build'])
+  expect(JSON.stringify(outcome)).toContain('Commit-message admission refuses a Claude-Session trailer')
+  expect(f.github.prs).toEqual([])
+  expect(await gitOut(spawnCapture, f.origin, ['rev-parse', 'refs/heads/main'])).toBe(f.baseSha)
+}, 300_000)
+
+test('published PR with a Claude-Session ancestor and clean worker tip stays open', async () => {
+  const f = await fixture()
+  const options = await f.prepare()
+  const run = f.store.get(f.row.id)!
+  const branch = run.branch!
+  const worktree = run.worktree!
+  await writeFile(join(worktree, 'NOTES.md'), 'seed\nprior trailer-bearing work\n')
+  await gitOut(spawnCapture, worktree, ['add', '--', 'NOTES.md'])
+  await gitOut(spawnCapture, worktree, ['-c', 'user.email=w@example.invalid', '-c', 'user.name=Worker',
+    '-c', 'commit.gpgsign=false', 'commit', '-m', 'work: prior build',
+    '-m', 'Claude-Session: https://claude.ai/session/fixture'])
+  const dirtyHead = await gitOut(spawnCapture, worktree, ['rev-parse', 'HEAD^{commit}'])
+  await writeFile(join(worktree, 'NOTES.md'), 'seed\nprior trailer-bearing work\nclean follow-up\n')
+  await gitOut(spawnCapture, worktree, ['add', '--', 'NOTES.md'])
+  await gitOut(spawnCapture, worktree, ['-c', 'user.email=w@example.invalid', '-c', 'user.name=Worker',
+    '-c', 'commit.gpgsign=false', 'commit', '-m', 'work: clean follow-up'])
+  const publishedHead = await gitOut(spawnCapture, worktree, ['rev-parse', 'HEAD^{commit}'])
+  await gitOut(spawnCapture, worktree, ['push', 'origin', branch])
+  f.github.prs.push({ number: 1, state: 'OPEN', headRefName: branch, baseRefName: 'main' })
+  await f.store.update(f.row.id, { published_pr: 1 })
+  expect(await gitOut(spawnCapture, f.origin, ['rev-parse', `refs/heads/${branch}^{commit}`])).toBe(publishedHead)
+  expect(await gitOut(spawnCapture, f.origin, ['show', '-s', '--format=%B', publishedHead])).not.toContain('Claude-Session:')
+  expect(await gitOut(spawnCapture, f.origin, ['rev-parse', `${publishedHead}^`])).toBe(dirtyHead)
+  expect(await gitOut(spawnCapture, f.origin, ['show', '-s', '--format=%B', dirtyHead]))
+    .toContain('Claude-Session: https://claude.ai/session/fixture')
+
+  const outcome = await (await createProjectBuildHost(options)).run({ mode: 'pr', start: 'fresh' }, new AbortController().signal)
+  expect(outcome.kind, why(f, outcome)).not.toBe('merged')
+  const roles = f.world.dispatches.map(dispatch => dispatch.role)
+  expect(roles).toEqual(['plan', 'build'])
+  expect(JSON.stringify(outcome)).toContain('Commit-message admission refuses a Claude-Session trailer')
+  expect(f.world.authoredHeads).toHaveLength(1)
+  expect(await gitOut(spawnCapture, f.repo, ['show', '-s', '--format=%B', f.world.authoredHeads[0]!]))
+    .not.toContain('Claude-Session:')
+  expect((await spawnCapture(['git', '-C', f.repo, 'merge-base', '--is-ancestor', dirtyHead, f.world.authoredHeads[0]!], f.repo)).ok).toBe(true)
+  expect(f.github.prs).toEqual([{ number: 1, state: 'OPEN', headRefName: branch, baseRefName: 'main' }])
+  expect(await gitOut(spawnCapture, f.origin, ['rev-parse', 'refs/heads/main'])).toBe(f.baseSha)
 }, 300_000)
 
 test('a synthesis worker guided by the exact verdict schema reaches MERGED unattended', async () => {

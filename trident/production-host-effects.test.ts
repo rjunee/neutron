@@ -237,6 +237,62 @@ test('publication pushes the pinned commit with a lease, witnesses PR, and persi
   expect((await measured(f)).pr).toEqual({ number: 12, head: f.tip, state: 'OPEN' })
 })
 
+test('commit-message admission blocks publication before push and independently blocks an already published PR', async () => {
+  const f = await fixture()
+  await f.command(['git', '-C', f.worktree, 'commit', '--allow-empty', '-m', 'Dirty ancestor\n\nClaude-Session: private-value'])
+  await f.command(['git', '-C', f.worktree, 'commit', '--allow-empty', '-m', 'Clean tip'])
+  const head = await f.command(['git', '-C', f.worktree, 'rev-parse', 'HEAD'])
+  expect(await f.publishChecked(await measured(f))).toMatchObject({ kind: 'blocked', on: expect.stringContaining('Claude-Session') })
+  expect(f.calls.some(argv => argv.includes('push'))).toBe(false)
+  expect(f.calls.some(argv => argv[0] === 'gh' && argv[2] === 'create')).toBe(false)
+  // Simulate a PR already published by an earlier worker; publication is not a bypass.
+  await f.command(['git', '-C', f.repo, 'push', 'origin', `${head}:refs/heads/change`])
+  f.setPr({ number: 12, headRefOid: head, state: 'OPEN', headRefName: 'change', baseRefName: 'main', isCrossRepository: false })
+  await f.store.update(f.row.id, { pr: 12, published_pr: 12 })
+  f.calls.length = 0
+  const result = await f.mergeChecked(await measured(f))
+  expect(result).toMatchObject({ kind: 'blocked', on: expect.stringContaining('Claude-Session') })
+  expect(JSON.stringify(result)).not.toContain('private-value')
+  const fetchIndex = f.calls.findIndex(argv => argv.includes('fetch'))
+  const logIndex = f.calls.findIndex(argv => argv.includes('log'))
+  expect(fetchIndex).toBeGreaterThanOrEqual(0)
+  expect(logIndex).toBeGreaterThanOrEqual(0)
+  expect(fetchIndex).toBeLessThan(logIndex)
+  expect(f.calls.find(argv => argv.includes('log'))?.at(-1)).toBe(`${f.base}..${head}`)
+  expect(f.calls.some(argv => argv[0] === 'gh' && argv[2] === 'merge')).toBe(false)
+  expect((await measured(f)).pr?.state).toBe('OPEN')
+})
+
+test('commit-message admission preserves clean publication and merge with body mentions and coauthors', async () => {
+  const f = await fixture()
+  await f.command(['git', '-C', f.worktree, 'commit', '--allow-empty', '-m', 'Explain Claude-Session removal\n\nA Claude-Session mention is not a trailer.\n\nCo-Authored-By: Fixture <fixture@example.invalid>'])
+  const snapshot = await measured(f)
+  const message = await f.command(['git', '-C', f.repo, 'show', '-s', '--format=%B', snapshot.head])
+  expect(await f.publishChecked(snapshot)).toEqual({ kind: 'allow' })
+  expect(await f.mergeChecked(await measured(f))).toEqual({ kind: 'allow' })
+  expect(await f.command(['git', '-C', f.repo, 'show', '-s', '--format=%B', snapshot.head])).toBe(message)
+})
+
+test('commit-message admission refuses unreadable publication and merge measurements', async () => {
+  const f = await fixture()
+  f.intercept(argv => argv.includes('log') ? bad() : undefined)
+  expect(await f.publishChecked(await measured(f))).toMatchObject({ kind: 'unknown' })
+  expect(f.calls.some(argv => argv.includes('push'))).toBe(false)
+  f.intercept(undefined)
+  expect(await f.publishChecked(await measured(f))).toEqual({ kind: 'allow' })
+  f.intercept(argv => argv.includes('log') ? bad() : undefined)
+  expect(await f.mergeChecked(await measured(f))).toMatchObject({ kind: 'unknown' })
+  expect(f.calls.some(argv => argv[0] === 'gh' && argv[2] === 'merge')).toBe(false)
+})
+
+test('commit-message admission applies to local merges too', async () => {
+  const f = await fixture()
+  await f.store.update(f.row.id, { merge_mode: 'local' })
+  await f.command(['git', '-C', f.worktree, 'commit', '--allow-empty', '-m', 'Local\n\nClaude-Session: private-value'])
+  expect(await f.mergeChecked(await measured(f))).toMatchObject({ kind: 'blocked' })
+  expect(await f.command(['git', '-C', f.repo, 'rev-parse', 'main'])).toBe(f.base)
+})
+
 test('publication refuses a foreign PR appearing during push', async () => {
   const f = await fixture()
   const snapshot = await measured(f)
