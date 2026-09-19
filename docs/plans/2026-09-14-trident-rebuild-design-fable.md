@@ -840,6 +840,8 @@ path.**
    design note for L5 is that queue wait must not count against a step's wall budget.
 6. **Model inheritance.** The REPL carries `frontier_model_floor: true`
    (`substrate-profiles.ts:266`) and may be on the planning model when a build dispatches.
+   The floor still governs fresh chats; an explicit session-only owner switch under
+   the 2026-09-11 harness pivot survives only that conversation's resume.
    A subagent call that omits `model` inherits it — a Forge build on the planning tier. Every
    dispatch sets `model` explicitly from `model-tiers.ts`; L5's fake-runner test asserts no
    request leaves without one.
