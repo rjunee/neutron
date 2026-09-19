@@ -53,8 +53,8 @@ function fixture(extraEnv: Record<string, string> = {}) {
     operations: () => { try { return readFileSync(log, 'utf8').trim().split('\n') } catch { return [] } } }
 }
 
-async function eventually(check: () => boolean): Promise<void> {
-  for (let attempt = 0; attempt < 200; attempt++) {
+async function eventually(check: () => boolean, attempts = 200): Promise<void> {
+  for (let attempt = 0; attempt < attempts; attempt++) {
     if (check()) return
     await Bun.sleep(5)
   }
@@ -62,6 +62,43 @@ async function eventually(check: () => boolean): Promise<void> {
 }
 
 describe('approved installed MCP broker', () => {
+  test.each([
+    ['cold', 'remove'], ['cold', 'rotate'], ['established', 'remove'], ['established', 'rotate'],
+  ] as const)('revoking a handshaking candidate preserves the unchanged %s peer: %s', async (state, change) => {
+    const a = fixture()
+    const b = fixture({ BROKER_TEST_CONNECT_DELAY: '1000' })
+    a.setServers([{ ...a.servers[0]!, name: 'a' }])
+    if (state === 'established') {
+      await a.broker.bind(a.context)
+      expect((await a.broker.request(a.context, 'a', { method: 'tools/list' })).tools).toHaveLength(1)
+    }
+    a.setServers([...a.servers, { ...b.servers[0]!, name: 'b' }])
+    await a.broker.retireRevoked()
+    const binding = a.broker.bind(a.context).then(value => ({ value }), error => ({ error }))
+    await eventually(() => b.operations().includes('spawn'))
+    expect(a.peerAlive()).toBe(true)
+    a.setServers(change === 'remove' ? a.servers.filter(server => server.name === 'a')
+      : a.servers.map(server => server.name === 'a' ? server : { ...server, env: { ...server.env, BROKER_TEST_SECRET: 'rotated' } }))
+    await a.broker.retireRevoked()
+    expect(b.peerAlive()).toBe(false)
+    expect(await binding).toMatchObject({ value: [{ name: 'a' }] })
+    expect(a.peerAlive()).toBe(true)
+    expect(a.operations()).toEqual(['spawn'])
+    expect((await a.broker.request(a.context, 'a', { method: 'tools/list' })).tools).toHaveLength(1)
+    await expect(a.broker.request(a.context, 'b', { method: 'tools/list' })).rejects.toThrow()
+  })
+
+  test('unexpected candidate handshake timeout still disposes the whole binding', async () => {
+    const a = fixture()
+    const b = fixture({ BROKER_TEST_CONNECT_DELAY: '3000' })
+    a.setServers([{ ...a.servers[0]!, name: 'a' }, { ...b.servers[0]!, name: 'b' }])
+    await expect(a.broker.bind(a.context)).rejects.toThrow()
+    expect(a.peerAlive()).toBe(false)
+    await eventually(() => !b.peerAlive(), 600)
+    expect(b.peerAlive()).toBe(false)
+    await expect(a.broker.request(a.context, 'a', { method: 'tools/list' })).rejects.toThrow()
+  })
+
   test.each(['remove', 'rotate'] as const)('revocation during cold admission cannot spawn a stale candidate or cancel its unchanged peer: %s', async change => {
     const a = fixture({ BROKER_TEST_CONNECT_DELAY: '500' })
     const b = fixture()

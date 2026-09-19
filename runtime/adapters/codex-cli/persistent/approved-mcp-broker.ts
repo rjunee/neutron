@@ -302,41 +302,52 @@ export class ApprovedMcpBroker {
         client.fallbackNotificationHandler = async (notification) => {
           if (binding.clients.get(server.name) === client) await this.notify(binding, server.name, client, notification)
         }
-        await client.connect(transport, { ...(signal ? { signal } : {}), timeout: this.options.connectTimeoutMs ?? 10_000 })
-        await this.verify(binding, context, true)
-        signal?.throwIfAborted()
-        const capabilities = client.getServerCapabilities()
-        const serverInfo = client.getServerVersion()
-        if (!capabilities || !serverInfo) throw refused()
-        const instructions = client.getInstructions()
-        const catalog: ApprovedMcpServerMetadata['catalog'] = []
-        const methods = [
-          ...(capabilities.tools ? ['tools/list'] : []),
-          ...(capabilities.resources ? ['resources/list', 'resources/templates/list'] : []),
-          ...(capabilities.prompts ? ['prompts/list'] : []),
-        ]
-        for (const method of methods) {
-          let cursor: string | undefined
-          const seen = new Set<string>()
-          do {
-            const params = cursor === undefined ? {} : { params: { cursor } }
-            await this.verify(binding, context, true)
-            signal?.throwIfAborted()
-            const result = await client.request(ClientRequestSchema.parse({ method, ...params }), ResultSchema,
-              { ...(signal ? { signal } : {}), timeout: this.options.requestTimeoutMs ?? 60_000 })
-            await this.verify(binding, context, true)
-            signal?.throwIfAborted()
-            catalog.push({ method, ...params, result })
-            if (result.nextCursor !== undefined && typeof result.nextCursor !== 'string') throw refused()
-            cursor = result.nextCursor as string | undefined
-            if (cursor !== undefined) {
-              if (seen.has(cursor)) throw refused()
-              seen.add(cursor)
-            }
-          } while (cursor !== undefined)
+        try {
+          await client.connect(transport, { ...(signal ? { signal } : {}), timeout: this.options.connectTimeoutMs ?? 10_000 })
+          await this.verify(binding, context, true)
+          signal?.throwIfAborted()
+          const capabilities = client.getServerCapabilities()
+          const serverInfo = client.getServerVersion()
+          if (!capabilities || !serverInfo) throw refused()
+          const instructions = client.getInstructions()
+          const catalog: ApprovedMcpServerMetadata['catalog'] = []
+          const methods = [
+            ...(capabilities.tools ? ['tools/list'] : []),
+            ...(capabilities.resources ? ['resources/list', 'resources/templates/list'] : []),
+            ...(capabilities.prompts ? ['prompts/list'] : []),
+          ]
+          for (const method of methods) {
+            let cursor: string | undefined
+            const seen = new Set<string>()
+            do {
+              const params = cursor === undefined ? {} : { params: { cursor } }
+              await this.verify(binding, context, true)
+              signal?.throwIfAborted()
+              const result = await client.request(ClientRequestSchema.parse({ method, ...params }), ResultSchema,
+                { ...(signal ? { signal } : {}), timeout: this.options.requestTimeoutMs ?? 60_000 })
+              await this.verify(binding, context, true)
+              signal?.throwIfAborted()
+              catalog.push({ method, ...params, result })
+              if (result.nextCursor !== undefined && typeof result.nextCursor !== 'string') throw refused()
+              cursor = result.nextCursor as string | undefined
+              if (cursor !== undefined) {
+                if (seen.has(cursor)) throw refused()
+                seen.add(cursor)
+              }
+            } while (cursor !== undefined)
+          }
+          if (binding.clients.get(server.name) !== client) throw refused()
+          binding.metadata.push({ name: server.name, capabilities, serverInfo,
+            ...(instructions === undefined ? {} : { instructions }), catalog })
+        } catch {
+          // Only explicit retirement removes this exact client's reservation.
+          // Unexpected EOF, timeout, lost authority and caller cancellation keep
+          // the outer fail-closed disposal semantics.
+          if (this.pending !== binding || binding.retirement || binding.clients.get(server.name) === client
+            || binding.serverFingerprints.has(server.name)) throw refused()
+          await this.verify(binding, context, true)
+          signal?.throwIfAborted()
         }
-        binding.metadata.push({ name: server.name, capabilities, serverInfo,
-          ...(instructions === undefined ? {} : { instructions }), catalog })
       }
       await this.verify(binding, context, true)
       signal?.throwIfAborted()
