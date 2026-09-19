@@ -23,6 +23,7 @@ import * as codex from '@neutronai/runtime/workers/codex-headless.ts'
 import { pool, supervisedBySessionKey } from '@neutronai/runtime/adapters/claude-code/persistent/pool-state.ts'
 import { fakeRunner, type BoundedWorkRequest } from '@neutronai/runtime/bounded-work.ts'
 import { prepareProjectBuild, suiteScript, type ProjectBuildContext } from '../wiring/project-build.ts'
+import { PROJECT_SNAPSHOT_SCHEMA } from '../wiring/project-build-snapshot.ts'
 import { makeLazyCredentialedHostRunner, spawnCapture } from '@neutronai/trident/git-mode.ts'
 import { githubProcessEnv } from '@neutronai/github/credential.ts'
 import { renderTestStrategy } from '@neutronai/trident/test-strategy.ts'
@@ -165,7 +166,11 @@ test('option sources preserve pin, selected provider, workflow and unavailable s
   expect(validators.get('verdict')!(payload)).toBe(true)
   const validate = validators.get('project-review')!
   expect(validate({ head: 'a'.repeat(40), diff: '', pr: null, payload })).toBe(true)
-  for (const value of [null, 1, {}, { head: 1, diff: '', pr: null, payload }, { head: 'a', diff: 3, pr: null, payload }, { head: 'a', diff: '', pr: 2, payload }, { head: 'a', diff: '', pr: null, payload: {} }]) expect(validate(value)).toBe(false)
+  expect(validate({ head: 'a'.repeat(40), diff: '', pr: { number: 2, head: 'a'.repeat(40), state: 'OPEN' }, payload })).toBe(true)
+  for (const value of [undefined, null, 1, {}, { head: 1, diff: '', pr: null, payload }, { head: 'a', diff: 3, pr: null, payload }, { head: 'a', diff: '', pr: 2, payload }]) {
+    expect(() => validate(value)).toThrow('Project snapshot contract:')
+  }
+  expect(validate({ head: 'a', diff: '', pr: null, payload: {} })).toBe(false)
   expect(f.captured().trailer.metadata({} as BoundedWorkRequest)).toBeUndefined()
 })
 
@@ -612,6 +617,8 @@ for (const role of ['plan', 'build', 'review', 'fix'] as const) {
       '  "kind"   — "completed" when you finished the role, or "blocked" when you could not.',
       '  "result" — when completed: { head, diff, pr, payload }. Omit when blocked.',
       'When blocked, add "on": a non-empty sentence saying what stopped you. Report blocked rather than inventing a result; a fabricated result is worse than a stopped run.',
+      'The completed result must satisfy this outer snapshot contract. Copy `snapshot.pr` from the host context unchanged: null or { "number": positive integer, "head": string, "state": "OPEN" | "CLOSED" | "MERGED" }. Never replace it with a number or URL. The forge payload field `result.payload.prNumber` is separately a number or null; it does not replace `result.pr`. Measure head and diff for the resulting revision; the host independently checks the claim.',
+      JSON.stringify(PROJECT_SNAPSHOT_SCHEMA),
       `\`result.payload\` must satisfy the ${role === 'plan' ? 'plan' : role === 'review' ? 'verdict' : 'forge'} trailer contract below. Read the host context for the measured snapshot.`,
       JSON.stringify(role === 'plan' ? PLAN_SCHEMA : role === 'review' ? VERDICT_SCHEMA : FORGE_SCHEMA),
       'Never publish or merge; the host owns those actions.',
@@ -892,8 +899,9 @@ test('suite child excludes the stored GitHub credential while git push retains i
     prNumber: null, diffFile: 'diff', testsPassed: true,
   } } }))
   // Inspect every field supplied by githubProcessEnv, not just the token itself.
+  // Emit presence only: a failing assertion must never render a credential.
   await writeFile(join(worktree, 'inspect-env.sh'),
-    Object.keys(credential).map(key => `printf '%s\\n' "${key}=\${${key}-ABSENT}"`).join('\n'))
+    Object.keys(credential).map(key => `if [ "\${${key}+x}" = x ]; then printf '%s\\n' '${key}=PRESENT'; else printf '%s\\n' '${key}=ABSENT'; fi`).join('\n'))
   const receipt = await options.policy.reviewSuite!.readCheckpoint({ head, diff: '', pr: null }, 1)
   expect(receipt?.report).toEqual({ hostExitCode: 0 })
   const transcript = await readFile(join(f.dir, 'state', encodeURIComponent(f.input.run.id), 'suite-round-1.log'), 'utf8')
@@ -907,10 +915,10 @@ test('suite child excludes the stored GitHub credential while git push retains i
     ['git', '-C', worktree, '-c', 'user.name=Fixture', '-c', 'user.email=fixture@example.test', 'commit', '--allow-empty', '-m', 'fixture'],
   ]) expect((await spawnCapture(argv)).ok).toBe(true)
   await writeFile(join(worktree, '.git', 'hooks', 'pre-push'),
-    '#!/bin/sh\nprintf "%s" "$GH_TOKEN" > push-env.txt\n', { mode: 0o755 })
+    '#!/bin/sh\nif [ "$GH_TOKEN" = "fixture-github-credential" ]; then printf match; else printf mismatch; fi > push-env.txt\n', { mode: 0o755 })
   const pushed = await options.production.runHost(['git', '-C', worktree, 'push', origin, 'HEAD:refs/heads/check'])
   expect(pushed.ok).toBe(true)
-  expect(await readFile(join(worktree, 'push-env.txt'), 'utf8')).toBe(credential.GH_TOKEN!)
+  expect(await readFile(join(worktree, 'push-env.txt'), 'utf8')).toBe('match')
 })
 
 // #1112. `spec.tools` IS the `--tools` surface — `spawn.ts:302` derives it as

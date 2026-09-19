@@ -76,7 +76,7 @@ describe('typecheck-all — real linked worktrees', () => {
     const { fresh } = fixture()
 
     const healthy = run(fresh, 'bash', ['scripts/ci/typecheck-all.sh'])
-    expect(healthy.code).toBe(0)
+    expect(healthy.code, healthy.out).toBe(0)
     expect(healthy.out).toContain('provisioning worktree dependencies')
     expect(healthy.out).toContain('TYPECHECK MATRIX: ALL PASS')
   }, 120_000)

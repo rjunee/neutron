@@ -135,6 +135,20 @@
 #
 set -uo pipefail
 
+# Tests own their GitHub fixtures. A build REPL can carry a real publishing
+# credential, but no discovery probe or test lane may inherit it: a failed
+# assertion can otherwise copy it into the suite log. Scrub this child shell
+# before the first Bun invocation; the caller's publishing environment is intact.
+# Keep non-secret CI metadata (GITHUB_ACTIONS, GITHUB_WORKSPACE, etc.). Tests that
+# exercise connected behavior explicitly install their synthetic credentials.
+while IFS= read -r credential_key; do
+  case "$credential_key" in
+    GH_TOKEN|GITHUB_TOKEN|GH_ENTERPRISE_TOKEN|GITHUB_ENTERPRISE_TOKEN|GIT_CONFIG_COUNT|GIT_CONFIG_PARAMETERS|GIT_CONFIG_KEY_*|GIT_CONFIG_VALUE_*)
+      unset "$credential_key" || exit 1
+      ;;
+  esac
+done < <(compgen -A variable)
+
 # SCRIPT_DIR = where this script + its sibling libs live (used to source the
 # shared discovery helper). ROOT = the checkout under test (cwd for discovery +
 # bun); defaults to this script's repo, NEUTRON_TEST_ROOT overrides it (CI / for

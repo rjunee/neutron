@@ -23,6 +23,9 @@
  */
 
 import { afterEach, beforeEach, describe, expect, test } from 'bun:test'
+import { mkdtemp, readFile, rm, writeFile } from 'node:fs/promises'
+import { tmpdir } from 'node:os'
+import { join, resolve } from 'node:path'
 
 import { createIsolatedHome, type IsolatedHome } from '../support/test-isolation.ts'
 
@@ -93,18 +96,18 @@ describe('the GitHub credential reaches a build, through the production composer
 
   test('an instance that never connected runs commands with NO GH_TOKEN', async () => {
     const { run_host } = await composeOpen()
-    const res = await run_host(['sh', '-c', 'echo "${GH_TOKEN:-unset}"'])
+    const res = await run_host(['sh', '-c', 'if [ "${GH_TOKEN+x}" = x ]; then printf present; else printf absent; fi'])
     expect(res.ok).toBe(true)
     // Unchanged behaviour for the un-connected instance is the compatibility
     // property: `githubProcessEnv(null)` is `{}`.
-    expect(res.stdout).toBe('unset')
+    expect(res.stdout).toBe('absent')
   })
 
   test('a token connected AFTER boot reaches the child process — no restart', async () => {
     const { run_host, db } = await composeOpen()
 
     // Before: nothing.
-    expect((await run_host(['sh', '-c', 'echo "${GH_TOKEN:-unset}"'])).stdout).toBe('unset')
+    expect((await run_host(['sh', '-c', 'if [ "${GH_TOKEN+x}" = x ]; then printf present; else printf absent; fi'])).stdout).toBe('absent')
 
     // The owner connects from chat, long after the composition was built. This is
     // the same store + owner handle the composer resolves through.
@@ -112,9 +115,9 @@ describe('the GitHub credential reaches a build, through the production composer
     await storeGitHubToken(store, asOwnerHandle(SLUG), TOKEN)
 
     // After: the SAME runner, never re-composed, now carries it.
-    const res = await run_host(['printenv', 'GH_TOKEN'])
+    const res = await run_host(['sh', '-c', 'if [ "$GH_TOKEN" = "$1" ]; then printf match; else printf mismatch; fi', 'probe', TOKEN])
     expect(res.ok).toBe(true)
-    expect(res.stdout).toBe(TOKEN)
+    expect(res.stdout).toBe('match')
   })
 
   test('git is configured to use the token for github.com, and nothing is written to disk', async () => {
@@ -127,9 +130,92 @@ describe('the GitHub credential reaches a build, through the production composer
     // itself what it resolved rather than asserting on our own env vars.
     const res = await run_host(['git', 'config', '--get', 'credential.https://github.com.helper'])
     expect(res.ok).toBe(true)
-    expect(res.stdout).toContain('username=x-access-token')
+    expect(res.stdout.includes('username=x-access-token')).toBe(true)
     // The helper reads $GH_TOKEN at invocation; the secret itself is never a
     // config value, so it cannot leak into a committed or dumped config.
-    expect(res.stdout).not.toContain(TOKEN)
+    expect(res.stdout.includes(TOKEN)).toBe(false)
   })
 })
+
+test('full-suite runner excludes ambient credentials from every lane and failed assertion output', async () => {
+  const root = await mkdtemp(join(tmpdir(), 'github-suite-boundary-'))
+  const canary = 'synthetic-ambient-github-credential-canary'
+  const credentialKeys = ['GH_TOKEN', 'GITHUB_TOKEN', 'GH_ENTERPRISE_TOKEN', 'GITHUB_ENTERPRISE_TOKEN',
+    'GIT_CONFIG_COUNT', 'GIT_CONFIG_PARAMETERS', 'GIT_CONFIG_KEY_9', 'GIT_CONFIG_VALUE_9']
+  try {
+    const source = `import { expect, test } from 'bun:test'
+const keys = ${JSON.stringify(credentialKeys)}
+// Discovery loads this module too. Report only a boolean even if it fails.
+if (keys.some(key => process.env[key] !== undefined)) throw new Error('credential inherited during discovery')
+// Bun versions differ in the no-match summary; keep a real discovery control.
+test('__neutron_runtests_no_match__ discovery control', () => {
+  expect(keys.some(key => process.env[key] !== undefined)).toBe(false)
+})
+test('credential isolation and retained CI metadata', () => {
+  for (const key of keys) expect(process.env[key]).toBeUndefined()
+  expect(process.env.GITHUB_ACTIONS).toBe('fixture-ci-metadata')
+  expect(Boolean(process.env.PATH)).toBe(true)
+})
+test('intentional assertion failure still reaches the host', () => {
+  expect(process.env.NEUTRON_TEST_INTENTIONAL_FAILURE === '1').toBe(false)
+})
+`
+    for (const [name, marker] of [['general', ''], ['database', 'pglite'],
+      ['device', 'installNativeHarness'], ['http', 'Bun.serve(']]) {
+      await writeFile(join(root, `${name}.test.ts`), `// ${marker}\n${source}`)
+    }
+    for (const failure of ['0', '1']) {
+      const log = join(root, `suite-${failure}.log`)
+      const child = Bun.spawn(['bash', resolve(import.meta.dir, '../../scripts/run-tests.sh')], {
+        env: {
+          ...Object.fromEntries(Object.entries(process.env).filter(([key]) => !key.startsWith('NEUTRON_TEST_'))),
+          ...Object.fromEntries(credentialKeys.map(key => [key, canary])),
+          GITHUB_ACTIONS: 'fixture-ci-metadata',
+          NEUTRON_TEST_ROOT: root,
+          NEUTRON_BUN_BIN: process.execPath,
+          NEUTRON_TEST_CONCURRENCY: '1',
+          NEUTRON_TEST_PGLITE_RETRIES: '0',
+          NEUTRON_TEST_INTENTIONAL_FAILURE: failure,
+        },
+        stdout: 'pipe', stderr: 'pipe',
+      })
+      const [exitCode, stdout, stderr] = await Promise.all([
+        child.exited, new Response(child.stdout).text(), new Response(child.stderr).text(),
+      ])
+      await writeFile(log, stdout + stderr)
+      const output = await readFile(log, 'utf8')
+      // Assert booleans so even a regression never echoes the captured log.
+      expect(output.includes(canary)).toBe(false)
+      expect(output.includes('credential inherited during discovery')).toBe(false)
+      expect(output.includes('4 test files (bun-discovered: 4)')).toBe(true)
+      expect(output.includes('1-file PGLite lane + 1-file device lane + 1-file real-HTTP lane')).toBe(true)
+      expect(exitCode).toBe(Number(failure))
+      expect(output.includes('intentional assertion failure still reaches the host')).toBe(true)
+      if (failure === '1') expect(output.includes('Expected: false')).toBe(true)
+    }
+  } finally {
+    await rm(root, { recursive: true, force: true })
+  }
+}, 30_000)
+
+test('credential assertions fail safely when a focused test inherits a credential', async () => {
+  const canary = 'synthetic-focused-credential-canary'
+  for (const [file, name] of [
+    [import.meta.path, 'an instance that never connected runs commands with NO GH_TOKEN'],
+    [resolve(import.meta.dir, '../../open/__tests__/project-build-wiring.test.ts'), 'suite child excludes the stored GitHub credential'],
+  ]) {
+    // Bun's implicit child environment retains its startup environment even after
+    // delete process.env.GH_TOKEN. Inject at process birth to reproduce that case.
+    const child = Bun.spawn([process.execPath, 'test', file!, '-t', name!], {
+      env: { ...process.env, GH_TOKEN: canary }, stdout: 'pipe', stderr: 'pipe',
+    })
+    const [exitCode, stdout, stderr] = await Promise.all([
+      child.exited, new Response(child.stdout).text(), new Response(child.stderr).text(),
+    ])
+    const output = stdout + stderr
+    expect(exitCode).toBe(1)
+    expect(output.includes('expect(received).toBe(expected)') || output.includes('expect(received).toEqual(expected)')).toBe(true)
+    expect(output.includes(canary)).toBe(false)
+    expect(output.toLowerCase().includes('present')).toBe(true)
+  }
+}, 30_000)
