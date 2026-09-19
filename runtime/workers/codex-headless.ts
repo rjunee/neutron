@@ -14,6 +14,7 @@ import type {
 } from '../bounded-work.ts'
 import { unknownCause } from '../refusal-cause.ts'
 import { reserveTrailerSlot } from './trailer-slot.ts'
+import { codexWorkerEnv, createCodexReviewTransport, type CodexReviewContract } from './codex-review.ts'
 
 type Probe = { ok: true } | { ok: false; reason: RefusalReason; detail: string }
 
@@ -21,15 +22,17 @@ export interface CodexHeadlessRunnerOptions {
   readonly buildScript?: string
   readonly env?: NodeJS.ProcessEnv
   readonly probe?: Probe
+  readonly reviewContracts?: ReadonlyMap<string, CodexReviewContract>
+  readonly reviewBriefIntegrity?: (text: string) => string
 }
 
 // Keep the selected contract value intact when passing it to the exec wrapper.
 const CLI_EFFORTS: Record<Effort, string> = { low: 'low', medium: 'medium', high: 'high', xhigh: 'xhigh', max: 'max' }
 
-const SUPPORTED_ROLES = new Set<WorkerRole>(['build', 'fix'])
+const SUPPORTED_ROLES = new Set<WorkerRole>(['build', 'fix', 'review', 'synthesis'])
 
 function startupProbe(env: NodeJS.ProcessEnv): Probe {
-  const childEnv = scrubGithubEnv(env)
+  const childEnv = codexWorkerEnv(env)
   const found = spawnSync('codex', ['--version'], { env: childEnv, stdio: 'ignore' })
   if (found.error || found.status !== 0) {
     return { ok: false, reason: 'provider-not-connected', detail: 'Codex CLI is unavailable' }
@@ -38,12 +41,6 @@ function startupProbe(env: NodeJS.ProcessEnv): Probe {
   return login.status === 0
     ? { ok: true }
     : { ok: false, reason: 'provider-not-connected', detail: 'Codex login is unavailable' }
-}
-
-function scrubGithubEnv(source: NodeJS.ProcessEnv): NodeJS.ProcessEnv {
-  return Object.fromEntries(
-    Object.entries(source).filter(([name]) => name !== 'GH_TOKEN' && !name.startsWith('GH_') && !name.startsWith('GITHUB_')),
-  )
 }
 
 type TrailerClaim = { head: string; diff: string; pr: null }
@@ -105,7 +102,9 @@ export function createCodexHeadlessRunner(options: CodexHeadlessRunnerOptions = 
   const baseEnv = options.env ?? process.env
   const probe = options.probe ?? startupProbe(baseEnv)
   const buildScript = options.buildScript ?? resolve(import.meta.dir, '../../trident/codex-build.sh')
-  const live = new Map<string, ChildProcess>()
+  const live = new Map<string, { readonly exitCode: number | null }>()
+  const review = createCodexReviewTransport({ env: baseEnv, contracts: options.reviewContracts ?? new Map(),
+    briefIntegrity: options.reviewBriefIntegrity, live })
 
   const unsupported = (role: WorkerRole, placement: Placement): Unsupported | null => {
     if (placement !== 'headless') {
@@ -113,6 +112,11 @@ export function createCodexHeadlessRunner(options: CodexHeadlessRunnerOptions = 
     }
     if (!SUPPORTED_ROLES.has(role)) {
       return { ok: false, reason: 'capability-unsupported', detail: `Codex runner does not support role ${role}` }
+    }
+    if (role === 'review' || role === 'synthesis') {
+      if (!options.reviewContracts?.size || !options.reviewBriefIntegrity) return { ok: false, reason: 'capability-unsupported', detail: 'Codex review requires host result and brief validators' }
+      if (!baseEnv.CODEX_HOME) return { ok: false, reason: 'provider-not-connected', detail: 'Codex review requires its selected account home' }
+      if (!review.ready) return { ok: false, reason: 'cli-contract', detail: 'Codex review CLI contract is unavailable' }
     }
     return probe.ok ? null : probe
   }
@@ -125,6 +129,7 @@ export function createCodexHeadlessRunner(options: CodexHeadlessRunnerOptions = 
     async run(req, placement, signal): Promise<BoundedWorkOutcome> {
       const refusal = unsupported(req.role, placement)
       if (refusal) return { kind: 'refused', reason: refusal.reason }
+      if (req.role === 'review' || req.role === 'synthesis') return review(req, signal)
 
       // Same atomic reservation the in-repl runners use. It is what separates a
       // FIRST dispatch of this step from a RESUME after a gateway replacement, and
@@ -138,7 +143,7 @@ export function createCodexHeadlessRunner(options: CodexHeadlessRunnerOptions = 
       if (held.kind === 'unknown') return { kind: 'unknown', detail: held.detail }
       if (held.kind === 'dispatch') {
         const effort = req.effort === null ? '' : CLI_EFFORTS[req.effort]
-        const env = scrubGithubEnv({
+        const env = codexWorkerEnv({
           ...baseEnv,
           CODEX_BUILD_MODEL: req.model_id,
           CODEX_BUILD_EFFORT: effort,

@@ -1,4 +1,5 @@
-import { mkdtemp, writeFile } from 'node:fs/promises'
+import { mkdtemp, writeFile, readFile, rename, unlink } from 'node:fs/promises'
+import { createHash } from 'node:crypto'
 import { join } from 'node:path'
 import { BUILTIN_MODEL_TIERS, configuredModels } from '@neutronai/runtime/configured-models.ts'
 import { placementFor, type BoundedWorkOutcome, type BoundedWorkRequest, type Provider, type WorkerRunner } from '@neutronai/runtime/bounded-work.ts'
@@ -55,6 +56,7 @@ export function createProjectReviewSource(input: ProjectReviewSourceOptions): Re
   const records = new Map<string, Promise<SeatObservation>>()
   const retried = new Set<string>()
   const syntheses = new Map<string, Promise<Awaited<ReturnType<ReviewSource['readSynthesis']>>>>()
+  const threadQueues = new Map<string, Promise<void>>()
   const keyFor = (snapshot: BuildSnapshot, round: number) => {
     if (!/^(?:[a-f0-9]{40}|[a-f0-9]{64})$/i.test(snapshot.head) || !snapshot.diff.trim() || !Number.isSafeInteger(round) || round < 1) throw Error('Review source requires a measured revision, diff and host round')
     return JSON.stringify([snapshot.head, snapshot.diff, snapshot.pr, round])
@@ -65,6 +67,52 @@ export function createProjectReviewSource(input: ProjectReviewSourceOptions): Re
     return route
   }
   async function dispatch(route: typeof synthesisRoute, snapshot: BuildSnapshot, round: number, attempt: number, panel?: SeatObservation[]): Promise<SeatObservation> {
+    // §3.3: one stored thread per recurring cross-provider seat, never a shared
+    // newest-thread heuristic. An abandoned lock is uncertainty, not permission
+    // to start another writer after a host replacement.
+    if (route.seat.provider !== 'openai-codex' || options.replProvider === 'openai-codex') return dispatchTurn(route, snapshot, round, attempt, panel)
+    const owner = JSON.stringify([options.runId, options.projectSlug, options.cwd, route.seat.id, route.seat.modelId, options.env.CODEX_HOME ?? null])
+    const path = join(options.evidenceRoot, `review-thread-${createHash('sha256').update(owner).digest('hex')}.json`)
+    const prior = threadQueues.get(owner) ?? Promise.resolve()
+    let release!: () => void
+    const turn = new Promise<void>(resolve => { release = resolve })
+    const queued = prior.then(() => turn)
+    threadQueues.set(owner, queued)
+    let waitTimer: ReturnType<typeof setTimeout> | undefined
+    let locked = false
+    let settled = false
+    try {
+      await Promise.race([prior, new Promise<never>((_, reject) => {
+        waitTimer = setTimeout(() => reject(Error(`Review seat ${route.seat.id}: thread queue budget expired`)), options.wallMs)
+      })])
+      clearTimeout(waitTimer)
+      if (options.signal.aborted) throw Error('Review thread wait cancelled')
+      try { await writeFile(`${path}.lock`, owner, { flag: 'wx', mode: 0o600 }); locked = true }
+      catch { throw Error(`Review seat ${route.seat.id}: thread ownership conflict`) }
+      let thread: { id: string } | null = null
+      try {
+        const stored = JSON.parse(await readFile(path, 'utf8'))
+        if (stored.owner !== owner || typeof stored.id !== 'string' || !stored.id) throw Error('Invalid stored review thread')
+        thread = { id: stored.id }
+      } catch (error) { if ((error as NodeJS.ErrnoException).code !== 'ENOENT') throw error }
+      const observed = await dispatchTurn(route, snapshot, round, attempt, panel, thread, async id => {
+        if (!id || (thread && thread.id !== id)) throw Error('Codex review did not preserve its observed thread')
+        await writeFile(`${path}.tmp`, JSON.stringify({ owner, id }), { mode: 0o600 })
+        await rename(`${path}.tmp`, path)
+      })
+      settled = true
+      return observed
+    } finally {
+      clearTimeout(waitTimer)
+      // A timed-out dispatch may still own the CLI writer until cancellation
+      // completes. Keep its lock rather than turning uncertainty into a replay.
+      if (locked && settled) await unlink(`${path}.lock`)
+      release()
+      if (threadQueues.get(owner) === queued) threadQueues.delete(owner)
+    }
+  }
+  async function dispatchTurn(route: typeof synthesisRoute, snapshot: BuildSnapshot, round: number, attempt: number, panel?: SeatObservation[],
+    thread: { id: string } | null = null, rememberThread?: (id: string | null) => Promise<void>): Promise<SeatObservation> {
     const { seat } = route
     const identity = { runId: options.runId, head: snapshot.head, round, provider: seat.provider, modelId: seat.modelId }
     const unavailable = (reason: string): SeatObservation => ({ ...identity, status: 'unavailable', payload: { reason: `Review seat ${seat.id}: ${reason}` } })
@@ -99,7 +147,7 @@ export function createProjectReviewSource(input: ProjectReviewSourceOptions): Re
     const request: BoundedWorkRequest = { run_id: options.runId, step_id: `${directory.split('/').at(-1)}:${round}:${attempt}`,
       role, model_id: seat.modelId, effort: route.effort, cwd: options.cwd, writable: false,
       network: true, tools: 'read-only', brief: { path: briefPath, integrity: briefIntegrity(text) },
-      result: { schema: 'verdict', path: join(directory, 'result.json') }, thread: null,
+      result: { schema: 'verdict', path: join(directory, 'result.json') }, thread,
       budget: { wall_ms: options.wallMs }, needs_approval_decision: false }
     const controller = new AbortController()
     let timer: ReturnType<typeof setTimeout> | undefined
@@ -112,7 +160,10 @@ export function createProjectReviewSource(input: ProjectReviewSourceOptions): Re
     try {
       if (options.signal.aborted) { abort(); return unavailable('host cancelled review') }
       const outcome = await Promise.race([runner.run(request, placement, controller.signal), stopped])
-      if (outcome.kind === 'completed') return { ...identity, status: 'completed', family: outcome.model_reported === null ? null : seat.family, payload: structuredClone(outcome.result) }
+      if (outcome.kind === 'completed') {
+        await rememberThread?.(outcome.thread_id)
+        return { ...identity, status: 'completed', family: outcome.model_reported === null ? null : seat.family, payload: structuredClone(outcome.result) }
+      }
       if (outcome.kind === 'refused') return unavailable(outcome.reason)
       // A worker block has no retryability evidence (it may be a rate limit).
       if (outcome.kind === 'blocked') return unavailable(outcome.on)

@@ -1,0 +1,194 @@
+import { createHash } from 'node:crypto'
+import { readFile, writeFile, rename } from 'node:fs/promises'
+import { dirname, join } from 'node:path'
+import type { BoundedWorkOutcome, BoundedWorkRequest, Usage } from '../bounded-work.ts'
+import { CODEX_CLI_AUTH_ENV_VARS } from '../adapters/codex-cli/auth.ts'
+import { reserveTrailerSlot } from './trailer-slot.ts'
+
+export interface CodexReviewContract {
+  jsonSchema: unknown
+  validate(value: unknown): boolean
+}
+
+const unknown = (detail: string): BoundedWorkOutcome => ({ kind: 'unknown', detail })
+const refused = (): BoundedWorkOutcome => ({ kind: 'refused', reason: 'capability-unsupported' })
+
+export function codexWorkerEnv(source: NodeJS.ProcessEnv): NodeJS.ProcessEnv {
+  return Object.fromEntries(Object.entries(source).filter(([key]) =>
+    !key.startsWith('GH_') && !key.startsWith('GITHUB_') && !CODEX_CLI_AUTH_ENV_VARS.includes(key)))
+}
+
+/** Strict structured outputs require every declared property to be required.
+ * Preserve optional-field omission as object alternatives, not invented nulls. */
+function strictSchema(value: unknown): unknown {
+  if (!value || typeof value !== 'object' || Array.isArray(value)) return value
+  const schema = value as Record<string, any>
+  if (schema.properties) {
+    const required = new Set<string>(schema.required ?? [])
+    const optional = Object.keys(schema.properties).filter(key => !required.has(key))
+    const variants = Array.from({ length: 2 ** optional.length }, (_, mask) => {
+      const keys = Object.keys(schema.properties).filter(key => required.has(key) || (mask & (1 << optional.indexOf(key))))
+      return { ...schema, required: keys, properties: Object.fromEntries(keys.map(key => [key, strictSchema(schema.properties[key])])) }
+    })
+    return variants.length === 1 ? variants[0] : { anyOf: variants }
+  }
+  return schema.items ? { ...schema, items: strictSchema(schema.items) } : schema
+}
+
+/** The CLI writes an untrusted candidate. Only a successful, observed turn may
+ * promote it to a durable receipt; a partial/nonzero process cannot approve on resume. */
+export function createCodexReviewTransport(options: {
+  env: NodeJS.ProcessEnv
+  contracts: ReadonlyMap<string, CodexReviewContract>
+  briefIntegrity: ((text: string) => string) | undefined
+  live: Map<string, { readonly exitCode: number | null }>
+}) {
+  const env = codexWorkerEnv(options.env)
+  const cliReady = options.contracts.size > 0 && [false, true].every(resume => {
+    try {
+      const probe = Bun.spawnSync(['codex', 'exec', ...(resume ? ['resume'] : []), '--strict-config', '--ignore-user-config',
+        '-c', 'sandbox_mode="read-only"', '-c', 'approval_policy="never"', '--help'], { env, timeout: 5_000 })
+      return probe.exitCode === 0 && ['--output-schema', '--json', '--output-last-message', '--ignore-rules']
+        .every(flag => probe.stdout.toString().includes(flag))
+    } catch { return false }
+  })
+
+  const run = async (req: BoundedWorkRequest, signal: AbortSignal): Promise<BoundedWorkOutcome> => {
+    const contract = options.contracts.get(req.result.schema)
+    if (!contract || !options.briefIntegrity || req.writable || req.tools !== 'read-only' || req.needs_approval_decision !== false
+      || !Number.isSafeInteger(req.budget.wall_ms) || req.budget.wall_ms <= 0
+      || !req.model_id || req.thread?.id === '') return refused()
+    if (signal.aborted) return { kind: 'failed', class: 'killed', detail: 'Codex review was cancelled before dispatch' }
+    // No per-call credential materialisation, ambient key billing, or fallback account.
+    if (!env.CODEX_HOME) return { kind: 'refused', reason: 'provider-not-connected' }
+    try {
+      const auth = JSON.parse(await readFile(join(env.CODEX_HOME, 'auth.json'), 'utf8'))
+      if (auth.OPENAI_API_KEY || auth.auth_mode === 'apikey' || !auth.tokens?.access_token || !auth.tokens?.refresh_token) {
+        return { kind: 'refused', reason: 'provider-not-connected' }
+      }
+    } catch { return { kind: 'refused', reason: 'provider-not-connected' } }
+    if (!cliReady) return { kind: 'refused', reason: 'cli-contract' }
+
+    const key = createHash('sha256').update(JSON.stringify([req.run_id, req.step_id])).digest('hex')
+    const reservation = join(dirname(req.result.path), `codex-headless-step-${key}.json`)
+    const identity = JSON.stringify([req, env.CODEX_HOME])
+    const receiptPath = `${reservation}.receipt`
+    const validate = (bytes: string): BoundedWorkOutcome => {
+      try {
+        const value = JSON.parse(bytes)
+        if (!value || value.run_id !== req.run_id || value.step_id !== req.step_id || value.schema !== req.result.schema) {
+          return unknown('Codex review trailer identity or schema mismatched')
+        }
+        const fields = value.kind === 'completed' ? ['run_id', 'step_id', 'schema', 'kind', 'result'] : ['run_id', 'step_id', 'schema', 'kind', 'on']
+        if (Object.keys(value).length !== fields.length || !fields.every(field => Object.hasOwn(value, field))) return unknown('Codex review trailer envelope malformed')
+        if (value.kind === 'blocked' && typeof value.on === 'string' && value.on.trim()) return { kind: 'blocked', on: value.on }
+        if (value.kind !== 'completed' || !contract.validate(value.result)) return unknown('Codex review payload failed host validation')
+        return { kind: 'completed', result: value.result, usage: null, model_reported: null, thread_id: null }
+      } catch { return unknown('Codex review trailer is unreadable') }
+    }
+    const held = await reserveTrailerSlot(reservation, identity, req.result.path)
+    if (held.kind === 'unknown') return unknown(held.detail)
+    if (held.kind === 'resume') {
+      try {
+        const receipt = JSON.parse(await readFile(receiptPath, 'utf8'))
+        if (receipt.identity !== identity || typeof receipt.thread_id !== 'string' || !receipt.thread_id
+          || (req.thread && receipt.thread_id !== req.thread.id)) return unknown('Codex review receipt identity mismatched')
+        const outcome = validate(receipt.envelope)
+        return outcome.kind === 'completed' ? { ...outcome, thread_id: receipt.thread_id, usage: receipt.usage } : outcome
+      } catch { return unknown('Codex review has no committed receipt; dispatch will not be replayed') }
+    }
+
+    const schemaPath = `${reservation}.schema`
+    const candidate = `${reservation}.candidate`
+    const envelopeShape = (kind: string, fields: Record<string, unknown>) => ({ type: 'object', additionalProperties: false,
+      required: ['run_id', 'step_id', 'schema', 'kind', ...Object.keys(fields)], properties: {
+        run_id: { type: 'string', enum: [req.run_id] }, step_id: { type: 'string', enum: [req.step_id] },
+        schema: { type: 'string', enum: [req.result.schema] }, kind: { type: 'string', enum: [kind] }, ...fields } })
+    // Structured outputs disallow a root union. The transport wrapper contains
+    // the exact ordinary trailer, including its distinct blocked alternative.
+    await writeFile(schemaPath, JSON.stringify({ type: 'object', additionalProperties: false, required: ['envelope'],
+      properties: { envelope: { anyOf: [
+        envelopeShape('completed', { result: strictSchema(contract.jsonSchema) }),
+        envelopeShape('blocked', { on: { type: 'string' } }),
+      ] } } }), { flag: 'wx', mode: 0o600 })
+    let brief: string
+    try { brief = await readFile(req.brief.path, 'utf8') }
+    catch { return unknown('Codex review brief could not be read') }
+    if (options.briefIntegrity(brief) !== req.brief.integrity) return unknown('Codex review brief integrity mismatched')
+    const args = ['exec', ...(req.thread ? ['resume', req.thread.id] : []), '--json', '--ignore-user-config', '--ignore-rules',
+      '-m', req.model_id, '-c', 'sandbox_mode="read-only"', '-c', 'approval_policy="never"',
+      ...(req.effort ? ['-c', `model_reasoning_effort=${JSON.stringify(req.effort)}`] : []),
+      '--output-schema', schemaPath, '-o', candidate, '-']
+    let thread: string | null = null
+    let usage: Usage | null = null
+    let completed = false
+    let invalid = false
+    let pending = ''
+    let timedOut = false
+    let killTimer: ReturnType<typeof setTimeout> | undefined
+    const prompt = `Request (data): ${JSON.stringify(req)}\n\n${brief}\n\nReturn {"envelope": <the result envelope>} as your final response. The host writes it; do not write files. If unable to review, return blocked with on.\n`
+    let child: Bun.Subprocess<Blob, 'pipe', 'ignore'>
+    try {
+      child = Bun.spawn(['codex', ...args], { cwd: req.cwd, env, detached: true, stdin: new Blob([prompt]), stdout: 'pipe', stderr: 'ignore' })
+    } catch { return { kind: 'failed', class: 'infra', detail: 'Codex review could not start' } }
+    options.live.set(req.step_id, child)
+    const kill = (signal: NodeJS.Signals) => {
+      try { if (child.pid) process.kill(-child.pid, signal) } catch { /* Already exited. */ }
+    }
+    const stop = () => { kill('SIGTERM'); killTimer ??= setTimeout(() => kill('SIGKILL'), 250) }
+    const timer = setTimeout(() => { timedOut = true; stop() }, req.budget.wall_ms)
+    signal.addEventListener('abort', stop, { once: true })
+    if (signal.aborted) stop()
+    const readEvents = async () => {
+      const decoder = new TextDecoder()
+      for await (const chunk of child.stdout) {
+        pending += decoder.decode(chunk, { stream: true })
+        if (pending.length > 1024 * 1024) { invalid = true; pending = ''; stop(); return }
+        let end: number
+        while ((end = pending.indexOf('\n')) >= 0) {
+          const line = pending.slice(0, end); pending = pending.slice(end + 1)
+          try {
+            const event = JSON.parse(line)
+            if (event.type === 'thread.started') {
+              if (thread !== null || typeof event.thread_id !== 'string' || !event.thread_id || (req.thread && event.thread_id !== req.thread.id)) invalid = true
+              else thread = event.thread_id
+            }
+            if (event.type === 'turn.failed' || event.type === 'error') invalid = true
+            if (event.type === 'turn.completed') {
+              if (completed) invalid = true
+              completed = true
+              const u = event.usage
+              if (u && Number.isSafeInteger(u.input_tokens) && u.input_tokens >= 0 && Number.isSafeInteger(u.output_tokens) && u.output_tokens >= 0) {
+                usage = { input_tokens: u.input_tokens, output_tokens: u.output_tokens,
+                  ...(Number.isSafeInteger(u.cached_input_tokens) && u.cached_input_tokens >= 0 ? { cache_read_input_tokens: u.cached_input_tokens } : {}) }
+              } else invalid = true
+            }
+          } catch { invalid = true }
+        }
+      }
+    }
+    const [code] = await Promise.all([child.exited.then(code => { kill('SIGKILL'); return code }),
+      readEvents().catch(() => { invalid = true; stop() })])
+    clearTimeout(timer)
+    signal.removeEventListener('abort', stop)
+    // Always close the process group, including children that survived the CLI.
+    kill('SIGKILL'); clearTimeout(killTimer)
+    options.live.delete(req.step_id)
+    if (signal.aborted) return { kind: 'failed', class: 'killed', detail: 'Codex review was cancelled' }
+    if (timedOut) return { kind: 'failed', class: 'timeout', detail: 'Codex review exceeded its wall-clock budget' }
+    if (code !== 0) return { kind: 'failed', class: 'infra', detail: `Codex review exited ${code ?? 'without status'}` }
+    if (invalid || !completed || !thread || pending.trim()) return unknown('Codex review lacks a valid completed turn and thread observation')
+    try {
+      const output = JSON.parse(await readFile(candidate, 'utf8'))
+      if (!output || Object.keys(output).length !== 1 || !Object.hasOwn(output, 'envelope')) return unknown('Codex review transport envelope malformed')
+      const envelope = JSON.stringify(output.envelope)
+      const outcome = validate(envelope)
+      if (outcome.kind !== 'completed' && outcome.kind !== 'blocked') return outcome
+      await writeFile(`${receiptPath}.tmp`, JSON.stringify({ identity, envelope, thread_id: thread, usage }), { flag: 'wx', mode: 0o600 })
+      await rename(`${receiptPath}.tmp`, receiptPath)
+      await writeFile(req.result.path, envelope, { flag: 'wx', mode: 0o600 })
+      return outcome.kind === 'completed' ? { ...outcome, thread_id: thread, usage } : outcome
+    } catch { return unknown('Codex review result could not be committed') }
+  }
+  return Object.assign(run, { ready: cliReady })
+}
