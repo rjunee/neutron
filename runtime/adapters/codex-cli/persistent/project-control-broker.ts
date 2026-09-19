@@ -196,25 +196,32 @@ export async function createProjectControlBroker(options: {
     if (!work) return
     current = work
     if (work.method === 'turn/start') active = { client: work.client, epoch: work.epoch, turnId: null, completed: false }
+    const settleCurrent = (): void => {
+      current = undefined
+      releaseCompletedTurn()
+      if (!closed && !active) {
+        try { journal.settle() } catch { close(new Error('Broker journal settlement failed; outcome unknown')) }
+      }
+    }
     void native(work.method, work.params).then(result => {
       if (work.method === 'turn/start') {
         if (!object(result) || !object(result.turn) || typeof result.turn.id !== 'string' || !active
           || active.turnId !== null && active.turnId !== result.turn.id) { close(new Error('Native turn identity unknown')); work.reject(closed!); return }
         active.turnId = result.turn.id
       }
-      work.resolve(result)
+      // A fulfilled caller may close immediately. Commit settlement before
+      // publishing the acknowledgement; active turns retain their marker.
+      settleCurrent()
+      if (closed) work.reject(closed)
+      else work.resolve(result)
+      pump()
     }, error => {
       if (work.method === 'turn/start') {
         if (active && active.turnId !== null) close(new Error('Native turn started before refusal; outcome unknown'))
         else active = undefined
       }
-      work.reject(error as Error)
-    }).finally(() => {
-      current = undefined
-      releaseCompletedTurn()
-      if (!closed && !active) {
-        try { journal.settle() } catch { close(new Error('Broker journal settlement failed; outcome unknown')) }
-      }
+      settleCurrent()
+      work.reject(closed ?? error as Error)
       pump()
     })
   }

@@ -20,7 +20,7 @@ function fixture() {
       listen(listener) { receive = listener }, close() {},
       send(message) {
         sent.push(message)
-        if (message.method === 'initialize' || acknowledge) queueMicrotask(() => receive({ id: message.id, result: {} }))
+        if (message.method === 'initialize' || acknowledge) queueMicrotask(() => receive({ id: message.id, result: message.method === 'turn/start' ? { turn: { id: 'active-turn' } } : {} }))
       },
     }
     const broker = await createProjectControlBroker({ ...binding, ...override, upstream, requestTimeoutMs: 20 })
@@ -57,15 +57,37 @@ test('lost acknowledgement survives restart as an unresolved fence, with reads a
   expect(next.broker.state().unresolved).toBe('thread/settings/update')
 })
 
-test('acknowledged settled settings remain writable after restart', async () => {
+test('acknowledged settings remain writable after immediate close and restart', async () => {
   const f = fixture()
   const first = await f.open()
   await first.broker.gateway('first').request('thread/settings/update', { threadId: f.binding.threadId, model: 'first' }, first.broker.state().epoch)
-  await new Promise(resolve => setTimeout(resolve, 0))
   first.broker.close()
   const next = await f.open()
   await next.broker.gateway('next').request('thread/settings/update', { threadId: f.binding.threadId, model: 'next' }, next.broker.state().epoch)
   expect(next.sent.filter(message => message.method === 'thread/settings/update')).toHaveLength(1)
+})
+
+test('acknowledged active turn remains unresolved after immediate close and restart', async () => {
+  const f = fixture()
+  const first = await f.open()
+  await first.broker.gateway('first').request('turn/start', { threadId: f.binding.threadId }, first.broker.state().epoch)
+  first.broker.close()
+  const next = await f.open()
+  expect(next.broker.state().unresolved).toBe('turn/start')
+  await expect(next.broker.gateway('next').request('turn/start', { threadId: f.binding.threadId }, next.broker.state().epoch)).rejects.toThrow('unresolved')
+  expect(next.sent.some(message => message.method === 'turn/start')).toBe(false)
+})
+
+test('failed durable settlement rejects acknowledgement and preserves the unknown outcome', async () => {
+  const f = fixture()
+  const first = await f.open()
+  const db = new Database(`${f.binding.socketPath}.sqlite`)
+  db.exec("CREATE TRIGGER refuse_settle BEFORE UPDATE ON broker WHEN OLD.unresolved IS NOT NULL AND NEW.unresolved IS NULL BEGIN SELECT RAISE(ABORT, 'fixture settlement failure'); END")
+  db.close()
+  await expect(first.broker.gateway('first').request('thread/settings/update', { threadId: f.binding.threadId, model: 'first' }, first.broker.state().epoch)).rejects.toThrow('settlement failed')
+  expect(first.broker.state().phase).toBe('closed')
+  const next = await f.open()
+  expect(next.broker.state().unresolved).toBe('thread/settings/update')
 })
 
 async function childBroker(binding: ReturnType<typeof fixture>['binding'], turn: boolean) {
