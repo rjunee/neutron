@@ -550,22 +550,23 @@ export class CodexOwnerBindings {
         const session: NonNullable<CodexActingSession['session']> = {
           projectId, isLive: () => !this.refused.has(projectId) && owner.broker.state().phase === 'idle',
           screenPrompt: () => undefined, answerApproval: async () => { throw new Error('Codex bounded approval refused') },
-          submitLine: async prompt => {
+          submitLine: async (prompt, dispatch) => {
             const active = this.builds.get(projectId)?.input
             if (!active) throw new Error('Codex build session has no active dispatch')
+            dispatch.signal.throwIfAborted()
             const handle = this.startTurn(projectId, { ...active.spec, prompt, session: { id: facts.threadId, last_active_at: Date.now() },
-              turn_absolute_ceiling_ms: Math.min(active.timeout_ms, active.request.budget.wall_ms) }, true)
+              turn_absolute_ceiling_ms: dispatch.timeout_ms }, true)
             const cancel = (): void => { fireAndForget('codex-owner-binding.cancel', handle.cancel()) }
-            active.signal.addEventListener('abort', cancel, { once: true })
+            dispatch.signal.addEventListener('abort', cancel, { once: true })
             try {
-              if (active.signal.aborted) await handle.cancel()
+              if (dispatch.signal.aborted) await handle.cancel()
               let completed = false
               for await (const event of handle.events) {
                 if (event.kind === 'error') throw new Error(event.message)
                 if (event.kind === 'completion') completed = true
               }
               if (!completed) throw new Error('Codex build native completion missing')
-            } finally { active.signal.removeEventListener('abort', cancel) }
+            } finally { dispatch.signal.removeEventListener('abort', cancel) }
           },
         }
         build = { session }; this.builds.set(projectId, build)

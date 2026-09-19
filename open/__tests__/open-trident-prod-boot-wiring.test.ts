@@ -10,6 +10,8 @@ import { honourDiffOutput } from '@neutronai/trident/testing/diff-output-host.ts
 import { makeTridentRun } from '@neutronai/trident/testing/make-trident-run.ts'
 import { spyOn } from 'bun:test'
 import { asOwnerHandle } from '@neutronai/persistence/index.ts'
+import { CodexCredentialService } from '@neutronai/trident/codex-credential.ts'
+import * as durableCodexOwner from '../wiring/codex-durable-owner.ts'
 /** Production boot and typed project-launch composition checks. */
 
 import { afterEach, beforeEach, describe, expect, test } from 'bun:test'
@@ -140,6 +142,37 @@ function panelCompletingSubstrate(): Substrate {
     },
   }
 }
+
+test.each([false, true])('production Codex recovery resolves materialized credentials before inspecting a surviving owner: journal=%s', async journal => {
+  delete process.env['ANTHROPIC_API_KEY']
+  delete process.env['OPENAI_API_KEY']
+  await new SqliteProjectSettingsStore(db).update('owner', 'project-one', { name: 'Project One', model_provider: 'openai-codex' })
+  const cwd = join(tmpDir, 'Projects', 'project-one')
+  const codexHome = join(cwd, '.codex')
+  mkdirSync(codexHome, { recursive: true })
+  writeFileSync(join(codexHome, 'project-owner.json'), JSON.stringify('project-one'))
+  if (journal) writeFileSync(join(codexHome, '.neutron-owner-launch.json'), '{}')
+  const order: string[] = []
+  const materialize = spyOn(CodexCredentialService.prototype, 'ensureMaterialized').mockImplementation(() => { order.push('materialized'); return true })
+  const resolve = spyOn(CodexCredentialService.prototype, 'resolveActiveCodexHome').mockImplementation((_owner, projectId) => {
+    if (projectId !== 'project-one') return null
+    order.push('project-credential')
+    return codexHome
+  })
+  const attach = spyOn(durableCodexOwner, 'openDurableCodexOwner').mockImplementation(async options => {
+    expect(options.projectId).toBe('project-one')
+    expect(options.cwd).toBe(cwd)
+    expect(options.codexHome).toBe(codexHome)
+    order.push('reattach')
+    throw new Error('Fixture survivor requires reconciliation')
+  })
+  try {
+    await buildOpenGraphComposer({ env: process.env, substrateFactory: () => recordingSubstrate([]) })({ db, project_slug: 'owner' })
+    expect(order.indexOf('materialized')).toBeGreaterThanOrEqual(0)
+    expect(order.indexOf('project-credential')).toBeGreaterThan(order.indexOf('materialized'))
+    expect(attach).toHaveBeenCalledTimes(journal ? 1 : 0)
+  } finally { attach.mockRestore(); resolve.mockRestore(); materialize.mockRestore() }
+})
 
 test.each([
   ['anthropic with headless available', 'anthropic', true],

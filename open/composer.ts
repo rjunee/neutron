@@ -1096,7 +1096,6 @@ export function buildOpenGraphComposer(
     const codexOwnerProjects = (await projectSettingsStore.list(project_slug))
       .filter(project => resolveModelProvider(project.id).provider === 'openai-codex')
       .map(project => project.id)
-    await codexOwnerBindings.reconcile(codexOwnerProjects)
     // O6 — NOTICE-FAMILY + RECOVERED-REPLY sinks for the owner's WARM conversational
     // substrate (`cc-agent-*`). The persistent REPL fires four DI seams on the
     // rising edge of otherwise-invisible states — a mid-turn API 5xx dead turn, a
@@ -1842,6 +1841,10 @@ export function buildOpenGraphComposer(
     } catch (err) {
       log.warn('codex_ensure_materialized_failed', { error: err instanceof Error ? err.message : String(err) })
     }
+    // Recovery reads this credential service through the shared owner resolver.
+    // Reconcile only after materialization; an earlier lookup is caught as an
+    // unavailable credential and silently skips surviving project owners.
+    await codexOwnerBindings.reconcile(codexOwnerProjects)
     const coresSubstrate =
       llmPool !== null ? makeEphemeralSubstrate('cc-cores')(owner_home) : null
     // Plan task 8 — the agent-callable ritual registration service. Assigned LATE

@@ -1,4 +1,5 @@
-import { afterEach, expect, test } from 'bun:test'
+import { afterEach, expect, spyOn, test } from 'bun:test'
+import * as codexActing from '@neutronai/runtime/workers/codex-acting-turn.ts'
 import { appendFileSync, existsSync, mkdirSync, mkdtempSync, rmSync, writeFileSync } from 'node:fs'
 import { tmpdir } from 'node:os'
 import { join } from 'node:path'
@@ -405,6 +406,35 @@ test('a native model read finishing after consuming timeout cannot deliver a lat
   expect(existsSync(join(f.homes.get('project-one')!, '.neutron-owner-work.json'))).toBe(false)
   expect((await collect(f.bindings.start('project-one', spec('new legitimate chat')))).at(-1)).toMatchObject({ kind: 'completion' })
   expect(f.launched).toHaveLength(1)
+})
+
+test.each(['signal', 'budget'] as const)('native build consumes the bridge %s and interrupts only its submitted parent', async cause => {
+  const f = fixture(true)
+  await collect(f.bindings.start('project-one', spec('warm owner')))
+  f.hold(true)
+  const stop = new AbortController()
+  const original = codexActing.createCodexActingTurn
+  const bridge = spyOn(codexActing, 'createCodexActingTurn').mockImplementation(binding => original({ ...binding,
+    session: { ...binding.session!, submitLine: (prompt, dispatch) => binding.session!.submitLine(prompt, {
+      signal: cause === 'signal' ? stop.signal : dispatch.signal,
+      timeout_ms: cause === 'budget' ? 35 : dispatch.timeout_ms,
+    }) },
+  }))
+  let timer: ReturnType<typeof setTimeout> | undefined
+  if (cause === 'signal') f.onPrompt(() => { timer = setTimeout(() => stop.abort(), 35) })
+  try {
+    const { request, worker } = await consumingBuild(f, { wall: 1500 })
+    const started = Date.now()
+    expect((await worker.run(request, 'in-repl', new AbortController().signal)).kind).toBe('unknown')
+    expect(Date.now() - started).toBeLessThan(1000)
+    expect(f.rpc.filter(call => call.method === 'turn/interrupt').map(call => call.params)).toEqual([
+      { threadId: 'native-project-one', turnId: 'turn-2' },
+    ])
+    expect(f.calls).toHaveLength(2)
+    expect((await collect(f.bindings.start('project-one', spec('must not reuse uncertain build')))).at(-1)?.kind).toBe('error')
+    expect(existsSync(join(f.homes.get('project-one')!, '.neutron-owner-work.json'))).toBe(true)
+    expect(f.launched).toEqual(['project-one'])
+  } finally { clearTimeout(timer); bridge.mockRestore(); await f.bindings.close() }
 })
 
 test('zero managed delivery does not renew a host view when a foreign native turn became active', async () => {
