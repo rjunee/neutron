@@ -88,6 +88,9 @@ async function fixture() {
           return { ok: true, exit_code: 0, stdout: diff, stderr: '' }
         }
         if (argv.includes('check-ref-format')) return { ok: true, exit_code: 0, stdout: '', stderr: '' }
+        // G166 (#1133): the publication trailer scan lists the launch-base..head range; the fake
+        // repo has no commits to scan, so the range is empty and nothing is read.
+        if (argv.includes('rev-list')) return { ok: true, exit_code: 0, stdout: '', stderr: '' }
         throw new Error(`Unexpected command: ${argv.join(' ')}`)
       },
     },

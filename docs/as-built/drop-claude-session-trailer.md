@@ -668,6 +668,131 @@ Each finding, before and after, measured with the fixture per mode (`REVIEW_MODE
   `:837`, `:852`, `:871`, `:888`, `:918`, `:943`, `:976`, `:998`, `:1036`, `:1081`,
   `:1098`, `:1116`, `:1139`, `:1163`, `:1185`, `:1202`, `:1225`, `:1254`.
 
+### Round 16: finding 0 closed at the publisher (`trident/gates/release-readiness.ts`, G166)
+
+**The residual, re-measured at `92b73ae7` before anything was written.**
+`REVIEW_MODE=reprobe-fault node /tmp/review-c80-adversarial.mjs trident/commit-with-resolved-head.sh`
+-> `exit: 69`, `mainAtBefore: false`, `branchMessages: "subject\n\nClaude-Session: fixture"`. The
+wrapper refuses truthfully ("refs/heads/main could not be re-read after the commit ... the ref
+was NOT reset") and the trailer-bearing commit stays on the branch. The wrapper cannot close
+this from inside git-that-cannot-read-its-own-ref: with the re-probe unreadable there is no
+expected value for a compare-and-swap, a blind reset is the round-13 defect that round 14
+removed, and a retry would fit the fixture's once-only fault and prove nothing about a fault
+that persists. The card's acceptance is "no loop-authored commit carries the trailer" -- a
+property of the PUBLISHED history -- so the closure is at the one place a Forge commit
+becomes public.
+
+**Where that place is (grep, not memory).** Positive control:
+`grep -rn "Claude-Session" trident/gates trident/production-host-effects.ts trident/build-host.ts`
+= 0 hits before this round; `grep -rln "Claude-Session" --include=*.ts --include=*.mjs
+--include=*.sh . | grep -v node_modules | grep -v .test.` = the wrapper (the filter),
+`trident/inner-workflow.mjs` (the Forge brief), `build-settings.ts` (the settings switch) --
+no scan existed. `publicationReadiness` (`trident/gates/release-readiness.ts`) is called by
+BOTH publishers -- `trident/production-host-effects.ts:369 publishChecked`, which then runs
+`git push --force-with-lease`, and `trident/build-host.ts:226 publishGate` -- with
+`launchBase` = the pinned launch base sha (`current.base_sha` / `options.leak.base_sha`,
+already required to be a full OID at `production-host-effects.ts:222`). It measured local
+head == reviewed head, remote lease readability and first-push ancestry, and read no commit
+message.
+
+**What was built.** In `release-readiness.ts`:
+
+1. `const sessionTrailerLine = /^claude-session:/i` (`:22`), with NO `u` flag on purpose: in
+   non-unicode mode ECMAScript's Canonicalize never folds a code unit >= 128 onto an ASCII
+   one, so this is the wrapper's ASCII-only `[Cc][Ll]...[Nn]:` bracket pattern in JS, and it
+   is line-anchored the same way.
+2. `sessionTrailerCarriers(run, repo, launchBase, head)`: `fullOid.test(launchBase)` else
+   `unknown('Publication launch base is not a full OID')` before any git call; then
+   `git rev-list --end-of-options <launchBase>..<head>` through `gitRangeArgv` (`:35`; the
+   two-dot range is what the head adds on top of the base) -- `!ok` ->
+   `unknown('Publication commit range could not be listed')`, any listed line that is not a
+   full OID -> `unknown('Publication commit range listing is malformed')`; then, per sha in
+   rev-list order, `git cat-file commit <sha>` -- the RAW object, the bytes the wrapper
+   strips, never `git log` porcelain -- `!ok` -> `unknown('Publication commit <sha> could not
+   be read')`, no `\n\n` separator -> `unknown('Publication commit <sha> has no message')`,
+   and any message line matching `sessionTrailerLine` makes the sha a carrier.
+3. In `publicationReadiness`, after the first-push ancestry block and immediately before
+   `return { kind: 'allow' }` (`:84`), unconditionally -- a re-publication with the remote
+   branch present is scanned the same as a first push: `unknown` is returned as is; carriers
+   -> `blocked('Publication branch carries a Claude-Session trailer on N commit(s) above the
+   launch base: <sha>, <sha>')`, the shas named so a fix round knows what to rewrite. Every
+   existing refusal keeps its order and text; the `try`/`unknownCause` wrapper still encloses
+   the whole body.
+
+The host runner (`spawnCapture`) decodes stdout as UTF-8 and trims it; a non-UTF-8 message
+body decodes with U+FFFD, and the line structure and the ASCII token survive that (no test
+discriminates it). The trim also removes the trailing newline of the raw object, which is
+why the separator is searched for rather than the object parsed by fixed offsets.
+
+**Closure demonstrated on the fixture's own residue.** The repository the `reprobe-fault`
+run above left behind (`/tmp/review-c80-HVAPrd`, `main` = `c3d426a1` carrying
+`Claude-Session: fixture` over base `cf8a8a3c`) was given a bare origin and handed to
+`publicationReadiness(run, repo, 'main', 'cf8a8a3c...', { head: c3d426a1 })`:
+`{"kind":"blocked","on":"Publication branch carries a Claude-Session trailer on 1 commit(s)
+above the launch base: c3d426a14372042e6e52a1f64cdc0e7454317f1c"}`. The commit the wrapper
+could not withdraw does not reach origin.
+
+**Repository positive control.** `git log --all --format=%H --grep='^Claude-Session:'` =
+`0fc6cb83`, `51e5b16f`, `d9e415d9`; `git cat-file commit 0fc6cb83 | sed '1,/^$/d' | grep -ci
+'^claude-session:'` = 1, and `0fc6cb83` is an ancestor of `a1be24e0`, below this PR's base.
+Over this PR's own range, `for s in $(git rev-list a1be24e0..HEAD); do git cat-file commit $s
+| sed '1,/^$/d' | grep -il '^claude-session:' && echo $s; done` prints nothing (9 commits at
+`92b73ae7`, 10 with this round's), so G166 allows #1152's own publication.
+
+**Tests** -- NEW `trident/gates/release-readiness.test.ts`, real git through a
+`Bun.spawnSync` run host (`GIT_CONFIG_GLOBAL=/dev/null`, `GIT_CONFIG_NOSYSTEM=1`, as
+`gates/fix-lineage.test.ts` does), each scratch repo with a base commit whose sha is the
+launch base, a bare `origin` (so `ls-remote` answers and the gate reaches the scan), and
+branch `change`; temp dirs removed in `finally`:
+
+- (a) `:64` POSITIVE CONTROL: one clean commit with only `Co-Authored-By` -> `allow`.
+- (b) `:72` one commit with a `Claude-Session:` paragraph -> exactly `blocked` with the
+  `on` text naming that sha; `refs/heads/change` unchanged (the gate only reads).
+- (c) `:81` `claude-session: lower` and `CLAUDE-SESSION: upper` -> blocked; `see
+  Claude-Session: notes mid-line` -> allow (line-anchored).
+- (d) `:95` carrier, clean, carrier -> blocked naming `<newest>, <oldest>` (rev-list order),
+  the clean sha absent.
+- (e) `:107` the trailer on a commit BELOW the launch base, one clean commit above ->
+  allow (range-bounded: history already on main is not this publication's).
+- (f) `:126` with the remote branch present (so the first-push ancestry arm is skipped and
+  the scan is the only measurement of the base): launchBase `'b'.repeat(40)` -> unknown
+  'Publication commit range could not be listed'; launchBase `'short'` -> unknown
+  'Publication launch base is not a full OID' and, by a counting run host, no `rev-list`
+  or `cat-file` argv was issued.
+- (g) `:142` a run host that fails every `cat-file` -> unknown naming the sha; branch
+  untouched.
+- (h) `:154` carrier pushed to origin first (`ls-remote` names it) -> still blocked: the
+  scan is unconditional, not inside the first-push arm.
+- (i) `:164` a fake run host with no git: `rev-list` -> `'c'*40`, `cat-file` -> a raw
+  object whose message is `subject\n\nClaude-Session: fake` -> blocked naming `'c'*40`;
+  `rev-list` -> `not-a-sha` -> unknown 'Publication commit range listing is malformed'.
+
+9 tests, all green (1.2s). `trident/build-host.test.ts` fake `run_host` (`:77-98`) gained
+one arm, `rev-list` -> ok with empty stdout, before its `Unexpected command` throw: the
+fake repo has no commits to scan, so every existing expectation in "publication readiness
+measures local head, remote state and first-push ancestry" and the `publishGate` tests
+holds unchanged (54 / 0, the baseline count). `trident/production-host-effects.test.ts`
+publishes real commits ("Build fixture", no trailer) through the real gate and needed no
+change.
+
+**Mutation, proven by hand before nomination.**
+`grep -c 'const sessionTrailerLine = /^claude-session:/i' trident/gates/release-readiness.ts`
+= 1. Replacing it with `const sessionTrailerLine = /^(?!)/` (a pattern that matches nothing:
+the scan runs, reads every commit, and never blocks) turns the guard
+`bun test trident/gates/release-readiness.test.ts` to 4 pass / 5 fail -- exactly (b), (c),
+(d), (h) and (i), each seeing `allow` where it expected `blocked` -- while the control
+`bun test trident/gates/fix-lineage.test.ts` (never imports release-readiness) stays 6 / 0;
+restored, the guard is 9 / 0. The pattern IS the acceptance: with it dead, every
+trailer-bearing branch publishes with `allow`.
+
+**Inventory.** `docs/trident-gates-inventory.md` gains row G166 (keep-in-place; production
+anchors `release-readiness.ts:22`, `:35`, `:84`; test anchors
+`release-readiness.test.ts:64`, `:72`, `:107`, `:154`; Silent: a trailer-bearing commit is
+pushed to the public repository), indexed under "Publication and replay"; the summary
+literals move 165 -> 166 entries and 155 -> 156 Silent (the awk enumeration in that
+paragraph prints `166 3 156 10`); `trident/gates-inventory-citations.test.ts:10`
+`toHaveLength(165)` -> `166` (1 / 0).
+
 ### Mutation, proven by hand before nomination
 
 `grep -c '\[Cc\]\[Ll\]\[Aa\]\[Uu\]\[Dd\]\[Ee\]-\[Ss\]\[Ee\]\[Ss\]\[Ss\]\[Ii\]\[Oo\]\[Nn\]:\*) drop\[i\]=1; removed=1 ;;'
@@ -757,11 +882,17 @@ stands as the guard that it never does. (The round-8 pattern mutation on
 - An `encoding UTF-8` header, if an object ever carried one, is not reproduced (git itself
   never writes it; `commit-tree` writes `encoding` only for a non-UTF-8 value). The
   post-condition compares tree and parents, not the encoding header.
-- A publish-side range scan (`trident/gates/release-readiness.ts:publicationReadiness`
-  refusing to publish when any commit in base..head has a line matching the same bracket
-  pattern): NOT in this round. It is what makes the acceptance hold through a 69 / 70 / 74
-  / 76 refusal that Forge then ignores, and it is the remaining task of this plan, in its
-  own PR with its own real-git test.
+- `pinnedMergeReadiness` (merge time) does NOT scan: the merge is of commits already
+  published through G166, and a PR published by a pre-G166 host is out of scope for this
+  card. The CI leak gate's `--messages-only` half is not extended either: it runs after the
+  push, when the message is already public, which is the wrong side of the boundary.
+- A pre-commit strip of `-m` values in the wrapper: not added. The post-commit strip already
+  covers every message source (`-m`, `-F`, `-C`, the editor, hooks), and a second filter over
+  argv would have its own edge cases for the guarantee the scan now gives at the boundary
+  that matters. One filter, one guarantee, one scan.
+- The scan reads only `launchBase..head`: a trailer on a commit below the pinned base is
+  main's history, not this publication's, and refusing it would block every branch off a
+  main that once carried one (`0fc6cb83` does).
 - Snapshotting and restoring the sequencer state a withdrawn commit consumed: still not
   done; the loss is named on stderr (unchanged from round 10).
 - `docs/AS_BUILT.md` and every existing shard: frozen; this record is a new shard.
@@ -774,7 +905,10 @@ effect on the next Forge commit from a checkout that carries it, whatever the RE
 say. The commit that landed round 8 was itself authored through the wrapper with a
 deliberate `Claude-Session: https://claude.ai/code/session_01PROOF` paragraph on its argv,
 and carries none; every later round's commit, this one included, was authored through the
-wrapper without such a paragraph and carries none. Merged is not shipped.
+wrapper without such a paragraph and carries none. G166 takes effect on the next
+publication from a DEPLOYED tree that carries it: the publisher runs in the host process,
+so a merge of this PR changes nothing until that host is redeployed, and a PR published by
+a host from before the deploy was never scanned. Merged is not shipped.
 
 ### Re-landed
 
@@ -841,3 +975,26 @@ record; the settings switch, the Forge brief, the strip filter and the Co-Author
 handling are untouched. The full suite is deferred to this plan's terminal task by the
 host's instruction; this round ran the wrapper's own real-git file and the Forge-brief file
 (52 + 153, all green) and the trident typecheck.
+
+Round 16 is the terminal task of run `07bd885d`, one commit on top of round 15 (`92b73ae7`,
+the task-2 commit of the same run, unpublished at plan time; origin's #1152 head is still
+`c80d4b92`), on the same base `a1be24e0`, in the same worktree. It closes finding 0 where
+it can be closed -- at the publisher, G166 -- and touches only
+`trident/gates/release-readiness.ts`, its new real-git test file, the `rev-list` arm in
+`trident/build-host.test.ts`, the G166 row and the two count literals in the inventory,
+the 165 -> 166 literal in `trident/gates-inventory-citations.test.ts`, and this record. The
+wrapper, its 52 tests, the settings switch, the Forge brief and the Co-Authored-By handling
+are untouched. Stage 1 (file-scoped, the branch's six changed test files: the new file,
+`build-host.test.ts`, `gates-inventory-citations.test.ts`,
+`commit-with-resolved-head-realgit.test.ts`, `inner-workflow.test.ts` and
+`build-settings.test.ts`) = 284 pass / 0 fail in 9.2s, with `gates/fix-lineage.test.ts`
+6 / 0 as the mutation control; `scripts/ci/typecheck-all.sh` = 50 of 51 tsconfigs pass,
+`trident/tsconfig.json` among them, the one FAIL being `app/tsconfig.json` TS2688 ("Cannot
+find type definition file for '@types'") from the parent checkout's self-referential
+`node_modules/@types` link, environmental and unrelated to this diff; `scripts/ci/lint.sh`
+clean (DIFF-BASE 0 found in 187 files -- the new range goes through `gitRangeArgv`). The
+host's build brief for this task instructed the full suite DEFERRED ("INTERMEDIATE TASK of
+a multi-task plan ... do NOT run the full suite this iteration"), which contradicts the
+plan step's "terminal, remainingTasks 0"; the brief is the contract the host verifies, so
+the full suite was not run here and the result reports `suiteOutcome: deferred` -- CI on
+the published head is the whole-branch run.
