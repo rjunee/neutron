@@ -206,6 +206,11 @@ export const MOUNTED_SLOTS: readonly RouteSlotServedEntry[] = [
     serves: 'the tab resolver — which tabs a project shows at all',
   },
   {
+    rung: 'app-repl-model',
+    composition: 'app_repl_model_surface',
+    serves: 'GET/POST /api/app/projects/<id>/repl-model — read and switch the live conversation model',
+  },
+  {
     rung: 'app-work-board',
     composition: 'app_work_board_surface',
     serves: 'the Work Board',

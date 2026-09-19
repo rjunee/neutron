@@ -74,10 +74,10 @@ export class WebReplModelClient {
     let raw: unknown
     try { raw = await response.json() } catch { raw = null }
     if (!response.ok) {
-      const detail = typeof raw === 'object' && raw !== null ? (raw as Record<string, unknown>)['detail'] : null
-      const error = typeof raw === 'object' && raw !== null ? (raw as Record<string, unknown>)['error'] : null
+      const message = typeof raw === 'object' && raw !== null ? (raw as Record<string, unknown>)['message'] : null
+      const code = typeof raw === 'object' && raw !== null ? (raw as Record<string, unknown>)['code'] : null
       throw new ReplModelError(
-        typeof detail === 'string' && detail ? detail : typeof error === 'string' && error ? error : `HTTP ${response.status}`,
+        typeof message === 'string' && message ? message : typeof code === 'string' && code ? code : `HTTP ${response.status}`,
         response.status,
       )
     }

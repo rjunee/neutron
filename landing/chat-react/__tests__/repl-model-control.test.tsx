@@ -54,7 +54,7 @@ describe('web REPL model switch', () => {
     const { ReplModelControl } = await import('../ReplModelControl.tsx')
     let reads = 0
     const fetchImpl = async (_url: string, init?: RequestInit): Promise<Response> => {
-      if (init?.method === 'POST') return json({ error: 'stale_session', detail: 'Session changed' }, 409)
+      if (init?.method === 'POST') return json({ ok: false, code: 'stale_session', message: 'Session changed' }, 409)
       reads++
       return json(state('cheap', `session-${reads}`))
     }
@@ -201,7 +201,7 @@ describe('web REPL model switch', () => {
     let reads = 0
     const fetchImpl = async (): Promise<Response> => {
       reads++
-      return reads === 1 ? json({ error: 'unavailable', detail: 'Harness offline' }, 503) : json(state('cheap'))
+      return reads === 1 ? json({ ok: false, code: 'unavailable', message: 'Harness offline' }, 503) : json(state('cheap'))
     }
     const host = document.createElement('div')
     document.body.appendChild(host)
@@ -227,7 +227,7 @@ describe('web REPL model switch', () => {
     const fetchImpl = async (_url: string, init?: RequestInit): Promise<Response> => {
       if (init?.method === 'POST') {
         posts++
-        return posts === 1 ? json({ error: 'busy', detail: 'Try again' }, 409) : json(state('deep'))
+        return posts === 1 ? json({ ok: false, code: 'busy', message: 'Try again' }, 409) : json(state('deep'))
       }
       reads++
       if (reads === 3) return new Promise<Response>((resolve) => { resolveRefresh = resolve })

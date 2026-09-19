@@ -74,9 +74,9 @@ export class ReplModelClient {
     if (!response.ok) {
       const error = isRecord(payload) ? payload : {};
       throw new ReplModelError(
-        typeof error.error === 'string' ? error.error : `http_${response.status}`,
-        typeof error.detail === 'string' ? error.detail :
-          typeof error.error === 'string' ? error.error : `Model request failed (HTTP ${response.status}).`,
+        typeof error.code === 'string' ? error.code : `http_${response.status}`,
+        typeof error.message === 'string' ? error.message :
+          typeof error.code === 'string' ? error.code : `Model request failed (HTTP ${response.status}).`,
         response.status,
       );
     }

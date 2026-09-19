@@ -93,7 +93,7 @@ describe('conversation REPL model on phone', () => {
 
   it('keeps the old model visible and shows server error after a rejected switch', async () => {
     postStatus = 409;
-    postBody = { error: 'session_changed', detail: 'Conversation changed. Refresh.' };
+    postBody = { ok: false, code: 'session_changed', message: 'Conversation changed. Refresh.' };
     const screen = await mount();
     await press('repl-model-open');
     await press('repl-model-option-frontier');
@@ -160,7 +160,7 @@ describe('conversation REPL model on phone', () => {
 
   it('ignores session A recovery GET completion after focus refreshes to session B', async () => {
     postStatus = 409;
-    postBody = { error: 'session_changed', detail: 'Session A changed.' };
+    postBody = { ok: false, code: 'session_changed', message: 'Session A changed.' };
     deferGetAt = 2;
     const screen = await mount();
     await press('repl-model-open');
@@ -179,7 +179,7 @@ describe('conversation REPL model on phone', () => {
 
   it('uses a same-generation recovery GET after a rejected switch', async () => {
     postStatus = 409;
-    postBody = { error: 'session_changed', detail: 'Session changed.' };
+    postBody = { ok: false, code: 'session_changed', message: 'Session changed.' };
     const screen = await mount();
     getBody = { ...states.cheap, sessionId: 'session-two', currentModel: 'other' };
     await press('repl-model-open');
