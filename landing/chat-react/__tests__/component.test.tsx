@@ -934,6 +934,14 @@ describe('ChatApp render (happy-dom)', () => {
           }),
         )
       }
+      // The shell also reads the active REPL model; it is unrelated to the
+      // create-project mutation whose calls this test counts.
+      if (url.endsWith('/repl-model')) {
+        return Promise.resolve(new Response(JSON.stringify({
+          harness: 'codex', sessionId: 'test-session', currentModel: 'cheap',
+          availableModels: [{ id: 'cheap', label: 'Cheap' }], status: 'ready',
+        }), { status: 200, headers: { 'content-type': 'application/json' } }))
+      }
       calls.push({ url, ...(init !== undefined ? { init } : {}) })
       return Promise.resolve(
         new Response(JSON.stringify({ ok: true, project: { id: 'taxes', label: 'Taxes' }, created: true }), {
@@ -1087,6 +1095,12 @@ describe('ChatApp render (happy-dom)', () => {
             headers: { 'content-type': 'application/json' },
           }),
         )
+      }
+      if (url.endsWith('/repl-model')) {
+        return Promise.resolve(new Response(JSON.stringify({
+          harness: 'codex', sessionId: 'test-session', currentModel: 'cheap',
+          availableModels: [{ id: 'cheap', label: 'Cheap' }], status: 'ready',
+        }), { status: 200, headers: { 'content-type': 'application/json' } }))
       }
       calls.push({ url })
       return Promise.resolve(new Response('{}', { status: 201 }))

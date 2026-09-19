@@ -231,6 +231,8 @@ export interface PersistentReplSubstrateOptions {
   /** Active project for the turn (`'default'` = the General surface). Per-project
    *  warm-pool namespace (S3 §2); folded into `poolKeyFor`. */
   project_id?: string
+  /** Exact owner conversation scope: null is General, including when legacy pool keys use 'general'. */
+  conversationProjectId?: string | null
   /** The SELECTED credential id (`PooledCredential.id`, NEVER the token/secret).
    *  Folded into `poolKeyFor` so a credential rotation (A→cooldown→B) re-keys to
    *  a fresh REPL spawned under B's env, and cooldown attribution matches the

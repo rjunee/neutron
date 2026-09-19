@@ -195,6 +195,65 @@ function gptFetch(): typeof fetch {
   }) as unknown as typeof fetch
 }
 
+for (const generalProvider of ['anthropic', 'openai'] as const) {
+  test(`explicit conversation scope selects opposite General/project providers (${generalProvider} General)`, async () => {
+    const cc = ccCapture()
+    const gpt = recordingGptFetch('scope-response')
+    const resolved: Array<string | undefined> = []
+    const projectProvider = generalProvider === 'anthropic' ? 'openai' : 'anthropic'
+    const sub = buildLlmCallSubstrate({
+      pool: anthropicPool(), substrate_instance_id: 'scope-provider', user_id: 'owner',
+      substrateFactory: cc.substrateFactory,
+      providerResolver: projectId => {
+        resolved.push(projectId)
+        return projectId === undefined ? generalProvider : projectId === 'general' ? projectProvider : 'anthropic'
+      },
+      openai: { pool: openaiPool(), bindMcpResolver: () => async () => ({}), fetchImpl: gpt.fetchImpl },
+    })!
+    for (const [context, expected] of [
+      [{ project_id: 'general', conversationProjectId: null }, generalProvider],
+      [{ project_id: 'general', conversationProjectId: 'general' }, projectProvider],
+      [{ project_id: 'other', conversationProjectId: 'other' }, 'anthropic'],
+      // Existing non-conversational callers retain their original project resolver.
+      [{ project_id: 'general' }, projectProvider],
+    ] as const) {
+      const claudeBefore = cc.seen.length
+      const gptBefore = gpt.bodies.length
+      const events = await drain(sub.start({ ...spec(), metering_context: context }))
+      expect(events.at(-1)?.kind).toBe('completion')
+      expect(cc.seen.length - claudeBefore).toBe(expected === 'anthropic' ? 1 : 0)
+      expect(gpt.bodies.length - gptBefore).toBe(expected === 'openai' ? 1 : 0)
+    }
+    expect(resolved).toEqual([undefined, 'general', 'other', 'general'])
+  })
+}
+
+test('explicit General/project scope isolates OpenAI history and clears only the provider-switched scope', async () => {
+  const cc = ccCapture()
+  const gpt = recordingGptFetch('previous-scope-response')
+  let generalProvider = 'openai'
+  const sub = buildLlmCallSubstrate({
+    pool: anthropicPool(), substrate_instance_id: 'scope-history', user_id: 'owner',
+    substrateFactory: cc.substrateFactory,
+    providerResolver: projectId => projectId === undefined ? generalProvider : 'openai',
+    openai: { pool: openaiPool(), bindMcpResolver: () => async () => ({}), fetchImpl: gpt.fetchImpl },
+  })!
+  const run = (conversationProjectId: string | null) => drain(sub.start({ ...spec(),
+    metering_context: { project_id: 'general', conversationProjectId } }))
+  await run(null)
+  await run('general')
+  expect(gpt.bodies[0]?.['previous_response_id']).toBeUndefined()
+  expect(gpt.bodies[1]?.['previous_response_id']).toBeUndefined()
+  generalProvider = 'anthropic'
+  await run(null)
+  expect(cc.seen).toHaveLength(1)
+  generalProvider = 'openai'
+  await run(null)
+  await run('general')
+  expect(gpt.bodies[2]?.['previous_response_id']).toBeUndefined()
+  expect(gpt.bodies[3]?.['previous_response_id']).toBe('previous-scope-response')
+})
+
 test('provider unset ⇒ BYTE-IDENTICAL anthropic path (CC factory + option bag), openai config ignored', async () => {
   const cc = ccCapture()
   const sub = buildLlmCallSubstrate({

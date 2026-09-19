@@ -14,7 +14,7 @@ import { type ModelUpdateWatchdog, type SessionIdleSignals, isModelClass, loadMo
 import { basenameOf, argvMatchesSession, defaultReadArgv, registerOrphanKill } from './orphan-adoption.ts'
 import { awaitBootAdoption, renewOwnAdoptionClaim } from './boot-adoption.ts'
 import { activeModelWatchdogs, activeWatchdogs, childByKey, cwdDriftAlertState, cwdDriftRespawnState, pendingChildKills, pool, supervisedBySessionKey, wedgeAlertState } from './pool-state.ts'
-import { type ReplRegistryRecord, getRecord, loadRegistry, patchRecord, upsertRecord, withOwnedRegistry } from './repl-registry.ts'
+import { type ReplRegistryRecord, getRecord, loadRegistry, patchRecord, readRegistryState, registryConversationScopeMatches, upsertRecord, withOwnedRegistry } from './repl-registry.ts'
 import { buildCrashLoopWarningText, recordAndEvaluateRestart } from './restart-rate.ts'
 import { type RespawnDeps, type RespawnOutcome, type RespawnTrigger, type SpawnReplOutcome, executeRespawn, planRespawn, shouldPostRespawnNotice } from './session-respawn.ts'
 import { type SessionSizeWatchdog, sessionJsonlPath } from './session-size-watchdog.ts'
@@ -28,7 +28,7 @@ import type { PersistentReplSubstrateOptions } from './types.ts'
 import { type ReplSession, httpHealth, terminateChild, terminatePidGracefully } from './repl-session.ts'
 import { clearRespawnInFlight, gateFor, getOrSpawnSession } from './spawn.ts'
 import { drainPendingRespawns } from './pending-respawn.ts'
-import { poolKeyFor } from './pool.ts'
+import { isUnregisteredPoolScopeConsistent, poolKeyFor } from './pool.ts'
 import { createLogger } from '@neutronai/logger'
 import { fireAndForget } from '@neutronai/logger/fire-and-forget.ts'
 
@@ -50,7 +50,12 @@ class RespawnClaimRefusedError extends Error implements SubstrateClassed {
  *  substrate's options. No-op when no registry path is set (supervision off). */
 export function registerSupervisedSubstrate(options: PersistentReplSubstrateOptions): void {
   if (options.replRegistryPath !== undefined) {
-    supervisedBySessionKey.set(poolKeyFor(options), options)
+    const key = poolKeyFor(options)
+    const state = readRegistryState(options.replRegistryPath)
+    if (state.kind === 'unreadable' || (state.kind === 'loaded' &&
+        (state.droppedKeys.includes(key) || (state.registry[key] !== undefined &&
+          !registryConversationScopeMatches(state.registry[key]!, options))))) return
+    supervisedBySessionKey.set(key, options)
   }
 }
 
@@ -245,12 +250,18 @@ export function respawnReplSession(
     const claim = withOwnedRegistry<
       | { kind: 'go'; record: ReplRegistryRecord }
       | { kind: 'registry-write-refused' }
+      | { kind: 'scope-refused' }
       | { kind: 'no-record' }
       | { kind: 'in-flight' }
       | { kind: 'capped'; just_tripped?: boolean }
     >(registryPath, (registry) => {
       const rec = registry[sessionKey]
       if (!rec) return { registry, result: { kind: 'no-record' } }
+      // This must precede even the force/cap/in-flight writes, not merely the
+      // eventual spawn: executeRespawn kills and evicts before it spawns.
+      if (!registryConversationScopeMatches(rec, options)) {
+        return { registry, result: { kind: 'scope-refused' }, skipSave: true }
+      }
       const inFlight =
         rec.respawn_in_flight_at !== undefined && now - rec.respawn_in_flight_at < RESPAWN_IN_FLIGHT_TTL_MS
       if (force) {
@@ -293,6 +304,8 @@ export function respawnReplSession(
     }
     const decision = claim.result
 
+    if (decision.kind === 'scope-refused') return { ok: false, reason: 'spawn-failed', sessionKey,
+      error: new RespawnClaimRefusedError('Conversation scope is ambiguous or mismatched; refusing respawn') }
     if (decision.kind === 'no-record') return { ok: false, reason: 'session-not-found', sessionKey }
     if (decision.kind === 'in-flight') return { ok: false, reason: 'spawn-failed', sessionKey }
     if (decision.kind === 'capped') {
@@ -494,6 +507,16 @@ export async function runReplWatchdogTick(
   const results: Array<{ sessionKey: string; action: string; respawned: boolean }> = []
 
   for (const sessionKey of keys) {
+    const record = registry[sessionKey]
+    const keyOptions = supervisedBySessionKey.get(sessionKey)
+    // A refused/unknown scope is not a dead child we own. Check before renewal,
+    // probing, crash notification, or any durable annotation of that row.
+    if (record !== undefined && (keyOptions !== undefined
+      ? !registryConversationScopeMatches(record, keyOptions)
+      : !isUnregisteredPoolScopeConsistent(sessionKey, record))) {
+      results.push({ sessionKey, action: 'scope-refused', respawned: false })
+      continue
+    }
     // #539 — RENEW THIS GATEWAY'S ADOPTION CLAIM FIRST, before anything in this tick can
     // decide to respawn or alert. The claim is what stops a second gateway attaching to a
     // pane this one is serving, and it is deliberately NOT a time-since-adoption TTL: it
@@ -545,8 +568,7 @@ export async function runReplWatchdogTick(
     //   - the POOLED SESSION — read below through `pool`, and a fence removes it; unreachable
     //     after `continue`.
     //   - `keyOptions` — `supervisedBySessionKey` is not touched by fencing, and a fenced key
-    //     never reaches it.
-    const record = registry[sessionKey]
+    //     never reaches the consumers below.
     const probe = await probeReplLiveness(sessionKey, record, healthProbe, isPidAlive)
     const verdict = detectReplWedged(probe)
     const action = decideWedgeAction({
@@ -562,7 +584,6 @@ export async function runReplWatchdogTick(
     })
 
     let respawned = false
-    const keyOptions = supervisedBySessionKey.get(sessionKey)
     const crashSink = keyOptions?.onChildCrash ?? options.onChildCrash
     if (
       action.kind !== 'ignore' &&
@@ -674,6 +695,9 @@ export async function runCwdDriftWatchdogTick(
 
   const entries: CwdDriftSupervisedEntry[] = []
   for (const sessionKey of ownedPoolKeys) {
+    const record = registry[sessionKey]
+    const owner = supervisedBySessionKey.get(sessionKey)
+    if (record !== undefined && owner !== undefined && !registryConversationScopeMatches(record, owner)) continue
     const p = pool.get(sessionKey)
     if (p === undefined) continue
     let session: ReplSession
@@ -956,14 +980,30 @@ export function startModelUpdateWatchdogForInstance(
       const upgradeModel = isModelClass(getBestModel()) ? getBestModel() : newModel
       // Target only the warm sessions this instance owns (pool keys whose owning
       // substrate points at this registry) — never another instance's sessions.
-      const ownedKeys = [...pool.keys()].filter(
-        (k) => supervisedBySessionKey.get(k)?.replRegistryPath === registryPath,
-      )
+      const ownedKeys = [...pool.keys()].filter(k => {
+        const owner = supervisedBySessionKey.get(k)
+        const record = getRecord(registryPath, k)
+        return owner?.replRegistryPath === registryPath && record !== undefined &&
+          registryConversationScopeMatches(record, owner) && record.owner_selected_model === undefined
+      })
+      const writeUpgradeModel = (key: string): boolean => {
+        const owner = supervisedBySessionKey.get(key)
+        if (owner?.replRegistryPath !== registryPath) return false
+        const write = withOwnedRegistry(registryPath, registry => {
+          const record = registry[key]
+          if (record === undefined || !registryConversationScopeMatches(record, owner) || record.owner_selected_model !== undefined) {
+            return { registry, result: false, skipSave: true }
+          }
+          registry[key] = { ...record, model: upgradeModel }
+          return { registry, result: true }
+        }, () => false)
+        return write.persisted && write.result
+      }
       if (isModelClass(upgradeModel)) {
         // The running child already resolved this class when it spawned. Keep
         // persisted rows version-free so every later resume resolves afresh;
         // no disruptive respawn is needed merely because the resolved id moved.
-        for (const key of ownedKeys) patchRecord(registryPath, key, { model: upgradeModel })
+        for (const key of ownedKeys) writeUpgradeModel(key)
         return
       }
       await runGracefulUpgrade({
@@ -973,7 +1013,7 @@ export function startModelUpdateWatchdogForInstance(
         upgradeSession: (key) => {
           // Rewrite the registry record's model BEFORE the respawn so the
           // `--resume` re-attaches on the NEW model (resumeSpecFor reads it).
-          patchRecord(registryPath, key, { model: upgradeModel })
+          if (!writeUpgradeModel(key)) return false
           const owner = supervisedBySessionKey.get(key) ?? options
           const outcome = respawnReplSession(
             owner,

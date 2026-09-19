@@ -7,6 +7,12 @@ import { ProjectDb } from '@neutronai/persistence/index.ts'
 import { SqliteProjectSettingsStore } from '@neutronai/gateway/projects/sqlite-store.ts'
 import { createModelProviderResolver } from '@neutronai/gateway/wiring/model-provider-resolution.ts'
 import { writeInstanceModelProvider, initializeInstanceModelProvider } from '@neutronai/gateway/storage/owner-metadata.ts'
+import { createOpenConversationProviderResolver } from '../composer.ts'
+import { InMemoryWebChatSessionProjectRegistry } from '@neutronai/gateway/http/chat-bridge.ts'
+import { buildLlmCallSubstrate } from '@neutronai/gateway/wiring/build-llm-call-substrate.ts'
+import { newCredentialPool } from '@neutronai/runtime/credential-pool.ts'
+import type { AgentSpec } from '@neutronai/runtime/substrate.ts'
+import type { Event } from '@neutronai/runtime/events.ts'
 
 const dirs: string[] = []
 const databases: ProjectDb[] = []
@@ -23,6 +29,53 @@ function fixture() {
   databases.push(db)
   const projects = new SqliteProjectSettingsStore(db)
   return { db, path, projects, resolve: createModelProviderResolver(db, 'owner', projects) }
+}
+
+for (const generalProvider of ['anthropic', 'openai-codex'] as const) {
+  test(`composed dispatch keeps General exact after docs pins a project (${generalProvider} General)`, async () => {
+    const { db, projects, resolve } = fixture()
+    const projectProvider = generalProvider === 'anthropic' ? 'openai-codex' : 'anthropic'
+    await writeInstanceModelProvider(db, 'owner', generalProvider)
+    for (const id of ['pinned', 'general']) {
+      await projects.update('owner', id, { name: id, model_provider: projectProvider })
+    }
+    await projects.update('owner', 'other', { name: 'other', model_provider: generalProvider })
+    const registry = new InMemoryWebChatSessionProjectRegistry()
+    registry.setActive('owner', 'pinned')
+    const sub = buildLlmCallSubstrate({
+      pool: newCredentialPool({ strategy: 'fill_first', credentials: [{ id: 'test', kind: 'api_key', secret: 'fake' }] }),
+      substrate_instance_id: 'exact-scope-test',
+      providerResolver: createOpenConversationProviderResolver(resolve, () => registry.getActive('owner')),
+      substrateFactory: () => ({ start: () => ({
+        events: (async function* (): AsyncGenerator<Event> {
+          yield { kind: 'completion', substrate_instance_id: 'claude-test', usage: { input_tokens: 0, output_tokens: 0 } }
+        })(), respondToTool: async () => {}, cancel: async () => {}, tool_resolution: 'internal',
+      }) }),
+    })!
+    for (const [context, expected] of [
+      [{ project_id: 'general', conversationProjectId: null }, generalProvider],
+      [{ project_id: 'general', conversationProjectId: 'general' }, projectProvider],
+      [{ project_id: 'other', conversationProjectId: 'other' }, generalProvider],
+      // No marker retains historical active-project fallback; a concrete legacy
+      // scope must still win over that pointer.
+      [undefined, projectProvider],
+      [{ project_id: 'other' }, generalProvider],
+    ] as const) {
+      const spec: AgentSpec = { prompt: 'test', tools: [], model_preference: ['opus'],
+        ...(context === undefined ? {} : { metering_context: context }) }
+      const events: Event[] = []
+      for await (const event of sub.start(spec).events) events.push(event)
+      if (expected === 'anthropic') {
+        expect(events.at(-1)?.kind).toBe('completion')
+      } else {
+        // No Codex credentials/host are supplied: its named refusal, rather
+        // than a Claude completion, proves which adapter actually consumed it.
+        expect(events.at(-1)?.kind).toBe('error')
+        expect(JSON.stringify(events)).toContain('openai-codex')
+      }
+    }
+    expect(resolve(undefined).provider).toBe(generalProvider)
+  })
 }
 
 test('live instance changes preserve explicit projects and isolate two provisioned instances', async () => {

@@ -1,6 +1,9 @@
 // persistent-repl-substrate.ts → model-floor.ts
 //
 // THE FRONTIER-MODEL FLOOR for owner-facing conversational REPLs.
+// The floor is the default. spawn.ts preserves a native model explicitly selected
+// by the owner on a resume of that same conversation; fresh conversations retain
+// this guard, and the model-update watchdog leaves explicit selections alone.
 //
 // WHAT WENT WRONG. The owner's project chat answered on the fast tier for a
 // whole working day, twice, and nobody could see it. The mechanism is one `??`:

@@ -604,6 +604,15 @@ export class HerdrHost implements AdoptableHost {
         if (keys.length === 0) return
         send('herdr-host.writeKeys', 'pane.send_keys', { pane_id: paneId, keys: herdrKeyNames(keys) })
       },
+      async sendKeys(keys) {
+        await enqueue(async () => {
+          if (exited || detached) throw new Error('herdr-host: picker input refused after exit or detach')
+          await client.call('pane.send_keys', {
+            pane_id: paneId,
+            keys: keys.map(key => key === 's' ? 's' : herdrKeyNames([key])[0]!),
+          })
+        })
+      },
       async submitLine(command, signal) {
         // ACKNOWLEDGED, IN ORDER, AND NOT NO-OP-SAFE. `write`/`writeKey` are
         // fire-and-forget by interface; this is the variant a caller may build a

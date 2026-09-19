@@ -52,9 +52,11 @@ import {
   type PersistentReplSubstrateOptions,
 } from '../persistent-repl-substrate.ts'
 import { poolKeyFor, replayPendingInbound } from '../pool.ts'
-import { supervisedBySessionKey } from '../pool-state.ts'
+import { pool, supervisedBySessionKey } from '../pool-state.ts'
 import { registerSupervisedSubstrate, respawnReplSession } from '../supervision.ts'
 import { getRecord, patchRecord, upsertRecord } from '../repl-registry.ts'
+import { switchPersistentReplModel } from '../model-control.ts'
+import { spawnWithChannelWedgeRespawn } from '../spawn.ts'
 
 /** The EXACT id measured in the owner's live REPL registry on the degraded row. */
 const LIVE_HAIKU_ID = 'claude-haiku-4-5-20251001'
@@ -628,6 +630,146 @@ function modelArg(argv: string[]): string | undefined {
 }
 
 describe('the frontier-model floor holds at the spawn chokepoint', () => {
+  it('direct spawn/resume cannot stamp scope onto an ambiguous legacy record', async () => {
+    const { host, argvs } = makeCapturingHost()
+    const registryPath = join(tempDir('neutron-direct-scope-'), 'repl-registry.json')
+    const options = opts(host, { user_id: 'scope-owner', project_id: 'general', replRegistryPath: registryPath })
+    const key = poolKeyFor(options)
+    const row = { sessionKey: key, sessionId: 'cccccccc-1111-2222-3333-444444444444',
+      cwd: options.cwd!, channelName: 'neutron-11112222333344445555666677778888', has_session: true }
+    upsertRecord(registryPath, row)
+    expect(getRecord(registryPath, key)).toEqual(row)
+    const before = readFileSync(registryPath, 'utf8')
+    await expect(spawnWithChannelWedgeRespawn(key, options, spec(getBestModel())))
+      .rejects.toThrow('conversation scope is ambiguous or mismatched')
+    await expect(spawnWithChannelWedgeRespawn(key, options, spec(getBestModel()),
+      { sessionId: row.sessionId }))
+      .rejects.toThrow('conversation scope is ambiguous or mismatched')
+    expect(argvs).toEqual([])
+    expect(readFileSync(registryPath, 'utf8')).toBe(before)
+  }, SPAWN_TEST_TIMEOUT_MS)
+  it('a fresh General turn leaves the ambiguous legacy transcript and pane untouched', async () => {
+    const { host, argvs } = makeCapturingHost()
+    let oldPaneTouches = 0
+    Object.assign(host, {
+      inspectHandle: async () => { oldPaneTouches++; throw new Error('must not inspect legacy pane') },
+      attach: async () => { oldPaneTouches++; throw new Error('must not attach legacy pane') },
+      closeHandle: async () => { oldPaneTouches++; throw new Error('must not close legacy pane') },
+    })
+    const registryPath = join(tempDir('neutron-general-boundary-'), 'repl-registry.json')
+    const identity = { user_id: 'scope-owner', project_id: 'general', credential_identity: 'cred-1' }
+    const options = opts(host, { ...identity, conversationProjectId: null, replRegistryPath: registryPath })
+    const { conversationProjectId: _scope, ...legacyOptions } = options
+    const legacyKey = poolKeyFor(legacyOptions)
+    const newKey = poolKeyFor(options)
+    expect(newKey).not.toBe(legacyKey)
+    expect(newKey).not.toBe(poolKeyFor({ ...options, conversationProjectId: 'general' }))
+    const oldRow = { sessionKey: legacyKey, sessionId: 'cccccccc-1111-2222-3333-444444444444',
+      cwd: options.cwd!, channelName: 'neutron-11112222333344445555666677778888', has_session: true, pane_handle: 'legacy-pane',
+      pid: 31337, child_generation: 'legacy-generation' }
+    upsertRecord(registryPath, oldRow)
+    expect(getRecord(registryPath, legacyKey)).toEqual(oldRow)
+    const before = JSON.stringify(getRecord(registryPath, legacyKey))
+    await drain(createPersistentReplSubstrate(options).start(spec(getBestModel())))
+    expect(argvs).toHaveLength(1)
+    expect(argvs[0]).not.toContain('--resume')
+    expect(argvs[0]).not.toContain(oldRow.sessionId)
+    expect(getRecord(registryPath, newKey)?.conversationProjectId).toBeNull()
+    expect(getRecord(registryPath, newKey)?.sessionId).not.toBe(oldRow.sessionId)
+    expect(JSON.stringify(getRecord(registryPath, legacyKey))).toBe(before)
+    expect(oldPaneTouches).toBe(0)
+  }, SPAWN_TEST_TIMEOUT_MS)
+  for (const conversationProjectId of [null, 'general', 'project']) {
+    it(`fresh spawn persists exact scope provenance for ${conversationProjectId ?? 'General'}`, async () => {
+      const { host } = makeCapturingHost()
+      const registryPath = join(tempDir('neutron-scope-writer-'), 'repl-registry.json')
+      const options = opts(host, { user_id: 'scope-owner', project_id: conversationProjectId ?? 'general',
+        conversationProjectId, credential_identity: 'cred-1', replRegistryPath: registryPath })
+      await drain(createPersistentReplSubstrate(options).start(spec(getBestModel())))
+      expect(getRecord(registryPath, poolKeyFor(options))?.conversationProjectId).toBe(conversationProjectId)
+    }, SPAWN_TEST_TIMEOUT_MS)
+  }
+  it('an acknowledged native switch writes the preference actually consumed by same-session resume', async () => {
+    const base = makeCapturingHost()
+    const host: PtyHost = {
+      async spawn(argv, spawnOptions) {
+        const child = await base.host.spawn(argv, spawnOptions)
+        let picker = false, current = 'opus', focused = 'opus'
+        return { ...child,
+          async readScreen() {
+            if (!picker) return '❯ \n? for shortcuts'
+            return 'Select model\n' + ['opus', 'haiku'].map((model, index) =>
+              `${focused === model ? '❯' : ' '} ${index + 1}. ${model === 'opus' ? 'Opus' : 'Haiku'}${current === model ? ' ✔' : ''}  ${model === 'opus' ? 'Opus 5' : 'Haiku 4.5'}`,
+            ).join('\n') + '\nEnter to set as default · s to use this session only · Esc to cancel'
+          },
+          async submitLine(command) {
+            if (command !== '/model') throw new Error('unexpected prompt/reset command')
+            picker = true; focused = current
+          },
+          async sendKeys(keys) {
+            for (const key of keys) {
+              if (key === 'up' || key === 'down') focused = focused === 'opus' ? 'haiku' : 'opus'
+              if (key === 'escape') picker = false
+              if (key === 's') { current = focused; picker = false }
+            }
+          },
+        }
+      },
+    }
+    const registryPath = join(tempDir('neutron-model-writer-reg-'), 'repl-registry.json')
+    const options = opts(host, { user_id: 'switch-owner', project_id: 'project', conversationProjectId: 'project',
+      credential_identity: 'cred-1', replRegistryPath: registryPath, frontierModelFloor: true, jsonlExistsProbe: () => true })
+    registerSupervisedSubstrate(options)
+    await drain(createPersistentReplSubstrate(options).start(spec(getBestModel())))
+    const key = poolKeyFor(options)
+    const sessionId = getRecord(registryPath, key)!.sessionId
+    const session = await pool.get(key)!
+    for (let i = 0; i < 200 && session.turnSlotHeld > 0; i++) await Bun.sleep(15)
+    expect(session.turnSlotHeld).toBe(0)
+    const scope = { userId: 'switch-owner', projectId: 'project' }
+    await expect(switchPersistentReplModel(scope, { sessionId, model: 'unoffered' })).rejects.toMatchObject({ code: 'invalid-model' })
+    expect(getRecord(registryPath, key)?.owner_selected_model).toBeUndefined()
+    expect((await switchPersistentReplModel(scope, { sessionId, model: 'haiku' })).currentModel).toBe('haiku')
+    expect(getRecord(registryPath, key)?.owner_selected_model).toBe('haiku')
+    for (let i = 0; i < 200 && !getRecord(registryPath, key)?.has_session; i++) await Bun.sleep(15)
+    expect(respawnReplSession(options, key, 'wedge-watchdog', 'model-switch-test').ok).toBe(true)
+    for (let i = 0; i < 200 && base.argvs.length < 2; i++) await Bun.sleep(15)
+    expect(modelArg(base.argvs[1]!)).toBe('haiku')
+    expect(base.argvs[1]![base.argvs[1]!.indexOf('--resume') + 1]).toBe(sessionId)
+  }, SPAWN_TEST_TIMEOUT_MS)
+
+  it('an explicit owner model survives same-conversation resume without changing its UUID', async () => {
+    const { host, argvs } = makeCapturingHost()
+    const registryPath = join(tempDir('neutron-model-selection-reg-'), 'repl-registry.json')
+    const options = opts(host, { user_id: 'selection-owner', project_id: 'project',
+      credential_identity: 'cred-1', replRegistryPath: registryPath, frontierModelFloor: true })
+    const sessionKey = poolKeyFor(options)
+    const sessionId = '00000000-0000-4000-8000-000000000001'
+    upsertRecord(registryPath, { sessionKey, sessionId, cwd: options.cwd!,
+      channelName: 'neutron-c0d22d2bc2480944a2ed4102d84abc5e', has_session: true,
+      model: LIVE_HAIKU_ID, owner_selected_model: LIVE_HAIKU_ID })
+    await drain(createPersistentReplSubstrate(options).start(spec(getBestModel())))
+    expect(modelArg(argvs[0]!)).toBe(LIVE_HAIKU_ID)
+    expect(argvs[0]![argvs[0]!.indexOf('--resume') + 1]).toBe(sessionId)
+    expect(getRecord(registryPath, sessionKey)?.model).toBe(LIVE_HAIKU_ID)
+    expect(getRecord(registryPath, sessionKey)?.owner_selected_model).toBe(LIVE_HAIKU_ID)
+  }, SPAWN_TEST_TIMEOUT_MS)
+
+  it('a selection from a lost conversation cannot lower a fresh conversation floor', async () => {
+    const { host, argvs } = makeCapturingHost()
+    const registryPath = join(tempDir('neutron-model-selection-reg-'), 'repl-registry.json')
+    const options = opts(host, { user_id: 'selection-owner', project_id: 'project',
+      credential_identity: 'cred-1', replRegistryPath: registryPath, frontierModelFloor: true })
+    const sessionKey = poolKeyFor(options)
+    upsertRecord(registryPath, { sessionKey, sessionId: '00000000-0000-4000-8000-000000000002', cwd: options.cwd!,
+      channelName: 'neutron-c0d22d2bc2480944a2ed4102d84abc5e', has_session: false,
+      model: LIVE_HAIKU_ID, owner_selected_model: LIVE_HAIKU_ID })
+    await drain(createPersistentReplSubstrate(options).start(spec(LIVE_HAIKU_ID)))
+    expect(modelArg(argvs[0]!)).toBe(getBestModel())
+    expect(argvs[0]).not.toContain('--resume')
+    expect(getRecord(registryPath, sessionKey)?.owner_selected_model).toBeUndefined()
+  }, SPAWN_TEST_TIMEOUT_MS)
+
   it('a Haiku record on the owner’s chat substrate spawns the FRONTIER model', async () => {
     // THE LIVE DEFECT, reproduced: a registry row naming Haiku is what
     // `pool.ts` / `supervision.ts` hand to the spawn as `record.model`.
@@ -817,10 +959,12 @@ describe('createClaudeCodeSubstrateAuto forwards frontier_model_floor', () => {
       substrate_instance_id: instanceId,
       cwd,
       frontier_model_floor: true,
+      conversationProjectId: null,
     })
     const reg = registeredFor(instanceId)
     expect(reg).toBeDefined()
     expect(reg!.frontierModelFloor).toBe(true)
+    expect(reg!.conversationProjectId).toBeNull()
   })
 
   it('leaves it unset when the caller omits it (every utility substrate)', () => {

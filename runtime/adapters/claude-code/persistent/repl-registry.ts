@@ -188,6 +188,8 @@ export interface ReplReuseProperties {
 export interface ReplRegistryRecord {
   /** Pool key — opaque; follows S3 re-namespacing. */
   sessionKey: string
+  /** Spawn-proven conversation scope. Absent legacy 'general' keys are ambiguous. */
+  conversationProjectId?: string | null
   /** Session UUID the respawn will `--resume`. */
   sessionId: string
   /** REPL working dir (instance home / project workdir). */
@@ -256,6 +258,8 @@ export interface ReplRegistryRecord {
   /** Model id the REPL spawned with — replayed on `--resume` so a respawn keeps
    *  the same `--model`. */
   model?: string
+  /** Explicit native session selection; only this exact model bypasses the default floor. */
+  owner_selected_model?: string
   /** Epoch ms the REPL first reached `/health` ok — the boot-grace gate input. */
   first_ready_at?: number
   /** Epoch ms of the last respawn — the cooldown gate input. */
@@ -390,6 +394,21 @@ export interface ReplRegistryRecord {
 
 /** All records keyed by `sessionKey`. */
 export type ReplRegistry = Record<string, ReplRegistryRecord>
+
+/** Never infer General from its historical key: that key also named a literal
+ * project 'general'. The latter now has a distinct key; ordinary legacy project
+ * keys remain unambiguous. Present provenance must match, never be rewritten. */
+export function registryConversationScopeMatches(
+  record: ReplRegistryRecord,
+  options: { project_id?: string; conversationProjectId?: string | null },
+): boolean {
+  if (record.conversationProjectId !== undefined) {
+    return record.conversationProjectId === (options.conversationProjectId !== undefined
+      ? options.conversationProjectId : options.project_id)
+  }
+  return options.conversationProjectId !== null &&
+    (options.project_id !== 'general' || options.conversationProjectId === 'general')
+}
 
 /** Result of parsing the on-disk registry file. */
 export type RegistryLoadResult =

@@ -714,13 +714,15 @@ a slash-command.
   periodic work-board wakeup). Terminal build decision turns use the live chat
   runner's queue and substrate. The second is an equal-grant, separate-session twin of the
   first: it runs `PROFILE_WARM_CHAT` with the same bridge, GitHub credential and
-  frontier-model floor, because a RITUAL composes there and ISSUES #504 settled that
+  frontier-model floor by default, because a RITUAL composes there and ISSUES #504 settled that
   a fired ritual must have "access to everything general has access to" — the
   previous locked-down `cc-ritual-*` lane could not read the owner's calendar and was
   rejected. What is separate is the SESSION, so a background compose that aborts
   cannot evict the child the owner is chatting on; the security boundary for that
   lane remains the ritual APPROVAL GATE (`reminders/ritual-fire.ts`), not the
-  substrate. The untrusted history-import REPL (`cc-import-*`), the per-project
+  substrate. An explicit owner model selection on the live chat is session-only and
+  survives a resume of that same conversation; it does not lower the fresh-chat or
+  proactive-compose floor. The untrusted history-import REPL (`cc-import-*`), the per-project
   onboarding-compose REPL (`cc-compose-*` — see "Per-project isolated onboarding
   compose" below), and the
   Trident build / fire REPLs (`cc-trident-*` / `cc-trident-fire-*`) leave it off,

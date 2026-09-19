@@ -27,6 +27,7 @@ import type { AgentSpec, Substrate } from '@neutronai/runtime/substrate.ts'
 import type { SessionHandle } from '@neutronai/runtime/session-handle.ts'
 import { buildLiveAgentTurn } from '../build-live-agent-turn.ts'
 import type { LiveAgentTurnRequest } from '../../http/chat-bridge.ts'
+import { projectModelTier } from '@neutronai/runtime/configured-models.ts'
 
 let tmp: string
 let db: ProjectDb
@@ -416,7 +417,8 @@ test('configured chat failure names the selected tier in the user bubble', async
   expect(sent.some((s) => s.type === 'agent_message' && s.body.includes("Configured model 'deepseek'"))).toBe(true)
 })
 
-test('configured chat queues overlapping input instead of injecting into a warm harness', async () => {
+for (const projectId of [undefined, 'general', 'other']) {
+test(`configured literal-general tier isolates overlapping input for ${projectId ?? 'General'}`, async () => {
   let release!: () => void
   let started!: () => void
   const ready = new Promise<void>((resolve) => { started = resolve })
@@ -432,14 +434,17 @@ test('configured chat queues overlapping input instead of injecting into a warm 
         yield { kind: 'completion', substrate_instance_id: 'stub', usage: { input_tokens: 1, output_tokens: 1 } }
       })(),
     } } },
-    configuredModel: () => 'glm', injectActiveTurn: async () => { injected++; return true },
+    configuredModel: id => projectModelTier({ NEUTRON_PROJECT_MODELS: '{"general":"glm"}' }, id),
+    injectActiveTurn: async () => { injected++; return true },
     personaLoader: { async load() { return '' } }, buttonStore: store,
     project_slug: 'project', owner_home: tmp, model: 'test-model', now: () => now,
   })
-  const first = run(makeTurn(sent, { user_text: 'first', topic_id: 'overlap' }))
+  const scope = projectId === undefined ? {} : { project_id: projectId }
+  const first = run(makeTurn(sent, { user_text: 'first', topic_id: 'overlap', ...scope }))
   await ready
-  const second = run(makeTurn(sent, { user_text: 'second', topic_id: 'overlap' }))
+  const second = run(makeTurn(sent, { user_text: 'second', topic_id: 'overlap', ...scope }))
   release()
   await Promise.all([first, second])
-  expect(injected).toBe(0)
+  expect(injected).toBe(projectId === 'general' ? 0 : 1)
 })
+}

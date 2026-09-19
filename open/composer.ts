@@ -268,6 +268,7 @@ export type OpenComposition = CompositionInput &
       | 'app_ws_surface'
       | 'app_docs_surface'
       | 'app_tabs_surface'
+      | 'app_repl_model_surface'
       | 'app_projects_surface'
       | 'app_work_board_surface'
       | 'app_activity_surface'
@@ -395,6 +396,8 @@ import { AgentWatcher } from '@neutronai/gateway/comments/agent-watcher.ts'
 import { buildAgentWatcherLlmCall } from '@neutronai/gateway/wiring/build-agent-watcher-llm-call.ts'
 import { InMemoryWebChatSessionProjectRegistry } from '@neutronai/gateway/http/chat-bridge.ts'
 import { createAppTabsSurface } from '@neutronai/gateway/http/app-tabs-surface.ts'
+import { composeReplModelSurface } from '@neutronai/gateway/composition/repl-model.ts'
+import { getPersistentReplModel, switchPersistentReplModel } from '@neutronai/runtime/adapters/claude-code/persistent/model-control.ts'
 import {
   BROKER_CALLBACK_PATH,
   createCoresOAuthBroker,
@@ -841,6 +844,17 @@ export function buildOpenAiToolManifest(): () => ReadonlyArray<{
   return () => replToolBridgeRef.current?.listToolSchemas() ?? []
 }
 
+/** Explicit conversation scope (including General) must not inherit a docs
+ * escalation's active-project pointer. Unscoped legacy callers still do. */
+export function createOpenConversationProviderResolver(
+  resolve: ReturnType<typeof createModelProviderResolver>,
+  activeProject: () => string | null | undefined,
+): NonNullable<OpenWiringContext['providerResolver']> {
+  return (projectId, scope) => resolve(
+    scope === 'conversation' ? projectId : projectId ?? activeProject() ?? undefined,
+  )
+}
+
 /** Deps for {@link resolveOpenConversationalProvider} (injected for testing). */
 export interface OpenConversationalProviderDeps {
   resolveOpenAiPool: (env: NodeJS.ProcessEnv) => CredentialPool | null
@@ -1065,8 +1079,8 @@ export function buildOpenGraphComposer(
       buildToolManifest: buildOpenAiToolManifest,
     })
     const resolveModelProvider = createModelProviderResolver(db, project_slug, projectSettingsStore)
-    const providerResolver = (projectId?: string) => resolveModelProvider(
-      projectId ?? chatSessionProjects.getActive(OWNER_USER_ID) ?? undefined,
+    const providerResolver = createOpenConversationProviderResolver(
+      resolveModelProvider, () => chatSessionProjects.getActive(OWNER_USER_ID),
     )
     // O6 — NOTICE-FAMILY + RECOVERED-REPLY sinks for the owner's WARM conversational
     // substrate (`cc-agent-*`). The persistent REPL fires four DI seams on the
@@ -3806,6 +3820,16 @@ export function buildOpenGraphComposer(
       auth: appOwnerAuth,
       cores: () => coresState,
       installations: new CoreInstallationsStore({ db }),
+    })
+
+    const appReplModelSurface = composeReplModelSurface({
+      auth: appOwnerAuth,
+      ownerUserId: OWNER_USER_ID,
+      ownerSlug: project_slug,
+      projectExists: async (projectId) => (await projectSettingsStore.list(project_slug)).some((project) => project.id === projectId),
+      provider: (projectId) => resolveModelProvider(projectId ?? undefined).provider,
+      readClaude: ({ userId, ownerSlug, projectId }) => getPersistentReplModel({ userId, instanceSlug: ownerSlug, projectId }),
+      switchClaude: ({ userId, ownerSlug, projectId }, request) => switchPersistentReplModel({ userId, instanceSlug: ownerSlug, projectId }, request),
     })
 
     // The Apps launcher backend (`/api/app/projects/<id>/launcher[*]`). The Apps
@@ -6826,7 +6850,7 @@ export function buildOpenGraphComposer(
       db,
       // The graph binds the tool bridge after this composer returns. Survivors
       // regain authority only after that binding, with no synthetic chat turn.
-      on_graph_ready: () => adoptLiveAgentRepls(['general', ...listProjectIds()]),
+      on_graph_ready: () => adoptLiveAgentRepls([null, ...listProjectIds()]),
       project_slug,
       // ALWAYS set, never conditionally spread. A field the composer assigns
       // only sometimes is exactly the ambiguity `composition-field-coverage`
@@ -7468,6 +7492,7 @@ export function buildOpenGraphComposer(
       // P1b — the tab resolver so the React ProjectShell shows the Documents/Tasks
       // tabs (without it, it falls back to Chat-only and the docs tab is hidden).
       app_tabs_surface: { handler: appTabsSurface.handler },
+      app_repl_model_surface: { handler: appReplModelSurface.handler },
       // The Apps launcher backend. Without this line the tab the resolver above
       // returns leads to four 404s (ISSUES #447).
       app_launcher_surface: { handler: appLauncherSurface.handler },

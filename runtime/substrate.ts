@@ -127,7 +127,7 @@ export interface AgentSpec {
    *  construction default. Coerced ≥ the inactivity window. Read by the persistent
    *  CC REPL adapter only. See the doc-comment above. */
   turn_absolute_ceiling_ms?: number
-  metering_context?: { project_id: string }
+  metering_context?: { project_id: string; conversationProjectId?: string | null }
 }
 
 /**

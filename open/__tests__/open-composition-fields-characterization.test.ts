@@ -107,6 +107,8 @@ const EXPECTED_COMPOSITION_KEYS = [
   // complete screen ships against it; same done-means-served proof as the keys
   // above.
   'app_reminders_surface',
+  // The live per-conversation model endpoint is composed for both web and mobile.
+  'app_repl_model_surface',
   // The external system-notice route (`POST /api/app/system-notice`). Same
   // done-means-served proof as the usage key below: it appears only if
   // `composeOpen` really constructs the surface and hands it over, which is what

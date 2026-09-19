@@ -68,6 +68,7 @@ import { loadAppConfig } from '../lib/config';
 import { RenderMarkdown } from '../lib/markdown-render';
 import { AuthedAttachmentImage } from './AuthedAttachmentImage';
 import { ConnectionNotice } from './ConnectionNotice';
+import { ReplModelControl } from './ReplModelControl';
 import type { AttachmentAuthCtx } from '../lib/attachment-url';
 import { ButtonOptionRow, ImageGalleryRow } from '../lib/button-primitives';
 import { CitationChipRow } from '../lib/citation-chip-row';
@@ -846,6 +847,9 @@ export function ChatSyncSurface({
 
   return (
     <View style={styles.fill}>
+      {user !== null && (
+        <ReplModelControl key={projectId} projectId={projectId} baseUrl={config.base_url} token={user.token} />
+      )}
       <ConnectionNotice status={status} pendingCount={pendingCount} sendError={sendError} />
       {dropMultiFileHint !== null ? (
         <View style={styles.dropMultiFileHint} testID="chat-drop-multi-file-hint">

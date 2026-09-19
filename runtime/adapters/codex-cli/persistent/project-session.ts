@@ -8,6 +8,8 @@ import type {
   PtySpawnOpts,
 } from '../../claude-code/persistent/pty-host.ts'
 import { detectCodexScreenPrompt, type CodexScreenPrompt } from './screen-prompts.ts'
+import { NativeModelPicker } from '../../native-model-picker.ts'
+import { ReplModelError, type ReplModelState, type ReplModelSwitch } from '../../../repl-model.ts'
 
 export type CodexSessionRecovery = 'started' | 'adopted' | 'restarted-after-loss'
 
@@ -108,6 +110,23 @@ export class CodexProjectSession {
   readonly paneHandle: string
   readonly recovery: CodexSessionRecovery
   private turnTail: Promise<void> = Promise.resolve()
+  private controlsBusy = false
+
+  async getModelState(): Promise<ReplModelState> { return this.modelControl() }
+
+  async switchModel(request: ReplModelSwitch): Promise<ReplModelState> { return this.modelControl(request) }
+
+  private async modelControl(request?: ReplModelSwitch): Promise<ReplModelState> {
+    if (this.controlsBusy) throw new ReplModelError('busy', 'Conversation controls are busy.')
+    this.controlsBusy = true
+    let release: () => void = () => {}
+    const previous = this.turnTail
+    this.turnTail = new Promise<void>(resolve => { release = resolve })
+    await previous
+    try {
+      return await new NativeModelPicker('codex', this.paneHandle, this.child).run(request)
+    } finally { this.controlsBusy = false; release() }
+  }
 
   constructor(
     projectId: string,
@@ -188,6 +207,14 @@ export class CodexProjectSessionHost {
   constructor(private readonly options: CodexProjectSessionHostOptions) {
     this.host = options.host ?? new HerdrHost()
     this.bin = options.bin ?? 'codex'
+  }
+
+  /** Discovery only: never opens, adopts, or restarts a project session. */
+  async peek(projectId: string): Promise<CodexProjectSession | undefined> {
+    const pending = this.opening.get(projectId)
+    if (!pending) return undefined
+    const session = await pending.session
+    return session.isLive() ? session : undefined
   }
 
   async open(options: OpenCodexProjectSessionOptions): Promise<CodexProjectSession> {

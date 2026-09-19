@@ -56,6 +56,7 @@ import { HeaderMenu } from './HeaderMenu.tsx'
 import { useTabOverflow, OverflowMenu } from './tab-overflow.tsx'
 import { useWorkActivity, JobStartDrawer } from './work-activity.tsx'
 import { ThemeToggle } from './ThemeToggle.tsx'
+import { ReplModelControl } from './ReplModelControl.tsx'
 // ACTIVITY INSPECTOR (SPEC § WAVE 3.5) — the panel behind the clickable rail dot.
 import { ActivityInspectorPanel } from './ActivityInspectorPanel.tsx'
 import { WebActivityClient, type ActivityRow } from './activity-client.ts'
@@ -790,6 +791,13 @@ export function ProjectShell({
             resolving={resolving}
             workRunning={work.running > 0}
             mobile={!isDesktop}
+          />
+          <ReplModelControl
+            key={projectId ?? '~general'}
+            projectId={projectId}
+            origin={config.origin}
+            token={config.token}
+            {...(fetchImpl !== undefined ? { fetchImpl } : {})}
           />
           {isDesktop ? <ThemeToggle /> : null}
           <HeaderMenu items={menuItems} onSelect={setActiveKey} />

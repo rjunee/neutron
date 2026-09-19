@@ -24,7 +24,7 @@
 
 import { mkdirSync } from 'node:fs'
 import { join } from 'node:path'
-import { readRegistryState } from './persistent/repl-registry.ts'
+import { readRegistryState, registryConversationScopeMatches } from './persistent/repl-registry.ts'
 import { beginBootAdoption } from './persistent/boot-adoption.ts'
 import { supervisedBySessionKey } from './persistent/pool-state.ts'
 import { authFingerprintFor } from './persistent/repl-session.ts'
@@ -186,6 +186,7 @@ export interface ClaudeCodeSubstrateOptions {
    */
   user_id?: string
   project_id?: string
+  conversationProjectId?: string | null
   credential_identity?: string
   /** S3 §2 — owning instance slug (advisory: redelivery logging / scoping). */
   instance_slug?: string
@@ -418,7 +419,7 @@ export function resolveReplCwdAndHome(input: {
 
 /** Exact lookup from trusted identity fields; durable session keys remain opaque. */
 export function existingClaudeRepl(options: Pick<ClaudeCodeSubstrateOptions,
-  'substrate_instance_id' | 'cwd' | 'user_id' | 'project_id' | 'credential_identity'>,
+  'substrate_instance_id' | 'cwd' | 'user_id' | 'project_id' | 'conversationProjectId' | 'credential_identity'>,
 ): { registryPath: string; sessionKey: string } | undefined {
   const { home } = resolveReplCwdAndHome({ cwd: options.cwd, env: process.env })
   if (home === undefined) return undefined
@@ -430,6 +431,9 @@ export function existingClaudeRepl(options: Pick<ClaudeCodeSubstrateOptions,
     throw new Error('boot REPL adoption cannot establish durable registry identity')
   }
   const row = state.kind === 'loaded' ? state.registry[sessionKey] : undefined
+  if (row !== undefined && !registryConversationScopeMatches(row, options)) {
+    throw new Error('boot REPL adoption refused: conversation scope is ambiguous or mismatched')
+  }
   return row?.pane_handle === undefined ? undefined : { registryPath, sessionKey }
 }
 
@@ -533,6 +537,7 @@ function prepareClaudeCodeOptions(options: ClaudeCodeSubstrateOptions) {
   // pool key (closes #104; makes the substrate instance-isolation-SAFE).
   if (options.user_id !== undefined) p.user_id = options.user_id
   if (options.project_id !== undefined) p.project_id = options.project_id
+  if (options.conversationProjectId !== undefined) p.conversationProjectId = options.conversationProjectId
   if (options.credential_identity !== undefined) p.credential_identity = options.credential_identity
   // S3 #106 — redelivery routing + injected sink.
   if (options.instance_slug !== undefined) p.instance_slug = options.instance_slug

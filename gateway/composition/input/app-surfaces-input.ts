@@ -321,6 +321,10 @@ export interface AppSurfacesCompositionInput {
   app_tabs_surface?: {
     handler: (req: Request) => Promise<Response | null>
   }
+  /** Live harness model discovery and conditional switching for web and mobile. */
+  app_repl_model_surface?: {
+    handler: (req: Request) => Promise<Response | null>
+  }
   /**
    * Work Board (Phase 1a) — the human read+WRITE board surface. Owns
    * `/api/app/projects/<id>/work-board[/<item_id>[/<verb>]]`. Dispatches the

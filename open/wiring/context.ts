@@ -65,7 +65,7 @@ export interface OpenWiringContext {
    */
   provider?: Provider
   /** Live per-turn project/instance/application resolution with provenance. */
-  providerResolver?: (projectId?: string) => ProviderSelection
+  providerResolver?: (projectId?: string, scope?: 'conversation') => ProviderSelection
   /**
    * Resolved OpenAI credential pool (`OPENAI_API_KEY`), or null when the box has
    * no OpenAI key. Consumed by the OpenAI-family adapters; when a project
