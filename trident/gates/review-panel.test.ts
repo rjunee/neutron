@@ -73,17 +73,44 @@ test('review peer deferral or missing provider refuses by configured name and re
   const failed = fixture(); failed.seat.status = 'deferred'; failed.source.retrySeat = async () => { throw Error('offline') }
   expect(await failed.check()).toMatchObject({ kind: 'blocked' })
 })
-test('review provenance compares recorded synthesis against worker payload', async () => {
+test('independent review and synthesis retain unresolved verdicts without requiring identical payloads', async () => {
   const f = fixture()
   expect(await f.check({ verdict: 'REQUEST_CHANGES', findings: [] })).toMatchObject({ kind: 'blocked' })
   expect(await f.check({ findings: [], verdict: 'APPROVE' })).toEqual({ kind: 'approve' })
+})
+test('independent review and synthesis blockers each veto approval and divergent findings reach fixes', async () => {
+  const workerFinding = { ...finding, symbol: 'workerFinding', title: 'worker defect' }
+  const synthesisFinding = { ...finding, symbol: 'synthesisFinding', title: 'synthesis defect' }
+  for (const [workerFindings, synthesisFindings] of [
+    [[workerFinding], []],
+    [[], [synthesisFinding]],
+    [[workerFinding], [synthesisFinding]],
+  ]) {
+    const f = fixture()
+    f.synthesis.payload = { verdict: synthesisFindings!.length ? 'REQUEST_CHANGES' : 'APPROVE', findings: synthesisFindings }
+    expect(await f.check({ verdict: workerFindings!.length ? 'REQUEST_CHANGES' : 'APPROVE', findings: workerFindings })).toEqual({
+      kind: 'fix',
+      findings: [...workerFindings!, ...synthesisFindings!].map(value => `code.ts:${value.symbol}:correctness`),
+      blockingCount: workerFindings!.length + synthesisFindings!.length,
+    })
+    expect(f.reads()).toBe(2)
+  }
+})
+test('standalone review exemptions and escalation cannot be hidden by approving synthesis', async () => {
+  const f = fixture()
+  expect(await f.check({ ...approve, findings: [{ ...finding, advisory: true, kind: 'suite' }] })).toEqual({
+    kind: 'fix', findings: ['code.ts:f:correctness'], blockingCount: 1,
+  })
+  expect(await f.check({ ...approve, escalate: { kind: 'design-gap', whatIsMissing: 'missing requirement' } })).toMatchObject({
+    kind: 'blocked', on: expect.stringContaining('orchestrator arbitration'),
+  })
 })
 test('review severity, minority veto and stable identities drive fixes and arbitration', async () => {
   for (const severity of ['major', 'blocker', 'minor', 'nit']) {
     const f = fixture(); f.seat.payload = { verdict: 'REQUEST_CHANGES', findings: [{ ...finding, severity }] }
     expect(await f.check()).toEqual(severity === 'major' || severity === 'blocker' ? { kind: 'fix', findings: ['code.ts:f:correctness'], blockingCount: 2 } : { kind: 'approve' })
     f.synthesis.payload = f.seat.payload
-    expect(await f.check()).toEqual(severity === 'major' || severity === 'blocker' ? { kind: 'fix', findings: ['code.ts:f:correctness'], blockingCount: 3 } : { kind: 'approve' })
+    expect(await f.check()).toEqual(severity === 'major' || severity === 'blocker' ? { kind: 'fix', findings: ['code.ts:f:correctness'], blockingCount: 4 } : { kind: 'approve' })
   }
   const f = fixture(); f.seat.payload = { verdict: 'APPROVE', findings: [{ ...finding, symbol: '' }] }
   expect(await f.check()).toMatchObject({ kind: 'unknown' })

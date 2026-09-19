@@ -80,7 +80,9 @@ export async function reviewPanel(source: ReviewSource | undefined, payload: unk
       ?? registry.find(model => model.model_id === seat.modelId)?.group
       ?? (seat.provider === 'pi' ? `pi:${seat.modelId}` : seat.provider))
     let unknownFamily = false
-    const verdicts: VerdictTrailer[] = []
+    // The standalone review and recorded synthesis are independently authored.
+    // Both retain a veto; matching provenance does not require identical findings.
+    const verdicts: VerdictTrailer[] = [trailer.value]
     for (const seat of seats) {
       const observed = await readReviewSeat(source, seat, snapshot, round)
       if (!observed) return infrastructure(`Review seat ${seat.id} (${seat.provider}) has no recorded observation`)
@@ -100,9 +102,6 @@ export async function reviewPanel(source: ReviewSource | undefined, payload: unk
     if (!recorded || recorded.runId !== runId || recorded.head !== snapshot.head || recorded.round !== round) return infrastructure('Review synthesis provenance does not match run, revision and round')
     const synthesis = validateTrailer('verdict', unmarked(recorded.payload))
     if (!synthesis.ok) return infrastructure('Review recorded synthesis is unusable')
-    // Compare decoded data, independent of object key ordering.
-    const canonical = (value: VerdictTrailer) => JSON.stringify([value.verdict, value.findings.map(f => [f.severity, f.title, f.evidence, f.file, f.symbol, f.rule, f.line]), value.escalate?.kind, value.escalate?.whatIsMissing])
-    if (canonical(synthesis.value) !== canonical(trailer.value)) return blocked('Review worker trailer differs from recorded synthesis')
     verdicts.push(synthesis.value)
     const blockers = verdicts.flatMap(v => v.findings).filter(f => f.severity !== 'minor' && f.severity !== 'nit')
     const actionable = verdicts.flatMap(v => v.findings).filter(f => f.severity !== 'nit').map(findingIdentity)
