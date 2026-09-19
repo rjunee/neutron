@@ -39,6 +39,7 @@ function fixture(remote = false) {
   let wrongReceipt = false
   let approval = false
   let capability = true
+  let terminalLag = 0
   let onPrompt: ((prompt: string) => void) | undefined
   const bindings = new CodexOwnerBindings(async projectId => {
     if (!authorized) throw new Error('No connected project credential')
@@ -109,7 +110,7 @@ function fixture(remote = false) {
       },
     }
     if (remote) Object.assign(owner, {
-      async refreshState() { if (completedRemotely) { phase = 'idle'; completedRemotely = false }; return owner.broker.state() },
+      async refreshState() { if (completedRemotely && terminalLag-- <= 0) { phase = 'idle'; completedRemotely = false }; return owner.broker.state() },
       async replyApproval(client: string, id: string | number, result: unknown, expectedEpoch: number) {
         await Bun.sleep(1)
         replies.push({ client, id, result, epoch: expectedEpoch })
@@ -133,6 +134,7 @@ function fixture(remote = false) {
       return owner.broker.gateway('terminal-native').request('turn/start', { threadId: identity.threadId, input: [{ text: 'terminal input' }] }, owner.broker.state().epoch)
     },
     authorize: (value: boolean) => { authorized = value },
+    delayTerminalState: (reads: number) => { terminalLag = reads },
     restart: () => new CodexOwnerBindings(async projectId => ({ cwd: join(dir, projectId), codexHome: homes.get(projectId)!, env: {} }),
       async options => owners.get(options.codexHome)!, binding => facts.get(binding)!),
     rpc, replies, hold: (value: boolean) => { held = value }, finish: (project = 'project-one') => finishers.get(project)!(),
@@ -148,6 +150,7 @@ test('cold boot without credentials does not fence a later connected native owne
   const f = fixture(true)
   f.authorize(false)
   await f.bindings.reconcile(['project-one'])
+  expect((await collect(f.bindings.start('project-one', spec('before credentials connect')))).at(-1)?.kind).toBe('error')
   expect(f.launched).toHaveLength(0)
   f.authorize(true)
   expect((await collect(f.bindings.start('project-one', spec('first authorized turn')))).at(-1)?.kind).toBe('completion')
@@ -169,6 +172,7 @@ test('an actual uncertain owner journal at boot stays fenced before any later la
 
 test('remote completion refreshes terminal state before releasing and clearing the durable work marker', async () => {
   const f = fixture(true)
+  f.delayTerminalState(2)
   for (const prompt of ['one', 'two']) {
     expect((await collect(f.bindings.start('project-one', spec(prompt)))).at(-1)?.kind).toBe('completion')
     expect(existsSync(join(f.homes.get('project-one')!, '.neutron-owner-work.json'))).toBe(false)
@@ -233,23 +237,35 @@ test('unattested native subagent capability refuses build while owner chat remai
   expect(f.calls).toHaveLength(2); expect(f.launched).toHaveLength(1)
 })
 
-test('missing child trailer fences later chat even when the native parent completed', async () => {
-  const f = fixture()
+test.each([false, true])('missing child trailer fences later chat even when native parent completed (failed tag %s)', async failedTag => {
+  const f = fixture(true)
   await collect(f.bindings.start('project-one', spec('hello')))
   const cwd = join(f.dir, 'project-one')
   const request: BoundedWorkRequest = { run_id: 'run', step_id: 'missing', role: 'build', model_id: 'gpt-5.5', effort: null,
     cwd, writable: true, network: true, tools: 'edit-and-run', brief: { path: join(cwd, 'brief'), integrity: 'fixture' },
     result: { path: join(cwd, 'missing.json'), schema: 'fixture' }, thread: null, budget: { wall_ms: 30 }, needs_approval_decision: false }
-  const turn = { conversation: { project_id: 'project-one', topic_id: 'topic', provider: 'openai-codex' as const, spec: spec('') },
-    request, spec: spec('dispatch'), timeout_ms: 30, signal: new AbortController().signal }
-  expect((await f.bindings.actingTurn('project-one', 'topic', cwd, [cwd])(turn)).kind).toBe('unknown')
+  const runners = await createProjectRunners({ conversation: { project_id: 'project-one', topic_id: 'topic', provider: 'openai-codex', spec: spec('') },
+    run_id: 'run', state_dir: cwd, actingTurn: f.bindings.actingTurn('project-one', 'topic', cwd, [cwd]),
+    trailer: { schemas: new Map([['fixture', () => true]]), metadata: () => undefined }, headless: {} })
+  const runner = runners.inRepl!
+  const worker = f.bindings.guardBuildRunner('project-one', failedTag ? { ...runner, async run(...args) {
+    expect((await runner.run(...args)).kind).toBe('unknown')
+    return { kind: 'failed', class: 'timeout', detail: 'Timeout classification is not native terminal evidence' }
+  } } : runner)
+  expect((await worker.run(request, 'in-repl', new AbortController().signal)).kind).toBe(failedTag ? 'failed' : 'unknown')
   expect(f.calls).toHaveLength(2)
   expect((await collect(f.bindings.start('project-one', spec('must not dispatch')))).at(-1)?.kind).toBe('error')
   expect(f.calls).toHaveLength(2)
+  await f.bindings.close()
+  const restarted = f.restart()
+  expect((await collect(restarted.start('project-one', spec('must not replay after restart')))).at(-1)?.kind).toBe('error')
+  expect(f.calls).toHaveLength(2)
+  await restarted.close()
 })
 
-test.each(['valid', 'invalid-payload', 'malformed-envelope'] as const)('host-decoded child %s controls later chat and distinct-step dispatch', async result => {
-  const valid = result === 'valid'
+test.each(['valid', 'invalid-payload', 'malformed-envelope', 'settled-infra', 'settled-timeout', 'settled-killed'] as const)('host-decoded child %s controls later chat and distinct-step dispatch', async result => {
+  const settledFailure = result.startsWith('settled-')
+  const valid = result === 'valid' || settledFailure
   const f = fixture(true)
   await collect(f.bindings.start('project-one', spec('hello')))
   const cwd = join(f.dir, 'project-one')
@@ -262,8 +278,13 @@ test.each(['valid', 'invalid-payload', 'malformed-envelope'] as const)('host-dec
     run_id: 'run', state_dir: cwd, actingTurn: f.bindings.actingTurn('project-one', 'topic', cwd, [cwd]),
     trailer: { schemas: new Map([['fixture', value => (value as { accepted?: boolean })?.accepted === true]]), metadata: () => undefined }, headless: {},
   })
-  const worker = f.bindings.guardBuildRunner('project-one', runners.inRepl!)
-  expect((await worker.run(request, 'in-repl', new AbortController().signal)).kind).toBe(valid ? 'completed' : 'unknown')
+  const runner = runners.inRepl!
+  const worker = f.bindings.guardBuildRunner('project-one', settledFailure ? { ...runner, async run(...args) {
+    const completed = await runner.run(...args)
+    expect(completed.kind).toBe('completed')
+    return { kind: 'failed', class: result.slice('settled-'.length) as 'infra' | 'timeout' | 'killed', detail: 'Host failure after verified terminal child' }
+  } } : runner)
+  expect((await worker.run(request, 'in-repl', new AbortController().signal)).kind).toBe(settledFailure ? 'failed' : valid ? 'completed' : 'unknown')
   expect(f.calls).toHaveLength(2)
   expect((await collect(f.bindings.start('project-one', spec('after payload')))).at(-1)?.kind).toBe(valid ? 'completion' : 'error')
   expect(f.calls).toHaveLength(valid ? 3 : 2)
@@ -275,6 +296,28 @@ test.each(['valid', 'invalid-payload', 'malformed-envelope'] as const)('host-dec
   const restarted = f.restart()
   expect((await collect(restarted.start('project-one', spec('after gateway restart')))).at(-1)?.kind).toBe(valid ? 'completion' : 'error')
   expect(f.calls).toHaveLength(valid ? 4 : 2)
+  expect(f.launched).toHaveLength(1)
+  await restarted.close()
+})
+
+test('pre-aborted consuming build never dispatches or fences the live owner, including after restart', async () => {
+  const f = fixture(true)
+  await collect(f.bindings.start('project-one', spec('hello')))
+  const cwd = join(f.dir, 'project-one')
+  const request: BoundedWorkRequest = { run_id: 'run', step_id: 'pre-aborted', role: 'build', model_id: 'gpt-5.5', effort: null,
+    cwd, writable: true, network: true, tools: 'edit-and-run', brief: { path: join(cwd, 'brief'), integrity: 'fixture' },
+    result: { path: join(cwd, 'result.json'), schema: 'fixture' }, thread: null, budget: { wall_ms: 2000 }, needs_approval_decision: false }
+  const runners = await createProjectRunners({ conversation: { project_id: 'project-one', topic_id: 'topic', provider: 'openai-codex', spec: spec('') },
+    run_id: 'run', state_dir: cwd, actingTurn: f.bindings.actingTurn('project-one', 'topic', cwd, [cwd]),
+    trailer: { schemas: new Map([['fixture', () => true]]), metadata: () => undefined }, headless: {} })
+  const worker = f.bindings.guardBuildRunner('project-one', runners.inRepl!)
+  expect((await worker.run(request, 'in-repl', AbortSignal.abort())).kind).toBe('unknown')
+  expect(f.calls).toHaveLength(1)
+  expect(existsSync(join(f.homes.get('project-one')!, '.neutron-owner-work.json'))).toBe(false)
+  expect((await collect(f.bindings.start('project-one', spec('still usable')))).at(-1)?.kind).toBe('completion')
+  await f.bindings.close()
+  const restarted = f.restart()
+  expect((await collect(restarted.start('project-one', spec('usable after restart')))).at(-1)?.kind).toBe('completion')
   expect(f.launched).toHaveLength(1)
   await restarted.close()
 })

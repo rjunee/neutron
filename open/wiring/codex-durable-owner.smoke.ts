@@ -48,7 +48,16 @@ async function run() {
   const cwd = join(root, 'project'), codexHome = join(root, 'home')
   mkdirSync(cwd); mkdirSync(codexHome, { mode: 0o700 })
   writeFileSync(join(codexHome, 'project-owner.json'), JSON.stringify('durable-owner-fixture'), { mode: 0o600 })
-  writeFileSync(join(codexHome, 'auth.json'), '{}', { mode: 0o600 })
+  // Synthetic subscription-shaped tokens: the loopback model requires no auth.
+  // Rotate every volatile token field between gateways without an OAuth request.
+  const credentials = (revision: number, account = 'fixture-account') => ({ tokens: {
+    account_id: account, access_token: `fixture-access-${revision}`, refresh_token: `fixture-refresh-${revision}`,
+    id_token: [Buffer.from(JSON.stringify({ alg: 'none' })).toString('base64url'), Buffer.from(JSON.stringify({
+      email: 'owner@example.test', sub: 'fixture-subject', exp: Math.floor(Date.now() / 1000) + 3600 + revision,
+      'https://api.openai.com/auth': { chatgpt_account_id: account, chatgpt_plan_type: 'plus' },
+    })).toString('base64url'), 'fixture'].join('.'),
+  }, last_refresh: new Date(Date.now() + revision * 1000).toISOString() })
+  writeFileSync(join(codexHome, 'auth.json'), JSON.stringify(credentials(1)), { mode: 0o600 })
   const inputs: string[] = []
   let ask = false
   const provider = Bun.serve({ hostname: '127.0.0.1', port: 0, async fetch(request) {
@@ -90,6 +99,7 @@ async function run() {
   }
   try {
     const first = await start('BEFORE_RESTART'); assert(first.report.completed, JSON.stringify(first.report.errors))
+    assert(!existsSync(join(codexHome, '.neutron-owner-work.json')), 'completed native turn must settle its host lease before restart')
     const before = readOwnerHelperDescriptor(descriptorPath)
     const tui = await rpc.call('pane.process_info', { pane_id: before.facts.paneHandle }) as { process_info: { shell_pid: number } }
     const children = readFileSync(`/proc/${before.helper.pid}/task/${before.helper.pid}/children`, 'utf8').trim().split(/\s+/).map(Number)
@@ -98,11 +108,29 @@ async function run() {
     identities.push(before.helper, helperIdentity(tui.process_info.shell_pid), helperIdentity(servers[0]))
     for (const id of identities) assert(!readFileSync(`/proc/${id.pid}/cgroup`, 'utf8').includes(first.unit))
     await kill(first)
+    const previousCredentialBytes = readFileSync(join(codexHome, 'auth.json'), 'utf8')
+    writeFileSync(join(codexHome, 'auth.json'), JSON.stringify(credentials(2)), { mode: 0o600 })
+    assert.notEqual(readFileSync(join(codexHome, 'auth.json'), 'utf8'), previousCredentialBytes)
     const second = await start('AFTER_RESTART'); assert(second.report.completed, JSON.stringify(second.report.errors))
     assert.deepEqual(readOwnerHelperDescriptor(descriptorPath), before)
     assert(inputs.some(input => input.includes('BEFORE_RESTART') && input.includes('AFTER_RESTART')), 'native conversation history survives')
     for (const id of identities) assert.deepEqual(helperIdentity(id.pid), id)
     await kill(second)
+    for (const revision of [1, 2]) {
+      writeFileSync(join(codexHome, 'auth.json'), JSON.stringify({ ...credentials(revision + 2), OPENAI_API_KEY: `metered-fixture-${revision}` }), { mode: 0o600 })
+      const beforeKey = inputs.length
+      const metered = await start(`MIXED_KEY_${revision}_MUST_REFUSE`)
+      assert.equal(metered.report.completed, false); assert(metered.report.errors.length)
+      assert.equal(inputs.length, beforeKey)
+      await kill(metered)
+    }
+    writeFileSync(join(codexHome, 'auth.json'), JSON.stringify(credentials(3, 'different-account')), { mode: 0o600 })
+    const beforeForeign = inputs.length
+    const foreign = await start('FOREIGN_ACCOUNT_MUST_REFUSE')
+    assert.equal(foreign.report.completed, false); assert(foreign.report.errors.length)
+    assert.equal(inputs.length, beforeForeign)
+    await kill(foreign)
+    writeFileSync(join(codexHome, 'auth.json'), JSON.stringify(credentials(4)), { mode: 0o600 })
     ask = true
     const pending = await start('PENDING_APPROVAL'); assert.equal(pending.report.state.pending.length, 1)
     await kill(pending)
@@ -132,7 +160,7 @@ async function run() {
     if (passed) rmSync(root, { recursive: true, force: true })
     else process.stderr.write(`Probe diagnostics retained: ${root}\n`)
   }
-  process.stdout.write('PASS: production durable launcher and Open owner consumer; exact helper/app-server/TUI/thread across gateway SIGKILL; resumed idle conversation; pending approval refuses replay; stale frontend refused. Pending approval recovery is NOT claimed.\n')
+  process.stdout.write('PASS: production durable launcher and Open owner consumer; exact helper/app-server/TUI/thread across gateway SIGKILL and simulated OAuth token refresh; changed account and mixed/changed API keys refused; resumed idle conversation; pending approval refuses replay; stale frontend refused. Pending approval recovery and a live OAuth refresh request are NOT claimed.\n')
 }
 function isAlive(id: HelperIdentity) {
   try { return JSON.stringify(helperIdentity(id.pid)) === JSON.stringify(id) }

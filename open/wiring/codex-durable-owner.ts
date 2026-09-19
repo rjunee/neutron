@@ -6,8 +6,18 @@ import { attachCodexOwner, readCodexOwnerBinding, type bootstrapCodexOwner, type
 import { assertProjectOwner, helperIdentity, privatePath, readOwnerHelperDescriptor } from '@neutronai/runtime/adapters/codex-cli/persistent/project-owner-helper-protocol.ts'
 import { HerdrHost } from '@neutronai/runtime/adapters/claude-code/persistent/herdr-host.ts'
 import { createHerdrRpc } from '@neutronai/runtime/adapters/claude-code/persistent/herdr-client.ts'
+import { readAccountId, validateCodexSubscriptionAuth } from '@neutronai/trident/codex-auth.ts'
 
 export type OwnerLaunch = Parameters<typeof bootstrapCodexOwner>[0] & { projectId: string }
+
+/** Account identity survives native access/id/refresh-token rotation. The private
+ * credential service's file is the source; JWT bodies are not invented authority. */
+export function codexOwnerCredentialIdentity(bytes: string): string {
+  if (!validateCodexSubscriptionAuth(bytes).ok) throw new Error('Codex owner subscription credential identity is unavailable')
+  const account = readAccountId(bytes)
+  if (account) return createHash('sha256').update(JSON.stringify(['chatgpt-account', account])).digest('hex')
+  throw new Error('Codex owner credential identity is unavailable')
+}
 
 /** Host journal is written before launch. Any incomplete/uncertain prior launch
  * refuses replacement; only an authenticated exact surviving helper is adopted. */
@@ -22,7 +32,7 @@ export async function openDurableCodexOwner(options: OwnerLaunch): Promise<Codex
     ...(options.env.HERDR_WORKSPACE_ID ? { workspaceId: options.env.HERDR_WORKSPACE_ID } : {}) })
   const credentialPath = join(options.codexHome, 'auth.json')
   privatePath(credentialPath, 'file')
-  const credential = createHash('sha256').update(readFileSync(credentialPath)).digest('hex')
+  const credential = codexOwnerCredentialIdentity(readFileSync(credentialPath, 'utf8'))
   const scope = { projectId: options.projectId, cwd: options.cwd, codexHome: options.codexHome, credential }
   let authority: ReturnType<typeof readOwnerHelperDescriptor> | undefined
   let launchedPid: number | undefined

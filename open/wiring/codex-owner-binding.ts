@@ -4,7 +4,7 @@ import { readCodexOwnerBinding, type CodexOwnerBootstrap, type CodexOwnerAttachm
 import { openDurableCodexOwner, type OwnerLaunch } from './codex-durable-owner.ts'
 import { createCodexConversationalSubstrate, type CodexConversationHost } from '@neutronai/runtime/adapters/codex-cli/persistent/conversational-substrate.ts'
 import { createCodexActingTurn, type CodexActingSession } from '@neutronai/runtime/workers/codex-acting-turn.ts'
-import type { ProjectActingTurn } from '@neutronai/runtime/workers/project-runners.ts'
+import { decodeProjectTrailer, type ProjectActingTurn } from '@neutronai/runtime/workers/project-runners.ts'
 import type { AgentSpec } from '@neutronai/runtime/substrate.ts'
 import type { SessionHandle } from '@neutronai/runtime/session-handle.ts'
 import type { WorkerRunner } from '@neutronai/runtime/bounded-work.ts'
@@ -33,6 +33,7 @@ export class CodexOwnerBindings {
   private readonly busy = new Set<string>()
   private readonly refused = new Set<string>()
   private readonly decodingBuilds = new Set<string>()
+  private readonly buildObservations = new Map<string, { invoked: boolean; terminal: boolean }>()
   private readonly builds = new Map<string, {
     session: NonNullable<CodexActingSession['session']>
     input?: Parameters<ProjectActingTurn>[0]
@@ -124,6 +125,15 @@ export class CodexOwnerBindings {
           released = true
           try {
             await refreshOwner(owner)
+            // Rollout task_complete can precede the broker's native turn/completed
+            // event. Reconcile only this exact finished turn, without a write or
+            // replay; idle from a single prematurely sampled RPC is not guaranteed.
+            const deadline = Date.now() + 2_000
+            while (outcome === 'completed' && turnId && owner.broker.state().phase === 'turn'
+              && owner.broker.state().activeTurnId === turnId && Date.now() < deadline) {
+              await Bun.sleep(25)
+              await refreshOwner(owner)
+            }
             if (outcome !== 'completed' || owner.broker.state().phase !== 'idle') this.refused.add(options.projectId)
           } catch (error) { this.refused.add(options.projectId); throw error }
           finally { control.close(); gateway.close(); this.busy.delete(options.projectId) }
@@ -144,6 +154,7 @@ export class CodexOwnerBindings {
     if (!/^[A-Za-z0-9_.-]{1,128}$/.test(projectId)) return Promise.reject(new Error('Codex owner requires a full project id'))
     let pending = this.owners.get(projectId)
     if (!pending) {
+      let openingAttempted = false
       pending = (async () => {
         const raw = await this.project(projectId)
         const project = { ...raw, cwd: realpathSync(raw.cwd), codexHome: realpathSync(raw.codexHome) }
@@ -155,6 +166,7 @@ export class CodexOwnerBindings {
           if (value !== undefined && !CODEX_CLI_AUTH_ENV_VARS.includes(key)) env[key] = value
         }
         env.CODEX_HOME = project.codexHome
+        openingAttempted = true
         const owner = await this.bootstrap({ projectId, binary: 'codex', socketPath: join(project.codexHome, 'owner.sock'),
           cwd: project.cwd, codexHome: project.codexHome, env })
         try {
@@ -174,7 +186,12 @@ export class CodexOwnerBindings {
         this.ownerProjects.set(owner, projectId)
         this.resolvedOwners.set(projectId, owner)
         return { owner, project }
-      })()
+      })().catch(error => {
+        // A failed credential lookup never acquired native authority. Retry that
+        // read after connection, but retain uncertainty once opening was attempted.
+        if (!openingAttempted) this.owners.delete(projectId)
+        throw error
+      })
       this.owners.set(projectId, pending)
     }
     return pending
@@ -221,17 +238,37 @@ export class CodexOwnerBindings {
    * must fence this same owner even when native parent/envelope checks passed. */
   guardBuildRunner(projectId: string, worker: WorkerRunner): WorkerRunner {
     return { ...worker, run: async (request, placement, signal) => {
+      // Positive no-dispatch proof: no runner/acting-turn call has occurred.
+      // A cancelled admission must not create a durable owner uncertainty marker.
+      if (signal.aborted || request.budget.wall_ms <= 0) return { kind: 'unknown', detail: 'Cancelled or out of time before owner dispatch.' }
       if (this.decodingBuilds.has(projectId)) return { kind: 'unknown', detail: 'Codex owner build result is still pending' }
       this.decodingBuilds.add(projectId)
+      const observation = { invoked: false, terminal: false }
+      this.buildObservations.set(projectId, observation)
       try {
         const outcome = await worker.run(request, placement, signal)
-        if (outcome.kind === 'unknown' || outcome.kind === 'failed') this.fence(projectId)
+        if (outcome.kind === 'unknown' || outcome.kind === 'failed') {
+          // Tags alone cannot establish delivery or terminal settlement. No
+          // acting-turn invocation is positive no-dispatch evidence. A failed
+          // host result after exact parent + child terminal evidence is safe
+          // only if no independent uncertainty fence or active lease remains.
+          if (!observation.invoked) return outcome
+          const owner = this.resolvedOwners.get(projectId)
+          if (outcome.kind === 'failed' && observation.terminal && owner && !this.refused.has(projectId)) {
+            await refreshOwner(owner)
+            if (!this.busy.has(projectId) && !this.builds.get(projectId)?.input && owner.broker.state().phase === 'idle') {
+              this.finishWork(projectId, owner)
+              return outcome
+            }
+          }
+          this.fence(projectId)
+        }
         else { const entry = await this.owners.get(projectId); if (entry) this.finishWork(projectId, entry.owner) }
         return outcome
       } catch (error) {
         this.refused.add(projectId)
         throw error
-      } finally { this.decodingBuilds.delete(projectId) }
+      } finally { this.decodingBuilds.delete(projectId); this.buildObservations.delete(projectId) }
     } }
   }
 
@@ -291,6 +328,8 @@ export class CodexOwnerBindings {
 
   actingTurn(projectId: string, topicId: string, cwd: string, roots: readonly string[]): ProjectActingTurn {
     return async turn => {
+      const observation = this.buildObservations.get(projectId)
+      if (observation) observation.invoked = true
       const { owner, project } = await this.resolve(projectId)
       if (realpathSync(cwd) !== project.cwd) throw new Error('Codex build project directory changed')
       if (roots.some(root => relative(project.cwd, realpathSync(root)).split(sep)[0] === '..')) {
@@ -338,7 +377,14 @@ export class CodexOwnerBindings {
         // A native parent can finish while its child remains unresolved. Fence
         // chat as well as subsequent builds until the host reconciles that child.
         if (outcome.kind !== 'turn-ended') this.refused.add(projectId)
-        else if (!this.decodingBuilds.has(projectId)) this.finishWork(projectId, owner)
+        else {
+          if (observation) {
+            const terminal = decodeProjectTrailer(readFileSync(turn.request.result.path, 'utf8'), turn.request,
+              { schemas: new Map([[turn.request.result.schema, value => value !== undefined]]), metadata: () => undefined })
+            observation.terminal = terminal.kind === 'completed' || terminal.kind === 'blocked'
+          }
+          if (!this.decodingBuilds.has(projectId)) this.finishWork(projectId, owner)
+        }
         return outcome
       } catch (error) {
         this.refused.add(projectId)
