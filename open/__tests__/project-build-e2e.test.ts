@@ -65,6 +65,7 @@ import { TridentPhaseUsageStore } from '@neutronai/trident/phase-usage.ts'
 import { createProjectBuildHost, type ProjectBuildOutcome } from '@neutronai/trident/project-build-host.ts'
 import { spawnCapture, type HostCommandResult } from '@neutronai/trident/git-mode.ts'
 import { gitRangeArgv } from '@neutronai/trident/git-range.ts'
+import { VERDICT_SCHEMA } from '@neutronai/trident/gates/result-contract.ts'
 import { workContextPath } from '@neutronai/trident/production-host-effects.ts'
 import { pool, supervisedBySessionKey } from '@neutronai/runtime/adapters/claude-code/persistent/pool-state.ts'
 import type { BoundedWorkRequest } from '@neutronai/runtime/bounded-work.ts'
@@ -204,6 +205,8 @@ interface WorkerWorld {
   selectedTasks: string[]
   /** The planner route the real driver wrote into each plan turn's context. */
   plannerChoices: string[]
+  synthesisShape: 'legacy' | 'schema-guided' | 'malformed'
+  synthesisSchemaSeen: boolean[]
 }
 
 /**
@@ -289,7 +292,18 @@ async function performRole(world: WorkerWorld, request: BoundedWorkRequest, brie
   // `verdict` schema, and its brief is the panel's own JSON, not a role brief. Its
   // step id is per DIRECTORY, round and attempt (`project-review-source.ts:99`), so
   // the round comes from the brief the source wrote, not from the step id.
-  if (request.result.schema === 'verdict') return verdictFor(world, JSON.parse(brief).round)
+  if (request.result.schema === 'verdict') {
+    const panelBrief = JSON.parse(brief)
+    const verdict = verdictFor(world, panelBrief.round)
+    if (request.role !== 'synthesis' || world.synthesisShape === 'legacy') return verdict
+    const hasSchema = JSON.stringify(panelBrief.verdictSchema) === JSON.stringify(VERDICT_SCHEMA)
+    world.synthesisSchemaSeen.push(hasSchema)
+    // A worker told only to account for each seat can plausibly add a summary.
+    // The strict host contract rejects it. The malformed control adds it even
+    // after seeing the schema, proving the gate was not relaxed to make merge pass.
+    return hasSchema && world.synthesisShape === 'schema-guided'
+      ? verdict : { ...verdict, synthesis: 'All supplied seats approve.' }
+  }
 
   // Every role brief points at the host turn context, which the host wrote in
   // `prepareWork` (`production-host-effects.ts:451`) and whose path the brief
@@ -536,7 +550,8 @@ async function fixture(options: { ralph?: boolean; moreTasks?: boolean; suiteExi
   blockersByRound?: readonly number[]; replanRounds?: readonly number[]
   maxRounds?: number; mergeMode?: 'pr' | 'local'; blockRoles?: readonly string[]
   repeatFirstFinding?: boolean; commentRounds?: readonly number[]
-  unavailableSeatRounds?: readonly number[]; codexReview?: 'valid' | 'wrong-run' } = {}) {
+  unavailableSeatRounds?: readonly number[]; codexReview?: 'valid' | 'wrong-run'
+  synthesisShape?: WorkerWorld['synthesisShape'] } = {}) {
   const dir = await mkdtemp(join(tmpdir(), 'project-build-e2e-'))
   cleanups.push(() => rm(dir, { recursive: true, force: true }))
   const origin = join(dir, 'origin.git')
@@ -601,6 +616,7 @@ async function fixture(options: { ralph?: boolean; moreTasks?: boolean; suiteExi
   const commands: string[][] = []
   const world: WorkerWorld = { run: spawnCapture, repo, scratch, dispatches: [],
     selectedTasks: [], plannerChoices: [],
+    synthesisShape: options.synthesisShape ?? 'legacy', synthesisSchemaSeen: [],
     blockersByRound: options.blockersByRound ?? [], replanRounds: options.replanRounds ?? [],
     blockRoles: new Set(options.blockRoles ?? []), repeatFirstFinding: options.repeatFirstFinding ?? false,
     commentRounds: new Set(options.commentRounds ?? []),
@@ -923,6 +939,27 @@ test('pr mode drives plan, build, review, publish and merge to a terminal merged
   expect(originMain.stdout.trim()).not.toBe(f.baseSha)
   expect(f.store.get(f.row.id)!.pr).toBe(1)
   expect(['cleaned', 'preserved']).toContain(outcome.cleanup.kind)
+}, 300_000)
+
+test('a synthesis worker guided by the exact verdict schema reaches MERGED unattended', async () => {
+  const f = await fixture({ synthesisShape: 'schema-guided' })
+  const outcome = await drive(f, 'pr')
+  expect(f.world.synthesisSchemaSeen).toEqual([true])
+  expect(outcome.kind, why(f, outcome)).toBe('merged')
+  expect(f.github.prs).toHaveLength(1)
+  expect(f.github.prs[0]!.state).toBe('MERGED')
+}, 300_000)
+
+test('an extra synthesis payload field still blocks review and leaves the PR open', async () => {
+  const f = await fixture({ synthesisShape: 'malformed' })
+  const outcome = await drive(f, 'pr')
+  expect(f.world.synthesisSchemaSeen).toHaveLength(1)
+  expect(outcome, why(f, outcome)).toMatchObject({ kind: 'blocked', phase: 'review',
+    recipient: 'orchestrator', on: expect.stringContaining('infra-only: Review panel host observation failed') })
+  expect(f.github.prs).toHaveLength(1)
+  expect(f.github.prs[0]!.state).toBe('OPEN')
+  const originMain = await spawnCapture(['git', '-C', f.origin, 'rev-parse', 'refs/heads/main'], f.origin)
+  expect(originMain.stdout.trim()).toBe(f.baseSha)
 }, 300_000)
 
 test('fresh retry rebuilds and republishes its prior open PR from a different real head', async () => {

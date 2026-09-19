@@ -7,7 +7,7 @@ import { modelTier, type ModelTierDescriptor } from './model-tiers.ts'
 import { phaseByKey, type PhaseModelConfig } from './phase-models.ts'
 import type { BuildSnapshot } from './build-run.ts'
 import { briefIntegrity } from './gates/brief-integrity.ts'
-import { validateTrailer } from './gates/result-contract.ts'
+import { validateTrailer, VERDICT_SCHEMA } from './gates/result-contract.ts'
 import type { ReviewSeat, ReviewSource, SeatObservation } from './gates/review-panel.ts'
 
 export interface ProjectReviewSourceOptions {
@@ -149,7 +149,8 @@ export function createProjectReviewSource(input: ProjectReviewSourceOptions): Re
     // The ids cannot be baked in: `step_id` here is per directory, round AND
     // attempt (below), so the brief points at the request the seat was handed.
     const text = JSON.stringify({ project: options.projectSlug, seat: seat.id, snapshot, round, panel,
-      instruction: 'Review the measured diff. Return the verdict schema with findings and file/line evidence. Synthesis must account for every supplied seat.',
+      verdictSchema: VERDICT_SCHEMA,
+      instruction: 'Review the measured diff. The result must conform exactly to verdictSchema, including findings and file/line evidence. Do not add fields to result or its nested objects beyond those declared in verdictSchema. Synthesis must account for every supplied seat within this same schema.',
       resultFile: 'Write your result file as a JSON object with EXACTLY these five fields: "schema", "run_id" and "step_id", each copied verbatim from this dispatch\'s request (`request.result.schema`, `request.run_id`, `request.step_id`) — do not invent or reformat them; "kind", which is "completed" when you produced a verdict or "blocked" when you could not; and "result", the verdict payload itself, omitted when blocked. When blocked, add "on": a non-empty sentence saying what stopped you. Report blocked rather than inventing a verdict.' })
     const briefPath = join(directory, 'brief.json')
     await writeFile(briefPath, text, { mode: 0o600, flag: 'wx' })
