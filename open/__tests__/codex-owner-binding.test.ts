@@ -9,6 +9,10 @@ import type { SessionHandle } from '@neutronai/runtime/session-handle.ts'
 import type { CodexOwnerBinding, CodexOwnerBindingFacts, CodexOwnerBootstrap } from '@neutronai/runtime/adapters/codex-cli/persistent/project-control-bootstrap.ts'
 import type { BoundedWorkRequest } from '@neutronai/runtime/bounded-work.ts'
 import { createProjectRunners } from '@neutronai/runtime/workers/project-runners.ts'
+import { composeReplModelSurface } from '@neutronai/gateway/composition/repl-model.ts'
+import { createAppNativeOwnerControlSurface } from '@neutronai/gateway/http/app-native-owner-control-surface.ts'
+import type { ReplModelState } from '@neutronai/runtime/repl-model.ts'
+import type { NativeOwnerControlState } from '../wiring/codex-owner-controls.ts'
 
 const dirs: string[] = []
 afterEach(() => { for (const dir of dirs.splice(0)) rmSync(dir, { recursive: true, force: true }) })
@@ -21,6 +25,13 @@ function fixture() {
   const facts = new Map<CodexOwnerBinding, CodexOwnerBindingFacts>()
   const calls: { project: string; thread: string; prompt: string }[] = []
   const launched: string[] = []
+  const rpc: { client: string; method: string; params: Record<string, unknown>; epoch: number | undefined }[] = []
+  const replies: { client: string; id: string | number; result: unknown; epoch: number }[] = []
+  const emitters = new Map<string, (method: string, params: Record<string, unknown>) => void>()
+  const finishers = new Map<string, () => void>()
+  let held = false
+  let wrongModel = false
+  let failReply = false
   const homes = new Map<string, string>()
   let fail = false
   let wrongReceipt = false
@@ -47,29 +58,44 @@ function fixture() {
     if (!capability) Reflect.deleteProperty(identity, 'capabilities')
     facts.set(binding, identity)
     let count = 0
+    let epoch = 0
+    let model = 'small'
     let phase: 'idle' | 'turn' = 'idle'
     let listener: ((message: Record<string, unknown>) => void) | undefined
+    emitters.set(project, (method, params) => listener?.({ id: 'approval', method, params: { threadId: identity.threadId, turnId: `turn-${count}`, ...params } }))
+    const finish = (): void => {
+      appendFileSync(identity.rolloutPath, line('event_msg', { type: 'task_complete', turn_id: `turn-${count}`, last_agent_message: `reply-${count}` }))
+      phase = 'idle'
+    }
+    finishers.set(project, finish)
     const owner: CodexOwnerBootstrap = { binding, writeTerminal() { throw new Error('Unexpected terminal delivery') }, async close() {},
-      broker: { state: () => ({ phase, generation: 1, epoch: count, activeTurnId: phase === 'turn' ? `turn-${count}` : null, unresolved: null }),
-        close() {}, gateway: () => ({ close() {}, reply() {}, subscribe(fn) { listener = fn; return () => { listener = undefined } },
-          async request(method, params) {
+      broker: { state: () => ({ phase, generation: 1, epoch, activeTurnId: phase === 'turn' ? `turn-${count}` : null, unresolved: null }),
+        close() {}, gateway: client => ({ close() {}, reply(id, result, expectedEpoch) {
+          replies.push({ client, id, result, epoch: expectedEpoch }); if (failReply) throw new Error('Reply delivery unknown')
+        }, subscribe(fn) { listener = fn; return () => { listener = undefined } },
+          async request(method, params, expectedEpoch) {
+            rpc.push({ client, method, params, epoch: expectedEpoch })
+            if (method === 'model/list') return params.cursor ? { data: [{ model: 'large', displayName: 'Large' }], nextCursor: null }
+              : { data: [{ model: 'small', displayName: 'Small' }], nextCursor: 'second' }
             expect(params.threadId).toBe(identity.threadId)
-            if (method === 'turn/interrupt') { phase = 'idle'; return {} }
+            if (method === 'thread/read') return { thread: { ...identity, id: identity.threadId, model } }
+            if (method === 'thread/settings/update') { epoch++; if (!wrongModel) model = params.model as string; return {} }
+            if (method === 'turn/interrupt') { finish(); return {} }
             expect(method).toBe('turn/start')
             const prompt = (params.input as { text: string }[])[0]!.text
             calls.push({ project, thread: params.threadId as string, prompt })
             const turn = `turn-${++count}`
+            epoch++
             phase = 'turn'
             if (count === 1) writeFileSync(identity.rolloutPath, line('session_meta', { id: identity.threadId,
               cwd: identity.cwd, source: identity.nativeMetadata.source, originator: identity.nativeMetadata.originator, session_id: identity.sessionId }))
             appendFileSync(identity.rolloutPath, line('event_msg', { type: 'task_started', turn_id: turn })
               + line('event_msg', { type: 'item_completed', thread_id: identity.threadId, turn_id: turn,
                 item: { type: 'UserMessage', id: `user-${count}`, content: [{ type: 'text', text: prompt, text_elements: [] }] } }))
-            if (approval) listener?.({ id: 'approval', method: 'item/tool/requestUserInput', params: { threadId: identity.threadId, turnId: turn } })
+            if (approval) listener?.({ id: 'approval', method: 'item/tool/requestUserInput', params: { threadId: 'foreign-thread', turnId: turn } })
             else {
               onPrompt?.(prompt)
-              appendFileSync(identity.rolloutPath, line('event_msg', { type: 'task_complete', turn_id: turn, last_agent_message: `reply-${count}` }))
-              phase = 'idle'
+              if (!held) finish()
             }
             return { turn: { id: wrongReceipt ? 'foreign-turn' : turn } }
           },
@@ -87,7 +113,11 @@ function fixture() {
     configuredChat: { env: { NEUTRON_PROJECT_MODELS: '{"project-one":"glm"}' }, fetchImpl: (() => { throw new Error('Unexpected configured API call') }) as unknown as typeof fetch },
   })!
   return { dir, calls, launched, homes, bindings, chat,
-    fail: () => { fail = true }, wrongReceipt: () => { wrongReceipt = true }, approval: () => { approval = true },
+    rpc, replies, hold: (value: boolean) => { held = value }, finish: (project = 'project-one') => finishers.get(project)!(),
+    question: (method: string, params: Record<string, unknown>, project = 'project-one') => emitters.get(project)!(method, params),
+    wrongModel: () => { wrongModel = true },
+    failReply: () => { failReply = true },
+    fail: () => { fail = true }, wrongReceipt: () => { wrongReceipt = true }, foreignApproval: () => { approval = true },
     noCapability: () => { capability = false },
     onPrompt: (fn: (prompt: string) => void) => { onPrompt = fn } }
 }
@@ -190,7 +220,7 @@ test('chat cannot interleave while a completed native parent awaits its child re
   expect((await collect(f.bindings.start('project-one', spec('now ready')))).at(-1)?.kind).toBe('completion')
 })
 
-test.each(['wrongReceipt', 'approval'] as const)('%s quarantines the shared binding for chat and build', async mode => {
+test.each(['wrongReceipt', 'foreignApproval'] as const)('%s quarantines the shared binding for chat and build', async mode => {
   const f = fixture(); f[mode]()
   expect((await collect(f.bindings.start('project-one', spec('hello')))).some(event => event.kind === 'error')).toBe(true)
   expect((await collect(f.bindings.start('project-one', spec('again')))).some(event => event.kind === 'error')).toBe(true)
@@ -217,4 +247,151 @@ test('foreign project marker and forged factory binding never submit native work
   writeFileSync(join(dir, 'project-owner.json'), JSON.stringify('project-two'))
   expect((await collect(bindings.start('project-two', spec('hello')))).at(-1)).toMatchObject({ kind: 'error', message: 'Unattested owner binding' })
   expect(launches).toBe(1)
+})
+
+function controlSurfaces(f: ReturnType<typeof fixture>) {
+  const auth = { mode: 'hs256' as const, resolve: async (token: string) => token === 'invalid'
+    ? { code: 'invalid_signature' as const, message: 'Invalid bearer' }
+    : { user_id: token, project_slug: 'instance', mode: 'hs256' as const } }
+  const model = composeReplModelSurface({ auth, ownerUserId: 'owner', ownerSlug: 'instance',
+    projectExists: async id => ['project-one', 'project-two'].includes(id), provider: () => 'openai-codex',
+    readClaude: async () => { throw new Error('Unexpected Claude') }, switchClaude: async () => { throw new Error('Unexpected Claude') },
+    readCodex: id => f.bindings.controls.model(id), switchCodex: (id, request) => f.bindings.controls.model(id, request),
+  })
+  const turn = createAppNativeOwnerControlSurface({ auth,
+    canAccess: async (user, owner, id) => user === 'owner' && owner === 'instance' && ['project-one', 'project-two'].includes(id),
+    read: id => f.bindings.controls.state(id), act: (id, request) => f.bindings.controls.act(id, request),
+  })
+  return async (kind: 'model' | 'control', body?: unknown, project = 'project-one', token: string | null = 'owner') => {
+    const request = new Request(`http://localhost/api/app/projects/${project}/repl-${kind}`, {
+      method: body === undefined ? 'GET' : 'POST', headers: token ? { authorization: `Bearer ${token}`, 'content-type': 'application/json' } : {},
+      ...(body === undefined ? {} : { body: JSON.stringify(body) }),
+    })
+    return (await (kind === 'model' ? model : turn).handler(request))!
+  }
+}
+
+test('native model API authenticates, lists all native pages, switches both directions and preserves exact owner', async () => {
+  const f = fixture(), api = controlSurfaces(f)
+  for (const token of [null, 'invalid']) expect((await api('model', undefined, 'project-one', token)).status).toBe(401)
+  expect((await api('model', undefined, 'project-one', 'stranger')).status).toBe(404)
+  expect((await api('model', undefined, 'missing')).status).toBe(404)
+  expect((await api('model')).status).toBe(503)
+  expect(f.launched).toHaveLength(0)
+  await collect(f.bindings.start('project-one', spec('before switch')))
+  let state = await (await api('model')).json() as ReplModelState
+  expect(state).toMatchObject({ harness: 'codex', currentModel: 'small', status: 'ready', availableModels: [{ id: 'small', label: 'Small' }, { id: 'large', label: 'Large' }] })
+  const old = state.sessionId
+  expect((await api('model', { model: 'invented', sessionId: old })).status).toBe(400)
+  expect(f.rpc.filter(call => call.method === 'thread/settings/update')).toHaveLength(0)
+  const up = await api('model', { model: 'large', sessionId: old })
+  expect(up.status).toBe(200); state = await up.json() as ReplModelState
+  expect(state.currentModel).toBe('large'); expect(state.sessionId).not.toBe(old)
+  expect((await api('model', { model: 'small', sessionId: old })).status).toBe(409)
+  await collect(f.bindings.start('project-one', spec('use larger model')))
+  expect(f.rpc.findLast(call => call.method === 'turn/start')?.params.model).toBe('large')
+  state = await (await api('model')).json() as ReplModelState
+  await collect(f.bindings.start('project-two', spec('isolated')))
+  expect((await api('model', { model: 'small', sessionId: state.sessionId }, 'project-two')).status).toBe(409)
+  expect(await (await api('model', { model: 'small', sessionId: state.sessionId })).json()).toMatchObject({ currentModel: 'small' })
+  expect((await collect(f.bindings.start('project-one', spec('after switch')))).at(-1)).toMatchObject({ kind: 'completion', session: { id: 'native-project-one' } })
+  expect(f.launched).toEqual(['project-one', 'project-two'])
+  expect(f.rpc.filter(call => call.method === 'thread/settings/update').map(call => call.params)).toEqual([
+    { threadId: 'native-project-one', model: 'large' }, { threadId: 'native-project-one', model: 'small' },
+  ])
+})
+
+test('native switch requires confirmed model state and quarantines an uncertain update', async () => {
+  const f = fixture(), api = controlSurfaces(f)
+  await collect(f.bindings.start('project-one', spec('hello')))
+  const { sessionId } = await (await api('model')).json() as ReplModelState
+  f.wrongModel()
+  expect((await api('model', { model: 'large', sessionId })).status).toBe(503)
+  expect((await collect(f.bindings.start('project-one', spec('no reuse')))).at(-1)?.kind).toBe('error')
+  expect(f.calls).toHaveLength(1)
+})
+
+test('native controls revalidate the full project credential-home marker without spawning', async () => {
+  const f = fixture(), api = controlSurfaces(f)
+  await collect(f.bindings.start('project-one', spec('hello')))
+  expect((await api('model')).status).toBe(200)
+  const before = f.rpc.length
+  writeFileSync(join(f.homes.get('project-one')!, 'project-owner.json'), JSON.stringify('project-two'))
+  expect((await api('model')).status).toBe(503)
+  expect((await api('control')).status).toBe(503)
+  expect(f.rpc).toHaveLength(before)
+  expect(f.launched).toEqual(['project-one'])
+})
+
+test.each(['accept', 'decline'] as const)('native %s approval is authenticated, exact-turn owned, one-shot and visible in the chat stream', async decision => {
+  const f = fixture(), api = controlSurfaces(f)
+  f.hold(true)
+  const events: Awaited<ReturnType<typeof collect>> = []
+  const draining = (async () => { for await (const event of f.bindings.start('project-one', spec('question')).events) events.push(event) })()
+  for (let attempt = 0; f.calls.length < 1 && attempt < 100; attempt++) await Bun.sleep(1)
+  f.question('item/commandExecution/requestApproval', { command: 'echo bounded', reason: 'Needs an owner decision', availableDecisions: ['accept', 'decline'] })
+  for (let attempt = 0; !events.some(event => event.kind === 'tool_call') && attempt < 100; attempt++) await Bun.sleep(1)
+  expect(events.some(event => event.kind === 'tool_call' && event.tool_name === 'codex_owner_question')).toBe(true)
+  for (const token of [null, 'invalid']) expect((await api('control', undefined, 'project-one', token)).status).toBe(401)
+  expect((await api('control', undefined, 'project-one', 'stranger')).status).toBe(404)
+  const state = await (await api('control')).json() as NativeOwnerControlState
+  expect(state.pending).toHaveLength(1)
+  const action = { ...state, action: 'reply', requestId: 'approval', result: { decision } }
+  for (const change of [{ projectId: 'project-two' }, { threadId: 'topic' }, { turnId: 'old' }, { bindingRevision: 'old' }, { epoch: state.epoch - 1 }, { generation: state.generation + 1 }]) {
+    expect([400, 409]).toContain((await api('control', { ...action, ...change })).status)
+  }
+  expect(f.replies).toHaveLength(0)
+  expect((await api('control', { ...action, result: { decision: 'acceptForSession' } })).status).toBe(503)
+  const model = await (await api('model')).json() as ReplModelState
+  expect(model.status).toBe('busy')
+  expect((await api('model', { model: 'large', sessionId: model.sessionId })).status).toBe(409)
+  expect((await api('control', action)).status).toBe(200)
+  expect(f.replies).toEqual([{ client: f.rpc.find(call => call.method === 'turn/start')!.client, id: 'approval', result: { decision }, epoch: state.epoch }])
+  expect((await api('control', action)).status).toBe(409)
+  f.finish(); await draining
+  f.hold(false)
+  expect((await collect(f.bindings.start('project-one', spec('next')))).at(-1)?.kind).toBe('completion')
+})
+
+test('native interrupt routes through the original writer and a stale turn cannot interrupt its successor', async () => {
+  const f = fixture(), api = controlSurfaces(f)
+  f.hold(true)
+  const draining = collect(f.bindings.start('project-one', spec('hold')))
+  for (let attempt = 0; f.calls.length < 1 && attempt < 100; attempt++) await Bun.sleep(1)
+  const state = await (await api('control')).json() as NativeOwnerControlState
+  const action = { ...state, action: 'interrupt' }
+  expect((await api('control', { ...action, turnId: 'other' })).status).toBe(409)
+  expect(f.rpc.filter(call => call.method === 'turn/interrupt')).toHaveLength(0)
+  expect((await api('control', action)).status).toBe(200)
+  await draining
+  const next = collect(f.bindings.start('project-one', spec('successor')))
+  for (let attempt = 0; f.calls.length < 2 && attempt < 100; attempt++) await Bun.sleep(1)
+  expect((await api('control', action)).status).toBe(409)
+  expect(f.rpc.filter(call => call.method === 'turn/interrupt')).toEqual([{
+    client: f.rpc.find(call => call.method === 'turn/start')!.client, method: 'turn/interrupt',
+    params: { threadId: state.threadId, turnId: state.turnId }, epoch: state.epoch,
+  }])
+  f.finish(); await next
+})
+
+test.each(['file', 'question', 'uncertain-reply'] as const)('native %s uses a validated answer and never retries uncertain delivery', async mode => {
+  const f = fixture(), api = controlSurfaces(f)
+  f.hold(true)
+  const draining = collect(f.bindings.start('project-one', spec('question')))
+  for (let attempt = 0; f.calls.length < 1 && attempt < 100; attempt++) await Bun.sleep(1)
+  f.question(mode === 'question' ? 'item/tool/requestUserInput' : 'item/fileChange/requestApproval',
+    mode === 'question' ? { questions: [{ id: 'choice', question: 'Which option?' }] } : { reason: 'One file change' })
+  const state = await (await api('control')).json() as NativeOwnerControlState
+  const answer = mode === 'question' ? { answers: { choice: { answers: ['first'] } } } : { decision: 'decline' }
+  const action = { ...state, action: 'reply', requestId: 'approval', result: answer }
+  expect((await api('control', { ...action, result: { answers: { foreign: { answers: ['wrong'] } } } })).status).toBe(503)
+  expect(f.replies).toHaveLength(0)
+  if (mode === 'uncertain-reply') f.failReply()
+  expect((await api('control', action)).status).toBe(mode === 'uncertain-reply' ? 503 : 200)
+  expect(f.replies).toHaveLength(1)
+  expect((await api('control', action)).status).toBe(mode === 'uncertain-reply' ? 503 : 409)
+  expect(f.replies).toHaveLength(1)
+  if (mode !== 'uncertain-reply') f.finish()
+  const events = await draining
+  expect(events.some(event => event.kind === 'error')).toBe(mode === 'uncertain-reply')
 })

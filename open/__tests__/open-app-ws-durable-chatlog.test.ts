@@ -44,6 +44,7 @@ import { composeProductionGraph } from '@neutronai/gateway/composition.ts'
 import { buildOpenGraphComposer } from '../composer.ts'
 import * as ambientAuth from '../ambient-claude-auth.ts'
 import { CodexOwnerBindings } from '../wiring/codex-owner-binding.ts'
+import { CodexOwnerControls } from '../wiring/codex-owner-controls.ts'
 import { SqliteProjectSettingsStore } from '@neutronai/gateway/projects/sqlite-store.ts'
 import type { AgentSpec, Substrate } from '@neutronai/runtime/substrate.ts'
 import type { SessionHandle } from '@neutronai/runtime/session-handle.ts'
@@ -181,6 +182,39 @@ const framesOfType = (frames: Array<Record<string, unknown>>, type: string): Arr
   frames.filter((f) => f['type'] === type)
 
 describe('Open app-ws durable chat-log + typing (real instance)', () => {
+  test('composed native model and turn-control routes require owner scope and share the selected project binding', async () => {
+    const calls: unknown[][] = []
+    const identity = { projectId: 'native-project', threadId: 'native-thread', bindingRevision: 'revision', generation: 1, epoch: 2, turnId: 'turn' }
+    const model = spyOn(CodexOwnerControls.prototype, 'model').mockImplementation(async (...args) => {
+      calls.push(['model', ...args])
+      return { harness: 'codex', sessionId: 'conditional-native-state', currentModel: args[1]?.model ?? 'small', availableModels: [{ id: 'small', label: 'Small' }, { id: 'large', label: 'Large' }], status: 'ready' }
+    })
+    const read = spyOn(CodexOwnerControls.prototype, 'state').mockImplementation(async projectId => {
+      calls.push(['state', projectId]); return { ...identity, status: 'turn', pending: [] }
+    })
+    const act = spyOn(CodexOwnerControls.prototype, 'act').mockImplementation(async (...args) => {
+      calls.push(['act', ...args]); return { ...identity, status: 'idle', pending: [] }
+    })
+    try {
+      harness = await startHarness({ nativeProject: true })
+      const request = (path: string, body?: unknown, token = 'dev:owner') => fetch(`${harness!.base}/api/app/projects/${path}`, {
+        headers: { authorization: `Bearer ${token}`, 'content-type': 'application/json' },
+        ...(body === undefined ? {} : { method: 'POST', body: JSON.stringify(body) }),
+      })
+      expect((await request('native-project/repl-model', undefined, 'invalid')).status).toBe(401)
+      expect((await request('missing/repl-control')).status).toBe(404)
+      expect(calls).toHaveLength(0)
+      expect(await (await request('native-project/repl-model')).json()).toMatchObject({ currentModel: 'small' })
+      expect(await (await request('native-project/repl-model', { model: 'large', sessionId: 'conditional-native-state' })).json()).toMatchObject({ currentModel: 'large' })
+      expect((await request('native-project/repl-control')).status).toBe(200)
+      expect((await request('native-project/repl-control', { ...identity, action: 'interrupt' })).status).toBe(200)
+      expect(calls).toEqual([
+        ['model', 'native-project'], ['model', 'native-project', { model: 'large', sessionId: 'conditional-native-state' }],
+        ['state', 'native-project'], ['act', 'native-project', { ...identity, action: 'interrupt' }],
+      ])
+    } finally { model.mockRestore(); read.mockRestore(); act.mockRestore() }
+  }, 30_000)
+
   for (const nativeProject of [false, true]) test(`credential-less composed chat uses ${nativeProject ? 'the selected native project' : 'the honest Claude-null refusal'}`, async () => {
     delete process.env.ANTHROPIC_API_KEY
     delete process.env.OPENAI_API_KEY
@@ -189,7 +223,9 @@ describe('Open app-ws durable chat-log + typing (real instance)', () => {
     process.env.NEUTRON_MODEL_PROVIDER = 'anthropic'
     const ambient = spyOn(ambientAuth, 'detectAmbientClaudeAuthCached').mockReturnValue(false)
     const nativeCalls: Array<string | undefined> = []
-    const native = spyOn(CodexOwnerBindings.prototype, 'start').mockImplementation((projectId, spec) => {
+    let nativeOwner: CodexOwnerBindings | undefined
+    const native = spyOn(CodexOwnerBindings.prototype, 'start').mockImplementation(function (this: CodexOwnerBindings, projectId, spec) {
+      nativeOwner = this
       nativeCalls.push(projectId)
       return recordingSubstrate().start(spec)
     })
@@ -205,6 +241,13 @@ describe('Open app-ws durable chat-log + typing (real instance)', () => {
       if (nativeProject) {
         expect(reply).toContain(AGENT_REPLY_BODY)
         expect(nativeCalls).toEqual(['native-project'])
+        await nativeOwner!.onOwnerQuestion!('native-project', { requestId: 'native-approval', method: 'item/commandExecution/requestApproval',
+          params: { threadId: 'native-thread', turnId: 'native-turn', command: 'echo bounded', reason: 'Native owner needs a decision' } })
+        await waitFor(() => framesOfType(socket!.frames, 'agent_message').some(frame => String(frame.body).includes('Native owner needs a decision')))
+        const question = framesOfType(socket.frames, 'agent_message').find(frame => String(frame.body).includes('Native owner needs a decision'))!
+        expect(question.body).toContain('echo bounded')
+        expect(question.seq).toBeGreaterThan(0)
+        expect(question.project_id).toBe('native-project')
         mobile = await openSocket(harness.base, 'token=dev:owner&platform=ios&device_id=native-mobile')
         await waitFor(() => framesOfType(mobile!.frames, 'session_ready').length > 0)
         const response = await fetch(`${harness.base}/api/app/chat/send`, { method: 'POST',

@@ -8,6 +8,9 @@ import type { AgentSpec } from '@neutronai/runtime/substrate.ts'
 import type { SessionHandle } from '@neutronai/runtime/session-handle.ts'
 import type { WorkerRunner } from '@neutronai/runtime/bounded-work.ts'
 import { CODEX_CLI_AUTH_ENV_VARS } from '@neutronai/runtime/adapters/codex-cli/auth.ts'
+import { CodexOwnerControls, type NativeOwnerQuestion } from './codex-owner-controls.ts'
+import type { Event } from '@neutronai/runtime/events.ts'
+import { fireAndForget } from '@neutronai/logger/fire-and-forget.ts'
 
 export interface CodexOwnerProject {
   cwd: string
@@ -29,6 +32,29 @@ export class CodexOwnerBindings {
     input?: Parameters<ProjectActingTurn>[0]
   }>()
   private closed = false
+  private readonly ownerProjects = new WeakMap<CodexOwnerBootstrap, string>()
+  private readonly questionSinks = new Map<string, (question: NativeOwnerQuestion) => void>()
+  onOwnerQuestion?: (projectId: string, question: NativeOwnerQuestion) => Promise<void>
+  readonly controls = new CodexOwnerControls({
+    lookup: async projectId => {
+      const entry = await this.owners.get(projectId)
+      if (entry && JSON.parse(readFileSync(join(entry.project.codexHome, 'project-owner.json'), 'utf8')) !== projectId) {
+        throw new Error('Codex owner credential home belongs to another project')
+      }
+      return entry?.owner
+    },
+    facts: owner => {
+      const facts = this.readBinding(owner.binding)
+      const projectId = this.ownerProjects.get(owner)
+      if (!projectId || JSON.parse(readFileSync(join(facts.codexHome, 'project-owner.json'), 'utf8')) !== projectId) {
+        throw new Error('Codex owner credential home identity changed')
+      }
+      return facts
+    },
+    busy: projectId => this.busy.has(projectId) || !!this.builds.get(projectId)?.input || this.decodingBuilds.has(projectId),
+    refused: projectId => this.closed || this.refused.has(projectId),
+    fence: projectId => { this.refused.add(projectId) },
+  })
   readonly host: CodexConversationHost = {
     acquireTurn: async (options, signal) => {
       signal.throwIfAborted()
@@ -36,21 +62,19 @@ export class CodexOwnerBindings {
       signal.throwIfAborted()
       if (realpathSync(options.cwd) !== project.cwd) throw new Error('Codex owner project directory changed')
       if (this.refused.has(options.projectId)) throw new Error('Codex owner requires native reconciliation')
-      if (this.busy.has(options.projectId) || owner.broker.state().phase !== 'idle') throw new Error('Codex owner is busy or requires recovery')
+      if (this.busy.has(options.projectId) || this.controls.isSwitching(options.projectId) || owner.broker.state().phase !== 'idle') throw new Error('Codex owner is busy or requires recovery')
       const facts = this.readBinding(owner.binding)
       const gateway = owner.broker.gateway(`owner-turn-${++this.sequence}`)
       this.busy.add(options.projectId)
       let released = false
       let submitted = false
       let turnId: string | undefined
-      // Native questions must not disappear into an unobserved broker client.
-      // Until an owner approval surface exists, refuse the turn explicitly.
-      let approvalPending = false
-      const unsubscribe = gateway.subscribe(message => {
-        if (message.id !== undefined) approvalPending = true
+      const control = this.controls.register(options.projectId, owner, gateway, question => {
+        this.questionSinks.get(options.projectId)?.(question)
+        if (this.onOwnerQuestion) fireAndForget('codex-owner.question', Promise.resolve().then(() => this.onOwnerQuestion!(options.projectId, question)),
+          () => { this.refused.add(options.projectId) })
       })
       const current = (): boolean => {
-        if (approvalPending) throw new Error('Codex native approval requires an owner response surface; binding fenced')
         try {
           if (JSON.parse(readFileSync(join(project.codexHome, 'project-owner.json'), 'utf8')) !== options.projectId) return false
           const now = this.readBinding(owner.binding)
@@ -65,13 +89,18 @@ export class CodexOwnerBindings {
           signal.throwIfAborted()
           if (!current() || submitted) throw new Error('Codex owner lease is unavailable or already submitted')
           submitted = true
+          const epoch = owner.broker.state().epoch
+          const model = await this.controls.turnModel(owner, gateway)
+          signal.throwIfAborted()
+          if (!current() || owner.broker.state().epoch !== epoch) throw new Error('Codex native model selection changed before dispatch')
           const response = await gateway.request('turn/start', {
-            threadId: facts.threadId, input: [{ type: 'text', text: prompt }],
+            threadId: facts.threadId, model, input: [{ type: 'text', text: prompt }],
             cwd: project.cwd, approvalPolicy: 'on-request',
             sandboxPolicy: { type: 'workspaceWrite', writableRoots: [project.cwd], networkAccess: true },
-          }, owner.broker.state().epoch) as { turn?: { id?: unknown } }
+          }, epoch) as { turn?: { id?: unknown } }
           if (typeof response.turn?.id !== 'string' || !response.turn.id) throw new Error('Codex native turn receipt missing')
           turnId = response.turn.id
+          control.receipt(turnId)
           return { threadId: facts.threadId, turnId, rolloutPath: facts.rolloutPath, bindingRevision: facts.bindingRevision }
         },
         interrupt: async id => {
@@ -84,7 +113,7 @@ export class CodexOwnerBindings {
           if (released) return
           released = true
           if (outcome !== 'completed' || owner.broker.state().phase !== 'idle') this.refused.add(options.projectId)
-          unsubscribe(); gateway.close(); this.busy.delete(options.projectId)
+          control.close(); gateway.close(); this.busy.delete(options.projectId)
         },
       }
     },
@@ -122,6 +151,7 @@ export class CodexOwnerBindings {
           await owner.close()
           throw error
         }
+        this.ownerProjects.set(owner, projectId)
         return { owner, project }
       })()
       this.owners.set(projectId, pending)
@@ -170,7 +200,33 @@ export class CodexOwnerBindings {
           throw new Error('Codex owner build result is still pending')
         }
         inner = createCodexConversationalSubstrate({ projectId, cwd: project.cwd, env: project.env, host: bindings.host }).start(spec)
-        yield* inner.events
+        const pending: Event[] = []
+        let wake: (() => void) | undefined
+        const sink = (question: NativeOwnerQuestion): void => {
+          pending.push({ kind: 'tool_call', tool_name: 'codex_owner_question', call_id: String(question.requestId), args: question })
+          pending.push({ kind: 'status', message: 'Codex is waiting for your answer in this project’s native controls.' })
+          wake?.()
+        }
+        if (bindings.questionSinks.has(projectId)) throw new Error('Codex owner conversation is already active')
+        bindings.questionSinks.set(projectId, sink)
+        const iterator = inner.events[Symbol.asyncIterator]()
+        let next = iterator.next()
+        try {
+          while (true) {
+            while (pending.length) yield pending.shift()!
+            const changed = new Promise<'question'>(resolve => { wake = () => resolve('question') })
+            const result = await Promise.race([next, changed])
+            wake = undefined
+            if (result === 'question') continue
+            if (result.done) break
+            yield result.value
+            next = iterator.next()
+          }
+        } finally {
+          if (bindings.questionSinks.get(projectId) === sink) bindings.questionSinks.delete(projectId)
+          try { await inner.cancel() }
+          finally { await iterator.return?.() }
+        }
       } catch (error) {
         yield { kind: 'error' as const, message: error instanceof Error ? error.message : 'Codex owner unavailable', retryable: false }
       }
