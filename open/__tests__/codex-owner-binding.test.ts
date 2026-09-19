@@ -36,6 +36,7 @@ function fixture(remote = false) {
   let held = false
   let wrongModel = false
   let failReply = false
+  let interruptFault: 'lost' | 'wrong-turn' | 'child' | 'unsolicited' | undefined
   const homes = new Map<string, string>()
   let fail = false
   let authorized = true
@@ -95,7 +96,18 @@ function fixture(remote = false) {
             expect(params.threadId).toBe(identity.threadId)
             if (method === 'thread/read') { await modelGate; return { thread: { ...identity, id: identity.threadId, model } } }
             if (method === 'thread/settings/update') { epoch++; if (!wrongModel) model = params.model as string; return {} }
-            if (method === 'turn/interrupt') { finish(); return {} }
+            if (method === 'turn/interrupt') {
+              if (interruptFault === 'child') appendFileSync(identity.rolloutPath, line('event_msg', {
+                type: 'item_completed', thread_id: identity.threadId, turn_id: `turn-${count}`,
+                item: { type: 'SubAgentActivity', kind: 'started', agent_thread_id: 'child', agent_path: '/root/child' },
+              }))
+              appendFileSync(identity.rolloutPath, line('event_msg', { type: 'turn_aborted',
+                turn_id: interruptFault === 'wrong-turn' ? 'foreign-turn' : `turn-${count}`, reason: 'interrupted' }))
+              if (remote) completedRemotely = true
+              else phase = 'idle'
+              if (interruptFault === 'lost') throw new Error('Interrupt acknowledgement lost')
+              return {}
+            }
             expect(method).toBe('turn/start')
             const prompt = (params.input as { text: string }[])[0]!.text
             calls.push({ project, thread: params.threadId as string, prompt })
@@ -152,6 +164,13 @@ function fixture(remote = false) {
     question: (method: string, params: Record<string, unknown>, project = 'project-one') => emitters.get(project)!(method, params),
     wrongModel: () => { wrongModel = true },
     failReply: () => { failReply = true },
+    interruptFault: (value: typeof interruptFault) => { interruptFault = value },
+    abortNative: () => {
+      const owner = owners.get(homes.get('project-one')!)!, identity = facts.get(owner.binding)!
+      return owner.broker.gateway('terminal-native').request('turn/interrupt', {
+        threadId: identity.threadId, turnId: owner.broker.state().activeTurnId,
+      }, owner.broker.state().epoch)
+    },
     fail: () => { fail = true }, recoverOpening: () => { fail = false }, wrongReceipt: () => { wrongReceipt = true }, foreignApproval: () => { approval = true },
     noCapability: () => { capability = false },
     onPrompt: (fn: (prompt: string) => void) => { onPrompt = fn } }
@@ -873,8 +892,9 @@ test.each(['accept', 'decline'] as const)('native %s approval is authenticated, 
   expect((await collect(f.bindings.start('project-one', spec('next')))).at(-1)?.kind).toBe('completion')
 })
 
-test('native interrupt routes through the original writer and a stale turn cannot interrupt its successor', async () => {
-  const f = fixture(), api = controlSurfaces(f)
+test.each([false, true])('native interrupt preserves successor chat and model controls (remote %s)', async remote => {
+  const f = fixture(remote), api = controlSurfaces(f)
+  if (remote) f.delayTerminalState(2)
   f.hold(true)
   const draining = collect(f.bindings.start('project-one', spec('hold')))
   for (let attempt = 0; f.calls.length < 1 && attempt < 100; attempt++) await Bun.sleep(1)
@@ -883,7 +903,11 @@ test('native interrupt routes through the original writer and a stale turn canno
   expect((await api('control', { ...action, turnId: 'other' })).status).toBe(409)
   expect(f.rpc.filter(call => call.method === 'turn/interrupt')).toHaveLength(0)
   expect((await api('control', action)).status).toBe(200)
-  await draining
+  const interrupted = await draining
+  expect(interrupted.at(-1)).toMatchObject({ kind: 'error', code: 'aborted' })
+  expect(interrupted.some(event => event.kind === 'completion')).toBe(false)
+  expect((await api('model')).status).toBe(200)
+  expect(existsSync(join(f.homes.get('project-one')!, '.neutron-owner-work.json'))).toBe(false)
   const next = collect(f.bindings.start('project-one', spec('successor')))
   for (let attempt = 0; f.calls.length < 2 && attempt < 100; attempt++) await Bun.sleep(1)
   expect((await api('control', action)).status).toBe(409)
@@ -891,7 +915,27 @@ test('native interrupt routes through the original writer and a stale turn canno
     client: f.rpc.find(call => call.method === 'turn/start')!.client, method: 'turn/interrupt',
     params: { threadId: state.threadId, turnId: state.turnId }, epoch: state.epoch,
   }])
-  f.finish(); await next
+  f.finish(); expect((await next).at(-1)).toMatchObject({ kind: 'completion', session: { id: state.threadId } })
+  expect(f.launched).toEqual(['project-one'])
+})
+
+test.each(['lost', 'wrong-turn', 'child', 'unsolicited'] as const)('native abort retains uncertainty fence: %s', async fault => {
+  const f = fixture(true), api = controlSurfaces(f)
+  f.hold(true); f.interruptFault(fault)
+  const draining = collect(f.bindings.start('project-one', spec('hold')))
+  for (let attempt = 0; f.calls.length < 1 && attempt < 100; attempt++) await Bun.sleep(1)
+  const state = await (await api('control')).json() as NativeOwnerControlState
+  if (fault === 'unsolicited') await f.abortNative()
+  else expect((await api('control', { ...state, action: 'interrupt' })).status).toBe(fault === 'lost' ? 503 : 200)
+  expect((await draining).some(event => event.kind === 'completion')).toBe(false)
+  expect((await api('model')).status).toBe(503)
+  expect(existsSync(join(f.homes.get('project-one')!, '.neutron-owner-work.json'))).toBe(true)
+  f.hold(false)
+  expect((await collect(f.bindings.start('project-one', spec('successor')))).at(-1)?.kind).toBe('error')
+  expect(f.calls).toHaveLength(1)
+  const restarted = f.restart()
+  expect((await collect(restarted.start('project-one', spec('restart successor')))).at(-1)?.kind).toBe('error')
+  await restarted.close()
 })
 
 test.each(['file', 'question', 'uncertain-reply'] as const)('native %s uses a validated answer and never retries uncertain delivery', async mode => {

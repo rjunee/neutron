@@ -169,17 +169,22 @@ export class CodexOwnerBindings {
           if (released) return
           released = true
           try {
+            // Only an acknowledged owner control may make a correlated native
+            // abort reusable. Build cancellation never proves child settlement.
+            const settled = outcome === 'completed' || outcome === 'interrupted'
+              && !this.builds.get(options.projectId)?.input && !this.decodingBuilds.has(options.projectId)
+              && await control.interrupted()
             await refreshOwner(owner)
-            // Rollout task_complete can precede the broker's native turn/completed
+            // Rollout terminal records can precede the broker's native turn/completed
             // event. Reconcile only this exact finished turn, without a write or
             // replay; idle from a single prematurely sampled RPC is not guaranteed.
             const deadline = Date.now() + 2_000
-            while (outcome === 'completed' && turnId && owner.broker.state().phase === 'turn'
+            while (settled && turnId && owner.broker.state().phase === 'turn'
               && owner.broker.state().activeTurnId === turnId && Date.now() < deadline) {
               await Bun.sleep(25)
               await refreshOwner(owner)
             }
-            if (deliveryAttempted && (outcome !== 'completed' || !this.reviews.has(options.projectId) && owner.broker.state().phase !== 'idle')) this.fence(options.projectId)
+            if (deliveryAttempted && (!settled || !this.reviews.has(options.projectId) && owner.broker.state().phase !== 'idle')) this.fence(options.projectId)
           } catch (error) { if (deliveryAttempted) this.fence(options.projectId); throw error }
           finally { control.close(); gateway.close(); this.busy.delete(options.projectId) }
           if (!deliveryAttempted && !this.refused.has(options.projectId) && owner.broker.state().phase === 'idle') {

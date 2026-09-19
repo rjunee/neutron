@@ -4,14 +4,17 @@ import type { Substrate } from '../../../substrate.ts'
 import type { OpenCodexProjectSessionOptions } from './project-session.ts'
 import { CodexRolloutObserver, type CodexRolloutIdentity, type CodexTurnReceipt } from './rollout-observer.ts'
 
-/** Shared with build and model control; release(refused) must quarantine reuse. */
+/** Shared with build and model control; release(refused) must quarantine reuse.
+ * An interrupted rollout is not completion: the host must independently prove
+ * an acknowledged owner interrupt and settled native work before allowing reuse.
+ */
 export interface CodexConversationLease {
   readonly identity: CodexRolloutIdentity
   submitLine(prompt: string): Promise<void | CodexTurnReceipt>
   /** Must interrupt only this native turn, never a successor or the whole pane. */
   interrupt(turnId: string): Promise<void>
   isLive(): boolean
-  release(outcome: 'completed' | 'refused'): Promise<void>
+  release(outcome: 'completed' | 'interrupted' | 'refused'): Promise<void>
 }
 
 export interface CodexConversationHost {
@@ -55,6 +58,7 @@ export function createCodexConversationalSubstrate(options: CodexConversationalS
       let lease: CodexConversationLease | undefined
       let observer: CodexRolloutObserver | undefined
       let succeeded = false
+      let interrupted = false
       let interrupt: Promise<void> | undefined
       let timedOut = false
       let timer: ReturnType<typeof setTimeout> | undefined
@@ -107,8 +111,9 @@ export function createCodexConversationalSubstrate(options: CodexConversationalS
             if (!lease.isLive()) throw new Error('codex conversation refused: pane exited before completion')
             const batch = observer.read()
             if (observer.completed) { succeeded = true; clearTimeout(timer) }
+            if (observer.interrupted) { interrupted = true; clearTimeout(timer) }
             for (const event of batch) yield event
-            if (succeeded) return
+            if (succeeded || interrupted) return
             await new Promise<void>((resolve) => {
               const done = (): void => { clearTimeout(timer); abort.signal.removeEventListener('abort', done); resolve() }
               const timer = setTimeout(done, pollMs)
@@ -122,15 +127,15 @@ export function createCodexConversationalSubstrate(options: CodexConversationalS
               : abort.signal.aborted ? { code: 'aborted' as const } : {}) }
         } finally {
           clearTimeout(timer)
-          if (lease !== undefined && !succeeded) {
+          if (lease !== undefined && !succeeded && !interrupted) {
             const refused = refusedProjects.get(options.host) ?? new Set<string>()
             refused.add(options.projectId)
             refusedProjects.set(options.host, refused)
           }
-          try { if (!succeeded) await cancel() }
+          try { if (!succeeded && !interrupted) await cancel() }
           finally {
             observer?.close()
-            await lease?.release(succeeded ? 'completed' : 'refused')
+            await lease?.release(succeeded ? 'completed' : interrupted ? 'interrupted' : 'refused')
           }
         }
       })()

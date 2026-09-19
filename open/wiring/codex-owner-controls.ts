@@ -26,6 +26,7 @@ interface ActiveTurn {
   pending: Map<RequestId, NativeOwnerQuestion>
   seen: Set<RequestId>
   interrupted?: boolean
+  interruptAcknowledgement?: Promise<void>
   clientId?: string | undefined
 }
 
@@ -154,6 +155,11 @@ export class CodexOwnerControls {
         active.turnId = turnId
         if ([...active.pending.values()].some(question => question.params.turnId !== turnId)) this.deps.fence(projectId)
       },
+      interrupted: async () => {
+        if (!active.interruptAcknowledgement) return false
+        try { await active.interruptAcknowledgement; return true }
+        catch { return false }
+      },
       close: () => { unsubscribe(); if (this.active.get(projectId) === active) this.active.delete(projectId) },
     }
   }
@@ -175,7 +181,10 @@ export class CodexOwnerControls {
     if (action.action === 'interrupt') {
       if (active.interrupted) throw new ReplModelError('session-changed', 'Native interruption was already requested.')
       active.interrupted = true
-      try { await active.gateway.request('turn/interrupt', { threadId: action.threadId, turnId: action.turnId }, action.epoch) }
+      try {
+        active.interruptAcknowledgement = active.gateway.request('turn/interrupt', { threadId: action.threadId, turnId: action.turnId }, action.epoch).then(() => {})
+        await active.interruptAcknowledgement
+      }
       catch (error) { this.deps.fence(projectId); throw error }
     } else {
       const question = active.pending.get(action.requestId)

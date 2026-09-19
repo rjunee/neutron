@@ -58,6 +58,7 @@ export class CodexRolloutObserver {
   private activeTurn: string | undefined
   private echoed = false
   private terminal = false
+  private aborted = false
   private closed = false
   private usage: TokenUsage = { input_tokens: 0, output_tokens: 0 }
   private device: number | undefined
@@ -128,7 +129,8 @@ export class CodexRolloutObserver {
 
   /** Cancellation is safe only after the exact submitted prompt is attested. */
   get turnId(): string | undefined { return this.echoed ? this.activeTurn : undefined }
-  get completed(): boolean { return this.terminal }
+  get completed(): boolean { return this.terminal && !this.aborted }
+  get interrupted(): boolean { return this.terminal && this.aborted }
 
   read(): Event[] {
     if (this.closed) throw new Error('codex rollout refused: observer closed')
@@ -288,7 +290,15 @@ export class CodexRolloutObserver {
           throw new Error('codex rollout refused: completion does not match native turn')
         }
         if (baseline) { this.activeTurn = undefined; return [] }
-        if (payload.type === 'turn_aborted') throw new Error('codex rollout refused: native turn aborted')
+        if (payload.type === 'turn_aborted') {
+          if (!this.echoed || !this.expectedTurn || this.pendingChildren.size !== 0) {
+            throw new Error('codex rollout refused: native abort lacks settled correlated turn')
+          }
+          this.terminal = true
+          this.aborted = true
+          this.activeTurn = undefined
+          return [{ kind: 'error', code: 'aborted', retryable: false, message: 'Codex native turn interrupted' }]
+        }
         if (!this.echoed || typeof payload.last_agent_message !== 'string') {
           throw new Error('codex rollout refused: completion lacks correlated reply')
         }
