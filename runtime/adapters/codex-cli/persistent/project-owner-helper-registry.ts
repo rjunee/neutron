@@ -22,7 +22,6 @@ export class OwnerHelperRegistry {
   async handle(raw: Rpc, signal: AbortSignal): Promise<Rpc> {
     this.assertOwner()
     if (!this.frontendGrant || raw.grant !== this.frontendGrant) throw new Error('Stale owner frontend grant')
-    this.review.acknowledge(raw)
     if (typeof raw.operation === 'string' && raw.operation.startsWith('review')) {
       const result = await this.review.handle(raw)
       this.assertOwner()

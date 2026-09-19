@@ -1,5 +1,6 @@
 import { randomBytes } from 'node:crypto'
 import { isDeepStrictEqual } from 'node:util'
+import { fireAndForget } from '@neutronai/logger/fire-and-forget.ts'
 import type { CodexOwnerBindingFacts } from './project-control-bootstrap.ts'
 import type { ProjectControlBroker, ProjectControlGateway, ProjectControlState } from './project-control-broker.ts'
 import { BROKER_MAX_MESSAGE_BYTES } from './project-control-broker-transport.ts'
@@ -32,7 +33,6 @@ export async function connectCodexOwnerHelper(options: { descriptorPath: string;
   let state: ProjectControlState
   let grant: string
   let observation = 0
-  let restoredReview: string | undefined
   type Writer = { listeners: Set<(message: Rpc) => void>; approvals: Map<string | number, Rpc>; ready: Promise<void>; writerGrant: string; cursor: number; detached: boolean }
   const writers = new Map<string, Writer>()
   const close = (error = new Error('Owner frontend detached')) => { closed ??= error; abort.abort(); for (const writer of writers.values()) writer.listeners.clear() }
@@ -42,7 +42,7 @@ export async function connectCodexOwnerHelper(options: { descriptorPath: string;
   }
   const call = async (body: Rpc): Promise<Rpc> => {
     assertCurrent()
-    const json = JSON.stringify({ ...body, ...(restoredReview ? { restoredReview } : {}) })
+    const json = JSON.stringify(body)
     if (Buffer.byteLength(json) > BROKER_MAX_MESSAGE_BYTES) throw new Error('Oversized helper request')
     let response: Response
     try {
@@ -73,7 +73,7 @@ export async function connectCodexOwnerHelper(options: { descriptorPath: string;
     catch (error) { close(error as Error); throw error }
   }
   const watchState = async () => { while (!closed) { await Bun.sleep(100); if (!closed) await refreshState() } }
-  void watchState().catch(error => close(error as Error))
+  fireAndForget('codex-cli.owner-helper.watch-state', watchState(), error => close(error as Error))
   const writerCall = (clientId: string, writer: Writer, body: Rpc) => call({ ...body, grant, clientId, writerGrant: writer.writerGrant })
   const poll = async (clientId: string, writer: Writer) => {
     while (!closed && !writer.detached) {
@@ -103,7 +103,7 @@ export async function connectCodexOwnerHelper(options: { descriptorPath: string;
     const ready = await reviewCall({ operation: 'reviewPrepare', grant, stageDir: request.stageDir, network: request.network, epoch: expectedEpoch })
     if (typeof ready.lease !== 'string' || !/^[a-f0-9]{64}$/.test(ready.lease)) { close(new Error('Invalid private review lease')); throw closed }
     const lease = ready.lease
-    let phase: 'ready' | 'started' | 'restoring' | 'restored' | 'abandoned' = 'ready'
+    let phase: 'ready' | 'started' | 'restoring' | 'restored' | 'releasing' | 'released' | 'abandoned' = 'ready'
     return {
       async start(input) {
         assertCurrent()
@@ -119,19 +119,25 @@ export async function connectCodexOwnerHelper(options: { descriptorPath: string;
         phase = 'restoring'
         const restored = await reviewCall({ operation: 'reviewRestore', grant, lease })
         if (restored.restored !== true) { close(new Error('Unverified review restoration')); throw closed }
+        phase = 'restored'
+      },
+      async release() {
+        assertCurrent()
+        if (phase !== 'restored') throw new Error('Review release unavailable')
+        phase = 'releasing'
         const acknowledged = await reviewCall({ operation: 'reviewAcknowledge', grant, lease })
         if (acknowledged.acknowledged !== true) { close(new Error('Unverified review acknowledgement')); throw closed }
-        restoredReview = lease
-        phase = 'restored'
-        // Prove receipt now, without waiting for an unrelated owner request.
-        await refreshState()
+        // This request proves receipt before releasing the native writer lock.
+        const released = await reviewCall({ operation: 'reviewRelease', grant, lease })
+        if (released.released !== true) { close(new Error('Unverified review release')); throw closed }
+        phase = 'released'
       },
       abandon() {
-        if (phase === 'restored' || phase === 'abandoned') return
+        if (phase === 'released' || phase === 'abandoned') return
         phase = 'abandoned'
         // Start the one best-effort notice before fencing this proxy synchronously.
         // Do not abort that notice: an absent response still retains the helper lease.
-        if (!closed) void call({ operation: 'reviewAbandon', grant, lease }).catch(() => {})
+        if (!closed) fireAndForget('codex-cli.owner-helper.review-abandon', call({ operation: 'reviewAbandon', grant, lease }))
         closed ??= new Error('Owner review abandoned; reconciliation required')
         for (const writer of writers.values()) writer.listeners.clear()
       },
@@ -154,9 +160,9 @@ export async function connectCodexOwnerHelper(options: { descriptorPath: string;
           writer.approvals.set(message.id, message)
         }
         for (const listener of writer.listeners) for (const approval of writer.approvals.values()) listener(approval)
-        void poll(clientId, writer).catch(error => { if (!writer.detached) close(error as Error) })
+        fireAndForget('codex-cli.owner-helper.poll', poll(clientId, writer), error => { if (!writer.detached) close(error as Error) })
       })()
-      void writer.ready.catch(error => close(error as Error))
+      fireAndForget('codex-cli.owner-helper.writer-ready', writer.ready, error => close(error as Error))
       const current = () => { assertCurrent(); if (writer.detached) throw new Error('Gateway frontend closed') }
       return {
         async request(method, params, expectedEpoch) {
@@ -172,9 +178,9 @@ export async function connectCodexOwnerHelper(options: { descriptorPath: string;
         close() {
           if (writer.detached) return
           writer.detached = true; writer.listeners.clear()
-          void writer.ready.then(() => writerCall(clientId, writer, { operation: 'closeWriter' })).then(() => {
+          fireAndForget('codex-cli.owner-helper.close-writer', writer.ready.then(() => writerCall(clientId, writer, { operation: 'closeWriter' })).then(() => {
             if (writers.get(clientId) === writer) writers.delete(clientId)
-          }).catch(error => { if (!closed) close(error as Error) })
+          }), error => { if (!closed) close(error as Error) })
         },
       }
     },

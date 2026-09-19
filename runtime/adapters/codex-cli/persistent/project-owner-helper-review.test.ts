@@ -54,15 +54,20 @@ async function fixture(options: { drop?: string; badRestore?: boolean } = {}) {
   const server = Bun.serve({ unix: socketPath, async fetch(request) {
     if (request.method !== 'POST' || new URL(request.url).pathname !== '/owner' || request.headers.has('origin')
       || request.headers.get('authorization') !== `Bearer ${token}`) return new Response('Refused', { status: 403 })
+    let operation: unknown
     try {
       assertOwner()
       const raw = await request.json() as Rpc
+      operation = raw.operation
       wire.push(raw)
       const result = raw.operation === 'attach' ? { facts, helper, challenge: raw.challenge, ...registry.attach() }
         : await registry.handle(raw, request.signal)
       if (raw.operation === options.drop) return new Response('{"lost":')
       return Response.json({ ...result, state: broker.state(), observation: ++observation })
-    } catch (error) { return Response.json({ error: (error as Error).message }, { status: 409 }) }
+    } catch (error) {
+      if (options.drop !== undefined && operation === options.drop) return new Response('{"lost":')
+      return Response.json({ error: (error as Error).message }, { status: 409 })
+    }
   } })
   cleanup.push(() => server.stop(true))
   chmodSync(socketPath, 0o600)
@@ -87,17 +92,20 @@ test('private helper transport prepares exact permissions, restores native readb
   await expect(lease.start([])).rejects.toThrow('unavailable')
   expect(f.sent.filter(message => message.method === 'turn/start')).toHaveLength(1)
   f.settle(); await lease.restore()
+  const nativeTui = f.broker.gateway('native-before-release')
+  await expect(nativeTui.request('turn/start', { threadId: 'owner', input: [] }, f.broker.state().epoch)).rejects.toThrow('review')
+  await lease.release()
   expect(f.profiles).toEqual({})
   const writer = connection.broker.gateway('next-owner')
   expect(await writer.request('turn/start', { threadId: 'owner', input: [] }, connection.broker.state().epoch)).toEqual({ turn: { id: 'next-owner-turn' } })
   expect(f.wire.filter(message => String(message.operation).startsWith('review')).map(message => message.operation))
-    .toEqual(['reviewPrepare', 'reviewStart', 'reviewRestore', 'reviewAcknowledge'])
+    .toEqual(['reviewPrepare', 'reviewStart', 'reviewRestore', 'reviewAcknowledge', 'reviewRelease'])
 })
 
 test('a restored helper supports a second review without treating a previous acknowledgement as a new lease', async () => {
   const f = await fixture(), connection = await f.connect()
   const first = await connection.reviewPrepare({ stageDir: f.stageDir, network: false }, connection.broker.state().epoch)
-  await first.start([]); f.settle(); await first.restore()
+  await first.start([]); f.settle(); await first.restore(); await first.release()
   const second = await connection.reviewPrepare({ stageDir: f.stageDir, network: true }, connection.broker.state().epoch)
   expect(Object.values(f.profiles)).toEqual([{ filesystem: { ':root': 'read', [f.stageDir]: 'write' }, network: { enabled: true } }])
   expect(await second.start([])).toEqual({ turnId: 'next-owner-turn' })
@@ -116,6 +124,8 @@ test('stale frontend grant, foreign lease, stale epoch and caller policy fields 
   const ready = await f.registry.handle(prepare, signal)
   expect(ready.lease).toMatch(/^[a-f0-9]{64}$/)
   expect(() => f.registry.attach()).toThrow('reconciliation')
+  await expect(f.registry.handle({ operation: 'reviewRelease', grant, lease: ready.lease }, signal)).rejects.toThrow('unavailable')
+  await expect(f.registry.handle({ operation: 'reviewAcknowledge', grant, lease: ready.lease }, signal)).rejects.toThrow('unavailable')
   await expect(f.registry.handle({ operation: 'reviewStart', grant, lease: 'forged', input: [] }, signal)).rejects.toThrow('Foreign')
   await expect(f.registry.handle({ operation: 'reviewStart', grant, lease: ready.lease, input: [], sandboxPolicy: {} }, signal)).rejects.toThrow('field')
   expect(f.sent.some(message => message.method === 'turn/start')).toBe(false)
@@ -127,7 +137,7 @@ test('stale frontend grant, foreign lease, stale epoch and caller policy fields 
 test('owner RPC cannot forge private review methods, with an ordinary native read as positive control', async () => {
   const f = await fixture(), connection = await f.connect(), writer = connection.broker.gateway('owner-rpc')
   expect(await writer.request('thread/read', { threadId: 'owner' })).toEqual({})
-  for (const method of ['reviewPrepare', 'reviewStart', 'reviewRestore', 'reviewAbandon', 'reviewAcknowledge', 'review/prepare']) {
+  for (const method of ['reviewPrepare', 'reviewStart', 'reviewRestore', 'reviewAbandon', 'reviewAcknowledge', 'reviewRelease', 'review/prepare']) {
     await expect(writer.request(method, { threadId: 'owner', stageDir: f.stageDir, network: false, input: [] }, connection.broker.state().epoch)).rejects.toThrow('Unclassified')
   }
   expect(f.sent.some(message => message.method === 'thread/read')).toBe(true)
@@ -138,7 +148,7 @@ for (const drop of ['reviewPrepare', 'reviewStart', 'reviewRestore', 'reviewAckn
   const f = await fixture({ drop }), connection = await f.connect()
   const operation = async () => {
     const lease = await connection.reviewPrepare({ stageDir: f.stageDir, network: false }, connection.broker.state().epoch)
-    await lease.start([]); f.settle(); await lease.restore()
+    await lease.start([]); f.settle(); await lease.restore(); await lease.release()
   }
   await expect(operation()).rejects.toThrow('outcome may be unknown')
   expect(connection.broker.state().phase).toBe('closed')
@@ -147,6 +157,8 @@ for (const drop of ['reviewPrepare', 'reviewStart', 'reviewRestore', 'reviewAckn
   const grant = f.wire.find(message => message.operation === 'reviewPrepare')!.grant
   await expect(f.registry.handle({ operation: 'request', grant, clientId: 'forged', method: 'turn/start', params: { threadId: 'owner', input: [] } }, AbortSignal.abort()))
     .rejects.toThrow('exclusive')
+  const nativeTui = f.broker.gateway('direct-native-tui')
+  await expect(nativeTui.request('turn/start', { threadId: 'owner', input: [] }, f.broker.state().epoch)).rejects.toThrow('review')
   expect(f.wire.filter(message => message.operation === drop)).toHaveLength(1)
 })
 
@@ -159,6 +171,17 @@ for (const wrongChild of [false, true]) test(`${wrongChild ? 'wrong child' : 'pa
   await expect(lease.restore()).rejects.toThrow('reconciliation')
   expect(f.sent.some(message => message.method === 'thread/settings/update')).toBe(false)
   expect(connection.broker.state().phase).toBe('closed')
+})
+
+test('lost final release response fences the old proxy after the helper has proven acknowledgement delivery', async () => {
+  const f = await fixture({ drop: 'reviewRelease' }), connection = await f.connect()
+  const lease = await connection.reviewPrepare({ stageDir: f.stageDir, network: false }, connection.broker.state().epoch)
+  await lease.start([]); f.settle(); await lease.restore()
+  await expect(lease.release()).rejects.toThrow('outcome may be unknown')
+  expect(connection.broker.state().phase).toBe('closed')
+  expect(() => connection.broker.gateway('stale-after-receipt')).toThrow('outcome may be unknown')
+  const replacement = await f.connect(), writer = replacement.broker.gateway('replacement-after-receipt')
+  expect(await writer.request('turn/start', { threadId: 'owner', input: [] }, replacement.broker.state().epoch)).toEqual({ turn: { id: 'next-owner-turn' } })
 })
 
 test('restore readback mismatch and replaced native binding cannot return writable helper authority', async () => {
@@ -183,4 +206,7 @@ test('abandon synchronously fences the proxy even when its helper response is lo
   await expect(lease.start([])).rejects.toThrow('abandoned')
   expect(() => f.registry.attach()).toThrow('reconciliation')
   expect(f.sent.some(message => message.method === 'turn/start')).toBe(false)
+  for (let attempt = 0; attempt < 20 && !f.wire.some(message => message.operation === 'reviewAbandon'); attempt++) await Bun.sleep(5)
+  expect(f.wire.filter(message => message.operation === 'reviewAbandon')).toHaveLength(1)
+  expect(f.broker.state().phase).toBe('closed')
 })
