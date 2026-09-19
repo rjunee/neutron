@@ -72,6 +72,16 @@ async function observeSubagents(directory: string, description: string): Promise
 type DispatchConsumption = 'consumed' | 'not-consumed' | 'unreadable'
 type TranscriptBoundary = { offset: number; identity?: { dev: number; ino: number } } | undefined
 
+/** Claude wraps a pasted terminal submission as one whole text message. Match
+ * only that exact envelope and payload; quoted or embedded dispatches are not
+ * evidence that this submission was consumed. */
+function isDispatchText(value: unknown, dispatch: string): boolean {
+  if (value === dispatch) return true
+  if (typeof value !== 'string') return false
+  const pasted = /^\s*<pasted_content id="([A-Za-z0-9_-]+)">\n([\s\S]*)\n<\/pasted_content id="\1">\s*$/.exec(value)
+  return pasted?.[2] === dispatch
+}
+
 /** Capture under the turn lock, before Enter. Missing files can start at zero;
  * other failures cannot establish a boundary. */
 async function transcriptBoundary(transcript: string): Promise<TranscriptBoundary> {
@@ -83,7 +93,7 @@ async function transcriptBoundary(transcript: string): Promise<TranscriptBoundar
   }
 }
 
-/** One read at expiry, never per poll. Persistent history is not evidence of
+/** One read at the launch probe deadline, never per poll. History is not evidence of
  * this submission. Replacement or truncation invalidates the captured boundary. */
 async function dispatchConsumption(transcript: string, dispatch: string, boundary: TranscriptBoundary, signal: AbortSignal, remainingMs: number): Promise<DispatchConsumption> {
   if (!boundary) return 'unreadable'
@@ -115,9 +125,9 @@ async function dispatchConsumption(transcript: string, dispatch: string, boundar
         const record = JSON.parse(line) as { type?: unknown; message?: { content?: unknown } }
         if (record.type !== 'user') continue
         const content = record.message?.content
-        if (content === dispatch) return 'consumed'
+        if (isDispatchText(content, dispatch)) return 'consumed'
         if (Array.isArray(content) && content.some(block => block !== null && typeof block === 'object'
-          && block.type === 'text' && block.text === dispatch)) return 'consumed'
+          && block.type === 'text' && isDispatchText(block.text, dispatch))) return 'consumed'
       } catch { /* Partial and unrelated records do not prove consumption. */ }
     }
     return 'not-consumed'
@@ -213,11 +223,18 @@ export function createClaudeActingTurn(binding: ClaudeActingSession, clock: Obse
           if (!accepted && clock.now() >= dispatchDeadline) {
             readingConsumption = true
             const consumption = await dispatchConsumption(transcript, dispatch, boundary, stopped, deadline - clock.now())
-            const detail = consumption === 'consumed'
-              ? 'The REPL consumed the dispatch, but no worker was observed within its budget.'
-              : consumption === 'not-consumed'
-                ? 'The dispatch line was never consumed by the REPL within its budget.'
-                : 'The session transcript could not be read across the dispatch boundary; REPL consumption is unknown.'
+            readingConsumption = false
+            // Consumption proves ownership of this request, not completion.
+            // Compaction can delay Agent creation beyond the launch probe. Keep
+            // observing the same slot and trailer under the original wall budget.
+            if (consumption === 'consumed') {
+              if (expired()) return unknown()
+              accepted = true
+              continue
+            }
+            const detail = consumption === 'not-consumed'
+              ? 'The dispatch line was never consumed by the REPL within its budget.'
+              : 'The session transcript could not be read across the dispatch boundary; REPL consumption is unknown.'
             const where = seen.directory === 'readable'
               ? `directory exists with ${seen.metaFiles} agent metadata file(s), none naming this step`
               : seen.directory === 'absent'

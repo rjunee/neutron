@@ -501,16 +501,62 @@ for (const scenario of ['string', 'blocks', 'historical only', 'decoys', 'missin
     try {
       const result = await createClaudeActingTurn(f.binding, { now: () => now, pause: async ms => { now += ms } })(f.input)
       const expected = ['string', 'blocks', 'created after boundary'].includes(scenario)
-        ? 'The REPL consumed the dispatch, but no worker was observed'
+        ? 'Claude trailer not observed before cancellation or host budget expiry.'
         : ['historical only', 'decoys'].includes(scenario)
           ? 'The dispatch line was never consumed by the REPL'
           : 'The session transcript could not be read across the dispatch boundary'
       expect(result).toEqual({ kind: 'unknown', detail: expect.stringContaining(expected) })
       expect(reads).toEqual(['bad boundary', 'stat failure'].includes(scenario) ? [] : [DISPATCH_TIMEOUT_MS])
-      expect(now).toBe(DISPATCH_TIMEOUT_MS)
+      expect(now).toBe(['string', 'blocks', 'created after boundary'].includes(scenario) ? 90_000 : DISPATCH_TIMEOUT_MS)
       expect(f.commands).toHaveLength(1)
       expect(f.released()).toBe(1)
     } finally { opened.mockRestore(); statProbe.mockRestore() }
+  })
+}
+
+for (const scenario of ['raw', 'pasted', 'pasted blocks', 'wrong id', 'embedded', 'wrong payload', 'cancelled', 'budget', 'wrong trailer'] as const) {
+  test(`consumed dispatch survives compaction without replay: ${scenario}`, async () => {
+    const f = await fixture()
+    f.binding.projects_dir = join(f.dir, 'projects')
+    const transcript = sessionJsonlPath('session', f.dir, f.binding.projects_dir)
+    await mkdir(join(transcript, '..'), { recursive: true })
+    let now = 0
+    const controller = new AbortController()
+    f.input.signal = controller.signal
+    f.input.request = { ...f.input.request, budget: { wall_ms: 180_000 } }
+    f.binding.session.child.submitLine = async text => {
+      f.commands.push(text)
+      const pasted = `\n\n<pasted_content id="fixture">\n${text}\n</pasted_content id="fixture">\n\n`
+      const content = scenario === 'raw' ? text
+        : scenario === 'pasted blocks' ? [{ type: 'text', text: pasted }]
+        : scenario === 'wrong id' ? pasted.replace('</pasted_content id="fixture">', '</pasted_content id="other">')
+        : scenario === 'embedded' ? 'quoted instruction: ' + pasted
+        : scenario === 'wrong payload' ? pasted.replace(text, text + ' changed') : pasted
+      await appendFile(transcript, JSON.stringify({ type: 'user', message: { content } }) + '\n')
+    }
+    const actingTurn = createClaudeActingTurn(f.binding, { now: () => now, pause: async ms => {
+      now += ms
+      if (scenario === 'cancelled' && now === 60_000) controller.abort()
+      if (now === 120_000 && !['cancelled', 'budget'].includes(scenario)) {
+        await writeFile(f.input.request.result.path, JSON.stringify({ run_id: 'run',
+          step_id: scenario === 'wrong trailer' ? 'other-step' : 'step', schema: 'v1',
+          kind: 'completed', result: { verdict: 'APPROVE' } }))
+      }
+    } })
+    const runners = await createProjectRunners({ conversation: f.input.conversation, run_id: 'run', state_dir: f.dir,
+      actingTurn, headless: {}, trailer: { schemas: new Map([['v1', value => (value as { verdict?: string }).verdict === 'APPROVE']]), metadata: () => undefined } })
+    const outcome = await runners.inRepl!.run(f.input.request, 'in-repl', f.input.signal)
+    if (['raw', 'pasted', 'pasted blocks'].includes(scenario)) {
+      expect(outcome).toMatchObject({ kind: 'completed', result: { verdict: 'APPROVE' } })
+      expect(now).toBe(120_000)
+    } else {
+      expect(outcome.kind).toBe('unknown')
+      if (['wrong id', 'embedded', 'wrong payload'].includes(scenario)) expect(now).toBe(DISPATCH_TIMEOUT_MS)
+      else if (scenario === 'cancelled') expect(now).toBe(60_000)
+      else expect(now).toBeGreaterThan(179_000)
+    }
+    expect(f.commands).toHaveLength(1)
+    expect(f.released()).toBe(1)
   })
 }
 
