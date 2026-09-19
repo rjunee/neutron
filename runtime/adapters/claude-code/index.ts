@@ -24,7 +24,7 @@
 
 import { mkdirSync } from 'node:fs'
 import { join } from 'node:path'
-import { readRegistryState } from './persistent/repl-registry.ts'
+import { readRegistryState, registryConversationScopeMatches } from './persistent/repl-registry.ts'
 import { beginBootAdoption } from './persistent/boot-adoption.ts'
 import { supervisedBySessionKey } from './persistent/pool-state.ts'
 import { authFingerprintFor } from './persistent/repl-session.ts'
@@ -419,7 +419,7 @@ export function resolveReplCwdAndHome(input: {
 
 /** Exact lookup from trusted identity fields; durable session keys remain opaque. */
 export function existingClaudeRepl(options: Pick<ClaudeCodeSubstrateOptions,
-  'substrate_instance_id' | 'cwd' | 'user_id' | 'project_id' | 'credential_identity'>,
+  'substrate_instance_id' | 'cwd' | 'user_id' | 'project_id' | 'conversationProjectId' | 'credential_identity'>,
 ): { registryPath: string; sessionKey: string } | undefined {
   const { home } = resolveReplCwdAndHome({ cwd: options.cwd, env: process.env })
   if (home === undefined) return undefined
@@ -431,6 +431,9 @@ export function existingClaudeRepl(options: Pick<ClaudeCodeSubstrateOptions,
     throw new Error('boot REPL adoption cannot establish durable registry identity')
   }
   const row = state.kind === 'loaded' ? state.registry[sessionKey] : undefined
+  if (row !== undefined && !registryConversationScopeMatches(row, options)) {
+    throw new Error('boot REPL adoption refused: conversation scope is ambiguous or mismatched')
+  }
   return row?.pane_handle === undefined ? undefined : { registryPath, sessionKey }
 }
 

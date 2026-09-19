@@ -129,6 +129,7 @@ import {
   normaliseRecord,
   ownPane,
   readRegistryState,
+  registryConversationScopeMatches,
   refreshPaneClaim,
   withOwnedRegistry,
   withRegistry,
@@ -411,6 +412,14 @@ export function beginBootAdoption(
     // also why the shutdown path refuses to let a child survive without a row: the
     // handle would have nowhere to be written and nobody to read it.
     return Promise.resolve({ kind: 'no-handle', sessionKey })
+  }
+  // Before even reusing a cached pass, require durable scope provenance. A
+  // legacy General alias must not inherit a previous caller's attribution.
+  const scopeState = readRegistryState(registryPath)
+  const scopeRecord = scopeState.kind === 'loaded' ? scopeState.registry[sessionKey] : undefined
+  if (scopeRecord !== undefined && !registryConversationScopeMatches(scopeRecord, options)) {
+    return Promise.resolve({ kind: 'undecided', sessionKey,
+      reason: 'conversation scope is ambiguous or mismatched; owner-led recovery is required' })
   }
   // AND THE SELF-FENCING DEADLINE IS CHECKED ON THE TURN PATH TOO (Argus r44), not only on
   // the supervision tick. The tick is what RENEWS, so a tick that has stopped renews nothing
@@ -812,6 +821,10 @@ export async function reconcileOwnRepl(
   }
   const record = state.kind === 'absent' ? undefined : normaliseRecord(state.registry[sessionKey])
   if (record === undefined) return { kind: 'no-handle', sessionKey }
+  if (!registryConversationScopeMatches(record, options)) {
+    return { kind: 'undecided', sessionKey,
+      reason: 'conversation scope is ambiguous or mismatched; owner-led recovery is required' }
+  }
   if (deps.expectedAuthFingerprint !== undefined &&
       record.reuse?.auth_fingerprint !== deps.expectedAuthFingerprint) {
     log(`key=${sessionKey.slice(0, 32)}: credential-changed — proactive adoption leaves the pane and row alone`)

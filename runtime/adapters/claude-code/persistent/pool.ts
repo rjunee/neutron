@@ -304,6 +304,9 @@ export function poolKeyFor(options: PersistentReplSubstrateOptions): string {
       options.user_id ?? '_platform',
       options.project_id ?? 'default',
       options.credential_identity ?? '_nocred',
+      // Never resume an ambiguous pre-scope 'general' row as a fresh General
+      // conversation. Both explicit scopes have their own collision-free key.
+      ...(options.conversationProjectId === null ? ['general-conversation'] : []),
       ...(options.conversationProjectId === 'general' ? ['literal-project'] : []),
     ].join(SESSION_KEY_SEP)
   }

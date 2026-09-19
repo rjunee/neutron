@@ -190,6 +190,18 @@ afterEach(() => {
 })
 
 describe('the adopt direction', () => {
+  it('a cached successful adoption cannot relabel an unmarked row as General', async () => {
+    const f = fixture()
+    const deps = { host: f.host, health: async () => true, log: () => {} }
+    expect((await beginBootAdoption(f.options, KEY, deps)).kind).toBe('adopted')
+    const before = readFileSync(f.registryPath, 'utf8')
+    const inspections = f.host.inspections.length
+    const differentScope = { ...f.options, project_id: 'general', conversationProjectId: null }
+    expect((await beginBootAdoption(differentScope, KEY, deps)).kind).toBe('undecided')
+    expect((await reconcileOwnRepl(differentScope, KEY, deps)).kind).toBe('undecided')
+    expect(f.host.inspections.length).toBe(inspections)
+    expect(readFileSync(f.registryPath, 'utf8')).toBe(before)
+  })
   for (const policy of [
     { label: 'unguarded turn', first: undefined, second: 'fp-abc' },
     { label: 'different guarded credential', first: 'fp-abc', second: 'fp-other' },

@@ -56,6 +56,7 @@ import { pool, supervisedBySessionKey } from '../pool-state.ts'
 import { registerSupervisedSubstrate, respawnReplSession } from '../supervision.ts'
 import { getRecord, patchRecord, upsertRecord } from '../repl-registry.ts'
 import { switchPersistentReplModel } from '../model-control.ts'
+import { spawnWithChannelWedgeRespawn } from '../spawn.ts'
 
 /** The EXACT id measured in the owner's live REPL registry on the degraded row. */
 const LIVE_HAIKU_ID = 'claude-haiku-4-5-20251001'
@@ -629,6 +630,65 @@ function modelArg(argv: string[]): string | undefined {
 }
 
 describe('the frontier-model floor holds at the spawn chokepoint', () => {
+  it('direct spawn/resume cannot stamp scope onto an ambiguous legacy record', async () => {
+    const { host, argvs } = makeCapturingHost()
+    const registryPath = join(tempDir('neutron-direct-scope-'), 'repl-registry.json')
+    const options = opts(host, { user_id: 'scope-owner', project_id: 'general', replRegistryPath: registryPath })
+    const key = poolKeyFor(options)
+    const row = { sessionKey: key, sessionId: 'cccccccc-1111-2222-3333-444444444444',
+      cwd: options.cwd!, channelName: 'neutron-11112222333344445555666677778888', has_session: true }
+    upsertRecord(registryPath, row)
+    expect(getRecord(registryPath, key)).toEqual(row)
+    const before = readFileSync(registryPath, 'utf8')
+    await expect(spawnWithChannelWedgeRespawn(key, options, spec(getBestModel())))
+      .rejects.toThrow('conversation scope is ambiguous or mismatched')
+    await expect(spawnWithChannelWedgeRespawn(key, options, spec(getBestModel()),
+      { sessionId: row.sessionId }))
+      .rejects.toThrow('conversation scope is ambiguous or mismatched')
+    expect(argvs).toEqual([])
+    expect(readFileSync(registryPath, 'utf8')).toBe(before)
+  }, SPAWN_TEST_TIMEOUT_MS)
+  it('a fresh General turn leaves the ambiguous legacy transcript and pane untouched', async () => {
+    const { host, argvs } = makeCapturingHost()
+    let oldPaneTouches = 0
+    Object.assign(host, {
+      inspectHandle: async () => { oldPaneTouches++; throw new Error('must not inspect legacy pane') },
+      attach: async () => { oldPaneTouches++; throw new Error('must not attach legacy pane') },
+      closeHandle: async () => { oldPaneTouches++; throw new Error('must not close legacy pane') },
+    })
+    const registryPath = join(tempDir('neutron-general-boundary-'), 'repl-registry.json')
+    const identity = { user_id: 'scope-owner', project_id: 'general', credential_identity: 'cred-1' }
+    const options = opts(host, { ...identity, conversationProjectId: null, replRegistryPath: registryPath })
+    const { conversationProjectId: _scope, ...legacyOptions } = options
+    const legacyKey = poolKeyFor(legacyOptions)
+    const newKey = poolKeyFor(options)
+    expect(newKey).not.toBe(legacyKey)
+    expect(newKey).not.toBe(poolKeyFor({ ...options, conversationProjectId: 'general' }))
+    const oldRow = { sessionKey: legacyKey, sessionId: 'cccccccc-1111-2222-3333-444444444444',
+      cwd: options.cwd!, channelName: 'neutron-11112222333344445555666677778888', has_session: true, pane_handle: 'legacy-pane',
+      pid: 31337, child_generation: 'legacy-generation' }
+    upsertRecord(registryPath, oldRow)
+    expect(getRecord(registryPath, legacyKey)).toEqual(oldRow)
+    const before = JSON.stringify(getRecord(registryPath, legacyKey))
+    await drain(createPersistentReplSubstrate(options).start(spec(getBestModel())))
+    expect(argvs).toHaveLength(1)
+    expect(argvs[0]).not.toContain('--resume')
+    expect(argvs[0]).not.toContain(oldRow.sessionId)
+    expect(getRecord(registryPath, newKey)?.conversationProjectId).toBeNull()
+    expect(getRecord(registryPath, newKey)?.sessionId).not.toBe(oldRow.sessionId)
+    expect(JSON.stringify(getRecord(registryPath, legacyKey))).toBe(before)
+    expect(oldPaneTouches).toBe(0)
+  }, SPAWN_TEST_TIMEOUT_MS)
+  for (const conversationProjectId of [null, 'general', 'project']) {
+    it(`fresh spawn persists exact scope provenance for ${conversationProjectId ?? 'General'}`, async () => {
+      const { host } = makeCapturingHost()
+      const registryPath = join(tempDir('neutron-scope-writer-'), 'repl-registry.json')
+      const options = opts(host, { user_id: 'scope-owner', project_id: conversationProjectId ?? 'general',
+        conversationProjectId, credential_identity: 'cred-1', replRegistryPath: registryPath })
+      await drain(createPersistentReplSubstrate(options).start(spec(getBestModel())))
+      expect(getRecord(registryPath, poolKeyFor(options))?.conversationProjectId).toBe(conversationProjectId)
+    }, SPAWN_TEST_TIMEOUT_MS)
+  }
   it('an acknowledged native switch writes the preference actually consumed by same-session resume', async () => {
     const base = makeCapturingHost()
     const host: PtyHost = {

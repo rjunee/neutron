@@ -37,6 +37,7 @@ import {
   getRecord,
   normaliseRecord,
   readRegistryState,
+  registryConversationScopeMatches,
   ownPane,
   patchRecord,
   releasePaneSpawnReservation,
@@ -102,6 +103,9 @@ async function spawnSession(
   // and the two reasons the floor is still load-bearing without it.
   const previousModel = options.replRegistryPath === undefined ? undefined
     : getRecord(options.replRegistryPath, sessionKey)
+  if (previousModel !== undefined && !registryConversationScopeMatches(previousModel, options)) {
+    throw new Error('persistent-repl: conversation scope is ambiguous or mismatched; refusing spawn/resume')
+  }
   const selected = resume !== undefined && previousModel?.sessionId === resume.sessionId &&
     typeof previousModel.owner_selected_model === 'string' && previousModel.owner_selected_model.trim() !== ''
     ? previousModel.owner_selected_model : undefined
@@ -758,6 +762,7 @@ async function spawnSession(
       const recoveryForcesFresh = session.forceFreshRespawn
       const record: ReplRegistryRecord = {
         sessionKey,
+        ...(options.conversationProjectId === undefined ? {} : { conversationProjectId: options.conversationProjectId }),
         sessionId: recoveredSessionId ?? sessionId,
         cwd,
         channelName,

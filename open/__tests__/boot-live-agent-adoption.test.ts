@@ -9,6 +9,7 @@ import { ProjectDb } from '@neutronai/persistence/index.ts'
 import { composeProductionGraph } from '@neutronai/gateway/composition.ts'
 import { LIVE_AGENT_TOOL_NAMES } from '@neutronai/gateway/wiring/build-live-agent-turn.ts'
 import { buildLlmCallSubstrate } from '@neutronai/gateway/wiring/build-llm-call-substrate.ts'
+import { getPersistentReplModel, switchPersistentReplModel } from '@neutronai/runtime/adapters/claude-code/persistent/model-control.ts'
 import { writeInstanceModelProvider } from '@neutronai/gateway/storage/owner-metadata.ts'
 import { deriveReplSupervisionPaths } from '@neutronai/runtime/adapters/claude-code/index.ts'
 import { configuredPtyHost } from '@neutronai/runtime/adapters/claude-code/persistent/configured-pty-host.ts'
@@ -340,13 +341,14 @@ test('adoption supplies explicit conversation provenance for General and ordinar
   ])
 })
 
-for (const selection of ['general-claude', 'project-claude', 'project-configured'] as const) {
+for (const selection of ['general-claude', 'project-claude', 'project-configured', 'legacy-general', 'mismatched-general'] as const) {
 test(`production boot isolates General and literal-general survivors (${selection})`, async () => {
+  const refused = selection === 'legacy-general' || selection === 'mismatched-general'
   process.env['NEUTRON_DB_PATH'] = join(home!, `${selection}.db`)
   seedMigratedDb(process.env['NEUTRON_DB_PATH']!)
   db = ProjectDb.open(process.env['NEUTRON_DB_PATH']!)
   await writeInstanceModelProvider(db, 'owner', selection === 'project-claude' ? 'openai-codex' : 'anthropic')
-  seedProject('general', { provider: selection === 'general-claude' ? 'openai-codex' : 'anthropic' })
+  seedProject('general', { provider: selection === 'general-claude' || refused ? 'openai-codex' : 'anthropic' })
   if (selection === 'project-configured') process.env['NEUTRON_PROJECT_MODELS'] = '{"general":"glm"}'
   const host = patchHost()
   devChannel = Bun.serve({ hostname: '127.0.0.1', port: 0, fetch() {
@@ -363,9 +365,15 @@ test(`production boot isolates General and literal-general survivors (${selectio
   })
   const generalKey = keyFor(null)
   const projectKey = keyFor('general')
+  const legacyKey = poolKeyFor({ substrate_instance_id: 'cc-agent-owner', cwd: home!, user_id: 'owner',
+    project_id: 'general', credential_identity: 'anthropic:ANTHROPIC_API_KEY' })
+  const rejectedGeneralKey = selection === 'legacy-general' ? legacyKey : generalKey
   expect(generalKey).not.toBe(projectKey)
+  expect(generalKey).not.toBe(legacyKey)
+  const generalRow = { ...registryRow(rejectedGeneralKey, HANDLE, GENERATION, devChannel.port!),
+    ...(selection === 'legacy-general' ? {} : { conversationProjectId: selection === 'mismatched-general' ? 'general' : null }) }
   writeFileSync(paths.replRegistryPath, JSON.stringify({
-    [generalKey]: registryRow(generalKey, HANDLE, GENERATION, devChannel.port!),
+    [rejectedGeneralKey]: generalRow,
     [projectKey]: registryRow(projectKey, SECOND_HANDLE, SECOND_GENERATION, secondDevChannel.port!,
       { session: SECOND_SESSION, channel: SECOND_CHANNEL, pid: SECOND_PID }),
   }))
@@ -379,6 +387,39 @@ test(`production boot isolates General and literal-general survivors (${selectio
   const composition = await composer({ db, project_slug: 'owner' })
   expect(host.attached).toEqual([])
   graph = await composeProductionGraph(composition)
+  if (refused) {
+    expect(host.attached).toEqual([])
+    expect(host.inspections).toEqual([])
+    expect(supervisedBySessionKey.has(generalKey)).toBe(false)
+    // A mismatched row on the NEW key cannot be relabeled even by a real turn.
+    // A legacy row occupies a DIFFERENT key; the fresh-start test exercises its
+    // ordinary General turn with a fake child that can complete new turns.
+    const wrapper = buildLlmCallSubstrate({
+      pool: newCredentialPool({ strategy: 'fill_first', credentials: [
+        { id: 'anthropic:ANTHROPIC_API_KEY', kind: 'api_key', secret: API_KEY },
+      ] }), substrate_instance_id: 'cc-agent-owner', cwd: home!, user_id: 'owner', project_slug: 'owner',
+      enableToolBridge: true,
+    })!
+    if (selection === 'mismatched-general') {
+      await expect(drain(wrapper.start({ prompt: 'hello', tools: [], model_preference: ['opus'],
+        metering_context: { project_id: 'general', conversationProjectId: null },
+      }))).rejects.toThrow('conversation scope is ambiguous or mismatched')
+    } else {
+      // Nor may a legacy caller deliberately request the old ambiguous key.
+      await expect(drain(wrapper.start({ prompt: 'hello', tools: [], model_preference: ['opus'],
+        metering_context: { project_id: 'general' },
+      }))).rejects.toThrow('conversation scope is ambiguous or mismatched')
+    }
+    expect(pool.has(generalKey)).toBe(false)
+    await expect(getPersistentReplModel({ userId: 'owner', projectId: null })).rejects.toMatchObject({ code: 'unavailable' })
+    await expect(switchPersistentReplModel({ userId: 'owner', projectId: null }, { sessionId: SESSION, model: 'haiku' }))
+      .rejects.toMatchObject({ code: 'unavailable' })
+    expect((JSON.parse(readFileSync(paths.replRegistryPath, 'utf8')) as ReplRegistry)[rejectedGeneralKey]).toEqual(generalRow)
+    expect(host.attached).toEqual([])
+    expect(host.closed).toEqual([])
+    expect(host.spawns()).toBe(0)
+    return
+  }
   const isProject = selection === 'project-claude'
   const selectedKey = isProject ? projectKey : generalKey
   const rejectedKey = isProject ? generalKey : projectKey
