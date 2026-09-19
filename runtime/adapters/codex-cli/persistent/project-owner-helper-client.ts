@@ -4,6 +4,7 @@ import type { CodexOwnerBindingFacts } from './project-control-bootstrap.ts'
 import type { ProjectControlBroker, ProjectControlGateway, ProjectControlState } from './project-control-broker.ts'
 import { BROKER_MAX_MESSAGE_BYTES } from './project-control-broker-transport.ts'
 import { exactFacts, object, readOwnerHelperDescriptor, socketIdentity, type Rpc } from './project-owner-helper-protocol.ts'
+import type { ReviewPermissionLease, ReviewPermissionRequest } from './project-review-permissions.ts'
 
 /** A lost response body is an unknown request outcome, just like a lost socket. */
 export async function decodeOwnerHelperResponse(response: Response, fail: (error: Error) => void): Promise<Rpc> {
@@ -31,6 +32,7 @@ export async function connectCodexOwnerHelper(options: { descriptorPath: string;
   let state: ProjectControlState
   let grant: string
   let observation = 0
+  let restoredReview: string | undefined
   type Writer = { listeners: Set<(message: Rpc) => void>; approvals: Map<string | number, Rpc>; ready: Promise<void>; writerGrant: string; cursor: number; detached: boolean }
   const writers = new Map<string, Writer>()
   const close = (error = new Error('Owner frontend detached')) => { closed ??= error; abort.abort(); for (const writer of writers.values()) writer.listeners.clear() }
@@ -40,7 +42,7 @@ export async function connectCodexOwnerHelper(options: { descriptorPath: string;
   }
   const call = async (body: Rpc): Promise<Rpc> => {
     assertCurrent()
-    const json = JSON.stringify(body)
+    const json = JSON.stringify({ ...body, ...(restoredReview ? { restoredReview } : {}) })
     if (Buffer.byteLength(json) > BROKER_MAX_MESSAGE_BYTES) throw new Error('Oversized helper request')
     let response: Response
     try {
@@ -94,7 +96,49 @@ export async function connectCodexOwnerHelper(options: { descriptorPath: string;
     await writerCall(clientId, writer, { operation: 'reply', id, result, epoch: expectedEpoch })
     writer.approvals.delete(id)
   }
+  const reviewPrepare = async (request: ReviewPermissionRequest, expectedEpoch: number): Promise<ReviewPermissionLease> => {
+    const reviewCall = async (body: Rpc) => {
+      try { return await call(body) } catch (error) { close(error as Error); throw error }
+    }
+    const ready = await reviewCall({ operation: 'reviewPrepare', grant, stageDir: request.stageDir, network: request.network, epoch: expectedEpoch })
+    if (typeof ready.lease !== 'string' || !/^[a-f0-9]{64}$/.test(ready.lease)) { close(new Error('Invalid private review lease')); throw closed }
+    const lease = ready.lease
+    let phase: 'ready' | 'started' | 'restoring' | 'restored' | 'abandoned' = 'ready'
+    return {
+      async start(input) {
+        assertCurrent()
+        if (phase !== 'ready') throw new Error('Review dispatch lease unavailable')
+        phase = 'started'
+        const result = await reviewCall({ operation: 'reviewStart', grant, lease, input })
+        if (typeof result.turnId !== 'string' || !result.turnId) { close(new Error('Invalid review dispatch receipt')); throw closed }
+        return { turnId: result.turnId }
+      },
+      async restore() {
+        assertCurrent()
+        if (phase !== 'started') throw new Error('Review restoration lease unavailable')
+        phase = 'restoring'
+        const restored = await reviewCall({ operation: 'reviewRestore', grant, lease })
+        if (restored.restored !== true) { close(new Error('Unverified review restoration')); throw closed }
+        const acknowledged = await reviewCall({ operation: 'reviewAcknowledge', grant, lease })
+        if (acknowledged.acknowledged !== true) { close(new Error('Unverified review acknowledgement')); throw closed }
+        restoredReview = lease
+        phase = 'restored'
+        // Prove receipt now, without waiting for an unrelated owner request.
+        await refreshState()
+      },
+      abandon() {
+        if (phase === 'restored' || phase === 'abandoned') return
+        phase = 'abandoned'
+        // Start the one best-effort notice before fencing this proxy synchronously.
+        // Do not abort that notice: an absent response still retains the helper lease.
+        if (!closed) void call({ operation: 'reviewAbandon', grant, lease }).catch(() => {})
+        closed ??= new Error('Owner review abandoned; reconciliation required')
+        for (const writer of writers.values()) writer.listeners.clear()
+      },
+    }
+  }
   const broker: ProjectControlBroker = {
+    reviewPermissions: reviewPrepare,
     state() { return closed ? { ...state, phase: 'closed' } : { ...state } },
     gateway(clientId): ProjectControlGateway {
       assertCurrent()
@@ -138,5 +182,5 @@ export async function connectCodexOwnerHelper(options: { descriptorPath: string;
   }
   const facts = Object.freeze({ ...descriptor.facts, nativeMetadata: Object.freeze({ ...descriptor.facts.nativeMetadata }),
     capabilities: Object.freeze({ ...descriptor.facts.capabilities }) })
-  return { facts, assertCurrent, broker, refreshState, replyApproval, close: () => close() }
+  return { facts, assertCurrent, broker, refreshState, replyApproval, reviewPrepare, close: () => close() }
 }

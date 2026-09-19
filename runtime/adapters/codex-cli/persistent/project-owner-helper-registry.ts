@@ -2,6 +2,7 @@ import { randomBytes } from 'node:crypto'
 import type { ProjectControlBroker } from './project-control-broker.ts'
 import { OwnerHelperSession } from './project-owner-helper-session.ts'
 import { object, type Rpc } from './project-owner-helper-protocol.ts'
+import { OwnerHelperReview } from './project-owner-helper-review.ts'
 
 /** Preserves the broker's exact Client-object ownership across gateway transport
  * replacement. A frontend grant never becomes another logical writer's grant.
@@ -10,15 +11,25 @@ export class OwnerHelperRegistry {
   private readonly writers = new Map<string, OwnerHelperSession>()
   private readonly retiring = new Set<string>()
   private frontendGrant: string | undefined
-  constructor(private broker: ProjectControlBroker, private assertOwner: () => void) {}
+  private readonly review: OwnerHelperReview
+  constructor(private broker: ProjectControlBroker, private assertOwner: () => void) { this.review = new OwnerHelperReview(broker, assertOwner) }
   attach() {
     this.assertOwner()
+    this.review.assertAttachable()
     this.frontendGrant = randomBytes(32).toString('hex')
     return { grant: this.frontendGrant }
   }
   async handle(raw: Rpc, signal: AbortSignal): Promise<Rpc> {
     this.assertOwner()
     if (!this.frontendGrant || raw.grant !== this.frontendGrant) throw new Error('Stale owner frontend grant')
+    this.review.acknowledge(raw)
+    if (typeof raw.operation === 'string' && raw.operation.startsWith('review')) {
+      const result = await this.review.handle(raw)
+      this.assertOwner()
+      if (raw.grant !== this.frontendGrant) throw new Error('Stale owner frontend grant; request outcome may be unknown')
+      return result
+    }
+    if (raw.operation === 'request' || raw.operation === 'reply') this.review.assertWriterAvailable()
     for (const clientId of this.retiring) {
       const writer = this.writers.get(clientId)
       if (writer?.canRetire()) { writer.destroy(); this.writers.delete(clientId); this.retiring.delete(clientId) }
@@ -60,5 +71,5 @@ export class OwnerHelperRegistry {
     if (raw.grant !== this.frontendGrant) throw new Error('Stale owner frontend grant; request outcome may be unknown')
     return result
   }
-  destroy() { this.frontendGrant = undefined; for (const writer of this.writers.values()) writer.destroy(); this.writers.clear(); this.retiring.clear() }
+  destroy() { this.frontendGrant = undefined; this.review.destroy(); for (const writer of this.writers.values()) writer.destroy(); this.writers.clear(); this.retiring.clear() }
 }
