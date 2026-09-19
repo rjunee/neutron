@@ -1,5 +1,5 @@
 /** Conversation-scoped current/list/switch control. Never changes chat identity. */
-import { useCallback, useMemo, useState } from 'react';
+import { useCallback, useMemo, useRef, useState } from 'react';
 import { ActivityIndicator, Pressable, Text, View } from 'react-native';
 import { useFocusEffect } from 'expo-router';
 
@@ -17,36 +17,49 @@ export function ReplModelControl({ projectId, baseUrl, token }: {
   const [loading, setLoading] = useState(true);
   const [switching, setSwitching] = useState(false);
   const [open, setOpen] = useState(false);
+  const switchInFlight = useRef(false);
+  // Focus/refresh replaces the authoritative session snapshot. Older GET or
+  // POST completions must never repaint the model of the newly focused session.
+  const generation = useRef(0);
 
   const refresh = useCallback(async (alive: () => boolean): Promise<void> => {
+    const requestGeneration = ++generation.current;
+    const current = () => alive() && generation.current === requestGeneration;
     setLoading(true);
+    setSwitching(false);
+    switchInFlight.current = false;
+    setOpen(false);
     setState(null);
     setError(null);
     try {
       const next = await client.get(projectId);
-      if (alive()) setState(next);
+      if (current()) setState(next);
     } catch (cause) {
-      if (alive()) {
+      if (current()) {
         setState(null);
         setError(cause instanceof Error ? cause.message : 'Could not load the current model.');
       }
     } finally {
-      if (alive()) setLoading(false);
+      if (current()) setLoading(false);
     }
   }, [client, projectId]);
 
   useFocusEffect(useCallback(() => {
     let active = true;
     void refresh(() => active);
-    return () => { active = false; };
+    return () => { active = false; generation.current += 1; };
   }, [refresh]));
 
   const choose = async (model: string): Promise<void> => {
-    if (switching || state?.status !== 'ready' || model === state.currentModel) return;
+    if (switchInFlight.current || state?.status !== 'ready' || model === state.currentModel) return;
+    const switchGeneration = generation.current;
+    const current = () => generation.current === switchGeneration;
+    switchInFlight.current = true;
     setSwitching(true);
     setError(null);
     try {
       const next = await client.switch(projectId, model, state.sessionId);
+      if (!current()) return;
       // A successful HTTP response is not permission to show a guessed model.
       if (next.sessionId !== state.sessionId) {
         throw new Error('The conversation changed while switching models. Refresh and try again.');
@@ -57,12 +70,19 @@ export function ReplModelControl({ projectId, baseUrl, token }: {
       setState(next);
       setOpen(false);
     } catch (cause) {
+      if (!current()) return;
       setError(cause instanceof Error ? cause.message : 'Could not switch the model.');
       // A failed command can race a session replacement. Refresh the server's
       // actual state without turning the failed command into a success claim.
-      try { setState(await client.get(projectId)); } catch { /* Keep the visible error and last confirmed state. */ }
+      try {
+        const next = await client.get(projectId);
+        if (current()) setState(next);
+      } catch { /* Keep the visible error and last confirmed state. */ }
     } finally {
-      setSwitching(false);
+      if (current()) {
+        switchInFlight.current = false;
+        setSwitching(false);
+      }
     }
   };
 

@@ -21,6 +21,11 @@ let calls: Call[] = [];
 let postStatus = 200;
 let postBody: unknown = states.frontier;
 let getBody: unknown = states.cheap;
+let deferPost = false;
+let completePost: (() => void) | null = null;
+let deferGetAt = 0;
+let getCount = 0;
+let completeGet: (() => void) | null = null;
 
 beforeAll(installNativeHarness);
 afterAll(resetHarnessGlobals);
@@ -30,12 +35,25 @@ beforeEach(() => {
   postStatus = 200;
   postBody = states.frontier;
   getBody = states.cheap;
+  deferPost = false;
+  completePost = null;
+  deferGetAt = 0;
+  getCount = 0;
+  completeGet = null;
   globalThis.fetch = (async (input, init) => {
     const method = init?.method ?? 'GET';
+    const responseBody = method === 'POST' ? postBody : getBody;
+    if (method === 'GET') getCount += 1;
     calls.push({ url: String(input), method,
       body: typeof init?.body === 'string' ? JSON.parse(init.body) : null,
       token: new Headers(init?.headers).get('authorization') });
-    return new Response(JSON.stringify(method === 'POST' ? postBody : getBody), {
+    if (method === 'POST' && deferPost) {
+      await new Promise<void>((resolve) => { completePost = resolve; });
+    }
+    if (method === 'GET' && getCount === deferGetAt) {
+      await new Promise<void>((resolve) => { completeGet = resolve; });
+    }
+    return new Response(JSON.stringify(responseBody), {
       status: method === 'POST' ? postStatus : 200,
       headers: { 'content-type': 'application/json' },
     });
@@ -101,6 +119,91 @@ describe('conversation REPL model on phone', () => {
     await press('repl-model-option-frontier');
     expect(document.querySelector('[data-testid="repl-model-open"]')?.textContent).toContain('cheap');
     expect(document.querySelector('[data-testid="repl-model-error"]')?.textContent).toContain('did not confirm');
+    screen.unmount();
+  });
+
+  it('ignores session A switch completion after focus refreshes to session B', async () => {
+    deferPost = true;
+    const screen = await mount();
+    await press('repl-model-open');
+    await press('repl-model-option-frontier');
+    expect(calls.at(-1)?.body).toEqual({ model: 'frontier', sessionId: 'session-one' });
+    expect(completePost).not.toBeNull();
+
+    // Changing the auth identity re-runs the focus effect in the device-shaped
+    // router stub, matching blur/refocus's cleanup + authoritative GET sequence.
+    getBody = { ...states.cheap, sessionId: 'session-two', currentModel: 'other' };
+    await screen.rerender(createElement(ReplModelControl,
+      { projectId: 'willow', baseUrl: 'https://example.test', token: 'second-token' }));
+    expect(document.querySelector('[data-testid="repl-model-open"]')?.textContent).toContain('other');
+
+    await act(async () => { completePost?.(); await Promise.resolve(); });
+    await screen.settle();
+    expect(document.querySelector('[data-testid="repl-model-open"]')?.textContent).toContain('other');
+    expect(document.querySelector('[data-testid="repl-model-error"]')).toBeNull();
+    screen.unmount();
+  });
+
+  it('ignores session A GET completion after focus refreshes to session B', async () => {
+    deferGetAt = 1;
+    const screen = await mount();
+    expect(completeGet).not.toBeNull();
+    getBody = { ...states.cheap, sessionId: 'session-two', currentModel: 'other' };
+    await screen.rerender(createElement(ReplModelControl,
+      { projectId: 'willow', baseUrl: 'https://example.test', token: 'second-token' }));
+    expect(document.querySelector('[data-testid="repl-model-open"]')?.textContent).toContain('other');
+    await act(async () => { completeGet?.(); await Promise.resolve(); });
+    await screen.settle();
+    expect(document.querySelector('[data-testid="repl-model-open"]')?.textContent).toContain('other');
+    screen.unmount();
+  });
+
+  it('ignores session A recovery GET completion after focus refreshes to session B', async () => {
+    postStatus = 409;
+    postBody = { error: 'session_changed', detail: 'Session A changed.' };
+    deferGetAt = 2;
+    const screen = await mount();
+    await press('repl-model-open');
+    await press('repl-model-option-frontier');
+    expect(completeGet).not.toBeNull();
+    getBody = { ...states.cheap, sessionId: 'session-two', currentModel: 'other' };
+    await screen.rerender(createElement(ReplModelControl,
+      { projectId: 'willow', baseUrl: 'https://example.test', token: 'second-token' }));
+    expect(document.querySelector('[data-testid="repl-model-open"]')?.textContent).toContain('other');
+    await act(async () => { completeGet?.(); await Promise.resolve(); });
+    await screen.settle();
+    expect(document.querySelector('[data-testid="repl-model-open"]')?.textContent).toContain('other');
+    expect(document.querySelector('[data-testid="repl-model-error"]')).toBeNull();
+    screen.unmount();
+  });
+
+  it('uses a same-generation recovery GET after a rejected switch', async () => {
+    postStatus = 409;
+    postBody = { error: 'session_changed', detail: 'Session changed.' };
+    const screen = await mount();
+    getBody = { ...states.cheap, sessionId: 'session-two', currentModel: 'other' };
+    await press('repl-model-open');
+    await press('repl-model-option-frontier');
+    expect(document.querySelector('[data-testid="repl-model-open"]')?.textContent).toContain('other');
+    expect(document.querySelector('[data-testid="repl-model-error"]')?.textContent).toContain('Session changed');
+    screen.unmount();
+  });
+
+  it('replaces a successful POST snapshot only when the next focus GET completes', async () => {
+    const screen = await mount();
+    await press('repl-model-open');
+    await press('repl-model-option-frontier');
+    expect(document.querySelector('[data-testid="repl-model-open"]')?.textContent).toContain('frontier');
+
+    deferGetAt = 2;
+    getBody = { ...states.cheap, sessionId: 'session-two', currentModel: 'other' };
+    await screen.rerender(createElement(ReplModelControl,
+      { projectId: 'willow', baseUrl: 'https://example.test', token: 'second-token' }));
+    expect(completeGet).not.toBeNull();
+    expect(document.querySelector('[data-testid="repl-model-open"]')?.textContent).toContain('unknown');
+    await act(async () => { completeGet?.(); await Promise.resolve(); });
+    await screen.settle();
+    expect(document.querySelector('[data-testid="repl-model-open"]')?.textContent).toContain('other');
     screen.unmount();
   });
 
