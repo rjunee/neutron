@@ -2,6 +2,7 @@ import { readFile, stat } from 'node:fs/promises'
 import { relative, resolve, sep } from 'node:path'
 import { setTimeout as delay } from 'node:timers/promises'
 import type { ToolGrant } from '../bounded-work.ts'
+import { unknownCause } from '../refusal-cause.ts'
 import { CodexApprovalRefusedError, type CodexProjectSession } from '../adapters/codex-cli/persistent/project-session.ts'
 import { projectTrailerStep, type ProjectActingTurn } from './project-runners.ts'
 
@@ -17,6 +18,16 @@ export interface CodexActingSession {
 }
 
 const toolRank: Record<ToolGrant, number> = { none: 0, 'read-only': 1, edit: 2, 'edit-and-run': 3 }
+
+type ActingSession = NonNullable<CodexActingSession['session']>
+interface DispatchState {
+  tail: Promise<void>
+  attempted: Set<string>
+  uncertain: boolean
+}
+// State follows the host-owned session, including across reconstructed bindings.
+// Only host reconciliation may replace that session after uncertain delivery.
+const dispatchStates = new WeakMap<ActingSession, DispatchState>()
 
 /** Continue the bound Codex project conversation. Transcript text is never completion. */
 export function createCodexActingTurn(binding: CodexActingSession): ProjectActingTurn {
@@ -40,11 +51,23 @@ export function createCodexActingTurn(binding: CodexActingSession): ProjectActin
     if (session.projectId !== project_id) return refuse('Codex project session does not match the bound project.')
     if (!session.isLive()) return refuse('Codex project session is not live.')
 
+    let state = dispatchStates.get(session)
+    if (!state) {
+      state = { tail: Promise.resolve(), attempted: new Set(), uncertain: false }
+      dispatchStates.set(session, state)
+    }
+    if (state.uncertain) return { kind: 'unknown', detail: 'Codex session requires reconciliation after an uncertain dispatch.' }
+    const previous = state.tail
+    let release!: () => void
+    state.tail = new Promise<void>(resolve => { release = resolve })
+    const dispatchId = JSON.stringify([request.run_id, request.step_id])
+    let dispatched = false
+    let completed = false
     const deadline = Date.now() + Math.min(timeout_ms, request.budget.wall_ms)
     const timer = new AbortController()
     const stopped = AbortSignal.any([signal, timer.signal])
     const expired = () => stopped.aborted || Date.now() >= deadline
-    const unknown = () => ({ kind: 'unknown' as const, detail: 'Codex trailer not observed before cancellation or host budget expiry.' })
+    const unknown = () => ({ kind: 'unknown' as const, detail: 'Codex submission completion and child trailer were not both observed before cancellation or host budget expiry.' })
     const answerPrompt = async () => {
       const prompt = session.screenPrompt()
       if (prompt?.kind === 'trust') return refuse('Codex directory trust requires setup outside the bounded worker.')
@@ -61,11 +84,20 @@ export function createCodexActingTurn(binding: CodexActingSession): ProjectActin
       return undefined
     }
     const observe = async () => {
+      await previous
       if (expired()) return unknown()
+      if (state.uncertain) return { kind: 'unknown' as const, detail: 'Codex session requires reconciliation after an uncertain dispatch.' }
+      if (state.attempted.has(dispatchId)) return { kind: 'unknown' as const, detail: 'Codex run/step was already dispatched; replay requires reconciliation.' }
+      if (!session.isLive()) return refuse('Codex project session is not live.')
       const initialPrompt = await answerPrompt()
       if (initialPrompt) return initialPrompt
       if (expired()) return unknown()
-      // JSON escapes newlines; CodexProjectSession owns serialized text/Enter acknowledgement.
+      // Record before calling: an acknowledgement can be lost after delivery.
+      state.attempted.add(dispatchId)
+      dispatched = true
+      // JSON escapes newlines. The native owner adapter resolves submission only
+      // after parent completion; the legacy pane adapter only acknowledges input.
+      // A child trailer must never bypass whichever submission is still pending.
       await session.submitLine('Execute the prompt in this JSON dispatch specification: ' + JSON.stringify({ ...spec, effort: request.effort }))
       while (!expired()) {
         const approval = await answerPrompt()
@@ -74,6 +106,7 @@ export function createCodexActingTurn(binding: CodexActingSession): ProjectActin
           const trailer = await stat(request.result.path)
           if (trailer.isFile()) {
             if (projectTrailerStep(await readFile(request.result.path, 'utf8'), request) !== 'not-current-step') {
+              if (expired()) return unknown()
               return { kind: 'turn-ended' as const }
             }
           } else {
@@ -87,15 +120,27 @@ export function createCodexActingTurn(binding: CodexActingSession): ProjectActin
       return unknown()
     }
     try {
-      if (expired()) return unknown()
-      return await Promise.race([
-        observe(),
+      const result = await Promise.race([
+        // Keep queued calls behind the actual observation, even when the caller
+        // has returned on timeout. They recheck cancellation before any write.
+        observe().then(result => {
+          if (dispatched && result.kind !== 'turn-ended') state.uncertain = true
+          return result
+        }, error => {
+          if (dispatched) state.uncertain = true
+          throw error
+        }).finally(release),
         delay(Math.max(1, deadline - Date.now()), undefined, { signal: stopped }).then(unknown, () => {
           if (signal.aborted) return unknown()
           throw new Error('Codex trailer wait interrupted')
         }),
       ])
+      completed = result.kind === 'turn-ended'
+      return result
+    } catch (error) {
+      return { kind: 'unknown', detail: unknownCause('Codex dispatch or trailer observation failed; completion is unknown.', error, request.run_id) }
     } finally {
+      if (dispatched && !completed) state.uncertain = true
       timer.abort()
     }
   }
