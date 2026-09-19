@@ -1,7 +1,7 @@
 /**
  * @neutronai/app — `app.config.js` Android Firebase resolution (ISSUES #385, #487).
  *
- * WHAT THIS PROTECTS. `app.config.js` exists for one reason: `expo-notifications`
+ * WHAT THIS PROTECTS. The Firebase part of `app.config.js`: `expo-notifications`
  * pulls Firebase native libs into the Android build, and the generated manifest
  * registers `FirebaseInitProvider` — a ContentProvider that runs at PROCESS
  * START. With no `google-services.json` applied, `google_app_id` is missing from
@@ -29,7 +29,7 @@
  * push works.**
  */
 
-import { afterEach, describe, expect, it } from 'bun:test';
+import { afterEach, beforeEach, describe, expect, it } from 'bun:test';
 import { join } from 'node:path';
 
 // eslint-disable-next-line @typescript-eslint/no-var-requires
@@ -38,8 +38,15 @@ const loadConfig = require(join(import.meta.dir, '..', 'app.config.js')) as () =
 };
 
 const ORIGINAL = process.env['GOOGLE_SERVICES_JSON'];
+const ORIGINAL_OWNER = process.env['NEUTRON_EXPO_OWNER'];
+
+beforeEach(() => {
+  process.env['NEUTRON_EXPO_OWNER'] = 'fixture-publisher';
+});
 
 afterEach(() => {
+  if (ORIGINAL_OWNER === undefined) delete process.env['NEUTRON_EXPO_OWNER'];
+  else process.env['NEUTRON_EXPO_OWNER'] = ORIGINAL_OWNER;
   if (ORIGINAL === undefined) delete process.env['GOOGLE_SERVICES_JSON'];
   else process.env['GOOGLE_SERVICES_JSON'] = ORIGINAL;
 });

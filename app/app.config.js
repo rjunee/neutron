@@ -1,6 +1,6 @@
 /**
- * Expo config — thin wrapper over app.json whose ONLY job is to resolve the
- * Android Firebase config file at build time (ISSUES #385).
+ * Expo config — resolves private publisher inputs over the public app.json.
+ * Android Firebase config is supplied at build time (ISSUES #385).
  *
  * WHY THIS EXISTS: `expo-notifications` pulls Firebase/FCM native libs into the
  * Android build, and the generated manifest registers
@@ -26,24 +26,31 @@
  */
 const { expo } = require('./app.json')
 
-module.exports = () => ({
-  expo: {
-    ...expo,
-    plugins: [...expo.plugins, './plugins/with-native-crash-reporting'],
-    android: {
-      ...expo.android,
-      // EAS supplies an absolute path; a local build falls back to the
-      // gitignored file beside this config. One expression, no branching.
-      //
-      // `||`, NOT `??` — and this is load-bearing rather than style. `??` falls
-      // back only on null/undefined, so an EAS variable that EXISTS but is EMPTY
-      // (cleared, or created with no value) resolves `googleServicesFile: ''`.
-      // That is not a loud failure: it produces a build with no Firebase config,
-      // which is precisely the instant `FirebaseInitProvider` crash this file
-      // exists to prevent — flash and close, no JS, no error to read. An empty
-      // string must take the fallback like any other missing value. Guarded by
-      // `__tests__/android-fcm-config.test.ts`; do not "modernise" this to `??`.
-      googleServicesFile: process.env.GOOGLE_SERVICES_JSON || './google-services.json',
+module.exports = () => {
+  const owner = process.env.NEUTRON_EXPO_OWNER
+  if (!owner || !owner.trim()) {
+    throw new Error('NEUTRON_EXPO_OWNER must be set in the local environment and the matching EAS environment (sensitive visibility).')
+  }
+  return {
+    expo: {
+      ...expo,
+      owner,
+      plugins: [...expo.plugins, './plugins/with-native-crash-reporting'],
+      android: {
+        ...expo.android,
+        // EAS supplies an absolute path; a local build falls back to the
+        // gitignored file beside this config. One expression, no branching.
+        //
+        // `||`, NOT `??` — and this is load-bearing rather than style. `??` falls
+        // back only on null/undefined, so an EAS variable that EXISTS but is EMPTY
+        // (cleared, or created with no value) resolves `googleServicesFile: ''`.
+        // That is not a loud failure: it produces a build with no Firebase config,
+        // which is precisely the instant `FirebaseInitProvider` crash this file
+        // exists to prevent — flash and close, no JS, no error to read. An empty
+        // string must take the fallback like any other missing value. Guarded by
+        // `__tests__/android-fcm-config.test.ts`; do not "modernise" this to `??`.
+        googleServicesFile: process.env.GOOGLE_SERVICES_JSON || './google-services.json',
+      },
     },
-  },
-})
+  }
+}
