@@ -23,6 +23,7 @@ import { modelTier } from '@neutronai/trident/model-tiers.ts'
 import { readProjectRepos } from '@neutronai/trident/project-repos.ts'
 import { buildReflectionGuidance } from '@neutronai/trident/reflection-guidance.ts'
 import { PROJECT_BUILD_WALL_MS } from '@neutronai/trident/project-build-budget.ts'
+import { prepareProjectDependencies } from './project-build-dependencies.ts'
 import { parseBuildModeState, readBuildRetrySource } from '@neutronai/trident/build-mode-state.ts'
 
 /**
@@ -78,6 +79,8 @@ export interface ProjectBuildContext {
   /** Test seam for suite execution. Production uses plain spawnCapture, without
    * the GitHub environment loaded by the publication runner. */
   runSuite?: ProjectBuildHostOptions['production']['runHost']
+  /** Test seam for dependency setup; production does not use publisher credentials. */
+  runInstall?: typeof spawnCapture
   stateRoot: string
   projectDir: string
   projectId: string
@@ -251,6 +254,7 @@ export async function prepareProjectBuild(input: InnerLoopInput, context: Projec
   // Armed files remain durable evidence that work may have been submitted.
   const reconciled = await reconcileStoppedTrailerReservations(state)
   if (!reconciled.ok) throw new Error(reconciled.detail)
+  await prepareProjectDependencies(run.worktree, state, context.runInstall)
   const topic = run.chat_id ?? context.projectId
   const codexSessions = context.codexSessionHost ?? new CodexProjectSessionHost({
     registryPath: join(context.stateRoot, 'codex-project-sessions.json'),
