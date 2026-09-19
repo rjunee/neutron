@@ -13,10 +13,12 @@ Read it before starting work and before writing an as-built record. The
 
 The short version, which is not a substitute for reading it:
 
-- **One queue: [`docs/spec-items/`](docs/spec-items/README.md)**, indexed by a
-  generated rollup. GitHub Issues is the **inbox**, not a second queue. No ad-hoc
-  tracking files — no `TODO.md`, no wave boards, no scratchpad that becomes a
-  parallel list.
+- **GitHub Issues is the master source for work state** — what is open, prioritised,
+  blocked, assigned to a milestone, or done. Keep it current as evidence changes.
+  **One normative queue:** [`docs/spec-items/`](docs/spec-items/README.md), indexed
+  by a generated rollup. Issues is the inbox/state board, not a second home for
+  acceptance criteria. No ad-hoc tracking files — no `TODO.md`, no wave boards,
+  no scratchpad that becomes a parallel list.
 - **Never build from a bare title.** Specifying is the agent's job, not the
   owner's: investigate the repo first, interview the owner in one batch for what
   the repo cannot answer, then rewrite the issue. `needs-spec` is never removed by
