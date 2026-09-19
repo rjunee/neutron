@@ -87,6 +87,7 @@ function harness(
     on_orphaned_session: 'wait',
     begin_crash_recovery: (id) => store.beginCrashRecovery(id),
     begin_project_build_driver_recovery: (id, reservation) => store.beginProjectBuildDriverRecovery(id, reservation),
+    list_stage_events: id => store.stageEvents(id),
     max_crash_recoveries: opts.maxCrashRecoveries ?? 2,
   })
   return new TridentTickLoop({
@@ -229,9 +230,16 @@ describe('external launcher death reaches the real orchestrator without killing 
     })
     await store.update(run.id, {
       inner_result: reservation,
-      inner_checkpoint: 'ralph-task-built',
-      inner_checkpoint_head: 'a'.repeat(40),
+      inner_checkpoint: null,
+      inner_checkpoint_head: null,
+      base_sha: 'b'.repeat(40), worktree: '/repo/worktree',
     })
+    await store.recordStageEvent(run.id, 'build-mode-state', JSON.stringify({ runId: run.id,
+      branch: run.branch, base: 'b'.repeat(40), repo: run.repo_path, projectSlug: run.project_slug,
+      mergeMode: run.merge_mode, worktree: '/repo/worktree', iteration: 0,
+      checkpoint: { head: 'a'.repeat(40), stage: 'ralph-task-built', round: 0,
+        replansUsed: 0, findings: [], previousFindings: [] },
+    }))
     const fires: InnerLoopInput[] = []
     const loop = harness('alive', async input => {
       fires.push(input)

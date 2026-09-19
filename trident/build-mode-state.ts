@@ -8,6 +8,15 @@ type BuildRetrySource = { prior: TridentRun; eventId: number; state: BuildModeSt
 export const retrySourceIdentity = (run: TridentRun): string =>
   JSON.stringify([run.id, run.project_slug, run.repo_path, run.branch, run.task, run.merge_mode, run.ralph])
 
+/** The latest host checkpoint is authoritative, including a pending provider arm. */
+export function readBuildModeState(
+  events: ReadonlyArray<{ stage: string; meta?: string | null }>,
+  run: TridentRun,
+): BuildModeState | null {
+  const event = events.filter(event => event.stage === 'build-mode-state').at(-1)
+  return event ? parseBuildModeState(event.meta ?? null, run) : null
+}
+
 /** Validate the original writer's identity before any state is consumed. */
 export function parseBuildModeState(meta: string | null, run: TridentRun, terminalSource = false): BuildModeState {
   const state = JSON.parse(meta ?? 'null')

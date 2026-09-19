@@ -4,6 +4,7 @@ import type { AdvanceOutcome } from './state-machine.ts'
 import { CONFIGURED_CODE_CAVEAT, composeWrongBaseRefusal, foldEvidence, foldRefName } from './wrong-base-remedy.ts'
 import { gitRangeArgv } from './git-range.ts'
 import { redactPushError } from './publish-failure.ts'
+import { readBuildModeState } from './build-mode-state.ts'
 import type { HostCommandResult } from './git-mode.ts'
 
 const realSleep = (ms: number): Promise<void> => new Promise((resolve) => setTimeout(resolve, ms))
@@ -31,7 +32,7 @@ export interface LaunchPreparationDeps {
 
 export async function prepareLaunch(
   run: TridentRun,
-  opts: Pick<BuildTridentOrchestratorOptions, 'run_host' | 'sleep'>,
+  opts: Pick<BuildTridentOrchestratorOptions, 'run_host' | 'sleep' | 'list_stage_events'>,
   deps: LaunchPreparationDeps,
 ): Promise<AdvanceOutcome | PreparedLaunch> {
   const {
@@ -43,15 +44,24 @@ export async function prepareLaunch(
     resolveResumeLiveHead,
     resumeHeadDecides,
   } = deps
+  let modeState: ReturnType<typeof readBuildModeState>
+  try {
+    modeState = readBuildModeState(opts.list_stage_events?.(run.id) ?? [], run)
+  } catch {
+    return {
+      run: failedRun(run, 'Project driver canonical checkpoint is unreadable or has invalid identity or state', false),
+      changed: true, waiting: false, note: `${run.phase} → failed (invalid project driver checkpoint)`,
+    }
+  }
   const base = await resolveBase(run)
-  let resume_checkpoint = run.inner_checkpoint
+  let resume_checkpoint = modeState?.checkpoint.stage ?? run.inner_checkpoint
   // MID-LOOP RESUME — the checkpoint travels WITH the commit it was recorded
   // against (and, for a REQUEST_CHANGES checkpoint, the findings recorded with
   // it). Threading the name alone is what forced every relaunch to rebuild: a
   // verdict is about a COMMIT, and without the OID the workflow cannot tell
   // whether the branch still holds the code that verdict was about.
-  let resume_checkpoint_head = run.inner_checkpoint_head
-  let resume_findings = run.inner_checkpoint_findings
+  let resume_checkpoint_head = modeState ? modeState.checkpoint.head : run.inner_checkpoint_head
+  let resume_findings = modeState ? JSON.stringify(modeState.checkpoint.findings) : run.inner_checkpoint_findings
   // MID-LOOP RESUME — READ the live branch head HERE, in the outer loop, because
   // THIS is the credentialed host boundary: `opts.run_host` already runs every other
   // git command for this run. The workflow's `head-probe-round-resume` agent seat
@@ -67,6 +77,9 @@ export async function prepareLaunch(
   // to compare against, or no branch → the workflow rebuilds regardless, and a fresh
   // launch must stay byte-identical (no extra git command, no extra arg).
   let resume_live_head =
+    // The typed host measures its own branch and validates the checkpoint head.
+    // A remote legacy probe must not erase a pending provider arm or an unpushed build.
+    modeState === null &&
     resume_checkpoint !== null &&
     /^(?:[0-9a-f]{40}|[0-9a-f]{64})$/.test(recorded) &&
     typeof run.branch === 'string' &&
@@ -142,7 +155,7 @@ export async function prepareLaunch(
   // card, only with the shortcut.
   const never_recovered = (run.crash_recoveries ?? 0) === 0 && (run.infra_retries ?? 0) === 0
   const seeded_resume =
-    run.inner_checkpoint !== null && run.workflow_run_id === null && never_recovered
+    modeState === null && run.inner_checkpoint !== null && run.workflow_run_id === null && never_recovered
   const seed_falsified =
     seeded_resume &&
     typeof resume_live_head === 'string' &&
@@ -216,7 +229,7 @@ export async function prepareLaunch(
     }
   }
 
-  const freshLaunch = launchRun.inner_checkpoint === null
+  const freshLaunch = resume_checkpoint === null
   const priorBaseSha = launchRun.base_sha
   const freshBuild = freshLaunch && priorBaseSha === null
   let base_sha: string | null = priorBaseSha

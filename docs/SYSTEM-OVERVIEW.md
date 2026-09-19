@@ -6686,7 +6686,17 @@ deleted, no dual path):
   asked BEFORE any `round-lost` verdict is written, and only a non-merge lets the
   head comparison speak. The guard's behaviour for a fix round that genuinely never
   pushed is unchanged.
-- **Per-phase SQLite checkpointing (C1) + idempotent crash-resume (C2):** the
+- **Project-driver gateway recovery:** the typed production host writes its
+  checkpoint to the latest `build-mode-state` stage event. Recovery validates that
+  event's run, project, repository, branch, base, worktree and merge-mode identity
+  with the host's parser, then requires a recorded head or pending provider step
+  (`trident/build-mode-state.ts:11`, `trident/orchestrator.ts:2919`). Launch
+  preparation forwards canonical resume state without synthesising legacy row
+  checkpoints (`trident/launch-preparation.ts:47`). The typed host measures the
+  current head; a pending step remains unknown and is never dispatched again
+  (`trident/build-run.ts:255`). A genuinely checkpoint-free abandoned reservation
+  still fails rather than replaying uncertain work.
+- **Retained workflow adapter: per-phase SQLite checkpointing (C1) + idempotent crash-resume (C2):** the
   workflow's own `agent()` Bash steps `UPDATE code_trident_runs` mid-run
   (`inner_checkpoint` = `forge-done` / `argus-approved` / `argus-request-changes`
   / `fix-round-N`; timestamps via `date -u +%FT%TZ` since `Date.now` is
