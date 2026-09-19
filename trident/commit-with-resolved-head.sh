@@ -4,16 +4,18 @@ set -uo pipefail
 # #1133 -- the message rewrite below must be byte-exact except for the line it removes, so
 # this filter works on the raw commit OBJECT (`git cat-file commit`, headers up to the first
 # empty line, then the message) and never on `git log` output, which is porcelain: re-encoded
-# per `i18n.logOutputEncoding` and decorated per `log.showSignature`. `LC_ALL=C` makes every
-# comparison a byte comparison (a UTF-8 locale would make `grep` call a latin1 body "binary"
-# and print a summary line in place of it); `read -r` with an empty IFS keeps every byte but
-# the newline, and a final line without one is written back without one. `${line,,}` under
-# the C locale folds ASCII only, so the match is case-insensitive the way git's own trailer
-# tokens are and no non-ASCII byte is touched. Removed: every line beginning
-# `Claude-Session:` and, when that emptied its paragraph (the CLI reminder makes the agent
-# write the trailer as its own `-m` paragraph), the one empty line that separated that
-# paragraph -- the next one, or the previous one when it was last -- so the rewrite leaves
-# no doubled or trailing blank line. Nothing else changes. Returns 0 when a line was removed.
+# per `i18n.logOutputEncoding` and decorated per `log.showSignature`. `read -r` with an empty
+# IFS keeps every byte but the newline, and a final line without one is written back without
+# one. The match is a bracket pattern (`[Cc][Ll]...:*`): it runs on bash 3.2 (stock macOS;
+# the bash-4 lowercasing expansion dies there with `bad substitution` AFTER the commit
+# landed, before the withdrawal), it is case-insensitive for ASCII only, the way git's own
+# trailer tokens are, and no non-ASCII byte is touched. `LC_ALL=C` is defence in depth (a byte comparison regardless of the REPL's
+# locale -- collation, a Turkish-locale fold); no test discriminates it. Removed: every line
+# beginning `Claude-Session:` and, when that emptied its paragraph (the CLI reminder makes the
+# agent write the trailer as its own `-m` paragraph), the one empty line that separated that
+# paragraph -- the next one, or the previous one when it was last. That removes only that one
+# separator; any other blank line the first commit stored (for example under verbatim
+# cleanup) is kept as it is. Nothing else changes. Returns 0 when a line was removed.
 strip_session_trailer() {
   local LC_ALL=C
   local line in_message=0 ended_with_newline=1
@@ -31,8 +33,8 @@ strip_session_trailer() {
   fi
   local n=${#lines[@]} i removed=0
   for ((i = 0; i < n; i++)); do
-    case "${lines[i],,}" in
-      claude-session:*) drop[i]=1; removed=1 ;;
+    case "${lines[i]}" in
+      [Cc][Ll][Aa][Uu][Dd][Ee]-[Ss][Ee][Ss][Ss][Ii][Oo][Nn]:*) drop[i]=1; removed=1 ;;
       *) drop[i]=0 ;;
     esac
   done
@@ -124,8 +126,15 @@ if [ -n "$new_head" ] && [ "$new_head" != "$head_oid" ]; then
   git cat-file commit "$new_head" >"$raw_object"
   cat_exit=$?
   if [ "$cat_exit" -ne 0 ]; then
+    # Fail CLOSED, and check the withdrawal (see the amend path below for why): a reset
+    # that fails must be reported as the commit REMAINING, never as "was withdrawn".
     git reset -q --soft "$head_oid"
-    echo "commit refused: the commit $new_head could not be read back for the Claude-Session check (git cat-file exited $cat_exit); the commit was withdrawn, HEAD is back at $head_oid and the index still holds the staged changes" >&2
+    reset_exit=$?
+    if [ "$reset_exit" -ne 0 ]; then
+      echo "commit refused: the commit $new_head could not be read back for the Claude-Session check (git cat-file exited $cat_exit) AND the commit could not be withdrawn (git reset --soft $head_oid exited $reset_exit); $new_head is on the branch and may carry the trailer" >&2
+      exit "$cat_exit"
+    fi
+    echo "commit refused: the commit $new_head could not be read back for the Claude-Session check (git cat-file exited $cat_exit); the commit was withdrawn, HEAD is back at $head_oid and the index still holds the staged changes; an in-progress merge, cherry-pick or revert that the withdrawn commit concluded is not restored (MERGE_HEAD and its siblings are gone) -- re-run it before retrying" >&2
     exit "$cat_exit"
   fi
   if strip_session_trailer <"$raw_object" >"$stripped_message"; then
@@ -150,6 +159,14 @@ if [ -n "$new_head" ] && [ "$new_head" != "$head_oid" ]; then
         --) break ;;
         -S|-S?*|--gpg-sign|--gpg-sign=*|--no-gpg-sign|--allow-empty|--allow-empty-message) amend_flags+=("$arg") ;;
         -m|-F|-C|-c|-t|--message|--file|--author|--date|--template|--fixup|--squash|--reuse-message|--reedit-message|--trailer|--pathspec-from-file|--cleanup) value_of=skip ;;
+        # A cluster of boolean short flags whose LAST letter takes the next argv element
+        # (-am, -qm, -sm, -nm, -om, -aF, ...). An attached value (`-Ffile.txt`, `-Cabc`) is
+        # not a cluster: a non-flag letter before the last one leaves the next arg alone.
+        -[!-]*[mFCct])
+          case "${arg%?}" in
+            -*[!apqvnseioz]*) ;;
+            *) value_of=skip ;;
+          esac ;;
       esac
     done
     # `--only`: an amend without paths re-snapshots the CURRENT index, so a pathspec commit
@@ -174,14 +191,18 @@ if [ -n "$new_head" ] && [ "$new_head" != "$head_oid" ]; then
       # branch head, so it must not be left at HEAD for a later commit to carry along.
       # `reset --soft` moves the branch back to where the probe found it and keeps the
       # index and worktree as the first commit left them, so Forge can retry; the
-      # trailer-bearing commit survives only in the reflog.
+      # trailer-bearing commit survives only in the reflog. What it cannot restore is the
+      # sequencer state the first commit CONSUMED: a merge, cherry-pick or revert in
+      # progress (MERGE_HEAD, MERGE_MSG, CHERRY_PICK_HEAD, REVERT_HEAD) is concluded by that
+      # commit and gone after the reset. The loss is named on stderr rather than snapshotted
+      # and restored: the wrapper's contract is the trailer, not the sequencer.
       git reset -q --soft "$head_oid"
       reset_exit=$?
       if [ "$reset_exit" -ne 0 ]; then
         echo "commit refused: the Claude-Session trailer could not be stripped (git commit --amend exited $amend_exit) AND the commit could not be withdrawn (git reset --soft $head_oid exited $reset_exit); $new_head is on the branch WITH the trailer" >&2
         exit "$amend_exit"
       fi
-      echo "commit refused: the Claude-Session trailer could not be stripped (git commit --amend exited $amend_exit); the commit $new_head was withdrawn, HEAD is back at $head_oid and the index still holds the staged changes" >&2
+      echo "commit refused: the Claude-Session trailer could not be stripped (git commit --amend exited $amend_exit); the commit $new_head was withdrawn, HEAD is back at $head_oid and the index still holds the staged changes; an in-progress merge, cherry-pick or revert that the withdrawn commit concluded is not restored (MERGE_HEAD and its siblings are gone) -- re-run it before retrying" >&2
       exit "$amend_exit"
     fi
     # The pre-strip commit $new_head was amended away and survives only in the reflog; a

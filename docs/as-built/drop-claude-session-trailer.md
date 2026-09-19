@@ -86,8 +86,9 @@ at the one deterministic place every Forge commit passes through: the commit wra
    `git commit "$@"`; it runs the commit as a child and, on success and ONLY when HEAD moved
    (so `--dry-run` and a no-op commit never amend an older commit), reads the new commit
    back as the raw OBJECT (`git cat-file commit`, headers up to the first empty line, then
-   the message), removes every line beginning `Claude-Session:` (ASCII case-insensitive,
-   compared under the C locale so every byte is a byte) and amends the commit in place with
+   the message), removes every line beginning `Claude-Session:` (a bash-3.2 bracket pattern,
+   ASCII case-insensitive, compared under the C locale so every byte is a byte) and amends
+   the commit in place with
    `--amend --only --no-verify --cleanup=verbatim -F <file>` (author, parent, tree and
    `Co-Authored-By` untouched; `--only` is what keeps the TREE untouched, see the review
    findings below). The stored message is byte-exact: the first commit's message minus the
@@ -226,12 +227,15 @@ change.
   drops a line that is not valid UTF-8 and prints `binary file matches` in its place: on
   this host, a body `caf\xe9 body` (a latin1 e-acute, stored raw under
   `i18n.commitEncoding=ISO-8859-1`) vanished from the filtered message. Closed: the filter
-  is a bash function running under `LC_ALL=C` (`read -r` with an empty IFS, `printf '%s'`),
-  so every comparison is a byte comparison and a final line without a newline is written
-  back without one; the bytes travel through files, never `$(...)`, which would drop the
-  trailing newline. Real-git test with the positive control first (this host's grep loses
-  the line and reports `binary`); after the wrapper the stored message holds the raw byte
-  and the object still carries its `encoding ISO-8859-1` header.
+  is a bash function (`read -r` with an empty IFS, `printf '%s'`), so every byte but the
+  newline is carried as it is and a final line without a newline is written back without
+  one; the bytes travel through files, never `$(...)`, which would drop the trailing
+  newline. Real-git test with the positive control first (this host's grep loses the line
+  and reports `binary`); after the wrapper the stored message holds the raw byte and the
+  object still carries its `encoding ISO-8859-1` header. The function also sets `LC_ALL=C`;
+  that is defence in depth (a byte comparison regardless of the REPL's locale), NOT the
+  mechanism the test proves -- no test discriminates it, and the record says so since
+  round 11.
 - **The amend ran a cleanup of its own.** `--cleanup=whitespace` on the amend trimmed every
   line's trailing spaces and overrode a config-level `commit.cleanup` the agent never
   overrode on argv (the reviewer's second nit: `commit.cleanup=verbatim`, `trailing   ` kept
@@ -244,22 +248,90 @@ change.
   test: with `commit.cleanup=verbatim` in config the trailing spaces survive the amend, and
   a `-F` file whose last line has no newline is stored without one.
 - **The match was case-sensitive** (the reviewer's first nit; git trailer tokens are not).
-  Closed: `${line,,}` under the C locale folds ASCII only, so `claude-session:` is removed
-  and no non-ASCII byte is touched. Real-git test.
+  Closed in round 10 with the bash-4 lowercasing expansion; replaced in round 11 (below) by
+  a bracket pattern (`[Cc][Ll][Aa][Uu][Dd][Ee]-[Ss][Ee][Ss][Ss][Ii][Oo][Nn]:*`) that runs on
+  bash 3.2, folds ASCII only, and touches no non-ASCII byte. Real-git test.
 - **The G135 row described the old amend.** Closed: the row now states the invariant in the
   terms of the code it cites (raw object read, byte filter, verbatim amend, fail-closed
-  withdrawal) and its anchors point at the current lines of the script and the tests,
-  including the four added this round; two test anchors that had drifted by one line
-  (`:60`, `:72` for tests starting at 59 and 71) are corrected.
+  withdrawal). Round 10 claimed its anchors were checked; the four it added pointed at the
+  blank line above each test (`:411`, `:434`, `:462`, `:472` for tests starting at 412, 435,
+  463 and 473). Round 11 re-measured every anchor at the final tree, last, and cites the
+  line each test or script statement starts on.
+
+### Review findings on round 10 (`c62bfd69`), and how each was closed
+
+The round-10 head went out for review and the synthesis came back REQUEST_CHANGES (one
+major, four minor, two nits), plus two nits from the review role's own result. Each was
+reproduced or measured against the real script before the change.
+
+- **MAJOR -- `case "${lines[i],,}" in` is a bash-4.0 expansion.** On the bash 3.2 of stock
+  macOS (the repository installs on Darwin; the sibling trident scripts keep to 3.2 on
+  purpose) it is a fatal `bad substitution` AFTER `git commit "$@"` landed and BEFORE the
+  fail-closed withdrawal -- on every wrapped commit. It was the only bash-4 construct in the
+  script (grep for `,,`, `^^`, `@Q`, `mapfile`, `readarray`, `declare -A`, `[[ -v`, `&>`,
+  `;;&`, `|&` finds that line and its comment, nothing else). Closed: the arm is the bracket
+  pattern above (ASCII case-insensitive, byte-wise under `LC_ALL=C`, bash 3.2). bash 3.2 is
+  not installed on CI or on this host, so the guard is static: a test reads the script and
+  asserts the regex `\$\{[^}]*(,,|\^\^|@[A-Za-z])\}|\bmapfile\b|\breadarray\b|declare -A|\[\[ -v `
+  finds nothing, with an in-test positive control that the same regex matches the round-10
+  line. Re-introducing `${lines[i],,}` turns exactly that test red (28 pass / 1 fail); the
+  case-insensitivity real-git test stays the behavioural guard.
+- **MINOR -- the `cat-file` failure path ran `git reset --soft` unchecked and always printed
+  "was withdrawn".** Closed: the path mirrors the amend path's `reset_exit` branch; a reset
+  that fails is reported as "could not be withdrawn ... is on the branch and may carry the
+  trailer", exit code the cat-file one. Two real-git shim tests: single fault (`cat-file`
+  exits 3: wrapper exits 3, "was withdrawn", HEAD at the parent, `change.txt` still staged,
+  no `Claude-Session` on the branch) and double fault (`cat-file` 3 AND `reset` 9: wrapper
+  exits 3, "could not be withdrawn" and "may carry the trailer", never "was withdrawn", and
+  the commit really is still on the branch with the trailer -- the truth the message
+  states). Forcing `reset_exit=0` on that path turns exactly the double-fault test red.
+- **MINOR -- four G135 anchors pointed at blank lines** (`:411`, `:434`, `:462`, `:472`;
+  the tests start one line later). Closed as described in the round-9 section: every
+  anchor re-measured last, at the final tree.
+- **MINOR -- G135 kept the retracted rationale** "because the summary line git printed
+  first names the pre-strip commit" (false when the agent's commit ran `-q`). Closed: the
+  row now says what is always true -- the pre-strip commit was amended away and any
+  `[branch sha]` summary line naming it is stale.
+- **MINOR -- `reset --soft` cannot restore what the first commit consumed.** A merge,
+  cherry-pick or revert in progress (MERGE_HEAD, MERGE_MSG, CHERRY_PICK_HEAD, REVERT_HEAD)
+  is concluded by the commit and gone after the withdrawal, so "index kept, Forge can retry"
+  is not equivalent after a merge in progress. Decision: NAME THE LOSS rather than snapshot
+  and restore `.git` sequencer state. The wrapper's contract is the trailer; the trident
+  conflict resolver has the outer publisher commit merge trees, not the Forge REPL; and
+  restoring sequencer files is more bash surface than the card asks for. Both withdrawal
+  lines on stderr, the G135 row and this record say it. Real-git test: `git merge
+  --no-commit --no-ff side` (positive control: MERGE_HEAD resolves), then the wrapper with
+  the trailer paragraph and the amend-refusing shim -- exit 128, HEAD at the parent, MERGE_HEAD
+  no longer resolves, the merged tree still staged, stderr contains "is not restored" and
+  "MERGE_HEAD". Dropping the sentence turns exactly that test red.
+- **NIT -- combined short options escaped the value-skip scan.** `-am '-Signed ...'` forwarded
+  the message as a `-S<keyid>` and the commit was withdrawn. Closed: one more `case` arm
+  after the `-S` arm, `-[!-]*[mFCct])`, which skips the next argv element when the cluster's
+  LAST letter takes a value -- and only when every letter before it is a boolean short flag
+  (`-*[!apqvnseioz]*` is left alone), so an attached value such as `-Ffile.txt` or `-Cabc`
+  does not swallow the flag after it. Two real-git tests: `-am` with a `-S`-leading paragraph
+  lands as prose, exit 0; and `-F<file>` attached followed by `--allow-empty` (nothing
+  staged) lands, because `--allow-empty` still reached the amend. Removing the arm reds the
+  first; removing the inner guard reds the second.
+- **NIT -- `LC_ALL=C` was credited as the mechanism the byte-safety test proves.** No test
+  discriminates it. Closed by wording: the line stays as defence in depth (a Turkish-locale
+  REPL, locale collation), and the header comment, the round-9 section above and this
+  sentence say that no test discriminates it.
+- **Review role's nits -- the anchor off-by-one (same as above) and the header comment's
+  "leaves no doubled or trailing blank line".** Under verbatim cleanup a doubled blank line
+  the first commit stored is kept, so the claim overreached. Closed: the comment now states
+  the byte-exact contract -- the filter removes only the one separator of a trailer-only
+  paragraph; any other blank line the first commit stored is kept as it is.
 
 ### Mutation, proven by hand before nomination
 
-`grep -c 'claude-session:\*) drop\[i\]=1; removed=1 ;;' trident/commit-with-resolved-head.sh`
-= 1. Replacing that case arm with `claude-session:*) drop[i]=0 ;;` (the trailer is matched
-and kept) turns 13 of the 23 tests in `commit-with-resolved-head-realgit.test.ts` red
-(every strip test, including the four added this round) while
+`grep -c '\[Cc\]\[Ll\]\[Aa\]\[Uu\]\[Dd\]\[Ee\]-\[Ss\]\[Ee\]\[Ss\]\[Ss\]\[Ii\]\[Oo\]\[Nn\]:\*) drop\[i\]=1; removed=1 ;;'
+trident/commit-with-resolved-head.sh` = 1. Replacing that case arm with
+`[Cc][Ll][Aa][Uu][Dd][Ee]-[Ss][Ee][Ss][Ss][Ii][Oo][Nn]:*) drop[i]=0 ;;` (the trailer is
+matched and kept) turns 16 of the 29 tests in `commit-with-resolved-head-realgit.test.ts`
+red (every strip test, including three added this round) while
 `runtime/adapters/claude-code/persistent/__tests__/build-settings.test.ts`, which never runs
-the wrapper, stays green (15 pass); restoring the arm returns the guard to 23 / 0. This is
+the wrapper, stays green (15 pass); restoring the arm returns the guard to 29 / 0. This is
 the nominated mutation.
 
 The earlier nominations still hold and are kept as by-hand checks:
@@ -292,9 +364,10 @@ green; restoring the line returns the guard to green. (The round-8 pattern mutat
 The settings switch takes effect on the next REPL spawn from a deployed tree that carries
 it; warm REPLs keep their old `--settings` file until they respawn. The wrapper strip takes
 effect on the next Forge commit from a checkout that carries it, whatever the REPL's settings
-say. The commit that lands this change was itself authored through the wrapper with a
+say. The commit that landed round 8 was itself authored through the wrapper with a
 deliberate `Claude-Session: https://claude.ai/code/session_01PROOF` paragraph on its argv,
-and carries none. Merged is not shipped.
+and carries none; every later round's commit, this one included, was authored through the
+wrapper without such a paragraph and carries none. Merged is not shipped.
 
 ### Re-landed
 
@@ -316,7 +389,7 @@ findings, and restores this record, which round 7 dropped. Its first head `1244b
 reviewed and came back REQUEST_CHANGES; the fix commit on top closes those findings (the
 section above) without touching the settings switch or the Forge brief.
 
-Round 9 is on base `a1be24e0` (origin/main at #1169) and replays `2a4cbb5a` by cherry-pick
+Round 9 was on base `a1be24e0` (origin/main at #1169) and replayed `2a4cbb5a` by cherry-pick
 (merge-tree clean against main). Round 8 (`2a4cbb5a`, CI 12/12 green) was APPROVED with one
 nit (the `-q` wording above, closed in round 9) and then died because the host's own
 `scripts/run-tests.sh` refused to run in that worktree (`node_modules/.bun` absent, exit 3;
@@ -324,3 +397,13 @@ fixed by #1168); the run after it died because the build wrote `result.pr` as a 
 instead of the snapshot object. Neither was a defect in the change. Round 9 (`bb653667`) was
 APPROVED with the byte-exactness findings closed in round 10 (the section above), which
 touches only the wrapper, its real-git tests, the G135 row and this record.
+
+Round 11 is on the same base `a1be24e0`. The relaunch created the local branch from main
+carrying nothing; the card's finished work sat on origin as PR #1152 head `c62bfd69`
+(`a1be24e0` + 4 commits, CI 12/12 green, a fast-forward), so this round re-lands it with
+`git merge --ff-only` -- no cherry-pick, no conflict -- and adds one commit that closes the
+round-10 findings above. The previous run built round 10 and was stopped by the host's
+review-progress gate after the round-10 panel returned REQUEST_CHANGES a second time
+("Review requires orchestrator arbitration: no-progress"); the change had not been approved
+as a whole, so those findings are what this round closes. It touches only the wrapper, its
+real-git tests, the G135 row and this record.

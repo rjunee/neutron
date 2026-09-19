@@ -1,5 +1,5 @@
 import { afterEach, expect, test } from 'bun:test'
-import { existsSync, mkdirSync, mkdtempSync, readdirSync, rmSync, writeFileSync } from 'node:fs'
+import { existsSync, mkdirSync, mkdtempSync, readFileSync, readdirSync, rmSync, writeFileSync } from 'node:fs'
 import { tmpdir } from 'node:os'
 import { join } from 'node:path'
 import { spawnSync } from 'node:child_process'
@@ -488,5 +488,147 @@ test('#1133: the amend stores the filtered bytes verbatim -- a config-level comm
   const result = run(tree, 'bash', [guard, branch, '-F', bodyFile])
   expect(result.status, result.stderr || result.stdout).toBe(0)
   expect(storedMessage(tree)).toBe(`feat: nl\n\n${CO_AUTHOR}\nRefs #1133`)
+  expect(git(tree, 'rev-parse', 'HEAD^')).toBe(parent)
+})
+
+// Round 11 (#1133). bash 3.2 is not installed on CI or on this host, so no real-git test above
+// can see a bash-4-only construct: the script would run green here and die on stock macOS
+// with `bad substitution` AFTER `git commit` landed and BEFORE the fail-closed withdrawal --
+// on every wrapped commit. This static guard is what goes red if one returns; the
+// case-insensitivity test above stays the behavioural guard for the bracket pattern that
+// replaced `${x,,}`.
+const BASH4_ONLY = /\$\{[^}]*(,,|\^\^|@[A-Za-z])\}|\bmapfile\b|\breadarray\b|declare -A|\[\[ -v /
+
+test('#1133: the wrapper uses no bash-4-only construct (it must run on the bash 3.2 of stock macOS)', () => {
+  // Positive control: the regex recognises the construct round 10 shipped.
+  expect(BASH4_ONLY.test('case "${lines[i],,}" in')).toBe(true)
+  expect(BASH4_ONLY.test('echo "${x^^}"')).toBe(true)
+  expect(BASH4_ONLY.test('declare -A map')).toBe(true)
+
+  const script = readFileSync(guard, 'utf8')
+  expect(script).toContain('strip_session_trailer() {') // the right file was read
+  expect(script.match(BASH4_ONLY)).toBeNull()
+})
+
+// A shim that is real git for everything except the one subcommand it fails, standing in for
+// a corrupt object store, a permission error, or a ref lock; `failures` maps subcommand -> exit.
+function shimmedGitFailing(failures: Record<string, number>): string {
+  const bin = mkdtempSync(join(tmpdir(), 'trident-head-fault-shim-'))
+  roots.push(bin)
+  const realGit = run(bin, 'sh', ['-c', 'command -v git']).stdout.trim()
+  const arms = Object.entries(failures)
+    .map(([sub, code]) => `if [ "$1" = "${sub}" ]; then echo "shim: ${sub} refused" >&2; exit ${code}; fi\n`)
+    .join('')
+  writeFileSync(join(bin, 'git'), `#!/bin/sh\n${arms}exec ${realGit} "$@"\n`, { mode: 0o755 })
+  return bin
+}
+
+test('#1133: a read-back that fails withdraws the commit (fail closed on the cat-file path, single fault)', () => {
+  const { tree, branch, parent } = fixture()
+  const bin = shimmedGitFailing({ 'cat-file': 3 })
+
+  const result = spawnSync('bash', [guard, branch, '-m', 'feat: subject', '-m', SESSION, '-m', CO_AUTHOR], {
+    cwd: tree,
+    encoding: 'utf8',
+    env: { ...process.env, PATH: `${bin}:${process.env.PATH ?? ''}` },
+  })
+
+  expect(result.status).toBe(3)
+  expect(result.stderr).toContain('shim: cat-file refused')
+  expect(result.stderr).toContain('could not be read back')
+  expect(result.stderr).toContain('was withdrawn')
+  expect(git(tree, 'rev-parse', 'HEAD')).toBe(parent)
+  expect(git(tree, 'diff', '--cached', '--name-only')).toBe('change.txt')
+  expect(run(tree, 'git', ['log', '--format=%B', branch]).stdout).not.toContain('Claude-Session')
+})
+
+test('#1133: a read-back that fails AND a withdrawal that fails is reported as the commit remaining, never as withdrawn (double fault)', () => {
+  const { tree, branch, parent } = fixture()
+  const bin = shimmedGitFailing({ 'cat-file': 3, reset: 9 })
+
+  const result = spawnSync('bash', [guard, branch, '-m', 'feat: subject', '-m', SESSION, '-m', CO_AUTHOR], {
+    cwd: tree,
+    encoding: 'utf8',
+    env: { ...process.env, PATH: `${bin}:${process.env.PATH ?? ''}` },
+  })
+
+  expect(result.status).toBe(3)
+  expect(result.stderr).toContain('shim: reset refused')
+  expect(result.stderr).toContain('could not be withdrawn')
+  expect(result.stderr).toContain('may carry the trailer')
+  expect(result.stderr).not.toContain('was withdrawn')
+  // The truth the message states: the commit really is still on the branch, trailer and all.
+  expect(git(tree, 'rev-parse', 'HEAD')).not.toBe(parent)
+  expect(git(tree, 'rev-parse', 'HEAD^')).toBe(parent)
+  expect(git(tree, 'log', '-1', '--format=%B')).toContain(SESSION)
+})
+
+test('#1133: a withdrawal after a merge in progress names the sequencer state it cannot restore (MERGE_HEAD is gone)', () => {
+  const { repo, tree, branch, parent } = fixture()
+  // A second branch to merge from, made in the main worktree so `tree` stays on the guarded branch.
+  git(repo, 'branch', 'side', parent)
+  git(repo, 'checkout', '-q', 'side')
+  writeFileSync(join(repo, 'side.txt'), 'side\n')
+  git(repo, 'add', 'side.txt')
+  git(repo, 'commit', '-q', '-m', 'side')
+  git(repo, 'checkout', '-q', 'main')
+  git(tree, 'reset', '-q')
+  rmSync(join(tree, 'change.txt'))
+  git(tree, 'merge', '-q', '--no-commit', '--no-ff', 'side')
+  // Positive control: the merge really is in progress before the wrapper runs.
+  expect(run(tree, 'git', ['rev-parse', '-q', '--verify', 'MERGE_HEAD']).status).toBe(0)
+  const bin = shimmedGitFailing({})
+  writeFileSync(
+    join(bin, 'git'),
+    `#!/bin/sh\n` +
+      `for a in "$@"; do if [ "$a" = "--amend" ]; then echo "shim: amend refused" >&2; exit 128; fi; done\n` +
+      `exec ${run(bin, 'sh', ['-c', 'command -v git']).stdout.trim()} "$@"\n`,
+    { mode: 0o755 },
+  )
+
+  const result = spawnSync('bash', [guard, branch, '-m', 'merge: side', '-m', SESSION], {
+    cwd: tree,
+    encoding: 'utf8',
+    env: { ...process.env, PATH: `${bin}:${process.env.PATH ?? ''}` },
+  })
+
+  expect(result.status).toBe(128)
+  expect(result.stderr).toContain('was withdrawn')
+  expect(result.stderr).toContain('is not restored')
+  expect(result.stderr).toContain('MERGE_HEAD')
+  expect(git(tree, 'rev-parse', 'HEAD')).toBe(parent)
+  // The measured truth the sentence states: the merge the withdrawn commit concluded is gone,
+  // while the merged tree is still staged for the retry.
+  expect(run(tree, 'git', ['rev-parse', '-q', '--verify', 'MERGE_HEAD']).status).not.toBe(0)
+  expect(git(tree, 'diff', '--cached', '--name-only')).toBe('side.txt')
+})
+
+test('#1133: a cluster of short options ending in -m (-am) hides its message from the amend-flag scan', () => {
+  const { tree, branch, parent } = fixture()
+
+  // `-am <msg>` is one argv element the scan must read as `-a -m`: the paragraph beginning
+  // `-S` is the VALUE of that -m, not a signing flag for the amend.
+  const result = run(tree, 'bash', [guard, branch, '-am', `-Signed by hand\n\n${SESSION}`])
+
+  expect(result.status, result.stderr || result.stdout).toBe(0)
+  const body = git(tree, 'log', '-1', '--format=%B')
+  expect(body).not.toContain('Claude-Session')
+  expect(body).toContain('-Signed by hand')
+  expect(git(tree, 'rev-parse', 'HEAD^')).toBe(parent)
+})
+
+test('#1133: an attached option value (-F<file>) is not a cluster -- the flag after it is still forwarded to the amend', () => {
+  const { tree, branch, parent } = fixture()
+  git(tree, 'reset', '-q') // nothing staged: the commit needs --allow-empty, and so does the amend
+  const bodyFile = join(tree, '..', 'attached.txt')
+  writeFileSync(bodyFile, `feat: attached\n\n${SESSION}\n`)
+
+  // A scan that read `-F<file>` as a cluster ending in a value-taking letter would skip
+  // `--allow-empty` as its value; the amend would then refuse to make the commit empty and
+  // the wrapper would withdraw a commit git had accepted.
+  const result = run(tree, 'bash', [guard, branch, `-F${bodyFile}`, '--allow-empty'])
+
+  expect(result.status, result.stderr || result.stdout).toBe(0)
+  expect(git(tree, 'log', '-1', '--format=%B')).toBe('feat: attached')
   expect(git(tree, 'rev-parse', 'HEAD^')).toBe(parent)
 })
