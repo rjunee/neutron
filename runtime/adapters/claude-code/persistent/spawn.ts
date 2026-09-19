@@ -368,7 +368,7 @@ async function spawnSession(
     : [mcpConfigPath, settingsPath]
   // Stamp the auth fingerprint the child is being spawned with so the warm-reuse
   // freshness guard can evict on a same-credential-id token refresh (Codex r2 P1).
-  session.authFingerprint = authFingerprintFor(options.env)
+  session.authFingerprint = authFingerprintFor(options.env, options.sinkTokenPath)
 
   // Pre-seed the first-run trust + bypass-permissions acceptance so the
   // interactive REPL doesn't wedge on a blocking Ink dialog before it loads
@@ -1550,7 +1550,7 @@ export async function getOrSpawnSession(
       const freshSurface = session.toolSurface === requestedToolSurface
       // P0-1 defense-in-depth: never serve a bridge-mismatched warm child.
       const freshBridge = session.toolBridgeActive === requestedToolBridge
-      const freshCredential = session.authFingerprint === authFingerprintFor(options.env)
+      const freshCredential = session.authFingerprint === authFingerprintFor(options.env, options.sinkTokenPath)
       // INSTALLED-MCP-SERVER guard: `mcpServers` is read once by `claude` at
       // startup, so a warm child cannot learn about a server the owner installed
       // (or approved, or revoked, or re-keyed) since it spawned. Evicting +

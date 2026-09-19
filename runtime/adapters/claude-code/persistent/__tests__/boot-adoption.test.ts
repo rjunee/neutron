@@ -190,6 +190,85 @@ afterEach(() => {
 })
 
 describe('the adopt direction', () => {
+  for (const policy of [
+    { label: 'unguarded turn', first: undefined, second: 'fp-abc' },
+    { label: 'different guarded credential', first: 'fp-abc', second: 'fp-other' },
+  ]) {
+    it(`a proactive caller cannot inherit a cached ${policy.label} adoption policy`, async () => {
+      const f = fixture()
+      const { entered, release } = f.host.holdAttach()
+      const deps = { host: f.host, health: async () => true, log: () => {} }
+      const initial = beginBootAdoption(f.options, KEY, {
+        ...deps, ...(policy.first === undefined ? {} : { expectedAuthFingerprint: policy.first }),
+      })
+      await entered
+      let proactiveSettled = false
+      const proactive = beginBootAdoption(f.options, KEY, {
+        ...deps, expectedAuthFingerprint: policy.second,
+      }).then(outcome => { proactiveSettled = true; return outcome })
+      await Promise.resolve()
+      expect(proactiveSettled).toBe(false)
+      release()
+      expect((await initial).kind).toBe('adopted')
+      const ownedRow = readRow(f.registryPath)
+      const ownedSession = await pool.get(KEY)
+      const outcome = await proactive
+      expect(outcome.kind).toBe('undecided')
+      expect(outcome.kind === 'undecided' && outcome.reason).toContain('incompatible adoption policy')
+      expect(readRow(f.registryPath)).toEqual(ownedRow)
+      expect(await pool.get(KEY)).toBe(ownedSession)
+      expect(f.host.closed).toEqual([])
+      // Refusing the proactive caller must not evict the original caller's cache.
+      expect((await beginBootAdoption(f.options, KEY, deps)).kind).toBe('adopted')
+      expect(f.host.attached).toHaveLength(1)
+    })
+  }
+
+  it('equal proactive credential policies share one in-flight adoption', async () => {
+    const f = fixture()
+    const { entered, release } = f.host.holdAttach()
+    const deps = { host: f.host, health: async () => true, log: () => {}, expectedAuthFingerprint: 'fp-abc' }
+    const first = beginBootAdoption(f.options, KEY, deps)
+    await entered
+    const second = beginBootAdoption(f.options, KEY, deps)
+    release()
+    expect((await first).kind).toBe('adopted')
+    expect((await second).kind).toBe('adopted')
+    expect(f.host.attached).toHaveLength(1)
+    expect((await pool.get(KEY))?.child.pid).toBe(4242)
+  })
+
+  it('proactive credential parity is rechecked under the claim and a refused pass is not cached', async () => {
+    const f = fixture()
+    const { entered, release } = f.host.holdAttach()
+    const pass = beginBootAdoption(f.options, KEY, {
+      host: f.host, health: async () => true, log: () => {},
+      expectedAuthFingerprint: 'fp-abc',
+    })
+    await entered
+    // Same pane and generation: only the credential evidence changes while the
+    // host attach is in flight. Handle/generation CAS alone cannot catch this.
+    const changed = writeRegistry(f.registryPath, {
+      reuse: { tool_surface: 'Read,Bash', tool_bridge: false, auth_fingerprint: 'fp-rotated' },
+    })
+    release()
+    const outcome = await pass
+    expect(outcome.kind).toBe('undecided')
+    expect(outcome.kind === 'undecided' && outcome.reason).toContain('credential-changed')
+    expect(readRow(f.registryPath)).toEqual(changed)
+    expect(pool.has(KEY)).toBe(false)
+    expect(f.host.closed).toEqual([])
+    expect(f.host.attached[0]?.detached).toBe(true)
+    expect(await postReply(deriveChildSinkToken(sink.token, GENERATION))).toBe(401)
+
+    const retry = await beginBootAdoption(f.options, KEY, {
+      host: f.host, health: async () => true, log: () => {},
+      expectedAuthFingerprint: 'fp-rotated',
+    })
+    expect(retry.kind).toBe('adopted')
+    expect((await pool.get(KEY))?.child.pid).toBe(4242)
+  })
+
   it('re-attaches the pane and puts a usable session back in the pool', async () => {
     const f = fixture()
     const outcome = await run(f)

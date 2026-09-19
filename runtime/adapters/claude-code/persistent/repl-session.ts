@@ -3,7 +3,7 @@
 // helpers (D2 split).
 
 import { dropLocalOwnership, noteLocalOwnership } from './local-ownership.ts'
-import { createHash, randomBytes } from 'node:crypto'
+import { randomBytes, scryptSync } from 'node:crypto'
 import { realpathSync, rmdirSync, unlinkSync } from 'node:fs'
 import { tmpdir } from 'node:os'
 import { dirname, resolve, sep } from 'node:path'
@@ -15,6 +15,7 @@ import { PtyRing, type RecentOutputOpts, type RingMark } from './pty-ring.ts'
 import type { SessionSizeWatchdog } from './session-size-watchdog.ts'
 import { CHILD_KILL_GRACE_MS, ZERO_USAGE, defaultIsPidAlive } from './signatures.ts'
 import type { ActiveTurn } from './types.ts'
+import { defaultSinkTokenPath, loadOrCreateSinkToken } from './sink-coordinates.ts'
 
 // ---------------------------------------------------------------------------
 // ReplSession — one warm REPL + its dev-channel + its turn serialization.
@@ -180,7 +181,7 @@ export class ReplSession {
    *  (defense-in-depth: the bridge restriction stays local, not keying-dependent). */
   toolBridgeActive = false
   /** Fingerprint of the auth secret this REPL was SPAWNED with (`CLAUDE_CODE_
-   *  OAUTH_TOKEN` / `ANTHROPIC_API_KEY`), hashed so no second plaintext copy of
+   *  OAUTH_TOKEN` / `ANTHROPIC_API_KEY`), derived so no second plaintext copy of
    *  the secret lives on the long-held session. The credential-freshness reuse
    *  guard compares the CURRENT dispatch's fingerprint against this: the pool key
    *  folds the STABLE `PooledCredential.id`, NOT the rotating token VALUE, so a
@@ -199,7 +200,7 @@ export class ReplSession {
    *  on the next turn. Deterministic over equal configuration, so an unchanged set
    *  reuses the warm child and the pool does not thrash. Derived from the servers'
    *  env VALUES (so a rotated secret reaches the subprocess) and therefore never
-   *  logged or persisted, exactly like {@link authFingerprint}. */
+   *  logged or persisted. The auth fingerprint is separately persisted for adoption. */
   mcpFingerprint = ''
   /** Per-session temp config files (`neutron-repl-*-mcp.json` + `*-settings.json`)
    *  this REPL was spawned with. Stashed so teardown can unlink them — an ephemeral
@@ -792,16 +793,41 @@ export function mergeEnv(overlay: Record<string, string | undefined> | undefined
  *  detect a per-dispatch OAuth token REFRESH under the SAME credential id. The
  *  pool key folds the STABLE `PooledCredential.id`, not the rotating token VALUE
  *  (#104), so without this a warm REPL keeps serving turns on an expired token
- *  after the access token rotates (Codex r2 P1). Hashed (never the plaintext
- *  secret) so no second copy of the token lives on the long-held session object.
+ *  after the access token rotates (Codex r2 P1).
+ *
+ *  Scrypt uses the independent, randomly generated instance sink root as a
+ *  protected per-instance salt, prefixed by a fixed domain. A registry-only
+ *  reader cannot test guesses without that salt; disclosure of both files still
+ *  requires scrypt's memory-hard work. The full 256-bit output replaces the old
+ *  64-bit truncation. The root stays in its existing 0600 file and is never put
+ *  in a registry row or given to a child.
+ *
+ *  N=16384, r=8, p=1 are Node's documented defaults (~16 MiB working memory).
+ *  These are opaque high-entropy provider tokens used for rotation comparison,
+ *  not human-chosen passwords. Explicit parameters and version identify the
+ *  durable format; increasing the work factor requires a migration. Synchronous
+ *  derivation also preserves the existing guard's check-before-use ordering.
+ *
+ *  The version prefix intentionally cannot equal an old unkeyed 16-hex digest.
+ *  A legacy nonempty row cannot be upgraded from the current token: that would
+ *  authorize an old child after same-ID rotation. Adoption must refuse it until
+ *  independent evidence of the child's actual credential permits migration.
  *  Returns `''` when no auth secret is present — the interactive-Max-login model
  *  authenticates via `claudeConfigDir`'s credentials.json + self-refresh, so
- *  there is no env token to fingerprint and the guard stays inert. */
-export function authFingerprintFor(env: Record<string, string | undefined> | undefined): string {
+ *  there is no env token to fingerprint and the guard stays inert. That sentinel
+ *  is unchanged across versions and does not require loading or creating a key. */
+export function authFingerprintFor(
+  env: Record<string, string | undefined> | undefined,
+  tokenPath?: string,
+): string {
   if (env === undefined) return ''
   const secret = env['CLAUDE_CODE_OAUTH_TOKEN'] ?? env['ANTHROPIC_AUTH_TOKEN'] ?? env['ANTHROPIC_API_KEY']
   if (typeof secret !== 'string' || secret.length === 0) return ''
-  return createHash('sha256').update(secret).digest('hex').slice(0, 16)
+  const salt = loadOrCreateSinkToken(tokenPath ?? defaultSinkTokenPath())
+  const digest = scryptSync(secret, `neutron/repl-auth-fingerprint/v1\0${salt}`, 32, {
+    N: 16384, r: 8, p: 1, maxmem: 32 * 1024 * 1024,
+  }).toString('hex')
+  return `scrypt-v1:${digest}`
 }
 
 /** Health-probe deadline. A dev-channel wedged enough to ACCEPT the connection

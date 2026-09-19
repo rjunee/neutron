@@ -310,6 +310,21 @@ references decisions by date; none is a second home for a decision.
 
 ## Decisions Log (immutable audit trail — NOT the build spec)
 
+### 2026-09-19 — Reconcile authorized live-chat project survivors before serving traffic.
+
+The locked requirement that a gateway restart restores project REPLs with their
+conversation intact includes recovery without a new app turn. This supersedes
+the lazy-construction residual of the 2026-09-13 entry for Open's `cc-agent-*`
+sessions: after the production graph binds its tools, boot derives exact keys
+from the current owner, General and non-deleted projects, their selected
+providers, and authorized credential identities. Only matching durable Claude
+pane rows enter adoption, each under its own options and a spawn-time auth
+fingerprint matching the current credential. No synthetic chat turn is
+sent and an absent or dead candidate does not arm supervision or spawn a REPL.
+Other substrate families retain lazy reconciliation; all existing identity
+probes, claims and fences remain binding. Acceptance lives in
+[`a-gateway-restart-keeps-the-project-repls`](docs/spec-items/a-gateway-restart-keeps-the-project-repls.md).
+
 ### 2026-09-16 — Observable pane adoption and bounded pane-loss recovery (#1095).
 
 An adopted pane must deliver a nonblank readable baseline before publication. A missing baseline or an exited child is refused and cleaned up; baseline detector signatures remain latched until they fall and rise. Pane loss reports `pane_vanished`, composition expiry reports `compose_timeout`, and genuine cancellation remains `aborted`. Wakeup terminal failures are grouped by typed reason. The first inactivity window is capped at the smaller of the configured turn window and 80% of the cadence. The progressing-turn policy (#1101) takes precedence for that original turn: its collector retains the 45-minute default absolute ceiling. Immediate pane-loss recovery is eligible only when the original loss arrives within the first window; one fresh attempt then has a hard budget of at most 10% of cadence, also capped by the configured turn window and ceiling. Thus early recovery fits 240 + 30 seconds inside the default 300-second cadence; later loss is reported and waits for the next sweep. The retry's hard budget takes precedence over progress on that recovery attempt.

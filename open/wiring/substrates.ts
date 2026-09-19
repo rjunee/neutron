@@ -34,6 +34,7 @@
 import {
   buildLlmCallSubstrate,
   type BuildLlmCallSubstrateInput,
+  type LlmCallSubstrate,
 } from '@neutronai/gateway/wiring/build-llm-call-substrate.ts'
 import {
   PROFILE_PHASE_SPEC,
@@ -52,6 +53,7 @@ import { buildTridentChildCrashSink } from './trident-child-crash-sink.ts'
 import { fireAndForget } from '@neutronai/logger/fire-and-forget.ts'
 
 export interface WiredSubstrates {
+  adoptLiveAgentRepls: (projectIds: readonly string[]) => Promise<void>
   /** Warm onboarding phase-spec substrate (`cc-llm-*`); null when LLM-less. */
   llmCallSubstrate: Substrate | null
   /** Warm live-chat substrate (`cc-agent-*`, tool-bridge on); null LLM-less. */
@@ -257,7 +259,7 @@ export function wireSubstrates(ctx: OpenWiringContext): WiredSubstrates {
 
   // Dedicated WARM conversational substrate for post-onboarding live chat
   // turns (no `ephemeral`; keyed per-dispatch on metering_context).
-  const makeLiveAgentSubstrate = (projectIdResolver?: () => string): Substrate | null =>
+  const makeLiveAgentSubstrate = (projectIdResolver?: () => string): LlmCallSubstrate | null =>
     conversationalAvailable
       ? buildLlmCallSubstrate({
           ...anthropicPoolArg,
@@ -595,6 +597,7 @@ export function wireSubstrates(ctx: OpenWiringContext): WiredSubstrates {
   }
 
   return {
+    adoptLiveAgentRepls: async projectIds => { await liveAgentSubstrate?.adoptExisting(projectIds) },
     llmCallSubstrate,
     liveAgentSubstrate,
     makeProjectLiveAgentSubstrate,

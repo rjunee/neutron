@@ -206,8 +206,12 @@ export type RowAdoptionOutcome =
    *  in-process host, or a build before handles existed). Not a failure. */
   | { readonly kind: 'no-handle'; readonly sessionKey: string }
 
-/** Injection seams. Production supplies none of them. */
+/** Optional proactive-adoption constraint and injectable probe seams. */
 export interface BootAdoptionDeps {
+  /** Proactive boot must not authorize a child carrying a replaced credential.
+   *  Empty string is meaningful (ambient auth); absent leaves turn-time reuse
+   *  checks in charge. Compared against the actual row and again under its claim. */
+  expectedAuthFingerprint?: string
   /** The host to ask. Defaults to `options.ptyHost ?? configuredPtyHost`. */
   host?: unknown
   /** `/health` probe. Defaults to the real one. */
@@ -356,6 +360,7 @@ interface AbandonSignal {
  * covered case, and it must not be written as one.
  */
 interface PassHandle {
+  readonly expectedAuthFingerprint: string | undefined
   readonly promise: Promise<RowAdoptionOutcome>
   readonly signal: AbandonSignal
   /** Mirrored synchronously so {@link resetBootAdoption} can tell a finished pass from
@@ -443,7 +448,20 @@ export function beginBootAdoption(
     passes.set(registryPath, forRegistry)
   }
   const live = forRegistry.get(sessionKey)
-  if (live !== undefined) return live.promise
+  if (live !== undefined) {
+    if (deps.expectedAuthFingerprint !== undefined &&
+        live.expectedAuthFingerprint !== deps.expectedAuthFingerprint) {
+      // A real turn may already own an unguarded pass. Await its gate but do
+      // not relabel its result as credential-checked proactive adoption, or
+      // delete/replace the pass that its own callers are still consuming.
+      return live.promise.then(() => {
+        const reason = 'incompatible adoption policy: the existing pass did not verify this proactive credential'
+        ;(deps.log ?? defaultLog)(`key=${sessionKey.slice(0, 32)}: ${reason}`)
+        return { kind: 'undecided', sessionKey, reason } as const
+      })
+    }
+    return live.promise
+  }
   // READ AND REGISTERED IN THE SAME SYNCHRONOUS STEP as the pass below — a latch checked
   // and then awaited before registering would reproduce the very race one level down.
   //
@@ -516,7 +534,10 @@ export function beginBootAdoption(
   // THE STORED PROMISE IS THE ONE THAT CLEARS THE TIMER, so there is no second,
   // unobserved promise to leak or to swallow a rejection: `started` already
   // converts every failure into a verdict, and every caller awaits this.
-  const handle: PassHandle = { promise: undefined as unknown as Promise<RowAdoptionOutcome>, signal, settled: false }
+  const handle: PassHandle = {
+    promise: undefined as unknown as Promise<RowAdoptionOutcome>, signal, settled: false,
+    expectedAuthFingerprint: deps.expectedAuthFingerprint,
+  }
   const gated = started.then((outcome) => {
     clearTimeout(timer)
     handle.settled = true
@@ -791,6 +812,11 @@ export async function reconcileOwnRepl(
   }
   const record = state.kind === 'absent' ? undefined : normaliseRecord(state.registry[sessionKey])
   if (record === undefined) return { kind: 'no-handle', sessionKey }
+  if (deps.expectedAuthFingerprint !== undefined &&
+      record.reuse?.auth_fingerprint !== deps.expectedAuthFingerprint) {
+    log(`key=${sessionKey.slice(0, 32)}: credential-changed — proactive adoption leaves the pane and row alone`)
+    return { kind: 'undecided', sessionKey, reason: 'credential-changed: spawn-time auth fingerprint is missing or no longer authorized' }
+  }
   if (record.pane_handle === undefined) {
     // A Bun child has no durable handle. An overlapping restart can still leave
     // it alive: inspect the transcript owners independently of the old gateway.
@@ -1913,7 +1939,7 @@ async function claimRowOrUnwind(args: {
   /** What the claim's critical section concluded. THREE, not a boolean: the row is ours,
    *  the row moved, or we never held the lock — and the third must not be able to reach
    *  the code that writes. */
-  type ClaimResult = 'ours' | 'row-moved' | 'lock-unacquired' | 'claimed-elsewhere' | 'reserved-elsewhere'
+  type ClaimResult = 'ours' | 'row-moved' | 'credential-changed' | 'lock-unacquired' | 'claimed-elsewhere' | 'reserved-elsewhere'
   let claim: ClaimResult
   // THE CLAIM IS A COMPARE-AND-SET, AND A CAS IS ONLY A CAS WHILE THE LOCK HOLDS
   // (Argus r14). `withFlockSync` deliberately runs unguarded when FFI is missing or
@@ -1941,6 +1967,10 @@ async function claimRowOrUnwind(args: {
         // correct implementation. Argus r21 hoisted that check too; the clear's early
         // returns were the last place this rule had not reached.
         const prev = registry[args.sessionKey]
+        if (args.deps.expectedAuthFingerprint !== undefined &&
+            prev?.reuse?.auth_fingerprint !== args.deps.expectedAuthFingerprint) {
+          return { registry, result: 'credential-changed' as ClaimResult, skipSave: true }
+        }
         if (
           prev === undefined ||
           prev.pane_handle !== args.expected.handle ||
@@ -2064,6 +2094,10 @@ async function claimRowOrUnwind(args: {
       `the registry could NOT BE READ OR WRITTEN for this adoption's row claim (${errorText(e)}) — ` +
         'nothing establishes who owns this pane, so it is left running and the row left alone',
     )
+  }
+  if (claim === 'credential-changed') {
+    log(`row ${args.sessionKey.slice(0, 32)}: credential-changed while attaching — leaving the pane and row alone`)
+    return args.release('credential-changed: durable auth fingerprint changed before the adoption claim')
   }
   if (claim === 'lock-unacquired') {
     // NOT PUBLISHED, AND NOT CLOSED. "Someone else owns this row" and "I could not find

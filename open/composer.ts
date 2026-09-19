@@ -1178,6 +1178,7 @@ export function buildOpenGraphComposer(
       llmCallSubstrate,
       liveAgentSubstrate,
       makeProjectLiveAgentSubstrate,
+      adoptLiveAgentRepls,
       makeComposeSubstrate,
       reminderComposeSubstrate,
       makeEphemeralSubstrate,
@@ -6823,6 +6824,9 @@ export function buildOpenGraphComposer(
 
     return {
       db,
+      // The graph binds the tool bridge after this composer returns. Survivors
+      // regain authority only after that binding, with no synthetic chat turn.
+      on_graph_ready: () => adoptLiveAgentRepls(['general', ...listProjectIds()]),
       project_slug,
       // ALWAYS set, never conditionally spread. A field the composer assigns
       // only sometimes is exactly the ambiguity `composition-field-coverage`

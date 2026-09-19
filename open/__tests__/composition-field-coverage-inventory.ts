@@ -91,6 +91,10 @@ export const MIN_EXPECTED_WIRED_FIELDS = 19
  */
 export const WIRED_FIELDS: readonly CompositionFieldWiredEntry[] = [
   {
+    field: 'on_graph_ready',
+    provides: 'authorized project REPL survivors regain their tool bridge before boot accepts traffic, without a chat turn',
+  },
+  {
     field: 'slug_is_fallback',
     provides:
       'the credential surfaces\' direction guard — unset, an explicit migration on a fallback boot claims rows belonging to a configured handle, which is the defect this field exists to close',

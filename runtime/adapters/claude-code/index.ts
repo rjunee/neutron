@@ -24,6 +24,10 @@
 
 import { mkdirSync } from 'node:fs'
 import { join } from 'node:path'
+import { readRegistryState } from './persistent/repl-registry.ts'
+import { beginBootAdoption } from './persistent/boot-adoption.ts'
+import { supervisedBySessionKey } from './persistent/pool-state.ts'
+import { authFingerprintFor } from './persistent/repl-session.ts'
 
 import { createLogger } from '@neutronai/logger'
 
@@ -412,17 +416,54 @@ export function resolveReplCwdAndHome(input: {
   return out
 }
 
-/**
- * Construct the Claude Code substrate. UNCONDITIONALLY builds the persistent
- * interactive-REPL substrate — there is no env toggle and no fallback (the
- * `NEUTRON_PERSISTENT_REPL` flag + the legacy per-turn `claude -p` path were
- * removed in the S3 rip-replace; `git revert` is the only rollback). The options
- * bag is mapped onto `createPersistentReplSubstrate` (one warm interactive
- * `claude` REPL per (substrate_instance_id, user, project, credential), driven
- * over the dev-channel, exempt from the June-15 `claude -p` cap). Every drain
- * call site consumes the same `Event` union.
- */
-export function createClaudeCodeSubstrateAuto(options: ClaudeCodeSubstrateOptions): Substrate {
+/** Exact lookup from trusted identity fields; durable session keys remain opaque. */
+export function existingClaudeRepl(options: Pick<ClaudeCodeSubstrateOptions,
+  'substrate_instance_id' | 'cwd' | 'user_id' | 'project_id' | 'credential_identity'>,
+): { registryPath: string; sessionKey: string } | undefined {
+  const { home } = resolveReplCwdAndHome({ cwd: options.cwd, env: process.env })
+  if (home === undefined) return undefined
+  const registryPath = deriveReplSupervisionPaths(home).replRegistryPath
+  const sessionKey = poolKeyFor(options)
+  const state = readRegistryState(registryPath)
+  if (state.kind === 'unreadable' ||
+      (state.kind === 'loaded' && state.droppedKeys.includes(sessionKey))) {
+    throw new Error('boot REPL adoption cannot establish durable registry identity')
+  }
+  const row = state.kind === 'loaded' ? state.registry[sessionKey] : undefined
+  return row?.pane_handle === undefined ? undefined : { registryPath, sessionKey }
+}
+
+/** Construct only a recorded survivor's owning adapter, without starting a turn. */
+export async function reconcileExistingClaudeRepl(
+  options: ClaudeCodeSubstrateOptions,
+): Promise<void> {
+  const existing = existingClaudeRepl(options)
+  if (existing === undefined || options.ephemeral === true) return
+  const { p, resolved } = prepareClaudeCodeOptions(options)
+  if (resolved.home === undefined) return
+  const paths = deriveReplSupervisionPaths(resolved.home)
+  applySupervisionPaths(p, paths)
+  const outcome = await beginBootAdoption(p, existing.sessionKey, {
+    expectedAuthFingerprint: authFingerprintFor(p.env, p.sinkTokenPath),
+  })
+  // Only a proved survivor becomes supervised. Registering dead candidates even
+  // briefly would let another registry watchdog turn boot discovery into a spawn.
+  if (outcome.kind !== 'adopted') return
+  // A first turn joining this pass owns its freshly resolved option bag.
+  if (!supervisedBySessionKey.has(existing.sessionKey)) registerSupervisedSubstrate(p)
+  startReplWatchdog(p, { heartbeatFile: paths.heartbeatFile })
+  startModelUpdateWatchdogForInstance(p)
+}
+
+function applySupervisionPaths(p: PersistentReplSubstrateOptions, paths: ReplSupervisionPaths): void {
+  p.replRegistryPath = paths.replRegistryPath
+  p.pendingRespawnsPath = paths.pendingRespawnsPath
+  p.restartMarkersPath = paths.restartMarkersPath
+  p.modelUpdateStatePath = paths.modelUpdateStatePath
+  p.sinkTokenPath = paths.sinkTokenPath
+}
+
+function prepareClaudeCodeOptions(options: ClaudeCodeSubstrateOptions) {
   const p: PersistentReplSubstrateOptions = {
     substrate_instance_id: options.substrate_instance_id,
   }
@@ -537,6 +578,22 @@ export function createClaudeCodeSubstrateAuto(options: ClaudeCodeSubstrateOption
   }
   if (options.permissions !== undefined) p.permissions = options.permissions
 
+  return { p, resolved, rawCwd, rawHome }
+}
+
+/**
+ * Construct the Claude Code substrate. UNCONDITIONALLY builds the persistent
+ * interactive-REPL substrate — there is no env toggle and no fallback (the
+ * `NEUTRON_PERSISTENT_REPL` flag + the legacy per-turn `claude -p` path were
+ * removed in the S3 rip-replace; `git revert` is the only rollback). The options
+ * bag is mapped onto `createPersistentReplSubstrate` (one warm interactive
+ * `claude` REPL per (substrate_instance_id, user, project, credential), driven
+ * over the dev-channel, exempt from the June-15 `claude -p` cap). Every drain
+ * call site consumes the same `Event` union.
+ */
+export function createClaudeCodeSubstrateAuto(options: ClaudeCodeSubstrateOptions): Substrate {
+  const { p, resolved, rawCwd, rawHome } = prepareClaudeCodeOptions(options)
+
   // Sprint-2 supervision: derive a per-instance persisted REPL registry + state dir
   // under the instance home and ensure the live watchdog (wedge/crash detect →
   // `--resume` respawn) + heartbeat run once per registry. Disposable one-turn
@@ -554,15 +611,11 @@ export function createClaudeCodeSubstrateAuto(options: ClaudeCodeSubstrateOption
     } catch {
       /* best-effort; a write failure later degrades supervision, never bricks */
     }
-    p.replRegistryPath = paths.replRegistryPath
-    p.pendingRespawnsPath = paths.pendingRespawnsPath
-    p.restartMarkersPath = paths.restartMarkersPath
-    p.modelUpdateStatePath = paths.modelUpdateStatePath
     // ISSUES #537 — the reply sink's persisted token, in the same state dir as the
     // rest of the durable REPL state. Wiring it is what makes a restarted gateway
     // present the SAME token the surviving REPLs were baked with; unwired (no
     // supervision home), the sink falls back to `defaultSinkTokenPath()`.
-    p.sinkTokenPath = paths.sinkTokenPath
+    applySupervisionPaths(p, paths)
     // Register the live options so the watchdog tick + the operator admin-respawn
     // endpoint actuate each session with its OWNING substrate's options (keyed by
     // pool key).
