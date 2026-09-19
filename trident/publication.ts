@@ -8,6 +8,7 @@ import { reviewedHeadOid, type MergeConflictResolver } from './merge.ts'
 import { rebaseOntoObservedBase } from './replay.ts'
 import { publishFailureReason } from './publish-failure.ts'
 import { fixLineage } from './gates/fix-lineage.ts'
+import { sessionTrailerReadiness } from './gates/release-readiness.ts'
 import { runLeakGatePreflight, type LeakPreflightFixer } from './leak-preflight.ts'
 import type { TridentRun } from './store.ts'
 
@@ -64,6 +65,17 @@ export async function resolveClaimedCommit(
   )
   const oid = res.stdout.trim()
   return res.ok && /^[0-9a-f]{40}$/.test(oid) ? oid : null
+}
+
+/** The full OID a rev-range operand names: a 40/64-hex sha as given, else `rev-parse` of the
+ *  ref (`^{commit}` so a tag resolves to the commit it points at); '' when it names none. */
+async function commitOf(run_host: DiffOutputHost, repo_path: string, operand: string): Promise<string> {
+  const name = operand.trim()
+  if (/^(?:[0-9a-f]{40}|[0-9a-f]{64})$/.test(name)) return name
+  if (name === '' || name.startsWith('-')) return ''
+  const res = await run_host(['git', '-C', repo_path, 'rev-parse', '--verify', '--quiet', `${name}^{commit}`], repo_path)
+  const oid = res.stdout.trim()
+  return res.ok && /^(?:[0-9a-f]{40}|[0-9a-f]{64})$/.test(oid) ? oid : ''
 }
 
 export interface PublicationDeps {
@@ -218,6 +230,38 @@ export async function publishBuiltCommit(
   } else {
     log.info('leak_preflight', { run_id: run.id, status: preflight.status, note: preflight.note })
   }
+  // #1133 (G166) ON THE SALVAGE PATH. This publisher is the THIRD writer of a build branch to
+  // origin, and it is the one a refused wrapper commit actually takes: the wrapper refuses
+  // (exit 69/70/74/76) and leaves the trailer-bearing commit on the branch, the checked
+  // publisher's `publicationReadiness` blocks, the run is recorded `failed`, and
+  // `reconcile_stranded` calls THIS function to push the branch "as PR #N, unreviewed" — which
+  // would publish exactly the commit the gate refused. The replay above makes it worse, not
+  // better: it re-commits the ORIGINAL message plus a replay note, so the trailer rides onto
+  // the replayed head. So the same scan runs here, after the replay and the preflight (so it
+  // measures the head that will be pushed) and before the lease push, over this branch's own
+  // commits (the window is spelled out below). It is
+  // UNCONDITIONAL — a remote already at this head is scanned the same as a first push, as the
+  // checked gate does — and it FAILS CLOSED: a carrier AND a range that cannot be measured
+  // both throw, so `reconcile_stranded` records the branch as not pushed (its ordinary
+  // "stranded work recorded without a publish" outcome) instead of publishing it. The reason
+  // names every carrier sha, so the operator can strip and relaunch.
+  //
+  // THE WINDOW IS THE REVIEW DIFF'S. `rebased.baseSha` is the observed base tip the head now
+  // sits on; absent one (no remote base at all), `resolvedDiffBase` is the same left-hand side
+  // the review diff below is taken against — the launch pin, else the qualified base ref —
+  // resolved here to the commit it names, because the scan lists a range and refuses a
+  // launch base that is not a full OID. A ref that names no commit resolves to '' and the
+  // scan refuses it as unmeasurable; nothing here can widen the window past the branch's
+  // own commits.
+  const trailerBase = rebased.baseSha !== ''
+    ? rebased.baseSha
+    : await commitOf(opts.run_host, run.repo_path, await resolvedDiffBase(run))
+  const trailers = await sessionTrailerReadiness(opts.run_host, run.repo_path, trailerBase, headToPublish)
+  if (trailers.kind !== 'allow') {
+    throw new Error(
+      `outer publisher refused to push branch ${branch}: ${trailers.kind === 'blocked' ? trailers.on : trailers.detail} — nothing was pushed; the branch stays local for inspection`,
+    )
+  }
   // THE BUILD REBASES ONTO CURRENT `main`, SO THE PUSH IS NOT A FAST-FORWARD.
   //
   // Measured on run `2aacf419` (2026-08-14): the build SUCCEEDED and the plain push here was
@@ -245,6 +289,12 @@ export async function publishBuiltCommit(
   // pre-rebase tip while the replay produced a new head still needs the real lease push.
   // The genuine "nothing was built" outcome keeps its guard where it belongs: the empty
   // base..head diff refusal below, which measures CONTENT against the base.
+  // PUSH THE OBJECT, NOT THE REF (#1133 round 18). The scans above measured `headToPublish`;
+  // a refspec of `refs/heads/<branch>:...` would send whatever the local ref names at push
+  // time, so a writer moving the branch between the scan and the push would publish an
+  // unscanned commit and the witness below would only notice after it was on origin. Naming
+  // the object makes the pushed commit the scanned commit by construction, the same shape the
+  // checked publisher (`production-host-effects.ts`) and G100's preservation push use.
   const alreadyPublished = remoteAlreadyAtPublishHead(expected, headToPublish)
   if (!alreadyPublished) {
     const pushed = await runWithRetries([
@@ -254,7 +304,7 @@ export async function publishBuiltCommit(
       'push',
       `--force-with-lease=refs/heads/${branch}:${expected}`,
       'origin',
-      `refs/heads/${branch}:refs/heads/${branch}`,
+      `${headToPublish}:refs/heads/${branch}`,
     ])
     // NOTE the lease is deliberately NOT re-observed between retries. Re-reading it would adopt
     // whatever moved and turn the retry into the force this code exists to avoid.

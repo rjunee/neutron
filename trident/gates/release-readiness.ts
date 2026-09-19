@@ -12,8 +12,67 @@ const fullOid = /^(?:[0-9a-f]{40}|[0-9a-f]{64})$/
 const unknown = (detail: string): GateResult => ({ kind: 'unknown', detail })
 const blocked = (on: string): GateResult => ({ kind: 'blocked', on })
 
-/** G083, G085, G086: measure the branch and launch ancestry before publication.
- * Lease enforcement and the post-push witness stay in the publication effect.
+/** #1133 (G166): a commit-message line that begins the session trailer. Deliberately NO `u`
+ * flag: in non-unicode mode ECMAScript's Canonicalize never folds a code unit >= 128 onto an
+ * ASCII one, so this is exactly the wrapper's ASCII-only `[Cc][Ll]...[Nn]:` bracket pattern
+ * (trident/commit-with-resolved-head.sh) expressed in JS — a look-alike letter from another
+ * script does not match, the same as it does not match there. Line-anchored: a mention of the
+ * token inside a sentence is not a trailer.
+ */
+const sessionTrailerLine = /^claude-session:/i
+
+/** Every commit in `launchBase..head` whose raw message carries a session-trailer line.
+ * The message is read from the raw object (`git cat-file commit`), the same bytes the wrapper
+ * strips, never from `git log` porcelain. Any step that cannot be measured is `unknown`, so a
+ * range that cannot be listed or a commit that cannot be read never publishes on the strength
+ * of what was not seen. (The host runner decodes stdout as UTF-8; a non-UTF-8 body decodes with
+ * U+FFFD, and the line structure and the ASCII token survive that.)
+ */
+async function sessionTrailerCarriers(
+  run: RunHostCommand, repo: string, launchBase: string, head: string,
+): Promise<{ kind: 'carriers'; shas: string[] } | { kind: 'unknown'; detail: string }> {
+  if (!fullOid.test(launchBase)) return { kind: 'unknown', detail: 'Publication launch base is not a full OID' }
+  const listed = await run(gitRangeArgv({ repo_path: repo, subcommand: 'rev-list', base: launchBase, head }), repo)
+  if (!listed.ok) return { kind: 'unknown', detail: 'Publication commit range could not be listed' }
+  const shas = listed.stdout.split('\n').map(line => line.trim()).filter(line => line !== '')
+  if (shas.some(sha => !fullOid.test(sha))) return { kind: 'unknown', detail: 'Publication commit range listing is malformed' }
+  const carriers: string[] = []
+  for (const sha of shas) {
+    const object = await run(['git', '-C', repo, 'cat-file', 'commit', sha], repo)
+    if (!object.ok) return { kind: 'unknown', detail: `Publication commit ${sha} could not be read` }
+    // A commit object is headers, one blank line, then the message. The host runner trims
+    // stdout, so a commit whose message is EMPTY (`--allow-empty-message`, which the wrapper
+    // honours) arrives as its headers alone with no separator left: that is a measured empty
+    // message — no line can carry the trailer — not an unreadable object, and it is allowed.
+    // Every header line is `name value` or a ` `-continued gpgsig line, so the first `\n\n` is
+    // always the header/message boundary and never falls inside the headers.
+    const separator = object.stdout.indexOf('\n\n')
+    const message = separator < 0 ? '' : object.stdout.slice(separator + 2)
+    if (message.split('\n').some(line => sessionTrailerLine.test(line))) carriers.push(sha)
+  }
+  return { kind: 'carriers', shas: carriers }
+}
+
+/** #1133 (G166) as one gate result, shared by EVERY path that pushes a build branch to origin:
+ * the checked publishers (`publicationReadiness` below) and the stranded-work salvage push
+ * (`trident/publication.ts` `publishBuiltCommit`). `blocked` names every carrier in
+ * `launchBase..head`; `unknown` is a range or commit that could not be measured, and a caller
+ * must refuse on it the same as on `blocked` — a push on the strength of what was not seen is
+ * the defect this gate exists to close.
+ */
+export async function sessionTrailerReadiness(
+  run: RunHostCommand, repo: string, launchBase: string, head: string,
+): Promise<GateResult> {
+  const trailers = await sessionTrailerCarriers(run, repo, launchBase, head)
+  if (trailers.kind === 'unknown') return unknown(trailers.detail)
+  if (trailers.shas.length > 0) {
+    return blocked(`Publication branch carries a Claude-Session trailer on ${trailers.shas.length} commit(s) above the launch base: ${trailers.shas.join(', ')}`)
+  }
+  return { kind: 'allow' }
+}
+
+/** G083, G085, G086, G166: measure the branch, launch ancestry and commit messages before
+ * publication. Lease enforcement and the post-push witness stay in the publication effect.
  */
 export async function publicationReadiness(
   run: RunHostCommand, repo: string, branch: string, launchBase: string, snapshot: BuildSnapshot, runId: string,
@@ -35,7 +94,14 @@ export async function publicationReadiness(
         ? blocked('Publication branch does not contain the pinned launch base')
         : unknown('Publication launch ancestry could not be established')
     }
-    return { kind: 'allow' }
+    // #1133 (G166): the commit wrapper strips the trailer from the commit it made and refuses
+    // (exit 69/70/74/76) when it cannot prove the ref it committed on. A refusal Forge ignored,
+    // or a commit that reached the branch any other way, is caught HERE — the last measurement
+    // before `git push` — so "no loop-authored commit carries the trailer" is a property of the
+    // published history, not of one process's exit code. Unconditional: a re-publication with
+    // the remote branch already present is scanned the same as a first push. The stranded-work
+    // salvage push (`publishBuiltCommit`) runs the same scan itself — it never reaches this gate.
+    return sessionTrailerReadiness(run, repo, launchBase, head)
   } catch (error) { return unknownCause('Publication host observation failed', error, runId) }
 }
 

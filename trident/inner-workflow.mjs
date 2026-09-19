@@ -1261,7 +1261,7 @@ function forgeStep1(reenter) {
 // Step 4 differs on git-mode: pr → push + open/reuse a GitHub PR; local → commit
 // on the branch only (no remote, no `gh pr create`).
 function forgePushStep(reenter) {
-  const guardedCommit = `Commit only by running \`bash trident/commit-with-resolved-head.sh ${forgeBranch} <the git commit arguments>\`; never invoke \`git commit\` directly. The wrapper refuses before commit when HEAD cannot be resolved and names whether the git query failed, returned no object, or returned an unexpected value.`
+  const guardedCommit = `Commit only by running \`bash trident/commit-with-resolved-head.sh ${forgeBranch} <the git commit arguments>\`; never invoke \`git commit\` directly. The wrapper refuses before commit when HEAD cannot be resolved and names whether the git query failed, returned no object, or returned an unexpected value. Do not add a \`Claude-Session:\` trailer to any commit message (the wrapper strips one if it appears); keep the Co-Authored-By trailer. After the wrapper returns, read commitSha with \`git rev-parse HEAD\`; never copy it from a \`[branch sha]\` summary line, because the wrapper may replace the commit it just created with a rebuilt one (the same tree, parents and author, the trailer removed) and swap the branch onto it.`
   return memberMode
     ? `${guardedCommit} Commit on ${forgeBranch} and stop. This is a wave-member branch owned by the parent join; do NOT push, open a PR, or run \`gh\`.`
     : isPr
