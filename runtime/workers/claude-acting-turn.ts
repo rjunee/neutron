@@ -3,7 +3,8 @@ import { SUBAGENT_TOOL_NAME } from './claude-tool-contract.ts'
 import { join, relative, resolve, sep } from 'node:path'
 import { setTimeout as delay } from 'node:timers/promises'
 import { sessionJsonlPath } from '../adapters/claude-code/persistent/jsonl-resumability.ts'
-import type { ToolGrant } from '../bounded-work.ts'
+import type { BoundedWorkRequest, ToolGrant } from '../bounded-work.ts'
+import { claudeChildRateLimited } from './claude-child-rate-limit.ts'
 import type { ReplSession } from '../adapters/claude-code/persistent/repl-session.ts'
 import { projectTrailerStep, type ProjectActingTurn } from './project-runners.ts'
 
@@ -44,11 +45,13 @@ interface SubagentObservation {
   readonly metaFiles: number
   /** One of them names THIS step. */
   readonly matched: boolean
+  readonly rateLimited?: boolean
 }
 
-async function observeSubagents(directory: string, description: string): Promise<SubagentObservation> {
+async function observeSubagents(directory: string, description: string, request: BoundedWorkRequest, sessionId: string): Promise<SubagentObservation> {
   let metaFiles = 0
   let matched = false
+  const children: string[] = []
   let names: string[]
   try {
     names = await readdir(directory)
@@ -63,10 +66,15 @@ async function observeSubagents(directory: string, description: string): Promise
     metaFiles += 1
     try {
       const meta = JSON.parse(await readFile(join(directory, name), 'utf8'))
-      if (meta?.description === description) matched = true
+      if (meta?.description === description) {
+        matched = true
+        children.push(name.slice('agent-'.length, -'.meta.json'.length))
+      }
     } catch { /* Partial writes and unreadable metadata are not proof. */ }
   }
-  return { directory: 'readable', metaFiles, matched }
+  const rateLimited = children.length === 1 && await claudeChildRateLimited(
+    join(directory, `agent-${children[0]}.jsonl`), children[0]!, sessionId, request)
+  return { directory: 'readable', metaFiles, matched, rateLimited }
 }
 
 type DispatchConsumption = 'consumed' | 'not-consumed' | 'unreadable'
@@ -218,7 +226,8 @@ export function createClaudeActingTurn(binding: ClaudeActingSession, clock: Obse
           } catch (error) {
             if ((error as NodeJS.ErrnoException).code !== 'ENOENT') throw error
           }
-          seen = await observeSubagents(subagents, `${request.role}: ${request.step_id}`)
+          seen = await observeSubagents(subagents, `${request.role}: ${request.step_id}`, request, session.sessionId)
+          if (seen.rateLimited) return { kind: 'blocked' as const, on: 'Claude child stopped at the provider rate limit (HTTP 429).' }
           accepted ||= seen.matched
           if (!accepted && clock.now() >= dispatchDeadline) {
             readingConsumption = true

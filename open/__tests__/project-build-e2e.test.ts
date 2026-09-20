@@ -706,7 +706,7 @@ async function fixture(options: { ralph?: boolean; moreTasks?: boolean; suiteExi
   maxRounds?: number; mergeMode?: 'pr' | 'local'; blockRoles?: readonly string[]
   repeatFirstFinding?: boolean; commentRounds?: readonly number[]
   unavailableSeatRounds?: readonly number[]; codexReview?: 'valid' | 'wrong-run'
-  synthesisShape?: WorkerWorld['synthesisShape'] } = {}) {
+  synthesisShape?: WorkerWorld['synthesisShape']; rateLimitedSynthesis?: boolean } = {}) {
   const dir = await mkdtemp(join(tmpdir(), 'project-build-e2e-'))
   cleanups.push(() => rm(dir, { recursive: true, force: true }))
   const origin = join(dir, 'origin.git')
@@ -814,8 +814,28 @@ async function fixture(options: { ralph?: boolean; moreTasks?: boolean; suiteExi
   // (`open/wiring/project-build.ts:214-251`).
   const key = `e2e-${row.id}`
   cleanups.push(() => { pool.delete(key); supervisedBySessionKey.delete(key) })
+  const worker = literalWorker(world)
+  const projectsDir = join(dir, 'claude-projects')
   const session = { sessionId: 'e2e-session', toolSurface: LIVE_AGENT_TOOL_NAMES.join(','), cwd: dir, hasChildExited: () => false,
-    child: { submitLine: literalWorker(world) }, acquireTurn: async () => () => {} }
+    child: { submitLine: async (line: string) => {
+      const spec = JSON.parse(line.slice(line.indexOf('{')))
+      const args = JSON.parse(String(spec.prompt).slice(String(spec.prompt).indexOf('{')))
+      const requestLine = String(args.prompt).split('\n').find(row => row.startsWith('Request (data): '))!
+      const request: BoundedWorkRequest = JSON.parse(requestLine.slice('Request (data): '.length))
+      if (!options.rateLimitedSynthesis || request.role !== 'synthesis') return worker(line)
+      // The provider owns this transcript envelope. No result file is written.
+      const directory = join(projectsDir, dir.replace(/\//g, '-'), 'e2e-session', 'subagents')
+      await mkdir(directory, { recursive: true })
+      await writeFile(join(directory, 'agent-quota.meta.json'), JSON.stringify({ description: args.description, toolUseId: 'tool-quota' }))
+      const identity = { agentId: 'quota', sessionId: 'e2e-session', isSidechain: true }
+      await writeFile(join(directory, 'agent-quota.jsonl'), [
+        { ...identity, type: 'user', message: { role: 'user', content: args.prompt } },
+        { ...identity, type: 'assistant', message: { role: 'assistant', model: '<synthetic>', content: [] },
+          isApiErrorMessage: true, error: 'rate_limit', apiErrorStatus: 429,
+          quotaLimits: { status: 'rejected' }, requestId: 'quota-request' },
+      ].map(row => JSON.stringify(row)).join('\n') + '\n')
+      world.dispatches.push({ role: request.role, step_id: request.step_id, schema: request.result.schema, wrote: [] })
+    } }, acquireTurn: async () => () => {} }
 
   const register = (registration: { key?: string; projectId?: string; instanceId?: string
     state?: 'ready' | 'pending' | 'missing' | 'empty' | 'exited' } = {}) => {
@@ -825,6 +845,7 @@ async function fixture(options: { ralph?: boolean; moreTasks?: boolean; suiteExi
       substrate_instance_id: registration.instanceId ?? 'cc-agent-e2e',
       project_id: registration.projectId ?? 'e2e-project',
       skip_permissions: true, extra_dirs: [dir],
+      projectsDir,
     } as never)
     if (registration.state === 'missing') { pool.delete(sessionKey); return }
     pool.set(sessionKey, registration.state === 'pending' ? new Promise(() => {})
@@ -1872,6 +1893,19 @@ test('an unavailable panel seat stops by configured seat and never synthesizes o
   const originMain = await spawnCapture(['git', '-C', f.origin, 'rev-parse', 'refs/heads/main'], f.origin)
   expect(originMain.stdout).toBe(f.baseSha)
 }, 300_000)
+
+test('a provider rate-limited synthesis stops with its cause without a trailer, replay, fix or merge', async () => {
+  const f = await fixture({ rateLimitedSynthesis: true })
+  const outcome = await drive(f, 'pr')
+  expect(outcome, why(f, outcome)).toMatchObject({ kind: 'blocked', phase: 'review', recipient: 'orchestrator',
+    on: 'infra-only: Review synthesis unavailable: Review seat synthesis: Claude child stopped at the provider rate limit (HTTP 429).' })
+  expect(f.world.dispatches.map(dispatch => dispatch.role)).toEqual(['plan', 'build', 'review', 'review', 'synthesis'])
+  expect(f.world.dispatches.at(-1)?.wrote).toEqual([])
+  expect(f.github.prs).toHaveLength(1)
+  expect(f.github.prs[0]!.state).toBe('OPEN')
+  const originMain = await spawnCapture(['git', '-C', f.origin, 'rev-parse', 'refs/heads/main'], f.origin)
+  expect(originMain.stdout).toBe(f.baseSha)
+}, 30_000)
 
 test('a design-gap escalation re-plans and rebuilds instead of dispatching a fix', async () => {
   // THE RE-PLAN BRANCH (`build-run.ts:564-574`). The panel reaches it only through a
