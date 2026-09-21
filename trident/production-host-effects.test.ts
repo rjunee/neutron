@@ -64,10 +64,11 @@ async function fixture() {
     if (argv[0] === 'gh') {
       if (argv[2] === 'list') return ok(JSON.stringify(pr ? [pr] : []))
       if (argv[2] === 'create') {
-        pr = { number: 12, headRefOid: await command(['git', '-C', repo, 'rev-parse', 'refs/heads/change']), state: 'OPEN', headRefName: 'change', baseRefName: 'main', isCrossRepository: false }
+        pr = { number: 12, headRefOid: await command(['git', '-C', repo, 'rev-parse', 'refs/heads/change']), state: 'OPEN', headRefName: 'change', baseRefName: 'main', isCrossRepository: false, isDraft: false }
         return ok('https://example.invalid/project/repo/pull/12\n')
       }
-      if (argv[2] === 'merge') { pr.state = 'MERGED'; return ok() }
+      if (argv[2] === 'ready') { pr.isDraft = false; return ok() }
+      if (argv[2] === 'merge') { if (pr.isDraft) return { ...bad(), stderr: 'Pull request is still a draft' }; pr.state = 'MERGED'; return ok() }
       return ok(JSON.stringify(pr))
     }
     const result = await spawnCapture(argv, cwd, env, timeout)
@@ -419,6 +420,79 @@ test('merge pins reviewed head and requires independent merged witness', async (
   const argv = f.calls.find(argv => argv[0] === 'gh' && argv[2] === 'merge')!
   expect(argv).toEqual(['gh', 'pr', 'merge', '12', '--squash', '--match-head-commit', f.tip])
   expect((await measured(f)).pr?.state).toBe('MERGED')
+  expect(f.calls.some(argv => argv[0] === 'gh' && argv[2] === 'ready')).toBe(false)
+})
+
+test('owned draft becomes ready and merges only the witnessed reviewed head', async () => {
+  const f = await fixture()
+  expect(await f.publishChecked(await measured(f))).toEqual({ kind: 'allow' })
+  f.setPr({ number: 12, headRefOid: f.tip, state: 'OPEN', headRefName: 'change', baseRefName: 'main', isCrossRepository: false, isDraft: true })
+  expect(await f.mergeChecked(await measured(f))).toEqual({ kind: 'allow' })
+  expect(f.calls.filter(argv => argv[0] === 'gh' && ['ready', 'merge'].includes(argv[2]!)))
+    .toEqual([['gh', 'pr', 'ready', '12'], ['gh', 'pr', 'merge', '12', '--squash', '--match-head-commit', f.tip]])
+  expect((await measured(f)).pr?.state).toBe('MERGED')
+})
+
+for (const provenance of [null, 13]) test(`foreign draft stays untouched with publication provenance ${provenance}`, async () => {
+  const f = await fixture()
+  expect(await f.publishChecked(await measured(f))).toEqual({ kind: 'allow' })
+  await f.store.update(f.row.id, { published_pr: provenance })
+  f.setPr({ number: 12, headRefOid: f.tip, state: 'OPEN', headRefName: 'change', baseRefName: 'main', isCrossRepository: false, isDraft: true })
+  expect(await f.mergeChecked(await measured(f))).toMatchObject({ kind: 'blocked', on: expect.stringContaining('provenance') })
+  expect(f.calls.some(argv => argv[0] === 'gh' && ['ready', 'merge'].includes(argv[2]!))).toBe(false)
+})
+
+for (const change of ['head', 'base', 'branch', 'repository', 'number', 'closed', 'ownership', 'draft-unknown', 'still-draft', 'ci-pending'] as const) {
+  test(`owned draft refuses ${change} after ready without merging`, async () => {
+    const f = await fixture()
+    expect(await f.publishChecked(await measured(f))).toEqual({ kind: 'allow' })
+    const pr = { number: 12, headRefOid: f.tip, state: 'OPEN', headRefName: 'change', baseRefName: 'main', isCrossRepository: false, isDraft: true as boolean | undefined }
+    f.setPr(pr)
+    const snapshot = await measured(f)
+    f.intercept(async argv => {
+      if (argv[0] !== 'gh' || argv[2] !== 'ready') return
+      pr.isDraft = false
+      if (change === 'head') pr.headRefOid = f.base
+      if (change === 'base') pr.baseRefName = 'other'
+      if (change === 'branch') pr.headRefName = 'other'
+      if (change === 'repository') pr.isCrossRepository = true
+      if (change === 'number') pr.number = 13
+      if (change === 'closed') pr.state = 'CLOSED'
+      if (change === 'ownership') await f.store.update(f.row.id, { published_pr: null })
+      if (change === 'draft-unknown') pr.isDraft = undefined
+      if (change === 'still-draft') pr.isDraft = true
+      if (change === 'ci-pending') f.setCiReadiness({ headSha: f.tip, mergeable: 'MERGEABLE', rows: [{ name: 'test', status: 'IN_PROGRESS' }] })
+      return ok()
+    })
+    expect((await f.mergeChecked(snapshot)).kind).not.toBe('allow')
+    expect(f.calls.filter(argv => argv[0] === 'gh' && argv[2] === 'ready')).toHaveLength(1)
+    expect(f.calls.some(argv => argv[0] === 'gh' && argv[2] === 'merge')).toBe(false)
+  })
+}
+
+test('ready diagnostics are bounded categories and never relay command output', async () => {
+  const f = await fixture()
+  expect(await f.publishChecked(await measured(f))).toEqual({ kind: 'allow' })
+  f.setPr({ number: 12, headRefOid: f.tip, state: 'OPEN', headRefName: 'change', baseRefName: 'main', isCrossRepository: false, isDraft: true })
+  f.intercept(argv => argv[0] === 'gh' && argv[2] === 'ready'
+    ? { ...bad(), exit_code: 1, stderr: `permission denied sensitive-payload ${'x'.repeat(9000)}` } : undefined)
+  const result = await f.mergeChecked(await measured(f))
+  expect(result).toEqual({ kind: 'unknown', detail: 'Owned PR ready transition was not confirmed (exit=1; timed_out=false; reason=authorization)' })
+  expect(JSON.stringify(result)).not.toContain('sensitive-payload')
+  expect(f.calls.some(argv => argv[0] === 'gh' && argv[2] === 'merge')).toBe(false)
+})
+
+test('merge timeout is success only when exact owned PR is independently witnessed merged', async () => {
+  const f = await fixture()
+  expect(await f.publishChecked(await measured(f))).toEqual({ kind: 'allow' })
+  const snapshot = await measured(f)
+  f.intercept(argv => {
+    if (argv[0] !== 'gh' || argv[2] !== 'merge') return
+    f.setPr({ number: 12, headRefOid: f.tip, state: 'MERGED', headRefName: 'change', baseRefName: 'main', isCrossRepository: false, isDraft: false })
+    return { ...bad(), timed_out: true }
+  })
+  expect(await f.mergeChecked(snapshot)).toEqual({ kind: 'allow' })
+  expect(f.calls.filter(argv => argv[0] === 'gh' && argv[2] === 'merge')).toHaveLength(1)
 })
 
 test('merge refuses when remote base-risk evidence cannot be persisted', async () => {

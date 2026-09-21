@@ -530,10 +530,11 @@ async function performRole(world: WorkerWorld, request: BoundedWorkRequest, brie
 // THE FAKE GITHUB
 // ─────────────────────────────────────────────────────────────────────────────
 
-interface FakePr { number: number; state: 'OPEN' | 'CLOSED' | 'MERGED'; headRefName: string; baseRefName: string }
+interface FakePr { number: number; state: 'OPEN' | 'CLOSED' | 'MERGED'; headRefName: string; baseRefName: string; isDraft?: boolean }
 
 function fakeGithub(input: { origin: string; repo: string }) {
   const prs: FakePr[] = []
+  const settings = { draftCreated: false }
   /** `gh pr <verb>`s this fake refuses, so a case can stop the driver at a chosen
    *  point without touching the driver. Mutable so one fixture can refuse and
    *  then relent, which is what a restarted build meets. */
@@ -546,12 +547,12 @@ function fakeGithub(input: { origin: string; repo: string }) {
   }
   const project = async (pr: FakePr, fields: string[]) => {
     const all: Record<string, unknown> = { number: pr.number, state: pr.state, headRefName: pr.headRefName,
-      baseRefName: pr.baseRefName, isCrossRepository: false, headRefOid: await headOf(pr.headRefName), mergeable: 'MERGEABLE' }
+      baseRefName: pr.baseRefName, isCrossRepository: false, headRefOid: await headOf(pr.headRefName), mergeable: 'MERGEABLE', isDraft: pr.isDraft ?? false }
     return Object.fromEntries(fields.map(field => [field, all[field]]))
   }
   const checkRuns = { total_count: 1, check_runs: [{ name: 'test', status: 'COMPLETED', conclusion: 'SUCCESS' }] }
   return {
-    prs, refuse,
+    prs, refuse, settings, checkRuns,
     async handle(argv: string[]): Promise<HostCommandResult> {
       const [, verb, ...rest] = argv
       if (verb === 'api') {
@@ -580,7 +581,7 @@ function fakeGithub(input: { origin: string; repo: string }) {
         return json(await project(pr, fields))
       }
       if (action === 'create') {
-        const pr: FakePr = { number: prs.length + 1, state: 'OPEN',
+        const pr: FakePr = { number: prs.length + 1, state: 'OPEN', isDraft: settings.draftCreated,
           headRefName: rest[rest.indexOf('--head') + 1]!, baseRefName: rest[rest.indexOf('--base') + 1]! }
         prs.push(pr)
         // Real `gh pr create` prints the owner/repo URL; publication parses it for provenance.
@@ -589,6 +590,7 @@ function fakeGithub(input: { origin: string; repo: string }) {
       if (action === 'merge') {
         const pr = prs.find(row => row.number === Number(rest[1]))
         if (!pr) return { ok: false, exit_code: 1, stdout: '', stderr: 'no pull requests found' }
+        if (pr.isDraft) return { ok: false, exit_code: 1, stdout: '', stderr: 'Pull request is still a draft' }
         const head = await headOf(pr.headRefName)
         if (rest[rest.indexOf('--match-head-commit') + 1] !== head) {
           return { ok: false, exit_code: 1, stdout: '', stderr: 'head commit changed' }
@@ -599,6 +601,12 @@ function fakeGithub(input: { origin: string; repo: string }) {
         if (!pushed.ok) return { ok: false, exit_code: 1, stdout: '', stderr: pushed.stderr }
         pr.state = 'MERGED'
         return ok('Merged')
+      }
+      if (action === 'ready') {
+        const pr = prs.find(row => row.number === Number(rest[1]))
+        if (!pr || pr.state !== 'OPEN') return { ok: false, exit_code: 1, stdout: '', stderr: 'no open pull request found' }
+        pr.isDraft = false
+        return ok()
       }
       throw new Error(`fake gh does not implement: ${argv.join(' ')}`)
     },
@@ -1524,6 +1532,48 @@ test('pr mode drives plan, build, review, publish and merge to a terminal merged
   expect(originMain.stdout.trim()).not.toBe(f.baseSha)
   expect(f.store.get(f.row.id)!.pr).toBe(1)
   expect(['cleaned', 'preserved']).toContain(outcome.cleanup.kind)
+}, 300_000)
+
+test('owned draft reaches ready only after approval, host suite and merge gates, then merges unattended', async () => {
+  const f = await fixture()
+  f.github.settings.draftCreated = true
+  const host = await createProjectBuildHost(await f.prepare())
+  const mergeGate = host.deps.mergeGate
+  let gatePassed = false
+  host.deps.mergeGate = async (...args) => {
+    expect(f.github.prs[0]?.isDraft).toBe(true)
+    expect(f.store.get(f.row.id)?.published_pr).toBe(f.github.prs[0]?.number)
+    expect(f.world.dispatches.some(dispatch => dispatch.role === 'synthesis')).toBe(true)
+    expect(f.commands.some(argv => argv[0] === 'bash' && (argv[2] ?? '').includes('bash scripts/ci/suite.sh'))).toBe(true)
+    const result = await mergeGate(...args)
+    gatePassed = result.kind === 'allow'
+    return result
+  }
+  const outcome = await host.run({ mode: 'pr', start: 'fresh' }, new AbortController().signal)
+  expect(outcome.kind, why(f, outcome)).toBe('merged')
+  expect(gatePassed).toBe(true)
+  expect(f.github.prs[0]).toMatchObject({ state: 'MERGED', isDraft: false })
+  const writes = f.commands.filter(argv => argv[0] === 'gh' && ['ready', 'merge'].includes(argv[2]!))
+  expect(writes).toEqual([['gh', 'pr', 'ready', '1'], ['gh', 'pr', 'merge', '1', '--squash', '--match-head-commit', expect.any(String)]])
+}, 300_000)
+
+for (const stop of ['suite', 'review', 'ci'] as const) test(`owned draft is never readied when ${stop} gate refuses`, async () => {
+  const f = await fixture({ suiteExit: stop === 'suite' ? 1 : 0, maxRounds: 1,
+    ...(stop === 'review' ? { blockersByRound: [0, 1] } : {}) })
+  f.github.settings.draftCreated = true
+  const host = await createProjectBuildHost(await f.prepare())
+  if (stop === 'ci') {
+    const mergeGate = host.deps.mergeGate
+    host.deps.mergeGate = async (...args) => {
+      f.github.checkRuns.check_runs[0]!.conclusion = 'FAILURE'
+      return mergeGate(...args)
+    }
+  }
+  const outcome = await host.run({ mode: 'pr', start: 'fresh' }, new AbortController().signal)
+  expect(outcome.kind, why(f, outcome)).not.toBe('merged')
+  expect(f.commands.some(argv => argv[0] === 'gh' && ['ready', 'merge'].includes(argv[2]!))).toBe(false)
+  expect(f.github.prs).toHaveLength(1)
+  expect(f.github.prs.every(pr => pr.state === 'OPEN' && pr.isDraft)).toBe(true)
 }, 300_000)
 
 test('a synthesis worker guided by the exact verdict schema reaches MERGED unattended', async () => {
