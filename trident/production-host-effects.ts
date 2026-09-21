@@ -10,7 +10,7 @@ import { pinnedMergeReadiness, publicationReadiness } from './gates/release-read
 import { unknownCause } from './gates/unknown-cause.ts'
 import { mergeLocalReviewed } from './merge.ts'
 import { gitRangeArgv } from './git-range.ts'
-import type { EnvCapableHostRunner } from './git-mode.ts'
+import type { EnvCapableHostRunner, HostCommandResult } from './git-mode.ts'
 import type { TridentRun, TridentRunStore } from './store.ts'
 import { isTerminalPhase } from './state-machine.ts'
 import { TRIDENT_SCRIPT_DIR } from './script-dir.ts'
@@ -19,6 +19,18 @@ import { parseBuildModeState, readBuildRetrySource, type BuildModeState } from '
 const oid = /^(?:[0-9a-f]{40}|[0-9a-f]{64})$/
 const unknown = (detail: string): GateResult => ({ kind: 'unknown', detail })
 const blocked = (on: string): GateResult => ({ kind: 'blocked', on })
+
+/** Report bounded categories, never remote output (which may contain credentials or paths). */
+function mergeCommandDetail(action: string, result: HostCommandResult): string {
+  const output = `${result.stderr}\n${result.stdout}`.slice(0, 8192)
+  const reason = /draft/i.test(output) ? 'draft'
+    : /head.*(?:changed|match)|(?:changed|match).*head/i.test(output) ? 'head-mismatch'
+    : /required|checks|status|policy|protected/i.test(output) ? 'checks-or-policy'
+    : /permission|forbidden|unauthorized|authentication/i.test(output) ? 'authorization'
+    : /conflict|not mergeable/i.test(output) ? 'conflict' : 'unclassified'
+  const exit = Number.isSafeInteger(result.exit_code) ? result.exit_code : 'unknown'
+  return `${action} was not confirmed (exit=${exit}; timed_out=${result.timed_out === true}; reason=${reason})`
+}
 
 export interface ProductionHostOptions {
   store: TridentRunStore
@@ -183,12 +195,12 @@ export function createProductionHostEffects(options: ProductionHostOptions) {
     if (!result.ok || result.timed_out || !oid.test(result.stdout.trim())) throw new Error('Build branch head is unreadable')
     return result.stdout.trim()
   }
-  async function readPr(current: TridentRun): Promise<BuildSnapshot['pr']> {
+  async function readPr(current: TridentRun, withDraft = false): Promise<(NonNullable<BuildSnapshot['pr']> & { isDraft?: boolean }) | null> {
     if (current.merge_mode === 'local') {
       if (current.pr !== null) throw new Error('Local run unexpectedly has a persisted PR')
       return null
     }
-    const fields = 'number,headRefOid,state,headRefName,baseRefName,isCrossRepository'
+    const fields = 'number,headRefOid,state,headRefName,baseRefName,isCrossRepository' + (withDraft ? ',isDraft' : '')
     const result = await runHost(current.pr === null
       ? ['gh', 'pr', 'list', '--head', branch, '--state', 'all', '--limit', '100', '--json', fields]
       : ['gh', 'pr', 'view', String(current.pr), '--json', fields], repo)
@@ -201,8 +213,9 @@ export function createProductionHostEffects(options: ProductionHostOptions) {
     if (!pr || !Number.isSafeInteger(pr.number) || pr.number <= 0 || typeof pr.headRefOid !== 'string' || !oid.test(pr.headRefOid)
       || !['OPEN', 'CLOSED', 'MERGED'].includes(pr.state) || pr.headRefName !== branch
       || pr.baseRefName !== baseBranch || pr.isCrossRepository !== false
-      || (current.pr !== null && current.pr !== pr.number)) throw new Error('PR identity or revision is malformed or mismatched')
-    return { number: pr.number, head: pr.headRefOid, state: pr.state }
+      || (current.pr !== null && current.pr !== pr.number)
+      || (withDraft && typeof pr.isDraft !== 'boolean')) throw new Error('PR identity or revision is malformed or mismatched')
+    return { number: pr.number, head: pr.headRefOid, state: pr.state, ...(withDraft ? { isDraft: pr.isDraft } : {}) }
   }
   async function readDiff(base: string, tip: string): Promise<string> {
     const directory = await mkdtemp(join(tmpdir(), 'build-observation-'))
@@ -418,8 +431,38 @@ export function createProductionHostEffects(options: ProductionHostOptions) {
       const fresh = await sameSnapshot(snapshot)
       if (fresh.kind !== 'allow') return fresh
       if (current.merge_mode === 'local') return mergeLocalReviewed(runHost, repo, branch, baseBranch, worktree, snapshot.head, runId)
+      // The driver invokes this effect only after review, host suite, publication
+      // and merge gates. A matching head or branch alone never owns a user's PR.
+      const ownsPins = () => {
+        const after = row()
+        return after.merge_mode === 'pr' && after.pr === snapshot.pr?.number
+          && after.published_pr === snapshot.pr?.number && after.base_sha === current.base_sha
+      }
+      if (!snapshot.pr || !ownsPins()) return blocked('Merge PR has no matching publication provenance')
       const ready = await pinnedMergeReadiness(runHost, repo, snapshot, runId)
       if (ready.kind !== 'allow') return ready
+      let pr = await readPr(row(), true)
+      if (!ownsPins() || !pr || pr.number !== snapshot.pr.number || pr.head !== snapshot.head || pr.state !== 'OPEN') {
+        return blocked('Merge PR ownership or reviewed revision changed')
+      }
+      if (pr.isDraft) {
+        const result = await runHost(['gh', 'pr', 'ready', String(pr.number)], repo)
+        // Ready has no atomic head option. Its response never proves which head
+        // is now ready; reobserve ownership and head before any pinned merge.
+        pr = await readPr(row(), true)
+        if (!ownsPins() || !pr || pr.number !== snapshot.pr.number || pr.head !== snapshot.head || pr.state !== 'OPEN') {
+          return blocked('PR ownership or reviewed revision changed during ready transition')
+        }
+        if (!result.ok || result.timed_out || pr.isDraft) return unknown(mergeCommandDetail('Owned PR ready transition', result))
+        // Becoming ready may start additional checks. Refresh drift and CI before
+        // merging, preserving their existing fail-closed classifications.
+        const refreshed = await pinnedMergeReadiness(runHost, repo, snapshot, runId)
+        if (refreshed.kind !== 'allow') return refreshed
+        const ci = await observeCi(snapshot)
+        if (ci.kind !== 'completed' || ci.headSha !== snapshot.head || ci.conclusion !== 'success') {
+          return unknown('Ready PR checks have not established success for the reviewed head')
+        }
+      }
       // gh pr merge exposes --match-head-commit, but no expected-base option.
       // Readiness above is an observation, not an atomic base precondition:
       // the remote base can move before GitHub accepts this merge. Persist that
@@ -436,13 +479,22 @@ export function createProductionHostEffects(options: ProductionHostOptions) {
       } catch (error) {
         return unknownCause('Remote merge base-risk evidence could not be persisted', error, runId)
       }
+      const finalSnapshot = await sameSnapshot(snapshot)
+      if (finalSnapshot.kind !== 'allow') return finalSnapshot
+      pr = await readPr(row(), true)
+      if (!ownsPins() || !pr || pr.number !== snapshot.pr.number || pr.head !== snapshot.head || pr.state !== 'OPEN' || pr.isDraft) {
+        return blocked('PR ownership, draft state or reviewed revision changed before merge')
+      }
       const result = await runHost(['gh', 'pr', 'merge', String(snapshot.pr!.number), '--squash',
         '--match-head-commit', snapshot.head], repo)
-      if (!result.ok || result.timed_out) return unknown('Pinned PR merge was not confirmed')
-      const pr = await readPr(current)
-      if (pr?.state !== 'MERGED' || pr.number !== snapshot.pr!.number || pr.head !== snapshot.head) return unknown('Merged PR was not witnessed')
+      // Even a timed-out response may have landed. Observe once, never repeat the
+      // write blindly; success requires the exact owned PR and reviewed head.
+      pr = await readPr(row(), true)
+      if (!ownsPins() || pr?.state !== 'MERGED' || pr.number !== snapshot.pr!.number || pr.head !== snapshot.head) {
+        return unknown(mergeCommandDetail('Pinned PR merge', result))
+      }
       return { kind: 'allow' }
-    } catch (error) { return unknown(String(error)) }
+    } catch { return unknown('Merge host observation or identity could not be established') }
   }
   async function cleanup(): Promise<CleanupOutcome> {
     try {
