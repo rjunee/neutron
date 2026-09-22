@@ -682,3 +682,103 @@ for (const objectFormat of ['sha1', 'sha256'] as const) {
     } finally { await rm(dir, { recursive: true, force: true }) }
   })
 }
+
+/** #1133 round 30 (round-29 panel, BLOCKING behavioural): the G166 gate refused a commit the
+ * commit wrapper itself produces. `strip_session_trailer` drops the blank line AFTER a wholly
+ * dropped trailer paragraph, or the one BEFORE it when it is the tail — and with TWO trailing
+ * trailer paragraphs both point that drop at the same line, so the blank before the first one
+ * survives as the last kept line. The raw object ends `subj\n\n`, the trimming production runner
+ * loses both LFs, and the capture is two bytes short WITH a header/message boundary present.
+ * The separator arm refused any gap above one byte BEFORE the OID authentication on the next line
+ * could clear the two proposed LFs. Real git and the real wrapper throughout.
+ */
+const wrapper = new URL('../commit-with-resolved-head.sh', import.meta.url).pathname
+
+for (const objectFormat of ['sha1', 'sha256'] as const) {
+  test(`#1133 G166 round 30 (${objectFormat}): a plain wrapper commit ending in the separator blank is authenticated and ALLOWED`, async () => {
+    const { dir, repo, launchBase } = await scratch(objectFormat)
+    try {
+      await appendFile(join(repo, 'f'), 'subj\n')
+      await git(repo, 'add', 'f')
+      const wrapped = Bun.spawnSync(['bash', wrapper, 'change', '-m', 'subj', '-m', 'Claude-Session: a', '-m', 'Claude-Session: b'], {
+        cwd: repo, stdout: 'pipe', stderr: 'pipe',
+        env: { ...process.env, GIT_CONFIG_GLOBAL: '/dev/null', GIT_CONFIG_NOSYSTEM: '1' },
+      })
+      expect(wrapped.exitCode, wrapped.stderr.toString()).toBe(0)
+      const sha = await git(repo, 'rev-parse', 'HEAD')
+      // The shape: the wrapper stripped both trailers and kept the separator blank before them.
+      const raw = (await run(['git', '-C', repo, 'cat-file', 'commit', sha], repo)).stdout
+      expect(raw).not.toContain('Claude-Session')
+      expect(raw.endsWith('\n\nsubj\n\n')).toBe(true)
+      // Through the trimming production runner that is a TWO-byte gap with a boundary present.
+      const size = Number(await git(repo, 'cat-file', '-s', sha))
+      const production = (await productionRun(['git', '-C', repo, 'cat-file', 'commit', sha], repo)).stdout
+      expect(size - Buffer.byteLength(production, 'utf8')).toBe(2)
+      expect(production).toContain('\n\n')
+      // Authenticated by OID, so it publishes through both runner shapes and both entry points.
+      expect(await sessionTrailerReadiness(productionRun, repo, launchBase, sha)).toEqual({ kind: 'allow' })
+      expect(await readiness(repo, launchBase, productionRun)).toEqual({ kind: 'allow' })
+      expect(await readiness(repo, launchBase)).toEqual({ kind: 'allow' })
+    } finally { await rm(dir, { recursive: true, force: true }) }
+  })
+
+  test(`#1133 G166 round 30 (${objectFormat}): real git — a --cleanup=verbatim message with THREE trailing LFs stays unknown`, async () => {
+    const { dir, repo, launchBase } = await scratch(objectFormat)
+    try {
+      await appendFile(join(repo, 'f'), 'verbatim\n')
+      await git(repo, 'add', 'f')
+      await writeFile(join(dir, 'msg'), 'feat: v\n\n\n')
+      await git(repo, 'commit', '-q', '--cleanup=verbatim', '-F', join(dir, 'msg'))
+      const sha = await git(repo, 'rev-parse', 'HEAD')
+      const size = Number(await git(repo, 'cat-file', '-s', sha))
+      const captured = Buffer.byteLength((await productionRun(['git', '-C', repo, 'cat-file', 'commit', sha], repo)).stdout, 'utf8')
+      expect(size - captured).toBe(3)
+      // The untrimming double sees every byte and allows; the trimming runner's 3-byte gap is
+      // beyond the stated bound and is reported, naming the gap, never waved through.
+      expect(await readiness(repo, launchBase)).toEqual({ kind: 'allow' })
+      expect(await readiness(repo, launchBase, productionRun)).toEqual({
+        kind: 'unknown', detail: `Publication commit ${sha} was read incompletely (${captured} of ${size} bytes)`,
+      })
+    } finally { await rm(dir, { recursive: true, force: true }) }
+  })
+}
+
+/** The relaxed bound, pinned from both sides on a fake host whose objects carry real OIDs: a
+ * two-LF gap reaches `restoredCommitMatches` and is decided by it, and three or more stay unknown
+ * without being reconstructed at all.
+ */
+const HEADERS = FULL_OBJECT.slice(0, FULL_OBJECT.indexOf('\n\n') + 2)
+const twoShort = (raw: string, host = raw.slice(0, -2)) =>
+  fakeHost(host, hostOk(String(Buffer.byteLength(raw, 'utf8'))), `${objectOid(raw)}\n`)
+
+test('#1133 G166 round 30: a clean object short by its two trailing LFs is authenticated and ALLOWED', async () => {
+  const clean = `${HEADERS}subject\n\n`
+  expect(await fakeReadiness(twoShort(clean))).toEqual({ kind: 'allow' })
+})
+
+test('#1133 G166 round 30: a CARRIER short by its two trailing LFs is still NAMED — the relaxation never demotes a carrier', async () => {
+  const carrier = `${HEADERS}subject\n\nClaude-Session: fake\n\n`
+  expect(await fakeReadiness(twoShort(carrier))).toEqual({ kind: 'blocked', on: carrierText([objectOid(carrier)]) })
+})
+
+test('#1133 G166 round 30: a two-byte gap whose lost bytes are NOT LFs reaches the authenticator and is refused by it', async () => {
+  const clean = `${HEADERS}subject\n\nCo-Authored-By: a <a@a>\n`
+  const size = Buffer.byteLength(clean, 'utf8')
+  expect(clean.slice(-2)).toBe('>\n')
+  expect(await fakeReadiness(twoShort(clean))).toEqual({
+    kind: 'unknown',
+    detail: `Publication commit ${objectOid(clean)} was read incompletely (${size - 2} of ${size} bytes: captured bytes and proposed terminators do not match the commit OID)`,
+  })
+})
+
+test('#1133 G166 round 30: a three-LF gap stays unknown WITHOUT reconstruction — the bound is three or more, not unbounded', async () => {
+  const verbatim = `${HEADERS}feat: v\n\n\n`
+  const size = Buffer.byteLength(verbatim, 'utf8')
+  const host = fakeHost(verbatim.slice(0, -3), hostOk(String(size)), `${objectOid(verbatim)}\n`)
+  // Positive control: the same bytes with all three LFs restored DO reproduce the OID, so the
+  // `unknown` below is the bound refusing to try, not an authentication that failed.
+  expect(objectOid(verbatim.slice(0, -3) + '\n\n\n')).toBe(objectOid(verbatim))
+  expect(await fakeReadiness(host)).toEqual({
+    kind: 'unknown', detail: `Publication commit ${objectOid(verbatim)} was read incompletely (${size - 3} of ${size} bytes)`,
+  })
+})

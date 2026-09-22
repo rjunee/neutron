@@ -1399,7 +1399,7 @@ OWN TERMINATORS explain is clean (`:124`-`:136`):
   `missing >= 2` → `unknown`. Round 22 justified the 1-byte tolerance with "a one-byte cut of a
   `Claude-Session:` line still leaves a matching line"; that is true of every shape git's
   DEFAULT cleanup stores and NOT universally, so round 23 replaced the justification with a
-  check — see the round-23 section below.
+  check — see the round-23 section below. (Round 30: `missing >= 3` → `unknown`; see there.)
 
 **Measured fixtures (git 2.43.0, bun 1.3.13).** An `--allow-empty-message` commit is a 178-byte
 object whose tail is `0a 0a`; every header line ends in a non-whitespace byte, so a trimming
@@ -1408,11 +1408,11 @@ capture may legitimately have. An ordinary `-m` commit is 217 bytes ending in a 
 (trimmed: `missing === 1`). `git commit-tree -F` stores the message verbatim, adding and
 stripping nothing (163 / 130 / 149 / 136 bytes for a normal, empty, no-trailing-newline and
 trailing-blank message), and the wrapper's `strip_session_trailer` stops at the last kept line,
-so a wrapper-rebuilt commit is always one of the three measured shapes. STATED BOUNDARY: a
-message stored with two or more trailing whitespace bytes — only `--cleanup=verbatim` does
-(`printf 'feat: v\n\n\n'` gives a 188-byte object with an `0a 0a 0a` tail) — is reported
-`unknown` through a trimming runner. That is a publisher refusal that NAMES the byte gap, never
-a silent pass.
+so a wrapper-rebuilt commit is one of FOUR measured shapes (round 30; this said three). The 4th: a
+plain call ending in trailer paragraphs keeps the blank BEFORE them — 196 bytes ending `subj\n\n`,
+194 trimmed, `missing === 2` beside a boundary. STATED BOUNDARY (round 30; was "two or more"):
+THREE or more trailing whitespace bytes (`--cleanup=verbatim` `printf 'feat: v\n\n\n'`, 188 bytes,
+`0a 0a 0a` tail) are `unknown` through a trimming runner — a refusal NAMING the gap, never a pass.
 
 **Regressions** (`trident/gates/release-readiness.test.ts`). A fake host returns a short read
 while answering `cat-file -s` with the FULL object's length (real git never truncates, so a
@@ -2314,3 +2314,80 @@ this branch's diff, so it is an environment gap, not a regression from this roun
 `npx tsc --noEmit -p tsconfig.json` and `-p trident/tsconfig.json` print zero lines; this worktree's
 `node_modules/@neutronai` is a symlink farm into the main checkout, so that typecheck resolves the
 main tree's package sources, and this round's only TypeScript edits are two comment lines.
+
+### Round 30: G166 accepts the commit the wrapper itself produces, and the bound is pinned from both sides
+
+Round 29's review panel found the first BEHAVIOURAL defect since round 26: the G166 scan refused a
+commit that `trident/commit-with-resolved-head.sh` produces from a plain call. Every earlier round-29
+finding was citation accuracy; this one is not.
+
+#### T1 — the separator arm refused before it could authenticate
+
+REPRODUCED FIRST, on real git with the wrapper from `4d3c68a8`. `bash commit-with-resolved-head.sh
+change -m subj -m 'Claude-Session: a' -m 'Claude-Session: b'` exits 0 and leaves a raw object
+ending `subj\n\n` (196 bytes in a scratch repo; `od -c` tail `s u b j \n \n`). `strip_session_trailer`
+(`trident/commit-with-resolved-head.sh:19`) drops the blank AFTER a wholly-dropped paragraph, else
+the one BEFORE it when the paragraph is the tail; with two trailing trailer paragraphs both drops
+land on the blank between them, so the blank before the first survives as the last kept line. The
+trimming production runner (`spawnCapture`) loses both LFs: a two-byte gap WITH the header/message
+boundary present. `trident/gates/release-readiness.ts:148` read `missing > 1` and returned
+`unknown` before `restoredCommitMatches` on `:149` could authenticate the two proposed LFs, and
+`publication.ts` turns that `unknown` into a refusal on all three origin-facing publishers.
+
+The regressions were appended to `trident/gates/release-readiness.test.ts` at EOF (so none of the
+28 existing `test(` anchors moved) and run RED on the unmodified `4d3c68a8` source: 5 fail / 41 pass.
+The wrapper reproduction's red line, verbatim from the sha1 run:
+`"detail": "Publication commit c3544c43133a187362d83e2e3459c1cddacc6712 was read incompletely (218 of 220 bytes)"`
+(the fixture identity is longer than the scratch repo's, hence 220 rather than 196; the gap is the
+same 2). The sha256 variant red at `266 of 268 bytes`.
+
+THE FIX is one comparison: `:148` `missing > 1` → `missing > 2`, so a separator-present gap of up to
+two bytes reaches the OID authenticator and is decided by it. The comment at `:133`-`:137` was
+rewritten in place with the same line count, so `release-readiness.ts` is still 283 lines and every
+`release-readiness.ts:NNN` citation in the inventory, this shard and the sibling test files still
+resolves to the statement it named. The wrapper was deliberately NOT changed: the commit it produces
+is well formed, a wrapper change would not help a `--cleanup=verbatim` or third-party commit already
+in a publication window, and the gate must accept every OID-authenticated shape regardless. The
+surviving trailing blank is cosmetic and is follow-up material, not a defect.
+
+Six tests, anchors `:698`, `:725`, `:754`, `:759`, `:764`, `:774` (added to the G166 inventory row,
+whose `release-readiness.test.ts` anchors again equal the file's own 34 `test(` lines):
+
+- `:698` (sha1 and sha256) — the real wrapper call above: exit 0, raw object ends `\n\nsubj\n\n`
+  with no `Claude-Session`, `cat-file -s` minus the `productionRun` capture is exactly 2, the
+  capture still contains `\n\n`; `sessionTrailerReadiness` and `publicationReadiness` both `allow`
+  through `productionRun`, and through the untrimming double.
+- `:725` (sha1 and sha256) — real git, `--cleanup=verbatim` `feat: v\n\n\n`: a 3-byte gap through
+  `productionRun` stays `unknown` with the plain gap detail; the untrimming double allows.
+- `:754` — fake host, clean object ending `subject\n\n` captured two short: `allow`.
+- `:759` — fake host, CARRIER ending `Claude-Session: fake\n\n` captured two short: `blocked`,
+  naming its OID. The relaxation never demotes a carrier.
+- `:764` — fake host, a two-byte gap whose lost bytes are `>\n`, not LFs: `unknown` with
+  `captured bytes and proposed terminators do not match the commit OID` — the relaxed bound reaches
+  the authenticator and the authenticator refuses. A genuinely truncated read stays `unknown`.
+- `:774` — fake host, a three-LF gap: `unknown` with the plain gap detail, WITH a positive control
+  that the same bytes plus three LFs DO reproduce the OID, so the refusal is the bound declining to
+  reconstruct, not an authentication that happened to fail.
+
+MUTATIONS, each applied alone, run, and restored (guard `bun test
+trident/gates/release-readiness.test.ts`, control `bun test trident/gates/build-claim.test.ts`):
+
+- UNDER, `missing > 2` → `missing > 1` (the pre-fix code): guard 5 fail / 41 pass — `:698` sha1 and
+  sha256, `:754`, `:759` (reads `unknown` instead of `blocked`) and `:764` (the plain gap detail
+  instead of the OID-mismatch detail, i.e. the authenticator was never consulted). `:725` and
+  `:774` stay green, as they must. Control 10 pass / 0 fail.
+- OVER, `missing > 2` → `missing > 3`: guard 3 fail / 43 pass — `:725` sha1 and sha256 (the verbatim
+  three-LF commit authenticates and is ALLOWED) and `:774`. So the bound is pinned at three, not
+  merely loosened. Control 10 pass / 0 fail.
+- Restored: guard 46 pass / 0 fail, 213 expects.
+
+DOCUMENTS CORRECTED WITH IT, in place and line-neutral so no citation of this shard moved: the
+round-22 rule list now records the new `missing >= 3` boundary, and the round-23 "measured fixtures"
+paragraph, which asserted a wrapper-rebuilt commit is "always one of the three measured shapes" and
+that only "two or more" trailing whitespace bytes are refused, now names the fourth shape and the
+three-or-more boundary. The G166 inventory row's enforcement text said a boundary capture "permits
+direct bytes or one proposed LF"; it now says up to two, and that three or more are unknown without
+reconstruction. `grep -rn "one missing LF\|one proposed LF\|missing > 1" trident docs` now hits
+only this shard: the round-22 mutation record (`:1435`, a historical `missing > 1` → `missing > 99`
+run) and this entry's own quotations of the old code. No source file and no inventory row states
+the old bound; the same search for `missing > 2` finds `release-readiness.ts:148` (positive control).

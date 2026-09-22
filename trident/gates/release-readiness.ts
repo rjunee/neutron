@@ -131,10 +131,10 @@ async function sessionTrailerCarriers(
     // header/message boundary and never falls inside the headers.
     //
     // Weigh the capture independently, then authenticate its bytes before scanning its message.
-    // With a boundary present, accept direct captures or one missing LF. Without a boundary,
-    // an empty message may have lost one or both separator LFs; require its tree header and
-    // reconstruct the boundary. Every proposed LF must reproduce the exact Git OID.
-    // Larger gaps (including verbatim trailing whitespace trimmed by the runner) stay unknown.
+    // With a boundary present, accept direct captures or up to TWO missing LFs (a wrapper commit
+    // keeps the blank before a dropped final trailer paragraph, so its raw object ends `\n\n`).
+    // Without a boundary, an empty message may have lost one or both separator LFs; require its
+    // tree header. Every proposed LF must reproduce the exact Git OID; three or more stay unknown.
     const size = await rawCommitSize(run, repo, sha)
     if (size === null) return { kind: 'unknown', detail: `Publication commit ${sha} size could not be measured` }
     const captured = Buffer.byteLength(object.stdout, 'utf8')
@@ -145,7 +145,7 @@ async function sessionTrailerCarriers(
       const emptyMessage = (missing === 2 || (missing === 1 && object.stdout.endsWith('\n')))
         && treeHeaderLine.test(object.stdout.split('\n', 1)[0] ?? '')
       if (!emptyMessage) return incompleteRead(sha, captured, size, ', no header/message boundary')
-    } else if (missing > 1) return incompleteRead(sha, captured, size, '')
+    } else if (missing > 2) return incompleteRead(sha, captured, size, '')
     if (!restoredCommitMatches(object.stdout, missing, sha)) {
       return incompleteRead(sha, captured, size, ': captured bytes and proposed terminators do not match the commit OID')
     }
