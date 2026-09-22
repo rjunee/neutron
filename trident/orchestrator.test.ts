@@ -762,8 +762,9 @@ describe('orchestrator — APPROVE → done → merge (server-gated)', () => {
     const final = await runToTerminal(h, run.id)
     expect(final.phase).toBe('done')
     const calls = h.hostCalls.map((c) => c.join(' '))
+    // The refspec names the OBJECT the scans measured, never the local ref (#1133 round 18).
     expect(calls).toContain(
-      `git -C /repo push --force-with-lease=refs/heads/feat-x:${stale} origin refs/heads/feat-x:refs/heads/feat-x`,
+      `git -C /repo push --force-with-lease=refs/heads/feat-x:${stale} origin ${head}:refs/heads/feat-x`,
     )
     const pushAt = calls.findIndex((c) => c.includes(' push '))
     // The WITNESS is the ls-remote AFTER the push. There is now also one BEFORE it (the lease

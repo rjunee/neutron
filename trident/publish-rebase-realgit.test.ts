@@ -86,8 +86,9 @@ async function observeRemote(repo: string, ref: string): Promise<string> {
   return res.stdout.trim().split(/\s+/)[0] ?? ''
 }
 
-/** The EXACT push `publishBuiltCommit` issues: a lease pinned to an observed sha. */
-async function leasePush(repo: string, branch: string, expected: string) {
+/** The EXACT push `publishBuiltCommit` issues: a lease pinned to an observed sha, pushing the
+ *  measured OBJECT (`head`) to the branch — never the local ref, which can move after the scans. */
+async function leasePush(repo: string, branch: string, expected: string, head: string) {
   return spawnCapture(
     [
       'git',
@@ -96,7 +97,7 @@ async function leasePush(repo: string, branch: string, expected: string) {
       'push',
       `--force-with-lease=refs/heads/${branch}:${expected}`,
       'origin',
-      `refs/heads/${branch}:refs/heads/${branch}`,
+      `${head}:refs/heads/${branch}`,
     ],
     repo,
   )
@@ -546,7 +547,7 @@ describe('REAL git + REAL shallow — the publish-time rebase onto main', () => 
     // The re-push, in the EXACT pinned-lease form `publishBuiltCommit` uses.
     const expected = await observeRemote(world.checkout, `refs/heads/${world.branch}`)
     expect(expected).toBe(world.branchTip)
-    const pushed = await leasePush(world.checkout, world.branch, expected)
+    const pushed = await leasePush(world.checkout, world.branch, expected, res.head)
     expect(pushed.ok).toBe(true)
 
     // THE MERGEABLE FACT the readiness probe will read — proven in the FULL repo, where
@@ -873,7 +874,7 @@ describe('REAL git + REAL shallow — the publish-time rebase onto main', () => 
     const theirsTip = (await gitOut(thirdparty, 'rev-parse', 'HEAD')).trim()
 
     // The lease now certifies a state that no longer holds → REFUSED, in git's own words.
-    const pushed = await leasePush(world.checkout, world.branch, expected)
+    const pushed = await leasePush(world.checkout, world.branch, expected, res.head)
     expect(pushed.ok).toBe(false)
     expect(`${pushed.stderr}${pushed.stdout}`).toMatch(/stale info|rejected/)
 

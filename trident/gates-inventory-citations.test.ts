@@ -7,7 +7,7 @@ const inventoryPath = resolve(root, 'docs/trident-gates-inventory.md')
 
 test('every test-column file:line citation resolves', () => {
   const rows = readFileSync(inventoryPath, 'utf8').split('\n').filter(line => /^\| G\d{3} \|/.test(line))
-  expect(rows).toHaveLength(165)
+  expect(rows).toHaveLength(166)
 
   const citations: string[] = []
   for (const row of rows) {
