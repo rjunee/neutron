@@ -2461,3 +2461,91 @@ exactly `:348` (capture longer than the object) and `:540` (the real non-UTF-8 c
 pass / 0 fail. Restored: 46 pass / 0 fail, 213 expects. Afterwards `grep -rn 'more bytes than the
 object holds' --include=*.ts --include=*.md --include=*.sh .` hits nothing (this sub-section's own
 quotation of the old wording is line-wrapped, so it does not match either).
+
+#### Round 30 terminal receipt — re-proved on the committed head `b70111fd`
+
+Everything below was measured by round 31's terminal task on `b70111fd`, with `git status --short`
+empty before the first mutation. Nothing is inherited from the T1–T4 sections above, and no
+production file changes in the commit that adds this receipt.
+
+**How round 31 restored the round.** After run `dc80bbca` failed its descent check, the host
+collapsed the branch into ONE commit, `4fc0a5ed`, on the new launch base `f542a488`. Its subject
+claims the round-30 fix, but its tree is round 29's: `git diff f542a488 4fc0a5ed` and
+`git diff b8411957 4d3c68a8` have the same md5 (`00419d17…`), and `4fc0a5ed:trident/gates/release-readiness.ts:148`
+still reads `missing > 1`. `7becc5c3` restored the fix by cherry-picking `f2463f24`
+(tag `salvage/pr1152-round30-t1`) with no merge; its tree is `f35d9c8d`, exactly what
+`git merge-tree --write-tree --merge-base 4d3c68a8 4fc0a5ed f2463f24` returns. Then `1637a691` (T2),
+`3be27b25` (T3) and `b70111fd` (T4). `git rev-list --no-merges f542a488..b70111fd` is those five.
+
+**T1, re-proved in both directions.** `grep -n 'missing > ' trident/gates/release-readiness.ts` is
+one line, `:148` `missing > 2`. Guard `bun test ./trident/gates/release-readiness.test.ts`, control
+`bun test ./trident/gates/build-claim.test.ts`.
+- Baseline: guard **46 pass / 0 fail / 213 expects** (7.0s); control **10 pass / 0 fail / 54 expects**.
+- UNDER (`:148` → `missing > 1`, the pre-fix bound): guard **41 pass / 5 fail** — `round 30 (sha1)`
+  and `round 30 (sha256): a plain wrapper commit ending in the separator blank is authenticated and
+  ALLOWED` (`:698`), `a clean object short by its two trailing LFs is authenticated and ALLOWED`
+  (`:754`), `a CARRIER short by its two trailing LFs is still NAMED — the relaxation never demotes a
+  carrier` (`:759`) and `a two-byte gap whose lost bytes are NOT LFs reaches the authenticator and is
+  refused by it` (`:764`). `:725` and `:774` stay green. Control 10 pass.
+- OVER (`:148` → `missing > 3`): guard **43 pass / 3 fail** — `round 30 (sha1)` and
+  `round 30 (sha256): real git — a --cleanup=verbatim message with THREE trailing LFs stays unknown`
+  (`:725`) and `a three-LF gap stays unknown WITHOUT reconstruction — the bound is three or more, not
+  unbounded` (`:774`). Control 10 pass.
+- Each mutation was applied alone and restored with `git checkout -- trident/gates/release-readiness.ts`,
+  proven by `git diff --quiet HEAD -- trident/gates/release-readiness.ts`; restored, the guard is
+  46 pass / 0 fail / 213 expects again. The `:698` case is itself the real-git wrapper reproduction.
+- A counting note for the next reader: the file has **34** test declarations, but
+  `grep -c '^test('` returns 26, because eight are indented inside `for` loops over object formats
+  and failure shapes. `grep -cE '^\s*test\('` gives the 34 that equals the G166 row's anchors.
+
+**Stage 1, targeted suites on the unmodified head.**
+- `bun test trident/gates/ trident/gates-inventory-citations.test.ts trident/build-host.test.ts`:
+  18 files, **201 pass / 0 fail / 2483 expects** (11s).
+- `bun test trident/commit-with-resolved-head-realgit.test.ts trident/publication-session-trailer-realgit.test.ts
+  trident/publish-rebase-realgit.test.ts runtime/adapters/claude-code/persistent/__tests__/build-settings.test.ts
+  open/__tests__/project-build-e2e.test.ts trident/inner-workflow.test.ts`: 6 files,
+  **384 pass / 0 fail / 3327 expects** (126s).
+- `bun test trident/orchestrator.test.ts`: **325 pass / 0 fail / 1555 expects** (5s), no timeout
+  override needed.
+
+**Typecheck.** `node_modules/.bin/tsc --noEmit -p tsconfig.json` and `-p trident/tsconfig.json` each
+print zero lines and exit 0. All 18 `node_modules/@neutronai/*` symlinks resolve inside this
+worktree (`readlink -f` of each counted against `$PWD`: 0 outside), so both typechecks measured this
+tree, not main's checkout.
+
+**Guards.** `GUARD_BASE_SHA=f542a488… GUARD_HEAD_SHA=$(git rev-parse HEAD) bash
+scripts/ci/as-built-write-guard.sh` exits 0 (`OK — frozen history is unchanged and every new shard
+is well formed.`); `bun scripts/ci/check-governed-repo-attributes.ts` exits 0; `grep -c '^## '` on
+this shard is **1**.
+
+**Local leak gate — a partial local run of the `purity` job, not CI's verdict.**
+`LEAK_GATE_BASE_SHA=f542a488… bash scripts/ci/leak-gate.sh --tree .` exits 1 with 454 findings: one
+Tier-2 vocabulary hit on the linked worktree's own `.git` pointer file (untracked, absent from a CI
+checkout) and 453 owner-denylist hits from the operator's local denylist file, which is not the
+denylist CI decodes from its secret. The full hit list (the per-rule display cap lifted in a scratch
+copy of the script) names 100 distinct files, and **none** of them is among the 24 files this branch
+changes. The commit-message window (29 lines) and the hosted-domain, structural and tracked-path
+tiers report nothing.
+
+**Provenance, from raw objects.** For every sha in `git rev-list --no-merges f542a488..HEAD`,
+`git --no-replace-objects cat-file commit <sha>` matches `^Claude-Session:` **zero** times and
+`^Co-Authored-By` **exactly once**: five rows before the receipt commit, zero deviating.
+
+**Emitting sites, with the positive control.**
+`git grep -n -i 'claude-session' HEAD -- ':!*.test.ts' ':!docs/**' ':!*.md'` returns 25 lines in
+five files: `trident/commit-with-resolved-head.sh` (20, the strip itself),
+`trident/gates/release-readiness.ts` (`:23`, `:184`), `trident/gates/build-claim.ts:58`,
+`trident/inner-workflow.mjs:1268` and `runtime/adapters/claude-code/persistent/build-settings.ts:174`.
+None composes a commit message. The control — the same recipe for `Co-Authored-By` — returns 6 lines
+in four files case-insensitively (4 case-sensitively: `build-settings.ts:176`, `:178`,
+`commit-with-resolved-head.sh:202`, `inner-workflow.mjs:1268`), so the recipe is live and an empty
+emitting result would have meant a broken recipe, not an absent emitter.
+
+**The full suite was NOT run by this task.** The host's test contract for this build step declared it
+an intermediate task and instructed `suiteOutcome: deferred` with zero full-suite runs, which
+overrides the plan's STEP 4; the cumulative full suite belongs to the host's terminal run over this
+branch. This receipt therefore claims stage 1 only and makes no `passed` claim for the suite.
+
+**PR #1152, read and not touched:** `Drop the Claude-Session trailer from loop-authored commits
+(#1133)`, `isDraft: true`, `OPEN`, `headRefOid` `4fc0a5ed`. Publication, ready-for-review and merge
+belong to the host.
