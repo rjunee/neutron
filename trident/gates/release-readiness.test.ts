@@ -349,7 +349,7 @@ test('#1133 G166: a capture longer than the object, or an unmeasurable size, is 
   const captured = Buffer.byteLength(FULL_OBJECT, 'utf8')
   expect(await fakeReadiness(fakeHost(FULL_OBJECT, hostOk(String(FULL_SIZE - 1))))).toEqual({
     kind: 'unknown',
-    detail: `Publication commit ${fakeHead} was read incompletely (${captured} of ${FULL_SIZE - 1} bytes: the read returned more bytes than the object holds)`,
+    detail: `Publication commit ${fakeHead} was read incompletely (${captured} of ${FULL_SIZE - 1} bytes: the UTF-8 decode is larger than the object, so a non-UTF-8 byte was replaced and the raw bytes cannot be authenticated)`,
   })
   for (const size of [
     { ok: false, exit_code: 128, stdout: '', stderr: 'no such object' },
@@ -537,7 +537,7 @@ test('#1133 G166: the scan validates BOTH ends of the range — a head that is n
  * inflated short read. The answer is a refusal that NAMES the sha and the gap — never a rewrite,
  * so G100 origin preservation is untouched — and the loop's own commits are always UTF-8.
  */
-test('#1133 G166: a real non-UTF-8 commit message is REFUSED as an over-read, never decoded and allowed', async () => {
+test('#1133 G166: a real non-UTF-8 commit message is REFUSED as UTF-8 replacement inflation, never decoded and allowed', async () => {
   const { dir, repo, launchBase } = await scratch()
   try {
     const tree = await git(repo, 'rev-parse', `${launchBase}^{tree}`)
@@ -563,7 +563,7 @@ test('#1133 G166: a real non-UTF-8 commit message is REFUSED as an over-read, ne
     expect(object.stdout).toContain('�')
     expect(await sessionTrailerReadiness(run, repo, launchBase, latin1)).toEqual({
       kind: 'unknown',
-      detail: `Publication commit ${latin1} was read incompletely (${captured} of ${size} bytes: the read returned more bytes than the object holds)`,
+      detail: `Publication commit ${latin1} was read incompletely (${captured} of ${size} bytes: the UTF-8 decode is larger than the object, so a non-UTF-8 byte was replaced and the raw bytes cannot be authenticated)`,
     })
   } finally { await rm(dir, { recursive: true, force: true }) }
 })

@@ -2440,3 +2440,24 @@ place on the same two lines, so no line of this shard moved; `grep -rn
 'drop-claude-session-trailer.md:[0-9]' trident docs` finds one citation of this shard (`:551`, from
 `commit-wrapper-and-raw-publication-integration.md:30`), above the edit. Scan after T3: 719
 citations, 37 broken, zero keys with more broken than the base; the citations tests stay 2/2.
+
+#### T4 — the negative-gap detail names UTF-8 replacement inflation, not an over-read
+
+`trident/gates/release-readiness.ts:142` answered `missing < 0` with "the read returned more bytes
+than the object holds" (measured `205 of 204` on the real non-UTF-8 regression). Nothing over-read:
+the host runner decodes the raw object as UTF-8, a lone `0xe9` becomes U+FFFD, and re-encoding
+inflates one byte to three. The `unknown` verdict is right; the wording sent an operator after a
+host-runner bug that does not exist. `:142` now reads `: the UTF-8 decode is larger than the object,
+so a non-UTF-8 byte was replaced and the raw bytes cannot be authenticated` — ONE line, so
+`release-readiness.ts` is still 283 lines and no `release-readiness.ts:NNN` citation moved. The two
+expectations that pin the wording (`release-readiness.test.ts:352`, the fake over-size capture, and
+`:566`, the real `git hash-object` non-UTF-8 object) were updated in place, and the `:540` title's
+"REFUSED as an over-read" became "REFUSED as UTF-8 replacement inflation" on its own line: the file
+is still 784 lines with 34 `test(` lines, equal to the G166 row's anchors.
+
+MUTATION (guard `bun test ./trident/gates/release-readiness.test.ts`, control `bun test
+./trident/gates/build-claim.test.ts`): the old wording put back on `:142` → guard 2 fail / 44 pass,
+exactly `:348` (capture longer than the object) and `:540` (the real non-UTF-8 commit). Control 10
+pass / 0 fail. Restored: 46 pass / 0 fail, 213 expects. Afterwards `grep -rn 'more bytes than the
+object holds' --include=*.ts --include=*.md --include=*.sh .` hits nothing (this sub-section's own
+quotation of the old wording is line-wrapped, so it does not match either).

@@ -139,7 +139,7 @@ async function sessionTrailerCarriers(
     if (size === null) return { kind: 'unknown', detail: `Publication commit ${sha} size could not be measured` }
     const captured = Buffer.byteLength(object.stdout, 'utf8')
     const missing = size - captured
-    if (missing < 0) return incompleteRead(sha, captured, size, ': the read returned more bytes than the object holds')
+    if (missing < 0) return incompleteRead(sha, captured, size, ': the UTF-8 decode is larger than the object, so a non-UTF-8 byte was replaced and the raw bytes cannot be authenticated')
     const separator = object.stdout.indexOf('\n\n')
     if (separator < 0) {
       const emptyMessage = (missing === 2 || (missing === 1 && object.stdout.endsWith('\n')))
