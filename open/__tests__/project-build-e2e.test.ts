@@ -906,6 +906,70 @@ async function drive(f: Awaited<ReturnType<typeof fixture>>, mode: 'pr' | 'ralph
   return host.run({ mode, start: 'fresh' }, new AbortController().signal)
 }
 
+test('worktree-add diagnostics preserve a terminal predecessor and allow retry after explicit release', async () => {
+  const f = await fixture()
+  await f.prepare()
+  const prior = f.store.get(f.row.id)!
+  const holder = prior.worktree!
+  const branch = prior.branch!
+  const before = await gitOut(spawnCapture, holder, ['rev-parse', 'HEAD'])
+  await f.store.update(prior.id, { phase: 'failed' })
+  const retry = await f.store.create({ slug: prior.slug, project_slug: prior.project_slug,
+    repo_path: f.repo, task: prior.task, branch })
+  await f.store.update(retry.id, { base_sha: f.baseSha })
+  f.input.run = f.store.get(retry.id)!
+  const start = f.commands.length
+  await expect(f.prepare()).rejects.toThrow('reason=branch-held; exit=128; timed_out=false; diagnostic_recorded=true')
+  const events = f.store.stageEvents(retry.id).filter(event => event.stage === 'build-worktree-add-failed')
+  expect(events).toHaveLength(1)
+  expect(JSON.parse(events[0]!.meta!)).toEqual({ operation: 'git-worktree-add', reason: 'branch-held', exit_code: 128, timed_out: false })
+  expect(events[0]!.meta).not.toContain(f.dir)
+  expect(events[0]!.meta).not.toContain(branch)
+  expect(await gitOut(spawnCapture, holder, ['symbolic-ref', 'HEAD'])).toBe(`refs/heads/${branch}`)
+  expect(await gitOut(spawnCapture, holder, ['rev-parse', 'HEAD'])).toBe(before)
+  expect(f.commands.slice(start).some(argv => argv.includes('--force') || argv.includes('remove') || argv.includes('checkout'))).toBe(false)
+  expect(f.world.dispatches).toHaveLength(0)
+
+  // The fixture explicitly releases its clean old tree; preparation has no
+  // authority to infer worker quiescence from a terminal database row.
+  await gitOut(spawnCapture, f.repo, ['worktree', 'remove', holder])
+  const host = await createProjectBuildHost(await f.prepare())
+  const outcome = await host.run({ mode: 'pr', start: 'fresh' }, new AbortController().signal)
+  expect(outcome.kind, why(f, outcome)).toBe('merged')
+  expect(f.store.stageEvents(retry.id).filter(event => event.stage === 'build-worktree-add-failed')).toHaveLength(1)
+}, 300_000)
+
+for (const scenario of [
+  { stderr: 'fatal: private-path already exists', reason: 'path-exists', exit: 128 },
+  { stderr: 'fatal: private-path is already registered', reason: 'path-exists', exit: 128 },
+  { stderr: 'fatal: private-path Permission denied', reason: 'permission', exit: 128 },
+  { stderr: 'fatal: private-path No space left on device', reason: 'storage-full', exit: 128 },
+  { stderr: 'private-path already checked out', reason: 'timeout', exit: 137, timedOut: true },
+  { stderr: 'private-path', reason: 'unclassified', exit: 128 },
+  { stderr: `${'x'.repeat(4096)} Permission denied private-path`, reason: 'unclassified', exit: 128 },
+  { stderr: 'private-path', reason: 'observation-error', exit: null },
+] as const) test(`worktree-add diagnostics persist only bounded categories: ${scenario.reason}/${scenario.stderr.length}`, async () => {
+  const f = await fixture()
+  const original = f.context.runHost
+  f.context.runHost = async (...args) => {
+    if (!args[0].includes('worktree') || !args[0].includes('add')) return original(...args)
+    if (scenario.exit === null) throw new Error(scenario.stderr)
+    return { ok: false, exit_code: scenario.exit, stderr: scenario.stderr, stdout: 'private-stdout',
+      timed_out: 'timedOut' in scenario }
+  }
+  let detail = ''
+  try { await f.prepare() } catch (error) { detail = String(error) }
+  expect(detail).toContain(`reason=${scenario.reason}`)
+  expect(detail).not.toContain('private-')
+  expect(detail.length).toBeLessThan(220)
+  const events = f.store.stageEvents(f.row.id).filter(event => event.stage === 'build-worktree-add-failed')
+  expect(events).toHaveLength(1)
+  expect(JSON.parse(events[0]!.meta!)).toEqual({ operation: 'git-worktree-add', reason: scenario.reason,
+    exit_code: scenario.exit, timed_out: scenario.exit === null ? null : 'timedOut' in scenario })
+  expect(events[0]!.meta!.length).toBeLessThan(140)
+  expect(f.world.dispatches).toHaveLength(0)
+})
+
 async function codexOwnerWithClaude(identity: 'valid' | 'wrong-schema' = 'valid') {
   const f = await fixture()
   const ownerHome = await mkdtemp(join(tmpdir(), 'project-build-cross-provider-'))
