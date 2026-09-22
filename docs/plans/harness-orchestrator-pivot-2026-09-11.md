@@ -262,7 +262,13 @@ job boundaries against +0.01 background drift; no `ANTHROPIC_API_KEY` anywhere o
 announced June-15 metering that justified interactive-only was paused and never took
 effect. Full record: Managed Decisions Log 2026-09-11.
 
-**Keep the gates, replace the loop.** The leak preflight, pinned merge, cross-model gate,
+**Keep the gates; the loop is REPAIRED IN PLACE, not replaced** (corrected 2026-09-22 — see
+SPEC Decisions Log 2026-09-22. The original wording here was *"replace the loop"*; the work
+measured on that date was 42 commits into the three loop files, 26 of them `fix:`, with the
+files still at full size. The owner: *"whatever work is being done and commited right now IS
+the work."* The acceptance below is unchanged, because it names properties, not mechanism.)
+
+**Keep the gates.** The leak preflight, pinned merge, cross-model gate,
 seat rotation, mutation prover and the arbiter rule are ahead of every shipped system
 surveyed and stay. The loop — control flow in a turn, session-bound workflows,
 model-transcribed checkpoints, liveness only at phase boundaries — is what goes.
@@ -284,7 +290,8 @@ next starts. "Merged" is not done.
    Prototype cost estimated at ~1 day in the strategy research (spike #7 there).
 3. **The orchestrator.** Project REPL as orchestrator on the herdr host; bounded work
    split on model (§ 3.2); questions only via the REPL in chat (§ 3.4). The trident core,
-   rebuilt — gates kept, loop replaced. Acceptance: a card is dispatched and reaches
+   rebuilt in place — gates kept, the loop repaired rather than rewritten (Decisions Log
+   2026-09-22). Acceptance: a card is dispatched and reaches
    **merged** with no human touching it.
 4. **The codex persistence spike** (§ 3.3). Its result shapes one adapter.
 5. **Migration.** The private one-time migration tooling, overlay pattern: `export NEUTRON_OPEN=<this
