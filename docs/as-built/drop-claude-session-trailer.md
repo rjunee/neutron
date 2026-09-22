@@ -2274,8 +2274,8 @@ question this card did not open.
 - `trident/publish-rebase-realgit.test.ts` — 12 citations, 5 rows, all `+1` from the line added
   after old line 89.
 
-The rows round 28 DID re-anchor were re-read rather than assumed: G100, G135, G139 and G166 still
-resolve to the statements they name on this head, so they were left alone.
+Of the rows round 28 DID re-anchor, G135 and G166 still resolve to the statements they name on this
+head; G139's two test anchors do NOT (corrected in round 31, T3), and G100's are round-19 drift (follow-up).
 
 IN-SOURCE ANCHORS, AND EVERY COPY OF THE SAME CLAIM. Two prose anchors inside
 `trident/gates/release-readiness.ts` named lines that had moved:
@@ -2416,3 +2416,27 @@ pattern, asserts exactly one match, and asserts the cited `inner-workflow.test.t
 existence and EOF, which is why nothing was red. Mutation, `:995` → `:979` on inventory `:35`: 1 fail /
 1 pass (the new test). Control `bun test ./trident/gates/build-claim.test.ts`: 10 pass / 0 fail.
 Restored: 2 pass / 0 fail.
+
+#### T3 — G139's test anchors re-anchored to the declarations they name
+
+The G139 row cited `trident/orchestrator.test.ts:9391` and `:9434`, the only orchestrator citations
+that did not get the branch's `+1`. Both were written in #744 (`6c92515e`), where `:9391` and `:9434`
+ARE the two declarations `test('the gate runs on the branch tree before the PR is opened, and a
+silent verdict adds nothing'` and `test('findings with no fixer still open the PR, and the annotation
+is sanitized'`. Those declarations sit at `:9894`/`:9937` on the base `f542a488` and at
+`:9895`/`:9938` on this head (verified with `sed -n '9895p;9938p'`). Re-anchored to `:9895`/`:9938`.
+
+The literal `+1` (`:9392`/`:9435`) was REJECTED: base `:9391` is `const joined = cmd.join(' ')` and
+base `:9434` is blank, both inside an unrelated test (head `:9376`, the UNKNOWN-refusal fetch count),
+so a `+1` would faithfully preserve an anchor that was already wrong — one blank line and one line
+of the wrong test. The `+1` is applied to the lines the row NAMES, not the lines it happened to
+cite. That the whole-file scan shows G139 with FEWER broken on head (0 vs 1) before this edit was an
+accident of the drift landing head `:9434` on a content line of the same wrong test.
+
+The round-29 as-built claim at `:2277`-`:2278`, that G100, G135, G139 and G166 "still resolve to the
+statements they name on this head", was false for G139 (and G100, whose `:1494/:1525/:1555` are
+pre-existing round-19 drift of a uniform `+237`, deferred to a follow-up card). It was corrected in
+place on the same two lines, so no line of this shard moved; `grep -rn
+'drop-claude-session-trailer.md:[0-9]' trident docs` finds one citation of this shard (`:551`, from
+`commit-wrapper-and-raw-publication-integration.md:30`), above the edit. Scan after T3: 719
+citations, 37 broken, zero keys with more broken than the base; the citations tests stay 2/2.
