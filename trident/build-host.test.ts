@@ -218,7 +218,7 @@ const commandResult = (stdout = '', exit_code = 0) => ({ ok: exit_code === 0, ex
 test('publication readiness measures local head, remote state and first-push ancestry', async () => {
   const f = await fixture()
   const baseRun = f.options.mutation.run_host
-  const check = (run = baseRun, value = snapshot) => publicationReadiness(run, 'repo', 'change', 'b'.repeat(40), value, 'run')
+  const check = (run = baseRun, value = snapshot) => publicationReadiness(run, 'repo', 'change', 'main', 'b'.repeat(40), value, 'run')
   expect(await check()).toEqual({ kind: 'allow' })
   for (const result of [commandResult('', 128), commandResult('short')]) {
     expect(await check(async (argv, cwd) => argv.includes('rev-parse') ? result : baseRun(argv, cwd))).toMatchObject({ kind: 'unknown' })
@@ -241,11 +241,11 @@ test('publication readiness measures local head, remote state and first-push anc
 })
 
 test('publication thrown host cause is bounded and normal refusal text is unchanged', async () => {
-  expect(await publicationReadiness(async () => { throw new Error('recognisable publication failure') }, 'repo', 'change', 'b'.repeat(40), snapshot, 'run')).toEqual({
+  expect(await publicationReadiness(async () => { throw new Error('recognisable publication failure') }, 'repo', 'change', 'main', 'b'.repeat(40), snapshot, 'run')).toEqual({
     kind: 'unknown', detail: 'Publication host observation failed: Error: recognisable publication failure',
   })
   const f = await fixture()
-  expect(await publicationReadiness(f.options.mutation.run_host, 'repo', 'change', 'b'.repeat(40), { ...snapshot, head: 'c'.repeat(40) }, 'run')).toEqual({
+  expect(await publicationReadiness(f.options.mutation.run_host, 'repo', 'change', 'main', 'b'.repeat(40), { ...snapshot, head: 'c'.repeat(40) }, 'run')).toEqual({
     kind: 'blocked', on: 'Publication branch differs from reviewed head',
   })
 })
@@ -906,4 +906,13 @@ test('G102 host composes readback of the prepared review context', async () => {
   expect(await host.deps.reviewArtifact!(request, snapshot)).toEqual({ kind: 'allow' })
   await writeFile(`${request.brief.path}.context.json`, JSON.stringify({ request, snapshot: { ...snapshot, diff: '+stale' } }))
   expect(await host.deps.reviewArtifact!(request, snapshot)).toMatchObject({ kind: 'unknown', detail: expect.stringContaining('measured revision') })
+})
+
+test('#1133 G166 round 31: the pr-mode publish gate asks ORIGIN for the run\'s own base branch, so the scan window can exclude what origin already publishes', async () => {
+  const f = await fixture()
+  f.prose()
+  expect(f.options.mutation.base_branch).toBe('base')
+  expect(await f.make().deps.publishGate(snapshot)).toEqual({ kind: 'allow' })
+  // The base branch is the run's (`mutation.base_branch`), not a default and not the PR head.
+  expect(f.calls.filter(argv => argv.includes('ls-remote')).map(argv => argv.at(-1))).toEqual(['refs/heads/change', 'refs/heads/base'])
 })

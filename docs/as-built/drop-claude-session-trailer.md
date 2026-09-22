@@ -2549,3 +2549,100 @@ branch. This receipt therefore claims stage 1 only and makes no `passed` claim f
 **PR #1152, read and not touched:** `Drop the Claude-Session trailer from loop-authored commits
 (#1133)`, `isDraft: true`, `OPEN`, `headRefOid` `4fc0a5ed`. Publication, ready-for-review and merge
 belong to the host.
+
+#### Fix round on the round-30 review — the scan window and the trimmed tail (`publicationReadiness`, `sessionTrailerCarriers`)
+
+The round-30 review of `a77e8512` approved on synthesis with two G166 findings carried into this
+fix round; both are behavioural and both are fixed, not documented around.
+
+**Window (`publicationReadiness`, one seat graded it major).** The checked publishers scanned
+`pin..head`. The pin is taken at a fresh launch and carried across resumes and fix rounds
+(`launch-preparation.ts` `let base_sha = priorBaseSha`), while the host rebases the branch onto
+the current base tip, so the scan also listed base-branch commits origin already publishes. One
+public carrier among them (`0fc6cb83`, #1131's squash, which copied a contributor's trailer)
+refused the run with nothing the loop could strip. `publicationReadiness` now takes the run's
+base branch (`production-host-effects.ts:382` passes `baseBranch`, `build-host.ts:228` passes
+`mutation.base_branch`, which `project-build-host.ts` sets from the same config) and starts the
+window at `merge-base(head, <tip>)` (`publishedBaseWindow`, `release-readiness.ts:304`), where
+`<tip>` is what `ls-remote` says ORIGIN holds, computed over the same raw graph as the listing,
+and only when that merge-base descends from the pin. Every excluded commit is reachable from
+origin's tip (already public), and the window is always a subset of `pin..head`. Anything not
+measured cleanly keeps the pin: a failed or malformed `ls-remote`, no base branch on origin, a tip
+the checkout has never fetched, a merge-base below the pin. A local `refs/remotes/origin/*` ref is
+never consulted, because any process with write access to the checkout can move it onto the
+branch head. Nothing is fetched and no ref moves. The salvage path was already scanning from the
+observed base tip and is unchanged; so is G100's advisory scan.
+
+**Trimmed tail (`sessionTrailerCarriers`, minor).** `spawnCapture` returns `stdout.trim()`, which
+strips every trailing whitespace code point, while the LF proposals restore at most two LFs. A
+`--cleanup=verbatim`, `commit-tree` or tooling-made message ending in a space, a tab or three or
+more LFs was therefore permanently `unknown`. A short capture that the LF proposals cannot explain
+now gets ONE more read (`whitespaceTrimmedMessage`, `release-readiness.ts:336`):
+`git log -1 --no-walk --no-show-signature --no-notes --format=format:%x00%B%x00` under
+`--no-replace-objects` and `i18n.logOutputEncoding=UTF-8`. The NULs fence the raw message on
+BOTH sides because `trim()` also strips LEADING whitespace: a message that opens with a blank
+line lost its head until the front fence was added, which the `'\n\n \n'` case caught on the first
+run. The read is accepted only when all four checks hold:
+- the capture is a prefix of the reconstruction;
+- everything after the capture is whitespace (`:345`), which is exactly what a trim can remove;
+- the reconstruction's size equals the object's own `cat-file -s`;
+- the reconstruction reproduces the listed OID.
+
+So the second read explains a trim and never heals a capture cut inside content. Two other cases
+also stay `unknown`: a commit with a non-UTF-8 `encoding` header, which `git log` re-encodes so
+the OID cannot match, and a read the runner truncated, which has no closing NUL. The reviewer's
+alternative of `git log --grep` porcelain was not taken, because the design rejected porcelain
+matching for the scan itself. This read only authenticates bytes that the raw object's OID then
+vouches for.
+
+**The previous round's nit, closed with it.** The negative-gap detail (`:142`) named one cause, a
+replaced non-UTF-8 byte, that the fake-host scenario at `release-readiness.test.ts:348` does not
+have: that scenario under-reports the size. The detail now reads "most likely a non-UTF-8 byte
+replaced by U+FFFD, or a size read that under-reports", so it covers both.
+
+**Behaviour changes pinned by existing tests, edited in place with no line moved.**
+- `release-readiness.test.ts:725`, the real-git `--cleanup=verbatim` three-LF case, now expects
+  `allow` through the trimming runner. That is the finding's own shape.
+- `:348` and `:566` expect the hedged wording.
+- `:774`'s title now says that the three-LF fake stays unknown because that double answers the
+  untrimmed read with exit 128.
+- `fakeHost` gained a `message` answer (default exit 128) on existing lines, so every earlier fake
+  case keeps its exact detail.
+- `production-host-effects.test.ts:382` and `:593` counted every `ls-remote` to pick out the lease
+  and witness reads. They now count only reads of `refs/heads/change`, because the window adds a
+  read of `refs/heads/main`.
+
+New regressions sit at EOF: `release-readiness.test.ts:804`, `:826`, `:855`, `:876`, `:903`,
+`production-host-effects.test.ts:1243` and `build-host.test.ts:911`. The G166 row's source
+anchors were re-mapped by content, and all 28 resolve to the statement they name. Its test column
+gained the seven new anchors. Its WINDOW CONSTRAINT clause is replaced, because the constraint no
+longer holds.
+
+**Mutations, each applied alone to `release-readiness.ts` and restored with `cmp` against the
+saved original.** Guard is `bun test ./trident/gates/release-readiness.test.ts
+./trident/production-host-effects.test.ts`; baseline is 157 pass.
+
+| Mutation | Result | Tests that went red |
+|---|---|---|
+| M1: `return descends.ok ? mergeBase : launchBase` → `return launchBase` (the pre-fix window) | 4 red | `:804` sha1, `:804` sha256, `:826`'s closing positive control, `production-host-effects.test.ts:1243` |
+| M2: → `return mergeBase` (no descent check) | 1 red | `:855`, where a carrier below the pin would be scanned |
+| M3: the untrimmed read disabled | 5 red | `:725` ×2, `:876` ×2, `:903` |
+| M4: the whitespace-only rule removed | 5 red | `:603` ×2 and `:665` ×2 (real git, honest `git log`, capture cut inside content), plus `:903` |
+
+**Stage 1, on the working tree.**
+- `bun test trident/gates/ trident/gates-inventory-citations.test.ts trident/build-host.test.ts
+  trident/production-host-effects.test.ts`: 19 files, 313 pass / 0 fail.
+- `open/__tests__/{open-trident-prod-boot-wiring,project-build-e2e,project-build-wiring}.test.ts`,
+  `trident/{cross-run-retry-checkpoint,project-build-host,project-launcher,publication-session-trailer-realgit,stranded-salvage-realgit}.test.ts`:
+  8 files, 260 pass / 1 fail. The one failure is `project-build-wiring.test.ts` "suite child
+  excludes the stored GitHub credential". This host's own process environment exports `GH_TOKEN`
+  and `GIT_CONFIG_*`, and the suite child inherits them. With those four unset,
+  `bun test open/__tests__/project-build-wiring.test.ts` passes 32 / 0. This branch does not
+  touch `open/`.
+- `tsc --noEmit -p tsconfig.json` and `-p trident/tsconfig.json` each print zero lines. ESLint on
+  the seven changed files exits 0.
+- `scripts/ci/typecheck-all.sh`: 50 of 51 configurations pass. `app/tsconfig.json` fails with
+  TS2688 `'@types'`, which comes from this worktree's install layout. The branch does not touch
+  `app/`.
+- The full suite was not run. This is an intermediate task and the host defers the suite to the
+  terminal task.

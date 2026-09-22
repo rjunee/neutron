@@ -109,10 +109,10 @@ test('G100 scan exception containment does not authorize subsequent publication'
   const h = host('rev-list')
   expect((await checkBuildClaim(h.run, w.repo, 'change', w.base, w.base, w.snapshot, 'preservation-test')).kind).toBe('blocked')
   expect(await git(w.origin, 'rev-parse', '--verify', 'refs/heads/change')).toBe(w.head)
-  expect(await publicationReadiness(h.run, w.repo, 'change', w.base, w.snapshot, 'preservation-test')).toMatchObject({
+  expect(await publicationReadiness(h.run, w.repo, 'change', 'main', w.base, w.snapshot, 'preservation-test')).toMatchObject({
     kind: 'unknown', detail: expect.stringContaining('credential loader unavailable'),
   })
   expect(h.failures()).toBe(2)
   expect(h.calls.filter(argv => argv.includes('push'))).toHaveLength(1)
-  expect(await publicationReadiness(host().run, w.repo, 'change', w.base, w.snapshot, 'preservation-test')).toEqual({ kind: 'allow' })
+  expect(await publicationReadiness(host().run, w.repo, 'change', 'main', w.base, w.snapshot, 'preservation-test')).toEqual({ kind: 'allow' })
 })

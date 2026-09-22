@@ -27,6 +27,7 @@ const sessionTrailerLine = /^claude-session:/i
  * is never consulted. Exported so a test can prove the listing carries it.
  */
 export const RAW_GRAPH_ENV: Readonly<Record<string, string>> = Object.freeze({ GIT_GRAFT_FILE: '/dev/null' })
+const RAW_GRAPH = ['--no-replace-objects', '--shallow-file', '/dev/null', '-c', 'core.commitGraph=false', '-c', 'advice.graftFileDeprecated=false']
 
 /** #1133 (G166): a commit object's own byte size, measured INDEPENDENTLY of the capture that
  * is being checked against it. `--no-replace-objects` on this read too: a replacement object
@@ -116,8 +117,7 @@ async function sessionTrailerCarriers(
   // `extraEnv` over the inherited environment, so the graft override reaches git unchanged.
   // `advice.graftFileDeprecated=false` keeps git's 8-line graft-file hint — printed whenever the
   // named graft file exists, and `/dev/null` does — out of every captured stderr.
-  const rawGraph = ['--no-replace-objects', '--shallow-file', '/dev/null', '-c', 'core.commitGraph=false', '-c', 'advice.graftFileDeprecated=false']
-  const listing = gitRangeArgv({ repo_path: repo, config: rawGraph, subcommand: 'rev-list', base: launchBase, head })
+  const listing = gitRangeArgv({ repo_path: repo, config: RAW_GRAPH, subcommand: 'rev-list', base: launchBase, head })
   const listed = await run(listing, repo, RAW_GRAPH_ENV)
   if (!listed.ok) return { kind: 'unknown', detail: 'Publication commit range could not be listed' }
   const shas = listed.stdout.split('\n').map(line => line.trim()).filter(line => line !== '')
@@ -134,23 +134,28 @@ async function sessionTrailerCarriers(
     // With a boundary present, accept direct captures or up to TWO missing LFs (a wrapper commit
     // keeps the blank before a dropped final trailer paragraph, so its raw object ends `\n\n`).
     // Without a boundary, an empty message may have lost one or both separator LFs; require its
-    // tree header. Every proposed LF must reproduce the exact Git OID; three or more stay unknown.
+    // tree header. Every proposed LF must reproduce the exact Git OID. A gap the LF proposals do
+    // not explain gets ONE more chance (round 31): an untrimmed read of the message that proves the
+    // capture lost nothing but trailing whitespace; failing that, it is unknown.
     const size = await rawCommitSize(run, repo, sha)
     if (size === null) return { kind: 'unknown', detail: `Publication commit ${sha} size could not be measured` }
     const captured = Buffer.byteLength(object.stdout, 'utf8')
     const missing = size - captured
-    if (missing < 0) return incompleteRead(sha, captured, size, ': the UTF-8 decode is larger than the object, so a non-UTF-8 byte was replaced and the raw bytes cannot be authenticated')
+    if (missing < 0) return incompleteRead(sha, captured, size, ': the UTF-8 decode is larger than the object -- most likely a non-UTF-8 byte replaced by U+FFFD, or a size read that under-reports -- so the raw bytes cannot be authenticated')
     const separator = object.stdout.indexOf('\n\n')
+    let why: string | null = null
     if (separator < 0) {
       const emptyMessage = (missing === 2 || (missing === 1 && object.stdout.endsWith('\n')))
         && treeHeaderLine.test(object.stdout.split('\n', 1)[0] ?? '')
-      if (!emptyMessage) return incompleteRead(sha, captured, size, ', no header/message boundary')
-    } else if (missing > 2) return incompleteRead(sha, captured, size, '')
-    if (!restoredCommitMatches(object.stdout, missing, sha)) {
-      return incompleteRead(sha, captured, size, ': captured bytes and proposed terminators do not match the commit OID')
-    }
-    if (separator < 0) continue
-    const message = object.stdout.slice(separator + 2)
+      if (!emptyMessage) why = ', no header/message boundary'
+    } else if (missing > 2) why = ''
+    if (why === null && !restoredCommitMatches(object.stdout, missing, sha)) why = ': captured bytes and proposed terminators do not match the commit OID'
+    // Round 31: a TRIMMING runner strips every trailing whitespace code point, not only LFs, so
+    // a short capture the LF proposals cannot explain may still be whole up to whitespace. The
+    // untrimmed message read below may only explain that trim: see `whitespaceTrimmedMessage`.
+    const message = why === null ? (separator < 0 ? '' : object.stdout.slice(separator + 2))
+      : missing > 0 ? await whitespaceTrimmedMessage(run, repo, sha, object.stdout, size) : null
+    if (message === null) return incompleteRead(sha, captured, size, why ?? '')
     if (message.split('\n').some(line => sessionTrailerLine.test(line))) carriers.push(sha)
   }
   return { kind: 'carriers', shas: carriers }
@@ -165,15 +170,10 @@ async function sessionTrailerCarriers(
  * read INCOMPLETELY — and a caller must refuse on it the same as on `blocked`: a push on the
  * strength of what was not seen is the defect this gate exists to close.
  *
- * THE WINDOW IS `launchBase..head`, WHATEVER THE CALLER PASSES AS `launchBase`. The checked
- * publishers pass the run's dispatch-time launch pin (`base_sha`); a branch that has since
- * MERGED the base branch lists every base-branch commit above that pin too, and a carrier
- * among them — `origin/main` carries one, `0fc6cb83` (#1131's squash, 2026-09-16) — is named in
- * the refusal even though the loop cannot strip a commit that is already public. That is the
- * same window the review diff measures (`production-host-effects.ts` `readDiff(base_sha, tip)`)
- * and it closes on its own as pins move past that commit; the salvage path avoids it by
- * scanning from the OBSERVED base tip (`publication.ts`). A refusal naming a sha that is an
- * ancestor of `origin/<base>` is therefore a stale-pin window, not a wrapper failure.
+ * THE WINDOW IS `launchBase..head`, WHATEVER THE CALLER PASSES AS `launchBase`. The salvage path
+ * passes the OBSERVED base tip (`publication.ts`); the checked publishers (`publicationReadiness`)
+ * start from the run's dispatch-time pin and narrow it with `publishedBaseWindow` (round 31), so a
+ * base-branch commit origin already publishes is never this publication's to refuse.
  */
 export async function sessionTrailerReadiness(
   run: RunHostCommand, repo: string, launchBase: string, head: string,
@@ -190,7 +190,7 @@ export async function sessionTrailerReadiness(
  * publication. Lease enforcement and the post-push witness stay in the publication effect.
  */
 export async function publicationReadiness(
-  run: RunHostCommand, repo: string, branch: string, launchBase: string, snapshot: BuildSnapshot, runId: string,
+  run: RunHostCommand, repo: string, branch: string, baseBranch: string, launchBase: string, snapshot: BuildSnapshot, runId: string,
 ): Promise<GateResult> {
   try {
     const local = await run(['git', '-C', repo, 'rev-parse', '--verify', `refs/heads/${branch}`], repo)
@@ -228,7 +228,7 @@ export async function publicationReadiness(
     // contract would become an unhandled throw. The sibling at `gates/build-claim.ts:65` awaits
     // correctly; `eslint.config.mjs` carries no `return-await`/`no-floating-promises` rule, so
     // nothing but this comment and its regression keeps it here.
-    return await sessionTrailerReadiness(run, repo, launchBase, head)
+    return await sessionTrailerReadiness(run, repo, await publishedBaseWindow(run, repo, baseBranch, launchBase, head), head)
   } catch (error) { return unknownCause('Publication host observation failed', error, runId) }
 }
 
@@ -280,4 +280,69 @@ export async function pinnedMergeReadiness(
     if (shouldHoldForBaseDrift(drift, new Set(), { hold_when_unassessable: true })) return blocked('Base drift overlaps reviewed changes')
     return { kind: 'allow' }
   } catch (error) { return unknownCause('Merge host observation could not be decoded', error, runId) }
+}
+
+/** #1133 round 31 (G166): the lower bound of the checked publishers' scan. The run's pin is
+ * taken once, at a fresh launch, and carried across resumes and fix rounds, while the host
+ * rebases the branch onto the CURRENT base tip -- so `pin..head` also lists base-branch commits
+ * above the pin. Those are already public on origin and the loop cannot strip them; a carrier
+ * among them (a squash that copied a contributor's trailer, as `0fc6cb83` did) refused every
+ * such run with no in-run remedy. The window starts at `merge-base(head, <origin's base tip>)`
+ * instead, when that descends from the pin:
+ *   * the tip is what `ls-remote` says ORIGIN holds, never the local `refs/remotes/origin/*`
+ *     ref, which any process with write access to the checkout can move onto the branch head;
+ *   * the merge-base is computed over the raw graph (`RAW_GRAPH`, `RAW_GRAPH_ENV`), so a
+ *     replacement ref or graft cannot move it onto the branch's own commits;
+ *   * every commit excluded is reachable from that merge-base, hence from origin's base tip,
+ *     hence already published; and because the merge-base descends from the pin, the window
+ *     is a SUBSET of `pin..head` -- this can only narrow the scan, never widen it.
+ * Anything not measured cleanly -- a failed or malformed `ls-remote`, no base branch on origin,
+ * a tip absent from the local object store, a merge-base that does not descend from the pin --
+ * keeps the pin: the stricter window, never an unmeasured narrower one. It issues no fetch and
+ * changes no ref.
+ */
+async function publishedBaseWindow(
+  run: RunHostCommand, repo: string, baseBranch: string, launchBase: string, head: string,
+): Promise<string> {
+  if (baseBranch === '') return launchBase
+  const ref = `refs/heads/${baseBranch}`
+  const observed = await run(['git', '-C', repo, 'ls-remote', '--heads', 'origin', ref], repo)
+  const fields = observed.ok ? observed.stdout.trim().split(/\s+/) : []
+  const tip = fields.length === 2 && fields[1] === ref && fullOid.test(fields[0]!) ? fields[0]! : null
+  if (tip === null) return launchBase
+  const merged = await run(['git', '-C', repo, ...RAW_GRAPH, 'merge-base', '--end-of-options', tip, head], repo, RAW_GRAPH_ENV)
+  const mergeBase = merged.stdout.trim()
+  if (!merged.ok || !fullOid.test(mergeBase)) return launchBase
+  if (mergeBase === launchBase) return launchBase
+  const descends = await run(['git', '-C', repo, ...RAW_GRAPH, 'merge-base', '--is-ancestor', '--end-of-options', launchBase, mergeBase], repo, RAW_GRAPH_ENV)
+  return descends.ok ? mergeBase : launchBase
+}
+
+/** #1133 round 31 (G166): the message of `sha` read so that a TRIMMING runner cannot shorten it,
+ * or `null`. `spawnCapture` returns `stdout.trim()`, which strips every trailing whitespace code
+ * point -- spaces, tabs, three or more LFs -- while the LF proposals above can only restore up to
+ * two LFs, so a `--cleanup=verbatim`, `commit-tree` or tooling-made message ending in any other
+ * whitespace was permanently `unknown` and every publisher refused it. `%x00` on BOTH sides of
+ * `%B` fences the message with NULs, which no trim removes -- `trim()` strips LEADING whitespace
+ * too, so a message that opens with a blank line needs the front fence as much as the back one;
+ * `format:` (separator semantics) adds no terminator; `%B` is the raw message after the header
+ * block's blank line. The read may only EXPLAIN
+ * the first capture's trim, never replace a lost read: the reconstruction must start with the
+ * whole capture, may add nothing but whitespace after it (exactly what a trim can remove), must
+ * weigh the object's own `cat-file -s` size, and must reproduce the listed OID. A capture cut
+ * inside real content therefore stays `unknown`, as does anything `git log` re-encodes (a
+ * non-UTF-8 `encoding` header) -- a changed byte cannot reproduce the OID.
+ */
+async function whitespaceTrimmedMessage(
+  run: RunHostCommand, repo: string, sha: string, capture: string, size: number,
+): Promise<string | null> {
+  const read = await run(['git', '--no-replace-objects', '-C', repo, '-c', 'i18n.logOutputEncoding=UTF-8', 'log', '-1', '--no-walk', '--no-show-signature', '--no-notes', '--format=format:%x00%B%x00', '--end-of-options', sha], repo)
+  if (!read.ok || read.stdout.length < 2 || !read.stdout.startsWith('\0') || !read.stdout.endsWith('\0')) return null
+  const message = read.stdout.slice(1, -1)
+  const separator = capture.indexOf('\n\n')
+  if (separator < 0 && !treeHeaderLine.test(capture.split('\n', 1)[0] ?? '')) return null
+  const whole = (separator < 0 ? `${capture.replace(/\n$/, '')}\n\n` : capture.slice(0, separator + 2)) + message
+  if (!whole.startsWith(capture) || whole.slice(capture.length).trim() !== '') return null
+  if (Buffer.byteLength(whole, 'utf8') !== size || !restoredCommitMatches(whole, 0, sha)) return null
+  return message
 }

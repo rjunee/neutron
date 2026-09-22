@@ -225,7 +225,7 @@ export function createBuildHost(options: BuildHostOptions): { deps: BuildRunDeps
       if (!proof.ok) return proof.repair
         ? { kind: 'repair-nomination', finding: `Mutation nomination is invalid: ${proof.repair.detail}. Supply a corrected nomination for the repaired commit; the mutation prover must still pass.` }
         : { kind: 'blocked', on: proof.reason }
-      const readiness = mergeMode === 'local' ? await localReadiness(snapshot) : await publicationReadiness(options.mutation.run_host, options.mutation.run.repo_path, options.mutation.run.branch ?? `trident/${options.mutation.run.slug}`, options.leak.base_sha, snapshot, options.mutation.run.id)
+      const readiness = mergeMode === 'local' ? await localReadiness(snapshot) : await publicationReadiness(options.mutation.run_host, options.mutation.run.repo_path, options.mutation.run.branch ?? `trident/${options.mutation.run.slug}`, options.mutation.base_branch, options.leak.base_sha, snapshot, options.mutation.run.id)
       if (readiness.kind !== 'allow') return readiness
       return fixLineage(options.mutation.run_host, options.mutation.run.repo_path, options.mutation.run.branch ?? `trident/${options.mutation.run.slug}`, options.reviewed_head, snapshot.head)
     },

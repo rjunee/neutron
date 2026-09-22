@@ -57,7 +57,7 @@ async function commit(repo: string, ...paragraphs: string[]): Promise<string> {
 
 async function readiness(repo: string, launchBase: string, host: RunHostCommand = run) {
   const snapshot: BuildSnapshot = { head: await git(repo, 'rev-parse', 'HEAD'), diff: '', pr: null }
-  return publicationReadiness(host, repo, 'change', launchBase, snapshot, 'run')
+  return publicationReadiness(host, repo, 'change', 'main', launchBase, snapshot, 'run')
 }
 
 const carrierText = (shas: string[]) =>
@@ -302,22 +302,22 @@ const hostOk = (stdout: string) => ({ ok: true, exit_code: 0, stdout, stderr: ''
 const fakeHost = (
   capture: string,
   size: { ok: boolean; exit_code: number; stdout: string; stderr: string } = hostOk(String(FULL_SIZE)),
-  listing = `${fakeHead}\n`,
+  listing = `${fakeHead}\n`, message = { ok: false, exit_code: 128, stdout: '', stderr: 'this double has no untrimmed message read' },
 ): RunHostCommand => async argv => {
   if (argv.includes('rev-parse')) return hostOk(`${fakeHead}\n`)
   if (argv.includes('ls-remote')) return hostOk(`${fakeHead}\trefs/heads/change\n`)
   if (argv.includes('rev-list')) return hostOk(listing)
   if (argv.includes('cat-file') && argv.includes('-s')) return size
-  if (argv.includes('cat-file')) return hostOk(capture)
+  if (argv.includes('cat-file')) return hostOk(capture); if (argv.includes('log')) return message
   throw new Error(`Unexpected command: ${argv.join(' ')}`)
 }
-const fakeReadiness = (host: RunHostCommand) => publicationReadiness(host, 'repo', 'change', fakeBase, fakeSnapshot, 'run')
+const fakeReadiness = (host: RunHostCommand) => publicationReadiness(host, 'repo', 'change', 'main', fakeBase, fakeSnapshot, 'run')
 
 test('#1133 G166: a fake host — a raw object with the trailer is refused; a malformed listing is unknown', async () => {
   const carrier = fakeHead
-  expect(await publicationReadiness(fakeHost(FULL_OBJECT, hostOk(String(FULL_SIZE)), `${carrier}\n`), 'repo', 'change', fakeBase, fakeSnapshot, 'run'))
+  expect(await publicationReadiness(fakeHost(FULL_OBJECT, hostOk(String(FULL_SIZE)), `${carrier}\n`), 'repo', 'change', 'main', fakeBase, fakeSnapshot, 'run'))
     .toEqual({ kind: 'blocked', on: carrierText([carrier]) })
-  expect(await publicationReadiness(fakeHost(FULL_OBJECT, hostOk(String(FULL_SIZE)), 'not-a-sha\n'), 'repo', 'change', fakeBase, fakeSnapshot, 'run'))
+  expect(await publicationReadiness(fakeHost(FULL_OBJECT, hostOk(String(FULL_SIZE)), 'not-a-sha\n'), 'repo', 'change', 'main', fakeBase, fakeSnapshot, 'run'))
     .toEqual({ kind: 'unknown', detail: 'Publication commit range listing is malformed' })
 })
 
@@ -349,7 +349,7 @@ test('#1133 G166: a capture longer than the object, or an unmeasurable size, is 
   const captured = Buffer.byteLength(FULL_OBJECT, 'utf8')
   expect(await fakeReadiness(fakeHost(FULL_OBJECT, hostOk(String(FULL_SIZE - 1))))).toEqual({
     kind: 'unknown',
-    detail: `Publication commit ${fakeHead} was read incompletely (${captured} of ${FULL_SIZE - 1} bytes: the UTF-8 decode is larger than the object, so a non-UTF-8 byte was replaced and the raw bytes cannot be authenticated)`,
+    detail: `Publication commit ${fakeHead} was read incompletely (${captured} of ${FULL_SIZE - 1} bytes: the UTF-8 decode is larger than the object -- most likely a non-UTF-8 byte replaced by U+FFFD, or a size read that under-reports -- so the raw bytes cannot be authenticated)`,
   })
   for (const size of [
     { ok: false, exit_code: 128, stdout: '', stderr: 'no such object' },
@@ -563,7 +563,7 @@ test('#1133 G166: a real non-UTF-8 commit message is REFUSED as UTF-8 replacemen
     expect(object.stdout).toContain('�')
     expect(await sessionTrailerReadiness(run, repo, launchBase, latin1)).toEqual({
       kind: 'unknown',
-      detail: `Publication commit ${latin1} was read incompletely (${captured} of ${size} bytes: the UTF-8 decode is larger than the object, so a non-UTF-8 byte was replaced and the raw bytes cannot be authenticated)`,
+      detail: `Publication commit ${latin1} was read incompletely (${captured} of ${size} bytes: the UTF-8 decode is larger than the object -- most likely a non-UTF-8 byte replaced by U+FFFD, or a size read that under-reports -- so the raw bytes cannot be authenticated)`,
     })
   } finally { await rm(dir, { recursive: true, force: true }) }
 })
@@ -722,7 +722,7 @@ for (const objectFormat of ['sha1', 'sha256'] as const) {
     } finally { await rm(dir, { recursive: true, force: true }) }
   })
 
-  test(`#1133 G166 round 30 (${objectFormat}): real git — a --cleanup=verbatim message with THREE trailing LFs stays unknown`, async () => {
+  test(`#1133 G166 round 31 (${objectFormat}): real git — a --cleanup=verbatim message with THREE trailing LFs is recovered by the untrimmed read and ALLOWED`, async () => {
     const { dir, repo, launchBase } = await scratch(objectFormat)
     try {
       await appendFile(join(repo, 'f'), 'verbatim\n')
@@ -733,11 +733,11 @@ for (const objectFormat of ['sha1', 'sha256'] as const) {
       const size = Number(await git(repo, 'cat-file', '-s', sha))
       const captured = Buffer.byteLength((await productionRun(['git', '-C', repo, 'cat-file', 'commit', sha], repo)).stdout, 'utf8')
       expect(size - captured).toBe(3)
-      // The untrimming double sees every byte and allows; the trimming runner's 3-byte gap is
-      // beyond the stated bound and is reported, naming the gap, never waved through.
+      // The untrimming double sees every byte and allows. The trimming runner's 3-byte gap is
+      // beyond the LF bound; round 31's untrimmed read proves it whitespace, size and OID intact.
       expect(await readiness(repo, launchBase)).toEqual({ kind: 'allow' })
       expect(await readiness(repo, launchBase, productionRun)).toEqual({
-        kind: 'unknown', detail: `Publication commit ${sha} was read incompletely (${captured} of ${size} bytes)`,
+        kind: 'allow',
       })
     } finally { await rm(dir, { recursive: true, force: true }) }
   })
@@ -771,7 +771,7 @@ test('#1133 G166 round 30: a two-byte gap whose lost bytes are NOT LFs reaches t
   })
 })
 
-test('#1133 G166 round 30: a three-LF gap stays unknown WITHOUT reconstruction — the bound is three or more, not unbounded', async () => {
+test('#1133 G166 round 30: a three-LF gap is never LF-reconstructed — with no untrimmed read to explain it (round 31), it stays unknown', async () => {
   const verbatim = `${HEADERS}feat: v\n\n\n`
   const size = Buffer.byteLength(verbatim, 'utf8')
   const host = fakeHost(verbatim.slice(0, -3), hostOk(String(size)), `${objectOid(verbatim)}\n`)
@@ -781,4 +781,141 @@ test('#1133 G166 round 30: a three-LF gap stays unknown WITHOUT reconstruction �
   expect(await fakeReadiness(host)).toEqual({
     kind: 'unknown', detail: `Publication commit ${objectOid(verbatim)} was read incompletely (${size - 3} of ${size} bytes)`,
   })
+})
+
+/** #1133 round 31 (round-30 panel, `publicationReadiness` G166): the checked publishers scanned
+ * `pin..head`, and the pin is carried across resumes and fix rounds while the host rebases the
+ * branch onto the CURRENT base tip — so base-branch commits above the pin were scanned too, and
+ * one public carrier among them (a squash that copied a contributor's trailer) refused every such
+ * run with nothing the loop could strip. The window now starts at `merge-base(head, <origin's
+ * base tip>)` when that descends from the pin. Real git throughout; `main` is the base branch.
+ */
+async function rebasedOntoMainCarrier(objectFormat: 'sha1' | 'sha256' = 'sha1') {
+  const world = await scratch(objectFormat)
+  await git(world.repo, 'checkout', '-q', 'main')
+  const mainCarrier = await commit(world.repo, 'contributor work', 'Claude-Session: https://example.invalid/contributor')
+  await git(world.repo, 'checkout', '-q', 'change')
+  await git(world.repo, 'reset', '-q', '--hard', 'main')
+  const head = await commit(world.repo, 'branch work', 'Co-Authored-By: Fixture <fixture@example.invalid>')
+  return { ...world, mainCarrier, head }
+}
+
+for (const objectFormat of ['sha1', 'sha256'] as const) {
+  test(`#1133 G166 round 31 (${objectFormat}): a carrier ORIGIN already publishes on the base branch above the pin does not refuse the checked publisher`, async () => {
+    const { dir, repo, launchBase, mainCarrier, head } = await rebasedOntoMainCarrier(objectFormat)
+    try {
+      await git(repo, 'push', '-q', 'origin', 'main')
+      // The pin window really does contain the public carrier — the refusal this round removes.
+      expect(await sessionTrailerReadiness(run, repo, launchBase, head)).toEqual({ kind: 'blocked', on: carrierText([mainCarrier]) })
+      for (const host of [run, productionRun, gitOnlyRun]) expect(await readiness(repo, launchBase, host)).toEqual({ kind: 'allow' })
+      // The branch's OWN carrier above the merge-base is still named, and only it.
+      const own = await commit(repo, 'own work', 'Claude-Session: https://example.invalid/own')
+      expect(await readiness(repo, launchBase, productionRun)).toEqual({ kind: 'blocked', on: carrierText([own]) })
+      // Positive control on the call shape: the tip comes from `ls-remote`, the merge-base runs on the raw graph.
+      const seen: { argv: string[]; env: Record<string, string> | undefined }[] = []
+      await readiness(repo, launchBase, (argv, cwd, extraEnv) => { seen.push({ argv, env: extraEnv }); return productionRun(argv, cwd, extraEnv) })
+      expect(seen.map(call => call.argv)).toContainEqual(['git', '-C', repo, 'ls-remote', '--heads', 'origin', 'refs/heads/main'])
+      const bases = seen.filter(call => call.argv.includes('merge-base') && !call.argv.includes('--is-ancestor'))
+      expect(bases).toHaveLength(1)
+      expect(bases[0]!.argv).toEqual(['git', '-C', repo, '--no-replace-objects', '--shallow-file', '/dev/null', '-c', 'core.commitGraph=false', '-c', 'advice.graftFileDeprecated=false', 'merge-base', '--end-of-options', mainCarrier, own])
+      expect(bases[0]!.env).toEqual({ GIT_GRAFT_FILE: '/dev/null' })
+    } finally { await rm(dir, { recursive: true, force: true }) }
+  })
+}
+
+test('#1133 G166 round 31: the narrowed window trusts only what ORIGIN holds — a local tracking ref, an absent base and an unfetched tip all keep the pin', async () => {
+  const { dir, repo, launchBase, mainCarrier, head } = await rebasedOntoMainCarrier()
+  const refused = { kind: 'blocked' as const, on: carrierText([mainCarrier]) }
+  try {
+    // No `main` on origin at all: nothing measured, so the stricter pin window stands.
+    expect(await readiness(repo, launchBase)).toEqual(refused)
+    // A LOCAL `refs/remotes/origin/main` moved onto the branch head is not origin's word.
+    await git(repo, 'update-ref', 'refs/remotes/origin/main', head)
+    expect(await readiness(repo, launchBase)).toEqual(refused)
+    // An empty base branch name asks origin nothing and keeps the pin.
+    expect(await publicationReadiness(run, repo, 'change', '', launchBase, { head, diff: '', pr: null }, 'run')).toEqual(refused)
+    // Origin's tip moved to a commit this checkout has never fetched: merge-base cannot be
+    // measured, so the pin stands rather than an unmeasured narrower window.
+    await git(repo, 'push', '-q', 'origin', 'main')
+    const other = join(dir, 'other')
+    await run(['git', 'clone', '-q', '-b', 'main', join(dir, 'origin.git'), other], dir)
+    await git(other, 'config', 'user.name', 'Fixture')
+    await git(other, 'config', 'user.email', 'fixture@example.invalid')
+    await git(other, 'commit', '-q', '--allow-empty', '-m', 'landed elsewhere')
+    await git(other, 'push', '-q', 'origin', 'HEAD:main')
+    const unfetched = await git(other, 'rev-parse', 'HEAD')
+    expect((await run(['git', '-C', repo, 'cat-file', '-e', unfetched], repo)).ok).toBe(false)
+    expect(await readiness(repo, launchBase)).toEqual(refused)
+    // Positive control: once the tip is local the same origin narrows the window.
+    await git(repo, 'fetch', '-q', 'origin', 'main')
+    expect(await readiness(repo, launchBase)).toEqual({ kind: 'allow' })
+  } finally { await rm(dir, { recursive: true, force: true }) }
+})
+
+test('#1133 G166 round 31: a merge-base BELOW the pin never widens the window onto a carrier the pin excludes', async () => {
+  const { dir, repo, launchBase: first } = await scratch()
+  try {
+    // origin/main stays at `first`; the run was pinned one commit later, ON a carrier.
+    await git(repo, 'push', '-q', 'origin', 'change:main')
+    const pinnedCarrier = await commit(repo, 'below the pin', 'Claude-Session: https://example.invalid/below')
+    const head = await commit(repo, 'branch work')
+    // Positive control: the carrier IS in `first..head`, so a window that fell back to the
+    // merge-base (`first`) would name it.
+    expect(await sessionTrailerReadiness(run, repo, first, head)).toEqual({ kind: 'blocked', on: carrierText([pinnedCarrier]) })
+    expect(await readiness(repo, pinnedCarrier)).toEqual({ kind: 'allow' })
+  } finally { await rm(dir, { recursive: true, force: true }) }
+})
+
+/** #1133 round 31 (round-30 panel, `sessionTrailerCarriers` G166): `spawnCapture` trims EVERY
+ * trailing whitespace code point, while the LF proposals can restore at most two LFs — so a
+ * message ending in a space, a tab or three-plus LFs was permanently `unknown`. The untrimmed
+ * `%B%x00` read may only explain that trim: whitespace after the whole capture, the object's
+ * own size, and its OID.
+ */
+for (const objectFormat of ['sha1', 'sha256'] as const) {
+  test(`#1133 G166 round 31 (${objectFormat}): messages ending in spaces, tabs or many LFs are authenticated through the trimming runner`, async () => {
+    const { dir, repo, launchBase } = await scratch(objectFormat)
+    try {
+      const tree = await git(repo, 'rev-parse', 'HEAD^{tree}')
+      const headers = `tree ${tree}\nparent ${launchBase}\nauthor Fixture <fixture@example.invalid> 1 +0000\ncommitter Fixture <fixture@example.invalid> 1 +0000\n\n`
+      for (const [message, verdict] of [
+        ['subject with trailing space \n', 'allow'], ['subject\n\nbody\t\n', 'allow'], ['subject \t \n\n\n\n', 'allow'],
+        ['\n\n \n', 'allow'], ['subject\n\nClaude-Session: https://example.invalid/x \n', 'blocked'], ['Claude-Session: x\t', 'blocked'],
+      ] as const) {
+        const raw = headers + message
+        await writeFile(join(dir, 'object'), raw)
+        const sha = await git(repo, 'hash-object', '-t', 'commit', '-w', join(dir, 'object'))
+        await git(repo, 'update-ref', 'refs/heads/change', sha)
+        const captured = (await productionRun(['git', '-C', repo, 'cat-file', 'commit', sha], repo)).stdout
+        // The shape the LF proposals cannot explain: the trim removed a non-LF or a third LF.
+        const gap = raw.slice(captured.length)
+        expect(raw.startsWith(captured)).toBe(true)
+        expect(gap.trim()).toBe('')
+        expect(gap.length > 2 || /[^\n]/.test(gap)).toBe(true)
+        const expected = verdict === 'allow' ? { kind: 'allow' as const } : { kind: 'blocked' as const, on: carrierText([sha]) }
+        expect(await readiness(repo, launchBase, productionRun)).toEqual(expected)
+        expect(await readiness(repo, launchBase)).toEqual(expected)
+      }
+    } finally { await rm(dir, { recursive: true, force: true }) }
+  })
+}
+
+test('#1133 G166 round 31: the untrimmed read only EXPLAINS a trim — it never heals a capture cut inside content', async () => {
+  const carrier = `${HEADERS}subject\n\nClaude-Session: fake \n`
+  const size = Buffer.byteLength(carrier, 'utf8')
+  const honest = hostOk(`\0subject\n\nClaude-Session: fake \n\0`)
+  const cut = carrier.slice(0, carrier.indexOf('Claude-Session'))
+  // Positive control: the same honest read DOES explain a trimmed capture of this object.
+  expect(await fakeReadiness(fakeHost(carrier.trimEnd(), hostOk(String(size)), `${objectOid(carrier)}\n`, honest)))
+    .toEqual({ kind: 'blocked', on: carrierText([objectOid(carrier)]) })
+  // A capture cut before the trailer line lost content, not whitespace: still unknown, and named.
+  expect(await fakeReadiness(fakeHost(cut, hostOk(String(size)), `${objectOid(carrier)}\n`, honest))).toEqual({
+    kind: 'unknown', detail: `Publication commit ${objectOid(carrier)} was read incompletely (${Buffer.byteLength(cut)} of ${size} bytes)`,
+  })
+  // A read that is not NUL-terminated, or does not reproduce the OID, explains nothing.
+  for (const message of [hostOk('\0subject\n\nClaude-Session: fake \n'), hostOk('subject\n\nClaude-Session: fake \n\0'), hostOk('\0subject\n\nClaude-Session: fake\t\n\0')]) {
+    expect(await fakeReadiness(fakeHost(carrier.trimEnd(), hostOk(String(size)), `${objectOid(carrier)}\n`, message))).toEqual({
+      kind: 'unknown', detail: `Publication commit ${objectOid(carrier)} was read incompletely (${size - 2} of ${size} bytes: captured bytes and proposed terminators do not match the commit OID)`,
+    })
+  }
 })

@@ -379,7 +379,7 @@ for (const stage of ['lease', 'push', 'witness', 'create', 'pr-witness']) {
     let remoteReads = 0
     let created = false
     f.intercept(argv => {
-      if (argv.includes('ls-remote')) {
+      if (argv.includes('ls-remote') && argv.includes('refs/heads/change')) {
         remoteReads++
         if (stage === 'lease' && remoteReads === 2) return bad()
         if (stage === 'witness' && remoteReads === 3) return ok(`${f.base}\trefs/heads/change`)
@@ -590,7 +590,7 @@ test('publication refuses malformed lease, missing store write and local mode', 
   const f = await fixture()
   const snapshot = await measured(f)
   let reads = 0
-  f.intercept(argv => argv.includes('ls-remote') && ++reads === 2 ? ok('garbled') : undefined)
+  f.intercept(argv => argv.includes('ls-remote') && argv.includes('refs/heads/change') && ++reads === 2 ? ok('garbled') : undefined)
   expect(await f.publishChecked(snapshot)).toMatchObject({ kind: 'unknown', detail: expect.stringContaining('lease is malformed') })
   f.intercept(undefined)
   const update = f.store.update.bind(f.store)
@@ -1238,4 +1238,28 @@ test('the run-row guard names which field moved, and never leaks the path', asyn
   // The VALUES are never interpolated — this string reaches inner_result and the chat.
   expect(JSON.stringify(movedBranch)).not.toContain('trident/moved')
   expect(JSON.stringify(movedBranch)).not.toContain(f.options.worktree)
+})
+
+test('#1133 G166 round 31: a public carrier on the base branch above the run\'s pin does not refuse publication; the branch\'s own carrier still does', async () => {
+  const f = await fixture()
+  // A contributor's squash lands on origin/main with a session trailer AFTER the run was pinned,
+  // and the host rebases the build branch onto it.
+  await writeFile(join(f.repo, 'contributor.txt'), 'contributor\n')
+  await f.command(['git', '-C', f.repo, 'add', 'contributor.txt'])
+  await f.command(['git', '-C', f.repo, 'commit', '-m', 'Contributor squash', '-m', 'Claude-Session: https://example.invalid/contributor'])
+  const carrier = await f.command(['git', '-C', f.repo, 'rev-parse', 'HEAD'])
+  await f.command(['git', '-C', f.repo, 'push', 'origin', 'main'])
+  await f.command(['git', '-C', f.worktree, 'rebase', '-q', 'main'])
+  expect(f.store.get(f.row.id)?.base_sha).toBe(f.base)
+  expect((await f.command(['git', '-C', f.repo, 'rev-list', `${f.base}..refs/heads/change`])).split('\n')).toContain(carrier)
+  const clean = await measured(f)
+  expect(await f.publishChecked(clean)).toEqual({ kind: 'allow' })
+  expect(f.calls).toContainEqual(['git', '-C', f.repo, 'ls-remote', '--heads', 'origin', 'refs/heads/main'])
+  // The branch's own carrier, above the merge-base with origin/main, is still refused and named.
+  await writeFile(join(f.worktree, 'code.txt'), 'own\n')
+  await f.command(['git', '-C', f.worktree, 'commit', '-q', '-am', 'Own work', '-m', 'Claude-Session: https://example.invalid/own'])
+  const own = await f.command(['git', '-C', f.worktree, 'rev-parse', 'HEAD'])
+  expect(await f.publishChecked(await measured(f))).toEqual({
+    kind: 'blocked', on: `Publication branch carries a Claude-Session trailer on 1 commit(s) above the launch base: ${own}`,
+  })
 })
