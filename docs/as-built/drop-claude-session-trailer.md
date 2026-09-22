@@ -2391,3 +2391,28 @@ reconstruction. `grep -rn "one missing LF\|one proposed LF\|missing > 1" trident
 only this shard: the round-22 mutation record (`:1435`, a historical `missing > 1` → `missing > 99`
 run) and this entry's own quotations of the old code. No source file and no inventory row states
 the old bound; the same search for `missing > 2` finds `release-readiness.ts:148` (positive control).
+
+#### T2 — the inventory's prose positive control cited a blank line
+
+`docs/trident-gates-inventory.md:35` names `enforceCrossModelGate` in
+`trident/inner-workflow.test.ts:979` as the positive control for NO TEST adjudication. At the base
+`f542a488` that line is `expect(SRC).toContain('function enforceCrossModelGate(')`; on this branch
+the 16 lines inserted after old `:762` left `:979` BLANK and moved the statement to `:995`
+(byte-equal to base `:979`). The round-29 sweep missed it because its instrument matched only
+`| Gnnn |` rows. Re-anchored `:979` → `:995`.
+
+THE WHOLE-FILE SCAN, run-owned: every `(trident|scripts|open|docs)/…:(\d+)` on every line of the
+inventory (prose, table rows, headers alike; `pre-#845` refs excluded), each read at its revision
+with `git show` and classified ok / blank / past-EOF / missing file, keyed by gate id or, for prose,
+by the line's own text (a line-number key misreports the one prose line the branch's new row shifts
+from `:292` to `:293`). Base: 578 citations, 38 broken. Head before T2: 719 citations, 38 broken,
+ONE key with more broken than the base — the `:35` prose line. After T2: 719 citations, 37 broken,
+ZERO keys with more broken than the base. (G139 shows fewer broken on head only by accident — see
+T3.)
+
+THE REGRESSION: a second test in `trident/gates-inventory-citations.test.ts` locates the sentence by
+pattern, asserts exactly one match, and asserts the cited `inner-workflow.test.ts` line contains
+`enforceCrossModelGate`. The first test reads only the TEST column of table rows and checks only
+existence and EOF, which is why nothing was red. Mutation, `:995` → `:979` on inventory `:35`: 1 fail /
+1 pass (the new test). Control `bun test ./trident/gates/build-claim.test.ts`: 10 pass / 0 fail.
+Restored: 2 pass / 0 fail.
