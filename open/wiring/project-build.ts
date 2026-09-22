@@ -1,5 +1,5 @@
 import { resolveTranscriptProjectsDir } from '@neutronai/runtime/adapters/claude-code/persistent/signatures.ts'
-import { spawnCapture } from '@neutronai/trident/git-mode.ts'
+import { spawnCapture, type HostCommandResult } from '@neutronai/trident/git-mode.ts'
 import { runWorktreePath } from '@neutronai/trident/merge.ts'
 import { mkdir, readFile, writeFile, lstat } from 'node:fs/promises'
 import { join, resolve } from 'node:path'
@@ -208,6 +208,23 @@ function fullSuiteCommand(strategy: string | null | undefined): string | null {
   return commands.length > 0 ? commands.join('\n') : null
 }
 
+/** Diagnostic categories are not ownership evidence and never authorize cleanup.
+ * Git's output may name private paths, so only fixed labels reach durable state. */
+function worktreeAddDiagnostic(result: HostCommandResult | null) {
+  const output = result ? `${result.stderr.slice(0, 4096)}\n${result.stdout.slice(0, 4096)}` : ''
+  const reason = result === null ? 'observation-error'
+    : result.timed_out ? 'timeout'
+    : /already (?:checked out|used by worktree)/i.test(output) ? 'branch-held'
+    : /already exists|already registered/i.test(output) ? 'path-exists'
+    : /permission denied|operation not permitted/i.test(output) ? 'permission'
+    : /no space left on device|disk quota exceeded/i.test(output) ? 'storage-full'
+    : 'unclassified'
+  const code = result?.exit_code
+  return { operation: 'git-worktree-add', reason,
+    exit_code: Number.isInteger(code) && code! >= 0 && code! <= 255 ? code! : null,
+    timed_out: result === null ? null : result.timed_out === true }
+}
+
 /** Bind one dispatched project, using the host's retained session launch options. */
 export async function prepareProjectBuild(input: InnerLoopInput, context: ProjectBuildContext, signal: AbortSignal): Promise<ProjectBuildHostOptions> {
   const run = { ...input.run, branch: input.run.branch ?? `trident/${input.run.slug}`,
@@ -242,10 +259,19 @@ export async function prepareProjectBuild(input: InnerLoopInput, context: Projec
         start = expected
       }
     }
-    const added = await git(branch.ok
-      ? ['worktree', 'add', '--', run.worktree, run.branch]
-      : ['worktree', 'add', '-b', run.branch, '--', run.worktree, start])
-    if (!added.ok || added.timed_out) throw Error('Build worktree creation was not confirmed')
+    let added: HostCommandResult | null = null
+    try {
+      added = await git(branch.ok
+        ? ['worktree', 'add', '--', run.worktree, run.branch]
+        : ['worktree', 'add', '-b', run.branch, '--', run.worktree, start])
+    } catch { /* A thrown observation carries no safe command evidence. */ }
+    if (!added?.ok || added.timed_out) {
+      const diagnostic = worktreeAddDiagnostic(added)
+      let recorded = true
+      try { await context.store.recordStageEvent(run.id, 'build-worktree-add-failed', JSON.stringify(diagnostic)) }
+      catch { recorded = false }
+      throw Error(`Build worktree creation was not confirmed (reason=${diagnostic.reason}; exit=${diagnostic.exit_code ?? 'unknown'}; timed_out=${diagnostic.timed_out ?? 'unknown'}; diagnostic_recorded=${recorded})`)
+    }
   }
   const checked = await context.runHost(['git', '-C', run.worktree, 'symbolic-ref', '--quiet', 'HEAD'], run.worktree)
   if (!checked.ok || checked.timed_out || checked.stdout.trim() !== `refs/heads/${run.branch}`) throw Error('Build worktree does not hold the assigned branch')
