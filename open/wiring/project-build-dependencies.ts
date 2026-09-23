@@ -88,6 +88,69 @@ async function preparationKey(worktree: string, workspaces: unknown[], executabl
   return hash.digest('hex')
 }
 
+/** Observe every installed dependency file, not just package entrypoints. ctime
+ * and inode prevent restored mtimes from hiding a write or replacement. Internal
+ * directory links are traversed once; external targets cannot authorize reuse. */
+async function installedTreeKey(worktree: string): Promise<string | null> {
+  const root = await realpath(worktree)
+  const modules = join(root, 'node_modules')
+  if (!await exists(modules)) return 'absent'
+  if (!(await lstat(modules)).isDirectory()) return null
+  const hash = createHash('sha256')
+  const pending = [modules]
+  const visited = new Set<string>()
+  for (let cursor = 0; cursor < pending.length; cursor++) {
+    const path = pending[cursor]!
+    const actual = await realpath(path)
+    if (!actual.startsWith(`${root}${sep}`)) return null
+    const link = await lstat(path, { bigint: true })
+    hash.update(JSON.stringify([path.slice(root.length), actual.slice(root.length),
+      ...[link.dev, link.ino, link.mode, link.size, link.mtimeNs, link.ctimeNs].map(String)]))
+    if (visited.has(actual)) continue
+    visited.add(actual)
+    const stat = await lstat(actual, { bigint: true })
+    hash.update(JSON.stringify([actual.slice(root.length),
+      ...[stat.dev, stat.ino, stat.mode, stat.size, stat.mtimeNs, stat.ctimeNs].map(String)]))
+    if (stat.isDirectory()) {
+      for (const entry of (await readdir(actual)).sort()) pending.push(join(actual, entry))
+    } else if (!stat.isFile()) return null
+  }
+  return hash.digest('hex')
+}
+
+/** Fresh host measurement for suite reuse. Unknown or dirty inputs never reuse
+ * proof. This shares preparation's manifest/toolchain and local-resolution keys. */
+export async function projectSuiteIdentity(worktree: string, expectedHead?: string): Promise<string | null> {
+  try {
+    const revision = await spawnCapture(['git', 'rev-parse', '--verify', 'HEAD'], worktree)
+    if (!revision.ok || (expectedHead !== undefined && revision.stdout.trim() !== expectedHead)) return null
+    const clean = await spawnCapture(['git', 'status', '--porcelain', '--untracked-files=all'], worktree)
+    if (!clean.ok || clean.stdout.trim()) return null
+    const executable = Bun.which('bun', { PATH: process.env.PATH ?? '' })
+    if (!executable) return null
+    const bun = await realpath(executable)
+    const manifestPath = join(worktree, 'package.json')
+    const manifest = await exists(manifestPath) ? JSON.parse(await readFile(manifestPath, 'utf8')) : {}
+    const workspaces = Array.isArray(manifest.workspaces) ? manifest.workspaces : manifest.workspaces?.packages ?? []
+    if (!Array.isArray(workspaces)) return null
+    const key = await preparationKey(worktree, workspaces, bun)
+    const resolution = await resolutionKey(worktree, workspaces, bun)
+    const installed = await installedTreeKey(worktree)
+    // Repositories without a manifest have no package resolution contract.
+    if (!key || !installed || (await exists(manifestPath) && !resolution)) return null
+    const modules = join(worktree, 'node_modules')
+    let installation = null
+    if (await exists(modules)) {
+      const stat = await lstat(modules)
+      if (!stat.isDirectory()) return null
+      installation = [stat.dev, stat.ino]
+    } else if (Object.keys({ ...manifest.dependencies, ...manifest.devDependencies }).length > 0) return null
+    const workspace = await lstat(await realpath(worktree))
+    return createHash('sha256').update(JSON.stringify([key, resolution, installed, installation,
+      workspace.dev, workspace.ino])).digest('hex')
+  } catch { return null }
+}
+
 /** Provision declared Bun workspaces. Recovery can reuse a measured installation
  * only after checking the same inputs and running the host readiness verifier. */
 export async function prepareProjectDependencies(worktree: string, state: string,

@@ -47,6 +47,7 @@ async function fixture() {
   const runner = fakeRunner('pi', { supports: (_role, placement) => { placements.push(placement); return { ok: true } } })
   const options: ProjectBuildHostOptions = {
     requestedModels: { plan: 'test', build: 'test', fix: 'test', review: 'test' },
+    suiteIdentity: async () => 'measured-fixture-identity',
     substrate: { provider: 'pi', inRepl: runner, headless: {} },
     // The real store over the same database, so the composition's write is the
     // write production performs rather than a stub that cannot fail.
@@ -59,6 +60,108 @@ async function fixture() {
   }
   return { options, path, placements }
 }
+
+for (const change of ['none', 'head', 'round', 'strategy', 'subset', 'identity', 'unknown identity', 'corrupt', 'missing', 'run'] as const) {
+  test(`durable publication suite recovery: ${change}`, async () => {
+    const f = await fixture()
+    const subject = { head: 'b'.repeat(40), diff: '+code', pr: null }
+    let calls = 0
+    f.options.policy.publicationSuite = { strategy: 'bun test', scope: 'full-suite', readCheckpoint: async (snapshot, round) => {
+      calls++
+      return { runId: f.options.production.runId, head: snapshot.head, round, report: { hostExitCode: 0 } }
+    } }
+    const host = await createProjectBuildHost(f.options)
+    const checkpoint = { head: subject.head, stage: 'approved' as const, round: 2, replansUsed: 0, findings: [], previousFindings: [] }
+    await host.deps.modes!.saveCheckpoint!(checkpoint)
+    expect(await host.deps.publicationSuite(subject)).toEqual({ kind: 'known', findings: [] })
+    if (change === 'head') subject.head = 'c'.repeat(40)
+    if (change === 'round') await host.deps.modes!.saveCheckpoint!({ ...checkpoint, round: 3 })
+    if (change === 'strategy') f.options.policy.publicationSuite.strategy = 'bash suite.sh'
+    if (change === 'subset') f.options.policy.publicationSuite.scope = 'subset'
+    if (change === 'identity') f.options.suiteIdentity = async () => 'changed-dependencies-or-tools'
+    if (change === 'unknown identity') f.options.suiteIdentity = async () => null
+    if (change === 'corrupt' || change === 'missing') await f.options.production.store.recordStageEvent(f.options.production.runId, 'build-suite-receipt', change === 'corrupt' ? '{' : null)
+    if (change === 'run') {
+      const other = await f.options.production.store.create({ slug: 'other', project_slug: 'project', repo_path: f.options.production.repo, task: 'other' })
+      await f.options.production.store.update(other.id, { branch: 'change', worktree: f.options.production.worktree, base_sha: 'a'.repeat(40) })
+      const receipt = f.options.production.store.stageEvents(f.options.production.runId).filter(event => event.stage === 'build-suite-receipt').at(-1)!
+      await f.options.production.store.recordStageEvent(other.id, 'build-suite-receipt', receipt.meta)
+      f.options.production.runId = other.id
+    }
+    const recovered = await createProjectBuildHost(f.options)
+    expect(await recovered.deps.publicationSuite(subject)).toEqual({ kind: 'known', findings: [] })
+    expect(calls).toBe(change === 'none' ? 1 : 2)
+  })
+}
+
+test('durable suite invalidation survives failure and stale completion cannot replace newer proof', async () => {
+  const f = await fixture()
+  const subject = { head: 'b'.repeat(40), diff: '+code', pr: null }
+  let calls = 0
+  f.options.policy.publicationSuite = { strategy: 'bun test', scope: 'full-suite', readCheckpoint: async (snapshot, round) => {
+    calls++
+    return { runId: f.options.production.runId, head: snapshot.head, round, report: { hostExitCode: 0 } }
+  } }
+  const host = await createProjectBuildHost(f.options)
+  await host.deps.publicationSuite(subject)
+  f.options.suiteIdentity = async () => 'changed'
+  f.options.policy.publicationSuite.readCheckpoint = async () => { throw new Error('interrupted') }
+  const failing = await createProjectBuildHost(f.options)
+  expect(await failing.deps.publicationSuite(subject)).toMatchObject({ kind: 'unknown' })
+  f.options.suiteIdentity = async () => 'measured-fixture-identity'
+  f.options.policy.publicationSuite.readCheckpoint = async (snapshot, round) => {
+    calls++
+    await f.options.production.store.recordStageEvent(f.options.production.runId, 'build-suite-receipt', null)
+    return { runId: f.options.production.runId, head: snapshot.head, round, report: { hostExitCode: 0 } }
+  }
+  const recovered = await createProjectBuildHost(f.options)
+  expect(await recovered.deps.publicationSuite(subject)).toMatchObject({ kind: 'unknown', detail: expect.stringContaining('ownership changed') })
+  expect(calls).toBe(2)
+  expect(f.options.production.store.stageEvents(f.options.production.runId).filter(event => event.stage === 'build-suite-receipt').at(-1)!.meta).toBeNull()
+})
+
+test('suite inputs changing during execution cannot publish or preserve a reusable proof', async () => {
+  const f = await fixture()
+  let identity = 'before'
+  f.options.suiteIdentity = async () => identity
+  f.options.policy.publicationSuite = { strategy: 'bun test', scope: 'full-suite', readCheckpoint: async (snapshot, round) => {
+    identity = 'after'
+    return { runId: f.options.production.runId, head: snapshot.head, round, report: { hostExitCode: 0 } }
+  } }
+  const host = await createProjectBuildHost(f.options)
+  expect(await host.deps.publicationSuite({ head: 'b'.repeat(40), diff: '+code', pr: null })).toMatchObject({
+    kind: 'unknown', detail: expect.stringContaining('inputs changed'),
+  })
+  expect(JSON.parse(f.options.production.store.stageEvents(f.options.production.runId).filter(event => event.stage === 'build-suite-receipt').at(-1)!.meta!)).not.toHaveProperty('receipt')
+})
+
+test('invalidation during identity measurement cannot revive an older suite receipt', async () => {
+  const f = await fixture()
+  const subject = { head: 'b'.repeat(40), diff: '+code', pr: null }
+  let calls = 0
+  f.options.policy.publicationSuite = { strategy: 'bun test', scope: 'full-suite', readCheckpoint: async (snapshot, round) => {
+    calls++
+    return { runId: f.options.production.runId, head: snapshot.head, round, report: { hostExitCode: 0 } }
+  } }
+  const first = await createProjectBuildHost(f.options)
+  await first.deps.publicationSuite(subject)
+  let release!: (identity: string) => void
+  let measured!: () => void
+  const measuring = new Promise<void>(resolve => { measured = resolve })
+  const paused = new Promise<string>(resolve => { release = resolve })
+  let once = true
+  f.options.suiteIdentity = async () => {
+    if (once) { once = false; measured(); return paused }
+    return 'measured-fixture-identity'
+  }
+  const restarted = await createProjectBuildHost(f.options)
+  const result = restarted.deps.publicationSuite(subject)
+  await measuring
+  await f.options.production.store.recordStageEvent(f.options.production.runId, 'build-suite-receipt', null)
+  release('measured-fixture-identity')
+  expect(await result).toEqual({ kind: 'known', findings: [] })
+  expect(calls).toBe(2)
+})
 
 test('project composition renders per-role context briefs and pins placement', async () => {
   const f = await fixture()

@@ -1,15 +1,16 @@
 import { readFile, writeFile } from 'node:fs/promises'
 import { dirname } from 'node:path'
 import { placementFor, type Provider, type WorkerRunner } from '@neutronai/runtime/bounded-work.ts'
-import type { BuildRunInput, BuildRunOutcome } from './build-run.ts'
+import type { BuildRunInput, BuildRunOutcome, BuildSnapshot } from './build-run.ts'
 import { createBuildHost, type BuildHostOptions } from './build-host.ts'
 import { createProjectReviewSource, type ProjectReviewSourceOptions } from './project-review-source.ts'
 import { createProjectObservationSources, type ProjectSuiteOptions } from './project-observation-sources.ts'
 import { briefIntegrity } from './gates/brief-integrity.ts'
-import { assessReviewSuite, type SuiteObservation } from './gates/review-suite.ts'
+import { assessReviewSuite } from './gates/review-suite.ts'
 import { createProductionHostEffects, productionCiSource, workContextPath, type CleanupOutcome, type ProductionHostOptions } from './production-host-effects.ts'
 import { AttemptAccounting } from './attempt-accounting.ts'
 import type { TridentAttemptLedger } from './attempt-ledger.ts'
+import { createProjectSuiteReceipts } from './project-suite-receipt.ts'
 
 /** Bound by the project composition, including its live conversational runner. */
 export interface ProjectBuildSubstrate {
@@ -45,6 +46,8 @@ export interface ProjectBuildHostOptions {
   requestedModels: Record<keyof BuildHostOptions['workers'], string>
   /** Rendered strategies selected only after the driver validates this task's plan. */
   testStrategies?: { full: string; intermediate: string | null }
+  /** Host-measured dependency/toolchain/workspace identity; unknown forbids reuse. */
+  suiteIdentity?: (snapshot: BuildSnapshot) => Promise<string | null>
 }
 
 export type ProjectBuildOutcome = BuildRunOutcome & { cleanup: CleanupOutcome }
@@ -106,7 +109,8 @@ export async function createProjectBuildHost(options: ProjectBuildHostOptions) {
     ciWorkflow: config.ciWorkflow, runId: run.id, suite: reviewSuite })
   const publicationObservations = createProjectObservationSources({ ci, baseBranch: config.baseBranch,
     ciWorkflow: config.ciWorkflow, runId: run.id, suite: publicationSuite })
-  let reviewReceipt: SuiteObservation | undefined
+  const suiteReceipts = createProjectSuiteReceipts({ store: config.store, run, identity: options.suiteIdentity })
+  let reviewRound: number | undefined
   const host = createBuildHost({
     ...policy,
     ...(review ? { review: createProjectReviewSource({ ...review,
@@ -136,26 +140,24 @@ export async function createProjectBuildHost(options: ProjectBuildHostOptions) {
     reviewReadiness: observations.reviewReadiness,
     reviewCi: observations.reviewCi,
     reviewSuite: { async observe(snapshot, round) {
-      reviewReceipt = undefined
-      const receipt = await observations.reviewSuite.observe(snapshot, round)
-      if (receipt.kind === 'known') reviewReceipt = structuredClone(receipt)
-      return receipt
+      reviewRound = round
+      return suiteReceipts.observe(observations.reviewSuite, snapshot, round, reviewSuite?.strategy, reviewSuite?.scope)
     } },
     publicationSuite: publicationObservations.reviewSuite,
     local: { baseBranch: options.production.baseBranch, worktree: options.production.worktree },
   })
-  const observePublicationSuite = host.deps.publicationSuite
   host.deps.publicationSuite = async snapshot => {
-    const receipt = reviewReceipt
-    // Reassess the original run/head/round receipt; do not relabel it as a
-    // terminal measurement. Missing configuration and subset evidence still
-    // require the publication source, as does any different strategy or head.
-    if (publicationSuite && receipt?.scope === 'full-suite'
-      && publicationSuite.scope === 'full-suite' && receipt.strategy === publicationSuite.strategy
-      && receipt.head === snapshot.head) {
-      return assessReviewSuite({ observe: async () => receipt }, snapshot, receipt.round, run.id)
+    // Recovery reads the driver's durable round. An in-memory round is useful
+    // only before a driver checkpoint exists (direct host consumers).
+    let round = reviewRound ?? -1
+    try { round = (await production.modes.loadResume())?.round ?? round }
+    catch {
+      if (config.store.stageEvents(run.id).some(event => event.stage === 'build-mode-state')) {
+        return { kind: 'unknown', detail: 'Publication suite round checkpoint is unreadable' }
+      }
     }
-    return timed('publication-suite', () => observePublicationSuite(snapshot))
+    return timed('publication-suite', () => assessReviewSuite({ observe: () => suiteReceipts.observe(publicationObservations.reviewSuite,
+      snapshot, round, publicationSuite?.strategy, publicationSuite?.scope) }, snapshot, round, run.id))
   }
   const readiness = host.deps.reviewReadiness!
   host.deps.reviewReadiness = (...args) => timed('review-readiness-wait', () => readiness(...args))

@@ -1115,6 +1115,22 @@ export class TridentRunStore {
     })
   }
 
+  /** Suite acquisition invalidates the previous proof before executing. Completion
+   * may append only while that exact acquisition still owns the latest event. */
+  async appendSuiteReceipt(runId: string, expected: number | null, meta: string): Promise<number | null> {
+    return this.db.transaction(tx => {
+      const result = tx.runSync(
+        `INSERT INTO code_trident_stage_events (run_id, stage, at, meta)
+         SELECT id, 'build-suite-receipt', ?, ? FROM code_trident_runs
+         WHERE id = ? AND phase NOT IN ${TERMINAL_PHASE_SQL}
+           AND (SELECT MAX(id) FROM code_trident_stage_events
+                WHERE run_id = ? AND stage = 'build-suite-receipt') IS ?`,
+        [this.now(), meta, runId, runId, expected],
+      )
+      return result.changes === 1 ? tx.get<{ id: number }>('SELECT last_insert_rowid() AS id', [])!.id : null
+    })
+  }
+
   async recordStageEvent(
     run_id: string,
     stage: string,
