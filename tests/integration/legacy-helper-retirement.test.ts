@@ -137,6 +137,21 @@ test('concurrent cleanup retires one owned helper at most once', async () => {
   expect(f.adoption).not.toHaveBeenCalled()
 })
 
+test('retirement renews the exact owned claim through the ownership funnel before termination', async () => {
+  const f = fixture()
+  let atTermination: ReplRegistryRecord | undefined
+  const owned = f.own(f.row, async () => '❯\n', () => {
+    atTermination = loadRegistry(f.path)[f.key]
+  })
+  const row = { ...owned.ownedRow, adoption_claim_at: 1, adoption_claim_pid: 123 }
+  saveRegistry(f.path, { [f.key]: row })
+  expect(await f.helper.retireExistingHelpers()).toEqual([{ sessionKey: f.key, outcome: 'retired' }])
+  expect(atTermination?.adoption_claim_at).toBeGreaterThan(1)
+  expect(atTermination).toEqual({ ...row, adoption_claim_at: atTermination!.adoption_claim_at!,
+    adoption_claim_pid: process.pid })
+  expect(owned.kills()).toBe(1)
+})
+
 test('a post-exit registry change is preserved without reopening admission or respawn', async () => {
   const f = fixture()
   const replacement = { ...f.row, child_generation: randomUUID() }

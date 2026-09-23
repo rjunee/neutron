@@ -43,7 +43,7 @@ The workspace ownership/placement foundation landed separately in #1231. This
 change does not claim production project placement or idle project sleeping.
 No production pane was closed during development.
 
-Validation: 156 tests passed (728 assertions) across the wiring, background-chat
+Validation: 170 tests passed (764 assertions), covering the wiring, background-chat
 isolation, provider routing, helper retirement, legacy cleanup and consuming
 Open reminder suites, plus workspace ownership and placement controls after
 rebasing onto #1231. The
@@ -57,9 +57,20 @@ adoption, preserve registry-only survivors regardless of health/evidence/host
 metadata, and prove both owned-idle retirement and refusal for active, unknown,
 unreadable or changed-identity helpers while preserving a live-chat control.
 
+Full CI caught a direct claim-timestamp write outside the ownership funnel and
+two older tests still requiring setup prewarm at boot. Retirement now calls
+`refreshPaneClaim` under the same ownership lock, preserving the exact-identity
+comparison and refreshing the claimant pid through the canonical transition.
+A direct test inspects the renewed row at termination. Both boot
+characterizations now assert no dispatch, then invoke the real composed
+interview engine to prove the setup helper is available on demand; the existing
+tool, continuity and composition-field assertions remain.
+
 Both counterfactual mutations failed the consuming integration test in both
 boot states: changing nudge workers back to warm failed the child-exit check;
 disabling the nudge substrate failed the worker-spawn check. Both mutations
 were restored. Reintroducing ordinary adoption in cleanup also failed its direct
 factory guard. Root and Trident typechecks passed. These are synthetic-process
 integration checks, not a live Claude subscription or deployed-pane proof.
+The updated boot characterizations also reject both reintroduced prewarm and
+disabled setup dispatch; both counterfactual mutations were restored.

@@ -14,7 +14,7 @@ import { SUBSTRATE_ERROR_CODES } from '../../../errors.ts'
 import { EventChannel } from './event-channel.ts'
 import { type PendingRespawnEntry, enqueuePendingRespawn } from './pending-respawns-queue.ts'
 import { REPL_DEBUG, activeModelWatchdogs, activeWatchdogs, childByKey, committedDispatches, cwdDriftAlertState, cwdDriftRespawnState, ephemeralSessions, pendingChildKills, pendingSpawns, pool, respawnGates, sink, supervisedBySessionKey, wedgeAlertState, retiringSessionKeys } from './pool-state.ts'
-import { getRecord, registryConversationScopeMatches, withOwnedRegistry, type ReplRegistryRecord } from './repl-registry.ts'
+import { getRecord, refreshPaneClaim, registryConversationScopeMatches, withOwnedRegistry, type ReplRegistryRecord } from './repl-registry.ts'
 import {
   SHUTDOWN_PENDING_SPAWN_GRACE_MS,
   cancellableWait,
@@ -483,7 +483,11 @@ async function retireOwnedPersistentRepl(
     const checked = withOwnedRegistry(registryPath, registry => {
       const row = registry[sessionKey]
       if (!matches(row)) return { registry, result: false, skipSave: true }
-      if (claimant !== undefined) registry[sessionKey] = { ...row!, adoption_claim_at: Date.now() }
+      if (claimant !== undefined) {
+        const refreshed = refreshPaneClaim(row!, claimant, Date.now(), process.pid)
+        if (refreshed === undefined) return { registry, result: false, skipSave: true }
+        registry[sessionKey] = refreshed
+      }
       return { registry, result: true }
     }, () => false)
     if (!checked.persisted || !checked.result) return 'refused'
