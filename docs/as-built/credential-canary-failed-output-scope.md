@@ -1,0 +1,7 @@
+## 2026-09-23 — Scope the credential canary's output check to the failed run
+
+The full-suite credential boundary test checked for the name of an intentionally passing fixture test in both nested runner invocations. Bun's dots reporter omits passing test names while retaining the test count. That made the test reject an otherwise successful, fully counted run before it examined the deliberate failure. Issue #1229 tracks the live failure.
+
+The fixture now uses Bun's dots reporter on every run, so an unconditional passing-name check is caught by CI. The check requires the test name and `Expected: false` only for the nested run whose assertion deliberately fails. Both runs still verify discovery of all four files, all three special lanes, absence of inherited credential markers and canary text, retention of CI metadata and PATH, and their host-observed exit codes. The failed run must still expose its assertion to the host; the test does not accept a worker-reported outcome in place of that receipt (G063).
+
+Evidence on a freshly fetched main worktree: a real Bun dots run omitted a passing test name while reporting its count. With dots pinned in the nested test, restoring the old unconditional name check made the test fail, and the scoped check passed. With the runner's credential scrub removed, the test failed at the discovery-isolation check without echoing the canary. With the deliberate assertion changed to pass, the test failed because the host saw exit code zero instead of one. All mutations were reverted.
