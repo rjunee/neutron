@@ -41,9 +41,13 @@ deadline. Each made the corresponding tests fail before restoration. The bounded
 reader does not prove complete live usage coverage: deployment measurement must
 check that actual transcripts fit these limits and report unavailable readings.
 
-Final local results: 137 focused tests and 125 consuming E2E tests passed; both
-TypeScript checks passed. The consuming suite required local socket permission.
-The exact prerequisite-base and candidate archive leak scans both report 455
+Final canonical-base results: 278 adapter/recovery tests (1,209 assertions) and
+151 consuming E2E tests (1,563 assertions) passed; both TypeScript checks passed.
+The consuming suite required local socket permission. Four semantic mutations
+were repeated after the canonical rebuild: relaxed and over-applied reservation
+identity, discarded failure authority, and over-applied telemetry refusal. All
+failed semantically; the restored parser/recovery controls pass.
+The exact merged-base and candidate archive leak scans both report 455
 identical inherited findings; this is a baseline-red tree, not a clean-tree
 claim. The changed-file archive with the known-present LICENSE positive control
 is silent, including this change's commit message scan.
