@@ -101,7 +101,7 @@ function hybridHost(): RunHostCommand {
     if (cmd[0] === 'gh' && cmd[1] === 'pr' && cmd[2] === 'list') return ok(opened ? '389\n' : '')
     if (cmd[0] === 'gh' && cmd[1] === 'pr' && cmd[2] === 'create') {
       opened = true
-      return ok()
+      return ok('https://example.test/project/repository/pull/389')
     }
     throw new Error(`unexpected host command: ${cmd.join(' ')}`)
   }
@@ -162,6 +162,7 @@ describe('trident stranded-failure startup sweep production wiring', () => {
       const recovered = seeded.get(stranded.id)
       expect(recovered?.phase).toBe('failed')
       expect(recovered?.pr).toBe(389)
+      expect(recovered?.published_pr).toBe(389)
       expect(recovered?.failure_reason).toStartWith(FAILURE)
       expect(recovered?.failure_reason).toContain(TRIDENT_SALVAGE_MARKER)
       expect(seeded.get(control.id)).toEqual(controlBefore)

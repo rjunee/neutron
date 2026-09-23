@@ -3904,7 +3904,7 @@ describe('sweepStrandedFailures', () => {
     return store.get(run.id)!
   }
 
-  test('persists only the salvaged PR and appended failure reason onto the failed row', async () => {
+  test('persists the salvaged PR, creation receipt and appended failure reason onto the failed row', async () => {
     const row = await failedPr('persist-salvage')
 
     await sweepStrandedFailures({
@@ -3912,6 +3912,7 @@ describe('sweepStrandedFailures', () => {
       reconcile: async (run) => ({
         ...run,
         pr: 73,
+        published_pr: 73,
         failure_reason: `${run.failure_reason} — build survived the failure`,
       }),
     })
@@ -3919,6 +3920,7 @@ describe('sweepStrandedFailures', () => {
     const saved = store.get(row.id)
     expect(saved?.phase).toBe('failed')
     expect(saved?.pr).toBe(73)
+    expect(saved?.published_pr).toBe(73)
     expect(saved?.failure_reason).toBe(
       'persist-salvage failed before handoff — build survived the failure',
     )

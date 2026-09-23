@@ -390,8 +390,10 @@ export interface BuildTridentOrchestratorOptions {
    * concurrently force-terminated run (that stays terminal; `saveIfActive` owns the
    * race-guarded phase write). Wired from the store:
    * `(id, patch) => store.update(id, patch).then(() => {})`. Omitted → a no-op default;
-   * only Ralph multi-task runs reach the re-fire path, so non-Ralph callers/tests are
-   * unaffected. MUST be wired wherever Ralph builds run.
+   * The outer publisher also uses this store writer for a matched PR creation
+   * receipt before annotation and review-diff work. Snapshot saves deliberately
+   * leave publication ownership untouched. MUST be wired wherever builds publish
+   * or Ralph runs re-fire.
    */
   persist_refire_reset?: (run_id: string, patch: TridentRunUpdate) => Promise<void>
   /**
@@ -790,6 +792,7 @@ export async function sweepStrandedFailures({
       if (salvaged === null) continue
       await store.update(row.id, {
         pr: salvaged.pr,
+        ...(salvaged.published_pr !== null ? { published_pr: salvaged.published_pr } : {}),
         failure_reason: salvaged.failure_reason,
       })
     } catch {
@@ -1448,6 +1451,7 @@ export function buildTridentOrchestrator(
         resolveBase,
         resolvedDiffBase,
         detectExistingPr,
+        recordPublication: pr => persistRefireReset(run.id, { published_pr: pr }),
       },
       run,
       claimedHead,
@@ -1589,6 +1593,7 @@ export function buildTridentOrchestrator(
         return {
           ...run,
           pr: published.pr,
+          published_pr: published.published_pr,
           branch,
           failure_reason: appendDisposition(commitReason),
           last_advanced_at: now(),
@@ -2406,6 +2411,7 @@ export function buildTridentOrchestrator(
           inner_checkpoint: checkpoint,
           inner_verdict: null,
           pr: published.pr,
+          published_pr: published.published_pr,
           branch: result.branch ?? run.branch,
         }
         await persistRefireReset(run.id, resetPatch)
