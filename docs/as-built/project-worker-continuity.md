@@ -10,7 +10,10 @@ previous thread.
 `trident/project-worker-continuity.ts` supplies the host-side wrapper. It stores
 the ownership digest and observed thread atomically, records each step's original
 requested thread for adapter recovery, and holds an exclusive writer lock during
-the turn. Missing or corrupt receipts, changed ownership, foreign thread claims,
+the turn. A separate run-directory initiation witness prevents deletion of the
+whole role directory from turning a follow-up into a fresh conversation. Recovery
+identity excludes regenerated filenames and remaining wall budget, while retaining
+the adapter's reservation directory and meaningful work inputs. Missing or corrupt receipts, changed ownership, foreign thread claims,
 uncertain previous steps and overlapping writers refuse further dispatch. A
 leftover lock after an unobserved process death stays uncertain; this module does
 not authorize taking it over. Credentials themselves are never stored. Native
@@ -23,11 +26,14 @@ then checks that the next step receives the observed thread. Other tests cover
 both native placement directions, unsupported Claude build/fix, every ownership
 dimension, same-step and different-step overlap, credential changes during a
 turn, missing/corrupt/symlink/oversized receipts, and recovery positive controls.
-The focused continuity and existing adapter suites pass 129 tests; both root and
-Trident TypeScript checks pass. Five semantic mutations fail their intended
+The focused continuity and existing adapter suites pass 131 tests; both root and
+Trident TypeScript checks pass. Seven semantic mutations fail their intended
 assertions: always creating a fresh thread, weakening ownership scope, removing
 writer exclusion, applying the wrapper to native/review work, and accepting an
-unobserved thread. Restoring the guards passes all 21 continuity tests.
+unobserved thread, binding regenerated transport coordinates, and recreating a
+missing role directory. Restoring the guards passes all 23 continuity tests. Independent
+review found the regenerated-coordinate and missing-role-directory cases; both
+now have regression tests through the real Codex adapter.
 
 This slice is the binding module and adapter-level verification. Production
 composition in `open/wiring/project-build.ts`, its consuming

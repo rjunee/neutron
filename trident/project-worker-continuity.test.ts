@@ -1,5 +1,5 @@
 import { afterEach, expect, test } from 'bun:test'
-import { chmod, mkdtemp, readFile, readdir, rm, symlink, unlink, writeFile } from 'node:fs/promises'
+import { chmod, mkdtemp, readFile, readdir, rename, rm, symlink, unlink, writeFile } from 'node:fs/promises'
 import { join } from 'node:path'
 import { tmpdir } from 'node:os'
 import { fakeRunner, type BoundedWorkOutcome, type BoundedWorkRequest, type WorkerRunner } from '@neutronai/runtime/bounded-work.ts'
@@ -65,6 +65,27 @@ for (const defect of ['missing-binding', 'corrupt-binding', 'missing-step', 'cor
     expect((await f.call()).kind).toBe('completed')
   })
 }
+
+test('missing whole role directory cannot become an initial turn; restoration preserves observed thread', async () => {
+  const f = await fixture(); await f.call()
+  const dir = join(f.dir, 'worker-conversation-build')
+  const saved = join(f.dir, 'saved-role')
+  await rename(dir, saved)
+  expect((await f.call({ step_id: 'two' })).kind).toBe('unknown')
+  expect(f.runner.calls).toHaveLength(1)
+  await rename(saved, dir)
+  expect((await f.call({ step_id: 'two' })).kind).toBe('completed')
+  expect(f.runner.calls[1]!.thread).toEqual({ id: 'observed-first' })
+})
+
+test('missing initiation witness cannot be reconstructed from a role directory', async () => {
+  const f = await fixture(); await f.call()
+  const path = join(f.dir, 'worker-conversation-build.initiated.json')
+  const original = await readFile(path, 'utf8'); await unlink(path)
+  expect((await f.call({ step_id: 'two' })).kind).toBe('unknown'); expect(f.runner.calls).toHaveLength(1)
+  await writeFile(path, original)
+  expect((await f.call({ step_id: 'two' })).kind).toBe('completed')
+})
 
 test('concurrent writers cannot share a thread; after settlement another step can resume it', async () => {
   const f = await fixture()
@@ -164,13 +185,30 @@ echo '{"type":"turn.completed","usage":{"input_tokens":3,"output_tokens":2}}'
 printf 'NEUTRON_CODEX_BUILD_HEAD=head\\nNEUTRON_CODEX_BUILD_DIFF=claim.diff\\nNEUTRON_CODEX_BUILD_PR=\\n' > "$NEUTRON_CODEX_BUILD_TRAILER_FILE"
 `)
   await chmod(script, 0o700)
-  const fresh = () => f.wrap({ runner: createCodexHeadlessRunner({ buildScript: script, probe: { ok: true }, env: { PATH: process.env.PATH } }) })
+  const fresh = (over: Partial<ProjectWorkerContinuityOptions> = {}) => f.wrap({
+    runner: createCodexHeadlessRunner({ buildScript: script, probe: { ok: true }, env: { PATH: process.env.PATH } }), ...over,
+  })
   expect((await fresh().run(f.request(), 'headless', signal())).kind).toBe('completed')
-  expect((await fresh().run(f.request(), 'headless', signal())).kind).toBe('completed')
+  await writeFile(join(f.dir, 'reconstructed-brief'), 'build')
+  const recovered = f.request({ budget: { wall_ms: 1000 },
+    brief: { path: join(f.dir, 'reconstructed-brief'), integrity: 'fixture' },
+    result: { path: join(f.dir, 'reconstructed-result'), schema: 'FORGE' } })
+  expect((await fresh().run(recovered, 'headless', signal())).kind).toBe('completed')
+  expect((await fresh().run({ ...recovered, brief: { ...recovered.brief, integrity: 'changed' } }, 'headless', signal())).kind).toBe('unknown')
+  expect((await fresh().run({ ...recovered, result: { ...recovered.result, path: join(f.dir, 'other', 'result') } }, 'headless', signal())).kind).toBe('unknown')
+  expect((await fresh().run({ ...recovered, model_id: 'changed-model' }, 'headless', signal())).kind).toBe('unknown')
+  expect((await fresh({ credentialIdentity: async () => 'changed-account' }).run(recovered, 'headless', signal())).kind).toBe('unknown')
   expect(await readFile(join(f.dir, 'threads'), 'utf8')).toBe('\n')
   expect((await fresh().run(f.request({ step_id: 'two' }), 'headless', signal())).kind).toBe('completed')
   expect(await readFile(join(f.dir, 'threads'), 'utf8')).toBe('\nobserved-first\n')
   const observation = await fresh().observe?.(f.request({ step_id: 'two' }))
   expect(observation?.thread_id).toBe('observed-first')
   expect(await readFile(join(f.dir, 'threads'), 'utf8')).toBe('\nobserved-first\n')
+  const role = join(f.dir, 'worker-conversation-build'); const saved = join(f.dir, 'saved-role')
+  await rename(role, saved)
+  expect((await fresh().run(f.request({ step_id: 'three' }), 'headless', signal())).kind).toBe('unknown')
+  expect(await readFile(join(f.dir, 'threads'), 'utf8')).toBe('\nobserved-first\n')
+  await rename(saved, role)
+  expect((await fresh().run(f.request({ step_id: 'three' }), 'headless', signal())).kind).toBe('completed')
+  expect(await readFile(join(f.dir, 'threads'), 'utf8')).toBe('\nobserved-first\nobserved-first\n')
 })

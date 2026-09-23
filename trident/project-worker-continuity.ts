@@ -1,7 +1,7 @@
 import { createHash, randomUUID } from 'node:crypto'
 import { constants } from 'node:fs'
 import { lstat, mkdir, open, rename, unlink } from 'node:fs/promises'
-import { join } from 'node:path'
+import { dirname, join, resolve } from 'node:path'
 import { placementFor, type BoundedWorkOutcome, type BoundedWorkRequest, type Provider, type WorkerRunner } from '@neutronai/runtime/bounded-work.ts'
 
 /** Host-owned conversation bindings; never worker result authority. See
@@ -68,7 +68,14 @@ export function createProjectWorkerContinuity(options: ProjectWorkerContinuityOp
     return hash([options.runId, options.projectId, req.role, runner.provider, req.model_id, credential, req.cwd])
   }
   const stepDir = (dir: string, req: BoundedWorkRequest) => join(dir, `step-${hash(req.step_id)}`)
-  const requestIdentity = (req: BoundedWorkRequest) => hash({ ...req, thread: null })
+  // A replacement host regenerates transport filenames and its remaining wait
+  // budget. The adapter's reservation directory and meaningful work stay fixed.
+  const requestIdentity = (req: BoundedWorkRequest) => hash({
+    run: req.run_id, step: req.step_id, role: req.role, model: req.model_id, effort: req.effort,
+    cwd: resolve(req.cwd), brief: req.brief.integrity, schema: req.result.schema,
+    reservationDirectory: resolve(dirname(req.result.path)),
+    writable: req.writable, network: req.network, tools: req.tools, approval: req.needs_approval_decision,
+  })
   const readStep = async (dir: string, req: BoundedWorkRequest, owner: string): Promise<Step> => {
     const location = stepDir(dir, req)
     if (!(await lstat(location)).isDirectory()) throw Error('step directory is not owned')
@@ -104,11 +111,23 @@ export function createProjectWorkerContinuity(options: ProjectWorkerContinuityOp
         const lease = await open(lock, 'wx', 0o600)
         await lease.close()
         release = () => unlink(lock)
-        let created = false
-        try { await mkdir(dir, { mode: 0o700 }); created = true }
-        catch (error) { if ((error as NodeJS.ErrnoException).code !== 'EEXIST') throw error }
+        const initiation = `${dir}.initiated.json`
+        let initiated: unknown
+        try { initiated = await read(initiation) }
+        catch (error) {
+          if ((error as NodeJS.ErrnoException).code !== 'ENOENT') throw error
+          // The initiation witness lives outside the replaceable role directory.
+          // Losing either half never makes a previously used role fresh again.
+          try { await lstat(dir); throw Error('initiation witness missing') }
+          catch (missing) { if ((missing as NodeJS.ErrnoException).code !== 'ENOENT') throw missing }
+          initiated = { version: 1, scope: owner }
+          await write(options.stateDir, `worker-conversation-${req.role}.initiated.json`, initiated)
+          await mkdir(dir, { mode: 0o700 })
+          await write(dir, 'binding.json', { version: 1, scope: owner, thread: null, pending: null })
+        }
+        if ((initiated as { version?: unknown })?.version !== 1
+          || (initiated as { scope?: unknown })?.scope !== owner) throw Error('initiation ownership mismatch')
         if (!(await lstat(dir)).isDirectory()) throw Error('binding directory is not owned')
-        if (created) await write(dir, 'binding.json', { version: 1, scope: owner, thread: null, pending: null })
         const binding = state(await read(join(dir, 'binding.json')), owner)
         if (binding.pending !== null && binding.pending !== req.step_id) throw Error('previous step remains unresolved')
         let newStep = false
