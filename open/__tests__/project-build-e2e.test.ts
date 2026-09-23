@@ -3211,6 +3211,11 @@ test('attempt accounting reconciles pre-crash provider spend through actual pend
   const pending = lastCheckpoint(f).pending as { step_id: string }
   const attempt = f.context.attempts.list(f.row.id).find(row => row.step_id === pending.step_id)!
   expect(attempt).toBeDefined()
+  const reviewAttempts = f.context.attempts.list(f.row.id).filter(row => row.phase === 'review_adversarial')
+  expect(reviewAttempts).toHaveLength(2)
+  expect(new Set(reviewAttempts.map(row => row.step_id)).size).toBe(2)
+  expect(reviewAttempts.filter(row => row.review_seat === null)).toHaveLength(1)
+  expect(reviewAttempts.filter(row => row.review_seat !== null)).toHaveLength(1)
   // Simulate the crash window: transport receipt reached disk, but ledger
   // completion/usage ingestion did not. The pending driver checkpoint is real.
   f.db.raw().query('UPDATE code_trident_attempts SET outcome = NULL, ended_at = NULL WHERE run_id = ? AND step_id = ?')
@@ -3244,7 +3249,12 @@ test('attempt accounting reconciles pre-crash provider spend through actual pend
   expect(f.context.attempts.get(attempt)).toMatchObject({ outcome: null, ended_at: null })
   await createProjectBuildHost(await f.prepare())
   expect(f.context.attempts.receipt(attempt)).toMatchObject({ input_tokens: 7, output_tokens: 3 })
-  expect(new TridentPhaseUsageStore(f.db).list(f.row.id)!.find(row => row.phase === 'review_adversarial')).toMatchObject({ input_tokens: 7, output_tokens: 3 })
+  const reviewReceipts = reviewAttempts.map(row => f.context.attempts.receipt(row)!)
+  for (const receipt of reviewReceipts) expect(receipt).toMatchObject({ input_tokens: 7, output_tokens: 3 })
+  expect(new Set(reviewReceipts.map(row => row.receipt_id)).size).toBe(2)
+  // Concurrent standalone and panel calls are two real attempts. Reconciliation
+  // retains both, but cannot charge either a second time.
+  expect(new TridentPhaseUsageStore(f.db).list(f.row.id)!.find(row => row.phase === 'review_adversarial')).toMatchObject({ input_tokens: 14, output_tokens: 6 })
   expect(f.world.dispatches).toHaveLength(0)
   expect(f.github.prs[0]!.state).toBe('OPEN')
 }, 300_000)

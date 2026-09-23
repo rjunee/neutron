@@ -39,7 +39,7 @@ Mismatched request journals and symlinks are refused with valid nonzero controls
 
 Verification:
 
-- `open/__tests__/project-build-e2e.test.ts`: 132 passed, including seven focused
+- `open/__tests__/project-build-e2e.test.ts`: 158 passed, including seven focused
   accounting cases covering the integrated native hook. New cases exercise a
   complete unknown-metadata run, actual Codex transport measurements with valid
   and mismatched result identities, explicit zero versus partial failed work,
@@ -48,23 +48,30 @@ Verification:
   the live session is removed, refuses altered/symlinked bindings, and keeps the
   pending result unknown with no new dispatch. Native successful work yields
   nonzero usage for all five role/seat calls through the actual Open binding.
+  Canonical integration also distinguishes the two concurrent review attempts:
+  separate step and receipt identities each contribute their measured usage,
+  while repeated pending recovery does not charge either call twice.
 - `trident/attempt-accounting.test.ts`: 14 passed against migrated SQLite,
   including all outcome kinds, missing/zero/nonzero controls, ownership mismatch,
   duplicate/restart recovery, telemetry refusal and abort with late measurements.
   The existing `trident/phase-usage.test.ts` and `trident/attempt-ledger.test.ts`
   projection/storage tests also pass.
 - Driver, generic/project host, project review source, accounting and phase
-  storage: 355 passed.
+  storage: 360 passed. The additional wiring, mutation-contract, production-effect
+  and local-merge consumer suites passed 152 tests.
   Worker adapters and wiring checks passed; the localhost REPL reuse test needed
   execution outside the socket-restricted sandbox and then passed.
 - Both `tsc -p tsconfig.json --noEmit` and
   `tsc -p trident/tsconfig.json --noEmit` passed.
-- Semantic mutations in `attempt-accounting.ts` each went red: discard failure
+- Semantic mutations of the accounting guards each went red: discard failure
   observations; turn measured zero into null; add a replayed receipt to prior
   spend; omit the resolved-model identity guard; veto missing telemetry; let a
   diagnostic sink veto work; omit reconciliation ownership; omit the native
   request binding check; discard increasing same-millisecond observations. Restored
   tests pass, including the valid ownership and absent-metadata controls.
+  The canonical branch repeated resolved-model under-enforcement and
+  same-millisecond over-enforcement mutations; each failed semantically, and
+  the restored accounting/ledger/projection suites passed all 39 tests.
 
 Leak verification of the accounting tree and its exact dependency base found
 the same 455 inherited findings with matching normalized finding sets. Both
