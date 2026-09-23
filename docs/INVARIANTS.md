@@ -57,10 +57,11 @@ with cross-references noted inline.
    wiped-DB cold-start path; React bootstrap injected by exact-string replace on the
    `/chat-react.js` tag. `open/composer.ts:1616-1748`.
    Protects: **S1** (Per-install owner credential).
-6. Prewarm promise never rejects and is not awaited at boot; `prewarmSettled` elevates cold-window
-   timeouts. `open/composer.ts:3661-3684,508-521`.
-   Protects: **D1**/**D2** (PoolRuntime reification / Substrate banner split) — flag/promise pair
-   must move together.
+6. Setup is lazy, retains context during onboarding, and retires at completion.
+   Background nudge and toolless utility workers exist only for their dispatched turn.
+   `open/wiring/substrates.ts`, `tests/integration/on-demand-background-sessions.open.test.ts`,
+   `tests/integration/helper-retirement.test.ts`.
+   Protects: **D1**/**D2** (PoolRuntime reification / Substrate banner split).
 7. Substrate instance-id prefixes are pool keys; the trident fire substrate must stay warm
    per-repo-cwd; the OWNER-FACING CONVERSATIONAL PAIR — `cc-agent-` (live chat) and `cc-nudge-`
    (background proactive compose: fired reminders/rituals + the work-board wakeup) — and ONLY that

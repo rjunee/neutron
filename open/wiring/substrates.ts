@@ -3,7 +3,7 @@
  *
  * Behavior-preserving extraction of the substrate-construction slice of
  * `createOpenComposition` (old `open/composer.ts` lines 485-661): the warm
- * onboarding phase-spec substrate (`cc-llm-*`) + its pre-warm, the warm
+ * onboarding phase-spec substrate (`cc-llm-*`), created on demand, the warm
  * live-chat substrate (`cc-agent-*`), the background proactive-compose substrate
  * (`cc-nudge-*`) — the two that carry `enableToolBridge` — the
  * per-worktree ephemeral factory (`makeEphemeralSubstrate`), and the warm
@@ -12,9 +12,7 @@
  * downstream verbatim.
  *
  * CARE (invariants pinned by `open/__tests__/open-wiring-substrates.test.ts`):
- *   - `prewarmReady` NEVER rejects and is NOT awaited at boot; `prewarmSettled`
- *     is exposed as a LIVE reference (`prewarmSettledRef.settled`) the `.then`
- *     flips, so the composer's cold-window elevation reads the live value.
+ *   - Setup is never prewarmed at boot. Background jobs have disposable workers.
  *   - `enableToolBridge: true` on the OWNER-FACING conversational pair only —
  *     `cc-agent-*` (live chat) and `cc-nudge-*` (background proactive compose,
  *     where a RITUAL runs and needs Core tools per ISSUES #504). `cc-llm-*`,
@@ -56,6 +54,11 @@ export interface WiredSubstrates {
   adoptLiveAgentRepls: (projectIds: readonly (string | null)[]) => Promise<void>
   /** Warm onboarding phase-spec substrate (`cc-llm-*`); null when LLM-less. */
   llmCallSubstrate: Substrate | null
+  /** Stateless, toolless jobs after onboarding; each turn owns a disposable worker. */
+  utilitySubstrate: Substrate | null
+  /** Onboarding is complete: stop helper admission and retire its owned worker. */
+  retireSetup: () => Promise<void>
+  retireLegacyBackground: (projectIds: readonly string[]) => Promise<void>
   /** Warm live-chat substrate (`cc-agent-*`, tool-bridge on); null LLM-less. */
   liveAgentSubstrate: Substrate | null
   /** Build a live-chat substrate pinned to one project for lazy REPL creation. */
@@ -73,9 +76,9 @@ export interface WiredSubstrates {
    */
   makeComposeSubstrate: (project_id: string) => Substrate | null
   /**
-   * BACKGROUND PROACTIVE-COMPOSE substrate (`cc-nudge-*`). The ONE REPL every
-   * timer-driven composition runs on — a fired reminder/ritual and the work-board
-   * wakeup. DISTINCT pool-key namespace from `cc-agent-*` (live chat), so an
+   * BACKGROUND PROACTIVE-COMPOSE substrate (`cc-nudge-*`). Each fired reminder,
+   * ritual or work-board wakeup gets its own disposable REPL. Its namespace is
+   * DISTINCT from `cc-agent-*` (live chat), so an
    * aborted / timed-out / crashed background compose can never evict, poison or
    * respawn the warm child the owner is talking to. Same GRANTS as the chat lane
    * (a ritual runs here — ISSUES #504); only the session is separate. Null when
@@ -90,10 +93,6 @@ export interface WiredSubstrates {
   makeEphemeralSubstrate: (instance_prefix: string, profile?: SubstrateProfile) => (cwd: string) => Substrate
   /** Warm per-repo-cwd trident-fire factory (memoized, non-ephemeral). */
   makeWarmFireSubstrate: (cwd: string) => Substrate
-  /** Build-time pre-warm promise (never rejects); null when LLM-less. */
-  prewarmReady: Promise<void> | null
-  /** LIVE reference the pre-warm `.then` flips; read for cold-window elevation. */
-  prewarmSettledRef: { settled: boolean }
   /** Substrate teardown hooks (none today; registered by the composer verbatim). */
   cleanups: Array<() => void>
 }
@@ -104,7 +103,7 @@ export interface WiredSubstrates {
  * rest of the closure consumes.
  */
 export function wireSubstrates(ctx: OpenWiringContext): WiredSubstrates {
-  const { llmPool, substrateFactory, owner_handle, owner_home, project_slug, prewarmSubstrate } =
+  const { llmPool, substrateFactory, owner_handle, owner_home, project_slug } =
     ctx
 
   // SWAPPABLE PROVIDER — one live, project-aware provider option bag shared by
@@ -184,7 +183,7 @@ export function wireSubstrates(ctx: OpenWiringContext): WiredSubstrates {
   // (2026-06-17 single-session architecture, Step 1).
   //
   // NOT `ephemeral`: a session-less phase-spec dispatch REUSES the ONE warm,
-  // pre-warmed `claude` REPL keyed on (instance, owner, project, credential)
+  // lazily spawned `claude` REPL keyed on (instance, owner, project, credential)
   // rather than cold-spawning a fresh heavy session (MCP + dev-channel +
   // plugins + system-prompt load, ~10-30s) EVERY onboarding turn just to
   // rephrase a prompt that has a static fallback. Context is ALLOWED to
@@ -197,7 +196,7 @@ export function wireSubstrates(ctx: OpenWiringContext): WiredSubstrates {
   // The `ephemeral` one-shot-isolation flag exists for the MANAGED gateway's
   // SHARED `cc-llm-*` substrate (7+ stateless utility callers that must not
   // bleed cross-purpose into one transcript). On Open this substrate is
-  // SINGLE-PURPOSE — wired only into `buildPhaseSpecResolver` below — so
+  // ONBOARDING-ONLY — phase prompts, extraction and suggestions — so
   // reusing one warm session is correct, not a collapse. `skip_permissions`
   // mirrors `liveAgentSubstrate` so the headless REPL doesn't block on
   // interactive prompts.
@@ -221,41 +220,24 @@ export function wireSubstrates(ctx: OpenWiringContext): WiredSubstrates {
         })
       : null
 
-  // Pre-warm the conversational session at onboarding start (fire-and-forget,
-  // behind the loading indicator). The cold warm-up (~10-30s) is paid ONCE
-  // here at composer build — NOT on the user's first turn — so the first real
-  // phase-spec dispatch hits a HOT session. Best-effort: any failure (no
-  // credentials at warm-up, transient spawn error) is swallowed; the engine's
-  // static phase prompts cover a cold/failed warm session, and the next real
-  // turn re-spawns the warm REPL lazily. Skipped entirely when LLM-less.
-  //
-  // 2026-06-18 (synthesis-completes fix): capture the pre-warm promise so the
-  // phase-spec resolver can AWAIT it (bounded) before its FIRST dispatch. If
-  // the owner answers the first question before the cold spawn settles, the
-  // first real turn would otherwise race the ~11-30s spawn and time out at the
-  // 12s conversational tier into the static fallback (the live-signup symptom).
-  // Awaiting readiness OUTSIDE the conversational timeout means only the cold
-  // first turn waits; warm turns stay snappy.
-  // Pre-warm ONLY the Claude Code warm-REPL path — pre-warming is a CC concept
-  // (cold spawn of the interactive REPL). The OpenAI adapter is stateless HTTP, so
-  // pre-warming it would fire a real API call at boot; skip it whenever openai is
-  // the requested provider (wired or not — an unwired openai turn just errors).
-  const prewarmReady: Promise<void> | null =
-    llmCallSubstrate !== null && (ctx.provider === undefined || ctx.provider === 'anthropic')
-      ? prewarmSubstrate(llmCallSubstrate)
-      : null
-  // Track whether the pre-warm has SETTLED so the resolver can elevate the
-  // budget for EVERY conversational dispatch in the cold window — not just the
-  // first (2026-06-18 cold-start fix, round 2: the live owner-signup raced the
-  // first TWO turns against the cold spawn and both timed out at 12 s). The flag
-  // flips true when the (never-rejecting) pre-warm promise resolves; until then,
-  // early turns get the cold-spawn-sized `first_call_timeout_ms` budget.
-  const prewarmSettledRef = { settled: prewarmReady === null }
-  if (prewarmReady !== null) {
-    fireAndForget('substrates.then', prewarmReady.then(() => {
-      prewarmSettledRef.settled = true
-    }))
-  }
+  // Proactive briefs, document watchers and board classification are not setup.
+  // Keep their toolless grants, but give every job its own bounded lifetime.
+  const utilitySubstrate = conversationalAvailable
+    ? buildLlmCallSubstrate({
+        ...anthropicPoolArg,
+        substrate_instance_id: `cc-utility-${owner_handle}`,
+        repl_pane_label: 'utility',
+        cwd: owner_home,
+        owner_handle,
+        user_id: OWNER_USER_ID,
+        project_slug,
+        profile: PROFILE_PHASE_SPEC,
+        ephemeral: true,
+        credential_failure_lane: 'background',
+        ...phaseSpecProvider,
+        ...(substrateFactory !== undefined ? { substrateFactory } : {}),
+      })
+    : null
 
   // Dedicated WARM conversational substrate for post-onboarding live chat
   // turns (no `ephemeral`; keyed per-dispatch on metering_context).
@@ -466,6 +448,7 @@ export function wireSubstrates(ctx: OpenWiringContext): WiredSubstrates {
           ...anthropicPoolArg,
           substrate_instance_id: `cc-nudge-${owner_handle}`,
           repl_pane_label: 'compose',
+          ephemeral: true,
           cwd: owner_home,
           owner_handle,
           user_id: OWNER_USER_ID,
@@ -602,16 +585,31 @@ export function wireSubstrates(ctx: OpenWiringContext): WiredSubstrates {
   }
 
   return {
+    async retireSetup() {
+      const outcomes = [...await llmCallSubstrate?.retire() ?? [],
+        ...await llmCallSubstrate?.retireExistingHelpers() ?? []]
+      for (const result of outcomes) {
+        if (result.outcome === 'refused') {
+          throw new Error('Setup retirement refused: worker ownership or exit was not confirmed')
+        }
+      }
+    },
+    async retireLegacyBackground(projectIds) {
+      for (const result of await reminderComposeSubstrate?.retireExistingHelpers([undefined, ...projectIds]) ?? []) {
+        if (result.outcome === 'refused') {
+          throw new Error('Legacy background retirement refused: worker ownership or idleness was not confirmed')
+        }
+      }
+    },
     adoptLiveAgentRepls: async projectIds => { await liveAgentSubstrate?.adoptExisting(projectIds) },
     llmCallSubstrate,
+    utilitySubstrate,
     liveAgentSubstrate,
     makeProjectLiveAgentSubstrate,
     makeComposeSubstrate,
     reminderComposeSubstrate,
     makeEphemeralSubstrate,
     makeWarmFireSubstrate,
-    prewarmReady,
-    prewarmSettledRef,
     cleanups: [],
   }
 }

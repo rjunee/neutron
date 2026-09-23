@@ -13,8 +13,7 @@ import { honourDiffOutput } from '@neutronai/trident/testing/diff-output-host.ts
  *     exclusive-sounding title;
  *   - `cc-trident-fire-*` is WARM per repo cwd (Map cache: same cwd → same id +
  *     same instance; distinct cwd → distinct id) and NON-ephemeral;
- *   - `prewarmReady` never rejects and `prewarmSettledRef.settled` flips true
- *     only AFTER the pre-warm resolves (live reference, not a boot snapshot);
+ *   - setup is lazy and background utility/nudge turns are disposable;
  *   - LLM-less (`llmPool: null`) leaves the warm substrates null and the
  *     factories throwing.
  */
@@ -134,6 +133,7 @@ async function drainEveryWiredSubstrate(w: ReturnType<typeof wireSubstrates>): P
   for (const s of [
     w.liveAgentSubstrate,
     w.llmCallSubstrate,
+    w.utilitySubstrate,
     w.reminderComposeSubstrate,
     w.makeComposeSubstrate('proj'),
   ]) {
@@ -187,7 +187,7 @@ describe('wireSubstrates — instance ids + tool-bridge invariants', () => {
 
     for (const id of bridged) {
       const opts = captured.find((o) => o.substrate_instance_id === id)!
-      expect(opts.ephemeral, id).not.toBe(true)
+      expect(opts.ephemeral === true, id).toBe(id === 'cc-nudge-owner')
       expect(opts.skip_permissions, id).toBe(true)
     }
   })
@@ -730,6 +730,18 @@ describe('wireSubstrates — instance ids + tool-bridge invariants', () => {
 })
 
 describe('wireSubstrates — project-aware provider across chat and builds', () => {
+  test('disposable OpenAI helpers do not share response history; setup retains onboarding continuity', async () => {
+    const rec = recordingOpenAiFetch()
+    const { ctx } = makeCtx({ ...openaiCtxOverrides(), openaiFetchImpl: rec.fetchImpl })
+    const w = wireSubstrates(ctx)
+    for (const substrate of [w.reminderComposeSubstrate!, w.utilitySubstrate!, w.llmCallSubstrate!]) {
+      await drain(substrate)
+      await drain(substrate)
+    }
+    expect(rec.bodies).toHaveLength(6)
+    for (const body of rec.bodies.slice(0, 5)) expect(body['previous_response_id']).toBeUndefined()
+    expect(rec.bodies[5]!['previous_response_id']).toBe('r1')
+  })
   function openaiCtxOverrides(): Partial<OpenWiringContext> {
     return {
       provider: 'openai',
@@ -854,8 +866,6 @@ describe('wireSubstrates — project-aware provider across chat and builds', () 
     expect(w.llmCallSubstrate).not.toBeNull()
     expect(w.liveAgentSubstrate).not.toBeNull()
     // No Anthropic pool → no CC pre-warm fired (openai is stateless HTTP).
-    expect(w.prewarmReady).toBeNull()
-    expect(w.prewarmSettledRef.settled).toBe(true)
     await drain(w.makeWarmFireSubstrate('/repo'))
     await drain(w.makeEphemeralSubstrate('cc-trident')('/repo'))
     expect(rec.bodies).toHaveLength(2)
@@ -1063,32 +1073,23 @@ describe('resolveOpenConversationalProvider — every declared value dispatches 
   })
 })
 
-describe('wireSubstrates — pre-warm live reference', () => {
-  test('prewarmReady never rejects and prewarmSettledRef flips true only after it resolves', async () => {
-    let release!: () => void
-    const gate = new Promise<void>((res) => {
-      release = res
-    })
-    const { ctx } = makeCtx({
-      prewarmSubstrate: async (): Promise<void> => {
-        await gate
-      },
-    })
+describe('wireSubstrates — on-demand helpers', () => {
+  test('setup never prewarms; real setup work starts lazily and retirement stops admission', async () => {
+    const { ctx, captured, prewarmCalls } = makeCtx()
     const w = wireSubstrates(ctx)
-    expect(w.prewarmReady).not.toBeNull()
-    // Not settled while the pre-warm is still in flight.
-    expect(w.prewarmSettledRef.settled).toBe(false)
-    // Never rejects.
-    let rejected = false
-    void w.prewarmReady!.catch(() => {
-      rejected = true
-    })
-    release()
-    await w.prewarmReady
-    // The `.then` flipped the LIVE reference — the composer's cold-window read
-    // now sees true.
-    expect(w.prewarmSettledRef.settled).toBe(true)
-    expect(rejected).toBe(false)
+    expect(prewarmCalls).toEqual([])
+    expect(captured).toEqual([])
+    await drain(w.llmCallSubstrate!)
+    await drain(w.llmCallSubstrate!)
+    expect(captured).toHaveLength(2)
+    expect(captured.every(opts => opts.substrate_instance_id === 'cc-llm-owner' && !opts.ephemeral)).toBe(true)
+    await w.retireSetup()
+    expect(() => w.llmCallSubstrate!.start(SESSIONLESS_SPEC)).toThrow('lifecycle has completed')
+    await drain(w.utilitySubstrate!)
+    expect(captured.at(-1)?.substrate_instance_id).toBe('cc-utility-owner')
+    expect(captured.at(-1)?.ephemeral).toBe(true)
+    expect(captured.at(-1)?.enableToolBridge).not.toBe(true)
+    expect(prewarmCalls).toEqual([])
   })
 
   test.each([
@@ -1106,8 +1107,7 @@ describe('wireSubstrates — pre-warm live reference', () => {
     expect(w.liveAgentSubstrate).toBeNull()
     expect(w.reminderComposeSubstrate).toBeNull()
     expect(w.makeComposeSubstrate('any-project')).toBeNull()
-    expect(w.prewarmReady).toBeNull()
-    expect(w.prewarmSettledRef.settled).toBe(true)
+    expect(w.utilitySubstrate).toBeNull()
   })
 
   test('owner Codex binding availability preserves credential-less Claude and admits selected Codex', async () => {
@@ -1133,9 +1133,7 @@ describe('wireSubstrates — pre-warm live reference', () => {
     expect(w.liveAgentSubstrate).toBeNull()
     // Compose is LLM-only — no credentials means its factory returns null.
     expect(w.makeComposeSubstrate('any-project')).toBeNull()
-    expect(w.prewarmReady).toBeNull()
-    // No pre-warm to await → settled seeds true immediately.
-    expect(w.prewarmSettledRef.settled).toBe(true)
+    expect(w.utilitySubstrate).toBeNull()
     expect(() => w.makeEphemeralSubstrate('cc-trident')('/repo')).toThrow(
       'cc-trident: empty Anthropic credential pool',
     )

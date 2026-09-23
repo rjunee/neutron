@@ -13,8 +13,8 @@ import { classifyThrownSpawnError } from './classify-spawn-error.ts'
 import { SUBSTRATE_ERROR_CODES } from '../../../errors.ts'
 import { EventChannel } from './event-channel.ts'
 import { type PendingRespawnEntry, enqueuePendingRespawn } from './pending-respawns-queue.ts'
-import { REPL_DEBUG, activeModelWatchdogs, activeWatchdogs, childByKey, committedDispatches, cwdDriftAlertState, cwdDriftRespawnState, ephemeralSessions, pendingChildKills, pendingSpawns, pool, respawnGates, sink, supervisedBySessionKey, wedgeAlertState } from './pool-state.ts'
-import { getRecord, registryConversationScopeMatches, type ReplRegistryRecord } from './repl-registry.ts'
+import { REPL_DEBUG, activeModelWatchdogs, activeWatchdogs, childByKey, committedDispatches, cwdDriftAlertState, cwdDriftRespawnState, ephemeralSessions, pendingChildKills, pendingSpawns, pool, respawnGates, sink, supervisedBySessionKey, wedgeAlertState, retiringSessionKeys } from './pool-state.ts'
+import { getRecord, registryConversationScopeMatches, withOwnedRegistry, type ReplRegistryRecord } from './repl-registry.ts'
 import {
   SHUTDOWN_PENDING_SPAWN_GRACE_MS,
   cancellableWait,
@@ -33,7 +33,7 @@ import {
   settleBootAdoptionsForShutdown,
 } from './boot-adoption.ts'
 import { randomUUID } from 'node:crypto'
-import { normalizePtyText } from './pty-text.ts'
+import { normalizePtyText, stripAnsi } from './pty-text.ts'
 import { CONTEXT_RESET_COMMAND, DEFAULT_IDLE_MAX_MS, DEFAULT_IDLE_QUIET_MS, DEFAULT_TURN_ABSOLUTE_CEILING_MS, DEFAULT_TURN_INACTIVITY_MS, REPL_LIVENESS_KEEPALIVE_MS, SESSION_KEY_SEP, runOutputScan, submitCommand } from './signatures.ts'
 import type { ActiveTurn, PersistentReplSubstrateOptions, RecoveredReply } from './types.ts'
 import { ReplSession, terminateChild, unlinkSessionConfigs } from './repl-session.ts'
@@ -385,6 +385,108 @@ export async function spawnEphemeralSession(
   return session
 }
 
+export type HelperRetirement = 'absent' | 'deferred' | 'retired' | 'refused'
+
+/** Retire an exact, already owned pool identity. Never discovers or kills by prefix.
+ * The caller stops admitting work first. Busy/spawning sessions finish normally;
+ * the turn driver's finally retries once its last committed dispatch has left.
+ * Transcripts are retained. An unverified survivor is an explicit refusal.
+ */
+export async function retirePersistentRepl(sessionKey: string): Promise<HelperRetirement> {
+  retiringSessionKeys.add(sessionKey)
+  const gate = respawnGates.get(sessionKey)
+  if (gate !== undefined && !gate.claim()) return 'refused'
+  try {
+    return await retireOwnedPersistentRepl(sessionKey)
+  } finally {
+    gate?.release()
+  }
+}
+
+async function retireOwnedPersistentRepl(sessionKey: string): Promise<HelperRetirement> {
+  const pending = pool.get(sessionKey)
+  if (pending === undefined) return 'absent'
+  if (pendingSpawns.get(sessionKey) === pending) {
+    neutralizeAbandonedSettle(pending.then(() => retirePersistentRepl(sessionKey)))
+    return 'deferred'
+  }
+  if ((committedDispatches.get(sessionKey) ?? 0) > 0) return 'deferred'
+  let session: ReplSession
+  try { session = await pending } catch { return 'absent' }
+  if (pool.get(sessionKey) !== pending || childByKey.get(sessionKey) !== session.child) return 'refused'
+  if ((committedDispatches.get(sessionKey) ?? 0) > 0 || session.activeTurn !== undefined || session.turnSlotHeld > 0) return 'deferred'
+  // A survivor can still be doing work started before this gateway. The local
+  // turn mutex cannot establish its idleness; refuse migration without a live
+  // rendered empty input prompt. Silence or a missing screen is not idleness.
+  if (session.adopted) {
+    if (session.child.readScreen === undefined) return 'refused'
+    let timeout: ReturnType<typeof setTimeout> | undefined
+    try {
+      const screen = await Promise.race([
+        session.child.readScreen(),
+        new Promise<never>((_, reject) => {
+          timeout = setTimeout(() => reject(new Error('idle observation timed out')), 2000)
+        }),
+      ])
+      const footer = stripAnsi(screen).trimEnd().split('\n').slice(-6)
+      if (/esc\s+to\s+interrupt/i.test(footer.join(' ')) ||
+          !footer.some(line => /^❯\s*$/.test(line.trim()))) return 'refused'
+    } catch {
+      return 'refused'
+    } finally {
+      if (timeout !== undefined) clearTimeout(timeout)
+    }
+    if (pool.get(sessionKey) !== pending || (committedDispatches.get(sessionKey) ?? 0) > 0 ||
+        session.activeTurn !== undefined || session.turnSlotHeld > 0) return 'deferred'
+  }
+  const options = supervisedBySessionKey.get(sessionKey)
+  const registryPath = options?.replRegistryPath
+  const claimant = session.paneClaimBy
+  const matches = (row: ReplRegistryRecord | undefined): boolean => row !== undefined &&
+    row.sessionId === session.sessionId && row.child_generation === session.childGeneration &&
+    row.adoption_claim_by === claimant &&
+    (options === undefined || registryConversationScopeMatches(row, options))
+  if (registryPath !== undefined) {
+    // Refresh the existing claim under the ownership lock before actuation. A
+    // lock/read/write failure or changed owner prevents the kill entirely.
+    const checked = withOwnedRegistry(registryPath, registry => {
+      const row = registry[sessionKey]
+      if (!matches(row)) return { registry, result: false, skipSave: true }
+      if (claimant !== undefined) registry[sessionKey] = { ...row!, adoption_claim_at: Date.now() }
+      return { registry, result: true }
+    }, () => false)
+    if (!checked.persisted || !checked.result) return 'refused'
+  } else if (session.child.paneHandle !== undefined) {
+    return 'refused'
+  }
+  // Do not discard a row or pool entry merely because termination was requested.
+  // terminateChild has a bounded force deadline, so independently confirm death.
+  await terminateChild(session.child)
+  if (!session.hasChildExited()) return 'refused'
+  if (registryPath !== undefined) {
+    const removed = withOwnedRegistry(registryPath, registry => {
+      const row = registry[sessionKey]
+      if (row === undefined) return { registry, result: true }
+      if (row.sessionId !== session.sessionId || row.child_generation !== session.childGeneration ||
+          (row.adoption_claim_by !== claimant &&
+            !(row.adoption_claim_by === undefined && row.pane_handle === undefined))) {
+        return { registry, result: false, skipSave: true }
+      }
+      delete registry[sessionKey]
+      return { registry, result: true }
+    }, () => false)
+    if (!removed.persisted || !removed.result) return 'refused'
+  }
+  if (pool.get(sessionKey) === pending) pool.delete(sessionKey)
+  if (childByKey.get(sessionKey) === session.child) childByKey.delete(sessionKey)
+  supervisedBySessionKey.delete(sessionKey)
+  session.sizeWatchdog?.stop()
+  session.paneClaimBy = undefined
+  sink.unregister(session.sessionId)
+  unlinkSessionConfigs(session)
+  return 'retired'
+}
+
 /**
  * Tear down a disposable one-shot REPL after its single turn settled. Terminating
  * the child is the whole point — the disposable REPL must never linger warm, so no
@@ -438,6 +540,9 @@ export function createPersistentReplSubstrate(options: PersistentReplSubstrateOp
       // one-shot purposes never collapse into one shared transcript. A dispatch
       // carrying a real `spec.session` (a multi-turn resume) always pools.
       const ephemeral = options.ephemeral === true && spec.session === undefined
+      if (!ephemeral && retiringSessionKeys.has(sessionKey)) {
+        throw new Error('Helper session lifecycle has completed')
+      }
       // Per-turn ACTIVITY-BASED timeout budgets (additive spec overrides). The
       // inactivity window is the idle-time-since-last-PTY-byte before a turn is
       // deemed frozen; the composer raises it for a cold/onboarding turn (heavier
@@ -963,6 +1068,12 @@ export function createPersistentReplSubstrate(options: PersistentReplSubstrateOp
            const outstanding = (committedDispatches.get(sessionKey) ?? 0) - 1
            if (outstanding > 0) committedDispatches.set(sessionKey, outstanding)
            else committedDispatches.delete(sessionKey)
+           if (outstanding <= 0 && retiringSessionKeys.has(sessionKey)) {
+             const outcome = await retirePersistentRepl(sessionKey)
+             if (outcome === 'refused') {
+               process.stderr.write('[repl] helper retirement refused after drain: ownership or exit not confirmed\n')
+             }
+           }
          }
          // LEAK PREVENTION (the crux). Settle the watchdog's outstanding-turn
          // marker on EVERY exit path — normal completion, early return, thrown
@@ -1691,6 +1802,7 @@ export async function shutdownAllPersistentRepls(
   childByKey.clear()
   pendingChildKills.clear()
   supervisedBySessionKey.clear()
+  retiringSessionKeys.clear()
   activeTurnRoutes.clear()
   wedgeAlertState.clear()
   cwdDriftRespawnState.clear()
