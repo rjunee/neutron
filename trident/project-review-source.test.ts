@@ -123,17 +123,114 @@ test('durable synthesis invalidates when the configured panel gains another comp
   expect(f.calls).toHaveLength(4)
 })
 
-test('durable pending attempt preserves its exact request and never buys a replacement', async () => {
+test('durable pending attempt reconciles its exact request without another paid review', async () => {
   const f = await durableFixture()
-  f.answer(async () => { throw Error('lost acknowledgement') })
+  const receipts = new Map<string, BoundedWorkOutcome>()
+  let purchases = 0
+  f.answer(async request => {
+    const previous = receipts.get(JSON.stringify(request))
+    if (previous) return previous
+    purchases++
+    receipts.set(JSON.stringify(request), completed())
+    if (request.role === 'review') throw Error('lost acknowledgement after worker completed')
+    return completed()
+  })
   expect(await f.check()).toMatchObject({ kind: 'blocked', on: expect.stringContaining('infra-only:') })
   const original = f.calls[0]!
   expect(JSON.parse(await readFile(join(dirname(original.result.path), 'request.json'), 'utf8'))).toEqual(original)
-  f.answer(async () => completed())
-  expect(await f.check()).toMatchObject({ kind: 'blocked', on: expect.stringContaining('pending') })
-  expect(f.calls).toHaveLength(1)
+  expect(await f.check()).toEqual({ kind: 'approve' })
+  expect(f.calls[1]).toEqual(original)
+  expect(purchases).toBe(2) // One review, one newly eligible synthesis.
+  expect(await f.check()).toEqual({ kind: 'approve' })
+  expect(purchases).toBe(2)
+  f.answer(async () => { purchases++; return completed() })
   const moved = f.source()
   expect(await moved.readSeat(moved.seats[1]!, { ...snapshot, head: 'b'.repeat(40) }, 1)).toMatchObject({ status: 'completed' })
+  expect(purchases).toBe(3)
+})
+
+test('pending reconciliation refuses damaged original requests and unknown recovered outcomes', async () => {
+  for (const damage of ['missing', 'foreign', 'thread', 'unknown', 'invalid-result'] as const) {
+    const f = await durableFixture()
+    f.answer(async () => { throw Error('lost acknowledgement') })
+    expect(await f.check()).toMatchObject({ kind: 'blocked' })
+    const path = join(dirname(f.calls[0]!.result.path), 'request.json')
+    const original = JSON.parse(await readFile(path, 'utf8'))
+    if (damage === 'missing') await rm(path)
+    if (damage === 'foreign') await writeFile(path, JSON.stringify({ ...original, run_id: 'foreign-run' }))
+    if (damage === 'thread') await writeFile(path, JSON.stringify({ ...original, thread: { id: 'replacement-thread' } }))
+    f.answer(async () => damage === 'invalid-result' ? completed({ verdict: 'APPROVE' }) : { kind: 'unknown', detail: 'original result not available' })
+    expect(await f.check()).toMatchObject({ kind: 'blocked', on: expect.stringContaining('infra-only:') })
+    expect(f.calls).toHaveLength(damage === 'unknown' || damage === 'invalid-result' ? 2 : 1)
+  }
+})
+
+test('pending headless recovery preserves the original thread and releases only its own source lease', async () => {
+  const f = await durableFixture(); f.options.replProvider = 'anthropic'
+  const receipts = new Map<string, BoundedWorkOutcome>()
+  let purchases = 0
+  f.answer(async request => {
+    const previous = receipts.get(JSON.stringify(request))
+    if (previous) return previous
+    purchases++
+    const outcome = { ...completed(), thread_id: request.thread?.id ?? 'original-provider-thread' } as BoundedWorkOutcome
+    receipts.set(JSON.stringify(request), outcome)
+    if (purchases === 1) throw Error('lost acknowledgement')
+    return outcome
+  })
+  const first = f.source()
+  await expect(first.readSeat(first.seats[1]!, snapshot, 1)).rejects.toThrow()
+  const restored = f.source()
+  expect(await restored.readSeat(restored.seats[1]!, snapshot, 1)).toMatchObject({ status: 'completed' })
+  expect(f.calls[1]).toEqual(f.calls[0])
+  expect(purchases).toBe(1)
+  expect(await restored.readSeat(restored.seats[1]!, snapshot, 2)).toMatchObject({ status: 'completed' })
+  expect(f.calls[2]!.thread).toEqual({ id: 'original-provider-thread' })
+  expect(purchases).toBe(2)
+})
+
+test('pending synthesis recovers without repurchasing seats or synthesis', async () => {
+  const f = await durableFixture()
+  const receipts = new Map<string, BoundedWorkOutcome>(); let purchases = 0
+  f.answer(async request => {
+    const previous = receipts.get(JSON.stringify(request))
+    if (previous) return previous
+    purchases++; receipts.set(JSON.stringify(request), completed())
+    if (request.role === 'synthesis') throw Error('lost synthesis acknowledgement')
+    return completed()
+  })
+  expect(await f.check()).toMatchObject({ kind: 'blocked' })
+  expect(purchases).toBe(2)
+  expect(await f.check()).toEqual({ kind: 'approve' })
+  expect(purchases).toBe(2)
+  expect(f.calls.map(row => row.role)).toEqual(['review', 'synthesis', 'synthesis'])
+  expect(f.calls[2]).toEqual(f.calls[1])
+})
+
+test('credential movement during dispatch permanently invalidates the original pending result', async () => {
+  const f = await durableFixture()
+  let credential = 'selected-account-before'
+  f.options.credentialIdentity = async () => credential
+  f.answer(async () => { credential = 'selected-account-after'; return completed() })
+  expect(await f.check()).toMatchObject({ kind: 'blocked' })
+  expect(f.calls).toHaveLength(1)
+  credential = 'selected-account-before'
+  f.answer(async () => completed())
+  expect(await f.check()).toMatchObject({ kind: 'blocked', on: expect.stringContaining('changed inputs') })
+  expect(f.calls).toHaveLength(1)
+  credential = 'selected-account-after'
+  expect(await f.check()).toEqual({ kind: 'approve' })
+  expect(f.calls).toHaveLength(3)
+})
+
+test('credential movement between operation capture and dispatch refuses before buying work', async () => {
+  const f = await durableFixture()
+  let reads = 0
+  f.options.credentialIdentity = async () => ++reads === 1 ? 'before' : 'after'
+  expect(await f.check()).toMatchObject({ kind: 'blocked' })
+  expect(f.calls).toHaveLength(0)
+  f.options.credentialIdentity = async () => 'after'
+  expect(await f.check()).toEqual({ kind: 'approve' })
   expect(f.calls).toHaveLength(2)
 })
 

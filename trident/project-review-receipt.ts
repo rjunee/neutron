@@ -10,10 +10,12 @@ export interface ReviewReceipt {
   version: 1
   identity: string
   state: 'pending' | 'settled'
+  requestHash?: string
+  invalidated?: 'input-changed'
   observation?: SeatObservation
 }
 
-async function readJson(path: string): Promise<unknown> {
+export async function readReviewJson(path: string): Promise<unknown> {
   const file = await open(path, constants.O_RDONLY | constants.O_NOFOLLOW | constants.O_NONBLOCK)
   try {
     const stat = await file.stat()
@@ -40,9 +42,11 @@ export async function readReviewReceipt(directory: string, identity: string): Pr
     if (!(await lstat(directory)).isDirectory()) throw Error('Review receipt directory is not owned storage')
   } catch (error) { if ((error as NodeJS.ErrnoException).code === 'ENOENT') return null; throw error }
   try {
-    const row = await readJson(join(directory, 'receipt.json')) as ReviewReceipt
+    const row = await readReviewJson(join(directory, 'receipt.json')) as ReviewReceipt
     if (!row || row.version !== 1 || row.identity !== identity || !['pending', 'settled'].includes(row.state)
       || (row.state === 'pending' && row.observation !== undefined)
+      || (row.requestHash !== undefined && !/^[a-f0-9]{64}$/.test(row.requestHash))
+      || (row.invalidated !== undefined && row.invalidated !== 'input-changed')
       || (row.state === 'settled' && (!row.observation || !['completed', 'deferred', 'unavailable', 'rate-limited'].includes(row.observation.status)))) {
       throw Error('Review receipt identity or state is invalid')
     }
@@ -63,8 +67,24 @@ export async function claimReviewReceipt(directory: string, identity: string): P
 
 export async function settleReviewReceipt(directory: string, identity: string, observation: SeatObservation): Promise<void> {
   const current = await readReviewReceipt(directory, identity)
-  if (!current || current.state !== 'pending') throw Error('Review receipt has no owned pending attempt')
+  if (!current || current.state !== 'pending' || current.invalidated) throw Error('Review receipt has no owned pending attempt')
+  await publish(directory, { ...current, state: 'settled', observation })
+}
+
+export async function bindReviewRequest(directory: string, identity: string, requestHash: string): Promise<void> {
+  const current = await readReviewReceipt(directory, identity)
+  if (!current || current.state !== 'pending' || current.requestHash || current.invalidated) throw Error('Review request has no unbound pending claim')
+  await publish(directory, { ...current, requestHash })
+}
+
+export async function invalidateReviewReceipt(directory: string, identity: string): Promise<void> {
+  const current = await readReviewReceipt(directory, identity)
+  if (!current || current.state !== 'pending') throw Error('Review input changed without a pending attempt')
+  await publish(directory, { ...current, invalidated: 'input-changed' })
+}
+
+async function publish(directory: string, receipt: ReviewReceipt): Promise<void> {
   const temporary = join(directory, `receipt-${randomUUID()}.tmp`)
-  await writeFile(temporary, JSON.stringify({ version: 1, identity, state: 'settled', observation }), { flag: 'wx', mode: 0o600 })
+  await writeFile(temporary, JSON.stringify(receipt), { flag: 'wx', mode: 0o600 })
   await rename(temporary, join(directory, 'receipt.json'))
 }
