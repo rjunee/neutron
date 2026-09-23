@@ -1,60 +1,82 @@
 ---
 title: Surface infrastructure retries to the owner
 group: trident
-status: open
+status: done
 priority: P2
 cutover: false
 legacy_ref: "SPEC.md § Phases → Steps (2026-09-12 split)"
 ---
 
-**An infrastructure retry is invisible to the owner — the board says nothing and
-the run row carries no count** (split out 2026-09-12 from the auto-retry item,
-which is otherwise DONE via PR #367).
+> **SHIPPED** in #904 (merge `5d72f26f`, 2026-09-15), which closed #535 and wrote its record at
+> `.trident/as-built/fix/535-fix.md`. Reconciled to `done` on 2026-09-23 under #1212; the
+> reconciliation record is `docs/as-built/1212-reconcile-retry-visibility-spec.md`. The queue
+> stayed `open` because #904 never edited this file.
 
-The auto-retry itself shipped: a measured infrastructure failure is classified and
-retried with no human in the loop, on a budget separate from the fix-round counter
-(`begin_infra_retry`, `max_infra_retries`, `trident/orchestrator.ts:382-387`).
-**Acceptance (d) of that item — "Visible: the board reads retrying-with-attempt-count,
-not `failed`; the owner is told ONCE, not once per attempt" — was never wired.**
-Two independent gaps, both measured 2026-09-12:
+**An infrastructure retry is visible to the owner: the board reads retrying with an attempt
+count, and the owner is told once per run.**
 
-1. **The owner-visibility seam is declared and never passed.** `on_infra_retry` —
-   *"Best-effort owner/visibility seam, invoked once on durable attempt 1 only"* —
-   is declared at `trident/orchestrator.ts:387` and read at
-   `trident/orchestrator.ts:2197` (`const onInfraRetry = opts.on_infra_retry`). A
-   whole-tree search finds it passed in **exactly one place, a test**
-   (`trident/infra-retry.test.ts:217`). No production composition supplies it, so
-   the "told ONCE" half fires never rather than once.
+The production composition supplies the owner-visibility seam. Beside the durable budget
+claim (`orchestratorOpts.begin_infra_retry`), `gateway/composition/build-core-modules.ts:824-825`
+assigns `orchestratorOpts.on_infra_retry = (run, attempt, cause) => deliverInfraRetry(...)`,
+routed through the Trident delivery sink. The orchestrator declares the seam at
+`trident/orchestrator.ts:448`, reads it at `:1299` and hands it to the retry step at `:2508`.
 
-2. **The count never reaches the card.** `infra_retries` is a real column — it is in
-   the live schema (`migrations/expected-schema.txt:631`) and in the run table
-   rebuilds (`migrations/0138_code_trident_runs_review_not_run.sql:102`) — but it is
-   **absent from `RunProgress`** (`trident/run-progress.ts:60-100`, which carries
-   `round`, `stalled`, `verdict`, `failure_reason`, `brief_alert` and no retry
-   count). The wire type the card renders cannot express "retrying, attempt 2", so
-   the surface has nothing to show even though the database knows.
+The observer fires once per run, from inside the claim branch. `trident/infrastructure-retry.ts:92`
+enters the retry path only for a result classified `infrastructure`; the observer is invoked at
+`:121-130` only after a successful durable claim and only when `claimed.infra_retries === 1`, so
+later attempts and genuine failures produce no notice. A throwing observer is caught and logged
+(`:122-129`) and cannot stop the retry. `deliverInfraRetry` (`trident/delivery.ts:1451`) posts to
+the originating chat and skips a run that has none.
 
-**Why this matters more than a cosmetic gap.** The whole argument for auto-retry was
-that a human should not have to notice an infrastructure failure. Retrying silently
-replaces one invisible state with another: a run that is quietly burning its retry
-budget is indistinguishable, on every surface the owner has, from a run that is
-simply slow. And when the budget is exhausted the owner sees a terminal failure with
-no indication that three attempts preceded it — which is the same
-confidently-worded-and-incomplete shape the terminal-reason work (#240) exists to
-prevent.
+The count is on the wire. `RunProgress` declares `infra_retries: number`
+(`trident/run-progress.ts:73`) and `deriveRunProgress` emits it (`:247`); a non-terminal run with
+`infra_retries > 0` selects the `retrying` step label (`:243-245`) instead of a failed or
+ordinary step. Both client decoders retain the field (`app/lib/work-board-client.ts:432`,
+`landing/chat-react/work-board-client.ts:485`), and the mobile and web boards render a
+`Retrying` tag that pulses only with a fresh heartbeat.
+
+Visibility does not keep a dead run alive. When `run.infra_retries >= maxInfraRetries`
+(`trident/infrastructure-retry.ts:93-111`) the run fails terminally with the reason
+`infrastructure failure persisted after N automatic retries (budget N) — not retrying again.
+Last measured cause: …` and `inner_verdict: 'REVIEW_NOT_RUN'`.
+
+**History.** This item was split out on 2026-09-12 (#514) from the auto-retry item, which is
+done via #367. It was measured then as two gaps: the `on_infra_retry` seam was declared but
+passed only by a test, and the retry count was absent from `RunProgress`. #904 closed both.
+
+**Why it matters.** Auto-retry exists so a human does not have to notice an infrastructure
+failure, and a silent retry would replace one invisible state with another: a run burning its
+retry budget would look the same as a slow run, and an exhausted budget would surface as a bare
+failure with no sign that attempts preceded it. The count on the card and the single notice
+keep the retry legible without turning each attempt into noise.
 
 ## Acceptance
 
-- [ ] `on_infra_retry` is supplied by the PRODUCTION composition, not only by a test.
+- [x] `on_infra_retry` is supplied by the PRODUCTION composition, not only by a test.
       A search for its call sites finds a non-test caller.
       verify: `rg -n "on_infra_retry" --glob '!**/*.test.ts'` names a composition file
-- [ ] The owner is told ONCE per run, not once per attempt. A run that retries three
+      (`gateway/composition/build-core-modules.ts:824`); pinned by
+      `gateway/__tests__/trident-crash-recovery-wiring.test.ts:37-40`
+- [x] The owner is told ONCE per run, not once per attempt. A run that retries three
       times produces exactly one owner-facing notification.
       Assert the negative too: a run that retries zero times produces none.
-- [ ] `RunProgress` carries the retry count, so the card can render
+      verify: `trident/infra-retry.test.ts:246-270` (three retries, a throwing observer,
+      `calls` is exactly one attempt-1 entry) and `trident/infra-retry.test.ts:179-212`
+      (a genuine failure retries zero times and `calls` is empty, `:209`)
+- [x] `RunProgress` carries the retry count, so the card can render
       "retrying, attempt N". Deleting the field from the wire type must turn a test red.
-      verify: `bun test trident/run-progress` and `bun test trident/infra-retry`
-- [ ] A run inside its retry budget does NOT read `failed` on the board. A test pins a
+      verify: `bun test trident/run-progress` and `bun test trident/infra-retry`;
+      `trident/run-progress.test.ts:53-58` reads `infra_retries === 2`. Deleting the
+      interface field turns `tsc -p trident/tsconfig.json` red at `trident/run-progress.ts:246`
+      and `trident/run-progress.test.ts:55`; deleting the emitted field turns
+      `trident/run-progress.test.ts:55` red at runtime (remeasured 2026-09-23, restored)
+- [x] A run inside its retry budget does NOT read `failed` on the board. A test pins a
       mid-retry run rendering as retrying; a mutant that reports `failed` goes red.
-- [ ] A run that EXHAUSTS the budget still fails terminally, with a reason naming the
+      verify: `trident/run-progress.test.ts:53-58` (`step_label` is `retrying`, `phase_label`
+      is not `failed`; flipping the selector at `trident/run-progress.ts:243` turns `:56` red);
+      `app/__tests__/work-board-helpers.test.ts:109-119` and
+      `landing/chat-react/__tests__/work-board-tab.test.tsx:250-291` pin the `Retrying` tag
+- [x] A run that EXHAUSTS the budget still fails terminally, with a reason naming the
       budget. Visibility must not become a path that keeps a dead run alive.
+      verify: `trident/infra-retry.test.ts:215-244` (`phase` is `failed`, reason contains
+      `(budget 2)` and the measured cause, verdict `REVIEW_NOT_RUN`)
