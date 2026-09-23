@@ -388,6 +388,11 @@ export async function buildRun(input: BuildRunInput, deps: BuildRunDeps, signal:
     async function work(role: WorkPhase, round: number): Promise<{ payload: unknown; review?: ReviewPanelObservation } | { stop: BuildRunOutcome }> {
       phase = role
       step_id = `${input.run_id}${input.mode === 'ralph' ? `:task:${input.ralphRound ?? 0}` : ''}:${role}:${round}`
+      // Review is read-only and its result is meaningful only for this measured
+      // revision. A resumed round can keep its number while its head changes;
+      // reusing that round's old id would recover the previous head's approval.
+      // Exact-head recovery keeps the same id, including its pending reservation.
+      if (role === 'review') step_id += `:head:${snapshot.head}`
       const { runner, request } = input.workers[role]
       const boundedRequest: BoundedWorkRequest = {
         ...request, run_id: input.run_id, step_id, role, needs_approval_decision: false,

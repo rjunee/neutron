@@ -35,6 +35,14 @@ function fixture(landFixes = true) {
     return run(request, placement, signal)
   }
   const cross = fakeRunner('openai-codex', { outcomes })
+  const crossRun = cross.run.bind(cross)
+  cross.run = async (request, placement, signal) => {
+    // Existing scenarios script by role/round; retain the actual measured-head
+    // request in calls so identity-specific tests can assert the full key.
+    const scripted = outcomes.get(request.step_id.replace(/:head:[a-f0-9]+$/, ''))
+    if (scripted) outcomes.set(request.step_id, scripted)
+    return crossRun(request, placement, signal)
+  }
   const request = {
     model_id: 'test', effort: null, cwd: '.', writable: true, network: false, tools: 'edit-and-run',
     brief: { path: 'brief.md', integrity: briefIntegrity('brief.md.context.json') }, result: { path: 'result.json', schema: 'build/1' },
@@ -89,7 +97,7 @@ test('fresh to merged with a fix, host gates and fake runners', async () => {
   f.decisions.push({ kind: 'fix', findings: ['logic'] }, { kind: 'approve' })
   expect((await f.run()).kind).toBe('merged')
   expect(f.runner.calls.map(c => c.role)).toEqual(['plan', 'build', 'fix'])
-  expect(f.cross.calls.map(c => c.step_id)).toEqual(['run:review:1', 'run:review:2'])
+  expect(f.cross.calls.map(c => c.step_id.replace(/:head:[a-f0-9]+$/, ''))).toEqual(['run:review:1', 'run:review:2'])
   expect(f.events.filter(e => e !== 'measure')).toEqual(['publishGate', 'publish', 'publishGate', 'publish', 'publicationSuite', 'mergeGate', 'merge'])
   expect(f.reads()).toBe(17)
   expect([...f.runner.calls, ...f.cross.calls].every(c => c.needs_approval_decision === false)).toBe(true)
@@ -497,7 +505,7 @@ for (const role of ['plan', 'review', 'fix'] as const) {
     if (role === 'fix') f.decisions.push({ kind: 'fix', findings: ['logic'] })
     const step = `run:${role}:${role === 'plan' ? 0 : 1}`
     f.outcomes.set(step, { kind: 'unknown', detail: 'unobserved' })
-    expect(await f.run()).toMatchObject({ kind: 'unknown', step_id: step, phase: role })
+    expect(await f.run()).toMatchObject({ kind: 'unknown', step_id: role === 'review' ? `${step}:head:${f.snapshot.head}` : step, phase: role })
     expect(f.events).not.toContain('merge')
   })
 }
@@ -836,6 +844,47 @@ test('G038 exact full resume head skips build; moved missing and short heads reb
   }
 })
 
+for (const moved of [false, true]) test(`review recovery ${moved ? 'invalidates a moved head' : 'reuses the exact head'} without resetting its round`, async () => {
+  const f = modeFixture('pr')
+  f.resume('built', 3)
+  const results = new Map<string, BoundedWorkOutcome>()
+  const paid: string[] = []
+  const requested: string[] = []
+  f.cross.run = async request => {
+    requested.push(request.step_id)
+    if (!results.has(request.step_id)) {
+      paid.push(request.step_id)
+      results.set(request.step_id, f.completed())
+    }
+    return structuredClone(results.get(request.step_id)!)
+  }
+  let ciReads = 0
+  f.deps.reviewCi = async () => ++ciReads === 2
+    ? { kind: 'unknown', detail: 'post-review CI unavailable' }
+    : { kind: 'known', findings: [] }
+  expect(await f.run()).toMatchObject({ kind: 'unknown', phase: 'review' })
+  const saved = f.state.checkpoints.at(-1)!
+  expect(saved.pending).toEqual({ phase: 'review', step_id: requested[0]! })
+  // The host has reconciled the completed pending worker. Its settled result
+  // remains owned by that id; a fresh driver must reuse it only at the same head.
+  f.state.resume = { ...saved, pending: undefined }
+  if (moved) {
+    f.snapshot.head = 'b'.repeat(40)
+    f.snapshot.pr!.head = f.snapshot.head
+    for (const key of f.outcomes.keys()) f.outcomes.set(key, f.completed())
+  }
+  expect(await f.run()).toMatchObject({ kind: 'merged' })
+  expect(paid).toHaveLength(moved ? 2 : 1)
+  expect(requested).toEqual([
+    `run:review:3:head:${'a'.repeat(40)}`,
+    `run:review:3:head:${(moved ? 'b' : 'a').repeat(40)}`,
+  ])
+  const reservations = f.state.checkpoints.filter(row => row.pending?.phase === 'review')
+  expect(reservations.map(row => row.pending!.step_id)).toEqual(requested)
+  expect(reservations.every(row => row.round >= 3)).toBe(true)
+  expect(f.runner.calls.filter(row => row.role === 'build')).toHaveLength(moved ? 1 : 0)
+})
+
 test('G038 absent live head rebuilds but unreadable required head stops', async () => {
   for (const head of ['absent', '']) {
     const f = modeFixture('pr'); f.resume(); f.snapshot.head = head; f.setPlan()
@@ -875,13 +924,13 @@ test('G041 resume inherits spent rounds and cannot restart exhausted budget', as
     f.decisions.push({ kind: 'fix', findings: ['bug'] })
     expect(await f.run()).toMatchObject({ kind: 'blocked', recipient: 'orchestrator' })
     expect(f.runner.calls).toHaveLength(0)
-    expect(f.cross.calls.map(c => c.step_id)).toEqual(stage === 'fixed' ? ['run:review:10'] : [])
+    expect(f.cross.calls.map(c => c.step_id.replace(/:head:[a-f0-9]+$/, ''))).toEqual(stage === 'fixed' ? ['run:review:10'] : [])
   }
   const f = modeFixture('pr'); f.resume('fixed', 3)
   f.decisions.push({ kind: 'fix', findings: ['new bug'] })
   expect((await f.run()).kind).toBe('merged')
   expect(f.runner.calls.map(c => c.step_id)).toEqual(['run:fix:3'])
-  expect(f.cross.calls.map(c => c.step_id)).toEqual(['run:review:3', 'run:review:4'])
+  expect(f.cross.calls.map(c => c.step_id.replace(/:head:[a-f0-9]+$/, ''))).toEqual(['run:review:3', 'run:review:4'])
 })
 
 test('resume pending worker preserves phase and exact step without dispatch', async () => {
@@ -1092,7 +1141,7 @@ test('G077 final-round design gap stops; a spare round admits replacement', asyn
       ? { kind: 'blocked', phase: 'review', recipient: 'orchestrator', on: `design-gap: re-plan-unreachable: ${gap.whatIsMissing}; no round left for the bounded re-plan` }
       : { kind: 'merged' })
     expect(f.runner.calls.map(c => c.step_id)).toEqual(round === 5 ? [] : ['run:plan:4', 'run:build:4'])
-    expect(f.cross.calls.map(c => c.step_id)).toEqual(round === 5 ? ['run:review:5'] : ['run:review:4', 'run:review:5'])
+    expect(f.cross.calls.map(c => c.step_id.replace(/:head:[a-f0-9]+$/, ''))).toEqual(round === 5 ? ['run:review:5'] : ['run:review:4', 'run:review:5'])
   }
 })
 test('design gap re-plans once and continues with fresh measurements and spent rounds', async () => {
@@ -1103,7 +1152,7 @@ test('design gap re-plans once and continues with fresh measurements and spent r
   f.deps.reviewGate = (payload, observation, snapshot, round, used, record) => { counts.push(used!); return gate(payload, observation, snapshot, round, used, record) }
   expect(await f.run()).toMatchObject({ kind: 'merged' })
   expect(f.runner.calls.map(c => c.step_id)).toEqual(['run:plan:0', 'run:build:0', 'run:plan:1', 'run:build:1', 'run:fix:2'])
-  expect(f.cross.calls.map(c => c.step_id)).toEqual(['run:review:1', 'run:review:2', 'run:review:3'])
+  expect(f.cross.calls.map(c => c.step_id.replace(/:head:[a-f0-9]+$/, ''))).toEqual(['run:review:1', 'run:review:2', 'run:review:3'])
   expect(counts).toEqual([0, 1, 1])
   expect(f.reads()).toBe(24)
 })
@@ -1340,7 +1389,7 @@ test('G076 approval on the last configured round can publish', async () => {
   f.deps.readReviewCap = async () => ({ kind: 'known', max_rounds: 2 })
   f.decisions.push({ kind: 'fix', findings: ['bug'] }, { kind: 'approve' })
   expect((await f.run()).kind).toBe('merged')
-  expect(f.cross.calls.map(c => c.step_id)).toEqual(['run:review:1', 'run:review:2'])
+  expect(f.cross.calls.map(c => c.step_id.replace(/:head:[a-f0-9]+$/, ''))).toEqual(['run:review:1', 'run:review:2'])
 })
 
 test('G076 unreadable cap never dispatches work', async () => {
@@ -1372,7 +1421,7 @@ test('G076 resumed rejection consumes exactly one remaining round', async () => 
     f.deps.readReviewCap = async () => ({ kind: 'known', max_rounds: 7 })
     expect((await f.run()).kind).toBe(round === 6 ? 'merged' : 'blocked')
     expect(f.runner.calls.map(c => c.step_id)).toEqual(round === 6 ? ['run:fix:6'] : [])
-    expect(f.cross.calls.map(c => c.step_id)).toEqual(round === 6 ? ['run:review:7'] : [])
+    expect(f.cross.calls.map(c => c.step_id.replace(/:head:[a-f0-9]+$/, ''))).toEqual(round === 6 ? ['run:review:7'] : [])
   }
 })
 
@@ -1560,7 +1609,7 @@ test('G056 records an unverified worker APPROVE only in deferred CI detail', asy
   expect(await f.run()).toEqual({
     kind: 'unknown',
     phase: 'review',
-    step_id: 'run:review:1',
+    step_id: `run:review:1:head:${'a'.repeat(40)}`,
     detail: 'Review CI readiness deferred: Review PR mergeability is not established; budget exhausted. Review worker reported APPROVE; host receipt not obtained.',
   })
   expect(f.events).not.toContain('merge')
@@ -1579,7 +1628,7 @@ test('G056 does not attribute a non-APPROVE worker trailer to deferred CI', asyn
   expect(await f.run()).toEqual({
     kind: 'unknown',
     phase: 'review',
-    step_id: 'run:review:1',
+    step_id: `run:review:1:head:${'a'.repeat(40)}`,
     detail: 'Review CI readiness deferred: Review PR mergeability is not established; budget exhausted',
   })
 })
@@ -1719,7 +1768,7 @@ test('G102 driver checks artifact after preparation and before every review', as
   }
   f.decisions.push({ kind: 'fix', findings: ['repair'] }, { kind: 'approve' })
   expect((await f.run()).kind).toBe('merged')
-  expect(checks).toEqual(['run:review:1', 'run:review:2'])
+  expect(checks).toEqual([`run:review:1:head:${'a'.repeat(40)}`, `run:review:2:head:${'b'.repeat(40)}`])
 })
 
 test('null usage does not veto an otherwise validated build and fix', async () => {
