@@ -30,7 +30,7 @@ const root = fs.realpathSync(process.argv[1]);
 const observations = [];
 for (const manifestPath of JSON.parse(process.argv[2])) {
   const manifest = JSON.parse(fs.readFileSync(path.join(root, manifestPath), 'utf8'));
-  const dependencies = Object.keys({ ...manifest.dependencies, ...manifest.devDependencies, ...manifest.optionalDependencies }).sort();
+  const dependencies = Object.keys({ ...manifest.dependencies, ...manifest.devDependencies, ...manifest.optionalDependencies, ...manifest.peerDependencies }).sort();
   for (const dependency of dependencies) {
     let target;
     try { target = Bun.resolveSync(dependency, path.dirname(path.join(root, manifestPath))); }

@@ -731,6 +731,7 @@ async function fixture(options: { ralph?: boolean; moreTasks?: boolean; suiteExi
   /** See `WorkerWorld.hostLedger` (default `false`). */
   hostLedger?: boolean
   bunWorkspace?: boolean
+  bunWorkspacePeer?: boolean
   manifest?: Record<string, unknown>
   dispatchTask?: string
   blockersByRound?: readonly number[]; replanRounds?: readonly number[]
@@ -793,8 +794,16 @@ async function fixture(options: { ralph?: boolean; moreTasks?: boolean; suiteExi
     await writeFile(join(repo, 'vendor', 'package', 'index.js'), 'exports.message = "dependency consumed"\n')
     const packed = await spawnCapture(['tar', '-czf', 'dependency.tgz', 'package'], join(repo, 'vendor'))
     expect(packed.ok).toBe(true)
-    await writeFile(join(repo, 'app', 'package.json'), JSON.stringify({ name: 'fixture-app', dependencies: { 'fixture-dependency': 'file:../vendor/dependency.tgz' } }))
-    await writeFile(join(repo, 'app', 'check.ts'), 'import { message } from "fixture-dependency"; if (message !== "dependency consumed") throw Error("wrong dependency"); console.log(message)\n')
+    if (options.bunWorkspacePeer) {
+      await mkdir(join(repo, 'vendor', 'peer'), { recursive: true })
+      await writeFile(join(repo, 'vendor', 'peer', 'package.json'), JSON.stringify({ name: 'fixture-peer', version: '1.0.0', main: 'index.js' }))
+      await writeFile(join(repo, 'vendor', 'peer', 'index.js'), 'exports.message = "local peer"\n')
+      expect((await spawnCapture(['tar', '-czf', 'peer.tgz', 'peer'], join(repo, 'vendor'))).ok).toBe(true)
+    }
+    await writeFile(join(repo, 'app', 'package.json'), JSON.stringify({ name: 'fixture-app', dependencies: { 'fixture-dependency': 'file:../vendor/dependency.tgz' },
+      ...(options.bunWorkspacePeer ? { peerDependencies: { 'fixture-peer': 'file:../vendor/peer.tgz' } } : {}) }))
+    await writeFile(join(repo, 'app', 'check.ts'), 'import { message } from "fixture-dependency"; if (message !== "dependency consumed") throw Error("wrong dependency"); console.log(message)\n'
+      + (options.bunWorkspacePeer ? 'import { message as peer } from "fixture-peer"; if (peer !== "local peer") throw Error("wrong peer");\n' : ''))
     await writeFile(join(repo, 'scripts', 'ci', 'verify-workspace-deps.ts'), await readFile(new URL('../../scripts/ci/verify-workspace-deps.ts', import.meta.url), 'utf8'))
     await writeFile(join(repo, 'scripts', 'ci', 'suite.sh'), '#!/usr/bin/env bash\nset -e\nbun scripts/ci/verify-workspace-deps.ts\nbun app/check.ts\n')
     const installed = await spawnCapture(['bun', 'install'], repo, { BUN_INSTALL_CACHE_DIR: join(dir, 'bun-cache') })
@@ -1329,6 +1338,70 @@ test('Bun workspace receipt cannot borrow an ancestor after its local dependency
   await f.prepare()
   expect(installs).toBe(1)
   expect((await spawnCapture(['bun', 'app/check.ts'], worktree)).stdout).toBe('dependency consumed')
+}, 30_000)
+
+for (const shape of ['borrowed', 'hoisted'] as const) {
+  test(`Bun workspace receipt tracks ${shape} peer dependencies`, async () => {
+    const f = await fixture({ bunWorkspace: true, bunWorkspacePeer: true })
+    await f.prepare()
+    const worktree = f.store.get(f.row.id)!.worktree!
+    const local = join(worktree, 'app', 'node_modules', 'fixture-peer')
+    const target = await realpath(local)
+    if (shape === 'borrowed') {
+      const ancestor = join(worktree, '..', 'node_modules', 'fixture-peer')
+      await mkdir(ancestor, { recursive: true })
+      await writeFile(join(ancestor, 'package.json'), JSON.stringify({ name: 'fixture-peer', main: 'index.js' }))
+      await writeFile(join(ancestor, 'index.js'), 'exports.message = "borrowed peer"')
+    } else await symlink(target, join(worktree, 'node_modules', 'fixture-peer'))
+    await rm(local)
+    const before = await spawnCapture(['bun', 'app/check.ts'], worktree)
+    if (shape === 'borrowed') expect(before.stderr).toContain('wrong peer')
+    else expect(before.ok, before.stderr).toBe(true)
+    const original = f.context.runInstall!
+    let installs = 0
+    f.context.runInstall = Object.assign(async (...args: Parameters<typeof original>) => {
+      if (!args[0][2]!.includes('verify-workspace-deps.ts')) installs++
+      return original(...args)
+    }, { writesDiffOutput: true as const })
+    await f.prepare()
+    expect(installs).toBe(shape === 'borrowed' ? 1 : 0)
+    const after = await spawnCapture(['bun', 'app/check.ts'], worktree)
+    expect(after.ok, after.stderr).toBe(true)
+  }, 30_000)
+}
+
+test('Bun workspace preparation never records external peer resolution as reusable evidence', async () => {
+  const f = await fixture({ bunWorkspace: true, bunWorkspacePeer: true })
+  const ancestor = join(f.dir, 'external-peer')
+  await mkdir(ancestor)
+  await writeFile(join(ancestor, 'package.json'), JSON.stringify({ name: 'fixture-peer', main: 'index.js' }))
+  await writeFile(join(ancestor, 'index.js'), 'exports.message = "borrowed peer"')
+  const original = f.context.runInstall!
+  let borrow = true
+  let installs = 0
+  f.context.runInstall = Object.assign(async (...args: Parameters<typeof original>) => {
+    if (args[0][2]!.includes('verify-workspace-deps.ts')) return original(...args)
+    installs++
+    const local = join(args[1]!, 'app', 'node_modules', 'fixture-peer')
+    await rm(local, { force: true })
+    const result = await original(...args)
+    if (borrow) {
+      await rm(local)
+      await symlink(ancestor, local)
+    }
+    return result
+  }, { writesDiffOutput: true as const })
+  const receipt = join(f.context.stateRoot, encodeURIComponent(f.row.id), 'dependencies-receipt.json')
+  await f.prepare()
+  await expect(readFile(receipt)).rejects.toMatchObject({ code: 'ENOENT' })
+  await f.prepare()
+  expect(installs).toBe(2)
+  await expect(readFile(receipt)).rejects.toMatchObject({ code: 'ENOENT' })
+  borrow = false
+  await f.prepare()
+  expect(JSON.parse(await readFile(receipt, 'utf8')).resolution).toMatch(/^[a-f0-9]{64}$/)
+  await f.prepare()
+  expect(installs).toBe(3)
 }, 30_000)
 
 test('Bun workspace receipt preserves valid root-local hoisting and stable unresolved optional probes', async () => {

@@ -10,7 +10,8 @@ identity covers the worktree path, Git revision, root and declared workspace
 manifests, lockfiles, installer configuration, branch verifier marker, host
 verifier bytes, runtime and resolved toolchain identity. The local dependency
 directory must retain its identity. A receipt also records the resolution targets
-and file identities of every declared root/workspace dependency. Recovery probes
+and file identities of every declared root/workspace dependency, including peers.
+Recovery probes
 these again in a fresh host-controlled process, avoiding the host's resolver
 cache. Every resolved target must remain inside the worktree. Stable unresolved
 optional/type probes are permitted, and local hoisting remains valid. A missing
@@ -28,7 +29,7 @@ root dependency directories and Bun stores are refused. Installation retains fro
 lifecycle scripts; verifier execution retains the host working directory and
 disabled branch runtime configuration.
 
-The consuming `open/__tests__/project-build-e2e.test.ts` passed 141 tests, including
+The consuming `open/__tests__/project-build-e2e.test.ts` passed 144 tests, including
 an unchanged recovery that merges with one installation and two verifications.
 Changed manifests, lockfile, configuration, verifier marker, revision, receipt,
 dependency directory and toolchain each require another installation. Existing
@@ -36,11 +37,14 @@ failure, timeout, publication and branch-preload refusal cases remain covered.
 The ancestor regression positively demonstrates that the general verifier alone
 accepts borrowed resolution before requiring the receipt path to repair it.
 Its paired control retains reuse with local hoisting and an omitted optional
-dependency. Both TypeScript projects passed.
+dependency. Peer-specific cases likewise require repair after ancestor fallback,
+preserve local hoisting, and refuse to record an externally resolved peer as
+reusable evidence. Both TypeScript projects passed.
 
 Semantic mutation checks produced assertion failures when receipt identity was
 ignored, when valid recovery always reinstalled, when reuse skipped its verifier,
 when local resolution evidence was bypassed, and when unresolved optional probes
-were incorrectly forbidden. Those mutations were restored. These are deterministic invocation and
+were incorrectly forbidden, when peers were omitted, and when external targets
+were allowed into a receipt. Those mutations were restored. These are deterministic invocation and
 admission results, not a claim of measured live wall-clock or token savings.
 The broader P0 and deployed acceptance remain open.
