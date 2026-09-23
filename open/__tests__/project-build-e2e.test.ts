@@ -1252,6 +1252,38 @@ test('attempt accounting consumes native child measurements through the actual O
   })
 })
 
+test('attempt accounting keeps a provider-reported model without usage, merges unattended, and leaves every counter unknown', async () => {
+  const f = await fixture()
+  const options = await f.prepare()
+  const real = options.substrate.inRepl!
+  const reported = (role: string, model: string) => `provider-reported-${role}-${model}`
+  options.substrate.inRepl = { ...real, async run(request, placement, signal) {
+    const result = await real.run(request, placement, signal)
+    if (result.kind !== 'completed') return result
+    const { observation: _none, ...validated } = result
+    return { ...validated, usage: null, model_reported: reported(request.role, request.model_id), thread_id: null }
+  } }
+  const host = await createProjectBuildHost(options)
+  expect((await host.run({ mode: 'implementation', start: 'fresh' }, new AbortController().signal)).kind).toBe('merged')
+  expect(f.github.prs[0]).toMatchObject({ state: 'MERGED' })
+  const attempts = f.context.attempts.list(f.row.id)
+  expect(attempts.map(row => row.role).sort()).toEqual(['build', 'plan', 'review', 'review', 'synthesis'])
+  for (const attempt of attempts) {
+    expect(attempt.outcome).toBe('completed')
+    const receipt = f.context.attempts.receipt(attempt)!
+    expect(receipt).toMatchObject({ source: 'bounded-worker-metadata', model_reported: reported(attempt.role, attempt.resolved_model),
+      input_tokens: null, output_tokens: null, cache_read_tokens: null, cache_creation_tokens: null, cost_usd: null })
+    expect(Number.isFinite(receipt.observed_at)).toBe(true)
+    expect(receipt.observed_at).toBeGreaterThanOrEqual(attempt.started_at!)
+    // Requested, resolved and reported models remain three independent facts.
+    expect(attempt.requested_model.length).toBeGreaterThan(0)
+    expect(attempt.resolved_model.length).toBeGreaterThan(0)
+    expect(receipt.model_reported).not.toBe(attempt.requested_model)
+    expect(receipt.model_reported).not.toBe(attempt.resolved_model)
+  }
+  expect(new TridentPhaseUsageStore(f.db).list(f.row.id)!.every(row => row.status === 'unknown' && row.input_tokens === null)).toBe(true)
+}, 120_000)
+
 test('attempt accounting keeps explicit zero on successful work and partial usage on a failed build without authorizing it', async () => {
   const f = await fixture()
   const options = await f.prepare()

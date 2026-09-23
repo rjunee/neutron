@@ -288,7 +288,8 @@ test('blocked output has a durable honest sibling; attempted owner tool cannot c
 
 test('unknown usage stays unknown rather than becoming invented zero counters', async () => {
   const f = await fixture('invalid-usage')
-  expect(await f.run()).toMatchObject({ kind: 'completed', usage: null })
+  // The attested model is independent of the counts the CLI failed to report.
+  expect(await f.run()).toMatchObject({ kind: 'completed', usage: null, model_reported: f.req.model_id })
 })
 
 test('provider usage survives rejected results, nonzero exit and observed interruption without authorizing completion', async () => {

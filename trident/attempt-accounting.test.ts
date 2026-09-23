@@ -53,6 +53,7 @@ test('missing measurements stay unknown, while a measured zero and a nonzero att
   expect(await dispatch(completed)).toEqual(completed)
   expect(projection()).toMatchObject({ status: 'unknown', input_tokens: null })
   expect(ledger.get(key)!.outcome).toBe('completed')
+  // Nothing reported (no usage, no model, no observation): no receipt is invented.
   expect(ledger.receipt(key)).toBeNull()
   const zero = { ...observed, usage: { input_tokens: 0, output_tokens: 0, cache_read_input_tokens: 0, cache_creation_input_tokens: 0, cost_usd: 0 } }
   await dispatch({ ...completed, observation: zero }, { ...request, step_id: 'build:1' })
@@ -60,6 +61,98 @@ test('missing measurements stay unknown, while a measured zero and a nonzero att
   expect(ledger.receipt({ ...key, step_id: 'build:1' })!.input_tokens).toBe(0)
   expect(ledger.receipt({ ...key, step_id: 'build:2' })!.input_tokens).toBe(17)
   expect(projection().input_tokens).toBeNull()
+})
+
+test('a completion that reports its model without usage keeps the model as attribution and every counter unknown', async () => {
+  const completed = { kind: 'completed', result: {}, usage: null, model_reported: 'claude-opus-reported', thread_id: null } as const
+  expect(await dispatch(completed)).toEqual(completed)
+  const row = ledger.get(key)!
+  expect(row).toMatchObject({ outcome: 'completed', requested_model: 'selected', resolved_model: 'resolved', started_at: 33, ended_at: 35 })
+  expect(ledger.receipt(key)).toEqual({ ...key, receipt_id: JSON.stringify(['run', 'build:0', 'dispatch']),
+    source: 'bounded-worker-metadata', observed_at: 34, model_reported: 'claude-opus-reported',
+    input_tokens: null, output_tokens: null, cache_read_tokens: null, cache_creation_tokens: null, cost_usd: null })
+  expect(ledger.receipt(key)!.observed_at).toBeGreaterThanOrEqual(row.started_at!)
+  expect(projection()).toMatchObject({ status: 'unknown', input_tokens: null, output_tokens: null, cache_read_tokens: null })
+  expect(events).not.toContain('attempt-accounting-refused')
+})
+
+test('reported usage and model on a completion without observation still record measured counters', async () => {
+  const completed = { kind: 'completed', result: {}, usage: { input_tokens: 12, output_tokens: 3, cache_read_input_tokens: 5 },
+    model_reported: 'claude-opus-reported', thread_id: null } as const
+  expect(await dispatch(completed)).toEqual(completed)
+  expect(ledger.receipt(key)).toMatchObject({ source: 'bounded-worker-metadata', model_reported: 'claude-opus-reported',
+    input_tokens: 12, output_tokens: 3, cache_read_tokens: 5, cache_creation_tokens: null, cost_usd: null })
+  expect(projection()).toMatchObject({ input_tokens: 12, output_tokens: 3, cache_read_tokens: 5 })
+})
+
+test('a duplicate or restarted model-only completion keeps one receipt and never erases earlier measured spend', async () => {
+  const completed = { kind: 'completed', result: {}, usage: null, model_reported: 'claude-opus-reported', thread_id: null } as const
+  await dispatch(completed)
+  const first = ledger.get(key), receipt = ledger.receipt(key)!
+  await dispatch(completed)
+  db.close(); db = ProjectDb.open(join(dir, 'project.db')); ledger = new TridentAttemptLedger(db); accounting = createAccounting()
+  await dispatch(completed)
+  expect(ledger.get(key)).toEqual(first)
+  expect(ledger.list('run')).toHaveLength(1)
+  const { observed_at, ...stable } = ledger.receipt(key)!
+  const { observed_at: firstObserved, ...firstStable } = receipt
+  expect(stable).toEqual(firstStable)
+  expect(observed_at).toBeGreaterThanOrEqual(firstObserved)
+  expect(projection()).toMatchObject({ status: 'unknown', input_tokens: null })
+
+  const measured = { ...key, step_id: 'build:1' }
+  await dispatch({ kind: 'failed', class: 'infra', detail: 'partial', observation: observed }, { ...request, step_id: 'build:1' })
+  const prior = ledger.receipt(measured)
+  expect((await dispatch(completed, { ...request, step_id: 'build:1' })).kind).toBe('completed')
+  expect(ledger.receipt(measured)).toEqual(prior)
+  expect(ledger.receipt(measured)).toMatchObject({ source: 'codex-cli-jsonl', model_reported: 'reported', input_tokens: 17, output_tokens: 4 })
+  // The model-only attempt is still unknown spend, so the phase sum stays unknown rather than 17.
+  expect(projection()).toMatchObject({ status: 'unknown', input_tokens: null })
+  expect(ledger.list('run')).toHaveLength(2)
+})
+
+test('a later native observation of the same call supersedes the model-only receipt with measured spend', async () => {
+  const completed = { kind: 'completed', result: {}, usage: null, model_reported: 'reported', thread_id: null } as const
+  const at = (step_id: string) => ({ ...key, step_id })
+  const receiptId = (step_id: string) => JSON.stringify(['run', step_id, 'dispatch'])
+  await dispatch(completed)
+  expect(ledger.receipt(key)).toMatchObject({ source: 'bounded-worker-metadata', model_reported: 'reported', observed_at: 34,
+    input_tokens: null, output_tokens: null, cache_read_tokens: null, cache_creation_tokens: null, cost_usd: null })
+  // Positive control: the same call without an attested model has no metadata receipt to supersede.
+  await dispatch({ ...completed, model_reported: null }, { ...request, step_id: 'build:1' })
+  expect(ledger.receipt(at('build:1'))).toBeNull()
+  expect(projection()).toMatchObject({ status: 'unknown', input_tokens: null })
+
+  const runner = { ...fakeRunner('openai-codex'), observe: async () => observed }
+  await accounting.reconcile('run', () => runner)
+  const measured = (step_id: string) => ({ ...at(step_id), receipt_id: receiptId(step_id), source: 'codex-cli-jsonl', observed_at: 20,
+    model_reported: 'reported', input_tokens: 17, output_tokens: 4, cache_read_tokens: 8, cache_creation_tokens: 0, cost_usd: null })
+  expect(ledger.receipt(key)).toEqual(measured('build:0'))
+  expect(ledger.receipt(at('build:1'))).toEqual(measured('build:1'))
+  const summed = projection()
+  expect(summed).toMatchObject({ status: 'partial', input_tokens: 34, output_tokens: 8, cache_read_tokens: 16 })
+  expect(events).not.toContain('attempt-accounting-refused')
+
+  // No double count on replay or after a host restart.
+  await accounting.reconcile('run', () => runner)
+  db.close(); db = ProjectDb.open(join(dir, 'project.db')); ledger = new TridentAttemptLedger(db); accounting = createAccounting()
+  await accounting.reconcile('run', () => runner)
+  expect(ledger.receipt(key)).toEqual(measured('build:0'))
+  expect(ledger.receipt(at('build:1'))).toEqual(measured('build:1'))
+  expect(projection()).toEqual(summed)
+  expect(ledger.list('run')).toHaveLength(2)
+  expect(events).not.toContain('attempt-accounting-refused')
+
+  // A genuinely different model is still refused, and the metadata receipt is retained.
+  await dispatch({ ...completed, model_reported: 'claude-opus-reported' }, { ...request, step_id: 'build:2' })
+  const metadata = ledger.receipt(at('build:2'))
+  await accounting.reconcile('run', () => runner)
+  expect(events).toContain('attempt-accounting-refused')
+  expect(ledger.receipt(at('build:2'))).toEqual(metadata)
+  expect(metadata).toMatchObject({ source: 'bounded-worker-metadata', model_reported: 'claude-opus-reported', input_tokens: null, output_tokens: null })
+  // Requested, resolved and reported models remain three distinct facts.
+  for (const row of ledger.list('run')) expect(row).toMatchObject({ requested_model: 'selected', resolved_model: 'resolved' })
+  expect(ledger.receipt(key)!.model_reported).toBe('reported')
 })
 
 test('duplicate completion and restart never add the same absolute receipt twice or erase prior partial spend', async () => {

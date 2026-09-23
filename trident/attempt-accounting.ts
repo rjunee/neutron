@@ -155,15 +155,17 @@ export class AttemptAccounting {
   private async recordOutcome(key: AttemptKey, outcome: BoundedWorkOutcome, signal: AbortSignal): Promise<void> {
     const observation = outcome.observation
     const completed = outcome.kind === 'completed' ? outcome : null
-    if (observation || completed?.usage) {
+    // A validated completion may attest its model while the provider omitted
+    // counts. The reported model is still attribution; its counters stay unknown.
+    if (observation || completed?.usage || completed?.model_reported) {
       const receipt: AttemptReceipt = {
         receipt_id: JSON.stringify([key.run_id, key.step_id, key.attempt_id]),
         source: observation?.source ?? 'bounded-worker-metadata',
         observed_at: observation?.observed_at_ms ?? this.now(),
         model_reported: observation?.model_reported ?? completed?.model_reported ?? null,
-        input_tokens: observation ? observation.usage.input_tokens : completed!.usage!.input_tokens,
-        output_tokens: observation ? observation.usage.output_tokens : completed!.usage!.output_tokens,
-        cache_read_tokens: observation ? observation.usage.cache_read_input_tokens : completed!.usage!.cache_read_input_tokens ?? null,
+        input_tokens: observation ? observation.usage.input_tokens : completed!.usage?.input_tokens ?? null,
+        output_tokens: observation ? observation.usage.output_tokens : completed!.usage?.output_tokens ?? null,
+        cache_read_tokens: observation ? observation.usage.cache_read_input_tokens : completed!.usage?.cache_read_input_tokens ?? null,
         cache_creation_tokens: observation?.usage.cache_creation_input_tokens ?? null,
         cost_usd: observation?.usage.cost_usd ?? null,
       }
