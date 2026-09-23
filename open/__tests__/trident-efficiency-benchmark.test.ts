@@ -8,7 +8,7 @@ function report(scenario: EfficiencyScenario): EfficiencyReport {
     build: scenario === 'moved-head' ? 2 : 1, fix: scenario === 'code-fix' ? 1 : 0,
     review: rounds * 3, synthesis: rounds, install: recovered ? 2 : 1, verify: recovered ? 3 : 2, proof: rounds },
   decisions: [], intervals: Array.from({ length: rounds * 3 }, (_, index) => ({ stage: `review:${index}`, start: Math.floor(index / 3) * 20, end: Math.floor(index / 3) * 20 + 10 })),
-  outcomes: scenario === 'pending-interruption' ? ['blocked', 'unknown'] : recovered ? ['unknown', 'merged'] : ['merged'],
+  outcomes: scenario === 'pending-interruption' ? ['blocked', 'merged'] : recovered ? ['unknown', 'merged'] : ['merged'],
   usage: { tokens: null, cost: null, source: 'scripted-provider-no-usage' } }
 }
 
@@ -45,9 +45,9 @@ test('workload clock joins overlapping intervals without summing them as elapsed
   expect(trace.intervals).toEqual([{ stage: 'first', start: 0, end: 10 }, { stage: 'second', start: 0, end: 20 }, { stage: 'after', start: 20, end: 21 }])
 })
 
-test('benchmark rejects a changed outcome, including a falsely merged interrupted run', () => {
+test('benchmark rejects leaving a completed recoverable request unresolved', () => {
   const valid = report('pending-interruption')
   expect(() => assertEfficient(valid)).not.toThrow()
-  valid.outcomes = ['blocked', 'merged']
+  valid.outcomes = ['blocked', 'unknown']
   expect(() => assertEfficient(valid)).toThrow('Gate outcome changed')
 })

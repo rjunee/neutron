@@ -1478,6 +1478,44 @@ test('prepared panel recovery reconciles a lost acknowledgement through the orig
   expect(f.world.dispatches).toHaveLength(2)
 })
 
+for (const damaged of ['missing', 'corrupt', 'unarmed', 'foreign'] as const)
+test(`prepared pending panel refuses ${damaged} native reservation without repurchasing and recovers when restored`, async () => {
+  const f = await preparedPanelFixture()
+  const options = await f.prepare()
+  const runner = options.substrate.inRepl!
+  options.substrate.inRepl = { ...runner, async run(request, placement, signal) {
+    const outcome = await runner.run(request, placement, signal)
+    if (request.role === 'review') throw Error('fixture: lost native acknowledgement')
+    return outcome
+  } }
+  const host = await createProjectBuildHost(options)
+  const measured = await host.deps.measure()
+  if (measured.kind !== 'known') throw Error('expected measured panel revision')
+  expect((await host.deps.observeReview(measured.value, 1)).kind).not.toBe('observed')
+  expect(f.world.dispatches.map(dispatch => dispatch.role)).toEqual(['review'])
+  const state = join(f.context.stateRoot, f.row.id)
+  const names = (await readdir(state)).filter(name => /^claude-step-[a-f0-9]{64}\.json$/.test(name))
+  // Positive control: damage the actual runner's single paid reservation, not
+  // a fixture-only idempotence map or a guessed evidence path.
+  expect(names).toHaveLength(1)
+  const reservation = join(state, names[0]!)
+  const original = await readFile(reservation, 'utf8')
+  expect(original).toContain(f.world.dispatches[0]!.step_id)
+  expect(original).toEndWith('\n#dispatch-armed\n')
+  if (damaged === 'missing') await rm(reservation)
+  else if (damaged === 'corrupt') await writeFile(reservation, '{')
+  else if (damaged === 'unarmed') await writeFile(reservation, original.replace('\n#dispatch-armed\n', ''))
+  else await writeFile(reservation, original.replace(f.row.id, 'foreign-run'))
+  const recovered = await f.observe()
+  expect(f.world.dispatches.map(dispatch => dispatch.role)).toEqual(['review'])
+  expect(recovered.kind).not.toBe('observed')
+  await writeFile(reservation, original)
+  expect((await f.observe()).kind).toBe('observed')
+  expect(f.world.dispatches.map(dispatch => dispatch.role)).toEqual(['review', 'synthesis'])
+  expect((await f.observe()).kind).toBe('observed')
+  expect(f.world.dispatches).toHaveLength(2)
+})
+
 test('prepared panel recovery cannot authorize a verdict across an actual child credential change during dispatch', async () => {
   const f = await preparedPanelFixture()
   const session = (await pool.get(f.key))!
@@ -2448,11 +2486,12 @@ async function efficiencyBenchmark(scenario: EfficiencyScenario, scheduling: Eff
   } else if (scenario === 'pending-interruption') {
     expect(await run('fresh', true)).toMatchObject({ kind: 'blocked', phase: 'review', on: 'infra-only: Review producer failed during the review join: Error: scripted acknowledgement lost after completed review' })
     const pending = lastCheckpoint(f).pending
-    expect(pending).toEqual({ phase: 'review', step_id: `${f.row.id}:review:1` })
+    const reviewStep = `${f.row.id}:review:1:head:${lastCheckpoint(f).head}`
+    expect(pending).toEqual({ phase: 'review', step_id: reviewStep })
     const completed = JSON.parse(await readFile(join(f.dir, 'state', f.row.id, 'review.result'), 'utf8'))
-    expect(completed).toMatchObject({ kind: 'completed', step_id: `${f.row.id}:review:1` })
-    expect(await run('resume')).toMatchObject({ kind: 'unknown', phase: 'review', step_id: `${f.row.id}:review:1`, detail: 'Resume awaits the existing worker observation' })
-    expect(lastCheckpoint(f).pending).toEqual(pending)
+    expect(completed).toMatchObject({ kind: 'completed', step_id: reviewStep, result: { head: lastCheckpoint(f).head } })
+    expect(await run('resume')).toMatchObject({ kind: 'merged', snapshot: { head: completed.result.head } })
+    expect(lastCheckpoint(f).pending).toBeUndefined()
   } else await run('fresh')
   for (const call of f.world.dispatches) counts[call.role as 'plan' | 'build' | 'fix' | 'review' | 'synthesis']++
   counts.proof = f.commands.filter(argv => argv[0] === 'bash' && argv[1] === '-lc' && (argv[2] ?? '').includes('bash scripts/ci/suite.sh')).length

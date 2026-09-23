@@ -29,18 +29,15 @@ Unchanged-head recovery retains one plan/build pair; moved-head recovery
 requires two. The moved-head scenario interrupts after the first head's proof
 and approval, then requires fresh build, review and proof for the new head.
 A merge API refusal resumes the approved head and merges without
-new paid work. A completed review whose acknowledgement is lost preserves its
-result and pending identity and remains unknown on resume without buying another
-call: the current driver does not automatically settle that pending identity.
-The benchmark requires one proof per scenario, or two for code-fix and moved-head. It exposed
-an additional proof on the same-head merge retry: the host's in-memory suite
-receipt does not survive reconstruction. That scenario is deliberately red
-pending a production repair, rather than treating repeat proof as acceptable.
-The moved-head-after-approval case exposes a second defect: the standalone
-review's old step identity is reused, so there are five total review dispatches
-instead of six and the new-head producer barrier fails. Its expectation remains
-six and two proofs. These are unpublished regression tests awaiting production
-fixes; they must turn green before this change can merge.
+new paid work. A completed review whose acknowledgement is lost must recover its
+original request, clear the pending identity and merge without buying another
+review. An unresolved outcome is not benchmark success.
+The benchmark requires one proof per scenario, or two for code-fix and moved-head.
+Its same-head control exposed an additional proof caused by an in-memory suite
+receipt, while moved-head recovery exposed standalone review reuse across heads
+(five review calls instead of six). The integrated durable suite and measured-head
+review identities make both controls green: one proof for unchanged-head recovery,
+six independent review calls and two proofs for the moved-head scenario.
 For the passing scenarios, before/after gate-decision sequences and terminal
 outcomes match. The stable second preparation saves
 exactly one install; revision changes still install and all preparations verify.
@@ -56,12 +53,13 @@ a fresh unattended live merge remain the separate live-evidence requirement.
 
 The earlier five-scenario implementation passed 163 consuming/oracle tests and
 both TypeScript projects. Strengthening the infrastructure and moved-head cases
-then exposed the two deliberately red regressions above. Production semantic
+then exposed the two regressions above; the integrated nonpending scenarios now
+pass all five controls. Production semantic
 mutations were killed: awaiting standalone before starting panel observation
 fails the fresh barrier; disabling same-head build reuse while assigning new
 worker identities fails the unchanged-head dispatch count; dropping approved
 checkpoint reuse while advancing its round fails the interruption review count.
-Those mutations are restored and no production source is part of this change.
+Those mutations are restored.
 The oracle also tests both extra and skipped required work, serial/missing review
 and changed outcomes. Final combined verification, leak comparison, independent
 review and deployment proof remain required before publication/merge.

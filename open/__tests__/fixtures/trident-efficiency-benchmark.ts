@@ -58,7 +58,7 @@ export function assertEfficient(report: EfficiencyReport): void {
   const recovered = ['unchanged-head', 'moved-head', 'interruption', 'pending-interruption'].includes(report.scenario)
   if (report.counts.install !== (recovered ? 2 : 1) || report.counts.verify !== (recovered ? 3 : 2)
       || report.counts.proof !== rounds) throw Error('Unexpected preparation or proof count')
-  const expectedOutcomes = report.scenario === 'pending-interruption' ? ['blocked', 'unknown']
+  const expectedOutcomes = report.scenario === 'pending-interruption' ? ['blocked', 'merged']
     : recovered ? ['unknown', 'merged'] : ['merged']
   if (JSON.stringify(report.outcomes) !== JSON.stringify(expectedOutcomes)) throw Error('Gate outcome changed')
 }
