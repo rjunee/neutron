@@ -57,6 +57,7 @@ export interface PlanProbe {
   sha256: string
   uncheckedCount: number
 }
+export type PlanCommit = { kind: 'known'; head: string } | Exclude<GateResult, { kind: 'allow' }>
 export interface ResumeCheckpoint {
   head: string | null
   stage: 'built' | 'approved' | 'rejected' | 'fixed' | 'ralph-task-built' | 'ralph-task-built-deviated'
@@ -76,6 +77,11 @@ export interface BuildModeHost {
   /** Diff must be generated using this exact OID, not a moving branch name. */
   regenerateDiff(head: string): Promise<{ kind: 'known'; diff: string } | { kind: 'unknown'; detail: string }>
   probePlan(head: string): Promise<PlanProbe | null>
+  /** Commit the host-rendered task ledger (the branch's own `.trident/ledgers/<branch>.md`) on top of
+   * `snapshot`, which must still be the live revision. Idempotent: a tip whose
+   * committed ledger already equals `body` returns that tip and writes nothing.
+   * `known` carries the resulting full head, which the driver re-measures. */
+  commitPlan(value: { body: string; snapshot: BuildSnapshot }): Promise<PlanCommit>
   /** Atomically consume the old result and persist the next iteration. Must be
    * idempotent by run_id + round, and compare the expected head before advancing.
    * An unknown response is reconciled by the host before another buildRun call. */
@@ -197,7 +203,44 @@ function claimMatches(value: unknown, measured: BuildSnapshot): value is BuildSn
 }
 
 const fullOid = (head: string | null): head is string => typeof head === 'string' && /^(?:[a-f0-9]{40}|[a-f0-9]{64})$/i.test(head)
-const unchecked = (body: string): string[] => body.split('\n').filter(line => /^\s*- \[ \]\s+/.test(line))
+const uncheckedLine = /^\s*- \[ \]\s+/
+const unchecked = (body: string): string[] => body.split('\n').filter(line => uncheckedLine.test(line))
+
+/**
+ * THE TASK LEDGER. A Ralph plan's `implementationPlan` is a checkbox list — one
+ * `- [x] T<n>: …` line per task already built on this branch, one `- [ ] T<n>: …`
+ * line per task still to build, the top task first — and the host commits it at
+ * every handoff, at the branch's own `.trident/ledgers/<branch>.md`
+ * (`taskLedgerPath`, trident/production-host-effects.ts). That committed file is the
+ * ONLY thing G026's cheap continuation planner can read (`probePlan` archives it at
+ * the tip), so a plan whose counts disagree with its own boxes would hand the next
+ * iteration a ledger that says something different from what this iteration built.
+ *
+ * Before this, nothing in the typed host wrote a ledger: the planner's lived only in
+ * `plan.result`, `probePlan` found main's stale root copy with zero unchecked boxes,
+ * and every continuation re-planned from scratch (spec item
+ * a-retry-must-resume-from-the-checkpoint, acceptance 2).
+ *
+ * ENFORCED ONLY WHERE A LEDGER IS COMMITTED — a handoff, `remainingTasks > 0`. A
+ * single-task or final iteration commits nothing and nothing downstream reads its
+ * boxes, so refusing its shape would turn a formatting slip into a failed run that
+ * used to build and merge. And the top task is compared with its checkbox marker
+ * stripped on both sides: `T1: foo` and `- [ ] T1: foo` name the same task (the
+ * publication title strips the marker for the same reason, open/wiring/project-build.ts).
+ */
+const taskText = (line: string): string => line.trim().replace(/^- \[ \]\s+/, '').trim()
+function ledgerAgrees(plan: ExecutionPlan): boolean {
+  if (plan.remainingTasks === 0) return true
+  const open = unchecked(plan.implementationPlan)
+  return open.length === plan.remainingTasks + 1 && taskText(open[0]!) === taskText(plan.topTask)
+}
+/** The ledger with its top task — the first unchecked line — ticked. */
+function tickTopTask(body: string): string {
+  const lines = body.split('\n')
+  const top = lines.findIndex(line => uncheckedLine.test(line))
+  lines[top] = lines[top]!.replace('- [ ]', '- [x]')
+  return lines.join('\n')
+}
 
 /**
  * A worker trailer is a claim, not a panel verdict. Keep a schema-valid APPROVE
@@ -448,6 +491,26 @@ export async function buildRun(input: BuildRunInput, deps: BuildRunDeps, signal:
       return { payload }
     }
 
+    /** Commit the ticked ledger at the built head, re-measure, and move the durable
+     *  checkpoint to the ledger commit before anything reads it. A crash between the
+     *  commit and the checkpoint fails SAFE: the resume sees the head moved (G038)
+     *  and rebuilds, and the rebuilt tip already carries the same ledger, so
+     *  `commitPlan` returns it without a second commit. */
+    async function commitLedger(body: string): Promise<BuildRunOutcome | null> {
+      const committed = await modes!.commitPlan({ body, snapshot: structuredClone(snapshot) })
+      if (committed.kind === 'blocked') return blocked(committed.on)
+      if (committed.kind === 'unknown') return unknown(committed.detail)
+      const observation = await deps.measure()
+      if (observation.kind === 'unknown') return unknown(observation.detail)
+      if (!fullOid(committed.head) || observation.value.head !== committed.head) {
+        return unknown('Task ledger commit is not the measured branch head')
+      }
+      const moved = observation.value.head !== snapshot.head
+      snapshot = observation.value
+      if (moved) await checkpoint({ head: snapshot.head, stage: 'built', pending: undefined, findings: [] })
+      return null
+    }
+
     let plan: ExecutionPlan | null = null
     async function planAndBuild(round: number): Promise<BuildRunOutcome | null> {
       const replanning = replansUsed > 0
@@ -473,6 +536,12 @@ export async function buildRun(input: BuildRunInput, deps: BuildRunDeps, signal:
           plan.topTask = unchecked(committedPlan.body)[0]!
           plan.remainingTasks = committedPlan.uncheckedCount - 1
         }
+        // G025, ledger shape: checked on the plan the build will EXECUTE, after G029
+        // replaced a cheap planner's claims with the committed bytes. Ralph only — a
+        // wave member's top task and count are the pin's, not the planner's.
+        if (input.mode === 'ralph' && !ledgerAgrees(plan)) {
+          return blocked('Planner returned no execution plan: the task ledger disagrees with topTask/remainingTasks')
+        }
         if (input.mode === 'wave') {
           const pinned = unchecked(plan.implementationPlan).find(line =>
             line.trim().slice(6).split(/[:\s]/, 1)[0] === input.pinnedTaskId)
@@ -490,7 +559,24 @@ export async function buildRun(input: BuildRunInput, deps: BuildRunDeps, signal:
         return { kind: 'built', snapshot, cause: 'wave-member-built' }
       }
       if (input.mode === 'ralph' && plan!.remainingTasks > 0) {
+        // THE LEDGER IS COMMITTED AT A HANDOFF ONLY, never on the final iteration. A
+        // handoff's next reader is the continuation planner, which reads the committed
+        // file. The final iteration's next readers are review and publication, which
+        // bind every worker receipt — the suite checkpoint, the mutation nomination, the
+        // publication body — to the head the BUILDER reported (`readArtifact`,
+        // open/wiring/project-build.ts). A host commit on top would leave the reviewed
+        // head with no receipt at all, so no multi-task card could ever merge (measured
+        // end to end: `open/__tests__/project-build-e2e.test.ts`, the Ralph-handoff
+        // retry). The merged ledger therefore records the last handoff's state — at
+        // the branch's OWN path, so no two cards' ledgers meet in a merge, and as
+        // prose the mutation gate treats as inert, so a documentation-only card keeps
+        // its exemption with the ledger in its diff.
+        const ledger = await commitLedger(tickTopTask(plan!.implementationPlan))
+        if (ledger) return ledger
         // G037: consume the old result before acknowledging the next iteration.
+        // `snapshot` is the LEDGER commit, so the handoff's recorded head — the one
+        // a retry's dispatch proves the local tip against and the one the next
+        // iteration's `probePlan` reads — carries the ticked ledger.
         const handoff = gateStop(await modes!.advanceRalph({ run_id: input.run_id, round: ralphRound,
           snapshot, remainingTasks: plan!.remainingTasks }))
         if (handoff) return handoff

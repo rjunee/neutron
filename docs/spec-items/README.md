@@ -16,7 +16,6 @@ at the old name. Retitle through the `title:` frontmatter instead.
 
 These are the items the harness-orchestrator cutover is gated on.
 
-- [`a-retry-must-resume-from-the-checkpoint`](a-retry-must-resume-from-the-checkpoint.md) — Carry a dead run's checkpoint and ralph round into its retry
 - [`the-orchestrator-owns-the-build-loop`](the-orchestrator-owns-the-build-loop.md) — The project REPL owns the build loop
 - [`the-review-loop-must-stop-and-re-plan`](the-review-loop-must-stop-and-re-plan.md) — Stop and escalate a review loop instead of iterating on a bad plan
 - [`a-gateway-restart-keeps-the-project-repls`](a-gateway-restart-keeps-the-project-repls.md) — A gateway restart keeps the project REPLs, conversation and all

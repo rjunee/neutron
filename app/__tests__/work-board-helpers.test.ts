@@ -213,6 +213,31 @@ describe('briefAlertText', () => {
     }))).toBeNull();
   });
 
+  it("states a retry's resume decision, yielding to a failure and to an integrity alert", () => {
+    // RED-mutation: drop the resume-note branch from `runNotice` → a retry that
+    // inherited nothing looks exactly like a first dispatch on the card.
+    const note = 'Not resumed: the branch moved off the last run\'s commit, so this is a fresh build; Ralph round 4/8 carried.';
+    expect(noticeFor(progress({ resume_note: note }))).toEqual({ text: note, tone: 'alert' });
+    // A terminal failure is the card's outcome and wins.
+    expect(noticeFor(progress({
+      phase_label: 'failed', step_label: 'failed', failure_reason: 'publish failed', resume_note: note,
+    }))).toEqual({ text: 'publish failed', tone: 'failure' });
+    // An integrity alert is evidence something went wrong and wins over the note.
+    expect(noticeFor(progress({ brief_alert: 'recovered alert', resume_note: note }))).toEqual({
+      text: 'recovered alert', tone: 'alert',
+    });
+    // …and still renders on its own when there is no note.
+    expect(noticeFor(progress({ brief_alert: 'recovered alert', resume_note: null }))).toEqual({
+      text: 'recovered alert', tone: 'alert',
+    });
+    // A CARRIED checkpoint is a healthy fact, not an alert: only a refusal is.
+    const carried = 'Dispatched to resume from ralph-task-built at abc1234 (rebuilds if the branch moves before launch); Ralph round 2/20 carried.';
+    expect(noticeFor(progress({ resume_note: carried }))).toEqual({ text: carried, tone: 'info' });
+    // A first dispatch (or an older gateway's frame) states nothing.
+    expect(noticeFor(progress({ resume_note: null }))).toBeNull();
+    expect(noticeFor(progress({ resume_note: '' }))).toBeNull();
+  });
+
   it('a failed run that recorded REVIEW_NOT_RUN says so instead of showing a blank', () => {
     // The card's measured cost, at the reading end: built work recorded as rejected.
     // A row that recorded no review and no reason can still say the one true thing.

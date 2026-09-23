@@ -405,6 +405,54 @@ describe('WorkBoardTab (happy-dom)', () => {
     await act(async () => root.unmount())
   })
 
+  it("states a retry's resume decision on the live card, and a failure still wins", async () => {
+    // RED-mutation: drop the resume-note branch from `runNotice` → the retry that
+    // inherited nothing renders exactly like a first dispatch.
+    const note = "Not resumed: the branch moved off the last run's commit, so this is a fresh build; Ralph round 4/8 carried."
+    const progress = (over: Record<string, unknown>) => ({
+      run_id: 'run_note',
+      phase_label: 'building' as const,
+      step_label: 'building' as const,
+      round: 1,
+      started_at: '2026-08-18T00:00:00Z',
+      last_advanced_at: '2026-08-18T00:01:00Z',
+      elapsed_ms: 60000,
+      stalled: false,
+      stalled_ms: null,
+      pr: null,
+      pr_url: null,
+      verdict: null,
+      failure_reason: null,
+      resume_note: note,
+      ...over,
+    })
+    const live = await mount(listOf([
+      item({ id: 'noted', title: 'Retried build', status: 'in_progress', linked_run_id: 'run_note',
+        run_progress: progress({}) }),
+    ]))
+    expect(live.container.querySelector('.cwb-brief-alert')?.textContent).toBe(note)
+    expect(live.container.querySelector('.cwb-fail-reason')).toBeNull()
+    await live.act(async () => live.root.unmount())
+
+    // A CARRIED checkpoint is informational, never styled as an alert.
+    const carried = 'Dispatched to resume from ralph-task-built at abc1234 (rebuilds if the branch moves before launch); Ralph round 2/20 carried.'
+    const resumed = await mount(listOf([
+      item({ id: 'resumed', title: 'Retried build', status: 'in_progress', linked_run_id: 'run_note',
+        run_progress: progress({ resume_note: carried }) }),
+    ]))
+    expect(resumed.container.querySelector('.cwb-resume-note')?.textContent).toBe(carried)
+    expect(resumed.container.querySelector('.cwb-brief-alert')).toBeNull()
+    await resumed.act(async () => resumed.root.unmount())
+
+    const failed = await mount(listOf([
+      item({ id: 'noted-failed', title: 'Retried build', status: 'failed', linked_run_id: 'run_note',
+        run_progress: progress({ phase_label: 'failed', step_label: 'failed', failure_reason: 'publish failed' }) }),
+    ]))
+    expect(failed.container.querySelector('.cwb-fail-reason')?.textContent).toBe('publish failed')
+    expect(failed.container.textContent).not.toContain('Not resumed')
+    await failed.act(async () => failed.root.unmount())
+  })
+
   it('keeps a recovered brief alert visible after the run succeeds and moves to Done', async () => {
     const alert = 'CODEX_BUILD_BRIEF_PART_CORRUPT: recovered after one bridge retry. DEFERRED.'
     const rows = [

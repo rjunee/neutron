@@ -182,11 +182,14 @@ function deps(over: Partial<BoardBoundBuildDeps> = {}): BoardBoundBuildDeps {
  * WHAT THIS DOES *NOT* PROVE, stated so no future reader mistakes it (cross-model
  * review, BLOCKER 2). The spec item's first criterion wants a refusal stated
  * "plainly on the card", and a captured `console.log` is not that: it is a SERVER
- * LOG, and nobody looking at the board sees it. That half of the criterion is NOT
- * delivered and its box is deliberately unticked — `work_board_items` has no
- * free-text field and `TridentBoardBinder` is `get`/`attachRun`/reconcile, so there
- * is no board surface to write to. These assertions pin the log because the log is
- * what exists, not because it answers the criterion.
+ * LOG, and nobody looking at the board sees it. When these tests were written that
+ * half of the criterion was NOT delivered — `work_board_items` has no free-text field
+ * and `TridentBoardBinder` is `get`/`attachRun`/reconcile, so there was no board
+ * surface to write to. It is now delivered on the RUN row instead:
+ * `code_trident_runs.resume_note` (migration 0155), written once by the dispatch
+ * (`resumeNote`, board-dispatch.ts), carried by `run_progress` to both front-ends and
+ * pinned in cross-run-retry-checkpoint.test.ts. These assertions still pin the log,
+ * which now also carries that sentence as `note`.
  */
 async function dispatchRecording(
   tip: (repo: string, branch: string) => Promise<string>,

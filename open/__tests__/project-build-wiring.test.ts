@@ -22,7 +22,7 @@ import * as runners from '@neutronai/runtime/workers/project-runners.ts'
 import * as codex from '@neutronai/runtime/workers/codex-headless.ts'
 import { pool, supervisedBySessionKey } from '@neutronai/runtime/adapters/claude-code/persistent/pool-state.ts'
 import { fakeRunner, type BoundedWorkRequest } from '@neutronai/runtime/bounded-work.ts'
-import { prepareProjectBuild, suiteScript, type ProjectBuildContext } from '../wiring/project-build.ts'
+import { PLAN_LEDGER_CONTRACT, prepareProjectBuild, suiteScript, type ProjectBuildContext } from '../wiring/project-build.ts'
 import { PROJECT_SNAPSHOT_SCHEMA } from '../wiring/project-build-snapshot.ts'
 import { makeLazyCredentialedHostRunner, spawnCapture } from '@neutronai/trident/git-mode.ts'
 import { githubProcessEnv } from '@neutronai/github/credential.ts'
@@ -610,6 +610,7 @@ for (const role of ['plan', 'build', 'review', 'fix'] as const) {
       JSON.stringify(PROJECT_SNAPSHOT_SCHEMA),
       `\`result.payload\` must satisfy the ${role === 'plan' ? 'plan' : role === 'review' ? 'verdict' : 'forge'} trailer contract below. Read the host context for the measured snapshot.`,
       JSON.stringify(role === 'plan' ? PLAN_SCHEMA : role === 'review' ? VERDICT_SCHEMA : FORGE_SCHEMA),
+      ...(role === 'plan' ? [PLAN_LEDGER_CONTRACT] : []),
       'Never publish or merge; the host owns those actions.',
     ].join('\n\n')
     const guidance = `\n\n<owner_reflection>\n${REFLECTION_GUIDANCE_FRAMING}\n${correction}\n</owner_reflection>`
@@ -641,6 +642,27 @@ test('rebuilt builder briefs cap escaped correction data', async () => {
     const brief = await readFile(options.workers[role].request.brief.path, 'utf8')
     const data = brief.split(REFLECTION_GUIDANCE_FRAMING + '\n')[1]!
     expect(data).toBe('&lt;'.repeat(MAX_REFLECTION_GUIDANCE_CHARS / 4) + '\n… (owner corrections truncated)\n</owner_reflection>')
+  }
+})
+
+// THE PLAN BRIEF MUST STATE THE LEDGER THE DRIVER ENFORCES AND COMMITS.
+// G025's ledger check, the handoff's `.trident/ledgers/<branch>.md` commit and G026-G029's
+// continuation planner all read `implementationPlan` as a checkbox list, and the
+// brief said none of it — so a planner returning headings and zero boxes was obeying
+// its brief, and every continuation re-planned from scratch. The phrases pinned here
+// are the ones a worker has to act on; only the plan role is told them.
+test('the plan brief states the task ledger shape and the planner "next" duty', async () => {
+  const f = await fixture()
+  const options = await f.prepare()
+  for (const role of ['plan', 'build', 'review', 'fix'] as const) {
+    const brief = await readFile(options.workers[role].request.brief.path, 'utf8')
+    const plan = role === 'plan'
+    for (const phrase of ['`- [x] T<n>: <one line>`', '`- [ ] T<n>: <one line>`',
+      '`topTask` is the first unchecked line, copied verbatim', '`remainingTasks` is the number of unchecked lines minus one',
+      'at a per-branch path under `.trident/ledgers/`, on a PUBLIC branch', '`planner: "next"` and `committedPlan`',
+      'return `committedPlan.body` unchanged as `implementationPlan`', 'write only the `executionSpec` for that task']) {
+      expect(brief.includes(phrase), `${role} brief ${plan ? 'must' : 'must not'} carry: ${phrase}`).toBe(plan)
+    }
   }
 })
 

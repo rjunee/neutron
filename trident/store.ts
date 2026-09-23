@@ -26,7 +26,7 @@ import { phaseForCheckpoint } from './checkpoint-phase.ts'
 import { checkpointRound } from './checkpoint-round.ts'
 import { trimAsciiWs } from './ascii-trim.ts'
 import { readBuildRetrySource, retrySourceIdentity } from './build-mode-state.ts'
-import { reviewCapableCheckpoint } from './run-disposition.ts'
+import { seedableCheckpoint } from './run-disposition.ts'
 import { carryableRalphRound, DEFAULT_MAX_RALPH_ROUNDS, isRalphCap } from './ralph-budget.ts'
 
 const crashLog = createLogger('trident-launcher-crash')
@@ -77,7 +77,7 @@ export class TridentRunReferenceAmbiguousError extends Error {
 
 export class TridentUnresumableSeedError extends Error {
   constructor(checkpoint: string) {
-    super(`refusing to create a trident run seeded at inner_checkpoint='${checkpoint}': only a checkpoint that means "a commit exists and nothing has judged it yet" (forge-done, fix-round-N, outer-published:*) may seed a resume — anything else either has no commit to resume or has ALREADY been judged, and seeding it would route unreviewed work past a review`)
+    super(`refusing to create a trident run seeded at inner_checkpoint='${checkpoint}': only a checkpoint that means "a commit exists and nothing has judged it yet" (forge-done, fix-round-N, outer-published:*) may seed a resume, plus ralph-task-built on a governed (ralph) row, which seeds a Ralph continuation that still builds and reviews — anything else either has no commit to resume or has ALREADY been judged, and seeding it would route unreviewed work past a review`)
     this.name = 'TridentUnresumableSeedError'
   }
 }
@@ -272,6 +272,16 @@ export interface TridentRun {
    * retry creates a new run row with a fresh null.
    */
   brief_alert: string | null
+  /**
+   * RETRY RESUME NOTE (migration 0155) — one plain sentence saying whether this
+   * run inherited the dead prior run's checkpoint and Ralph round, and if not,
+   * why. Written ONCE, by the board dispatch at `create`, from the very values it
+   * seeded onto this row (`resumeNote`, board-dispatch.ts), so the card text and
+   * the row cannot disagree. Null only for a first dispatch, which has no prior
+   * run to state anything about. NEVER written by `save()`/`update()`: the note
+   * describes the decision this row was BORN with, not anything that happened later.
+   */
+  resume_note: string | null
   /**
    * Trident v2 (migration 0089) — the CC workflow run id of the last
    * inner-loop dispatch. Observability only (correlate the row with its
@@ -476,6 +486,12 @@ export interface CreateTridentRunInput {
    *  workflow reads these back on resume exactly as the prior round recorded them. */
   inner_checkpoint_findings?: string | null
   /**
+   * The dispatch's one-sentence statement of what this row inherited from the
+   * prior run (see `TridentRun.resume_note`). Omitted → null, the first-dispatch
+   * shape every other caller keeps. Stored verbatim; write-once.
+   */
+  resume_note?: string | null
+  /**
    * Salvage-resume seed — see `inner_checkpoint`. The origin/<base> tip the SEEDED
    * head was cut from, carried from the prior run.
    *
@@ -573,6 +589,7 @@ interface TridentRunDbRow {
   channel_kind: Topic['channel_kind']
   failure_reason: string | null
   brief_alert: string | null
+  resume_note: string | null
   workflow_run_id: string | null
   inner_checkpoint: string | null
   inner_checkpoint_head: string | null
@@ -596,7 +613,7 @@ interface TridentRunDbRow {
 export const COLS =
   'id, slug, project_slug, phase, round, max_rounds, ralph, ralph_round, ralph_task_total, ' +
   'max_ralph_rounds, branch, pr, published_pr, merge_mode, subagent_run_id, subagent_status, ' +
-  'repo_path, worktree, task, chat_id, thread_id, channel_kind, failure_reason, brief_alert, ' +
+  'repo_path, worktree, task, chat_id, thread_id, channel_kind, failure_reason, brief_alert, resume_note, ' +
   'workflow_run_id, inner_checkpoint, inner_checkpoint_head, ' +
   'inner_checkpoint_findings, inner_verdict, inner_result, ' +
   'started_at, last_advanced_at, harvested_at, crash_recoveries, infra_retries, ' +
@@ -683,8 +700,13 @@ export class TridentRunStore {
     // every reader compares (`trimAsciiWs`, the six ASCII characters all three
     // copies agree on). A null/omitted seed is the fresh-dispatch shape and is
     // untouched.
+    //
+    // THE ONE NON-REVIEW NAME (spec item a-retry-must-resume-from-the-checkpoint).
+    // `ralph-task-built` is accepted on a GOVERNED row only: it seeds a Ralph
+    // continuation that builds the next task with the cheap planner, and routes
+    // nothing past a review. `seedableCheckpoint` (run-disposition.ts) owns that rule.
     const seededCheckpoint = trimAsciiWs(input.inner_checkpoint ?? '')
-    if (seededCheckpoint !== '' && !reviewCapableCheckpoint(seededCheckpoint)) {
+    if (seededCheckpoint !== '' && !seedableCheckpoint(seededCheckpoint, input.ralph === true)) {
       throw new TridentUnresumableSeedError(seededCheckpoint)
     }
     // AND THE NAME IS ONLY HALF THE SEED (Argus r24, major). The guard above asked
@@ -890,6 +912,7 @@ export class TridentRunStore {
       channel_kind: input.channel_kind ?? 'telegram',
       failure_reason: null,
       brief_alert: null,
+      resume_note: input.resume_note ?? null,
       workflow_run_id: null,
       // THE STORED VALUE IS THE ONE THAT WAS GUARDED (Argus r24, minor). The guard
       // above decides on the TRIMMED name and the normalised pins; persisting the
@@ -944,6 +967,7 @@ export class TridentRunStore {
         run.channel_kind,
         run.failure_reason,
         run.brief_alert,
+        run.resume_note,
         run.workflow_run_id,
         run.inner_checkpoint,
         run.inner_checkpoint_head,
@@ -1953,6 +1977,10 @@ export class TridentRunStore {
    * `update({inner_result})` for the workflow-sim result write in tests;
    * `brief_alert` is written by `trident/checkpoint.sh`.
    *
+   * `resume_note` (0155) is not written here either, and has NO writer after
+   * `create`: it states the resume decision the dispatch made when it created the
+   * row, so no later snapshot may restate it (`TridentRunUpdate` does not name it).
+   *
    * `inner_checkpoint_head` (0122) is excluded for the
    * same reason AND a sharper one: it is only meaningful PAIRED with the
    * `inner_checkpoint` it was written beside. The known cost of that exclusion
@@ -2312,6 +2340,7 @@ function rowToRun(row: TridentRunDbRow): TridentRun {
     channel_kind: row.channel_kind,
     failure_reason: row.failure_reason,
     brief_alert: row.brief_alert,
+    resume_note: row.resume_note ?? null,
     workflow_run_id: row.workflow_run_id,
     inner_checkpoint: row.inner_checkpoint,
     inner_checkpoint_head: row.inner_checkpoint_head,

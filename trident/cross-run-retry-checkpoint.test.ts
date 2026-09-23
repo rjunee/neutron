@@ -18,7 +18,9 @@ const HEAD = 'a'.repeat(40)
 const BASE = 'b'.repeat(40)
 const TASK = 'Build the specified retry continuity change with a full regression suite and preserved review rounds'
 
-async function fixture(over: { checkpoint?: Partial<ResumeCheckpoint>; phase?: 'failed' | 'stopped'; cardRound?: number } = {}) {
+async function fixture(over: { checkpoint?: Partial<ResumeCheckpoint>; phase?: 'failed' | 'stopped'; cardRound?: number;
+  mergeMode?: 'local' | 'pr'; iteration?: number } = {}) {
+  const mergeMode = over.mergeMode ?? 'local'
   const dir = mkdtempSync(join(tmpdir(), 'cross-run-retry-'))
   seedMigratedDb(join(dir, 'project.db'))
   const db = ProjectDb.open(join(dir, 'project.db'))
@@ -26,7 +28,7 @@ async function fixture(over: { checkpoint?: Partial<ResumeCheckpoint>; phase?: '
   const store = new TridentRunStore(db)
   const branch = `trident/${slugifyTask(TASK)}`
   const prior = await store.create({ slug: slugifyTask(TASK), project_slug: 'project', repo_path: dir,
-    task: TASK, branch, merge_mode: 'local', ralph: true, ralph_round: 4, max_ralph_rounds: 8 })
+    task: TASK, branch, merge_mode: mergeMode, ralph: true, ralph_round: 4, max_ralph_rounds: 8 })
   const worktree = join(dir, 'work')
   await store.update(prior.id, { worktree, base_sha: BASE })
   const options = { store, runId: prior.id, projectSlug: 'project', repo: dir, worktree, branch,
@@ -36,18 +38,25 @@ async function fixture(over: { checkpoint?: Partial<ResumeCheckpoint>; phase?: '
     findings: [], previousFindings: ['Earlier finding'], previousBlockingCount: 1, ...over.checkpoint }
   const original = createProductionHostEffects(options)
   await original.modes.saveCheckpoint(checkpoint)
+  if (over.iteration !== undefined) {
+    // The shape `advanceRalph` leaves behind: the iteration advanced past the row's round.
+    const event = store.stageEvents(prior.id).filter(e => e.stage === 'build-mode-state').at(-1)!
+    await store.recordStageEvent(prior.id, 'build-mode-state', JSON.stringify({ ...JSON.parse(event.meta!),
+      iteration: over.iteration, consumed: { round: over.iteration - 1, head: HEAD } }))
+  }
   // Positive control: the original host can read the exact state being retried.
   expect(await original.modes.loadResume()).toEqual(checkpoint)
   await store.update(prior.id, { phase: over.phase ?? 'failed' })
-  const dispatch = (tip = HEAD, linkedRun: string | null = prior.id, task = TASK) => dispatchBoardBoundBuild({ task, board_item_id: 'card' }, {
+  const tipReads: string[] = []
+  const dispatch = (tip: string | ((mode: string) => string) = HEAD, linkedRun: string | null = prior.id, task = TASK) => dispatchBoardBoundBuild({ task, board_item_id: 'card' }, {
     store, project_slug: 'project', repo_path: dir,
     board: { get: () => ({ id: 'card', title: TASK, design_doc_ref: null, linked_run_id: linkedRun,
       ...(over.cardRound === undefined ? {} : { ralph_round: over.cardRound, max_ralph_rounds: 8 }) }),
       attachRun: async () => {} },
-    resolveBuildRepo: async () => dir, resolveMergeMode: async () => 'local', resolveRalph: async () => true,
-    readBranchTip: async () => tip,
+    resolveBuildRepo: async () => dir, resolveMergeMode: async () => mergeMode, resolveRalph: async () => true,
+    readBranchTip: async (_repo, _branch, mode) => { tipReads.push(mode); return typeof tip === 'function' ? tip(mode) : tip },
   })
-  return { dir, db, store, prior, options, checkpoint, dispatch }
+  return { dir, db, store, prior, options, checkpoint, dispatch, tipReads }
 }
 
 test('intentional source invalidation carries the Ralph budget without carrying a checkpoint', async () => {
@@ -249,7 +258,7 @@ for (const link of [null, 'missing']) test(`a card naming ${link ?? 'no run'} ca
   expect(f.store.stageEvents(result.run.id)).toHaveLength(0)
 })
 
-for (const stage of ['approved', 'rejected', 'ralph-task-built', 'built'] as const) test(`a governed ${stage} checkpoint does not promise completed-build review`, async () => {
+for (const stage of ['approved', 'rejected', 'ralph-task-built-deviated', 'built'] as const) test(`a governed ${stage} checkpoint does not promise completed-build review`, async () => {
   const f = await fixture({ checkpoint: { stage } })
   const result = await f.dispatch()
   expect(result.ok).toBe(true)
@@ -356,4 +365,182 @@ for (const stage of ['approved', 'rejected', 'pending'] as const) test(`a later 
   if (!next.ok) return
   expect(next.run.inner_checkpoint).toBeNull()
   expect(f.store.stageEvents(next.run.id)).toHaveLength(0)
+})
+
+// ── THE RALPH CONTINUATION (spec item a-retry-must-resume-from-the-checkpoint, gap 2) ──
+// A governed iteration that built its task and handed back parks at `ralph-task-built`.
+// Its retry used to be born with `inner_checkpoint = null`, so it paid the full planning
+// survey again; it now carries the checkpoint, its head and the base pin, and the retry
+// host imports the continuation state the cheap planner (`build-run.ts`, G026) reads.
+const CONTINUATION = { stage: 'ralph-task-built', round: 0, previousFindings: [], previousBlockingCount: 0 } as const
+
+for (const mergeMode of ['local', 'pr'] as const)
+test(`a ${mergeMode}-mode retry of a handed-back Ralph iteration carries its checkpoint off the LOCAL tip`, async () => {
+  // Origin lags the recorded head in BOTH modes: an iteration commits locally and hands
+  // back without publishing. Only the local ref holds HEAD, so a remote read (the
+  // `detectExistingPr`-shaped probe) cannot be what recovers continuity here.
+  const f = await fixture({ checkpoint: CONTINUATION, mergeMode })
+  const result = await f.dispatch(mode => mode === 'local' ? HEAD : 'c'.repeat(40))
+  expect(result.ok, JSON.stringify(result)).toBe(true)
+  if (!result.ok) return
+  expect(f.tipReads).toEqual(['local'])
+  expect(result.run.inner_checkpoint).toBe('ralph-task-built')
+  expect(result.run.inner_checkpoint_head).toBe(HEAD)
+  expect(result.run.base_sha).toBe(BASE)
+  expect(result.run.ralph_round).toBe(4)
+  expect(result.run.max_ralph_rounds).toBe(8)
+  const link = f.store.stageEvents(result.run.id).find(e => e.stage === 'build-retry-source')
+  expect(JSON.parse(link!.meta!)).toMatchObject({ priorRunId: f.prior.id, head: HEAD })
+  // The retry host imports the continuation as its own state: stage and head intact.
+  const worktree = join(f.dir, 'retry-work')
+  await f.store.update(result.run.id, { worktree })
+  const host = createProductionHostEffects({ ...f.options, runId: result.run.id, worktree })
+  expect(await host.modes.loadResume()).toMatchObject({ stage: 'ralph-task-built', head: HEAD, round: 0 })
+  expect(host.ralphIteration()).toBe(4)
+})
+
+test('a continuation retry is born at the iteration the handoff advanced to, never below it', async () => {
+  // `advanceRalph` moved the source to iteration 6 while the card still reads round 4.
+  const f = await fixture({ checkpoint: CONTINUATION, iteration: 6, cardRound: 4 })
+  const result = await f.dispatch()
+  expect(result.ok, JSON.stringify(result)).toBe(true)
+  if (!result.ok) return
+  expect(result.run.inner_checkpoint).toBe('ralph-task-built')
+  expect(result.run.ralph_round).toBe(6)
+  expect(result.run.max_ralph_rounds).toBe(8)
+  const worktree = join(f.dir, 'retry-work')
+  await f.store.update(result.run.id, { worktree })
+  const host = createProductionHostEffects({ ...f.options, runId: result.run.id, worktree })
+  await host.modes.loadResume()
+  expect(host.ralphIteration()).toBe(6)
+})
+
+for (const tip of ['', 'c'.repeat(40)]) test(`a continuation on a ${tip ? 'moved' : 'missing'} local tip is not adopted`, async () => {
+  const f = await fixture({ checkpoint: CONTINUATION })
+  const result = await f.dispatch(tip)
+  expect(result.ok).toBe(true)
+  if (!result.ok) return
+  expect(result.run.inner_checkpoint).toBeNull()
+  expect(f.store.stageEvents(result.run.id)).toHaveLength(0)
+  expect(result.run.ralph_round).toBe(4)
+})
+
+test('a continuation carried once survives a retry that died before building', async () => {
+  const f = await fixture({ checkpoint: CONTINUATION })
+  const first = await f.dispatch()
+  expect(first.ok).toBe(true)
+  if (!first.ok) return
+  const worktree = join(f.dir, 'retry-work')
+  await f.store.update(first.run.id, { worktree })
+  await createProductionHostEffects({ ...f.options, runId: first.run.id, worktree }).modes.loadResume()
+  await f.store.update(first.run.id, { phase: 'failed', worktree: null })
+  const second = await f.dispatch(HEAD, first.run.id)
+  expect(second.ok, JSON.stringify(second)).toBe(true)
+  if (!second.ok) return
+  expect(second.run.inner_checkpoint).toBe('ralph-task-built')
+  expect(JSON.parse(f.store.stageEvents(second.run.id).find(e => e.stage === 'build-retry-source')!.meta!).priorRunId)
+    .toBe(first.run.id)
+})
+
+// ── THE CARD SENTENCE (spec item a-retry-must-resume-from-the-checkpoint, acceptance 1) ──
+// "carries … forward, OR states plainly on the card that it will not. Silence fails." Each
+// case goes through the real `dispatchBoardBoundBuild` and reads the ROW it wrote, because
+// the row is what `run_progress` carries to the card. The sentence must agree with the
+// round and cap that same row holds.
+async function withSeedLine<T>(fn: () => Promise<T>): Promise<{ value: T; seedLine: string | null }> {
+  const lines: string[] = []
+  const original = console.log
+  console.log = (...args: unknown[]) => { lines.push(args.map(a => String(a)).join(' ')) }
+  try {
+    const value = await fn()
+    return { value, seedLine: lines.find(l => l.includes('event=dispatch_resume_seed')) ?? null }
+  } finally { console.log = original }
+}
+
+const SHORT = HEAD.slice(0, 7)
+const noteCases: { name: string; reason: string; over?: Parameters<typeof fixture>[0];
+  tip?: string; link?: 'prior' | null | 'missing' | 'foreign'; task?: string; expected: (round: string) => string }[] = [
+  { name: 'a carried review checkpoint', reason: 'resumed',
+    expected: r => `Dispatched to resume from fix-round-3 at ${SHORT} (rebuilds if the branch moves before launch); Ralph round ${r} carried.` },
+  { name: 'a carried Ralph continuation', reason: 'resumed_continuation', over: { checkpoint: CONTINUATION },
+    expected: r => `Dispatched to resume from ralph-task-built at ${SHORT} (rebuilds if the branch moves before launch); Ralph round ${r} carried.` },
+  { name: 'a moved branch tip', reason: 'branch_tip_moved', tip: 'c'.repeat(40),
+    expected: r => `Not resumed: the branch moved off the last run's commit, so this is a fresh build; Ralph round ${r} carried.` },
+  { name: 'an unreadable branch tip', reason: 'branch_tip_unreadable_or_absent', tip: '',
+    expected: r => `Not resumed: the branch tip could not be read or the branch is gone, so this is a fresh build; Ralph round ${r} carried.` },
+  { name: 'a prior with nothing to resume', reason: 'prior_run_has_no_resumable_build', over: { checkpoint: { stage: 'approved' } },
+    expected: r => `Not resumed: the last run left no build to resume, so this is a fresh build; Ralph round ${r} carried.` },
+  { name: 'an edited task text', reason: 'prior_run_task_text_differs', task: `${TASK} after clarification`,
+    expected: r => `Not resumed: the card's task text changed since the last run, so this is a fresh build; Ralph round ${r} carried.` },
+  { name: 'a card naming no run', reason: 'card_names_no_run', link: null,
+    expected: r => `Not resumed: the card names no prior run, so this is a fresh build; fresh Ralph budget ${r}.` },
+  { name: 'a card naming a deleted run', reason: 'card_names_an_unknown_run', link: 'missing',
+    expected: r => `Not resumed: the run the card names no longer exists, so this is a fresh build; fresh Ralph budget ${r}.` },
+  { name: "a card naming another project's run", reason: 'card_names_a_different_run', link: 'foreign',
+    expected: r => `Not resumed: the run the card names belongs to another project, so this is a fresh build; fresh Ralph budget ${r}.` },
+]
+
+for (const c of noteCases) test(`a retry after ${c.name} states its resume decision on the row (${c.reason})`, async () => {
+  const f = await fixture(c.over)
+  let link: string | null = f.prior.id
+  if (c.link === null) link = null
+  if (c.link === 'missing') link = 'missing'
+  if (c.link === 'foreign') {
+    const foreign = await f.store.create({ slug: 'foreign-project-run', project_slug: 'another-project',
+      repo_path: f.dir, task: TASK, ralph: true })
+    await f.store.update(foreign.id, { phase: 'failed' })
+    link = foreign.id
+  }
+  const { value: result, seedLine } = await withSeedLine(() => f.dispatch(c.tip ?? HEAD, link, c.task ?? TASK))
+  expect(result.ok, JSON.stringify(result)).toBe(true)
+  if (!result.ok) return
+  const row = f.store.get(result.run.id)!
+  // The sentence names the round and cap the ROW holds — never a value it only intended.
+  const note = c.expected(`${row.ralph_round}/${row.max_ralph_rounds}`)
+  expect(row.resume_note).toBe(note)
+  expect(note.length).toBeLessThanOrEqual(200)
+  // Carried exactly when the row carries it: a resumed note on a row with no
+  // checkpoint (or the reverse) is the card lying about the row.
+  expect(row.inner_checkpoint !== null).toBe(c.reason.startsWith('resumed'))
+  expect(seedLine).toContain(`reason=${c.reason}`)
+  expect(seedLine).toContain('note=')
+  expect(seedLine).toContain(note.slice(0, 20))
+})
+
+test('a first dispatch, with no prior run to state anything about, writes no note', async () => {
+  const f = await fixture()
+  const { value: result, seedLine } = await withSeedLine(() =>
+    f.dispatch(HEAD, null, 'Write an unrelated documentation card that has never been built before'))
+  expect(result.ok, JSON.stringify(result)).toBe(true)
+  if (!result.ok) return
+  expect(f.store.get(result.run.id)!.resume_note).toBeNull()
+  // …and the log line is not emitted either: there was no prior of any kind to ask about.
+  expect(seedLine).toBeNull()
+})
+
+test("a first dispatch whose slug collides with ANOTHER card's run is not told it was not resumed", async () => {
+  const f = await fixture()
+  // Same first 35 characters as TASK, so `slugifyTask` gives the prior's slug, but a
+  // different card: different task text, and the card links no run.
+  const colliding = `${TASK} — a different card entirely`
+  expect(slugifyTask(colliding)).toBe(slugifyTask(TASK))
+  const { value: result, seedLine } = await withSeedLine(() => f.dispatch(HEAD, null, colliding))
+  expect(result.ok, JSON.stringify(result)).toBe(true)
+  if (!result.ok) return
+  expect(f.store.get(result.run.id)!.resume_note).toBeNull()
+  // The slug match is still reported to the operator, as another run for the slug.
+  expect(seedLine).toContain(`other_prior_for_slug=${f.prior.id}`)
+})
+
+test('the carried and fresh budget wordings follow the row, not the reason', async () => {
+  // A card holding its own budget snapshot carries it even when it names no run — the
+  // sentence must say "carried" there, and "fresh" only when nothing was inherited.
+  const f = await fixture({ cardRound: 5 })
+  const result = await f.dispatch(HEAD, null)
+  expect(result.ok, JSON.stringify(result)).toBe(true)
+  if (!result.ok) return
+  const row = f.store.get(result.run.id)!
+  expect(row.ralph_round).toBe(5)
+  expect(row.resume_note).toBe(
+    `Not resumed: the card names no prior run, so this is a fresh build; Ralph round 5/${row.max_ralph_rounds} carried.`)
 })

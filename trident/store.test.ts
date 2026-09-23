@@ -761,6 +761,31 @@ describe('TridentRunStore', () => {
     },
   )
 
+  // THE RALPH CONTINUATION SEED IS GOVERNED-ONLY (spec item
+  // a-retry-must-resume-from-the-checkpoint). `ralph-task-built` is refused on the
+  // non-ralph rows above and accepted on a ralph row, where it opens the next
+  // iteration with the cheap planner; its `-deviated` twin stays refused everywhere,
+  // because a deviated build's committed plan is stale.
+  test.each([
+    ['ralph-task-built', true, true],
+    ['ralph-task-built', false, false],
+    ['ralph-task-built-deviated', true, false],
+  ] as const)('create on seed %p with ralph=%p accepts=%p', async (checkpoint, ralph, accepts) => {
+    const store = new TridentRunStore(db)
+    const create = store.create({
+      slug: `continuation-${String(ralph)}-${checkpoint}`,
+      project_slug: 't1',
+      repo_path: '/r',
+      task: 't',
+      ralph,
+      inner_checkpoint: checkpoint,
+      inner_checkpoint_head: 'a'.repeat(40),
+      base_sha: 'c'.repeat(40),
+    })
+    if (accepts) expect((await create).inner_checkpoint).toBe(checkpoint)
+    else await expect(create).rejects.toThrow(TridentUnresumableSeedError)
+  })
+
   // A SEEDED NAME IS ONLY HALF A SEED (Argus r24, major). The name guard above
   // answered "this checkpoint means a commit exists and nothing judged it", then let
   // the two columns saying WHICH commit through unchecked. Both gaps are permanent
@@ -2117,7 +2142,7 @@ describe('terminalTransition retracts a stale in-flight claim', () => {
 })
 
 describe('INSERT column/placeholder/bound-array alignment — the silent-corruption guard (BLOCKING addendum)', () => {
-  test('COLS matches the 43 readable run columns', () => {
+  test('COLS matches the 44 readable run columns', () => {
     // The INSERT placeholder list is derived from COLS, so placeholder count =
     // column count by construction. What is NOT free is COLS agreeing with the
     // TABLE: a column added, dropped or renamed by a migration without touching
@@ -2125,16 +2150,17 @@ describe('INSERT column/placeholder/bound-array alignment — the silent-corrupt
     // arity/order). The literal count is deliberate — adding a column must be a
     // conscious edit here, not an invisible drift. It moved 40 -> 41 when
     // `claimed_paths` arrived with migration 0139: the guard refused to let a
-    // real column land silently, which is exactly its job.
+    // real column land silently, which is exactly its job. 42 -> 43 with
+    // `ralph_task_total` (migration 0154); 43 -> 44 with `resume_note` (0155).
     const cols = COLS.split(', ')
     const pragma = db
       .prepare<{ name: string }, []>(`PRAGMA table_info(code_trident_runs)`)
       .all()
 
-    expect(cols).toHaveLength(43)
+    expect(cols).toHaveLength(44)
     // agent_waked_at is deliberately absent from COLS: claimAgentWake is its sole
     // writer, so a full snapshot can never clear an already-won delivery claim.
-    // The table therefore has 44 columns and COLS has 43 — compare against the
+    // The table therefore has 45 columns and COLS has 44 — compare against the
     // snapshot-writable set, not the raw pragma count.
     const snapshotWritable = pragma.filter((c) => c.name !== 'agent_waked_at')
     expect(cols).toHaveLength(snapshotWritable.length)
@@ -2183,9 +2209,30 @@ describe('INSERT column/placeholder/bound-array alignment — the silent-corrupt
       channel_kind: 'cli',
       parent_run_id: 'parent-run-distinct',
       wave_task_id: 'T7',
+      resume_note: 'resume-note-distinct',
     })
 
     expect(store.get(run.id)).toEqual(run)
+  })
+
+  test('resume_note is written once at create and no later write can restate it', async () => {
+    // WHY: the note states the resume decision the dispatch made when it created the
+    // row; a later snapshot restating it would let the card describe a decision that
+    // was never made. RED-mutation: drop `run.resume_note` from the INSERT values
+    // (or its COLS entry) and the stored value is lost or shifted.
+    const store = new TridentRunStore(db)
+    const note = 'Not resumed: the branch moved off the last run\'s commit, so this is a fresh build.'
+    const run = await store.create({ slug: 'note-once', project_slug: 't1', repo_path: '/r', task: 't', resume_note: note })
+    expect(run.resume_note).toBe(note)
+    expect(store.get(run.id)?.resume_note).toBe(note)
+    // `update()` does not name the column: an injected key is not written.
+    await store.update(run.id, { phase: 'failed', resume_note: 'rewritten' } as never)
+    // `save()` of a full snapshot carrying a different value does not write it either.
+    await store.save({ ...store.get(run.id)!, resume_note: 'rewritten by save' })
+    expect(store.get(run.id)?.resume_note).toBe(note)
+    // Omitted → null, the first-dispatch shape.
+    const fresh = await store.create({ slug: 'note-none', project_slug: 't1', repo_path: '/r', task: 't' })
+    expect(store.get(fresh.id)?.resume_note).toBeNull()
   })
 
   /**

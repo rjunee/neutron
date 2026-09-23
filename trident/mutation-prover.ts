@@ -3779,6 +3779,12 @@ function checkObservation(value: unknown, field: string): string | null {
  * tests} takes the no-production-file exemption. Nothing that ships reads those
  * files, and a reviewer reads the plan anyway. Reopen it here only together
  * with an outcome for the plan-only diff.
+ *
+ * The host's per-branch Ralph task ledger, `.trident/ledgers/<branch>.md`
+ * (`taskLedgerPath`, `production-host-effects.ts`), leans on this too: the host
+ * commits it into every multi-task card's diff, so listing `.trident` here would
+ * strip a documentation-only card's exemption and leave it the ledger as its only
+ * "production" file — which no test reads, the same empty satisfiable set.
  */
 const PROSE_DIR_DENYLIST = ['skills', 'prompts', '.claude', 'agent-dispatch', '.github']
 

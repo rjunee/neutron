@@ -258,9 +258,19 @@ export function briefAlertText(rp: RunProgress | undefined): string | null {
   return typeof alert === 'string' && alert.length > 0 ? alert : null;
 }
 
+/** The dispatch's one-sentence resume decision for a retry (`resume_note`); null
+ *  for a first dispatch or a frame from a gateway that predates the field. */
+export function resumeNoteText(rp: RunProgress | undefined): string | null {
+  if (rp === undefined) return null;
+  const note = rp.resume_note;
+  return typeof note === 'string' && note.length > 0 ? note : null;
+}
+
 export interface RunNotice {
   text: string;
-  tone: 'failure' | 'alert' | 'blocked';
+  /** `info`: a retry that carried the dead run's checkpoint — a healthy fact about
+   *  the run, not something that went wrong, so it is not styled as an alert. */
+  tone: 'failure' | 'alert' | 'blocked' | 'info';
 }
 
 /** Terminal failure is the card's outcome; a recovered brief alert is only the
@@ -283,7 +293,16 @@ export function runNotice(item: WorkBoardItem): RunNotice | null {
   // as though it caused that failure.
   if (rp !== undefined && resolveStepLabel(rp) === 'failed') return null;
   const alert = briefAlertText(rp);
-  return alert === null ? null : { text: alert, tone: 'alert' };
+  if (alert !== null) return { text: alert, tone: 'alert' };
+  // The retry's resume decision: whether it carried the dead run's checkpoint and
+  // Ralph round, and why not when it did not. A retry that inherited nothing must
+  // SAY so rather than look like a first dispatch. It yields to an integrity alert,
+  // which is evidence something went wrong; the note is only what the row was born
+  // with. Only a REFUSAL ("Not resumed: …", `resumeNote` in trident/board-dispatch.ts)
+  // is an alert an owner should notice; a carried checkpoint is informational.
+  const note = resumeNoteText(rp);
+  if (note === null) return null;
+  return { text: note, tone: note.startsWith('Not resumed:') ? 'alert' : 'info' };
 }
 
 /** The leading dot's color bucket, or 'upcoming' (faint gray outline, no fill). */

@@ -291,6 +291,21 @@ describe('parseWorkBoardItems', () => {
     expect(out[1]!.run_progress).toBeUndefined()
   })
 
+  it('parses run_progress.resume_note through, and null when absent or not a string', () => {
+    const base = {
+      run_id: 'run-1', phase_label: 'building', round: 1, ralph_round: 0,
+      started_at: '', last_advanced_at: '', elapsed_ms: 0, stalled: false, stalled_ms: null,
+      pr: null, verdict: null, failure_reason: null,
+    }
+    const note = 'Not resumed: the branch moved off the last run\'s commit, so this is a fresh build.'
+    const out = parseWorkBoardItems([
+      { id: 'a', title: 'A', status: 'in_progress', run_progress: { ...base, resume_note: note } },
+      { id: 'b', title: 'B', status: 'in_progress', run_progress: base },
+      { id: 'c', title: 'C', status: 'in_progress', run_progress: { ...base, resume_note: 42 } },
+    ])
+    expect(out.map((i) => i.run_progress?.resume_note)).toEqual([note, null, null])
+  })
+
   it('parses run_progress.pr_url through, and null when the gateway omits it', () => {
     const base = {
       run_id: 'run-1',

@@ -219,6 +219,8 @@ test('first apply runs all migrations in order and records them in _migrations',
     152,
     153,
     154,
+    // 0155 — the retry's resume note. 0154 is `ralph_task_total`; both apply, in order.
+    155,
   ])
   expect(result.skipped).toEqual([])
 
@@ -228,7 +230,7 @@ test('first apply runs all migrations in order and records them in _migrations',
     )
     .all()
   expect(rows.map((r) => r.version)).toEqual(result.applied)
-  expect(rows.at(-1)).toMatchObject({ version: 154, name: 'ralph_task_total' })
+  expect(rows.find((r) => r.version === 154)).toMatchObject({ version: 154, name: 'ralph_task_total' })
   for (const table of ['code_trident_runs', 'work_board_items']) {
     expect(db.query<{ name: string; notnull: number }, []>(`PRAGMA table_info(${table})`).all())
       .toContainEqual(expect.objectContaining({ name: 'ralph_task_total', notnull: 0 }))
@@ -407,6 +409,24 @@ test('second apply on the same DB is idempotent (zero new applies)', () => {
     .get()
   expect(count?.c).toBe(first.applied.length)
   db2.close()
+})
+
+test('0155 adds the nullable resume_note column to code_trident_runs', () => {
+  const db = new Database(join(tmp, 'project.db'), { create: true })
+  applyMigrations(db)
+  const row = db
+    .query<{ name: string }, []>('SELECT name FROM _migrations WHERE version = 155')
+    .get()
+  expect(row?.name).toBe('trident_resume_note')
+  const col = db
+    .query<{ name: string; type: string; notnull: number; dflt_value: string | null }, []>(
+      "SELECT name, type, \"notnull\", dflt_value FROM pragma_table_info('code_trident_runs') WHERE name = 'resume_note'",
+    )
+    .get()
+  // Nullable with no default: a first dispatch has nothing to state, and every
+  // row written before this column existed reads NULL rather than a fabricated note.
+  expect(col).toEqual({ name: 'resume_note', type: 'TEXT', notnull: 0, dflt_value: null })
+  db.close()
 })
 
 test('applied row has applied_at populated', () => {

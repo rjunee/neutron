@@ -236,6 +236,8 @@ function makeRun(checkout: string, overrides: Partial<TridentRun> = {}): Trident
     // brief_alert with #431, parent_run_id/wave_task_id with #439's wave children.
     // The fixture predates all of them, which is what the typecheck caught.
     brief_alert: null,
+    // …and resume_note with migration 0155.
+    resume_note: null,
     parent_run_id: null,
     wave_task_id: null,
     claimed_paths: [],

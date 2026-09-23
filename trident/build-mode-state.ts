@@ -59,9 +59,36 @@ export function retryModeSource(store: TridentRunStore, prior: TridentRun, seen 
   const checkpoint = state.checkpoint
   // Never inherit approval or an unresolved worker reservation. A bare Ralph
   // build has not established that its remaining plan is empty.
-  if (checkpoint.pending !== undefined || checkpoint.head === null || checkpoint.round < 1
-    || !(checkpoint.stage === 'fixed' || (checkpoint.stage === 'built' && !prior.ralph))) return null
-  return { prior, eventId: event.id, state }
+  if (checkpoint.pending !== undefined || checkpoint.head === null) return null
+  if (checkpoint.round >= 1 && (checkpoint.stage === 'fixed' || (checkpoint.stage === 'built' && !prior.ralph))) {
+    return { prior, eventId: event.id, state }
+  }
+  return ralphContinuationSource(prior, state) ? { prior, eventId: event.id, state } : null
+}
+
+/**
+ * A GOVERNED ITERATION THAT HANDED BACK IS A CONTINUATION SOURCE (spec item
+ * a-retry-must-resume-from-the-checkpoint, gap 2). `advanceRalph`
+ * (production-host-effects.ts) writes a `ralph-task-built` state with the head it
+ * consumed, an advanced `iteration` and `round` reset to 0; a retry that adopted one and
+ * died before building re-mints the same checkpoint under its own identity, so the
+ * chain survives more than one failed attempt. Adopting that state does not skip a
+ * build or a review — the retry still builds the next task — it lets that iteration
+ * open with the committed plan (`build-run.ts`, G026) instead of paying for the full
+ * planning survey again. The branch tip is still proven against the recorded head at
+ * dispatch (board-dispatch.ts) and again at launch (launch-preparation.ts).
+ *
+ * `ralph-task-built-deviated` is never a source: a deviated build left a committed
+ * plan the code no longer matches, so its retry must re-plan in full.
+ */
+function ralphContinuationSource(prior: TridentRun, state: BuildModeState): boolean {
+  const checkpoint = state.checkpoint
+  return prior.ralph === true && checkpoint.stage === 'ralph-task-built' && checkpoint.head !== null
+}
+
+/** True when a typed retry source hands forward a Ralph continuation, not a review. */
+export function isRalphContinuationSource(source: BuildRetrySource): boolean {
+  return source.state.checkpoint.stage === 'ralph-task-built'
 }
 
 /** The dispatch-minted link authorizes importing state, never prior receipts. */

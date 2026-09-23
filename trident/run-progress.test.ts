@@ -160,6 +160,14 @@ describe('deriveRunProgress — phase/checkpoint → label', () => {
     expect(p.failure_reason).toBeNull()
     expect(p.brief_alert).toBe(alert)
   })
+
+  test("carries the dispatch's resume sentence, and null for a first dispatch", () => {
+    // RED-mutation: drop `resume_note` from the derived object → the card never
+    // learns whether its retry inherited the dead run's checkpoint.
+    const note = 'Resumed from ralph-task-built at aaaaaaa; Ralph round 4/8 carried.'
+    expect(deriveRunProgress(run({ phase: 'forge-init', resume_note: note }), T0).resume_note).toBe(note)
+    expect(deriveRunProgress(run({ phase: 'forge-init' }), T0).resume_note).toBeNull()
+  })
 })
 
 describe('deriveRunProgress — stall detection', () => {

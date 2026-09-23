@@ -493,15 +493,43 @@ function modeFixture(mode: BuildRunInput['mode'] = 'ralph') {
     regenerated: string
     oldResult: unknown
     advances: number
-  } = { resume: null, probe: null, regenerated: f.snapshot.diff, oldResult: { built: true }, advances: 0 }
+    /** Every ledger commit the driver asked for, with the head it asked on. */
+    commits: { body: string; head: string }[]
+    /** The body the fake branch tip already commits, for the idempotent path. */
+    committedBody: string | null
+    advanced: import('./build-run.ts').BuildSnapshot[]
+    checkpoints: import('./build-run.ts').ResumeCheckpoint[]
+  } = { resume: null, probe: null, regenerated: f.snapshot.diff, oldResult: { built: true }, advances: 0,
+    commits: [], committedBody: null, advanced: [], checkpoints: [] }
   const prepared: { role: string; previous: unknown; planner?: string; findings: readonly string[]; suiteScope?: string }[] = []
   f.deps.prepareWork = async (request, context) => { prepared.push({ role: request.role, ...structuredClone(context) }) }
+  // The ledger commit a real host makes: a NEW head on top of the measured one, and
+  // every later worker trailer describes that head.
+  const ledgerHead = 'c'.repeat(40)
   f.deps.modes = {
     loadResume: async () => state.resume,
-    saveCheckpoint: async () => {},
+    saveCheckpoint: async checkpoint => { f.events.push(`checkpoint:${checkpoint.stage}:${checkpoint.head}`); state.checkpoints.push(structuredClone(checkpoint)) },
     regenerateDiff: async head => { f.events.push(`diff:${head}`); return { kind: 'known', diff: state.regenerated } },
     probePlan: async () => { f.events.push('probe'); return state.probe },
-    advanceRalph: async () => { state.oldResult = null; state.advances++; return { kind: 'allow' } },
+    commitPlan: async ({ body, snapshot }) => {
+      f.events.push('commitPlan')
+      state.commits.push({ body, head: snapshot.head })
+      if (snapshot.head !== f.snapshot.head) return { kind: 'blocked', on: 'Host observation changed since the gate' }
+      if (state.committedBody === body) return { kind: 'known', head: f.snapshot.head }
+      const old = f.snapshot.head
+      state.committedBody = body
+      f.snapshot.head = ledgerHead
+      f.snapshot.diff += 'diff --git a/.trident/ledgers/change.md b/.trident/ledgers/change.md\n'
+      for (const outcome of f.outcomes.values()) {
+        if (outcome.kind === 'completed' && outcome.result && typeof outcome.result === 'object' && 'head' in outcome.result && outcome.result.head === old) outcome.result.head = ledgerHead
+      }
+      return { kind: 'known', head: ledgerHead }
+    },
+    advanceRalph: async value => {
+      f.events.push(`advance:${value.snapshot.head}`)
+      state.advanced.push(structuredClone(value.snapshot))
+      state.oldResult = null; state.advances++; return { kind: 'allow' }
+    },
   }
   const setPlan = (payload: unknown = plan) => f.outcomes.set('run:plan:0', f.completed({ ...f.snapshot, payload }))
   setPlan()
@@ -510,7 +538,7 @@ function modeFixture(mode: BuildRunInput['mode'] = 'ralph') {
     state.resume = { head: f.snapshot.head, stage, round, findings: [], previousFindings: [] }
     return state.resume
   }
-  return { ...f, state, plan, prepared, setPlan, resume, run: () => {
+  return { ...f, state, plan, prepared, setPlan, resume, ledgerHead, run: () => {
     if (f.input.mode === 'ralph') {
       for (const [key, value] of [...f.outcomes]) {
         if (!key.includes(':task:')) f.outcomes.set(key.replace('run:', `run:task:${f.input.ralphRound ?? 0}:`), value)
@@ -608,7 +636,7 @@ test('G037 intermediate task atomically consumes old result before continuation'
   expect(f.state.advances).toBe(1)
   expect(f.cross.calls).toHaveLength(0)
   expect(f.events).not.toContain('publish')
-  const terminal = modeFixture(); terminal.plan.remainingTasks = 0; terminal.setPlan()
+  const terminal = modeFixture(); terminal.plan.implementationPlan = '- [ ] T1: first'; terminal.plan.remainingTasks = 0; terminal.setPlan()
   expect((await terminal.run()).kind).toBe('merged')
   expect(terminal.cross.calls).toHaveLength(1)
   expect(terminal.state.advances).toBe(0)
@@ -622,6 +650,125 @@ for (const kind of ['blocked', 'unknown'] as const) {
     expect(f.cross.calls).toHaveLength(0)
   })
 }
+
+// ── THE TASK LEDGER (spec item a-retry-must-resume-from-the-checkpoint, acceptance 2) ──
+// G026's cheap planner reads the committed ledger at the tip, and nothing in the
+// typed host used to write one, so every continuation re-planned from scratch. The
+// driver now refuses a HANDOFF ledger that disagrees with its counts and commits the
+// ticked ledger at the handoff, BEFORE `advanceRalph` records the head.
+
+test('G025 ledger: a Ralph handoff plan whose unchecked lines disagree with topTask/remainingTasks is no plan', async () => {
+  const ledger = 'Planner returned no execution plan: the task ledger disagrees with topTask/remainingTasks'
+  for (const patch of [
+    { remainingTasks: 2 },                                   // count says three, the ledger has two
+    { implementationPlan: '- [ ] T1: first\n- [ ] T2: second\n- [ ] T3: third' }, // count says two, the ledger has three
+    { topTask: '- [ ] T2: second' },                         // the top task is not the first unchecked line
+    { topTask: 'T2: second' },                               // …with or without its checkbox marker
+    { implementationPlan: '## T1 first\n## T2 second' },     // headings, no boxes: what iteration 1 of this card returned
+  ]) {
+    const f = modeFixture(); f.setPlan({ ...f.plan, ...patch })
+    expect(await f.run(), JSON.stringify(patch)).toMatchObject({ kind: 'blocked', phase: 'plan', on: ledger })
+    expect(f.runner.calls.map(c => c.role)).toEqual(['plan'])
+    expect(f.state.commits).toEqual([])
+  }
+  // Positive control: the same disagreeing payload is not a ledger in pr mode.
+  const pr = modeFixture('pr'); pr.setPlan({ ...pr.plan, remainingTasks: 2 })
+  expect((await pr.run()).kind).toBe('merged')
+  expect(pr.state.commits).toEqual([])
+  // Whitespace, or a missing checkbox marker, around an otherwise verbatim top task
+  // is not a disagreement: both name the ledger's first unchecked task.
+  for (const topTask of ['  - [ ] T1: first  ', 'T1: first']) {
+    const same = modeFixture(); same.setPlan({ ...same.plan, topTask })
+    expect((await same.run()).kind, topTask).toBe('continued')
+    expect(same.state.commits.map(c => c.body)).toEqual(['- [x] T1: first\n- [ ] T2: second'])
+  }
+})
+
+test('G025 ledger: a plan that commits no ledger is never refused for its shape', async () => {
+  // A single-task or final iteration commits nothing and nothing reads its boxes, so a
+  // heading-only ledger or a disagreeing count there builds and merges as it always did.
+  for (const patch of [
+    { implementationPlan: '## T1 first', topTask: 'T1 first', remainingTasks: 0 },
+    { implementationPlan: '- [ ] T1: first\n- [ ] T2: second', remainingTasks: 0 },
+  ]) {
+    const f = modeFixture(); f.setPlan({ ...f.plan, ...patch })
+    expect((await f.run()).kind, JSON.stringify(patch)).toBe('merged')
+    expect(f.state.commits).toEqual([])
+  }
+})
+
+test('Ralph handoff commits the ticked ledger and hands the LEDGER head to advanceRalph', async () => {
+  const f = modeFixture()
+  const outcome = await f.run()
+  expect(outcome).toMatchObject({ kind: 'continued', remainingTasks: 1, snapshot: { head: f.ledgerHead } })
+  // Exactly the top task ticked, rendered from the plan the build executed, on the built head.
+  expect(f.state.commits).toEqual([{ body: '- [x] T1: first\n- [ ] T2: second', head: 'a'.repeat(40) }])
+  expect(f.state.advanced.map(s => s.head)).toEqual([f.ledgerHead])
+  // The checkpoint moves to the ledger commit BEFORE the handoff reads it.
+  // (The two `pending` reservations before plan and build carry no head yet.)
+  const order = f.events.filter(e => e === 'commitPlan' || (e.startsWith('checkpoint:built:') && !e.endsWith(':null')) || e.startsWith('advance:'))
+  expect(order).toEqual([`checkpoint:built:${'a'.repeat(40)}`, 'commitPlan', `checkpoint:built:${f.ledgerHead}`, `advance:${f.ledgerHead}`])
+})
+
+test('Ralph ledger commit that writes nothing keeps the head and makes no second checkpoint', async () => {
+  const f = modeFixture(); f.state.committedBody = '- [x] T1: first\n- [ ] T2: second'
+  expect(await f.run()).toMatchObject({ kind: 'continued', snapshot: { head: 'a'.repeat(40) } })
+  expect(f.state.commits).toHaveLength(1)
+  expect(f.state.advanced.map(s => s.head)).toEqual(['a'.repeat(40)])
+  expect(f.state.checkpoints.filter(c => c.stage === 'built' && c.pending === undefined)).toHaveLength(1)
+})
+
+test('Ralph ledger commit refusal or an unmeasured ledger head never hands off', async () => {
+  for (const reply of [
+    { kind: 'blocked', on: 'Host observation changed since the gate' },
+    { kind: 'unknown', detail: 'Task ledger commit was not confirmed' },
+    { kind: 'known', head: 'd'.repeat(40) },                 // claims a head the branch is not at
+  ] as const) {
+    const f = modeFixture()
+    f.deps.modes!.commitPlan = async () => reply
+    const outcome = await f.run()
+    expect(outcome).toMatchObject(reply.kind === 'blocked' ? { kind: 'blocked', phase: 'build', on: reply.on }
+      : { kind: 'unknown', phase: 'build', detail: reply.kind === 'unknown' ? reply.detail : 'Task ledger commit is not the measured branch head' })
+    expect(f.state.advances).toBe(0)
+    expect(f.state.oldResult).not.toBeNull()
+  }
+})
+
+test('final Ralph iteration never moves the reviewed head with a ledger commit', async () => {
+  // A one-task run: no continuation will read a ledger, so the host adds nothing to
+  // the diff the builder's receipts are bound to.
+  const single = modeFixture(); single.plan.implementationPlan = '- [ ] T1: first'; single.plan.remainingTasks = 0; single.setPlan()
+  expect((await single.run()).kind).toBe('merged')
+  expect(single.state.commits).toEqual([])
+  // The last iteration of a multi-task run, whose diff already carries the handoff
+  // ledger: the reviewed and merged revision is still the BUILDER's head, because
+  // every worker receipt review and publication read is bound to that head.
+  const last = modeFixture(); last.snapshot.diff = 'diff --git a/.trident/ledgers/change.md b/.trident/ledgers/change.md\n+ledger\n'
+  last.plan.implementationPlan = '- [x] T1: first\n- [ ] T2: second'; last.plan.topTask = '- [ ] T2: second'; last.plan.remainingTasks = 0; last.setPlan()
+  expect(await last.run()).toMatchObject({ kind: 'merged', snapshot: { head: 'a'.repeat(40) } })
+  expect(last.state.commits).toEqual([])
+  expect(last.state.advances).toBe(0)
+  expect(last.cross.calls.every(c => c.step_id.includes(':review:'))).toBe(true)
+  expect(last.events).not.toContain('commitPlan')
+})
+
+test('iteration 2 continues from the ledger iteration 1 committed, not a regenerated plan', async () => {
+  // Iteration 1: a fresh plan, one task built, the ticked ledger committed.
+  const first = modeFixture()
+  expect((await first.run()).kind).toBe('continued')
+  const committed = first.state.commits[0]!.body
+  // Iteration 2: the resumed run at the handoff the first one recorded, with the
+  // probe returning exactly the bytes the first iteration committed.
+  const f = modeFixture(); f.resume('ralph-task-built'); f.input.ralphRound = 1
+  f.state.probe = { found: true, body: committed, uncheckedCount: 1,
+    sha256: new Bun.CryptoHasher('sha256').update(committed).digest('hex') }
+  // The planner is a model: its claim is untrusted and here deliberately wrong.
+  f.setPlan({ ...f.plan, implementationPlan: 'a whole new plan', topTask: '- [ ] T9: invented', remainingTasks: 7 })
+  expect((await f.run()).kind).toBe('merged')
+  expect(f.prepared[0]).toMatchObject({ role: 'plan', planner: 'next', committedPlan: { body: committed } })
+  expect(f.prepared.find(p => p.role === 'build')?.previous).toMatchObject({
+    implementationPlan: '- [x] T1: first\n- [ ] T2: second', topTask: '- [ ] T2: second', remainingTasks: 0 })
+})
 
 test('G038 exact full resume head skips build; moved missing and short heads rebuild', async () => {
   for (const head of [null, 'short', 'b'.repeat(40), 'a'.repeat(40)]) {
@@ -880,6 +1027,7 @@ test('G077 final-round design gap stops; a spare round admits replacement', asyn
       loadResume: async () => ({ head: f.snapshot.head, stage: 'built', round, findings: [], previousFindings: [] }),
       regenerateDiff: async () => ({ kind: 'known', diff: f.snapshot.diff }),
       probePlan: async () => null, advanceRalph: async () => ({ kind: 'allow' }),
+      commitPlan: async () => ({ kind: 'unknown', detail: 'pr mode never commits a ledger' }),
       saveCheckpoint: async () => {},
     }
     f.decisions.push(gap)
@@ -935,6 +1083,7 @@ test('resume keeps the host re-plan count and rejects invalid counts', async () 
       loadResume: async () => ({ head: f.snapshot.head, stage: 'built', round: 2, replansUsed: used, findings: [], previousFindings: [] }),
       regenerateDiff: async () => ({ kind: 'known', diff: f.snapshot.diff }),
       probePlan: async () => null, advanceRalph: async () => ({ kind: 'allow' }),
+      commitPlan: async () => ({ kind: 'unknown', detail: 'pr mode never commits a ledger' }),
     }
     f.decisions.push(gap)
     expect(await f.run()).toMatchObject({ kind: 'blocked', on: used === 1 ? expect.stringContaining('already spent') : 'Invalid recorded re-plan count' })
@@ -947,6 +1096,7 @@ test('resumed rejection after re-plan stops before another fix', async () => {
     loadResume: async () => ({ head: f.snapshot.head, stage: 'rejected', round: 2, replansUsed: 1, findings: [{ kind: 'code', actionable: true, text: 'old' }], previousFindings: ['old'] }),
     regenerateDiff: async () => ({ kind: 'known', diff: f.snapshot.diff }),
     probePlan: async () => null, advanceRalph: async () => ({ kind: 'allow' }),
+    commitPlan: async () => ({ kind: 'unknown', detail: 'pr mode never commits a ledger' }),
   }
   expect(await f.run()).toMatchObject({ kind: 'blocked', on: expect.stringContaining('post-re-plan trigger') })
   expect(f.runner.calls).toHaveLength(0)
@@ -1621,6 +1771,9 @@ test('suite scope follows the validated Ralph task and never defers non-Ralph bu
   for (const mode of ['ralph', 'pr'] as const) {
     for (const remainingTasks of [0, 2]) {
       const f = modeFixture(mode)
+      // G025 refuses a ledger whose boxes disagree with its counts, so the fixture's
+      // plan lists exactly remainingTasks + 1 unchecked tasks.
+      f.plan.implementationPlan = ['- [ ] T1: first', '- [ ] T2: second', '- [ ] T3: third'].slice(0, remainingTasks + 1).join('\n')
       f.plan.remainingTasks = remainingTasks
       f.setPlan()
       f.decisions.push({ kind: 'fix', findings: ['repair behavior'] }, { kind: 'approve' })
