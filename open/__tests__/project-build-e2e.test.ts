@@ -288,6 +288,7 @@ interface WorkerWorld {
   reviewVeto?: 'standalone' | 'synthesis'
   numericBuildPr?: boolean
   mutationArgv?: 'bare' | 'valid'
+  commitAttribution?: 'direct' | 'wrapped'
   extraBuildFiles?: Record<string, string>
   run: Runner
   repo: string
@@ -553,8 +554,14 @@ async function performRole(world: WorkerWorld, request: BoundedWorkRequest, brie
     }
     await gitOut(world.run, cwd, ['add', '--', 'NOTES.md',
       ...(commitsPlan && !world.hostLedger ? ['IMPLEMENTATION_PLAN.md'] : [])])
-    await gitOut(world.run, cwd, ['-c', 'user.email=w@example.invalid', '-c', 'user.name=Worker',
-      '-c', 'commit.gpgsign=false', 'commit', '-m', `work: ${request.role} ${request.step_id}`])
+    const commitArgs = ['-m', `work: ${request.role} ${request.step_id}`,
+      ...(world.commitAttribution ? ['-m', 'Claude-Session: fixture\nCo-Authored-By: Fixture <fixture@example.invalid>'] : [])]
+    if (world.commitAttribution === 'wrapped') {
+      expect(brief).toContain('Commit only through the host wrapper with argv')
+      const wrapped = await world.run(['bash', fileURLToPath(new URL('../../trident/commit-with-resolved-head.sh', import.meta.url)), branch, ...commitArgs], cwd)
+      if (!wrapped.ok) throw Error('fixture commit wrapper refused')
+    } else await gitOut(world.run, cwd, ['-c', 'user.email=w@example.invalid', '-c', 'user.name=Worker',
+      '-c', 'commit.gpgsign=false', 'commit', ...commitArgs])
     // Measure the produced revision from the only base this worker was given.
     //
     // THE BASE IS THE PRE-DISPATCH HEAD. On the FIRST build that happens to be the
@@ -1035,6 +1042,76 @@ async function drive(f: Awaited<ReturnType<typeof fixture>>): Promise<ProjectBui
   const host = await createProjectBuildHost(options)
   return host.run({ mode: 'implementation', start: 'fresh' }, new AbortController().signal)
 }
+
+for (const attribution of ['direct', 'wrapped'] as const) for (const fix of [false, true])
+test(`host commit recovery merges unattended with ${attribution} attribution, fix=${fix}`, async () => {
+  const f = await fixture({ blockersByRound: fix ? [0, 1] : [] })
+  f.world.commitAttribution = attribution
+  // Make the consuming mutation reader and prover run on the replacement OID;
+  // a documentation-only exemption would miss a broken artifact projection.
+  f.world.mutationArgv = 'valid'
+  const outcome = await drive(f)
+  expect(outcome.kind, why(f, outcome)).toBe('merged')
+  expect(f.github.prs[0]!.state).toBe('MERGED')
+  const receipts = f.store.stageEvents(f.row.id).filter(event => event.stage === 'build-commit-recovery')
+  expect(receipts).toHaveLength(attribution === 'direct' ? (fix ? 2 : 1) : 0)
+  const publicHead = await gitOut(spawnCapture, f.origin, ['rev-parse', 'refs/heads/main'])
+  const messages = await gitOut(spawnCapture, f.origin, ['log', '--format=%B', `${f.baseSha}..${publicHead}`])
+  expect(messages).not.toContain('Claude-Session:')
+  expect(messages).toContain('Co-Authored-By: Fixture')
+  for (const receipt of receipts) {
+    const value = JSON.parse(receipt.meta!)
+    const role = value.step.includes(':fix:') ? 'fix' : 'build'
+    const original = await readFile(join(f.context.stateRoot, f.row.id, `${role}.result`), 'utf8')
+    expect(createHash('sha256').update(original).digest('hex')).toBe(value.artifact)
+    expect(JSON.parse(original).result.head).toBe(value.from)
+    expect(JSON.parse(original).result.payload.commitSha).toBe(value.from)
+    expect(value.to).not.toBe(value.from)
+    const before = await gitOut(spawnCapture, f.repo, ['cat-file', 'commit', value.from])
+    const after = await gitOut(spawnCapture, f.repo, ['cat-file', 'commit', value.to])
+    expect(before).toContain('Claude-Session:')
+    expect(after).not.toContain('Claude-Session:')
+    expect(after.split('\n\n')[0]).toBe(before.split('\n\n')[0])
+  }
+}, 120_000)
+
+test('historical carrier checkpoints remain refused on resume and are not adopted by an unpublished PR retry', async () => {
+  const task = 'Write a small documented behavior and verify the completed change'
+  const f = await fixture({ dispatchTask: task })
+  f.world.commitAttribution = 'direct'
+  const priorHost = await createProjectBuildHost(await f.prepare())
+  // Reproduce the old host, whose completed builder checkpoint preceded G166
+  // and which had no host recovery effect at the worker boundary.
+  delete priorHost.deps.recoverBuildCommit
+  const first = await buildRun({ mode: 'implementation', start: 'fresh', run_id: f.row.id, workers: priorHost.workers,
+    repl_provider: 'anthropic', merge_mode: 'pr' }, priorHost.deps, new AbortController().signal)
+  expect(first).toMatchObject({ kind: 'blocked', phase: 'publish', on: expect.stringContaining('Claude-Session trailer') })
+  const checkpoint = lastCheckpoint(f)
+  expect(checkpoint).toMatchObject({ stage: 'built', round: 1 })
+  expect(checkpoint.pending).toBeUndefined()
+  f.world.dispatches.length = 0
+  const next = await createProjectBuildHost(await f.prepare())
+  const retried = await buildRun({ mode: 'implementation', start: 'resume', run_id: f.row.id, workers: next.workers,
+    repl_provider: 'anthropic', merge_mode: 'pr' }, next.deps, new AbortController().signal)
+  expect(retried).toMatchObject({ kind: 'blocked', phase: 'publish', on: expect.stringContaining('Claude-Session trailer') })
+  expect(f.world.dispatches).toEqual([])
+  expect(f.github.prs).toEqual([])
+  const prior = f.store.get(f.row.id)!
+  expect(await gitOut(spawnCapture, f.repo, ['rev-parse', `refs/heads/${prior.branch}`])).toBe(String(checkpoint.head))
+  await f.store.update(prior.id, { phase: 'failed', worktree: null })
+  const dispatched = await dispatchBoardBoundBuild({ task, board_item_id: 'retry-card' }, {
+    store: f.store, project_slug: 'project', repo_path: f.repo,
+    board: { get: () => ({ id: 'retry-card', title: task, design_doc_ref: null, linked_run_id: prior.id }), attachRun: async () => {} },
+    resolveBuildRepo: async () => f.repo, resolveMergeMode: async () => 'pr', hostRunner: f.context.runHost,
+  })
+  expect(dispatched.ok, JSON.stringify(dispatched)).toBe(true)
+  if (!dispatched.ok) return
+  // PR retry admission proves the remote tip, which G166 never published.
+  // This is a fresh build request, not authorization to repair the old object.
+  expect(dispatched.run.inner_checkpoint_head).toBeNull()
+  expect(f.store.stageEvents(dispatched.run.id).some(event => event.stage === 'build-retry-source')).toBe(false)
+  expect(f.store.stageEvents(dispatched.run.id).some(event => event.stage === 'build-commit-recovery')).toBe(false)
+}, 120_000)
 
 for (const mergeMode of ['local', 'pr'] as const) for (const carrier of [false, true]) {
   test(`G166 consuming pre-merge ${mergeMode}: own carrier=${carrier}, public-base carrier excluded`, async () => {

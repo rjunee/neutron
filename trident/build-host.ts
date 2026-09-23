@@ -29,7 +29,7 @@ export interface BuildHostOptions {
   replProvider: Provider
   workers: Record<Role, { provider: Provider; request: Workers[Role]['request'] }>
   /** Host observations and effects, never worker assertions or gate overrides. */
-  effects: Pick<BuildRunDeps, 'prepareWork' | 'measure' | 'publish' | 'merge'>
+  effects: Pick<BuildRunDeps, 'prepareWork' | 'measure' | 'publish' | 'merge' | 'recoverBuildCommit'>
   leak: Omit<Parameters<typeof runLeakGatePreflight>[0], 'head' | 'fixer' | 'max_fix_attempts'>
   mutation: Omit<MutationGateInput, 'expected_head' | 'claim'> & {
     run: MutationGateInput['run'] & { max_rounds?: number | undefined }
