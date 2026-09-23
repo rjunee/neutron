@@ -1,5 +1,5 @@
 import { describe, expect, test } from 'bun:test'
-import { chmodSync, mkdtempSync, readFileSync, writeFileSync } from 'node:fs'
+import { chmodSync, mkdtempSync, readFileSync, readdirSync, writeFileSync } from 'node:fs'
 import { tmpdir } from 'node:os'
 import { join } from 'node:path'
 import { buildRun, type BuildSnapshot, type BuildRunDeps } from '@neutronai/trident/build-run.ts'
@@ -25,7 +25,7 @@ function fixture(change: Partial<Record<'HEAD' | 'DIFF' | 'PR', string | null>> 
   writeFileSync(join(dir, 'source.trailer'), Object.entries(fields).map(([key, value]) => `NEUTRON_CODEX_BUILD_${key}=${value}\n`).join('') + extra)
   // A tempting host snapshot is available in the brief, but is never a claim.
   writeFileSync(join(dir, 'brief'), JSON.stringify({ snapshot: measured }))
-  writeFileSync(script, `#!/bin/bash\nenv > ${JSON.stringify(seen)}\nprintf '%s\\n' "$NEUTRON_CODEX_THREAD_ID" >> ${JSON.stringify(threads)}\necho 'stdout-is-not-the-result'\ncat source.trailer > "$NEUTRON_CODEX_BUILD_TRAILER_FILE"\n`)
+  writeFileSync(script, `#!/bin/bash\nenv > ${JSON.stringify(seen)}\nprintf '%s\\n' "$NEUTRON_CODEX_THREAD_ID" >> ${JSON.stringify(threads)}\nprintf '{"type":"thread.started","thread_id":"%s"}\\n' "\${NEUTRON_CODEX_THREAD_ID:-observed-first}"\necho '{"type":"turn.completed","usage":{"input_tokens":23,"output_tokens":7,"cached_input_tokens":11}}'\ncat source.trailer > "$NEUTRON_CODEX_BUILD_TRAILER_FILE"\n`)
   chmodSync(script, 0o755)
   const request = (over: Partial<BoundedWorkRequest> = {}): BoundedWorkRequest => ({
     run_id: 'run-1', step_id: 'step-1', role: 'build', model_id: 'gpt-test', effort: 'high',
@@ -96,12 +96,79 @@ describe('Codex headless WorkerRunner', () => {
   test('a second call carries the same durable thread id', async () => {
     const f = fixture()
     const runner = createCodexHeadlessRunner({ buildScript: f.script, probe: { ok: true } })
-    const threaded = f.request({ thread: { id: 'thread-42' } })
-    const first = await runner.run(threaded, 'headless', new AbortController().signal)
-    const second = await runner.run({ ...threaded, step_id: 'step-2' }, 'headless', new AbortController().signal)
-    expect(first.kind === 'completed' && first.thread_id).toBe('thread-42')
-    expect(second.kind === 'completed' && second.thread_id).toBe('thread-42')
-    expect(readFileSync(f.threads, 'utf8')).toBe('thread-42\nthread-42\n')
+    const first = await runner.run(f.request(), 'headless', new AbortController().signal)
+    expect(first.kind === 'completed' && first.thread_id).toBe('observed-first')
+    if (first.kind !== 'completed' || !first.thread_id) throw new Error('missing observed thread')
+    const restarted = createCodexHeadlessRunner({ buildScript: f.script, probe: { ok: true } })
+    const second = await restarted.run(f.request({ step_id: 'step-2', thread: { id: first.thread_id } }), 'headless', new AbortController().signal)
+    expect(second.kind === 'completed' && second.thread_id).toBe('observed-first')
+    expect(readFileSync(f.threads, 'utf8')).toBe('\nobserved-first\n')
+    expect(second).toMatchObject({ usage: { input_tokens: 23, output_tokens: 7, cache_read_input_tokens: 11 }, model_reported: null })
+  })
+
+  test('a foreign provider thread cannot be relabelled with the requested id', async () => {
+    const f = fixture()
+    writeFileSync(f.script, readFileSync(f.script, 'utf8').replace('${NEUTRON_CODEX_THREAD_ID:-observed-first}', 'newest-decoy'))
+    const runner = createCodexHeadlessRunner({ buildScript: f.script, probe: { ok: true } })
+    expect(await runner.run(f.request({ thread: { id: 'owned-thread' } }), 'headless', new AbortController().signal))
+      .toMatchObject({ kind: 'unknown', detail: expect.stringContaining('matching thread') })
+  })
+
+  test('a failed process cannot leave an acceptable receipt on recovery', async () => {
+    const f = fixture()
+    writeFileSync(f.script, readFileSync(f.script, 'utf8') + '\nexit 5\n')
+    const runner = createCodexHeadlessRunner({ buildScript: f.script, probe: { ok: true } })
+    expect((await runner.run(f.request(), 'headless', new AbortController().signal)).kind).toBe('failed')
+    expect(await runner.run(f.request(), 'headless', new AbortController().signal))
+      .toMatchObject({ kind: 'unknown', detail: expect.stringContaining('no committed receipt') })
+    expect(readFileSync(f.threads, 'utf8')).toBe('\n')
+  })
+
+  test('restart reuses the observed receipt even after the mutable role slot changes', async () => {
+    const f = fixture()
+    const runner = createCodexHeadlessRunner({ buildScript: f.script, probe: { ok: true } })
+    const first = await runner.run(f.request(), 'headless', new AbortController().signal)
+    writeFileSync(f.request().result.path, 'foreign-role-slot')
+    const restarted = createCodexHeadlessRunner({ buildScript: f.script, probe: { ok: true } })
+    expect(await restarted.run(f.request(), 'headless', new AbortController().signal)).toEqual(first)
+    expect(readFileSync(f.threads, 'utf8')).toBe('\n')
+  })
+
+  test('restart recovers after transport filenames and remaining budget change', async () => {
+    const f = fixture()
+    const request = f.request()
+    const runner = createCodexHeadlessRunner({ buildScript: f.script, probe: { ok: true } })
+    const first = await runner.run(request, 'headless', new AbortController().signal)
+    expect(first.kind).toBe('completed')
+    const restarted = createCodexHeadlessRunner({ buildScript: f.script, probe: { ok: true } })
+    const relocated = { ...request,
+      budget: { wall_ms: 2_000 },
+      brief: { ...request.brief, path: join(request.cwd, 'replacement-brief') },
+      result: { ...request.result, path: join(request.cwd, 'replacement-result') },
+    }
+    expect(await restarted.run(relocated, 'headless', new AbortController().signal)).toEqual(first)
+    expect(readFileSync(f.threads, 'utf8')).toBe('\n')
+    // A different semantic request at the same durable coordinates is refused.
+    for (const changed of [
+      { ...relocated, model_id: 'other-model' },
+      { ...relocated, brief: { ...relocated.brief, integrity: '8:changed' } },
+      { ...relocated, network: true },
+    ]) expect((await restarted.run(changed, 'headless', new AbortController().signal)).kind).toBe('unknown')
+    expect(readFileSync(f.threads, 'utf8')).toBe('\n')
+  })
+
+  test('corrupt observation and changed account identity cannot reuse a receipt', async () => {
+    const f = fixture()
+    const runner = createCodexHeadlessRunner({ buildScript: f.script, probe: { ok: true }, env: { PATH: process.env.PATH, CODEX_HOME: 'seat-one' } })
+    expect((await runner.run(f.request(), 'headless', new AbortController().signal)).kind).toBe('completed')
+    const other = createCodexHeadlessRunner({ buildScript: f.script, probe: { ok: true }, env: { PATH: process.env.PATH, CODEX_HOME: 'seat-two' } })
+    expect((await other.run(f.request(), 'headless', new AbortController().signal)).kind).toBe('unknown')
+    const receipt = join(f.request().cwd, readdirSync(f.request().cwd).find(name => name.endsWith('.receipt'))!)
+    const bytes = JSON.parse(readFileSync(receipt, 'utf8'))
+    bytes.observation.usage.input_tokens = 'invented'
+    writeFileSync(receipt, JSON.stringify(bytes))
+    expect((await runner.run(f.request(), 'headless', new AbortController().signal)).kind).toBe('unknown')
+    expect(readFileSync(f.threads, 'utf8')).toBe('\n')
   })
 
   test('unsupported placement and roles are refused, never failed', async () => {

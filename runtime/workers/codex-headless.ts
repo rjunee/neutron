@@ -1,5 +1,5 @@
 import { spawn, spawnSync, type ChildProcess } from 'node:child_process'
-import { readFile } from 'node:fs/promises'
+import { readFile, writeFile, rename } from 'node:fs/promises'
 import { createHash } from 'node:crypto'
 import { dirname, join, resolve } from 'node:path'
 import type {
@@ -14,6 +14,7 @@ import type {
 } from '../bounded-work.ts'
 import { unknownCause } from '../refusal-cause.ts'
 import { reserveTrailerSlot } from './trailer-slot.ts'
+import { codexBuildObservation, isCodexBuildObservation, type CodexBuildObservation } from './codex-build-observation.ts'
 import { codexWorkerEnv, createCodexReviewTransport, type CodexReviewContract } from './codex-review.ts'
 
 type Probe = { ok: true } | { ok: false; reason: RefusalReason; detail: string }
@@ -91,7 +92,7 @@ function waitFor(child: ChildProcess, signal: AbortSignal): Promise<{ code: numb
       signal.removeEventListener('abort', abort)
       resolveResult({ code: null, killed: aborted })
     })
-    child.once('exit', (code) => {
+    child.once('close', (code) => {
       signal.removeEventListener('abort', abort)
       resolveResult({ code, killed: aborted })
     })
@@ -134,6 +135,8 @@ export function createCodexHeadlessRunner(options: CodexHeadlessRunnerOptions = 
       const refusal = unsupported(req.role, placement)
       if (refusal) return { kind: 'refused', reason: refusal.reason }
       if (req.role === 'review' || req.role === 'synthesis') return review(req, signal)
+      if (req.thread && !/^[a-zA-Z0-9][a-zA-Z0-9_-]*$/.test(req.thread.id)) return { kind: 'refused', reason: 'cli-contract' }
+      if (signal.aborted) return { kind: 'failed', class: 'killed', detail: 'Codex worker was cancelled before dispatch' }
 
       // Same atomic reservation the in-repl runners use. It is what separates a
       // FIRST dispatch of this step from a RESUME after a gateway replacement, and
@@ -142,9 +145,24 @@ export function createCodexHeadlessRunner(options: CodexHeadlessRunnerOptions = 
       // so destroying it would replay work whose outcome was already known.
       const key = createHash('sha256').update(JSON.stringify([req.run_id, req.step_id])).digest('hex')
       const reservation = join(dirname(req.result.path), `codex-headless-step-${key}.json`)
-      const identity = JSON.stringify(req)
+      // The reservation directory is the durable run state. A replacement host
+      // may choose new brief/result filenames or a different remaining wait
+      // budget there; those are transport coordinates, not a new paid attempt.
+      // Retain the brief's bytes receipt and execution policy: changed work must
+      // never inherit the previous completion merely because run/step match.
+      const identity = JSON.stringify({
+        run: req.run_id, step: req.step_id, role: req.role, provider: 'openai-codex',
+        model: req.model_id, effort: req.effort, thread: req.thread?.id ?? null,
+        credentialHome: baseEnv.CODEX_HOME ?? null, cwd: resolve(req.cwd),
+        briefIntegrity: req.brief.integrity, schema: req.result.schema,
+        writable: req.writable, network: req.network, tools: req.tools,
+        needsApproval: req.needs_approval_decision,
+      })
+      const receiptPath = `${reservation}.receipt`
       const held = await reserveTrailerSlot(reservation, identity, req.result.path)
       if (held.kind === 'unknown') return { kind: 'unknown', detail: held.detail }
+      let observation: CodexBuildObservation
+      let trailerText: string
       if (held.kind === 'dispatch') {
         const effort = req.effort === null ? '' : CLI_EFFORTS[req.effort]
         const env = codexWorkerEnv({
@@ -157,7 +175,10 @@ export function createCodexHeadlessRunner(options: CodexHeadlessRunnerOptions = 
           NEUTRON_CODEX_BUILD_TRAILER_FILE: req.result.path,
           NEUTRON_CODEX_THREAD_ID: req.thread?.id ?? '',
         })
-        const child = spawn('/bin/bash', [buildScript], { cwd: req.cwd, env, stdio: 'ignore' })
+        const events = codexBuildObservation(req.thread?.id ?? null)
+        const child = spawn('/bin/bash', [buildScript], { cwd: req.cwd, env, stdio: ['ignore', 'pipe', 'ignore'] })
+        child.stdout!.setEncoding('utf8')
+        child.stdout!.on('data', (chunk: string) => events.push(chunk))
         live.set(req.step_id, child)
         let timedOut = false
         const timer = setTimeout(() => {
@@ -174,21 +195,40 @@ export function createCodexHeadlessRunner(options: CodexHeadlessRunnerOptions = 
           if (settled.code === 3) return { kind: 'refused', reason: 'cli-contract' }
           return { kind: 'failed', class: 'infra', detail: `Codex wrapper exited ${settled.code ?? 'without status'}` }
         }
-      }
-      let trailerText: string
-      try {
-        trailerText = await readFile(req.result.path, 'utf8')
-      } catch (error) {
-        return { kind: 'unknown', detail: unknownCause('Codex wrapper exited successfully without a readable trailer', error, req.run_id) }
+        try {
+          trailerText = await readFile(req.result.path, 'utf8')
+        } catch (error) {
+          return { kind: 'unknown', detail: unknownCause('Codex wrapper exited successfully without a readable trailer', error, req.run_id) }
+        }
+        const observed = events.finish()
+        if (!observed) return { kind: 'unknown', detail: 'Codex build lacks a valid completed turn and matching thread observation' }
+        observation = observed
+        try {
+          await writeFile(`${receiptPath}.tmp`, JSON.stringify({ identity, trailerText, observation }), { flag: 'wx', mode: 0o600 })
+          await rename(`${receiptPath}.tmp`, receiptPath)
+        } catch { return { kind: 'unknown', detail: 'Codex build observation could not be committed' } }
+      } else {
+        // Recovery consumes the original receipt, never the role's mutable slot or
+        // a newly requested ID. An uncertain dispatch must not buy another turn.
+        try {
+          const receipt = JSON.parse(await readFile(receiptPath, 'utf8'))
+          if (receipt.identity !== identity || typeof receipt.trailerText !== 'string'
+            || !isCodexBuildObservation(receipt.observation)
+            || (req.thread && receipt.observation.thread_id !== req.thread.id)) {
+            return { kind: 'unknown', detail: 'Codex build receipt identity mismatched' }
+          }
+          trailerText = receipt.trailerText
+          observation = receipt.observation
+        } catch { return { kind: 'unknown', detail: 'Codex build has no committed receipt; dispatch will not be replayed' } }
       }
       const mapped = await mapTrailer(trailerText, req.cwd, req.run_id)
       if (mapped.kind === 'unknown') return mapped
       return {
         kind: 'completed',
         result: mapped.result,
-        usage: { input_tokens: 0, output_tokens: 0 },
-        model_reported: req.model_id,
-        thread_id: req.thread?.id ?? null,
+        usage: observation.usage,
+        model_reported: observation.model_reported,
+        thread_id: observation.thread_id,
       }
     },
     async liveness(handle: WorkerHandle) {

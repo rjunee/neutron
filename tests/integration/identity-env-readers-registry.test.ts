@@ -245,6 +245,10 @@ const KNOWN_READERS: Readonly<Record<string, string>> = {
     'Broad project-id validation regex matches an identity-name candidate; registered conservatively. No identity env access.',
   'runtime/adapters/codex-cli/persistent/project-owner-helper-registry.ts':
     'Broad client-id validation regex matches an identity-name candidate; registered conservatively. No identity env access.',
+  'runtime/workers/codex-build-observation.ts':
+    'Broad thread-id validation regexes in isCodexBuildObservation and codexBuildObservation match identity-name candidates; registered conservatively. No env access. Provider observation behavior is pinned in runtime/workers/codex-build-observation.test.ts.',
+  'runtime/workers/codex-headless.ts':
+    'Broad requested-thread-id validation regex matches identity-name candidates; registered conservatively. No identity-home resolution: the added CODEX_HOME read binds a receipt to its credential-home selector, not NEUTRON_HOME/OWNER_HOME/NEUTRON_DB_PATH. Thread and changed-credential-home behavior is pinned in runtime/workers/codex-headless.test.ts.',
   'agent-dispatch/command.ts':
     'Broad regex literal at agent-dispatch/command.ts:71 matches an identity-name candidate; registered conservatively, without claiming an env read or trimming behavior.',
   'app/app/projects/[id]/cores/dtc-analytics.tsx':
