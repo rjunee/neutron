@@ -79,7 +79,7 @@ import { CodexOwnerBindings } from '../wiring/codex-owner-binding.ts'
 import { restrictedOwnerFixture } from './fixtures/codex-owner-review.ts'
 import { PROJECT_DEPENDENCIES_TIMEOUT_MS } from '../wiring/project-build-dependencies.ts'
 import { PROJECT_SNAPSHOT_SCHEMA } from '../wiring/project-build-snapshot.ts'
-import { EfficiencyTrace, EFFICIENCY_SCENARIOS, assertEfficient, type EfficiencyReport, type EfficiencyScenario } from './fixtures/trident-efficiency-benchmark.ts'
+import { EfficiencyTrace, EFFICIENCY_SCENARIOS, assertEfficient, compareEfficiency, type EfficiencyReport, type EfficiencyScenario } from './fixtures/trident-efficiency-benchmark.ts'
 import { ReplSession } from '@neutronai/runtime/adapters/claude-code/persistent/repl-session.ts'
 
 const cleanups: (() => void | Promise<void>)[] = []
@@ -2597,14 +2597,23 @@ async function efficiencyBenchmark(scenario: EfficiencyScenario, scheduling: Eff
   // second project's acquisition cannot select the predecessor's granted roots.
   pool.delete(f.key)
   supervisedBySessionKey.delete(f.key)
-  return { timing_unit: 'scripted-workload-unit', barrier_complete: !barrierExpired, scenario, scheduling, counts, decisions: trace.decisions, intervals: trace.intervals, outcomes,
+  const models = f.context.attempts.list(f.row.id).map(attempt => ({ role: attempt.role, seat: attempt.review_seat,
+    provider: attempt.provider, requested: attempt.requested_model, resolved: attempt.resolved_model, placement: attempt.placement }))
+  return { scope: { fixture: 'project-build-e2e-scripted-v1', task: f.row.task,
+    gates: { observed: [...new Set(trace.decisions.map(decision => decision.split(':')[0]!))].sort(),
+      suite_strategy: f.input.test_strategy ?? '', intermediate_strategy: f.input.test_strategy_intermediate ?? null,
+      max_rounds: f.input.max_rounds, merge_mode: 'pr' },
+    models: [...new Set(models.map(model => JSON.stringify(model)))].sort().map(model => JSON.parse(model)) },
+    timing_unit: 'scripted-workload-unit', barrier_complete: !barrierExpired, scenario, scheduling, counts, decisions: trace.decisions, intervals: trace.intervals, outcomes,
     usage: { tokens: null, cost: null, source: 'scripted-provider-no-usage' } }
 }
 
 test.each([...EFFICIENCY_SCENARIOS])('deterministic efficiency benchmark: %s', async scenario => {
   const before = await efficiencyBenchmark(scenario, 'serial-baseline')
   const after = await efficiencyBenchmark(scenario, 'concurrent')
-  if (process.env.TRIDENT_EFFICIENCY_REPORT === '1') console.log(JSON.stringify({ before, after }))
+  const comparison = compareEfficiency(before, after)
+  if (process.env.TRIDENT_EFFICIENCY_REPORT === '1') console.log(JSON.stringify({ before, after, comparison }))
+  expect(comparison).toEqual({ kind: 'matched' })
   assertEfficient(after)
   expect(() => assertEfficient(before)).toThrow('Independent reviews serialized')
   expect(after.decisions).toEqual(before.decisions)
