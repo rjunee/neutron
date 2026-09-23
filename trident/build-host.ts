@@ -15,7 +15,7 @@ import { unknownCause } from './gates/unknown-cause.ts'
 import { observeReviewPanel, decideReviewPanel, type ReviewSource } from './gates/review-panel.ts'
 import { ciReadinessForHead, type CiRunObservation } from './ci-readiness.ts'
 import { runLeakGatePreflight } from './leak-preflight.ts'
-import { assessMergeDiff, localMergeReadiness } from './merge.ts'
+import { assessMergeDiff, diffBaseRef, localMergeReadiness, refResolves } from './merge.ts'
 import { mutationFailureSummary, runMutationProofGate, type MutationGateInput } from './mutation-prover.ts'
 
 type Workers = BuildRunInput['workers']
@@ -174,7 +174,12 @@ export function createBuildHost(options: BuildHostOptions): { deps: BuildRunDeps
     reviewGate: async (payload, observation, snapshot, round, replansUsed, recordProgress) => decideReviewPanel(payload, observation, snapshot, round, options.mutation.run.id, replansUsed, recordProgress),
     async publishGate(snapshot, mergeMode) {
       const claim = await options.mutation.readClaim(snapshot)
-      const proof = await runMutationProofGate({ ...options.mutation, claim, expected_head: snapshot.head })
+      // The launch pin owns the changed-file range. A stale local base branch
+      // includes unrelated upstream production changes in the mutation requirement.
+      // Keep the branch name for publication readiness, which checks the PR base.
+      const baseRef = await diffBaseRef(options.mutation.base_branch, options.leak.base_sha,
+        ref => refResolves(options.mutation.run_host, options.mutation.run.repo_path, ref))
+      const proof = await runMutationProofGate({ ...options.mutation, base_branch: baseRef, claim, expected_head: snapshot.head })
       if (!proof.ok) return proof.repair
         ? { kind: 'repair-nomination', finding: `Mutation nomination is invalid: ${proof.repair.detail}. Supply a corrected nomination for the repaired commit; the mutation prover must still pass.` }
         : { kind: 'blocked', on: [proof.reason, mutationFailureSummary(proof.evidence)].filter(Boolean).join('; ') }
