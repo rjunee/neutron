@@ -851,7 +851,7 @@ async function claudeOptionsFor(
 }
 
 export interface LlmCallSubstrate extends Substrate {
-  /** Reconcile exact legacy helper keys, then retire only verified idle survivors. */
+  /** Retire already-owned exact helper keys; preserve registry-only survivors. */
   retireExistingHelpers(projectIds?: readonly (string | undefined)[]): Promise<ReadonlyArray<{ sessionKey: string; outcome: HelperRetirement }>>
   /** Stop admission and retire only the Claude keys this instance actually served. */
   retire(): Promise<ReadonlyArray<{ sessionKey: string; outcome: HelperRetirement }>>
@@ -916,15 +916,14 @@ export function buildLlmCallSubstrate(
           }
           const sessionKey = poolKeyFor(identity)
           try {
-            if (existingClaudeRepl(identity) === undefined) continue
-            const resolved = await resolveCredentialAuthEnv({
-              ...(input.oauthRefresh === undefined ? {} : { oauthRefresh: input.oauthRefresh }),
-              ...(input.owner_handle === undefined ? {} : { owner_handle: input.owner_handle }),
-            }, credentialPool!, credential)
-            const opts = await claudeOptionsFor(input, resolved, () => projectId)
-            delete opts.ephemeral
-            await reconcileExistingClaudeRepl(opts)
-            const outcome = await retirePersistentRepl(sessionKey)
+            const existing = existingClaudeRepl(identity)
+            if (existing === undefined) continue
+            // Ordinary boot adoption can close a pane when health, evidence or
+            // host compatibility fails. Cleanup must never use it to acquire a
+            // survivor: only an identity already owned by this process is eligible.
+            const outcome = await retirePersistentRepl(sessionKey, {
+              registryPath: existing.registryPath, requireFreshIdle: true,
+            })
             outcomes.push({ sessionKey, outcome: outcome === 'absent' ? 'refused' : outcome })
           } catch {
             outcomes.push({ sessionKey, outcome: 'refused' })

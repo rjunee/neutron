@@ -24,30 +24,40 @@ both before and after asynchronous probing, so intentional retirement neither
 respawns the helper nor reports it as a crash.
 
 Legacy helper discovery derives keys from this owner's authorized credential
-identities and known project/General scopes. Existing adoption verifies the pane
-identity and credential before retirement. An adopted helper additionally needs
-a fresh rendered empty input prompt without the working indicator. Unknown,
-busy, foreign-owned or unreadable candidates are preserved with a logged
-refusal. This is not a prefix-based pane sweep, and historical credentials or
-deleted project scopes are not silently granted migration authority.
+identities and known project/General scopes. It does not call ordinary boot
+adoption: that path can terminate a child on failed health or reuse evidence
+before establishing idleness. Cleanup can retire only an identity already owned
+by this process in the same registry, with no active or queued turn and a fresh
+rendered empty input prompt without the working indicator. Registry-only,
+unknown, busy, foreign-owned or unreadable candidates are preserved with a
+logged refusal; refusal before termination restores any temporary admission fence.
+Registry generation, session and claim are checked again before termination.
+This is not a prefix-based pane sweep, and historical credentials or deleted
+project scopes are not silently granted migration authority. In particular,
+restart does not automatically remove unowned legacy helper panes: safe
+acquisition of those survivors is not delivered by this change.
 
-This is the helper-lifetime slice of the 2026-09-23 decision and
-`docs/spec-items/project-herdr-workspaces.md`. It does not claim that project
-workspace placement or idle project sleeping ships here. No production pane was
-closed during development.
+This implements the owner's requested on-demand helper lifetime. It does not
+depend on the separately proposed workspace-placement decision/spec, or claim
+that project workspace placement or idle project sleeping ships here. No
+production pane was closed during development.
 
-Validation: 121 tests passed across the wiring, background-chat isolation,
-provider routing, helper retirement and consuming Open reminder suites. The
+Validation: 135 tests passed (630 assertions) across the wiring, background-chat
+isolation, provider routing, helper retirement, legacy cleanup and consuming
+Open reminder suites. The
 Open integration test boots both fresh and completed onboarding, fires through
 the real reminder dispatcher and persistent adapter into a synthetic local
 PTY/dev-channel peer, observes child exit, then proves the next fire creates a
 new worker. Retirement tests cover active plus queued turns, successful and
 refused identity checks, cancellation isolation, adopted-idle observation and
-an in-flight watchdog probe.
+an in-flight watchdog probe. Direct factory cleanup tests forbid ordinary
+adoption, preserve registry-only survivors regardless of health/evidence/host
+metadata, and prove both owned-idle retirement and refusal for active, unknown,
+unreadable or changed-identity helpers while preserving a live-chat control.
 
 Both counterfactual mutations failed the consuming integration test in both
 boot states: changing nudge workers back to warm failed the child-exit check;
 disabling the nudge substrate failed the worker-spawn check. Both mutations
-were restored and the 121-test run passed afterward. Root and Trident
-typechecks passed. These are synthetic-process integration checks, not a live
-Claude subscription or deployed-pane proof.
+were restored. Reintroducing ordinary adoption in cleanup also failed its direct
+factory guard. Root and Trident typechecks passed. These are synthetic-process
+integration checks, not a live Claude subscription or deployed-pane proof.

@@ -38,7 +38,7 @@ import { CONTEXT_RESET_COMMAND, DEFAULT_IDLE_MAX_MS, DEFAULT_IDLE_QUIET_MS, DEFA
 import type { ActiveTurn, PersistentReplSubstrateOptions, RecoveredReply } from './types.ts'
 import { ReplSession, terminateChild, unlinkSessionConfigs } from './repl-session.ts'
 import { AUTH_FAILURE_DETECTOR_ID } from './auth-failure-signature.ts'
-import { getOrSpawnSession, injectMessage, shutdownQuarantinedChildren, spawnWithChannelWedgeRespawn, waitForReplIdle } from './spawn.ts'
+import { gateFor, getOrSpawnSession, injectMessage, shutdownQuarantinedChildren, spawnWithChannelWedgeRespawn, waitForReplIdle } from './spawn.ts'
 import { fireAndForget } from '@neutronai/logger/fire-and-forget.ts'
 
 const activeTurnRoutes = new Map<string, { session: ReplSession; turn: ActiveTurn }>()
@@ -392,33 +392,61 @@ export type HelperRetirement = 'absent' | 'deferred' | 'retired' | 'refused'
  * the turn driver's finally retries once its last committed dispatch has left.
  * Transcripts are retained. An unverified survivor is an explicit refusal.
  */
-export async function retirePersistentRepl(sessionKey: string): Promise<HelperRetirement> {
+export async function retirePersistentRepl(
+  sessionKey: string,
+  existing?: { registryPath: string; requireFreshIdle: true },
+): Promise<HelperRetirement> {
+  // Registry discovery is not ownership. Legacy cleanup cannot acquire, probe,
+  // adopt or close a registry-only survivor. Nor may it borrow a same-key pool
+  // entry belonging to another registry. Refuse before any mutable marker.
+  if (existing !== undefined && (
+    !pool.has(sessionKey) ||
+    supervisedBySessionKey.get(sessionKey)?.replRegistryPath !== existing.registryPath ||
+    pendingSpawns.has(sessionKey) || (committedDispatches.get(sessionKey) ?? 0) > 0
+  )) return 'refused'
+  const alreadyRetiring = retiringSessionKeys.has(sessionKey)
   retiringSessionKeys.add(sessionKey)
-  const gate = respawnGates.get(sessionKey)
-  if (gate !== undefined && !gate.claim()) return 'refused'
+  const gate = gateFor(sessionKey)
+  if (!gate.claim()) {
+    if (existing !== undefined && !alreadyRetiring) retiringSessionKeys.delete(sessionKey)
+    return 'refused'
+  }
+  const attempt = { beganTermination: false }
+  let outcome: HelperRetirement = 'refused'
   try {
-    return await retireOwnedPersistentRepl(sessionKey)
+    outcome = await retireOwnedPersistentRepl(sessionKey, attempt, existing?.registryPath)
+    return outcome
   } finally {
-    gate?.release()
+    gate.release()
+    // A rejected migration is observational: keep the survivor's normal
+    // admission and supervision. Never undo a prior explicit retirement.
+    if (existing !== undefined && outcome === 'refused' && !alreadyRetiring && !attempt.beganTermination) {
+      retiringSessionKeys.delete(sessionKey)
+    }
   }
 }
 
-async function retireOwnedPersistentRepl(sessionKey: string): Promise<HelperRetirement> {
+async function retireOwnedPersistentRepl(
+  sessionKey: string,
+  attempt: { beganTermination: boolean },
+  expectedRegistryPath?: string,
+): Promise<HelperRetirement> {
+  const requireFreshIdle = expectedRegistryPath !== undefined
   const pending = pool.get(sessionKey)
-  if (pending === undefined) return 'absent'
+  if (pending === undefined) return requireFreshIdle ? 'refused' : 'absent'
   if (pendingSpawns.get(sessionKey) === pending) {
     neutralizeAbandonedSettle(pending.then(() => retirePersistentRepl(sessionKey)))
     return 'deferred'
   }
-  if ((committedDispatches.get(sessionKey) ?? 0) > 0) return 'deferred'
+  if ((committedDispatches.get(sessionKey) ?? 0) > 0) return requireFreshIdle ? 'refused' : 'deferred'
   let session: ReplSession
-  try { session = await pending } catch { return 'absent' }
+  try { session = await pending } catch { return requireFreshIdle ? 'refused' : 'absent' }
   if (pool.get(sessionKey) !== pending || childByKey.get(sessionKey) !== session.child) return 'refused'
-  if ((committedDispatches.get(sessionKey) ?? 0) > 0 || session.activeTurn !== undefined || session.turnSlotHeld > 0) return 'deferred'
+  if ((committedDispatches.get(sessionKey) ?? 0) > 0 || session.activeTurn !== undefined || session.turnSlotHeld > 0) return requireFreshIdle ? 'refused' : 'deferred'
   // A survivor can still be doing work started before this gateway. The local
   // turn mutex cannot establish its idleness; refuse migration without a live
   // rendered empty input prompt. Silence or a missing screen is not idleness.
-  if (session.adopted) {
+  if (session.adopted || requireFreshIdle) {
     if (session.child.readScreen === undefined) return 'refused'
     let timeout: ReturnType<typeof setTimeout> | undefined
     try {
@@ -437,10 +465,13 @@ async function retireOwnedPersistentRepl(sessionKey: string): Promise<HelperReti
       if (timeout !== undefined) clearTimeout(timeout)
     }
     if (pool.get(sessionKey) !== pending || (committedDispatches.get(sessionKey) ?? 0) > 0 ||
-        session.activeTurn !== undefined || session.turnSlotHeld > 0) return 'deferred'
+        session.activeTurn !== undefined || session.turnSlotHeld > 0) return requireFreshIdle ? 'refused' : 'deferred'
   }
   const options = supervisedBySessionKey.get(sessionKey)
   const registryPath = options?.replRegistryPath
+  // The pool promise and screen observation yielded; ownership configuration
+  // may have changed since the migration's initial read-only preflight.
+  if (requireFreshIdle && registryPath !== expectedRegistryPath) return 'refused'
   const claimant = session.paneClaimBy
   const matches = (row: ReplRegistryRecord | undefined): boolean => row !== undefined &&
     row.sessionId === session.sessionId && row.child_generation === session.childGeneration &&
@@ -461,6 +492,7 @@ async function retireOwnedPersistentRepl(sessionKey: string): Promise<HelperReti
   }
   // Do not discard a row or pool entry merely because termination was requested.
   // terminateChild has a bounded force deadline, so independently confirm death.
+  attempt.beganTermination = true
   await terminateChild(session.child)
   if (!session.hasChildExited()) return 'refused'
   if (registryPath !== undefined) {
