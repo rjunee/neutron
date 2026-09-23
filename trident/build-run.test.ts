@@ -1798,3 +1798,28 @@ test('suite scope uses the measured remaining count rather than a cheap planner 
     expect(f.prepared.find(p => p.role === 'build')?.suiteScope).toBe(measuredCount === 1 ? 'full-suite' : 'subset')
   }
 })
+
+test('completed Ralph build checkpoints retain the validated terminal remainder before publication can fail', async () => {
+  for (const remainingTasks of [0, 2]) {
+    const f = modeFixture()
+    f.plan.implementationPlan = ['- [ ] T1: first', '- [ ] T2: second', '- [ ] T3: third'].slice(0, remainingTasks + 1).join('\n')
+    f.plan.remainingTasks = remainingTasks
+    f.setPlan()
+    const saved: import('./build-run.ts').ResumeCheckpoint[] = []
+    f.deps.modes!.saveCheckpoint = async state => { saved.push(structuredClone(state)) }
+    f.deps.publishGate = async () => ({ kind: 'blocked', on: 'publication proof unavailable' })
+    expect((await f.run()).kind).toBe(remainingTasks === 0 ? 'blocked' : 'continued')
+    expect(saved.at(-1)).toMatchObject({ stage: 'built', head: f.snapshot.head, remainingTasks })
+    expect(saved.at(-1)?.pending).toBeUndefined()
+  }
+})
+
+test('terminal retry repeats publication proof and review without planning or rebuilding', async () => {
+  const f = modeFixture()
+  f.resume().remainingTasks = 0
+  expect((await f.run()).kind).toBe('merged')
+  expect(f.runner.calls).toHaveLength(0)
+  expect(f.cross.calls.map(call => call.role)).toEqual(['review'])
+  expect(f.events).toContain('publishGate')
+  expect(f.events).toContain('publicationSuite')
+})

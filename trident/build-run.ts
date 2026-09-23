@@ -65,6 +65,8 @@ export interface ResumeCheckpoint {
   /** Persisted by the host alongside the review checkpoint. */
   replansUsed?: number
   previousBlockingCount?: number
+  /** Host-validated plan remainder at the completed Ralph build; absent is unknown. */
+  remainingTasks?: number | undefined
   findings: readonly { kind: 'code' | 'lane'; actionable: boolean; text: string }[]
   previousFindings: readonly string[]
   /** A running/unobserved turn must be settled by its host, never dispatched again. */
@@ -484,7 +486,8 @@ export async function buildRun(input: BuildRunInput, deps: BuildRunDeps, signal:
       // the rest of the driver uses.
       if (role === 'build' || role === 'fix') {
         await checkpoint({ head: measured.head, stage: role === 'fix' ? 'fixed' : 'built',
-          round: role === 'fix' ? round + 1 : Math.max(durable.round, 1, round + 1), pending: undefined, findings: [] })
+          round: role === 'fix' ? round + 1 : Math.max(durable.round, 1, round + 1), pending: undefined, findings: [],
+          ...(role === 'build' ? { remainingTasks: input.mode === 'ralph' ? plan!.remainingTasks : undefined } : {}) })
       }
       const payload = role === 'plan' ? clampPlanBranchBrief(result.payload) : result.payload
       previousPayload = payload
