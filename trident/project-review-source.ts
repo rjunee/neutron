@@ -111,6 +111,11 @@ export function createProjectReviewSource(input: ProjectReviewSourceOptions): Re
       }
       return structuredClone(observed)
     }
+    const priorAttempt = options.accounting.ledger.get({ run_id: options.runId,
+      step_id: `${directory.split('/').at(-1)}:${round}:${attempt}`, attempt_id: 'dispatch' })
+    // The durable ledger is only a veto against replay after lost file evidence.
+    // Its outcome/usage cannot restore a verdict or authorize a fresh attempt.
+    if (priorAttempt) throw Error(`Review seat ${route.seat.id}: prior attempt lost its receipt directory`)
     // No connected transport means no attempt was purchased. A later connection
     // may still run this seat, unlike a worker refusal or an uncertain dispatch.
     const runner = options.runnerFor(route.model, route.seat)

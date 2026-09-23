@@ -25,12 +25,18 @@ original deferred receipt. Accounting/provider telemetry never supplies verdict
 authority. Existing verdict validation, every panel veto and synthesis checkpoint
 remain in the consuming gate.
 
-Verification: 61 focused source/panel tests passed, including unchanged-input
+The durable attempt ledger supplies only a refusal when an already-admitted
+attempt loses its entire receipt directory or evidence root; it never restores a
+verdict. Receipt reads use nonblocking nofollow opens, a bounded descriptor read,
+and a second stat, rejecting FIFOs, excessive size and concurrent file growth.
+
+Verification: 64 focused source/panel/receipt tests passed, including unchanged-input
 reuse, required fresh work, retry exhaustion and successful recovery, account
 rotation, concurrent claims, pending requests and corrupt/symlinked evidence.
-Both root and Trident TypeScript checks passed. Three semantic mutations failed
+Both root and Trident TypeScript checks passed. Six semantic mutations failed
 their targeted tests: rejecting valid settled recovery, assigning fresh retry
-identities, and omitting the measured head from identity. Restoring production
-code returned all 61 tests to green. The integration change wires current task
+identities, omitting the measured head from identity, removing the durable
+missing-directory refusal, permitting FIFO blocking, and ignoring file growth.
+Restoring production code returned all 64 tests to green. The integration change wires current task
 and credential identity and exercises `open/__tests__/project-build-e2e.test.ts`;
 focused source evidence alone does not establish deployed efficiency.

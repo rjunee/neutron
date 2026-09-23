@@ -1,5 +1,5 @@
 import { afterEach, expect, spyOn, test } from 'bun:test'
-import { mkdtemp, readFile, rm, writeFile, symlink } from 'node:fs/promises'
+import { mkdtemp, mkdir, readFile, rm, writeFile, symlink } from 'node:fs/promises'
 import { tmpdir } from 'node:os'
 import { join, dirname } from 'node:path'
 import type { BoundedWorkOutcome, BoundedWorkRequest, WorkerRunner } from '@neutronai/runtime/bounded-work.ts'
@@ -46,6 +46,8 @@ async function fixture() {
 
 async function durableFixture() {
   const f = await fixture()
+  f.options.evidenceRoot = join(f.options.cwd, 'review-evidence')
+  await mkdir(f.options.evidenceRoot)
   f.options.taskInput = () => 'canonical task bytes'
   f.options.credentialIdentity = async provider => `selected-test-account:${provider}`
   return f
@@ -206,6 +208,24 @@ test('corrupt, foreign, missing and symlinked receipt evidence cannot approve or
     }
     expect(await f.check()).toMatchObject({ kind: 'blocked', on: expect.stringContaining('infra-only:') })
     expect(f.calls).toHaveLength(2)
+  }
+})
+
+test('durable ledger refuses lost whole receipt directories and roots without buying work', async () => {
+  for (const removed of ['initial-directory', 'retry-directory', 'entire-root'] as const) {
+    const f = await durableFixture(); let calls = 0
+    if (removed === 'retry-directory') f.answer(async () => ++calls === 1
+      ? { kind: 'failed', class: 'infra', detail: 'deferred' } : completed())
+    expect(await f.check()).toEqual({ kind: 'approve' })
+    const count = f.calls.length
+    await rm(removed === 'entire-root' ? f.options.evidenceRoot
+      : dirname(f.calls[removed === 'retry-directory' ? 1 : 0]!.result.path), { recursive: true })
+    expect(await f.check()).toMatchObject({ kind: 'blocked' })
+    expect(f.calls).toHaveLength(count)
+    if (removed === 'entire-root') await mkdir(f.options.evidenceRoot)
+    const next = f.source()
+    expect(await next.readSeat(next.seats[1]!, { ...snapshot, head: 'b'.repeat(40) }, 1)).toMatchObject({ status: 'completed' })
+    expect(f.calls).toHaveLength(count + 1)
   }
 })
 

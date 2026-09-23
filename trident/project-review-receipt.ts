@@ -14,11 +14,24 @@ export interface ReviewReceipt {
 }
 
 async function readJson(path: string): Promise<unknown> {
-  const file = await open(path, constants.O_RDONLY | constants.O_NOFOLLOW)
+  const file = await open(path, constants.O_RDONLY | constants.O_NOFOLLOW | constants.O_NONBLOCK)
   try {
     const stat = await file.stat()
     if (!stat.isFile() || stat.size > 8 * 1024 * 1024) throw Error('Review receipt is not a bounded regular file')
-    return JSON.parse(await file.readFile('utf8'))
+    // Read at most the measured size plus one byte. A file growing after stat
+    // cannot make readFile allocate unbounded data, and a FIFO cannot hold open.
+    const bytes = Buffer.alloc(stat.size + 1)
+    let length = 0
+    while (length < bytes.length) {
+      const read = await file.read(bytes, length, bytes.length - length, null)
+      if (read.bytesRead === 0) break
+      length += read.bytesRead
+    }
+    const after = await file.stat()
+    if (length !== stat.size || after.size !== stat.size || after.mtimeMs !== stat.mtimeMs || after.ctimeMs !== stat.ctimeMs) {
+      throw Error('Review receipt changed while being read')
+    }
+    return JSON.parse(bytes.subarray(0, length).toString('utf8'))
   } finally { await file.close() }
 }
 
