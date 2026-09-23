@@ -107,3 +107,9 @@ termination grace. Fixtures leave a descendant holding the pipe after normal
 exit and timeout; both return the corresponding typed outcome. Reintroducing
 the telemetry veto, removing the drain deadline, or awaiting pipe close instead
 of process exit makes those consuming worker controls fail.
+
+CI caught a redundant elapsed-time assertion in the descendant-pipe fixture.
+It was removed without a lint exemption: the unchanged two-second test deadline,
+typed completion/timeout outcomes and retained usage already cover the contract
+against the thirty-second descendant. Repeating the close-instead-of-exit mutation
+still fails on the wrong outcome; restoring it passes both fixture modes.

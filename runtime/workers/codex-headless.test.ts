@@ -46,10 +46,8 @@ describe('Codex headless WorkerRunner', () => {
       const descendantPath = join(request.cwd, 'descendant.pid')
       writeFileSync(f.script, readFileSync(f.script, 'utf8') +
         `(trap '' TERM; exec sleep 30) &\nprintf '%s' "$!" > ${JSON.stringify(descendantPath)}\n` + (mode === 'timeout' ? 'wait\n' : 'exit 0\n'))
-      const started = Date.now()
       try {
         const result = await createCodexHeadlessRunner({ buildScript: f.script, probe: { ok: true } }).run(request, 'headless', new AbortController().signal)
-        expect(Date.now() - started).toBeLessThan(1500)
         if (mode === 'timeout') expect(result).toMatchObject({ kind: 'failed', class: 'timeout' })
         else expect(result.kind).toBe('completed')
         expect(result.observation?.usage.input_tokens).toBe(12)
