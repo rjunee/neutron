@@ -1,8 +1,12 @@
 import type { BoundedWorkOutcome, BoundedWorkRequest, Placement, ProviderObservation, WorkerRunner } from '@neutronai/runtime/bounded-work.ts'
+import { createLogger } from '@neutronai/logger'
+import { fireAndForget } from '@neutronai/logger/fire-and-forget.ts'
 import { createHash } from 'node:crypto'
 import { lstat, readFile, writeFile } from 'node:fs/promises'
 import { join } from 'node:path'
 import { TridentAttemptLedger, type AttemptIdentity, type AttemptKey, type AttemptReceipt } from './attempt-ledger.ts'
+
+const log = createLogger('trident')
 
 export interface AttemptAttribution {
   phase: string
@@ -22,7 +26,7 @@ export class AttemptAccounting {
   /** Stage diagnostics are advisory; an unavailable sink cannot veto work. */
   async recordEvent(stage: string, data: unknown): Promise<void> {
     try { await this.event(stage, JSON.stringify(data)) }
-    catch { console.error(`[trident] event=attempt-accounting-event-unavailable stage=${stage}`) }
+    catch { log.error('attempt-accounting-event-unavailable', { stage }) }
   }
 
   async interval<T>(stage: string, identity: Record<string, unknown>, operation: () => Promise<T>): Promise<T> {
@@ -100,7 +104,7 @@ export class AttemptAccounting {
         ? this.ledger.lifecycle(key, { ended_at: this.now(), outcome: 'interrupted' }) : Promise.resolve()
       // The awaiting path below observes write failure. An aborted provider may
       // remain pending, so attach a handler now to avoid an unhandled rejection.
-      void interruption.catch(() => {})
+      fireAndForget('attempt-accounting.interruption', interruption)
     }
     signal.addEventListener('abort', interrupted, { once: true })
     if (signal.aborted) interrupted()
