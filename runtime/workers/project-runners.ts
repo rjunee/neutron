@@ -30,7 +30,7 @@ export type ProjectActingTurn = ((input: {
   signal: AbortSignal
   subagent?: string
 }) => Promise<{ kind: 'turn-ended' } | { kind: 'unknown'; detail: string } | Extract<BoundedWorkOutcome, { kind: 'blocked' }> | (Extract<BoundedWorkOutcome, { kind: 'refused' }> & { detail: string })>) & {
-  /** Host-only reader; may reconcile a reserved step without dispatching it. */
+  /** Telemetry-only reader; cannot authorize a result or dispatch work. */
   observeUsage?(request: BoundedWorkRequest): Promise<ProviderObservation | undefined>
 }
 
@@ -135,6 +135,15 @@ export async function createProjectRunners(options: ProjectRunnersOptions) {
       if (request.run_id !== runId) return unknown('Request run_id does not match the host run.')
       return runner.run(request, placement, signal)
     },
+    ...(runner.recover ? {
+      async recover(request: BoundedWorkRequest, placement: Parameters<WorkerRunner['run']>[1], signal: AbortSignal): Promise<BoundedWorkOutcome> {
+        const supported = runner.supports(request.role, placement)
+        if (placement !== placementFor(runner.provider, conversation.provider)) return { kind: 'refused', reason: 'placement-unavailable' }
+        if (!supported.ok) return { kind: 'refused', reason: supported.reason }
+        if (request.run_id !== runId) return unknown('Request run_id does not match the host run.')
+        return runner.recover!(request, placement, signal)
+      },
+    } : {}),
     liveness: handle => runner.liveness(handle),
     async observe(request) {
       if (request.run_id !== runId) return undefined
@@ -143,6 +152,7 @@ export async function createProjectRunners(options: ProjectRunnersOptions) {
   })
   const common = {
     topic_id: conversation.topic_id, state_dir: stateDir, spec: conversation.spec, subagent: 'bounded-worker',
+    ...(conversation.provider === 'openai-codex' && options.codexResultTransport ? { resultTransport: options.codexResultTransport } : {}),
     decodeTrailer: (bytes: string, req: BoundedWorkRequest) => decodeProjectTrailer(bytes, req, options.trailer),
   }
   const admission = construct?.({ ...common, composeActingTurn: async () => { throw new Error('Admission runner cannot dispatch') } })
@@ -150,13 +160,20 @@ export async function createProjectRunners(options: ProjectRunnersOptions) {
     provider: conversation.provider,
     supports: admission.supports,
     observe: request => options.actingTurn.observeUsage?.(request) ?? Promise.resolve(undefined),
+    async recover(request, placement, signal) {
+      const result = await admission.recover?.(request, placement, signal) ?? unknown('Runner recovery capability is unavailable.')
+      try {
+        const observation = await options.actingTurn.observeUsage?.(request)
+        if (observation) return { ...result, observation }
+      } catch { /* Telemetry cannot authorize or veto the result. */ }
+      return result
+    },
     async run(request, placement, signal) {
       let uncertainty: string | undefined
       let refusal: Extract<BoundedWorkOutcome, { kind: 'refused' }> | undefined
       let blocked: Extract<BoundedWorkOutcome, { kind: 'blocked' }> | undefined
       const runner = construct({
         ...common,
-        ...(conversation.provider === 'openai-codex' && options.codexResultTransport ? { resultTransport: options.codexResultTransport } : {}),
         async composeActingTurn(_topic, spec, turn: { timeout_ms: number; subagent?: string; childResultPath?: string }) {
           const actingRequest = conversation.provider === 'openai-codex' && turn.childResultPath
             ? { ...request, result: { ...request.result, path: turn.childResultPath } } : request

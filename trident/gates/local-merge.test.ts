@@ -38,11 +38,15 @@ async function fixture() {
   return { repo, wt, head, git, check }
 }
 
-async function runLocalBuild(f: Awaited<ReturnType<typeof fixture>>, overrides: Partial<BuildRunDeps> = {}) {
+async function runLocalBuild(
+  f: Awaited<ReturnType<typeof fixture>>,
+  overrides: Partial<BuildRunDeps> = {},
+  scriptedReviewStep = `run:review:1:head:${f.head}`,
+) {
   const snapshot = { head: f.head, diff: await f.git('diff', 'base...change'), pr: null }
   const completed: BoundedWorkOutcome = { kind: 'completed', result: snapshot,
     usage: { input_tokens: 0, output_tokens: 0 }, model_reported: 'test', thread_id: null }
-  const runner = fakeRunner('pi', { outcomes: new Map(['run:plan:0', 'run:build:0', 'run:review:1'].map(step => [step, completed])) })
+  const runner = fakeRunner('pi', { outcomes: new Map(['run:plan:0', 'run:build:0', scriptedReviewStep].map(step => [step, completed])) })
   const request = { model_id: 'test', effort: null, cwd: f.wt, writable: true, network: false,
     tools: 'edit-and-run', brief: { path: 'brief', integrity: briefIntegrity('brief.context.json') }, result: { path: 'result', schema: 'test' }, thread: null, budget: { wall_ms: 1000 } } as const
   const worker = { runner, request }
@@ -84,6 +88,27 @@ test('G109 real local worktree and branch allow, landing retains the reviewed br
   expect(await f.git('rev-parse', 'change')).toBe(f.head)
   expect(await f.git('merge-base', '--is-ancestor', f.head, 'base')).toBe('')
 })
+
+for (const scriptedReviewStep of ['run:review:1', `run:review:1:head:${'b'.repeat(40)}`]) {
+  test(`local merge rejects review outcome under non-current identity ${scriptedReviewStep}`, async () => {
+    const f = await fixture()
+    let merged = false
+    const { outcome, calls } = await runLocalBuild(f, {
+      merge: async () => { merged = true },
+    }, scriptedReviewStep)
+    expect(calls.filter(call => call.role === 'review').map(call => call.step_id)).toEqual([
+      `run:review:1:head:${f.head}`,
+    ])
+    expect(outcome).toEqual({
+      kind: 'unknown',
+      phase: 'review',
+      step_id: `run:review:1:head:${f.head}`,
+      detail: `fakeRunner: no scripted outcome for step run:review:1:head:${f.head}`,
+    })
+    expect(merged).toBe(false)
+    expect((await host(['git', 'merge-base', '--is-ancestor', f.head, 'base'], f.repo)).ok).toBe(false)
+  })
+}
 
 test('local review-readiness refusal stops the no-PR run before review dispatch', async () => {
   const f = await fixture()

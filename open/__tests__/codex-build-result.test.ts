@@ -251,8 +251,9 @@ test('failed exclusive stage clear leaves an unarmed reservation and cannot disp
 
 test.each(['review', 'synthesis'] as const)('exact host-minted %s panel slot has no arbitrary owner-home destination authority', async role => {
   const f = fixture()
-  const panel = join(f.stateDir, 'review-aB123z'); mkdirSync(panel)
-  const request: BoundedWorkRequest = { ...f.request, role, step_id: 'review-aB123z:1:0', brief: { ...f.request.brief, path: join(panel, 'brief.json') },
+  const name = `review-${'0123456789abcdef'.repeat(4)}`
+  const panel = join(f.stateDir, name); mkdirSync(panel)
+  const request: BoundedWorkRequest = { ...f.request, role, step_id: `${name}:1:0`, brief: { ...f.request.brief, path: join(panel, 'brief.json') },
     result: { schema: 'verdict', path: join(panel, 'result.json') }, writable: false, tools: 'read-only' }
   ;(f.trailer.schemas as Map<string, (value: unknown) => boolean>).set('verdict', f.trailer.schemas.get('fixture')!)
   expect((await f.run(async child => {
@@ -262,4 +263,29 @@ test.each(['review', 'synthesis'] as const)('exact host-minted %s panel slot has
   expect(readFileSync(request.result.path, 'utf8')).toBe(f.envelope(request))
   expect((await f.run(async () => { throw new Error('must not call') }, { ...request, result: { ...request.result, path: join(f.stateDir, 'global.result') } })).kind).toBe('unknown')
   expect(f.calls()).toBe(1)
+})
+
+test.each(['legacy', 'short', 'long', 'uppercase', 'nonhex', 'traversal', 'suffix', 'newline', 'zero-round', 'negative-attempt', 'foreign-brief'] as const)
+('durable panel transport refuses %s identity before native work', async damage => {
+  const f = fixture()
+  const digest = '0123456789abcdef'.repeat(4)
+  const name = damage === 'legacy' ? 'review-aB123z'
+    : damage === 'short' ? `review-${digest.slice(1)}`
+    : damage === 'long' ? `review-${digest}0`
+    : damage === 'uppercase' ? `review-${digest.toUpperCase()}`
+    : damage === 'nonhex' ? `review-g${digest.slice(1)}`
+    : damage === 'traversal' ? `../review-${digest}` : `review-${digest}`
+  const panel = join(f.stateDir, name); mkdirSync(panel)
+  const step = `${name}:${damage === 'zero-round' ? 0 : 1}:${damage === 'negative-attempt' ? -1 : 0}`
+  const request: BoundedWorkRequest = { ...f.request, role: 'review',
+    step_id: `${step}${damage === 'suffix' ? ':extra' : damage === 'newline' ? '\n' : ''}`,
+    brief: { ...f.request.brief, path: join(damage === 'foreign-brief' ? f.stateDir : panel, 'brief.json') },
+    result: { schema: 'verdict', path: join(panel, 'result.json') }, writable: false, tools: 'read-only' }
+  ;(f.trailer.schemas as Map<string, (value: unknown) => boolean>).set('verdict', f.trailer.schemas.get('fixture')!)
+  expect((await f.run(async child => {
+    writeFileSync(child.result.path, f.envelope(request))
+    return decodeProjectTrailer(f.envelope(request), request, f.trailer) as never
+  }, request)).kind).toBe('unknown')
+  expect(f.calls()).toBe(0)
+  expect(existsSync(request.result.path)).toBe(false)
 })

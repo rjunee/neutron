@@ -75,6 +75,8 @@ export function createBuildHost(options: BuildHostOptions): { deps: BuildRunDeps
         provider: selected.provider,
         supports: (workRole) => runner.supports(workRole, placement),
         run: (request, _placement, signal) => runner.run(request, placement, signal),
+        recover: (request, _placement, signal) => runner.recover?.(request, placement, signal)
+          ?? Promise.resolve({ kind: 'unknown', detail: 'Worker has no recovery capability' }),
         liveness: (handle) => runner.liveness(handle),
       },
     }

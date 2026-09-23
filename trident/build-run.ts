@@ -5,6 +5,7 @@ import { createLogger } from '@neutronai/logger'
 // wrapper in `./gates/unknown-cause.ts`, which returns a `GateResult`.
 import { TERMINAL_CAUSE_MAX, unknownCause } from '@neutronai/runtime/refusal-cause.ts'
 import { createHash } from 'node:crypto'
+import { isDeepStrictEqual } from 'node:util'
 import { clampPlanBranchBrief, validateTrailer } from './gates/result-contract.ts'
 import {
   placementFor,
@@ -69,8 +70,49 @@ export interface ResumeCheckpoint {
   remainingTasks?: number | undefined
   findings: readonly { kind: 'code' | 'lane'; actionable: boolean; text: string }[]
   previousFindings: readonly string[]
-  /** A running/unobserved turn must be settled by its host, never dispatched again. */
-  pending?: { phase: WorkPhase; step_id: string } | undefined
+  /** Baseline retained across completion checkpoints; omission is legacy evidence. */
+  previousReview?: ReviewProgress | null
+  /** Explicit provenance, independent of round numbers and branch movement. */
+  reviewBaseline?: 'none' | 'required'
+  /** Re-present only the original request to its idempotent runner. Legacy pending
+   * rows without the host continuation remain unknown. */
+  pending?: { phase: WorkPhase; step_id: string; recovery?: PendingRecovery } | undefined
+}
+
+interface PendingRecovery {
+  request: BoundedWorkRequest
+  inputs: ReturnType<typeof recoveryInputs>
+  round: number
+  snapshot: BuildSnapshot
+  previous: unknown
+  findings: readonly string[]
+  planner: 'full' | 'next'
+  committedPlan?: PlanProbe
+  plan: ExecutionPlan | null
+  /** Null records known absence; omission is incomplete recovery evidence. */
+  previousReview: ReviewProgress | null
+  reviewBaseline: 'none' | 'required'
+}
+
+function validReviewBaseline(marker: unknown, progress: unknown): boolean {
+  return marker === 'none' ? progress === null : marker === 'required' && validReviewProgress(progress)
+}
+
+function validReviewProgress(value: unknown): value is ReviewProgress {
+  if (!value || typeof value !== 'object') return false
+  const progress = value as ReviewProgress
+  return Array.isArray(progress.findings) && progress.findings.every(f => typeof f === 'string' && f.trim().length > 0)
+    && Number.isSafeInteger(progress.blockingCount) && progress.blockingCount >= 0
+}
+
+function recoveryInputs(input: BuildRunInput, maxRounds: number) {
+  // owned_pr is fresh-admission provenance, and can appear after this run publishes.
+  // The original and measured snapshots bind recovery to the actual PR instead.
+  const { start: _start, owned_pr: _ownedPr, workers, ...identity } = input
+  // JSON checkpoints omit absent optional inputs; compare that same durable form.
+  return { ...Object.fromEntries(Object.entries(identity).filter(([, value]) => value !== undefined)), maxRounds, workers: Object.fromEntries(
+    Object.entries(workers).map(([role, { runner, request }]) => [role, { provider: runner.provider, request }]),
+  ) }
 }
 export interface BuildModeHost {
   loadResume(): Promise<ResumeCheckpoint | null>
@@ -304,10 +346,39 @@ export async function buildRun(input: BuildRunInput, deps: BuildRunDeps, signal:
     if (initial.kind === 'unknown') return unknown(initial.detail)
     snapshot = initial.value
     if (!local && confirmedMerged(snapshot)) return { kind: 'merged', snapshot }
+    let recovery = resume?.pending?.recovery
     if (resume?.pending) {
-      phase = resume.pending.phase
-      step_id = resume.pending.step_id
-      return unknown('Resume awaits the existing worker observation')
+      const pending = resume.pending
+      const original = recovery?.request
+      const expected = { ...input.workers[pending.phase].request, run_id: input.run_id,
+        step_id: pending.step_id, role: pending.phase, needs_approval_decision: false }
+      if (!recovery || !isDeepStrictEqual(original, expected)
+          || !isDeepStrictEqual(recovery.inputs, recoveryInputs(input, maxRounds))
+          || !Number.isSafeInteger(recovery.round) || recovery.round < 0
+          || !recovery.snapshot || typeof recovery.snapshot.head !== 'string' || typeof recovery.snapshot.diff !== 'string'
+          || (recovery.snapshot.pr !== null && (!recovery.snapshot.pr
+            || !Number.isSafeInteger(recovery.snapshot.pr.number) || recovery.snapshot.pr.number < 1
+            || typeof recovery.snapshot.pr.head !== 'string' || !['OPEN', 'CLOSED', 'MERGED'].includes(recovery.snapshot.pr.state)))
+          || !Array.isArray(recovery.findings) || !recovery.findings.every(f => typeof f === 'string')
+          || !['full', 'next'].includes(recovery.planner) || !('previous' in recovery)
+          || (recovery.plan !== null && !executionPlan(recovery.plan))
+          || !validReviewBaseline(recovery.reviewBaseline, recovery.previousReview)
+          || ((pending.phase === 'fix' || (resume.replansUsed ?? 0) > 0) && recovery.reviewBaseline !== 'required')
+          || recovery.reviewBaseline !== resume.reviewBaseline
+          || !isDeepStrictEqual(recovery.previousReview, resume.previousReview)) {
+        return unknown('Resume cannot validate the original pending worker request and context')
+      }
+      const expectedStep = `${input.run_id}${input.mode === 'ralph' ? `:task:${input.ralphRound ?? 0}` : ''}:${pending.phase}:${recovery.round}`
+        + (pending.phase === 'review' ? `:head:${recovery.snapshot.head}` : '')
+      if (pending.step_id !== expectedStep || (pending.phase !== 'plan' && recovery.round > maxRounds)
+          || (pending.phase === 'build' && (input.mode === 'ralph' || input.mode === 'wave') && !recovery.plan)) {
+        return unknown('Resume cannot validate the original pending worker identity')
+      }
+      // Read-only work cannot explain movement. Mutating work is reconciled below
+      // against its original input revision and the independently measured result.
+      if ((pending.phase === 'review' || !recovery.request.writable) && !corroborates(recovery.snapshot, snapshot)) {
+        return unknown('Pending worker input revision changed before recovery')
+      }
     }
     if (local && snapshot.pr !== null) return blocked('Local build has a PR')
     // Receipt provenance establishes ownership; a fresh checkout can still be at base.
@@ -332,11 +403,16 @@ export async function buildRun(input: BuildRunInput, deps: BuildRunDeps, signal:
     // four existing cases pin that, and the first draft of this fix broke all four
     // by treating every resume as a moved one.
     let headMoved = false
-    let previous: readonly string[] = []
-    let previousReview: ReviewProgress | undefined
+    let previous: readonly string[] = resume?.previousFindings ?? []
+    if (resume && (!validReviewBaseline(resume.reviewBaseline, resume.previousReview)
+        || ((replansUsed > 0 || resume.stage === 'fixed' || resume.stage === 'rejected') && resume.reviewBaseline !== 'required'))) {
+      return unknown('Resume prior review baseline is missing or invalid')
+    }
+    let previousReview: ReviewProgress | undefined = resume?.previousReview ?? undefined
+    let reviewBaseline: 'none' | 'required' = resume?.reviewBaseline ?? 'none'
     let previousBlockingCount = resume?.previousBlockingCount ?? resume?.previousFindings.length ?? 0
-    if (resume) {
-      if (!Number.isSafeInteger(resume.round) || resume.round < 0) return blocked('Invalid recorded review round')
+    if (resume && (!Number.isSafeInteger(resume.round) || resume.round < 0)) return blocked('Invalid recorded review round')
+    if (resume && !recovery) {
       firstRound = Math.max(1, resume.round)
       previous = resume.previousFindings
       if (fullOid(resume.head) && snapshot.head !== 'absent' && !fullOid(snapshot.head)) {
@@ -360,7 +436,7 @@ export async function buildRun(input: BuildRunInput, deps: BuildRunDeps, signal:
     let planner: 'full' | 'next' = 'full'
     let committedPlan: PlanProbe | undefined
     const ralphRound = input.ralphRound ?? 0
-    if (input.mode === 'ralph' && !skipBuild) {
+    if (input.mode === 'ralph' && !skipBuild && !recovery) {
       // G026: only a clean handoff can use the cheap planner, with periodic refresh.
       const clean = resume?.stage === 'ralph-task-built' && Number.isSafeInteger(ralphRound)
         && ralphRound > 0 && ralphRound % 5 !== 0
@@ -380,47 +456,83 @@ export async function buildRun(input: BuildRunInput, deps: BuildRunDeps, signal:
     let durable: ResumeCheckpoint = resume ?? { head: null, stage: 'built', round: 0,
       replansUsed: 0, findings: [], previousFindings: [] }
     async function checkpoint(patch: Partial<ResumeCheckpoint>) {
-      durable = { ...durable, replansUsed, previousFindings: previous, previousBlockingCount, ...patch }
+      durable = { ...durable, replansUsed, previousFindings: previous, previousBlockingCount,
+        previousReview: previousReview ?? null, reviewBaseline, ...patch }
       await modes?.saveCheckpoint(structuredClone(durable))
     }
     let previousPayload: unknown = null
     let findings: readonly string[] = []
+    if (recovery) {
+      snapshot = structuredClone(recovery.snapshot)
+      previousPayload = recovery.previous
+      findings = recovery.findings
+      planner = recovery.planner
+      committedPlan = recovery.committedPlan
+      firstRound = Math.max(1, resume!.round, recovery.round)
+      previousReview = recovery.previousReview ?? undefined
+      reviewBaseline = recovery.reviewBaseline
+      skipBuild = recovery.request.role === 'review' || recovery.request.role === 'fix'
+      resumeFix = recovery.request.role === 'fix'
+    }
     async function work(role: WorkPhase, round: number): Promise<{ payload: unknown; review?: ReviewPanelObservation } | { stop: BuildRunOutcome }> {
       phase = role
       step_id = `${input.run_id}${input.mode === 'ralph' ? `:task:${input.ralphRound ?? 0}` : ''}:${role}:${round}`
+      // Review is read-only and its result is meaningful only for this measured
+      // revision. A resumed round can keep its number while its head changes;
+      // reusing that round's old id would recover the previous head's approval.
+      // Exact-head recovery keeps the same id, including its pending reservation.
+      if (role === 'review') step_id += `:head:${snapshot.head}`
+      if (!validReviewBaseline(reviewBaseline, previousReview ?? null)
+          || ((role === 'fix' || replansUsed > 0) && reviewBaseline !== 'required')) {
+        return { stop: unknown('Worker continuation requires prior review progress') }
+      }
       const { runner, request } = input.workers[role]
-      const boundedRequest: BoundedWorkRequest = {
+      const boundedRequest: BoundedWorkRequest = recovery?.request ?? {
         ...request, run_id: input.run_id, step_id, role, needs_approval_decision: false,
       }
-      await checkpoint({ pending: { phase: role, step_id }, round: Math.max(durable.round, round) })
+      if (recovery && (boundedRequest.role !== role || boundedRequest.step_id !== step_id)) {
+        return { stop: unknown('Resume would dispatch a different pending worker') }
+      }
+      const execute = recovery ? runner.recover?.bind(runner) : runner.run.bind(runner)
+      if (!execute) return { stop: unknown('Pending worker runner cannot recover without dispatch') }
       // Only the validated plan can defer a Ralph builder's full suite. Fixes and
       // terminal tasks require it, regardless of a strategy supplied at launch.
       const suiteScope = role === 'build' && input.mode === 'ralph' && plan !== null && plan.remainingTasks > 0
         ? 'subset' : 'full-suite'
-      await deps.prepareWork(boundedRequest, { snapshot: structuredClone(snapshot), previous: previousPayload, findings, planner,
+      if (!recovery) await deps.prepareWork(boundedRequest, { snapshot: structuredClone(snapshot), previous: previousPayload, findings, planner,
         ...(committedPlan ? { committedPlan } : {}), ...((role === 'build' || role === 'fix') ? { suiteScope } : {}) })
       if (role === 'review') {
         if (!deps.reviewArtifact) return { stop: unknown('Review artifact host is missing') }
         const artifact = gateStop(await deps.reviewArtifact(boundedRequest, snapshot))
         if (artifact) return { stop: artifact }
       }
+      if (!recovery) await checkpoint({ pending: { phase: role, step_id, recovery: {
+        request: structuredClone(boundedRequest), inputs: structuredClone(recoveryInputs(input, maxRounds)), round,
+        snapshot: structuredClone(snapshot), previous: previousPayload ?? null, findings, planner,
+        ...(committedPlan ? { committedPlan } : {}), plan, previousReview: previousReview ?? null, reviewBaseline,
+      } }, round: Math.max(durable.round, round) })
       let outcome: BoundedWorkOutcome
       let review: ReviewPanelObservation | undefined
       try {
-        if (role === 'review') {
+        if (role === 'review' && recovery) {
+          // Reconcile the original worker before starting any other producer. A
+          // missing reservation cannot fall through to an ordinary dispatch.
+          outcome = await execute(boundedRequest, placementFor(runner.provider, input.repl_provider), signal)
+          if (outcome.kind === 'completed') review = await deps.observeReview(structuredClone(snapshot), round)
+        } else if (role === 'review') {
           if (!deps.observeReview) return { stop: unknown('Review observation host is missing') }
           // Readiness, CI, suite and artifact preparation have all passed. Start
           // every independent producer before awaiting a verdict, and drain both
           // sides even when one rejects. No fix or merge can race a live reviewer.
           const [standalone, panel] = await Promise.allSettled([
-            Promise.resolve().then(() => runner.run(boundedRequest, placementFor(runner.provider, input.repl_provider), signal)),
+            Promise.resolve().then(() => execute(boundedRequest, placementFor(runner.provider, input.repl_provider), signal)),
             Promise.resolve().then(() => deps.observeReview(structuredClone(snapshot), round)),
           ])
           if (standalone.status === 'rejected') throw standalone.reason
           if (panel.status === 'rejected') throw panel.reason
           outcome = standalone.value
           review = panel.value
-        } else outcome = await runner.run(boundedRequest, placementFor(runner.provider, input.repl_provider), signal)
+        } else outcome = await execute(boundedRequest, placementFor(runner.provider, input.repl_provider), signal)
       } catch (error) {
         if (role === 'review') return { stop: blocked(unknownCause('infra-only: Review producer failed during the review join', error, input.run_id).slice(0, TERMINAL_CAUSE_MAX)) }
         if (role === 'plan' && replansUsed > 0) return { stop: blocked(unknownCause('design-gap: re-plan-failed: planner threw before producing a revised execution spec', error, input.run_id).slice(0, TERMINAL_CAUSE_MAX)) }
@@ -485,6 +597,7 @@ export async function buildRun(input: BuildRunInput, deps: BuildRunDeps, signal:
       }
       const payload = role === 'plan' ? clampPlanBranchBrief(result.payload) : result.payload
       previousPayload = payload
+      recovery = undefined
       return { payload, ...(review ? { review } : {}) }
     }
 
@@ -508,11 +621,11 @@ export async function buildRun(input: BuildRunInput, deps: BuildRunDeps, signal:
       return null
     }
 
-    let plan: ExecutionPlan | null = null
+    let plan: ExecutionPlan | null = recovery?.plan ?? null
     async function planAndBuild(round: number): Promise<BuildRunOutcome | null> {
       const replanning = replansUsed > 0
       const replanFailed = (reason: string) => blocked(`design-gap: re-plan-failed: ${reason}`)
-      const planned = await work('plan', round)
+      const planned = recovery?.request.role === 'build' ? { payload: previousPayload } : await work('plan', round)
       if ('stop' in planned) {
         // Running or unreadable work retains its identity; it is not a failed plan.
         // Corroboration failures retain their existing measured-evidence cause.
@@ -584,30 +697,34 @@ export async function buildRun(input: BuildRunInput, deps: BuildRunDeps, signal:
     if (!skipBuild) {
       // A rebuild after the head MOVED must not reuse the round-0 result identities
       // (see `headMoved`). Every other rebuild keeps them.
-      const stop = await planAndBuild(headMoved ? firstRound : 0)
+      const stop = await planAndBuild(recovery?.round ?? (headMoved ? firstRound : 0))
       if (stop) return stop
     }
     if (resumeFix) {
       if (firstRound >= maxRounds) return blocked('Review requires orchestrator arbitration: round ceiling')
-      findings = resume!.findings.filter(f => f.kind === 'code' && f.actionable).map(f => f.text)
-      if (firstRound >= 3 && findings.some(f => previous.includes(f))) return blocked('Review requires orchestrator arbitration: repeated finding')
-      if (replansUsed > 0 && (findings.some(f => previous.includes(f)) || findings.length >= previousBlockingCount)) return blocked('Review requires orchestrator arbitration: post-re-plan trigger')
-      previous = findings
-      previousBlockingCount = findings.length
-      previousReview = { findings: [...findings], blockingCount: findings.length }
+      findings = recovery?.findings ?? resume!.findings.filter(f => f.kind === 'code' && f.actionable).map(f => f.text)
+      if (!recovery && firstRound >= 3 && findings.some(f => previous.includes(f))) return blocked('Review requires orchestrator arbitration: repeated finding')
+      if (!recovery && replansUsed > 0 && (findings.some(f => previous.includes(f)) || findings.length >= previousBlockingCount)) return blocked('Review requires orchestrator arbitration: post-re-plan trigger')
+      if (!recovery) {
+        previous = findings
+        previousBlockingCount = previousReview?.blockingCount ?? previousBlockingCount
+      }
       const fixed = await work('fix', firstRound)
       if ('stop' in fixed) return fixed.stop
       firstRound++
     }
     async function repairNomination(repair: NominationRepair, round: number): Promise<BuildRunOutcome | null> {
+      if (recovery) return unknown('Pending worker must be reconciled before nomination repair')
       findings = [repair.finding]
       await checkpoint({ head: snapshot.head, stage: 'rejected', round, pending: undefined,
+        previousReview: { findings, blockingCount: 1 }, reviewBaseline: 'required',
         findings: findings.map(text => ({ kind: 'code' as const, actionable: true, text })) })
       if (round >= maxRounds) return blocked('Review requires orchestrator arbitration: round ceiling')
       const current = { findings, blockingCount: 1 }
       const progress = gateStop(reviewProgress(previousReview, current))
       if (progress) return progress
       previousReview = current
+      reviewBaseline = 'required'
       previous = [...findings]
       previousBlockingCount = current.blockingCount
       approved = false
@@ -706,6 +823,7 @@ export async function buildRun(input: BuildRunInput, deps: BuildRunDeps, signal:
         // that need it.
         if (decision.kind === 'fix') {
           await checkpoint({ head: snapshot.head, stage: 'rejected', round, pending: undefined,
+            previousReview: currentReview ?? null, reviewBaseline: 'required',
             findings: decision.findings.map(text => ({ kind: 'code' as const, actionable: true, text })) })
         }
         if (decision.kind === 're-plan' && replansUsed !== 0) return blocked('Review requires orchestrator arbitration: re-plan already spent')
@@ -717,6 +835,7 @@ export async function buildRun(input: BuildRunInput, deps: BuildRunDeps, signal:
           break
         }
         previousReview = currentReview
+        reviewBaseline = 'required'
         if (decision.kind === 're-plan') {
           // G077: a replacement needs a subsequent review within the host's cap.
           if (round >= maxRounds) return blocked(`design-gap: re-plan-unreachable: ${decision.whatIsMissing}; no round left for the bounded re-plan`)

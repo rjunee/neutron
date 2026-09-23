@@ -1,8 +1,14 @@
 import { reviewArtifact } from './gates/review-artifact.ts'
 import { briefIntegrity } from './gates/brief-integrity.ts'
 import { fixLineage } from './gates/fix-lineage.ts'
+import { mkdtemp, readFile, rm, writeFile } from 'node:fs/promises'
+import { tmpdir } from 'node:os'
+import { join } from 'node:path'
+import { createHash } from 'node:crypto'
+import { codexInReplRunner } from '@neutronai/runtime/workers/codex-in-repl.ts'
+import { decodeProjectTrailer } from '@neutronai/runtime/workers/project-runners.ts'
 import { expect, spyOn, test } from 'bun:test'
-import { fakeRunner, type BoundedWorkOutcome } from '@neutronai/runtime/bounded-work.ts'
+import { fakeRunner, type BoundedWorkOutcome, type BoundedWorkRequest } from '@neutronai/runtime/bounded-work.ts'
 import { reviewPanel } from './gates/review-panel.ts'
 import { buildRun, type BuildRunDeps, type BuildRunInput, type BuildSnapshot, type ReviewDecision } from './build-run.ts'
 
@@ -35,6 +41,14 @@ function fixture(landFixes = true) {
     return run(request, placement, signal)
   }
   const cross = fakeRunner('openai-codex', { outcomes })
+  const crossRun = cross.run.bind(cross)
+  cross.run = async (request, placement, signal) => {
+    // Existing scenarios script by role/round; retain the actual measured-head
+    // request in calls so identity-specific tests can assert the full key.
+    const scripted = outcomes.get(request.step_id.replace(/:head:[a-f0-9]+$/, ''))
+    if (scripted) outcomes.set(request.step_id, scripted)
+    return crossRun(request, placement, signal)
+  }
   const request = {
     model_id: 'test', effort: null, cwd: '.', writable: true, network: false, tools: 'edit-and-run',
     brief: { path: 'brief.md', integrity: briefIntegrity('brief.md.context.json') }, result: { path: 'result.json', schema: 'build/1' },
@@ -89,7 +103,7 @@ test('fresh to merged with a fix, host gates and fake runners', async () => {
   f.decisions.push({ kind: 'fix', findings: ['logic'] }, { kind: 'approve' })
   expect((await f.run()).kind).toBe('merged')
   expect(f.runner.calls.map(c => c.role)).toEqual(['plan', 'build', 'fix'])
-  expect(f.cross.calls.map(c => c.step_id)).toEqual(['run:review:1', 'run:review:2'])
+  expect(f.cross.calls.map(c => c.step_id.replace(/:head:[a-f0-9]+$/, ''))).toEqual(['run:review:1', 'run:review:2'])
   expect(f.events.filter(e => e !== 'measure')).toEqual(['publishGate', 'publish', 'publishGate', 'publish', 'publicationSuite', 'mergeGate', 'merge'])
   expect(f.reads()).toBe(17)
   expect([...f.runner.calls, ...f.cross.calls].every(c => c.needs_approval_decision === false)).toBe(true)
@@ -497,7 +511,7 @@ for (const role of ['plan', 'review', 'fix'] as const) {
     if (role === 'fix') f.decisions.push({ kind: 'fix', findings: ['logic'] })
     const step = `run:${role}:${role === 'plan' ? 0 : 1}`
     f.outcomes.set(step, { kind: 'unknown', detail: 'unobserved' })
-    expect(await f.run()).toMatchObject({ kind: 'unknown', step_id: step, phase: role })
+    expect(await f.run()).toMatchObject({ kind: 'unknown', step_id: role === 'review' ? `${step}:head:${f.snapshot.head}` : step, phase: role })
     expect(f.events).not.toContain('merge')
   })
 }
@@ -590,9 +604,11 @@ function modeFixture(mode: BuildRunInput['mode'] = 'ralph') {
   }
   const setPlan = (payload: unknown = plan) => f.outcomes.set('run:plan:0', f.completed({ ...f.snapshot, payload }))
   setPlan()
-  const resume = (stage: import('./build-run.ts').ResumeCheckpoint['stage'] = 'built', round = 1) => {
+  const resume = (stage: import('./build-run.ts').ResumeCheckpoint['stage'] = 'built', round = 1,
+    previousReview: import('./gates/review-progress.ts').ReviewProgress | null = null) => {
     f.input.start = 'resume'
-    state.resume = { head: f.snapshot.head, stage, round, findings: [], previousFindings: [] }
+    state.resume = { head: f.snapshot.head, stage, round, findings: [], previousFindings: [], previousReview,
+      reviewBaseline: previousReview === null ? 'none' : 'required' }
     return state.resume
   }
   return { ...f, state, plan, prepared, setPlan, resume, ledgerHead, run: () => {
@@ -829,11 +845,52 @@ test('iteration 2 continues from the ledger iteration 1 committed, not a regener
 
 test('G038 exact full resume head skips build; moved missing and short heads rebuild', async () => {
   for (const head of [null, 'short', 'b'.repeat(40), 'a'.repeat(40)]) {
-    const f = modeFixture('pr'); const checkpoint = f.resume('approved'); checkpoint.head = head
+    const f = modeFixture('pr'); const checkpoint = f.resume('approved', 1, { findings: [], blockingCount: 0 }); checkpoint.head = head
     expect((await f.run()).kind).toBe('merged')
     expect(f.runner.calls.some(c => c.role === 'build')).toBe(head !== f.snapshot.head)
     expect(f.cross.calls.length).toBe(head === f.snapshot.head ? 0 : 1)
   }
+})
+
+for (const moved of [false, true]) test(`review recovery ${moved ? 'invalidates a moved head' : 'reuses the exact head'} without resetting its round`, async () => {
+  const f = modeFixture('pr')
+  f.resume('built', 3, { findings: ['prior'], blockingCount: 1 })
+  const results = new Map<string, BoundedWorkOutcome>()
+  const paid: string[] = []
+  const requested: string[] = []
+  f.cross.run = async request => {
+    requested.push(request.step_id)
+    if (!results.has(request.step_id)) {
+      paid.push(request.step_id)
+      results.set(request.step_id, f.completed())
+    }
+    return structuredClone(results.get(request.step_id)!)
+  }
+  let ciReads = 0
+  f.deps.reviewCi = async () => ++ciReads === 2
+    ? { kind: 'unknown', detail: 'post-review CI unavailable' }
+    : { kind: 'known', findings: [] }
+  expect(await f.run()).toMatchObject({ kind: 'unknown', phase: 'review' })
+  const saved = f.state.checkpoints.at(-1)!
+  expect(saved.pending).toMatchObject({ phase: 'review', step_id: requested[0]! })
+  // The host has reconciled the completed pending worker. Its settled result
+  // remains owned by that id; a fresh driver must reuse it only at the same head.
+  f.state.resume = { ...saved, pending: undefined }
+  if (moved) {
+    f.snapshot.head = 'b'.repeat(40)
+    f.snapshot.pr!.head = f.snapshot.head
+    for (const key of f.outcomes.keys()) f.outcomes.set(key, f.completed())
+  }
+  expect(await f.run()).toMatchObject({ kind: 'merged' })
+  expect(paid).toHaveLength(moved ? 2 : 1)
+  expect(requested).toEqual([
+    `run:review:3:head:${'a'.repeat(40)}`,
+    `run:review:3:head:${(moved ? 'b' : 'a').repeat(40)}`,
+  ])
+  const reservations = f.state.checkpoints.filter(row => row.pending?.phase === 'review')
+  expect(reservations.map(row => row.pending!.step_id)).toEqual(requested)
+  expect(reservations.every(row => row.round >= 3)).toBe(true)
+  expect(f.runner.calls.filter(row => row.role === 'build')).toHaveLength(moved ? 1 : 0)
 })
 
 test('G038 absent live head rebuilds but unreadable required head stops', async () => {
@@ -849,7 +906,7 @@ test('G038 absent live head rebuilds but unreadable required head stops', async 
 test('G039 only actionable code findings buy a resumed fix', async () => {
   for (const finding of [null, { kind: 'lane', actionable: true, text: 'seat down' },
     { kind: 'code', actionable: false, text: 'advisory' }, { kind: 'code', actionable: true, text: 'bug' }] as const) {
-    const f = modeFixture('pr'); const checkpoint = f.resume('rejected', 2)
+    const f = modeFixture('pr'); const checkpoint = f.resume('rejected', 2, { findings: finding ? [finding.text] : [], blockingCount: finding?.actionable ? 1 : 0 })
     checkpoint.findings = finding ? [finding] : []
     expect((await f.run()).kind).toBe('merged')
     const actionable = finding?.kind === 'code' && finding.actionable
@@ -870,18 +927,18 @@ test('G040 resume diff is regenerated from pinned OID and empty diff rebuilds', 
 
 test('G041 resume inherits spent rounds and cannot restart exhausted budget', async () => {
   for (const stage of ['fixed', 'rejected'] as const) {
-    const f = modeFixture('pr'); const checkpoint = f.resume(stage, 10)
+    const f = modeFixture('pr'); const checkpoint = f.resume(stage, 10, { findings: ['prior'], blockingCount: 2 })
     checkpoint.findings = [{ kind: 'code', actionable: true, text: 'bug' }]
     f.decisions.push({ kind: 'fix', findings: ['bug'] })
     expect(await f.run()).toMatchObject({ kind: 'blocked', recipient: 'orchestrator' })
     expect(f.runner.calls).toHaveLength(0)
-    expect(f.cross.calls.map(c => c.step_id)).toEqual(stage === 'fixed' ? ['run:review:10'] : [])
+    expect(f.cross.calls.map(c => c.step_id.replace(/:head:[a-f0-9]+$/, ''))).toEqual(stage === 'fixed' ? ['run:review:10'] : [])
   }
-  const f = modeFixture('pr'); f.resume('fixed', 3)
+  const f = modeFixture('pr'); f.resume('fixed', 3, { findings: ['prior'], blockingCount: 2 })
   f.decisions.push({ kind: 'fix', findings: ['new bug'] })
   expect((await f.run()).kind).toBe('merged')
   expect(f.runner.calls.map(c => c.step_id)).toEqual(['run:fix:3'])
-  expect(f.cross.calls.map(c => c.step_id)).toEqual(['run:review:3', 'run:review:4'])
+  expect(f.cross.calls.map(c => c.step_id.replace(/:head:[a-f0-9]+$/, ''))).toEqual(['run:review:3', 'run:review:4'])
 })
 
 test('resume pending worker preserves phase and exact step without dispatch', async () => {
@@ -890,6 +947,506 @@ test('resume pending worker preserves phase and exact step without dispatch', as
   expect(await f.run()).toMatchObject({ kind: 'unknown', phase: 'fix', step_id: 'original:fix:3' })
   expect(f.runner.calls).toHaveLength(0)
   expect(f.cross.calls).toHaveLength(0)
+})
+
+for (const role of ['plan', 'build', 'review', 'fix'] as const) for (const reservationState of ['retained', 'missing', 'unarmed', 'foreign'] as const) {
+  const missingReservation = reservationState !== 'retained'
+  test(`pending ${role} ${missingReservation ? `refuses ${reservationState} reservation` : 'recovers its original file result'} after restart without another provider turn`, async () => {
+    const directory = await mkdtemp(join(tmpdir(), 'build-recovery-'))
+    try {
+      const f = modeFixture('pr')
+      f.input.repl_provider = 'openai-codex'
+      if (role === 'fix') f.resume('rejected', 3, { findings: ['logic'], blockingCount: 1 }).findings = [{ kind: 'code', actionable: true, text: 'logic' }]
+      let panels = 0
+      const observeReview = f.deps.observeReview
+      f.deps.observeReview = async (...args) => { panels++; return observeReview(...args) }
+      const request = { ...f.input.workers[role].request, cwd: directory,
+        brief: { path: join(directory, 'brief.md'), integrity: briefIntegrity(`${join(directory, 'brief.md')}.context.json`) },
+        result: { path: join(directory, 'result.json'), schema: 'build/1' } }
+      f.deps.reviewArtifact = (req, snapshot) => reviewArtifact(req, snapshot, async path =>
+        path === req.brief.path ? `${req.brief.path}.context.json` : JSON.stringify({ request: req, snapshot }))
+      let providerTurns = 0
+      let original: BoundedWorkRequest | undefined
+      let recoveredResult: unknown
+      const requests: BoundedWorkRequest[] = []
+      const makeRunner = () => {
+        const runner = codexInReplRunner({
+          state_dir: directory, topic_id: 'project-topic', spec: { tools: [], model_preference: ['test'] },
+          composeActingTurn: async (_topic, spec) => {
+            providerTurns++
+            const args = JSON.parse(spec.prompt.split('\n')[1]!)
+            original = JSON.parse(args.message.split('\n').find((line: string) => line.startsWith('Request (data): '))!.slice(16))
+            if (role !== 'review') {
+              f.snapshot.head = 'b'.repeat(40)
+              if (f.snapshot.pr) f.snapshot.pr.head = f.snapshot.head
+              for (const outcome of f.outcomes.values()) {
+                if (outcome.kind === 'completed' && outcome.result && typeof outcome.result === 'object') Object.assign(outcome.result, structuredClone(f.snapshot))
+              }
+            }
+            recoveredResult = { ...structuredClone(f.snapshot), ...(role === 'plan' ? { payload: f.plan } : {}) }
+            await writeFile(request.result.path, JSON.stringify({ ...original, schema: request.result.schema, kind: 'completed', result: recoveredResult }))
+            throw new Error('Acknowledgement lost after the original worker wrote its result')
+          },
+          decodeTrailer: (bytes, req) => decodeProjectTrailer(bytes, req, {
+            schemas: new Map([['build/1', (result: unknown) => result !== null && typeof result === 'object']]),
+            metadata: () => undefined,
+          }),
+        })
+        const run = runner.run
+        runner.run = async (req, placement, signal) => { requests.push(structuredClone(req)); return run(req, placement, signal) }
+        const recover = runner.recover!
+        runner.recover = async (req, placement, signal) => { requests.push(structuredClone(req)); return recover(req, placement, signal) }
+        return runner
+      }
+      f.input.workers[role] = { request, runner: makeRunner() }
+      expect(await f.run()).toMatchObject({ kind: 'unknown', phase: role })
+      const saved = JSON.parse(JSON.stringify(f.state.checkpoints.at(-1)!))
+      expect(saved.pending.recovery.request).toEqual(original)
+      expect(saved.pending.recovery.previousReview).toEqual(role === 'fix' ? { findings: ['logic'], blockingCount: 1 } : null)
+      const preparedBefore = f.prepared.filter(value => value.role === role).length
+      const panelsBefore = panels
+      const checkpointsBefore = f.state.checkpoints.length
+      const key = createHash('sha256').update(JSON.stringify([original!.run_id, original!.step_id])).digest('hex')
+      const reservationPath = join(directory, `codex-step-${key}.json`)
+      if (reservationState === 'missing') await rm(reservationPath)
+      if (reservationState === 'unarmed') await writeFile(reservationPath, JSON.stringify(original))
+      if (reservationState === 'foreign') await writeFile(reservationPath, JSON.stringify({ ...original, step_id: 'other-step' }) + '\n#dispatch-armed\n')
+      const reservationBytes = reservationState === 'missing' ? null : await readFile(reservationPath, 'utf8')
+      const resultBytes = await readFile(request.result.path, 'utf8')
+      f.state.resume = saved
+      f.input.start = 'resume'
+      if (f.snapshot.pr) f.input.owned_pr = f.snapshot.pr.number
+      f.input.workers[role].runner = makeRunner()
+      expect(await f.run()).toMatchObject({ kind: missingReservation ? 'unknown' : 'merged' })
+      expect(providerTurns).toBe(1)
+      expect(requests).toEqual([original!, original!])
+      expect(f.prepared.filter(value => value.role === role)).toHaveLength(preparedBefore)
+      if (missingReservation) {
+        expect(panels).toBe(panelsBefore)
+        expect(f.state.checkpoints).toHaveLength(checkpointsBefore)
+        expect(f.state.checkpoints.at(-1)?.pending?.step_id).toBe(original!.step_id)
+        expect(f.events).not.toContain('merge')
+        expect(await readFile(request.result.path, 'utf8')).toBe(resultBytes)
+        if (reservationBytes === null) await expect(readFile(reservationPath)).rejects.toMatchObject({ code: 'ENOENT' })
+        else expect(await readFile(reservationPath, 'utf8')).toBe(reservationBytes)
+      } else {
+        expect(f.state.checkpoints.at(-1)?.pending).toBeUndefined()
+        expect(f.events).toContain('publicationSuite')
+        expect(f.events).toContain('mergeGate')
+      }
+    } finally { await rm(directory, { recursive: true, force: true }) }
+  })
+}
+
+async function pendingBuildFixture() {
+  const f = modeFixture('pr')
+  const original = f.completed()
+  f.outcomes.set('run:build:0', { kind: 'unknown', detail: 'lost acknowledgement' })
+  expect(await f.run()).toMatchObject({ kind: 'unknown', phase: 'build' })
+  f.state.resume = JSON.parse(JSON.stringify(f.state.checkpoints.at(-1)!))
+  f.input.start = 'resume'
+  f.outcomes.set('run:build:0', original)
+  f.input.workers.build.runner = { ...f.runner, recover: f.runner.run }
+  f.runner.calls.length = 0
+  f.cross.calls.length = 0
+  return f
+}
+
+for (const progress of ['missing', 'null', 'invalid', 'valid'] as const) test(`pending fix requires ${progress} review progress to preserve the repeated-finding gate`, async () => {
+  const f = modeFixture('pr')
+  f.decisions.push({ kind: 'fix', findings: ['repeat'], blockingCount: 1 })
+  f.outcomes.set('run:fix:1', { kind: 'unknown', detail: 'lost acknowledgement' })
+  expect(await f.run()).toMatchObject({ kind: 'unknown', phase: 'fix' })
+  const saved = JSON.parse(JSON.stringify(f.state.checkpoints.at(-1)!))
+  expect(saved.pending.recovery.previousReview).toEqual({ findings: ['repeat'], blockingCount: 1 })
+  if (progress === 'missing') delete saved.pending.recovery.previousReview
+  if (progress === 'null') saved.pending.recovery.previousReview = null
+  if (progress === 'invalid') saved.pending.recovery.previousReview = { findings: [' '], blockingCount: 1 }
+  f.state.resume = JSON.parse(JSON.stringify(saved))
+  f.input.start = 'resume'
+  f.decisions.push({ kind: 'fix', findings: ['repeat'], blockingCount: 1 }, { kind: 'approve' })
+  f.outcomes.set('run:fix:1', f.completed())
+  let recovered = 0
+  f.input.workers.fix.runner = { ...f.runner, recover: async (...args) => { recovered++; return f.runner.run(...args) } }
+  f.runner.calls.length = 0
+  f.cross.calls.length = 0
+  const checkpoints = f.state.checkpoints.length
+  const outcome = await f.run()
+  expect(outcome.kind).toBe(progress === 'valid' ? 'blocked' : 'unknown')
+  expect(recovered).toBe(progress === 'valid' ? 1 : 0)
+  expect(f.runner.calls.map(request => request.step_id)).toEqual(progress === 'valid' ? ['run:fix:1'] : [])
+  expect(f.cross.calls).toHaveLength(progress === 'valid' ? 1 : 0)
+  expect(f.events).not.toContain('merge')
+  if (progress === 'valid') expect(outcome).toMatchObject({ kind: 'blocked', on: 'Review requires orchestrator arbitration: repeated finding' })
+  else {
+    expect(outcome).toMatchObject({ kind: 'unknown', phase: 'fix', step_id: 'run:fix:1' })
+    expect(f.state.checkpoints).toHaveLength(checkpoints)
+    expect(f.state.checkpoints.at(-1)?.pending?.step_id).toBe('run:fix:1')
+  }
+})
+
+for (const role of ['plan', 'build', 'review'] as const) test(`pending ${role} rejects an omitted prior-review field before recovery`, async () => {
+  const f = modeFixture('pr')
+  const key = `run:${role}:${role === 'review' ? 1 : 0}`
+  f.outcomes.set(key, { kind: 'unknown', detail: 'lost acknowledgement' })
+  expect(await f.run()).toMatchObject({ kind: 'unknown', phase: role })
+  const saved = JSON.parse(JSON.stringify(f.state.checkpoints.at(-1)!))
+  expect(saved.pending.recovery.previousReview).toBeNull()
+  delete saved.pending.recovery.previousReview
+  f.state.resume = JSON.parse(JSON.stringify(saved))
+  f.input.start = 'resume'
+  let recovered = 0
+  const runner = f.input.workers[role].runner
+  f.input.workers[role].runner = { ...runner, recover: async () => { recovered++; return f.completed() } }
+  f.runner.calls.length = 0
+  f.cross.calls.length = 0
+  expect(await f.run()).toMatchObject({ kind: 'unknown', phase: role, step_id: saved.pending.step_id })
+  expect(recovered).toBe(0)
+  expect(f.runner.calls).toHaveLength(0)
+  expect(f.cross.calls).toHaveLength(0)
+  expect(f.events).not.toContain('merge')
+})
+
+for (const scenario of [
+  { after: 're-plan', role: 'plan', round: 1 },
+  { after: 're-plan', role: 'build', round: 1 },
+  { after: 're-plan', role: 'review', round: 2 },
+  { after: 'fix', role: 'review', round: 2 },
+] as const) for (const history of ['missing', 'null', 'valid'] as const) {
+  test(`pending ${scenario.role}:${scenario.round} after ${scenario.after} requires ${history} review history`, async () => {
+    const f = modeFixture('pr')
+    f.decisions.push(scenario.after === 'fix' ? { kind: 'fix', findings: ['repeat'], blockingCount: 2 }
+      : { kind: 're-plan', findings: ['repeat'], blockingCount: 2, whatIsMissing: 'design' })
+    const step = `run:${scenario.role}:${scenario.round}`
+    f.outcomes.set(step, { kind: 'unknown', detail: 'lost acknowledgement' })
+    expect(await f.run()).toMatchObject({ kind: 'unknown', phase: scenario.role })
+    const saved = JSON.parse(JSON.stringify(f.state.checkpoints.at(-1)!))
+    expect(saved.pending.recovery.previousReview).toEqual({ findings: ['repeat'], blockingCount: 2 })
+    expect(saved.replansUsed).toBe(scenario.after === 'fix' ? 0 : 1)
+    if (history === 'missing') delete saved.pending.recovery.previousReview
+    if (history === 'null') saved.pending.recovery.previousReview = null
+    f.state.resume = JSON.parse(JSON.stringify(saved))
+    f.input.start = 'resume'
+    f.outcomes.set(step, f.completed({ ...f.snapshot, ...(scenario.role === 'plan' ? { payload: f.plan } : {}) }))
+    const runner = f.input.workers[scenario.role].runner
+    let recovered = 0
+    f.input.workers[scenario.role].runner = { ...runner, recover: async (...args) => { recovered++; return runner.run(...args) } }
+    f.decisions.push({ kind: 'fix', findings: ['repeat'], blockingCount: 2 }, { kind: 'approve' })
+    f.runner.calls.length = 0
+    f.cross.calls.length = 0
+    const checkpoints = f.state.checkpoints.length
+    const result = await f.run()
+    expect(result.kind).toBe(history === 'valid' ? 'blocked' : 'unknown')
+    expect(recovered).toBe(history === 'valid' ? 1 : 0)
+    expect(f.runner.calls.some(request => request.role === 'fix')).toBe(false)
+    expect(f.events).not.toContain('merge')
+    if (history === 'valid') expect(result).toMatchObject({ on: 'Review requires orchestrator arbitration: repeated finding' })
+    else {
+      expect(f.runner.calls).toHaveLength(0)
+      expect(f.cross.calls).toHaveLength(0)
+      expect(f.state.checkpoints).toHaveLength(checkpoints)
+    }
+  })
+}
+
+for (const after of ['fix', 're-plan'] as const) for (const history of ['missing', 'null', 'missing-marker', 'invalid-marker', 'erased', 'valid'] as const) {
+  test(`completed ${after} checkpoint keeps ${history} history before its next review`, async () => {
+    const f = modeFixture('pr')
+    f.decisions.push(after === 'fix' ? { kind: 'fix', findings: ['repeat'], blockingCount: 2 }
+      : { kind: 're-plan', findings: ['repeat'], blockingCount: 2, whatIsMissing: 'design' })
+    let readiness = 0
+    f.deps.reviewReadiness = async () => ++readiness === 2 ? { kind: 'unknown', detail: 'interrupted before review' } : { kind: 'allow' }
+    expect(await f.run()).toMatchObject({ kind: 'unknown', detail: 'interrupted before review' })
+    const saved = JSON.parse(JSON.stringify(f.state.checkpoints.at(-1)!))
+    expect(saved).toMatchObject({ round: 2, previousReview: { findings: ['repeat'], blockingCount: 2 } })
+    expect(saved.pending).toBeUndefined()
+    if (history === 'missing') delete saved.previousReview
+    if (history === 'null') saved.previousReview = null
+    if (history === 'missing-marker') delete saved.reviewBaseline
+    if (history === 'invalid-marker') saved.reviewBaseline = 'invented'
+    if (history === 'erased') { saved.reviewBaseline = 'none'; saved.previousReview = null }
+    f.state.resume = JSON.parse(JSON.stringify(saved))
+    f.input.start = 'resume'
+    f.decisions.push({ kind: 'fix', findings: ['repeat'], blockingCount: 2 }, { kind: 'approve' })
+    f.runner.calls.length = 0
+    f.cross.calls.length = 0
+    const checkpoints = f.state.checkpoints.length
+    const prepared = f.prepared.length
+    const result = await f.run()
+    expect(result.kind).toBe(history === 'valid' ? 'blocked' : 'unknown')
+    expect(f.runner.calls).toHaveLength(0)
+    expect(f.cross.calls).toHaveLength(history === 'valid' ? 1 : 0)
+    expect(f.events).not.toContain('merge')
+    if (history === 'valid') expect(result).toMatchObject({ on: 'Review requires orchestrator arbitration: repeated finding' })
+    else {
+      expect(f.state.checkpoints).toHaveLength(checkpoints)
+      expect(f.prepared).toHaveLength(prepared)
+    }
+  })
+}
+
+for (const history of ['missing', 'null', 'valid'] as const) test(`moved-head rebuild requires ${history} history before writing a later-round request`, async () => {
+  const f = modeFixture('pr')
+  const saved = f.resume('approved', 1, { findings: [], blockingCount: 0 })
+  if (history === 'missing') delete saved.previousReview
+  if (history === 'null') saved.previousReview = null
+  f.state.resume = JSON.parse(JSON.stringify(saved))
+  f.snapshot.head = 'b'.repeat(40)
+  for (const key of f.outcomes.keys()) f.outcomes.set(key, f.completed())
+  expect(await f.run()).toMatchObject({ kind: history === 'valid' ? 'merged' : 'unknown' })
+  if (history === 'valid') expect(f.runner.calls.map(request => request.step_id)).toEqual(['run:plan:1', 'run:build:1'])
+  else {
+    expect(f.runner.calls).toHaveLength(0)
+    expect(f.cross.calls).toHaveLength(0)
+    expect(f.state.checkpoints).toHaveLength(0)
+    expect(f.prepared).toHaveLength(0)
+  }
+})
+
+for (const loseAck of [false, true]) test(`G038 generated pre-review checkpoint permits moved-head plan one, lost ack=${loseAck}`, async () => {
+  const f = modeFixture('pr')
+  f.deps.reviewReadiness = async () => ({ kind: 'unknown', detail: 'stopped before first review' })
+  expect(await f.run()).toMatchObject({ kind: 'unknown', detail: 'stopped before first review' })
+  const saved = JSON.parse(JSON.stringify(f.state.checkpoints.at(-1)!))
+  expect(saved).toMatchObject({ stage: 'built', round: 1, replansUsed: 0, previousReview: null, reviewBaseline: 'none' })
+  expect(saved.pending).toBeUndefined()
+  expect(f.cross.calls).toHaveLength(0)
+  f.state.resume = saved
+  f.input.start = 'resume'
+  f.snapshot.head = 'b'.repeat(40)
+  if (f.snapshot.pr) f.snapshot.pr.head = f.snapshot.head
+  for (const key of f.outcomes.keys()) f.outcomes.set(key, f.completed())
+  f.deps.reviewReadiness = async () => ({ kind: 'allow' })
+  f.runner.calls.length = 0
+  if (loseAck) {
+    f.outcomes.set('run:plan:1', { kind: 'unknown', detail: 'lost acknowledgement' })
+    expect(await f.run()).toMatchObject({ kind: 'unknown', phase: 'plan', step_id: 'run:plan:1', detail: 'lost acknowledgement' })
+    const pending = JSON.parse(JSON.stringify(f.state.checkpoints.at(-1)!))
+    expect(pending.pending.recovery).toMatchObject({ round: 1, previousReview: null, reviewBaseline: 'none' })
+    f.state.resume = pending
+    f.outcomes.set('run:plan:1', f.completed())
+    f.input.workers.plan.runner = { ...f.runner, recover: f.runner.run }
+    f.runner.calls.length = 0
+  }
+  expect(await f.run()).toMatchObject({ kind: 'merged' })
+  expect(f.runner.calls.map(request => request.step_id)).toEqual(['run:plan:1', 'run:build:1'])
+  expect(f.cross.calls.map(request => request.step_id)).toEqual([`run:review:1:head:${f.snapshot.head}`])
+  expect(f.state.checkpoints.at(-1)).toMatchObject({ stage: 'approved', previousReview: null, reviewBaseline: 'none' })
+})
+
+for (const role of ['plan', 'build', 'review', 'fix'] as const) for (const marker of ['missing', 'invalid', 'contradictory'] as const) {
+  test(`pending ${role} rejects ${marker} baseline provenance before recovery`, async () => {
+    const f = modeFixture('pr')
+    if (role === 'fix') f.decisions.push({ kind: 'fix', findings: ['repeat'], blockingCount: 1 })
+    const step = `run:${role}:${role === 'fix' || role === 'review' ? 1 : 0}`
+    f.outcomes.set(step, { kind: 'unknown', detail: 'lost acknowledgement' })
+    expect(await f.run()).toMatchObject({ kind: 'unknown', phase: role })
+    const saved = JSON.parse(JSON.stringify(f.state.checkpoints.at(-1)!))
+    // Damage both copies: consistency with the other row must not manufacture provenance.
+    for (const row of [saved, saved.pending.recovery]) {
+      if (marker === 'missing') delete row.reviewBaseline
+      else row.reviewBaseline = marker === 'invalid' ? 'invented' : role === 'fix' ? 'none' : 'required'
+    }
+    f.state.resume = JSON.parse(JSON.stringify(saved))
+    f.input.start = 'resume'
+    let recovered = 0
+    f.input.workers[role].runner = { ...f.input.workers[role].runner, recover: async () => { recovered++; return f.completed() } }
+    f.runner.calls.length = 0
+    f.cross.calls.length = 0
+    const count = f.state.checkpoints.length
+    expect(await f.run()).toMatchObject({ kind: 'unknown', phase: role })
+    expect(recovered).toBe(0)
+    expect(f.runner.calls).toHaveLength(0)
+    expect(f.cross.calls).toHaveLength(0)
+    expect(f.state.checkpoints).toHaveLength(count)
+    expect(f.events).not.toContain('merge')
+  })
+}
+
+for (const role of ['fix', 'plan', 'build', 'review'] as const) test(`pending ${role} cannot erase established provenance with a coherent none pair`, async () => {
+  const f = modeFixture('pr')
+  f.decisions.push(role === 'fix' ? { kind: 'fix', findings: ['repeat'], blockingCount: 1 }
+    : { kind: 're-plan', findings: ['repeat'], blockingCount: 1, whatIsMissing: 'design' })
+  const step = `run:${role}:${role === 'review' ? 2 : 1}`
+  f.outcomes.set(step, { kind: 'unknown', detail: 'lost acknowledgement' })
+  expect(await f.run()).toMatchObject({ kind: 'unknown', phase: role })
+  const saved = JSON.parse(JSON.stringify(f.state.checkpoints.at(-1)!))
+  for (const row of [saved, saved.pending.recovery]) { row.reviewBaseline = 'none'; row.previousReview = null }
+  f.state.resume = saved
+  f.input.start = 'resume'
+  let recovered = 0
+  f.input.workers[role].runner = { ...f.input.workers[role].runner, recover: async () => { recovered++; return f.completed() } }
+  f.runner.calls.length = 0
+  f.cross.calls.length = 0
+  expect(await f.run()).toMatchObject({ kind: 'unknown', phase: role })
+  expect(recovered).toBe(0)
+  expect(f.runner.calls).toHaveLength(0)
+  expect(f.cross.calls).toHaveLength(0)
+  expect(f.events).not.toContain('merge')
+})
+
+test('a round-zero rebuild can legitimately retain prior review history', async () => {
+  const f = modeFixture('pr')
+  f.resume('fixed', 3, { findings: ['prior'], blockingCount: 2 })
+  f.snapshot.head = 'absent'
+  f.outcomes.set('run:plan:0', { kind: 'unknown', detail: 'still planning' })
+  expect(await f.run()).toMatchObject({ kind: 'unknown', detail: 'still planning' })
+  expect(f.runner.calls.map(request => request.step_id)).toEqual(['run:plan:0'])
+  expect(f.state.checkpoints.at(-1)?.pending?.recovery).toMatchObject({ round: 0, previousReview: { findings: ['prior'], blockingCount: 2 } })
+  f.state.resume = JSON.parse(JSON.stringify(f.state.checkpoints.at(-1)!))
+  f.input.workers.plan.runner = { ...f.runner, recover: f.runner.run }
+  f.runner.calls.length = 0
+  expect(await f.run()).toMatchObject({ kind: 'unknown', detail: 'still planning' })
+  expect(f.runner.calls.map(request => request.step_id)).toEqual(['run:plan:0'])
+})
+
+for (const change of ['missing-request', 'wrong-request', 'wrong-step', 'model', 'brief', 'policy', 'provider', 'round-cap'] as const) {
+  test(`pending recovery refuses ${change} before another worker or publication`, async () => {
+    const f = await pendingBuildFixture()
+    const pending = f.state.resume!.pending!
+    if (change === 'missing-request') delete pending.recovery
+    if (change === 'wrong-request') pending.recovery!.request = { ...pending.recovery!.request, model_id: 'other-model' }
+    if (change === 'wrong-step') pending.step_id = 'other:build:0'
+    if (change === 'model') f.input.workers.build.request = { ...f.input.workers.build.request, model_id: 'changed-model' }
+    if (change === 'brief') f.input.workers.plan.request = { ...f.input.workers.plan.request, brief: { path: 'brief.md', integrity: 'changed-task' } }
+    if (change === 'policy') f.input.workers.build.request = { ...f.input.workers.build.request, network: true }
+    if (change === 'provider') f.input.workers.build.runner = { ...f.runner, provider: 'openai-codex' }
+    if (change === 'round-cap') f.deps.readReviewCap = async () => ({ kind: 'known', max_rounds: 4 })
+    expect(await f.run()).toMatchObject({ kind: 'unknown', phase: 'build', step_id: pending.step_id })
+    expect(f.runner.calls).toHaveLength(0)
+    expect(f.cross.calls).toHaveLength(0)
+    expect(f.events).not.toContain('publish')
+    expect(f.events).not.toContain('merge')
+  })
+}
+
+test('pending build result cannot apply to a different measured head', async () => {
+  const f = await pendingBuildFixture()
+  f.snapshot.head = 'c'.repeat(40)
+  expect(await f.run()).toMatchObject({ kind: 'failed', cause: 'built-head-unverified' })
+  expect(f.runner.calls.map(request => request.step_id)).toEqual(['run:build:0'])
+  expect(f.events).not.toContain('publish')
+  expect(f.cross.calls).toHaveLength(0)
+})
+
+test('writable pending planner cannot apply an old result to a moved head', async () => {
+  const f = modeFixture('pr')
+  const original = f.outcomes.get('run:plan:0')!
+  f.outcomes.set('run:plan:0', { kind: 'unknown', detail: 'lost acknowledgement' })
+  expect(await f.run()).toMatchObject({ kind: 'unknown', phase: 'plan' })
+  f.state.resume = JSON.parse(JSON.stringify(f.state.checkpoints.at(-1)!))
+  f.input.start = 'resume'
+  f.input.workers.plan.runner = { ...f.runner, recover: f.runner.run }
+  f.outcomes.set('run:plan:0', original)
+  f.snapshot.head = 'c'.repeat(40)
+  f.runner.calls.length = 0
+  expect(await f.run()).toMatchObject({ kind: 'failed', cause: 'built-head-unverified' })
+  expect(f.runner.calls.map(request => request.step_id)).toEqual(['run:plan:0'])
+  expect(f.events).not.toContain('publish')
+  expect(f.cross.calls).toHaveLength(0)
+})
+
+test('pending recovery cannot fall back to ordinary run when the runner lacks recovery', async () => {
+  const f = await pendingBuildFixture()
+  delete f.input.workers.build.runner.recover
+  expect(await f.run()).toMatchObject({ kind: 'unknown', phase: 'build', detail: 'Pending worker runner cannot recover without dispatch' })
+  expect(f.runner.calls).toHaveLength(0)
+  expect(f.cross.calls).toHaveLength(0)
+  expect(f.events).not.toContain('publish')
+})
+
+test('unresolved pending build remains unknown and cannot buy a new step', async () => {
+  const f = await pendingBuildFixture()
+  f.outcomes.set('run:build:0', { kind: 'unknown', detail: 'still running' })
+  expect(await f.run()).toMatchObject({ kind: 'unknown', step_id: 'run:build:0', detail: 'still running' })
+  expect(f.runner.calls.map(request => request.step_id)).toEqual(['run:build:0'])
+  expect(f.events).not.toContain('publish')
+  expect(f.cross.calls).toHaveLength(0)
+})
+
+for (const role of ['plan', 'review'] as const) test(`read-only pending ${role} cannot recover across head movement`, async () => {
+  const f = modeFixture('pr')
+  f.input.workers[role].request = { ...f.input.workers[role].request, writable: false }
+  const key = `run:${role}:${role === 'plan' ? 0 : 1}`
+  f.outcomes.set(key, { kind: 'unknown', detail: 'lost acknowledgement' })
+  expect(await f.run()).toMatchObject({ kind: 'unknown', phase: role })
+  f.state.resume = JSON.parse(JSON.stringify(f.state.checkpoints.at(-1)!))
+  f.input.start = 'resume'
+  f.snapshot.head = 'c'.repeat(40)
+  if (f.snapshot.pr) f.snapshot.pr.head = f.snapshot.head
+  f.outcomes.set(key, f.completed())
+  f.runner.calls.length = 0
+  f.cross.calls.length = 0
+  expect(await f.run()).toMatchObject({ kind: 'unknown', phase: role, detail: 'Pending worker input revision changed before recovery' })
+  expect(f.runner.calls).toHaveLength(0)
+  expect(f.cross.calls).toHaveLength(0)
+  expect(f.events).not.toContain('merge')
+})
+
+test('recovered pending build still requires the publication suite', async () => {
+  const f = await pendingBuildFixture()
+  f.deps.publicationSuite = async () => ({ kind: 'unknown', detail: 'full suite receipt missing' })
+  expect(await f.run()).toMatchObject({ kind: 'unknown', detail: 'full suite receipt missing' })
+  expect(f.runner.calls.map(request => request.step_id)).toEqual(['run:build:0'])
+  expect(f.events).not.toContain('merge')
+})
+
+test('pending review cannot be discarded by a publication nomination repair', async () => {
+  const f = modeFixture('pr')
+  f.outcomes.set('run:review:1', { kind: 'unknown', detail: 'still running' })
+  expect(await f.run()).toMatchObject({ kind: 'unknown', phase: 'review' })
+  const pending = JSON.parse(JSON.stringify(f.state.checkpoints.at(-1)!))
+  f.state.resume = pending
+  f.input.start = 'resume'
+  f.deps.publishGate = async () => ({ kind: 'repair-nomination', finding: 'nomination changed' })
+  f.runner.calls.length = 0
+  f.cross.calls.length = 0
+  const checkpoints = f.state.checkpoints.length
+  const outcome = await f.run()
+  expect(f.state.checkpoints).toHaveLength(checkpoints)
+  expect(f.state.checkpoints.at(-1)?.pending).toEqual(pending.pending)
+  expect(outcome).toMatchObject({ kind: 'unknown', detail: 'Pending worker must be reconciled before nomination repair' })
+  expect(f.runner.calls).toHaveLength(0)
+  expect(f.cross.calls).toHaveLength(0)
+  expect(f.events).not.toContain('merge')
+})
+
+test('interrupted nomination repair retains its own review progress before a resumed fix', async () => {
+  const f = modeFixture('pr')
+  f.resume('approved', 1, { findings: ['old'], blockingCount: 2 })
+  f.deps.publishGate = async () => ({ kind: 'repair-nomination', finding: 'nomination' })
+  const save = f.deps.modes!.saveCheckpoint
+  f.deps.modes!.saveCheckpoint = async value => {
+    await save(value)
+    if (value.stage === 'rejected' && !value.pending) throw new Error('interrupted after nomination checkpoint')
+  }
+  expect(await f.run()).toMatchObject({ kind: 'unknown', detail: 'interrupted after nomination checkpoint' })
+  const saved = JSON.parse(JSON.stringify(f.state.checkpoints.at(-1)!))
+  expect(saved.previousReview).toEqual({ findings: ['nomination'], blockingCount: 1 })
+  f.state.resume = saved
+  f.deps.modes!.saveCheckpoint = save
+  f.deps.publishGate = async () => ({ kind: 'allow' })
+  f.decisions.push({ kind: 'fix', findings: ['nomination'], blockingCount: 1 }, { kind: 'approve' })
+  expect(await f.run()).toMatchObject({ kind: 'blocked', on: 'Review requires orchestrator arbitration: repeated finding' })
+  expect(f.runner.calls.map(request => request.step_id)).toEqual(['run:fix:1'])
+  expect(f.events).not.toContain('merge')
+})
+
+for (const remainingTasks of [0, 1]) test(`pending Ralph build preserves its validated remainder ${remainingTasks}`, async () => {
+  const f = modeFixture()
+  f.setPlan({ ...f.plan, remainingTasks })
+  f.outcomes.set('run:build:0', { kind: 'unknown', detail: 'lost acknowledgement' })
+  expect(await f.run()).toMatchObject({ kind: 'unknown', phase: 'build' })
+  f.state.resume = JSON.parse(JSON.stringify(f.state.checkpoints.at(-1)!))
+  f.input.start = 'resume'
+  f.outcomes.set('run:build:0', f.completed())
+  f.input.workers.build.runner = { ...f.runner, recover: f.runner.run }
+  f.runner.calls.length = 0
+  expect(await f.run()).toMatchObject({ kind: remainingTasks ? 'continued' : 'merged' })
+  expect(f.runner.calls.map(request => request.role)).toEqual(['build'])
+  expect(f.prepared.filter(value => value.role === 'build').map(value => value.suiteScope)).toEqual([remainingTasks ? 'subset' : 'full-suite'])
+  expect(f.state.advances).toBe(remainingTasks ? 1 : 0)
+  expect(f.events.includes('publicationSuite')).toBe(remainingTasks === 0)
 })
 
 for (const start of ['fresh', 'resume'] as const) {
@@ -949,7 +1506,7 @@ test('resume regenerated diff disagreement blocks and unreadable diff remains un
 })
 
 test('resume rejection retains previous finding classes at round three', async () => {
-  const f = modeFixture('pr'); const checkpoint = f.resume('rejected', 3)
+  const f = modeFixture('pr'); const checkpoint = f.resume('rejected', 3, { findings: ['same class'], blockingCount: 1 })
   checkpoint.findings = [{ kind: 'code', actionable: true, text: 'same class' }]
   checkpoint.previousFindings = ['same class']
   expect(await f.run()).toMatchObject({ kind: 'blocked', on: 'Review requires orchestrator arbitration: repeated finding' })
@@ -1081,7 +1638,7 @@ test('G077 final-round design gap stops; a spare round admits replacement', asyn
     const f = fixture(); f.input.start = 'resume'
     f.deps.readReviewCap = async () => ({ kind: 'known', max_rounds: 5 })
     f.deps.modes = {
-      loadResume: async () => ({ head: f.snapshot.head, stage: 'built', round, findings: [], previousFindings: [] }),
+      loadResume: async () => ({ head: f.snapshot.head, stage: 'built', round, findings: [], previousFindings: [], reviewBaseline: 'required', previousReview: { findings: ['prior'], blockingCount: 3 } }),
       regenerateDiff: async () => ({ kind: 'known', diff: f.snapshot.diff }),
       probePlan: async () => null, advanceRalph: async () => ({ kind: 'allow' }),
       commitPlan: async () => ({ kind: 'unknown', detail: 'pr mode never commits a ledger' }),
@@ -1092,7 +1649,7 @@ test('G077 final-round design gap stops; a spare round admits replacement', asyn
       ? { kind: 'blocked', phase: 'review', recipient: 'orchestrator', on: `design-gap: re-plan-unreachable: ${gap.whatIsMissing}; no round left for the bounded re-plan` }
       : { kind: 'merged' })
     expect(f.runner.calls.map(c => c.step_id)).toEqual(round === 5 ? [] : ['run:plan:4', 'run:build:4'])
-    expect(f.cross.calls.map(c => c.step_id)).toEqual(round === 5 ? ['run:review:5'] : ['run:review:4', 'run:review:5'])
+    expect(f.cross.calls.map(c => c.step_id.replace(/:head:[a-f0-9]+$/, ''))).toEqual(round === 5 ? ['run:review:5'] : ['run:review:4', 'run:review:5'])
   }
 })
 test('design gap re-plans once and continues with fresh measurements and spent rounds', async () => {
@@ -1103,7 +1660,7 @@ test('design gap re-plans once and continues with fresh measurements and spent r
   f.deps.reviewGate = (payload, observation, snapshot, round, used, record) => { counts.push(used!); return gate(payload, observation, snapshot, round, used, record) }
   expect(await f.run()).toMatchObject({ kind: 'merged' })
   expect(f.runner.calls.map(c => c.step_id)).toEqual(['run:plan:0', 'run:build:0', 'run:plan:1', 'run:build:1', 'run:fix:2'])
-  expect(f.cross.calls.map(c => c.step_id)).toEqual(['run:review:1', 'run:review:2', 'run:review:3'])
+  expect(f.cross.calls.map(c => c.step_id.replace(/:head:[a-f0-9]+$/, ''))).toEqual(['run:review:1', 'run:review:2', 'run:review:3'])
   expect(counts).toEqual([0, 1, 1])
   expect(f.reads()).toBe(24)
 })
@@ -1137,7 +1694,7 @@ test('resume keeps the host re-plan count and rejects invalid counts', async () 
     const f = fixture(); f.input.start = 'resume'
     f.deps.modes = {
       saveCheckpoint: async () => {},
-      loadResume: async () => ({ head: f.snapshot.head, stage: 'built', round: 2, replansUsed: used, findings: [], previousFindings: [] }),
+      loadResume: async () => ({ head: f.snapshot.head, stage: 'built', round: 2, replansUsed: used, findings: [], previousFindings: [], reviewBaseline: 'required', previousReview: { findings: ['prior'], blockingCount: 3 } }),
       regenerateDiff: async () => ({ kind: 'known', diff: f.snapshot.diff }),
       probePlan: async () => null, advanceRalph: async () => ({ kind: 'allow' }),
       commitPlan: async () => ({ kind: 'unknown', detail: 'pr mode never commits a ledger' }),
@@ -1150,7 +1707,7 @@ test('resumed rejection after re-plan stops before another fix', async () => {
   const f = fixture(); f.input.start = 'resume'
   f.deps.modes = {
     saveCheckpoint: async () => {},
-    loadResume: async () => ({ head: f.snapshot.head, stage: 'rejected', round: 2, replansUsed: 1, findings: [{ kind: 'code', actionable: true, text: 'old' }], previousFindings: ['old'] }),
+    loadResume: async () => ({ head: f.snapshot.head, stage: 'rejected', round: 2, replansUsed: 1, findings: [{ kind: 'code', actionable: true, text: 'old' }], previousFindings: ['old'], reviewBaseline: 'required', previousReview: { findings: ['old'], blockingCount: 1 } }),
     regenerateDiff: async () => ({ kind: 'known', diff: f.snapshot.diff }),
     probePlan: async () => null, advanceRalph: async () => ({ kind: 'allow' }),
     commitPlan: async () => ({ kind: 'unknown', detail: 'pr mode never commits a ledger' }),
@@ -1306,7 +1863,7 @@ test('G070 repeated nits do not enter fix arithmetic', async () => {
 })
 
 test('G070 resumed fix retains its briefed identities for the next panel', async () => {
-  const f = modeFixture('pr'); const checkpoint = f.resume('rejected', 1)
+  const f = modeFixture('pr'); const checkpoint = f.resume('rejected', 1, { findings: ['code.ts:f:recurring'], blockingCount: 1 })
   checkpoint.findings = [{ kind: 'code', actionable: true, text: 'code.ts:f:recurring' }]
   checkpoint.previousFindings = []
   progressPanel(f, [[], [{ severity: 'minor', rule: 'recurring' }]])
@@ -1340,7 +1897,7 @@ test('G076 approval on the last configured round can publish', async () => {
   f.deps.readReviewCap = async () => ({ kind: 'known', max_rounds: 2 })
   f.decisions.push({ kind: 'fix', findings: ['bug'] }, { kind: 'approve' })
   expect((await f.run()).kind).toBe('merged')
-  expect(f.cross.calls.map(c => c.step_id)).toEqual(['run:review:1', 'run:review:2'])
+  expect(f.cross.calls.map(c => c.step_id.replace(/:head:[a-f0-9]+$/, ''))).toEqual(['run:review:1', 'run:review:2'])
 })
 
 test('G076 unreadable cap never dispatches work', async () => {
@@ -1367,17 +1924,17 @@ for (const cap of [0, -1, 1.5, NaN, Infinity, Number.MAX_SAFE_INTEGER + 1, null,
 
 test('G076 resumed rejection consumes exactly one remaining round', async () => {
   for (const round of [6, 7]) {
-    const f = modeFixture('pr'); const checkpoint = f.resume('rejected', round)
+    const f = modeFixture('pr'); const checkpoint = f.resume('rejected', round, { findings: ['bug'], blockingCount: 1 })
     checkpoint.findings = [{ kind: 'code', actionable: true, text: 'bug' }]
     f.deps.readReviewCap = async () => ({ kind: 'known', max_rounds: 7 })
     expect((await f.run()).kind).toBe(round === 6 ? 'merged' : 'blocked')
     expect(f.runner.calls.map(c => c.step_id)).toEqual(round === 6 ? ['run:fix:6'] : [])
-    expect(f.cross.calls.map(c => c.step_id)).toEqual(round === 6 ? ['run:review:7'] : [])
+    expect(f.cross.calls.map(c => c.step_id.replace(/:head:[a-f0-9]+$/, ''))).toEqual(round === 6 ? ['run:review:7'] : [])
   }
 })
 
 test('G076 over-budget resume refuses before review', async () => {
-  const f = modeFixture('pr'); f.resume('fixed', 8)
+  const f = modeFixture('pr'); f.resume('fixed', 8, { findings: ['prior'], blockingCount: 1 })
   f.deps.readReviewCap = async () => ({ kind: 'known', max_rounds: 7 })
   expect(await f.run()).toMatchObject({ kind: 'blocked', on: expect.stringContaining('round ceiling') })
   expect(f.cross.calls).toHaveLength(0)
@@ -1509,7 +2066,7 @@ for (const head of ['a'.repeat(40), '', 'absent']) test(`G042 driver stops lost 
 })
 
 test('G042 resumed fix stops before another panel when no commit lands', async () => {
-  const f = modeFixture('pr'); f.resume('rejected', 1).findings = [{ kind: 'code', actionable: true, text: 'repair' }]
+  const f = modeFixture('pr'); f.resume('rejected', 1, { findings: ['repair'], blockingCount: 1 }).findings = [{ kind: 'code', actionable: true, text: 'repair' }]
   const run = f.runner.run
   // Override the fixture's committing fixer with a completed no-op.
   f.runner.run = async (request, placement, signal) => request.role === 'fix' ? f.completed({ ...f.snapshot }) : run(request, placement, signal)
@@ -1560,7 +2117,7 @@ test('G056 records an unverified worker APPROVE only in deferred CI detail', asy
   expect(await f.run()).toEqual({
     kind: 'unknown',
     phase: 'review',
-    step_id: 'run:review:1',
+    step_id: `run:review:1:head:${'a'.repeat(40)}`,
     detail: 'Review CI readiness deferred: Review PR mergeability is not established; budget exhausted. Review worker reported APPROVE; host receipt not obtained.',
   })
   expect(f.events).not.toContain('merge')
@@ -1579,7 +2136,7 @@ test('G056 does not attribute a non-APPROVE worker trailer to deferred CI', asyn
   expect(await f.run()).toEqual({
     kind: 'unknown',
     phase: 'review',
-    step_id: 'run:review:1',
+    step_id: `run:review:1:head:${'a'.repeat(40)}`,
     detail: 'Review CI readiness deferred: Review PR mergeability is not established; budget exhausted',
   })
 })
@@ -1648,7 +2205,7 @@ test('G084 each fix proves descent from the immediately preceding review', async
 
 test('G084 resumed fix uses the recorded reviewed head and refuses unreadable ancestry', async () => {
   const f = modeFixture('pr')
-  f.resume('rejected').findings = [{ kind: 'code', actionable: true, text: 'bug' }]
+  f.resume('rejected', 1, { findings: ['bug'], blockingCount: 1 }).findings = [{ kind: 'code', actionable: true, text: 'bug' }]
   const pins: string[] = []
   f.deps.checkFixLineage = async (_produced, pin) => {
     pins.push(pin)
@@ -1719,7 +2276,7 @@ test('G102 driver checks artifact after preparation and before every review', as
   }
   f.decisions.push({ kind: 'fix', findings: ['repair'] }, { kind: 'approve' })
   expect((await f.run()).kind).toBe('merged')
-  expect(checks).toEqual(['run:review:1', 'run:review:2'])
+  expect(checks).toEqual([`run:review:1:head:${'a'.repeat(40)}`, `run:review:2:head:${'b'.repeat(40)}`])
 })
 
 test('null usage does not veto an otherwise validated build and fix', async () => {

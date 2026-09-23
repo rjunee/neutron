@@ -31,6 +31,32 @@ afterEach(() => {
   rmSync(tmp, { recursive: true, force: true })
 })
 
+describe('claimWorkerConversation', () => {
+  test('exactly one initial claim survives reconstruction while other roles and runs remain eligible', async () => {
+    const store = new TridentRunStore(db)
+    const run = await store.create({ slug: 'conversation', project_slug: 'project', repo_path: '/repo', task: 'task' })
+    const claim = () => store.claimWorkerConversation(run.id, 'plan', 'scope', 'step')
+    expect((await Promise.all([claim(), claim()])).sort()).toEqual([false, true])
+    const reconstructed = new TridentRunStore(db)
+    expect(await reconstructed.claimWorkerConversation(run.id, 'plan', 'other-owner', 'later')).toBe(false)
+    expect(await reconstructed.claimWorkerConversation(run.id, 'build', 'scope', 'build')).toBe(true)
+    const other = await store.create({ slug: 'other-conversation', project_slug: 'project', repo_path: '/repo', task: 'task' })
+    expect(await reconstructed.claimWorkerConversation(other.id, 'plan', 'scope', 'step')).toBe(true)
+    await store.update(other.id, { phase: 'failed' })
+    expect(await reconstructed.claimWorkerConversation(other.id, 'fix', 'scope', 'fix')).toBe(false)
+  })
+
+  for (const meta of [null, '{', '{}', '{"version":2,"role":"plan"}'])
+  test(`corrupt initiation evidence cannot authorize another initial conversation: ${meta}`, async () => {
+    const store = new TridentRunStore(db)
+    const run = await store.create({ slug: 'corrupt-conversation', project_slug: 'project', repo_path: '/repo', task: 'task' })
+    await store.recordStageEvent(run.id, 'unrelated', meta)
+    expect(await store.claimWorkerConversation(run.id, 'plan', 'scope', 'step')).toBe(true)
+    await store.recordStageEvent(run.id, 'build-worker-conversation-started', meta)
+    expect(await store.claimWorkerConversation(run.id, 'build', 'scope', 'build')).toBe(false)
+  })
+})
+
 describe('latestHeartbeatAt', () => {
   test('returns the newest heartbeat for this run and ignores ordinary stages', async () => {
     const store = new TridentRunStore(db)

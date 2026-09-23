@@ -2,7 +2,7 @@ import { afterEach, expect, test } from 'bun:test'
 import { mkdtemp, readFile, rm, writeFile } from 'node:fs/promises'
 import { tmpdir } from 'node:os'
 import { dirname, join } from 'node:path'
-import { clearTrailerSlot, reconcileStoppedTrailerReservations, reserveTrailerSlot } from './trailer-slot.ts'
+import { clearTrailerSlot, readArmedTrailerReservation, reconcileStoppedTrailerReservations, reserveTrailerSlot } from './trailer-slot.ts'
 
 const directories: string[] = []
 afterEach(async () => {
@@ -14,6 +14,23 @@ async function slot() {
   directories.push(dir)
   return { reservation: join(dir, `claude-step-${'a'.repeat(64)}.json`), result: join(dir, 'build.result'), identity: 'the-request' }
 }
+
+test('recovery reads only exact armed authority and leaves missing or invalid reservations untouched', async () => {
+  const s = await slot()
+  await writeFile(s.result, 'retained result')
+  expect((await readArmedTrailerReservation(s.reservation, s.identity)).kind).toBe('unknown')
+  expect(await readFile(s.reservation, 'utf8').catch((error: NodeJS.ErrnoException) => error.code)).toBe('ENOENT')
+  for (const bytes of [s.identity, 'foreign\n#dispatch-armed\n', 'corrupt']) {
+    await writeFile(s.reservation, bytes)
+    expect((await readArmedTrailerReservation(s.reservation, s.identity)).kind).toBe('unknown')
+    expect(await readFile(s.reservation, 'utf8')).toBe(bytes)
+  }
+  const armed = s.identity + '\n#dispatch-armed\n'
+  await writeFile(s.reservation, armed)
+  expect(await readArmedTrailerReservation(s.reservation, s.identity)).toEqual({ kind: 'resume' })
+  expect(await readFile(s.reservation, 'utf8')).toBe(armed)
+  expect(await readFile(s.result, 'utf8')).toBe('retained result')
+})
 
 test('exactly one of many concurrent callers may dispatch a step', async () => {
   // The bounded task must run ONCE. Two owners both dispatching would run the work

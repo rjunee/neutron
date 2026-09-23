@@ -3,7 +3,7 @@ import { mkdtemp, readFile, rm, writeFile } from 'node:fs/promises'
 import { tmpdir } from 'node:os'
 import { join } from 'node:path'
 import { ProjectDb } from '@neutronai/persistence/index.ts'
-import { fakeRunner, type Provider } from '@neutronai/runtime/bounded-work.ts'
+import { fakeRunner, type Provider, type BoundedWorkRequest } from '@neutronai/runtime/bounded-work.ts'
 import { seedMigratedDb } from '../tests/support/migrated-db.ts'
 import { TridentRunStore } from './store.ts'
 import { TridentAttemptLedger } from './attempt-ledger.ts'
@@ -12,6 +12,7 @@ import type { BuildRunOutcome } from './build-run.ts'
 import { briefIntegrity } from './gates/brief-integrity.ts'
 import { workContextPath } from './production-host-effects.ts'
 import { spawnCapture } from './git-mode.ts'
+import { AttemptAccounting } from './attempt-accounting.ts'
 
 const cleanups: (() => Promise<void>)[] = []
 afterEach(async () => { for (const cleanup of cleanups.splice(0)) await cleanup() })
@@ -47,6 +48,7 @@ async function fixture() {
   const runner = fakeRunner('pi', { supports: (_role, placement) => { placements.push(placement); return { ok: true } } })
   const options: ProjectBuildHostOptions = {
     requestedModels: { plan: 'test', build: 'test', fix: 'test', review: 'test' },
+    suiteIdentity: async () => 'measured-fixture-identity',
     substrate: { provider: 'pi', inRepl: runner, headless: {} },
     // The real store over the same database, so the composition's write is the
     // write production performs rather than a stub that cannot fail.
@@ -59,6 +61,131 @@ async function fixture() {
   }
   return { options, path, placements }
 }
+
+test('project build wrappers preserve accounting recovery without preparation or dispatch on restart', async () => {
+  const f = await fixture(), raw = fakeRunner('pi')
+  let recoveries = 0
+  f.options.substrate.inRepl = { ...raw, recover: async () => {
+    recoveries++; return { kind: 'completed', result: {}, usage: null, model_reported: null, thread_id: null }
+  } }
+  const first = await createProjectBuildHost(f.options)
+  const request: BoundedWorkRequest = { ...first.workers.build.request, run_id: f.options.production.runId,
+    step_id: 'build:0', role: 'build', needs_approval_decision: false }
+  const accounting = new AttemptAccounting(f.options.attempts, join(f.path, '..'), async () => {})
+  const attribution = { phase: 'build', task_id: 'task', head_sha: 'a'.repeat(40), review_seat: null, requested_model: 'test' }
+  await accounting.prepare(request, 'pi', 'in-repl', attribution, async () => {})
+  expect((await first.workers.build.runner.recover!(request, 'headless', new AbortController().signal)).kind).toBe('unknown')
+  expect(recoveries).toBe(0)
+  await f.options.attempts.lifecycle({ run_id: request.run_id, step_id: request.step_id, attempt_id: 'dispatch' }, { started_at: Date.now() })
+  const restarted = await createProjectBuildHost(f.options)
+  expect((await restarted.workers.build.runner.recover!(request, 'headless', new AbortController().signal)).kind).toBe('completed')
+  expect(recoveries).toBe(1); expect(raw.calls).toHaveLength(0)
+  expect(f.options.attempts.list(request.run_id)).toHaveLength(1)
+  expect((await restarted.workers.build.runner.recover!({ ...request, model_id: 'changed' }, 'in-repl', new AbortController().signal)).kind).toBe('unknown')
+  expect(recoveries).toBe(1); expect(raw.calls).toHaveLength(0)
+})
+
+for (const change of ['none', 'head', 'round', 'strategy', 'subset', 'identity', 'unknown identity', 'corrupt', 'missing', 'run'] as const) {
+  test(`durable publication suite recovery: ${change}`, async () => {
+    const f = await fixture()
+    const subject = { head: 'b'.repeat(40), diff: '+code', pr: null }
+    let calls = 0
+    f.options.policy.publicationSuite = { strategy: 'bun test', scope: 'full-suite', readCheckpoint: async (snapshot, round) => {
+      calls++
+      return { runId: f.options.production.runId, head: snapshot.head, round, report: { hostExitCode: 0 } }
+    } }
+    const host = await createProjectBuildHost(f.options)
+    const checkpoint = { head: subject.head, stage: 'approved' as const, round: 2, replansUsed: 0, findings: [], previousFindings: [] }
+    await host.deps.modes!.saveCheckpoint!(checkpoint)
+    expect(await host.deps.publicationSuite(subject)).toEqual({ kind: 'known', findings: [] })
+    if (change === 'head') subject.head = 'c'.repeat(40)
+    if (change === 'round') await host.deps.modes!.saveCheckpoint!({ ...checkpoint, round: 3 })
+    if (change === 'strategy') f.options.policy.publicationSuite.strategy = 'bash suite.sh'
+    if (change === 'subset') f.options.policy.publicationSuite.scope = 'subset'
+    if (change === 'identity') f.options.suiteIdentity = async () => 'changed-dependencies-or-tools'
+    if (change === 'unknown identity') f.options.suiteIdentity = async () => null
+    if (change === 'corrupt' || change === 'missing') await f.options.production.store.recordStageEvent(f.options.production.runId, 'build-suite-receipt', change === 'corrupt' ? '{' : null)
+    if (change === 'run') {
+      const other = await f.options.production.store.create({ slug: 'other', project_slug: 'project', repo_path: f.options.production.repo, task: 'other' })
+      await f.options.production.store.update(other.id, { branch: 'change', worktree: f.options.production.worktree, base_sha: 'a'.repeat(40) })
+      const receipt = f.options.production.store.stageEvents(f.options.production.runId).filter(event => event.stage === 'build-suite-receipt').at(-1)!
+      await f.options.production.store.recordStageEvent(other.id, 'build-suite-receipt', receipt.meta)
+      f.options.production.runId = other.id
+    }
+    const recovered = await createProjectBuildHost(f.options)
+    expect(await recovered.deps.publicationSuite(subject)).toEqual({ kind: 'known', findings: [] })
+    expect(calls).toBe(change === 'none' ? 1 : 2)
+  })
+}
+
+test('durable suite invalidation survives failure and stale completion cannot replace newer proof', async () => {
+  const f = await fixture()
+  const subject = { head: 'b'.repeat(40), diff: '+code', pr: null }
+  let calls = 0
+  f.options.policy.publicationSuite = { strategy: 'bun test', scope: 'full-suite', readCheckpoint: async (snapshot, round) => {
+    calls++
+    return { runId: f.options.production.runId, head: snapshot.head, round, report: { hostExitCode: 0 } }
+  } }
+  const host = await createProjectBuildHost(f.options)
+  await host.deps.publicationSuite(subject)
+  f.options.suiteIdentity = async () => 'changed'
+  f.options.policy.publicationSuite.readCheckpoint = async () => { throw new Error('interrupted') }
+  const failing = await createProjectBuildHost(f.options)
+  expect(await failing.deps.publicationSuite(subject)).toMatchObject({ kind: 'unknown' })
+  f.options.suiteIdentity = async () => 'measured-fixture-identity'
+  f.options.policy.publicationSuite.readCheckpoint = async (snapshot, round) => {
+    calls++
+    await f.options.production.store.recordStageEvent(f.options.production.runId, 'build-suite-receipt', null)
+    return { runId: f.options.production.runId, head: snapshot.head, round, report: { hostExitCode: 0 } }
+  }
+  const recovered = await createProjectBuildHost(f.options)
+  expect(await recovered.deps.publicationSuite(subject)).toMatchObject({ kind: 'unknown', detail: expect.stringContaining('ownership changed') })
+  expect(calls).toBe(2)
+  expect(f.options.production.store.stageEvents(f.options.production.runId).filter(event => event.stage === 'build-suite-receipt').at(-1)!.meta).toBeNull()
+})
+
+test('suite inputs changing during execution cannot publish or preserve a reusable proof', async () => {
+  const f = await fixture()
+  let identity = 'before'
+  f.options.suiteIdentity = async () => identity
+  f.options.policy.publicationSuite = { strategy: 'bun test', scope: 'full-suite', readCheckpoint: async (snapshot, round) => {
+    identity = 'after'
+    return { runId: f.options.production.runId, head: snapshot.head, round, report: { hostExitCode: 0 } }
+  } }
+  const host = await createProjectBuildHost(f.options)
+  expect(await host.deps.publicationSuite({ head: 'b'.repeat(40), diff: '+code', pr: null })).toMatchObject({
+    kind: 'unknown', detail: expect.stringContaining('inputs changed'),
+  })
+  expect(JSON.parse(f.options.production.store.stageEvents(f.options.production.runId).filter(event => event.stage === 'build-suite-receipt').at(-1)!.meta!)).not.toHaveProperty('receipt')
+})
+
+test('invalidation during identity measurement cannot revive an older suite receipt', async () => {
+  const f = await fixture()
+  const subject = { head: 'b'.repeat(40), diff: '+code', pr: null }
+  let calls = 0
+  f.options.policy.publicationSuite = { strategy: 'bun test', scope: 'full-suite', readCheckpoint: async (snapshot, round) => {
+    calls++
+    return { runId: f.options.production.runId, head: snapshot.head, round, report: { hostExitCode: 0 } }
+  } }
+  const first = await createProjectBuildHost(f.options)
+  await first.deps.publicationSuite(subject)
+  let release!: (identity: string) => void
+  let measured!: () => void
+  const measuring = new Promise<void>(resolve => { measured = resolve })
+  const paused = new Promise<string>(resolve => { release = resolve })
+  let once = true
+  f.options.suiteIdentity = async () => {
+    if (once) { once = false; measured(); return paused }
+    return 'measured-fixture-identity'
+  }
+  const restarted = await createProjectBuildHost(f.options)
+  const result = restarted.deps.publicationSuite(subject)
+  await measuring
+  await f.options.production.store.recordStageEvent(f.options.production.runId, 'build-suite-receipt', null)
+  release('measured-fixture-identity')
+  expect(await result).toEqual({ kind: 'known', findings: [] })
+  expect(calls).toBe(2)
+})
 
 test('project composition renders per-role context briefs and pins placement', async () => {
   const f = await fixture()
@@ -334,7 +461,8 @@ test('production composition driver reaches a review panel through all three obs
   host.deps.runLeakGatePreflight = async () => ({ status: 'clean', head: observedHead, findings: [], skipped_rules: [], attempts: 0, note: '' })
   host.deps.publishGate = async () => ({ kind: 'allow' })
   host.deps.publish = async () => {}
-  await host.deps.modes!.saveCheckpoint({ head: observedHead, stage: 'built', round: 1, replansUsed: 0, findings: [], previousFindings: [] })
+  await host.deps.modes!.saveCheckpoint({ head: observedHead, stage: 'built', round: 1, replansUsed: 0, findings: [], previousFindings: [],
+    reviewBaseline: 'none', previousReview: null })
   const result = await host.run({ mode: 'pr', start: 'resume' }, new AbortController().signal)
   expect(panelCalls, JSON.stringify(result)).toBeGreaterThan(0)
   expect(result.kind).toBe('blocked')

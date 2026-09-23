@@ -101,6 +101,21 @@ test('mis-keyed provider is refused without falling back', async () => {
   expect(await buildRun(f.input(host), host.deps, new AbortController().signal)).toMatchObject({ kind: 'refused' })
 })
 
+test.each(['pi', 'openai-codex'] as const)('recovery preserves prescribed placement for %s without a run fallback', async provider => {
+  const f = await fixture(), placements: string[] = []
+  const raw = fakeRunner(provider)
+  f.options.runners[provider] = { ...raw, recover: async (_request, placement) => {
+    placements.push(placement); return { kind: 'completed', result: {}, usage: null, model_reported: null, thread_id: null }
+  } }
+  f.options.workers.build.provider = provider
+  const host = f.make(), request: BoundedWorkRequest = { ...host.workers.build.request, run_id: 'run', step_id: 'build:0', role: 'build', needs_approval_decision: false }
+  expect((await host.workers.build.runner.recover!(request, 'headless', new AbortController().signal)).kind).toBe('completed')
+  expect(placements).toEqual([provider === 'pi' ? 'in-repl' : 'headless']); expect(raw.calls).toHaveLength(0)
+  f.options.runners[provider] = raw
+  expect((await f.make().workers.build.runner.recover!(request, 'in-repl', new AbortController().signal)).kind).toBe('unknown')
+  expect(raw.calls).toHaveLength(0)
+})
+
 for (const provider of ['pi', 'openai-codex'] satisfies Provider[]) {
   test(`placement follows project provider for ${provider}`, async () => {
     const f = await fixture()
@@ -481,7 +496,7 @@ test('composed local host reaches merged with no PR', async () => {
   const payload = { verdict: 'APPROVE', findings: [] }
   const outcomes = new Map<string, import('@neutronai/runtime/bounded-work.ts').BoundedWorkOutcome>()
   for (const [role, round] of [['plan', 0], ['build', 0], ['review', 1]] as const) {
-    outcomes.set(`test:${role}:${round}`, { kind: 'completed', result: { ...snapshot, payload },
+    outcomes.set(`test:${role}:${round}${role === 'review' ? `:head:${head}` : ''}`, { kind: 'completed', result: { ...snapshot, payload },
       usage: { input_tokens: 0, output_tokens: 0 }, model_reported: 'test-model', thread_id: null })
   }
   f.options.runners.pi = fakeRunner('pi', { outcomes })
@@ -705,7 +720,7 @@ for (const cap of [undefined, 2, 7]) {
       kind: 'blocked', on: expect.stringContaining('round ceiling'),
     })
     expect(calls.filter(call => call.includes(':review:'))).toEqual(
-      Array.from({ length: cap ?? 10 }, (_, i) => `test:review:${i + 1}`))
+      Array.from({ length: cap ?? 10 }, (_, i) => `test:review:${i + 1}:head:${i === 0 ? snapshot.head : `${'c'.repeat(39)}${i % 10}`}`))
   })
 }
 

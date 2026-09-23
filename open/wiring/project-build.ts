@@ -1,7 +1,8 @@
 import { resolveTranscriptProjectsDir } from '@neutronai/runtime/adapters/claude-code/persistent/signatures.ts'
 import { spawnCapture, type HostCommandResult } from '@neutronai/trident/git-mode.ts'
 import { runWorktreePath } from '@neutronai/trident/merge.ts'
-import { mkdir, readFile, writeFile, lstat } from 'node:fs/promises'
+import { mkdir, readFile, writeFile, lstat, open } from 'node:fs/promises'
+import { constants } from 'node:fs'
 import { join, resolve } from 'node:path'
 import { createHash } from 'node:crypto'
 import { createProjectRunners, type ProjectTrailerDecoder, type ProjectActingTurn } from '@neutronai/runtime/workers/project-runners.ts'
@@ -15,6 +16,7 @@ import { PROJECT_REPL_TOOL_DEFS } from '@neutronai/gateway/wiring/build-live-age
 import type { CodexOwnerBindings } from './codex-owner-binding.ts'
 import { codexBuildResultTransport } from './codex-build-result.ts'
 import { pool, supervisedBySessionKey } from '@neutronai/runtime/adapters/claude-code/persistent/pool-state.ts'
+import { mergeEnv } from '@neutronai/runtime/adapters/claude-code/persistent/repl-session.ts'
 import type { PersistentReplSubstrateOptions } from '@neutronai/runtime/adapters/claude-code/persistent/types.ts'
 import type { Provider } from '@neutronai/runtime/provider.ts'
 import type { ProviderSelectionSource } from '@neutronai/runtime/adapters/select-substrate.ts'
@@ -27,10 +29,36 @@ import { modelTier } from '@neutronai/trident/model-tiers.ts'
 import { readProjectRepos } from '@neutronai/trident/project-repos.ts'
 import { buildReflectionGuidance } from '@neutronai/trident/reflection-guidance.ts'
 import { PROJECT_BUILD_WALL_MS } from '@neutronai/trident/project-build-budget.ts'
-import { prepareProjectDependencies } from './project-build-dependencies.ts'
+import { prepareProjectDependencies, projectSuiteIdentity } from './project-build-dependencies.ts'
 import { parseBuildModeState, readBuildRetrySource } from '@neutronai/trident/build-mode-state.ts'
 import { assertProjectSnapshot, PROJECT_SNAPSHOT_SCHEMA } from './project-build-snapshot.ts'
 import { AttemptAccounting } from '@neutronai/trident/attempt-accounting.ts'
+import { createProjectWorkerContinuity } from '@neutronai/trident/project-worker-continuity.ts'
+
+/** Match the selected adapters' credential source without storing its contents.
+ * Rotation is conservatively a different owner until account identity is attested. */
+async function workerCredentialIdentity(provider: Provider, env: NodeJS.ProcessEnv): Promise<string | null> {
+  if (provider === 'anthropic') {
+    const token = ['CLAUDE_CODE_OAUTH_TOKEN', 'ANTHROPIC_AUTH_TOKEN', 'ANTHROPIC_API_KEY']
+      .find(name => typeof env[name] === 'string' && env[name]!.trim() !== '')
+    if (token) return createHash('sha256').update(JSON.stringify([token, env[token]])).digest('hex')
+  }
+  const directory = provider === 'openai-codex' ? env.CODEX_HOME
+    : provider === 'anthropic' ? env.CLAUDE_CONFIG_DIR || (env.HOME ? join(env.HOME, '.claude') : undefined) : undefined
+  if (!directory) return null
+  try {
+    const file = await open(join(directory, provider === 'openai-codex' ? 'auth.json' : '.credentials.json'),
+      constants.O_RDONLY | constants.O_NOFOLLOW | constants.O_NONBLOCK)
+    try {
+      const stat = await file.stat()
+      if (!stat.isFile() || stat.size === 0 || stat.size > 65_536) return null
+      const bytes = Buffer.alloc(65_537)
+      const { bytesRead } = await file.read(bytes, 0, bytes.length, 0)
+      if (bytesRead === 0 || bytesRead > 65_536) return null
+      return createHash('sha256').update(bytes.subarray(0, bytesRead)).digest('hex')
+    } finally { await file.close() }
+  } catch { return null }
+}
 
 /**
  * WALL BUDGET PER ROLE. This was ONE flat 45 minutes for all four roles, which is
@@ -448,6 +476,18 @@ export async function prepareProjectBuild(input: InnerLoopInput, context: Projec
   if (context.provider === 'openai-codex' && context.codexOwnerBindings && substrate.inRepl) {
     substrate.inRepl = context.codexOwnerBindings.guardBuildRunner(context.projectId, substrate.inRepl)
   }
+  for (const provider of ['anthropic', 'openai-codex'] as const) {
+    const runner = substrate.headless[provider]
+    if (!runner || provider === context.provider) continue
+    const env = provider === 'openai-codex' ? codexEnv : context.env
+    substrate.headless[provider] = createProjectWorkerContinuity({ stateDir: state, runId: run.id,
+      projectId: context.projectId, replProvider: context.provider, runner,
+      claimInitial: (request, scope) => {
+        if (request.role !== 'plan' && request.role !== 'build' && request.role !== 'fix') return Promise.resolve(false)
+        return context.store.claimWorkerConversation(run.id, request.role, scope, request.step_id)
+      },
+      credentialIdentity: () => workerCredentialIdentity(provider, env) })
+  }
   const workers = {} as ProjectBuildHostOptions['workers']
   const requestedModels = {} as ProjectBuildHostOptions['requestedModels']
   for (const role of ['plan', 'build', 'review', 'fix'] as const) {
@@ -582,8 +622,31 @@ export async function prepareProjectBuild(input: InnerLoopInput, context: Projec
   }
   const declaration = readProjectRepos(context.projectDir, run.project_slug)
   const repo = declaration.repos.find(row => resolve(context.projectDir, row.path) === resolve(run.repo_path))
+  const reviewCredentialIdentity = async (provider: Provider): Promise<string | null> => {
+    if (provider !== 'anthropic' || provider !== context.provider) {
+      return workerCredentialIdentity(provider, provider === 'openai-codex' ? codexEnv : context.env)
+    }
+    const candidates = liveProjectSessions(context.projectId)
+    if (candidates.length !== 1) return null
+    const [key, options] = candidates[0]!
+    const pending = pool.get(key)
+    if (!pending || Bun.peek.status(pending) !== 'fulfilled') return null
+    const session = await pending
+    if (!session || session.hasChildExited()) return null
+    // Spawn/adoption stamps the credential actually held by this child. A
+    // changed desired overlay cannot relabel an already-running child.
+    if (session.authFingerprint) return createHash('sha256').update(JSON.stringify([
+      provider, context.projectId, session.sessionId, session.authFingerprint,
+    ])).digest('hex')
+    const selected = mergeEnv(options.env)
+    if (options.claudeConfigDir !== undefined) selected.CLAUDE_CONFIG_DIR = options.claudeConfigDir
+    if (['CLAUDE_CODE_OAUTH_TOKEN', 'ANTHROPIC_AUTH_TOKEN', 'ANTHROPIC_API_KEY'].some(key => selected[key])) return null
+    const credential = await workerCredentialIdentity(provider, selected)
+    return credential ? createHash('sha256').update(JSON.stringify([credential, session.sessionId, session.authFingerprint])).digest('hex') : null
+  }
   return {
     substrate, workers, requestedModels, attempts: context.attempts,
+    suiteIdentity: snapshot => projectSuiteIdentity(run.worktree, snapshot.head),
     testStrategies: { full: input.test_strategy ?? '', intermediate: input.test_strategy_intermediate ?? null },
     production: { store: context.store, runId: run.id, projectSlug: run.project_slug,
       repo: run.repo_path, worktree: run.worktree, branch: run.branch, baseBranch: input.base_branch,
@@ -653,6 +716,7 @@ export async function prepareProjectBuild(input: InnerLoopInput, context: Projec
             observed.timed_out || unopenable ? {} : { hostExitCode: observed.exit_code } }
         } },
       review: { evidenceRoot: state, env: codexEnv, phaseModels: config, wallMs: 2_700_000, signal,
+        credentialIdentity: reviewCredentialIdentity,
         runnerFor: (model, seat) => model.group === 'api' || model.group === 'kimi' ? undefined
           : seat.provider === substrate.provider ? substrate.inRepl : substrate.headless[seat.provider] },
     },

@@ -151,6 +151,62 @@ test('observation-only startup reconciliation ingests pre-crash spend without di
   expect(ledger.list('run')).toHaveLength(1)
 })
 
+test('recovery reuses a started journal after restart without another dispatch or accounting start', async () => {
+  await accounting.prepare(request, 'openai-codex', 'headless', attribution, async () => {})
+  await ledger.lifecycle(key, { started_at: 33 })
+  let recoveries = 0
+  const runner = { ...fakeRunner('openai-codex'), recover: async (req: BoundedWorkRequest) => {
+    recoveries++; expect(req).toEqual(request)
+    return { kind: 'completed', result: { approved: true }, usage: null, model_reported: null, thread_id: 'thread', observation: observed } as const
+  } }
+  db.close(); db = ProjectDb.open(join(dir, 'project.db')); ledger = new TridentAttemptLedger(db); accounting = createAccounting()
+  for (let i = 0; i < 2; i++) expect((await accounting.recover(runner, request, 'headless', new AbortController().signal)).kind).toBe('completed')
+  expect(recoveries).toBe(2); expect(runner.calls).toHaveLength(0)
+  expect(ledger.list('run')).toHaveLength(1)
+  expect(ledger.get(key)).toMatchObject({ queued_at: 31, prepared_at: 32, started_at: 33, outcome: 'completed' })
+  expect(projection()).toMatchObject({ input_tokens: 17, output_tokens: 4 })
+})
+
+test.each(['missing-attempt', 'unstarted', 'missing-journal', 'corrupt-journal', 'symlink', 'attribution', 'capability',
+  'brief', 'model', 'tools', 'thread', 'result', 'budget', 'provider', 'placement'] as const)('recovery refuses %s without dispatch, observation, or new evidence', async defect => {
+  if (defect !== 'missing-attempt') {
+    await accounting.prepare(request, 'openai-codex', 'headless', attribution, async () => {})
+    if (defect !== 'unstarted') await ledger.lifecycle(key, { started_at: 33 })
+  }
+  const path = readdirSync(dir).find(name => name.startsWith('attempt-request-'))
+  if (path && ['missing-journal', 'corrupt-journal', 'symlink', 'attribution'].includes(defect)) {
+    const target = join(dir, path), original = readFileSync(target, 'utf8')
+    if (defect === 'missing-journal') unlinkSync(target)
+    if (defect === 'corrupt-journal') writeFileSync(target, '{')
+    if (defect === 'attribution') { const saved = JSON.parse(original); saved.attribution.head_sha = 'b'.repeat(40); writeFileSync(target, JSON.stringify(saved)) }
+    if (defect === 'symlink') { writeFileSync(`${target}.copy`, original); unlinkSync(target); symlinkSync(`${target}.copy`, target) }
+  }
+  let recoveries = 0, observations = 0
+  const runner = { ...fakeRunner(defect === 'provider' ? 'anthropic' : 'openai-codex'),
+    observe: async () => { observations++; return observed },
+    ...(defect === 'capability' ? {} : { recover: async () => { recoveries++; return { kind: 'completed', result: {}, usage: null, model_reported: null, thread_id: null } as const } }) }
+  const req = { ...request,
+    ...(defect === 'brief' ? { brief: { ...request.brief, integrity: 'changed-task' } } : {}),
+    ...(defect === 'model' ? { model_id: 'other' } : {}), ...(defect === 'tools' ? { tools: 'none' as const } : {}),
+    ...(defect === 'thread' ? { thread: { id: 'other' } } : {}),
+    ...(defect === 'result' ? { result: { ...request.result, path: '/other' } } : {}),
+    ...(defect === 'budget' ? { budget: { wall_ms: 99 } } : {}),
+  }
+  const before = ledger.list('run')
+  expect((await accounting.recover(runner, req, defect === 'placement' ? 'in-repl' : 'headless', new AbortController().signal)).kind).toBe('unknown')
+  expect(recoveries).toBe(0); expect(observations).toBe(0); expect(runner.calls).toHaveLength(0)
+  expect(ledger.list('run')).toEqual(before); expect(ledger.receipt(key)).toBeNull()
+})
+
+test('uncertain recovery retains partial spend without claiming a terminal attempt', async () => {
+  await accounting.prepare(request, 'openai-codex', 'headless', attribution, async () => {})
+  await ledger.lifecycle(key, { started_at: 33 })
+  const runner = { ...fakeRunner('openai-codex'), recover: async () => ({ kind: 'unknown', detail: 'still pending', observation: observed } as const) }
+  expect((await accounting.recover(runner, request, 'headless', new AbortController().signal)).kind).toBe('unknown')
+  expect(ledger.get(key)).toMatchObject({ ended_at: null, outcome: null })
+  expect(projection().input_tokens).toBe(17); expect(runner.calls).toHaveLength(0)
+})
+
 test('reconciliation refuses mismatched or symlinked journals before observing and retains earlier nonzero spend', async () => {
   await dispatch({ kind: 'failed', class: 'infra', detail: 'partial', observation: observed })
   const path = join(dir, readdirSync(dir).find(name => name.startsWith('attempt-request-'))!)

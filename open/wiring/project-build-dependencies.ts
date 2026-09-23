@@ -88,6 +88,94 @@ async function preparationKey(worktree: string, workspaces: unknown[], executabl
   return hash.digest('hex')
 }
 
+/** A bounded native metadata walk avoids one JS filesystem round trip per file.
+ * NUL fields preserve arbitrary whitespace; undecodable names refuse reuse.
+ * find never follows links: the host validates their targets before measuring
+ * additional local roots, so an external tree is never traversed. */
+export async function projectInstalledTreeIdentity(worktree: string,
+  run: typeof spawnCapture = spawnCapture): Promise<string | null> {
+  try {
+  const root = await realpath(worktree)
+  const modules = join(root, 'node_modules')
+  if (!await exists(modules)) return 'absent'
+  if (!(await lstat(modules)).isDirectory()) return null
+  const hash = createHash('sha256')
+  const covered: string[] = []
+  let pending = [modules]
+  const deadline = performance.now() + 5000
+  while (pending.length > 0) {
+    const remaining = Math.floor(deadline - performance.now())
+    if (remaining <= 0) return null
+    const batch = pending.sort()
+    pending = []
+    covered.push(...batch)
+    const measured = await run(['find', '-P', ...batch, '-printf', '%p\\0%D\\0%i\\0%m\\0%s\\0%T@\\0%C@\\0%y\\0%l\\0'],
+      root, { LC_ALL: 'C' }, remaining)
+    if (!measured.ok || measured.timed_out || measured.stdout.length > 64 * 1024 * 1024
+      || !measured.stdout.endsWith('\0') || measured.stdout.includes('\uFFFD')) return null
+    hash.update(measured.stdout)
+    const fields = measured.stdout.split('\0')
+    fields.pop()
+    if (fields.length === 0 || fields.length % 9 !== 0) return null
+    const links: string[] = []
+    for (let index = 0; index < fields.length; index += 9) {
+      const path = fields[index]!
+      if (!batch.some(base => path === base || path.startsWith(`${base}${sep}`))) return null
+      if (!fields.slice(index + 1, index + 5).every(value => /^\d+$/.test(value))
+        || !fields.slice(index + 5, index + 7).every(value => /^-?\d+(?:\.\d+)?$/.test(value))) return null
+      const kind = fields[index + 7]
+      if (kind === 'l') links.push(path)
+      else if (kind !== 'f' && kind !== 'd') return null
+    }
+    // Resolve only links, in bounded groups; ordinary files require no JS stat.
+    for (let offset = 0; offset < links.length; offset += 64) {
+      if (performance.now() >= deadline) return null
+      const targets = await Promise.all(links.slice(offset, offset + 64).map(path => realpath(path)))
+      for (const actual of targets) {
+        if (!actual.startsWith(`${root}${sep}`)) return null
+        if (!covered.some(base => actual === base || actual.startsWith(`${base}${sep}`))
+          && !pending.includes(actual)) pending.push(actual)
+      }
+    }
+  }
+  if (performance.now() >= deadline) return null
+  return hash.digest('hex')
+  } catch { return null }
+}
+
+/** Fresh host measurement for suite reuse. Unknown or dirty inputs never reuse
+ * proof. This shares preparation's manifest/toolchain and local-resolution keys. */
+export async function projectSuiteIdentity(worktree: string, expectedHead?: string): Promise<string | null> {
+  try {
+    const revision = await spawnCapture(['git', 'rev-parse', '--verify', 'HEAD'], worktree)
+    if (!revision.ok || (expectedHead !== undefined && revision.stdout.trim() !== expectedHead)) return null
+    const clean = await spawnCapture(['git', 'status', '--porcelain', '--untracked-files=all'], worktree)
+    if (!clean.ok || clean.stdout.trim()) return null
+    const executable = Bun.which('bun', { PATH: process.env.PATH ?? '' })
+    if (!executable) return null
+    const bun = await realpath(executable)
+    const manifestPath = join(worktree, 'package.json')
+    const manifest = await exists(manifestPath) ? JSON.parse(await readFile(manifestPath, 'utf8')) : {}
+    const workspaces = Array.isArray(manifest.workspaces) ? manifest.workspaces : manifest.workspaces?.packages ?? []
+    if (!Array.isArray(workspaces)) return null
+    const key = await preparationKey(worktree, workspaces, bun)
+    const resolution = await resolutionKey(worktree, workspaces, bun)
+    const installed = await projectInstalledTreeIdentity(worktree)
+    // Repositories without a manifest have no package resolution contract.
+    if (!key || !installed || (await exists(manifestPath) && !resolution)) return null
+    const modules = join(worktree, 'node_modules')
+    let installation = null
+    if (await exists(modules)) {
+      const stat = await lstat(modules)
+      if (!stat.isDirectory()) return null
+      installation = [stat.dev, stat.ino]
+    } else if (Object.keys({ ...manifest.dependencies, ...manifest.devDependencies }).length > 0) return null
+    const workspace = await lstat(await realpath(worktree))
+    return createHash('sha256').update(JSON.stringify([key, resolution, installed, installation,
+      workspace.dev, workspace.ino])).digest('hex')
+  } catch { return null }
+}
+
 /** Provision declared Bun workspaces. Recovery can reuse a measured installation
  * only after checking the same inputs and running the host readiness verifier. */
 export async function prepareProjectDependencies(worktree: string, state: string,

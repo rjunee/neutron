@@ -161,6 +161,10 @@ export interface WorkerRunner {
    */
   supports(role: WorkerRole, placement: Placement): Supported | Unsupported
   run(req: BoundedWorkRequest, placement: Placement, signal: AbortSignal): Promise<BoundedWorkOutcome>
+  /** Reconcile only an existing exact, armed dispatch and its retained artifacts.
+   * Never create/clear/arm a reservation, compose an acting turn, invoke a provider,
+   * or fall back to run when evidence or this capability is unavailable. */
+  recover?(req: BoundedWorkRequest, placement: Placement, signal: AbortSignal): Promise<BoundedWorkOutcome>
   /** Read existing provider evidence only. Never dispatch, authorize a result,
    * acquire/recover locks, clear result slots, or change a reservation. */
   observe?(req: BoundedWorkRequest): Promise<ProviderObservation | undefined>

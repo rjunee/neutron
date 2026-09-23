@@ -15,7 +15,7 @@ import type {
   WorkerRunner,
 } from '../bounded-work.ts'
 import { unknownCause } from '../refusal-cause.ts'
-import { reserveTrailerSlot } from './trailer-slot.ts'
+import { readArmedTrailerReservation, reserveTrailerSlot } from './trailer-slot.ts'
 import { codexBuildObservation, isCodexBuildObservation, type CodexBuildObservation } from './codex-build-observation.ts'
 import { codexWorkerEnv, createCodexReviewTransport, type CodexReviewContract } from './codex-review.ts'
 import { createObservationPublisher, recoverProviderObservation } from './provider-observation-recovery.ts'
@@ -159,7 +159,7 @@ export function createCodexHeadlessRunner(options: CodexHeadlessRunnerOptions = 
     writable: req.writable, network: req.network, tools: req.tools,
     needsApproval: req.needs_approval_decision,
   })
-  return {
+  const runner: WorkerRunner = {
     provider: 'openai-codex',
     supports(role, placement) {
       return unsupported(role, placement) ?? { ok: true }
@@ -188,12 +188,19 @@ export function createCodexHeadlessRunner(options: CodexHeadlessRunnerOptions = 
         return { ...observation, model_reported: receipt.observation.model_reported }
       })
     },
-    async run(req, placement, signal): Promise<BoundedWorkOutcome> {
+    run: (...args) => executeWork(false, ...args),
+    recover: (...args) => executeWork(true, ...args),
+    async liveness(handle: WorkerHandle) {
+      const child = live.get(handle.step_id)
+      return child && child.exitCode === null ? 'activity' : 'nothing'
+    },
+  }
+  const executeWork = async (recoveryOnly: boolean, ...[req, placement, signal]: Parameters<WorkerRunner['run']>): Promise<BoundedWorkOutcome> => {
       let measured: ProviderObservation | undefined
       const execute = async (): Promise<BoundedWorkOutcome> => {
       const refusal = unsupported(req.role, placement)
       if (refusal) return { kind: 'refused', reason: refusal.reason }
-      if (req.role === 'review' || req.role === 'synthesis') return review(req, signal)
+      if (req.role === 'review' || req.role === 'synthesis') return recoveryOnly ? review.recover(req, signal) : review(req, signal)
       if (req.thread && !/^[a-zA-Z0-9][a-zA-Z0-9_-]*$/.test(req.thread.id)) return { kind: 'refused', reason: 'cli-contract' }
       if (signal.aborted) return { kind: 'failed', class: 'killed', detail: 'Codex worker was cancelled before dispatch' }
 
@@ -211,7 +218,9 @@ export function createCodexHeadlessRunner(options: CodexHeadlessRunnerOptions = 
       // never inherit the previous completion merely because run/step match.
       const identity = buildIdentity(req)
       const receiptPath = `${reservation}.receipt`
-      const held = await reserveTrailerSlot(reservation, identity, req.result.path)
+      const held = recoveryOnly
+        ? await readArmedTrailerReservation(reservation, identity, { signal, deadline: Date.now() + req.budget.wall_ms })
+        : await reserveTrailerSlot(reservation, identity, req.result.path)
       if (held.kind === 'unknown') return { kind: 'unknown', detail: held.detail }
       let observation: CodexBuildObservation
       let trailerText: string
@@ -259,7 +268,7 @@ export function createCodexHeadlessRunner(options: CodexHeadlessRunnerOptions = 
           await rename(`${receiptPath}.tmp`, receiptPath)
         } catch { return { kind: 'unknown', detail: 'Codex build observation could not be committed' } }
       } else {
-        measured = await this.observe?.(req)
+        measured = await runner.observe?.(req)
         // Recovery consumes the original receipt, never the role's mutable slot or
         // a newly requested ID. An uncertain dispatch must not buy another turn.
         try {
@@ -285,10 +294,6 @@ export function createCodexHeadlessRunner(options: CodexHeadlessRunnerOptions = 
       }
       const outcome = await execute()
       return measured ? { ...outcome, observation: measured } : outcome
-    },
-    async liveness(handle: WorkerHandle) {
-      const child = live.get(handle.step_id)
-      return child && child.exitCode === null ? 'activity' : 'nothing'
-    },
-  }
+    }
+  return runner
 }

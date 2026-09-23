@@ -1,5 +1,5 @@
 import { afterEach, expect, test } from 'bun:test'
-import { mkdtemp, mkdir, writeFile, readFile, readdir, rm } from 'node:fs/promises'
+import { mkdtemp, mkdir, writeFile, readFile, readdir, rm, unlink } from 'node:fs/promises'
 import { join } from 'node:path'
 import { tmpdir } from 'node:os'
 import { createCodexHeadlessRunner } from './codex-headless.ts'
@@ -69,6 +69,51 @@ process.exit(mode === 'nonzero' ? 2 : 0);
   const calls = async () => (await readFile(join(dir, 'calls'), 'utf8')).trim().split('\n').map(row => JSON.parse(row))
   const invocations = async () => (await readFile(join(dir, 'invocations'), 'utf8')).trim().split('\n').filter(Boolean).map(row => JSON.parse(row))
   return { dir, home, env, req, runner, productionRunner, run, calls, invocations }
+}
+
+for (const role of ['review', 'synthesis'] as const) {
+  test(`Codex ${role} recovery never invokes CLI or creates missing dispatch authority`, async () => {
+    const f = await fixture()
+    const req = { ...f.req, role }
+    const runner = f.runner(), signal = new AbortController().signal
+    const snapshot = async () => Object.fromEntries(await Promise.all((await readdir(f.dir)).filter(name => name !== 'account').sort()
+      .map(async name => [name, await readFile(join(f.dir, name), 'utf8')])))
+    await writeFile(req.result.path, 'unowned previous result')
+    const initial = await snapshot()
+    expect((await runner.recover!(req, 'headless', signal)).kind).toBe('unknown')
+    expect(await snapshot()).toEqual(initial)
+    const first = await runner.run(req, 'headless', signal)
+    expect(first.kind).toBe('completed')
+    expect(await f.calls()).toHaveLength(1)
+    const replacement = f.runner()
+    const retained = await snapshot()
+    expect(await replacement.recover!(req, 'headless', signal)).toEqual(first)
+    for (const request of [{ ...req, model_id: 'changed-model' }, { ...req, brief: { ...req.brief, integrity: 'changed-task' } }]) {
+      expect((await replacement.recover!(request, 'headless', signal)).kind).toBe('unknown')
+      expect(await snapshot()).toEqual(retained)
+    }
+    const reservation = join(f.dir, (await readdir(f.dir)).find(name => /^codex-headless-step-.*\.json$/.test(name))!)
+    const receiptBytes = await readFile(`${reservation}.receipt`, 'utf8')
+    await unlink(`${reservation}.receipt`)
+    const uncommitted = await snapshot()
+    expect((await replacement.recover!(req, 'headless', signal)).kind).toBe('unknown')
+    expect(await snapshot()).toEqual(uncommitted)
+    await writeFile(`${reservation}.receipt`, receiptBytes)
+    for (const bytes of [JSON.stringify([req, f.home]), 'corrupt', JSON.stringify([{ ...req, model_id: 'foreign' }, f.home]) + '\n#dispatch-armed\n']) {
+      await writeFile(reservation, bytes)
+      const before = await snapshot()
+      expect((await replacement.recover!(req, 'headless', signal)).kind).toBe('unknown')
+      expect(await snapshot()).toEqual(before)
+    }
+    // Losing both files also removes the ordinary dispatch path's schema-file
+    // collision. Only the recovery reservation guard prevents another CLI turn.
+    await unlink(reservation)
+    await unlink(`${reservation}.schema`)
+    const lost = await snapshot()
+    expect((await replacement.recover!(req, 'headless', signal)).kind).toBe('unknown')
+    expect(await snapshot()).toEqual(lost)
+    expect(await f.calls()).toHaveLength(1)
+  })
 }
 
 test('Codex review host death after provider usage recovers spend without child completion or replay', async () => {

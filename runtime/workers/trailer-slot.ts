@@ -1,4 +1,5 @@
-import { readdir, readFile, unlink, writeFile } from 'node:fs/promises'
+import { constants } from 'node:fs'
+import { open, readdir, readFile, unlink, writeFile } from 'node:fs/promises'
 import { join } from 'node:path'
 
 /** Clear the result slot a step is about to dispatch against.
@@ -44,6 +45,71 @@ export type SlotReservation =
  * recognises the request, and so the armed and unarmed states are distinguishable
  * from the file alone after any restart. */
 const ARMED = '\n#dispatch-armed\n'
+const MAX_RESERVATION_BYTES = 256 * 1024
+const MAX_RESERVATION_READ_MS = 250
+
+/** Recovery has no authority to reserve work. Only an existing exact armed
+ * reservation proves this request may have been dispatched. This reader never
+ * creates, clears, arms, or takes over a slot, even when the file is missing.
+ * Read one bounded, stable regular-file snapshot within the caller's deadline
+ * and cancellation signal; unsafe or stalled evidence remains unknown. */
+export async function readArmedTrailerReservation(
+  reservation: string,
+  identity: string,
+  bounds: { signal?: AbortSignal; deadline?: number } = {},
+): Promise<Exclude<SlotReservation, { kind: 'dispatch' }>> {
+  type Retained = Exclude<SlotReservation, { kind: 'dispatch' }>
+  const unavailable = (): Retained => ({ kind: 'unknown', detail: 'Step reservation is unavailable or unsafe; recovery cannot dispatch work.' })
+  const deadline = Math.min(bounds.deadline ?? Infinity, Date.now() + MAX_RESERVATION_READ_MS)
+  if (bounds.signal?.aborted || !Number.isFinite(deadline) || deadline <= Date.now()) return unavailable()
+  const controller = new AbortController()
+  const check = () => {
+    controller.signal.throwIfAborted()
+    if (Date.now() >= deadline) throw new Error('Reservation observation expired')
+  }
+  const collect = async (): Promise<Retained> => {
+    try {
+      check()
+      // Opening a FIFO must itself be nonblocking. Refuse symlinks and every
+      // non-regular descriptor before reading even one byte from it.
+      const file = await open(reservation, constants.O_RDONLY | constants.O_NONBLOCK | constants.O_NOFOLLOW)
+      try {
+        check()
+        const before = await file.stat()
+        if (!before.isFile() || before.size > MAX_RESERVATION_BYTES) return unavailable()
+        const bytes = Buffer.alloc(before.size + 1)
+        let offset = 0
+        while (offset < bytes.length) {
+          check()
+          const part = await file.read(bytes, offset, bytes.length - offset, offset)
+          if (!part.bytesRead) break
+          offset += part.bytesRead
+        }
+        check()
+        const after = await file.stat()
+        check()
+        if (!after.isFile() || offset !== before.size || after.size !== before.size
+          || after.mtimeMs !== before.mtimeMs || after.ctimeMs !== before.ctimeMs) return unavailable()
+        if (bytes.subarray(0, offset).toString('utf8') === identity + ARMED) return { kind: 'resume' }
+        return { kind: 'unknown', detail: 'Recovery requires an existing exact armed step reservation.' }
+      } finally { await file.close() }
+    } catch { return unavailable() }
+  }
+  let timer: ReturnType<typeof setTimeout> | undefined
+  let stop = () => {}
+  const interrupted = new Promise<Retained>(resolve => {
+    stop = () => { controller.abort(); resolve(unavailable()) }
+    bounds.signal?.addEventListener('abort', stop, { once: true })
+    timer = setTimeout(stop, Math.max(0, deadline - Date.now()))
+    if (bounds.signal?.aborted) stop()
+  })
+  try { return await Promise.race([collect(), interrupted]) }
+  finally {
+    clearTimeout(timer)
+    bounds.signal?.removeEventListener('abort', stop)
+    controller.abort()
+  }
+}
 
 const RESERVATION_FILE = /^(?:claude|codex|pi|codex-headless)-step-[a-f0-9]{64}\.json$/
 

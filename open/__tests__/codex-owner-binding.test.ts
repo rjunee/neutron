@@ -8,7 +8,7 @@ import { buildLlmCallSubstrate } from '@neutronai/gateway/wiring/build-llm-call-
 import type { AgentSpec } from '@neutronai/runtime/substrate.ts'
 import type { SessionHandle } from '@neutronai/runtime/session-handle.ts'
 import type { CodexOwnerBinding, CodexOwnerBindingFacts, CodexOwnerBootstrap } from '@neutronai/runtime/adapters/codex-cli/persistent/project-control-bootstrap.ts'
-import type { BoundedWorkRequest } from '@neutronai/runtime/bounded-work.ts'
+import { fakeRunner, type BoundedWorkRequest } from '@neutronai/runtime/bounded-work.ts'
 import { createProjectRunners } from '@neutronai/runtime/workers/project-runners.ts'
 import { codexBuildResultTransport } from '../wiring/codex-build-result.ts'
 import { restrictedOwnerFixture } from './fixtures/codex-owner-review.ts'
@@ -205,6 +205,60 @@ async function consumingBuild(f: ReturnType<typeof fixture>, options: { cwd?: st
     trailer, headless: {} })
   return { request, rawWorker: runners.inRepl!, worker: f.bindings.guardBuildRunner('project-one', runners.inRepl!) }
 }
+
+test('recovery passes owner credential, cancellation, and durable uncertainty fences without invoking run', async () => {
+  const f = fixture(true)
+  await collect(f.bindings.start('project-one', spec('warm owner')))
+  const { request } = await consumingBuild(f)
+  let recoveries = 0
+  const raw = fakeRunner('openai-codex')
+  const worker = f.bindings.guardBuildRunner('project-one', { ...raw, recover: async () => {
+    recoveries++; return { kind: 'completed', result: {}, usage: null, model_reported: null, thread_id: null }
+  } })
+  f.authorize(false)
+  expect((await worker.recover!(request, 'in-repl', new AbortController().signal)).kind).toBe('unknown')
+  expect(recoveries).toBe(0)
+  f.authorize(true)
+  expect((await worker.recover!(request, 'in-repl', AbortSignal.abort())).kind).toBe('unknown')
+  expect(recoveries).toBe(0)
+  expect((await worker.recover!(request, 'in-repl', new AbortController().signal)).kind).toBe('completed')
+  expect(recoveries).toBe(1); expect(raw.calls).toHaveLength(0); expect(f.calls).toHaveLength(1)
+  expect((await f.bindings.guardBuildRunner('project-one', raw).recover!(request, 'in-repl', new AbortController().signal)).kind).toBe('unknown')
+  expect(raw.calls).toHaveLength(0)
+  writeFileSync(join(f.homes.get('project-one')!, '.neutron-owner-work.json'), '{}')
+  expect((await worker.recover!(request, 'in-repl', new AbortController().signal)).kind).toBe('unknown')
+  expect(recoveries).toBe(1); expect(raw.calls).toHaveLength(0)
+  await f.bindings.close()
+})
+
+test('recovery shares the restricted review queue with run and subsequent recovery', async () => {
+  const dir = mkdtempSync(join(tmpdir(), 'owner-recovery-queue-')); dirs.push(dir)
+  const native = await restrictedOwnerFixture({ projectId: 'review-project', cwd: dir, execute: async () => {} })
+  try {
+    await native.bindings.prepareReview('review-project')
+    let release!: () => void, entered!: () => void
+    const gate = new Promise<void>(resolve => { release = resolve })
+    const started = new Promise<void>(resolve => { entered = resolve })
+    const calls: string[] = []
+    const completed = { kind: 'completed', result: {}, usage: null, model_reported: null, thread_id: null } as const
+    const worker = native.bindings.guardBuildRunner('review-project', { ...fakeRunner('openai-codex'),
+      run: async () => { calls.push('run'); entered(); await gate; return completed },
+      recover: async req => { calls.push(req.step_id); return completed },
+    })
+    const request: BoundedWorkRequest = { run_id: 'run', step_id: 'review:0', role: 'review', model_id: 'gpt-test', effort: null,
+      cwd: dir, writable: false, network: false, tools: 'read-only', brief: { path: join(dir, 'brief'), integrity: 'fixture' },
+      result: { path: join(dir, 'result'), schema: 'fixture' }, thread: null, budget: { wall_ms: 2000 }, needs_approval_decision: false }
+    const first = worker.run(request, 'in-repl', new AbortController().signal)
+    await started
+    const second = worker.recover!({ ...request, step_id: 'review:1' }, 'in-repl', new AbortController().signal)
+    const third = worker.recover!({ ...request, step_id: 'review:2', role: 'synthesis' }, 'in-repl', new AbortController().signal)
+    await Bun.sleep(10)
+    expect(calls).toEqual(['run'])
+    release()
+    expect((await Promise.all([first, second, third])).map(result => result.kind)).toEqual(['completed', 'completed', 'completed'])
+    expect(calls).toEqual(['run', 'review:1', 'review:2']); expect(native.children).toHaveLength(0)
+  } finally { await native.close() }
+})
 
 test.each([false, true])('real owner consumer publishes child result before accepting outcome (transfer failure %s)', async failTransfer => {
   const f = fixture(true)

@@ -52,7 +52,7 @@ export function codexBuildResultTransport(options: ResultTransport): CodexResult
       if (request.result.schema === 'verdict' && (request.role === 'review' || request.role === 'synthesis')) {
         // ProjectReviewSource mints the directory and encodes it in the host
         // step identity. Native work cannot create owner-home evidence folders.
-        const identity = /^(review-[A-Za-z0-9]{6}):[1-9][0-9]*:[0-9]+$/.exec(request.step_id)
+        const identity = /^(review-[a-f0-9]{64}):[1-9][0-9]*:[0-9]+$/.exec(request.step_id)
         if (!identity || request.brief.path !== join(options.stateDir, identity[1]!, 'brief.json')) return fail()
         reviewDirectory = identity[1]!
         destinationName = 'result.json'

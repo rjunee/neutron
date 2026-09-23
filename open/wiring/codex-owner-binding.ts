@@ -364,7 +364,8 @@ export class CodexOwnerBindings {
     const supports: WorkerRunner['supports'] = (role, placement) => (role === 'review' || role === 'synthesis') && !this.reviewReady.has(projectId)
       ? { ok: false, reason: 'capability-unsupported', detail: 'Codex owner lacks attested read-only child execution with isolated result output' }
       : worker.supports(role, placement)
-    const guarded: WorkerRunner = { ...worker, supports, run: async (request, placement, signal) => {
+    const execute = (recovery: boolean): WorkerRunner['run'] => async (request, placement, signal) => {
+      if (recovery && !worker.recover) return { kind: 'unknown', detail: 'Codex worker has no recovery capability' }
       const deadline = Date.now() + request.budget.wall_ms
       const supported = supports(request.role, placement)
       if (!supported.ok) return { kind: 'refused', reason: supported.reason }
@@ -427,7 +428,7 @@ export class CodexOwnerBindings {
             return { kind: 'unknown', detail: 'Restricted review owner rollout does not attest this conversation' }
           }
         }
-        const outcome = await worker.run(request, placement, signal)
+        const outcome = await (recovery ? worker.recover!(request, placement, signal) : worker.run(request, placement, signal))
         if (outcome.kind === 'unknown' || outcome.kind === 'failed') {
           // Tags alone cannot establish delivery or terminal settlement. No
           // opening/native-delivery attempt is positive no-side-effect evidence. A failed
@@ -479,9 +480,9 @@ export class CodexOwnerBindings {
         if (observation.attempted) this.fence(projectId)
         throw error
       } finally { observation.closed = true; this.decodingBuilds.delete(projectId); this.buildObservations.delete(projectId) }
-    } }
-    return { ...guarded, run: async (request, placement, signal) => {
-      if (request.role !== 'review' && request.role !== 'synthesis') return guarded.run(request, placement, signal)
+    }
+    const queued = (operation: WorkerRunner['run']): WorkerRunner['run'] => async (request, placement, signal) => {
+      if (request.role !== 'review' && request.role !== 'synthesis') return operation(request, placement, signal)
       const previous = this.reviewQueue.get(projectId) ?? Promise.resolve()
       let release!: () => void
       const gate = new Promise<void>(resolve => { release = resolve })
@@ -493,10 +494,11 @@ export class CodexOwnerBindings {
         await Promise.race([previous, delay(Math.max(1, request.budget.wall_ms), undefined, { signal: AbortSignal.any([stopped, timer.signal]) })
           .then(() => { throw new Error('Review queue budget expired') })])
         stopped.throwIfAborted()
-        return await guarded.run(request, placement, stopped)
+        return await operation(request, placement, stopped)
       } catch { return { kind: 'unknown', detail: 'Restricted review queue or execution was interrupted' } }
       finally { timer.abort(); release(); if (this.reviewQueue.get(projectId) === tail) this.reviewQueue.delete(projectId) }
-    } }
+    }
+    return { ...worker, supports, run: queued(execute(false)), recover: queued(execute(true)) }
   }
 
   start(projectId: string | undefined, spec: AgentSpec): SessionHandle {

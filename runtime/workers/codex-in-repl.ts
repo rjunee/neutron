@@ -1,7 +1,7 @@
 import { readFile } from 'node:fs/promises'
 import { createHash } from 'node:crypto'
 import { join } from 'node:path'
-import { reserveTrailerSlot } from './trailer-slot.ts'
+import { readArmedTrailerReservation, reserveTrailerSlot } from './trailer-slot.ts'
 import { setTimeout as delay } from 'node:timers/promises'
 import type { AgentSpec } from '../substrate.ts'
 import type { BoundedWorkOutcome, BoundedWorkRequest, WorkerRunner } from '../bounded-work.ts'
@@ -44,10 +44,7 @@ export function codexInReplRunner(options: CodexInReplOptions): WorkerRunner {
     ? { ok: true }
     : { ok: false, reason: 'placement-unavailable', detail: 'Codex subagents require the project REPL.' }
 
-  return {
-    provider: 'openai-codex',
-    supports,
-    async run(req, placement, signal) {
+  const execute = async (recoveryOnly: boolean, ...[req, placement, signal]: Parameters<WorkerRunner['run']>): Promise<BoundedWorkOutcome> => {
       const supported = supports(req.role, placement)
       if (!supported.ok) return { kind: 'refused', reason: supported.reason }
       const deadline = Date.now() + req.budget.wall_ms
@@ -59,19 +56,25 @@ export function codexInReplRunner(options: CodexInReplOptions): WorkerRunner {
         const key = createHash('sha256').update(JSON.stringify([req.run_id, req.step_id])).digest('hex')
         const reservation = join(options.state_dir, `codex-step-${key}.json`)
         const identity = JSON.stringify(req)
+        // Validate recovery authority before touching transport state. A missing
+        // reservation must never prepare a first-dispatch transport.
+        const retained = recoveryOnly ? await readArmedTrailerReservation(reservation, identity, { signal, deadline }) : undefined
+        if (retained?.kind === 'unknown') return unseen(retained.detail)
         if (options.resultTransport) {
           // Preparation has no native effects and must precede the durable arm.
           // An existing reservation requires existing transport authority; the
           // atomic reservation below remains the only dispatch decision.
-          let disposition: 'dispatch' | 'resume' = 'dispatch'
-          try { await readFile(reservation, 'utf8'); disposition = 'resume' }
-          catch (error) { if ((error as NodeJS.ErrnoException).code !== 'ENOENT') throw error }
+          let disposition: 'dispatch' | 'resume' = recoveryOnly ? 'resume' : 'dispatch'
+          if (!recoveryOnly) {
+            try { await readFile(reservation, 'utf8'); disposition = 'resume' }
+            catch (error) { if ((error as NodeJS.ErrnoException).code !== 'ENOENT') throw error }
+          }
           transport = await options.resultTransport.prepare(req, signal, disposition)
         }
         // Ownership and the slot clear are one operation: see `reserveTrailerSlot`.
         // Reserving and clearing in either order leaves a restart window that either
         // reads the previous round's trailer or destroys this step's own receipt.
-        const held = await reserveTrailerSlot(reservation, identity, req.result.path, transport?.clearForDispatch)
+        const held = retained ?? await reserveTrailerSlot(reservation, identity, req.result.path, transport?.clearForDispatch)
         if (held.kind === 'unknown') return unseen(held.detail)
         if (held.kind === 'dispatch') {
           if (signal.aborted || Date.now() >= deadline) return unseen('Cancelled or out of time before dispatch.')
@@ -135,7 +138,12 @@ export function codexInReplRunner(options: CodexInReplOptions): WorkerRunner {
         // (including a child FINAL_ANSWER) cannot establish the bounded outcome.
         return unseen('Dispatch or observation interrupted; subagent completion is unknown.')
       } finally { transport?.close() }
-    },
+    }
+  return {
+    provider: 'openai-codex',
+    supports,
+    run: (...args) => execute(false, ...args),
+    recover: (...args) => execute(true, ...args),
     async liveness(handle) {
       try {
         return await options.probe?.(handle) ?? 'unknown'

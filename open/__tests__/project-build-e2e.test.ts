@@ -53,7 +53,7 @@ import { LIVE_AGENT_TOOL_NAMES } from '@neutronai/gateway/wiring/build-live-agen
 import { afterEach, expect, spyOn, test } from 'bun:test'
 import { chmod, mkdir, mkdtemp, readFile, readdir, realpath, rename, rm, symlink, writeFile } from 'node:fs/promises'
 import { tmpdir } from 'node:os'
-import { join } from 'node:path'
+import { dirname, join } from 'node:path'
 import { fileURLToPath } from 'node:url'
 import { createHash } from 'node:crypto'
 import { ProjectDb } from '@neutronai/persistence/index.ts'
@@ -79,6 +79,7 @@ import { CodexOwnerBindings } from '../wiring/codex-owner-binding.ts'
 import { restrictedOwnerFixture } from './fixtures/codex-owner-review.ts'
 import { PROJECT_DEPENDENCIES_TIMEOUT_MS } from '../wiring/project-build-dependencies.ts'
 import { PROJECT_SNAPSHOT_SCHEMA } from '../wiring/project-build-snapshot.ts'
+import { EfficiencyTrace, EFFICIENCY_SCENARIOS, assertEfficient, type EfficiencyReport, type EfficiencyScenario } from './fixtures/trident-efficiency-benchmark.ts'
 import { ReplSession } from '@neutronai/runtime/adapters/claude-code/persistent/repl-session.ts'
 
 const cleanups: (() => void | Promise<void>)[] = []
@@ -316,7 +317,7 @@ interface WorkerWorld {
    */
   blockRoles: ReadonlySet<string>
   /** Every dispatch this fake observed, in order — the harness's audit trail. */
-  dispatches: { role: string; step_id: string; schema: string; wrote: string[] }[]
+  dispatches: { role: string; step_id: string; schema: string; wrote: string[]; measuredHead?: string; resultPath?: string }[]
   /** The task the host handed each build turn after planner validation. */
   selectedTasks: string[]
   /** The planner route the real driver wrote into each plan turn's context. */
@@ -366,9 +367,17 @@ function verdictFor(world: WorkerWorld, round: number) {
   }
 }
 
-/** The host round a dispatch belongs to, taken from the identity the HOST assigned:
- *  `build-run.ts:308` ends every role step id with `:${role}:${round}`. */
-const roundOfStep = (step_id: string): number => Number(step_id.split(':').at(-1))
+/** Review identities additionally bind the full measured revision. */
+const roundOfStep = (step_id: string): number => Number(step_id.match(/:(?:plan|build|fix|review):(\d+)(?::head:[a-f0-9]{40})?$/)?.[1])
+
+function dispatchStep(dispatch: WorkerWorld['dispatches'][number]): string {
+  if (dispatch.role !== 'review' || dispatch.schema === 'verdict') return dispatch.step_id
+  expect(dispatch.measuredHead).toMatch(/^[a-f0-9]{40}$/)
+  expect(dispatch.step_id.endsWith(`:head:${dispatch.measuredHead}`)).toBe(true)
+  return dispatch.step_id.slice(0, -46)
+}
+
+const standaloneReview = (world: WorkerWorld) => world.dispatches.find(dispatch => dispatch.schema === 'project-review')!
 
 /**
  * THE ONLY FAKE MODEL IN THIS FILE.
@@ -411,7 +420,8 @@ function literalWorker(world: WorkerWorld) {
       ...(stopped ? { on: `harness: the ${request.role} worker was stopped mid-turn` } : {}),
     }
     world.dispatches.push({ role: request.role, step_id: request.step_id,
-      schema: request.result.schema, wrote: Object.keys(body as object).sort() })
+      schema: request.result.schema, wrote: Object.keys(body as object).sort(), resultPath: request.result.path,
+      ...(request.role === 'review' ? { measuredHead: await gitOut(world.run, request.cwd, ['rev-parse', 'HEAD']) } : {}) })
     // The dispatch prompt asks for a temporary file and a rename, so do that.
     await writeFile(`${request.result.path}.tmp`, JSON.stringify(body), { mode: 0o600 })
     await rename(`${request.result.path}.tmp`, request.result.path)
@@ -743,6 +753,7 @@ async function fixture(options: { ralph?: boolean; moreTasks?: boolean; suiteExi
   /** Real session ownership with only the model boundary held at a barrier. */
   reviewChild?: (request: BoundedWorkRequest, seat: string) => Promise<void>
   reviewVeto?: 'standalone' | 'synthesis'
+  efficiencyTrace?: EfficiencyTrace
 } = {}) {
   const dir = await mkdtemp(join(tmpdir(), 'project-build-e2e-'))
   cleanups.push(() => rm(dir, { recursive: true, force: true }))
@@ -864,7 +875,7 @@ async function fixture(options: { ralph?: boolean; moreTasks?: boolean; suiteExi
   cleanups.push(() => { pool.delete(key); supervisedBySessionKey.delete(key) })
   const worker = literalWorker(world)
   const projectsDir = join(dir, 'claude-projects')
-  const session = { sessionId: 'e2e-session', toolSurface: LIVE_AGENT_TOOL_NAMES.join(','), cwd: dir, hasChildExited: () => false,
+  const session = { sessionId: 'e2e-session', authFingerprint: 'fixture-spawned-credential', toolSurface: LIVE_AGENT_TOOL_NAMES.join(','), cwd: dir, hasChildExited: () => false,
     child: { submitLine: async (line: string) => {
       const spec = JSON.parse(line.slice(line.indexOf('{')))
       const args = JSON.parse(String(spec.prompt).slice(String(spec.prompt).indexOf('{')))
@@ -882,7 +893,8 @@ async function fixture(options: { ralph?: boolean; moreTasks?: boolean; suiteExi
             content: [], usage: { input_tokens: 7, output_tokens: 3, cache_read_input_tokens: 2, cache_creation_input_tokens: 0 } } },
         ].map(row => JSON.stringify(row)).join('\n') + '\n')
       }
-      if (!options.rateLimitedSynthesis || request.role !== 'synthesis') return worker(line)
+      if (!options.rateLimitedSynthesis || request.role !== 'synthesis') return options.efficiencyTrace && request.role !== 'review'
+        ? options.efficiencyTrace.during(request.role, () => worker(line)) : worker(line)
       // The provider owns this transcript envelope. No result file is written.
       const directory = join(projectsDir, dir.replace(/\//g, '-'), 'e2e-session', 'subagents')
       await mkdir(directory, { recursive: true })
@@ -900,6 +912,7 @@ async function fixture(options: { ralph?: boolean; moreTasks?: boolean; suiteExi
   let registeredSession: typeof session | ReplSession = session
   if (options.reviewChild) {
     const live = new ReplSession(key, 'e2e-generation', 'e2e-session', 'e2e-channel', dir)
+    live.authFingerprint = session.authFingerprint
     live.toolSurface = session.toolSurface
     const children: Promise<void>[] = []
     const errors: unknown[] = []
@@ -933,6 +946,7 @@ async function fixture(options: { ralph?: boolean; moreTasks?: boolean; suiteExi
       substrate_instance_id: registration.instanceId ?? 'cc-agent-e2e',
       project_id: registration.projectId ?? 'e2e-project',
       skip_permissions: true, extra_dirs: [dir],
+      env: { CLAUDE_CODE_OAUTH_TOKEN: 'fixture-native-credential', ANTHROPIC_AUTH_TOKEN: undefined, ANTHROPIC_API_KEY: undefined },
       projectsDir,
     } as never)
     if (registration.state === 'missing') { pool.delete(sessionKey); return }
@@ -1206,6 +1220,321 @@ test('Codex owner routes explicit Claude plan, review and synthesis headlessly a
     expect(envelope).toMatchObject({ run_id: f.row.id, step_id: call.request.step_id, schema: call.request.result.schema, kind: 'completed' })
   }
 }, 30_000)
+
+async function preparedClaudePlanner(f: Awaited<ReturnType<typeof codexOwnerWithClaude>>) {
+  const host = await createProjectBuildHost(await f.prepare())
+  const measured = await host.deps.measure()
+  if (measured.kind !== 'known') throw Error('expected measured fixture')
+  const request = (step: string): BoundedWorkRequest => ({ ...host.workers.plan.request,
+    run_id: f.row.id, step_id: `${f.row.id}:plan:${step}`, role: 'plan', needs_approval_decision: false })
+  const call = async (req: BoundedWorkRequest) => {
+    await host.deps.prepareWork(req, { snapshot: measured.value, previous: null, findings: [] })
+    return host.workers.plan.runner.run(req, 'headless', new AbortController().signal)
+  }
+  return { request, call }
+}
+
+test('prepared recurring Claude planning resumes its observed conversation after host reconstruction', async () => {
+  const f = await codexOwnerWithClaude()
+  const first = await preparedClaudePlanner(f)
+  expect((await first.call(first.request('0'))).kind).toBe('completed')
+  expect((await first.call(first.request('1'))).kind).toBe('completed')
+  const restarted = await preparedClaudePlanner(f)
+  expect((await restarted.call(restarted.request('2'))).kind).toBe('completed')
+  const calls = (await readFile(f.calls, 'utf8')).trim().split('\n').map(line => JSON.parse(line))
+  expect(calls).toHaveLength(3)
+  const thread = calls[0].argv[calls[0].argv.indexOf('--session-id') + 1]
+  expect(thread).toBeTruthy()
+  expect(calls.map(call => call.request.thread)).toEqual([null, { id: thread }, { id: thread }])
+  expect(calls.slice(1).map(call => call.argv[call.argv.indexOf('--resume') + 1])).toEqual([thread, thread])
+  expect(f.children).toHaveLength(0)
+}, 30_000)
+
+for (const changed of ['model', 'credential', 'project', 'missing', 'corrupt', 'writer', 'whole-state'] as const)
+test(`prepared recurring conversation refuses changed ${changed} and still admits its legitimate successor`, async () => {
+  const f = await codexOwnerWithClaude()
+  const first = await preparedClaudePlanner(f)
+  expect((await first.call(first.request('0'))).kind).toBe('completed')
+  const binding = join(f.context.stateRoot, f.row.id, 'worker-conversation-plan', 'binding.json')
+  const saved = await readFile(binding, 'utf8')
+  const restore: Array<() => Promise<void> | void> = []
+  if (changed === 'credential') {
+    f.context.env.CLAUDE_CODE_OAUTH_TOKEN = 'rotated-owner'
+    restore.push(() => { f.context.env.CLAUDE_CODE_OAUTH_TOKEN = 'fixture-selected-claude' })
+  }
+  if (changed === 'missing') { await rename(binding, `${binding}.saved`); restore.push(() => rename(`${binding}.saved`, binding)) }
+  if (changed === 'corrupt') { await writeFile(binding, '{}'); restore.push(() => writeFile(binding, saved)) }
+  if (changed === 'whole-state') {
+    const state = join(f.context.stateRoot, f.row.id)
+    await rename(state, `${state}.saved`)
+    await mkdir(state)
+    // Rebuild all host-owned transports/briefs exactly as restart does. Only
+    // the SQLite initiation witness remains from the first conversation.
+    restore.push(async () => { await rm(state, { recursive: true }); await rename(`${state}.saved`, state) })
+  }
+  const lock = join(f.context.stateRoot, f.row.id, 'worker-conversation-plan.writer.lock')
+  if (changed === 'writer') { await writeFile(lock, ''); restore.push(() => rm(lock)) }
+  if (changed === 'project') {
+    f.context.projectId = 'another-project'
+    await expect(preparedClaudePlanner(f)).rejects.toThrow('State directory belongs to a different project conversation or run')
+    restore.push(() => { f.context.projectId = 'e2e-project' })
+  } else {
+    const candidate = changed === 'whole-state' ? await preparedClaudePlanner(f) : first
+    const request = { ...candidate.request('1'), ...(changed === 'model' ? { model_id: 'claude-different-model' } : {}) }
+    expect((await candidate.call(request)).kind).toBe('unknown')
+  }
+  expect((await readFile(f.calls, 'utf8')).trim().split('\n')).toHaveLength(1)
+  for (const undo of restore.reverse()) await undo()
+  const recovered = await preparedClaudePlanner(f)
+  // Model-mismatched accounting is a distinct attempted step, so use a fresh
+  // successor while keeping the same role's conversation ownership.
+  expect((await recovered.call(recovered.request('2'))).kind).toBe('completed')
+  const calls = (await readFile(f.calls, 'utf8')).trim().split('\n').map(line => JSON.parse(line))
+  expect(calls).toHaveLength(2)
+  expect(calls[1].argv).toContain('--resume')
+  expect(calls[1].request.thread.id).toBe(JSON.parse(saved).thread)
+}, 30_000)
+
+for (const changed of ['none', 'head', 'strategy', 'dependencies', 'missing', 'corrupt', 'subset'] as const)
+test(`prepared host suite receipt survives reconstruction and handles ${changed} inputs`, async () => {
+  const f = await fixture({ bunWorkspace: true })
+  const original = f.context.runSuite!
+  let suites = 0
+  f.context.runSuite = async (...args) => { suites++; return original(...args) }
+  const prepared = await f.prepare()
+  let host = await createProjectBuildHost(prepared)
+  let measured = await host.deps.measure()
+  if (measured.kind !== 'known') throw Error('expected measured fixture')
+  expect(await host.deps.publicationSuite(measured.value)).toMatchObject({ kind: 'known' })
+  expect(suites).toBe(1)
+  const receipt = f.store.stageEvents(f.row.id).filter(event => event.stage === 'build-suite-receipt').at(-1)!
+  expect(JSON.parse(receipt.meta!).receipt).toMatchObject({ head: measured.value.head, scope: 'full-suite' })
+  const worktree = f.store.get(f.row.id)!.worktree!
+  if (changed === 'head') expect((await spawnCapture(['git', 'commit', '--allow-empty', '-m', 'test: moved revision'], worktree)).ok).toBe(true)
+  if (changed === 'dependencies') {
+    // The lockfile, manifest, and git head stay unchanged; installed bytes alone
+    // must invalidate the proof acquired against the previous installation.
+    await writeFile(join(worktree, 'node_modules', 'proof-input'), 'changed installation')
+  }
+  if (changed === 'strategy') f.input.test_strategy += '\nAdditional host strategy identity.'
+  if (changed === 'missing') f.db.raw().query('DELETE FROM code_trident_stage_events WHERE run_id = ? AND stage = ?').run(f.row.id, 'build-suite-receipt')
+  if (changed === 'corrupt' || changed === 'subset') {
+    const value = JSON.parse(receipt.meta!)
+    if (changed === 'subset') value.receipt.scope = 'subset'
+    await f.store.recordStageEvent(f.row.id, 'build-suite-receipt', changed === 'corrupt' ? '{' : JSON.stringify(value))
+  }
+  host = await createProjectBuildHost(await f.prepare())
+  measured = await host.deps.measure()
+  if (measured.kind !== 'known') throw Error('expected measured fixture')
+  expect(await host.deps.publicationSuite(measured.value)).toMatchObject({ kind: 'known' })
+  expect(suites).toBe(changed === 'none' ? 1 : 2)
+  expect(f.world.dispatches).toHaveLength(0)
+}, 120_000)
+
+async function preparedPanelFixture() {
+  const f = await fixture()
+  f.register()
+  await f.prepare()
+  const worktree = f.store.get(f.row.id)!.worktree!
+  const move = async () => {
+    await writeFile(join(worktree, 'NOTES.md'), `measured revision ${await gitOut(spawnCapture, worktree, ['rev-parse', 'HEAD'])}\n`)
+    expect((await spawnCapture(['git', 'add', 'NOTES.md'], worktree)).ok).toBe(true)
+    expect((await spawnCapture(['git', 'commit', '-m', 'test: measured panel revision'], worktree)).ok).toBe(true)
+  }
+  await move()
+  const observe = async (round = 1) => {
+    const host = await createProjectBuildHost(await f.prepare())
+    const measured = await host.deps.measure()
+    if (measured.kind !== 'known') throw Error('expected measured panel revision')
+    return host.deps.observeReview(measured.value, round)
+  }
+  return { ...f, move, observe }
+}
+
+for (const changed of ['none', 'head', 'round', 'task', 'model', 'effort', 'credential', 'desired-credential', 'file-credential'] as const)
+test(`prepared panel recovery purchases only the work invalidated by ${changed}`, async () => {
+  const f = await preparedPanelFixture()
+  const config = join(f.dir, 'selected-native-config')
+  if (changed === 'file-credential') {
+    const session = (await pool.get(f.key))!
+    session.authFingerprint = ''
+    supervisedBySessionKey.get(f.key)!.env!.CLAUDE_CODE_OAUTH_TOKEN = undefined
+    supervisedBySessionKey.get(f.key)!.claudeConfigDir = config
+    await mkdir(config)
+    await writeFile(join(config, '.credentials.json'), '{"fixture":"original-account"}')
+  }
+  expect((await f.observe()).kind).toBe('observed')
+  expect(f.world.dispatches.map(dispatch => dispatch.role)).toEqual(['review', 'synthesis'])
+  if (changed === 'head') await f.move()
+  if (changed === 'task') f.db.raw().query('UPDATE code_trident_runs SET task = ? WHERE id = ?').run('changed canonical task', f.row.id)
+  if (changed === 'model') f.input.phase_models = { ...f.input.phase_models, review_adversarial: { model: 'fable' } }
+  if (changed === 'effort') f.input.phase_models = { ...f.input.phase_models, review_adversarial: { model: 'opus', effort: 'low' } }
+  if (changed === 'credential') (await pool.get(f.key))!.authFingerprint = 'fixture-replaced-child-credential'
+  if (changed === 'desired-credential') supervisedBySessionKey.get(f.key)!.env!.CLAUDE_CODE_OAUTH_TOKEN = 'desired-but-not-spawned-credential'
+  if (changed === 'file-credential') await writeFile(join(config, '.credentials.json'), '{"fixture":"changed-account"}')
+  const expectedCalls = changed === 'none' || changed === 'desired-credential' ? 2 : changed === 'effort' ? 3 : 4
+  expect((await f.observe(changed === 'round' ? 2 : 1)).kind).toBe('observed')
+  expect(f.world.dispatches).toHaveLength(expectedCalls)
+  // The newly accepted observations are themselves reusable after another host
+  // reconstruction; invalidation cannot become permanent repeated work.
+  expect((await f.observe(changed === 'round' ? 2 : 1)).kind).toBe('observed')
+  expect(f.world.dispatches).toHaveLength(expectedCalls)
+})
+
+for (const damaged of ['missing', 'corrupt', 'foreign', 'pending', 'directory', 'whole-state'] as const)
+test(`prepared panel recovery refuses ${damaged} host evidence without buying another verdict`, async () => {
+  const f = await preparedPanelFixture()
+  expect((await f.observe()).kind).toBe('observed')
+  expect(f.world.dispatches).toHaveLength(2)
+  const directory = dirname(f.world.dispatches[0]!.resultPath!)
+  const path = join(directory, 'receipt.json')
+  const original = await readFile(path, 'utf8')
+  const restore: Array<() => Promise<void>> = []
+  if (damaged === 'whole-state') {
+    const state = join(f.context.stateRoot, f.row.id)
+    await rename(state, `${state}.saved`)
+    restore.push(async () => { await rm(state, { recursive: true }); await rename(`${state}.saved`, state) })
+  } else if (damaged === 'directory') {
+    await rename(directory, `${directory}.saved`)
+    restore.push(() => rename(`${directory}.saved`, directory))
+  } else {
+    const value = JSON.parse(original)
+    if (damaged === 'missing') await rm(path)
+    else if (damaged === 'corrupt') await writeFile(path, '{')
+    else if (damaged === 'foreign') await writeFile(path, JSON.stringify({ ...value, identity: 'another-request' }))
+    else {
+      await writeFile(path, JSON.stringify({ ...value, state: 'pending', observation: undefined }))
+      // Without the original request there is no authority to ask the transport
+      // to reconcile this pending slot, even if a result happens to exist.
+      const request = join(directory, 'request.json')
+      const bytes = await readFile(request, 'utf8')
+      await rm(request)
+      restore.push(() => writeFile(request, bytes))
+    }
+    restore.push(() => writeFile(path, original))
+  }
+  expect((await f.observe()).kind).not.toBe('observed')
+  expect(f.world.dispatches).toHaveLength(2)
+  for (const undo of restore) await undo()
+  expect((await f.observe()).kind).toBe('observed')
+  expect(f.world.dispatches).toHaveLength(2)
+})
+
+test('prepared panel recovery retains the consumed infrastructure retry and permits fresh review for a moved head', async () => {
+  const f = await preparedPanelFixture()
+  const paid: BoundedWorkRequest[] = []
+  const observe = async () => {
+    const options = await f.prepare()
+    const original = options.substrate.inRepl!
+    options.substrate.inRepl = { ...original, async run(request, placement, signal) {
+      if (request.result.schema === 'verdict' && request.role === 'review') {
+        paid.push(request)
+        return { kind: 'failed', class: 'infra', detail: 'fixture infrastructure failure' }
+      }
+      return original.run(request, placement, signal)
+    } }
+    const host = await createProjectBuildHost(options)
+    const measured = await host.deps.measure()
+    if (measured.kind !== 'known') throw Error('expected measured panel revision')
+    return host.deps.observeReview(measured.value, 1)
+  }
+  expect((await observe()).kind).toBe('blocked')
+  expect(paid).toHaveLength(2)
+  expect((await observe()).kind).toBe('blocked')
+  expect(paid).toHaveLength(2)
+  const retryDirectory = dirname(paid[1]!.result.path)
+  await rename(retryDirectory, `${retryDirectory}.saved`)
+  expect((await observe()).kind).toBe('blocked')
+  expect(paid).toHaveLength(2)
+  await rename(`${retryDirectory}.saved`, retryDirectory)
+  await f.move()
+  expect((await observe()).kind).toBe('blocked')
+  expect(paid).toHaveLength(4)
+})
+
+test('prepared panel recovery reconciles a lost acknowledgement through the original native request without another paid turn', async () => {
+  const f = await preparedPanelFixture()
+  const options = await f.prepare()
+  const runner = options.substrate.inRepl!
+  let lost = false
+  options.substrate.inRepl = { ...runner, async run(request, placement, signal) {
+    const outcome = await runner.run(request, placement, signal)
+    if (request.role === 'review' && !lost) {
+      lost = true
+      throw Error('fixture: acknowledgement lost after native result settled')
+    }
+    return outcome
+  } }
+  const host = await createProjectBuildHost(options)
+  const measured = await host.deps.measure()
+  if (measured.kind !== 'known') throw Error('expected measured panel revision')
+  expect((await host.deps.observeReview(measured.value, 1)).kind).not.toBe('observed')
+  expect(f.world.dispatches.map(dispatch => dispatch.role)).toEqual(['review'])
+  const originalStep = f.world.dispatches[0]!.step_id
+  expect((await f.observe()).kind).toBe('observed')
+  expect(f.world.dispatches.map(dispatch => dispatch.role)).toEqual(['review', 'synthesis'])
+  expect(f.world.dispatches[0]!.step_id).toBe(originalStep)
+  expect((await f.observe()).kind).toBe('observed')
+  expect(f.world.dispatches).toHaveLength(2)
+})
+
+for (const damaged of ['missing', 'corrupt', 'unarmed', 'foreign'] as const)
+test(`prepared pending panel refuses ${damaged} native reservation without repurchasing and recovers when restored`, async () => {
+  const f = await preparedPanelFixture()
+  const options = await f.prepare()
+  const runner = options.substrate.inRepl!
+  options.substrate.inRepl = { ...runner, async run(request, placement, signal) {
+    const outcome = await runner.run(request, placement, signal)
+    if (request.role === 'review') throw Error('fixture: lost native acknowledgement')
+    return outcome
+  } }
+  const host = await createProjectBuildHost(options)
+  const measured = await host.deps.measure()
+  if (measured.kind !== 'known') throw Error('expected measured panel revision')
+  expect((await host.deps.observeReview(measured.value, 1)).kind).not.toBe('observed')
+  expect(f.world.dispatches.map(dispatch => dispatch.role)).toEqual(['review'])
+  const state = join(f.context.stateRoot, f.row.id)
+  const names = (await readdir(state)).filter(name => /^claude-step-[a-f0-9]{64}\.json$/.test(name))
+  // Positive control: damage the actual runner's single paid reservation, not
+  // a fixture-only idempotence map or a guessed evidence path.
+  expect(names).toHaveLength(1)
+  const reservation = join(state, names[0]!)
+  const original = await readFile(reservation, 'utf8')
+  expect(original).toContain(f.world.dispatches[0]!.step_id)
+  expect(original).toEndWith('\n#dispatch-armed\n')
+  if (damaged === 'missing') await rm(reservation)
+  else if (damaged === 'corrupt') await writeFile(reservation, '{')
+  else if (damaged === 'unarmed') await writeFile(reservation, original.replace('\n#dispatch-armed\n', ''))
+  else await writeFile(reservation, original.replace(f.row.id, 'foreign-run'))
+  const recovered = await f.observe()
+  expect(f.world.dispatches.map(dispatch => dispatch.role)).toEqual(['review'])
+  expect(recovered.kind).not.toBe('observed')
+  await writeFile(reservation, original)
+  expect((await f.observe()).kind).toBe('observed')
+  expect(f.world.dispatches.map(dispatch => dispatch.role)).toEqual(['review', 'synthesis'])
+  expect((await f.observe()).kind).toBe('observed')
+  expect(f.world.dispatches).toHaveLength(2)
+})
+
+test('prepared panel recovery cannot authorize a verdict across an actual child credential change during dispatch', async () => {
+  const f = await preparedPanelFixture()
+  const session = (await pool.get(f.key))!
+  const originalCredential = session.authFingerprint
+  const options = await f.prepare()
+  const runner = options.substrate.inRepl!
+  options.substrate.inRepl = { ...runner, async run(request, placement, signal) {
+    if (request.role === 'review') session.authFingerprint = 'changed-during-actual-dispatch'
+    return runner.run(request, placement, signal)
+  } }
+  const host = await createProjectBuildHost(options)
+  const measured = await host.deps.measure()
+  if (measured.kind !== 'known') throw Error('expected measured panel revision')
+  expect((await host.deps.observeReview(measured.value, 1)).kind).not.toBe('observed')
+  expect(f.world.dispatches.map(dispatch => dispatch.role)).toEqual(['review'])
+  session.authFingerprint = originalCredential
+  expect((await f.observe()).kind).not.toBe('observed')
+  expect(f.world.dispatches.map(dispatch => dispatch.role)).toEqual(['review'])
+})
 
 test('Codex owner with unavailable selected Claude credentials refuses before any worker or publication', async () => {
   const f = await codexOwnerWithClaude()
@@ -2052,6 +2381,144 @@ test.each(['readiness', 'ci', 'artifact'] as const)('unavailable admission preve
   expect(f.world.dispatches.map(call => call.role)).toEqual(['plan', 'build'])
 }, 30_000)
 
+/** Same task, providers, gates and scripted verdicts in both schedules. The
+ * baseline reconstructs the serial paid-review constraint measured in #1196;
+ * removing the setup receipt recreates pre-receipt preparation. No live timing,
+ * pricing or historical recovery count is synthesized by this fixture. */
+async function efficiencyBenchmark(scenario: EfficiencyScenario, scheduling: EfficiencyReport['scheduling']): Promise<EfficiencyReport> {
+  const trace = new EfficiencyTrace()
+  let serial = Promise.resolve()
+  let pending: Array<() => void> = []
+  let barrierExpired = false
+  const timers = new Set<ReturnType<typeof setTimeout>>()
+  cleanups.push(() => { for (const timer of timers) clearTimeout(timer); for (const release of pending) release() })
+  const f = await fixture({ bunWorkspace: true, efficiencyTrace: trace,
+    blockersByRound: scenario === 'code-fix' ? [0, 1] : [],
+    reviewChild: async (_request, seat) => {
+      if (scheduling === 'serial-baseline') {
+        const next = serial.then(() => trace.during(`review:${seat}`, async () => {}, 10))
+        serial = next
+        return next
+      }
+      const finish = trace.begin(`review:${seat}`, 10)
+      await new Promise<void>(resolve => {
+        // Deadline is only a deadlock escape for a regressed serial producer.
+        // Release its child so the real transport can drain; never abandon a
+        // result writer and wait for the much longer provider budget.
+        const timer = setTimeout(() => {
+          barrierExpired = true
+          const batch = pending; pending = []; for (const release of batch) release()
+        }, 10_000)
+        timers.add(timer)
+        pending.push(() => { clearTimeout(timer); timers.delete(timer); resolve() })
+        if (pending.length === 3) { const batch = pending; pending = []; for (const release of batch) release() }
+      })
+      finish()
+    },
+  })
+  f.input.phase_models = { ...f.input.phase_models, review_rubric: { model: 'fable' } }
+  const counts = { plan: 0, build: 0, fix: 0, review: 0, synthesis: 0, install: 0, verify: 0, proof: 0 }
+  const suite = f.context.runSuite!
+  f.context.runSuite = Object.assign(async (...args: Parameters<typeof suite>) =>
+    trace.during('proof', () => suite(...args)), { writesDiffOutput: true as const })
+  const install = f.context.runInstall!
+  f.context.runInstall = Object.assign(async (...args: Parameters<typeof install>) => {
+    const stage = args[0][2]!.includes('verify-workspace-deps.ts') ? 'verify' : 'install'
+    counts[stage]++
+    return trace.during(stage, () => install(...args))
+  }, { writesDiffOutput: true as const })
+  const prepare = async () => trace.during('prepare', async () => {
+    if (scheduling === 'serial-baseline') await rm(join(f.context.stateRoot, encodeURIComponent(f.row.id), 'dependencies-receipt.json'), { force: true })
+    f.input.run = f.store.get(f.row.id)!
+    return f.prepare()
+  })
+  // A stable second preparation is the positive reuse control. Recovery after a
+  // committed build legitimately changes the receipt's revision and installs.
+  await prepare()
+  const outcomes: string[] = []
+  const run = async (start: 'fresh' | 'resume', die = false) => {
+    const host = await createProjectBuildHost(await prepare())
+    if (scenario === 'pending-interruption' && start === 'fresh') {
+      const runner = host.workers.review.runner
+      host.workers.review.runner = { ...runner, run: async (...args) => {
+        await runner.run(...args)
+        // The actual provider evidence exists, but this process loses its
+        // acknowledgement before the driver clears the durable pending identity.
+        throw Error('scripted acknowledgement lost after completed review')
+      } }
+    }
+    for (const key of ['admissionGate', 'reviewReadiness', 'reviewArtifact', 'reviewCi', 'reviewSuite', 'reviewGate', 'publicationSuite', 'publishGate', 'mergeGate'] as const) {
+      const original = host.deps[key]!
+      // Observe the real gate result. This wrapper never supplies a verdict.
+      Object.assign(host.deps, { [key]: async (...args: never[]) => {
+        const value = await trace.during(`gate:${key}`, () => (original as (...args: never[]) => Promise<{ kind: string }>)(...args))
+        trace.decisions.push(`${key}:${value.kind}`)
+        return value
+      } })
+    }
+    const outcome = die ? await buildRun({ mode: 'pr', start, run_id: f.row.id, workers: host.workers,
+      repl_provider: 'anthropic', merge_mode: 'pr' }, host.deps, new AbortController().signal)
+      : await host.run({ mode: 'pr', start }, new AbortController().signal)
+    outcomes.push(outcome.kind)
+    return outcome
+  }
+  if (scenario === 'unchanged-head' || scenario === 'moved-head') {
+    const refusedAction = scenario === 'moved-head' ? 'merge' : 'create'
+    f.github.refuse.add(refusedAction)
+    const first = await run('fresh', true)
+    expect(first).toMatchObject({ kind: 'unknown', phase: scenario === 'moved-head' ? 'merge' : 'publish' })
+    if (scenario === 'moved-head') {
+      expect(lastCheckpoint(f)).toMatchObject({ stage: 'approved' })
+      const worktree = f.store.get(f.row.id)!.worktree!
+      await writeFile(join(worktree, 'MOVED.md'), 'external revision\n')
+      await gitOut(f.world.run, worktree, ['add', 'MOVED.md'])
+      await gitOut(f.world.run, worktree, ['commit', '-m', 'advance assigned branch'])
+    }
+    f.github.refuse.delete(refusedAction)
+    await run('resume')
+  } else if (scenario === 'interruption') {
+    f.github.refuse.add('merge')
+    expect(await run('fresh', true)).toMatchObject({ kind: 'unknown', phase: 'merge' })
+    expect(lastCheckpoint(f)).toMatchObject({ stage: 'approved' })
+    const approvedHead = lastCheckpoint(f).head
+    f.github.refuse.delete('merge')
+    expect(await run('resume')).toMatchObject({ kind: 'merged', snapshot: { head: approvedHead } })
+  } else if (scenario === 'pending-interruption') {
+    expect(await run('fresh', true)).toMatchObject({ kind: 'blocked', phase: 'review', on: 'infra-only: Review producer failed during the review join: Error: scripted acknowledgement lost after completed review' })
+    const pending = lastCheckpoint(f).pending
+    const reviewStep = `${f.row.id}:review:1:head:${lastCheckpoint(f).head}`
+    expect(pending).toMatchObject({ phase: 'review', step_id: reviewStep,
+      recovery: { request: { run_id: f.row.id, step_id: reviewStep, role: 'review' }, snapshot: { head: lastCheckpoint(f).head } } })
+    const completed = JSON.parse(await readFile(join(f.dir, 'state', f.row.id, 'review.result'), 'utf8'))
+    expect(completed).toMatchObject({ kind: 'completed', step_id: reviewStep, result: { head: lastCheckpoint(f).head } })
+    expect(await run('resume')).toMatchObject({ kind: 'merged', snapshot: { head: completed.result.head } })
+    expect(lastCheckpoint(f).pending).toBeUndefined()
+  } else await run('fresh')
+  for (const call of f.world.dispatches) counts[call.role as 'plan' | 'build' | 'fix' | 'review' | 'synthesis']++
+  counts.proof = f.commands.filter(argv => argv[0] === 'bash' && argv[1] === '-lc' && (argv[2] ?? '').includes('bash scripts/ci/suite.sh')).length
+  // Both schedules run in this test. Retire the first fixture's identity so the
+  // second project's acquisition cannot select the predecessor's granted roots.
+  pool.delete(f.key)
+  supervisedBySessionKey.delete(f.key)
+  return { timing_unit: 'scripted-workload-unit', barrier_complete: !barrierExpired, scenario, scheduling, counts, decisions: trace.decisions, intervals: trace.intervals, outcomes,
+    usage: { tokens: null, cost: null, source: 'scripted-provider-no-usage' } }
+}
+
+test.each([...EFFICIENCY_SCENARIOS])('deterministic efficiency benchmark: %s', async scenario => {
+  const before = await efficiencyBenchmark(scenario, 'serial-baseline')
+  const after = await efficiencyBenchmark(scenario, 'concurrent')
+  if (process.env.TRIDENT_EFFICIENCY_REPORT === '1') console.log(JSON.stringify({ before, after }))
+  assertEfficient(after)
+  expect(() => assertEfficient(before)).toThrow('Independent reviews serialized')
+  expect(after.decisions).toEqual(before.decisions)
+  expect(after.outcomes).toEqual(before.outcomes)
+  expect(after.counts).toEqual({ ...before.counts, install: before.counts.install - 1 })
+  expect(after.counts.proof).toBe(scenario === 'code-fix' || scenario === 'moved-head' ? 2 : 1)
+  expect(after.usage).toEqual({ tokens: null, cost: null, source: 'scripted-provider-no-usage' })
+  // The machine-readable record is emitted on demand; no private run paths or
+  // generated timestamps enter the fixed scenario comparison.
+}, 120_000)
+
 test('pr mode drives plan, build, review, publish and merge to a terminal merged outcome', async () => {
   const f = await fixture()
   const outcome = await drive(f, 'pr')
@@ -2734,7 +3201,7 @@ test('a design-gap escalation re-plans and rebuilds instead of dispatching a fix
     'plan', 'build', 'review', 'review', 'synthesis',
   ])
   // NO fix worker ran, and the replacement pair carries round 1's identity.
-  expect(f.world.dispatches.map(dispatch => dispatch.step_id).filter(id => id.startsWith(f.row.id)))
+  expect(f.world.dispatches.map(dispatchStep).filter(id => id.startsWith(f.row.id)))
     .toEqual([`${f.row.id}:plan:0`, `${f.row.id}:build:0`, `${f.row.id}:review:1`,
       `${f.row.id}:plan:1`, `${f.row.id}:build:1`, `${f.row.id}:review:2`])
 
@@ -2789,6 +3256,41 @@ test('a finding repeated after a fix stops before another fix is dispatched', as
 }, 300_000)
 
 // ── RESUME ACROSS A DRIVER RESTART ───────────────────────────────────────────
+
+for (const progress of ['valid', 'missing', 'null', 'invalid'] as const)
+test(`pending native fix recovery preserves repeated-finding enforcement with ${progress} progress`, async () => {
+  const f = await fixture({ blockersByRound: [0, 2, 1], repeatFirstFinding: true })
+  const host = await createProjectBuildHost(await f.prepare())
+  const runner = host.workers.fix.runner
+  host.workers.fix.runner = { ...runner, async run(...args) {
+    const result = await runner.run(...args)
+    expect(result.kind).toBe('completed')
+    return { kind: 'unknown', detail: 'fixture: completed fix acknowledgement lost' }
+  } }
+  expect(await buildRun({ mode: 'pr', start: 'fresh', run_id: f.row.id, workers: host.workers,
+    repl_provider: 'anthropic', merge_mode: 'pr' }, host.deps, new AbortController().signal))
+    .toMatchObject({ kind: 'unknown', phase: 'fix' })
+  const event = f.store.stageEvents(f.row.id).filter(row => row.stage === 'build-mode-state').at(-1)!
+  const state = JSON.parse(event.meta!)
+  expect(state.checkpoint.pending).toMatchObject({ phase: 'fix', step_id: `${f.row.id}:fix:1`,
+    recovery: { previousReview: { blockingCount: 6 } } })
+  expect(state.checkpoint.pending.recovery.previousReview.findings.length).toBe(2)
+  if (progress === 'missing') delete state.checkpoint.pending.recovery.previousReview
+  if (progress === 'null') state.checkpoint.pending.recovery.previousReview = null
+  if (progress === 'invalid') state.checkpoint.pending.recovery.previousReview = { findings: [' '], blockingCount: 6 }
+  if (progress !== 'valid') await f.store.recordStageEvent(f.row.id, 'build-mode-state', JSON.stringify(state))
+  const before = f.world.dispatches.length
+  const outcome = await restartThroughGateway(f)
+  if (progress === 'valid') {
+    expect(outcome).toMatchObject({ kind: 'blocked', phase: 'review', on: 'Review requires orchestrator arbitration: repeated finding' })
+    expect(f.world.dispatches.slice(before).map(call => call.role)).toEqual(['review', 'review', 'synthesis'])
+  } else {
+    expect(outcome.kind).toBe('unknown')
+    expect(f.world.dispatches).toHaveLength(before)
+  }
+  expect(f.world.dispatches.filter(call => call.role === 'fix')).toHaveLength(1)
+  expect(f.github.prs[0]!.state).toBe('OPEN')
+}, 30_000)
 
 for (const scenario of ['bare', 'valid', 'repeated', 'exhausted', 'forged-fix', 'wrong-head-fix', 'wrong-run', 'wrong-step'] as const)
 test(`unchanged-tip retry consumes prior ${scenario} mutation nomination despite new worker brief`, async () => {
@@ -2903,7 +3405,7 @@ test('local invalid nomination gets one bounded fix and a fresh review before lo
   const outcome = await host.run({ mode: 'pr', start: 'fresh' }, new AbortController().signal)
   expect(outcome.kind, why(f, outcome)).toBe('merged')
   expect(f.world.dispatches.filter(dispatch => dispatch.step_id.startsWith(`${f.row.id}:`)
-    && ['review', 'fix'].includes(dispatch.role)).map(dispatch => dispatch.step_id))
+    && ['review', 'fix'].includes(dispatch.role)).map(dispatchStep))
     .toEqual([`${f.row.id}:review:1`, `${f.row.id}:fix:1`, `${f.row.id}:review:2`])
   expect(f.github.prs).toEqual([])
 }, 300_000)
@@ -2978,7 +3480,8 @@ test(`an orchestrated ${mergeMode} retry survives launch falsification: ${scenar
     expect(await f.store.saveIfActive(terminal.run)).toBe(true)
     expect(terminal.run.phase, JSON.stringify(terminal)).toBe('done')
     expect(f.world.dispatches.some(d => d.role === 'plan' || d.role === 'build' || d.role === 'fix')).toBe(false)
-    expect(f.world.dispatches[0]!.step_id).toBe(`${dispatched.run.id}:review:1`)
+    expect(dispatchStep(standaloneReview(f.world))).toBe(`${dispatched.run.id}:review:1`)
+    expect(standaloneReview(f.world).measuredHead).toBe(String(checkpoint.head))
     return
   }
   const failed = f.store.get(dispatched.run.id)!
@@ -3081,7 +3584,8 @@ test(`a cross-run ${mergeMode} retry ${moved ? 'refuses remote movement after di
   const outcome = await host.run({ mode: fixed ? 'ralph' : 'pr', start: 'resume' }, new AbortController().signal)
   expect(outcome.kind, why(f, outcome)).toBe('merged')
   expect(f.world.dispatches.some(dispatch => dispatch.role === 'plan' || dispatch.role === 'build' || dispatch.role === 'fix')).toBe(false)
-  expect(f.world.dispatches[0]).toMatchObject({ role: 'review', step_id: `${dispatched.run.id}:${fixed ? 'task:0:' : ''}review:${fixed ? 2 : 1}` })
+  expect(dispatchStep(standaloneReview(f.world))).toBe(`${dispatched.run.id}:${fixed ? 'task:0:' : ''}review:${fixed ? 2 : 1}`)
+  expect(standaloneReview(f.world).measuredHead).toBe(String(checkpoint.head))
   expect(f.world.dispatches.some(dispatch => dispatch.step_id.startsWith(`${prior.id}:`))).toBe(false)
   const saved = f.store.stageEvents(dispatched.run.id).filter(event => event.stage === 'build-mode-state')
   expect(JSON.parse(saved[0]!.meta!).checkpoint).toEqual(checkpoint)
@@ -3109,7 +3613,9 @@ test('a driver restarted between the build and review re-adopts the build instea
   // (`build-run.ts:239-243`), and that is the other resume case below.
   const built = await spawnCapture(['git', '-C', f.repo, 'rev-parse', 'refs/heads/trident/card'], f.repo)
   expect(lastCheckpoint(f)).toEqual({ head: built.stdout, stage: 'built', round: 1,
-    replansUsed: 0, previousFindings: [], previousBlockingCount: 0, findings: [], pending: undefined })
+    replansUsed: 0, previousFindings: [], previousBlockingCount: 0, findings: [],
+    reviewBaseline: 'none', previousReview: null })
+  expect(lastCheckpoint(f).pending).toBeUndefined()
 
   // …and the build worker's result file, which the next process reads back as the
   // suite checkpoint for this revision (`open/wiring/project-build.ts:243-247`).
@@ -3126,7 +3632,8 @@ test('a driver restarted between the build and review re-adopts the build instea
   // RE-ADOPTED, NOT REDONE: no plan and no build in the second process, and the
   // review it did run is round 1 — the round the first process had reached.
   expect(f.world.dispatches.map(dispatch => dispatch.role)).toEqual(['review', 'review', 'synthesis'])
-  expect(f.world.dispatches[0]!.step_id).toBe(`${f.row.id}:review:1`)
+  expect(dispatchStep(standaloneReview(f.world))).toBe(`${f.row.id}:review:1`)
+  expect(standaloneReview(f.world).measuredHead).toBe(built.stdout)
   // The merged revision is the one process 1 built: one note, not two.
   const merged = await spawnCapture(['git', '-C', f.origin, 'show', 'refs/heads/main:NOTES.md'], f.origin)
   expect(merged.stdout).toBe(`seed\n${f.row.id}:build:0`)
@@ -3173,11 +3680,8 @@ test('a driver resumed after the branch head moved rebuilds instead of adopting 
 }, 300_000)
 
 test('a driver restarted during a worker turn refuses to re-fire it', async () => {
-  // THE OTHER HALF OF THE CONTRACT. `work()` writes `pending` BEFORE it dispatches
-  // (`build-run.ts:313`), so a process that dies inside a turn leaves a checkpoint
-  // naming a turn whose outcome nobody observed. Re-dispatching it would run the
-  // same step id twice; the driver instead returns `unknown` with that identity
-  // preserved, for the orchestrator to settle (`build-run.ts:239-243`).
+  // The driver persists original-request recovery authority before dispatch.
+  // Restart may inspect that exact native result, but cannot buy another turn.
   // PROCESS 1 stops INSIDE the review turn: the worker reports `blocked`, which is
   // what every role brief tells it to do when it cannot finish. The driver has
   // already written `pending` and nothing on that path clears it.
@@ -3187,17 +3691,17 @@ test('a driver restarted during a worker turn refuses to re-fire it', async () =
   if (first.kind === 'blocked') expect(first.on).toBe('harness: the review worker was stopped mid-turn')
   // The blocked answer really went through the decoder as a blocked envelope.
   expect(f.world.dispatches.at(-1)!.wrote).toEqual(['kind', 'on', 'run_id', 'schema', 'step_id'])
-  expect(lastCheckpoint(f).pending).toEqual({ phase: 'review', step_id: `${f.row.id}:review:1` })
+  const reviewStep = `${f.row.id}:review:1:head:${lastCheckpoint(f).head}`
+  const pending = lastCheckpoint(f).pending
+  expect(pending).toMatchObject({ phase: 'review', step_id: reviewStep,
+    recovery: { request: { run_id: f.row.id, step_id: reviewStep }, snapshot: { head: lastCheckpoint(f).head } } })
 
   f.world.dispatches.length = 0
   const outcome = await restartThroughGateway(f)
-  expect(outcome.kind, why(f, outcome)).toBe('unknown')
-  if (outcome.kind === 'unknown') {
-    expect(outcome.detail).toBe('Resume awaits the existing worker observation')
-    // The identity is PRESERVED, which is what lets the orchestrator settle it.
-    expect(outcome.phase).toBe('review')
-    expect(outcome.step_id).toBe(`${f.row.id}:review:1`)
-  }
+  expect(outcome).toMatchObject({ kind: 'blocked', phase: 'review', on: 'harness: the review worker was stopped mid-turn' })
+  // The original blocked observation is recovered, not turned into approval or
+  // an invented fresh attempt. Its unresolved checkpoint remains exact.
+  expect(lastCheckpoint(f).pending).toEqual(pending)
   // Nothing was dispatched by the second process, and the PR process 1 opened for
   // review is untouched — no merge, no second PR.
   expect(f.world.dispatches).toEqual([])
@@ -3242,8 +3746,13 @@ test('attempt accounting reconciles pre-crash provider spend through actual pend
   await createProjectBuildHost(await f.prepare())
   expect(f.context.attempts.receipt(attempt)).toBeNull()
   await rename(`${bindingPath}.original`, bindingPath)
+  await createProjectBuildHost(await f.prepare())
+  // Usage reconciliation alone cannot settle the result. The subsequent driver
+  // recovery separately reads the original validated blocked trailer.
+  expect(f.context.attempts.receipt(attempt)).toMatchObject({ source: 'claude-repl-jsonl', input_tokens: 7, output_tokens: 3 })
+  expect(f.context.attempts.get(attempt)).toMatchObject({ outcome: null, ended_at: null })
   const resumed = await restartThroughGateway(f)
-  expect(resumed.kind).toBe('unknown')
+  expect(resumed).toMatchObject({ kind: 'blocked', phase: 'review', on: 'harness: the review worker was stopped mid-turn' })
   expect(f.world.dispatches).toHaveLength(0)
   expect(f.context.attempts.receipt(attempt)).toMatchObject({ source: 'claude-repl-jsonl', input_tokens: 7, output_tokens: 3 })
   expect(f.context.attempts.get(attempt)).toMatchObject({ outcome: null, ended_at: null })
@@ -3527,7 +4036,8 @@ test(`terminal Ralph ${mergeMode} publication retry re-proves the built head wit
   if (mergeMode === 'pr' || !reviewFix) expect(proofHeads).toContain(String(checkpoint.head))
   expect(f.world.dispatches.some(dispatch => ['plan', 'build'].includes(dispatch.role))).toBe(false)
   expect(f.world.dispatches.some(dispatch => dispatch.role === 'review')).toBe(true)
-  expect(f.world.dispatches[0]).toMatchObject({ role: 'review', step_id: `${dispatched.run.id}:task:1:review:1` })
+  expect(dispatchStep(standaloneReview(f.world))).toBe(`${dispatched.run.id}:task:1:review:1`)
+  expect(standaloneReview(f.world).measuredHead).toBe(String(checkpoint.head))
   expect(f.world.dispatches.some(dispatch => dispatch.step_id.startsWith(`${prior.id}:`))).toBe(false)
   expect(f.world.dispatches.filter(dispatch => dispatch.role === 'fix')).toHaveLength(reviewFix ? 1 : 0)
   if (reviewFix) {
