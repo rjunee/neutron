@@ -42,6 +42,15 @@ suites pass all 153 tests.
 Both root and Trident TypeScript checks pass. The consuming
 `open/__tests__/project-build-e2e.test.ts` suite passes all 125 tests.
 
+The identity-env registry initially failed for both new broad thread-ID regexes:
+its deliberately conservative detector also matches identity-variable names.
+`tests/integration/identity-env-readers-registry.test.ts` now records those exact
+files and behavior provenance. Neither reads the identity-home selectors; the
+runner's added environment read is the credential-home selector used in receipt
+identity. The detector and assertions are unchanged. The full registry suite was
+observed red (19 passing, two failing) before registration and green (21 passing)
+afterward.
+
 Scope remains partial: durable project/role/model/credential ownership and writer
 coordination belong to the consuming orchestration layer; this transport accepts
 its explicit requested ID and verifies the provider's reply. Failed-attempt usage
