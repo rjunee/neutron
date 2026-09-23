@@ -39,6 +39,48 @@ function fixture(change: Partial<Record<'HEAD' | 'DIFF' | 'PR', string | null>> 
 }
 
 describe('Codex headless WorkerRunner', () => {
+  for (const role of ['build', 'fix'] as const) {
+    test(`Codex ${role} recovery needs exact retained authority and never runs the wrapper`, async () => {
+      const f = fixture()
+      const req = f.request({ role }), signal = new AbortController().signal
+      const options = { buildScript: f.script, probe: { ok: true as const } }
+      const runner = createCodexHeadlessRunner(options)
+      const snapshot = async () => Object.fromEntries(await Promise.all(readdirSync(req.cwd).sort()
+        .map(async name => [name, await asyncFs.readFile(join(req.cwd, name), 'utf8')])))
+      writeFileSync(req.result.path, 'unowned previous result')
+      const initial = await snapshot()
+      expect((await runner.recover!(req, 'headless', signal)).kind).toBe('unknown')
+      expect(await snapshot()).toEqual(initial)
+      const first = await runner.run(req, 'headless', signal)
+      expect(first.kind).toBe('completed')
+      const replacement = createCodexHeadlessRunner(options)
+      const retained = await snapshot()
+      expect(await replacement.recover!(req, 'headless', signal)).toEqual(first)
+      for (const request of [{ ...req, model_id: 'changed-model' }, { ...req, brief: { ...req.brief, integrity: 'changed-task' } }, { ...req, network: !req.network }]) {
+        expect((await replacement.recover!(request, 'headless', signal)).kind).toBe('unknown')
+        expect(await snapshot()).toEqual(retained)
+      }
+      const reservation = join(req.cwd, readdirSync(req.cwd).find(name => /^codex-headless-step-.*\.json$/.test(name))!)
+      const armed = readFileSync(reservation, 'utf8')
+      const receiptBytes = readFileSync(`${reservation}.receipt`, 'utf8')
+      await asyncFs.unlink(`${reservation}.receipt`)
+      const uncommitted = await snapshot()
+      expect((await replacement.recover!(req, 'headless', signal)).kind).toBe('unknown')
+      expect(await snapshot()).toEqual(uncommitted)
+      writeFileSync(`${reservation}.receipt`, receiptBytes)
+      for (const bytes of [armed.replace('\n#dispatch-armed\n', ''), 'corrupt', armed.replace(req.model_id, 'foreign')]) {
+        writeFileSync(reservation, bytes)
+        const before = await snapshot()
+        expect((await replacement.recover!(req, 'headless', signal)).kind).toBe('unknown')
+        expect(await snapshot()).toEqual(before)
+      }
+      await asyncFs.unlink(reservation)
+      const lost = await snapshot()
+      expect((await replacement.recover!(req, 'headless', signal)).kind).toBe('unknown')
+      expect(await snapshot()).toEqual(lost)
+      expect(readFileSync(f.threads, 'utf8')).toBe('\n')
+    })
+  }
   for (const mode of ['exit', 'timeout'] as const) {
     test(`descendant-held stdout cannot retain bounded worker settlement after ${mode}`, async () => {
       const f = fixture()

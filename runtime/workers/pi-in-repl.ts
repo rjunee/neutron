@@ -1,7 +1,7 @@
 import { readFile } from 'node:fs/promises'
 import { createHash } from 'node:crypto'
 import { join } from 'node:path'
-import { reserveTrailerSlot } from './trailer-slot.ts'
+import { readArmedTrailerReservation, reserveTrailerSlot } from './trailer-slot.ts'
 import { setTimeout as delay } from 'node:timers/promises'
 import type { AgentSpec } from '../substrate.ts'
 import type { BoundedWorkOutcome, BoundedWorkRequest, WorkerRunner } from '../bounded-work.ts'
@@ -39,10 +39,7 @@ export function piInReplRunner(options: PiInReplOptions): WorkerRunner {
     ? { ok: true }
     : { ok: false, reason: 'placement-unavailable', detail: 'Pi subagents require the project REPL.' }
 
-  return {
-    provider: 'pi',
-    supports,
-    async run(req, placement, signal) {
+  const execute = async (recoveryOnly: boolean, ...[req, placement, signal]: Parameters<WorkerRunner['run']>): Promise<BoundedWorkOutcome> => {
       const supported = supports(req.role, placement)
       if (!supported.ok) return { kind: 'refused', reason: supported.reason }
       if (req.thread !== null) return { kind: 'refused', reason: 'capability-unsupported' }
@@ -57,7 +54,9 @@ export function piInReplRunner(options: PiInReplOptions): WorkerRunner {
         // Ownership and the slot clear are one operation: see `reserveTrailerSlot`.
         // Reserving and clearing in either order leaves a restart window that either
         // reads the previous round's trailer or destroys this step's own receipt.
-        const held = await reserveTrailerSlot(reservation, identity, req.result.path)
+        const held = recoveryOnly
+          ? await readArmedTrailerReservation(reservation, identity)
+          : await reserveTrailerSlot(reservation, identity, req.result.path)
         if (held.kind === 'unknown') return unseen(held.detail)
         if (held.kind === 'dispatch') {
           if (signal.aborted || Date.now() >= deadline) return unseen('Cancelled or out of time before dispatch.')
@@ -108,7 +107,12 @@ export function piInReplRunner(options: PiInReplOptions): WorkerRunner {
         // Neither these nor a dispatch exception validate the requested trailer.
         return unseen('Dispatch or observation interrupted; subagent completion is unknown.')
       }
-    },
+    }
+  return {
+    provider: 'pi',
+    supports,
+    run: (...args) => execute(false, ...args),
+    recover: (...args) => execute(true, ...args),
     async liveness(handle) {
       try {
         return await options.probe?.(handle) ?? 'unknown'

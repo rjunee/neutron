@@ -4,7 +4,7 @@ import { readFileSync } from 'node:fs'
 import { dirname, join } from 'node:path'
 import type { BoundedWorkOutcome, BoundedWorkRequest, ProviderObservation, Usage } from '../bounded-work.ts'
 import { CODEX_CLI_AUTH_ENV_VARS } from '../adapters/codex-cli/auth.ts'
-import { reserveTrailerSlot } from './trailer-slot.ts'
+import { readArmedTrailerReservation, reserveTrailerSlot } from './trailer-slot.ts'
 import { codexObservation } from './provider-observation.ts'
 import { createObservationPublisher, decodeObservationReceipt, recoverProviderObservation } from './provider-observation-recovery.ts'
 
@@ -77,7 +77,7 @@ export function createCodexReviewTransport(options: {
     } catch { return false }
   })()
 
-  const run = async (req: BoundedWorkRequest, signal: AbortSignal): Promise<BoundedWorkOutcome> => {
+  const execute = async (recoveryOnly: boolean, req: BoundedWorkRequest, signal: AbortSignal): Promise<BoundedWorkOutcome> => {
     const contract = options.contracts.get(req.result.schema)
     if (!contract || !options.briefIntegrity || req.writable || req.tools !== 'read-only' || req.needs_approval_decision !== false
       || !Number.isSafeInteger(req.budget.wall_ms) || req.budget.wall_ms <= 0
@@ -107,7 +107,9 @@ export function createCodexReviewTransport(options: {
         return { kind: 'completed', result: value.result, usage: null, model_reported: null, thread_id: null }
       } catch { return unknown('Codex review trailer is unreadable') }
     }
-    const held = await reserveTrailerSlot(reservation, identity, req.result.path)
+    const held = recoveryOnly
+      ? await readArmedTrailerReservation(reservation, identity)
+      : await reserveTrailerSlot(reservation, identity, req.result.path)
     if (held.kind === 'unknown') return unknown(held.detail)
     if (held.kind === 'resume') {
       try { observation = decodeObservationReceipt(await readFile(observationPath, 'utf8'), identity, 'codex-cli-jsonl') } catch { /* legacy or unobserved */ }
@@ -234,5 +236,7 @@ export function createCodexReviewTransport(options: {
     return recoverProviderObservation(reservation, JSON.stringify([req, env.CODEX_HOME]),
       `${reservation}.observation`, 'codex-cli-jsonl')
   }
-  return Object.assign(run, { ready: cliReady, connected, observe })
+  const run = (req: BoundedWorkRequest, signal: AbortSignal) => execute(false, req, signal)
+  const recover = (req: BoundedWorkRequest, signal: AbortSignal) => execute(true, req, signal)
+  return Object.assign(run, { ready: cliReady, connected, observe, recover })
 }

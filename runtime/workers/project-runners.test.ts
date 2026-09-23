@@ -1,5 +1,5 @@
 import { afterEach, expect, test } from 'bun:test'
-import { mkdtemp, readFile, rm, writeFile } from 'node:fs/promises'
+import { mkdtemp, readFile, readdir, rm, unlink, writeFile } from 'node:fs/promises'
 import { tmpdir } from 'node:os'
 import { join } from 'node:path'
 import { fakeRunner, type BoundedWorkRequest, type ProviderObservation } from '../bounded-work.ts'
@@ -38,6 +38,47 @@ async function fixture(provider: Provider = 'openai-codex') {
 }
 
 for (const provider of ['anthropic', 'openai-codex', 'pi'] as const) {
+  test(`${provider} recovery requires exact armed evidence and cannot compose or reserve`, async () => {
+    const f = await fixture(provider)
+    const runner = (await createProjectRunners(f.options)).inRepl!
+    const snapshot = async () => Object.fromEntries(await Promise.all((await readdir(f.dir)).sort()
+      .map(async name => [name, await readFile(join(f.dir, name), 'utf8')])))
+    // Even a tempting complete result cannot stand in for dispatch authority.
+    await writeFile(f.request.result.path, JSON.stringify(f.envelope))
+    const before = await snapshot()
+    expect((await runner.recover!(f.request, 'in-repl', signal())).kind).toBe('unknown')
+    expect(await snapshot()).toEqual(before)
+    expect(f.calls).toHaveLength(0)
+    const first = await runner.run(f.request, 'in-repl', signal())
+    expect(first.kind).toBe('completed')
+    expect(f.calls).toHaveLength(1)
+    const reservation = join(f.dir, (await readdir(f.dir)).find(name => /-step-.*\.json$/.test(name))!)
+    const armed = await readFile(reservation, 'utf8')
+    const retained = await snapshot()
+    const replacement = (await createProjectRunners(f.options)).inRepl!
+    expect(await replacement.recover!(f.request, 'in-repl', signal())).toEqual(first)
+    for (const request of [
+      { ...f.request, model_id: 'other-model' },
+      { ...f.request, brief: { ...f.request.brief, integrity: 'changed-task' } },
+      { ...f.request, network: !f.request.network },
+      { ...f.request, run_id: 'other-run' },
+    ]) expect((await replacement.recover!(request, 'in-repl', signal())).kind).toBe('unknown')
+    expect(await replacement.recover!(f.request, 'headless', signal())).toEqual({ kind: 'refused', reason: 'placement-unavailable' })
+    expect(await snapshot()).toEqual(retained)
+    for (const bytes of [JSON.stringify(f.request), 'unreadable reservation', JSON.stringify({ ...f.request, model_id: 'foreign' }) + '\n#dispatch-armed\n']) {
+      await writeFile(reservation, bytes)
+      const beforeRefusal = await snapshot()
+      expect((await replacement.recover!(f.request, 'in-repl', signal())).kind).toBe('unknown')
+      expect(await snapshot()).toEqual(beforeRefusal)
+    }
+    await writeFile(reservation, armed)
+    await unlink(reservation)
+    const lost = await snapshot()
+    expect((await replacement.recover!(f.request, 'in-repl', signal())).kind).toBe('unknown')
+    expect(await snapshot()).toEqual(lost)
+    expect(f.calls).toHaveLength(1)
+  })
+
   test(`${provider} dispatches into its own conversation and recovers without replay`, async () => {
     const f = await fixture(provider)
     const first = await createProjectRunners(f.options)
@@ -60,6 +101,49 @@ for (const provider of ['anthropic', 'openai-codex', 'pi'] as const) {
     expect(f.calls).toHaveLength(1)
   })
 }
+
+test('Codex recovery preserves child transport without preparing or clearing a fresh dispatch', async () => {
+  const f = await fixture('openai-codex')
+  const preparations: string[] = []
+  let clears = 0, publishes = 0
+  f.options.codexResultTransport = {
+    async prepare(_req, _signal, disposition) {
+      preparations.push(disposition)
+      return { resultPath: join(f.dir, 'child-result'),
+        async clearForDispatch() { clears++ },
+        async publish() { publishes++; await writeFile(f.request.result.path, JSON.stringify(f.envelope)); return true },
+        close() {} }
+    },
+  }
+  const runner = (await createProjectRunners(f.options)).inRepl!
+  expect((await runner.recover!(f.request, 'in-repl', signal())).kind).toBe('unknown')
+  expect(preparations).toEqual([])
+  expect((await runner.run(f.request, 'in-repl', signal())).kind).toBe('completed')
+  await unlink(f.request.result.path)
+  const replacement = (await createProjectRunners(f.options)).inRepl!
+  expect((await replacement.recover!(f.request, 'in-repl', signal())).kind).toBe('completed')
+  expect(preparations).toEqual(['dispatch', 'resume'])
+  expect(clears).toBe(1)
+  expect(publishes).toBe(2)
+  expect(f.calls).toHaveLength(1)
+})
+
+test('headless project wrapper preserves recovery and never substitutes run', async () => {
+  const f = await fixture('pi')
+  let runs = 0, recoveries = 0
+  f.options.headless.anthropic = { ...fakeRunner('anthropic', {}),
+    async run() { runs++; return { kind: 'unknown', detail: 'run' } },
+    async recover() { recoveries++; return { kind: 'blocked', on: 'retained' } },
+  }
+  f.options.headless['openai-codex'] = fakeRunner('openai-codex', {})
+  const runners = await createProjectRunners(f.options)
+  expect(runners.headless['openai-codex']!.recover).toBeUndefined()
+  expect(await runners.headless.anthropic!.recover!(f.request, 'headless', signal())).toEqual({ kind: 'blocked', on: 'retained' })
+  expect(await runners.headless.anthropic!.recover!(f.request, 'in-repl', signal())).toEqual({ kind: 'refused', reason: 'placement-unavailable' })
+  expect((await runners.headless.anthropic!.recover!({ ...f.request, run_id: 'foreign' }, 'headless', signal())).kind).toBe('unknown')
+  expect(recoveries).toBe(1)
+  expect(runs).toBe(0)
+})
 
 for (const provider of ['anthropic', 'openai-codex', 'pi'] as const) {
   test(`${provider} waits past another step's trailer`, async () => {

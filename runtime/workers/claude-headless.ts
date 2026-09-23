@@ -4,7 +4,7 @@ import { createHash, randomUUID } from 'node:crypto'
 import { readFile, realpath, rename, writeFile, unlink } from 'node:fs/promises'
 import { isAbsolute, join, relative, resolve, sep } from 'node:path'
 import type { BoundedWorkOutcome, BoundedWorkRequest, ProviderObservation, Usage, WorkerRunner } from '../bounded-work.ts'
-import { reserveTrailerSlot } from './trailer-slot.ts'
+import { readArmedTrailerReservation, reserveTrailerSlot } from './trailer-slot.ts'
 import { claudeObservation } from './provider-observation.ts'
 import { createObservationPublisher, decodeObservationReceipt, recoverProviderObservation } from './provider-observation-recovery.ts'
 
@@ -228,7 +228,7 @@ export function createClaudeHeadlessRunner(input: ClaudeHeadlessRunnerOptions): 
   const supports: WorkerRunner['supports'] = (role, placement) => placement !== 'headless'
     ? { ok: false, reason: 'placement-unavailable', detail: 'Claude headless work requires a different-provider project REPL.' }
     : !ROLES.has(role) ? { ok: false, reason: 'capability-unsupported', detail: 'Claude headless supports plan, review and synthesis only.' } : startup
-  return { provider: 'anthropic', supports,
+  const runner: WorkerRunner = { provider: 'anthropic', supports,
     async observe(req) {
       if (!env || !credential) return undefined
       const key = keyFor(req)
@@ -242,7 +242,14 @@ export function createClaudeHeadlessRunner(input: ClaudeHeadlessRunnerOptions): 
           return await read(join(state, `claude-headless-thread-${session}.json`)) === binding
         })
     },
-    async run(req, placement, signal) {
+    run: (...args) => executeWork(false, ...args),
+    recover: (...args) => executeWork(true, ...args),
+    async liveness(handle) {
+      const child = live.get(keyFor(handle))
+      return child && child.exitCode === null ? 'activity' : 'unknown'
+    },
+  }
+  const executeWork = async (recoveryOnly: boolean, ...[req, placement, signal]: Parameters<WorkerRunner['run']>): Promise<BoundedWorkOutcome> => {
       const supported = supports(req.role, placement)
       if (!supported.ok) return { kind: 'refused', reason: supported.reason }
       const validate = options.schemas.get(req.result.schema)
@@ -256,7 +263,8 @@ export function createClaudeHeadlessRunner(input: ClaudeHeadlessRunnerOptions): 
       const deadline = Date.now() + req.budget.wall_ms
       const expired = () => signal.aborted || Date.now() >= deadline
       if (expired()) return unknown('Claude dispatch expired before reservation.')
-      if (credentialIdentity(env) !== credential || !probe(cli, env).ok) {
+      // Recovery may inspect credentials, but must not launch even CLI probes.
+      if (credentialIdentity(env) !== credential || (!recoveryOnly && !probe(cli, env).ok)) {
         return { kind: 'refused', reason: 'provider-not-connected' }
       }
       let observation: ProviderObservation | undefined
@@ -281,7 +289,10 @@ export function createClaudeHeadlessRunner(input: ClaudeHeadlessRunnerOptions): 
           return { kind: 'refused', reason: 'capability-unsupported' }
         }
         // Reuse the existing Claude reservation namespace and stopped-run recovery.
-        const held = await reserveTrailerSlot(join(state, `claude-step-${key}.json`), JSON.stringify(req), req.result.path)
+        const reservation = join(state, `claude-step-${key}.json`)
+        const held = recoveryOnly
+          ? await readArmedTrailerReservation(reservation, JSON.stringify(req))
+          : await reserveTrailerSlot(reservation, JSON.stringify(req), req.result.path)
         if (held.kind === 'unknown') return unknown(held.detail)
         const receiptPath = join(state, `claude-headless-receipt-${key}.json`)
         const observationPath = `${receiptPath}.observation`
@@ -343,10 +354,6 @@ export function createClaudeHeadlessRunner(input: ClaudeHeadlessRunnerOptions): 
         await release()
         return observed(decoded.outcome)
       } catch { return observed(unknown('Claude dispatch or durable result observation could not be established.')) }
-    },
-    async liveness(handle) {
-      const child = live.get(keyFor(handle))
-      return child && child.exitCode === null ? 'activity' : 'unknown'
-    },
-  }
+    }
+  return runner
 }

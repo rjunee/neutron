@@ -45,6 +45,22 @@ export type SlotReservation =
  * from the file alone after any restart. */
 const ARMED = '\n#dispatch-armed\n'
 
+/** Recovery has no authority to reserve work. Only an existing exact armed
+ * reservation proves this request may have been dispatched. This reader never
+ * creates, clears, arms, or takes over a slot, even when the file is missing. */
+export async function readArmedTrailerReservation(
+  reservation: string,
+  identity: string,
+): Promise<Exclude<SlotReservation, { kind: 'dispatch' }>> {
+  try {
+    const existing = await readFile(reservation, 'utf8')
+    if (existing === identity + ARMED) return { kind: 'resume' }
+    return { kind: 'unknown', detail: 'Recovery requires an existing exact armed step reservation.' }
+  } catch {
+    return { kind: 'unknown', detail: 'Step reservation is unavailable; recovery cannot dispatch work.' }
+  }
+}
+
 const RESERVATION_FILE = /^(?:claude|codex|pi|codex-headless)-step-[a-f0-9]{64}\.json$/
 
 /** Reconcile reservations after the host has observed that the prior run attempt stopped.

@@ -1,4 +1,4 @@
-import { afterEach, expect, test } from 'bun:test'
+import { afterEach, expect, spyOn, test } from 'bun:test'
 import { mkdtemp, readFile, rm, writeFile, mkdir, symlink, unlink, readdir } from 'node:fs/promises'
 import { tmpdir } from 'node:os'
 import { join } from 'node:path'
@@ -79,6 +79,60 @@ main();
     schemas: new Map([['test-result', (value: unknown) => (value as { answer?: unknown })?.answer === 'verified']]), cliPath }
   const runner = createClaudeHeadlessRunner(options)
   return { root, cwd, state, req, runner, options, launched, counter, run: (request = req, signal = new AbortController().signal) => runner.run(request, 'headless', signal) }
+}
+
+for (const role of ['plan', 'review', 'synthesis'] as const) {
+  test(`Claude ${role} recovery reads exact retained evidence without CLI invocation or reservation repair`, async () => {
+    const f = await fixture()
+    const req = { ...f.req, role }
+    const signal = new AbortController().signal
+    const snapshot = async () => Object.fromEntries(await Promise.all((await readdir(f.state)).sort()
+      .map(async name => [name, await readFile(join(f.state, name), 'utf8')])))
+    await writeFile(req.result.path, 'unowned previous result')
+    const initial = await snapshot()
+    const spawn = spyOn(Bun, 'spawn'), spawnSync = spyOn(Bun, 'spawnSync')
+    try {
+      expect((await f.runner.recover!(req, 'headless', signal)).kind).toBe('unknown')
+      expect(spawn).not.toHaveBeenCalled()
+      expect(spawnSync).not.toHaveBeenCalled()
+      expect(await snapshot()).toEqual(initial)
+      const first = await f.runner.run(req, 'headless', signal)
+      expect(first.kind).toBe('completed')
+      expect(spawn).toHaveBeenCalledTimes(1)
+      const replacement = createClaudeHeadlessRunner(f.options)
+      spawn.mockClear(); spawnSync.mockClear()
+      const retained = await snapshot()
+      expect(await replacement.recover!(req, 'headless', signal)).toEqual(first)
+      const receipt = join(f.state, (await readdir(f.state)).find(name => /^claude-headless-receipt-.*\.json$/.test(name))!)
+      const receiptBytes = await readFile(receipt, 'utf8')
+      await unlink(receipt)
+      const uncommitted = await snapshot()
+      expect((await replacement.recover!(req, 'headless', signal)).kind).toBe('unknown')
+      expect(await snapshot()).toEqual(uncommitted)
+      await writeFile(receipt, receiptBytes)
+      expect((await replacement.recover!({ ...req, model_id: 'claude-other-model' }, 'headless', signal)).kind).toBe('unknown')
+      expect((await replacement.recover!({ ...req, network: !req.network }, 'headless', signal)).kind).toBe('unknown')
+      expect(await snapshot()).toEqual(retained)
+      // Completed receipt can restore only its own missing published result.
+      await unlink(req.result.path)
+      expect(await replacement.recover!(req, 'headless', signal)).toEqual(first)
+      expect(await snapshot()).toEqual(retained)
+      const reservation = join(f.state, (await readdir(f.state)).find(name => /^claude-step-/.test(name))!)
+      for (const bytes of [JSON.stringify(req), 'corrupt', JSON.stringify({ ...req, model_id: 'foreign' }) + '\n#dispatch-armed\n']) {
+        await writeFile(reservation, bytes)
+        const before = await snapshot()
+        expect((await replacement.recover!(req, 'headless', signal)).kind).toBe('unknown')
+        expect(await snapshot()).toEqual(before)
+      }
+      await unlink(reservation)
+      const lost = await snapshot()
+      expect((await replacement.recover!(req, 'headless', signal)).kind).toBe('unknown')
+      expect(await snapshot()).toEqual(lost)
+      expect(await readFile(f.counter, 'utf8')).toBe('call\n')
+      expect(spawn).not.toHaveBeenCalled()
+      expect(spawnSync).not.toHaveBeenCalled()
+    } finally { spawn.mockRestore(); spawnSync.mockRestore() }
+  })
 }
 
 test('Claude host death after provider usage recovers spend before child completion without replay', async () => {
