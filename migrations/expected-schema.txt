@@ -342,6 +342,9 @@ CREATE INDEX profile_pic_pending_project_user_started
 CREATE INDEX profile_pic_pending_status_started
     ON profile_pic_pending (status, started_at)
 
+[index] project_admission_leases_scope (tbl=project_admission_leases)
+CREATE INDEX project_admission_leases_scope ON project_admission_leases(scope_key)
+
 [index] sean_ellis_responses_open (tbl=sean_ellis_responses)
 CREATE INDEX sean_ellis_responses_open
     ON sean_ellis_responses (project_slug)
@@ -1248,6 +1251,26 @@ CREATE TABLE project_account_selection (
     CHECK (account_id <> ''),
     PRIMARY KEY (owner_slug, project_id, service, account_id)
 ) STRICT
+
+[table] project_admission_fences (tbl=project_admission_fences)
+CREATE TABLE project_admission_fences (
+  scope_key TEXT PRIMARY KEY,
+  generation INTEGER NOT NULL DEFAULT 0 CHECK (generation >= 0),
+  phase TEXT NOT NULL CHECK (phase IN ('open', 'draining', 'quiesced', 'replacing', 'attesting')),
+  maintenance_token TEXT,
+  CHECK ((phase = 'open' AND maintenance_token IS NULL) OR
+         (phase <> 'open' AND maintenance_token IS NOT NULL))
+)
+
+[table] project_admission_leases (tbl=project_admission_leases)
+CREATE TABLE project_admission_leases (
+  token TEXT PRIMARY KEY,
+  scope_key TEXT NOT NULL REFERENCES project_admission_fences(scope_key),
+  generation INTEGER NOT NULL CHECK (generation >= 0),
+  reason TEXT NOT NULL CHECK (reason IN ('conversation', 'queuedDispatch', 'build', 'approval', 'liveChild')),
+  producer TEXT NOT NULL,
+  work_ref TEXT NOT NULL
+)
 
 [table] project_credentials (tbl=project_credentials)
 CREATE TABLE project_credentials (
