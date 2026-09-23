@@ -6,13 +6,14 @@ priority: P1
 cutover: false
 ---
 
-Work state: remaining pre-merge admission scope from PR #1171, using #1133's
-G166 scanner. Publication already checks messages; merge must independently
-measure the immutable reviewed history, including previously published owned
-PRs and local-mode builds. Reuse the authenticated raw-object scanner and its
-origin-observed public-base window. A public base commit above the launch pin
-is excluded only under the existing ancestry rules; a branch-owned carrier
-beneath a clean tip is refused. Missing or incomplete evidence refuses merge.
+Work state: GitHub issue #1222, covering the remaining pre-merge admission scope
+from PR #1171 using #1133's G166 scanner. Publication already checks messages;
+merge must independently measure the immutable reviewed history, including
+previously published owned PRs and local-mode builds. Reuse the authenticated
+raw-object scanner and its origin-observed public-base window. A public base
+commit above the launch pin is excluded only under the existing ancestry rules;
+a branch-owned carrier beneath a clean tip is refused. Missing or incomplete
+evidence refuses merge.
 
 The ownership, draft, CI, reviewed-head and pinned merge gates remain required.
 This is admission, not message rewriting or historical repair. G100 preservation
