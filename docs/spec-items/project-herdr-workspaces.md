@@ -93,6 +93,15 @@ Until wired, the selected provider must refuse visibly. The terminal manager's
 `null` General scope must never become the literal project id `general` to bypass
 those checks. Adapter placement propagation alone does not complete this criterion.
 
+Production Chat routing also requires a verified credential handoff. The pool can
+select another credential (`runtime/credential-pool.ts:228-240`), which names a
+different warm REPL (`runtime/adapters/claude-code/persistent/pool.ts:302-310`).
+The workspace manager correctly refuses a second live Chat owner
+(`runtime/adapters/claude-code/persistent/project-workspaces.ts:182-186`).
+Connecting that manager to conversation dispatch without coordinating scope-wide
+admission, live child/work evidence and exact old-owner retirement would block
+credential rotation. Optional adapter plumbing does not provide that handoff.
+
 Cross-provider headless workers currently consume pipes and process exit status
 (`runtime/workers/claude-headless.ts:158-164`, `runtime/workers/codex-headless.ts:242-246`).
 Herdr supplies rendered screens and no exit code. Their terminal placement must
