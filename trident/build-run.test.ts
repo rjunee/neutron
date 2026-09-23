@@ -607,7 +607,8 @@ function modeFixture(mode: BuildRunInput['mode'] = 'ralph') {
   const resume = (stage: import('./build-run.ts').ResumeCheckpoint['stage'] = 'built', round = 1,
     previousReview: import('./gates/review-progress.ts').ReviewProgress | null = null) => {
     f.input.start = 'resume'
-    state.resume = { head: f.snapshot.head, stage, round, findings: [], previousFindings: [], previousReview }
+    state.resume = { head: f.snapshot.head, stage, round, findings: [], previousFindings: [], previousReview,
+      reviewBaseline: previousReview === null ? 'none' : 'required' }
     return state.resume
   }
   return { ...f, state, plan, prepared, setPlan, resume, ledgerHead, run: () => {
@@ -1148,7 +1149,7 @@ for (const scenario of [
   })
 }
 
-for (const after of ['fix', 're-plan'] as const) for (const history of ['missing', 'null', 'valid'] as const) {
+for (const after of ['fix', 're-plan'] as const) for (const history of ['missing', 'null', 'missing-marker', 'invalid-marker', 'erased', 'valid'] as const) {
   test(`completed ${after} checkpoint keeps ${history} history before its next review`, async () => {
     const f = modeFixture('pr')
     f.decisions.push(after === 'fix' ? { kind: 'fix', findings: ['repeat'], blockingCount: 2 }
@@ -1161,6 +1162,9 @@ for (const after of ['fix', 're-plan'] as const) for (const history of ['missing
     expect(saved.pending).toBeUndefined()
     if (history === 'missing') delete saved.previousReview
     if (history === 'null') saved.previousReview = null
+    if (history === 'missing-marker') delete saved.reviewBaseline
+    if (history === 'invalid-marker') saved.reviewBaseline = 'invented'
+    if (history === 'erased') { saved.reviewBaseline = 'none'; saved.previousReview = null }
     f.state.resume = JSON.parse(JSON.stringify(saved))
     f.input.start = 'resume'
     f.decisions.push({ kind: 'fix', findings: ['repeat'], blockingCount: 2 }, { kind: 'approve' })
@@ -1197,6 +1201,88 @@ for (const history of ['missing', 'null', 'valid'] as const) test(`moved-head re
     expect(f.state.checkpoints).toHaveLength(0)
     expect(f.prepared).toHaveLength(0)
   }
+})
+
+for (const loseAck of [false, true]) test(`G038 generated pre-review checkpoint permits moved-head plan one, lost ack=${loseAck}`, async () => {
+  const f = modeFixture('pr')
+  f.deps.reviewReadiness = async () => ({ kind: 'unknown', detail: 'stopped before first review' })
+  expect(await f.run()).toMatchObject({ kind: 'unknown', detail: 'stopped before first review' })
+  const saved = JSON.parse(JSON.stringify(f.state.checkpoints.at(-1)!))
+  expect(saved).toMatchObject({ stage: 'built', round: 1, replansUsed: 0, previousReview: null, reviewBaseline: 'none' })
+  expect(saved.pending).toBeUndefined()
+  expect(f.cross.calls).toHaveLength(0)
+  f.state.resume = saved
+  f.input.start = 'resume'
+  f.snapshot.head = 'b'.repeat(40)
+  if (f.snapshot.pr) f.snapshot.pr.head = f.snapshot.head
+  for (const key of f.outcomes.keys()) f.outcomes.set(key, f.completed())
+  f.deps.reviewReadiness = async () => ({ kind: 'allow' })
+  f.runner.calls.length = 0
+  if (loseAck) {
+    f.outcomes.set('run:plan:1', { kind: 'unknown', detail: 'lost acknowledgement' })
+    expect(await f.run()).toMatchObject({ kind: 'unknown', phase: 'plan', step_id: 'run:plan:1', detail: 'lost acknowledgement' })
+    const pending = JSON.parse(JSON.stringify(f.state.checkpoints.at(-1)!))
+    expect(pending.pending.recovery).toMatchObject({ round: 1, previousReview: null, reviewBaseline: 'none' })
+    f.state.resume = pending
+    f.outcomes.set('run:plan:1', f.completed())
+    f.input.workers.plan.runner = { ...f.runner, recover: f.runner.run }
+    f.runner.calls.length = 0
+  }
+  expect(await f.run()).toMatchObject({ kind: 'merged' })
+  expect(f.runner.calls.map(request => request.step_id)).toEqual(['run:plan:1', 'run:build:1'])
+  expect(f.cross.calls.map(request => request.step_id)).toEqual([`run:review:1:head:${f.snapshot.head}`])
+  expect(f.state.checkpoints.at(-1)).toMatchObject({ stage: 'approved', previousReview: null, reviewBaseline: 'none' })
+})
+
+for (const role of ['plan', 'build', 'review', 'fix'] as const) for (const marker of ['missing', 'invalid', 'contradictory'] as const) {
+  test(`pending ${role} rejects ${marker} baseline provenance before recovery`, async () => {
+    const f = modeFixture('pr')
+    if (role === 'fix') f.decisions.push({ kind: 'fix', findings: ['repeat'], blockingCount: 1 })
+    const step = `run:${role}:${role === 'fix' || role === 'review' ? 1 : 0}`
+    f.outcomes.set(step, { kind: 'unknown', detail: 'lost acknowledgement' })
+    expect(await f.run()).toMatchObject({ kind: 'unknown', phase: role })
+    const saved = JSON.parse(JSON.stringify(f.state.checkpoints.at(-1)!))
+    // Damage both copies: consistency with the other row must not manufacture provenance.
+    for (const row of [saved, saved.pending.recovery]) {
+      if (marker === 'missing') delete row.reviewBaseline
+      else row.reviewBaseline = marker === 'invalid' ? 'invented' : role === 'fix' ? 'none' : 'required'
+    }
+    f.state.resume = JSON.parse(JSON.stringify(saved))
+    f.input.start = 'resume'
+    let recovered = 0
+    f.input.workers[role].runner = { ...f.input.workers[role].runner, recover: async () => { recovered++; return f.completed() } }
+    f.runner.calls.length = 0
+    f.cross.calls.length = 0
+    const count = f.state.checkpoints.length
+    expect(await f.run()).toMatchObject({ kind: 'unknown', phase: role })
+    expect(recovered).toBe(0)
+    expect(f.runner.calls).toHaveLength(0)
+    expect(f.cross.calls).toHaveLength(0)
+    expect(f.state.checkpoints).toHaveLength(count)
+    expect(f.events).not.toContain('merge')
+  })
+}
+
+for (const role of ['fix', 'plan', 'build', 'review'] as const) test(`pending ${role} cannot erase established provenance with a coherent none pair`, async () => {
+  const f = modeFixture('pr')
+  f.decisions.push(role === 'fix' ? { kind: 'fix', findings: ['repeat'], blockingCount: 1 }
+    : { kind: 're-plan', findings: ['repeat'], blockingCount: 1, whatIsMissing: 'design' })
+  const step = `run:${role}:${role === 'review' ? 2 : 1}`
+  f.outcomes.set(step, { kind: 'unknown', detail: 'lost acknowledgement' })
+  expect(await f.run()).toMatchObject({ kind: 'unknown', phase: role })
+  const saved = JSON.parse(JSON.stringify(f.state.checkpoints.at(-1)!))
+  for (const row of [saved, saved.pending.recovery]) { row.reviewBaseline = 'none'; row.previousReview = null }
+  f.state.resume = saved
+  f.input.start = 'resume'
+  let recovered = 0
+  f.input.workers[role].runner = { ...f.input.workers[role].runner, recover: async () => { recovered++; return f.completed() } }
+  f.runner.calls.length = 0
+  f.cross.calls.length = 0
+  expect(await f.run()).toMatchObject({ kind: 'unknown', phase: role })
+  expect(recovered).toBe(0)
+  expect(f.runner.calls).toHaveLength(0)
+  expect(f.cross.calls).toHaveLength(0)
+  expect(f.events).not.toContain('merge')
 })
 
 test('a round-zero rebuild can legitimately retain prior review history', async () => {
@@ -1420,7 +1506,7 @@ test('resume regenerated diff disagreement blocks and unreadable diff remains un
 })
 
 test('resume rejection retains previous finding classes at round three', async () => {
-  const f = modeFixture('pr'); const checkpoint = f.resume('rejected', 3)
+  const f = modeFixture('pr'); const checkpoint = f.resume('rejected', 3, { findings: ['same class'], blockingCount: 1 })
   checkpoint.findings = [{ kind: 'code', actionable: true, text: 'same class' }]
   checkpoint.previousFindings = ['same class']
   expect(await f.run()).toMatchObject({ kind: 'blocked', on: 'Review requires orchestrator arbitration: repeated finding' })
@@ -1552,7 +1638,7 @@ test('G077 final-round design gap stops; a spare round admits replacement', asyn
     const f = fixture(); f.input.start = 'resume'
     f.deps.readReviewCap = async () => ({ kind: 'known', max_rounds: 5 })
     f.deps.modes = {
-      loadResume: async () => ({ head: f.snapshot.head, stage: 'built', round, findings: [], previousFindings: [], previousReview: { findings: ['prior'], blockingCount: 3 } }),
+      loadResume: async () => ({ head: f.snapshot.head, stage: 'built', round, findings: [], previousFindings: [], reviewBaseline: 'required', previousReview: { findings: ['prior'], blockingCount: 3 } }),
       regenerateDiff: async () => ({ kind: 'known', diff: f.snapshot.diff }),
       probePlan: async () => null, advanceRalph: async () => ({ kind: 'allow' }),
       commitPlan: async () => ({ kind: 'unknown', detail: 'pr mode never commits a ledger' }),
@@ -1608,7 +1694,7 @@ test('resume keeps the host re-plan count and rejects invalid counts', async () 
     const f = fixture(); f.input.start = 'resume'
     f.deps.modes = {
       saveCheckpoint: async () => {},
-      loadResume: async () => ({ head: f.snapshot.head, stage: 'built', round: 2, replansUsed: used, findings: [], previousFindings: [], previousReview: { findings: ['prior'], blockingCount: 3 } }),
+      loadResume: async () => ({ head: f.snapshot.head, stage: 'built', round: 2, replansUsed: used, findings: [], previousFindings: [], reviewBaseline: 'required', previousReview: { findings: ['prior'], blockingCount: 3 } }),
       regenerateDiff: async () => ({ kind: 'known', diff: f.snapshot.diff }),
       probePlan: async () => null, advanceRalph: async () => ({ kind: 'allow' }),
       commitPlan: async () => ({ kind: 'unknown', detail: 'pr mode never commits a ledger' }),
@@ -1621,7 +1707,7 @@ test('resumed rejection after re-plan stops before another fix', async () => {
   const f = fixture(); f.input.start = 'resume'
   f.deps.modes = {
     saveCheckpoint: async () => {},
-    loadResume: async () => ({ head: f.snapshot.head, stage: 'rejected', round: 2, replansUsed: 1, findings: [{ kind: 'code', actionable: true, text: 'old' }], previousFindings: ['old'] }),
+    loadResume: async () => ({ head: f.snapshot.head, stage: 'rejected', round: 2, replansUsed: 1, findings: [{ kind: 'code', actionable: true, text: 'old' }], previousFindings: ['old'], reviewBaseline: 'required', previousReview: { findings: ['old'], blockingCount: 1 } }),
     regenerateDiff: async () => ({ kind: 'known', diff: f.snapshot.diff }),
     probePlan: async () => null, advanceRalph: async () => ({ kind: 'allow' }),
     commitPlan: async () => ({ kind: 'unknown', detail: 'pr mode never commits a ledger' }),
@@ -1848,7 +1934,7 @@ test('G076 resumed rejection consumes exactly one remaining round', async () => 
 })
 
 test('G076 over-budget resume refuses before review', async () => {
-  const f = modeFixture('pr'); f.resume('fixed', 8)
+  const f = modeFixture('pr'); f.resume('fixed', 8, { findings: ['prior'], blockingCount: 1 })
   f.deps.readReviewCap = async () => ({ kind: 'known', max_rounds: 7 })
   expect(await f.run()).toMatchObject({ kind: 'blocked', on: expect.stringContaining('round ceiling') })
   expect(f.cross.calls).toHaveLength(0)

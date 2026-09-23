@@ -72,6 +72,8 @@ export interface ResumeCheckpoint {
   previousFindings: readonly string[]
   /** Baseline retained across completion checkpoints; omission is legacy evidence. */
   previousReview?: ReviewProgress | null
+  /** Explicit provenance, independent of round numbers and branch movement. */
+  reviewBaseline?: 'none' | 'required'
   /** Re-present only the original request to its idempotent runner. Legacy pending
    * rows without the host continuation remain unknown. */
   pending?: { phase: WorkPhase; step_id: string; recovery?: PendingRecovery } | undefined
@@ -89,10 +91,12 @@ interface PendingRecovery {
   plan: ExecutionPlan | null
   /** Null records known absence; omission is incomplete recovery evidence. */
   previousReview: ReviewProgress | null
+  reviewBaseline: 'none' | 'required'
 }
 
-const reviewHistoryRequired = (role: WorkPhase, round: number): boolean =>
-  role === 'fix' || (role === 'review' ? round > 1 : round > 0)
+function validReviewBaseline(marker: unknown, progress: unknown): boolean {
+  return marker === 'none' ? progress === null : marker === 'required' && validReviewProgress(progress)
+}
 
 function validReviewProgress(value: unknown): value is ReviewProgress {
   if (!value || typeof value !== 'object') return false
@@ -358,8 +362,10 @@ export async function buildRun(input: BuildRunInput, deps: BuildRunDeps, signal:
           || !Array.isArray(recovery.findings) || !recovery.findings.every(f => typeof f === 'string')
           || !['full', 'next'].includes(recovery.planner) || !('previous' in recovery)
           || (recovery.plan !== null && !executionPlan(recovery.plan))
-          || recovery.previousReview === undefined || (reviewHistoryRequired(pending.phase, recovery.round) && recovery.previousReview === null)
-          || (recovery.previousReview !== null && !validReviewProgress(recovery.previousReview))) {
+          || !validReviewBaseline(recovery.reviewBaseline, recovery.previousReview)
+          || ((pending.phase === 'fix' || (resume.replansUsed ?? 0) > 0) && recovery.reviewBaseline !== 'required')
+          || recovery.reviewBaseline !== resume.reviewBaseline
+          || !isDeepStrictEqual(recovery.previousReview, resume.previousReview)) {
         return unknown('Resume cannot validate the original pending worker request and context')
       }
       const expectedStep = `${input.run_id}${input.mode === 'ralph' ? `:task:${input.ralphRound ?? 0}` : ''}:${pending.phase}:${recovery.round}`
@@ -398,10 +404,12 @@ export async function buildRun(input: BuildRunInput, deps: BuildRunDeps, signal:
     // by treating every resume as a moved one.
     let headMoved = false
     let previous: readonly string[] = resume?.previousFindings ?? []
-    if (resume?.previousReview !== undefined && resume.previousReview !== null && !validReviewProgress(resume.previousReview)) {
-      return unknown('Resume prior review progress is invalid')
+    if (resume && (!validReviewBaseline(resume.reviewBaseline, resume.previousReview)
+        || ((replansUsed > 0 || resume.stage === 'fixed' || resume.stage === 'rejected') && resume.reviewBaseline !== 'required'))) {
+      return unknown('Resume prior review baseline is missing or invalid')
     }
     let previousReview: ReviewProgress | undefined = resume?.previousReview ?? undefined
+    let reviewBaseline: 'none' | 'required' = resume?.reviewBaseline ?? 'none'
     let previousBlockingCount = resume?.previousBlockingCount ?? resume?.previousFindings.length ?? 0
     if (resume && (!Number.isSafeInteger(resume.round) || resume.round < 0)) return blocked('Invalid recorded review round')
     if (resume && !recovery) {
@@ -449,7 +457,7 @@ export async function buildRun(input: BuildRunInput, deps: BuildRunDeps, signal:
       replansUsed: 0, findings: [], previousFindings: [] }
     async function checkpoint(patch: Partial<ResumeCheckpoint>) {
       durable = { ...durable, replansUsed, previousFindings: previous, previousBlockingCount,
-        previousReview: previousReview ?? null, ...patch }
+        previousReview: previousReview ?? null, reviewBaseline, ...patch }
       await modes?.saveCheckpoint(structuredClone(durable))
     }
     let previousPayload: unknown = null
@@ -462,6 +470,7 @@ export async function buildRun(input: BuildRunInput, deps: BuildRunDeps, signal:
       committedPlan = recovery.committedPlan
       firstRound = Math.max(1, resume!.round, recovery.round)
       previousReview = recovery.previousReview ?? undefined
+      reviewBaseline = recovery.reviewBaseline
       skipBuild = recovery.request.role === 'review' || recovery.request.role === 'fix'
       resumeFix = recovery.request.role === 'fix'
     }
@@ -473,7 +482,8 @@ export async function buildRun(input: BuildRunInput, deps: BuildRunDeps, signal:
       // reusing that round's old id would recover the previous head's approval.
       // Exact-head recovery keeps the same id, including its pending reservation.
       if (role === 'review') step_id += `:head:${snapshot.head}`
-      if (reviewHistoryRequired(role, round) && !previousReview) {
+      if (!validReviewBaseline(reviewBaseline, previousReview ?? null)
+          || ((role === 'fix' || replansUsed > 0) && reviewBaseline !== 'required')) {
         return { stop: unknown('Worker continuation requires prior review progress') }
       }
       const { runner, request } = input.workers[role]
@@ -499,7 +509,7 @@ export async function buildRun(input: BuildRunInput, deps: BuildRunDeps, signal:
       if (!recovery) await checkpoint({ pending: { phase: role, step_id, recovery: {
         request: structuredClone(boundedRequest), inputs: structuredClone(recoveryInputs(input, maxRounds)), round,
         snapshot: structuredClone(snapshot), previous: previousPayload ?? null, findings, planner,
-        ...(committedPlan ? { committedPlan } : {}), plan, previousReview: previousReview ?? null,
+        ...(committedPlan ? { committedPlan } : {}), plan, previousReview: previousReview ?? null, reviewBaseline,
       } }, round: Math.max(durable.round, round) })
       let outcome: BoundedWorkOutcome
       let review: ReviewPanelObservation | undefined
@@ -707,13 +717,14 @@ export async function buildRun(input: BuildRunInput, deps: BuildRunDeps, signal:
       if (recovery) return unknown('Pending worker must be reconciled before nomination repair')
       findings = [repair.finding]
       await checkpoint({ head: snapshot.head, stage: 'rejected', round, pending: undefined,
-        previousReview: { findings, blockingCount: 1 },
+        previousReview: { findings, blockingCount: 1 }, reviewBaseline: 'required',
         findings: findings.map(text => ({ kind: 'code' as const, actionable: true, text })) })
       if (round >= maxRounds) return blocked('Review requires orchestrator arbitration: round ceiling')
       const current = { findings, blockingCount: 1 }
       const progress = gateStop(reviewProgress(previousReview, current))
       if (progress) return progress
       previousReview = current
+      reviewBaseline = 'required'
       previous = [...findings]
       previousBlockingCount = current.blockingCount
       approved = false
@@ -812,19 +823,19 @@ export async function buildRun(input: BuildRunInput, deps: BuildRunDeps, signal:
         // that need it.
         if (decision.kind === 'fix') {
           await checkpoint({ head: snapshot.head, stage: 'rejected', round, pending: undefined,
-            previousReview: currentReview ?? null,
+            previousReview: currentReview ?? null, reviewBaseline: 'required',
             findings: decision.findings.map(text => ({ kind: 'code' as const, actionable: true, text })) })
         }
         if (decision.kind === 're-plan' && replansUsed !== 0) return blocked('Review requires orchestrator arbitration: re-plan already spent')
         const progress = gateStop(reviewProgress(previousReview, currentReview))
         if (progress) return progress
         if (decision.kind === 'approve') {
-          await checkpoint({ head: snapshot.head, stage: 'approved', round, pending: undefined, findings: [],
-            previousReview: currentReview ?? null })
+          await checkpoint({ head: snapshot.head, stage: 'approved', round, pending: undefined, findings: [] })
           firstRound = round
           break
         }
         previousReview = currentReview
+        reviewBaseline = 'required'
         if (decision.kind === 're-plan') {
           // G077: a replacement needs a subsequent review within the host's cap.
           if (round >= maxRounds) return blocked(`design-gap: re-plan-unreachable: ${decision.whatIsMissing}; no round left for the bounded re-plan`)
