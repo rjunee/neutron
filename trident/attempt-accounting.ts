@@ -4,6 +4,7 @@ import { fireAndForget } from '@neutronai/logger/fire-and-forget.ts'
 import { createHash } from 'node:crypto'
 import { lstat, readFile, writeFile } from 'node:fs/promises'
 import { join } from 'node:path'
+import { isDeepStrictEqual } from 'node:util'
 import { TridentAttemptLedger, type AttemptIdentity, type AttemptKey, type AttemptReceipt } from './attempt-ledger.ts'
 
 const log = createLogger('trident')
@@ -125,6 +126,33 @@ export class AttemptAccounting {
     }
     finally { signal.removeEventListener('abort', interrupted) }
     await interruption
+    await this.recordOutcome(key, outcome, signal)
+    return outcome
+  }
+
+  /** A pending step can only inspect its already-started, exactly journaled call. */
+  async recover(runner: WorkerRunner, request: BoundedWorkRequest, placement: Placement, signal: AbortSignal): Promise<BoundedWorkOutcome> {
+    const key = this.key(request)
+    const unavailable = (): BoundedWorkOutcome => ({ kind: 'unknown', detail: 'Bounded attempt recovery lacks matching started request evidence' })
+    const admitted = this.ledger.get(key)
+    if (!runner.recover || !admitted || admitted.provider !== runner.provider || admitted.role !== request.role
+      || admitted.resolved_model !== request.model_id || admitted.placement !== placement
+      || admitted.prepared_at === null || admitted.started_at === null) return unavailable()
+    try {
+      const path = this.requestPath(key)
+      if (!(await lstat(path)).isFile()) return unavailable()
+      const saved = JSON.parse(await readFile(path, 'utf8'))
+      if (!isDeepStrictEqual(saved.request, request) || saved.provider !== runner.provider || saved.placement !== placement
+        || ['phase', 'task_id', 'head_sha', 'review_seat', 'requested_model'].some(field => saved.attribution?.[field] !== admitted[field as keyof typeof admitted])) return unavailable()
+    } catch { return unavailable() }
+    const outcome = await runner.recover(request, placement, signal)
+    // The adapter validates result authority. Uncertainty does not end an attempt.
+    if (outcome.kind === 'completed') await this.recordOutcome(key, outcome, signal)
+    else if (outcome.observation) await this.observe(key, outcome.observation)
+    return outcome
+  }
+
+  private async recordOutcome(key: AttemptKey, outcome: BoundedWorkOutcome, signal: AbortSignal): Promise<void> {
     const observation = outcome.observation
     const completed = outcome.kind === 'completed' ? outcome : null
     if (observation || completed?.usage) {
@@ -147,7 +175,6 @@ export class AttemptAccounting {
     if (this.ledger.get(key)!.ended_at === null) await this.ledger.lifecycle(key, {
       ended_at: this.now(), outcome: signal.aborted && outcome.kind !== 'completed' ? 'interrupted' : outcome.kind,
     })
-    return outcome
   }
 
   private async observe(key: AttemptKey, observation: ProviderObservation): Promise<void> {

@@ -102,6 +102,7 @@ export async function createProjectBuildHost(options: ProjectBuildHostOptions) {
       supports: (role, placement) => runner.supports(role, placement),
       liveness: handle => runner.liveness(handle),
       run: (request, placement, signal) => accounting.run(runner, request, placement, signal),
+      recover: (request, placement, signal) => accounting.recover(runner, request, placement, signal),
     }
   }
   const { review, reviewSuite, publicationSuite, ...policy } = options.policy

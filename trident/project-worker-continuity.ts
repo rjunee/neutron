@@ -87,6 +87,67 @@ export function createProjectWorkerContinuity(options: ProjectWorkerContinuityOp
       || !(value.thread === null || validThread(value.thread))) throw Error('step binding mismatch')
     return value
   }
+  const execute = (recovery: boolean): WorkerRunner['run'] => async (req, placement, signal) => {
+    const supported = runner.supports(req.role, placement)
+    if (!supported.ok) return { kind: 'refused', reason: supported.reason }
+    if (recovery && !runner.recover) return unknown('worker has no recovery capability')
+    const dispatch = recovery ? runner.recover!.bind(runner) : runner.run.bind(runner)
+    if (!applies(req)) return dispatch(req, placement, signal)
+    if (placement !== 'headless') return { kind: 'refused', reason: 'placement-unavailable' }
+    let release: (() => Promise<void>) | undefined
+    try {
+      const owner = await scope(req)
+      const dir = directory(req)
+      const lock = `${dir}.writer.lock`
+      const lease = await open(lock, 'wx', 0o600)
+      await lease.close()
+      release = () => unlink(lock)
+      const initiation = `${dir}.initiated.json`
+      let initiated: unknown
+      try { initiated = await read(initiation) }
+      catch (error) {
+        if (recovery) throw error
+        if ((error as NodeJS.ErrnoException).code !== 'ENOENT') throw error
+        // The initiation witness lives outside the replaceable role directory.
+        // Losing either half never makes a previously used role fresh again.
+        try { await lstat(dir); throw Error('initiation witness missing') }
+        catch (missing) { if ((missing as NodeJS.ErrnoException).code !== 'ENOENT') throw missing }
+        if (!await options.claimInitial(req, owner)) throw Error('conversation was already initiated')
+        initiated = { version: 1, scope: owner }
+        await write(options.stateDir, `worker-conversation-${req.role}.initiated.json`, initiated)
+        await mkdir(dir, { mode: 0o700 })
+        await write(dir, 'binding.json', { version: 1, scope: owner, thread: null, pending: null })
+      }
+      if ((initiated as { version?: unknown })?.version !== 1
+        || (initiated as { scope?: unknown })?.scope !== owner) throw Error('initiation ownership mismatch')
+      if (!(await lstat(dir)).isDirectory()) throw Error('binding directory is not owned')
+      const binding = state(await read(join(dir, 'binding.json')), owner)
+      if (binding.pending !== null && binding.pending !== req.step_id) throw Error('previous step remains unresolved')
+      let newStep = false
+      if (!recovery) {
+        try { await mkdir(stepDir(dir, req), { mode: 0o700 }); newStep = true }
+        catch (error) { if ((error as NodeJS.ErrnoException).code !== 'EEXIST') throw error }
+      }
+      if (newStep) {
+        if (binding.pending === req.step_id) throw Error('reserved step receipt missing')
+        await write(stepDir(dir, req), 'request.json', {
+          version: 1, scope: owner, request: requestIdentity(req), thread: binding.thread,
+        })
+      }
+      const step = await readStep(dir, req, owner)
+      if (req.thread && req.thread.id !== step.thread) throw Error('requested thread is not owned')
+      if (!recovery) await write(dir, 'binding.json', { ...binding, pending: req.step_id })
+      if (await scope(req) !== owner) throw Error('credential changed before dispatch')
+      const outcome = await dispatch({ ...req, thread: step.thread === null ? null : { id: step.thread } }, placement, signal)
+      if (outcome.kind !== 'completed') return outcome
+      if (await scope(req) !== owner) return unknown('credential changed during dispatch')
+      if (!validThread(outcome.thread_id) || (binding.thread !== null && outcome.thread_id !== binding.thread)
+        || (step.thread !== null && outcome.thread_id !== step.thread)) return unknown('provider did not observe the owned thread')
+      await write(dir, 'binding.json', { ...binding, thread: outcome.thread_id, pending: null })
+      return outcome
+    } catch { return unknown('binding is unavailable, mismatched, or held by another writer') }
+    finally { await release?.().catch(() => { /* An uncleared lock remains fail-closed. */ }) }
+  }
   return {
     provider: runner.provider,
     supports: (role, placement) => runner.supports(role, placement),
@@ -101,61 +162,7 @@ export function createProjectWorkerContinuity(options: ProjectWorkerContinuityOp
         return await runner.observe?.({ ...req, thread: step.thread === null ? null : { id: step.thread } })
       } catch { return undefined }
     },
-    async run(req, placement, signal) {
-      const supported = runner.supports(req.role, placement)
-      if (!supported.ok) return { kind: 'refused', reason: supported.reason }
-      if (!applies(req)) return runner.run(req, placement, signal)
-      if (placement !== 'headless') return { kind: 'refused', reason: 'placement-unavailable' }
-      let release: (() => Promise<void>) | undefined
-      try {
-        const owner = await scope(req)
-        const dir = directory(req)
-        const lock = `${dir}.writer.lock`
-        const lease = await open(lock, 'wx', 0o600)
-        await lease.close()
-        release = () => unlink(lock)
-        const initiation = `${dir}.initiated.json`
-        let initiated: unknown
-        try { initiated = await read(initiation) }
-        catch (error) {
-          if ((error as NodeJS.ErrnoException).code !== 'ENOENT') throw error
-          // The initiation witness lives outside the replaceable role directory.
-          // Losing either half never makes a previously used role fresh again.
-          try { await lstat(dir); throw Error('initiation witness missing') }
-          catch (missing) { if ((missing as NodeJS.ErrnoException).code !== 'ENOENT') throw missing }
-          if (!await options.claimInitial(req, owner)) throw Error('conversation was already initiated')
-          initiated = { version: 1, scope: owner }
-          await write(options.stateDir, `worker-conversation-${req.role}.initiated.json`, initiated)
-          await mkdir(dir, { mode: 0o700 })
-          await write(dir, 'binding.json', { version: 1, scope: owner, thread: null, pending: null })
-        }
-        if ((initiated as { version?: unknown })?.version !== 1
-          || (initiated as { scope?: unknown })?.scope !== owner) throw Error('initiation ownership mismatch')
-        if (!(await lstat(dir)).isDirectory()) throw Error('binding directory is not owned')
-        const binding = state(await read(join(dir, 'binding.json')), owner)
-        if (binding.pending !== null && binding.pending !== req.step_id) throw Error('previous step remains unresolved')
-        let newStep = false
-        try { await mkdir(stepDir(dir, req), { mode: 0o700 }); newStep = true }
-        catch (error) { if ((error as NodeJS.ErrnoException).code !== 'EEXIST') throw error }
-        if (newStep) {
-          if (binding.pending === req.step_id) throw Error('reserved step receipt missing')
-          await write(stepDir(dir, req), 'request.json', {
-            version: 1, scope: owner, request: requestIdentity(req), thread: binding.thread,
-          })
-        }
-        const step = await readStep(dir, req, owner)
-        if (req.thread && req.thread.id !== step.thread) throw Error('requested thread is not owned')
-        await write(dir, 'binding.json', { ...binding, pending: req.step_id })
-        if (await scope(req) !== owner) throw Error('credential changed before dispatch')
-        const outcome = await runner.run({ ...req, thread: step.thread === null ? null : { id: step.thread } }, placement, signal)
-        if (outcome.kind !== 'completed') return outcome
-        if (await scope(req) !== owner) return unknown('credential changed during dispatch')
-        if (!validThread(outcome.thread_id) || (binding.thread !== null && outcome.thread_id !== binding.thread)
-          || (step.thread !== null && outcome.thread_id !== step.thread)) return unknown('provider did not observe the owned thread')
-        await write(dir, 'binding.json', { ...binding, thread: outcome.thread_id, pending: null })
-        return outcome
-      } catch { return unknown('binding is unavailable, mismatched, or held by another writer') }
-      finally { await release?.().catch(() => { /* An uncleared lock remains fail-closed. */ }) }
-    },
+    run: execute(false),
+    recover: execute(true),
   }
 }

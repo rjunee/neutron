@@ -3,7 +3,7 @@ import { mkdtemp, readFile, rm, writeFile } from 'node:fs/promises'
 import { tmpdir } from 'node:os'
 import { join } from 'node:path'
 import { ProjectDb } from '@neutronai/persistence/index.ts'
-import { fakeRunner, type Provider } from '@neutronai/runtime/bounded-work.ts'
+import { fakeRunner, type Provider, type BoundedWorkRequest } from '@neutronai/runtime/bounded-work.ts'
 import { seedMigratedDb } from '../tests/support/migrated-db.ts'
 import { TridentRunStore } from './store.ts'
 import { TridentAttemptLedger } from './attempt-ledger.ts'
@@ -12,6 +12,7 @@ import type { BuildRunOutcome } from './build-run.ts'
 import { briefIntegrity } from './gates/brief-integrity.ts'
 import { workContextPath } from './production-host-effects.ts'
 import { spawnCapture } from './git-mode.ts'
+import { AttemptAccounting } from './attempt-accounting.ts'
 
 const cleanups: (() => Promise<void>)[] = []
 afterEach(async () => { for (const cleanup of cleanups.splice(0)) await cleanup() })
@@ -60,6 +61,29 @@ async function fixture() {
   }
   return { options, path, placements }
 }
+
+test('project build wrappers preserve accounting recovery without preparation or dispatch on restart', async () => {
+  const f = await fixture(), raw = fakeRunner('pi')
+  let recoveries = 0
+  f.options.substrate.inRepl = { ...raw, recover: async () => {
+    recoveries++; return { kind: 'completed', result: {}, usage: null, model_reported: null, thread_id: null }
+  } }
+  const first = await createProjectBuildHost(f.options)
+  const request: BoundedWorkRequest = { ...first.workers.build.request, run_id: f.options.production.runId,
+    step_id: 'build:0', role: 'build', needs_approval_decision: false }
+  const accounting = new AttemptAccounting(f.options.attempts, join(f.path, '..'), async () => {})
+  const attribution = { phase: 'build', task_id: 'task', head_sha: 'a'.repeat(40), review_seat: null, requested_model: 'test' }
+  await accounting.prepare(request, 'pi', 'in-repl', attribution, async () => {})
+  expect((await first.workers.build.runner.recover!(request, 'headless', new AbortController().signal)).kind).toBe('unknown')
+  expect(recoveries).toBe(0)
+  await f.options.attempts.lifecycle({ run_id: request.run_id, step_id: request.step_id, attempt_id: 'dispatch' }, { started_at: Date.now() })
+  const restarted = await createProjectBuildHost(f.options)
+  expect((await restarted.workers.build.runner.recover!(request, 'headless', new AbortController().signal)).kind).toBe('completed')
+  expect(recoveries).toBe(1); expect(raw.calls).toHaveLength(0)
+  expect(f.options.attempts.list(request.run_id)).toHaveLength(1)
+  expect((await restarted.workers.build.runner.recover!({ ...request, model_id: 'changed' }, 'in-repl', new AbortController().signal)).kind).toBe('unknown')
+  expect(recoveries).toBe(1); expect(raw.calls).toHaveLength(0)
+})
 
 for (const change of ['none', 'head', 'round', 'strategy', 'subset', 'identity', 'unknown identity', 'corrupt', 'missing', 'run'] as const) {
   test(`durable publication suite recovery: ${change}`, async () => {

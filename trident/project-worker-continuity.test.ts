@@ -39,6 +39,63 @@ test('first observed thread is reused by a reconstructed host, while original st
   expect(f.runner.calls.map(call => call.thread)).toEqual([null, { id: 'observed-first' }, null])
 })
 
+test('recovery uses the stored original thread, settles validated completion and never claims a new binding', async () => {
+  const f = await fixture(), recovered: BoundedWorkRequest[] = []
+  let claims = 0
+  const runner = { ...f.runner, recover: async (request: BoundedWorkRequest) => { recovered.push(request); return completed() } }
+  const wrap = () => f.wrap({ runner, claimInitial: async () => { claims++; return true } })
+  expect((await wrap().recover!(f.request(), 'headless', signal())).kind).toBe('unknown')
+  expect(await readdir(f.dir)).toEqual([]); expect(claims).toBe(0)
+  await f.call()
+  await f.call({ step_id: 'two' })
+  for (const step_id of ['one', 'two']) expect((await wrap().recover!(f.request({ step_id }), 'headless', signal())).kind).toBe('completed')
+  expect(recovered.map(request => request.thread)).toEqual([null, { id: 'observed-first' }])
+  expect(f.runner.calls).toHaveLength(2); expect(claims).toBe(0)
+  expect(JSON.parse(await readFile(f.binding, 'utf8'))).toMatchObject({ thread: 'observed-first', pending: null })
+})
+
+test.each(['step', 'brief', 'model', 'credential', 'thread', 'missing-binding', 'missing-initiation', 'missing-step', 'capability', 'lock'] as const)('recovery refuses changed or missing %s without fresh work; intact evidence recovers', async defect => {
+  const f = await fixture(); await f.call()
+  const recovered: BoundedWorkRequest[] = []
+  const runner = { ...f.runner, recover: async (request: BoundedWorkRequest) => { recovered.push(request); return completed() } }
+  const req = f.request({ ...(defect === 'step' ? { step_id: 'new' } : {}),
+    ...(defect === 'brief' ? { brief: { ...f.request().brief, integrity: 'changed' } } : {}),
+    ...(defect === 'model' ? { model_id: 'changed' } : {}), ...(defect === 'thread' ? { thread: { id: 'foreign' } } : {}) })
+  const role = join(f.dir, 'worker-conversation-build')
+  const step = (await readdir(role)).find(name => name.startsWith('step-'))!
+  const target = defect === 'missing-binding' ? f.binding : defect === 'missing-initiation'
+    ? join(f.dir, 'worker-conversation-build.initiated.json') : defect === 'missing-step' ? join(role, step, 'request.json') : null
+  const original = target ? await readFile(target, 'utf8') : null
+  if (target) await unlink(target)
+  const lock = join(f.dir, 'worker-conversation-build.writer.lock')
+  if (defect === 'lock') await writeFile(lock, '')
+  const wrapped = f.wrap({ runner: defect === 'capability' ? f.runner : runner,
+    ...(defect === 'credential' ? { credentialIdentity: async () => 'other-account' } : {}) })
+  expect((await wrapped.recover!(req, 'headless', signal())).kind).toBe('unknown')
+  expect(recovered).toHaveLength(0); expect(f.runner.calls).toHaveLength(1)
+  if (target) await writeFile(target, original!)
+  if (defect === 'lock') await unlink(lock)
+  expect((await f.wrap({ runner }).recover!(f.request(), 'headless', signal())).kind).toBe('completed')
+  expect(recovered).toHaveLength(1); expect(f.runner.calls).toHaveLength(1)
+})
+
+test.each(['unknown', 'wrong-thread', 'credential-change'] as const)('recovery leaves binding pending for %s until validated completion', async defect => {
+  const f = await fixture()
+  const pending = { ...f.runner, run: async (req: BoundedWorkRequest) => { await f.runner.run(req, 'headless', signal()); return { kind: 'unknown', detail: 'lost acknowledgement' } as const } }
+  await f.wrap({ runner: pending }).run(f.request(), 'headless', signal())
+  const before = await readFile(f.binding, 'utf8')
+  let credential = 'account-a'
+  const recover = async () => {
+    if (defect === 'credential-change') credential = 'other-account'
+    return defect === 'unknown' ? { kind: 'unknown', detail: 'pending' } as const : completed(defect === 'wrong-thread' ? '' : 'observed-first')
+  }
+  expect((await f.wrap({ runner: { ...pending, recover }, credentialIdentity: async () => credential }).recover!(f.request(), 'headless', signal())).kind).toBe('unknown')
+  expect(await readFile(f.binding, 'utf8')).toBe(before); expect(f.runner.calls).toHaveLength(1)
+  expect((await f.wrap({ runner: { ...pending, recover: async () => completed() } }).recover!(f.request(), 'headless', signal())).kind).toBe('completed')
+  expect(JSON.parse(await readFile(f.binding, 'utf8'))).toMatchObject({ thread: 'observed-first', pending: null })
+  expect(f.runner.calls).toHaveLength(1)
+})
+
 for (const field of ['run', 'project', 'model', 'credential', 'provider', 'cwd'] as const) {
   test(`changed ${field} ownership refuses without dispatch; original ownership remains usable`, async () => {
     const f = await fixture(); await f.call()
