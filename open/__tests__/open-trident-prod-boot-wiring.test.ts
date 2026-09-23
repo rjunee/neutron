@@ -225,7 +225,7 @@ test.each([
     }
     expect(fired).toEqual({ status: 'fired', error: null })
     expect(optionsSeen).toHaveLength(1)
-    expect(starts).toEqual([{ mode: 'pr', start: 'fresh' }])
+    expect(starts).toEqual([{ mode: 'implementation', start: 'fresh' }])
     expect(optionsSeen[0]!.production.runId).toBe(run.id)
     expect(optionsSeen[0]!.substrate.provider).toBe(provider)
     expect(optionsSeen[0]!.substrate.headless.anthropic?.provider).toBe(provider === 'pi' ? 'anthropic' : undefined)

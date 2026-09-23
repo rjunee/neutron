@@ -135,6 +135,7 @@ function doneRun(overrides: Partial<TridentRun> = {}): TridentRun {
     branch: 'feat/demo',
     pr: 42,
     merge_mode: 'pr',
+    execution_strategy: 'single',
     subagent_run_id: null,
     subagent_status: null,
     repo_path: '/tmp/repo',
@@ -268,6 +269,10 @@ describe('Open skill-forge prod-boot wiring (parity gap #5)', () => {
       const runs = new TridentRunStore(db)
       const run = await runs.create({ slug: 'skill-question', project_slug: 'owner', repo_path: '/tmp/repo',
         task: doneRun().task, chat_id: appWsTopicId(OWNER_USER_ID), channel_kind: 'app_socket' })
+      expect(await runs.selectExecutionStrategy(run.id, {
+        strategy: 'single', rationale: 'One coherent workflow.',
+        plan: JSON.stringify({ strategy: 'single', implementationPlan: '- [x] Complete workflow' }),
+      })).toEqual({ kind: 'allow' })
       await runs.update(run.id, { phase: 'done' })
       await composition.trident!.on_run_terminal!(runs.get(run.id)!)
       expect(systemTurnsInOwnerChat()).toEqual([])
