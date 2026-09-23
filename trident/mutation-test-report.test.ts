@@ -7,6 +7,7 @@ const row = '    <testcase name="wanted" classname="" time="0.1" file="fixture.t
 
 test('JUnit positive control requires one complete passed case', () => {
   expect(passedCase(begin + row + ' />\n' + end, 'wanted')).toBe(true)
+  expect(passedCase(begin + '    <properties>\n      <property name="ci" value="https://example.invalid/run" />\n      <property name="commit" value="abc123" />\n    </properties>\n' + row + ' />\n' + end, 'wanted')).toBe(true)
   expect(passedCase(begin + row + ' />\n' + end, 'another')).toBe(false)
   expect(passedCase(begin + row + ' />\n' + end, 'wanted', 'other suite')).toBe(false)
 })
@@ -19,5 +20,6 @@ test('JUnit positive control rejects skipped, failed, duplicated, and malformed 
   expect(passedCase(begin + row + ' />\n' + end + 'garbage', 'wanted')).toBe(false)
   expect(passedCase(begin + row + ' />\n' + end + begin + end, 'wanted')).toBe(false)
   expect(passedCase(begin + row + ' />\n  garbage\n' + end, 'wanted')).toBe(false)
+  expect(passedCase(begin + '    <property name="ci" value="orphan" />\n' + row + ' />\n' + end, 'wanted')).toBe(false)
   expect(passedCase(begin + row + ' />\n', 'wanted')).toBe(false)
 })

@@ -17,8 +17,13 @@ export function passedCase(report: string, name: string, classname = ''): boolea
       rootSeen = true
       stack.push('testsuites')
     } else if (/^<testsuite name="[^"]*" file="[^"]+"(?: line="\d+")? tests="\d+" assertions="\d+" failures="0" skipped="\d+" time="[\d.]+" hostname="[^"]+">$/.test(row)) {
-      if (!stack.length || stack.at(-1) === 'testcase') return false
+      if (stack.at(-1) !== 'testsuites' && stack.at(-1) !== 'testsuite') return false
       stack.push('testsuite')
+    } else if (row === '<properties>') {
+      if (stack.at(-1) !== 'testsuite') return false
+      stack.push('properties')
+    } else if (/^<property name="[^"]+" value="[^"]*" \/>$/.test(row)) {
+      if (stack.at(-1) !== 'properties') return false
     } else if (row.startsWith('<testcase')) {
       const caseRow = row.match(/^<testcase name="([^"]*)" classname="([^"]*)" time="[\d.]+" file="[^"]+" line="\d+" assertions="\d+"( \/)?>$/)
       if (!caseRow || stack.at(-1) !== 'testsuite') return false
@@ -30,7 +35,7 @@ export function passedCase(report: string, name: string, classname = ''): boolea
       if (!isPassed) stack.push('testcase')
     } else if (row === '<skipped />') {
       if (stack.at(-1) !== 'testcase') return false
-    } else if (row === '</testcase>' || row === '</testsuite>' || row === '</testsuites>') {
+    } else if (row === '</testcase>' || row === '</properties>' || row === '</testsuite>' || row === '</testsuites>') {
       if (stack.pop() !== row.slice(2, -1)) return false
       if (row === '</testsuites>' && stack.length) return false
       if (row === '</testsuites>') rootClosed = true
