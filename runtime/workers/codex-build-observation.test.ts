@@ -60,9 +60,25 @@ test('missing usage is unknown while measured zero and reported model survive', 
     .toMatchObject({ usage: { input_tokens: 0, output_tokens: 0 }, model_reported: 'reported-model' })
 })
 test('malformed telemetry cannot veto independently observed thread and completion authority', () => {
-  for (const tail of ['not json\n', '{"type":', 'null\n', '{"type":"error"}\n', 'x'.repeat(1024 * 1024 + 1) + '\n']) {
+  for (const tail of ['not json\n', 'null\n', '{"type":"error"}\n', 'x'.repeat(1024 * 1024 + 1) + '\n',
+    JSON.stringify({ type: 'item.completed', padding: 'x'.repeat(1024 * 1024 + 1) }) + '\n']) {
     const reader = codexBuildObservation(null)
     reader.push(JSON.stringify(start) + '\n' + JSON.stringify(done) + '\n' + tail)
     expect(reader.finish()).toEqual({ thread_id: 'owned-thread', usage: null, model_reported: null })
+  }
+})
+test('oversized and unterminated authority contradictions cannot hide inside telemetry noise', () => {
+  for (const tail of [
+    JSON.stringify({ type: 'turn.failed', padding: 'x'.repeat(1024 * 1024 + 1) }) + '\n',
+    JSON.stringify({ type: 'thread.started', thread_id: 'foreign', padding: 'x'.repeat(1024 * 1024 + 1) }) + '\n',
+    JSON.stringify({ ...done, padding: 'x'.repeat(1024 * 1024 + 1) }) + '\n',
+    JSON.stringify({ type: 'turn.failed' }), '{"type":', '{not-json}',
+    JSON.stringify({ type: 'item.completed', padding: 'x'.repeat(8 * 1024 * 1024 + 1) }) + '\n',
+  ]) {
+    const reader = codexBuildObservation('owned-thread')
+    reader.push(JSON.stringify(start) + '\n' + JSON.stringify(done) + '\n')
+    // Exercise the actual pipe's fragmented oversized-record path.
+    for (let offset = 0; offset < tail.length; offset += 65536) reader.push(tail.slice(offset, offset + 65536))
+    expect(reader.finish()).toBeNull()
   }
 })

@@ -58,7 +58,8 @@ describe('Codex headless WorkerRunner', () => {
       }
     }, 2000)
   }
-  for (const noise of ['diagnostic text\n', '{not-json}\n', '{"type":"error"}\n', '{"type":', 'x'.repeat(1024 * 1024 + 1) + '\n']) {
+  for (const noise of ['diagnostic text\n', '{"type":"error"}\n', 'x'.repeat(1024 * 1024 + 1) + '\n',
+    JSON.stringify({ type: 'item.completed', padding: 'x'.repeat(1024 * 1024 + 1) }) + '\n']) {
     test(`valid trailer and thread survive unusable telemetry: ${noise.slice(0, 20)}`, async () => {
       const f = fixture()
       // Emit from a file so oversized noise does not exceed shell argv limits.
@@ -67,6 +68,17 @@ describe('Codex headless WorkerRunner', () => {
       const result = await createCodexHeadlessRunner({ buildScript: f.script, probe: { ok: true } }).run(f.request(), 'headless', new AbortController().signal)
       expect(result).toMatchObject({ kind: 'completed', thread_id: 'observed-first', usage: null, model_reported: null })
       if (result.kind === 'completed') expect(result.result).toEqual(measured)
+    })
+  }
+  for (const tail of [JSON.stringify({ type: 'turn.failed', padding: 'x'.repeat(1024 * 1024 + 1) }) + '\n',
+    JSON.stringify({ type: 'thread.started', thread_id: 'foreign', padding: 'x'.repeat(1024 * 1024 + 1) }) + '\n',
+    JSON.stringify({ type: 'turn.failed' }), '{"type":']) {
+    test(`authority uncertainty refuses a valid trailer: ${tail.slice(0, 35)}`, async () => {
+      const f = fixture()
+      writeFileSync(join(f.request().cwd, 'authority-tail'), tail)
+      writeFileSync(f.script, readFileSync(f.script, 'utf8') + 'cat authority-tail\n')
+      const result = await createCodexHeadlessRunner({ buildScript: f.script, probe: { ok: true } }).run(f.request(), 'headless', new AbortController().signal)
+      expect(result.kind).toBe('unknown')
     })
   }
   test('stalled telemetry publication cannot hold a finished worker indefinitely', async () => {
@@ -153,10 +165,10 @@ describe('Codex headless WorkerRunner', () => {
       const request = f.request({ budget: { wall_ms: mode === 'timeout' ? 250 : 5000 }, ...(mode === 'thread-mismatch' ? { thread: { id: 'expected' } } : {}) })
       const runner = createCodexHeadlessRunner({ buildScript: f.script, probe: { ok: true } })
       const outcome = await runner.run(request, 'headless', new AbortController().signal)
-      expect(outcome.kind).toBe(mode === 'failure' || mode === 'timeout' ? 'failed' : mode === 'malformed' ? 'completed' : 'unknown')
+      expect(outcome.kind).toBe(mode === 'failure' || mode === 'timeout' ? 'failed' : 'unknown')
       expect(outcome.observation?.usage.input_tokens).toBe(mode === 'thread-mismatch' ? null : 12)
       expect(await runner.observe!(request)).toEqual(outcome.observation)
-      expect((await runner.run(request, 'headless', new AbortController().signal)).kind).toBe(mode === 'malformed' ? 'completed' : 'unknown')
+      expect((await runner.run(request, 'headless', new AbortController().signal)).kind).toBe('unknown')
       expect(readFileSync(f.threads, 'utf8')).toBe(mode === 'thread-mismatch' ? 'expected\n' : '\n')
     })
   }

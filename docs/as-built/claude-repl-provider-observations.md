@@ -87,11 +87,15 @@ fail; removing the final flush deadline fails the stalled-write control. A
 duplicate/reordered-observation mutation must fail immediately, before a later
 valid update can hide the regression.
 
-Malformed, oversized or diagnostic stdout and standalone error events do not veto
-an independently valid wrapper trailer with exact thread/completion authority.
-Unusable result telemetry is unknown; already observed provider spend remains
-available separately. Foreign/duplicate threads and actual failed turns retain
-their authority refusals. The worker settles from process exit, then drains
+Missing or invalid usage fields, clearly non-envelope diagnostics, valid oversized
+non-authority records and standalone error events do not veto an independently
+valid wrapper trailer with exact thread/completion authority. Unusable result
+telemetry is unknown; already observed provider spend remains available separately.
+Foreign/duplicate threads and actual failed turns retain their authority refusals,
+including otherwise-valid oversized records and complete JSON without a newline.
+Potential protocol objects that cannot be parsed within the bounded 8 MiB envelope
+window remain authority-unknown; they are not silently classified as diagnostics.
+The worker settles from process exit, then drains
 stdout for at most 250 ms within its remaining budget. It runs in a dedicated
 process group and tears down descendants, so a heartbeat inheriting stdout cannot
 hold completion or timeout indefinitely. A timed-out process has a bounded
