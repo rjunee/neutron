@@ -105,6 +105,78 @@ import { DEFAULT_MAX_RALPH_ROUNDS } from './ralph-budget.ts'
 
 const log = createLogger('trident')
 
+/**
+ * Every answer the dispatch's seed ladder can give to "what does this retry inherit
+ * from the run before it?" — one per arm of the ladder in {@link dispatchBoardBoundBuild}.
+ * `no_prior_terminal_run` is the only one that is not a statement about a prior run.
+ */
+export type ResumeSeedReason =
+  | 'no_prior_terminal_run'
+  | 'card_names_no_run'
+  | 'card_names_an_unknown_run'
+  | 'card_names_a_different_run'
+  | 'card_names_a_live_run'
+  | 'prior_run_task_text_differs'
+  | 'prior_run_has_no_resumable_build'
+  | 'resumed'
+  | 'resumed_continuation'
+  | 'branch_tip_moved'
+  | 'branch_tip_unreadable_or_absent'
+
+/** The values the dispatch has ALREADY decided for the new row — the note is built
+ *  from these and nothing else, so the card text cannot disagree with the row. */
+export interface ResumeNoteRow {
+  inner_checkpoint: string | null
+  inner_checkpoint_head: string | null
+  ralph: boolean
+  ralph_round: number
+  max_ralph_rounds: number
+  /** Whether the card's Ralph spend was inherited (`budget !== null` in the dispatch). */
+  budget_carried: boolean
+}
+
+const NOT_RESUMED_BECAUSE: Record<Exclude<ResumeSeedReason, 'no_prior_terminal_run' | 'resumed' | 'resumed_continuation'>, string> = {
+  card_names_no_run: 'the card names no prior run',
+  card_names_an_unknown_run: 'the run the card names no longer exists',
+  card_names_a_different_run: "the run the card names belongs to another project",
+  card_names_a_live_run: 'the run the card names is still live',
+  prior_run_task_text_differs: "the card's task text changed since the last run",
+  prior_run_has_no_resumable_build: 'the last run left no build to resume',
+  branch_tip_moved: "the branch moved off the last run's commit",
+  branch_tip_unreadable_or_absent: 'the branch tip could not be read or the branch is gone',
+}
+
+/**
+ * THE CARD SENTENCE FOR A RETRY (spec item a-retry-must-resume-from-the-checkpoint,
+ * acceptance 1: "carries … forward, OR states plainly on the card that it will not").
+ *
+ * A retry that declines to resume is a byte-identical fresh dispatch — a row with a null
+ * checkpoint and round 0 looks exactly like a first attempt, and before this the only
+ * place the refusal existed was a `dispatch_resume_seed` log line no owner reads. So the
+ * dispatch writes ONE sentence onto the row (`code_trident_runs.resume_note`), which
+ * `run_progress` carries to the card.
+ *
+ * Null ONLY for `no_prior_terminal_run`: a first dispatch has nothing to state. Every
+ * other reason yields a sentence naming whether the checkpoint was carried and, for a
+ * governed run, the Ralph round and cap the row actually holds. No path, host or
+ * identity is ever interpolated — the only variable parts are the checkpoint NAME, a
+ * 7-character commit prefix and two integers.
+ */
+export function resumeNote(reason: ResumeSeedReason, row: ResumeNoteRow): string | null {
+  if (reason === 'no_prior_terminal_run') return null
+  // One sentence: the resume clause, then — for a governed run only — the budget clause.
+  const ralph = !row.ralph
+    ? '.'
+    : row.budget_carried
+      ? `; Ralph round ${row.ralph_round}/${row.max_ralph_rounds} carried.`
+      : `; fresh Ralph budget ${row.ralph_round}/${row.max_ralph_rounds}.`
+  if (reason === 'resumed' || reason === 'resumed_continuation') {
+    const at = row.inner_checkpoint_head !== null ? ` at ${row.inner_checkpoint_head.slice(0, 7)}` : ''
+    return `Resumed from ${row.inner_checkpoint ?? 'the last checkpoint'}${at}${ralph}`
+  }
+  return `Not resumed: ${NOT_RESUMED_BECAUSE[reason]}, so this is a fresh build${ralph}`
+}
+
 export interface AlreadyLandedFinding {
   pr: number
   merged_at: string | null
@@ -1259,7 +1331,7 @@ export async function dispatchBoardBoundBuild(
   // built. The reason is decided on the same lines that decide the seed and
   // emitted once, after the last await, so the line reports the decision that was
   // actually made rather than one it was heading for.
-  let seedReason = 'no_prior_terminal_run'
+  let seedReason: ResumeSeedReason = 'no_prior_terminal_run'
   // DIAGNOSTIC ONLY — never the decision. `latestTerminalBySlug` answers "is there ANY
   // prior for this work", which is the right question for a log line and the WRONG one
   // for "is there a prior THIS CARD is bound to": it orders by `started_at DESC LIMIT 1`
@@ -1544,6 +1616,23 @@ export async function dispatchBoardBoundBuild(
   // the re-read would find is OUR OWN, and refusing on it would queue a hold
   // behind a run this very call created.
   let createdRunId: string | null = null
+  // WHETHER THERE WAS A PRIOR TO ASK ABOUT — the same condition that gates the
+  // `dispatch_resume_seed` line below, so the card sentence and the log line are
+  // emitted for exactly the same dispatches. The ladder above always names a reason
+  // (`card_names_no_run` for a link-less card), so without this a card's very FIRST
+  // dispatch would be told it "was not resumed" from a run that never existed.
+  const hadPriorToAsk = prior !== null || cardsPriorRun !== '' || anyPriorForThisWork !== null
+  // THE CARD SENTENCE, built from the values this row is about to be written with —
+  // the same seed, budget and cap the spreads below pass — so the note and the row
+  // cannot disagree. Written once, at create; nothing later restates it.
+  const resume_note = resumeNote(hadPriorToAsk ? seedReason : 'no_prior_terminal_run', {
+    inner_checkpoint: seed?.checkpoint ?? null,
+    inner_checkpoint_head: seed?.head ?? null,
+    ralph,
+    ralph_round: budget?.ralph_round ?? 0,
+    max_ralph_rounds: budget?.max_ralph_rounds ?? effectiveMaxRalphRounds ?? DEFAULT_MAX_RALPH_ROUNDS,
+    budget_carried: budget !== null,
+  })
   try {
     const admission = await deps.store.createIfClaimsAvailable({
       slug,
@@ -1556,6 +1645,7 @@ export async function dispatchBoardBoundBuild(
       // RECORD THE CLAIM on the run row, so the next dispatch's gate is a real
       // query against live state rather than an inference.
       claimed_paths: paths,
+      resume_note,
       ...(input.bound_pr !== undefined && input.bound_pr !== null ? { bound_pr: input.bound_pr } : {}),
       // Only publication provenance travels through the exact card link. The
       // observational `pr` field may have been filled by discovery and cannot
@@ -1688,7 +1778,7 @@ export async function dispatchBoardBoundBuild(
     // grep to find out what a retry inherited, reporting a retry that never happened.
     // Reading the values off the ROW rather than off `seed`/`budget` closes the other
     // half of that: the line now states what was WRITTEN, not what was intended.
-    if (prior !== null || cardsPriorRun !== '' || anyPriorForThisWork !== null) {
+    if (hadPriorToAsk) {
       log.info('dispatch_resume_seed', {
         project: deps.project_slug,
         item: board_item_id,
@@ -1715,6 +1805,8 @@ export async function dispatchBoardBoundBuild(
         // `reason` of `resumed` describes the COMMIT; the budget is carried on a
         // different gate, so one word cannot honestly cover both.
         budget_carried: budget !== null,
+        // The sentence the card shows, read OFF THE ROW like the fields above.
+        note: run.resume_note,
       })
     }
     // BIND: light the item up (fork ⑂ + in_progress) the instant the build starts.

@@ -191,6 +191,21 @@ describe('parseWorkBoardItems', () => {
     expect(out[0]!.run_progress?.brief_alert).toContain('CODEX_BUILD_BRIEF_PART_CORRUPT');
   });
 
+  it('parses run_progress.resume_note through, and null when absent or not a string', () => {
+    const base = {
+      run_id: 'run_1', phase_label: 'building', round: 1, ralph_round: 0,
+      started_at: '', last_advanced_at: '', elapsed_ms: 0, stalled: false, stalled_ms: null,
+      pr: null, verdict: null, failure_reason: null,
+    };
+    const note = 'Not resumed: the branch moved off the last run\'s commit, so this is a fresh build.';
+    const out = parseWorkBoardItems([
+      { ...item({ id: 'a', linked_run_id: 'run_1' }), run_progress: { ...base, resume_note: note } },
+      { ...item({ id: 'b', linked_run_id: 'run_1' }), run_progress: base },
+      { ...item({ id: 'c', linked_run_id: 'run_1' }), run_progress: { ...base, resume_note: 42 } },
+    ]);
+    expect(out.map((i) => i.run_progress?.resume_note)).toEqual([note, null, null]);
+  });
+
   it('falls back to stepLabelFromPhase when step_label is absent (legacy server)', () => {
     const out = parseWorkBoardItems([
       {

@@ -664,7 +664,7 @@ CREATE TABLE "code_trident_runs" (
     infra_retries       INTEGER,
     agent_waked_at      INTEGER
 , brief_alert TEXT, parent_run_id TEXT, wave_task_id TEXT, claimed_paths TEXT, published_pr INTEGER, ralph_task_total INTEGER
-    CHECK (ralph_task_total IS NULL OR (typeof(ralph_task_total) = 'integer' AND ralph_task_total > 0 AND ralph_task_total <= 9007199254740991))) STRICT
+    CHECK (ralph_task_total IS NULL OR (typeof(ralph_task_total) = 'integer' AND ralph_task_total > 0 AND ralph_task_total <= 9007199254740991)), resume_note TEXT) STRICT
 
 [table] code_trident_stage_events (tbl=code_trident_stage_events)
 CREATE TABLE code_trident_stage_events (

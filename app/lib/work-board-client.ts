@@ -137,6 +137,9 @@ export interface RunProgress {
   failure_reason: string | null;
   /** Added after the base progress shape; optional for rolling-deploy frames. */
   brief_alert?: string | null;
+  /** The retry's resume decision (did it carry the dead run's checkpoint and Ralph
+   *  round?). Optional for rolling-deploy frames; null for a first dispatch. */
+  resume_note?: string | null;
 }
 
 export interface CreateWorkBoardItemInput {
@@ -451,5 +454,6 @@ function parseRunProgress(raw: unknown): RunProgress | null {
         : null,
     failure_reason: typeof r['failure_reason'] === 'string' ? (r['failure_reason'] as string) : null,
     brief_alert: typeof r['brief_alert'] === 'string' ? (r['brief_alert'] as string) : null,
+    resume_note: typeof r['resume_note'] === 'string' ? (r['resume_note'] as string) : null,
   };
 }

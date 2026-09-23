@@ -541,6 +541,9 @@ export interface AppWsRunProgress {
   failure_reason: string | null
   /** Durable brief-integrity refusal, retained even when a later retry recovers. */
   brief_alert: string | null
+  /** One sentence: did this retry carry the dead run's checkpoint and Ralph round?
+   *  null for a first dispatch. */
+  resume_note: string | null
 }
 
 /**

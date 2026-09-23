@@ -247,6 +247,14 @@ function briefAlertText(rp: RunProgress | undefined): string | null {
   return typeof alert === 'string' && alert.length > 0 ? alert : null
 }
 
+/** The dispatch's one-sentence resume decision for a retry (`resume_note`); null
+ *  for a first dispatch or a frame from a gateway that predates the field. */
+function resumeNoteText(rp: RunProgress | undefined): string | null {
+  if (rp === undefined) return null
+  const note = rp.resume_note
+  return typeof note === 'string' && note.length > 0 ? note : null
+}
+
 interface RunNotice {
   text: string
   tone: 'failure' | 'alert' | 'blocked'
@@ -268,7 +276,14 @@ function runNotice(item: WorkBoardItem): RunNotice | null {
   // unrelated terminal failure whose reason happens to be missing.
   if (rp !== undefined && resolveStepLabel(rp) === 'failed') return null
   const alert = briefAlertText(rp)
-  return alert === null ? null : { text: alert, tone: 'alert' }
+  if (alert !== null) return { text: alert, tone: 'alert' }
+  // The retry's resume decision: whether it carried the dead run's checkpoint and
+  // Ralph round, and why not when it did not. A retry that inherited nothing must
+  // SAY so rather than look like a first dispatch. It yields to an integrity alert,
+  // which is evidence something went wrong; the note is only what the row was born
+  // with.
+  const note = resumeNoteText(rp)
+  return note === null ? null : { text: note, tone: 'alert' }
 }
 
 interface DotState {

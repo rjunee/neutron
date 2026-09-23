@@ -2150,7 +2150,8 @@ describe('INSERT column/placeholder/bound-array alignment — the silent-corrupt
     // arity/order). The literal count is deliberate — adding a column must be a
     // conscious edit here, not an invisible drift. It moved 40 -> 41 when
     // `claimed_paths` arrived with migration 0139: the guard refused to let a
-    // real column land silently, which is exactly its job.
+    // real column land silently, which is exactly its job. 42 -> 43 with
+    // `resume_note` (migration 0155).
     const cols = COLS.split(', ')
     const pragma = db
       .prepare<{ name: string }, []>(`PRAGMA table_info(code_trident_runs)`)
@@ -2208,9 +2209,30 @@ describe('INSERT column/placeholder/bound-array alignment — the silent-corrupt
       channel_kind: 'cli',
       parent_run_id: 'parent-run-distinct',
       wave_task_id: 'T7',
+      resume_note: 'resume-note-distinct',
     })
 
     expect(store.get(run.id)).toEqual(run)
+  })
+
+  test('resume_note is written once at create and no later write can restate it', async () => {
+    // WHY: the note states the resume decision the dispatch made when it created the
+    // row; a later snapshot restating it would let the card describe a decision that
+    // was never made. RED-mutation: drop `run.resume_note` from the INSERT values
+    // (or its COLS entry) and the stored value is lost or shifted.
+    const store = new TridentRunStore(db)
+    const note = 'Not resumed: the branch moved off the last run\'s commit, so this is a fresh build.'
+    const run = await store.create({ slug: 'note-once', project_slug: 't1', repo_path: '/r', task: 't', resume_note: note })
+    expect(run.resume_note).toBe(note)
+    expect(store.get(run.id)?.resume_note).toBe(note)
+    // `update()` does not name the column: an injected key is not written.
+    await store.update(run.id, { phase: 'failed', resume_note: 'rewritten' } as never)
+    // `save()` of a full snapshot carrying a different value does not write it either.
+    await store.save({ ...store.get(run.id)!, resume_note: 'rewritten by save' })
+    expect(store.get(run.id)?.resume_note).toBe(note)
+    // Omitted → null, the first-dispatch shape.
+    const fresh = await store.create({ slug: 'note-none', project_slug: 't1', repo_path: '/r', task: 't' })
+    expect(store.get(fresh.id)?.resume_note).toBeNull()
   })
 
   /**

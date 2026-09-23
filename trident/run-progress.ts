@@ -108,6 +108,13 @@ export interface RunProgress {
   failure_reason: string | null
   /** Brief-integrity refusal, including one recovered by the bridge retry. */
   brief_alert: string | null
+  /**
+   * The dispatch's one-sentence statement of whether this retry carried the dead
+   * run's checkpoint and Ralph round (`TridentRun.resume_note`, migration 0155).
+   * null for a first dispatch. Rendered on the card so a retry is never silent
+   * about what it inherited.
+   */
+  resume_note: string | null
 }
 
 const TERMINAL_PHASES: readonly TridentPhase[] = ['done', 'failed', 'stopped']
@@ -256,6 +263,7 @@ export function deriveRunProgress(
     verdict: run.inner_verdict,
     failure_reason: run.failure_reason,
     brief_alert: run.brief_alert,
+    resume_note: run.resume_note,
   }
 }
 

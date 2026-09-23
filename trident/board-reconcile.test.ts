@@ -327,6 +327,9 @@ describe('end-to-end — the tick loop reconciles the board on a terminal run', 
 
     const alert = 'CODEX_BUILD_BRIEF_PART_CORRUPT: recovered after one bridge retry. DEFERRED.'
     db.raw().run('UPDATE code_trident_runs SET brief_alert = ? WHERE id = ?', [alert, run_id])
+    // The dispatch's resume sentence rides the same retained binding (migration 0155).
+    const note = 'Not resumed: the card names no prior run, so this is a fresh build.'
+    db.raw().run('UPDATE code_trident_runs SET resume_note = ? WHERE id = ?', [note, run_id])
 
     // 2. Drive the durable loop with a sim firer + the reconcile observer wired
     //    into on_terminal (exactly as build-core-modules composes it).
@@ -383,6 +386,7 @@ describe('end-to-end — the tick loop reconciles the board on a terminal run', 
     expect(reconciled.completed_at).not.toBeNull()
     // Main's assertion: the recovered alert still derives from the RETAINED binding.
     expect(runProgressForItem(reconciled, (id) => store.get(id), Date.now())?.brief_alert).toBe(alert)
+    expect(runProgressForItem(reconciled, (id) => store.get(id), Date.now())?.resume_note).toBe(note)
     // ...and this branch's: the run's PR number is DURABLE on the item, written by the
     // same reconcile. Both hold now — the binding is kept on `done` AND the number is
     // copied onto the card, so neither assertion is the other's precondition.

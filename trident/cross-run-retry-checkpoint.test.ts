@@ -441,3 +441,92 @@ test('a continuation carried once survives a retry that died before building', a
   expect(JSON.parse(f.store.stageEvents(second.run.id).find(e => e.stage === 'build-retry-source')!.meta!).priorRunId)
     .toBe(first.run.id)
 })
+
+// ── THE CARD SENTENCE (spec item a-retry-must-resume-from-the-checkpoint, acceptance 1) ──
+// "carries … forward, OR states plainly on the card that it will not. Silence fails." Each
+// case goes through the real `dispatchBoardBoundBuild` and reads the ROW it wrote, because
+// the row is what `run_progress` carries to the card. The sentence must agree with the
+// round and cap that same row holds.
+async function withSeedLine<T>(fn: () => Promise<T>): Promise<{ value: T; seedLine: string | null }> {
+  const lines: string[] = []
+  const original = console.log
+  console.log = (...args: unknown[]) => { lines.push(args.map(a => String(a)).join(' ')) }
+  try {
+    const value = await fn()
+    return { value, seedLine: lines.find(l => l.includes('event=dispatch_resume_seed')) ?? null }
+  } finally { console.log = original }
+}
+
+const SHORT = HEAD.slice(0, 7)
+const noteCases: { name: string; reason: string; over?: Parameters<typeof fixture>[0];
+  tip?: string; link?: 'prior' | null | 'missing' | 'foreign'; task?: string; expected: (round: string) => string }[] = [
+  { name: 'a carried review checkpoint', reason: 'resumed',
+    expected: r => `Resumed from fix-round-3 at ${SHORT}; Ralph round ${r} carried.` },
+  { name: 'a carried Ralph continuation', reason: 'resumed_continuation', over: { checkpoint: CONTINUATION },
+    expected: r => `Resumed from ralph-task-built at ${SHORT}; Ralph round ${r} carried.` },
+  { name: 'a moved branch tip', reason: 'branch_tip_moved', tip: 'c'.repeat(40),
+    expected: r => `Not resumed: the branch moved off the last run's commit, so this is a fresh build; Ralph round ${r} carried.` },
+  { name: 'an unreadable branch tip', reason: 'branch_tip_unreadable_or_absent', tip: '',
+    expected: r => `Not resumed: the branch tip could not be read or the branch is gone, so this is a fresh build; Ralph round ${r} carried.` },
+  { name: 'a prior with nothing to resume', reason: 'prior_run_has_no_resumable_build', over: { checkpoint: { stage: 'approved' } },
+    expected: r => `Not resumed: the last run left no build to resume, so this is a fresh build; Ralph round ${r} carried.` },
+  { name: 'an edited task text', reason: 'prior_run_task_text_differs', task: `${TASK} after clarification`,
+    expected: r => `Not resumed: the card's task text changed since the last run, so this is a fresh build; Ralph round ${r} carried.` },
+  { name: 'a card naming no run', reason: 'card_names_no_run', link: null,
+    expected: r => `Not resumed: the card names no prior run, so this is a fresh build; fresh Ralph budget ${r}.` },
+  { name: 'a card naming a deleted run', reason: 'card_names_an_unknown_run', link: 'missing',
+    expected: r => `Not resumed: the run the card names no longer exists, so this is a fresh build; fresh Ralph budget ${r}.` },
+  { name: "a card naming another project's run", reason: 'card_names_a_different_run', link: 'foreign',
+    expected: r => `Not resumed: the run the card names belongs to another project, so this is a fresh build; fresh Ralph budget ${r}.` },
+]
+
+for (const c of noteCases) test(`a retry after ${c.name} states its resume decision on the row (${c.reason})`, async () => {
+  const f = await fixture(c.over)
+  let link: string | null = f.prior.id
+  if (c.link === null) link = null
+  if (c.link === 'missing') link = 'missing'
+  if (c.link === 'foreign') {
+    const foreign = await f.store.create({ slug: 'foreign-project-run', project_slug: 'another-project',
+      repo_path: f.dir, task: TASK, ralph: true })
+    await f.store.update(foreign.id, { phase: 'failed' })
+    link = foreign.id
+  }
+  const { value: result, seedLine } = await withSeedLine(() => f.dispatch(c.tip ?? HEAD, link, c.task ?? TASK))
+  expect(result.ok, JSON.stringify(result)).toBe(true)
+  if (!result.ok) return
+  const row = f.store.get(result.run.id)!
+  // The sentence names the round and cap the ROW holds — never a value it only intended.
+  const note = c.expected(`${row.ralph_round}/${row.max_ralph_rounds}`)
+  expect(row.resume_note).toBe(note)
+  expect(note.length).toBeLessThanOrEqual(200)
+  // Carried exactly when the row carries it: a resumed note on a row with no
+  // checkpoint (or the reverse) is the card lying about the row.
+  expect(row.inner_checkpoint !== null).toBe(c.reason.startsWith('resumed'))
+  expect(seedLine).toContain(`reason=${c.reason}`)
+  expect(seedLine).toContain('note=')
+  expect(seedLine).toContain(note.slice(0, 20))
+})
+
+test('a first dispatch, with no prior run to state anything about, writes no note', async () => {
+  const f = await fixture()
+  const { value: result, seedLine } = await withSeedLine(() =>
+    f.dispatch(HEAD, null, 'Write an unrelated documentation card that has never been built before'))
+  expect(result.ok, JSON.stringify(result)).toBe(true)
+  if (!result.ok) return
+  expect(f.store.get(result.run.id)!.resume_note).toBeNull()
+  // …and the log line is not emitted either: the two are gated on the same condition.
+  expect(seedLine).toBeNull()
+})
+
+test('the carried and fresh budget wordings follow the row, not the reason', async () => {
+  // A card holding its own budget snapshot carries it even when it names no run — the
+  // sentence must say "carried" there, and "fresh" only when nothing was inherited.
+  const f = await fixture({ cardRound: 5 })
+  const result = await f.dispatch(HEAD, null)
+  expect(result.ok, JSON.stringify(result)).toBe(true)
+  if (!result.ok) return
+  const row = f.store.get(result.run.id)!
+  expect(row.ralph_round).toBe(5)
+  expect(row.resume_note).toBe(
+    `Not resumed: the card names no prior run, so this is a fresh build; Ralph round 5/${row.max_ralph_rounds} carried.`)
+})

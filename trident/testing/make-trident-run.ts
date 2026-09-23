@@ -43,6 +43,7 @@ export function makeTridentRun(over: Partial<TridentRun> = {}): TridentRun {
     channel_kind: 'telegram',
     failure_reason: null,
     brief_alert: null,
+    resume_note: null,
     workflow_run_id: null,
     inner_checkpoint: null,
     inner_checkpoint_head: null,
