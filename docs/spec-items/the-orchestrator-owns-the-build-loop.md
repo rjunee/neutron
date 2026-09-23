@@ -15,13 +15,15 @@ milestone 2, so that time is now: without this file the milestone closes on opin
 **What it is NOT.** Three slices have merged and none of them is this item: escalation
 routing into sequencing decisions (#697), the orchestrator's board reorder and its report
 (#707, which closed #536), and terminal build decisions moving onto the project
-conversation (#716). Each is real and each is a step; none replaces the loop.
+conversation (#716). Each is real and each is a step; none alone proves this item.
 
-**The measurement that shows why.** `trident/inner-workflow.mjs` is 9,315 lines,
+**Historical measurement at specification time.** `trident/inner-workflow.mjs` was 9,315 lines,
 `trident/orchestrator.ts` 6,316, `trident/inner-loop.ts` 1,167 — **16,798 lines**, intact.
-The umbrella's own words are that this loop is "replaced". Reporting milestone 2 as
+The umbrella's original words were that this loop is "replaced". Reporting milestone 2 as
 "6 of 7" is true by issue count and misleading by effort, and this file exists so that
-cannot happen again.
+cannot happen again. The 2026-09-22 Decisions Log entry in `SPEC.md:323-331`
+supersedes replacement with repair in place. File size or deletion alone cannot
+establish whether the repaired loop satisfies the properties below.
 
 ## What done means
 
@@ -49,9 +51,12 @@ is the thing being rebuilt.
       enumeration with a positive control, not a claim: the grep that finds the sanctioned
       path must also be the grep that would find a second one.
 
-- [ ] **The old loop is DELETED, not flagged off.** No dual code path — the repository
-      forbids it. Establish by grep with a positive control that nothing still routes
-      through the replaced loop, and say what was deleted rather than what was added.
+- [ ] **The loop is repaired in place without adding a parallel build path.**
+      Decisions Log 2026-09-22 supersedes the former requirement to delete the loop.
+      A repaired existing component need not disappear. When a routing path is
+      replaced, remove that superseded route and prove the consuming surface uses
+      the governed route, with a positive control that would find either route.
+      No feature flag may leave an ungoverned alternative alongside it.
 
 - [ ] **The gates are kept.** Every gate the current loop enforces is enforced by the new
       one. Enumerate them first — a list derived by grep, with a positive control, not by
