@@ -37,14 +37,16 @@ project scopes are not silently granted migration authority. In particular,
 restart does not automatically remove unowned legacy helper panes: safe
 acquisition of those survivors is not delivered by this change.
 
-This implements the owner's requested on-demand helper lifetime. It does not
-depend on the separately proposed workspace-placement decision/spec, or claim
-that project workspace placement or idle project sleeping ships here. No
-production pane was closed during development.
+This implements the owner's requested on-demand helper lifetime, within the
+2026-09-23 workspace decision and `docs/spec-items/project-herdr-workspaces.md`.
+The workspace ownership/placement foundation landed separately in #1231. This
+change does not claim production project placement or idle project sleeping.
+No production pane was closed during development.
 
-Validation: 135 tests passed (630 assertions) across the wiring, background-chat
+Validation: 156 tests passed (728 assertions) across the wiring, background-chat
 isolation, provider routing, helper retirement, legacy cleanup and consuming
-Open reminder suites. The
+Open reminder suites, plus workspace ownership and placement controls after
+rebasing onto #1231. The
 Open integration test boots both fresh and completed onboarding, fires through
 the real reminder dispatcher and persistent adapter into a synthetic local
 PTY/dev-channel peer, observes child exit, then proves the next fire creates a
