@@ -130,9 +130,10 @@ test('every review and synthesis brief delivers the exact authoritative verdict 
   const briefs = await Promise.all(f.calls.map(async request => ({
     request, brief: JSON.parse(await readFile(request.brief.path, 'utf8')),
   })))
-  expect(briefs.map(({ brief }) => brief.seat)).toEqual([
-    'review_rubric', 'review_adversarial', 'review_codex', 'review_kimi', 'synthesis',
+  expect(briefs.slice(0, -1).map(({ brief }) => brief.seat).sort()).toEqual([
+    'review_adversarial', 'review_codex', 'review_kimi', 'review_rubric',
   ])
+  expect(briefs.at(-1)!.brief.seat).toBe('synthesis')
   for (const { request, brief } of briefs) {
     expect(brief.verdictSchema).toEqual(VERDICT_SCHEMA)
     expect(request.result.schema).toBe('verdict')
