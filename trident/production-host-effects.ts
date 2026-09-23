@@ -2,7 +2,7 @@ import { mkdtemp, readFile, rm, writeFile, rename, lstat } from 'node:fs/promise
 import { tmpdir } from 'node:os'
 import { join } from 'node:path'
 import { createHash } from 'node:crypto'
-import type { BuildRunDeps, BuildSnapshot, GateResult, Measurement, BuildModeHost } from './build-run.ts'
+import type { BuildRunDeps, BuildSnapshot, GateResult, Measurement, BuildModeHost, PlanCommit } from './build-run.ts'
 import { classifyCiRollup, confirmConfigurationError, type CiRunObservation, type RequiredCheckObservation } from './ci-readiness.ts'
 import { briefIntegrity } from './gates/brief-integrity.ts'
 import type { AdmissionSource } from './gates/project-admission.ts'
@@ -17,6 +17,8 @@ import { TRIDENT_SCRIPT_DIR } from './script-dir.ts'
 import { parseBuildModeState, readBuildRetrySource, type BuildModeState } from './build-mode-state.ts'
 
 const oid = /^(?:[0-9a-f]{40}|[0-9a-f]{64})$/
+/** The committed task ledger `probePlan` reads and `commitPlan` writes. */
+const LEDGER_FILE = 'IMPLEMENTATION_PLAN.md'
 const unknown = (detail: string): GateResult => ({ kind: 'unknown', detail })
 const blocked = (on: string): GateResult => ({ kind: 'blocked', on })
 
@@ -314,6 +316,45 @@ export function createProductionHostEffects(options: ProductionHostOptions) {
         return { found: true, body, sha256: createHash('sha256').update(body).digest('hex'),
           uncheckedCount: body.split('\n').filter(line => /^\s*- \[ \]\s+/.test(line)).length }
       } finally { await rm(directory, { recursive: true, force: true }) }
+    },
+    async commitPlan({ body, snapshot }): Promise<PlanCommit> {
+      const unknown = (detail: string): PlanCommit => ({ kind: 'unknown', detail })
+      try {
+        row()
+        if (!oid.test(snapshot.head)) return unknown('Task ledger commit requires a full head')
+        // The ledger lands on exactly the revision the driver measured, never on a
+        // tip that moved under it.
+        const fresh = await sameSnapshot(snapshot)
+        if (fresh.kind !== 'allow') return fresh.kind === 'blocked' ? fresh : unknown(fresh.detail)
+        const blobId = (text: string) => createHash(snapshot.head.length === 40 ? 'sha1' : 'sha256')
+          .update(`blob ${Buffer.byteLength(text)}\0`).update(text).digest('hex')
+        const expected = blobId(body)
+        // Idempotent: a tip that already commits these exact bytes (a crash-resume
+        // rebuild, or a builder that ticked the box itself) needs no second commit.
+        const existing = await git('rev-parse', '--verify', '--quiet', `${snapshot.head}:${LEDGER_FILE}`)
+        if (existing.timed_out) return unknown('Committed task ledger is unreadable')
+        if (existing.ok && existing.stdout.trim() === expected) return { kind: 'known', head: snapshot.head }
+        const path = join(worktree, LEDGER_FILE)
+        const present = await lstat(path).catch(() => null)
+        if (present && !present.isFile()) return { kind: 'blocked', on: 'Task ledger path is not a regular file' }
+        await writeFile(path, body)
+        const staged = await runHost(['git', '-C', worktree, 'add', '--', LEDGER_FILE], worktree)
+        if (!staged.ok || staged.timed_out) return unknown('Task ledger could not be staged')
+        // A FIXED subject: no task text and no trailers. The ledger lands on a public
+        // branch and the leak gate scans commit messages, which are never redacted.
+        // The pathspec commits the ledger alone, whatever else the index holds.
+        const remaining = body.split('\n').filter(line => /^\s*- \[ \]\s+/.test(line)).length
+        const committed = await runHost(['git', '-C', worktree, '-c', 'user.name=trident', '-c', 'user.email=trident@neutron.local',
+          '-c', 'commit.gpgsign=false', 'commit', '--no-verify', '-q', '-m', `chore(trident): task ledger — ${remaining} remaining`,
+          '--', LEDGER_FILE], worktree)
+        if (!committed.ok || committed.timed_out) return unknown('Task ledger commit was not confirmed')
+        const tip = await head()
+        const parent = await git('rev-parse', '--verify', `${tip}^1`)
+        const blob = await git('rev-parse', '--verify', `${tip}:${LEDGER_FILE}`)
+        if (tip === snapshot.head || !parent.ok || parent.timed_out || parent.stdout.trim() !== snapshot.head
+          || !blob.ok || blob.timed_out || blob.stdout.trim() !== expected) return unknown('Task ledger commit could not be verified')
+        return { kind: 'known', head: tip }
+      } catch (error) { return unknown(String(error)) }
     },
     async advanceRalph(value) {
       try {

@@ -961,6 +961,75 @@ test('production Ralph handoff consumes once and probes the pinned committed pla
   expect(await restarted.modes.advanceRalph({ ...handoff, snapshot: { ...snapshot, head: f.tip } })).toMatchObject({ kind: 'blocked' })
 })
 
+// THE HOST COMMITS THE TASK LEDGER THE CONTINUATION PLANNER READS. `probePlan` has
+// always archived IMPLEMENTATION_PLAN.md at the tip; nothing in the typed host wrote
+// it, so G026 found main's stale copy (zero unchecked boxes) and every continuation
+// re-planned from scratch. These run on a real repository: the commit, the probe and
+// the refusals are git's answers, not a fake's.
+test('production commitPlan commits the ledger alone on the measured head and the probe reads it back', async () => {
+  const f = await fixture()
+  const snapshot = await measured(f)
+  // Something else sits staged in the index: the pathspec commit must not sweep it in.
+  await writeFile(join(f.worktree, 'staged.txt'), 'not the ledger\n')
+  await f.command(['git', '-C', f.worktree, 'add', 'staged.txt'])
+  const body = '- [x] T1: first\n- [ ] T2: second\n- [ ] T3: third\n'
+  const committed = await f.modes.commitPlan({ body, snapshot })
+  expect(committed.kind).toBe('known')
+  if (committed.kind !== 'known') throw new Error('unreachable')
+  expect(committed.head).not.toBe(snapshot.head)
+  expect(await f.command(['git', '-C', f.repo, 'rev-parse', 'refs/heads/change'])).toBe(committed.head)
+  expect(await f.command(['git', '-C', f.repo, 'rev-parse', `${committed.head}^1`])).toBe(snapshot.head)
+  expect(await f.command(['git', '-C', f.repo, 'diff-tree', '--no-commit-id', '--name-only', '-r', committed.head])).toBe('IMPLEMENTATION_PLAN.md')
+  // A fixed subject, no task text and no trailers: the message lands on a public branch.
+  expect(await f.command(['git', '-C', f.repo, 'log', '-1', '--format=%B', committed.head])).toBe('chore(trident): task ledger — 2 remaining')
+  const probe = await f.modes.probePlan(committed.head)
+  expect(probe).toMatchObject({ found: true, body, uncheckedCount: 2,
+    sha256: new Bun.CryptoHasher('sha256').update(body).digest('hex') })
+  expect((await measured(f)).head).toBe(committed.head)
+})
+
+test('production commitPlan is idempotent on a tip that already commits the same ledger', async () => {
+  const f = await fixture()
+  const body = '- [x] T1: first\n- [ ] T2: second\n'
+  const first = await f.modes.commitPlan({ body, snapshot: await measured(f) })
+  if (first.kind !== 'known') throw new Error(JSON.stringify(first))
+  // The crash-resume shape: the same body asked for again at the ledger commit.
+  const again = await f.modes.commitPlan({ body, snapshot: await measured(f) })
+  expect(again).toEqual({ kind: 'known', head: first.head })
+  expect(await f.command(['git', '-C', f.repo, 'rev-parse', 'refs/heads/change'])).toBe(first.head)
+  expect(f.calls.filter(argv => argv.includes('commit'))).toHaveLength(1)
+  // A DIFFERENT body is a real change and does commit.
+  const next = await f.modes.commitPlan({ body: '- [x] T1: first\n- [x] T2: second\n', snapshot: await measured(f) })
+  expect(next.kind === 'known' && next.head !== first.head).toBe(true)
+})
+
+test('production commitPlan refuses a moved tip and a ledger path that is not a regular file', async () => {
+  const f = await fixture()
+  const stale = await measured(f)
+  await writeFile(join(f.worktree, 'code.txt'), 'moved\n')
+  await f.command(['git', '-C', f.worktree, 'commit', '-am', 'Move build'])
+  const moved = await f.command(['git', '-C', f.repo, 'rev-parse', 'refs/heads/change'])
+  expect(await f.modes.commitPlan({ body: '- [ ] T1: first\n', snapshot: stale })).toEqual({ kind: 'blocked', on: 'Host observation changed since the gate' })
+  expect(await f.command(['git', '-C', f.repo, 'rev-parse', 'refs/heads/change'])).toBe(moved)
+  // A link would make the host write through it to bytes outside the worktree.
+  const outside = join(f.dir, 'outside-plan')
+  await writeFile(outside, 'host bytes\n')
+  await symlink(outside, join(f.worktree, 'IMPLEMENTATION_PLAN.md'))
+  expect(await f.modes.commitPlan({ body: '- [ ] T1: first\n', snapshot: await measured(f) })).toEqual({ kind: 'blocked', on: 'Task ledger path is not a regular file' })
+  expect(await readFile(outside, 'utf8')).toBe('host bytes\n')
+})
+
+test('production commitPlan reports an unconfirmed commit as unknown, never as a head', async () => {
+  const f = await fixture()
+  f.intercept(argv => argv.includes('add') && argv.includes('IMPLEMENTATION_PLAN.md') ? bad() : undefined)
+  expect(await f.modes.commitPlan({ body: '- [ ] T1: first\n', snapshot: await measured(f) }))
+    .toEqual({ kind: 'unknown', detail: 'Task ledger could not be staged' })
+  f.intercept(argv => argv.includes('commit') ? bad() : undefined)
+  expect(await f.modes.commitPlan({ body: '- [ ] T1: first\n', snapshot: await measured(f) }))
+    .toEqual({ kind: 'unknown', detail: 'Task ledger commit was not confirmed' })
+  expect(await f.command(['git', '-C', f.repo, 'rev-parse', 'refs/heads/change'])).toBe(f.tip)
+})
+
 test('production fixed checkpoint survives a host crash without accepting trailer counters', async () => {
   const f = await resumeFixture()
   const save = f.deps.modes!.saveCheckpoint!

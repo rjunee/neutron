@@ -114,6 +114,29 @@ export interface ProjectBuildContext {
  * the review-suite-placement issue; this constant only stops the gate from being
  * unanswerable by construction.
  */
+/**
+ * THE PLAN BRIEF MUST STATE THE LEDGER THE HOST ENFORCES AND COMMITS.
+ *
+ * The typed driver reads a plan's `implementationPlan` as a checkbox ledger: G025
+ * refuses a Ralph plan whose unchecked lines disagree with `topTask` and
+ * `remainingTasks`, the handoff commits the ledger with the top box ticked as
+ * `IMPLEMENTATION_PLAN.md`, and G026-G029 select the cheap continuation planner
+ * only when that committed file has an unchecked task (`trident/build-run.ts`).
+ * None of that was in the brief, so a planner that returned headings and no boxes
+ * was doing exactly what it had been told — and every continuation re-planned from
+ * scratch (spec item a-retry-must-resume-from-the-checkpoint, acceptance 2).
+ *
+ * The brief is written once at prepare time, before any iteration exists, so the
+ * `planner: "next"` duty is stated unconditionally and keyed on the host context
+ * field each dispatch carries.
+ */
+export const PLAN_LEDGER_CONTRACT = [
+  'THE TASK LEDGER. `implementationPlan` is a checkbox list with one line per task: `- [x] T<n>: <one line>` for a task already built on this branch, and `- [ ] T<n>: <one line>` for each task still to build, the next task first among the unchecked lines.',
+  '`topTask` is the first unchecked line, copied verbatim. `remainingTasks` is the number of unchecked lines minus one. The host refuses a plan whose lines disagree with those two fields.',
+  'After the build the host ticks the top task and commits the ledger as IMPLEMENTATION_PLAN.md on a PUBLIC branch whose files and commit messages are leak-scanned: no hostnames, usernames or absolute paths in any line.',
+  'CONTINUATION. When the host context carries `planner: "next"` and `committedPlan`, the committed ledger IS the plan: return `committedPlan.body` unchanged as `implementationPlan`, its first unchecked line as `topTask`, and its unchecked count minus one as `remainingTasks`, and write only the `executionSpec` for that task. Do not re-survey the repository or re-plan the remaining tasks.',
+].join('\n')
+
 export const REVIEW_SUITE_TIMEOUT_MS = 45 * 60_000
 
 /**
@@ -431,6 +454,7 @@ export async function prepareProjectBuild(input: InnerLoopInput, context: Projec
       JSON.stringify(PROJECT_SNAPSHOT_SCHEMA),
       `\`result.payload\` must satisfy the ${role === 'plan' ? 'plan' : role === 'review' ? 'verdict' : 'forge'} trailer contract below. Read the host context for the measured snapshot.`,
       JSON.stringify(role === 'plan' ? PLAN_SCHEMA : role === 'review' ? VERDICT_SCHEMA : FORGE_SCHEMA),
+      ...(role === 'plan' ? [PLAN_LEDGER_CONTRACT] : []),
       'Never publish or merge; the host owns those actions.',
     ].join('\n\n') + (isBuilder ? buildReflectionGuidance(input.reflection_context) : '')
     const path = join(state, `${role}.brief`)
