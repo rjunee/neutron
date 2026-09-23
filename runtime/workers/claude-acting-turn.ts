@@ -1,5 +1,6 @@
 import { open, readdir, readFile, stat } from 'node:fs/promises'
 import { SUBAGENT_TOOL_NAME } from './claude-tool-contract.ts'
+import { CLAUDE_BOUNDED_PROFILE_FINGERPRINT } from './claude-bounded-profile.ts'
 import { join, relative, resolve, sep } from 'node:path'
 import { setTimeout as delay } from 'node:timers/promises'
 import { isDeepStrictEqual } from 'node:util'
@@ -16,7 +17,7 @@ import { projectTrailerStep, type ProjectActingTurn } from './project-runners.ts
 export interface ClaudeActingSession {
   project_id: string
   topic_id: string
-  session: Pick<ReplSession, 'sessionId' | 'cwd' | 'child' | 'acquireTurn' | 'toolSurface'>
+  session: Pick<ReplSession, 'sessionId' | 'cwd' | 'child' | 'acquireTurn' | 'toolSurface' | 'boundedWorkerProfile'>
   projects_dir?: string
   grants: { tools: ToolGrant; writable: boolean; network: boolean; roots: readonly string[] }
 }
@@ -209,6 +210,9 @@ export function createClaudeActingTurn(binding: ClaudeActingSession, clock: Obse
     }
     if (!session.toolSurface.split(',').includes(SUBAGENT_TOOL_NAME)) {
       return refuse(`Claude session cannot create a subagent: its tool surface (${session.toolSurface || '<empty>'}) does not carry ${SUBAGENT_TOOL_NAME}.`)
+    }
+    if (session.boundedWorkerProfile !== CLAUDE_BOUNDED_PROFILE_FINGERPRINT) {
+      return refuse('Claude session lacks the current bounded worker profile; refresh the project session before dispatch.')
     }
 
     const deadline = clock.now() + Math.min(timeout_ms, request.budget.wall_ms)

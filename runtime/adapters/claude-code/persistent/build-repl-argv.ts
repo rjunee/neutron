@@ -22,6 +22,9 @@
  * Probed live against claude 2.1.198's own parser warning. An out-of-set value
  * is silently ignored by the CLI, so tests pin membership.
  */
+import { CLAUDE_BOUNDED_AGENTS_JSON } from '../../../workers/claude-bounded-profile.ts'
+import { SUBAGENT_TOOL_NAME } from '../../../workers/claude-tool-contract.ts'
+
 export const CLAUDE_EFFORT_VALUES = ['low', 'medium', 'high', 'xhigh', 'max'] as const
 
 // REASONING-EFFORT PIN — #345's twin, Claude side. Unpinned, the REPL runs at
@@ -152,6 +155,9 @@ export function buildReplArgv(input: BuildReplArgvInput): string[] {
   } else {
     argv.push('--tools', input.tools.join(','))
   }
+  // Register the native child without narrowing the owner's conversational tools.
+  // Tool-less/import REPLs do not get a worker definition or new capabilities.
+  if (input.tools?.includes(SUBAGENT_TOOL_NAME)) argv.push('--agents', CLAUDE_BOUNDED_AGENTS_JSON)
   // P0-1 — permit the native-MCP tool bridge's namespace (additive to `--tools`,
   // which only governs built-ins). Present only when the substrate attached the
   // bridge, so untrusted-content REPLs never get an MCP-tool grant.

@@ -176,6 +176,9 @@ export class ReplSession {
    *  whose requested surface differs, so a less-privileged turn (e.g. an import
    *  `tools:[]`) can never reuse a more-privileged warm REPL (Codex-r1-P1). */
   toolSurface = ''
+  /** Exact host-defined bounded worker profile supplied at this child's spawn.
+   * Undefined on legacy adopted children; never inferred from current code. */
+  boundedWorkerProfile?: string | undefined
   /** P0-1 — whether this REPL was SPAWNED with the native-MCP tool bridge
    *  attached. Like {@link toolSurface}, it is a spawn-time property the reuse
    *  guard checks so a bridge-mismatched turn never reuses this warm child
