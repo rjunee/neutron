@@ -2483,6 +2483,7 @@ async function adoptRow(
     return outcomeOfClose(close, sessionKey, 'closed-unadoptable', reason)
   }
   session.toolSurface = reuse.tool_surface
+  session.boundedWorkerProfile = typeof reuse.bounded_worker_profile === 'string' ? reuse.bounded_worker_profile : undefined
   session.toolBridgeActive = reuse.tool_bridge
   session.authFingerprint = typeof reuse.auth_fingerprint === 'string' ? reuse.auth_fingerprint : ''
   // The temp config files this child was spawned with, derived from the channel name

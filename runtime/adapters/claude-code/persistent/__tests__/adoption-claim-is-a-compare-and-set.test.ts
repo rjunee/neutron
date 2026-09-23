@@ -49,6 +49,7 @@ import { tmpdir } from 'node:os'
 import { join } from 'node:path'
 import {
   armSelfFence,
+  beginBootAdoption,
   fenceLostSession,
   fencedReasonFor,
   setFenceTimerFactoryForTests,
@@ -59,7 +60,7 @@ import {
   resetBootAdoptionForTests,
 } from '../boot-adoption.ts'
 import { getOrSpawnSession } from '../spawn.ts'
-import { ReplSession } from '../repl-session.ts'
+import { ReplSession, authFingerprintFor } from '../repl-session.ts'
 import type { PtyChild } from '../pty-host.ts'
 import type { AgentSpec } from '../../../../substrate.ts'
 import { childByKey, pool, sink, supervisedBySessionKey } from '../pool-state.ts'
@@ -255,6 +256,48 @@ afterEach(() => {
 })
 
 describe('two incarnations racing for one row', () => {
+  for (const profile of [undefined, 'obsolete-native-profile']) {
+    it(`profile refresh preserves a surviving adopted native parent with no reconstructed leases (${profile})`, async () => {
+      const f = fixture({ reuse: { tool_surface: 'Agent,Read', tool_bridge: false,
+        auth_fingerprint: authFingerprintFor(undefined),
+        ...(profile === undefined ? {} : { bounded_worker_profile: profile }) } })
+      // The parent composer is quiet while its native child remains alive. Neither
+      // this display nor a completed chat turn establishes child termination.
+      f.host.addPane(HANDLE, { argv: oursArgv(), screens: ['❯\n  1 agent running'], pid: 4242 })
+      expect((await beginBootAdoption(f.options, KEY, { host: f.host, health: async () => true, log: () => {} })).kind).toBe('adopted')
+      const session = (await pool.get(KEY))!
+      expect(session.adopted).toBe(true)
+      expect(session.activeTurn).toBeUndefined()
+      expect(session.turnSlotHeld).toBe(0)
+      expect(session.boundedWorkerProfile).toBe(profile)
+      const before = readFileSync(f.registryPath, 'utf8')
+      const spec: AgentSpec = { prompt: 'next chat turn', model_preference: ['claude-opus-5'],
+        tools: ['Agent', 'Read'].map(name => ({ name, description: name, input_schema: {}, output_schema: {}, capability_required: 'local' })) }
+      const next = await getOrSpawnSession(KEY, f.options, spec).catch(error => error)
+      expect(f.host.panes.has(HANDLE)).toBe(true)
+      expect(f.host.closed).toEqual([])
+      expect(f.host.attached[0]!.hasExited()).toBe(false)
+      expect(next).toBe(session)
+      expect(readFileSync(f.registryPath, 'utf8')).toBe(before)
+      // Repeated lookup must not treat one successful adoption/lookup as an idle
+      // certificate. The bounded capability preflight still refuses this profile.
+      expect(await getOrSpawnSession(KEY, f.options, spec)).toBe(session)
+      expect(f.host.closed).toEqual([])
+    })
+  }
+
+  for (const profile of [undefined, 'persisted-profile-from-spawn']) {
+    it(`restores bounded profile from the adopted child, never current defaults (${profile})`, async () => {
+      const f = fixture({ reuse: { tool_surface: 'Agent,Read', tool_bridge: false, auth_fingerprint: 'fp-cas',
+        ...(profile === undefined ? {} : { bounded_worker_profile: profile }) } })
+      expect((await pass(f)).kind).toBe('adopted')
+      const session = await pool.get(KEY)
+      expect(session).toBeDefined()
+      expect(session!.boundedWorkerProfile).toBe(profile)
+      expect(session!.toolSurface).toBe('Agent,Read')
+    })
+  }
+
   it('the one that did not claim it refuses, and only one wrapper is left on the pane', async () => {
     const f = fixture()
 

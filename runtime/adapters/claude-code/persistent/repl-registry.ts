@@ -178,6 +178,8 @@ export interface ReplReuseProperties {
    *  EMPTY STRING IS A REAL VALUE here (`--tools ""`, the default-deny surface an
    *  untrusted-content REPL gets), never a missing one. */
   tool_surface: string
+  /** Exact bounded worker definition fingerprint from this child's spawn argv. */
+  bounded_worker_profile?: string
   /** `session.toolBridgeActive`: was the native-MCP tool bridge attached at spawn. */
   tool_bridge: boolean
   /** `session.authFingerprint`: see {@link ReplRegistryRecord.reuse}. */

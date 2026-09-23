@@ -14,6 +14,9 @@
  */
 
 import { describe, it, expect, afterEach } from 'bun:test'
+import { pool } from '../pool-state.ts'
+import { getOrSpawnSession } from '../spawn.ts'
+import { CLAUDE_BOUNDED_AGENTS_JSON, CLAUDE_BOUNDED_PROFILE_FINGERPRINT } from '../../../../workers/claude-bounded-profile.ts'
 import type { AgentSpec } from '../../../../substrate.ts'
 import type { SessionHandle } from '../../../../session-handle.ts'
 import type { Event } from '../../../../events.ts'
@@ -132,6 +135,35 @@ function toolsValue(argv: string[]): string | undefined {
 }
 
 describe('persistent REPL — tool restriction (Codex-r1-P1 SECURITY)', () => {
+  it('upgrades a legacy bounded profile once and then reuses the current spawn', async () => {
+    const { host, argvs, spawnCount } = makeCapturingHost()
+    const options = opts(host, {
+      substrate_instance_id: 'cc-agent-acme', user_id: 'profile-user', project_id: 'profile-project', credential_identity: 'profile-credential',
+    })
+    const sub = createPersistentReplSubstrate(options)
+    const tools = ['Agent', 'Read', 'Bash', 'Write', 'Edit']
+    await drain(sub.start(spec('first', tools)))
+    const session = await [...pool.values()][0]!
+    expect(session.boundedWorkerProfile).toBe(CLAUDE_BOUNDED_PROFILE_FINGERPRINT)
+    expect(argvs[0]![argvs[0]!.indexOf('--agents') + 1]).toBe(CLAUDE_BOUNDED_AGENTS_JSON)
+    session.boundedWorkerProfile = undefined // adopted legacy spawn lacks this capability
+    // A bounded reader can still own this parent after yielding the dispatch slot.
+    // A profile upgrade must spare it; new bounded work will fail its own preflight.
+    let yieldSlot!: () => void
+    const release = await session.acquireTurn(yieldDispatch => { yieldSlot = yieldDispatch })
+    yieldSlot()
+    expect(await getOrSpawnSession(session.sessionKey, options, spec('chat while child runs', tools))).toBe(session)
+    expect(spawnCount()).toBe(1)
+    expect(session.boundedWorkerProfile).toBeUndefined()
+    release()
+    await drain(sub.start(spec('refresh', tools)))
+    expect(spawnCount()).toBe(2)
+    expect(argvs[1]).toContain('--agents')
+    await drain(sub.start(spec('reuse', tools)))
+    expect(spawnCount()).toBe(2)
+    expect(toolsValue(argvs[1]!)).toBe(tools.join(','))
+  })
+
   it('a tools:[] caller spawns the REPL with --tools "" (no built-in tools)', async () => {
     const { host, argvs } = makeCapturingHost()
     const sub = createPersistentReplSubstrate(

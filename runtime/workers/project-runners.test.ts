@@ -92,6 +92,10 @@ for (const provider of ['anthropic', 'openai-codex', 'pi'] as const) {
     expect(f.calls[0]!.spec.model_preference).toEqual(['chosen-model'])
     const tool = { anthropic: 'Agent tool', 'openai-codex': 'collaboration.spawn_agent tool', pi: 'subagent tool' }[provider]
     expect(f.calls[0]!.spec.prompt).toContain(tool)
+    if (provider === 'anthropic') {
+      expect(JSON.parse(f.calls[0]!.spec.prompt.split('\n')[1]!).subagent_type).toBe('neutron-bounded-worker')
+      expect(f.calls[0]!.spec.tools).toEqual(f.options.conversation.spec.tools)
+    }
     expect(f.calls[0]!.timeout_ms).toBeGreaterThan(0)
     expect(f.calls[0]!.timeout_ms).toBeLessThanOrEqual(f.request.budget.wall_ms)
     if (provider === 'pi') expect(f.calls[0]!.subagent).toMatch(/^bounded-worker-[a-f0-9]{64}$/)

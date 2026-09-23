@@ -13,6 +13,8 @@ import { mcpSurfaceFingerprint } from '../../../mcp-servers.ts'
 import type { AgentSpec } from '../../../substrate.ts'
 import { type DeadTurnNotice, startApi5xxDeadTurnWatcher } from './api5xx-dead-turn-watcher.ts'
 import { buildReplArgv, resolveReplEffort } from './build-repl-argv.ts'
+import { CLAUDE_BOUNDED_PROFILE_FINGERPRINT } from '../../../workers/claude-bounded-profile.ts'
+import { SUBAGENT_TOOL_NAME } from '../../../workers/claude-tool-contract.ts'
 import { supportsAutocompact } from './autocompact-support.ts'
 import { buildSettings } from './build-settings.ts'
 import { configuredPtyHost } from './configured-pty-host.ts'
@@ -356,6 +358,7 @@ async function spawnSession(
   })
 
   session.toolSurface = toolSurface.join(',')
+  session.boundedWorkerProfile = argv.includes('--agents') ? CLAUDE_BOUNDED_PROFILE_FINGERPRINT : undefined
   // Stamp the active project scope this REPL serves (folded into the pool key, so
   // it is stable for the session's whole lifetime). The `/tool-call` sink reads
   // it to bind the active project into a tool dispatch — see `ReplSession.projectId`.
@@ -801,6 +804,7 @@ async function spawnSession(
       // the live one cannot disagree.
       record.reuse = {
         tool_surface: session.toolSurface,
+        ...(session.boundedWorkerProfile === undefined ? {} : { bounded_worker_profile: session.boundedWorkerProfile }),
         tool_bridge: session.toolBridgeActive,
         auth_fingerprint: session.authFingerprint,
       }
@@ -1562,6 +1566,8 @@ export async function getOrSpawnSession(
       //      so conversational context survives). Self-healing within one turn; NOT
       //      a "there is no window" guarantee.
       const freshSurface = session.toolSurface === requestedToolSurface
+      const freshBoundedProfile = session.boundedWorkerProfile === (spec.tools.some(tool => tool.name === SUBAGENT_TOOL_NAME)
+        ? CLAUDE_BOUNDED_PROFILE_FINGERPRINT : undefined)
       // P0-1 defense-in-depth: never serve a bridge-mismatched warm child.
       const freshBridge = session.toolBridgeActive === requestedToolBridge
       const freshCredential = session.authFingerprint === authFingerprintFor(options.env, options.sinkTokenPath)
@@ -1598,7 +1604,13 @@ export async function getOrSpawnSession(
       // like the freshness guards below. NOT silent — log so the eviction is
       // observable in prod.
       if (freshSurface && freshBridge && freshCredential && freshMcpServers && !session.poisoned) {
-        return session
+        // Adoption reconstructs an empty in-memory lease set, even when native
+        // children survive the gateway. Missing leases cannot prove those children
+        // idle. Preserve adopted parents until an explicit lifecycle operation
+        // reconciles them; bounded dispatch separately refuses the stale profile.
+        // Automatic profile-only refresh is safe only for a parent whose complete
+        // lifetime this gateway has owned and whose local leases have drained.
+        if (freshBoundedProfile || session.adopted || session.activeTurn !== undefined || session.turnSlotHeld > 0) return session
       }
       // Set when the poisoned child was QUARANTINED rather than evicted: it stays
       // alive (it hosts live work) and must not be terminated or reported dead.
@@ -1652,9 +1664,11 @@ export async function getOrSpawnSession(
           ? 'abandon-poison'
           : !freshSurface
             ? 'tool-surface mismatch'
-            : !freshBridge
-              ? 'tool-bridge mismatch'
-              : 'credential rotation'
+            : !freshBoundedProfile
+              ? 'bounded-worker profile mismatch'
+              : !freshBridge
+                ? 'tool-bridge mismatch'
+                : 'credential rotation'
         // Evict, then AWAIT the old child's exit before falling through to spawn so a
         // supervised `--resume` replacement (same sessionId) never co-owns the session
         // transcript with the dying child (the Argus-r3 one-owner invariant). The
