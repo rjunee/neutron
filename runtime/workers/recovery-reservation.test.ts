@@ -113,7 +113,10 @@ for (const provider of ['claude', 'codex', 'pi'] as const) {
       const f = await fixture(provider)
       await fs.writeFile(f.reservation, f.armed)
       let release!: () => void
-      const stalled = new Promise<void>(resolve => { release = resolve })
+      let stalledOpenReleased = false
+      const stalled = new Promise<void>(resolve => {
+        release = () => { stalledOpenReleased = true; resolve() }
+      })
       const originalOpen = fs.open
       const opened = spyOn(fs, 'open').mockImplementation(async (path, flags, mode) => {
         if (path === f.reservation) await stalled
@@ -122,9 +125,8 @@ for (const provider of ['claude', 'codex', 'pi'] as const) {
       const controller = new AbortController()
       const timer = interruption === 'abort' ? setTimeout(() => controller.abort(), 25) : undefined
       try {
-        const start = Date.now()
         expect(await bounded(f.recover({ ...f.req, budget: { wall_ms: interruption === 'deadline' ? 35 : 1000 } }, controller.signal))).toMatchObject({ kind: 'unknown' })
-        expect(Date.now() - start).toBeLessThan(200)
+        expect(stalledOpenReleased).toBeFalse()
         expect(await fs.readFile(f.reservation, 'utf8')).toBe(f.armed)
         expect(f.composed()).toBe(0)
       } finally { clearTimeout(timer); release(); opened.mockRestore() }
