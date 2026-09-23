@@ -204,3 +204,17 @@ Four reviewers, three REQUEST_CHANGES. Addressed:
 - The `Resumed from …` wording, the `alert` tone for a carried checkpoint, the slug-collision
   note on a first dispatch, and `PLAN_LEDGER_CONTRACT` sitting between `REVIEW_SUITE_TIMEOUT_MS`
   and its docblock (moved above it).
+
+Measured on this round (file-scoped; the full suite runs on the plan's terminal task):
+`trident/build-run.test.ts` 203/0, `trident/production-host-effects.test.ts` 110/0,
+`open/__tests__/project-build-e2e.test.ts` 121/0, `trident/cross-run-retry-checkpoint.test.ts`
+53/0, `trident/mutation-prover.test.ts` 232/0, `trident/store.test.ts` 159/0, both front-ends'
+work-board tests green. `open/__tests__/project-build-wiring.test.ts` is 32/1 with the same
+environmental credential fail as above, and 33/0 with the stored credential unset.
+
+The round's proof pair, measured in a proof-shaped tree (a detached worktree under
+`.trident-worktrees/` with no install of its own): in `trident/build-run.ts` replace
+`  if (plan.remainingTasks === 0) return true` with `  if (plan.remainingTasks < 0) return true`.
+Guard `trident/build-run.test.ts` goes from 203/0 to 202 pass and 1 fail (`G025 ledger: a plan
+that commits no ledger is never refused for its shape`); control `trident/run-disposition.test.ts`
+stays 50/0 both ways.
