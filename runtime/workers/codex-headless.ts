@@ -5,6 +5,7 @@ import { dirname, join, resolve } from 'node:path'
 import type {
   BoundedWorkOutcome,
   BoundedWorkRequest,
+  ProviderObservation,
   Effort,
   Placement,
   RefusalReason,
@@ -17,8 +18,8 @@ import { unknownCause } from '../refusal-cause.ts'
 import { reserveTrailerSlot } from './trailer-slot.ts'
 import { codexBuildObservation, isCodexBuildObservation, type CodexBuildObservation } from './codex-build-observation.ts'
 import { codexWorkerEnv, createCodexReviewTransport, type CodexReviewContract } from './codex-review.ts'
-import { recoverProviderObservation } from './provider-observation-recovery.ts'
-import { codexObservation } from './provider-observation.ts'
+import { createObservationPublisher, recoverProviderObservation } from './provider-observation-recovery.ts'
+import { codexObservation, readProviderObservation } from './provider-observation.ts'
 
 type Probe = { ok: true } | { ok: false; reason: RefusalReason; detail: string }
 
@@ -149,6 +150,11 @@ export function createCodexHeadlessRunner(options: CodexHeadlessRunnerOptions = 
       const key = createHash('sha256').update(JSON.stringify([req.run_id, req.step_id])).digest('hex')
       const reservation = join(dirname(req.result.path), `codex-headless-step-${key}.json`)
       const identity = buildIdentity(req)
+      const current = await recoverProviderObservation(reservation, identity, `${reservation}.observation`, 'codex-cli-jsonl', undefined, bytes => {
+        const receipt = JSON.parse(bytes)
+        return receipt.identity === identity ? readProviderObservation(JSON.stringify(receipt.observation), 'codex-cli-jsonl') : undefined
+      })
+      if (current) return current
       return recoverProviderObservation(reservation, identity, `${reservation}.receipt`, 'codex-cli-jsonl', undefined, bytes => {
         const receipt = JSON.parse(bytes)
         if (receipt.identity !== identity || !isCodexBuildObservation(receipt.observation)
@@ -162,6 +168,8 @@ export function createCodexHeadlessRunner(options: CodexHeadlessRunnerOptions = 
       })
     },
     async run(req, placement, signal): Promise<BoundedWorkOutcome> {
+      let measured: ProviderObservation | undefined
+      const execute = async (): Promise<BoundedWorkOutcome> => {
       const refusal = unsupported(req.role, placement)
       if (refusal) return { kind: 'refused', reason: refusal.reason }
       if (req.role === 'review' || req.role === 'synthesis') return review(req, signal)
@@ -199,9 +207,11 @@ export function createCodexHeadlessRunner(options: CodexHeadlessRunnerOptions = 
           NEUTRON_CODEX_THREAD_ID: req.thread?.id ?? '',
         })
         const events = codexBuildObservation(req.thread?.id ?? null)
+        const started = Date.now()
+        const publisher = createObservationPublisher(`${reservation}.observation`, identity)
         const child = spawn('/bin/bash', [buildScript], { cwd: req.cwd, env, stdio: ['ignore', 'pipe', 'ignore'] })
         child.stdout!.setEncoding('utf8')
-        child.stdout!.on('data', (chunk: string) => events.push(chunk))
+        child.stdout!.on('data', (chunk: string) => { events.push(chunk); publisher.publish(events.snapshot(started, Date.now())) })
         live.set(req.step_id, child)
         let timedOut = false
         const timer = setTimeout(() => {
@@ -211,6 +221,9 @@ export function createCodexHeadlessRunner(options: CodexHeadlessRunnerOptions = 
         const settled = await waitFor(child, signal)
         clearTimeout(timer)
         live.delete(req.step_id)
+        // Retry the latest absolute snapshot even if an earlier identical write
+        // failed. Never replace newer observed spend with an older disk receipt.
+        measured = await publisher.settle(events.snapshot(started, Date.now()))
         if (settled.killed || signal.aborted) return { kind: 'failed', class: 'killed', detail: 'Codex worker was cancelled' }
         if (timedOut) return { kind: 'failed', class: 'timeout', detail: 'Codex worker exceeded its wall-clock budget' }
         if (settled.code !== 0) {
@@ -231,6 +244,7 @@ export function createCodexHeadlessRunner(options: CodexHeadlessRunnerOptions = 
           await rename(`${receiptPath}.tmp`, receiptPath)
         } catch { return { kind: 'unknown', detail: 'Codex build observation could not be committed' } }
       } else {
+        measured = await this.observe?.(req)
         // Recovery consumes the original receipt, never the role's mutable slot or
         // a newly requested ID. An uncertain dispatch must not buy another turn.
         try {
@@ -253,6 +267,9 @@ export function createCodexHeadlessRunner(options: CodexHeadlessRunnerOptions = 
         model_reported: observation.model_reported,
         thread_id: observation.thread_id,
       }
+      }
+      const outcome = await execute()
+      return measured ? { ...outcome, observation: measured } : outcome
     },
     async liveness(handle: WorkerHandle) {
       const child = live.get(handle.step_id)

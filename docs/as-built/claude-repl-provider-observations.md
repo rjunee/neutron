@@ -56,10 +56,33 @@ transport relocation while rejecting changed work, model or credential home.
 The hook never invokes `run`, changes a reservation, acquires or recovers a lock,
 or publishes a result. Existing provider observations retain their timestamps;
 legacy builder receipts without host times receive explicitly observed read-window
-times. Headless recovery reads are limited to 256 KiB regular snapshots and 250 ms.
+times. Each headless receipt recovery is limited to 256 KiB regular snapshots and
+250 ms; a Codex builder's legacy receipt fallback allows at most two such reads.
 Missing/corrupt/mismatched evidence remains unavailable. Adapter tests cover
 nonzero/zero recovery, unchanged dispatch counts and state files, and exact
 request/model/credential mismatches. Additional mutation checks remove and
 over-apply reservation binding, remove snapshot/symlink bounds, and disable the
 recovery deadline; each fails before restoration. Driver startup invocation and
 the durable ledger are verified by the accounting integration change.
+
+Claude headless, Codex review and Codex builder observations are atomically
+persisted while each child remains active, independently of result authority.
+A shared publisher binds each receipt to the original reservation identity,
+retains monotonic absolute counters and coalesces pending updates behind one writer.
+Its terminal flush has a 250 ms limit and retries failed writes; an older durable
+snapshot cannot replace newer in-memory spend. Exact-thread provider usage from
+failed or partial turns survives; a mismatched thread cannot add usage or erase
+earlier accepted-thread spend. The independent observation cannot turn the
+completion parser's refusal into success. Recovery reads it without replay or
+adding duplicate counts. Separate process tests kill the host after a live
+observation is durable but before child settlement, then recover usage without
+completing or dispatching again for all three adapters. Claude
+recovery canonicalizes its cwd using the same real path as dispatch, including a
+legitimate symlink; changing that symlink's target invalidates the credential/cwd
+binding. Mutation checks relax thread matching, discard valid observations,
+remove failure persistence, and replace canonical cwd identity with lexical
+identity. All produce semantic failures before restoration.
+Removing each adapter's live publication also makes its process-death control
+fail; removing the final flush deadline fails the stalled-write control. A
+duplicate/reordered-observation mutation must fail immediately, before a later
+valid update can hide the regression.

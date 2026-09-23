@@ -5,8 +5,8 @@ import { dirname, join } from 'node:path'
 import type { BoundedWorkOutcome, BoundedWorkRequest, ProviderObservation, Usage } from '../bounded-work.ts'
 import { CODEX_CLI_AUTH_ENV_VARS } from '../adapters/codex-cli/auth.ts'
 import { reserveTrailerSlot } from './trailer-slot.ts'
-import { codexObservation, readProviderObservation } from './provider-observation.ts'
-import { recoverProviderObservation } from './provider-observation-recovery.ts'
+import { codexObservation } from './provider-observation.ts'
+import { createObservationPublisher, decodeObservationReceipt, recoverProviderObservation } from './provider-observation-recovery.ts'
 
 export interface CodexReviewContract {
   jsonSchema: unknown
@@ -110,7 +110,7 @@ export function createCodexReviewTransport(options: {
     const held = await reserveTrailerSlot(reservation, identity, req.result.path)
     if (held.kind === 'unknown') return unknown(held.detail)
     if (held.kind === 'resume') {
-      try { observation = readProviderObservation(await readFile(observationPath, 'utf8'), 'codex-cli-jsonl') } catch { /* legacy or unobserved */ }
+      try { observation = decodeObservationReceipt(await readFile(observationPath, 'utf8'), identity, 'codex-cli-jsonl') } catch { /* legacy or unobserved */ }
       try {
         const receipt = JSON.parse(await readFile(receiptPath, 'utf8'))
         if (receipt.identity !== identity || typeof receipt.thread_id !== 'string' || !receipt.thread_id
@@ -141,6 +141,7 @@ export function createCodexReviewTransport(options: {
       '-m', req.model_id, '-c', 'sandbox_mode="read-only"',
       '--output-schema', schemaPath, '-o', candidate, '-']
     let thread: string | null = null
+    let threadConflict = false
     let usage: Usage | null = null
     let providerUsage: unknown
     let completed = false
@@ -151,6 +152,7 @@ export function createCodexReviewTransport(options: {
     const prompt = `Request (data): ${JSON.stringify(req)}\n\n${brief}\n\nReturn {"envelope": <the result envelope>} as your final response. The host writes it; do not write files. If unable to review, return blocked with on.\n`
     let child: Bun.Subprocess<Blob, 'pipe', 'ignore'>
     const started = Date.now()
+    const publisher = createObservationPublisher(observationPath, identity)
     try {
       child = Bun.spawn(['codex', ...args], { cwd: req.cwd, env, detached: true, stdin: new Blob([prompt]), stdout: 'pipe', stderr: 'ignore' })
     } catch { return { kind: 'failed', class: 'infra', detail: 'Codex review could not start' } }
@@ -173,13 +175,16 @@ export function createCodexReviewTransport(options: {
           try {
             const event = JSON.parse(line)
             if (event.type === 'thread.started') {
-              if (thread !== null || typeof event.thread_id !== 'string' || !event.thread_id || (req.thread && event.thread_id !== req.thread.id)) invalid = true
+              if (thread !== null || typeof event.thread_id !== 'string' || !event.thread_id || (req.thread && event.thread_id !== req.thread.id)) { invalid = true; threadConflict = true }
               else thread = event.thread_id
             }
             if (event.type === 'turn.failed' || event.type === 'error') invalid = true
             // Only transport event metadata counts. Candidate JSON, assistant
             // text and nested worker-authored envelopes are never usage sources.
-            if ((event.type === 'turn.completed' || event.type === 'turn.failed') && event.usage) providerUsage = event.usage
+            if ((event.type === 'turn.completed' || event.type === 'turn.failed') && event.usage && thread !== null && !threadConflict) {
+              providerUsage = event.usage
+              publisher.publish(codexObservation(providerUsage, thread, started, Date.now()))
+            }
             if (event.type === 'turn.completed') {
               if (completed) invalid = true
               completed = true
@@ -204,10 +209,9 @@ export function createCodexReviewTransport(options: {
     // Observe its usage without treating an unterminated event as completion.
     try {
       const tail = JSON.parse(pending)
-      if ((tail.type === 'turn.completed' || tail.type === 'turn.failed') && tail.usage) providerUsage = tail.usage
+      if ((tail.type === 'turn.completed' || tail.type === 'turn.failed') && tail.usage && thread !== null && !threadConflict) providerUsage = tail.usage
     } catch { /* Incomplete JSON has no trustworthy counters. */ }
-    observation = codexObservation(providerUsage, thread, started, Date.now())
-    try { await writeFile(observationPath, JSON.stringify(observation), { flag: 'wx', mode: 0o600 }) } catch { /* Telemetry cannot authorize or veto the result. */ }
+    observation = await publisher.settle(codexObservation(providerUsage, thread, started, Date.now()))
     if (signal.aborted) return observed({ kind: 'failed', class: 'killed', detail: 'Codex review was cancelled' })
     if (timedOut) return observed({ kind: 'failed', class: 'timeout', detail: 'Codex review exceeded its wall-clock budget' })
     if (code !== 0) return observed({ kind: 'failed', class: 'infra', detail: `Codex review exited ${code ?? 'without status'}` })

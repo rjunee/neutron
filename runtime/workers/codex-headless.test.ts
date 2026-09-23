@@ -1,4 +1,5 @@
-import { describe, expect, test } from 'bun:test'
+import { describe, expect, spyOn, test } from 'bun:test'
+import * as asyncFs from 'node:fs/promises'
 import { chmodSync, mkdtempSync, readFileSync, readdirSync, writeFileSync } from 'node:fs'
 import { tmpdir } from 'node:os'
 import { join } from 'node:path'
@@ -38,6 +39,97 @@ function fixture(change: Partial<Record<'HEAD' | 'DIFF' | 'PR', string | null>> 
 }
 
 describe('Codex headless WorkerRunner', () => {
+  test('stalled telemetry publication cannot hold a finished worker indefinitely', async () => {
+    const f = fixture()
+    const original = asyncFs.writeFile
+    let release!: () => void
+    const stalled = new Promise<void>(resolve => { release = resolve })
+    const mock = spyOn(asyncFs, 'writeFile').mockImplementation(async (...args) => {
+      if (String(args[0]).endsWith('.observation.tmp')) await stalled
+      return original(...args)
+    })
+    try {
+      const outcome = await createCodexHeadlessRunner({ buildScript: f.script, probe: { ok: true } }).run(f.request(), 'headless', new AbortController().signal)
+      expect(outcome.kind).toBe('completed')
+      expect(outcome.observation?.usage.input_tokens).toBe(12)
+    } finally { release(); mock.mockRestore() }
+  }, 3000)
+  test('failed telemetry writes retain newer in-memory spend and retry at terminal settlement', async () => {
+    const f = fixture()
+    const original = asyncFs.writeFile
+    let attempts = 0
+    const mock = spyOn(asyncFs, 'writeFile').mockImplementation(async (...args) => {
+      if (String(args[0]).endsWith('.observation.tmp') && ++attempts === 1) throw new Error('fixture publication failed')
+      return original(...args)
+    })
+    try {
+      const runner = createCodexHeadlessRunner({ buildScript: f.script, probe: { ok: true } })
+      const outcome = await runner.run(f.request(), 'headless', new AbortController().signal)
+      expect(outcome.kind).toBe('completed')
+      expect(outcome.observation?.usage.input_tokens).toBe(12)
+      expect(await runner.observe!(f.request())).toEqual(outcome.observation)
+      expect(attempts).toBeGreaterThan(1)
+    } finally { mock.mockRestore() }
+  })
+  test('host death after streamed usage recovers spend before child completion without replay', async () => {
+    const f = fixture()
+    const request = f.request({ budget: { wall_ms: 30_000 } })
+    const childPid = join(request.cwd, 'fixture-child.pid')
+    writeFileSync(f.script, readFileSync(f.script, 'utf8').replace('cat source.trailer',
+      `printf '%s' "$$" > ${JSON.stringify(childPid)}\nexec sleep 30\ncat source.trailer`))
+    const hostPath = join(request.cwd, 'fixture-host.ts')
+    writeFileSync(hostPath, `import {createCodexHeadlessRunner} from ${JSON.stringify(import.meta.dir + '/codex-headless.ts')};\n` +
+      `await createCodexHeadlessRunner({buildScript:${JSON.stringify(f.script)},probe:{ok:true}}).run(${JSON.stringify(request)},'headless',new AbortController().signal);\n`)
+    const host = Bun.spawn([process.execPath, hostPath], { stdout: 'ignore', stderr: 'ignore' })
+    let recovered
+    const runner = createCodexHeadlessRunner({ buildScript: f.script, probe: { ok: true } })
+    try {
+      const deadline = Date.now() + 5000
+      while (Date.now() < deadline) {
+        recovered = await runner.observe!(request)
+        if (recovered?.usage.input_tokens === 12) break
+        await Bun.sleep(10)
+      }
+      expect(recovered?.usage.input_tokens).toBe(12)
+      expect(host.exitCode).toBeNull()
+      host.kill('SIGKILL'); await host.exited
+      expect(await runner.observe!(request)).toEqual(recovered)
+      expect((await runner.run(request, 'headless', new AbortController().signal)).kind).toBe('unknown')
+      expect(readFileSync(f.threads, 'utf8')).toBe('\n')
+      const sidecar = join(request.cwd, readdirSync(request.cwd).find(name => name.endsWith('.observation'))!)
+      const saved = readFileSync(sidecar, 'utf8')
+      await Bun.sleep(10)
+      const corrupt = JSON.parse(saved); corrupt.identity = 'foreign'
+      writeFileSync(sidecar, JSON.stringify(corrupt))
+      expect(await runner.observe!(request)).toBeUndefined()
+      writeFileSync(sidecar, '{')
+      expect(await runner.observe!(request)).toBeUndefined()
+      writeFileSync(sidecar, saved)
+      expect(await runner.observe!(request)).toEqual(recovered)
+    } finally {
+      host.kill('SIGKILL'); await host.exited
+      try { process.kill(Number(readFileSync(childPid, 'utf8')), 'SIGKILL') } catch { /* Already exited or never started. */ }
+    }
+  }, 10_000)
+  for (const mode of ['failure', 'timeout', 'malformed', 'thread-mismatch'] as const) {
+    test(`builder retains provider usage through ${mode} without authorizing or replaying`, async () => {
+      const f = fixture()
+      let script = readFileSync(f.script, 'utf8')
+      if (mode === 'failure') script += 'exit 7\n'
+      if (mode === 'timeout') script += 'exec sleep 10\n'
+      if (mode === 'malformed') script += 'printf "{broken"\n'
+      if (mode === 'thread-mismatch') script = script.replace('${NEUTRON_CODEX_THREAD_ID:-observed-first}', 'foreign')
+      writeFileSync(f.script, script)
+      const request = f.request({ budget: { wall_ms: mode === 'timeout' ? 250 : 5000 }, ...(mode === 'thread-mismatch' ? { thread: { id: 'expected' } } : {}) })
+      const runner = createCodexHeadlessRunner({ buildScript: f.script, probe: { ok: true } })
+      const outcome = await runner.run(request, 'headless', new AbortController().signal)
+      expect(outcome.kind).toBe(mode === 'failure' || mode === 'timeout' ? 'failed' : 'unknown')
+      expect(outcome.observation?.usage.input_tokens).toBe(mode === 'thread-mismatch' ? null : 12)
+      expect(await runner.observe!(request)).toEqual(outcome.observation)
+      expect((await runner.run(request, 'headless', new AbortController().signal)).kind).toBe('unknown')
+      expect(readFileSync(f.threads, 'utf8')).toBe(mode === 'thread-mismatch' ? 'expected\n' : '\n')
+    })
+  }
   test('builder receipt observation is read-only, credential-bound and independent of completion replay', async () => {
     const f = fixture()
     const options = { buildScript: f.script, probe: { ok: true as const }, env: { PATH: process.env.PATH, CODEX_HOME: 'seat-one' } }
@@ -294,7 +386,7 @@ for (const field of ['head', 'pr'] as const) {
 for (const field of ['HEAD', 'DIFF', 'PR'] as const) {
   test(`missing ${field} stays unknown despite matching measured snapshot in brief`, async () => {
     const outcome = await runTrailer({ [field]: null })
-    expect(outcome).toEqual({ kind: 'unknown', detail: `Codex trailer is missing NEUTRON_CODEX_BUILD_${field}` })
+    expect(outcome).toEqual({ kind: 'unknown', detail: `Codex trailer is missing NEUTRON_CODEX_BUILD_${field}`, observation: expect.objectContaining({ source: 'codex-cli-jsonl' }) })
     expect(await compare(outcome, measured)).toMatchObject({ kind: 'unknown', phase: 'build' })
   })
 }
@@ -302,28 +394,28 @@ for (const field of ['HEAD', 'DIFF', 'PR'] as const) {
 for (const field of ['HEAD', 'DIFF'] as const) {
   test(`empty ${field} is unknown`, async () => {
     expect(await runTrailer({ [field]: '' }))
-      .toEqual({ kind: 'unknown', detail: `Codex trailer has empty NEUTRON_CODEX_BUILD_${field}` })
+      .toEqual({ kind: 'unknown', detail: `Codex trailer has empty NEUTRON_CODEX_BUILD_${field}`, observation: expect.objectContaining({ source: 'codex-cli-jsonl' }) })
   })
 }
 
 test('PR number alone lacks the compared PR head and state', async () => {
   expect(await runTrailer({ PR: '42' }))
-    .toEqual({ kind: 'unknown', detail: 'Codex trailer is missing pr.head and pr.state for NEUTRON_CODEX_BUILD_PR' })
+    .toEqual({ kind: 'unknown', detail: 'Codex trailer is missing pr.head and pr.state for NEUTRON_CODEX_BUILD_PR', observation: expect.objectContaining({ source: 'codex-cli-jsonl' }) })
 })
 
 test('unreadable diff artifact is unknown', async () => {
   expect(await runTrailer({ DIFF: 'missing.diff' }))
-    .toEqual({ kind: 'unknown', detail: expect.stringMatching(/^Codex trailer NEUTRON_CODEX_BUILD_DIFF artifact is unreadable: Error: ENOENT/) })
+    .toEqual({ kind: 'unknown', detail: expect.stringMatching(/^Codex trailer NEUTRON_CODEX_BUILD_DIFF artifact is unreadable: Error: ENOENT/), observation: expect.objectContaining({ source: 'codex-cli-jsonl' }) })
 })
 
 test('duplicate fields are ambiguous even when one value matches', async () => {
   expect(await runTrailer({}, 'NEUTRON_CODEX_BUILD_HEAD=other\n'))
-    .toEqual({ kind: 'unknown', detail: 'Codex trailer repeats NEUTRON_CODEX_BUILD_HEAD' })
+    .toEqual({ kind: 'unknown', detail: 'Codex trailer repeats NEUTRON_CODEX_BUILD_HEAD', observation: expect.objectContaining({ source: 'codex-cli-jsonl' }) })
 })
 
 test('malformed line is unknown', async () => {
   expect(await runTrailer({}, 'not a field\n'))
-    .toEqual({ kind: 'unknown', detail: 'Codex wrapper wrote a malformed trailer' })
+    .toEqual({ kind: 'unknown', detail: 'Codex wrapper wrote a malformed trailer', observation: expect.objectContaining({ source: 'codex-cli-jsonl' }) })
 })
 
 test('unreadable trailer stays unknown', async () => {
@@ -331,7 +423,7 @@ test('unreadable trailer stays unknown', async () => {
   writeFileSync(f.script, '#!/bin/bash\nexit 0\n')
   const outcome = await createCodexHeadlessRunner({ buildScript: f.script, probe: { ok: true } })
     .run(f.request(), 'headless', new AbortController().signal)
-  expect(outcome).toEqual({ kind: 'unknown', detail: expect.stringMatching(/^Codex wrapper exited successfully without a readable trailer: Error: ENOENT/) })
+  expect(outcome).toEqual({ kind: 'unknown', detail: expect.stringMatching(/^Codex wrapper exited successfully without a readable trailer: Error: ENOENT/), observation: expect.objectContaining({ source: 'codex-cli-jsonl' }) })
 })
 
 for (const effort of ['xhigh', 'max'] as const) {

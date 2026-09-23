@@ -36,6 +36,7 @@ if (args.includes('--strict-config')) {
   process.exit(mode === 'sentinel-zero' ? 0 : 1);
 }
 const prompt = readFileSync(0, 'utf8');
+writeFileSync(process.env.FIXTURE_DIR + '/provider.pid',String(process.pid));
 const req = JSON.parse(prompt.split('\\n')[0].slice('Request (data): '.length));
 appendFileSync(process.env.FIXTURE_DIR + '/calls', JSON.stringify({args, prompt, env:process.env, cwd:process.cwd()})+'\\n');
 if (mode === 'hang') { process.on('SIGTERM', () => {}); setInterval(() => {}, 1000); await new Promise(() => {}); }
@@ -69,6 +70,36 @@ process.exit(mode === 'nonzero' ? 2 : 0);
   const invocations = async () => (await readFile(join(dir, 'invocations'), 'utf8')).trim().split('\n').filter(Boolean).map(row => JSON.parse(row))
   return { dir, home, env, req, runner, productionRunner, run, calls, invocations }
 }
+
+test('Codex review host death after provider usage recovers spend without child completion or replay', async () => {
+  const f = await fixture('usage-then-hang')
+  const req = { ...f.req, budget: { wall_ms: 30_000 } }
+  const hostPath = join(f.dir, 'observation-host.ts')
+  await writeFile(hostPath, `import {createCodexHeadlessRunner} from ${JSON.stringify(import.meta.dir + '/codex-headless.ts')};\n` +
+    `import {VERDICT_SCHEMA,validateTrailer} from ${JSON.stringify(import.meta.dir + '/../../trident/gates/result-contract.ts')};\n` +
+    `import {briefIntegrity} from ${JSON.stringify(import.meta.dir + '/../../trident/gates/brief-integrity.ts')};\n` +
+    `await createCodexHeadlessRunner({env:${JSON.stringify(f.env)},probe:{ok:true},reviewBriefIntegrity:briefIntegrity,reviewContracts:new Map([['verdict',{jsonSchema:VERDICT_SCHEMA,validate:(value)=>validateTrailer('verdict',value).ok}]])}).run(${JSON.stringify(req)},'headless',new AbortController().signal);\n`)
+  const host = Bun.spawn([process.execPath, hostPath], { stdout: 'ignore', stderr: 'ignore' })
+  const runner = f.runner()
+  try {
+    let observed
+    const deadline = Date.now() + 5000
+    while (Date.now() < deadline) {
+      observed = await runner.observe!(req)
+      if (observed?.usage.input_tokens === 6) break
+      await Bun.sleep(10)
+    }
+    expect(observed?.usage.input_tokens).toBe(6)
+    expect(host.exitCode).toBeNull()
+    host.kill('SIGKILL'); await host.exited
+    expect(await f.runner().observe!(req)).toEqual(observed)
+    expect((await runner.run(req, 'headless', new AbortController().signal)).kind).toBe('unknown')
+    expect(await f.calls()).toHaveLength(1)
+  } finally {
+    host.kill('SIGKILL'); await host.exited
+    try { process.kill(-Number(await readFile(join(f.dir, 'provider.pid'), 'utf8')), 'SIGKILL') } catch { /* Gone or not started. */ }
+  }
+}, 10_000)
 
 for (const mode of ['nonzero', 'zero-usage'] as const) {
   test(`Codex read-only usage recovery retains ${mode} without dispatch`, async () => {

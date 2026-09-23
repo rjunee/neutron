@@ -3,6 +3,37 @@ import { codexBuildObservation } from './codex-build-observation.ts'
 
 const start = { type: 'thread.started', thread_id: 'owned-thread' }
 const done = { type: 'turn.completed', usage: { input_tokens: 13, output_tokens: 2, cached_input_tokens: 9 } }
+test('partial failed turns retain deduplicated provider usage without authorizing completion', () => {
+  const reader = codexBuildObservation('owned-thread')
+  reader.push(JSON.stringify(start) + '\n')
+  const failure = { ...done, type: 'turn.failed', model: 'reported' }
+  reader.push(JSON.stringify(failure) + '\n' + JSON.stringify(failure))
+  expect(reader.finish()).toBeNull()
+  expect(reader.snapshot(1, 2)).toMatchObject({ model_reported: 'reported', thread_id: 'owned-thread',
+    usage: { input_tokens: 4, cache_read_input_tokens: 9, output_tokens: 2 } })
+  expect(reader.snapshot(1, 2)).toEqual(reader.snapshot(1, 2))
+})
+test('wrong-thread and pre-thread usage is not attributed, legitimate zero remains zero', () => {
+  const wrong = codexBuildObservation('expected')
+  wrong.push(JSON.stringify(start) + '\n' + JSON.stringify(done) + '\n')
+  expect(wrong.snapshot(1, 2).usage.input_tokens).toBeNull()
+  const early = codexBuildObservation(null)
+  early.push(JSON.stringify(done) + '\n' + JSON.stringify(start) + '\n')
+  expect(early.snapshot(1, 2).usage.input_tokens).toBeNull()
+  const valid = codexBuildObservation(null)
+  valid.push(JSON.stringify(start) + '\n' + JSON.stringify({ type: 'turn.failed', usage: { input_tokens: 0, output_tokens: 0, cached_input_tokens: 0 } }) + '\n')
+  expect(valid.snapshot(1, 2).usage).toMatchObject({ input_tokens: 0, output_tokens: 0, cache_read_input_tokens: 0 })
+})
+test('duplicate or older usage cannot double-charge or erase earlier accepted-thread spend', () => {
+  const reader = codexBuildObservation('owned-thread')
+  reader.push(JSON.stringify(start) + '\n' + JSON.stringify(done) + '\n')
+  const observed = reader.snapshot(1, 2)
+  reader.push(JSON.stringify(done) + '\n' + JSON.stringify({ ...done, usage: { input_tokens: 1, output_tokens: 0, cached_input_tokens: 0 } }) + '\n')
+  expect(reader.snapshot(1, 2)).toEqual(observed)
+  reader.push(JSON.stringify({ type: 'thread.started', thread_id: 'foreign' }) + '\n' + JSON.stringify({ ...done, usage: { input_tokens: 1000, output_tokens: 1000, cached_input_tokens: 1000 } }) + '\n')
+  expect(reader.snapshot(1, 2)).toEqual(observed)
+  expect(reader.finish()).toBeNull()
+})
 function observe(events: unknown[], requested: string | null = null) {
   const reader = codexBuildObservation(requested)
   // Fragmented reads exercise the actual pipe boundary.
