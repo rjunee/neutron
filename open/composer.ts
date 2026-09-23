@@ -1,5 +1,5 @@
 import { createProjectLauncher } from '@neutronai/trident/project-launcher.ts'
-import { TridentPhaseUsageStore } from '@neutronai/trident/phase-usage.ts'
+import { TridentAttemptLedger } from '@neutronai/trident/attempt-ledger.ts'
 import { buildSubstrateWorkflowFire, buildWorkflowFirer } from '@neutronai/trident/inner-loop.ts'
 import { prepareProjectBuild } from './wiring/project-build.ts'
 import { CodexOwnerBindings } from './wiring/codex-owner-binding.ts'
@@ -1235,7 +1235,7 @@ export function buildOpenGraphComposer(
               const id = workBoardProjectIdForKey(project_slug, input.run.project_slug) ?? 'general'
               const providerSelection = resolveModelProvider(id)
               return prepareProjectBuild(input, {
-                store: boardRunStore, phaseUsage: new TridentPhaseUsageStore(db), runHost: tridentHostRunner,
+                store: boardRunStore, attempts: new TridentAttemptLedger(db), runHost: tridentHostRunner,
                 stateRoot: projectBuildStateRoot,
                 projectDir: joinPath(owner_home, 'Projects', input.run.project_slug),
                 projectId: id, provider: providerSelection.provider, providerSource: providerSelection.source, env,

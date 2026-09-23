@@ -102,6 +102,16 @@ test('newer cumulative observations replace rather than add and cannot erase ear
   expect(projection().input_tokens).toBe(150)
 })
 
+test('same-millisecond provider updates retain increasing absolute usage without inventing observation time', async () => {
+  await ledger.admit(identity)
+  await ledger.observe(identity, receipt)
+  expect(await ledger.observe(identity, receipt)).toBe('stale')
+  expect(await ledger.observe(identity, { ...receipt, output_tokens: 21 })).toBe('recorded')
+  expect(projection()).toMatchObject({ input_tokens: 100, output_tokens: 21, observed_at: 100 })
+  await expect(ledger.observe(identity, receipt)).rejects.toThrow('regressed')
+  expect(projection().output_tokens).toBe(21)
+})
+
 test('lifecycle recovery fills holes in either order without rewriting terminal evidence', async () => {
   await ledger.admit(identity)
   await ledger.lifecycle(identity, { ended_at: 90, outcome: 'interrupted' })

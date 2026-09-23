@@ -18,7 +18,6 @@ import type { MergeDiffAssessment } from './merge.ts'
 import { applyReviewSuite, type SuiteAssessment } from './gates/review-suite.ts'
 import { reviewProgress, type ReviewProgress } from './gates/review-progress.ts'
 import type { TerminalCause } from './terminal-cause.ts'
-import type { PhaseUsageReport } from './phase-usage.ts'
 import type { ReviewPanelObservation } from './gates/review-panel.ts'
 
 const log = createLogger('trident')
@@ -149,8 +148,6 @@ export interface BuildRunDeps {
   publish(snapshot: BuildSnapshot): Promise<void>
   /** Local effects must pin the reviewed head, preserve the branch and merge without rewriting it. */
   merge(snapshot: BuildSnapshot): Promise<void>
-  /** Persist absolute totals for each model phase after every completed turn. */
-  recordPhaseUsage(runId: string, phase: string, report: PhaseUsageReport): Promise<void>
   confirmLocalMerge?(snapshot: BuildSnapshot): Promise<GateResult>
 }
 
@@ -388,7 +385,6 @@ export async function buildRun(input: BuildRunInput, deps: BuildRunDeps, signal:
     }
     let previousPayload: unknown = null
     let findings: readonly string[] = []
-    const usageTotals = new Map<string, PhaseUsageReport>()
     async function work(role: WorkPhase, round: number): Promise<{ payload: unknown; review?: ReviewPanelObservation } | { stop: BuildRunOutcome }> {
       phase = role
       step_id = `${input.run_id}${input.mode === 'ralph' ? `:task:${input.ralphRound ?? 0}` : ''}:${role}:${round}`
@@ -437,24 +433,6 @@ export async function buildRun(input: BuildRunInput, deps: BuildRunDeps, signal:
         case 'failed': return { stop: failed(`${outcome.class}: ${outcome.detail}`) }
         case 'completed': break
       }
-      const usagePhase = role === 'plan' ? 'decomposition' : role === 'review' ? 'review_adversarial' : 'build'
-      const priorUsage = usageTotals.get(usagePhase)
-      const cacheRead = outcome.usage?.cache_read_input_tokens
-      const report: PhaseUsageReport = {
-        status: 'partial',
-        input_tokens: outcome.usage === null || priorUsage?.input_tokens === null ? null : (priorUsage?.input_tokens ?? 0) + outcome.usage.input_tokens,
-        output_tokens: outcome.usage === null || priorUsage?.output_tokens === null ? null : (priorUsage?.output_tokens ?? 0) + outcome.usage.output_tokens,
-        cache_read_tokens: priorUsage
-          ? priorUsage.cache_read_tokens === null || cacheRead === undefined ? null : priorUsage.cache_read_tokens + cacheRead
-          : cacheRead ?? null,
-        cache_creation_tokens: null,
-        cost_usd: null,
-        source: outcome.model_reported === null || priorUsage?.source === 'unknown-model' ? 'unknown-model'
-          : priorUsage && priorUsage.source !== outcome.model_reported ? 'multiple-models' : outcome.model_reported,
-        observed_at: Math.max(Date.now(), (priorUsage?.observed_at ?? -1) + 1),
-      }
-      await deps.recordPhaseUsage(input.run_id, usagePhase, report)
-      usageTotals.set(usagePhase, report)
       let observation = await deps.measure()
       if (local && (role === 'build' || role === 'fix')) {
         // G032: the host owns the three-read budget; no worker sets it.

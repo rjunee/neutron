@@ -79,7 +79,6 @@ function fixture(landFixes = true) {
       }
     },
     merge: async () => { events.push('merge'); snapshot.pr!.state = 'MERGED' },
-    recordPhaseUsage: async () => {},
   }
   return { input, deps, runner, cross, outcomes, completed, snapshot, events, decisions, reads: () => reads,
     run: () => buildRun(input, deps, new AbortController().signal) }
@@ -195,34 +194,7 @@ test('terminal publication cannot proceed when the full-suite gate is missing or
   }
 })
 
-test('production build loop records cumulative usage at every completed phase boundary', async () => {
-  const f = fixture()
-  const completedWithUsage = (input_tokens: number, output_tokens: number, cache_read_input_tokens?: number): BoundedWorkOutcome => ({
-    kind: 'completed', result: structuredClone(f.snapshot),
-    usage: { input_tokens, output_tokens, ...(cache_read_input_tokens === undefined ? {} : { cache_read_input_tokens }) },
-    model_reported: 'measured-model', thread_id: null,
-  })
-  f.outcomes.set('run:plan:0', completedWithUsage(10, 2, 4))
-  f.outcomes.set('run:build:0', completedWithUsage(20, 3, 5))
-  f.outcomes.set('run:review:1', completedWithUsage(30, 4))
-  f.outcomes.set('run:fix:1', completedWithUsage(7, 1, 2))
-  f.outcomes.set('run:review:2', completedWithUsage(11, 2, 3))
-  f.decisions.push({ kind: 'fix', findings: ['logic'] }, { kind: 'approve' })
-  const records: Array<{ runId: string; phase: string; report: Parameters<BuildRunDeps['recordPhaseUsage']>[2] }> = []
-  f.deps.recordPhaseUsage = async (runId, phase, report) => { records.push({ runId, phase, report }) }
-
-  expect((await f.run()).kind).toBe('merged')
-  expect(records.map(({ runId, phase, report }) => ({ runId, phase, input: report.input_tokens,
-    output: report.output_tokens, cache: report.cache_read_tokens, status: report.status, source: report.source }))).toEqual([
-    { runId: 'run', phase: 'decomposition', input: 10, output: 2, cache: 4, status: 'partial', source: 'measured-model' },
-    { runId: 'run', phase: 'build', input: 20, output: 3, cache: 5, status: 'partial', source: 'measured-model' },
-    { runId: 'run', phase: 'review_adversarial', input: 30, output: 4, cache: null, status: 'partial', source: 'measured-model' },
-    { runId: 'run', phase: 'build', input: 27, output: 4, cache: 7, status: 'partial', source: 'measured-model' },
-    { runId: 'run', phase: 'review_adversarial', input: 41, output: 6, cache: null, status: 'partial', source: 'measured-model' },
-  ])
-  expect(records[3]!.report.observed_at).toBeGreaterThan(records[1]!.report.observed_at)
-  expect(records[4]!.report.observed_at).toBeGreaterThan(records[2]!.report.observed_at)
-})
+// Attempt accounting is verified through the production project host.
 
 test('placement is resolved for every role at admission and dispatch', async () => {
   const f = fixture()
@@ -1750,15 +1722,11 @@ test('G102 driver checks artifact after preparation and before every review', as
   expect(checks).toEqual(['run:review:1', 'run:review:2'])
 })
 
-test('null usage completes and keeps cumulative counters unknown across later fixes', async () => {
+test('null usage does not veto an otherwise validated build and fix', async () => {
   const f = fixture()
   f.outcomes.set('run:build:0', { kind: 'completed', result: structuredClone(f.snapshot), usage: null, model_reported: null, thread_id: null })
   f.decisions.push({ kind: 'fix', findings: ['logic'] }, { kind: 'approve' })
-  const records: Parameters<BuildRunDeps['recordPhaseUsage']>[2][] = []
-  f.deps.recordPhaseUsage = async (_run, phase, report) => { if (phase === 'build') records.push(report) }
   expect((await f.run()).kind).toBe('merged')
-  expect(records).toHaveLength(2)
-  for (const report of records) expect(report).toMatchObject({ input_tokens: null, output_tokens: null, cache_read_tokens: null, source: 'unknown-model' })
 })
 
 // Keep acquisition/classification real: only the external CI transport is a fixture.

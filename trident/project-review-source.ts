@@ -9,6 +9,7 @@ import type { BuildSnapshot } from './build-run.ts'
 import { briefIntegrity } from './gates/brief-integrity.ts'
 import { validateTrailer, VERDICT_SCHEMA } from './gates/result-contract.ts'
 import type { ReviewSeat, ReviewSource, SeatObservation } from './gates/review-panel.ts'
+import type { AttemptAccounting } from './attempt-accounting.ts'
 
 export interface ProjectReviewSourceOptions {
   runId: string
@@ -23,6 +24,8 @@ export interface ProjectReviewSourceOptions {
   runnerFor(model: ModelTierDescriptor, seat: ReviewSeat): WorkerRunner | undefined
   wallMs: number
   signal: AbortSignal
+  accounting: AttemptAccounting
+  taskId(): string
 }
 
 /** One source per admitted build. Records are private host memory; rebuilding the
@@ -97,9 +100,10 @@ export function createProjectReviewSource(input: ProjectReviewSourceOptions): Re
     let locked = false
     let settled = false
     try {
-      await Promise.race([prior, new Promise<never>((_, reject) => {
+      await options.accounting.interval('review-thread-queue', { run_id: options.runId, review_seat: route.seat.id,
+        head_sha: snapshot.head, round, attempt }, () => Promise.race([prior, new Promise<never>((_, reject) => {
         waitTimer = setTimeout(() => reject(Error(`Review seat ${route.seat.id}: thread queue budget expired`)), options.wallMs)
-      })])
+      })]))
       clearTimeout(waitTimer)
       if (options.signal.aborted) throw Error('Review thread wait cancelled')
       try { await writeFile(`${path}.lock`, owner, { flag: 'wx', mode: 0o600 }); locked = true }
@@ -159,12 +163,15 @@ export function createProjectReviewSource(input: ProjectReviewSourceOptions): Re
       instruction: 'Review the measured diff. The result must conform exactly to verdictSchema, including findings and file/line evidence. Do not add fields to result or its nested objects beyond those declared in verdictSchema. Synthesis must account for every supplied seat within this same schema.',
       resultFile: 'Write your result file as a JSON object with EXACTLY these five fields: "schema", "run_id" and "step_id", each copied verbatim from this dispatch\'s request (`request.result.schema`, `request.run_id`, `request.step_id`) — do not invent or reformat them; "kind", which is "completed" when you produced a verdict or "blocked" when you could not; and "result", the verdict payload itself, omitted when blocked. When blocked, add "on": a non-empty sentence saying what stopped you. Report blocked rather than inventing a verdict.' })
     const briefPath = join(directory, 'brief.json')
-    await writeFile(briefPath, text, { mode: 0o600, flag: 'wx' })
     const request: BoundedWorkRequest = { run_id: options.runId, step_id: `${directory.split('/').at(-1)}:${round}:${attempt}`,
       role, model_id: seat.modelId, effort: route.effort, cwd: options.cwd, writable: false,
       network: true, tools: 'read-only', brief: { path: briefPath, integrity: briefIntegrity(text) },
       result: { schema: 'verdict', path: join(directory, 'result.json') }, thread,
       budget: { wall_ms: options.wallMs }, needs_approval_decision: false }
+    await options.accounting.prepare(request, seat.provider, placement, {
+      phase: seat.id, task_id: options.taskId(), head_sha: snapshot.head,
+      review_seat: seat.id, requested_model: route.model.tier,
+    }, () => writeFile(briefPath, text, { mode: 0o600, flag: 'wx' }))
     const controller = new AbortController()
     let timer: ReturnType<typeof setTimeout> | undefined
     let abort: () => void = () => {}
@@ -175,7 +182,7 @@ export function createProjectReviewSource(input: ProjectReviewSourceOptions): Re
     })
     try {
       if (options.signal.aborted) { abort(); return unavailable('host cancelled review') }
-      const outcome = await Promise.race([runner.run(request, placement, controller.signal), stopped])
+      const outcome = await Promise.race([options.accounting.run(runner, request, placement, controller.signal), stopped])
       if (outcome.kind === 'completed') {
         await rememberThread?.(outcome.thread_id)
         return { ...identity, status: 'completed', family: outcome.model_reported === null ? null : seat.family, payload: structuredClone(outcome.result) }

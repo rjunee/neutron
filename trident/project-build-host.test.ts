@@ -6,7 +6,7 @@ import { ProjectDb } from '@neutronai/persistence/index.ts'
 import { fakeRunner, type Provider } from '@neutronai/runtime/bounded-work.ts'
 import { seedMigratedDb } from '../tests/support/migrated-db.ts'
 import { TridentRunStore } from './store.ts'
-import { TridentPhaseUsageStore } from './phase-usage.ts'
+import { TridentAttemptLedger } from './attempt-ledger.ts'
 import { createProjectBuildHost, projectBuildRunners, withProductionCleanup, type ProjectBuildHostOptions } from './project-build-host.ts'
 import type { BuildRunOutcome } from './build-run.ts'
 import { briefIntegrity } from './gates/brief-integrity.ts'
@@ -46,10 +46,11 @@ async function fixture() {
   const placements: string[] = []
   const runner = fakeRunner('pi', { supports: (_role, placement) => { placements.push(placement); return { ok: true } } })
   const options: ProjectBuildHostOptions = {
+    requestedModels: { plan: 'test', build: 'test', fix: 'test', review: 'test' },
     substrate: { provider: 'pi', inRepl: runner, headless: {} },
     // The real store over the same database, so the composition's write is the
     // write production performs rather than a stub that cannot fail.
-    phaseUsage: new TridentPhaseUsageStore(db),
+    attempts: new TridentAttemptLedger(db),
     production: { store, runId: row.id, projectSlug: 'project', repo: dir, worktree: join(dir, 'work'), branch: 'change',
       baseBranch: 'main', runHost: spawnCapture, ciWorkflow: 'ci.yml', publication: async () => ({ title: 'Build', bodyFile: join(dir, 'body') }) },
     policy: { leak: { scratch_dir: join(dir, 'scan') }, mutation: { readClaim: async () => null } },

@@ -116,7 +116,8 @@ export class TridentAttemptLedger {
         if (previous.receipt_id !== receipt.receipt_id || previous.source !== receipt.source) {
           throw new Error('attempt receipt ownership conflict')
         }
-        if (receipt.observed_at <= previous.observed_at) return 'stale'
+        if (receipt.observed_at < previous.observed_at
+          || (receipt.observed_at === previous.observed_at && receiptFields.every(field => receipt[field] === previous[field]))) return 'stale'
         if (previous.model_reported !== null && receipt.model_reported !== previous.model_reported) {
           throw new Error('attempt reported model conflict')
         }

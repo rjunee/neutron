@@ -3,8 +3,11 @@ import { spawnCapture, type HostCommandResult } from '@neutronai/trident/git-mod
 import { runWorktreePath } from '@neutronai/trident/merge.ts'
 import { mkdir, readFile, writeFile, lstat } from 'node:fs/promises'
 import { join, resolve } from 'node:path'
-import { createProjectRunners, type ProjectTrailerDecoder } from '@neutronai/runtime/workers/project-runners.ts'
+import { createHash } from 'node:crypto'
+import { createProjectRunners, type ProjectTrailerDecoder, type ProjectActingTurn } from '@neutronai/runtime/workers/project-runners.ts'
 import { createClaudeActingTurn } from '@neutronai/runtime/workers/claude-acting-turn.ts'
+import { observeClaudeChildUsage } from '@neutronai/runtime/workers/claude-child-observation.ts'
+import { sessionJsonlPath } from '@neutronai/runtime/adapters/claude-code/persistent/jsonl-resumability.ts'
 import { createCodexHeadlessRunner } from '@neutronai/runtime/workers/codex-headless.ts'
 import { createClaudeHeadlessRunner } from '@neutronai/runtime/workers/claude-headless.ts'
 import { reconcileStoppedTrailerReservations } from '@neutronai/runtime/workers/trailer-slot.ts'
@@ -27,6 +30,7 @@ import { PROJECT_BUILD_WALL_MS } from '@neutronai/trident/project-build-budget.t
 import { prepareProjectDependencies } from './project-build-dependencies.ts'
 import { parseBuildModeState, readBuildRetrySource } from '@neutronai/trident/build-mode-state.ts'
 import { assertProjectSnapshot, PROJECT_SNAPSHOT_SCHEMA } from './project-build-snapshot.ts'
+import { AttemptAccounting } from '@neutronai/trident/attempt-accounting.ts'
 
 /**
  * WALL BUDGET PER ROLE. This was ONE flat 45 minutes for all four roles, which is
@@ -76,7 +80,7 @@ function liveProjectSessions(projectId: string): Array<[string, PersistentReplSu
 
 export interface ProjectBuildContext {
   store: ProjectBuildHostOptions['production']['store']
-  phaseUsage: ProjectBuildHostOptions['phaseUsage']
+  attempts: ProjectBuildHostOptions['attempts']
   runHost: ProjectBuildHostOptions['production']['runHost']
   /** Test seam for suite execution. Production uses plain spawnCapture, without
    * the GitHub environment loaded by the publication runner. */
@@ -306,8 +310,12 @@ export async function prepareProjectBuild(input: InnerLoopInput, context: Projec
   // Armed files remain durable evidence that work may have been submitted.
   const reconciled = await reconcileStoppedTrailerReservations(state)
   if (!reconciled.ok) throw new Error(reconciled.detail)
-  await prepareProjectDependencies(run.worktree, state, context.runInstall)
+  const accounting = new AttemptAccounting(context.attempts, state,
+    (stage, meta) => context.store.recordStageEvent(run.id, stage, meta))
+  await accounting.interval('dependency-preparation', { run_id: run.id },
+    () => prepareProjectDependencies(run.worktree, state, context.runInstall))
   const topic = run.chat_id ?? context.projectId
+  const observerPath = (step: string) => join(state, `claude-observer-${createHash('sha256').update(step).digest('hex')}.json`)
   const codexEnv = { ...context.env, ...(input.codex_home ? { CODEX_HOME: input.codex_home } : {}) }
   const trailer: ProjectTrailerDecoder = { schemas: new Map([
     ['project-plan', (value: unknown) => validSnapshot(value, 'plan')],
@@ -338,7 +346,7 @@ export async function prepareProjectBuild(input: InnerLoopInput, context: Projec
       // card-dispatched runs died this way and surfaced only as a timeout (#1112).
       spec: { tools: PROJECT_REPL_TOOL_DEFS, model_preference: [], metering_context: { project_id: context.projectId } } },
     run_id: run.id, state_dir: state,
-    actingTurn: async turn => {
+    actingTurn: Object.assign(async (turn: Parameters<ProjectActingTurn>[0]): ReturnType<ProjectActingTurn> => {
       if (context.provider === 'openai-codex') {
         if (!context.codexOwnerBindings) return { kind: 'refused', reason: 'capability-unsupported', detail: 'Shared Codex owner binding is unavailable' }
         return context.codexOwnerBindings.actingTurn(context.projectId, topic, context.projectDir, [run.worktree])(turn)
@@ -400,9 +408,30 @@ export async function prepareProjectBuild(input: InnerLoopInput, context: Projec
       if (!session || session.hasChildExited()) return { kind: 'unknown', detail: 'Project conversation child is unavailable' }
       // Restricted launches do not attest the edit/run grants required by this bridge.
       if (options.skip_permissions !== true || options.restricted || options.permissions) return { kind: 'refused', reason: 'capability-unsupported', detail: 'Project launch grants cannot authorize bounded build work' }
+      const transcript = sessionJsonlPath(session.sessionId, session.cwd, resolveTranscriptProjectsDir(options))
+      const observer = JSON.stringify({ request: turn.request, session: session.sessionId,
+        directory: join(transcript.slice(0, -'.jsonl'.length), 'subagents') })
+      try { await writeFile(observerPath(turn.request.step_id), observer, { flag: 'wx', mode: 0o600 }) }
+      catch (error) {
+        if ((error as NodeJS.ErrnoException).code !== 'EEXIST' || await readFile(observerPath(turn.request.step_id), 'utf8') !== observer) {
+          // Observer binding cannot reroute or block paid work; its absence stays
+          // explicit unknown telemetry rather than selecting a different session.
+          await accounting.recordEvent('attempt-observer-binding-unavailable', { run_id: run.id, step_id: turn.request.step_id })
+        }
+      }
       return createClaudeActingTurn({ project_id: context.projectId, topic_id: topic, session, projects_dir: resolveTranscriptProjectsDir(options),
         grants: { tools: 'edit-and-run', writable: true, network: true, roots: options.extra_dirs ?? [] } })(turn)
-    },
+    }, { observeUsage: async (request: Parameters<NonNullable<ProjectActingTurn['observeUsage']>>[0]) => {
+      if (context.provider !== 'anthropic' || request.run_id !== run.id) return undefined
+      try {
+        const path = observerPath(request.step_id)
+        if (!(await lstat(path)).isFile()) return undefined
+        const saved = JSON.parse(await readFile(path, 'utf8'))
+        if (JSON.stringify(saved.request) !== JSON.stringify(request) || typeof saved.session !== 'string' || !saved.session
+          || typeof saved.directory !== 'string' || !saved.directory) return undefined
+        return observeClaudeChildUsage(saved.directory, saved.session, request)
+      } catch { return undefined }
+    } }),
     trailer,
     ...(context.provider === 'openai-codex' ? { codexResultTransport: codexBuildResultTransport({
       projectId: context.projectId, projectDir: context.projectDir, stateDir: state, runId: run.id, trailer,
@@ -420,10 +449,12 @@ export async function prepareProjectBuild(input: InnerLoopInput, context: Projec
     substrate.inRepl = context.codexOwnerBindings.guardBuildRunner(context.projectId, substrate.inRepl)
   }
   const workers = {} as ProjectBuildHostOptions['workers']
+  const requestedModels = {} as ProjectBuildHostOptions['requestedModels']
   for (const role of ['plan', 'build', 'review', 'fix'] as const) {
     const phase = phaseByKey(role === 'plan' ? 'decomposition' : role === 'review' ? 'review_adversarial' : 'build')!
     const selected = config[phase.key]
     const descriptor = modelTier(selected?.model ?? phase.default.tier)
+    requestedModels[role] = selected?.model ?? phase.default.tier
     if (!descriptor) throw Error(`Unknown model for ${role}`)
     const provider: Provider = descriptor.group === 'claude' ? 'anthropic' : descriptor.group === 'codex' ? 'openai-codex' : 'pi'
     // Owner guidance and test execution instructions belong only to the builders.
@@ -552,7 +583,7 @@ export async function prepareProjectBuild(input: InnerLoopInput, context: Projec
   const declaration = readProjectRepos(context.projectDir, run.project_slug)
   const repo = declaration.repos.find(row => resolve(context.projectDir, row.path) === resolve(run.repo_path))
   return {
-    substrate, workers, phaseUsage: context.phaseUsage,
+    substrate, workers, requestedModels, attempts: context.attempts,
     testStrategies: { full: input.test_strategy ?? '', intermediate: input.test_strategy_intermediate ?? null },
     production: { store: context.store, runId: run.id, projectSlug: run.project_slug,
       repo: run.repo_path, worktree: run.worktree, branch: run.branch, baseBranch: input.base_branch,
