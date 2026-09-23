@@ -728,7 +728,8 @@ test('local-mode driver reaches merged through the real production effect', asyn
   const snapshot = await measured(f)
   const outcomes = new Map<string, BoundedWorkOutcome>()
   for (const [role, round] of [['plan', 0], ['build', 0], ['review', 1]] as const) {
-    outcomes.set(`${f.row.id}:${role}:${round}`, { kind: 'completed', result: { ...snapshot, payload: {} },
+    const stepId = `${f.row.id}:${role}:${round}${role === 'review' ? `:head:${snapshot.head}` : ''}`
+    outcomes.set(stepId, { kind: 'completed', result: { ...snapshot, payload: {} },
       usage: { input_tokens: 0, output_tokens: 0 }, model_reported: 'test', thread_id: null })
   }
   const path = join(f.dir, 'driver-brief')
@@ -806,7 +807,8 @@ async function resumeFixture(round = 3, replansUsed = 1) {
   const snapshot = await measured(f)
   await f.modes.saveCheckpoint!({ head: f.tip, stage: 'rejected', round, replansUsed,
     previousFindings: ['older issue', 'another issue'], previousBlockingCount: 2,
-    findings: [{ kind: 'code', actionable: true, text: 'new issue' }] })
+    findings: [{ kind: 'code', actionable: true, text: 'new issue' }],
+    previousReview: { findings: ['new issue'], blockingCount: 1 }, reviewBaseline: 'required' })
   const path = join(f.dir, 'resume-brief')
   await writeFile(path, workContextPath(path))
   const request: BuildRunInput['workers']['build']['request'] = { model_id: 'test', effort: null,
@@ -881,7 +883,8 @@ for (const regresses of [false, true]) {
     await f.store.update(f.row.id, { pr: 12, published_pr: 12 })
     const oldPr = { number: 12, headRefOid: f.base, state: 'OPEN', headRefName: 'change', baseRefName: 'main', isCrossRepository: false }
     f.setPr({ ...oldPr })
-    await f.modes.saveCheckpoint!({ head: f.tip, stage: 'built', round: 0, replansUsed: 0, findings: [], previousFindings: [] })
+    await f.modes.saveCheckpoint!({ head: f.tip, stage: 'built', round: 0, replansUsed: 0, findings: [], previousFindings: [],
+      previousReview: null, reviewBaseline: 'none' })
     const waits: number[] = []
     Object.assign(f.deps, createProductionHostEffects({ ...f.options, publicationSleep: async ms => { waits.push(ms) } }).effects)
     let pushed = false
@@ -905,11 +908,11 @@ for (const regresses of [false, true]) {
 test('production resume reloads rejected state, inherits rounds, and ignores worker counters', async () => {
   const f = await resumeFixture()
   expect(await f.run()).toMatchObject({ kind: 'blocked', on: 'fixture stops before merge' })
-  expect(f.runner.calls.map(c => c.step_id)).toEqual([`${f.row.id}:fix:3`, `${f.row.id}:review:4`])
-  expect(f.rounds).toEqual([[4, 1]])
   // The fix commits for real, so the approved head is the one the repository now
   // holds, not the tip the fixture opened on — and it must not be that tip.
   const landed = (await measured(f)).head
+  expect(f.runner.calls.map(c => c.step_id)).toEqual([`${f.row.id}:fix:3`, `${f.row.id}:review:4:head:${landed}`])
+  expect(f.rounds).toEqual([[4, 1]])
   expect(landed).not.toBe(f.tip)
   expect(await createProductionHostEffects(f.options).modes.loadResume()).toMatchObject({
     stage: 'approved', round: 4, replansUsed: 1, head: landed,
@@ -930,7 +933,7 @@ test('production pending worker survives reconstruction without redispatch', asy
   f.input.workers.fix.runner = pendingRunner
   expect(await f.run()).toMatchObject({ kind: 'unknown', step_id: `${f.row.id}:fix:3` })
   f.deps.modes = createProductionHostEffects(f.options).modes
-  expect(await f.run()).toMatchObject({ kind: 'unknown', step_id: `${f.row.id}:fix:3`, detail: expect.stringContaining('existing worker') })
+  expect(await f.run()).toMatchObject({ kind: 'unknown', step_id: `${f.row.id}:fix:3`, detail: 'Pending worker runner cannot recover without dispatch' })
   expect(pendingRunner.calls).toHaveLength(1)
   expect(f.runner.calls).toHaveLength(0)
   expect(await f.deps.modes.loadResume()).toMatchObject({ round: 3, replansUsed: 1, pending: { phase: 'fix', step_id: `${f.row.id}:fix:3` } })
@@ -1087,7 +1090,8 @@ test('production fixed checkpoint survives a host crash without accepting traile
   expect(await restarted.modes.loadResume()).toMatchObject({ stage: 'fixed', round: 4, replansUsed: 1 })
   f.deps.modes = restarted.modes
   expect(await f.run()).toMatchObject({ kind: 'blocked', on: 'fixture stops before merge' })
-  expect(f.runner.calls.map(c => c.step_id)).toEqual([`${f.row.id}:fix:3`, `${f.row.id}:review:4`])
+  const landed = (await measured(f)).head
+  expect(f.runner.calls.map(c => c.step_id)).toEqual([`${f.row.id}:fix:3`, `${f.row.id}:review:4:head:${landed}`])
   expect(f.rounds).toEqual([[4, 1]])
 })
 
@@ -1230,13 +1234,17 @@ test('production rejected review survives a crash before the next fix', async ()
   f.deps.modes = restarted.modes
   f.deps.reviewGate = async (_p, _observation, _s, _r, _u, record) => { record?.({ findings: [], blockingCount: 0 }); return { kind: 'approve' } }
   expect(await f.run()).toMatchObject({ kind: 'blocked', on: 'fixture stops before merge' })
-  expect(f.runner.calls.map(c => c.step_id)).toEqual([`${f.row.id}:fix:1`, `${f.row.id}:review:2`, `${f.row.id}:fix:2`, `${f.row.id}:review:3`])
+  const landed = (await measured(f)).head
+  const firstFix = (await f.command(['git', '-C', f.repo, 'rev-parse', `${landed}^`])).trim()
+  expect(f.runner.calls.map(c => c.step_id)).toEqual([`${f.row.id}:fix:1`, `${f.row.id}:review:2:head:${firstFix}`,
+    `${f.row.id}:fix:2`, `${f.row.id}:review:3:head:${landed}`])
 })
 
 test('production Ralph driver persists its continuation and host iteration', async () => {
   const f = await resumeFixture(0, 0)
   await f.db.run('UPDATE code_trident_runs SET ralph = 1 WHERE id = ?', [f.row.id])
-  await f.modes.saveCheckpoint({ head: f.tip, stage: 'ralph-task-built', round: 0, replansUsed: 0, findings: [], previousFindings: [] })
+  await f.modes.saveCheckpoint({ head: f.tip, stage: 'ralph-task-built', round: 0, replansUsed: 0, findings: [], previousFindings: [],
+    previousReview: null, reviewBaseline: 'none' })
   f.input.mode = 'ralph'
   f.input.ralphRound = 0
   const snapshot = await measured(f)
