@@ -25,7 +25,6 @@ function item(partial: Partial<OvernightItem> & { id: string }): OvernightItem {
     trident_run_id: null,
     trident_slug: null,
     spawn_attempts: 0,
-    ralph: false,
     created_at: '2026-06-19T10:00:00Z',
     started_at: null,
     finished_at: null,

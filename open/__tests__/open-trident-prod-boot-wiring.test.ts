@@ -225,7 +225,7 @@ test.each([
     }
     expect(fired).toEqual({ status: 'fired', error: null })
     expect(optionsSeen).toHaveLength(1)
-    expect(starts).toEqual([{ mode: 'pr', start: 'fresh' }])
+    expect(starts).toEqual([{ mode: 'implementation', start: 'fresh' }])
     expect(optionsSeen[0]!.production.runId).toBe(run.id)
     expect(optionsSeen[0]!.substrate.provider).toBe(provider)
     expect(optionsSeen[0]!.substrate.headless.anthropic?.provider).toBe(provider === 'pi' ? 'anthropic' : undefined)
@@ -458,7 +458,6 @@ describe('Open foundational-Trident prod-boot wiring', () => {
         // returns 'local' without ever reaching `publisherAvailable` — no `gh`,
         // no network. The credential half is proven below through the store.
         resolveMergeMode: (path) => detectMergeMode(path, tbd.merge_mode_probe),
-        resolveRalph: async () => false,
         // THE COMPOSED RUNNER, by VALUE and not by a count of its spelling (Argus
         // r17). This is the object both dispatch tools hand the seed's branch-tip
         // probe; a boot that left it undefined puts every re-dispatch back on the

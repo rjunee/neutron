@@ -5,6 +5,7 @@ import { join } from 'node:path'
 import { seedMigratedDb } from '../tests/support/migrated-db.ts'
 import { applyMigrations } from '@neutronai/migrations/runner.ts'
 import { ProjectDb } from '@neutronai/persistence/index.ts'
+import { WorkBoardStore } from '@neutronai/work-board/store.ts'
 import {
   changeSignatureEntries,
   COLS,
@@ -29,6 +30,75 @@ beforeEach(() => {
 afterEach(() => {
   db.close()
   rmSync(tmp, { recursive: true, force: true })
+})
+
+describe('persisted execution selection', () => {
+  for (const strategy of ['single', 'task_sequence'] as const) {
+    test(`${strategy} persists before build and survives stale saves, terminal reconcile and a cleared card link`, async () => {
+      const store = new TridentRunStore(db)
+      const board = new WorkBoardStore(db)
+      const card = await board.create('p', { title: 'strategy' })
+      const run = await store.create({ slug: 'strategy', project_slug: 'p', repo_path: '/repo', task: 'task', max_task_iterations: 5 })
+      await board.attachRun('p', card.id, run.id)
+      expect(run.execution_strategy).toBeNull()
+      const selection = { strategy, rationale: 'Useful execution boundary', plan: JSON.stringify({ strategy, tasks: ['one'] }) }
+      expect(await store.selectExecutionStrategy(run.id, selection)).toEqual({ kind: 'allow' })
+      expect(await store.selectExecutionStrategy(run.id, selection)).toEqual({ kind: 'allow' })
+      expect(new TridentRunStore(db).get(run.id)).toMatchObject({ execution_strategy: strategy,
+        strategy_rationale: selection.rationale, strategy_plan: selection.plan, strategy_source: 'planner' })
+      expect(board.get('p', card.id)).toMatchObject({ execution_strategy: strategy, strategy_plan: selection.plan })
+      await store.save({ ...run, task_iteration: 2 })
+      expect(store.get(run.id)!.execution_strategy).toBe(strategy)
+      expect(board.get('p', card.id)).toMatchObject({ task_iteration: 2, max_task_iterations: 5 })
+      await store.save({ ...run, task_iteration: 0 })
+      expect(board.get('p', card.id)!.task_iteration).toBe(2)
+      await store.update(run.id, { phase: 'failed' })
+      await board.detachRun('p', run.id, 'failed')
+      await board.update('p', card.id, { status: 'upcoming' })
+      expect(board.get('p', card.id)).toMatchObject({ linked_run_id: null, execution_strategy: strategy,
+        strategy_plan: selection.plan, task_iteration: 2, max_task_iterations: 5 })
+    })
+  }
+
+  test('conflicting selection is refused while explicit same-strategy replanning remains available', async () => {
+    const store = new TridentRunStore(db)
+    const run = await store.create({ slug: 'immutable', project_slug: 'p', repo_path: '/repo', task: 'task' })
+    const original = { strategy: 'single' as const, rationale: 'One coherent change', plan: '{"tasks":["one"]}' }
+    expect(await store.selectExecutionStrategy(run.id, original)).toEqual({ kind: 'allow' })
+    expect((await store.selectExecutionStrategy(run.id, { ...original, strategy: 'task_sequence' })).kind).toBe('blocked')
+    expect((await store.selectExecutionStrategy(run.id, { ...original, plan: '{"tasks":["two"]}' })).kind).toBe('blocked')
+    expect((await store.updateExecutionPlan(run.id, { ...original, strategy: 'task_sequence' })).kind).toBe('blocked')
+    expect(await store.updateExecutionPlan(run.id, { ...original, plan: '{"tasks":["two"]}' })).toEqual({ kind: 'allow' })
+    expect(store.get(run.id)!.strategy_plan).toBe('{"tasks":["two"]}')
+    await expect(db.run("UPDATE code_trident_runs SET execution_strategy = NULL WHERE id = ?", [run.id])).rejects.toThrow('immutable')
+    expect(store.get(run.id)!.execution_strategy).toBe('single')
+  })
+
+  test('card write failure rolls back the run selection and the sibling remains selectable', async () => {
+    const store = new TridentRunStore(db)
+    const board = new WorkBoardStore(db)
+    const card = await board.create('p', { title: 'atomic' })
+    const run = await store.create({ slug: 'atomic', project_slug: 'p', repo_path: '/repo', task: 'task' })
+    await board.attachRun('p', card.id, run.id)
+    await db.run(`CREATE TEMP TRIGGER reject_strategy BEFORE UPDATE OF execution_strategy ON work_board_items
+      BEGIN SELECT RAISE(ABORT, 'card unavailable'); END`, [])
+    const choice = { strategy: 'task_sequence' as const, rationale: 'Separate tasks', plan: '{}' }
+    await expect(store.selectExecutionStrategy(run.id, choice)).rejects.toThrow('card unavailable')
+    expect(store.get(run.id)!.execution_strategy).toBeNull()
+    await db.run('DROP TRIGGER reject_strategy', [])
+    expect(await store.selectExecutionStrategy(run.id, choice)).toEqual({ kind: 'allow' })
+  })
+
+  test('exhausted selection is blocked and its remaining-budget sibling is accepted', async () => {
+    const store = new TridentRunStore(db)
+    const choice = { strategy: 'single' as const, rationale: 'Whole plan', plan: '{}' }
+    for (const [iteration, expected] of [[5, 'blocked'], [4, 'allow']] as const) {
+      const run = await store.create({ slug: `budget-${iteration}`, project_slug: 'p', repo_path: '/repo', task: 'task',
+        task_iteration: iteration, max_task_iterations: 5 })
+      expect((await store.selectExecutionStrategy(run.id, choice)).kind).toBe(expected)
+      expect(store.get(run.id)!.task_iteration).toBe(iteration)
+    }
+  })
 })
 
 describe('claimWorkerConversation', () => {
@@ -184,14 +254,14 @@ describe('TridentRunStore', () => {
       '2026-08-18T10:00:00.400Z',
     ]
     const store = new TridentRunStore(db, () => times.shift()!)
-    await store.recordStageEvent('run-stage', 'launch-start', 'round=1 ralph_round=0')
+    await store.recordStageEvent('run-stage', 'launch-start', 'round=1 task_iteration=0')
     await store.recordStageEvent('run-stage', 'fire-dispatched')
     await store.recordStageEvent('run-stage', 'fire-settled', null)
     await store.recordStageEvent('other-run', 'wrapper-start')
 
     const got = store.stageEvents('run-stage')
     expect(got.map(({ stage, at, meta }) => ({ stage, at, meta }))).toEqual([
-      { stage: 'launch-start', at: '2026-08-18T10:00:00.100Z', meta: 'round=1 ralph_round=0' },
+      { stage: 'launch-start', at: '2026-08-18T10:00:00.100Z', meta: 'round=1 task_iteration=0' },
       { stage: 'fire-dispatched', at: '2026-08-18T10:00:00.300Z', meta: null },
       { stage: 'fire-settled', at: '2026-08-18T10:00:00.200Z', meta: null },
     ])
@@ -222,7 +292,7 @@ describe('TridentRunStore', () => {
       'fire-settled',
     ])
 
-    await store.recordStageEvent(run.id, 'launch-start', 'round=2 ralph_round=0')
+    await store.recordStageEvent(run.id, 'launch-start', 'round=2 task_iteration=0')
     await store.recordStageEvent(run.id, 'fire-dispatched')
     expect(store.stageEvents(run.id).map((event) => event.stage)).toEqual([
       'launch-start',
@@ -261,18 +331,18 @@ describe('TridentRunStore', () => {
 
   test('task totals are nullable positive integers and survive stale full-row saves', async () => {
     const store = new TridentRunStore(db)
-    const old = await store.create({ slug: 'task-total', project_slug: 't1', repo_path: '/repo', task: 'build', ralph: true })
-    expect(old.ralph_task_total).toBeNull()
-    await store.update(old.id, { ralph_task_total: 15 })
+    const old = await store.create({ slug: 'task-total', project_slug: 't1', repo_path: '/repo', task: 'build', execution_strategy: 'task_sequence' })
+    expect(old.task_total).toBeNull()
+    await store.update(old.id, { task_total: 15 })
     await store.save(old)
     await store.saveIfActive(old)
-    expect(store.get(old.id)?.ralph_task_total).toBe(15)
+    expect(store.get(old.id)?.task_total).toBe(15)
     for (const invalid of [0, -1, 1.5, Number.MAX_SAFE_INTEGER + 1]) {
-      await expect(store.update(old.id, { ralph_task_total: invalid })).rejects.toThrow()
-      expect(store.get(old.id)?.ralph_task_total).toBe(15)
+      await expect(store.update(old.id, { task_total: invalid })).rejects.toThrow()
+      expect(store.get(old.id)?.task_total).toBe(15)
     }
-    await store.update(old.id, { ralph_task_total: null })
-    expect(store.get(old.id)?.ralph_task_total).toBeNull()
+    await store.update(old.id, { task_total: null })
+    expect(store.get(old.id)?.task_total).toBeNull()
   })
 
   test('create + get round-trips every column with defaults', async () => {
@@ -286,8 +356,8 @@ describe('TridentRunStore', () => {
     expect(run.phase).toBe('forge-init')
     expect(run.round).toBe(1)
     expect(run.max_rounds).toBe(10)
-    expect(run.ralph).toBe(false)
-    expect(run.max_ralph_rounds).toBe(20)
+    expect(run.execution_strategy).toBeNull()
+    expect(run.max_task_iterations).toBe(20)
     expect(run.merge_mode).toBe('local')
     expect(run.pr).toBeNull()
     expect(run.base_sha).toBeNull()
@@ -329,7 +399,7 @@ describe('TridentRunStore', () => {
 
     const second = 'CODEX_BUILD_BRIEF_PART_CORRUPT: second durable alert. DEFERRED.'
     db.raw().run('UPDATE code_trident_runs SET brief_alert = ? WHERE id = ?', [second, run.id])
-    expect(await store.saveIfActive({ ...stale, phase: 'ralph-plan' })).toBe(true)
+    expect(await store.saveIfActive({ ...stale, phase: 'task-plan' })).toBe(true)
     expect(store.get(run.id)?.brief_alert).toBe(second)
   })
 
@@ -610,27 +680,27 @@ describe('TridentRunStore', () => {
     ).rejects.toThrow()
   })
 
-  test('create honours overrides (ralph, merge_mode, caps, routing)', async () => {
+  test('create honours overrides (execution_strategy, merge_mode, caps, routing)', async () => {
     const store = new TridentRunStore(db)
     const run = await store.create({
       slug: 'big-spec-build',
       project_slug: 't1',
       repo_path: '/repo',
       task: 'build the whole spec',
-      ralph: true,
+      execution_strategy: 'task_sequence',
       merge_mode: 'pr',
       max_rounds: 12,
-      max_ralph_rounds: 30,
+      max_task_iterations: 30,
       branch: 'feature-x',
       worktree: '/wt/feature-x',
       chat_id: '-100',
       thread_id: '42',
     })
     const got = store.get(run.id)
-    expect(got?.ralph).toBe(true)
+    expect(got?.execution_strategy).toBe('task_sequence')
     expect(got?.merge_mode).toBe('pr')
     expect(got?.max_rounds).toBe(12)
-    expect(got?.max_ralph_rounds).toBe(30)
+    expect(got?.max_task_iterations).toBe(30)
     expect(got?.branch).toBe('feature-x')
     expect(got?.worktree).toBe('/wt/feature-x')
     expect(got?.chat_id).toBe('-100')
@@ -734,7 +804,7 @@ describe('TridentRunStore', () => {
     'argus-request-changes-round-7',
     'pr-merged',
     'inner-error',
-    'ralph-task-built',
+    'task-built',
     'awaiting-trailer',
     'who-knows',
     // Out of the round domain both round parsers accept, so no reader would call it
@@ -787,23 +857,23 @@ describe('TridentRunStore', () => {
     },
   )
 
-  // THE RALPH CONTINUATION SEED IS GOVERNED-ONLY (spec item
-  // a-retry-must-resume-from-the-checkpoint). `ralph-task-built` is refused on the
-  // non-ralph rows above and accepted on a ralph row, where it opens the next
+  // THE TASK CONTINUATION SEED IS GOVERNED-ONLY (spec item
+  // a-retry-must-resume-from-the-checkpoint). `task-built` is refused on the
+  // non-execution_strategy rows above and accepted on a execution_strategy row, where it opens the next
   // iteration with the cheap planner; its `-deviated` twin stays refused everywhere,
   // because a deviated build's committed plan is stale.
   test.each([
-    ['ralph-task-built', true, true],
-    ['ralph-task-built', false, false],
-    ['ralph-task-built-deviated', true, false],
-  ] as const)('create on seed %p with ralph=%p accepts=%p', async (checkpoint, ralph, accepts) => {
+    ['task-built', 'task_sequence', true],
+    ['task-built', 'single', false],
+    ['task-built-deviated', 'task_sequence', false],
+  ] as const)('create on seed %p with execution_strategy=%p accepts=%p', async (checkpoint, execution_strategy, accepts) => {
     const store = new TridentRunStore(db)
     const create = store.create({
-      slug: `continuation-${String(ralph)}-${checkpoint}`,
+      slug: `continuation-${String(execution_strategy)}-${checkpoint}`,
       project_slug: 't1',
       repo_path: '/r',
       task: 't',
-      ralph,
+      execution_strategy,
       inner_checkpoint: checkpoint,
       inner_checkpoint_head: 'a'.repeat(40),
       base_sha: 'c'.repeat(40),
@@ -1241,7 +1311,7 @@ describe('TridentRunStore', () => {
         last_advanced_at: clock,
       })
       expect(claimed?.round).toBe(1)
-      expect(claimed?.ralph_round).toBe(0)
+      expect(claimed?.task_iteration).toBe(0)
       expect(claimed?.harvested_at).toBeNull()
     })
 
@@ -1897,7 +1967,7 @@ describe('empty-findings rejection guard — an empty finding set is never a rej
       })
       expect(await store.saveIfActive({
         ...saved,
-        phase: 'ralph-plan',
+        phase: 'task-plan',
         inner_verdict: verdict,
       })).toBe(true)
       expect(store.get(saved.id)?.inner_verdict).toBe(verdict)
@@ -2168,7 +2238,7 @@ describe('terminalTransition retracts a stale in-flight claim', () => {
 })
 
 describe('INSERT column/placeholder/bound-array alignment — the silent-corruption guard (BLOCKING addendum)', () => {
-  test('COLS matches the 44 readable run columns', () => {
+  test('COLS matches the 47 readable run columns', () => {
     // The INSERT placeholder list is derived from COLS, so placeholder count =
     // column count by construction. What is NOT free is COLS agreeing with the
     // TABLE: a column added, dropped or renamed by a migration without touching
@@ -2177,13 +2247,13 @@ describe('INSERT column/placeholder/bound-array alignment — the silent-corrupt
     // conscious edit here, not an invisible drift. It moved 40 -> 41 when
     // `claimed_paths` arrived with migration 0139: the guard refused to let a
     // real column land silently, which is exactly its job. 42 -> 43 with
-    // `ralph_task_total` (migration 0154); 43 -> 44 with `resume_note` (0155).
+    // `task_total` (migration 0154); 43 -> 44 with `resume_note` (0155).
     const cols = COLS.split(', ')
     const pragma = db
       .prepare<{ name: string }, []>(`PRAGMA table_info(code_trident_runs)`)
       .all()
 
-    expect(cols).toHaveLength(44)
+    expect(cols).toHaveLength(47)
     // agent_waked_at is deliberately absent from COLS: claimAgentWake is its sole
     // writer, so a full snapshot can never clear an already-won delivery claim.
     // The table therefore has 45 columns and COLS has 44 — compare against the
@@ -2221,10 +2291,10 @@ describe('INSERT column/placeholder/bound-array alignment — the silent-corrupt
       id: 'run-distinct-0001',
       slug: 'slug-distinct',
       project_slug: 'project-slug-distinct',
-      phase: 'ralph-plan',
+      phase: 'task-plan',
       max_rounds: 7,
-      ralph: true,
-      max_ralph_rounds: 13,
+      execution_strategy: 'task_sequence',
+      max_task_iterations: 13,
       branch: 'branch-distinct',
       merge_mode: 'pr',
       repo_path: '/repo/path/distinct',
@@ -2396,7 +2466,7 @@ describe('update() derives the phase from the checkpoint', () => {
       ['fix-round-10', 'argus'],
       ['argus-request-changes', 'forge-fix'],
       ['argus-request-changes-round-2', 'forge-fix'],
-      ['ralph-task-built', 'ralph-task'],
+      ['task-built', 'task-build'],
     ]
     for (const [checkpoint, phase] of cases) {
       const run = await seed(store, `phase-map-${checkpoint}`)

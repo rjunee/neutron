@@ -248,7 +248,7 @@ describe('parseInnerResult — decode the typed terminal column', () => {
     // A real PR number still decodes untouched.
     expect(prOf(7)).toBe(7)
   })
-  // The deviation flag decides whether the NEXT Ralph iteration pays for the full
+  // The deviation flag decides whether the NEXT Task sequence iteration pays for the full
   // whole-repo survey (~287 s) or takes the cheap `plan:next` continuation. It is
   // fail-closed in the direction that costs money, not correctness: a truthy
   // stand-in read as `true` would re-plan from scratch every iteration forever,
@@ -270,12 +270,12 @@ describe('parseInnerResult — decode the typed terminal column', () => {
         ?.deviated_from_spec,
     ).toBe(false)
   })
-  test('decodes remainingTasks (the #362 Ralph re-fire signal); absent → null', () => {
+  test('decodes remainingTasks (the #362 Task sequence re-fire signal); absent → null', () => {
     const withRemaining = parseInnerResult(
-      JSON.stringify({ verdict: 'REQUEST_CHANGES', checkpoint: 'ralph-task-built', remainingTasks: 3 }),
+      JSON.stringify({ verdict: 'REQUEST_CHANGES', checkpoint: 'task-built', remainingTasks: 3 }),
     )
     expect(withRemaining?.remaining_tasks).toBe(3)
-    // Absent field (legacy/non-Ralph rows) → null (no re-fire).
+    // Absent field (legacy/non-Task sequence rows) → null (no re-fire).
     const withoutRemaining = parseInnerResult(JSON.stringify({ verdict: 'APPROVE' }))
     expect(withoutRemaining?.remaining_tasks).toBeNull()
   })
@@ -426,12 +426,12 @@ describe('buildWorkflowFirer — fire mechanics over a fire seam', () => {
   /**
    * The durable re-fire counter. The workflow gates its cheap `plan:next`
    * continuation planner (and the every-Kth full re-plan) on it, so a launcher that
-   * dropped it would silently pay the full whole-repo survey on every Ralph task —
+   * dropped it would silently pay the full whole-repo survey on every Task sequence task —
    * exactly the waste that planner exists to remove, and invisible from either side.
    */
-  test('the Ralph round counter is threaded from the run row', () => {
-    expect(buildWorkflowArgs(input()).ralphRound).toBe(0)
-    expect(buildWorkflowArgs(input({ run: makeRun({ ralph: true, ralph_round: 4 }) })).ralphRound).toBe(4)
+  test('the Task sequence round counter is threaded from the run row', () => {
+    expect(buildWorkflowArgs(input()).taskIteration).toBe(0)
+    expect(buildWorkflowArgs(input({ run: makeRun({ execution_strategy: 'task_sequence', task_iteration: 4 }) })).taskIteration).toBe(4)
   })
 
   /**

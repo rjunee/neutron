@@ -62,7 +62,7 @@ async function runBuiltHead(opts: Options = {}) {
   const parallel = async (fns: Array<() => Promise<unknown>>) => Promise.all(fns.map((f) => f()))
   const args = {
     repoPath: '/repo', task: 'Ship it', baseBranch: 'main', slug: 'built-head', maxRounds: opts.maxRounds ?? 3,
-    ralph: false, mergeMode: opts.mode ?? 'local', prNumber: null, branch,
+    executionStrategy: 'single', mergeMode: opts.mode ?? 'local', prNumber: null, branch,
     dbPath: '/tmp/no.db', runId: 'built-head-run', codexHome: null,
     resumeCheckpoint: opts.resumeCheckpoint ?? null,
     ...(opts.resumeLiveHead !== undefined ? { resumeLiveHead: opts.resumeLiveHead } : {}),

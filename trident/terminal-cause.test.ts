@@ -38,8 +38,8 @@ const run = (over: Record<string, unknown> = {}): TridentRun =>
     round: 1,
     max_rounds: 10,
     ralph: 1,
-    ralph_round: 0,
-    max_ralph_rounds: 20,
+    task_iteration: 0,
+    max_task_iterations: 20,
     branch: 'trident/a-card',
     pr: 217,
     merge_mode: 'pr',
@@ -565,7 +565,7 @@ describe('interpretFailure — a specific summary per measured cause (#520)', ()
       [
         'handoff-publish',
         'pr-already-merged',
-        'ralph-task-built',
+        'task-built',
         'resume-approved-unchanged',
         'review-approved',
         'review-escalated',
@@ -580,7 +580,7 @@ describe('interpretFailure — a specific summary per measured cause (#520)', ()
     // the publish — of something this cause did not measure, and the branches that read
     // the reason are the ones that know. Naming the exit as the failure would be a
     // confident sentence about an unmeasured cause.
-    for (const kind of ['review-approved', 'pr-already-merged', 'resume-approved-unchanged', 'wave-member-built', 'handoff-publish', 'ralph-task-built']) {
+    for (const kind of ['review-approved', 'pr-already-merged', 'resume-approved-unchanged', 'wave-member-built', 'handoff-publish', 'task-built']) {
       const out = interpretFailure(row(kind, { failure_reason: 'merge failed: git push rejected' }))
       expect({ kind, klass: out.klass }).toEqual({ kind, klass: 'merge-mechanics' })
     }

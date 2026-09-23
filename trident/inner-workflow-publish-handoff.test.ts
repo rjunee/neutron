@@ -14,7 +14,7 @@
  * `publishRequested: true` terminal result unconditionally; `publishHead` is a
  * best-effort CROSS-CHECK — the trimmed claim when it is 7–40 hex, else null.
  *
- * Harness copied from `inner-workflow-ralph-refire.test.ts`: read the
+ * Harness copied from `inner-workflow-task-sequence-refire.test.ts`: read the
  * un-importable script (top-level `return` + Workflow-runtime globals), strip the
  * single `export`, and run the body as an AsyncFunction with MOCKED runtime
  * globals that RECORD every `agent()` label. `dbPath`/`runId` are null so the
@@ -80,7 +80,7 @@ async function runPublish(commitSha: string): Promise<PublishRun> {
     baseBranch: 'main',
     slug: 'pub-run', // → forgeBranch === 'trident/pub-run'
     maxRounds: 3,
-    ralph: false,
+    executionStrategy: 'single',
     mergeMode: 'pr', // ← isPr: the run returns at the forge-done publish handoff
     prNumber: null,
     branch: null,

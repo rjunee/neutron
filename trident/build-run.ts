@@ -6,7 +6,9 @@ import { createLogger } from '@neutronai/logger'
 import { TERMINAL_CAUSE_MAX, unknownCause } from '@neutronai/runtime/refusal-cause.ts'
 import { createHash } from 'node:crypto'
 import { isDeepStrictEqual } from 'node:util'
-import { clampPlanBranchBrief, validateTrailer } from './gates/result-contract.ts'
+import { clampPlanBranchBrief, validateTrailer, type PlanTrailer } from './gates/result-contract.ts'
+import { isExecutionStrategy, type ExecutionStrategy, type ExecutionStrategySource } from './execution-strategy.ts'
+import { normalizeLegacyStoredExecutionPlan } from './legacy-execution-compat.ts'
 import {
   placementFor,
   type BoundedWorkOutcome,
@@ -45,12 +47,14 @@ export type ReviewDecision =
   | { kind: 're-plan'; findings: readonly string[]; whatIsMissing: string; blockingCount?: number }
   | Exclude<GateResult, { kind: 'allow' }>
 
-export interface ExecutionPlan {
-  implementationPlan: string
-  topTask: string
-  remainingTasks: number
-  executionSpec: string
-}
+export type ExecutionPlan = PlanTrailer
+export type ExecutionStrategyObservation = {
+  kind: 'known'
+  strategy: ExecutionStrategy | null
+  rationale: string | null
+  plan: ExecutionPlan | null
+  source: ExecutionStrategySource | null
+} | { kind: 'unknown'; detail: string }
 export interface PlanProbe {
   found: boolean
   body: string
@@ -59,15 +63,18 @@ export interface PlanProbe {
   uncheckedCount: number
 }
 export type PlanCommit = { kind: 'known'; head: string } | Exclude<GateResult, { kind: 'allow' }>
+export interface TaskHandoffIntent { iteration: number; builtHead: string; body: string }
 export interface ResumeCheckpoint {
   head: string | null
-  stage: 'built' | 'approved' | 'rejected' | 'fixed' | 'ralph-task-built' | 'ralph-task-built-deviated'
+  stage: 'built' | 'approved' | 'rejected' | 'fixed' | 'task-built' | 'task-built-deviated'
   round: number
   /** Persisted by the host alongside the review checkpoint. */
   replansUsed?: number
   previousBlockingCount?: number
-  /** Host-validated plan remainder at the completed Ralph build; absent is unknown. */
+  /** Host-validated plan remainder at the completed task-sequence build; absent is unknown. */
   remainingTasks?: number | undefined
+  /** Completed intermediate task: spend is durable before the Git ledger write. */
+  handoff?: TaskHandoffIntent | undefined
   findings: readonly { kind: 'code' | 'lane'; actionable: boolean; text: string }[]
   previousFindings: readonly string[]
   /** Baseline retained across completion checkpoints; omission is legacy evidence. */
@@ -89,6 +96,7 @@ interface PendingRecovery {
   planner: 'full' | 'next'
   committedPlan?: PlanProbe
   plan: ExecutionPlan | null
+  executionStrategy: ExecutionStrategy | null
   /** Null records known absence; omission is incomplete recovery evidence. */
   previousReview: ReviewProgress | null
   reviewBaseline: 'none' | 'required'
@@ -108,13 +116,17 @@ function validReviewProgress(value: unknown): value is ReviewProgress {
 function recoveryInputs(input: BuildRunInput, maxRounds: number) {
   // owned_pr is fresh-admission provenance, and can appear after this run publishes.
   // The original and measured snapshots bind recovery to the actual PR instead.
-  const { start: _start, owned_pr: _ownedPr, workers, ...identity } = input
+  const { start: _start, owned_pr: _ownedPr, executionStrategy: _strategy, workers, ...identity } = input
   // JSON checkpoints omit absent optional inputs; compare that same durable form.
-  return { ...Object.fromEntries(Object.entries(identity).filter(([, value]) => value !== undefined)), maxRounds, workers: Object.fromEntries(
+  return { ...Object.fromEntries(Object.entries(identity).filter(([, value]) => value !== undefined)),
+    ...(input.mode === 'implementation' ? { taskIteration: input.taskIteration ?? 0 } : {}), maxRounds, workers: Object.fromEntries(
     Object.entries(workers).map(([role, { runner, request }]) => [role, { provider: runner.provider, request }]),
   ) }
 }
 export interface BuildModeHost {
+  loadExecutionStrategy(): Promise<ExecutionStrategyObservation>
+  /** Persist the validated proposal before builder dispatch; refresh cannot reclassify. */
+  selectExecutionStrategy(value: { strategy: ExecutionStrategy; rationale: string; plan: ExecutionPlan; refresh: boolean }): Promise<GateResult>
   loadResume(): Promise<ResumeCheckpoint | null>
   /** Only the driver supplies this state; never pass a worker trailer here. */
   saveCheckpoint(checkpoint: ResumeCheckpoint): Promise<void>
@@ -126,22 +138,25 @@ export interface BuildModeHost {
    * committed ledger already equals `body` returns that tip and writes nothing.
    * `known` carries the resulting full head, which the driver re-measures. */
   commitPlan(value: { body: string; snapshot: BuildSnapshot }): Promise<PlanCommit>
+  /** Read-only proof that a moved tip is exactly the intended ledger-only child. */
+  recoverTaskHandoff?(value: { intent: TaskHandoffIntent; snapshot: BuildSnapshot }): Promise<GateResult>
   /** Atomically consume the old result and persist the next iteration. Must be
    * idempotent by run_id + round, and compare the expected head before advancing.
    * An unknown response is reconciled by the host before another buildRun call. */
-  advanceRalph(value: { run_id: string; round: number; snapshot: BuildSnapshot; remainingTasks: number }): Promise<GateResult>
+  advanceTask(value: { run_id: string; round: number; snapshot: BuildSnapshot; remainingTasks: number }): Promise<GateResult>
 }
 
 export interface BuildRunInput {
   run_id: string
-  mode: 'pr' | 'ralph' | 'wave' | 'bound_pr'
+  mode: 'implementation' | 'wave' | 'bound_pr'
+  executionStrategy?: ExecutionStrategy | null
   start: 'fresh' | 'resume'
   merge_mode?: 'pr' | 'local'
   bound_pr?: number
   /** PR proven by dispatch to belong to this card's prior terminal run. */
   owned_pr?: number
   pinnedTaskId?: string
-  ralphRound?: number
+  taskIteration?: number
   repl_provider: Provider
   workers: Record<WorkPhase, {
     runner: WorkerRunner
@@ -158,7 +173,10 @@ export interface BuildRunDeps {
   readReviewCap(runId: string): Promise<{ kind: 'known'; max_rounds?: number | undefined } | { kind: 'unknown'; detail: string }>
   assignedBranch?: string | undefined
   modes?: BuildModeHost
-  prepareWork(request: BoundedWorkRequest, context: { snapshot: BuildSnapshot; previous: unknown; findings: readonly string[]; planner?: 'full' | 'next'; committedPlan?: PlanProbe; suiteScope?: 'full-suite' | 'subset'; testStrategy?: string }): Promise<void>
+  /** Narrow compatibility for the original, still-reserved legacy request. Never
+   * authorize new work or substitute provider, grants, budget or worker identity. */
+  validateLegacyPendingRequest?(workers: PendingRecovery['inputs']['workers']): Promise<GateResult>
+  prepareWork(request: BoundedWorkRequest, context: { snapshot: BuildSnapshot; previous: unknown; findings: readonly string[]; planner?: 'full' | 'next'; executionStrategy?: ExecutionStrategy | null; committedPlan?: PlanProbe; suiteScope?: 'full-suite' | 'subset'; testStrategy?: string }): Promise<void>
   /** Read back the materialized review input after preparation, before dispatch. */
   reviewArtifact?(request: BoundedWorkRequest, snapshot: BuildSnapshot): Promise<GateResult>
   measure(): Promise<Measurement>
@@ -197,7 +215,7 @@ export type BuildRunOutcome =
   | { kind: 'merged'; snapshot: BuildSnapshot }
   | { kind: 'blocked'; phase: BuildPhase; on: string; recipient: 'orchestrator' }
   | { kind: 'built'; snapshot: BuildSnapshot; cause: 'wave-member-built' }
-  | { kind: 'continued'; snapshot: BuildSnapshot; remainingTasks: number; cause: 'ralph-task-built' }
+  | { kind: 'continued'; snapshot: BuildSnapshot; remainingTasks: number; cause: 'task-built' }
   | { kind: 'refused'; reason: 'worker-unsupported'; detail: string }
   | { kind: 'failed'; phase: BuildPhase; detail: string; cause: TerminalCause }
   /** Nonterminal: preserve the worker and its step identity; do not reap/re-fire. */
@@ -250,7 +268,7 @@ const uncheckedLine = /^\s*- \[ \]\s+/
 const unchecked = (body: string): string[] => body.split('\n').filter(line => uncheckedLine.test(line))
 
 /**
- * THE TASK LEDGER. A Ralph plan's `implementationPlan` is a checkbox list — one
+ * THE TASK LEDGER. A task-sequence plan's `implementationPlan` is a checkbox list — one
  * `- [x] T<n>: …` line per task already built on this branch, one `- [ ] T<n>: …`
  * line per task still to build, the top task first — and the host commits it at
  * every handoff, at the branch's own `.trident/ledgers/<branch>.md`
@@ -264,10 +282,9 @@ const unchecked = (body: string): string[] => body.split('\n').filter(line => un
  * and every continuation re-planned from scratch (spec item
  * a-retry-must-resume-from-the-checkpoint, acceptance 2).
  *
- * ENFORCED ONLY WHERE A LEDGER IS COMMITTED — a handoff, `remainingTasks > 0`. A
- * single-task or final iteration commits nothing and nothing downstream reads its
- * boxes, so refusing its shape would turn a formatting slip into a failed run that
- * used to build and merge. And the top task is compared with its checkbox marker
+ * This shape check applies where a ledger is committed: `remainingTasks > 0`.
+ * Separately, full refreshes preserve the accepted pending queue even when the
+ * new proposal claims to be terminal. The top task is compared with its checkbox marker
  * stripped on both sides: `T1: foo` and `- [ ] T1: foo` name the same task (the
  * publication title strips the marker for the same reason, open/wiring/project-build.ts).
  */
@@ -298,10 +315,7 @@ function ciUnknownDetail(payload: unknown, detail: string): string {
 }
 
 function executionPlan(value: unknown): value is ExecutionPlan {
-  if (!value || typeof value !== 'object') return false
-  const plan = value as ExecutionPlan
-  return typeof plan.implementationPlan === 'string' && typeof plan.topTask === 'string'
-    && typeof plan.executionSpec === 'string' && Number.isSafeInteger(plan.remainingTasks) && plan.remainingTasks >= 0
+  return validateTrailer('plan', value).ok
 }
 
 /** Build state machine. Control flow and every side effect stay in this host. */
@@ -318,6 +332,7 @@ export async function buildRun(input: BuildRunInput, deps: BuildRunDeps, signal:
   }
   // G019 stays in the retained review-only executor, including on resume.
   if (input.mode === 'bound_pr') return blocked('bound_pr requires the retained review-only executor')
+  if (input.mode !== 'implementation' && input.mode !== 'wave') return blocked('Unknown build mode')
   try {
     // Enumerate every reachable worker role at admission, including later fixes.
     for (const role of ['plan', 'build', 'review', 'fix'] as const) {
@@ -337,8 +352,30 @@ export async function buildRun(input: BuildRunInput, deps: BuildRunDeps, signal:
     if (!Number.isSafeInteger(maxRounds) || maxRounds < 1) return unknown('Review round cap is invalid')
 
     const modes = deps.modes
-    if ((input.mode === 'ralph' || input.start === 'resume') && !modes) return blocked('Mode host is required')
+    if ((input.mode === 'implementation' || input.start === 'resume') && !modes) return blocked('Mode host is required')
+    // Wave is an explicit host mode, but migrated waves still need their stored
+    // provenance to reconcile an original pre-cutover worker reservation.
+    const selection = modes ? await modes.loadExecutionStrategy() : null
+    if (selection?.kind === 'unknown') return unknown(selection.detail)
+    const selected = input.mode === 'implementation' ? selection : null
+    const legacySelection = selection?.source === 'legacy' ? selection : null
+    let strategy = selected?.strategy ?? null
+    if (selected && (strategy === null
+      ? selected.source !== null || selected.rationale !== null || selected.plan !== null
+      : !isExecutionStrategy(strategy) || !['planner', 'legacy'].includes(selected.source ?? '')
+        || typeof selected.rationale !== 'string' || !selected.rationale.trim()
+        || (selected.plan === null ? selected.source !== 'legacy'
+          : !executionPlan(selected.plan) || selected.plan.strategy !== strategy))) {
+      return unknown('Persisted execution strategy is missing valid selection evidence')
+    }
+    if (input.mode === 'implementation' && input.executionStrategy !== undefined && input.executionStrategy !== strategy) {
+      return unknown('Execution strategy changed after launch preparation')
+    }
+    let acceptedPlan = selected?.plan ?? null
     const resume = input.start === 'resume' ? await modes!.loadResume() : null
+    if (input.mode === 'implementation' && strategy === null && resume && resume.pending?.phase !== 'plan') {
+      return unknown('Resume requires a persisted execution strategy before completed work can be reused')
+    }
     phase = resume?.pending?.phase ?? phase
     step_id = resume?.pending?.step_id ?? step_id
     let snapshot: BuildSnapshot
@@ -350,10 +387,19 @@ export async function buildRun(input: BuildRunInput, deps: BuildRunDeps, signal:
     if (resume?.pending) {
       const pending = resume.pending
       const original = recovery?.request
-      const expected = { ...input.workers[pending.phase].request, run_id: input.run_id,
+      let expectedInputs = recoveryInputs(input, maxRounds)
+      let expectedRequest = input.workers[pending.phase].request
+      if (legacySelection && recovery && deps.validateLegacyPendingRequest
+        && !isDeepStrictEqual(recovery.inputs.workers, expectedInputs.workers)) {
+        const compatible = gateStop(await deps.validateLegacyPendingRequest(recovery.inputs.workers))
+        if (compatible) return compatible
+        expectedInputs = { ...expectedInputs, workers: recovery.inputs.workers }
+        expectedRequest = recovery.inputs.workers[pending.phase]!.request
+      }
+      const expected = { ...expectedRequest, run_id: input.run_id,
         step_id: pending.step_id, role: pending.phase, needs_approval_decision: false }
       if (!recovery || !isDeepStrictEqual(original, expected)
-          || !isDeepStrictEqual(recovery.inputs, recoveryInputs(input, maxRounds))
+          || !isDeepStrictEqual(recovery.inputs, expectedInputs)
           || !Number.isSafeInteger(recovery.round) || recovery.round < 0
           || !recovery.snapshot || typeof recovery.snapshot.head !== 'string' || typeof recovery.snapshot.diff !== 'string'
           || (recovery.snapshot.pr !== null && (!recovery.snapshot.pr
@@ -361,6 +407,8 @@ export async function buildRun(input: BuildRunInput, deps: BuildRunDeps, signal:
             || typeof recovery.snapshot.pr.head !== 'string' || !['OPEN', 'CLOSED', 'MERGED'].includes(recovery.snapshot.pr.state)))
           || !Array.isArray(recovery.findings) || !recovery.findings.every(f => typeof f === 'string')
           || !['full', 'next'].includes(recovery.planner) || !('previous' in recovery)
+          || !(recovery.executionStrategy === null || isExecutionStrategy(recovery.executionStrategy))
+          || (pending.phase !== 'plan' && input.mode === 'implementation' && recovery.executionStrategy !== strategy)
           || (recovery.plan !== null && !executionPlan(recovery.plan))
           || !validReviewBaseline(recovery.reviewBaseline, recovery.previousReview)
           || ((pending.phase === 'fix' || (resume.replansUsed ?? 0) > 0) && recovery.reviewBaseline !== 'required')
@@ -368,10 +416,25 @@ export async function buildRun(input: BuildRunInput, deps: BuildRunDeps, signal:
           || !isDeepStrictEqual(recovery.previousReview, resume.previousReview)) {
         return unknown('Resume cannot validate the original pending worker request and context')
       }
-      const expectedStep = `${input.run_id}${input.mode === 'ralph' ? `:task:${input.ralphRound ?? 0}` : ''}:${pending.phase}:${recovery.round}`
+      if (pending.phase === 'build' && acceptedPlan === null && selected?.source === 'legacy'
+        && recovery.plan !== null && recovery.plan.strategy === strategy) {
+        const adopted = gateStop(await modes!.selectExecutionStrategy({ strategy: recovery.plan.strategy,
+          rationale: recovery.plan.rationale, plan: structuredClone(recovery.plan), refresh: true }))
+        if (adopted) return adopted
+        const observed = await modes!.loadExecutionStrategy()
+        if (observed.kind === 'unknown') return unknown(observed.detail)
+        if (observed.strategy !== strategy || observed.source !== 'legacy'
+          || observed.rationale !== recovery.plan.rationale || !isDeepStrictEqual(observed.plan, recovery.plan)) {
+          return unknown('Legacy pending plan persistence was not confirmed')
+        }
+        acceptedPlan = structuredClone(recovery.plan)
+      }
+      const expectedStep = `${input.run_id}${recovery.executionStrategy === 'task_sequence' ? `:task:${input.taskIteration ?? 0}` : ''}:${pending.phase}:${recovery.round}`
         + (pending.phase === 'review' ? `:head:${recovery.snapshot.head}` : '')
       if (pending.step_id !== expectedStep || (pending.phase !== 'plan' && recovery.round > maxRounds)
-          || (pending.phase === 'build' && (input.mode === 'ralph' || input.mode === 'wave') && !recovery.plan)) {
+          || (pending.phase === 'build' && (!recovery.plan
+            || (input.mode === 'implementation' && (strategy === null || recovery.plan.strategy !== strategy
+              || !isDeepStrictEqual(recovery.plan, acceptedPlan)))))) {
         return unknown('Resume cannot validate the original pending worker identity')
       }
       // Read-only work cannot explain movement. Mutating work is reconciled below
@@ -392,6 +455,8 @@ export async function buildRun(input: BuildRunInput, deps: BuildRunDeps, signal:
     let replansUsed = resume?.replansUsed ?? 0
     if (replansUsed !== 0 && replansUsed !== 1) return blocked('Invalid recorded re-plan count')
     let skipBuild = false
+    let discardHandoff = false
+    let resumeTaskHandoff: ExecutionPlan | null = null
     let approved = false
     let firstRound = 1
     let resumeFix = false
@@ -399,7 +464,7 @@ export async function buildRun(input: BuildRunInput, deps: BuildRunDeps, signal:
     // Only this shape must not reuse the round-0 result identities: the retained
     // `plan:0` / `build:0` files describe the checkpointed revision, and movement
     // deliberately invalidates that revision and everything derived from it. An
-    // absent head, a wave task, or a ralph task rebuild reuse round 0 as before —
+    // absent head, a wave task, or a task_sequence task rebuild reuse round 0 as before —
     // four existing cases pin that, and the first draft of this fix broke all four
     // by treating every resume as a moved one.
     let headMoved = false
@@ -419,27 +484,63 @@ export async function buildRun(input: BuildRunInput, deps: BuildRunDeps, signal:
         return failed('Required resume head is unreadable', 'resume-head-unreadable')
       }
       headMoved = fullOid(resume.head) && fullOid(snapshot.head) && resume.head !== snapshot.head
-      // G038: absence/movement rebuilds; only an exact full OID opens a fast path.
+      if (resume.handoff) {
+        const intent = resume.handoff
+        if (strategy !== 'task_sequence' || resume.stage !== 'built' || !acceptedPlan
+          || acceptedPlan.remainingTasks !== resume.remainingTasks || !ledgerAgrees(acceptedPlan)
+          || acceptedPlan.remainingTasks <= 0 || intent.body !== tickTopTask(acceptedPlan.implementationPlan)
+          || !Number.isSafeInteger(intent.iteration) || intent.iteration < 0 || !fullOid(intent.builtHead)) {
+          return unknown('Task ledger intent disagrees with the completed task')
+        }
+        if (resume.head !== snapshot.head) {
+          if (!modes!.recoverTaskHandoff) return unknown('Task ledger recovery host is missing')
+          const recovered = snapshot.head === 'absent' ? { kind: 'blocked' as const, on: 'Task branch is absent' }
+            : await modes!.recoverTaskHandoff({ intent, snapshot })
+          if (recovered.kind === 'unknown') return unknown(recovered.detail)
+          if (recovered.kind === 'allow') {
+            resume.head = snapshot.head
+            headMoved = false
+          } else discardHandoff = true
+        }
+        // Spend may already be one ahead of the unresolved handoff's identity.
+        input = { ...input, taskIteration: intent.iteration + (discardHandoff ? 1 : 0) }
+      }
+      // G038: arbitrary movement rebuilds. Only an exact full OID (including
+      // the ledger child independently authenticated above) opens a fast path.
       if (fullOid(resume.head) && resume.head === snapshot.head
-          && input.mode !== 'wave' && !resume.stage.startsWith('ralph-task-built')) {
+          && input.mode !== 'wave' && !resume.stage.startsWith('task-built')) {
         const regenerated = await modes!.regenerateDiff(resume.head)
         if (regenerated.kind === 'unknown') return unknown(regenerated.detail)
         // G040: an empty regenerated diff cannot authorize review or approval.
         if (regenerated.diff.trim().length > 0) {
           if (regenerated.diff !== snapshot.diff) return blocked('Regenerated diff disagrees with host measurement')
+          // A builder checkpoint precedes the ledger/iteration handoff. Reusing
+          // its head must not turn an intermediate task into a completed card.
+          if (strategy === 'task_sequence' && resume.stage === 'built') {
+            if (!Number.isSafeInteger(resume.remainingTasks) || resume.remainingTasks! < 0
+              || !acceptedPlan || acceptedPlan.remainingTasks !== resume.remainingTasks || !ledgerAgrees(acceptedPlan)) {
+              return unknown('Task-sequence built checkpoint cannot establish its remaining task handoff')
+            }
+            if (resume.remainingTasks !== 0) resumeTaskHandoff = structuredClone(acceptedPlan)
+          }
           skipBuild = true
           approved = resume.stage === 'approved'
           resumeFix = resume.stage === 'rejected' && resume.findings.some(f => f.kind === 'code' && f.actionable)
+        } else if (resume.handoff) {
+          // G040 cannot reuse a completed no-op at the launch base. Retire its
+          // already spent identity before reserving a budget-checked rebuild.
+          discardHandoff = true
+          input = { ...input, taskIteration: resume.handoff.iteration + 1 }
         }
       }
     }
     let planner: 'full' | 'next' = 'full'
     let committedPlan: PlanProbe | undefined
-    const ralphRound = input.ralphRound ?? 0
-    if (input.mode === 'ralph' && !skipBuild && !recovery) {
+    const taskIteration = input.taskIteration ?? 0
+    if (strategy === 'task_sequence' && !skipBuild && !recovery) {
       // G026: only a clean handoff can use the cheap planner, with periodic refresh.
-      const clean = resume?.stage === 'ralph-task-built' && Number.isSafeInteger(ralphRound)
-        && ralphRound > 0 && ralphRound % 5 !== 0
+      const clean = resume?.stage === 'task-built' && Number.isSafeInteger(taskIteration)
+        && taskIteration > 0 && taskIteration % 5 !== 0
       if (clean) {
         const probe = await modes!.probePlan(snapshot.head)
         // G027 and G028: independently measured committed bytes and count agree.
@@ -460,7 +561,21 @@ export async function buildRun(input: BuildRunInput, deps: BuildRunDeps, signal:
         previousReview: previousReview ?? null, reviewBaseline, ...patch }
       await modes?.saveCheckpoint(structuredClone(durable))
     }
-    let previousPayload: unknown = null
+    if (discardHandoff) {
+      await checkpoint({ handoff: undefined, stage: 'task-built-deviated' })
+    }
+    if (acceptedPlan && strategy === 'task_sequence' && !skipBuild && !recovery) {
+      // Every new task planner, including a clean continuation, needs remaining
+      // durable budget. Settling a completed handoff or reconciling an existing
+      // worker dispatches no new work and must remain possible at the cap.
+      const budget = gateStop(await modes!.selectExecutionStrategy({ strategy,
+        rationale: acceptedPlan.rationale, plan: structuredClone(acceptedPlan), refresh: true }))
+      if (budget) return budget
+    } else if (resume?.handoff && resume.head === snapshot.head) {
+      // Persist the independently authenticated child before ordinary handoff.
+      await checkpoint({ head: snapshot.head })
+    }
+    let previousPayload: unknown = acceptedPlan
     let findings: readonly string[] = []
     if (recovery) {
       snapshot = structuredClone(recovery.snapshot)
@@ -476,12 +591,12 @@ export async function buildRun(input: BuildRunInput, deps: BuildRunDeps, signal:
     }
     async function work(role: WorkPhase, round: number): Promise<{ payload: unknown; review?: ReviewPanelObservation } | { stop: BuildRunOutcome }> {
       phase = role
-      step_id = `${input.run_id}${input.mode === 'ralph' ? `:task:${input.ralphRound ?? 0}` : ''}:${role}:${round}`
+      step_id = recovery?.request.step_id ?? `${input.run_id}${strategy === 'task_sequence' ? `:task:${input.taskIteration ?? 0}` : ''}:${role}:${round}`
       // Review is read-only and its result is meaningful only for this measured
       // revision. A resumed round can keep its number while its head changes;
       // reusing that round's old id would recover the previous head's approval.
       // Exact-head recovery keeps the same id, including its pending reservation.
-      if (role === 'review') step_id += `:head:${snapshot.head}`
+      if (role === 'review' && !recovery) step_id += `:head:${snapshot.head}`
       if (!validReviewBaseline(reviewBaseline, previousReview ?? null)
           || ((role === 'fix' || replansUsed > 0) && reviewBaseline !== 'required')) {
         return { stop: unknown('Worker continuation requires prior review progress') }
@@ -495,11 +610,12 @@ export async function buildRun(input: BuildRunInput, deps: BuildRunDeps, signal:
       }
       const execute = recovery ? runner.recover?.bind(runner) : runner.run.bind(runner)
       if (!execute) return { stop: unknown('Pending worker runner cannot recover without dispatch') }
-      // Only the validated plan can defer a Ralph builder's full suite. Fixes and
+      // Only the validated plan can defer a task-sequence builder's full suite. Fixes and
       // terminal tasks require it, regardless of a strategy supplied at launch.
-      const suiteScope = role === 'build' && input.mode === 'ralph' && plan !== null && plan.remainingTasks > 0
+      const suiteScope = role === 'build' && strategy === 'task_sequence' && plan !== null && plan.remainingTasks > 0
         ? 'subset' : 'full-suite'
       if (!recovery) await deps.prepareWork(boundedRequest, { snapshot: structuredClone(snapshot), previous: previousPayload, findings, planner,
+        executionStrategy: strategy,
         ...(committedPlan ? { committedPlan } : {}), ...((role === 'build' || role === 'fix') ? { suiteScope } : {}) })
       if (role === 'review') {
         if (!deps.reviewArtifact) return { stop: unknown('Review artifact host is missing') }
@@ -509,7 +625,7 @@ export async function buildRun(input: BuildRunInput, deps: BuildRunDeps, signal:
       if (!recovery) await checkpoint({ pending: { phase: role, step_id, recovery: {
         request: structuredClone(boundedRequest), inputs: structuredClone(recoveryInputs(input, maxRounds)), round,
         snapshot: structuredClone(snapshot), previous: previousPayload ?? null, findings, planner,
-        ...(committedPlan ? { committedPlan } : {}), plan, previousReview: previousReview ?? null, reviewBaseline,
+        ...(committedPlan ? { committedPlan } : {}), plan, executionStrategy: strategy, previousReview: previousReview ?? null, reviewBaseline,
       } }, round: Math.max(durable.round, round) })
       let outcome: BoundedWorkOutcome
       let review: ReviewPanelObservation | undefined
@@ -593,19 +709,24 @@ export async function buildRun(input: BuildRunInput, deps: BuildRunDeps, signal:
       if (role === 'build' || role === 'fix') {
         await checkpoint({ head: measured.head, stage: role === 'fix' ? 'fixed' : 'built',
           round: role === 'fix' ? round + 1 : Math.max(durable.round, 1, round + 1), pending: undefined, findings: [],
-          ...(role === 'build' ? { remainingTasks: input.mode === 'ralph' ? plan!.remainingTasks : undefined } : {}) })
+          ...(role === 'build' ? { remainingTasks: strategy === 'task_sequence' ? plan!.remainingTasks : 0,
+            handoff: strategy === 'task_sequence' && plan!.remainingTasks > 0
+              ? { iteration: taskIteration, builtHead: measured.head, body: tickTopTask(plan!.implementationPlan) } : undefined } : {}) })
       }
-      const payload = role === 'plan' ? clampPlanBranchBrief(result.payload) : result.payload
+      // Only reconciliation of an original pre-cutover reservation may translate
+      // the old planner shape. Every newly dispatched planner uses the closed v2
+      // contract, including later work on a migrated run.
+      const legacyPlan = role === 'plan' && recovery?.request.result.schema === 'project-plan'
+        && legacySelection ? normalizeLegacyStoredExecutionPlan(result.payload,
+          { execution_strategy: legacySelection.strategy, strategy_source: legacySelection.source }) : null
+      const payload = role === 'plan' ? clampPlanBranchBrief(legacyPlan ?? result.payload) : result.payload
       previousPayload = payload
       recovery = undefined
       return { payload, ...(review ? { review } : {}) }
     }
 
-    /** Commit the ticked ledger at the built head, re-measure, and move the durable
-     *  checkpoint to the ledger commit before anything reads it. A crash between the
-     *  commit and the checkpoint fails SAFE: the resume sees the head moved (G038)
-     *  and rebuilds, and the rebuilt tip already carries the same ledger, so
-     *  `commitPlan` returns it without a second commit. */
+    /** Spend and intent precede Git. A lost commit acknowledgement is recovered
+     * only after the host proves the exact direct-child ledger-only revision. */
     async function commitLedger(body: string): Promise<BuildRunOutcome | null> {
       const committed = await modes!.commitPlan({ body, snapshot: structuredClone(snapshot) })
       if (committed.kind === 'blocked') return blocked(committed.on)
@@ -625,7 +746,8 @@ export async function buildRun(input: BuildRunInput, deps: BuildRunDeps, signal:
     async function planAndBuild(round: number): Promise<BuildRunOutcome | null> {
       const replanning = replansUsed > 0
       const replanFailed = (reason: string) => blocked(`design-gap: re-plan-failed: ${reason}`)
-      const planned = recovery?.request.role === 'build' ? { payload: previousPayload } : await work('plan', round)
+      const recoveringBuild = recovery?.request.role === 'build'
+      const planned = recoveringBuild ? { payload: recovery!.plan } : await work('plan', round)
       if ('stop' in planned) {
         // Running or unreadable work retains its identity; it is not a failed plan.
         // Corroboration failures retain their existing measured-evidence cause.
@@ -636,10 +758,16 @@ export async function buildRun(input: BuildRunInput, deps: BuildRunDeps, signal:
       if (replanning && (!planned.payload || typeof planned.payload !== 'object'
           || !('executionSpec' in planned.payload) || typeof planned.payload.executionSpec !== 'string'
           || !planned.payload.executionSpec.trim())) return replanFailed('planner returned no executionSpec')
-      if (input.mode === 'ralph' || input.mode === 'wave') {
+      {
         // G025: a completed worker with a null planner payload is still no plan.
         if (!executionPlan(planned.payload)) return blocked('Planner returned no execution plan')
         plan = { ...planned.payload }
+        if (input.mode === 'implementation' && strategy !== null && plan.strategy !== strategy) {
+          return blocked('Planner cannot change the persisted execution strategy')
+        }
+        if (input.mode === 'implementation' && plan.strategy === 'single' && plan.remainingTasks !== 0) {
+          return blocked('Single execution plan must cover the whole work without remaining tasks')
+        }
         // G029: execution uses measured identity, bytes and remaining count.
         if (committedPlan) {
           plan.implementationPlan = committedPlan.body
@@ -647,10 +775,30 @@ export async function buildRun(input: BuildRunInput, deps: BuildRunDeps, signal:
           plan.remainingTasks = committedPlan.uncheckedCount - 1
         }
         // G025, ledger shape: checked on the plan the build will EXECUTE, after G029
-        // replaced a cheap planner's claims with the committed bytes. Ralph only — a
+        // replaced a cheap planner's claims with the committed bytes. task-sequence only — a
         // wave member's top task and count are the pin's, not the planner's.
-        if (input.mode === 'ralph' && !ledgerAgrees(plan)) {
+        if (input.mode === 'implementation' && plan.strategy === 'task_sequence' && !ledgerAgrees(plan)) {
           return blocked('Planner returned no execution plan: the task ledger disagrees with topTask/remainingTasks')
+        }
+        if (input.mode === 'implementation' && plan.strategy === 'task_sequence'
+            && acceptedPlan && !committedPlan && !recoveringBuild) {
+          // A full planner may revise execution details, but only the host's
+          // completed handoff can remove a task from the accepted pending queue.
+          // Matching the saved count prevents advancing twice if selection was
+          // persisted before the planner reservation was cleared on a restart.
+          const pending = unchecked(acceptedPlan.implementationPlan).map(taskText)
+          // Previously accepted terminal plans can name their sole task without
+          // checkbox syntax. Preserve that identity rather than inventing a queue.
+          const opaqueTerminal = pending.length === 0 && acceptedPlan.remainingTasks === 0
+          if (opaqueTerminal) pending.push(taskText(acceptedPlan.topTask))
+          if (resume?.stage === 'task-built' && resume.head === snapshot.head
+              && acceptedPlan.remainingTasks > 0 && resume.remainingTasks === acceptedPlan.remainingTasks) pending.shift()
+          const proposed = unchecked(plan.implementationPlan).map(taskText)
+          if (opaqueTerminal && proposed.length === 0 && plan.remainingTasks === 0) proposed.push(taskText(plan.topTask))
+          if (!isDeepStrictEqual(proposed, pending) || pending.length === 0
+              || plan.remainingTasks !== pending.length - 1 || taskText(plan.topTask) !== pending[0]) {
+            return blocked('Planner cannot change the host-owned pending task sequence')
+          }
         }
         if (input.mode === 'wave') {
           const pinned = unchecked(plan.implementationPlan).find(line =>
@@ -658,6 +806,21 @@ export async function buildRun(input: BuildRunInput, deps: BuildRunDeps, signal:
           if (!pinned || !input.pinnedTaskId) return blocked('Plan has no unchecked pinned wave task')
           plan.topTask = pinned
           plan.remainingTasks = 0
+        }
+        if (input.mode === 'implementation' && !recoveringBuild) {
+          const persisted = gateStop(await modes!.selectExecutionStrategy({ strategy: plan.strategy,
+            rationale: plan.rationale, plan: structuredClone(plan), refresh: acceptedPlan !== null || strategy !== null }))
+          if (persisted) return persisted
+          const observed = await modes!.loadExecutionStrategy()
+          if (observed.kind === 'unknown') return unknown(observed.detail)
+          if (observed.strategy !== plan.strategy || observed.source !== (selected?.source ?? 'planner')
+            || observed.rationale !== plan.rationale
+            || !isDeepStrictEqual(observed.plan, plan)) return unknown('Execution strategy persistence was not confirmed')
+          strategy = plan.strategy
+          acceptedPlan = structuredClone(plan)
+          // The accepted decision is durable before clearing the planner reservation.
+          // A restart in between reconciles that same planner request and decision.
+          await checkpoint({ pending: undefined })
         }
         previousPayload = plan
       }
@@ -668,7 +831,7 @@ export async function buildRun(input: BuildRunInput, deps: BuildRunDeps, signal:
         if (!fullOid(snapshot.head)) return failed('Wave build requires a full commit OID', 'built-head-unverified')
         return { kind: 'built', snapshot, cause: 'wave-member-built' }
       }
-      if (input.mode === 'ralph' && plan!.remainingTasks > 0) {
+      if (strategy === 'task_sequence' && plan!.remainingTasks > 0) {
         // THE LEDGER IS COMMITTED AT A HANDOFF ONLY, never on the final iteration. A
         // handoff's next reader is the continuation planner, which reads the committed
         // file. The final iteration's next readers are review and publication, which
@@ -676,24 +839,29 @@ export async function buildRun(input: BuildRunInput, deps: BuildRunDeps, signal:
         // publication body — to the head the BUILDER reported (`readArtifact`,
         // open/wiring/project-build.ts). A host commit on top would leave the reviewed
         // head with no receipt at all, so no multi-task card could ever merge (measured
-        // end to end: `open/__tests__/project-build-e2e.test.ts`, the Ralph-handoff
+        // end to end: `open/__tests__/project-build-e2e.test.ts`, the task-sequence-handoff
         // retry). The merged ledger therefore records the last handoff's state — at
         // the branch's OWN path, so no two cards' ledgers meet in a merge, and as
         // prose the mutation gate treats as inert, so a documentation-only card keeps
         // its exemption with the ledger in its diff.
-        const ledger = await commitLedger(tickTopTask(plan!.implementationPlan))
-        if (ledger) return ledger
-        // G037: consume the old result before acknowledging the next iteration.
-        // `snapshot` is the LEDGER commit, so the handoff's recorded head — the one
-        // a retry's dispatch proves the local tip against and the one the next
-        // iteration's `probePlan` reads — carries the ticked ledger.
-        const handoff = gateStop(await modes!.advanceRalph({ run_id: input.run_id, round: ralphRound,
-          snapshot, remainingTasks: plan!.remainingTasks }))
-        if (handoff) return handoff
-        return { kind: 'continued', snapshot, remainingTasks: plan!.remainingTasks, cause: 'ralph-task-built' }
+        return handoffTask(plan!)
       }
       return null
     }
+    async function handoffTask(completed: ExecutionPlan): Promise<BuildRunOutcome> {
+      // Older completed checkpoints lack an intent. Upgrade before any Git write.
+      if (!durable.handoff) await checkpoint({ handoff: { iteration: taskIteration,
+        builtHead: snapshot.head, body: tickTopTask(completed.implementationPlan) } })
+      const ledger = await commitLedger(tickTopTask(completed.implementationPlan))
+      if (ledger) return ledger
+      // G037: consume the old result before acknowledging the next iteration.
+      // The measured ledger commit carries the completed task for its next reader.
+      const handoff = gateStop(await modes!.advanceTask({ run_id: input.run_id, round: taskIteration,
+        snapshot, remainingTasks: completed.remainingTasks }))
+      if (handoff) return handoff
+      return { kind: 'continued', snapshot, remainingTasks: completed.remainingTasks, cause: 'task-built' }
+    }
+    if (resumeTaskHandoff) return await handoffTask(resumeTaskHandoff)
     if (!skipBuild) {
       // A rebuild after the head MOVED must not reuse the round-0 result identities
       // (see `headMoved`). Every other rebuild keeps them.

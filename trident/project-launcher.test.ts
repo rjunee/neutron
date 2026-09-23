@@ -226,7 +226,7 @@ test('a rejecting driver settles as inner-error rather than stranding the reserv
   expect(out.changed).toBe(true)
 })
 
-test('result mappings retain driver causes and wave/Ralph handoffs', async () => {
+test('result mappings retain driver causes and wave/task-sequence handoffs', async () => {
   const f = await fixture()
   for (const raw of [null, '', '{', 'null', '{}', '{"projectBuild":{"kind":"merged"}}']) expect(projectBuildPending(raw)).toBe(false)
   const deadDriverReservation = JSON.stringify({
@@ -244,9 +244,9 @@ test('result mappings retain driver causes and wave/Ralph handoffs', async () =>
   expect(built.built).toBe(true)
   expect(built.checkpoint).toBe('wave-member-built')
   expect(built.commit_sha).toBe(merged.snapshot.head)
-  const next = parseInnerResult(projectBuildResult({ kind: 'continued', cause: 'ralph-task-built', remainingTasks: 2, snapshot: merged.snapshot, cleanup: merged.cleanup }, f.input))!
+  const next = parseInnerResult(projectBuildResult({ kind: 'continued', cause: 'task-built', remainingTasks: 2, snapshot: merged.snapshot, cleanup: merged.cleanup }, f.input))!
   expect(next.publish_requested).toBe(true)
-  expect(next.checkpoint).toBe('ralph-task-built')
+  expect(next.checkpoint).toBe('task-built')
   expect(next.remaining_tasks).toBe(2)
   // #990 — the PR-number domain check lives in the HARVEST PARSER, so it only
   // still applies if the driver's own terminal outcome reaches `inner_result` in

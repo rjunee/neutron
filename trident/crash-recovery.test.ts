@@ -92,12 +92,12 @@ function orchestrator(
 async function seedCrashedMidBuild(id: string): Promise<void> {
   await store.create({ id, slug: 'x', project_slug: 'p', repo_path: '/repo', task: 'build' })
   await store.update(id, {
-    phase: 'ralph-task',
+    phase: 'task-build',
     branch: 'trident/x',
     pr: 61,
-    inner_checkpoint: 'ralph-task-built',
+    inner_checkpoint: 'task-built',
     round: 2,
-    ralph_round: 3,
+    task_iteration: 3,
     subagent_run_id: 'wf-1',
     subagent_status: 'running',
     workflow_run_id: 'gen-dead',
@@ -121,16 +121,16 @@ describe('(a) a crashed launcher is RECOVERED as a continuation, not reaped', ()
     // duplicated" property the orchestrator owns — it hands the workflow back the
     // artifacts that survived instead of starting a fresh build.
     expect(seen.length).toBe(1)
-    expect(seen[0]?.resume_checkpoint).toBe('ralph-task-built')
+    expect(seen[0]?.resume_checkpoint).toBe('task-built')
     expect(seen[0]?.run.branch).toBe('trident/x')
     expect(seen[0]?.run.pr).toBe(61)
 
     const after = store.get('recover-1')!
-    expect(after.phase).toBe('ralph-task')
+    expect(after.phase).toBe('task-build')
     expect(after.subagent_status).toBe('running')
     // A launcher crash is not the AGENT's failure — it must not spend its rounds.
     expect(after.round).toBe(2)
-    expect(after.ralph_round).toBe(3)
+    expect(after.task_iteration).toBe(3)
     // One unit of the durable budget spent, and nothing was harvested.
     expect(after.crash_recoveries).toBe(1)
     expect(after.harvested_at).toBeNull()
@@ -190,7 +190,7 @@ describe('(b) recovery is BOUNDED, and the bound is DURABLE across restarts', ()
     // would be a confident lie about a build whose reviewer may never have run.
     expect((after.failure_reason ?? '').toLowerCase()).not.toContain('exhausted')
     expect(after.round).toBe(1)
-    expect(after.ralph_round).toBe(0)
+    expect(after.task_iteration).toBe(0)
     // The terminal row still says WHAT died — the launcher, not the agent.
     expect(after.subagent_status).toBe('crashed')
   })
@@ -373,9 +373,9 @@ describe('(f) a merged PR is ADOPTED at recovery, never rebuilt', () => {
     await loop.runOnce()
 
     expect(fires).toHaveLength(1)
-    expect(fires[0]?.resume_checkpoint).toBe('ralph-task-built')
+    expect(fires[0]?.resume_checkpoint).toBe('task-built')
     expect(fires[0]?.run.pr).toBe(61)
-    expect(store.get('adopt-open')!.phase).toBe('ralph-task')
+    expect(store.get('adopt-open')!.phase).toBe('task-build')
     expect(commands[0]).toEqual(['gh', 'pr', 'view', '61', '--json', 'state,number', '--jq', '.state'])
   })
 

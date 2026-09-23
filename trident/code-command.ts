@@ -7,7 +7,7 @@
  * store. It simply CREATES a `code_trident_runs` row and returns — the
  * foundational tick loop (`trident/tick.ts` → `buildTridentOrchestrator`)
  * picks the row up on its next sweep and drives it end-to-end: forge-init
- * (or the Ralph plan↔task loop for governed repos) → Argus review → fix
+ * (or the Task sequence plan↔task loop for governed repos) → Argus review → fix
  * loop → merge (per git-mode) → done. State lives in SQLite, so the run
  * survives a control-plane restart and resumes from its persisted phase.
  *
@@ -17,7 +17,7 @@
  * behind it changes from the Core wrapper to foundational Trident.
  *
  * Layering: this module is owned by the foundational runtime and depends
- * only on the run store (`TridentRunStore`) + the git-mode/ralph detection
+ * only on the run store (`TridentRunStore`) + the git-mode/task-sequence detection
  * helpers — never on `cores/free/code-gen`. The gateway wraps
  * `parseAndExecuteCodeCommand` in a `ChatCommandFilter` at the boot layer.
  */
@@ -164,12 +164,6 @@ export interface TridentCodeContext {
    * finished commit is rebuilt from scratch (Argus r16).
    */
   hostRunner?: EnvCapableHostRunner
-  /**
-   * Resolve whether this build is governed (Ralph one-task-per-context
-   * loop). Defaults to `detectRalphMode` (see board-dispatch.ts) — a
-   * `SPEC.md` at the git root governs; an explicit resolver still wins.
-   */
-  resolveRalph?: () => Promise<boolean>
   /** Chat thread context persisted on the run for status posts. */
   chat_id?: string | null
   thread_id?: string | null
@@ -182,7 +176,7 @@ export interface TridentCodeContext {
   channel_kind?: Topic['channel_kind']
   /** Round caps (else the store defaults: 8 / 20). */
   max_rounds?: number
-  max_ralph_rounds?: number
+  max_task_iterations?: number
   /**
    * Executor-liveness preflight, forwarded to the dispatch chokepoint.
    *
@@ -249,12 +243,11 @@ async function executeDispatch(
     resolveMergeMode: ctx.resolveMergeMode,
     ...(ctx.landedProbe !== undefined ? { landedProbe: ctx.landedProbe } : {}),
     ...(ctx.hostRunner !== undefined ? { hostRunner: ctx.hostRunner } : {}),
-    ...(ctx.resolveRalph !== undefined ? { resolveRalph: ctx.resolveRalph } : {}),
     ...(ctx.chat_id !== undefined ? { chat_id: ctx.chat_id } : {}),
     ...(ctx.thread_id !== undefined ? { thread_id: ctx.thread_id } : {}),
     ...(ctx.channel_kind !== undefined ? { channel_kind: ctx.channel_kind } : {}),
     ...(ctx.max_rounds !== undefined ? { max_rounds: ctx.max_rounds } : {}),
-    ...(ctx.max_ralph_rounds !== undefined ? { max_ralph_rounds: ctx.max_ralph_rounds } : {}),
+    ...(ctx.max_task_iterations !== undefined ? { max_task_iterations: ctx.max_task_iterations } : {}),
     ...(ctx.preflight !== undefined ? { preflight: ctx.preflight } : {}),
   }
   const result = await dispatchBoardBoundBuild({ task: cmd.task, board_item_id: cmd.board_item_id }, deps)
@@ -281,10 +274,19 @@ async function executeDispatch(
     }
   }
 
-  const mode = result.ralph ? 'governed (Ralph)' : result.merge_mode === 'pr' ? 'PR' : 'local'
+  const mode = result.execution_strategy === null
+    ? 'planning pending'
+    : result.execution_strategy === 'task_sequence'
+      ? 'task sequence'
+      : 'single build'
   return {
     text: `🛠 Building \`${truncate(cmd.task, 60)}\` — Trident run \`${result.run.id.slice(0, 8)}\` (${mode} mode), bound to Plan item \`${cmd.board_item_id}\`. Forge → Argus → merge runs autonomously; I'll surface the result. Send \`/code stop\` to cancel.`,
-    data: { run_id: result.run.id, slug: result.run.slug, merge_mode: result.merge_mode, ralph: result.ralph },
+    data: {
+      run_id: result.run.id,
+      slug: result.run.slug,
+      merge_mode: result.merge_mode,
+      execution_strategy: result.execution_strategy,
+    },
   }
 }
 
@@ -361,6 +363,6 @@ const HELP_TEXT = `Code build — \`/code\` cheatsheet (powered by foundational 
 - \`/code stop <run_id>\` — stop a specific run by id (prefix ok).
 - \`/code fleet\` — census the local build lanes from live processes; says UNKNOWN, never zero, when it cannot look.
 
-Governed repos (a \`SPEC.md\` at the root) run the Ralph plan↔task loop automatically.
+The initial planner selects a single build or a task sequence from the accepted plan; repository files do not select it.
 
 The build runs autonomously and survives restarts — state lives in the \`code_trident_runs\` table, driven by the tick loop.`

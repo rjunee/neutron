@@ -33,5 +33,5 @@ path without improving this construction-time guarantee.
       `trident/orchestrator.test.ts`, `trident/arbiter-wiring.test.ts`,
       `gateway/composition/build-core-modules-trident-arbiter-wiring.test.ts`,
       `trident/board-reconcile.test.ts`, `trident/code-command.test.ts`,
-      `trident/ported-fixes.test.ts`, `trident/ralph.test.ts`,
+      `trident/ported-fixes.test.ts`, `trident/task-sequence.test.ts`,
       `trident/restart-resume.test.ts`, and `trident/merge-realgit.test.ts`.

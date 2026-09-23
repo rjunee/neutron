@@ -30,7 +30,7 @@
  * existing resume path and the commit goes to REVIEW instead of being rebuilt from
  * scratch.
  *
- * AND, ON A SEPARATE GATE, IT CARRIES THE CARD'S RALPH SPEND (#519) — `ralph_round`
+ * AND, ON A SEPARATE GATE, IT CARRIES THE CARD'S TASK SPEND (#519) — `task_iteration`
  * together with the cap it is measured against, `min(prior, this dispatch)` — for ANY
  * governed prior the card names, EXHAUSTED included, since the gate is the link and not
  * the disposition. A run that died mid-budget keeps its count and its plan-refresh
@@ -42,9 +42,9 @@
  * cost a card its budget while it does still refuse the commit.
  *
  * #629 MOVES THE AUTHORITY TO THE CARD. The linked prior remains a compatibility
- * source for cards that have not yet recorded their first terminal governed run;
+ * source for cards that have not yet recorded their durable snapshot;
  * once the card has a snapshot, clearing or replacing `linked_run_id` cannot reset
- * the spend. Dispatch refuses an at-cap card with `ralph_budget_exhausted`.
+ * the spend. Dispatch refuses an at-cap card with `task_budget_exhausted`.
  *
  * Every other shape dispatches exactly as it did before, and now SAYS SO: one
  * `dispatch_resume_seed` line per dispatch that had a prior terminal run AND created
@@ -66,7 +66,7 @@
  * evidence binding and sets the lane (done / failed) when the run lands.
  *
  * Layering: depends only on the run store (`TridentRunStore`), the git-mode /
- * ralph detection helpers, and a STRUCTURAL board binder interface (satisfied
+ * execution_strategy detection helpers, and a STRUCTURAL board binder interface (satisfied
  * by `WorkBoardStore` at the composition root) — never imports `work-board`
  * directly, so trident stays decoupled + unit-testable with a stub binder.
  */
@@ -82,9 +82,7 @@ import {
 } from '@neutronai/work-board/dispatch-readiness.ts'
 import {
   detectMergeMode,
-  detectRalphMode,
   defaultGitModeProbe,
-  defaultRalphModeProbe,
   makeCredentialedHostRunner,
   makeLazyCredentialedHostRunner,
   spawnCapture,
@@ -92,8 +90,8 @@ import {
   type PublisherCredentialSource,
 } from './git-mode.ts'
 import { ensureProjectBuildWorkspace } from './build-workspace.ts'
-import { RALPH_CONTINUATION_CHECKPOINT, builtButNeverReviewedSeed, carriedRalphBudget } from './run-disposition.ts'
-import { isRalphContinuationSource, retryModeSource } from './build-mode-state.ts'
+import { TASK_CONTINUATION_CHECKPOINT, builtButNeverReviewedSeed, carriedTaskBudget } from './run-disposition.ts'
+import { isTaskContinuationSource, retryModeSource } from './build-mode-state.ts'
 import { detectBaseBranch } from './merge.ts'
 import { slugifyTask } from './slugify-task.ts'
 import { isTerminalPhase } from './state-machine.ts'
@@ -101,7 +99,7 @@ import type { DispatchHoldInput, DispatchHoldPayload, DispatchHoldStore } from '
 import { deriveClaimedPaths } from './claimed-paths.ts'
 import { defaultBranchHolderProbe, type BranchHolderProbe } from './fire-evidence-probes.ts'
 import type { MergeMode, TridentRun, TridentRunStore } from './store.ts'
-import { DEFAULT_MAX_RALPH_ROUNDS } from './ralph-budget.ts'
+import { DEFAULT_MAX_TASK_ITERATIONS, isTaskCap, isTaskIteration } from './task-budget.ts'
 
 const log = createLogger('trident')
 
@@ -128,10 +126,10 @@ export type ResumeSeedReason =
 export interface ResumeNoteRow {
   inner_checkpoint: string | null
   inner_checkpoint_head: string | null
-  ralph: boolean
-  ralph_round: number
-  max_ralph_rounds: number
-  /** Whether the card's Ralph spend was inherited (`budget !== null` in the dispatch). */
+  execution_strategy: 'single' | 'task_sequence' | null
+  task_iteration: number
+  max_task_iterations: number
+  /** Whether the card's Task spend was inherited (`budget !== null` in the dispatch). */
   budget_carried: boolean
 }
 
@@ -158,7 +156,7 @@ const NOT_RESUMED_BECAUSE: Record<Exclude<ResumeSeedReason, 'no_prior_terminal_r
  *
  * Null ONLY for `no_prior_terminal_run`: a first dispatch has nothing to state. Every
  * other reason yields a sentence naming whether the checkpoint was carried and, for a
- * governed run, the Ralph round and cap the row actually holds. No path, host or
+ * selected task sequence or a carried budget, the iteration and cap the row holds. No path, host or
  * identity is ever interpolated — the only variable parts are the checkpoint NAME, a
  * 7-character commit prefix and two integers.
  *
@@ -171,17 +169,17 @@ const NOT_RESUMED_BECAUSE: Record<Exclude<ResumeSeedReason, 'no_prior_terminal_r
  */
 export function resumeNote(reason: ResumeSeedReason, row: ResumeNoteRow): string | null {
   if (reason === 'no_prior_terminal_run') return null
-  // One sentence: the resume clause, then — for a governed run only — the budget clause.
-  const ralph = !row.ralph
+  // A carried allowance remains visible under either strategy.
+  const budgetNote = row.execution_strategy !== 'task_sequence' && !row.budget_carried
     ? '.'
     : row.budget_carried
-      ? `; Ralph round ${row.ralph_round}/${row.max_ralph_rounds} carried.`
-      : `; fresh Ralph budget ${row.ralph_round}/${row.max_ralph_rounds}.`
+      ? `; Task round ${row.task_iteration}/${row.max_task_iterations} carried.`
+      : `; fresh Task budget ${row.task_iteration}/${row.max_task_iterations}.`
   if (reason === 'resumed' || reason === 'resumed_continuation') {
     const at = row.inner_checkpoint_head !== null ? ` at ${row.inner_checkpoint_head.slice(0, 7)}` : ''
-    return `Dispatched to resume from ${row.inner_checkpoint ?? 'the last checkpoint'}${at} (rebuilds if the branch moves before launch)${ralph}`
+    return `Dispatched to resume from ${row.inner_checkpoint ?? 'the last checkpoint'}${at} (rebuilds if the branch moves before launch)${budgetNote}`
   }
-  return `Not resumed: ${NOT_RESUMED_BECAUSE[reason]}, so this is a fresh build${ralph}`
+  return `Not resumed: ${NOT_RESUMED_BECAUSE[reason]}, so this is a fresh build${budgetNote}`
 }
 
 export interface AlreadyLandedFinding {
@@ -346,9 +344,13 @@ export interface TridentBoardBinder {
     id: string
     repo_name?: string | null
     linked_run_id?: string | null
-    ralph_round?: number
-    max_ralph_rounds?: number | null
-    ralph_task_total?: number | null
+    execution_strategy?: 'single' | 'task_sequence' | null
+    strategy_rationale?: string | null
+    strategy_plan?: string | null
+    strategy_source?: 'planner' | 'legacy' | null
+    task_iteration?: number
+    max_task_iterations?: number | null
+    task_total?: number | null
     /**
      * The card's lane. OPTIONAL so the existing readiness/bind test seams need not
      * implement it — but the hold sweep reads it, because a card finished BY HAND
@@ -376,10 +378,10 @@ export interface TridentBoardBinder {
     pr_info?: {
       pr: number | null
       pr_url: string | null
-      ralph: boolean
-      ralph_round: number
-      max_ralph_rounds: number
-      ralph_task_total?: number | null
+      execution_strategy: 'single' | 'task_sequence' | null
+      task_iteration: number
+      max_task_iterations: number
+      task_total?: number | null
     },
   ): Promise<unknown>
 }
@@ -484,17 +486,11 @@ export interface BoardBoundBuildDeps {
   /** Credential source for direct callers that do not inject a merge-mode resolver. */
   secretsStore?: Pick<SecretsStore, 'get'>
   owner_handle?: string
-  /**
-   * Resolve whether this build is governed (Ralph mode). Defaults to
-   * `detectRalphMode` over the production probe — a `SPEC.md` at the git
-   * root governs. An explicit resolver still wins. Test seam.
-   */
-  resolveRalph?: () => Promise<boolean>
   chat_id?: string | null
   thread_id?: string | null
   channel_kind?: Topic['channel_kind']
   max_rounds?: number
-  max_ralph_rounds?: number
+  max_task_iterations?: number
   /**
    * EXECUTOR LIVENESS, at the CHOKEPOINT — not at one caller.
    *
@@ -533,7 +529,7 @@ export type BoardBoundBuildRejectionCode =
   // level out from the fix loop it was stopped in. Clearing the block is a
   // status write the orchestrator makes deliberately.
   | 'card_blocked'
-  | 'ralph_budget_exhausted'
+  | 'task_budget_exhausted'
   | 'already_landed'
   // Something LIVE already holds this card's branch — a non-terminal run row,
   // or a linked-worktree lock naming a live pid. REFUSED *AND* QUEUED: nothing
@@ -550,7 +546,7 @@ export type BoardBoundBuildRejectionCode =
   | 'backend_error'
 
 export type BoardBoundBuildResult =
-  | { ok: true; run: TridentRun; merge_mode: MergeMode; ralph: boolean }
+  | { ok: true; run: TridentRun; merge_mode: MergeMode; execution_strategy: 'single' | 'task_sequence' | null }
   | {
       ok: false
       // THE QUEUED REFUSAL — a `held`/`branch_live` that really did write a hold
@@ -768,7 +764,7 @@ export async function dispatchBoardBoundBuild(
     ...(deps.thread_id !== undefined ? { thread_id: deps.thread_id } : {}),
     ...(deps.channel_kind !== undefined ? { channel_kind: deps.channel_kind } : {}),
     ...(deps.max_rounds !== undefined ? { max_rounds: deps.max_rounds } : {}),
-    ...(deps.max_ralph_rounds !== undefined ? { max_ralph_rounds: deps.max_ralph_rounds } : {}),
+    ...(deps.max_task_iterations !== undefined ? { max_task_iterations: deps.max_task_iterations } : {}),
     // AND THE ROUND'S OWN KIND (Argus r3, minor). `bound_pr` is what makes this
     // dispatch a REVIEW of a published head rather than a build; a hold that
     // dropped it came back through the sweep as a full build, opening a second
@@ -964,11 +960,14 @@ export async function dispatchBoardBoundBuild(
   // HOME base. A brand-new project has no code repo; without this the run row's
   // repo_path would be the HOME dir (not a git repo) and the inner workflow's
   // `git worktree add` would fail at forge-init before Forge ever ran. Merge-mode
-  // + ralph detection then probe the RESOLVED workspace (a fresh local project
+  // detection then probes the RESOLVED workspace (a fresh local project
   // has no origin, so merge mode correctly degrades to 'local').
   let repo_path: string
   let merge_mode: MergeMode
-  let ralph: boolean
+  let execution_strategy = item.execution_strategy ?? null
+  let strategy_rationale = item.strategy_rationale ?? null
+  let strategy_plan = item.strategy_plan ?? null
+  let strategy_source = item.strategy_source ?? null
   // The composition root's credentialed runner, when it wired one. The
   // `secretsStore` + `owner_handle` branch below still overrides it for a direct
   // caller that hands its own credential source instead.
@@ -1008,15 +1007,6 @@ export async function dispatchBoardBoundBuild(
       throw new Error('resolveMergeMode or a credentialed secretsStore + owner_handle is required')
     }
     merge_mode = await mergeModeFn(repo_path)
-    // K10 restored the governed default (the refactor-window `resolveRalph =
-    // false` override is gone): a root `SPEC.md` on the resolved workspace's
-    // git root flips the build into Ralph mode via `detectRalphMode`. Neither
-    // production caller (the `/code` chat command nor the agent-native
-    // `work_board_dispatch_build` tool) supplies `resolveRalph`, so this is
-    // the live behavior for every real build; an explicit caller-supplied
-    // `deps.resolveRalph` (tests, or a future composition-root override)
-    // still wins.
-    ralph = await (deps.resolveRalph ?? (() => detectRalphMode(repo_path, defaultRalphModeProbe())))()
   } catch (err) {
     return {
       ok: false,
@@ -1027,11 +1017,11 @@ export async function dispatchBoardBoundBuild(
 
   // A card-owned counter is independent of its movable run link. Refuse at the
   // dispatch chokepoint when it is spent so exhaustion cannot masquerade as a
-  // newly completed run or buy another bootstrap before failing. Non-governed
-  // dispatches do not consume this allowance and remain startable.
+  // newly completed run or buy another bootstrap before failing. This applies
+  // while planning is pending and under either selected strategy.
   //
   // THE CARD'S OWN SNAPSHOT IS THE ONLY THING THIS READS, and the review that
-  // found it reading `deps.max_ralph_rounds` as a fallback is why the sentence is
+  // found it reading `deps.max_task_iterations` as a fallback is why the sentence is
   // here. A card with no snapshot has spent nothing — its counter is 0 — so the
   // fallback could never refuse a card that had genuinely spent anything. What it
   // COULD do is answer a question it had not been asked: comparing 0 against the
@@ -1041,25 +1031,29 @@ export async function dispatchBoardBoundBuild(
   // with "this card is exhausted" — a config fault reported as a budget fact, i.e.
   // "I could not read the cap" wearing "the cap is spent" as a mask. The cap this
   // guard compares against is a value the store has already validated on the way
-  // in (`max_ralph_rounds IS NULL OR >= 0`, migration 0142 — 0141's `>= 1` was the
+  // in (`max_task_iterations IS NULL OR >= 0`, migration 0142 — 0141's `>= 1` was the
   // rule that disagreed with the run store, and #728 resolved the disagreement in
   // the store's favour), so it is a cap, not an input.
   //
   // BOTH `??` HERE ARE NULLISH, NOT TRUTHY, AND THAT IS LOAD-BEARING. A cap of `0`
-  // is a real cap meaning "no iterations" (`TridentInvalidRalphCapError`'s docblock
+  // is a real cap meaning "no iterations" (`TridentInvalidTaskCapError`'s docblock
   // in `store.ts` says so in as many words), so it must survive the coalesce and
   // reach the comparison as `0`, where `0 >= 0` refuses. Rewriting either of these
   // as `||` would read a zero cap as ABSENT and admit the very card the owner
   // capped at nothing.
-  const cardRalphRound = item.ralph_round ?? 0
-  const cardRalphCap = item.max_ralph_rounds ?? null
-  if (ralph && cardRalphCap !== null && cardRalphRound >= cardRalphCap) {
+  const cardTaskIteration = item.task_iteration ?? 0
+  const cardTaskCap = item.max_task_iterations ?? null
+  if (!isTaskIteration(cardTaskIteration) || (cardTaskCap !== null && !isTaskCap(cardTaskCap))
+    || (cardTaskIteration > 0 && cardTaskCap === null)) {
+    return { ok: false, code: 'backend_error', message: 'The card iteration budget is corrupt. Nothing was dispatched.' }
+  }
+  if (cardTaskCap !== null && cardTaskIteration >= cardTaskCap) {
     return {
       ok: false,
-      code: 'ralph_budget_exhausted',
+      code: 'task_budget_exhausted',
       message:
-        `Refused: Plan item "${board_item_id}" exhausted its Ralph iteration budget ` +
-        `(${cardRalphRound}/${cardRalphCap}). No run was created; completion was not reported.`,
+        `Refused: Plan item "${board_item_id}" exhausted its Task iteration budget ` +
+        `(${cardTaskIteration}/${cardTaskCap}). No run was created; completion was not reported.`,
     }
   }
 
@@ -1283,16 +1277,16 @@ export async function dispatchBoardBoundBuild(
   // checkpoint evidence onto the new row. Nothing else changes — `launch()` reads
   // `inner_checkpoint` and the existing `classifyResume` machinery routes
   // `forge-done` / `fix-round-N` / `outer-published:*` to review mode — except a
-  // bare `forge-done` in RALPH mode, which that machinery rebuilds
-  // ('ralph-progress-unknown'), so the resolved `ralph` flag is an input to the
+  // bare `forge-done` in TASK mode, which that machinery rebuilds
+  // ('execution_strategy-progress-unknown'), so the persisted execution strategy is an input to the
   // seed decision rather than something read after the row exists.
   //
-  // THE CHECKPOINT IS NOT THE WHOLE OF CONTINUITY (#519). The card's Ralph SPEND is
-  // the other durable half: `refireNextRalphTask` bounds the run's remaining loop on
-  // `ralph_round + 1 > max_ralph_rounds` and `buildWorkflowArgs` threads the counter
+  // THE CHECKPOINT IS NOT THE WHOLE OF CONTINUITY (#519). The card's Task SPEND is
+  // the other durable half: `refireNextTask` bounds the run's remaining loop on
+  // `task_iteration + 1 > max_task_iterations` and `buildWorkflowArgs` threads the counter
   // to the inner workflow's plan-refresh cadence, so a re-dispatch that writes 0 hands
   // a mid-budget run a fresh count and lands its periodic full re-plan on the wrong
-  // iteration of the same work. `carriedRalphBudget` (run-disposition.ts) owns that
+  // iteration of the same work. `carriedTaskBudget` (run-disposition.ts) owns that
   // decision — BOTH halves or neither, and the cap is min(prior, this dispatch) so a
   // re-dispatch may tighten the budget and never loosen it. It is deliberately NOT
   // gated on the commit proof; see the ladder below and the file header for why the
@@ -1331,7 +1325,7 @@ export async function dispatchBoardBoundBuild(
   let typedSource: ReturnType<typeof retryModeSource> = null
   // WHY THE SEED DECISION IS NAMED OUT LOUD (#519). Every arm below that declines
   // falls back to a byte-identical FRESH dispatch, and a fresh dispatch looks
-  // exactly like a first attempt: a row with a null checkpoint and `ralph_round`
+  // exactly like a first attempt: a row with a null checkpoint and `task_iteration`
   // 0. So the one place the refusal existed at all was the absence of two column
   // values, which no operator reads and no journal records — a card that silently
   // rebuilt finished work was indistinguishable from a card that had never been
@@ -1345,15 +1339,14 @@ export async function dispatchBoardBoundBuild(
   // over a slug that `slugifyTask` TRUNCATES at 35 characters, so a colliding card's
   // newer run wins. See `namedPrior` below for why that mattered.
   const anyPriorForThisWork = deps.store.latestTerminalBySlug(deps.project_slug, slug)
-  // THE CARD'S RALPH BUDGET, carried separately from the commit and gated on the
-  // STRONG identity alone — see `carriedRalphBudget` (run-disposition.ts). Null for
-  // every dispatch that has no governed prior to inherit from, which is the
-  // pre-existing shape.
-  let budget: { ralph_round: number; max_ralph_rounds: number } | null =
-    ralph && item.max_ralph_rounds !== undefined && item.max_ralph_rounds !== null
+  // THE CARD'S TASK BUDGET, carried separately from the commit and gated on the
+  // STRONG identity alone — see `carriedTaskBudget` (run-disposition.ts). Null for
+  // every dispatch with neither a card snapshot nor a prior to inherit from.
+  let budget: { task_iteration: number; max_task_iterations: number } | null =
+    item.max_task_iterations !== undefined && item.max_task_iterations !== null
       ? {
-          ralph_round: item.ralph_round ?? 0,
-          max_ralph_rounds: Math.min(item.max_ralph_rounds, deps.max_ralph_rounds ?? item.max_ralph_rounds),
+          task_iteration: item.task_iteration ?? 0,
+          max_task_iterations: Math.min(item.max_task_iterations, deps.max_task_iterations ?? item.max_task_iterations),
         }
       : null
   // THE SLUG IS NOT AN IDENTITY. `slugifyTask` truncates at 35 characters, so two
@@ -1427,7 +1420,7 @@ export async function dispatchBoardBoundBuild(
   // text is the card's design-doc BODY (`work-board-surface.ts`) and `slugifyTask`
   // truncates at 35 characters — so an owner clarifying that doc between two presses
   // keeps the same slug, the same branch and the same card while the full text
-  // differs. Measured: a prior at `ralph_round 12` on `fix-round-3`, tip unmoved,
+  // differs. Measured: a prior at `task_iteration 12` on `fix-round-3`, tip unmoved,
   // `linked_run_id` naming it, came back `prior_run_is_a_different_card` with a fresh
   // budget. Same lane, same card, and a diagnosis that was simply false. Clarifying a
   // spec doc between two presses is the most likely thing an owner does.
@@ -1457,14 +1450,28 @@ export async function dispatchBoardBoundBuild(
     // this project and is terminal, so it is the prior — and nothing below has to re-check
     // any of that.
     prior = namedPrior
+    try {
+      prior = await deps.store.reconcileTaskSpend(prior.id) ?? prior
+    } catch {
+      return { ok: false, code: 'backend_error', message: 'The previous run has an invalid iteration checkpoint. Nothing was dispatched.' }
+    }
+    if (execution_strategy !== null && prior.execution_strategy !== null && execution_strategy !== prior.execution_strategy) {
+      return { ok: false, code: 'backend_error', message: 'The card and prior run disagree about the immutable execution strategy. Nothing was dispatched.' }
+    }
+    if (execution_strategy === null) {
+      execution_strategy = prior.execution_strategy
+      strategy_rationale = prior.strategy_rationale
+      strategy_plan = prior.strategy_plan
+      strategy_source = prior.strategy_source
+    }
     // PAST THE LINK CHECK THIS CARD *IS* THIS RUN'S CARD, so the budget travels and
-    // nothing below can veto it. `deps.max_ralph_rounds` is passed as the CEILING for
+    // nothing below can veto it. `deps.max_task_iterations` is passed as the CEILING for
     // the carried cap — never as a gate on the carried ROUND, which is the mistake an
     // earlier revision of this branch made: a refused carry is a fresh row at 0, i.e.
     // a budget RESET wearing a guard's clothes.
-    const read = carriedRalphBudget(prior, {
-      ralph,
-      ...(deps.max_ralph_rounds !== undefined ? { max_ralph_rounds: deps.max_ralph_rounds } : {}),
+    const read = carriedTaskBudget(prior, {
+      execution_strategy,
+      ...(deps.max_task_iterations !== undefined ? { max_task_iterations: deps.max_task_iterations } : {}),
     })
     // AN UNREADABLE PRIOR BUDGET REFUSES THE DISPATCH (final review round, defect four).
     // It cannot degrade to "carry nothing": for a COUNTER that is the reset, and the
@@ -1494,15 +1501,19 @@ export async function dispatchBoardBoundBuild(
         message:
           `Refused: this card's previous run ${prior.id.slice(0, 8)} carries an unreadable ` +
           `${read.column} (${typeof read.value === 'number' ? String(read.value) : JSON.stringify(read.value)}), ` +
-          'so how much of its Ralph budget the card has spent cannot be established — and an unknown spend ' +
+          'so how much of its Task budget the card has spent cannot be established — and an unknown spend ' +
           'authorises no further iteration. Both columns are INTEGER NOT NULL, so this row is corrupt rather ' +
           `than legacy: repair code_trident_runs.${read.column} for run ${prior.id} and dispatch again. ` +
           'Nothing was dispatched.',
       }
     }
-    // The card snapshot is authoritative once present. The linked row remains
-    // useful for commit salvage and for pre-migration cards only.
-    if (budget === null) budget = read.budget
+    // Neither a stale card snapshot nor a stale predecessor may refund spend.
+    if (read.budget !== null) {
+      budget = budget === null ? read.budget : {
+        task_iteration: Math.max(budget.task_iteration, read.budget.task_iteration),
+        max_task_iterations: Math.min(budget.max_task_iterations, read.budget.max_task_iterations),
+      }
+    }
     if (prior.task !== input.task) {
       // Only the COMMIT is refused, and the reason names which of the two facts
       // disagreed rather than claiming this is a different card.
@@ -1513,32 +1524,32 @@ export async function dispatchBoardBoundBuild(
       let source: ReturnType<typeof retryModeSource>
       try {
         source = prior.repo_path === repo_path && prior.branch === branch
-          && prior.merge_mode === merge_mode && prior.ralph === ralph
+          && prior.merge_mode === merge_mode && prior.execution_strategy === execution_strategy
           ? retryModeSource(deps.store, prior) : null
       } catch {
         return { ok: false, code: 'backend_error', message: 'The previous run has an invalid retry checkpoint. Nothing was dispatched.' }
       }
       // Typed state or a source link supersedes an inherited legacy projection.
       // An ineligible successor cannot revive its old fix-round seed.
-      // A GOVERNED ITERATION THAT HANDED BACK (`ralph-task-built`) is carried as a
+      // A GOVERNED ITERATION THAT HANDED BACK (`task-built`) is carried as a
       // CONTINUATION seed rather than a review seed (spec item
       // a-retry-must-resume-from-the-checkpoint, gap 2): the retry still builds the next
       // task, but opens it with the committed plan instead of the full planning survey.
-      const continuation = source !== null && isRalphContinuationSource(source)
+      const continuation = source !== null && isTaskContinuationSource(source)
       const candidate = source !== null ? {
-        checkpoint: continuation ? RALPH_CONTINUATION_CHECKPOINT : `fix-round-${source.state.checkpoint.round}`,
+        checkpoint: continuation ? TASK_CONTINUATION_CHECKPOINT : `fix-round-${source.state.checkpoint.round}`,
         head: source.state.checkpoint.head!, findings: null, base_sha: prior.base_sha!,
       } : deps.store.stageEvents(prior.id).some(event => event.stage === 'build-mode-state' || event.stage === 'build-retry-source')
-        ? null : builtButNeverReviewedSeed(prior, { ralph })
+        ? null : builtButNeverReviewedSeed(prior, { execution_strategy })
       if (candidate === null) {
         seedReason = 'prior_run_has_no_resumable_build'
       } else {
-        // THE CONTINUATION'S TIP IS THE LOCAL REF, WHATEVER THE MERGE MODE. A Ralph
+        // THE CONTINUATION'S TIP IS THE LOCAL REF, WHATEVER THE MERGE MODE. A Task
         // iteration commits locally and hands back without publishing (deferred waves
         // leave origin stale by design), so in `pr` mode origin legitimately lags the
         // recorded head and a remote read would refuse every such retry. It is the
         // same ref `prepareLaunch` re-verifies this seed against (launch-preparation.ts,
-        // the `ralph-task-built` arm of `resolveResumeLiveHead`), so the dispatch proof
+        // the `task-built` arm of `resolveResumeLiveHead`), so the dispatch proof
         // and the launch proof ask one question — and neither is the fire-time PR probe.
         const tipMode: MergeMode = continuation ? 'local' : merge_mode
         // The call itself sits inside the try: a NON-async probe throws at the
@@ -1558,16 +1569,6 @@ export async function dispatchBoardBoundBuild(
           seed = candidate
           typedSource = source
           seedReason = continuation ? 'resumed_continuation' : 'resumed'
-          // THE ITERATION COUNT TRAVELS WITH THE CONTINUATION. `advanceRalph` advanced
-          // the source's `iteration` when it handed back, and the host mints the retry's
-          // state at `max(source.iteration, row.ralph_round)` — but it reads the row's
-          // round for the planner cadence BEFORE that mint. A card snapshot that lags the
-          // handoff would open the iteration at a round the minted state disagrees with,
-          // and the handoff at its end would refuse the mismatch. Raising the row to the
-          // source's count can only TIGHTEN the budget, never authorise work.
-          if (continuation && budget !== null && source!.state.iteration > budget.ralph_round) {
-            budget = { ...budget, ralph_round: source!.state.iteration }
-          }
         } else {
           // THE TWO FAILURES ARE DIFFERENT FACTS AND ARE REPORTED AS SUCH. A 40-hex
           // tip that is not the recorded one means the branch moved — someone else's
@@ -1583,13 +1584,17 @@ export async function dispatchBoardBoundBuild(
       }
     }
   }
-  // ONE value for the row's Ralph cap, decided HERE so nothing below can overwrite
+  // ONE value for the row's Task cap, decided HERE so nothing below can overwrite
   // it — the deps spread used to sit inside the create call BELOW the seed and
   // silently won, which is how a prior run's 5 became the ambient 20. `budget` has
   // already folded the deps cap in as a ceiling, so this is not "config ignored": it
   // is min(prior, config). Undefined for every dispatch with nothing to inherit,
   // which is byte-identical to before.
-  const effectiveMaxRalphRounds = budget?.max_ralph_rounds ?? deps.max_ralph_rounds
+  const effectiveMaxTaskIterations = budget?.max_task_iterations ?? deps.max_task_iterations
+  if (budget !== null && budget.task_iteration >= budget.max_task_iterations) {
+    return { ok: false, code: 'task_budget_exhausted',
+      message: `Refused: Plan item "${board_item_id}" exhausted its task iteration budget (${budget.task_iteration}/${budget.max_task_iterations}). No run was created.` }
+  }
 
   // (5) FILE CONTENTION — do not start a build on a file a LIVE run already owns.
   //
@@ -1644,9 +1649,9 @@ export async function dispatchBoardBoundBuild(
   const resume_note = resumeNote(cardHadPrior ? seedReason : 'no_prior_terminal_run', {
     inner_checkpoint: seed?.checkpoint ?? null,
     inner_checkpoint_head: seed?.head ?? null,
-    ralph,
-    ralph_round: budget?.ralph_round ?? 0,
-    max_ralph_rounds: budget?.max_ralph_rounds ?? effectiveMaxRalphRounds ?? DEFAULT_MAX_RALPH_ROUNDS,
+    execution_strategy,
+    task_iteration: budget?.task_iteration ?? 0,
+    max_task_iterations: budget?.max_task_iterations ?? effectiveMaxTaskIterations ?? DEFAULT_MAX_TASK_ITERATIONS,
     budget_carried: budget !== null,
   })
   try {
@@ -1656,7 +1661,10 @@ export async function dispatchBoardBoundBuild(
       repo_path,
       task: input.task,
       merge_mode,
-      ralph,
+      execution_strategy,
+      strategy_rationale,
+      strategy_plan,
+      strategy_source,
       branch,
       // RECORD THE CLAIM on the run row, so the next dispatch's gate is a real
       // query against live state rather than an inference.
@@ -1690,23 +1698,23 @@ export async function dispatchBoardBoundBuild(
             base_sha: seed.base_sha,
           }
         : {}),
-      // THE CARD'S RALPH BUDGET (#519) — BOTH HALVES OR NEITHER, and carried
+      // THE CARD'S TASK BUDGET (#519) — BOTH HALVES OR NEITHER, and carried
       // independently of the commit seed above: the link is what proves this card owns
       // the prior run, and the task text has no bearing on a value that can only
       // tighten a bound. `create` refuses a round whose cap was not named, so the pair
       // is written as a pair here.
       ...(budget !== null
         ? {
-            ralph_round: budget.ralph_round,
-            max_ralph_rounds: budget.max_ralph_rounds,
-            ralph_task_total: item.ralph_task_total ?? (prior?.ralph ? prior.ralph_task_total : null),
+            task_iteration: budget.task_iteration,
+            max_task_iterations: budget.max_task_iterations,
+            task_total: item.task_total ?? (prior?.execution_strategy ? prior.task_total : null),
           }
         : {}),
       // …and for every dispatch with nothing to inherit, the configured cap exactly as
-      // before. `effectiveMaxRalphRounds` already prefers the carried one, so this
+      // before. `effectiveMaxTaskIterations` already prefers the carried one, so this
       // never overwrites it (the old deps spread sat BELOW the seed and did).
-      ...(budget === null && effectiveMaxRalphRounds !== undefined
-        ? { max_ralph_rounds: effectiveMaxRalphRounds }
+      ...(budget === null && effectiveMaxTaskIterations !== undefined
+        ? { max_task_iterations: effectiveMaxTaskIterations }
         : {}),
       ...(deps.max_rounds !== undefined ? { max_rounds: deps.max_rounds } : {}),
       ...(deps.chat_id !== undefined ? { chat_id: deps.chat_id } : {}),
@@ -1815,8 +1823,8 @@ export async function dispatchBoardBoundBuild(
         checkpoint: run.inner_checkpoint,
         // THE BOUND IS A PAIR, so both halves are reported: a round without the cap it
         // is measured against says nothing about whether the card is exhausted.
-        ralph_round: run.ralph_round,
-        max_ralph_rounds: run.max_ralph_rounds,
+        task_iteration: run.task_iteration,
+        max_task_iterations: run.max_task_iterations,
         // AND WHETHER THE CARD'S SPEND WAS INHERITED AT ALL, as its own field. A
         // `reason` of `resumed` describes the COMMIT; the budget is carried on a
         // different gate, so one word cannot honestly cover both.
@@ -1831,7 +1839,7 @@ export async function dispatchBoardBoundBuild(
     // A card that was previously HELD and has now finally dispatched clears its
     // queue entry (idempotent — a never-held card has no row to delete).
     await deps.holds?.deleteByItem(deps.project_slug, board_item_id)
-    return { ok: true, run, merge_mode, ralph }
+    return { ok: true, run, merge_mode, execution_strategy }
   } catch (err) {
     const detail = err instanceof Error ? err.message : String(err)
     // THE SAME RACE, ONE PROCESS FURTHER OUT. The store closes the in-process

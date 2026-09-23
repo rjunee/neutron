@@ -455,7 +455,7 @@ phase_for_checkpoint() {
   case "$name" in
     forge-done | argus-approved) printf 'argus' ; return ;;
     argus-request-changes) printf 'forge-fix' ; return ;;
-    ralph-task-built) printf 'ralph-task' ; return ;;
+    task-built | ralph-task-built) printf 'task-build' ; return ;;
   esac
   local fix_re='^fix-round-[0-9]+$'
   local rc_re='^argus-request-changes-round-[0-9]+$'

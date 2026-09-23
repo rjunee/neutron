@@ -280,7 +280,7 @@ function runNotice(item: WorkBoardItem): RunNotice | null {
   const alert = briefAlertText(rp)
   if (alert !== null) return { text: alert, tone: 'alert' }
   // The retry's resume decision: whether it carried the dead run's checkpoint and
-  // Ralph round, and why not when it did not. A retry that inherited nothing must
+  // task iteration, and why not when it did not. A retry that inherited nothing must
   // SAY so rather than look like a first dispatch. It yields to an integrity alert,
   // which is evidence something went wrong; the note is only what the row was born
   // with. Only a REFUSAL ("Not resumed: …", `resumeNote` in trident/board-dispatch.ts)
@@ -342,7 +342,17 @@ function roundText(rp: RunProgress | undefined): string | null {
   if (rp === undefined) return null
   const step = resolveStepLabel(rp)
   if (step === 'done' || step === 'failed') return null
+  if (rp.execution_strategy === null) return 'Planning pending'
+  if (rp.execution_strategy === 'single') return `Round ${rp.round}`
   const task = rp.task_number
+  if (rp.execution_strategy === 'task_sequence') {
+    const number = Number.isSafeInteger(task) && task! > 0 ? task : '?'
+    const total = typeof number === 'number' && Number.isSafeInteger(rp.task_total) && rp.task_total! >= number
+      ? rp.task_total : '?'
+    return `Task ${number}/${total} · Round ${rp.round}`
+  }
+  // Older frames carried no strategy. Preserve their known task/round display;
+  // absence is compatibility, not evidence for `single`.
   if (!Number.isSafeInteger(task) || task! < 1) return `Round ${rp.round}`
   const total = Number.isSafeInteger(rp.task_total) && rp.task_total! >= task! ? rp.task_total : '?'
   return `Task ${task}/${total} · Round ${rp.round}`

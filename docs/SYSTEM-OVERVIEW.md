@@ -3546,8 +3546,8 @@ actionable `dispatchConstraint` describing the wrapper or executor required to w
     that CONNECTED and produced no sha or no diff stops too: round 1 had no
     did-it-land gate, so an empty build reached the panel and five reviewers APPROVED
     a change that did not exist. That gate sits after the PR capture, the `forge-done`
-    checkpoint and the Ralph re-fire — it guards the review PANEL, and an intermediate
-    Ralph task opens none.
+    checkpoint and the task-sequence continuation — it guards the review PANEL,
+    and an intermediate task-sequence task opens none.
   - **A codex build makes the codex REVIEWER same-family.** The cross-model gate is
     unchanged and still cannot turn a deferred review into an APPROVE, but on a codex
     build the panel's family diversity comes from `argus:claude`,
@@ -6554,7 +6554,7 @@ deleted, no dual path):
 - **OUTER (durable):** `trident/tick.ts` sweeps the `code_trident_runs` SQLite
   table (migration 0077) and calls the orchestrator `step` per run. State in
   SQLite ⇒ restart-safe + resumable. Merge stays the OUTER / human gate
-  (`trident/merge.ts`), and the Ralph spec-drift docs are unchanged.
+  (`trident/merge.ts`), and planner-selected execution strategy is unchanged.
 - **INNER:** `trident/inner-workflow.mjs` is ONE CC Dynamic Workflow (run by the
   `Workflow` tool) that drives **Forge build (isolated worktree) → parallel
   adversarial Argus review → asymmetric-gated synthesis → bounded fix loop →
@@ -6634,12 +6634,12 @@ deleted, no dual path):
   (`builtButNeverReviewedSeed` at the `trident/board-dispatch.ts` chokepoint, gated on the prior
   row's FULL TASK TEXT matching — the slug truncates at 35 chars and two cards can collide on it —
   on the live branch tip resolving to EXACTLY the recorded head, and on the checkpoint being one
-  the workflow really reviews, which a bare `forge-done` in RALPH mode is not), so a successful
+  the workflow really reviews, which a bare `forge-done` in `task_sequence` is not), so a successful
   build whose lane died pre-review is routed to REVIEW on re-dispatch instead of being rebuilt.
-  SCOPE, because the Ralph exclusion is not a corner case here: a governed repo (a git root with
-  `SPEC.md` — THIS one) runs Ralph, and there a bare `forge-done` still rebuilds, because a Ralph
-  iteration's build says nothing about how many tasks remain (`classifyResume` →
-  `ralph-progress-unknown`). What the seed recovers in a governed repo is the
+  SCOPE, because the task-sequence exclusion is not a corner case: a bare
+  `forge-done` in `task_sequence` still rebuilds because one task's build says
+  nothing about how many tasks remain (`classifyResume` uses the historical
+  compatibility reason `ralph-progress-unknown`). What the seed recovers is the
   `outer-published:<oid>:<remaining>:<round>` and `fix-round-N` window — the shapes that DO carry
   a reviewable commit and a recorded remaining-task count — AND ONLY WHERE THE COMMIT IS ON A REF
   THE RESUME CAN READ (Argus, major): the tip proof runs against `origin` in `pr` mode and the
@@ -6649,7 +6649,7 @@ deleted, no dual path):
   already pushed — actually salvages; in `local` mode every salvageable checkpoint does. That
   boundary is why the 33 measured `forge-done` rows (all 33 `pr` mode, 0 `local`) are NOT covered
   by the seed, stated at length in this card's as-built record. What the verdict honesty fixes
-  everywhere, Ralph included, is the RECORDING: a run of the shape those 33 rows have — terminal
+  everywhere, `task_sequence` included, is the RECORDING: a run of the shape those 33 rows have — terminal
   at `forge-done`, no review, no findings — is now recorded `REVIEW_NOT_RUN` rather than
   inflating the rejection count. FROM NOW ON, not retroactively: the 33 measured rows still say
   what they said. Readers follow the
@@ -6662,7 +6662,7 @@ deleted, no dual path):
   `docs/INVARIANTS.md` #118 and the 2026-08-31 as-built entry.
 - **A MERGE IS TERMINAL (ISSUES #563):** the run lifecycle ENDS where the change
   ships. The inner loop probes the PR's merge state the instant a Forge round
-  returns — ahead of the review panel, the Ralph re-fire, the round-1 empty-build
+  returns — ahead of the review panel, task-sequence continuation, the round-1 empty-build
   refusal and any round increment — and a merged PR ends the run right there
   (`inner_checkpoint = 'pr-merged'`, result `{prMerged:true, verdict:'APPROVE',
   blockKind:'none'}`, no `reviewedHead`). It had to be probed rather than signalled:
@@ -6725,7 +6725,7 @@ deleted, no dual path):
   over code the prior phase's outcome is actually about. `classifyResume`
   (`trident/inner-workflow.mjs`) compares the RECORDED `inner_checkpoint_head`
   against a live `git ls-remote` (pr) / `git rev-parse` (local) probe of the branch
-  head. **Equal** → the prior verdict is about exactly this code: non-Ralph `forge-done` /
+  head. **Equal** → the prior verdict is about exactly this code: `single` `forge-done` /
   `fix-round-N` → skip the Forge build and review the recorded commit (the diff is
   regenerated as `git diff <base>..<oid>`, BY OID — a branch name is a moving
   target); `argus-request-changes-round-N` (+ recorded findings) → skip the re-review and
@@ -6733,7 +6733,8 @@ deleted, no dual path):
   bounding across crashes; `argus-approved` → skip build+review and let the OUTER
   loop merge. **Different, unreadable, an abbreviated/malformed sha, a NULL OID (a
   row written before `0122`), a checkpoint name it does not know
-  (`ralph-task-built`), Ralph `forge-done` (whose remaining-task count was not recorded),
+  (`task-built`; historically `ralph-task-built`), `task_sequence` `forge-done`
+  (whose remaining-task count was not recorded),
   or a diff that could not be regenerated** → REBUILD and
   RE-REVIEW. `reviewedHead` — the OID the outer merge pins with
   `--match-head-commit` — may only ever be set from the RECORDED value or from a
@@ -6745,7 +6746,7 @@ deleted, no dual path):
   The outer publisher's `outer-published:<oid>:<remaining>:<round>` checkpoint uses
   the same classifier. Its encoded OID has precedence over the companion OID
   column, but never over the live-head equality check; after equality is proven,
-  its diff path and Ralph counters are restored without rebuilding or planning.
+  its diff path and task-iteration counters are restored without rebuilding or planning.
 - **Orchestrator surface:** `Workflow` is now on the live-chat agent's constant
   `DEFAULT_TOOL_NAMES` (`build-live-agent-turn.ts`) so the owner's orchestrator
   REPL can fire background tridents directly + stay responsive (readies the
@@ -6857,12 +6858,14 @@ state-machine skeleton; **PR-3 wired the real agentic loop** (below).
   `subagent_status`) so the loop is restart-safe, instead of in the
   disconnected generic `runtime/subagent/` registry. `TridentRunStore`
   (`trident/store.ts`) is the CRUD wrapper, shaped like `ReminderStore`.
-- **State machine** — `advanceTridentRun(run, deps)`
+- **Historical compatibility state machine** — `advanceTridentRun(run, deps)`
   (`trident/state-machine.ts`): the phase graph
   `forge-init → {argus | ralph-plan} → ralph-task → … → argus ⇄ forge-fix
   → done` with terminal `done | failed | stopped`, the Argus round cap
-  (`max_rounds`, default 10) and the Ralph plan↔task round cap
-  (`max_ralph_rounds`, default 20). The pure `computeTransition` owns the
+  (`max_rounds`, default 10) and the legacy task-iteration cap
+  (`max_ralph_rounds`, now `max_task_iterations`, default 20). These old phase
+  and column names are migration provenance; the live names are `task-plan`,
+  `task-build`, and `task_iteration`. The pure `computeTransition` owns the
   control flow; `deps.classify` reads the sub-agent outcome. PR-2 shipped
   `stubAdvanceDeps` (always "running"); PR-3 supersedes it with a real
   fire+harvest+merge `step` (below).
@@ -6907,8 +6910,8 @@ state-machine skeleton; **PR-3 wired the real agentic loop** (below).
   LOUDLY instead of shipping unreviewed code) and
   `'local'` (`git merge --no-ff`) merge bodies — **no `git worktree remove`** (Open uses plain branches). Battle-
   tested the legacy harness fixes are mapped (see `trident/legacy-fixes.test.ts`): no
-  phantom-id poll, no silent exit, loud fail on a missing Ralph
-  `REMAINING_TASKS`, the `max_rounds`/`max_ralph_rounds` caps, the
+  phantom-id poll, no silent exit, loud fail on missing task-sequence
+  `REMAINING_TASKS`, the `max_rounds`/`max_task_iterations` caps, the
   oversized-diff guard, model-routing defaults, and (PR-5) **restart-resume**
   — an orphaned `subagent_run_id` (untracked after a control-plane restart)
   is recovered by a bounded one-per-process re-dispatch
@@ -6942,50 +6945,53 @@ state-machine skeleton; **PR-3 wired the real agentic loop** (below).
   (Ryan-locked: build both, auto-detect). `cleanupAfterMerge` dispatches to
   the `trident/merge.ts` bodies (PR-3).
 
-### Ralph build mode (PR-4) — spec-driven, one task per fresh context
+### Planner-selected execution strategy — `single` or `task_sequence`
 
-For large, spec-driven work, Trident runs in **Ralph mode** (named after
-Geoffrey Huntley's "ralph" loop) instead of one big Forge context that drifts
-as its window fills. Progress lives in FILES + git history, never a context
-window, so a fresh agent each iteration cannot forget what was agreed.
+Every fresh implementation build begins with planning pending. The existing
+initial planner returns one closed result containing an executable plan, a
+nonempty strategy rationale, and exactly one strategy: `single` or
+`task_sequence`. This is not a second classification call. The host validates
+the whole result and persists the accepted strategy, rationale, and plan before
+it may dispatch a builder. Missing, malformed, contradictory, incomplete, or
+unknown selection blocks the build or leaves it explicitly unknown; it never
+defaults to `single`.
 
-- **Detection** — `detectRalphMode(repoPath, probe, {explicit})`
-  (`trident/git-mode.ts`): a run is Ralph when explicitly requested OR the
-  repo's git root contains a `SPEC.md` (a "governed" repo).
-  `defaultRalphModeProbe` resolves the git root then checks `<root>/SPEC.md`.
-  Persisted as `ralph` on the run row; the run-creation call site is
-  `trident/code-command.ts` (the `/code` entry, PR-5), which auto-detects
-  git-mode + Ralph at dispatch.
-- **The loop** (driven by the same tick state machine):
-  1. `forge-init` (Ralph bootstrap) — create the branch, write the first
-     `IMPLEMENTATION_PLAN.md` (a `- [ ] <task>` checklist derived from
-     `SPEC.md`), build ONLY the top task, open the PR, report
-     `REMAINING_TASKS`. Prompt: `renderForgePrompt` + `RALPH_BOOTSTRAP_NOTE`.
-  2. `ralph-plan` — a FRESH, docs-only planner diffs `SPEC.md` against the
-     actual code and rewrites `IMPLEMENTATION_PLAN.md`, reporting
-     `REMAINING_TASKS` + `NEXT_TASK`. Prompt: `renderRalphPlanPrompt`; parsed
-     by `parseRalphPlan` (no PR contract lines required). The active
-     drift-catch: a regressed task re-opens as `- [ ]`.
-  3. `ralph-task` — a FRESH Forge implements ONLY the surfaced `NEXT_TASK`
-     (threaded via `session.nextTaskFor`), checks it off in
-     `IMPLEMENTATION_PLAN.md`, commits code + tests. (Historical prompt:
-     `renderRalphTaskPrompt`, since folded into `trident/inner-workflow.mjs`;
-     the folded executor writes `IMPLEMENTATION_PLAN.md`, NOT the changelog —
-     `docs/AS_BUILT.md` is the single consolidated as-built record that the
-     planner READS (`inner-workflow.mjs:361`) and that unit PRs append to, not
-     an executor-written artifact. Restoring an executor changelog-write would
-     be a separate trident-loop change under self-surgery discipline.)
-  4. Repeat 2 ⇄ 3 until a planning pass reports `REMAINING_TASKS=0`, then →
-     `argus` → the normal fix/merge loop reviews + merges the accumulated
-     branch.
-- **Fail-loud guard** — a missing/garbled `REMAINING_TASKS` (strict
-  `^[0-9]+$`) from the bootstrap OR any planner halts the run (`phase=failed`),
-  never silently merges a partial governed build. `max_ralph_rounds`
-  (default 20) bounds a non-converging planner so the loop can't spin forever.
+The repository's `SPEC.md` remains authoritative governance context for the
+planner, but its presence or absence never selects execution grouping. Both
+strategies are valid for repositories with or without a `SPEC.md`:
 
-Threading the production gateway credential closure into a live
-`TridentDispatch` so boot drives the loop (and the run-creation call site that
-calls `detectRalphMode`) is PR-5.
+- **`single`** — one builder invocation completes the whole accepted plan. Its
+  terminal validation uses the full-suite scope before review and publication.
+- **`task_sequence`** — each builder invocation completes exactly the
+  host-selected task. The host validates the committed ledger, task identity,
+  remaining count, and mutation evidence; while tasks remain it records a
+  `task-built` handoff and defers review and publication. The terminal task
+  receives the full-suite scope, and only the cumulative result is reviewed and
+  published. A continuation planner may refresh execution details within this
+  strategy, but cannot reclassify the run.
+
+Selection is immutable across continuation, restart, infrastructure retry,
+cross-run retry, changed branch heads, cleared card links, and bounded
+replanning. Task-iteration spend and its card-owned cap travel together, so a
+retry cannot buy a fresh budget by changing strategy. Wave members and bound
+reviews remain explicit host modes rather than planner-selected strategies.
+The host continues to own task identity, suite scope, review, mutation proof,
+publication, merge, and all budgets.
+
+The Work Board renders `Planning pending` before selection, `Round R` for
+`single`, and `Task N/M · Round R` for `task_sequence` (`?` when the latest
+validated plan has no known total). Terminal rows hide progress. Clients accept
+older frames without inventing a strategy.
+
+**Historical compatibility mapping.** Existing stored `ralph = 1` means
+`task_sequence`; `ralph = 0` means `single`. Migration translates
+`ralph_round` → `task_iteration`, `max_ralph_rounds` → `max_task_iterations`,
+and `ralph_task_total` → `task_total` without resetting spend. Historical
+phases and checkpoints map `ralph-plan` → `task-plan`, `ralph-task` →
+`task-build`, and `ralph-task-built[-deviated]` →
+`task-built[-deviated]`. Old SQL migrations, immutable decision entries, frozen
+as-built records, test filenames, and historical anchors retain their original
+names as provenance; they are not current product terminology.
 
 ## Concurrent publishes and the AS_BUILT log — the entry-aware merge driver (`scripts/git/`)
 

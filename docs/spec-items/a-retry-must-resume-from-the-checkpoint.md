@@ -1,5 +1,5 @@
 ---
-title: Carry a dead run's checkpoint and ralph round into its retry
+title: Carry a dead run's checkpoint and task iteration into its retry
 group: trident
 status: done
 priority: P0
@@ -7,16 +7,27 @@ cutover: true
 legacy_ref: "SPEC.md § Phases → Steps (2026-09-12 split)"
 ---
 
+> **Current terminology.** This completed item predates planner-selected
+> execution strategy. Its current contract is that a retry preserves the
+> persisted `single` or `task_sequence` selection and card-owned
+> `task_iteration` / `max_task_iterations` spend. Historical storage maps
+> `ralph = 1` → `task_sequence`, `ralph = 0` → `single`, `ralph_round` →
+> `task_iteration`, `max_ralph_rounds` → `max_task_iterations`, and the
+> checkpoints `ralph-task-built[-deviated]` →
+> `task-built[-deviated]`. The older column, checkpoint, migration, test, and
+> function names below are retained as historical evidence.
+
 **A retry must resume from the checkpoint, not merely from the PR.** A re-dispatch creates a NEW run
 row, and what that row inherits now depends on the card's `linked_run_id`.
 
-**What carries.** When a card names its own governed prior run, `dispatchBoardBoundBuild` loads that run
-by id and the new row is born with the prior's Ralph spend — `ralph_round` together with the cap it is
-measured against, `min(prior, this dispatch)` — and, when the prior's checkpoint is review-capable
+**What carries.** When a card names its own prior run, `dispatchBoardBoundBuild` loads that run
+by id and the new row preserves its selected strategy and task-iteration spend —
+`task_iteration` together with the cap it is measured against,
+`min(prior, this dispatch)` — and, when the prior's checkpoint is review-capable
 (`fix-round-N`, `outer-published:*`) and the live branch tip still holds its recorded head, with that
 checkpoint, its head, its findings and its base pin. The review `round` comes from the checkpoint name,
-so review rounds are not restarted for such a resume. A governed prior that handed back a finished Ralph
-iteration (`ralph-task-built`) is resumed the same way when the LOCAL branch ref still holds its recorded
+so review rounds are not restarted for such a resume. A `task_sequence` prior that handed back a finished
+iteration (`task-built`) is resumed the same way when the LOCAL branch ref still holds its recorded
 head, and the new row is born at the iteration that handoff advanced to. Whatever the dispatch decides,
 it writes one sentence saying so onto the row, and the card shows it.
 
@@ -25,13 +36,14 @@ three are closed, and `## Closed` below records where.
 
 - The spend rode `linked_run_id`, so anything that moved or cleared that link started a fresh
   budget. The card now owns the spend (#722, #728; rjunee/neutron#629 is closed).
-- The governed plan was regenerated from scratch on every resume. A retry of a handed-back
-  Ralph iteration now resumes `ralph-task-built` and the typed build host plans it with the
+- The task-sequence plan was regenerated from scratch on every resume. A retry of a handed-back
+  task iteration now resumes `task-built` and the typed build host plans it with the
   cheap `next` planner over the committed ledger.
 - A refusal to carry was a log line only. The dispatch now writes one sentence onto the run
   row (`resume_note`), and the card renders it.
 
-Acceptance: a retry carries the dead run's `inner_checkpoint` and `ralph_round` forward, or states plainly
+Acceptance: a retry carries the dead run's strategy, `inner_checkpoint`, and
+`task_iteration` forward, or states plainly
 on the card that it will not. The fire-time `detectExistingPr` probe (`trident/orchestrator.ts` `launch`)
 must not be the thing that recovers continuity — it only sets `pr`, and it silently degrades to zero in
 `local` merge-mode, where there is no origin to ask.
@@ -42,15 +54,16 @@ All three are met. #628 once ticked all three on evidence that did not hold; the
 measurements under `## Closed` are what these ticks rest on, and they name the loop each
 one is measured on.
 
-- [x] A retry carries the dead run's `inner_checkpoint` and `ralph_round` forward, OR states
+- [x] A retry carries the dead run's strategy, `inner_checkpoint`, and
+      `task_iteration` forward, OR states
       plainly on the card that it will not. Silence fails; a new run row with
-      `inner_checkpoint = null` and `ralph_round = 0` and no card text is the defect.
+      `inner_checkpoint = null` and `task_iteration = 0` and no card text is the defect.
       verify: `trident/cross-run-retry-checkpoint.test.ts` (every seed reason writes its
       sentence; a first dispatch writes none), `trident/store.test.ts` (write-once
       `resume_note`), `trident/run-progress.test.ts`, `app/__tests__/work-board-helpers.test.ts`,
       `landing/chat-react/__tests__/work-board-tab.test.tsx`.
 - [x] Planning and review tokens are not re-spent on a resume that had a checkpoint to
-      resume from. Assert the governed plan is NOT regenerated from scratch.
+      resume from. Assert the task-sequence plan is NOT regenerated from scratch.
       verify: `open/__tests__/project-build-e2e.test.ts` (the retry's planner choice is
       `next` and the plan it executes is the committed ledger's exact bytes),
       `trident/build-run.test.ts`, `trident/production-host-effects.test.ts`.
@@ -61,7 +74,7 @@ one is measured on.
       `open/__tests__/project-build-e2e.test.ts`, each run for `local` and `pr` with origin
       lagging the recorded head; `trident/retry-resumes-checkpoint.test.ts`.
 
-## Shipped
+## Historical shipped evidence
 
 `builtButNeverReviewedSeed` → `dispatchBoardBoundBuild` → `TridentRunStore.create`
 already carried `inner_checkpoint`, its head, its findings, the base pin and the review

@@ -12,7 +12,7 @@
  * `ProjectDb`, async writes (busy-retry under the hood), sync reads.
  *
  * PR-2 scope: the store + the state-machine skeleton. The Forge/Argus
- * spawning (PR-3) and the Ralph plan↔task loop (PR-4) read + write these
+ * spawning (PR-3) and the Task plan↔task loop (PR-4) read + write these
  * rows; this PR lands the persistence so neither needs a schema change.
  */
 
@@ -25,9 +25,10 @@ import { resultCarriesEscalation } from './escalation-evidence.ts'
 import { phaseForCheckpoint } from './checkpoint-phase.ts'
 import { checkpointRound } from './checkpoint-round.ts'
 import { trimAsciiWs } from './ascii-trim.ts'
-import { readBuildRetrySource, retrySourceIdentity } from './build-mode-state.ts'
+import { parseBuildModeState, readBuildRetrySource, retrySourceIdentity } from './build-mode-state.ts'
 import { seedableCheckpoint } from './run-disposition.ts'
-import { carryableRalphRound, DEFAULT_MAX_RALPH_ROUNDS, isRalphCap } from './ralph-budget.ts'
+import { carryableTaskIteration, DEFAULT_MAX_TASK_ITERATIONS, isTaskCap } from './task-budget.ts'
+import type { ExecutionStrategy } from './execution-strategy.ts'
 
 const crashLog = createLogger('trident-launcher-crash')
 
@@ -50,8 +51,8 @@ function launcherCrashReasonRank(reason: string): number {
  */
 export type TridentPhase =
   | 'forge-init'
-  | 'ralph-plan'
-  | 'ralph-task'
+  | 'task-plan'
+  | 'task-build'
   | 'argus'
   | 'forge-fix'
   | 'done'
@@ -77,7 +78,7 @@ export class TridentRunReferenceAmbiguousError extends Error {
 
 export class TridentUnresumableSeedError extends Error {
   constructor(checkpoint: string) {
-    super(`refusing to create a trident run seeded at inner_checkpoint='${checkpoint}': only a checkpoint that means "a commit exists and nothing has judged it yet" (forge-done, fix-round-N, outer-published:*) may seed a resume, plus ralph-task-built on a governed (ralph) row, which seeds a Ralph continuation that still builds and reviews — anything else either has no commit to resume or has ALREADY been judged, and seeding it would route unreviewed work past a review`)
+    super(`refusing to create a trident run seeded at inner_checkpoint='${checkpoint}': only a checkpoint that means "a commit exists and nothing has judged it yet" (forge-done, fix-round-N, outer-published:*) may seed a resume, plus task-built on a governed (execution_strategy) row, which seeds a Task continuation that still builds and reviews — anything else either has no commit to resume or has ALREADY been judged, and seeding it would route unreviewed work past a review`)
     this.name = 'TridentUnresumableSeedError'
   }
 }
@@ -112,67 +113,37 @@ export class TridentUnseededPinError extends Error {
 }
 
 /**
- * A carried `ralph_round` with no cap named alongside it (#519, round 2 BLOCKER).
+ * A carried `task_iteration` with no cap named alongside it (#519, round 2 BLOCKER).
  *
- * A Ralph budget is a PAIR — the counter and the bound it is measured against — and
+ * A Task budget is a PAIR — the counter and the bound it is measured against — and
  * a row holding half of it is not bounded at all. The measured defect: a prior run at
- * `ralph_round: 5, max_ralph_rounds: 5`, re-dispatched with no explicit cap, produced
- * a row at `5 / 20`, because `create` supplies {@link DEFAULT_MAX_RALPH_ROUNDS} when
+ * `task_iteration: 5, max_task_iterations: 5`, re-dispatched with no explicit cap, produced
+ * a row at `5 / 20`, because `create` supplies {@link DEFAULT_MAX_TASK_ITERATIONS} when
  * the caller names nothing. `5 + 1 > 20` is false, so a card deliberately capped at 5
  * was handed twenty iterations — the unbounded-retry defect the round carry exists to
  * close, re-entering through the cap.
  *
  * So a row that carries a spent round MUST name the cap that round was spent against.
- * `builtButNeverReviewedSeed` resolves both together (`carriedRalphCap` =
+ * `builtButNeverReviewedSeed` resolves both together (`carriedTaskCap` =
  * min(prior, dispatch)) and the dispatch chokepoint writes them as one; this is that
  * requirement at the write site, where no future caller can omit it by accident.
  */
 export class TridentUnboundedCarriedRoundError extends Error {
-  constructor(ralph_round: number) {
-    super(`refusing to create a trident run carrying ralph_round=${ralph_round} with no max_ralph_rounds: a Ralph budget is the PAIR (counter, bound), and a row that names only the counter falls back to the DEFAULT cap — which silently RAISES the bound of any card that had a tighter one, handing an exhausted card a fresh budget. Carry the prior run's effective cap alongside the round (see carriedRalphCap), or carry neither`)
+  constructor(task_iteration: number) {
+    super(`refusing to create a trident run carrying task_iteration=${task_iteration} with no max_task_iterations: a Task budget is the PAIR (counter, bound), and a row that names only the counter falls back to the DEFAULT cap — which silently RAISES the bound of any card that had a tighter one, handing an exhausted card a fresh budget. Carry the prior run's effective cap alongside the round (see carriedTaskCap), or carry neither`)
     this.name = 'TridentUnboundedCarriedRoundError'
   }
 }
 
 /**
- * A carried `ralph_round` on a row that will not run a Ralph loop (#519,
- * adversarial review P3).
+ * A `max_task_iterations` that is present but is not a cap (#519, final review round).
  *
- * `create` re-applied the unseeded and pair preconditions but never "this row is
- * governed", so `create({ ralph: false, ralph_round: 4, … })` wrote a Ralph counter
- * onto a non-Ralph row — and the docblock in `board-dispatch.ts` claimed the write
- * site re-applied that predicate, which was false. The counter is meaningless there
- * (`refireNextRalphTask` is never reached on a non-Ralph run) and it is READ by
- * `buildWorkflowArgs` regardless, so the workflow would be told an iteration number
- * for a loop that does not exist. `carriedRalphBudget` (run-disposition.ts) already
- * `carriedRalphBudget` (run-disposition.ts) already answers null for that shape; this is
- * the same predicate at the write site.
- *
- * A CREATE-TIME RULE, NOT A TABLE INVARIANT, and the distinction is stated because an
- * earlier draft implied the stronger one (adversarial review, item 6). `update` applies
- * none of the three new predicates — `crash-recovery.test.ts` and `tick-liveness.test.ts`
- * both write `ralph_round: 3` onto rows whose `ralph` defaulted to false — so a
- * non-governed row CAN hold a counter if something patches one on. That is deliberate for
- * now: `TridentRunUpdate` is the state machine's own seam and tightening it is a separate
- * change with its own blast radius. What this class guarantees is that no DISPATCH can
- * create such a row, which is the path #519 is about.
- */
-export class TridentUngovernedRalphRoundError extends Error {
-  constructor(ralph_round: number) {
-    super(`refusing to create a NON-ralph trident run carrying ralph_round=${ralph_round}: a count of Ralph iterations is meaningless on a row that will not run a Ralph loop, and buildWorkflowArgs threads it to the inner workflow regardless — set ralph:true or carry no round`)
-    this.name = 'TridentUngovernedRalphRoundError'
-  }
-}
-
-/**
- * A `max_ralph_rounds` that is present but is not a cap (#519, final review round).
- *
- * `create` resolved the field with `input.max_ralph_rounds ?? DEFAULT_MAX_RALPH_ROUNDS`,
+ * `create` resolved the field with `input.max_task_iterations ?? DEFAULT_MAX_TASK_ITERATIONS`,
  * which is correct for ABSENT and silently wrong for INVALID: a `NaN`, a negative or a
  * fractional cap is not nullish, so it was written straight into an INTEGER column and
- * every later `ralph_round + 1 > max_ralph_rounds` comparison was decided against a
+ * every later `task_iteration + 1 > max_task_iterations` comparison was decided against a
  * value nothing had checked. A `NaN` cap makes that comparison FALSE forever, which is
- * an unbounded Ralph loop produced by a config typo.
+ * an unbounded Task loop produced by a config typo.
  *
  * Zero is NOT invalid and is not refused here: a card capped at zero gets no
  * iterations, which is a coherent thing to ask for and which the loop refuses loudly on
@@ -180,19 +151,19 @@ export class TridentUngovernedRalphRoundError extends Error {
  * because the alternative is choosing a number on the caller's behalf and the most
  * permissive one is always available.
  */
-export class TridentInvalidRalphCapError extends Error {
+export class TridentInvalidTaskCapError extends Error {
   constructor(value: unknown) {
-    super(`refusing to create a trident run with max_ralph_rounds=${typeof value === 'number' ? String(value) : JSON.stringify(value)}: a Ralph cap must be a non-negative safe integer (0 is allowed and means "no iterations"). ABSENT gets the default; a value that is PRESENT but unreadable is refused rather than replaced, because every ralph_round + 1 > max_ralph_rounds comparison would otherwise be decided against an unchecked number — and NaN makes that comparison false forever, i.e. an unbounded loop from a config typo`)
-    this.name = 'TridentInvalidRalphCapError'
+    super(`refusing to create a trident run with max_task_iterations=${typeof value === 'number' ? String(value) : JSON.stringify(value)}: a Task cap must be a non-negative safe integer (0 is allowed and means "no iterations"). ABSENT gets the default; a value that is PRESENT but unreadable is refused rather than replaced, because every task_iteration + 1 > max_task_iterations comparison would otherwise be decided against an unchecked number — and NaN makes that comparison false forever, i.e. an unbounded loop from a config typo`)
+    this.name = 'TridentInvalidTaskCapError'
   }
 }
 
 /**
- * A `ralph_round` that is present but is not a counter (#519, final review round —
+ * A `task_iteration` that is present but is not a counter (#519, final review round —
  * defect FOUR of one shape).
  *
  * `create` normalised any unreadable counter to `0`, which is the most permissive answer
- * available: a row written `{ ralph_round: 0, max_ralph_rounds: 20 }` is authorised for
+ * available: a row written `{ task_iteration: 0, max_task_iterations: 20 }` is authorised for
  * the whole budget, because `0 + 1 > 20` is false. So malformed persisted data — or a
  * caller passing `NaN` from arithmetic on an absent field — restored exactly the budget
  * this change exists to preserve, in the field beside the cap that had just been given a
@@ -203,10 +174,10 @@ export class TridentInvalidRalphCapError extends Error {
  * counter throws, because there is no substitution for it that is not a lie about how
  * much the card has spent.
  */
-export class TridentInvalidRalphRoundError extends Error {
+export class TridentInvalidTaskIterationError extends Error {
   constructor(value: unknown) {
-    super(`refusing to create a trident run with ralph_round=${typeof value === 'number' ? String(value) : JSON.stringify(value)}: a Ralph counter must be a non-negative safe integer (0 is allowed and means "nothing spent"). ABSENT gets 0; a value that is PRESENT but unreadable is refused rather than normalised, because every normalisation available is MORE permissive than the truth — a counter quietly read as 0 authorises the card's entire max_ralph_rounds budget`)
-    this.name = 'TridentInvalidRalphRoundError'
+    super(`refusing to create a trident run with task_iteration=${typeof value === 'number' ? String(value) : JSON.stringify(value)}: a Task counter must be a non-negative safe integer (0 is allowed and means "nothing spent"). ABSENT gets 0; a value that is PRESENT but unreadable is refused rather than normalised, because every normalisation available is MORE permissive than the truth — a counter quietly read as 0 authorises the card's entire max_task_iterations budget`)
+    this.name = 'TridentInvalidTaskIterationError'
   }
 }
 
@@ -234,12 +205,15 @@ export interface TridentRun {
   phase: TridentPhase
   round: number
   max_rounds: number
-  /** Ralph build-mode flag (PR-4). Stored as 0/1; surfaced as boolean. */
-  ralph: boolean
-  ralph_round: number
-  /** Latest plan-derived total; null until a Ralph continuation is harvested. */
-  ralph_task_total: number | null
-  max_ralph_rounds: number
+  /** Null means the initial planner has not selected an execution strategy. */
+  execution_strategy: ExecutionStrategy | null
+  strategy_rationale: string | null
+  strategy_plan: string | null
+  strategy_source: 'planner' | 'legacy' | null
+  task_iteration: number
+  /** Latest plan-derived total; null until a Task continuation is harvested. */
+  task_total: number | null
+  max_task_iterations: number
   branch: string | null
   /** The origin/<base> commit the build branch was cut from, read in code at launch; null for legacy rows/local-mode failures. */
   base_sha: string | null
@@ -274,7 +248,7 @@ export interface TridentRun {
   brief_alert: string | null
   /**
    * RETRY RESUME NOTE (migration 0155) — one plain sentence saying whether this
-   * run inherited the dead prior run's checkpoint and Ralph round, and if not,
+   * run inherited the dead prior run's checkpoint and Task round, and if not,
    * why. Written ONCE, by the board dispatch at `create`, from the very values it
    * seeded onto this row (`resumeNote`, board-dispatch.ts), so the card text and
    * the row cannot disagree. Null only for a first dispatch, which has no prior
@@ -363,7 +337,7 @@ export interface TridentRun {
    * DURABLE on purpose: the cause it bounds is a gateway deploy loop (three
    * restarts in 53 min on 2026-08-14), and every gateway boot resets in-memory
    * state — an in-process counter cannot cap the very loop that restarts the
-   * process. SEPARATE from `round`/`ralph_round`: a launcher crash is not the
+   * process. SEPARATE from `round`/`task_iteration`: a launcher crash is not the
    * agent's failure and must not consume its fix rounds.
    */
   crash_recoveries: number
@@ -428,27 +402,29 @@ export interface CreateTridentRunInput {
   phase?: TridentPhase
   /** Defaults to 10 — the review-round cap the fix loop bounds on. See `create`. */
   max_rounds?: number
-  /** Defaults to false. */
-  ralph?: boolean
-  /** Defaults to {@link DEFAULT_MAX_RALPH_ROUNDS}. */
-  max_ralph_rounds?: number
+  /** Fresh implementation runs begin with planning pending. */
+  execution_strategy?: ExecutionStrategy | null
+  strategy_rationale?: string | null
+  strategy_plan?: string | null
+  strategy_source?: 'planner' | 'legacy' | null
+  /** Defaults to {@link DEFAULT_MAX_TASK_ITERATIONS}. */
+  max_task_iterations?: number
   /**
-   * SALVAGE-RESUME SEED — the prior run's Ralph re-fire counter (#519). Omitted →
+   * SALVAGE-RESUME SEED — the prior run's Task re-fire counter (#519). Omitted →
    * 0, the fresh-dispatch value every other caller keeps.
    *
    * THE CARD'S SPEND, not an independent knob, and NOT part of the commit seed: it is
    * gated on the board link alone, so it travels even when a task-text edit refuses
-   * the checkpoint (see `carriedRalphBudget`, run-disposition.ts — the only writer).
-   * `create` refuses it on a row that is not governed
-   * (`TridentUngovernedRalphRoundError`) and on a row that names no
-   * `max_ralph_rounds` (`TridentUnboundedCarriedRoundError`), because a counter
+   * the checkpoint (see `carriedTaskBudget`, run-disposition.ts — the only writer).
+   * `create` refuses a positive counter that names no
+   * `max_task_iterations` (`TridentUnboundedCarriedRoundError`), because a counter
    * without its bound silently inherits the DEFAULT cap and so RAISES the bound of
    * any card that had a tighter one. It does NOT bound the value by that cap: a round
    * at or past it is stored verbatim so the cap BITES here, because refusing would
    * fall back to 0 — a reset, not a refusal.
    */
-  ralph_round?: number
-  ralph_task_total?: number | null
+  task_iteration?: number
+  task_total?: number | null
   /** Defaults to 'local'; set by `detectMergeMode` at creation. */
   merge_mode?: MergeMode
   branch?: string | null
@@ -536,8 +512,8 @@ export type WorkflowColumnsSeen = Pick<TridentRun, 'inner_checkpoint' | 'inner_v
 export interface TridentRunUpdate {
   phase?: TridentPhase
   round?: number
-  ralph_round?: number
-  ralph_task_total?: number | null
+  task_iteration?: number
+  task_total?: number | null
   branch?: string | null
   base_sha?: string | null
   base_behind?: number | null
@@ -569,10 +545,13 @@ interface TridentRunDbRow {
   phase: TridentPhase
   round: number
   max_rounds: number
-  ralph: number
-  ralph_round: number
-  ralph_task_total: number | null
-  max_ralph_rounds: number
+  execution_strategy: ExecutionStrategy | null
+  strategy_rationale: string | null
+  strategy_plan: string | null
+  strategy_source: 'planner' | 'legacy' | null
+  task_iteration: number
+  task_total: number | null
+  max_task_iterations: number
   branch: string | null
   base_sha: string | null
   base_behind: number | null
@@ -611,8 +590,8 @@ interface TridentRunDbRow {
 
 /** Exported solely so tests can pin the column-count invariant. */
 export const COLS =
-  'id, slug, project_slug, phase, round, max_rounds, ralph, ralph_round, ralph_task_total, ' +
-  'max_ralph_rounds, branch, pr, published_pr, merge_mode, subagent_run_id, subagent_status, ' +
+  'id, slug, project_slug, phase, round, max_rounds, execution_strategy, strategy_rationale, strategy_plan, strategy_source, task_iteration, task_total, ' +
+  'max_task_iterations, branch, pr, published_pr, merge_mode, subagent_run_id, subagent_status, ' +
   'repo_path, worktree, task, chat_id, thread_id, channel_kind, failure_reason, brief_alert, resume_note, ' +
   'workflow_run_id, inner_checkpoint, inner_checkpoint_head, ' +
   'inner_checkpoint_findings, inner_verdict, inner_result, ' +
@@ -677,6 +656,89 @@ export class TridentRunStore {
     private readonly now: () => string = () => new Date().toISOString(),
   ) {}
 
+  /** Persist the host-validated first decision; retries may repeat the exact decision. */
+  async selectExecutionStrategy(
+    id: string,
+    selection: { strategy: ExecutionStrategy; rationale: string; plan: string },
+  ): Promise<{ kind: 'allow' } | { kind: 'blocked'; on: string } | { kind: 'unknown'; detail: string }> {
+    return this.writeExecutionSelection(id, selection, false)
+  }
+
+  /** Bounded replanning can replace accepted details, never the selected strategy. */
+  async updateExecutionPlan(
+    id: string,
+    selection: { strategy: ExecutionStrategy; rationale: string; plan: string },
+  ): Promise<{ kind: 'allow' } | { kind: 'blocked'; on: string } | { kind: 'unknown'; detail: string }> {
+    return this.writeExecutionSelection(id, selection, true)
+  }
+
+  private async writeExecutionSelection(
+    id: string,
+    selection: { strategy: ExecutionStrategy; rationale: string; plan: string },
+    refresh: boolean,
+  ): Promise<{ kind: 'allow' } | { kind: 'blocked'; on: string } | { kind: 'unknown'; detail: string }> {
+    if ((selection.strategy !== 'single' && selection.strategy !== 'task_sequence')
+      || typeof selection.rationale !== 'string' || selection.rationale.trim() === ''
+      || typeof selection.plan !== 'string' || selection.plan.trim() === '') {
+      return { kind: 'blocked', on: 'execution strategy requires a valid strategy, rationale, and accepted plan' }
+    }
+    try {
+      const plan: unknown = JSON.parse(selection.plan)
+      if (plan === null || typeof plan !== 'object' || Array.isArray(plan)) {
+        return { kind: 'blocked', on: 'accepted execution plan must be a serialized object' }
+      }
+    } catch {
+      return { kind: 'blocked', on: 'accepted execution plan is not valid JSON' }
+    }
+    return this.db.transaction(async (tx) => {
+      try { this.reconcileTaskSpendInTransaction(id) }
+      catch { return { kind: 'unknown' as const, detail: 'execution iteration checkpoint is invalid' } }
+      const run = this.get(id)
+      if (run === null) return { kind: 'unknown' as const, detail: 'execution strategy run is missing' }
+      if (['done', 'failed', 'stopped'].includes(run.phase)) {
+        return { kind: 'blocked' as const, on: 'execution strategy run is terminal' }
+      }
+      if (!isTaskCap(run.max_task_iterations) || !isTaskCap(run.task_iteration)) {
+        return { kind: 'unknown' as const, detail: 'execution iteration budget is corrupt' }
+      }
+      if (run.task_iteration >= run.max_task_iterations) {
+        return { kind: 'blocked' as const, on: 'task iteration budget is exhausted' }
+      }
+      if (run.execution_strategy !== null && run.execution_strategy !== selection.strategy) {
+        return { kind: 'blocked' as const, on: 'execution strategy is immutable' }
+      }
+      if (refresh && run.execution_strategy === null) {
+        return { kind: 'blocked' as const, on: 'cannot refresh a plan before selecting execution strategy' }
+      }
+      if (!refresh && run.execution_strategy !== null
+        && (run.strategy_rationale !== selection.rationale || run.strategy_plan !== selection.plan)) {
+        return { kind: 'blocked' as const, on: 'execution strategy selection conflicts with durable evidence' }
+      }
+      const cards = tx.prepare<{
+        execution_strategy: ExecutionStrategy | null; task_iteration: number; max_task_iterations: number | null
+      }, [string, string]>(
+        'SELECT execution_strategy, task_iteration, max_task_iterations FROM work_board_items WHERE project_slug = ? AND linked_run_id = ?',
+      ).all(run.project_slug, id)
+      for (const card of cards) {
+        if (card.execution_strategy !== null && card.execution_strategy !== selection.strategy) {
+          return { kind: 'blocked' as const, on: 'card execution strategy is immutable' }
+        }
+        if (!isTaskCap(card.task_iteration) || (card.max_task_iterations !== null && !isTaskCap(card.max_task_iterations))) {
+          return { kind: 'unknown' as const, detail: 'card execution iteration budget is corrupt' }
+        }
+        if (card.max_task_iterations !== null && card.task_iteration >= card.max_task_iterations) {
+          return { kind: 'blocked' as const, on: 'card task iteration budget is exhausted' }
+        }
+      }
+      await tx.run(
+        `UPDATE code_trident_runs SET execution_strategy = ?, strategy_rationale = ?, strategy_plan = ?,
+          strategy_source = COALESCE(strategy_source, 'planner'), last_advanced_at = ? WHERE id = ?`,
+        [selection.strategy, selection.rationale, selection.plan, this.now(), id],
+      )
+      return { kind: 'allow' as const }
+    })
+  }
+
   async create(input: CreateTridentRunInput): Promise<TridentRun> {
     const parentRunId = input.parent_run_id ?? null
     const waveTaskId = input.wave_task_id ?? null
@@ -702,11 +764,11 @@ export class TridentRunStore {
     // untouched.
     //
     // THE ONE NON-REVIEW NAME (spec item a-retry-must-resume-from-the-checkpoint).
-    // `ralph-task-built` is accepted on a GOVERNED row only: it seeds a Ralph
+    // `task-built` is accepted on a GOVERNED row only: it seeds a Task
     // continuation that builds the next task with the cheap planner, and routes
     // nothing past a review. `seedableCheckpoint` (run-disposition.ts) owns that rule.
     const seededCheckpoint = trimAsciiWs(input.inner_checkpoint ?? '')
-    if (seededCheckpoint !== '' && !seedableCheckpoint(seededCheckpoint, input.ralph === true)) {
+    if (seededCheckpoint !== '' && !seedableCheckpoint(seededCheckpoint, input.execution_strategy ?? null)) {
       throw new TridentUnresumableSeedError(seededCheckpoint)
     }
     // AND THE NAME IS ONLY HALF THE SEED (Argus r24, major). The guard above asked
@@ -751,7 +813,7 @@ export class TridentRunStore {
         throw new TridentUnseededPinError('inner_checkpoint_findings', input.inner_checkpoint_findings ?? null)
       }
     }
-    // THE CARRIED RALPH BUDGET (#519) — checked here for exactly the reason the three
+    // THE CARRIED TASK BUDGET (#519) — checked here for exactly the reason the three
     // seed columns are: the safety of a row must not rest on a predicate one function
     // away. What makes it unwritable is enforced below rather than described here; an
     // earlier revision of this comment asserted an unseeded-row rule that the code
@@ -760,11 +822,11 @@ export class TridentRunStore {
     //
     // THE CAP IS NOT A PRECONDITION HERE, DELIBERATELY (cross-model review,
     // BLOCKER 1). An earlier revision threw when a carried round left no re-fire
-    // inside this row's `max_ralph_rounds`. Both halves of that were wrong. The
+    // inside this row's `max_task_iterations`. Both halves of that were wrong. The
     // PRODUCER's matching refusal fell back to a fresh row at 0, which handed an
     // exhausted card its entire budget back — so the store must ACCEPT a round at or
-    // past the cap and let the cap bite on this row (`refireNextRalphTask`,
-    // `computeTransition`: fail loudly, naming `max_ralph_rounds`). And throwing here
+    // past the cap and let the cap bite on this row (`refireNextTask`,
+    // `computeTransition`: fail loudly, naming `max_task_iterations`). And throwing here
     // would convert an exhausted card's dispatch into a `backend_error` — HTTP 500,
     // nothing queued — when the honest answer is a row that reviews the commit it
     // adopted and refuses only a NEW planning iteration. Clamping was not an option
@@ -772,9 +834,9 @@ export class TridentRunStore {
     //
     // ABSENT reads as 0 — `undefined`/`null` is the shape every existing caller passes,
     // and a fresh row has spent nothing. PRESENT-BUT-UNREADABLE THROWS
-    // (`TridentInvalidRalphRoundError`, below): there is no normalisation of a counter
+    // (`TridentInvalidTaskIterationError`, below): there is no normalisation of a counter
     // that is not MORE permissive than the truth, because a counter quietly read as 0
-    // authorises the card's entire budget. `carryableRalphRound` is the same three-way
+    // authorises the card's entire budget. `carryableTaskIteration` is the same three-way
     // reader the producer applies — one predicate, both places.
     //
     // AN EARLIER VERSION OF THIS COMMENT SAID THE OPPOSITE — "anything that is not a
@@ -786,55 +848,50 @@ export class TridentRunStore {
     // The `??` alone was correct for `undefined` and silently wrong for every other
     // non-cap: `NaN`, a negative and a fractional value are not nullish, so they were
     // written into an INTEGER column and then decided every
-    // `ralph_round + 1 > max_ralph_rounds` comparison — and `NaN` makes that comparison
-    // false forever, which is an unbounded Ralph loop produced by a config typo. Zero is
+    // `task_iteration + 1 > max_task_iterations` comparison — and `NaN` makes that comparison
+    // false forever, which is an unbounded Task loop produced by a config typo. Zero is
     // a VALID cap (no iterations) and passes through untouched.
-    // `!= null`, NOT `!== undefined` (adversarial review, item 4). `carriedRalphCap`
+    // `!= null`, NOT `!== undefined` (adversarial review, item 4). `carriedTaskCap`
     // treats `null` as ABSENT and this site treated it as INVALID, so the producer and the
-    // write site disagreed about one value — the exact divergence `ralph-budget.ts`'s
+    // write site disagreed about one value — the exact divergence `task-budget.ts`'s
     // docblock says that file exists to make impossible, shipped with the two copies
     // diverged. `main` accepted a null cap; the reachable path is a hold payload
     // (`dispatch-holds.ts` `parseJsonObject`, no field validation) forwarded on
     // `!== undefined` and past a `??` that does not filter null, ending in an HTTP 500
     // with the card not queued. Latent today because no production caller sets the dep.
-    if (input.max_ralph_rounds != null && !isRalphCap(input.max_ralph_rounds)) {
-      throw new TridentInvalidRalphCapError(input.max_ralph_rounds)
+    if (input.max_task_iterations != null && !isTaskCap(input.max_task_iterations)) {
+      throw new TridentInvalidTaskCapError(input.max_task_iterations)
     }
-    const maxRalphRounds = input.max_ralph_rounds ?? DEFAULT_MAX_RALPH_ROUNDS
+    const maxTaskIterations = input.max_task_iterations ?? DEFAULT_MAX_TASK_ITERATIONS
     // ABSENT GETS 0; PRESENT-BUT-UNREADABLE IS REFUSED — the same three-way split the cap
     // above takes, and for a sharper reason (final review round, defect four). A counter
     // normalised to 0 does not merely lose information: it AUTHORISES the card's whole
-    // budget, because `0 + 1 > max_ralph_rounds` is false. There is no substitution that
+    // budget, because `0 + 1 > max_task_iterations` is false. There is no substitution that
     // is not more permissive than the truth, so there is no substitution.
-    const carriedRalphRoundOrNull = carryableRalphRound(input.ralph_round)
-    if (carriedRalphRoundOrNull === null) {
-      throw new TridentInvalidRalphRoundError(input.ralph_round)
+    const carriedTaskIterationOrNull = carryableTaskIteration(input.task_iteration)
+    if (carriedTaskIterationOrNull === null) {
+      throw new TridentInvalidTaskIterationError(input.task_iteration)
     }
-    const carriedRalphRound = carriedRalphRoundOrNull
-    if (carriedRalphRound > 0) {
-      // GOVERNED, OR NOT AT ALL (adversarial review P3). The producer already answers
-      // null for a non-Ralph row; this is that predicate at the write site, which is
-      // where the docblock two files away claimed it already was.
-      if (input.ralph !== true) {
-        throw new TridentUngovernedRalphRoundError(carriedRalphRound)
-      }
+    const carriedTaskIteration = carriedTaskIterationOrNull
+    if (carriedTaskIteration > 0) {
+      // Spend belongs to the card under either selected strategy.
       // THE PAIR, ENFORCED (round 2 BLOCKER). A spent round measured against a cap
       // this row did not inherit is not a bound: the fallback to
-      // DEFAULT_MAX_RALPH_ROUNDS silently RAISES the bound of any card that had a
+      // DEFAULT_MAX_TASK_ITERATIONS silently RAISES the bound of any card that had a
       // tighter one. Carrying the round is meaningless without it, so the write site
       // refuses the half-pair rather than completing it with a default.
       // `== null`, NOT `=== undefined` (final gate, blocker 1). The cap is RESOLVED
       // thirty lines up with `??`, which treats null and undefined alike, while this
-      // check saw only one of them — so `{ ralph_round: 5, max_ralph_rounds: null }`
+      // check saw only one of them — so `{ task_iteration: 5, max_task_iterations: null }`
       // passed the pair guard AND resolved to the default, creating the unbounded
       // half-pair 5/20 that this very error exists to refuse. Two spellings of ABSENT
       // taking different branches, again: the same asymmetry fixed one layer over at the
-      // `isRalphCap` validation, in the one place left where a `??` normalisation was
+      // `isTaskCap` validation, in the one place left where a `??` normalisation was
       // paired with an `=== undefined` validation rather than with a comparison on the
       // normalised value. (Audited: every other `??` in `create` compares the result, so
       // none of them can disagree about null.)
-      if (input.max_ralph_rounds == null) {
-        throw new TridentUnboundedCarriedRoundError(carriedRalphRound)
+      if (input.max_task_iterations == null) {
+        throw new TridentUnboundedCarriedRoundError(carriedTaskIteration)
       }
     }
     // NO SEEDED-CHECKPOINT PRECONDITION, and its removal is deliberate (adversarial
@@ -877,12 +934,15 @@ export class TridentRunStore {
       // alone because an applied migration is not edited. Raising the fallback in
       // `inner-workflow.mjs` alone would have changed NOTHING for a real lane.
       max_rounds: input.max_rounds ?? 10,
-      ralph: input.ralph ?? false,
+      execution_strategy: input.execution_strategy ?? null,
+      strategy_rationale: input.strategy_rationale ?? null,
+      strategy_plan: input.strategy_plan ?? null,
+      strategy_source: input.strategy_source ?? (input.execution_strategy ? 'planner' : null),
       // THE PRIOR RUN'S RE-FIRE COUNTER, or 0 (#519). Validated above, so this is
       // the value the guard accepted rather than the raw argument.
-      ralph_round: carriedRalphRound,
-      ralph_task_total: input.ralph === true ? input.ralph_task_total ?? null : null,
-      max_ralph_rounds: maxRalphRounds,
+      task_iteration: carriedTaskIteration,
+      task_total: input.task_total ?? null,
+      max_task_iterations: maxTaskIterations,
       branch: input.branch ?? null,
       // SALVAGE-RESUME SEED (see `CreateTridentRunInput`): normally null, and
       // non-null only when the dispatch chokepoint has proven a prior terminal run
@@ -949,10 +1009,13 @@ export class TridentRunStore {
         run.phase,
         run.round,
         run.max_rounds,
-        run.ralph ? 1 : 0,
-        run.ralph_round,
-        run.ralph_task_total,
-        run.max_ralph_rounds,
+        run.execution_strategy,
+        run.strategy_rationale,
+        run.strategy_plan,
+        run.strategy_source,
+        run.task_iteration,
+        run.task_total,
+        run.max_task_iterations,
         run.branch,
         run.pr,
         run.published_pr,
@@ -1111,8 +1174,56 @@ export class TridentRunStore {
                 WHERE run_id = ? AND stage = 'build-mode-state') IS ?`,
         [this.now(), meta, runId, runId, expected],
       )
-      return result.changes === 1 ? tx.get<{ id: number }>('SELECT last_insert_rowid() AS id', [])!.id : null
+      if (result.changes !== 1) return null
+      const eventId = tx.get<{ id: number }>('SELECT last_insert_rowid() AS id', [])!.id
+      // Checkpoint and spend commit together, including the card projection.
+      // A completed intermediate build is charged before its Git ledger write;
+      // neither lost handoff acknowledgement nor outer harvest can refund it.
+      this.reconcileTaskSpendInTransaction(runId)
+      return eventId
     })
+  }
+
+  /** Repair historical checkpoint/row lag before deciding whether more work is
+   * allowed. Spend belongs to the run/card even when its commit cannot be adopted. */
+  async reconcileTaskSpend(id: string): Promise<TridentRun | null> {
+    return this.db.transaction(() => {
+      this.reconcileTaskSpendInTransaction(id)
+      return this.get(id)
+    })
+  }
+
+  /** A pending handoff settles one already charged task, never an older identity
+   * after the run or any linked card has accumulated additional spend. */
+  taskHandoffSpendMatches(id: string, iteration: number): boolean {
+    const run = this.get(id)
+    const spent = iteration + 1
+    if (!run || !isTaskCap(iteration) || !isTaskCap(spent) || run.task_iteration !== spent
+      || !isTaskCap(run.max_task_iterations)) return false
+    const cards = this.db.prepare<{ task_iteration: number; max_task_iterations: number | null }, [string, string]>(
+      'SELECT task_iteration, max_task_iterations FROM work_board_items WHERE project_slug = ? AND linked_run_id = ?',
+    ).all(run.project_slug, id)
+    return cards.every(card => card.task_iteration === spent
+      && (card.max_task_iterations === null || isTaskCap(card.max_task_iterations)))
+  }
+
+  private reconcileTaskSpendInTransaction(id: string): void {
+    const run = this.get(id)
+    if (!run) return
+    const event = this.stageEvents(id).filter(event => event.stage === 'build-mode-state').at(-1)
+    if (!event) return
+    const state = parseBuildModeState(event.meta, run, ['done', 'failed', 'stopped'].includes(run.phase))
+    if (!isTaskCap(run.task_iteration) || !isTaskCap(run.max_task_iterations)) {
+      throw new Error('Execution iteration budget is corrupt')
+    }
+    const spent = Math.max(state.iteration, state.checkpoint.handoff ? state.checkpoint.handoff.iteration + 1 : 0)
+    if (spent > run.task_iteration) {
+      if (run.execution_strategy === null) throw new Error('Task spend has no execution selection')
+      // Migration 0157 projects this update to linked cards with MAX(spend) and
+      // MIN(cap), in this same transaction. Never add the count a second time.
+      this.db.runSync('UPDATE code_trident_runs SET task_iteration = MAX(task_iteration, ?) WHERE id = ?',
+        [spent, id])
+    }
   }
 
   /** Suite acquisition invalidates the previous proof before executing. Completion
@@ -1775,8 +1886,11 @@ export class TridentRunStore {
     }
     if (patch.phase !== undefined) push('phase', patch.phase)
     if (patch.round !== undefined) push('round', patch.round)
-    if (patch.ralph_round !== undefined) push('ralph_round', patch.ralph_round)
-    if (patch.ralph_task_total !== undefined) push('ralph_task_total', patch.ralph_task_total)
+    if (patch.task_iteration !== undefined) {
+      sets.push('task_iteration = MAX(task_iteration, ?)')
+      params.push(patch.task_iteration)
+    }
+    if (patch.task_total !== undefined) push('task_total', patch.task_total)
     if (patch.branch !== undefined) push('branch', patch.branch)
     if (patch.base_sha !== undefined) push('base_sha', patch.base_sha)
     if (patch.base_behind !== undefined) push('base_behind', patch.base_behind)
@@ -2077,7 +2191,7 @@ export class TridentRunStore {
     }
     await this.db.run(
       `UPDATE code_trident_runs
-          SET phase = ?, round = MAX(round, ?, ?), ralph_round = ?, branch = ?, pr = ?,
+          SET phase = ?, round = MAX(round, ?, ?), task_iteration = MAX(task_iteration, ?), branch = ?, pr = ?,
               merge_mode = ?, subagent_run_id = ?, subagent_status = ?,
               worktree = ?, failure_reason = ?, workflow_run_id = ?,
               inner_checkpoint = ?, inner_verdict = ?, harvested_at = ?,
@@ -2097,7 +2211,7 @@ export class TridentRunStore {
         run.phase,
         run.round,
         checkpointRound(run.inner_checkpoint) ?? 0,
-        run.ralph_round,
+        run.task_iteration,
         run.branch,
         run.pr,
         run.merge_mode,
@@ -2240,7 +2354,7 @@ export class TridentRunStore {
       }
       const res = tx.runSync(
         `UPDATE code_trident_runs
-            SET phase = ?, round = MAX(round, ?, ${roundAssign}), ralph_round = ?, branch = ?, pr = ?,
+            SET phase = ?, round = MAX(round, ?, ${roundAssign}), task_iteration = MAX(task_iteration, ?), branch = ?, pr = ?,
                 merge_mode = ?, subagent_run_id = ?, subagent_status = ?,
                 worktree = ?, failure_reason = ?, workflow_run_id = ?,
                 ${checkpointAssign}, ${verdictAssign}, harvested_at = ?,
@@ -2279,7 +2393,7 @@ export class TridentRunStore {
           run.phase,
           run.round,
           ...roundBinds,
-          run.ralph_round,
+          run.task_iteration,
           run.branch,
           run.pr,
           run.merge_mode,
@@ -2352,10 +2466,13 @@ function rowToRun(row: TridentRunDbRow): TridentRun {
     phase: row.phase,
     round: row.round,
     max_rounds: row.max_rounds,
-    ralph: row.ralph === 1,
-    ralph_round: row.ralph_round,
-    ralph_task_total: row.ralph_task_total,
-    max_ralph_rounds: row.max_ralph_rounds,
+    execution_strategy: row.execution_strategy,
+    strategy_rationale: row.strategy_rationale,
+    strategy_plan: row.strategy_plan,
+    strategy_source: row.strategy_source,
+    task_iteration: row.task_iteration,
+    task_total: row.task_total,
+    max_task_iterations: row.max_task_iterations,
     branch: row.branch,
     base_sha: row.base_sha,
     base_behind: row.base_behind ?? null,

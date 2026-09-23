@@ -175,17 +175,20 @@ describe('one codegen_cancel surface routes both dispatch paths', () => {
   test('MUTATION: status, fetch, row and board HTTP derive the same task and review counters', async () => {
     const run = await trident.create({
       id: 'trident-readable', slug: 'readable', project_slug: 'p', repo_path: '/repo', task: 'build widget',
-      ralph: true,
+      execution_strategy: 'task_sequence',
     })
     const board = new WorkBoardStore(db)
     const item = await board.create('p', { title: 'Readable progress' })
     await board.attachRun('p', item.id, run.id)
     const router = routeCodegenCancel(legacy(), trident, 'p', bare())
 
-    await trident.update(run.id, { ralph_round: 9, ralph_task_total: 15, round: 1, inner_checkpoint: 'forge-done' })
+    await trident.update(run.id, { task_iteration: 9, task_total: 15, round: 1, inner_checkpoint: 'forge-done' })
 
-    const expected = { round: 1, ralph_round: 9, task_number: 10, task_total: 15 }
-    expect(trident.get(run.id)).toMatchObject({ ralph_round: 9, ralph_task_total: 15, round: 1 })
+    const expected = {
+      execution_strategy: 'task_sequence', round: 1,
+      task_iteration: 9, task_number: 10, task_total: 15,
+    }
+    expect(trident.get(run.id)).toMatchObject({ task_iteration: 9, task_total: 15, round: 1 })
 
     expect(await router.status({ task_id: run.slug })).toMatchObject({
       status: 'reviewing', phase: 'reviewing', ...expected,

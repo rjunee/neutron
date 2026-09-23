@@ -261,7 +261,7 @@ async function runExistingReviewPanel(
     branch: null,
     pr: null,
     merge_mode: 'local',
-    ralph: false,
+    execution_strategy: 'single',
     worktree: input.worktree_path,
     repo_path: input.worktree_path,
     inner_result: null,

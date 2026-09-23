@@ -98,10 +98,10 @@ async function seedRunning(id: string, generation: string, repo_path = '/repo'):
   const store = new TridentRunStore(db)
   await store.create({ id, slug: id, project_slug: 'alice', repo_path, task: 'build' })
   await store.update(id, {
-    phase: 'ralph-task',
+    phase: 'task-build',
     branch: 'trident/test',
     pr: 312,
-    inner_checkpoint: 'ralph-task-built',
+    inner_checkpoint: 'task-built',
     subagent_run_id: 'wf-wire-1',
     subagent_status: 'running',
     workflow_run_id: generation,
@@ -139,7 +139,7 @@ describe('trident external liveness composition wiring', () => {
       await seedRunning('dead-run', 'gen-wire-1')
       await instance.loop.runLivenessOnce()
       const after = new TridentRunStore(db).get('dead-run')!
-      expect(after.phase).toBe('ralph-task')
+      expect(after.phase).toBe('task-build')
       expect(after.subagent_status).toBe('crashed')
       expect(after.subagent_run_id).toBe('wf-wire-1')
       expect(after.workflow_run_id).toBe('gen-wire-1')
@@ -355,7 +355,7 @@ describe('trident hang-watchdog wiring — the composed orchestrator consults th
       await instance.loop.runOnce()
 
       const after = new TridentRunStore(db).get(id)!
-      expect(after.phase).toBe('ralph-task')
+      expect(after.phase).toBe('task-build')
       expect(after.subagent_status).toBe('running')
       expect(after.failure_reason).toBeNull()
       // AND NOTHING WAS WRITTEN. A DEFER never re-stamps the clock (T4): an unknown

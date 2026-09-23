@@ -1,5 +1,6 @@
-import { readFile, writeFile } from 'node:fs/promises'
-import { dirname } from 'node:path'
+import { lstat, readFile, writeFile } from 'node:fs/promises'
+import { dirname, join } from 'node:path'
+import { isDeepStrictEqual } from 'node:util'
 import { placementFor, type Provider, type WorkerRunner } from '@neutronai/runtime/bounded-work.ts'
 import type { BuildRunInput, BuildRunOutcome, BuildSnapshot } from './build-run.ts'
 import { createBuildHost, type BuildHostOptions } from './build-host.ts'
@@ -96,7 +97,7 @@ export async function createProjectBuildHost(options: ProjectBuildHostOptions) {
   async function timed<T>(stage: string, operation: () => Promise<T>): Promise<T> {
     return accounting.interval(stage, { run_id: config.runId }, operation)
   }
-  const taskId = () => run.wave_task_id ?? `${run.id}:task:${run.ralph ? production.ralphIteration() : 0}`
+  const taskId = () => run.wave_task_id ?? `${run.id}:task:${config.store.get(run.id)?.execution_strategy === 'task_sequence' ? production.taskIteration() : 0}`
   for (const [provider, runner] of Object.entries(runners)) {
     runners[provider as Provider] = { provider: runner.provider,
       supports: (role, placement) => runner.supports(role, placement),
@@ -148,6 +149,42 @@ export async function createProjectBuildHost(options: ProjectBuildHostOptions) {
     publicationSuite: publicationObservations.reviewSuite,
     local: { baseBranch: options.production.baseBranch, worktree: options.production.worktree },
   })
+  host.deps.validateLegacyPendingRequest = async originalWorkers => {
+    const current = config.store.get(run.id)
+    if (current?.strategy_source !== 'legacy' || current.execution_strategy === null) {
+      return { kind: 'unknown', detail: 'Original worker compatibility requires a migrated execution strategy' }
+    }
+    try {
+      const expected = Object.fromEntries(Object.entries(host.workers).map(([role, worker]) =>
+        [role, { provider: worker.runner.provider, request: structuredClone(worker.request) }]))
+      for (const role of ['plan', 'build', 'review', 'fix'] as const) {
+        const live = expected[role]!.request
+        const original = originalWorkers?.[role]?.request
+        const directory = dirname(live.brief.path)
+        if (live.brief.path !== join(directory, `${role}.strategy-v2.brief.${role}.host`)
+          || original?.brief.path !== join(directory, `${role}.brief.${role}.host`)
+          || typeof original.brief.integrity !== 'string') {
+          return { kind: 'unknown', detail: 'Original worker brief is not the reserved legacy artifact' }
+        }
+        expected[role] = { ...expected[role]!, request: { ...live,
+          brief: structuredClone(original.brief),
+          ...(role === 'plan' ? { result: { ...live.result, schema: 'project-plan' } } : {}),
+        } }
+      }
+      // Only the known brief/schema transition is permitted. Provider, model,
+      // effort, grants, paths, budgets and all other identity remain exact.
+      if (!isDeepStrictEqual(originalWorkers, expected)) {
+        return { kind: 'unknown', detail: 'Original worker routing or authority changed during recovery' }
+      }
+      for (const { request } of Object.values(expected)) {
+        if (!(await lstat(request.brief.path)).isFile()
+          || briefIntegrity(await readFile(request.brief.path, 'utf8')) !== request.brief.integrity) {
+          return { kind: 'unknown', detail: 'Original worker brief integrity cannot be established' }
+        }
+      }
+      return { kind: 'allow' }
+    } catch (error) { return { kind: 'unknown', detail: `Original worker artifact is unavailable: ${String(error)}` } }
+  }
   host.deps.publicationSuite = async snapshot => {
     // Recovery reads the driver's durable round. An in-memory round is useful
     // only before a driver checkpoint exists (direct host consumers).
@@ -174,7 +211,13 @@ export async function createProjectBuildHost(options: ProjectBuildHostOptions) {
     async run(input: Omit<BuildRunInput, 'run_id' | 'workers' | 'repl_provider' | 'merge_mode'>, signal: AbortSignal): Promise<ProjectBuildOutcome> {
       return withProductionCleanup(
         async () => {
-          const result = await host.run({ ...input, ...(run.published_pr !== null ? { owned_pr: run.published_pr } : {}), ...(input.mode === 'ralph' ? { ralphRound: production.ralphIteration() } : {}), run_id: run.id, workers: host.workers, repl_provider: options.substrate.provider, merge_mode: run.merge_mode }, signal)
+          const current = config.store.get(run.id)
+          if (!current) throw new Error('Build run disappeared before dispatch')
+          const result = await host.run({ ...input,
+            ...(input.mode === 'implementation' ? { executionStrategy: current.execution_strategy } : {}),
+            ...(run.published_pr !== null ? { owned_pr: run.published_pr } : {}),
+            ...(input.mode === 'implementation' ? { taskIteration: production.taskIteration() } : {}),
+            run_id: run.id, workers: host.workers, repl_provider: options.substrate.provider, merge_mode: run.merge_mode }, signal)
           if (!('kind' in result)) throw new Error('Project build returned a review-only outcome')
           return result
         },

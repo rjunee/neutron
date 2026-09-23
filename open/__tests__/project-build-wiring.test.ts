@@ -66,6 +66,18 @@ async function writeWorkerAttempt(options: ProjectBuildHostOptions, role: 'build
 async function writeCompleted(options: ProjectBuildHostOptions, role: 'build' | 'fix', text: string) {
   await writeWorkerAttempt(options, role, text, 'valid')
 }
+
+/** Publication consumes the original planner envelope, including its selected strategy. */
+async function writePlan(options: ProjectBuildHostOptions, payload: {
+  implementationPlan: string; topTask: string; executionSpec: string;
+  complexity: 'mechanical' | 'reasoning'; remainingTasks: number; branchBrief?: string;
+}) {
+  const runId = options.production.runId
+  await writeFile(options.workers.plan.request.result.path, JSON.stringify({
+    schema: 'project-plan-v2', run_id: runId, step_id: `${runId}:plan:0`, kind: 'completed',
+    result: { payload: { strategy: 'single', rationale: 'One coherent change.', ...payload } },
+  }))
+}
 async function fixture() {
   const dir = await mkdtemp(join(tmpdir(), 'project-options-'))
   cleanup.push(() => rm(dir, { recursive: true, force: true }))
@@ -185,10 +197,10 @@ test('publication, mutation and suite consumers require every completed original
       guard: ['bun', 'test', 'guard.test.ts'], control: ['bun', 'test', 'control.test.ts'] }
     const result = { head, payload: { mutationClaim: claim, worktreePath: options.production.worktree,
       branch: 'change', commitSha: head, prNumber: null, diffFile: 'diff', testsPassed: true } }
-    await writeFile(options.workers.plan.request.result.path, JSON.stringify({ result: { payload: {
+    await writePlan(options, {
       implementationPlan: '- [x] Change', topTask: '- [x] Change', executionSpec: 'Change the code.',
       complexity: 'mechanical', remainingTasks: 0, branchBrief: '',
-    } } }))
+    })
     const path = options.workers.build.request.result.path
     const completionShape: CompletionShape = scenario === 'next-state-pending' ? 'pending'
       : scenario === 'wrong-completion-stage' ? 'wrong-stage'
@@ -231,10 +243,10 @@ test('fix artifact consumers require a fixed completion rather than a built comp
     guard: ['bun', 'test', 'guard.test.ts'], control: ['bun', 'test', 'control.test.ts'] }
   const result = { head, payload: { mutationClaim: claim, worktreePath: options.production.worktree,
     branch: 'change', commitSha: head, prNumber: null, diffFile: 'diff', testsPassed: true } }
-  await writeFile(options.workers.plan.request.result.path, JSON.stringify({ result: { payload: {
+  await writePlan(options, {
     implementationPlan: '- [x] Fix', topTask: '- [x] Fix', executionSpec: 'Fix the code.',
     complexity: 'mechanical', remainingTasks: 0, branchBrief: '',
-  } } }))
+  })
 
   await writeWorkerAttempt(options, 'fix', JSON.stringify({ result }), 'wrong-stage')
   const before = f.commands.length
@@ -292,11 +304,11 @@ test('publication describes the completed change and retains the card as support
   f.input.run.task = '# DISPATCH THIS THROUGH TRIDENT\n\nCall the build tool; do not build inline.'
   const options = await f.prepare()
   const head = 'b'.repeat(40)
-  await writeFile(options.workers.plan.request.result.path, JSON.stringify({ result: { payload: {
+  await writePlan(options, {
     implementationPlan: '- [x] Omit the empty field', topTask: '- [x] Omit the empty field',
     executionSpec: 'Change the log payload.', complexity: 'mechanical', remainingTasks: 0,
     branchBrief: '# Omit empty failure reasons from wakeup logs\n\nThe log now leaves out an empty field.',
-  } } }))
+  })
   await writeCompleted(options, 'build', JSON.stringify({ result: { head, payload: {
     mutationClaim: { file: 'guard.ts', find: 'fixed', replace: 'broken', guard: ['bun', 'test', 'guard.test.ts'], control: ['bun', 'test', 'guard.test.ts'] },
     worktreePath: options.production.worktree, branch: 'change', commitSha: head,
@@ -325,11 +337,11 @@ test('publication refuses a build result belonging to a different head', async (
   const options = await f.prepare()
   const reviewedHead = 'b'.repeat(40)
   const earlierHead = 'c'.repeat(40)
-  await writeFile(options.workers.plan.request.result.path, JSON.stringify({ result: { payload: {
+  await writePlan(options, {
     implementationPlan: '- [x] Omit the empty field', topTask: '- [x] Omit the empty field',
     executionSpec: 'Change the log payload.', complexity: 'mechanical', remainingTasks: 0,
     branchBrief: '# Omit empty failure reasons from wakeup logs\n\nThe log now leaves out an empty field.',
-  } } }))
+  })
   await writeCompleted(options, 'build', JSON.stringify({ result: { head: earlierHead, payload: {
     mutationClaim: { file: 'guard.ts', find: 'fixed', replace: 'broken', guard: ['bun', 'test', 'guard.test.ts'], control: ['bun', 'test', 'guard.test.ts'] },
     worktreePath: options.production.worktree, branch: 'change', commitSha: earlierHead,
@@ -347,10 +359,10 @@ test('publication refuses a build result whose commitSha is not the reviewed hea
   const f = await fixture()
   const options = await f.prepare()
   const head = 'b'.repeat(40)
-  await writeFile(options.workers.plan.request.result.path, JSON.stringify({ result: { payload: {
+  await writePlan(options, {
     implementationPlan: '- [x] Omit the empty field', topTask: '- [x] Omit the empty field',
     executionSpec: 'Change the log payload.', complexity: 'mechanical', remainingTasks: 0, branchBrief: '',
-  } } }))
+  })
   await writeCompleted(options, 'build', JSON.stringify({ result: { head, payload: {
     mutationClaim: null, worktreePath: options.production.worktree, branch: 'change',
     commitSha: 'c'.repeat(40), prNumber: null, diffFile: 'diff', testsPassed: true,
@@ -366,11 +378,11 @@ test('publication titles from this round\'s task, never the prior-branch digest'
   const f = await fixture()
   const options = await f.prepare()
   const head = 'b'.repeat(40)
-  await writeFile(options.workers.plan.request.result.path, JSON.stringify({ result: { payload: {
+  await writePlan(options, {
     implementationPlan: '- [x] Current change', topTask: '- [x] Current change',
     executionSpec: 'Change it.', complexity: 'mechanical', remainingTasks: 0,
     branchBrief: 'BUILT: Prior branch state only',
-  } } }))
+  })
   await writeCompleted(options, 'build', JSON.stringify({ result: { head, payload: {
     mutationClaim: null, worktreePath: options.production.worktree, branch: 'change',
     commitSha: head, prNumber: null, diffFile: 'diff', testsPassed: true,
@@ -611,6 +623,7 @@ for (const role of ['plan', 'build', 'review', 'fix'] as const) {
       `\`result.payload\` must satisfy the ${role === 'plan' ? 'plan' : role === 'review' ? 'verdict' : 'forge'} trailer contract below. Read the host context for the measured snapshot.`,
       JSON.stringify(role === 'plan' ? PLAN_SCHEMA : role === 'review' ? VERDICT_SCHEMA : FORGE_SCHEMA),
       ...(role === 'plan' ? [PLAN_LEDGER_CONTRACT] : []),
+      ...(builder ? ['EXECUTION SCOPE. Read the host context `executionStrategy` and validated plan in `previous`. For `single`, implement the WHOLE accepted plan and executionSpec. For `task_sequence`, implement only the host-selected `topTask` and its executionSpec; leave later tasks to later calls. Never select a strategy or task yourself. A fix addresses the host-provided findings without changing strategy. A wave member implements only its host-pinned task.'] : []),
       'Never publish or merge; the host owns those actions.',
     ].join('\n\n')
     const guidance = `\n\n<owner_reflection>\n${REFLECTION_GUIDANCE_FRAMING}\n${correction}\n</owner_reflection>`

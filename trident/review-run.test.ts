@@ -357,7 +357,7 @@ describe('executeBoundReview', () => {
       merge_mode: 'local',
       pr: null,
       branch: null,
-      ralph: false,
+      execution_strategy: 'single',
       repo_path: worktree,
     })
     expect(input.resume_checkpoint).toBe(`outer-published:${HEAD}:0:1`)

@@ -520,9 +520,19 @@ export interface AppWsWorkBoardItem {
 export interface AppWsRunProgress {
   run_id: string
   phase_label: 'planning' | 'building' | 'reviewing' | 'merged' | 'failed' | 'cancelled'
+  step_label: 'building' | 'reviewing' | 'fixing' | 'merging' | 'retrying' | 'done' | 'failed'
   round: number
+  infra_retries: number
+  /** Null means the initial planner has not selected a strategy yet. */
+  execution_strategy: 'single' | 'task_sequence' | null
+  /** Zero-based persisted task-sequence iteration. */
+  task_iteration: number
+  task_number: number | null
+  task_total: number | null
   started_at: string
   last_advanced_at: string
+  heartbeat_at: string | null
+  heartbeat_fresh_until: string | null
   elapsed_ms: number
   stalled: boolean
   stalled_ms: number | null
@@ -541,7 +551,7 @@ export interface AppWsRunProgress {
   failure_reason: string | null
   /** Durable brief-integrity refusal, retained even when a later retry recovers. */
   brief_alert: string | null
-  /** One sentence: did this retry carry the dead run's checkpoint and Ralph round?
+  /** One sentence: did this retry carry the dead run's checkpoint and task iteration?
    *  null for a first dispatch. */
   resume_note: string | null
 }

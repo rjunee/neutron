@@ -57,10 +57,10 @@ afterEach(() => {
 async function seedRunning(id: string, generation: string): Promise<TridentRun> {
   await store.create({ id, slug: id, project_slug: 'p', repo_path: '/repo', task: 'build' })
   return (await store.update(id, {
-    phase: 'ralph-task',
+    phase: 'task-build',
     branch: 'trident/existing',
     pr: 312,
-    inner_checkpoint: 'ralph-task-built',
+    inner_checkpoint: 'task-built',
     subagent_run_id: `workflow-${id}`,
     subagent_status: 'running',
     workflow_run_id: generation,
@@ -159,7 +159,6 @@ describe('external launcher death reaches the real orchestrator without killing 
         hasGithubOrigin: async () => false,
         publisherAvailable: async () => ({ authenticated: true }),
       },
-      resolveRalph: async () => false,
     })
     const output = await registry.get(WORK_BOARD_START_TOOL)!.handler(
       { board_item_id: item.id },
@@ -201,7 +200,7 @@ describe('external launcher death reaches the real orchestrator without killing 
 
     await loop.runLivenessOnce()
     const latched = store.get('spent')!
-    expect(latched.phase).toBe('ralph-task')
+    expect(latched.phase).toBe('task-build')
     expect(latched.subagent_status).toBe('crashed')
     expect(latched.failure_reason).toContain('inner workflow launcher crashed:')
     expect(latched.failure_reason).toContain('generation-dead')
@@ -211,7 +210,7 @@ describe('external launcher death reaches the real orchestrator without killing 
     // Red mutation verified by hand: deleting the §1a-crash `launch(claimed)`
     // branch reaps the row terminal with zero fires, making these assertions fail.
     expect(fires.length).toBeGreaterThanOrEqual(1)
-    expect(fires[0]!.resume_checkpoint).toBe('ralph-task-built')
+    expect(fires[0]!.resume_checkpoint).toBe('task-built')
     expect(fires[0]!.run.branch).toBe('trident/existing')
     expect(fires[0]!.run.pr).toBe(312)
     expect(isTerminalPhase(continued.phase)).toBe(false)
@@ -219,7 +218,7 @@ describe('external launcher death reaches the real orchestrator without killing 
     expect(continued.workflow_run_id).toBe('generation-live')
     expect(continued.crash_recoveries).toBe(1)
     expect(continued.round).toBe(1)
-    expect(continued.ralph_round).toBe(0)
+    expect(continued.task_iteration).toBe(0)
   })
 
   test('a gateway restart resumes a dead in-process driver from its checkpoint, never as a fresh build', async () => {
@@ -237,7 +236,7 @@ describe('external launcher death reaches the real orchestrator without killing 
     await store.recordStageEvent(run.id, 'build-mode-state', JSON.stringify({ runId: run.id,
       branch: run.branch, base: 'b'.repeat(40), repo: run.repo_path, projectSlug: run.project_slug,
       mergeMode: run.merge_mode, worktree: '/repo/worktree', iteration: 0,
-      checkpoint: { head: 'a'.repeat(40), stage: 'ralph-task-built', round: 0,
+      checkpoint: { head: 'a'.repeat(40), stage: 'task-built', round: 0,
         replansUsed: 0, findings: [], previousFindings: [] },
     }))
     const fires: InnerLoopInput[] = []
@@ -251,7 +250,7 @@ describe('external launcher death reaches the real orchestrator without killing 
     // The claim consumed the stale reservation, then `launch()` was given the
     // persisted continuation — branch/PR/checkpoint all survive; it is not fresh.
     expect(fires).toHaveLength(1)
-    expect(fires[0]!.resume_checkpoint).toBe('ralph-task-built')
+    expect(fires[0]!.resume_checkpoint).toBe('task-built')
     expect(fires[0]!.run.branch).toBe('trident/existing')
     expect(fires[0]!.run.pr).toBe(312)
     const recovered = store.get(run.id)!
@@ -271,7 +270,7 @@ describe('external launcher death reaches the real orchestrator without killing 
 
     await loop.runLivenessOnce()
     const latched = store.get('throwing-recovery')!
-    expect(latched.phase).toBe('ralph-task')
+    expect(latched.phase).toBe('task-build')
     expect(latched.subagent_status).toBe('crashed')
 
     for (let sweep = 0; sweep < 6; sweep++) await loop.runOnce()
@@ -280,14 +279,14 @@ describe('external launcher death reaches the real orchestrator without killing 
     expect(outcomes).toEqual([
       'launch threw (attempt 1 of 3): persistent launch failure at mint_run_id — retrying next tick',
       'launch threw (attempt 2 of 3): persistent launch failure at mint_run_id — retrying next tick',
-      'ralph-task → failed (launch kept throwing)',
+      'task-build → failed (launch kept throwing)',
     ])
     expect(terminal.phase).toBe('failed')
     expect(terminal.failure_reason).toContain('persistent launch failure at mint_run_id')
     expect(terminal.failure_reason ?? '').not.toContain('exhausted')
     expect(terminal.crash_recoveries).toBe(1)
     expect(terminal.branch).toBe('trident/existing')
-    expect(terminal.inner_checkpoint).toBe('ralph-task-built')
+    expect(terminal.inner_checkpoint).toBe('task-built')
   })
 
   test('a slow but positively alive run is untouched by the liveness pass and one sweep', async () => {
@@ -297,7 +296,7 @@ describe('external launcher death reaches the real orchestrator without killing 
       id: 'slow-alive', slug: 'slow-alive', project_slug: 'p', repo_path: '/repo', task: 'build',
     })
     await staleStore.update('slow-alive', {
-      phase: 'ralph-task',
+      phase: 'task-build',
       subagent_run_id: 'workflow-slow',
       subagent_status: 'running',
       workflow_run_id: 'generation-alive',
@@ -328,10 +327,10 @@ describe('a hung crash-recovery fire cannot wedge the lanes behind it', () => {
       task: 'build A',
     })
     await laneAStore.update('lane-a', {
-      phase: 'ralph-task',
+      phase: 'task-build',
       branch: 'trident/existing-a',
       pr: 312,
-      inner_checkpoint: 'ralph-task-built',
+      inner_checkpoint: 'task-built',
       subagent_run_id: 'workflow-a',
       subagent_status: 'running',
       workflow_run_id: 'generation-dead-a',
@@ -344,10 +343,10 @@ describe('a hung crash-recovery fire cannot wedge the lanes behind it', () => {
       task: 'build B',
     })
     await laneBStore.update('lane-b', {
-      phase: 'ralph-task',
+      phase: 'task-build',
       branch: 'trident/existing-b',
       pr: 313,
-      inner_checkpoint: 'ralph-task-built',
+      inner_checkpoint: 'task-built',
       subagent_run_id: 'workflow-b',
       subagent_status: 'running',
       workflow_run_id: 'generation-dead-b',
@@ -441,7 +440,7 @@ describe('a hung crash-recovery fire cannot wedge the lanes behind it', () => {
     expect(laneA.failure_reason ?? '').not.toContain('exhausted')
     expect(laneA.crash_recoveries).toBe(1)
     expect(laneA.branch).toBe('trident/existing-a')
-    expect(laneA.inner_checkpoint).toBe('ralph-task-built')
+    expect(laneA.inner_checkpoint).toBe('task-built')
 
     expect((await loop.runOnce()).skipped_due_to_overlap).toBe(false)
   })

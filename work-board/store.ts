@@ -66,6 +66,10 @@ export type WorkBoardTaskType = 'build' | 'research'
 
 /** Public, fully-typed board item. */
 export interface WorkBoardItem {
+  execution_strategy?: 'single' | 'task_sequence' | null
+  strategy_rationale?: string | null
+  strategy_plan?: string | null
+  strategy_source?: 'planner' | 'legacy' | null
   /** Repository name; null or omitted selects the project default. */
   repo_name?: string | null
   id: string
@@ -85,10 +89,10 @@ export interface WorkBoardItem {
   inline_active: boolean
   /** Bound `code_trident_runs.id` when a trident run works this item. */
   linked_run_id: string | null
-  /** Card-owned Ralph spend. A null cap means no governed dispatch yet. */
-  ralph_round?: number
-  max_ralph_rounds?: number | null
-  ralph_task_total?: number | null
+  /** Card-owned iteration spend. A null cap means no allowance was recorded yet. */
+  task_iteration?: number
+  max_task_iterations?: number | null
+  task_total?: number | null
   created_at: string
   updated_at: string
   /** ISO-8601 UTC; null until status='done'. */
@@ -160,10 +164,13 @@ export interface RunPrInfo {
 }
 
 export interface RunTerminalInfo extends RunPrInfo {
-  ralph?: boolean
-  ralph_round?: number
-  max_ralph_rounds?: number
-  ralph_task_total?: number | null
+  strategy_rationale?: string | null
+  strategy_plan?: string | null
+  strategy_source?: 'planner' | 'legacy' | null
+  execution_strategy?: 'single' | 'task_sequence' | null
+  task_iteration?: number
+  max_task_iterations?: number
+  task_total?: number | null
 }
 
 /** Where to drop the moved item relative to a sibling. */
@@ -289,7 +296,7 @@ const COLS =
   'id, project_slug, title, status, sort_order, design_doc_ref, ' +
   'inline_active, linked_run_id, created_at, updated_at, completed_at, task_type, ' +
   'blocked_by, declared_surfaces, ' +
-  'pr, pr_url, ralph_round, max_ralph_rounds, repo_name, ralph_task_total'
+  'pr, pr_url, task_iteration, max_task_iterations, repo_name, task_total, execution_strategy, strategy_rationale, strategy_plan, strategy_source'
 
 /** One `?` per column in {@link COLS}, DERIVED — a hand-counted placeholder list is how
  *  the rebase produced `SQLite query expected 14 values, received 16`. */
@@ -298,6 +305,10 @@ const COL_PLACEHOLDERS = COLS.split(',')
   .join(', ')
 
 interface WorkBoardItemDbRow {
+  execution_strategy: 'single' | 'task_sequence' | null
+  strategy_rationale: string | null
+  strategy_plan: string | null
+  strategy_source: 'planner' | 'legacy' | null
   repo_name: string | null
   id: string
   project_slug: string
@@ -315,9 +326,9 @@ interface WorkBoardItemDbRow {
   declared_surfaces: string | null
   pr: number | null
   pr_url: string | null
-  ralph_round: number
-  max_ralph_rounds: number | null
-  ralph_task_total: number | null
+  task_iteration: number
+  max_task_iterations: number | null
+  task_total: number | null
 }
 
 /**
@@ -551,9 +562,13 @@ function rowToItem(row: WorkBoardItemDbRow): WorkBoardItem {
     design_doc_ref: row.design_doc_ref,
     inline_active: row.inline_active === 1,
     linked_run_id: row.linked_run_id,
-    ralph_round: row.ralph_round,
-    max_ralph_rounds: row.max_ralph_rounds,
-    ralph_task_total: row.ralph_task_total,
+    execution_strategy: row.execution_strategy,
+    strategy_rationale: row.strategy_rationale,
+    strategy_plan: row.strategy_plan,
+    strategy_source: row.strategy_source,
+    task_iteration: row.task_iteration,
+    max_task_iterations: row.max_task_iterations,
+    task_total: row.task_total,
     created_at: row.created_at,
     updated_at: row.updated_at,
     completed_at: row.completed_at,
@@ -740,9 +755,13 @@ export class WorkBoardStore {
       design_doc_ref,
       inline_active: false,
       linked_run_id: null,
-      ralph_round: 0,
-      max_ralph_rounds: null,
-      ralph_task_total: null,
+      execution_strategy: null,
+      strategy_rationale: null,
+      strategy_plan: null,
+      strategy_source: null,
+      task_iteration: 0,
+      max_task_iterations: null,
+      task_total: null,
       created_at: ts,
       updated_at: ts,
       completed_at,
@@ -788,10 +807,14 @@ export class WorkBoardStore {
           item.declared_surfaces === null ? null : JSON.stringify(item.declared_surfaces),
           item.pr,
           item.pr_url,
-          item.ralph_round ?? 0,
-          item.max_ralph_rounds ?? null,
+          item.task_iteration ?? 0,
+          item.max_task_iterations ?? null,
           item.repo_name ?? null,
-          item.ralph_task_total ?? null,
+          item.task_total ?? null,
+          item.execution_strategy ?? null,
+          item.strategy_rationale ?? null,
+          item.strategy_plan ?? null,
+          item.strategy_source ?? null,
         ],
       )
     })
@@ -1363,6 +1386,17 @@ export class WorkBoardStore {
       if (current === null) return null
       const sets = ['inline_active = 0']
       const params: (string | number | null)[] = []
+      if (pr_info?.execution_strategy != null) {
+        if (current.execution_strategy != null && current.execution_strategy !== pr_info.execution_strategy) {
+          throw new Error('card execution strategy is immutable')
+        }
+        sets.push('execution_strategy = COALESCE(execution_strategy, ?)',
+          'strategy_rationale = COALESCE(?, strategy_rationale)',
+          'strategy_plan = COALESCE(?, strategy_plan)',
+          'strategy_source = COALESCE(strategy_source, ?)')
+        params.push(pr_info.execution_strategy, pr_info.strategy_rationale ?? null,
+          pr_info.strategy_plan ?? null, pr_info.strategy_source ?? null)
+      }
       if (outcome === 'done') {
         // Done — keep the terminal binding so completed history can still
         // derive durable run evidence (notably a recovered integrity alert).
@@ -1390,17 +1424,17 @@ export class WorkBoardStore {
         sets.push('pr = ?', 'pr_url = ?')
         params.push(pr_info.pr, pr_info.pr_url)
       }
-      // The card is the durable owner of the allowance. Only governed runs
-      // advance it, MAX prevents a delayed terminal observer from walking spend
+      // The card is the durable owner of the allowance under either strategy.
+      // MAX prevents a delayed terminal observer from walking spend
       // backward, and MIN prevents a later dispatch from widening the cap.
-      if (pr_info?.ralph === true && pr_info.ralph_round !== undefined && pr_info.max_ralph_rounds !== undefined) {
-        sets.push('ralph_round = MAX(ralph_round, ?)',
-          'max_ralph_rounds = CASE WHEN max_ralph_rounds IS NULL THEN ? ELSE MIN(max_ralph_rounds, ?) END')
-        params.push(pr_info.ralph_round, pr_info.max_ralph_rounds, pr_info.max_ralph_rounds)
+      if (pr_info?.task_iteration !== undefined && pr_info.max_task_iterations !== undefined) {
+        sets.push('task_iteration = MAX(task_iteration, ?)',
+          'max_task_iterations = CASE WHEN max_task_iterations IS NULL THEN ? ELSE MIN(max_task_iterations, ?) END')
+        params.push(pr_info.task_iteration, pr_info.max_task_iterations, pr_info.max_task_iterations)
         // The estimate can shrink after a re-plan. Preserve an earlier estimate
         // only when this terminal observation supplies no total of its own.
-        sets.push('ralph_task_total = CASE WHEN ? >= ralph_round THEN COALESCE(?, ralph_task_total) ELSE ralph_task_total END')
-        params.push(pr_info.ralph_round, pr_info.ralph_task_total ?? null)
+        sets.push('task_total = CASE WHEN ? >= task_iteration THEN COALESCE(?, task_total) ELSE task_total END')
+        params.push(pr_info.task_iteration, pr_info.task_total ?? null)
       }
       sets.push('updated_at = ?')
       params.push(this.now(), project_slug, current.id)

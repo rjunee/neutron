@@ -16,6 +16,14 @@ import { AttemptAccounting } from './attempt-accounting.ts'
 
 const cleanups: (() => Promise<void>)[] = []
 afterEach(async () => { for (const cleanup of cleanups.splice(0)) await cleanup() })
+const singlePlan = { strategy: 'single' as const, rationale: 'One builder can complete the accepted plan.',
+  implementationPlan: '- [ ] implement the task\n', topTask: '- [ ] implement the task',
+  executionSpec: 'Implement the task.', complexity: 'mechanical' as const, remainingTasks: 0 }
+async function selectSingle(options: ProjectBuildHostOptions) {
+  expect(await options.production.store.selectExecutionStrategy(options.production.runId, {
+    strategy: singlePlan.strategy, rationale: singlePlan.rationale, plan: JSON.stringify(singlePlan),
+  })).toEqual({ kind: 'allow' })
+}
 
 for (const provider of ['anthropic', 'openai-codex', 'pi'] as const) {
   test(`project runners keep ${provider} inside its REPL and others headless`, () => {
@@ -208,7 +216,7 @@ test('project composition refuses a missing provider by name before host command
   const f = await fixture()
   f.options.substrate.inRepl = undefined
   const host = await createProjectBuildHost(f.options)
-  expect(await host.run({ mode: 'pr', start: 'fresh' }, new AbortController().signal)).toMatchObject({
+  expect(await host.run({ mode: 'implementation', start: 'fresh' }, new AbortController().signal)).toMatchObject({
     kind: 'refused', reason: 'worker-unsupported', detail: expect.stringContaining('pi'),
   })
 })
@@ -233,11 +241,11 @@ test('project reconstruction supplies persisted modes and refuses altered host b
   await expect(createProjectBuildHost(f.options)).rejects.toThrow()
 })
 
-test('project Ralph state read failure is unknown', async () => {
+test('project task-sequence state read failure is unknown', async () => {
   const f = await fixture()
   const host = await createProjectBuildHost(f.options)
   await f.options.production.store.recordStageEvent(f.options.production.runId, 'build-mode-state', '{}')
-  expect(await host.run({ mode: 'ralph', start: 'resume' }, new AbortController().signal)).toMatchObject({
+  expect(await host.run({ mode: 'implementation', start: 'resume' }, new AbortController().signal)).toMatchObject({
     kind: 'unknown', detail: expect.stringContaining('valid identity or state'),
   })
 })
@@ -248,7 +256,7 @@ test('G125 cleanup runs for every build ending and a thrown or aborted build', a
     { kind: 'merged', snapshot },
     { kind: 'blocked', phase: 'review', on: 'gate', recipient: 'orchestrator' },
     { kind: 'built', snapshot, cause: 'wave-member-built' },
-    { kind: 'continued', snapshot, remainingTasks: 1, cause: 'ralph-task-built' },
+    { kind: 'continued', snapshot, remainingTasks: 1, cause: 'task-built' },
     { kind: 'refused', reason: 'worker-unsupported', detail: 'unsupported' },
     { kind: 'failed', phase: 'build', detail: 'worker failed', cause: 'workflow-threw' },
     { kind: 'unknown', phase: 'fix', step_id: 'step', detail: 'unobserved' },
@@ -420,6 +428,7 @@ test('observation suite requires independently acquired identity and preserves r
 
 test('production composition driver reaches a review panel through all three observation sources', async () => {
   const f = await fixture()
+  await selectSingle(f.options)
   const observed = observationFixture()
   await f.options.production.store.update(f.options.production.runId, { merge_mode: 'pr' })
   f.options.production.ciSource = observed.options.ci
@@ -463,7 +472,7 @@ test('production composition driver reaches a review panel through all three obs
   host.deps.publish = async () => {}
   await host.deps.modes!.saveCheckpoint({ head: observedHead, stage: 'built', round: 1, replansUsed: 0, findings: [], previousFindings: [],
     reviewBaseline: 'none', previousReview: null })
-  const result = await host.run({ mode: 'pr', start: 'resume' }, new AbortController().signal)
+  const result = await host.run({ mode: 'implementation', start: 'resume' }, new AbortController().signal)
   expect(panelCalls, JSON.stringify(result)).toBeGreaterThan(0)
   expect(result.kind).toBe('blocked')
 })

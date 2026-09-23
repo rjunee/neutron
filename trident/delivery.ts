@@ -657,7 +657,7 @@ function infraDeathInterpretation(): FailureInterpretation {
  * the moment `'review-escalated'` was added, then survived two review rounds saying it. `'unknown'` buys silence by definition.
  * The success and handoff exits (`review-approved`, `pr-already-merged`,
  * `resume-approved-unchanged`, `wave-member-built`, `handoff-publish`,
- * `ralph-task-built`) are not failures at all: a FAILED row carrying one of them failed
+ * `task-built`) are not failures at all: a FAILED row carrying one of them failed
  * downstream of that exit, at the merge or the publish, of something this cause did not
  * measure — and the branches below, which read the reason that death actually wrote,
  * are the ones that know. Naming the exit as the failure would be a confident sentence
@@ -729,7 +729,7 @@ function interpretTerminalCause(
     case 'resume-approved-unchanged':
     case 'wave-member-built':
     case 'handoff-publish':
-    case 'ralph-task-built':
+    case 'task-built':
     case 'unknown':
       return null
   }

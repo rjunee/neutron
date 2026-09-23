@@ -3,12 +3,19 @@ import * as asyncFs from 'node:fs/promises'
 import { chmodSync, mkdtempSync, readFileSync, readdirSync, writeFileSync } from 'node:fs'
 import { tmpdir } from 'node:os'
 import { join } from 'node:path'
-import { buildRun, type BuildSnapshot, type BuildRunDeps } from '@neutronai/trident/build-run.ts'
+import { buildRun, type BuildSnapshot, type BuildRunDeps, type ExecutionPlan } from '@neutronai/trident/build-run.ts'
 import { fakeRunner, type BoundedWorkOutcome } from '../bounded-work.ts'
 import type { BoundedWorkRequest } from '../bounded-work.ts'
 import { createCodexHeadlessRunner } from './codex-headless.ts'
 
 const measured: BuildSnapshot = { head: 'measured-head', diff: '+built\nline=two\n', pr: null }
+const singlePlan: ExecutionPlan = {
+  implementationPlan: '- [ ] T1: exercise claim corroboration',
+  topTask: '- [ ] T1: exercise claim corroboration',
+  executionSpec: 'Exercise the build claim corroboration path.',
+  complexity: 'mechanical', remainingTasks: 0, strategy: 'single',
+  rationale: 'The fixture is one bounded build.',
+}
 
 function fixture(change: Partial<Record<'HEAD' | 'DIFF' | 'PR', string | null>> = {}, extra = '') {
   const dir = mkdtempSync(join(tmpdir(), 'codex-headless-'))
@@ -390,11 +397,23 @@ describe('Codex headless WorkerRunner', () => {
 async function compare(outcome: BoundedWorkOutcome, measured: BuildSnapshot) {
   const initial = { ...measured, pr: null }
   const plan = fakeRunner('anthropic', { outcomes: new Map([
-    ['run:plan:0', { kind: 'completed', result: initial, usage: { input_tokens: 0, output_tokens: 0 }, model_reported: 'test', thread_id: null }],
+    ['run:plan:0', { kind: 'completed', result: { ...initial, payload: singlePlan }, usage: { input_tokens: 0, output_tokens: 0 }, model_reported: 'test', thread_id: null }],
   ]) })
   const build = fakeRunner('openai-codex', { outcomes: new Map([['run:build:0', outcome]]) })
   let reads = 0
+  let selected: ExecutionPlan | null = null
   const deps: BuildRunDeps = {
+    modes: {
+      loadExecutionStrategy: async () => selected === null
+        ? { kind: 'known', strategy: null, rationale: null, plan: null, source: null }
+        : { kind: 'known', strategy: selected.strategy, rationale: selected.rationale, plan: selected, source: 'planner' },
+      selectExecutionStrategy: async value => { selected = structuredClone(value.plan); return { kind: 'allow' } },
+      loadResume: async () => null, saveCheckpoint: async () => {},
+      regenerateDiff: async () => ({ kind: 'known', diff: measured.diff }),
+      probePlan: async () => null,
+      commitPlan: async () => ({ kind: 'unknown', detail: 'Single strategy does not commit a task ledger' }),
+      advanceTask: async () => ({ kind: 'allow' }),
+    },
     // Terminal full-suite evidence; the driver refuses to merge without a source.
     publicationSuite: async () => ({ kind: 'known' as const, findings: [] }),
     readReviewCap: async () => ({ kind: 'known' }),
@@ -416,7 +435,7 @@ async function compare(outcome: BoundedWorkOutcome, measured: BuildSnapshot) {
   }
   const request = fixture().request()
   return buildRun({
-    run_id: 'run', mode: 'pr', start: 'fresh', repl_provider: 'anthropic',
+    run_id: 'run', mode: 'implementation', start: 'fresh', repl_provider: 'anthropic',
     workers: {
       plan: { runner: plan, request }, build: { runner: build, request },
       review: { runner: fakeRunner('anthropic'), request }, fix: { runner: build, request },

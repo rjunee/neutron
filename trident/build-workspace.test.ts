@@ -196,7 +196,6 @@ describe('dispatchBoardBoundBuild resolves a per-project git workspace', () => {
         repo_path: home,
         // Use the REAL resolver (default) — the whole point of this test.
         resolveMergeMode: async () => 'local',
-        resolveRalph: async () => false,
       },
     )
     expect(res.ok).toBe(true)
@@ -219,7 +218,6 @@ describe('dispatchBoardBoundBuild resolves a per-project git workspace', () => {
       board,
       repo_path: home,
       resolveMergeMode: async () => 'local' as const,
-      resolveRalph: async () => false,
     }
     const ra = await dispatchBoardBoundBuild({ board_item_id: a.id, task: 'x' }, { ...base, project_slug: 'alpha' })
     const rb = await dispatchBoardBoundBuild({ board_item_id: b.id, task: 'y' }, { ...base, project_slug: 'beta' })

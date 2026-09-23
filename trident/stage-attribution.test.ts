@@ -75,9 +75,9 @@ function insertEvents(db: Database, events: readonly StageEvent[]): void {
   })()
 }
 
-function completeWindow(runId: string, startMs: number, ralphRound: number): StageEvent[] {
+function completeWindow(runId: string, startMs: number, taskIteration: number): StageEvent[] {
   return [
-    event(runId, 'launch-start', startMs, `round=1 ralph_round=${ralphRound}`),
+    event(runId, 'launch-start', startMs, `round=1 task_iteration=${taskIteration}`),
     event(runId, 'fire-dispatched', startMs + 100),
     event(runId, 'fire-settled', startMs + 200),
     event(runId, 'plan-start', startMs + 300),
@@ -109,7 +109,7 @@ async function runCli(path: string, label = 'fixture'): Promise<{
 describe('stage attribution pure reader', () => {
   test('happy path computes six pre-build durations plus exact brief and build windows', () => {
     const events = [
-      event('run-happy', 'launch-start', 0, 'round=1 ralph_round=1'),
+      event('run-happy', 'launch-start', 0, 'round=1 task_iteration=1'),
       event('run-happy', 'fire-dispatched', 100),
       event('run-happy', 'fire-settled', 1_100),
       event('run-happy', 'plan-start', 3_100),
@@ -120,7 +120,7 @@ describe('stage attribution pure reader', () => {
       event('run-happy', 'codex-exec-end', 40_100),
     ]
     const [fireWindow] = groupIntoFireWindows(events)
-    expect(fireWindow?.label).toBe('run-happy#0 round=1 ralph_round=1')
+    expect(fireWindow?.label).toBe('run-happy#0 round=1 task_iteration=1')
 
     const result = computeSegments(fireWindow!)
     expect(result.segments.map((segment) => segment.durationMs)).toEqual([
@@ -139,10 +139,10 @@ describe('stage attribution pure reader', () => {
 
   test('re-fire interleaving opens isolated windows and never emits a negative duration', () => {
     const events = [
-      event('run-refire', 'launch-start', 0, 'round=1 ralph_round=1'),
+      event('run-refire', 'launch-start', 0, 'round=1 task_iteration=1'),
       event('run-refire', 'fire-dispatched', 100),
       event('run-refire', 'fire-settled', 200),
-      event('run-refire', 'launch-start', 1_000, 'round=1 ralph_round=2'),
+      event('run-refire', 'launch-start', 1_000, 'round=1 task_iteration=2'),
       event('run-refire', 'fire-dispatched', 1_100),
       event('run-refire', 'fire-settled', 1_300),
       event('run-refire', 'plan-start', 1_500),
@@ -150,8 +150,8 @@ describe('stage attribution pure reader', () => {
     const windows = groupIntoFireWindows(events)
 
     expect(windows.map((fireWindow) => fireWindow.label)).toEqual([
-      'run-refire#0 round=1 ralph_round=1',
-      'run-refire#1 round=1 ralph_round=2',
+      'run-refire#0 round=1 task_iteration=1',
+      'run-refire#1 round=1 task_iteration=2',
     ])
     expect(windows[0]?.events.map((row) => row.at)).toEqual(events.slice(0, 3).map((row) => row.at))
     expect(windows[1]?.events.map((row) => row.at)).toEqual(events.slice(3).map((row) => row.at))
@@ -191,7 +191,7 @@ describe('stage attribution pure reader', () => {
       event('run-orphan', 'fire-dispatched', 0),
       event('run-orphan', 'fire-dispatched', 50),
       event('run-orphan', 'fire-settled', 100),
-      event('run-orphan', 'launch-start', 1_000, 'round=2 ralph_round=3'),
+      event('run-orphan', 'launch-start', 1_000, 'round=2 task_iteration=3'),
       event('run-orphan', 'fire-dispatched', 1_100),
     ]
     const windows = groupIntoFireWindows(events)
@@ -199,7 +199,7 @@ describe('stage attribution pure reader', () => {
     expect(windows[0]?.label).toBe('run-orphan#0 no-launch-start')
     expect(computeSegments(windows[0]!).segments[0]?.durationMs).toBe(100)
     expect(computeSegments(windows[0]!).notes).toContain('duplicate:fire-dispatched')
-    expect(windows[1]?.label).toBe('run-orphan#1 round=2 ralph_round=3')
+    expect(windows[1]?.label).toBe('run-orphan#1 round=2 task_iteration=3')
   })
 
   // ARGUS r5 (minor): the settle-timeout HOLD path stamps `fire-unobserved-launch`

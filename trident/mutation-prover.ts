@@ -3903,7 +3903,7 @@ function checkObservation(value: unknown, field: string): string | null {
  * files, and a reviewer reads the plan anyway. Reopen it here only together
  * with an outcome for the plan-only diff.
  *
- * The host's per-branch Ralph task ledger, `.trident/ledgers/<branch>.md`
+ * The host's per-branch Task sequence task ledger, `.trident/ledgers/<branch>.md`
  * (`taskLedgerPath`, `production-host-effects.ts`), leans on this too: the host
  * commits it into every multi-task card's diff, so listing `.trident` here would
  * strip a documentation-only card's exemption and leave it the ledger as its only
@@ -3925,8 +3925,8 @@ const PROSE_EXACT = ['LICENSE', 'NOTICE']
 
 /**
  * Markdown that DRIVES the harness, matched by basename anywhere in the tree.
- * `SPEC.md` flips the repo into Ralph mode (`git-mode.ts:defaultRalphModeProbe`)
- * and `IMPLEMENTATION_PLAN.md` is the task list Ralph builds from — editing
+ * `SPEC.md` flips the repo into Task sequence mode (`git-mode.ts:defaultTask sequenceModeProbe`)
+ * and `IMPLEMENTATION_PLAN.md` is the task list Task sequence builds from — editing
  * either changes what the next run DOES, so neither is documentation.
  */
 const EXECUTABLE_PROSE_FILES = ['SPEC.md', 'IMPLEMENTATION_PLAN.md', 'CLAUDE.md', 'AGENTS.md', 'SKILL.md']

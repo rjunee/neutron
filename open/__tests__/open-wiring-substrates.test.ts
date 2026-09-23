@@ -604,7 +604,6 @@ describe('wireSubstrates — instance ids + tool-bridge invariants', () => {
           repo_path: '/repo/dead',
           resolveBuildRepo: async (home) => home,
           resolveMergeMode: async () => 'pr',
-          resolveRalph: async () => false,
         },
       )
       expect(dispatched.ok).toBe(true)

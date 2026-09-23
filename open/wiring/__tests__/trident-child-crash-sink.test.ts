@@ -72,10 +72,10 @@ function sink(): (info: {
 async function seedRunning(id: string, generation: string): Promise<void> {
   await store.create({ id, slug: id, project_slug: 'p', repo_path: '/repo', task: 'build' })
   await store.update(id, {
-    phase: 'ralph-task',
+    phase: 'task-build',
     branch: `trident/${id}`,
     pr: 282,
-    inner_checkpoint: 'ralph-task-built',
+    inner_checkpoint: 'task-built',
     subagent_run_id: 'wf-1',
     subagent_status: 'running',
     workflow_run_id: generation,

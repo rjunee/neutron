@@ -8,6 +8,7 @@ import { ProjectDb } from '@neutronai/persistence/index.ts'
 import { fakeRunner, type BoundedWorkOutcome, type BoundedWorkRequest } from '@neutronai/runtime/bounded-work.ts'
 import { seedMigratedDb } from '../tests/support/migrated-db.ts'
 import { TridentRunStore } from './store.ts'
+import { WorkBoardStore } from '@neutronai/work-board/store.ts'
 import { spawnCapture, type EnvCapableHostRunner, type HostCommandResult } from './git-mode.ts'
 import { createProductionHostEffects, productionCiSource, taskLedgerPath, workContextPath } from './production-host-effects.ts'
 import { classifyMutationTarget, isProseOnlyChange } from './mutation-prover.ts'
@@ -20,6 +21,16 @@ const cleanups: (() => Promise<void>)[] = []
 afterEach(async () => { for (const cleanup of cleanups.splice(0)) await cleanup() })
 /** The fixture branch `change`'s own ledger path, and a writer that creates its parents. */
 const LEDGER = '.trident/ledgers/change.md'
+const singlePlan = { strategy: 'single' as const, rationale: 'One builder can complete the accepted plan.',
+  implementationPlan: '- [ ] implement the task\n', topTask: '- [ ] implement the task',
+  executionSpec: 'Implement the task.', complexity: 'mechanical' as const, remainingTasks: 0 }
+const taskSequencePlan = { strategy: 'task_sequence' as const, rationale: 'The accepted plan has useful task boundaries.',
+  implementationPlan: '- [ ] first\n- [ ] second\n', topTask: '- [ ] first',
+  executionSpec: 'Implement the selected task.', complexity: 'mechanical' as const, remainingTasks: 1 }
+async function selectPlan(store: TridentRunStore, runId: string, plan: typeof singlePlan | typeof taskSequencePlan) {
+  expect(await store.selectExecutionStrategy(runId, { strategy: plan.strategy, rationale: plan.rationale,
+    plan: JSON.stringify(plan) })).toEqual({ kind: 'allow' })
+}
 async function writeLedger(worktree: string, body: string) {
   await mkdir(join(worktree, '.trident', 'ledgers'), { recursive: true })
   await writeFile(join(worktree, LEDGER), body)
@@ -794,7 +805,7 @@ test('local-mode driver reaches merged through the real production effect', asyn
   const outcomes = new Map<string, BoundedWorkOutcome>()
   for (const [role, round] of [['plan', 0], ['build', 0], ['review', 1]] as const) {
     const stepId = `${f.row.id}:${role}:${round}${role === 'review' ? `:head:${snapshot.head}` : ''}`
-    outcomes.set(stepId, { kind: 'completed', result: { ...snapshot, payload: {} },
+    outcomes.set(stepId, { kind: 'completed', result: { ...snapshot, payload: role === 'plan' ? singlePlan : {} },
       usage: { input_tokens: 0, output_tokens: 0 }, model_reported: 'test', thread_id: null })
   }
   const path = join(f.dir, 'driver-brief')
@@ -803,12 +814,12 @@ test('local-mode driver reaches merged through the real production effect', asyn
     tools: 'edit-and-run', brief: { path, integrity: briefIntegrity(workContextPath(path)) },
     result: { schema: 'test', path: join(f.dir, 'result') }, thread: null, budget: { wall_ms: 1000 } }
   const runner = fakeRunner('pi', { outcomes })
-  const input: BuildRunInput = { run_id: f.row.id, mode: 'pr', start: 'fresh', merge_mode: 'local', repl_provider: 'pi',
+  const input: BuildRunInput = { run_id: f.row.id, mode: 'implementation', start: 'fresh', merge_mode: 'local', repl_provider: 'pi',
     workers: { plan: { runner, request }, build: { runner, request }, review: { runner, request }, fix: { runner, request } } }
   // Policy seams are scripted here; git measurement, preparation, landing and
   // the final ancestry witness use the real local repository.
   // Compose the same readback gate as createBuildHost over production files.
-  const deps: BuildRunDeps = { reviewArtifact, ...f.effects,
+  const deps: BuildRunDeps = { reviewArtifact, ...f.effects, modes: f.modes,
     // The driver requires a round cap from the run row and refuses without one
     // (`trident/build-run.ts` — 'Review round cap source is missing'). Production
     // gets it from `createBuildHost`; these fixtures build deps by hand, so they
@@ -867,8 +878,10 @@ for (const failure of ['during-assessment', 'push-failure', 'push-timeout'] as c
   })
 }
 
-async function resumeFixture(round = 3, replansUsed = 1) {
+async function resumeFixture(round = 3, replansUsed = 1,
+  selectedPlan: typeof singlePlan | typeof taskSequencePlan = singlePlan) {
   const f = await fixture()
+  await selectPlan(f.store, f.row.id, selectedPlan)
   const snapshot = await measured(f)
   await f.modes.saveCheckpoint!({ head: f.tip, stage: 'rejected', round, replansUsed,
     previousFindings: ['older issue', 'another issue'], previousBlockingCount: 2,
@@ -893,7 +906,7 @@ async function resumeFixture(round = 3, replansUsed = 1) {
     }
     const now = await measured(f)
     const payload = request.role === 'plan'
-      ? { executionSpec: 'revised execution spec', round: 0, replansUsed: 0 }
+      ? { ...singlePlan, executionSpec: 'revised execution spec' }
       : { round: 0, replansUsed: 0 }
     return { kind: 'completed', result: { ...now, payload, round: 0, replansUsed: 0 },
       usage: { input_tokens: 0, output_tokens: 0 }, model_reported: 'test', thread_id: null }
@@ -936,7 +949,7 @@ async function resumeFixture(round = 3, replansUsed = 1) {
     publishGate: async () => ({ kind: 'allow' }),
     mergeGate: async () => ({ kind: 'blocked', on: 'fixture stops before merge' }),
   }
-  const input: BuildRunInput = { run_id: f.row.id, mode: 'pr', start: 'resume', repl_provider: 'pi',
+  const input: BuildRunInput = { run_id: f.row.id, mode: 'implementation', start: 'resume', repl_provider: 'pi',
     workers: { plan: { runner, request }, build: { runner, request }, review: { runner, request }, fix: { runner, request } } }
   return { ...f, restarted, runner, rounds, deps, input, run: () => buildRun(input, deps, new AbortController().signal) }
 }
@@ -1017,23 +1030,112 @@ test('production checkpoint rejects stale writers and missing resume state', asy
   expect(await createProductionHostEffects(f.options).modes.loadResume()).toMatchObject({ round: 3, replansUsed: 1 })
 })
 
-test('production Ralph handoff consumes once and probes the pinned committed plan', async () => {
+test('production task-sequence handoff consumes once and probes the pinned committed plan', async () => {
   const f = await fixture()
-  // This fixture enables the already-created run for the additive mode host.
-  await f.db.run('UPDATE code_trident_runs SET ralph = 1 WHERE id = ?', [f.row.id])
+  await selectPlan(f.store, f.row.id, taskSequencePlan)
+  const board = new WorkBoardStore(f.db)
+  const card = await board.create('project', { title: 'Task handoff accounting' })
+  await board.attachRun('project', card.id, f.row.id)
   await writeLedger(f.worktree, '- [x] first\n- [ ] second\n')
   await f.command(['git', '-C', f.worktree, 'add', LEDGER])
   await f.command(['git', '-C', f.worktree, 'commit', '-m', 'Commit plan'])
   const snapshot = await measured(f)
   await f.modes.saveCheckpoint!({ head: snapshot.head, stage: 'built', round: 1, replansUsed: 0, findings: [], previousFindings: [] })
   const handoff = { run_id: f.row.id, round: 0, snapshot, remainingTasks: 1 }
-  expect(await f.modes.advanceRalph(handoff)).toEqual({ kind: 'allow' })
+  expect(await f.modes.advanceTask(handoff)).toEqual({ kind: 'allow' })
+  expect(f.store.get(f.row.id)!.task_iteration).toBe(1)
+  expect(board.get('project', card.id)!.task_iteration).toBe(1)
   const restarted = createProductionHostEffects(f.options)
-  expect(await restarted.modes.advanceRalph(handoff)).toEqual({ kind: 'allow' })
-  expect(restarted.ralphIteration()).toBe(1)
-  expect(await restarted.modes.loadResume()).toMatchObject({ stage: 'ralph-task-built', round: 0 })
+  expect(await restarted.modes.advanceTask(handoff)).toEqual({ kind: 'allow' })
+  expect(f.store.get(f.row.id)!.task_iteration).toBe(1)
+  expect(restarted.taskIteration()).toBe(1)
+  expect(await restarted.modes.loadResume()).toMatchObject({ stage: 'task-built', round: 0 })
   expect(await restarted.modes.probePlan(snapshot.head)).toMatchObject({ body: '- [x] first\n- [ ] second\n', uncheckedCount: 1 })
-  expect(await restarted.modes.advanceRalph({ ...handoff, snapshot: { ...snapshot, head: f.tip } })).toMatchObject({ kind: 'blocked' })
+  expect(await restarted.modes.advanceTask({ ...handoff, snapshot: { ...snapshot, head: f.tip } })).toMatchObject({ kind: 'blocked' })
+})
+
+async function ledgerIntentFixture() {
+  const f = await fixture()
+  await selectPlan(f.store, f.row.id, taskSequencePlan)
+  const intent = { iteration: 0, builtHead: f.tip, body: '- [x] first\n- [ ] second\n' }
+  const checkpoint = { head: f.tip, stage: 'built' as const, round: 1, replansUsed: 0,
+    findings: [], previousFindings: [], remainingTasks: 1, handoff: intent }
+  await f.modes.saveCheckpoint(checkpoint)
+  expect(f.store.get(f.row.id)!.task_iteration).toBe(1)
+  return { ...f, intent, checkpoint }
+}
+
+test('task ledger intent authenticates the real child and charges repeated recovery only once', async () => {
+  const f = await ledgerIntentFixture()
+  const result = await f.modes.commitPlan({ body: f.intent.body, snapshot: await measured(f) })
+  expect(result.kind).toBe('known')
+  const snapshot = await measured(f)
+  expect(snapshot.head).not.toBe(f.checkpoint.head)
+  for (let attempt = 0; attempt < 2; attempt++) {
+    const host = createProductionHostEffects(f.options)
+    expect(await host.modes.loadResume()).toMatchObject({ handoff: f.intent })
+    expect(await host.modes.recoverTaskHandoff!({ intent: f.intent, snapshot })).toEqual({ kind: 'allow' })
+    expect(f.store.get(f.row.id)!.task_iteration).toBe(1)
+    expect(host.taskIteration()).toBe(0)
+  }
+  const resumed = createProductionHostEffects(f.options)
+  await resumed.modes.loadResume()
+  await resumed.modes.saveCheckpoint({ ...f.checkpoint, head: snapshot.head })
+  const handoff = { run_id: f.row.id, round: 0, snapshot, remainingTasks: 1 }
+  expect(await resumed.modes.advanceTask(handoff)).toEqual({ kind: 'allow' })
+  expect(await createProductionHostEffects(f.options).modes.advanceTask(handoff)).toEqual({ kind: 'allow' })
+  expect(f.store.get(f.row.id)!.task_iteration).toBe(1)
+})
+
+for (const damage of ['extra-file', 'wrong-body', 'grandchild', 'merge'] as const)
+test(`task ledger intent refuses ${damage} without refunding completed work`, async () => {
+  const f = await ledgerIntentFixture()
+  expect((await f.modes.commitPlan({ body: f.intent.body, snapshot: await measured(f) })).kind).toBe('known')
+  if (damage === 'merge') {
+    const tree = await f.command(['git', '-C', f.worktree, 'rev-parse', 'HEAD^{tree}'])
+    const merged = await f.command(['git', '-C', f.worktree, 'commit-tree', tree, '-p', f.tip, '-p', f.base, '-m', 'Merge-shaped ledger'])
+    await f.command(['git', '-C', f.worktree, 'reset', '--soft', merged])
+  } else {
+    if (damage === 'wrong-body') await writeLedger(f.worktree, '- [x] first\n- [ ] unrelated\n')
+    else await writeFile(join(f.worktree, 'unrelated.md'), 'extra change\n')
+    await f.command(['git', '-C', f.worktree, 'add', '--', damage === 'wrong-body' ? LEDGER : 'unrelated.md'])
+    await f.command(['git', '-C', f.worktree, 'commit', ...(damage === 'grandchild' ? [] : ['--amend']), '-m', 'Changed ledger candidate'])
+  }
+  const host = createProductionHostEffects(f.options)
+  const snapshot = await measured(f)
+  expect(await host.modes.recoverTaskHandoff!({ intent: f.intent, snapshot })).toMatchObject({ kind: 'blocked' })
+  expect((await f.store.reconcileTaskSpend(f.row.id))!.task_iteration).toBe(1)
+})
+
+test('task ledger intent rejects malformed evidence while old checkpoints remain readable', async () => {
+  const f = await ledgerIntentFixture()
+  const event = f.store.stageEvents(f.row.id).filter(e => e.stage === 'build-mode-state').at(-1)!
+  const original = JSON.parse(event.meta!)
+  for (const handoff of [null, { ...f.intent, iteration: -1 }, { ...f.intent, iteration: 1 },
+    { ...f.intent, builtHead: 'short' }, { ...f.intent, body: '- [x] first' }]) {
+    await f.store.recordStageEvent(f.row.id, 'build-mode-state', JSON.stringify({ ...original,
+      checkpoint: { ...original.checkpoint, handoff } }))
+    await expect(createProductionHostEffects(f.options).modes.loadResume()).rejects.toThrow('Task ledger intent is invalid')
+  }
+  delete original.checkpoint.handoff
+  await f.store.recordStageEvent(f.row.id, 'build-mode-state', JSON.stringify(original))
+  expect(await createProductionHostEffects(f.options).modes.loadResume()).toMatchObject({ head: f.tip, remainingTasks: 1 })
+  expect((await f.store.reconcileTaskSpend(f.row.id))!.task_iteration).toBe(1)
+})
+
+for (const owner of ['run', 'card'] as const)
+test(`task ledger intent cannot reuse an old identity after ${owner} spend advances`, async () => {
+  const f = await ledgerIntentFixture()
+  const board = new WorkBoardStore(f.db)
+  const card = await board.create('project', { title: 'Stale ledger intent' })
+  await board.attachRun('project', card.id, f.row.id)
+  expect(createProductionHostEffects(f.options).taskIteration()).toBe(0)
+  if (owner === 'run') await f.store.update(f.row.id, { task_iteration: 2 })
+  else f.db.runSync('UPDATE work_board_items SET task_iteration = 2 WHERE id = ?', [card.id])
+  const stale = createProductionHostEffects(f.options)
+  expect(() => stale.taskIteration()).toThrow('Task ledger intent no longer matches run or card spend')
+  await expect(stale.modes.loadResume()).rejects.toThrow('Task ledger intent no longer matches run or card spend')
+  expect(board.get('project', card.id)!.task_iteration).toBe(2)
 })
 
 // THE HOST COMMITS THE TASK LEDGER THE CONTINUATION PLANNER READS. `probePlan` used
@@ -1181,7 +1283,7 @@ test('production G038 moved and absent heads rebuild; unreadable head stops', as
       // This fixture resumes with a re-plan already spent, so the planner must
       // return a revised execution spec or G075 stops the run before the rebuild
       // this test exists to observe.
-      const payload = request.role === 'plan' ? { executionSpec: 'revised execution spec' } : null
+      const payload = request.role === 'plan' ? { ...singlePlan, executionSpec: 'revised execution spec' } : null
       return { kind: 'completed', result: { ...observed, payload }, usage: { input_tokens: 0, output_tokens: 0 }, model_reported: 'test', thread_id: null }
     }
     for (const role of ['plan', 'build', 'review', 'fix'] as const) f.input.workers[role].runner = runner
@@ -1228,22 +1330,22 @@ for (const operation of ['archive', 'tar'] as const) {
   })
 }
 
-test('production Ralph rejects wrong identity, incomplete state and unknown head', async () => {
+test('production task-sequence rejects wrong identity, incomplete state and unknown head', async () => {
   const f = await fixture()
-  await f.db.run('UPDATE code_trident_runs SET ralph = 1 WHERE id = ?', [f.row.id])
+  await selectPlan(f.store, f.row.id, taskSequencePlan)
   const snapshot = await measured(f)
   const checkpoint = { head: f.tip, stage: 'built' as const, round: 1, replansUsed: 0, findings: [], previousFindings: [] }
   const handoff = { run_id: f.row.id, round: 0, snapshot, remainingTasks: 1 }
-  expect(await f.modes.advanceRalph(handoff)).toMatchObject({ kind: 'unknown', detail: expect.stringContaining('checkpoint is missing') })
+  expect(await f.modes.advanceTask(handoff)).toMatchObject({ kind: 'unknown', detail: expect.stringContaining('checkpoint is missing') })
   await f.modes.saveCheckpoint!(checkpoint)
-  expect(await f.modes.advanceRalph({ ...handoff, run_id: 'different' })).toMatchObject({ kind: 'unknown', detail: expect.stringContaining('identity') })
+  expect(await f.modes.advanceTask({ ...handoff, run_id: 'different' })).toMatchObject({ kind: 'unknown', detail: expect.stringContaining('identity') })
   await f.modes.saveCheckpoint!({ ...checkpoint, stage: 'fixed' })
-  expect(await f.modes.advanceRalph(handoff)).toMatchObject({ kind: 'unknown', detail: expect.stringContaining('completed build') })
+  expect(await f.modes.advanceTask(handoff)).toMatchObject({ kind: 'unknown', detail: expect.stringContaining('completed build') })
   await f.modes.saveCheckpoint!(checkpoint)
   f.intercept(argv => argv.includes('rev-parse') ? bad() : undefined)
-  expect(await f.modes.advanceRalph(handoff)).toMatchObject({ kind: 'unknown', detail: expect.stringContaining('unreadable') })
+  expect(await f.modes.advanceTask(handoff)).toMatchObject({ kind: 'unknown', detail: expect.stringContaining('unreadable') })
   f.intercept(undefined)
-  expect(await f.modes.advanceRalph(handoff)).toEqual({ kind: 'allow' })
+  expect(await f.modes.advanceTask(handoff)).toEqual({ kind: 'allow' })
 })
 
 test('production plan refuses a committed link to host bytes', async () => {
@@ -1277,7 +1379,8 @@ test('production re-plan spend survives a crash before replanning begins', async
 
 test('production checkpoint append refuses a terminal transition after host observation', async () => {
   const f = await fixture()
-  const first = await f.store.appendBuildModeState(f.row.id, null, '{}')
+  await f.modes.saveCheckpoint!({ head: f.tip, stage: 'built', round: 1, replansUsed: 0, findings: [], previousFindings: [] })
+  const first = f.store.stageEvents(f.row.id).filter(event => event.stage === 'build-mode-state').at(-1)!.id
   expect(typeof first).toBe('number')
   await f.store.update(f.row.id, { phase: 'stopped' })
   expect(await f.store.appendBuildModeState(f.row.id, first, '{"later":true}')).toBeNull()
@@ -1305,28 +1408,49 @@ test('production rejected review survives a crash before the next fix', async ()
     `${f.row.id}:fix:2`, `${f.row.id}:review:3:head:${landed}`])
 })
 
-test('production Ralph driver persists its continuation and host iteration', async () => {
-  const f = await resumeFixture(0, 0)
-  await f.db.run('UPDATE code_trident_runs SET ralph = 1 WHERE id = ?', [f.row.id])
-  await f.modes.saveCheckpoint({ head: f.tip, stage: 'ralph-task-built', round: 0, replansUsed: 0, findings: [], previousFindings: [],
+test('production task-sequence driver persists its continuation and host iteration', async () => {
+  const f = await resumeFixture(0, 0, taskSequencePlan)
+  await f.modes.saveCheckpoint({ head: f.tip, stage: 'task-built', round: 0, replansUsed: 0, findings: [], previousFindings: [],
     previousReview: null, reviewBaseline: 'none' })
-  f.input.mode = 'ralph'
-  f.input.ralphRound = 0
+  f.input.mode = 'implementation'
+  f.input.taskIteration = 0
   const snapshot = await measured(f)
   const calls: string[] = []
   const runner = fakeRunner('pi')
   runner.run = async request => {
     calls.push(request.step_id)
     return { kind: 'completed', result: { ...snapshot, payload: request.role === 'plan'
-      ? { implementationPlan: '- [ ] first\n- [ ] next\n', topTask: '- [ ] first', remainingTasks: 1, executionSpec: 'implement first' }
+      ? { ...taskSequencePlan, implementationPlan: '- [ ] first\n- [ ] second\n',
+          topTask: '- [ ] first', remainingTasks: 1, executionSpec: 'implement first' }
       : { round: 0, replansUsed: 99 } }, usage: { input_tokens: 0, output_tokens: 0 }, model_reported: 'test', thread_id: null }
   }
   for (const role of ['plan', 'build', 'review', 'fix'] as const) f.input.workers[role].runner = runner
   expect(await f.run()).toMatchObject({ kind: 'continued', remainingTasks: 1 })
   expect(calls).toEqual([`${f.row.id}:task:0:plan:0`, `${f.row.id}:task:0:build:0`])
   const restarted = createProductionHostEffects(f.options)
-  expect(restarted.ralphIteration()).toBe(1)
-  expect(await restarted.modes.loadResume()).toMatchObject({ stage: 'ralph-task-built', round: 0, replansUsed: 0 })
+  expect(restarted.taskIteration()).toBe(1)
+  expect(await restarted.modes.loadResume()).toMatchObject({ stage: 'task-built', round: 0, replansUsed: 0 })
+})
+
+for (const cap of [1, 2])
+test(`task ledger intent with an empty regenerated diff respects budget ${cap}`, async () => {
+  const f = await resumeFixture(0, 0, taskSequencePlan)
+  f.db.runSync('UPDATE code_trident_runs SET max_task_iterations = ? WHERE id = ?', [cap, f.row.id])
+  // A completed no-op task at the launch base has no cumulative diff to reuse.
+  await f.store.update(f.row.id, { base_sha: f.tip })
+  await f.modes.saveCheckpoint({ head: f.tip, stage: 'built', round: 1, replansUsed: 0,
+    findings: [], previousFindings: [], previousReview: null, reviewBaseline: 'none', remainingTasks: 1,
+    handoff: { iteration: 0, builtHead: f.tip, body: '- [x] first\n- [ ] second\n' } })
+  f.runner.run = async request => {
+    f.runner.calls.push(request)
+    const snapshot = await measured(f)
+    return { kind: 'completed', result: { ...snapshot, payload: request.role === 'plan' ? taskSequencePlan : {} },
+      usage: { input_tokens: 0, output_tokens: 0 }, model_reported: 'test', thread_id: null }
+  }
+  expect(await f.run()).toMatchObject(cap === 1 ? { kind: 'blocked', on: 'task iteration budget is exhausted' }
+    : { kind: 'continued', remainingTasks: 1 })
+  expect(f.runner.calls.map(c => c.step_id)).toEqual(cap === 1 ? [] : [`${f.row.id}:task:1:plan:0`, `${f.row.id}:task:1:build:0`])
+  expect(f.store.get(f.row.id)!.task_iteration).toBe(cap)
 })
 
 test('production plan refuses archive transformations of committed bytes', async () => {

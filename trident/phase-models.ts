@@ -168,7 +168,7 @@ export const TRIDENT_PHASES: ReadonlyArray<TridentPhase> = Object.freeze([
     key: 'decomposition',
     label: 'Decomposition',
     description: 'Reads the task and the spec, then breaks the work into ordered steps.',
-    // `plan:next` is the CONTINUATION planner: on a Ralph iteration that is picking
+    // `plan:next` is the CONTINUATION planner: on a Task sequence iteration that is picking
     // the next task off the plan its own previous iteration committed, it replaces
     // `plan:fable` and skips the whole-repo survey. Same phase and same default
     // deliberately — it does the same job with less input, so an owner who moves

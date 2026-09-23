@@ -274,7 +274,7 @@ describe('composeTerminalDelivery', () => {
   })
 
   test('a non-terminal run composes nothing (defensive null)', () => {
-    for (const phase of ['forge-init', 'ralph-plan', 'ralph-task', 'argus', 'forge-fix'] as TridentPhase[]) {
+    for (const phase of ['forge-init', 'task-plan', 'task-build', 'argus', 'forge-fix'] as TridentPhase[]) {
       expect(composeTerminalDelivery(runWith({ phase }))).toBeNull()
     }
   })

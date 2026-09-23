@@ -1,7 +1,7 @@
 /**
  * @neutronai/trident — the one live Forge/Argus prompt constant.
  *
- * HISTORY: this module used to render the Forge/Argus/Ralph prompts and
+ * HISTORY: this module used to render the Forge/Argus/Task sequence prompts and
  * parse their locked terminal contract for the v1 exec-model outer loop
  * (`session.ts` + `substrate-dispatch.ts`, both deleted). That loop is gone.
  *

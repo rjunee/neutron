@@ -1097,67 +1097,9 @@ export function defaultGitModeProbe(
   }
 }
 
-// ---------------------------------------------------------------------------
-// Ralph mode detection
-// ---------------------------------------------------------------------------
-
-/**
- * Probe for `detectRalphMode`. Narrow on purpose — the only fact Ralph
- * detection needs is whether the repo is "governed" (its git root has a
- * `SPEC.md`, per the Spec-Drift Guardrails convention). Tests inject a
- * stub; production uses `defaultRalphModeProbe`.
- */
-export interface RalphModeProbe {
-  /** Whether the git root containing `repoPath` has a `SPEC.md`. */
-  hasSpecFile(repoPath: string): Promise<boolean>
-}
-
-/**
- * Decide whether a run uses Ralph build mode (the one-task-per-fresh-
- * context loop). Mirrors the legacy harness SKILL.md "Ralph mode detection":
- *
- *   1. EXPLICIT — the caller asked for it (`opts.explicit`) → Ralph.
- *   2. GOVERNED — else the repo's git root contains a `SPEC.md` → Ralph.
- *   3. Else → legacy single-context build.
- *
- * A probe that throws is treated as "not governed" so detection degrades
- * to the legacy path rather than erroring a run at creation time.
- */
-export async function detectRalphMode(
-  repoPath: string,
-  probe: RalphModeProbe,
-  opts: { explicit?: boolean } = {},
-): Promise<boolean> {
-  if (opts.explicit === true) return true
-  try {
-    return await probe.hasSpecFile(repoPath)
-  } catch {
-    return false
-  }
-}
-
-/**
- * Default production probe: resolves the git root via
- * `git rev-parse --show-toplevel` (falling back to `repoPath`), then checks
- * for `<root>/SPEC.md`. The file-existence check is injectable so unit
- * tests need no real filesystem.
- */
-export function defaultRalphModeProbe(
-  run: (cmd: string[], cwd?: string) => Promise<HostCommandResult> = spawnCapture,
-  fileExists: (path: string) => Promise<boolean> = (p) => Bun.file(p).exists(),
-): RalphModeProbe {
-  return {
-    hasSpecFile: async (repoPath) => {
-      const res = await run(['git', '-C', repoPath, 'rev-parse', '--show-toplevel'], repoPath)
-      const root = res.ok && res.stdout.trim().length > 0 ? res.stdout.trim() : repoPath
-      return await fileExists(`${root}/SPEC.md`)
-    },
-  }
-}
-
 /**
  * Default production host-command runner: shells `cmd` via `Bun.spawn`
- * and captures stdout/stderr/exit. Shared by the git-mode/ralph probes
+ * and captures stdout/stderr/exit. Shared by the git-mode probe
  * AND the trident orchestrator's `run_host` (git/gh/numstat/merge) when a
  * composer doesn't inject its own. Never throws — a spawn failure resolves
  * to `{ ok:false, exit_code:-1 }`.

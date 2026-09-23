@@ -1,3 +1,5 @@
+import type { ExecutionStrategy } from '../execution-strategy.ts'
+
 export type Verdict = 'APPROVE' | 'REQUEST_CHANGES' | 'COMMENT'
 export type FindingSeverity = 'blocker' | 'major' | 'minor' | 'nit'
 
@@ -40,6 +42,8 @@ export interface ForgeTrailer {
 }
 
 export interface PlanTrailer {
+  strategy: ExecutionStrategy
+  rationale: string
   implementationPlan: string
   topTask: string
   executionSpec: string
@@ -85,8 +89,8 @@ type Rule = {
   description?: string
   examples?: readonly unknown[]
 } & (
-  | { type: 'string'; enum?: readonly string[] }
-  | { type: 'number' | 'integer' | 'boolean' }
+  | { type: 'string'; enum?: readonly string[]; minLength?: number }
+  | { type: 'number' | 'integer' | 'boolean'; minimum?: number }
   | MultiRule
   | { type: 'array'; items: Rule }
   | ({ type: 'object' } & Shape))
@@ -165,13 +169,15 @@ const shapes: Record<TrailerKind, Shape> = {
   plan: {
     type: 'object',
     additionalProperties: false,
-    required: ['implementationPlan', 'topTask', 'executionSpec', 'complexity', 'remainingTasks'],
+    required: ['strategy', 'rationale', 'implementationPlan', 'topTask', 'executionSpec', 'complexity', 'remainingTasks'],
     properties: {
-      implementationPlan: { type: 'string' },
-      topTask: { type: 'string' },
-      executionSpec: { type: 'string' },
+      strategy: { type: 'string', enum: ['single', 'task_sequence'] },
+      rationale: { type: 'string', minLength: 1 },
+      implementationPlan: { type: 'string', minLength: 1 },
+      topTask: { type: 'string', minLength: 1 },
+      executionSpec: { type: 'string', minLength: 1 },
       complexity: { type: 'string', enum: ['mechanical', 'reasoning'] },
-      remainingTasks: { type: 'number' },
+      remainingTasks: { type: 'integer', minimum: 0 },
       branchBrief: { type: ['string', 'null'] },
     },
   },
@@ -242,9 +248,11 @@ function validateRule(value: unknown, rule: Rule, path: string): { ok: true } | 
     if (value === null || typeof value !== 'object' || Array.isArray(value)) return reject('not-object', path)
     return validateShape(value as Record<string, unknown>, rule as Shape, path)
   }
-  if (rule.type === 'integer') return typeof value === 'number' && Number.isInteger(value) ? { ok: true } : reject('wrong-type', path)
+  if (rule.type === 'integer') return typeof value === 'number' && Number.isSafeInteger(value)
+    && (rule.minimum === undefined || value >= rule.minimum) ? { ok: true } : reject('wrong-type', path)
   if (typeof value !== rule.type) return reject('wrong-type', path)
   if (rule.type === 'string' && rule.enum && !rule.enum.includes(value as string)) return reject('invalid-enum', path)
+  if (rule.type === 'string' && rule.minLength !== undefined && (value as string).trim().length < rule.minLength) return reject('wrong-type', path)
   return { ok: true }
 }
 

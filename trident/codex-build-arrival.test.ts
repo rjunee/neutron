@@ -124,7 +124,7 @@ async function emitForgeBuildPrompt(
     baseBranch: 'main',
     slug: 'arrival-run',
     maxRounds: 1,
-    ralph: false,
+    executionStrategy: 'single',
     mergeMode: 'pr',
     prNumber: null,
     branch: null,

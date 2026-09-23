@@ -28,7 +28,7 @@ describe('classifyFireTimeoutRow — a moved workflow-owned column is a live lan
   test('an inner_checkpoint delta reads as launched and names the column', () => {
     const evidence = classifyFireTimeoutRow(
       columns(),
-      columns({ inner_checkpoint: 'ralph-task-built' }),
+      columns({ inner_checkpoint: 'task-built' }),
     )
     expect(evidence.kind).toBe('launched')
     expect(evidence.detail).toContain('inner_checkpoint')
@@ -134,7 +134,7 @@ describe('classifyFireTimeoutRow — an outer-published row is finished work', (
 
 describe('classifyFireTimeoutRow — everything else is no evidence', () => {
   test('inner-loop checkpoints and a null checkpoint are not evidence', () => {
-    for (const name of ['ralph-task-built', 'forge-done', 'argus-request-changes', null]) {
+    for (const name of ['task-built', 'forge-done', 'argus-request-changes', null]) {
       expect(classifyFireTimeoutRow(columns({ inner_checkpoint: name }), columns({ inner_checkpoint: name })).kind).toBe(
         'none',
       )

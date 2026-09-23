@@ -55,8 +55,8 @@ function recordingSink(): { sink: OutboundSink; sent: OutgoingMessage[] } {
 describe('TridentTickLoop.runOnce', () => {
   test('advances every non-terminal run whose sub-agent completed', async () => {
     const store = new TridentRunStore(db)
-    const a = await store.create({ slug: 'a', project_slug: 't1', repo_path: '/r', task: 't' })
-    const b = await store.create({ slug: 'b', project_slug: 't1', repo_path: '/r', task: 't' })
+    const a = await store.create({ slug: 'a', project_slug: 't1', repo_path: '/r', task: 't', execution_strategy: 'single' })
+    const b = await store.create({ slug: 'b', project_slug: 't1', repo_path: '/r', task: 't', execution_strategy: 'single' })
 
     const loop = new TridentTickLoop({ store, deps: depsWith({ status: 'completed', result: {} }) })
     const res = await loop.runOnce()
@@ -71,7 +71,7 @@ describe('TridentTickLoop.runOnce', () => {
     const store = new TridentRunStore(db)
     const done = await store.create({ slug: 'done', project_slug: 't1', repo_path: '/r', task: 't' })
     await store.save({ ...done, phase: 'done' })
-    const active = await store.create({ slug: 'active', project_slug: 't1', repo_path: '/r', task: 't' })
+    const active = await store.create({ slug: 'active', project_slug: 't1', repo_path: '/r', task: 't', execution_strategy: 'single' })
 
     const loop = new TridentTickLoop({ store, deps: depsWith({ status: 'completed', result: {} }) })
     const res = await loop.runOnce()
@@ -147,7 +147,7 @@ describe('TridentTickLoop.runOnce', () => {
 
   test('a throwing hold drain never fails the tick', async () => {
     const store = new TridentRunStore(db)
-    const a = await store.create({ slug: 'a', project_slug: 't1', repo_path: '/r', task: 't' })
+    const a = await store.create({ slug: 'a', project_slug: 't1', repo_path: '/r', task: 't', execution_strategy: 'single' })
     const loop = new TridentTickLoop({
       store,
       deps: depsWith({ status: 'completed', result: {} }),
@@ -291,6 +291,7 @@ describe('TridentTickLoop.runOnce', () => {
         project_slug: 't1',
         repo_path: '/r',
         task: 't',
+        execution_strategy: 'single',
         chat_id: '1',
         thread_id: '2',
       })

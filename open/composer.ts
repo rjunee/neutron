@@ -6383,8 +6383,8 @@ export function buildOpenGraphComposer(
         ...(hold.payload?.thread_id !== undefined ? { thread_id: hold.payload.thread_id } : {}),
         ...(hold.payload?.channel_kind !== undefined ? { channel_kind: hold.payload.channel_kind } : {}),
         ...(hold.payload?.max_rounds !== undefined ? { max_rounds: hold.payload.max_rounds } : {}),
-        ...(hold.payload?.max_ralph_rounds !== undefined
-          ? { max_ralph_rounds: hold.payload.max_ralph_rounds }
+        ...(hold.payload?.max_task_iterations !== undefined
+          ? { max_task_iterations: hold.payload.max_task_iterations }
           : {}),
       }),
     })

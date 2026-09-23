@@ -14,9 +14,9 @@
  *   died-before-build      no review ran and this dispatch has NO BUILD IT MAY
  *                          RESUME — either nothing was built (checkpoint null,
  *                          `inner-error`, `awaiting-trailer`, …) or what was built
- *                          is deliberately not resumable. `ralph-task-built` is the
+ *                          is deliberately not resumable. `task-built` is the
  *                          latter and is the honest majority of that bucket on the
- *                          live table: a ralph iteration builds ONE task and hands
+ *                          live table: a task-sequence iteration builds ONE task and hands
  *                          back, so the next iteration must plan and build the NEXT
  *                          task — the workflow rebuilds it by design
  *                          (`resumeOnUnchangedHead` → `unknown-checkpoint`), and a
@@ -57,7 +57,7 @@
  */
 
 import type { TridentRun } from './store.ts'
-import { carriedRalphCap, isRalphCap, isRalphRound } from './ralph-budget.ts'
+import { carriedTaskCap, isTaskCap, isTaskIteration } from './task-budget.ts'
 import { TERMINAL_PHASES } from './state-machine.ts'
 import { trimAsciiWs } from './ascii-trim.ts'
 import { OUTER_PUBLISHED_CHECKPOINT } from './checkpoint-round.ts'
@@ -106,8 +106,8 @@ const isTerminal = (phase: string): boolean =>
  * This is the NAME half of that agreement and is deliberately mode-blind — a
  * commit exists under every one of these names whatever mode built it, which is
  * what the DISPOSITION states. The one place the workflow's answer depends on
- * more than the name is `forge-done` in ralph mode, and that belongs to the
- * prediction rather than the taxonomy: `builtButNeverReviewedSeed` takes `ralph`
+ * more than the name is `forge-done` in execution_strategy mode, and that belongs to the
+ * prediction rather than the taxonomy: `builtButNeverReviewedSeed` takes `execution_strategy`
  * and refuses there. Putting it here instead would make an offline COUNT of the
  * historical table depend on a flag no historical row's classification should
  * turn on.
@@ -146,29 +146,29 @@ export function reviewCapableCheckpoint(name: string): boolean {
 }
 
 /**
- * THE RALPH CONTINUATION CHECKPOINT — the one name a governed retry may be seeded
+ * THE TASK CONTINUATION CHECKPOINT — the one name a governed retry may be seeded
  * with that is NOT review-capable (spec item a-retry-must-resume-from-the-checkpoint,
- * gap 2). A Ralph iteration that built its task and handed back parks here with the
+ * gap 2). A Task iteration that built its task and handed back parks here with the
  * committed IMPLEMENTATION_PLAN.md as its plan. A retry seeded with it does not skip a
  * build and does not skip a review: it BUILDS the next task, but opens that iteration
  * with the cheap continuation planner (`build-run.ts`, G026) instead of re-deriving the
  * whole plan. Without the seed every retry of such a card paid the full planning survey.
  *
- * `ralph-task-built-deviated` is deliberately NOT this name: a deviated build left a
+ * `task-built-deviated` is deliberately NOT this name: a deviated build left a
  * committed plan the code no longer matches, so its retry must re-plan in full.
  */
-export const RALPH_CONTINUATION_CHECKPOINT = 'ralph-task-built'
+export const TASK_CONTINUATION_CHECKPOINT = 'task-built'
 
 /**
  * May a NEW row be born carrying `name` as its seeded checkpoint? The taxonomy above is
- * unchanged — `ralph-task-built` still classifies `died-before-build`, because no review
+ * unchanged — `task-built` still classifies `died-before-build`, because no review
  * ran and the offline disposition count must not move. This is the separate question of
- * what a dispatch may hand forward: a review-capable checkpoint on any row, or the Ralph
- * continuation checkpoint on a GOVERNED row only (a non-Ralph row has no loop to
+ * what a dispatch may hand forward: a review-capable checkpoint on any row, or the Task
+ * continuation checkpoint on a GOVERNED row only (a non-Task row has no loop to
  * continue, so the name would mean nothing there).
  */
-export function seedableCheckpoint(name: string, ralph: boolean): boolean {
-  return reviewCapableCheckpoint(name) || (ralph && name === RALPH_CONTINUATION_CHECKPOINT)
+export function seedableCheckpoint(name: string, execution_strategy: 'single' | 'task_sequence' | null): boolean {
+  return reviewCapableCheckpoint(name) || (execution_strategy === 'task_sequence' && name === TASK_CONTINUATION_CHECKPOINT)
 }
 
 /**
@@ -224,100 +224,16 @@ export function terminalRunDisposition(
   return reviewCapableCheckpoint(name) ? 'built-never-reviewed' : 'died-before-build'
 }
 
-/**
- * THE CARD'S RALPH BUDGET, as the row that re-dispatches it must inherit it — the
- * spend AND the bound it is measured against, or nothing.
- *
- * WHY IT IS CARRIED AT ALL (#519). `ralph_round` is not decoration.
- * `refireNextRalphTask` (orchestrator.ts) bounds the Ralph loop on
- * `nextRalphRound > run.max_ralph_rounds`, and `buildWorkflowArgs` (inner-loop.ts)
- * threads the counter to the inner workflow as `ralphRound`, where the
- * plan-refresh cadence reads `ralphRound % PLAN_REFRESH_EVERY`. A re-dispatch that
- * writes 0 hands a mid-budget run a fresh count and restarts its cadence, so the
- * periodic full re-plan lands on the wrong iteration of the SAME piece of work.
- *
- * SINCE #629 this is the compatibility source for a card whose durable snapshot is
- * still null. Terminal reconciliation writes the governed pair onto the card, and
- * dispatch prefers that snapshot over this linked-row result thereafter.
- *
- * AN EARLIER VERSION OF THIS PARAGRAPH SAID SOMETHING NOW FALSE, and it is corrected
- * here rather than quietly deleted because the reason it went stale is the point. It
- * said an EXHAUSTED run — which dies on `ralph-task-built`, a name
- * {@link reviewCapableCheckpoint} declines — gets "another full budget", and scoped this
- * function to mid-budget runs. Both were true when written and stopped being true in the
- * same patch: the budget carry was decoupled from the COMMIT seed, so it is gated on the
- * board link alone and no longer on the disposition. This function now carries any valid
- * governed pair, exhausted included, which is exactly what the exhausted-run tests in
- * `retry-resumes-checkpoint.test.ts` assert. A comment describing pre-fix behaviour is
- * worse than none: a reader trusting it would restore the gate believing it was already
- * there.
- *
- * THE PAIR IS INDIVISIBLE. Returning a round without its cap is not a bound: a
- * prior at `5 / 5` re-dispatched under the ambient default became `5 / 20`, and
- * `5 + 1 > 20` authorises fifteen more iterations. So either both travel or
- * neither does, and the cap is `min(prior, dispatch)` — a re-dispatch may TIGHTEN
- * the budget, never loosen it (see `carriedRalphCap`).
- *
- * BOTH RUNS MUST BE GOVERNED. `opts.ralph` is the mode the NEW row is born in
- * (resolved at dispatch by `detectRalphMode`); `run.ralph` is the mode the count
- * was produced in. A count of Ralph iterations means nothing on a row that will not
- * run a Ralph loop, and a non-Ralph prior has no iterations to count.
- *
- * IT IS DELIBERATELY *NOT* GATED ON THE COMMIT SEED, and that is the fix for the
- * measured slug-truncation defect (adversarial review, P2). `slugifyTask` truncates
- * at 35 characters and the ▶ task text is the card's design-doc BODY, so an owner
- * clarifying that doc between two presses keeps the same slug and the same branch
- * while the full text differs. `builtButNeverReviewedSeed`'s caller refuses the
- * COMMIT on a text mismatch, and must keep doing so — adopting the wrong card's
- * unreviewed commit sends code to review under another card's title. But the BUDGET
- * has no such hazard, because the carry is monotone: `min` can only tighten a bound,
- * never authorise work. Under-authorising is the safe direction, so the weak proxy
- * (task text) does not get to veto the strong identity (`linked_run_id`, which
- * `attachRun` alone writes) for a value that cannot authorise anything.
- *
- * WHAT CARRYING AN AT-CAP ROUND COSTS, ON BOTH BRANCHES (adversarial review, item 3).
- * An earlier version of this reasoning lived in `ralph-budget.ts` and claimed "nothing is
- * bricked", justified by an argument that covers only one of the two branches this split
- * created:
- *
- *   - ON THE SEEDED BRANCH nothing is lost. The row resumes to a REVIEW (`fix-round-N`,
- *     `outer-published:*`) and `refireNextRalphTask` is reached only from `applyResult`'s
- *     `publish_requested && run.ralph && remaining_tasks > 0` arm, so the run still
- *     reviews, fixes and merges the commit it adopted. Only a NEW planning iteration is
- *     refused, which is what a budget is for.
- *   - ON THE TASK-TEXT-DIFFERS BRANCH THERE IS NO SEED. The row is a fresh `forge-init`
- *     build that inherits a spent budget and dies at its first Ralph transition, having
- *     paid for a forge bootstrap first. The policy is still right — an exhausted card must
- *     not get twenty more iterations because its spec doc was edited — but it is a real
- *     cost, not a free one. `enterRalphPlan` (state-machine.ts) now says WHICH of the two
- *     happened rather than blaming a planner that never ran.
- *
- * FAIL-CLOSED MEANS REFUSING, NOT CARRYING NOTHING (cross-model review, final round —
- * defect FOUR of one shape). The counter used to be normalised to `0` for any value it
- * could not read, so a governed prior at `{ ralph_round: NaN, max_ralph_rounds: 20 }`
- * became `{ 0, 20 }` and `computeTransition` authorised the next transition because
- * `0 + 1 > 20` is false — the budget reset, restored for malformed persisted data, in
- * the field next to the one that had just been given a careful three-way
- * classification. For a COUNTER there is no benign fallback: "carry nothing" IS the
- * reset. So an unreadable half of the prior pair returns `ok: false` and the dispatch
- * REFUSES, naming the run and the column. Both columns are `INTEGER NOT NULL DEFAULT`,
- * so nothing this rejects is a legacy shape.
- */
-/**
- * The answer `carriedRalphBudget` gives. Three cases, and the third is the one defect
- * four was missing: an UNREADABLE prior budget is neither "carry this" nor "carry
- * nothing", because carrying nothing IS the reset.
- */
-export type CarriedRalphBudget =
-  | { ok: true; budget: { ralph_round: number; max_ralph_rounds: number } | null }
-  | { ok: false; column: 'ralph_round' | 'max_ralph_rounds'; value: unknown }
+/** A prior run donates its validated budget under either immutable strategy. */
+export type CarriedTaskBudget =
+  | { ok: true; budget: { task_iteration: number; max_task_iterations: number } | null }
+  | { ok: false; column: 'task_iteration' | 'max_task_iterations'; value: unknown }
 
-export function carriedRalphBudget(
+export function carriedTaskBudget(
   run: TridentRun,
-  opts: { ralph?: boolean; max_ralph_rounds?: number },
-): CarriedRalphBudget {
-  // NOT GOVERNED IS NOT AN ERROR — there is genuinely no Ralph spend to inherit.
-  if (opts.ralph !== true || run.ralph !== true) return { ok: true, budget: null }
+  opts: { execution_strategy?: 'single' | 'task_sequence' | null; max_task_iterations?: number },
+): CarriedTaskBudget {
+  // Strategy cannot erase previously spent iterations.
   // THE PRIOR ROW MUST BE READABLE IN BOTH HALVES, AND ABSENCE IS NOT EXCUSED HERE.
   // Both columns are `INTEGER NOT NULL DEFAULT` (migrations 0068/0100), asserted rather
   // than assumed, so a persisted row has no legitimate unset state: anything this
@@ -325,18 +241,18 @@ export function carriedRalphBudget(
   // "carry nothing" the way an unreadable DISPATCH cap can, because there is no
   // fallback that preserves a spend — carrying nothing restores the whole budget, which
   // is precisely defect four. `unknown` authorises nothing, so the dispatch refuses.
-  if (!isRalphRound(run.ralph_round)) {
-    return { ok: false, column: 'ralph_round', value: run.ralph_round }
+  if (!isTaskIteration(run.task_iteration)) {
+    return { ok: false, column: 'task_iteration', value: run.task_iteration }
   }
-  if (!isRalphCap(run.max_ralph_rounds)) {
-    return { ok: false, column: 'max_ralph_rounds', value: run.max_ralph_rounds }
+  if (!isTaskCap(run.max_task_iterations)) {
+    return { ok: false, column: 'max_task_iterations', value: run.max_task_iterations }
   }
-  const cap = carriedRalphCap(run.max_ralph_rounds, opts.max_ralph_rounds)
+  const cap = carriedTaskCap(run.max_task_iterations, opts.max_task_iterations)
   // Only reachable when the DISPATCH's cap is present-but-unreadable. That value then
-  // reaches `create`, which refuses it BY NAME (`TridentInvalidRalphCapError`), so the
-  // dispatch fails loudly rather than silently inheriting nothing — see `carriedRalphCap`.
+  // reaches `create`, which refuses it BY NAME (`TridentInvalidTaskCapError`), so the
+  // dispatch fails loudly rather than silently inheriting nothing — see `carriedTaskCap`.
   if (cap === null) return { ok: true, budget: null }
-  return { ok: true, budget: { ralph_round: run.ralph_round, max_ralph_rounds: cap } }
+  return { ok: true, budget: { task_iteration: run.task_iteration, max_task_iterations: cap } }
 }
 
 /**
@@ -356,15 +272,15 @@ export function carriedRalphBudget(
  * resume site and the workflow both apply — because the publish stamped the name
  * against the commit it actually pushed.
  *
- * RALPH IS AN INPUT, because the seed is a PREDICTION about what the workflow will
+ * TASK IS AN INPUT, because the seed is a PREDICTION about what the workflow will
  * do and `resumeOnUnchangedHead` is the thing that decides it. That function
- * answers `{ mode: 'rebuild', reason: 'ralph-progress-unknown' }` for a bare
- * `forge-done` when `input.ralph === true` — a ralph iteration's build says
+ * answers `{ mode: 'rebuild', reason: 'execution_strategy-progress-unknown' }` for a bare
+ * `forge-done` when `input.execution_strategy === 'task_sequence'` — a task-sequence iteration's build says
  * nothing about whether the PLAN is finished, so the next iteration must re-plan.
  * Seeding that row would strip the launcher's leftover-branch guard and its
  * base_sha pin off a run the workflow then rebuilds anyway: all of the cost of
  * resuming, none of the saving. `fix-round-N` and `outer-published:*` route to
- * review in BOTH modes, so ralph does not touch them.
+ * review in BOTH modes, so execution_strategy does not touch them.
  *
  * A `stopped` PRIOR SEEDS NOTHING, and it is the one place this function departs
  * from the taxonomy above on purpose. `stopped` is written by exactly two callers
@@ -381,13 +297,13 @@ export function carriedRalphBudget(
  */
 export function builtButNeverReviewedSeed(
   run: TridentRun,
-  opts: { ralph?: boolean } = {},
+  opts: { execution_strategy?: 'single' | 'task_sequence' | null } = {},
 ): { checkpoint: string; head: string; findings: string | null; base_sha: string } | null {
   if (terminalRunDisposition(run) !== 'built-never-reviewed') return null
   if (run.phase === 'stopped') return null
   const checkpoint = typeof run.inner_checkpoint === 'string' ? trimCheckpoint(run.inner_checkpoint) : ''
   if (checkpoint.length === 0) return null
-  if (opts.ralph === true && checkpoint === 'forge-done') return null
+  if (opts.execution_strategy === 'task_sequence' && checkpoint === 'forge-done') return null
   const published = checkpoint.match(OUTER_PUBLISHED_CHECKPOINT)
   const head = trimCheckpoint(published?.[1] ?? run.inner_checkpoint_head ?? '').toLowerCase()
   if (!/^(?:[0-9a-f]{40}|[0-9a-f]{64})$/.test(head)) return null

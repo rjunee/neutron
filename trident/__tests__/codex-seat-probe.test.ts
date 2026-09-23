@@ -870,7 +870,6 @@ describe('dispatch preflight (P4)', () => {
       repo_path: '/repo',
       resolveBuildRepo: async (home) => home,
       merge_mode_probe: localProbe(),
-      resolveRalph: async () => false,
       ...(preflight !== undefined ? { preflight } : {}),
     })
     return reg
@@ -942,7 +941,6 @@ describe('dispatch preflight (P4)', () => {
       repo_path: '/repo',
       resolveBuildRepo: async (home) => home,
       resolveMergeMode: async () => 'local',
-      resolveRalph: async () => false,
       ...(preflight !== undefined ? { preflight } : {}),
     }
   }
@@ -1002,7 +1000,6 @@ describe('dispatch preflight (P4)', () => {
         repo_path: '/repo',
         resolveBuildRepo: async (home) => home,
         resolveMergeMode: async () => 'local',
-        resolveRalph: async () => false,
         preflight: async () => ({ ok: false, reason: REFUSAL }),
       },
     )
@@ -1021,7 +1018,6 @@ describe('dispatch preflight (P4)', () => {
         repo_path: '/repo',
         resolveBuildRepo: async (home) => home,
         resolveMergeMode: async () => 'local',
-        resolveRalph: async () => false,
         preflight: async () => ({ ok: true }),
       },
     )

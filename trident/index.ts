@@ -7,7 +7,7 @@
  * by an in-process tick loop.
  *
  * PR-2 of ~5: the state machine + tick driver + git-mode auto-detect. The
- * Forge/Argus spawning (PR-3) and the Ralph plan↔task loop (PR-4) build on
+ * Forge/Argus spawning (PR-3) and the task-sequence plan↔task loop (PR-4) build on
  * these via the `AdvanceDeps` / `MergeCleanupDeps` seams.
  */
 
@@ -60,8 +60,6 @@ export { withTerminalObserver, composeTerminalHook } from './terminal-observer.t
 export {
   detectMergeMode,
   defaultGitModeProbe,
-  detectRalphMode,
-  defaultRalphModeProbe,
   isGithubRemoteUrl,
   cleanupAfterMerge,
   spawnCapture,
@@ -75,7 +73,6 @@ export type {
   PublisherAuthResult,
   PublisherAuthFailureCause,
   EnvCapableHostRunner,
-  RalphModeProbe,
   HostCommandResult,
   MergeCleanupDeps,
   MergeCleanupResult,

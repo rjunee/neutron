@@ -19,7 +19,7 @@ import { isPlainBranchName } from './mutation-prover.ts'
 
 const oid = /^(?:[0-9a-f]{40}|[0-9a-f]{64})$/
 /**
- * WHERE THE HOST COMMITS A RALPH CARD'S TASK LEDGER — `.trident/ledgers/<branch>.md`.
+ * WHERE THE HOST COMMITS A TASK-SEQUENCE CARD'S LEDGER — `.trident/ledgers/<branch>.md`.
  *
  * PER BRANCH, never a fixed repo-root file. The ledger is committed at every handoff
  * and so stays in the card's diff, and a fixed path (`IMPLEMENTATION_PLAN.md` was
@@ -283,6 +283,9 @@ export function createProductionHostEffects(options: ProductionHostOptions) {
     const event = latestModeEvent()
     if (!event) return null
     const state = parseBuildModeState(event.meta, row())
+    if (state.checkpoint.handoff && !store.taskHandoffSpendMatches(runId, state.checkpoint.handoff.iteration)) {
+      throw new Error('Task ledger intent no longer matches run or card spend')
+    }
     modeVersion = event.id
     return state
   }
@@ -295,6 +298,18 @@ export function createProductionHostEffects(options: ProductionHostOptions) {
     modeState = structuredClone(state)
   }
   const modes: BuildModeHost = {
+    async loadExecutionStrategy() {
+      try {
+        const current = row()
+        return { kind: 'known', strategy: current.execution_strategy,
+          rationale: current.strategy_rationale, source: current.strategy_source,
+          plan: current.strategy_plan === null ? null : JSON.parse(current.strategy_plan) }
+      } catch (error) { return { kind: 'unknown', detail: String(error) } }
+    },
+    async selectExecutionStrategy(value) {
+      const selected = { strategy: value.strategy, rationale: value.rationale, plan: JSON.stringify(value.plan) }
+      return value.refresh ? store.updateExecutionPlan(runId, selected) : store.selectExecutionStrategy(runId, selected)
+    },
     async loadResume() {
       modeState = readModeState()
       if (!modeState) {
@@ -304,14 +319,15 @@ export function createProductionHostEffects(options: ProductionHostOptions) {
           // Only completed checkpoint data crosses runs; no worker reservation,
           // approval, CI receipt or publication receipt is copied.
           await saveModeState({ checkpoint: source.state.checkpoint,
-            iteration: Math.max(source.state.iteration, row().ralph_round) })
+            iteration: Math.max(source.state.iteration, row().task_iteration) })
         }
       }
       if (!modeState) throw new Error('Host resume checkpoint is missing')
       return structuredClone(modeState.checkpoint)
     },
     async saveCheckpoint(checkpoint) {
-      await saveModeState({ ...modeState, checkpoint, iteration: modeState?.iteration ?? row().ralph_round })
+      await saveModeState({ ...modeState, checkpoint, iteration: checkpoint.handoff?.iteration
+        ?? Math.max(modeState?.iteration ?? 0, row().task_iteration) })
     },
     async regenerateDiff(tip) {
       try {
@@ -404,25 +420,51 @@ export function createProductionHostEffects(options: ProductionHostOptions) {
         return { kind: 'known', head: tip }
       } catch (error) { return unknown(String(error)) }
     },
-    async advanceRalph(value) {
+    async recoverTaskHandoff({ intent, snapshot }) {
+      try {
+        const state = readModeState()
+        if (!state?.checkpoint.handoff || JSON.stringify(state.checkpoint.handoff) !== JSON.stringify(intent)) {
+          return unknown('Task ledger recovery intent changed')
+        }
+        if (ledgerFile === null || !oid.test(snapshot.head)) return blocked('Task ledger recovery head or path is unavailable')
+        const fresh = await sameSnapshot(snapshot)
+        if (fresh.kind !== 'allow') return fresh
+        const parents = await git('rev-list', '--parents', '-n', '1', snapshot.head)
+        if (!parents.ok || parents.timed_out) return unknown('Task ledger recovery parent is unreadable')
+        if (parents.stdout.trim() !== `${snapshot.head} ${intent.builtHead}`) return blocked('Moved head is not the task ledger child')
+        const changed = await git('diff-tree', '--no-commit-id', '--name-only', '-r', '-z', '--no-renames', intent.builtHead, snapshot.head)
+        if (!changed.ok || changed.timed_out) return unknown('Task ledger recovery tree is unreadable')
+        if (changed.stdout !== `${ledgerFile}\0`) return blocked('Moved head changes more than the task ledger')
+        const entry = await git('ls-tree', '-z', snapshot.head, '--', ledgerFile)
+        if (!entry.ok || entry.timed_out) return unknown('Task ledger recovery blob is unreadable')
+        const expected = createHash(snapshot.head.length === 40 ? 'sha1' : 'sha256')
+          .update(`blob ${Buffer.byteLength(intent.body)}\0`).update(intent.body).digest('hex')
+        if (entry.stdout !== `100644 blob ${expected}\t${ledgerFile}\0`) return blocked('Moved head does not contain the intended task ledger')
+        return sameSnapshot(snapshot)
+      } catch (error) { return unknown(String(error)) }
+    },
+    async advanceTask(value) {
       try {
         const current = row()
         const observed = await sameSnapshot(value.snapshot)
         if (observed.kind !== 'allow') return observed
-        if (value.run_id !== runId || !current.ralph || !Number.isSafeInteger(value.round)
-          || value.round < 0 || !Number.isSafeInteger(value.remainingTasks) || value.remainingTasks <= 0) return unknown('Ralph handoff identity or count is missing')
+        if (value.run_id !== runId || current.execution_strategy !== 'task_sequence' || !Number.isSafeInteger(value.round)
+          || value.round < 0 || !Number.isSafeInteger(value.remainingTasks) || value.remainingTasks <= 0) return unknown('task-sequence handoff identity or count is missing')
         const state = readModeState()
-        if (!state) return unknown('Ralph build checkpoint is missing')
+        if (!state) return unknown('task-sequence build checkpoint is missing')
         if (state.consumed?.round === value.round && state.consumed.head === value.snapshot.head) return { kind: 'allow' }
         if (state.iteration !== value.round || state.checkpoint.pending || state.checkpoint.stage !== 'built'
-          || state.checkpoint.head !== value.snapshot.head) return unknown('Ralph handoff does not match the completed build')
+          || state.checkpoint.head !== value.snapshot.head) return unknown('task-sequence handoff does not match the completed build')
         await saveModeState({ iteration: value.round + 1, consumed: { round: value.round, head: value.snapshot.head },
-          checkpoint: { ...state.checkpoint, stage: 'ralph-task-built', round: 0 } })
+          checkpoint: { ...state.checkpoint, handoff: undefined, stage: 'task-built', round: 0 } })
         return { kind: 'allow' }
       } catch (error) { return unknown(String(error)) }
     },
   }
-  function ralphIteration() { return readModeState()?.iteration ?? row().ralph_round }
+  function taskIteration() {
+    const state = readModeState()
+    return state?.checkpoint.handoff?.iteration ?? Math.max(state?.iteration ?? 0, row().task_iteration)
+  }
   const ciSource = options.ciSource ?? productionCiSource(runHost, repo)
   const ciNow = options.ciNow ?? Date.now
   let missingSince: number | null = null
@@ -629,5 +671,5 @@ export function createProductionHostEffects(options: ProductionHostOptions) {
     publish: snapshot => requireAllow(publishChecked(snapshot)),
     merge: snapshot => requireAllow(mergeChecked(snapshot)),
   }
-  return { effects, modes, ralphIteration, admission, observeCi, publishChecked, mergeChecked, cleanup }
+  return { effects, modes, taskIteration, admission, observeCi, publishChecked, mergeChecked, cleanup }
 }

@@ -46,7 +46,7 @@ export interface DispatchHoldPayload {
   thread_id?: string | null
   channel_kind?: Topic['channel_kind']
   max_rounds?: number
-  max_ralph_rounds?: number
+  max_task_iterations?: number
   /**
    * THE PR A HELD **REVIEW** ROUND WAS BOUND TO (Argus r3, minor). A `bound_pr`
    * dispatch reviews a published head and never builds; a held one that lost the

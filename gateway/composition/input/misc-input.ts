@@ -424,10 +424,9 @@ export interface MiscCompositionInput {
      * was already built is rebuilt from scratch (Argus r16).
      */
     host_runner?: import('@neutronai/trident/git-mode.ts').EnvCapableHostRunner
-    resolveRalph?: () => Promise<boolean>
     channel_kind?: import('@neutronai/channels/types.ts').Topic['channel_kind']
     max_rounds?: number
-    max_ralph_rounds?: number
+    max_task_iterations?: number
     /**
      * M1 ▶ play button (agent-native) — resolves a board item's SAVED spec (its
      * design_doc_ref doc, else its title) so `work_board_start` builds from the

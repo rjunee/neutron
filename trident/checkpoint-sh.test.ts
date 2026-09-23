@@ -62,8 +62,8 @@ const SCRIPT = fileURLToPath(new URL('./checkpoint.sh', import.meta.url))
  */
 const ALL_PHASES: readonly TridentPhase[] = [
   'forge-init',
-  'ralph-plan',
-  'ralph-task',
+  'task-plan',
+  'task-build',
   'argus',
   'forge-fix',
   'done',

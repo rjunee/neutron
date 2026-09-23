@@ -86,12 +86,12 @@ function recordingLatch(): {
 async function seedInFlight(id: string, generation: string): Promise<TridentRun> {
   await store.create({ id, slug: id, project_slug: 'p', repo_path: '/repo', task: 'build' })
   return (await store.update(id, {
-    phase: 'ralph-task',
+    phase: 'task-build',
     branch: 'trident/x',
     pr: 61,
-    inner_checkpoint: 'ralph-task-built',
+    inner_checkpoint: 'task-built',
     round: 2,
-    ralph_round: 3,
+    task_iteration: 3,
     subagent_run_id: 'wf-1',
     subagent_status: 'running',
     workflow_run_id: generation,
@@ -208,7 +208,7 @@ describe('T2 — launcher death uses the durable recovery latch', () => {
     await loop.runLivenessOnce()
 
     const after = store.get('terminal-1')!
-    expect(after.phase).toBe('ralph-task')
+    expect(after.phase).toBe('task-build')
     expect(after.subagent_status).toBe('crashed')
     expect(after.failure_reason ?? '').toContain('external liveness probe')
     expect(after.failure_reason ?? '').toContain('gen-dead')
@@ -233,13 +233,13 @@ describe('T2 — launcher death uses the durable recovery latch', () => {
     await loop.runLivenessOnce()
 
     const after = store.get('terminal-budget-independent')!
-    expect(after.phase).toBe('ralph-task')
+    expect(after.phase).toBe('task-build')
     expect(after.subagent_status).toBe('crashed')
     await store.crashRunningByLauncher('gen-dead', 'later pushed duplicate')
     expect(store.get('terminal-budget-independent')).toEqual(after)
     expect(after.crash_recoveries).toBe(0)
     expect(after.round).toBe(2)
-    expect(after.ralph_round).toBe(3)
+    expect(after.task_iteration).toBe(3)
   })
 })
 
@@ -254,7 +254,7 @@ describe('T4 — NO FALSE DEATHS: absence of evidence is never death', () => {
     const st = staleStore()
     await st.create({ id, slug: id, project_slug: 'p', repo_path: '/repo', task: 'build' })
     return (await st.update(id, {
-      phase: 'ralph-task',
+      phase: 'task-build',
       subagent_run_id: 'wf-1',
       subagent_status: 'running',
       workflow_run_id: generation,
@@ -515,7 +515,7 @@ describe('T6 — a gateway-shutdown death is reported as a deploy, and only that
     expect(after.subagent_status).toBe('crashed')
     // The build is NOT declared terminal by the probe — a dead launcher is not a dead
     // build, and that property is unchanged by the attribution.
-    expect(after.phase).toBe('ralph-task')
+    expect(after.phase).toBe('task-build')
     expect(after.failure_reason ?? '').toContain('deploy')
     expect(after.failure_reason ?? '').not.toContain('crashed')
   })

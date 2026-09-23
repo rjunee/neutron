@@ -4881,7 +4881,7 @@ describe('the prose-only exemption FAILS CLOSED', () => {
   })
 
   test('the markdown that DRIVES the harness is not documentation either', () => {
-    // `SPEC.md` flips the repo into Ralph mode and `IMPLEMENTATION_PLAN.md` is the
+    // `SPEC.md` flips the repo into Task sequence mode and `IMPLEMENTATION_PLAN.md` is the
     // task list the next run builds from: both change what the harness DOES.
     expect(isProseOnlyChange(['SPEC.md'])).toBe(false)
     expect(isProseOnlyChange(['IMPLEMENTATION_PLAN.md'])).toBe(false)

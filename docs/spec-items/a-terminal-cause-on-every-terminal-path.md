@@ -45,7 +45,8 @@ legacy_ref: "SPEC.md § Phases → Steps (2026-09-12 split)"
 > UNDERCOUNTED the silent paths. It named the three review-verdict block kinds;
 > the actual enumeration of `writeTerminalResult` call sites is **twelve**, of which
 > **eight** emitted nothing: the two resume shortcuts, the wave-member build, both
-> publish handoffs, both mid-run merge exits, and the Ralph re-fire, on top of the
+> publish handoffs, both mid-run merge exits, and the task-sequence continuation
+> (then named Ralph re-fire), on top of the
 > review-verdict exit itself. `.../inner-workflow-terminal-cause.test.ts` enumerates
 > them from source with a positive control, so a thirteenth **written the way this
 > codebase writes them** cannot be added silently — which is the drift this item's HOW IT

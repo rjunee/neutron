@@ -81,7 +81,7 @@ function productionArgs(
       branch: null,
       pr: null,
       merge_mode: 'local',
-      ralph: false,
+      execution_strategy: 'single',
       ...runOverrides,
     } as never,
     base_branch: 'main',
@@ -112,7 +112,7 @@ async function runWorkflow(
     buildPr?: number
     /** The branch the build reports having committed on. Default the run's own. */
     buildBranch?: string
-    /** Ralph's planner says this many tasks remain AFTER the one being built. */
+    /** Task sequence's planner says this many tasks remain AFTER the one being built. */
     remainingTasks?: number
     /**
      * Make the branch-head probe report a MOVED head, so `roundLanded` passes and the
@@ -242,7 +242,7 @@ async function runWorkflow(
     if (label === 'plan:fable') {
       if (opts.throwingPlanner === true) throw new Error('planner rejected an ordinary malformed request')
       if (opts.nullPlanner === true) return null
-      // Ralph's planner. `complexity` is the field that splits the build dispatch
+      // Task sequence's planner. `complexity` is the field that splits the build dispatch
       // into `build` and `build_mechanical`, which is the whole point of the test
       // that asks for it.
       return {
@@ -658,8 +658,8 @@ describe('a dead planner reaches the infrastructure retry seam', () => {
     expect(failureClass(result)).toBe('genuine')
   })
 
-  test('a null Ralph planner result is infrastructure', async () => {
-    const { result, captured } = await runWorkflow(productionArgs(null, { ralph: true }), {
+  test('a null Task sequence planner result is infrastructure', async () => {
+    const { result, captured } = await runWorkflow(productionArgs(null, { execution_strategy: 'task_sequence' }), {
       nullPlanner: true,
     })
     expect(captured.filter((call) => call.label === 'plan:fable')).toHaveLength(1)
@@ -669,8 +669,8 @@ describe('a dead planner reaches the infrastructure retry seam', () => {
     expect(failureClass(result)).toBe('infrastructure')
   })
 
-  test('an ordinary Ralph planner rejection stays genuine', async () => {
-    const { result, captured } = await runWorkflow(productionArgs(null, { ralph: true }), {
+  test('an ordinary Task sequence planner rejection stays genuine', async () => {
+    const { result, captured } = await runWorkflow(productionArgs(null, { execution_strategy: 'task_sequence' }), {
       throwingPlanner: true,
     })
     expect(captured.filter((call) => call.label === 'plan:fable')).toHaveLength(1)
@@ -690,7 +690,7 @@ describe('THE ADVERSARIAL SEAT RUNS ON CODEX WITHOUT LOSING ITS CONTRACT', () =>
   }
 
   test('the subprocess receives the adversarial rubric and no Anthropic model is requested', async () => {
-    const { captured } = await runWorkflow(productionArgs(TARGET, { ralph: true }))
+    const { captured } = await runWorkflow(productionArgs(TARGET, { execution_strategy: 'task_sequence' }))
     const seat = captured.find((c) => c.label === 'argus:adversarial')!
     expect(seat.prompt).toContain("CODEX_REVIEW_MODEL='gpt-5.6-terra'")
     expect(seat.prompt).toContain('NEUTRON_CODEX_REVIEW_RUBRIC=')
@@ -715,7 +715,7 @@ describe('THE ADVERSARIAL SEAT RUNS ON CODEX WITHOUT LOSING ITS CONTRACT', () =>
   })
 
   test('a deferred codex adversarial core seat cannot yield APPROVE', async () => {
-    const { result } = await runWorkflow(productionArgs(TARGET, { ralph: true }), {
+    const { result } = await runWorkflow(productionArgs(TARGET, { execution_strategy: 'task_sequence' }), {
       deferredAdversarial: true,
     })
     expect(result['verdict']).toBe('REQUEST_CHANGES')
@@ -1254,15 +1254,15 @@ describe('THE BUILD RUNS ON CODEX — no Anthropic model is requested for the ph
     })).toBe('genuine')
   })
 
-  test('a Ralph task tagged [mechanical] goes to codex too — one row, both build phases', async () => {
+  test('a Task sequence task tagged [mechanical] goes to codex too — one row, both build phases', async () => {
     // THE SECOND BUILD PHASE. `modelForTag` splits the forge dispatch by the planner's
-    // complexity tag, so a Ralph iteration tagged `mechanical` resolves the separate
+    // complexity tag, so a Task sequence iteration tagged `mechanical` resolves the separate
     // `build_mechanical` phase key — which the owner never sees and never sets. Read
     // literally, that key has no override, so it kept dispatching Sonnet on Anthropic
     // for exactly the tasks a codex build was moved off Claude to cover.
-    const ralphArgs = productionArgs(CODEX_BUILD, { ralph: true })
-    expect(ralphArgs['ralph']).toBe(true)
-    const { captured } = await runWorkflow(ralphArgs, { complexity: 'mechanical' })
+    const taskSequenceArgs = productionArgs(CODEX_BUILD, { execution_strategy: 'task_sequence' })
+    expect(taskSequenceArgs['executionStrategy']).toBe('task_sequence')
+    const { captured } = await runWorkflow(taskSequenceArgs, { complexity: 'mechanical' })
     const build = captured.find((c) => c.label === 'forge:build')!
     expect(build.prompt).toContain(`bash '${CODEX_BUILD_SCRIPT_PATH}'`)
     expect(build.prompt).toContain("CODEX_BUILD_MODEL='gpt-5.6-terra'")
@@ -1270,15 +1270,15 @@ describe('THE BUILD RUNS ON CODEX — no Anthropic model is requested for the ph
     // …and the run SAYS the owner's setting reached this phase. A mirrored override
     // that logged `phase=build_mechanical` with no `override=owner` would leave the
     // one honest answer to "did my setting take effect?" reading like a no.
-    const { logs } = await runWorkflow(ralphArgs, { complexity: 'mechanical' })
+    const { logs } = await runWorkflow(taskSequenceArgs, { complexity: 'mechanical' })
     expect(
       logs.some((l) => l.includes('phase=build_mechanical') && l.includes('override=owner')),
     ).toBe(true)
 
-    // THE CONTROL, on the same ralph+mechanical path: with no override the very same
+    // THE CONTROL, on the same task-sequence+mechanical path: with no override the very same
     // dispatch carries Sonnet, so the assertions above are caused by the mirroring
     // and not by a mechanical route that never ran.
-    const plain = await runWorkflow(productionArgs(null, { ralph: true }), {
+    const plain = await runWorkflow(productionArgs(null, { execution_strategy: 'task_sequence' }), {
       complexity: 'mechanical',
     })
     expect(plain.captured.find((c) => c.label === 'forge:build')!.opts['model']).toBe(SONNET_MODEL)
@@ -1305,7 +1305,7 @@ describe('THE BUILD RUNS ON CODEX — no Anthropic model is requested for the ph
     // validation — the workflow ignores it and mirrors `build`.
     const { captured } = await runWorkflow(
       {
-        ...productionArgs({ build: { model: 'terra' } }, { ralph: true }),
+        ...productionArgs({ build: { model: 'terra' } }, { execution_strategy: 'task_sequence' }),
         phaseModels: { build: { model: 'terra' }, build_mechanical: { model: 'sonnet', effort: 'low' } },
       },
       { complexity: 'mechanical' },
@@ -1320,7 +1320,7 @@ describe('THE BUILD RUNS ON CODEX — no Anthropic model is requested for the ph
     })
     // The CONTROL that keeps the assertion honest: SONNET_MODEL is what this dispatch
     // carries when nothing moved it, so "no Anthropic model" above is a real absence.
-    const plain = await runWorkflow(productionArgs(null, { ralph: true }), {
+    const plain = await runWorkflow(productionArgs(null, { execution_strategy: 'task_sequence' }), {
       complexity: 'mechanical',
     })
     expect(plain.captured.find((c) => c.label === 'forge:build')!.opts['model']).toBe(SONNET_MODEL)
@@ -1590,25 +1590,25 @@ describe('THE BUILD RUNS ON CODEX — no Anthropic model is requested for the ph
     )
   })
 
-  test('a Ralph task that built nothing RE-FIRES the next task instead of aborting', async () => {
-    // THE GATE GUARDS THE REVIEW PANEL, and an intermediate Ralph task opens none. A
+  test('a Task sequence task that built nothing RE-FIRES the next task instead of aborting', async () => {
+    // THE GATE GUARDS THE REVIEW PANEL, and an intermediate Task sequence task opens none. A
     // single task the planner turned into a no-op must not kill a multi-task run: the
     // outer loop re-fires the next task, and the FINAL task still passes through the
     // gate before any reviewer is paid. Placing the check ahead of the re-fire made
     // one empty task abort everything.
     const { captured, result } = await runWorkflow(
-      productionArgs(CODEX_BUILD, { ralph: true }),
+      productionArgs(CODEX_BUILD, { execution_strategy: 'task_sequence' }),
       { buildProduces: { commitSha: '', diffFile: '' }, remainingTasks: 2 },
     )
     expect(result['ok']).toBe(true)
-    expect(result['checkpoint']).toBe('ralph-task-built')
+    expect(result['checkpoint']).toBe('task-built')
     expect(result['remainingTasks']).toBe(2)
     // No panel was opened for the empty intermediate — the budget is still unspent.
     expect(captured.filter((c) => String(c.label).startsWith('argus:'))).toEqual([])
 
     // THE CONTROL: the LAST task (nothing remaining) with the same emptiness still
     // stops the run, so this is the re-fire path and not a hole in the gate.
-    const last = await runWorkflow(productionArgs(CODEX_BUILD, { ralph: true }), {
+    const last = await runWorkflow(productionArgs(CODEX_BUILD, { execution_strategy: 'task_sequence' }), {
       buildProduces: { commitSha: '', diffFile: '' },
       remainingTasks: 0,
     })

@@ -9,7 +9,7 @@ const base = {
   task: 'add a reactions feature',
   branch: 'feat/reactions',
   pr: 26,
-  ralph: false,
+  execution_strategy: 'single' as const,
   chat_id: 'chat',
   thread_id: 'thread',
 }
@@ -24,9 +24,9 @@ test('a done trident run maps to a skill-worthy multi-step workflow', () => {
   expect(auditWorkflow(wf).worthy).toBe(true)
 })
 
-test('ralph mode swaps the build step', () => {
-  const wf = completedWorkflowFromTridentRun({ ...base, ralph: true })
-  expect(wf.steps.map((s) => s.action)).toContain('trident.ralph-task')
+test('task-sequence strategy swaps the build step', () => {
+  const wf = completedWorkflowFromTridentRun({ ...base, execution_strategy: 'task_sequence' })
+  expect(wf.steps.map((s) => s.action)).toContain('trident.task-build')
 })
 
 test('a non-done run is not marked succeeded', () => {

@@ -20,16 +20,19 @@ rather than re-arguing or re-dating a decision. Other docs reference a decision
 by date, never restate it. The Decisions Log is immutable — entries are never
 removed or rewritten; a superseded decision stays with a "superseded" note.
 
-**This is a governed repo** under the Spec-Drift Guardrails convention: it has a
-root `SPEC.md`. trident's `detectRalphMode` (`trident/git-mode.ts`) keys off a
-root `SPEC.md` in the git root of the repo BEING BUILT — so a trident `/code`
-build whose workspace is a checkout of THIS tree runs the Ralph plan↔task loop,
-diffing this spec against the code. It does NOT auto-govern an arbitrary
-user-project `/code`: those resolve a fresh `<home>/Projects/<slug>/code` build
-workspace (git-init + empty commit, no `SPEC.md`), so they stay on the legacy
-single-context build. This file governs trident builds against this checkout,
-not every production `/code`. Agents READ this spec and diff it against the
-code. **Ownership is split, and the split is the rule:** the owner owns the
+**This is a governed repo** under the Spec-Drift Guardrails convention: its root
+`SPEC.md` governs builds against this checkout. Agents read it and compare its
+requirements with the code. Governance is authoritative context, independent
+of execution grouping. Every fresh implementation build begins with planning
+pending; the existing initial planner proposes `single` or `task_sequence`, a
+rationale, and an executable plan. The host validates and persists the decision
+before dispatching the builder. `single` completes the whole accepted plan in
+one builder call; `task_sequence` completes one host-selected task per call.
+Either strategy can be selected with or without `SPEC.md`; unavailable or invalid
+selection blocks or remains unknown. Recovery retains the selection and spent
+card budget. Wave members and bound reviews remain explicit host modes
+(Decisions Log 2026-09-23, planner-selected execution strategy).
+**Ownership is split, and the split is the rule:** the owner owns the
 Decisions Log and the architecture body — agents never rewrite those. Agents
 MAINTAIN the work queue at `docs/spec-items/` (add, correct, reprioritise, close),
 which is why it is no longer inside this file (Decisions Log 2026-09-12). An
@@ -45,7 +48,7 @@ before use (Decisions Log 2026-09-14, #742).
 | Concern | Doc |
 |---|---|
 | Decisions + architecture + roadmap (this file) | `/SPEC.md` |
-| Current build queue (agent-regenerated on demand, disposable; may be absent when idle) | `/IMPLEMENTATION_PLAN.md` |
+| Accepted build plan and continuation ledger (owned by one branch) | Run decision and `.trident/ledgers/<branch>.md` |
 | **The work queue — one file per specified, buildable item** | **`docs/spec-items/`** (index: `docs/spec-items/README.md`) |
 | How work is captured, specified, built and recorded | `docs/process/work-tracking.md` (the binding standard) |
 | Chronological build log (frozen 2026-09-12; one file per change after it) | `docs/AS_BUILT.md`, then `docs/as-built/` |
@@ -309,6 +312,28 @@ references decisions by date; none is a second home for a decision.
 | `docs/plans/*` | Per-sprint mechanics briefs (referenced from `docs/spec-items/`) |
 
 ## Decisions Log (immutable audit trail — NOT the build spec)
+
+### 2026-09-23 — The initial planner selects a persisted execution strategy (#1216).
+
+Owner-directed: active build terminology is `single` and `task_sequence`.
+The existing initial planner proposes the strategy, rationale, and executable
+plan for every fresh implementation build. The host validates and persists that
+selection before any builder dispatch. `SPEC.md` remains authoritative
+governance context; its presence never chooses execution grouping. Invalid or
+unavailable selection blocks or remains unknown, without a permissive default.
+The host owns task identities, card budgets, recovery, test scope, review,
+mutation proof, publication, and merge. Retry and bounded replanning retain the
+persisted selection and cannot reset spend. Wave and bound-review remain
+explicit host modes, and model, effort, and substrate routing are unchanged.
+
+This supersedes filesystem-based selection described in the 2026-07-16 entry
+and the active Ralph terminology in the 2026-07-17 and earlier 2026-09-23
+entries. Historical names remain immutable provenance: stored legacy `ralph=1`
+means `task_sequence`, and `ralph=0` means `single`. Existing active runs are
+translated from that stored evidence without probing the filesystem again.
+The UI shows `Planning pending`, then `Round R` for `single` or
+`Task N/M · Round R` for `task_sequence`. The acceptance contract is
+[`planner-selected-execution-strategy`](docs/spec-items/planner-selected-execution-strategy.md).
 
 ### 2026-09-23 — Name task progress and review rounds explicitly (#516).
 

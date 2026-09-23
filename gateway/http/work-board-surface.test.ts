@@ -192,7 +192,7 @@ describe('work-board HTTP surface — trident run integration (items 1 + 3)', ()
       // A run bound to a proj1 item carries project_slug=proj1 (dispatch keys the
       // run on the same scope), so the run-progress cross-scope guard passes.
       'run-1': fakeRun({ id: 'run-1', project_slug: SCOPE, phase: 'forge-init', inner_checkpoint: 'forge-done', pr: 9,
-        ralph: true, ralph_round: 9, ralph_task_total: 15, max_ralph_rounds: 80 }),
+        execution_strategy: 'task_sequence', task_iteration: 9, task_total: 15, max_task_iterations: 80 }),
     })
     const s = createWorkBoardSurface({ store, auth, trident_runs: access })
     const res = await s.handler(req('GET', '/api/app/projects/proj1/work-board'))
@@ -202,7 +202,10 @@ describe('work-board HTTP surface — trident run integration (items 1 + 3)', ()
     const row = body.items.find((i) => i.id === item.id)
     expect(row?.run_progress?.phase_label).toBe('reviewing')
     expect(row?.run_progress?.pr).toBe(9)
-    expect(row?.run_progress).toMatchObject({ task_number: 10, task_total: 15, round: 1 })
+    expect(row?.run_progress).toMatchObject({
+      execution_strategy: 'task_sequence', task_iteration: 9,
+      task_number: 10, task_total: 15, round: 1,
+    })
   })
 
   test('GET composes run_progress.pr_url from the shared repo-web-url peek', async () => {

@@ -1,11 +1,11 @@
 /**
- * RALPH RE-FIRE (#362) — AS-BUILT behavioral coverage of the inner loop's
+ * TASK SEQUENCE RE-FIRE (#362) — AS-BUILT behavioral coverage of the inner loop's
  * one-task-per-fresh-context emit, executed over the REAL `inner-workflow.mjs`
  * body (not a parallel re-implementation).
  *
- * The bug: a multi-task Ralph build shipped after ONLY task 1 — the inner loop
+ * The bug: a multi-task Task sequence build shipped after ONLY task 1 — the inner loop
  * built `plan.topTask`, logged `plan.remainingTasks`, and then went straight to
- * review→merge, never consuming the remaining count. The fix: in Ralph mode with
+ * review→merge, never consuming the remaining count. The fix: in Task sequence mode with
  * tasks still remaining after the one it builds, the iteration SKIPS review and
  * returns a typed intermediate result carrying `remainingTasks` so the OUTER loop
  * re-fires a fresh iteration for the next task; only the FINAL task (remaining 0)
@@ -25,7 +25,7 @@ import { fileURLToPath } from 'node:url'
 
 const SRC = readFileSync(fileURLToPath(new URL('./inner-workflow.mjs', import.meta.url)), 'utf8')
 
-interface RalphRun {
+interface TaskSequenceRun {
   labels: string[]
   result: {
     ok: boolean
@@ -37,9 +37,9 @@ interface RalphRun {
   }
 }
 
-/** Drive the REAL inner-workflow body in Ralph mode with a plan that reports
+/** Drive the REAL inner-workflow body in Task sequence mode with a plan that reports
  *  `remainingTasks` tasks still unchecked after the one this iteration builds. */
-async function runRalph(remainingTasks: number): Promise<RalphRun> {
+async function runTaskSequence(remainingTasks: number): Promise<TaskSequenceRun> {
   const labels: string[] = []
 
   const agent = async (_prompt: string, opts?: { label?: string }): Promise<unknown> => {
@@ -58,8 +58,8 @@ async function runRalph(remainingTasks: number): Promise<RalphRun> {
     if (label === 'forge:build' || String(label).startsWith('forge:fix-round-')) {
       return {
         prNumber: null,
-        branch: 'trident/ralph-run',
-        diffFile: '/tmp/ralph.diff',
+        branch: 'trident/task-sequence-run',
+        diffFile: '/tmp/task-sequence.diff',
         worktreePath: '/wt',
         commitSha: 'abc123',
         testsPassed: true,
@@ -81,9 +81,9 @@ async function runRalph(remainingTasks: number): Promise<RalphRun> {
     repoPath: '/repo',
     task: 'Ship the multi-task feature',
     baseBranch: 'main',
-    slug: 'ralph-run',
+    slug: 'task-sequence-run',
     maxRounds: 3,
-    ralph: true, // ← Ralph mode
+    executionStrategy: 'task_sequence', // ← Task sequence mode
     mergeMode: 'local',
     prNumber: null,
     branch: null,
@@ -101,13 +101,13 @@ async function runRalph(remainingTasks: number): Promise<RalphRun> {
     ...args: string[]
   ) => (...a: unknown[]) => Promise<unknown>
   const fn = AsyncFunction('agent', 'parallel', 'phase', 'log', 'budget', 'args', body)
-  const result = (await fn(agent, parallel, phase, log, budget, args)) as RalphRun['result']
+  const result = (await fn(agent, parallel, phase, log, budget, args)) as TaskSequenceRun['result']
   return { labels, result }
 }
 
-describe('inner-workflow.mjs — Ralph re-fire emit (#362, executed over the real body)', () => {
+describe('inner-workflow.mjs — Task sequence re-fire emit (#362, executed over the real body)', () => {
   test('tasks remain (2) → build ONE task, SKIP review, return an intermediate re-fire result', async () => {
-    const { labels, result } = await runRalph(2)
+    const { labels, result } = await runTaskSequence(2)
 
     // It planned + built exactly one task.
     expect(labels).toContain('plan:fable')
@@ -119,7 +119,7 @@ describe('inner-workflow.mjs — Ralph re-fire emit (#362, executed over the rea
 
     // The typed result is the outer loop's re-fire signal.
     expect(result.remainingTasks).toBe(2)
-    expect(result.checkpoint).toBe('ralph-task-built')
+    expect(result.checkpoint).toBe('task-built')
     // NOT 'argus-approved' — the outer merge provenance gate can never fire on an
     // unreviewed intermediate.
     expect(result.verdict).not.toBe('APPROVE')
@@ -127,7 +127,7 @@ describe('inner-workflow.mjs — Ralph re-fire emit (#362, executed over the rea
   })
 
   test('final task (0 remain) → review runs and the iteration returns an APPROVE terminal result', async () => {
-    const { labels, result } = await runRalph(0)
+    const { labels, result } = await runTaskSequence(0)
 
     // The final iteration reviews the cumulative diff before merge.
     expect(labels).toContain('plan:fable')

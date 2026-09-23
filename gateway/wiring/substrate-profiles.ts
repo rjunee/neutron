@@ -453,7 +453,7 @@ export const PROFILE_ARBITER: SubstrateProfile = {
  * `[Request interrupted by user]` at 23:19:21, and `repl-respawn ...
  * cc-trident-fire-juno ... session=77fa6d70` is logged 8 seconds later. No
  * checkpoint reached, no PR opened, no parseable result — surfacing to the owner
- * as "terminal result missing/garbled". Ralph mode's FIRST step is the most
+ * as "terminal result missing/garbled". Task sequence mode's FIRST step is the most
  * expensive one in the pipeline, so the bigger the plan the more certainly it
  * died: the build could essentially never succeed.
  *

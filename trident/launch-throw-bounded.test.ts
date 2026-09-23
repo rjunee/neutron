@@ -56,9 +56,9 @@ function orchestrator(control: LaunchControl, crashRecovery = false) {
 async function seedRun(id: string): Promise<TridentRun> {
   await store.create({ id, slug: id, project_slug: 'p', repo_path: '/repo', task: 'build' })
   await store.update(id, {
-    phase: 'ralph-task',
+    phase: 'task-build',
     branch: 'trident/work-survives',
-    inner_checkpoint: 'ralph-task-built',
+    inner_checkpoint: 'task-built',
   })
   return store.get(id)!
 }
@@ -84,13 +84,13 @@ describe('launch throws are visible and bounded', () => {
     expect(third.run.failure_reason).toContain('not retrying')
     expect(third.run.failure_reason ?? '').not.toMatch(/exhausted/)
     expect(third.run.branch).toBe('trident/work-survives')
-    expect(third.run.inner_checkpoint).toBe('ralph-task-built')
+    expect(third.run.inner_checkpoint).toBe('task-built')
 
     expect(await store.saveIfActive(third.run)).toBe(true)
     expect(store.get(run.id)).toMatchObject({
       phase: 'failed',
       branch: 'trident/work-survives',
-      inner_checkpoint: 'ralph-task-built',
+      inner_checkpoint: 'task-built',
     })
   })
 

@@ -9,7 +9,7 @@
  *
  * ─────────────────────────────────────────────────────────────────────
  * SCOPE — PR-2 lands the SKELETON: the phase enum, the transition graph,
- * the round / ralph-round caps, and terminal handling. The two seams the
+ * the round / task-sequence-round caps, and terminal handling. The two seams the
  * graph hangs off of are PR-3 and PR-4:
  *
  *   • PR-3 (Forge/Argus spawning) — owns `deps.classify`: reading the
@@ -19,8 +19,8 @@
  *     ships `stubAdvanceDeps`, whose `classify` always reports `running`,
  *     so the loop is wired + restart-safe but never advances on its own.
  *
- *   • PR-4 (Ralph) — the `forge-init → ralph-plan → ralph-task` cycle is
- *     fully wired HERE (the transition graph + the `max_ralph_rounds`
+ *   • PR-4 (Task sequence) — the `forge-init → task-plan → task-build` cycle is
+ *     fully wired HERE (the transition graph + the `max_task_iterations`
  *     cap), but the planner / one-task Forge spawns those phases drive
  *     are PR-4's job via the same `deps.classify` seam.
  *
@@ -30,18 +30,18 @@
  * SHIPPED-ARCHITECTURE NOTE (Trident v2 exec-model): production no longer
  * drives this per-phase graph for the inner loop. The live Forge→Argus→fix
  * loop is one native CC Dynamic Workflow (`inner-workflow.mjs`), and the
- * Ralph plan→task→repeat cycle (`ralph-plan`/`ralph-task` below) is driven
+ * Task sequence plan→task→repeat cycle (`task-plan`/`task-build` below) is driven
  * by the OUTER `orchestrator.ts` via the `remaining_tasks` re-fire
- * (`refireNextRalphTask`, #362) — NOT by `computeTransition`. This module is
+ * (`refireNextTaskSequenceTask`, #362) — NOT by `computeTransition`. This module is
  * RETAINED for: the `stubAdvanceDeps` restart-safe no-op fallback (wired when
  * the exec-model orchestrator is absent), one-commit revertibility, and its
  * role as the executable cross-repo parity anchor for the legacy harness's `/trident` skill
- * loop (`legacy-fixes.test.ts`). Its `ralph-plan`/`ralph-task`/`forge-fix`
+ * loop (`legacy-fixes.test.ts`). Its `task-plan`/`task-build`/`forge-fix`
  * branches are therefore not reached in the shipped exec-model path.
  * ─────────────────────────────────────────────────────────────────────
  */
 
-import { ralphCapFailureReason } from './ralph-budget.ts'
+import { taskCapFailureReason } from './task-budget.ts'
 import type { TridentPhase, TridentRun, WorkflowColumnsSeen } from './store.ts'
 
 /** The phases the loop never advances out of. */
@@ -55,13 +55,13 @@ export function isTerminalPhase(phase: TridentPhase): boolean {
  * The parsed result of a COMPLETED sub-agent, produced by `deps.classify`
  * (PR-3). Which fields are meaningful depends on the phase that completed:
  *
- *   • forge-init / ralph-plan → `remaining`: count of unchecked tasks in
+ *   • forge-init / task-plan → `remaining`: count of unchecked tasks in
  *     IMPLEMENTATION_PLAN.md. `null`/`undefined` from a LEGACY one-shot
- *     forge-init (no Ralph) is fine — it routes straight to Argus. But a
- *     `null`/`undefined` from a RALPH bootstrap or a planner is a hard
+ *     forge-init (no Task sequence) is fine — it routes straight to Argus. But a
+ *     `null`/`undefined` from a TASK SEQUENCE bootstrap or a planner is a hard
  *     fail (the skill's "missing REMAINING_TASKS fails loudly" rule):
  *     reviewing a partial governed build as if it were done is the exact
- *     danger the Ralph loop exists to prevent.
+ *     danger the Task sequence loop exists to prevent.
  *
  *   • argus → `approved`: true for APPROVE, false for REQUEST CHANGES.
  */
@@ -109,7 +109,7 @@ export interface AdvanceOutcome {
 
 /**
  * Pure transition: given a run + its completed sub-agent's result, compute
- * the next phase + round/ralph-round counters + any failure reason. NO I/O.
+ * the next phase + round/task-sequence-round counters + any failure reason. NO I/O.
  * Exported for direct unit testing of the control flow.
  *
  * Precondition: `run.phase` is non-terminal (the caller short-circuits
@@ -118,56 +118,64 @@ export interface AdvanceOutcome {
 export function computeTransition(
   run: TridentRun,
   result: PhaseResult,
-): { phase: TridentPhase; round: number; ralph_round: number; failure_reason: string | null; note: string } {
-  const keep = { round: run.round, ralph_round: run.ralph_round, failure_reason: null as string | null }
+): { phase: TridentPhase; round: number; task_iteration: number; failure_reason: string | null; note: string } {
+  const keep = { round: run.round, task_iteration: run.task_iteration, failure_reason: null as string | null }
 
   switch (run.phase) {
     case 'forge-init': {
-      // Legacy single-context build (no Ralph) → straight to review.
-      if (!run.ralph) {
+      if (run.execution_strategy === null) {
+        return {
+          phase: 'failed',
+          round: run.round,
+          task_iteration: run.task_iteration,
+          failure_reason: 'execution strategy is still pending',
+          note: 'forge-init → failed (execution strategy pending)',
+        }
+      }
+      if (run.execution_strategy === 'single') {
         return { phase: 'argus', ...keep, note: 'forge-init → argus (one-shot build)' }
       }
       const remaining = result.remaining
       if (remaining === null || remaining === undefined) {
-        // Skill rule: a Ralph bootstrap that omits REMAINING_TASKS fails
+        // Skill rule: a Task sequence bootstrap that omits REMAINING_TASKS fails
         // loudly — never fall through to reviewing a partial governed build.
         return {
           phase: 'failed',
           round: run.round,
-          ralph_round: run.ralph_round,
-          failure_reason: 'ralph bootstrap emitted no valid REMAINING_TASKS',
+          task_iteration: run.task_iteration,
+          failure_reason: 'task-sequence bootstrap emitted no valid REMAINING_TASKS',
           note: 'forge-init → failed (missing REMAINING_TASKS)',
         }
       }
       if (remaining <= 0) {
-        return { phase: 'argus', ...keep, note: 'forge-init → argus (ralph build complete)' }
+        return { phase: 'argus', ...keep, note: 'forge-init → argus (task sequence complete)' }
       }
-      return enterRalphPlan(run, `forge-init → ralph-plan (${remaining} task(s) remain)`)
+      return enterTaskPlan(run, `forge-init → task-plan (${remaining} task(s) remain)`)
     }
 
-    case 'ralph-plan': {
+    case 'task-plan': {
       const remaining = result.remaining
       if (remaining === null || remaining === undefined) {
         return {
           phase: 'failed',
           round: run.round,
-          ralph_round: run.ralph_round,
-          failure_reason: 'ralph planner emitted no valid REMAINING_TASKS',
-          note: 'ralph-plan → failed (missing REMAINING_TASKS)',
+          task_iteration: run.task_iteration,
+          failure_reason: 'task-sequence planner emitted no valid REMAINING_TASKS',
+          note: 'task-plan → failed (missing REMAINING_TASKS)',
         }
       }
       if (remaining <= 0) {
-        return { phase: 'argus', ...keep, note: 'ralph-plan → argus (0 tasks remain)' }
+        return { phase: 'argus', ...keep, note: 'task-plan → argus (0 tasks remain)' }
       }
-      return { phase: 'ralph-task', ...keep, note: `ralph-plan → ralph-task (${remaining} task(s) remain)` }
+      return { phase: 'task-build', ...keep, note: `task-plan → task-build (${remaining} task(s) remain)` }
     }
 
-    case 'ralph-task':
+    case 'task-build':
       // Every task is followed by a fresh planning pass (the active
-      // drift-catch). The ralph-round increment + cap lives in
-      // enterRalphPlan so the loop is bounded from both the task path and
+      // drift-catch). The task-sequence-round increment + cap lives in
+      // enterTaskPlan so the loop is bounded from both the task path and
       // the planner path by the single counter.
-      return enterRalphPlan(run, 'ralph-task → ralph-plan (re-plan after task)')
+      return enterTaskPlan(run, 'task-build → task-plan (re-plan after task)')
 
     case 'argus': {
       if (result.approved === true) {
@@ -178,7 +186,7 @@ export function computeTransition(
         return {
           phase: 'failed',
           round: run.round,
-          ralph_round: run.ralph_round,
+          task_iteration: run.task_iteration,
           failure_reason: `reached max_rounds (${run.max_rounds}) without Argus APPROVE`,
           note: 'argus → failed (max rounds reached)',
         }
@@ -186,7 +194,7 @@ export function computeTransition(
       return {
         phase: 'forge-fix',
         round: nextRound,
-        ralph_round: run.ralph_round,
+        task_iteration: run.task_iteration,
         failure_reason: null,
         note: `argus REQUEST CHANGES → forge-fix (round ${nextRound}/${run.max_rounds})`,
       }
@@ -202,19 +210,19 @@ export function computeTransition(
 }
 
 /**
- * Enter a Ralph planning pass: increment `ralph_round` and enforce the
- * `max_ralph_rounds` cap. This is the SINGLE place the ralph-round
- * counter advances (mirrors the skill's "Spawn a Ralph planner" shared
+ * Enter a Task sequence planning pass: increment `task_iteration` and enforce the
+ * `max_task_iterations` cap. This is the SINGLE place the task-sequence-round
+ * counter advances (mirrors the skill's "Spawn a Task sequence planner" shared
  * block) so a non-converging plan↔task loop fails loudly rather than
  * spinning forever.
  */
-function enterRalphPlan(
+function enterTaskPlan(
   run: TridentRun,
   note: string,
-): { phase: TridentPhase; round: number; ralph_round: number; failure_reason: string | null; note: string } {
-  const nextRalphRound = run.ralph_round + 1
-  if (nextRalphRound > run.max_ralph_rounds) {
-    // THE SENTENCE IS OWNED BY `ralphCapFailureReason` (ralph-budget.ts), NOT WRITTEN
+): { phase: TridentPhase; round: number; task_iteration: number; failure_reason: string | null; note: string } {
+  const nextTaskIteration = run.task_iteration + 1
+  if (nextTaskIteration > run.max_task_iterations) {
+    // THE SENTENCE IS OWNED BY `taskCapFailureReason` (task-sequence-budget.ts), NOT WRITTEN
     // HERE — and this comment is deliberately SHORT because the last four versions of it
     // were not. When the sentence moved to a shared owner, its whole derivation was left
     // behind here and went stale within one round: it still described arm 1 as "this run
@@ -224,20 +232,20 @@ function enterRalphPlan(
     // duplicated rule — it drifts, and it drifts silently because nothing compiles it.
     //
     // What belongs here is the LOCAL fact this function contributes, and nothing else:
-    // the refusal fires iff `ralph_round + 1 > max_ralph_rounds`, so at this point
-    // `ralph_round >= max_ralph_rounds`. Everything about WHICH arm that produces, why
+    // the refusal fires iff `task_iteration + 1 > max_task_iterations`, so at this point
+    // `task_iteration >= max_task_iterations`. Everything about WHICH arm that produces, why
     // there are three and not four, and what each may and may not claim, lives with the
     // function that writes it.
-    const failure_reason = ralphCapFailureReason(run)
+    const failure_reason = taskCapFailureReason(run)
     return {
       phase: 'failed',
       round: run.round,
-      ralph_round: run.ralph_round,
+      task_iteration: run.task_iteration,
       failure_reason,
-      note: 'ralph loop → failed (max ralph rounds reached)',
+      note: 'task sequence → failed (max task iterations reached)',
     }
   }
-  return { phase: 'ralph-plan', round: run.round, ralph_round: nextRalphRound, failure_reason: null, note }
+  return { phase: 'task-plan', round: run.round, task_iteration: nextTaskIteration, failure_reason: null, note }
 }
 
 /**
@@ -282,7 +290,7 @@ export async function advanceTridentRun(
     ...run,
     phase: t.phase,
     round: t.round,
-    ralph_round: t.ralph_round,
+    task_iteration: t.task_iteration,
     failure_reason: t.failure_reason,
     // Live phase → fresh slot for PR-3 to spawn into. Terminal → keep the
     // completing agent's id, mark its status terminal for the audit trail.
@@ -293,7 +301,7 @@ export async function advanceTridentRun(
   const changed =
     next.phase !== run.phase ||
     next.round !== run.round ||
-    next.ralph_round !== run.ralph_round
+    next.task_iteration !== run.task_iteration
   return { run: next, changed, waiting: false, note: t.note }
 }
 

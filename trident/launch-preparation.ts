@@ -89,12 +89,12 @@ export async function prepareLaunch(
           {
             repo_path: run.repo_path,
             branch: run.branch,
-            // Deferred Ralph waves deliberately leave origin stale. These checkpoints
+            // Deferred Task sequence waves deliberately leave origin stale. These checkpoints
             // rebuild regardless of the head; the local match is planner-only, allowing
             // the clean name to open plan:next through cleanContinuation.
             merge_mode:
-              resume_checkpoint === 'ralph-task-built' ||
-              resume_checkpoint === 'ralph-task-built-deviated'
+              resume_checkpoint === 'task-built' ||
+              resume_checkpoint === 'task-built-deviated'
                 ? 'local'
                 : run.merge_mode,
           },
@@ -219,7 +219,7 @@ export async function prepareLaunch(
     existingPr !== null && run.pr === null
       ? { ...seedCheckedRun, pr: existingPr }
       : seedCheckedRun
-  if (resume_live_head === '' && resumeHeadDecides(resume_checkpoint_name, run.ralph)) {
+  if (resume_live_head === '' && resumeHeadDecides(resume_checkpoint_name, run.execution_strategy === 'task_sequence')) {
     const cause = `could not read the head of ${run.branch}; the recorded work is at ${recorded}; re-run when the read succeeds`
     return {
       run: resumeHeadUnreadable(launchRun, cause, resume_checkpoint),

@@ -54,10 +54,13 @@ export interface TridentBoardReconciler {
     pr_info?: {
       pr: number | null
       pr_url: string | null
-      ralph: boolean
-      ralph_round: number
-      max_ralph_rounds: number
-      ralph_task_total?: number | null
+      execution_strategy: 'single' | 'task_sequence' | null
+      strategy_rationale?: string | null
+      strategy_plan?: string | null
+      strategy_source?: 'planner' | 'legacy' | null
+      task_iteration: number
+      max_task_iterations: number
+      task_total?: number | null
     },
   ): Promise<unknown>
 }
@@ -123,10 +126,13 @@ export function buildBoardReconcileObserver(
     await board.detachRun(run.project_slug, run.id, outcome, {
       pr,
       pr_url,
-      ralph: run.ralph,
-      ralph_round: run.ralph_round,
-      max_ralph_rounds: run.max_ralph_rounds,
-      ralph_task_total: run.ralph_task_total,
+      execution_strategy: run.execution_strategy,
+      strategy_rationale: run.strategy_rationale,
+      strategy_plan: run.strategy_plan,
+      strategy_source: run.strategy_source,
+      task_iteration: run.task_iteration,
+      max_task_iterations: run.max_task_iterations,
+      task_total: run.task_total,
     })
   }
 }

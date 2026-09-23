@@ -162,7 +162,7 @@ export function createRecoveryLivenessStep(deps: RecoveryLivenessDependencies) {
       //     `update()`/`saveIfActive` is impossible here by design: their crash veto
       //     refuses non-crashed writes onto a latched row, and that veto stays.
       //
-      //     `round`/`ralph_round` are untouched: a launcher crash is not the agent's
+      //     `round`/`task_iteration` are untouched: a launcher crash is not the agent's
       //     failure. `harvested_at` is never stamped on any recovery path — nothing was
       //     harvested. Unwired (`begin_crash_recovery` absent) → falls through to the
       //     unchanged reap below, byte-stable for legacy callers.

@@ -30,17 +30,18 @@ export interface TridentRunLike {
   task: string
   branch: string | null
   pr: number | null
-  ralph: boolean
+  execution_strategy: 'single' | 'task_sequence' | null
   chat_id: string | null
   thread_id: string | null
 }
 
 /** The procedure a happy-path Trident run executes, as named steps. */
-function tridentSteps(ralph: boolean): WorkflowStep[] {
+function tridentSteps(strategy: TridentRunLike['execution_strategy']): WorkflowStep[] {
+  if (strategy === null) throw new Error('cannot audit a completed Trident workflow with a pending execution strategy')
   const steps: WorkflowStep[] = [
     { action: 'trident.plan', summary: 'plan the change' },
   ]
-  if (ralph) steps.push({ action: 'trident.ralph-task', summary: 'one-task-per-context build loop' })
+  if (strategy === 'task_sequence') steps.push({ action: 'trident.task-build', summary: 'one-task-per-context build loop' })
   else steps.push({ action: 'trident.build', summary: 'implement the change' })
   steps.push({ action: 'trident.argus-review', summary: 'multi-agent code review' })
   steps.push({ action: 'trident.fix', summary: 'apply review findings' })
@@ -61,7 +62,7 @@ export function completedWorkflowFromTridentRun(run: TridentRunLike): CompletedW
   const wf: CompletedWorkflow = {
     project_slug: run.project_slug,
     intent: run.task,
-    steps: tridentSteps(run.ralph),
+    steps: tridentSteps(run.execution_strategy),
     artifacts,
     succeeded: run.phase === 'done',
   }

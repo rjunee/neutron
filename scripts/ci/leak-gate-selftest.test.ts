@@ -272,9 +272,8 @@ describe('G8 leak-gate — planted findings FAIL', () => {
   }, 60_000)
 
   test('RT1: a root SPEC.md is allowed (K10 intentionally introduced one)', () => {
-    // K10 lands a real root `SPEC.md` (the public master spec), which flips the
-    // repo into Ralph-governed mode (`detectRalphMode` keys off a root SPEC.md).
-    // That flip is now INTENDED, so a root SPEC.md must NOT trip forbidden-path.
+    // K10 lands a real root `SPEC.md` as the public master spec, so it must NOT
+    // trip forbidden-path.
     // This test is the inversion of the pre-K10 tripwire, which banned a root
     // SPEC.md; it pins that an otherwise-clean tree WITH a root SPEC.md stays
     // silent. The remaining root files (STATUS.md/ISSUES.md/CLAUDE.md) stay
@@ -317,10 +316,9 @@ describe('G8 leak-gate — planted findings FAIL', () => {
   })
 
   test('RT1: a NON-root SPEC.md is allowed (forbidden-path is root-exact)', () => {
-    // The tripwire bans a *root* SPEC.md only — `detectRalphMode` keys off the
-    // git-root file. A nested `docs/SPEC.md` (or any subdir spec) must NOT trip
-    // the gate, or legitimate spec docs would be un-committable. Pins the
-    // exact-root boundary of the FORBIDDEN_EXACT rule.
+    // A nested `docs/SPEC.md` (or any subdir spec) must NOT trip the gate, or
+    // legitimate spec docs would be un-committable. Pins the exact-root boundary
+    // of the FORBIDDEN_EXACT rule.
     const dir = freshTree()
     try {
       mkdirSync(join(dir, 'docs'))

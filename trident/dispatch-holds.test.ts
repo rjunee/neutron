@@ -85,7 +85,6 @@ function deps(
     repo_path: '/home/owner',
     resolveBuildRepo: async () => REPO,
     resolveMergeMode: async () => 'local',
-    resolveRalph: async () => false,
     holds,
     // An always-alive executor. Present because `buildDispatchHoldSweep` requires
     // it in the type: the sweep re-dispatches UNATTENDED, so it may not be the
@@ -648,7 +647,7 @@ describe('CLEAN CARD UNAFFECTED — no regression to the normal path', () => {
     expect(c.ok).toBe(true)
     if (!c.ok) return
     expect(c.merge_mode).toBe('local')
-    expect(c.ralph).toBe(false)
+    expect(c.execution_strategy).toBeNull()
     expect(c.run.claimed_paths).toEqual(['trident/foo.ts'])
     expect(store.get(c.run.id)?.claimed_paths).toEqual(['trident/foo.ts'])
     expect(board.attached).toEqual([{ id: 'C', run_id: c.run.id }])

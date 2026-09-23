@@ -25,7 +25,7 @@ describe('Open /code stop board binder', () => {
     rmSync(tmp, { recursive: true, force: true })
   })
 
-  test('carries terminal PR and Ralph payload through the production binder', async () => {
+  test('carries terminal PR and task-sequence payload through the production binder', async () => {
     const scope = 'owner'
     const runStore = new TridentRunStore(db)
     const run = await runStore.create({
@@ -33,9 +33,9 @@ describe('Open /code stop board binder', () => {
       project_slug: scope,
       repo_path: '/repo',
       task: 'stop this governed build',
-      ralph: true,
-      ralph_round: 3,
-      max_ralph_rounds: 7,
+      execution_strategy: 'task_sequence',
+      task_iteration: 3,
+      max_task_iterations: 7,
     })
     await runStore.update(run.id, { pr: 784 })
 
@@ -57,7 +57,7 @@ describe('Open /code stop board binder', () => {
     expect(stopped.status).toBe('failed')
     expect(stopped.pr).toBe(784)
     expect(stopped.pr_url).toBeNull()
-    expect(stopped.ralph_round).toBe(3)
-    expect(stopped.max_ralph_rounds).toBe(7)
+    expect(stopped.task_iteration).toBe(3)
+    expect(stopped.max_task_iterations).toBe(7)
   })
 })

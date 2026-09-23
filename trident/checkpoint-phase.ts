@@ -4,13 +4,13 @@
  * WHY THIS EXISTS. `code_trident_runs.phase` was decorative. Measured over every
  * run this database has ever held: `failed` 138, `stopped` 59, `done` 9,
  * `forge-init` 1 — and ZERO rows in any of the four in-flight phases
- * (`ralph-plan`, `ralph-task`, `forge-fix`, `argus`). The column was written once
+ * (`task-plan`, `task-build`, `forge-fix`, `argus`). The column was written once
  * at create (`store.ts` `input.phase ?? 'forge-init'`) and then not again until a
  * terminal write, so for the whole life of a build every raw read of `phase` said
  * "init" — through a 40-minute Forge round, through review, through fix rounds.
  *
  * The information was never missing. The inner workflow stamps `inner_checkpoint`
- * faithfully at every transition (`forge-done`, `ralph-task-built`,
+ * faithfully at every transition (`forge-done`, `task-built`,
  * `argus-request-changes-round-N`, `fix-round-N`, …). It simply never reached the
  * column that names the phase, because the exec-model orchestrator drives the loop
  * and `state-machine.ts`'s per-phase graph — the only thing that ever computed
@@ -72,8 +72,8 @@ export function phaseForCheckpoint(checkpoint: string | null): TridentPhase | nu
     return 'forge-fix'
   }
 
-  // One Ralph task built, the next one is being built.
-  if (checkpoint === 'ralph-task-built') return 'ralph-task'
+  // One Task sequence task built, the next one is being built.
+  if (checkpoint === 'task-built') return 'task-build'
 
   return null
 }

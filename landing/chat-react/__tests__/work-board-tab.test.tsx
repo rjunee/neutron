@@ -253,7 +253,8 @@ describe('WorkBoardTab (happy-dom)', () => {
       phase_label: 'building',
       step_label: 'retrying',
       round: 2,
-      ralph_round: 1,
+      execution_strategy: 'task_sequence',
+      task_iteration: 1,
       task_number: 2,
       task_total: null,
       infra_retries: 2,
@@ -308,7 +309,8 @@ describe('WorkBoardTab (happy-dom)', () => {
           phase_label: 'building',
           step_label: 'building',
           round: 1,
-          ralph_round: 9,
+          execution_strategy: 'task_sequence',
+          task_iteration: 9,
           task_number: 10,
           task_total: 15,
           started_at: '2026-07-02T00:00:00Z',
@@ -333,6 +335,25 @@ describe('WorkBoardTab (happy-dom)', () => {
     expect(container.querySelector('.cwb-run-progress')).toBeNull()
     expect(container.textContent).not.toContain('🔨')
     expect(container.textContent).not.toContain('4m')
+    await act(async () => root.unmount())
+  })
+
+  it('renders planner-pending and single strategies without inventing task progress', async () => {
+    const base = {
+      run_id: 'run_strategy', phase_label: 'planning' as const, step_label: 'building' as const,
+      round: 3, task_iteration: 0, task_number: null, task_total: null,
+      started_at: '2026-07-02T00:00:00Z', last_advanced_at: '2026-07-02T00:01:00Z',
+      elapsed_ms: 60_000, stalled: false, stalled_ms: null, pr: null, pr_url: null,
+      verdict: null, failure_reason: null,
+    }
+    const rows = [
+      item({ id: 'pending', linked_run_id: 'pending', run_progress: { ...base, run_id: 'pending', execution_strategy: null } }),
+      item({ id: 'single', linked_run_id: 'single', run_progress: { ...base, run_id: 'single', execution_strategy: 'single' } }),
+    ]
+    const { container, root, act } = await mount(listOf(rows))
+    expect(Array.from(container.querySelectorAll('.cwb-round')).map(node => node.textContent)).toEqual([
+      'Planning pending', 'Round 3',
+    ])
     await act(async () => root.unmount())
   })
 
@@ -408,7 +429,7 @@ describe('WorkBoardTab (happy-dom)', () => {
   it("states a retry's resume decision on the live card, and a failure still wins", async () => {
     // RED-mutation: drop the resume-note branch from `runNotice` → the retry that
     // inherited nothing renders exactly like a first dispatch.
-    const note = "Not resumed: the branch moved off the last run's commit, so this is a fresh build; Ralph round 4/8 carried."
+    const note = "Not resumed: the branch moved off the last run's commit, so this is a fresh build; Task iteration 4/8 carried."
     const progress = (over: Record<string, unknown>) => ({
       run_id: 'run_note',
       phase_label: 'building' as const,
@@ -435,7 +456,7 @@ describe('WorkBoardTab (happy-dom)', () => {
     await live.act(async () => live.root.unmount())
 
     // A CARRIED checkpoint is informational, never styled as an alert.
-    const carried = 'Dispatched to resume from ralph-task-built at abc1234 (rebuilds if the branch moves before launch); Ralph round 2/20 carried.'
+    const carried = 'Dispatched to resume from task-built at abc1234 (rebuilds if the branch moves before launch); Task iteration 2/20 carried.'
     const resumed = await mount(listOf([
       item({ id: 'resumed', title: 'Retried build', status: 'in_progress', linked_run_id: 'run_note',
         run_progress: progress({ resume_note: carried }) }),

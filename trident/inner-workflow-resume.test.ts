@@ -16,11 +16,11 @@
  * a "resume" that silently re-runs everything is the old behaviour wearing a new
  * name and would pass a naive "it returned APPROVE" test.
  *
- * Harness identical in spirit to `inner-workflow-ralph-refire.test.ts`: read the
+ * Harness identical in spirit to `inner-workflow-task-sequence-refire.test.ts`: read the
  * un-importable script (top-level `return` + Workflow-runtime globals), strip the
  * single `export`, and run the body as an AsyncFunction with MOCKED runtime globals
  * that RECORD every `agent()` label and prompt. `dbPath`/`runId` ARE threaded here
- * (unlike the ralph harness) so the checkpoint steps issue their agent() call and
+ * (unlike the task-sequence harness) so the checkpoint steps issue their agent() call and
  * this suite can read the exact command they would run — nothing executes it, so no
  * database is touched.
  */
@@ -117,7 +117,7 @@ interface ResumeOpts {
   maxRounds?: number
   /** Bytes the resume-diff step reports writing. 0 → it could not produce one. */
   diffBytes?: number
-  ralph?: boolean
+  executionStrategy?: 'single' | 'task_sequence'
   /** The rendered TEST EXECUTION block. Omitted → '' (a launcher that derives none),
    *  which is the arming condition for the full-suite gate. */
   testStrategy?: string
@@ -258,7 +258,7 @@ async function runResume(opts: ResumeOpts): Promise<RunOut> {
     baseBranch: 'main',
     slug: 'resume-run',
     maxRounds: opts.maxRounds ?? 10,
-    ralph: opts.ralph === true,
+    executionStrategy: opts.executionStrategy ?? 'single',
     // local mode keeps the panel to claude+adversarial+synthesis (no CI probe, no
     // cross-model seats) — the resume decision is git-mode independent. `pr: true`
     // switches to the mode where CI EXISTS, which is the only place a CI property can
@@ -699,11 +699,11 @@ describe('mid-loop resume — every "could not tell" answer re-reviews', () => {
     expect(out.labels.slice(0, firstReview).some((l) => l.startsWith('forge:fix-round-'))).toBe(false)
   })
 
-  test("'ralph-task-built' + unchanged head → rebuild, because the NEXT task is still unbuilt", async () => {
+  test("'task-built' + unchanged head → rebuild, because the NEXT task is still unbuilt", async () => {
     const out = await runResume({
-      checkpoint: 'ralph-task-built',
+      checkpoint: 'task-built',
       recordedHead: RECORDED,
-      ralph: true,
+      executionStrategy: 'task_sequence',
     })
     expect(out.labels).toContain('plan:fable')
     expect(built(out.labels)).toBe(true)
@@ -796,7 +796,7 @@ describe('classifyResume — the boundaries, executed', () => {
     expect(source).toContain('fix-round-')
     // …and from the head-unchanged half, which now lives in its own function.
     expect(source).toContain("reason: 'unknown-checkpoint'")
-    expect(source).toContain("reason: 'ralph-progress-unknown'")
+    expect(source).toContain("reason: 'task-progress-unknown'")
     expect(source.length).toBeGreaterThan(500)
   })
 
@@ -807,7 +807,7 @@ describe('classifyResume — the boundaries, executed', () => {
       recordedHead: unknown
       currentHead: unknown
       hasFindings: boolean
-      ralph?: boolean
+      taskSequence?: boolean
     }) => { mode: string; reason: string }
     parseResumeRound: (n: unknown, roundCap: number) => number
   }
@@ -849,42 +849,42 @@ describe('classifyResume — the boundaries, executed', () => {
         recordedHead: RECORDED,
         currentHead: RECORDED,
         hasFindings: false,
-        ralph: true,
+        taskSequence: true,
       }),
-    ).toEqual({ mode: 'rebuild', reason: 'ralph-progress-unknown' })
+    ).toEqual({ mode: 'rebuild', reason: 'task-progress-unknown' })
   })
 
   /**
    * THE BOUNDED STOP MUST NOT PRE-EMPT A DECISION THE HEAD NEVER PARTICIPATES IN
-   * (Argus r5). Two dispositions are `rebuild` on EVERY head — a ralph `forge-done`
-   * and any unrecognised name, `ralph-task-built` above all. Ordering the `''` check
+   * (Argus r5). Two dispositions are `rebuild` on EVERY head — a task-sequence `forge-done`
+   * and any unrecognised name, `task-built` above all. Ordering the `''` check
    * in front of them made a transient read failure convert a rebuild that was going
    * to happen anyway into a TERMINAL stop: one `ls-remote` blip would have killed
-   * every resuming ralph re-fire, which is a strictly worse outcome than the one this
+   * every resuming task-sequence re-fire, which is a strictly worse outcome than the one this
    * card set out to remove.
    */
   test('an unreadable head does NOT stop a checkpoint that rebuilds on every head', () => {
-    // `ralph-task-built` — the checkpoint the ralph re-fire path writes.
-    expect(at('ralph-task-built', RECORDED, '')).toEqual({
+    // `task-built` — the checkpoint the task-sequence re-fire path writes.
+    expect(at('task-built', RECORDED, '')).toEqual({
       mode: 'rebuild',
       reason: 'unknown-checkpoint',
     })
     // …and the same answer on every OTHER head, which is what makes it head-independent.
-    expect(at('ralph-task-built', RECORDED, RECORDED).mode).toBe('rebuild')
-    expect(at('ralph-task-built', RECORDED, MOVED).mode).toBe('rebuild')
-    expect(at('ralph-task-built', RECORDED, 'absent').mode).toBe('rebuild')
-    // `forge-done` in ralph mode: built one task, progress unknown → rebuild regardless.
-    const ralphAt = (currentHead: unknown): { mode: string; reason: string } =>
+    expect(at('task-built', RECORDED, RECORDED).mode).toBe('rebuild')
+    expect(at('task-built', RECORDED, MOVED).mode).toBe('rebuild')
+    expect(at('task-built', RECORDED, 'absent').mode).toBe('rebuild')
+    // `forge-done` in task-sequence mode: built one task, progress unknown → rebuild regardless.
+    const taskSequenceAt = (currentHead: unknown): { mode: string; reason: string } =>
       fns.classifyResume({
         checkpoint: 'forge-done',
         recordedHead: RECORDED,
         currentHead,
         hasFindings: false,
-        ralph: true,
+        taskSequence: true,
       })
-    expect(ralphAt('')).toEqual({ mode: 'rebuild', reason: 'ralph-progress-unknown' })
-    expect(ralphAt(RECORDED).mode).toBe('rebuild')
-    expect(ralphAt(MOVED).mode).toBe('rebuild')
+    expect(taskSequenceAt('')).toEqual({ mode: 'rebuild', reason: 'task-progress-unknown' })
+    expect(taskSequenceAt(RECORDED).mode).toBe('rebuild')
+    expect(taskSequenceAt(MOVED).mode).toBe('rebuild')
     // NEGATIVE CONTROL — the head-DEPENDENT names still stop, or the exemption above
     // would have quietly deleted the bounded stop entirely.
     expect(at('forge-done', RECORDED, '')).toEqual({ mode: 'stop', reason: 'head-unreadable' })
@@ -920,22 +920,22 @@ describe('classifyResume — the boundaries, executed', () => {
       // mirror's only guard, and it did not carry the suffixed form.
       `outer-published:${RECORDED}:3:1:deviated`,
       `outer-published:${RECORDED}:2:3:deviated`,
-      'ralph-task-built',
+      'task-built',
       'who-knows',
       'outer-published:nothex:3:1',
     ]
-    for (const ralph of [false, true]) {
+    for (const taskSequence of [false, true]) {
       for (const name of names) {
         const verdict = fns.classifyResume({
           checkpoint: name,
           recordedHead: RECORDED,
           currentHead: '',
           hasFindings: true,
-          ralph,
+          taskSequence,
         })
-        expect({ name, ralph, exits: resumeHeadDecides(name, ralph) }).toEqual({
+        expect({ name, taskSequence, exits: resumeHeadDecides(name, taskSequence) }).toEqual({
           name,
-          ralph,
+          taskSequence,
           exits: verdict.mode === 'stop',
         })
       }
@@ -1088,7 +1088,7 @@ describe('mid-loop resume — an unreadable head is a bounded STOP, never a rebu
     expect(out.result.terminalCause).toContain('trident/resume-run')
     expect(out.result.terminalCause).toContain(RECORDED)
     expect(out.result.terminalCause).toContain('could not read')
-    // Not the Ralph re-fire path: there is no task to hand back.
+    // Not the Task sequence re-fire path: there is no task to hand back.
     expect(out.result.remainingTasks).toBe(0)
     // The finally block still ran — a bounded stop is still a tidy exit.
     expect(out.labels).toContain('cleanup:worktree')
@@ -1118,7 +1118,7 @@ describe('mid-loop resume — an unreadable head is a bounded STOP, never a rebu
 
     expect(judged(out.labels)).toBe(false)
     expect(out.labels.some((l) => l.startsWith('forge:'))).toBe(false)
-    // remainingTasks 0 keeps the outer loop off the Ralph re-fire path…
+    // remainingTasks 0 keeps the outer loop off the Task sequence re-fire path…
     expect(out.result.remainingTasks).toBe(0)
     // …and the published checkpoint survives verbatim, so the re-run reviews the
     // very OID the publisher recorded.
