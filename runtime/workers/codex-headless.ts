@@ -4,6 +4,7 @@ import { createHash } from 'node:crypto'
 import { dirname, join, resolve } from 'node:path'
 import type {
   BoundedWorkOutcome,
+  BoundedWorkRequest,
   Effort,
   Placement,
   RefusalReason,
@@ -16,6 +17,8 @@ import { unknownCause } from '../refusal-cause.ts'
 import { reserveTrailerSlot } from './trailer-slot.ts'
 import { codexBuildObservation, isCodexBuildObservation, type CodexBuildObservation } from './codex-build-observation.ts'
 import { codexWorkerEnv, createCodexReviewTransport, type CodexReviewContract } from './codex-review.ts'
+import { recoverProviderObservation } from './provider-observation-recovery.ts'
+import { codexObservation } from './provider-observation.ts'
 
 type Probe = { ok: true } | { ok: false; reason: RefusalReason; detail: string }
 
@@ -126,10 +129,37 @@ export function createCodexHeadlessRunner(options: CodexHeadlessRunnerOptions = 
     return probe.ok ? null : probe
   }
 
+  const buildIdentity = (req: BoundedWorkRequest) => JSON.stringify({
+    run: req.run_id, step: req.step_id, role: req.role, provider: 'openai-codex',
+    model: req.model_id, effort: req.effort, thread: req.thread?.id ?? null,
+    credentialHome: baseEnv.CODEX_HOME ?? null, cwd: resolve(req.cwd),
+    briefIntegrity: req.brief.integrity, schema: req.result.schema,
+    writable: req.writable, network: req.network, tools: req.tools,
+    needsApproval: req.needs_approval_decision,
+  })
   return {
     provider: 'openai-codex',
     supports(role, placement) {
       return unsupported(role, placement) ?? { ok: true }
+    },
+    async observe(req) {
+      if (req.role === 'review' || req.role === 'synthesis') return review.observe(req)
+      if (req.role !== 'build' && req.role !== 'fix') return undefined
+      const started = Date.now()
+      const key = createHash('sha256').update(JSON.stringify([req.run_id, req.step_id])).digest('hex')
+      const reservation = join(dirname(req.result.path), `codex-headless-step-${key}.json`)
+      const identity = buildIdentity(req)
+      return recoverProviderObservation(reservation, identity, `${reservation}.receipt`, 'codex-cli-jsonl', undefined, bytes => {
+        const receipt = JSON.parse(bytes)
+        if (receipt.identity !== identity || !isCodexBuildObservation(receipt.observation)
+          || (req.thread && receipt.observation.thread_id !== req.thread.id)) return undefined
+        const usage = receipt.observation.usage
+        const observation = codexObservation(usage === null ? undefined : {
+          input_tokens: usage.input_tokens, output_tokens: usage.output_tokens,
+          cached_input_tokens: usage.cache_read_input_tokens,
+        }, receipt.observation.thread_id, started, Date.now())
+        return { ...observation, model_reported: receipt.observation.model_reported }
+      })
     },
     async run(req, placement, signal): Promise<BoundedWorkOutcome> {
       const refusal = unsupported(req.role, placement)
@@ -150,14 +180,7 @@ export function createCodexHeadlessRunner(options: CodexHeadlessRunnerOptions = 
       // budget there; those are transport coordinates, not a new paid attempt.
       // Retain the brief's bytes receipt and execution policy: changed work must
       // never inherit the previous completion merely because run/step match.
-      const identity = JSON.stringify({
-        run: req.run_id, step: req.step_id, role: req.role, provider: 'openai-codex',
-        model: req.model_id, effort: req.effort, thread: req.thread?.id ?? null,
-        credentialHome: baseEnv.CODEX_HOME ?? null, cwd: resolve(req.cwd),
-        briefIntegrity: req.brief.integrity, schema: req.result.schema,
-        writable: req.writable, network: req.network, tools: req.tools,
-        needsApproval: req.needs_approval_decision,
-      })
+      const identity = buildIdentity(req)
       const receiptPath = `${reservation}.receipt`
       const held = await reserveTrailerSlot(reservation, identity, req.result.path)
       if (held.kind === 'unknown') return { kind: 'unknown', detail: held.detail }

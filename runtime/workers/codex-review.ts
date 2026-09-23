@@ -6,6 +6,7 @@ import type { BoundedWorkOutcome, BoundedWorkRequest, ProviderObservation, Usage
 import { CODEX_CLI_AUTH_ENV_VARS } from '../adapters/codex-cli/auth.ts'
 import { reserveTrailerSlot } from './trailer-slot.ts'
 import { codexObservation, readProviderObservation } from './provider-observation.ts'
+import { recoverProviderObservation } from './provider-observation-recovery.ts'
 
 export interface CodexReviewContract {
   jsonSchema: unknown
@@ -223,5 +224,11 @@ export function createCodexReviewTransport(options: {
       return observed(outcome.kind === 'completed' ? { ...outcome, thread_id: thread, usage } : outcome)
     } catch { return observed(unknown('Codex review result could not be committed')) }
               }
-  return Object.assign(run, { ready: cliReady, connected })
+  const observe = async (req: BoundedWorkRequest) => {
+    const key = createHash('sha256').update(JSON.stringify([req.run_id, req.step_id])).digest('hex')
+    const reservation = join(dirname(req.result.path), `codex-headless-step-${key}.json`)
+    return recoverProviderObservation(reservation, JSON.stringify([req, env.CODEX_HOME]),
+      `${reservation}.observation`, 'codex-cli-jsonl')
+  }
+  return Object.assign(run, { ready: cliReady, connected, observe })
 }

@@ -136,6 +136,10 @@ export async function createProjectRunners(options: ProjectRunnersOptions) {
       return runner.run(request, placement, signal)
     },
     liveness: handle => runner.liveness(handle),
+    async observe(request) {
+      if (request.run_id !== runId) return undefined
+      try { return await runner.observe?.(request) } catch { return undefined }
+    },
   })
   const common = {
     topic_id: conversation.topic_id, state_dir: stateDir, spec: conversation.spec, subagent: 'bounded-worker',
@@ -145,6 +149,7 @@ export async function createProjectRunners(options: ProjectRunnersOptions) {
   const inRepl = construct && admission ? guard({
     provider: conversation.provider,
     supports: admission.supports,
+    observe: request => options.actingTurn.observeUsage?.(request) ?? Promise.resolve(undefined),
     async run(request, placement, signal) {
       let uncertainty: string | undefined
       let refusal: Extract<BoundedWorkOutcome, { kind: 'refused' }> | undefined

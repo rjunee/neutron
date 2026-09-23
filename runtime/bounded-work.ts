@@ -161,6 +161,9 @@ export interface WorkerRunner {
    */
   supports(role: WorkerRole, placement: Placement): Supported | Unsupported
   run(req: BoundedWorkRequest, placement: Placement, signal: AbortSignal): Promise<BoundedWorkOutcome>
+  /** Read existing provider evidence only. Never dispatch, authorize a result,
+   * acquire/recover locks, clear result slots, or change a reservation. */
+  observe?(req: BoundedWorkRequest): Promise<ProviderObservation | undefined>
   /** The `run-evidence` vocabulary, unchanged: a probe that cannot see is
    *  `unknown`, which is not `nothing`. */
   liveness(handle: WorkerHandle): Promise<'activity' | 'nothing' | 'unknown'>

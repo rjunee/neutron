@@ -6,6 +6,7 @@ import { isAbsolute, join, relative, resolve, sep } from 'node:path'
 import type { BoundedWorkOutcome, BoundedWorkRequest, ProviderObservation, Usage, WorkerRunner } from '../bounded-work.ts'
 import { reserveTrailerSlot } from './trailer-slot.ts'
 import { claudeObservation, readProviderObservation } from './provider-observation.ts'
+import { recoverProviderObservation } from './provider-observation-recovery.ts'
 
 export interface ClaudeHeadlessRunnerOptions {
   /** Explicit host-selected authentication environment. Never defaults to process.env. */
@@ -222,6 +223,19 @@ export function createClaudeHeadlessRunner(input: ClaudeHeadlessRunnerOptions): 
     ? { ok: false, reason: 'placement-unavailable', detail: 'Claude headless work requires a different-provider project REPL.' }
     : !ROLES.has(role) ? { ok: false, reason: 'capability-unsupported', detail: 'Claude headless supports plan, review and synthesis only.' } : startup
   return { provider: 'anthropic', supports,
+    async observe(req) {
+      if (!env || !credential) return undefined
+      const key = keyFor(req)
+      const state = resolve(options.state_dir)
+      const binding = JSON.stringify([req.run_id, resolve(options.cwd), req.model_id,
+        createHash('sha256').update(JSON.stringify([env, credential])).digest('hex')])
+      return recoverProviderObservation(join(state, `claude-step-${key}.json`), JSON.stringify(req),
+        join(state, `claude-headless-receipt-${key}.json.observation`), 'claude-cli-json', async read => {
+          const session = await read(join(state, `claude-headless-session-${key}.json`))
+          if (!/^[0-9a-f]{8}-(?:[0-9a-f]{4}-){3}[0-9a-f]{12}$/.test(session) || (req.thread && req.thread.id !== session)) return false
+          return await read(join(state, `claude-headless-thread-${session}.json`)) === binding
+        })
+    },
     async run(req, placement, signal) {
       const supported = supports(req.role, placement)
       if (!supported.ok) return { kind: 'refused', reason: supported.reason }

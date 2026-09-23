@@ -80,6 +80,23 @@ main();
   return { root, cwd, state, req, runner, options, launched, counter, run: (request = req, signal = new AbortController().signal) => runner.run(request, 'headless', signal) }
 }
 
+for (const mode of ['exit-error', 'zero-usage'] as const) {
+  test(`read-only observation recovery retains ${mode} without dispatch or lock changes`, async () => {
+    const f = await fixture(mode)
+    expect(await f.runner.observe!(f.req)).toBeUndefined()
+    const first = await f.run()
+    const before = await readdir(f.state)
+    const calls = await readFile(f.counter, 'utf8')
+    expect(await createClaudeHeadlessRunner(f.options).observe!(f.req)).toEqual(first.observation)
+    expect((await f.runner.observe!(f.req))?.usage.input_tokens).toBe(mode === 'zero-usage' ? 0 : 17)
+    expect(await f.runner.observe!({ ...f.req, model_id: 'claude-other' })).toBeUndefined()
+    expect(await f.runner.observe!({ ...f.req, step_id: 'foreign' })).toBeUndefined()
+    expect(await createClaudeHeadlessRunner({ ...f.options, env: { ...f.options.env, CLAUDE_CODE_OAUTH_TOKEN: 'different' } }).observe!(f.req)).toBeUndefined()
+    expect(await readdir(f.state)).toEqual(before)
+    expect(await readFile(f.counter, 'utf8')).toBe(calls)
+  })
+}
+
 test('successful headless completion uses exact model, measured usage, isolated argv, stdin and host trailer', async () => {
   const f = await fixture()
   expect(await f.run()).toMatchObject({ kind: 'completed', result: { answer: 'verified' },

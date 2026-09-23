@@ -38,6 +38,26 @@ function fixture(change: Partial<Record<'HEAD' | 'DIFF' | 'PR', string | null>> 
 }
 
 describe('Codex headless WorkerRunner', () => {
+  test('builder receipt observation is read-only, credential-bound and independent of completion replay', async () => {
+    const f = fixture()
+    const options = { buildScript: f.script, probe: { ok: true as const }, env: { PATH: process.env.PATH, CODEX_HOME: 'seat-one' } }
+    const runner = createCodexHeadlessRunner(options)
+    const request = f.request()
+    expect(await runner.observe!(request)).toBeUndefined()
+    expect((await runner.run(request, 'headless', new AbortController().signal)).kind).toBe('completed')
+    const files = readdirSync(request.cwd)
+    const observed = await createCodexHeadlessRunner(options).observe!(request)
+    expect(observed).toMatchObject({ source: 'codex-cli-jsonl', thread_id: 'observed-first',
+      usage: { input_tokens: 12, output_tokens: 7, cache_read_input_tokens: 11, cost_usd: null } })
+    const relocated = { ...request, budget: { wall_ms: 99 }, brief: { ...request.brief, path: join(request.cwd, 'other-brief') },
+      result: { ...request.result, path: join(request.cwd, 'other-result') } }
+    expect((await runner.observe!(relocated))?.usage).toEqual(observed?.usage)
+    for (const changed of [{ ...request, model_id: 'other' }, { ...request, step_id: 'other' },
+      { ...request, brief: { ...request.brief, integrity: 'changed' } }]) expect(await runner.observe!(changed)).toBeUndefined()
+    expect(await createCodexHeadlessRunner({ ...options, env: { ...options.env, CODEX_HOME: 'seat-two' } }).observe!(request)).toBeUndefined()
+    expect(readFileSync(f.threads, 'utf8')).toBe('\n')
+    expect(readdirSync(request.cwd)).toEqual(files)
+  })
   test('a resumed step keeps its own receipt instead of re-dispatching', async () => {
     const f = fixture()
     const runner = createCodexHeadlessRunner({ buildScript: f.script, probe: { ok: true } })

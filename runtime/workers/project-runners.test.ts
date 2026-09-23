@@ -108,6 +108,17 @@ test('unavailable observation cannot veto valid completion or grant missing comp
   expect((await (await createProjectRunners(f.options)).inRepl!.run(f.request, 'in-repl', signal())).kind).toBe('completed')
 })
 
+test('project observation recovery invokes no dispatch and refuses another run', async () => {
+  const f = await fixture('anthropic')
+  let reads = 0
+  f.options.actingTurn.observeUsage = async request => { reads++; expect(request).toBe(f.request); return observed }
+  const runner = (await createProjectRunners(f.options)).inRepl!
+  expect(await runner.observe!(f.request)).toEqual(observed)
+  expect(await runner.observe!({ ...f.request, run_id: 'foreign' })).toBeUndefined()
+  expect(f.calls).toHaveLength(0)
+  expect(reads).toBe(1)
+})
+
 test('headless selection follows project provider and underlying supports', async () => {
   for (const provider of PROVIDERS) {
     const f = await fixture(provider)

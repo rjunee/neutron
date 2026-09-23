@@ -70,6 +70,23 @@ process.exit(mode === 'nonzero' ? 2 : 0);
   return { dir, home, env, req, runner, productionRunner, run, calls, invocations }
 }
 
+for (const mode of ['nonzero', 'zero-usage'] as const) {
+  test(`Codex read-only usage recovery retains ${mode} without dispatch`, async () => {
+    const f = await fixture(mode)
+    const runner = f.runner()
+    expect(await runner.observe!(f.req)).toBeUndefined()
+    const first = await f.run()
+    const calls = await f.calls()
+    expect(await runner.observe!(f.req)).toEqual(first.observation)
+    expect((await runner.observe!(f.req))?.usage.input_tokens).toBe(mode === 'zero-usage' ? 0 : 6)
+    expect(await runner.observe!({ ...f.req, model_id: 'other' })).toBeUndefined()
+    expect(await runner.observe!({ ...f.req, step_id: 'other' })).toBeUndefined()
+    const other = createCodexHeadlessRunner({ env: { ...f.env, CODEX_HOME: join(f.dir, 'other-home') }, probe: { ok: true } })
+    expect(await other.observe!(f.req)).toBeUndefined()
+    expect(await f.calls()).toEqual(calls)
+  })
+}
+
 test('review and synthesis use read-only Codex exec with stdin, host schema, selected home and observed usage', async () => {
   for (const role of ['review', 'synthesis'] as const) {
     const f = await fixture()

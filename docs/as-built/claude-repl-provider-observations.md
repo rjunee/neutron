@@ -47,3 +47,19 @@ The exact prerequisite-base and candidate archive leak scans both report 455
 identical inherited findings; this is a baseline-red tree, not a clean-tree
 claim. The changed-file archive with the known-present LICENSE positive control
 is silent, including this change's commit message scan.
+
+The runner's optional `observe(request)` hook also exposes read-only startup
+reconciliation. Project runners retain run ownership; Claude headless and Codex
+review readers require their exact armed reservation and credential binding.
+The Codex builder reads its stable request-bound committed receipt, preserving
+transport relocation while rejecting changed work, model or credential home.
+The hook never invokes `run`, changes a reservation, acquires or recovers a lock,
+or publishes a result. Existing provider observations retain their timestamps;
+legacy builder receipts without host times receive explicitly observed read-window
+times. Headless recovery reads are limited to 256 KiB regular snapshots and 250 ms.
+Missing/corrupt/mismatched evidence remains unavailable. Adapter tests cover
+nonzero/zero recovery, unchanged dispatch counts and state files, and exact
+request/model/credential mismatches. Additional mutation checks remove and
+over-apply reservation binding, remove snapshot/symlink bounds, and disable the
+recovery deadline; each fails before restoration. Driver startup invocation and
+the durable ledger are verified by the accounting integration change.
