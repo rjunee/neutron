@@ -44,7 +44,6 @@ describe('OvernightQueueStore', () => {
     expect(item.agent_role).toBe('forge')
     expect(item.priority).toBe('P3')
     expect(item.status).toBe('queued')
-    expect(item.ralph).toBe(false)
     const got = store.get('owk-20260619-001')
     expect(got).not.toBeNull()
     expect(got?.description).toBe('Deepen pricing analysis')
@@ -60,13 +59,10 @@ describe('OvernightQueueStore', () => {
       agent_role: 'atlas',
       priority: 'P1',
       context_relpath: 'docs/spec.md',
-      ralph: true,
     })
     expect(item.agent_role).toBe('atlas')
     expect(item.priority).toBe('P1')
     expect(item.context_relpath).toBe('docs/spec.md')
-    expect(item.ralph).toBe(true)
-    expect(store.get(item.id)?.ralph).toBe(true)
   })
 
   test('update patches only provided fields + persists trident link', async () => {

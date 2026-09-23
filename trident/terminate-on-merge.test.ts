@@ -21,7 +21,7 @@
  * THE FIX, AND THE TWO CONSTRAINTS ON IT.
  *   1. TERMINATE ON THE MERGE, not on a later observation of it: the merge state is
  *      probed the instant a Forge round returns, ahead of the review panel, the
- *      Ralph re-fire and any round increment — everything the wasted round is made
+ *      Task sequence re-fire and any round increment — everything the wasted round is made
  *      of.
  *   2. NEVER CONFLATE IT WITH THE ROUND-LOST GUARD (Open #148). That guard decides
  *      by reading the branch head, and a merge DELETES the branch, so a merged run
@@ -228,7 +228,7 @@ describe('mergedTerminalResult — a merged run is recorded as a SUCCESS', () =>
     expect(r().reviewedHead).toBeUndefined()
   })
 
-  test('it never re-fires a Ralph task onto a merged, deleted branch', () => {
+  test('it never re-fires a Task sequence task onto a merged, deleted branch', () => {
     expect(r().remainingTasks).toBe(0)
   })
 
@@ -256,12 +256,12 @@ describe('the loop terminates ON the merge, not on a later observation of it', (
     expect(at(R1_PROBE)).toBeLessThan(at('runReviewRound(diffFile, round, pr)'))
   })
 
-  test('round 1 asks BEFORE the Ralph re-fire and BEFORE the empty-build throw', () => {
-    // A merged PR ends a Ralph run too: the next task would be built onto a branch
+  test('round 1 asks BEFORE the Task sequence re-fire and BEFORE the empty-build throw', () => {
+    // A merged PR ends a Task sequence run too: the next task would be built onto a branch
     // the merge deleted. And a sign-off style task that merges someone else's PR
     // legitimately produces no diff — the throw would record that shipped work as a
     // failure, so the merge question must be settled first.
-    expect(at(R1_PROBE)).toBeLessThan(at('if (ralph === true && ralphRemaining > 0)'))
+    expect(at(R1_PROBE)).toBeLessThan(at('if (taskSequence && taskRemaining > 0)'))
     expect(at(R1_PROBE)).toBeLessThan(at("if (branchHead === '' || diffFile === '')"))
   })
 

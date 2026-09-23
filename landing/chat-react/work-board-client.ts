@@ -149,9 +149,11 @@ export interface RunProgress {
   round: number
   /** Added after the base progress shape; absent on rolling-deploy frames. */
   infra_retries?: number
-  /** Optional only for compatibility with an older gateway frame. */
-  ralph_round?: number
-  /** Null means non-Ralph; absent only on older gateway frames. */
+  /** Undefined only when an older frame carried neither strategy nor legacy mode. */
+  execution_strategy?: 'single' | 'task_sequence' | null
+  /** Zero-based task-sequence iteration; absent on older frames. */
+  task_iteration?: number
+  /** Null means the selected strategy is not task_sequence. */
   task_number?: number | null
   task_total?: number | null
   started_at: string
@@ -170,8 +172,8 @@ export interface RunProgress {
   failure_reason: string | null
   /** Added after the base progress shape; optional for rolling-deploy frames. */
   brief_alert?: string | null
-  /** The retry's resume decision (did it carry the dead run's checkpoint and Ralph
-   *  round?). Optional for rolling-deploy frames; null for a first dispatch. */
+  /** The retry's resume decision (did it carry the dead run's checkpoint and task
+   *  iteration?). Optional for rolling-deploy frames; null for a first dispatch. */
   resume_note?: string | null
 }
 
@@ -477,15 +479,39 @@ function parseRunProgress(raw: unknown): RunProgress | null {
   const step_label: RunStepLabel = RUN_STEP_LABELS.includes(rawStep as RunStepLabel)
     ? (rawStep as RunStepLabel)
     : stepLabelFromPhase(phase_label as RunPhaseLabel)
+  const hasStrategy = Object.prototype.hasOwnProperty.call(r, 'execution_strategy')
+  const strategyValue = r['execution_strategy']
+  if (hasStrategy && strategyValue !== null && strategyValue !== 'single' && strategyValue !== 'task_sequence') {
+    return null
+  }
+  if (hasStrategy && !(Number.isSafeInteger(r['task_iteration']) && (r['task_iteration'] as number) >= 0)) {
+    return null
+  }
+  // A rolling-deploy legacy frame may carry the old boolean explicitly. Its
+  // presence is evidence; absence is not `false` and must stay unknown.
+  const execution_strategy = hasStrategy
+    ? strategyValue as 'single' | 'task_sequence' | null
+    : typeof r['ralph'] === 'boolean'
+      ? r['ralph'] ? 'task_sequence' : 'single'
+      : undefined
+  const task_iteration = Number.isSafeInteger(r['task_iteration']) && (r['task_iteration'] as number) >= 0
+    ? r['task_iteration'] as number
+    : Number.isSafeInteger(r['ralph_round']) && (r['ralph_round'] as number) >= 0
+      ? r['ralph_round'] as number
+      : undefined
+  const explicitTaskNumber = Number.isSafeInteger(r['task_number']) && (r['task_number'] as number) > 0
+    ? r['task_number'] as number : null
+  const task_number = explicitTaskNumber ??
+    (execution_strategy === 'task_sequence' && task_iteration !== undefined ? task_iteration + 1 : null)
   return {
     run_id,
     phase_label: phase_label as RunPhaseLabel,
     step_label,
     round: typeof r['round'] === 'number' ? (r['round'] as number) : 1,
     infra_retries: typeof r['infra_retries'] === 'number' ? (r['infra_retries'] as number) : 0,
-    ralph_round: typeof r['ralph_round'] === 'number' ? (r['ralph_round'] as number) : 0,
-    task_number: Number.isSafeInteger(r['task_number']) && (r['task_number'] as number) > 0
-      ? r['task_number'] as number : null,
+    ...(execution_strategy !== undefined ? { execution_strategy } : {}),
+    ...(task_iteration !== undefined ? { task_iteration } : {}),
+    task_number,
     task_total: Number.isSafeInteger(r['task_total']) && (r['task_total'] as number) > 0
       ? r['task_total'] as number : null,
     started_at: typeof r['started_at'] === 'string' ? (r['started_at'] as string) : '',

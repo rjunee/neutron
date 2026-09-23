@@ -630,7 +630,7 @@ describe('the probe window is closed — the row is re-read AFTER the worktree p
 
   test('a row that moves during the probe is launch evidence on its OWN, with no live holder', async () => {
     const gather = buildFireEvidenceGatherer({
-      read_run: readsInOrder(run(), run({ inner_checkpoint: 'ralph-task-built' })),
+      read_run: readsInOrder(run(), run({ inner_checkpoint: 'task-built' })),
       // Nothing holds the branch: without the second read this is plain `none`.
       run_host: async () => okHost(porcelain()),
       fs: makeFs(),
@@ -640,7 +640,7 @@ describe('the probe window is closed — the row is re-read AFTER the worktree p
     expect(evidence.kind).toBe('launched')
     if (evidence.kind === 'launched') {
       expect(evidence.detail).toContain('inner_checkpoint')
-      expect(evidence.observed?.inner_checkpoint).toBe('ralph-task-built')
+      expect(evidence.observed?.inner_checkpoint).toBe('task-built')
     }
   })
 

@@ -69,11 +69,11 @@ describe('buildBoardReconcileObserver', () => {
 
     await obs({
       project_slug: 'proj-1', id: 'run-budget', phase: 'failed', repo_path: '/repo',
-      pr: null, ralph: true, ralph_round: 2, max_ralph_rounds: 3,
-      ralph_task_total: 8,
+      pr: null, execution_strategy: 'task_sequence', task_iteration: 2, max_task_iterations: 3,
+      task_total: 8,
     } as never)
 
-    expect(board.get('proj-1', item.id)).toMatchObject({ ralph_round: 2, max_ralph_rounds: 3, ralph_task_total: 8 })
+    expect(board.get('proj-1', item.id)).toMatchObject({ task_iteration: 2, max_task_iterations: 3, task_total: 8 })
 
     // MONOTONIC, in the two directions the name claims — asserted, because a test
     // that only writes onto a fresh card establishes neither. A DELAYED observer
@@ -81,25 +81,25 @@ describe('buildBoardReconcileObserver', () => {
     // must not widen the one the card already carries.
     await obs({
       project_slug: 'proj-1', id: 'run-budget', phase: 'failed', repo_path: '/repo',
-      pr: null, ralph: true, ralph_round: 1, max_ralph_rounds: 9,
-      ralph_task_total: 14,
+      pr: null, execution_strategy: 'task_sequence', task_iteration: 1, max_task_iterations: 9,
+      task_total: 14,
     } as never)
 
-    expect(board.get('proj-1', item.id)).toMatchObject({ ralph_round: 2, max_ralph_rounds: 3, ralph_task_total: 8 })
+    expect(board.get('proj-1', item.id)).toMatchObject({ task_iteration: 2, max_task_iterations: 3, task_total: 8 })
 
     // …and the control that stops this passing by refusing every write: a genuine
     // advance with a tighter cap IS recorded.
     await obs({
       project_slug: 'proj-1', id: 'run-budget', phase: 'failed', repo_path: '/repo',
-      pr: null, ralph: true, ralph_round: 3, max_ralph_rounds: 3,
-      ralph_task_total: 6,
+      pr: null, execution_strategy: 'task_sequence', task_iteration: 3, max_task_iterations: 3,
+      task_total: 6,
     } as never)
 
-    expect(board.get('proj-1', item.id)).toMatchObject({ ralph_round: 3, max_ralph_rounds: 3, ralph_task_total: 6 })
+    expect(board.get('proj-1', item.id)).toMatchObject({ task_iteration: 3, max_task_iterations: 3, task_total: 6 })
     await board.update('proj-1', item.id, { status: 'upcoming' })
     const reopened = ProjectDb.open(join(tmp, 'project.db'))
     try {
-      expect(new WorkBoardStore(reopened).get('proj-1', item.id)).toMatchObject({ linked_run_id: null, ralph_task_total: 6 })
+      expect(new WorkBoardStore(reopened).get('proj-1', item.id)).toMatchObject({ linked_run_id: null, task_total: 6 })
     } finally { reopened.close() }
   })
 
@@ -110,23 +110,23 @@ describe('buildBoardReconcileObserver', () => {
 
     await obs({
       project_slug: 'proj-1', id: 'run-zero-budget', phase: 'failed', repo_path: '/repo',
-      pr: null, ralph: true, ralph_round: 0, max_ralph_rounds: 0,
+      pr: null, execution_strategy: 'task_sequence', task_iteration: 0, max_task_iterations: 0,
     } as never)
 
-    expect(board.get('proj-1', item.id)).toMatchObject({ ralph_round: 0, max_ralph_rounds: 0 })
+    expect(board.get('proj-1', item.id)).toMatchObject({ task_iteration: 0, max_task_iterations: 0 })
   })
 
-  test('a NON-governed terminal run leaves the card budget untouched', async () => {
+  test('a single terminal run preserves card iteration spend', async () => {
     const obs = buildBoardReconcileObserver(board)!
     const item = await board.create('proj-1', { title: 'ungoverned card' })
     await board.attachRun('proj-1', item.id, 'run-plain')
 
     await obs({
       project_slug: 'proj-1', id: 'run-plain', phase: 'failed', repo_path: '/repo',
-      pr: null, ralph: false, ralph_round: 4, max_ralph_rounds: 5,
+      pr: null, execution_strategy: 'single', task_iteration: 4, max_task_iterations: 5,
     } as never)
 
-    expect(board.get('proj-1', item.id)).toMatchObject({ ralph_round: 0, max_ralph_rounds: null })
+    expect(board.get('proj-1', item.id)).toMatchObject({ execution_strategy: 'single', task_iteration: 4, max_task_iterations: 5 })
   })
 })
 
@@ -271,8 +271,7 @@ describe('end-to-end — the tick loop reconciles the board on a terminal run', 
       repo_path: '/repo',
       resolveBuildRepo: async (home: string) => home,
       resolveMergeMode: async () => 'local' as const,
-      resolveRalph: async () => true,
-      max_ralph_rounds: 2,
+      max_task_iterations: 2,
     }
     const first = await dispatchBoardBoundBuild(
       { board_item_id: item.id, task: 'spend the bounded retry budget' },
@@ -281,13 +280,13 @@ describe('end-to-end — the tick loop reconciles the board on a terminal run', 
     expect(first).toMatchObject({ ok: true })
     if (!first.ok) return
 
-    await store.update(first.run.id, { phase: 'failed', ralph_round: 2 })
+    await store.update(first.run.id, { phase: 'failed', task_iteration: 2 })
     const terminal = store.get(first.run.id)!
     await buildBoardReconcileObserver(board)!(terminal)
     expect(board.get('proj-1', item.id)).toMatchObject({
       linked_run_id: first.run.id,
-      ralph_round: 2,
-      max_ralph_rounds: 2,
+      task_iteration: 2,
+      max_task_iterations: 2,
     })
 
     await board.update('proj-1', item.id, { status: 'upcoming' })
@@ -297,7 +296,7 @@ describe('end-to-end — the tick loop reconciles the board on a terminal run', 
       { board_item_id: item.id, task: 'retry after clearing the terminal link' },
       deps,
     )
-    expect(retry).toMatchObject({ ok: false, code: 'ralph_budget_exhausted' })
+    expect(retry).toMatchObject({ ok: false, code: 'task_budget_exhausted' })
     const rows = db.raw().query<{ count: number }, []>('SELECT COUNT(*) AS count FROM code_trident_runs').get()
     expect(rows?.count).toBe(1)
   })
@@ -316,7 +315,6 @@ describe('end-to-end — the tick loop reconciles the board on a terminal run', 
         repo_path: '/repo',
         resolveBuildRepo: async (home) => home,
         resolveMergeMode: async () => 'pr',
-        resolveRalph: async () => false,
       },
     )
     expect(res.ok).toBe(true)

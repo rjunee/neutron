@@ -10,7 +10,7 @@
  */
 
 import { afterEach, beforeEach, describe, expect, test } from 'bun:test'
-import { mkdirSync, mkdtempSync, rmSync, writeFileSync } from 'node:fs'
+import { mkdtempSync, rmSync } from 'node:fs'
 import { tmpdir } from 'node:os'
 import { join } from 'node:path'
 import { seedMigratedDb } from '../tests/support/migrated-db.ts'
@@ -96,7 +96,6 @@ function ctx(over: Partial<TridentCodeContext> = {}): TridentCodeContext {
     // Identity workspace resolver — keep repo_path as-is, no real fs/git in unit tests.
     resolveBuildRepo: async (home) => home,
     resolveMergeMode: async () => 'pr',
-    resolveRalph: async () => false,
     ...over,
   }
 }
@@ -142,159 +141,15 @@ describe('/code parser parity with the Code-Gen Core surface', () => {
 })
 
 describe('/code <task> creates a code_trident_runs row', () => {
-  test('dispatch persists a forge-init row with detected mode + ralph flag', async () => {
-    const res = await parseAndExecuteCodeCommand('/code --item item-1 add a thing', ctx({ resolveRalph: async () => false }))
+  test('fresh dispatch persists planning-pending strategy without probing repository files', async () => {
+    const res = await parseAndExecuteCodeCommand('/code --item item-1 add a thing', ctx())
     expect(res).not.toBeNull()
-    const data = res!.data as { run_id: string; ralph: boolean; merge_mode: string }
+    const data = res!.data as { run_id: string; execution_strategy: string | null; merge_mode: string }
     const row = store.get(data.run_id)!
     expect(row.phase).toBe('forge-init')
-    expect(row.task).toBe('add a thing')
-    expect(row.project_slug).toBe('proj-1')
-    expect(row.repo_path).toBe('/repo')
-    expect(row.merge_mode).toBe('pr')
-    expect(row.ralph).toBe(false)
-    expect(row.branch).toBe('trident/add-a-thing')
-    expect(res!.text).toContain('Trident run')
-  })
-
-  test('a governed repo (SPEC.md) creates a ralph run', async () => {
-    const res = await parseAndExecuteCodeCommand('/code --item item-1 build the spec', ctx({ resolveRalph: async () => true }))
-    const data = res!.data as { run_id: string }
-    expect(store.get(data.run_id)!.ralph).toBe(true)
-    expect(res!.text).toContain('Ralph')
-  })
-
-  test('RT1: with NO resolveRalph override (production shape) a real root SPEC.md resolves ralph=true (K10 governed flip)', async () => {
-    // Production composition (open/composer.ts `trident_build_dispatch`) never
-    // sets `resolveRalph` — it relies on the chokepoint's default. K10 restored
-    // that default to `detectRalphMode`, which flips this run governed because
-    // `repo_path` has a real root SPEC.md (the refactor-window `false` override
-    // is gone). Build the context WITHOUT the `ctx()` helper (which always stubs
-    // resolveRalph) so this test exercises the real fallback in
-    // `board-dispatch.ts`. Inversion of the pre-K10 assertion.
-    const specDir = mkdtempSync(join(tmpdir(), 'neutron-trident-code-specdir-'))
-    writeFileSync(join(specDir, 'SPEC.md'), '# spec\n')
-    try {
-      const noOverrideCtx: TridentCodeContext = {
-        store,
-        work_board: boardStub(),
-        project_slug: 'proj-1',
-        repo_path: specDir,
-        resolveBuildRepo: async (home) => home, // identity — repo_path stays specDir
-        resolveMergeMode: async () => 'pr',
-        // resolveRalph deliberately OMITTED.
-      }
-      const res = await parseAndExecuteCodeCommand('/code --item item-1 add a thing', noOverrideCtx)
-      expect(res).not.toBeNull()
-      const data = res!.data as { run_id: string; ralph: boolean }
-      expect(data.ralph).toBe(true)
-      expect(store.get(data.run_id)!.ralph).toBe(true)
-      expect(res!.text).toContain('Ralph')
-    } finally {
-      rmSync(specDir, { recursive: true, force: true })
-    }
-  })
-
-  test('RT1: with NO resolveRalph override, a repo WITHOUT a root SPEC.md resolves ralph=false', async () => {
-    // The other production-boundary of the restored `detectRalphMode` default:
-    // no override + no root SPEC.md must stay ungoverned. Pins that the K10
-    // flip is SPEC.md-gated (not always-on) — a wiring regression that forced
-    // Ralph on would fail here. Mirror of the positive case above, no SPEC.md.
-    const noSpecDir = mkdtempSync(join(tmpdir(), 'neutron-trident-code-nospec-'))
-    try {
-      const noOverrideCtx: TridentCodeContext = {
-        store,
-        work_board: boardStub(),
-        project_slug: 'proj-1',
-        repo_path: noSpecDir,
-        resolveBuildRepo: async (home) => home, // identity — repo_path stays noSpecDir
-        resolveMergeMode: async () => 'pr',
-        // resolveRalph deliberately OMITTED; no SPEC.md on disk.
-      }
-      const res = await parseAndExecuteCodeCommand('/code --item item-1 add a thing', noOverrideCtx)
-      expect(res).not.toBeNull()
-      const data = res!.data as { run_id: string; ralph: boolean }
-      expect(data.ralph).toBe(false)
-      expect(store.get(data.run_id)!.ralph).toBe(false)
-      expect(res!.text).not.toContain('Ralph')
-    } finally {
-      rmSync(noSpecDir, { recursive: true, force: true })
-    }
-  })
-
-  // ── Production boundary: the REAL workspace resolver ───────────────────────
-  // The identity-`resolveBuildRepo` tests above intentionally pin `repo_path`.
-  // Production does NOT: `open/composer.ts` passes `owner_home` and the dispatch
-  // chokepoint REPLACES it with `<home>/Projects/<slug>/code` via the real
-  // `ensureProjectBuildWorkspace`. These two tests exercise that real resolver
-  // (no `resolveBuildRepo` override) so the persisted `ralph` reflects the
-  // ACTUAL build workspace, not the owner's checkout — killing the masking.
-  test('production boundary: real resolver — a fresh project workspace has no SPEC.md → ralph=false', async () => {
-    // A normal user-project `/code`: the real resolver git-inits a fresh
-    // `<home>/Projects/<slug>/code` (empty commit, NO SPEC.md), so Ralph stays
-    // OFF even though this OWNER checkout has a root SPEC.md. `detectRalphMode`
-    // probes the build workspace, not the owner home.
-    const home = mkdtempSync(join(tmpdir(), 'neutron-code-home-'))
-    try {
-      const realCtx: TridentCodeContext = {
-        store,
-        work_board: boardStub(),
-        project_slug: 'proj-1',
-        repo_path: home,
-        resolveMergeMode: async () => 'local',
-        // resolveBuildRepo OMITTED → the real ensureProjectBuildWorkspace runs.
-        // resolveRalph OMITTED → the real detectRalphMode over the resolved workspace.
-      }
-      const res = await parseAndExecuteCodeCommand('/code --item item-1 add a thing', realCtx)
-      expect(res).not.toBeNull()
-      const data = res!.data as { run_id: string; ralph: boolean }
-      const row = store.get(data.run_id)!
-      expect(row.repo_path).toBe(join(home, 'Projects', 'proj-1', 'code'))
-      expect(data.ralph).toBe(false)
-      expect(row.ralph).toBe(false)
-      expect(res!.text).not.toContain('Ralph')
-    } finally {
-      rmSync(home, { recursive: true, force: true })
-    }
-  })
-
-  test('production boundary: real resolver — a build workspace that IS a checkout with root SPEC.md → ralph=true', async () => {
-    // The governed case through the SAME real resolver: when the resolved build
-    // workspace already exists as a healthy git repo WITH a root SPEC.md (e.g.
-    // trident building against a checkout of this tree), `ensureProjectBuildWorkspace`
-    // returns it untouched and `detectRalphMode` governs.
-    const home = mkdtempSync(join(tmpdir(), 'neutron-code-home-gov-'))
-    const workspace = join(home, 'Projects', 'proj-1', 'code')
-    try {
-      mkdirSync(workspace, { recursive: true })
-      writeFileSync(join(workspace, 'SPEC.md'), '# spec\n')
-      const git = (args: string[]) => {
-        const r = Bun.spawnSync(['git', '-c', 'user.email=t@t', '-c', 'user.name=t', ...args], { cwd: workspace })
-        if (r.exitCode !== 0) throw new Error(`git ${args.join(' ')} failed: ${new TextDecoder().decode(r.stderr)}`)
-      }
-      git(['init', '-q', '--initial-branch=main'])
-      git(['add', 'SPEC.md'])
-      git(['commit', '-q', '-m', 'seed spec'])
-      const realCtx: TridentCodeContext = {
-        store,
-        work_board: boardStub(),
-        project_slug: 'proj-1',
-        repo_path: home,
-        resolveMergeMode: async () => 'local',
-        // resolveBuildRepo OMITTED → real resolver returns the existing workspace as-is.
-        // resolveRalph OMITTED → real detectRalphMode sees the workspace SPEC.md.
-      }
-      const res = await parseAndExecuteCodeCommand('/code --item item-1 add a thing', realCtx)
-      expect(res).not.toBeNull()
-      const data = res!.data as { run_id: string; ralph: boolean }
-      const row = store.get(data.run_id)!
-      expect(row.repo_path).toBe(workspace)
-      expect(data.ralph).toBe(true)
-      expect(row.ralph).toBe(true)
-      expect(res!.text).toContain('Ralph')
-    } finally {
-      rmSync(home, { recursive: true, force: true })
-    }
+    expect(row.execution_strategy).toBeNull()
+    expect(data.execution_strategy).toBeNull()
+    expect(res!.text).toContain('planning pending')
   })
 
   test('#317 threads the originating channel_kind onto the run row', async () => {

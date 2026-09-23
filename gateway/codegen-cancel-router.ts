@@ -30,7 +30,8 @@ export interface UnifiedTridentState {
   pr_number?: number
   summary?: string
   round: number
-  ralph_round: number
+  execution_strategy: 'single' | 'task_sequence' | null
+  task_iteration: number
   task_number: number | null
   task_total: number | null
 }
@@ -112,7 +113,8 @@ export function routeCodegenCancel(
       run_id: run.id,
       phase: progress.step_label,
       round: progress.round,
-      ralph_round: progress.ralph_round,
+      execution_strategy: progress.execution_strategy,
+      task_iteration: progress.task_iteration,
       task_number: progress.task_number,
       task_total: progress.task_total,
       reason: run.failure_reason,

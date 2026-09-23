@@ -67,7 +67,7 @@ describe('Code-Gen Core — manifest', () => {
     expect(statusProp?.enum?.sort()).toEqual(
       [
         'argus', 'cancelled', 'completed', 'done', 'failed', 'forge-fix',
-        'forge-init', 'pending', 'ralph-plan', 'ralph-task', 'running', 'stopped',
+        'forge-init', 'pending', 'running', 'stopped', 'task-build', 'task-plan',
       ],
     )
   })

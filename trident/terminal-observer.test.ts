@@ -21,7 +21,7 @@ function run(): TridentRun {
     project_slug: 'owner',
     phase: 'done',
     max_rounds: 5,
-    max_ralph_rounds: 0,
+    max_task_iterations: 0,
     merge_mode: 'pr',
     subagent_run_id: null,
     subagent_status: null,

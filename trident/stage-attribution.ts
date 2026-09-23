@@ -100,7 +100,7 @@ export interface FireWindow {
   label: string
   startAt: string
   round: string | null
-  ralphRound: string | null
+  taskIteration: string | null
   hasLaunchStart: boolean
   events: StageEvent[]
 }
@@ -152,7 +152,7 @@ function lexicalCompare(left: string, right: string): number {
   return left < right ? -1 : left > right ? 1 : 0
 }
 
-function metaValue(meta: string | null, key: 'round' | 'ralph_round'): string | null {
+function metaValue(meta: string | null, key: 'round' | 'task_iteration'): string | null {
   if (meta === null) return null
   const match = meta.match(new RegExp(`(?:^|\\s)${key}=([^\\s]+)`))
   return match?.[1] ?? null
@@ -165,10 +165,10 @@ function makeWindow(
   launch: StageEvent | null,
 ): FireWindow {
   const round = launch === null ? null : metaValue(launch.meta, 'round')
-  const ralphRound = launch === null ? null : metaValue(launch.meta, 'ralph_round')
+  const taskIteration = launch === null ? null : metaValue(launch.meta, 'task_iteration')
   const qualifiers = launch === null
     ? ['no-launch-start']
-    : [round === null ? null : `round=${round}`, ralphRound === null ? null : `ralph_round=${ralphRound}`]
+    : [round === null ? null : `round=${round}`, taskIteration === null ? null : `task_iteration=${taskIteration}`]
         .filter((value): value is string => value !== null)
   return {
     runId,
@@ -176,7 +176,7 @@ function makeWindow(
     label: `${runId}#${index}${qualifiers.length === 0 ? '' : ` ${qualifiers.join(' ')}`}`,
     startAt: firstEvent.at,
     round,
-    ralphRound,
+    taskIteration,
     hasLaunchStart: launch !== null,
     events: [],
   }

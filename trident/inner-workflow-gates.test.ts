@@ -57,7 +57,7 @@ async function runWorkflow(opts: Options = {}) {
   }
   const args = {
     repoPath: '/repo', task: 'pin existing gates', baseBranch: 'main', slug: 'gate-pins',
-    branch: BRANCH, maxRounds: 3, ralph: false, mergeMode: 'pr',
+    branch: BRANCH, maxRounds: 3, executionStrategy: 'single', mergeMode: 'pr',
     dbPath: '/tmp/gates.db', runId: 'gate-pins', checkpointScript: '/harness/checkpoint.sh',
     codexBuildScript: '/harness/codex-build.sh',
     models: { fable: 'fable', opus: 'opus', sonnet: 'sonnet', fast: 'haiku' },

@@ -86,7 +86,7 @@ export const defaultResultDocWriter: ResultDocWriter = {
       `# Overnight result — ${item.id}\n\n` +
       `- Project: ${item.owner_slug}\n` +
       `- Task: ${item.description}\n` +
-      `- Agent: ${item.agent_role}${item.ralph ? ' (ralph)' : ''}\n` +
+      `- Agent: ${item.agent_role}\n` +
       `- Trident run: ${item.trident_run_id ?? '(none)'} (${item.trident_slug ?? '-'})\n` +
       `- Result: ${result}\n` +
       `- Finished: ${item.finished_at ?? new Date().toISOString()}\n`
@@ -97,7 +97,7 @@ export const defaultResultDocWriter: ResultDocWriter = {
 
 /**
  * Build the Trident seam: create a `code_trident_runs` row per item and poll
- * it. `ralph` items use Ralph spec-driven build mode; the merge mode is
+ * it. Fresh overnight implementation runs leave strategy selection to the initial planner; the merge mode is
  * auto-detected per the run's repo (`pr` when a GitHub origin + `gh` exist,
  * else `local`).
  */
@@ -118,7 +118,6 @@ export function buildOvernightTridentSeam(
         project_slug: input.owner_slug,
         repo_path: input.repo_path,
         task,
-        ralph: input.ralph,
         merge_mode,
       })
       return { id: run.id, slug: run.slug }

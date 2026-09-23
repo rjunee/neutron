@@ -10,7 +10,13 @@ import { decodeProjectTrailer } from '@neutronai/runtime/workers/project-runners
 import { expect, spyOn, test } from 'bun:test'
 import { fakeRunner, type BoundedWorkOutcome, type BoundedWorkRequest } from '@neutronai/runtime/bounded-work.ts'
 import { reviewPanel } from './gates/review-panel.ts'
-import { buildRun, type BuildRunDeps, type BuildRunInput, type BuildSnapshot, type ReviewDecision } from './build-run.ts'
+import { buildRun, type BuildRunDeps, type BuildRunInput, type BuildSnapshot, type ExecutionPlan, type ReviewDecision } from './build-run.ts'
+
+const singlePlan: ExecutionPlan = {
+  implementationPlan: '- [ ] T1: implement the change', topTask: '- [ ] T1: implement the change',
+  executionSpec: 'Implement the complete accepted plan', complexity: 'mechanical', remainingTasks: 0,
+  strategy: 'single', rationale: 'The complete change fits in one implementation turn.',
+}
 
 function fixture(landFixes = true) {
   let landed = 10
@@ -21,7 +27,7 @@ function fixture(landFixes = true) {
   })
   for (const role of ['plan', 'build', 'review', 'fix']) {
     for (let round = 0; round <= 12; round++) outcomes.set(`run:${role}:${round}`, completed(
-      role === 'plan' && round > 0 ? { ...snapshot, payload: { executionSpec: 'revised execution spec' } } : undefined))
+      role === 'plan' ? { ...snapshot, payload: { ...singlePlan, ...(round > 0 ? { executionSpec: 'revised execution spec' } : {}) } } : undefined))
   }
   const runner = fakeRunner('anthropic', { outcomes })
   const run = runner.run.bind(runner)
@@ -55,13 +61,22 @@ function fixture(landFixes = true) {
     thread: null, budget: { wall_ms: 1000 },
   } as const
   const input: BuildRunInput = {
-    run_id: 'run', mode: 'pr', start: 'fresh', repl_provider: 'anthropic',
+    run_id: 'run', mode: 'implementation', start: 'fresh', repl_provider: 'anthropic',
     workers: { plan: { runner, request }, build: { runner, request }, review: { runner: cross, request }, fix: { runner, request } },
   }
   const events: string[] = []
   const decisions: ReviewDecision[] = []
   let reads = 0
+  let acceptedPlan = structuredClone(singlePlan)
   const deps: BuildRunDeps = {
+    modes: {
+      loadExecutionStrategy: async () => ({ kind: 'known', strategy: 'single', rationale: acceptedPlan.rationale, plan: acceptedPlan, source: 'planner' }),
+      selectExecutionStrategy: async value => { acceptedPlan = structuredClone(value.plan); return { kind: 'allow' } },
+      loadResume: async () => null, saveCheckpoint: async () => {},
+      regenerateDiff: async () => ({ kind: 'known', diff: snapshot.diff }),
+      probePlan: async () => null, advanceTask: async () => ({ kind: 'allow' }),
+      commitPlan: async () => ({ kind: 'unknown', detail: 'Single strategy never commits a task ledger' }),
+    },
     readReviewCap: async () => ({ kind: 'known' }),
     checkBuildClaim: async () => { events.push('preserve'); return { kind: 'blocked', on: 'Claim conflicts after preservation' } },
     assignedBranch: 'change',
@@ -107,6 +122,162 @@ test('fresh to merged with a fix, host gates and fake runners', async () => {
   expect(f.events.filter(e => e !== 'measure')).toEqual(['publishGate', 'publish', 'publishGate', 'publish', 'publicationSuite', 'mergeGate', 'merge'])
   expect(f.reads()).toBe(17)
   expect([...f.runner.calls, ...f.cross.calls].every(c => c.needs_approval_decision === false)).toBe(true)
+})
+
+function pendingStrategyFixture(strategy: 'single' | 'task_sequence') {
+  const f = modeFixture(strategy)
+  delete f.input.executionStrategy // Omitting the hint must still require planner selection.
+  let selected: Awaited<ReturnType<NonNullable<BuildRunDeps['modes']>['loadExecutionStrategy']>> = {
+    kind: 'known', strategy: null, rationale: null, plan: null, source: null,
+  }
+  const selections: Parameters<NonNullable<BuildRunDeps['modes']>['selectExecutionStrategy']>[0][] = []
+  f.deps.modes!.loadExecutionStrategy = async () => structuredClone(selected)
+  f.deps.modes!.selectExecutionStrategy = async value => {
+    selections.push(structuredClone(value))
+    selected = { kind: 'known', strategy: value.strategy, rationale: value.rationale, plan: value.plan, source: 'planner' }
+    return { kind: 'allow' }
+  }
+  const run = f.runner.run.bind(f.runner)
+  f.runner.run = async (request, ...rest) => {
+    if (request.role === 'build') {
+      expect(selected).toMatchObject({ strategy, source: 'planner', plan: { strategy } })
+      expect(selections).toHaveLength(1)
+    }
+    // The plan starts pending; selecting task_sequence changes subsequent task IDs.
+    const normalized = request.step_id.replace(/:task:\d+:/, ':')
+    const outcome = f.outcomes.get(normalized)
+    if (outcome) f.outcomes.set(request.step_id, outcome)
+    return run(request, ...rest)
+  }
+  return { ...f, selections, selection: () => selected }
+}
+
+for (const strategy of ['single', 'task_sequence'] as const)
+test(`fresh pending run persists ${strategy} before its only builder dispatch`, async () => {
+  const f = pendingStrategyFixture(strategy)
+  expect((await f.run()).kind).toBe(strategy === 'single' ? 'merged' : 'continued')
+  expect(f.runner.calls.map(call => call.role)).toEqual(['plan', 'build'])
+  expect(f.selections).toEqual([{ strategy, rationale: f.plan.rationale, plan: f.plan, refresh: false }])
+  expect(f.prepared.find(p => p.role === 'build')).toMatchObject({ previous: f.plan,
+    executionStrategy: strategy, suiteScope: strategy === 'single' ? 'full-suite' : 'subset' })
+})
+
+for (const strategy of ['single', 'task_sequence'] as const)
+test(`unselected pending initial planner resumes and selects ${strategy} without replacing its request`, async () => {
+  const f = pendingStrategyFixture(strategy)
+  f.outcomes.set('run:plan:0', { kind: 'unknown', detail: 'Initial planner acknowledgment lost' })
+  expect(await f.run()).toMatchObject({ kind: 'unknown', phase: 'plan', step_id: 'run:plan:0' })
+  const original = f.runner.calls[0]
+  f.state.resume = structuredClone(f.state.checkpoints.at(-1)!)
+  f.input.start = 'resume'
+  f.setPlan()
+  f.input.workers.plan.runner = { ...f.runner, recover: f.runner.run }
+  expect((await f.run()).kind).toBe(strategy === 'single' ? 'merged' : 'continued')
+  expect(f.runner.calls.filter(call => call.role === 'plan')).toEqual([original!, original!])
+  expect(f.selections).toHaveLength(1)
+})
+
+for (const selected of [false, true])
+test(`completed checkpoint ${selected ? 'with' : 'without'} selected strategy cannot invent implementation authority`, async () => {
+  const f = modeFixture('single')
+  delete f.input.executionStrategy
+  f.resume('built').remainingTasks = 0
+  if (!selected) f.deps.modes!.loadExecutionStrategy = async () => ({ kind: 'known', strategy: null, rationale: null, plan: null, source: null })
+  const outcome = await f.run()
+  expect(outcome.kind).toBe(selected ? 'merged' : 'unknown')
+  expect(f.runner.calls).toEqual([])
+  expect(f.cross.calls).toHaveLength(selected ? 1 : 0)
+  expect(f.events.includes('merge')).toBe(selected)
+})
+
+for (const patch of [
+  { strategy: undefined }, { strategy: 'parallel' }, { strategy: null }, { strategy: 1 },
+  { rationale: undefined }, { rationale: '' }, { rationale: ' \n ' },
+  { implementationPlan: '' }, { topTask: '' }, { executionSpec: '' },
+  { remainingTasks: -1 }, { complexity: 'invented' }, { additionalProperty: 'not allowed' },
+  { remainingTasks: 1 },
+]) test(`closed planner selection refuses malformed proposal ${JSON.stringify(patch)}`, async () => {
+  const f = pendingStrategyFixture('single')
+  f.setPlan({ ...f.plan, ...patch })
+  expect(await f.run()).toMatchObject({ kind: 'blocked', phase: 'plan' })
+  expect(f.runner.calls.map(call => call.role)).toEqual(['plan'])
+  expect(f.selections).toEqual([])
+  expect(f.selection()).toMatchObject({ strategy: null, plan: null })
+})
+
+for (const kind of ['blocked', 'unknown'] as const)
+test(`selection persistence ${kind} prevents builder and all publication`, async () => {
+  const f = pendingStrategyFixture('single')
+  f.deps.modes!.selectExecutionStrategy = async () => kind === 'blocked'
+    ? { kind, on: 'Selection compare-and-swap refused' } : { kind, detail: 'Selection write unobserved' }
+  expect(await f.run()).toMatchObject(kind === 'blocked'
+    ? { kind, phase: 'plan', on: 'Selection compare-and-swap refused' }
+    : { kind, phase: 'plan', detail: 'Selection write unobserved' })
+  expect(f.runner.calls.map(call => call.role)).toEqual(['plan'])
+  expect(f.cross.calls).toEqual([])
+  expect(f.events).not.toContain('publish')
+})
+
+test('unreadable persisted selection cannot be replaced with a new planner choice', async () => {
+  const f = pendingStrategyFixture('single')
+  f.deps.modes!.loadExecutionStrategy = async () => ({ kind: 'unknown', detail: 'Selection record is corrupt' })
+  expect(await f.run()).toMatchObject({ kind: 'unknown', phase: 'plan', detail: 'Selection record is corrupt' })
+  expect(f.runner.calls).toEqual([])
+  expect(f.selections).toEqual([])
+})
+
+for (const patch of [
+  { strategy: 'invented' }, { rationale: null }, { rationale: ' ' }, { plan: null },
+  { source: null }, { plan: { ...singlePlan, strategy: 'task_sequence' } },
+]) test(`corrupt selected evidence prevents reclassification ${JSON.stringify(patch)}`, async () => {
+  const f = fixture()
+  f.deps.modes!.loadExecutionStrategy = async () => ({ kind: 'known', strategy: 'single', rationale: singlePlan.rationale,
+    plan: singlePlan, source: 'planner', ...patch } as Awaited<ReturnType<NonNullable<BuildRunDeps['modes']>['loadExecutionStrategy']>>)
+  expect(await f.run()).toMatchObject({ kind: 'unknown', phase: 'plan', detail: 'Persisted execution strategy is missing valid selection evidence' })
+  expect(f.runner.calls).toEqual([])
+})
+
+for (const selected of ['single', 'task_sequence'] as const)
+test(`launch cannot override persisted ${selected} with a contradictory strategy hint`, async () => {
+  const f = modeFixture(selected)
+  f.input.executionStrategy = selected === 'single' ? 'task_sequence' : 'single'
+  expect(await f.run()).toMatchObject({ kind: 'unknown', phase: 'plan', detail: 'Execution strategy changed after launch preparation' })
+  expect(f.runner.calls).toEqual([])
+})
+
+test('selection acknowledgment requires exact durable readback before builder dispatch', async () => {
+  for (const patch of [{ strategy: null }, { source: null }, { source: 'legacy' },
+    { rationale: 'different rationale' }, { plan: { ...singlePlan, executionSpec: 'different work' } }]) {
+    const f = pendingStrategyFixture('single')
+    const load = f.deps.modes!.loadExecutionStrategy
+    f.deps.modes!.loadExecutionStrategy = async () => {
+      const stored = await load()
+      return f.selections.length ? { ...stored, ...patch } as Awaited<ReturnType<typeof load>> : stored
+    }
+    expect(await f.run()).toMatchObject({ kind: 'unknown', phase: 'plan', detail: 'Execution strategy persistence was not confirmed' })
+    expect(f.runner.calls.map(call => call.role)).toEqual(['plan'])
+    expect(f.selections).toHaveLength(1)
+  }
+})
+
+for (const selected of ['single', 'task_sequence'] as const)
+test(`existing ${selected} selection refuses planner reclassification`, async () => {
+  const f = modeFixture(selected)
+  f.setPlan({ ...f.plan, strategy: selected === 'single' ? 'task_sequence' : 'single' })
+  expect(await f.run()).toMatchObject({ kind: 'blocked', phase: 'plan' })
+  expect(f.runner.calls.map(call => call.role)).toEqual(['plan'])
+  expect(f.cross.calls).toEqual([])
+  expect(f.state.advances).toBe(0)
+})
+
+test('bounded replanning cannot change the selected strategy or dispatch a second builder', async () => {
+  const f = fixture()
+  f.decisions.push(gap)
+  f.outcomes.set('run:plan:1', f.completed({ ...f.snapshot, payload: { ...singlePlan, strategy: 'task_sequence' } }))
+  expect(await f.run()).toMatchObject({ kind: 'blocked', phase: 'plan', on: 'Planner cannot change the persisted execution strategy' })
+  expect(f.runner.calls.map(call => call.role)).toEqual(['plan', 'build', 'plan'])
+  expect(f.cross.calls).toHaveLength(1)
+  expect(f.events).not.toContain('merge')
 })
 
 test('review starts standalone and panel together, drains both, then rechecks CI and revision', async () => {
@@ -487,12 +658,12 @@ for (const gate of ['publishGate', 'mergeGate'] as const) {
 }
 test('host prepares the next brief from measured state and prior work', async () => {
   const f = fixture()
-  f.outcomes.set('run:plan:0', f.completed({ ...f.snapshot, payload: { plan: 'implement spec' } }))
+  f.outcomes.set('run:plan:0', f.completed({ ...f.snapshot, payload: singlePlan }))
   f.decisions.push({ kind: 'fix', findings: ['missing validation'] })
   const prepared: { role: string; previous: unknown; findings: readonly string[] }[] = []
   f.deps.prepareWork = async (request, context) => { prepared.push({ role: request.role, previous: context.previous, findings: context.findings }) }
   expect((await f.run()).kind).toBe('merged')
-  expect(prepared.find(p => p.role === 'build')?.previous).toEqual({ plan: 'implement spec' })
+  expect(prepared.find(p => p.role === 'build')?.previous).toEqual(singlePlan)
   expect(prepared.find(p => p.role === 'fix')?.findings).toEqual(['missing validation'])
 })
 test('G030 caps a planner branch brief before preparing the builder context', async () => {
@@ -519,7 +690,7 @@ test('build head and diff advance from the initial base under host observation',
   const f = fixture()
   const built = structuredClone(f.snapshot)
   f.snapshot.head = '0'.repeat(40); f.snapshot.diff = ''
-  f.outcomes.set('run:plan:0', f.completed(structuredClone(f.snapshot)))
+  f.outcomes.set('run:plan:0', f.completed({ ...structuredClone(f.snapshot), payload: singlePlan }))
   const measure = f.deps.measure; let reads = 0
   f.deps.measure = async () => {
     if (++reads === 3) Object.assign(f.snapshot, built)
@@ -554,10 +725,13 @@ for (const change of ['number', 'head'] as const) {
   })
 }
 
-function modeFixture(mode: BuildRunInput['mode'] = 'ralph') {
+function modeFixture(mode: 'single' | 'task_sequence' | 'wave' | 'bound_pr' = 'task_sequence') {
   const f = fixture()
-  f.input.mode = mode
-  const plan = { implementationPlan: '- [ ] T1: first\n- [ ] T2: second', topTask: '- [ ] T1: first', remainingTasks: 1, executionSpec: 'implement one task' }
+  f.input.mode = mode === 'single' || mode === 'task_sequence' ? 'implementation' : mode
+  const strategy = mode === 'task_sequence' || mode === 'wave' ? 'task_sequence' : 'single'
+  if (f.input.mode === 'implementation') f.input.executionStrategy = strategy
+  const plan: ExecutionPlan = { implementationPlan: '- [ ] T1: first\n- [ ] T2: second', topTask: '- [ ] T1: first', remainingTasks: strategy === 'single' ? 0 : 1,
+    executionSpec: 'implement one task', complexity: 'mechanical', strategy, rationale: 'The selected strategy matches the accepted execution boundaries.' }
   const state: {
     resume: import('./build-run.ts').ResumeCheckpoint | null
     probe: import('./build-run.ts').PlanProbe | null
@@ -577,7 +751,10 @@ function modeFixture(mode: BuildRunInput['mode'] = 'ralph') {
   // The ledger commit a real host makes: a NEW head on top of the measured one, and
   // every later worker trailer describes that head.
   const ledgerHead = 'c'.repeat(40)
+  let acceptedPlan = plan
   f.deps.modes = {
+    loadExecutionStrategy: async () => ({ kind: 'known', strategy, rationale: acceptedPlan.rationale, plan: acceptedPlan, source: 'planner' }),
+    selectExecutionStrategy: async value => { acceptedPlan = structuredClone(value.plan); return { kind: 'allow' } },
     loadResume: async () => state.resume,
     saveCheckpoint: async checkpoint => { f.events.push(`checkpoint:${checkpoint.stage}:${checkpoint.head}`); state.checkpoints.push(structuredClone(checkpoint)) },
     regenerateDiff: async head => { f.events.push(`diff:${head}`); return { kind: 'known', diff: state.regenerated } },
@@ -596,7 +773,7 @@ function modeFixture(mode: BuildRunInput['mode'] = 'ralph') {
       }
       return { kind: 'known', head: ledgerHead }
     },
-    advanceRalph: async value => {
+    advanceTask: async value => {
       f.events.push(`advance:${value.snapshot.head}`)
       state.advanced.push(structuredClone(value.snapshot))
       state.oldResult = null; state.advances++; return { kind: 'allow' }
@@ -612,16 +789,16 @@ function modeFixture(mode: BuildRunInput['mode'] = 'ralph') {
     return state.resume
   }
   return { ...f, state, plan, prepared, setPlan, resume, ledgerHead, run: () => {
-    if (f.input.mode === 'ralph') {
+    if (f.input.executionStrategy === 'task_sequence') {
       for (const [key, value] of [...f.outcomes]) {
-        if (!key.includes(':task:')) f.outcomes.set(key.replace('run:', `run:task:${f.input.ralphRound ?? 0}:`), value)
+        if (!key.includes(':task:')) f.outcomes.set(key.replace('run:', `run:task:${f.input.taskIteration ?? 0}:`), value)
       }
     }
     return f.run()
   } }
 }
 
-for (const mode of ['ralph', 'wave'] as const) {
+for (const mode of ['task_sequence', 'wave'] as const) {
   test(`G025 G024 ${mode} requires a non-null valid plan before build`, async () => {
     for (const payload of [null, {}, { remainingTasks: -1 }]) {
       const f = modeFixture(mode); f.setPlan(payload)
@@ -655,7 +832,7 @@ test('G034 wave requires a measured full commit even with a matching trailer', a
 })
 
 function cheapFixture() {
-  const f = modeFixture(); f.resume('ralph-task-built'); f.input.ralphRound = 2
+  const f = modeFixture(); f.resume('task-built'); f.input.taskIteration = 2
   f.state.probe = { found: true, body: f.plan.implementationPlan,
     sha256: new Bun.CryptoHasher('sha256').update(f.plan.implementationPlan).digest('hex'), uncheckedCount: 2 }
   return f
@@ -663,12 +840,12 @@ function cheapFixture() {
 
 test('G026 clean handoff and positive round outside refresh interval select next planner', async () => {
   for (const round of [0, -1, 1.5, 5, 10, 2]) {
-    const f = cheapFixture(); f.input.ralphRound = round
+    const f = cheapFixture(); f.input.taskIteration = round
     await f.run()
     expect(f.prepared[0]?.planner).toBe(round === 2 ? 'next' : 'full')
     expect(f.events.includes('probe')).toBe(round === 2)
   }
-  for (const stage of ['built', 'ralph-task-built-deviated'] as const) {
+  for (const stage of ['built', 'task-built-deviated'] as const) {
     const f = cheapFixture(); f.state.resume!.stage = stage
     await f.run()
     expect(f.events).not.toContain('probe')
@@ -704,7 +881,7 @@ test('G029 committed body task and count replace cheap planner claims', async ()
 
 test('G037 intermediate task atomically consumes old result before continuation', async () => {
   const f = modeFixture()
-  expect(await f.run()).toMatchObject({ kind: 'continued', cause: 'ralph-task-built' })
+  expect(await f.run()).toMatchObject({ kind: 'continued', cause: 'task-built' })
   expect(f.state.oldResult).toBeNull()
   expect(f.state.advances).toBe(1)
   expect(f.cross.calls).toHaveLength(0)
@@ -717,7 +894,7 @@ test('G037 intermediate task atomically consumes old result before continuation'
 for (const kind of ['blocked', 'unknown'] as const) {
   test(`G037 handoff ${kind} never acknowledges continuation`, async () => {
     const f = modeFixture()
-    f.deps.modes!.advanceRalph = async () => kind === 'blocked' ? { kind, on: 'head moved' } : { kind, detail: 'write unobserved' }
+    f.deps.modes!.advanceTask = async () => kind === 'blocked' ? { kind, on: 'head moved' } : { kind, detail: 'write unobserved' }
     expect(await f.run()).toMatchObject({ kind })
     expect(f.state.oldResult).not.toBeNull()
     expect(f.cross.calls).toHaveLength(0)
@@ -728,9 +905,9 @@ for (const kind of ['blocked', 'unknown'] as const) {
 // G026's cheap planner reads the committed ledger at the tip, and nothing in the
 // typed host used to write one, so every continuation re-planned from scratch. The
 // driver now refuses a HANDOFF ledger that disagrees with its counts and commits the
-// ticked ledger at the handoff, BEFORE `advanceRalph` records the head.
+// ticked ledger at the handoff, BEFORE `advanceTask` records the head.
 
-test('G025 ledger: a Ralph handoff plan whose unchecked lines disagree with topTask/remainingTasks is no plan', async () => {
+test('G025 ledger: a task-sequence handoff plan whose unchecked lines disagree with topTask/remainingTasks is no plan', async () => {
   const ledger = 'Planner returned no execution plan: the task ledger disagrees with topTask/remainingTasks'
   for (const patch of [
     { remainingTasks: 2 },                                   // count says three, the ledger has two
@@ -744,8 +921,8 @@ test('G025 ledger: a Ralph handoff plan whose unchecked lines disagree with topT
     expect(f.runner.calls.map(c => c.role)).toEqual(['plan'])
     expect(f.state.commits).toEqual([])
   }
-  // Positive control: the same disagreeing payload is not a ledger in pr mode.
-  const pr = modeFixture('pr'); pr.setPlan({ ...pr.plan, remainingTasks: 2 })
+  // A whole-plan single build does not derive execution boundaries from checkbox counts.
+  const pr = modeFixture('single'); pr.setPlan({ ...pr.plan, topTask: 'Complete both tasks', remainingTasks: 0 })
   expect((await pr.run()).kind).toBe('merged')
   expect(pr.state.commits).toEqual([])
   // Whitespace, or a missing checkbox marker, around an otherwise verbatim top task
@@ -770,7 +947,7 @@ test('G025 ledger: a plan that commits no ledger is never refused for its shape'
   }
 })
 
-test('Ralph handoff commits the ticked ledger and hands the LEDGER head to advanceRalph', async () => {
+test('task-sequence handoff commits the ticked ledger and hands the LEDGER head to advanceTask', async () => {
   const f = modeFixture()
   const outcome = await f.run()
   expect(outcome).toMatchObject({ kind: 'continued', remainingTasks: 1, snapshot: { head: f.ledgerHead } })
@@ -783,15 +960,15 @@ test('Ralph handoff commits the ticked ledger and hands the LEDGER head to advan
   expect(order).toEqual([`checkpoint:built:${'a'.repeat(40)}`, 'commitPlan', `checkpoint:built:${f.ledgerHead}`, `advance:${f.ledgerHead}`])
 })
 
-test('Ralph ledger commit that writes nothing keeps the head and makes no second checkpoint', async () => {
+test('task-sequence ledger commit that writes nothing keeps the head and makes no second checkpoint', async () => {
   const f = modeFixture(); f.state.committedBody = '- [x] T1: first\n- [ ] T2: second'
   expect(await f.run()).toMatchObject({ kind: 'continued', snapshot: { head: 'a'.repeat(40) } })
   expect(f.state.commits).toHaveLength(1)
   expect(f.state.advanced.map(s => s.head)).toEqual(['a'.repeat(40)])
-  expect(f.state.checkpoints.filter(c => c.stage === 'built' && c.pending === undefined)).toHaveLength(1)
+  expect(f.state.checkpoints.filter(c => c.stage === 'built' && c.pending === undefined && c.head === f.snapshot.head)).toHaveLength(1)
 })
 
-test('Ralph ledger commit refusal or an unmeasured ledger head never hands off', async () => {
+test('task-sequence ledger commit refusal or an unmeasured ledger head never hands off', async () => {
   for (const reply of [
     { kind: 'blocked', on: 'Host observation changed since the gate' },
     { kind: 'unknown', detail: 'Task ledger commit was not confirmed' },
@@ -807,7 +984,7 @@ test('Ralph ledger commit refusal or an unmeasured ledger head never hands off',
   }
 })
 
-test('final Ralph iteration never moves the reviewed head with a ledger commit', async () => {
+test('final task-sequence iteration never moves the reviewed head with a ledger commit', async () => {
   // A one-task run: no continuation will read a ledger, so the host adds nothing to
   // the diff the builder's receipts are bound to.
   const single = modeFixture(); single.plan.implementationPlan = '- [ ] T1: first'; single.plan.remainingTasks = 0; single.setPlan()
@@ -832,7 +1009,7 @@ test('iteration 2 continues from the ledger iteration 1 committed, not a regener
   const committed = first.state.commits[0]!.body
   // Iteration 2: the resumed run at the handoff the first one recorded, with the
   // probe returning exactly the bytes the first iteration committed.
-  const f = modeFixture(); f.resume('ralph-task-built'); f.input.ralphRound = 1
+  const f = modeFixture(); f.resume('task-built'); f.input.taskIteration = 1
   f.state.probe = { found: true, body: committed, uncheckedCount: 1,
     sha256: new Bun.CryptoHasher('sha256').update(committed).digest('hex') }
   // The planner is a model: its claim is untrusted and here deliberately wrong.
@@ -845,7 +1022,7 @@ test('iteration 2 continues from the ledger iteration 1 committed, not a regener
 
 test('G038 exact full resume head skips build; moved missing and short heads rebuild', async () => {
   for (const head of [null, 'short', 'b'.repeat(40), 'a'.repeat(40)]) {
-    const f = modeFixture('pr'); const checkpoint = f.resume('approved', 1, { findings: [], blockingCount: 0 }); checkpoint.head = head
+    const f = modeFixture('single'); const checkpoint = f.resume('approved', 1, { findings: [], blockingCount: 0 }); checkpoint.head = head
     expect((await f.run()).kind).toBe('merged')
     expect(f.runner.calls.some(c => c.role === 'build')).toBe(head !== f.snapshot.head)
     expect(f.cross.calls.length).toBe(head === f.snapshot.head ? 0 : 1)
@@ -853,7 +1030,7 @@ test('G038 exact full resume head skips build; moved missing and short heads reb
 })
 
 for (const moved of [false, true]) test(`review recovery ${moved ? 'invalidates a moved head' : 'reuses the exact head'} without resetting its round`, async () => {
-  const f = modeFixture('pr')
+  const f = modeFixture('single')
   f.resume('built', 3, { findings: ['prior'], blockingCount: 1 })
   const results = new Map<string, BoundedWorkOutcome>()
   const paid: string[] = []
@@ -879,7 +1056,7 @@ for (const moved of [false, true]) test(`review recovery ${moved ? 'invalidates 
   if (moved) {
     f.snapshot.head = 'b'.repeat(40)
     f.snapshot.pr!.head = f.snapshot.head
-    for (const key of f.outcomes.keys()) f.outcomes.set(key, f.completed())
+    for (const key of f.outcomes.keys()) f.outcomes.set(key, f.completed({ ...f.snapshot, ...(key.includes(':plan:') ? { payload: singlePlan } : {}) }))
   }
   expect(await f.run()).toMatchObject({ kind: 'merged' })
   expect(paid).toHaveLength(moved ? 2 : 1)
@@ -895,7 +1072,7 @@ for (const moved of [false, true]) test(`review recovery ${moved ? 'invalidates 
 
 test('G038 absent live head rebuilds but unreadable required head stops', async () => {
   for (const head of ['absent', '']) {
-    const f = modeFixture('pr'); f.resume(); f.snapshot.head = head; f.setPlan()
+    const f = modeFixture('single'); f.resume(); f.snapshot.head = head; f.setPlan()
     const measure = f.deps.measure; let reads = 0
     f.deps.measure = async () => { if (++reads === 3) f.snapshot.head = 'a'.repeat(40); return measure() }
     expect((await f.run()).kind).toBe(head === 'absent' ? 'merged' : 'failed')
@@ -906,7 +1083,7 @@ test('G038 absent live head rebuilds but unreadable required head stops', async 
 test('G039 only actionable code findings buy a resumed fix', async () => {
   for (const finding of [null, { kind: 'lane', actionable: true, text: 'seat down' },
     { kind: 'code', actionable: false, text: 'advisory' }, { kind: 'code', actionable: true, text: 'bug' }] as const) {
-    const f = modeFixture('pr'); const checkpoint = f.resume('rejected', 2, { findings: finding ? [finding.text] : [], blockingCount: finding?.actionable ? 1 : 0 })
+    const f = modeFixture('single'); const checkpoint = f.resume('rejected', 2, { findings: finding ? [finding.text] : [], blockingCount: finding?.actionable ? 1 : 0 })
     checkpoint.findings = finding ? [finding] : []
     expect((await f.run()).kind).toBe('merged')
     const actionable = finding?.kind === 'code' && finding.actionable
@@ -918,7 +1095,7 @@ test('G039 only actionable code findings buy a resumed fix', async () => {
 
 test('G040 resume diff is regenerated from pinned OID and empty diff rebuilds', async () => {
   for (const diff of ['', '+built\n']) {
-    const f = modeFixture('pr'); f.resume(); f.state.regenerated = diff
+    const f = modeFixture('single'); f.resume(); f.state.regenerated = diff
     expect((await f.run()).kind).toBe('merged')
     expect(f.events).toContain(`diff:${'a'.repeat(40)}`)
     expect(f.runner.calls.some(c => c.role === 'build')).toBe(diff === '')
@@ -927,14 +1104,14 @@ test('G040 resume diff is regenerated from pinned OID and empty diff rebuilds', 
 
 test('G041 resume inherits spent rounds and cannot restart exhausted budget', async () => {
   for (const stage of ['fixed', 'rejected'] as const) {
-    const f = modeFixture('pr'); const checkpoint = f.resume(stage, 10, { findings: ['prior'], blockingCount: 2 })
+    const f = modeFixture('single'); const checkpoint = f.resume(stage, 10, { findings: ['prior'], blockingCount: 2 })
     checkpoint.findings = [{ kind: 'code', actionable: true, text: 'bug' }]
     f.decisions.push({ kind: 'fix', findings: ['bug'] })
     expect(await f.run()).toMatchObject({ kind: 'blocked', recipient: 'orchestrator' })
     expect(f.runner.calls).toHaveLength(0)
     expect(f.cross.calls.map(c => c.step_id.replace(/:head:[a-f0-9]+$/, ''))).toEqual(stage === 'fixed' ? ['run:review:10'] : [])
   }
-  const f = modeFixture('pr'); f.resume('fixed', 3, { findings: ['prior'], blockingCount: 2 })
+  const f = modeFixture('single'); f.resume('fixed', 3, { findings: ['prior'], blockingCount: 2 })
   f.decisions.push({ kind: 'fix', findings: ['new bug'] })
   expect((await f.run()).kind).toBe('merged')
   expect(f.runner.calls.map(c => c.step_id)).toEqual(['run:fix:3'])
@@ -942,7 +1119,7 @@ test('G041 resume inherits spent rounds and cannot restart exhausted budget', as
 })
 
 test('resume pending worker preserves phase and exact step without dispatch', async () => {
-  const f = modeFixture('pr'); const checkpoint = f.resume()
+  const f = modeFixture('single'); const checkpoint = f.resume()
   checkpoint.pending = { phase: 'fix', step_id: 'original:fix:3' }
   expect(await f.run()).toMatchObject({ kind: 'unknown', phase: 'fix', step_id: 'original:fix:3' })
   expect(f.runner.calls).toHaveLength(0)
@@ -954,7 +1131,7 @@ for (const role of ['plan', 'build', 'review', 'fix'] as const) for (const reser
   test(`pending ${role} ${missingReservation ? `refuses ${reservationState} reservation` : 'recovers its original file result'} after restart without another provider turn`, async () => {
     const directory = await mkdtemp(join(tmpdir(), 'build-recovery-'))
     try {
-      const f = modeFixture('pr')
+      const f = modeFixture('single')
       f.input.repl_provider = 'openai-codex'
       if (role === 'fix') f.resume('rejected', 3, { findings: ['logic'], blockingCount: 1 }).findings = [{ kind: 'code', actionable: true, text: 'logic' }]
       let panels = 0
@@ -1039,7 +1216,7 @@ for (const role of ['plan', 'build', 'review', 'fix'] as const) for (const reser
 }
 
 async function pendingBuildFixture() {
-  const f = modeFixture('pr')
+  const f = modeFixture('single')
   const original = f.completed()
   f.outcomes.set('run:build:0', { kind: 'unknown', detail: 'lost acknowledgement' })
   expect(await f.run()).toMatchObject({ kind: 'unknown', phase: 'build' })
@@ -1053,7 +1230,7 @@ async function pendingBuildFixture() {
 }
 
 for (const progress of ['missing', 'null', 'invalid', 'valid'] as const) test(`pending fix requires ${progress} review progress to preserve the repeated-finding gate`, async () => {
-  const f = modeFixture('pr')
+  const f = modeFixture('single')
   f.decisions.push({ kind: 'fix', findings: ['repeat'], blockingCount: 1 })
   f.outcomes.set('run:fix:1', { kind: 'unknown', detail: 'lost acknowledgement' })
   expect(await f.run()).toMatchObject({ kind: 'unknown', phase: 'fix' })
@@ -1086,7 +1263,7 @@ for (const progress of ['missing', 'null', 'invalid', 'valid'] as const) test(`p
 })
 
 for (const role of ['plan', 'build', 'review'] as const) test(`pending ${role} rejects an omitted prior-review field before recovery`, async () => {
-  const f = modeFixture('pr')
+  const f = modeFixture('single')
   const key = `run:${role}:${role === 'review' ? 1 : 0}`
   f.outcomes.set(key, { kind: 'unknown', detail: 'lost acknowledgement' })
   expect(await f.run()).toMatchObject({ kind: 'unknown', phase: role })
@@ -1114,7 +1291,7 @@ for (const scenario of [
   { after: 'fix', role: 'review', round: 2 },
 ] as const) for (const history of ['missing', 'null', 'valid'] as const) {
   test(`pending ${scenario.role}:${scenario.round} after ${scenario.after} requires ${history} review history`, async () => {
-    const f = modeFixture('pr')
+    const f = modeFixture('single')
     f.decisions.push(scenario.after === 'fix' ? { kind: 'fix', findings: ['repeat'], blockingCount: 2 }
       : { kind: 're-plan', findings: ['repeat'], blockingCount: 2, whatIsMissing: 'design' })
     const step = `run:${scenario.role}:${scenario.round}`
@@ -1151,7 +1328,7 @@ for (const scenario of [
 
 for (const after of ['fix', 're-plan'] as const) for (const history of ['missing', 'null', 'missing-marker', 'invalid-marker', 'erased', 'valid'] as const) {
   test(`completed ${after} checkpoint keeps ${history} history before its next review`, async () => {
-    const f = modeFixture('pr')
+    const f = modeFixture('single')
     f.decisions.push(after === 'fix' ? { kind: 'fix', findings: ['repeat'], blockingCount: 2 }
       : { kind: 're-plan', findings: ['repeat'], blockingCount: 2, whatIsMissing: 'design' })
     let readiness = 0
@@ -1186,13 +1363,13 @@ for (const after of ['fix', 're-plan'] as const) for (const history of ['missing
 }
 
 for (const history of ['missing', 'null', 'valid'] as const) test(`moved-head rebuild requires ${history} history before writing a later-round request`, async () => {
-  const f = modeFixture('pr')
+  const f = modeFixture('single')
   const saved = f.resume('approved', 1, { findings: [], blockingCount: 0 })
   if (history === 'missing') delete saved.previousReview
   if (history === 'null') saved.previousReview = null
   f.state.resume = JSON.parse(JSON.stringify(saved))
   f.snapshot.head = 'b'.repeat(40)
-  for (const key of f.outcomes.keys()) f.outcomes.set(key, f.completed())
+  for (const key of f.outcomes.keys()) f.outcomes.set(key, f.completed({ ...f.snapshot, ...(key.includes(':plan:') ? { payload: singlePlan } : {}) }))
   expect(await f.run()).toMatchObject({ kind: history === 'valid' ? 'merged' : 'unknown' })
   if (history === 'valid') expect(f.runner.calls.map(request => request.step_id)).toEqual(['run:plan:1', 'run:build:1'])
   else {
@@ -1204,7 +1381,7 @@ for (const history of ['missing', 'null', 'valid'] as const) test(`moved-head re
 })
 
 for (const loseAck of [false, true]) test(`G038 generated pre-review checkpoint permits moved-head plan one, lost ack=${loseAck}`, async () => {
-  const f = modeFixture('pr')
+  const f = modeFixture('single')
   f.deps.reviewReadiness = async () => ({ kind: 'unknown', detail: 'stopped before first review' })
   expect(await f.run()).toMatchObject({ kind: 'unknown', detail: 'stopped before first review' })
   const saved = JSON.parse(JSON.stringify(f.state.checkpoints.at(-1)!))
@@ -1215,7 +1392,7 @@ for (const loseAck of [false, true]) test(`G038 generated pre-review checkpoint 
   f.input.start = 'resume'
   f.snapshot.head = 'b'.repeat(40)
   if (f.snapshot.pr) f.snapshot.pr.head = f.snapshot.head
-  for (const key of f.outcomes.keys()) f.outcomes.set(key, f.completed())
+  for (const key of f.outcomes.keys()) f.outcomes.set(key, f.completed({ ...f.snapshot, ...(key.includes(':plan:') ? { payload: singlePlan } : {}) }))
   f.deps.reviewReadiness = async () => ({ kind: 'allow' })
   f.runner.calls.length = 0
   if (loseAck) {
@@ -1224,7 +1401,7 @@ for (const loseAck of [false, true]) test(`G038 generated pre-review checkpoint 
     const pending = JSON.parse(JSON.stringify(f.state.checkpoints.at(-1)!))
     expect(pending.pending.recovery).toMatchObject({ round: 1, previousReview: null, reviewBaseline: 'none' })
     f.state.resume = pending
-    f.outcomes.set('run:plan:1', f.completed())
+    f.outcomes.set('run:plan:1', f.completed({ ...f.snapshot, payload: singlePlan }))
     f.input.workers.plan.runner = { ...f.runner, recover: f.runner.run }
     f.runner.calls.length = 0
   }
@@ -1236,7 +1413,7 @@ for (const loseAck of [false, true]) test(`G038 generated pre-review checkpoint 
 
 for (const role of ['plan', 'build', 'review', 'fix'] as const) for (const marker of ['missing', 'invalid', 'contradictory'] as const) {
   test(`pending ${role} rejects ${marker} baseline provenance before recovery`, async () => {
-    const f = modeFixture('pr')
+    const f = modeFixture('single')
     if (role === 'fix') f.decisions.push({ kind: 'fix', findings: ['repeat'], blockingCount: 1 })
     const step = `run:${role}:${role === 'fix' || role === 'review' ? 1 : 0}`
     f.outcomes.set(step, { kind: 'unknown', detail: 'lost acknowledgement' })
@@ -1264,7 +1441,7 @@ for (const role of ['plan', 'build', 'review', 'fix'] as const) for (const marke
 }
 
 for (const role of ['fix', 'plan', 'build', 'review'] as const) test(`pending ${role} cannot erase established provenance with a coherent none pair`, async () => {
-  const f = modeFixture('pr')
+  const f = modeFixture('single')
   f.decisions.push(role === 'fix' ? { kind: 'fix', findings: ['repeat'], blockingCount: 1 }
     : { kind: 're-plan', findings: ['repeat'], blockingCount: 1, whatIsMissing: 'design' })
   const step = `run:${role}:${role === 'review' ? 2 : 1}`
@@ -1286,7 +1463,7 @@ for (const role of ['fix', 'plan', 'build', 'review'] as const) test(`pending ${
 })
 
 test('a round-zero rebuild can legitimately retain prior review history', async () => {
-  const f = modeFixture('pr')
+  const f = modeFixture('single')
   f.resume('fixed', 3, { findings: ['prior'], blockingCount: 2 })
   f.snapshot.head = 'absent'
   f.outcomes.set('run:plan:0', { kind: 'unknown', detail: 'still planning' })
@@ -1330,7 +1507,7 @@ test('pending build result cannot apply to a different measured head', async () 
 })
 
 test('writable pending planner cannot apply an old result to a moved head', async () => {
-  const f = modeFixture('pr')
+  const f = modeFixture('single')
   const original = f.outcomes.get('run:plan:0')!
   f.outcomes.set('run:plan:0', { kind: 'unknown', detail: 'lost acknowledgement' })
   expect(await f.run()).toMatchObject({ kind: 'unknown', phase: 'plan' })
@@ -1365,7 +1542,7 @@ test('unresolved pending build remains unknown and cannot buy a new step', async
 })
 
 for (const role of ['plan', 'review'] as const) test(`read-only pending ${role} cannot recover across head movement`, async () => {
-  const f = modeFixture('pr')
+  const f = modeFixture('single')
   f.input.workers[role].request = { ...f.input.workers[role].request, writable: false }
   const key = `run:${role}:${role === 'plan' ? 0 : 1}`
   f.outcomes.set(key, { kind: 'unknown', detail: 'lost acknowledgement' })
@@ -1392,7 +1569,7 @@ test('recovered pending build still requires the publication suite', async () =>
 })
 
 test('pending review cannot be discarded by a publication nomination repair', async () => {
-  const f = modeFixture('pr')
+  const f = modeFixture('single')
   f.outcomes.set('run:review:1', { kind: 'unknown', detail: 'still running' })
   expect(await f.run()).toMatchObject({ kind: 'unknown', phase: 'review' })
   const pending = JSON.parse(JSON.stringify(f.state.checkpoints.at(-1)!))
@@ -1412,7 +1589,7 @@ test('pending review cannot be discarded by a publication nomination repair', as
 })
 
 test('interrupted nomination repair retains its own review progress before a resumed fix', async () => {
-  const f = modeFixture('pr')
+  const f = modeFixture('single')
   f.resume('approved', 1, { findings: ['old'], blockingCount: 2 })
   f.deps.publishGate = async () => ({ kind: 'repair-nomination', finding: 'nomination' })
   const save = f.deps.modes!.saveCheckpoint
@@ -1432,7 +1609,7 @@ test('interrupted nomination repair retains its own review progress before a res
   expect(f.events).not.toContain('merge')
 })
 
-for (const remainingTasks of [0, 1]) test(`pending Ralph build preserves its validated remainder ${remainingTasks}`, async () => {
+for (const remainingTasks of [0, 1]) test(`pending task-sequence build preserves its validated remainder ${remainingTasks}`, async () => {
   const f = modeFixture()
   f.setPlan({ ...f.plan, remainingTasks })
   f.outcomes.set('run:build:0', { kind: 'unknown', detail: 'lost acknowledgement' })
@@ -1462,19 +1639,19 @@ for (const start of ['fresh', 'resume'] as const) {
   })
 }
 
-for (const mode of ['ralph', 'wave'] as const) {
+for (const mode of ['task_sequence', 'wave'] as const) {
   test(`${mode} still corroborates worker trailers and preserves worker unknown`, async () => {
     for (const unknown of [false, true]) {
       const f = modeFixture(mode); f.input.pinnedTaskId = 'T1'
       f.outcomes.set('run:build:0', unknown ? { kind: 'unknown', detail: 'running' } : f.completed({ ...f.snapshot, head: 'lie' }))
-      expect(await f.run()).toMatchObject(unknown ? { kind: 'unknown', step_id: mode === 'ralph' ? 'run:task:0:build:0' : 'run:build:0' } : { kind: 'failed', cause: 'built-head-unverified' })
+      expect(await f.run()).toMatchObject(unknown ? { kind: 'unknown', step_id: mode === 'task_sequence' ? 'run:task:0:build:0' : 'run:build:0' } : { kind: 'failed', cause: 'built-head-unverified' })
       expect(f.cross.calls).toHaveLength(0)
       expect(f.events).not.toContain('publish')
     }
   })
 }
 
-test('Ralph step identities include the task iteration', async () => {
+test('task-sequence step identities include the task iteration', async () => {
   const f = cheapFixture(); await f.run()
   expect(f.runner.calls.map(c => c.step_id)).toEqual(['run:task:2:plan:0', 'run:task:2:build:0'])
 })
@@ -1490,14 +1667,14 @@ test('mode host and valid recorded rounds are required', async () => {
   const missing = modeFixture(); delete missing.deps.modes
   expect(await missing.run()).toMatchObject({ kind: 'blocked', on: 'Mode host is required' })
   for (const round of [-1, 1.5]) {
-    const f = modeFixture('pr'); f.resume('built', round)
+    const f = modeFixture('single'); f.resume('built', round)
     expect(await f.run()).toMatchObject({ kind: 'blocked', on: 'Invalid recorded review round' })
     expect(f.runner.calls).toHaveLength(0)
   }
 })
 
 test('resume regenerated diff disagreement blocks and unreadable diff remains unknown', async () => {
-  const f = modeFixture('pr'); f.resume(); f.state.regenerated = 'different'
+  const f = modeFixture('single'); f.resume(); f.state.regenerated = 'different'
   expect(await f.run()).toMatchObject({ kind: 'blocked', on: 'Regenerated diff disagrees with host measurement' })
   expect(f.runner.calls).toHaveLength(0)
   f.deps.modes!.regenerateDiff = async () => ({ kind: 'unknown', detail: 'read failed' })
@@ -1506,7 +1683,7 @@ test('resume regenerated diff disagreement blocks and unreadable diff remains un
 })
 
 test('resume rejection retains previous finding classes at round three', async () => {
-  const f = modeFixture('pr'); const checkpoint = f.resume('rejected', 3, { findings: ['same class'], blockingCount: 1 })
+  const f = modeFixture('single'); const checkpoint = f.resume('rejected', 3, { findings: ['same class'], blockingCount: 1 })
   checkpoint.findings = [{ kind: 'code', actionable: true, text: 'same class' }]
   checkpoint.previousFindings = ['same class']
   expect(await f.run()).toMatchObject({ kind: 'blocked', on: 'Review requires orchestrator arbitration: repeated finding' })
@@ -1551,7 +1728,7 @@ test('local mode rejects PR identity and changed landing revision', async () => 
   const bound = localFixture(); bound.input.mode = 'bound_pr'
   expect(await bound.run()).toMatchObject({ kind: 'blocked', on: 'bound_pr requires the retained review-only executor' })
   const existing = localFixture(); existing.input.start = 'resume'
-  existing.deps.modes = { loadResume: async () => null } as NonNullable<BuildRunDeps['modes']>
+  existing.deps.modes = { ...existing.deps.modes!, loadResume: async () => null }
   existing.snapshot.pr = { number: 1, head: existing.snapshot.head, state: 'OPEN' }
   expect(await existing.run()).toMatchObject({ kind: 'blocked', on: 'Local build has a PR' })
   const moved = localFixture(); moved.deps.merge = async () => { moved.snapshot.head = 'b'.repeat(40) }
@@ -1619,7 +1796,7 @@ test('G075 revised execution spec reaches rebuild', async () => {
     if (request.step_id === 'run:build:1') prepared.push(context.previous)
   }
   expect((await f.run()).kind).toBe('merged')
-  expect(prepared).toEqual([{ executionSpec: 'revised execution spec' }])
+  expect(prepared).toEqual([{ ...singlePlan, executionSpec: 'revised execution spec' }])
 })
 test('G075 unreadable re-plan measurement remains unknown', async () => {
   const f = fixture(); f.decisions.push(gap)
@@ -1638,9 +1815,10 @@ test('G077 final-round design gap stops; a spare round admits replacement', asyn
     const f = fixture(); f.input.start = 'resume'
     f.deps.readReviewCap = async () => ({ kind: 'known', max_rounds: 5 })
     f.deps.modes = {
+      ...f.deps.modes!,
       loadResume: async () => ({ head: f.snapshot.head, stage: 'built', round, findings: [], previousFindings: [], reviewBaseline: 'required', previousReview: { findings: ['prior'], blockingCount: 3 } }),
       regenerateDiff: async () => ({ kind: 'known', diff: f.snapshot.diff }),
-      probePlan: async () => null, advanceRalph: async () => ({ kind: 'allow' }),
+      probePlan: async () => null, advanceTask: async () => ({ kind: 'allow' }),
       commitPlan: async () => ({ kind: 'unknown', detail: 'pr mode never commits a ledger' }),
       saveCheckpoint: async () => {},
     }
@@ -1693,10 +1871,11 @@ test('resume keeps the host re-plan count and rejects invalid counts', async () 
   for (const used of [1, 2]) {
     const f = fixture(); f.input.start = 'resume'
     f.deps.modes = {
+      ...f.deps.modes!,
       saveCheckpoint: async () => {},
       loadResume: async () => ({ head: f.snapshot.head, stage: 'built', round: 2, replansUsed: used, findings: [], previousFindings: [], reviewBaseline: 'required', previousReview: { findings: ['prior'], blockingCount: 3 } }),
       regenerateDiff: async () => ({ kind: 'known', diff: f.snapshot.diff }),
-      probePlan: async () => null, advanceRalph: async () => ({ kind: 'allow' }),
+      probePlan: async () => null, advanceTask: async () => ({ kind: 'allow' }),
       commitPlan: async () => ({ kind: 'unknown', detail: 'pr mode never commits a ledger' }),
     }
     f.decisions.push(gap)
@@ -1706,10 +1885,11 @@ test('resume keeps the host re-plan count and rejects invalid counts', async () 
 test('resumed rejection after re-plan stops before another fix', async () => {
   const f = fixture(); f.input.start = 'resume'
   f.deps.modes = {
+      ...f.deps.modes!,
     saveCheckpoint: async () => {},
     loadResume: async () => ({ head: f.snapshot.head, stage: 'rejected', round: 2, replansUsed: 1, findings: [{ kind: 'code', actionable: true, text: 'old' }], previousFindings: ['old'], reviewBaseline: 'required', previousReview: { findings: ['old'], blockingCount: 1 } }),
     regenerateDiff: async () => ({ kind: 'known', diff: f.snapshot.diff }),
-    probePlan: async () => null, advanceRalph: async () => ({ kind: 'allow' }),
+    probePlan: async () => null, advanceTask: async () => ({ kind: 'allow' }),
     commitPlan: async () => ({ kind: 'unknown', detail: 'pr mode never commits a ledger' }),
   }
   expect(await f.run()).toMatchObject({ kind: 'blocked', on: expect.stringContaining('post-re-plan trigger') })
@@ -1863,7 +2043,7 @@ test('G070 repeated nits do not enter fix arithmetic', async () => {
 })
 
 test('G070 resumed fix retains its briefed identities for the next panel', async () => {
-  const f = modeFixture('pr'); const checkpoint = f.resume('rejected', 1, { findings: ['code.ts:f:recurring'], blockingCount: 1 })
+  const f = modeFixture('single'); const checkpoint = f.resume('rejected', 1, { findings: ['code.ts:f:recurring'], blockingCount: 1 })
   checkpoint.findings = [{ kind: 'code', actionable: true, text: 'code.ts:f:recurring' }]
   checkpoint.previousFindings = []
   progressPanel(f, [[], [{ severity: 'minor', rule: 'recurring' }]])
@@ -1924,7 +2104,7 @@ for (const cap of [0, -1, 1.5, NaN, Infinity, Number.MAX_SAFE_INTEGER + 1, null,
 
 test('G076 resumed rejection consumes exactly one remaining round', async () => {
   for (const round of [6, 7]) {
-    const f = modeFixture('pr'); const checkpoint = f.resume('rejected', round, { findings: ['bug'], blockingCount: 1 })
+    const f = modeFixture('single'); const checkpoint = f.resume('rejected', round, { findings: ['bug'], blockingCount: 1 })
     checkpoint.findings = [{ kind: 'code', actionable: true, text: 'bug' }]
     f.deps.readReviewCap = async () => ({ kind: 'known', max_rounds: 7 })
     expect((await f.run()).kind).toBe(round === 6 ? 'merged' : 'blocked')
@@ -1934,7 +2114,7 @@ test('G076 resumed rejection consumes exactly one remaining round', async () => 
 })
 
 test('G076 over-budget resume refuses before review', async () => {
-  const f = modeFixture('pr'); f.resume('fixed', 8, { findings: ['prior'], blockingCount: 1 })
+  const f = modeFixture('single'); f.resume('fixed', 8, { findings: ['prior'], blockingCount: 1 })
   f.deps.readReviewCap = async () => ({ kind: 'known', max_rounds: 7 })
   expect(await f.run()).toMatchObject({ kind: 'blocked', on: expect.stringContaining('round ceiling') })
   expect(f.cross.calls).toHaveLength(0)
@@ -2030,7 +2210,7 @@ test('G023 driver missing assignment remains unknown', async () => {
 
 test('G036 initial confirmed merge wins over fresh PR refusal and pending resume', async () => {
   for (const pending of [false, true]) {
-    const f = modeFixture('pr')
+    const f = modeFixture('single')
     if (pending) f.resume('rejected').pending = { phase: 'fix', step_id: 'existing' }
     f.snapshot.pr = { number: 7, head: f.snapshot.head, state: 'MERGED' }
     f.snapshot.head = 'absent'
@@ -2066,7 +2246,7 @@ for (const head of ['a'.repeat(40), '', 'absent']) test(`G042 driver stops lost 
 })
 
 test('G042 resumed fix stops before another panel when no commit lands', async () => {
-  const f = modeFixture('pr'); f.resume('rejected', 1, { findings: ['repair'], blockingCount: 1 }).findings = [{ kind: 'code', actionable: true, text: 'repair' }]
+  const f = modeFixture('single'); f.resume('rejected', 1, { findings: ['repair'], blockingCount: 1 }).findings = [{ kind: 'code', actionable: true, text: 'repair' }]
   const run = f.runner.run
   // Override the fixture's committing fixer with a completed no-op.
   f.runner.run = async (request, placement, signal) => request.role === 'fix' ? f.completed({ ...f.snapshot }) : run(request, placement, signal)
@@ -2158,7 +2338,7 @@ test('G100 missing preservation stays unknown and resolved same claims continue'
 test('G032 local full SHA-256 heads remain accepted', async () => {
   const f = localFixture()
   f.snapshot.head = 'a'.repeat(64)
-  for (const key of f.outcomes.keys()) f.outcomes.set(key, f.completed())
+  for (const key of f.outcomes.keys()) f.outcomes.set(key, f.completed({ ...f.snapshot, ...(key.includes(':plan:') ? { payload: singlePlan } : {}) }))
   expect((await f.run()).kind).toBe('merged')
 })
 
@@ -2177,7 +2357,7 @@ test('G036 local mode cannot use PR merge confirmation', async () => {
 })
 
 test('G036 merge probe uncertainty preserves the pending worker identity', async () => {
-  const f = modeFixture('pr')
+  const f = modeFixture('single')
   f.resume('rejected').pending = { phase: 'fix', step_id: 'existing-fix' }
   f.deps.measure = async () => ({ kind: 'unknown', detail: 'merge probe unavailable' })
   expect(await f.run()).toMatchObject({ kind: 'unknown', phase: 'fix', step_id: 'existing-fix' })
@@ -2204,7 +2384,7 @@ test('G084 each fix proves descent from the immediately preceding review', async
 })
 
 test('G084 resumed fix uses the recorded reviewed head and refuses unreadable ancestry', async () => {
-  const f = modeFixture('pr')
+  const f = modeFixture('single')
   f.resume('rejected', 1, { findings: ['bug'], blockingCount: 1 }).findings = [{ kind: 'code', actionable: true, text: 'bug' }]
   const pins: string[] = []
   f.deps.checkFixLineage = async (_produced, pin) => {
@@ -2377,18 +2557,18 @@ test('PR identity cannot change between approval and merge', async () => {
   expect(f.events).not.toContain('merge')
 })
 
-test('suite scope follows the validated Ralph task and never defers non-Ralph builds or fixes', async () => {
-  for (const mode of ['ralph', 'pr'] as const) {
+test('suite scope follows the validated task-sequence task and never defers non-task-sequence builds or fixes', async () => {
+  for (const mode of ['task_sequence', 'single'] as const) {
     for (const remainingTasks of [0, 2]) {
       const f = modeFixture(mode)
       // G025 refuses a ledger whose boxes disagree with its counts, so the fixture's
       // plan lists exactly remainingTasks + 1 unchecked tasks.
       f.plan.implementationPlan = ['- [ ] T1: first', '- [ ] T2: second', '- [ ] T3: third'].slice(0, remainingTasks + 1).join('\n')
-      f.plan.remainingTasks = remainingTasks
+      f.plan.remainingTasks = mode === 'single' ? 0 : remainingTasks
       f.setPlan()
       f.decisions.push({ kind: 'fix', findings: ['repair behavior'] }, { kind: 'approve' })
       const outcome = await f.run()
-      const intermediate = mode === 'ralph' && remainingTasks > 0
+      const intermediate = mode === 'task_sequence' && remainingTasks > 0
       expect(outcome.kind).toBe(intermediate ? 'continued' : 'merged')
       expect(f.prepared.find(p => p.role === 'build')?.suiteScope).toBe(intermediate ? 'subset' : 'full-suite')
       if (!intermediate) expect(f.prepared.find(p => p.role === 'fix')?.suiteScope).toBe('full-suite')
@@ -2409,7 +2589,7 @@ test('suite scope uses the measured remaining count rather than a cheap planner 
   }
 })
 
-test('completed Ralph build checkpoints retain the validated terminal remainder before publication can fail', async () => {
+test('completed task-sequence build checkpoints retain the validated terminal remainder before publication can fail', async () => {
   for (const remainingTasks of [0, 2]) {
     const f = modeFixture()
     f.plan.implementationPlan = ['- [ ] T1: first', '- [ ] T2: second', '- [ ] T3: third'].slice(0, remainingTasks + 1).join('\n')

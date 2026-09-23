@@ -7,6 +7,16 @@ with a concrete `file:line` anchor and the refactor unit (or existing test) that
 invariant tagged **unprotected — covered by review only** has no automated guard today; a unit
 touching that area must add one or an Argus/Codex reviewer must explicitly re-verify it by hand.
 
+> **Current execution-strategy terminology (2026-09-23).** Fresh builds persist the
+> initial planner's `single` or `task_sequence` selection before builder dispatch.
+> Historical storage and evidence map as follows: `ralph = 1` → `task_sequence`,
+> `ralph = 0` → `single`; `ralph_round` → `task_iteration`;
+> `max_ralph_rounds` → `max_task_iterations`; `ralph_task_total` → `task_total`;
+> `ralph-plan` → `task-plan`; `ralph-task` → `task-build`; and
+> `ralph-task-built[-deviated]` → `task-built[-deviated]`. Old migration names,
+> test filenames, frozen records, and quoted checkpoints below remain provenance,
+> not active product vocabulary. See the `SPEC.md` decision dated 2026-09-23.
+
 > **On the count.** The plan (§G10) says "all 12 critic reports"; there are in fact **11**
 > `critic-*.md` files in the audit directory. `critic-security-config.md` has no dedicated
 > "load-bearing subtleties" section (its charter is config/secrets/auth-gate posture), so its
@@ -457,7 +467,8 @@ with cross-references noted inline.
     column; historical rows are never rewritten (they are the measurement evidence). A
     REQUEST_CHANGES row classifies `reviewed-rejected` whether or not it carries findings, so a
     legacy fabricated row can never seed a resume; `died-before-build` means "no build this
-    dispatch may resume" (`ralph-task-built` sits there WITH a commit, because the workflow
+    dispatch may resume" (the historical `ralph-task-built` checkpoint, now
+    `task-built`, sits there WITH a commit because the workflow
     rebuilds that shape by design). The classifier is mode-blind so an offline count of the
     historical table never turns on a flag, and the offline SQL published in this card's as-built record
     (`docs/as-built/1-measured-cost-97-of-160-rejection.md`) is
@@ -488,8 +499,9 @@ with cross-references noted inline.
     credentialed remote read, and pinned that way in
     `open/__tests__/open-trident-prod-boot-wiring.test.ts`; the fail-closed direction means an
     unwired site is invisible except as work rebuilt), and the checkpoint is one
-    `resumeOnUnchangedHead` really reviews — a bare `forge-done` in RALPH mode is not (it rebuilds,
-    'ralph-progress-unknown'). The base pin is REQUIRED, not carried-if-present: a seeded row is
+    `resumeOnUnchangedHead` really reviews — a bare `forge-done` in
+    `task_sequence` is not (it rebuilds with the historical compatibility reason
+    `ralph-progress-unknown`). The base pin is REQUIRED, not carried-if-present: a seeded row is
     not a fresh launch and `launch()` never re-pins it, so a null-base seed would leave the
     publish-time cut-from-origin refusal permanently inert for it and every re-seed off it. The
     seed does NOT carry `pr`, which would short-circuit `detectExistingPr` onto a possibly-closed
@@ -599,8 +611,9 @@ with cross-references noted inline.
     tier threads NO token (the child process uses the OS Keychain).
     `gateway/cores/core-credential-resolver.ts:46-61`.
     Protects: **C6** (Credential-resolver unification).
-33. leak-gate allowlist is keyed to the literal `docs/AS_BUILT.md` path; Ralph prompts will
-    recreate a root `AS-BUILT.md` unless repointed first. `scripts/ci/leak-gate-allowlist.txt:69-80`.
+33. leak-gate allowlist is keyed to the literal `docs/AS_BUILT.md` path; historical
+    task-sequence prompts could recreate a root `AS-BUILT.md` unless repointed first.
+    `scripts/ci/leak-gate-allowlist.txt:69-80`.
     Protects: **K6** (Changelog consolidation), **K7** (Docs truth pass), **K10** (repoints
     prompts), **G7** (Leak-gate NUL tripwire).
 34. `app/` bundle purity: the shared wire-types package must never import node-only modules or it
@@ -924,7 +937,8 @@ with cross-references noted inline.
     it is not misclassified as agent-side spend. `trident/crash-recovery.test.ts`.
     Protects: bounded, restart-proof recovery from spinning forever under a deploy loop.
 115. A crash-recovery relaunch is a continuation, not a retry: it never consumes `round` or
-    `ralph_round`, and only `beginCrashRecovery` may clear the `crashed` latch / null the
+    `task_iteration` (stored historically as `ralph_round`), and only
+    `beginCrashRecovery` may clear the `crashed` latch / null the
     tombstoned workflow generation — never `update`/`save`/`saveIfActive` (`saveIfActive` vetoes
     non-crashed writes onto a crashed-latched row). `trident/crash-recovery.test.ts` +
     `trident/store.test.ts`.

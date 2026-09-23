@@ -209,7 +209,7 @@ function infraRun(cause: string, overrides: Partial<TridentRun> = {}, crossModel
  *
  * THE PHASE IS `'argus'`, NOT `'running'`. The first draft wrote `'running'`, which is
  * not a member of `TridentPhase` at all (`trident/store.ts:33` — the vocabulary is
- * forge-init / ralph-plan / ralph-task / argus / forge-fix / done / failed / stopped,
+ * forge-init / task-plan / task-build / argus / forge-fix / done / failed / stopped,
  * and the table's CHECK constraint is built from exactly that list). A fixture
  * describing a state the schema forbids cannot stand in for a real row, and the type
  * error was the schema saying so. `'argus'` is both legal and the honest choice: it is

@@ -32,7 +32,6 @@ beforeEach(() => {
       hasGithubOrigin: async () => false,
       publisherAvailable: async () => ({ authenticated: true }),
     },
-    resolveRalph: async () => false,
   })
 })
 afterEach(() => { db.close(); rmSync(tmp, { recursive: true, force: true }) })

@@ -1,8 +1,8 @@
 /**
- * `plan:next` — WHICH PLANNER A RALPH ITERATION ACTUALLY RUNS, asserted over the
+ * `plan:next` — WHICH PLANNER A TASK SEQUENCE ITERATION ACTUALLY RUNS, asserted over the
  * REAL `inner-workflow.mjs` body.
  *
- * THE MEASURED WASTE: every Ralph iteration re-ran `plan:fable`, whose first two
+ * THE MEASURED WASTE: every Task sequence iteration re-ran `plan:fable`, whose first two
  * steps are "read SPEC.md and survey the CURRENT code" — 287 s per task, eight
  * times on one card, to re-derive a document the PREVIOUS iteration's Forge had
  * already committed to the branch. The fix is a second, much smaller planner that
@@ -137,9 +137,9 @@ type ProbeAnswer = {
 } | null
 
 interface Opts {
-  ralph?: boolean
+  executionStrategy?: 'single' | 'task_sequence'
   /** Omitted entirely (not null) → a LEGACY launcher that threads no round. */
-  ralphRound?: number
+  taskIteration?: number
   resumeCheckpoint?: string | null
   resumeCheckpointHead?: string | null
   resumeLiveHead?: string
@@ -173,7 +173,7 @@ interface Opts {
   forgeDeviates?: boolean
   /** What BOTH planner seats report as still unchecked AFTER this task. `0` (the
    *  default) runs the iteration through to review; `>0` makes it hand back to the
-   *  outer loop, which is the only path that writes a `ralph-task-built*`
+   *  outer loop, which is the only path that writes a `task-built*`
    *  checkpoint. */
   remainingTasks?: number
   /** `'pr'` exercises the publish handoff (the build invocation exits early and the
@@ -239,7 +239,7 @@ async function run(opts: Opts = {}): Promise<Out> {
     if (label === 'plan:next') {
       if (opts.planNextDead === true) return null
       // The contract the real prompt states: the committed body comes back
-      // VERBATIM, so `ralphExecuteNote` hands Forge exactly what is on the branch.
+      // VERBATIM, so `taskSequenceExecuteNote` hands Forge exactly what is on the branch.
       return {
         implementationPlan: opts.planNextRelay?.implementationPlan ?? probeAnswer?.planBody ?? COMMITTED_PLAN,
         topTask: opts.planNextRelay?.topTask ?? 'T2 — the task THIS iteration must pick up',
@@ -304,7 +304,7 @@ async function run(opts: Opts = {}): Promise<Out> {
     baseBranch: 'main',
     slug: 'plan-next-run',
     maxRounds: 3,
-    ralph: opts.ralph !== false,
+    executionStrategy: opts.executionStrategy ?? 'task_sequence',
     // local mode keeps the panel small and stops the run short of the pr-mode
     // publish handoff; the planner choice is git-mode independent.
     mergeMode: opts.mergeMode ?? 'local',
@@ -332,7 +332,7 @@ async function run(opts: Opts = {}): Promise<Out> {
   // a different case from one that threads null, and the same is true of the
   // launcher-read live head. Spreading them conditionally is what lets the
   // legacy-launcher scenario be written at all.
-  if (opts.ralphRound !== undefined) args.ralphRound = opts.ralphRound
+  if (opts.taskIteration !== undefined) args.taskIteration = opts.taskIteration
   if (opts.resumeLiveHead !== undefined) args.resumeLiveHead = opts.resumeLiveHead
 
   const body = SRC.replace('export const meta', 'const meta')
@@ -344,14 +344,14 @@ async function run(opts: Opts = {}): Promise<Out> {
   return { captured, labels: captured.map((c) => c.label), logs, result }
 }
 
-/** A CLEAN RALPH HANDOFF: the checkpoint the workflow itself writes after building
+/** A CLEAN TASK SEQUENCE HANDOFF: the checkpoint the workflow itself writes after building
  *  one task, with the branch head unmoved since. This exact shape — and only this
  *  one — is what `classifyResume` reports as 'unknown-checkpoint' AFTER its
  *  recorded-vs-live head comparison has already passed. */
 const cleanHandoff = (round: number, over: Opts = {}): Opts => ({
-  ralph: true,
-  ralphRound: round,
-  resumeCheckpoint: 'ralph-task-built',
+  executionStrategy: 'task_sequence',
+  taskIteration: round,
+  resumeCheckpoint: 'task-built',
   resumeCheckpointHead: HEAD,
   resumeLiveHead: HEAD,
   ...over,
@@ -373,7 +373,7 @@ const PLAN_START = `bash '${STAGE_SCRIPT}' '${STAGE_DB}' '${STAGE_RUN}' 'plan-st
 
 describe('plan:next — iteration 1 and every genuine crash-resume keep the full planner', () => {
   test('iteration 1 runs plan:fable, with the survey line intact and no resume note', async () => {
-    const out = await run({ ralph: true, ralphRound: 0, resumeCheckpoint: null, prNumber: null })
+    const out = await run({ executionStrategy: 'task_sequence', taskIteration: 0, resumeCheckpoint: null, prNumber: null })
 
     expect(out.labels).toContain('plan:fable')
     // Asserted as ABSENCES: the cheap path must not even be probed on a card's
@@ -394,7 +394,7 @@ describe('plan:next — iteration 1 and every genuine crash-resume keep the full
     expect(promptFor(out, 'forge:build')).not.toContain('BRANCH-STATE BRIEF')
   })
 
-  test('the branch MOVED under a ralph-task-built checkpoint → full planner', async () => {
+  test('the branch MOVED under a task-built checkpoint → full planner', async () => {
     // A head that moved in the crash window means code exists that the committed
     // plan was not derived against. That is precisely when re-deriving is worth
     // 287 s, and `classifyResume` reports it as 'head-moved', never
@@ -415,7 +415,7 @@ describe('plan:next — iteration 1 and every genuine crash-resume keep the full
     expect(promptFor(out, 'forge:build')).not.toContain('BRANCH-STATE BRIEF')
   })
 
-  test("a 'forge-done' resume in ralph mode → full planner", async () => {
+  test("a 'forge-done' resume in task-sequence mode → full planner", async () => {
     const out = await run(
       cleanHandoff(2, { resumeCheckpoint: 'forge-done' }),
     )
@@ -430,10 +430,10 @@ describe('plan:next — iteration 1 and every genuine crash-resume keep the full
     }
   })
 
-  test('a launcher that threads NO ralphRound falls back to the full planner', async () => {
+  test('a launcher that threads NO taskIteration falls back to the full planner', async () => {
     // The fail-safe default, and the only thing standing between an older launcher
     // and a continuation planner running on an iteration nobody counted.
-    const { ralphRound: _dropped, ...legacyArgs } = cleanHandoff(2)
+    const { taskIteration: _dropped, ...legacyArgs } = cleanHandoff(2)
     const out = await run(legacyArgs)
 
     expect(out.labels).toContain('plan:fable')
@@ -467,7 +467,7 @@ describe('plan:next — a clean continuation plans from the committed plan', () 
     expect(probe).toContain('.trident/plans/trident/plan-next-run.md')
     expect(probe).toContain('Do NOT modify anything')
 
-    // DOWNSTREAM IS UNTOUCHED: `ralphExecuteNote` still hands Forge the plan body
+    // DOWNSTREAM IS UNTOUCHED: `taskSequenceExecuteNote` still hands Forge the plan body
     // to persist, whichever planner produced it.
     const forge = promptFor(out, 'forge:build')
     expect(forge).toContain(COMMITTED_PLAN)
@@ -479,11 +479,11 @@ describe('plan:next — a clean continuation plans from the committed plan', () 
     expect(out.result.ok).toBe(true)
   })
 
-  test('ITERATION 2 — ralphRound 1 — takes the cheap path, which is the whole card', async () => {
-    // THE OFF-BY-ONE THIS TEST EXISTS TO PIN. `ralph_round` is ZERO-BASED: the store
+  test('ITERATION 2 — taskIteration 1 — takes the cheap path, which is the whole card', async () => {
+    // THE OFF-BY-ONE THIS TEST EXISTS TO PIN. `task_iteration` is ZERO-BASED: the store
     // creates a run at 0 and the orchestrator bumps it once per re-fire, so the
     // SECOND iteration — the first one that has a committed plan to read, and the
-    // first one the card's acceptance criteria name — arrives here as ralphRound 1.
+    // first one the card's acceptance criteria name — arrives here as taskIteration 1.
     // A `>= 2` gate looks right and silently makes iteration 2 pay the full 287 s
     // survey; nothing in the old round list (0, 2, 3, 5, 10) could see it.
     const out = await run(cleanHandoff(1))
@@ -577,7 +577,7 @@ describe('plan:next — the branch-state brief', () => {
   })
 
   test('plan:fable cannot authorize the shared-schema branchBrief field', async () => {
-    const out = await run({ ralph: true, ralphRound: 0, resumeCheckpoint: null, prNumber: null })
+    const out = await run({ executionStrategy: 'task_sequence', taskIteration: 0, resumeCheckpoint: null, prNumber: null })
     const forge = promptFor(out, 'forge:build')
 
     expect(out.labels).toContain('plan:fable')
@@ -901,7 +901,7 @@ describe('plan:next — the cheap path escalates rather than guessing', () => {
   test('a probe whose DISPATCH THROWS does not end the lane — the build still happens', async () => {
     // THE DIFFERENCE BETWEEN A SEAT THAT ANSWERS `null` AND A SEAT THAT REJECTS, and
     // it is the whole finding: an unwrapped `await agent(...)` propagates the
-    // rejection out of the Ralph block, past `forge:build`, into the terminal
+    // rejection out of the Task sequence block, past `forge:build`, into the terminal
     // handler — the card's ONE optimisation seat taking the lane down with it. The
     // probe is an accelerator; the only correct response to its death is to pay the
     // full price and build anyway.
@@ -993,7 +993,7 @@ describe('plan:next — the cheap path escalates rather than guessing', () => {
 
   test('a BYTE-NEUTRAL “- [ ]” → “- [x]” flip is caught, though it changes neither count', async () => {
     // ARGUS r3, THE CONFIRMED MAJOR. The relay ticks a task that is NOT ticked on the
-    // branch: same lines, same bytes, and `ralphExecuteNote` would have Forge commit
+    // branch: same lines, same bytes, and `taskSequenceExecuteNote` would have Forge commit
     // it — a task dropped from the card's own plan with nobody deciding to drop it.
     // Counting cannot see this; a checksum cannot miss it.
     const flipped = COMMITTED_PLAN.replace('- [ ] T2', '- [x] T2')
@@ -1017,7 +1017,7 @@ describe('plan:next — the cheap path escalates rather than guessing', () => {
   })
 
   test('a RE-ORDERED checklist is caught, though it changes neither count', async () => {
-    // The other byte-neutral tamper: the Ralph discipline builds the FIRST unchecked
+    // The other byte-neutral tamper: the Task sequence discipline builds the FIRST unchecked
     // task, so swapping two lines silently re-prioritises the card and commits the new
     // order over the plan.
     const lines = COMMITTED_PLAN.split('\n')
@@ -1103,7 +1103,7 @@ describe('plan:next — the cheap path escalates rather than guessing', () => {
  *
  * `plan:next` is asked to do two mechanical things — echo the committed body
  * verbatim, and report the probe's unchecked count minus one — and the probe already
- * MEASURED both. Getting either wrong is silent and expensive: `ralphExecuteNote`
+ * MEASURED both. Getting either wrong is silent and expensive: `taskSequenceExecuteNote`
  * tells Forge to write "EXACTLY this body" and commit it, so a shortened echo deletes
  * tasks from the card's own plan; and `remainingTasks` is the re-fire gate, so a
  * hallucinated 0 declares a half-built card finished.
@@ -1125,11 +1125,11 @@ describe('plan:next — the measurement beats the relay', () => {
   })
 
   test('a topTask that is not a literal unchecked line is replaced by the committed one', async () => {
-    // `ralphExecuteNote` tells Forge to implement "the task above" and to commit the
+    // `taskSequenceExecuteNote` tells Forge to implement "the task above" and to commit the
     // plan with THAT task marked '- [x]'. A paraphrased (or invented) topTask leaves
     // Forge nothing to check off: the same plan comes back with the same unchecked
     // items, the next iteration picks the same first task, and the checklist cannot
-    // converge until PLAN_REFRESH_EVERY or `max_ralph_rounds` stops it. The body is
+    // converge until PLAN_REFRESH_EVERY or `max_task_iterations` stops it. The body is
     // right here, so the first unchecked line is READ, not taken on the relay's word.
     const out = await run(
       cleanHandoff(2, { planNextRelay: { topTask: 'tidy up the T2 area a bit' } }),
@@ -1180,7 +1180,7 @@ describe('plan:next — the measurement beats the relay', () => {
     // 4 unchecked, one of them built this iteration → 3 remain, and the run hands
     // back to the outer loop instead of declaring the card done.
     expect(out.result.remainingTasks).toBe(3)
-    expect(out.result.checkpoint).toBe('ralph-task-built')
+    expect(out.result.checkpoint).toBe('task-built')
     expect(out.logs.some((l) => l.includes('plan:next INTEGRITY') && l.includes('measured count'))).toBe(
       true,
     )
@@ -1303,31 +1303,31 @@ describe('plan:next — the probe reads the ref the resume gate judged', () => {
  * unknown-checkpoint → rebuild, which is the full `plan:fable`.
  */
 describe('deviatedFromSpec — a deviated iteration hands off a DIFFERENT checkpoint', () => {
-  test('LOCAL mode: a deviating Forge writes ralph-task-built-deviated', async () => {
+  test('LOCAL mode: a deviating Forge writes task-built-deviated', async () => {
     const out = await run({
-      ralph: true,
-      ralphRound: 0,
+      executionStrategy: 'task_sequence',
+      taskIteration: 0,
       remainingTasks: 2,
       forgeDeviates: true,
       withDb: true,
     })
 
-    expect(out.result.checkpoint).toBe('ralph-task-built-deviated')
+    expect(out.result.checkpoint).toBe('task-built-deviated')
     expect(out.result.remainingTasks).toBe(2)
     // The RECORDED name matters as much as the returned one: the next invocation
     // reads the row, not this object.
-    expect(out.labels).toContain('checkpoint:ralph-task-built-deviated')
-    expect(out.labels).not.toContain('checkpoint:ralph-task-built')
+    expect(out.labels).toContain('checkpoint:task-built-deviated')
+    expect(out.labels).not.toContain('checkpoint:task-built')
   })
 
-  test('LOCAL mode: a Forge that did NOT deviate still writes ralph-task-built', async () => {
+  test('LOCAL mode: a Forge that did NOT deviate still writes task-built', async () => {
     // The default guard. Nothing about the handoff may change for the overwhelmingly
     // common case, or every iteration pays the survey and the card achieves nothing.
-    const out = await run({ ralph: true, ralphRound: 0, remainingTasks: 2, withDb: true })
+    const out = await run({ executionStrategy: 'task_sequence', taskIteration: 0, remainingTasks: 2, withDb: true })
 
-    expect(out.result.checkpoint).toBe('ralph-task-built')
-    expect(out.labels).toContain('checkpoint:ralph-task-built')
-    expect(out.labels).not.toContain('checkpoint:ralph-task-built-deviated')
+    expect(out.result.checkpoint).toBe('task-built')
+    expect(out.labels).toContain('checkpoint:task-built')
+    expect(out.labels).not.toContain('checkpoint:task-built-deviated')
   })
 
   test('the NEXT iteration after a deviated handoff pays for the full survey', async () => {
@@ -1335,9 +1335,9 @@ describe('deviatedFromSpec — a deviated iteration hands off a DIFFERENT checkp
     // the following iteration dispatches. Everything else in this file is plumbing
     // that exists to make this line true.
     const out = await run({
-      ralph: true,
-      ralphRound: 3,
-      resumeCheckpoint: 'ralph-task-built-deviated',
+      executionStrategy: 'task_sequence',
+      taskIteration: 3,
+      resumeCheckpoint: 'task-built-deviated',
       resumeCheckpointHead: HEAD,
       resumeLiveHead: HEAD,
     })
@@ -1360,8 +1360,8 @@ describe('deviatedFromSpec — a deviated iteration hands off a DIFFERENT checkp
     // In pr mode this invocation EXITS at the publish handoff — it never reaches the
     // checkpoint that names the deviation. The result field is the only channel.
     const deviated = await run({
-      ralph: true,
-      ralphRound: 0,
+      executionStrategy: 'task_sequence',
+      taskIteration: 0,
       mergeMode: 'pr',
       remainingTasks: 2,
       forgeDeviates: true,
@@ -1370,7 +1370,7 @@ describe('deviatedFromSpec — a deviated iteration hands off a DIFFERENT checkp
     expect(deviated.result.checkpoint).toBe('forge-done')
     expect(deviated.result.deviatedFromSpec).toBe(true)
 
-    const clean = await run({ ralph: true, ralphRound: 0, mergeMode: 'pr', remainingTasks: 2 })
+    const clean = await run({ executionStrategy: 'task_sequence', taskIteration: 0, mergeMode: 'pr', remainingTasks: 2 })
     expect(clean.result.checkpoint).toBe('forge-done')
     expect(clean.result.deviatedFromSpec).toBe(false)
   })
@@ -1380,8 +1380,8 @@ describe('deviatedFromSpec — a deviated iteration hands off a DIFFERENT checkp
     // read the suffixed name as a review-eligible publish checkpoint), so the only
     // thing it knows about the deviation is the suffix the outer publisher appended.
     const out = await run({
-      ralph: true,
-      ralphRound: 2,
+      executionStrategy: 'task_sequence',
+      taskIteration: 2,
       mergeMode: 'pr',
       resumeCheckpoint: `outer-published:${HEAD}:2:1:deviated`,
       resumeLiveHead: HEAD,
@@ -1389,17 +1389,17 @@ describe('deviatedFromSpec — a deviated iteration hands off a DIFFERENT checkp
     })
 
     expect(out.labels).not.toContain('forge:build')
-    expect(out.result.checkpoint).toBe('ralph-task-built-deviated')
+    expect(out.result.checkpoint).toBe('task-built-deviated')
     expect(out.result.remainingTasks).toBe(2)
-    expect(out.labels).toContain('checkpoint:ralph-task-built-deviated')
+    expect(out.labels).toContain('checkpoint:task-built-deviated')
   })
 
   test('PR mode: an outer-published resume WITHOUT the suffix is unchanged', async () => {
     // The byte-identical-old-format guard: the suffix is optional, and its absence
     // must leave the existing publish→review→re-fire path exactly as it was.
     const out = await run({
-      ralph: true,
-      ralphRound: 2,
+      executionStrategy: 'task_sequence',
+      taskIteration: 2,
       mergeMode: 'pr',
       resumeCheckpoint: `outer-published:${HEAD}:2:1`,
       resumeLiveHead: HEAD,
@@ -1407,7 +1407,7 @@ describe('deviatedFromSpec — a deviated iteration hands off a DIFFERENT checkp
     })
 
     expect(out.labels).not.toContain('forge:build')
-    expect(out.result.checkpoint).toBe('ralph-task-built')
+    expect(out.result.checkpoint).toBe('task-built')
     expect(out.result.remainingTasks).toBe(2)
   })
 })
@@ -1422,7 +1422,7 @@ describe('plan:next — the constants and the seam are the ones the card specifi
 
   test('both planners return the SAME schema', () => {
     // `plan:next` differs from `plan:fable` in its INPUT, not its output — that is
-    // what keeps `ralphExecuteNote`, the complexity routing and the re-fire count
+    // what keeps `taskSequenceExecuteNote`, the complexity routing and the re-fire count
     // working untouched.
     expect(SRC).toContain("label: 'plan:next', phase: 'Build', schema: PLAN_SCHEMA")
     expect(SRC).toContain("label: 'plan:fable', phase: 'Build', schema: PLAN_SCHEMA")
@@ -1442,16 +1442,16 @@ describe('plan:next — the constants and the seam are the ones the card specifi
  * Each test here pins one of those.
  */
 describe('plan:next — the production shapes that silently disabled the fast path', () => {
-  test('a ralphRound relayed as a STRING still takes the cheap path', async () => {
+  test('a taskIteration relayed as a STRING still takes the cheap path', async () => {
     // `buildWorkflowArgs` reads an INTEGER column, but the value crosses a JSON
     // boundary through the launcher before it arrives here. A launcher that relays
-    // `"2"` made `Number.isSafeInteger(ralphRound)` false, and because that check
+    // `"2"` made `Number.isSafeInteger(taskIteration)` false, and because that check
     // sits inside `cleanContinuation`, the probe was never dispatched and the
     // SKIPPED diagnostic never fired: the full survey was paid on every iteration
     // with no evidence anywhere that a cheaper path had been declined.
     const out = await run({
       ...cleanHandoff(2),
-      ralphRound: '2' as unknown as number,
+      taskIteration: '2' as unknown as number,
     })
 
     expect(out.labels).toContain('plan:probe')
@@ -1459,12 +1459,12 @@ describe('plan:next — the production shapes that silently disabled the fast pa
     expect(out.labels).not.toContain('plan:fable')
   })
 
-  test('a NON-numeric ralphRound still falls back to the full planner', async () => {
+  test('a NON-numeric taskIteration still falls back to the full planner', async () => {
     // The coercion must not become a way to smuggle nonsense past the gate:
     // `Number('later')` is NaN, which `Number.isSafeInteger` still rejects.
     const out = await run({
       ...cleanHandoff(2),
-      ralphRound: 'later' as unknown as number,
+      taskIteration: 'later' as unknown as number,
     })
 
     expect(out.labels).toContain('plan:fable')
@@ -1476,9 +1476,9 @@ describe('plan:next — the production shapes that silently disabled the fast pa
     // NOT A BUG — `deviatedFromSpec` above pins this as deliberate: a Forge that
     // deviated built something the committed plan no longer describes, so re-deriving
     // is correct. What was missing is the evidence. The live run f7ec86a6 sat at
-    // ralph round 2 on this exact checkpoint with an unmoved head, and nothing in its
+    // task-sequence round 2 on this exact checkpoint with an unmoved head, and nothing in its
     // record distinguished "correctly declined" from "silently broken".
-    const out = await run(cleanHandoff(2, { resumeCheckpoint: 'ralph-task-built-deviated' }))
+    const out = await run(cleanHandoff(2, { resumeCheckpoint: 'task-built-deviated' }))
 
     expect(out.labels).toContain('plan:fable')
     expect(out.labels).not.toContain('plan:next')
@@ -1486,11 +1486,11 @@ describe('plan:next — the production shapes that silently disabled the fast pa
     const select = out.logs.find((l) => l.includes('planner-select'))
     expect(select).toContain('handoff=false')
     expect(select).toContain('cleanContinuation=false')
-    expect(select).toContain('ralph-task-built-deviated')
+    expect(select).toContain('task-built-deviated')
   })
 })
 
-describe('planner selection is observable on EVERY ralph iteration', () => {
+describe('planner selection is observable on EVERY task-sequence iteration', () => {
   test('the cheap path logs both its inputs and its outcome', async () => {
     const out = await run(cleanHandoff(2))
 
@@ -1506,7 +1506,7 @@ describe('planner selection is observable on EVERY ralph iteration', () => {
     // never that it full-planned — it was that this case produced no line at all,
     // because the only diagnostic was nested inside `if (cleanContinuation && ...)`.
     // An instrument gated on the condition it exists to report cannot report it.
-    const out = await run({ ralph: true, ralphRound: 0, resumeCheckpoint: null, prNumber: null })
+    const out = await run({ executionStrategy: 'task_sequence', taskIteration: 0, resumeCheckpoint: null, prNumber: null })
 
     expect(out.labels).toContain('plan:fable')
     const select = out.logs.find((l) => l.includes('planner-select'))
@@ -1518,7 +1518,7 @@ describe('planner selection is observable on EVERY ralph iteration', () => {
   test('a STRING round is reported as both what arrived and what it coerced to', async () => {
     // Without both halves the log would say `round 2` for a value that was `"2"`,
     // and the type accident stays invisible in exactly the record meant to expose it.
-    const out = await run({ ...cleanHandoff(2), ralphRound: '2' as unknown as number })
+    const out = await run({ ...cleanHandoff(2), taskIteration: '2' as unknown as number })
 
     const select = out.logs.find((l) => l.includes('planner-select'))
     expect(select).toContain('"2"')

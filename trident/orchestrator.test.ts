@@ -116,8 +116,8 @@ interface Harness {
   complete: () => Promise<void>
   hostCalls: string[][]
   inputs: InnerLoopInput[]
-  /** RALPH RE-FIRE (#362) — every atomic reset patch `persist_refire_reset` was
-   *  called with (assert the crash-safe bundle: inner_result + slot + ralph_round). */
+  /** TASK SEQUENCE RE-FIRE (#362) — every atomic reset patch `persist_refire_reset` was
+   *  called with (assert the crash-safe bundle: inner_result + slot + task_iteration). */
   refirePatches: import('./store.ts').TridentRunUpdate[]
 }
 
@@ -274,7 +274,7 @@ function buildHarness(opts: {
     // The resume head-read retries are SPACED in production (a `pr`-mode read is a
     // network call). The suite injects a no-op wait so those attempts stay free.
     sleep: async () => {},
-    // RALPH RE-FIRE (#362) — persist the re-fire reset atomically out-of-band so a
+    // TASK SEQUENCE RE-FIRE (#362) — persist the re-fire reset atomically out-of-band so a
     // re-fired run isn't re-harvested (production wires the identical seam). The spy
     // records each patch to assert the crash-safe bundle, then applies it for real.
     persist_refire_reset: (id, patch) => {
@@ -775,7 +775,7 @@ describe('orchestrator — APPROVE → done → merge (server-gated)', () => {
     expect(h.inputs[1]!.resume_checkpoint).toBe(`outer-published:${head}:0:1`)
   })
 
-  test('an intermediate Ralph publish handoff defers publishing and atomically renames the checkpoint', async () => {
+  test('an intermediate Task sequence publish handoff defers publishing and atomically renames the checkpoint', async () => {
     const head = 'abcdef0123456789abcdef0123456789abcdef01'
     const h = buildHarness({
       plan: () => ({
@@ -789,7 +789,7 @@ describe('orchestrator — APPROVE → done → merge (server-gated)', () => {
         },
       }),
     })
-    const run = await createRun({ merge_mode: 'pr' as MergeMode, ralph: true })
+    const run = await createRun({ merge_mode: 'pr' as MergeMode, execution_strategy: 'task_sequence' })
     await store.update(run.id, { inner_checkpoint_head: head })
 
     await h.loop.runOnce()
@@ -800,7 +800,7 @@ describe('orchestrator — APPROVE → done → merge (server-gated)', () => {
     expect(calls.some((c) => c.includes(' push '))).toBe(false)
     expect(calls.some((c) => c.includes('gh pr create'))).toBe(false)
     expect(h.refirePatches).toHaveLength(1)
-    expect(h.refirePatches[0]?.inner_checkpoint).toBe('ralph-task-built')
+    expect(h.refirePatches[0]?.inner_checkpoint).toBe('task-built')
     expect('inner_checkpoint_head' in h.refirePatches[0]!).toBe(false)
     expect(store.get(run.id)?.inner_checkpoint_head).toBe(head)
   })
@@ -808,7 +808,7 @@ describe('orchestrator — APPROVE → done → merge (server-gated)', () => {
   /** Deviation now crosses the process boundary as the checkpoint NAME. The
    * intermediate task is not published, so there is deliberately no
    * `outer-published:*:deviated` handoff to carry it. */
-  test('a deviated intermediate Ralph handoff uses the deviated checkpoint name without publishing', async () => {
+  test('a deviated intermediate Task sequence handoff uses the deviated checkpoint name without publishing', async () => {
     const head = 'abcdef0123456789abcdef0123456789abcdef01'
     const h = buildHarness({
       plan: () => ({
@@ -823,7 +823,7 @@ describe('orchestrator — APPROVE → done → merge (server-gated)', () => {
         },
       }),
     })
-    const run = await createRun({ merge_mode: 'pr' as MergeMode, ralph: true })
+    const run = await createRun({ merge_mode: 'pr' as MergeMode, execution_strategy: 'task_sequence' })
     await store.update(run.id, { inner_checkpoint_head: head })
 
     await h.loop.runOnce()
@@ -834,7 +834,7 @@ describe('orchestrator — APPROVE → done → merge (server-gated)', () => {
     expect(calls.some((c) => c.includes(' push '))).toBe(false)
     expect(calls.some((c) => c.includes('gh pr create'))).toBe(false)
     expect(h.refirePatches).toHaveLength(1)
-    expect(h.refirePatches[0]?.inner_checkpoint).toBe('ralph-task-built-deviated')
+    expect(h.refirePatches[0]?.inner_checkpoint).toBe('task-built-deviated')
     expect('inner_checkpoint_head' in h.refirePatches[0]!).toBe(false)
     expect(store.get(run.id)?.inner_checkpoint_head).toBe(head)
   })
@@ -4063,7 +4063,7 @@ describe('orchestrator — ISSUES #563: a run whose PR is ALREADY merged', () =>
     expect(isTridentHarvestTerminal(final)).toBe(true)
   })
 
-  test('a merged Ralph iteration stops instead of re-firing the next task', async () => {
+  test('a merged Task sequence iteration stops instead of re-firing the next task', async () => {
     // The next task would be built onto a branch the merge deleted. `prMerged` is
     // read BEFORE the re-fire, so even a result that still claims remaining tasks
     // ends the run.
@@ -4080,7 +4080,7 @@ describe('orchestrator — ISSUES #563: a run whose PR is ALREADY merged', () =>
         argusCheckpoint: 'pr-merged',
       }),
     })
-    const run = await createRun({ merge_mode: 'pr' as MergeMode, ralph: true })
+    const run = await createRun({ merge_mode: 'pr' as MergeMode, execution_strategy: 'task_sequence' })
 
     const final = await runToTerminal(h, run.id)
     expect(final.phase).toBe('done')
@@ -4748,8 +4748,8 @@ describe('REVIEW_NOT_RUN — terminal without the reviewer speaking', () => {
   })
 })
 
-describe('orchestrator — RALPH RE-FIRE (#362): multi-task build re-fires per task, merges once at 0', () => {
-  // The bug: a multi-task Ralph build shipped after ONLY task 1 (the inner loop
+describe('orchestrator — TASK SEQUENCE RE-FIRE (#362): multi-task build re-fires per task, merges once at 0', () => {
+  // The bug: a multi-task Task sequence build shipped after ONLY task 1 (the inner loop
   // built plan.topTask, then the outer merged with no remaining-tasks check). The
   // fix: the inner iteration emits `remainingTasks`; the outer RE-FIRES a fresh
   // iteration per remaining task and merges only when it reaches 0.
@@ -4769,15 +4769,15 @@ describe('orchestrator — RALPH RE-FIRE (#362): multi-task build re-fires per t
         if (fireCount === 1) {
           // Task 1 built, 2 remain → intermediate re-fire result (NOT reviewed).
           return {
-            result: { verdict: 'REQUEST_CHANGES', prNumber: 55, branch, remainingTasks: 2, checkpoint: 'ralph-task-built' },
-            argusCheckpoint: 'ralph-task-built',
+            result: { verdict: 'REQUEST_CHANGES', prNumber: 55, branch, remainingTasks: 2, checkpoint: 'task-built' },
+            argusCheckpoint: 'task-built',
           }
         }
         if (fireCount === 2) {
           // Task 2 built, 1 remains → another re-fire.
           return {
-            result: { verdict: 'REQUEST_CHANGES', prNumber: 55, branch, remainingTasks: 1, checkpoint: 'ralph-task-built' },
-            argusCheckpoint: 'ralph-task-built',
+            result: { verdict: 'REQUEST_CHANGES', prNumber: 55, branch, remainingTasks: 1, checkpoint: 'task-built' },
+            argusCheckpoint: 'task-built',
           }
         }
         // Task 3 (final) built, 0 remain → reviewed + APPROVED → the merge path.
@@ -4787,7 +4787,7 @@ describe('orchestrator — RALPH RE-FIRE (#362): multi-task build re-fires per t
         }
       },
     })
-    const run = await createRun({ ralph: true, branch, merge_mode: 'pr' as MergeMode })
+    const run = await createRun({ execution_strategy: 'task_sequence', branch, merge_mode: 'pr' as MergeMode })
 
     const final = await runToTerminal(h, run.id)
 
@@ -4801,54 +4801,54 @@ describe('orchestrator — RALPH RE-FIRE (#362): multi-task build re-fires per t
     // THREE inner iterations fired — one per task (the bug shipped after ONE).
     expect(h.inputs.length).toBe(3)
     // Each re-fire is a FRESH context (a brand-new Workflow launch), and fires 2 & 3
-    // RESUME onto the same branch via the workflow-written 'ralph-task-built'
+    // RESUME onto the same branch via the workflow-written 'task-built'
     // checkpoint (re-plan the next task; never accumulate one context).
     expect(h.inputs[0]!.resume_checkpoint ?? null).toBeNull()
-    expect(h.inputs[1]!.resume_checkpoint).toBe('ralph-task-built')
-    expect(h.inputs[2]!.resume_checkpoint).toBe('ralph-task-built')
+    expect(h.inputs[1]!.resume_checkpoint).toBe('task-built')
+    expect(h.inputs[2]!.resume_checkpoint).toBe('task-built')
     // The branch/PR is reused across every iteration — never a duplicate build.
     expect(h.inputs.every((i) => i.run.branch === branch)).toBe(true)
 
-    // The ralph-round counter advanced once per re-fire (bounds the loop).
-    expect(final.ralph_round).toBe(2)
+    // The task-iteration counter advanced once per re-fire (bounds the loop).
+    expect(final.task_iteration).toBe(2)
     // harvested_at is stamped only on the TERMINAL harvest (the merge), not the
     // intermediate re-fires.
     expect(final.harvested_at).not.toBeNull()
   })
 
-  test('a Ralph build that never converges fails at max_ralph_rounds (no infinite re-fire)', async () => {
+  test('a Task sequence build that never converges fails at max_task_iterations (no infinite re-fire)', async () => {
     // A planner that ALWAYS reports a task still remaining — the fix must fail
     // loudly at the cap rather than re-fire forever.
     const h = buildHarness({
       plan: (): SimPlan => ({
-        result: { verdict: 'REQUEST_CHANGES', prNumber: 9, branch: 'trident/loops', remainingTasks: 5, checkpoint: 'ralph-task-built' },
-        argusCheckpoint: 'ralph-task-built',
+        result: { verdict: 'REQUEST_CHANGES', prNumber: 9, branch: 'trident/loops', remainingTasks: 5, checkpoint: 'task-built' },
+        argusCheckpoint: 'task-built',
       }),
     })
     const run = await createRun({
-      ralph: true,
+      execution_strategy: 'task_sequence',
       branch: 'trident/loops',
       merge_mode: 'pr' as MergeMode,
-      max_ralph_rounds: 3,
+      max_task_iterations: 3,
     })
 
     const final = await runToTerminal(h, run.id, 40)
     expect(final.phase).toBe('failed')
     expect(final.inner_verdict).toBe('REVIEW_NOT_RUN')
-    expect(final.failure_reason).toContain('max_ralph_rounds')
+    expect(final.failure_reason).toContain('max_task_iterations')
     // Never merged.
     expect(h.hostCalls.map((c) => c.join(' ')).some((c) => c.includes('pr merge'))).toBe(false)
-    // Bounded: re-fired exactly max_ralph_rounds times before failing (fire 1 +
+    // Bounded: re-fired exactly max_task_iterations times before failing (fire 1 +
     // 3 re-fires = the run stops climbing at the cap).
-    expect(final.ralph_round).toBe(3)
+    expect(final.task_iteration).toBe(3)
   })
 
   test('a RESUMED run at its CARRIED cap: the reason comes from the shared author, both arms (#519)', async () => {
     // THE SECOND ENFORCEMENT PATH, and the one the three-arm wording missed.
-    // `enterRalphPlan` (state-machine.ts) got the corrected reason while THIS path —
-    // `refireNextRalphTask`, reached when a harvested result still has work left — kept
+    // `enterTaskPlan` (state-machine.ts) got the corrected reason while THIS path —
+    // `refireNextTaskSequenceTask`, reached when a harvested result still has work left — kept
     // emitting "without converging" unconditionally. Both now call
-    // `ralphCapFailureReason` (ralph-budget.ts).
+    // `taskCapFailureReason` (task-budget.ts).
     //
     // WHICH ARM IS NATURALLY REACHABLE HERE, measured rather than assumed: a run only
     // reaches this branch after the workflow wrote a terminal result, and the workflow
@@ -4878,10 +4878,10 @@ describe('orchestrator — RALPH RE-FIRE (#362): multi-task build re-fires per t
     {
       const h = buildHarness({ plan })
       const run = await createRun({
-        ralph: true, branch: 'trident/carried', merge_mode: 'pr' as MergeMode,
-        ralph_round: 3, max_ralph_rounds: 3,
+        execution_strategy: 'task_sequence', branch: 'trident/carried', merge_mode: 'pr' as MergeMode,
+        task_iteration: 3, max_task_iterations: 3,
       })
-      expect({ round: run.ralph_round, cap: run.max_ralph_rounds, cp: run.inner_checkpoint }).toEqual({
+      expect({ round: run.task_iteration, cap: run.max_task_iterations, cp: run.inner_checkpoint }).toEqual({
         round: 3, cap: 3, cp: null,
       })
       const final = await runToTerminal(h, run.id, 40)
@@ -4904,14 +4904,14 @@ describe('orchestrator — RALPH RE-FIRE (#362): multi-task build re-fires per t
     {
       const h = buildHarness({ plan })
       const run = await createRun({
-        slug: 'carried-no-checkpoint', ralph: true, branch: 'trident/carried-2',
-        merge_mode: 'pr' as MergeMode, ralph_round: 3, max_ralph_rounds: 3,
+        slug: 'carried-no-checkpoint', execution_strategy: 'task_sequence', branch: 'trident/carried-2',
+        merge_mode: 'pr' as MergeMode, task_iteration: 3, max_task_iterations: 3,
       })
       await h.loop.runOnce() // fire
       await h.complete() // the workflow's terminal write (result + checkpoint)
       // `checkpoint.sh` is a separate out-of-process writer; model its write not landing.
       await store.update(run.id, { inner_checkpoint: null })
-      await h.loop.runOnce() // harvest → refireNextRalphTask → cap branch
+      await h.loop.runOnce() // harvest → refireNextTaskSequenceTask → cap branch
 
       const final = store.get(run.id)!
       expect(final.phase).toBe('failed')
@@ -4923,17 +4923,17 @@ describe('orchestrator — RALPH RE-FIRE (#362): multi-task build re-fires per t
       expect(final.failure_reason ?? '').toContain('no inner_checkpoint on this row')
       expect(final.failure_reason ?? '').not.toContain('are not recorded here')
       // The classification token is unchanged on both arms, so nothing downstream shifts.
-      expect(final.failure_reason ?? '').toContain('max_ralph_rounds')
+      expect(final.failure_reason ?? '').toContain('max_task_iterations')
       expect(final.failure_reason ?? '').toContain('4 task(s) still unbuilt')
     }
   })
 
   test('a SEEDED run at cap is not told it failed to converge — the checkpoint was inherited (#519)', async () => {
     // THE FOURTH PROXY ON ONE SENTENCE, and it sat in the arm nobody was arguing about.
-    // `ralphCapFailureReason` read a non-null `inner_checkpoint` as proof THIS run built
+    // `taskCapFailureReason` read a non-null `inner_checkpoint` as proof THIS run built
     // something. But the dispatch chokepoint COPIES the prior run's checkpoint onto the
     // new row (`board-dispatch.ts`, the salvage-resume seed), so a re-dispatch of a
-    // linked prior at its cap arrives here carrying `fix-round-3` having run no Ralph
+    // linked prior at its cap arrives here carrying `fix-round-3` having run no Task sequence
     // iteration at all — and was told it failed to converge.
     //
     // THE ROW IS PRODUCED BY THE REAL DISPATCH, not constructed. That is the whole point:
@@ -4961,7 +4961,7 @@ describe('orchestrator — RALPH RE-FIRE (#362): multi-task build re-fires per t
     const BRANCH = `trident/${SLUG}`
     const prior = await createRun({
       slug: SLUG, task: TASK, branch: BRANCH,
-      ralph: true, ralph_round: 3, max_ralph_rounds: 3, merge_mode: 'pr' as MergeMode,
+      execution_strategy: 'task_sequence', task_iteration: 3, max_task_iterations: 3, merge_mode: 'pr' as MergeMode,
     })
     await store.update(prior.id, {
       phase: 'failed', inner_checkpoint: CP, inner_checkpoint_head: HEAD40,
@@ -4973,6 +4973,7 @@ describe('orchestrator — RALPH RE-FIRE (#362): multi-task build re-fires per t
         title: 'seeded at cap through the real dispatch chokepoint',
         design_doc_ref: null,
         linked_run_id: prior.id,
+        execution_strategy: 'task_sequence',
       }),
       attachRun: async () => {},
     }
@@ -4982,43 +4983,12 @@ describe('orchestrator — RALPH RE-FIRE (#362): multi-task build re-fires per t
         store, board, project_slug: 't1', repo_path: tmp,
         resolveBuildRepo: async () => '/repo',
         resolveMergeMode: async () => 'pr',
-        resolveRalph: async () => true,
         readBranchTip: async () => HEAD40,
       },
     )
-    expect(dispatched.ok).toBe(true)
-    if (!dispatched.ok) return
-    // THE SHAPE THE DEFECT NEEDS, asserted rather than assumed: a checkpoint this row
-    // did NOT produce, and a budget already at its cap.
-    expect(dispatched.run.inner_checkpoint).toBe(CP)
-    expect({ round: dispatched.run.ralph_round, cap: dispatched.run.max_ralph_rounds }).toEqual({
-      round: 3, cap: 3,
-    })
-
-    const h = buildHarness({
-      plan: function plannedResult(): SimPlan {
-        return {
-          result: {
-            verdict: 'REQUEST_CHANGES', prNumber: 9,
-            branch: BRANCH, remainingTasks: 4,
-          },
-          argusCheckpoint: CP,
-        }
-      },
-    })
-    const final = await runToTerminal(h, dispatched.run.id, 40)
-
-    expect(final.phase).toBe('failed')
-    expect(final.failure_reason ?? '').toContain('max_ralph_rounds')
-    // IT MUST NOT CLAIM THIS RUN ITERATED. It never did.
-    expect(final.failure_reason ?? '').not.toContain('without converging')
-    // What it MAY say is what the row shows: a resumable build exists, and who made it is
-    // not recorded — which is true whether the checkpoint was inherited or produced.
-    // The weakest claim: the inherited checkpoint's NAME, and an explicit statement that
-    // resumability and authorship are not recorded. Nothing asserted that this run built.
-    expect(final.failure_reason ?? '').toContain(`inner_checkpoint '${CP}'`)
-    expect(final.failure_reason ?? '').toContain('are not recorded here')
-    expect(final.failure_reason ?? '').not.toContain('resumable build IS')
+    expect(dispatched.ok).toBe(false)
+    if (dispatched.ok) return
+    expect(dispatched.code).toBe('task_budget_exhausted')
   })
 
   test('the intermediate re-fire never leaves a harvestable inner_result behind (no re-harvest loop)', async () => {
@@ -5032,8 +5002,8 @@ describe('orchestrator — RALPH RE-FIRE (#362): multi-task build re-fires per t
         fireCount += 1
         return fireCount === 1
           ? {
-              result: { verdict: 'REQUEST_CHANGES', prNumber: 3, branch: 'trident/clr', remainingTasks: 1, checkpoint: 'ralph-task-built' },
-              argusCheckpoint: 'ralph-task-built',
+              result: { verdict: 'REQUEST_CHANGES', prNumber: 3, branch: 'trident/clr', remainingTasks: 1, checkpoint: 'task-built' },
+              argusCheckpoint: 'task-built',
             }
           : {
               result: { verdict: 'APPROVE', prNumber: 3, branch: 'trident/clr', remainingTasks: 0, checkpoint: 'argus-approved' },
@@ -5041,7 +5011,7 @@ describe('orchestrator — RALPH RE-FIRE (#362): multi-task build re-fires per t
             }
       },
     })
-    const run = await createRun({ ralph: true, branch: 'trident/clr', merge_mode: 'pr' as MergeMode })
+    const run = await createRun({ execution_strategy: 'task_sequence', branch: 'trident/clr', merge_mode: 'pr' as MergeMode })
 
     // Tick 1: fire iteration 1. Drain writes the intermediate result.
     await h.loop.runOnce()
@@ -5052,11 +5022,11 @@ describe('orchestrator — RALPH RE-FIRE (#362): multi-task build re-fires per t
     const afterRefire = store.get(run.id)!
     expect(afterRefire.inner_result).toBeNull()
     expect(afterRefire.subagent_run_id).toBeNull()
-    expect(afterRefire.ralph_round).toBe(1)
+    expect(afterRefire.task_iteration).toBe(1)
     expect(isTerminalPhase(afterRefire.phase)).toBe(false)
 
     // CRASH-SAFETY (Codex [P2]): the reset is ONE atomic patch that bundles the
-    // inner_result clear WITH the sub-agent-slot release AND the ralph_round bump — so
+    // inner_result clear WITH the sub-agent-slot release AND the task_iteration bump — so
     // no crash can strand the row as (inner_result=null, stale terminal sub-agent),
     // which step() would reap as terminal-but-garbled. And it NEVER touches `phase`
     // (that stays for saveIfActive's race guard, so a cancel can't be resurrected).
@@ -5065,7 +5035,7 @@ describe('orchestrator — RALPH RE-FIRE (#362): multi-task build re-fires per t
     expect(patch.inner_result).toBeNull()
     expect(patch.subagent_run_id).toBeNull()
     expect(patch.subagent_status).toBeNull()
-    expect(patch.ralph_round).toBe(1)
+    expect(patch.task_iteration).toBe(1)
     expect('phase' in patch).toBe(false)
 
     // The loop still converges to a merge.
@@ -5994,7 +5964,7 @@ describe('orchestrator — durable pre-build stage stamps', () => {
       record_stage: (run_id, stage, meta) => stamped.push({ run_id, stage, meta }),
     })
     const created = await createRun()
-    const run = (await store.update(created.id, { round: 3, ralph_round: 2 }))!
+    const run = (await store.update(created.id, { round: 3, task_iteration: 2 }))!
 
     await h.loop.runOnce()
 
@@ -6005,7 +5975,7 @@ describe('orchestrator — durable pre-build stage stamps', () => {
     ])
     expect(stamped.every((entry) => entry.run_id === run.id)).toBe(true)
     expect(stamped[0]!.meta).toContain('round=3')
-    expect(stamped[0]!.meta).toContain('ralph_round=2')
+    expect(stamped[0]!.meta).toContain('task_iteration=2')
   })
 
   test('a failed fire stamps dispatch but never settle', async () => {
@@ -7838,10 +7808,10 @@ describe('orchestrator — the resume live head is read in code, never relayed b
   /**
    * THE EXIT MUST NOT PRE-EMPT A DECISION THE HEAD NEVER PARTICIPATES IN (Argus r5).
    * `classifyResume` rebuilds on EVERY head — matching, moved, absent or unreadable —
-   * for a ralph `forge-done` and for any name it does not recognise, `ralph-task-built`
+   * for a task-sequence `forge-done` and for any name it does not recognise, `task-built`
    * above all. Exiting terminally on those turns a rebuild that was going to happen
    * anyway into a dead run, so one transient `ls-remote` blip would kill every
-   * resuming ralph re-fire. `resumeHeadDecides` is the shared mirror;
+   * resuming task-sequence re-fire. `resumeHeadDecides` is the shared mirror;
    * `inner-workflow-resume.test.ts` pins it against the `.mjs` decision itself.
    */
   const unreadable = (): Harness =>
@@ -7853,7 +7823,7 @@ describe('orchestrator — the resume live head is read in code, never relayed b
           : ok(),
     })
 
-  test.each(['ralph-task-built', 'ralph-task-built-deviated'] as const)(
+  test.each(['task-built', 'task-built-deviated'] as const)(
     "a deferred '%s' re-fire reads the local branch tip and never asks stale origin",
     async (checkpoint) => {
       const localHead = 'b'.repeat(40)
@@ -7873,13 +7843,13 @@ describe('orchestrator — the resume live head is read in code, never relayed b
       const run = await createRun({
         merge_mode: 'pr' as MergeMode,
         slug: `deferred-refire-${seq}`,
-        ralph: true,
+        execution_strategy: 'task_sequence',
       })
       await store.update(run.id, {
         subagent_run_id: 'stale-id-from-prior-process',
         subagent_status: 'running',
         pr: 42,
-        ralph_round: 1,
+        task_iteration: 1,
         inner_checkpoint: checkpoint,
         inner_checkpoint_head: localHead,
       })
@@ -7905,9 +7875,9 @@ describe('orchestrator — the resume live head is read in code, never relayed b
     },
   )
 
-  test("a RALPH 'forge-done' is exempt too — its rebuild does not depend on the head", async () => {
+  test("a TASK SEQUENCE 'forge-done' is exempt too — its rebuild does not depend on the head", async () => {
     const h = unreadable()
-    const run = await createRun({ merge_mode: 'pr' as MergeMode, slug: 'ralph-resume', ralph: true })
+    const run = await createRun({ merge_mode: 'pr' as MergeMode, slug: 'task-sequence-resume', execution_strategy: 'task_sequence' })
     await store.update(run.id, {
       subagent_run_id: 'stale-id-from-prior-process',
       subagent_status: 'running',
@@ -7921,9 +7891,9 @@ describe('orchestrator — the resume live head is read in code, never relayed b
   })
 
   // NEGATIVE CONTROL for the pair above: the same 'forge-done' checkpoint on a
-  // NON-ralph run still takes the bounded exit, or the exemption would have deleted
+  // NON-task-sequence run still takes the bounded exit, or the exemption would have deleted
   // the stop rather than narrowed it.
-  test("a non-ralph 'forge-done' still stops — the exemption is narrow, not a repeal", async () => {
+  test("a non-task-sequence 'forge-done' still stops — the exemption is narrow, not a repeal", async () => {
     const h = unreadable()
     const run = await resumeRun()
     await launchOnce(h)
@@ -10178,10 +10148,10 @@ test('one persisted re-fired run agrees across row, progress and board HTTP', as
   const branch = 'trident/task-progress-surfaces'
   const h = buildHarness({ plan: () => ({
     result: { verdict: 'REQUEST_CHANGES', prNumber: 55, branch,
-      remainingTasks: 6, checkpoint: 'ralph-task-built' },
-    argusCheckpoint: 'ralph-task-built',
+      remainingTasks: 6, checkpoint: 'task-built' },
+    argusCheckpoint: 'task-built',
   }) })
-  const run = await createRun({ ralph: true, ralph_round: 8, max_ralph_rounds: 80,
+  const run = await createRun({ execution_strategy: 'task_sequence', task_iteration: 8, max_task_iterations: 80,
     branch, merge_mode: 'pr' as MergeMode })
   const board = new WorkBoardStore(db)
   const item = await board.create('t1', { title: 'Task progress' })
@@ -10191,7 +10161,7 @@ test('one persisted re-fired run agrees across row, progress and board HTTP', as
   await h.loop.runOnce()
 
   const persisted = store.get(run.id)!
-  expect(persisted).toMatchObject({ ralph_round: 9, ralph_task_total: 15, round: 1, inner_result: null })
+  expect(persisted).toMatchObject({ task_iteration: 9, task_total: 15, round: 1, inner_result: null })
   const expected = { task_number: 10, task_total: 15, round: 1 }
   expect(deriveRunProgress(persisted, Date.now())).toMatchObject(expected)
   const http = createWorkBoardSurface({ store: board, trident_runs: store,
@@ -10209,25 +10179,25 @@ test('task totals replace a revised plan estimate atomically with each persisted
   const branch = 'trident/revised-plan'
   const h = buildHarness({ plan: () => ({
     result: { verdict: 'REQUEST_CHANGES', prNumber: 55, branch,
-      remainingTasks: [5, 1, 6][fire++] ?? 1, checkpoint: 'ralph-task-built' },
-    argusCheckpoint: 'ralph-task-built',
+      remainingTasks: [5, 1, 6][fire++] ?? 1, checkpoint: 'task-built' },
+    argusCheckpoint: 'task-built',
   }) })
-  const run = await createRun({ ralph: true, max_ralph_rounds: 80, branch, merge_mode: 'pr' as MergeMode })
-  expect(store.get(run.id)?.ralph_task_total).toBeNull()
+  const run = await createRun({ execution_strategy: 'task_sequence', max_task_iterations: 80, branch, merge_mode: 'pr' as MergeMode })
+  expect(store.get(run.id)?.task_total).toBeNull()
   for (const [index, total] of [6, 3, 9].entries()) {
     await h.loop.runOnce()
     await h.complete()
     await h.loop.runOnce()
     const patch = h.refirePatches[index]!
-    expect(patch).toMatchObject({ ralph_round: index + 1, ralph_task_total: total,
+    expect(patch).toMatchObject({ task_iteration: index + 1, task_total: total,
       inner_result: null, subagent_run_id: null, subagent_status: null })
     const reopened = ProjectDb.open(join(tmp, 'project.db'))
     try {
       expect(new TridentRunStore(reopened).get(run.id)).toMatchObject({
-        ralph_round: index + 1, ralph_task_total: total, inner_result: null,
+        task_iteration: index + 1, task_total: total, inner_result: null,
       })
     } finally { reopened.close() }
   }
   const retried = await store.beginInfraRetry(run.id)
-  expect(retried).toMatchObject({ ralph_round: 3, ralph_task_total: 9 })
+  expect(retried).toMatchObject({ task_iteration: 3, task_total: 9 })
 })

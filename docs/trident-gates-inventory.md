@@ -1,5 +1,16 @@
 # Trident gates inventory — #545, enumeration slice
 
+> **Current terminology; historical anchors stay intact.** Fresh builds use the
+> initial planner's persisted `single` or `task_sequence` strategy. In pre-cutover
+> evidence, stored `ralph = 1` maps to `task_sequence` and `ralph = 0` maps to
+> `single`; `ralph_round` → `task_iteration`, `max_ralph_rounds` →
+> `max_task_iterations`, `ralph_task_total` → `task_total`, `ralph-plan` →
+> `task-plan`, `ralph-task` → `task-build`, and
+> `ralph-task-built[-deviated]` → `task-built[-deviated]`. Gate IDs, old source
+> anchors, migration names, test filenames, and recorded checkpoint strings are
+> deliberately unchanged so this inventory continues to identify the evidence it
+> originally enumerated.
+
 **3 NO TEST entries out of 166 preservation entries.** 156 entries are classified **Silent** if lost and 10 are **Loud**. The counts are direct row enumerations: `awk -F'|' '/^\\| G[0-9][0-9][0-9] / { if ($6 ~ /NO TEST/) u++; if ($7 ~ /Silent:/) s++; else if ($7 ~ /Loud:/) l++; n++ } END { print n, u+0, s, l }' docs/trident-gates-inventory.md` prints `166 3 156 10`. G135 moved from Silent to Loud when #818 added independent pre-commit enforcement; its row changed, but the summary did not. No other loss-classification row moved. The count is conservative: `NO TEST` means this audit did not locate a sufficiently specific pin, including cases where only a related happy-path or argument-threading test was found. It is not a claim that the repository contains no relevant test. The original rows are the result of static inspection. The #745 follow-up mutation-certified G021, G022, G023, G024, G034 and G075 with complete workflow execution in `trident/inner-workflow-gates.test.ts`; other rows are not freshly certified.
 
 Baseline: `f7320fc76eb3e1d0775dabd56cf957da632904e5`. The three subject files were measured at 9,315, 6,316, and 1,167 lines respectively (16,798 total), matching the task brief. The staged issue contains no numerical source anchors to correct; the preservation requirement is `docs/spec-items/the-orchestrator-owns-the-build-loop.md:56`. This slice inventories the existing loop; it does not satisfy the replacement or end-to-end build criteria.

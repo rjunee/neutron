@@ -105,7 +105,7 @@ export function buildRemindersChatCommandFilter(deps: {
  * The composer threads `resolve_context(input)` — given the inbound
  * envelope (project_id / user_id / project_slug), it returns the
  * `TridentCodeContext` (store + project_slug + repo_path + the git-mode /
- * Ralph detection seams). Returning `null` means "no `/code` build target
+ * Task sequence detection seams). Returning `null` means "no `/code` build target
  * for this project" → the filter replies with a friendly unavailable
  * message rather than throwing.
  */

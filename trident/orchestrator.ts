@@ -61,12 +61,12 @@ import { unknownWorkerObservation, workerEvidence, type RunWorkerObserver, type 
  *      outer/human gate); on REQUEST_CHANGES / failed-provenance → phase `failed`
  *      with a named reason (recoverable: re-run), never a silent success.
  *
- *      RALPH RE-FIRE (#362): a harvested result carrying `remaining_tasks > 0` is
- *      an INTERMEDIATE Ralph iteration — one task built, more remain. Instead of
+ *      TASK SEQUENCE RE-FIRE (#362): a harvested result carrying `remaining_tasks > 0` is
+ *      an INTERMEDIATE Task sequence iteration — one task built, more remain. Instead of
  *      merging (the bug: multi-task builds shipped after task 1), `applyResult`
- *      RE-FIRES a fresh inner iteration for the next task (`refireNextRalphTask`:
- *      reset the sub-agent slot, keep branch/PR + the 'ralph-task-built' resume
- *      checkpoint, bump `ralph_round`, cap at `max_ralph_rounds`). This — not
+ *      RE-FIRES a fresh inner iteration for the next task (`refireNextTaskSequenceTask`:
+ *      reset the sub-agent slot, keep branch/PR + the 'task-built' resume
+ *      checkpoint, bump `task_iteration`, cap at `max_task_iterations`). This — not
  *      `state-machine.ts` — is where the live plan→task→repeat loop is driven in
  *      the exec model.
  *
@@ -85,9 +85,9 @@ import { unknownWorkerObservation, workerEvidence, type RunWorkerObserver, type 
  * one-commit revertibility, AND its role as the executable cross-repo PARITY
  * anchor for the legacy harness's `/trident` skill loop (`legacy-fixes.test.ts`). The exec-model
  * step above no longer drives its per-phase graph for the inner loop; in
- * particular the Ralph plan→task→repeat cycle is now driven HERE via the
- * `remaining_tasks` re-fire (`refireNextRalphTask`, #362), NOT by
- * `computeTransition`'s `ralph-plan`/`ralph-task` branches.
+ * particular the Task sequence plan→task→repeat cycle is now driven HERE via the
+ * `remaining_tasks` re-fire (`refireNextTaskSequenceTask`, #362), NOT by
+ * `computeTransition`'s `task-plan`/`task-build` branches.
  */
 
 import {
@@ -103,7 +103,7 @@ import { fireAndForget } from '@neutronai/logger/fire-and-forget.ts'
 import { gitRangeArgv } from './git-range.ts'
 import { hasArgusProvenance, phaseForCheckpoint } from './checkpoint-phase.ts'
 import { readBuildModeState } from './build-mode-state.ts'
-import { ralphCapFailureReason } from './ralph-budget.ts'
+import { taskCapFailureReason } from './task-budget.ts'
 import { checkpointRoundField } from './checkpoint-round.ts'
 import { advanceBoundReview, recordedTerminalVerdict } from './bound-review.ts'
 export { recordedTerminalVerdict } from './bound-review.ts'
@@ -377,13 +377,13 @@ export interface BuildTridentOrchestratorOptions {
   /** Mint the per-dispatch tracking id (test seam). Defaults to crypto.randomUUID. */
   mint_run_id?: () => string
   /**
-   * RALPH RE-FIRE (#362) — persist the re-fire reset patch OUT-OF-BAND in ONE atomic
+   * TASK SEQUENCE RE-FIRE (#362) — persist the re-fire reset patch OUT-OF-BAND in ONE atomic
    * store UPDATE. `save`/`saveIfActive` DELIBERATELY never write `inner_result` (it is
    * workflow-owned, so the launch persist can't clobber a result the detached workflow
    * wrote), so a re-fire — which must null the harvested intermediate result AND reset
    * the sub-agent slot together — cannot go through them. This seam writes the whole
    * reset (`inner_result=null` + the released sub-agent slot + the bumped
-   * `ralph_round`) as a SINGLE row UPDATE, so the durable row is never left in the
+   * `task_iteration`) as a SINGLE row UPDATE, so the durable row is never left in the
    * inconsistent `inner_result=null` + stale-terminal-sub-agent state that `step()`
    * would reap as "terminal-but-garbled" if the process crashed between two writes
    * (Codex review [P2]). The patch NEVER includes `phase`, so it cannot resurrect a
@@ -393,7 +393,8 @@ export interface BuildTridentOrchestratorOptions {
    * The outer publisher also uses this store writer for a matched PR creation
    * receipt before annotation and review-diff work. Snapshot saves deliberately
    * leave publication ownership untouched. MUST be wired wherever builds publish
-   * or Ralph runs re-fire.
+   * or task-sequence runs re-fire. Only task-sequence multi-task runs reach the
+   * re-fire path; non-task-sequence callers and tests are unaffected.
    */
   persist_refire_reset?: (run_id: string, patch: TridentRunUpdate) => Promise<void>
   /**
@@ -452,7 +453,7 @@ export interface BuildTridentOrchestratorOptions {
    * How many launcher crashes on ONE run may be recovered by relaunching before
    * the run is failed terminally. Default {@link DEFAULT_MAX_CRASH_RECOVERIES}.
    *
-   * DELIBERATELY SEPARATE from `max_rounds`/`max_ralph_rounds`: a launcher crash is
+   * DELIBERATELY SEPARATE from `max_rounds`/`max_task_iterations`: a launcher crash is
    * not the agent's failure and must not consume its fix rounds. The counter it
    * bounds (`crash_recoveries`) is a DURABLE column rather than in-process state,
    * because the cause being bounded is a gateway deploy loop (three restarts in
@@ -1044,21 +1045,21 @@ export async function resolveResumeLiveHead(
  *
  *   • `''` — no checkpoint at all → `rebuild`, and nothing recorded to preserve.
  *   • `pr-merged` → `merged`; the head branch may already be deleted.
- *   • `forge-done` in RALPH mode → `rebuild` ('ralph-progress-unknown'), and
- *     any name `classifyResume` does not recognise — `ralph-task-built` above all —
+ *   • `forge-done` in TASK SEQUENCE mode → `rebuild` ('task-progress-unknown'), and
+ *     any name `classifyResume` does not recognise — `task-built` above all —
  *     → `rebuild` ('unknown-checkpoint'). Both are the answer on EVERY head, so a
  *     read failure changed nothing (Argus r5). Stopping these terminally would let
- *     one transient `ls-remote` blip kill every resuming ralph re-fire.
+ *     one transient `ls-remote` blip kill every resuming task-sequence re-fire.
  *
  * MIRRORS `classifyResume`/`resumeOnUnchangedHead` in `inner-workflow.mjs`, which is
  * a `.mjs` Workflow script this module cannot import; `inner-workflow-resume.test.ts`
  * executes BOTH and asserts they agree on every name, so the pair cannot drift
  * silently.
  */
-export function resumeHeadDecides(checkpoint: string, ralph: boolean): boolean {
+export function resumeHeadDecides(checkpoint: string, taskSequence: boolean): boolean {
   const name = checkpoint.trim()
   if (name === '' || name === 'pr-merged') return false
-  if (name === 'forge-done' && ralph) return false
+  if (name === 'forge-done' && taskSequence) return false
   return (
     name === 'argus-approved' ||
     name === 'argus-request-changes' ||
@@ -1851,7 +1852,7 @@ export function buildTridentOrchestrator(
     // run never fires the build workflow, so stamping first would write a launch-start event for
     // a build launch that never happened — and this stage ledger is exactly what the latency card
     // reads.
-    stamp('launch-start', `round=${run.round} ralph_round=${run.ralph_round}`)
+    stamp('launch-start', `round=${run.round} task_iteration=${run.task_iteration}`)
     const prepared = await prepareLaunch(run, opts, {
       resolveBase,
       detectExistingPr,
@@ -2189,61 +2190,61 @@ export function buildTridentOrchestrator(
   /** Apply a harvested, decoded inner result to the run (merge on a SERVER-GATED
    *  APPROVE, else fail). */
   /**
-   * RALPH RE-FIRE (#362) — the harvested inner iteration built ONE task but MORE
-   * remain (`remaining_tasks > 0`). Per the Ralph one-task-per-fresh-context
+   * TASK SEQUENCE RE-FIRE (#362) — the harvested inner iteration built ONE task but MORE
+   * remain (`remaining_tasks > 0`). Per the Task sequence one-task-per-fresh-context
    * discipline the build is NOT done: reset the run to a launchable state so the
    * NEXT tick fires a FRESH inner iteration (re-plan against the committed
    * IMPLEMENTATION_PLAN.md + build the next top task, reusing the branch/PR), rather
-   * than merging after task 1 (the bug #362 fixes). Bounded by `max_ralph_rounds`
-   * (via the run's `ralph_round` counter) so a non-converging planner fails loudly
+   * than merging after task 1 (the bug #362 fixes). Bounded by `max_task_iterations`
+   * (via the run's `task_iteration` counter) so a non-converging planner fails loudly
    * instead of re-firing forever.
    *
    * The reset is persisted OUT-OF-BAND in ONE atomic UPDATE (`persistRefireReset`)
    * because `saveIfActive` never writes `inner_result` (workflow-owned). Bundling the
-   * `inner_result=null` clear WITH the sub-agent-slot release + `ralph_round` bump in a
+   * `inner_result=null` clear WITH the sub-agent-slot release + `task_iteration` bump in a
    * single row write means a crash can never strand the row in the inconsistent
    * (inner_result=null, stale terminal sub-agent) state `step()` would reap as
    * "terminal-but-garbled" (Codex review [P2]). It never writes `phase`, so it can't
    * resurrect a concurrently force-terminated run; `saveIfActive` still commits the
    * (unchanged, non-terminal) phase under its race guard.
    */
-  async function refireNextRalphTask(
+  async function refireNextTaskSequenceTask(
     run: TridentRun,
     result: InnerResult,
-    checkpointNameOverride?: 'ralph-task-built' | 'ralph-task-built-deviated',
+    checkpointNameOverride?: 'task-built' | 'task-built-deviated',
   ): Promise<AdvanceOutcome> {
     fired.delete(run.id)
     redispatched.delete(run.id)
     const pr = result.pr_number ?? run.pr
     const branch = result.branch ?? run.branch
     const remaining = result.remaining_tasks ?? 0
-    const nextRalphRound = run.ralph_round + 1
+    const nextTaskIteration = run.task_iteration + 1
     // Current one-based task plus tasks still planned after it. This is a plan
     // estimate, not the spending cap; replacement plans may grow or shrink it.
-    const plannedTotal = (run.ralph_round + 1) + remaining
+    const plannedTotal = (run.task_iteration + 1) + remaining
     const taskTotal = Number.isSafeInteger(plannedTotal) && Number.isSafeInteger(remaining) && remaining > 0
       ? plannedTotal : null
 
-    if (nextRalphRound > run.max_ralph_rounds) {
+    if (nextTaskIteration > run.max_task_iterations) {
       // Cap reached: fail loudly. No out-of-band clear needed — the run goes TERMINAL
       // (`saveIfActive` commits `phase='failed'`), and `listNonTerminal` never reloads a
       // terminal row, so the stale `inner_result` is inert. (If a crash beats that
       // commit, the next tick re-harvests, re-enters here, and fails again — idempotent.)
       //
       // THE REASON IS NOT WRITTEN HERE (#519, final gate). This site emitted "without
-      // converging" UNCONDITIONALLY while `enterRalphPlan` (state-machine.ts) had already
+      // converging" UNCONDITIONALLY while `enterTaskPlan` (state-machine.ts) had already
       // been given a three-arm wording, so the inaccurate diagnosis stayed live on
       // exactly the path a RESUMED seeded run takes — reached after review when
       // `remaining_tasks > 0`, which is the shape most likely to arrive at the cap having
       // run no iteration of its own. Both sites now call the single author,
-      // `ralphCapFailureReason` (ralph-budget.ts); fixing the string twice would have
+      // `taskCapFailureReason` (task-sequence-budget.ts); fixing the string twice would have
       // re-created the two-copies divergence that module exists to prevent. `remaining`
       // is this path's own fact — the state machine does not know it — so it is passed in
       // rather than dropped.
       const failed: TridentRun = {
         ...failedRun(
           run,
-          ralphCapFailureReason({ ...run, remaining_tasks: remaining }),
+          taskCapFailureReason({ ...run, remaining_tasks: remaining }),
           false,
         ),
         pr,
@@ -2251,13 +2252,13 @@ export function buildTridentOrchestrator(
         harvested_at: nowMs(),
         inner_verdict: 'REVIEW_NOT_RUN',
       }
-      return { run: failed, changed: true, waiting: false, note: 'ralph loop → failed (max ralph rounds)' }
+      return { run: failed, changed: true, waiting: false, note: 'task-sequence loop → failed (max task-sequence rounds)' }
     }
 
     // ATOMIC reset to launchable: null the harvested `inner_result`, release the
-    // sub-agent slot (so `step()` re-fires next tick), and bump `ralph_round` — all in
+    // sub-agent slot (so `step()` re-fires next tick), and bump `task_iteration` — all in
     // ONE store UPDATE, so any crash leaves a coherent, re-fireable row. Branch/PR and
-    // the workflow-written 'ralph-task-built' `inner_checkpoint` (non-null, NOT
+    // the workflow-written 'task-built' `inner_checkpoint` (non-null, NOT
     // 'argus-approved') are preserved so the next fire resumes onto the branch and
     // re-plans the next task without the approved short-circuit. `phase` is
     // deliberately excluded (see the seam doc): it stays whatever it is, so a
@@ -2266,8 +2267,8 @@ export function buildTridentOrchestrator(
       inner_result: null,
       subagent_run_id: null,
       subagent_status: null,
-      ralph_round: nextRalphRound,
-      ralph_task_total: taskTotal,
+      task_iteration: nextTaskIteration,
+      task_total: taskTotal,
       inner_verdict: null,
       pr,
       branch,
@@ -2282,8 +2283,8 @@ export function buildTridentOrchestrator(
     // unstamped — this is a NON-terminal continuation, not a terminal outer-harvest.
     const next: TridentRun = {
       ...run,
-      ralph_round: nextRalphRound,
-      ralph_task_total: taskTotal,
+      task_iteration: nextTaskIteration,
+      task_total: taskTotal,
       pr,
       branch,
       subagent_run_id: null,
@@ -2297,7 +2298,7 @@ export function buildTridentOrchestrator(
       run: next,
       changed: true,
       waiting: false,
-      note: `ralph task built (${remaining} remain) → re-fire iteration ${nextRalphRound}/${run.max_ralph_rounds}`,
+      note: `task-sequence task built (${remaining} remain) → re-fire iteration ${nextTaskIteration}/${run.max_task_iterations}`,
     }
   }
 
@@ -2331,7 +2332,7 @@ export function buildTridentOrchestrator(
     // A wave child owns exactly one pinned build. Its `built` result is the join
     // barrier's input, not an approval or publish handoff: finish the child in
     // place and leave its member branch untouched for the parent to integrate.
-    // This must precede every side-effecting path below (publish, Ralph re-fire,
+    // This must precede every side-effecting path below (publish, Task sequence re-fire,
     // review provenance, merge). Children have no chat route, so none is read.
     if (run.parent_run_id !== null && result.built) {
       if (typeof result.commit_sha !== 'string') {
@@ -2380,11 +2381,11 @@ export function buildTridentOrchestrator(
     }
 
     if (result.publish_requested) {
-      if (run.ralph && (result.remaining_tasks ?? 0) > 0) {
-        return refireNextRalphTask(
+      if (run.execution_strategy === 'task_sequence' && (result.remaining_tasks ?? 0) > 0) {
+        return refireNextTaskSequenceTask(
           run,
           result,
-          result.deviated_from_spec ? 'ralph-task-built-deviated' : 'ralph-task-built',
+          result.deviated_from_spec ? 'task-built-deviated' : 'task-built',
         )
       }
       try {
@@ -2395,7 +2396,7 @@ export function buildTridentOrchestrator(
         // resume-launch regex below, `inner-workflow.mjs`'s resume parse, and its
         // `classifyResume`. The optional `:deviated` suffix carries the previous
         // Forge's deviation across the process boundary so the resumed invocation
-        // writes the `ralph-task-built-deviated` checkpoint and the NEXT iteration
+        // writes the `task-built-deviated` checkpoint and the NEXT iteration
         // full-plans; without it the string is byte-identical to the old format.
         // THE ROUND IS CLAMPED TO WHAT THE READERS ACCEPT (Argus r10, minor).
         // `result.round` comes from `parseInnerResult`, i.e. from substrate JSON,
@@ -2468,7 +2469,7 @@ export function buildTridentOrchestrator(
     }
 
     // A MERGE IS TERMINAL (ISSUES #563) — checked before EVERY other branch,
-    // including the Ralph re-fire, because a merged PR outranks every other reading
+    // including the Task sequence re-fire, because a merged PR outranks every other reading
     // of this result: the change has shipped, its head branch is gone, and there is
     // nothing left to build onto, review, or merge.
     //
@@ -2502,12 +2503,12 @@ export function buildTridentOrchestrator(
       }
     }
 
-    // RALPH RE-FIRE (#362) — checked FIRST, before the terminal-harvest stamp: an
+    // TASK SEQUENCE RE-FIRE (#362) — checked FIRST, before the terminal-harvest stamp: an
     // intermediate iteration with tasks still remaining is NOT a merge/fail, so it
     // must not stamp `harvested_at` (the terminal-harvest marker) nor run the merge
     // provenance gate. Re-fire a fresh iteration for the next task instead.
     if (result.remaining_tasks !== null && result.remaining_tasks > 0) {
-      return refireNextRalphTask(run, result)
+      return refireNextTaskSequenceTask(run, result)
     }
 
     const infrastructureRetry = await tryInfrastructureRetry({

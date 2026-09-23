@@ -1,72 +1,27 @@
 /**
- * @neutronai/trident — the Ralph re-fire BUDGET, and the one predicate that says
- * whether a given re-fire counter can still be spent under it.
- *
- * A LEAF ON PURPOSE. It imports nothing at all, because the two modules that must
- * agree about this number sit on opposite sides of an existing edge: `store.ts`
- * imports `reviewCapableCheckpoint` from `run-disposition.ts`, so a constant
- * living in `store.ts` and read by `run-disposition.ts` would close a runtime
- * import cycle the G4 gate rejects. The same shape `ascii-trim.ts` and
- * `checkpoint-round.ts` already take: one concept, no dependencies, shared by
- * every site that has to give the same answer.
- *
- * WHY THEY MUST AGREE (#519). A re-dispatch of a card THAT NAMES ITS PRIOR RUN
- * carries that run's `ralph_round` and cap onto the new row, so for that path the
- * Ralph bound follows the card rather than the attempt. `carriedRalphBudget`
- * (run-disposition.ts) decides whether the pair may be carried;
- * `TridentRunStore.create` (store.ts) refuses a pair it should not have been
- * offered. Two copies of the rule would let the producer offer exactly the value
- * the write site throws on, which turns a salvageable dispatch into a
- * `backend_error` — the failure mode this file exists to make impossible.
- *
- * AND THAT IS THE WHOLE OF THE CLAIM. An earlier version of this paragraph said the
- * bound "is a property of the CARD" and that `max_ralph_rounds` is not resettable by
- * pressing ▶ again — which is exactly what this change spent two review rounds
- * establishing to be FALSE, in the file that implements the rule, where a future
- * reader is most likely to trust it. It was written before the escapes were
- * understood and nothing re-reads a comment you did not touch. The escapes, both
- * measured and both pinned as tests in `retry-resumes-checkpoint.test.ts`:
- *
- *   - ONE CLICK CLEARS THE LINK. `work-board/store.ts` NULLs `linked_run_id` when a
- *     card leaves the `failed` lane (`nextStatus('failed')` to `'upcoming'`, the
- *     ordinary status-dot advance) and again on `done` to `upcoming`. The carry is
- *     gated on that link, so the next dispatch inherits nothing: same card, same
- *     slug, same branch, full fresh budget.
- *   - AN INTERVENING NON-GOVERNED RUN LAUNDERS THE SPEND — and the mechanism is the
- *     LINK MOVING, not a lookup picking a row. Every successful dispatch rebinds the
- *     card to its new run (`board-dispatch.ts:1574`), so one ralph-off dispatch makes
- *     that row what `linked_run_id` names; the ladder loads it by that exact id and
- *     `carriedRalphBudget` answers null on `run.ralph !== true`
- *     (`run-disposition.ts:298`). An earlier version of this bullet blamed
- *     `latestTerminalBySlug` returning the latest terminal row, which WAS the mechanism
- *     until the prior stopped being resolved by slug — the phenomenon is unchanged and
- *     the cause named for it had become fiction. That row is present and readable; it is
- *     simply not governed, which is why it is not a "gap in the chain".
- *
- * #629 makes this helper the compatibility path for a card without a persisted
- * budget snapshot. Once present, the card-owned pair is authoritative; this helper
- * still guarantees that an older governed pair travels together and only tightens.
+ * Card-owned iteration budget primitives. Counters and caps travel as a pair
+ * across retries under either execution strategy. Missing input uses the fresh
+ * default; corrupt evidence never restores an allowance.
  */
-
 /**
  * The re-fire cap a run gets when its creator names none — the value
- * `TridentRunStore.create` has always written for `max_ralph_rounds`.
+ * `TridentRunStore.create` has always written for `max_task_iterations`.
  *
  * The `DEFAULT 20` on the column is not the authority here: `create` always
  * supplies the field, so this constant is what every row born through it carries,
  * and it is what a caller deciding whether a carried round is spendable must
  * resolve the cap to when the dispatch names no explicit cap of its own.
  */
-export const DEFAULT_MAX_RALPH_ROUNDS = 20 as const
+export const DEFAULT_MAX_TASK_ITERATIONS = 20 as const
 
 /**
- * Is `v` a value this repo can use as a Ralph re-fire COUNTER?
+ * Is `v` a value this repo can use as a Task re-fire COUNTER?
  *
- * THE SAME DOMAIN AS {@link isRalphCap}, AND THE SYMMETRY IS THE POINT (cross-model
+ * THE SAME DOMAIN AS {@link isTaskCap}, AND THE SYMMETRY IS THE POINT (cross-model
  * review, final round — the FOURTH defect of one shape in this lane). The cap got a
  * careful three-way classification while the counter quietly normalised every value it
- * did not understand to `0`. So a governed prior at `{ ralph_round: NaN,
- * max_ralph_rounds: 20 }` produced `{ 0, 20 }`, and `computeTransition` then authorised
+ * did not understand to `0`. So a governed prior at `{ task_iteration: NaN,
+ * max_task_iterations: 20 }` produced `{ 0, 20 }`, and `computeTransition` then authorised
  * the next transition because `0 + 1 > 20` is false: the budget reset, restored for
  * malformed persisted data, in the field next to the one that had just been fixed.
  *
@@ -75,7 +30,7 @@ export const DEFAULT_MAX_RALPH_ROUNDS = 20 as const
  * rather than "unset", and callers must refuse them instead of substituting, because
  * every substitution available is more permissive than the truth.
  */
-export function isRalphRound(v: unknown): boolean {
+export function isTaskIteration(v: unknown): boolean {
   return Number.isSafeInteger(v) && (v as number) >= 0
 }
 
@@ -83,7 +38,7 @@ export function isRalphRound(v: unknown): boolean {
  * The re-fire counter a caller's INPUT may be normalised to — `0` when genuinely
  * absent, the value when readable, and `null` when present but unreadable.
  *
- * THREE ANSWERS, NOT TWO, for the reason {@link carriedRalphCap} has three: absent and
+ * THREE ANSWERS, NOT TWO, for the reason {@link carriedTaskCap} has three: absent and
  * invalid are different facts and collapsing them is what produced defect four. Absent
  * (`undefined`/`null`) is a caller that named no counter, and `0` is the right answer
  * for it — it is what `create` has always written for a fresh row. A PRESENT value that
@@ -91,32 +46,32 @@ export function isRalphRound(v: unknown): boolean {
  * than quietly charge the card nothing.
  *
  * NOTE THAT `null` HERE IS THE STRICT ANSWER, not the permissive one — the opposite of
- * `carriedRalphCap`'s `null`. For a CAP, carrying nothing leaves the dispatch's own cap
+ * `carriedTaskCap`'s `null`. For a CAP, carrying nothing leaves the dispatch's own cap
  * in place, so `null` costs nothing. For a COUNTER there is no such fallback: carrying
  * nothing IS the reset. That asymmetry is why callers must treat a `null` round as a
  * REFUSAL and never as "carry zero".
  */
-export function carryableRalphRound(round: unknown): number | null {
+export function carryableTaskIteration(round: unknown): number | null {
   if (round === undefined || round === null) return 0
-  return isRalphRound(round) ? (round as number) : null
+  return isTaskIteration(round) ? (round as number) : null
 }
 
 /**
- * Is `v` a value this repo can use as a Ralph re-fire cap?
+ * Is `v` a value this repo can use as a Task re-fire cap?
  *
  * A SAFE INTEGER ≥ 0, AND THE ZERO IS THE POINT (cross-model review, final round).
  * An earlier revision of this file required `>= 1`, treated everything else as
- * "absent", and substituted {@link DEFAULT_MAX_RALPH_ROUNDS} — so
- * `carriedRalphCap(30, 0)` answered **20**, and a dispatch that asked for ZERO
+ * "absent", and substituted {@link DEFAULT_MAX_TASK_ITERATIONS} — so
+ * `carriedTaskCap(30, 0)` answered **20**, and a dispatch that asked for ZERO
  * iterations authorised fifteen more on a run already at round 5. That is not a
  * fail-closed default, it is the most permissive value available, chosen because an
  * edge value was mistaken for an unset one. Nothing in this repo establishes a
  * positive-only contract for the field, so "non-positive means absent" was an
  * assumption rather than a fact.
  *
- * ZERO IS A COHERENT REQUEST — a card capped at zero gets no Ralph iterations, and
- * `refireNextRalphTask` / `computeTransition` refuse the first one loudly, naming
- * `max_ralph_rounds`. So zero is VALID and preserved. Only `undefined`/`null` mean
+ * ZERO IS A COHERENT REQUEST — a card capped at zero gets no Task iterations, and
+ * `refireNextTask` / `computeTransition` refuse the first one loudly, naming
+ * `max_task_iterations`. So zero is VALID and preserved. Only `undefined`/`null` mean
  * absent, and only they get a default.
  *
  * Everything else — negative, fractional, `NaN`, `±Infinity`, past 2^53, a string —
@@ -124,7 +79,7 @@ export function carryableRalphRound(round: unknown): number | null {
  * caller can refuse instead of substituting. `Number.isSafeInteger` is the only test
  * that rejects all of them at once.
  */
-export function isRalphCap(v: unknown): boolean {
+export function isTaskCap(v: unknown): boolean {
   return Number.isSafeInteger(v) && (v as number) >= 0
 }
 
@@ -134,7 +89,7 @@ export function isRalphCap(v: unknown): boolean {
  *
  * WHY A CAP HAS TO TRAVEL AT ALL (cross-model review round 2, BLOCKER). Carrying the
  * round alone does not make a bound, because the bound is a PAIR. A prior run at
- * `ralph_round: 5, max_ralph_rounds: 5` re-dispatched with no explicit cap produced a
+ * `task_iteration: 5, max_task_iterations: 5` re-dispatched with no explicit cap produced a
  * row at `5 / 20` — the round travelled, the cap did not, and `5 + 1 > 20` is false,
  * so a card someone deliberately capped at 5 got 20.
  *
@@ -148,19 +103,19 @@ export function isRalphCap(v: unknown): boolean {
  *   - A cap RAISED in configuration does NOT reach a resumed card. This is the
  *     load-bearing half: otherwise an exhausted card could be resurrected by editing
  *     config and pressing ▶ — the unbounded-retry defect re-entering through the cap
- *     instead of the counter. The escape hatch is deliberate and explicit rather than
- *     ambient: the carry only happens when the card NAMES the prior run, so re-cutting
- *     the card takes the fresh dispatch with its fresh budget, on purpose.
+ *     instead of the counter. Dispatch combines this linked-prior bound with the
+ *     card's durable snapshot. Clearing a run link cannot clear that snapshot.
+ *     A fresh allowance requires both an absent link and absent card evidence.
  *
  * ABSENT AND INVALID ARE DIFFERENT ANSWERS, and conflating them is what the final
  * blocker was.
  *
  *   - `dispatch_cap` ABSENT (`undefined`/`null`) is the only case that gets
- *     {@link DEFAULT_MAX_RALPH_ROUNDS} — and that is right, because it is exactly what
+ *     {@link DEFAULT_MAX_TASK_ITERATIONS} — and that is right, because it is exactly what
  *     `TridentRunStore.create` writes for a row whose creator named no cap. Nothing is
  *     being substituted for a value someone supplied.
  *   - `dispatch_cap` PRESENT is honoured as given, ZERO INCLUDED. It is never widened.
- *   - `dispatch_cap` present but INVALID ({@link isRalphCap} false) carries NOTHING.
+ *   - `dispatch_cap` present but INVALID ({@link isTaskCap} false) carries NOTHING.
  *     The invalid value then reaches `create`, which REFUSES it by name — loud, and at
  *     the write site, rather than quietly becoming the most permissive number in the
  *     file. Returning `null` here is what keeps this function from having to throw.
@@ -169,24 +124,24 @@ export function isRalphCap(v: unknown): boolean {
  *     There is no prior bound to preserve, so the dispatch's own cap applies — which
  *     is the pre-existing behaviour for a legacy or garbled row, not a loosening.
  */
-export function carriedRalphCap(prior_cap: unknown, dispatch_cap: unknown): number | null {
-  if (!isRalphCap(prior_cap)) return null
+export function carriedTaskCap(prior_cap: unknown, dispatch_cap: unknown): number | null {
+  if (!isTaskCap(prior_cap)) return null
   // ABSENT MEANS ABSENT — and nothing else does.
   if (dispatch_cap === undefined || dispatch_cap === null) {
-    return Math.min(prior_cap as number, DEFAULT_MAX_RALPH_ROUNDS)
+    return Math.min(prior_cap as number, DEFAULT_MAX_TASK_ITERATIONS)
   }
   // PRESENT BUT UNREADABLE: carry nothing and let the write site refuse the raw value
   // by name. Substituting a default here is precisely the failure this rules out.
-  if (!isRalphCap(dispatch_cap)) return null
+  if (!isTaskCap(dispatch_cap)) return null
   return Math.min(prior_cap as number, dispatch_cap as number)
 }
 
 /**
  * THE ONE AUTHOR OF THE CAP-REFUSAL DIAGNOSIS, shared by both production sites that
- * enforce the Ralph bound.
+ * enforce the Task bound.
  *
  * WHY IT IS HERE AND NOT INLINE (final gate). The three-arm wording was written into
- * `enterRalphPlan` (state-machine.ts) and `refireNextRalphTask` (orchestrator.ts) kept
+ * `enterTaskPlan` (state-machine.ts) and `refireNextTask` (orchestrator.ts) kept
  * emitting "without converging" unconditionally — so the sentence this lane spent three
  * rounds correcting was still live on the path a RESUMED seeded run takes after review
  * when `remaining_tasks > 0`, which is precisely the shape most likely to arrive at the
@@ -196,15 +151,15 @@ export function carriedRalphCap(prior_cap: unknown, dispatch_cap: unknown): numb
  * owns the sentence the way it already owns the predicates.
  *
  * THE THREE ARMS, and why there are three rather than four. The refusal fires iff
- * `ralph_round >= max_ralph_rounds`; `max_ralph_rounds` is written only by
+ * `task_iteration >= max_task_iterations`; `max_task_iterations` is written only by
  * `TridentRunStore.create` (absent from `TridentRunUpdate`) and `create` refuses any cap
- * that is not a non-negative safe integer, so `ralph_round === 0` here IMPLIES
- * `max_ralph_rounds === 0`, and round 0 under a positive cap cannot reach this code at
+ * that is not a non-negative safe integer, so `task_iteration === 0` here IMPLIES
+ * `max_task_iterations === 0`, and round 0 under a positive cap cannot reach this code at
  * all.
  *
  *   1. A CHECKPOINT EXISTS ON THIS ROW. That is the whole claim — the name, and that it
  *      is present. NOT that this run produced it (the dispatch chokepoint copies a prior
- *      run's checkpoint forward), and NOT that it is resumable (`ralph-task-built` is a
+ *      run's checkpoint forward), and NOT that it is resumable (`task-built` is a
  *      checkpoint that `reviewCapableCheckpoint` in run-disposition.ts declines, so
  *      "a resumable build is present" was false for it).
  *
@@ -220,11 +175,11 @@ export function carriedRalphCap(prior_cap: unknown, dispatch_cap: unknown): numb
  *      READER — `delivery.ts` never parses it and production routes on `phase: 'failed'`
  *      — so it was declined. The checkpoint NAME is in the message and the row is
  *      queryable; an operator who needs more can read the row.
- *   2. NO CHECKPOINT AND `ralph_round === 0` — therefore cap 0, so no iteration could be
+ *   2. NO CHECKPOINT AND `task_iteration === 0` — therefore cap 0, so no iteration could be
  *      authorised at all. The two column values, and that consequence. NOT "this run
  *      built nothing": a null checkpoint is written out-of-process, so its absence means
  *      "not recorded", never "did not happen".
- *   3. NO CHECKPOINT AND `ralph_round > 0` — the budget is spent. NOT that nothing was
+ *   3. NO CHECKPOINT AND `task_iteration > 0` — the budget is spent. NOT that nothing was
  *      attempted (this function's own caller advances the counter without writing a
  *      checkpoint, so a row here may have planned repeatedly) and NOT who spent it.
  *
@@ -239,13 +194,13 @@ export function carriedRalphCap(prior_cap: unknown, dispatch_cap: unknown): numb
  * (it knows how much work is left; the state machine does not), appended when present so
  * neither caller loses information the other never had.
  *
- * The `max_ralph_rounds` token appears in all three arms, so the classification is
+ * The `max_task_iterations` token appears in all three arms, so the classification is
  * unchanged and only the explanation differs.
  */
-export function ralphCapFailureReason(row: {
+export function taskCapFailureReason(row: {
   inner_checkpoint: string | null
-  ralph_round: number
-  max_ralph_rounds: number
+  task_iteration: number
+  max_task_iterations: number
   remaining_tasks?: number | null
 }): string {
   const tail =
@@ -256,10 +211,10 @@ export function ralphCapFailureReason(row: {
   // five successively narrower overclaims this replaced.
   const hasCheckpoint = row.inner_checkpoint !== null
   if (hasCheckpoint) {
-    return `Ralph loop hit max_ralph_rounds (${row.max_ralph_rounds}) with ralph_round at ${row.ralph_round}: the budget is exhausted, so no further iteration could start. This row carries inner_checkpoint '${row.inner_checkpoint}'; whether that work is resumable, and which run produced it, are not recorded here — read the row and the card's earlier runs${tail}`
+    return `Task loop hit max_task_iterations (${row.max_task_iterations}) with task_iteration at ${row.task_iteration}: the budget is exhausted, so no further iteration could start. This row carries inner_checkpoint '${row.inner_checkpoint}'; whether that work is resumable, and which run produced it, are not recorded here — read the row and the card's earlier runs${tail}`
   }
   // NO CHECKPOINT AND NO ROUNDS RECORDED. Which, since the refusal fires only when
-  // `ralph_round >= max_ralph_rounds`, means the cap is 0 — so no iteration could ever
+  // `task_iteration >= max_task_iterations`, means the cap is 0 — so no iteration could ever
   // have been authorised, whatever else happened. That is the whole claim.
   //
   // WHAT THIS ARM USED TO ADD AND NO LONGER DOES: "this run built nothing" and "no
@@ -268,16 +223,16 @@ export function ralphCapFailureReason(row: {
   // absence means "not recorded", never "did not happen". This lane relied on exactly
   // that fact one round earlier to construct a terminal result with no checkpoint behind
   // it, and then left the overclaim standing two lines away. Sixth proxy on one string.
-  if (row.ralph_round === 0) {
-    return `Ralph loop cannot start: max_ralph_rounds is ${row.max_ralph_rounds}, so no Ralph iteration could be authorised — with that cap, ralph_round + 1 exceeds it for any counter. This row records ralph_round 0 and no inner_checkpoint. The cap itself is the reason: raise max_ralph_rounds at dispatch if this card is meant to build${tail}`
+  if (row.task_iteration === 0) {
+    return `Task loop cannot start: max_task_iterations is ${row.max_task_iterations}, so no Task iteration could be authorised — with that cap, task_iteration + 1 exceeds it for any counter. This row records task_iteration 0 and no inner_checkpoint. The cap itself is the reason: raise max_task_iterations at dispatch if this card is meant to build${tail}`
   }
   // NO CHECKPOINT, N ROUNDS RECORDED. The counter is the only thing that moved, and the
   // row does not say who moved it or whether anything was attempted.
   //
   // "NOTHING WAS ATTEMPTED" USED TO BE ASSERTED HERE, and contradicted the next clause of
-  // its own sentence: `enterRalphPlan` — this very function's caller in the phase graph —
-  // ADVANCES `ralph_round` without writing a checkpoint, so a row in exactly this state
+  // its own sentence: `enterTaskPlan` — this very function's caller in the phase graph —
+  // ADVANCES `task_iteration` without writing a checkpoint, so a row in exactly this state
   // may have attempted planning repeatedly. A sentence that concedes a possibility it has
   // just denied is worse than either half alone.
-  return `Ralph loop hit max_ralph_rounds (${row.max_ralph_rounds}) with ralph_round at ${row.ralph_round} and no inner_checkpoint on this row: the budget is spent, so no further iteration could start. Neither is recorded here: whether anything was attempted (the phase graph advances this counter without writing a checkpoint, and the checkpoint is written out-of-process, so its absence establishes neither), nor which run spent the rounds — read the row and the card's earlier runs${tail}`
+  return `Task loop hit max_task_iterations (${row.max_task_iterations}) with task_iteration at ${row.task_iteration} and no inner_checkpoint on this row: the budget is spent, so no further iteration could start. Neither is recorded here: whether anything was attempted (the phase graph advances this counter without writing a checkpoint, and the checkpoint is written out-of-process, so its absence establishes neither), nor which run spent the rounds — read the row and the card's earlier runs${tail}`
 }

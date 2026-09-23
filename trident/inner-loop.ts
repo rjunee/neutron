@@ -177,7 +177,7 @@ export interface InnerLoopInput {
    * Null/empty → the workflow's contract is byte-identical to legacy.
    */
   test_strategy?: string | null
-  /** The subset-scope TEST EXECUTION block for intermediate Ralph tasks. */
+  /** The subset-scope TEST EXECUTION block for intermediate Task sequence tasks. */
   test_strategy_intermediate?: string | null
   /**
    * OWNER PER-PHASE MODEL OVERRIDES — phase key → `{model?, effort?}`, as validated
@@ -248,10 +248,10 @@ export interface InnerResult {
   round: number
   checkpoint: string | null
   /**
-   * RALPH RE-FIRE (#362) — the count of Ralph tasks still UNCHECKED after the one
+   * TASK SEQUENCE RE-FIRE (#362) — the count of Task sequence tasks still UNCHECKED after the one
    * this inner iteration built. `> 0` is the outer loop's signal to RE-FIRE a fresh
    * inner iteration for the next task (build one task per fresh context) instead of
-   * merging after task 1; `0` (the final task, or a non-Ralph run) takes the normal
+   * merging after task 1; `0` (the final task, or a non-Task sequence run) takes the normal
    * merge/fail path. `null` when the column predates #362 / omits the field — treated
    * as 0 (no re-fire) so legacy rows and single-task builds are unchanged.
    */
@@ -371,10 +371,10 @@ export interface InnerResult {
    */
   publish_head?: string | null
   /**
-   * Forge reported that it MATERIALLY deviated from the Ralph exec spec it was given,
+   * Forge reported that it MATERIALLY deviated from the Task sequence exec spec it was given,
    * so the IMPLEMENTATION_PLAN.md it committed may no longer describe the code. In pr
    * mode the orchestrator suffixes the `outer-published:` checkpoint with `:deviated`,
-   * the resumed invocation writes the `ralph-task-built-deviated` checkpoint variant,
+   * the resumed invocation writes the `task-built-deviated` checkpoint variant,
    * and the NEXT iteration pays for the full `plan:fable` survey instead of the cheap
    * continuation planner. The EXACT boolean only — absent/garbled → false, because a
    * false positive here costs ~5 minutes of re-planning per iteration.
@@ -620,13 +620,13 @@ export function buildWorkflowArgs(
     ...(typeof input.base_sha === 'string' && /^(?:[0-9a-f]{40}|[0-9a-f]{64})$/.test(input.base_sha) ? { baseSha: input.base_sha } : {}),
     slug: run.slug,
     maxRounds: input.max_rounds,
-    ralph: run.ralph,
-    // WHICH Ralph iteration this is (0 on the first, bumped per re-fire). The
+    executionStrategy: run.execution_strategy,
+    // WHICH task-sequence iteration this is (0 on the first, bumped per re-fire). The
     // workflow gates its cheap `plan:next` continuation planner on it, along with
     // the every-Kth full re-plan cadence; a missing value reads there as "always
     // run the full planner", so a launcher that does not thread it is slower,
     // never wrong.
-    ralphRound: run.ralph_round,
+    taskIteration: run.task_iteration,
     // Thread the run's git-mode so the workflow's Forge prompt matches it: a
     // `local` run (no GitHub origin / no `gh`) must NOT be told to push to
     // origin + `gh pr create` (that would fail Forge); it commits on the branch
@@ -887,7 +887,7 @@ export function parseInnerResult(raw: string | null | undefined): InnerResult | 
     // silently strand an unmerged PR as "done".
     pr_merged: p.prMerged === true,
     // Same exact-boolean rule, for the same reason in the opposite direction: a
-    // truthy stand-in read as a deviation forces the next Ralph iteration back onto
+    // truthy stand-in read as a deviation forces the next Task sequence iteration back onto
     // the whole-repo survey this card exists to stop paying for.
     deviated_from_spec: p.deviatedFromSpec === true,
     publish_requested: p.publishRequested === true,
@@ -959,7 +959,7 @@ export function parseInnerResult(raw: string | null | undefined): InnerResult | 
     // contract as `parseCheckpointFindings`); `[]` when absent or garbled, which decodes
     // identically to the fail-closed boolean above and never invents a rejection.
     findings: Array.isArray(p.findings) ? p.findings : [],
-    // RALPH RE-FIRE (#362). Absent/garbled → null (treated as no re-fire).
+    // TASK SEQUENCE RE-FIRE (#362). Absent/garbled → null (treated as no re-fire).
     remaining_tasks:
       typeof p.remainingTasks === 'number' && Number.isFinite(p.remainingTasks)
         ? Math.max(0, Math.trunc(p.remainingTasks))

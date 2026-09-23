@@ -458,7 +458,6 @@ describe('Open foundational-Trident prod-boot wiring', () => {
         // returns 'local' without ever reaching `publisherAvailable` — no `gh`,
         // no network. The credential half is proven below through the store.
         resolveMergeMode: (path) => detectMergeMode(path, tbd.merge_mode_probe),
-        resolveRalph: async () => false,
         // THE COMPOSED RUNNER, by VALUE and not by a count of its spelling (Argus
         // r17). This is the object both dispatch tools hand the seed's branch-tip
         // probe; a boot that left it undefined puts every re-dispatch back on the

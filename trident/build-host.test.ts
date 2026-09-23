@@ -13,6 +13,9 @@ import { MERGE_DIFF_BYTES_MAX } from './merge.ts'
 const head = 'a'.repeat(40)
 const snapshot: BuildSnapshot = { head, diff: '+code', pr: null }
 const published: BuildSnapshot = { ...snapshot, pr: { number: 12, head, state: 'OPEN' } }
+const singlePlan = { strategy: 'single' as const, rationale: 'One builder can complete the accepted plan.',
+  implementationPlan: '- [ ] implement the task\n', topTask: '- [ ] implement the task',
+  executionSpec: 'Implement the task.', complexity: 'mechanical' as const, remainingTasks: 0 }
 const dirs: string[] = []
 afterEach(async () => { await Promise.all(dirs.splice(0).map(dir => rm(dir, { recursive: true, force: true }))) })
 async function fixture() {
@@ -30,6 +33,7 @@ async function fixture() {
   let drift: 'clear' | 'overlap' | 'unreadable' = 'clear'
   let leakOutput = 'LEAK GATE: INCOMPLETE\nRULES THAT COULD NOT RUN: pii'
   let leakCode = 3
+  let selected: typeof singlePlan | null = null
   const options: BuildHostOptions = {
     reviewReadiness: { observe: async () => ({ kind: 'known', head, configuration: { kind: 'resolved', required: ['checks'] }, mergeability: 'mergeable', checksComplete: true, checks: [{ name: 'checks', state: 'passed' }] }) },
     reviewCi: { observe: async snapshot => ({ kind: 'known', head: snapshot.head, status: 'green', failing: [], base: null }) },
@@ -38,6 +42,22 @@ async function fixture() {
     // fixture must decide what this host reports rather than leave it unwired.
     publicationSuite: { observe: async (snapshot, round) => ({ kind: 'known', runId: 'test', head: snapshot.head, round, strategy: '', scope: 'full-suite', report: null }) },
     reviewed_head: null,
+    modes: {
+      loadExecutionStrategy: async () => selected === null
+        ? { kind: 'known', strategy: null, rationale: null, plan: null, source: null }
+        : { kind: 'known', strategy: selected.strategy, rationale: selected.rationale, plan: structuredClone(selected), source: 'planner' },
+      selectExecutionStrategy: async value => {
+        if (value.strategy !== value.plan.strategy || value.rationale !== value.plan.rationale) return { kind: 'blocked', on: 'invalid selection fixture' }
+        selected = structuredClone(value.plan) as typeof singlePlan
+        return { kind: 'allow' }
+      },
+      loadResume: async () => null,
+      saveCheckpoint: async () => {},
+      regenerateDiff: async () => ({ kind: 'known', diff: snapshot.diff }),
+      probePlan: async () => null,
+      commitPlan: async () => ({ kind: 'known', head }),
+      advanceTask: async () => ({ kind: 'allow' }),
+    },
     runners: { pi: fakeRunner('pi') }, replProvider: 'pi',
     workers: Object.fromEntries(['plan', 'build', 'review', 'fix'].map(role => [role, { provider: 'pi', request }])) as BuildHostOptions['workers'],
     effects: {
@@ -81,7 +101,7 @@ async function fixture() {
     observeCi: async () => ({ kind: 'completed', conclusion: 'success', headSha: head }),
   }
   const make = () => createBuildHost(options)
-  const input = (host: ReturnType<typeof make>): BuildRunInput => ({ run_id: 'test', mode: 'pr', start: 'fresh', repl_provider: options.replProvider, workers: host.workers })
+  const input = (host: ReturnType<typeof make>): BuildRunInput => ({ run_id: 'test', mode: 'implementation', start: 'fresh', merge_mode: 'pr', repl_provider: options.replProvider, workers: host.workers })
   return { options, make, input, path, calls, setDrift: (value: typeof drift) => { drift = value }, prose: () => { diff = 'M\0README.md\0' }, clean: () => { leakCode = 0; leakOutput = 'LEAK GATE: SILENT' } }
 }
 
@@ -385,7 +405,7 @@ test('fresh null reviewed_head reaches allow and publishes through the driver', 
   }
   f.options.runners.pi = {
     ...fakeRunner('pi'),
-    run: async () => ({ kind: 'completed', result: { ...snapshot, payload }, usage: { input_tokens: 0, output_tokens: 0 }, model_reported: 'test-model', thread_id: null }),
+    run: async request => ({ kind: 'completed', result: { ...snapshot, payload: request.role === 'plan' ? singlePlan : payload }, usage: { input_tokens: 0, output_tokens: 0 }, model_reported: 'test-model', thread_id: null }),
   }
   let publications = 0
   f.options.effects.publish = async value => { expect(value).toEqual(snapshot); publications++ }
@@ -513,7 +533,7 @@ test('composed local host reaches merged with no PR', async () => {
   const payload = { verdict: 'APPROVE', findings: [] }
   const outcomes = new Map<string, import('@neutronai/runtime/bounded-work.ts').BoundedWorkOutcome>()
   for (const [role, round] of [['plan', 0], ['build', 0], ['review', 1]] as const) {
-    outcomes.set(`test:${role}:${round}${role === 'review' ? `:head:${head}` : ''}`, { kind: 'completed', result: { ...snapshot, payload },
+    outcomes.set(`test:${role}:${round}${role === 'review' ? `:head:${head}` : ''}`, { kind: 'completed', result: { ...snapshot, payload: role === 'plan' ? singlePlan : payload },
       usage: { input_tokens: 0, output_tokens: 0 }, model_reported: 'test-model', thread_id: null })
   }
   f.options.runners.pi = fakeRunner('pi', { outcomes })
@@ -565,7 +585,7 @@ async function boundFixture(failure = false) {
   const runner = fakeRunner('pi')
   runner.run = async request => {
     effects.push(request.role)
-    return { kind: 'completed', result: structuredClone(current), usage: { input_tokens: 0, output_tokens: 0 }, model_reported: 'test', thread_id: null }
+    return { kind: 'completed', result: { ...structuredClone(current), payload: request.role === 'plan' ? singlePlan : null }, usage: { input_tokens: 0, output_tokens: 0 }, model_reported: 'test', thread_id: null }
   }
   f.options.runners = { pi: runner }
   f.options.effects = {
@@ -619,7 +639,7 @@ for (const failure of [false, true]) {
 
 test('G019 routing fixture positive control reaches build publish and merge for pr mode', async () => {
   const f = await boundFixture()
-  expect(await f.host.run({ ...f.input, mode: 'pr' }, new AbortController().signal)).toMatchObject({ kind: 'merged' })
+  expect(await f.host.run({ ...f.input, mode: 'implementation', merge_mode: 'pr' }, new AbortController().signal)).toMatchObject({ kind: 'merged' })
   expect(f.effects).toEqual(['plan', 'build', 'publish', 'review', 'merge'])
   expect(f.panels()).toBe(0)
 })
@@ -710,7 +730,8 @@ for (const cap of [undefined, 2, 7]) {
       run: async request => {
         calls.push(request.step_id)
         if (request.role === 'fix') landed++
-        return { kind: 'completed', result: { ...snapshot, head: head(), pr, payload: { round: 0, max_rounds: 100 } },
+        return { kind: 'completed', result: { ...snapshot, head: head(), pr,
+          payload: request.role === 'plan' ? singlePlan : { round: 0, max_rounds: 100 } },
           usage: { input_tokens: 0, output_tokens: 0 }, model_reported: 'test', thread_id: null }
       },
     }

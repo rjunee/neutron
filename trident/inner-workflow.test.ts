@@ -192,7 +192,7 @@ describe('inner-workflow.mjs — meta + phases', () => {
   })
 
   test('destructures the args contract with defaults', () => {
-    for (const key of ['repoPath', 'task', 'baseBranch', 'slug', 'maxRounds', 'ralph', 'prNumber', 'branch', 'dbPath', 'runId', 'checkpointScript', 'resumeCheckpoint']) {
+    for (const key of ['repoPath', 'task', 'baseBranch', 'slug', 'maxRounds', 'executionStrategy', 'prNumber', 'branch', 'dbPath', 'runId', 'checkpointScript', 'resumeCheckpoint']) {
       expect(SRC).toContain(key)
     }
   })
@@ -258,7 +258,7 @@ describe('inner-workflow.mjs — pinned wave member mode', () => {
       branch: 'trident/card',
       repo_path: '/repo',
       task: 'card task',
-      ralph: true,
+      execution_strategy: 'task_sequence',
     })
     const input = { run, base_branch: 'main', db_path: '/tmp/project.db', max_rounds: 3 }
     const ordinary = buildWorkflowArgs(input)
@@ -445,26 +445,26 @@ describe('inner-workflow.mjs — deterministic branch + worktree isolation', () 
     expect(SRC).toContain('schema: FORGE_SCHEMA')
   })
 
-  test('ralph mode runs a DEDICATED plan:fable orchestrator step (split out of forge:build) that emits an execution spec + complexity tag', () => {
-    // P-F2: Ralph planning is no longer FUSED into forge:build — a dedicated
+  test('task-sequence mode runs a DEDICATED plan:fable orchestrator step (split out of forge:build) that emits an execution spec + complexity tag', () => {
+    // P-F2: Task sequence planning is no longer FUSED into forge:build — a dedicated
     // Fable planner regenerates IMPLEMENTATION_PLAN.md + emits the per-task
     // exec spec + complexity tag; forge:build is now a pure executor.
     expect(SRC).toContain('function planFablePrompt(')
-    expect(SRC).toContain('function ralphExecuteNote(')
+    expect(SRC).toContain('function taskSequenceExecuteNote(')
     expect(SRC).toContain('const PLAN_SCHEMA =')
     expect(SRC).toContain("label: 'plan:fable'")
     expect(SRC).toContain('schema: PLAN_SCHEMA')
-    // Gated on ralph mode; forge:build carries the exec spec + is routed by tag.
-    expect(SRC).toContain('if (ralph === true)')
-    expect(SRC).toContain('RALPH MODE')
+    // Gated on task-sequence mode; forge:build carries the exec spec + is routed by tag.
+    expect(SRC).toContain('if (taskSequence || memberMode)')
+    expect(SRC).toContain('TASK SEQUENCE MODE')
     expect(SRC).toContain('IMPLEMENTATION_PLAN.md')
     expect(SRC).toContain('you are the EXECUTOR')
   })
 
-  test('Ralph fails loudly on a null plan (never runs Forge unplanned) + the planner inspects the reused branch on resume (Codex [P2])', () => {
+  test('Task sequence fails loudly on a null plan (never runs Forge unplanned) + the planner inspects the reused branch on resume (Codex [P2])', () => {
     // A null plan (planner terminal error) must NOT silently fall through to an
-    // unplanned forge:build now that the in-Forge RALPH_NOTE is gone.
-    expect(SRC).toContain('refusing to run Forge without a plan in Ralph mode')
+    // unplanned forge:build now that the in-Forge TASK SEQUENCE_NOTE is gone.
+    expect(SRC).toContain('refusing to run Forge without a plan in Task sequence mode')
     // On resume the planner inspects the reused branch, not just the base branch.
     expect(SRC).toContain('planFablePrompt(resuming)')
     expect(SRC).toContain('RESUME — a prior run ALREADY committed progress')

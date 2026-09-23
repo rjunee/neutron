@@ -30,22 +30,24 @@ function run(over: Partial<TridentRun> = {}): TridentRun {
 }
 
 describe('deriveRunProgress — phase/checkpoint → label', () => {
-  test('Ralph progress uses the persisted plan estimate, never the iteration cap', () => {
-    const known = deriveRunProgress(run({ ralph: true, ralph_round: 9, ralph_task_total: 15, max_ralph_rounds: 80 }), T0)
-    expect(known).toMatchObject({ task_number: 10, task_total: 15, round: 1 })
-    const unknown = deriveRunProgress(run({ ralph: true, ralph_task_total: null, max_ralph_rounds: 80 }), T0)
+  test('task-sequence progress uses the persisted plan estimate, never the iteration cap', () => {
+    const known = deriveRunProgress(run({ execution_strategy: 'task_sequence', task_iteration: 9, task_total: 15, max_task_iterations: 80 }), T0)
+    expect(known).toMatchObject({ execution_strategy: 'task_sequence', task_iteration: 9, task_number: 10, task_total: 15, round: 1 })
+    const unknown = deriveRunProgress(run({ execution_strategy: 'task_sequence', task_total: null, max_task_iterations: 80 }), T0)
     expect(unknown).toMatchObject({ task_number: 1, task_total: null })
-    const stale = deriveRunProgress(run({ ralph: true, ralph_round: 9, ralph_task_total: 5 }), T0)
+    const stale = deriveRunProgress(run({ execution_strategy: 'task_sequence', task_iteration: 9, task_total: 5 }), T0)
     expect(stale).toMatchObject({ task_number: 10, task_total: null })
-    const ordinary = deriveRunProgress(run({ ralph: false, ralph_task_total: 15 }), T0)
-    expect(ordinary).toMatchObject({ task_number: null, task_total: null })
+    const single = deriveRunProgress(run({ execution_strategy: 'single', task_total: 15 }), T0)
+    expect(single).toMatchObject({ task_number: null, task_total: null })
+    const pending = deriveRunProgress(run({ execution_strategy: null, task_total: 15 }), T0)
+    expect(pending).toMatchObject({ execution_strategy: null, task_number: null, task_total: null })
   })
 
   test('a fresh forge-init run with no checkpoint is "planning"', () => {
     const p = deriveRunProgress(run(), T0 + 30_000)
     expect(p.phase_label).toBe('planning')
     expect(p.round).toBe(1)
-    expect(p.ralph_round).toBe(0)
+    expect(p.task_iteration).toBe(0)
     expect(p.elapsed_ms).toBe(30_000)
     expect(p.stalled).toBe(false)
   })
@@ -89,9 +91,9 @@ describe('deriveRunProgress — phase/checkpoint → label', () => {
     expect(p.round).toBe(1)
   })
 
-  test('a re-fired second task carries outer counter 1 beside inner round 1', () => {
-    const p = deriveRunProgress(run({ ralph: true, ralph_round: 1, round: 1 }), T0)
-    expect({ ralph_round: p.ralph_round, round: p.round }).toEqual({ ralph_round: 1, round: 1 })
+  test('a re-fired second task carries task iteration 1 beside inner round 1', () => {
+    const p = deriveRunProgress(run({ execution_strategy: 'task_sequence', task_iteration: 1, round: 1 }), T0)
+    expect({ task_iteration: p.task_iteration, round: p.round }).toEqual({ task_iteration: 1, round: 1 })
   })
 
   test('fix-round-N checkpoint → REVIEWING round N (the fix is already built)', () => {
@@ -164,7 +166,7 @@ describe('deriveRunProgress — phase/checkpoint → label', () => {
   test("carries the dispatch's resume sentence, and null for a first dispatch", () => {
     // RED-mutation: drop `resume_note` from the derived object → the card never
     // learns whether its retry inherited the dead run's checkpoint.
-    const note = 'Resumed from ralph-task-built at aaaaaaa; Ralph round 4/8 carried.'
+    const note = 'Resumed from task-built at aaaaaaa; Task iteration 4/8 carried.'
     expect(deriveRunProgress(run({ phase: 'forge-init', resume_note: note }), T0).resume_note).toBe(note)
     expect(deriveRunProgress(run({ phase: 'forge-init' }), T0).resume_note).toBeNull()
   })

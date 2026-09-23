@@ -143,7 +143,6 @@ export interface OvernightTridentCreateInput {
   repo_path: string
   task: string
   slug: string
-  ralph: boolean
   /** Resolved `[context:]` file text, threaded into the run's task. */
   context_text?: string
 }
@@ -363,7 +362,6 @@ export class OvernightDispatcher {
           repo_path: p.repo_root,
           task: item.description,
           slug: tridentSlugFor(item),
-          ralph: item.ralph,
           ...(gate.context_text !== undefined ? { context_text: gate.context_text } : {}),
         })
         await this.deps.store.update(item.id, {

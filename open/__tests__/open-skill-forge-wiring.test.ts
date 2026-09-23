@@ -131,7 +131,7 @@ function doneRun(overrides: Partial<TridentRun> = {}): TridentRun {
     project_slug: 'owner',
     phase: 'done',
     max_rounds: 5,
-    max_ralph_rounds: 0,
+    max_task_iterations: 0,
     branch: 'feat/demo',
     pr: 42,
     merge_mode: 'pr',

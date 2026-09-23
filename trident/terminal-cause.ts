@@ -30,7 +30,7 @@
  * AND WHY NOT `blockKind`, WHICH IS ALREADY A CLOSED SET ON THE SAME RESULT. Because it
  * answers a narrower question and only sometimes. It describes what kind of BLOCK a
  * review verdict was — and 3 of the 12 terminal paths carry no `blockKind` by any shape
- * this file's instrument models (both publish handoffs and the Ralph re-fire). BOTH HALVES
+ * this file's instrument models (both publish handoffs and the Task sequence re-fire). BOTH HALVES
  * ARE DERIVED, the number AND the names: `inner-workflow-terminal-cause.test.ts` (`the
  * blockKind claim is derived, not remembered`) measures the count and asserts which three
  * kinds they are, because the figure in this sentence was wrong when it was written and a
@@ -136,9 +136,9 @@ export const TERMINAL_CAUSES = [
    *  an ending so much as a baton — but it IS a terminal result, so it names
    *  itself rather than going out silent. */
   'handoff-publish',
-  /** A Ralph run built one task and is handing the outer loop a re-fire for the
+  /** A Task sequence run built one task and is handing the outer loop a re-fire for the
    *  next one. Same shape as the publish handoff. */
-  'ralph-task-built',
+  'task-built',
   /** The workflow THREW. Not a review verdict; the prose cause carries the
    *  sentence it threw. */
   'workflow-threw',
@@ -234,7 +234,7 @@ export function terminalCauseReason(
     //    same exit is a second owner for one fact. `review-escalated` is the same
     //    rule for #654's `escalationStopSentence`, which fires above this line.
     //  - `review-approved`, `pr-already-merged`, `resume-approved-unchanged`,
-    //    `wave-member-built`, `handoff-publish` and `ralph-task-built` are not
+    //    `wave-member-built`, `handoff-publish` and `task-built` are not
     //    failures. Reaching a terminal FAILURE reason with one of them means the
     //    run died after this exit, of something this function did not measure.
     //  - `unknown` is the whole reason `'unknown'` is a member: it buys silence.
@@ -247,7 +247,7 @@ export function terminalCauseReason(
     case 'built-head-unverified':
     case 'wave-member-built':
     case 'handoff-publish':
-    case 'ralph-task-built':
+    case 'task-built':
     case 'workflow-threw':
     case 'unknown':
       return null

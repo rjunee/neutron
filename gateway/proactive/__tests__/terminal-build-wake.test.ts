@@ -14,7 +14,7 @@ import {
 function run(over: Partial<TridentRun> = {}): TridentRun {
   return makeTridentRun({
     id: 'run-123', slug: 'wake', project_slug: 'acme', phase: 'done', max_rounds: 3,
-    max_ralph_rounds: 0, branch: 'trident/wake', pr: 42, merge_mode: 'pr',
+    max_task_iterations: 0, branch: 'trident/wake', pr: 42, merge_mode: 'pr',
     subagent_run_id: null, subagent_status: null, repo_path: '/repo', worktree: '/worktree',
     task: 'Repair terminal delivery', chat_id: 'chat-1', channel_kind: 'app_socket',
     started_at: 'T', last_advanced_at: 'T', ...over,

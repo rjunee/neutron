@@ -164,7 +164,7 @@ describe('(a) measured incident retries without a human', () => {
     expect(claimed.workflow_run_id).toBeNull()
     expect(claimed.harvested_at).toBeNull()
     expect(claimed.round).toBe(1)
-    expect(claimed.ralph_round).toBe(0)
+    expect(claimed.task_iteration).toBe(0)
 
     await h.loop.runOnce()
     expect(h.inputs).toHaveLength(1)
@@ -225,7 +225,7 @@ describe('(c) retry budget and backoff are separate from fix rounds', () => {
     expect(after.phase).toBe('failed')
     expect(after.infra_retries).toBe(2)
     expect(after.round).toBe(1)
-    expect(after.ralph_round).toBe(0)
+    expect(after.task_iteration).toBe(0)
     expect(after.inner_verdict).toBe('REVIEW_NOT_RUN')
     expect(after.failure_reason).toContain('(budget 2)')
     expect(after.failure_reason).toContain(INCIDENT_CAUSE)

@@ -91,18 +91,15 @@ CREATE INDEX idx_code_subagent_registry_owner
     ON code_subagent_registry (instance_key)
 
 [index] idx_code_trident_runs_active (tbl=code_trident_runs)
-CREATE INDEX idx_code_trident_runs_active
-    ON code_trident_runs (phase)
+CREATE INDEX idx_code_trident_runs_active ON code_trident_runs(phase)
     WHERE phase NOT IN ('done', 'failed', 'stopped')
 
 [index] idx_code_trident_runs_slug (tbl=code_trident_runs)
-CREATE UNIQUE INDEX idx_code_trident_runs_slug
-    ON code_trident_runs (project_slug, slug)
+CREATE UNIQUE INDEX idx_code_trident_runs_slug ON code_trident_runs(project_slug, slug)
     WHERE phase NOT IN ('done', 'failed', 'stopped')
 
 [index] idx_code_trident_runs_wave_child (tbl=code_trident_runs)
-CREATE UNIQUE INDEX idx_code_trident_runs_wave_child
-    ON code_trident_runs (parent_run_id, wave_task_id)
+CREATE UNIQUE INDEX idx_code_trident_runs_wave_child ON code_trident_runs(parent_run_id, wave_task_id)
     WHERE parent_run_id IS NOT NULL
 
 [index] idx_connect_guest_invites_project (tbl=connect_guest_invites)
@@ -659,58 +656,56 @@ CREATE TABLE code_trident_phase_usage (
 
 [table] code_trident_runs (tbl=code_trident_runs)
 CREATE TABLE "code_trident_runs" (
-    id                  TEXT PRIMARY KEY NOT NULL,
-    slug                TEXT NOT NULL,
-    project_slug        TEXT NOT NULL,
-    phase               TEXT NOT NULL DEFAULT 'forge-init'
-                            CHECK (phase IN (
-                                'forge-init', 'ralph-plan', 'ralph-task',
-                                'argus', 'forge-fix',
-                                'done', 'failed', 'stopped'
-                            )),
-    round               INTEGER NOT NULL DEFAULT 1,
-    max_rounds          INTEGER NOT NULL DEFAULT 8,
-    ralph               INTEGER NOT NULL DEFAULT 0
-                            CHECK (ralph IN (0, 1)),
-    ralph_round         INTEGER NOT NULL DEFAULT 0,
-    max_ralph_rounds    INTEGER NOT NULL DEFAULT 20,
-    branch              TEXT,
-    pr                  INTEGER,
-    merge_mode          TEXT NOT NULL DEFAULT 'local'
-                            CHECK (merge_mode IN ('local', 'pr')),
-    subagent_run_id     TEXT,
-    subagent_status     TEXT
-                            CHECK (subagent_status IS NULL OR subagent_status IN (
-                                'pending', 'running', 'completed', 'failed', 'crashed'
-                            )),
-    repo_path           TEXT NOT NULL,
-    worktree            TEXT,
-    task                TEXT NOT NULL,
-    chat_id             TEXT,
-    thread_id           TEXT,
-    failure_reason      TEXT,
-    started_at          TEXT NOT NULL,
-    last_advanced_at    TEXT NOT NULL,
-    channel_kind        TEXT NOT NULL DEFAULT 'telegram'
-                            CHECK (channel_kind IN ('telegram', 'app_socket', 'webhook', 'cli')),
-    workflow_run_id     TEXT,
-    inner_checkpoint    TEXT,
-    inner_verdict       TEXT
-                            CHECK (inner_verdict IS NULL OR inner_verdict IN ('APPROVE', 'REQUEST_CHANGES', 'REVIEW_NOT_RUN')),
-    inner_result        TEXT,
-    harvested_at        INTEGER,
-    inner_checkpoint_head     TEXT,
+    id TEXT PRIMARY KEY NOT NULL,
+    slug TEXT NOT NULL,
+    project_slug TEXT NOT NULL,
+    phase TEXT NOT NULL DEFAULT 'forge-init'
+        CHECK (phase IN ('forge-init', 'task-plan', 'task-build', 'argus', 'forge-fix', 'done', 'failed', 'stopped')),
+    round INTEGER NOT NULL DEFAULT 1,
+    max_rounds INTEGER NOT NULL DEFAULT 8,
+    execution_strategy TEXT CHECK (execution_strategy IN ('single', 'task_sequence')),
+    strategy_rationale TEXT,
+    strategy_plan TEXT,
+    strategy_source TEXT CHECK (strategy_source IN ('planner', 'legacy')),
+    task_iteration INTEGER NOT NULL DEFAULT 0,
+    max_task_iterations INTEGER NOT NULL DEFAULT 20,
+    branch TEXT,
+    pr INTEGER,
+    merge_mode TEXT NOT NULL DEFAULT 'local' CHECK (merge_mode IN ('local', 'pr')),
+    subagent_run_id TEXT,
+    subagent_status TEXT CHECK (subagent_status IS NULL OR subagent_status IN ('pending', 'running', 'completed', 'failed', 'crashed')),
+    repo_path TEXT NOT NULL,
+    worktree TEXT,
+    task TEXT NOT NULL,
+    chat_id TEXT,
+    thread_id TEXT,
+    failure_reason TEXT,
+    started_at TEXT NOT NULL,
+    last_advanced_at TEXT NOT NULL,
+    channel_kind TEXT NOT NULL DEFAULT 'telegram' CHECK (channel_kind IN ('telegram', 'app_socket', 'webhook', 'cli')),
+    workflow_run_id TEXT,
+    inner_checkpoint TEXT,
+    inner_verdict TEXT CHECK (inner_verdict IS NULL OR inner_verdict IN ('APPROVE', 'REQUEST_CHANGES', 'REVIEW_NOT_RUN')),
+    inner_result TEXT,
+    harvested_at INTEGER,
+    inner_checkpoint_head TEXT,
     inner_checkpoint_findings TEXT,
-    crash_recoveries    INTEGER,
-    reviewed_head       TEXT,
-    bound_pr            INTEGER,
-    fenced_paths        TEXT,
-    base_sha            TEXT,
-    base_behind         INTEGER,
-    infra_retries       INTEGER,
-    agent_waked_at      INTEGER
-, brief_alert TEXT, parent_run_id TEXT, wave_task_id TEXT, claimed_paths TEXT, published_pr INTEGER, ralph_task_total INTEGER
-    CHECK (ralph_task_total IS NULL OR (typeof(ralph_task_total) = 'integer' AND ralph_task_total > 0 AND ralph_task_total <= 9007199254740991)), resume_note TEXT) STRICT
+    crash_recoveries INTEGER,
+    reviewed_head TEXT,
+    bound_pr INTEGER,
+    fenced_paths TEXT,
+    base_sha TEXT,
+    base_behind INTEGER,
+    infra_retries INTEGER,
+    agent_waked_at INTEGER,
+    brief_alert TEXT,
+    parent_run_id TEXT,
+    wave_task_id TEXT,
+    claimed_paths TEXT,
+    published_pr INTEGER,
+    task_total INTEGER CHECK (task_total IS NULL OR (typeof(task_total) = 'integer' AND task_total > 0 AND task_total <= 9007199254740991)),
+    resume_note TEXT
+) STRICT
 
 [table] code_trident_stage_events (tbl=code_trident_stage_events)
 CREATE TABLE code_trident_stage_events (
@@ -1118,8 +1113,8 @@ CREATE TABLE overnight_queue (
     trident_run_id      TEXT,
     trident_slug        TEXT,
     spawn_attempts      INTEGER NOT NULL DEFAULT 0,
-    ralph               INTEGER NOT NULL DEFAULT 0
-                            CHECK (ralph IN (0, 1)),
+    legacy_execution_mode               INTEGER NOT NULL DEFAULT 0
+                            CHECK (legacy_execution_mode IN (0, 1)),
     created_at          TEXT NOT NULL,                       -- ISO-8601 UTC
     started_at          TEXT,
     finished_at         TEXT,
@@ -1717,12 +1712,12 @@ CREATE TABLE "work_board_items" (
     pr                 INTEGER,                     -- 0133 — durable PR provenance
     pr_url             TEXT,                        -- 0133 — composed PR link
     blockers           TEXT,                        -- 0139 — JSON array of sibling card ids the dispatch chokepoint gates on
-    ralph_round        INTEGER NOT NULL DEFAULT 0
-                           CHECK (ralph_round >= 0),
-    max_ralph_rounds   INTEGER
-                           CHECK (max_ralph_rounds IS NULL OR max_ralph_rounds >= 0)
-, repo_name TEXT, ralph_task_total INTEGER
-    CHECK (ralph_task_total IS NULL OR (typeof(ralph_task_total) = 'integer' AND ralph_task_total > 0 AND ralph_task_total <= 9007199254740991))) STRICT
+    task_iteration        INTEGER NOT NULL DEFAULT 0
+                           CHECK (task_iteration >= 0),
+    max_task_iterations   INTEGER
+                           CHECK (max_task_iterations IS NULL OR max_task_iterations >= 0)
+, repo_name TEXT, task_total INTEGER
+    CHECK (task_total IS NULL OR (typeof(task_total) = 'integer' AND task_total > 0 AND task_total <= 9007199254740991)), execution_strategy TEXT CHECK (execution_strategy IN ('single', 'task_sequence')), strategy_rationale TEXT, strategy_plan TEXT, strategy_source TEXT CHECK (strategy_source IN ('planner', 'legacy'))) STRICT
 
 [table] workspace_members (tbl=workspace_members)
 CREATE TABLE workspace_members (
@@ -1762,11 +1757,38 @@ CREATE TABLE "wow_events" (
     redacted_payload_json TEXT NOT NULL DEFAULT '{}'
 ) STRICT
 
+[trigger] code_trident_runs_card_strategy (tbl=code_trident_runs)
+CREATE TRIGGER code_trident_runs_card_strategy
+AFTER UPDATE OF execution_strategy, strategy_rationale, strategy_plan, strategy_source, task_iteration, max_task_iterations, task_total ON code_trident_runs
+BEGIN
+    SELECT CASE WHEN EXISTS (
+        SELECT 1 FROM work_board_items WHERE linked_run_id = NEW.id AND project_slug = NEW.project_slug
+        AND execution_strategy IS NOT NULL AND NEW.execution_strategy IS NOT execution_strategy
+    ) THEN RAISE(ABORT, 'card execution strategy is immutable') END;
+    UPDATE work_board_items SET
+        execution_strategy = COALESCE(execution_strategy, NEW.execution_strategy),
+        strategy_rationale = COALESCE(NEW.strategy_rationale, strategy_rationale),
+        strategy_plan = COALESCE(NEW.strategy_plan, strategy_plan),
+        strategy_source = COALESCE(strategy_source, NEW.strategy_source),
+        task_iteration = MAX(task_iteration, NEW.task_iteration),
+        max_task_iterations = MIN(COALESCE(max_task_iterations, NEW.max_task_iterations), NEW.max_task_iterations),
+        task_total = CASE WHEN NEW.task_iteration >= task_iteration THEN COALESCE(NEW.task_total, task_total) ELSE task_total END
+    WHERE linked_run_id = NEW.id AND project_slug = NEW.project_slug;
+END
+
 [trigger] code_trident_runs_seed_usage (tbl=code_trident_runs)
 CREATE TRIGGER code_trident_runs_seed_usage AFTER INSERT ON code_trident_runs
 BEGIN
-    INSERT INTO code_trident_phase_usage (run_id, phase)
+    INSERT INTO code_trident_phase_usage(run_id, phase)
         SELECT NEW.id, phase FROM code_trident_usage_phases;
+END
+
+[trigger] code_trident_runs_strategy_immutable (tbl=code_trident_runs)
+CREATE TRIGGER code_trident_runs_strategy_immutable
+BEFORE UPDATE OF execution_strategy ON code_trident_runs
+WHEN OLD.execution_strategy IS NOT NULL AND NEW.execution_strategy IS NOT OLD.execution_strategy
+BEGIN
+    SELECT RAISE(ABORT, 'execution strategy is immutable');
 END
 
 [trigger] rail_message_insert (tbl=app_chat_messages)
@@ -1789,6 +1811,26 @@ CREATE TRIGGER rail_receipt_update AFTER UPDATE ON app_chat_receipts
 WHEN NEW.read_at IS NOT NULL BEGIN
     UPDATE rail_device_marks SET seq = MAX(seq, NEW.seq)
     WHERE topic_id = NEW.topic_id AND device_id = NEW.device_id;
+END
+
+[trigger] work_board_items_attach_strategy (tbl=work_board_items)
+CREATE TRIGGER work_board_items_attach_strategy
+AFTER UPDATE OF linked_run_id ON work_board_items WHEN NEW.linked_run_id IS NOT NULL
+BEGIN
+    SELECT CASE WHEN EXISTS (
+        SELECT 1 FROM code_trident_runs WHERE id = NEW.linked_run_id AND project_slug = NEW.project_slug
+        AND NEW.execution_strategy IS NOT NULL AND execution_strategy IS NOT NEW.execution_strategy
+    ) THEN RAISE(ABORT, 'card execution strategy is immutable') END;
+    UPDATE work_board_items SET
+        execution_strategy = COALESCE(execution_strategy, (SELECT execution_strategy FROM code_trident_runs WHERE id = NEW.linked_run_id)),
+        strategy_rationale = COALESCE((SELECT strategy_rationale FROM code_trident_runs WHERE id = NEW.linked_run_id), strategy_rationale),
+        strategy_plan = COALESCE((SELECT strategy_plan FROM code_trident_runs WHERE id = NEW.linked_run_id), strategy_plan),
+        strategy_source = COALESCE(strategy_source, (SELECT strategy_source FROM code_trident_runs WHERE id = NEW.linked_run_id)),
+        task_iteration = MAX(task_iteration, (SELECT task_iteration FROM code_trident_runs WHERE id = NEW.linked_run_id)),
+        max_task_iterations = MIN(COALESCE(max_task_iterations, (SELECT max_task_iterations FROM code_trident_runs WHERE id = NEW.linked_run_id)),
+            (SELECT max_task_iterations FROM code_trident_runs WHERE id = NEW.linked_run_id)),
+        task_total = COALESCE((SELECT task_total FROM code_trident_runs WHERE id = NEW.linked_run_id), task_total)
+    WHERE id = NEW.id AND EXISTS (SELECT 1 FROM code_trident_runs WHERE id = NEW.linked_run_id AND project_slug = NEW.project_slug);
 END
 
 [view] onboarding_metrics (tbl=onboarding_metrics)

@@ -182,7 +182,7 @@ test('durable Open owner MCP reaches approved SDK peer, retains successor handle
   }
   await chat()
   await chat()
-  const outcome = await drive(f, 'pr')
+  const outcome = await drive(f)
   expect(outcome.kind, why(f, outcome)).toBe('merged')
   expect(boundedRefusals).toBeGreaterThan(0)
   await chat()
@@ -279,6 +279,10 @@ async function measureDiff(run: Runner, repo: string, base: string, head: string
 }
 
 interface WorkerWorld {
+  strategy: 'single' | 'task_sequence'
+  plannerPatch?: Record<string, unknown>
+  builderObservations: { strategy: unknown; rationale: unknown; plan: unknown; scope: unknown; previous: unknown; contextStrategy: unknown }[]
+  readSelectedRun: (runId: string) => ReturnType<TridentRunStore['get']>
   reviewVeto?: 'standalone' | 'synthesis'
   numericBuildPr?: boolean
   mutationArgv?: 'bare' | 'valid'
@@ -330,7 +334,7 @@ interface WorkerWorld {
    * ledger itself (not even the legacy root `IMPLEMENTATION_PLAN.md`; it still records
    * the task it was handed), so the only ledger a continuation can find is the one
    * `commitLedger` committed at the branch's own `.trident/ledgers/<branch>.md`
-   * (`trident/build-run.ts`, the Ralph handoff).
+   * (`trident/build-run.ts`, the task-sequence handoff).
    */
   hostLedger?: boolean
   synthesisShape: 'legacy' | 'schema-guided' | 'malformed' | 'independent'
@@ -480,6 +484,7 @@ async function performRole(world: WorkerWorld, request: BoundedWorkRequest, brie
       // deliberately wrong one. Only the host's measured replacement can turn that
       // into the real task, so the assertions below now have exactly one source.
       return { ...snapshot, payload: {
+        strategy: world.strategy, rationale: 'Tasks have independently verifiable execution boundaries.',
         implementationPlan: 'WORKER CLAIM — not the committed plan',
         topTask: '- [ ] WORKER INVENTED a task that is not in the committed plan',
         executionSpec: 'Complete the worker-invented task',
@@ -488,21 +493,39 @@ async function performRole(world: WorkerWorld, request: BoundedWorkRequest, brie
       } }
     }
     const more = brief.includes('MORE TASKS')
-    return { ...snapshot, payload: {
+    const payload = {
+      strategy: world.strategy, rationale: 'The accepted plan determines the useful execution boundary.',
       implementationPlan: `- [ ] T1 record the note\n${more ? '- [ ] T2 record another note\n' : ''}`,
-      topTask: '- [ ] T1 record the note',
-      executionSpec: 'Append one line to NOTES.md and commit it.',
+      topTask: world.strategy === 'single' ? 'Complete every task in the accepted plan' : '- [ ] T1 record the note',
+      executionSpec: world.strategy === 'single' && more ? 'Record both requested notes and commit the complete change.' : 'Append one line to NOTES.md and commit it.',
       complexity: 'mechanical',
-      remainingTasks: more ? 1 : 0,
-    } }
+      remainingTasks: world.strategy === 'task_sequence' && more ? 1 : 0,
+      ...world.plannerPatch,
+    }
+    if (request.result.schema === 'project-plan') {
+      const { strategy: _strategy, rationale: _rationale, ...legacy } = payload
+      return { ...snapshot, payload: legacy }
+    }
+    return { ...snapshot, payload }
   }
 
   if (request.role === 'build' || request.role === 'fix') {
+    if (request.role === 'build') {
+      const row = world.readSelectedRun(request.run_id)!
+      world.builderObservations.push({ strategy: row.execution_strategy, rationale: row.strategy_rationale,
+        plan: row.strategy_plan, scope: context.suiteScope, previous: context.previous, contextStrategy: context.executionStrategy })
+    }
     const selected = context.previous as { implementationPlan?: string; topTask?: string }
     const commitsPlan = request.role === 'build' && selected.topTask
       && selected.implementationPlan?.includes('T2 record another note')
     if (commitsPlan && selected.topTask && selected.implementationPlan) {
-      world.selectedTasks.push(selected.topTask)
+      if (context.executionStrategy === 'single') {
+        expect(brief).toContain('implement the WHOLE accepted plan')
+        world.selectedTasks.push(...selected.implementationPlan.split('\n').filter(line => line.startsWith('- [ ] ')))
+      } else {
+        expect(brief).toContain('implement only the host-selected `topTask`')
+        world.selectedTasks.push(selected.topTask)
+      }
       if (!world.hostLedger) await writeFile(join(cwd, 'IMPLEMENTATION_PLAN.md'),
         selected.implementationPlan.replace(selected.topTask, selected.topTask.replace('- [ ]', '- [x]')))
     }
@@ -731,6 +754,7 @@ let result = verdict
 if (request.result.schema !== 'verdict') {
   const context = JSON.parse(readFileSync(request.brief.path + '.context.json', 'utf8'))
   result = { ...context.snapshot, payload: request.role === 'plan' ? {
+    strategy: 'single', rationale: 'The complete plan fits in one implementation turn.',
     implementationPlan: '- [ ] T1 record the note', topTask: '- [ ] T1 record the note',
     executionSpec: 'Append one line to NOTES.md and commit it.', complexity: 'mechanical', remainingTasks: 0,
   } : verdict }
@@ -742,7 +766,8 @@ console.log(JSON.stringify({ type: 'result', subtype: 'success', is_error: false
     run_id: request.run_id, step_id: request.step_id, kind: 'completed', result } }))
 `
 
-async function fixture(options: { ralph?: boolean; moreTasks?: boolean; suiteExit?: number; testStrategy?: string
+async function fixture(options: { taskSequence?: boolean; moreTasks?: boolean; suiteExit?: number; testStrategy?: string
+  spec?: boolean
   /** `false`: the seed commit carries NO `IMPLEMENTATION_PLAN.md` (default `true`). */
   seedLedger?: boolean
   /** See `WorkerWorld.hostLedger` (default `false`). */
@@ -833,6 +858,7 @@ async function fixture(options: { ralph?: boolean; moreTasks?: boolean; suiteExi
     await rm(join(repo, 'app', 'node_modules'), { recursive: true, force: true })
   }
   await writeFile(join(repo, 'NOTES.md'), 'seed\n')
+  if (options.spec) await writeFile(join(repo, 'SPEC.md'), '# Project specification\n\nRecord and verify notes.\n')
   if (options.seedLedger ?? true) {
     await writeFile(join(repo, 'IMPLEMENTATION_PLAN.md'),
       `- [ ] T1 record the note\n${options.moreTasks ? '- [ ] T2 record another note\n' : ''}`)
@@ -851,7 +877,7 @@ async function fixture(options: { ralph?: boolean; moreTasks?: boolean; suiteExi
   cleanups.push(() => db.close())
   const store = new TridentRunStore(db)
   const row = await store.create({ slug: options.dispatchTask ? slugifyTask(options.dispatchTask) : 'card', project_slug: 'project', repo_path: repo,
-    task: options.dispatchTask ?? `Record a note in NOTES.md.${options.moreTasks ? '\nMORE TASKS' : ''}`, ralph: options.ralph ?? false,
+    task: options.dispatchTask ?? `Record a note in NOTES.md.${options.moreTasks ? '\nMORE TASKS' : ''}`,
     // The review round ceiling is read off THIS row (`build-host.ts:140-144`), so a
     // ceiling case pins its own rather than leaning on the schema default of 8/10.
     ...(options.maxRounds === undefined ? {} : { max_rounds: options.maxRounds }) })
@@ -860,6 +886,7 @@ async function fixture(options: { ralph?: boolean; moreTasks?: boolean; suiteExi
   const github = fakeGithub({ origin, repo })
   const commands: string[][] = []
   const world: WorkerWorld = { run: spawnCapture, repo, scratch, dispatches: [],
+    strategy: options.taskSequence ? 'task_sequence' : 'single', builderObservations: [], readSelectedRun: id => store.get(id),
     ...(options.reviewVeto ? { reviewVeto: options.reviewVeto } : {}),
     selectedTasks: [], plannerChoices: [], committedPlans: [], hostLedger: options.hostLedger ?? false,
     synthesisShape: options.synthesisShape ?? 'legacy', synthesisSchemaSeen: [],
@@ -1000,10 +1027,10 @@ async function fixture(options: { ralph?: boolean; moreTasks?: boolean; suiteExi
     register, key, codexCalls }
 }
 
-async function drive(f: Awaited<ReturnType<typeof fixture>>, mode: 'pr' | 'ralph'): Promise<ProjectBuildOutcome> {
+async function drive(f: Awaited<ReturnType<typeof fixture>>): Promise<ProjectBuildOutcome> {
   const options = await f.prepare()
   const host = await createProjectBuildHost(options)
-  return host.run({ mode, start: 'fresh' }, new AbortController().signal)
+  return host.run({ mode: 'implementation', start: 'fresh' }, new AbortController().signal)
 }
 
 for (const productionChange of [false, true])
@@ -1027,7 +1054,7 @@ test(`publication mutation uses the launch pin with stale local main: ${producti
     ...(productionChange ? { 'src/upstream.ts': 'export const value = 2\n' } : {}),
   }
 
-  const outcome = await drive(f, 'pr')
+  const outcome = await drive(f)
   if (productionChange) {
     expect(outcome, why(f, outcome)).toMatchObject({ kind: 'blocked', phase: 'publish', on: expect.stringContaining('nominated no mutation') })
     expect(f.github.prs.some(pr => pr.state === 'MERGED')).toBe(false)
@@ -1049,7 +1076,7 @@ test(`publication mutation uses the launch pin with stale local main: ${producti
 
 test('attempt accounting consumes a full build with missing metadata and attributes each role and review seat', async () => {
   const f = await fixture()
-  expect((await drive(f, 'pr')).kind).toBe('merged')
+  expect((await drive(f)).kind).toBe('merged')
   const attempts = f.context.attempts.list(f.row.id)
   expect(attempts.map(row => row.role).sort()).toEqual(['build', 'plan', 'review', 'review', 'synthesis'])
   expect(attempts.filter(row => row.review_seat !== null).map(row => row.review_seat).sort()).toEqual(['review_adversarial', 'synthesis'])
@@ -1073,7 +1100,7 @@ test('attempt accounting consumes a full build with missing metadata and attribu
 
 test.each(['valid', 'wrong-run'] as const)('attempt accounting retains actual headless transport usage with %s result identity', async codexReview => {
   const f = await fixture({ codexReview })
-  const result = await drive(f, 'pr')
+  const result = await drive(f)
   expect(result.kind === 'merged').toBe(codexReview === 'valid')
   const attempts = f.context.attempts.list(f.row.id).filter(row => row.provider === 'openai-codex')
   expect(attempts).toHaveLength(1)
@@ -1086,7 +1113,7 @@ test.each(['valid', 'wrong-run'] as const)('attempt accounting retains actual he
 
 test('attempt accounting consumes native child measurements through the actual Open acting-turn binding', async () => {
   const f = await fixture({ nativeUsage: true })
-  expect((await drive(f, 'pr')).kind).toBe('merged')
+  expect((await drive(f)).kind).toBe('merged')
   const attempts = f.context.attempts.list(f.row.id)
   expect(attempts).toHaveLength(5)
   for (const attempt of attempts) expect(f.context.attempts.receipt(attempt)).toMatchObject({
@@ -1111,7 +1138,7 @@ test('attempt accounting keeps explicit zero on successful work and partial usag
       : { ...result, observation: observed }
   } }
   const host = await createProjectBuildHost(options)
-  expect((await host.run({ mode: 'pr', start: 'fresh' }, new AbortController().signal)).kind).toBe('failed')
+  expect((await host.run({ mode: 'implementation', start: 'fresh' }, new AbortController().signal)).kind).toBe('failed')
   const attempts = f.context.attempts.list(f.row.id)
   expect(attempts).toHaveLength(2)
   expect(attempts.find(row => row.role === 'build')!.outcome).toBe('failed')
@@ -1182,7 +1209,7 @@ test('worktree-add diagnostics preserve a terminal predecessor and allow retry a
   // authority to infer worker quiescence from a terminal database row.
   await gitOut(spawnCapture, f.repo, ['worktree', 'remove', holder])
   const host = await createProjectBuildHost(await f.prepare())
-  const outcome = await host.run({ mode: 'pr', start: 'fresh' }, new AbortController().signal)
+  const outcome = await host.run({ mode: 'implementation', start: 'fresh' }, new AbortController().signal)
   expect(outcome.kind, why(f, outcome)).toBe('merged')
   expect(f.store.stageEvents(retry.id).filter(event => event.stage === 'build-worktree-add-failed')).toHaveLength(1)
 }, 300_000)
@@ -1250,7 +1277,7 @@ async function codexOwnerWithClaude(identity: 'valid' | 'wrong-schema' = 'valid'
 
 test('Codex owner routes explicit Claude plan, review and synthesis headlessly and its native build merges', async () => {
   const f = await codexOwnerWithClaude()
-  const outcome = await drive(f, 'pr')
+  const outcome = await drive(f)
   expect(outcome.kind, why(f, outcome)).toBe('merged')
   expect(f.children.map(request => request.role)).toEqual(['build'])
   const calls = (await readFile(f.calls, 'utf8')).trim().split('\n').map(line => JSON.parse(line))
@@ -1586,7 +1613,7 @@ test('prepared panel recovery cannot authorize a verdict across an actual child 
 test('Codex owner with unavailable selected Claude credentials refuses before any worker or publication', async () => {
   const f = await codexOwnerWithClaude()
   f.context.env.CLAUDE_CODE_OAUTH_TOKEN = 'wrong-selected-credential'
-  await expect(drive(f, 'pr')).rejects.toThrow('provider-not-connected')
+  await expect(drive(f)).rejects.toThrow('provider-not-connected')
   expect(f.children).toEqual([])
   await expect(readFile(f.calls, 'utf8')).rejects.toMatchObject({ code: 'ENOENT' })
   expect(f.commands.some(argv => argv[0] === 'gh' && argv.includes('create'))).toBe(false)
@@ -1597,7 +1624,7 @@ test('Codex owner cannot substitute its native child for a missing configured Cl
   const prepared = await f.prepare()
   delete prepared.substrate.headless.anthropic
   const host = await createProjectBuildHost(prepared)
-  const outcome = await host.run({ mode: 'pr', start: 'fresh' }, new AbortController().signal)
+  const outcome = await host.run({ mode: 'implementation', start: 'fresh' }, new AbortController().signal)
   expect(outcome.kind).not.toBe('merged')
   expect(f.children).toEqual([])
   await expect(readFile(f.calls, 'utf8')).rejects.toMatchObject({ code: 'ENOENT' })
@@ -1605,7 +1632,7 @@ test('Codex owner cannot substitute its native child for a missing configured Cl
 
 test('Codex owner observes wrong Claude schema as unknown without building or publishing', async () => {
   const f = await codexOwnerWithClaude('wrong-schema')
-  const outcome = await drive(f, 'pr')
+  const outcome = await drive(f)
   expect(outcome.kind).not.toBe('merged')
   expect(f.children).toEqual([])
   const calls = (await readFile(f.calls, 'utf8')).trim().split('\n').map(line => JSON.parse(line))
@@ -1671,7 +1698,7 @@ test.each(['valid', 'forbidden-edit', 'wrong-schema', 'restore-lost', 'ack-lost'
   cleanups.push(() => native.close())
   f.context.codexOwnerBindings = native.bindings
   const before = await gitOut(f.world.run, f.origin, ['rev-parse', 'refs/heads/main'])
-  const outcome = await drive(f, 'pr')
+  const outcome = await drive(f)
   expect(native.errors).toEqual([])
   expect(native.opens()).toBe(1)
   if (fault === 'valid') {
@@ -1704,7 +1731,7 @@ test('Bun workspace dependencies are local before workers and publication consum
   await expect(readFile(join(worktree, 'lifecycle-ran'))).rejects.toMatchObject({ code: 'ENOENT' })
   expect(f.world.dispatches).toEqual([])
   const host = await createProjectBuildHost(prepared)
-  const outcome = await host.run({ mode: 'pr', start: 'fresh' }, new AbortController().signal)
+  const outcome = await host.run({ mode: 'implementation', start: 'fresh' }, new AbortController().signal)
   expect(outcome.kind, why(f, outcome)).toBe('merged')
   const state = join(f.context.stateRoot, encodeURIComponent(f.row.id))
   expect(await readFile(join(state, 'dependencies.log'), 'utf8')).toContain('Worktree-local dependency preparation completed')
@@ -1721,7 +1748,7 @@ test('Bun workspace recovery repairs missing dependencies before workers', async
   expect(broken.ok).toBe(false)
   expect(broken.stderr).toContain('node_modules/.bun does not exist')
   f.input.run = f.store.get(f.row.id)!
-  const outcome = await drive(f, 'pr')
+  const outcome = await drive(f)
   expect(outcome.kind, why(f, outcome)).toBe('merged')
   const log = await readFile(join(f.context.stateRoot, encodeURIComponent(f.row.id), 'dependencies.log'), 'utf8')
   expect(log.match(/Worktree-local dependency preparation completed/g)).toHaveLength(2)
@@ -1738,7 +1765,7 @@ test('Bun workspace unchanged recovery saves an install and still verifies befor
   await f.prepare()
   expect(calls).toEqual(['install', 'verify'])
   f.input.run = f.store.get(f.row.id)!
-  const outcome = await drive(f, 'pr')
+  const outcome = await drive(f)
   expect(outcome.kind, why(f, outcome)).toBe('merged')
   expect(calls).toEqual(['install', 'verify', 'verify'])
 }, 120_000)
@@ -1959,7 +1986,7 @@ for (const shape of ['failure', 'failure-installed', 'empty-success', 'empty-sto
       return { ok: !failed, exit_code: failed ? 1 : 0,
         stdout: '', stderr: '', ...(shape.startsWith('timeout') ? { timed_out: true } : {}) }
     }, { writesDiffOutput: true as const })
-    await expect(drive(f, 'pr')).rejects.toThrow('Build dependency preparation failed')
+    await expect(drive(f)).rejects.toThrow('Build dependency preparation failed')
     expect(installs).toBe(1)
     expect(f.world.dispatches).toEqual([])
     expect(f.github.prs).toEqual([])
@@ -1977,7 +2004,7 @@ test('Bun workspace publication suite still refuses merge when dependencies disa
   const worktree = f.store.get(f.row.id)!.worktree!
   await rm(join(worktree, 'node_modules'), { recursive: true })
   const host = await createProjectBuildHost(prepared)
-  const outcome = await host.run({ mode: 'pr', start: 'fresh' }, new AbortController().signal)
+  const outcome = await host.run({ mode: 'implementation', start: 'fresh' }, new AbortController().signal)
   expect(outcome.kind).not.toBe('merged')
   expect(f.world.dispatches.some(dispatch => dispatch.role === 'build')).toBe(true)
   expect(f.github.prs).toHaveLength(1)
@@ -2009,7 +2036,7 @@ test('Bun workspace hung installer is killed by the bounded host watchdog', asyn
     nativeTimeout(callback, ms === PROJECT_DEPENDENCIES_TIMEOUT_MS ? 20 : ms, ...args)
   ) as typeof setTimeout)
   try {
-    await expect(drive(f, 'pr')).rejects.toThrow('Build dependency preparation failed')
+    await expect(drive(f)).rejects.toThrow('Build dependency preparation failed')
     const log = await readFile(join(f.context.stateRoot, encodeURIComponent(f.row.id), 'dependencies.log'), 'utf8')
     expect(log).toContain('timed_out=true')
     expect(f.world.dispatches).toEqual([])
@@ -2076,7 +2103,7 @@ for (const [kind, manifest] of [
       installs++
       throw new Error('non-Bun repository must not be installed with Bun')
     }, { writesDiffOutput: true as const })
-    const outcome = await drive(f, 'pr')
+    const outcome = await drive(f)
     expect(outcome.kind, why(f, outcome)).toBe('merged')
     expect(installs).toBe(0)
   }, 120_000)
@@ -2137,7 +2164,7 @@ async function seedPriorPublication(f: Awaited<ReturnType<typeof fixture>>, publ
  */
 async function driveUntilTheProcessDies(f: Awaited<ReturnType<typeof fixture>>, start: 'fresh' | 'resume'): Promise<BuildRunOutcome> {
   const host = await createProjectBuildHost(await f.prepare())
-  return buildRun({ mode: 'pr', start, run_id: f.row.id, workers: host.workers,
+  return buildRun({ mode: 'implementation', start, run_id: f.row.id, workers: host.workers,
     repl_provider: 'anthropic', merge_mode: f.store.get(f.row.id)!.merge_mode },
   host.deps, new AbortController().signal)
 }
@@ -2279,6 +2306,56 @@ function why(f: Awaited<ReturnType<typeof fixture>>, outcome: BuildRunOutcome | 
   return JSON.stringify({ outcome, dispatches: f.world.dispatches })
 }
 
+for (const spec of [false, true]) for (const strategy of ['single', 'task_sequence'] as const)
+test(`initial planner chooses ${strategy} through board and launcher ${spec ? 'with' : 'without'} SPEC.md`, async () => {
+  const f = await fixture({ spec, taskSequence: strategy === 'task_sequence', moreTasks: true, seedLedger: false, hostLedger: true })
+  const task = 'Record and verify both requested notes with the complete regression suite. MORE TASKS'
+  const dispatched = await dispatchBoardBoundBuild({ task, board_item_id: 'strategy-card' }, {
+    store: f.store, project_slug: 'project', repo_path: f.repo,
+    board: { get: () => ({ id: 'strategy-card', title: task, design_doc_ref: null, linked_run_id: null }), attachRun: async () => {} },
+    resolveBuildRepo: async () => f.repo, resolveMergeMode: async () => 'pr', hostRunner: f.context.runHost,
+  })
+  expect(dispatched.ok, JSON.stringify(dispatched)).toBe(true)
+  if (!dispatched.ok) return
+  expect(dispatched.run.execution_strategy).toBeNull()
+  expect(dispatched.run.strategy_rationale).toBeNull()
+  expect(dispatched.run.strategy_plan).toBeNull()
+  const launched = await launchThroughGateway(f, dispatched.run.id, input => {
+    expect(input.run.execution_strategy).toBeNull()
+  })
+  expect(launched.errors).toEqual([])
+  expect(launched.outcome?.kind, JSON.stringify(launched.outcome)).toBe(strategy === 'single' ? 'merged' : 'continued')
+  expect(f.world.dispatches.filter(d => d.role === 'plan')).toHaveLength(1)
+  expect(f.world.dispatches.filter(d => d.role === 'build')).toHaveLength(1)
+  expect(f.world.builderObservations).toHaveLength(1)
+  const observed = f.world.builderObservations[0]!
+  expect(observed).toMatchObject({ strategy, contextStrategy: strategy,
+    rationale: 'The accepted plan determines the useful execution boundary.',
+    scope: strategy === 'single' ? 'full-suite' : 'subset' })
+  expect(JSON.parse(observed.plan as string)).toMatchObject({ strategy, implementationPlan: '- [ ] T1 record the note\n- [ ] T2 record another note\n' })
+  expect(observed.previous).toMatchObject({ strategy, implementationPlan: '- [ ] T1 record the note\n- [ ] T2 record another note\n' })
+  expect(f.world.selectedTasks).toEqual(strategy === 'single'
+    ? ['- [ ] T1 record the note', '- [ ] T2 record another note'] : ['- [ ] T1 record the note'])
+  expect(f.world.dispatches.some(d => d.role === 'review')).toBe(strategy === 'single')
+  expect(f.github.prs).toHaveLength(strategy === 'single' ? 1 : 0)
+}, 60_000)
+
+for (const patch of [
+  { strategy: undefined }, { strategy: 'parallel' }, { strategy: null },
+  { rationale: '' }, { rationale: '   ' }, { strategy: 'single', unexpected: true },
+  { implementationPlan: '' }, { executionSpec: '' }, { remainingTasks: -1 },
+]) test(`invalid initial strategy prevents builder dispatch: ${JSON.stringify(patch)}`, async () => {
+  const f = await fixture()
+  f.world.plannerPatch = patch
+  const outcome = await drive(f)
+  expect(outcome).toMatchObject({ kind: 'unknown', phase: 'plan', detail: 'Trailer result failed host schema validation.' })
+  expect(f.world.dispatches.map(d => d.role)).toEqual(['plan'])
+  expect(f.world.builderObservations).toEqual([])
+  expect(f.store.get(f.row.id)!.execution_strategy).toBeNull()
+  expect(f.store.get(f.row.id)!.strategy_plan).toBeNull()
+  expect(f.github.prs).toEqual([])
+}, 30_000)
+
 // ─────────────────────────────────────────────────────────────────────────────
 // THE TESTS
 // ─────────────────────────────────────────────────────────────────────────────
@@ -2333,7 +2410,7 @@ for (const [shape, detail] of acquisitionCases) {
       if (shape === 'missing-pool') f.register({ state: 'missing' })
       if (shape === 'pending' || shape === 'empty' || shape === 'exited') f.register({ state: shape })
     }
-    const outcome = await drive(f, 'pr')
+    const outcome = await drive(f)
     expect(outcome).toMatchObject({ kind: 'unknown', phase: 'plan',
       detail: `Dispatch turn completion unknown: ${detail}` })
     expect(spawns).toBe(shape === 'ambiguous-before' ? 0 : 1)
@@ -2353,7 +2430,7 @@ for (const state of ['ready', 'exited', 'rekeyed'] as const) {
     f.register({ key: `${f.key}-other-substrate`, instanceId: 'cc-compose-e2e' })
     let spawns = 0
     f.context.spawnProjectSession = async () => { spawns++; f.register() }
-    const outcome = await drive(f, 'pr')
+    const outcome = await drive(f)
     expect(outcome.kind, why(f, outcome)).toBe('merged')
     expect(spawns).toBe(state === 'exited' ? 1 : 0)
     expect(f.world.dispatches[0]?.role).toBe('plan')
@@ -2379,7 +2456,7 @@ test('session acquisition: hung prewarm expires and late completion never dispat
   const watchdog = nativeTimeout(() => controller.abort(), 2_000)
   try {
     expect(PROJECT_SESSION_ACQUIRE_TIMEOUT_MS).toBe(35_000)
-    const outcome = await host.run({ mode: 'pr', start: 'fresh' }, controller.signal)
+    const outcome = await host.run({ mode: 'implementation', start: 'fresh' }, controller.signal)
     expect(started).toBe(true)
     expect(outcome).toMatchObject({ kind: 'unknown', phase: 'plan',
       // The timeout names the budget it blew AND what it was trying to repair, so a
@@ -2423,7 +2500,7 @@ test('every dispatched brief states the envelope the decoder requires', async ()
 test('numeric outer PR stops a valid build payload before review or publication', async () => {
   const f = await fixture()
   f.world.numericBuildPr = true
-  const outcome = await drive(f, 'pr')
+  const outcome = await drive(f)
   expect(outcome).toMatchObject({ kind: 'unknown', detail: expect.stringContaining('result.pr must be null or an object') })
   expect(f.world.dispatches.map(dispatch => dispatch.role)).toEqual(['plan', 'build'])
   expect(f.github.prs).toEqual([])
@@ -2441,7 +2518,7 @@ test.each(['approve', 'standalone', 'synthesis', 'missing-seat'] as const)('all-
   })
   f.input.phase_models = { ...f.input.phase_models, review_rubric: { model: 'fable' } }
   let settled = false
-  const running = drive(f, 'pr').then(result => { settled = true; return result })
+  const running = drive(f).then(result => { settled = true; return result })
   let timer: ReturnType<typeof setTimeout> | undefined
   try {
     // The deadline prevents a broken serial implementation leaving children
@@ -2472,7 +2549,7 @@ test.each(['readiness', 'ci', 'artifact'] as const)('unavailable admission preve
   if (stop === 'readiness') host.deps.reviewReadiness = async () => ({ kind: 'unknown', detail: 'fixture readiness unavailable' })
   if (stop === 'ci') host.deps.reviewCi = async () => ({ kind: 'blocked', on: 'fixture CI unavailable' })
   if (stop === 'artifact') host.deps.reviewArtifact = async () => ({ kind: 'unknown', detail: 'fixture artifact unavailable' })
-  const outcome = await host.run({ mode: 'pr', start: 'fresh' }, new AbortController().signal)
+  const outcome = await host.run({ mode: 'implementation', start: 'fresh' }, new AbortController().signal)
   expect(outcome.kind).toBe(stop === 'ci' ? 'blocked' : 'unknown')
   expect(started).toEqual([])
   expect(f.world.dispatches.map(call => call.role)).toEqual(['plan', 'build'])
@@ -2553,9 +2630,9 @@ async function efficiencyBenchmark(scenario: EfficiencyScenario, scheduling: Eff
         return value
       } })
     }
-    const outcome = die ? await buildRun({ mode: 'pr', start, run_id: f.row.id, workers: host.workers,
+    const outcome = die ? await buildRun({ mode: 'implementation', start, run_id: f.row.id, workers: host.workers,
       repl_provider: 'anthropic', merge_mode: 'pr' }, host.deps, new AbortController().signal)
-      : await host.run({ mode: 'pr', start }, new AbortController().signal)
+      : await host.run({ mode: 'implementation', start }, new AbortController().signal)
     outcomes.push(outcome.kind)
     return outcome
   }
@@ -2618,7 +2695,7 @@ test.each([...EFFICIENCY_SCENARIOS])('deterministic efficiency benchmark: %s', a
 
 test('pr mode drives plan, build, review, publish and merge to a terminal merged outcome', async () => {
   const f = await fixture()
-  const outcome = await drive(f, 'pr')
+  const outcome = await drive(f)
   expect(outcome.kind, why(f, outcome)).toBe('merged')
 
   // The sequence actually dispatched, not merely the ending.
@@ -2671,7 +2748,7 @@ test('owned draft reaches ready only after approval, host suite and merge gates,
     gatePassed = result.kind === 'allow'
     return result
   }
-  const outcome = await host.run({ mode: 'pr', start: 'fresh' }, new AbortController().signal)
+  const outcome = await host.run({ mode: 'implementation', start: 'fresh' }, new AbortController().signal)
   expect(outcome.kind, why(f, outcome)).toBe('merged')
   expect(gatePassed).toBe(true)
   expect(f.github.prs[0]).toMatchObject({ state: 'MERGED', isDraft: false })
@@ -2691,7 +2768,7 @@ for (const stop of ['suite', 'review', 'ci'] as const) test(`owned draft is neve
       return mergeGate(...args)
     }
   }
-  const outcome = await host.run({ mode: 'pr', start: 'fresh' }, new AbortController().signal)
+  const outcome = await host.run({ mode: 'implementation', start: 'fresh' }, new AbortController().signal)
   expect(outcome.kind, why(f, outcome)).not.toBe('merged')
   expect(f.commands.some(argv => argv[0] === 'gh' && ['ready', 'merge'].includes(argv[2]!))).toBe(false)
   expect(f.github.prs).toHaveLength(1)
@@ -2700,7 +2777,7 @@ for (const stop of ['suite', 'review', 'ci'] as const) test(`owned draft is neve
 
 test('a synthesis worker guided by the exact verdict schema reaches MERGED unattended', async () => {
   const f = await fixture({ synthesisShape: 'schema-guided' })
-  const outcome = await drive(f, 'pr')
+  const outcome = await drive(f)
   expect(f.world.synthesisSchemaSeen).toEqual([true])
   expect(outcome.kind, why(f, outcome)).toBe('merged')
   expect(f.github.prs).toHaveLength(1)
@@ -2714,7 +2791,7 @@ test('independent valid synthesis findings enter the fix loop instead of stoppin
   // run data. The recorded panel must request a fix without requiring the
   // unrelated review worker to produce a byte-for-byte echo.
   const f = await fixture({ blockersByRound: [0, 1, 0], synthesisShape: 'independent' })
-  const outcome = await drive(f, 'pr')
+  const outcome = await drive(f)
   expect(outcome.kind, why(f, outcome)).toBe('merged')
   expect(f.world.dispatches.some(dispatch => dispatch.role === 'synthesis')).toBe(true)
   expect(f.world.dispatches.some(dispatch => dispatch.role === 'fix')).toBe(true)
@@ -2723,7 +2800,7 @@ test('independent valid synthesis findings enter the fix loop instead of stoppin
 
 test('an extra synthesis payload field still blocks review and leaves the PR open', async () => {
   const f = await fixture({ synthesisShape: 'malformed' })
-  const outcome = await drive(f, 'pr')
+  const outcome = await drive(f)
   expect(f.world.synthesisSchemaSeen).toHaveLength(1)
   expect(outcome, why(f, outcome)).toMatchObject({ kind: 'blocked', phase: 'review',
     recipient: 'orchestrator', on: expect.stringContaining('infra-only: Review panel host observation failed') })
@@ -2740,7 +2817,7 @@ test('fresh retry rebuilds and republishes its prior open PR from a different re
   expect(seeded.priorHead).not.toBe(f.baseSha)
 
   const host = await createProjectBuildHost(seeded.options)
-  const outcome = await host.run({ mode: 'pr', start: 'fresh' }, new AbortController().signal)
+  const outcome = await host.run({ mode: 'implementation', start: 'fresh' }, new AbortController().signal)
   expect(outcome.kind, why(f, outcome)).toBe('merged')
 
   const finalHead = await gitOut(spawnCapture, f.origin, ['rev-parse', `refs/heads/${seeded.branch}^{commit}`])
@@ -2760,7 +2837,7 @@ test('fresh retry refuses an open PR whose durable publication provenance names 
   const f = await fixture()
   const seeded = await seedPriorPublication(f, 2)
   const host = await createProjectBuildHost(seeded.options)
-  const outcome = await host.run({ mode: 'pr', start: 'fresh' }, new AbortController().signal)
+  const outcome = await host.run({ mode: 'implementation', start: 'fresh' }, new AbortController().signal)
 
   expect(outcome).toMatchObject({ kind: 'blocked', phase: 'plan', on: 'Fresh build already has a PR' })
   expect(f.world.dispatches).toEqual([])
@@ -2771,7 +2848,7 @@ test('fresh retry refuses an open PR whose durable publication provenance names 
 
 test('configured Codex review uses the production read-only headless runner and its exact verdict merges', async () => {
   const f = await fixture({ codexReview: 'valid' })
-  const outcome = await drive(f, 'pr')
+  const outcome = await drive(f)
   expect(outcome.kind, why(f, outcome)).toBe('merged')
 
   const evidence = await codexReviewEvidence(f)
@@ -2819,7 +2896,7 @@ for (const [label, auth] of [
   test(`Codex review ${label} fails admission before plan or build`, async () => {
     const f = await fixture({ codexReview: 'valid' })
     await writeFile(join(f.input.codex_home!, 'auth.json'), auth)
-    await expect(drive(f, 'pr')).rejects.toThrow('Review seat review_codex: provider-not-connected')
+    await expect(drive(f)).rejects.toThrow('Review seat review_codex: provider-not-connected')
     expect(f.world.dispatches).toHaveLength(0)
     expect(f.github.prs).toHaveLength(0)
     await expect(readFile(f.codexCalls, 'utf8')).rejects.toThrow()
@@ -2833,7 +2910,7 @@ test('missing Codex review runner constructs but blocks the consuming build befo
   const runnerFor = options.policy.review!.runnerFor
   options.policy.review!.runnerFor = (model, seat) => seat.id === 'review_codex' ? undefined : runnerFor(model, seat)
   const host = await createProjectBuildHost(options)
-  const outcome = await host.run({ mode: 'pr', start: 'fresh' }, new AbortController().signal)
+  const outcome = await host.run({ mode: 'implementation', start: 'fresh' }, new AbortController().signal)
 
   expect(outcome, why(f, outcome)).toMatchObject({
     kind: 'blocked', phase: 'review', recipient: 'orchestrator',
@@ -2852,7 +2929,7 @@ test('missing Codex review runner constructs but blocks the consuming build befo
 
 test('a Codex review envelope for another run is observed but cannot merge', async () => {
   const f = await fixture({ codexReview: 'wrong-run' })
-  const outcome = await drive(f, 'pr')
+  const outcome = await drive(f)
   expect(outcome.kind, why(f, outcome)).not.toBe('merged')
 
   // Positive control: this is a rejected RESULT, not an unavailable seat or a
@@ -2868,7 +2945,7 @@ test('a Codex review envelope for another run is observed but cannot merge', asy
 
 test('a missing full-suite command stops with its own cause and runs no suite', async () => {
   const f = await fixture({ testStrategy: 'TEST EXECUTION: stage 1 only\n' })
-  const outcome = await drive(f, 'pr')
+  const outcome = await drive(f)
   expect(outcome.kind, why(f, outcome)).toBe('unknown')
   if (outcome.kind === 'unknown') {
     expect(outcome.phase).toBe('review')
@@ -2878,13 +2955,14 @@ test('a missing full-suite command stops with its own cause and runs no suite', 
   expect(f.commands.filter(argv => argv[0] === 'bash' && argv[1] === '-lc' && (argv[2] ?? '').includes('suite.sh'))).toEqual([])
 }, 300_000)
 
-test('ralph mode with a single task reaches the same terminal merged outcome', async () => {
-  const f = await fixture({ ralph: true })
-  const outcome = await drive(f, 'ralph')
+test('task_sequence strategy with a single task reaches the same terminal merged outcome', async () => {
+  const f = await fixture({ taskSequence: true })
+  const outcome = await drive(f)
   expect(outcome.kind, why(f, outcome)).toBe('merged')
   expect(f.world.dispatches.map(d => d.role).slice(0, 3)).toEqual(['plan', 'build', 'review'])
-  // Ralph step ids carry the iteration (`build-run.ts:278`); pr mode's do not.
-  expect(f.world.dispatches[0]!.step_id).toContain(':task:0:plan:0')
+  // Selection happens in the initial plan; subsequent task work carries its iteration.
+  expect(f.world.dispatches[0]!.step_id).toBe(`${f.row.id}:plan:0`)
+  expect(f.world.dispatches[1]!.step_id).toBe(`${f.row.id}:task:0:build:0`)
   expect(f.github.prs[0]!.state).toBe('MERGED')
 }, 300_000)
 
@@ -2905,7 +2983,7 @@ test('an admission host exception reaches the outcome with its cause attached', 
     return (real as Runner)(argv, ...(rest as [string?, Record<string, string>?, number?]))
   }, { writesDiffOutput: true as const }) as typeof real
   const host = await createProjectBuildHost(options)
-  const outcome = await host.run({ mode: 'pr', start: 'fresh' }, new AbortController().signal)
+  const outcome = await host.run({ mode: 'implementation', start: 'fresh' }, new AbortController().signal)
   expect(outcome.kind, why(f, outcome)).toBe('unknown')
   if (outcome.kind === 'unknown') {
     expect(outcome.phase).toBe('plan')
@@ -2941,7 +3019,7 @@ test('a clobbered run row stops the build and names the field that moved', async
   const fresh = await fixture()
   const host = await createProjectBuildHost(await fresh.prepare())
   await fresh.store.update(fresh.row.id, { worktree: null })
-  const outcome = await host.run({ mode: 'pr', start: 'fresh' }, new AbortController().signal)
+  const outcome = await host.run({ mode: 'implementation', start: 'fresh' }, new AbortController().signal)
   expect(outcome.kind, why(fresh, outcome)).toBe('unknown')
   if (outcome.kind === 'unknown') {
     expect(outcome.phase).toBe('plan')
@@ -2953,24 +3031,24 @@ test('a clobbered run row stops the build and names the field that moved', async
   expect(fresh.world.dispatches).toEqual([])
 }, 180_000)
 
-test('ralph mode with remaining tasks hands off after the build instead of merging', async () => {
-  const f = await fixture({ ralph: true, moreTasks: true })
-  const outcome = await drive(f, 'ralph')
+test('task_sequence strategy with remaining tasks hands off after the build instead of merging', async () => {
+  const f = await fixture({ taskSequence: true, moreTasks: true })
+  const outcome = await drive(f)
   expect(outcome.kind, why(f, outcome)).toBe('continued')
   if (outcome.kind === 'continued') expect(outcome.remainingTasks).toBe(1)
-  // The handoff is consumed before the iteration advances (`advanceRalph`).
+  // The handoff is consumed before the iteration advances (`advanceTask`).
   const events = f.store.stageEvents(f.row.id).filter(e => e.stage === 'build-mode-state')
   expect(JSON.parse(events.at(-1)!.meta!).iteration).toBe(1)
   expect(f.world.dispatches.map(d => d.role)).toEqual(['plan', 'build'])
 }, 300_000)
 
-test('ralph continuation probes the committed plan and selects its next unchecked task', async () => {
-  const f = await fixture({ ralph: true, moreTasks: true })
+test('task_sequence continuation probes the committed plan and selects its next unchecked task', async () => {
+  const f = await fixture({ taskSequence: true, moreTasks: true })
 
   // Keep the first process's worktree and mode checkpoint, as a real process exit
   // would, then construct a fresh composed host over those durable artifacts.
   const firstHost = await createProjectBuildHost(await f.prepare())
-  const first = await buildRun({ mode: 'ralph', start: 'fresh', ralphRound: 0,
+  const first = await buildRun({ mode: 'implementation', start: 'fresh', taskIteration: 0,
     run_id: f.row.id, workers: firstHost.workers, repl_provider: 'anthropic', merge_mode: 'pr' },
   firstHost.deps, new AbortController().signal)
   expect(first.kind, why(f, first)).toBe('continued')
@@ -2978,7 +3056,7 @@ test('ralph continuation probes the committed plan and selects its next unchecke
 
   f.world.dispatches.length = 0
   const resumed = await createProjectBuildHost(await f.prepare())
-  const outcome = await resumed.run({ mode: 'ralph', start: 'resume' }, new AbortController().signal)
+  const outcome = await resumed.run({ mode: 'implementation', start: 'resume' }, new AbortController().signal)
   expect(outcome, why(f, outcome)).toMatchObject({ kind: 'blocked', phase: 'publish' })
   expect(f.world.dispatches[0]).toMatchObject({ role: 'plan', step_id: `${f.row.id}:task:1:plan:0` })
   expect(f.world.plannerChoices).toEqual(['full', 'next'])
@@ -3005,14 +3083,14 @@ const sha256 = (text: string) => createHash('sha256').update(text).digest('hex')
 /** The git blob id of `text` — an exact-bytes comparison (`spawnCapture` trims stdout). */
 const blobId = (text: string) => createHash('sha1').update(`blob ${Buffer.byteLength(text)}\0`).update(text).digest('hex')
 
-/** Iteration 1 of a Ralph card on the fixture's own row, handed back, then killed. */
+/** Iteration 1 of a task-sequence card on the fixture's own row, handed back, then killed. */
 async function handOffThenDie(f: Awaited<ReturnType<typeof fixture>>, mergeMode: 'pr' | 'local') {
   const host = await createProjectBuildHost(await f.prepare())
-  const first = await host.run({ mode: 'ralph', start: 'fresh' }, new AbortController().signal)
+  const first = await host.run({ mode: 'implementation', start: 'fresh' }, new AbortController().signal)
   expect(first.kind, why(f, first)).toBe('continued')
   if (first.kind === 'continued') expect(first.remainingTasks).toBe(1)
   const checkpoint = lastCheckpoint(f)
-  expect(checkpoint.stage).toBe('ralph-task-built')
+  expect(checkpoint.stage).toBe('task-built')
   const states = f.store.stageEvents(f.row.id).filter(event => event.stage === 'build-mode-state')
   expect(JSON.parse(states.at(-1)!.meta!).iteration).toBe(1)
   const h2 = String(checkpoint.head)
@@ -3046,14 +3124,14 @@ function redispatchContinuation(f: Awaited<ReturnType<typeof fixture>>, priorId:
     store: f.store, project_slug: 'project', repo_path: f.repo,
     board: { get: () => ({ id: 'card', title: CONTINUATION_TASK, design_doc_ref: null, linked_run_id: priorId }),
       attachRun: async () => {} },
-    resolveBuildRepo: async () => f.repo, resolveMergeMode: async () => mergeMode, resolveRalph: async () => true,
+    resolveBuildRepo: async () => f.repo, resolveMergeMode: async () => mergeMode,
     hostRunner: f.context.runHost,
   })
 }
 
 for (const mergeMode of ['local', 'pr'] as const)
-test(`a ${mergeMode} retry of a run that died after a Ralph handoff resumes from the host's committed ledger`, async () => {
-  const f = await fixture({ ralph: true, moreTasks: true, mergeMode, dispatchTask: CONTINUATION_TASK,
+test(`a ${mergeMode} retry of a run that died after a task-sequence handoff resumes from the host's committed ledger`, async () => {
+  const f = await fixture({ taskSequence: true, moreTasks: true, mergeMode, dispatchTask: CONTINUATION_TASK,
     seedLedger: false, hostLedger: true })
   // NO MUTATION NOMINATION, deliberately. Every change this card makes is prose
   // (NOTES.md), and the final diff also carries the host's ledger. The ledger sits at
@@ -3071,11 +3149,14 @@ test(`a ${mergeMode} retry of a run that died after a Ralph handoff resumes from
   if (!dispatched.ok) return
   const run = dispatched.run
   expect(run.id).not.toBe(prior.id)
-  expect(run.inner_checkpoint).toBe('ralph-task-built')
+  expect(run.inner_checkpoint).toBe('task-built')
   expect(run.inner_checkpoint_head).toBe(h2)
   expect(run.base_sha).toBe(f.baseSha)
-  expect(run.ralph_round).toBe(1)
-  expect(run.max_ralph_rounds).toBe(prior.max_ralph_rounds)
+  expect(run.task_iteration).toBe(1)
+  expect(run.max_task_iterations).toBe(prior.max_task_iterations)
+  expect(run.execution_strategy).toBe('task_sequence')
+  expect(run.strategy_rationale).toBe(prior.strategy_rationale)
+  expect(run.strategy_plan).toBe(prior.strategy_plan)
   const links = f.store.stageEvents(run.id).filter(event => event.stage === 'build-retry-source')
   expect(links).toHaveLength(1)
   expect(JSON.parse(links[0]!.meta!)).toMatchObject({ priorRunId: prior.id, head: h2, runId: run.id })
@@ -3100,9 +3181,9 @@ test(`a ${mergeMode} retry of a run that died after a Ralph handoff resumes from
       prs: f.github.prs.length, commands: f.commands.length }
   })
   expect(launched.errors).toEqual([])
-  expect({ checkpoint: seen?.checkpoint, head: seen?.head }).toEqual({ checkpoint: 'ralph-task-built', head: h2 })
+  expect({ checkpoint: seen?.checkpoint, head: seen?.head }).toEqual({ checkpoint: 'task-built', head: h2 })
   // `prepareLaunch` did not falsify the seed.
-  expect(launched.stepped.inner_checkpoint).toBe('ralph-task-built')
+  expect(launched.stepped.inner_checkpoint).toBe('task-built')
   expect(launched.stepped.base_sha).toBe(f.baseSha)
   const outcome = launched.outcome!
   expect(outcome.kind, why(f, outcome)).toBe('merged')
@@ -3114,8 +3195,8 @@ test(`a ${mergeMode} retry of a run that died after a Ralph handoff resumes from
   expect(f.world.selectedTasks).toEqual(['- [ ] T2 record another note'])
   expect(f.world.dispatches.some(dispatch => dispatch.step_id.startsWith(`${prior.id}:`))).toBe(false)
   // The plan turn's host context as the worker read it off disk (`project-build-host.ts`
-  // writes `<role>.brief.<role>.host`, and its context beside it).
-  const planContext = JSON.parse(await readFile(workContextPath(join(f.context.stateRoot, run.id, 'plan.brief.plan.host')), 'utf8'))
+  // writes `<role>.strategy-v2.brief.<role>.host`, and its context beside it).
+  const planContext = JSON.parse(await readFile(workContextPath(join(f.context.stateRoot, run.id, 'plan.strategy-v2.brief.plan.host')), 'utf8'))
   expect(planContext.request.step_id).toBe(`${run.id}:task:1:plan:0`)
   expect(planContext.planner).toBe('next')
   expect(planContext.committedPlan).toMatchObject({ found: true, body: HANDOFF_LEDGER, sha256: sha256(HANDOFF_LEDGER), uncheckedCount: 1 })
@@ -3147,8 +3228,8 @@ test(`a ${mergeMode} retry of a run that died after a Ralph handoff resumes from
   }
 }, 300_000)
 
-test('a Ralph retry whose branch moved after the handoff carries no checkpoint, says why, and never adopts the moved branch', async () => {
-  const f = await fixture({ ralph: true, moreTasks: true, mergeMode: 'local', dispatchTask: CONTINUATION_TASK,
+test('a task-sequence retry whose branch moved after the handoff carries no checkpoint, says why, and never adopts the moved branch', async () => {
+  const f = await fixture({ taskSequence: true, moreTasks: true, mergeMode: 'local', dispatchTask: CONTINUATION_TASK,
     seedLedger: false, hostLedger: true })
   const { prior, h2, branch } = await handOffThenDie(f, 'local')
   const advanced = await gitOut(spawnCapture, f.repo, ['commit-tree', `${h2}^{tree}`, '-p', h2,
@@ -3168,8 +3249,8 @@ test('a Ralph retry whose branch moved after the handoff carries no checkpoint, 
   const seedLine = lines.find(line => line.includes('event=dispatch_resume_seed'))
   expect(seedLine).toContain('reason=branch_tip_moved')
   // The budget is the card's, and it still travels when the checkpoint does not.
-  expect(run.ralph_round).toBe(prior.ralph_round)
-  expect(run.max_ralph_rounds).toBe(prior.max_ralph_rounds)
+  expect(run.task_iteration).toBe(prior.task_iteration)
+  expect(run.max_task_iterations).toBe(prior.max_task_iterations)
 
   // THE LAUNCH NEITHER CONTINUES NOR BUILDS ON THE MOVED BRANCH. With no checkpoint
   // the row is a fresh launch, and the branch now carries commits this run did not
@@ -3199,7 +3280,7 @@ test('a REQUEST_CHANGES panel dispatches a fix worker and the re-review merges',
   // reaches `work('fix')`, `checkFixLineage`, `reviewProgress` and a second pass
   // through publication.
   const f = await fixture({ blockersByRound: [0, 1] })
-  const outcome = await drive(f, 'pr')
+  const outcome = await drive(f)
   expect(outcome.kind, why(f, outcome)).toBe('merged')
 
   // The exact sequence, not merely the ending. `work('review')` dispatches the
@@ -3239,7 +3320,7 @@ test('a REQUEST_CHANGES panel dispatches a fix worker and the re-review merges',
 
 test('a COMMENT panel stops as an unresolved verdict and never merges', async () => {
   const f = await fixture({ commentRounds: [1] })
-  const outcome = await drive(f, 'pr')
+  const outcome = await drive(f)
   expect(outcome, why(f, outcome)).toMatchObject({
     kind: 'blocked', phase: 'review', recipient: 'orchestrator',
     on: 'Review has an unresolved verdict without nonblocking findings',
@@ -3255,7 +3336,7 @@ test('a COMMENT panel stops as an unresolved verdict and never merges', async ()
 
 test('an unavailable panel seat stops by configured seat and never synthesizes or merges', async () => {
   const f = await fixture({ unavailableSeatRounds: [1] })
-  const outcome = await drive(f, 'pr')
+  const outcome = await drive(f)
   expect(outcome, why(f, outcome)).toMatchObject({
     kind: 'blocked', phase: 'review', recipient: 'orchestrator',
     on: 'Review seat review_adversarial (anthropic) is unavailable',
@@ -3272,7 +3353,7 @@ test('an unavailable panel seat stops by configured seat and never synthesizes o
 
 test('a provider rate-limited synthesis stops with its cause without a trailer, replay, fix or merge', async () => {
   const f = await fixture({ rateLimitedSynthesis: true })
-  const outcome = await drive(f, 'pr')
+  const outcome = await drive(f)
   expect(outcome, why(f, outcome)).toMatchObject({ kind: 'blocked', phase: 'review', recipient: 'orchestrator',
     on: 'infra-only: Review synthesis unavailable: Review seat synthesis: Claude child stopped at the provider rate limit (HTTP 429).' })
   expect(f.world.dispatches.map(dispatch => dispatch.role)).toEqual(['plan', 'build', 'review', 'review', 'synthesis'])
@@ -3290,7 +3371,7 @@ test('a design-gap escalation re-plans and rebuilds instead of dispatching a fix
   // (`gates/escalation.ts:85-96,140`). It then runs plan AND build again rather
   // than a fix, which is the whole difference between the two branches.
   const f = await fixture({ blockersByRound: [0, 1], replanRounds: [1] })
-  const outcome = await drive(f, 'pr')
+  const outcome = await drive(f)
   expect(outcome.kind, why(f, outcome)).toBe('merged')
 
   expect(f.world.dispatches.map(dispatch => dispatch.role)).toEqual([
@@ -3316,7 +3397,7 @@ test('a second unconverged round stops at the row-configured ceiling, not at a v
   // being stopped earlier by progress arithmetic. The cap is this ROW's
   // (`build-host.ts:140-144`), pinned here at 2.
   const f = await fixture({ blockersByRound: [0, 2, 1], maxRounds: 2 })
-  const outcome = await drive(f, 'pr')
+  const outcome = await drive(f)
   expect(outcome.kind, why(f, outcome)).toBe('blocked')
   if (outcome.kind === 'blocked') {
     expect(outcome.on).toBe('Review requires orchestrator arbitration: round ceiling')
@@ -3339,7 +3420,7 @@ test('a second unconverged round stops at the row-configured ceiling, not at a v
 
 test('a finding repeated after a fix stops before another fix is dispatched', async () => {
   const f = await fixture({ blockersByRound: [0, 2, 1], repeatFirstFinding: true })
-  const outcome = await drive(f, 'pr')
+  const outcome = await drive(f)
   expect(outcome.kind, why(f, outcome)).toBe('blocked')
   if (outcome.kind === 'blocked') {
     expect(outcome.on).toBe('Review requires orchestrator arbitration: repeated finding')
@@ -3354,6 +3435,154 @@ test('a finding repeated after a fix stops before another fix is dispatched', as
 
 // ── RESUME ACROSS A DRIVER RESTART ───────────────────────────────────────────
 
+for (const strategy of ['single', 'task_sequence', 'wave'] as const)
+test(`historical pending ${strategy} planner recovers its original schema and reservation`, async () => {
+  const f = await fixture({ taskSequence: strategy !== 'single', moreTasks: true, seedLedger: false, hostLedger: true })
+  const mode = strategy === 'wave' ? { mode: 'wave' as const, pinnedTaskId: 'T1' } : { mode: 'implementation' as const }
+  f.db.raw().query("UPDATE code_trident_runs SET execution_strategy = ?, strategy_source = 'legacy', strategy_rationale = ? WHERE id = ?")
+    .run(strategy === 'wave' ? 'single' : strategy, 'Execution strategy preserved from the legacy run selection.', f.row.id)
+  f.input.run = f.store.get(f.row.id)!
+  const prepared = await f.prepare()
+  for (const [role, worker] of Object.entries(prepared.workers)) {
+    const path = join(f.context.stateRoot, f.row.id, `${role}.brief`)
+    await writeFile(path, await readFile(worker.request.brief.path, 'utf8'))
+    worker.request = { ...worker.request, brief: { ...worker.request.brief, path },
+      result: { ...worker.request.result, ...(role === 'plan' ? { schema: 'project-plan' } : {}) } }
+  }
+  const host = await createProjectBuildHost(prepared)
+  const runner = host.workers.plan.runner
+  host.workers.plan.runner = { ...runner, async run(...args) {
+    const outcome = await runner.run(...args)
+    expect(outcome.kind).toBe('completed')
+    return { kind: 'unknown', detail: 'fixture: completed historical planner acknowledgement lost' }
+  } }
+  expect(await buildRun({ ...mode, start: 'fresh', run_id: f.row.id, workers: host.workers,
+    repl_provider: 'anthropic', merge_mode: 'pr' }, host.deps, new AbortController().signal))
+    .toMatchObject({ kind: 'unknown', phase: 'plan' })
+  const event = f.store.stageEvents(f.row.id).filter(row => row.stage === 'build-mode-state').at(-1)!
+  const state = JSON.parse(event.meta!)
+  const recovery = state.checkpoint.pending.recovery
+  recovery.inputs.mode = strategy === 'single' ? 'pr' : strategy === 'wave' ? 'wave' : 'ralph'
+  if (strategy === 'task_sequence') recovery.inputs.ralphRound = recovery.inputs.taskIteration ?? 0
+  delete recovery.inputs.taskIteration
+  delete recovery.executionStrategy
+  await f.store.recordStageEvent(f.row.id, 'build-mode-state', JSON.stringify(state))
+  const original = await readFile(join(f.context.stateRoot, f.row.id, 'plan.result'), 'utf8')
+  expect(JSON.parse(original)).toMatchObject({ schema: 'project-plan', step_id: state.checkpoint.pending.step_id })
+  expect(JSON.parse(original).result.payload.strategy).toBeUndefined()
+  f.world.dispatches.length = 0
+  f.input.run = f.store.get(f.row.id)!
+  const outcome = strategy === 'wave'
+    ? await (await createProjectBuildHost(await f.prepare())).run({ ...mode, start: 'resume' }, new AbortController().signal)
+    : await restartThroughGateway(f)
+  expect(outcome.kind, why(f, outcome)).toBe(strategy === 'single' ? 'merged' : strategy === 'wave' ? 'built' : 'continued')
+  expect(f.world.dispatches.filter(d => d.role === 'plan')).toEqual([])
+  expect(f.world.dispatches.filter(d => d.role === 'build')).toHaveLength(1)
+  expect(f.world.builderObservations[0]).toMatchObject({ strategy: strategy === 'wave' ? 'single' : strategy,
+    scope: strategy === 'task_sequence' ? 'subset' : 'full-suite' })
+  if (strategy === 'wave') {
+    expect(f.world.selectedTasks).toEqual(['- [ ] T1 record the note'])
+    expect(f.world.dispatches.some(d => d.role === 'review')).toBe(false)
+    expect(f.github.prs).toEqual([])
+  }
+  expect(await readFile(join(f.context.stateRoot, f.row.id, 'plan.result'), 'utf8')).toBe(original)
+}, 30_000)
+
+for (const strategy of ['single', 'task_sequence'] as const) for (const source of ['legacy', 'planner'] as const)
+for (const fault of source === 'legacy' && strategy === 'single'
+  ? ['none', 'provider', 'model', 'effort', 'budget', 'tools', 'cwd', 'result-path', 'brief-path', 'brief-integrity'] : ['none'])
+test(`historical pending ${strategy} builder recovers only with ${source} provenance${fault === 'none' ? '' : ` and rejects changed ${fault}`}`, async () => {
+  const f = await fixture({ taskSequence: strategy === 'task_sequence', moreTasks: true, seedLedger: false, hostLedger: true })
+  const prepared = await f.prepare()
+  for (const [role, worker] of Object.entries(prepared.workers)) {
+    const path = join(f.context.stateRoot, f.row.id, `${role}.brief`)
+    await writeFile(path, await readFile(worker.request.brief.path, 'utf8'))
+    worker.request = { ...worker.request, brief: { ...worker.request.brief, path } }
+  }
+  // The native pending reservation is created using the original path and
+  // integrity before dispatch. Recovery cannot manufacture a replacement.
+  const host = await createProjectBuildHost(prepared)
+  const runner = host.workers.build.runner
+  host.workers.build.runner = { ...runner, async run(...args) {
+    const outcome = await runner.run(...args)
+    expect(outcome.kind).toBe('completed')
+    return { kind: 'unknown', detail: 'fixture: completed historical builder acknowledgement lost' }
+  } }
+  expect(await buildRun({ mode: 'implementation', start: 'fresh', run_id: f.row.id, workers: host.workers,
+    repl_provider: 'anthropic', merge_mode: 'pr' }, host.deps, new AbortController().signal))
+    .toMatchObject({ kind: 'unknown', phase: 'build' })
+  const event = f.store.stageEvents(f.row.id).filter(row => row.stage === 'build-mode-state').at(-1)!
+  const state = JSON.parse(event.meta!)
+  const recovery = state.checkpoint.pending.recovery
+  const originalStep = state.checkpoint.pending.step_id
+  // Reconstruct the previous writer's durable shape, leaving the genuine native
+  // build reservation and result artifact byte-for-byte intact.
+  recovery.inputs.mode = strategy === 'single' ? 'pr' : 'ralph'
+  if (strategy === 'task_sequence') recovery.inputs.ralphRound = recovery.inputs.taskIteration ?? 0
+  delete recovery.inputs.taskIteration
+  delete recovery.executionStrategy
+  delete recovery.inputs.executionStrategy
+  recovery.inputs.workers.plan.request.result.schema = 'project-plan'
+  for (const plan of [recovery.plan, recovery.previous]) {
+    delete plan.strategy
+    delete plan.rationale
+  }
+  if (strategy === 'single') {
+    // The historical single driver kept the accepted payload only in previous
+    // and ignored its remainder when assigning the complete change.
+    recovery.plan = null
+    recovery.previous.remainingTasks = 1
+  }
+  const originalWorker = recovery.inputs.workers.build
+  if (fault === 'provider') originalWorker.provider = 'openai-codex'
+  if (fault === 'model') originalWorker.request.model_id = 'different-model'
+  if (fault === 'effort') originalWorker.request.effort = 'xhigh'
+  if (fault === 'budget') originalWorker.request.budget.wall_ms += 1
+  if (fault === 'tools') originalWorker.request.tools = 'read-only'
+  if (fault === 'cwd') originalWorker.request.cwd = f.repo
+  if (fault === 'result-path') originalWorker.request.result.path += '.unreserved'
+  if (fault === 'brief-path') originalWorker.request.brief.path += '.unreserved'
+  if (fault === 'brief-integrity') originalWorker.request.brief.integrity = 'sha256:changed'
+  // Keep the two checkpoint copies coherent. Only comparison with the actual
+  // host-owned routing and immutable files can refuse this forged authority.
+  if (fault !== 'none') recovery.request = { ...originalWorker.request,
+    run_id: f.row.id, step_id: originalStep, role: 'build', needs_approval_decision: false }
+  await f.store.recordStageEvent(f.row.id, 'build-mode-state', JSON.stringify(state))
+  if (source === 'legacy') {
+    f.db.raw().query("UPDATE code_trident_runs SET strategy_source = 'legacy', strategy_plan = NULL WHERE id = ?").run(f.row.id)
+  }
+  if (source === 'legacy' && fault === 'none') {
+    const resumed = await createProjectBuildHost(await f.prepare())
+    const normalized = (await resumed.deps.modes!.loadResume())!.pending!.recovery!
+    expect(await resumed.deps.validateLegacyPendingRequest!(normalized.inputs.workers)).toEqual({ kind: 'allow' })
+    expect(normalized.inputs as Record<string, unknown>).toEqual({ mode: 'implementation', run_id: f.row.id, repl_provider: 'anthropic', merge_mode: 'pr',
+      taskIteration: 0, maxRounds: f.row.max_rounds, workers: normalized.inputs.workers })
+    expect(normalized.request).toEqual({ ...normalized.inputs.workers.build!.request,
+      run_id: f.row.id, step_id: originalStep, role: 'build', needs_approval_decision: false })
+  }
+  const spend = f.store.get(f.row.id)!.task_iteration
+  const artifact = await readFile(join(f.context.stateRoot, f.row.id, 'build.result'), 'utf8')
+  f.world.dispatches.length = 0
+  const outcome = await restartThroughGateway(f)
+  expect(outcome.kind, why(f, outcome)).toBe(source === 'planner' || fault !== 'none' ? 'unknown' : strategy === 'single' ? 'merged' : 'continued')
+  if (fault !== 'none') expect(outcome).toMatchObject({ kind: 'unknown', detail: fault === 'brief-path'
+    ? 'Original worker brief is not the reserved legacy artifact' : fault === 'brief-integrity'
+      ? 'Original worker brief integrity cannot be established' : 'Original worker routing or authority changed during recovery' })
+  expect(f.world.dispatches.some(d => d.role === 'plan' || d.role === 'build')).toBe(false)
+  expect(f.store.get(f.row.id)!.execution_strategy).toBe(strategy)
+  expect(f.store.get(f.row.id)!.task_iteration).toBe(spend)
+  if (source === 'legacy' && strategy === 'task_sequence') {
+    const handoff = f.store.stageEvents(f.row.id).filter(row => row.stage === 'build-mode-state').at(-1)!
+    expect(JSON.parse(handoff.meta!)).toMatchObject({ iteration: spend + 1, checkpoint: { stage: 'task-built' } })
+  }
+  expect(await readFile(join(f.context.stateRoot, f.row.id, 'build.result'), 'utf8')).toBe(artifact)
+  expect(JSON.parse(artifact).step_id).toBe(originalStep)
+  if (source === 'planner' || fault !== 'none') {
+    expect(lastCheckpoint(f).pending).toEqual(state.checkpoint.pending)
+    expect(f.github.prs).toEqual([])
+  }
+}, 30_000)
+
 for (const progress of ['valid', 'missing', 'null', 'invalid'] as const)
 test(`pending native fix recovery preserves repeated-finding enforcement with ${progress} progress`, async () => {
   const f = await fixture({ blockersByRound: [0, 2, 1], repeatFirstFinding: true })
@@ -3364,7 +3593,7 @@ test(`pending native fix recovery preserves repeated-finding enforcement with ${
     expect(result.kind).toBe('completed')
     return { kind: 'unknown', detail: 'fixture: completed fix acknowledgement lost' }
   } }
-  expect(await buildRun({ mode: 'pr', start: 'fresh', run_id: f.row.id, workers: host.workers,
+  expect(await buildRun({ mode: 'implementation', start: 'fresh', run_id: f.row.id, workers: host.workers,
     repl_provider: 'anthropic', merge_mode: 'pr' }, host.deps, new AbortController().signal))
     .toMatchObject({ kind: 'unknown', phase: 'fix' })
   const event = f.store.stageEvents(f.row.id).filter(row => row.stage === 'build-mode-state').at(-1)!
@@ -3404,7 +3633,7 @@ test(`unchanged-tip retry consumes prior ${scenario} mutation nomination despite
     const result = await priorGate(...args)
     return result.kind === 'repair-nomination' ? { kind: 'blocked', on: result.finding } : result
   }
-  const first = await priorHost.run({ mode: 'pr', start: 'fresh' }, new AbortController().signal)
+  const first = await priorHost.run({ mode: 'implementation', start: 'fresh' }, new AbortController().signal)
   expect(first.kind, why(f, first)).toBe(argv === 'bare' ? 'blocked' : 'unknown')
   const checkpoint = lastCheckpoint(f)
   expect(checkpoint).toMatchObject({ stage: 'built', round: 1 })
@@ -3439,7 +3668,7 @@ test(`unchanged-tip retry consumes prior ${scenario} mutation nomination despite
     store: f.store, project_slug: 'project', repo_path: f.repo,
     max_rounds: scenario === 'exhausted' ? 1 : 5,
     board: { get: () => ({ id: 'retry-card', title: task, design_doc_ref: null, linked_run_id: prior.id }), attachRun: async () => {} },
-    resolveBuildRepo: async () => f.repo, resolveMergeMode: async () => 'pr', resolveRalph: async () => false,
+    resolveBuildRepo: async () => f.repo, resolveMergeMode: async () => 'pr',
   })
   expect(dispatched.ok, JSON.stringify(dispatched)).toBe(true)
   if (!dispatched.ok) return
@@ -3499,7 +3728,7 @@ test('local invalid nomination gets one bounded fix and a fresh review before lo
     }
     await prepare(request, context)
   }
-  const outcome = await host.run({ mode: 'pr', start: 'fresh' }, new AbortController().signal)
+  const outcome = await host.run({ mode: 'implementation', start: 'fresh' }, new AbortController().signal)
   expect(outcome.kind, why(f, outcome)).toBe('merged')
   expect(f.world.dispatches.filter(dispatch => dispatch.step_id.startsWith(`${f.row.id}:`)
     && ['review', 'fix'].includes(dispatch.role)).map(dispatchStep))
@@ -3515,14 +3744,14 @@ test(`an orchestrated ${mergeMode} retry survives launch falsification: ${scenar
   f.github.refuse.add('create')
   const priorHost = await createProjectBuildHost(await f.prepare())
   if (mergeMode === 'local') priorHost.deps.reviewReadiness = async () => ({ kind: 'unknown', detail: 'Simulated stop before review' })
-  const first = await priorHost.run({ mode: 'pr', start: 'fresh' }, new AbortController().signal)
+  const first = await priorHost.run({ mode: 'implementation', start: 'fresh' }, new AbortController().signal)
   expect(first.kind, why(f, first)).toBe('unknown')
   const checkpoint = lastCheckpoint(f)
   await f.store.update(f.row.id, { phase: 'failed', worktree: null })
   const redispatch = (priorId: string) => dispatchBoardBoundBuild({ task, board_item_id: 'retry-card' }, {
     store: f.store, project_slug: 'project', repo_path: f.repo,
     board: { get: () => ({ id: 'retry-card', title: task, design_doc_ref: null, linked_run_id: priorId }), attachRun: async () => {} },
-    resolveBuildRepo: async () => f.repo, resolveMergeMode: async () => mergeMode, resolveRalph: async () => false,
+    resolveBuildRepo: async () => f.repo, resolveMergeMode: async () => mergeMode,
   })
   const advanceBranch = async () => {
   const committed = await spawnCapture(['git', '-C', f.repo, 'commit-tree', `${checkpoint.head}^{tree}`,
@@ -3594,8 +3823,8 @@ test(`an orchestrated ${mergeMode} retry survives launch falsification: ${scenar
   expect(next.ok, JSON.stringify({ failed: failed.failure_reason, next })).toBe(true)
   if (!next.ok) return
   expect(next.run.inner_checkpoint).toBeNull()
-  expect(next.run.ralph_round).toBe(dispatched.run.ralph_round)
-  expect(next.run.max_ralph_rounds).toBe(dispatched.run.max_ralph_rounds)
+  expect(next.run.task_iteration).toBe(dispatched.run.task_iteration)
+  expect(next.run.max_task_iterations).toBe(dispatched.run.max_task_iterations)
 }, 300_000)
 
 for (const { mergeMode, fixed, moved, preparationFailure } of [
@@ -3608,7 +3837,7 @@ for (const { mergeMode, fixed, moved, preparationFailure } of [
 ] as const)
 test(`a cross-run ${mergeMode} retry ${moved ? 'refuses remote movement after dispatch' : `reviews the prior ${fixed ? 'fix' : 'build'} and reaches merged without rebuilding`}${preparationFailure ? ' after a preparation failure' : ''}`, async () => {
   const task = 'Record a note in NOTES.md and verify the resulting change with the complete regression suite'
-  const f = await fixture({ dispatchTask: task, mergeMode, ralph: fixed,
+  const f = await fixture({ dispatchTask: task, mergeMode, taskSequence: fixed,
     ...(fixed ? { blockersByRound: [0, 1, 0] } : {}) })
   const firstHost = await createProjectBuildHost(await f.prepare())
   if (fixed) {
@@ -3618,7 +3847,7 @@ test(`a cross-run ${mergeMode} retry ${moved ? 'refuses remote movement after di
       ? { kind: 'unknown', detail: 'Simulated process death after publishing the fix' } : readiness(...args)
   } else if (mergeMode === 'pr') f.github.refuse.add('create')
   else firstHost.deps.reviewReadiness = async () => ({ kind: 'unknown', detail: 'Simulated process death before review' })
-  const first = await firstHost.run({ mode: fixed ? 'ralph' : 'pr', start: 'fresh' }, new AbortController().signal)
+  const first = await firstHost.run({ mode: 'implementation', start: 'fresh' }, new AbortController().signal)
   expect(first.kind, why(f, first)).toBe('unknown')
   expect(f.world.dispatches.filter(dispatch => ['plan', 'build', 'fix'].includes(dispatch.role)).map(dispatch => dispatch.role))
     .toEqual(fixed ? ['plan', 'build', 'fix'] : ['plan', 'build'])
@@ -3636,7 +3865,7 @@ test(`a cross-run ${mergeMode} retry ${moved ? 'refuses remote movement after di
     store: f.store, project_slug: 'project', repo_path: f.repo,
     board: { get: () => ({ id: 'retry-card', title: task, design_doc_ref: null, linked_run_id: priorId }),
       attachRun: async () => {} },
-    resolveBuildRepo: async () => f.repo, resolveMergeMode: async () => mergeMode, resolveRalph: async () => fixed,
+    resolveBuildRepo: async () => f.repo, resolveMergeMode: async () => mergeMode,
   })
   let dispatched = await redispatch(prior.id)
   expect(dispatched.ok, JSON.stringify(dispatched)).toBe(true)
@@ -3661,8 +3890,8 @@ test(`a cross-run ${mergeMode} retry ${moved ? 'refuses remote movement after di
     dispatched = await redispatch(failed.id)
     expect(dispatched.ok, JSON.stringify(dispatched)).toBe(true)
     if (!dispatched.ok) return
-    expect(dispatched.run.ralph_round).toBe(failed.ralph_round)
-    expect(dispatched.run.max_ralph_rounds).toBe(failed.max_ralph_rounds)
+    expect(dispatched.run.task_iteration).toBe(failed.task_iteration)
+    expect(dispatched.run.max_task_iterations).toBe(failed.max_task_iterations)
     f.input.run = dispatched.run
   }
   if (moved) {
@@ -3678,7 +3907,7 @@ test(`a cross-run ${mergeMode} retry ${moved ? 'refuses remote movement after di
     return
   }
   const host = await createProjectBuildHost(await f.prepare())
-  const outcome = await host.run({ mode: fixed ? 'ralph' : 'pr', start: 'resume' }, new AbortController().signal)
+  const outcome = await host.run({ mode: 'implementation', start: 'resume' }, new AbortController().signal)
   expect(outcome.kind, why(f, outcome)).toBe('merged')
   expect(f.world.dispatches.some(dispatch => dispatch.role === 'plan' || dispatch.role === 'build' || dispatch.role === 'fix')).toBe(false)
   expect(dispatchStep(standaloneReview(f.world))).toBe(`${dispatched.run.id}:${fixed ? 'task:0:' : ''}review:${fixed ? 2 : 1}`)
@@ -3711,7 +3940,7 @@ test('a driver restarted between the build and review re-adopts the build instea
   const built = await spawnCapture(['git', '-C', f.repo, 'rev-parse', 'refs/heads/trident/card'], f.repo)
   expect(lastCheckpoint(f)).toEqual({ head: built.stdout, stage: 'built', round: 1,
     replansUsed: 0, previousFindings: [], previousBlockingCount: 0, findings: [],
-    reviewBaseline: 'none', previousReview: null })
+    reviewBaseline: 'none', previousReview: null, remainingTasks: 0 })
   expect(lastCheckpoint(f).pending).toBeUndefined()
 
   // …and the build worker's result file, which the next process reads back as the
@@ -3878,7 +4107,7 @@ test('a driver resumed from a rejected checkpoint dispatches the deferred fix', 
   f.input.run = f.store.get(f.row.id)!
   f.world.dispatches.length = 0
   const resumed = await createProjectBuildHost(await f.prepare())
-  const outcome = await resumed.run({ mode: 'pr', start: 'resume' }, new AbortController().signal)
+  const outcome = await resumed.run({ mode: 'implementation', start: 'resume' }, new AbortController().signal)
   expect(outcome.kind, why(f, outcome)).toBe('merged')
   expect(f.world.dispatches.map(dispatch => dispatch.role)).toEqual([
     'fix', 'review', 'review', 'synthesis',
@@ -3897,7 +4126,7 @@ test('local merge mode reaches merged with no PR, no push and no gh call', async
   // run, so G055 answered `unknown` — fail-closed — for every local build. That is
   // the fix this case guards; see `build-host.ts`'s `reviewCi`.
   const f = await fixture({ mergeMode: 'local' })
-  const outcome = await drive(f, 'pr')
+  const outcome = await drive(f)
   expect(outcome.kind, why(f, outcome)).toBe('merged')
   expect(f.world.dispatches.map(dispatch => dispatch.role))
     .toEqual(['plan', 'build', 'review', 'review', 'synthesis'])
@@ -3955,12 +4184,13 @@ test('local merge mode reaches merged with no PR, no push and no gh call', async
  *    dispatched from a RESUMED rejection, `build-run.ts:461-472`) is driven
  *    alongside the fresh fix path.
  *  • THE REST OF RESUME. The cases here resume `built`, `pending`, `rejected` and
- *    `ralph-task-built` checkpoints. An `approved` checkpoint and a regenerated
+ *    `task-built` checkpoints. An `approved` checkpoint and a regenerated
  *    diff that disagrees with the measurement are not driven.
  *  • KIMI AND THE REST OF HEADLESS PLACEMENT. Codex review's successful first
  *    call and wrong-run envelope are driven above; resume and concurrency are
  *    owned by the runner suite. Kimi remains configured off here.
- *  • `mode: 'wave'` and `mode: 'bound_pr'`.
+ *  • Fresh wave orchestration and `mode: 'bound_pr'`. Migrated wave pending
+ *    planner recovery and its pinned builder are exercised above.
  *  • LOCAL MODE'S REFUSALS. The local case merges; `localMergeReadiness`'s dirty
  *    worktree, base-drift overlap, moved-branch and non-isolated-worktree stops
  *    are not driven, nor is `confirmLocalMerge` failing after a merge.
@@ -4004,15 +4234,15 @@ function registerSession(f: Awaited<ReturnType<typeof fixture>>, session: Record
 
 const neverSettles = () => new Promise<never>(() => {})
 
-test('terminal Ralph task receives full-suite instructions after an intermediate task deferred them', async () => {
+test('terminal task-sequence task receives full-suite instructions after an intermediate task deferred them', async () => {
   const { renderTestStrategy, FULL_SUITE_REQUIRED, INTERMEDIATE_SUITE_DEFERRED } = await import('@neutronai/trident/test-strategy.ts')
-  const f = await fixture({ ralph: true, moreTasks: true })
+  const f = await fixture({ taskSequence: true, moreTasks: true })
   const strategy = { resolution: { command: 'bun test', source: 'package-json' as const }, jobs: 1, base_branch: 'main',
     knobs: { jobs_env: null, concurrency_env: null, probed_file: null, pinned_by_command: false } }
   f.input.test_strategy_intermediate = renderTestStrategy({ ...strategy, scope: 'subset' })
   f.input.test_strategy = renderTestStrategy({ ...strategy, scope: 'full-suite' })
   const firstHost = await createProjectBuildHost(await f.prepare())
-  const first = await buildRun({ mode: 'ralph', start: 'fresh', ralphRound: 0,
+  const first = await buildRun({ mode: 'implementation', start: 'fresh', taskIteration: 0,
     run_id: f.row.id, workers: firstHost.workers, repl_provider: 'anthropic', merge_mode: 'pr' },
   firstHost.deps, new AbortController().signal)
   expect(first.kind, why(f, first)).toBe('continued')
@@ -4022,7 +4252,7 @@ test('terminal Ralph task receives full-suite instructions after an intermediate
   expect(firstContext.testStrategy).not.toContain(FULL_SUITE_REQUIRED)
 
   const resumed = await createProjectBuildHost(await f.prepare())
-  const outcome = await resumed.run({ mode: 'ralph', start: 'resume' }, new AbortController().signal)
+  const outcome = await resumed.run({ mode: 'implementation', start: 'resume' }, new AbortController().signal)
   expect(outcome, why(f, outcome)).toMatchObject({ kind: 'blocked', phase: 'publish' })
   const request = resumed.workers.build.request
   const context = JSON.parse(await readFile(workContextPath(request.brief.path), 'utf8'))
@@ -4055,7 +4285,7 @@ for (const seam of ['submitLine', 'acquireTurn', 'silent-worker'] as const) {
     // — a genuine park never reaches the assertion. The 60s timeout on this test does
     // fire, and was observed doing so: forcing both walls to an hour (the control for
     // this case) fails it with `timed out after 60000ms`.
-    const outcome = await host.run({ mode: 'pr', start: 'fresh' }, new AbortController().signal)
+    const outcome = await host.run({ mode: 'implementation', start: 'fresh' }, new AbortController().signal)
     expect(outcome, why(f, outcome)).toMatchObject({ kind: 'unknown', phase: 'plan' })
     // WHICH uncertainty is deliberately not pinned. `claudeInReplRunner`'s dispatch
     // wall (`claude-in-repl.ts:76`) and `createClaudeActingTurn`'s own
@@ -4069,10 +4299,10 @@ for (const seam of ['submitLine', 'acquireTurn', 'silent-worker'] as const) {
 
 for (const mergeMode of ['pr', 'local'] as const)
 for (const reviewFix of [false, true])
-test(`terminal Ralph ${mergeMode} publication retry re-proves the built head without new planning or building${reviewFix ? ' and gives its review-requested fix the full suite' : ''}`, async () => {
+test(`terminal task-sequence ${mergeMode} publication retry re-proves the built head without new planning or building${reviewFix ? ' and gives its review-requested fix the full suite' : ''}`, async () => {
   const { renderTestStrategy, FULL_SUITE_REQUIRED, INTERMEDIATE_SUITE_DEFERRED } = await import('@neutronai/trident/test-strategy.ts')
   const task = 'Record a note in NOTES.md and verify the resulting change with the complete regression suite\nMORE TASKS'
-  const f = await fixture({ dispatchTask: task, mergeMode, ralph: true, moreTasks: true, seedLedger: false, hostLedger: true,
+  const f = await fixture({ dispatchTask: task, mergeMode, taskSequence: true, moreTasks: true, seedLedger: false, hostLedger: true,
     ...(reviewFix ? { blockersByRound: [0, 1, 0] } : {}) })
   // The host alone commits the branch ledger. Include executable code and a real
   // nominated guard/control pair so the retry must repeat mutation proof.
@@ -4082,7 +4312,7 @@ test(`terminal Ralph ${mergeMode} publication retry re-proves the built head wit
   f.input.test_strategy_intermediate = renderTestStrategy({ ...strategy, scope: 'subset' })
   f.input.test_strategy = renderTestStrategy({ ...strategy, scope: 'full-suite' })
   const intermediateHost = await createProjectBuildHost(await f.prepare())
-  const intermediate = await buildRun({ mode: 'ralph', start: 'fresh', ralphRound: 0,
+  const intermediate = await buildRun({ mode: 'implementation', start: 'fresh', taskIteration: 0,
     run_id: f.row.id, workers: intermediateHost.workers, repl_provider: 'anthropic', merge_mode: mergeMode },
   intermediateHost.deps, new AbortController().signal)
   expect(intermediate.kind, why(f, intermediate)).toBe('continued')
@@ -4092,14 +4322,14 @@ test(`terminal Ralph ${mergeMode} publication retry re-proves the built head wit
   expect(intermediateContext.testStrategy).toContain(INTERMEDIATE_SUITE_DEFERRED)
   expect(intermediateContext.testStrategy).not.toContain(FULL_SUITE_REQUIRED)
   expect(f.world.dispatches.some(dispatch => dispatch.role === 'review')).toBe(false)
-  await f.store.update(f.row.id, { ralph_round: 1 })
+  await f.store.update(f.row.id, { task_iteration: 1 })
   f.input.run = f.store.get(f.row.id)!
   const firstHost = await createProjectBuildHost(await f.prepare())
   // In PR mode publication pushes the measured object, then PR creation fails.
   // Local mode never needs a remote ref or GitHub to establish continuity.
   if (mergeMode === 'pr') f.github.refuse.add('create')
   else firstHost.deps.reviewReadiness = async () => ({ kind: 'unknown', detail: 'proof temporarily unavailable before review' })
-  const first = await firstHost.run({ mode: 'ralph', start: 'resume' }, new AbortController().signal)
+  const first = await firstHost.run({ mode: 'implementation', start: 'resume' }, new AbortController().signal)
   expect(first.kind, why(f, first)).toBe('unknown')
   const terminalContext = JSON.parse(await readFile(workContextPath(firstHost.workers.build.request.brief.path), 'utf8'))
   expect(terminalContext.previous.remainingTasks).toBe(0)
@@ -4113,12 +4343,12 @@ test(`terminal Ralph ${mergeMode} publication retry re-proves the built head wit
   const dispatched = await dispatchBoardBoundBuild({ task, board_item_id: 'retry-card' }, {
     store: f.store, project_slug: 'project', repo_path: f.repo,
     board: { get: () => ({ id: 'retry-card', title: task, design_doc_ref: null, linked_run_id: prior.id }), attachRun: async () => {} },
-    resolveBuildRepo: async () => f.repo, resolveMergeMode: async () => mergeMode, resolveRalph: async () => true,
+    resolveBuildRepo: async () => f.repo, resolveMergeMode: async () => mergeMode,
   })
   expect(dispatched.ok, JSON.stringify(dispatched)).toBe(true)
   if (!dispatched.ok) return
   expect(dispatched.run.inner_checkpoint_head).toBe(String(checkpoint.head))
-  expect(dispatched.run.ralph_round).toBe(1)
+  expect(dispatched.run.task_iteration).toBe(1)
   f.input.run = dispatched.run
   f.github.refuse.delete('create')
   f.world.dispatches.length = 0
@@ -4127,7 +4357,7 @@ test(`terminal Ralph ${mergeMode} publication retry re-proves the built head wit
   const proofHeads: string[] = []
   const publication = host.deps.publishGate
   host.deps.publishGate = async (...args) => { proofHeads.push(args[0].head); return publication(...args) }
-  const outcome = await host.run({ mode: 'ralph', start: 'resume' }, new AbortController().signal)
+  const outcome = await host.run({ mode: 'implementation', start: 'resume' }, new AbortController().signal)
   expect(outcome.kind, why(f, outcome)).toBe('merged')
   expect(proofHeads.length).toBeGreaterThan(0)
   if (mergeMode === 'pr' || !reviewFix) expect(proofHeads).toContain(String(checkpoint.head))

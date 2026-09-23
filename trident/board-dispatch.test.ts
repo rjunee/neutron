@@ -90,7 +90,6 @@ function dispatch(repoDir: string, secretsStore: { get: () => Promise<string | n
       owner_handle: 'owner',
       secretsStore,
       resolveBuildRepo: async () => repoDir,
-      resolveRalph: async () => false,
       ...(resolveMergeMode === undefined ? {} : { resolveMergeMode }),
     },
   )
@@ -104,11 +103,36 @@ function localDeps(boardOverride: TridentBoardBinder = board): BoardBoundBuildDe
     repo_path: tmp,
     resolveBuildRepo: async () => tmp,
     resolveMergeMode: async () => 'local',
-    resolveRalph: async () => false,
   }
 }
 
-describe('card-owned Ralph iteration budget', () => {
+describe('card-owned Task iteration budget', () => {
+  for (const strategy of [null, 'single', 'task_sequence'] as const) {
+    test(`exhaustion refuses ${strategy ?? 'pending'} with a remaining-budget sibling`, async () => {
+      const makeBoard = (spent: number): TridentBoardBinder => ({
+        get: () => ({ id: 'ready', title: 'Build the specified budget accounting change with regression coverage', design_doc_ref: null,
+          linked_run_id: null, execution_strategy: strategy, task_iteration: spent, max_task_iterations: 3 }),
+        attachRun: async () => {},
+      })
+      const exhausted = await dispatchBoardBoundBuild({ task: `budget ${strategy}`, board_item_id: 'ready' }, localDeps(makeBoard(3)))
+      expect(exhausted).toMatchObject({ ok: false, code: 'task_budget_exhausted' })
+      const sibling = await dispatchBoardBoundBuild({ task: `budget ${strategy}`, board_item_id: 'ready' }, localDeps(makeBoard(2)))
+      expect(sibling.ok).toBe(true)
+      if (sibling.ok) expect(sibling.run).toMatchObject({ execution_strategy: strategy, task_iteration: 2, max_task_iterations: 3 })
+    })
+  }
+
+  test('a positive card counter with no cap cannot become a fresh allowance', async () => {
+    const corrupt: TridentBoardBinder = {
+      get: () => ({ id: 'ready', title: 'Build the specified budget accounting change with regression coverage', design_doc_ref: null,
+        linked_run_id: null, task_iteration: 2, max_task_iterations: null }),
+      attachRun: async () => {},
+    }
+    expect(await dispatchBoardBoundBuild({ task: 'corrupt budget', board_item_id: 'ready' }, localDeps(corrupt)))
+      .toMatchObject({ ok: false, code: 'backend_error' })
+    const fresh: TridentBoardBinder = { ...corrupt, get: () => ({ ...corrupt.get('proj-1', 'ready')!, task_iteration: 0 }) }
+    expect((await dispatchBoardBoundBuild({ task: 'fresh allowance', board_item_id: 'ready' }, localDeps(fresh))).ok).toBe(true)
+  })
   function budgetBoard(round: number, cap: number | null, total: number | null = null): TridentBoardBinder {
     return {
       get: () => ({
@@ -116,9 +140,9 @@ describe('card-owned Ralph iteration budget', () => {
         title: 'wire the CSV export button to the new endpoint with tests',
         design_doc_ref: null,
         linked_run_id: null,
-        ralph_round: round,
-        max_ralph_rounds: cap,
-        ralph_task_total: total,
+        task_iteration: round,
+        max_task_iterations: cap,
+        task_total: total,
       }),
       attachRun: async () => {},
     }
@@ -127,38 +151,38 @@ describe('card-owned Ralph iteration budget', () => {
   test('a new card receives the full configured budget', async () => {
     const result = await dispatchBoardBoundBuild(
       { task: 'build the thing', board_item_id: 'ready' },
-      { ...localDeps(budgetBoard(0, null)), resolveRalph: async () => true, max_ralph_rounds: 3 },
+      { ...localDeps(budgetBoard(0, null)), max_task_iterations: 3 },
     )
     expect(result.ok).toBe(true)
     if (!result.ok) return
-    expect([result.run.ralph_round, result.run.max_ralph_rounds]).toEqual([0, 3])
+    expect([result.run.task_iteration, result.run.max_task_iterations]).toEqual([0, 3])
   })
 
   test('a re-dispatch one below the card cap inherits its spend without a prior-run link', async () => {
     const result = await dispatchBoardBoundBuild(
       { task: 'build the thing', board_item_id: 'ready' },
-      { ...localDeps(budgetBoard(2, 3, 7)), resolveRalph: async () => true, max_ralph_rounds: 20 },
+      { ...localDeps(budgetBoard(2, 3, 7)), max_task_iterations: 20 },
     )
     expect(result.ok).toBe(true)
     if (!result.ok) return
-    expect([result.run.ralph_round, result.run.max_ralph_rounds]).toEqual([2, 3])
-    expect(store.get(result.run.id)?.ralph_task_total).toBe(7)
+    expect([result.run.task_iteration, result.run.max_task_iterations]).toEqual([2, 3])
+    expect(store.get(result.run.id)?.task_total).toBe(7)
   })
 
   test('a card with NO snapshot is never exhausted, whatever the dispatch ceiling says', async () => {
     // The control for the refusal below, and the shape a review found broken: the
-    // guard read `deps.max_ralph_rounds` when the card had no snapshot, so a
+    // guard read `deps.max_task_iterations` when the card had no snapshot, so a
     // deliberate ceiling of 0 ("no iterations — the LOOP refuses the first one")
     // and an INVALID ceiling both came back as "this card is exhausted". A card
     // that has never recorded a governed terminal run has spent nothing.
     for (const ceiling of [0, -5, Number.NaN]) {
       const result = await dispatchBoardBoundBuild(
         { task: `ceiling ${String(ceiling)} — build the thing`, board_item_id: 'ready' },
-        { ...localDeps(budgetBoard(0, null)), resolveRalph: async () => true, max_ralph_rounds: ceiling },
+        { ...localDeps(budgetBoard(0, null)), max_task_iterations: ceiling },
       )
       // 0 and NaN are cap values the run store decides on (zero is written, NaN is
       // refused by name as `backend_error`); NEITHER is this guard's to answer.
-      expect({ ceiling, exhausted: !result.ok && result.code === 'ralph_budget_exhausted' })
+      expect({ ceiling, exhausted: !result.ok && result.code === 'task_budget_exhausted' })
         .toEqual({ ceiling, exhausted: false })
     }
   })
@@ -166,11 +190,11 @@ describe('card-owned Ralph iteration budget', () => {
   test('a card at its cap is refused as exhausted, not reported complete', async () => {
     const result = await dispatchBoardBoundBuild(
       { task: 'build the thing', board_item_id: 'ready' },
-      { ...localDeps(budgetBoard(3, 3)), resolveRalph: async () => true, max_ralph_rounds: 20 },
+      { ...localDeps(budgetBoard(3, 3)), max_task_iterations: 20 },
     )
     expect(result.ok).toBe(false)
     if (result.ok) return
-    expect(result.code).toBe('ralph_budget_exhausted')
+    expect(result.code).toBe('task_budget_exhausted')
     expect(result.message).toContain('No run was created; completion was not reported')
     expect(store.listNonTerminal()).toHaveLength(0)
   })
@@ -505,7 +529,6 @@ describe('dispatch refuses a card whose work already landed', () => {
           repo_path: tmp,
           resolveBuildRepo: async () => tmp,
           resolveMergeMode: async () => mergeMode,
-          resolveRalph: async () => false,
           landedProbe: makeDispatchLandedProbe(run),
         },
       ),
@@ -615,7 +638,6 @@ describe('dispatch refuses a card whose work already landed', () => {
           repo_path: tmp,
           resolveBuildRepo: async () => repo,
           resolveMergeMode: async () => 'pr',
-          resolveRalph: async () => false,
           owner_handle: 'owner',
           secretsStore: { get: async () => 'test-sentinel-token-abc' },
         },
@@ -681,7 +703,6 @@ describe('branch liveness refusal (branch_live)', () => {
       repo_path: tmp,
       resolveBuildRepo: async () => repoDir,
       resolveMergeMode: async () => 'local',
-      resolveRalph: async () => false,
       ...over,
     }
   }
@@ -723,7 +744,7 @@ describe('branch liveness refusal (branch_live)', () => {
       repo_path: repoDir,
       task: TASK,
       merge_mode: 'local',
-      ralph: false,
+      execution_strategy: 'single',
       branch: BRANCH,
     })
 
@@ -868,7 +889,7 @@ describe('branch liveness refusal (branch_live)', () => {
       repo_path: repoDir,
       task: TASK,
       merge_mode: 'local',
-      ralph: false,
+      execution_strategy: 'single',
       branch: BRANCH,
     })
     const linkedBoard: TridentBoardBinder = {
@@ -924,7 +945,7 @@ describe('branch liveness refusal (branch_live)', () => {
       repo_path: repoDir,
       task: TASK,
       merge_mode: 'local',
-      ralph: false,
+      execution_strategy: 'single',
       branch: BRANCH,
     })
     const linkedBoard: TridentBoardBinder = {
@@ -976,7 +997,7 @@ describe('branch liveness refusal (branch_live)', () => {
       repo_path: repoDir,
       task: TASK,
       merge_mode: 'local',
-      ralph: false,
+      execution_strategy: 'single',
       branch: BRANCH,
     })
     const linkedBoard: TridentBoardBinder = {
@@ -1032,7 +1053,7 @@ describe('branch liveness refusal (branch_live)', () => {
       repo_path: foreignRepo,
       task: 'a different project entirely',
       merge_mode: 'local',
-      ralph: false,
+      execution_strategy: 'single',
       branch: 'trident/some-other-card',
     })
     // What actually refuses this dispatch: a worktree lock on the card branch.
@@ -1073,7 +1094,7 @@ describe('branch liveness refusal (branch_live)', () => {
       repo_path: repoDir,
       task: TASK,
       merge_mode: 'local',
-      ralph: false,
+      execution_strategy: 'single',
       branch: BRANCH,
     })
 
@@ -1157,7 +1178,7 @@ describe('branch liveness refusal (branch_live)', () => {
       repo_path: repoDir,
       task: TASK,
       merge_mode: 'local',
-      ralph: false,
+      execution_strategy: 'single',
       branch: BRANCH,
       phase: 'failed',
     })
@@ -1266,7 +1287,7 @@ describe('branch liveness refusal (branch_live)', () => {
             repo_path: repoDir,
             task: TASK,
             merge_mode: 'local',
-            ralph: false,
+            execution_strategy: 'single',
             branch: BRANCH,
           })
         ).id
@@ -1443,6 +1464,7 @@ describe('dispatch seeds a resume from a built-but-never-reviewed prior run', ()
     published_pr?: number | null
     task?: string
     base_sha?: string | null
+    execution_strategy?: 'single' | 'task_sequence' | null
   }) {
     const task = over.task ?? TASK
     const run = await store.create({
@@ -1451,6 +1473,7 @@ describe('dispatch seeds a resume from a built-but-never-reviewed prior run', ()
       repo_path: tmp,
       task,
       branch: BRANCH,
+      execution_strategy: over.execution_strategy ?? 'single',
     })
     await store.update(run.id, {
       phase: over.phase ?? 'failed',
@@ -1473,7 +1496,7 @@ describe('dispatch seeds a resume from a built-but-never-reviewed prior run', ()
   /** Dispatch the card, recording every branch-tip read the chokepoint pays for. */
   async function dispatchSeeding(
     readBranchTip: (repo: string, branch: string) => Promise<string>,
-    over: { task?: string; ralph?: boolean; merge_mode?: 'local' | 'pr' } = {},
+    over: { task?: string; execution_strategy?: 'single' | 'task_sequence' | null; merge_mode?: 'local' | 'pr' } = {},
   ) {
     const tipReads: Array<[string, string]> = []
     // The MODE each read was asked for — the seam that decides whether the proof
@@ -1484,7 +1507,6 @@ describe('dispatch seeds a resume from a built-but-never-reviewed prior run', ()
       {
         ...localDeps(),
         ...(over.merge_mode === undefined ? {} : { resolveMergeMode: async () => over.merge_mode! }),
-        ...(over.ralph === undefined ? {} : { resolveRalph: async () => over.ralph! }),
         readBranchTip: async (repo, branch, merge_mode) => {
           tipReads.push([repo, branch])
           tipModes.push(merge_mode)
@@ -1535,7 +1557,6 @@ describe('dispatch seeds a resume from a built-but-never-reviewed prior run', ()
           repo_path: tmp,
           resolveBuildRepo: async () => tmp,
           resolveMergeMode: async () => 'pr',
-          resolveRalph: async () => false,
           // Not under test here, and it must not need a live `gh`.
           landedProbe: async () => null,
           owner_handle: 'owner',
@@ -1606,7 +1627,6 @@ describe('dispatch seeds a resume from a built-but-never-reviewed prior run', ()
       repo_path: tmp,
       resolveBuildRepo: async () => tmp,
       resolveMergeMode: async () => 'pr',
-      resolveRalph: async () => false,
       landedProbe: async () => null,
     })
 
@@ -1689,7 +1709,6 @@ describe('dispatch seeds a resume from a built-but-never-reviewed prior run', ()
           repo_path: tmp,
           resolveBuildRepo: async () => tmp,
           resolveMergeMode: async () => 'local',
-          resolveRalph: async () => false,
           landedProbe: async () => null,
           owner_handle: 'owner',
           secretsStore: { get: async () => 'test-sentinel-token-abc' },
@@ -1835,7 +1854,7 @@ describe('dispatch seeds a resume from a built-but-never-reviewed prior run', ()
     // Every no-link shape the binder can produce is enumerated here, because the
     // field is optional (absent), nullable (null) and free text (whitespace).
     //
-    // ONE CARD PER SHAPE, like the ralph suite below: `latestTerminalBySlug` orders
+    // ONE CARD PER SHAPE, like the execution_strategy suite below: `latestTerminalBySlug` orders
     // by `started_at DESC, id DESC`, and same-second rows tie-break on a random id,
     // so reusing one slug would read whichever prior happened to sort first.
     const linkShapes: Array<[string, string, string | null | undefined]> = [
@@ -1928,35 +1947,35 @@ describe('dispatch seeds a resume from a built-but-never-reviewed prior run', ()
   })
 
   /**
-   * THE RALPH DRIFT. `resumeOnUnchangedHead` (inner-workflow.mjs) answers
-   * `{ mode: 'rebuild', reason: 'ralph-progress-unknown' }` for a bare `forge-done`
-   * when the run is a ralph run — that iteration built ONE task and handed back, so
+   * THE TASK DRIFT. `resumeOnUnchangedHead` (inner-workflow.mjs) answers
+   * `{ mode: 'rebuild', reason: 'execution_strategy-progress-unknown' }` for a bare `forge-done`
+   * when the run is a task-sequence run — that iteration built ONE task and handed back, so
    * the next must plan and build the next task. Seeding it anyway would strip the
    * launcher's leftover-branch guard and its base pin off a run the workflow then
-   * rebuilds regardless: all of the cost of resuming, none of the saving. And ralph
+   * rebuilds regardless: all of the cost of resuming, none of the saving. And execution_strategy
    * is the LIVE default on any repo with a root SPEC.md, which this one has.
    */
-  test('RALPH: a bare forge-done prior seeds NOTHING; a fix-round prior still does', async () => {
+  test('TASK: a bare forge-done prior seeds NOTHING; a fix-round prior still does', async () => {
     // Three separate cards, so each dispatch reads exactly the prior row it was
     // given rather than whichever of a chain of same-slug rows sorted first.
-    const seedFor = async (task: string, checkpoint: string, ralph: boolean) => {
-      await priorRun({ task, checkpoint, findings: FINDINGS })
-      const { result } = await dispatchSeeding(async () => HEAD, { task, ralph })
+    const seedFor = async (task: string, checkpoint: string, execution_strategy: 'single' | 'task_sequence' | null) => {
+      await priorRun({ task, checkpoint, findings: FINDINGS, execution_strategy })
+      const { result } = await dispatchSeeding(async () => HEAD, { task, execution_strategy })
       expect(result.ok).toBe(true)
       return result.ok ? result.run : null
     }
 
-    const ralphed = await seedFor('ralph card built one task only', 'forge-done', true)
+    const ralphed = await seedFor('execution_strategy card built one task only', 'forge-done', 'task_sequence')
     expect(ralphed?.inner_checkpoint).toBeNull()
     expect(ralphed?.base_sha).toBeNull()
 
-    // POSITIVE CONTROL, same checkpoint and same tip, ralph off: it seeds. Without
+    // POSITIVE CONTROL, same checkpoint and same tip, execution_strategy off: it seeds. Without
     // this the assertion above would pass on a seed that was simply broken.
-    const plain = await seedFor('non ralph card built one task only', 'forge-done', false)
+    const plain = await seedFor('non execution_strategy card built one task only', 'forge-done', 'single')
     expect(plain?.inner_checkpoint).toBe('forge-done')
 
-    // …and `fix-round-N`, which the workflow reviews in BOTH modes, is untouched by ralph.
-    const fixed = await seedFor('ralph card already fixed a round', 'fix-round-2', true)
+    // …and `fix-round-N`, which the workflow reviews in BOTH modes, is untouched by execution_strategy.
+    const fixed = await seedFor('execution_strategy card already fixed a round', 'fix-round-2', 'task_sequence')
     expect(fixed?.inner_checkpoint).toBe('fix-round-2')
   })
 

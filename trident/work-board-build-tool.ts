@@ -124,10 +124,9 @@ export interface TridentBuildToolDeps {
    * finished commit is rebuilt from scratch (Argus r16).
    */
   host_runner?: EnvCapableHostRunner
-  resolveRalph?: () => Promise<boolean>
   channel_kind?: Topic['channel_kind']
   max_rounds?: number
-  max_ralph_rounds?: number
+  max_task_iterations?: number
   /**
    * Resolve the build spec for a board item — its `design_doc_ref` doc content
    * when present + readable, else the item title. Wired to the work-board
@@ -262,11 +261,10 @@ export function registerTridentBuildToolSurface(
         resolveMergeMode: (path) => detectMergeMode(path, deps.merge_mode_probe),
         ...(deps.landed_probe !== undefined ? { landedProbe: deps.landed_probe } : {}),
         ...(deps.host_runner !== undefined ? { hostRunner: deps.host_runner } : {}),
-        ...(deps.resolveRalph !== undefined ? { resolveRalph: deps.resolveRalph } : {}),
         ...(deps.channel_kind !== undefined ? { channel_kind: deps.channel_kind } : {}),
         ...(delivery !== undefined ? { chat_id: delivery.chat_id, thread_id: delivery.thread_id } : {}),
         ...(deps.max_rounds !== undefined ? { max_rounds: deps.max_rounds } : {}),
-        ...(deps.max_ralph_rounds !== undefined ? { max_ralph_rounds: deps.max_ralph_rounds } : {}),
+        ...(deps.max_task_iterations !== undefined ? { max_task_iterations: deps.max_task_iterations } : {}),
         // EXECUTOR LIVENESS, enforced at the chokepoint every dispatch path
         // shares (see BoardBoundBuildDeps.preflight).
         ...(deps.preflight !== undefined ? { preflight: deps.preflight } : {}),
@@ -390,11 +388,10 @@ export function registerTridentBuildToolSurface(
         // is the exact waste this card exists to remove, failing closed so nothing
         // ever looked wrong.
         ...(deps.host_runner !== undefined ? { hostRunner: deps.host_runner } : {}),
-        ...(deps.resolveRalph !== undefined ? { resolveRalph: deps.resolveRalph } : {}),
         ...(deps.channel_kind !== undefined ? { channel_kind: deps.channel_kind } : {}),
         ...(delivery !== undefined ? { chat_id: delivery.chat_id, thread_id: delivery.thread_id } : {}),
         ...(deps.max_rounds !== undefined ? { max_rounds: deps.max_rounds } : {}),
-        ...(deps.max_ralph_rounds !== undefined ? { max_ralph_rounds: deps.max_ralph_rounds } : {}),
+        ...(deps.max_task_iterations !== undefined ? { max_task_iterations: deps.max_task_iterations } : {}),
         // EXECUTOR LIVENESS, enforced at the chokepoint every dispatch path
         // shares (see BoardBoundBuildDeps.preflight).
         ...(deps.preflight !== undefined ? { preflight: deps.preflight } : {}),

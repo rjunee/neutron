@@ -262,6 +262,7 @@ async function runResumeDiff(world: World, opts: { pr: boolean; baseSha?: string
     baseBranch: 'main',
     slug: SLUG,
     maxRounds: 10,
+    executionStrategy: 'single',
     mergeMode: opts.pr ? 'pr' : 'local',
     prNumber: opts.pr ? 7 : null,
     branch: BRANCH,

@@ -22,15 +22,15 @@ describe('isTerminalPhase / TERMINAL_PHASES', () => {
     for (const p of ['done', 'failed', 'stopped'] as TridentPhase[]) {
       expect(isTerminalPhase(p)).toBe(true)
     }
-    for (const p of ['forge-init', 'ralph-plan', 'ralph-task', 'argus', 'forge-fix'] as TridentPhase[]) {
+    for (const p of ['forge-init', 'task-plan', 'task-build', 'argus', 'forge-fix'] as TridentPhase[]) {
       expect(isTerminalPhase(p)).toBe(false)
     }
   })
 })
 
-describe('computeTransition — legacy (non-ralph) build', () => {
+describe('computeTransition — legacy (non-task-sequence) build', () => {
   test('forge-init → argus (one-shot)', () => {
-    const t = computeTransition(makeTridentRun({ phase: 'forge-init', ralph: false }), {})
+    const t = computeTransition(makeTridentRun({ phase: 'forge-init', execution_strategy: 'single' }), {})
     expect(t.phase).toBe('argus')
   })
 
@@ -59,7 +59,7 @@ describe('computeTransition — legacy (non-ralph) build', () => {
   })
 
   test('full legacy loop walks forge-init → argus → forge-fix → argus → done', () => {
-    let run = makeTridentRun({ phase: 'forge-init', ralph: false })
+    let run = makeTridentRun({ phase: 'forge-init', execution_strategy: 'single' })
     run = { ...run, phase: computeTransition(run, {}).phase }
     expect(run.phase).toBe('argus')
     let t = computeTransition(run, { approved: false })
@@ -74,54 +74,54 @@ describe('computeTransition — legacy (non-ralph) build', () => {
   })
 })
 
-describe('computeTransition — ralph build', () => {
-  test('forge-init with remaining>0 → ralph-plan, ralph_round increments', () => {
-    const t = computeTransition(makeTridentRun({ phase: 'forge-init', ralph: true, ralph_round: 0 }), { remaining: 3 })
-    expect(t.phase).toBe('ralph-plan')
-    expect(t.ralph_round).toBe(1)
+describe('computeTransition — task-sequence build', () => {
+  test('forge-init with remaining>0 → task-plan, task_iteration increments', () => {
+    const t = computeTransition(makeTridentRun({ phase: 'forge-init', execution_strategy: 'task_sequence', task_iteration: 0 }), { remaining: 3 })
+    expect(t.phase).toBe('task-plan')
+    expect(t.task_iteration).toBe(1)
   })
 
   test('forge-init with remaining=0 → argus', () => {
-    const t = computeTransition(makeTridentRun({ phase: 'forge-init', ralph: true }), { remaining: 0 })
+    const t = computeTransition(makeTridentRun({ phase: 'forge-init', execution_strategy: 'task_sequence' }), { remaining: 0 })
     expect(t.phase).toBe('argus')
   })
 
-  test('forge-init ralph with missing REMAINING → failed (loud)', () => {
-    const t = computeTransition(makeTridentRun({ phase: 'forge-init', ralph: true }), {})
+  test('forge-init task sequence with missing REMAINING → failed (loud)', () => {
+    const t = computeTransition(makeTridentRun({ phase: 'forge-init', execution_strategy: 'task_sequence' }), {})
     expect(t.phase).toBe('failed')
     expect(t.failure_reason).toContain('REMAINING_TASKS')
   })
 
-  test('ralph-plan remaining>0 → ralph-task (no ralph_round bump)', () => {
-    const t = computeTransition(makeTridentRun({ phase: 'ralph-plan', ralph: true, ralph_round: 2 }), { remaining: 5 })
-    expect(t.phase).toBe('ralph-task')
-    expect(t.ralph_round).toBe(2)
+  test('task-plan remaining>0 → task-build (no task_iteration bump)', () => {
+    const t = computeTransition(makeTridentRun({ phase: 'task-plan', execution_strategy: 'task_sequence', task_iteration: 2 }), { remaining: 5 })
+    expect(t.phase).toBe('task-build')
+    expect(t.task_iteration).toBe(2)
   })
 
-  test('ralph-plan remaining=0 → argus', () => {
-    const t = computeTransition(makeTridentRun({ phase: 'ralph-plan', ralph: true }), { remaining: 0 })
+  test('task-plan remaining=0 → argus', () => {
+    const t = computeTransition(makeTridentRun({ phase: 'task-plan', execution_strategy: 'task_sequence' }), { remaining: 0 })
     expect(t.phase).toBe('argus')
   })
 
-  test('ralph-plan missing REMAINING → failed (loud)', () => {
-    const t = computeTransition(makeTridentRun({ phase: 'ralph-plan', ralph: true }), {})
+  test('task-plan missing REMAINING → failed (loud)', () => {
+    const t = computeTransition(makeTridentRun({ phase: 'task-plan', execution_strategy: 'task_sequence' }), {})
     expect(t.phase).toBe('failed')
     expect(t.failure_reason).toContain('REMAINING_TASKS')
   })
 
-  test('ralph-task → ralph-plan, ralph_round increments', () => {
-    const t = computeTransition(makeTridentRun({ phase: 'ralph-task', ralph: true, ralph_round: 1 }), {})
-    expect(t.phase).toBe('ralph-plan')
-    expect(t.ralph_round).toBe(2)
+  test('task-build → task-plan, task_iteration increments', () => {
+    const t = computeTransition(makeTridentRun({ phase: 'task-build', execution_strategy: 'task_sequence', task_iteration: 1 }), {})
+    expect(t.phase).toBe('task-plan')
+    expect(t.task_iteration).toBe(2)
   })
 
-  test('ralph_round at cap → failed', () => {
+  test('task_iteration at cap → failed', () => {
     const t = computeTransition(
-      makeTridentRun({ phase: 'ralph-task', ralph: true, ralph_round: 20, max_ralph_rounds: 20 }),
+      makeTridentRun({ phase: 'task-build', execution_strategy: 'task_sequence', task_iteration: 20, max_task_iterations: 20 }),
       {},
     )
     expect(t.phase).toBe('failed')
-    expect(t.failure_reason).toContain('max_ralph_rounds')
+    expect(t.failure_reason).toContain('max_task_iterations')
   })
 })
 
@@ -153,7 +153,7 @@ describe('advanceTridentRun', () => {
   test('completed transition advances phase, clears sub-agent slot, stamps clock', async () => {
     const run = makeTridentRun({
       phase: 'forge-init',
-      ralph: false,
+      execution_strategy: 'single',
       subagent_run_id: 'forge-1',
       subagent_status: 'completed',
     })

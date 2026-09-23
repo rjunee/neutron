@@ -41,14 +41,14 @@ const CASES: ReadonlyArray<readonly [string, Row, TerminalRunDisposition]> = [
   ['a null checkpoint', { checkpoint: null }, 'died-before-build'],
   ['inner-error', { checkpoint: 'inner-error' }, 'died-before-build'],
   ['awaiting-trailer', { checkpoint: 'awaiting-trailer' }, 'died-before-build'],
-  // `ralph-task-built` has a COMMIT behind it, and still belongs here: the bucket
-  // is "no build this dispatch may resume", not "the disk is empty". A ralph
+  // `task-built` has a COMMIT behind it, and still belongs here: the bucket
+  // is "no build this dispatch may resume", not "the disk is empty". A execution_strategy
   // iteration builds one task and hands back, so `resumeOnUnchangedHead` answers
   // `unknown-checkpoint` → rebuild for it on every head; a seed promising review
   // would be a lie about what the workflow does next. Conservative in the only
   // direction that is safe — it costs a rebuild that already happens today, and
   // never hands unreviewed work to a resume that will not review it.
-  ['ralph-task-built — built, but the workflow rebuilds it by design', { checkpoint: 'ralph-task-built' }, 'died-before-build'],
+  ['task-built — built, but the workflow rebuilds it by design', { checkpoint: 'task-built' }, 'died-before-build'],
 
   // ── built, never judged: a commit exists and nothing has an opinion on it ──
   ['forge-done + REVIEW_NOT_RUN', { checkpoint: 'forge-done' }, 'built-never-reviewed'],
@@ -183,10 +183,10 @@ describe('builtButNeverReviewedSeed — what may be handed to the next dispatch'
     expect(seed).toEqual({ checkpoint: 'forge-done', head: HEAD, findings, base_sha: base })
   })
 
-  test('RALPH PARITY: a bare forge-done never seeds a ralph run, but fix-round/published do', () => {
+  test('TASK PARITY: a bare forge-done never seeds a execution_strategy run, but fix-round/published do', () => {
     // The drift this closes: `resumeOnUnchangedHead` (inner-workflow.mjs) answers
-    // `{ mode: 'rebuild', reason: 'ralph-progress-unknown' }` for `forge-done` when
-    // `ralph === true` — a ralph build says nothing about whether the PLAN is done.
+    // `{ mode: 'rebuild', reason: 'execution_strategy-progress-unknown' }` for `forge-done` when
+    // `execution_strategy === 'task_sequence'` — a execution_strategy build says nothing about whether the PLAN is done.
     // Seeding it would strip the leftover-branch guard off a run the workflow then
     // rebuilds anyway: all of the cost, none of the saving.
     const ralphRow = (checkpoint: string) =>
@@ -197,19 +197,19 @@ describe('builtButNeverReviewedSeed — what may be handed to the next dispatch'
         inner_checkpoint_head: HEAD,
         base_sha: BASE,
       })
-    expect(builtButNeverReviewedSeed(ralphRow('forge-done'), { ralph: true })).toBeNull()
-    // Positive control on the SAME row: without ralph it is the salvageable shape,
+    expect(builtButNeverReviewedSeed(ralphRow('forge-done'), { execution_strategy: 'task_sequence' })).toBeNull()
+    // Positive control on the SAME row: without execution_strategy it is the salvageable shape,
     // so the null above is the flag talking and not a broken fixture.
-    expect(builtButNeverReviewedSeed(ralphRow('forge-done'), { ralph: false })?.checkpoint).toBe(
+    expect(builtButNeverReviewedSeed(ralphRow('forge-done'), { execution_strategy: 'single' })?.checkpoint).toBe(
       'forge-done',
     )
     expect(builtButNeverReviewedSeed(ralphRow('forge-done'))?.checkpoint).toBe('forge-done')
-    // The two shapes the workflow reviews in BOTH modes still seed under ralph.
-    expect(builtButNeverReviewedSeed(ralphRow('fix-round-2'), { ralph: true })?.checkpoint).toBe(
+    // The two shapes the workflow reviews in BOTH modes still seed under execution_strategy.
+    expect(builtButNeverReviewedSeed(ralphRow('fix-round-2'), { execution_strategy: 'task_sequence' })?.checkpoint).toBe(
       'fix-round-2',
     )
     expect(
-      builtButNeverReviewedSeed(ralphRow(`outer-published:${OTHER}:0:1`), { ralph: true })?.head,
+      builtButNeverReviewedSeed(ralphRow(`outer-published:${OTHER}:0:1`), { execution_strategy: 'task_sequence' })?.head,
     ).toBe(OTHER)
     // The DISPOSITION is unmoved by the flag — the row really is built-never-reviewed,
     // and an offline count of the historical table must not turn on a mode flag.

@@ -107,7 +107,6 @@ function toolFor() {
     // Identity workspace resolver — keep repo_path as-is, no real fs/git in unit tests.
     resolveBuildRepo: async (home) => home,
     merge_mode_probe: localProbe(),
-    resolveRalph: async () => false,
   })
   return reg.get(WORK_BOARD_DISPATCH_BUILD_TOOL)!
 }
@@ -172,61 +171,6 @@ describe('work_board_dispatch_build tool', () => {
     expect(attached).toEqual([{ id: 'ready', run_id: out.run_id as string }])
   })
 
-  test('RT1 (tool): no resolveRalph override + a root SPEC.md → persisted ralph=true', async () => {
-    // The agent-native production path (`work_board_dispatch_build`) shares the
-    // `dispatchBoardBoundBuild` core with `/code` and does NOT supply
-    // `resolveRalph` in production, so the K10 flip must engage here too. Point
-    // repo_path at a dir WITH a root SPEC.md and omit the override.
-    const specDir = mkdtempSync(join(tmpdir(), 'neutron-wb-build-spec-'))
-    writeFileSync(join(specDir, 'SPEC.md'), '# spec\n')
-    try {
-      const reg = new ToolRegistry()
-      registerTridentBuildToolSurface(reg, {
-        store,
-        work_board: board(),
-        repo_path: specDir,
-        resolveBuildRepo: async (home) => home, // identity — repo_path stays specDir
-        merge_mode_probe: localProbe(),
-        // resolveRalph deliberately OMITTED — exercises the detectRalphMode default.
-      })
-      const out = (await reg.get(WORK_BOARD_DISPATCH_BUILD_TOOL)!.handler(
-        { board_item_id: 'ready', task: 'build the export' },
-        ctx,
-      )) as Record<string, unknown>
-      expect(out.ok).toBe(true)
-      expect(store.get(out.run_id as string)!.ralph).toBe(true)
-    } finally {
-      rmSync(specDir, { recursive: true, force: true })
-    }
-  })
-
-  test('RT1 (tool): no resolveRalph override + NO root SPEC.md → persisted ralph=false', async () => {
-    // The ungoverned boundary of the same agent-native path: no override + no
-    // SPEC.md stays legacy. A regression that force-injected `resolveRalph:
-    // false` in the tool adapter would fail the positive test above; one that
-    // force-enabled Ralph would fail this. Together they pin the SPEC.md gate.
-    const noSpecDir = mkdtempSync(join(tmpdir(), 'neutron-wb-build-nospec-'))
-    try {
-      const reg = new ToolRegistry()
-      registerTridentBuildToolSurface(reg, {
-        store,
-        work_board: board(),
-        repo_path: noSpecDir,
-        resolveBuildRepo: async (home) => home,
-        merge_mode_probe: localProbe(),
-        // resolveRalph deliberately OMITTED; no SPEC.md on disk.
-      })
-      const out = (await reg.get(WORK_BOARD_DISPATCH_BUILD_TOOL)!.handler(
-        { board_item_id: 'ready', task: 'build the export' },
-        ctx,
-      )) as Record<string, unknown>
-      expect(out.ok).toBe(true)
-      expect(store.get(out.run_id as string)!.ralph).toBe(false)
-    } finally {
-      rmSync(noSpecDir, { recursive: true, force: true })
-    }
-  })
-
   test('#339 — resolve_delivery stamps the originating chat topic (from ctx.project_id) onto the run', async () => {
     const reg = new ToolRegistry()
     registerTridentBuildToolSurface(reg, {
@@ -235,7 +179,6 @@ describe('work_board_dispatch_build tool', () => {
       repo_path: '/repo',
       resolveBuildRepo: async (home) => home,
       merge_mode_probe: localProbe(),
-      resolveRalph: async () => false,
       resolve_delivery: (projectId) => ({
         chat_id: projectId !== null ? `app:owner:${projectId}` : 'app:owner',
         thread_id: null,
@@ -283,7 +226,6 @@ describe('work_board_dispatch_build tool', () => {
       repo_path: '/repo',
       resolveBuildRepo: async (home) => home,
       merge_mode_probe: prProbe(),
-      resolveRalph: async () => false,
       landed_probe: async () => ({
         pr: 336,
         merged_at: null,
@@ -330,7 +272,6 @@ describe('active-project scoping (P0: a named-project build lands on that projec
       repo_path: '/repo',
       resolveBuildRepo: async (home) => home,
       merge_mode_probe: localProbe(),
-      resolveRalph: async () => false,
     })
     return reg.get(WORK_BOARD_DISPATCH_BUILD_TOOL)!
   }
@@ -370,7 +311,6 @@ describe('active-project scoping (P0: a named-project build lands on that projec
       repo_path: '/repo',
       resolveBuildRepo: async (home) => home,
       merge_mode_probe: localProbe(),
-      resolveRalph: async () => false,
       resolve_task: async (slug) => {
         resolveSlugs.push(slug)
         return 'resolved spec for acme'
@@ -395,7 +335,6 @@ function startToolFor(resolve_task?: (slug: string, item: { title: string; desig
     // Identity workspace resolver — keep repo_path as-is, no real fs/git in unit tests.
     resolveBuildRepo: async (home) => home,
     merge_mode_probe: localProbe(),
-    resolveRalph: async () => false,
     ...(resolve_task !== undefined ? { resolve_task } : {}),
   })
   return reg.get(WORK_BOARD_START_TOOL)!
@@ -490,7 +429,7 @@ describe('work_board_start tool (▶ agent-native parity)', () => {
       repo_path: '/repo',
       task: 'the in-flight build',
       merge_mode: 'local',
-      ralph: false,
+      execution_strategy: 'single',
       branch: 'trident/live-build',
     })
     runningRunId = live.id
@@ -511,7 +450,7 @@ describe('work_board_start tool (▶ agent-native parity)', () => {
       repo_path: '/repo',
       task: 'a build that failed',
       merge_mode: 'local',
-      ralph: false,
+      execution_strategy: 'single',
       branch: 'trident/dead-build',
     })
     await store.update(dead.id, { phase: 'failed' })
@@ -548,7 +487,6 @@ describe('chat-ack seam (#429 task 4)', () => {
       repo_path: '/repo',
       resolveBuildRepo: async (home) => home,
       merge_mode_probe: localProbe(),
-      resolveRalph: async () => false,
       chat_ack,
     })
     return reg
@@ -724,7 +662,6 @@ describe('the seed tip probe is credentialed on EVERY tool entry (private origin
       repo_path: tmp,
       resolveBuildRepo: async (home) => home,
       merge_mode_probe: prProbe(),
-      resolveRalph: async () => false,
       // Not under test, and it must not need a live `gh`.
       landed_probe: async () => null,
       ...(host_runner !== undefined ? { host_runner } : {}),

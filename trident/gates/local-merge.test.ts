@@ -5,7 +5,7 @@ import { mkdtemp, rm, writeFile } from 'node:fs/promises'
 import { tmpdir } from 'node:os'
 import { join } from 'node:path'
 import { projectAdmission } from './project-admission.ts'
-import { buildRun, type BuildRunInput, type BuildRunDeps } from '../build-run.ts'
+import { buildRun, type BuildRunInput, type BuildRunDeps, type ExecutionPlan } from '../build-run.ts'
 import { fakeRunner, type BoundedWorkOutcome } from '@neutronai/runtime/bounded-work.ts'
 import { localMergeReadiness, type RunHostCommand } from '../merge.ts'
 
@@ -46,11 +46,32 @@ async function runLocalBuild(
   const snapshot = { head: f.head, diff: await f.git('diff', 'base...change'), pr: null }
   const completed: BoundedWorkOutcome = { kind: 'completed', result: snapshot,
     usage: { input_tokens: 0, output_tokens: 0 }, model_reported: 'test', thread_id: null }
-  const runner = fakeRunner('pi', { outcomes: new Map(['run:plan:0', 'run:build:0', scriptedReviewStep].map(step => [step, completed])) })
+  const plan: ExecutionPlan = {
+    implementationPlan: '- [ ] T1: exercise the local merge gate',
+    topTask: '- [ ] T1: exercise the local merge gate',
+    executionSpec: 'Exercise the local merge gate.', complexity: 'mechanical',
+    remainingTasks: 0, strategy: 'single', rationale: 'The fixture is one bounded build.',
+  }
+  const runner = fakeRunner('pi', { outcomes: new Map([
+    ['run:plan:0', { ...completed, result: { ...snapshot, payload: plan } }],
+    ['run:build:0', completed], [scriptedReviewStep, completed],
+  ]) })
   const request = { model_id: 'test', effort: null, cwd: f.wt, writable: true, network: false,
     tools: 'edit-and-run', brief: { path: 'brief', integrity: briefIntegrity('brief.context.json') }, result: { path: 'result', schema: 'test' }, thread: null, budget: { wall_ms: 1000 } } as const
   const worker = { runner, request }
+  let selected: ExecutionPlan | null = null
   const deps: BuildRunDeps = {
+    modes: {
+      loadExecutionStrategy: async () => selected === null
+        ? { kind: 'known', strategy: null, rationale: null, plan: null, source: null }
+        : { kind: 'known', strategy: selected.strategy, rationale: selected.rationale, plan: selected, source: 'planner' },
+      selectExecutionStrategy: async value => { selected = structuredClone(value.plan); return { kind: 'allow' } },
+      loadResume: async () => null, saveCheckpoint: async () => {},
+      regenerateDiff: async () => ({ kind: 'known', diff: snapshot.diff }),
+      probePlan: async () => null,
+      commitPlan: async () => ({ kind: 'unknown', detail: 'Single strategy does not commit a task ledger' }),
+      advanceTask: async () => ({ kind: 'allow' }),
+    },
     readReviewCap: async () => ({ kind: 'known' }),
     assignedBranch: 'change',
     reviewArtifact: (request, measured) => reviewArtifact(request, measured, async path =>
@@ -74,7 +95,7 @@ async function runLocalBuild(
       return result.ok ? { kind: 'allow' } : { kind: 'blocked', on: 'not landed' }
     },
   }
-  const outcome = await buildRun({ run_id: 'run', mode: 'pr', merge_mode: 'local', start: 'fresh', repl_provider: 'pi',
+  const outcome = await buildRun({ run_id: 'run', mode: 'implementation', merge_mode: 'local', start: 'fresh', repl_provider: 'pi',
     workers: { plan: worker, build: worker, review: worker, fix: worker } }, { ...deps, ...overrides }, new AbortController().signal)
   return { outcome, calls: runner.calls }
 }

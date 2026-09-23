@@ -85,7 +85,7 @@ export function projectBuildResult(outcome: ProjectBuildOutcome, input: InnerLoo
     prNumber: snapshot?.pr?.number ?? input.run.pr,
     commitSha: snapshot?.head, reviewedHead: snapshot?.head,
     remainingTasks: outcome.kind === 'continued' ? outcome.remainingTasks : undefined,
-    checkpoint: outcome.kind === 'merged' ? 'merged' : outcome.kind === 'built' ? 'wave-member-built' : outcome.kind === 'continued' ? 'ralph-task-built' : 'inner-error',
+    checkpoint: outcome.kind === 'merged' ? 'merged' : outcome.kind === 'built' ? 'wave-member-built' : outcome.kind === 'continued' ? 'task-built' : 'inner-error',
     terminalCauseKind: outcome.kind === 'failed' ? outcome.cause : undefined,
     terminalCause: outcome.kind === 'blocked' ? outcome.on : 'detail' in outcome ? outcome.detail : undefined,
   })
@@ -121,7 +121,7 @@ export function createProjectLauncher(options: ProjectLauncherOptions): TridentW
         if (!saved) return { status: 'unconfirmed', error: 'Project launch reservation was not acquired' }
         reserved = true
         const host = await createProjectBuildHost(await options.prepare(input, controller.signal))
-        const mode = input.run.bound_pr !== null ? 'bound_pr' : input.run.parent_run_id !== null ? 'wave' : input.run.ralph ? 'ralph' : 'pr'
+        const mode = input.run.bound_pr !== null ? 'bound_pr' : input.run.parent_run_id !== null ? 'wave' : 'implementation'
         const running = host.run({ mode, start: input.resume_checkpoint ? 'resume' : 'fresh',
           ...(input.run.bound_pr !== null ? { bound_pr: input.run.bound_pr } : {}),
           ...(input.run.wave_task_id !== null ? { pinnedTaskId: input.run.wave_task_id } : {}),

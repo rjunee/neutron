@@ -51,11 +51,11 @@ interface RunOpts {
    */
   approveAll?: boolean
   /**
-   * Run in Ralph mode, which is the ONLY way `plan:fable` is dispatched — the planner
-   * prompt is unreachable otherwise, so a rule spliced only into the non-Ralph path
+   * Run in Task sequence mode, which is the ONLY way `plan:fable` is dispatched — the planner
+   * prompt is unreachable otherwise, so a rule spliced only into the non-Task sequence path
    * would look covered while the planner never sees it.
    */
-  ralph?: boolean
+  executionStrategy?: 'single' | 'task_sequence'
   task?: string
   briefParts?: unknown
   codexBuild?: boolean
@@ -64,9 +64,9 @@ interface RunOpts {
    * the legacy-contract case (the workflow defaults it to '').
    */
   testStrategy?: string
-  /** The rendered subset-scoped TEST EXECUTION block used by intermediate Ralph rounds. */
+  /** The rendered subset-scoped TEST EXECUTION block used by intermediate Task sequence rounds. */
   testStrategyIntermediate?: string
-  /** Planner claim used to select terminal (0) versus intermediate (>0) Ralph scope. */
+  /** Planner claim used to select terminal (0) versus intermediate (>0) Task sequence scope. */
   planRemainingTasks?: number
   /**
    * What every forge build/fix round reports for `testsPassed`. Defaults to `true`
@@ -179,7 +179,7 @@ async function runWorkflow(
     ...(opts.baseSha !== undefined ? { baseSha: opts.baseSha } : {}),
     slug: 'test-run',
     maxRounds: 3,
-    ralph: opts.ralph === true,
+    executionStrategy: opts.executionStrategy ?? 'single',
     // Codex-build cases use pr mode so the workflow stops at the durable publisher
     // handoff after Forge; the task is not subsequently copied into reviewer prompts.
     mergeMode: opts.mergeMode ?? (opts.codexBuild ? 'pr' : 'local'),
@@ -263,7 +263,7 @@ const stageCommand = (stage: string): string =>
 describe('inner-workflow.mjs — workflow-side stage stamps on existing turns', () => {
   test('plan:fable and Claude Forge lead with their gated stage calls without adding a stage seat', async () => {
     const { captured } = await runWorkflow('', {
-      ralph: true,
+      executionStrategy: 'task_sequence',
       dbPath: STAGE_DB,
       runId: STAGE_RUN,
     })
@@ -290,7 +290,7 @@ describe('inner-workflow.mjs — workflow-side stage stamps on existing turns', 
     { name: 'dbPath missing', dbPath: null, runId: STAGE_RUN },
     { name: 'runId missing', dbPath: STAGE_DB, runId: null },
   ])('$name leaves plan:fable and Claude Forge byte-identical to the unstamped output', async ({ dbPath, runId }) => {
-    const common = { ralph: true, dbPath, runId }
+    const common = { executionStrategy: 'task_sequence' as const, dbPath, runId }
     const withConfiguredScript = (await runWorkflow('', {
       ...common,
       stageStampScript: STAGE_SCRIPT,
@@ -893,7 +893,7 @@ describe('inner-workflow.mjs — AS-BUILT: every command-running agent is told n
   const PROHIBITION = 'NEVER kill processes by pattern or by name'
   const CARVE_OUT = 'Kill ONLY a pid you started yourself and can name'
 
-  /** Every seat that is handed a shell, in BOTH modes. `plan:fable` is Ralph-only. */
+  /** Every seat that is handed a shell, in BOTH modes. `plan:fable` is Task sequence-only. */
   const COMMAND_RUNNING_LABELS = [
     'forge:build',
     'forge:fix-round-2',
@@ -904,19 +904,19 @@ describe('inner-workflow.mjs — AS-BUILT: every command-running agent is told n
   ]
 
   let captured: Captured[]
-  let ralphCaptured: Captured[]
+  let taskSequenceCaptured: Captured[]
   beforeAll(async () => {
     captured = (await runWorkflow(GUIDANCE)).captured
-    ralphCaptured = (await runWorkflow(GUIDANCE, { ralph: true })).captured
+    taskSequenceCaptured = (await runWorkflow(GUIDANCE, { executionStrategy: 'task_sequence' })).captured
   })
 
   test('the harness actually dispatched every seat it claims to cover', () => {
     for (const label of COMMAND_RUNNING_LABELS) {
       expect(captured.some((c) => c.label === label)).toBe(true)
     }
-    // The planner exists ONLY in Ralph mode — assert the mode really produced it,
+    // The planner exists ONLY in Task sequence mode — assert the mode really produced it,
     // or its coverage test below would vacuously pass over an empty call list.
-    expect(ralphCaptured.some((c) => c.label === 'plan:fable')).toBe(true)
+    expect(taskSequenceCaptured.some((c) => c.label === 'plan:fable')).toBe(true)
   })
 
   test('EVERY command-running prompt carries the rule, with the reason and the carve-out', () => {
@@ -939,17 +939,17 @@ describe('inner-workflow.mjs — AS-BUILT: every command-running agent is told n
     }
   })
 
-  test('the Ralph PLANNER gets it too — the planner spawns processes like any other seat', () => {
-    const plan = ralphCaptured.filter((c) => c.label === 'plan:fable')
+  test('the Task sequence PLANNER gets it too — the planner spawns processes like any other seat', () => {
+    const plan = taskSequenceCaptured.filter((c) => c.label === 'plan:fable')
     expect(plan.length).toBeGreaterThan(0)
     for (const c of plan) {
       expect(c.prompt).toContain(SHARED_BOX)
       expect(c.prompt).toContain(PROHIBITION)
       expect(c.prompt).toContain(CARVE_OUT)
     }
-    // …and Ralph's forge:build, which is assembled through a DIFFERENT path (it gets
+    // …and Task sequence's forge:build, which is assembled through a DIFFERENT path (it gets
     // the planner's execution note appended), keeps the rule.
-    const forge = ralphCaptured.filter((c) => c.label === 'forge:build')
+    const forge = taskSequenceCaptured.filter((c) => c.label === 'forge:build')
     expect(forge.length).toBeGreaterThan(0)
     for (const c of forge) expect(c.prompt).toContain(PROHIBITION)
   })
@@ -1210,9 +1210,9 @@ describe('AS-BUILT: the full-suite gate gives testsPassed teeth', () => {
       expect(checkpointPrompt(captured, 'forge-done')).toContain("printf '%s' '[]'")
     })
 
-    test('deferred on an intermediate Ralph round records no suite finding', async () => {
+    test('deferred on an intermediate Task sequence round records no suite finding', async () => {
       const { captured, result } = await runWorkflow('', {
-        ralph: true,
+        executionStrategy: 'task_sequence',
         planRemainingTasks: 2,
         testStrategy: STRATEGY,
         testStrategyIntermediate: 'TEST EXECUTION\n\nintermediate subset rules',
@@ -1229,9 +1229,9 @@ describe('AS-BUILT: the full-suite gate gives testsPassed teeth', () => {
       expect(forgeBuildPrompt(captured)).not.toContain("suiteOutcome='not-run'")
     })
 
-    test('not-run on the same intermediate Ralph round still records the blocker', async () => {
+    test('not-run on the same intermediate Task sequence round still records the blocker', async () => {
       const { captured } = await runWorkflow('', {
-        ralph: true,
+        executionStrategy: 'task_sequence',
         planRemainingTasks: 2,
         testStrategy: STRATEGY,
         testStrategyIntermediate: 'TEST EXECUTION\n\nintermediate subset rules',
@@ -1244,9 +1244,9 @@ describe('AS-BUILT: the full-suite gate gives testsPassed teeth', () => {
     })
   })
 
-  test('deferred on the terminal Ralph round still blocks', async () => {
+  test('deferred on the terminal Task sequence round still blocks', async () => {
     const { result } = await runWorkflow('', {
-      ralph: true,
+      executionStrategy: 'task_sequence',
       testStrategy: STRATEGY,
       testStrategyIntermediate: 'TEST EXECUTION\n\nintermediate subset rules',
       testsPassed: false,

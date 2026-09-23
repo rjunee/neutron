@@ -197,7 +197,7 @@ async function runWorkflow(opts: {
     baseBranch: 'main',
     slug: 'test-run',
     maxRounds: 3,
-    ralph: false,
+    executionStrategy: 'single',
     mergeMode: 'local',
     prNumber: null,
     branch: null,

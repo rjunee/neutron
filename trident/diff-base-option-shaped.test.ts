@@ -108,6 +108,7 @@ async function workflowDiffBase(args: {
       {
         repoPath: args.repoPath ?? '/repo',
         task: 'x',
+        executionStrategy: 'single',
         baseBranch: args.baseBranch,
         slug: 'ord',
         maxRounds: 10,

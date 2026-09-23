@@ -35,7 +35,6 @@ export interface OvernightItem {
   trident_run_id: string | null
   trident_slug: string | null
   spawn_attempts: number
-  ralph: boolean
   /** ISO-8601 UTC. */
   created_at: string
   started_at: string | null
@@ -52,7 +51,6 @@ export interface CreateOvernightItemInput {
   priority?: OvernightPriority
   status?: OvernightStatus
   context_relpath?: string | null
-  ralph?: boolean
   created_at?: string
 }
 
@@ -66,7 +64,6 @@ export interface OvernightItemUpdate {
   trident_run_id?: string | null
   trident_slug?: string | null
   spawn_attempts?: number
-  ralph?: boolean
   started_at?: string | null
   finished_at?: string | null
   window_date_local?: string | null
@@ -84,7 +81,6 @@ interface OvernightItemDbRow {
   trident_run_id: string | null
   trident_slug: string | null
   spawn_attempts: number
-  ralph: number
   created_at: string
   started_at: string | null
   finished_at: string | null
@@ -94,7 +90,7 @@ interface OvernightItemDbRow {
 const COLS =
   'id, project_slug, agent_role, priority, description, status, ' +
   'context_relpath, result, trident_run_id, trident_slug, spawn_attempts, ' +
-  'ralph, created_at, started_at, finished_at, window_date_local'
+  'created_at, started_at, finished_at, window_date_local'
 
 /**
  * Allocate the next `owk-YYYYMMDD-NNN` id for `dateYYYYMMDD`, given the set
@@ -142,7 +138,6 @@ export class OvernightQueueStore {
       trident_run_id: null,
       trident_slug: null,
       spawn_attempts: 0,
-      ralph: input.ralph ?? false,
       created_at: ts,
       started_at: null,
       finished_at: null,
@@ -150,7 +145,7 @@ export class OvernightQueueStore {
     }
     await this.db.run(
       `INSERT INTO overnight_queue (${COLS})
-       VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)`,
+       VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)`,
       [
         item.id,
         item.owner_slug,
@@ -163,7 +158,6 @@ export class OvernightQueueStore {
         item.trident_run_id,
         item.trident_slug,
         item.spawn_attempts,
-        item.ralph ? 1 : 0,
         item.created_at,
         item.started_at,
         item.finished_at,
@@ -236,7 +230,6 @@ export class OvernightQueueStore {
     if (patch.trident_run_id !== undefined) push('trident_run_id', patch.trident_run_id)
     if (patch.trident_slug !== undefined) push('trident_slug', patch.trident_slug)
     if (patch.spawn_attempts !== undefined) push('spawn_attempts', patch.spawn_attempts)
-    if (patch.ralph !== undefined) push('ralph', patch.ralph ? 1 : 0)
     if (patch.started_at !== undefined) push('started_at', patch.started_at)
     if (patch.finished_at !== undefined) push('finished_at', patch.finished_at)
     if (patch.window_date_local !== undefined) push('window_date_local', patch.window_date_local)
@@ -287,7 +280,6 @@ function rowToItem(row: OvernightItemDbRow): OvernightItem {
     trident_run_id: row.trident_run_id,
     trident_slug: row.trident_slug,
     spawn_attempts: row.spawn_attempts,
-    ralph: row.ralph === 1,
     created_at: row.created_at,
     started_at: row.started_at,
     finished_at: row.finished_at,

@@ -4,7 +4,7 @@
  * merge driver at all.
  *
  * A governed repo is one with a `SPEC.md` at its git root (the Spec-Drift
- * Guardrails convention, the same test `detectRalphMode` uses). Those repos
+ * Guardrails convention; governance does not select execution strategy). Those repos
  * keep an as-built log. While that log was APPEND-ONLY this gate required it to
  * resolve `merge=union`, because two open PRs conflicted by construction rather
  * than by subject and "keep both" was always the right resolution.

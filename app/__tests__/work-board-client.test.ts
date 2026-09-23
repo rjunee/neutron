@@ -149,6 +149,35 @@ describe('parseWorkBoardItems', () => {
     expect(parsed.task_number).toBeNull();
   });
 
+  it('validates current strategies and maps legacy mode only when explicitly present', () => {
+    const current = parseWorkBoardItems([{ ...item(), run_progress: {
+      run_id: 'current', phase_label: 'planning', execution_strategy: null,
+      task_iteration: 0, round: 1,
+    } }])[0]!.run_progress!;
+    expect(current.execution_strategy).toBeNull();
+    expect(current.task_iteration).toBe(0);
+
+    const legacyTask = parseWorkBoardItems([{ ...item(), run_progress: {
+      run_id: 'legacy-task', phase_label: 'building', ralph: true, ralph_round: 3,
+    } }])[0]!.run_progress!;
+    expect(legacyTask).toMatchObject({ execution_strategy: 'task_sequence', task_iteration: 3, task_number: 4 });
+    const legacySingle = parseWorkBoardItems([{ ...item(), run_progress: {
+      run_id: 'legacy-single', phase_label: 'building', ralph: false,
+    } }])[0]!.run_progress!;
+    expect(legacySingle.execution_strategy).toBe('single');
+
+    const absent = parseWorkBoardItems([{ ...item(), run_progress: {
+      run_id: 'older', phase_label: 'building', round: 2,
+    } }])[0]!.run_progress!;
+    expect(Object.prototype.hasOwnProperty.call(absent, 'execution_strategy')).toBe(false);
+    expect(parseWorkBoardItems([{ ...item(), run_progress: {
+      run_id: 'bad', phase_label: 'building', execution_strategy: 'automatic', task_iteration: 0,
+    } }])[0]!.run_progress).toBeUndefined();
+    expect(parseWorkBoardItems([{ ...item(), run_progress: {
+      run_id: 'bad-iteration', phase_label: 'building', execution_strategy: 'single', task_iteration: -1,
+    } }])[0]!.run_progress).toBeUndefined();
+  });
+
   it('drops malformed entries, keeps valid rows', () => {
     const out = parseWorkBoardItems([
       item({ id: 'a' }),
@@ -172,7 +201,8 @@ describe('parseWorkBoardItems', () => {
           phase_label: 'building',
           step_label: 'fixing',
           round: 3,
-          ralph_round: 1,
+          execution_strategy: 'task_sequence',
+          task_iteration: 1,
           started_at: '',
           last_advanced_at: '',
           elapsed_ms: 0,
@@ -187,13 +217,13 @@ describe('parseWorkBoardItems', () => {
     ]);
     expect(out[0]!.run_progress?.step_label).toBe('fixing');
     expect(out[0]!.run_progress?.round).toBe(3);
-    expect(out[0]!.run_progress?.ralph_round).toBe(1);
+    expect(out[0]!.run_progress?.task_iteration).toBe(1);
     expect(out[0]!.run_progress?.brief_alert).toContain('CODEX_BUILD_BRIEF_PART_CORRUPT');
   });
 
   it('parses run_progress.resume_note through, and null when absent or not a string', () => {
     const base = {
-      run_id: 'run_1', phase_label: 'building', round: 1, ralph_round: 0,
+      run_id: 'run_1', phase_label: 'building', round: 1, execution_strategy: 'single', task_iteration: 0,
       started_at: '', last_advanced_at: '', elapsed_ms: 0, stalled: false, stalled_ms: null,
       pr: null, verdict: null, failure_reason: null,
     };

@@ -36,7 +36,7 @@ export interface SimResult {
   round?: number
   /** The `checkpoint` field inside the result JSON (self-asserted). */
   checkpoint?: string | null
-  /** RALPH RE-FIRE (#362) — tasks still unbuilt after this iteration; `> 0` drives
+  /** TASK SEQUENCE RE-FIRE (#362) — tasks still unbuilt after this iteration; `> 0` drives
    *  an outer re-fire. Omit (→ undefined, serialized absent) for single-task runs. */
   remainingTasks?: number | null
   /** #545 — the head OID the review judged, which the pr-mode merge pins with
@@ -56,7 +56,7 @@ export interface SimResult {
    *  it (the wrapper's catch path writes `findings: []`, and legacy rows omit it entirely),
    *  so the absent-field default decodes to `findings_present: false`. */
   findings?: unknown[]
-  /** The build's Forge reported it deviated from the Ralph exec spec. Emitted only
+  /** The build's Forge reported it deviated from the Task sequence exec spec. Emitted only
    *  when the test sets it (the workflow writes it on the publish handoff), so the
    *  absent-field default keeps every other test on the unsuffixed checkpoint. */
   deviatedFromSpec?: boolean
@@ -84,7 +84,7 @@ export function simResultJson(sim: SimResult): string {
     round: sim.round ?? 1,
     checkpoint: sim.checkpoint ?? null,
     // Only emit when the test set it (mirrors the .mjs, which omits it for
-    // non-Ralph runs); `parseInnerResult` treats an absent field as null.
+    // non-Task sequence runs); `parseInnerResult` treats an absent field as null.
     ...(sim.remainingTasks !== undefined ? { remainingTasks: sim.remainingTasks } : {}),
     // #563 — same rule: emitted only when the test asks for it, so the absent-field
     // default (no merge already performed) is what every other test exercises.

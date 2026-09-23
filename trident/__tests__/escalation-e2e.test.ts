@@ -129,7 +129,7 @@ async function runWorkflow(
       return { verdict: 'REQUEST_CHANGES', findings: [] }
     }
     if (label === 'plan:fable') {
-      // This run is NOT Ralph, so the ONLY `plan:fable` seat reachable is the bounded
+      // This run is NOT Task sequence, so the ONLY `plan:fable` seat reachable is the bounded
       // re-plan. Counting this label therefore counts re-plans exactly.
       if (opts.rePlan === 'throws') throw new Error('plan:fable transport failed after 3 attempts')
       if (opts.rePlan === 'null') return null
@@ -186,7 +186,7 @@ async function runWorkflow(
     // Deliberately generous: a run that stops at round 2 cannot have been stopped by
     // the cap, which is the whole claim.
     maxRounds: opts.maxRounds ?? 6,
-    ralph: false,
+    execution_strategy: 'single',
     mergeMode: 'local',
     prNumber: null,
     branch: null,

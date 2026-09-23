@@ -810,7 +810,7 @@ async function newExitPath() {
     // …so three can never carry one, which is the figure `terminal-cause.ts` cites.
     expect(sites.length - withBlockKind.length).toBe(3)
     // AND WHICH THREE, DERIVED TOO. The docblock does not only cite the NUMBER — it names
-    // the paths ("both publish handoffs and the Ralph re-fire"). A count alone cannot keep
+    // the paths ("both publish handoffs and the Task sequence re-fire"). A count alone cannot keep
     // that half honest: three OTHER sites could lose their `blockKind` and the number would
     // still read 3 while the sentence had gone false. That is precisely how the original
     // figure in that docblock was wrong when it was written, so the identities are measured
@@ -818,7 +818,7 @@ async function newExitPath() {
     expect(sites.filter((s) => !s.carriesBlockKind).map((s) => s.kind).sort()).toEqual([
       'handoff-publish',
       'handoff-publish',
-      'ralph-task-built',
+      'task-built',
     ])
   })
 
@@ -1092,7 +1092,7 @@ async function newExitPath() {
     const differing = `${SRC}
 function newExitResult(mode) {
   if (mode === 'a') return { ok: false, terminalCauseKind: 'workflow-threw' }
-  return { ok: false, terminalCauseKind: 'ralph-task-built' }
+  return { ok: false, terminalCauseKind: 'task-built' }
 }
 async function newExitPath() {
   const newExit = newExitResult('b')
@@ -1135,12 +1135,12 @@ async function newExitPath() {
     ok: false,
     checkpoint: 'new-exit',
     terminalCauseKind: 'workflow-threw',
-    terminalCauseKind: 'ralph-task-built',
+    terminalCauseKind: 'task-built',
   })
 }
 `
     const added = terminalSites(dup).find((s) => s.line > SRC_LINES)!
-    expect(added.kind).toBe('ralph-task-built')
+    expect(added.kind).toBe('task-built')
   })
 
   test('a scope that binds one name TWICE is an ambiguity, not a first-one-wins', () => {

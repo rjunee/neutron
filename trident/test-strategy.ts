@@ -595,7 +595,7 @@ export interface TestStrategyInput {
   /** The in-process interleaving budget that goes with `jobs`. Absent → not set. */
   concurrency?: number
   base_branch: string
-  /** Absent defaults to the terminal/non-Ralph full-suite contract. */
+  /** Absent defaults to the terminal/non-Task sequence full-suite contract. */
   scope?: SuiteScope
 }
 
@@ -882,7 +882,7 @@ export function renderTestStrategy(input: TestStrategyInput): string {
 export interface TestStrategyDetail {
   /** The rendered TEST EXECUTION block — what the launcher threads to the workflow. */
   block: string
-  /** The subset-scope render for INTERMEDIATE Ralph iterations; consumed by the launcher in a later task. */
+  /** The subset-scope render for INTERMEDIATE Task sequence iterations; consumed by the launcher in a later task. */
   intermediate_block: string
   /** A one-line, log-safe summary of the numbers behind the block. */
   summary: string

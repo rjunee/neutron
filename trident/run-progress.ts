@@ -71,9 +71,11 @@ export interface RunProgress {
   round: number
   /** Durable infrastructure retry attempts already claimed for this run. */
   infra_retries: number
-  /** Zero-based persisted Ralph task counter; presentation adds one for the task number. */
-  ralph_round: number
-  /** One-based task iteration for Ralph; null for a non-Ralph run. */
+  /** Planner-selected execution mode; null means the initial plan is still pending. */
+  execution_strategy: 'single' | 'task_sequence' | null
+  /** Zero-based persisted task-sequence iteration counter. */
+  task_iteration: number
+  /** One-based task number for task-sequence runs; null for other strategies. */
   task_number: number | null
   /** Latest plan estimate, never the configured iteration cap. */
   task_total: number | null
@@ -110,7 +112,7 @@ export interface RunProgress {
   brief_alert: string | null
   /**
    * The dispatch's one-sentence statement of whether this retry carried the dead
-   * run's checkpoint and Ralph round (`TridentRun.resume_note`, migration 0155).
+   * run's checkpoint and task iteration (`TridentRun.resume_note`, migration 0155).
    * null for a first dispatch. Rendered on the card so a retry is never silent
    * about what it inherited.
    */
@@ -123,9 +125,9 @@ const TERMINAL_PHASES: readonly TridentPhase[] = ['done', 'failed', 'stopped']
 function baseLabel(phase: TridentPhase): RunPhaseLabel {
   switch (phase) {
     case 'forge-init':
-    case 'ralph-plan':
+    case 'task-plan':
       return 'planning'
-    case 'ralph-task':
+    case 'task-build':
     case 'forge-fix':
       return 'building'
     case 'argus':
@@ -245,10 +247,11 @@ export function deriveRunProgress(
       : deriveStepLabel(run.phase, run.inner_checkpoint),
     round,
     infra_retries: run.infra_retries,
-    ralph_round: run.ralph_round,
-    task_number: run.ralph ? run.ralph_round + 1 : null,
-    task_total: run.ralph && Number.isSafeInteger(run.ralph_task_total)
-      && run.ralph_task_total! >= run.ralph_round + 1 ? run.ralph_task_total : null,
+    execution_strategy: run.execution_strategy,
+    task_iteration: run.task_iteration,
+    task_number: run.execution_strategy === 'task_sequence' ? run.task_iteration + 1 : null,
+    task_total: run.execution_strategy === 'task_sequence' && Number.isSafeInteger(run.task_total)
+      && run.task_total! >= run.task_iteration + 1 ? run.task_total : null,
     started_at: run.started_at,
     last_advanced_at: run.last_advanced_at,
     heartbeat_at,

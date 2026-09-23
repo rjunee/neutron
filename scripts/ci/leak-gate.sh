@@ -767,10 +767,9 @@ echo
 echo "── Tier 3: structural ─────────────────────────────────────────────────"
 FORBIDDEN_PREFIXES='tenancy/ tenant-provisioning/ signup/ identity/ proxy/'
 # RT1 tripwire — root `SPEC.md` is DELIBERATELY absent from this list as of K10.
-# K10 intentionally introduces a root SPEC.md (the public master spec), which
-# flips the repo into Ralph-governed mode (`detectRalphMode` in
-# trident/git-mode.ts keys off a root SPEC.md). That flip is now INTENDED, so a
-# root SPEC.md must NOT trip forbidden-path.
+# K10 intentionally introduced a root SPEC.md (the public master spec).
+# Governance remains authoritative context, independent of the initial planner's
+# execution-strategy choice. A root SPEC.md must NOT trip forbidden-path.
 #
 # `AGENTS.md` is absent for the SAME reason, as of this change, and the evidence
 # is the private repo itself: STATUS.md, ISSUES.md and CLAUDE.md all exist at its

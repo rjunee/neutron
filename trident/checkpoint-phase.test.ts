@@ -41,8 +41,8 @@ const SCRIPT = fileURLToPath(new URL('./checkpoint.sh', import.meta.url))
 /** Migration 0077's phase CHECK set, verbatim — typed so a typo fails typecheck. */
 const ALL_PHASES: readonly TridentPhase[] = [
   'forge-init',
-  'ralph-plan',
-  'ralph-task',
+  'task-plan',
+  'task-build',
   'argus',
   'forge-fix',
   'done',
@@ -63,7 +63,7 @@ const CHECKPOINT_NAMES: readonly string[] = [
   // in-flight, each implying a phase
   'forge-done',
   'argus-approved',
-  'ralph-task-built',
+  'task-built',
   'argus-request-changes',
   'argus-request-changes-round-1',
   'argus-request-changes-round-2',
@@ -93,7 +93,7 @@ const CHECKPOINT_NAMES: readonly string[] = [
   'fix-round-',
   'fix-round-x',
   'argus-request-changes-round-',
-  'ralph-task-built ',
+  'task-built ',
   'FORGE-DONE',
   'a-checkpoint-invented-next-week',
 ]
@@ -123,8 +123,8 @@ describe('phaseForCheckpoint — the canonical table', () => {
     expect(phaseForCheckpoint('argus-request-changes-round-10')).toBe('forge-fix')
   })
 
-  test('one Ralph task built means the next one is being built', () => {
-    expect(phaseForCheckpoint('ralph-task-built')).toBe('ralph-task')
+  test('one Task sequence task built means the next one is being built', () => {
+    expect(phaseForCheckpoint('task-built')).toBe('task-build')
   })
 
   test('terminal-adjacent checkpoints imply NOTHING — the outer loop owns those', () => {
@@ -147,7 +147,7 @@ describe('phaseForCheckpoint — the canonical table', () => {
     expect(phaseForCheckpoint('fix-round-')).toBeNull()
     expect(phaseForCheckpoint('fix-round-x')).toBeNull()
     expect(phaseForCheckpoint('forge-done-but-not-really')).toBeNull()
-    expect(phaseForCheckpoint('ralph-task-built ')).toBeNull()
+    expect(phaseForCheckpoint('task-built ')).toBeNull()
     expect(phaseForCheckpoint('FORGE-DONE')).toBeNull()
   })
 
@@ -335,12 +335,12 @@ describe('checkpoint.sh writes the phase — against a real sqlite database', ()
     // re-loaded, re-driven and re-merged after the owner cancelled it.
     for (const id of ['cancelled', 'failed-run']) {
       const before = row(id)['phase']
-      for (const cp of ['forge-done', 'fix-round-3', 'argus-request-changes', 'ralph-task-built']) {
+      for (const cp of ['forge-done', 'fix-round-3', 'argus-request-changes', 'task-built']) {
         expect(sh([id, 'inner_checkpoint', cp]).code).toBe(0)
         expect(row(id)['phase']).toBe(before) // never resurrected
       }
       // ...while the orphan stays TRACEABLE — the checkpoint itself still lands.
-      expect(row(id)['inner_checkpoint']).toBe('ralph-task-built')
+      expect(row(id)['inner_checkpoint']).toBe('task-built')
     }
   })
 
@@ -383,7 +383,7 @@ describe('hasArgusProvenance — did the reviewer actually speak?', () => {
   test('the throw path and the pre-review checkpoints are NOT provenance', () => {
     expect(hasArgusProvenance('inner-error')).toBe(false) // 45 more of the same
     expect(hasArgusProvenance('awaiting-trailer')).toBe(false)
-    expect(hasArgusProvenance('ralph-task-built')).toBe(false)
+    expect(hasArgusProvenance('task-built')).toBe(false)
     expect(hasArgusProvenance('pr-merged')).toBe(false)
     expect(hasArgusProvenance('outer-published:abc123:0:3')).toBe(false)
     expect(hasArgusProvenance(null)).toBe(false)

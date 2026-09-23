@@ -31,6 +31,7 @@ import { buildReflectionGuidance } from '@neutronai/trident/reflection-guidance.
 import { PROJECT_BUILD_WALL_MS } from '@neutronai/trident/project-build-budget.ts'
 import { prepareProjectDependencies, projectSuiteIdentity } from './project-build-dependencies.ts'
 import { parseBuildModeState, readBuildRetrySource } from '@neutronai/trident/build-mode-state.ts'
+import { normalizeLegacyStoredExecutionPlan } from '@neutronai/trident/legacy-execution-compat.ts'
 import { assertProjectSnapshot, PROJECT_SNAPSHOT_SCHEMA } from './project-build-snapshot.ts'
 import { AttemptAccounting } from '@neutronai/trident/attempt-accounting.ts'
 import { createProjectWorkerContinuity } from '@neutronai/trident/project-worker-continuity.ts'
@@ -130,7 +131,7 @@ export interface ProjectBuildContext {
  * THE PLAN BRIEF MUST STATE THE LEDGER THE HOST ENFORCES AND COMMITS.
  *
  * The typed driver reads a plan's `implementationPlan` as a checkbox ledger: G025
- * refuses a Ralph handoff plan whose unchecked lines disagree with `topTask` and
+ * refuses a task-sequence handoff plan whose unchecked lines disagree with `topTask` and
  * `remainingTasks`, the handoff commits the ledger with the top box ticked at the
  * branch's own `.trident/ledgers/<branch>.md`, and G026-G029 select the cheap
  * continuation planner only when that committed file has an unchecked task
@@ -144,7 +145,10 @@ export interface ProjectBuildContext {
  * field each dispatch carries.
  */
 export const PLAN_LEDGER_CONTRACT = [
-  'THE TASK LEDGER. `implementationPlan` is a checkbox list with one line per task: `- [x] T<n>: <one line>` for a task already built on this branch, and `- [ ] T<n>: <one line>` for each task still to build, the next task first among the unchecked lines.',
+  'EXECUTION STRATEGY. On a fresh implementation build choose `strategy: "single"` or `strategy: "task_sequence"`, give a nonempty `rationale`, and supply the executable plan in this same result. Base the choice on coherent work boundaries, dependencies, and the size of a useful builder assignment. A repository with SPEC.md can use either strategy; a repository without it can use either strategy. Read and obey repository governance, but never treat the presence of a file or the number of arbitrary checklist bullets as the strategy decision.',
+  'When host context `executionStrategy` is already selected, retain it exactly. Continuation, recovery, and bounded replanning cannot change it. The host owns task identities, budgets, test scope, review, mutation proof, publication, and merge. No worker proposal changes those authorities.',
+  'For `single`, `implementationPlan` and `executionSpec` describe the WHOLE accepted work; `topTask` summarizes that whole work and `remainingTasks` is 0. The builder completes the entire plan in one call.',
+  'THE TASK LEDGER. For `task_sequence`, `implementationPlan` is a checkbox list with one line per executable task: `- [x] T<n>: <one line>` for a task already built on this branch, and `- [ ] T<n>: <one line>` for each task still to build, the next task first among the unchecked lines. `executionSpec` describes only the selected top task. A wave member remains pinned to its host-assigned task.',
   '`topTask` is the first unchecked line, copied verbatim. `remainingTasks` is the number of unchecked lines minus one. When tasks remain, the host refuses a plan whose lines disagree with those two fields.',
   'After a build that leaves tasks remaining, the host ticks the top task and commits the ledger itself, at a per-branch path under `.trident/ledgers/`, on a PUBLIC branch whose files and commit messages are leak-scanned: no hostnames, usernames or absolute paths in any line. Do not write or edit that file, or a repo-root IMPLEMENTATION_PLAN.md, yourself.',
   'CONTINUATION. When the host context carries `planner: "next"` and `committedPlan`, the committed ledger IS the plan: return `committedPlan.body` unchanged as `implementationPlan`, its first unchecked line as `topTask`, and its unchecked count minus one as `remainingTasks`, and write only the `executionSpec` for that task. Do not re-survey the repository or re-plan the remaining tasks.',
@@ -346,7 +350,13 @@ export async function prepareProjectBuild(input: InnerLoopInput, context: Projec
   const observerPath = (step: string) => join(state, `claude-observer-${createHash('sha256').update(step).digest('hex')}.json`)
   const codexEnv = { ...context.env, ...(input.codex_home ? { CODEX_HOME: input.codex_home } : {}) }
   const trailer: ProjectTrailerDecoder = { schemas: new Map([
-    ['project-plan', (value: unknown) => validSnapshot(value, 'plan')],
+    ['project-plan-v2', (value: unknown) => validSnapshot(value, 'plan')],
+    ['project-plan', (value: unknown) => {
+      assertProjectSnapshot(value)
+      const current = context.store.get(run.id)
+      return current?.strategy_source === 'legacy'
+        && normalizeLegacyStoredExecutionPlan(value.payload, current) !== null
+    }],
     ['project-build', (value: unknown) => validSnapshot(value, 'forge')],
     ['project-review', (value: unknown) => validSnapshot(value, 'verdict')],
     ['verdict', (value: unknown) => validateTrailer('verdict', value).ok],
@@ -527,16 +537,18 @@ export async function prepareProjectBuild(input: InnerLoopInput, context: Projec
       `\`result.payload\` must satisfy the ${role === 'plan' ? 'plan' : role === 'review' ? 'verdict' : 'forge'} trailer contract below. Read the host context for the measured snapshot.`,
       JSON.stringify(role === 'plan' ? PLAN_SCHEMA : role === 'review' ? VERDICT_SCHEMA : FORGE_SCHEMA),
       ...(role === 'plan' ? [PLAN_LEDGER_CONTRACT] : []),
+      ...(isBuilder ? ['EXECUTION SCOPE. Read the host context `executionStrategy` and validated plan in `previous`. For `single`, implement the WHOLE accepted plan and executionSpec. For `task_sequence`, implement only the host-selected `topTask` and its executionSpec; leave later tasks to later calls. Never select a strategy or task yourself. A fix addresses the host-provided findings without changing strategy. A wave member implements only its host-pinned task.'] : []),
       'Never publish or merge; the host owns those actions.',
     ].join('\n\n') + (isBuilder ? buildReflectionGuidance(input.reflection_context) : '')
-    const path = join(state, `${role}.brief`)
+    // Never overwrite the original brief of a still-reserved pre-cutover worker.
+    const path = join(state, `${role}.strategy-v2.brief`)
     await writeFile(path, brief, { mode: 0o600 })
     workers[role] = { provider, request: {
       model_id: descriptor.model_id, effort: selected?.effort ?? phase.default.effort,
       cwd: run.worktree, writable: role !== 'review', network: role !== 'review',
       tools: role === 'review' ? 'read-only' : 'edit-and-run',
       brief: { path, integrity: briefIntegrity(brief) },
-      result: { schema: role === 'plan' ? 'project-plan' : role === 'review' ? 'project-review' : 'project-build', path: join(state, `${role}.result`) },
+      result: { schema: role === 'plan' ? 'project-plan-v2' : role === 'review' ? 'project-review' : 'project-build', path: join(state, `${role}.result`) },
       thread: null, budget: { wall_ms: PROJECT_BUILD_WALL_MS[role] },
     } }
   }
@@ -544,7 +556,7 @@ export async function prepareProjectBuild(input: InnerLoopInput, context: Projec
   // A retried build keeps its completed worker artifacts under the ORIGINAL
   // run's directory. Read through the dispatch-minted source chain; never move
   // receipts or relabel worker envelopes as if this run had produced them.
-  const readArtifact = async (role: 'plan' | 'build' | 'fix', head?: string): Promise<string> => {
+  const readArtifact = async (role: 'plan' | 'build' | 'fix', head?: string) => {
     let current = context.store.get(run.id)!
     const seen = new Set<string>()
     for (;;) {
@@ -570,7 +582,7 @@ export async function prepareProjectBuild(input: InnerLoopInput, context: Projec
             throw new Error('Completed artifact is missing original host-observed worker identity')
           }
         }
-        return text
+        return { text, source: current }
       }
       catch (error) { if ((error as NodeJS.ErrnoException).code !== 'ENOENT') throw error }
       const source = readBuildRetrySource(context.store, current)
@@ -581,13 +593,22 @@ export async function prepareProjectBuild(input: InnerLoopInput, context: Projec
     }
   }
   const publication = async (snapshot: { head: string }) => {
-    const planEnvelope = JSON.parse(await readArtifact('plan', snapshot.head))
-    const plan = validateTrailer('plan', planEnvelope?.result?.payload)
+    const artifact = await readArtifact('plan', snapshot.head)
+    const planEnvelope = JSON.parse(artifact.text)
+    if (planEnvelope?.run_id !== artifact.source.id || planEnvelope?.kind !== 'completed') {
+      throw new Error('Publication plan is missing its original worker identity')
+    }
+    const legacyPlan = planEnvelope.schema === 'project-plan'
+      ? normalizeLegacyStoredExecutionPlan(planEnvelope?.result?.payload, artifact.source) : null
+    if (planEnvelope.schema !== 'project-plan-v2' && legacyPlan === null) {
+      throw new Error('Publication plan has no valid execution-strategy provenance')
+    }
+    const plan = validateTrailer('plan', legacyPlan ?? planEnvelope?.result?.payload)
     if (!plan.ok) throw new Error(`Publication plan result is invalid: ${plan.reason} at ${plan.path}`)
     let forge: ReturnType<typeof validateTrailer<'forge'>> | null = null
     for (const role of ['fix', 'build'] as const) {
       try {
-        const envelope = JSON.parse(await readArtifact(role, snapshot.head))
+        const envelope = JSON.parse((await readArtifact(role, snapshot.head)).text)
         if (envelope?.result?.head !== snapshot.head) continue
         const checked = validateTrailer('forge', envelope?.result?.payload)
         if (checked.ok) { forge = checked; break }
@@ -657,7 +678,7 @@ export async function prepareProjectBuild(input: InnerLoopInput, context: Projec
       mutation: { readClaim: async snapshot => {
         for (const role of ['fix', 'build'] as const) {
           let value
-          try { value = JSON.parse(await readArtifact(role, snapshot.head)) } catch { continue }
+          try { value = JSON.parse((await readArtifact(role, snapshot.head)).text) } catch { continue }
           const checked = validateTrailer('forge', value?.result?.payload)
           if (checked.ok && checked.value.commitSha === snapshot.head) return checked.value.mutationClaim
         }
@@ -682,7 +703,7 @@ export async function prepareProjectBuild(input: InnerLoopInput, context: Projec
         readCheckpoint: async (snapshot, round) => {
           for (const role of ['fix', 'build'] as const) {
             let value: { result?: { head?: unknown; payload?: unknown } }
-            try { value = JSON.parse(await readArtifact(role, snapshot.head)) }
+            try { value = JSON.parse((await readArtifact(role, snapshot.head)).text) }
             catch { continue }
             if (value?.result?.head !== snapshot.head) continue
             const checked = validateTrailer('forge', value.result.payload)

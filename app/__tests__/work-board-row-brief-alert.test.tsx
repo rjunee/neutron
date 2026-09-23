@@ -75,15 +75,19 @@ function item(over: Partial<WorkBoardItem> = {}): WorkBoardItem {
 }
 
 describe('WorkBoardRow brief alerts (mobile)', () => {
-  it('renders known, unknown and non-Ralph task progress, hiding terminal counters', async () => {
-    for (const [task, total, step, label] of [
-      [10, 15, 'building', 'Task 10/15 · Round 1'],
-      [10, null, 'building', 'Task 10/? · Round 1'],
-      [null, null, 'building', 'Round 1'],
-      [10, 15, 'failed', null],
+  it('renders pending, single, task-sequence and terminal progress distinctly', async () => {
+    for (const [strategy, task, total, step, label] of [
+      [null, null, null, 'building', 'Planning pending'],
+      ['single', null, null, 'building', 'Round 1'],
+      ['task_sequence', 10, 15, 'building', 'Task 10/15 · Round 1'],
+      ['task_sequence', 10, null, 'building', 'Task 10/? · Round 1'],
+      ['task_sequence', 10, 15, 'failed', null],
     ] as const) {
       const row = item();
-      row.run_progress = { ...row.run_progress!, task_number: task, task_total: total, step_label: step };
+      row.run_progress = {
+        ...row.run_progress!, execution_strategy: strategy, task_iteration: task === null ? 0 : task - 1,
+        task_number: task, task_total: total, step_label: step,
+      };
       const screen = await mountScreen(createElement(WorkBoardRow, {
         item: row, busy: false, index: 0, laneCount: 1,
         onAdvance: () => {}, onRename: () => {}, onReorderTo: () => {}, onDelete: () => {},

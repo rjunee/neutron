@@ -56,7 +56,7 @@ function progress(over: Partial<RunProgress> = {}): RunProgress {
     phase_label: 'building',
     step_label: 'building',
     round: 1,
-    ralph_round: 0,
+    task_iteration: 0,
     started_at: '',
     last_advanced_at: '',
     heartbeat_at: '2099-01-01T00:00:00Z',
@@ -125,7 +125,12 @@ describe('stepTag + roundText derive from step_label (M1 redesign)', () => {
   });
 
   it('names the task, latest plan total, and review round independently', () => {
-    expect(roundText(progress({ ralph_round: 9, task_number: 10, task_total: 15, round: 1 }))).toBe('Task 10/15 · Round 1');
+    expect(roundText(progress({ execution_strategy: 'task_sequence', task_iteration: 9, task_number: 10, task_total: 15, round: 1 }))).toBe('Task 10/15 · Round 1');
+    expect(roundText(progress({ execution_strategy: 'task_sequence', task_number: 1, task_total: null, round: 1 }))).toBe('Task 1/? · Round 1');
+    expect(roundText(progress({ execution_strategy: 'task_sequence', task_number: 10, task_total: 9, round: 2 }))).toBe('Task 10/? · Round 2');
+    expect(roundText(progress({ execution_strategy: 'single', task_number: 10, task_total: 15, round: 2 }))).toBe('Round 2');
+    expect(roundText(progress({ execution_strategy: null, task_number: 10, task_total: 15, round: 2 }))).toBe('Planning pending');
+    // No strategy field is an older frame: retain its known presentation.
     expect(roundText(progress({ task_number: 1, task_total: null, round: 1 }))).toBe('Task 1/? · Round 1');
     expect(roundText(progress({ task_number: 10, task_total: 9, round: 2 }))).toBe('Task 10/? · Round 2');
     expect(roundText(progress({ task_number: null, task_total: 15, round: 2 }))).toBe('Round 2');
@@ -216,7 +221,7 @@ describe('briefAlertText', () => {
   it("states a retry's resume decision, yielding to a failure and to an integrity alert", () => {
     // RED-mutation: drop the resume-note branch from `runNotice` → a retry that
     // inherited nothing looks exactly like a first dispatch on the card.
-    const note = 'Not resumed: the branch moved off the last run\'s commit, so this is a fresh build; Ralph round 4/8 carried.';
+    const note = 'Not resumed: the branch moved off the last run\'s commit, so this is a fresh build; Task iteration 4/8 carried.';
     expect(noticeFor(progress({ resume_note: note }))).toEqual({ text: note, tone: 'alert' });
     // A terminal failure is the card's outcome and wins.
     expect(noticeFor(progress({
@@ -231,7 +236,7 @@ describe('briefAlertText', () => {
       text: 'recovered alert', tone: 'alert',
     });
     // A CARRIED checkpoint is a healthy fact, not an alert: only a refusal is.
-    const carried = 'Dispatched to resume from ralph-task-built at abc1234 (rebuilds if the branch moves before launch); Ralph round 2/20 carried.';
+    const carried = 'Dispatched to resume from task-built at abc1234 (rebuilds if the branch moves before launch); Task iteration 2/20 carried.';
     expect(noticeFor(progress({ resume_note: carried }))).toEqual({ text: carried, tone: 'info' });
     // A first dispatch (or an older gateway's frame) states nothing.
     expect(noticeFor(progress({ resume_note: null }))).toBeNull();

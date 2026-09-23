@@ -207,7 +207,7 @@ describe('FIX 3 — oversized-diff guard', () => {
 })
 
 // ---------------------------------------------------------------------------
-// FIX 4 — max_rounds / max_ralph_rounds caps with loud failure reporting.
+// FIX 4 — max_rounds / max_task_iterations caps with loud failure reporting.
 // the legacy harness: a non-converging review loop or planner fails for manual review
 // rather than spinning forever. Open analog: computeTransition (state-machine).
 // ---------------------------------------------------------------------------
@@ -219,18 +219,18 @@ describe('FIX 4 — round caps fail loudly', () => {
     expect(t.failure_reason).toContain('max_rounds')
   })
 
-  test('ralph re-plan past max_ralph_rounds → failed with a named reason', () => {
-    const run = makeRun({ phase: 'ralph-task', ralph: true, ralph_round: 20, max_ralph_rounds: 20 })
+  test('task-sequence re-plan past max_task_iterations → failed with a named reason', () => {
+    const run = makeRun({ phase: 'task-build', execution_strategy: 'task_sequence', task_iteration: 20, max_task_iterations: 20 })
     const t = computeTransition(run, {})
     expect(t.phase).toBe('failed')
-    expect(t.failure_reason).toContain('max_ralph_rounds')
+    expect(t.failure_reason).toContain('max_task_iterations')
   })
 
-  test('the single ralph-round counter lives in the plan transition (no double-count)', () => {
-    const run = makeRun({ phase: 'ralph-task', ralph: true, ralph_round: 3, max_ralph_rounds: 20 })
+  test('the single task-sequence-round counter lives in the plan transition (no double-count)', () => {
+    const run = makeRun({ phase: 'task-build', execution_strategy: 'task_sequence', task_iteration: 3, max_task_iterations: 20 })
     const t = computeTransition(run, {})
-    expect(t.phase).toBe('ralph-plan')
-    expect(t.ralph_round).toBe(4) // incremented exactly once
+    expect(t.phase).toBe('task-plan')
+    expect(t.task_iteration).toBe(4) // incremented exactly once
   })
 })
 
@@ -291,25 +291,25 @@ describe('FIX 6 — no silent exit / no silent merge', () => {
 // ---------------------------------------------------------------------------
 // FIX 7 — Missing/garbled REMAINING_TASKS fails loudly (never silently
 // reviews a partial governed build). Open analog: computeTransition (the live
-// state-machine) fails a ralph bootstrap/planner whose count is null.
+// state-machine) fails a task-sequence bootstrap/planner whose count is null.
 // ---------------------------------------------------------------------------
 describe('FIX 7 — missing REMAINING_TASKS fails loud', () => {
-  test('a Ralph bootstrap with no valid count → failed (not a one-shot Argus)', () => {
-    const run = makeRun({ phase: 'forge-init', ralph: true })
+  test('a Task sequence bootstrap with no valid count → failed (not a one-shot Argus)', () => {
+    const run = makeRun({ phase: 'forge-init', execution_strategy: 'task_sequence' })
     const t = computeTransition(run, { remaining: null })
     expect(t.phase).toBe('failed')
     expect(t.failure_reason).toContain('REMAINING_TASKS')
   })
 
   test('a planner with no valid count → failed', () => {
-    const run = makeRun({ phase: 'ralph-plan', ralph: true, ralph_round: 1 })
+    const run = makeRun({ phase: 'task-plan', execution_strategy: 'task_sequence', task_iteration: 1 })
     const t = computeTransition(run, { remaining: null })
     expect(t.phase).toBe('failed')
     expect(t.failure_reason).toContain('REMAINING_TASKS')
   })
 
-  test('a legacy (non-ralph) forge-init with absent remaining → argus, not failed', () => {
-    const run = makeRun({ phase: 'forge-init', ralph: false })
+  test('a legacy (non-task-sequence) forge-init with absent remaining → argus, not failed', () => {
+    const run = makeRun({ phase: 'forge-init', execution_strategy: 'single' })
     const t = computeTransition(run, {})
     expect(t.phase).toBe('argus')
   })

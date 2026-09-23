@@ -16,6 +16,7 @@ at the old name. Retitle through the `title:` frontmatter instead.
 
 These are the items the harness-orchestrator cutover is gated on.
 
+- [`planner-selected-execution-strategy`](planner-selected-execution-strategy.md) — Let the initial planner select a persisted execution strategy
 - [`salvage-publication-provenance`](salvage-publication-provenance.md) — Preserve publication ownership when salvaging a failed build
 - [`the-orchestrator-owns-the-build-loop`](the-orchestrator-owns-the-build-loop.md) — The project REPL owns the build loop
 - [`the-review-loop-must-stop-and-re-plan`](the-review-loop-must-stop-and-re-plan.md) — Stop and escalate a review loop instead of iterating on a bad plan
@@ -36,8 +37,9 @@ branch is cut (standard §3.1, §3.2).
 
 | Item | Title | Priority | Cutover |
 |---|---|---|---|
-| [`a-retry-must-resume-from-the-checkpoint`](a-retry-must-resume-from-the-checkpoint.md) | Carry a dead run's checkpoint and ralph round into its retry | P0 | yes |
+| [`a-retry-must-resume-from-the-checkpoint`](a-retry-must-resume-from-the-checkpoint.md) | Carry a dead run's checkpoint and task iteration into its retry | P0 | yes |
 | [`a-terminal-cause-on-every-terminal-path`](a-terminal-cause-on-every-terminal-path.md) | Emit a terminal cause on every terminal path, and report it | P0 | yes |
+| [`planner-selected-execution-strategy`](planner-selected-execution-strategy.md) | Let the initial planner select a persisted execution strategy | P0 | yes |
 | [`resolve-the-review-diff-base`](resolve-the-review-diff-base.md) | Rev-range base: the pinned sha, else a ref nobody can mistake | P0 | yes |
 | [`salvage-publication-provenance`](salvage-publication-provenance.md) | Preserve publication ownership when salvaging a failed build | P0 | yes |
 | [`the-orchestrator-owns-the-build-loop`](the-orchestrator-owns-the-build-loop.md) | The project REPL owns the build loop | P0 | yes |
