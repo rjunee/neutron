@@ -276,6 +276,9 @@ interface RunOpts {
    * "does not exist in production".
    */
   codexExecSleepSecs?: number
+  /** Reject the resume surface before any paid turn. */
+  resumeUnsupported?: boolean
+  sandboxUnsupported?: boolean
   /**
    * Deliver this signal to the WRAPPER's own pid once the mock `codex` is running,
    * and report what a supervisor of the shape inner-workflow.mjs uses would have
@@ -414,7 +417,22 @@ function run(opts: RunOpts = {}): RunResult {
       opts.codexExecSleepSecs === undefined ? '' : `sleep ${opts.codexExecSleepSecs}\n`
     writeFileSync(
       mock,
-      `#!/bin/sh\nif [ "$1" = "login" ] && [ "$2" = "status" ]; then exit ${opts.codexLoginExit}; fi\nprintf '%s\\n' "$@" > ${JSON.stringify(join(dir, 'codex-argv.txt'))}\nenv > ${JSON.stringify(join(dir, 'codex-env.txt'))}\ncat > ${JSON.stringify(join(dir, 'codex-stdin.txt'))}\n${marker}${slow}exit 0\n`,
+      `#!/bin/sh
+if [ "$1" = "login" ] && [ "$2" = "status" ]; then exit ${opts.codexLoginExit}; fi
+if [ "$1" = "exec" ] && [ "$2" = "resume" ] && [ "$3" = "--help" ]; then
+  echo '--json'; exit ${opts.resumeUnsupported ? 2 : 0}
+fi
+case "$*" in
+  *neutron_codex_build_probe_sentinel*)
+    printf '%s\\n' "$@" > ${JSON.stringify(join(dir, 'codex-probe-argv.txt'))}
+    echo 'unknown configuration field ${opts.sandboxUnsupported ? 'sandbox_mode' : 'neutron_codex_build_probe_sentinel'} in -c/--config override' >&2
+    exit 2 ;;
+esac
+printf '%s\\n' "$@" > ${JSON.stringify(join(dir, 'codex-argv.txt'))}
+pwd > ${JSON.stringify(join(dir, 'codex-cwd.txt'))}
+env > ${JSON.stringify(join(dir, 'codex-env.txt'))}
+cat > ${JSON.stringify(join(dir, 'codex-stdin.txt'))}
+${marker}${slow}exit 0\n`,
     )
     chmodSync(mock, 0o755)
   }
@@ -1202,7 +1220,7 @@ describe('the mid-exec liveness heartbeat', () => {
     // passed for exactly the case it was written for. Slice out the region between the
     // END of the seam branch and the real invocation and require the arming there.
     const seamEnd = SCRIPT_TEXT.indexOf('CODEX_BUILD_CALL_FAILED: the codex build call failed')
-    const realExec = SCRIPT_TEXT.indexOf('codex exec "$@" --sandbox danger-full-access')
+    const realExec = SCRIPT_TEXT.indexOf('codex exec "$@" -; then')
     expect(seamEnd).toBeGreaterThan(0)
     expect(realExec).toBeGreaterThan(seamEnd)
     const productionRegion = SCRIPT_TEXT.slice(seamEnd, realExec)
@@ -1437,13 +1455,45 @@ function rerun(
 
 describe('trident/codex-build.sh — exit-code contract', () => {
   test('resumes the requested Codex thread', () => {
-    const { status, codexArgv } = run({
+    const { status, codexArgv, dir } = run({
       authed: true,
       codexLoginExit: 0,
       env: { NEUTRON_CODEX_THREAD_ID: 'thread-42' },
     })
     expect(status).toBe(0)
     expect(codexArgv.split('\n').slice(0, 3)).toEqual(['exec', 'resume', 'thread-42'])
+    expect(codexArgv.split('\n')).toContain('--json')
+    expect(codexArgv.split('\n')).toContain('sandbox_mode="danger-full-access"')
+    expect(codexArgv.split('\n')).not.toContain('--sandbox')
+    expect(codexArgv.split('\n')).not.toContain('--cd')
+    expect(readFileSync(join(dir, 'codex-cwd.txt'), 'utf8').trim()).toBe(realpathSync(dir))
+    const probe = readFileSync(join(dir, 'codex-probe-argv.txt'), 'utf8').trim().split('\n')
+    expect(probe).toContain('--ignore-user-config')
+    expect(probe.at(-1)).toBe('neutron_codex_build_probe_sentinel=true')
+  })
+  test('fresh calls retain their exec sandbox and cwd flags', () => {
+    const r = run({ authed: true, codexLoginExit: 0 })
+    expect(r.status).toBe(0)
+    const args = r.codexArgv.split('\n')
+    expect(args).toContain('--json')
+    expect(args).toContain('--sandbox')
+    expect(args).toContain('--cd')
+    expect(args).not.toContain('resume')
+    expect(args).not.toContain('sandbox_mode="danger-full-access"')
+  })
+  for (const bad of ['resumeUnsupported', 'sandboxUnsupported'] as const) {
+    test(`${bad} refuses the requested resume without a fresh turn`, () => {
+      const r = run({ authed: true, codexLoginExit: 0, [bad]: true, env: { NEUTRON_CODEX_THREAD_ID: 'thread-42' } })
+      expect(r.status).toBe(3)
+      expect(r.stderr).toContain('CODEX_BUILD_RESUME_UNSUPPORTED')
+      expect(existsSync(join(r.dir, 'codex-running'))).toBe(false)
+    })
+  }
+  test('a newest-thread selector cannot be supplied as an identity', () => {
+    const r = run({ authed: true, codexLoginExit: 0, env: { NEUTRON_CODEX_THREAD_ID: '--last' } })
+    expect(r.status).toBe(3)
+    expect(r.stderr).toContain('CODEX_BUILD_THREAD_INVALID')
+    expect(existsSync(join(r.dir, 'codex-running'))).toBe(false)
   })
   test('no CODEX_HOME → exit 10 (not connected)', () => {
     const { status, stderr } = run({ noCodexHome: true })

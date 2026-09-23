@@ -1443,10 +1443,37 @@ stamp_stage codex-exec-start
 start_stage_heartbeat
 
 if [ -n "${NEUTRON_CODEX_THREAD_ID:-}" ]; then
-  set -- resume "${NEUTRON_CODEX_THREAD_ID}" "$@"
+  # Resume is a different CLI surface: it rejects exec's --sandbox and --cd.
+  # Never replace a requested conversation with a fresh turn on probe failure.
+  case "$NEUTRON_CODEX_THREAD_ID" in
+    -*|*[!a-zA-Z0-9_-]*)
+      echo 'CODEX_BUILD_THREAD_INVALID: invalid requested thread. DEFERRED.' >&2
+      exit 3 ;;
+  esac
+  resume_help=$(timeout 5 codex exec resume --help 2>&1) || {
+    echo 'CODEX_BUILD_RESUME_UNSUPPORTED: resume help failed. DEFERRED.' >&2
+    exit 3
+  }
+  if ! printf '%s' "$resume_help" | grep -q -- '--json'; then
+    echo 'CODEX_BUILD_RESUME_UNSUPPORTED: resume JSON events unavailable. DEFERRED.' >&2
+    exit 3
+  fi
+  # Sentinel LAST: the first unrecognised override must be our sentinel, proving
+  # the real sandbox key was accepted without buying a model turn.
+  probe=$(timeout 5 codex exec --strict-config --ignore-user-config \
+    -c 'sandbox_mode="danger-full-access"' \
+    -c 'neutron_codex_build_probe_sentinel=true' </dev/null 2>&1)
+  probe_status=$?
+  if [ "$probe_status" -eq 0 ] || ! printf '%s' "$probe" | grep -Eq 'unknown configuration field [`"\x27]?neutron_codex_build_probe_sentinel[`"\x27]? in -c/--config override'; then
+    echo 'CODEX_BUILD_RESUME_UNSUPPORTED: sandbox config contract unavailable. DEFERRED.' >&2
+    exit 3
+  fi
+  set -- resume "$NEUTRON_CODEX_THREAD_ID" "$@" --json -c 'sandbox_mode="danger-full-access"'
+else
+  set -- "$@" --json --sandbox danger-full-access --cd "$WORKTREE"
 fi
 if <"$BRIEF_FILE" run_build_child \
-  codex exec "$@" --sandbox danger-full-access --cd "$WORKTREE" -; then
+  codex exec "$@" -; then
   stop_stage_heartbeat
   stamp_stage codex-exec-end
   emit_trailer ok
