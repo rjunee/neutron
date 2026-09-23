@@ -55,7 +55,27 @@ describe('buildSettings — behaviour-preserving atomic write', () => {
     buildSettings({ settingsPath, hookPath: '/abs/hook.ts' })
     const parsed = JSON.parse(readFileSync(settingsPath, 'utf8'))
     expect(parsed.permissions).toBeUndefined()
-    expect(Object.keys(parsed)).toEqual(['hooks'])
+    expect(Object.keys(parsed)).toEqual(['hooks', 'attribution'])
+  })
+
+  test('#1133: drops ONLY the Claude-Session trailer — attribution.sessionUrl:false, Co-Authored-By untouched', () => {
+    // Every REPL Neutron spawns is machine-driven; the CLI's `attribution.sessionUrl`
+    // ("Set to false to omit the Claude-Session trailer and PR-body link") is the
+    // source-side switch. It must be emitted unconditionally, and it must be the
+    // ONLY attribution key: `attribution.commit` / `attribution.pr` /
+    // `includeCoAuthoredBy` would alter or remove the Co-Authored-By trailer.
+    const dir = freshDir()
+    const settingsPath = join(dir, 'settings.json')
+    buildSettings({ settingsPath, hookPath: '/abs/hook.ts' })
+    const parsed = JSON.parse(readFileSync(settingsPath, 'utf8'))
+    expect(parsed.attribution).toEqual({ sessionUrl: false })
+    expect(parsed.attribution.commit).toBeUndefined()
+    expect(parsed.attribution.pr).toBeUndefined()
+    expect(parsed.includeCoAuthoredBy).toBeUndefined()
+    // Present on every variant, not just the bare Stop-hook one.
+    const withPerms = join(dir, 'with-perms.json')
+    buildSettings({ settingsPath: withPerms, hookPath: '/abs/hook.ts', permissions: { deny: ['Bash'] } })
+    expect(JSON.parse(readFileSync(withPerms, 'utf8')).attribution).toEqual({ sessionUrl: false })
   })
 
   test('no `PostToolUse` key when todoSync is not provided', () => {

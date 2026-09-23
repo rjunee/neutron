@@ -138,8 +138,10 @@ export function createBuildHost(options: BuildHostOptions): { deps: BuildRunDeps
       usageLastObserved.set(key, absolute.observed_at)
     },
     reviewArtifact,
+    // #1133 (G166): the preservation push scans launch-base..head for the session trailer; the
+    // launch base is the same pin `publishGate` hands `publicationReadiness` below.
     checkBuildClaim: (claim, snapshot) => checkBuildClaim(options.mutation.run_host,
-      options.mutation.run.repo_path, options.mutation.run.branch ?? `trident/${options.mutation.run.slug}`, claim, snapshot, options.mutation.run.id),
+      options.mutation.run.repo_path, options.mutation.run.branch ?? `trident/${options.mutation.run.slug}`, options.leak.base_sha, claim, snapshot, options.mutation.run.id),
     checkFixLineage: (snapshot, reviewedHead) => fixLineage(options.mutation.run_host,
       options.mutation.run.repo_path, options.mutation.run.branch ?? `trident/${options.mutation.run.slug}`, reviewedHead, snapshot.head),
     async readReviewCap(runId) {
@@ -223,7 +225,7 @@ export function createBuildHost(options: BuildHostOptions): { deps: BuildRunDeps
       if (!proof.ok) return proof.repair
         ? { kind: 'repair-nomination', finding: `Mutation nomination is invalid: ${proof.repair.detail}. Supply a corrected nomination for the repaired commit; the mutation prover must still pass.` }
         : { kind: 'blocked', on: proof.reason }
-      const readiness = mergeMode === 'local' ? await localReadiness(snapshot) : await publicationReadiness(options.mutation.run_host, options.mutation.run.repo_path, options.mutation.run.branch ?? `trident/${options.mutation.run.slug}`, options.leak.base_sha, snapshot, options.mutation.run.id)
+      const readiness = mergeMode === 'local' ? await localReadiness(snapshot) : await publicationReadiness(options.mutation.run_host, options.mutation.run.repo_path, options.mutation.run.branch ?? `trident/${options.mutation.run.slug}`, options.mutation.base_branch, options.leak.base_sha, snapshot, options.mutation.run.id)
       if (readiness.kind !== 'allow') return readiness
       return fixLineage(options.mutation.run_host, options.mutation.run.repo_path, options.mutation.run.branch ?? `trident/${options.mutation.run.slug}`, options.reviewed_head, snapshot.head)
     },

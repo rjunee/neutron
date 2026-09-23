@@ -88,6 +88,9 @@ async function fixture() {
           return { ok: true, exit_code: 0, stdout: diff, stderr: '' }
         }
         if (argv.includes('check-ref-format')) return { ok: true, exit_code: 0, stdout: '', stderr: '' }
+        // G166 (#1133): the publication trailer scan lists the launch-base..head range; the fake
+        // repo has no commits to scan, so the range is empty and nothing is read.
+        if (argv.includes('rev-list')) return { ok: true, exit_code: 0, stdout: '', stderr: '' }
         throw new Error(`Unexpected command: ${argv.join(' ')}`)
       },
     },
@@ -215,7 +218,7 @@ const commandResult = (stdout = '', exit_code = 0) => ({ ok: exit_code === 0, ex
 test('publication readiness measures local head, remote state and first-push ancestry', async () => {
   const f = await fixture()
   const baseRun = f.options.mutation.run_host
-  const check = (run = baseRun, value = snapshot) => publicationReadiness(run, 'repo', 'change', 'b'.repeat(40), value, 'run')
+  const check = (run = baseRun, value = snapshot) => publicationReadiness(run, 'repo', 'change', 'main', 'b'.repeat(40), value, 'run')
   expect(await check()).toEqual({ kind: 'allow' })
   for (const result of [commandResult('', 128), commandResult('short')]) {
     expect(await check(async (argv, cwd) => argv.includes('rev-parse') ? result : baseRun(argv, cwd))).toMatchObject({ kind: 'unknown' })
@@ -238,11 +241,11 @@ test('publication readiness measures local head, remote state and first-push anc
 })
 
 test('publication thrown host cause is bounded and normal refusal text is unchanged', async () => {
-  expect(await publicationReadiness(async () => { throw new Error('recognisable publication failure') }, 'repo', 'change', 'b'.repeat(40), snapshot, 'run')).toEqual({
+  expect(await publicationReadiness(async () => { throw new Error('recognisable publication failure') }, 'repo', 'change', 'main', 'b'.repeat(40), snapshot, 'run')).toEqual({
     kind: 'unknown', detail: 'Publication host observation failed: Error: recognisable publication failure',
   })
   const f = await fixture()
-  expect(await publicationReadiness(f.options.mutation.run_host, 'repo', 'change', 'b'.repeat(40), { ...snapshot, head: 'c'.repeat(40) }, 'run')).toEqual({
+  expect(await publicationReadiness(f.options.mutation.run_host, 'repo', 'change', 'main', 'b'.repeat(40), { ...snapshot, head: 'c'.repeat(40) }, 'run')).toEqual({
     kind: 'blocked', on: 'Publication branch differs from reviewed head',
   })
 })
@@ -794,12 +797,47 @@ test('G100 composed host preserves a real Git branch before reporting conflict',
   await git('-c', 'user.name=Test', '-c', 'user.email=test@example.invalid', 'commit', '--allow-empty', '-m', 'built')
   const built = await git('rev-parse', 'HEAD')
   f.options.mutation.run_host = run
+  // #1133 (G166): the composed host hands the preservation push the run's launch base (the
+  // same `leak.base_sha` pin `publishGate` scans from), so the scan window is base..built.
+  f.options.leak.base_sha = old
   const deps = f.make().deps
-  expect(await deps.checkBuildClaim!(old.slice(0, 7), { ...snapshot, head: built })).toMatchObject({ kind: 'blocked' })
+  expect(await deps.checkBuildClaim!(old.slice(0, 7), { ...snapshot, head: built })).toEqual({ kind: 'blocked', on: expect.stringContaining('; branch preserved on origin') })
   expect(await git('--git-dir', remote, 'rev-parse', 'refs/heads/change')).toBe(built)
   expect(await git('rev-parse', 'refs/heads/change')).toBe(built)
   expect(await deps.checkBuildClaim!(built.slice(0, 7), { ...snapshot, head: built })).toEqual({ kind: 'allow' })
   expect(await deps.checkBuildClaim!('deadbeef', { ...snapshot, head: built })).toEqual({ kind: 'allow' })
+})
+
+test('G100/G166 composed host threads the launch base into the preservation scan: a carrier is preserved and named', async () => {
+  const f = await fixture()
+  const repo = f.options.mutation.run.repo_path
+  const remote = join(repo, 'origin.git')
+  const run: BuildHostOptions['mutation']['run_host'] = async (argv, cwd) => {
+    const child = Bun.spawn(argv, { cwd: cwd ?? repo, stdout: 'pipe', stderr: 'pipe' })
+    const [stdout, stderr, exit_code] = await Promise.all([new Response(child.stdout).text(), new Response(child.stderr).text(), child.exited])
+    return { ok: exit_code === 0, stdout, stderr, exit_code }
+  }
+  const git = async (...args: string[]) => {
+    const result = await run(['git', ...args], repo)
+    expect(result.ok).toBe(true)
+    return result.stdout.trim()
+  }
+  await git('init', '-b', 'change')
+  await git('init', '--bare', remote)
+  await git('remote', 'add', 'origin', remote)
+  await git('-c', 'user.name=Test', '-c', 'user.email=test@example.invalid', 'commit', '--allow-empty', '-m', 'base')
+  const old = await git('rev-parse', 'HEAD')
+  await git('-c', 'user.name=Test', '-c', 'user.email=test@example.invalid', 'commit', '--allow-empty', '-m', 'built', '-m', 'Claude-Session: https://claude.ai/code/session_01HOST')
+  const built = await git('rev-parse', 'HEAD')
+  f.options.mutation.run_host = run
+  f.options.leak.base_sha = old
+  const deps = f.make().deps
+  // Owner decision 2026-09-19: G100 preserves; the G166 scan on this path names the carrier.
+  expect(await deps.checkBuildClaim!(old.slice(0, 7), { ...snapshot, head: built })).toEqual({
+    kind: 'blocked',
+    on: expect.stringContaining(`; branch preserved on origin; preserved range: Publication branch carries a Claude-Session trailer on 1 commit(s) above the launch base: ${built}`),
+  })
+  expect(await git('--git-dir', remote, 'rev-parse', 'refs/heads/change')).toBe(built)
 })
 
 test('G023 host derives branch assignment from the run', async () => {
@@ -868,4 +906,13 @@ test('G102 host composes readback of the prepared review context', async () => {
   expect(await host.deps.reviewArtifact!(request, snapshot)).toEqual({ kind: 'allow' })
   await writeFile(`${request.brief.path}.context.json`, JSON.stringify({ request, snapshot: { ...snapshot, diff: '+stale' } }))
   expect(await host.deps.reviewArtifact!(request, snapshot)).toMatchObject({ kind: 'unknown', detail: expect.stringContaining('measured revision') })
+})
+
+test('#1133 G166 round 31: the pr-mode publish gate asks ORIGIN for the run\'s own base branch, so the scan window can exclude what origin already publishes', async () => {
+  const f = await fixture()
+  f.prose()
+  expect(f.options.mutation.base_branch).toBe('base')
+  expect(await f.make().deps.publishGate(snapshot)).toEqual({ kind: 'allow' })
+  // The base branch is the run's (`mutation.base_branch`), not a default and not the PR head.
+  expect(f.calls.filter(argv => argv.includes('ls-remote')).map(argv => argv.at(-1))).toEqual(['refs/heads/change', 'refs/heads/base'])
 })

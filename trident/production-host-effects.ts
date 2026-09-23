@@ -379,7 +379,7 @@ export function createProductionHostEffects(options: ProductionHostOptions) {
       if (current.merge_mode !== 'pr') return blocked('Publication requires PR mode')
       const fresh = await sameSnapshot(snapshot)
       if (fresh.kind !== 'allow') return fresh
-      const ready = await publicationReadiness(runHost, repo, branch, current.base_sha!, snapshot, runId)
+      const ready = await publicationReadiness(runHost, repo, branch, baseBranch, current.base_sha!, snapshot, runId)
       if (ready.kind !== 'allow') return ready
       const publication = await options.publication(snapshot)
       const remote = await git('ls-remote', '--heads', 'origin', `refs/heads/${branch}`)
