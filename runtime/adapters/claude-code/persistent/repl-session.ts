@@ -53,7 +53,8 @@ export class ReplSession {
    *  REPL's in-context memory. */
   poisoned = false
   /**
-   * How many callers hold this session's turn slot OR are queued for it (see
+   * How many callers hold this session's turn slot, are queued for it, OR retain
+   * accepted background work after yielding the dispatch slot (see
    * {@link acquireTurn}). Zero means no committed turn is left on this session.
    *
    * BUSY STARTS HERE, NOT AT `activeTurn`. A dispatch takes the slot and only later
@@ -506,9 +507,13 @@ export class ReplSession {
     t.settle()
   }
 
-  /** Acquire the per-session turn slot; returns a release fn. Serializes turns
-   *  so the warm REPL never has two channel turns in flight at once. */
-  async acquireTurn(): Promise<() => void> {
+  private readonly backgroundReaders = new Set<Promise<void>>()
+
+  /** Acquire the per-session write slot and a busy lease. A read-only background
+   * dispatcher may yield the write slot after binding its child. Other read-only
+   * dispatchers can follow; ordinary/writable turns wait for all retained readers.
+   * A queued writer owns the queue before waiting, so later readers cannot starve it. */
+  async acquireTurn(backgroundDispatch?: (yieldDispatch: () => void) => void): Promise<() => void> {
     let release: () => void = () => {}
     const prev = this.turnTail
     this.turnTail = new Promise<void>((res) => {
@@ -529,7 +534,15 @@ export class ReplSession {
     // completion, and the teardown happens the moment no committed turn is left.
     this.turnSlotHeld += 1
     await prev
+    if (!backgroundDispatch) await Promise.all(this.backgroundReaders)
     let released = false
+    let finishReader!: () => void
+    const reader = new Promise<void>(resolve => { finishReader = resolve })
+    backgroundDispatch?.(() => {
+      if (released) return
+      this.backgroundReaders.add(reader)
+      release()
+    })
     return () => {
       // IDEMPOTENT. Several of `start`'s early-return paths call the release they were
       // handed, and a plain `res()` tolerated being called twice because re-resolving a
@@ -537,6 +550,8 @@ export class ReplSession {
       // negative, which reads as "idle" to the evictor.
       if (released) return
       released = true
+      this.backgroundReaders.delete(reader)
+      finishReader()
       this.turnSlotHeld -= 1
       release()
     }

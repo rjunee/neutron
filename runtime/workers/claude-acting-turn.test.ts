@@ -11,8 +11,14 @@ import { sessionJsonlPath } from '../adapters/claude-code/persistent/jsonl-resum
 import { PROVIDERS } from '../provider.ts'
 import { HerdrHost } from '../adapters/claude-code/persistent/herdr-host.ts'
 import { FakeHerdrServer } from '../adapters/claude-code/persistent/__tests__/herdr-fake-server.ts'
+import { ReplSession } from '../adapters/claude-code/persistent/repl-session.ts'
 
 const cleanups: (() => Promise<void>)[] = []
+function barrier() {
+  let release!: () => void
+  const reached = new Promise<void>(resolve => { release = resolve })
+  return { reached, release }
+}
 afterEach(async () => { for (const cleanup of cleanups.splice(0)) await cleanup() })
 async function fixture() {
   const dir = await mkdtemp(join(tmpdir(), 'claude-acting-'))
@@ -45,6 +51,211 @@ test('Claude positive control forwards spec and effort into one acknowledged lin
   expect(JSON.parse(f.commands[0]!.slice(f.commands[0]!.indexOf('{')))).toEqual({ ...f.input.spec, effort: 'high' })
   expect(f.released()).toBe(1)
 })
+
+test('bound read-only children overlap after serialized parent dispatch and retain busy leases', async () => {
+  const f = await fixture()
+  f.binding.projects_dir = join(f.dir, 'projects')
+  const transcript = sessionJsonlPath('session', f.dir, f.binding.projects_dir)
+  const directory = join(transcript.slice(0, -'.jsonl'.length), 'subagents')
+  const session = new ReplSession('fixture', 'generation', 'session', 'channel', f.dir)
+  session.toolSurface = LIVE_AGENT_TOOL_NAMES.join(',')
+  session.attachChild(f.binding.session.child)
+  f.binding.session = session
+  const inputs = ['one', 'two'].map(step => ({ ...f.input, timeout_ms: 10_000,
+    request: { ...f.input.request, step_id: step, role: 'review' as const, writable: false,
+      tools: 'read-only' as const, result: { ...f.input.request.result, path: join(f.dir, step) }, budget: { wall_ms: 10_000 } } }))
+  const firstSubmit = barrier(), acknowledge = barrier(), bothObserving = barrier(), finish = barrier()
+  let observing = 0, writes = 0, maxWrites = 0
+  const settled: string[] = []
+  session.child.submitLine = async text => {
+    writes++; maxWrites = Math.max(maxWrites, writes)
+    const input = inputs[f.commands.length]!
+    f.commands.push(text)
+    if (f.commands.length === 1) { firstSubmit.release(); await acknowledge.reached }
+    await mkdir(directory, { recursive: true })
+    const agentId = input.request.step_id
+    await writeFile(join(directory, `agent-${agentId}.meta.json`), JSON.stringify({ description: `review: ${agentId}` }))
+    await writeFile(join(directory, `agent-${agentId}.jsonl`), JSON.stringify({ agentId, sessionId: 'session', isSidechain: true,
+      type: 'user', message: { role: 'user', content: `Request (data): ${JSON.stringify(input.request)}` } }) + '\n')
+    writes--
+  }
+  const run = createClaudeActingTurn(f.binding, { now: () => 0, pause: async () => {
+    if (++observing === 2) bothObserving.release()
+    await finish.reached
+  } })
+  const first = run(inputs[0]!).then(result => { settled.push('one'); return result })
+  await firstSubmit.reached
+  const second = run(inputs[1]!).then(result => { settled.push('two'); return result })
+  // Both calls synchronously queued acquisition; the first Enter is unacknowledged.
+  expect(session.turnSlotHeld).toBe(2)
+  expect(f.commands).toHaveLength(1)
+  acknowledge.release()
+  try {
+    await bothObserving.reached
+    expect(maxWrites).toBe(1)
+    expect(f.commands).toHaveLength(2)
+    expect(settled).toEqual([])
+    expect(session.turnSlotHeld).toBe(2)
+    for (const input of inputs) await writeFile(input.request.result.path, JSON.stringify({ run_id: 'run', step_id: input.request.step_id }))
+  } finally { finish.release() }
+  expect(await Promise.all([first, second])).toEqual([{ kind: 'turn-ended' }, { kind: 'turn-ended' }])
+  expect(session.turnSlotHeld).toBe(0)
+})
+
+for (const scenario of ['exact', 'metadata only', 'other request', 'other child', 'other session', 'not sidechain',
+  'partial', 'duplicate request', 'duplicate child', 'writable', 'edit tools'] as const) {
+  test(`background dispatch transfer requires unique read-only child ownership: ${scenario}`, async () => {
+    const f = await fixture()
+    f.binding.projects_dir = join(f.dir, 'projects')
+    const transcript = sessionJsonlPath('session', f.dir, f.binding.projects_dir)
+    const directory = join(transcript.slice(0, -'.jsonl'.length), 'subagents')
+    f.input.request = { ...f.input.request, writable: scenario === 'writable',
+      tools: scenario === 'edit tools' ? 'edit' : 'read-only' }
+    let yielded = 0
+    f.binding.session.acquireTurn = async background => {
+      background?.(() => { yielded++ })
+      return () => {}
+    }
+    f.binding.session.child.submitLine = async () => {
+      await mkdir(directory, { recursive: true })
+      await writeFile(join(directory, 'agent-bound.meta.json'), JSON.stringify({ description: 'build: step' }))
+      if (scenario === 'duplicate child') await writeFile(join(directory, 'agent-extra.meta.json'), JSON.stringify({ description: 'build: step' }))
+      if (scenario === 'metadata only') return
+      const request = scenario === 'other request' ? { ...f.input.request, run_id: 'other' } : f.input.request
+      const content = `Request (data): ${JSON.stringify(request)}`
+      const row = { agentId: scenario === 'other child' ? 'other' : 'bound', sessionId: scenario === 'other session' ? 'other' : 'session',
+        isSidechain: scenario !== 'not sidechain', type: 'user', message: { role: 'user', content: scenario === 'duplicate request' ? `${content}\n${content}` : content } }
+      await writeFile(join(directory, 'agent-bound.jsonl'), JSON.stringify(row) + (scenario === 'partial' ? '' : '\n'))
+    }
+    let polls = 0
+    const run = createClaudeActingTurn(f.binding, { now: () => 0, pause: async () => {
+      expect(yielded).toBe(scenario === 'exact' ? 1 : 0)
+      if (++polls === 2) await writeFile(f.input.request.result.path, '{}')
+    } })
+    expect(await run(f.input)).toEqual({ kind: 'turn-ended' })
+    expect(polls).toBe(2)
+    expect(yielded).toBe(scenario === 'exact' ? 1 : 0)
+  })
+}
+
+test('yielding a dispatch slot preserves its busy lease and release is idempotent', async () => {
+  const session = new ReplSession('fixture', 'generation', 'session', 'channel', '/tmp')
+  let yieldDispatch!: () => void
+  const releaseFirst = await session.acquireTurn(yieldSlot => { yieldDispatch = yieldSlot })
+  const queued = session.acquireTurn(() => {})
+  expect(session.turnSlotHeld).toBe(2)
+  yieldDispatch(); yieldDispatch()
+  const releaseSecond = await queued
+  expect(session.turnSlotHeld).toBe(2)
+  releaseSecond(); releaseSecond()
+  expect(session.turnSlotHeld).toBe(1)
+  releaseFirst(); releaseFirst()
+  expect(session.turnSlotHeld).toBe(0)
+})
+
+test('an ordinary writer waits for every background reader and later readers cannot pass it', async () => {
+  const session = new ReplSession('fixture', 'generation', 'session', 'channel', '/tmp')
+  let yieldFirst!: () => void, yieldSecond!: () => void
+  const releaseFirst = await session.acquireTurn(yieldSlot => { yieldFirst = yieldSlot })
+  yieldFirst()
+  const releaseSecond = await session.acquireTurn(yieldSlot => { yieldSecond = yieldSlot })
+  yieldSecond()
+  const admitted: string[] = []
+  const writer = session.acquireTurn().then(release => { admitted.push('writer'); return release })
+  const laterReader = session.acquireTurn(() => {}).then(release => { admitted.push('later reader'); return release })
+  // Drain the acquisition continuations, not elapsed wall time. With the reader
+  // barrier removed the writer has enough turns to enter and the assertion fails.
+  for (let turn = 0; turn < 8; turn++) await Promise.resolve()
+  expect(admitted).toEqual([])
+  expect(session.turnSlotHeld).toBe(4)
+  releaseFirst()
+  for (let turn = 0; turn < 8; turn++) await Promise.resolve()
+  expect(admitted).toEqual([])
+  releaseSecond()
+  const releaseWriter = await writer
+  expect(admitted).toEqual(['writer'])
+  expect(session.turnSlotHeld).toBe(2)
+  releaseWriter()
+  const releaseReader = await laterReader
+  expect(admitted).toEqual(['writer', 'later reader'])
+  releaseReader()
+  expect(session.turnSlotHeld).toBe(0)
+})
+
+for (const grant of ['writable', 'edit tools'] as const) {
+  test(`the acting consumer admits ${grant} only after existing background readers settle`, async () => {
+    const f = await fixture()
+    const session = new ReplSession('fixture', 'generation', 'session', 'channel', f.dir)
+    session.toolSurface = LIVE_AGENT_TOOL_NAMES.join(',')
+    session.attachChild(f.binding.session.child)
+    f.binding.session = session
+    f.input.timeout_ms = 10_000
+    f.input.request = { ...f.input.request, writable: grant === 'writable',
+      tools: grant === 'edit tools' ? 'edit' : 'read-only', budget: { wall_ms: 10_000 } }
+    let yieldDispatch!: () => void
+    const releaseReader = await session.acquireTurn(yieldSlot => { yieldDispatch = yieldSlot })
+    yieldDispatch()
+    let admitted = 0
+    const acquire = session.acquireTurn.bind(session)
+    session.acquireTurn = async background => {
+      const release = await acquire(background)
+      admitted++
+      return release
+    }
+    const waiting = f.run()
+    try {
+      for (let turn = 0; turn < 8; turn++) await Promise.resolve()
+      expect(f.commands).toHaveLength(0)
+      expect(admitted).toBe(0)
+      expect(session.turnSlotHeld).toBe(2)
+    } finally { releaseReader(); await waiting }
+    expect(await waiting).toEqual({ kind: 'turn-ended' })
+    expect(f.commands).toHaveLength(1)
+    expect(session.turnSlotHeld).toBe(0)
+  })
+}
+
+for (const outcome of ['cancelled', 'rate limited', 'lost acknowledgement'] as const) {
+  test(`a bound read-only child stays owned without replay when ${outcome}`, async () => {
+    const f = await fixture()
+    f.binding.projects_dir = join(f.dir, 'projects')
+    f.input.request = { ...f.input.request, writable: false, tools: 'read-only', budget: { wall_ms: 1000 } }
+    const transcript = sessionJsonlPath('session', f.dir, f.binding.projects_dir)
+    const directory = join(transcript.slice(0, -'.jsonl'.length), 'subagents')
+    const childPath = join(directory, 'agent-bound.jsonl')
+    const session = new ReplSession('fixture', 'generation', 'session', 'channel', f.dir)
+    session.toolSurface = LIVE_AGENT_TOOL_NAMES.join(',')
+    session.attachChild(f.binding.session.child)
+    f.binding.session = session
+    const identity = { agentId: 'bound', sessionId: 'session', isSidechain: true }
+    session.child.submitLine = async text => {
+      f.commands.push(text)
+      await mkdir(directory, { recursive: true })
+      await writeFile(join(directory, 'agent-bound.meta.json'), JSON.stringify({ description: 'build: step' }))
+      await writeFile(childPath, JSON.stringify({ ...identity, type: 'user', message: { role: 'user',
+        content: `Request (data): ${JSON.stringify(f.input.request)}` } }) + '\n')
+      if (outcome === 'lost acknowledgement') throw new Error('lost acknowledgement')
+    }
+    const controller = new AbortController()
+    const actingTurn = createClaudeActingTurn(f.binding, { now: () => 0, pause: async () => {
+      expect(session.turnSlotHeld).toBe(1)
+      if (outcome === 'cancelled') controller.abort()
+      else await appendFile(childPath, JSON.stringify({ ...identity, type: 'assistant',
+        message: { role: 'assistant', model: '<synthetic>' }, error: 'rate_limit', isApiErrorMessage: true,
+        apiErrorStatus: 429, quotaLimits: { status: 'rejected' }, requestId: 'quota' }) + '\n')
+    } })
+    const runners = await createProjectRunners({ conversation: f.input.conversation, run_id: 'run', state_dir: f.dir,
+      actingTurn, headless: {}, trailer: { schemas: new Map(), metadata: () => undefined } })
+    const result = await runners.inRepl!.run(f.input.request, 'in-repl', controller.signal)
+    expect(result.kind).toBe(outcome === 'rate limited' ? 'blocked' : 'unknown')
+    expect(session.turnSlotHeld).toBe(0)
+    // A new runner and live signal cannot duplicate the uncertain accepted child.
+    const replacement = await createProjectRunners({ conversation: f.input.conversation, run_id: 'run', state_dir: f.dir,
+      actingTurn, headless: {}, trailer: { schemas: new Map(), metadata: () => undefined } })
+    expect((await replacement.inRepl!.run(f.input.request, 'in-repl', new AbortController().signal)).kind).toBe('unknown')
+    expect(f.commands).toHaveLength(1)
+  })
+}
 
 for (const provider of PROVIDERS.filter(p => p !== 'anthropic')) {
   test(`refuses provider ${provider} by name`, async () => {

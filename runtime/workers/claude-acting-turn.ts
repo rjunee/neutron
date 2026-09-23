@@ -2,6 +2,7 @@ import { open, readdir, readFile, stat } from 'node:fs/promises'
 import { SUBAGENT_TOOL_NAME } from './claude-tool-contract.ts'
 import { join, relative, resolve, sep } from 'node:path'
 import { setTimeout as delay } from 'node:timers/promises'
+import { isDeepStrictEqual } from 'node:util'
 import { sessionJsonlPath } from '../adapters/claude-code/persistent/jsonl-resumability.ts'
 import type { BoundedWorkRequest, ToolGrant } from '../bounded-work.ts'
 import { claudeChildRateLimited } from './claude-child-rate-limit.ts'
@@ -46,6 +47,26 @@ interface SubagentObservation {
   /** One of them names THIS step. */
   readonly matched: boolean
   readonly rateLimited?: boolean
+  /** Unique child transcript proves the complete request and provider identity. */
+  readonly bound?: boolean
+}
+
+async function childOwnsRequest(path: string, agentId: string, sessionId: string, request: BoundedWorkRequest): Promise<boolean> {
+  try {
+    const file = await open(path, 'r')
+    try {
+      const bytes = Buffer.alloc(64 * 1024)
+      const { bytesRead } = await file.read(bytes, 0, bytes.length, 0)
+      const text = bytes.subarray(0, bytesRead).toString('utf8')
+      const end = text.indexOf('\n')
+      if (end < 0) return false
+      const row = JSON.parse(text.slice(0, end))
+      if (row.agentId !== agentId || row.sessionId !== sessionId || row.isSidechain !== true
+        || row.type !== 'user' || row.message?.role !== 'user' || typeof row.message.content !== 'string') return false
+      const requests = row.message.content.split('\n').filter((line: string) => line.startsWith('Request (data): '))
+      return requests.length === 1 && isDeepStrictEqual(JSON.parse(requests[0]!.slice('Request (data): '.length)), request)
+    } finally { await file.close() }
+  } catch { return false }
 }
 
 async function observeSubagents(directory: string, description: string, request: BoundedWorkRequest, sessionId: string): Promise<SubagentObservation> {
@@ -74,7 +95,9 @@ async function observeSubagents(directory: string, description: string, request:
   }
   const rateLimited = children.length === 1 && await claudeChildRateLimited(
     join(directory, `agent-${children[0]}.jsonl`), children[0]!, sessionId, request)
-  return { directory: 'readable', metaFiles, matched, rateLimited }
+  const bound = children.length === 1 && await childOwnsRequest(
+    join(directory, `agent-${children[0]}.jsonl`), children[0]!, sessionId, request)
+  return { directory: 'readable', metaFiles, matched, rateLimited, bound }
 }
 
 type DispatchConsumption = 'consumed' | 'not-consumed' | 'unreadable'
@@ -196,7 +219,9 @@ export function createClaudeActingTurn(binding: ClaudeActingSession, clock: Obse
     // actuation. Racing acquisition must never dispatch after the caller times out.
     let readingConsumption = false
     const observe = async () => {
-      const release = await session.acquireTurn()
+      let yieldDispatch: (() => void) | undefined
+      const readOnly = !request.writable && toolRank[request.tools] <= toolRank['read-only']
+      const release = await session.acquireTurn(readOnly ? yieldSlot => { yieldDispatch = yieldSlot } : undefined)
       try {
         if (expired()) return unknown()
         // JSON escapes newlines: submitLine accepts one line and owns text/Enter ordering.
@@ -228,6 +253,14 @@ export function createClaudeActingTurn(binding: ClaudeActingSession, clock: Obse
           }
           seen = await observeSubagents(subagents, `${request.role}: ${request.step_id}`, request, session.sessionId)
           if (seen.rateLimited) return { kind: 'blocked' as const, on: 'Claude child stopped at the provider rate limit (HTTP 429).' }
+          // Terminal acknowledgement, parent consumption, and description-only
+          // metadata cannot transfer ownership. Only a uniquely bound read-only
+          // child permits another parent submission while this result is pending.
+          // Keep the busy lease so revocation/model switching still sees live work.
+          if (seen.bound) {
+            yieldDispatch?.()
+            yieldDispatch = undefined
+          }
           accepted ||= seen.matched
           if (!accepted && clock.now() >= dispatchDeadline) {
             readingConsumption = true
