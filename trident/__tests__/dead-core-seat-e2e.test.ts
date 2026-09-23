@@ -87,7 +87,7 @@ async function runWorkflow(script: Script): Promise<RunOut> {
     baseBranch: 'main',
     slug: 'dead-seat',
     maxRounds: 3,
-    execution_strategy: 'single',
+    executionStrategy: 'single',
     mergeMode: 'local',
     prNumber: null,
     branch: null,

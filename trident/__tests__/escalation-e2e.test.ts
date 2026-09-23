@@ -186,7 +186,7 @@ async function runWorkflow(
     // Deliberately generous: a run that stops at round 2 cannot have been stopped by
     // the cap, which is the whole claim.
     maxRounds: opts.maxRounds ?? 6,
-    execution_strategy: 'single',
+    executionStrategy: 'single',
     mergeMode: 'local',
     prNumber: null,
     branch: null,

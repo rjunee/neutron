@@ -159,7 +159,7 @@ async function runWorkflow(script: Script): Promise<RunOut> {
     baseBranch: 'main',
     slug: 'dying-seat',
     maxRounds: 3,
-    execution_strategy: 'single',
+    executionStrategy: 'single',
     mergeMode: script.pr === true ? 'pr' : 'local',
     prNumber: script.pr === true ? 7 : null,
     branch: null,
