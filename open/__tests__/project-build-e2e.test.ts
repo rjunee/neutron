@@ -51,7 +51,7 @@
  */
 import { LIVE_AGENT_TOOL_NAMES } from '@neutronai/gateway/wiring/build-live-agent-turn.ts'
 import { afterEach, expect, spyOn, test } from 'bun:test'
-import { chmod, mkdir, mkdtemp, readFile, readdir, rename, rm, symlink, writeFile } from 'node:fs/promises'
+import { chmod, mkdir, mkdtemp, readFile, readdir, realpath, rename, rm, symlink, writeFile } from 'node:fs/promises'
 import { tmpdir } from 'node:os'
 import { join } from 'node:path'
 import { fileURLToPath } from 'node:url'
@@ -731,6 +731,7 @@ async function fixture(options: { ralph?: boolean; moreTasks?: boolean; suiteExi
   /** See `WorkerWorld.hostLedger` (default `false`). */
   hostLedger?: boolean
   bunWorkspace?: boolean
+  bunWorkspacePeer?: boolean
   manifest?: Record<string, unknown>
   dispatchTask?: string
   blockersByRound?: readonly number[]; replanRounds?: readonly number[]
@@ -793,8 +794,16 @@ async function fixture(options: { ralph?: boolean; moreTasks?: boolean; suiteExi
     await writeFile(join(repo, 'vendor', 'package', 'index.js'), 'exports.message = "dependency consumed"\n')
     const packed = await spawnCapture(['tar', '-czf', 'dependency.tgz', 'package'], join(repo, 'vendor'))
     expect(packed.ok).toBe(true)
-    await writeFile(join(repo, 'app', 'package.json'), JSON.stringify({ name: 'fixture-app', dependencies: { 'fixture-dependency': 'file:../vendor/dependency.tgz' } }))
-    await writeFile(join(repo, 'app', 'check.ts'), 'import { message } from "fixture-dependency"; if (message !== "dependency consumed") throw Error("wrong dependency"); console.log(message)\n')
+    if (options.bunWorkspacePeer) {
+      await mkdir(join(repo, 'vendor', 'peer'), { recursive: true })
+      await writeFile(join(repo, 'vendor', 'peer', 'package.json'), JSON.stringify({ name: 'fixture-peer', version: '1.0.0', main: 'index.js' }))
+      await writeFile(join(repo, 'vendor', 'peer', 'index.js'), 'exports.message = "local peer"\n')
+      expect((await spawnCapture(['tar', '-czf', 'peer.tgz', 'peer'], join(repo, 'vendor'))).ok).toBe(true)
+    }
+    await writeFile(join(repo, 'app', 'package.json'), JSON.stringify({ name: 'fixture-app', dependencies: { 'fixture-dependency': 'file:../vendor/dependency.tgz' },
+      ...(options.bunWorkspacePeer ? { peerDependencies: { 'fixture-peer': 'file:../vendor/peer.tgz' } } : {}) }))
+    await writeFile(join(repo, 'app', 'check.ts'), 'import { message } from "fixture-dependency"; if (message !== "dependency consumed") throw Error("wrong dependency"); console.log(message)\n'
+      + (options.bunWorkspacePeer ? 'import { message as peer } from "fixture-peer"; if (peer !== "local peer") throw Error("wrong peer");\n' : ''))
     await writeFile(join(repo, 'scripts', 'ci', 'verify-workspace-deps.ts'), await readFile(new URL('../../scripts/ci/verify-workspace-deps.ts', import.meta.url), 'utf8'))
     await writeFile(join(repo, 'scripts', 'ci', 'suite.sh'), '#!/usr/bin/env bash\nset -e\nbun scripts/ci/verify-workspace-deps.ts\nbun app/check.ts\n')
     const installed = await spawnCapture(['bun', 'install'], repo, { BUN_INSTALL_CACHE_DIR: join(dir, 'bun-cache') })
@@ -1222,6 +1231,223 @@ test('Bun workspace recovery repairs missing dependencies before workers', async
   expect(log.match(/Worktree-local dependency preparation completed/g)).toHaveLength(2)
 }, 120_000)
 
+test('Bun workspace unchanged recovery saves an install and still verifies before merging', async () => {
+  const f = await fixture({ bunWorkspace: true })
+  const original = f.context.runInstall!
+  const calls: string[] = []
+  f.context.runInstall = Object.assign(async (...args: Parameters<typeof original>) => {
+    calls.push(args[0][2]!.includes('verify-workspace-deps.ts') ? 'verify' : 'install')
+    return original(...args)
+  }, { writesDiffOutput: true as const })
+  await f.prepare()
+  expect(calls).toEqual(['install', 'verify'])
+  f.input.run = f.store.get(f.row.id)!
+  const outcome = await drive(f, 'pr')
+  expect(outcome.kind, why(f, outcome)).toBe('merged')
+  expect(calls).toEqual(['install', 'verify', 'verify'])
+}, 120_000)
+
+for (const changed of ['root manifest', 'workspace manifest', 'lockfile', 'config', 'branch verifier',
+  'revision', 'missing receipt', 'corrupt receipt', 'wrong receipt', 'missing modules', 'toolchain'] as const) {
+  test(`Bun workspace receipt requires installation after changed ${changed}`, async () => {
+    const f = await fixture({ bunWorkspace: true })
+    await f.prepare()
+    const worktree = f.store.get(f.row.id)!.worktree!
+    const receipt = join(f.context.stateRoot, encodeURIComponent(f.row.id), 'dependencies-receipt.json')
+    // Positive control: a real verified install created the observation we invalidate.
+    expect(JSON.parse(await readFile(receipt, 'utf8')).key).toMatch(/^[a-f0-9]{64}$/)
+    const originalPath = process.env.PATH
+    if (changed === 'revision') {
+      await gitOut(spawnCapture, worktree, ['-c', 'user.name=Fixture', '-c', 'user.email=fixture@example.invalid', 'commit', '--allow-empty', '-m', 'fixture revision'])
+    } else if (changed === 'missing receipt' || changed === 'missing modules') {
+      await rm(changed === 'missing receipt' ? receipt : join(worktree, 'node_modules'), { recursive: true })
+    } else if (changed === 'corrupt receipt') await writeFile(receipt, 'invalid')
+    else if (changed === 'wrong receipt') {
+      const stored = JSON.parse(await readFile(receipt, 'utf8'))
+      await writeFile(receipt, JSON.stringify({ ...stored, key: '0'.repeat(64) }))
+    } else if (changed === 'toolchain') {
+      const bin = join(f.dir, 'replacement-toolchain')
+      await mkdir(bin)
+      const actual = Bun.which('bun')!
+      await writeFile(join(bin, 'bun'), `#!/bin/sh\nexec '${actual.replaceAll("'", "'\\''")}' "$@"\n`, { mode: 0o755 })
+      process.env.PATH = `${bin}:${originalPath}`
+    } else {
+      const path = join(worktree, {
+        'root manifest': 'package.json', 'workspace manifest': 'app/package.json', 'lockfile': 'bun.lock',
+        'config': 'bunfig.toml', 'branch verifier': 'scripts/ci/verify-workspace-deps.ts',
+      }[changed])
+      await writeFile(path, `${await readFile(path, 'utf8')}\n`)
+    }
+    const original = f.context.runInstall!
+    const calls: string[] = []
+    f.context.runInstall = Object.assign(async (...args: Parameters<typeof original>) => {
+      calls.push(args[0][2]!.includes('verify-workspace-deps.ts') ? 'verify' : 'install')
+      return original(...args)
+    }, { writesDiffOutput: true as const })
+    try {
+      await f.prepare()
+      expect(calls).toEqual(['install', 'verify'])
+      expect(JSON.parse(await readFile(receipt, 'utf8')).key).toMatch(/^[a-f0-9]{64}$/)
+    } finally { process.env.PATH = originalPath }
+  }, 30_000)
+}
+
+test('Bun workspace reused receipt never hides verifier failure and failure invalidates success', async () => {
+  const f = await fixture({ bunWorkspace: true })
+  await f.prepare()
+  const receipt = join(f.context.stateRoot, encodeURIComponent(f.row.id), 'dependencies-receipt.json')
+  const stored = await readFile(receipt, 'utf8')
+  expect(JSON.parse(stored).key).toMatch(/^[a-f0-9]{64}$/)
+  const original = f.context.runInstall!
+  const calls: string[] = []
+  let failVerification = true
+  f.context.runInstall = Object.assign(async (...args: Parameters<typeof original>) => {
+    const verifier = args[0][2]!.includes('verify-workspace-deps.ts')
+    calls.push(verifier ? 'verify' : 'install')
+    if (verifier && failVerification) return { ok: false, exit_code: 3, stdout: '', stderr: 'verification failed' }
+    return original(...args)
+  }, { writesDiffOutput: true as const })
+  await expect(f.prepare()).rejects.toThrow('workspace dependency verification did not complete successfully')
+  expect(calls).toEqual(['verify'])
+  await expect(readFile(receipt)).rejects.toMatchObject({ code: 'ENOENT' })
+  expect(f.world.dispatches).toEqual([])
+  failVerification = false
+  await f.prepare()
+  expect(calls).toEqual(['verify', 'install', 'verify'])
+}, 30_000)
+
+test('Bun workspace receipt cannot borrow an ancestor after its local dependency disappears', async () => {
+  const f = await fixture({ bunWorkspace: true })
+  await f.prepare()
+  const worktree = f.store.get(f.row.id)!.worktree!
+  const ancestor = join(worktree, '..', 'node_modules', 'fixture-dependency')
+  await mkdir(ancestor, { recursive: true })
+  await writeFile(join(ancestor, 'package.json'), JSON.stringify({ name: 'fixture-dependency', main: 'index.js' }))
+  await writeFile(join(ancestor, 'index.js'), 'exports.message = "borrowed dependency"')
+  await rm(join(worktree, 'app', 'node_modules', 'fixture-dependency'))
+  // Positive control: the old verifier really accepts the ancestor resolution.
+  const verifier = fileURLToPath(new URL('../../scripts/ci/verify-workspace-deps.ts', import.meta.url))
+  expect((await spawnCapture(['bun', '--config=/dev/null', '--no-env-file', verifier, worktree], f.dir)).ok).toBe(true)
+  expect((await spawnCapture(['bun', 'app/check.ts'], worktree)).stderr).toContain('wrong dependency')
+  const original = f.context.runInstall!
+  let installs = 0
+  f.context.runInstall = Object.assign(async (...args: Parameters<typeof original>) => {
+    if (!args[0][2]!.includes('verify-workspace-deps.ts')) installs++
+    return original(...args)
+  }, { writesDiffOutput: true as const })
+  await f.prepare()
+  expect(installs).toBe(1)
+  expect((await spawnCapture(['bun', 'app/check.ts'], worktree)).stdout).toBe('dependency consumed')
+}, 30_000)
+
+for (const shape of ['borrowed', 'hoisted'] as const) {
+  test(`Bun workspace receipt tracks ${shape} peer dependencies`, async () => {
+    const f = await fixture({ bunWorkspace: true, bunWorkspacePeer: true })
+    await f.prepare()
+    const worktree = f.store.get(f.row.id)!.worktree!
+    const local = join(worktree, 'app', 'node_modules', 'fixture-peer')
+    const target = await realpath(local)
+    if (shape === 'borrowed') {
+      const ancestor = join(worktree, '..', 'node_modules', 'fixture-peer')
+      await mkdir(ancestor, { recursive: true })
+      await writeFile(join(ancestor, 'package.json'), JSON.stringify({ name: 'fixture-peer', main: 'index.js' }))
+      await writeFile(join(ancestor, 'index.js'), 'exports.message = "borrowed peer"')
+    } else await symlink(target, join(worktree, 'node_modules', 'fixture-peer'))
+    await rm(local)
+    const before = await spawnCapture(['bun', 'app/check.ts'], worktree)
+    if (shape === 'borrowed') expect(before.stderr).toContain('wrong peer')
+    else expect(before.ok, before.stderr).toBe(true)
+    const original = f.context.runInstall!
+    let installs = 0
+    f.context.runInstall = Object.assign(async (...args: Parameters<typeof original>) => {
+      if (!args[0][2]!.includes('verify-workspace-deps.ts')) installs++
+      return original(...args)
+    }, { writesDiffOutput: true as const })
+    await f.prepare()
+    expect(installs).toBe(shape === 'borrowed' ? 1 : 0)
+    const after = await spawnCapture(['bun', 'app/check.ts'], worktree)
+    expect(after.ok, after.stderr).toBe(true)
+  }, 30_000)
+}
+
+test('Bun workspace preparation never records external peer resolution as reusable evidence', async () => {
+  const f = await fixture({ bunWorkspace: true, bunWorkspacePeer: true })
+  const ancestor = join(f.dir, 'external-peer')
+  await mkdir(ancestor)
+  await writeFile(join(ancestor, 'package.json'), JSON.stringify({ name: 'fixture-peer', main: 'index.js' }))
+  await writeFile(join(ancestor, 'index.js'), 'exports.message = "borrowed peer"')
+  const original = f.context.runInstall!
+  let borrow = true
+  let installs = 0
+  f.context.runInstall = Object.assign(async (...args: Parameters<typeof original>) => {
+    if (args[0][2]!.includes('verify-workspace-deps.ts')) return original(...args)
+    installs++
+    const local = join(args[1]!, 'app', 'node_modules', 'fixture-peer')
+    await rm(local, { force: true })
+    const result = await original(...args)
+    if (borrow) {
+      await rm(local)
+      await symlink(ancestor, local)
+    }
+    return result
+  }, { writesDiffOutput: true as const })
+  const receipt = join(f.context.stateRoot, encodeURIComponent(f.row.id), 'dependencies-receipt.json')
+  await f.prepare()
+  await expect(readFile(receipt)).rejects.toMatchObject({ code: 'ENOENT' })
+  await f.prepare()
+  expect(installs).toBe(2)
+  await expect(readFile(receipt)).rejects.toMatchObject({ code: 'ENOENT' })
+  borrow = false
+  await f.prepare()
+  expect(JSON.parse(await readFile(receipt, 'utf8')).resolution).toMatch(/^[a-f0-9]{64}$/)
+  await f.prepare()
+  expect(installs).toBe(3)
+}, 30_000)
+
+test('Bun workspace receipt preserves valid root-local hoisting and stable unresolved optional probes', async () => {
+  const f = await fixture({ bunWorkspace: true })
+  await f.prepare()
+  const worktree = f.store.get(f.row.id)!.worktree!
+  const local = join(worktree, 'app', 'node_modules', 'fixture-dependency')
+  const target = await realpath(local)
+  await symlink(target, join(worktree, 'node_modules', 'fixture-dependency'))
+  await rm(local)
+  const manifest = join(worktree, 'app', 'package.json')
+  const parsed = JSON.parse(await readFile(manifest, 'utf8'))
+  await writeFile(manifest, JSON.stringify({ ...parsed, optionalDependencies: { 'unavailable-fixture-optional': '*' } }))
+  const original = f.context.runInstall!
+  let installs = 0
+  f.context.runInstall = Object.assign(async (...args: Parameters<typeof original>) => {
+    if (!args[0][2]!.includes('verify-workspace-deps.ts')) {
+      installs++
+      // Model an installer that omits an unavailable optional package. All
+      // resolution/verifier/receipt behavior remains the real consuming path.
+      return { ok: true, exit_code: 0, stdout: '', stderr: '' }
+    }
+    return original(...args)
+  }, { writesDiffOutput: true as const })
+  await f.prepare()
+  expect(installs).toBe(1)
+  await f.prepare()
+  expect(installs).toBe(1)
+  expect((await spawnCapture(['bun', 'app/check.ts'], worktree)).stdout).toBe('dependency consumed')
+}, 30_000)
+
+test('Bun workspace receipt refuses a borrowed Bun store before workers', async () => {
+  const f = await fixture({ bunWorkspace: true })
+  await f.prepare()
+  const worktree = f.store.get(f.row.id)!.worktree!
+  const store = join(worktree, 'node_modules', '.bun')
+  const borrowed = join(f.dir, 'borrowed-store')
+  await rename(store, borrowed)
+  await symlink(borrowed, store)
+  f.context.runInstall = Object.assign(async () => { throw new Error('must refuse before commands') }, { writesDiffOutput: true as const })
+  await expect(f.prepare()).rejects.toThrow('Bun store must be a worktree-local directory')
+  expect(f.world.dispatches).toEqual([])
+  await expect(readFile(join(f.context.stateRoot, encodeURIComponent(f.row.id), 'dependencies-receipt.json')))
+    .rejects.toMatchObject({ code: 'ENOENT' })
+}, 30_000)
+
 for (const shape of ['failure', 'failure-installed', 'empty-success', 'empty-store', 'timeout', 'timeout-installed'] as const) {
   test(`Bun workspace install ${shape} cannot dispatch or publish`, async () => {
     const f = await fixture({ bunWorkspace: true })
@@ -1243,6 +1469,8 @@ for (const shape of ['failure', 'failure-installed', 'empty-success', 'empty-sto
     expect(f.github.prs).toEqual([])
     const log = await readFile(join(f.context.stateRoot, encodeURIComponent(f.row.id), 'dependencies.log'), 'utf8')
     expect(log).toContain('REFUSED:')
+    await expect(readFile(join(f.context.stateRoot, encodeURIComponent(f.row.id), 'dependencies-receipt.json')))
+      .rejects.toMatchObject({ code: 'ENOENT' })
   }, 30_000)
 }
 
