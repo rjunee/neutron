@@ -76,6 +76,7 @@ import {
 } from './herdr-protocol.ts'
 import { createHerdrRpc, verifyHerdrProtocol, HerdrError, type HerdrRpc } from './herdr-client.ts'
 import { fireAndForget } from '@neutronai/logger/fire-and-forget.ts'
+import type { ProjectWorkspaceManager } from './project-workspaces.ts'
 
 /** How long to wait for herdr to report the spawned pane's pid before refusing
  *  the spawn. A pane that has exec'd reports one within a poll or two; this is a
@@ -130,6 +131,8 @@ export interface HerdrHostDeps {
   sleep?: (ms: number) => Promise<void>
   /** Workspace to place the REPL's tab in. Defaults to `$HERDR_WORKSPACE_ID`. */
   workspaceId?: string
+  /** Explicit project placement and durable workspace ownership. */
+  projectWorkspaces?: Pick<ProjectWorkspaceManager, 'applyLayout'>
   /** How long to wait for `beginOutput()` before releasing screens anyway, with a
    *  warning. Defaults to {@link HERDR_OUTPUT_GATE_MAX_MS}. */
   outputGateMaxMs?: number
@@ -969,6 +972,9 @@ export class HerdrHost implements AdoptableHost {
    * survived.
    */
   private async applyLayout(client: HerdrRpc, argv: string[], opts: PtySpawnOpts): Promise<string> {
+    if (opts.projectPlacement !== undefined && this.deps.projectWorkspaces === undefined) {
+      throw new Error('herdr-host: explicit project placement requires a workspace manager')
+    }
     const workspaceId = this.deps.workspaceId ?? process.env['HERDR_WORKSPACE_ID']
     // TYPED, not a bare literal. `HerdrLayoutPaneNode` records what was measured
     // against the live server about this node — `command` genuinely execs — and an
@@ -991,9 +997,12 @@ export class HerdrHost implements AdoptableHost {
       // and find themselves where they left off, not yanked to a REPL pane.
       focus: false,
       root,
+      tab_label: opts.label ?? HERDR_REPL_PANE_LABEL,
     }
     if (workspaceId !== undefined && workspaceId !== '') params['workspace_id'] = workspaceId
-    const applied = (await client.call('layout.apply', params)) as unknown as HerdrLayoutApply
+    const applied = opts.projectPlacement !== undefined
+      ? await this.deps.projectWorkspaces!.applyLayout(client, root, opts.projectPlacement)
+      : (await client.call('layout.apply', params)) as unknown as HerdrLayoutApply
     const paneId = applied.layout?.root?.pane_id
     if (typeof paneId !== 'string' || paneId === '') {
       throw new Error(

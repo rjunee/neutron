@@ -334,3 +334,11 @@ export interface HerdrLayoutApply {
     readonly root: { readonly pane_id: string }
   }
 }
+
+/** Project placement uses these protocol-20 fields in addition to pane labels.
+ * A tab label belongs to layout.apply, not its root pane node. */
+export type HerdrProjectLayoutParams = ({ workspace_id: string; tab_id?: never } | { tab_id: string; workspace_id?: never }) & {
+  tab_label: string
+  focus: false
+  root: HerdrLayoutPaneNode
+}

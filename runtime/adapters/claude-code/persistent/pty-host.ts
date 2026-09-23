@@ -50,6 +50,7 @@
  */
 
 import type { Key } from './keystrokes.ts'
+import type { ProjectPanePlacement } from './project-workspaces.ts'
 
 /**
  * How long a host waits for its caller to call {@link PtyChild.beginOutput} before
@@ -361,6 +362,9 @@ export interface PtySpawnOpts {
   cwd: string
   /** Human-legible pane label. Herdr falls back to `neutron-repl` when absent. */
   label?: string
+  /** Explicit project terminal placement. The Herdr host requires its ownership
+   * manager when present; it must never silently use the ambient workspace. */
+  projectPlacement?: ProjectPanePlacement
   /**
    * Environment for the child. Passed verbatim — the caller is responsible
    * for the auth scrub (unset `ANTHROPIC_API_KEY` / set

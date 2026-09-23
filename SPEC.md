@@ -173,6 +173,15 @@ project-bound tools, while harness-based orchestration remains separate
 [the configured-model specification](docs/spec-items/configured-models-for-review-and-chat.md)
 for configuration and the outstanding live compatibility measurements.
 
+Each active project has one owned Herdr workspace; General and genuinely shared
+warm helpers have the separate `Neutron General` workspace.
+Its first tab is `Chat`, and additional agent processes have descriptive task
+names. Sleeping projects release their workspaces after owned work is safely
+retired, retaining conversation history for resume. Activity and uncertain live
+work prevent sleep. This lifecycle does not weaken restart adoption or native
+subagent placement (Decisions Log 2026-09-23, project workspaces;
+[`docs/spec-items/project-herdr-workspaces.md`](docs/spec-items/project-herdr-workspaces.md)).
+
 A warm REPL runs in a **herdr pane** (Decisions Log 2026-09-12, "the REPL
 substrate becomes selectable"), which makes it a child of the herdr server
 rather than of the gateway: a **gateway** restart leaves it running and the next
@@ -312,6 +321,20 @@ references decisions by date; none is a second home for a decision.
 | `docs/plans/*` | Per-sprint mechanics briefs (referenced from `docs/spec-items/`) |
 
 ## Decisions Log (immutable audit trail — NOT the build spec)
+
+### 2026-09-23 — Project-owned Herdr workspaces, useful tab names, and sleeping projects.
+
+Owner-directed: one Herdr workspace per active project, main project chat first,
+and additional agent tabs named for useful work. General and any genuinely shared
+helper that must stay warm belong in `Neutron General`. Project-specific
+workspaces exist only while active. When a project sleeps, release its workspace and preserve its
+conversation for wake/resume. An active or unresolved build, queued work, or
+pending approval keeps the project awake. Workspace cleanup verifies ownership
+and retires saved pane claims; it does not delete transcripts or interrupt live
+work. Native subagents remain inside their harness, as the locked pivot requires;
+terminal views must not duplicate them. The existing REPL restart/adoption
+identity checks remain binding. Specification and delivery boundaries:
+[`docs/spec-items/project-herdr-workspaces.md`](docs/spec-items/project-herdr-workspaces.md).
 
 ### 2026-09-23 — The initial planner selects a persisted execution strategy (#1216).
 
