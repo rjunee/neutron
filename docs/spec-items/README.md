@@ -38,6 +38,7 @@ branch is cut (standard §3.1, §3.2).
 | [`a-retry-must-resume-from-the-checkpoint`](a-retry-must-resume-from-the-checkpoint.md) | Carry a dead run's checkpoint and ralph round into its retry | P0 | yes |
 | [`a-terminal-cause-on-every-terminal-path`](a-terminal-cause-on-every-terminal-path.md) | Emit a terminal cause on every terminal path, and report it | P0 | yes |
 | [`resolve-the-review-diff-base`](resolve-the-review-diff-base.md) | Rev-range base: the pinned sha, else a ref nobody can mistake | P0 | yes |
+| [`salvage-publication-provenance`](salvage-publication-provenance.md) | Preserve publication ownership when salvaging a failed build | P0 | yes |
 | [`the-orchestrator-owns-the-build-loop`](the-orchestrator-owns-the-build-loop.md) | The project REPL owns the build loop | P0 | yes |
 | [`the-review-loop-must-stop-and-re-plan`](the-review-loop-must-stop-and-re-plan.md) | Stop and escalate a review loop instead of iterating on a bad plan | P0 | yes |
 | [`trident-build-efficiency`](trident-build-efficiency.md) | Avoid repeated build work and measure Trident's time and token costs | P0 | yes |

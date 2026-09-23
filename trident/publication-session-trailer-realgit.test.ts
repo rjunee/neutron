@@ -93,6 +93,49 @@ function salvageRun(world: World): TridentRun {
   } as unknown as TridentRun
 }
 
+for (const receipt of ['valid', 'missing', 'mismatched', 'timeout', 'discovered', 'owned'] as const) {
+  test(`salvage publication ownership requires a ${receipt} creation or lineage receipt`, async () => {
+    const world = await seedWorld(['feat: built work'])
+    const d = deps(world)
+    const run = salvageRun(world)
+    const recorded: number[] = []
+    run.published_pr = receipt === 'owned' ? 7 : null
+    const runHost: DiffOutputHost = Object.assign(async (...args: Parameters<DiffOutputHost>) => {
+      const result = await d.run_host(...args)
+      if (args[0][0] !== 'gh' || args[0][2] !== 'create') return result
+      if (receipt === 'missing') return { ...result, stdout: '' }
+      if (receipt === 'mismatched') return { ...result, stdout: 'https://example.test/project/repository/pull/8' }
+      if (receipt === 'timeout') return { ...result, timed_out: true }
+      return result
+    }, { writesDiffOutput: true as const })
+    const published = await publishBuiltCommit({ ...d, run_host: runHost,
+      recordPublication: async pr => { recorded.push(pr) },
+      ...(receipt === 'discovered' || receipt === 'owned' ? { detectExistingPr: async () => 7 } : {}) }, run, null)
+    expect(published.pr).toBe(7)
+    expect(published.published_pr).toBe(receipt === 'valid' || receipt === 'owned' ? 7 : null)
+    expect(d.prCreated()).toBe(receipt !== 'discovered' && receipt !== 'owned')
+    expect(recorded).toEqual(receipt === 'valid' ? [7] : [])
+  })
+}
+
+test('salvage records creation ownership before later review-diff preparation fails', async () => {
+  const world = await seedWorld(['feat: built work'])
+  const d = deps(world)
+  const recorded: number[] = []
+  const runHost: DiffOutputHost = Object.assign(async (...args: Parameters<DiffOutputHost>) => {
+    if (args[0].some(arg => arg.startsWith('--output=/tmp/trident-outer-published-'))) {
+      expect(recorded).toEqual([7])
+      return { ok: false, stdout: '', stderr: 'fixture diff output unavailable', exit_code: 1 }
+    }
+    return d.run_host(...args)
+  }, { writesDiffOutput: true as const })
+  await expect(publishBuiltCommit({ ...d, run_host: runHost,
+    recordPublication: async pr => { recorded.push(pr) } }, salvageRun(world), null))
+    .rejects.toThrow('could not materialize the review diff')
+  expect(recorded).toEqual([7])
+  expect(d.prCreated()).toBe(true)
+})
+
 /** Real git for everything; `gh` answered locally, and every argv recorded. */
 function deps(world: World): PublicationDeps & { calls: string[][]; prCreated: () => boolean } {
   const calls: string[][] = []
@@ -101,7 +144,7 @@ function deps(world: World): PublicationDeps & { calls: string[][]; prCreated: (
     async (cmd: string[], cwd?: string, extraEnv?: Record<string, string>, timeoutMs?: number) => {
       calls.push(cmd)
       if (cmd[0] === 'gh') {
-        if (cmd[1] === 'pr' && cmd[2] === 'create') { created = true; return { ok: true, stdout: '', stderr: '', exit_code: 0 } }
+        if (cmd[1] === 'pr' && cmd[2] === 'create') { created = true; return { ok: true, stdout: 'https://example.test/project/repository/pull/7', stderr: '', exit_code: 0 } }
         return { ok: true, stdout: '', stderr: '', exit_code: 0 }
       }
       return spawnCapture(cmd, cwd, extraEnv, timeoutMs)
@@ -129,7 +172,7 @@ test('#1133 G166 salvage: positive control — a branch with only Co-Authored-By
   expect(await observeRemote(world.checkout, `refs/heads/${BRANCH}`)).toBe('')
   const d = deps(world)
   const published = await publishBuiltCommit(d, salvageRun(world), null)
-  expect(published).toEqual({ pr: 7, head: world.branchTip, push: 'pushed' })
+  expect(published).toEqual({ pr: 7, published_pr: 7, head: world.branchTip, push: 'pushed' })
   expect(await observeRemote(world.checkout, `refs/heads/${BRANCH}`)).toBe(world.branchTip)
   expect(d.prCreated()).toBe(true)
   // The scan ran on this path: the raw object of the branch commit was read before the push.
@@ -165,7 +208,7 @@ for (const concurrentMessage of ['concurrent clean work', `concurrent work\n\n${
     )
     const published = await publishBuiltCommit({ ...d, run_host: racing }, salvageRun(world), null)
     expect(advanced).toBe(true)
-    expect(published).toEqual({ pr: 7, head: world.branchTip, push: 'pushed' })
+    expect(published).toEqual({ pr: 7, published_pr: 7, head: world.branchTip, push: 'pushed' })
     expect(d.prCreated()).toBe(true)
     expect(await observeRemote(world.checkout, `refs/heads/${BRANCH}`)).toBe(world.branchTip)
     // Read the receiver's raw object, not a local copy or just the publisher's return value.

@@ -264,14 +264,14 @@ function buildHybridHost(failPush = false): { run: RunHostCommand; calls: string
     if (cmd[0] === 'gh' && cmd[1] === 'pr' && cmd[2] === 'list') return ok(opened ? '7\n' : '')
     if (cmd[0] === 'gh' && cmd[1] === 'pr' && cmd[2] === 'create') {
       opened = true
-      return ok()
+      return ok('https://example.test/project/repository/pull/7')
     }
     throw new Error(`unexpected host command: ${cmd.join(' ')}`)
   }
   return { run, calls }
 }
 
-function orchestrator(world: World, host: RunHostCommand) {
+function orchestrator(world: World, host: RunHostCommand, store?: TridentRunStore) {
   return buildTridentOrchestrator({
     fire_workflow: async () => ({
       status: 'failed',
@@ -282,6 +282,7 @@ function orchestrator(world: World, host: RunHostCommand) {
     sleep: async () => {},
     now: () => NOW,
     run_host: honourDiffOutput(host),
+    ...(store ? { persist_refire_reset: async (id: string, patch: import('./store.ts').TridentRunUpdate) => { await store.update(id, patch) } } : {}),
   })
 }
 
@@ -317,7 +318,7 @@ describe('REAL git — stranded terminal-failure salvage', () => {
       })
       await store.update(run.id, { branch: run.branch, round: run.round, inner_checkpoint: 'forge-done' })
 
-      const orch = orchestrator(world, harness.run)
+      const orch = orchestrator(world, harness.run, store)
       const loop = new TridentTickLoop({ store, step: orch.step })
       await loop.runOnce()
 
@@ -326,6 +327,7 @@ describe('REAL git — stranded terminal-failure salvage', () => {
       if (row === null) return
       expect(row.phase).toBe('failed')
       expect(row.pr).toBe(7)
+      expect(row.published_pr).toBe(7)
       expect(row.failure_reason).toStartWith(FAILURE)
       expect(row.failure_reason).toContain(TRIDENT_SALVAGE_MARKER)
       expect(row.failure_reason).toContain('#7')

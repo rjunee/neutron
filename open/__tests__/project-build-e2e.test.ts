@@ -2142,6 +2142,56 @@ async function driveUntilTheProcessDies(f: Awaited<ReturnType<typeof fixture>>, 
   host.deps, new AbortController().signal)
 }
 
+for (const owned of [true, false]) test(`salvaged publication ${owned ? 'carries its creation receipt' : 'does not adopt a discovered PR'} into the real retry consumer`, async () => {
+  const task = 'Record a note in NOTES.md and verify the note survives publication and retry without rebuilding'
+  const f = await fixture({ dispatchTask: task })
+  const firstHost = await createProjectBuildHost(await f.prepare())
+  firstHost.deps.publishGate = async () => ({ kind: 'blocked', on: 'fixture proof infrastructure unavailable' })
+  expect(await buildRun({ mode: 'pr', start: 'fresh', run_id: f.row.id,
+    workers: firstHost.workers, repl_provider: 'anthropic', merge_mode: 'pr' },
+  firstHost.deps, new AbortController().signal)).toMatchObject({ kind: 'blocked', phase: 'publish' })
+  const checkpoint = lastCheckpoint(f)
+  const prior = f.store.get(f.row.id)!
+  expect(checkpoint).toMatchObject({ stage: 'built', round: 1 })
+  if (!owned) f.github.prs.push({ number: 1, state: 'OPEN', headRefName: prior.branch!, baseRefName: 'main' })
+  const salvageHost = Object.assign(async (...args: Parameters<typeof f.context.runHost>) => {
+    const argv = args[0]
+    if (argv[0] === 'gh' && argv[1] === 'pr' && argv[2] === 'list' && argv.includes('--jq')) {
+      const pr = f.github.prs.find(row => row.headRefName === argv[argv.indexOf('--head') + 1])
+      return { ok: true, exit_code: 0, stdout: pr ? String(pr.number) : '', stderr: '' }
+    }
+    return f.context.runHost(...args)
+  }, { writesDiffOutput: true as const })
+  const orch = buildTridentOrchestrator({ fire_workflow: async () => { throw Error('No build dispatch during salvage') },
+    db_path: f.input.db_path, base_branch: 'main', run_host: salvageHost, sleep: async () => {},
+    persist_refire_reset: async (id, patch) => { await f.store.update(id, patch) },
+    leak_preflight: async input => ({ status: 'clean', head: input.head, findings: [], skipped_rules: [], attempts: 0, note: 'fixture scanner' }) })
+  const salvaged = await orch.reconcile_stranded({ ...prior, phase: 'failed', failure_reason: 'proof infrastructure unavailable' })
+  expect(salvaged).not.toBeNull()
+  expect(salvaged!.pr).toBe(1)
+  expect(salvaged!.published_pr).toBe(owned ? 1 : null)
+  // The old driver is terminal and its worktree has been released before a new
+  // launch claims the same branch; the saved build checkpoint survives cleanup.
+  expect((await spawnCapture(['git', '-C', f.repo, 'worktree', 'remove', '--force', prior.worktree!], f.repo)).ok).toBe(true)
+  await f.store.save({ ...salvaged!, worktree: null })
+  const dispatched = await dispatchBoardBoundBuild({ task, board_item_id: 'salvage-retry-card' }, {
+    store: f.store, project_slug: 'project', repo_path: f.repo,
+    board: { get: () => ({ id: 'salvage-retry-card', title: task, design_doc_ref: null, linked_run_id: prior.id }), attachRun: async () => {} },
+    resolveBuildRepo: async () => f.repo, resolveMergeMode: async () => 'pr', resolveRalph: async () => false,
+  })
+  expect(dispatched.ok, JSON.stringify(dispatched)).toBe(true)
+  if (!dispatched.ok) return
+  expect(dispatched.run.published_pr).toBe(owned ? 1 : null)
+  f.world.dispatches.length = 0
+  f.input.run = dispatched.run
+  const host = await createProjectBuildHost(await f.prepare())
+  const outcome = await host.run({ mode: 'pr', start: 'resume' }, new AbortController().signal)
+  expect(outcome.kind, why(f, outcome)).toBe(owned ? 'merged' : 'unknown')
+  expect(f.world.dispatches.some(call => ['plan', 'build'].includes(call.role))).toBe(false)
+  expect(f.github.prs[0]!.state).toBe(owned ? 'MERGED' : 'OPEN')
+  expect(f.github.prs).toHaveLength(1)
+}, 30_000)
+
 /** The state a restarted driver actually reads back (`production-host-effects.ts:235`). */
 function lastCheckpoint(f: Awaited<ReturnType<typeof fixture>>) {
   const events = f.store.stageEvents(f.row.id).filter(event => event.stage === 'build-mode-state')

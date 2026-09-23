@@ -86,13 +86,15 @@ export interface PublicationDeps {
   resolveBase: (run: TridentRun) => Promise<string>
   resolvedDiffBase: (run: TridentRun) => Promise<string>
   detectExistingPr: (run: TridentRun) => Promise<number | null>
+  /** Persist only a matched create receipt, before later annotation/diff work. */
+  recordPublication?: (pr: number) => Promise<void>
 }
 
 export async function publishBuiltCommit(
   deps: PublicationDeps,
   run: TridentRun,
   claimedHead: string | null,
-): Promise<{ pr: number; head: string; push: 'pushed' | 'noop-already-at-head' }> {
+): Promise<{ pr: number; published_pr: number | null; head: string; push: 'pushed' | 'noop-already-at-head' }> {
   const opts = deps
   const { resolveBase, resolvedDiffBase, detectExistingPr } = deps
   if (run.merge_mode !== 'pr') throw new Error('outer publish requested outside pr mode')
@@ -340,6 +342,7 @@ export async function publishBuiltCommit(
   }
 
   let pr = prBefore
+  let publishedPr = pr !== null && run.published_pr === pr ? pr : null
   if (pr === null) {
     const base = await resolveBase(run)
     const created = await runWithRetries(
@@ -347,6 +350,14 @@ export async function publishBuiltCommit(
     )
     if (!created.ok) throw new Error(publishFailureReason('open a PR for', branch, created.stderr))
     pr = await detectExistingPr({ ...run, branch })
+    // Discovery alone cannot prove ownership. Match the create command's receipt
+    // to the independently observed PR before granting this run lineage ownership.
+    const receipt = /^https:\/\/[^/\s]+\/[^/\s]+\/[^/\s]+\/pull\/([1-9]\d*)$/.exec(created.stdout.trim())
+    const number = receipt ? Number(receipt[1]) : null
+    if (!created.timed_out && number !== null && Number.isSafeInteger(number) && number === pr) {
+      await deps.recordPublication?.(number)
+      publishedPr = number
+    }
   }
   if (pr === null) throw new Error(`outer publisher could not confirm an open PR for branch ${branch}`)
 
@@ -648,5 +659,5 @@ export async function publishBuiltCommit(
       }
     }
   }
-  return { pr, head: headToPublish, push: alreadyPublished ? 'noop-already-at-head' : 'pushed' }
+  return { pr, published_pr: publishedPr, head: headToPublish, push: alreadyPublished ? 'noop-already-at-head' : 'pushed' }
 }
