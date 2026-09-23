@@ -1222,6 +1222,105 @@ test('Bun workspace recovery repairs missing dependencies before workers', async
   expect(log.match(/Worktree-local dependency preparation completed/g)).toHaveLength(2)
 }, 120_000)
 
+test('Bun workspace unchanged recovery saves an install and still verifies before merging', async () => {
+  const f = await fixture({ bunWorkspace: true })
+  const original = f.context.runInstall!
+  const calls: string[] = []
+  f.context.runInstall = Object.assign(async (...args: Parameters<typeof original>) => {
+    calls.push(args[0][2]!.includes('verify-workspace-deps.ts') ? 'verify' : 'install')
+    return original(...args)
+  }, { writesDiffOutput: true as const })
+  await f.prepare()
+  expect(calls).toEqual(['install', 'verify'])
+  f.input.run = f.store.get(f.row.id)!
+  const outcome = await drive(f, 'pr')
+  expect(outcome.kind, why(f, outcome)).toBe('merged')
+  expect(calls).toEqual(['install', 'verify', 'verify'])
+}, 120_000)
+
+for (const changed of ['root manifest', 'workspace manifest', 'lockfile', 'config', 'branch verifier',
+  'revision', 'missing receipt', 'corrupt receipt', 'wrong receipt', 'missing modules', 'toolchain'] as const) {
+  test(`Bun workspace receipt requires installation after changed ${changed}`, async () => {
+    const f = await fixture({ bunWorkspace: true })
+    await f.prepare()
+    const worktree = f.store.get(f.row.id)!.worktree!
+    const receipt = join(f.context.stateRoot, encodeURIComponent(f.row.id), 'dependencies-receipt.json')
+    // Positive control: a real verified install created the observation we invalidate.
+    expect(JSON.parse(await readFile(receipt, 'utf8')).key).toMatch(/^[a-f0-9]{64}$/)
+    const originalPath = process.env.PATH
+    if (changed === 'revision') {
+      await gitOut(spawnCapture, worktree, ['-c', 'user.name=Fixture', '-c', 'user.email=fixture@example.invalid', 'commit', '--allow-empty', '-m', 'fixture revision'])
+    } else if (changed === 'missing receipt' || changed === 'missing modules') {
+      await rm(changed === 'missing receipt' ? receipt : join(worktree, 'node_modules'), { recursive: true })
+    } else if (changed === 'corrupt receipt') await writeFile(receipt, 'invalid')
+    else if (changed === 'wrong receipt') {
+      const stored = JSON.parse(await readFile(receipt, 'utf8'))
+      await writeFile(receipt, JSON.stringify({ ...stored, key: '0'.repeat(64) }))
+    } else if (changed === 'toolchain') {
+      const bin = join(f.dir, 'replacement-toolchain')
+      await mkdir(bin)
+      const actual = Bun.which('bun')!
+      await writeFile(join(bin, 'bun'), `#!/bin/sh\nexec '${actual.replaceAll("'", "'\\''")}' "$@"\n`, { mode: 0o755 })
+      process.env.PATH = `${bin}:${originalPath}`
+    } else {
+      const path = join(worktree, {
+        'root manifest': 'package.json', 'workspace manifest': 'app/package.json', 'lockfile': 'bun.lock',
+        'config': 'bunfig.toml', 'branch verifier': 'scripts/ci/verify-workspace-deps.ts',
+      }[changed])
+      await writeFile(path, `${await readFile(path, 'utf8')}\n`)
+    }
+    const original = f.context.runInstall!
+    const calls: string[] = []
+    f.context.runInstall = Object.assign(async (...args: Parameters<typeof original>) => {
+      calls.push(args[0][2]!.includes('verify-workspace-deps.ts') ? 'verify' : 'install')
+      return original(...args)
+    }, { writesDiffOutput: true as const })
+    try {
+      await f.prepare()
+      expect(calls).toEqual(['install', 'verify'])
+      expect(JSON.parse(await readFile(receipt, 'utf8')).key).toMatch(/^[a-f0-9]{64}$/)
+    } finally { process.env.PATH = originalPath }
+  }, 30_000)
+}
+
+test('Bun workspace reused receipt never hides verifier failure and failure invalidates success', async () => {
+  const f = await fixture({ bunWorkspace: true })
+  await f.prepare()
+  const worktree = f.store.get(f.row.id)!.worktree!
+  const receipt = join(f.context.stateRoot, encodeURIComponent(f.row.id), 'dependencies-receipt.json')
+  const stored = await readFile(receipt, 'utf8')
+  expect(JSON.parse(stored).key).toMatch(/^[a-f0-9]{64}$/)
+  await rm(join(worktree, 'node_modules', '.bun'), { recursive: true })
+  await writeFile(join(worktree, 'node_modules', 'not-a-dependency'), 'presence is insufficient')
+  const original = f.context.runInstall!
+  const calls: string[] = []
+  f.context.runInstall = Object.assign(async (...args: Parameters<typeof original>) => {
+    calls.push(args[0][2]!.includes('verify-workspace-deps.ts') ? 'verify' : 'install')
+    return original(...args)
+  }, { writesDiffOutput: true as const })
+  await expect(f.prepare()).rejects.toThrow('workspace dependency verification did not complete successfully')
+  expect(calls).toEqual(['verify'])
+  await expect(readFile(receipt)).rejects.toMatchObject({ code: 'ENOENT' })
+  expect(f.world.dispatches).toEqual([])
+  await f.prepare()
+  expect(calls).toEqual(['verify', 'install', 'verify'])
+}, 30_000)
+
+test('Bun workspace receipt refuses a borrowed Bun store before workers', async () => {
+  const f = await fixture({ bunWorkspace: true })
+  await f.prepare()
+  const worktree = f.store.get(f.row.id)!.worktree!
+  const store = join(worktree, 'node_modules', '.bun')
+  const borrowed = join(f.dir, 'borrowed-store')
+  await rename(store, borrowed)
+  await symlink(borrowed, store)
+  f.context.runInstall = Object.assign(async () => { throw new Error('must refuse before commands') }, { writesDiffOutput: true as const })
+  await expect(f.prepare()).rejects.toThrow('Bun store must be a worktree-local directory')
+  expect(f.world.dispatches).toEqual([])
+  await expect(readFile(join(f.context.stateRoot, encodeURIComponent(f.row.id), 'dependencies-receipt.json')))
+    .rejects.toMatchObject({ code: 'ENOENT' })
+}, 30_000)
+
 for (const shape of ['failure', 'failure-installed', 'empty-success', 'empty-store', 'timeout', 'timeout-installed'] as const) {
   test(`Bun workspace install ${shape} cannot dispatch or publish`, async () => {
     const f = await fixture({ bunWorkspace: true })
@@ -1243,6 +1342,8 @@ for (const shape of ['failure', 'failure-installed', 'empty-success', 'empty-sto
     expect(f.github.prs).toEqual([])
     const log = await readFile(join(f.context.stateRoot, encodeURIComponent(f.row.id), 'dependencies.log'), 'utf8')
     expect(log).toContain('REFUSED:')
+    await expect(readFile(join(f.context.stateRoot, encodeURIComponent(f.row.id), 'dependencies-receipt.json')))
+      .rejects.toMatchObject({ code: 'ENOENT' })
   }, 30_000)
 }
 

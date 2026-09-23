@@ -1,5 +1,6 @@
-import { appendFile, lstat, readFile, readdir } from 'node:fs/promises'
-import { join } from 'node:path'
+import { appendFile, lstat, readFile, readdir, realpath, rename, unlink, writeFile } from 'node:fs/promises'
+import { join, resolve, sep } from 'node:path'
+import { createHash, randomUUID } from 'node:crypto'
 import { fileURLToPath } from 'node:url'
 import { spawnCapture } from '@neutronai/trident/git-mode.ts'
 
@@ -12,10 +13,52 @@ async function exists(path: string): Promise<boolean> {
 
 const quote = (value: string): string => `'${value.replaceAll("'", "'\\''")}'`
 
-/** Provision only declared Bun workspaces; other repositories keep their own setup.
- * Always reinstall on recovery: an existing worktree is not an install receipt. */
+const hostRoot = fileURLToPath(new URL('../../', import.meta.url))
+const hostVerifier = join(hostRoot, 'scripts/ci/verify-workspace-deps.ts')
+const RECEIPT_VERSION = 1
+
+/** The receipt is a host observation, never a tracked project file. Hash all
+ * declared workspace manifests, including uncommitted dependency edits. */
+async function preparationKey(worktree: string, workspaces: unknown[], executable: string): Promise<string | null> {
+  const head = await spawnCapture(['git', 'rev-parse', '--verify', 'HEAD'], worktree)
+  if (!head.ok || !/^[a-f0-9]{40,64}$/.test(head.stdout.trim())) return null
+  const files = new Set(['package.json', 'bun.lock', 'bun.lockb', 'bunfig.toml', '.npmrc',
+    'scripts/ci/verify-workspace-deps.ts'])
+  for (const workspace of workspaces) {
+    if (typeof workspace !== 'string' || workspace.startsWith('!') || workspace.split('/').includes('..')) return null
+    for await (const path of new Bun.Glob(`${workspace}/package.json`).scan({ cwd: worktree, onlyFiles: true })) files.add(path)
+  }
+  const hash = createHash('sha256')
+  const tool = await lstat(executable)
+  hash.update(JSON.stringify([RECEIPT_VERSION, await realpath(worktree), head.stdout.trim(),
+    process.platform, process.arch, process.version, Bun.version, executable,
+    [tool.dev, tool.ino, tool.size, tool.mtimeMs, tool.ctimeMs], await readFile(hostVerifier, 'utf8'), '--frozen-lockfile', '--ignore-scripts']))
+  for (const path of [...files].sort()) {
+    const full = resolve(worktree, path)
+    if (!full.startsWith(`${resolve(worktree)}${sep}`)) return null
+    hash.update(JSON.stringify([path, await exists(full)]))
+    if (!await exists(full)) continue
+    if (!(await lstat(full)).isFile() || !(await realpath(full)).startsWith(`${await realpath(worktree)}${sep}`)) return null
+    hash.update(await readFile(full))
+  }
+  return hash.digest('hex')
+}
+
+/** Provision declared Bun workspaces. Recovery can reuse a measured installation
+ * only after checking the same inputs and running the host readiness verifier. */
 export async function prepareProjectDependencies(worktree: string, state: string,
   run: typeof spawnCapture = spawnCapture): Promise<void> {
+  const receiptPath = join(state, 'dependencies-receipt.json')
+  const invalidate = async () => { try { await unlink(receiptPath) } catch (error) {
+    if ((error as NodeJS.ErrnoException).code !== 'ENOENT') throw error
+  } }
+  let receipt: { version?: number; key?: string; modulesDevice?: number; modulesInode?: number } | null = null
+  if (await exists(receiptPath) && (await lstat(receiptPath)).isFile()) {
+    try { receipt = JSON.parse(await readFile(receiptPath, 'utf8')) } catch { /* Corrupt means reinstall. */ }
+  }
+  // Retire the old success before any fallible preparation, including manifest
+  // parsing. A crash or timeout cannot leave that success reusable next time.
+  await invalidate()
   const manifestPath = join(worktree, 'package.json')
   if (!await exists(manifestPath)) return
   const manifest = JSON.parse(await readFile(manifestPath, 'utf8'))
@@ -29,12 +72,29 @@ export async function prepareProjectDependencies(worktree: string, state: string
   const log = join(state, 'dependencies.log')
   await appendFile(log, '\nPreparing worktree-local Bun dependencies\n', { mode: 0o600 })
   const refuse = async (detail: string): Promise<never> => {
+    await invalidate()
     await appendFile(log, `REFUSED: ${detail}\n`)
     throw new Error(`Build dependency preparation failed: ${detail}; see ${log}`)
   }
   const modules = join(worktree, 'node_modules')
   if (await exists(modules) && !(await lstat(modules)).isDirectory()) {
     await refuse('node_modules must be a worktree-local directory')
+  }
+  const store = join(modules, '.bun')
+  if (await exists(store) && !(await lstat(store)).isDirectory()) {
+    await refuse('Bun store must be a worktree-local directory')
+  }
+  const executable = Bun.which('bun', { PATH: process.env.PATH ?? '' })
+  if (!executable) return refuse('Bun executable is unavailable')
+  const bun = await realpath(executable)
+  const verifier = join(worktree, 'scripts', 'ci', 'verify-workspace-deps.ts')
+  // Repositories without the host readiness contract still install every time.
+  const key = await exists(verifier) ? await preparationKey(worktree, workspaces, bun) : null
+  let reuse = false
+  if (key && receipt && await exists(modules)) {
+    const identity = await lstat(modules)
+    reuse = receipt.version === RECEIPT_VERSION && receipt.key === key
+      && receipt.modulesDevice === identity.dev && receipt.modulesInode === identity.ino
   }
   const execute = async (argv: string[], label: string, cwd = worktree) => {
     await appendFile(log, `${label}\n`)
@@ -47,20 +107,30 @@ export async function prepareProjectDependencies(worktree: string, state: string
   }
   // This host preparation phase must not execute package lifecycle scripts.
   // A project requiring generated artifacts still has to satisfy its full suite.
-  await execute(['bun', 'install', '--frozen-lockfile', '--ignore-scripts'], 'bun install')
+  if (reuse) await appendFile(log, 'Reusing validated worktree dependency receipt\n')
+  else await execute([bun, 'install', '--frozen-lockfile', '--ignore-scripts'], 'bun install')
   // A zero exit is insufficient: a no-op executable must not admit workers into
   // the same empty tree that caused the publication failure.
   if (!await exists(modules) || !(await lstat(modules)).isDirectory() || (await readdir(modules)).length === 0) {
     await refuse('bun install produced no worktree-local dependencies')
   }
-  const verifier = join(worktree, 'scripts', 'ci', 'verify-workspace-deps.ts')
+  if (await exists(store) && !(await lstat(store)).isDirectory()) {
+    await refuse('Bun store must be a worktree-local directory')
+  }
   // A repository carrying this verifier opts into the workspace readiness contract.
   // Both the script AND its runtime configuration must belong to the host.
   // A worktree cwd lets bunfig.toml preload branch code before even an absolute
   // host script. Keep that tree as data only, with an explicit empty config and
   // no dotenv loading; resolution inside the verifier still uses its root arg.
-  if (await exists(verifier)) await execute(['bun', '--config=/dev/null', '--no-env-file',
-    fileURLToPath(new URL('../../scripts/ci/verify-workspace-deps.ts', import.meta.url)), worktree],
-    'workspace dependency verification', fileURLToPath(new URL('../../', import.meta.url)))
+  if (await exists(verifier)) await execute([bun, '--config=/dev/null', '--no-env-file', hostVerifier, worktree],
+    'workspace dependency verification', hostRoot)
+  // A successful installer must not silently change an input behind the receipt.
+  if (key && key === await preparationKey(worktree, workspaces, bun)) {
+    const identity = await lstat(modules)
+    const temporary = `${receiptPath}.${randomUUID()}.tmp`
+    await writeFile(temporary, JSON.stringify({ version: RECEIPT_VERSION, key,
+      modulesDevice: identity.dev, modulesInode: identity.ino }), { mode: 0o600, flag: 'wx' })
+    await rename(temporary, receiptPath)
+  }
   await appendFile(log, 'Worktree-local dependency preparation completed\n')
 }
