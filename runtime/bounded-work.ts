@@ -100,13 +100,32 @@ export interface BoundedWorkRequest {
  * this week: a fire seam returned `fired` on any completion event, so four runs
  * sat marked `running` while the launcher had replied, in words, NOT FIRED.
  */
-export type BoundedWorkOutcome =
+export type BoundedWorkOutcome = (
   | { kind: 'completed'; result: unknown; usage: Usage | null; model_reported: string | null; thread_id: string | null }
   /** §3.2: "If it cannot proceed it returns 'blocked on X' to the orchestrator." */
   | { kind: 'blocked'; on: string }
   | { kind: 'refused'; reason: RefusalReason }
   | { kind: 'failed'; class: 'infra' | 'timeout' | 'killed'; detail: string }
   | { kind: 'unknown'; detail: string }
+) & { readonly observation?: ProviderObservation }
+
+/** Host observation of provider transport metadata, independent of result authority.
+ * Missing metrics are unknown, not zero. Input excludes the two cache categories. */
+export interface ProviderObservation {
+  readonly source: 'claude-cli-json' | 'codex-cli-jsonl'
+  readonly started_at_ms: number
+  readonly finished_at_ms: number
+  readonly observed_at_ms: number
+  readonly model_reported: string | null
+  readonly thread_id: string | null
+  readonly usage: {
+    readonly input_tokens: number | null
+    readonly output_tokens: number | null
+    readonly cache_read_input_tokens: number | null
+    readonly cache_creation_input_tokens: number | null
+    readonly cost_usd: number | null
+  }
+}
 
 export type RefusalReason =
   | 'provider-not-connected'

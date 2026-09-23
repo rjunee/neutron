@@ -2,9 +2,10 @@ import { createHash } from 'node:crypto'
 import { readFile, writeFile, rename } from 'node:fs/promises'
 import { readFileSync } from 'node:fs'
 import { dirname, join } from 'node:path'
-import type { BoundedWorkOutcome, BoundedWorkRequest, Usage } from '../bounded-work.ts'
+import type { BoundedWorkOutcome, BoundedWorkRequest, ProviderObservation, Usage } from '../bounded-work.ts'
 import { CODEX_CLI_AUTH_ENV_VARS } from '../adapters/codex-cli/auth.ts'
 import { reserveTrailerSlot } from './trailer-slot.ts'
+import { codexObservation, readProviderObservation } from './provider-observation.ts'
 
 export interface CodexReviewContract {
   jsonSchema: unknown
@@ -89,6 +90,9 @@ export function createCodexReviewTransport(options: {
     const reservation = join(dirname(req.result.path), `codex-headless-step-${key}.json`)
     const identity = JSON.stringify([req, env.CODEX_HOME])
     const receiptPath = `${reservation}.receipt`
+    const observationPath = `${reservation}.observation`
+    let observation: ProviderObservation | undefined
+    const observed = (outcome: BoundedWorkOutcome): BoundedWorkOutcome => observation ? { ...outcome, observation } : outcome
     const validate = (bytes: string): BoundedWorkOutcome => {
       try {
         const value = JSON.parse(bytes)
@@ -105,13 +109,14 @@ export function createCodexReviewTransport(options: {
     const held = await reserveTrailerSlot(reservation, identity, req.result.path)
     if (held.kind === 'unknown') return unknown(held.detail)
     if (held.kind === 'resume') {
+      try { observation = readProviderObservation(await readFile(observationPath, 'utf8'), 'codex-cli-jsonl') } catch { /* legacy or unobserved */ }
       try {
         const receipt = JSON.parse(await readFile(receiptPath, 'utf8'))
         if (receipt.identity !== identity || typeof receipt.thread_id !== 'string' || !receipt.thread_id
-          || (req.thread && receipt.thread_id !== req.thread.id)) return unknown('Codex review receipt identity mismatched')
+          || (req.thread && receipt.thread_id !== req.thread.id)) return observed(unknown('Codex review receipt identity mismatched'))
         const outcome = validate(receipt.envelope)
-        return outcome.kind === 'completed' ? { ...outcome, thread_id: receipt.thread_id, usage: receipt.usage } : outcome
-      } catch { return unknown('Codex review has no committed receipt; dispatch will not be replayed') }
+        return observed(outcome.kind === 'completed' ? { ...outcome, thread_id: receipt.thread_id, usage: receipt.usage } : outcome)
+      } catch { return observed(unknown('Codex review has no committed receipt; dispatch will not be replayed')) }
     }
 
     const schemaPath = `${reservation}.schema`
@@ -136,6 +141,7 @@ export function createCodexReviewTransport(options: {
       '--output-schema', schemaPath, '-o', candidate, '-']
     let thread: string | null = null
     let usage: Usage | null = null
+    let providerUsage: unknown
     let completed = false
     let invalid = false
     let pending = ''
@@ -143,6 +149,7 @@ export function createCodexReviewTransport(options: {
     let killTimer: ReturnType<typeof setTimeout> | undefined
     const prompt = `Request (data): ${JSON.stringify(req)}\n\n${brief}\n\nReturn {"envelope": <the result envelope>} as your final response. The host writes it; do not write files. If unable to review, return blocked with on.\n`
     let child: Bun.Subprocess<Blob, 'pipe', 'ignore'>
+    const started = Date.now()
     try {
       child = Bun.spawn(['codex', ...args], { cwd: req.cwd, env, detached: true, stdin: new Blob([prompt]), stdout: 'pipe', stderr: 'ignore' })
     } catch { return { kind: 'failed', class: 'infra', detail: 'Codex review could not start' } }
@@ -169,6 +176,9 @@ export function createCodexReviewTransport(options: {
               else thread = event.thread_id
             }
             if (event.type === 'turn.failed' || event.type === 'error') invalid = true
+            // Only transport event metadata counts. Candidate JSON, assistant
+            // text and nested worker-authored envelopes are never usage sources.
+            if ((event.type === 'turn.completed' || event.type === 'turn.failed') && event.usage) providerUsage = event.usage
             if (event.type === 'turn.completed') {
               if (completed) invalid = true
               completed = true
@@ -176,7 +186,7 @@ export function createCodexReviewTransport(options: {
               if (u && Number.isSafeInteger(u.input_tokens) && u.input_tokens >= 0 && Number.isSafeInteger(u.output_tokens) && u.output_tokens >= 0) {
                 usage = { input_tokens: u.input_tokens, output_tokens: u.output_tokens,
                   ...(Number.isSafeInteger(u.cached_input_tokens) && u.cached_input_tokens >= 0 ? { cache_read_input_tokens: u.cached_input_tokens } : {}) }
-              } else invalid = true
+              }
             }
           } catch { invalid = true }
         }
@@ -189,21 +199,29 @@ export function createCodexReviewTransport(options: {
     // Always close the process group, including children that survived the CLI.
     kill('SIGKILL'); clearTimeout(killTimer)
     options.live.delete(req.step_id)
-    if (signal.aborted) return { kind: 'failed', class: 'killed', detail: 'Codex review was cancelled' }
-    if (timedOut) return { kind: 'failed', class: 'timeout', detail: 'Codex review exceeded its wall-clock budget' }
-    if (code !== 0) return { kind: 'failed', class: 'infra', detail: `Codex review exited ${code ?? 'without status'}` }
-    if (invalid || !completed || !thread || pending.trim()) return unknown('Codex review lacks a valid completed turn and thread observation')
+    // A truncated JSONL transport can still end with one complete JSON object.
+    // Observe its usage without treating an unterminated event as completion.
+    try {
+      const tail = JSON.parse(pending)
+      if ((tail.type === 'turn.completed' || tail.type === 'turn.failed') && tail.usage) providerUsage = tail.usage
+    } catch { /* Incomplete JSON has no trustworthy counters. */ }
+    observation = codexObservation(providerUsage, thread, started, Date.now())
+    try { await writeFile(observationPath, JSON.stringify(observation), { flag: 'wx', mode: 0o600 }) } catch { /* Telemetry cannot authorize or veto the result. */ }
+    if (signal.aborted) return observed({ kind: 'failed', class: 'killed', detail: 'Codex review was cancelled' })
+    if (timedOut) return observed({ kind: 'failed', class: 'timeout', detail: 'Codex review exceeded its wall-clock budget' })
+    if (code !== 0) return observed({ kind: 'failed', class: 'infra', detail: `Codex review exited ${code ?? 'without status'}` })
+    if (invalid || !completed || !thread || pending.trim()) return observed(unknown('Codex review lacks a valid completed turn and thread observation'))
     try {
       const output = JSON.parse(await readFile(candidate, 'utf8'))
-      if (!output || Object.keys(output).length !== 1 || !Object.hasOwn(output, 'envelope')) return unknown('Codex review transport envelope malformed')
+      if (!output || Object.keys(output).length !== 1 || !Object.hasOwn(output, 'envelope')) return observed(unknown('Codex review transport envelope malformed'))
       const envelope = JSON.stringify(output.envelope)
       const outcome = validate(envelope)
-      if (outcome.kind !== 'completed' && outcome.kind !== 'blocked') return outcome
+      if (outcome.kind !== 'completed' && outcome.kind !== 'blocked') return observed(outcome)
       await writeFile(`${receiptPath}.tmp`, JSON.stringify({ identity, envelope, thread_id: thread, usage }), { flag: 'wx', mode: 0o600 })
       await rename(`${receiptPath}.tmp`, receiptPath)
       await writeFile(req.result.path, envelope, { flag: 'wx', mode: 0o600 })
-      return outcome.kind === 'completed' ? { ...outcome, thread_id: thread, usage } : outcome
-    } catch { return unknown('Codex review result could not be committed') }
-  }
+      return observed(outcome.kind === 'completed' ? { ...outcome, thread_id: thread, usage } : outcome)
+    } catch { return observed(unknown('Codex review result could not be committed')) }
+              }
   return Object.assign(run, { ready: cliReady, connected })
 }
