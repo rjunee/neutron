@@ -3042,6 +3042,100 @@ test('task_sequence strategy with remaining tasks hands off after the build inst
   expect(f.world.dispatches.map(d => d.role)).toEqual(['plan', 'build'])
 }, 300_000)
 
+for (const mergeMode of ['pr', 'local'] as const)
+for (const boundary of ['before-ledger', 'after-ledger', 'zero-conflict'] as const)
+test(`same-run task-sequence crash ${boundary} in ${mergeMode} cannot publish unfinished tasks`, async () => {
+  const f = await fixture({ mergeMode, taskSequence: true, moreTasks: true, seedLedger: false, hostLedger: true })
+  const host = await createProjectBuildHost(await f.prepare())
+  const save = host.deps.modes!.saveCheckpoint
+  let builtCheckpoints = 0
+  host.deps.modes!.saveCheckpoint = async checkpoint => {
+    await save(checkpoint)
+    if (checkpoint.stage === 'built' && checkpoint.head && !checkpoint.pending && checkpoint.remainingTasks === 1) {
+      builtCheckpoints++
+      if (builtCheckpoints === (boundary === 'after-ledger' ? 2 : 1)) {
+        throw new Error('simulated process death after durable intermediate build')
+      }
+    }
+  }
+  const first = await buildRun({ mode: 'implementation', start: 'fresh', taskIteration: 0,
+    run_id: f.row.id, workers: host.workers, repl_provider: 'anthropic', merge_mode: mergeMode },
+  host.deps, new AbortController().signal)
+  expect(first).toMatchObject({ kind: 'unknown', phase: 'build', detail: 'simulated process death after durable intermediate build' })
+  expect(lastCheckpoint(f)).toMatchObject({ stage: 'built', remainingTasks: 1 })
+  expect(lastCheckpoint(f).pending).toBeUndefined()
+  expect(f.world.dispatches.map(dispatch => dispatch.role)).toEqual(['plan', 'build'])
+  expect(f.github.prs).toEqual([])
+  const interruptedHead = lastCheckpoint(f).head
+  if (boundary === 'zero-conflict') {
+    const event = f.store.stageEvents(f.row.id).filter(event => event.stage === 'build-mode-state').at(-1)!
+    const state = JSON.parse(event.meta!)
+    state.checkpoint.remainingTasks = 0
+    await f.store.recordStageEvent(f.row.id, 'build-mode-state', JSON.stringify(state))
+    expect(JSON.parse(f.store.get(f.row.id)!.strategy_plan!).remainingTasks).toBe(1)
+  }
+
+  f.world.dispatches.length = 0
+  const resumed = await createProjectBuildHost(await f.prepare())
+  const outcome = await resumed.run({ mode: 'implementation', start: 'resume' }, new AbortController().signal)
+  if (boundary === 'zero-conflict') {
+    expect(outcome, why(f, outcome)).toMatchObject({ kind: 'unknown',
+      detail: 'Task-sequence built checkpoint cannot establish its remaining task handoff' })
+    expect(f.world.dispatches).toEqual([])
+    expect(f.github.prs).toEqual([])
+    return
+  }
+  expect(outcome.kind, why(f, outcome)).toBe('continued')
+  expect(f.world.dispatches).toEqual([])
+  expect(f.github.prs).toEqual([])
+  expect(lastCheckpoint(f)).toMatchObject({ stage: 'task-built', remainingTasks: 1 })
+  if (boundary === 'after-ledger') expect(lastCheckpoint(f).head).toBe(interruptedHead)
+  else expect(lastCheckpoint(f).head).not.toBe(interruptedHead)
+  const events = f.store.stageEvents(f.row.id).filter(event => event.stage === 'build-mode-state')
+  expect(JSON.parse(events.at(-1)!.meta!).iteration).toBe(1)
+  const ledger = `.trident/ledgers/${f.store.get(f.row.id)!.branch}.md`
+  const committed = await spawnCapture(['git', '-C', f.repo, 'show', `${lastCheckpoint(f).head}:${ledger}`], f.repo)
+  expect(committed.stdout.trim()).toBe('- [x] T1 record the note\n- [ ] T2 record another note')
+  const main = await spawnCapture(['git', '-C', mergeMode === 'pr' ? f.origin : f.repo, 'show', 'main:NOTES.md'], f.repo)
+  expect(main.stdout.trim()).toBe('seed')
+
+  // Recovery produced a real continuation: its next reader can build T2.
+  const next = await createProjectBuildHost(await f.prepare())
+  const terminal = await next.run({ mode: 'implementation', start: 'resume' }, new AbortController().signal)
+  expect(terminal.kind, why(f, terminal)).toBe('merged')
+  expect(f.world.plannerChoices).toEqual(['full', 'next'])
+  expect(f.world.selectedTasks).toEqual(['- [ ] T1 record the note', '- [ ] T2 record another note'])
+  expect(f.world.dispatches[0]).toMatchObject({ role: 'plan', step_id: `${f.row.id}:task:1:plan:0` })
+  if (mergeMode === 'local') expect(f.commands.some(argv => argv[0] === 'gh')).toBe(false)
+}, 300_000)
+
+for (const mergeMode of ['pr', 'local'] as const)
+test(`same-run terminal task-sequence crash in ${mergeMode} resumes review without rebuilding`, async () => {
+  const f = await fixture({ mergeMode, taskSequence: true })
+  const host = await createProjectBuildHost(await f.prepare())
+  const save = host.deps.modes!.saveCheckpoint
+  host.deps.modes!.saveCheckpoint = async checkpoint => {
+    await save(checkpoint)
+    if (checkpoint.stage === 'built' && checkpoint.head && !checkpoint.pending) {
+      throw new Error('simulated process death after terminal build')
+    }
+  }
+  const first = await buildRun({ mode: 'implementation', start: 'fresh', taskIteration: 0,
+    run_id: f.row.id, workers: host.workers, repl_provider: 'anthropic', merge_mode: mergeMode },
+  host.deps, new AbortController().signal)
+  expect(first).toMatchObject({ kind: 'unknown', phase: 'build' })
+  const checkpoint = lastCheckpoint(f)
+  expect(checkpoint).toMatchObject({ stage: 'built', remainingTasks: 0 })
+  f.world.dispatches.length = 0
+  const resumed = await createProjectBuildHost(await f.prepare())
+  const outcome = await resumed.run({ mode: 'implementation', start: 'resume' }, new AbortController().signal)
+  expect(outcome.kind, why(f, outcome)).toBe('merged')
+  expect(f.world.dispatches.map(dispatch => dispatch.role)).toEqual(['review', 'review', 'synthesis'])
+  expect(standaloneReview(f.world).measuredHead).toBe(checkpoint.head as string)
+  const merged = await spawnCapture(['git', '-C', mergeMode === 'pr' ? f.origin : f.repo, 'show', 'main:NOTES.md'], f.repo)
+  expect(merged.stdout.trim()).toBe(`seed\n${f.row.id}:task:0:build:0`)
+}, 300_000)
+
 test('task_sequence continuation probes the committed plan and selects its next unchecked task', async () => {
   const f = await fixture({ taskSequence: true, moreTasks: true })
 

@@ -2606,10 +2606,55 @@ test('completed task-sequence build checkpoints retain the validated terminal re
 
 test('terminal retry repeats publication proof and review without planning or rebuilding', async () => {
   const f = modeFixture()
+  f.plan.remainingTasks = 0
   f.resume().remainingTasks = 0
   expect((await f.run()).kind).toBe('merged')
   expect(f.runner.calls).toHaveLength(0)
   expect(f.cross.calls.map(call => call.role)).toEqual(['review'])
   expect(f.events).toContain('publishGate')
   expect(f.events).toContain('publicationSuite')
+})
+
+test('same-run task-sequence intermediate checkpoint resumes its handoff without reviewing', async () => {
+  const f = modeFixture()
+  f.resume().remainingTasks = 1
+  expect(await f.run()).toMatchObject({ kind: 'continued', remainingTasks: 1 })
+  expect(f.runner.calls).toEqual([])
+  expect(f.cross.calls).toEqual([])
+  expect(f.state.commits).toEqual([{ body: '- [x] T1: first\n- [ ] T2: second', head: 'a'.repeat(40) }])
+  expect(f.state.advanced.map(snapshot => snapshot.head)).toEqual([f.ledgerHead])
+  expect(f.events).not.toContain('publishGate')
+  expect(f.events).not.toContain('merge')
+})
+
+test('same-run task-sequence terminal checkpoint preserves review without rebuilding', async () => {
+  const f = modeFixture()
+  f.plan.remainingTasks = 0
+  f.plan.implementationPlan = '- [ ] T1: first'
+  f.resume().remainingTasks = 0
+  expect((await f.run()).kind).toBe('merged')
+  expect(f.runner.calls).toEqual([])
+  expect(f.cross.calls.map(call => call.role)).toEqual(['review'])
+  expect(f.state.commits).toEqual([])
+  expect(f.state.advances).toBe(0)
+  expect(f.events).toContain('publishGate')
+})
+
+for (const missing of ['count', 'plan', 'count-agreement', 'zero-count-agreement', 'ledger-agreement'] as const)
+test(`same-run task-sequence checkpoint refuses missing ${missing}`, async () => {
+  const f = modeFixture()
+  const checkpoint = f.resume()
+  if (missing !== 'count') checkpoint.remainingTasks = missing === 'count-agreement' ? 2 : 1
+  if (missing === 'zero-count-agreement') checkpoint.remainingTasks = 0
+  if (missing === 'plan') f.deps.modes!.loadExecutionStrategy = async () => ({ kind: 'known',
+    strategy: 'task_sequence', source: 'legacy', rationale: 'Migrated selection', plan: null })
+  if (missing === 'ledger-agreement') f.plan.implementationPlan = '- [ ] T1: first'
+  expect(await f.run()).toMatchObject({ kind: 'unknown',
+    detail: 'Task-sequence built checkpoint cannot establish its remaining task handoff' })
+  expect(f.runner.calls).toEqual([])
+  expect(f.cross.calls).toEqual([])
+  expect(f.state.commits).toEqual([])
+  expect(f.state.advances).toBe(0)
+  expect(f.events).not.toContain('publishGate')
+  expect(f.events).not.toContain('merge')
 })

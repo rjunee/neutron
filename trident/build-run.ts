@@ -451,6 +451,7 @@ export async function buildRun(input: BuildRunInput, deps: BuildRunDeps, signal:
     let replansUsed = resume?.replansUsed ?? 0
     if (replansUsed !== 0 && replansUsed !== 1) return blocked('Invalid recorded re-plan count')
     let skipBuild = false
+    let resumeTaskHandoff: ExecutionPlan | null = null
     let approved = false
     let firstRound = 1
     let resumeFix = false
@@ -486,6 +487,15 @@ export async function buildRun(input: BuildRunInput, deps: BuildRunDeps, signal:
         // G040: an empty regenerated diff cannot authorize review or approval.
         if (regenerated.diff.trim().length > 0) {
           if (regenerated.diff !== snapshot.diff) return blocked('Regenerated diff disagrees with host measurement')
+          // A builder checkpoint precedes the ledger/iteration handoff. Reusing
+          // its head must not turn an intermediate task into a completed card.
+          if (strategy === 'task_sequence' && resume.stage === 'built') {
+            if (!Number.isSafeInteger(resume.remainingTasks) || resume.remainingTasks! < 0
+              || !acceptedPlan || acceptedPlan.remainingTasks !== resume.remainingTasks || !ledgerAgrees(acceptedPlan)) {
+              return unknown('Task-sequence built checkpoint cannot establish its remaining task handoff')
+            }
+            if (resume.remainingTasks !== 0) resumeTaskHandoff = structuredClone(acceptedPlan)
+          }
           skipBuild = true
           approved = resume.stage === 'approved'
           resumeFix = resume.stage === 'rejected' && resume.findings.some(f => f.kind === 'code' && f.actionable)
@@ -769,19 +779,21 @@ export async function buildRun(input: BuildRunInput, deps: BuildRunDeps, signal:
         // the branch's OWN path, so no two cards' ledgers meet in a merge, and as
         // prose the mutation gate treats as inert, so a documentation-only card keeps
         // its exemption with the ledger in its diff.
-        const ledger = await commitLedger(tickTopTask(plan!.implementationPlan))
-        if (ledger) return ledger
-        // G037: consume the old result before acknowledging the next iteration.
-        // `snapshot` is the LEDGER commit, so the handoff's recorded head — the one
-        // a retry's dispatch proves the local tip against and the one the next
-        // iteration's `probePlan` reads — carries the ticked ledger.
-        const handoff = gateStop(await modes!.advanceTask({ run_id: input.run_id, round: taskIteration,
-          snapshot, remainingTasks: plan!.remainingTasks }))
-        if (handoff) return handoff
-        return { kind: 'continued', snapshot, remainingTasks: plan!.remainingTasks, cause: 'task-built' }
+        return handoffTask(plan!)
       }
       return null
     }
+    async function handoffTask(completed: ExecutionPlan): Promise<BuildRunOutcome> {
+      const ledger = await commitLedger(tickTopTask(completed.implementationPlan))
+      if (ledger) return ledger
+      // G037: consume the old result before acknowledging the next iteration.
+      // The measured ledger commit carries the completed task for its next reader.
+      const handoff = gateStop(await modes!.advanceTask({ run_id: input.run_id, round: taskIteration,
+        snapshot, remainingTasks: completed.remainingTasks }))
+      if (handoff) return handoff
+      return { kind: 'continued', snapshot, remainingTasks: completed.remainingTasks, cause: 'task-built' }
+    }
+    if (resumeTaskHandoff) return await handoffTask(resumeTaskHandoff)
     if (!skipBuild) {
       // A rebuild after the head MOVED must not reuse the round-0 result identities
       // (see `headMoved`). Every other rebuild keeps them.
