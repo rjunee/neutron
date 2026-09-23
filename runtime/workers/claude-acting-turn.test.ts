@@ -404,15 +404,23 @@ test('project runner preserves the correlated provider block and never replays t
     const identity = { agentId: 'quota', sessionId: 'session', isSidechain: true }
     await writeFile(join(directory, 'agent-quota.jsonl'), [
       { ...identity, type: 'user', message: { role: 'user', content: args.prompt } },
+      { ...identity, type: 'assistant', message: { role: 'assistant', id: 'provider-message', model: 'provider-model',
+        usage: { input_tokens: 17, output_tokens: 0, cache_read_input_tokens: 9, cache_creation_input_tokens: 0 } } },
       { ...identity, type: 'assistant', message: { role: 'assistant', model: '<synthetic>' },
         error: 'rate_limit', isApiErrorMessage: true, apiErrorStatus: 429, quotaLimits: { status: 'rejected' }, requestId: 'request' },
     ].map(row => JSON.stringify(row)).join('\n') + '\n')
   }
   const build = () => createProjectRunners({ conversation: f.input.conversation, run_id: 'run', state_dir: f.dir,
     actingTurn: createClaudeActingTurn(f.binding), headless: {}, trailer: { schemas: new Map(), metadata: () => undefined } })
-  expect(await (await build()).inRepl!.run(f.input.request, 'in-repl', f.input.signal)).toEqual({
-    kind: 'blocked', on: 'Claude child stopped at the provider rate limit (HTTP 429).' })
-  expect((await (await build()).inRepl!.run(f.input.request, 'in-repl', f.input.signal)).kind).toBe('unknown')
+  const first = await (await build()).inRepl!.run(f.input.request, 'in-repl', f.input.signal)
+  expect(first).toEqual({ kind: 'blocked', on: 'Claude child stopped at the provider rate limit (HTTP 429).', observation: {
+    source: 'claude-repl-jsonl', model_reported: 'provider-model', thread_id: 'quota', started_at_ms: expect.any(Number),
+    finished_at_ms: expect.any(Number), observed_at_ms: expect.any(Number),
+    usage: { input_tokens: 17, output_tokens: 0, cache_read_input_tokens: 9, cache_creation_input_tokens: 0, cost_usd: null },
+  } })
+  const second = await (await build()).inRepl!.run(f.input.request, 'in-repl', f.input.signal)
+  expect(second.kind).toBe('unknown')
+  expect(second.observation?.usage).toEqual(first.observation?.usage)
   expect(f.commands).toHaveLength(1)
   expect(f.released()).toBe(1)
   expect(await fs.stat(f.input.request.result.path).catch(error => error.code)).toBe('ENOENT')

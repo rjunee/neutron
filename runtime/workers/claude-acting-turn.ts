@@ -6,6 +6,7 @@ import { isDeepStrictEqual } from 'node:util'
 import { sessionJsonlPath } from '../adapters/claude-code/persistent/jsonl-resumability.ts'
 import type { BoundedWorkRequest, ToolGrant } from '../bounded-work.ts'
 import { claudeChildRateLimited } from './claude-child-rate-limit.ts'
+import { observeClaudeChildUsage } from './claude-child-observation.ts'
 import type { ReplSession } from '../adapters/claude-code/persistent/repl-session.ts'
 import { projectTrailerStep, type ProjectActingTurn } from './project-runners.ts'
 
@@ -179,7 +180,7 @@ export function createClaudeActingTurn(binding: ClaudeActingSession, clock: Obse
   const child = session.child
   const transcript = sessionJsonlPath(session.sessionId, session.cwd, binding.projects_dir)
   const subagents = join(transcript.slice(0, -'.jsonl'.length), 'subagents')
-  return async ({ conversation, request, spec, timeout_ms, signal }) => {
+  const actingTurn: ProjectActingTurn = async ({ conversation, request, spec, timeout_ms, signal }) => {
     const refuse = (detail: string) => ({ kind: 'refused' as const, reason: 'capability-unsupported' as const, detail })
     if (conversation.provider !== 'anthropic') return refuse(`Claude acting turn refuses provider ${conversation.provider}.`)
     if (conversation.project_id !== project_id || conversation.topic_id !== topic_id) return refuse('Project conversation does not match the bound Claude session.')
@@ -313,4 +314,6 @@ export function createClaudeActingTurn(binding: ClaudeActingSession, clock: Obse
       timer.abort()
     }
   }
+  actingTurn.observeUsage = request => observeClaudeChildUsage(subagents, session.sessionId, request)
+  return actingTurn
 }

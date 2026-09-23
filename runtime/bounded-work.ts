@@ -112,7 +112,7 @@ export type BoundedWorkOutcome = (
 /** Host observation of provider transport metadata, independent of result authority.
  * Missing metrics are unknown, not zero. Input excludes the two cache categories. */
 export interface ProviderObservation {
-  readonly source: 'claude-cli-json' | 'codex-cli-jsonl'
+  readonly source: 'claude-cli-json' | 'codex-cli-jsonl' | 'claude-repl-jsonl'
   readonly started_at_ms: number
   readonly finished_at_ms: number
   readonly observed_at_ms: number
