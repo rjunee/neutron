@@ -126,6 +126,22 @@ fail (`carries the dispatch's resume sentence, and null for a first dispatch`), 
 through the `@neutronai/migrations` alias, so both are green unmutated in a proof tree that
 does not have this branch's 0155.
 
+Replayed onto 7d5ca4bd (#1192, terminal task suite instructions). One textual conflict,
+`trident/build-run.test.ts` `modeFixture`, resolved by keeping both sides: this branch's
+`commits` / `committedBody` / `advanced` / `checkpoints` fixture state and #1192's
+`suiteScope?: string` on `prepared`. One semantic seam: #1192's test `suite scope follows the
+validated Ralph task…` set `remainingTasks` to 0 and 2 against a two-task ledger, which G025
+(`ledgerAgrees`) now refuses with `Planner returned no execution plan: the task ledger disagrees
+with topTask/remainingTasks`; the fixture now lists exactly `remainingTasks + 1` unchecked tasks
+and the assertion is unchanged. Measured on the replay: `trident/build-run.test.ts` 202/0 (main
+7d5ca4bd: 196/0), `open/__tests__/project-build-e2e.test.ts` 121/0, `migrations/runner.test.ts`
+23/0, `trident/store.test.ts` 159/0, `trident/cross-run-retry-checkpoint.test.ts` 52/0,
+`trident/production-host-effects.test.ts` 108/0, `migrations/regen-snapshot.ts` writes no change.
+`open/__tests__/project-build-wiring.test.ts` is 32/1: the one fail, `suite child excludes the
+stored GitHub credential while git push retains it`, reds identically on main 7d5ca4bd in the same
+environment (a stored credential present in the test host's environment) and is not this branch.
+The proof pair re-measured on the replay: guard 40/0 → 39 pass 1 fail mutated; control 50/0 both ways.
+
 ### The replay rule for ordinal 0154
 
 Main's #1188 took 0154 (`ralph_task_total`) after this branch was cut; 0155 stays. Replaying

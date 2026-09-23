@@ -1753,6 +1753,9 @@ test('suite scope follows the validated Ralph task and never defers non-Ralph bu
   for (const mode of ['ralph', 'pr'] as const) {
     for (const remainingTasks of [0, 2]) {
       const f = modeFixture(mode)
+      // G025 refuses a ledger whose boxes disagree with its counts, so the fixture's
+      // plan lists exactly remainingTasks + 1 unchecked tasks.
+      f.plan.implementationPlan = ['- [ ] T1: first', '- [ ] T2: second', '- [ ] T3: third'].slice(0, remainingTasks + 1).join('\n')
       f.plan.remainingTasks = remainingTasks
       f.setPlan()
       f.decisions.push({ kind: 'fix', findings: ['repair behavior'] }, { kind: 'approve' })
