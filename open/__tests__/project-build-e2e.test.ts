@@ -739,7 +739,7 @@ async function fixture(options: { ralph?: boolean; moreTasks?: boolean; suiteExi
   maxRounds?: number; mergeMode?: 'pr' | 'local'; blockRoles?: readonly string[]
   repeatFirstFinding?: boolean; commentRounds?: readonly number[]
   unavailableSeatRounds?: readonly number[]; codexReview?: 'valid' | 'wrong-run'
-  synthesisShape?: WorkerWorld['synthesisShape']; rateLimitedSynthesis?: boolean
+  synthesisShape?: WorkerWorld['synthesisShape']; rateLimitedSynthesis?: boolean; nativeUsage?: boolean
   /** Real session ownership with only the model boundary held at a barrier. */
   reviewChild?: (request: BoundedWorkRequest, seat: string) => Promise<void>
   reviewVeto?: 'standalone' | 'synthesis'
@@ -870,6 +870,18 @@ async function fixture(options: { ralph?: boolean; moreTasks?: boolean; suiteExi
       const args = JSON.parse(String(spec.prompt).slice(String(spec.prompt).indexOf('{')))
       const requestLine = String(args.prompt).split('\n').find(row => row.startsWith('Request (data): '))!
       const request: BoundedWorkRequest = JSON.parse(requestLine.slice('Request (data): '.length))
+      if (options.nativeUsage) {
+        const directory = join(projectsDir, dir.replace(/\//g, '-'), 'e2e-session', 'subagents')
+        await mkdir(directory, { recursive: true })
+        const agentId = createHash('sha256').update(request.step_id).digest('hex').slice(0, 12)
+        await writeFile(join(directory, `agent-${agentId}.meta.json`), JSON.stringify({ description: args.description }))
+        const identity = { agentId, sessionId: 'e2e-session', isSidechain: true }
+        await writeFile(join(directory, `agent-${agentId}.jsonl`), [
+          { ...identity, type: 'user', message: { role: 'user', content: args.prompt } },
+          { ...identity, type: 'assistant', message: { id: 'provider-message', role: 'assistant', model: request.model_id,
+            content: [], usage: { input_tokens: 7, output_tokens: 3, cache_read_input_tokens: 2, cache_creation_input_tokens: 0 } } },
+        ].map(row => JSON.stringify(row)).join('\n') + '\n')
+      }
       if (!options.rateLimitedSynthesis || request.role !== 'synthesis') return worker(line)
       // The provider owns this transcript envelope. No result file is written.
       const directory = join(projectsDir, dir.replace(/\//g, '-'), 'e2e-session', 'subagents')
@@ -1009,6 +1021,20 @@ test.each(['valid', 'wrong-run'] as const)('attempt accounting retains actual he
   expect(receipt).toMatchObject({ source: 'codex-cli-jsonl', input_tokens: null, output_tokens: 3, cost_usd: null })
   expect(attempts[0]!.outcome === 'completed').toBe(codexReview === 'valid')
   expect(new TridentPhaseUsageStore(f.db).list(f.row.id)!.find(row => row.phase === 'review_codex')).toMatchObject({ input_tokens: null, output_tokens: 3 })
+})
+
+test('attempt accounting consumes native child measurements through the actual Open acting-turn binding', async () => {
+  const f = await fixture({ nativeUsage: true })
+  expect((await drive(f, 'pr')).kind).toBe('merged')
+  const attempts = f.context.attempts.list(f.row.id)
+  expect(attempts).toHaveLength(5)
+  for (const attempt of attempts) expect(f.context.attempts.receipt(attempt)).toMatchObject({
+    source: 'claude-repl-jsonl', input_tokens: 7, output_tokens: 3,
+    cache_read_tokens: 2, cache_creation_tokens: 0, cost_usd: null, model_reported: attempt.resolved_model,
+  })
+  expect(new TridentPhaseUsageStore(f.db).list(f.row.id)!.find(row => row.phase === 'review_adversarial')).toMatchObject({
+    input_tokens: 14, output_tokens: 6, cache_read_tokens: 4,
+  })
 })
 
 test('attempt accounting keeps explicit zero on successful work and partial usage on a failed build without authorizing it', async () => {
@@ -3180,40 +3206,46 @@ test('a driver restarted during a worker turn refuses to re-fire it', async () =
 }, 300_000)
 
 test('attempt accounting reconciles pre-crash provider spend through actual pending gateway recovery without dispatch or approval', async () => {
-  const f = await fixture({ blockRoles: ['review'] })
+  const f = await fixture({ blockRoles: ['review'], nativeUsage: true })
   expect((await driveUntilTheProcessDies(f, 'fresh')).kind).toBe('blocked')
-  const pending = lastCheckpoint(f).pending!
+  const pending = lastCheckpoint(f).pending as { step_id: string }
   const attempt = f.context.attempts.list(f.row.id).find(row => row.step_id === pending.step_id)!
   expect(attempt).toBeDefined()
   // Simulate the crash window: transport receipt reached disk, but ledger
   // completion/usage ingestion did not. The pending driver checkpoint is real.
   f.db.raw().query('UPDATE code_trident_attempts SET outcome = NULL, ended_at = NULL WHERE run_id = ? AND step_id = ?')
     .run(f.row.id, pending.step_id)
-  const receiptPath = join(f.dir, 'host-provider-observation.json')
-  const observedAt = Date.now()
-  await writeFile(receiptPath, JSON.stringify({ source: 'claude-cli-json', started_at_ms: observedAt, finished_at_ms: observedAt,
-    observed_at_ms: observedAt, model_reported: attempt.resolved_model, thread_id: null,
-    usage: { input_tokens: 31, output_tokens: 7, cache_read_input_tokens: 0, cache_creation_input_tokens: 0, cost_usd: null } }))
-  const prepare = f.prepare
-  let observationReads = 0
-  f.prepare = async () => {
-    const options = await prepare()
-    options.substrate.inRepl = { ...options.substrate.inRepl!, observe: async request => {
-      if (request.run_id !== f.row.id || request.step_id !== pending.step_id) return undefined
-      observationReads++
-      return JSON.parse(await readFile(receiptPath, 'utf8'))
-    } }
-    return options
-  }
+  f.db.raw().query('DELETE FROM code_trident_attempt_receipts WHERE run_id = ? AND step_id = ?').run(f.row.id, pending.step_id)
+  expect(f.context.attempts.receipt(attempt)).toBeNull()
+  // Lose the live session too. Recovery reads the original host-bound child
+  // transcript and never acquires a new session to reconcile accounting.
+  pool.delete(f.key)
+  supervisedBySessionKey.delete(f.key)
   f.world.dispatches.length = 0
+  const bindingPath = join(f.context.stateRoot, f.row.id,
+    `claude-observer-${createHash('sha256').update(pending.step_id).digest('hex')}.json`)
+  const bindingBytes = await readFile(bindingPath, 'utf8')
+  const corrupted = JSON.parse(bindingBytes)
+  corrupted.request.run_id = 'another-run'
+  await writeFile(bindingPath, JSON.stringify(corrupted))
+  await createProjectBuildHost(await f.prepare())
+  expect(f.context.attempts.receipt(attempt)).toBeNull()
+  expect(f.world.dispatches).toHaveLength(0)
+  await writeFile(bindingPath, bindingBytes)
+  await rename(bindingPath, `${bindingPath}.original`)
+  await symlink(`${bindingPath}.original`, bindingPath)
+  await createProjectBuildHost(await f.prepare())
+  expect(f.context.attempts.receipt(attempt)).toBeNull()
+  await rename(`${bindingPath}.original`, bindingPath)
   const resumed = await restartThroughGateway(f)
   expect(resumed.kind).toBe('unknown')
   expect(f.world.dispatches).toHaveLength(0)
-  expect(f.context.attempts.receipt(attempt)).toMatchObject({ input_tokens: 31, output_tokens: 7 })
+  expect(f.context.attempts.receipt(attempt)).toMatchObject({ source: 'claude-repl-jsonl', input_tokens: 7, output_tokens: 3 })
   expect(f.context.attempts.get(attempt)).toMatchObject({ outcome: null, ended_at: null })
   await createProjectBuildHost(await f.prepare())
-  expect(observationReads).toBe(2)
-  expect(f.context.attempts.receipt(attempt)).toMatchObject({ input_tokens: 31, output_tokens: 7 })
+  expect(f.context.attempts.receipt(attempt)).toMatchObject({ input_tokens: 7, output_tokens: 3 })
+  expect(new TridentPhaseUsageStore(f.db).list(f.row.id)!.find(row => row.phase === 'review_adversarial')).toMatchObject({ input_tokens: 7, output_tokens: 3 })
+  expect(f.world.dispatches).toHaveLength(0)
   expect(f.github.prs[0]!.state).toBe('OPEN')
 }, 300_000)
 
