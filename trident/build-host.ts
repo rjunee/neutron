@@ -12,7 +12,7 @@ import { publicationReadiness, pinnedMergeReadiness } from './gates/release-read
 import { briefIntegrity } from './gates/brief-integrity.ts'
 import { projectAdmission, type AdmissionSource } from './gates/project-admission.ts'
 import { unknownCause } from './gates/unknown-cause.ts'
-import { reviewPanel, type ReviewSource } from './gates/review-panel.ts'
+import { observeReviewPanel, decideReviewPanel, type ReviewSource } from './gates/review-panel.ts'
 import { ciReadinessForHead, type CiRunObservation } from './ci-readiness.ts'
 import { runLeakGatePreflight } from './leak-preflight.ts'
 import { assessMergeDiff, localMergeReadiness } from './merge.ts'
@@ -218,7 +218,9 @@ export function createBuildHost(options: BuildHostOptions): { deps: BuildRunDeps
       : assessReviewCi(options.reviewCi, snapshot, options.leak.base_sha, options.mutation.run.id, signal),
     reviewSuite: (snapshot, round) => assessReviewSuite(options.reviewSuite, snapshot, round, options.mutation.run.id),
     publicationSuite: snapshot => assessReviewSuite(options.publicationSuite, snapshot, -1, options.mutation.run.id),
-    reviewGate: (payload, snapshot, round, replansUsed, recordProgress) => reviewPanel(options.review, payload, snapshot, round, options.mutation.run.id, replansUsed, { provider: options.workers.build.provider, modelId: options.workers.build.request.model_id }, recordProgress),
+    observeReview: (snapshot, round) => observeReviewPanel(options.review, snapshot, round, options.mutation.run.id,
+      { provider: options.workers.build.provider, modelId: options.workers.build.request.model_id }),
+    reviewGate: async (payload, observation, snapshot, round, replansUsed, recordProgress) => decideReviewPanel(payload, observation, snapshot, round, options.mutation.run.id, replansUsed, recordProgress),
     async publishGate(snapshot, mergeMode) {
       const claim = await options.mutation.readClaim(snapshot)
       const proof = await runMutationProofGate({ ...options.mutation, claim, expected_head: snapshot.head })

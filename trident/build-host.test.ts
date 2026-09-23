@@ -156,11 +156,11 @@ test('unreadable admission and missing project source stay unknown', async () =>
 test('malformed review and missing panel evidence are infrastructure blocks', async () => {
   const f = await fixture()
   const { deps } = f.make()
-  expect(await deps.reviewGate(null, snapshot, 1)).toMatchObject({ kind: 'blocked', on: 'infra-only: Review trailer not-object at $' })
+  expect(await deps.reviewGate(null, await deps.observeReview(snapshot, 1), snapshot, 1)).toMatchObject({ kind: 'blocked', on: 'infra-only: Review trailer not-object at $' })
   const finding = { severity: 'major', title: 'bug', evidence: 'code.ts:1', file: 'code.ts', symbol: 'f', rule: 'correctness', line: 1 }
-  expect(await deps.reviewGate({ verdict: 'APPROVE', findings: [finding] }, snapshot, 1)).toMatchObject({ kind: 'blocked', on: expect.stringContaining('infra-only:') })
-  for (const severity of ['minor', 'nit']) expect(await deps.reviewGate({ verdict: 'APPROVE', findings: [{ ...finding, severity }] }, snapshot, 1)).toMatchObject({ kind: 'blocked', on: 'infra-only: Review panel observation source is missing' })
-  expect(await deps.reviewGate({ verdict: 'APPROVE', findings: [] }, snapshot, 1)).toMatchObject({ kind: 'blocked', on: expect.stringContaining('infra-only:') })
+  expect(await deps.reviewGate({ verdict: 'APPROVE', findings: [finding] }, await deps.observeReview(snapshot, 1), snapshot, 1)).toMatchObject({ kind: 'blocked', on: expect.stringContaining('infra-only:') })
+  for (const severity of ['minor', 'nit']) expect(await deps.reviewGate({ verdict: 'APPROVE', findings: [{ ...finding, severity }] }, await deps.observeReview(snapshot, 1), snapshot, 1)).toMatchObject({ kind: 'blocked', on: 'infra-only: Review panel observation source is missing' })
+  expect(await deps.reviewGate({ verdict: 'APPROVE', findings: [] }, await deps.observeReview(snapshot, 1), snapshot, 1)).toMatchObject({ kind: 'blocked', on: expect.stringContaining('infra-only:') })
 })
 
 test('leak preflight preserves incomplete and clean outcomes at snapshot head', async () => {
@@ -346,10 +346,10 @@ test('host admission and review reach authoritative policy sources', async () =>
   const host = f.make()
   expect(await host.deps.admissionGate(f.input(host))).toEqual({ kind: 'allow' })
   const progress: unknown[] = []
-  expect(await host.deps.reviewGate(payload, snapshot, 1, 0, value => progress.push(value))).toEqual({ kind: 'approve' })
+  expect(await host.deps.reviewGate(payload, await host.deps.observeReview(snapshot, 1), snapshot, 1, 0, value => progress.push(value))).toEqual({ kind: 'approve' })
   expect(progress).toEqual([{ findings: [], blockingCount: 0 }])
   f.options.review.readSynthesis = async () => null
-  expect(await host.deps.reviewGate(payload, snapshot, 1)).toMatchObject({ kind: 'blocked', on: expect.stringContaining('infra-only:') })
+  expect(await host.deps.reviewGate(payload, await host.deps.observeReview(snapshot, 1), snapshot, 1)).toMatchObject({ kind: 'blocked', on: expect.stringContaining('infra-only:') })
 })
 
 test('fresh null reviewed_head reaches allow and publishes through the driver', async () => {
@@ -599,8 +599,8 @@ test('review composition carries host re-plan usage independently of worker data
     readSynthesis: async () => ({ runId: 'test', head, round: 1, checkpoint: 'reviewed', payload }),
   }
   const { deps } = f.make()
-  expect(await deps.reviewGate(payload, snapshot, 1, 0)).toMatchObject({ kind: 're-plan' })
-  expect(await deps.reviewGate(payload, snapshot, 1, 1)).toMatchObject({ kind: 'blocked' })
+  expect(await deps.reviewGate(payload, await deps.observeReview(snapshot, 1), snapshot, 1, 0)).toMatchObject({ kind: 're-plan' })
+  expect(await deps.reviewGate(payload, await deps.observeReview(snapshot, 1), snapshot, 1, 1)).toMatchObject({ kind: 'blocked' })
 })
 
 async function boundFixture(failure = false) {
@@ -646,7 +646,7 @@ async function boundFixture(failure = false) {
   // Reachable permissive build control: a routing regression must actually build,
   // publish and merge, rather than stop at an unrelated admission or leak gate.
   host.deps.admissionGate = async () => ({ kind: 'allow' })
-  host.deps.reviewGate = async (_payload, _snapshot, _round, _used, record) => { record?.({ findings: [], blockingCount: 0 }); return { kind: 'approve' } }
+  host.deps.reviewGate = async (_payload, _observation, _snapshot, _round, _used, record) => { record?.({ findings: [], blockingCount: 0 }); return { kind: 'approve' } }
   host.deps.runLeakGatePreflight = async () => ({ status: 'clean', head, findings: [], skipped_rules: [], attempts: 0, note: '' })
   host.deps.publishGate = async () => ({ kind: 'allow' })
   host.deps.mergeGate = async () => ({ kind: 'allow' })
@@ -776,7 +776,7 @@ for (const cap of [undefined, 2, 7]) {
     // A real panel reports its findings to the host; this stub must too, or the
     // driver's progress gate has nothing to read and this test stops on that
     // instead of on the cap it exists to measure.
-    host.deps.reviewGate = async (_payload, _snapshot, round, _used, record) => {
+    host.deps.reviewGate = async (_payload, _observation, _snapshot, round, _used, record) => {
       record?.({ findings: [`bug-${round}`], blockingCount: 0 })
       return { kind: 'fix', findings: [`bug-${round}`] }
     }

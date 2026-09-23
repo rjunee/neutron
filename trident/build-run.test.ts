@@ -65,7 +65,8 @@ function fixture(landFixes = true) {
     reviewCi: async () => ({ kind: 'known', findings: [] }),
     reviewSuite: async () => ({ kind: 'known', findings: [] }),
     publicationSuite: async () => { events.push('publicationSuite'); return { kind: 'known', findings: [] } },
-    reviewGate: async (_payload, _snapshot, _round, _used, record) => {
+    observeReview: async (snapshot, round) => ({ kind: 'observed', runId: 'run', snapshot, round, verdicts: [], checkpoint: 'argus-approved' }),
+    reviewGate: async (_payload, _observation, _snapshot, _round, _used, record) => {
       const decision = decisions.shift() ?? { kind: 'approve' as const }
       record?.('findings' in decision ? { findings: decision.findings, blockingCount: decision.blockingCount ?? decision.findings.length } : { findings: [], blockingCount: 0 })
       return decision
@@ -93,6 +94,90 @@ test('fresh to merged with a fix, host gates and fake runners', async () => {
   expect(f.events.filter(e => e !== 'measure')).toEqual(['publishGate', 'publish', 'publishGate', 'publish', 'publicationSuite', 'mergeGate', 'merge'])
   expect(f.reads()).toBe(17)
   expect([...f.runner.calls, ...f.cross.calls].every(c => c.needs_approval_decision === false)).toBe(true)
+})
+
+test('review starts standalone and panel together, drains both, then rechecks CI and revision', async () => {
+  for (const fault of ['none', 'standalone', 'panel', 'revision', 'ci'] as const) {
+    const f = fixture()
+    const started: string[] = [], finished: string[] = []
+    let release!: () => void
+    const barrier = new Promise<void>(resolve => { release = resolve })
+    let reached!: () => void
+    const both = new Promise<void>(resolve => { reached = resolve })
+    const start = (name: string) => { started.push(name); if (started.length === 2) reached() }
+    const run = f.cross.run.bind(f.cross)
+    f.cross.run = async (...args) => {
+      start('standalone'); await barrier; finished.push('standalone')
+      if (fault === 'standalone') throw Error('review rejected')
+      return run(...args)
+    }
+    const observe = f.deps.observeReview
+    f.deps.observeReview = async (...args) => {
+      start('panel'); await barrier; finished.push('panel')
+      if (fault === 'panel') throw Error('panel rejected')
+      if (fault === 'revision') f.snapshot.head = 'b'.repeat(40)
+      return observe(...args)
+    }
+    f.deps.reviewCi = async () => started.length && fault === 'ci'
+      ? { kind: 'blocked', on: 'CI became unavailable' } : { kind: 'known', findings: [] }
+    let settled = false
+    const pending = f.run().then(value => { settled = true; return value })
+    let timer: ReturnType<typeof setTimeout> | undefined
+    try {
+      await Promise.race([both, new Promise<never>((_, reject) => {
+        timer = setTimeout(() => reject(Error('Independent producers did not start')), 1000)
+      })])
+      expect(started).toEqual(['standalone', 'panel'])
+      expect(finished).toEqual([])
+      expect(settled).toBe(false)
+    } finally { clearTimeout(timer); release(); await pending }
+    const result = await pending
+    expect(finished).toHaveLength(2)
+    expect(result.kind).toBe(fault === 'none' ? 'merged' : fault === 'revision' ? 'failed' : 'blocked')
+    if (fault !== 'none') expect(f.events).not.toContain('merge')
+  }
+})
+
+test('a rejected standalone review cannot return while a sibling still owns live work', async () => {
+  const f = fixture()
+  let release!: () => void, entered!: () => void
+  const held = new Promise<void>(resolve => { release = resolve })
+  const started = new Promise<void>(resolve => { entered = resolve })
+  const observe = f.deps.observeReview
+  f.deps.observeReview = async (...args) => { entered(); await held; return observe(...args) }
+  f.cross.run = async () => { throw Error('standalone rejected') }
+  let settled = false
+  const running = f.run().then(value => { settled = true; return value })
+  try {
+    await started
+    await new Promise<void>(resolve => setImmediate(resolve))
+    expect(settled).toBe(false)
+    expect(f.events).not.toContain('merge')
+  } finally { release() }
+  expect(await running).toMatchObject({ kind: 'blocked', on: expect.stringContaining('standalone rejected') })
+})
+
+test('unavailable review admission prevents both standalone and panel dispatch', async () => {
+  for (const stop of ['readiness', 'ci', 'artifact', 'preparation'] as const) {
+    const f = fixture()
+    let panels = 0
+    f.deps.observeReview = async () => { panels++; throw Error('must not dispatch') }
+    if (stop === 'readiness') f.deps.reviewReadiness = async () => ({ kind: 'unknown', detail: 'unavailable' })
+    if (stop === 'ci') f.deps.reviewCi = async () => ({ kind: 'blocked', on: 'unavailable' })
+    if (stop === 'artifact') f.deps.reviewArtifact = async () => ({ kind: 'blocked', on: 'unavailable' })
+    if (stop === 'preparation') f.deps.prepareWork = async req => { if (req.role === 'review') throw Error('unavailable') }
+    expect((await f.run()).kind).not.toBe('merged')
+    expect(f.cross.calls).toEqual([])
+    expect(panels).toBe(0)
+  }
+})
+
+test('missing review observation host refuses before standalone dispatch', async () => {
+  const f = fixture()
+  delete (f.deps as Partial<BuildRunDeps>).observeReview
+  expect(await f.run()).toMatchObject({ kind: 'unknown', phase: 'review', detail: 'Review observation host is missing' })
+  expect(f.cross.calls).toEqual([])
+  expect((await fixture().run()).kind).toBe('merged')
 })
 
 test('terminal publication cannot proceed when the full-suite gate is missing or red', async () => {
@@ -1043,7 +1128,7 @@ test('design gap re-plans once and continues with fresh measurements and spent r
   f.decisions.push(gap, { kind: 'fix', findings: ['new'] }, { kind: 'approve' })
   const counts: number[] = []
   const gate = f.deps.reviewGate
-  f.deps.reviewGate = (payload, snapshot, round, used, record) => { counts.push(used!); return gate(payload, snapshot, round, used, record) }
+  f.deps.reviewGate = (payload, observation, snapshot, round, used, record) => { counts.push(used!); return gate(payload, observation, snapshot, round, used, record) }
   expect(await f.run()).toMatchObject({ kind: 'merged' })
   expect(f.runner.calls.map(c => c.step_id)).toEqual(['run:plan:0', 'run:build:0', 'run:plan:1', 'run:build:1', 'run:fix:2'])
   expect(f.cross.calls.map(c => c.step_id)).toEqual(['run:review:1', 'run:review:2', 'run:review:3'])
@@ -1053,7 +1138,7 @@ test('design gap re-plans once and continues with fresh measurements and spent r
 test('host refuses a second re-plan even when worker claims zero spent', async () => {
   const f = fixture()
   f.outcomes.set('run:review:2', f.completed({ ...f.snapshot, payload: { replansUsed: 0 } }))
-  f.deps.reviewGate = async (_payload, _snapshot, _round, used, record) => { record?.({ findings: gap.findings, blockingCount: 2 }); return { ...gap, whatIsMissing: `host count ${used}` } }
+  f.deps.reviewGate = async (_payload, _observation, _snapshot, _round, used, record) => { record?.({ findings: gap.findings, blockingCount: 2 }); return { ...gap, whatIsMissing: `host count ${used}` } }
   expect(await f.run()).toMatchObject({ kind: 'blocked', on: expect.stringContaining('already spent'), recipient: 'orchestrator' })
   expect(f.runner.calls.filter(c => c.role === 'plan')).toHaveLength(2)
 })
@@ -1153,7 +1238,7 @@ test('suite step feeds panel and fix briefs and overrides approving panels every
     expect(snapshot.head).toBe(f.snapshot.head); order.push(`suite:${round}`)
     return { kind: 'known', findings: round === 1 ? [{ title: 'FULL SUITE NOT PROVEN', evidence: 'run full suite', advisory: false }] : [] }
   }
-  f.deps.reviewGate = async (_, __, round, _used, record) => { order.push(`panel:${round}`); record?.({ findings: [], blockingCount: 0 }); return { kind: 'approve' } }
+  f.deps.reviewGate = async (_, _observation, __, round, _used, record) => { order.push(`panel:${round}`); record?.({ findings: [], blockingCount: 0 }); return { kind: 'approve' } }
   expect((await f.run()).kind).toBe('merged')
   expect(order).toEqual(['suite:1', 'panel:1', 'suite:2', 'panel:2'])
   for (const role of ['review', 'fix']) expect(briefs.find(b => b.role === role)?.findings).toContain('FULL SUITE NOT PROVEN: run full suite')
@@ -1182,7 +1267,7 @@ function progressPanel(f: ReturnType<typeof fixture>, rounds: { severity: string
     const payload = { verdict: 'REQUEST_CHANGES', findings: rounds[round - 1]!.map(item => ({ ...item, file: 'code.ts', symbol: 'f', title: item.rule, evidence: 'code.ts:1', line: 1 })) }
     f.outcomes.set(`run:review:${round}`, f.completed({ ...f.snapshot, payload }))
   }
-  f.deps.reviewGate = (payload, snapshot, round, used, record) => reviewPanel({
+  f.deps.reviewGate = (payload, _observation, snapshot, round, used, record) => reviewPanel({
     seats: [{ id: 'core', provider: 'pi', modelId: 'model', role: 'core', enabled: true }],
     readSeat: async () => ({ runId: 'run', head: snapshot.head, round, provider: 'pi', modelId: 'model', status: 'completed', payload }),
     retrySeat: async () => {},
@@ -1262,7 +1347,7 @@ for (const cap of [1, 2, 7, 12]) {
     const f = fixture()
     f.deps.readReviewCap = async () => ({ kind: 'known', max_rounds: cap })
     const rounds: number[] = []
-    f.deps.reviewGate = async (_payload, _snapshot, round, _used, record) => {
+    f.deps.reviewGate = async (_payload, _observation, _snapshot, round, _used, record) => {
       rounds.push(round)
       record?.({ findings: [`unique-${round}`], blockingCount: 0 })
       return { kind: 'fix', findings: [`unique-${round}`] }
@@ -1615,7 +1700,7 @@ test('G084 missing lineage host cannot accept a fix', async () => {
 test('G060 thrown review round becomes an infrastructure block', async () => {
   const f = fixture()
   f.cross.run = async () => { throw new Error('review transport failed') }
-  expect(await f.run()).toMatchObject({ kind: 'blocked', phase: 'review', recipient: 'orchestrator', on: 'infra-only: Review round threw before producing synthesis: Error: review transport failed' })
+  expect(await f.run()).toMatchObject({ kind: 'blocked', phase: 'review', recipient: 'orchestrator', on: 'infra-only: Review producer failed during the review join: Error: review transport failed' })
   expect(f.runner.calls.map(call => call.role)).toEqual(['plan', 'build'])
   expect(f.events).not.toContain('merge')
 })
@@ -1624,7 +1709,7 @@ test('G057 G060 driver routes incomplete panel facts to the orchestrator', async
   for (const missing of ['seat', 'synthesis']) {
     const f = fixture()
     const approve = { verdict: 'APPROVE', findings: [] }
-    f.deps.reviewGate = (_payload, snapshot, round) => reviewPanel({
+    f.deps.reviewGate = (_payload, _observation, snapshot, round) => reviewPanel({
       seats: [{ id: 'core', provider: 'pi', modelId: 'review-model', role: 'core', enabled: true }],
       readSeat: async () => missing === 'seat' ? null : { runId: 'run', head: snapshot.head, round, provider: 'pi', modelId: 'review-model', status: 'completed', payload: approve },
       retrySeat: async () => {}, readSynthesis: async () => null,

@@ -1,5 +1,5 @@
 import { expect, test } from 'bun:test'
-import { reviewPanel, type ReviewSource, type SeatObservation } from './review-panel.ts'
+import { decideReviewPanel, observeReviewPanel, reviewPanel, type ReviewSource, type SeatObservation } from './review-panel.ts'
 const snapshot = { head: 'a'.repeat(40), diff: 'code', pr: null }
 const approve = { verdict: 'APPROVE', findings: [] }
 const finding = { severity: 'major', title: 'bug', evidence: 'code.ts:1', file: 'code.ts', symbol: 'f', rule: 'correctness', line: 1 }
@@ -25,6 +25,36 @@ function deferred<T>() {
 }
 // Drain runnable promise continuations without a wall-clock latency assertion.
 const drain = () => new Promise<void>(resolve => setImmediate(resolve))
+
+test('observation and decision are separate: composition spends no work and preserves both vetoes', async () => {
+  for (const veto of ['standalone', 'synthesis', 'none'] as const) {
+    const f = fixture()
+    const refusal = { verdict: 'REQUEST_CHANGES', findings: [finding] }
+    if (veto === 'synthesis') f.synthesis.payload = refusal
+    const observed = await observeReviewPanel(f.source, snapshot, 1, 'run')
+    expect(observed.kind).toBe('observed')
+    const before = f.reads()
+    expect(decideReviewPanel(veto === 'standalone' ? refusal : approve, observed, snapshot, 1, 'run'))
+      .toMatchObject({ kind: veto === 'none' ? 'approve' : 'fix' })
+    expect(f.reads()).toBe(before)
+    expect(f.retries()).toBe(0)
+    for (const changed of [{ ...snapshot, head: 'b'.repeat(40) }, { ...snapshot, diff: 'different' }]) {
+      expect(decideReviewPanel(approve, observed, changed, 1, 'run')).toMatchObject({ kind: 'blocked' })
+    }
+    expect(decideReviewPanel(approve, observed, snapshot, 2, 'run')).toMatchObject({ kind: 'blocked' })
+    expect(decideReviewPanel(approve, observed, snapshot, 1, 'other')).toMatchObject({ kind: 'blocked' })
+  }
+})
+
+test('observation identity compares PR fields rather than object key order', async () => {
+  const f = fixture()
+  const current = { ...snapshot, pr: { number: 12, state: 'OPEN' as const, head: snapshot.head } }
+  const observation = await observeReviewPanel(f.source, current, 1, 'run')
+  expect(decideReviewPanel(approve, observation, { ...current, pr: { head: snapshot.head, state: 'OPEN', number: 12 } }, 1, 'run')).toEqual({ kind: 'approve' })
+  for (const pr of [null, { ...current.pr, number: 13 }, { ...current.pr, head: 'b'.repeat(40) }, { ...current.pr, state: 'CLOSED' as const }]) {
+    expect(decideReviewPanel(approve, observation, { ...current, pr }, 1, 'run')).toMatchObject({ kind: 'blocked' })
+  }
+})
 
 test('panel starts every enabled seat before release and synthesizes only after the last settles', async () => {
   const f = fixture()

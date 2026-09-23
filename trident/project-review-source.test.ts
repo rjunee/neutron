@@ -5,7 +5,7 @@ import { join } from 'node:path'
 import type { BoundedWorkOutcome, BoundedWorkRequest, WorkerRunner } from '@neutronai/runtime/bounded-work.ts'
 import { decodeProjectTrailer, type ProjectTrailerOutcome } from '@neutronai/runtime/workers/project-runners.ts'
 import { createProjectReviewSource, type ProjectReviewSourceOptions } from './project-review-source.ts'
-import { reviewPanel } from './gates/review-panel.ts'
+import { decideReviewPanel, observeReviewPanel, reviewPanel } from './gates/review-panel.ts'
 import { validateTrailer, VERDICT_SCHEMA } from './gates/result-contract.ts'
 const approve = { verdict: 'APPROVE', findings: [] }
 const snapshot = { head: 'a'.repeat(40), diff: 'actual diff', pr: null }
@@ -32,6 +32,21 @@ async function fixture() {
   const check = (s = source()) => reviewPanel(s, approve, snapshot, 1, 'host-run')
   return { options, calls, bindings, source, check, answer: (fn: typeof answer) => { answer = fn } }
 }
+
+test('separate panel observation joins once and decision composition never redispatches valid verdicts', async () => {
+  const f = await fixture()
+  const source = f.source()
+  const [one, two] = await Promise.all([
+    observeReviewPanel(source, snapshot, 1, 'host-run'),
+    observeReviewPanel(source, snapshot, 1, 'host-run'),
+  ])
+  expect(one.kind).toBe('observed')
+  expect(two).toEqual(one)
+  expect(f.calls.map(call => call.role)).toEqual(['review', 'synthesis'])
+  expect(decideReviewPanel(approve, one, snapshot, 1, 'host-run')).toEqual({ kind: 'approve' })
+  expect(decideReviewPanel({ verdict: 'COMMENT', findings: [] }, two, snapshot, 1, 'host-run')).toMatchObject({ kind: 'blocked' })
+  expect(f.calls).toHaveLength(2)
+})
 
 test('cross-provider review persists one observed thread per seat across source replacement', async () => {
   const f = await fixture()

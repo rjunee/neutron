@@ -78,6 +78,7 @@ import { CodexOwnerBindings } from '../wiring/codex-owner-binding.ts'
 import { restrictedOwnerFixture } from './fixtures/codex-owner-review.ts'
 import { PROJECT_DEPENDENCIES_TIMEOUT_MS } from '../wiring/project-build-dependencies.ts'
 import { PROJECT_SNAPSHOT_SCHEMA } from '../wiring/project-build-snapshot.ts'
+import { ReplSession } from '@neutronai/runtime/adapters/claude-code/persistent/repl-session.ts'
 
 const cleanups: (() => void | Promise<void>)[] = []
 afterEach(async () => { for (const fn of cleanups.splice(0).reverse()) await fn() })
@@ -276,6 +277,7 @@ async function measureDiff(run: Runner, repo: string, base: string, head: string
 }
 
 interface WorkerWorld {
+  reviewVeto?: 'standalone' | 'synthesis'
   numericBuildPr?: boolean
   mutationArgv?: 'bare' | 'valid'
   run: Runner
@@ -390,6 +392,11 @@ function literalWorker(world: WorkerWorld) {
     const stopped = world.blockRoles.has(request.role)
       || (request.role === 'review' && panelRound !== undefined && world.unavailableSeatRounds.has(panelRound))
     let inner = stopped ? undefined : await performRole(world, request, brief)
+    if ((world.reviewVeto === 'standalone' && request.role === 'review' && request.result.schema !== 'verdict')
+        || (world.reviewVeto === 'synthesis' && request.role === 'synthesis')) {
+      const veto = { verdict: 'COMMENT', findings: [] }
+      inner = request.result.schema === 'verdict' ? veto : { ...(inner as object), payload: veto }
+    }
     if (world.numericBuildPr && request.role === 'build') inner = { ...(inner as object), pr: 17 }
 
     // Write ONLY what the brief asked for. See `envelopeFieldsNamedBy`. A blocked
@@ -730,7 +737,11 @@ async function fixture(options: { ralph?: boolean; moreTasks?: boolean; suiteExi
   maxRounds?: number; mergeMode?: 'pr' | 'local'; blockRoles?: readonly string[]
   repeatFirstFinding?: boolean; commentRounds?: readonly number[]
   unavailableSeatRounds?: readonly number[]; codexReview?: 'valid' | 'wrong-run'
-  synthesisShape?: WorkerWorld['synthesisShape']; rateLimitedSynthesis?: boolean } = {}) {
+  synthesisShape?: WorkerWorld['synthesisShape']; rateLimitedSynthesis?: boolean
+  /** Real session ownership with only the model boundary held at a barrier. */
+  reviewChild?: (request: BoundedWorkRequest, seat: string) => Promise<void>
+  reviewVeto?: 'standalone' | 'synthesis'
+} = {}) {
   const dir = await mkdtemp(join(tmpdir(), 'project-build-e2e-'))
   cleanups.push(() => rm(dir, { recursive: true, force: true }))
   const origin = join(dir, 'origin.git')
@@ -822,6 +833,7 @@ async function fixture(options: { ralph?: boolean; moreTasks?: boolean; suiteExi
   const github = fakeGithub({ origin, repo })
   const commands: string[][] = []
   const world: WorkerWorld = { run: spawnCapture, repo, scratch, dispatches: [],
+    ...(options.reviewVeto ? { reviewVeto: options.reviewVeto } : {}),
     selectedTasks: [], plannerChoices: [], committedPlans: [], hostLedger: options.hostLedger ?? false,
     synthesisShape: options.synthesisShape ?? 'legacy', synthesisSchemaSeen: [],
     blockersByRound: options.blockersByRound ?? [], replanRounds: options.replanRounds ?? [],
@@ -863,6 +875,34 @@ async function fixture(options: { ralph?: boolean; moreTasks?: boolean; suiteExi
       world.dispatches.push({ role: request.role, step_id: request.step_id, schema: request.result.schema, wrote: [] })
     } }, acquireTurn: async () => () => {} }
 
+  let registeredSession: typeof session | ReplSession = session
+  if (options.reviewChild) {
+    const live = new ReplSession(key, 'e2e-generation', 'e2e-session', 'e2e-channel', dir)
+    live.toolSurface = session.toolSurface
+    const children: Promise<void>[] = []
+    const errors: unknown[] = []
+    live.attachChild({ pid: 123, write() {}, kill() {}, hasExited: () => false,
+      exited: new Promise(() => {}), submitLine: async line => {
+        const spec = JSON.parse(line.slice(line.indexOf('{')))
+        const args = JSON.parse(String(spec.prompt).slice(String(spec.prompt).indexOf('{')))
+        const requestLine = String(args.prompt).split('\n').find(row => row.startsWith('Request (data): '))!
+        const request: BoundedWorkRequest = JSON.parse(requestLine.slice('Request (data): '.length))
+        if (request.role !== 'review') return session.child.submitLine(line)
+        const seat = request.result.schema === 'verdict' ? JSON.parse(await readFile(request.brief.path, 'utf8')).seat : 'standalone'
+        const directory = join(projectsDir, dir.replace(/\//g, '-'), 'e2e-session', 'subagents')
+        await mkdir(directory, { recursive: true })
+        const agentId = createHash('sha256').update(request.step_id).digest('hex')
+        await writeFile(join(directory, `agent-${agentId}.meta.json`), JSON.stringify({ description: args.description }))
+        await writeFile(join(directory, `agent-${agentId}.jsonl`), JSON.stringify({ agentId, sessionId: 'e2e-session',
+          isSidechain: true, type: 'user', message: { role: 'user', content: args.prompt } }) + '\n')
+        // Acceptance returns immediately; the independently owned child remains
+        // live until its barrier opens. Production owns submission serialization.
+        children.push(options.reviewChild!(request, seat).then(() => worker(line)).catch(error => { errors.push(error) }))
+      } })
+    registeredSession = live
+    cleanups.push(async () => { await Promise.all(children); expect(errors).toEqual([]); expect(live.turnSlotHeld).toBe(0) })
+  }
+
   const register = (registration: { key?: string; projectId?: string; instanceId?: string
     state?: 'ready' | 'pending' | 'missing' | 'empty' | 'exited' } = {}) => {
     const sessionKey = registration.key ?? key
@@ -876,7 +916,7 @@ async function fixture(options: { ralph?: boolean; moreTasks?: boolean; suiteExi
     if (registration.state === 'missing') { pool.delete(sessionKey); return }
     pool.set(sessionKey, registration.state === 'pending' ? new Promise(() => {})
       : Promise.resolve((registration.state === 'empty' ? undefined
-        : registration.state === 'exited' ? { ...session, hasChildExited: () => true } : session) as never))
+        : registration.state === 'exited' ? { ...session, hasChildExited: () => true } : registeredSession) as never))
   }
 
   const context: ProjectBuildContext = {
@@ -1613,6 +1653,55 @@ test('numeric outer PR stops a valid build payload before review or publication'
   expect(outcome).toMatchObject({ kind: 'unknown', detail: expect.stringContaining('result.pr must be null or an object') })
   expect(f.world.dispatches.map(dispatch => dispatch.role)).toEqual(['plan', 'build'])
   expect(f.github.prs).toEqual([])
+}, 30_000)
+
+test.each(['approve', 'standalone', 'synthesis', 'missing-seat'] as const)('all-producer barrier crosses the real session lock and preserves vetoes: %s', async verdict => {
+  const started: string[] = []
+  let release!: () => void, allStarted!: () => void
+  const hold = new Promise<void>(resolve => { release = resolve })
+  const entered = new Promise<void>(resolve => { allStarted = resolve })
+  const f = await fixture({
+    ...(verdict === 'standalone' || verdict === 'synthesis' ? { reviewVeto: verdict } : {}),
+    unavailableSeatRounds: verdict === 'missing-seat' ? [1] : [],
+    reviewChild: async (_request, seat) => { started.push(seat); if (started.length === 3) allStarted(); await hold },
+  })
+  f.input.phase_models = { ...f.input.phase_models, review_rubric: { model: 'fable' } }
+  let settled = false
+  const running = drive(f, 'pr').then(result => { settled = true; return result })
+  let timer: ReturnType<typeof setTimeout> | undefined
+  try {
+    // The deadline prevents a broken serial implementation leaving children
+    // behind; success depends on the barrier, never on elapsed-time estimates.
+    await Promise.race([entered, new Promise<never>((_, reject) => {
+      timer = setTimeout(() => reject(Error(`Producers did not reach barrier: ${started.join(',')}`)), 10_000)
+    })])
+    expect([...started].sort()).toEqual(['review_adversarial', 'review_rubric', 'standalone'])
+    expect(settled).toBe(false)
+    expect(f.world.dispatches.filter(call => call.role === 'review' || call.role === 'synthesis')).toEqual([])
+    expect(f.github.prs.every(pr => pr.state === 'OPEN')).toBe(true)
+  } finally { clearTimeout(timer); release(); await running }
+  const outcome = await running
+  expect(outcome.kind, why(f, outcome)).toBe(verdict === 'approve' ? 'merged' : 'blocked')
+  if (verdict === 'standalone' || verdict === 'synthesis') {
+    expect(outcome).toMatchObject({ kind: 'blocked', on: 'Review has an unresolved verdict without nonblocking findings' })
+  }
+  expect(started).toHaveLength(3)
+  expect(f.world.dispatches.filter(call => call.role === 'synthesis')).toHaveLength(verdict === 'missing-seat' ? 0 : 1)
+  if (verdict !== 'approve') expect(f.github.prs.every(pr => pr.state === 'OPEN')).toBe(true)
+}, 30_000)
+
+test.each(['readiness', 'ci', 'artifact'] as const)('unavailable admission prevents every review producer in the consuming host: %s', async stop => {
+  const started: string[] = []
+  const f = await fixture({ reviewChild: async (_request, seat) => { started.push(seat) } })
+  f.input.phase_models = { ...f.input.phase_models, review_rubric: { model: 'fable' } }
+  const host = await createProjectBuildHost(await f.prepare())
+  if (stop === 'readiness') host.deps.reviewReadiness = async () => ({ kind: 'unknown', detail: 'fixture readiness unavailable' })
+  if (stop === 'ci') host.deps.reviewCi = async () => ({ kind: 'blocked', on: 'fixture CI unavailable' })
+  if (stop === 'artifact') host.deps.reviewArtifact = async () => ({ kind: 'unknown', detail: 'fixture artifact unavailable' })
+  const outcome = await host.run({ mode: 'pr', start: 'fresh' }, new AbortController().signal)
+  expect(outcome.kind).toBe(stop === 'ci' ? 'blocked' : 'unknown')
+  expect(started).toEqual([])
+  expect(f.world.dispatches.map(call => call.role)).toEqual(['plan', 'build'])
 }, 30_000)
 
 test('pr mode drives plan, build, review, publish and merge to a terminal merged outcome', async () => {

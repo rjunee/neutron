@@ -19,6 +19,7 @@ import { applyReviewSuite, type SuiteAssessment } from './gates/review-suite.ts'
 import { reviewProgress, type ReviewProgress } from './gates/review-progress.ts'
 import type { TerminalCause } from './terminal-cause.ts'
 import type { PhaseUsageReport } from './phase-usage.ts'
+import type { ReviewPanelObservation } from './gates/review-panel.ts'
 
 const log = createLogger('trident')
 
@@ -139,7 +140,8 @@ export interface BuildRunDeps {
    * belongs at construction rather than as a runtime `unknown` each caller must recall. */
   publicationSuite(snapshot: BuildSnapshot): Promise<SuiteAssessment>
   // reviewGate owns panel provenance and severity, and records evidence before filtering.
-  reviewGate(payload: unknown, snapshot: BuildSnapshot, round: number, replansUsed?: number, recordProgress?: (value: ReviewProgress) => void): Promise<ReviewDecision>
+  observeReview(snapshot: BuildSnapshot, round: number): Promise<ReviewPanelObservation>
+  reviewGate(payload: unknown, observation: ReviewPanelObservation, snapshot: BuildSnapshot, round: number, replansUsed?: number, recordProgress?: (value: ReviewProgress) => void): Promise<ReviewDecision>
   // publishGate owns mutation proof and publication readiness; mergeGate owns CI,
   // base drift and pinned-head merge eligibility. Both run on host observations.
   publishGate(snapshot: BuildSnapshot, mergeMode?: 'pr' | 'local'): Promise<PublicationGateResult>
@@ -387,7 +389,7 @@ export async function buildRun(input: BuildRunInput, deps: BuildRunDeps, signal:
     let previousPayload: unknown = null
     let findings: readonly string[] = []
     const usageTotals = new Map<string, PhaseUsageReport>()
-    async function work(role: WorkPhase, round: number): Promise<{ payload: unknown } | { stop: BuildRunOutcome }> {
+    async function work(role: WorkPhase, round: number): Promise<{ payload: unknown; review?: ReviewPanelObservation } | { stop: BuildRunOutcome }> {
       phase = role
       step_id = `${input.run_id}${input.mode === 'ralph' ? `:task:${input.ralphRound ?? 0}` : ''}:${role}:${round}`
       const { runner, request } = input.workers[role]
@@ -407,10 +409,24 @@ export async function buildRun(input: BuildRunInput, deps: BuildRunDeps, signal:
         if (artifact) return { stop: artifact }
       }
       let outcome: BoundedWorkOutcome
+      let review: ReviewPanelObservation | undefined
       try {
-        outcome = await runner.run(boundedRequest, placementFor(runner.provider, input.repl_provider), signal)
+        if (role === 'review') {
+          if (!deps.observeReview) return { stop: unknown('Review observation host is missing') }
+          // Readiness, CI, suite and artifact preparation have all passed. Start
+          // every independent producer before awaiting a verdict, and drain both
+          // sides even when one rejects. No fix or merge can race a live reviewer.
+          const [standalone, panel] = await Promise.allSettled([
+            Promise.resolve().then(() => runner.run(boundedRequest, placementFor(runner.provider, input.repl_provider), signal)),
+            Promise.resolve().then(() => deps.observeReview(structuredClone(snapshot), round)),
+          ])
+          if (standalone.status === 'rejected') throw standalone.reason
+          if (panel.status === 'rejected') throw panel.reason
+          outcome = standalone.value
+          review = panel.value
+        } else outcome = await runner.run(boundedRequest, placementFor(runner.provider, input.repl_provider), signal)
       } catch (error) {
-        if (role === 'review') return { stop: blocked(unknownCause('infra-only: Review round threw before producing synthesis', error, input.run_id).slice(0, TERMINAL_CAUSE_MAX)) }
+        if (role === 'review') return { stop: blocked(unknownCause('infra-only: Review producer failed during the review join', error, input.run_id).slice(0, TERMINAL_CAUSE_MAX)) }
         if (role === 'plan' && replansUsed > 0) return { stop: blocked(unknownCause('design-gap: re-plan-failed: planner threw before producing a revised execution spec', error, input.run_id).slice(0, TERMINAL_CAUSE_MAX)) }
         throw error
       }
@@ -491,7 +507,7 @@ export async function buildRun(input: BuildRunInput, deps: BuildRunDeps, signal:
       }
       const payload = role === 'plan' ? clampPlanBranchBrief(result.payload) : result.payload
       previousPayload = payload
-      return { payload }
+      return { payload, ...(review ? { review } : {}) }
     }
 
     /** Commit the ticked ledger at the built head, re-measure, and move the durable
@@ -694,7 +710,8 @@ export async function buildRun(input: BuildRunInput, deps: BuildRunDeps, signal:
         if (ci.kind === 'unknown') return unknown(ciUnknownDetail(result.payload, ci.detail))
         if (ci.kind === 'blocked') return blocked(ci.on)
         let currentReview: ReviewProgress | undefined
-        const panel = await deps.reviewGate(result.payload, snapshot, round, replansUsed, value => {
+        if (!result.review) return unknown('Review panel observation is missing')
+        const panel = await deps.reviewGate(result.payload, result.review, snapshot, round, replansUsed, value => {
           currentReview = { findings: [...value.findings], blockingCount: value.blockingCount }
         })
         const suiteDecision = applyReviewSuite(panel, suite)

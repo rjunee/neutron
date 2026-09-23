@@ -146,6 +146,7 @@ async function compare(outcome: BoundedWorkOutcome, measured: BuildSnapshot) {
     admissionGate: async () => ({ kind: 'allow' }),
     runLeakGatePreflight: async () => { throw new Error('unexpected gate') },
     assessMergeDiff: () => { throw new Error('unexpected gate') },
+    observeReview: async () => { throw new Error('unexpected review observation') },
     reviewGate: async () => { throw new Error('unexpected review') },
     publishGate: async () => { throw new Error('unexpected publication') },
     mergeGate: async () => { throw new Error('unexpected merge') },
