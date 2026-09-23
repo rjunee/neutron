@@ -30,6 +30,11 @@ A mutation accepting stale generation/token comparisons failed one test; a
 mutation refusing every valid reopen failed two. Restored store tests passed
 (7 tests, 44 assertions).
 
+Hosted CI also exercised three literal migration-order expectations that stopped
+at 0157. Their exact lists now include 0158; the assertions remain exact. The full
+migration suite then passed locally (227 tests, 5,881 assertions), alongside the
+store and affected runner/repair tests (34 tests, 330 assertions).
+
 Integration obligations established during investigation: chat admission must
 precede the queue in `gateway/wiring/build-live-agent-turn.ts`; Work Board must
 retain fenced holds instead of deleting them as permanent refusals in
