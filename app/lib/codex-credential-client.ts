@@ -19,10 +19,8 @@
  * is not a shipped feature. `account` is optional everywhere: omitting it means the
  * first seat, which is exactly what a pre-rotation client sends.
  *
- * GLOBAL ROUTES ONLY, deliberately. The per-project override is an advanced escape
- * hatch the web Settings tab already offers; putting it on a phone would mean
- * explaining project→global resolution precedence on a 6-inch screen to solve a
- * problem nobody has yet.
+ * GLOBAL ROUTES ONLY here. Project chat settings use the shared
+ * ProjectChatSettingsClient for their explicitly project-scoped connection.
  *
  * WRITE-ONLY. The stored tokens are never returned by the surface — only a status.
  * Nothing here logs the pasted bundle, and it is never put into component state

@@ -1088,9 +1088,8 @@ export function buildOpenGraphComposer(
       if (!(await projectSettingsStore.list(project_slug)).some(project => project.id === projectId)) {
         throw new Error('Codex owner project is unavailable')
       }
-      const home = codexCredentialService.resolveActiveCodexHome(asOwnerHandle(owner_handle), projectId)
-      if (!home) throw new Error('Codex owner requires a connected project credential')
-      return { cwd: joinPath(owner_home, 'Projects', projectId), codexHome: home, env }
+      const credential = codexCredentialService.resolveProjectOwnerCredential(asOwnerHandle(owner_handle), projectId)
+      return { cwd: joinPath(owner_home, 'Projects', projectId), ...credential, env }
     })
     const codexOwnerProjects = (await projectSettingsStore.list(project_slug))
       .filter(project => resolveModelProvider(project.id).provider === 'openai-codex')

@@ -95,6 +95,7 @@ import {
   type VoiceTranscriptionStatus,
 } from './voice-transcription-client.ts'
 import { PersonalityEditor } from './PersonalityEditor.tsx'
+import { ProjectChatSettings } from './ProjectChatSettings.tsx'
 
 type FetchImpl = (input: string, init?: RequestInit) => Promise<Response>
 
@@ -409,20 +410,25 @@ export function SettingsTab({
 
   // ── codex connect (Part B) ──
   const [codexStatus, setCodexStatus] = useState<CodexStatus | null>(null)
+  const [codexStatusProject, setCodexStatusProject] = useState<string | null>(null)
+  const codexSequence = useRef(0)
   const [codexAuth, setCodexAuth] = useState('')
   const [codexBusy, setCodexBusy] = useState(false)
   const [codexError, setCodexError] = useState<string | null>(null)
 
   const loadCodex = useCallback((): void => {
+    const seq = ++codexSequence.current
     void codexClient
       .status(projectId)
       .then((s) => {
-        if (!mountedRef.current) return
+        if (!mountedRef.current || seq !== codexSequence.current) return
         setCodexStatus(s)
+        setCodexStatusProject(projectId)
       })
       .catch(() => {
-        if (!mountedRef.current) return
-        setCodexStatus({ status: 'not_connected' })
+        if (!mountedRef.current || seq !== codexSequence.current) return
+        setCodexStatus(null)
+        setCodexStatusProject(projectId)
       })
   }, [codexClient, projectId])
 
@@ -430,6 +436,7 @@ export function SettingsTab({
     if (codexAuth.trim().length === 0) return
     setCodexBusy(true)
     setCodexError(null)
+    const seq = ++codexSequence.current
     void codexClient
       .connect(projectId, codexAuth.trim())
       // The POST reply carries {status, mode, scope} but NOT `override_present`
@@ -437,13 +444,14 @@ export function SettingsTab({
       // saving so the remove affordance appears immediately, no reload needed.
       .then(() => codexClient.status(projectId))
       .then((s) => {
-        if (!mountedRef.current) return
+        if (!mountedRef.current || seq !== codexSequence.current) return
         setCodexStatus(s)
+        setCodexStatusProject(projectId)
         setCodexAuth('')
         setCodexBusy(false)
       })
       .catch((err: unknown) => {
-        if (!mountedRef.current) return
+        if (!mountedRef.current || seq !== codexSequence.current) return
         setCodexBusy(false)
         setCodexError(err instanceof Error ? err.message : 'failed to connect Codex')
       })
@@ -452,6 +460,7 @@ export function SettingsTab({
   const disconnectCodex = useCallback((): void => {
     setCodexBusy(true)
     setCodexError(null)
+    const seq = ++codexSequence.current
     void codexClient
       .disconnect(projectId)
       // Removing a project override must reflect the EFFECTIVE status, not a hard
@@ -459,12 +468,13 @@ export function SettingsTab({
       // (connected, scope=global). Re-fetch rather than assume.
       .then(() => codexClient.status(projectId))
       .then((s) => {
-        if (!mountedRef.current) return
+        if (!mountedRef.current || seq !== codexSequence.current) return
         setCodexStatus(s)
+        setCodexStatusProject(projectId)
         setCodexBusy(false)
       })
       .catch((err: unknown) => {
-        if (!mountedRef.current) return
+        if (!mountedRef.current || seq !== codexSequence.current) return
         setCodexBusy(false)
         setCodexError(err instanceof Error ? err.message : 'failed to disconnect Codex')
       })
@@ -726,6 +736,9 @@ export function SettingsTab({
     setGlobalCreds([])
     setService('')
     setToken('')
+    setCodexAuth('')
+    setCodexBusy(false)
+    setCodexError(null)
     setLabel('')
     setBusyKey(null)
     setNameError(null)
@@ -1058,24 +1071,18 @@ export function SettingsTab({
         )}
       </section>
 
+      <ProjectChatSettings key={projectId} projectId={projectId} origin={config.origin} token={config.token}
+        fetchImpl={withSignal} codexStatus={codexStatusProject === projectId ? codexStatus : null} />
       {/* ── Codex review OVERRIDE (optional — the primary/global connect lives
           in the General → Admin tab; this only overrides it for THIS project) ── */}
       <section className="cset-section" aria-label="Codex review override">
-        <h2 className="cset-h">Codex review — project override</h2>
+        <h2 className="cset-h">Project Codex connection</h2>
         <p className="cset-sub">
-          <strong>Optional / advanced.</strong> Codex is normally connected once, account-wide, in
-          <strong> General → Admin → Codex cross-model review</strong>, and the trident reviewer
-          uses that global credential. You can store a <em>project-scoped</em> override here; the
-          credential resolver prefers it over the global default wherever this project’s id is in
-          play (project → global → unset). Run <code>codex login</code>, then paste that
+          Codex chat requires a subscription connected explicitly to this project. This connection
+          also overrides the account-wide Codex reviewer credential for this project.
+          Run <code>codex login</code>, then paste that
           subscription’s <code>~/.codex/auth.json</code>. A metered <code>OPENAI_API_KEY</code> is
           rejected — subscription only.
-          <br />
-          <small>
-            Note: the trident review loop is instance-scoped, so builds currently use the global
-            credential; a stored override takes effect for the trident review once builds are
-            project-scoped.
-          </small>
         </p>
         <p className="cset-codex-status" data-status={codexStatus?.status ?? 'not_connected'}>
           {codexStatus?.status === 'connected'

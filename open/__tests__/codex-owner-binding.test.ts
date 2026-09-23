@@ -54,6 +54,7 @@ function fixture(remote = false) {
   const homes = new Map<string, string>()
   let fail = false
   let authorized = true
+  let credentialIdentity = 'fixture-credential'
   let wrongReceipt = false
   let approval = false
   let capability = true
@@ -67,9 +68,9 @@ function fixture(remote = false) {
     if (!authorized) throw new Error('No connected project credential')
     const cwd = join(dir, projectId), codexHome = join(cwd, 'home')
     mkdirSync(codexHome, { recursive: true, mode: 0o700 })
-    writeFileSync(join(codexHome, 'project-owner.json'), JSON.stringify(projectId))
+    if (!existsSync(join(codexHome, 'project-owner.json'))) writeFileSync(join(codexHome, 'project-owner.json'), JSON.stringify(projectId))
     homes.set(projectId, codexHome)
-    return { cwd, codexHome, env: { OPENAI_API_KEY: 'must-not-reach-native', PATH: process.env.PATH } }
+    return { cwd, codexHome, credentialIdentity, env: { OPENAI_API_KEY: 'must-not-reach-native', PATH: process.env.PATH } }
   }, async options => {
     const project = JSON.parse(await Bun.file(join(options.codexHome, 'project-owner.json')).text()) as string
     launched.push(project)
@@ -168,11 +169,12 @@ function fixture(remote = false) {
       return owner.broker.gateway('terminal-native').request('turn/start', { threadId: identity.threadId, input: [{ text: 'terminal input' }] }, owner.broker.state().epoch)
     },
     authorize: (value: boolean) => { authorized = value },
+    credential: (value: string) => { credentialIdentity = value },
     delayTerminalState: (reads: number) => { terminalLag = reads },
     gateProject: (gate: Promise<void> | undefined) => { projectGate = gate },
     gateOpening: (gate: Promise<void> | undefined) => { openingGate = gate },
     gateModel: (gate: Promise<void> | undefined) => { modelGate = gate },
-    restart: () => new CodexOwnerBindings(async projectId => ({ cwd: join(dir, projectId), codexHome: homes.get(projectId)!, env: {} }),
+    restart: () => new CodexOwnerBindings(async projectId => ({ cwd: join(dir, projectId), codexHome: homes.get(projectId)!, credentialIdentity, env: {} }),
       async options => owners.get(options.codexHome)!, binding => facts.get(binding)!),
     rpc, replies, hold: (value: boolean) => { held = value }, finish: (project = 'project-one') => finishers.get(project)!(),
     question: (method: string, params: Record<string, unknown>, project = 'project-one') => emitters.get(project)!(method, params),
@@ -205,6 +207,30 @@ async function consumingBuild(f: ReturnType<typeof fixture>, options: { cwd?: st
     trailer, headless: {} })
   return { request, rawWorker: runners.inRepl!, worker: f.bindings.guardBuildRunner('project-one', runners.inRepl!) }
 }
+
+test('cached owner rechecks credential authorization and account identity before chat, controls and build recovery', async () => {
+  const f = fixture()
+  await collect(f.bindings.start('project-one', spec('initial')))
+  const calls = f.calls.length
+  f.authorize(false)
+  expect(await collect(f.bindings.start('project-one', spec('revoked')))).toContainEqual(expect.objectContaining({
+    kind: 'error', message: expect.stringContaining('No connected project credential'),
+  }))
+  await expect(f.bindings.controls.model('project-one')).rejects.toThrow('No connected project credential')
+  f.authorize(true)
+  f.credential('different-account')
+  expect(await collect(f.bindings.start('project-one', spec('foreign account')))).toContainEqual(expect.objectContaining({
+    kind: 'error', message: expect.stringContaining('credential identity changed'),
+  }))
+  const build = await consumingBuild(f)
+  expect(await build.worker.run(build.request, 'in-repl', new AbortController().signal)).toMatchObject({ kind: 'unknown', detail: expect.stringContaining('credential identity changed') })
+  expect(f.calls).toHaveLength(calls)
+  expect(f.launched).toEqual(['project-one'])
+  f.credential('fixture-credential')
+  expect((await collect(f.bindings.start('project-one', spec('restored original account')))).at(-1)?.kind).toBe('completion')
+  expect(f.launched).toEqual(['project-one'])
+  await f.bindings.close()
+})
 
 test('recovery passes owner credential, cancellation, and durable uncertainty fences without invoking run', async () => {
   const f = fixture(true)
@@ -828,7 +854,7 @@ test('foreign project marker and forged factory binding never submit native work
   const dir = mkdtempSync(join(tmpdir(), 'owner-marker-test-')); dirs.push(dir)
   writeFileSync(join(dir, 'project-owner.json'), JSON.stringify('other-project'))
   let launches = 0
-  const bindings = new CodexOwnerBindings(async () => ({ cwd: dir, codexHome: dir, env: {} }), async () => {
+  const bindings = new CodexOwnerBindings(async () => ({ cwd: dir, codexHome: dir, credentialIdentity: 'fixture', env: {} }), async () => {
     launches++; return { binding: {}, async close() {} } as CodexOwnerBootstrap
   })
   expect((await collect(bindings.start('project-one', spec('hello')))).at(-1)).toMatchObject({ kind: 'error', message: 'Codex owner credential home belongs to another project' })
@@ -985,6 +1011,40 @@ test.each([false, true])('native interrupt preserves successor chat and model co
   }])
   f.finish(); expect((await next).at(-1)).toMatchObject({ kind: 'completion', session: { id: state.threadId } })
   expect(f.launched).toEqual(['project-one'])
+})
+
+test('revoking the credential refuses new work but preserves exact-turn interruption', async () => {
+  const f = fixture(), api = controlSurfaces(f)
+  f.hold(true)
+  const draining = collect(f.bindings.start('project-one', spec('hold')))
+  for (let attempt = 0; f.calls.length < 1 && attempt < 100; attempt++) await Bun.sleep(1)
+  const state = await (await api('control')).json() as NativeOwnerControlState
+  f.authorize(false)
+  expect((await api('model')).status).toBe(503)
+  expect((await api('control', { ...state, action: 'interrupt' })).status).toBe(200)
+  expect((await draining).at(-1)).toMatchObject({ kind: 'error', code: 'aborted' })
+  expect(f.rpc.filter(call => call.method === 'turn/interrupt')).toHaveLength(1)
+  await f.bindings.close()
+})
+
+test('revoking a grant refuses approval but preserves the exact pending decline', async () => {
+  const f = fixture(), api = controlSurfaces(f)
+  f.hold(true)
+  const draining = collect(f.bindings.start('project-one', spec('question')))
+  for (let attempt = 0; f.calls.length < 1 && attempt < 100; attempt++) await Bun.sleep(1)
+  f.question('item/commandExecution/requestApproval', { availableDecisions: ['accept', 'decline'] })
+  const state = await (await api('control')).json() as NativeOwnerControlState
+  expect(state.pending).toHaveLength(1)
+  const action = { ...state, action: 'reply', requestId: 'approval' }
+  f.authorize(false)
+  expect((await api('control', { ...action, result: { decision: 'accept' } })).status).toBe(503)
+  expect(f.replies).toHaveLength(0)
+  expect((await api('control', { ...action, result: { decision: 'decline' } })).status).toBe(200)
+  expect(f.replies).toHaveLength(1)
+  expect(f.replies[0]?.result).toEqual({ decision: 'decline' })
+  f.finish()
+  expect((await draining).at(-1)?.kind).toBe('completion')
+  await f.bindings.close()
 })
 
 test.each(['lost', 'wrong-turn', 'child', 'unsolicited'] as const)('native abort retains uncertainty fence: %s', async fault => {

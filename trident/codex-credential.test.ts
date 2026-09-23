@@ -6,7 +6,7 @@ import { asOwnerHandle } from '@neutronai/persistence/index.ts'
  * CONNECTED (exit 0), not the exit-10 NOT_CONNECTED branch.
  */
 
-import { afterEach, beforeEach, describe, expect, test } from 'bun:test'
+import { afterEach, beforeEach, describe, expect, spyOn, test } from 'bun:test'
 import { spawnSync } from 'node:child_process'
 import {
   chmodSync,
@@ -564,6 +564,85 @@ describe('one ChatGPT account cannot occupy two seats', () => {
 })
 
 describe('project directory ownership', () => {
+  test('native owner never resolves a global seat; exact project connection is the positive control', async () => {
+    const svc = newService()
+    await svc.connect(OWNER, subscriptionAuth())
+    const fallback = spyOn(store, 'resolve')
+    expect(() => svc.resolveProjectOwnerCredential(OWNER, 'alpha')).toThrow('Connect a Codex subscription to this project')
+    expect(fallback).not.toHaveBeenCalled()
+    fallback.mockRestore()
+    expect(svc.status(OWNER, { project_id: 'alpha' })).toMatchObject({ status: 'connected', scope: 'global', owner_credential: { configured: false } })
+    await svc.connect(OWNER, subscriptionAuth(), { scope: 'project', project_id: 'alpha' })
+    const selected = svc.resolveProjectOwnerCredential(OWNER, 'alpha')
+    expect(selected.codexHome).toBe(codexProjectHome(codexHome, 'alpha'))
+    expect(selected.credentialIdentity).toMatch(/^[a-f0-9]{64}$/)
+    expect(() => svc.resolveProjectOwnerCredential(OWNER, 'beta')).toThrow('Connect a Codex subscription')
+    expect(svc.projectOwnerCredentialStatus(OWNER, 'alpha')).toMatchObject({ configured: true, checked_at: expect.any(String) })
+    await svc.disconnect(OWNER, { scope: 'project', project_id: 'alpha' })
+    expect(() => svc.resolveProjectOwnerCredential(OWNER, 'alpha')).toThrow('Connect a Codex subscription')
+    expect(svc.resolveActiveCodexHome(OWNER, 'alpha')).toBe(codexHome)
+  })
+
+  test('native owner accepts same-account refresh but refuses foreign disk identity before harvesting', async () => {
+    const svc = newService(), target = { scope: 'project' as const, project_id: 'alpha' }
+    await svc.connect(OWNER, subscriptionAuth(), target)
+    const first = svc.resolveProjectOwnerCredential(OWNER, 'alpha')
+    const refreshed = JSON.parse(subscriptionAuth())
+    refreshed.tokens.access_token = 'refreshed-access'
+    refreshed.last_refresh = '2026-09-23T00:00:00.000Z'
+    writeFileSync(codexAuthPath(first.codexHome), JSON.stringify(refreshed))
+    expect(svc.resolveProjectOwnerCredential(OWNER, 'alpha')).toEqual(first)
+    await new Promise(resolve => setTimeout(resolve, 0))
+    const before = store.resolveProject(OWNER, 'alpha', CODEX_CREDENTIAL_SERVICE)?.plaintext
+    refreshed.tokens.account_id = 'different-account'
+    refreshed.last_refresh = '2026-09-24T00:00:00.000Z'
+    writeFileSync(codexAuthPath(first.codexHome), JSON.stringify(refreshed))
+    expect(() => svc.resolveProjectOwnerCredential(OWNER, 'alpha')).toThrow('identity changed')
+    expect(svc.projectOwnerCredentialStatus(OWNER, 'alpha').configured).toBe(false)
+    await new Promise(resolve => setTimeout(resolve, 0))
+    expect(store.resolveProject(OWNER, 'alpha', CODEX_CREDENTIAL_SERVICE)?.plaintext).toBe(before)
+    expect(readMaterializedAuth(first.codexHome)).toBe(JSON.stringify(refreshed))
+    await svc.connect(OWNER, subscriptionAuth(), target)
+    expect(svc.resolveProjectOwnerCredential(OWNER, 'alpha')).toEqual(first)
+    writeFileSync(join(first.codexHome, 'project-owner.json'), JSON.stringify('beta'))
+    expect(() => svc.resolveProjectOwnerCredential(OWNER, 'alpha')).toThrow('ownership')
+  })
+
+  test('native owner refuses expired project rows and revoked credentials without fallback', async () => {
+    const svc = new CodexCredentialService({ store, codexHome, rotation: new SqliteCodexRotationStore(db),
+      probe: async () => ({ kind: 'revoked', httpStatus: 401 }) })
+    await svc.connect(OWNER, subscriptionAuth())
+    await svc.connect(OWNER, subscriptionAuth(), { scope: 'project', project_id: 'alpha' })
+    expect(svc.resolveProjectOwnerCredential(OWNER, 'alpha').codexHome).toBe(codexProjectHome(codexHome, 'alpha'))
+    await svc.refreshSeatLiveness(OWNER, { scope: 'project', project_id: 'alpha' })
+    expect(() => svc.resolveProjectOwnerCredential(OWNER, 'alpha')).toThrow('REVOKED')
+    await svc.connect(OWNER, subscriptionAuth().replace('"acc"', '"reconnected-access"'), { scope: 'project', project_id: 'alpha' })
+    expect(svc.resolveProjectOwnerCredential(OWNER, 'alpha').codexHome).toBe(codexProjectHome(codexHome, 'alpha'))
+    await store.set(OWNER, { service: CODEX_CREDENTIAL_SERVICE, plaintext: subscriptionAuth(), scope: 'project',
+      project_id: 'alpha', expires_at: '2000-01-01T00:00:00.000Z' })
+    expect(() => svc.resolveProjectOwnerCredential(OWNER, 'alpha')).toThrow('Connect a Codex subscription')
+  })
+
+  test('an inconclusive project credential read is unknown, not a missing connection', async () => {
+    const svc = newService()
+    const read = spyOn(store, 'resolveProject').mockImplementation(() => { throw new Error('Private filesystem location must not escape') })
+    try {
+      expect(svc.projectOwnerCredentialStatus(OWNER, 'alpha')).toMatchObject({ configured: null, detail: 'Project Codex credential could not be checked' })
+    } finally { read.mockRestore() }
+    expect(svc.projectOwnerCredentialStatus(OWNER, 'alpha').configured).toBe(false)
+    await svc.connect(OWNER, subscriptionAuth(), { scope: 'project', project_id: 'alpha' })
+    expect(svc.projectOwnerCredentialStatus(OWNER, 'alpha').configured).toBe(true)
+  })
+
+  test('access-token expiry preserves the explicit project grant for native refresh', async () => {
+    const svc = newService()
+    const auth = JSON.parse(subscriptionAuth())
+    auth.tokens.access_token = `header.${Buffer.from(JSON.stringify({ exp: 1 })).toString('base64url')}.signature`
+    await svc.connect(OWNER, JSON.stringify(auth), { scope: 'project', project_id: 'alpha' })
+    expect(svc.status(OWNER, { project_id: 'alpha' }).status).toBe('expired')
+    expect(svc.resolveProjectOwnerCredential(OWNER, 'alpha').codexHome).toBe(codexProjectHome(codexHome, 'alpha'))
+  })
+
   test('owner resolves after restart; mismatches refuse every project access without changing credentials', async () => {
     const svc = newService()
     const target = { scope: 'project' as const, project_id: 'alpha' }

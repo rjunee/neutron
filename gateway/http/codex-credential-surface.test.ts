@@ -77,6 +77,19 @@ afterEach(() => {
 })
 
 describe('codex-auth HTTP surface — GLOBAL (primary)', () => {
+  test('project response distinguishes inherited reviewer connection from explicit owner credential configuration', async () => {
+    const auth = JSON.stringify({ tokens: { access_token: 'fixture-access', refresh_token: 'fixture-refresh', account_id: 'fixture-account' } })
+    await surface.handler(req('POST', GLOBAL, { auth }))
+    const inherited = await (await surface.handler(req('GET', PROJECT)))!.json()
+    expect(inherited).toMatchObject({ status: 'connected', scope: 'global', owner_credential: { configured: false, checked_at: expect.any(String) } })
+    await surface.handler(req('POST', PROJECT, { auth }))
+    const connected = await (await surface.handler(req('GET', PROJECT)))!.json()
+    expect(connected).toMatchObject({ status: 'connected', scope: 'project', owner_credential: { configured: true } })
+    expect(JSON.stringify(connected)).not.toContain('fixture-account')
+    expect(JSON.stringify(connected)).not.toContain('fixture-access')
+    const other = await (await surface.handler(req('GET', '/api/app/projects/p2/codex-auth')))!.json()
+    expect(other).toMatchObject({ owner_credential: { configured: false } })
+  })
   test('disclaims non-owned paths with null', async () => {
     expect(await surface.handler(req('GET', '/api/app/projects/p1/credentials'))).toBeNull()
     expect(await surface.handler(req('GET', '/api/other'))).toBeNull()

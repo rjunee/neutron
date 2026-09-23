@@ -154,10 +154,10 @@ test.each([false, true])('production Codex recovery resolves materialized creden
   if (journal) writeFileSync(join(codexHome, '.neutron-owner-launch.json'), '{}')
   const order: string[] = []
   const materialize = spyOn(CodexCredentialService.prototype, 'ensureMaterialized').mockImplementation(() => { order.push('materialized'); return true })
-  const resolve = spyOn(CodexCredentialService.prototype, 'resolveActiveCodexHome').mockImplementation((_owner, projectId) => {
-    if (projectId !== 'project-one') return null
+  const resolve = spyOn(CodexCredentialService.prototype, 'resolveProjectOwnerCredential').mockImplementation((_owner, projectId) => {
+    if (projectId !== 'project-one') throw new Error('No project credential')
     order.push('project-credential')
-    return codexHome
+    return { codexHome, credentialIdentity: 'fixture' }
   })
   const attach = spyOn(durableCodexOwner, 'openDurableCodexOwner').mockImplementation(async options => {
     expect(options.projectId).toBe('project-one')

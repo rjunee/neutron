@@ -22,7 +22,7 @@ async function command(argv: string[]) {
 }
 async function gateway(configPath: string, phase: string) {
   const config = JSON.parse(readFileSync(configPath, 'utf8'))
-  const bindings = new CodexOwnerBindings(async () => ({ cwd: config.cwd, codexHome: config.codexHome, env: config.env }),
+  const bindings = new CodexOwnerBindings(async () => ({ cwd: config.cwd, codexHome: config.codexHome, credentialIdentity: 'fixture', env: config.env }),
     options => openDurableCodexOwner({ ...options, binary: config.binary, configOverrides: config.configOverrides, timeoutMs: 30_000 }))
   await bindings.reconcile(['durable-owner-fixture'])
   const errors: string[] = []

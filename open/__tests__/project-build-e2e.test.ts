@@ -1388,7 +1388,7 @@ async function codexOwnerWithClaude(identity: 'valid' | 'wrong-schema' = 'valid'
     build: { model: 'sol' }, review_adversarial: { model: 'opus' }, synthesis: { model: 'opus' } }
   const children: BoundedWorkRequest[] = []
   const execute = literalWorker(f.world)
-  const guard = new CodexOwnerBindings(async () => ({ cwd: f.context.projectDir, codexHome: ownerHome, env: {} }))
+  const guard = new CodexOwnerBindings(async () => ({ cwd: f.context.projectDir, codexHome: ownerHome, credentialIdentity: 'fixture', env: {} }))
   cleanups.push(() => guard.close())
   f.context.codexOwnerBindings = {
     guardBuildRunner: (project, worker) => guard.guardBuildRunner(project, worker),
@@ -1777,7 +1777,7 @@ test('prepared Codex build/fix transport publishes canonical artifacts while una
   f.input.phase_models = { ...f.input.phase_models, build: { model: 'sol' }, review_adversarial: { model: 'sol' } }
   const children: BoundedWorkRequest[] = []
   const execute = literalWorker(f.world)
-  const guard = new CodexOwnerBindings(async () => ({ cwd: f.context.projectDir, codexHome: ownerHome, env: {} }))
+  const guard = new CodexOwnerBindings(async () => ({ cwd: f.context.projectDir, codexHome: ownerHome, credentialIdentity: 'fixture', env: {} }))
   f.context.codexOwnerBindings = {
     guardBuildRunner: (project, worker) => guard.guardBuildRunner(project, worker),
     actingTurn: project => async turn => {
