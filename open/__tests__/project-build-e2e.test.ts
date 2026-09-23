@@ -3257,6 +3257,41 @@ test('a finding repeated after a fix stops before another fix is dispatched', as
 
 // ── RESUME ACROSS A DRIVER RESTART ───────────────────────────────────────────
 
+for (const progress of ['valid', 'missing', 'null', 'invalid'] as const)
+test(`pending native fix recovery preserves repeated-finding enforcement with ${progress} progress`, async () => {
+  const f = await fixture({ blockersByRound: [0, 2, 1], repeatFirstFinding: true })
+  const host = await createProjectBuildHost(await f.prepare())
+  const runner = host.workers.fix.runner
+  host.workers.fix.runner = { ...runner, async run(...args) {
+    const result = await runner.run(...args)
+    expect(result.kind).toBe('completed')
+    return { kind: 'unknown', detail: 'fixture: completed fix acknowledgement lost' }
+  } }
+  expect(await buildRun({ mode: 'pr', start: 'fresh', run_id: f.row.id, workers: host.workers,
+    repl_provider: 'anthropic', merge_mode: 'pr' }, host.deps, new AbortController().signal))
+    .toMatchObject({ kind: 'unknown', phase: 'fix' })
+  const event = f.store.stageEvents(f.row.id).filter(row => row.stage === 'build-mode-state').at(-1)!
+  const state = JSON.parse(event.meta!)
+  expect(state.checkpoint.pending).toMatchObject({ phase: 'fix', step_id: `${f.row.id}:fix:1`,
+    recovery: { previousReview: { blockingCount: 6 } } })
+  expect(state.checkpoint.pending.recovery.previousReview.findings.length).toBe(2)
+  if (progress === 'missing') delete state.checkpoint.pending.recovery.previousReview
+  if (progress === 'null') state.checkpoint.pending.recovery.previousReview = null
+  if (progress === 'invalid') state.checkpoint.pending.recovery.previousReview = { findings: [' '], blockingCount: 6 }
+  if (progress !== 'valid') await f.store.recordStageEvent(f.row.id, 'build-mode-state', JSON.stringify(state))
+  const before = f.world.dispatches.length
+  const outcome = await restartThroughGateway(f)
+  if (progress === 'valid') {
+    expect(outcome).toMatchObject({ kind: 'blocked', phase: 'review', on: 'Review requires orchestrator arbitration: repeated finding' })
+    expect(f.world.dispatches.slice(before).map(call => call.role)).toEqual(['review', 'review', 'synthesis'])
+  } else {
+    expect(outcome.kind).toBe('unknown')
+    expect(f.world.dispatches).toHaveLength(before)
+  }
+  expect(f.world.dispatches.filter(call => call.role === 'fix')).toHaveLength(1)
+  expect(f.github.prs[0]!.state).toBe('OPEN')
+}, 30_000)
+
 for (const scenario of ['bare', 'valid', 'repeated', 'exhausted', 'forged-fix', 'wrong-head-fix', 'wrong-run', 'wrong-step'] as const)
 test(`unchanged-tip retry consumes prior ${scenario} mutation nomination despite new worker brief`, async () => {
   const argv = scenario === 'valid' ? 'valid' : 'bare'

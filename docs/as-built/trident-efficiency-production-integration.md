@@ -48,6 +48,10 @@ later restored. The outer driver retains the original request and continuation,
 and the lost-ack benchmark completes its merge with three review calls and one
 proof across both host lifetimes. An observed blocked result remains blocked;
 telemetry reconciliation alone never settles its pending attempt or grants approval.
+Pending native-fix controls preserve the prior review's repeated findings and
+blocking count across reconstruction. Missing, null or malformed prior progress
+refuses before another provider call; valid progress recovers the original fix
+and still stops the repeated finding before a second fix or merge.
 
 This record establishes local integration behavior. Deployed timing, usage and
 the next live unattended merge remain tracked by issue #1196.
