@@ -16,7 +16,7 @@ import { reviewPanel, type ReviewSource } from './gates/review-panel.ts'
 import { ciReadinessForHead, type CiRunObservation } from './ci-readiness.ts'
 import { runLeakGatePreflight } from './leak-preflight.ts'
 import { assessMergeDiff, localMergeReadiness } from './merge.ts'
-import { runMutationProofGate, type MutationGateInput } from './mutation-prover.ts'
+import { mutationFailureSummary, runMutationProofGate, type MutationGateInput } from './mutation-prover.ts'
 import type { PhaseUsageReport, PhaseUsageRow, TridentPhaseUsageStore } from './phase-usage.ts'
 
 type Workers = BuildRunInput['workers']
@@ -224,7 +224,7 @@ export function createBuildHost(options: BuildHostOptions): { deps: BuildRunDeps
       const proof = await runMutationProofGate({ ...options.mutation, claim, expected_head: snapshot.head })
       if (!proof.ok) return proof.repair
         ? { kind: 'repair-nomination', finding: `Mutation nomination is invalid: ${proof.repair.detail}. Supply a corrected nomination for the repaired commit; the mutation prover must still pass.` }
-        : { kind: 'blocked', on: proof.reason }
+        : { kind: 'blocked', on: [proof.reason, mutationFailureSummary(proof.evidence)].filter(Boolean).join('; ') }
       const readiness = mergeMode === 'local' ? await localReadiness(snapshot) : await publicationReadiness(options.mutation.run_host, options.mutation.run.repo_path, options.mutation.run.branch ?? `trident/${options.mutation.run.slug}`, options.mutation.base_branch, options.leak.base_sha, snapshot, options.mutation.run.id)
       if (readiness.kind !== 'allow') return readiness
       return fixLineage(options.mutation.run_host, options.mutation.run.repo_path, options.mutation.run.branch ?? `trident/${options.mutation.run.slug}`, options.reviewed_head, snapshot.head)

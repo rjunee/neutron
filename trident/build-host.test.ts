@@ -464,6 +464,32 @@ test('host propagates G084 refusals after proof and readiness allow', async () =
   expect(await f.make().deps.publishGate(snapshot)).toEqual({ kind: 'allow' })
 })
 
+test('publication refusal retains bounded control diagnostics without raw branch output', async () => {
+  const f = await fixture()
+  const claim = { file: 'src/code.ts', find: 'original', replace: 'broken',
+    guard: ['bun', 'test', 'guard.test.ts'], control: ['bun', 'test', 'control.test.ts'] }
+  const { MUTATION_PROOF_SCHEMA, MUTATION_PROVER_VERSION } = await import('./mutation-prover.ts')
+  const observation = { argv: claim.guard, exit_code: 1, timed_out: false,
+    output_sha256: 'c'.repeat(64), failure_kind: 'database-schema-mismatch' as const }
+  f.options.mutation.readClaim = async () => claim
+  f.options.mutation.prover = {
+    prove: async () => ({ schema: MUTATION_PROOF_SCHEMA, prover_version: MUTATION_PROVER_VERSION,
+      run_id: 'test', claimed: claim, proof_token: 'd'.repeat(64), proved: false,
+      reason: 'the control did not stay GREEN under the mutation', observed: {
+        head_sha: head, file: claim.file, file_sha256_before: 'a'.repeat(64), file_sha256_mutated: 'b'.repeat(64),
+        file_sha256_restored: 'a'.repeat(64), guard_mutated: observation, control_mutated: { ...observation, argv: claim.control },
+        guard_restored: { ...observation, exit_code: 0 },
+      } }),
+    verify: () => ({ ok: false, reason: 'evidence does not claim proved' }),
+  }
+  const verdict = await f.make().deps.publishGate(snapshot)
+  expect(verdict.kind).toBe('blocked')
+  if (verdict.kind !== 'blocked') throw new Error('expected refusal')
+  expect(verdict.on).toContain('control_mutated: exit=1, timed_out=false, kind=database-schema-mismatch')
+  expect(verdict.on).toContain(`output_sha256=${'c'.repeat(64)}`)
+  expect(verdict.on.length).toBeLessThan(1000)
+})
+
 test('local host gates use local evidence without remote publication or CI', async () => {
   const f = await fixture(); f.prose()
   f.options.local = { baseBranch: 'base', worktree: f.options.leak.repo_path }
