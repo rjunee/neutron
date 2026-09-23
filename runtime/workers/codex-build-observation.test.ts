@@ -49,7 +49,7 @@ test('first call captures provider identity; exact resume accepts the same ident
 test('foreign, missing, duplicate and failed observations cannot authorize completion', () => {
   expect(observe([start, done], 'newest-decoy')).toBeNull()
   for (const events of [[done], [start], [done, start], [start, start, done], [start, done, done],
-    [start, { type: 'turn.failed' }, done], [start, { type: 'error' }, done],
+    [start, { type: 'turn.failed' }, done],
     [{ type: 'item.completed', item: { text: JSON.stringify(start) } }, done]]) expect(observe(events)).toBeNull()
 })
 test('missing usage is unknown while measured zero and reported model survive', () => {
@@ -59,10 +59,10 @@ test('missing usage is unknown while measured zero and reported model survive', 
   expect(observe([start, { type: 'turn.completed', model: 'reported-model', usage: { input_tokens: 0, output_tokens: 0 } }]))
     .toMatchObject({ usage: { input_tokens: 0, output_tokens: 0 }, model_reported: 'reported-model' })
 })
-test('malformed protocol and unfinished event tails stay unknown', () => {
-  for (const tail of ['not json\n', '{"type":', 'null\n']) {
+test('malformed telemetry cannot veto independently observed thread and completion authority', () => {
+  for (const tail of ['not json\n', '{"type":', 'null\n', '{"type":"error"}\n', 'x'.repeat(1024 * 1024 + 1) + '\n']) {
     const reader = codexBuildObservation(null)
     reader.push(JSON.stringify(start) + '\n' + JSON.stringify(done) + '\n' + tail)
-    expect(reader.finish()).toBeNull()
+    expect(reader.finish()).toEqual({ thread_id: 'owned-thread', usage: null, model_reported: null })
   }
 })

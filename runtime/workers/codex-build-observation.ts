@@ -24,6 +24,7 @@ export function codexBuildObservation(requestedThread: string | null) {
   let thread: string | null = null
   let completed = false
   let invalid = false
+  let telemetryInvalid = false
   let usage: Usage | null = null
   let model: string | null = null
   let ownershipInvalid = false
@@ -44,10 +45,10 @@ export function codexBuildObservation(requestedThread: string | null) {
       while ((end = pending.indexOf('\n')) >= 0) {
         const line = pending.slice(0, end); pending = pending.slice(end + 1)
         if (!line.trim()) continue
-        if (line.length > 1024 * 1024) { invalid = true; continue }
+        if (line.length > 1024 * 1024) { telemetryInvalid = true; continue }
         try {
           const event = JSON.parse(line)
-          if (!event || typeof event.type !== 'string') { invalid = true; continue }
+          if (!event || typeof event.type !== 'string') { telemetryInvalid = true; continue }
           if (event.type === 'thread.started') {
             if (thread !== null || completed || typeof event.thread_id !== 'string'
               || !/^[a-zA-Z0-9][a-zA-Z0-9_-]*$/.test(event.thread_id)
@@ -55,7 +56,8 @@ export function codexBuildObservation(requestedThread: string | null) {
             else thread = event.thread_id
           }
           observeEvent(event)
-          if (event.type === 'turn.failed' || event.type === 'error') invalid = true
+          if (event.type === 'turn.failed') invalid = true
+          if (event.type === 'error') telemetryInvalid = true
           if (event.type === 'turn.completed') {
             if (completed || thread === null) invalid = true
             completed = true
@@ -69,13 +71,14 @@ export function codexBuildObservation(requestedThread: string | null) {
             }
             if (typeof event.model === 'string' && event.model.trim()) model = event.model
           }
-        } catch { invalid = true }
+        } catch { telemetryInvalid = true }
       }
-      if (pending.length > 1024 * 1024) { invalid = true; pending = '' }
+      if (pending.length > 1024 * 1024) { telemetryInvalid = true; pending = '' }
     },
     finish(): CodexBuildObservation | null {
-      return invalid || pending.trim() || !completed || thread === null ? null
-        : { thread_id: thread, usage, model_reported: model }
+      return invalid || !completed || thread === null ? null
+        : { thread_id: thread, usage: telemetryInvalid || pending.trim() ? null : usage,
+          model_reported: telemetryInvalid || pending.trim() ? null : model }
     },
     snapshot(started: number, finished: number) {
       // A complete final JSON object without newline remains telemetry only;

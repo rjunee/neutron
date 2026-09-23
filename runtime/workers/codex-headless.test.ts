@@ -39,6 +39,36 @@ function fixture(change: Partial<Record<'HEAD' | 'DIFF' | 'PR', string | null>> 
 }
 
 describe('Codex headless WorkerRunner', () => {
+  for (const mode of ['exit', 'timeout'] as const) {
+    test(`descendant-held stdout cannot retain bounded worker settlement after ${mode}`, async () => {
+      const f = fixture()
+      const request = f.request({ budget: { wall_ms: mode === 'timeout' ? 250 : 1500 } })
+      const descendantPath = join(request.cwd, 'descendant.pid')
+      writeFileSync(f.script, readFileSync(f.script, 'utf8') +
+        `(trap '' TERM; exec sleep 30) &\nprintf '%s' "$!" > ${JSON.stringify(descendantPath)}\n` + (mode === 'timeout' ? 'wait\n' : 'exit 0\n'))
+      const started = Date.now()
+      try {
+        const result = await createCodexHeadlessRunner({ buildScript: f.script, probe: { ok: true } }).run(request, 'headless', new AbortController().signal)
+        expect(Date.now() - started).toBeLessThan(1500)
+        if (mode === 'timeout') expect(result).toMatchObject({ kind: 'failed', class: 'timeout' })
+        else expect(result.kind).toBe('completed')
+        expect(result.observation?.usage.input_tokens).toBe(12)
+      } finally {
+        try { process.kill(Number(readFileSync(descendantPath, 'utf8')), 'SIGKILL') } catch { /* Settlement already closed its group. */ }
+      }
+    }, 2000)
+  }
+  for (const noise of ['diagnostic text\n', '{not-json}\n', '{"type":"error"}\n', '{"type":', 'x'.repeat(1024 * 1024 + 1) + '\n']) {
+    test(`valid trailer and thread survive unusable telemetry: ${noise.slice(0, 20)}`, async () => {
+      const f = fixture()
+      // Emit from a file so oversized noise does not exceed shell argv limits.
+      writeFileSync(join(f.request().cwd, 'telemetry-noise'), noise)
+      writeFileSync(f.script, readFileSync(f.script, 'utf8') + 'cat telemetry-noise\n')
+      const result = await createCodexHeadlessRunner({ buildScript: f.script, probe: { ok: true } }).run(f.request(), 'headless', new AbortController().signal)
+      expect(result).toMatchObject({ kind: 'completed', thread_id: 'observed-first', usage: null, model_reported: null })
+      if (result.kind === 'completed') expect(result.result).toEqual(measured)
+    })
+  }
   test('stalled telemetry publication cannot hold a finished worker indefinitely', async () => {
     const f = fixture()
     const original = asyncFs.writeFile
@@ -123,10 +153,10 @@ describe('Codex headless WorkerRunner', () => {
       const request = f.request({ budget: { wall_ms: mode === 'timeout' ? 250 : 5000 }, ...(mode === 'thread-mismatch' ? { thread: { id: 'expected' } } : {}) })
       const runner = createCodexHeadlessRunner({ buildScript: f.script, probe: { ok: true } })
       const outcome = await runner.run(request, 'headless', new AbortController().signal)
-      expect(outcome.kind).toBe(mode === 'failure' || mode === 'timeout' ? 'failed' : 'unknown')
+      expect(outcome.kind).toBe(mode === 'failure' || mode === 'timeout' ? 'failed' : mode === 'malformed' ? 'completed' : 'unknown')
       expect(outcome.observation?.usage.input_tokens).toBe(mode === 'thread-mismatch' ? null : 12)
       expect(await runner.observe!(request)).toEqual(outcome.observation)
-      expect((await runner.run(request, 'headless', new AbortController().signal)).kind).toBe('unknown')
+      expect((await runner.run(request, 'headless', new AbortController().signal)).kind).toBe(mode === 'malformed' ? 'completed' : 'unknown')
       expect(readFileSync(f.threads, 'utf8')).toBe(mode === 'thread-mismatch' ? 'expected\n' : '\n')
     })
   }

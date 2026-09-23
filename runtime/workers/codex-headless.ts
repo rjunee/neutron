@@ -84,22 +84,43 @@ async function mapTrailer(text: string, cwd: string, runId: string): Promise<Tra
   }
 }
 
-function waitFor(child: ChildProcess, signal: AbortSignal): Promise<{ code: number | null; killed: boolean }> {
+function waitFor(child: ChildProcess, signal: AbortSignal, wallMs: number): Promise<{ code: number | null; killed: boolean; timedOut: boolean }> {
   return new Promise((resolveResult) => {
     let aborted = false
-    const abort = () => {
-      aborted = true
-      child.kill('SIGTERM')
+    let timedOut = false
+    let finished = false
+    let drainTimer: ReturnType<typeof setTimeout> | undefined
+    let killTimer: ReturnType<typeof setTimeout> | undefined
+    const deadline = Date.now() + wallMs
+    const killGroup = (signal: NodeJS.Signals) => {
+      try { if (child.pid) process.kill(-child.pid, signal) } catch { /* Already exited or failed to spawn. */ }
     }
+    const finish = (code: number | null) => {
+      if (finished) return
+      finished = true
+      clearTimeout(wallTimer); clearTimeout(drainTimer); clearTimeout(killTimer)
+      signal.removeEventListener('abort', abort)
+      // Descendants can inherit stdout after the wrapper exits. Neither their
+      // pipe lifetime nor telemetry drainage owns the bounded call's lifetime.
+      killGroup('SIGKILL')
+      child.stdout?.destroy()
+      resolveResult({ code, killed: aborted, timedOut })
+    }
+    const stop = () => {
+      killGroup('SIGTERM')
+      killTimer ??= setTimeout(() => finish(null), 250)
+    }
+    const abort = () => { aborted = true; stop() }
+    const wallTimer = setTimeout(() => { timedOut = true; stop() }, Math.max(1, wallMs))
     signal.addEventListener('abort', abort, { once: true })
-    child.once('error', () => {
-      signal.removeEventListener('abort', abort)
-      resolveResult({ code: null, killed: aborted })
+    child.once('error', () => finish(null))
+    child.once('exit', code => {
+      clearTimeout(wallTimer)
+      if (timedOut || aborted || !child.stdout || child.stdout.readableEnded) return finish(code)
+      child.stdout.once('end', () => finish(code))
+      drainTimer = setTimeout(() => finish(code), Math.max(0, Math.min(250, deadline - Date.now())))
     })
-    child.once('close', (code) => {
-      signal.removeEventListener('abort', abort)
-      resolveResult({ code, killed: aborted })
-    })
+    if (signal.aborted) abort()
   })
 }
 
@@ -209,23 +230,17 @@ export function createCodexHeadlessRunner(options: CodexHeadlessRunnerOptions = 
         const events = codexBuildObservation(req.thread?.id ?? null)
         const started = Date.now()
         const publisher = createObservationPublisher(`${reservation}.observation`, identity)
-        const child = spawn('/bin/bash', [buildScript], { cwd: req.cwd, env, stdio: ['ignore', 'pipe', 'ignore'] })
+        const child = spawn('/bin/bash', [buildScript], { cwd: req.cwd, env, detached: true, stdio: ['ignore', 'pipe', 'ignore'] })
         child.stdout!.setEncoding('utf8')
         child.stdout!.on('data', (chunk: string) => { events.push(chunk); publisher.publish(events.snapshot(started, Date.now())) })
         live.set(req.step_id, child)
-        let timedOut = false
-        const timer = setTimeout(() => {
-          timedOut = true
-          child.kill('SIGTERM')
-        }, req.budget.wall_ms)
-        const settled = await waitFor(child, signal)
-        clearTimeout(timer)
+        const settled = await waitFor(child, signal, req.budget.wall_ms)
         live.delete(req.step_id)
         // Retry the latest absolute snapshot even if an earlier identical write
         // failed. Never replace newer observed spend with an older disk receipt.
         measured = await publisher.settle(events.snapshot(started, Date.now()))
         if (settled.killed || signal.aborted) return { kind: 'failed', class: 'killed', detail: 'Codex worker was cancelled' }
-        if (timedOut) return { kind: 'failed', class: 'timeout', detail: 'Codex worker exceeded its wall-clock budget' }
+        if (settled.timedOut) return { kind: 'failed', class: 'timeout', detail: 'Codex worker exceeded its wall-clock budget' }
         if (settled.code !== 0) {
           if (settled.code === 10 || settled.code === 11) return { kind: 'refused', reason: 'provider-not-connected' }
           if (settled.code === 3) return { kind: 'refused', reason: 'cli-contract' }
