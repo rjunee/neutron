@@ -199,6 +199,12 @@ export function createCodexReviewTransport(options: {
     // Always close the process group, including children that survived the CLI.
     kill('SIGKILL'); clearTimeout(killTimer)
     options.live.delete(req.step_id)
+    // A truncated JSONL transport can still end with one complete JSON object.
+    // Observe its usage without treating an unterminated event as completion.
+    try {
+      const tail = JSON.parse(pending)
+      if ((tail.type === 'turn.completed' || tail.type === 'turn.failed') && tail.usage) providerUsage = tail.usage
+    } catch { /* Incomplete JSON has no trustworthy counters. */ }
     observation = codexObservation(providerUsage, thread, started, Date.now())
     try { await writeFile(observationPath, JSON.stringify(observation), { flag: 'wx', mode: 0o600 }) } catch { /* Telemetry cannot authorize or veto the result. */ }
     if (signal.aborted) return observed({ kind: 'failed', class: 'killed', detail: 'Codex review was cancelled' })

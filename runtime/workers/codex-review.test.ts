@@ -48,7 +48,7 @@ if (mode === 'blocked') { envelope.kind='blocked'; delete envelope.result; envel
 if (mode !== 'missing') writeFileSync(args[args.indexOf('-o')+1], mode === 'malformed' ? '{' : JSON.stringify({envelope}));
 writeFileSync(1, JSON.stringify({type:'thread.started',thread_id:args[1] === 'resume' ? args[2] : 'recorded-thread'})+'\\n');
 if (mode !== 'no-completion') writeFileSync(1, JSON.stringify({type:mode==='turn-failed'?'turn.failed':'turn.completed',
-  usage:['missing-usage','worker-usage'].includes(mode)?undefined:mode==='zero-usage'?{input_tokens:0,output_tokens:0,cached_input_tokens:0}:{input_tokens:17,output_tokens:3,cached_input_tokens:11}})+'\\n');
+  usage:['missing-usage','worker-usage'].includes(mode)?undefined:mode==='zero-usage'?{input_tokens:0,output_tokens:0,cached_input_tokens:0}:{input_tokens:17,output_tokens:3,cached_input_tokens:11}})+(mode==='no-newline'?'':'\\n'));
 if (mode==='duplicate-completion') writeFileSync(1, JSON.stringify({type:'turn.completed',usage:{input_tokens:17,output_tokens:3,cached_input_tokens:11}})+'\\n');
 if (mode==='usage-then-hang') { process.on('SIGTERM', () => {}); setInterval(() => {}, 1000); await new Promise(() => {}); }
 process.exit(mode === 'nonzero' ? 2 : 0);
@@ -127,7 +127,7 @@ test('a blocked result remains blocked on resume', async () => {
 })
 
 test('failed, interrupted and malformed reviews retain provider spend, never result authority', async () => {
-  for (const mode of ['nonzero', 'payload', 'malformed', 'turn-failed', 'usage-then-hang', 'duplicate-completion']) {
+  for (const mode of ['nonzero', 'payload', 'malformed', 'turn-failed', 'usage-then-hang', 'duplicate-completion', 'no-newline']) {
     const f = await fixture(mode)
     const req = mode === 'usage-then-hang' ? { ...f.req, budget: { wall_ms: 250 } } : f.req
     const first = await f.run(req)
