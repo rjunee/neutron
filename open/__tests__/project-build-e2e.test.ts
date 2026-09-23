@@ -1275,8 +1275,7 @@ test(`prepared recurring conversation refuses changed ${changed} and still admit
     restore.push(() => { f.context.projectId = 'e2e-project' })
   } else {
     const candidate = changed === 'whole-state' ? await preparedClaudePlanner(f) : first
-    const request = candidate.request('1')
-    if (changed === 'model') request.model_id = 'claude-different-model'
+    const request = { ...candidate.request('1'), ...(changed === 'model' ? { model_id: 'claude-different-model' } : {}) }
     expect((await candidate.call(request)).kind).toBe('unknown')
   }
   expect((await readFile(f.calls, 'utf8')).trim().split('\n')).toHaveLength(1)
