@@ -57,7 +57,10 @@ if(mode==='wrong-session') receipt.session_id='00000000-0000-0000-0000-000000000
 if(mode==='permission') receipt.permission_denials=[{tool_name:'AskUserQuestion'}];
 if(mode==='no-permissions') delete receipt.permission_denials;
 if(mode==='invalid-usage') receipt.usage={input_tokens:-1,output_tokens:0};
+if(mode==='missing-usage') delete receipt.usage;
+if(mode==='zero-usage') receipt.usage={input_tokens:0,output_tokens:0,cache_read_input_tokens:0,cache_creation_input_tokens:0};
 writeFileSync(1,JSON.stringify(receipt));
+if(mode==='usage-then-hang') { setInterval(()=>{},1000); await new Promise(()=>{}); }
 if(mode==='exit-error') process.exit(2);
 }
 main();
@@ -78,7 +81,7 @@ main();
 
 test('successful headless completion uses exact model, measured usage, isolated argv, stdin and host trailer', async () => {
   const f = await fixture()
-  expect(await f.run()).toEqual({ kind: 'completed', result: { answer: 'verified' },
+  expect(await f.run()).toMatchObject({ kind: 'completed', result: { answer: 'verified' },
     usage: { input_tokens: 17, output_tokens: 23, cache_read_input_tokens: 11 }, model_reported: f.req.model_id, thread_id: expect.any(String) })
   const observed = JSON.parse(await readFile(f.launched, 'utf8'))
   for (const flag of ['--safe-mode', '--restricted', '--strict-mcp-config', '--disable-slash-commands', '--session-id']) expect(observed.args).toContain(flag)
@@ -160,7 +163,8 @@ for (const mode of ['text-only', 'stale', 'wrong-schema', 'invalid-payload', 'ex
 
 test('blocked output has a durable honest sibling; attempted owner tool cannot complete', async () => {
   const blocked = await fixture('blocked')
-  expect(await blocked.run()).toEqual({ kind: 'blocked', on: 'Need source evidence.' })
+  expect(await blocked.run()).toMatchObject({ kind: 'blocked', on: 'Need source evidence.',
+    observation: { usage: { input_tokens: 17, output_tokens: 23 } } })
   expect(JSON.parse(await readFile(blocked.req.result.path, 'utf8')).kind).toBe('blocked')
   for (const mode of ['permission', 'no-permissions']) expect(await (await fixture(mode)).run()).toMatchObject({ kind: 'blocked' })
 })
@@ -168,6 +172,31 @@ test('blocked output has a durable honest sibling; attempted owner tool cannot c
 test('unknown usage stays unknown rather than becoming invented zero counters', async () => {
   const f = await fixture('invalid-usage')
   expect(await f.run()).toMatchObject({ kind: 'completed', usage: null })
+})
+
+test('provider usage survives rejected results, nonzero exit and timeout without authorizing completion', async () => {
+  for (const mode of ['exit-error', 'invalid-payload', 'extra', 'usage-then-hang']) {
+    const f = await fixture(mode)
+    const req = mode === 'usage-then-hang' ? { ...f.req, budget: { wall_ms: 250 } } : f.req
+    const outcome = await f.run(req)
+    expect(outcome.kind).toBe(mode === 'exit-error' || mode === 'usage-then-hang' ? 'failed' : 'unknown')
+    expect(outcome.observation).toMatchObject({ source: 'claude-cli-json', model_reported: req.model_id,
+      usage: { input_tokens: 17, output_tokens: 23, cache_read_input_tokens: 11 } })
+    expect(outcome.observation!.finished_at_ms).toBeGreaterThanOrEqual(outcome.observation!.started_at_ms)
+    await expect(readFile(req.result.path)).rejects.toMatchObject({ code: 'ENOENT' })
+    const recovered = await createClaudeHeadlessRunner(f.options).run(req, 'headless', new AbortController().signal)
+    expect(recovered.kind).toBe('unknown')
+    expect(recovered.observation).toEqual(outcome.observation)
+    expect(await readFile(f.counter, 'utf8')).toBe('call\n')
+  }
+})
+
+test('successful telemetry distinguishes unknown and real zero without vetoing valid results', async () => {
+  const missing = await (await fixture('missing-usage')).run()
+  expect(missing).toMatchObject({ kind: 'completed', usage: null, observation: { usage: { input_tokens: null, output_tokens: null } } })
+  const zero = await (await fixture('zero-usage')).run()
+  expect(zero).toMatchObject({ kind: 'completed', observation: { usage: { input_tokens: 0, output_tokens: 0,
+    cache_read_input_tokens: 0, cache_creation_input_tokens: 0 } } })
 })
 
 test('duplicate and restarted step reads the durable receipt without redispatch', async () => {
