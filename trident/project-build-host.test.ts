@@ -167,8 +167,9 @@ test('project composition binds review source to admitted run and worktree', asy
       } }),
   }
   const host = await createProjectBuildHost(f.options)
+  const snapshot = { head: 'b'.repeat(40), diff: 'measured diff', pr: null }
   expect(await host.deps.reviewGate({ verdict: 'APPROVE', findings: [] },
-    { head: 'b'.repeat(40), diff: 'measured diff', pr: null }, 1, 0)).toEqual({ kind: 'approve' })
+    await host.deps.observeReview(snapshot, 1), snapshot, 1, 0)).toEqual({ kind: 'approve' })
   expect(requests).toHaveLength(2)
   expect(requests.every(request => request.run_id === f.options.production.runId && request.cwd === f.options.production.worktree)).toBe(true)
 })

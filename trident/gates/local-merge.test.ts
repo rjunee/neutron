@@ -61,7 +61,8 @@ async function runLocalBuild(f: Awaited<ReturnType<typeof fixture>>, overrides: 
     // so the fixture states what this run reports rather than leaving it unwired.
     publicationSuite: async () => ({ kind: 'known' as const, findings: [] }),
     reviewSuite: async () => ({ kind: 'known', findings: [] }),
-    reviewGate: async (_payload, _snapshot, _round, _used, record) => { record?.({ findings: [], blockingCount: 0 }); return { kind: 'approve' } }, publishGate: async () => f.check(), mergeGate: async () => f.check(),
+    observeReview: async (snapshot, round) => ({ kind: 'observed', runId: 'run', snapshot, round, verdicts: [], checkpoint: 'argus-approved' }),
+    reviewGate: async (_payload, _observation, _snapshot, _round, _used, record) => { record?.({ findings: [], blockingCount: 0 }); return { kind: 'approve' } }, publishGate: async () => f.check(), mergeGate: async () => f.check(),
     publish: async () => { throw new Error('local mode must not publish') },
     merge: async () => { await f.git('merge', '--no-ff', f.head, '-m', 'land reviewed head') },
     recordPhaseUsage: async () => {},
@@ -104,7 +105,7 @@ test('local publication preflight uncertainty stops the approved no-PR run befor
   let reviewed = false
   let merged = false
   const { outcome } = await runLocalBuild(f, {
-    reviewGate: async (_payload, _snapshot, _round, _used, record) => { reviewed = true; record?.({ findings: [], blockingCount: 0 }); return { kind: 'approve' } },
+    reviewGate: async (_payload, _observation, _snapshot, _round, _used, record) => { reviewed = true; record?.({ findings: [], blockingCount: 0 }); return { kind: 'approve' } },
     runLeakGatePreflight: async () => ({ status: 'unknown', head: f.head, findings: [], skipped_rules: [], attempts: 0, note: 'preflight observation unavailable' }),
     merge: async () => { merged = true },
   })

@@ -39,9 +39,9 @@ export interface ReviewSource {
     runId: string; head: string; round: number; checkpoint: string; payload: unknown
   } | { runId: string; head: string; round: number; unavailable: string } | null>
 }
-const unknown = (detail: string): ReviewDecision => ({ kind: 'unknown', detail })
-const blocked = (on: string): ReviewDecision => ({ kind: 'blocked', on })
-const infrastructure = (detail: string): ReviewDecision => blocked(`infra-only: ${detail}`)
+const unknown = (detail: string): Extract<ReviewDecision, { kind: 'unknown' }> => ({ kind: 'unknown', detail })
+const blocked = (on: string): Extract<ReviewDecision, { kind: 'blocked' }> => ({ kind: 'blocked', on })
+const infrastructure = (detail: string) => blocked(`infra-only: ${detail}`)
 
 /** G062: reserved host markers cannot exempt model findings. */
 function unmarked(payload: unknown): unknown {
@@ -67,10 +67,12 @@ export async function readReviewSeat(source: ReviewSource, seat: ReviewSeat, sna
   return observed
 }
 
-/** G057–G062, G104: re-read the recorded panel for this exact revision and round. */
-export async function reviewPanel(source: ReviewSource | undefined, payload: unknown, snapshot: BuildSnapshot, round: number, runId: string, replansUsed = 0, builder?: Pick<ReviewSeat, 'provider' | 'modelId' | 'family'>, recordProgress?: (value: ReviewProgress) => void): Promise<ReviewDecision> {
-  const trailer = validateTrailer('verdict', unmarked(payload))
-  if (!trailer.ok) return infrastructure(`Review trailer ${trailer.reason} at ${trailer.path}`)
+export type ReviewPanelObservation =
+  | { kind: 'observed'; runId: string; snapshot: BuildSnapshot; round: number; verdicts: VerdictTrailer[]; checkpoint: string }
+  | Extract<ReviewDecision, { kind: 'blocked' | 'unknown' }>
+
+/** Observe independent producers without requiring the standalone verdict first. */
+export async function observeReviewPanel(source: ReviewSource | undefined, snapshot: BuildSnapshot, round: number, runId: string, builder?: Pick<ReviewSeat, 'provider' | 'modelId' | 'family'>): Promise<ReviewPanelObservation> {
   if (!source) return infrastructure('Review panel observation source is missing')
   try {
     const seats = source.seats.filter(seat => seat.enabled)
@@ -80,9 +82,7 @@ export async function reviewPanel(source: ReviewSource | undefined, payload: unk
       ?? registry.find(model => model.model_id === seat.modelId)?.group
       ?? (seat.provider === 'pi' ? `pi:${seat.modelId}` : seat.provider))
     let unknownFamily = false
-    // The standalone review and recorded synthesis are independently authored.
-    // Both retain a veto; matching provenance does not require identical findings.
-    const verdicts: VerdictTrailer[] = [trailer.value]
+    const verdicts: VerdictTrailer[] = []
     // Seat reads may dispatch paid work. Start independent seats together, then
     // wait for every sibling even on rejection before synthesis or a decision.
     // Consume results in configuration order so completion timing cannot choose
@@ -111,24 +111,45 @@ export async function reviewPanel(source: ReviewSource | undefined, payload: unk
     const synthesis = validateTrailer('verdict', unmarked(recorded.payload))
     if (!synthesis.ok) return infrastructure('Review recorded synthesis is unusable')
     verdicts.push(synthesis.value)
-    const blockers = verdicts.flatMap(v => v.findings).filter(f => f.severity !== 'minor' && f.severity !== 'nit')
-    const actionable = verdicts.flatMap(v => v.findings).filter(f => f.severity !== 'nit').map(findingIdentity)
-    recordProgress?.({ findings: [...new Set(actionable)], blockingCount: blockers.length })
-    let replan: ReviewDecision | undefined
-    for (const verdict of verdicts) {
-      if (!verdict.escalate) continue
-      const escalation = decideEscalation({ claim: verdict.escalate, claimVerdict: verdict.verdict, replansUsed, round })
-      if (escalation.action !== 're-plan') return blocked(`Review requires orchestrator arbitration: ${escalation.refusedClaim || verdict.escalate.kind}: ${verdict.escalate.whatIsMissing}`)
-      replan = { kind: 're-plan', whatIsMissing: escalation.whatIsMissing, findings: [...new Set(blockers.map(findingIdentity))], blockingCount: blockers.length }
-    }
-    if (replan) return replan
-    if (blockers.length > 0) {
-      const identities = blockers.map(findingIdentity)
-      if (identities.some(id => !id)) return unknown('Review blocking findings have no stable identity for arbitration')
-      return { kind: 'fix', findings: [...new Set(identities)], blockingCount: blockers.length }
-    }
-    if (verdicts.some(v => v.verdict === 'COMMENT' || (v.verdict === 'REQUEST_CHANGES' && v.findings.length === 0))) return blocked('Review has an unresolved verdict without nonblocking findings')
-    if (recorded.checkpoint !== 'argus-approved') return infrastructure('Review recorded approval checkpoint is missing')
-    return { kind: 'approve' }
+    return { kind: 'observed', runId, snapshot: structuredClone(snapshot), round, verdicts, checkpoint: recorded.checkpoint }
   } catch (error) { return infrastructure(unknownCause('Review panel host observation failed', error, runId).slice(0, TERMINAL_CAUSE_MAX)) }
+}
+
+/** G057–G062, G104: compose once, retaining standalone and synthesis vetoes. */
+export function decideReviewPanel(payload: unknown, observed: ReviewPanelObservation, snapshot: BuildSnapshot, round: number, runId: string, replansUsed = 0, recordProgress?: (value: ReviewProgress) => void): ReviewDecision {
+  const trailer = validateTrailer('verdict', unmarked(payload))
+  if (!trailer.ok) return infrastructure(`Review trailer ${trailer.reason} at ${trailer.path}`)
+  if (observed.kind !== 'observed') return observed
+  if (observed.runId !== runId || observed.round !== round || observed.snapshot.head !== snapshot.head
+      || observed.snapshot.diff !== snapshot.diff || observed.snapshot.pr?.number !== snapshot.pr?.number
+      || observed.snapshot.pr?.head !== snapshot.pr?.head || observed.snapshot.pr?.state !== snapshot.pr?.state) {
+    return infrastructure('Review panel observation does not match run, revision and round')
+  }
+  const verdicts = [trailer.value, ...observed.verdicts]
+  const blockers = verdicts.flatMap(v => v.findings).filter(f => f.severity !== 'minor' && f.severity !== 'nit')
+  const actionable = verdicts.flatMap(v => v.findings).filter(f => f.severity !== 'nit').map(findingIdentity)
+  recordProgress?.({ findings: [...new Set(actionable)], blockingCount: blockers.length })
+  let replan: ReviewDecision | undefined
+  for (const verdict of verdicts) {
+    if (!verdict.escalate) continue
+    const escalation = decideEscalation({ claim: verdict.escalate, claimVerdict: verdict.verdict, replansUsed, round })
+    if (escalation.action !== 're-plan') return blocked(`Review requires orchestrator arbitration: ${escalation.refusedClaim || verdict.escalate.kind}: ${verdict.escalate.whatIsMissing}`)
+    replan = { kind: 're-plan', whatIsMissing: escalation.whatIsMissing, findings: [...new Set(blockers.map(findingIdentity))], blockingCount: blockers.length }
+  }
+  if (replan) return replan
+  if (blockers.length > 0) {
+    const identities = blockers.map(findingIdentity)
+    if (identities.some(id => !id)) return unknown('Review blocking findings have no stable identity for arbitration')
+    return { kind: 'fix', findings: [...new Set(identities)], blockingCount: blockers.length }
+  }
+  if (verdicts.some(v => v.verdict === 'COMMENT' || (v.verdict === 'REQUEST_CHANGES' && v.findings.length === 0))) return blocked('Review has an unresolved verdict without nonblocking findings')
+  if (observed.checkpoint !== 'argus-approved') return infrastructure('Review recorded approval checkpoint is missing')
+  return { kind: 'approve' }
+}
+
+/** Complete gate for callers that already hold the standalone observation. */
+export async function reviewPanel(source: ReviewSource | undefined, payload: unknown, snapshot: BuildSnapshot, round: number, runId: string, replansUsed = 0, builder?: Pick<ReviewSeat, 'provider' | 'modelId' | 'family'>, recordProgress?: (value: ReviewProgress) => void): Promise<ReviewDecision> {
+  const trailer = validateTrailer('verdict', unmarked(payload))
+  if (!trailer.ok) return infrastructure(`Review trailer ${trailer.reason} at ${trailer.path}`)
+  return decideReviewPanel(payload, await observeReviewPanel(source, snapshot, round, runId, builder), snapshot, round, runId, replansUsed, recordProgress)
 }

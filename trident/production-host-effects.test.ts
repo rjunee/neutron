@@ -770,7 +770,8 @@ test('local-mode driver reaches merged through the real production effect', asyn
     admissionGate: async () => ({ kind: 'allow' }),
     runLeakGatePreflight: async () => ({ status: 'clean', head: f.tip, note: '', findings: [], skipped_rules: [], attempts: 0 }),
     assessMergeDiff: () => ({ allow: true, measured_bytes: snapshot.diff.length }),
-    reviewGate: async (_payload, _snapshot, _round, _replans, record) => { record?.({ findings: [], blockingCount: 0 }); return { kind: 'approve' } },
+    observeReview: async (snapshot, round) => ({ kind: 'observed', runId: 'run', snapshot, round, verdicts: [], checkpoint: 'argus-approved' }),
+    reviewGate: async (_payload, _observation, _snapshot, _round, _replans, record) => { record?.({ findings: [], blockingCount: 0 }); return { kind: 'approve' } },
     publishGate: async () => ({ kind: 'allow' }), mergeGate: async () => ({ kind: 'allow' }),
     confirmLocalMerge: async () => {
       await f.command(['git', '-C', f.repo, 'merge-base', '--is-ancestor', f.tip, 'main'])
@@ -860,7 +861,8 @@ async function resumeFixture(round = 3, replansUsed = 1) {
     reviewSuite: async () => ({ kind: 'known' as const, findings: [] }),
     reviewCi: async () => ({ kind: 'known' as const, findings: [] }),
     admissionGate: async () => ({ kind: 'allow' }),
-    reviewGate: async (_payload, _snapshot, round, replans, record) => { rounds.push([round, replans!]); record?.({ findings: [], blockingCount: 0 }); return { kind: 'approve' } },
+    observeReview: async (snapshot, round) => ({ kind: 'observed', runId: 'run', snapshot, round, verdicts: [], checkpoint: 'argus-approved' }),
+    reviewGate: async (_payload, _observation, _snapshot, round, replans, record) => { rounds.push([round, replans!]); record?.({ findings: [], blockingCount: 0 }); return { kind: 'approve' } },
     // The preflight reports the head it scanned, and the driver refuses to publish a
     // revision the scan did not see. The fixer commits for real, so pinning this to
     // the fixture's opening tip would incorrectly report publication drift.
@@ -1192,7 +1194,7 @@ test('production plan refuses a committed link to host bytes', async () => {
 test('production re-plan spend survives a crash before replanning begins', async () => {
   const f = await resumeFixture(2, 0)
   const save = f.deps.modes!.saveCheckpoint!
-  f.deps.reviewGate = async (_p, _s, _r, _u, record) => { // A design gap is not a code blocker: reporting one here would read as
+  f.deps.reviewGate = async (_p, _observation, _s, _r, _u, record) => { // A design gap is not a code blocker: reporting one here would read as
   // no progress against the resumed round and stop before the re-plan.
   record?.({ findings: ['design gap'], blockingCount: 0 }); return { kind: 're-plan', findings: ['design gap'], whatIsMissing: 'redesign' } }
   f.deps.modes!.saveCheckpoint = async checkpoint => {
@@ -1217,7 +1219,7 @@ test('production checkpoint append refuses a terminal transition after host obse
 
 test('production rejected review survives a crash before the next fix', async () => {
   const f = await resumeFixture(1, 0)
-  f.deps.reviewGate = async (_p, _s, _r, _u, record) => { record?.({ findings: ['second issue'], blockingCount: 1 }); return { kind: 'fix', findings: ['second issue'] } }
+  f.deps.reviewGate = async (_p, _observation, _s, _r, _u, record) => { record?.({ findings: ['second issue'], blockingCount: 1 }); return { kind: 'fix', findings: ['second issue'] } }
   const save = f.deps.modes!.saveCheckpoint!
   f.deps.modes!.saveCheckpoint = async checkpoint => {
     await save(checkpoint)
@@ -1228,7 +1230,7 @@ test('production rejected review survives a crash before the next fix', async ()
   expect(await restarted.modes.loadResume()).toMatchObject({ stage: 'rejected', round: 2, replansUsed: 0,
     findings: [{ kind: 'code', actionable: true, text: 'second issue' }], previousFindings: ['new issue'] })
   f.deps.modes = restarted.modes
-  f.deps.reviewGate = async (_p, _s, _r, _u, record) => { record?.({ findings: [], blockingCount: 0 }); return { kind: 'approve' } }
+  f.deps.reviewGate = async (_p, _observation, _s, _r, _u, record) => { record?.({ findings: [], blockingCount: 0 }); return { kind: 'approve' } }
   expect(await f.run()).toMatchObject({ kind: 'blocked', on: 'fixture stops before merge' })
   expect(f.runner.calls.map(c => c.step_id)).toEqual([`${f.row.id}:fix:1`, `${f.row.id}:review:2`, `${f.row.id}:fix:2`, `${f.row.id}:review:3`])
 })
