@@ -291,7 +291,7 @@ export function createClaudeHeadlessRunner(input: ClaudeHeadlessRunnerOptions): 
         // Reuse the existing Claude reservation namespace and stopped-run recovery.
         const reservation = join(state, `claude-step-${key}.json`)
         const held = recoveryOnly
-          ? await readArmedTrailerReservation(reservation, JSON.stringify(req))
+          ? await readArmedTrailerReservation(reservation, JSON.stringify(req), { signal, deadline })
           : await reserveTrailerSlot(reservation, JSON.stringify(req), req.result.path)
         if (held.kind === 'unknown') return unknown(held.detail)
         const receiptPath = join(state, `claude-headless-receipt-${key}.json`)

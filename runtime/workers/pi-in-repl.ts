@@ -55,7 +55,7 @@ export function piInReplRunner(options: PiInReplOptions): WorkerRunner {
         // Reserving and clearing in either order leaves a restart window that either
         // reads the previous round's trailer or destroys this step's own receipt.
         const held = recoveryOnly
-          ? await readArmedTrailerReservation(reservation, identity)
+          ? await readArmedTrailerReservation(reservation, identity, { signal, deadline })
           : await reserveTrailerSlot(reservation, identity, req.result.path)
         if (held.kind === 'unknown') return unseen(held.detail)
         if (held.kind === 'dispatch') {

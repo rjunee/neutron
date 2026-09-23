@@ -108,7 +108,7 @@ export function createCodexReviewTransport(options: {
       } catch { return unknown('Codex review trailer is unreadable') }
     }
     const held = recoveryOnly
-      ? await readArmedTrailerReservation(reservation, identity)
+      ? await readArmedTrailerReservation(reservation, identity, { signal, deadline: Date.now() + req.budget.wall_ms })
       : await reserveTrailerSlot(reservation, identity, req.result.path)
     if (held.kind === 'unknown') return unknown(held.detail)
     if (held.kind === 'resume') {

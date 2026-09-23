@@ -219,7 +219,7 @@ export function createCodexHeadlessRunner(options: CodexHeadlessRunnerOptions = 
       const identity = buildIdentity(req)
       const receiptPath = `${reservation}.receipt`
       const held = recoveryOnly
-        ? await readArmedTrailerReservation(reservation, identity)
+        ? await readArmedTrailerReservation(reservation, identity, { signal, deadline: Date.now() + req.budget.wall_ms })
         : await reserveTrailerSlot(reservation, identity, req.result.path)
       if (held.kind === 'unknown') return { kind: 'unknown', detail: held.detail }
       let observation: CodexBuildObservation

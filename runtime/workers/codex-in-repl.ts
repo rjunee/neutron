@@ -58,7 +58,7 @@ export function codexInReplRunner(options: CodexInReplOptions): WorkerRunner {
         const identity = JSON.stringify(req)
         // Validate recovery authority before touching transport state. A missing
         // reservation must never prepare a first-dispatch transport.
-        const retained = recoveryOnly ? await readArmedTrailerReservation(reservation, identity) : undefined
+        const retained = recoveryOnly ? await readArmedTrailerReservation(reservation, identity, { signal, deadline }) : undefined
         if (retained?.kind === 'unknown') return unseen(retained.detail)
         if (options.resultTransport) {
           // Preparation has no native effects and must precede the durable arm.
