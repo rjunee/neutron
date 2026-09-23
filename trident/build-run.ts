@@ -85,7 +85,8 @@ interface PendingRecovery {
   planner: 'full' | 'next'
   committedPlan?: PlanProbe
   plan: ExecutionPlan | null
-  previousReview?: ReviewProgress
+  /** Null records known absence; omission is incomplete recovery evidence. */
+  previousReview: ReviewProgress | null
 }
 
 function recoveryInputs(input: BuildRunInput, maxRounds: number) {
@@ -345,8 +346,9 @@ export async function buildRun(input: BuildRunInput, deps: BuildRunDeps, signal:
           || !Array.isArray(recovery.findings) || !recovery.findings.every(f => typeof f === 'string')
           || !['full', 'next'].includes(recovery.planner) || !('previous' in recovery)
           || (recovery.plan !== null && !executionPlan(recovery.plan))
-          || (recovery.previousReview !== undefined && (!Array.isArray(recovery.previousReview.findings)
-            || !recovery.previousReview.findings.every(f => typeof f === 'string')
+          || recovery.previousReview === undefined || (pending.phase === 'fix' && recovery.previousReview === null)
+          || (recovery.previousReview !== null && (!Array.isArray(recovery.previousReview.findings)
+            || !recovery.previousReview.findings.every(f => typeof f === 'string' && f.trim().length > 0)
             || !Number.isSafeInteger(recovery.previousReview.blockingCount) || recovery.previousReview.blockingCount < 0))) {
         return unknown('Resume cannot validate the original pending worker request and context')
       }
@@ -445,7 +447,7 @@ export async function buildRun(input: BuildRunInput, deps: BuildRunDeps, signal:
       planner = recovery.planner
       committedPlan = recovery.committedPlan
       firstRound = Math.max(1, resume!.round, recovery.round)
-      previousReview = recovery.previousReview
+      previousReview = recovery.previousReview ?? undefined
       skipBuild = recovery.request.role === 'review' || recovery.request.role === 'fix'
       resumeFix = recovery.request.role === 'fix'
     }
@@ -480,7 +482,7 @@ export async function buildRun(input: BuildRunInput, deps: BuildRunDeps, signal:
       if (!recovery) await checkpoint({ pending: { phase: role, step_id, recovery: {
         request: structuredClone(boundedRequest), inputs: structuredClone(recoveryInputs(input, maxRounds)), round,
         snapshot: structuredClone(snapshot), previous: previousPayload ?? null, findings, planner,
-        ...(committedPlan ? { committedPlan } : {}), plan, ...(previousReview ? { previousReview } : {}),
+        ...(committedPlan ? { committedPlan } : {}), plan, previousReview: previousReview ?? null,
       } }, round: Math.max(durable.round, round) })
       let outcome: BoundedWorkOutcome
       let review: ReviewPanelObservation | undefined

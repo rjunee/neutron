@@ -1000,6 +1000,7 @@ for (const role of ['plan', 'build', 'review', 'fix'] as const) for (const reser
       expect(await f.run()).toMatchObject({ kind: 'unknown', phase: role })
       const saved = JSON.parse(JSON.stringify(f.state.checkpoints.at(-1)!))
       expect(saved.pending.recovery.request).toEqual(original)
+      expect(saved.pending.recovery.previousReview).toEqual(role === 'fix' ? { findings: ['logic'], blockingCount: 1 } : null)
       const preparedBefore = f.prepared.filter(value => value.role === role).length
       const panelsBefore = panels
       const checkpointsBefore = f.state.checkpoints.length
@@ -1048,6 +1049,61 @@ async function pendingBuildFixture() {
   f.cross.calls.length = 0
   return f
 }
+
+for (const progress of ['missing', 'null', 'invalid', 'valid'] as const) test(`pending fix requires ${progress} review progress to preserve the repeated-finding gate`, async () => {
+  const f = modeFixture('pr')
+  f.decisions.push({ kind: 'fix', findings: ['repeat'], blockingCount: 1 })
+  f.outcomes.set('run:fix:1', { kind: 'unknown', detail: 'lost acknowledgement' })
+  expect(await f.run()).toMatchObject({ kind: 'unknown', phase: 'fix' })
+  const saved = JSON.parse(JSON.stringify(f.state.checkpoints.at(-1)!))
+  expect(saved.pending.recovery.previousReview).toEqual({ findings: ['repeat'], blockingCount: 1 })
+  if (progress === 'missing') delete saved.pending.recovery.previousReview
+  if (progress === 'null') saved.pending.recovery.previousReview = null
+  if (progress === 'invalid') saved.pending.recovery.previousReview = { findings: [' '], blockingCount: 1 }
+  f.state.resume = JSON.parse(JSON.stringify(saved))
+  f.input.start = 'resume'
+  f.decisions.push({ kind: 'fix', findings: ['repeat'], blockingCount: 1 }, { kind: 'approve' })
+  f.outcomes.set('run:fix:1', f.completed())
+  let recovered = 0
+  f.input.workers.fix.runner = { ...f.runner, recover: async (...args) => { recovered++; return f.runner.run(...args) } }
+  f.runner.calls.length = 0
+  f.cross.calls.length = 0
+  const checkpoints = f.state.checkpoints.length
+  const outcome = await f.run()
+  expect(outcome.kind).toBe(progress === 'valid' ? 'blocked' : 'unknown')
+  expect(recovered).toBe(progress === 'valid' ? 1 : 0)
+  expect(f.runner.calls.map(request => request.step_id)).toEqual(progress === 'valid' ? ['run:fix:1'] : [])
+  expect(f.cross.calls).toHaveLength(progress === 'valid' ? 1 : 0)
+  expect(f.events).not.toContain('merge')
+  if (progress === 'valid') expect(outcome).toMatchObject({ kind: 'blocked', on: 'Review requires orchestrator arbitration: repeated finding' })
+  else {
+    expect(outcome).toMatchObject({ kind: 'unknown', phase: 'fix', step_id: 'run:fix:1' })
+    expect(f.state.checkpoints).toHaveLength(checkpoints)
+    expect(f.state.checkpoints.at(-1)?.pending?.step_id).toBe('run:fix:1')
+  }
+})
+
+for (const role of ['plan', 'build', 'review'] as const) test(`pending ${role} rejects an omitted prior-review field before recovery`, async () => {
+  const f = modeFixture('pr')
+  const key = `run:${role}:${role === 'review' ? 1 : 0}`
+  f.outcomes.set(key, { kind: 'unknown', detail: 'lost acknowledgement' })
+  expect(await f.run()).toMatchObject({ kind: 'unknown', phase: role })
+  const saved = JSON.parse(JSON.stringify(f.state.checkpoints.at(-1)!))
+  expect(saved.pending.recovery.previousReview).toBeNull()
+  delete saved.pending.recovery.previousReview
+  f.state.resume = JSON.parse(JSON.stringify(saved))
+  f.input.start = 'resume'
+  let recovered = 0
+  const runner = f.input.workers[role].runner
+  f.input.workers[role].runner = { ...runner, recover: async () => { recovered++; return f.completed() } }
+  f.runner.calls.length = 0
+  f.cross.calls.length = 0
+  expect(await f.run()).toMatchObject({ kind: 'unknown', phase: role, step_id: saved.pending.step_id })
+  expect(recovered).toBe(0)
+  expect(f.runner.calls).toHaveLength(0)
+  expect(f.cross.calls).toHaveLength(0)
+  expect(f.events).not.toContain('merge')
+})
 
 for (const change of ['missing-request', 'wrong-request', 'wrong-step', 'model', 'brief', 'policy', 'provider', 'round-cap'] as const) {
   test(`pending recovery refuses ${change} before another worker or publication`, async () => {
