@@ -59,6 +59,7 @@ import { createHash } from 'node:crypto'
 import { ProjectDb } from '@neutronai/persistence/index.ts'
 import { seedMigratedDb } from '../../tests/support/migrated-db.ts'
 import { TridentRunStore } from '@neutronai/trident/store.ts'
+import { WorkBoardStore } from '@neutronai/work-board/store.ts'
 import { dispatchBoardBoundBuild } from '@neutronai/trident/board-dispatch.ts'
 import { buildTridentOrchestrator } from '@neutronai/trident/orchestrator.ts'
 import { createProjectLauncher } from '@neutronai/trident/project-launcher.ts'
@@ -3043,17 +3044,25 @@ test('task_sequence strategy with remaining tasks hands off after the build inst
 }, 300_000)
 
 for (const mergeMode of ['pr', 'local'] as const)
-for (const boundary of ['before-ledger', 'after-ledger', 'zero-conflict'] as const)
+for (const boundary of ['before-ledger', 'before-commit', 'commit-uncheckpointed', 'after-ledger', 'zero-conflict'] as const)
 test(`same-run task-sequence crash ${boundary} in ${mergeMode} cannot publish unfinished tasks`, async () => {
   const f = await fixture({ mergeMode, taskSequence: true, moreTasks: true, seedLedger: false, hostLedger: true })
   const host = await createProjectBuildHost(await f.prepare())
   const save = host.deps.modes!.saveCheckpoint
+  const commit = host.deps.modes!.commitPlan
+  if (boundary === 'before-commit' || boundary === 'commit-uncheckpointed') {
+    host.deps.modes!.commitPlan = async value => {
+      if (boundary === 'commit-uncheckpointed') expect((await commit(value)).kind).toBe('known')
+      throw new Error('simulated process death after durable intermediate build')
+    }
+  }
   let builtCheckpoints = 0
   host.deps.modes!.saveCheckpoint = async checkpoint => {
     await save(checkpoint)
     if (checkpoint.stage === 'built' && checkpoint.head && !checkpoint.pending && checkpoint.remainingTasks === 1) {
       builtCheckpoints++
-      if (builtCheckpoints === (boundary === 'after-ledger' ? 2 : 1)) {
+      if (boundary !== 'before-commit' && boundary !== 'commit-uncheckpointed'
+        && builtCheckpoints === (boundary === 'after-ledger' ? 2 : 1)) {
         throw new Error('simulated process death after durable intermediate build')
       }
     }
@@ -3064,6 +3073,7 @@ test(`same-run task-sequence crash ${boundary} in ${mergeMode} cannot publish un
   expect(first).toMatchObject({ kind: 'unknown', phase: 'build', detail: 'simulated process death after durable intermediate build' })
   expect(lastCheckpoint(f)).toMatchObject({ stage: 'built', remainingTasks: 1 })
   expect(lastCheckpoint(f).pending).toBeUndefined()
+  expect(f.store.get(f.row.id)!.task_iteration).toBe(1)
   expect(f.world.dispatches.map(dispatch => dispatch.role)).toEqual(['plan', 'build'])
   expect(f.github.prs).toEqual([])
   const interruptedHead = lastCheckpoint(f).head
@@ -3076,11 +3086,25 @@ test(`same-run task-sequence crash ${boundary} in ${mergeMode} cannot publish un
   }
 
   f.world.dispatches.length = 0
+  if (boundary === 'commit-uncheckpointed') {
+    const interrupted = await createProjectBuildHost(await f.prepare())
+    const persist = interrupted.deps.modes!.saveCheckpoint
+    interrupted.deps.modes!.saveCheckpoint = async checkpoint => {
+      await persist(checkpoint)
+      throw new Error('simulated second process death after ledger recovery')
+    }
+    const again = await buildRun({ mode: 'implementation', start: 'resume', taskIteration: 1,
+      run_id: f.row.id, workers: interrupted.workers, repl_provider: 'anthropic', merge_mode: mergeMode },
+    interrupted.deps, new AbortController().signal)
+    expect(again).toMatchObject({ kind: 'unknown', detail: 'simulated second process death after ledger recovery' })
+    expect(f.store.get(f.row.id)!.task_iteration).toBe(1)
+    expect(f.world.dispatches).toEqual([])
+  }
   const resumed = await createProjectBuildHost(await f.prepare())
   const outcome = await resumed.run({ mode: 'implementation', start: 'resume' }, new AbortController().signal)
   if (boundary === 'zero-conflict') {
     expect(outcome, why(f, outcome)).toMatchObject({ kind: 'unknown',
-      detail: 'Task-sequence built checkpoint cannot establish its remaining task handoff' })
+      detail: expect.stringContaining('Task ledger intent is invalid') })
     expect(f.world.dispatches).toEqual([])
     expect(f.github.prs).toEqual([])
     return
@@ -3093,6 +3117,7 @@ test(`same-run task-sequence crash ${boundary} in ${mergeMode} cannot publish un
   else expect(lastCheckpoint(f).head).not.toBe(interruptedHead)
   const events = f.store.stageEvents(f.row.id).filter(event => event.stage === 'build-mode-state')
   expect(JSON.parse(events.at(-1)!.meta!).iteration).toBe(1)
+  expect(f.store.get(f.row.id)!.task_iteration).toBe(1)
   const ledger = `.trident/ledgers/${f.store.get(f.row.id)!.branch}.md`
   const committed = await spawnCapture(['git', '-C', f.repo, 'show', `${lastCheckpoint(f).head}:${ledger}`], f.repo)
   expect(committed.stdout.trim()).toBe('- [x] T1 record the note\n- [ ] T2 record another note')
@@ -3107,6 +3132,50 @@ test(`same-run task-sequence crash ${boundary} in ${mergeMode} cannot publish un
   expect(f.world.selectedTasks).toEqual(['- [ ] T1 record the note', '- [ ] T2 record another note'])
   expect(f.world.dispatches[0]).toMatchObject({ role: 'plan', step_id: `${f.row.id}:task:1:plan:0` })
   if (mergeMode === 'local') expect(f.commands.some(argv => argv[0] === 'gh')).toBe(false)
+}, 300_000)
+
+for (const cap of [1, 2])
+test(`task ledger interrupted handoff preserves spend at a differing head with cap ${cap}`, async () => {
+  const f = await fixture({ mergeMode: 'local', taskSequence: true, moreTasks: true, seedLedger: false, hostLedger: true })
+  f.db.runSync('UPDATE code_trident_runs SET max_task_iterations = ? WHERE id = ?', [cap, f.row.id])
+  const board = new WorkBoardStore(f.db)
+  const card = await board.create(f.row.project_slug, { title: 'Ledger interruption budget' })
+  await board.attachRun(f.row.project_slug, card.id, f.row.id)
+  const host = await createProjectBuildHost(await f.prepare())
+  const commit = host.deps.modes!.commitPlan
+  host.deps.modes!.commitPlan = async value => {
+    expect((await commit(value)).kind).toBe('known')
+    throw new Error('simulated process death after Git commit')
+  }
+  expect(await buildRun({ mode: 'implementation', start: 'fresh', taskIteration: 0,
+    run_id: f.row.id, workers: host.workers, repl_provider: 'anthropic', merge_mode: 'local' },
+  host.deps, new AbortController().signal)).toMatchObject({ kind: 'unknown', detail: 'simulated process death after Git commit' })
+  expect(f.store.get(f.row.id)!.task_iteration).toBe(1)
+  expect(board.get(f.row.project_slug, card.id)!.task_iteration).toBe(1)
+  const worktree = f.store.get(f.row.id)!.worktree!
+  await writeFile(join(worktree, 'unrelated.md'), 'An unrelated change invalidates ledger adoption.\n')
+  await gitOut(f.world.run, worktree, ['add', '--', 'unrelated.md'])
+  await gitOut(f.world.run, worktree, ['-c', 'user.name=Fixture', '-c', 'user.email=fixture@example.invalid',
+    'commit', '-m', 'Unrelated change'])
+  f.world.dispatches.length = 0
+  const restarted = await createProjectBuildHost(await f.prepare())
+  const outcome = await restarted.run({ mode: 'implementation', start: 'resume' }, new AbortController().signal)
+  if (cap === 1) {
+    expect(outcome, why(f, outcome)).toMatchObject({ kind: 'blocked', on: 'task iteration budget is exhausted' })
+    expect(f.world.dispatches).toEqual([])
+    const again = await createProjectBuildHost(await f.prepare())
+    expect(await again.run({ mode: 'implementation', start: 'resume' }, new AbortController().signal))
+      .toMatchObject({ kind: 'blocked', on: 'task iteration budget is exhausted' })
+    expect(f.world.dispatches).toEqual([])
+  } else {
+    expect(outcome.kind, why(f, outcome)).toBe('continued')
+    expect(f.world.dispatches.map(d => d.role)).toEqual(['plan', 'build'])
+    expect(f.world.dispatches.every(d => d.step_id.includes(':task:1:'))).toBe(true)
+    expect(f.world.plannerChoices).toEqual(['full', 'full'])
+  }
+  expect(f.store.get(f.row.id)!.task_iteration).toBe(cap)
+  expect(board.get(f.row.project_slug, card.id)!.task_iteration).toBe(cap)
+  expect(f.github.prs).toEqual([])
 }, 300_000)
 
 for (const mergeMode of ['pr', 'local'] as const)

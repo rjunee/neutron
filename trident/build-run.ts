@@ -63,6 +63,7 @@ export interface PlanProbe {
   uncheckedCount: number
 }
 export type PlanCommit = { kind: 'known'; head: string } | Exclude<GateResult, { kind: 'allow' }>
+export interface TaskHandoffIntent { iteration: number; builtHead: string; body: string }
 export interface ResumeCheckpoint {
   head: string | null
   stage: 'built' | 'approved' | 'rejected' | 'fixed' | 'task-built' | 'task-built-deviated'
@@ -72,6 +73,8 @@ export interface ResumeCheckpoint {
   previousBlockingCount?: number
   /** Host-validated plan remainder at the completed task-sequence build; absent is unknown. */
   remainingTasks?: number | undefined
+  /** Completed intermediate task: spend is durable before the Git ledger write. */
+  handoff?: TaskHandoffIntent | undefined
   findings: readonly { kind: 'code' | 'lane'; actionable: boolean; text: string }[]
   previousFindings: readonly string[]
   /** Baseline retained across completion checkpoints; omission is legacy evidence. */
@@ -135,6 +138,8 @@ export interface BuildModeHost {
    * committed ledger already equals `body` returns that tip and writes nothing.
    * `known` carries the resulting full head, which the driver re-measures. */
   commitPlan(value: { body: string; snapshot: BuildSnapshot }): Promise<PlanCommit>
+  /** Read-only proof that a moved tip is exactly the intended ledger-only child. */
+  recoverTaskHandoff?(value: { intent: TaskHandoffIntent; snapshot: BuildSnapshot }): Promise<GateResult>
   /** Atomically consume the old result and persist the next iteration. Must be
    * idempotent by run_id + round, and compare the expected head before advancing.
    * An unknown response is reconciled by the host before another buildRun call. */
@@ -450,6 +455,7 @@ export async function buildRun(input: BuildRunInput, deps: BuildRunDeps, signal:
     let replansUsed = resume?.replansUsed ?? 0
     if (replansUsed !== 0 && replansUsed !== 1) return blocked('Invalid recorded re-plan count')
     let skipBuild = false
+    let discardHandoff = false
     let resumeTaskHandoff: ExecutionPlan | null = null
     let approved = false
     let firstRound = 1
@@ -478,7 +484,29 @@ export async function buildRun(input: BuildRunInput, deps: BuildRunDeps, signal:
         return failed('Required resume head is unreadable', 'resume-head-unreadable')
       }
       headMoved = fullOid(resume.head) && fullOid(snapshot.head) && resume.head !== snapshot.head
-      // G038: absence/movement rebuilds; only an exact full OID opens a fast path.
+      if (resume.handoff) {
+        const intent = resume.handoff
+        if (strategy !== 'task_sequence' || resume.stage !== 'built' || !acceptedPlan
+          || acceptedPlan.remainingTasks !== resume.remainingTasks || !ledgerAgrees(acceptedPlan)
+          || acceptedPlan.remainingTasks <= 0 || intent.body !== tickTopTask(acceptedPlan.implementationPlan)
+          || !Number.isSafeInteger(intent.iteration) || intent.iteration < 0 || !fullOid(intent.builtHead)) {
+          return unknown('Task ledger intent disagrees with the completed task')
+        }
+        if (resume.head !== snapshot.head) {
+          if (!modes!.recoverTaskHandoff) return unknown('Task ledger recovery host is missing')
+          const recovered = snapshot.head === 'absent' ? { kind: 'blocked' as const, on: 'Task branch is absent' }
+            : await modes!.recoverTaskHandoff({ intent, snapshot })
+          if (recovered.kind === 'unknown') return unknown(recovered.detail)
+          if (recovered.kind === 'allow') {
+            resume.head = snapshot.head
+            headMoved = false
+          } else discardHandoff = true
+        }
+        // Spend may already be one ahead of the unresolved handoff's identity.
+        input = { ...input, taskIteration: intent.iteration + (discardHandoff ? 1 : 0) }
+      }
+      // G038: arbitrary movement rebuilds. Only an exact full OID (including
+      // the ledger child independently authenticated above) opens a fast path.
       if (fullOid(resume.head) && resume.head === snapshot.head
           && input.mode !== 'wave' && !resume.stage.startsWith('task-built')) {
         const regenerated = await modes!.regenerateDiff(resume.head)
@@ -498,6 +526,11 @@ export async function buildRun(input: BuildRunInput, deps: BuildRunDeps, signal:
           skipBuild = true
           approved = resume.stage === 'approved'
           resumeFix = resume.stage === 'rejected' && resume.findings.some(f => f.kind === 'code' && f.actionable)
+        } else if (resume.handoff) {
+          // G040 cannot reuse a completed no-op at the launch base. Retire its
+          // already spent identity before reserving a budget-checked rebuild.
+          discardHandoff = true
+          input = { ...input, taskIteration: resume.handoff.iteration + 1 }
         }
       }
     }
@@ -527,6 +560,19 @@ export async function buildRun(input: BuildRunInput, deps: BuildRunDeps, signal:
       durable = { ...durable, replansUsed, previousFindings: previous, previousBlockingCount,
         previousReview: previousReview ?? null, reviewBaseline, ...patch }
       await modes?.saveCheckpoint(structuredClone(durable))
+    }
+    if (discardHandoff) {
+      await checkpoint({ handoff: undefined, stage: 'task-built-deviated' })
+    }
+    if (acceptedPlan && (discardHandoff || (strategy === 'task_sequence' && resume?.stage === 'task-built-deviated' && !recovery))) {
+      // Re-check the existing selection's budget before a changed-head planner
+      // can dispatch. This refresh retains the accepted plan and strategy.
+      const budget = gateStop(await modes!.selectExecutionStrategy({ strategy: strategy!,
+        rationale: acceptedPlan.rationale, plan: structuredClone(acceptedPlan), refresh: true }))
+      if (budget) return budget
+    } else if (resume?.handoff && resume.head === snapshot.head) {
+      // Persist the independently authenticated child before ordinary handoff.
+      await checkpoint({ head: snapshot.head })
     }
     let previousPayload: unknown = acceptedPlan
     let findings: readonly string[] = []
@@ -662,7 +708,9 @@ export async function buildRun(input: BuildRunInput, deps: BuildRunDeps, signal:
       if (role === 'build' || role === 'fix') {
         await checkpoint({ head: measured.head, stage: role === 'fix' ? 'fixed' : 'built',
           round: role === 'fix' ? round + 1 : Math.max(durable.round, 1, round + 1), pending: undefined, findings: [],
-          ...(role === 'build' ? { remainingTasks: strategy === 'task_sequence' ? plan!.remainingTasks : 0 } : {}) })
+          ...(role === 'build' ? { remainingTasks: strategy === 'task_sequence' ? plan!.remainingTasks : 0,
+            handoff: strategy === 'task_sequence' && plan!.remainingTasks > 0
+              ? { iteration: taskIteration, builtHead: measured.head, body: tickTopTask(plan!.implementationPlan) } : undefined } : {}) })
       }
       // Only reconciliation of an original pre-cutover reservation may translate
       // the old planner shape. Every newly dispatched planner uses the closed v2
@@ -676,11 +724,8 @@ export async function buildRun(input: BuildRunInput, deps: BuildRunDeps, signal:
       return { payload, ...(review ? { review } : {}) }
     }
 
-    /** Commit the ticked ledger at the built head, re-measure, and move the durable
-     *  checkpoint to the ledger commit before anything reads it. A crash between the
-     *  commit and the checkpoint fails SAFE: the resume sees the head moved (G038)
-     *  and rebuilds, and the rebuilt tip already carries the same ledger, so
-     *  `commitPlan` returns it without a second commit. */
+    /** Spend and intent precede Git. A lost commit acknowledgement is recovered
+     * only after the host proves the exact direct-child ledger-only revision. */
     async function commitLedger(body: string): Promise<BuildRunOutcome | null> {
       const committed = await modes!.commitPlan({ body, snapshot: structuredClone(snapshot) })
       if (committed.kind === 'blocked') return blocked(committed.on)
@@ -803,6 +848,9 @@ export async function buildRun(input: BuildRunInput, deps: BuildRunDeps, signal:
       return null
     }
     async function handoffTask(completed: ExecutionPlan): Promise<BuildRunOutcome> {
+      // Older completed checkpoints lack an intent. Upgrade before any Git write.
+      if (!durable.handoff) await checkpoint({ handoff: { iteration: taskIteration,
+        builtHead: snapshot.head, body: tickTopTask(completed.implementationPlan) } })
       const ledger = await commitLedger(tickTopTask(completed.implementationPlan))
       if (ledger) return ledger
       // G037: consume the old result before acknowledging the next iteration.

@@ -283,6 +283,9 @@ export function createProductionHostEffects(options: ProductionHostOptions) {
     const event = latestModeEvent()
     if (!event) return null
     const state = parseBuildModeState(event.meta, row())
+    if (state.checkpoint.handoff && !store.taskHandoffSpendMatches(runId, state.checkpoint.handoff.iteration)) {
+      throw new Error('Task ledger intent no longer matches run or card spend')
+    }
     modeVersion = event.id
     return state
   }
@@ -323,7 +326,8 @@ export function createProductionHostEffects(options: ProductionHostOptions) {
       return structuredClone(modeState.checkpoint)
     },
     async saveCheckpoint(checkpoint) {
-      await saveModeState({ ...modeState, checkpoint, iteration: modeState?.iteration ?? row().task_iteration })
+      await saveModeState({ ...modeState, checkpoint, iteration: checkpoint.handoff?.iteration
+        ?? Math.max(modeState?.iteration ?? 0, row().task_iteration) })
     },
     async regenerateDiff(tip) {
       try {
@@ -416,6 +420,29 @@ export function createProductionHostEffects(options: ProductionHostOptions) {
         return { kind: 'known', head: tip }
       } catch (error) { return unknown(String(error)) }
     },
+    async recoverTaskHandoff({ intent, snapshot }) {
+      try {
+        const state = readModeState()
+        if (!state?.checkpoint.handoff || JSON.stringify(state.checkpoint.handoff) !== JSON.stringify(intent)) {
+          return unknown('Task ledger recovery intent changed')
+        }
+        if (ledgerFile === null || !oid.test(snapshot.head)) return blocked('Task ledger recovery head or path is unavailable')
+        const fresh = await sameSnapshot(snapshot)
+        if (fresh.kind !== 'allow') return fresh
+        const parents = await git('rev-list', '--parents', '-n', '1', snapshot.head)
+        if (!parents.ok || parents.timed_out) return unknown('Task ledger recovery parent is unreadable')
+        if (parents.stdout.trim() !== `${snapshot.head} ${intent.builtHead}`) return blocked('Moved head is not the task ledger child')
+        const changed = await git('diff-tree', '--no-commit-id', '--name-only', '-r', '-z', '--no-renames', intent.builtHead, snapshot.head)
+        if (!changed.ok || changed.timed_out) return unknown('Task ledger recovery tree is unreadable')
+        if (changed.stdout !== `${ledgerFile}\0`) return blocked('Moved head changes more than the task ledger')
+        const entry = await git('ls-tree', '-z', snapshot.head, '--', ledgerFile)
+        if (!entry.ok || entry.timed_out) return unknown('Task ledger recovery blob is unreadable')
+        const expected = createHash(snapshot.head.length === 40 ? 'sha1' : 'sha256')
+          .update(`blob ${Buffer.byteLength(intent.body)}\0`).update(intent.body).digest('hex')
+        if (entry.stdout !== `100644 blob ${expected}\t${ledgerFile}\0`) return blocked('Moved head does not contain the intended task ledger')
+        return sameSnapshot(snapshot)
+      } catch (error) { return unknown(String(error)) }
+    },
     async advanceTask(value) {
       try {
         const current = row()
@@ -429,12 +456,15 @@ export function createProductionHostEffects(options: ProductionHostOptions) {
         if (state.iteration !== value.round || state.checkpoint.pending || state.checkpoint.stage !== 'built'
           || state.checkpoint.head !== value.snapshot.head) return unknown('task-sequence handoff does not match the completed build')
         await saveModeState({ iteration: value.round + 1, consumed: { round: value.round, head: value.snapshot.head },
-          checkpoint: { ...state.checkpoint, stage: 'task-built', round: 0 } })
+          checkpoint: { ...state.checkpoint, handoff: undefined, stage: 'task-built', round: 0 } })
         return { kind: 'allow' }
       } catch (error) { return unknown(String(error)) }
     },
   }
-  function taskIteration() { return Math.max(readModeState()?.iteration ?? 0, row().task_iteration) }
+  function taskIteration() {
+    const state = readModeState()
+    return state?.checkpoint.handoff?.iteration ?? Math.max(state?.iteration ?? 0, row().task_iteration)
+  }
   const ciSource = options.ciSource ?? productionCiSource(runHost, repo)
   const ciNow = options.ciNow ?? Date.now
   let missingSince: number | null = null

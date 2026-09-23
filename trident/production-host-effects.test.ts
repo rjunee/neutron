@@ -989,6 +989,90 @@ test('production task-sequence handoff consumes once and probes the pinned commi
   expect(await restarted.modes.advanceTask({ ...handoff, snapshot: { ...snapshot, head: f.tip } })).toMatchObject({ kind: 'blocked' })
 })
 
+async function ledgerIntentFixture() {
+  const f = await fixture()
+  await selectPlan(f.store, f.row.id, taskSequencePlan)
+  const intent = { iteration: 0, builtHead: f.tip, body: '- [x] first\n- [ ] second\n' }
+  const checkpoint = { head: f.tip, stage: 'built' as const, round: 1, replansUsed: 0,
+    findings: [], previousFindings: [], remainingTasks: 1, handoff: intent }
+  await f.modes.saveCheckpoint(checkpoint)
+  expect(f.store.get(f.row.id)!.task_iteration).toBe(1)
+  return { ...f, intent, checkpoint }
+}
+
+test('task ledger intent authenticates the real child and charges repeated recovery only once', async () => {
+  const f = await ledgerIntentFixture()
+  const result = await f.modes.commitPlan({ body: f.intent.body, snapshot: await measured(f) })
+  expect(result.kind).toBe('known')
+  const snapshot = await measured(f)
+  expect(snapshot.head).not.toBe(f.checkpoint.head)
+  for (let attempt = 0; attempt < 2; attempt++) {
+    const host = createProductionHostEffects(f.options)
+    expect(await host.modes.loadResume()).toMatchObject({ handoff: f.intent })
+    expect(await host.modes.recoverTaskHandoff!({ intent: f.intent, snapshot })).toEqual({ kind: 'allow' })
+    expect(f.store.get(f.row.id)!.task_iteration).toBe(1)
+    expect(host.taskIteration()).toBe(0)
+  }
+  const resumed = createProductionHostEffects(f.options)
+  await resumed.modes.loadResume()
+  await resumed.modes.saveCheckpoint({ ...f.checkpoint, head: snapshot.head })
+  const handoff = { run_id: f.row.id, round: 0, snapshot, remainingTasks: 1 }
+  expect(await resumed.modes.advanceTask(handoff)).toEqual({ kind: 'allow' })
+  expect(await createProductionHostEffects(f.options).modes.advanceTask(handoff)).toEqual({ kind: 'allow' })
+  expect(f.store.get(f.row.id)!.task_iteration).toBe(1)
+})
+
+for (const damage of ['extra-file', 'wrong-body', 'grandchild', 'merge'] as const)
+test(`task ledger intent refuses ${damage} without refunding completed work`, async () => {
+  const f = await ledgerIntentFixture()
+  expect((await f.modes.commitPlan({ body: f.intent.body, snapshot: await measured(f) })).kind).toBe('known')
+  if (damage === 'merge') {
+    const tree = await f.command(['git', '-C', f.worktree, 'rev-parse', 'HEAD^{tree}'])
+    const merged = await f.command(['git', '-C', f.worktree, 'commit-tree', tree, '-p', f.tip, '-p', f.base, '-m', 'Merge-shaped ledger'])
+    await f.command(['git', '-C', f.worktree, 'reset', '--soft', merged])
+  } else {
+    if (damage === 'wrong-body') await writeLedger(f.worktree, '- [x] first\n- [ ] unrelated\n')
+    else await writeFile(join(f.worktree, 'unrelated.md'), 'extra change\n')
+    await f.command(['git', '-C', f.worktree, 'add', '--', damage === 'wrong-body' ? LEDGER : 'unrelated.md'])
+    await f.command(['git', '-C', f.worktree, 'commit', ...(damage === 'grandchild' ? [] : ['--amend']), '-m', 'Changed ledger candidate'])
+  }
+  const host = createProductionHostEffects(f.options)
+  const snapshot = await measured(f)
+  expect(await host.modes.recoverTaskHandoff!({ intent: f.intent, snapshot })).toMatchObject({ kind: 'blocked' })
+  expect((await f.store.reconcileTaskSpend(f.row.id))!.task_iteration).toBe(1)
+})
+
+test('task ledger intent rejects malformed evidence while old checkpoints remain readable', async () => {
+  const f = await ledgerIntentFixture()
+  const event = f.store.stageEvents(f.row.id).filter(e => e.stage === 'build-mode-state').at(-1)!
+  const original = JSON.parse(event.meta!)
+  for (const handoff of [null, { ...f.intent, iteration: -1 }, { ...f.intent, iteration: 1 },
+    { ...f.intent, builtHead: 'short' }, { ...f.intent, body: '- [x] first' }]) {
+    await f.store.recordStageEvent(f.row.id, 'build-mode-state', JSON.stringify({ ...original,
+      checkpoint: { ...original.checkpoint, handoff } }))
+    await expect(createProductionHostEffects(f.options).modes.loadResume()).rejects.toThrow('Task ledger intent is invalid')
+  }
+  delete original.checkpoint.handoff
+  await f.store.recordStageEvent(f.row.id, 'build-mode-state', JSON.stringify(original))
+  expect(await createProductionHostEffects(f.options).modes.loadResume()).toMatchObject({ head: f.tip, remainingTasks: 1 })
+  expect((await f.store.reconcileTaskSpend(f.row.id))!.task_iteration).toBe(1)
+})
+
+for (const owner of ['run', 'card'] as const)
+test(`task ledger intent cannot reuse an old identity after ${owner} spend advances`, async () => {
+  const f = await ledgerIntentFixture()
+  const board = new WorkBoardStore(f.db)
+  const card = await board.create('project', { title: 'Stale ledger intent' })
+  await board.attachRun('project', card.id, f.row.id)
+  expect(createProductionHostEffects(f.options).taskIteration()).toBe(0)
+  if (owner === 'run') await f.store.update(f.row.id, { task_iteration: 2 })
+  else f.db.runSync('UPDATE work_board_items SET task_iteration = 2 WHERE id = ?', [card.id])
+  const stale = createProductionHostEffects(f.options)
+  expect(() => stale.taskIteration()).toThrow('Task ledger intent no longer matches run or card spend')
+  await expect(stale.modes.loadResume()).rejects.toThrow('Task ledger intent no longer matches run or card spend')
+  expect(board.get('project', card.id)!.task_iteration).toBe(2)
+})
+
 // THE HOST COMMITS THE TASK LEDGER THE CONTINUATION PLANNER READS. `probePlan` used
 // to archive the repo-root IMPLEMENTATION_PLAN.md at the tip; nothing in the typed host
 // wrote it, so G026 found main's stale copy (zero unchecked boxes) and every
@@ -1281,6 +1365,27 @@ test('production task-sequence driver persists its continuation and host iterati
   const restarted = createProductionHostEffects(f.options)
   expect(restarted.taskIteration()).toBe(1)
   expect(await restarted.modes.loadResume()).toMatchObject({ stage: 'task-built', round: 0, replansUsed: 0 })
+})
+
+for (const cap of [1, 2])
+test(`task ledger intent with an empty regenerated diff respects budget ${cap}`, async () => {
+  const f = await resumeFixture(0, 0, taskSequencePlan)
+  f.db.runSync('UPDATE code_trident_runs SET max_task_iterations = ? WHERE id = ?', [cap, f.row.id])
+  // A completed no-op task at the launch base has no cumulative diff to reuse.
+  await f.store.update(f.row.id, { base_sha: f.tip })
+  await f.modes.saveCheckpoint({ head: f.tip, stage: 'built', round: 1, replansUsed: 0,
+    findings: [], previousFindings: [], previousReview: null, reviewBaseline: 'none', remainingTasks: 1,
+    handoff: { iteration: 0, builtHead: f.tip, body: '- [x] first\n- [ ] second\n' } })
+  f.runner.run = async request => {
+    f.runner.calls.push(request)
+    const snapshot = await measured(f)
+    return { kind: 'completed', result: { ...snapshot, payload: request.role === 'plan' ? taskSequencePlan : {} },
+      usage: { input_tokens: 0, output_tokens: 0 }, model_reported: 'test', thread_id: null }
+  }
+  expect(await f.run()).toMatchObject(cap === 1 ? { kind: 'blocked', on: 'task iteration budget is exhausted' }
+    : { kind: 'continued', remainingTasks: 1 })
+  expect(f.runner.calls.map(c => c.step_id)).toEqual(cap === 1 ? [] : [`${f.row.id}:task:1:plan:0`, `${f.row.id}:task:1:build:0`])
+  expect(f.store.get(f.row.id)!.task_iteration).toBe(cap)
 })
 
 test('production plan refuses archive transformations of committed bytes', async () => {

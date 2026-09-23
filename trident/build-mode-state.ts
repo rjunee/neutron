@@ -87,6 +87,18 @@ export function parseBuildModeState(meta: string | null, run: TridentRun, termin
     || (c.pending !== undefined && (!c.pending || !['plan', 'build', 'review', 'fix'].includes(c.pending.phase) || typeof c.pending.step_id !== 'string' || !c.pending.step_id.startsWith(`${run.id}:`)))) {
     throw new Error('Host mode checkpoint is missing valid identity or state')
   }
+  if (c.handoff !== undefined) {
+    const intent = c.handoff
+    if (!intent || run.execution_strategy !== 'task_sequence' || c.stage !== 'built' || c.head === null || c.pending !== undefined
+      || !Number.isSafeInteger(intent.iteration) || intent.iteration < 0 || intent.iteration !== state.iteration
+      || !Number.isSafeInteger(intent.iteration + 1) || typeof intent.builtHead !== 'string' || !oid.test(intent.builtHead)
+      || typeof intent.body !== 'string' || !Number.isSafeInteger(c.remainingTasks) || c.remainingTasks <= 0
+      || intent.body.split('\n').filter((line: string) => /^\s*- \[ \]\s+/.test(line)).length !== c.remainingTasks) {
+      throw new Error('Task ledger intent is invalid')
+    }
+    // Historical events outlive plan refreshes. Only the resume consumer binds
+    // the latest intent to the current accepted plan; receipt readers parse all.
+  }
   return state
 }
 

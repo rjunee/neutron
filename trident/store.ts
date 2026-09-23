@@ -1177,7 +1177,8 @@ export class TridentRunStore {
       if (result.changes !== 1) return null
       const eventId = tx.get<{ id: number }>('SELECT last_insert_rowid() AS id', [])!.id
       // Checkpoint and spend commit together, including the card projection.
-      // A crash before outer result harvest cannot refund a completed handoff.
+      // A completed intermediate build is charged before its Git ledger write;
+      // neither lost handoff acknowledgement nor outer harvest can refund it.
       this.reconcileTaskSpendInTransaction(runId)
       return eventId
     })
@@ -1192,6 +1193,20 @@ export class TridentRunStore {
     })
   }
 
+  /** A pending handoff settles one already charged task, never an older identity
+   * after the run or any linked card has accumulated additional spend. */
+  taskHandoffSpendMatches(id: string, iteration: number): boolean {
+    const run = this.get(id)
+    const spent = iteration + 1
+    if (!run || !isTaskCap(iteration) || !isTaskCap(spent) || run.task_iteration !== spent
+      || !isTaskCap(run.max_task_iterations)) return false
+    const cards = this.db.prepare<{ task_iteration: number; max_task_iterations: number | null }, [string, string]>(
+      'SELECT task_iteration, max_task_iterations FROM work_board_items WHERE project_slug = ? AND linked_run_id = ?',
+    ).all(run.project_slug, id)
+    return cards.every(card => card.task_iteration === spent
+      && (card.max_task_iterations === null || isTaskCap(card.max_task_iterations)))
+  }
+
   private reconcileTaskSpendInTransaction(id: string): void {
     const run = this.get(id)
     if (!run) return
@@ -1201,12 +1216,13 @@ export class TridentRunStore {
     if (!isTaskCap(run.task_iteration) || !isTaskCap(run.max_task_iterations)) {
       throw new Error('Execution iteration budget is corrupt')
     }
-    if (state.iteration > run.task_iteration) {
+    const spent = Math.max(state.iteration, state.checkpoint.handoff ? state.checkpoint.handoff.iteration + 1 : 0)
+    if (spent > run.task_iteration) {
       if (run.execution_strategy === null) throw new Error('Task spend has no execution selection')
       // Migration 0157 projects this update to linked cards with MAX(spend) and
       // MIN(cap), in this same transaction. Never add the count a second time.
       this.db.runSync('UPDATE code_trident_runs SET task_iteration = MAX(task_iteration, ?) WHERE id = ?',
-        [state.iteration, id])
+        [spent, id])
     }
   }
 

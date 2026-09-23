@@ -37,6 +37,10 @@ The host continues to own task identity, test scope, review, mutation proof,
 publication, merge, and all budgets. Card-owned iteration spend and its cap
 survive every strategy translation and retry, including when a prior-run link
 is cleared. A retry cannot buy a fresh budget by changing strategy.
+For an intermediate task, its validated completed-build checkpoint charges the
+iteration before the host writes the Git ledger. Settling or rejecting a pending
+ledger handoff cannot refund that spend or charge it twice. Ledger recovery uses
+the original task identity even though the persisted spent count is one ahead.
 
 Legacy stored `ralph = 1` maps to `task_sequence`; `ralph = 0` maps to `single`.
 Migration translates durable counters and phases/checkpoints without changing

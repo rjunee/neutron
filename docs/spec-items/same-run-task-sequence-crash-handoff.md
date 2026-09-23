@@ -27,8 +27,22 @@ returning `continued`, using the ordinary idempotent handoff. It must not dispat
 another planner/builder, publish, review, or merge that intermediate task. Missing
 or contradictory evidence must return `unknown` before any of those effects.
 The same rule applies if the ledger was already committed and checkpointed but
-the handoff had not yet advanced. A moved branch retains the existing rebuild
-behavior; this item does not authorize adopting an unrecorded revision.
+the handoff had not yet advanced. Before writing Git, the completed intermediate
+build records an intent containing its original iteration, builder head and exact
+ticked ledger bytes, and charges that iteration in the same database transaction.
+The charge survives a differing branch tip and rejection of checkpoint adoption.
+
+A lost Git-commit acknowledgement may recover only the intended ledger-only
+direct child: exactly one parent equal to the builder head, only the branch's
+ledger path changed, and the expected regular-file blob. The host remeasures the
+tip before acknowledging recovery. This explicit intent is the sole exception to
+G038's moved-head rebuild rule; arbitrary moved heads still rebuild within the
+remaining budget. Exhausted runs dispatch no worker, including on repeated
+restart. Handoff consumes the original task identity once without adding spend
+again. An intent whose run or linked card has advanced beyond its one recorded
+charge is stale and cannot restore an older task identity. Old checkpoints
+acquire the intent before their next ledger write; missing
+or malformed evidence never authorizes adoption of a moved revision.
 
 ## Acceptance
 
@@ -40,6 +54,18 @@ behavior; this item does not authorize adopting an unrecorded revision.
       builds the next unchecked task through the existing continuation path.
       verify: `open/__tests__/project-build-e2e.test.ts` and
       `trident/build-run.test.ts`.
+- [x] Interruption after the real Git commit but before the head checkpoint
+      resumes without planner/builder dispatch, including a second interruption
+      during recovery. Run/card spend remains one. An unrelated changed tip
+      rejects adoption: an exhausted sibling cannot dispatch, while a sibling
+      with remaining budget rebuilds under the next task identity.
+      verify: `open/__tests__/project-build-e2e.test.ts`.
+- [x] Extra-file, wrong-blob, grandchild and merge-shaped candidates cannot
+      authenticate as ledger recovery. Malformed intents fail closed; older
+      checkpoints remain readable. Semantic mutations separately remove parent,
+      ledger-only and spend checks, and refuse valid recovery; all must fail.
+      verify: `trident/production-host-effects.test.ts` and
+      `trident/task-ledger-intent-mutation.test.ts`.
 - [x] Missing remaining count, missing plan, or count/ledger disagreement (including
       a zero checkpoint whose accepted plan still has work remaining) returns
       `unknown` without handoff or review. A blanket refusal also fails acceptance:
