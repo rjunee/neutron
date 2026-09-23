@@ -36,6 +36,10 @@ it to every parent fails the known-idle upgrade control. The 230 focused tests,
 all 262 consuming `open/__tests__/project-build-e2e.test.ts` cases, and both
 `tsc -p tsconfig.json` and `tsc -p trident/tsconfig.json` pass. The consuming
 fixtures carry the same spawn profile as the real parent; no driver or gate is
-stubbed to bypass the capability check. This slice supports issue #1196. It does not
+stubbed to bypass the capability check. All 33 Open project-build wiring tests
+also pass with truthful warm and cold parent profile fixtures. The selected-live
+parent test refuses both missing and stale profiles before accepting the current
+profile; bypassing that guard or refusing every profile makes those consuming
+wiring controls fail semantically. This slice supports issue #1196. It does not
 claim measured live token savings or completion of the efficiency item; those
 require the deployed run evidence specified by that item.
