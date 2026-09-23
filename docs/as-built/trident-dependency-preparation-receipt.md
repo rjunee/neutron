@@ -22,9 +22,9 @@ without the readiness contract retain their previous installation behavior.
 
 The host retires the previous receipt before preparation and writes a replacement
 only after success with unchanged inputs. Missing or malformed observations,
-changed inputs and replaced dependencies require installation. Missing packages
-or a failed verifier refuse admission. Borrowed root dependency directories and
-Bun stores are refused. Installation retains frozen lockfiles and disabled
+changed inputs and replaced dependencies require installation. An empty or missing
+dependency directory, or a failed readiness verifier, refuses admission. Borrowed
+root dependency directories and Bun stores are refused. Installation retains frozen lockfiles and disabled
 lifecycle scripts; verifier execution retains the host working directory and
 disabled branch runtime configuration.
 
