@@ -293,8 +293,14 @@ export function createProjectReviewSource(input: ProjectReviewSourceOptions): Re
     try {
       if (options.signal.aborted) { abort(); return unavailable('host cancelled review') }
       await assertScope(operation)
-      const outcome = await Promise.race([options.accounting.run(runner, request, placement, controller.signal), stopped])
+      const outcome = await Promise.race([recovering
+        ? options.accounting.recover(runner, request, placement, controller.signal)
+        : options.accounting.run(runner, request, placement, controller.signal), stopped])
       await assertScope(operation)
+      // Recovery may inspect existing evidence only. Unsupported, missing,
+      // damaged or unresolved provider evidence retains the original pending
+      // claim so restoring that evidence can recover it without a new attempt.
+      if (recovering && outcome.kind !== 'completed') throw Error('Original review outcome remains pending')
       if (outcome.kind === 'completed') {
         if (recovering && !validateTrailer('verdict', outcome.result).ok) throw Error('Recovered review verdict is invalid')
         await rememberThread?.(outcome.thread_id)

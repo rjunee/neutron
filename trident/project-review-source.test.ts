@@ -25,8 +25,10 @@ async function fixture() {
   const db = ProjectDb.open(join(dir, 'project.db')); databases.push(db)
   await new TridentRunStore(db).create({ id: 'host-run', slug: 'review', project_slug: 'project', repo_path: dir, task: 'review' })
   const calls: BoundedWorkRequest[] = []
+  const recoveries: BoundedWorkRequest[] = []
   const bindings: string[] = []
   let answer: (request: BoundedWorkRequest) => Promise<BoundedWorkOutcome> = async () => completed()
+  let recoverAnswer: typeof answer | undefined
   const options: ProjectReviewSourceOptions = {
     accounting: new AttemptAccounting(new TridentAttemptLedger(db), dir, async () => {}), taskId: () => 'task-1',
     runId: 'host-run', projectSlug: 'project', cwd: dir, evidenceRoot: dir, env: {},
@@ -36,12 +38,17 @@ async function fixture() {
     runnerFor: (model, seat): WorkerRunner => {
       bindings.push(`${model.tier}:${model.endpoint ?? ''}:${model.credential ?? ''}`)
       return { provider: seat.provider, supports: () => ({ ok: true }), liveness: async () => 'unknown',
-        run: async request => { calls.push(request); return answer(request) } }
+        run: async request => { calls.push(request); return answer(request) },
+        ...(recoverAnswer ? { recover: async (request: BoundedWorkRequest) => {
+          recoveries.push(request); return recoverAnswer!(request)
+        } } : {}),
+      }
     },
   }
   const source = () => createProjectReviewSource(options)
   const check = (s = source()) => reviewPanel(s, approve, snapshot, 1, 'host-run')
-  return { options, calls, bindings, source, check, answer: (fn: typeof answer) => { answer = fn } }
+  return { options, calls, recoveries, bindings, source, check, answer: (fn: typeof answer) => { answer = fn },
+    recover: (fn: typeof answer) => { recoverAnswer = fn } }
 }
 
 async function durableFixture() {
@@ -135,11 +142,13 @@ test('durable pending attempt reconciles its exact request without another paid 
     if (request.role === 'review') throw Error('lost acknowledgement after worker completed')
     return completed()
   })
+  f.recover(async request => receipts.get(JSON.stringify(request)) ?? { kind: 'unknown', detail: 'Original provider receipt is missing' })
   expect(await f.check()).toMatchObject({ kind: 'blocked', on: expect.stringContaining('infra-only:') })
   const original = f.calls[0]!
   expect(JSON.parse(await readFile(join(dirname(original.result.path), 'request.json'), 'utf8'))).toEqual(original)
   expect(await f.check()).toEqual({ kind: 'approve' })
-  expect(f.calls[1]).toEqual(original)
+  expect(f.recoveries).toEqual([original])
+  expect(f.calls.map(request => request.role)).toEqual(['review', 'synthesis'])
   expect(purchases).toBe(2) // One review, one newly eligible synthesis.
   expect(await f.check()).toEqual({ kind: 'approve' })
   expect(purchases).toBe(2)
@@ -159,9 +168,10 @@ test('pending reconciliation refuses damaged original requests and unknown recov
     if (damage === 'missing') await rm(path)
     if (damage === 'foreign') await writeFile(path, JSON.stringify({ ...original, run_id: 'foreign-run' }))
     if (damage === 'thread') await writeFile(path, JSON.stringify({ ...original, thread: { id: 'replacement-thread' } }))
-    f.answer(async () => damage === 'invalid-result' ? completed({ verdict: 'APPROVE' }) : { kind: 'unknown', detail: 'original result not available' })
+    f.recover(async () => damage === 'invalid-result' ? completed({ verdict: 'APPROVE' }) : { kind: 'unknown', detail: 'original result not available' })
     expect(await f.check()).toMatchObject({ kind: 'blocked', on: expect.stringContaining('infra-only:') })
-    expect(f.calls).toHaveLength(damage === 'unknown' || damage === 'invalid-result' ? 2 : 1)
+    expect(f.calls).toHaveLength(1)
+    expect(f.recoveries).toHaveLength(damage === 'unknown' || damage === 'invalid-result' ? 1 : 0)
   }
 })
 
@@ -178,14 +188,15 @@ test('pending headless recovery preserves the original thread and releases only 
     if (purchases === 1) throw Error('lost acknowledgement')
     return outcome
   })
+  f.recover(async request => receipts.get(JSON.stringify(request)) ?? { kind: 'unknown', detail: 'Original provider receipt is missing' })
   const first = f.source()
   await expect(first.readSeat(first.seats[1]!, snapshot, 1)).rejects.toThrow()
   const restored = f.source()
   expect(await restored.readSeat(restored.seats[1]!, snapshot, 1)).toMatchObject({ status: 'completed' })
-  expect(f.calls[1]).toEqual(f.calls[0])
+  expect(f.recoveries).toEqual([f.calls[0]!])
   expect(purchases).toBe(1)
   expect(await restored.readSeat(restored.seats[1]!, snapshot, 2)).toMatchObject({ status: 'completed' })
-  expect(f.calls[2]!.thread).toEqual({ id: 'original-provider-thread' })
+  expect(f.calls[1]!.thread).toEqual({ id: 'original-provider-thread' })
   expect(purchases).toBe(2)
 })
 
@@ -199,12 +210,31 @@ test('pending synthesis recovers without repurchasing seats or synthesis', async
     if (request.role === 'synthesis') throw Error('lost synthesis acknowledgement')
     return completed()
   })
+  f.recover(async request => receipts.get(JSON.stringify(request)) ?? { kind: 'unknown', detail: 'Original provider receipt is missing' })
   expect(await f.check()).toMatchObject({ kind: 'blocked' })
   expect(purchases).toBe(2)
   expect(await f.check()).toEqual({ kind: 'approve' })
   expect(purchases).toBe(2)
-  expect(f.calls.map(row => row.role)).toEqual(['review', 'synthesis', 'synthesis'])
-  expect(f.calls[2]).toEqual(f.calls[1])
+  expect(f.calls.map(row => row.role)).toEqual(['review', 'synthesis'])
+  expect(f.recoveries).toEqual([f.calls[1]!])
+})
+
+test('pending recovery never falls back to run when capability or provider evidence is missing', async () => {
+  for (const missing of ['capability', 'evidence'] as const) {
+    const f = await durableFixture()
+    f.answer(async () => { throw Error('lost acknowledgement after original turn') })
+    expect(await f.check()).toMatchObject({ kind: 'blocked' })
+    const original = f.calls[0]!
+    f.answer(async () => completed()) // A forbidden fallback would buy new work.
+    if (missing === 'evidence') f.recover(async () => ({ kind: 'unknown', detail: 'original reservation is missing' }))
+    expect(await f.check()).toMatchObject({ kind: 'blocked' })
+    expect(f.calls).toEqual([original])
+    expect(JSON.parse(await readFile(join(dirname(original.result.path), 'receipt.json'), 'utf8')).state).toBe('pending')
+    f.recover(async () => completed())
+    expect(await f.check()).toEqual({ kind: 'approve' })
+    expect(f.calls.map(request => request.role)).toEqual(['review', 'synthesis'])
+    expect(f.recoveries.at(-1)).toEqual(original)
+  }
 })
 
 test('credential movement during dispatch permanently invalidates the original pending result', async () => {
