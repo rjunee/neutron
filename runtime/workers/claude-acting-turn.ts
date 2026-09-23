@@ -220,7 +220,8 @@ export function createClaudeActingTurn(binding: ClaudeActingSession, clock: Obse
     let readingConsumption = false
     const observe = async () => {
       let yieldDispatch: (() => void) | undefined
-      const release = await session.acquireTurn(yieldSlot => { yieldDispatch = yieldSlot })
+      const readOnly = !request.writable && toolRank[request.tools] <= toolRank['read-only']
+      const release = await session.acquireTurn(readOnly ? yieldSlot => { yieldDispatch = yieldSlot } : undefined)
       try {
         if (expired()) return unknown()
         // JSON escapes newlines: submitLine accepts one line and owns text/Enter ordering.
@@ -256,7 +257,7 @@ export function createClaudeActingTurn(binding: ClaudeActingSession, clock: Obse
           // metadata cannot transfer ownership. Only a uniquely bound read-only
           // child permits another parent submission while this result is pending.
           // Keep the busy lease so revocation/model switching still sees live work.
-          if (seen.bound && !request.writable && toolRank[request.tools] <= toolRank['read-only']) {
+          if (seen.bound) {
             yieldDispatch?.()
             yieldDispatch = undefined
           }

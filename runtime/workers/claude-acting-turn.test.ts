@@ -142,7 +142,7 @@ test('yielding a dispatch slot preserves its busy lease and release is idempoten
   const session = new ReplSession('fixture', 'generation', 'session', 'channel', '/tmp')
   let yieldDispatch!: () => void
   const releaseFirst = await session.acquireTurn(yieldSlot => { yieldDispatch = yieldSlot })
-  const queued = session.acquireTurn()
+  const queued = session.acquireTurn(() => {})
   expect(session.turnSlotHeld).toBe(2)
   yieldDispatch(); yieldDispatch()
   const releaseSecond = await queued
@@ -152,6 +152,68 @@ test('yielding a dispatch slot preserves its busy lease and release is idempoten
   releaseFirst(); releaseFirst()
   expect(session.turnSlotHeld).toBe(0)
 })
+
+test('an ordinary writer waits for every background reader and later readers cannot pass it', async () => {
+  const session = new ReplSession('fixture', 'generation', 'session', 'channel', '/tmp')
+  let yieldFirst!: () => void, yieldSecond!: () => void
+  const releaseFirst = await session.acquireTurn(yieldSlot => { yieldFirst = yieldSlot })
+  yieldFirst()
+  const releaseSecond = await session.acquireTurn(yieldSlot => { yieldSecond = yieldSlot })
+  yieldSecond()
+  const admitted: string[] = []
+  const writer = session.acquireTurn().then(release => { admitted.push('writer'); return release })
+  const laterReader = session.acquireTurn(() => {}).then(release => { admitted.push('later reader'); return release })
+  // Drain the acquisition continuations, not elapsed wall time. With the reader
+  // barrier removed the writer has enough turns to enter and the assertion fails.
+  for (let turn = 0; turn < 8; turn++) await Promise.resolve()
+  expect(admitted).toEqual([])
+  expect(session.turnSlotHeld).toBe(4)
+  releaseFirst()
+  for (let turn = 0; turn < 8; turn++) await Promise.resolve()
+  expect(admitted).toEqual([])
+  releaseSecond()
+  const releaseWriter = await writer
+  expect(admitted).toEqual(['writer'])
+  expect(session.turnSlotHeld).toBe(2)
+  releaseWriter()
+  const releaseReader = await laterReader
+  expect(admitted).toEqual(['writer', 'later reader'])
+  releaseReader()
+  expect(session.turnSlotHeld).toBe(0)
+})
+
+for (const grant of ['writable', 'edit tools'] as const) {
+  test(`the acting consumer admits ${grant} only after existing background readers settle`, async () => {
+    const f = await fixture()
+    const session = new ReplSession('fixture', 'generation', 'session', 'channel', f.dir)
+    session.toolSurface = LIVE_AGENT_TOOL_NAMES.join(',')
+    session.attachChild(f.binding.session.child)
+    f.binding.session = session
+    f.input.timeout_ms = 10_000
+    f.input.request = { ...f.input.request, writable: grant === 'writable',
+      tools: grant === 'edit tools' ? 'edit' : 'read-only', budget: { wall_ms: 10_000 } }
+    let yieldDispatch!: () => void
+    const releaseReader = await session.acquireTurn(yieldSlot => { yieldDispatch = yieldSlot })
+    yieldDispatch()
+    let admitted = 0
+    const acquire = session.acquireTurn.bind(session)
+    session.acquireTurn = async background => {
+      const release = await acquire(background)
+      admitted++
+      return release
+    }
+    const waiting = f.run()
+    try {
+      for (let turn = 0; turn < 8; turn++) await Promise.resolve()
+      expect(f.commands).toHaveLength(0)
+      expect(admitted).toBe(0)
+      expect(session.turnSlotHeld).toBe(2)
+    } finally { releaseReader(); await waiting }
+    expect(await waiting).toEqual({ kind: 'turn-ended' })
+    expect(f.commands).toHaveLength(1)
+    expect(session.turnSlotHeld).toBe(0)
+  })
+}
 
 for (const outcome of ['cancelled', 'rate limited', 'lost acknowledgement'] as const) {
   test(`a bound read-only child stays owned without replay when ${outcome}`, async () => {
