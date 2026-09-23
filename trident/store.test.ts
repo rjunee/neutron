@@ -761,6 +761,31 @@ describe('TridentRunStore', () => {
     },
   )
 
+  // THE RALPH CONTINUATION SEED IS GOVERNED-ONLY (spec item
+  // a-retry-must-resume-from-the-checkpoint). `ralph-task-built` is refused on the
+  // non-ralph rows above and accepted on a ralph row, where it opens the next
+  // iteration with the cheap planner; its `-deviated` twin stays refused everywhere,
+  // because a deviated build's committed plan is stale.
+  test.each([
+    ['ralph-task-built', true, true],
+    ['ralph-task-built', false, false],
+    ['ralph-task-built-deviated', true, false],
+  ] as const)('create on seed %p with ralph=%p accepts=%p', async (checkpoint, ralph, accepts) => {
+    const store = new TridentRunStore(db)
+    const create = store.create({
+      slug: `continuation-${String(ralph)}-${checkpoint}`,
+      project_slug: 't1',
+      repo_path: '/r',
+      task: 't',
+      ralph,
+      inner_checkpoint: checkpoint,
+      inner_checkpoint_head: 'a'.repeat(40),
+      base_sha: 'c'.repeat(40),
+    })
+    if (accepts) expect((await create).inner_checkpoint).toBe(checkpoint)
+    else await expect(create).rejects.toThrow(TridentUnresumableSeedError)
+  })
+
   // A SEEDED NAME IS ONLY HALF A SEED (Argus r24, major). The name guard above
   // answered "this checkpoint means a commit exists and nothing judged it", then let
   // the two columns saying WHICH commit through unchecked. Both gaps are permanent

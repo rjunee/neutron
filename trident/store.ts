@@ -26,7 +26,7 @@ import { phaseForCheckpoint } from './checkpoint-phase.ts'
 import { checkpointRound } from './checkpoint-round.ts'
 import { trimAsciiWs } from './ascii-trim.ts'
 import { readBuildRetrySource, retrySourceIdentity } from './build-mode-state.ts'
-import { reviewCapableCheckpoint } from './run-disposition.ts'
+import { seedableCheckpoint } from './run-disposition.ts'
 import { carryableRalphRound, DEFAULT_MAX_RALPH_ROUNDS, isRalphCap } from './ralph-budget.ts'
 
 const crashLog = createLogger('trident-launcher-crash')
@@ -77,7 +77,7 @@ export class TridentRunReferenceAmbiguousError extends Error {
 
 export class TridentUnresumableSeedError extends Error {
   constructor(checkpoint: string) {
-    super(`refusing to create a trident run seeded at inner_checkpoint='${checkpoint}': only a checkpoint that means "a commit exists and nothing has judged it yet" (forge-done, fix-round-N, outer-published:*) may seed a resume — anything else either has no commit to resume or has ALREADY been judged, and seeding it would route unreviewed work past a review`)
+    super(`refusing to create a trident run seeded at inner_checkpoint='${checkpoint}': only a checkpoint that means "a commit exists and nothing has judged it yet" (forge-done, fix-round-N, outer-published:*) may seed a resume, plus ralph-task-built on a governed (ralph) row, which seeds a Ralph continuation that still builds and reviews — anything else either has no commit to resume or has ALREADY been judged, and seeding it would route unreviewed work past a review`)
     this.name = 'TridentUnresumableSeedError'
   }
 }
@@ -683,8 +683,13 @@ export class TridentRunStore {
     // every reader compares (`trimAsciiWs`, the six ASCII characters all three
     // copies agree on). A null/omitted seed is the fresh-dispatch shape and is
     // untouched.
+    //
+    // THE ONE NON-REVIEW NAME (spec item a-retry-must-resume-from-the-checkpoint).
+    // `ralph-task-built` is accepted on a GOVERNED row only: it seeds a Ralph
+    // continuation that builds the next task with the cheap planner, and routes
+    // nothing past a review. `seedableCheckpoint` (run-disposition.ts) owns that rule.
     const seededCheckpoint = trimAsciiWs(input.inner_checkpoint ?? '')
-    if (seededCheckpoint !== '' && !reviewCapableCheckpoint(seededCheckpoint)) {
+    if (seededCheckpoint !== '' && !seedableCheckpoint(seededCheckpoint, input.ralph === true)) {
       throw new TridentUnresumableSeedError(seededCheckpoint)
     }
     // AND THE NAME IS ONLY HALF THE SEED (Argus r24, major). The guard above asked

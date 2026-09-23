@@ -146,6 +146,32 @@ export function reviewCapableCheckpoint(name: string): boolean {
 }
 
 /**
+ * THE RALPH CONTINUATION CHECKPOINT — the one name a governed retry may be seeded
+ * with that is NOT review-capable (spec item a-retry-must-resume-from-the-checkpoint,
+ * gap 2). A Ralph iteration that built its task and handed back parks here with the
+ * committed IMPLEMENTATION_PLAN.md as its plan. A retry seeded with it does not skip a
+ * build and does not skip a review: it BUILDS the next task, but opens that iteration
+ * with the cheap continuation planner (`build-run.ts`, G026) instead of re-deriving the
+ * whole plan. Without the seed every retry of such a card paid the full planning survey.
+ *
+ * `ralph-task-built-deviated` is deliberately NOT this name: a deviated build left a
+ * committed plan the code no longer matches, so its retry must re-plan in full.
+ */
+export const RALPH_CONTINUATION_CHECKPOINT = 'ralph-task-built'
+
+/**
+ * May a NEW row be born carrying `name` as its seeded checkpoint? The taxonomy above is
+ * unchanged — `ralph-task-built` still classifies `died-before-build`, because no review
+ * ran and the offline disposition count must not move. This is the separate question of
+ * what a dispatch may hand forward: a review-capable checkpoint on any row, or the Ralph
+ * continuation checkpoint on a GOVERNED row only (a non-Ralph row has no loop to
+ * continue, so the name would mean nothing there).
+ */
+export function seedableCheckpoint(name: string, ralph: boolean): boolean {
+  return reviewCapableCheckpoint(name) || (ralph && name === RALPH_CONTINUATION_CHECKPOINT)
+}
+
+/**
  * TRIM THE ASCII WHITESPACE SET, NOT JAVASCRIPT'S. `String.prototype.trim` also
  * strips NBSP, the Unicode space separators and the BOM, and this function has TWO
  * mirrors that do not: the trim in `trident/checkpoint.sh` (which names the same

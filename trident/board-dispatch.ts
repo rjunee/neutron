@@ -92,8 +92,8 @@ import {
   type PublisherCredentialSource,
 } from './git-mode.ts'
 import { ensureProjectBuildWorkspace } from './build-workspace.ts'
-import { builtButNeverReviewedSeed, carriedRalphBudget } from './run-disposition.ts'
-import { retryModeSource } from './build-mode-state.ts'
+import { RALPH_CONTINUATION_CHECKPOINT, builtButNeverReviewedSeed, carriedRalphBudget } from './run-disposition.ts'
+import { isRalphContinuationSource, retryModeSource } from './build-mode-state.ts'
 import { detectBaseBranch } from './merge.ts'
 import { slugifyTask } from './slugify-task.ts'
 import { isTerminalPhase } from './state-machine.ts'
@@ -1441,14 +1441,27 @@ export async function dispatchBoardBoundBuild(
       }
       // Typed state or a source link supersedes an inherited legacy projection.
       // An ineligible successor cannot revive its old fix-round seed.
+      // A GOVERNED ITERATION THAT HANDED BACK (`ralph-task-built`) is carried as a
+      // CONTINUATION seed rather than a review seed (spec item
+      // a-retry-must-resume-from-the-checkpoint, gap 2): the retry still builds the next
+      // task, but opens it with the committed plan instead of the full planning survey.
+      const continuation = source !== null && isRalphContinuationSource(source)
       const candidate = source !== null ? {
-        checkpoint: `fix-round-${source.state.checkpoint.round}`,
+        checkpoint: continuation ? RALPH_CONTINUATION_CHECKPOINT : `fix-round-${source.state.checkpoint.round}`,
         head: source.state.checkpoint.head!, findings: null, base_sha: prior.base_sha!,
       } : deps.store.stageEvents(prior.id).some(event => event.stage === 'build-mode-state' || event.stage === 'build-retry-source')
         ? null : builtButNeverReviewedSeed(prior, { ralph })
       if (candidate === null) {
         seedReason = 'prior_run_has_no_resumable_build'
       } else {
+        // THE CONTINUATION'S TIP IS THE LOCAL REF, WHATEVER THE MERGE MODE. A Ralph
+        // iteration commits locally and hands back without publishing (deferred waves
+        // leave origin stale by design), so in `pr` mode origin legitimately lags the
+        // recorded head and a remote read would refuse every such retry. It is the
+        // same ref `prepareLaunch` re-verifies this seed against (launch-preparation.ts,
+        // the `ralph-task-built` arm of `resolveResumeLiveHead`), so the dispatch proof
+        // and the launch proof ask one question — and neither is the fire-time PR probe.
+        const tipMode: MergeMode = continuation ? 'local' : merge_mode
         // The call itself sits inside the try: a NON-async probe throws at the
         // call, before any promise exists for a .catch to attach to (Argus r7).
         let tip = ''
@@ -1457,7 +1470,7 @@ export async function dispatchBoardBoundBuild(
             deps.readBranchTip ??
             ((p: string, b: string, m: MergeMode) =>
               defaultReadBranchTip(p, b, m, credentialedRunner ?? spawnCapture))
-          )(repo_path, branch, merge_mode)
+          )(repo_path, branch, tipMode)
         } catch {
           tip = '' // a thrown probe is NO evidence — fall through to a fresh dispatch
         }
@@ -1465,7 +1478,17 @@ export async function dispatchBoardBoundBuild(
         if (observed === candidate.head) {
           seed = candidate
           typedSource = source
-          seedReason = 'resumed'
+          seedReason = continuation ? 'resumed_continuation' : 'resumed'
+          // THE ITERATION COUNT TRAVELS WITH THE CONTINUATION. `advanceRalph` advanced
+          // the source's `iteration` when it handed back, and the host mints the retry's
+          // state at `max(source.iteration, row.ralph_round)` — but it reads the row's
+          // round for the planner cadence BEFORE that mint. A card snapshot that lags the
+          // handoff would open the iteration at a round the minted state disagrees with,
+          // and the handoff at its end would refuse the mismatch. Raising the row to the
+          // source's count can only TIGHTEN the budget, never authorise work.
+          if (continuation && budget !== null && source!.state.iteration > budget.ralph_round) {
+            budget = { ...budget, ralph_round: source!.state.iteration }
+          }
         } else {
           // THE TWO FAILURES ARE DIFFERENT FACTS AND ARE REPORTED AS SUCH. A 40-hex
           // tip that is not the recorded one means the branch moved — someone else's
