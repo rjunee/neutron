@@ -11,7 +11,7 @@ import { OwnerHelperRegistry } from './project-owner-helper-registry.ts'
 const cleanup: (() => void)[] = []
 afterEach(() => { for (const close of cleanup.splice(0).reverse()) close() })
 
-async function fixture(options: { drop?: string; badRestore?: boolean; nativeRefuseSettings?: boolean } = {}) {
+async function fixture(options: { drop?: string; badRestore?: boolean; nativeRefuseSettings?: boolean; nextOwnerTurnDelayMs?: number } = {}) {
   const root = mkdtempSync('/tmp/helper-review-test-'), cwd = join(root, 'project'), codexHome = join(root, 'home')
   const stageDir = join(cwd, '.neutron', 'build-results', 'a'.repeat(64))
   mkdirSync(stageDir, { recursive: true }); mkdirSync(codexHome, { mode: 0o700 })
@@ -38,8 +38,12 @@ async function fixture(options: { drop?: string; badRestore?: boolean; nativeRef
         else profiles[key.slice('permissions.'.length)] = structuredClone(edit.value)
       }
       if (message.method === 'turn/start') result = { turn: { id: settingsRestored ? 'next-owner-turn' : 'parent-turn' } }
-      queueMicrotask(() => receive(options.nativeRefuseSettings && message.method === 'thread/settings/update'
-        ? { id: message.id, error: { code: -32001, message: 'native refusal' } } : { id: message.id, result }))
+      const respond = () => receive(options.nativeRefuseSettings && message.method === 'thread/settings/update'
+        ? { id: message.id, error: { code: -32001, message: 'native refusal' } } : { id: message.id, result })
+      if (message.method === 'turn/start' && settingsRestored && options.nextOwnerTurnDelayMs !== undefined) {
+        const timer = setTimeout(respond, options.nextOwnerTurnDelayMs)
+        cleanup.push(() => clearTimeout(timer))
+      } else queueMicrotask(respond)
     },
   } })
   cleanup.push(() => broker.close())
@@ -244,7 +248,7 @@ test('abandon synchronously fences the proxy even when its helper response is lo
 })
 
 test('private settlement wait survives the ordinary transport deadline and waits for delayed exact child completion', async () => {
-  const f = await fixture(), connection = await f.connect(250)
+  const f = await fixture({ nextOwnerTurnDelayMs: 350 }), connection = await f.connect(250)
   const lease = await connection.reviewPrepare({ stageDir: f.stageDir, network: false }, connection.broker.state().epoch)
   await lease.start([])
   f.event('turn/started', 'child', 'child-turn'); f.identifyChild(); f.event('turn/completed', 'owner', 'parent-turn')
@@ -253,8 +257,20 @@ test('private settlement wait survives the ordinary transport deadline and waits
   await expect(lease.waitSettled(1500)).rejects.toThrow('wait')
   expect(f.wire.filter(message => message.operation === 'reviewWaitSettled')).toHaveLength(1)
   await lease.restore(); await lease.release()
-  const writer = connection.broker.gateway('after-delayed-child')
-  expect(await writer.request('turn/start', { threadId: 'owner', input: [] }, connection.broker.state().epoch)).toEqual({ turn: { id: 'next-owner-turn' } })
+  connection.close()
+  const ordinaryConnection = await f.connect()
+  const writer = ordinaryConnection.broker.gateway('after-delayed-child')
+  expect(await writer.request('turn/start', { threadId: 'owner', input: [] }, ordinaryConnection.broker.state().epoch)).toEqual({ turn: { id: 'next-owner-turn' } })
+})
+
+test('a settlement-only transport deadline cannot prove a later delayed writable response', async () => {
+  const f = await fixture({ nextOwnerTurnDelayMs: 350 }), connection = await f.connect(250)
+  const lease = await connection.reviewPrepare({ stageDir: f.stageDir, network: false }, connection.broker.state().epoch)
+  await lease.start([]); f.settle(); expect(await lease.waitSettled(1500)).toBe(true)
+  await lease.restore(); await lease.release()
+  const writer = connection.broker.gateway('too-short-after-settlement')
+  await expect(writer.request('turn/start', { threadId: 'owner', input: [] }, connection.broker.state().epoch))
+    .rejects.toThrow('outcome may be unknown')
 })
 
 for (const wrongChild of [false, true]) test(`private settlement wait fences on ${wrongChild ? 'wrong' : 'absent'} child completion timeout`, async () => {
