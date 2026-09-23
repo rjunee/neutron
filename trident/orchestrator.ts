@@ -2218,10 +2218,26 @@ export function buildTridentOrchestrator(
     const pr = result.pr_number ?? run.pr
     const branch = result.branch ?? run.branch
     const remaining = result.remaining_tasks ?? 0
-    const nextTaskIteration = run.task_iteration + 1
+    let nextTaskIteration = run.task_iteration + 1
+    try {
+      const state = readBuildModeState(listStageEvents?.(run.id) ?? [], run)
+      if (state !== null) {
+        if (!['task-built', 'task-built-deviated'].includes(state.checkpoint.stage)
+          || !state.consumed || state.consumed.head !== state.checkpoint.head
+          || state.iteration !== state.consumed.round + 1) {
+          throw new Error('Task handoff has no valid consumption proof')
+        }
+        // The typed host commits spend with its handoff. Harvest projects that
+        // absolute count; adding again would charge the same task twice.
+        nextTaskIteration = Math.max(run.task_iteration, state.iteration)
+      }
+    } catch {
+      return { run: failedRun(run, 'task handoff accounting checkpoint is invalid', false),
+        changed: true, waiting: false, note: 'task-sequence loop → failed (invalid task spend)' }
+    }
     // Current one-based task plus tasks still planned after it. This is a plan
     // estimate, not the spending cap; replacement plans may grow or shrink it.
-    const plannedTotal = (run.task_iteration + 1) + remaining
+    const plannedTotal = nextTaskIteration + remaining
     const taskTotal = Number.isSafeInteger(plannedTotal) && Number.isSafeInteger(remaining) && remaining > 0
       ? plannedTotal : null
 

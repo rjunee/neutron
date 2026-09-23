@@ -1450,6 +1450,11 @@ export async function dispatchBoardBoundBuild(
     // this project and is terminal, so it is the prior — and nothing below has to re-check
     // any of that.
     prior = namedPrior
+    try {
+      prior = await deps.store.reconcileTaskSpend(prior.id) ?? prior
+    } catch {
+      return { ok: false, code: 'backend_error', message: 'The previous run has an invalid iteration checkpoint. Nothing was dispatched.' }
+    }
     if (execution_strategy !== null && prior.execution_strategy !== null && execution_strategy !== prior.execution_strategy) {
       return { ok: false, code: 'backend_error', message: 'The card and prior run disagree about the immutable execution strategy. Nothing was dispatched.' }
     }
@@ -1564,16 +1569,6 @@ export async function dispatchBoardBoundBuild(
           seed = candidate
           typedSource = source
           seedReason = continuation ? 'resumed_continuation' : 'resumed'
-          // THE ITERATION COUNT TRAVELS WITH THE CONTINUATION. `advanceTask` advanced
-          // the source's `iteration` when it handed back, and the host mints the retry's
-          // state at `max(source.iteration, row.task_iteration)` — but it reads the row's
-          // round for the planner cadence BEFORE that mint. A card snapshot that lags the
-          // handoff would open the iteration at a round the minted state disagrees with,
-          // and the handoff at its end would refuse the mismatch. Raising the row to the
-          // source's count can only TIGHTEN the budget, never authorise work.
-          if (continuation && budget !== null && source!.state.iteration > budget.task_iteration) {
-            budget = { ...budget, task_iteration: source!.state.iteration }
-          }
         } else {
           // THE TWO FAILURES ARE DIFFERENT FACTS AND ARE REPORTED AS SUCH. A 40-hex
           // tip that is not the recorded one means the branch moved — someone else's

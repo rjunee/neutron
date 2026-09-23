@@ -3570,7 +3570,9 @@ test(`historical pending ${strategy} builder recovers only with ${source} proven
       ? 'Original worker brief integrity cannot be established' : 'Original worker routing or authority changed during recovery' })
   expect(f.world.dispatches.some(d => d.role === 'plan' || d.role === 'build')).toBe(false)
   expect(f.store.get(f.row.id)!.execution_strategy).toBe(strategy)
-  expect(f.store.get(f.row.id)!.task_iteration).toBe(spend)
+  // A recovered completed builder consumes its task at the durable handoff,
+  // before outer harvest. Refused recovery and single builds spend no task.
+  expect(f.store.get(f.row.id)!.task_iteration).toBe(spend + (outcome.kind === 'continued' ? 1 : 0))
   if (source === 'legacy' && strategy === 'task_sequence') {
     const handoff = f.store.stageEvents(f.row.id).filter(row => row.stage === 'build-mode-state').at(-1)!
     expect(JSON.parse(handoff.meta!)).toMatchObject({ iteration: spend + 1, checkpoint: { stage: 'task-built' } })

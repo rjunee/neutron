@@ -25,7 +25,7 @@ import { resultCarriesEscalation } from './escalation-evidence.ts'
 import { phaseForCheckpoint } from './checkpoint-phase.ts'
 import { checkpointRound } from './checkpoint-round.ts'
 import { trimAsciiWs } from './ascii-trim.ts'
-import { readBuildRetrySource, retrySourceIdentity } from './build-mode-state.ts'
+import { parseBuildModeState, readBuildRetrySource, retrySourceIdentity } from './build-mode-state.ts'
 import { seedableCheckpoint } from './run-disposition.ts'
 import { carryableTaskIteration, DEFAULT_MAX_TASK_ITERATIONS, isTaskCap } from './task-budget.ts'
 import type { ExecutionStrategy } from './execution-strategy.ts'
@@ -691,6 +691,8 @@ export class TridentRunStore {
       return { kind: 'blocked', on: 'accepted execution plan is not valid JSON' }
     }
     return this.db.transaction(async (tx) => {
+      try { this.reconcileTaskSpendInTransaction(id) }
+      catch { return { kind: 'unknown' as const, detail: 'execution iteration checkpoint is invalid' } }
       const run = this.get(id)
       if (run === null) return { kind: 'unknown' as const, detail: 'execution strategy run is missing' }
       if (['done', 'failed', 'stopped'].includes(run.phase)) {
@@ -1172,8 +1174,40 @@ export class TridentRunStore {
                 WHERE run_id = ? AND stage = 'build-mode-state') IS ?`,
         [this.now(), meta, runId, runId, expected],
       )
-      return result.changes === 1 ? tx.get<{ id: number }>('SELECT last_insert_rowid() AS id', [])!.id : null
+      if (result.changes !== 1) return null
+      const eventId = tx.get<{ id: number }>('SELECT last_insert_rowid() AS id', [])!.id
+      // Checkpoint and spend commit together, including the card projection.
+      // A crash before outer result harvest cannot refund a completed handoff.
+      this.reconcileTaskSpendInTransaction(runId)
+      return eventId
     })
+  }
+
+  /** Repair historical checkpoint/row lag before deciding whether more work is
+   * allowed. Spend belongs to the run/card even when its commit cannot be adopted. */
+  async reconcileTaskSpend(id: string): Promise<TridentRun | null> {
+    return this.db.transaction(() => {
+      this.reconcileTaskSpendInTransaction(id)
+      return this.get(id)
+    })
+  }
+
+  private reconcileTaskSpendInTransaction(id: string): void {
+    const run = this.get(id)
+    if (!run) return
+    const event = this.stageEvents(id).filter(event => event.stage === 'build-mode-state').at(-1)
+    if (!event) return
+    const state = parseBuildModeState(event.meta, run, ['done', 'failed', 'stopped'].includes(run.phase))
+    if (!isTaskCap(run.task_iteration) || !isTaskCap(run.max_task_iterations)) {
+      throw new Error('Execution iteration budget is corrupt')
+    }
+    if (state.iteration > run.task_iteration) {
+      if (run.execution_strategy === null) throw new Error('Task spend has no execution selection')
+      // Migration 0157 projects this update to linked cards with MAX(spend) and
+      // MIN(cap), in this same transaction. Never add the count a second time.
+      this.db.runSync('UPDATE code_trident_runs SET task_iteration = MAX(task_iteration, ?) WHERE id = ?',
+        [state.iteration, id])
+    }
   }
 
   /** Suite acquisition invalidates the previous proof before executing. Completion

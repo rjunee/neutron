@@ -434,7 +434,7 @@ export function createProductionHostEffects(options: ProductionHostOptions) {
       } catch (error) { return unknown(String(error)) }
     },
   }
-  function taskIteration() { return readModeState()?.iteration ?? row().task_iteration }
+  function taskIteration() { return Math.max(readModeState()?.iteration ?? 0, row().task_iteration) }
   const ciSource = options.ciSource ?? productionCiSource(runHost, repo)
   const ciNow = options.ciNow ?? Date.now
   let missingSince: number | null = null

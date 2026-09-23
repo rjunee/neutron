@@ -10174,6 +10174,45 @@ test('one persisted re-fired run agrees across row, progress and board HTTP', as
   expect(body.items.find(row => row.id === item.id)?.run_progress).toMatchObject(expected)
 })
 
+for (const evidence of ['handoff', 'malformed', 'foreign', 'unconsumed'] as const) {
+  test(`outer harvest uses proven absolute task spend once: ${evidence}`, async () => {
+    const branch = 'trident/task-spend-harvest'
+    const h = buildHarness({ plan: () => ({ result: { verdict: 'REQUEST_CHANGES', prNumber: 55, branch,
+      remainingTasks: 2, checkpoint: 'task-built' }, argusCheckpoint: 'task-built' }) })
+    const run = await createRun({ execution_strategy: 'task_sequence', max_task_iterations: 3,
+      branch, merge_mode: 'pr' as MergeMode })
+    await h.loop.runOnce()
+    await h.complete()
+    await store.update(run.id, { worktree: join(tmp, 'work'), base_sha: 'b'.repeat(40) })
+    const current = store.get(run.id)!
+    const handoff = { runId: run.id, branch, base: current.base_sha, repo: current.repo_path,
+      worktree: current.worktree, projectSlug: current.project_slug, mergeMode: current.merge_mode,
+      iteration: 1, consumed: { round: 0, head: 'a'.repeat(40) },
+      checkpoint: { head: 'a'.repeat(40), stage: 'task-built', round: 0, replansUsed: 0,
+        findings: [], previousFindings: [], remainingTasks: 2 } }
+    await store.appendBuildModeState(run.id, null, JSON.stringify(handoff))
+    expect(store.get(run.id)!.task_iteration).toBe(1)
+    if (evidence !== 'handoff') {
+      await store.recordStageEvent(run.id, 'build-mode-state', evidence === 'malformed' ? '{' : JSON.stringify({
+        ...handoff, ...(evidence === 'foreign' ? { runId: 'foreign' } : { consumed: undefined }),
+      }))
+    }
+    await h.loop.runOnce()
+    const after = store.get(run.id)!
+    expect(after.task_iteration).toBe(1)
+    if (evidence === 'handoff') {
+      expect(after).toMatchObject({ task_total: 3, inner_result: null })
+      expect(after.phase).not.toBe('failed')
+      expect(h.refirePatches).toHaveLength(1)
+      expect(h.refirePatches[0]!.task_iteration).toBe(1)
+    } else {
+      expect(after.phase).toBe('failed')
+      expect(after.failure_reason).toContain('accounting checkpoint is invalid')
+      expect(h.refirePatches).toHaveLength(0)
+    }
+  })
+}
+
 test('task totals replace a revised plan estimate atomically with each persisted re-fire', async () => {
   let fire = 0
   const branch = 'trident/revised-plan'

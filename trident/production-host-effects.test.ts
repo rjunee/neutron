@@ -8,6 +8,7 @@ import { ProjectDb } from '@neutronai/persistence/index.ts'
 import { fakeRunner, type BoundedWorkOutcome, type BoundedWorkRequest } from '@neutronai/runtime/bounded-work.ts'
 import { seedMigratedDb } from '../tests/support/migrated-db.ts'
 import { TridentRunStore } from './store.ts'
+import { WorkBoardStore } from '@neutronai/work-board/store.ts'
 import { spawnCapture, type EnvCapableHostRunner, type HostCommandResult } from './git-mode.ts'
 import { createProductionHostEffects, productionCiSource, taskLedgerPath, workContextPath } from './production-host-effects.ts'
 import { classifyMutationTarget, isProseOnlyChange } from './mutation-prover.ts'
@@ -967,6 +968,9 @@ test('production checkpoint rejects stale writers and missing resume state', asy
 test('production task-sequence handoff consumes once and probes the pinned committed plan', async () => {
   const f = await fixture()
   await selectPlan(f.store, f.row.id, taskSequencePlan)
+  const board = new WorkBoardStore(f.db)
+  const card = await board.create('project', { title: 'Task handoff accounting' })
+  await board.attachRun('project', card.id, f.row.id)
   await writeLedger(f.worktree, '- [x] first\n- [ ] second\n')
   await f.command(['git', '-C', f.worktree, 'add', LEDGER])
   await f.command(['git', '-C', f.worktree, 'commit', '-m', 'Commit plan'])
@@ -974,8 +978,11 @@ test('production task-sequence handoff consumes once and probes the pinned commi
   await f.modes.saveCheckpoint!({ head: snapshot.head, stage: 'built', round: 1, replansUsed: 0, findings: [], previousFindings: [] })
   const handoff = { run_id: f.row.id, round: 0, snapshot, remainingTasks: 1 }
   expect(await f.modes.advanceTask(handoff)).toEqual({ kind: 'allow' })
+  expect(f.store.get(f.row.id)!.task_iteration).toBe(1)
+  expect(board.get('project', card.id)!.task_iteration).toBe(1)
   const restarted = createProductionHostEffects(f.options)
   expect(await restarted.modes.advanceTask(handoff)).toEqual({ kind: 'allow' })
+  expect(f.store.get(f.row.id)!.task_iteration).toBe(1)
   expect(restarted.taskIteration()).toBe(1)
   expect(await restarted.modes.loadResume()).toMatchObject({ stage: 'task-built', round: 0 })
   expect(await restarted.modes.probePlan(snapshot.head)).toMatchObject({ body: '- [x] first\n- [ ] second\n', uncheckedCount: 1 })
@@ -1223,7 +1230,8 @@ test('production re-plan spend survives a crash before replanning begins', async
 
 test('production checkpoint append refuses a terminal transition after host observation', async () => {
   const f = await fixture()
-  const first = await f.store.appendBuildModeState(f.row.id, null, '{}')
+  await f.modes.saveCheckpoint!({ head: f.tip, stage: 'built', round: 1, replansUsed: 0, findings: [], previousFindings: [] })
+  const first = f.store.stageEvents(f.row.id).filter(event => event.stage === 'build-mode-state').at(-1)!.id
   expect(typeof first).toBe('number')
   await f.store.update(f.row.id, { phase: 'stopped' })
   expect(await f.store.appendBuildModeState(f.row.id, first, '{"later":true}')).toBeNull()
