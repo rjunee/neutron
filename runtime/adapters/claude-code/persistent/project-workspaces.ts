@@ -145,13 +145,13 @@ export class ProjectWorkspaceManager {
       }
     }
 
-    let initialTab: string | undefined
+    let initialPane: string | undefined
     let createdHere = false
     if (!record.workspace) {
       const created = object(await client.call('workspace.create', { label: placement.projectId === null ? 'Neutron General' : placement.projectLabel, cwd: root.cwd, focus: false }))
       const workspace = handle(object(created.workspace).workspace_id)
       createdHere = true
-      initialTab = handle(object(created.tab).tab_id)
+      initialPane = handle(object(created.root_pane).pane_id)
       record = this.reserve(key, record, { ...record, workspace })
       await client.call('workspace.report_metadata', { workspace_id: workspace, source: SOURCE, tokens: { [TOKEN]: record.token } })
     }
@@ -163,7 +163,7 @@ export class ProjectWorkspaceManager {
       if (!live) {
         const argv = [process.execPath, '-e', PLACEHOLDER, record.token]
         const placeholder = layout(await client.call('layout.apply', {
-          ...(initialTab ? { tab_id: initialTab } : { workspace_id: workspace }), tab_label: 'Chat', focus: false,
+          workspace_id: workspace, tab_label: 'Chat', focus: false,
           // Herdr merges env into its own environment. The env executable really
           // clears it before exec; identity probes observe the final Bun argv.
           root: { type: 'pane', cwd: root.cwd, command: ['/usr/bin/env', '-i', ...argv], label: 'Chat', env: {} },
@@ -171,11 +171,14 @@ export class ProjectWorkspaceManager {
         record = this.reserve(key, record, { ...record, chat: {
           tab: placeholder.layout.tab_id, pane: placeholder.layout.root.pane_id, placeholderArgv: argv,
         } })
+        if (initialPane) {
+          await client.call('pane.close', { pane_id: initialPane })
+          initialPane = undefined
+        }
       }
       await client.call('tab.move', { tab_id: record.chat!.tab, insert_index: 0 })
-      initialTab = undefined
     }
-    let replaceTab = initialTab
+    let replacedPlaceholder: string | undefined
     if (placement.role === 'chat' && record.chat) {
       try {
         const pane = object(object(await client.call('pane.get', { pane_id: record.chat.pane })).pane)
@@ -191,7 +194,7 @@ export class ProjectWorkspaceManager {
           || JSON.stringify(object(foreground[0]).argv) !== JSON.stringify(record.chat.placeholderArgv)) {
           throw new Error('project-workspaces: Chat placeholder identity is not verified')
         }
-        replaceTab = record.chat.tab
+        replacedPlaceholder = record.chat.pane
       } catch (error) {
         if (!(error instanceof HerdrError) || error.code !== 'pane_not_found') throw error
       }
@@ -200,16 +203,15 @@ export class ProjectWorkspaceManager {
     record = this.reserve(key, record, { ...record, state: 'pending' })
     const title = placement.role === 'chat' ? 'Chat' : placement.taskLabel!
     const params = {
-      ...(replaceTab === undefined ? { workspace_id: workspace } : { tab_id: replaceTab }),
+      workspace_id: workspace,
       tab_label: title, focus: false, root: { ...root, label: title },
     } satisfies HerdrProjectLayoutParams
     let applied: HerdrLayoutApply
     try { applied = layout(await client.call('layout.apply', params), workspace) } catch (error) {
-      // A typed refusal of the first worker can leave only our inert placeholder.
-      // Re-check the complete workspace and placeholder before closing that empty
-      // allocation. Transport uncertainty or any additional pane retains the claim.
+      // Retire only our exact placeholder. A workspace-wide close cannot be made
+      // safe by a prior pane.list: another pane can arrive after that observation.
       if (createdHere && placement.role === 'worker' && error instanceof HerdrError) {
-        await this.removeEmptyAllocation(client, key, record).catch(() => undefined)
+        await this.retireUnusedPlaceholder(client, key, record).catch(() => undefined)
       }
       throw error
     }
@@ -217,6 +219,10 @@ export class ProjectWorkspaceManager {
       if (placement.role === 'chat') {
         await client.call('tab.move', { tab_id: applied.layout.tab_id, insert_index: 0 })
       }
+      // Never replace the placeholder's entire tab. A split made after our
+      // identity probe belongs to someone else and survives this pane-only close.
+      if (replacedPlaceholder) await client.call('pane.close', { pane_id: replacedPlaceholder })
+      if (initialPane) await client.call('pane.close', { pane_id: initialPane })
       this.reserve(key, record, {
         ...record, state: 'ready',
         ...(placement.role === 'chat' ? { chat: { tab: applied.layout.tab_id, pane: applied.layout.root.pane_id } } : {}),
@@ -254,22 +260,20 @@ export class ProjectWorkspaceManager {
     }
   }
 
-  private async removeEmptyAllocation(client: HerdrRpc, key: string, record: WorkspaceRecord): Promise<void> {
+  private async retireUnusedPlaceholder(client: HerdrRpc, key: string, record: WorkspaceRecord): Promise<void> {
     if (!record.workspace || !record.chat?.placeholderArgv) return
-    const listing = object(await client.call('pane.list', { workspace_id: record.workspace })).panes
-    if (!Array.isArray(listing) || listing.length !== 1) return
-    const pane = object(listing[0])
+    const pane = object(object(await client.call('pane.get', { pane_id: record.chat.pane })).pane)
     if (pane.pane_id !== record.chat.pane || pane.tab_id !== record.chat.tab || pane.workspace_id !== record.workspace) return
     const found = object(object(await client.call('workspace.get', { workspace_id: record.workspace })).workspace)
     if (found.workspace_id !== record.workspace || object(found.tokens)[TOKEN] !== record.token) return
     const info = object(object(await client.call('pane.process_info', { pane_id: record.chat.pane })).process_info)
     if (!Array.isArray(info.foreground_processes) || info.foreground_processes.length !== 1
       || JSON.stringify(object(info.foreground_processes[0]).argv) !== JSON.stringify(record.chat.placeholderArgv)) return
-    await client.call('workspace.close', { workspace_id: record.workspace })
-    this.journal.update(rows => {
-      if (JSON.stringify(rows[key]) !== JSON.stringify(record)) throw new Error('project-workspaces: cleanup ownership changed')
-      delete rows[key]
-    })
+    await client.call('pane.close', { pane_id: record.chat.pane })
+    // Retain the workspace mapping and closed slot reference. Next wake verifies
+    // whether the workspace/slot is gone before recreating either. Lifecycle
+    // reconciliation may reclaim the empty workspace with a server-side guard.
+    this.reserve(key, record, { ...record, state: 'ready' })
   }
 
   private reserve(key: string, expected: WorkspaceRecord, next: WorkspaceRecord): WorkspaceRecord {

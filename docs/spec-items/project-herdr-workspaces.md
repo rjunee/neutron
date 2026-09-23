@@ -36,6 +36,13 @@ a model or request tools. An activity lease must retain it only while actual wor
 keeps the project awake. Creation must preserve focus. Existing chat panes are adopted through the
 existing REPL identity checks, never overwritten by a new chat spawn.
 
+Closing a workspace or replacing a whole tab requires an atomic server-side
+ownership/contents guard. A previously sampled pane list is insufficient because
+a new pane can arrive before the close. Without that guard, retire only verified
+owned panes and leave the workspace for lifecycle reconciliation. A real Chat
+gets a fresh tab before the inert placeholder pane is retired; unrelated splits
+in the former placeholder tab survive.
+
 A project is awake while a conversation, queued dispatch, build, pending
 approval, or unresolved live child requires it. After work and foreground
 activity end, retirement preserves transcripts, closes verified owned panes,

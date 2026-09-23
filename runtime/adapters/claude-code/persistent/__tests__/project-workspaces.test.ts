@@ -22,6 +22,7 @@ class Server implements HerdrRpc {
   failure: string | undefined
   rejectWorker = false
   foreignOnReject = false
+  afterProcessInfo?: (pane: { pane_id: string; workspace_id: string; tab_id: string; argv: unknown }) => void
   serial = 0
   ordering: string[] = []
   async call(method: string, params: Record<string, unknown>): Promise<Record<string, unknown>> {
@@ -32,10 +33,12 @@ class Server implements HerdrRpc {
         const workspace_id = `workspace-${++this.serial}`
         const tab_id = `tab-${++this.serial}`
         const workspace = { workspace_id, tokens: {} }
+        const pane_id = `pane-${++this.serial}`
         this.ordering.push(tab_id)
         this.workspaces.set(workspace_id, workspace)
         this.tabs.set(tab_id, { workspace_id, tab_id, pane_count: 1 })
-        return { workspace, tab: { tab_id } }
+        this.panes.set(pane_id, { workspace_id, tab_id, pane_id, argv: ['initial-shell'] })
+        return { workspace, tab: { tab_id }, root_pane: { pane_id } }
       }
       case 'workspace.report_metadata': {
         this.workspaces.get(params.workspace_id as string)!.tokens = params.tokens as Record<string, unknown>
@@ -71,10 +74,29 @@ class Server implements HerdrRpc {
         if (!pane) throw new HerdrError('pane_not_found', 'gone')
         return { pane }
       }
-      case 'pane.process_info': return { process_info: { foreground_processes: [{ argv: this.panes.get(params.pane_id as string)!.argv }] } }
+      case 'pane.process_info': {
+        const pane = this.panes.get(params.pane_id as string)!
+        const result = { process_info: { foreground_processes: [{ argv: pane.argv }] } }
+        this.afterProcessInfo?.(pane)
+        return result
+      }
       case 'tab.get': return { tab: this.tabs.get(params.tab_id as string) }
       case 'tab.move': this.ordering = [params.tab_id as string, ...this.ordering.filter(id => id !== params.tab_id)]; return {}
-      case 'pane.close': this.panes.delete(params.pane_id as string); return {}
+      case 'tab.close': {
+        this.tabs.delete(params.tab_id as string)
+        for (const [id, pane] of this.panes) if (pane.tab_id === params.tab_id) this.panes.delete(id)
+        return {}
+      }
+      case 'pane.close': {
+        const pane = this.panes.get(params.pane_id as string)
+        this.panes.delete(params.pane_id as string)
+        if (pane && ![...this.panes.values()].some(other => other.tab_id === pane.tab_id)) {
+          this.tabs.delete(pane.tab_id)
+          this.ordering = this.ordering.filter(id => id !== pane.tab_id)
+        }
+        if (pane && ![...this.panes.values()].some(other => other.workspace_id === pane.workspace_id)) this.workspaces.delete(pane.workspace_id)
+        return {}
+      }
       case 'pane.list': return { panes: [...this.panes.values()].filter(pane => pane.workspace_id === params.workspace_id) }
       case 'workspace.close': {
         this.workspaces.delete(params.workspace_id as string)
@@ -103,7 +125,7 @@ test('General, literal general and another project are distinct even with same l
   expect(server.calls.filter(c => ['workspace.create', 'layout.apply'].includes(c.method)).every(c => c.params.focus === false)).toBe(true)
 })
 
-test('worker-first reserves inert Chat then creates named worker; verified Chat replaces only placeholder', async () => {
+test('worker-first reserves inert Chat then creates named worker; verified Chat retires only placeholder', async () => {
   const { manager, server, path } = fixture()
   const worker = await manager.applyLayout(server, root, scope('one', 'worker'))
   const before = JSON.parse(readFileSync(path, 'utf8'))
@@ -112,7 +134,8 @@ test('worker-first reserves inert Chat then creates named worker; verified Chat 
   const chat = await manager.applyLayout(server, root, scope())
   const mutations = server.calls.filter(c => c.method === 'layout.apply')
   expect(mutations.map(c => c.params.tab_label)).toEqual(['Chat', 'Review · ownership', 'Chat'])
-  expect(mutations[2]!.params.tab_id).toBe(row.chat.tab)
+  expect(mutations[2]!.params.tab_id).toBeUndefined()
+  expect(mutations[2]!.params.workspace_id).toBe(worker.layout.workspace_id)
   expect(server.panes.has(worker.layout.root.pane_id)).toBe(true)
   expect(server.panes.has(row.chat.pane)).toBe(false)
   expect(server.panes.has(chat.layout.root.pane_id)).toBe(true)
@@ -199,13 +222,14 @@ test('unavailable lock prevents all external creation; restored lock permits it'
   expect(server.count('workspace.create')).toBe(1)
 })
 
-test('definitely refused first worker removes only its verified empty placeholder allocation', async () => {
+test('definitely refused first worker retires only its verified placeholder; server removes empty workspace', async () => {
   const { manager, server, path } = fixture()
   server.rejectWorker = true
   await expect(manager.applyLayout(server, root, scope('one', 'worker'))).rejects.toThrow('worker rejected')
   expect(server.workspaces.size).toBe(0)
   expect(server.panes.size).toBe(0)
-  expect(JSON.parse(readFileSync(path, 'utf8'))).toEqual({})
+  expect(Object.values(JSON.parse(readFileSync(path, 'utf8'))).map((row: any) => row.state)).toEqual(['ready'])
+  expect(server.count('workspace.close')).toBe(0)
   server.rejectWorker = false
   await manager.applyLayout(server, root, scope('one', 'worker'))
   expect(server.workspaces.size).toBe(1)
@@ -217,7 +241,7 @@ test('post-spawn ordering failure closes the unreturned real child and retains u
   server.failure = 'tab.move'
   await expect(manager.applyLayout(server, root, scope())).rejects.toThrow('transport unavailable')
   expect(server.count('pane.close')).toBe(1)
-  expect(server.panes.size).toBe(0)
+  expect([...server.panes.values()].map(pane => pane.argv)).toEqual([['initial-shell']])
   server.failure = undefined
   await expect(new ProjectWorkspaceManager(path).applyLayout(server, root, scope())).rejects.toThrow('pending')
 })
@@ -230,6 +254,55 @@ test('failed worker never closes workspace after an unrelated pane has arrived',
   expect(server.workspaces.size).toBe(1)
   expect(server.panes.has('foreign')).toBe(true)
   expect(server.count('workspace.close')).toBe(0)
+})
+
+test('failed-worker cleanup preserves a foreign split arriving after its final identity sample', async () => {
+  const { manager, server } = fixture()
+  server.rejectWorker = true
+  let placeholder = ''
+  server.afterProcessInfo = pane => {
+    placeholder = pane.pane_id
+    server.panes.set('late-foreign', { ...pane, pane_id: 'late-foreign', argv: ['user-shell'] })
+    server.tabs.get(pane.tab_id)!.pane_count += 1
+  }
+  await expect(manager.applyLayout(server, root, scope('one', 'worker'))).rejects.toThrow('worker rejected')
+  expect(placeholder).not.toBe('')
+  expect(server.panes.has(placeholder)).toBe(false)
+  expect(server.panes.has('late-foreign')).toBe(true)
+  expect(server.workspaces.size).toBe(1)
+  expect(server.count('workspace.close')).toBe(0)
+})
+
+test('unknown placeholder identity leaves its pane and pending ownership intact', async () => {
+  const { manager, server, path } = fixture()
+  server.rejectWorker = true
+  server.failure = 'pane.process_info'
+  await expect(manager.applyLayout(server, root, scope('one', 'worker'))).rejects.toThrow('worker rejected')
+  const record = Object.values(JSON.parse(readFileSync(path, 'utf8')))[0] as any
+  expect(record.state).toBe('pending')
+  expect(server.panes.has(record.chat.pane)).toBe(true)
+  expect(server.calls.filter(call => call.method === 'pane.close' && call.params.pane_id === record.chat.pane)).toHaveLength(0)
+  expect(server.count('workspace.close')).toBe(0)
+})
+
+test('real Chat creation preserves a foreign split arriving after placeholder identity verification', async () => {
+  const { manager, server } = fixture()
+  await manager.applyLayout(server, root, scope('one', 'worker'))
+  let placeholder = ''
+  let placeholderTab = ''
+  server.afterProcessInfo = pane => {
+    placeholder = pane.pane_id
+    placeholderTab = pane.tab_id
+    server.panes.set('late-foreign', { ...pane, pane_id: 'late-foreign', argv: ['user-shell'] })
+    server.tabs.get(pane.tab_id)!.pane_count += 1
+  }
+  const chat = await manager.applyLayout(server, root, scope())
+  expect(placeholder).not.toBe('')
+  expect(chat.layout.tab_id).not.toBe(placeholderTab)
+  expect(server.panes.has(placeholder)).toBe(false)
+  expect(server.panes.has('late-foreign')).toBe(true)
+  expect(server.ordering[0]).toBe(chat.layout.tab_id)
+  expect(server.calls.filter(call => call.method === 'layout.apply').every(call => call.params.tab_id === undefined)).toBe(true)
 })
 
 test('competing manager cannot acquire a pending creation, but can use ready ownership', async () => {
