@@ -186,6 +186,23 @@ test('mutation proof blocks missing nomination and pins the reviewed head', asyn
   expect(await deps.publishGate({ ...snapshot, head: 'c'.repeat(40) })).toMatchObject({ kind: 'blocked', on: expect.stringContaining('branch tip') })
 })
 
+test('publication mutation uses the launch pin without probing mutable base refs', async () => {
+  const f = await fixture()
+  f.prose()
+  const run = f.options.mutation.run_host
+  f.options.mutation.run_host = async (argv, cwd) => {
+    if (argv.includes('rev-parse') && argv.includes('--quiet')
+      && argv.some(arg => arg === 'refs/remotes/origin/base^{commit}' || arg === 'refs/heads/base^{commit}')) {
+      throw new Error('base ref probe must be lazy')
+    }
+    return run(argv, cwd)
+  }
+  expect(await f.make().deps.publishGate(snapshot)).toEqual({ kind: 'allow' })
+  const diffs = f.calls.filter(argv => argv.includes('diff') && argv.includes('--name-status'))
+  expect(diffs).toHaveLength(1)
+  expect(diffs[0]).toContain(`${f.options.leak.base_sha}...${head}`)
+})
+
 test('CI unreadable stays unknown; red, absent, running and wrong head block', async () => {
   const f = await fixture()
   for (const observation of [

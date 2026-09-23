@@ -282,6 +282,7 @@ interface WorkerWorld {
   reviewVeto?: 'standalone' | 'synthesis'
   numericBuildPr?: boolean
   mutationArgv?: 'bare' | 'valid'
+  extraBuildFiles?: Record<string, string>
   run: Runner
   repo: string
   scratch: string
@@ -512,6 +513,11 @@ async function performRole(world: WorkerWorld, request: BoundedWorkRequest, brie
     const notes = join(cwd, 'NOTES.md')
     const previous = await readFile(notes, 'utf8').catch(() => '')
     await writeFile(notes, `${previous}${request.step_id}\n`)
+    for (const [file, bytes] of Object.entries(world.extraBuildFiles ?? {})) {
+      await mkdir(dirname(join(cwd, file)), { recursive: true })
+      await writeFile(join(cwd, file), bytes)
+      await gitOut(world.run, cwd, ['add', '--', file])
+    }
     if (world.mutationArgv) {
       await mkdir(join(cwd, 'src'), { recursive: true })
       await mkdir(join(cwd, 'tests'), { recursive: true })
@@ -999,6 +1005,47 @@ async function drive(f: Awaited<ReturnType<typeof fixture>>, mode: 'pr' | 'ralph
   const host = await createProjectBuildHost(options)
   return host.run({ mode, start: 'fresh' }, new AbortController().signal)
 }
+
+for (const productionChange of [false, true])
+test(`publication mutation uses the launch pin with stale local main: ${productionChange ? 'production still requires proof' : 'docs and tests remain exempt'}`, async () => {
+  const f = await fixture()
+  const git = (args: string[]) => gitOut(f.world.run, f.repo, args)
+  // Upstream production code landed after this checkout's local main. The run
+  // launches from that newer commit, as a real fetched project build does.
+  await mkdir(join(f.repo, 'src'), { recursive: true })
+  await writeFile(join(f.repo, 'src/upstream.ts'), 'export const value = 1\n')
+  await git(['add', '--', 'src/upstream.ts'])
+  await git(['commit', '-m', 'feat: upstream code'])
+  await git(['push', 'origin', 'main'])
+  const launchBase = await git(['rev-parse', 'HEAD'])
+  await git(['checkout', '--detach', launchBase])
+  await git(['update-ref', 'refs/heads/main', f.baseSha, launchBase])
+  await f.store.update(f.row.id, { base_sha: launchBase })
+  f.input.run = f.store.get(f.row.id)!
+  f.world.extraBuildFiles = {
+    'tests/upstream.test.ts': "import { test, expect } from 'bun:test'\nimport { value } from '../src/upstream.ts'\ntest('value', () => expect(value).toBeGreaterThan(0))\n",
+    ...(productionChange ? { 'src/upstream.ts': 'export const value = 2\n' } : {}),
+  }
+
+  const outcome = await drive(f, 'pr')
+  if (productionChange) {
+    expect(outcome, why(f, outcome)).toMatchObject({ kind: 'blocked', phase: 'publish', on: expect.stringContaining('nominated no mutation') })
+    expect(f.github.prs.some(pr => pr.state === 'MERGED')).toBe(false)
+  } else {
+    expect(outcome.kind, why(f, outcome)).toBe('merged')
+    expect(f.github.prs[0]).toMatchObject({ state: 'MERGED', baseRefName: 'main' })
+  }
+  const mutationRanges = f.commands.filter(argv => argv.includes('diff') && argv.includes('--name-status'))
+    .map(argv => argv.find(arg => arg.includes('...'))!)
+  expect(mutationRanges.length).toBeGreaterThan(0)
+  const builtHead = mutationRanges[0]!.split('...')[1]!
+  expect(await git(['rev-parse', 'refs/heads/main'])).toBe(f.baseSha)
+  // Positive control: the obsolete range really does include production code.
+  expect((await git(['diff', '--name-only', `refs/heads/main...${builtHead}`])).split('\n')).toContain('src/upstream.ts')
+  expect((await git(['diff', '--name-only', `${launchBase}...${builtHead}`])).split('\n').sort()).toEqual([
+    'NOTES.md', ...(productionChange ? ['src/upstream.ts'] : []), 'tests/upstream.test.ts',
+  ])
+}, 120_000)
 
 test('attempt accounting consumes a full build with missing metadata and attributes each role and review seat', async () => {
   const f = await fixture()
