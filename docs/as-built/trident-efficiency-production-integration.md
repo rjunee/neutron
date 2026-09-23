@@ -29,5 +29,13 @@ invocation across unchanged reconstruction and two after a moved head, changed
 strategy, changed installed dependencies or missing, corrupt or subset evidence.
 The host and adapter tests retain runtime, workspace and request-identity controls.
 
+Panel recovery receives current canonical task bytes and the selected credential
+identity. Native Claude binding uses the credential fingerprint stamped onto the
+actual spawned or adopted child; changing only the desired environment cannot
+relabel an existing child. File-login sessions bind the selected credential file.
+Consuming tests reconstruct the production host and require retained seat and
+synthesis outcomes, fresh work for changed inputs, refusal of damaged evidence,
+and preservation of an already-consumed infrastructure retry.
+
 This record establishes local integration behavior. Deployed timing, usage and
 the next live unattended merge remain tracked by issue #1196.

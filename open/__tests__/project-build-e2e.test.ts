@@ -53,7 +53,7 @@ import { LIVE_AGENT_TOOL_NAMES } from '@neutronai/gateway/wiring/build-live-agen
 import { afterEach, expect, spyOn, test } from 'bun:test'
 import { chmod, mkdir, mkdtemp, readFile, readdir, realpath, rename, rm, symlink, writeFile } from 'node:fs/promises'
 import { tmpdir } from 'node:os'
-import { join } from 'node:path'
+import { dirname, join } from 'node:path'
 import { fileURLToPath } from 'node:url'
 import { createHash } from 'node:crypto'
 import { ProjectDb } from '@neutronai/persistence/index.ts'
@@ -316,7 +316,7 @@ interface WorkerWorld {
    */
   blockRoles: ReadonlySet<string>
   /** Every dispatch this fake observed, in order — the harness's audit trail. */
-  dispatches: { role: string; step_id: string; schema: string; wrote: string[]; measuredHead?: string }[]
+  dispatches: { role: string; step_id: string; schema: string; wrote: string[]; measuredHead?: string; resultPath?: string }[]
   /** The task the host handed each build turn after planner validation. */
   selectedTasks: string[]
   /** The planner route the real driver wrote into each plan turn's context. */
@@ -419,7 +419,7 @@ function literalWorker(world: WorkerWorld) {
       ...(stopped ? { on: `harness: the ${request.role} worker was stopped mid-turn` } : {}),
     }
     world.dispatches.push({ role: request.role, step_id: request.step_id,
-      schema: request.result.schema, wrote: Object.keys(body as object).sort(),
+      schema: request.result.schema, wrote: Object.keys(body as object).sort(), resultPath: request.result.path,
       ...(request.role === 'review' ? { measuredHead: await gitOut(world.run, request.cwd, ['rev-parse', 'HEAD']) } : {}) })
     // The dispatch prompt asks for a temporary file and a rename, so do that.
     await writeFile(`${request.result.path}.tmp`, JSON.stringify(body), { mode: 0o600 })
@@ -873,7 +873,7 @@ async function fixture(options: { ralph?: boolean; moreTasks?: boolean; suiteExi
   cleanups.push(() => { pool.delete(key); supervisedBySessionKey.delete(key) })
   const worker = literalWorker(world)
   const projectsDir = join(dir, 'claude-projects')
-  const session = { sessionId: 'e2e-session', toolSurface: LIVE_AGENT_TOOL_NAMES.join(','), cwd: dir, hasChildExited: () => false,
+  const session = { sessionId: 'e2e-session', authFingerprint: 'fixture-spawned-credential', toolSurface: LIVE_AGENT_TOOL_NAMES.join(','), cwd: dir, hasChildExited: () => false,
     child: { submitLine: async (line: string) => {
       const spec = JSON.parse(line.slice(line.indexOf('{')))
       const args = JSON.parse(String(spec.prompt).slice(String(spec.prompt).indexOf('{')))
@@ -909,6 +909,7 @@ async function fixture(options: { ralph?: boolean; moreTasks?: boolean; suiteExi
   let registeredSession: typeof session | ReplSession = session
   if (options.reviewChild) {
     const live = new ReplSession(key, 'e2e-generation', 'e2e-session', 'e2e-channel', dir)
+    live.authFingerprint = session.authFingerprint
     live.toolSurface = session.toolSurface
     const children: Promise<void>[] = []
     const errors: unknown[] = []
@@ -942,6 +943,7 @@ async function fixture(options: { ralph?: boolean; moreTasks?: boolean; suiteExi
       substrate_instance_id: registration.instanceId ?? 'cc-agent-e2e',
       project_id: registration.projectId ?? 'e2e-project',
       skip_permissions: true, extra_dirs: [dir],
+      env: { CLAUDE_CODE_OAUTH_TOKEN: 'fixture-native-credential', ANTHROPIC_AUTH_TOKEN: undefined, ANTHROPIC_API_KEY: undefined },
       projectsDir,
     } as never)
     if (registration.state === 'missing') { pool.delete(sessionKey); return }
@@ -1325,6 +1327,173 @@ test(`prepared host suite receipt survives reconstruction and handles ${changed}
   expect(suites).toBe(changed === 'none' ? 1 : 2)
   expect(f.world.dispatches).toHaveLength(0)
 }, 120_000)
+
+async function preparedPanelFixture() {
+  const f = await fixture()
+  f.register()
+  await f.prepare()
+  const worktree = f.store.get(f.row.id)!.worktree!
+  const move = async () => {
+    await writeFile(join(worktree, 'NOTES.md'), `measured revision ${await gitOut(spawnCapture, worktree, ['rev-parse', 'HEAD'])}\n`)
+    expect((await spawnCapture(['git', 'add', 'NOTES.md'], worktree)).ok).toBe(true)
+    expect((await spawnCapture(['git', 'commit', '-m', 'test: measured panel revision'], worktree)).ok).toBe(true)
+  }
+  await move()
+  const observe = async (round = 1) => {
+    const host = await createProjectBuildHost(await f.prepare())
+    const measured = await host.deps.measure()
+    if (measured.kind !== 'known') throw Error('expected measured panel revision')
+    return host.deps.observeReview(measured.value, round)
+  }
+  return { ...f, move, observe }
+}
+
+for (const changed of ['none', 'head', 'round', 'task', 'model', 'effort', 'credential', 'desired-credential', 'file-credential'] as const)
+test(`prepared panel recovery purchases only the work invalidated by ${changed}`, async () => {
+  const f = await preparedPanelFixture()
+  const config = join(f.dir, 'selected-native-config')
+  if (changed === 'file-credential') {
+    const session = (await pool.get(f.key))!
+    session.authFingerprint = ''
+    supervisedBySessionKey.get(f.key)!.env!.CLAUDE_CODE_OAUTH_TOKEN = undefined
+    supervisedBySessionKey.get(f.key)!.claudeConfigDir = config
+    await mkdir(config)
+    await writeFile(join(config, '.credentials.json'), '{"fixture":"original-account"}')
+  }
+  expect((await f.observe()).kind).toBe('observed')
+  expect(f.world.dispatches.map(dispatch => dispatch.role)).toEqual(['review', 'synthesis'])
+  if (changed === 'head') await f.move()
+  if (changed === 'task') f.db.raw().query('UPDATE code_trident_runs SET task = ? WHERE id = ?').run('changed canonical task', f.row.id)
+  if (changed === 'model') f.input.phase_models = { ...f.input.phase_models, review_adversarial: { model: 'fable' } }
+  if (changed === 'effort') f.input.phase_models = { ...f.input.phase_models, review_adversarial: { model: 'opus', effort: 'low' } }
+  if (changed === 'credential') (await pool.get(f.key))!.authFingerprint = 'fixture-replaced-child-credential'
+  if (changed === 'desired-credential') supervisedBySessionKey.get(f.key)!.env!.CLAUDE_CODE_OAUTH_TOKEN = 'desired-but-not-spawned-credential'
+  if (changed === 'file-credential') await writeFile(join(config, '.credentials.json'), '{"fixture":"changed-account"}')
+  const expectedCalls = changed === 'none' || changed === 'desired-credential' ? 2 : changed === 'effort' ? 3 : 4
+  expect((await f.observe(changed === 'round' ? 2 : 1)).kind).toBe('observed')
+  expect(f.world.dispatches).toHaveLength(expectedCalls)
+  // The newly accepted observations are themselves reusable after another host
+  // reconstruction; invalidation cannot become permanent repeated work.
+  expect((await f.observe(changed === 'round' ? 2 : 1)).kind).toBe('observed')
+  expect(f.world.dispatches).toHaveLength(expectedCalls)
+})
+
+for (const damaged of ['missing', 'corrupt', 'foreign', 'pending', 'directory', 'whole-state'] as const)
+test(`prepared panel recovery refuses ${damaged} host evidence without buying another verdict`, async () => {
+  const f = await preparedPanelFixture()
+  expect((await f.observe()).kind).toBe('observed')
+  expect(f.world.dispatches).toHaveLength(2)
+  const directory = dirname(f.world.dispatches[0]!.resultPath!)
+  const path = join(directory, 'receipt.json')
+  const original = await readFile(path, 'utf8')
+  const restore: Array<() => Promise<void>> = []
+  if (damaged === 'whole-state') {
+    const state = join(f.context.stateRoot, f.row.id)
+    await rename(state, `${state}.saved`)
+    restore.push(async () => { await rm(state, { recursive: true }); await rename(`${state}.saved`, state) })
+  } else if (damaged === 'directory') {
+    await rename(directory, `${directory}.saved`)
+    restore.push(() => rename(`${directory}.saved`, directory))
+  } else {
+    const value = JSON.parse(original)
+    if (damaged === 'missing') await rm(path)
+    else if (damaged === 'corrupt') await writeFile(path, '{')
+    else if (damaged === 'foreign') await writeFile(path, JSON.stringify({ ...value, identity: 'another-request' }))
+    else {
+      await writeFile(path, JSON.stringify({ ...value, state: 'pending', observation: undefined }))
+      // Without the original request there is no authority to ask the transport
+      // to reconcile this pending slot, even if a result happens to exist.
+      const request = join(directory, 'request.json')
+      const bytes = await readFile(request, 'utf8')
+      await rm(request)
+      restore.push(() => writeFile(request, bytes))
+    }
+    restore.push(() => writeFile(path, original))
+  }
+  expect((await f.observe()).kind).not.toBe('observed')
+  expect(f.world.dispatches).toHaveLength(2)
+  for (const undo of restore) await undo()
+  expect((await f.observe()).kind).toBe('observed')
+  expect(f.world.dispatches).toHaveLength(2)
+})
+
+test('prepared panel recovery retains the consumed infrastructure retry and permits fresh review for a moved head', async () => {
+  const f = await preparedPanelFixture()
+  const paid: BoundedWorkRequest[] = []
+  const observe = async () => {
+    const options = await f.prepare()
+    const original = options.substrate.inRepl!
+    options.substrate.inRepl = { ...original, async run(request, placement, signal) {
+      if (request.result.schema === 'verdict' && request.role === 'review') {
+        paid.push(request)
+        return { kind: 'failed', class: 'infra', detail: 'fixture infrastructure failure' }
+      }
+      return original.run(request, placement, signal)
+    } }
+    const host = await createProjectBuildHost(options)
+    const measured = await host.deps.measure()
+    if (measured.kind !== 'known') throw Error('expected measured panel revision')
+    return host.deps.observeReview(measured.value, 1)
+  }
+  expect((await observe()).kind).toBe('blocked')
+  expect(paid).toHaveLength(2)
+  expect((await observe()).kind).toBe('blocked')
+  expect(paid).toHaveLength(2)
+  const retryDirectory = dirname(paid[1]!.result.path)
+  await rename(retryDirectory, `${retryDirectory}.saved`)
+  expect((await observe()).kind).toBe('blocked')
+  expect(paid).toHaveLength(2)
+  await rename(`${retryDirectory}.saved`, retryDirectory)
+  await f.move()
+  expect((await observe()).kind).toBe('blocked')
+  expect(paid).toHaveLength(4)
+})
+
+test('prepared panel recovery reconciles a lost acknowledgement through the original native request without another paid turn', async () => {
+  const f = await preparedPanelFixture()
+  const options = await f.prepare()
+  const runner = options.substrate.inRepl!
+  let lost = false
+  options.substrate.inRepl = { ...runner, async run(request, placement, signal) {
+    const outcome = await runner.run(request, placement, signal)
+    if (request.role === 'review' && !lost) {
+      lost = true
+      throw Error('fixture: acknowledgement lost after native result settled')
+    }
+    return outcome
+  } }
+  const host = await createProjectBuildHost(options)
+  const measured = await host.deps.measure()
+  if (measured.kind !== 'known') throw Error('expected measured panel revision')
+  expect((await host.deps.observeReview(measured.value, 1)).kind).not.toBe('observed')
+  expect(f.world.dispatches.map(dispatch => dispatch.role)).toEqual(['review'])
+  const originalStep = f.world.dispatches[0]!.step_id
+  expect((await f.observe()).kind).toBe('observed')
+  expect(f.world.dispatches.map(dispatch => dispatch.role)).toEqual(['review', 'synthesis'])
+  expect(f.world.dispatches[0]!.step_id).toBe(originalStep)
+  expect((await f.observe()).kind).toBe('observed')
+  expect(f.world.dispatches).toHaveLength(2)
+})
+
+test('prepared panel recovery cannot authorize a verdict across an actual child credential change during dispatch', async () => {
+  const f = await preparedPanelFixture()
+  const session = (await pool.get(f.key))!
+  const originalCredential = session.authFingerprint
+  const options = await f.prepare()
+  const runner = options.substrate.inRepl!
+  options.substrate.inRepl = { ...runner, async run(request, placement, signal) {
+    if (request.role === 'review') session.authFingerprint = 'changed-during-actual-dispatch'
+    return runner.run(request, placement, signal)
+  } }
+  const host = await createProjectBuildHost(options)
+  const measured = await host.deps.measure()
+  if (measured.kind !== 'known') throw Error('expected measured panel revision')
+  expect((await host.deps.observeReview(measured.value, 1)).kind).not.toBe('observed')
+  expect(f.world.dispatches.map(dispatch => dispatch.role)).toEqual(['review'])
+  session.authFingerprint = originalCredential
+  expect((await f.observe()).kind).not.toBe('observed')
+  expect(f.world.dispatches.map(dispatch => dispatch.role)).toEqual(['review'])
+})
 
 test('Codex owner with unavailable selected Claude credentials refuses before any worker or publication', async () => {
   const f = await codexOwnerWithClaude()

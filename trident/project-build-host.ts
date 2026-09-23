@@ -114,7 +114,8 @@ export async function createProjectBuildHost(options: ProjectBuildHostOptions) {
   const host = createBuildHost({
     ...policy,
     ...(review ? { review: createProjectReviewSource({ ...review,
-      accounting, taskId, runId: run.id, projectSlug: config.projectSlug, cwd: config.worktree, replProvider: options.substrate.provider }) } : {}),
+      accounting, taskId, taskInput: () => config.store.get(run.id)?.task ?? '',
+      runId: run.id, projectSlug: config.projectSlug, cwd: config.worktree, replProvider: options.substrate.provider }) } : {}),
     workers, runners,
     reviewed_head: run.inner_checkpoint_head,
     leak: { ...options.policy.leak, run_host: config.runHost, repo_path: config.repo, branch: config.branch, base_sha: run.base_sha },

@@ -16,6 +16,7 @@ import { PROJECT_REPL_TOOL_DEFS } from '@neutronai/gateway/wiring/build-live-age
 import type { CodexOwnerBindings } from './codex-owner-binding.ts'
 import { codexBuildResultTransport } from './codex-build-result.ts'
 import { pool, supervisedBySessionKey } from '@neutronai/runtime/adapters/claude-code/persistent/pool-state.ts'
+import { mergeEnv } from '@neutronai/runtime/adapters/claude-code/persistent/repl-session.ts'
 import type { PersistentReplSubstrateOptions } from '@neutronai/runtime/adapters/claude-code/persistent/types.ts'
 import type { Provider } from '@neutronai/runtime/provider.ts'
 import type { ProviderSelectionSource } from '@neutronai/runtime/adapters/select-substrate.ts'
@@ -621,6 +622,28 @@ export async function prepareProjectBuild(input: InnerLoopInput, context: Projec
   }
   const declaration = readProjectRepos(context.projectDir, run.project_slug)
   const repo = declaration.repos.find(row => resolve(context.projectDir, row.path) === resolve(run.repo_path))
+  const reviewCredentialIdentity = async (provider: Provider): Promise<string | null> => {
+    if (provider !== 'anthropic' || provider !== context.provider) {
+      return workerCredentialIdentity(provider, provider === 'openai-codex' ? codexEnv : context.env)
+    }
+    const candidates = liveProjectSessions(context.projectId)
+    if (candidates.length !== 1) return null
+    const [key, options] = candidates[0]!
+    const pending = pool.get(key)
+    if (!pending || Bun.peek.status(pending) !== 'fulfilled') return null
+    const session = await pending
+    if (!session || session.hasChildExited()) return null
+    // Spawn/adoption stamps the credential actually held by this child. A
+    // changed desired overlay cannot relabel an already-running child.
+    if (session.authFingerprint) return createHash('sha256').update(JSON.stringify([
+      provider, context.projectId, session.sessionId, session.authFingerprint,
+    ])).digest('hex')
+    const selected = mergeEnv(options.env)
+    if (options.claudeConfigDir !== undefined) selected.CLAUDE_CONFIG_DIR = options.claudeConfigDir
+    if (['CLAUDE_CODE_OAUTH_TOKEN', 'ANTHROPIC_AUTH_TOKEN', 'ANTHROPIC_API_KEY'].some(key => selected[key])) return null
+    const credential = await workerCredentialIdentity(provider, selected)
+    return credential ? createHash('sha256').update(JSON.stringify([credential, session.sessionId, session.authFingerprint])).digest('hex') : null
+  }
   return {
     substrate, workers, requestedModels, attempts: context.attempts,
     suiteIdentity: snapshot => projectSuiteIdentity(run.worktree, snapshot.head),
@@ -693,6 +716,7 @@ export async function prepareProjectBuild(input: InnerLoopInput, context: Projec
             observed.timed_out || unopenable ? {} : { hostExitCode: observed.exit_code } }
         } },
       review: { evidenceRoot: state, env: codexEnv, phaseModels: config, wallMs: 2_700_000, signal,
+        credentialIdentity: reviewCredentialIdentity,
         runnerFor: (model, seat) => model.group === 'api' || model.group === 'kimi' ? undefined
           : seat.provider === substrate.provider ? substrate.inRepl : substrate.headless[seat.provider] },
     },
