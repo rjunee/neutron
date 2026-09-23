@@ -221,6 +221,7 @@ test('first apply runs all migrations in order and records them in _migrations',
     154,
     // 0155 — the retry's resume note. 0154 is `ralph_task_total`; both apply, in order.
     155,
+    156,
   ])
   expect(result.skipped).toEqual([])
 

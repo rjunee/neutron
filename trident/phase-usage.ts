@@ -42,6 +42,9 @@ export class TridentPhaseUsageStore {
       if (value !== null && !Number.isFinite(value)) throw new TypeError('usage measurements must be finite or null')
     }
     return this.db.transaction((tx) => {
+      if (tx.get('SELECT 1 FROM code_trident_attempts WHERE run_id = ? AND phase = ? LIMIT 1', [runId, phase])) {
+        throw new Error('attempt accounting owns this phase projection')
+      }
       const row = tx.get<{ observed_at: number | null }>(
         'SELECT observed_at FROM code_trident_phase_usage WHERE run_id = ? AND phase = ?', [runId, phase],
       )
@@ -57,4 +60,23 @@ export class TridentPhaseUsageStore {
       return 'recorded'
     })
   }
+}
+
+/** Called in the attempt writer's transaction. Unknown operands never become zero. */
+export function projectAttemptUsage(db: ProjectDb, runId: string, phase: string): void {
+  const metrics = ['input_tokens', 'output_tokens', 'cache_read_tokens', 'cache_creation_tokens', 'cost_usd'] as const
+  const rows = db.all<Pick<PhaseUsageRow, typeof metrics[number] | 'observed_at'>>(
+    `SELECT r.input_tokens, r.output_tokens, r.cache_read_tokens, r.cache_creation_tokens, r.cost_usd, r.observed_at
+     FROM code_trident_attempts a LEFT JOIN code_trident_attempt_receipts r
+       ON a.run_id = r.run_id AND a.step_id = r.step_id AND a.attempt_id = r.attempt_id
+     WHERE a.run_id = ? AND a.phase = ? ORDER BY a.step_id, a.attempt_id`, [runId, phase])
+  const values = metrics.map((field) => rows.length === 0 || rows.some((row) => row[field] === null)
+    ? null : rows.reduce((sum, row) => sum + row[field]!, 0))
+  const known = values.filter((value) => value !== null).length
+  const status = known === 0 ? 'unknown' : known === metrics.length ? 'complete' : 'partial'
+  db.runSync(`UPDATE code_trident_phase_usage SET status = ?, input_tokens = ?, output_tokens = ?,
+    cache_read_tokens = ?, cache_creation_tokens = ?, cost_usd = ?, source = ?, observed_at = ?
+    WHERE run_id = ? AND phase = ?`,
+  [status, ...values, known ? 'attempt-ledger/v1' : null,
+    known ? Math.max(...rows.map((row) => row.observed_at ?? 0)) : null, runId, phase])
 }

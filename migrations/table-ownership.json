@@ -146,6 +146,16 @@
         "Migration 0144 seeds unknown rows for existing runs and installs the run-insert trigger."
       ]
     },
+    "code_trident_attempts": {
+      "owner": "trident/attempt-ledger.ts",
+      "writers": ["trident/attempt-ledger.ts"],
+      "notes": ["Host identities and lifecycle observations for actual bounded calls."]
+    },
+    "code_trident_attempt_receipts": {
+      "owner": "trident/attempt-ledger.ts",
+      "writers": ["trident/attempt-ledger.ts"],
+      "notes": ["One absolute provider observation per call; phase totals remain a derived projection."]
+    },
     "transcript_usage_watermarks": {
       "owner": "trident/transcript-usage.ts",
       "writers": ["trident/transcript-usage.ts"],
