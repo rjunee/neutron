@@ -1,6 +1,7 @@
 import { expect, test } from 'bun:test'
 import { mkdirSync, mkdtempSync, readFileSync, rmSync, writeFileSync } from 'node:fs'
 import { join, resolve } from 'node:path'
+import { passedCase } from './mutation-test-report.ts'
 
 const root = resolve(import.meta.dir, '..')
 const source = readFileSync(join(import.meta.dir, 'build-run.ts'), 'utf8')
@@ -13,6 +14,7 @@ test('task budget preflight mutations refuse overspend without refusing valid co
   const directory = mkdtempSync(join(parent, 'task-budget-preflight-'))
   const subject = join(directory, 'build-run.ts')
   const tests = join(directory, 'build-run.test.ts')
+  const report = join(directory, 'report.xml')
   const imports = (text: string) => text.replace(/(from\s+)(['"])((?:\.\.?\/|@neutronai\/)[^'"]+)\2/g,
     (_match, from, quote, specifier) => `${from}${quote}${specifier === './build-run.ts' ? subject
       : specifier.startsWith('.') ? resolve(import.meta.dir, specifier) : import.meta.resolve(specifier)}${quote}`)
@@ -21,17 +23,17 @@ test('task budget preflight mutations refuse overspend without refusing valid co
     writeFileSync(tests, imports(suite))
     const run = (text: string) => {
       writeFileSync(subject, imports(text))
-      const result = Bun.spawnSync([process.execPath, 'test', tests, '-t', 'task budget preflight'], {
+      const result = Bun.spawnSync([process.execPath, 'test', tests, '-t', 'task budget preflight', '--reporter=junit', `--reporter-outfile=${report}`], {
         cwd: root, stdout: 'pipe', stderr: 'pipe', timeout: 30_000,
       })
-      return { code: result.exitCode, output: result.stdout.toString() + result.stderr.toString() }
+      return { code: result.exitCode, output: result.stdout.toString() + result.stderr.toString(), report: readFileSync(report, 'utf8') }
     }
     const exhausted = 'task budget preflight refuses an exhausted clean continuation before any worker'
     const allowed = 'task budget preflight permits a clean continuation with remaining budget'
     const settle = 'task budget preflight permits an exhausted intermediate checkpoint to settle without workers'
     const control = run(source)
     expect(control.code, control.output).toBe(0)
-    for (const name of [exhausted, allowed, settle]) expect(control.output).toContain(`(pass) ${name}`)
+    for (const name of [exhausted, allowed, settle]) expect(passedCase(control.report, name), control.report).toBe(true)
     for (const [find, replacement, failure] of [
       [anchor, 'false', exhausted],
       [anchor, "acceptedPlan && strategy === 'task_sequence' && !recovery", settle],
