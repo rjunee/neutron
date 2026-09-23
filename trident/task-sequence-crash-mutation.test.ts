@@ -1,6 +1,7 @@
 import { expect, test } from 'bun:test'
 import { mkdirSync, mkdtempSync, readFileSync, rmSync, writeFileSync } from 'node:fs'
 import { join, resolve } from 'node:path'
+import { passedCase } from './mutation-test-report.ts'
 
 const root = resolve(import.meta.dir, '..')
 const source = readFileSync(join(import.meta.dir, 'build-run.ts'), 'utf8')
@@ -20,23 +21,24 @@ test('same-run task-sequence crash guard mutations fail in both directions with 
   const directory = mkdtempSync(join(parent, 'task-sequence-crash-'))
   const subject = join(directory, 'build-run.ts')
   const tests = join(directory, 'build-run.test.ts')
+  const report = join(directory, 'report.xml')
   try {
     expect(source.split(anchor)).toHaveLength(2)
     expect(source.split(handoff)).toHaveLength(2)
     writeFileSync(tests, imports(suite, subject))
     const run = (text: string) => {
       writeFileSync(subject, imports(text, subject))
-      const result = Bun.spawnSync([process.execPath, 'test', tests, '-t', 'same-run task-sequence'], {
+      const result = Bun.spawnSync([process.execPath, 'test', tests, '-t', 'same-run task-sequence', '--reporter=junit', `--reporter-outfile=${report}`], {
         cwd: root, stdout: 'pipe', stderr: 'pipe', timeout: 30_000,
       })
-      return { code: result.exitCode, output: result.stdout.toString() + result.stderr.toString() }
+      return { code: result.exitCode, output: result.stdout.toString() + result.stderr.toString(), report: readFileSync(report, 'utf8') }
     }
     const positive = 'same-run task-sequence terminal checkpoint preserves review without rebuilding'
     const negative = 'same-run task-sequence intermediate checkpoint resumes its handoff without reviewing'
     const contradictory = 'same-run task-sequence checkpoint refuses missing zero-count-agreement'
     const control = run(source)
     expect(control.code, control.output).toBe(0)
-    for (const name of [positive, negative, contradictory]) expect(control.output).toContain(`(pass) ${name}`)
+    for (const name of [positive, negative, contradictory]) expect(passedCase(control.report, name), control.report).toBe(true)
     for (const [find, replacement, rejected] of [
       [anchor, 'false', negative],
       [handoff, 'if (true) resumeTaskHandoff', positive],

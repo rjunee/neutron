@@ -1,0 +1,7 @@
+## 2026-09-23 — Keep mutation controls independent of Bun's console reporter
+
+Issue #1230. A host-observed full-suite run reported four mutation-test failures even though each nested control exited zero and ran its selected cases. Bun 1.3.13 can omit passing case names from console output, leaving only summary counts. The tests treated those missing lines as failed controls.
+
+The four mutation tests now request a JUnit receipt from each nested Bun run. Their green controls require named, passing case records in that receipt. The mutant runs still require nonzero exit and the specific named failing case, so a broken or over-applied guard cannot pass on aggregate counts alone. The receipt is written inside each test's temporary mutant directory and removed with it.
+
+Measured: all four focused mutation tests passed (51 assertions). The consuming 100-file Trident general lane ran 3,239 cases; none of these four tests failed. Eleven unrelated `mutation-workspace-isolation.test.ts` cases failed because sandboxed Bun could not write its temporary directory, reproducible alone on untouched current main. Root and Trident `tsc --noEmit` checks and `git diff --check` passed. A current-main reporter-mode probe selected three budget-preflight cases and printed `3 pass`, `0 fail`, without their names, matching the missing-name condition observed in the host run. The full current-main lane did not repeat these four failures; the host run remains the direct full-suite failure evidence.

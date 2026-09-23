@@ -1,6 +1,7 @@
 import { expect, test } from 'bun:test'
 import { mkdirSync, mkdtempSync, readFileSync, rmSync, writeFileSync } from 'node:fs'
 import { join, resolve } from 'node:path'
+import { passedCase } from './mutation-test-report.ts'
 
 const root = resolve(import.meta.dir, '..')
 const source = readFileSync(join(import.meta.dir, 'orchestrator.ts'), 'utf8')
@@ -21,20 +22,21 @@ test('project-driver recovery guard mutations fail in both directions, with a gr
   const directory = mkdtempSync(join(parent, 'project-driver-recovery-'))
   const subject = join(directory, 'orchestrator.ts')
   const tests = join(directory, 'orchestrator.test.ts')
+  const report = join(directory, 'report.xml')
   try {
     expect(source.split(anchor)).toHaveLength(2)
     writeFileSync(tests, imports(suite, subject))
     const run = (text: string) => {
       writeFileSync(subject, imports(text, subject))
-      const result = Bun.spawnSync([process.execPath, 'test', tests, '-t', 'project-driver gateway recovery'], {
+      const result = Bun.spawnSync([process.execPath, 'test', tests, '-t', 'project-driver gateway recovery', '--reporter=junit', `--reporter-outfile=${report}`], {
         cwd: root, stdout: 'pipe', stderr: 'pipe', timeout: 30_000,
       })
-      return { code: result.exitCode, output: result.stdout.toString() + result.stderr.toString() }
+      return { code: result.exitCode, output: result.stdout.toString() + result.stderr.toString(), report: readFileSync(report, 'utf8') }
     }
     const control = run(source)
     expect(control.code, control.output).toBe(0)
-    expect(control.output).toContain('(pass) project-driver gateway recovery > a prior gateway reservation resumes only from the durable branch/head/checkpoint')
-    expect(control.output).toContain('(pass) project-driver gateway recovery > an uncheckpointed prior-gateway reservation becomes terminal instead of replaying')
+    expect(passedCase(control.report, 'a prior gateway reservation resumes only from the durable branch/head/checkpoint', 'project-driver gateway recovery'), control.report).toBe(true)
+    expect(passedCase(control.report, 'an uncheckpointed prior-gateway reservation becomes terminal instead of replaying', 'project-driver gateway recovery'), control.report).toBe(true)
     for (const [replacement, rejectedTest] of [
       ['if (true) {', 'a prior gateway reservation resumes only from the durable branch/head/checkpoint'],
       ['if (false) {', 'an uncheckpointed prior-gateway reservation becomes terminal instead of replaying'],

@@ -1,6 +1,7 @@
 import { expect, test } from 'bun:test'
 import { mkdirSync, mkdtempSync, readFileSync, rmSync, writeFileSync } from 'node:fs'
 import { join, resolve } from 'node:path'
+import { passedCase } from './mutation-test-report.ts'
 
 const root = resolve(import.meta.dir, '..')
 const host = readFileSync(join(import.meta.dir, 'production-host-effects.ts'), 'utf8')
@@ -14,6 +15,7 @@ test('task ledger intent mutations preserve both adoption and refusal controls',
   const hostPath = join(directory, 'production-host-effects.ts')
   const storePath = join(directory, 'store.ts')
   const testPath = join(directory, 'production-host-effects.test.ts')
+  const report = join(directory, 'report.xml')
   const imports = (text: string) => text.replace(/(from\s+)(['"])((?:\.\.?\/|@neutronai\/)[^'"]+)\2/g,
     (_match, from, quote, name) => `${from}${quote}${name === './production-host-effects.ts' ? hostPath
       : name === './store.ts' ? storePath : name.startsWith('.') ? resolve(import.meta.dir, name) : import.meta.resolve(name)}${quote}`)
@@ -26,15 +28,15 @@ test('task ledger intent mutations preserve both adoption and refusal controls',
     const run = (hostSource: string, storeSource: string) => {
       writeFileSync(hostPath, imports(hostSource))
       writeFileSync(storePath, imports(storeSource))
-      const result = Bun.spawnSync([process.execPath, 'test', testPath, '-t', 'task ledger intent'], {
+      const result = Bun.spawnSync([process.execPath, 'test', testPath, '-t', 'task ledger intent', '--reporter=junit', `--reporter-outfile=${report}`], {
         cwd: root, stdout: 'pipe', stderr: 'pipe', timeout: 30_000,
       })
-      return { code: result.exitCode, output: result.stdout.toString() + result.stderr.toString() }
+      return { code: result.exitCode, output: result.stdout.toString() + result.stderr.toString(), report: readFileSync(report, 'utf8') }
     }
     const control = run(host, store)
     expect(control.code, control.output).toBe(0)
     const positive = 'task ledger intent authenticates the real child and charges repeated recovery only once'
-    expect(control.output).toContain(`(pass) ${positive}`)
+    expect(passedCase(control.report, positive), control.report).toBe(true)
     for (const [hostSource, storeSource, killed] of [
       [replace(host, 'if (parents.stdout.trim() !== `${snapshot.head} ${intent.builtHead}`)', 'if (false)'),
         store, 'task ledger intent refuses merge without refunding completed work'],
