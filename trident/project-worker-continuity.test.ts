@@ -1,0 +1,176 @@
+import { afterEach, expect, test } from 'bun:test'
+import { chmod, mkdtemp, readFile, readdir, rm, symlink, unlink, writeFile } from 'node:fs/promises'
+import { join } from 'node:path'
+import { tmpdir } from 'node:os'
+import { fakeRunner, type BoundedWorkOutcome, type BoundedWorkRequest, type WorkerRunner } from '@neutronai/runtime/bounded-work.ts'
+import { createCodexHeadlessRunner } from '@neutronai/runtime/workers/codex-headless.ts'
+import { createClaudeHeadlessRunner } from '@neutronai/runtime/workers/claude-headless.ts'
+import { createProjectWorkerContinuity, type ProjectWorkerContinuityOptions } from './project-worker-continuity.ts'
+
+const dirs: string[] = []
+afterEach(async () => { await Promise.all(dirs.splice(0).map(dir => rm(dir, { recursive: true, force: true }))) })
+const signal = () => new AbortController().signal
+const completed = (thread = 'observed-first'): BoundedWorkOutcome => ({
+  kind: 'completed', result: {}, usage: null, model_reported: null, thread_id: thread,
+})
+async function fixture() {
+  const dir = await mkdtemp(join(tmpdir(), 'worker-continuity-')); dirs.push(dir)
+  const request = (over: Partial<BoundedWorkRequest> = {}): BoundedWorkRequest => ({
+    run_id: 'run', step_id: 'one', role: 'build', model_id: 'gpt-test', effort: 'high', cwd: dir,
+    writable: true, network: false, tools: 'edit-and-run', brief: { path: join(dir, 'brief'), integrity: 'fixture' },
+    result: { schema: 'FORGE', path: join(dir, 'result') }, thread: null, budget: { wall_ms: 5000 },
+    needs_approval_decision: false, ...over,
+  })
+  const runner = fakeRunner('openai-codex', { outcomes: new Map(['one', 'two', 'three'].map(id => [id, completed()])) })
+  const options: ProjectWorkerContinuityOptions = { stateDir: dir, runId: 'run', projectId: 'project', replProvider: 'anthropic', runner,
+    credentialIdentity: async () => 'account-a' }
+  const wrap = (over: Partial<ProjectWorkerContinuityOptions> = {}) => createProjectWorkerContinuity({ ...options, ...over })
+  const call = (over: Partial<BoundedWorkRequest> = {}) => wrap().run(request(over), 'headless', signal())
+  return { dir, request, runner, options, wrap, call, binding: join(dir, 'worker-conversation-build', 'binding.json') }
+}
+
+test('first observed thread is reused by a reconstructed host, while original step recovery retains its original request', async () => {
+  const f = await fixture()
+  expect((await f.call()).kind).toBe('completed')
+  expect((await f.call({ step_id: 'two' })).kind).toBe('completed')
+  expect((await f.call()).kind).toBe('completed')
+  expect(f.runner.calls.map(call => call.thread)).toEqual([null, { id: 'observed-first' }, null])
+})
+
+for (const field of ['run', 'project', 'model', 'credential', 'provider', 'cwd'] as const) {
+  test(`changed ${field} ownership refuses without dispatch; original ownership remains usable`, async () => {
+    const f = await fixture(); await f.call()
+    const alien = fakeRunner('anthropic', { outcomes: new Map([['two', completed()]]) })
+    const changed = f.wrap(field === 'project' ? { projectId: 'other' }
+      : field === 'credential' ? { credentialIdentity: async () => 'account-b' }
+      : field === 'provider' ? { runner: alien, replProvider: 'openai-codex' } : {})
+    const req = f.request({ step_id: 'two', ...(field === 'run' ? { run_id: 'other' } : {}),
+      ...(field === 'model' ? { model_id: 'other-model' } : {}), ...(field === 'cwd' ? { cwd: join(f.dir, 'other') } : {}) })
+    expect((await changed.run(req, 'headless', signal())).kind).toBe('unknown')
+    expect(f.runner.calls).toHaveLength(1); expect(alien.calls).toHaveLength(0)
+    expect((await f.call({ step_id: 'two' })).kind).toBe('completed')
+  })
+}
+
+for (const defect of ['missing-binding', 'corrupt-binding', 'missing-step', 'corrupt-step'] as const) {
+  test(`${defect} cannot create a fresh conversation; restoring the receipt resumes normally`, async () => {
+    const f = await fixture(); await f.call()
+    const roleDir = join(f.dir, 'worker-conversation-build')
+    const stepDir = (await readdir(roleDir)).find(name => name.startsWith('step-'))!
+    const path = defect.endsWith('binding') ? f.binding : join(roleDir, stepDir, 'request.json')
+    const original = await readFile(path, 'utf8')
+    if (defect.startsWith('missing')) await unlink(path); else await writeFile(path, '{}')
+    expect((await f.call()).kind).toBe('unknown'); expect(f.runner.calls).toHaveLength(1)
+    await writeFile(path, original)
+    expect((await f.call()).kind).toBe('completed')
+  })
+}
+
+test('concurrent writers cannot share a thread; after settlement another step can resume it', async () => {
+  const f = await fixture()
+  let entered!: () => void; const ready = new Promise<void>(resolve => { entered = resolve })
+  let finish!: () => void; const held = new Promise<void>(resolve => { finish = resolve })
+  const runner: WorkerRunner = { ...f.runner, async run(req) { f.runner.calls.push(req); entered(); await held; return completed() } }
+  const running = f.wrap({ runner }).run(f.request(), 'headless', signal()); await ready
+  expect((await f.call()).kind).toBe('unknown'); expect(f.runner.calls).toHaveLength(1)
+  expect((await f.call({ step_id: 'two' })).kind).toBe('unknown'); expect(f.runner.calls).toHaveLength(1)
+  finish(); expect((await running).kind).toBe('completed')
+  expect((await f.call({ step_id: 'two' })).kind).toBe('completed')
+  expect(f.runner.calls[1]!.thread).toEqual({ id: 'observed-first' })
+})
+
+test('unobserved or different threads never authorize a follow-up; pending original step can recover', async () => {
+  const f = await fixture()
+  const runner: WorkerRunner = { ...f.runner, run: async () => ({ ...completed(), thread_id: null }) as BoundedWorkOutcome }
+  expect((await f.wrap({ runner }).run(f.request(), 'headless', signal())).kind).toBe('unknown')
+  expect((await f.call({ step_id: 'two' })).kind).toBe('unknown'); expect(f.runner.calls).toHaveLength(0)
+  expect((await f.call()).kind).toBe('completed')
+  const changed: WorkerRunner = { ...f.runner, run: async () => completed('foreign') }
+  expect((await f.wrap({ runner: changed }).run(f.request({ step_id: 'two' }), 'headless', signal())).kind).toBe('unknown')
+  expect((await f.call({ step_id: 'three' })).kind).toBe('unknown')
+  expect((await f.call({ step_id: 'two' })).kind).toBe('completed')
+})
+
+test('credential changes during a turn cannot bind its thread, and missing identity cannot buy a turn', async () => {
+  const f = await fixture()
+  expect((await f.wrap({ credentialIdentity: async () => null }).run(f.request(), 'headless', signal())).kind).toBe('unknown')
+  expect(f.runner.calls).toHaveLength(0)
+  let account = 'account-a'
+  const runner: WorkerRunner = { ...f.runner, async run() { account = 'account-b'; return completed() } }
+  expect((await f.wrap({ runner, credentialIdentity: async () => account }).run(f.request(), 'headless', signal())).kind).toBe('unknown')
+  expect((await f.call({ step_id: 'two' })).kind).toBe('unknown')
+  expect((await f.call()).kind).toBe('completed')
+})
+
+test('supplied foreign thread and changed same-step request refuse; a new role has its own conversation', async () => {
+  const f = await fixture(); await f.call()
+  expect((await f.call({ thread: { id: 'foreign' } })).kind).toBe('unknown')
+  expect((await f.call({ effort: 'low' })).kind).toBe('unknown')
+  expect(f.runner.calls).toHaveLength(1)
+  expect((await f.call()).kind).toBe('completed')
+  expect((await f.call({ role: 'fix' })).kind).toBe('completed')
+  expect(f.runner.calls[2]!.thread).toBeNull()
+  expect((await f.call({ role: 'fix', step_id: 'two' })).kind).toBe('completed')
+  expect(f.runner.calls[3]!.thread).toEqual({ id: 'observed-first' })
+})
+
+for (const defect of ['symlink', 'oversized', 'stale-lock'] as const) {
+  test(`${defect} stays uncertain without dispatch; intact receipt is a positive control`, async () => {
+    const f = await fixture(); await f.call()
+    const original = await readFile(f.binding, 'utf8')
+    if (defect === 'symlink') {
+      await writeFile(join(f.dir, 'other'), original); await unlink(f.binding); await symlink(join(f.dir, 'other'), f.binding)
+    } else if (defect === 'oversized') await writeFile(f.binding, original + ' '.repeat(16_385))
+    else await writeFile(join(f.dir, 'worker-conversation-build.writer.lock'), '')
+    expect((await f.call({ step_id: 'two' })).kind).toBe('unknown'); expect(f.runner.calls).toHaveLength(1)
+    if (defect === 'symlink') await unlink(f.binding)
+    if (defect === 'stale-lock') await unlink(join(f.dir, 'worker-conversation-build.writer.lock'))
+    else await writeFile(f.binding, original)
+    expect((await f.call({ step_id: 'two' })).kind).toBe('completed')
+  })
+}
+
+test('same-provider work and review seats retain their native placement and do not enter builder binding storage', async () => {
+  const f = await fixture()
+  for (const provider of ['anthropic', 'openai-codex'] as const) {
+    const runner = fakeRunner(provider, { outcomes: new Map([['one', completed()]]) })
+    expect((await f.wrap({ runner, replProvider: provider }).run(f.request(), 'in-repl', signal())).kind).toBe('completed')
+    expect(runner.calls[0]!.thread).toBeNull()
+  }
+  expect((await f.call({ role: 'review', thread: { id: 'seat-thread' } })).kind).toBe('completed')
+  expect(f.runner.calls[0]!.thread).toEqual({ id: 'seat-thread' })
+  expect(await readdir(f.dir)).toEqual([])
+})
+
+test('unsupported Claude build/fix retain explicit capability refusal without any dispatch or binding', async () => {
+  const f = await fixture()
+  const runner = createClaudeHeadlessRunner({ env: {}, cwd: f.dir, state_dir: f.dir, schemas: new Map() })
+  const wrapped = f.wrap({ runner, replProvider: 'openai-codex' })
+  for (const role of ['build', 'fix'] as const) {
+    expect(await wrapped.run(f.request({ role }), 'headless', signal())).toEqual({ kind: 'refused', reason: 'capability-unsupported' })
+  }
+  expect(await readdir(f.dir)).toEqual([])
+})
+
+test('real Codex adapter receives initial creation, restart resume and same-step recall without another paid dispatch', async () => {
+  const f = await fixture()
+  const script = join(f.dir, 'wrapper.sh')
+  await writeFile(join(f.dir, 'brief'), 'build')
+  await writeFile(join(f.dir, 'claim.diff'), '+change')
+  await writeFile(script, `#!/bin/bash
+printf '%s\\n' "$NEUTRON_CODEX_THREAD_ID" >> threads
+printf '{"type":"thread.started","thread_id":"%s"}\\n' "\${NEUTRON_CODEX_THREAD_ID:-observed-first}"
+echo '{"type":"turn.completed","usage":{"input_tokens":3,"output_tokens":2}}'
+printf 'NEUTRON_CODEX_BUILD_HEAD=head\\nNEUTRON_CODEX_BUILD_DIFF=claim.diff\\nNEUTRON_CODEX_BUILD_PR=\\n' > "$NEUTRON_CODEX_BUILD_TRAILER_FILE"
+`)
+  await chmod(script, 0o700)
+  const fresh = () => f.wrap({ runner: createCodexHeadlessRunner({ buildScript: script, probe: { ok: true }, env: { PATH: process.env.PATH } }) })
+  expect((await fresh().run(f.request(), 'headless', signal())).kind).toBe('completed')
+  expect((await fresh().run(f.request(), 'headless', signal())).kind).toBe('completed')
+  expect(await readFile(join(f.dir, 'threads'), 'utf8')).toBe('\n')
+  expect((await fresh().run(f.request({ step_id: 'two' }), 'headless', signal())).kind).toBe('completed')
+  expect(await readFile(join(f.dir, 'threads'), 'utf8')).toBe('\nobserved-first\n')
+  const observation = await fresh().observe?.(f.request({ step_id: 'two' }))
+  expect(observation?.thread_id).toBe('observed-first')
+  expect(await readFile(join(f.dir, 'threads'), 'utf8')).toBe('\nobserved-first\n')
+})
