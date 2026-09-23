@@ -24,8 +24,18 @@ the outer publisher, redispatches through the Work Board and runs the project
 host. The owned case merges with zero new plan/build calls; its unowned sibling
 keeps the discovered PR open. No prior receipt is inferred from a branch name,
 matching commit, author or failure message, and no historical row is backfilled.
-The original live PR therefore remains unowned; deployment acceptance must use
-a fresh publication.
+The original live PR therefore remains unowned. These static consuming E2E
+cases establish the salvage ownership seam; ordinary fresh publication does not
+directly exercise salvage.
+
+Completion remains in progress under the locked pivot
+(`docs/plans/harness-orchestrator-pivot-2026-09-11.md:278-295`). The unchecked
+acceptance criterion requires the exact merged revision to be deployed and
+served, positive and negative source controls on that served revision, and a
+fresh adopted-chat Work Board dispatch reaching unattended merge. That live
+dispatch establishes the served end-to-end regression. Deployment and live
+acceptance evidence are still outstanding; the static results below do not
+establish them.
 
 Verification: 364 tests pass across the publisher, stranded real-git salvage,
 orchestrator and boot-composition suites. The publisher tests cover valid,

@@ -16,6 +16,7 @@ at the old name. Retitle through the `title:` frontmatter instead.
 
 These are the items the harness-orchestrator cutover is gated on.
 
+- [`salvage-publication-provenance`](salvage-publication-provenance.md) — Preserve publication ownership when salvaging a failed build
 - [`the-orchestrator-owns-the-build-loop`](the-orchestrator-owns-the-build-loop.md) — The project REPL owns the build loop
 - [`the-review-loop-must-stop-and-re-plan`](the-review-loop-must-stop-and-re-plan.md) — Stop and escalate a review loop instead of iterating on a bad plan
 - [`trident-build-efficiency`](trident-build-efficiency.md) — Avoid repeated build work and measure Trident's time and token costs
