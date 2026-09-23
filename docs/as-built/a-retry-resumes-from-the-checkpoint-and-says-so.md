@@ -106,6 +106,26 @@ the same run reds `trident/store.test.ts` on the COLS count.
 No open PR on the upstream repository adds a migration: the five open PRs at the time of
 writing (#1164-#1167, #1171) change no `migrations/0*` file, so 0155 is free.
 
+Verification (replayed onto 7454048a): `bash scripts/ci/lint.sh` exits 0, and
+`scripts/ci/typecheck-all.sh` checks 51 tsconfigs, 50 pass. The one FAIL is
+`app/tsconfig.json`, `error TS2688: Cannot find type definition file for '@types'` (Entry
+point for implicit type library '@types'). It is environmental and not this branch: the same
+`tsc --noEmit -p app/tsconfig.json` on the host's main checkout prints the identical single
+error and exits 2. The build worktree nests inside that checkout, so tsc's ancestor
+`node_modules/@types` walk reaches the host tree, whose `node_modules/@types` holds a
+self-referential `@types` symlink. A clean CI checkout has no ancestor `node_modules`.
+Pinning `--typeRoots app/node_modules/@types` removes TS2688, and the only error left is
+`app/__tests__/support/mount.tsx(17,1) TS2578` (an unused `@ts-expect-error`). That is the
+same leak: `--traceResolution` resolves `react-dom/client` to the host tree's
+`@types/react-dom`, and this branch does not touch that file.
+
+The nominated proof pair: in `trident/run-progress.ts` replace `    resume_note: run.resume_note,`
+with `    resume_note: null,`. `trident/run-progress.test.ts` goes from 40 pass to 39 pass and 1
+fail (`carries the dispatch's resume sentence, and null for a first dispatch`), and
+`trident/run-disposition.test.ts` stays 50 pass both ways. Neither file applies migrations
+through the `@neutronai/migrations` alias, so both are green unmutated in a proof tree that
+does not have this branch's 0155.
+
 ### The replay rule for ordinal 0154
 
 Main's #1188 took 0154 (`ralph_task_total`) after this branch was cut; 0155 stays. Replaying
