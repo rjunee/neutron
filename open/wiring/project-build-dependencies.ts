@@ -13,8 +13,8 @@ async function exists(path: string): Promise<boolean> {
 
 const quote = (value: string): string => `'${value.replaceAll("'", "'\\''")}'`
 
-const hostRoot = fileURLToPath(new URL('../../', import.meta.url))
-const hostVerifier = join(hostRoot, 'scripts/ci/verify-workspace-deps.ts')
+const hostDirectory = fileURLToPath(new URL('../../', import.meta.url))
+const hostVerifier = join(hostDirectory, 'scripts/ci/verify-workspace-deps.ts')
 const RECEIPT_VERSION = 1
 
 /** The receipt is a host observation, never a tracked project file. Hash all
@@ -123,7 +123,7 @@ export async function prepareProjectDependencies(worktree: string, state: string
   // host script. Keep that tree as data only, with an explicit empty config and
   // no dotenv loading; resolution inside the verifier still uses its root arg.
   if (await exists(verifier)) await execute([bun, '--config=/dev/null', '--no-env-file', hostVerifier, worktree],
-    'workspace dependency verification', hostRoot)
+    'workspace dependency verification', hostDirectory)
   // A successful installer must not silently change an input behind the receipt.
   if (key && key === await preparationKey(worktree, workspaces, bun)) {
     const identity = await lstat(modules)
