@@ -37,5 +37,17 @@ Consuming tests reconstruct the production host and require retained seat and
 synthesis outcomes, fresh work for changed inputs, refusal of damaged evidence,
 and preservation of an already-consumed infrastructure retry.
 
+Pending recovery uses an explicit recovery-only runner operation through adapter,
+placement, accounting, continuity and owner wrappers. It cannot fall back to an
+ordinary paid dispatch. Consuming controls remove, corrupt, unarm or replace the
+actual native reservation after a completed review loses its acknowledgement:
+each refuses with no additional model turn, while restoring the original
+evidence permits recovery and the newly eligible synthesis. Credential movement
+during dispatch invalidates the pending source receipt even if the account is
+later restored. The outer driver retains the original request and continuation,
+and the lost-ack benchmark completes its merge with three review calls and one
+proof across both host lifetimes. An observed blocked result remains blocked;
+telemetry reconciliation alone never settles its pending attempt or grants approval.
+
 This record establishes local integration behavior. Deployed timing, usage and
 the next live unattended merge remain tracked by issue #1196.

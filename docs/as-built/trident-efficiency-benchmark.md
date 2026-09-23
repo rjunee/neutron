@@ -54,7 +54,8 @@ a fresh unattended live merge remain the separate live-evidence requirement.
 The earlier five-scenario implementation passed 163 consuming/oracle tests and
 both TypeScript projects. Strengthening the infrastructure and moved-head cases
 then exposed the two regressions above; the integrated nonpending scenarios now
-pass all five controls. Production semantic
+pass all six scenarios, including recovery of the completed pending review.
+Production semantic
 mutations were killed: awaiting standalone before starting panel observation
 fails the fresh barrier; disabling same-head build reuse while assigning new
 worker identities fails the unchanged-head dispatch count; dropping approved

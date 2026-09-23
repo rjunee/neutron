@@ -2487,7 +2487,8 @@ async function efficiencyBenchmark(scenario: EfficiencyScenario, scheduling: Eff
     expect(await run('fresh', true)).toMatchObject({ kind: 'blocked', phase: 'review', on: 'infra-only: Review producer failed during the review join: Error: scripted acknowledgement lost after completed review' })
     const pending = lastCheckpoint(f).pending
     const reviewStep = `${f.row.id}:review:1:head:${lastCheckpoint(f).head}`
-    expect(pending).toEqual({ phase: 'review', step_id: reviewStep })
+    expect(pending).toMatchObject({ phase: 'review', step_id: reviewStep,
+      recovery: { request: { run_id: f.row.id, step_id: reviewStep, role: 'review' }, snapshot: { head: lastCheckpoint(f).head } } })
     const completed = JSON.parse(await readFile(join(f.dir, 'state', f.row.id, 'review.result'), 'utf8'))
     expect(completed).toMatchObject({ kind: 'completed', step_id: reviewStep, result: { head: lastCheckpoint(f).head } })
     expect(await run('resume')).toMatchObject({ kind: 'merged', snapshot: { head: completed.result.head } })
@@ -3642,11 +3643,8 @@ test('a driver resumed after the branch head moved rebuilds instead of adopting 
 }, 300_000)
 
 test('a driver restarted during a worker turn refuses to re-fire it', async () => {
-  // THE OTHER HALF OF THE CONTRACT. `work()` writes `pending` BEFORE it dispatches
-  // (`build-run.ts:313`), so a process that dies inside a turn leaves a checkpoint
-  // naming a turn whose outcome nobody observed. Re-dispatching it would run the
-  // same step id twice; the driver instead returns `unknown` with that identity
-  // preserved, for the orchestrator to settle (`build-run.ts:239-243`).
+  // The driver persists original-request recovery authority before dispatch.
+  // Restart may inspect that exact native result, but cannot buy another turn.
   // PROCESS 1 stops INSIDE the review turn: the worker reports `blocked`, which is
   // what every role brief tells it to do when it cannot finish. The driver has
   // already written `pending` and nothing on that path clears it.
@@ -3657,17 +3655,16 @@ test('a driver restarted during a worker turn refuses to re-fire it', async () =
   // The blocked answer really went through the decoder as a blocked envelope.
   expect(f.world.dispatches.at(-1)!.wrote).toEqual(['kind', 'on', 'run_id', 'schema', 'step_id'])
   const reviewStep = `${f.row.id}:review:1:head:${lastCheckpoint(f).head}`
-  expect(lastCheckpoint(f).pending).toEqual({ phase: 'review', step_id: reviewStep })
+  const pending = lastCheckpoint(f).pending
+  expect(pending).toMatchObject({ phase: 'review', step_id: reviewStep,
+    recovery: { request: { run_id: f.row.id, step_id: reviewStep }, snapshot: { head: lastCheckpoint(f).head } } })
 
   f.world.dispatches.length = 0
   const outcome = await restartThroughGateway(f)
-  expect(outcome.kind, why(f, outcome)).toBe('unknown')
-  if (outcome.kind === 'unknown') {
-    expect(outcome.detail).toBe('Resume awaits the existing worker observation')
-    // The identity is PRESERVED, which is what lets the orchestrator settle it.
-    expect(outcome.phase).toBe('review')
-    expect(outcome.step_id).toBe(reviewStep)
-  }
+  expect(outcome).toMatchObject({ kind: 'blocked', phase: 'review', on: 'harness: the review worker was stopped mid-turn' })
+  // The original blocked observation is recovered, not turned into approval or
+  // an invented fresh attempt. Its unresolved checkpoint remains exact.
+  expect(lastCheckpoint(f).pending).toEqual(pending)
   // Nothing was dispatched by the second process, and the PR process 1 opened for
   // review is untouched — no merge, no second PR.
   expect(f.world.dispatches).toEqual([])
@@ -3712,8 +3709,13 @@ test('attempt accounting reconciles pre-crash provider spend through actual pend
   await createProjectBuildHost(await f.prepare())
   expect(f.context.attempts.receipt(attempt)).toBeNull()
   await rename(`${bindingPath}.original`, bindingPath)
+  await createProjectBuildHost(await f.prepare())
+  // Usage reconciliation alone cannot settle the result. The subsequent driver
+  // recovery separately reads the original validated blocked trailer.
+  expect(f.context.attempts.receipt(attempt)).toMatchObject({ source: 'claude-repl-jsonl', input_tokens: 7, output_tokens: 3 })
+  expect(f.context.attempts.get(attempt)).toMatchObject({ outcome: null, ended_at: null })
   const resumed = await restartThroughGateway(f)
-  expect(resumed.kind).toBe('unknown')
+  expect(resumed).toMatchObject({ kind: 'blocked', phase: 'review', on: 'harness: the review worker was stopped mid-turn' })
   expect(f.world.dispatches).toHaveLength(0)
   expect(f.context.attempts.receipt(attempt)).toMatchObject({ source: 'claude-repl-jsonl', input_tokens: 7, output_tokens: 3 })
   expect(f.context.attempts.get(attempt)).toMatchObject({ outcome: null, ended_at: null })
