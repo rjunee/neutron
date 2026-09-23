@@ -272,7 +272,7 @@ All `inner-workflow.mjs:NNNN` anchors in this inventory are explicitly labeled `
 G166 pre-merge admission (PR #1171 remainder): the production host independently
 rescans the reviewed commit history before local merge and, after pinned PR
 readiness, before any owned draft-ready or merge write
-(`trident/production-host-effects.ts:522`, `:535`). Both paths share publication's
+(`trident/production-host-effects.ts:523`, `:539`). Both paths share publication's
 authenticated scanner and origin-observed public-base window through
 `trident/gates/release-readiness.ts:192`; an already-public base carrier is
 excluded, while a branch-owned carrier or unmeasured raw history refuses merge.

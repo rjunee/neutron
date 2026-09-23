@@ -2,9 +2,9 @@
 
 The remaining merge-boundary scope from PR #1171 is implemented using the
 existing G166 scanner. Local merge now checks the reviewed history before
-`mergeLocalReviewed` (`trident/production-host-effects.ts:522`); PR merge checks
+`mergeLocalReviewed` (`trident/production-host-effects.ts:523`); PR merge checks
 after pinned readiness has fetched and witnessed the reviewed head, before any
-draft-ready write (`:535`). Ownership, draft transitions, CI and the final pinned
+draft-ready write (`:539`). Ownership, draft transitions, CI and the final pinned
 merge remain in place. This adds admission, not message rewriting or a change
 to G100 preservation or the advisory leak preflight.
 
