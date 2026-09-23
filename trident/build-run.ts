@@ -70,6 +70,8 @@ export interface ResumeCheckpoint {
   remainingTasks?: number | undefined
   findings: readonly { kind: 'code' | 'lane'; actionable: boolean; text: string }[]
   previousFindings: readonly string[]
+  /** Baseline retained across completion checkpoints; omission is legacy evidence. */
+  previousReview?: ReviewProgress | null
   /** Re-present only the original request to its idempotent runner. Legacy pending
    * rows without the host continuation remain unknown. */
   pending?: { phase: WorkPhase; step_id: string; recovery?: PendingRecovery } | undefined
@@ -87,6 +89,16 @@ interface PendingRecovery {
   plan: ExecutionPlan | null
   /** Null records known absence; omission is incomplete recovery evidence. */
   previousReview: ReviewProgress | null
+}
+
+const reviewHistoryRequired = (role: WorkPhase, round: number): boolean =>
+  role === 'fix' || (role === 'review' ? round > 1 : round > 0)
+
+function validReviewProgress(value: unknown): value is ReviewProgress {
+  if (!value || typeof value !== 'object') return false
+  const progress = value as ReviewProgress
+  return Array.isArray(progress.findings) && progress.findings.every(f => typeof f === 'string' && f.trim().length > 0)
+    && Number.isSafeInteger(progress.blockingCount) && progress.blockingCount >= 0
 }
 
 function recoveryInputs(input: BuildRunInput, maxRounds: number) {
@@ -346,10 +358,8 @@ export async function buildRun(input: BuildRunInput, deps: BuildRunDeps, signal:
           || !Array.isArray(recovery.findings) || !recovery.findings.every(f => typeof f === 'string')
           || !['full', 'next'].includes(recovery.planner) || !('previous' in recovery)
           || (recovery.plan !== null && !executionPlan(recovery.plan))
-          || recovery.previousReview === undefined || (pending.phase === 'fix' && recovery.previousReview === null)
-          || (recovery.previousReview !== null && (!Array.isArray(recovery.previousReview.findings)
-            || !recovery.previousReview.findings.every(f => typeof f === 'string' && f.trim().length > 0)
-            || !Number.isSafeInteger(recovery.previousReview.blockingCount) || recovery.previousReview.blockingCount < 0))) {
+          || recovery.previousReview === undefined || (reviewHistoryRequired(pending.phase, recovery.round) && recovery.previousReview === null)
+          || (recovery.previousReview !== null && !validReviewProgress(recovery.previousReview))) {
         return unknown('Resume cannot validate the original pending worker request and context')
       }
       const expectedStep = `${input.run_id}${input.mode === 'ralph' ? `:task:${input.ralphRound ?? 0}` : ''}:${pending.phase}:${recovery.round}`
@@ -388,7 +398,10 @@ export async function buildRun(input: BuildRunInput, deps: BuildRunDeps, signal:
     // by treating every resume as a moved one.
     let headMoved = false
     let previous: readonly string[] = resume?.previousFindings ?? []
-    let previousReview: ReviewProgress | undefined
+    if (resume?.previousReview !== undefined && resume.previousReview !== null && !validReviewProgress(resume.previousReview)) {
+      return unknown('Resume prior review progress is invalid')
+    }
+    let previousReview: ReviewProgress | undefined = resume?.previousReview ?? undefined
     let previousBlockingCount = resume?.previousBlockingCount ?? resume?.previousFindings.length ?? 0
     if (resume && (!Number.isSafeInteger(resume.round) || resume.round < 0)) return blocked('Invalid recorded review round')
     if (resume && !recovery) {
@@ -435,7 +448,8 @@ export async function buildRun(input: BuildRunInput, deps: BuildRunDeps, signal:
     let durable: ResumeCheckpoint = resume ?? { head: null, stage: 'built', round: 0,
       replansUsed: 0, findings: [], previousFindings: [] }
     async function checkpoint(patch: Partial<ResumeCheckpoint>) {
-      durable = { ...durable, replansUsed, previousFindings: previous, previousBlockingCount, ...patch }
+      durable = { ...durable, replansUsed, previousFindings: previous, previousBlockingCount,
+        previousReview: previousReview ?? null, ...patch }
       await modes?.saveCheckpoint(structuredClone(durable))
     }
     let previousPayload: unknown = null
@@ -459,6 +473,9 @@ export async function buildRun(input: BuildRunInput, deps: BuildRunDeps, signal:
       // reusing that round's old id would recover the previous head's approval.
       // Exact-head recovery keeps the same id, including its pending reservation.
       if (role === 'review') step_id += `:head:${snapshot.head}`
+      if (reviewHistoryRequired(role, round) && !previousReview) {
+        return { stop: unknown('Worker continuation requires prior review progress') }
+      }
       const { runner, request } = input.workers[role]
       const boundedRequest: BoundedWorkRequest = recovery?.request ?? {
         ...request, run_id: input.run_id, step_id, role, needs_approval_decision: false,
@@ -680,8 +697,7 @@ export async function buildRun(input: BuildRunInput, deps: BuildRunDeps, signal:
       if (!recovery && replansUsed > 0 && (findings.some(f => previous.includes(f)) || findings.length >= previousBlockingCount)) return blocked('Review requires orchestrator arbitration: post-re-plan trigger')
       if (!recovery) {
         previous = findings
-        previousBlockingCount = findings.length
-        previousReview = { findings: [...findings], blockingCount: findings.length }
+        previousBlockingCount = previousReview?.blockingCount ?? previousBlockingCount
       }
       const fixed = await work('fix', firstRound)
       if ('stop' in fixed) return fixed.stop
@@ -691,6 +707,7 @@ export async function buildRun(input: BuildRunInput, deps: BuildRunDeps, signal:
       if (recovery) return unknown('Pending worker must be reconciled before nomination repair')
       findings = [repair.finding]
       await checkpoint({ head: snapshot.head, stage: 'rejected', round, pending: undefined,
+        previousReview: { findings, blockingCount: 1 },
         findings: findings.map(text => ({ kind: 'code' as const, actionable: true, text })) })
       if (round >= maxRounds) return blocked('Review requires orchestrator arbitration: round ceiling')
       const current = { findings, blockingCount: 1 }
@@ -795,13 +812,15 @@ export async function buildRun(input: BuildRunInput, deps: BuildRunDeps, signal:
         // that need it.
         if (decision.kind === 'fix') {
           await checkpoint({ head: snapshot.head, stage: 'rejected', round, pending: undefined,
+            previousReview: currentReview ?? null,
             findings: decision.findings.map(text => ({ kind: 'code' as const, actionable: true, text })) })
         }
         if (decision.kind === 're-plan' && replansUsed !== 0) return blocked('Review requires orchestrator arbitration: re-plan already spent')
         const progress = gateStop(reviewProgress(previousReview, currentReview))
         if (progress) return progress
         if (decision.kind === 'approve') {
-          await checkpoint({ head: snapshot.head, stage: 'approved', round, pending: undefined, findings: [] })
+          await checkpoint({ head: snapshot.head, stage: 'approved', round, pending: undefined, findings: [],
+            previousReview: currentReview ?? null })
           firstRound = round
           break
         }
