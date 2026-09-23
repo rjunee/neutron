@@ -1,5 +1,5 @@
 import { afterEach, expect, test } from 'bun:test'
-import { mkdtemp, mkdir, writeFile, readFile, rm } from 'node:fs/promises'
+import { mkdtemp, mkdir, writeFile, readFile, readdir, rm } from 'node:fs/promises'
 import { join } from 'node:path'
 import { tmpdir } from 'node:os'
 import { createCodexHeadlessRunner } from './codex-headless.ts'
@@ -50,6 +50,7 @@ writeFileSync(1, JSON.stringify({type:'thread.started',thread_id:args[1] === 're
 if (mode !== 'no-completion') writeFileSync(1, JSON.stringify({type:mode==='turn-failed'?'turn.failed':'turn.completed',
   usage:['missing-usage','worker-usage'].includes(mode)?undefined:mode==='zero-usage'?{input_tokens:0,output_tokens:0,cached_input_tokens:0}:{input_tokens:17,output_tokens:3,cached_input_tokens:11}})+(mode==='no-newline'?'':'\\n'));
 if (mode==='duplicate-completion') writeFileSync(1, JSON.stringify({type:'turn.completed',usage:{input_tokens:17,output_tokens:3,cached_input_tokens:11}})+'\\n');
+writeFileSync(process.env.FIXTURE_DIR + '/receipt-ready','ready');
 if (mode==='usage-then-hang') { process.on('SIGTERM', () => {}); setInterval(() => {}, 1000); await new Promise(() => {}); }
 process.exit(mode === 'nonzero' ? 2 : 0);
 })();
@@ -129,8 +130,16 @@ test('a blocked result remains blocked on resume', async () => {
 test('failed, interrupted and malformed reviews retain provider spend, never result authority', async () => {
   for (const mode of ['nonzero', 'payload', 'malformed', 'turn-failed', 'usage-then-hang', 'duplicate-completion', 'no-newline']) {
     const f = await fixture(mode)
-    const req = mode === 'usage-then-hang' ? { ...f.req, budget: { wall_ms: 250 } } : f.req
-    const first = await f.run(req)
+    const req = mode === 'usage-then-hang' ? { ...f.req, budget: { wall_ms: 30_000 } } : f.req
+    const controller = new AbortController()
+    const pending = f.run(req, controller.signal)
+    if (mode === 'usage-then-hang') {
+      while (!(await readFile(join(f.dir, 'receipt-ready')).then(() => true, () => false))) {
+        if (await Promise.race([pending.then(() => true), Bun.sleep(10).then(() => false)])) throw Error('Worker ended before emitting usage')
+      }
+      controller.abort()
+    }
+    const first = await pending
     expect(first.kind).toBe(mode === 'nonzero' || mode === 'usage-then-hang' ? 'failed' : 'unknown')
     expect(first.observation).toMatchObject({ source: 'codex-cli-jsonl', thread_id: 'recorded-thread',
       model_reported: null, usage: { input_tokens: 6, output_tokens: 3, cache_read_input_tokens: 11 } })
@@ -153,6 +162,18 @@ test('worker-authored usage cannot supply missing provider observations', async 
   expect(await (await fixture('worker-usage')).run()).toMatchObject({ kind: 'unknown', observation: {
     usage: { input_tokens: null, output_tokens: null, cache_read_input_tokens: null },
   } })
+})
+
+test('a refused recovered receipt keeps prior spend and cannot redispatch', async () => {
+  const f = await fixture()
+  const first = await f.run()
+  const receiptPath = join(f.dir, (await readdir(f.dir)).find(path => path.endsWith('.receipt'))!)
+  const receipt = JSON.parse(await readFile(receiptPath, 'utf8'))
+  await writeFile(receiptPath, JSON.stringify({ ...receipt, identity: 'mismatched' }))
+  const recovered = await f.run()
+  expect(recovered).toMatchObject({ kind: 'unknown', detail: 'Codex review receipt identity mismatched' })
+  expect(recovered.observation).toEqual(first.observation)
+  expect(await f.calls()).toHaveLength(1)
 })
 
 test('changed request cannot reuse a reserved receipt', async () => {

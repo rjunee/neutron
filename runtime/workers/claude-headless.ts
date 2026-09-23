@@ -275,17 +275,17 @@ export function createClaudeHeadlessRunner(input: ClaudeHeadlessRunnerOptions): 
           // spend after failure can never promote an uncommitted result.
           try { observation = readProviderObservation(await readFile(observationPath, 'utf8'), 'claude-cli-json') } catch { /* legacy or unobserved */ }
           const session = await readFile(sessionPath, 'utf8')
-          if (req.thread && req.thread.id !== session || await readFile(threadPath(session), 'utf8') !== binding) return unknown('Claude retained session binding did not match.')
+          if (req.thread && req.thread.id !== session || await readFile(threadPath(session), 'utf8') !== binding) return observed(unknown('Claude retained session binding did not match.'))
           const decoded = decode(await readFile(receiptPath, 'utf8'), req, session, validate)
           if (!decoded.envelope) return observed(decoded.outcome)
           const lock = `${threadPath(session)}.busy`
           const release = await acquireThreadLock(lock, key, true)
-          if (!release) return unknown('Claude retained thread is held by another host or an unobserved step.')
+          if (!release) return observed(unknown('Claude retained thread is held by another host or an unobserved step.'))
           try {
             let existing: string | undefined
             try { existing = await readFile(req.result.path, 'utf8') } catch (error) { if ((error as NodeJS.ErrnoException).code !== 'ENOENT') throw error }
             if (existing === undefined) await publish(decoded.envelope)
-            else if (existing !== decoded.envelope) return unknown('Claude durable receipt and result file do not agree.')
+            else if (existing !== decoded.envelope) return observed(unknown('Claude durable receipt and result file do not agree.'))
             return observed(decoded.outcome)
           } finally { await release() }
         }

@@ -22,9 +22,12 @@ valid Codex review. Result identity, permissions, model checks and durable
 completion receipts retain their existing authority.
 
 Verification includes process fixtures for successful and failed nonzero spend,
-explicit zero, missing usage, timeout after observed usage, corrupt trailers,
+explicit zero, missing usage, interruption after observed usage, corrupt trailers,
 duplicate completion, worker-authored usage rejection, and restart without
-another process. Both TypeScript projects passed. The consuming
+another process. Recovered lock/receipt refusals retain the earlier observation.
+Interruption tests wait for a child receipt before cancellation, avoiding
+startup-load-sensitive short deadlines. Separate timeout fixtures check the
+typed timeout outcome. Both TypeScript projects passed. The consuming
 `open/__tests__/project-build-e2e.test.ts` passed all 125 tests with local test
 sockets permitted; the sandboxed attempt failed nine socket-listening fixtures.
 

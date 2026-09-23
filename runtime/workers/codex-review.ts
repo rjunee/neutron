@@ -113,7 +113,7 @@ export function createCodexReviewTransport(options: {
       try {
         const receipt = JSON.parse(await readFile(receiptPath, 'utf8'))
         if (receipt.identity !== identity || typeof receipt.thread_id !== 'string' || !receipt.thread_id
-          || (req.thread && receipt.thread_id !== req.thread.id)) return unknown('Codex review receipt identity mismatched')
+          || (req.thread && receipt.thread_id !== req.thread.id)) return observed(unknown('Codex review receipt identity mismatched'))
         const outcome = validate(receipt.envelope)
         return observed(outcome.kind === 'completed' ? { ...outcome, thread_id: receipt.thread_id, usage: receipt.usage } : outcome)
       } catch { return observed(unknown('Codex review has no committed receipt; dispatch will not be replayed')) }

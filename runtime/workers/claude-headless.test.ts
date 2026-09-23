@@ -60,6 +60,7 @@ if(mode==='invalid-usage') receipt.usage={input_tokens:-1,output_tokens:0};
 if(mode==='missing-usage') delete receipt.usage;
 if(mode==='zero-usage') receipt.usage={input_tokens:0,output_tokens:0,cache_read_input_tokens:0,cache_creation_input_tokens:0};
 writeFileSync(1,JSON.stringify(receipt));
+writeFileSync(${JSON.stringify(join(state, 'receipt-ready'))},'ready');
 if(mode==='usage-then-hang') { setInterval(()=>{},1000); await new Promise(()=>{}); }
 if(mode==='exit-error') process.exit(2);
 }
@@ -174,11 +175,21 @@ test('unknown usage stays unknown rather than becoming invented zero counters', 
   expect(await f.run()).toMatchObject({ kind: 'completed', usage: null })
 })
 
-test('provider usage survives rejected results, nonzero exit and timeout without authorizing completion', async () => {
+test('provider usage survives rejected results, nonzero exit and observed interruption without authorizing completion', async () => {
   for (const mode of ['exit-error', 'invalid-payload', 'extra', 'usage-then-hang']) {
     const f = await fixture(mode)
-    const req = mode === 'usage-then-hang' ? { ...f.req, budget: { wall_ms: 250 } } : f.req
-    const outcome = await f.run(req)
+    const req = mode === 'usage-then-hang' ? { ...f.req, budget: { wall_ms: 30_000 } } : f.req
+    const controller = new AbortController()
+    const pending = f.run(req, controller.signal)
+    if (mode === 'usage-then-hang') {
+      // Interrupt only after the child has emitted its provider receipt. A short
+      // startup deadline would test machine load instead of usage preservation.
+      while (!(await readFile(join(f.state, 'receipt-ready')).then(() => true, () => false))) {
+        if (await Promise.race([pending.then(() => true), Bun.sleep(10).then(() => false)])) throw Error('Worker ended before emitting usage')
+      }
+      controller.abort()
+    }
+    const outcome = await pending
     expect(outcome.kind).toBe(mode === 'exit-error' || mode === 'usage-then-hang' ? 'failed' : 'unknown')
     expect(outcome.observation).toMatchObject({ source: 'claude-cli-json', model_reported: req.model_id,
       usage: { input_tokens: 17, output_tokens: 23, cache_read_input_tokens: 11 } })
@@ -206,7 +217,9 @@ test('duplicate and restarted step reads the durable receipt without redispatch'
   expect(await createClaudeHeadlessRunner(f.options).run(f.req, 'headless', new AbortController().signal)).toEqual(first)
   expect(await readFile(f.counter, 'utf8')).toBe('call\n')
   await writeFile(f.req.result.path, '{}')
-  expect(await f.run()).toMatchObject({ kind: 'unknown' })
+  const mismatched = await f.run()
+  expect(mismatched).toMatchObject({ kind: 'unknown' })
+  expect(mismatched.observation).toEqual(first.observation)
   expect(await readFile(f.counter, 'utf8')).toBe('call\n')
 })
 
@@ -228,7 +241,10 @@ test('receipt recovery refuses a live publishing host and recovers a dead host o
   const token = '11111111-1111-1111-1111-111111111111'
   await unlink(f.req.result.path)
   await writeFile(lock, JSON.stringify({ key, pid: process.pid, token }))
-  expect(await f.run()).toMatchObject({ kind: 'unknown' })
+  const locked = await f.run()
+  expect(locked).toMatchObject({ kind: 'unknown' })
+  expect(locked.observation).toEqual(first.observation)
+  expect(await readFile(f.counter, 'utf8')).toBe('call\n')
   // Linux cannot allocate this pid; ESRCH is independently checked before the fixture.
   expect(() => process.kill(2147483647, 0)).toThrow()
   await writeFile(lock, JSON.stringify({ key, pid: 2147483647, token }))
@@ -299,7 +315,8 @@ test('pre-abort does not reserve or spawn, timeout kills the process and does no
   const f = await fixture('hang')
   expect(await f.run(f.req, AbortSignal.abort())).toMatchObject({ kind: 'unknown' })
   await expect(readFile(f.counter)).rejects.toMatchObject({ code: 'ENOENT' })
-  const req = { ...f.req, budget: { wall_ms: 150 } }
+  // Includes the synchronous contract/authentication probes before process creation.
+  const req = { ...f.req, budget: { wall_ms: 1500 } }
   expect(await f.run(req)).toMatchObject({ kind: 'failed', class: 'timeout' })
   expect(await f.run(req)).toMatchObject({ kind: 'unknown' })
   expect(await readFile(f.counter, 'utf8')).toBe('call\n')
