@@ -83,8 +83,15 @@ export async function reviewPanel(source: ReviewSource | undefined, payload: unk
     // The standalone review and recorded synthesis are independently authored.
     // Both retain a veto; matching provenance does not require identical findings.
     const verdicts: VerdictTrailer[] = [trailer.value]
-    for (const seat of seats) {
-      const observed = await readReviewSeat(source, seat, snapshot, round)
+    // Seat reads may dispatch paid work. Start independent seats together, then
+    // wait for every sibling even on rejection before synthesis or a decision.
+    // Consume results in configuration order so completion timing cannot choose
+    // the reported refusal or reorder finding provenance.
+    const observations = await Promise.allSettled(seats.map(seat => readReviewSeat(source, seat, snapshot, round)))
+    for (const [index, seat] of seats.entries()) {
+      const result = observations[index]!
+      if (result.status === 'rejected') throw result.reason
+      const observed = result.value
       if (!observed) return infrastructure(`Review seat ${seat.id} (${seat.provider}) has no recorded observation`)
       if (observed.runId !== runId || observed.head !== snapshot.head || observed.round !== round || observed.provider !== seat.provider || observed.modelId !== seat.modelId) return infrastructure(`Review seat ${seat.id} (${seat.provider}) provenance does not match run, revision, round, provider or model`)
       if (observed.family === null) unknownFamily = true
