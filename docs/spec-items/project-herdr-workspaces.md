@@ -77,3 +77,33 @@ Gateway restart preserves active work and is not a sleep event.
 The first change supplies workspace ownership and terminal placement only.
 Production composition and safe sleep/retirement are subsequent slices; this
 item remains open until those consuming paths and live behaviour are verified.
+
+## Production composition investigation
+
+General already follows the instance provider choice
+(`instance-project-provider-resolution.md:10-13`, `open/composer.ts:850-858`),
+and the Codex credential resolver selects a configured global seat when project
+scope is absent (`trident/codex-credential.ts:739-754`). Native owner integration
+is incomplete: `open/wiring/codex-owner-binding.ts:520` refuses absent project
+selection, and `runtime/adapters/codex-cli/persistent/project-owner-helper-protocol.ts:43-48`
+requires a project-owned credential directory. Completing that integration must
+preserve an explicit General owner namespace and reuse the selected credential
+in place; credential copies violate `trident/codex-credential.ts:396-399`.
+Until wired, the selected provider must refuse visibly. The terminal manager's
+`null` General scope must never become the literal project id `general` to bypass
+those checks. Adapter placement propagation alone does not complete this criterion.
+
+Production Chat routing also requires a verified credential handoff. The pool can
+select another credential (`runtime/credential-pool.ts:228-240`), which names a
+different warm REPL (`runtime/adapters/claude-code/persistent/pool.ts:302-310`).
+The workspace manager correctly refuses a second live Chat owner
+(`runtime/adapters/claude-code/persistent/project-workspaces.ts:182-186`).
+Connecting that manager to conversation dispatch without coordinating scope-wide
+admission, live child/work evidence and exact old-owner retirement would block
+credential rotation. Optional adapter plumbing does not provide that handoff.
+
+Cross-provider headless workers currently consume pipes and process exit status
+(`runtime/workers/claude-headless.ts:158-164`, `runtime/workers/codex-headless.ts:242-246`).
+Herdr supplies rendered screens and no exit code. Their terminal placement must
+preserve structured result and cancellation evidence; launching a second worker
+for a tab does not satisfy the requirement. Same-provider children stay native.

@@ -10,6 +10,7 @@ import { buildDetectorContext } from './output-scan.ts'
 import type { ResolvedOwnerMcpServer } from '../../../mcp-servers.ts'
 import type { SpawnAssertionConfig } from './post-spawn-assertion.ts'
 import type { PtyHost } from './pty-host.ts'
+import type { ProjectPanePlacement } from './project-workspaces.ts'
 import { RATE_LIMIT_BANNER_BOTTOM_N, type RateLimitBannerSeverity, matchRateLimitBanner, severityForBannerDetectorId } from './rate-limit-banner.ts'
 import { AUTH_FAILURE_BOTTOM_N, matchAuthFailure } from './auth-failure-signature.ts'
 import type { CaptureSessionConfig } from './session-capture.ts'
@@ -219,6 +220,8 @@ export interface PersistentReplSubstrateOptions {
   substrate_instance_id: string
   /** Human-legible pane label composed by the caller from its role and card. */
   repl_pane_label?: string
+  /** Explicit terminal scope, supplied by composition for this dispatch. */
+  projectPlacement?: ProjectPanePlacement
   /** CWD for the REPL (instance home). DERIVED, not keyed (S3 #104/§2): two turns
    *  for the same (instance,user,project,credential) MUST land on the same warm
    *  REPL even if a caller computed `cwd` differently. Missing or blank cwd

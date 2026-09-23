@@ -536,6 +536,7 @@ async function spawnSession(
       cwd,
       env: childEnv,
       ...(options.repl_pane_label !== undefined ? { label: options.repl_pane_label } : {}),
+      ...(options.projectPlacement !== undefined ? { projectPlacement: options.projectPlacement } : {}),
       // SNAPSHOT-REPLACE, not append — on either backend. Each delivery is the child's
       // whole current screen (see `pty-host.ts` / `pty-ring.ts`), and `replace` is what
       // keeps the detector falling edge working: a cleared screen arrives with nothing
