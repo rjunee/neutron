@@ -18,6 +18,7 @@ These are the items the harness-orchestrator cutover is gated on.
 
 - [`the-orchestrator-owns-the-build-loop`](the-orchestrator-owns-the-build-loop.md) — The project REPL owns the build loop
 - [`the-review-loop-must-stop-and-re-plan`](the-review-loop-must-stop-and-re-plan.md) — Stop and escalate a review loop instead of iterating on a bad plan
+- [`trident-build-efficiency`](trident-build-efficiency.md) — Avoid repeated build work and measure Trident's time and token costs
 - [`a-gateway-restart-keeps-the-project-repls`](a-gateway-restart-keeps-the-project-repls.md) — A gateway restart keeps the project REPLs, conversation and all
 - [`durable-reply-sink-coordinates`](durable-reply-sink-coordinates.md) — The sink's coordinates outlive the gateway, and an orphan must not
 
@@ -39,6 +40,7 @@ branch is cut (standard §3.1, §3.2).
 | [`resolve-the-review-diff-base`](resolve-the-review-diff-base.md) | Rev-range base: the pinned sha, else a ref nobody can mistake | P0 | yes |
 | [`the-orchestrator-owns-the-build-loop`](the-orchestrator-owns-the-build-loop.md) | The project REPL owns the build loop | P0 | yes |
 | [`the-review-loop-must-stop-and-re-plan`](the-review-loop-must-stop-and-re-plan.md) | Stop and escalate a review loop instead of iterating on a bad plan | P0 | yes |
+| [`trident-build-efficiency`](trident-build-efficiency.md) | Avoid repeated build work and measure Trident's time and token costs | P0 | yes |
 | [`a-changed-literal-must-not-leave-new-prose-stale`](a-changed-literal-must-not-leave-new-prose-stale.md) | Refuse newly added prose that asserts a constant's replaced literal | P1 | — |
 | [`a-fake-cannot-be-silently-incomplete`](a-fake-cannot-be-silently-incomplete.md) | Require output-capable hosts at merge construction | P1 | — |
 | [`a-run-whose-head-does-not-resolve-must-refuse-to-commit`](a-run-whose-head-does-not-resolve-must-refuse-to-commit.md) | A run whose HEAD does not resolve must refuse to commit | P1 | — |
