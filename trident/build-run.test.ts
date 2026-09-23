@@ -1,8 +1,14 @@
 import { reviewArtifact } from './gates/review-artifact.ts'
 import { briefIntegrity } from './gates/brief-integrity.ts'
 import { fixLineage } from './gates/fix-lineage.ts'
+import { mkdtemp, readFile, rm, writeFile } from 'node:fs/promises'
+import { tmpdir } from 'node:os'
+import { join } from 'node:path'
+import { createHash } from 'node:crypto'
+import { codexInReplRunner } from '@neutronai/runtime/workers/codex-in-repl.ts'
+import { decodeProjectTrailer } from '@neutronai/runtime/workers/project-runners.ts'
 import { expect, spyOn, test } from 'bun:test'
-import { fakeRunner, type BoundedWorkOutcome } from '@neutronai/runtime/bounded-work.ts'
+import { fakeRunner, type BoundedWorkOutcome, type BoundedWorkRequest } from '@neutronai/runtime/bounded-work.ts'
 import { reviewPanel } from './gates/review-panel.ts'
 import { buildRun, type BuildRunDeps, type BuildRunInput, type BuildSnapshot, type ReviewDecision } from './build-run.ts'
 
@@ -864,7 +870,7 @@ for (const moved of [false, true]) test(`review recovery ${moved ? 'invalidates 
     : { kind: 'known', findings: [] }
   expect(await f.run()).toMatchObject({ kind: 'unknown', phase: 'review' })
   const saved = f.state.checkpoints.at(-1)!
-  expect(saved.pending).toEqual({ phase: 'review', step_id: requested[0]! })
+  expect(saved.pending).toMatchObject({ phase: 'review', step_id: requested[0]! })
   // The host has reconciled the completed pending worker. Its settled result
   // remains owned by that id; a fresh driver must reuse it only at the same head.
   f.state.resume = { ...saved, pending: undefined }
@@ -939,6 +945,236 @@ test('resume pending worker preserves phase and exact step without dispatch', as
   expect(await f.run()).toMatchObject({ kind: 'unknown', phase: 'fix', step_id: 'original:fix:3' })
   expect(f.runner.calls).toHaveLength(0)
   expect(f.cross.calls).toHaveLength(0)
+})
+
+for (const role of ['plan', 'build', 'review', 'fix'] as const) for (const reservationState of ['retained', 'missing', 'unarmed', 'foreign'] as const) {
+  const missingReservation = reservationState !== 'retained'
+  test(`pending ${role} ${missingReservation ? `refuses ${reservationState} reservation` : 'recovers its original file result'} after restart without another provider turn`, async () => {
+    const directory = await mkdtemp(join(tmpdir(), 'build-recovery-'))
+    try {
+      const f = modeFixture('pr')
+      f.input.repl_provider = 'openai-codex'
+      if (role === 'fix') f.resume('rejected', 3).findings = [{ kind: 'code', actionable: true, text: 'logic' }]
+      let panels = 0
+      const observeReview = f.deps.observeReview
+      f.deps.observeReview = async (...args) => { panels++; return observeReview(...args) }
+      const request = { ...f.input.workers[role].request, cwd: directory,
+        brief: { path: join(directory, 'brief.md'), integrity: briefIntegrity(`${join(directory, 'brief.md')}.context.json`) },
+        result: { path: join(directory, 'result.json'), schema: 'build/1' } }
+      f.deps.reviewArtifact = (req, snapshot) => reviewArtifact(req, snapshot, async path =>
+        path === req.brief.path ? `${req.brief.path}.context.json` : JSON.stringify({ request: req, snapshot }))
+      let providerTurns = 0
+      let original: BoundedWorkRequest | undefined
+      let recoveredResult: unknown
+      const requests: BoundedWorkRequest[] = []
+      const makeRunner = () => {
+        const runner = codexInReplRunner({
+          state_dir: directory, topic_id: 'project-topic', spec: { tools: [], model_preference: ['test'] },
+          composeActingTurn: async (_topic, spec) => {
+            providerTurns++
+            const args = JSON.parse(spec.prompt.split('\n')[1]!)
+            original = JSON.parse(args.message.split('\n').find((line: string) => line.startsWith('Request (data): '))!.slice(16))
+            if (role !== 'review') {
+              f.snapshot.head = 'b'.repeat(40)
+              if (f.snapshot.pr) f.snapshot.pr.head = f.snapshot.head
+              for (const outcome of f.outcomes.values()) {
+                if (outcome.kind === 'completed' && outcome.result && typeof outcome.result === 'object') Object.assign(outcome.result, structuredClone(f.snapshot))
+              }
+            }
+            recoveredResult = { ...structuredClone(f.snapshot), ...(role === 'plan' ? { payload: f.plan } : {}) }
+            await writeFile(request.result.path, JSON.stringify({ ...original, schema: request.result.schema, kind: 'completed', result: recoveredResult }))
+            throw new Error('Acknowledgement lost after the original worker wrote its result')
+          },
+          decodeTrailer: (bytes, req) => decodeProjectTrailer(bytes, req, {
+            schemas: new Map([['build/1', (result: unknown) => result !== null && typeof result === 'object']]),
+            metadata: () => undefined,
+          }),
+        })
+        const run = runner.run
+        runner.run = async (req, placement, signal) => { requests.push(structuredClone(req)); return run(req, placement, signal) }
+        const recover = runner.recover!
+        runner.recover = async (req, placement, signal) => { requests.push(structuredClone(req)); return recover(req, placement, signal) }
+        return runner
+      }
+      f.input.workers[role] = { request, runner: makeRunner() }
+      expect(await f.run()).toMatchObject({ kind: 'unknown', phase: role })
+      const saved = JSON.parse(JSON.stringify(f.state.checkpoints.at(-1)!))
+      expect(saved.pending.recovery.request).toEqual(original)
+      const preparedBefore = f.prepared.filter(value => value.role === role).length
+      const panelsBefore = panels
+      const checkpointsBefore = f.state.checkpoints.length
+      const key = createHash('sha256').update(JSON.stringify([original!.run_id, original!.step_id])).digest('hex')
+      const reservationPath = join(directory, `codex-step-${key}.json`)
+      if (reservationState === 'missing') await rm(reservationPath)
+      if (reservationState === 'unarmed') await writeFile(reservationPath, JSON.stringify(original))
+      if (reservationState === 'foreign') await writeFile(reservationPath, JSON.stringify({ ...original, step_id: 'other-step' }) + '\n#dispatch-armed\n')
+      const reservationBytes = reservationState === 'missing' ? null : await readFile(reservationPath, 'utf8')
+      const resultBytes = await readFile(request.result.path, 'utf8')
+      f.state.resume = saved
+      f.input.start = 'resume'
+      if (f.snapshot.pr) f.input.owned_pr = f.snapshot.pr.number
+      f.input.workers[role].runner = makeRunner()
+      expect(await f.run()).toMatchObject({ kind: missingReservation ? 'unknown' : 'merged' })
+      expect(providerTurns).toBe(1)
+      expect(requests).toEqual([original!, original!])
+      expect(f.prepared.filter(value => value.role === role)).toHaveLength(preparedBefore)
+      if (missingReservation) {
+        expect(panels).toBe(panelsBefore)
+        expect(f.state.checkpoints).toHaveLength(checkpointsBefore)
+        expect(f.state.checkpoints.at(-1)?.pending?.step_id).toBe(original!.step_id)
+        expect(f.events).not.toContain('merge')
+        expect(await readFile(request.result.path, 'utf8')).toBe(resultBytes)
+        if (reservationBytes === null) await expect(readFile(reservationPath)).rejects.toMatchObject({ code: 'ENOENT' })
+        else expect(await readFile(reservationPath, 'utf8')).toBe(reservationBytes)
+      } else {
+        expect(f.state.checkpoints.at(-1)?.pending).toBeUndefined()
+        expect(f.events).toContain('publicationSuite')
+        expect(f.events).toContain('mergeGate')
+      }
+    } finally { await rm(directory, { recursive: true, force: true }) }
+  })
+}
+
+async function pendingBuildFixture() {
+  const f = modeFixture('pr')
+  const original = f.completed()
+  f.outcomes.set('run:build:0', { kind: 'unknown', detail: 'lost acknowledgement' })
+  expect(await f.run()).toMatchObject({ kind: 'unknown', phase: 'build' })
+  f.state.resume = JSON.parse(JSON.stringify(f.state.checkpoints.at(-1)!))
+  f.input.start = 'resume'
+  f.outcomes.set('run:build:0', original)
+  f.input.workers.build.runner = { ...f.runner, recover: f.runner.run }
+  f.runner.calls.length = 0
+  f.cross.calls.length = 0
+  return f
+}
+
+for (const change of ['missing-request', 'wrong-request', 'wrong-step', 'model', 'brief', 'policy', 'provider', 'round-cap'] as const) {
+  test(`pending recovery refuses ${change} before another worker or publication`, async () => {
+    const f = await pendingBuildFixture()
+    const pending = f.state.resume!.pending!
+    if (change === 'missing-request') delete pending.recovery
+    if (change === 'wrong-request') pending.recovery!.request = { ...pending.recovery!.request, model_id: 'other-model' }
+    if (change === 'wrong-step') pending.step_id = 'other:build:0'
+    if (change === 'model') f.input.workers.build.request = { ...f.input.workers.build.request, model_id: 'changed-model' }
+    if (change === 'brief') f.input.workers.plan.request = { ...f.input.workers.plan.request, brief: { path: 'brief.md', integrity: 'changed-task' } }
+    if (change === 'policy') f.input.workers.build.request = { ...f.input.workers.build.request, network: true }
+    if (change === 'provider') f.input.workers.build.runner = { ...f.runner, provider: 'openai-codex' }
+    if (change === 'round-cap') f.deps.readReviewCap = async () => ({ kind: 'known', max_rounds: 4 })
+    expect(await f.run()).toMatchObject({ kind: 'unknown', phase: 'build', step_id: pending.step_id })
+    expect(f.runner.calls).toHaveLength(0)
+    expect(f.cross.calls).toHaveLength(0)
+    expect(f.events).not.toContain('publish')
+    expect(f.events).not.toContain('merge')
+  })
+}
+
+test('pending build result cannot apply to a different measured head', async () => {
+  const f = await pendingBuildFixture()
+  f.snapshot.head = 'c'.repeat(40)
+  expect(await f.run()).toMatchObject({ kind: 'failed', cause: 'built-head-unverified' })
+  expect(f.runner.calls.map(request => request.step_id)).toEqual(['run:build:0'])
+  expect(f.events).not.toContain('publish')
+  expect(f.cross.calls).toHaveLength(0)
+})
+
+test('writable pending planner cannot apply an old result to a moved head', async () => {
+  const f = modeFixture('pr')
+  const original = f.outcomes.get('run:plan:0')!
+  f.outcomes.set('run:plan:0', { kind: 'unknown', detail: 'lost acknowledgement' })
+  expect(await f.run()).toMatchObject({ kind: 'unknown', phase: 'plan' })
+  f.state.resume = JSON.parse(JSON.stringify(f.state.checkpoints.at(-1)!))
+  f.input.start = 'resume'
+  f.input.workers.plan.runner = { ...f.runner, recover: f.runner.run }
+  f.outcomes.set('run:plan:0', original)
+  f.snapshot.head = 'c'.repeat(40)
+  f.runner.calls.length = 0
+  expect(await f.run()).toMatchObject({ kind: 'failed', cause: 'built-head-unverified' })
+  expect(f.runner.calls.map(request => request.step_id)).toEqual(['run:plan:0'])
+  expect(f.events).not.toContain('publish')
+  expect(f.cross.calls).toHaveLength(0)
+})
+
+test('pending recovery cannot fall back to ordinary run when the runner lacks recovery', async () => {
+  const f = await pendingBuildFixture()
+  delete f.input.workers.build.runner.recover
+  expect(await f.run()).toMatchObject({ kind: 'unknown', phase: 'build', detail: 'Pending worker runner cannot recover without dispatch' })
+  expect(f.runner.calls).toHaveLength(0)
+  expect(f.cross.calls).toHaveLength(0)
+  expect(f.events).not.toContain('publish')
+})
+
+test('unresolved pending build remains unknown and cannot buy a new step', async () => {
+  const f = await pendingBuildFixture()
+  f.outcomes.set('run:build:0', { kind: 'unknown', detail: 'still running' })
+  expect(await f.run()).toMatchObject({ kind: 'unknown', step_id: 'run:build:0', detail: 'still running' })
+  expect(f.runner.calls.map(request => request.step_id)).toEqual(['run:build:0'])
+  expect(f.events).not.toContain('publish')
+  expect(f.cross.calls).toHaveLength(0)
+})
+
+for (const role of ['plan', 'review'] as const) test(`read-only pending ${role} cannot recover across head movement`, async () => {
+  const f = modeFixture('pr')
+  f.input.workers[role].request = { ...f.input.workers[role].request, writable: false }
+  const key = `run:${role}:${role === 'plan' ? 0 : 1}`
+  f.outcomes.set(key, { kind: 'unknown', detail: 'lost acknowledgement' })
+  expect(await f.run()).toMatchObject({ kind: 'unknown', phase: role })
+  f.state.resume = JSON.parse(JSON.stringify(f.state.checkpoints.at(-1)!))
+  f.input.start = 'resume'
+  f.snapshot.head = 'c'.repeat(40)
+  if (f.snapshot.pr) f.snapshot.pr.head = f.snapshot.head
+  f.outcomes.set(key, f.completed())
+  f.runner.calls.length = 0
+  f.cross.calls.length = 0
+  expect(await f.run()).toMatchObject({ kind: 'unknown', phase: role, detail: 'Pending worker input revision changed before recovery' })
+  expect(f.runner.calls).toHaveLength(0)
+  expect(f.cross.calls).toHaveLength(0)
+  expect(f.events).not.toContain('merge')
+})
+
+test('recovered pending build still requires the publication suite', async () => {
+  const f = await pendingBuildFixture()
+  f.deps.publicationSuite = async () => ({ kind: 'unknown', detail: 'full suite receipt missing' })
+  expect(await f.run()).toMatchObject({ kind: 'unknown', detail: 'full suite receipt missing' })
+  expect(f.runner.calls.map(request => request.step_id)).toEqual(['run:build:0'])
+  expect(f.events).not.toContain('merge')
+})
+
+test('pending review cannot be discarded by a publication nomination repair', async () => {
+  const f = modeFixture('pr')
+  f.outcomes.set('run:review:1', { kind: 'unknown', detail: 'still running' })
+  expect(await f.run()).toMatchObject({ kind: 'unknown', phase: 'review' })
+  const pending = JSON.parse(JSON.stringify(f.state.checkpoints.at(-1)!))
+  f.state.resume = pending
+  f.input.start = 'resume'
+  f.deps.publishGate = async () => ({ kind: 'repair-nomination', finding: 'nomination changed' })
+  f.runner.calls.length = 0
+  f.cross.calls.length = 0
+  const checkpoints = f.state.checkpoints.length
+  const outcome = await f.run()
+  expect(f.state.checkpoints).toHaveLength(checkpoints)
+  expect(f.state.checkpoints.at(-1)?.pending).toEqual(pending.pending)
+  expect(outcome).toMatchObject({ kind: 'unknown', detail: 'Pending worker must be reconciled before nomination repair' })
+  expect(f.runner.calls).toHaveLength(0)
+  expect(f.cross.calls).toHaveLength(0)
+  expect(f.events).not.toContain('merge')
+})
+
+for (const remainingTasks of [0, 1]) test(`pending Ralph build preserves its validated remainder ${remainingTasks}`, async () => {
+  const f = modeFixture()
+  f.setPlan({ ...f.plan, remainingTasks })
+  f.outcomes.set('run:build:0', { kind: 'unknown', detail: 'lost acknowledgement' })
+  expect(await f.run()).toMatchObject({ kind: 'unknown', phase: 'build' })
+  f.state.resume = JSON.parse(JSON.stringify(f.state.checkpoints.at(-1)!))
+  f.input.start = 'resume'
+  f.outcomes.set('run:build:0', f.completed())
+  f.input.workers.build.runner = { ...f.runner, recover: f.runner.run }
+  f.runner.calls.length = 0
+  expect(await f.run()).toMatchObject({ kind: remainingTasks ? 'continued' : 'merged' })
+  expect(f.runner.calls.map(request => request.role)).toEqual(['build'])
+  expect(f.prepared.filter(value => value.role === 'build').map(value => value.suiteScope)).toEqual([remainingTasks ? 'subset' : 'full-suite'])
+  expect(f.state.advances).toBe(remainingTasks ? 1 : 0)
+  expect(f.events.includes('publicationSuite')).toBe(remainingTasks === 0)
 })
 
 for (const start of ['fresh', 'resume'] as const) {
