@@ -883,6 +883,8 @@
   .cwb-blocked-reason { flex: 1 1 auto; min-width: 0; font-size: 0.7333rem; color: var(--phase-blocked-fg); white-space: nowrap; overflow: hidden; text-overflow: ellipsis; }
   /* Recovered brief-integrity alert — persistent but de-emphasized; full text on hover. */
   .cwb-brief-alert { flex: 1 1 auto; min-width: 0; font-size: 0.7333rem; color: var(--muted); white-space: nowrap; overflow: hidden; text-overflow: ellipsis; }
+  /* A retry that carried its checkpoint — a plain fact about the run, never an alert. */
+  .cwb-resume-note { flex: 1 1 auto; min-width: 0; font-size: 0.7333rem; color: var(--muted); font-style: italic; white-space: nowrap; overflow: hidden; text-overflow: ellipsis; }
   /* FIX #341 — drag handle: bare ⠿ grip-dots, NO border/button chrome, so it
      reads as a draggable grip rather than a third action button beside ▶/✕.
      Muted (`--faint`, brightening to `--muted` on hover) with a grab/grabbing

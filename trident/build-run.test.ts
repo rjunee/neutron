@@ -519,7 +519,7 @@ function modeFixture(mode: BuildRunInput['mode'] = 'ralph') {
       const old = f.snapshot.head
       state.committedBody = body
       f.snapshot.head = ledgerHead
-      f.snapshot.diff += 'diff --git a/IMPLEMENTATION_PLAN.md b/IMPLEMENTATION_PLAN.md\n'
+      f.snapshot.diff += 'diff --git a/.trident/ledgers/change.md b/.trident/ledgers/change.md\n'
       for (const outcome of f.outcomes.values()) {
         if (outcome.kind === 'completed' && outcome.result && typeof outcome.result === 'object' && 'head' in outcome.result && outcome.result.head === old) outcome.result.head = ledgerHead
       }
@@ -652,17 +652,18 @@ for (const kind of ['blocked', 'unknown'] as const) {
 }
 
 // ── THE TASK LEDGER (spec item a-retry-must-resume-from-the-checkpoint, acceptance 2) ──
-// G026's cheap planner reads `IMPLEMENTATION_PLAN.md` at the tip, and nothing in the
-// typed host used to write it, so every continuation re-planned from scratch. The
-// driver now refuses a ledger that disagrees with its counts and commits the ticked
-// ledger at the handoff, BEFORE `advanceRalph` records the head.
+// G026's cheap planner reads the committed ledger at the tip, and nothing in the
+// typed host used to write one, so every continuation re-planned from scratch. The
+// driver now refuses a HANDOFF ledger that disagrees with its counts and commits the
+// ticked ledger at the handoff, BEFORE `advanceRalph` records the head.
 
-test('G025 ledger: a Ralph plan whose unchecked lines disagree with topTask/remainingTasks is no plan', async () => {
+test('G025 ledger: a Ralph handoff plan whose unchecked lines disagree with topTask/remainingTasks is no plan', async () => {
   const ledger = 'Planner returned no execution plan: the task ledger disagrees with topTask/remainingTasks'
   for (const patch of [
-    { remainingTasks: 0 },                                   // count says one task, the ledger has two
-    { remainingTasks: 2 },                                   // count says three
+    { remainingTasks: 2 },                                   // count says three, the ledger has two
+    { implementationPlan: '- [ ] T1: first\n- [ ] T2: second\n- [ ] T3: third' }, // count says two, the ledger has three
     { topTask: '- [ ] T2: second' },                         // the top task is not the first unchecked line
+    { topTask: 'T2: second' },                               // …with or without its checkbox marker
     { implementationPlan: '## T1 first\n## T2 second' },     // headings, no boxes: what iteration 1 of this card returned
   ]) {
     const f = modeFixture(); f.setPlan({ ...f.plan, ...patch })
@@ -671,12 +672,29 @@ test('G025 ledger: a Ralph plan whose unchecked lines disagree with topTask/rema
     expect(f.state.commits).toEqual([])
   }
   // Positive control: the same disagreeing payload is not a ledger in pr mode.
-  const pr = modeFixture('pr'); pr.setPlan({ ...pr.plan, remainingTasks: 0 })
+  const pr = modeFixture('pr'); pr.setPlan({ ...pr.plan, remainingTasks: 2 })
   expect((await pr.run()).kind).toBe('merged')
   expect(pr.state.commits).toEqual([])
-  // And whitespace around an otherwise verbatim top task is not a disagreement.
-  const spaced = modeFixture(); spaced.setPlan({ ...spaced.plan, topTask: '  - [ ] T1: first  ' })
-  expect((await spaced.run()).kind).toBe('continued')
+  // Whitespace, or a missing checkbox marker, around an otherwise verbatim top task
+  // is not a disagreement: both name the ledger's first unchecked task.
+  for (const topTask of ['  - [ ] T1: first  ', 'T1: first']) {
+    const same = modeFixture(); same.setPlan({ ...same.plan, topTask })
+    expect((await same.run()).kind, topTask).toBe('continued')
+    expect(same.state.commits.map(c => c.body)).toEqual(['- [x] T1: first\n- [ ] T2: second'])
+  }
+})
+
+test('G025 ledger: a plan that commits no ledger is never refused for its shape', async () => {
+  // A single-task or final iteration commits nothing and nothing reads its boxes, so a
+  // heading-only ledger or a disagreeing count there builds and merges as it always did.
+  for (const patch of [
+    { implementationPlan: '## T1 first', topTask: 'T1 first', remainingTasks: 0 },
+    { implementationPlan: '- [ ] T1: first\n- [ ] T2: second', remainingTasks: 0 },
+  ]) {
+    const f = modeFixture(); f.setPlan({ ...f.plan, ...patch })
+    expect((await f.run()).kind, JSON.stringify(patch)).toBe('merged')
+    expect(f.state.commits).toEqual([])
+  }
 })
 
 test('Ralph handoff commits the ticked ledger and hands the LEDGER head to advanceRalph', async () => {
@@ -717,15 +735,15 @@ test('Ralph ledger commit refusal or an unmeasured ledger head never hands off',
 })
 
 test('final Ralph iteration never moves the reviewed head with a ledger commit', async () => {
-  // A one-task run: no continuation will read a ledger, and IMPLEMENTATION_PLAN.md is
-  // executable prose to the mutation gate, so the host must not add it to the diff.
+  // A one-task run: no continuation will read a ledger, so the host adds nothing to
+  // the diff the builder's receipts are bound to.
   const single = modeFixture(); single.plan.implementationPlan = '- [ ] T1: first'; single.plan.remainingTasks = 0; single.setPlan()
   expect((await single.run()).kind).toBe('merged')
   expect(single.state.commits).toEqual([])
   // The last iteration of a multi-task run, whose diff already carries the handoff
   // ledger: the reviewed and merged revision is still the BUILDER's head, because
   // every worker receipt review and publication read is bound to that head.
-  const last = modeFixture(); last.snapshot.diff = 'diff --git a/IMPLEMENTATION_PLAN.md b/IMPLEMENTATION_PLAN.md\n+ledger\n'
+  const last = modeFixture(); last.snapshot.diff = 'diff --git a/.trident/ledgers/change.md b/.trident/ledgers/change.md\n+ledger\n'
   last.plan.implementationPlan = '- [x] T1: first\n- [ ] T2: second'; last.plan.topTask = '- [ ] T2: second'; last.plan.remainingTasks = 0; last.setPlan()
   expect(await last.run()).toMatchObject({ kind: 'merged', snapshot: { head: 'a'.repeat(40) } })
   expect(last.state.commits).toEqual([])

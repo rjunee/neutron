@@ -77,7 +77,7 @@ export interface BuildModeHost {
   /** Diff must be generated using this exact OID, not a moving branch name. */
   regenerateDiff(head: string): Promise<{ kind: 'known'; diff: string } | { kind: 'unknown'; detail: string }>
   probePlan(head: string): Promise<PlanProbe | null>
-  /** Commit the host-rendered task ledger (`IMPLEMENTATION_PLAN.md`) on top of
+  /** Commit the host-rendered task ledger (the branch's own `.trident/ledgers/<branch>.md`) on top of
    * `snapshot`, which must still be the live revision. Idempotent: a tip whose
    * committed ledger already equals `body` returns that tip and writes nothing.
    * `known` carries the resulting full head, which the driver re-measures. */
@@ -209,20 +209,30 @@ const unchecked = (body: string): string[] => body.split('\n').filter(line => un
 /**
  * THE TASK LEDGER. A Ralph plan's `implementationPlan` is a checkbox list — one
  * `- [x] T<n>: …` line per task already built on this branch, one `- [ ] T<n>: …`
- * line per task still to build, the top task first — and the host commits it as
- * `IMPLEMENTATION_PLAN.md` at every handoff. That committed file is the ONLY thing
- * G026's cheap continuation planner can read (`probePlan` archives it at the tip),
- * so a plan whose counts disagree with its own boxes would hand the next iteration
- * a ledger that says something different from what this iteration built.
+ * line per task still to build, the top task first — and the host commits it at
+ * every handoff, at the branch's own `.trident/ledgers/<branch>.md`
+ * (`taskLedgerPath`, trident/production-host-effects.ts). That committed file is the
+ * ONLY thing G026's cheap continuation planner can read (`probePlan` archives it at
+ * the tip), so a plan whose counts disagree with its own boxes would hand the next
+ * iteration a ledger that says something different from what this iteration built.
  *
- * Before this, nothing in the typed host wrote the file: the planner's ledger lived
- * only in `plan.result`, `probePlan` found main's stale copy with zero unchecked
- * boxes, and every continuation re-planned from scratch (spec item
+ * Before this, nothing in the typed host wrote a ledger: the planner's lived only in
+ * `plan.result`, `probePlan` found main's stale root copy with zero unchecked boxes,
+ * and every continuation re-planned from scratch (spec item
  * a-retry-must-resume-from-the-checkpoint, acceptance 2).
+ *
+ * ENFORCED ONLY WHERE A LEDGER IS COMMITTED — a handoff, `remainingTasks > 0`. A
+ * single-task or final iteration commits nothing and nothing downstream reads its
+ * boxes, so refusing its shape would turn a formatting slip into a failed run that
+ * used to build and merge. And the top task is compared with its checkbox marker
+ * stripped on both sides: `T1: foo` and `- [ ] T1: foo` name the same task (the
+ * publication title strips the marker for the same reason, open/wiring/project-build.ts).
  */
+const taskText = (line: string): string => line.trim().replace(/^- \[ \]\s+/, '').trim()
 function ledgerAgrees(plan: ExecutionPlan): boolean {
+  if (plan.remainingTasks === 0) return true
   const open = unchecked(plan.implementationPlan)
-  return open.length === plan.remainingTasks + 1 && open[0]!.trim() === plan.topTask.trim()
+  return open.length === plan.remainingTasks + 1 && taskText(open[0]!) === taskText(plan.topTask)
 }
 /** The ledger with its top task — the first unchecked line — ticked. */
 function tickTopTask(body: string): string {
@@ -557,7 +567,10 @@ export async function buildRun(input: BuildRunInput, deps: BuildRunDeps, signal:
         // open/wiring/project-build.ts). A host commit on top would leave the reviewed
         // head with no receipt at all, so no multi-task card could ever merge (measured
         // end to end: `open/__tests__/project-build-e2e.test.ts`, the Ralph-handoff
-        // retry). The merged ledger therefore records the last handoff's state.
+        // retry). The merged ledger therefore records the last handoff's state — at
+        // the branch's OWN path, so no two cards' ledgers meet in a merge, and as
+        // prose the mutation gate treats as inert, so a documentation-only card keeps
+        // its exemption with the ledger in its diff.
         const ledger = await commitLedger(tickTopTask(plan!.implementationPlan))
         if (ledger) return ledger
         // G037: consume the old result before acknowledging the next iteration.

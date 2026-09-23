@@ -1,7 +1,7 @@
 import { reviewArtifact } from './gates/review-artifact.ts'
 import { fixLineage } from './gates/fix-lineage.ts'
 import { afterEach, expect, test } from 'bun:test'
-import { mkdtemp, readFile, rm, writeFile, symlink } from 'node:fs/promises'
+import { mkdir, mkdtemp, readFile, rm, writeFile, symlink } from 'node:fs/promises'
 import { tmpdir } from 'node:os'
 import { join } from 'node:path'
 import { ProjectDb } from '@neutronai/persistence/index.ts'
@@ -9,7 +9,8 @@ import { fakeRunner, type BoundedWorkOutcome, type BoundedWorkRequest } from '@n
 import { seedMigratedDb } from '../tests/support/migrated-db.ts'
 import { TridentRunStore } from './store.ts'
 import { spawnCapture, type EnvCapableHostRunner, type HostCommandResult } from './git-mode.ts'
-import { createProductionHostEffects, productionCiSource, workContextPath } from './production-host-effects.ts'
+import { createProductionHostEffects, productionCiSource, taskLedgerPath, workContextPath } from './production-host-effects.ts'
+import { classifyMutationTarget, isProseOnlyChange } from './mutation-prover.ts'
 import { briefIntegrity } from './gates/brief-integrity.ts'
 import { buildRun, type BuildRunDeps, type BuildRunInput, type BuildSnapshot } from './build-run.ts'
 import { readProjectRepos, resolveProjectRepo } from './project-repos.ts'
@@ -17,6 +18,12 @@ import { ciReadinessForHead } from './ci-readiness.ts'
 
 const cleanups: (() => Promise<void>)[] = []
 afterEach(async () => { for (const cleanup of cleanups.splice(0)) await cleanup() })
+/** The fixture branch `change`'s own ledger path, and a writer that creates its parents. */
+const LEDGER = '.trident/ledgers/change.md'
+async function writeLedger(worktree: string, body: string) {
+  await mkdir(join(worktree, '.trident', 'ledgers'), { recursive: true })
+  await writeFile(join(worktree, LEDGER), body)
+}
 const ok = (stdout = ''): HostCommandResult => ({ ok: true, stdout, stderr: '', exit_code: 0 })
 const bad = (): HostCommandResult => ({ ok: false, stdout: '', stderr: 'unreadable', exit_code: 128 })
 
@@ -946,8 +953,8 @@ test('production Ralph handoff consumes once and probes the pinned committed pla
   const f = await fixture()
   // This fixture enables the already-created run for the additive mode host.
   await f.db.run('UPDATE code_trident_runs SET ralph = 1 WHERE id = ?', [f.row.id])
-  await writeFile(join(f.worktree, 'IMPLEMENTATION_PLAN.md'), '- [x] first\n- [ ] second\n')
-  await f.command(['git', '-C', f.worktree, 'add', 'IMPLEMENTATION_PLAN.md'])
+  await writeLedger(f.worktree, '- [x] first\n- [ ] second\n')
+  await f.command(['git', '-C', f.worktree, 'add', LEDGER])
   await f.command(['git', '-C', f.worktree, 'commit', '-m', 'Commit plan'])
   const snapshot = await measured(f)
   await f.modes.saveCheckpoint!({ head: snapshot.head, stage: 'built', round: 1, replansUsed: 0, findings: [], previousFindings: [] })
@@ -961,11 +968,40 @@ test('production Ralph handoff consumes once and probes the pinned committed pla
   expect(await restarted.modes.advanceRalph({ ...handoff, snapshot: { ...snapshot, head: f.tip } })).toMatchObject({ kind: 'blocked' })
 })
 
-// THE HOST COMMITS THE TASK LEDGER THE CONTINUATION PLANNER READS. `probePlan` has
-// always archived IMPLEMENTATION_PLAN.md at the tip; nothing in the typed host wrote
-// it, so G026 found main's stale copy (zero unchecked boxes) and every continuation
-// re-planned from scratch. These run on a real repository: the commit, the probe and
-// the refusals are git's answers, not a fake's.
+// THE HOST COMMITS THE TASK LEDGER THE CONTINUATION PLANNER READS. `probePlan` used
+// to archive the repo-root IMPLEMENTATION_PLAN.md at the tip; nothing in the typed host
+// wrote it, so G026 found main's stale copy (zero unchecked boxes) and every
+// continuation re-planned from scratch. The ledger now lives at the branch's OWN path,
+// `.trident/ledgers/<branch>.md`. These run on a real repository: the commit, the probe
+// and the refusals are git's answers, not a fake's.
+
+test('the task ledger path is per branch and inert to the mutation gate', () => {
+  expect(taskLedgerPath('change')).toBe(LEDGER)
+  expect(taskLedgerPath('trident/a-card')).toBe('.trident/ledgers/trident/a-card.md')
+  // Two cards never share one ledger, so two in-flight PRs never meet on it in a merge.
+  expect(taskLedgerPath('trident/a-card')).not.toBe(taskLedgerPath('trident/b-card'))
+  for (const refused of ['', ' change', '-change', 'a..b', 'a:b', 'a/']) expect(taskLedgerPath(refused)).toBeNull()
+  // A documentation-only card keeps its prose exemption with the host's ledger in its
+  // diff, and the ledger is never a nominatable target: the empty-satisfiable-set shape
+  // the repo-root IMPLEMENTATION_PLAN.md (executable prose) created.
+  const ledger = taskLedgerPath('trident/a-card')!
+  expect(isProseOnlyChange(['docs/notes.md', ledger])).toBe(true)
+  expect(classifyMutationTarget(ledger)).toBe('prose')
+  expect(isProseOnlyChange(['docs/notes.md', 'IMPLEMENTATION_PLAN.md'])).toBe(false)
+})
+
+test('production probePlan reads only the branch ledger and answers null when there is none', async () => {
+  const f = await fixture()
+  // A repo-root IMPLEMENTATION_PLAN.md (main's legacy copy) is not this branch's ledger.
+  await writeFile(join(f.worktree, 'IMPLEMENTATION_PLAN.md'), '- [ ] legacy\n')
+  await f.command(['git', '-C', f.worktree, 'add', 'IMPLEMENTATION_PLAN.md'])
+  await f.command(['git', '-C', f.worktree, 'commit', '-m', 'Legacy root plan'])
+  const snapshot = await measured(f)
+  expect(await f.modes.probePlan(snapshot.head)).toBeNull()
+  // An unreadable commit is still an error, never "no plan".
+  await expect(f.modes.probePlan('e'.repeat(40))).rejects.toThrow('unreadable')
+})
+
 test('production commitPlan commits the ledger alone on the measured head and the probe reads it back', async () => {
   const f = await fixture()
   const snapshot = await measured(f)
@@ -979,7 +1015,7 @@ test('production commitPlan commits the ledger alone on the measured head and th
   expect(committed.head).not.toBe(snapshot.head)
   expect(await f.command(['git', '-C', f.repo, 'rev-parse', 'refs/heads/change'])).toBe(committed.head)
   expect(await f.command(['git', '-C', f.repo, 'rev-parse', `${committed.head}^1`])).toBe(snapshot.head)
-  expect(await f.command(['git', '-C', f.repo, 'diff-tree', '--no-commit-id', '--name-only', '-r', committed.head])).toBe('IMPLEMENTATION_PLAN.md')
+  expect(await f.command(['git', '-C', f.repo, 'diff-tree', '--no-commit-id', '--name-only', '-r', committed.head])).toBe(LEDGER)
   // A fixed subject, no task text and no trailers: the message lands on a public branch.
   expect(await f.command(['git', '-C', f.repo, 'log', '-1', '--format=%B', committed.head])).toBe('chore(trident): task ledger — 2 remaining')
   const probe = await f.modes.probePlan(committed.head)
@@ -1014,14 +1050,23 @@ test('production commitPlan refuses a moved tip and a ledger path that is not a 
   // A link would make the host write through it to bytes outside the worktree.
   const outside = join(f.dir, 'outside-plan')
   await writeFile(outside, 'host bytes\n')
-  await symlink(outside, join(f.worktree, 'IMPLEMENTATION_PLAN.md'))
+  await mkdir(join(f.worktree, '.trident', 'ledgers'), { recursive: true })
+  await symlink(outside, join(f.worktree, LEDGER))
   expect(await f.modes.commitPlan({ body: '- [ ] T1: first\n', snapshot: await measured(f) })).toEqual({ kind: 'blocked', on: 'Task ledger path is not a regular file' })
   expect(await readFile(outside, 'utf8')).toBe('host bytes\n')
+  // A link at a PARENT directory carries the write out just as surely: refused before
+  // anything is written through it.
+  await rm(join(f.worktree, '.trident'), { recursive: true, force: true })
+  const outsideDir = join(f.dir, 'outside-dir')
+  await mkdir(outsideDir)
+  await symlink(outsideDir, join(f.worktree, '.trident'))
+  expect(await f.modes.commitPlan({ body: '- [ ] T1: first\n', snapshot: await measured(f) })).toEqual({ kind: 'blocked', on: 'Task ledger path is not a regular file' })
+  expect(await Bun.file(join(outsideDir, 'ledgers', 'change.md')).exists()).toBe(false)
 })
 
 test('production commitPlan reports an unconfirmed commit as unknown, never as a head', async () => {
   const f = await fixture()
-  f.intercept(argv => argv.includes('add') && argv.includes('IMPLEMENTATION_PLAN.md') ? bad() : undefined)
+  f.intercept(argv => argv.includes('add') && argv.includes(LEDGER) ? bad() : undefined)
   expect(await f.modes.commitPlan({ body: '- [ ] T1: first\n', snapshot: await measured(f) }))
     .toEqual({ kind: 'unknown', detail: 'Task ledger could not be staged' })
   f.intercept(argv => argv.includes('commit') ? bad() : undefined)
@@ -1098,8 +1143,8 @@ test('production mode refuses malformed persisted state and unusable observation
 for (const operation of ['archive', 'tar'] as const) {
   test(`production plan refuses failed ${operation} even with usable output`, async () => {
     const f = await fixture()
-    await writeFile(join(f.worktree, 'IMPLEMENTATION_PLAN.md'), '- [ ] next\n')
-    await f.command(['git', '-C', f.worktree, 'add', 'IMPLEMENTATION_PLAN.md'])
+    await writeLedger(f.worktree, '- [ ] next\n')
+    await f.command(['git', '-C', f.worktree, 'add', LEDGER])
     await f.command(['git', '-C', f.worktree, 'commit', '-m', 'Commit plan'])
     const snapshot = await measured(f)
     expect(await f.modes.probePlan(snapshot.head)).toMatchObject({ uncheckedCount: 1 })
@@ -1136,8 +1181,9 @@ test('production plan refuses a committed link to host bytes', async () => {
   const f = await fixture()
   const outside = join(f.dir, 'outside-plan')
   await writeFile(outside, '- [ ] unrelated host task\n')
-  await symlink(outside, join(f.worktree, 'IMPLEMENTATION_PLAN.md'))
-  await f.command(['git', '-C', f.worktree, 'add', 'IMPLEMENTATION_PLAN.md'])
+  await mkdir(join(f.worktree, '.trident', 'ledgers'), { recursive: true })
+  await symlink(outside, join(f.worktree, LEDGER))
+  await f.command(['git', '-C', f.worktree, 'add', LEDGER])
   await f.command(['git', '-C', f.worktree, 'commit', '-m', 'Commit link fixture'])
   const snapshot = await measured(f)
   await expect(f.modes.probePlan(snapshot.head)).rejects.toThrow('regular file')
@@ -1212,9 +1258,9 @@ test('production Ralph driver persists its continuation and host iteration', asy
 
 test('production plan refuses archive transformations of committed bytes', async () => {
   const f = await fixture()
-  await writeFile(join(f.worktree, '.gitattributes'), 'IMPLEMENTATION_PLAN.md export-subst\n')
-  await writeFile(join(f.worktree, 'IMPLEMENTATION_PLAN.md'), '- [ ] next $Format:%H$\n')
-  await f.command(['git', '-C', f.worktree, 'add', '.gitattributes', 'IMPLEMENTATION_PLAN.md'])
+  await writeFile(join(f.worktree, '.gitattributes'), `${LEDGER} export-subst\n`)
+  await writeLedger(f.worktree, '- [ ] next $Format:%H$\n')
+  await f.command(['git', '-C', f.worktree, 'add', '.gitattributes', LEDGER])
   await f.command(['git', '-C', f.worktree, 'commit', '-m', 'Commit archive attribute fixture'])
   const snapshot = await measured(f)
   await expect(f.modes.probePlan(snapshot.head)).rejects.toThrow('blob could not be verified')

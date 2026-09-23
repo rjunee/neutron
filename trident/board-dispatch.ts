@@ -161,6 +161,13 @@ const NOT_RESUMED_BECAUSE: Record<Exclude<ResumeSeedReason, 'no_prior_terminal_r
  * governed run, the Ralph round and cap the row actually holds. No path, host or
  * identity is ever interpolated — the only variable parts are the checkpoint NAME, a
  * 7-character commit prefix and two integers.
+ *
+ * A CARRIED CHECKPOINT IS WORDED AS THE DISPATCH'S DECISION, NOT THE OUTCOME. The note
+ * is written once, here, from the dispatch-time tip proof, and nothing may restate it
+ * (`code_trident_runs.resume_note`, trident/store.ts). A branch that moves between this
+ * dispatch and the launch is caught by the driver's G038 head check, which rebuilds
+ * instead (trident/build-run.ts) — so "Resumed from …" would claim an outcome the run
+ * can still decline. The sentence says what the dispatch did and names that exception.
  */
 export function resumeNote(reason: ResumeSeedReason, row: ResumeNoteRow): string | null {
   if (reason === 'no_prior_terminal_run') return null
@@ -172,7 +179,7 @@ export function resumeNote(reason: ResumeSeedReason, row: ResumeNoteRow): string
       : `; fresh Ralph budget ${row.ralph_round}/${row.max_ralph_rounds}.`
   if (reason === 'resumed' || reason === 'resumed_continuation') {
     const at = row.inner_checkpoint_head !== null ? ` at ${row.inner_checkpoint_head.slice(0, 7)}` : ''
-    return `Resumed from ${row.inner_checkpoint ?? 'the last checkpoint'}${at}${ralph}`
+    return `Dispatched to resume from ${row.inner_checkpoint ?? 'the last checkpoint'}${at} (rebuilds if the branch moves before launch)${ralph}`
   }
   return `Not resumed: ${NOT_RESUMED_BECAUSE[reason]}, so this is a fresh build${ralph}`
 }
@@ -1616,16 +1623,25 @@ export async function dispatchBoardBoundBuild(
   // the re-read would find is OUR OWN, and refusing on it would queue a hold
   // behind a run this very call created.
   let createdRunId: string | null = null
-  // WHETHER THERE WAS A PRIOR TO ASK ABOUT — the same condition that gates the
-  // `dispatch_resume_seed` line below, so the card sentence and the log line are
-  // emitted for exactly the same dispatches. The ladder above always names a reason
+  // WHETHER THERE WAS A PRIOR TO ASK ABOUT — the condition that gates the
+  // `dispatch_resume_seed` line below. The ladder above always names a reason
   // (`card_names_no_run` for a link-less card), so without this a card's very FIRST
   // dispatch would be told it "was not resumed" from a run that never existed.
   const hadPriorToAsk = prior !== null || cardsPriorRun !== '' || anyPriorForThisWork !== null
+  // THE CARD SENTENCE HAS A NARROWER GATE: a prior THIS CARD can be said to have — a
+  // resolved prior, a run the card links, or a slug match for the SAME task text. The
+  // slug lookup (`anyPriorForThisWork`) is truncated at 35 characters (`slugifyTask`),
+  // so it also finds ANOTHER card's run when two titles share a prefix, and a brand-new
+  // card would be told on its first dispatch that it "was not resumed". A slug match
+  // whose task text differs stays in the log line (`other_prior_for_slug`) and off the
+  // card. One with the same text is this card's own work with its link lost, and a
+  // retry of that must still SAY it did not resume (acceptance 1: silence fails).
+  const cardHadPrior = prior !== null || cardsPriorRun !== ''
+    || (anyPriorForThisWork !== null && anyPriorForThisWork.task === input.task)
   // THE CARD SENTENCE, built from the values this row is about to be written with —
   // the same seed, budget and cap the spreads below pass — so the note and the row
   // cannot disagree. Written once, at create; nothing later restates it.
-  const resume_note = resumeNote(hadPriorToAsk ? seedReason : 'no_prior_terminal_run', {
+  const resume_note = resumeNote(cardHadPrior ? seedReason : 'no_prior_terminal_run', {
     inner_checkpoint: seed?.checkpoint ?? null,
     inner_checkpoint_head: seed?.head ?? null,
     ralph,

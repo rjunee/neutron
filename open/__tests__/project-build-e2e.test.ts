@@ -68,7 +68,7 @@ import { createProjectBuildHost, type ProjectBuildOutcome } from '@neutronai/tri
 import { spawnCapture, type HostCommandResult } from '@neutronai/trident/git-mode.ts'
 import { gitRangeArgv } from '@neutronai/trident/git-range.ts'
 import { VERDICT_SCHEMA } from '@neutronai/trident/gates/result-contract.ts'
-import { workContextPath } from '@neutronai/trident/production-host-effects.ts'
+import { taskLedgerPath, workContextPath } from '@neutronai/trident/production-host-effects.ts'
 import { pool, supervisedBySessionKey } from '@neutronai/runtime/adapters/claude-code/persistent/pool-state.ts'
 import type { BoundedWorkRequest } from '@neutronai/runtime/bounded-work.ts'
 import { buildRun, type BuildRunOutcome } from '@neutronai/trident/build-run.ts'
@@ -321,9 +321,10 @@ interface WorkerWorld {
   /** The committed ledger bytes the real driver handed each plan turn (`committedPlan.body`). */
   committedPlans: (string | undefined)[]
   /**
-   * THE HOST IS THE ONLY LEDGER WRITER. When set, a build worker never writes
-   * `IMPLEMENTATION_PLAN.md` itself (it still records the task it was handed), so the
-   * only ledger a continuation can find is the one `commitLedger` committed
+   * THE HOST IS THE ONLY LEDGER WRITER. When set, a build worker never writes a
+   * ledger itself (not even the legacy root `IMPLEMENTATION_PLAN.md`; it still records
+   * the task it was handed), so the only ledger a continuation can find is the one
+   * `commitLedger` committed at the branch's own `.trident/ledgers/<branch>.md`
    * (`trident/build-run.ts`, the Ralph handoff).
    */
   hostLedger?: boolean
@@ -1993,8 +1994,9 @@ test('ralph continuation probes the committed plan and selects its next unchecke
 // ledger the HOST commits at the handoff, and the dispatch → `prepareLaunch` path
 // that carries the dead run's checkpoint onto a NEW row. Here the seed commit has
 // no ledger and the worker never writes one (`seedLedger: false`, `hostLedger:
-// true`), so the only `IMPLEMENTATION_PLAN.md` anywhere is `commitLedger`'s — and
-// the retry is driven through the real dispatch and the real gateway launch.
+// true`), so the only ledger anywhere is `commitLedger`'s, at the branch's own
+// `.trident/ledgers/<branch>.md` — and the retry is driven through the real dispatch
+// and the real gateway launch.
 
 const CONTINUATION_TASK = 'Record a note in NOTES.md and verify the resulting change with the complete regression suite. MORE TASKS'
 const HANDOFF_LEDGER = '- [x] T1 record the note\n- [ ] T2 record another note\n'
@@ -2016,12 +2018,17 @@ async function handOffThenDie(f: Awaited<ReturnType<typeof fixture>>, mergeMode:
   expect(h2).toMatch(/^[0-9a-f]{40}$/)
   const prior = f.store.get(f.row.id)!
   const branch = prior.branch!
+  const ledger = taskLedgerPath(branch)!
+  expect(ledger).toBe(`.trident/ledgers/${branch}.md`)
   // THE HOST'S LEDGER COMMIT IS THE HANDOFF HEAD, and it is the only ledger there is:
   // the worker's build commit beneath it carries none, and neither does the base.
-  expect(await gitOut(spawnCapture, f.repo, ['rev-parse', '--verify', `${h2}:IMPLEMENTATION_PLAN.md`])).toBe(blobId(HANDOFF_LEDGER))
+  expect(await gitOut(spawnCapture, f.repo, ['rev-parse', '--verify', `${h2}:${ledger}`])).toBe(blobId(HANDOFF_LEDGER))
+  expect(await gitOut(spawnCapture, f.repo, ['diff-tree', '--no-commit-id', '--name-only', '-r', h2])).toBe(ledger)
   expect(await gitOut(spawnCapture, f.repo, ['log', '-1', '--format=%s', h2])).toBe('chore(trident): task ledger — 1 remaining')
-  expect((await spawnCapture(['git', '-C', f.repo, 'cat-file', '-e', `${h2}^:IMPLEMENTATION_PLAN.md`], f.repo)).ok).toBe(false)
-  expect((await spawnCapture(['git', '-C', f.repo, 'cat-file', '-e', `${f.baseSha}:IMPLEMENTATION_PLAN.md`], f.repo)).ok).toBe(false)
+  expect((await spawnCapture(['git', '-C', f.repo, 'cat-file', '-e', `${h2}^:${ledger}`], f.repo)).ok).toBe(false)
+  expect((await spawnCapture(['git', '-C', f.repo, 'cat-file', '-e', `${f.baseSha}:${ledger}`], f.repo)).ok).toBe(false)
+  // Nothing lands at the repo root: no shared file for two cards' PRs to meet on.
+  expect((await spawnCapture(['git', '-C', f.repo, 'cat-file', '-e', `${h2}:IMPLEMENTATION_PLAN.md`], f.repo)).ok).toBe(false)
   // The handoff's cleanup PRESERVED the local ref (it holds unpushed work).
   expect(await gitOut(spawnCapture, f.repo, ['rev-parse', '--verify', `refs/heads/${branch}^{commit}`])).toBe(h2)
   if (mergeMode === 'pr') {
@@ -2047,9 +2054,12 @@ for (const mergeMode of ['local', 'pr'] as const)
 test(`a ${mergeMode} retry of a run that died after a Ralph handoff resumes from the host's committed ledger`, async () => {
   const f = await fixture({ ralph: true, moreTasks: true, mergeMode, dispatchTask: CONTINUATION_TASK,
     seedLedger: false, hostLedger: true })
-  // The final diff carries the ledger, which is EXECUTABLE prose to the mutation
-  // gate, so the last iteration needs a real guard/control pair to merge.
-  f.world.mutationArgv = 'valid'
+  // NO MUTATION NOMINATION, deliberately. Every change this card makes is prose
+  // (NOTES.md), and the final diff also carries the host's ledger. The ledger sits at
+  // the branch's own `.trident/ledgers/<branch>.md`, which the gate reads as inert
+  // prose, so the card keeps the prose-only exemption and merges with nothing to
+  // nominate. At the repo-root IMPLEMENTATION_PLAN.md (executable prose) it could not
+  // merge at all: it owed a proof and had no legal target.
   const { prior, h2, branch } = await handOffThenDie(f, mergeMode)
   expect(f.world.plannerChoices).toEqual(['full'])
 
@@ -2115,7 +2125,10 @@ test(`a ${mergeMode} retry of a run that died after a Ralph handoff resumes from
   const subjects = (await gitOut(spawnCapture, mergeMode === 'pr' ? f.origin : f.repo, ['log', '--format=%s', `${f.baseSha}..${merged}`])).split('\n')
   expect(subjects).toContain(`work: build ${run.id}:task:1:build:0`)
   expect(subjects.filter(subject => subject.startsWith('chore(trident): task ledger'))).toEqual(['chore(trident): task ledger — 1 remaining'])
-  expect(await gitOut(spawnCapture, f.repo, ['rev-parse', '--verify', `${merged}:IMPLEMENTATION_PLAN.md`])).toBe(blobId(HANDOFF_LEDGER))
+  expect(await gitOut(spawnCapture, f.repo, ['rev-parse', '--verify', `${merged}:${taskLedgerPath(branch)!}`])).toBe(blobId(HANDOFF_LEDGER))
+  expect((await spawnCapture(['git', '-C', f.repo, 'cat-file', '-e', `${merged}:IMPLEMENTATION_PLAN.md`], f.repo)).ok).toBe(false)
+  // The prose-only exemption carried the merge: no nomination was ever made.
+  expect(f.world.mutationArgv).toBeUndefined()
 
   // ACCEPTANCE 3: the resume never leaned on the fire-time PR probe.
   if (mergeMode === 'local') {

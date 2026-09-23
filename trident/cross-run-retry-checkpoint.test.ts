@@ -461,9 +461,9 @@ const SHORT = HEAD.slice(0, 7)
 const noteCases: { name: string; reason: string; over?: Parameters<typeof fixture>[0];
   tip?: string; link?: 'prior' | null | 'missing' | 'foreign'; task?: string; expected: (round: string) => string }[] = [
   { name: 'a carried review checkpoint', reason: 'resumed',
-    expected: r => `Resumed from fix-round-3 at ${SHORT}; Ralph round ${r} carried.` },
+    expected: r => `Dispatched to resume from fix-round-3 at ${SHORT} (rebuilds if the branch moves before launch); Ralph round ${r} carried.` },
   { name: 'a carried Ralph continuation', reason: 'resumed_continuation', over: { checkpoint: CONTINUATION },
-    expected: r => `Resumed from ralph-task-built at ${SHORT}; Ralph round ${r} carried.` },
+    expected: r => `Dispatched to resume from ralph-task-built at ${SHORT} (rebuilds if the branch moves before launch); Ralph round ${r} carried.` },
   { name: 'a moved branch tip', reason: 'branch_tip_moved', tip: 'c'.repeat(40),
     expected: r => `Not resumed: the branch moved off the last run's commit, so this is a fresh build; Ralph round ${r} carried.` },
   { name: 'an unreadable branch tip', reason: 'branch_tip_unreadable_or_absent', tip: '',
@@ -514,8 +514,22 @@ test('a first dispatch, with no prior run to state anything about, writes no not
   expect(result.ok, JSON.stringify(result)).toBe(true)
   if (!result.ok) return
   expect(f.store.get(result.run.id)!.resume_note).toBeNull()
-  // …and the log line is not emitted either: the two are gated on the same condition.
+  // …and the log line is not emitted either: there was no prior of any kind to ask about.
   expect(seedLine).toBeNull()
+})
+
+test("a first dispatch whose slug collides with ANOTHER card's run is not told it was not resumed", async () => {
+  const f = await fixture()
+  // Same first 35 characters as TASK, so `slugifyTask` gives the prior's slug, but a
+  // different card: different task text, and the card links no run.
+  const colliding = `${TASK} — a different card entirely`
+  expect(slugifyTask(colliding)).toBe(slugifyTask(TASK))
+  const { value: result, seedLine } = await withSeedLine(() => f.dispatch(HEAD, null, colliding))
+  expect(result.ok, JSON.stringify(result)).toBe(true)
+  if (!result.ok) return
+  expect(f.store.get(result.run.id)!.resume_note).toBeNull()
+  // The slug match is still reported to the operator, as another run for the slug.
+  expect(seedLine).toContain(`other_prior_for_slug=${f.prior.id}`)
 })
 
 test('the carried and fresh budget wordings follow the row, not the reason', async () => {

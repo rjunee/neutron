@@ -646,7 +646,7 @@ test('rebuilt builder briefs cap escaped correction data', async () => {
 })
 
 // THE PLAN BRIEF MUST STATE THE LEDGER THE DRIVER ENFORCES AND COMMITS.
-// G025's ledger check, the handoff's `IMPLEMENTATION_PLAN.md` commit and G026-G029's
+// G025's ledger check, the handoff's `.trident/ledgers/<branch>.md` commit and G026-G029's
 // continuation planner all read `implementationPlan` as a checkbox list, and the
 // brief said none of it — so a planner returning headings and zero boxes was obeying
 // its brief, and every continuation re-planned from scratch. The phrases pinned here
@@ -659,7 +659,7 @@ test('the plan brief states the task ledger shape and the planner "next" duty', 
     const plan = role === 'plan'
     for (const phrase of ['`- [x] T<n>: <one line>`', '`- [ ] T<n>: <one line>`',
       '`topTask` is the first unchecked line, copied verbatim', '`remainingTasks` is the number of unchecked lines minus one',
-      'IMPLEMENTATION_PLAN.md on a PUBLIC branch', '`planner: "next"` and `committedPlan`',
+      'at a per-branch path under `.trident/ledgers/`, on a PUBLIC branch', '`planner: "next"` and `committedPlan`',
       'return `committedPlan.body` unchanged as `implementationPlan`', 'write only the `executionSpec` for that task']) {
       expect(brief.includes(phrase), `${role} brief ${plan ? 'must' : 'must not'} carry: ${phrase}`).toBe(plan)
     }

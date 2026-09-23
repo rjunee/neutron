@@ -1,4 +1,4 @@
-import { mkdtemp, readFile, rm, writeFile, rename, lstat } from 'node:fs/promises'
+import { mkdtemp, readFile, rm, writeFile, rename, lstat, mkdir } from 'node:fs/promises'
 import { tmpdir } from 'node:os'
 import { join } from 'node:path'
 import { createHash } from 'node:crypto'
@@ -15,10 +15,36 @@ import type { TridentRun, TridentRunStore } from './store.ts'
 import { isTerminalPhase } from './state-machine.ts'
 import { TRIDENT_SCRIPT_DIR } from './script-dir.ts'
 import { parseBuildModeState, readBuildRetrySource, type BuildModeState } from './build-mode-state.ts'
+import { isPlainBranchName } from './mutation-prover.ts'
 
 const oid = /^(?:[0-9a-f]{40}|[0-9a-f]{64})$/
-/** The committed task ledger `probePlan` reads and `commitPlan` writes. */
-const LEDGER_FILE = 'IMPLEMENTATION_PLAN.md'
+/**
+ * WHERE THE HOST COMMITS A RALPH CARD'S TASK LEDGER — `.trident/ledgers/<branch>.md`.
+ *
+ * PER BRANCH, never a fixed repo-root file. The ledger is committed at every handoff
+ * and so stays in the card's diff, and a fixed path (`IMPLEMENTATION_PLAN.md` was
+ * the first draft) made every multi-task PR rewrite the same tracked file from the
+ * same base: two cards in flight on one repo, and the second to merge went
+ * CONFLICTING on a file neither card was about — the shared-file class the
+ * `docs/as-built/` shard split removed. A per-branch path (the
+ * `.trident/mutation-claims/<branch>.json` and `.trident/plans/<branch>.md`
+ * precedent) cannot collide, and what lands on main is one card's own record under
+ * `.trident/`, not a root file a later planner surveys as outstanding work.
+ *
+ * INERT TO THE MUTATION GATE by construction: a `.md` under `.trident/` whose
+ * basename is not executable prose (`isProseOnlyChange`, `trident/mutation-prover.ts`).
+ * So a card whose real change is documentation keeps its prose exemption once the
+ * host's ledger is in the diff, and the ledger is never a nominatable target. The
+ * repo-root `IMPLEMENTATION_PLAN.md` stays executable prose; the host never writes it.
+ *
+ * Null when the branch name is not one this module will put in a path.
+ */
+export const TASK_LEDGER_DIR = '.trident/ledgers'
+export function taskLedgerPath(branch: string): string | null {
+  const b = branch.trim()
+  if (b.length === 0 || b !== branch || !isPlainBranchName(b)) return null
+  return `${TASK_LEDGER_DIR}/${b}.md`
+}
 const unknown = (detail: string): GateResult => ({ kind: 'unknown', detail })
 const blocked = (on: string): GateResult => ({ kind: 'blocked', on })
 
@@ -165,6 +191,7 @@ export const workContextPath = (briefPath: string): string => `${briefPath}.cont
 export function createProductionHostEffects(options: ProductionHostOptions) {
   const { store, runId, repo, worktree, branch, baseBranch, runHost } = options
   const cleanupMode = store.get(runId)?.merge_mode
+  const ledgerFile = taskLedgerPath(branch)
   const git = (...args: string[]) => runHost(['git', '-C', repo, ...args], repo)
   function row(): TridentRun {
     const current = store.get(runId)
@@ -296,18 +323,29 @@ export function createProductionHostEffects(options: ProductionHostOptions) {
     async probePlan(tip) {
       row()
       if (!oid.test(tip)) throw new Error('Committed plan requires a full head')
+      if (ledgerFile === null) throw new Error('Committed plan path is unavailable for this branch name')
+      // ABSENT IS AN ANSWER, not an error: a tip whose handoff predates the per-branch
+      // ledger (or a repo that never had one) has no committed plan, and G026 then
+      // takes the full planner — the safe direction, spending tokens rather than
+      // trusting a plan that is not there. Absent means the COMMIT reads and the path
+      // does not resolve in it; an unreadable commit is still an error.
+      const commit = await git('rev-parse', '--verify', '--quiet', `${tip}^{commit}`)
+      if (!commit.ok || commit.timed_out || commit.stdout.trim() !== tip) throw new Error('Committed plan is missing or unreadable')
+      const present = await git('rev-parse', '--verify', '--quiet', `${tip}:${ledgerFile}`)
+      if (present.timed_out || (!present.ok && present.exit_code !== 1)) throw new Error('Committed plan is missing or unreadable')
+      if (!present.ok) return null
       const directory = await mkdtemp(join(tmpdir(), 'build-plan-'))
       try {
         // File output avoids the host runner's stdout truncation boundary.
         const path = join(directory, 'plan.tar')
-        const result = await runHost(['git', '-C', repo, 'archive', '--format=tar', `--output=${path}`, tip, 'IMPLEMENTATION_PLAN.md'], repo)
+        const result = await runHost(['git', '-C', repo, 'archive', '--format=tar', `--output=${path}`, tip, ledgerFile], repo)
         if (!result.ok || result.timed_out) throw new Error('Committed plan is missing or unreadable')
-        const extracted = await runHost(['tar', '-xf', path, '-C', directory, 'IMPLEMENTATION_PLAN.md'], repo)
+        const extracted = await runHost(['tar', '-xf', path, '-C', directory, ledgerFile], repo)
         if (!extracted.ok || extracted.timed_out) throw new Error('Committed plan extraction is unreadable')
-        const planPath = join(directory, 'IMPLEMENTATION_PLAN.md')
+        const planPath = join(directory, ledgerFile)
         if (!(await lstat(planPath)).isFile()) throw new Error('Committed plan is not a regular file')
         const body = await readFile(planPath, 'utf8')
-        const blob = await git('rev-parse', '--verify', `${tip}:IMPLEMENTATION_PLAN.md`)
+        const blob = await git('rev-parse', '--verify', `${tip}:${ledgerFile}`)
         const expected = blob.stdout.trim()
         // Archive attributes may transform content. Only the exact committed blob
         // may supply the continuation planner's independently measured bytes.
@@ -322,6 +360,7 @@ export function createProductionHostEffects(options: ProductionHostOptions) {
       try {
         row()
         if (!oid.test(snapshot.head)) return unknown('Task ledger commit requires a full head')
+        if (ledgerFile === null) return { kind: 'blocked', on: 'Task ledger path is unavailable for this branch name' }
         // The ledger lands on exactly the revision the driver measured, never on a
         // tip that moved under it.
         const fresh = await sameSnapshot(snapshot)
@@ -331,14 +370,23 @@ export function createProductionHostEffects(options: ProductionHostOptions) {
         const expected = blobId(body)
         // Idempotent: a tip that already commits these exact bytes (a crash-resume
         // rebuild, or a builder that ticked the box itself) needs no second commit.
-        const existing = await git('rev-parse', '--verify', '--quiet', `${snapshot.head}:${LEDGER_FILE}`)
+        const existing = await git('rev-parse', '--verify', '--quiet', `${snapshot.head}:${ledgerFile}`)
         if (existing.timed_out) return unknown('Committed task ledger is unreadable')
         if (existing.ok && existing.stdout.trim() === expected) return { kind: 'known', head: snapshot.head }
-        const path = join(worktree, LEDGER_FILE)
-        const present = await lstat(path).catch(() => null)
-        if (present && !present.isFile()) return { kind: 'blocked', on: 'Task ledger path is not a regular file' }
+        // EVERY component is checked before the write, not only the file: a link at
+        // `.trident` or `.trident/ledgers` would carry the write out of the worktree
+        // just as surely as a link at the ledger itself.
+        const segments = ledgerFile.split('/')
+        for (let depth = 1; depth <= segments.length; depth++) {
+          const at = join(worktree, ...segments.slice(0, depth))
+          const entry = await lstat(at).catch(() => null)
+          const leaf = depth === segments.length
+          if (entry && (leaf ? !entry.isFile() : !entry.isDirectory())) return { kind: 'blocked', on: 'Task ledger path is not a regular file' }
+          if (!entry && !leaf) await mkdir(at)
+        }
+        const path = join(worktree, ledgerFile)
         await writeFile(path, body)
-        const staged = await runHost(['git', '-C', worktree, 'add', '--', LEDGER_FILE], worktree)
+        const staged = await runHost(['git', '-C', worktree, 'add', '--', ledgerFile], worktree)
         if (!staged.ok || staged.timed_out) return unknown('Task ledger could not be staged')
         // A FIXED subject: no task text and no trailers. The ledger lands on a public
         // branch and the leak gate scans commit messages, which are never redacted.
@@ -346,11 +394,11 @@ export function createProductionHostEffects(options: ProductionHostOptions) {
         const remaining = body.split('\n').filter(line => /^\s*- \[ \]\s+/.test(line)).length
         const committed = await runHost(['git', '-C', worktree, '-c', 'user.name=trident', '-c', 'user.email=trident@neutron.local',
           '-c', 'commit.gpgsign=false', 'commit', '--no-verify', '-q', '-m', `chore(trident): task ledger — ${remaining} remaining`,
-          '--', LEDGER_FILE], worktree)
+          '--', ledgerFile], worktree)
         if (!committed.ok || committed.timed_out) return unknown('Task ledger commit was not confirmed')
         const tip = await head()
         const parent = await git('rev-parse', '--verify', `${tip}^1`)
-        const blob = await git('rev-parse', '--verify', `${tip}:${LEDGER_FILE}`)
+        const blob = await git('rev-parse', '--verify', `${tip}:${ledgerFile}`)
         if (tip === snapshot.head || !parent.ok || parent.timed_out || parent.stdout.trim() !== snapshot.head
           || !blob.ok || blob.timed_out || blob.stdout.trim() !== expected) return unknown('Task ledger commit could not be verified')
         return { kind: 'known', head: tip }

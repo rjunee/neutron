@@ -353,7 +353,9 @@ function WorkBoardRowImpl({
                   ? styles.failReason
                   : notice.tone === 'blocked'
                     ? styles.blockedReason
-                    : styles.briefAlert
+                    : notice.tone === 'info'
+                      ? styles.resumeNote
+                      : styles.briefAlert
               }
               numberOfLines={1}
               testID={`work-board-run-notice-${notice.tone}`}
@@ -568,6 +570,14 @@ const styles = createThemedStyles({
     color: THEME.text_muted,
     fontSize: TYPOGRAPHY.caption.fontSize,
     lineHeight: TYPOGRAPHY.caption.lineHeight,
+  },
+  // A retry that carried its checkpoint: a plain fact about the run, never an alert.
+  resumeNote: {
+    flexShrink: 1,
+    color: THEME.text_muted,
+    fontSize: TYPOGRAPHY.caption.fontSize,
+    lineHeight: TYPOGRAPHY.caption.lineHeight,
+    fontStyle: 'italic',
   },
   date: {
     color: THEME.text_muted,

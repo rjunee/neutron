@@ -31,15 +31,31 @@ mode there is no origin to ask at all. A remote read — the shape of the fire-t
 local ref `prepareLaunch` re-verifies at launch.
 
 **The host commits the Ralph task ledger at each handoff.** The cheap continuation planner (G026,
-`trident/build-run.ts:349-366`) reads `IMPLEMENTATION_PLAN.md` at the branch tip, and nothing in
-the typed host wrote that file: the probe found main's stale copy with no unchecked boxes and
-every continuation re-planned from scratch. The driver now renders the ledger with the finished
-task ticked, commits it alone through `commitPlan` (`trident/production-host-effects.ts`), re-measures,
-and only then hands the head to the next iteration. The FINAL iteration does not commit it:
-review and publication bind every worker receipt (suite checkpoint, mutation nomination,
-publication body) to the head the builder reported, and a host commit on top of that head left
-the reviewed head with no receipt, so no multi-task card could merge. G025 now also refuses a
-Ralph plan whose unchecked lines disagree with its `topTask`/`remainingTasks`.
+`trident/build-run.ts:349-366`) used to read the repo-root `IMPLEMENTATION_PLAN.md` at the branch
+tip, and nothing in the typed host wrote that file: the probe found main's stale copy with no
+unchecked boxes and every continuation re-planned from scratch. The driver now renders the ledger
+with the finished task ticked, commits it alone through `commitPlan`
+(`trident/production-host-effects.ts`), re-measures, and only then hands the head to the next
+iteration. The FINAL iteration does not commit it: review and publication bind every worker
+receipt (suite checkpoint, mutation nomination, publication body) to the head the builder
+reported, and a host commit on top of that head left the reviewed head with no receipt, so no
+multi-task card could merge. G025 now also refuses a Ralph HANDOFF plan (`remainingTasks > 0`)
+whose unchecked lines disagree with its `topTask`/`remainingTasks`.
+
+**The ledger lives at the branch's own path, `.trident/ledgers/<branch>.md`** (`taskLedgerPath`,
+`trident/production-host-effects.ts`), for `probePlan` and `commitPlan` alike. Merge behaviour,
+stated because the ledger stays in the card's diff: every multi-task Ralph PR adds or updates
+exactly one file, its own ledger, and no two cards share a path, so two cards in flight on one
+repo never conflict on it (a root file rewritten wholesale by every PR would have, the class the
+`docs/as-built/` shard split removed). Main keeps each merged card's ledger at the last
+handoff's state, under `.trident/` beside `.trident/plans/` and `.trident/mutation-claims/`,
+not at the root where a later planner would survey it as outstanding work. The path is a `.md`
+under `.trident/` whose basename is not executable prose, so the mutation gate treats it as
+inert: a card whose real change is documentation keeps its prose-only exemption with the ledger
+in its diff, and the ledger is never a nominatable target (`isProseOnlyChange` /
+`classifyMutationTarget`, `trident/mutation-prover.ts`). A tip without a ledger (a handoff that
+predates this path, or a repo that never had one) is an answer, not an error: `probePlan`
+returns null and G026 takes the full planner.
 
 **The card states the decision.** Migration `0155_trident_resume_note.sql` adds
 `code_trident_runs.resume_note`. `resumeNote()` (`trident/board-dispatch.ts:165-178`) builds one
@@ -50,6 +66,17 @@ for a governed run. No path, host or identity is interpolated. The column is wri
 create (`trident/store.ts:909`), with no later writer (`:1972`). `run_progress` carries it
 (`trident/run-progress.ts:109-113`) and both front-ends render it in `runNotice`
 (`app/lib/work-board-helpers.ts:263`, `landing/chat-react/WorkBoardTab.tsx:252`).
+
+Because nothing restates the note, a carried checkpoint is worded as the dispatch's decision
+rather than the outcome: `Dispatched to resume from <checkpoint> at <sha7> (rebuilds if the
+branch moves before launch); …`. A branch that moves between dispatch and launch is caught by
+the driver's G038 head check, which rebuilds, and the sentence names that exception instead of
+claiming "Resumed". Only a refusal (`Not resumed: …`) renders in the `alert` tone; a carried
+checkpoint renders in a new `info` tone (`cwb-resume-note` on the web, `resumeNote` style on
+mobile). The note's gate is narrower than the log line's: a slug match for a DIFFERENT task text
+(the 35-character `slugifyTask` prefix colliding with another card's run) writes no note and is
+reported only as the log line's `other_prior_for_slug`; a slug match for the same task text
+still writes one, because that is this card's own work with its link lost.
 
 ### Measured against main (7454048a) and this branch
 
@@ -160,3 +187,20 @@ onto main conflicts in three files, and one more merges clean and is wrong:
    is the one excluded): bump it and say `43 -> 44 with resume_note`.
 
 The same rule sits beside `155,` in `migrations/runner.test.ts`.
+
+### Review round 1 (PR #1195)
+
+Four reviewers, three REQUEST_CHANGES. Addressed:
+
+- The ledger was the repo-root `IMPLEMENTATION_PLAN.md`: every multi-task PR rewrote one shared
+  file (concurrent cards conflict), and it is executable prose, so a documentation-only
+  multi-task card lost its exemption with nothing it could nominate. Moved to
+  `.trident/ledgers/<branch>.md`; the e2e retry case now merges a prose-only multi-task card with
+  no mutation nomination at all (`open/__tests__/project-build-e2e.test.ts`, the Ralph-handoff
+  retry), which the root path could not.
+- G025 was byte-exact on the whole checkbox line and enforced on plans that commit no ledger. It
+  now runs only for `remainingTasks > 0` and compares the top task with its checkbox marker
+  stripped (`trident/build-run.test.ts`, the two G025 cases).
+- The `Resumed from …` wording, the `alert` tone for a carried checkpoint, the slug-collision
+  note on a first dispatch, and `PLAN_LEDGER_CONTRACT` sitting between `REVIEW_SUITE_TIMEOUT_MS`
+  and its docblock (moved above it).

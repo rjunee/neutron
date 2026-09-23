@@ -230,6 +230,9 @@ describe('briefAlertText', () => {
     expect(noticeFor(progress({ brief_alert: 'recovered alert', resume_note: null }))).toEqual({
       text: 'recovered alert', tone: 'alert',
     });
+    // A CARRIED checkpoint is a healthy fact, not an alert: only a refusal is.
+    const carried = 'Dispatched to resume from ralph-task-built at abc1234 (rebuilds if the branch moves before launch); Ralph round 2/20 carried.';
+    expect(noticeFor(progress({ resume_note: carried }))).toEqual({ text: carried, tone: 'info' });
     // A first dispatch (or an older gateway's frame) states nothing.
     expect(noticeFor(progress({ resume_note: null }))).toBeNull();
     expect(noticeFor(progress({ resume_note: '' }))).toBeNull();

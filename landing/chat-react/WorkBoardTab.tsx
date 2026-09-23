@@ -257,7 +257,9 @@ function resumeNoteText(rp: RunProgress | undefined): string | null {
 
 interface RunNotice {
   text: string
-  tone: 'failure' | 'alert' | 'blocked'
+  /** `info`: a retry that carried the dead run's checkpoint — a healthy fact about
+   *  the run, not something that went wrong, so it is not styled as an alert. */
+  tone: 'failure' | 'alert' | 'blocked' | 'info'
 }
 
 function runNotice(item: WorkBoardItem): RunNotice | null {
@@ -281,9 +283,11 @@ function runNotice(item: WorkBoardItem): RunNotice | null {
   // Ralph round, and why not when it did not. A retry that inherited nothing must
   // SAY so rather than look like a first dispatch. It yields to an integrity alert,
   // which is evidence something went wrong; the note is only what the row was born
-  // with.
+  // with. Only a REFUSAL ("Not resumed: …", `resumeNote` in trident/board-dispatch.ts)
+  // is an alert an owner should notice; a carried checkpoint is informational.
   const note = resumeNoteText(rp)
-  return note === null ? null : { text: note, tone: 'alert' }
+  if (note === null) return null
+  return { text: note, tone: note.startsWith('Not resumed:') ? 'alert' : 'info' }
 }
 
 interface DotState {
@@ -1304,7 +1308,9 @@ function WorkBoardRow({
                   ? 'cwb-fail-reason'
                   : notice.tone === 'blocked'
                     ? 'cwb-blocked-reason'
-                    : 'cwb-brief-alert'
+                    : notice.tone === 'info'
+                      ? 'cwb-resume-note'
+                      : 'cwb-brief-alert'
               }
               title={notice.text}
             >
