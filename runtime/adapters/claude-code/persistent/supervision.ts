@@ -13,7 +13,7 @@ import { makeInFlightGate } from './in-flight-gate.ts'
 import { type ModelUpdateWatchdog, type SessionIdleSignals, isModelClass, loadModelUpdateState, realProbeModel, runGracefulUpgrade, saveModelUpdateState, startModelUpdateWatchdog } from './model-update-watchdog.ts'
 import { basenameOf, argvMatchesSession, defaultReadArgv, registerOrphanKill } from './orphan-adoption.ts'
 import { awaitBootAdoption, renewOwnAdoptionClaim } from './boot-adoption.ts'
-import { activeModelWatchdogs, activeWatchdogs, childByKey, cwdDriftAlertState, cwdDriftRespawnState, pendingChildKills, pool, supervisedBySessionKey, wedgeAlertState } from './pool-state.ts'
+import { activeModelWatchdogs, activeWatchdogs, childByKey, cwdDriftAlertState, cwdDriftRespawnState, pendingChildKills, pool, supervisedBySessionKey, wedgeAlertState, retiringSessionKeys } from './pool-state.ts'
 import { type ReplRegistryRecord, getRecord, loadRegistry, patchRecord, readRegistryState, registryConversationScopeMatches, upsertRecord, withOwnedRegistry } from './repl-registry.ts'
 import { buildCrashLoopWarningText, recordAndEvaluateRestart } from './restart-rate.ts'
 import { type RespawnDeps, type RespawnOutcome, type RespawnTrigger, type SpawnReplOutcome, executeRespawn, planRespawn, shouldPostRespawnNotice } from './session-respawn.ts'
@@ -49,6 +49,7 @@ class RespawnClaimRefusedError extends Error implements SubstrateClassed {
  *  tick + the admin-respawn endpoint actuate each session with the OWNING
  *  substrate's options. No-op when no registry path is set (supervision off). */
 export function registerSupervisedSubstrate(options: PersistentReplSubstrateOptions): void {
+  if (retiringSessionKeys.has(poolKeyFor(options))) return
   if (options.replRegistryPath !== undefined) {
     const key = poolKeyFor(options)
     const state = readRegistryState(options.replRegistryPath)
@@ -75,6 +76,7 @@ export function respawnSupervisedSession(
   replRegistryPath: string,
   sessionKey: string,
 ): RespawnOutcome {
+  if (retiringSessionKeys.has(sessionKey)) return { ok: false, reason: 'session-not-found', sessionKey }
   const options = supervisedBySessionKey.get(sessionKey)
   if (options === undefined || options.replRegistryPath !== replRegistryPath) {
     return { ok: false, reason: 'session-not-found', sessionKey }
@@ -507,6 +509,7 @@ export async function runReplWatchdogTick(
   const results: Array<{ sessionKey: string; action: string; respawned: boolean }> = []
 
   for (const sessionKey of keys) {
+    if (retiringSessionKeys.has(sessionKey)) continue
     const record = registry[sessionKey]
     const keyOptions = supervisedBySessionKey.get(sessionKey)
     // A refused/unknown scope is not a dead child we own. Check before renewal,
@@ -570,6 +573,9 @@ export async function runReplWatchdogTick(
     //   - `keyOptions` — `supervisedBySessionKey` is not touched by fencing, and a fenced key
     //     never reaches the consumers below.
     const probe = await probeReplLiveness(sessionKey, record, healthProbe, isPidAlive)
+    // A retirement can land while the probe awaits HTTP. Its deliberate death
+    // must neither report a crash nor trigger a recovery from this stale tick.
+    if (retiringSessionKeys.has(sessionKey)) continue
     const verdict = detectReplWedged(probe)
     const action = decideWedgeAction({
       verdict,
@@ -695,6 +701,7 @@ export async function runCwdDriftWatchdogTick(
 
   const entries: CwdDriftSupervisedEntry[] = []
   for (const sessionKey of ownedPoolKeys) {
+    if (retiringSessionKeys.has(sessionKey)) continue
     const record = registry[sessionKey]
     const owner = supervisedBySessionKey.get(sessionKey)
     if (record !== undefined && owner !== undefined && !registryConversationScopeMatches(record, owner)) continue
@@ -987,6 +994,7 @@ export function startModelUpdateWatchdogForInstance(
           registryConversationScopeMatches(record, owner) && record.owner_selected_model === undefined
       })
       const writeUpgradeModel = (key: string): boolean => {
+        if (retiringSessionKeys.has(key)) return false
         const owner = supervisedBySessionKey.get(key)
         if (owner?.replRegistryPath !== registryPath) return false
         const write = withOwnedRegistry(registryPath, registry => {

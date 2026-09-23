@@ -1,7 +1,6 @@
 /**
- * Onboarding warm-conversational session + pre-warm — Step 1 of the
- * single-session onboarding rework (2026-06-17). Pins the behaviour that kills
- * the 90s-per-turn onboarding stall:
+ * Onboarding keeps one conversational session while in use, but no longer
+ * prewarms it at boot (on-demand helper lifetime, 2026-09-23).
  *
  *   1. The Open composer composes the onboarding phase-spec (`cc-llm-*`)
  *      substrate as a WARM, REUSED session — NOT `ephemeral`, NO
@@ -14,9 +13,8 @@
  *      this substrate was `ephemeral: true` → a fresh heavy `claude` session
  *      cold-spawned EVERY onboarding turn.
  *
- *   2. The composer PRE-WARMS that session at onboarding start: exactly ONE
- *      build-time warm-up dispatch fires (behind the loading indicator), NOT a
- *      per-turn cold spawn.
+ *   2. The composer starts no helper at boot. A real phase-prompt request
+ *      dispatches lazily through the same capturing factory (positive control).
  *
  *   3. Session-reuse contract (the literal "factory/spawn called once across
  *      turns" assertion): driving `buildLlmCallSubstrate` with the composer's
@@ -74,7 +72,7 @@ beforeEach(() => {
   process.env['NEUTRON_LANDING_STATIC_DIR'] = LANDING_DIR
   process.env['NEUTRON_ONBOARDING_CHAT_COOKIE_SECRET'] = 'open-test-secret-0123456789'
   // A credential makes resolveOpenLlmPool return a non-null pool so the
-  // phase-spec substrate (and its pre-warm) are actually built.
+  // phase-spec substrate is available for an on-demand request.
   process.env['ANTHROPIC_API_KEY'] = 'sk-ant-test-warm-conversational'
   delete process.env['CLAUDE_CODE_OAUTH_TOKEN']
   delete process.env['NOTIFY_SOCKET']
@@ -88,8 +86,7 @@ afterEach(() => {
   rmSync(tmpDir, { recursive: true, force: true })
 })
 
-/** A canned-completion fake substrate `start()` so the pre-warm's
- *  `collectTokensToString` resolves immediately. */
+/** A canned-completion fake substrate for a requested phase prompt. */
 function cannedHandle(instanceId: string): SessionHandle {
   const events = (async function* (): AsyncGenerator<Event, void, void> {
     yield { kind: 'token', text: 'ready' }
@@ -114,7 +111,7 @@ function cannedHandle(instanceId: string): SessionHandle {
  * background timer leaks into a sibling test file under happy-dom.
  */
 async function bootAndCapture(
-  assert: (captured: ClaudeCodeSubstrateOptions[]) => void,
+  assert: (captured: ClaudeCodeSubstrateOptions[], resolveSetupPrompt: () => Promise<void>) => void | Promise<void>,
 ): Promise<void> {
   const captured: ClaudeCodeSubstrateOptions[] = []
   const substrateFactory = (opts: ClaudeCodeSubstrateOptions): Substrate => {
@@ -127,9 +124,11 @@ async function bootAndCapture(
   const composition = await composer({ db, project_slug: 'owner' })
   const graph = await composeProductionGraph(composition)
   try {
-    // Let the fire-and-forget pre-warm dispatch flush.
+    // Flush any erroneous fire-and-forget boot dispatch before asserting none.
     await Bun.sleep(20)
-    assert(captured)
+    await assert(captured, async () => {
+      await composition.onboarding_import_running_cron!.engine.resolvePhasePromptSpec('owner', 'owner', 'signup')
+    })
   } finally {
     for (const cleanup of composition.realmode_cleanups ?? []) {
       try {
@@ -144,11 +143,12 @@ async function bootAndCapture(
 }
 
 describe('Open onboarding — warm conversational phase-spec substrate', () => {
-  test('the phase-spec (cc-llm-*) substrate is composed NON-ephemeral, with NO per-turn /clear', async () => {
-    await bootAndCapture((captured) => {
-      // The pre-warm dispatched through the phase-spec substrate at build —
-      // exactly the `cc-llm-*` instance, and exactly ONCE (one build-time
-      // warm-up spawn, NOT a per-turn cold spawn).
+  test('phase-spec starts only on demand, remains NON-ephemeral, and has NO per-turn /clear', async () => {
+    await bootAndCapture(async (captured, resolveSetupPrompt) => {
+      expect(captured).toHaveLength(0)
+      // Positive control: the real engine's first phase request reaches the
+      // same factory. Absence above cannot pass because the capture is broken.
+      await resolveSetupPrompt()
       const phaseSpecOpts = captured.filter((o) =>
         o.substrate_instance_id.startsWith('cc-llm-'),
       )
@@ -167,11 +167,9 @@ describe('Open onboarding — warm conversational phase-spec substrate', () => {
     })
   }, 30_000)
 
-  test('no ephemeral disposable cold-spawn fires at onboarding start (the per-turn path is gone)', async () => {
+  test('no disposable background worker fires merely because onboarding boots', async () => {
     await bootAndCapture((captured) => {
-      // No substrate was dispatched at build with `ephemeral: true` — the
-      // per-turn disposable cold-spawn path that caused the 90s stall is gone
-      // from the onboarding conversational path.
+      // Background one-shots are available, but must wait for actual work.
       const ephemeralSpawns = captured.filter((o) => o.ephemeral === true)
       expect(ephemeralSpawns.length).toBe(0)
     })

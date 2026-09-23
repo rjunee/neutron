@@ -1070,8 +1070,7 @@ export function buildOpenGraphComposer(
     // warm live-chat (`cc-agent-*`, the ONLY tool-bridge substrate), the
     // per-worktree ephemeral factory, and the warm per-repo-cwd trident-fire
     // factory. Built once from the narrow wiring context and consumed downstream
-    // verbatim. `prewarmSettledRef` is a LIVE reference the pre-warm `.then`
-    // flips (cold-window budget elevation reads `.settled`, not a snapshot).
+    // verbatim. Setup starts only when onboarding needs an LLM turn.
     // Import the former boot setting once; later dispatches read only stored settings.
     await initializeInstanceModelProvider(db, project_slug,
       env['NEUTRON_MODEL_PROVIDER']?.trim() ? normalizeProvider(env['NEUTRON_MODEL_PROVIDER']) : null)
@@ -1216,6 +1215,9 @@ export function buildOpenGraphComposer(
     }
     const {
       llmCallSubstrate,
+      utilitySubstrate,
+      retireSetup,
+      retireLegacyBackground,
       liveAgentSubstrate,
       makeProjectLiveAgentSubstrate,
       adoptLiveAgentRepls,
@@ -1223,8 +1225,6 @@ export function buildOpenGraphComposer(
       reminderComposeSubstrate,
       makeEphemeralSubstrate,
       makeWarmFireSubstrate,
-      prewarmReady,
-      prewarmSettledRef,
       cleanups: substrateCleanups,
     } = wireSubstrates(wiringCtx)
     const tridentFireInnerWorkflow =
@@ -1998,18 +1998,6 @@ export function buildOpenGraphComposer(
         chatSessionProjects.getActive(OWNER_USER_ID),
       owner_data_dir: owner_home,
       personaLoader,
-      // Make the first conversational turn AWAIT the pre-warm (bounded) so a cold
-      // CC spawn never times out into the static fallback (2026-06-18). Resolves
-      // on real readiness or the cap, whichever first; never rejects.
-      ...(prewarmReady !== null
-        ? {
-            awaitReady: (): Promise<void> => awaitPrewarmReady(prewarmReady, env),
-            // Elevate the budget for EVERY dispatch in the cold window, not just the
-            // first (round 2): the live owner-signup raced the first two turns and
-            // both timed out at 12 s. Once the pre-warm settles, turns go snappy.
-            isWarmReady: (): boolean => prewarmSettledRef.settled,
-          }
-        : {}),
       // Belt to awaitReady's suspenders (2026-06-18 cold-start fix): give cold-window
       // conversational dispatches a cold-spawn-sized budget so they can't degrade to
       // static merely because the warm session is still spawning when the owner
@@ -3473,12 +3461,11 @@ export function buildOpenGraphComposer(
     // composer never set it. Wire it now so the daily brief + idle-nudge sweep
     // ship ON (no feature flag). Both post through the production ChannelRouter
     // (resolved post-boot inside `build-core-modules`), reuse the shared cron
-    // registry, and route LLM work through the SAME warm `cc-llm` substrate the
-    // nudge engine / wow picker use (`buildAnthropicLlmCall`).
+    // registry, and route toolless LLM work through disposable utility workers.
     const proactiveLlm =
-      llmCallSubstrate !== null &&
+      utilitySubstrate !== null &&
       (llmPool !== null || conversationalProviderCtx.openaiLlmPool !== undefined)
-        ? buildAnthropicLlmCall({ substrate: llmCallSubstrate })
+        ? buildAnthropicLlmCall({ substrate: utilitySubstrate })
         : null
     // The brief posts to the General topic on the SAME app-ws delivery path
     // fired reminders now use (`reminderGeneralTopic = appWsTopicId(OWNER_USER_ID)`
@@ -3784,7 +3771,7 @@ export function buildOpenGraphComposer(
       },
     })
     const agentWatcherLlmCall = buildAgentWatcherLlmCall({
-      substrate: llmCallSubstrate,
+      substrate: utilitySubstrate,
       url_slug: project_slug,
       personaLoader,
     })
@@ -4394,6 +4381,7 @@ export function buildOpenGraphComposer(
     // returns false so the marker stays null and the reconnect-recovery replay
     // can still recover the signal exactly once.
     const fanOnboardingCompleted = (user_id: string): boolean => {
+      fireAndForget('onboarding.retire-setup', retireSetup())
       const frame: AppWsOutboundOnboardingCompleted = {
         v: 1,
         type: 'onboarding_completed',
@@ -4828,12 +4816,12 @@ export function buildOpenGraphComposer(
           })
         : undefined
     // #429 task 3 — the classify LLM for the auto-classifier, built like the
-    // proactiveLlm above: the warm `cc-llm` substrate + FAST_MODEL (no model
+    // proactiveLlm above: the disposable utility substrate + FAST_MODEL (no model
     // literal in the classifier itself). null on an LLM-less box → the
     // classifier degrades to keyword-only.
     const workBoardClassifyLlm =
-      llmCallSubstrate !== null
-        ? buildAnthropicLlmCall({ substrate: llmCallSubstrate, model: FAST_MODEL })
+      utilitySubstrate !== null
+        ? buildAnthropicLlmCall({ substrate: utilitySubstrate, model: FAST_MODEL })
         : null
     // The ONE card-removal chokepoint: cancel a live bound run (trident via the
     // §F6a terminate chokepoint, research via the dispatch stop) → dispose the
@@ -5230,6 +5218,14 @@ export function buildOpenGraphComposer(
     // onboarding preamble/affordance or is plain steady-state chat.
     const engine = landing.engine
     const onboardingStateStore = landing.stateStore
+    // Migration refusals stay visible without blocking the owner's live chat.
+    fireAndForget('background.retire-legacy', retireLegacyBackground([
+      appWsTopicId(OWNER_USER_ID), ...listProjectIds(),
+    ]))
+    const initialOnboardingState = await onboardingStateStore.get(project_slug, OWNER_USER_ID)
+    if (initialOnboardingState?.phase === 'completed' || initialOnboardingState?.phase === 'failed') {
+      fireAndForget('onboarding.retire-setup-at-boot', retireSetup())
+    }
     // LIVE-path personality suggester (2026-07-21). Feeds the SAME Opus-backed
     // `personalityCharacterSuggester` into the live CC-session onboarding so the
     // per-turn step guard renders MEMOIZED, owner-personalized picks instead of

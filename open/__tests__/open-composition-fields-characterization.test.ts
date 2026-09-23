@@ -7,10 +7,8 @@
  *
  *   1. The EXACT set of `CompositionInput` field KEYS Open sets. Any carve that
  *      silently adds/drops/renames a composition field trips this immediately.
- *   2. The build-time substrate dispatch: exactly ONE `cc-llm-*` pre-warm fires
- *      at boot, and it does NOT carry `enableToolBridge` (only `cc-agent-*` does
- *      — that substrate is lazy and never dispatches at build, so its flag is
- *      pinned by the focused `wireSubstrates` unit test instead).
+ *   2. Boot is lazy: no helper dispatch. A requested setup phase reaches the
+ *      capturing factory, without a tool bridge or per-turn context reset.
  *
  * Captured against the pre-carve composer as ground truth, and MUST stay green
  * across every carve unit. It asserts real wiring, not phase-machine bookkeeping.
@@ -305,7 +303,7 @@ function cannedHandle(instanceId: string): SessionHandle {
 }
 
 async function bootAndInspect(
-  assert: (composition: Record<string, unknown>, captured: ClaudeCodeSubstrateOptions[]) => void,
+  assert: (composition: Record<string, unknown>, captured: ClaudeCodeSubstrateOptions[], resolveSetupPrompt: () => Promise<void>) => void | Promise<void>,
 ): Promise<void> {
   const captured: ClaudeCodeSubstrateOptions[] = []
   const substrateFactory = (opts: ClaudeCodeSubstrateOptions): Substrate => {
@@ -317,13 +315,14 @@ async function bootAndInspect(
   const composer = buildOpenGraphComposer({ env: process.env, substrateFactory })
   // Only compose the CompositionInput — we deliberately do NOT stand up the
   // production graph (HTTP server + cron schedulers), so this characterization
-  // never leaks a scheduler into a sibling test's shared bun process. The
-  // fire-and-forget `cc-llm-*` pre-warm fires during `composer()` build itself.
+  // never leaks a scheduler into a sibling test's shared bun process.
   const composition = await composer({ db, project_slug: 'owner' })
   try {
-    // Let the fire-and-forget pre-warm dispatch flush so it appears in `captured`.
+    // Flush any erroneous fire-and-forget boot dispatch before asserting none.
     await Bun.sleep(20)
-    assert(composition as unknown as Record<string, unknown>, captured)
+    await assert(composition as unknown as Record<string, unknown>, captured, async () => {
+      await composition.onboarding_import_running_cron!.engine.resolvePhasePromptSpec('owner', 'owner', 'signup')
+    })
   } finally {
     for (const cleanup of composition.realmode_cleanups ?? []) {
       try {
@@ -337,13 +336,13 @@ async function bootAndInspect(
 }
 
 describe('Open composition — field-key characterization (C3a carve guard)', () => {
-  // ONE composer boot covers both assertions (composition keys + the build-time
-  // pre-warm dispatch) to keep this heavy characterization's footprint minimal.
-  test('composer sets EXACTLY the expected fields + fires one cc-llm-* pre-warm (no tool bridge)', async () => {
-    await bootAndInspect((composition, captured) => {
+  // One boot covers composition keys, lazy construction and real on-demand dispatch.
+  test('composer sets EXACTLY the expected fields and dispatches setup only on demand', async () => {
+    await bootAndInspect(async (composition, captured, resolveSetupPrompt) => {
       expect(Object.keys(composition).sort()).toEqual([...EXPECTED_COMPOSITION_KEYS])
-
-      // The onboarding phase-spec pre-warm is the ONLY build-time dispatch.
+      expect(captured).toHaveLength(0)
+      await resolveSetupPrompt()
+      // Same capture, positive control: one real setup request reaches cc-llm.
       expect(captured.length).toBe(1)
       const opts = captured[0]!
       expect(opts.substrate_instance_id.startsWith('cc-llm-')).toBe(true)

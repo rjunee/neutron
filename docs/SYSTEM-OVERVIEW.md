@@ -708,10 +708,10 @@ a slash-command.
   calls `setReplToolBridge(graph.get('mcp'))` once the registry is populated;
   shutdown clears it. LLM-less boxes (no graph) leave it unset → no second
   server.
-- **Security (opt-in per substrate).** The owner's two WARM conversational
+- **Security (opt-in per substrate).** The owner's two conversational
   substrates set `enableToolBridge: true`: the live chat (`cc-agent-*`) and the
-  background proactive-compose REPL (`cc-nudge-*` — fired reminders/rituals and the
-  periodic work-board wakeup). Terminal build decision turns use the live chat
+  disposable background proactive-compose REPL (`cc-nudge-*` — fired reminders/rituals and the
+  periodic work-board wakeup, terminated when each turn settles). Terminal build decision turns use the live chat
   runner's queue and substrate. The second is an equal-grant, separate-session twin of the
   first: it runs `PROFILE_WARM_CHAT` with the same bridge, GitHub credential and
   frontier-model floor by default, because a RITUAL composes there and ISSUES #504 settled that
@@ -4851,7 +4851,7 @@ ritual content in chat.
   what must be recorded about it? A `nudge` answer composes the row's stored
   message; a `skipped` answer (the fail-closed verdict) writes a durable
   `code_ritual_runs` 'skipped' row and posts NOTHING; a `fire` answer writes a
-  durable `'running'` row and composes the APPROVED PROMPT — on the warm BACKGROUND
+  durable `'running'` row and composes the APPROVED PROMPT — on a disposable BACKGROUND
   compose session (`cc-nudge-*`), through the same `llm.compose` call and the same
   `deliver()` outbound a nudge uses — then settles the ledger `finished`/`failed`.
   That session was `cc-agent-*`, the owner's chat REPL, until 2026-08-16: one
@@ -5165,7 +5165,7 @@ is set — and the Open composer never set it. It now ships ON (no feature flag)
 - **The daily nudge PRODUCER** (`gateway/tasks/p6/nudge-engine.ts`) — the sweep
   above consumes `current_focus_pick`, and that table's only non-test writer is
   the P6.1 nudge cron. `open/composer.ts` sets `tasks.enable_nudge_engine_cron`
-  + `tasks.nudge_engine.llm` (the same warm `cc-llm` `proactiveLlm` the brief
+  + `tasks.nudge_engine.llm` (the same disposable `cc-utility` `proactiveLlm` the brief
   composer and nudge rater use), so the producer runs. The flag is set **only
   when that llm resolves** — that is a dependency, not a feature flag: an
   llm-less tick still runs the staleness pass (decaying focus scores) and then

@@ -40,6 +40,9 @@ import type {
 
 export const REPL_DEBUG = process.env['NEUTRON_REPL_DEBUG'] === '1'
 
+/** Explicitly completed helper lifecycles must not be resurrected by supervision. */
+export const retiringSessionKeys = new Set<string>()
+
 // ---------------------------------------------------------------------------
 // P0-1 native-MCP tool bridge — late-bound dispatcher.
 //

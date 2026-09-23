@@ -38,6 +38,7 @@ import { createConfiguredChatSubstrate } from '@neutronai/runtime/adapters/confi
  * the T7 implementation.
  */
 
+import { poolKeyFor, retirePersistentRepl, type HelperRetirement } from '@neutronai/runtime/adapters/claude-code/persistent/pool.ts'
 import {
   createClaudeCodeSubstrateAuto,
   existingClaudeRepl,
@@ -850,6 +851,10 @@ async function claudeOptionsFor(
 }
 
 export interface LlmCallSubstrate extends Substrate {
+  /** Retire already-owned exact helper keys; preserve registry-only survivors. */
+  retireExistingHelpers(projectIds?: readonly (string | undefined)[]): Promise<ReadonlyArray<{ sessionKey: string; outcome: HelperRetirement }>>
+  /** Stop admission and retire only the Claude keys this instance actually served. */
+  retire(): Promise<ReadonlyArray<{ sessionKey: string; outcome: HelperRetirement }>>
   /** Reconcile durable Claude survivors without turns. Exact conversation scopes:
    * null is General; strings are actual project ids (never sentinel aliases). */
   adoptExisting(projectIds: readonly (string | null)[]): Promise<void>
@@ -890,10 +895,50 @@ export function buildLlmCallSubstrate(
   // (user, project) turns keep separate upstream sessions — mirroring the CC
   // warm-pool key dimensions.
   const openaiSessions: OpenAiSessionLedger = new Map()
+  const servedClaudeKeys = new Set<string>()
+  let retired = false
   // Credential-pool failure accounting for every turn this substrate serves.
   // Absent ⇒ `'interactive'`, which is what every pre-existing call site meant.
   const failureLane: FailureOrigin = input.credential_failure_lane ?? 'interactive'
   return {
+    async retireExistingHelpers(projectIds = [undefined]) {
+      const outcomes: Array<{ sessionKey: string; outcome: HelperRetirement }> = []
+      const credentialPool = input.pool ?? await input.resolvePool?.()
+      for (const credential of credentialPool?.credentials ?? []) {
+        for (const projectId of new Set(projectIds)) {
+          // No prefix scan or inferred alias: derive the authorized original key.
+          const identity = {
+            substrate_instance_id: input.substrate_instance_id,
+            ...(input.cwd === undefined ? {} : { cwd: input.cwd }),
+            ...(input.user_id === undefined ? {} : { user_id: input.user_id }),
+            credential_identity: credential.id,
+            ...(projectId === undefined ? {} : { project_id: projectId }),
+          }
+          const sessionKey = poolKeyFor(identity)
+          try {
+            const existing = existingClaudeRepl(identity)
+            if (existing === undefined) continue
+            // Ordinary boot adoption can close a pane when health, evidence or
+            // host compatibility fails. Cleanup must never use it to acquire a
+            // survivor: only an identity already owned by this process is eligible.
+            const outcome = await retirePersistentRepl(sessionKey, {
+              registryPath: existing.registryPath, requireFreshIdle: true,
+            })
+            outcomes.push({ sessionKey, outcome: outcome === 'absent' ? 'refused' : outcome })
+          } catch {
+            outcomes.push({ sessionKey, outcome: 'refused' })
+          }
+        }
+      }
+      return outcomes
+    },
+    async retire() {
+      retired = true
+      openaiSessions.clear()
+      return Promise.all([...servedClaudeKeys].map(async sessionKey => ({
+        sessionKey, outcome: await retirePersistentRepl(sessionKey),
+      })))
+    },
     async adoptExisting(projectIds): Promise<void> {
       if (input.ephemeral === true) return
       for (const conversationProjectId of new Set(projectIds)) {
@@ -938,6 +983,7 @@ export function buildLlmCallSubstrate(
       }
     },
     start(spec: AgentSpec): SessionHandle {
+      if (retired) throw new Error('Helper session lifecycle has completed')
       // SWAPPABLE PROVIDER — resolve the backend for THIS turn. A NON-EMPTY per-turn
       // resolver value wins (active-project provider); an EMPTY/whitespace resolver
       // result means "no dynamic override this turn" → defer to the statically
@@ -1022,7 +1068,7 @@ export function buildLlmCallSubstrate(
           spec,
           substrate_instance_id: input.substrate_instance_id,
           config: input.openai,
-          sessionLedger: openaiSessions,
+          ...(input.ephemeral === true ? {} : { sessionLedger: openaiSessions }),
           sessionKey,
           failureLane,
           ...(providerSource !== undefined ? { providerSource } : {}),
@@ -1084,6 +1130,11 @@ export function buildLlmCallSubstrate(
         // The `substrateFactory` seam lets tests inject a fake substrate.
         const factory = input.substrateFactory ?? createClaudeCodeSubstrateAuto
         if (conversationProjectId !== undefined) opts.conversationProjectId = conversationProjectId
+        if (retired) {
+          yield { kind: 'error', retryable: false, message: 'Helper session lifecycle has completed' }
+          return
+        }
+        if (opts.ephemeral !== true) servedClaudeKeys.add(poolKeyFor(opts))
         innerHandle = factory(opts).start(spec)
         if (cancelled) {
           await innerHandle.cancel()
