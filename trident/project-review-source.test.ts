@@ -1,7 +1,7 @@
 import { afterEach, expect, spyOn, test } from 'bun:test'
-import { mkdtemp, readFile, rm } from 'node:fs/promises'
+import { mkdtemp, readFile, rm, writeFile, symlink } from 'node:fs/promises'
 import { tmpdir } from 'node:os'
-import { join } from 'node:path'
+import { join, dirname } from 'node:path'
 import type { BoundedWorkOutcome, BoundedWorkRequest, WorkerRunner } from '@neutronai/runtime/bounded-work.ts'
 import { decodeProjectTrailer, type ProjectTrailerOutcome } from '@neutronai/runtime/workers/project-runners.ts'
 import { createProjectReviewSource, type ProjectReviewSourceOptions } from './project-review-source.ts'
@@ -43,6 +43,202 @@ async function fixture() {
   const check = (s = source()) => reviewPanel(s, approve, snapshot, 1, 'host-run')
   return { options, calls, bindings, source, check, answer: (fn: typeof answer) => { answer = fn } }
 }
+
+async function durableFixture() {
+  const f = await fixture()
+  f.options.taskInput = () => 'canonical task bytes'
+  f.options.credentialIdentity = async provider => `selected-test-account:${provider}`
+  return f
+}
+
+test('durable panel recovery reuses completed seat and synthesis without buying either again', async () => {
+  const f = await durableFixture()
+  expect(await f.check()).toEqual({ kind: 'approve' })
+  expect(f.calls.map(row => row.role)).toEqual(['review', 'synthesis'])
+  const original = f.calls.map(row => structuredClone(row))
+  expect(await f.check()).toEqual({ kind: 'approve' })
+  expect(f.calls).toEqual(original)
+  const restored = f.source()
+  const seat = restored.seats[1]!
+  const observation = await restored.readSeat(seat, snapshot, 1)
+  observation!.payload = null
+  expect(await f.check(restored)).toEqual({ kind: 'approve' })
+  expect(f.calls).toHaveLength(2)
+})
+
+test('durable deferred retry is consumed across reconstruction and its completed sibling recovers', async () => {
+  for (const completeRetry of [false, true]) {
+    const f = await durableFixture()
+    let attempts = 0
+    f.answer(async () => ++attempts === 1 || !completeRetry
+      ? { kind: 'failed', class: 'infra', detail: 'deferred' } : completed())
+    expect(await f.check()).toMatchObject({ kind: completeRetry ? 'approve' : 'blocked' })
+    const count = f.calls.length
+    expect(count).toBe(completeRetry ? 3 : 2)
+    const source = f.source()
+    expect(await f.check(source)).toMatchObject({ kind: completeRetry ? 'approve' : 'blocked' })
+    await expect(source.retrySeat(source.seats[1]!, snapshot, 1)).rejects.toThrow('retry already consumed')
+    expect(f.calls).toHaveLength(count)
+  }
+})
+
+test('durable completed rejection and rate limit cannot purchase another review on recovery', async () => {
+  for (const outcome of [completed({ verdict: 'COMMENT', findings: [] }), { kind: 'blocked', on: 'rate limited' } as BoundedWorkOutcome]) {
+    const f = await durableFixture(); f.answer(async () => outcome)
+    expect(await f.check()).toMatchObject({ kind: 'blocked' })
+    const count = f.calls.length
+    expect(await f.check()).toMatchObject({ kind: 'blocked' })
+    expect(f.calls).toHaveLength(count)
+  }
+})
+
+test('durable retry cannot inherit a missing or nondeferred original receipt', async () => {
+  for (const missing of [true, false]) {
+    const f = await durableFixture(); let attempts = 0
+    f.answer(async () => ++attempts === 1 ? { kind: 'failed', class: 'infra', detail: 'deferred' } : completed())
+    expect(await f.check()).toEqual({ kind: 'approve' })
+    const path = join(dirname(f.calls[0]!.result.path), 'receipt.json')
+    if (missing) await rm(path)
+    else {
+      const original = JSON.parse(await readFile(path, 'utf8'))
+      original.observation.status = 'unavailable'
+      await writeFile(path, JSON.stringify(original))
+    }
+    expect(await f.check()).toMatchObject({ kind: 'blocked', on: expect.stringContaining('infra-only:') })
+    expect(f.calls).toHaveLength(3)
+  }
+})
+
+test('durable synthesis invalidates when the configured panel gains another completed seat', async () => {
+  const f = await durableFixture()
+  expect(await f.check()).toEqual({ kind: 'approve' })
+  f.options.phaseModels = { ...f.options.phaseModels, review_codex: { model: 'sol' } }
+  expect(await f.check()).toEqual({ kind: 'approve' })
+  expect(f.calls.map(row => row.role)).toEqual(['review', 'synthesis', 'review', 'synthesis'])
+  const panel = JSON.parse(await readFile(f.calls[3]!.brief.path, 'utf8')).panel
+  expect(panel).toHaveLength(2)
+  expect(await f.check()).toEqual({ kind: 'approve' })
+  expect(f.calls).toHaveLength(4)
+})
+
+test('durable pending attempt preserves its exact request and never buys a replacement', async () => {
+  const f = await durableFixture()
+  f.answer(async () => { throw Error('lost acknowledgement') })
+  expect(await f.check()).toMatchObject({ kind: 'blocked', on: expect.stringContaining('infra-only:') })
+  const original = f.calls[0]!
+  expect(JSON.parse(await readFile(join(dirname(original.result.path), 'request.json'), 'utf8'))).toEqual(original)
+  f.answer(async () => completed())
+  expect(await f.check()).toMatchObject({ kind: 'blocked', on: expect.stringContaining('pending') })
+  expect(f.calls).toHaveLength(1)
+  const moved = f.source()
+  expect(await moved.readSeat(moved.seats[1]!, { ...snapshot, head: 'b'.repeat(40) }, 1)).toMatchObject({ status: 'completed' })
+  expect(f.calls).toHaveLength(2)
+})
+
+test('durable recovery distinguishes changed task, revision, diff, round, model, effort and account', async () => {
+  const changes = ['task', 'task-id', 'head', 'diff', 'round', 'model', 'effort', 'credential', 'environment'] as const
+  for (const change of changes) {
+    const f = await durableFixture()
+    const first = f.source()
+    await first.readSeat(first.seats[1]!, snapshot, 1)
+    const before = f.calls[0]!
+    let nextSnapshot = snapshot
+    let round = 1
+    if (change === 'task') f.options.taskInput = () => 'changed canonical task'
+    if (change === 'task-id') f.options.taskId = () => 'other-task'
+    if (change === 'head') nextSnapshot = { ...snapshot, head: 'b'.repeat(40) }
+    if (change === 'diff') nextSnapshot = { ...snapshot, diff: 'changed measured diff' }
+    if (change === 'round') round = 2
+    if (change === 'model') f.options.phaseModels = { ...f.options.phaseModels, review_adversarial: { model: 'luna' } }
+    if (change === 'effort') f.options.phaseModels = { ...f.options.phaseModels, review_adversarial: { model: 'sol', effort: 'max' } }
+    if (change === 'credential') f.options.credentialIdentity = async () => 'other-selected-account'
+    if (change === 'environment') f.options.env = { REVIEW_POLICY: 'changed' }
+    const next = f.source()
+    expect(await next.readSeat(next.seats[1]!, nextSnapshot, round)).toMatchObject({ status: 'completed' })
+    expect(f.calls).toHaveLength(2)
+    expect(f.calls[1]!.step_id).not.toBe(before.step_id)
+  }
+})
+
+test('durable key also invalidates source-local cache when task or credential changes', async () => {
+  const f = await durableFixture()
+  let task = 'first task'; let credential = 'first credential'
+  f.options.taskInput = () => task
+  f.options.credentialIdentity = async () => credential
+  const source = f.source(); const seat = source.seats[1]!
+  await source.readSeat(seat, snapshot, 1)
+  await source.readSeat(seat, snapshot, 1); expect(f.calls).toHaveLength(1)
+  task = 'changed task'; await source.readSeat(seat, snapshot, 1)
+  credential = 'changed credential'; await source.readSeat(seat, snapshot, 1)
+  expect(f.calls).toHaveLength(3)
+})
+
+test('missing task or credential identity cannot claim cross-host reuse', async () => {
+  for (const missing of ['task', 'empty-task', 'credential', 'empty-credential'] as const) {
+    const f = await durableFixture()
+    if (missing === 'task') delete f.options.taskInput
+    if (missing === 'empty-task') f.options.taskInput = () => ''
+    if (missing === 'credential') delete f.options.credentialIdentity
+    if (missing === 'empty-credential') f.options.credentialIdentity = async () => null
+    const source = f.source()
+    expect(await f.check(source)).toEqual({ kind: 'approve' })
+    expect(await f.check(source)).toEqual({ kind: 'approve' })
+    expect(f.calls).toHaveLength(2)
+    expect(await f.check()).toEqual({ kind: 'approve' })
+    expect(f.calls).toHaveLength(4)
+  }
+})
+
+test('corrupt, foreign, missing and symlinked receipt evidence cannot approve or redispatch', async () => {
+  for (const corruption of ['json', 'identity', 'head', 'missing', 'symlink'] as const) {
+    const f = await durableFixture()
+    expect(await f.check()).toEqual({ kind: 'approve' })
+    const directory = dirname(f.calls[0]!.result.path)
+    const path = join(directory, 'receipt.json')
+    const saved = JSON.parse(await readFile(path, 'utf8'))
+    if (corruption === 'json') await writeFile(path, '{')
+    if (corruption === 'identity') await writeFile(path, JSON.stringify({ ...saved, identity: 'foreign' }))
+    if (corruption === 'head') await writeFile(path, JSON.stringify({ ...saved, observation: { ...saved.observation, head: 'b'.repeat(40) } }))
+    if (corruption === 'missing') await rm(path)
+    if (corruption === 'symlink') {
+      const other = join(f.options.evidenceRoot, 'copied-receipt.json')
+      await writeFile(other, JSON.stringify(saved)); await rm(path); await symlink(other, path)
+    }
+    expect(await f.check()).toMatchObject({ kind: 'blocked', on: expect.stringContaining('infra-only:') })
+    expect(f.calls).toHaveLength(2)
+  }
+})
+
+test('durable independent source cannot take an in-flight same-provider attempt', async () => {
+  const f = await durableFixture()
+  let finish!: () => void
+  f.answer(async () => { await new Promise<void>(resolve => { finish = resolve }); return completed() })
+  const first = f.source(); const second = f.source()
+  const pending = first.readSeat(first.seats[1]!, snapshot, 1)
+  for (let count = 0; !finish && count < 100; count++) await new Promise(resolve => setTimeout(resolve, 5))
+  await expect(second.readSeat(second.seats[1]!, snapshot, 1)).rejects.toThrow('pending')
+  finish(); await pending
+  expect(f.calls).toHaveLength(1)
+})
+
+test('durable cross-provider completion reuses original request before reading advanced thread', async () => {
+  const f = await durableFixture(); f.options.replProvider = 'anthropic'
+  f.answer(async req => ({ ...completed(), thread_id: req.thread?.id ?? `thread-${req.role}` } as BoundedWorkOutcome))
+  const first = f.source()
+  await first.readSeat(first.seats[1]!, snapshot, 1)
+  const original = f.calls[0]!
+  expect(original.thread).toBeNull()
+  const recovered = f.source()
+  await recovered.readSeat(recovered.seats[1]!, snapshot, 1)
+  expect(f.calls).toHaveLength(1)
+  expect(JSON.parse(await readFile(join(dirname(original.result.path), 'request.json'), 'utf8'))).toEqual(original)
+  await recovered.readSeat(recovered.seats[1]!, snapshot, 2)
+  expect(f.calls[1]!.thread).toEqual({ id: 'thread-review' })
+  f.options.credentialIdentity = async () => 'rotated-account-at-same-path'
+  const rotated = f.source()
+  await rotated.readSeat(rotated.seats[1]!, snapshot, 2)
+  expect(f.calls[2]!.thread).toBeNull()
+})
 
 test('separate panel observation joins once and decision composition never redispatches valid verdicts', async () => {
   const f = await fixture()
