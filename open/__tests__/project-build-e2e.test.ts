@@ -82,7 +82,6 @@ import { PROJECT_DEPENDENCIES_TIMEOUT_MS } from '../wiring/project-build-depende
 import { PROJECT_SNAPSHOT_SCHEMA } from '../wiring/project-build-snapshot.ts'
 import { EfficiencyTrace, EFFICIENCY_SCENARIOS, assertEfficient, compareEfficiency, type EfficiencyReport, type EfficiencyScenario } from './fixtures/trident-efficiency-benchmark.ts'
 import { ReplSession } from '@neutronai/runtime/adapters/claude-code/persistent/repl-session.ts'
-import { CLAUDE_BOUNDED_PROFILE_FINGERPRINT } from '@neutronai/runtime/workers/claude-bounded-profile.ts'
 
 const cleanups: (() => void | Promise<void>)[] = []
 afterEach(async () => { for (const fn of cleanups.splice(0).reverse()) await fn() })
@@ -917,7 +916,7 @@ async function fixture(options: { taskSequence?: boolean; moreTasks?: boolean; s
   cleanups.push(() => { pool.delete(key); supervisedBySessionKey.delete(key) })
   const worker = literalWorker(world)
   const projectsDir = join(dir, 'claude-projects')
-  const session = { sessionId: 'e2e-session', authFingerprint: 'fixture-spawned-credential', boundedWorkerProfile: CLAUDE_BOUNDED_PROFILE_FINGERPRINT, toolSurface: LIVE_AGENT_TOOL_NAMES.join(','), cwd: dir, hasChildExited: () => false,
+  const session = { sessionId: 'e2e-session', authFingerprint: 'fixture-spawned-credential', toolSurface: LIVE_AGENT_TOOL_NAMES.join(','), cwd: dir, hasChildExited: () => false,
     child: { submitLine: async (line: string) => {
       const spec = JSON.parse(line.slice(line.indexOf('{')))
       const args = JSON.parse(String(spec.prompt).slice(String(spec.prompt).indexOf('{')))
@@ -956,7 +955,6 @@ async function fixture(options: { taskSequence?: boolean; moreTasks?: boolean; s
     const live = new ReplSession(key, 'e2e-generation', 'e2e-session', 'e2e-channel', dir)
     live.authFingerprint = session.authFingerprint
     live.toolSurface = session.toolSurface
-    live.boundedWorkerProfile = session.boundedWorkerProfile
     const children: Promise<void>[] = []
     const errors: unknown[] = []
     live.attachChild({ pid: 123, write() {}, kill() {}, hasExited: () => false,
@@ -4658,7 +4656,7 @@ for (const seam of ['submitLine', 'acquireTurn', 'silent-worker'] as const) {
     // shortened here, not the mechanism that enforces it.
     options.workers.plan.request = { ...options.workers.plan.request, budget: { wall_ms: 1_500 } }
     registerSession(f, {
-      sessionId: 'e2e-session', boundedWorkerProfile: CLAUDE_BOUNDED_PROFILE_FINGERPRINT, toolSurface: LIVE_AGENT_TOOL_NAMES.join(','), cwd: f.dir, hasChildExited: () => false,
+      sessionId: 'e2e-session', toolSurface: LIVE_AGENT_TOOL_NAMES.join(','), cwd: f.dir, hasChildExited: () => false,
       child: { submitLine: seam === 'submitLine' ? neverSettles : async () => {} },
       acquireTurn: seam === 'acquireTurn' ? neverSettles : async () => () => {},
     })

@@ -6,7 +6,6 @@
  */
 
 import { afterEach, beforeEach, describe, it, expect } from 'bun:test'
-import { CLAUDE_BOUNDED_AGENT } from '../../../../workers/claude-bounded-profile.ts'
 import {
   buildReplArgv,
   resolveReplEffort,
@@ -25,20 +24,12 @@ const base = {
 }
 
 describe('buildReplArgv', () => {
-  it('registers a bounded native profile while retaining the parent tools and MCP permissions', () => {
+  it('uses the built-in native child route without injecting a spawn-only profile', () => {
     const argv = buildReplArgv({ ...base, resume: false,
       tools: ['Agent', 'Read', 'Bash', 'Write', 'Edit', 'ToolSearch'], allowedMcpTools: ['mcp__neutron'] })
-    const agents = JSON.parse(argv[argv.indexOf('--agents') + 1]!)
-    expect(Object.keys(agents)).toEqual([CLAUDE_BOUNDED_AGENT])
-    expect(agents[CLAUDE_BOUNDED_AGENT].tools).toEqual(['Read', 'Grep', 'Glob', 'Bash', 'Edit', 'Write'])
+    expect(argv).not.toContain('--agents')
     expect(argv[argv.indexOf('--tools') + 1]).toBe('Agent,Read,Bash,Write,Edit,ToolSearch')
     expect(argv[argv.indexOf('--allowedTools') + 1]).toBe('mcp__neutron')
-  })
-
-  it('does not provision a worker in a tool-less or non-delegating session', () => {
-    for (const tools of [undefined, [], ['Read', 'Grep']]) {
-      expect(buildReplArgv({ ...base, resume: false, ...(tools === undefined ? {} : { tools }) })).not.toContain('--agents')
-    }
   })
 
   it('fresh spawn pins --session-id (not --resume)', () => {

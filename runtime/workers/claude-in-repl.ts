@@ -6,7 +6,6 @@ import { setTimeout as delay } from 'node:timers/promises'
 import type { AgentSpec } from '../substrate.ts'
 import type { BoundedWorkOutcome, BoundedWorkRequest, WorkerRunner } from '../bounded-work.ts'
 import { SUBAGENT_TOOL_NAME } from './claude-tool-contract.ts'
-import { CLAUDE_BOUNDED_AGENT } from './claude-bounded-profile.ts'
 import type { ProjectTrailerOutcome } from './project-runners.ts'
 
 
@@ -50,7 +49,7 @@ export function claudeInReplRunner(options: ClaudeInReplOptions): WorkerRunner {
         if (held.kind === 'dispatch') {
           if (signal.aborted || Date.now() >= deadline) return unseen('Cancelled or out of time before dispatch.')
           const args = {
-            subagent_type: CLAUDE_BOUNDED_AGENT,
+            subagent_type: 'general-purpose',
             description: `${req.role}: ${req.step_id}`,
             model: req.model_id,
             run_in_background: true,

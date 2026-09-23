@@ -4,7 +4,6 @@ import { createPersistentReplSubstrate, shutdownAllPersistentRepls } from '@neut
 import type { AgentSpec } from '@neutronai/runtime/substrate.ts'
 import { LIVE_AGENT_TOOL_NAMES, PROJECT_REPL_TOOL_DEFS } from '@neutronai/gateway/wiring/build-live-agent-turn.ts'
 import { SUBAGENT_TOOL_NAME } from '@neutronai/runtime/workers/claude-tool-contract.ts'
-import { CLAUDE_BOUNDED_PROFILE_FINGERPRINT } from '@neutronai/runtime/workers/claude-bounded-profile.ts'
 import { REFLECTION_GUIDANCE_FRAMING, MAX_REFLECTION_GUIDANCE_CHARS } from '@neutronai/trident/reflection-guidance.ts'
 import { PLAN_SCHEMA, FORGE_SCHEMA, VERDICT_SCHEMA } from '@neutronai/trident/gates/result-contract.ts'
 import { briefIntegrity } from '@neutronai/trident/gates/brief-integrity.ts'
@@ -435,7 +434,7 @@ test('acting turn requires the selected live project session and observed grants
   expect((await act()).kind).toBe('unknown')
   const key = 'fixture-project-launch'
   const config = { substrate_instance_id: 'cc-agent-fixture', project_id: f.context.projectId, skip_permissions: true, extra_dirs: [f.dir] }
-  const session = { sessionId: 'fixture-session', toolSurface: LIVE_AGENT_TOOL_NAMES.join(','), boundedWorkerProfile: undefined as string | undefined, cwd: f.dir, hasChildExited: () => false, child: { submitLine: async () => {} }, acquireTurn: async () => () => {} }
+  const session = { sessionId: 'fixture-session', toolSurface: LIVE_AGENT_TOOL_NAMES.join(','), cwd: f.dir, hasChildExited: () => false, child: { submitLine: async () => {} }, acquireTurn: async () => () => {} }
   cleanup.push(() => { pool.delete(key); supervisedBySessionKey.delete(key); supervisedBySessionKey.delete(key + '-other') })
   supervisedBySessionKey.set(key, config)
   expect((await act()).kind).toBe('unknown')
@@ -454,12 +453,6 @@ test('acting turn requires the selected live project session and observed grants
   supervisedBySessionKey.set(key, config)
   await mkdir(join(f.dir, 'state'), { recursive: true })
   await writeFile(request.result.path, '{}')
-  // A live parent and result file do not establish its native worker profile.
-  for (const profile of [undefined, 'stale-profile']) {
-    session.boundedWorkerProfile = profile
-    expect(await act()).toMatchObject({ kind: 'refused', detail: expect.stringContaining('lacks the current bounded worker profile') })
-  }
-  session.boundedWorkerProfile = CLAUDE_BOUNDED_PROFILE_FINGERPRINT
   expect((await act()).kind).toBe('turn-ended')
   f.context.provider = 'pi'
   await f.prepare()
@@ -538,7 +531,7 @@ test('acting turn lazily starts and retains a cold project session', async () =>
   const turn = { conversation: captured.conversation, request, spec: { ...captured.conversation.spec, prompt: 'bounded work' }, timeout_ms: 50, signal: new AbortController().signal }
   const key = 'cold-project-launch'
   const config = { substrate_instance_id: 'cc-agent-fixture', project_id: f.context.projectId, skip_permissions: true, extra_dirs: [f.dir] }
-  const session = { sessionId: 'fixture-session', toolSurface: LIVE_AGENT_TOOL_NAMES.join(','), boundedWorkerProfile: CLAUDE_BOUNDED_PROFILE_FINGERPRINT, cwd: f.dir, hasChildExited: () => false, child: { submitLine: async () => {} }, acquireTurn: async () => () => {} }
+  const session = { sessionId: 'fixture-session', toolSurface: LIVE_AGENT_TOOL_NAMES.join(','), cwd: f.dir, hasChildExited: () => false, child: { submitLine: async () => {} }, acquireTurn: async () => () => {} }
   let spawns = 0
   cleanup.push(() => { pool.delete(key); supervisedBySessionKey.delete(key) })
   f.setSpawnProjectSession(async projectId => {

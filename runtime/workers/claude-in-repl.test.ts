@@ -8,7 +8,6 @@ import type { AgentSpec } from '../substrate.ts'
 import type { BoundedWorkOutcome, BoundedWorkRequest } from '../bounded-work.ts'
 import { claudeInReplRunner, type ClaudeInReplOptions } from './claude-in-repl.ts'
 import { SUBAGENT_TOOL_NAME } from './claude-tool-contract.ts'
-import { CLAUDE_BOUNDED_AGENT } from './claude-bounded-profile.ts'
 
 const directories: string[] = []
 afterEach(async () => {
@@ -69,7 +68,7 @@ test('dispatches one explicitly modeled subagent and reads its file, never the r
   f.options.composeActingTurn = async (topic, spec, opts) => {
     const args = JSON.parse(spec.prompt.slice(spec.prompt.indexOf('\n') + 1))
     expect(args.model).toBe(f.req.model_id)
-    expect(args.subagent_type).toBe(CLAUDE_BOUNDED_AGENT)
+    expect(args.subagent_type).toBe('general-purpose')
     expect(args.run_in_background).toBe(true)
     expect(args.prompt).toContain(JSON.stringify(f.req))
     expect(args.prompt).toContain('harness file tool')

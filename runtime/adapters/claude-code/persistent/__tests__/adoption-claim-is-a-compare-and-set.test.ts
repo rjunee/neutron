@@ -60,8 +60,10 @@ import {
   resetBootAdoptionForTests,
 } from '../boot-adoption.ts'
 import { getOrSpawnSession } from '../spawn.ts'
-import { CLAUDE_BOUNDED_PROFILE_FINGERPRINT } from '../../../../workers/claude-bounded-profile.ts'
 import { ReplSession, authFingerprintFor } from '../repl-session.ts'
+import { createClaudeActingTurn } from '../../../../workers/claude-acting-turn.ts'
+import { claudeInReplRunner } from '../../../../workers/claude-in-repl.ts'
+import type { BoundedWorkRequest } from '../../../../bounded-work.ts'
 import type { PtyChild } from '../pty-host.ts'
 import type { AgentSpec } from '../../../../substrate.ts'
 import { childByKey, pool, sink, supervisedBySessionKey } from '../pool-state.ts'
@@ -260,7 +262,7 @@ describe('two incarnations racing for one row', () => {
   for (const mismatch of ['credential', 'surface', 'bridge', 'mcp', 'poison', 'poison-hosted'] as const) {
     it(`refuses ${mismatch} eviction of an adopted parent with unknown native children`, async () => {
       const f = fixture({ reuse: { tool_surface: 'Agent,Read', tool_bridge: false,
-        auth_fingerprint: authFingerprintFor(undefined), bounded_worker_profile: CLAUDE_BOUNDED_PROFILE_FINGERPRINT } })
+        auth_fingerprint: authFingerprintFor(undefined) } })
       f.host.addPane(HANDLE, { argv: oursArgv(), screens: ['❯\n  1 agent running'], pid: 4242 })
       expect((await beginBootAdoption(f.options, KEY, { host: f.host, health: async () => true, log: () => {} })).kind).toBe('adopted')
       const session = (await pool.get(KEY))!
@@ -296,47 +298,57 @@ describe('two incarnations racing for one row', () => {
     })
   }
 
-  for (const profile of [undefined, 'obsolete-native-profile']) {
-    it(`profile refresh preserves a surviving adopted native parent with no reconstructed leases (${profile})`, async () => {
-      const f = fixture({ reuse: { tool_surface: 'Agent,Read', tool_bridge: false,
-        auth_fingerprint: authFingerprintFor(undefined),
-        ...(profile === undefined ? {} : { bounded_worker_profile: profile }) } })
-      // The parent composer is quiet while its native child remains alive. Neither
-      // this display nor a completed chat turn establishes child termination.
-      f.host.addPane(HANDLE, { argv: oursArgv(), screens: ['❯\n  1 agent running'], pid: 4242 })
-      expect((await beginBootAdoption(f.options, KEY, { host: f.host, health: async () => true, log: () => {} })).kind).toBe('adopted')
-      const session = (await pool.get(KEY))!
-      expect(session.adopted).toBe(true)
-      expect(session.activeTurn).toBeUndefined()
-      expect(session.turnSlotHeld).toBe(0)
-      expect(session.boundedWorkerProfile).toBe(profile)
-      const before = readFileSync(f.registryPath, 'utf8')
-      const spec: AgentSpec = { prompt: 'next chat turn', model_preference: ['claude-opus-5'],
-        tools: ['Agent', 'Read'].map(name => ({ name, description: name, input_schema: {}, output_schema: {}, capability_required: 'local' })) }
-      const next = await getOrSpawnSession(KEY, f.options, spec).catch(error => error)
-      expect(f.host.panes.has(HANDLE)).toBe(true)
-      expect(f.host.closed).toEqual([])
-      expect(f.host.attached[0]!.hasExited()).toBe(false)
-      expect(next).toBe(session)
-      expect(readFileSync(f.registryPath, 'utf8')).toBe(before)
-      // Repeated lookup must not treat one successful adoption/lookup as an idle
-      // certificate. The bounded capability preflight still refuses this profile.
-      expect(await getOrSpawnSession(KEY, f.options, spec)).toBe(session)
-      expect(f.host.closed).toEqual([])
+  it('an adopted pre-profile parent dispatches a general-purpose native child without termination', async () => {
+    const f = fixture({ reuse: { tool_surface: 'Agent,Read', tool_bridge: false,
+      auth_fingerprint: authFingerprintFor(undefined) } })
+    f.host.addPane(HANDLE, { argv: oursArgv(), screens: ['❯\n  1 agent running'], pid: 4242 })
+    expect((await beginBootAdoption(f.options, KEY, { host: f.host, health: async () => true, log: () => {} })).kind).toBe('adopted')
+    const session = (await pool.get(KEY))!
+    expect(session.adopted).toBe(true)
+    expect(session.activeTurn).toBeUndefined()
+    expect(session.turnSlotHeld).toBe(0)
+    const before = readFileSync(f.registryPath, 'utf8')
+    const spec: AgentSpec = { prompt: 'next chat turn', model_preference: ['claude-opus-5'],
+      tools: ['Agent', 'Read'].map(name => ({ name, description: name, input_schema: {}, output_schema: {}, capability_required: 'local' })) }
+    expect(await getOrSpawnSession(KEY, f.options, spec)).toBe(session)
+    const dir = scratch()
+    const request: BoundedWorkRequest = {
+      run_id: 'adopted-run', step_id: 'child', role: 'review', model_id: 'claude-opus-5', effort: 'high',
+      cwd: '/tmp', writable: false, network: false, tools: 'read-only',
+      brief: { path: join(dir, 'brief.md'), integrity: 'fixture' },
+      result: { path: join(dir, 'result.json'), schema: 'test-v1' },
+      thread: { id: SESSION_ID }, budget: { wall_ms: 1000 }, needs_approval_decision: false,
+    }
+    writeFileSync(request.brief.path, 'Review the requested work.')
+    const commands: string[] = []
+    session.child.submitLine = async line => {
+      commands.push(line)
+      const submitted = JSON.parse(line.slice(line.indexOf('{')))
+      const args = JSON.parse(submitted.prompt.split('\n')[1])
+      expect(args.subagent_type).toBe('general-purpose')
+      expect(args.model).toBe(request.model_id)
+      expect(args.prompt).toContain(JSON.stringify(request))
+      writeFileSync(request.result.path, JSON.stringify({ kind: 'blocked', on: 'native result evidence' }))
+    }
+    const acting = createClaudeActingTurn({ project_id: 'proj', topic_id: 'topic', session,
+      grants: { roots: [], tools: 'read-only', writable: false, network: false } })
+    const runner = claudeInReplRunner({ topic_id: 'topic', state_dir: dir, spec,
+      composeActingTurn: async (_topic, childSpec, opts) => {
+        expect(await acting({
+          conversation: { project_id: 'proj', topic_id: 'topic', provider: 'anthropic', spec },
+          request, spec: childSpec, signal: new AbortController().signal, ...opts,
+        })).toEqual({ kind: 'turn-ended' })
+        return 'dispatch acknowledged'
+      },
+      decodeTrailer: bytes => JSON.parse(bytes),
     })
-  }
-
-  for (const profile of [undefined, 'persisted-profile-from-spawn']) {
-    it(`restores bounded profile from the adopted child, never current defaults (${profile})`, async () => {
-      const f = fixture({ reuse: { tool_surface: 'Agent,Read', tool_bridge: false, auth_fingerprint: 'fp-cas',
-        ...(profile === undefined ? {} : { bounded_worker_profile: profile }) } })
-      expect((await pass(f)).kind).toBe('adopted')
-      const session = await pool.get(KEY)
-      expect(session).toBeDefined()
-      expect(session!.boundedWorkerProfile).toBe(profile)
-      expect(session!.toolSurface).toBe('Agent,Read')
-    })
-  }
+    expect(await runner.run(request, 'in-repl', new AbortController().signal)).toEqual({ kind: 'blocked', on: 'native result evidence' })
+    expect(commands).toHaveLength(1)
+    expect(await getOrSpawnSession(KEY, f.options, spec)).toBe(session)
+    expect(f.host.closed).toEqual([])
+    expect(f.host.attached[0]!.hasExited()).toBe(false)
+    expect(readFileSync(f.registryPath, 'utf8')).toBe(before)
+  })
 
   it('the one that did not claim it refuses, and only one wrapper is left on the pane', async () => {
     const f = fixture()
