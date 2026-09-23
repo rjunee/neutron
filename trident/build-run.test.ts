@@ -716,21 +716,22 @@ test('Ralph ledger commit refusal or an unmeasured ledger head never hands off',
   }
 })
 
-test('final Ralph iteration ticks the last box only on a branch that already carries the ledger', async () => {
+test('final Ralph iteration never moves the reviewed head with a ledger commit', async () => {
   // A one-task run: no continuation will read a ledger, and IMPLEMENTATION_PLAN.md is
   // executable prose to the mutation gate, so the host must not add it to the diff.
   const single = modeFixture(); single.plan.implementationPlan = '- [ ] T1: first'; single.plan.remainingTasks = 0; single.setPlan()
   expect((await single.run()).kind).toBe('merged')
   expect(single.state.commits).toEqual([])
-  // The last iteration of a multi-task run: the diff already carries the ledger, so
-  // the reviewed and merged revision is the one with every box ticked.
+  // The last iteration of a multi-task run, whose diff already carries the handoff
+  // ledger: the reviewed and merged revision is still the BUILDER's head, because
+  // every worker receipt review and publication read is bound to that head.
   const last = modeFixture(); last.snapshot.diff = 'diff --git a/IMPLEMENTATION_PLAN.md b/IMPLEMENTATION_PLAN.md\n+ledger\n'
   last.plan.implementationPlan = '- [x] T1: first\n- [ ] T2: second'; last.plan.topTask = '- [ ] T2: second'; last.plan.remainingTasks = 0; last.setPlan()
-  expect(await last.run()).toMatchObject({ kind: 'merged', snapshot: { head: last.ledgerHead } })
-  expect(last.state.commits).toEqual([{ body: '- [x] T1: first\n- [x] T2: second', head: 'a'.repeat(40) }])
+  expect(await last.run()).toMatchObject({ kind: 'merged', snapshot: { head: 'a'.repeat(40) } })
+  expect(last.state.commits).toEqual([])
   expect(last.state.advances).toBe(0)
   expect(last.cross.calls.every(c => c.step_id.includes(':review:'))).toBe(true)
-  expect(last.events.indexOf('commitPlan')).toBeLessThan(last.events.indexOf('publishGate'))
+  expect(last.events).not.toContain('commitPlan')
 })
 
 test('iteration 2 continues from the ledger iteration 1 committed, not a regenerated plan', async () => {

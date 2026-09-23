@@ -231,11 +231,6 @@ function tickTopTask(body: string): string {
   lines[top] = lines[top]!.replace('- [ ]', '- [x]')
   return lines.join('\n')
 }
-/** The measured branch diff already carries a ledger. The final iteration ticks its
- *  last box only then: `IMPLEMENTATION_PLAN.md` is EXECUTABLE prose to the mutation
- *  gate (`mutation-prover.ts` `EXECUTABLE_PROSE_FILES`), so adding it to a one-task
- *  run's diff would strip the prose-only exemption from a change that had it. */
-const carriesLedger = (diff: string): boolean => /^diff --git a\/IMPLEMENTATION_PLAN\.md b\/IMPLEMENTATION_PLAN\.md$/m.test(diff)
 
 /**
  * A worker trailer is a claim, not a panel verdict. Keep a schema-valid APPROVE
@@ -553,11 +548,18 @@ export async function buildRun(input: BuildRunInput, deps: BuildRunDeps, signal:
         if (!fullOid(snapshot.head)) return failed('Wave build requires a full commit OID', 'built-head-unverified')
         return { kind: 'built', snapshot, cause: 'wave-member-built' }
       }
-      if (input.mode === 'ralph' && (plan!.remainingTasks > 0 || carriesLedger(snapshot.diff))) {
+      if (input.mode === 'ralph' && plan!.remainingTasks > 0) {
+        // THE LEDGER IS COMMITTED AT A HANDOFF ONLY, never on the final iteration. A
+        // handoff's next reader is the continuation planner, which reads the committed
+        // file. The final iteration's next readers are review and publication, which
+        // bind every worker receipt — the suite checkpoint, the mutation nomination, the
+        // publication body — to the head the BUILDER reported (`readArtifact`,
+        // open/wiring/project-build.ts). A host commit on top would leave the reviewed
+        // head with no receipt at all, so no multi-task card could ever merge (measured
+        // end to end: `open/__tests__/project-build-e2e.test.ts`, the Ralph-handoff
+        // retry). The merged ledger therefore records the last handoff's state.
         const ledger = await commitLedger(tickTopTask(plan!.implementationPlan))
         if (ledger) return ledger
-      }
-      if (input.mode === 'ralph' && plan!.remainingTasks > 0) {
         // G037: consume the old result before acknowledging the next iteration.
         // `snapshot` is the LEDGER commit, so the handoff's recorded head — the one
         // a retry's dispatch proves the local tip against and the one the next

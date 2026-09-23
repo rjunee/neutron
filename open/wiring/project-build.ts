@@ -133,7 +133,7 @@ export interface ProjectBuildContext {
 export const PLAN_LEDGER_CONTRACT = [
   'THE TASK LEDGER. `implementationPlan` is a checkbox list with one line per task: `- [x] T<n>: <one line>` for a task already built on this branch, and `- [ ] T<n>: <one line>` for each task still to build, the next task first among the unchecked lines.',
   '`topTask` is the first unchecked line, copied verbatim. `remainingTasks` is the number of unchecked lines minus one. The host refuses a plan whose lines disagree with those two fields.',
-  'After the build the host ticks the top task and commits the ledger as IMPLEMENTATION_PLAN.md on a PUBLIC branch whose files and commit messages are leak-scanned: no hostnames, usernames or absolute paths in any line.',
+  'After a build that leaves tasks remaining, the host ticks the top task and commits the ledger as IMPLEMENTATION_PLAN.md on a PUBLIC branch whose files and commit messages are leak-scanned: no hostnames, usernames or absolute paths in any line.',
   'CONTINUATION. When the host context carries `planner: "next"` and `committedPlan`, the committed ledger IS the plan: return `committedPlan.body` unchanged as `implementationPlan`, its first unchecked line as `topTask`, and its unchecked count minus one as `remainingTasks`, and write only the `executionSpec` for that task. Do not re-survey the repository or re-plan the remaining tasks.',
 ].join('\n')
 

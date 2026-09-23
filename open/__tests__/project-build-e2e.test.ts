@@ -55,6 +55,7 @@ import { chmod, mkdir, mkdtemp, readFile, readdir, rename, rm, symlink, writeFil
 import { tmpdir } from 'node:os'
 import { join } from 'node:path'
 import { fileURLToPath } from 'node:url'
+import { createHash } from 'node:crypto'
 import { ProjectDb } from '@neutronai/persistence/index.ts'
 import { seedMigratedDb } from '../../tests/support/migrated-db.ts'
 import { TridentRunStore } from '@neutronai/trident/store.ts'
@@ -317,6 +318,15 @@ interface WorkerWorld {
   selectedTasks: string[]
   /** The planner route the real driver wrote into each plan turn's context. */
   plannerChoices: string[]
+  /** The committed ledger bytes the real driver handed each plan turn (`committedPlan.body`). */
+  committedPlans: (string | undefined)[]
+  /**
+   * THE HOST IS THE ONLY LEDGER WRITER. When set, a build worker never writes
+   * `IMPLEMENTATION_PLAN.md` itself (it still records the task it was handed), so the
+   * only ledger a continuation can find is the one `commitLedger` committed
+   * (`trident/build-run.ts`, the Ralph handoff).
+   */
+  hostLedger?: boolean
   synthesisShape: 'legacy' | 'schema-guided' | 'malformed' | 'independent'
   synthesisSchemaSeen: boolean[]
 }
@@ -439,6 +449,7 @@ async function performRole(world: WorkerWorld, request: BoundedWorkRequest, brie
   if (request.role === 'plan') {
     // A plan turn writes no commit, so the measured revision is unchanged.
     world.plannerChoices.push(context.planner)
+    world.committedPlans.push(context.committedPlan?.body)
     if (context.planner === 'next') {
       // THE WORKER MUST NOT DO G029'S JOB. This used to read `context.committedPlan`
       // and emit the first unchecked task and the remaining count itself — so the
@@ -472,7 +483,7 @@ async function performRole(world: WorkerWorld, request: BoundedWorkRequest, brie
       && selected.implementationPlan?.includes('T2 record another note')
     if (commitsPlan && selected.topTask && selected.implementationPlan) {
       world.selectedTasks.push(selected.topTask)
-      await writeFile(join(cwd, 'IMPLEMENTATION_PLAN.md'),
+      if (!world.hostLedger) await writeFile(join(cwd, 'IMPLEMENTATION_PLAN.md'),
         selected.implementationPlan.replace(selected.topTask, selected.topTask.replace('- [ ]', '- [x]')))
     }
     const branch = await gitOut(world.run, cwd, ['rev-parse', '--abbrev-ref', 'HEAD'])
@@ -491,7 +502,7 @@ async function performRole(world: WorkerWorld, request: BoundedWorkRequest, brie
       await gitOut(world.run, cwd, ['add', '--', 'src/limit.ts', 'tests/limit.test.ts', 'tests/control.test.ts'])
     }
     await gitOut(world.run, cwd, ['add', '--', 'NOTES.md',
-      ...(commitsPlan ? ['IMPLEMENTATION_PLAN.md'] : [])])
+      ...(commitsPlan && !world.hostLedger ? ['IMPLEMENTATION_PLAN.md'] : [])])
     await gitOut(world.run, cwd, ['-c', 'user.email=w@example.invalid', '-c', 'user.name=Worker',
       '-c', 'commit.gpgsign=false', 'commit', '-m', `work: ${request.role} ${request.step_id}`])
     // Measure the produced revision from the only base this worker was given.
@@ -707,6 +718,10 @@ console.log(JSON.stringify({ type: 'result', subtype: 'success', is_error: false
 `
 
 async function fixture(options: { ralph?: boolean; moreTasks?: boolean; suiteExit?: number; testStrategy?: string
+  /** `false`: the seed commit carries NO `IMPLEMENTATION_PLAN.md` (default `true`). */
+  seedLedger?: boolean
+  /** See `WorkerWorld.hostLedger` (default `false`). */
+  hostLedger?: boolean
   bunWorkspace?: boolean
   manifest?: Record<string, unknown>
   dispatchTask?: string
@@ -779,8 +794,10 @@ async function fixture(options: { ralph?: boolean; moreTasks?: boolean; suiteExi
     await rm(join(repo, 'app', 'node_modules'), { recursive: true, force: true })
   }
   await writeFile(join(repo, 'NOTES.md'), 'seed\n')
-  await writeFile(join(repo, 'IMPLEMENTATION_PLAN.md'),
-    `- [ ] T1 record the note\n${options.moreTasks ? '- [ ] T2 record another note\n' : ''}`)
+  if (options.seedLedger ?? true) {
+    await writeFile(join(repo, 'IMPLEMENTATION_PLAN.md'),
+      `- [ ] T1 record the note\n${options.moreTasks ? '- [ ] T2 record another note\n' : ''}`)
+  }
   await git(repo, ['add', '-A'])
   await git(repo, ['commit', '-m', 'chore: seed'])
   await git(repo, ['remote', 'add', 'origin', origin])
@@ -804,7 +821,7 @@ async function fixture(options: { ralph?: boolean; moreTasks?: boolean; suiteExi
   const github = fakeGithub({ origin, repo })
   const commands: string[][] = []
   const world: WorkerWorld = { run: spawnCapture, repo, scratch, dispatches: [],
-    selectedTasks: [], plannerChoices: [],
+    selectedTasks: [], plannerChoices: [], committedPlans: [], hostLedger: options.hostLedger ?? false,
     synthesisShape: options.synthesisShape ?? 'legacy', synthesisSchemaSeen: [],
     blockersByRound: options.blockersByRound ?? [], replanRounds: options.replanRounds ?? [],
     blockRoles: new Set(options.blockRoles ?? []), repeatFirstFinding: options.repeatFirstFinding ?? false,
@@ -1403,6 +1420,45 @@ async function restartThroughGateway(f: Awaited<ReturnType<typeof fixture>>) {
   return JSON.parse(f.store.get(f.row.id)!.inner_result!).projectBuild as ProjectBuildOutcome
 }
 
+/**
+ * LAUNCH ANY ROW THROUGH THE OUTER GATEWAY, the way a dispatched run is really
+ * started: the orchestrator's `step` → `launch` → `prepareLaunch`
+ * (`trident/orchestrator.ts`) → the real project launcher → `createProjectBuildHost`
+ * → `buildRun`. Unlike `restartThroughGateway` it asserts no crash-recovery
+ * preconditions, so a RE-DISPATCHED row can be driven from its first fire.
+ * `onPrepare` sees exactly what `prepareLaunch` handed the launcher. A launch that
+ * ends `failed` before firing returns no outcome instead of waiting for a driver
+ * that never started.
+ */
+async function launchThroughGateway(f: Awaited<ReturnType<typeof fixture>>, runId: string,
+  onPrepare: (input: InnerLoopInput) => void) {
+  let settled!: () => void
+  const completion = new Promise<void>(resolve => { settled = resolve })
+  const record = f.store.recordStageEvent.bind(f.store)
+  const recording = spyOn(f.store, 'recordStageEvent').mockImplementation(async (...args) => {
+    await record(...args)
+    if (args[0] === runId && args[1] === 'build-driver-settled') settled()
+  })
+  cleanups.push(() => recording.mockRestore())
+  const errors: unknown[] = []
+  const launcher = createProjectLauncher({ store: f.store, onError: error => { errors.push(error) }, prepare: async input => {
+    onPrepare(input)
+    f.input.run = input.run
+    return f.prepare()
+  } })
+  const orch = buildTridentOrchestrator({ fire_workflow: launcher, db_path: f.input.db_path,
+    base_branch: 'main', run_host: Object.assign(f.context.runHost, { writesDiffOutput: true as const }),
+    read_run: id => f.store.get(id), list_stage_events: id => f.store.stageEvents(id),
+    begin_project_build_driver_recovery: (id, reservation) => f.store.beginProjectBuildDriverRecovery(id, reservation),
+    sleep: async () => {} })
+  const advanced = await orch.step(f.store.get(runId)!)
+  if (advanced.run.phase === 'failed') return { stepped: advanced.run, outcome: null, errors }
+  expect(await f.store.saveIfActive(advanced.run)).toBe(true)
+  await completion
+  return { stepped: advanced.run, errors,
+    outcome: JSON.parse(f.store.get(runId)!.inner_result!).projectBuild as ProjectBuildOutcome }
+}
+
 /** The outcome plus the dispatch trail — a stop is only legible with both. */
 function why(f: Awaited<ReturnType<typeof fixture>>, outcome: BuildRunOutcome | ProjectBuildOutcome): string {
   return JSON.stringify({ outcome, dispatches: f.world.dispatches })
@@ -1928,6 +1984,198 @@ test('ralph continuation probes the committed plan and selects its next unchecke
     '- [ ] T1 record the note',
     '- [ ] T2 record another note',
   ])
+}, 300_000)
+
+// ── A RETRY OF A RALPH HANDOFF (spec item a-retry-must-resume-from-the-checkpoint) ──
+//
+// The case above keeps ONE row alive and leaves the ledger to the worker and the
+// seed commit, so it says nothing about the two things a RETRY depends on: the
+// ledger the HOST commits at the handoff, and the dispatch → `prepareLaunch` path
+// that carries the dead run's checkpoint onto a NEW row. Here the seed commit has
+// no ledger and the worker never writes one (`seedLedger: false`, `hostLedger:
+// true`), so the only `IMPLEMENTATION_PLAN.md` anywhere is `commitLedger`'s — and
+// the retry is driven through the real dispatch and the real gateway launch.
+
+const CONTINUATION_TASK = 'Record a note in NOTES.md and verify the resulting change with the complete regression suite. MORE TASKS'
+const HANDOFF_LEDGER = '- [x] T1 record the note\n- [ ] T2 record another note\n'
+const sha256 = (text: string) => createHash('sha256').update(text).digest('hex')
+/** The git blob id of `text` — an exact-bytes comparison (`spawnCapture` trims stdout). */
+const blobId = (text: string) => createHash('sha1').update(`blob ${Buffer.byteLength(text)}\0`).update(text).digest('hex')
+
+/** Iteration 1 of a Ralph card on the fixture's own row, handed back, then killed. */
+async function handOffThenDie(f: Awaited<ReturnType<typeof fixture>>, mergeMode: 'pr' | 'local') {
+  const host = await createProjectBuildHost(await f.prepare())
+  const first = await host.run({ mode: 'ralph', start: 'fresh' }, new AbortController().signal)
+  expect(first.kind, why(f, first)).toBe('continued')
+  if (first.kind === 'continued') expect(first.remainingTasks).toBe(1)
+  const checkpoint = lastCheckpoint(f)
+  expect(checkpoint.stage).toBe('ralph-task-built')
+  const states = f.store.stageEvents(f.row.id).filter(event => event.stage === 'build-mode-state')
+  expect(JSON.parse(states.at(-1)!.meta!).iteration).toBe(1)
+  const h2 = String(checkpoint.head)
+  expect(h2).toMatch(/^[0-9a-f]{40}$/)
+  const prior = f.store.get(f.row.id)!
+  const branch = prior.branch!
+  // THE HOST'S LEDGER COMMIT IS THE HANDOFF HEAD, and it is the only ledger there is:
+  // the worker's build commit beneath it carries none, and neither does the base.
+  expect(await gitOut(spawnCapture, f.repo, ['rev-parse', '--verify', `${h2}:IMPLEMENTATION_PLAN.md`])).toBe(blobId(HANDOFF_LEDGER))
+  expect(await gitOut(spawnCapture, f.repo, ['log', '-1', '--format=%s', h2])).toBe('chore(trident): task ledger — 1 remaining')
+  expect((await spawnCapture(['git', '-C', f.repo, 'cat-file', '-e', `${h2}^:IMPLEMENTATION_PLAN.md`], f.repo)).ok).toBe(false)
+  expect((await spawnCapture(['git', '-C', f.repo, 'cat-file', '-e', `${f.baseSha}:IMPLEMENTATION_PLAN.md`], f.repo)).ok).toBe(false)
+  // The handoff's cleanup PRESERVED the local ref (it holds unpushed work).
+  expect(await gitOut(spawnCapture, f.repo, ['rev-parse', '--verify', `refs/heads/${branch}^{commit}`])).toBe(h2)
+  if (mergeMode === 'pr') {
+    // …and origin has never seen it: a remote read of this branch answers nothing.
+    expect((await spawnCapture(['git', '-C', f.origin, 'rev-parse', '--verify', `refs/heads/${branch}^{commit}`], f.origin)).ok).toBe(false)
+    expect(f.github.prs).toEqual([])
+  }
+  await f.store.update(prior.id, { phase: 'failed', worktree: null })
+  return { prior: f.store.get(prior.id)!, h2, branch }
+}
+
+function redispatchContinuation(f: Awaited<ReturnType<typeof fixture>>, priorId: string, mergeMode: 'pr' | 'local') {
+  return dispatchBoardBoundBuild({ task: CONTINUATION_TASK, board_item_id: 'card' }, {
+    store: f.store, project_slug: 'project', repo_path: f.repo,
+    board: { get: () => ({ id: 'card', title: CONTINUATION_TASK, design_doc_ref: null, linked_run_id: priorId }),
+      attachRun: async () => {} },
+    resolveBuildRepo: async () => f.repo, resolveMergeMode: async () => mergeMode, resolveRalph: async () => true,
+    hostRunner: f.context.runHost,
+  })
+}
+
+for (const mergeMode of ['local', 'pr'] as const)
+test(`a ${mergeMode} retry of a run that died after a Ralph handoff resumes from the host's committed ledger`, async () => {
+  const f = await fixture({ ralph: true, moreTasks: true, mergeMode, dispatchTask: CONTINUATION_TASK,
+    seedLedger: false, hostLedger: true })
+  // The final diff carries the ledger, which is EXECUTABLE prose to the mutation
+  // gate, so the last iteration needs a real guard/control pair to merge.
+  f.world.mutationArgv = 'valid'
+  const { prior, h2, branch } = await handOffThenDie(f, mergeMode)
+  expect(f.world.plannerChoices).toEqual(['full'])
+
+  // ── THE DISPATCH: the dead run's checkpoint and round travel onto a NEW row.
+  const dispatchStart = f.commands.length
+  const dispatched = await redispatchContinuation(f, prior.id, mergeMode)
+  expect(dispatched.ok, JSON.stringify(dispatched)).toBe(true)
+  if (!dispatched.ok) return
+  const run = dispatched.run
+  expect(run.id).not.toBe(prior.id)
+  expect(run.inner_checkpoint).toBe('ralph-task-built')
+  expect(run.inner_checkpoint_head).toBe(h2)
+  expect(run.base_sha).toBe(f.baseSha)
+  expect(run.ralph_round).toBe(1)
+  expect(run.max_ralph_rounds).toBe(prior.max_ralph_rounds)
+  const links = f.store.stageEvents(run.id).filter(event => event.stage === 'build-retry-source')
+  expect(links).toHaveLength(1)
+  expect(JSON.parse(links[0]!.meta!)).toMatchObject({ priorRunId: prior.id, head: h2, runId: run.id })
+  // The TIP PROOF is a local `git rev-parse`, never a remote read, in either mode.
+  // In `pr` mode the dispatch's merged-PR probe (`makeDispatchLandedProbe`) is its
+  // only `gh` call — a landing check, not the tip proof.
+  const dispatchArgvs = f.commands.slice(dispatchStart)
+  expect(dispatchArgvs.filter(argv => argv.includes('ls-remote'))).toEqual([])
+  expect(dispatchArgvs.filter(argv => argv[0] === 'gh').map(argv => argv.slice(0, 3).concat(argv.slice(5, 7))))
+    .toEqual(mergeMode === 'pr' ? [['gh', 'pr', 'list', '--state', 'merged']] : [])
+  expect(dispatchArgvs).toContainEqual(['git', '-C', f.repo, 'rev-parse', '--verify', '--quiet', `refs/heads/${branch}`])
+
+  // ── THE LAUNCH, through the real gateway.
+  f.world.dispatches.length = 0
+  f.world.plannerChoices.length = 0
+  f.world.committedPlans.length = 0
+  f.world.selectedTasks.length = 0
+  const launchStart = f.commands.length
+  let seen: { checkpoint: unknown; head: unknown; prs: number; commands: number } | undefined
+  const launched = await launchThroughGateway(f, run.id, input => {
+    seen = { checkpoint: input.resume_checkpoint, head: input.resume_checkpoint_head,
+      prs: f.github.prs.length, commands: f.commands.length }
+  })
+  expect(launched.errors).toEqual([])
+  expect({ checkpoint: seen?.checkpoint, head: seen?.head }).toEqual({ checkpoint: 'ralph-task-built', head: h2 })
+  // `prepareLaunch` did not falsify the seed.
+  expect(launched.stepped.inner_checkpoint).toBe('ralph-task-built')
+  expect(launched.stepped.base_sha).toBe(f.baseSha)
+  const outcome = launched.outcome!
+  expect(outcome.kind, why(f, outcome)).toBe('merged')
+
+  // ACCEPTANCE 2: the continuation opened on the COMMITTED plan, not a full re-plan.
+  expect(f.world.plannerChoices).toEqual(['next'])
+  expect(f.world.dispatches[0]).toMatchObject({ role: 'plan', step_id: `${run.id}:task:1:plan:0` })
+  expect(f.world.committedPlans).toEqual([HANDOFF_LEDGER])
+  expect(f.world.selectedTasks).toEqual(['- [ ] T2 record another note'])
+  expect(f.world.dispatches.some(dispatch => dispatch.step_id.startsWith(`${prior.id}:`))).toBe(false)
+  // The plan turn's host context as the worker read it off disk (`project-build-host.ts`
+  // writes `<role>.brief.<role>.host`, and its context beside it).
+  const planContext = JSON.parse(await readFile(workContextPath(join(f.context.stateRoot, run.id, 'plan.brief.plan.host')), 'utf8'))
+  expect(planContext.request.step_id).toBe(`${run.id}:task:1:plan:0`)
+  expect(planContext.planner).toBe('next')
+  expect(planContext.committedPlan).toMatchObject({ found: true, body: HANDOFF_LEDGER, sha256: sha256(HANDOFF_LEDGER), uncheckedCount: 1 })
+  // The merged revision is the BUILDER's head, and it carries the handoff's ledger:
+  // the final iteration commits none, because review and publication bind every
+  // worker receipt to the head the builder reported (`trident/build-run.ts`).
+  const merged = await gitOut(spawnCapture, mergeMode === 'pr' ? f.origin : f.repo, ['rev-parse', '--verify', 'refs/heads/main^{commit}'])
+  const subjects = (await gitOut(spawnCapture, mergeMode === 'pr' ? f.origin : f.repo, ['log', '--format=%s', `${f.baseSha}..${merged}`])).split('\n')
+  expect(subjects).toContain(`work: build ${run.id}:task:1:build:0`)
+  expect(subjects.filter(subject => subject.startsWith('chore(trident): task ledger'))).toEqual(['chore(trident): task ledger — 1 remaining'])
+  expect(await gitOut(spawnCapture, f.repo, ['rev-parse', '--verify', `${merged}:IMPLEMENTATION_PLAN.md`])).toBe(blobId(HANDOFF_LEDGER))
+
+  // ACCEPTANCE 3: the resume never leaned on the fire-time PR probe.
+  if (mergeMode === 'local') {
+    expect(f.commands.filter(argv => argv[0] === 'gh')).toEqual([])
+    expect(f.github.prs).toEqual([])
+    expect(await gitOut(spawnCapture, f.origin, ['for-each-ref', '--format=%(refname) %(objectname)']))
+      .toBe(`refs/heads/main ${f.baseSha}`)
+  } else {
+    // The probe DID run before the fire, and answered nothing — there was no PR.
+    expect(f.commands.slice(launchStart, seen!.commands))
+      .toContainEqual(['gh', 'pr', 'list', '--head', branch, '--json', 'number', '--jq', '.[0].number // empty'])
+    expect(seen!.prs).toBe(0)
+    expect(f.github.prs).toHaveLength(1)
+    expect(f.github.prs[0]).toMatchObject({ headRefName: branch, state: 'MERGED' })
+  }
+}, 300_000)
+
+test('a Ralph retry whose branch moved after the handoff carries no checkpoint, says why, and never adopts the moved branch', async () => {
+  const f = await fixture({ ralph: true, moreTasks: true, mergeMode: 'local', dispatchTask: CONTINUATION_TASK,
+    seedLedger: false, hostLedger: true })
+  const { prior, h2, branch } = await handOffThenDie(f, 'local')
+  const advanced = await gitOut(spawnCapture, f.repo, ['commit-tree', `${h2}^{tree}`, '-p', h2,
+    '-m', 'test: branch advances after the handoff'])
+  await gitOut(spawnCapture, f.repo, ['update-ref', `refs/heads/${branch}`, advanced])
+
+  const lines: string[] = []
+  const logging = spyOn(console, 'log').mockImplementation((...args: unknown[]) => { lines.push(args.map(String).join(' ')) })
+  let dispatched: Awaited<ReturnType<typeof redispatchContinuation>>
+  try { dispatched = await redispatchContinuation(f, prior.id, 'local') } finally { logging.mockRestore() }
+  expect(dispatched.ok, JSON.stringify(dispatched)).toBe(true)
+  if (!dispatched.ok) return
+  const run = dispatched.run
+  expect(run.inner_checkpoint).toBeNull()
+  expect(run.inner_checkpoint_head).toBeNull()
+  expect(f.store.stageEvents(run.id).some(event => event.stage === 'build-retry-source')).toBe(false)
+  const seedLine = lines.find(line => line.includes('event=dispatch_resume_seed'))
+  expect(seedLine).toContain('reason=branch_tip_moved')
+  // The budget is the card's, and it still travels when the checkpoint does not.
+  expect(run.ralph_round).toBe(prior.ralph_round)
+  expect(run.max_ralph_rounds).toBe(prior.max_ralph_rounds)
+
+  // THE LAUNCH NEITHER CONTINUES NOR BUILDS ON THE MOVED BRANCH. With no checkpoint
+  // the row is a fresh launch, and the branch now carries commits this run did not
+  // make and origin never saw, so the wrong-base guard refuses before any worker —
+  // which means no planner of either kind, and certainly no `next` off a ledger the
+  // branch no longer ends at.
+  f.world.dispatches.length = 0
+  f.world.plannerChoices.length = 0
+  let seen: { checkpoint: unknown } | undefined
+  const launched = await launchThroughGateway(f, run.id, input => { seen = { checkpoint: input.resume_checkpoint } })
+  expect(launched.errors).toEqual([])
+  expect(launched.outcome).toBeNull()
+  expect(launched.stepped.phase).toBe('failed')
+  expect(launched.stepped.failure_reason).toContain('not on origin/main')
+  expect(launched.stepped.failure_reason).toContain('refusing to build on another lane')
+  expect(seen).toBeUndefined()
+  expect(f.world.plannerChoices).toEqual([])
+  expect(f.world.dispatches).toEqual([])
+  // The moved commit is untouched.
+  expect(await gitOut(spawnCapture, f.repo, ['rev-parse', '--verify', `refs/heads/${branch}^{commit}`])).toBe(advanced)
 }, 300_000)
 
 // ── FIX ROUNDS ───────────────────────────────────────────────────────────────
