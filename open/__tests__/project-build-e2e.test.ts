@@ -1006,6 +1006,53 @@ async function drive(f: Awaited<ReturnType<typeof fixture>>, mode: 'pr' | 'ralph
   return host.run({ mode, start: 'fresh' }, new AbortController().signal)
 }
 
+for (const mergeMode of ['local', 'pr'] as const) for (const carrier of [false, true]) {
+  test(`G166 consuming pre-merge ${mergeMode}: own carrier=${carrier}, public-base carrier excluded`, async () => {
+    const f = await fixture({ mergeMode })
+    const options = await f.prepare()
+    const run = f.store.get(f.row.id)!
+    const git = (cwd: string, args: string[]) => gitOut(spawnCapture, cwd, args)
+    // The launch pin predates a public carrier. This is ordinary upstream
+    // history and must not poison admission of the run's own clean work.
+    await git(f.repo, ['commit', '--allow-empty', '-m', 'Public base', '-m', 'Claude-Session: public-fixture'])
+    const publicBase = await git(f.repo, ['rev-parse', 'HEAD'])
+    await git(f.repo, ['push', 'origin', 'main'])
+    await git(run.worktree!, ['rebase', 'main'])
+    if (carrier) await git(run.worktree!, ['commit', '--allow-empty', '-m', 'Own ancestor', '-m', 'cLaUdE-sEsSiOn: fixture'])
+    const ancestor = await git(run.worktree!, ['rev-parse', 'HEAD'])
+    await writeFile(join(run.worktree!, 'NOTES.md'), 'completed fixture work\n')
+    await git(run.worktree!, ['add', 'NOTES.md'])
+    await git(run.worktree!, ['commit', '-m', 'Discuss Claude-Session: as data', '-m', 'Co-Authored-By: Fixture <fixture@example.invalid>'])
+    const reviewed = await git(run.worktree!, ['rev-parse', 'HEAD'])
+    if (mergeMode === 'pr') {
+      await git(run.worktree!, ['push', 'origin', run.branch!])
+      f.github.prs.push({ number: 1, state: 'OPEN', headRefName: run.branch!, baseRefName: 'main', isDraft: true })
+      await f.store.update(run.id, { pr: 1, published_pr: 1 })
+    }
+    // Exercise the consuming composition's merge effect directly, deliberately
+    // independent of publication. A pre-push refusal cannot make this pass.
+    const host = await createProjectBuildHost(options)
+    const measured = await host.deps.measure()
+    expect(measured.kind).toBe('known')
+    if (measured.kind !== 'known') throw new Error(measured.detail)
+    expect(measured.value.head).toBe(reviewed)
+    f.commands.length = 0
+    const target = mergeMode === 'pr' ? f.origin : f.repo
+    if (carrier) {
+      await expect(host.deps.merge(measured.value)).rejects.toThrow(
+        `Publication branch carries a Claude-Session trailer on 1 commit(s) above the launch base: ${ancestor}`)
+      expect(await git(target, ['rev-parse', 'refs/heads/main'])).toBe(publicBase)
+      expect(f.commands.some(argv => argv[0] === 'gh' && ['ready', 'merge'].includes(argv[2]!))).toBe(false)
+      if (mergeMode === 'pr') expect(f.github.prs[0]).toMatchObject({ state: 'OPEN', isDraft: true })
+    } else {
+      await host.deps.merge(measured.value)
+      expect(await git(target, ['show', 'refs/heads/main:NOTES.md'])).toBe('completed fixture work')
+      if (mergeMode === 'pr') expect(f.github.prs[0]).toMatchObject({ state: 'MERGED', isDraft: false })
+    }
+    expect(f.commands.some(argv => argv.includes('cat-file') && argv.includes('commit'))).toBe(true)
+  }, 120_000)
+}
+
 for (const productionChange of [false, true])
 test(`publication mutation uses the launch pin with stale local main: ${productionChange ? 'production still requires proof' : 'docs and tests remain exempt'}`, async () => {
   const f = await fixture()
