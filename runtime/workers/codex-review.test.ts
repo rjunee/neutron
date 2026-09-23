@@ -18,23 +18,48 @@ async function fixture(mode = 'valid') {
   await writeFile(join(dir, 'mode'), mode)
   await writeFile(join(dir, 'invocations'), '')
   await writeFile(join(dir, 'brief'), 'Review the bounded diff. A long prompt stays on stdin.')
-  await writeFile(join(dir, 'codex'), `#!/usr/bin/env node
+  // Keep capability probes in a tiny shell shim to avoid repeated Node startup
+  // inside the five-second probe deadline under CI shard load.
+  await writeFile(join(dir, 'codex'), `#!/bin/sh
+IFS= read -r mode < "$FIXTURE_DIR/mode"
+case "$1:$2:$3" in
+  --version::)
+    [ "$#" -eq 1 ] || exit 64
+    printf '%s\\n' '["--version"]' >> "$FIXTURE_DIR/invocations"
+    exit 0 ;;
+  login:status:)
+    [ "$#" -eq 2 ] || exit 64
+    printf '%s\\n' '["login","status"]' >> "$FIXTURE_DIR/invocations"
+    exit 0 ;;
+  exec:--help:)
+    [ "$#" -eq 2 ] || exit 64
+    printf '%s\\n' '["exec","--help"]' >> "$FIXTURE_DIR/invocations" ;;
+  exec:resume:--help)
+    [ "$#" -eq 3 ] || exit 64
+    printf '%s\\n' '["exec","resume","--help"]' >> "$FIXTURE_DIR/invocations"
+    [ "$mode" != missing-resume ] || exit 2 ;;
+  exec:--strict-config:--ignore-user-config)
+    [ "$#" -eq 7 ] && [ "$4" = -c ] && [ "$5" = 'sandbox_mode="read-only"' ] &&
+      [ "$6" = -c ] && [ "$7" = neutron_codex_contract_probe_sentinel=true ] || exit 64
+    printf '%s\\n' '["exec","--strict-config","--ignore-user-config","-c","sandbox_mode=\\"read-only\\"","-c","neutron_codex_contract_probe_sentinel=true"]' >> "$FIXTURE_DIR/invocations"
+    printf '%s\\n' '["exec","--strict-config","--ignore-user-config","-c","sandbox_mode=\\"read-only\\"","-c","neutron_codex_contract_probe_sentinel=true"]' >> "$FIXTURE_DIR/probes"
+    key=neutron_codex_contract_probe_sentinel
+    [ "$mode" != bad-sandbox ] || key=sandbox_mode
+    [ "$mode" != missing-sentinel ] || key=another_key
+    printf '%s' "unknown configuration field $key in -c/--config override" >&2
+    [ "$mode" = sentinel-zero ] && exit 0
+    exit 1 ;;
+  *) exec node "$FIXTURE_DIR/codex-turn.js" "$@" ;;
+esac
+[ "$mode" != bad-cli ] || { printf '%s' '--json'; exit 0; }
+printf '%s' '--output-schema --json --output-last-message --ignore-rules'
+`, { mode: 0o755 })
+  await writeFile(join(dir, 'codex-turn.js'), `
 const { readFileSync, writeFileSync, appendFileSync } = require('node:fs');
 (async () => {
 const args = process.argv.slice(2);
 appendFileSync(process.env.FIXTURE_DIR + '/invocations', JSON.stringify(args)+'\\n');
-if (args.includes('--version') || args[0] === 'login') process.exit(0);
 const mode = readFileSync(process.env.FIXTURE_DIR + '/mode', 'utf8');
-if (args.includes('--help')) {
-  if (mode === 'missing-resume' && args[1] === 'resume') process.exit(2);
-  writeFileSync(1, mode === 'bad-cli' ? '--json' : '--output-schema --json --output-last-message --ignore-rules'); process.exit(0);
-}
-if (args.includes('--strict-config')) {
-  appendFileSync(process.env.FIXTURE_DIR + '/probes', JSON.stringify(args)+'\\n');
-  const key = mode === 'bad-sandbox' ? 'sandbox_mode' : mode === 'missing-sentinel' ? 'another_key' : 'neutron_codex_contract_probe_sentinel';
-  writeFileSync(2, 'unknown configuration field ' + key + ' in -c/--config override');
-  process.exit(mode === 'sentinel-zero' ? 0 : 1);
-}
 const prompt = readFileSync(0, 'utf8');
 writeFileSync(process.env.FIXTURE_DIR + '/provider.pid',String(process.pid));
 const req = JSON.parse(prompt.split('\\n')[0].slice('Request (data): '.length));
