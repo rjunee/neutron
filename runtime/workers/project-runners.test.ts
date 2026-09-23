@@ -2,13 +2,16 @@ import { afterEach, expect, test } from 'bun:test'
 import { mkdtemp, readFile, rm, writeFile } from 'node:fs/promises'
 import { tmpdir } from 'node:os'
 import { join } from 'node:path'
-import { fakeRunner, type BoundedWorkRequest } from '../bounded-work.ts'
+import { fakeRunner, type BoundedWorkRequest, type ProviderObservation } from '../bounded-work.ts'
 import { PROVIDERS, type Provider } from '../provider.ts'
 import { createProjectRunners, decodeProjectTrailer, type ProjectRunnersOptions } from './project-runners.ts'
 
 const directories: string[] = []
 afterEach(async () => { await Promise.all(directories.splice(0).map(path => rm(path, { recursive: true, force: true }))) })
 const signal = () => new AbortController().signal
+const observed: ProviderObservation = { source: 'claude-repl-jsonl', started_at_ms: 1, finished_at_ms: 2, observed_at_ms: 2,
+  model_reported: 'provider-model', thread_id: 'child', usage: { input_tokens: 17, output_tokens: 0,
+    cache_read_input_tokens: null, cache_creation_input_tokens: null, cost_usd: null } }
 async function fixture(provider: Provider = 'openai-codex') {
   const dir = await mkdtemp(join(tmpdir(), 'project-runners-'))
   directories.push(dir)
@@ -72,6 +75,49 @@ for (const provider of ['anthropic', 'openai-codex', 'pi'] as const) {
       .toEqual({ kind: 'completed', result: f.envelope.result, ...f.metadata })
   })
 }
+
+for (const scenario of ['completed', 'malformed', 'interrupted', 'blocked', 'refused'] as const) {
+  test(`host usage survives ${scenario} outcomes and restart without dispatch replay`, async () => {
+    const f = await fixture('anthropic')
+    f.request = { ...f.request, budget: { wall_ms: 1000 } }
+    const acting = f.options.actingTurn
+    let reads = 0
+    f.options.actingTurn = async input => {
+      if (scenario === 'completed') return acting(input)
+      f.calls.push(input)
+      if (scenario === 'malformed') { await writeFile(f.request.result.path, '{'); return { kind: 'turn-ended' } }
+      if (scenario === 'interrupted') throw new Error('lost acknowledgement')
+      if (scenario === 'blocked') return { kind: 'blocked', on: 'provider limit' }
+      return { kind: 'refused', reason: 'capability-unsupported', detail: 'unavailable' }
+    }
+    f.options.actingTurn.observeUsage = async () => { reads++; return observed }
+    const first = await (await createProjectRunners(f.options)).inRepl!.run(f.request, 'in-repl', signal())
+    expect(first.kind).toBe(scenario === 'completed' ? 'completed' : scenario === 'blocked' ? 'blocked' : scenario === 'refused' ? 'refused' : 'unknown')
+    expect(first.observation).toEqual(observed)
+    const controller = new AbortController(); controller.abort()
+    const second = await (await createProjectRunners(f.options)).inRepl!.run(f.request, 'in-repl', scenario === 'completed' || scenario === 'malformed' ? signal() : controller.signal)
+    expect(second.observation).toEqual(observed)
+    expect(f.calls).toHaveLength(1)
+    expect(reads).toBe(2)
+  })
+}
+
+test('unavailable observation cannot veto valid completion or grant missing completion', async () => {
+  const f = await fixture('anthropic')
+  f.options.actingTurn.observeUsage = async () => { throw new Error('unreadable telemetry') }
+  expect((await (await createProjectRunners(f.options)).inRepl!.run(f.request, 'in-repl', signal())).kind).toBe('completed')
+})
+
+test('project observation recovery invokes no dispatch and refuses another run', async () => {
+  const f = await fixture('anthropic')
+  let reads = 0
+  f.options.actingTurn.observeUsage = async request => { reads++; expect(request).toBe(f.request); return observed }
+  const runner = (await createProjectRunners(f.options)).inRepl!
+  expect(await runner.observe!(f.request)).toEqual(observed)
+  expect(await runner.observe!({ ...f.request, run_id: 'foreign' })).toBeUndefined()
+  expect(f.calls).toHaveLength(0)
+  expect(reads).toBe(1)
+})
 
 test('headless selection follows project provider and underlying supports', async () => {
   for (const provider of PROVIDERS) {

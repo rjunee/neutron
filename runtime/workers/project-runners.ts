@@ -1,7 +1,7 @@
 import { readFile, writeFile } from 'node:fs/promises'
 import { join } from 'node:path'
 import type { AgentSpec } from '../substrate.ts'
-import { placementFor, type BoundedWorkOutcome, type BoundedWorkRequest, type WorkerRunner } from '../bounded-work.ts'
+import { placementFor, type BoundedWorkOutcome, type BoundedWorkRequest, type WorkerRunner, type ProviderObservation } from '../bounded-work.ts'
 import { PROVIDERS, type Provider } from '../provider.ts'
 import { claudeInReplRunner } from './claude-in-repl.ts'
 import { codexInReplRunner, type CodexResultTransport } from './codex-in-repl.ts'
@@ -22,14 +22,17 @@ export interface ProjectConversation {
  * Pi must bind subagent to the request and supply an out-of-grant trailer writer.
  * Child success still requires the file; a correlated provider terminal error
  * can establish a block without authoring a worker result. */
-export type ProjectActingTurn = (input: {
+export type ProjectActingTurn = ((input: {
   conversation: ProjectConversation
   request: BoundedWorkRequest
   spec: AgentSpec
   timeout_ms: number
   signal: AbortSignal
   subagent?: string
-}) => Promise<{ kind: 'turn-ended' } | { kind: 'unknown'; detail: string } | Extract<BoundedWorkOutcome, { kind: 'blocked' }> | (Extract<BoundedWorkOutcome, { kind: 'refused' }> & { detail: string })>
+}) => Promise<{ kind: 'turn-ended' } | { kind: 'unknown'; detail: string } | Extract<BoundedWorkOutcome, { kind: 'blocked' }> | (Extract<BoundedWorkOutcome, { kind: 'refused' }> & { detail: string })>) & {
+  /** Host-only reader; may reconcile a reserved step without dispatching it. */
+  observeUsage?(request: BoundedWorkRequest): Promise<ProviderObservation | undefined>
+}
 
 type Completed = Extract<BoundedWorkOutcome, { kind: 'completed' }>
 export interface ProjectTrailerDecoder {
@@ -133,6 +136,10 @@ export async function createProjectRunners(options: ProjectRunnersOptions) {
       return runner.run(request, placement, signal)
     },
     liveness: handle => runner.liveness(handle),
+    async observe(request) {
+      if (request.run_id !== runId) return undefined
+      try { return await runner.observe?.(request) } catch { return undefined }
+    },
   })
   const common = {
     topic_id: conversation.topic_id, state_dir: stateDir, spec: conversation.spec, subagent: 'bounded-worker',
@@ -142,6 +149,7 @@ export async function createProjectRunners(options: ProjectRunnersOptions) {
   const inRepl = construct && admission ? guard({
     provider: conversation.provider,
     supports: admission.supports,
+    observe: request => options.actingTurn.observeUsage?.(request) ?? Promise.resolve(undefined),
     async run(request, placement, signal) {
       let uncertainty: string | undefined
       let refusal: Extract<BoundedWorkOutcome, { kind: 'refused' }> | undefined
@@ -170,7 +178,12 @@ export async function createProjectRunners(options: ProjectRunnersOptions) {
         },
       })
       const outcome = await runner.run(request, placement, signal)
-      return blocked ?? refusal ?? (uncertainty === undefined ? outcome : unknown(`Dispatch turn completion unknown: ${uncertainty}`))
+      const result = blocked ?? refusal ?? (uncertainty === undefined ? outcome : unknown(`Dispatch turn completion unknown: ${uncertainty}`))
+      try {
+        const observation = await options.actingTurn.observeUsage?.(request)
+        if (observation) return { ...result, observation }
+      } catch { /* Telemetry cannot authorize or veto the result. */ }
+      return result
     },
     liveness: async () => 'unknown',
   }) : undefined

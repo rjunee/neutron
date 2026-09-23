@@ -33,6 +33,7 @@ if(args.includes('--help')) { writeFileSync(1,${JSON.stringify(mode === 'old-cli
 if(args.includes('auth')) { writeFileSync(1,JSON.stringify({loggedIn:${mode !== 'no-auth'}})); process.exit(0); }
 async function main() {
 const prompt=readFileSync(0,'utf8');
+writeFileSync(${JSON.stringify(join(state, 'provider.pid'))},String(process.pid));
 writeFileSync(${JSON.stringify(launched)},JSON.stringify({args,prompt,env:process.env}));
 appendFileSync(${JSON.stringify(counter)},'call\\n');
 if(${JSON.stringify(mode)}==='hang') { setInterval(()=>{},1000); await new Promise(()=>{}); }
@@ -78,6 +79,67 @@ main();
     schemas: new Map([['test-result', (value: unknown) => (value as { answer?: unknown })?.answer === 'verified']]), cliPath }
   const runner = createClaudeHeadlessRunner(options)
   return { root, cwd, state, req, runner, options, launched, counter, run: (request = req, signal = new AbortController().signal) => runner.run(request, 'headless', signal) }
+}
+
+test('Claude host death after provider usage recovers spend before child completion without replay', async () => {
+  const f = await fixture('usage-then-hang')
+  const req = { ...f.req, budget: { wall_ms: 30_000 } }
+  const hostPath = join(f.root, 'observation-host.ts')
+  await writeFile(hostPath, `import {createClaudeHeadlessRunner} from ${JSON.stringify(import.meta.dir + '/claude-headless.ts')};\n` +
+    `await createClaudeHeadlessRunner({...${JSON.stringify(f.options)},schemas:new Map([['test-result',(value)=>value?.answer==='verified']])}).run(${JSON.stringify(req)},'headless',new AbortController().signal);\n`)
+  const host = Bun.spawn([process.execPath, hostPath], { stdout: 'ignore', stderr: 'ignore' })
+  try {
+    let observed
+    const deadline = Date.now() + 5000
+    while (Date.now() < deadline) {
+      observed = await f.runner.observe!(req)
+      if (observed?.usage.input_tokens === 17) break
+      await Bun.sleep(10)
+    }
+    expect(observed?.usage.input_tokens).toBe(17)
+    expect(host.exitCode).toBeNull()
+    host.kill('SIGKILL'); await host.exited
+    const runner = createClaudeHeadlessRunner(f.options)
+    expect(await runner.observe!(req)).toEqual(observed)
+    expect((await runner.run(req, 'headless', new AbortController().signal)).kind).toBe('unknown')
+    expect(await readFile(f.counter, 'utf8')).toBe('call\n')
+  } finally {
+    host.kill('SIGKILL'); await host.exited
+    try { process.kill(-Number(await readFile(join(f.state, 'provider.pid'), 'utf8')), 'SIGKILL') } catch { /* Gone or not started. */ }
+  }
+}, 10_000)
+
+test('read-only recovery accepts the original symlink cwd and refuses a changed target', async () => {
+  const f = await fixture()
+  const alias = join(f.root, 'repo-link')
+  await symlink(f.cwd, alias)
+  const options = { ...f.options, cwd: alias }
+  const runner = createClaudeHeadlessRunner(options)
+  const request = { ...f.req, cwd: alias }
+  const first = await runner.run(request, 'headless', new AbortController().signal)
+  expect(first.kind).toBe('completed')
+  expect(await runner.observe!(request)).toEqual(first.observation)
+  await unlink(alias)
+  const different = join(f.root, 'different-repo'); await mkdir(different); await symlink(different, alias)
+  expect(await runner.observe!(request)).toBeUndefined()
+  expect(await readFile(f.counter, 'utf8')).toBe('call\n')
+})
+
+for (const mode of ['exit-error', 'zero-usage'] as const) {
+  test(`read-only observation recovery retains ${mode} without dispatch or lock changes`, async () => {
+    const f = await fixture(mode)
+    expect(await f.runner.observe!(f.req)).toBeUndefined()
+    const first = await f.run()
+    const before = await readdir(f.state)
+    const calls = await readFile(f.counter, 'utf8')
+    expect(await createClaudeHeadlessRunner(f.options).observe!(f.req)).toEqual(first.observation)
+    expect((await f.runner.observe!(f.req))?.usage.input_tokens).toBe(mode === 'zero-usage' ? 0 : 17)
+    expect(await f.runner.observe!({ ...f.req, model_id: 'claude-other' })).toBeUndefined()
+    expect(await f.runner.observe!({ ...f.req, step_id: 'foreign' })).toBeUndefined()
+    expect(await createClaudeHeadlessRunner({ ...f.options, env: { ...f.options.env, CLAUDE_CODE_OAUTH_TOKEN: 'different' } }).observe!(f.req)).toBeUndefined()
+    expect(await readdir(f.state)).toEqual(before)
+    expect(await readFile(f.counter, 'utf8')).toBe(calls)
+  })
 }
 
 test('successful headless completion uses exact model, measured usage, isolated argv, stdin and host trailer', async () => {

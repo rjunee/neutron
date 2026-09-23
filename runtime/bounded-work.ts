@@ -112,7 +112,7 @@ export type BoundedWorkOutcome = (
 /** Host observation of provider transport metadata, independent of result authority.
  * Missing metrics are unknown, not zero. Input excludes the two cache categories. */
 export interface ProviderObservation {
-  readonly source: 'claude-cli-json' | 'codex-cli-jsonl'
+  readonly source: 'claude-cli-json' | 'codex-cli-jsonl' | 'claude-repl-jsonl'
   readonly started_at_ms: number
   readonly finished_at_ms: number
   readonly observed_at_ms: number
@@ -161,6 +161,9 @@ export interface WorkerRunner {
    */
   supports(role: WorkerRole, placement: Placement): Supported | Unsupported
   run(req: BoundedWorkRequest, placement: Placement, signal: AbortSignal): Promise<BoundedWorkOutcome>
+  /** Read existing provider evidence only. Never dispatch, authorize a result,
+   * acquire/recover locks, clear result slots, or change a reservation. */
+  observe?(req: BoundedWorkRequest): Promise<ProviderObservation | undefined>
   /** The `run-evidence` vocabulary, unchanged: a probe that cannot see is
    *  `unknown`, which is not `nothing`. */
   liveness(handle: WorkerHandle): Promise<'activity' | 'nothing' | 'unknown'>

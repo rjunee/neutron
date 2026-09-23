@@ -1,0 +1,115 @@
+## 2026-09-23 — Retain provider observations from bound Claude children
+
+Implements the same-provider observation slice of
+`docs/spec-items/trident-build-efficiency.md:100-115` for #1196. The project runner
+reads host-owned child evidence after every outcome, including interruption,
+refusal, provider block, invalid result and reservation recovery. The reader does
+not dispatch work or authorize a result. The existing trailer validation and
+reservation mechanisms still decide completion and prevent replay.
+
+Only a uniquely identified child's transcript whose initial user envelope binds
+the complete request, child and session supplies measurements. Assistant provider
+envelopes supply the reported model, child identity and token/cache fields;
+assistant text and worker result claims do not. Repeated content blocks for one
+provider message retain cumulative maxima, and distinct message counts are
+summed. Missing values stay unknown, explicit zero remains zero, and price stays
+unknown because these provider envelopes do not report cost. The source is
+`claude-repl-jsonl`. Host timestamps describe the bounded observation read window,
+not inferred child execution duration. The durable attempt-ledger consumer is a
+separate integration slice.
+
+The reader rejects symlinks and special files, limits metadata to 16 KiB,
+transcripts to an 8 MiB fixed snapshot, individual lines to 256 KiB and directory
+enumeration to 4096 entries. A 250 ms deadline bounds the reader; timeout or
+unreadable evidence leaves telemetry unavailable without changing the outcome.
+Late I/O closes its descriptor and cannot proceed after cancellation. These
+bounds intentionally prefer unknown totals over silently counting a prefix.
+
+Verification uses `runtime/workers/claude-child-observation.test.ts`,
+`runtime/workers/project-runners.test.ts`,
+`runtime/workers/claude-acting-turn.test.ts`, and the unchanged consuming
+`open/__tests__/project-build-e2e.test.ts`, plus both TypeScript configurations.
+The real acting-turn/project-runner test retains nonzero usage through a provider
+rate limit and recovery, with exactly one dispatch. Parser tests cover repeated
+provider messages, partial failure, unknown/zero values, foreign identities,
+oversized evidence, symlinks and stalled metadata I/O against legitimate reads.
+Semantic mutations relaxed request ownership, over-applied the ownership refusal,
+double-counted duplicate usage, discarded zero, and dropped the observation at
+the consumer. Additional mutations removed symlink rejection, removed byte/line
+bounds against otherwise-valid oversized evidence, and disabled the observation
+deadline. Each made the corresponding tests fail before restoration. The bounded
+reader does not prove complete live usage coverage: deployment measurement must
+check that actual transcripts fit these limits and report unavailable readings.
+
+Final canonical-base results: 278 adapter/recovery tests (1,209 assertions) and
+151 consuming E2E tests (1,563 assertions) passed; both TypeScript checks passed.
+The consuming suite required local socket permission. Four semantic mutations
+were repeated after the canonical rebuild: relaxed and over-applied reservation
+identity, discarded failure authority, and over-applied telemetry refusal. All
+failed semantically; the restored parser/recovery controls pass.
+The exact merged-base and candidate archive leak scans both report 455
+identical inherited findings; this is a baseline-red tree, not a clean-tree
+claim. The changed-file archive with the known-present LICENSE positive control
+is silent, including this change's commit message scan.
+
+The runner's optional `observe(request)` hook also exposes read-only startup
+reconciliation. Project runners retain run ownership; Claude headless and Codex
+review readers require their exact armed reservation and credential binding.
+The Codex builder reads its stable request-bound committed receipt, preserving
+transport relocation while rejecting changed work, model or credential home.
+The hook never invokes `run`, changes a reservation, acquires or recovers a lock,
+or publishes a result. Existing provider observations retain their timestamps;
+legacy builder receipts without host times receive explicitly observed read-window
+times. Each headless receipt recovery is limited to 256 KiB regular snapshots and
+250 ms; a Codex builder's legacy receipt fallback allows at most two such reads.
+Missing/corrupt/mismatched evidence remains unavailable. Adapter tests cover
+nonzero/zero recovery, unchanged dispatch counts and state files, and exact
+request/model/credential mismatches. Additional mutation checks remove and
+over-apply reservation binding, remove snapshot/symlink bounds, and disable the
+recovery deadline; each fails before restoration. Driver startup invocation and
+the durable ledger are verified by the accounting integration change.
+
+Claude headless, Codex review and Codex builder observations are atomically
+persisted while each child remains active, independently of result authority.
+A shared publisher binds each receipt to the original reservation identity,
+retains monotonic absolute counters and coalesces pending updates behind one writer.
+Its terminal flush has a 250 ms limit and retries failed writes; an older durable
+snapshot cannot replace newer in-memory spend. Exact-thread provider usage from
+failed or partial turns survives; a mismatched thread cannot add usage or erase
+earlier accepted-thread spend. The independent observation cannot turn the
+completion parser's refusal into success. Recovery reads it without replay or
+adding duplicate counts. Separate process tests kill the host after a live
+observation is durable but before child settlement, then recover usage without
+completing or dispatching again for all three adapters. Claude
+recovery canonicalizes its cwd using the same real path as dispatch, including a
+legitimate symlink; changing that symlink's target invalidates the credential/cwd
+binding. Mutation checks relax thread matching, discard valid observations,
+remove failure persistence, and replace canonical cwd identity with lexical
+identity. All produce semantic failures before restoration.
+Removing each adapter's live publication also makes its process-death control
+fail; removing the final flush deadline fails the stalled-write control. A
+duplicate/reordered-observation mutation must fail immediately, before a later
+valid update can hide the regression.
+
+Missing or invalid usage fields, clearly non-envelope diagnostics, valid oversized
+non-authority records and standalone error events do not veto an independently
+valid wrapper trailer with exact thread/completion authority. Unusable result
+telemetry is unknown; already observed provider spend remains available separately.
+Foreign/duplicate threads and actual failed turns retain their authority refusals,
+including otherwise-valid oversized records and complete JSON without a newline.
+Potential protocol objects that cannot be parsed within the bounded 8 MiB envelope
+window remain authority-unknown; they are not silently classified as diagnostics.
+The worker settles from process exit, then drains
+stdout for at most 250 ms within its remaining budget. It runs in a dedicated
+process group and tears down descendants, so a heartbeat inheriting stdout cannot
+hold completion or timeout indefinitely. A timed-out process has a bounded
+termination grace. Fixtures leave a descendant holding the pipe after normal
+exit and timeout; both return the corresponding typed outcome. Reintroducing
+the telemetry veto, removing the drain deadline, or awaiting pipe close instead
+of process exit makes those consuming worker controls fail.
+
+CI caught a redundant elapsed-time assertion in the descendant-pipe fixture.
+It was removed without a lint exemption: the unchanged two-second test deadline,
+typed completion/timeout outcomes and retained usage already cover the contract
+against the thirty-second descendant. Repeating the close-instead-of-exit mutation
+still fails on the wrong outcome; restoring it passes both fixture modes.
