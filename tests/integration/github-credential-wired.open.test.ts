@@ -164,6 +164,11 @@ test('intentional assertion failure still reaches the host', () => {
       ['device', 'installNativeHarness'], ['http', 'Bun.serve(']]) {
       await writeFile(join(root, `${name}.test.ts`), `// ${marker}\n${source}`)
     }
+    // Dots omit successful test names while retaining the host's file count,
+    // exit status, and failed assertion output. Pin that reporter here so a
+    // future unconditional pass-name check fails on every suite run.
+    const dotsBun = join(root, 'bun-dots.sh')
+    await writeFile(dotsBun, '#!/bin/sh\nexec "$NEUTRON_TEST_DOTS_BUN" "$@" --dots\n', { mode: 0o755 })
     for (const failure of ['0', '1']) {
       const log = join(root, `suite-${failure}.log`)
       const child = Bun.spawn(['bash', resolve(import.meta.dir, '../../scripts/run-tests.sh')], {
@@ -172,7 +177,8 @@ test('intentional assertion failure still reaches the host', () => {
           ...Object.fromEntries(credentialKeys.map(key => [key, canary])),
           GITHUB_ACTIONS: 'fixture-ci-metadata',
           NEUTRON_TEST_ROOT: root,
-          NEUTRON_BUN_BIN: process.execPath,
+          NEUTRON_BUN_BIN: dotsBun,
+          NEUTRON_TEST_DOTS_BUN: process.execPath,
           NEUTRON_TEST_CONCURRENCY: '1',
           NEUTRON_TEST_PGLITE_RETRIES: '0',
           NEUTRON_TEST_INTENTIONAL_FAILURE: failure,
@@ -190,8 +196,12 @@ test('intentional assertion failure still reaches the host', () => {
       expect(output.includes('4 test files (bun-discovered: 4)')).toBe(true)
       expect(output.includes('1-file PGLite lane + 1-file device lane + 1-file real-HTTP lane')).toBe(true)
       expect(exitCode).toBe(Number(failure))
-      expect(output.includes('intentional assertion failure still reaches the host')).toBe(true)
-      if (failure === '1') expect(output.includes('Expected: false')).toBe(true)
+      if (failure === '1') {
+        // A successful test's display name depends on Bun's reporter mode. The
+        // failed run must expose the assertion itself to the host.
+        expect(output.includes('intentional assertion failure still reaches the host')).toBe(true)
+        expect(output.includes('Expected: false')).toBe(true)
+      }
     }
   } finally {
     await rm(root, { recursive: true, force: true })
