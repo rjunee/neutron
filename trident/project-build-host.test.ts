@@ -461,7 +461,8 @@ test('production composition driver reaches a review panel through all three obs
   host.deps.runLeakGatePreflight = async () => ({ status: 'clean', head: observedHead, findings: [], skipped_rules: [], attempts: 0, note: '' })
   host.deps.publishGate = async () => ({ kind: 'allow' })
   host.deps.publish = async () => {}
-  await host.deps.modes!.saveCheckpoint({ head: observedHead, stage: 'built', round: 1, replansUsed: 0, findings: [], previousFindings: [] })
+  await host.deps.modes!.saveCheckpoint({ head: observedHead, stage: 'built', round: 1, replansUsed: 0, findings: [], previousFindings: [],
+    reviewBaseline: 'none', previousReview: null })
   const result = await host.run({ mode: 'pr', start: 'resume' }, new AbortController().signal)
   expect(panelCalls, JSON.stringify(result)).toBeGreaterThan(0)
   expect(result.kind).toBe('blocked')
