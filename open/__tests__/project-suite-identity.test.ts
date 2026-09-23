@@ -3,7 +3,7 @@ import { copyFile, mkdir, mkdtemp, rename, rm, stat, symlink, utimes, writeFile 
 import { join } from 'node:path'
 import { tmpdir } from 'node:os'
 import { projectInstalledTreeIdentity, projectSuiteIdentity } from '../wiring/project-build-dependencies.ts'
-import { spawnCapture } from '../../trident/git-mode.ts'
+import { spawnCapture } from '@neutronai/trident/git-mode.ts'
 
 const roots: string[] = []
 afterEach(async () => { for (const root of roots.splice(0)) await rm(root, { recursive: true, force: true }) })

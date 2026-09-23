@@ -3613,7 +3613,9 @@ test('a driver restarted between the build and review re-adopts the build instea
   // (`build-run.ts:239-243`), and that is the other resume case below.
   const built = await spawnCapture(['git', '-C', f.repo, 'rev-parse', 'refs/heads/trident/card'], f.repo)
   expect(lastCheckpoint(f)).toEqual({ head: built.stdout, stage: 'built', round: 1,
-    replansUsed: 0, previousFindings: [], previousBlockingCount: 0, findings: [], pending: undefined })
+    replansUsed: 0, previousFindings: [], previousBlockingCount: 0, findings: [],
+    reviewBaseline: 'none', previousReview: null })
+  expect(lastCheckpoint(f).pending).toBeUndefined()
 
   // …and the build worker's result file, which the next process reads back as the
   // suite checkpoint for this revision (`open/wiring/project-build.ts:243-247`).
