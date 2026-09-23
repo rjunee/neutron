@@ -51,7 +51,7 @@
  */
 import { LIVE_AGENT_TOOL_NAMES } from '@neutronai/gateway/wiring/build-live-agent-turn.ts'
 import { afterEach, expect, spyOn, test } from 'bun:test'
-import { chmod, mkdir, mkdtemp, readFile, readdir, rename, rm, symlink, writeFile } from 'node:fs/promises'
+import { chmod, mkdir, mkdtemp, readFile, readdir, realpath, rename, rm, symlink, writeFile } from 'node:fs/promises'
 import { tmpdir } from 'node:os'
 import { join } from 'node:path'
 import { fileURLToPath } from 'node:url'
@@ -1286,24 +1286,78 @@ for (const changed of ['root manifest', 'workspace manifest', 'lockfile', 'confi
 test('Bun workspace reused receipt never hides verifier failure and failure invalidates success', async () => {
   const f = await fixture({ bunWorkspace: true })
   await f.prepare()
-  const worktree = f.store.get(f.row.id)!.worktree!
   const receipt = join(f.context.stateRoot, encodeURIComponent(f.row.id), 'dependencies-receipt.json')
   const stored = await readFile(receipt, 'utf8')
   expect(JSON.parse(stored).key).toMatch(/^[a-f0-9]{64}$/)
-  await rm(join(worktree, 'node_modules', '.bun'), { recursive: true })
-  await writeFile(join(worktree, 'node_modules', 'not-a-dependency'), 'presence is insufficient')
   const original = f.context.runInstall!
   const calls: string[] = []
+  let failVerification = true
   f.context.runInstall = Object.assign(async (...args: Parameters<typeof original>) => {
-    calls.push(args[0][2]!.includes('verify-workspace-deps.ts') ? 'verify' : 'install')
+    const verifier = args[0][2]!.includes('verify-workspace-deps.ts')
+    calls.push(verifier ? 'verify' : 'install')
+    if (verifier && failVerification) return { ok: false, exit_code: 3, stdout: '', stderr: 'verification failed' }
     return original(...args)
   }, { writesDiffOutput: true as const })
   await expect(f.prepare()).rejects.toThrow('workspace dependency verification did not complete successfully')
   expect(calls).toEqual(['verify'])
   await expect(readFile(receipt)).rejects.toMatchObject({ code: 'ENOENT' })
   expect(f.world.dispatches).toEqual([])
+  failVerification = false
   await f.prepare()
   expect(calls).toEqual(['verify', 'install', 'verify'])
+}, 30_000)
+
+test('Bun workspace receipt cannot borrow an ancestor after its local dependency disappears', async () => {
+  const f = await fixture({ bunWorkspace: true })
+  await f.prepare()
+  const worktree = f.store.get(f.row.id)!.worktree!
+  const ancestor = join(worktree, '..', 'node_modules', 'fixture-dependency')
+  await mkdir(ancestor, { recursive: true })
+  await writeFile(join(ancestor, 'package.json'), JSON.stringify({ name: 'fixture-dependency', main: 'index.js' }))
+  await writeFile(join(ancestor, 'index.js'), 'exports.message = "borrowed dependency"')
+  await rm(join(worktree, 'app', 'node_modules', 'fixture-dependency'))
+  // Positive control: the old verifier really accepts the ancestor resolution.
+  const verifier = fileURLToPath(new URL('../../scripts/ci/verify-workspace-deps.ts', import.meta.url))
+  expect((await spawnCapture(['bun', '--config=/dev/null', '--no-env-file', verifier, worktree], f.dir)).ok).toBe(true)
+  expect((await spawnCapture(['bun', 'app/check.ts'], worktree)).stderr).toContain('wrong dependency')
+  const original = f.context.runInstall!
+  let installs = 0
+  f.context.runInstall = Object.assign(async (...args: Parameters<typeof original>) => {
+    if (!args[0][2]!.includes('verify-workspace-deps.ts')) installs++
+    return original(...args)
+  }, { writesDiffOutput: true as const })
+  await f.prepare()
+  expect(installs).toBe(1)
+  expect((await spawnCapture(['bun', 'app/check.ts'], worktree)).stdout).toBe('dependency consumed')
+}, 30_000)
+
+test('Bun workspace receipt preserves valid root-local hoisting and stable unresolved optional probes', async () => {
+  const f = await fixture({ bunWorkspace: true })
+  await f.prepare()
+  const worktree = f.store.get(f.row.id)!.worktree!
+  const local = join(worktree, 'app', 'node_modules', 'fixture-dependency')
+  const target = await realpath(local)
+  await symlink(target, join(worktree, 'node_modules', 'fixture-dependency'))
+  await rm(local)
+  const manifest = join(worktree, 'app', 'package.json')
+  const parsed = JSON.parse(await readFile(manifest, 'utf8'))
+  await writeFile(manifest, JSON.stringify({ ...parsed, optionalDependencies: { 'unavailable-fixture-optional': '*' } }))
+  const original = f.context.runInstall!
+  let installs = 0
+  f.context.runInstall = Object.assign(async (...args: Parameters<typeof original>) => {
+    if (!args[0][2]!.includes('verify-workspace-deps.ts')) {
+      installs++
+      // Model an installer that omits an unavailable optional package. All
+      // resolution/verifier/receipt behavior remains the real consuming path.
+      return { ok: true, exit_code: 0, stdout: '', stderr: '' }
+    }
+    return original(...args)
+  }, { writesDiffOutput: true as const })
+  await f.prepare()
+  expect(installs).toBe(1)
+  await f.prepare()
+  expect(installs).toBe(1)
+  expect((await spawnCapture(['bun', 'app/check.ts'], worktree)).stdout).toBe('dependency consumed')
 }, 30_000)
 
 test('Bun workspace receipt refuses a borrowed Bun store before workers', async () => {

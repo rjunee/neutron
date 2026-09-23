@@ -15,24 +15,68 @@ const quote = (value: string): string => `'${value.replaceAll("'", "'\\''")}'`
 
 const hostDirectory = fileURLToPath(new URL('../../', import.meta.url))
 const hostVerifier = join(hostDirectory, 'scripts/ci/verify-workspace-deps.ts')
-const RECEIPT_VERSION = 1
+const RECEIPT_VERSION = 2
+
+// Run resolution in a new host-controlled process: Bun caches resolutions in a
+// long-lived host, which could otherwise conceal removal of a local package.
+// Resolving does not load project code. Consistently unresolved optional/type
+// packages remain unknown; a package resolved outside the tree is never local
+// installation evidence, even when the general readiness verifier tolerates it.
+const RESOLUTION_PROBE = `
+const fs = require('node:fs');
+const path = require('node:path');
+const crypto = require('node:crypto');
+const root = fs.realpathSync(process.argv[1]);
+const observations = [];
+for (const manifestPath of JSON.parse(process.argv[2])) {
+  const manifest = JSON.parse(fs.readFileSync(path.join(root, manifestPath), 'utf8'));
+  const dependencies = Object.keys({ ...manifest.dependencies, ...manifest.devDependencies, ...manifest.optionalDependencies }).sort();
+  for (const dependency of dependencies) {
+    let target;
+    try { target = Bun.resolveSync(dependency, path.dirname(path.join(root, manifestPath))); }
+    catch { observations.push([manifestPath, dependency, null]); continue; }
+    const actual = fs.realpathSync(target);
+    if (!actual.startsWith(root + path.sep)) process.exit(3);
+    const stat = fs.statSync(actual);
+    observations.push([manifestPath, dependency, path.relative(root, actual), stat.dev, stat.ino, stat.size, stat.mtimeMs, stat.ctimeMs]);
+  }
+}
+console.log(crypto.createHash('sha256').update(JSON.stringify(observations)).digest('hex'));
+`
+
+async function workspaceManifests(worktree: string, workspaces: unknown[]): Promise<string[] | null> {
+  const files = new Set(['package.json'])
+  for (const workspace of workspaces) {
+    if (typeof workspace !== 'string' || workspace.startsWith('!') || workspace.split('/').includes('..')) return null
+    for await (const path of new Bun.Glob(`${workspace}/package.json`).scan({ cwd: worktree, onlyFiles: true })) files.add(path)
+  }
+  return [...files].sort()
+}
+
+async function resolutionKey(worktree: string, workspaces: unknown[], bun: string): Promise<string | null> {
+  const manifests = await workspaceManifests(worktree, workspaces)
+  if (!manifests) return null
+  const result = await spawnCapture([bun, '--config=/dev/null', '--no-env-file', '--eval', RESOLUTION_PROBE,
+    worktree, JSON.stringify(manifests)], hostDirectory, undefined, 30_000)
+  const key = result.stdout.trim()
+  return result.ok && !result.timed_out && /^[a-f0-9]{64}$/.test(key) ? key : null
+}
 
 /** The receipt is a host observation, never a tracked project file. Hash all
  * declared workspace manifests, including uncommitted dependency edits. */
 async function preparationKey(worktree: string, workspaces: unknown[], executable: string): Promise<string | null> {
   const head = await spawnCapture(['git', 'rev-parse', '--verify', 'HEAD'], worktree)
   if (!head.ok || !/^[a-f0-9]{40,64}$/.test(head.stdout.trim())) return null
-  const files = new Set(['package.json', 'bun.lock', 'bun.lockb', 'bunfig.toml', '.npmrc',
+  const manifests = await workspaceManifests(worktree, workspaces)
+  if (!manifests) return null
+  const files = new Set([...manifests, 'bun.lock', 'bun.lockb', 'bunfig.toml', '.npmrc',
     'scripts/ci/verify-workspace-deps.ts'])
-  for (const workspace of workspaces) {
-    if (typeof workspace !== 'string' || workspace.startsWith('!') || workspace.split('/').includes('..')) return null
-    for await (const path of new Bun.Glob(`${workspace}/package.json`).scan({ cwd: worktree, onlyFiles: true })) files.add(path)
-  }
   const hash = createHash('sha256')
   const tool = await lstat(executable)
   hash.update(JSON.stringify([RECEIPT_VERSION, await realpath(worktree), head.stdout.trim(),
     process.platform, process.arch, process.version, Bun.version, executable,
-    [tool.dev, tool.ino, tool.size, tool.mtimeMs, tool.ctimeMs], await readFile(hostVerifier, 'utf8'), '--frozen-lockfile', '--ignore-scripts']))
+    [tool.dev, tool.ino, tool.size, tool.mtimeMs, tool.ctimeMs], await readFile(hostVerifier, 'utf8'),
+    RESOLUTION_PROBE, '--frozen-lockfile', '--ignore-scripts']))
   for (const path of [...files].sort()) {
     const full = resolve(worktree, path)
     if (!full.startsWith(`${resolve(worktree)}${sep}`)) return null
@@ -52,7 +96,7 @@ export async function prepareProjectDependencies(worktree: string, state: string
   const invalidate = async () => { try { await unlink(receiptPath) } catch (error) {
     if ((error as NodeJS.ErrnoException).code !== 'ENOENT') throw error
   } }
-  let receipt: { version?: number; key?: string; modulesDevice?: number; modulesInode?: number } | null = null
+  let receipt: { version?: number; key?: string; resolution?: string; modulesDevice?: number; modulesInode?: number } | null = null
   if (await exists(receiptPath) && (await lstat(receiptPath)).isFile()) {
     try { receipt = JSON.parse(await readFile(receiptPath, 'utf8')) } catch { /* Corrupt means reinstall. */ }
   }
@@ -95,6 +139,7 @@ export async function prepareProjectDependencies(worktree: string, state: string
     const identity = await lstat(modules)
     reuse = receipt.version === RECEIPT_VERSION && receipt.key === key
       && receipt.modulesDevice === identity.dev && receipt.modulesInode === identity.ino
+    if (reuse) reuse = typeof receipt.resolution === 'string' && receipt.resolution === await resolutionKey(worktree, workspaces, bun)
   }
   const execute = async (argv: string[], label: string, cwd = worktree) => {
     await appendFile(log, `${label}\n`)
@@ -126,9 +171,15 @@ export async function prepareProjectDependencies(worktree: string, state: string
     'workspace dependency verification', hostDirectory)
   // A successful installer must not silently change an input behind the receipt.
   if (key && key === await preparationKey(worktree, workspaces, bun)) {
+    const resolution = await resolutionKey(worktree, workspaces, bun)
+    if (!resolution) {
+      await appendFile(log, 'Dependency resolutions are not confined to this worktree; preparation will not be reused\n')
+      await appendFile(log, 'Worktree-local dependency preparation completed without a reusable receipt\n')
+      return
+    }
     const identity = await lstat(modules)
     const temporary = `${receiptPath}.${randomUUID()}.tmp`
-    await writeFile(temporary, JSON.stringify({ version: RECEIPT_VERSION, key,
+    await writeFile(temporary, JSON.stringify({ version: RECEIPT_VERSION, key, resolution,
       modulesDevice: identity.dev, modulesInode: identity.ino }), { mode: 0o600, flag: 'wx' })
     await rename(temporary, receiptPath)
   }
