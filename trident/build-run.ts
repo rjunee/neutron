@@ -564,10 +564,11 @@ export async function buildRun(input: BuildRunInput, deps: BuildRunDeps, signal:
     if (discardHandoff) {
       await checkpoint({ handoff: undefined, stage: 'task-built-deviated' })
     }
-    if (acceptedPlan && (discardHandoff || (strategy === 'task_sequence' && resume?.stage === 'task-built-deviated' && !recovery))) {
-      // Re-check the existing selection's budget before a changed-head planner
-      // can dispatch. This refresh retains the accepted plan and strategy.
-      const budget = gateStop(await modes!.selectExecutionStrategy({ strategy: strategy!,
+    if (acceptedPlan && strategy === 'task_sequence' && !skipBuild && !recovery) {
+      // Every new task planner, including a clean continuation, needs remaining
+      // durable budget. Settling a completed handoff or reconciling an existing
+      // worker dispatches no new work and must remain possible at the cap.
+      const budget = gateStop(await modes!.selectExecutionStrategy({ strategy,
         rationale: acceptedPlan.rationale, plan: structuredClone(acceptedPlan), refresh: true }))
       if (budget) return budget
     } else if (resume?.handoff && resume.head === snapshot.head) {

@@ -926,6 +926,31 @@ test('task refresh recovery cannot advance twice after the selection was persist
   expect(f.cross.calls).toHaveLength(0)
 })
 
+test('task budget preflight refuses an exhausted clean continuation before any worker', async () => {
+  const f = cheapFixture()
+  f.deps.modes!.selectExecutionStrategy = async () => ({ kind: 'blocked', on: 'task iteration budget is exhausted' })
+  expect(await f.run()).toMatchObject({ kind: 'blocked', on: 'task iteration budget is exhausted' })
+  expect(f.runner.calls).toEqual([])
+  expect(f.prepared).toEqual([])
+})
+
+test('task budget preflight permits a clean continuation with remaining budget', async () => {
+  const f = cheapFixture()
+  expect(await f.run()).toMatchObject({ kind: 'continued', remainingTasks: 1 })
+  expect(f.runner.calls.map(c => c.role)).toEqual(['plan', 'build'])
+  expect(f.prepared[0]?.planner).toBe('next')
+})
+
+test('task budget preflight permits an exhausted intermediate checkpoint to settle without workers', async () => {
+  const f = modeFixture()
+  f.resume('built').remainingTasks = 1
+  f.deps.modes!.selectExecutionStrategy = async () => ({ kind: 'blocked', on: 'task iteration budget is exhausted' })
+  expect(await f.run()).toMatchObject({ kind: 'continued', remainingTasks: 1 })
+  expect(f.state.commits).toHaveLength(1)
+  expect(f.state.advances).toBe(1)
+  expect(f.runner.calls).toEqual([])
+})
+
 test('G026 clean handoff and positive round outside refresh interval select next planner', async () => {
   for (const round of [0, -1, 1.5, 5, 10, 2]) {
     const f = cheapFixture(); f.input.taskIteration = round

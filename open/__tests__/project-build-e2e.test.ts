@@ -3191,6 +3191,53 @@ test(`same-run task-sequence crash ${boundary} in ${mergeMode} cannot publish un
 }, 300_000)
 
 for (const cap of [1, 2])
+test(`clean task handoff checks cap ${cap} before dispatching the next planner`, async () => {
+  const f = await fixture({ mergeMode: 'local', taskSequence: true, moreTasks: true, seedLedger: false, hostLedger: true })
+  f.db.runSync('UPDATE code_trident_runs SET max_task_iterations = ? WHERE id = ?', [cap, f.row.id])
+  const board = new WorkBoardStore(f.db)
+  const card = await board.create(f.row.project_slug, { title: 'Clean handoff budget' })
+  await board.attachRun(f.row.project_slug, card.id, f.row.id)
+  const host = await createProjectBuildHost(await f.prepare())
+  const commit = host.deps.modes!.commitPlan
+  host.deps.modes!.commitPlan = async value => {
+    expect((await commit(value)).kind).toBe('known')
+    throw new Error('simulated process death after Git commit')
+  }
+  expect(await buildRun({ mode: 'implementation', start: 'fresh', taskIteration: 0,
+    run_id: f.row.id, workers: host.workers, repl_provider: 'anthropic', merge_mode: 'local' },
+  host.deps, new AbortController().signal)).toMatchObject({ kind: 'unknown', detail: 'simulated process death after Git commit' })
+  expect(f.store.get(f.row.id)!.task_iteration).toBe(1)
+  f.world.dispatches.length = 0
+  const recovered = await createProjectBuildHost(await f.prepare())
+  expect(await recovered.run({ mode: 'implementation', start: 'resume' }, new AbortController().signal))
+    .toMatchObject({ kind: 'continued', remainingTasks: 1 })
+  expect(lastCheckpoint(f).stage).toBe('task-built')
+  expect(f.world.dispatches).toEqual([])
+  expect(board.get(f.row.project_slug, card.id)!.task_iteration).toBe(1)
+
+  const next = await createProjectBuildHost(await f.prepare())
+  const outcome = await next.run({ mode: 'implementation', start: 'resume' }, new AbortController().signal)
+  if (cap === 1) {
+    expect(outcome, why(f, outcome)).toMatchObject({ kind: 'blocked', on: 'task iteration budget is exhausted' })
+    expect(f.world.dispatches).toEqual([])
+    const again = await createProjectBuildHost(await f.prepare())
+    expect(await again.run({ mode: 'implementation', start: 'resume' }, new AbortController().signal))
+      .toMatchObject({ kind: 'blocked', on: 'task iteration budget is exhausted' })
+    expect(f.world.dispatches).toEqual([])
+    expect(f.github.prs).toEqual([])
+  } else {
+    expect(outcome.kind, why(f, outcome)).toBe('merged')
+    expect(f.world.dispatches.map(d => d.role).slice(0, 2)).toEqual(['plan', 'build'])
+    expect(f.world.plannerChoices).toEqual(['full', 'next'])
+    expect(f.world.selectedTasks).toEqual(['- [ ] T1 record the note', '- [ ] T2 record another note'])
+  }
+  // Only the intermediate handoff is charged by this host; terminal harvesting
+  // belongs to the outer orchestrator and is outside this fixture.
+  expect(f.store.get(f.row.id)!.task_iteration).toBe(1)
+  expect(board.get(f.row.project_slug, card.id)!.task_iteration).toBe(1)
+}, 300_000)
+
+for (const cap of [1, 2])
 test(`task ledger interrupted handoff preserves spend at a differing head with cap ${cap}`, async () => {
   const f = await fixture({ mergeMode: 'local', taskSequence: true, moreTasks: true, seedLedger: false, hostLedger: true })
   f.db.runSync('UPDATE code_trident_runs SET max_task_iterations = ? WHERE id = ?', [cap, f.row.id])
