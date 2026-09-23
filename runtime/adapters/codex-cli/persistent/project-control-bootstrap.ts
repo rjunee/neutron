@@ -3,6 +3,7 @@ import { lstatSync, realpathSync } from 'node:fs'
 import { dirname, isAbsolute, join } from 'node:path'
 import type { ServerWebSocket } from 'bun'
 import type { PtyHost } from '../../claude-code/persistent/pty-host.ts'
+import type { ProjectPanePlacement } from '../../claude-code/persistent/project-workspaces.ts'
 import { createProjectControlBroker, classifyProjectControlMethod, type ProjectControlBroker, type ProjectControlGateway } from './project-control-broker.ts'
 import { openProjectControlJournal } from './project-control-broker-journal.ts'
 import { BROKER_MAX_MESSAGE_BYTES, createProjectControlStdioTransport, type ProjectControlTransport } from './project-control-broker-transport.ts'
@@ -92,8 +93,12 @@ export async function bootstrapCodexOwner(options: {
   onTerminalData?(bytes: Uint8Array): void
   /** Existing host boundary; Herdr gives the native TUI its own visible pane. */
   terminalHost?: PtyHost
+  projectPlacement?: ProjectPanePlacement
   onTerminalScreen?(screen: string): void
 }): Promise<CodexOwnerBootstrap> {
+  if (options.projectPlacement !== undefined && options.terminalHost === undefined) {
+    throw new Error('Explicit Codex project placement requires a terminal host')
+  }
   options = { ...options, env: { ...options.env }, configOverrides: [...options.configOverrides ?? [], 'features.multi_agent_v2=true'] }
   const timeout = options.timeoutMs ?? 15_000
   if (!Number.isFinite(timeout) || timeout <= 0) throw new Error('Invalid bootstrap deadline')
@@ -296,6 +301,7 @@ export async function bootstrapCodexOwner(options: {
     }
     if (options.terminalHost) {
       const terminal = await options.terminalHost.spawn(argv, { ...launch, label: 'codex-native-owner',
+        ...(options.projectPlacement === undefined ? {} : { projectPlacement: options.projectPlacement }),
         onScreen(screen) { options.onTerminalScreen?.(screen) } })
       tui = { pid: terminal.pid, paneHandle: terminal.paneHandle, hasExited: terminal.hasExited,
         exited: terminal.exited, write: bytes => terminal.write(bytes), kill: () => terminal.kill(), dispose: () => terminal.detach?.() }
