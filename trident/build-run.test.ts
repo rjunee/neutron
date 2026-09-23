@@ -494,7 +494,7 @@ function modeFixture(mode: BuildRunInput['mode'] = 'ralph') {
     oldResult: unknown
     advances: number
   } = { resume: null, probe: null, regenerated: f.snapshot.diff, oldResult: { built: true }, advances: 0 }
-  const prepared: { role: string; previous: unknown; planner?: string; findings: readonly string[] }[] = []
+  const prepared: { role: string; previous: unknown; planner?: string; findings: readonly string[]; suiteScope?: string }[] = []
   f.deps.prepareWork = async (request, context) => { prepared.push({ role: request.role, ...structuredClone(context) }) }
   f.deps.modes = {
     loadResume: async () => state.resume,
@@ -1615,4 +1615,33 @@ test('PR identity cannot change between approval and merge', async () => {
   }
   expect(await f.run()).toMatchObject({ kind: 'blocked', phase: 'merge', on: 'Published PR does not match reviewed revision' })
   expect(f.events).not.toContain('merge')
+})
+
+test('suite scope follows the validated Ralph task and never defers non-Ralph builds or fixes', async () => {
+  for (const mode of ['ralph', 'pr'] as const) {
+    for (const remainingTasks of [0, 2]) {
+      const f = modeFixture(mode)
+      f.plan.remainingTasks = remainingTasks
+      f.setPlan()
+      f.decisions.push({ kind: 'fix', findings: ['repair behavior'] }, { kind: 'approve' })
+      const outcome = await f.run()
+      const intermediate = mode === 'ralph' && remainingTasks > 0
+      expect(outcome.kind).toBe(intermediate ? 'continued' : 'merged')
+      expect(f.prepared.find(p => p.role === 'build')?.suiteScope).toBe(intermediate ? 'subset' : 'full-suite')
+      if (!intermediate) expect(f.prepared.find(p => p.role === 'fix')?.suiteScope).toBe('full-suite')
+      expect(f.prepared.find(p => p.role === 'plan')?.suiteScope).toBeUndefined()
+    }
+  }
+})
+
+test('suite scope uses the measured remaining count rather than a cheap planner claim', async () => {
+  for (const measuredCount of [1, 2]) {
+    const f = cheapFixture()
+    const body = measuredCount === 1 ? '- [ ] T2: last task' : f.plan.implementationPlan
+    f.state.probe = { found: true, body, uncheckedCount: measuredCount,
+      sha256: new Bun.CryptoHasher('sha256').update(body).digest('hex') }
+    f.setPlan({ ...f.plan, remainingTasks: measuredCount === 1 ? 99 : 0 })
+    expect((await f.run()).kind).toBe(measuredCount === 1 ? 'merged' : 'continued')
+    expect(f.prepared.find(p => p.role === 'build')?.suiteScope).toBe(measuredCount === 1 ? 'full-suite' : 'subset')
+  }
 })

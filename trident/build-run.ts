@@ -108,7 +108,7 @@ export interface BuildRunDeps {
   readReviewCap(runId: string): Promise<{ kind: 'known'; max_rounds?: number | undefined } | { kind: 'unknown'; detail: string }>
   assignedBranch?: string | undefined
   modes?: BuildModeHost
-  prepareWork(request: BoundedWorkRequest, context: { snapshot: BuildSnapshot; previous: unknown; findings: readonly string[]; planner?: 'full' | 'next'; committedPlan?: PlanProbe }): Promise<void>
+  prepareWork(request: BoundedWorkRequest, context: { snapshot: BuildSnapshot; previous: unknown; findings: readonly string[]; planner?: 'full' | 'next'; committedPlan?: PlanProbe; suiteScope?: 'full-suite' | 'subset'; testStrategy?: string }): Promise<void>
   /** Read back the materialized review input after preparation, before dispatch. */
   reviewArtifact?(request: BoundedWorkRequest, snapshot: BuildSnapshot): Promise<GateResult>
   measure(): Promise<Measurement>
@@ -350,7 +350,12 @@ export async function buildRun(input: BuildRunInput, deps: BuildRunDeps, signal:
         ...request, run_id: input.run_id, step_id, role, needs_approval_decision: false,
       }
       await checkpoint({ pending: { phase: role, step_id }, round: Math.max(durable.round, round) })
-      await deps.prepareWork(boundedRequest, { snapshot: structuredClone(snapshot), previous: previousPayload, findings, planner, ...(committedPlan ? { committedPlan } : {}) })
+      // Only the validated plan can defer a Ralph builder's full suite. Fixes and
+      // terminal tasks require it, regardless of a strategy supplied at launch.
+      const suiteScope = role === 'build' && input.mode === 'ralph' && plan !== null && plan.remainingTasks > 0
+        ? 'subset' : 'full-suite'
+      await deps.prepareWork(boundedRequest, { snapshot: structuredClone(snapshot), previous: previousPayload, findings, planner,
+        ...(committedPlan ? { committedPlan } : {}), ...((role === 'build' || role === 'fix') ? { suiteScope } : {}) })
       if (role === 'review') {
         if (!deps.reviewArtifact) return { stop: unknown('Review artifact host is missing') }
         const artifact = gateStop(await deps.reviewArtifact(boundedRequest, snapshot))

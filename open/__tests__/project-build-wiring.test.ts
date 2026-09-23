@@ -595,9 +595,11 @@ for (const role of ['plan', 'build', 'review', 'fix'] as const) {
     const builder = role === 'build' || role === 'fix'
     // Enumerate every role, with build/fix as the nonempty positive controls.
     expect(brief.includes(correction)).toBe(builder)
-    expect(brief.includes(strategy)).toBe(builder)
+    expect(brief.includes('host context `testStrategy`')).toBe(builder)
+    expect(options.testStrategies).toEqual({ full: strategy, intermediate: null })
     expect(brief.includes('<owner_reflection>')).toBe(builder)
-    const contract = [f.input.run.task, builder ? strategy : '',
+    const contract = [f.input.run.task, builder
+      ? 'Follow the TEST EXECUTION instructions in the host context `testStrategy`. The host selects `suiteScope` after validating this task: `full-suite` requires the full suite; only `subset` defers it for an intermediate task. Never infer scope from the task number or an earlier task.' : '',
       `Perform the ${role} role.`,
       'Write your result file as a JSON object with EXACTLY these five fields:',
       '  "schema", "run_id", "step_id"  — copy each verbatim from the host context: `request.result.schema`, `request.run_id`, `request.step_id`. Do not invent or reformat them.',
@@ -611,8 +613,7 @@ for (const role of ['plan', 'build', 'review', 'fix'] as const) {
       'Never publish or merge; the host owns those actions.',
     ].join('\n\n')
     const guidance = `\n\n<owner_reflection>\n${REFLECTION_GUIDANCE_FRAMING}\n${correction}\n</owner_reflection>`
-    // Exact equality preserves every pre-existing contract line and builder strategy;
-    // only the old raw reflection slot moves into a framed suffix.
+    // Exact equality preserves the result contract and builder-only context reference.
     expect(brief).toBe(contract + (builder ? guidance : ''))
     expect(options.workers[role].request.brief.integrity).toBe(briefIntegrity(brief))
     expect(options.policy.reviewSuite!.strategy).toBe(strategy)

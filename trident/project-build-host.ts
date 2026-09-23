@@ -41,6 +41,8 @@ export interface ProjectBuildHostOptions {
     mutation: Omit<BuildHostOptions['mutation'], 'run' | 'run_host' | 'base_branch'>
   }
   workers: BuildHostOptions['workers']
+  /** Rendered strategies selected only after the driver validates this task's plan. */
+  testStrategies?: { full: string; intermediate: string | null }
 }
 
 export type ProjectBuildOutcome = BuildRunOutcome & { cleanup: CleanupOutcome }
@@ -97,7 +99,15 @@ export async function createProjectBuildHost(options: ProjectBuildHostOptions) {
     leak: { ...options.policy.leak, run_host: config.runHost, repo_path: config.repo, branch: config.branch, base_sha: run.base_sha },
     mutation: { ...options.policy.mutation, run, run_host: config.runHost, base_branch: config.baseBranch },
     replProvider: options.substrate.provider,
-    effects: production.effects,
+    effects: { ...production.effects, async prepareWork(request, context) {
+      const strategies = options.testStrategies
+      const builder = request.role === 'build' || request.role === 'fix'
+      await production.effects.prepareWork(request, strategies && builder ? {
+        ...context,
+        testStrategy: context.suiteScope === 'subset' && strategies.intermediate !== null
+          ? strategies.intermediate : strategies.full,
+      } : context)
+    } },
     modes: production.modes,
     admission: production.admission,
     observeCi: production.observeCi,
