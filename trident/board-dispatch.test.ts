@@ -109,7 +109,7 @@ function localDeps(boardOverride: TridentBoardBinder = board): BoardBoundBuildDe
 }
 
 describe('card-owned Ralph iteration budget', () => {
-  function budgetBoard(round: number, cap: number | null): TridentBoardBinder {
+  function budgetBoard(round: number, cap: number | null, total: number | null = null): TridentBoardBinder {
     return {
       get: () => ({
         id: 'ready',
@@ -118,6 +118,7 @@ describe('card-owned Ralph iteration budget', () => {
         linked_run_id: null,
         ralph_round: round,
         max_ralph_rounds: cap,
+        ralph_task_total: total,
       }),
       attachRun: async () => {},
     }
@@ -136,11 +137,12 @@ describe('card-owned Ralph iteration budget', () => {
   test('a re-dispatch one below the card cap inherits its spend without a prior-run link', async () => {
     const result = await dispatchBoardBoundBuild(
       { task: 'build the thing', board_item_id: 'ready' },
-      { ...localDeps(budgetBoard(2, 3)), resolveRalph: async () => true, max_ralph_rounds: 20 },
+      { ...localDeps(budgetBoard(2, 3, 7)), resolveRalph: async () => true, max_ralph_rounds: 20 },
     )
     expect(result.ok).toBe(true)
     if (!result.ok) return
     expect([result.run.ralph_round, result.run.max_ralph_rounds]).toEqual([2, 3])
+    expect(store.get(result.run.id)?.ralph_task_total).toBe(7)
   })
 
   test('a card with NO snapshot is never exhausted, whatever the dispatch ceiling says', async () => {

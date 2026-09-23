@@ -31,6 +31,8 @@ export interface UnifiedTridentState {
   summary?: string
   round: number
   ralph_round: number
+  task_number: number | null
+  task_total: number | null
 }
 
 export type UnifiedCodegenOrchestrator = Pick<CodegenOrchestrator, 'dispatch'> & {
@@ -111,6 +113,8 @@ export function routeCodegenCancel(
       phase: progress.step_label,
       round: progress.round,
       ralph_round: progress.ralph_round,
+      task_number: progress.task_number,
+      task_total: progress.task_total,
       reason: run.failure_reason,
       already_terminal: isTerminalPhase(run.phase),
       ...(run.branch !== null ? { branch: run.branch } : {}),

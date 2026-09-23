@@ -1,38 +1,55 @@
 ---
-title: Show both build counters on the card as <ralph_round>.<round>
+title: Show task progress and review round explicitly on the card
 group: work-board
-status: open
+status: done
 priority: P2
 cutover: false
 legacy_ref: "SPEC.md § Phases → Steps (2026-09-12 split)"
 ---
 
-**A build's progress is TWO counters, so the card must show both — `<ralph_round>.<round>`**
-(owner request, 2026-08-13). A trident run nests two loops and the board renders one of them, so a run
-can grind through twenty task iterations while the owner watches a number that never moves.
-`ralph_round` is the OUTER loop — which task of the governed plan is being built, each in a fresh
-context, bounded by `max_ralph_rounds` (`trident/orchestrator.ts` `refireNextRalphTask`).
-`round` is the INNER loop — the Argus review round for the task in hand, bumped on REQUEST_CHANGES →
-forge-fix and bounded by `max_rounds` (`trident/state-machine.ts`). Task 2 under its first review is
-therefore **2.1**, and it is the LEFT digit that tells the owner the build is advancing.
-Acceptance: a run that re-fires to its next task visibly changes the number on the card without the
-owner asking; and the three surfaces that answer "where is this run" — the card, `codegen_status`, and
-the run row — do not disagree. (The `phase` a ralph re-fire deliberately leaves untouched, so
-`codegen_status` can report `forge-init` half an hour into a healthy run, is part of the same defect:
-correct mechanically, false as a status.) Related, and deliberately NOT the same item: the
-`Work Board row state` card fixes the same class one layer up — a row must not claim a run it does not
-have — and the pulse half of it is the entry above, blocked on the heartbeat. THIS entry is a DISPLAY
-defect over a counter we already record honestly; that one is a MISSING SIGNAL. Collapsing them would
-only make a run that reports nothing report nothing more precisely.
+The owner’s 2026-09-23 decision replaces the decimal task/review counter with
+`Task N/M · Round R`. A display such as `10.1` conceals both what is advancing
+and how much work remains. This supersedes the 2026-08-13 decimal presentation;
+the two counters still describe separate things.
+
+For Ralph, `N` is the one-based task iteration (`ralph_round + 1`) and `R` is
+the review/fix round. `M` is the latest plan estimate: at an intermediate task
+harvest, the completed task number plus the validated remaining-task count.
+The total is persisted in the same write that advances the task and consumes
+its result. It can grow or shrink when a later result revises the plan. It is
+never `max_ralph_rounds`, which limits spending and says nothing about plan size.
+This is current iteration progress, not an immutable count of original task IDs.
+
+A fresh first task or historical run has no recorded total and reads
+`Task N/? · Round R`. Same-run retries and redispatch from an existing run or
+card seed preserve a known total. A non-Ralph run reads only `Round R`;
+terminal rows hide the counter. Mobile and web use the same server-derived
+task number and total. Older gateway frames without task identity show only
+the known review round instead of guessing a build mode.
+
+This changes progress presentation and persistence, not escalation thresholds
+or the heartbeat signal. See the Decisions Log entry dated 2026-09-23.
 
 ## Acceptance
 
-- [ ] A run that re-fires to its next task visibly changes the number on the card **without
-      the owner asking**. Task 2 under its first review reads `2.1`.
-- [ ] The three surfaces that answer "where is this run" — the card, `codegen_status`, and
-      the run row — do not disagree. Assert all three against one re-fired run; checking a
-      single surface passes with the defect present.
-- [ ] `codegen_status` no longer reports `forge-init` half an hour into a healthy run.
-- [ ] This does not absorb the pulse item. This is a DISPLAY defect over a counter already
-      recorded honestly; the heartbeat item is a MISSING SIGNAL. A change that collapses
-      them makes a run that reports nothing report nothing more precisely.
+- [x] A Ralph task with iteration 9, total 15 and review round 1 renders
+      `Task 10/15 · Round 1` on phone and web; missing total renders `?`.
+      verify: mobile row/helper and web Work Board render tests.
+- [x] Non-Ralph runs show `Round R`; terminal rows show no counter. Malformed
+      totals never become a numeric denominator.
+      verify: both client parser suites and render tests.
+- [x] An intermediate harvest advances the task, records its plan total, clears
+      the consumed result and releases the worker in one persisted update.
+      Reopening the database reads the same task/total; replacement plans can
+      decrease or increase the estimate.
+      verify: `trident/orchestrator.test.ts`, task-total re-fire test.
+- [x] Infrastructure retry, prior-run redispatch, and card-only redispatch keep
+      the known total. Terminal reconciliation preserves it when the run link
+      is subsequently cleared.
+      verify: orchestrator, retry-resumes-checkpoint, board-dispatch and
+      board-reconcile tests.
+- [x] Card progress, `codegen_status` and the run row agree on task number,
+      total and review round; changing the iteration cap cannot change the total.
+      verify: shared run-progress, status-route and board HTTP tests.
+- [x] Substituting the iteration cap for the denominator and restoring decimal
+      formatting each make the corresponding semantic tests fail.

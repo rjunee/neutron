@@ -8,8 +8,11 @@ import { seedMigratedDb } from '../../tests/support/migrated-db.ts'
 import { ProjectDb } from '@neutronai/persistence/index.ts'
 import { TridentRunStore } from '@neutronai/trident/store.ts'
 import { buildTridentTerminator } from '@neutronai/trident/terminate.ts'
+import { WorkBoardStore } from '@neutronai/work-board/store.ts'
+import { createAppWsAuthResolver } from '@neutronai/channels/adapters/app-ws/auth.ts'
 import { routeCodegenCancel, type UnifiedCancelResult } from '../codegen-cancel-router.ts'
 import { buildCoresBackendFactories } from '../boot-cores-factories.ts'
+import { createWorkBoardSurface } from '../http/work-board-surface.ts'
 
 let tmp: string
 let db: ProjectDb
@@ -169,22 +172,37 @@ describe('one codegen_cancel surface routes both dispatch paths', () => {
     expect(trident.get('12345678-two')?.phase).toBe('forge-init')
   })
 
-  test('MUTATION: status derives the same live step and both counters as the board snapshot', async () => {
+  test('MUTATION: status, fetch, row and board HTTP derive the same task and review counters', async () => {
     const run = await trident.create({
       id: 'trident-readable', slug: 'readable', project_slug: 'p', repo_path: '/repo', task: 'build widget',
+      ralph: true,
     })
+    const board = new WorkBoardStore(db)
+    const item = await board.create('p', { title: 'Readable progress' })
+    await board.attachRun('p', item.id, run.id)
     const router = routeCodegenCancel(legacy(), trident, 'p', bare())
 
-    await trident.update(run.id, { ralph_round: 1, round: 1, inner_checkpoint: 'forge-done' })
+    await trident.update(run.id, { ralph_round: 9, ralph_task_total: 15, round: 1, inner_checkpoint: 'forge-done' })
+
+    const expected = { round: 1, ralph_round: 9, task_number: 10, task_total: 15 }
+    expect(trident.get(run.id)).toMatchObject({ ralph_round: 9, ralph_task_total: 15, round: 1 })
 
     expect(await router.status({ task_id: run.slug })).toMatchObject({
-      status: 'reviewing', phase: 'reviewing', round: 1, ralph_round: 1,
+      status: 'reviewing', phase: 'reviewing', ...expected,
       dispatch_path: 'trident', run_id: run.id, already_terminal: false,
     })
     expect(await router.fetch({ task_id: run.id.slice(0, 8) })).toMatchObject({
-      phase: 'reviewing', round: 1, ralph_round: 1, dispatch_path: 'trident',
+      phase: 'reviewing', dispatch_path: 'trident', ...expected,
     })
     expect(await router.fetch({ task_id: run.id })).not.toHaveProperty('summary')
+    const http = createWorkBoardSurface({ store: board, trident_runs: trident,
+      auth: createAppWsAuthResolver({ project_slug: 'p', bypass: true }) })
+    const response = await http.handler(new Request('http://test/api/app/projects/p/work-board', {
+      headers: { authorization: 'Bearer test' },
+    }))
+    expect(response?.status).toBe(200)
+    const body = await response!.json() as { items: Array<{ id: string; run_progress: unknown }> }
+    expect(body.items.find(row => row.id === item.id)?.run_progress).toMatchObject(expected)
   })
 
   test('MUTATION: deleting production factory routing leaves the installed Code-Gen backend unable to reach Trident', async () => {

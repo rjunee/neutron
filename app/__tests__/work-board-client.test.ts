@@ -135,6 +135,20 @@ describe('WorkBoardClient', () => {
 });
 
 describe('parseWorkBoardItems', () => {
+  it('preserves task progress and leaves malformed or absent totals unknown', () => {
+    for (const [wire, expected] of [[15, 15], [null, null], [undefined, null], ['15', null], [0, null], [-1, null], [1.5, null], [Infinity, null], [NaN, null]] as const) {
+      const parsed = parseWorkBoardItems([{ ...item(), run_progress: {
+        run_id: 'run-total', phase_label: 'building', task_number: 10, task_total: wire,
+      } }])[0]!.run_progress!;
+      expect(parsed.task_number).toBe(10);
+      expect(parsed.task_total).toBe(expected);
+    }
+    const parsed = parseWorkBoardItems([{ ...item(), run_progress: {
+      run_id: 'run-total', phase_label: 'building', task_number: '10', task_total: 15,
+    } }])[0]!.run_progress!;
+    expect(parsed.task_number).toBeNull();
+  });
+
   it('drops malformed entries, keeps valid rows', () => {
     const out = parseWorkBoardItems([
       item({ id: 'a' }),

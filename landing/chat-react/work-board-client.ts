@@ -151,6 +151,9 @@ export interface RunProgress {
   infra_retries?: number
   /** Optional only for compatibility with an older gateway frame. */
   ralph_round?: number
+  /** Null means non-Ralph; absent only on older gateway frames. */
+  task_number?: number | null
+  task_total?: number | null
   started_at: string
   last_advanced_at: string
   /** Positive ALIVE evidence from the run's own wrapper; null when unestablished. */
@@ -478,6 +481,10 @@ function parseRunProgress(raw: unknown): RunProgress | null {
     round: typeof r['round'] === 'number' ? (r['round'] as number) : 1,
     infra_retries: typeof r['infra_retries'] === 'number' ? (r['infra_retries'] as number) : 0,
     ralph_round: typeof r['ralph_round'] === 'number' ? (r['ralph_round'] as number) : 0,
+    task_number: Number.isSafeInteger(r['task_number']) && (r['task_number'] as number) > 0
+      ? r['task_number'] as number : null,
+    task_total: Number.isSafeInteger(r['task_total']) && (r['task_total'] as number) > 0
+      ? r['task_total'] as number : null,
     started_at: typeof r['started_at'] === 'string' ? (r['started_at'] as string) : '',
     last_advanced_at: typeof r['last_advanced_at'] === 'string' ? (r['last_advanced_at'] as string) : '',
     heartbeat_at: typeof r['heartbeat_at'] === 'string' ? (r['heartbeat_at'] as string) : null,

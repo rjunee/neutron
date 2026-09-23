@@ -345,7 +345,7 @@ function WorkBoardRowImpl({
               <Text style={[styles.tagText, { color: PHASE[tag.colorKey].fg }]}>{tag.label}</Text>
             </View>
           ) : null}
-          {round !== null ? <Text style={styles.round}>{round}</Text> : null}
+          {round !== null ? <Text style={styles.round} testID="work-board-task-progress">{round}</Text> : null}
           {notice !== null ? (
             <Text
               style={
@@ -481,6 +481,7 @@ const styles = createThemedStyles({
   // the title. Renders only when the item has status to show (item 4).
   meta: {
     flexDirection: 'row',
+    flexWrap: 'wrap',
     alignItems: 'center',
     gap: SPACING.xs,
     marginLeft: META_INDENT,

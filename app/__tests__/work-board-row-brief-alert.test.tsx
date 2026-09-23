@@ -75,6 +75,25 @@ function item(over: Partial<WorkBoardItem> = {}): WorkBoardItem {
 }
 
 describe('WorkBoardRow brief alerts (mobile)', () => {
+  it('renders known, unknown and non-Ralph task progress, hiding terminal counters', async () => {
+    for (const [task, total, step, label] of [
+      [10, 15, 'building', 'Task 10/15 · Round 1'],
+      [10, null, 'building', 'Task 10/? · Round 1'],
+      [null, null, 'building', 'Round 1'],
+      [10, 15, 'failed', null],
+    ] as const) {
+      const row = item();
+      row.run_progress = { ...row.run_progress!, task_number: task, task_total: total, step_label: step };
+      const screen = await mountScreen(createElement(WorkBoardRow, {
+        item: row, busy: false, index: 0, laneCount: 1,
+        onAdvance: () => {}, onRename: () => {}, onReorderTo: () => {}, onDelete: () => {},
+      }));
+      const counter = screen.byTestId('work-board-task-progress');
+      expect(counter?.textContent ?? null).toBe(label);
+      screen.unmount();
+    }
+  });
+
   it("the dot calls this row's inspector callback, while status advance stays separate", async () => {
     const opened: string[] = [];
     const advanced: string[] = [];

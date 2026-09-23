@@ -70,9 +70,10 @@ describe('buildBoardReconcileObserver', () => {
     await obs({
       project_slug: 'proj-1', id: 'run-budget', phase: 'failed', repo_path: '/repo',
       pr: null, ralph: true, ralph_round: 2, max_ralph_rounds: 3,
+      ralph_task_total: 8,
     } as never)
 
-    expect(board.get('proj-1', item.id)).toMatchObject({ ralph_round: 2, max_ralph_rounds: 3 })
+    expect(board.get('proj-1', item.id)).toMatchObject({ ralph_round: 2, max_ralph_rounds: 3, ralph_task_total: 8 })
 
     // MONOTONIC, in the two directions the name claims — asserted, because a test
     // that only writes onto a fresh card establishes neither. A DELAYED observer
@@ -81,18 +82,25 @@ describe('buildBoardReconcileObserver', () => {
     await obs({
       project_slug: 'proj-1', id: 'run-budget', phase: 'failed', repo_path: '/repo',
       pr: null, ralph: true, ralph_round: 1, max_ralph_rounds: 9,
+      ralph_task_total: 14,
     } as never)
 
-    expect(board.get('proj-1', item.id)).toMatchObject({ ralph_round: 2, max_ralph_rounds: 3 })
+    expect(board.get('proj-1', item.id)).toMatchObject({ ralph_round: 2, max_ralph_rounds: 3, ralph_task_total: 8 })
 
     // …and the control that stops this passing by refusing every write: a genuine
     // advance with a tighter cap IS recorded.
     await obs({
       project_slug: 'proj-1', id: 'run-budget', phase: 'failed', repo_path: '/repo',
       pr: null, ralph: true, ralph_round: 3, max_ralph_rounds: 3,
+      ralph_task_total: 6,
     } as never)
 
-    expect(board.get('proj-1', item.id)).toMatchObject({ ralph_round: 3, max_ralph_rounds: 3 })
+    expect(board.get('proj-1', item.id)).toMatchObject({ ralph_round: 3, max_ralph_rounds: 3, ralph_task_total: 6 })
+    await board.update('proj-1', item.id, { status: 'upcoming' })
+    const reopened = ProjectDb.open(join(tmp, 'project.db'))
+    try {
+      expect(new WorkBoardStore(reopened).get('proj-1', item.id)).toMatchObject({ linked_run_id: null, ralph_task_total: 6 })
+    } finally { reopened.close() }
   })
 
   test('a zero cap means no iterations and survives terminal reconciliation', async () => {

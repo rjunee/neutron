@@ -201,6 +201,7 @@ function makeRun(checkout: string, overrides: Partial<TridentRun> = {}): Trident
     max_rounds: 10,
     ralph: false,
     ralph_round: 0,
+    ralph_task_total: null,
     max_ralph_rounds: 20,
     branch: BRANCH,
     base_sha: null,

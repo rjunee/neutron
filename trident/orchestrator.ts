@@ -2213,6 +2213,11 @@ export function buildTridentOrchestrator(
     const branch = result.branch ?? run.branch
     const remaining = result.remaining_tasks ?? 0
     const nextRalphRound = run.ralph_round + 1
+    // Current one-based task plus tasks still planned after it. This is a plan
+    // estimate, not the spending cap; replacement plans may grow or shrink it.
+    const plannedTotal = (run.ralph_round + 1) + remaining
+    const taskTotal = Number.isSafeInteger(plannedTotal) && Number.isSafeInteger(remaining) && remaining > 0
+      ? plannedTotal : null
 
     if (nextRalphRound > run.max_ralph_rounds) {
       // Cap reached: fail loudly. No out-of-band clear needed — the run goes TERMINAL
@@ -2257,6 +2262,7 @@ export function buildTridentOrchestrator(
       subagent_run_id: null,
       subagent_status: null,
       ralph_round: nextRalphRound,
+      ralph_task_total: taskTotal,
       inner_verdict: null,
       pr,
       branch,
@@ -2272,6 +2278,7 @@ export function buildTridentOrchestrator(
     const next: TridentRun = {
       ...run,
       ralph_round: nextRalphRound,
+      ralph_task_total: taskTotal,
       pr,
       branch,
       subagent_run_id: null,

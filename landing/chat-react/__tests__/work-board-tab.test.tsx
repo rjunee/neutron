@@ -254,6 +254,8 @@ describe('WorkBoardTab (happy-dom)', () => {
       step_label: 'retrying',
       round: 2,
       ralph_round: 1,
+      task_number: 2,
+      task_total: null,
       infra_retries: 2,
       started_at: '2026-07-02T00:00:00Z',
       last_advanced_at: '2026-07-02T00:01:00Z',
@@ -287,7 +289,7 @@ describe('WorkBoardTab (happy-dom)', () => {
     const activeRows = Array.from(container.querySelectorAll('.cwb-ul:not(.cwb-completed-ul) .cwb-row'))
 
     expect(activeRows[0]!.querySelector('.cwb-tag')!.textContent).toBe('Retrying')
-    expect(activeRows[0]!.querySelector('.cwb-round')!.textContent).toBe('2.2')
+    expect(activeRows[0]!.querySelector('.cwb-round')!.textContent).toBe('Task 2/? · Round 2')
     expect(activeRows[0]!.querySelector('.cwb-dot')!.className).not.toContain('cwb-dot-pulse')
     expect(activeRows[1]!.querySelector('.cwb-dot')!.className).toContain('cwb-dot-pulse')
 
@@ -304,9 +306,11 @@ describe('WorkBoardTab (happy-dom)', () => {
         run_progress: {
           run_id: 'run_1',
           phase_label: 'building',
-          step_label: 'fixing',
-          round: 2,
-          ralph_round: 1,
+          step_label: 'building',
+          round: 1,
+          ralph_round: 9,
+          task_number: 10,
+          task_total: 15,
           started_at: '2026-07-02T00:00:00Z',
           last_advanced_at: '2026-07-02T00:01:00Z',
           elapsed_ms: 120000,
@@ -322,9 +326,9 @@ describe('WorkBoardTab (happy-dom)', () => {
     const { container, root, act } = await mount(listOf(rows))
     const tag = container.querySelector('.cwb-tag')
     expect(tag).not.toBeNull()
-    expect(tag!.textContent).toBe('Fixing')
-    expect(tag!.className).toContain('cwb-tag-fix')
-    expect(container.querySelector('.cwb-round')!.textContent).toBe('2.2')
+    expect(tag!.textContent).toBe('Building')
+    expect(tag!.className).toContain('cwb-tag-build')
+    expect(container.querySelector('.cwb-round')!.textContent).toBe('Task 10/15 · Round 1')
     // No emoji glyphs, no elapsed-minutes timer, no old sub-label.
     expect(container.querySelector('.cwb-run-progress')).toBeNull()
     expect(container.textContent).not.toContain('🔨')
@@ -692,7 +696,7 @@ describe('WorkBoardTab (happy-dom)', () => {
     const meta = buildingRow.querySelector('.cwb-row-meta')
     expect(meta).not.toBeNull()
     expect(meta!.querySelector('.cwb-tag')!.textContent).toBe('Building')
-    expect(meta!.querySelector('.cwb-round')!.textContent).toBe('1.1')
+    expect(meta!.querySelector('.cwb-round')!.textContent).toBe('Round 1')
     // Queued row → its durable state, without inventing a round.
     const queuedRow = liRows[1]!
     expect(queuedRow.querySelector('.cwb-title')!.textContent).toBe('Just queued')

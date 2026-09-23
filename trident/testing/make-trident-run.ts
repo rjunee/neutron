@@ -25,6 +25,7 @@ export function makeTridentRun(over: Partial<TridentRun> = {}): TridentRun {
     max_rounds: 8,
     ralph: false,
     ralph_round: 0,
+    ralph_task_total: null,
     max_ralph_rounds: 20,
     branch: null,
     base_sha: null,

@@ -131,6 +131,7 @@ async function priorRun(
     task?: string
     ralph?: boolean
     ralph_round?: number
+    ralph_task_total?: number | null
     max_ralph_rounds?: number
     checkpoint?: string | null
     phase?: 'done' | 'failed' | 'stopped'
@@ -153,6 +154,7 @@ async function priorRun(
     inner_verdict: 'REVIEW_NOT_RUN',
     base_sha: BASE,
     ralph_round: over.ralph_round ?? 4,
+    ralph_task_total: over.ralph_task_total ?? null,
   })
   cardLink = run.id
   return store.get(run.id)!
@@ -220,7 +222,7 @@ describe('a re-dispatch after a DEAD run resumes from its checkpoint AND its ral
     // board-dispatch.ts → the new row is born at 0 and the round assertions fail.
     // RED-mutation B: restore `ralph_round: 0` in `TridentRunStore.create` → same,
     // one layer down, which is why both layers are asserted.
-    const prior = await priorRun({ ralph_round: 4 })
+    const prior = await priorRun({ ralph_round: 4, ralph_task_total: 12 })
     expect(prior.ralph_round).toBe(4) // precondition, asserted not assumed
 
     const { result, seedLine } = await dispatchRecording(async () => HEAD)
@@ -238,6 +240,7 @@ describe('a re-dispatch after a DEAD run resumes from its checkpoint AND its ral
     // the ROW, never this object.
     const stored = store.get(result.run.id)!
     expect(stored.ralph_round).toBe(4)
+    expect(stored.ralph_task_total).toBe(12)
     expect(stored.inner_checkpoint).toBe('fix-round-3')
     // AND IT SAYS SO, naming the prior run whose continuity was adopted.
     expect(seedLine).toContain('reason=resumed')

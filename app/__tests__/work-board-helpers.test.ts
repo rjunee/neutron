@@ -103,14 +103,14 @@ describe('stepTag + roundText derive from step_label (M1 redesign)', () => {
   it('building → "Building" tag + task.review counters', () => {
     const rp = progress({ step_label: 'building', round: 2 });
     expect(stepTag(withRun(rp))).toEqual({ label: 'Building', colorKey: 'build' });
-    expect(roundText(rp)).toBe('1.2');
+    expect(roundText(rp)).toBe('Round 2');
   });
 
   it('retrying keeps its tag and build counters but pulses only with a fresh heartbeat', () => {
     const rp = progress({ step_label: 'retrying', infra_retries: 2 });
     expect(stepTag(withRun(rp))).toEqual({ label: 'Retrying', colorKey: 'build' });
     expect(rp.infra_retries).toBe(2);
-    expect(roundText(rp)).toBe('1.1');
+    expect(roundText(rp)).toBe('Round 1');
     expect(dotState(withRun(rp))).toEqual({ colorKey: 'build', pulse: false });
     expect(dotState(item({ status: 'in_progress', linked_run_id: 'r1', run_progress: rp }))).toEqual({
       colorKey: 'build',
@@ -121,23 +121,26 @@ describe('stepTag + roundText derive from step_label (M1 redesign)', () => {
   it('reviewing → "Reviewing" tag + round N', () => {
     const rp = progress({ step_label: 'reviewing', round: 3 });
     expect(stepTag(withRun(rp))).toEqual({ label: 'Reviewing', colorKey: 'review' });
-    expect(roundText(rp)).toBe('1.3');
+    expect(roundText(rp)).toBe('Round 3');
   });
 
-  it('a re-fired task renders the one-based outer task and inner review as 2.1', () => {
-    expect(roundText(progress({ ralph_round: 1, round: 1 }))).toBe('2.1');
+  it('names the task, latest plan total, and review round independently', () => {
+    expect(roundText(progress({ ralph_round: 9, task_number: 10, task_total: 15, round: 1 }))).toBe('Task 10/15 · Round 1');
+    expect(roundText(progress({ task_number: 1, task_total: null, round: 1 }))).toBe('Task 1/? · Round 1');
+    expect(roundText(progress({ task_number: 10, task_total: 9, round: 2 }))).toBe('Task 10/? · Round 2');
+    expect(roundText(progress({ task_number: null, task_total: 15, round: 2 }))).toBe('Round 2');
   });
 
   it('fixing → "Fixing" tag + round N', () => {
     const rp = progress({ step_label: 'fixing', round: 4 });
     expect(stepTag(withRun(rp))).toEqual({ label: 'Fixing', colorKey: 'fix' });
-    expect(roundText(rp)).toBe('1.4');
+    expect(roundText(rp)).toBe('Round 4');
   });
 
   it('merging → "Merging" tag + round N', () => {
     const rp = progress({ step_label: 'merging', round: 5 });
     expect(stepTag(withRun(rp))).toEqual({ label: 'Merging', colorKey: 'merge' });
-    expect(roundText(rp)).toBe('1.5');
+    expect(roundText(rp)).toBe('Round 5');
   });
 
   it('done (terminal) → "Merged" tag, NO round', () => {
@@ -159,7 +162,7 @@ describe('stepTag + roundText derive from step_label (M1 redesign)', () => {
     const legacy = progress({ phase_label: 'reviewing', round: 2 });
     delete (legacy as { step_label?: unknown }).step_label;
     expect(stepTag(withRun(legacy))).toEqual({ label: 'Reviewing', colorKey: 'review' });
-    expect(roundText(legacy)).toBe('1.2');
+    expect(roundText(legacy)).toBe('Round 2');
     const legacyMerged = progress({ phase_label: 'merged' });
     delete (legacyMerged as { step_label?: unknown }).step_label;
     expect(stepTag(withRun(legacyMerged))).toEqual({ label: 'Merged', colorKey: 'merge' });
