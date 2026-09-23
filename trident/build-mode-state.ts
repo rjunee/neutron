@@ -34,6 +34,7 @@ export function parseBuildModeState(meta: string | null, run: TridentRun, termin
     || !Array.isArray(c.findings) || !c.findings.every((f: any) => f && ['code', 'lane'].includes(f.kind) && typeof f.actionable === 'boolean' && typeof f.text === 'string')
     || !Array.isArray(c.previousFindings) || !c.previousFindings.every((f: unknown) => typeof f === 'string')
     || (c.previousBlockingCount !== undefined && (!Number.isSafeInteger(c.previousBlockingCount) || c.previousBlockingCount < 0))
+    || (c.remainingTasks !== undefined && (!Number.isSafeInteger(c.remainingTasks) || c.remainingTasks < 0))
     || (state.consumed !== undefined && (!Number.isSafeInteger(state.consumed?.round) || state.consumed.round < 0
       || typeof state.consumed.head !== 'string' || !oid.test(state.consumed.head)))
     || (c.pending !== undefined && (!c.pending || !['plan', 'build', 'review', 'fix'].includes(c.pending.phase) || typeof c.pending.step_id !== 'string' || !c.pending.step_id.startsWith(`${run.id}:`)))) {
@@ -57,10 +58,12 @@ export function retryModeSource(store: TridentRunStore, prior: TridentRun, seen 
   }
   const state = parseBuildModeState(event.meta, prior, true)
   const checkpoint = state.checkpoint
-  // Never inherit approval or an unresolved worker reservation. A bare Ralph
-  // build has not established that its remaining plan is empty.
+  // Never inherit approval or an unresolved worker reservation. A terminal Ralph
+  // build may retry publication/review only when its host checkpoint records an
+  // empty validated plan. Legacy/partial builds cannot establish that fact.
   if (checkpoint.pending !== undefined || checkpoint.head === null) return null
-  if (checkpoint.round >= 1 && (checkpoint.stage === 'fixed' || (checkpoint.stage === 'built' && !prior.ralph))) {
+  if (checkpoint.round >= 1 && (checkpoint.stage === 'fixed' || (checkpoint.stage === 'built'
+    && (!prior.ralph || checkpoint.remainingTasks === 0)))) {
     return { prior, eventId: event.id, state }
   }
   return ralphContinuationSource(prior, state) ? { prior, eventId: event.id, state } : null

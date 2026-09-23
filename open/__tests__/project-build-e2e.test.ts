@@ -2970,3 +2970,89 @@ for (const seam of ['submitLine', 'acquireTurn', 'silent-worker'] as const) {
     expect(f.github.prs).toEqual([])
   }, 60_000)
 }
+
+for (const mergeMode of ['pr', 'local'] as const)
+for (const reviewFix of [false, true])
+test(`terminal Ralph ${mergeMode} publication retry re-proves the built head without new planning or building${reviewFix ? ' and gives its review-requested fix the full suite' : ''}`, async () => {
+  const { renderTestStrategy, FULL_SUITE_REQUIRED, INTERMEDIATE_SUITE_DEFERRED } = await import('@neutronai/trident/test-strategy.ts')
+  const task = 'Record a note in NOTES.md and verify the resulting change with the complete regression suite\nMORE TASKS'
+  const f = await fixture({ dispatchTask: task, mergeMode, ralph: true, moreTasks: true, seedLedger: false, hostLedger: true,
+    ...(reviewFix ? { blockersByRound: [0, 1, 0] } : {}) })
+  // The host alone commits the branch ledger. Include executable code and a real
+  // nominated guard/control pair so the retry must repeat mutation proof.
+  f.world.mutationArgv = 'valid'
+  const strategy = { resolution: { command: 'bash scripts/ci/suite.sh', source: 'package-json' as const }, jobs: 1, base_branch: 'main',
+    knobs: { jobs_env: null, concurrency_env: null, probed_file: null, pinned_by_command: false } }
+  f.input.test_strategy_intermediate = renderTestStrategy({ ...strategy, scope: 'subset' })
+  f.input.test_strategy = renderTestStrategy({ ...strategy, scope: 'full-suite' })
+  const intermediateHost = await createProjectBuildHost(await f.prepare())
+  const intermediate = await buildRun({ mode: 'ralph', start: 'fresh', ralphRound: 0,
+    run_id: f.row.id, workers: intermediateHost.workers, repl_provider: 'anthropic', merge_mode: mergeMode },
+  intermediateHost.deps, new AbortController().signal)
+  expect(intermediate.kind, why(f, intermediate)).toBe('continued')
+  const intermediateContext = JSON.parse(await readFile(workContextPath(intermediateHost.workers.build.request.brief.path), 'utf8'))
+  expect(intermediateContext.previous.remainingTasks).toBe(1)
+  expect(intermediateContext.suiteScope).toBe('subset')
+  expect(intermediateContext.testStrategy).toContain(INTERMEDIATE_SUITE_DEFERRED)
+  expect(intermediateContext.testStrategy).not.toContain(FULL_SUITE_REQUIRED)
+  expect(f.world.dispatches.some(dispatch => dispatch.role === 'review')).toBe(false)
+  await f.store.update(f.row.id, { ralph_round: 1 })
+  f.input.run = f.store.get(f.row.id)!
+  const firstHost = await createProjectBuildHost(await f.prepare())
+  // In PR mode publication pushes the measured object, then PR creation fails.
+  // Local mode never needs a remote ref or GitHub to establish continuity.
+  if (mergeMode === 'pr') f.github.refuse.add('create')
+  else firstHost.deps.reviewReadiness = async () => ({ kind: 'unknown', detail: 'proof temporarily unavailable before review' })
+  const first = await firstHost.run({ mode: 'ralph', start: 'resume' }, new AbortController().signal)
+  expect(first.kind, why(f, first)).toBe('unknown')
+  const terminalContext = JSON.parse(await readFile(workContextPath(firstHost.workers.build.request.brief.path), 'utf8'))
+  expect(terminalContext.previous.remainingTasks).toBe(0)
+  expect(terminalContext.suiteScope).toBe('full-suite')
+  expect(terminalContext.testStrategy).toContain(FULL_SUITE_REQUIRED)
+  expect(terminalContext.testStrategy).not.toContain(INTERMEDIATE_SUITE_DEFERRED)
+  const checkpoint = lastCheckpoint(f)
+  expect(checkpoint).toMatchObject({ stage: 'built', remainingTasks: 0, round: 1 })
+  const prior = f.store.get(f.row.id)!
+  await f.store.update(prior.id, { phase: 'failed', worktree: null })
+  const dispatched = await dispatchBoardBoundBuild({ task, board_item_id: 'retry-card' }, {
+    store: f.store, project_slug: 'project', repo_path: f.repo,
+    board: { get: () => ({ id: 'retry-card', title: task, design_doc_ref: null, linked_run_id: prior.id }), attachRun: async () => {} },
+    resolveBuildRepo: async () => f.repo, resolveMergeMode: async () => mergeMode, resolveRalph: async () => true,
+  })
+  expect(dispatched.ok, JSON.stringify(dispatched)).toBe(true)
+  if (!dispatched.ok) return
+  expect(dispatched.run.inner_checkpoint_head).toBe(String(checkpoint.head))
+  expect(dispatched.run.ralph_round).toBe(1)
+  f.input.run = dispatched.run
+  f.github.refuse.delete('create')
+  f.world.dispatches.length = 0
+  const host = await createProjectBuildHost(await f.prepare())
+  expect(await host.deps.measure()).toMatchObject({ kind: 'known', value: { head: checkpoint.head } })
+  const proofHeads: string[] = []
+  const publication = host.deps.publishGate
+  host.deps.publishGate = async (...args) => { proofHeads.push(args[0].head); return publication(...args) }
+  const outcome = await host.run({ mode: 'ralph', start: 'resume' }, new AbortController().signal)
+  expect(outcome.kind, why(f, outcome)).toBe('merged')
+  expect(proofHeads.length).toBeGreaterThan(0)
+  if (mergeMode === 'pr' || !reviewFix) expect(proofHeads).toContain(String(checkpoint.head))
+  expect(f.world.dispatches.some(dispatch => ['plan', 'build'].includes(dispatch.role))).toBe(false)
+  expect(f.world.dispatches.some(dispatch => dispatch.role === 'review')).toBe(true)
+  expect(f.world.dispatches[0]).toMatchObject({ role: 'review', step_id: `${dispatched.run.id}:task:1:review:1` })
+  expect(f.world.dispatches.some(dispatch => dispatch.step_id.startsWith(`${prior.id}:`))).toBe(false)
+  expect(f.world.dispatches.filter(dispatch => dispatch.role === 'fix')).toHaveLength(reviewFix ? 1 : 0)
+  if (reviewFix) {
+    const fixContext = JSON.parse(await readFile(workContextPath(host.workers.fix.request.brief.path), 'utf8'))
+    // A resumed build skips planAndBuild; the in-memory plan is null. The review
+    // payload in previous is not a replacement ExecutionPlan.
+    expect(fixContext.previous.remainingTasks).toBeUndefined()
+    expect(fixContext.suiteScope).toBe('full-suite')
+    expect(fixContext.testStrategy).toContain(FULL_SUITE_REQUIRED)
+    expect(fixContext.testStrategy).not.toContain(INTERMEDIATE_SUITE_DEFERRED)
+    expect(f.world.dispatches.filter(dispatch => dispatch.schema === 'project-review')).toHaveLength(2)
+  }
+  const publicationLog = await readFile(join(f.context.stateRoot, dispatched.run.id, 'suite-publication.log'), 'utf8')
+  expect(publicationLog).toContain('HARNESS SUITE ran in')
+  const merged = await spawnCapture(['git', '-C', mergeMode === 'pr' ? f.origin : f.repo, 'show', 'refs/heads/main:NOTES.md'], f.repo)
+  expect(merged.stdout).toBe(`seed\n${prior.id}:task:0:build:0\n${prior.id}:task:1:build:0${reviewFix ? `\n${dispatched.run.id}:task:1:fix:1` : ''}`)
+  if (mergeMode === 'local') expect(f.commands.some(argv => argv[0] === 'gh')).toBe(false)
+}, 300_000)

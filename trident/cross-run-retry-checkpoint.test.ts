@@ -544,3 +544,57 @@ test('the carried and fresh budget wordings follow the row, not the reason', asy
   expect(row.resume_note).toBe(
     `Not resumed: the card names no prior run, so this is a fresh build; Ralph round 5/${row.max_ralph_rounds} carried.`)
 })
+
+test('a host-recorded terminal Ralph build carries its exact checkpoint into publication retry', async () => {
+  const f = await fixture({ checkpoint: { stage: 'built', remainingTasks: 0 } })
+  const result = await f.dispatch()
+  expect(result.ok, JSON.stringify(result)).toBe(true)
+  if (!result.ok) return
+  expect(result.run.inner_checkpoint_head).toBe(HEAD)
+  expect(result.run.base_sha).toBe(BASE)
+  expect(result.run.ralph_round).toBe(4)
+  const worktree = join(f.dir, 'terminal-retry')
+  await f.store.update(result.run.id, { worktree })
+  const host = createProductionHostEffects({ ...f.options, runId: result.run.id, worktree })
+  expect(await host.modes.loadResume()).toEqual(f.checkpoint)
+})
+
+for (const remainingTasks of [undefined, 1, 20]) test(`a Ralph build with remainder ${remainingTasks} cannot skip its unfinished plan`, async () => {
+  const f = await fixture({ checkpoint: { stage: 'built', remainingTasks } })
+  const result = await f.dispatch()
+  expect(result.ok, JSON.stringify(result)).toBe(true)
+  if (!result.ok) return
+  expect(result.run.inner_checkpoint).toBeNull()
+  expect(result.run.ralph_round).toBe(4)
+  expect(f.store.stageEvents(result.run.id)).toHaveLength(0)
+})
+
+for (const remainingTasks of [-1, 0.5, null, '0', Number.MAX_SAFE_INTEGER + 1]) test(`a malformed terminal remainder ${remainingTasks} cannot authorize a retry`, async () => {
+  const f = await fixture({ checkpoint: { stage: 'built', remainingTasks: 0 } })
+  const source = f.store.stageEvents(f.prior.id).filter(event => event.stage === 'build-mode-state').at(-1)!
+  const state = JSON.parse(source.meta!)
+  state.checkpoint.remainingTasks = remainingTasks
+  await f.store.recordStageEvent(f.prior.id, 'build-mode-state', JSON.stringify(state))
+  expect(await f.dispatch()).toMatchObject({ ok: false, code: 'backend_error' })
+  expect(f.store.listNonTerminal()).toHaveLength(0)
+})
+
+for (const fault of ['changed task', 'moved head', 'missing card link', 'pending build', 'wrong branch', 'wrong project'] as const)
+test(`a zero terminal remainder cannot bypass ${fault} provenance`, async () => {
+  const f = await fixture({ checkpoint: { stage: 'built', remainingTasks: 0 } })
+  if (fault === 'pending build' || fault === 'wrong branch' || fault === 'wrong project') {
+    const source = f.store.stageEvents(f.prior.id).filter(event => event.stage === 'build-mode-state').at(-1)!
+    const state = JSON.parse(source.meta!)
+    if (fault === 'pending build') state.checkpoint.pending = { phase: 'build', step_id: `${f.prior.id}:task:4:build:0` }
+    if (fault === 'wrong branch') state.branch = 'trident/foreign'
+    if (fault === 'wrong project') state.projectSlug = 'foreign'
+    await f.store.recordStageEvent(f.prior.id, 'build-mode-state', JSON.stringify(state))
+  }
+  const result = await f.dispatch(fault === 'moved head' ? 'c'.repeat(40) : HEAD,
+    fault === 'missing card link' ? null : f.prior.id, fault === 'changed task' ? `${TASK}\nResume note: changed instructions` : TASK)
+  if (fault === 'wrong branch' || fault === 'wrong project') expect(result).toMatchObject({ ok: false, code: 'backend_error' })
+  else {
+    expect(result.ok).toBe(true)
+    if (result.ok) expect(result.run.inner_checkpoint).toBeNull()
+  }
+})
