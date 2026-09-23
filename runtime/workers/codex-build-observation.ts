@@ -40,6 +40,7 @@ export function codexBuildObservation(requestedThread: string | null) {
     if (typeof event.model === 'string' && event.model.trim()) model = event.model
   }
   const record = (line: string, terminated: boolean) => {
+    line = line.trimStart()
     if (!line.trim()) return
     const couldBeEnvelope = line.trimStart().startsWith('{')
     if (line.length > 8 * 1024 * 1024) {
@@ -87,12 +88,13 @@ export function codexBuildObservation(requestedThread: string | null) {
         chunk = chunk.slice(boundary + 1)
         discarding = false
       }
-      pending += chunk
+      pending = (pending + chunk).trimStart()
       let end: number
       while ((end = pending.indexOf('\n')) >= 0) {
         const line = pending.slice(0, end); pending = pending.slice(end + 1)
         record(line, true)
       }
+      pending = pending.trimStart()
       if (pending.length > 8 * 1024 * 1024) {
         record(pending, false)
         pending = ''; discarding = true

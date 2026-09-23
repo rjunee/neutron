@@ -82,3 +82,13 @@ test('oversized and unterminated authority contradictions cannot hide inside tel
     expect(reader.finish()).toBeNull()
   }
 })
+test('fragmented insignificant whitespace cannot hide authority or over-refuse harmless padding', () => {
+  for (const failed of [true, false]) {
+    const reader = codexBuildObservation('owned-thread')
+    reader.push(JSON.stringify(start) + '\n' + JSON.stringify(done) + '\n')
+    for (let chunk = 0; chunk < 129; chunk++) reader.push(' '.repeat(65536))
+    reader.push(failed ? '{"type":"turn.failed"}\n' : '\n')
+    if (failed) expect(reader.finish()).toBeNull()
+    else expect(reader.finish()?.thread_id).toBe('owned-thread')
+  }
+})
