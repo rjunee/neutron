@@ -30,6 +30,12 @@ The focused tests cover parent permission preservation, profile provisioning,
 dispatch selection, adopted profile provenance, fail-closed capability checks,
 and busy-versus-idle refresh. Semantic mutations admit a legacy profile, reject a
 current profile, retain an idle stale process, and replace a busy process; each
-fails its behavioral regression. This slice supports issue #1196. It does not
+fails its behavioral regression. Removing the adopted-parent guard specifically
+fails the real adoption test because the surviving pane is terminated; applying
+it to every parent fails the known-idle upgrade control. The 230 focused tests,
+all 262 consuming `open/__tests__/project-build-e2e.test.ts` cases, and both
+`tsc -p tsconfig.json` and `tsc -p trident/tsconfig.json` pass. The consuming
+fixtures carry the same spawn profile as the real parent; no driver or gate is
+stubbed to bypass the capability check. This slice supports issue #1196. It does not
 claim measured live token savings or completion of the efficiency item; those
 require the deployed run evidence specified by that item.
