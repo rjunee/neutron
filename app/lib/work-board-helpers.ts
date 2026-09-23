@@ -340,12 +340,15 @@ export function dotState(item: WorkBoardItem): DotState {
   return { colorKey: 'upcoming', pulse: false };
 }
 
-/** `<task>.<review>` for a live run; the persisted Ralph task counter is zero-based. */
+/** Explicit task progress and review round; missing totals remain visibly unknown. */
 export function roundText(rp: RunProgress | undefined): string | null {
   if (rp === undefined) return null;
   const step = resolveStepLabel(rp);
   if (step === 'done' || step === 'failed') return null;
-  return `${(rp.ralph_round ?? 0) + 1}.${rp.round}`;
+  const task = rp.task_number;
+  if (!Number.isSafeInteger(task) || task! < 1) return `Round ${rp.round}`;
+  const total = Number.isSafeInteger(rp.task_total) && rp.task_total! >= task! ? rp.task_total : '?';
+  return `Task ${task}/${total} · Round ${rp.round}`;
 }
 
 /**

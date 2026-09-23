@@ -73,6 +73,10 @@ export interface RunProgress {
   infra_retries: number
   /** Zero-based persisted Ralph task counter; presentation adds one for the task number. */
   ralph_round: number
+  /** One-based task iteration for Ralph; null for a non-Ralph run. */
+  task_number: number | null
+  /** Latest plan estimate, never the configured iteration cap. */
+  task_total: number | null
   /** ISO-8601 UTC run start — the client ticks live elapsed off this. */
   started_at: string
   /** ISO-8601 UTC last checkpoint/transition — the client ticks live stall off this. */
@@ -235,6 +239,9 @@ export function deriveRunProgress(
     round,
     infra_retries: run.infra_retries,
     ralph_round: run.ralph_round,
+    task_number: run.ralph ? run.ralph_round + 1 : null,
+    task_total: run.ralph && Number.isSafeInteger(run.ralph_task_total)
+      && run.ralph_task_total! >= run.ralph_round + 1 ? run.ralph_task_total : null,
     started_at: run.started_at,
     last_advanced_at: run.last_advanced_at,
     heartbeat_at,

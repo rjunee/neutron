@@ -10161,3 +10161,71 @@ test('a launcher that persists branch/worktree keeps them through the post-fire 
   expect(out.run.worktree).toBe(worktree)
   expect(out.run.branch).toBe('trident/add-thing')
 })
+
+// Keep task-progress coverage at EOF: the gate inventory carries exact anchors
+// into the long-standing tests above, so inserting new declarations earlier
+// would silently move provenance even though those gates did not change.
+test('one persisted re-fired run agrees across row, progress and board HTTP', async () => {
+  const [{ WorkBoardStore }, { createAppWsAuthResolver },
+    { createWorkBoardSurface }, { deriveRunProgress }] = await Promise.all([
+    import('@neutronai/work-board/store.ts'),
+    import('@neutronai/channels/adapters/app-ws/auth.ts'),
+    import('@neutronai/gateway/http/work-board-surface.ts'),
+    import('./run-progress.ts'),
+  ])
+  const branch = 'trident/task-progress-surfaces'
+  const h = buildHarness({ plan: () => ({
+    result: { verdict: 'REQUEST_CHANGES', prNumber: 55, branch,
+      remainingTasks: 6, checkpoint: 'ralph-task-built' },
+    argusCheckpoint: 'ralph-task-built',
+  }) })
+  const run = await createRun({ ralph: true, ralph_round: 8, max_ralph_rounds: 80,
+    branch, merge_mode: 'pr' as MergeMode })
+  const board = new WorkBoardStore(db)
+  const item = await board.create('t1', { title: 'Task progress' })
+  await board.attachRun('t1', item.id, run.id)
+  await h.loop.runOnce()
+  await h.complete()
+  await h.loop.runOnce()
+
+  const persisted = store.get(run.id)!
+  expect(persisted).toMatchObject({ ralph_round: 9, ralph_task_total: 15, round: 1, inner_result: null })
+  const expected = { task_number: 10, task_total: 15, round: 1 }
+  expect(deriveRunProgress(persisted, Date.now())).toMatchObject(expected)
+  const http = createWorkBoardSurface({ store: board, trident_runs: store,
+    auth: createAppWsAuthResolver({ project_slug: 'owner', bypass: true }) })
+  const response = await http.handler(new Request('http://test/api/app/projects/t1/work-board', {
+    headers: { authorization: 'Bearer test' },
+  }))
+  expect(response?.status).toBe(200)
+  const body = await response!.json() as { items: Array<{ id: string; run_progress: unknown }> }
+  expect(body.items.find(row => row.id === item.id)?.run_progress).toMatchObject(expected)
+})
+
+test('task totals replace a revised plan estimate atomically with each persisted re-fire', async () => {
+  let fire = 0
+  const branch = 'trident/revised-plan'
+  const h = buildHarness({ plan: () => ({
+    result: { verdict: 'REQUEST_CHANGES', prNumber: 55, branch,
+      remainingTasks: [5, 1, 6][fire++] ?? 1, checkpoint: 'ralph-task-built' },
+    argusCheckpoint: 'ralph-task-built',
+  }) })
+  const run = await createRun({ ralph: true, max_ralph_rounds: 80, branch, merge_mode: 'pr' as MergeMode })
+  expect(store.get(run.id)?.ralph_task_total).toBeNull()
+  for (const [index, total] of [6, 3, 9].entries()) {
+    await h.loop.runOnce()
+    await h.complete()
+    await h.loop.runOnce()
+    const patch = h.refirePatches[index]!
+    expect(patch).toMatchObject({ ralph_round: index + 1, ralph_task_total: total,
+      inner_result: null, subagent_run_id: null, subagent_status: null })
+    const reopened = ProjectDb.open(join(tmp, 'project.db'))
+    try {
+      expect(new TridentRunStore(reopened).get(run.id)).toMatchObject({
+        ralph_round: index + 1, ralph_task_total: total, inner_result: null,
+      })
+    } finally { reopened.close() }
+  }
+  const retried = await store.beginInfraRetry(run.id)
+  expect(retried).toMatchObject({ ralph_round: 3, ralph_task_total: 9 })
+})

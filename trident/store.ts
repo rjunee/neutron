@@ -237,6 +237,8 @@ export interface TridentRun {
   /** Ralph build-mode flag (PR-4). Stored as 0/1; surfaced as boolean. */
   ralph: boolean
   ralph_round: number
+  /** Latest plan-derived total; null until a Ralph continuation is harvested. */
+  ralph_task_total: number | null
   max_ralph_rounds: number
   branch: string | null
   /** The origin/<base> commit the build branch was cut from, read in code at launch; null for legacy rows/local-mode failures. */
@@ -436,6 +438,7 @@ export interface CreateTridentRunInput {
    * fall back to 0 — a reset, not a refusal.
    */
   ralph_round?: number
+  ralph_task_total?: number | null
   /** Defaults to 'local'; set by `detectMergeMode` at creation. */
   merge_mode?: MergeMode
   branch?: string | null
@@ -518,6 +521,7 @@ export interface TridentRunUpdate {
   phase?: TridentPhase
   round?: number
   ralph_round?: number
+  ralph_task_total?: number | null
   branch?: string | null
   base_sha?: string | null
   base_behind?: number | null
@@ -551,6 +555,7 @@ interface TridentRunDbRow {
   max_rounds: number
   ralph: number
   ralph_round: number
+  ralph_task_total: number | null
   max_ralph_rounds: number
   branch: string | null
   base_sha: string | null
@@ -589,7 +594,7 @@ interface TridentRunDbRow {
 
 /** Exported solely so tests can pin the column-count invariant. */
 export const COLS =
-  'id, slug, project_slug, phase, round, max_rounds, ralph, ralph_round, ' +
+  'id, slug, project_slug, phase, round, max_rounds, ralph, ralph_round, ralph_task_total, ' +
   'max_ralph_rounds, branch, pr, published_pr, merge_mode, subagent_run_id, subagent_status, ' +
   'repo_path, worktree, task, chat_id, thread_id, channel_kind, failure_reason, brief_alert, ' +
   'workflow_run_id, inner_checkpoint, inner_checkpoint_head, ' +
@@ -854,6 +859,7 @@ export class TridentRunStore {
       // THE PRIOR RUN'S RE-FIRE COUNTER, or 0 (#519). Validated above, so this is
       // the value the guard accepted rather than the raw argument.
       ralph_round: carriedRalphRound,
+      ralph_task_total: input.ralph === true ? input.ralph_task_total ?? null : null,
       max_ralph_rounds: maxRalphRounds,
       branch: input.branch ?? null,
       // SALVAGE-RESUME SEED (see `CreateTridentRunInput`): normally null, and
@@ -922,6 +928,7 @@ export class TridentRunStore {
         run.max_rounds,
         run.ralph ? 1 : 0,
         run.ralph_round,
+        run.ralph_task_total,
         run.max_ralph_rounds,
         run.branch,
         run.pr,
@@ -1713,6 +1720,7 @@ export class TridentRunStore {
     if (patch.phase !== undefined) push('phase', patch.phase)
     if (patch.round !== undefined) push('round', patch.round)
     if (patch.ralph_round !== undefined) push('ralph_round', patch.ralph_round)
+    if (patch.ralph_task_total !== undefined) push('ralph_task_total', patch.ralph_task_total)
     if (patch.branch !== undefined) push('branch', patch.branch)
     if (patch.base_sha !== undefined) push('base_sha', patch.base_sha)
     if (patch.base_behind !== undefined) push('base_behind', patch.base_behind)
@@ -2286,6 +2294,7 @@ function rowToRun(row: TridentRunDbRow): TridentRun {
     max_rounds: row.max_rounds,
     ralph: row.ralph === 1,
     ralph_round: row.ralph_round,
+    ralph_task_total: row.ralph_task_total,
     max_ralph_rounds: row.max_ralph_rounds,
     branch: row.branch,
     base_sha: row.base_sha,

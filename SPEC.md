@@ -310,6 +310,16 @@ references decisions by date; none is a second home for a decision.
 
 ## Decisions Log (immutable audit trail — NOT the build spec)
 
+### 2026-09-23 — Name task progress and review rounds explicitly (#516).
+
+The Work Board shows `Task N/M · Round R` for Ralph runs, `Task N/? · Round R`
+while the plan total is unknown, and `Round R` for ordinary builds. Terminal
+rows hide the counter. This supersedes the decimal display requested on
+2026-08-13: `10.1` did not tell the owner whether ten tasks or ten repeated
+reviews had occurred. The denominator is the latest harvested plan estimate,
+never the iteration allowance, and may change when the plan changes. Acceptance
+lives in `docs/spec-items/a-card-must-show-both-build-counters.md`.
+
 ### 2026-09-22 — THE LOOP IS REPAIRED IN PLACE, NOT REPLACED. Owner-locked: *"whatever work is being done and commited right now IS the work."* Supersedes the METHOD in the 2026-09-11 pivot entry; the GOAL is unchanged.
 
 The 2026-09-11 entry said *"keep the gates, replace the loop."* Measured 2026-09-22 against `origin/main`: since #545 opened on 2026-09-12, **42 commits have touched `trident/inner-workflow.mjs`, `trident/inner-loop.ts` and `trident/orchestrator.ts` — 26 of them `fix:`** — and the three files stand at **7,050 / 1,209 / 3,058 lines**. Nothing has been rewritten; the loop is being hardened defect by defect against live cutover-acceptance cycles (owner's run reports on #545, 09-19 / 09-20 / 09-22).

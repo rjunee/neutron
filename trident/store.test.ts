@@ -233,6 +233,22 @@ describe('TridentRunStore', () => {
     expect(store.listRepoPaths()).toEqual(['/repo/a', '/repo/b'])
   })
 
+  test('task totals are nullable positive integers and survive stale full-row saves', async () => {
+    const store = new TridentRunStore(db)
+    const old = await store.create({ slug: 'task-total', project_slug: 't1', repo_path: '/repo', task: 'build', ralph: true })
+    expect(old.ralph_task_total).toBeNull()
+    await store.update(old.id, { ralph_task_total: 15 })
+    await store.save(old)
+    await store.saveIfActive(old)
+    expect(store.get(old.id)?.ralph_task_total).toBe(15)
+    for (const invalid of [0, -1, 1.5, Number.MAX_SAFE_INTEGER + 1]) {
+      await expect(store.update(old.id, { ralph_task_total: invalid })).rejects.toThrow()
+      expect(store.get(old.id)?.ralph_task_total).toBe(15)
+    }
+    await store.update(old.id, { ralph_task_total: null })
+    expect(store.get(old.id)?.ralph_task_total).toBeNull()
+  })
+
   test('create + get round-trips every column with defaults', async () => {
     const store = new TridentRunStore(db)
     const run = await store.create({
@@ -2101,7 +2117,7 @@ describe('terminalTransition retracts a stale in-flight claim', () => {
 })
 
 describe('INSERT column/placeholder/bound-array alignment — the silent-corruption guard (BLOCKING addendum)', () => {
-  test('COLS matches the 42 readable run columns', () => {
+  test('COLS matches the 43 readable run columns', () => {
     // The INSERT placeholder list is derived from COLS, so placeholder count =
     // column count by construction. What is NOT free is COLS agreeing with the
     // TABLE: a column added, dropped or renamed by a migration without touching
@@ -2115,10 +2131,10 @@ describe('INSERT column/placeholder/bound-array alignment — the silent-corrupt
       .prepare<{ name: string }, []>(`PRAGMA table_info(code_trident_runs)`)
       .all()
 
-    expect(cols).toHaveLength(42)
+    expect(cols).toHaveLength(43)
     // agent_waked_at is deliberately absent from COLS: claimAgentWake is its sole
     // writer, so a full snapshot can never clear an already-won delivery claim.
-    // The table therefore has 43 columns and COLS has 42 — compare against the
+    // The table therefore has 44 columns and COLS has 43 — compare against the
     // snapshot-writable set, not the raw pragma count.
     const snapshotWritable = pragma.filter((c) => c.name !== 'agent_waked_at')
     expect(cols).toHaveLength(snapshotWritable.length)

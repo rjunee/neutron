@@ -30,6 +30,17 @@ function run(over: Partial<TridentRun> = {}): TridentRun {
 }
 
 describe('deriveRunProgress — phase/checkpoint → label', () => {
+  test('Ralph progress uses the persisted plan estimate, never the iteration cap', () => {
+    const known = deriveRunProgress(run({ ralph: true, ralph_round: 9, ralph_task_total: 15, max_ralph_rounds: 80 }), T0)
+    expect(known).toMatchObject({ task_number: 10, task_total: 15, round: 1 })
+    const unknown = deriveRunProgress(run({ ralph: true, ralph_task_total: null, max_ralph_rounds: 80 }), T0)
+    expect(unknown).toMatchObject({ task_number: 1, task_total: null })
+    const stale = deriveRunProgress(run({ ralph: true, ralph_round: 9, ralph_task_total: 5 }), T0)
+    expect(stale).toMatchObject({ task_number: 10, task_total: null })
+    const ordinary = deriveRunProgress(run({ ralph: false, ralph_task_total: 15 }), T0)
+    expect(ordinary).toMatchObject({ task_number: null, task_total: null })
+  })
+
   test('a fresh forge-init run with no checkpoint is "planning"', () => {
     const p = deriveRunProgress(run(), T0 + 30_000)
     expect(p.phase_label).toBe('planning')

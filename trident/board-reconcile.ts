@@ -57,6 +57,7 @@ export interface TridentBoardReconciler {
       ralph: boolean
       ralph_round: number
       max_ralph_rounds: number
+      ralph_task_total?: number | null
     },
   ): Promise<unknown>
 }
@@ -125,6 +126,7 @@ export function buildBoardReconcileObserver(
       ralph: run.ralph,
       ralph_round: run.ralph_round,
       max_ralph_rounds: run.max_ralph_rounds,
+      ralph_task_total: run.ralph_task_total,
     })
   }
 }

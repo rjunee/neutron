@@ -269,6 +269,7 @@ export interface TridentBoardBinder {
     linked_run_id?: string | null
     ralph_round?: number
     max_ralph_rounds?: number | null
+    ralph_task_total?: number | null
     /**
      * The card's lane. OPTIONAL so the existing readiness/bind test seams need not
      * implement it — but the hold sweep reads it, because a card finished BY HAND
@@ -299,6 +300,7 @@ export interface TridentBoardBinder {
       ralph: boolean
       ralph_round: number
       max_ralph_rounds: number
+      ralph_task_total?: number | null
     },
   ): Promise<unknown>
 }
@@ -1565,7 +1567,11 @@ export async function dispatchBoardBoundBuild(
       // tighten a bound. `create` refuses a round whose cap was not named, so the pair
       // is written as a pair here.
       ...(budget !== null
-        ? { ralph_round: budget.ralph_round, max_ralph_rounds: budget.max_ralph_rounds }
+        ? {
+            ralph_round: budget.ralph_round,
+            max_ralph_rounds: budget.max_ralph_rounds,
+            ralph_task_total: item.ralph_task_total ?? (prior?.ralph ? prior.ralph_task_total : null),
+          }
         : {}),
       // …and for every dispatch with nothing to inherit, the configured cap exactly as
       // before. `effectiveMaxRalphRounds` already prefers the carried one, so this

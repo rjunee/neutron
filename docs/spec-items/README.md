@@ -69,7 +69,7 @@ branch is cut (standard §3.1, §3.2).
 |---|---|---|---|
 | [`a-card-pulse-must-be-gated-on-a-real-heartbeat`](a-card-pulse-must-be-gated-on-a-real-heartbeat.md) | Gate a card's pulse on the shipped heartbeat, never on a proxy | P1 | — |
 | [`plan-docs-must-land-somewhere-versioned`](plan-docs-must-land-somewhere-versioned.md) | Land a card's plan doc somewhere durable and versioned | P1 | — |
-| [`a-card-must-show-both-build-counters`](a-card-must-show-both-build-counters.md) | Show both build counters on the card as <ralph_round>.<round> | P2 | — |
+| [`a-card-must-show-both-build-counters`](a-card-must-show-both-build-counters.md) | Show task progress and review round explicitly on the card | P2 | — |
 
 ### email-core
 

@@ -88,6 +88,7 @@ export interface WorkBoardItem {
   /** Card-owned Ralph spend. A null cap means no governed dispatch yet. */
   ralph_round?: number
   max_ralph_rounds?: number | null
+  ralph_task_total?: number | null
   created_at: string
   updated_at: string
   /** ISO-8601 UTC; null until status='done'. */
@@ -162,6 +163,7 @@ export interface RunTerminalInfo extends RunPrInfo {
   ralph?: boolean
   ralph_round?: number
   max_ralph_rounds?: number
+  ralph_task_total?: number | null
 }
 
 /** Where to drop the moved item relative to a sibling. */
@@ -287,7 +289,7 @@ const COLS =
   'id, project_slug, title, status, sort_order, design_doc_ref, ' +
   'inline_active, linked_run_id, created_at, updated_at, completed_at, task_type, ' +
   'blocked_by, declared_surfaces, ' +
-  'pr, pr_url, ralph_round, max_ralph_rounds, repo_name'
+  'pr, pr_url, ralph_round, max_ralph_rounds, repo_name, ralph_task_total'
 
 /** One `?` per column in {@link COLS}, DERIVED — a hand-counted placeholder list is how
  *  the rebase produced `SQLite query expected 14 values, received 16`. */
@@ -315,6 +317,7 @@ interface WorkBoardItemDbRow {
   pr_url: string | null
   ralph_round: number
   max_ralph_rounds: number | null
+  ralph_task_total: number | null
 }
 
 /**
@@ -550,6 +553,7 @@ function rowToItem(row: WorkBoardItemDbRow): WorkBoardItem {
     linked_run_id: row.linked_run_id,
     ralph_round: row.ralph_round,
     max_ralph_rounds: row.max_ralph_rounds,
+    ralph_task_total: row.ralph_task_total,
     created_at: row.created_at,
     updated_at: row.updated_at,
     completed_at: row.completed_at,
@@ -738,6 +742,7 @@ export class WorkBoardStore {
       linked_run_id: null,
       ralph_round: 0,
       max_ralph_rounds: null,
+      ralph_task_total: null,
       created_at: ts,
       updated_at: ts,
       completed_at,
@@ -786,6 +791,7 @@ export class WorkBoardStore {
           item.ralph_round ?? 0,
           item.max_ralph_rounds ?? null,
           item.repo_name ?? null,
+          item.ralph_task_total ?? null,
         ],
       )
     })
@@ -1391,6 +1397,10 @@ export class WorkBoardStore {
         sets.push('ralph_round = MAX(ralph_round, ?)',
           'max_ralph_rounds = CASE WHEN max_ralph_rounds IS NULL THEN ? ELSE MIN(max_ralph_rounds, ?) END')
         params.push(pr_info.ralph_round, pr_info.max_ralph_rounds, pr_info.max_ralph_rounds)
+        // The estimate can shrink after a re-plan. Preserve an earlier estimate
+        // only when this terminal observation supplies no total of its own.
+        sets.push('ralph_task_total = CASE WHEN ? >= ralph_round THEN COALESCE(?, ralph_task_total) ELSE ralph_task_total END')
+        params.push(pr_info.ralph_round, pr_info.ralph_task_total ?? null)
       }
       sets.push('updated_at = ?')
       params.push(this.now(), project_slug, current.id)
