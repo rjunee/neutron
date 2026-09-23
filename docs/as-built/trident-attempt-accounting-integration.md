@@ -39,9 +39,8 @@ Mismatched request journals and symlinks are refused with valid nonzero controls
 
 Verification:
 
-- `open/__tests__/project-build-e2e.test.ts`: the first full integration suite
-  passed 130 cases; seven focused accounting cases cover the final native hook.
-  New cases exercise a
+- `open/__tests__/project-build-e2e.test.ts`: 132 passed, including seven focused
+  accounting cases covering the integrated native hook. New cases exercise a
   complete unknown-metadata run, actual Codex transport measurements with valid
   and mismatched result identities, explicit zero versus partial failed work,
   and reconstructed host recovery with one child dispatch and unchanged totals.
