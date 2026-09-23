@@ -1271,7 +1271,7 @@ test('production task-sequence driver persists its continuation and host iterati
   runner.run = async request => {
     calls.push(request.step_id)
     return { kind: 'completed', result: { ...snapshot, payload: request.role === 'plan'
-      ? { ...taskSequencePlan, implementationPlan: '- [ ] first\n- [ ] next\n',
+      ? { ...taskSequencePlan, implementationPlan: '- [ ] first\n- [ ] second\n',
           topTask: '- [ ] first', remainingTasks: 1, executionSpec: 'implement first' }
       : { round: 0, replansUsed: 99 } }, usage: { input_tokens: 0, output_tokens: 0 }, model_reported: 'test', thread_id: null }
   }

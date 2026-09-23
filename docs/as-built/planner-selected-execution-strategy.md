@@ -60,3 +60,35 @@ The exported candidate and exact base each reported 455 inherited leak
 findings with identical rule totals; neither whole tree is silent. Publication
 remains subject to the exact-head full-suite result and repository guards.
 No push, PR, merge, deployment, or live acceptance is claimed.
+
+The full-planner refresh now preserves the host-owned ordered pending task
+sequence (`trident/build-run.ts`). A planner cannot tick, drop, reorder, or
+declare unfinished accepted tasks terminal to reach review early. Execution
+details remain revisable. Only a matching-head `task-built` checkpoint with
+the accepted remainder advances one task; checking the remainder also prevents
+advancing twice after selection persistence and before reservation cleanup.
+Cheap continuation still uses its measured ledger. Previously accepted terminal
+tasks without checkbox syntax retain their task identity.
+
+Additional refresh verification:
+
+- The complete Open project-build E2E file passed 250/250 with 2,860 assertions.
+  Its new production-host cases refuse tick/drop/reorder proposals before
+  persistence or building and accept an execution-detail revision that advances
+  only the checkpointed task. An earlier sandbox run failed nine local-socket
+  cases; the complete socket-capable rerun above passed all of them.
+- The driver passed 356/356. The broad Trident run recorded 6,276 passed,
+  five skipped, and one failed across 197 files: an old fixture seeded
+  `first/second` but refreshed it as `first/next`. The fixture now preserves
+  its accepted task names; its complete production-host file then passed
+  110/110. The broad suite was not rerun after that fixture-only correction.
+- Both TypeScript checks, changed-file ESLint, and the diff whitespace check
+  passed. Candidate and exact preceding base leak scans both reported 455
+  findings, with identical rule totals; no whole-tree silence is claimed.
+- Paired final-code mutations were caught in an isolated copy. Bypassing the
+  guard produced five failing driver cases with eleven passing siblings and
+  three failing production-consuming cases with the valid detail sibling
+  passing. Refusing every guarded refresh produced six failing driver cases
+  with ten passing siblings and failed the valid production-consuming detail
+  case while all three attack refusals passed. Restoring the implementation
+  passed all sixteen focused driver cases and all four consuming cases.

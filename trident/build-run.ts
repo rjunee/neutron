@@ -277,10 +277,9 @@ const unchecked = (body: string): string[] => body.split('\n').filter(line => un
  * and every continuation re-planned from scratch (spec item
  * a-retry-must-resume-from-the-checkpoint, acceptance 2).
  *
- * ENFORCED ONLY WHERE A LEDGER IS COMMITTED — a handoff, `remainingTasks > 0`. A
- * single-task or final iteration commits nothing and nothing downstream reads its
- * boxes, so refusing its shape would turn a formatting slip into a failed run that
- * used to build and merge. And the top task is compared with its checkbox marker
+ * This shape check applies where a ledger is committed: `remainingTasks > 0`.
+ * Separately, full refreshes preserve the accepted pending queue even when the
+ * new proposal claims to be terminal. The top task is compared with its checkbox marker
  * stripped on both sides: `T1: foo` and `- [ ] T1: foo` name the same task (the
  * publication title strips the marker for the same reason, open/wiring/project-build.ts).
  */
@@ -734,6 +733,26 @@ export async function buildRun(input: BuildRunInput, deps: BuildRunDeps, signal:
         // wave member's top task and count are the pin's, not the planner's.
         if (input.mode === 'implementation' && plan.strategy === 'task_sequence' && !ledgerAgrees(plan)) {
           return blocked('Planner returned no execution plan: the task ledger disagrees with topTask/remainingTasks')
+        }
+        if (input.mode === 'implementation' && plan.strategy === 'task_sequence'
+            && acceptedPlan && !committedPlan && !recoveringBuild) {
+          // A full planner may revise execution details, but only the host's
+          // completed handoff can remove a task from the accepted pending queue.
+          // Matching the saved count prevents advancing twice if selection was
+          // persisted before the planner reservation was cleared on a restart.
+          const pending = unchecked(acceptedPlan.implementationPlan).map(taskText)
+          // Previously accepted terminal plans can name their sole task without
+          // checkbox syntax. Preserve that identity rather than inventing a queue.
+          const opaqueTerminal = pending.length === 0 && acceptedPlan.remainingTasks === 0
+          if (opaqueTerminal) pending.push(taskText(acceptedPlan.topTask))
+          if (resume?.stage === 'task-built' && resume.head === snapshot.head
+              && acceptedPlan.remainingTasks > 0 && resume.remainingTasks === acceptedPlan.remainingTasks) pending.shift()
+          const proposed = unchecked(plan.implementationPlan).map(taskText)
+          if (opaqueTerminal && proposed.length === 0 && plan.remainingTasks === 0) proposed.push(taskText(plan.topTask))
+          if (!isDeepStrictEqual(proposed, pending) || pending.length === 0
+              || plan.remainingTasks !== pending.length - 1 || taskText(plan.topTask) !== pending[0]) {
+            return blocked('Planner cannot change the host-owned pending task sequence')
+          }
         }
         if (input.mode === 'wave') {
           const pinned = unchecked(plan.implementationPlan).find(line =>

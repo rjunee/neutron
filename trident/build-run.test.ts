@@ -838,6 +838,94 @@ function cheapFixture() {
   return f
 }
 
+for (const mutation of ['unchanged', 'tick', 'drop', 'reorder', 'false-terminal'] as const) {
+  for (const iteration of [2, 5]) {
+    test(`task refresh preserves pending identity: ${mutation} iteration ${iteration}`, async () => {
+      const f = cheapFixture(); f.input.taskIteration = iteration
+      if (mutation !== 'unchanged') f.setPlan({ ...f.plan,
+        implementationPlan: mutation === 'tick' ? '- [x] T1: first\n- [ ] T2: second'
+          : mutation === 'reorder' ? '- [ ] T2: second\n- [ ] T1: first'
+          : mutation === 'false-terminal' ? f.plan.implementationPlan : '- [ ] T2: second',
+        topTask: mutation === 'false-terminal' ? f.plan.topTask : '- [ ] T2: second',
+        remainingTasks: mutation === 'reorder' ? 1 : 0,
+      })
+      const outcome = await f.run()
+      const refused = iteration === 5 && mutation !== 'unchanged'
+      expect(outcome.kind).toBe(refused ? 'blocked' : 'continued')
+      expect(f.cross.calls).toHaveLength(0)
+      expect(f.state.advances).toBe(refused ? 0 : 1)
+      expect(f.events).not.toContain('publish')
+      if (refused) {
+        expect(f.runner.calls.map(c => c.role)).toEqual(['plan'])
+        expect((await f.deps.modes!.loadExecutionStrategy())).toMatchObject({ plan: f.plan })
+      } else expect(f.prepared.find(p => p.role === 'build')?.previous).toMatchObject({
+        topTask: '- [ ] T1: first', remainingTasks: 1,
+      })
+    })
+  }
+}
+
+test('task refresh allows execution detail revisions without completing tasks', async () => {
+  const f = cheapFixture(); f.input.taskIteration = 5
+  f.setPlan({ ...f.plan, executionSpec: 'Use the revised implementation approach', rationale: 'Revised details' })
+  expect((await f.run()).kind).toBe('continued')
+  expect(f.prepared.find(p => p.role === 'build')?.previous).toMatchObject({
+    topTask: f.plan.topTask, executionSpec: 'Use the revised implementation approach' })
+  expect(f.cross.calls).toHaveLength(0)
+})
+
+test('task refresh preserves a previously accepted terminal task without checkbox syntax', async () => {
+  const f = modeFixture()
+  f.plan.implementationPlan = '## T1 first'; f.plan.topTask = 'T1 first'; f.plan.remainingTasks = 0
+  f.setPlan({ ...f.plan, executionSpec: 'Revised terminal execution details' })
+  expect((await f.run()).kind).toBe('merged')
+  expect(f.prepared.find(p => p.role === 'build')?.previous).toMatchObject({ topTask: 'T1 first', remainingTasks: 0 })
+})
+
+for (const source of ['planner', 'legacy'] as const) {
+  test(`task refresh allows checkpoint-backed terminal advancement (${source})`, async () => {
+    const f = cheapFixture(); f.input.taskIteration = 5; f.state.resume!.remainingTasks = 1
+    const load = f.deps.modes!.loadExecutionStrategy
+    f.deps.modes!.loadExecutionStrategy = async () => ({ ...await load(), source })
+    f.setPlan({ ...f.plan, implementationPlan: '- [x] T1: first\n- [ ] T2: second',
+      topTask: '- [ ] T2: second', remainingTasks: 0 })
+    expect((await f.run()).kind).toBe('merged')
+    expect(f.prepared.find(p => p.role === 'build')?.previous).toMatchObject({ topTask: '- [ ] T2: second', remainingTasks: 0 })
+    expect(f.cross.calls).toHaveLength(1)
+  })
+}
+
+test('task refresh cannot advance on an uncorroborated handoff head', async () => {
+  const f = cheapFixture(); f.input.taskIteration = 5; f.state.resume!.remainingTasks = 1
+  f.state.resume!.head = 'b'.repeat(40)
+  f.outcomes.set('run:plan:1', f.completed({ ...f.snapshot, payload: { ...f.plan,
+    implementationPlan: '- [ ] T2: second', topTask: '- [ ] T2: second', remainingTasks: 0 } }))
+  expect(await f.run()).toMatchObject({ kind: 'blocked', on: 'Planner cannot change the host-owned pending task sequence' })
+  expect(f.runner.calls.map(c => c.role)).toEqual(['plan'])
+})
+
+test('task refresh recovery cannot advance twice after the selection was persisted', async () => {
+  const f = cheapFixture(); f.input.taskIteration = 5
+  f.plan.implementationPlan += '\n- [ ] T3: third'; f.plan.remainingTasks = 2
+  f.state.resume!.remainingTasks = 2
+  f.setPlan({ ...f.plan, implementationPlan: '- [x] T1: first\n- [ ] T2: second\n- [ ] T3: third',
+    topTask: '- [ ] T2: second', remainingTasks: 1 })
+  const save = f.deps.modes!.saveCheckpoint
+  let interrupted = false
+  f.deps.modes!.saveCheckpoint = async checkpoint => {
+    if (!checkpoint.pending && !interrupted) { interrupted = true; throw new Error('interrupted after selection') }
+    await save(checkpoint)
+  }
+  expect(await f.run()).toMatchObject({ kind: 'unknown', detail: 'interrupted after selection' })
+  expect(f.runner.calls.map(c => c.role)).toEqual(['plan'])
+  f.state.resume = structuredClone(f.state.checkpoints.at(-1)!)
+  f.input.workers.plan.runner = { ...f.runner, recover: f.runner.run }
+  f.runner.calls.length = 0
+  expect(await f.run()).toMatchObject({ kind: 'continued', remainingTasks: 1 })
+  expect(f.prepared.find(p => p.role === 'build')?.previous).toMatchObject({ topTask: '- [ ] T2: second', remainingTasks: 1 })
+  expect(f.cross.calls).toHaveLength(0)
+})
+
 test('G026 clean handoff and positive round outside refresh interval select next planner', async () => {
   for (const round of [0, -1, 1.5, 5, 10, 2]) {
     const f = cheapFixture(); f.input.taskIteration = round
@@ -934,14 +1022,13 @@ test('G025 ledger: a task-sequence handoff plan whose unchecked lines disagree w
   }
 })
 
-test('G025 ledger: a plan that commits no ledger is never refused for its shape', async () => {
-  // A single-task or final iteration commits nothing and nothing reads its boxes, so a
-  // heading-only ledger or a disagreeing count there builds and merges as it always did.
+test('G025 ledger: single strategy does not impose task-sequence ledger shape', async () => {
+  // Single executes the whole plan, independently of its checkbox formatting.
   for (const patch of [
     { implementationPlan: '## T1 first', topTask: 'T1 first', remainingTasks: 0 },
     { implementationPlan: '- [ ] T1: first\n- [ ] T2: second', remainingTasks: 0 },
   ]) {
-    const f = modeFixture(); f.setPlan({ ...f.plan, ...patch })
+    const f = modeFixture('single'); f.setPlan({ ...f.plan, ...patch })
     expect((await f.run()).kind, JSON.stringify(patch)).toBe('merged')
     expect(f.state.commits).toEqual([])
   }
@@ -1611,6 +1698,7 @@ test('interrupted nomination repair retains its own review progress before a res
 
 for (const remainingTasks of [0, 1]) test(`pending task-sequence build preserves its validated remainder ${remainingTasks}`, async () => {
   const f = modeFixture()
+  if (remainingTasks === 0) { f.plan.implementationPlan = '- [ ] T1: first'; f.plan.remainingTasks = 0 }
   f.setPlan({ ...f.plan, remainingTasks })
   f.outcomes.set('run:build:0', { kind: 'unknown', detail: 'lost acknowledgement' })
   expect(await f.run()).toMatchObject({ kind: 'unknown', phase: 'build' })

@@ -3136,6 +3136,44 @@ test(`same-run terminal task-sequence crash in ${mergeMode} resumes review witho
   expect(merged.stdout.trim()).toBe(`seed\n${f.row.id}:task:0:build:0`)
 }, 300_000)
 
+for (const proposal of ['details', 'tick', 'drop', 'reorder'] as const)
+test(`full task refresh preserves unfinished tasks through the production host: ${proposal}`, async () => {
+  const f = await fixture({ taskSequence: true, moreTasks: true, seedLedger: false, hostLedger: true })
+  await f.store.update(f.row.id, { task_iteration: 4 })
+  f.world.plannerPatch = { implementationPlan: '- [ ] T1 record the note\n- [ ] T2 record another note\n- [ ] T3 record the final note',
+    topTask: '- [ ] T1 record the note', remainingTasks: 2 }
+  const firstHost = await createProjectBuildHost(await f.prepare())
+  const first = await buildRun({ mode: 'implementation', start: 'fresh', taskIteration: 4,
+    run_id: f.row.id, workers: firstHost.workers, repl_provider: 'anthropic', merge_mode: 'pr' },
+  firstHost.deps, new AbortController().signal)
+  expect(first.kind, why(f, first)).toBe('continued')
+  const accepted = f.store.get(f.row.id)!.strategy_plan
+  f.world.dispatches.length = 0
+  f.world.plannerPatch = {
+    implementationPlan: proposal === 'details' ? '- [x] T1 record the note\n- [ ] T2 record another note\n- [ ] T3 record the final note'
+      : proposal === 'tick' ? '- [x] T1 record the note\n- [x] T2 record another note\n- [ ] T3 record the final note'
+      : proposal === 'drop' ? '- [x] T1 record the note\n- [ ] T3 record the final note'
+      : '- [x] T1 record the note\n- [ ] T3 record the final note\n- [ ] T2 record another note',
+    topTask: proposal === 'details' ? '- [ ] T2 record another note' : '- [ ] T3 record the final note',
+    remainingTasks: proposal === 'details' || proposal === 'reorder' ? 1 : 0,
+    executionSpec: 'Append another verified note and commit it.',
+  }
+  const resumed = await createProjectBuildHost(await f.prepare())
+  const outcome = await resumed.run({ mode: 'implementation', start: 'resume' }, new AbortController().signal)
+  expect(f.world.plannerChoices).toEqual(['full', 'full'])
+  if (proposal === 'details') {
+    expect(outcome.kind, why(f, outcome)).toBe('continued')
+    expect(f.world.selectedTasks).toEqual(['- [ ] T1 record the note', '- [ ] T2 record another note'])
+    expect(f.world.dispatches.map(d => d.role)).toEqual(['plan', 'build'])
+  } else {
+    expect(outcome, why(f, outcome)).toMatchObject({ kind: 'blocked', phase: 'plan',
+      on: 'Planner cannot change the host-owned pending task sequence' })
+    expect(f.world.selectedTasks).toEqual(['- [ ] T1 record the note'])
+    expect(f.world.dispatches.map(d => d.role)).toEqual(['plan'])
+    expect(f.store.get(f.row.id)!.strategy_plan).toBe(accepted)
+  }
+}, 300_000)
+
 test('task_sequence continuation probes the committed plan and selects its next unchecked task', async () => {
   const f = await fixture({ taskSequence: true, moreTasks: true })
 
