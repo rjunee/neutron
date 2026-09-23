@@ -2174,7 +2174,7 @@ for (const owned of [true, false]) test(`salvaged publication ${owned ? 'carries
   const f = await fixture({ dispatchTask: task })
   const firstHost = await createProjectBuildHost(await f.prepare())
   firstHost.deps.publishGate = async () => ({ kind: 'blocked', on: 'fixture proof infrastructure unavailable' })
-  expect(await buildRun({ mode: 'pr', start: 'fresh', run_id: f.row.id,
+  expect(await buildRun({ mode: 'implementation', start: 'fresh', run_id: f.row.id,
     workers: firstHost.workers, repl_provider: 'anthropic', merge_mode: 'pr' },
   firstHost.deps, new AbortController().signal)).toMatchObject({ kind: 'blocked', phase: 'publish' })
   const checkpoint = lastCheckpoint(f)
@@ -2204,7 +2204,7 @@ for (const owned of [true, false]) test(`salvaged publication ${owned ? 'carries
   const dispatched = await dispatchBoardBoundBuild({ task, board_item_id: 'salvage-retry-card' }, {
     store: f.store, project_slug: 'project', repo_path: f.repo,
     board: { get: () => ({ id: 'salvage-retry-card', title: task, design_doc_ref: null, linked_run_id: prior.id }), attachRun: async () => {} },
-    resolveBuildRepo: async () => f.repo, resolveMergeMode: async () => 'pr', resolveRalph: async () => false,
+    resolveBuildRepo: async () => f.repo, resolveMergeMode: async () => 'pr',
   })
   expect(dispatched.ok, JSON.stringify(dispatched)).toBe(true)
   if (!dispatched.ok) return
@@ -2212,7 +2212,7 @@ for (const owned of [true, false]) test(`salvaged publication ${owned ? 'carries
   f.world.dispatches.length = 0
   f.input.run = dispatched.run
   const host = await createProjectBuildHost(await f.prepare())
-  const outcome = await host.run({ mode: 'pr', start: 'resume' }, new AbortController().signal)
+  const outcome = await host.run({ mode: 'implementation', start: 'resume' }, new AbortController().signal)
   expect(outcome.kind, why(f, outcome)).toBe(owned ? 'merged' : 'unknown')
   expect(f.world.dispatches.some(call => ['plan', 'build'].includes(call.role))).toBe(false)
   expect(f.github.prs[0]!.state).toBe(owned ? 'MERGED' : 'OPEN')
