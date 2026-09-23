@@ -15,6 +15,9 @@ export interface ProjectWorkerContinuityOptions {
   /** Stable selected account identity, or a conservative hash of credential
    * bytes when account identity cannot be attested. Never return a secret. */
   credentialIdentity(): Promise<string | null>
+  /** Atomic host-owned witness outside the replaceable filesystem receipts.
+   * Only the first initiation for this run and role may claim it. */
+  claimInitial(request: BoundedWorkRequest, scope: string): Promise<boolean>
 }
 
 const hash = (value: unknown) => createHash('sha256').update(JSON.stringify(value)).digest('hex')
@@ -120,6 +123,7 @@ export function createProjectWorkerContinuity(options: ProjectWorkerContinuityOp
           // Losing either half never makes a previously used role fresh again.
           try { await lstat(dir); throw Error('initiation witness missing') }
           catch (missing) { if ((missing as NodeJS.ErrnoException).code !== 'ENOENT') throw missing }
+          if (!await options.claimInitial(req, owner)) throw Error('conversation was already initiated')
           initiated = { version: 1, scope: owner }
           await write(options.stateDir, `worker-conversation-${req.role}.initiated.json`, initiated)
           await mkdir(dir, { mode: 0o700 })

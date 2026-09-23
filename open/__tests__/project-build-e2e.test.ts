@@ -316,7 +316,7 @@ interface WorkerWorld {
    */
   blockRoles: ReadonlySet<string>
   /** Every dispatch this fake observed, in order — the harness's audit trail. */
-  dispatches: { role: string; step_id: string; schema: string; wrote: string[] }[]
+  dispatches: { role: string; step_id: string; schema: string; wrote: string[]; measuredHead?: string }[]
   /** The task the host handed each build turn after planner validation. */
   selectedTasks: string[]
   /** The planner route the real driver wrote into each plan turn's context. */
@@ -366,9 +366,17 @@ function verdictFor(world: WorkerWorld, round: number) {
   }
 }
 
-/** The host round a dispatch belongs to, taken from the identity the HOST assigned:
- *  `build-run.ts:308` ends every role step id with `:${role}:${round}`. */
-const roundOfStep = (step_id: string): number => Number(step_id.split(':').at(-1))
+/** Review identities additionally bind the full measured revision. */
+const roundOfStep = (step_id: string): number => Number(step_id.match(/:(?:plan|build|fix|review):(\d+)(?::head:[a-f0-9]{40})?$/)?.[1])
+
+function dispatchStep(dispatch: WorkerWorld['dispatches'][number]): string {
+  if (dispatch.role !== 'review' || dispatch.schema === 'verdict') return dispatch.step_id
+  expect(dispatch.measuredHead).toMatch(/^[a-f0-9]{40}$/)
+  expect(dispatch.step_id.endsWith(`:head:${dispatch.measuredHead}`)).toBe(true)
+  return dispatch.step_id.slice(0, -46)
+}
+
+const standaloneReview = (world: WorkerWorld) => world.dispatches.find(dispatch => dispatch.schema === 'project-review')!
 
 /**
  * THE ONLY FAKE MODEL IN THIS FILE.
@@ -411,7 +419,8 @@ function literalWorker(world: WorkerWorld) {
       ...(stopped ? { on: `harness: the ${request.role} worker was stopped mid-turn` } : {}),
     }
     world.dispatches.push({ role: request.role, step_id: request.step_id,
-      schema: request.result.schema, wrote: Object.keys(body as object).sort() })
+      schema: request.result.schema, wrote: Object.keys(body as object).sort(),
+      ...(request.role === 'review' ? { measuredHead: await gitOut(world.run, request.cwd, ['rev-parse', 'HEAD']) } : {}) })
     // The dispatch prompt asks for a temporary file and a rename, so do that.
     await writeFile(`${request.result.path}.tmp`, JSON.stringify(body), { mode: 0o600 })
     await rename(`${request.result.path}.tmp`, request.result.path)
@@ -1206,6 +1215,117 @@ test('Codex owner routes explicit Claude plan, review and synthesis headlessly a
     expect(envelope).toMatchObject({ run_id: f.row.id, step_id: call.request.step_id, schema: call.request.result.schema, kind: 'completed' })
   }
 }, 30_000)
+
+async function preparedClaudePlanner(f: Awaited<ReturnType<typeof codexOwnerWithClaude>>) {
+  const host = await createProjectBuildHost(await f.prepare())
+  const measured = await host.deps.measure()
+  if (measured.kind !== 'known') throw Error('expected measured fixture')
+  const request = (step: string): BoundedWorkRequest => ({ ...host.workers.plan.request,
+    run_id: f.row.id, step_id: `${f.row.id}:plan:${step}`, role: 'plan', needs_approval_decision: false })
+  const call = async (req: BoundedWorkRequest) => {
+    await host.deps.prepareWork(req, { snapshot: measured.value, previous: null, findings: [] })
+    return host.workers.plan.runner.run(req, 'headless', new AbortController().signal)
+  }
+  return { request, call }
+}
+
+test('prepared recurring Claude planning resumes its observed conversation after host reconstruction', async () => {
+  const f = await codexOwnerWithClaude()
+  const first = await preparedClaudePlanner(f)
+  expect((await first.call(first.request('0'))).kind).toBe('completed')
+  expect((await first.call(first.request('1'))).kind).toBe('completed')
+  const restarted = await preparedClaudePlanner(f)
+  expect((await restarted.call(restarted.request('2'))).kind).toBe('completed')
+  const calls = (await readFile(f.calls, 'utf8')).trim().split('\n').map(line => JSON.parse(line))
+  expect(calls).toHaveLength(3)
+  const thread = calls[0].argv[calls[0].argv.indexOf('--session-id') + 1]
+  expect(thread).toBeTruthy()
+  expect(calls.map(call => call.request.thread)).toEqual([null, { id: thread }, { id: thread }])
+  expect(calls.slice(1).map(call => call.argv[call.argv.indexOf('--resume') + 1])).toEqual([thread, thread])
+  expect(f.children).toHaveLength(0)
+}, 30_000)
+
+for (const changed of ['model', 'credential', 'project', 'missing', 'corrupt', 'writer', 'whole-state'] as const)
+test(`prepared recurring conversation refuses changed ${changed} and still admits its legitimate successor`, async () => {
+  const f = await codexOwnerWithClaude()
+  const first = await preparedClaudePlanner(f)
+  expect((await first.call(first.request('0'))).kind).toBe('completed')
+  const binding = join(f.context.stateRoot, f.row.id, 'worker-conversation-plan', 'binding.json')
+  const saved = await readFile(binding, 'utf8')
+  const restore: Array<() => Promise<void> | void> = []
+  if (changed === 'credential') {
+    f.context.env.CLAUDE_CODE_OAUTH_TOKEN = 'rotated-owner'
+    restore.push(() => { f.context.env.CLAUDE_CODE_OAUTH_TOKEN = 'fixture-selected-claude' })
+  }
+  if (changed === 'missing') { await rename(binding, `${binding}.saved`); restore.push(() => rename(`${binding}.saved`, binding)) }
+  if (changed === 'corrupt') { await writeFile(binding, '{}'); restore.push(() => writeFile(binding, saved)) }
+  if (changed === 'whole-state') {
+    const state = join(f.context.stateRoot, f.row.id)
+    await rename(state, `${state}.saved`)
+    await mkdir(state)
+    // Rebuild all host-owned transports/briefs exactly as restart does. Only
+    // the SQLite initiation witness remains from the first conversation.
+    restore.push(async () => { await rm(state, { recursive: true }); await rename(`${state}.saved`, state) })
+  }
+  const lock = join(f.context.stateRoot, f.row.id, 'worker-conversation-plan.writer.lock')
+  if (changed === 'writer') { await writeFile(lock, ''); restore.push(() => rm(lock)) }
+  if (changed === 'project') {
+    f.context.projectId = 'another-project'
+    await expect(preparedClaudePlanner(f)).rejects.toThrow('State directory belongs to a different project conversation or run')
+    restore.push(() => { f.context.projectId = 'e2e-project' })
+  } else {
+    const candidate = changed === 'whole-state' ? await preparedClaudePlanner(f) : first
+    const request = candidate.request('1')
+    if (changed === 'model') request.model_id = 'claude-different-model'
+    expect((await candidate.call(request)).kind).toBe('unknown')
+  }
+  expect((await readFile(f.calls, 'utf8')).trim().split('\n')).toHaveLength(1)
+  for (const undo of restore.reverse()) await undo()
+  const recovered = await preparedClaudePlanner(f)
+  // Model-mismatched accounting is a distinct attempted step, so use a fresh
+  // successor while keeping the same role's conversation ownership.
+  expect((await recovered.call(recovered.request('2'))).kind).toBe('completed')
+  const calls = (await readFile(f.calls, 'utf8')).trim().split('\n').map(line => JSON.parse(line))
+  expect(calls).toHaveLength(2)
+  expect(calls[1].argv).toContain('--resume')
+  expect(calls[1].request.thread.id).toBe(JSON.parse(saved).thread)
+}, 30_000)
+
+for (const changed of ['none', 'head', 'strategy', 'dependencies', 'missing', 'corrupt', 'subset'] as const)
+test(`prepared host suite receipt survives reconstruction and handles ${changed} inputs`, async () => {
+  const f = await fixture({ bunWorkspace: true })
+  const original = f.context.runSuite!
+  let suites = 0
+  f.context.runSuite = async (...args) => { suites++; return original(...args) }
+  const prepared = await f.prepare()
+  let host = await createProjectBuildHost(prepared)
+  let measured = await host.deps.measure()
+  if (measured.kind !== 'known') throw Error('expected measured fixture')
+  expect(await host.deps.publicationSuite(measured.value)).toMatchObject({ kind: 'known' })
+  expect(suites).toBe(1)
+  const receipt = f.store.stageEvents(f.row.id).filter(event => event.stage === 'build-suite-receipt').at(-1)!
+  expect(JSON.parse(receipt.meta!).receipt).toMatchObject({ head: measured.value.head, scope: 'full-suite' })
+  const worktree = f.store.get(f.row.id)!.worktree!
+  if (changed === 'head') expect((await spawnCapture(['git', 'commit', '--allow-empty', '-m', 'test: moved revision'], worktree)).ok).toBe(true)
+  if (changed === 'dependencies') {
+    // The lockfile, manifest, and git head stay unchanged; installed bytes alone
+    // must invalidate the proof acquired against the previous installation.
+    await writeFile(join(worktree, 'node_modules', 'proof-input'), 'changed installation')
+  }
+  if (changed === 'strategy') f.input.test_strategy += '\nAdditional host strategy identity.'
+  if (changed === 'missing') f.db.raw().query('DELETE FROM code_trident_stage_events WHERE run_id = ? AND stage = ?').run(f.row.id, 'build-suite-receipt')
+  if (changed === 'corrupt' || changed === 'subset') {
+    const value = JSON.parse(receipt.meta!)
+    if (changed === 'subset') value.receipt.scope = 'subset'
+    await f.store.recordStageEvent(f.row.id, 'build-suite-receipt', changed === 'corrupt' ? '{' : JSON.stringify(value))
+  }
+  host = await createProjectBuildHost(await f.prepare())
+  measured = await host.deps.measure()
+  if (measured.kind !== 'known') throw Error('expected measured fixture')
+  expect(await host.deps.publicationSuite(measured.value)).toMatchObject({ kind: 'known' })
+  expect(suites).toBe(changed === 'none' ? 1 : 2)
+  expect(f.world.dispatches).toHaveLength(0)
+}, 120_000)
 
 test('Codex owner with unavailable selected Claude credentials refuses before any worker or publication', async () => {
   const f = await codexOwnerWithClaude()
@@ -2734,7 +2854,7 @@ test('a design-gap escalation re-plans and rebuilds instead of dispatching a fix
     'plan', 'build', 'review', 'review', 'synthesis',
   ])
   // NO fix worker ran, and the replacement pair carries round 1's identity.
-  expect(f.world.dispatches.map(dispatch => dispatch.step_id).filter(id => id.startsWith(f.row.id)))
+  expect(f.world.dispatches.map(dispatchStep).filter(id => id.startsWith(f.row.id)))
     .toEqual([`${f.row.id}:plan:0`, `${f.row.id}:build:0`, `${f.row.id}:review:1`,
       `${f.row.id}:plan:1`, `${f.row.id}:build:1`, `${f.row.id}:review:2`])
 
@@ -2903,7 +3023,7 @@ test('local invalid nomination gets one bounded fix and a fresh review before lo
   const outcome = await host.run({ mode: 'pr', start: 'fresh' }, new AbortController().signal)
   expect(outcome.kind, why(f, outcome)).toBe('merged')
   expect(f.world.dispatches.filter(dispatch => dispatch.step_id.startsWith(`${f.row.id}:`)
-    && ['review', 'fix'].includes(dispatch.role)).map(dispatch => dispatch.step_id))
+    && ['review', 'fix'].includes(dispatch.role)).map(dispatchStep))
     .toEqual([`${f.row.id}:review:1`, `${f.row.id}:fix:1`, `${f.row.id}:review:2`])
   expect(f.github.prs).toEqual([])
 }, 300_000)
@@ -2978,7 +3098,8 @@ test(`an orchestrated ${mergeMode} retry survives launch falsification: ${scenar
     expect(await f.store.saveIfActive(terminal.run)).toBe(true)
     expect(terminal.run.phase, JSON.stringify(terminal)).toBe('done')
     expect(f.world.dispatches.some(d => d.role === 'plan' || d.role === 'build' || d.role === 'fix')).toBe(false)
-    expect(f.world.dispatches[0]!.step_id).toBe(`${dispatched.run.id}:review:1`)
+    expect(dispatchStep(standaloneReview(f.world))).toBe(`${dispatched.run.id}:review:1`)
+    expect(standaloneReview(f.world).measuredHead).toBe(String(checkpoint.head))
     return
   }
   const failed = f.store.get(dispatched.run.id)!
@@ -3081,7 +3202,8 @@ test(`a cross-run ${mergeMode} retry ${moved ? 'refuses remote movement after di
   const outcome = await host.run({ mode: fixed ? 'ralph' : 'pr', start: 'resume' }, new AbortController().signal)
   expect(outcome.kind, why(f, outcome)).toBe('merged')
   expect(f.world.dispatches.some(dispatch => dispatch.role === 'plan' || dispatch.role === 'build' || dispatch.role === 'fix')).toBe(false)
-  expect(f.world.dispatches[0]).toMatchObject({ role: 'review', step_id: `${dispatched.run.id}:${fixed ? 'task:0:' : ''}review:${fixed ? 2 : 1}` })
+  expect(dispatchStep(standaloneReview(f.world))).toBe(`${dispatched.run.id}:${fixed ? 'task:0:' : ''}review:${fixed ? 2 : 1}`)
+  expect(standaloneReview(f.world).measuredHead).toBe(String(checkpoint.head))
   expect(f.world.dispatches.some(dispatch => dispatch.step_id.startsWith(`${prior.id}:`))).toBe(false)
   const saved = f.store.stageEvents(dispatched.run.id).filter(event => event.stage === 'build-mode-state')
   expect(JSON.parse(saved[0]!.meta!).checkpoint).toEqual(checkpoint)
@@ -3126,7 +3248,8 @@ test('a driver restarted between the build and review re-adopts the build instea
   // RE-ADOPTED, NOT REDONE: no plan and no build in the second process, and the
   // review it did run is round 1 — the round the first process had reached.
   expect(f.world.dispatches.map(dispatch => dispatch.role)).toEqual(['review', 'review', 'synthesis'])
-  expect(f.world.dispatches[0]!.step_id).toBe(`${f.row.id}:review:1`)
+  expect(dispatchStep(standaloneReview(f.world))).toBe(`${f.row.id}:review:1`)
+  expect(standaloneReview(f.world).measuredHead).toBe(built.stdout)
   // The merged revision is the one process 1 built: one note, not two.
   const merged = await spawnCapture(['git', '-C', f.origin, 'show', 'refs/heads/main:NOTES.md'], f.origin)
   expect(merged.stdout).toBe(`seed\n${f.row.id}:build:0`)
@@ -3187,7 +3310,8 @@ test('a driver restarted during a worker turn refuses to re-fire it', async () =
   if (first.kind === 'blocked') expect(first.on).toBe('harness: the review worker was stopped mid-turn')
   // The blocked answer really went through the decoder as a blocked envelope.
   expect(f.world.dispatches.at(-1)!.wrote).toEqual(['kind', 'on', 'run_id', 'schema', 'step_id'])
-  expect(lastCheckpoint(f).pending).toEqual({ phase: 'review', step_id: `${f.row.id}:review:1` })
+  const reviewStep = `${f.row.id}:review:1:head:${lastCheckpoint(f).head}`
+  expect(lastCheckpoint(f).pending).toEqual({ phase: 'review', step_id: reviewStep })
 
   f.world.dispatches.length = 0
   const outcome = await restartThroughGateway(f)
@@ -3196,7 +3320,7 @@ test('a driver restarted during a worker turn refuses to re-fire it', async () =
     expect(outcome.detail).toBe('Resume awaits the existing worker observation')
     // The identity is PRESERVED, which is what lets the orchestrator settle it.
     expect(outcome.phase).toBe('review')
-    expect(outcome.step_id).toBe(`${f.row.id}:review:1`)
+    expect(outcome.step_id).toBe(reviewStep)
   }
   // Nothing was dispatched by the second process, and the PR process 1 opened for
   // review is untouched — no merge, no second PR.
@@ -3527,7 +3651,8 @@ test(`terminal Ralph ${mergeMode} publication retry re-proves the built head wit
   if (mergeMode === 'pr' || !reviewFix) expect(proofHeads).toContain(String(checkpoint.head))
   expect(f.world.dispatches.some(dispatch => ['plan', 'build'].includes(dispatch.role))).toBe(false)
   expect(f.world.dispatches.some(dispatch => dispatch.role === 'review')).toBe(true)
-  expect(f.world.dispatches[0]).toMatchObject({ role: 'review', step_id: `${dispatched.run.id}:task:1:review:1` })
+  expect(dispatchStep(standaloneReview(f.world))).toBe(`${dispatched.run.id}:task:1:review:1`)
+  expect(standaloneReview(f.world).measuredHead).toBe(String(checkpoint.head))
   expect(f.world.dispatches.some(dispatch => dispatch.step_id.startsWith(`${prior.id}:`))).toBe(false)
   expect(f.world.dispatches.filter(dispatch => dispatch.role === 'fix')).toHaveLength(reviewFix ? 1 : 0)
   if (reviewFix) {

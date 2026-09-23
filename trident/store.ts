@@ -1131,6 +1131,22 @@ export class TridentRunStore {
     })
   }
 
+  /** A conversation may be created only once per run and recurring worker role.
+   * This durable authority survives loss of every filesystem receipt. */
+  async claimWorkerConversation(runId: string, role: 'plan' | 'build' | 'fix', scope: string, stepId: string): Promise<boolean> {
+    return this.db.transaction(tx => tx.runSync(
+      `INSERT INTO code_trident_stage_events (run_id, stage, at, meta)
+       SELECT id, 'build-worker-conversation-started', ?, ? FROM code_trident_runs
+       WHERE id = ? AND phase NOT IN ${TERMINAL_PHASE_SQL}
+         AND NOT EXISTS (SELECT 1 FROM code_trident_stage_events
+           WHERE run_id = ? AND stage = 'build-worker-conversation-started'
+             AND CASE WHEN json_valid(meta) AND json_extract(meta, '$.version') = 1
+                 AND json_extract(meta, '$.role') IN ('plan', 'build', 'fix')
+               THEN json_extract(meta, '$.role') = ? ELSE 1 END)`,
+      [this.now(), JSON.stringify({ version: 1, role, scope, stepId }), runId, runId, role],
+    ).changes === 1)
+  }
+
   async recordStageEvent(
     run_id: string,
     stage: string,

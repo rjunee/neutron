@@ -1,5 +1,5 @@
 import { afterEach, expect, test } from 'bun:test'
-import { chmod, mkdtemp, readFile, readdir, rename, rm, symlink, unlink, writeFile } from 'node:fs/promises'
+import { chmod, mkdir, mkdtemp, readFile, readdir, rename, rm, symlink, unlink, writeFile } from 'node:fs/promises'
 import { join } from 'node:path'
 import { tmpdir } from 'node:os'
 import { fakeRunner, type BoundedWorkOutcome, type BoundedWorkRequest, type WorkerRunner } from '@neutronai/runtime/bounded-work.ts'
@@ -22,7 +22,9 @@ async function fixture() {
     needs_approval_decision: false, ...over,
   })
   const runner = fakeRunner('openai-codex', { outcomes: new Map(['one', 'two', 'three'].map(id => [id, completed()])) })
+  const initiated = new Set<string>()
   const options: ProjectWorkerContinuityOptions = { stateDir: dir, runId: 'run', projectId: 'project', replProvider: 'anthropic', runner,
+    claimInitial: async request => { if (initiated.has(request.role)) return false; initiated.add(request.role); return true },
     credentialIdentity: async () => 'account-a' }
   const wrap = (over: Partial<ProjectWorkerContinuityOptions> = {}) => createProjectWorkerContinuity({ ...options, ...over })
   const call = (over: Partial<BoundedWorkRequest> = {}) => wrap().run(request(over), 'headless', signal())
@@ -74,6 +76,24 @@ test('missing whole role directory cannot become an initial turn; restoration pr
   expect((await f.call({ step_id: 'two' })).kind).toBe('unknown')
   expect(f.runner.calls).toHaveLength(1)
   await rename(saved, dir)
+  expect((await f.call({ step_id: 'two' })).kind).toBe('completed')
+  expect(f.runner.calls[1]!.thread).toEqual({ id: 'observed-first' })
+})
+
+test('losing the whole receipt directory and initiation file cannot turn a follow-up into a first turn', async () => {
+  const f = await fixture()
+  expect((await f.call()).kind).toBe('completed')
+  const saved = `${f.dir}-saved`
+  await rename(f.dir, saved)
+  try {
+    await mkdir(f.dir)
+    expect((await f.call({ step_id: 'two' })).kind).toBe('unknown')
+    expect((await f.call()).kind).toBe('unknown')
+    expect(f.runner.calls).toHaveLength(1)
+  } finally {
+    await rm(f.dir, { recursive: true, force: true })
+    await rename(saved, f.dir)
+  }
   expect((await f.call({ step_id: 'two' })).kind).toBe('completed')
   expect(f.runner.calls[1]!.thread).toEqual({ id: 'observed-first' })
 })
