@@ -552,6 +552,71 @@ test('local merge preserves the reviewed branch and updates the checked-out base
   expect(f.calls.some(argv => argv[0] === 'gh')).toBe(false)
 })
 
+for (const mode of ['local', 'pr'] as const) for (const carrier of [false, true]) {
+  test(`G166 pre-merge ${mode}: public-base carrier permits clean history, own carrier=${carrier}`, async () => {
+    const f = await fixture()
+    await f.store.update(f.row.id, { merge_mode: mode })
+    await f.command(['git', '-C', f.repo, 'commit', '--allow-empty', '-m', 'Public base', '-m', 'Claude-Session: public-fixture'])
+    const publicBase = await f.command(['git', '-C', f.repo, 'rev-parse', 'HEAD'])
+    await f.command(['git', '-C', f.repo, 'push', 'origin', 'main'])
+    await f.command(['git', '-C', f.worktree, 'rebase', 'main'])
+    if (carrier) await f.command(['git', '-C', f.worktree, 'commit', '--allow-empty', '-m', 'Own ancestor', '-m', 'cLaUdE-sEsSiOn: fixture'])
+    const ancestor = await f.command(['git', '-C', f.worktree, 'rev-parse', 'HEAD'])
+    await f.command(['git', '-C', f.worktree, 'commit', '--allow-empty', '-m', 'Discuss Claude-Session: as data', '-m', 'Co-Authored-By: Fixture <fixture@example.invalid>'])
+    const head = await f.command(['git', '-C', f.worktree, 'rev-parse', 'HEAD'])
+    // Seed an already-published, owned draft directly: no publication gate can
+    // account for this refusal, and a forbidden PR must not even become ready.
+    if (mode === 'pr') {
+      await f.command(['git', '-C', f.worktree, 'push', 'origin', 'change'])
+      await f.store.update(f.row.id, { pr: 12, published_pr: 12 })
+      f.setPr({ number: 12, headRefOid: head, state: 'OPEN', headRefName: 'change', baseRefName: 'main', isCrossRepository: false, isDraft: true })
+      f.setCiReadiness({ headSha: head, mergeable: 'MERGEABLE', rows: [{ name: 'test', status: 'COMPLETED', conclusion: 'SUCCESS' }] })
+    }
+    const snapshot = await measured(f)
+    f.calls.length = 0
+    const result = await f.mergeChecked(snapshot)
+    if (carrier) {
+      expect(result).toEqual({ kind: 'blocked', on: `Publication branch carries a Claude-Session trailer on 1 commit(s) above the launch base: ${ancestor}` })
+      expect(await f.command(['git', '-C', f.repo, 'rev-parse', 'main'])).toBe(publicBase)
+      expect(f.calls.some(argv => argv[0] === 'gh' && ['ready', 'merge'].includes(argv[2]!))).toBe(false)
+      expect(f.calls.some(argv => argv.includes('push'))).toBe(false)
+    } else {
+      expect(result).toEqual({ kind: 'allow' })
+      if (mode === 'local') expect(await readFile(join(f.repo, 'code.txt'), 'utf8')).toBe(await readFile(join(f.worktree, 'code.txt'), 'utf8'))
+      else expect((await measured(f)).pr?.state).toBe('MERGED')
+    }
+    const scanned = f.calls.findIndex(argv => argv.includes('cat-file') && argv.includes('commit'))
+    expect(scanned).toBeGreaterThanOrEqual(0)
+    if (mode === 'pr') {
+      const fetched = f.calls.findIndex(argv => argv.includes('fetch'))
+      expect(fetched).toBeGreaterThanOrEqual(0)
+      expect(scanned).toBeGreaterThan(fetched)
+    }
+  })
+}
+
+for (const mode of ['local', 'pr'] as const) for (const failure of ['failed', 'truncated', 'throwing'] as const) {
+  test(`G166 pre-merge ${mode} refuses ${failure} raw evidence independently of publication`, async () => {
+    const f = await fixture()
+    expect(await f.publishChecked(await measured(f))).toEqual({ kind: 'allow' })
+    await f.store.update(f.row.id, { merge_mode: mode, ...(mode === 'local' ? { pr: null, published_pr: null } : {}) })
+    const snapshot = await measured(f)
+    f.calls.length = 0
+    f.intercept(async argv => {
+      if (!argv.includes('cat-file') || !argv.includes('commit')) return
+      if (failure === 'throwing') throw new Error('fixture raw read failure')
+      if (failure === 'failed') return bad()
+      const raw = await spawnCapture(argv, f.repo)
+      return { ...raw, stdout: raw.stdout.slice(0, 30) }
+    })
+    expect(await f.mergeChecked(snapshot)).toMatchObject({ kind: 'unknown' })
+    expect(f.calls.some(argv => argv.includes('cat-file') && argv.includes('commit'))).toBe(true)
+    expect(f.calls.some(argv => argv[0] === 'gh' && ['ready', 'merge'].includes(argv[2]!))).toBe(false)
+    expect(f.calls.some(argv => argv.includes('push'))).toBe(false)
+    expect(await f.command(['git', '-C', f.repo, 'rev-parse', 'main'])).toBe(f.base)
+  })
+}
+
 test('prepare persists host context and stage evidence; mismatched request cannot prepare', async () => {
   const f = await fixture()
   const snapshot = await measured(f)

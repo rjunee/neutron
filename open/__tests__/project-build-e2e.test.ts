@@ -80,7 +80,7 @@ import { CodexOwnerBindings } from '../wiring/codex-owner-binding.ts'
 import { restrictedOwnerFixture } from './fixtures/codex-owner-review.ts'
 import { PROJECT_DEPENDENCIES_TIMEOUT_MS } from '../wiring/project-build-dependencies.ts'
 import { PROJECT_SNAPSHOT_SCHEMA } from '../wiring/project-build-snapshot.ts'
-import { EfficiencyTrace, EFFICIENCY_SCENARIOS, assertEfficient, type EfficiencyReport, type EfficiencyScenario } from './fixtures/trident-efficiency-benchmark.ts'
+import { EfficiencyTrace, EFFICIENCY_SCENARIOS, assertEfficient, compareEfficiency, type EfficiencyReport, type EfficiencyScenario } from './fixtures/trident-efficiency-benchmark.ts'
 import { ReplSession } from '@neutronai/runtime/adapters/claude-code/persistent/repl-session.ts'
 
 const cleanups: (() => void | Promise<void>)[] = []
@@ -1032,6 +1032,53 @@ async function drive(f: Awaited<ReturnType<typeof fixture>>): Promise<ProjectBui
   const options = await f.prepare()
   const host = await createProjectBuildHost(options)
   return host.run({ mode: 'implementation', start: 'fresh' }, new AbortController().signal)
+}
+
+for (const mergeMode of ['local', 'pr'] as const) for (const carrier of [false, true]) {
+  test(`G166 consuming pre-merge ${mergeMode}: own carrier=${carrier}, public-base carrier excluded`, async () => {
+    const f = await fixture({ mergeMode })
+    const options = await f.prepare()
+    const run = f.store.get(f.row.id)!
+    const git = (cwd: string, args: string[]) => gitOut(spawnCapture, cwd, args)
+    // The launch pin predates a public carrier. This is ordinary upstream
+    // history and must not poison admission of the run's own clean work.
+    await git(f.repo, ['commit', '--allow-empty', '-m', 'Public base', '-m', 'Claude-Session: public-fixture'])
+    const publicBase = await git(f.repo, ['rev-parse', 'HEAD'])
+    await git(f.repo, ['push', 'origin', 'main'])
+    await git(run.worktree!, ['rebase', 'main'])
+    if (carrier) await git(run.worktree!, ['commit', '--allow-empty', '-m', 'Own ancestor', '-m', 'cLaUdE-sEsSiOn: fixture'])
+    const ancestor = await git(run.worktree!, ['rev-parse', 'HEAD'])
+    await writeFile(join(run.worktree!, 'NOTES.md'), 'completed fixture work\n')
+    await git(run.worktree!, ['add', 'NOTES.md'])
+    await git(run.worktree!, ['commit', '-m', 'Discuss Claude-Session: as data', '-m', 'Co-Authored-By: Fixture <fixture@example.invalid>'])
+    const reviewed = await git(run.worktree!, ['rev-parse', 'HEAD'])
+    if (mergeMode === 'pr') {
+      await git(run.worktree!, ['push', 'origin', run.branch!])
+      f.github.prs.push({ number: 1, state: 'OPEN', headRefName: run.branch!, baseRefName: 'main', isDraft: true })
+      await f.store.update(run.id, { pr: 1, published_pr: 1 })
+    }
+    // Exercise the consuming composition's merge effect directly, deliberately
+    // independent of publication. A pre-push refusal cannot make this pass.
+    const host = await createProjectBuildHost(options)
+    const measured = await host.deps.measure()
+    expect(measured.kind).toBe('known')
+    if (measured.kind !== 'known') throw new Error(measured.detail)
+    expect(measured.value.head).toBe(reviewed)
+    f.commands.length = 0
+    const target = mergeMode === 'pr' ? f.origin : f.repo
+    if (carrier) {
+      await expect(host.deps.merge(measured.value)).rejects.toThrow(
+        `Publication branch carries a Claude-Session trailer on 1 commit(s) above the launch base: ${ancestor}`)
+      expect(await git(target, ['rev-parse', 'refs/heads/main'])).toBe(publicBase)
+      expect(f.commands.some(argv => argv[0] === 'gh' && ['ready', 'merge'].includes(argv[2]!))).toBe(false)
+      if (mergeMode === 'pr') expect(f.github.prs[0]).toMatchObject({ state: 'OPEN', isDraft: true })
+    } else {
+      await host.deps.merge(measured.value)
+      expect(await git(target, ['show', 'refs/heads/main:NOTES.md'])).toBe('completed fixture work')
+      if (mergeMode === 'pr') expect(f.github.prs[0]).toMatchObject({ state: 'MERGED', isDraft: false })
+    }
+    expect(f.commands.some(argv => argv.includes('cat-file') && argv.includes('commit'))).toBe(true)
+  }, 120_000)
 }
 
 for (const productionChange of [false, true])
@@ -2675,14 +2722,23 @@ async function efficiencyBenchmark(scenario: EfficiencyScenario, scheduling: Eff
   // second project's acquisition cannot select the predecessor's granted roots.
   pool.delete(f.key)
   supervisedBySessionKey.delete(f.key)
-  return { timing_unit: 'scripted-workload-unit', barrier_complete: !barrierExpired, scenario, scheduling, counts, decisions: trace.decisions, intervals: trace.intervals, outcomes,
+  const models = f.context.attempts.list(f.row.id).map(attempt => ({ role: attempt.role, seat: attempt.review_seat,
+    provider: attempt.provider, requested: attempt.requested_model, resolved: attempt.resolved_model, placement: attempt.placement }))
+  return { scope: { fixture: 'project-build-e2e-scripted-v1', task: f.row.task,
+    gates: { observed: [...new Set(trace.decisions.map(decision => decision.split(':')[0]!))].sort(),
+      suite_strategy: f.input.test_strategy ?? '', intermediate_strategy: f.input.test_strategy_intermediate ?? null,
+      max_rounds: f.input.max_rounds, merge_mode: 'pr' },
+    models: [...new Set(models.map(model => JSON.stringify(model)))].sort().map(model => JSON.parse(model)) },
+    timing_unit: 'scripted-workload-unit', barrier_complete: !barrierExpired, scenario, scheduling, counts, decisions: trace.decisions, intervals: trace.intervals, outcomes,
     usage: { tokens: null, cost: null, source: 'scripted-provider-no-usage' } }
 }
 
 test.each([...EFFICIENCY_SCENARIOS])('deterministic efficiency benchmark: %s', async scenario => {
   const before = await efficiencyBenchmark(scenario, 'serial-baseline')
   const after = await efficiencyBenchmark(scenario, 'concurrent')
-  if (process.env.TRIDENT_EFFICIENCY_REPORT === '1') console.log(JSON.stringify({ before, after }))
+  const comparison = compareEfficiency(before, after)
+  if (process.env.TRIDENT_EFFICIENCY_REPORT === '1') console.log(JSON.stringify({ before, after, comparison }))
+  expect(comparison).toEqual({ kind: 'matched' })
   assertEfficient(after)
   expect(() => assertEfficient(before)).toThrow('Independent reviews serialized')
   expect(after.decisions).toEqual(before.decisions)

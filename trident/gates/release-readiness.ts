@@ -186,6 +186,15 @@ export async function sessionTrailerReadiness(
   return { kind: 'allow' }
 }
 
+/** Scan the reviewed history at either admission boundary, excluding only base
+ * commits independently witnessed on origin. Recompute the window on every call.
+ */
+export async function sessionTrailerReadinessForBase(
+  run: RunHostCommand, repo: string, baseBranch: string, launchBase: string, head: string,
+): Promise<GateResult> {
+  return sessionTrailerReadiness(run, repo, await publishedBaseWindow(run, repo, baseBranch, launchBase, head), head)
+}
+
 /** G083, G085, G086, G166: measure the branch, launch ancestry and commit messages before
  * publication. Lease enforcement and the post-push witness stay in the publication effect.
  */
@@ -228,7 +237,7 @@ export async function publicationReadiness(
     // contract would become an unhandled throw. The sibling at `gates/build-claim.ts:65` awaits
     // correctly; `eslint.config.mjs` carries no `return-await`/`no-floating-promises` rule, so
     // nothing but this comment and its regression keeps it here.
-    return await sessionTrailerReadiness(run, repo, await publishedBaseWindow(run, repo, baseBranch, launchBase, head), head)
+    return await sessionTrailerReadinessForBase(run, repo, baseBranch, launchBase, head)
   } catch (error) { return unknownCause('Publication host observation failed', error, runId) }
 }
 

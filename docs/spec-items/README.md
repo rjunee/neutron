@@ -57,6 +57,7 @@ branch is cut (standard §3.1, §3.2).
 | [`codex-work-runs-headless-per-call-on-a-reused-thread`](codex-work-runs-headless-per-call-on-a-reused-thread.md) | Run cross-model codex work headless per call on a reused thread | P1 | — |
 | [`dead-lane-process-reaping`](dead-lane-process-reaping.md) | Reap child processes left by dead build lanes | P1 | — |
 | [`launcher-crash-report-precedence`](launcher-crash-report-precedence.md) | Prefer the better-informed launcher death report | P1 | — |
+| [`premerge-session-trailer-admission`](premerge-session-trailer-admission.md) | Independently scan reviewed commit messages before merge | P1 | — |
 | [`publish-only-resume-without-re-running-forge`](publish-only-resume-without-re-running-forge.md) | Re-publish a built commit after a credential blink, without rebuilding | P1 | — |
 | [`run-head-hash-width`](run-head-hash-width.md) | Accept full SHA-1 and SHA-256 run heads and checkpoints | P1 | — |
 | [`codex-control-socket-path-fits-sun-len`](codex-control-socket-path-fits-sun-len.md) | Keep Codex control sockets within Linux sun_path | P2 | — |

@@ -6,7 +6,7 @@ import type { BuildRunDeps, BuildSnapshot, GateResult, Measurement, BuildModeHos
 import { classifyCiRollup, confirmConfigurationError, type CiRunObservation, type RequiredCheckObservation } from './ci-readiness.ts'
 import { briefIntegrity } from './gates/brief-integrity.ts'
 import type { AdmissionSource } from './gates/project-admission.ts'
-import { pinnedMergeReadiness, publicationReadiness } from './gates/release-readiness.ts'
+import { pinnedMergeReadiness, publicationReadiness, sessionTrailerReadinessForBase } from './gates/release-readiness.ts'
 import { unknownCause } from './gates/unknown-cause.ts'
 import { mergeLocalReviewed } from './merge.ts'
 import { gitRangeArgv } from './git-range.ts'
@@ -561,7 +561,11 @@ export function createProductionHostEffects(options: ProductionHostOptions) {
       const current = row()
       const fresh = await sameSnapshot(snapshot)
       if (fresh.kind !== 'allow') return fresh
-      if (current.merge_mode === 'local') return mergeLocalReviewed(runHost, repo, branch, baseBranch, worktree, snapshot.head, runId)
+      if (current.merge_mode === 'local') {
+        const messages = await sessionTrailerReadinessForBase(runHost, repo, baseBranch, current.base_sha!, snapshot.head)
+        if (messages.kind !== 'allow') return messages
+        return mergeLocalReviewed(runHost, repo, branch, baseBranch, worktree, snapshot.head, runId)
+      }
       // The driver invokes this effect only after review, host suite, publication
       // and merge gates. A matching head or branch alone never owns a user's PR.
       const ownsPins = () => {
@@ -572,6 +576,10 @@ export function createProductionHostEffects(options: ProductionHostOptions) {
       if (!snapshot.pr || !ownsPins()) return blocked('Merge PR has no matching publication provenance')
       const ready = await pinnedMergeReadiness(runHost, repo, snapshot, runId)
       if (ready.kind !== 'allow') return ready
+      // Publication is historical evidence, not merge admission. Re-read the
+      // authenticated messages even for a previously published, owned PR.
+      const messages = await sessionTrailerReadinessForBase(runHost, repo, baseBranch, current.base_sha!, snapshot.head)
+      if (messages.kind !== 'allow') return messages
       let pr = await readPr(row(), true)
       if (!ownsPins() || !pr || pr.number !== snapshot.pr.number || pr.head !== snapshot.head || pr.state !== 'OPEN') {
         return blocked('Merge PR ownership or reviewed revision changed')
