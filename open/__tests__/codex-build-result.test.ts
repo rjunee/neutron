@@ -188,7 +188,8 @@ test('resume refuses missing transport authority instead of minting a replacemen
 })
 
 test.each([false, true])('exclusive dispatch clears preexisting same-step stage; fresh child output=%s', async fresh => {
-  const f = fixture(80)
+  const f = fresh ? fixture() : fixture(80)
+  expect(f.request.budget.wall_ms).toBe(fresh ? 1000 : 80)
   const transport = codexBuildResultTransport({ projectId: 'project', projectDir: f.projectDir, stateDir: f.stateDir, runId: 'run', trailer: f.trailer })
   const lease = await transport.prepare(f.request, new AbortController().signal, 'dispatch')
   writeFileSync(lease.resultPath, f.envelope(f.request, 'stale'))
@@ -200,7 +201,10 @@ test.each([false, true])('exclusive dispatch clears preexisting same-step stage;
     actingTurn: async turn => {
       calls++
       staleAtDispatch = existsSync(turn.request.result.path)
-      if (fresh) writeFileSync(turn.request.result.path, f.envelope())
+      if (fresh) {
+        await Bun.sleep(150)
+        writeFileSync(turn.request.result.path, f.envelope())
+      }
       return { kind: 'turn-ended' }
     } })
   expect((await runners.inRepl!.run(f.request, 'in-repl', new AbortController().signal)).kind).toBe(fresh ? 'completed' : 'unknown')
