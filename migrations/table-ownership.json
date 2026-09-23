@@ -13,6 +13,14 @@
     "current writer set \u2014 the test picks it up automatically."
   ],
   "tables": {
+    "project_admission_fences": {
+      "owner": "gateway/project-admission-store.ts",
+      "writers": ["gateway/project-admission-store.ts"]
+    },
+    "project_admission_leases": {
+      "owner": "gateway/project-admission-store.ts",
+      "writers": ["gateway/project-admission-store.ts"]
+    },
     "projects": {
       "owner": "gateway/projects/sqlite-store.ts",
       "writers": [
