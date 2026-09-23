@@ -53,7 +53,8 @@ export class ReplSession {
    *  REPL's in-context memory. */
   poisoned = false
   /**
-   * How many callers hold this session's turn slot OR are queued for it (see
+   * How many callers hold this session's turn slot, are queued for it, OR retain
+   * accepted background work after yielding the dispatch slot (see
    * {@link acquireTurn}). Zero means no committed turn is left on this session.
    *
    * BUSY STARTS HERE, NOT AT `activeTurn`. A dispatch takes the slot and only later
@@ -506,9 +507,10 @@ export class ReplSession {
     t.settle()
   }
 
-  /** Acquire the per-session turn slot; returns a release fn. Serializes turns
-   *  so the warm REPL never has two channel turns in flight at once. */
-  async acquireTurn(): Promise<() => void> {
+  /** Acquire the per-session write slot and a busy lease. A background dispatcher
+   * may yield the write slot after binding its child while retaining the busy
+   * lease until observation ends. Ordinary callers release both together. */
+  async acquireTurn(backgroundDispatch?: (yieldDispatch: () => void) => void): Promise<() => void> {
     let release: () => void = () => {}
     const prev = this.turnTail
     this.turnTail = new Promise<void>((res) => {
@@ -529,6 +531,7 @@ export class ReplSession {
     // completion, and the teardown happens the moment no committed turn is left.
     this.turnSlotHeld += 1
     await prev
+    backgroundDispatch?.(release)
     let released = false
     return () => {
       // IDEMPOTENT. Several of `start`'s early-return paths call the release they were
