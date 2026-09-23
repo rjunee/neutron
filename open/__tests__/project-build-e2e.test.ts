@@ -79,6 +79,7 @@ import { CodexOwnerBindings } from '../wiring/codex-owner-binding.ts'
 import { restrictedOwnerFixture } from './fixtures/codex-owner-review.ts'
 import { PROJECT_DEPENDENCIES_TIMEOUT_MS } from '../wiring/project-build-dependencies.ts'
 import { PROJECT_SNAPSHOT_SCHEMA } from '../wiring/project-build-snapshot.ts'
+import { EfficiencyTrace, EFFICIENCY_SCENARIOS, assertEfficient, type EfficiencyReport, type EfficiencyScenario } from './fixtures/trident-efficiency-benchmark.ts'
 import { ReplSession } from '@neutronai/runtime/adapters/claude-code/persistent/repl-session.ts'
 
 const cleanups: (() => void | Promise<void>)[] = []
@@ -752,6 +753,7 @@ async function fixture(options: { ralph?: boolean; moreTasks?: boolean; suiteExi
   /** Real session ownership with only the model boundary held at a barrier. */
   reviewChild?: (request: BoundedWorkRequest, seat: string) => Promise<void>
   reviewVeto?: 'standalone' | 'synthesis'
+  efficiencyTrace?: EfficiencyTrace
 } = {}) {
   const dir = await mkdtemp(join(tmpdir(), 'project-build-e2e-'))
   cleanups.push(() => rm(dir, { recursive: true, force: true }))
@@ -891,7 +893,8 @@ async function fixture(options: { ralph?: boolean; moreTasks?: boolean; suiteExi
             content: [], usage: { input_tokens: 7, output_tokens: 3, cache_read_input_tokens: 2, cache_creation_input_tokens: 0 } } },
         ].map(row => JSON.stringify(row)).join('\n') + '\n')
       }
-      if (!options.rateLimitedSynthesis || request.role !== 'synthesis') return worker(line)
+      if (!options.rateLimitedSynthesis || request.role !== 'synthesis') return options.efficiencyTrace && request.role !== 'review'
+        ? options.efficiencyTrace.during(request.role, () => worker(line)) : worker(line)
       // The provider owns this transcript envelope. No result file is written.
       const directory = join(projectsDir, dir.replace(/\//g, '-'), 'e2e-session', 'subagents')
       await mkdir(directory, { recursive: true })
@@ -2339,6 +2342,142 @@ test.each(['readiness', 'ci', 'artifact'] as const)('unavailable admission preve
   expect(started).toEqual([])
   expect(f.world.dispatches.map(call => call.role)).toEqual(['plan', 'build'])
 }, 30_000)
+
+/** Same task, providers, gates and scripted verdicts in both schedules. The
+ * baseline reconstructs the serial paid-review constraint measured in #1196;
+ * removing the setup receipt recreates pre-receipt preparation. No live timing,
+ * pricing or historical recovery count is synthesized by this fixture. */
+async function efficiencyBenchmark(scenario: EfficiencyScenario, scheduling: EfficiencyReport['scheduling']): Promise<EfficiencyReport> {
+  const trace = new EfficiencyTrace()
+  let serial = Promise.resolve()
+  let pending: Array<() => void> = []
+  let barrierExpired = false
+  const timers = new Set<ReturnType<typeof setTimeout>>()
+  cleanups.push(() => { for (const timer of timers) clearTimeout(timer); for (const release of pending) release() })
+  const f = await fixture({ bunWorkspace: true, efficiencyTrace: trace,
+    blockersByRound: scenario === 'code-fix' ? [0, 1] : [],
+    reviewChild: async (_request, seat) => {
+      if (scheduling === 'serial-baseline') {
+        const next = serial.then(() => trace.during(`review:${seat}`, async () => {}, 10))
+        serial = next
+        return next
+      }
+      const finish = trace.begin(`review:${seat}`, 10)
+      await new Promise<void>(resolve => {
+        // Deadline is only a deadlock escape for a regressed serial producer.
+        // Release its child so the real transport can drain; never abandon a
+        // result writer and wait for the much longer provider budget.
+        const timer = setTimeout(() => {
+          barrierExpired = true
+          const batch = pending; pending = []; for (const release of batch) release()
+        }, 10_000)
+        timers.add(timer)
+        pending.push(() => { clearTimeout(timer); timers.delete(timer); resolve() })
+        if (pending.length === 3) { const batch = pending; pending = []; for (const release of batch) release() }
+      })
+      finish()
+    },
+  })
+  f.input.phase_models = { ...f.input.phase_models, review_rubric: { model: 'fable' } }
+  const counts = { plan: 0, build: 0, fix: 0, review: 0, synthesis: 0, install: 0, verify: 0, proof: 0 }
+  const suite = f.context.runSuite!
+  f.context.runSuite = Object.assign(async (...args: Parameters<typeof suite>) =>
+    trace.during('proof', () => suite(...args)), { writesDiffOutput: true as const })
+  const install = f.context.runInstall!
+  f.context.runInstall = Object.assign(async (...args: Parameters<typeof install>) => {
+    const stage = args[0][2]!.includes('verify-workspace-deps.ts') ? 'verify' : 'install'
+    counts[stage]++
+    return trace.during(stage, () => install(...args))
+  }, { writesDiffOutput: true as const })
+  const prepare = async () => trace.during('prepare', async () => {
+    if (scheduling === 'serial-baseline') await rm(join(f.context.stateRoot, encodeURIComponent(f.row.id), 'dependencies-receipt.json'), { force: true })
+    f.input.run = f.store.get(f.row.id)!
+    return f.prepare()
+  })
+  // A stable second preparation is the positive reuse control. Recovery after a
+  // committed build legitimately changes the receipt's revision and installs.
+  await prepare()
+  const outcomes: string[] = []
+  const run = async (start: 'fresh' | 'resume', die = false) => {
+    const host = await createProjectBuildHost(await prepare())
+    if (scenario === 'pending-interruption' && start === 'fresh') {
+      const runner = host.workers.review.runner
+      host.workers.review.runner = { ...runner, run: async (...args) => {
+        await runner.run(...args)
+        // The actual provider evidence exists, but this process loses its
+        // acknowledgement before the driver clears the durable pending identity.
+        throw Error('scripted acknowledgement lost after completed review')
+      } }
+    }
+    for (const key of ['admissionGate', 'reviewReadiness', 'reviewArtifact', 'reviewCi', 'reviewSuite', 'reviewGate', 'publicationSuite', 'publishGate', 'mergeGate'] as const) {
+      const original = host.deps[key]!
+      // Observe the real gate result. This wrapper never supplies a verdict.
+      Object.assign(host.deps, { [key]: async (...args: never[]) => {
+        const value = await trace.during(`gate:${key}`, () => (original as (...args: never[]) => Promise<{ kind: string }>)(...args))
+        trace.decisions.push(`${key}:${value.kind}`)
+        return value
+      } })
+    }
+    const outcome = die ? await buildRun({ mode: 'pr', start, run_id: f.row.id, workers: host.workers,
+      repl_provider: 'anthropic', merge_mode: 'pr' }, host.deps, new AbortController().signal)
+      : await host.run({ mode: 'pr', start }, new AbortController().signal)
+    outcomes.push(outcome.kind)
+    return outcome
+  }
+  if (scenario === 'unchanged-head' || scenario === 'moved-head') {
+    const refusedAction = scenario === 'moved-head' ? 'merge' : 'create'
+    f.github.refuse.add(refusedAction)
+    const first = await run('fresh', true)
+    expect(first).toMatchObject({ kind: 'unknown', phase: scenario === 'moved-head' ? 'merge' : 'publish' })
+    if (scenario === 'moved-head') {
+      expect(lastCheckpoint(f)).toMatchObject({ stage: 'approved' })
+      const worktree = f.store.get(f.row.id)!.worktree!
+      await writeFile(join(worktree, 'MOVED.md'), 'external revision\n')
+      await gitOut(f.world.run, worktree, ['add', 'MOVED.md'])
+      await gitOut(f.world.run, worktree, ['commit', '-m', 'advance assigned branch'])
+    }
+    f.github.refuse.delete(refusedAction)
+    await run('resume')
+  } else if (scenario === 'interruption') {
+    f.github.refuse.add('merge')
+    expect(await run('fresh', true)).toMatchObject({ kind: 'unknown', phase: 'merge' })
+    expect(lastCheckpoint(f)).toMatchObject({ stage: 'approved' })
+    const approvedHead = lastCheckpoint(f).head
+    f.github.refuse.delete('merge')
+    expect(await run('resume')).toMatchObject({ kind: 'merged', snapshot: { head: approvedHead } })
+  } else if (scenario === 'pending-interruption') {
+    expect(await run('fresh', true)).toMatchObject({ kind: 'blocked', phase: 'review', on: 'infra-only: Review producer failed during the review join: Error: scripted acknowledgement lost after completed review' })
+    const pending = lastCheckpoint(f).pending
+    expect(pending).toEqual({ phase: 'review', step_id: `${f.row.id}:review:1` })
+    const completed = JSON.parse(await readFile(join(f.dir, 'state', f.row.id, 'review.result'), 'utf8'))
+    expect(completed).toMatchObject({ kind: 'completed', step_id: `${f.row.id}:review:1` })
+    expect(await run('resume')).toMatchObject({ kind: 'unknown', phase: 'review', step_id: `${f.row.id}:review:1`, detail: 'Resume awaits the existing worker observation' })
+    expect(lastCheckpoint(f).pending).toEqual(pending)
+  } else await run('fresh')
+  for (const call of f.world.dispatches) counts[call.role as 'plan' | 'build' | 'fix' | 'review' | 'synthesis']++
+  counts.proof = f.commands.filter(argv => argv[0] === 'bash' && argv[1] === '-lc' && (argv[2] ?? '').includes('bash scripts/ci/suite.sh')).length
+  // Both schedules run in this test. Retire the first fixture's identity so the
+  // second project's acquisition cannot select the predecessor's granted roots.
+  pool.delete(f.key)
+  supervisedBySessionKey.delete(f.key)
+  return { timing_unit: 'scripted-workload-unit', barrier_complete: !barrierExpired, scenario, scheduling, counts, decisions: trace.decisions, intervals: trace.intervals, outcomes,
+    usage: { tokens: null, cost: null, source: 'scripted-provider-no-usage' } }
+}
+
+test.each([...EFFICIENCY_SCENARIOS])('deterministic efficiency benchmark: %s', async scenario => {
+  const before = await efficiencyBenchmark(scenario, 'serial-baseline')
+  const after = await efficiencyBenchmark(scenario, 'concurrent')
+  if (process.env.TRIDENT_EFFICIENCY_REPORT === '1') console.log(JSON.stringify({ before, after }))
+  assertEfficient(after)
+  expect(() => assertEfficient(before)).toThrow('Independent reviews serialized')
+  expect(after.decisions).toEqual(before.decisions)
+  expect(after.outcomes).toEqual(before.outcomes)
+  expect(after.counts).toEqual({ ...before.counts, install: before.counts.install - 1 })
+  expect(after.counts.proof).toBe(scenario === 'code-fix' || scenario === 'moved-head' ? 2 : 1)
+  expect(after.usage).toEqual({ tokens: null, cost: null, source: 'scripted-provider-no-usage' })
+  // The machine-readable record is emitted on demand; no private run paths or
+  // generated timestamps enter the fixed scenario comparison.
+}, 120_000)
 
 test('pr mode drives plan, build, review, publish and merge to a terminal merged outcome', async () => {
   const f = await fixture()
