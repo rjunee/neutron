@@ -371,7 +371,6 @@ async function compare(outcome: BoundedWorkOutcome, measured: BuildSnapshot) {
     mergeGate: async () => { throw new Error('unexpected merge') },
     publish: async () => { throw new Error('unexpected publication') },
     merge: async () => { throw new Error('unexpected merge') },
-    recordPhaseUsage: async () => {},
   }
   const request = fixture().request()
   return buildRun({

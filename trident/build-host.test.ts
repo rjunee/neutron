@@ -26,7 +26,6 @@ async function fixture() {
     result: { schema: 'test', path: join(dir, 'result') }, thread: null, budget: { wall_ms: 100 },
   } satisfies BuildRunInput['workers']['build']['request']
   const calls: string[][] = []
-  const usageRecords: Array<{ runId: string; phase: string }> = []
   let diff = 'M\0src/code.ts\0'
   let drift: 'clear' | 'overlap' | 'unreadable' = 'clear'
   let leakOutput = 'LEAK GATE: INCOMPLETE\nRULES THAT COULD NOT RUN: pii'
@@ -47,21 +46,6 @@ async function fixture() {
         await writeFile(`${request.brief.path}.context.json`, JSON.stringify({ request, ...context }))
       }, measure: async () => ({ kind: 'known', value: snapshot }),
       publish: async () => { throw new Error('unexpected publish') }, merge: async () => { throw new Error('unexpected merge') },
-    },
-    // SEEDED LIKE PRODUCTION, not empty. The migration's trigger
-    // `code_trident_runs_seed_usage` (0144) inserts one `status:'unknown'` row per
-    // phase when the run is created, so `list()` is NEVER empty for a real run.
-    // An empty fixture made `recordPhaseUsage`'s `known` flag true, which nulls every
-    // measurement through `add()` — and a `'partial'` row with all-null measurements
-    // is exactly what the schema's CHECK rejects. The fixture was modelling a state
-    // that cannot occur, and it hid that the first write of every project build was
-    // illegal.
-    phaseUsage: {
-      list: () => ['decomposition', 'build', 'review_adversarial'].map(phase => ({
-        run_id: 'test', phase, status: 'unknown' as const, input_tokens: null, output_tokens: null,
-        cache_read_tokens: null, cache_creation_tokens: null, cost_usd: null, source: null, observed_at: null,
-      })),
-      record: async (runId, phase) => { usageRecords.push({ runId, phase }); return 'recorded' },
     },
     leak: {
       repo_path: dir, branch: 'change', base_sha: 'b'.repeat(40), scratch_dir: join(dir, 'scan'), gate_script: 'trusted-gate',
@@ -98,7 +82,7 @@ async function fixture() {
   }
   const make = () => createBuildHost(options)
   const input = (host: ReturnType<typeof make>): BuildRunInput => ({ run_id: 'test', mode: 'pr', start: 'fresh', repl_provider: options.replProvider, workers: host.workers })
-  return { options, make, input, path, calls, usageRecords, setDrift: (value: typeof drift) => { drift = value }, prose: () => { diff = 'M\0README.md\0' }, clean: () => { leakCode = 0; leakOutput = 'LEAK GATE: SILENT' } }
+  return { options, make, input, path, calls, setDrift: (value: typeof drift) => { drift = value }, prose: () => { diff = 'M\0README.md\0' }, clean: () => { leakCode = 0; leakOutput = 'LEAK GATE: SILENT' } }
 }
 
 test('missing provider is refused by the driver before effects', async () => {
@@ -381,72 +365,9 @@ test('fresh null reviewed_head reaches allow and publishes through the driver', 
     kind: 'blocked', phase: 'publish', on: 'Published PR does not match candidate revision', recipient: 'orchestrator',
   })
   expect(publications).toBe(1)
-  expect(f.usageRecords).toEqual([
-    { runId: 'test', phase: 'decomposition' },
-    { runId: 'test', phase: 'build' },
-  ])
 })
 
-// THE PROJECT-BUILD CASE, which is the one that broke the first unattended run.
-// `open/wiring/project-build.ts` passes `metadata: () => undefined`, so
-// `decodeProjectTrailer` fills `{usage: null, model_reported: null, thread_id: null}`
-// and every measurement resolves null. The seeded row already says `'unknown'`; writing
-// a `'partial'` row over it is what `0144`'s CHECK rejects, and the throw killed the run
-// at the plan phase. So the write must be SKIPPED, not attempted.
-test('a worker that reports no usage writes nothing, leaving the seeded unknown row', async () => {
-  const f = await fixture()
-  const attempted: string[] = []
-  f.options.phaseUsage = {
-    list: () => ['decomposition', 'build', 'review_adversarial'].map(phase => ({
-      run_id: 'test', phase, status: 'unknown' as const, input_tokens: null, output_tokens: null,
-      cache_read_tokens: null, cache_creation_tokens: null, cost_usd: null, source: null, observed_at: null,
-    })),
-    record: async (_runId, phase) => { attempted.push(phase); return 'recorded' },
-  }
-  const host = await f.make()
-  await host.deps.recordPhaseUsage('test', 'decomposition', {
-    status: 'partial', input_tokens: null, output_tokens: null, cache_read_tokens: null,
-    cache_creation_tokens: null, cost_usd: null, source: 'unknown-model', observed_at: Date.now(),
-  })
-  expect(attempted).toEqual([])
-})
-
-// POSITIVE CONTROL: a real measurement still writes. Without this, "never write
-// anything" would satisfy the test above.
-test('a worker that reports usage still writes', async () => {
-  const f = await fixture()
-  const attempted: string[] = []
-  f.options.phaseUsage = {
-    list: () => [{ run_id: 'test', phase: 'decomposition', status: 'unknown' as const, input_tokens: null,
-      output_tokens: null, cache_read_tokens: null, cache_creation_tokens: null, cost_usd: null,
-      source: null, observed_at: null }],
-    record: async (_runId, phase) => { attempted.push(phase); return 'recorded' },
-  }
-  const host = await f.make()
-  await host.deps.recordPhaseUsage('test', 'decomposition', {
-    status: 'partial', input_tokens: 7, output_tokens: null, cache_read_tokens: null,
-    cache_creation_tokens: null, cost_usd: null, source: 'test-model', observed_at: Date.now(),
-  })
-  expect(attempted).toEqual(['decomposition'])
-})
-
-test('phase usage resumes from persisted absolute totals without double-counting this invocation', async () => {
-  const f = await fixture()
-  const writes: Array<{ input_tokens: number | null; observed_at: number }> = []
-  f.options.phaseUsage = {
-    list: () => [{ run_id: 'test', phase: 'build', status: 'partial', input_tokens: 100, output_tokens: 10,
-      cache_read_tokens: null, cache_creation_tokens: null, cost_usd: null, source: 'old-model', observed_at: 500 }],
-    record: async (_runId, _phase, report) => { writes.push({ input_tokens: report.input_tokens, observed_at: report.observed_at }); return 'recorded' },
-  }
-  const report = { status: 'partial', input_tokens: 20, output_tokens: 3, cache_read_tokens: 5,
-    cache_creation_tokens: null, cost_usd: null, source: 'new-model', observed_at: 100 } as const
-  const host = f.make()
-
-  await host.deps.recordPhaseUsage('test', 'build', report)
-  await host.deps.recordPhaseUsage('test', 'build', { ...report, input_tokens: 27 })
-  expect(writes).toEqual([{ input_tokens: 120, observed_at: 501 }, { input_tokens: 127, observed_at: 502 }])
-})
-
+// Usage attribution is covered through the durable project host in attempt-accounting.test.ts.
 test('host propagates G084 refusals after proof and readiness allow', async () => {
   const f = await fixture()
   f.prose()

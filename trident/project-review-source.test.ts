@@ -7,17 +7,28 @@ import { decodeProjectTrailer, type ProjectTrailerOutcome } from '@neutronai/run
 import { createProjectReviewSource, type ProjectReviewSourceOptions } from './project-review-source.ts'
 import { decideReviewPanel, observeReviewPanel, reviewPanel } from './gates/review-panel.ts'
 import { validateTrailer, VERDICT_SCHEMA } from './gates/result-contract.ts'
+import { AttemptAccounting } from './attempt-accounting.ts'
+import { TridentAttemptLedger } from './attempt-ledger.ts'
+import { ProjectDb } from '@neutronai/persistence/index.ts'
+import { seedMigratedDb } from '../tests/support/migrated-db.ts'
+import { TridentRunStore } from './store.ts'
 const approve = { verdict: 'APPROVE', findings: [] }
 const snapshot = { head: 'a'.repeat(40), diff: 'actual diff', pr: null }
 const dirs: string[] = []
+const databases: ProjectDb[] = []
+afterEach(() => { for (const db of databases.splice(0)) db.close() })
 afterEach(async () => { await Promise.all(dirs.splice(0).map(dir => rm(dir, { recursive: true, force: true }))) })
 const completed = (result: unknown = approve): BoundedWorkOutcome => ({ kind: 'completed', result, model_reported: 'untrusted-model-claim', usage: { input_tokens: 0, output_tokens: 0 }, thread_id: 'fixture-thread' })
 async function fixture() {
   const dir = await mkdtemp(join(tmpdir(), 'review-source-test-')); dirs.push(dir)
+  seedMigratedDb(join(dir, 'project.db'))
+  const db = ProjectDb.open(join(dir, 'project.db')); databases.push(db)
+  await new TridentRunStore(db).create({ id: 'host-run', slug: 'review', project_slug: 'project', repo_path: dir, task: 'review' })
   const calls: BoundedWorkRequest[] = []
   const bindings: string[] = []
   let answer: (request: BoundedWorkRequest) => Promise<BoundedWorkOutcome> = async () => completed()
   const options: ProjectReviewSourceOptions = {
+    accounting: new AttemptAccounting(new TridentAttemptLedger(db), dir, async () => {}), taskId: () => 'task-1',
     runId: 'host-run', projectSlug: 'project', cwd: dir, evidenceRoot: dir, env: {},
     phaseModels: { review_rubric: { model: 'none' }, review_adversarial: { model: 'sol' },
       review_codex: { model: 'none' }, review_kimi: { model: 'none' } },

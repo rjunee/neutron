@@ -64,6 +64,7 @@ import { buildTridentOrchestrator } from '@neutronai/trident/orchestrator.ts'
 import { createProjectLauncher } from '@neutronai/trident/project-launcher.ts'
 import { slugifyTask } from '@neutronai/trident/slugify-task.ts'
 import { TridentPhaseUsageStore } from '@neutronai/trident/phase-usage.ts'
+import { TridentAttemptLedger } from '@neutronai/trident/attempt-ledger.ts'
 import { createProjectBuildHost, type ProjectBuildOutcome } from '@neutronai/trident/project-build-host.ts'
 import { spawnCapture, type HostCommandResult } from '@neutronai/trident/git-mode.ts'
 import { gitRangeArgv } from '@neutronai/trident/git-range.ts'
@@ -929,7 +930,7 @@ async function fixture(options: { ralph?: boolean; moreTasks?: boolean; suiteExi
   }
 
   const context: ProjectBuildContext = {
-    store, phaseUsage: new TridentPhaseUsageStore(db), runHost, runSuite: runHost,
+    store, attempts: new TridentAttemptLedger(db), runHost, runSuite: runHost,
     runInstall: Object.assign((argv: string[], cwd?: string, env?: Record<string, string>, timeout?: number) =>
       spawnCapture(argv, cwd, { ...env, BUN_INSTALL_CACHE_DIR: join(dir, 'bun-cache') }, timeout),
     { writesDiffOutput: true as const }),
@@ -972,6 +973,99 @@ async function drive(f: Awaited<ReturnType<typeof fixture>>, mode: 'pr' | 'ralph
   const host = await createProjectBuildHost(options)
   return host.run({ mode, start: 'fresh' }, new AbortController().signal)
 }
+
+test('attempt accounting consumes a full build with missing metadata and attributes each role and review seat', async () => {
+  const f = await fixture()
+  expect((await drive(f, 'pr')).kind).toBe('merged')
+  const attempts = f.context.attempts.list(f.row.id)
+  expect(attempts.map(row => row.role).sort()).toEqual(['build', 'plan', 'review', 'review', 'synthesis'])
+  expect(attempts.filter(row => row.review_seat !== null).map(row => row.review_seat).sort()).toEqual(['review_adversarial', 'synthesis'])
+  for (const attempt of attempts) {
+    expect(attempt).toMatchObject({ run_id: f.row.id, outcome: 'completed', placement: 'in-repl', provider: 'anthropic' })
+    expect(attempt.task_id).toBe(`${f.row.id}:task:0`)
+    expect(attempt.head_sha).toMatch(/^[a-f0-9]{40}$/)
+    expect(attempt.requested_model.length).toBeGreaterThan(0)
+    expect(attempt.resolved_model.length).toBeGreaterThan(0)
+    expect(attempt.started_at!).toBeGreaterThanOrEqual(attempt.prepared_at!)
+    expect(attempt.ended_at!).toBeGreaterThanOrEqual(attempt.started_at!)
+    expect(f.context.attempts.receipt(attempt)).toBeNull()
+  }
+  expect(new TridentPhaseUsageStore(f.db).list(f.row.id)!.every(row => row.status === 'unknown')).toBe(true)
+  const intervals = f.store.stageEvents(f.row.id).filter(event => event.stage === 'build-stage-ended').map(event => JSON.parse(event.meta!))
+  expect(intervals.map(value => value.stage)).toContain('cleanup')
+  expect(intervals.map(value => value.stage)).toContain('publication-proof')
+  expect(intervals.map(value => value.stage)).toContain('dependency-preparation')
+  for (const interval of intervals) expect(interval.ended_at).toBeGreaterThanOrEqual(interval.started_at)
+})
+
+test.each(['valid', 'wrong-run'] as const)('attempt accounting retains actual headless transport usage with %s result identity', async codexReview => {
+  const f = await fixture({ codexReview })
+  const result = await drive(f, 'pr')
+  expect(result.kind === 'merged').toBe(codexReview === 'valid')
+  const attempts = f.context.attempts.list(f.row.id).filter(row => row.provider === 'openai-codex')
+  expect(attempts).toHaveLength(1)
+  expect(attempts[0]).toMatchObject({ review_seat: 'review_codex', phase: 'review_codex', requested_model: 'sol', placement: 'headless' })
+  const receipt = f.context.attempts.receipt(attempts[0]!)!
+  expect(receipt).toMatchObject({ source: 'codex-cli-jsonl', input_tokens: null, output_tokens: 3, cost_usd: null })
+  expect(attempts[0]!.outcome === 'completed').toBe(codexReview === 'valid')
+  expect(new TridentPhaseUsageStore(f.db).list(f.row.id)!.find(row => row.phase === 'review_codex')).toMatchObject({ input_tokens: null, output_tokens: 3 })
+})
+
+test('attempt accounting keeps explicit zero on successful work and partial usage on a failed build without authorizing it', async () => {
+  const f = await fixture()
+  const options = await f.prepare()
+  const real = options.substrate.inRepl!
+  options.substrate.inRepl = { ...real, async run(request, placement, signal) {
+    const result = await real.run(request, placement, signal)
+    const observed = { source: 'claude-cli-json' as const, started_at_ms: Date.now(), finished_at_ms: Date.now(), observed_at_ms: Date.now(),
+      model_reported: request.model_id, thread_id: null, usage: { input_tokens: request.role === 'plan' ? 0 : 23,
+        output_tokens: 0, cache_read_input_tokens: 0, cache_creation_input_tokens: null, cost_usd: null } }
+    return request.role === 'build' ? { kind: 'failed' as const, class: 'infra' as const, detail: 'partial transport failure', observation: observed }
+      : { ...result, observation: observed }
+  } }
+  const host = await createProjectBuildHost(options)
+  expect((await host.run({ mode: 'pr', start: 'fresh' }, new AbortController().signal)).kind).toBe('failed')
+  const attempts = f.context.attempts.list(f.row.id)
+  expect(attempts).toHaveLength(2)
+  expect(attempts.find(row => row.role === 'build')!.outcome).toBe('failed')
+  const phases = new TridentPhaseUsageStore(f.db).list(f.row.id)!
+  expect(phases.find(row => row.phase === 'decomposition')).toMatchObject({ input_tokens: 0, output_tokens: 0, status: 'partial' })
+  expect(phases.find(row => row.phase === 'build')).toMatchObject({ input_tokens: 23, output_tokens: 0, status: 'partial' })
+  expect(f.github.prs.some(pr => pr.state === 'MERGED')).toBe(false)
+})
+
+test('attempt accounting reopens the production host and consumes the same transport receipt without replay or double counting', async () => {
+  const f = await fixture()
+  const options = await f.prepare()
+  const real = options.substrate.inRepl!
+  const observedAt = Date.now()
+  options.substrate.inRepl = { ...real, async run(request, placement, signal) {
+    return { ...await real.run(request, placement, signal), observation: {
+      source: 'claude-cli-json', started_at_ms: observedAt, finished_at_ms: observedAt, observed_at_ms: observedAt,
+      model_reported: request.model_id, thread_id: null, usage: { input_tokens: 19, output_tokens: 2,
+        cache_read_input_tokens: 0, cache_creation_input_tokens: 0, cost_usd: null },
+    } }
+  } }
+  let host = await createProjectBuildHost(options)
+  const measured = await host.deps.measure()
+  if (measured.kind !== 'known') throw Error('fixture revision must be measurable')
+  const request: BoundedWorkRequest = { ...host.workers.plan.request, run_id: f.row.id,
+    step_id: `${f.row.id}:plan:0`, role: 'plan', needs_approval_decision: false }
+  const execute = async () => {
+    await host.deps.prepareWork(request, { snapshot: measured.value, previous: null, findings: [] })
+    expect((await host.workers.plan.runner.run(request, 'in-repl', new AbortController().signal)).kind).toBe('completed')
+  }
+  await execute()
+  const first = f.context.attempts.list(f.row.id)
+  await execute()
+  // A new composition and ledger object has no in-memory usage baseline to carry.
+  options.attempts = new TridentAttemptLedger(f.db)
+  host = await createProjectBuildHost(options)
+  await execute()
+  expect(f.context.attempts.list(f.row.id)).toEqual(first)
+  expect(f.world.dispatches).toHaveLength(1)
+  expect(new TridentPhaseUsageStore(f.db).list(f.row.id)!.find(row => row.phase === 'decomposition')).toMatchObject({ input_tokens: 19, output_tokens: 2 })
+})
 
 test('worktree-add diagnostics preserve a terminal predecessor and allow retry after explicit release', async () => {
   const f = await fixture()
@@ -3085,6 +3179,44 @@ test('a driver restarted during a worker turn refuses to re-fire it', async () =
   expect(f.github.prs[0]!.state).toBe('OPEN')
 }, 300_000)
 
+test('attempt accounting reconciles pre-crash provider spend through actual pending gateway recovery without dispatch or approval', async () => {
+  const f = await fixture({ blockRoles: ['review'] })
+  expect((await driveUntilTheProcessDies(f, 'fresh')).kind).toBe('blocked')
+  const pending = lastCheckpoint(f).pending!
+  const attempt = f.context.attempts.list(f.row.id).find(row => row.step_id === pending.step_id)!
+  expect(attempt).toBeDefined()
+  // Simulate the crash window: transport receipt reached disk, but ledger
+  // completion/usage ingestion did not. The pending driver checkpoint is real.
+  f.db.raw().query('UPDATE code_trident_attempts SET outcome = NULL, ended_at = NULL WHERE run_id = ? AND step_id = ?')
+    .run(f.row.id, pending.step_id)
+  const receiptPath = join(f.dir, 'host-provider-observation.json')
+  const observedAt = Date.now()
+  await writeFile(receiptPath, JSON.stringify({ source: 'claude-cli-json', started_at_ms: observedAt, finished_at_ms: observedAt,
+    observed_at_ms: observedAt, model_reported: attempt.resolved_model, thread_id: null,
+    usage: { input_tokens: 31, output_tokens: 7, cache_read_input_tokens: 0, cache_creation_input_tokens: 0, cost_usd: null } }))
+  const prepare = f.prepare
+  let observationReads = 0
+  f.prepare = async () => {
+    const options = await prepare()
+    options.substrate.inRepl = { ...options.substrate.inRepl!, observe: async request => {
+      if (request.run_id !== f.row.id || request.step_id !== pending.step_id) return undefined
+      observationReads++
+      return JSON.parse(await readFile(receiptPath, 'utf8'))
+    } }
+    return options
+  }
+  f.world.dispatches.length = 0
+  const resumed = await restartThroughGateway(f)
+  expect(resumed.kind).toBe('unknown')
+  expect(f.world.dispatches).toHaveLength(0)
+  expect(f.context.attempts.receipt(attempt)).toMatchObject({ input_tokens: 31, output_tokens: 7 })
+  expect(f.context.attempts.get(attempt)).toMatchObject({ outcome: null, ended_at: null })
+  await createProjectBuildHost(await f.prepare())
+  expect(observationReads).toBe(2)
+  expect(f.context.attempts.receipt(attempt)).toMatchObject({ input_tokens: 31, output_tokens: 7 })
+  expect(f.github.prs[0]!.state).toBe('OPEN')
+}, 300_000)
+
 test('a driver resumed from a rejected checkpoint dispatches the deferred fix', async () => {
   const f = await fixture({ blockersByRound: [0, 1], maxRounds: 1 })
 
@@ -3164,10 +3296,9 @@ test('local merge mode reaches merged with no PR, no push and no gh call', async
  *    spawns test processes and is not driven offline here.
  *  • REAL GITHUB. `gh` is faked. Rate limits, cross-repository PRs, branch
  *    protection variants and merge races are not exercised.
- *  • PHASE USAGE WRITES. `metadata()` is `() => undefined` in the real
- *    composition, so every worker outcome reports null usage and
- *    `recordPhaseUsage` skips the write (`build-host.ts:128`). The skip is
- *    covered; the write is not.
+ *  • LIVE PROVIDER METERING. Accounting writes, explicit zero, unavailable
+ *    metrics, partial failures and transport recovery are exercised above;
+ *    a live provider's actual subscription spend still needs live evidence.
  *  • THE PANEL'S OTHER STOPS. `blockersByRound` drives `fix`, `re-plan` and the
  *    round ceiling and G070's repeated-finding stop; separate cases drive a
  *    `COMMENT` verdict and an `unavailable` seat. A seat that remains `deferred`,

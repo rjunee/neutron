@@ -1,4 +1,5 @@
 import { readFile, writeFile } from 'node:fs/promises'
+import { dirname } from 'node:path'
 import { placementFor, type Provider, type WorkerRunner } from '@neutronai/runtime/bounded-work.ts'
 import type { BuildRunInput, BuildRunOutcome } from './build-run.ts'
 import { createBuildHost, type BuildHostOptions } from './build-host.ts'
@@ -7,6 +8,8 @@ import { createProjectObservationSources, type ProjectSuiteOptions } from './pro
 import { briefIntegrity } from './gates/brief-integrity.ts'
 import { assessReviewSuite, type SuiteObservation } from './gates/review-suite.ts'
 import { createProductionHostEffects, productionCiSource, workContextPath, type CleanupOutcome, type ProductionHostOptions } from './production-host-effects.ts'
+import { AttemptAccounting } from './attempt-accounting.ts'
+import type { TridentAttemptLedger } from './attempt-ledger.ts'
 
 /** Bound by the project composition, including its live conversational runner. */
 export interface ProjectBuildSubstrate {
@@ -30,17 +33,16 @@ export interface ProjectBuildHostOptions {
   substrate: ProjectBuildSubstrate
   production: ProductionHostOptions
   /** Policy-specific sources remain explicit, without permissive defaults. */
-  /** Phase usage is a required write for the host, so the composition must supply
-   * its store rather than let the driver run unmeasured. */
-  phaseUsage: BuildHostOptions['phaseUsage']
+  attempts: TridentAttemptLedger
   policy: Pick<BuildHostOptions, 'boundReview'> & {
     reviewSuite?: ProjectSuiteOptions
     publicationSuite?: ProjectSuiteOptions
-    review?: Omit<ProjectReviewSourceOptions, 'runId' | 'projectSlug' | 'cwd' | 'replProvider'>
+    review?: Omit<ProjectReviewSourceOptions, 'runId' | 'projectSlug' | 'cwd' | 'replProvider' | 'accounting' | 'taskId'>
     leak: Pick<BuildHostOptions['leak'], 'scratch_dir' | 'gate_script'>
     mutation: Omit<BuildHostOptions['mutation'], 'run' | 'run_host' | 'base_branch'>
   }
   workers: BuildHostOptions['workers']
+  requestedModels: Record<keyof BuildHostOptions['workers'], string>
   /** Rendered strategies selected only after the driver validates this task's plan. */
   testStrategies?: { full: string; intermediate: string | null }
 }
@@ -84,6 +86,21 @@ export async function createProjectBuildHost(options: ProjectBuildHostOptions) {
   const ci = config.ciSource ?? productionCiSource(config.runHost, config.repo)
   const production = createProductionHostEffects({ ...config, ciSource: ci })
   const runners = projectBuildRunners(options.substrate, Object.values(workers).map(worker => worker.provider))
+  const accounting = new AttemptAccounting(options.attempts, dirname(workers.plan.request.brief.path),
+    (stage, meta) => config.store.recordStageEvent(run.id, stage, meta))
+  const recoveryRunners = projectBuildRunners(options.substrate, options.attempts.list(run.id).map(row => row.provider as Provider))
+  await accounting.reconcile(run.id, provider => recoveryRunners[provider as Provider])
+  async function timed<T>(stage: string, operation: () => Promise<T>): Promise<T> {
+    return accounting.interval(stage, { run_id: config.runId }, operation)
+  }
+  const taskId = () => run.wave_task_id ?? `${run.id}:task:${run.ralph ? production.ralphIteration() : 0}`
+  for (const [provider, runner] of Object.entries(runners)) {
+    runners[provider as Provider] = { provider: runner.provider,
+      supports: (role, placement) => runner.supports(role, placement),
+      liveness: handle => runner.liveness(handle),
+      run: (request, placement, signal) => accounting.run(runner, request, placement, signal),
+    }
+  }
   const { review, reviewSuite, publicationSuite, ...policy } = options.policy
   const observations = createProjectObservationSources({ ci, baseBranch: config.baseBranch,
     ciWorkflow: config.ciWorkflow, runId: run.id, suite: reviewSuite })
@@ -93,8 +110,8 @@ export async function createProjectBuildHost(options: ProjectBuildHostOptions) {
   const host = createBuildHost({
     ...policy,
     ...(review ? { review: createProjectReviewSource({ ...review,
-      runId: run.id, projectSlug: config.projectSlug, cwd: config.worktree, replProvider: options.substrate.provider }) } : {}),
-    workers, runners, phaseUsage: options.phaseUsage,
+      accounting, taskId, runId: run.id, projectSlug: config.projectSlug, cwd: config.worktree, replProvider: options.substrate.provider }) } : {}),
+    workers, runners,
     reviewed_head: run.inner_checkpoint_head,
     leak: { ...options.policy.leak, run_host: config.runHost, repo_path: config.repo, branch: config.branch, base_sha: run.base_sha },
     mutation: { ...options.policy.mutation, run, run_host: config.runHost, base_branch: config.baseBranch },
@@ -102,11 +119,16 @@ export async function createProjectBuildHost(options: ProjectBuildHostOptions) {
     effects: { ...production.effects, async prepareWork(request, context) {
       const strategies = options.testStrategies
       const builder = request.role === 'build' || request.role === 'fix'
-      await production.effects.prepareWork(request, strategies && builder ? {
-        ...context,
-        testStrategy: context.suiteScope === 'subset' && strategies.intermediate !== null
-          ? strategies.intermediate : strategies.full,
-      } : context)
+      const selected = workers[request.role as keyof typeof workers]
+      const phase = request.role === 'plan' ? 'decomposition' : request.role === 'review' ? 'review_adversarial' : 'build'
+      await accounting.prepare(request, selected.provider, placementFor(selected.provider, options.substrate.provider), {
+        phase, task_id: taskId(), head_sha: context.snapshot.head, review_seat: null,
+        requested_model: options.requestedModels[request.role as keyof typeof workers],
+      }, () => production.effects.prepareWork(request, strategies && builder ? {
+          ...context,
+          testStrategy: context.suiteScope === 'subset' && strategies.intermediate !== null
+            ? strategies.intermediate : strategies.full,
+        } : context))
     } },
     modes: production.modes,
     admission: production.admission,
@@ -133,8 +155,16 @@ export async function createProjectBuildHost(options: ProjectBuildHostOptions) {
       && receipt.head === snapshot.head) {
       return assessReviewSuite({ observe: async () => receipt }, snapshot, receipt.round, run.id)
     }
-    return observePublicationSuite(snapshot)
+    return timed('publication-suite', () => observePublicationSuite(snapshot))
   }
+  const readiness = host.deps.reviewReadiness!
+  host.deps.reviewReadiness = (...args) => timed('review-readiness-wait', () => readiness(...args))
+  const reviewGate = host.deps.reviewGate
+  host.deps.reviewGate = (...args) => timed('review-and-synthesis', () => reviewGate(...args))
+  const publishGate = host.deps.publishGate
+  host.deps.publishGate = (...args) => timed('publication-proof', () => publishGate(...args))
+  const mergeGate = host.deps.mergeGate
+  host.deps.mergeGate = (...args) => timed('merge-readiness-wait', () => mergeGate(...args))
   return {
     runners, workers: host.workers, deps: host.deps,
     async run(input: Omit<BuildRunInput, 'run_id' | 'workers' | 'repl_provider' | 'merge_mode'>, signal: AbortSignal): Promise<ProjectBuildOutcome> {
@@ -144,7 +174,7 @@ export async function createProjectBuildHost(options: ProjectBuildHostOptions) {
           if (!('kind' in result)) throw new Error('Project build returned a review-only outcome')
           return result
         },
-        production.cleanup,
+        () => timed('cleanup', production.cleanup),
       )
     },
   }

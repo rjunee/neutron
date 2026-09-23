@@ -15,7 +15,7 @@ import { tmpdir } from 'node:os'
 import { join } from 'node:path'
 import { ProjectDb } from '@neutronai/persistence/index.ts'
 import { TridentRunStore } from '@neutronai/trident/store.ts'
-import { TridentPhaseUsageStore } from '@neutronai/trident/phase-usage.ts'
+import { TridentAttemptLedger } from '@neutronai/trident/attempt-ledger.ts'
 import { seedMigratedDb } from '../../tests/support/migrated-db.ts'
 import { reserveFreePort } from '../../tests/support/test-isolation.ts'
 import * as runners from '@neutronai/runtime/workers/project-runners.ts'
@@ -84,7 +84,7 @@ async function fixture() {
   cleanup.push(() => { runnerSpy.mockRestore(); codexSpy.mockRestore() })
   const commands: string[][] = []
   let spawnProjectSession = async (_projectId: string): Promise<void> => {}
-  const context: ProjectBuildContext = { store, phaseUsage: new TridentPhaseUsageStore(db), projectDir: dir, projectId: 'fixture-project',
+  const context: ProjectBuildContext = { store, attempts: new TridentAttemptLedger(db), projectDir: dir, projectId: 'fixture-project',
     stateRoot: join(dir, 'state'), provider: 'anthropic', providerSource: 'application', env: {}, spawnProjectSession: projectId => spawnProjectSession(projectId), runHost: async argv => {
       commands.push([...argv])
       return { ok: true, exit_code: 0, stdout: argv.includes('symbolic-ref') ? 'refs/heads/change' : '', stderr: '' }

@@ -4,7 +4,7 @@ import { tmpdir } from 'node:os'
 import { join } from 'node:path'
 import { ProjectDb } from '@neutronai/persistence/index.ts'
 import { TridentRunStore } from '@neutronai/trident/store.ts'
-import { TridentPhaseUsageStore } from '@neutronai/trident/phase-usage.ts'
+import { TridentAttemptLedger } from '@neutronai/trident/attempt-ledger.ts'
 import { spawnCapture } from '@neutronai/trident/git-mode.ts'
 import { createMutationProver, spawnGuardCommand, type MutationClaim } from '@neutronai/trident/mutation-prover.ts'
 import { validateTrailer } from '@neutronai/trident/gates/result-contract.ts'
@@ -46,7 +46,7 @@ async function fixture() {
   const row = await store.create({ slug: 'contract', project_slug: 'project', repo_path: repo, task: 'Implement a bounded limit' })
   await store.update(row.id, { base_sha: head })
   const options = await prepareProjectBuild({ run: store.get(row.id)!, base_branch: 'main', db_path: join(dir, 'db'), max_rounds: 3 }, {
-    store, phaseUsage: new TridentPhaseUsageStore(db), projectDir: dir, projectId: 'contract-project',
+    store, attempts: new TridentAttemptLedger(db), projectDir: dir, projectId: 'contract-project',
     stateRoot: join(dir, 'state'), provider: 'anthropic', providerSource: 'application', env: {}, runHost: spawnCapture,
     spawnProjectSession: async () => { throw new Error('brief preparation must not dispatch a worker') },
   }, new AbortController().signal)
