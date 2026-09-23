@@ -145,7 +145,19 @@ export function createCodexHeadlessRunner(options: CodexHeadlessRunnerOptions = 
       // so destroying it would replay work whose outcome was already known.
       const key = createHash('sha256').update(JSON.stringify([req.run_id, req.step_id])).digest('hex')
       const reservation = join(dirname(req.result.path), `codex-headless-step-${key}.json`)
-      const identity = JSON.stringify([req, baseEnv.CODEX_HOME ?? null])
+      // The reservation directory is the durable run state. A replacement host
+      // may choose new brief/result filenames or a different remaining wait
+      // budget there; those are transport coordinates, not a new paid attempt.
+      // Retain the brief's bytes receipt and execution policy: changed work must
+      // never inherit the previous completion merely because run/step match.
+      const identity = JSON.stringify({
+        run: req.run_id, step: req.step_id, role: req.role, provider: 'openai-codex',
+        model: req.model_id, effort: req.effort, thread: req.thread?.id ?? null,
+        credentialHome: baseEnv.CODEX_HOME ?? null, cwd: resolve(req.cwd),
+        briefIntegrity: req.brief.integrity, schema: req.result.schema,
+        writable: req.writable, network: req.network, tools: req.tools,
+        needsApproval: req.needs_approval_decision,
+      })
       const receiptPath = `${reservation}.receipt`
       const held = await reserveTrailerSlot(reservation, identity, req.result.path)
       if (held.kind === 'unknown') return { kind: 'unknown', detail: held.detail }

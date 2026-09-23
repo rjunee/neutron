@@ -571,8 +571,10 @@ run_build_child() {
     echo "CODEX_BUILD_DATA_HOME_FAILED: could not create the isolated build data home at $BUILD_DATA_HOME. DEFERRED." >&2
     return 1
   fi
-  env -u OWNER_HOME -u NEUTRON_DB_PATH -u GH_TOKEN -u GITHUB_TOKEN \
-    NEUTRON_HOME="$BUILD_DATA_HOME" "$@"
+  # Resume has no --cd flag. Pin the process cwd explicitly for both call shapes,
+  # even if a future setup step changes the wrapper's current directory.
+  (cd "$WORKTREE" && env -u OWNER_HOME -u NEUTRON_DB_PATH -u GH_TOKEN -u GITHUB_TOKEN \
+    NEUTRON_HOME="$BUILD_DATA_HOME" "$@")
 }
 
 # A full-length lowercase-hex sha, or the empty string. Charset AND length, because

@@ -134,6 +134,29 @@ describe('Codex headless WorkerRunner', () => {
     expect(readFileSync(f.threads, 'utf8')).toBe('\n')
   })
 
+  test('restart recovers after transport filenames and remaining budget change', async () => {
+    const f = fixture()
+    const request = f.request()
+    const runner = createCodexHeadlessRunner({ buildScript: f.script, probe: { ok: true } })
+    const first = await runner.run(request, 'headless', new AbortController().signal)
+    expect(first.kind).toBe('completed')
+    const restarted = createCodexHeadlessRunner({ buildScript: f.script, probe: { ok: true } })
+    const relocated = { ...request,
+      budget: { wall_ms: 2_000 },
+      brief: { ...request.brief, path: join(request.cwd, 'replacement-brief') },
+      result: { ...request.result, path: join(request.cwd, 'replacement-result') },
+    }
+    expect(await restarted.run(relocated, 'headless', new AbortController().signal)).toEqual(first)
+    expect(readFileSync(f.threads, 'utf8')).toBe('\n')
+    // A different semantic request at the same durable coordinates is refused.
+    for (const changed of [
+      { ...relocated, model_id: 'other-model' },
+      { ...relocated, brief: { ...relocated.brief, integrity: '8:changed' } },
+      { ...relocated, network: true },
+    ]) expect((await restarted.run(changed, 'headless', new AbortController().signal)).kind).toBe('unknown')
+    expect(readFileSync(f.threads, 'utf8')).toBe('\n')
+  })
+
   test('corrupt observation and changed account identity cannot reuse a receipt', async () => {
     const f = fixture()
     const runner = createCodexHeadlessRunner({ buildScript: f.script, probe: { ok: true }, env: { PATH: process.env.PATH, CODEX_HOME: 'seat-one' } })
