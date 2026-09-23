@@ -43,9 +43,9 @@ function insertRun(phase: string, slug = SLUG): void {
   seq += 1
   db.prepare<never, [string, string, string, string, string, string, string]>(
     `INSERT INTO code_trident_runs
-       (id, slug, project_slug, phase, round, max_rounds, ralph, ralph_round,
-        max_ralph_rounds, merge_mode, repo_path, task, started_at, last_advanced_at)
-     VALUES (?, ?, ?, ?, 1, 3, 0, 0, 20, 'pr', '/repo', ?, ?, ?)`,
+       (id, slug, project_slug, phase, round, max_rounds, execution_strategy,
+        task_iteration, max_task_iterations, merge_mode, repo_path, task, started_at, last_advanced_at)
+     VALUES (?, ?, ?, ?, 1, 3, 'single', 0, 20, 'pr', '/repo', ?, ?, ?)`,
   ).run(`run-${seq}`, slug, PROJ, phase, 'a task', '2026-08-11T00:00:00Z', '2026-08-11T00:00:00Z')
 }
 
@@ -86,9 +86,9 @@ describe('slug uniqueness applies to LIVE runs only', () => {
       db
         .prepare<never, [string, string, string, string, string, string, string]>(
           `INSERT INTO code_trident_runs
-             (id, slug, project_slug, phase, round, max_rounds, ralph, ralph_round,
-              max_ralph_rounds, merge_mode, repo_path, task, started_at, last_advanced_at)
-           VALUES (?, ?, ?, ?, 1, 3, 0, 0, 20, 'pr', '/repo', ?, ?, ?)`,
+             (id, slug, project_slug, phase, round, max_rounds, execution_strategy,
+              task_iteration, max_task_iterations, merge_mode, repo_path, task, started_at, last_advanced_at)
+           VALUES (?, ?, ?, ?, 1, 3, 'single', 0, 20, 'pr', '/repo', ?, ?, ?)`,
         )
         .run(`run-${seq}`, SLUG, 'other-project', 'forge-init', 't', '2026-08-11T00:00:00Z', '2026-08-11T00:00:00Z'),
     ).not.toThrow()
