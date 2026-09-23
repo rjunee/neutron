@@ -1068,12 +1068,10 @@ export class CodexCredentialService {
     // Fire-and-forget: the resolver is synchronous by contract (the orchestrator
     // calls it at fire time) and a failed re-encrypt must not fail a run — the
     // stored copy simply stays stale until the next resolve tries again.
-    // Carry the EXISTING label through. The store's upsert overwrites `label` on
-    // conflict, so passing null here would erase the name the owner connected the
-    // seat under and leave it anonymous in every generic credential view — a
-    // silent cosmetic regression on a path that runs on its own schedule.
-    const existingLabel =
-      this.store.getMeta(owner_slug, target.project_id, service)?.label ?? null
+    // Refresh token bytes, not the grant: preserve its label AND expiry. Turning
+    // a finite grant into an unlimited one would silently extend owner authority.
+    const existing = this.store.getMeta(owner_slug, target.project_id, service)
+    if (existing === null || existing.scope !== target.scope) return
     fireAndForget(
       'codex_credential_harvest_back',
       this.store
@@ -1082,8 +1080,8 @@ export class CodexCredentialService {
           plaintext: validated.normalized,
           scope: target.scope,
           project_id: target.project_id,
-          label: existingLabel,
-          expires_at: null,
+          label: existing.label,
+          expires_at: existing.expires_at,
         })
         .then(() => {
           // Length only — never the bundle, and never any field of it.

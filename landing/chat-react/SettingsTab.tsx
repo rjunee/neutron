@@ -415,9 +415,14 @@ export function SettingsTab({
   const [codexAuth, setCodexAuth] = useState('')
   const [codexBusy, setCodexBusy] = useState(false)
   const [codexError, setCodexError] = useState<string | null>(null)
+  const currentCodexStatus = codexStatusProject === projectId ? codexStatus : null
+  const currentCodexError = codexStatusProject === projectId ? codexError : null
 
   const loadCodex = useCallback((): void => {
     const seq = ++codexSequence.current
+    setCodexStatus(null)
+    setCodexStatusProject(projectId)
+    setCodexError(null)
     void codexClient
       .status(projectId)
       .then((s) => {
@@ -425,10 +430,11 @@ export function SettingsTab({
         setCodexStatus(s)
         setCodexStatusProject(projectId)
       })
-      .catch(() => {
+      .catch((err: unknown) => {
         if (!mountedRef.current || seq !== codexSequence.current) return
         setCodexStatus(null)
         setCodexStatusProject(projectId)
+        setCodexError(err instanceof Error ? err.message : 'Could not check the project Codex connection')
       })
   }, [codexClient, projectId])
 
@@ -436,6 +442,8 @@ export function SettingsTab({
     if (codexAuth.trim().length === 0) return
     setCodexBusy(true)
     setCodexError(null)
+    setCodexStatus(null)
+    setCodexStatusProject(projectId)
     const seq = ++codexSequence.current
     void codexClient
       .connect(projectId, codexAuth.trim())
@@ -460,6 +468,8 @@ export function SettingsTab({
   const disconnectCodex = useCallback((): void => {
     setCodexBusy(true)
     setCodexError(null)
+    setCodexStatus(null)
+    setCodexStatusProject(projectId)
     const seq = ++codexSequence.current
     void codexClient
       .disconnect(projectId)
@@ -1072,7 +1082,7 @@ export function SettingsTab({
       </section>
 
       <ProjectChatSettings key={projectId} projectId={projectId} origin={config.origin} token={config.token}
-        fetchImpl={withSignal} codexStatus={codexStatusProject === projectId ? codexStatus : null} />
+        fetchImpl={withSignal} codexStatus={currentCodexStatus} />
       {/* ── Codex review OVERRIDE (optional — the primary/global connect lives
           in the General → Admin tab; this only overrides it for THIS project) ── */}
       <section className="cset-section" aria-label="Codex review override">
@@ -1084,29 +1094,31 @@ export function SettingsTab({
           subscription’s <code>~/.codex/auth.json</code>. A metered <code>OPENAI_API_KEY</code> is
           rejected — subscription only.
         </p>
-        <p className="cset-codex-status" data-status={codexStatus?.status ?? 'not_connected'}>
-          {codexStatus?.status === 'connected'
-            ? codexStatus.scope === 'project'
+        <p className="cset-codex-status" data-status={currentCodexStatus?.status ?? 'unknown'}>
+          {currentCodexStatus === null
+            ? currentCodexError !== null ? 'Connection status unavailable' : 'Checking project connection…'
+            : currentCodexStatus.status === 'connected'
+            ? currentCodexStatus.scope === 'project'
               ? '✓ Connected (project override)'
-              : codexStatus.override_present === true
+              : currentCodexStatus.override_present === true
                 ? '⚠ Override expired — using the global default'
                 : '✓ Connected (using the global default)'
-            : codexStatus?.status === 'expired'
+            : currentCodexStatus.status === 'expired'
               ? '⚠ Token expired — re-connect'
               : // NOT the same sentence as `expired`: the token has not run out, the
                 // server has disowned it, and only a fresh `codex login` fixes it.
-                codexStatus?.status === 'revoked'
+                currentCodexStatus.status === 'revoked'
                 ? '⚠ Session REVOKED server-side — re-connect (waiting will not fix it)'
-                : codexStatus?.override_present === true
+                : currentCodexStatus.override_present === true
                 ? '○ Override set but not usable — using the global default'
                 : '○ Not connected'}
-          {codexStatus?.detail !== undefined ? ` — ${codexStatus.detail}` : ''}
+          {currentCodexStatus?.detail !== undefined ? ` — ${currentCodexStatus.detail}` : ''}
         </p>
-        {codexError !== null ? <p className="cset-error">{codexError}</p> : null}
+        {currentCodexError !== null ? <p className="cset-error">{currentCodexError}</p> : null}
         {/* Show removal whenever a project-override ROW exists — including an
             expired one the resolver skipped (which masks itself behind the global
             default), so a stale override is never un-removable. */}
-        {codexStatus?.override_present === true ? (
+        {currentCodexStatus?.override_present === true ? (
           <div className="cset-form-actions">
             <button
               type="button"

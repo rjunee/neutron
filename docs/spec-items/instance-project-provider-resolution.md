@@ -42,6 +42,8 @@ same account preserves that identity; removing the grant or replacing its accoun
 refuses admission without opening a replacement owner. Exact-turn interruption and
 declining a pending approval remain available to settle existing work. Reviewer inheritance and
 rotation retain their existing scope.
+Harvesting refreshed token bytes preserves the existing grant expiry; refresh does
+not extend a finite project grant.
 
 The project Codex status includes `owner_credential`: configuration (`true`, `false`,
 or `null` when inspection could not conclude), observation time and explanation. This
@@ -64,6 +66,8 @@ is a local credential check, not a claim of live owner/build/restart acceptance 
   Verify: `gateway/wiring/__tests__/build-llm-call-substrate-provider.test.ts`.
 - [x] Web and phone settings save either harness and inheritance through the project
   route, show failed writes without claiming success, and keep project changes isolated.
+  Pending and failed credential reads expose no previous project's status or removal
+  control; a failed read remains unknown, not disconnected.
   Verify: `landing/chat-react/__tests__/project-chat-settings.test.tsx`,
   `app/__tests__/project-chat-settings.test.tsx`.
 - [x] A global reviewer connection remains insufficient for a native project owner.

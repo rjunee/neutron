@@ -623,6 +623,28 @@ describe('project directory ownership', () => {
     expect(() => svc.resolveProjectOwnerCredential(OWNER, 'alpha')).toThrow('Connect a Codex subscription')
   })
 
+  test('native same-account refresh preserves finite project grant expiry and refuses after it', async () => {
+    let now = Date.parse('2026-09-23T00:00:00.000Z')
+    store = new ProjectCredentialStore(db, { crypto: new SecretsStore({ data_dir: tmp, db }), now: () => new Date(now).toISOString() })
+    const svc = new CodexCredentialService({ store, codexHome, now: () => now, rotation: new SqliteCodexRotationStore(db) })
+    const expires_at = '2026-09-23T01:00:00.000Z'
+    await store.set(OWNER, { service: CODEX_CREDENTIAL_SERVICE, plaintext: subscriptionAuth(), scope: 'project',
+      project_id: 'alpha', label: 'Finite project grant', expires_at })
+    const first = svc.resolveProjectOwnerCredential(OWNER, 'alpha')
+    const refreshed = JSON.parse(subscriptionAuth())
+    refreshed.tokens.access_token = 'new-access'
+    refreshed.last_refresh = new Date(now).toISOString()
+    writeFileSync(codexAuthPath(first.codexHome), JSON.stringify(refreshed))
+    expect(svc.resolveProjectOwnerCredential(OWNER, 'alpha')).toEqual(first)
+    await new Promise(resolve => setTimeout(resolve, 0))
+    expect(JSON.parse(store.resolveProject(OWNER, 'alpha', CODEX_CREDENTIAL_SERVICE)!.plaintext).tokens.access_token).toBe('new-access')
+    expect(store.getMeta(OWNER, 'alpha', CODEX_CREDENTIAL_SERVICE)).toMatchObject({ label: 'Finite project grant', expires_at })
+    expect(svc.projectOwnerCredentialStatus(OWNER, 'alpha').configured).toBe(true)
+    now = Date.parse(expires_at) + 1
+    expect(svc.projectOwnerCredentialStatus(OWNER, 'alpha').configured).toBe(false)
+    expect(() => svc.resolveProjectOwnerCredential(OWNER, 'alpha')).toThrow('Connect a Codex subscription')
+  })
+
   test('an inconclusive project credential read is unknown, not a missing connection', async () => {
     const svc = newService()
     const read = spyOn(store, 'resolveProject').mockImplementation(() => { throw new Error('Private filesystem location must not escape') })
