@@ -2,7 +2,7 @@ import { afterEach, expect, test } from 'bun:test'
 import { copyFile, mkdir, mkdtemp, rename, rm, stat, symlink, utimes, writeFile } from 'node:fs/promises'
 import { join } from 'node:path'
 import { tmpdir } from 'node:os'
-import { projectSuiteIdentity } from '../wiring/project-build-dependencies.ts'
+import { projectInstalledTreeIdentity, projectSuiteIdentity } from '../wiring/project-build-dependencies.ts'
 import { spawnCapture } from '../../trident/git-mode.ts'
 
 const roots: string[] = []
@@ -94,4 +94,62 @@ test('suite identity detects internal dependency changes even when entrypoint an
   expect(await projectSuiteIdentity(root)).toBe(changed)
   await symlink(tmpdir(), join(dependency, 'external'))
   expect(await projectSuiteIdentity(root)).toBeNull()
+})
+
+test('native dependency observation is one bounded argv call and preserves unusual filenames', async () => {
+  const { root } = await fixture()
+  const modules = join(root, 'node_modules')
+  await mkdir(modules)
+  await Promise.all(Array.from({ length: 40 }, (_, index) => writeFile(join(modules, `file-${index}.js`), 'one')))
+  const unusual = join(modules, 'spaces\nand;$()"quotes.js')
+  await writeFile(unusual, 'one')
+  const calls: Parameters<typeof spawnCapture>[] = []
+  const observed = Object.assign(async (...args: Parameters<typeof spawnCapture>) => {
+    calls.push(args)
+    return spawnCapture(...args)
+  }, { writesDiffOutput: true as const })
+  const before = await projectInstalledTreeIdentity(root, observed)
+  expect(before).toMatch(/^[a-f0-9]{64}$/)
+  expect(calls).toHaveLength(1)
+  expect(calls[0]![0]).toEqual(['find', '-P', modules, '-printf', '%p\\0%D\\0%i\\0%m\\0%s\\0%T@\\0%C@\\0%y\\0%l\\0'])
+  expect(calls[0]![3]).toBeGreaterThan(0)
+  expect(calls[0]![3]).toBeLessThanOrEqual(5000)
+  expect(await projectInstalledTreeIdentity(root)).toBe(before)
+  await writeFile(unusual, 'two')
+  expect(await projectInstalledTreeIdentity(root)).not.toBe(before)
+})
+
+for (const failure of ['timeout', 'exit', 'malformed'] as const) {
+  test(`native dependency observation refuses ${failure} instead of reusing a partial transcript`, async () => {
+    const { root } = await fixture()
+    await mkdir(join(root, 'node_modules'))
+    const run = Object.assign(async (...args: Parameters<typeof spawnCapture>) => {
+      const valid = await spawnCapture(...args)
+      expect(valid.ok).toBe(true)
+      return { ...valid, ok: failure !== 'exit', exit_code: failure === 'exit' ? 1 : 0,
+        ...(failure === 'malformed' ? { stdout: 'partial' } : {}),
+        ...(failure === 'timeout' ? { timed_out: true } : {}) }
+    }, { writesDiffOutput: true as const })
+    expect(await projectInstalledTreeIdentity(root, run)).toBeNull()
+    expect(await projectInstalledTreeIdentity(root)).toMatch(/^[a-f0-9]{64}$/)
+  })
+}
+
+test('native dependency observation follows only validated local link targets and tracks their internals', async () => {
+  const { root } = await fixture()
+  await mkdir(join(root, 'node_modules'))
+  const workspace = join(root, 'workspace-package')
+  await mkdir(workspace)
+  await writeFile(join(workspace, 'implementation.js'), 'one')
+  await symlink(workspace, join(root, 'node_modules', 'local'))
+  const before = await projectInstalledTreeIdentity(root)
+  expect(before).toMatch(/^[a-f0-9]{64}$/)
+  expect(await projectInstalledTreeIdentity(root)).toBe(before)
+  await writeFile(join(workspace, 'implementation.js'), 'two')
+  expect(await projectInstalledTreeIdentity(root)).not.toBe(before)
+  const external = await mkdtemp(join(tmpdir(), 'suite-external-'))
+  roots.push(external)
+  await writeFile(join(external, 'code.js'), 'outside')
+  await symlink(external, join(workspace, 'external'))
+  expect(await projectInstalledTreeIdentity(root)).toBeNull()
 })

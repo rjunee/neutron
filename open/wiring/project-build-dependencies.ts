@@ -88,34 +88,59 @@ async function preparationKey(worktree: string, workspaces: unknown[], executabl
   return hash.digest('hex')
 }
 
-/** Observe every installed dependency file, not just package entrypoints. ctime
- * and inode prevent restored mtimes from hiding a write or replacement. Internal
- * directory links are traversed once; external targets cannot authorize reuse. */
-async function installedTreeKey(worktree: string): Promise<string | null> {
+/** A bounded native metadata walk avoids one JS filesystem round trip per file.
+ * NUL fields preserve arbitrary whitespace; undecodable names refuse reuse.
+ * find never follows links: the host validates their targets before measuring
+ * additional local roots, so an external tree is never traversed. */
+export async function projectInstalledTreeIdentity(worktree: string,
+  run: typeof spawnCapture = spawnCapture): Promise<string | null> {
+  try {
   const root = await realpath(worktree)
   const modules = join(root, 'node_modules')
   if (!await exists(modules)) return 'absent'
   if (!(await lstat(modules)).isDirectory()) return null
   const hash = createHash('sha256')
-  const pending = [modules]
-  const visited = new Set<string>()
-  for (let cursor = 0; cursor < pending.length; cursor++) {
-    const path = pending[cursor]!
-    const actual = await realpath(path)
-    if (!actual.startsWith(`${root}${sep}`)) return null
-    const link = await lstat(path, { bigint: true })
-    hash.update(JSON.stringify([path.slice(root.length), actual.slice(root.length),
-      ...[link.dev, link.ino, link.mode, link.size, link.mtimeNs, link.ctimeNs].map(String)]))
-    if (visited.has(actual)) continue
-    visited.add(actual)
-    const stat = await lstat(actual, { bigint: true })
-    hash.update(JSON.stringify([actual.slice(root.length),
-      ...[stat.dev, stat.ino, stat.mode, stat.size, stat.mtimeNs, stat.ctimeNs].map(String)]))
-    if (stat.isDirectory()) {
-      for (const entry of (await readdir(actual)).sort()) pending.push(join(actual, entry))
-    } else if (!stat.isFile()) return null
+  const covered: string[] = []
+  let pending = [modules]
+  const deadline = performance.now() + 5000
+  while (pending.length > 0) {
+    const remaining = Math.floor(deadline - performance.now())
+    if (remaining <= 0) return null
+    const batch = pending.sort()
+    pending = []
+    covered.push(...batch)
+    const measured = await run(['find', '-P', ...batch, '-printf', '%p\\0%D\\0%i\\0%m\\0%s\\0%T@\\0%C@\\0%y\\0%l\\0'],
+      root, { LC_ALL: 'C' }, remaining)
+    if (!measured.ok || measured.timed_out || measured.stdout.length > 64 * 1024 * 1024
+      || !measured.stdout.endsWith('\0') || measured.stdout.includes('\uFFFD')) return null
+    hash.update(measured.stdout)
+    const fields = measured.stdout.split('\0')
+    fields.pop()
+    if (fields.length === 0 || fields.length % 9 !== 0) return null
+    const links: string[] = []
+    for (let index = 0; index < fields.length; index += 9) {
+      const path = fields[index]!
+      if (!batch.some(base => path === base || path.startsWith(`${base}${sep}`))) return null
+      if (!fields.slice(index + 1, index + 5).every(value => /^\d+$/.test(value))
+        || !fields.slice(index + 5, index + 7).every(value => /^-?\d+(?:\.\d+)?$/.test(value))) return null
+      const kind = fields[index + 7]
+      if (kind === 'l') links.push(path)
+      else if (kind !== 'f' && kind !== 'd') return null
+    }
+    // Resolve only links, in bounded groups; ordinary files require no JS stat.
+    for (let offset = 0; offset < links.length; offset += 64) {
+      if (performance.now() >= deadline) return null
+      const targets = await Promise.all(links.slice(offset, offset + 64).map(path => realpath(path)))
+      for (const actual of targets) {
+        if (!actual.startsWith(`${root}${sep}`)) return null
+        if (!covered.some(base => actual === base || actual.startsWith(`${base}${sep}`))
+          && !pending.includes(actual)) pending.push(actual)
+      }
+    }
   }
+  if (performance.now() >= deadline) return null
   return hash.digest('hex')
+  } catch { return null }
 }
 
 /** Fresh host measurement for suite reuse. Unknown or dirty inputs never reuse
@@ -135,7 +160,7 @@ export async function projectSuiteIdentity(worktree: string, expectedHead?: stri
     if (!Array.isArray(workspaces)) return null
     const key = await preparationKey(worktree, workspaces, bun)
     const resolution = await resolutionKey(worktree, workspaces, bun)
-    const installed = await installedTreeKey(worktree)
+    const installed = await projectInstalledTreeIdentity(worktree)
     // Repositories without a manifest have no package resolution contract.
     if (!key || !installed || (await exists(manifestPath) && !resolution)) return null
     const modules = join(worktree, 'node_modules')
