@@ -82,8 +82,8 @@
  */
 
 import { createHash, createHmac, randomBytes, timingSafeEqual } from 'node:crypto'
-import { readFile, realpath, writeFile } from 'node:fs/promises'
-import { join, resolve, sep } from 'node:path'
+import { lstat, readFile, realpath, writeFile } from 'node:fs/promises'
+import { dirname, join, resolve, sep } from 'node:path'
 
 import type { HostCommandResult } from './git-mode.ts'
 import { gitRangeArgv } from './git-range.ts'
@@ -94,7 +94,7 @@ import type { TridentRun } from './store.ts'
 export const MUTATION_PROOF_SCHEMA = 'trident.mutation-proof/1'
 
 /** Prover implementation version, recorded in (and signed into) the evidence. */
-export const MUTATION_PROVER_VERSION = 1
+export const MUTATION_PROVER_VERSION = 2
 
 /**
  * Wall-clock ceiling for the WHOLE proof — guard, control and the restored
@@ -400,6 +400,8 @@ export interface CommandObservation {
   /** sha256 of stdout+stderr — a red and a green run cannot share one. */
   output_sha256: string
   timed_out: boolean
+  /** Fixed vocabulary only: never persist branch stdout, paths, or secrets. */
+  failure_kind?: 'database-schema-mismatch' | 'module-resolution-failed' | 'command-failed'
 }
 
 /** What the prover OBSERVED. Absent (`null`) when it never got to run. */
@@ -589,18 +591,20 @@ export function canonicalPayload(e: Omit<MutationEvidence, 'proof_token'>): stri
           o.file_sha256_before,
           o.file_sha256_mutated,
           o.file_sha256_restored,
-          [o.guard_mutated.argv, o.guard_mutated.exit_code, o.guard_mutated.output_sha256, o.guard_mutated.timed_out],
+          [o.guard_mutated.argv, o.guard_mutated.exit_code, o.guard_mutated.output_sha256, o.guard_mutated.timed_out, o.guard_mutated.failure_kind ?? null],
           [
             o.control_mutated.argv,
             o.control_mutated.exit_code,
             o.control_mutated.output_sha256,
             o.control_mutated.timed_out,
+            o.control_mutated.failure_kind ?? null,
           ],
           [
             o.guard_restored.argv,
             o.guard_restored.exit_code,
             o.guard_restored.output_sha256,
             o.guard_restored.timed_out,
+            o.guard_restored.failure_kind ?? null,
           ],
         ],
   ])
@@ -2713,17 +2717,9 @@ const PROOF_PROVISIONING_CONFIG = [
 
 /**
  * Where a run's throwaway PROOF worktree lives. Sibling of the merge worktree
- * convention (`merge.ts:runWorktreePath`), and INSIDE the repo for a second
- * reason beyond that one: a guard command has to be runnable there. Because the
- * worktree sits under `<repo>/.trident-worktrees/`, the runtime's upward module
- * resolution finds the base checkout's `node_modules`, so `bun test …` works in
- * a tree that was never installed into.
- *
- * The residual, and which way it fails: a guard that reaches the mutated file
- * through a WORKSPACE ALIAS (`@neutronai/x/…`) resolves to the base checkout,
- * not to this worktree, so it would not see the mutation — and would stay GREEN,
- * which reads as "the guard does not guard this" and BLOCKS the merge. Wrong for
- * the right reason: a proof we could not make is never a proof we made.
+ * convention (`merge.ts:runWorktreePath`). Workspace dependencies are provisioned
+ * in this tree before observing tests and again after restoration: ancestor
+ * workspace links would load a different commit's code and migrations.
  */
 export function proofWorktreePath(repo_path: string, run: Pick<TridentRun, 'id' | 'slug'>): string {
   const id8 = run.id.replace(/[^A-Za-z0-9_-]/g, '').slice(0, 8) || 'run'
@@ -2850,7 +2846,107 @@ export function createMutationProver(deps: MutationProverDeps): MutationProver {
       exit_code: res.exit_code,
       output_sha256: sha256(`${res.stdout}\n${res.stderr}`),
       timed_out: false,
+      ...(res.exit_code !== 0 ? { failure_kind: classifyMutationFailure(`${res.stdout}\n${res.stderr}`) } : {}),
     }
+  }
+
+  async function prepareWorkspace(wt: string, deadline: number): Promise<string | null> {
+    let manifest: Record<string, unknown>
+    const text = await fs.read(join(wt, 'package.json')).catch(() => null)
+    if (text === null) return null // Non-JavaScript repositories do not need a JS install.
+    try { manifest = JSON.parse(text) }
+    catch { return 'proof package manifest is malformed' }
+    if (manifest === null || typeof manifest !== 'object') return 'proof package manifest is malformed'
+    if (manifest.workspaces === undefined) return null
+    const lock = await fs.read(join(wt, 'bun.lock')).catch(() => null)
+    const binaryLock = lock === null ? await fs.read(join(wt, 'bun.lockb')).catch(() => null) : null
+    if (lock === null && binaryLock === null) {
+      // Workspace syntax is shared by npm and other supported runners. It is
+      // not evidence of Bun ownership; never require them to add a Bun lock.
+      return typeof manifest.packageManager === 'string' && manifest.packageManager.startsWith('bun@')
+        ? 'proof Bun workspace requires a committed Bun lockfile for a frozen install' : null
+    }
+    const workspaces = Array.isArray(manifest.workspaces) ? manifest.workspaces
+      : (manifest.workspaces as { packages?: unknown } | null)?.packages
+    if (!Array.isArray(workspaces) || workspaces.some(p => typeof p !== 'string'
+      || p.startsWith('/') || p.split('/').includes('..') || p.includes('\\'))) {
+      return 'proof workspace declarations are invalid or escape the pinned tree'
+    }
+    // Never synthesize a dependency graph or run lifecycle scripts from the
+    // branch. A frozen, local install also avoids ancestor workspace aliases.
+    const packages: Array<{ name: string; dir: string; manifest: Record<string, unknown> }> = []
+    for (const pattern of workspaces as string[]) {
+      // A manifest glob skips linked directories, whereas Bun follows explicitly
+      // named workspaces. Inspect each directory-pattern prefix first, including
+      // the symlink entries themselves, without traversing their targets.
+      const segments = pattern.split('/')
+      for (let depth = 1; depth <= segments.length; depth++) {
+        const prefix = segments.slice(0, depth).join('/')
+        for await (const directory of new Bun.Glob(prefix).scan({ cwd: wt, onlyFiles: false, followSymlinks: false })) {
+          if ((await lstat(join(wt, directory))).isSymbolicLink()) return 'proof workspace directory path contains a symlink'
+        }
+      }
+      for await (const file of new Bun.Glob(`${pattern}/package.json`).scan({ cwd: wt, onlyFiles: true, followSymlinks: false })) {
+        if (!await withinWorktree(join(wt, file), wt)) return 'proof workspace package escapes the pinned tree'
+        const pkg = JSON.parse(await fs.read(join(wt, file))) as Record<string, unknown>
+        if (typeof pkg.name !== 'string' || !/^(?:@[A-Za-z0-9._-]+\/)?[A-Za-z0-9._-]+$/.test(pkg.name)
+          || pkg.name.split('/').some(p => p === '.' || p === '..')) return 'proof workspace package name is invalid'
+        packages.push({ name: pkg.name, dir: resolve(wt, file, '..'), manifest: pkg })
+      }
+    }
+    if (packages.length === 0) return 'proof workspace declarations selected no package manifests'
+    // Fresh git worktrees have no installed dependencies. Refuse branch-owned
+    // destinations BEFORE the installer can follow a root, scope, or nested
+    // node_modules symlink and write into a shared checkout. Checking after the
+    // install would only diagnose corruption that had already happened.
+    for (const dir of [wt, ...packages.map(pkg => pkg.dir)]) {
+      const destination = await lstat(join(dir, 'node_modules')).catch(error => {
+        if ((error as NodeJS.ErrnoException).code === 'ENOENT') return null
+        throw error
+      })
+      if (destination !== null) return 'proof install destination already exists in the committed tree'
+    }
+    const installed = await observe(['bun', 'install', '--frozen-lockfile', '--ignore-scripts', '--backend=copyfile', '--no-progress'], wt, deadline)
+    if (installed.exit_code !== 0 || installed.timed_out) {
+      return `proof workspace frozen install failed (exit ${installed.exit_code}, timed_out=${installed.timed_out}, output_sha256=${installed.output_sha256})`
+    }
+    // Verify the package manager's result independently. A root directory
+    // symlink or workspace link pointing at the ancestor is not a local install.
+    try {
+      const modules = await lstat(join(wt, 'node_modules')).catch(error => {
+        if ((error as NodeJS.ErrnoException).code === 'ENOENT') return null
+        throw error
+      })
+      if (modules?.isSymbolicLink()) return 'proof node_modules is not worktree-local'
+      const byName = new Map(packages.map(pkg => [pkg.name, pkg.dir]))
+      if (byName.size !== packages.length) return 'proof workspace package names are duplicated'
+      for (const owner of [{ dir: wt, manifest }, ...packages]) {
+        for (const field of ['dependencies', 'devDependencies', 'optionalDependencies', 'peerDependencies']) {
+          const dependencies = owner.manifest[field]
+          if (dependencies === null || typeof dependencies !== 'object') continue
+          for (const name of Object.keys(dependencies)) {
+            const target = byName.get(name)
+            if (target === undefined) continue
+            // Bun's isolated linker legitimately puts these under each package,
+            // not all at the root. Walk only within this proof tree.
+            let cursor = owner.dir
+            let found = false
+            while (cursor === wt || cursor.startsWith(`${wt}${sep}`)) {
+              const link = join(cursor, 'node_modules', name)
+              const resolved = await realpath(link).catch(() => null)
+              if (resolved !== null) {
+                if (resolved !== await realpath(target)) return 'proof workspace dependency resolves outside its pinned package'
+                found = true
+                break
+              }
+              cursor = dirname(cursor)
+            }
+            if (!found) return 'proof workspace dependency could not be resolved inside its pinned tree'
+          }
+        }
+      }
+    } catch { return 'proof workspace dependency could not be verified in the pinned tree' }
+    return null
   }
 
   /**
@@ -3431,6 +3527,11 @@ export function createMutationProver(deps: MutationProverDeps): MutationProver {
       return refuse(run_id, claim, `mutating ${claim.file} did not change its bytes — the mutation did not apply`)
     }
 
+    const dependencies = await prepareWorkspace(wt, deadline).catch(() => 'proof workspace provisioning failed')
+    if (dependencies !== null) return refuse(run_id, claim, dependencies)
+    const installedTree = await checkoutIsTheCommit(wt, headSha)
+    if (installedTree !== null) return refuse(run_id, claim, installedTree)
+
     try {
       await fs.write(target, mutated)
     } catch (err) {
@@ -3524,6 +3625,10 @@ export function createMutationProver(deps: MutationProverDeps): MutationProver {
     if (fresh !== null) {
       return refuse(run_id, claim, fresh)
     }
+    const restoredDependencies = await prepareWorkspace(wt, deadline).catch(() => 'proof workspace provisioning failed')
+    if (restoredDependencies !== null) return refuse(run_id, claim, restoredDependencies)
+    const installedRestoredTree = await checkoutIsTheCommit(wt, headSha)
+    if (installedRestoredTree !== null) return refuse(run_id, claim, installedRestoredTree)
 
     let restored: string
     try {
@@ -3597,6 +3702,21 @@ export function createMutationProver(deps: MutationProverDeps): MutationProver {
 function stripToken(e: MutationEvidence): Omit<MutationEvidence, 'proof_token'> {
   const { proof_token: _token, ...rest } = e
   return rest
+}
+
+function classifyMutationFailure(output: string): NonNullable<CommandObservation['failure_kind']> {
+  if (/column [^\n]{0,240} does not exist|relation [^\n]{0,240} does not exist|no such (?:column|table)|has no column named/i.test(output)) return 'database-schema-mismatch'
+  if (/Cannot find (?:module|package)|ModuleNotFoundError|ERR_MODULE_NOT_FOUND/.test(output)) return 'module-resolution-failed'
+  return 'command-failed'
+}
+
+/** Bounded machine evidence for the consuming host; no branch output or argv. */
+export function mutationFailureSummary(evidence: MutationEvidence | null): string {
+  if (evidence?.observed === null || evidence?.observed === undefined) return ''
+  return (['guard_mutated', 'control_mutated', 'guard_restored'] as const).map(phase => {
+    const observed = evidence.observed![phase]
+    return `${phase}: exit=${observed.exit_code}, timed_out=${observed.timed_out}, kind=${observed.failure_kind ?? 'none'}, output_sha256=${observed.output_sha256}`
+  }).join('; ')
 }
 
 /**
@@ -3751,6 +3871,9 @@ function checkObservation(value: unknown, field: string): string | null {
     return `observed.${field}.output_sha256 is not a sha256 digest (placeholder or hand-written)`
   }
   if (typeof c.timed_out !== 'boolean') return `observed.${field}.timed_out is not a boolean`
+  if (c.failure_kind !== undefined && !['database-schema-mismatch', 'module-resolution-failed', 'command-failed'].includes(c.failure_kind as string)) {
+    return `observed.${field}.failure_kind is not a supported diagnostic`
+  }
   return null
 }
 
