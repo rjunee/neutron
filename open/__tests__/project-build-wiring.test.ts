@@ -1,4 +1,5 @@
 import { makeRecordingHost } from '@neutronai/runtime/adapters/claude-code/persistent/__tests__/recording-host.ts'
+import { TRIDENT_SCRIPT_DIR } from '@neutronai/trident/script-dir.ts'
 import { createPersistentReplSubstrate, shutdownAllPersistentRepls } from '@neutronai/runtime/adapters/claude-code/persistent/persistent-repl-substrate.ts'
 import type { AgentSpec } from '@neutronai/runtime/substrate.ts'
 import { LIVE_AGENT_TOOL_NAMES, PROJECT_REPL_TOOL_DEFS } from '@neutronai/gateway/wiring/build-live-agent-turn.ts'
@@ -631,6 +632,7 @@ for (const role of ['plan', 'build', 'review', 'fix'] as const) {
       JSON.stringify(role === 'plan' ? PLAN_SCHEMA : role === 'review' ? VERDICT_SCHEMA : FORGE_SCHEMA),
       ...(role === 'plan' ? [PLAN_LEDGER_CONTRACT] : []),
       ...(builder ? ['EXECUTION SCOPE. Read the host context `executionStrategy` and validated plan in `previous`. For `single`, implement the WHOLE accepted plan and executionSpec. For `task_sequence`, implement only the host-selected `topTask` and its executionSpec; leave later tasks to later calls. Never select a strategy or task yourself. A fix addresses the host-provided findings without changing strategy. A wave member implements only its host-pinned task.'] : []),
+      ...(builder ? [`Commit only through the host wrapper with argv ${JSON.stringify(['bash', join(TRIDENT_SCRIPT_DIR, 'commit-with-resolved-head.sh'), options.production.branch])}, followed by your git commit arguments. Never invoke git commit directly. Do not add a Claude-Session: trailer; keep Co-Authored-By. After the wrapper returns, read the final OID with git rev-parse HEAD for both result.head and payload.commitSha.`] : []),
       'Never publish or merge; the host owns those actions.',
     ].join('\n\n')
     const guidance = `\n\n<owner_reflection>\n${REFLECTION_GUIDANCE_FRAMING}\n${correction}\n</owner_reflection>`

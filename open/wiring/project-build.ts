@@ -35,6 +35,8 @@ import { normalizeLegacyStoredExecutionPlan } from '@neutronai/trident/legacy-ex
 import { assertProjectSnapshot, PROJECT_SNAPSHOT_SCHEMA } from './project-build-snapshot.ts'
 import { AttemptAccounting } from '@neutronai/trident/attempt-accounting.ts'
 import { createProjectWorkerContinuity } from '@neutronai/trident/project-worker-continuity.ts'
+import { recoveredBuildArtifact } from '@neutronai/trident/recover-builder-commit.ts'
+import { TRIDENT_SCRIPT_DIR } from '@neutronai/trident/script-dir.ts'
 
 /** Match the selected adapters' credential source without storing its contents.
  * Rotation is conservatively a different owner until account identity is attested. */
@@ -538,6 +540,7 @@ export async function prepareProjectBuild(input: InnerLoopInput, context: Projec
       JSON.stringify(role === 'plan' ? PLAN_SCHEMA : role === 'review' ? VERDICT_SCHEMA : FORGE_SCHEMA),
       ...(role === 'plan' ? [PLAN_LEDGER_CONTRACT] : []),
       ...(isBuilder ? ['EXECUTION SCOPE. Read the host context `executionStrategy` and validated plan in `previous`. For `single`, implement the WHOLE accepted plan and executionSpec. For `task_sequence`, implement only the host-selected `topTask` and its executionSpec; leave later tasks to later calls. Never select a strategy or task yourself. A fix addresses the host-provided findings without changing strategy. A wave member implements only its host-pinned task.'] : []),
+      ...(isBuilder ? [`Commit only through the host wrapper with argv ${JSON.stringify(['bash', join(TRIDENT_SCRIPT_DIR, 'commit-with-resolved-head.sh'), run.branch])}, followed by your git commit arguments. Never invoke git commit directly. Do not add a Claude-Session: trailer; keep Co-Authored-By. After the wrapper returns, read the final OID with git rev-parse HEAD for both result.head and payload.commitSha.`] : []),
       'Never publish or merge; the host owns those actions.',
     ].join('\n\n') + (isBuilder ? buildReflectionGuidance(input.reflection_context) : '')
     // Never overwrite the original brief of a still-reserved pre-cutover worker.
@@ -563,8 +566,9 @@ export async function prepareProjectBuild(input: InnerLoopInput, context: Projec
       if (seen.has(current.id)) throw new Error('Retry artifact source cycle')
       seen.add(current.id)
       try {
-        const text = await readFile(join(context.stateRoot, encodeURIComponent(current.id), `${role}.result`), 'utf8')
+        let text = await readFile(join(context.stateRoot, encodeURIComponent(current.id), `${role}.result`), 'utf8')
         if (role !== 'plan' && head !== undefined) {
+          text = recoveredBuildArtifact(text, head, context.store.stageEvents(current.id))
           const envelope = JSON.parse(text)
           if (envelope?.result?.head !== head) throw new Error('Completed artifact does not match this revision')
           const states = context.store.stageEvents(current.id).filter(event => event.stage === 'build-mode-state')

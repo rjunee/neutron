@@ -14,6 +14,7 @@ import type { EnvCapableHostRunner, HostCommandResult } from './git-mode.ts'
 import type { TridentRun, TridentRunStore } from './store.ts'
 import { isTerminalPhase } from './state-machine.ts'
 import { TRIDENT_SCRIPT_DIR } from './script-dir.ts'
+import { BUILDER_COMMIT_RECOVERY, recoverBuilderCommit } from './recover-builder-commit.ts'
 import { parseBuildModeState, readBuildRetrySource, type BuildModeState } from './build-mode-state.ts'
 import { isPlainBranchName } from './mutation-prover.ts'
 
@@ -653,8 +654,15 @@ export function createProductionHostEffects(options: ProductionHostOptions) {
     const result = await gate
     if (result.kind !== 'allow') throw new Error(result.kind === 'unknown' ? result.detail : result.on)
   }
-  const effects: Pick<BuildRunDeps, 'prepareWork' | 'measure' | 'publish' | 'merge'> = {
+  const effects: Pick<BuildRunDeps, 'prepareWork' | 'measure' | 'publish' | 'merge' | 'recoverBuildCommit'> = {
     measure,
+    async recoverBuildCommit(request, before, result, measured) {
+      row()
+      if (request.run_id !== runId || request.cwd !== worktree) return { kind: 'unknown', detail: 'Worker commit recovery does not belong to this build' }
+      return recoverBuilderCommit({ runHost, repo, branch, request, before, result, measured,
+        events: store.stageEvents(runId),
+        record: meta => store.recordStageEvent(runId, BUILDER_COMMIT_RECOVERY, meta) })
+    },
     async prepareWork(request, context) {
       row()
       if (request.run_id !== runId || request.cwd !== worktree) throw new Error('Worker request does not belong to this build')

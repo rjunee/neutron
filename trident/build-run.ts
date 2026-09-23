@@ -180,6 +180,9 @@ export interface BuildRunDeps {
   /** Read back the materialized review input after preparation, before dispatch. */
   reviewArtifact?(request: BoundedWorkRequest, snapshot: BuildSnapshot): Promise<GateResult>
   measure(): Promise<Measurement>
+  /** Host-only message recovery before any review/proof observes the new OID. */
+  recoverBuildCommit?(request: BoundedWorkRequest, before: string, result: unknown, measured: BuildSnapshot): Promise<
+    { kind: 'known'; head: string; recovered?: true } | Exclude<GateResult, { kind: 'allow' }>>
   /** Resolve a differing commit claim and preserve a real conflict before refusing. */
   checkBuildClaim?(claim: string, snapshot: BuildSnapshot): Promise<GateResult>
   /** Re-measure fix ancestry against the host-held pre-fix revision. */
@@ -672,7 +675,7 @@ export async function buildRun(input: BuildRunInput, deps: BuildRunDeps, signal:
         }
       }
       if (observation.kind === 'unknown') return { stop: unknown(observation.detail) }
-      const measured = observation.value
+      let measured = observation.value
       // G036 precedes trailer and lost-round checks: merging can remove the branch.
       if (!local && confirmedMerged(measured, snapshot.pr)) return { stop: { kind: 'merged', snapshot: measured } }
       if (role === 'build' || role === 'fix') {
@@ -680,13 +683,28 @@ export async function buildRun(input: BuildRunInput, deps: BuildRunDeps, signal:
         const branch = gateStop(builderBranch(deps.assignedBranch, payload))
         if (branch) return { stop: branch }
       }
+      let result = outcome.result
+      if ((role === 'build' || role === 'fix') && deps.recoverBuildCommit) {
+        const recovered = await deps.recoverBuildCommit(boundedRequest, recovery?.snapshot.head ?? snapshot.head, result, measured)
+        if (recovered.kind === 'unknown') return { stop: unknown(recovered.detail) }
+        if (recovered.kind === 'blocked') return { stop: blocked(recovered.on) }
+        if (recovered.recovered) {
+          const after = await deps.measure()
+          if (after.kind === 'unknown') return { stop: unknown(after.detail) }
+          if (after.value.head !== recovered.head || after.value.diff !== measured.diff
+            || !samePr(after.value.pr, measured.pr)) return { stop: unknown('Builder commit recovery changed the measured content or lost its branch pin') }
+          if (!result || typeof result !== 'object' || !('payload' in result)
+            || !result.payload || typeof result.payload !== 'object') return { stop: unknown('Recovered builder result has no payload') }
+          result = { ...result, head: recovered.head, payload: { ...result.payload, commitSha: recovered.head } }
+          measured = after.value
+        }
+      }
       if (role === 'fix' && !fixLanded(snapshot.head, measured.head)) return { stop: failed('Fix round did not move the measured branch head', 'round-lost-work') }
       if (role === 'fix') {
         if (!deps.checkFixLineage) return { stop: unknown('Fix lineage host is missing') }
         const lineage = gateStop(await deps.checkFixLineage(measured, snapshot.head))
         if (lineage) return { stop: lineage }
       }
-      let result = outcome.result
       if ((role === 'build' || role === 'fix') && result && typeof result === 'object'
           && 'head' in result && typeof result.head === 'string' && result.head !== measured.head
           && /^[a-f0-9]{4,64}$/i.test(result.head)) {
