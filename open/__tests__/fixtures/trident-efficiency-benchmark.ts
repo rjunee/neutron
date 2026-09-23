@@ -7,6 +7,21 @@
 export const EFFICIENCY_SCENARIOS = ['fresh', 'code-fix', 'unchanged-head', 'moved-head', 'interruption', 'pending-interruption'] as const
 export type EfficiencyScenario = typeof EFFICIENCY_SCENARIOS[number]
 export type BenchmarkInterval = { stage: string; start: number; end: number }
+/** Compare the scripted workload, not run IDs, temporary paths or generated SHAs.
+ * Models come from admitted attempts, including the distinct review seats. */
+export interface EfficiencyScope {
+  fixture: string
+  task: string
+  gates: {
+    observed: string[]
+    suite_strategy: string
+    intermediate_strategy: string | null
+    max_rounds: number
+    merge_mode: string
+  }
+  models: Array<{ role: string; seat: string | null; provider: string;
+    requested: string; resolved: string; placement: string }>
+}
 export class EfficiencyTrace {
   readonly intervals: BenchmarkInterval[] = []
   readonly decisions: string[] = []
@@ -25,6 +40,7 @@ export class EfficiencyTrace {
   }
 }
 export interface EfficiencyReport {
+  scope: EfficiencyScope | null
   timing_unit: 'scripted-workload-unit'
   barrier_complete: boolean
   scenario: EfficiencyScenario
@@ -34,6 +50,35 @@ export interface EfficiencyReport {
   intervals: BenchmarkInterval[]
   outcomes: string[]
   usage: { tokens: null; cost: null; source: 'scripted-provider-no-usage' }
+}
+
+export type EfficiencyComparison = { kind: 'matched' } | { kind: 'unmatched'; reasons: string[] }
+
+/** An unmatched workload is reportable, but supplies no efficiency comparison.
+ * Gate/outcome drift within a matched workload is a regression, not a saving. */
+export function compareEfficiency(before: EfficiencyReport, after: EfficiencyReport): EfficiencyComparison {
+  const reasons: string[] = []
+  if (before.scenario !== after.scenario) reasons.push('scenario')
+  if (before.timing_unit !== after.timing_unit) reasons.push('timing unit')
+  if (!before.scope || !after.scope) reasons.push('missing scope')
+  else {
+    if (before.scope.fixture !== after.scope.fixture || !before.scope.fixture || !after.scope.fixture) reasons.push('scripted fixture')
+    if (before.scope.task !== after.scope.task || !before.scope.task || !after.scope.task) reasons.push('task')
+    const gates = ({ gates }: EfficiencyScope) => JSON.stringify([
+      [...gates.observed].sort(), gates.suite_strategy, gates.intermediate_strategy, gates.max_rounds, gates.merge_mode,
+    ])
+    if (!before.scope.gates.observed.length || !after.scope.gates.observed.length || gates(before.scope) !== gates(after.scope)) reasons.push('gates')
+    // Scheduling and repeated calls may alter order/count, never the set of
+    // model/seat assignments. Dispatch-count acceptance remains independent.
+    const models = (scope: EfficiencyScope) => JSON.stringify([...new Set(scope.models.map(model => JSON.stringify([
+      model.role, model.seat, model.provider, model.requested, model.resolved, model.placement,
+    ])))].sort())
+    if (!before.scope.models.length || !after.scope.models.length || models(before.scope) !== models(after.scope)) reasons.push('models')
+  }
+  if (reasons.length) return { kind: 'unmatched', reasons }
+  if (JSON.stringify(before.decisions) !== JSON.stringify(after.decisions)
+      || JSON.stringify(before.outcomes) !== JSON.stringify(after.outcomes)) throw Error('Equivalent scope changed gate decisions or outcomes')
+  return { kind: 'matched' }
 }
 
 /** Fail on extra work AND on skipping required work. Counts are per complete
