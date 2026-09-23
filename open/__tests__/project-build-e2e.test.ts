@@ -2647,6 +2647,37 @@ function registerSession(f: Awaited<ReturnType<typeof fixture>>, session: Record
 
 const neverSettles = () => new Promise<never>(() => {})
 
+test('terminal Ralph task receives full-suite instructions after an intermediate task deferred them', async () => {
+  const { renderTestStrategy, FULL_SUITE_REQUIRED, INTERMEDIATE_SUITE_DEFERRED } = await import('@neutronai/trident/test-strategy.ts')
+  const f = await fixture({ ralph: true, moreTasks: true })
+  const strategy = { resolution: { command: 'bun test', source: 'package-json' as const }, jobs: 1, base_branch: 'main',
+    knobs: { jobs_env: null, concurrency_env: null, probed_file: null, pinned_by_command: false } }
+  f.input.test_strategy_intermediate = renderTestStrategy({ ...strategy, scope: 'subset' })
+  f.input.test_strategy = renderTestStrategy({ ...strategy, scope: 'full-suite' })
+  const firstHost = await createProjectBuildHost(await f.prepare())
+  const first = await buildRun({ mode: 'ralph', start: 'fresh', ralphRound: 0,
+    run_id: f.row.id, workers: firstHost.workers, repl_provider: 'anthropic', merge_mode: 'pr' },
+  firstHost.deps, new AbortController().signal)
+  expect(first.kind, why(f, first)).toBe('continued')
+  const firstContext = JSON.parse(await readFile(workContextPath(firstHost.workers.build.request.brief.path), 'utf8'))
+  expect(firstContext.suiteScope).toBe('subset')
+  expect(firstContext.testStrategy).toContain(INTERMEDIATE_SUITE_DEFERRED)
+  expect(firstContext.testStrategy).not.toContain(FULL_SUITE_REQUIRED)
+
+  const resumed = await createProjectBuildHost(await f.prepare())
+  const outcome = await resumed.run({ mode: 'ralph', start: 'resume' }, new AbortController().signal)
+  expect(outcome, why(f, outcome)).toMatchObject({ kind: 'blocked', phase: 'publish' })
+  const request = resumed.workers.build.request
+  const context = JSON.parse(await readFile(workContextPath(request.brief.path), 'utf8'))
+  expect(context.previous.remainingTasks).toBe(0)
+  expect(context.suiteScope).toBe('full-suite')
+  expect(context.testStrategy).toContain(FULL_SUITE_REQUIRED)
+  expect(context.testStrategy).not.toContain(INTERMEDIATE_SUITE_DEFERRED)
+  const brief = await readFile(request.brief.path, 'utf8')
+  expect(brief).toContain('host context `testStrategy`')
+  expect(brief).not.toContain(INTERMEDIATE_SUITE_DEFERRED)
+}, 300_000)
+
 for (const seam of ['submitLine', 'acquireTurn', 'silent-worker'] as const) {
   test(`a hung ${seam} stops the plan step at its wall as a measured unknown`, async () => {
     const f = await fixture()

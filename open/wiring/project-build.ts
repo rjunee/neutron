@@ -404,7 +404,8 @@ export async function prepareProjectBuild(input: InnerLoopInput, context: Projec
     const provider: Provider = descriptor.group === 'claude' ? 'anthropic' : descriptor.group === 'codex' ? 'openai-codex' : 'pi'
     // Owner guidance and test execution instructions belong only to the builders.
     const isBuilder = role === 'build' || role === 'fix'
-    const brief = [run.task, isBuilder ? input.test_strategy_intermediate ?? input.test_strategy ?? '' : '',
+    const brief = [run.task, isBuilder
+      ? 'Follow the TEST EXECUTION instructions in the host context `testStrategy`. The host selects `suiteScope` after validating this task: `full-suite` requires the full suite; only `subset` defers it for an intermediate task. Never infer scope from the task number or an earlier task.' : '',
       // THE BRIEF MUST STATE THE ENVELOPE, AND THE WORKER MUST COPY ITS IDS.
       // `decodeProjectTrailer` (`runtime/workers/project-runners.ts:44-58`) reads
       // `{ schema, run_id, step_id, kind, result }` and refuses unless `run_id`,
@@ -527,6 +528,7 @@ export async function prepareProjectBuild(input: InnerLoopInput, context: Projec
   const repo = declaration.repos.find(row => resolve(context.projectDir, row.path) === resolve(run.repo_path))
   return {
     substrate, workers, phaseUsage: context.phaseUsage,
+    testStrategies: { full: input.test_strategy ?? '', intermediate: input.test_strategy_intermediate ?? null },
     production: { store: context.store, runId: run.id, projectSlug: run.project_slug,
       repo: run.repo_path, worktree: run.worktree, branch: run.branch, baseBranch: input.base_branch,
       runHost: context.runHost, ciWorkflow: repo?.ciWorkflow,
