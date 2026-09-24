@@ -15,54 +15,34 @@
  * start() was still in flight" is deterministic rather than a timing hope.
  */
 
-import { describe, expect, it, mock } from 'bun:test';
+import { afterAll, describe, expect, it } from 'bun:test';
 
 import { installNativeHarness } from './support/native-harness';
+import {
+  harnessAudioState,
+  resetHarnessAudio,
+  setHarnessRecorderPrepare,
+} from './support/stubs/expo-audio';
 
 installNativeHarness();
 
-// ── A recorder we can freeze mid-prepare ─────────────────────────────────────
-
-interface FakeRecorder {
-  record_calls: number;
-  stop_calls: number;
-  running: boolean;
-  uri: string | null;
-  prepareToRecordAsync: () => Promise<void>;
-  record: () => void;
-  stop: () => Promise<void>;
-}
+// ── Freeze the harness recorder mid-prepare ──────────────────────────────────
 
 /** Resolved by the test to let `prepareToRecordAsync` return. */
 let release_prepare: (() => void) | null = null;
 
-const recorder: FakeRecorder = {
-  record_calls: 0,
-  stop_calls: 0,
-  running: false,
-  uri: 'file:///tmp/probe.m4a',
-  prepareToRecordAsync: () =>
+function resetRecorder(): void {
+  resetHarnessAudio();
+  release_prepare = null;
+  setHarnessRecorderPrepare(() =>
     new Promise<void>((resolve) => {
       release_prepare = resolve;
-    }),
-  record: () => {
-    recorder.record_calls += 1;
-    recorder.running = true;
-  },
-  stop: async () => {
-    recorder.stop_calls += 1;
-    recorder.running = false;
-  },
-};
+    }));
+}
 
-mock.module('expo-audio', () => ({
-  useAudioRecorder: () => recorder,
-  useAudioPlayer: () => ({ play: () => {}, pause: () => {}, seekTo: async () => {} }),
-  useAudioPlayerStatus: () => ({ playing: false, currentTime: 0, duration: 0 }),
-  getRecordingPermissionsAsync: async () => ({ granted: true, canAskAgain: true }),
-  requestRecordingPermissionsAsync: async () => ({ granted: true, canAskAgain: true }),
-  setAudioModeAsync: async () => undefined,
-}));
+afterAll(() => {
+  setHarnessRecorderPrepare(null);
+});
 
 const { act } = await import('react');
 const { createElement } = await import('react');
@@ -86,13 +66,6 @@ function mountProbe(sink: { value: VoiceRecorderValue | null }): Promise<{
   return mountScreen(createElement(Probe));
 }
 
-function resetRecorder(): void {
-  recorder.record_calls = 0;
-  recorder.stop_calls = 0;
-  recorder.running = false;
-  release_prepare = null;
-}
-
 describe('useVoiceRecorder — release arrives while start() is still in flight', () => {
   it('a TAP mid-start latches once capture is live, instead of being dropped', async () => {
     resetRecorder();
@@ -103,7 +76,8 @@ describe('useVoiceRecorder — release arrives while start() is still in flight'
       await act(async () => {
         void sink.value?.start();
       });
-      expect(recorder.record_calls).toBe(0);
+      expect(harnessAudioState().prepare_calls).toBe(1);
+      expect(harnessAudioState().record_calls).toBe(0);
 
       // Thumb lifts BEFORE capture began — this is the whole race.
       await act(async () => {
@@ -117,11 +91,11 @@ describe('useVoiceRecorder — release arrives while start() is still in flight'
       });
       await screen.settle();
 
-      expect(recorder.record_calls).toBe(1);
+      expect(harnessAudioState().record_calls).toBe(1);
       // The tap's intent survived the race: still capturing, now hands-free.
       expect(sink.value?.latched).toBe(true);
       expect(sink.value?.phase).toBe('recording');
-      expect(recorder.running).toBe(true);
+      expect(harnessAudioState().recording).toBe(true);
     } finally {
       screen.unmount();
     }
@@ -146,8 +120,8 @@ describe('useVoiceRecorder — release arrives while start() is still in flight'
 
       // Capture did begin (the native call was already committed), so the ONLY
       // acceptable outcome is that it was stopped again immediately.
-      expect(recorder.stop_calls).toBeGreaterThanOrEqual(1);
-      expect(recorder.running).toBe(false);
+      expect(harnessAudioState().stop_calls).toBeGreaterThanOrEqual(1);
+      expect(harnessAudioState().recording).toBe(false);
       expect(sink.value?.phase).toBe('idle');
       expect(sink.value?.active).toBe(false);
     } finally {
@@ -172,7 +146,7 @@ describe('useVoiceRecorder — release arrives while start() is still in flight'
       });
       await screen.settle();
 
-      expect(recorder.running).toBe(false);
+      expect(harnessAudioState().recording).toBe(false);
       expect(sink.value?.phase).toBe('idle');
     } finally {
       screen.unmount();
@@ -191,12 +165,12 @@ describe('useVoiceRecorder — release arrives while start() is still in flight'
       await Promise.resolve();
     });
     await screen.settle();
-    expect(recorder.running).toBe(true);
+    expect(harnessAudioState().recording).toBe(true);
 
     screen.unmount();
     await act(async () => {
       await Promise.resolve();
     });
-    expect(recorder.running).toBe(false);
+    expect(harnessAudioState().recording).toBe(false);
   });
 });

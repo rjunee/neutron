@@ -66,6 +66,12 @@ const DEFAULT_CONFIG: VoiceHarnessConfig = {
 
 let config: VoiceHarnessConfig = { ...DEFAULT_CONFIG };
 let state: VoiceHarnessState = freshState();
+let recorderPrepare: (() => Promise<void>) | null = null;
+
+/** Hold native prepare at a caller-controlled gate for recorder race tests. */
+export function setHarnessRecorderPrepare(prepare: (() => Promise<void>) | null): void {
+  recorderPrepare = prepare;
+}
 
 function freshState(): VoiceHarnessState {
   return {
@@ -112,6 +118,7 @@ const recorder: HarnessRecorder = {
   },
   prepareToRecordAsync: async (): Promise<void> => {
     state.prepare_calls += 1;
+    await recorderPrepare?.();
   },
   record: (): void => {
     state.record_calls += 1;
