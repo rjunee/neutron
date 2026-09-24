@@ -445,22 +445,30 @@ describe('SECURITY: the untrusted substrates receive nothing', () => {
     // of the box.
     setReplToolBridge(bridge())
     let cfgPath: string | undefined
+    let cfgExistedAtSpawn = false
+    let cfgDirModeAtSpawn: number | undefined
+    const intendedFailure = 'owner MCP test: PTY host refused to spawn'
     const exploding: PtyHost = {
       async spawn(argv: string[]): Promise<PtyChild> {
-        expect(argv).toContain('--mcp-config')
-        cfgPath = argv[argv.indexOf('--mcp-config') + 1]
-        expect(cfgPath).toBeDefined()
-        expect(existsSync(cfgPath!)).toBe(true)
-        expect(statSync(dirname(cfgPath!)).mode & 0o777).toBe(0o700)
-        throw new Error('pty host refused to spawn')
+        const configArg = argv.indexOf('--mcp-config')
+        cfgPath = configArg < 0 ? undefined : argv[configArg + 1]
+        cfgExistedAtSpawn = cfgPath !== undefined && existsSync(cfgPath)
+        cfgDirModeAtSpawn = cfgPath !== undefined && existsSync(dirname(cfgPath))
+          ? statSync(dirname(cfgPath)).mode & 0o777
+          : undefined
+        throw new Error(intendedFailure)
       },
     }
     const sub = createPersistentReplSubstrate(
       opts(exploding, { enableToolBridge: true, resolveExtraMcpServers: async () => [EXAMPLE] }),
     )
-    await expect(drain(sub.start(spec('hi')))).rejects.toThrow()
+    await expect(drain(sub.start(spec('hi')))).rejects.toThrow(
+      /^drain error: owner MCP test: PTY host refused to spawn$/,
+    )
 
     expect(cfgPath).toBeDefined()
+    expect(cfgExistedAtSpawn).toBe(true)
+    expect(cfgDirModeAtSpawn).toBe(0o700)
     expect(existsSync(cfgPath!)).toBe(false)
     expect(existsSync(dirname(cfgPath!))).toBe(false)
   })
