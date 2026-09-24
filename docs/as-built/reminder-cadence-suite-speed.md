@@ -49,6 +49,13 @@ default-composer characterization and loop inventory. Both root and Trident
 TypeScript checks passed. Initial sandboxed socket attempts were rejected by the
 environment and are not counted as green runs; socket-enabled reruns passed.
 
+The composition-field inventory classifies `reminder_scheduler` as an intentionally
+unset test seam, alongside `pid_probe`: the default Open composer omits it, while
+explicit test injection is forwarded to the real loop. The coverage check reproduced
+the missing-classification failure before this entry and passed all five cases
+afterward; the focused reminder/composition rerun passed all 87 cases. No existing
+wired field was demoted and the inventory guard remains unchanged.
+
 The full suite was deliberately deferred while a live Trident run was active.
 `open/__tests__/project-build-e2e.test.ts` was not run: this slice does not touch
 publication, admission, or review. Full-suite/CI, review, merge, and deployment
