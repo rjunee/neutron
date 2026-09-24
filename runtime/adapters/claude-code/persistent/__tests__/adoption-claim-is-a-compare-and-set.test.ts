@@ -60,6 +60,7 @@ import {
   resetBootAdoptionForTests,
 } from '../boot-adoption.ts'
 import { getOrSpawnSession } from '../spawn.ts'
+import { CLAUDE_BOUNDED_PROFILE_FINGERPRINT } from '../../../../workers/claude-bounded-profile.ts'
 import { ReplSession, authFingerprintFor } from '../repl-session.ts'
 import type { PtyChild } from '../pty-host.ts'
 import type { AgentSpec } from '../../../../substrate.ts'
@@ -256,6 +257,45 @@ afterEach(() => {
 })
 
 describe('two incarnations racing for one row', () => {
+  for (const mismatch of ['credential', 'surface', 'bridge', 'mcp', 'poison', 'poison-hosted'] as const) {
+    it(`refuses ${mismatch} eviction of an adopted parent with unknown native children`, async () => {
+      const f = fixture({ reuse: { tool_surface: 'Agent,Read', tool_bridge: false,
+        auth_fingerprint: authFingerprintFor(undefined), bounded_worker_profile: CLAUDE_BOUNDED_PROFILE_FINGERPRINT } })
+      f.host.addPane(HANDLE, { argv: oursArgv(), screens: ['❯\n  1 agent running'], pid: 4242 })
+      expect((await beginBootAdoption(f.options, KEY, { host: f.host, health: async () => true, log: () => {} })).kind).toBe('adopted')
+      const session = (await pool.get(KEY))!
+      expect(session.adopted).toBe(true)
+      expect(session.activeTurn).toBeUndefined()
+      expect(session.turnSlotHeld).toBe(0)
+      const options = { ...f.options }
+      const names = mismatch === 'surface' ? ['Read'] : ['Agent', 'Read']
+      const spec: AgentSpec = { prompt: 'next chat turn', model_preference: ['claude-opus-5'],
+        tools: names.map(name => ({ name, description: name, input_schema: {}, output_schema: {}, capability_required: 'local' })) }
+      if (mismatch === 'credential') options.env = { CLAUDE_CODE_OAUTH_TOKEN: 'rotated-test-token' }
+      if (mismatch === 'bridge') session.toolBridgeActive = true
+      if (mismatch === 'mcp') session.mcpFingerprint = 'previous-mcp-configuration'
+      if (mismatch.startsWith('poison')) session.poisoned = true
+      // A callback reporting zero hosted workflows is not a native-child census.
+      options.hostsLiveWork = () => mismatch === 'poison-hosted' ? 1 : 0
+      let spawns = 0
+      f.host.spawn = async () => { spawns++; throw new Error('unexpected replacement spawn') }
+      const before = readFileSync(f.registryPath, 'utf8')
+      for (let attempt = 0; attempt < 2; attempt++) {
+        const result = await getOrSpawnSession(KEY, options, spec).catch(error => error)
+        expect(result).toBeInstanceOf(Error)
+        expect(result.substrateErrorClass).toBe('repl_unreconciled')
+        expect(result.message).toMatch(/native-child liveness is unknown/)
+        expect(await pool.get(KEY)).toBe(session)
+        expect(childByKey.get(KEY)).toBe(session.child)
+        expect(f.host.panes.has(HANDLE)).toBe(true)
+        expect(session.hasChildExited()).toBe(false)
+        expect(f.host.closed).toEqual([])
+        expect(spawns).toBe(0)
+        expect(readFileSync(f.registryPath, 'utf8')).toBe(before)
+      }
+    })
+  }
+
   for (const profile of [undefined, 'obsolete-native-profile']) {
     it(`profile refresh preserves a surviving adopted native parent with no reconstructed leases (${profile})`, async () => {
       const f = fixture({ reuse: { tool_surface: 'Agent,Read', tool_bridge: false,

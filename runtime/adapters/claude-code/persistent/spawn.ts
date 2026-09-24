@@ -1524,7 +1524,8 @@ export async function getOrSpawnSession(
     }
     if (!session.hasChildExited()) {
       // Reuse guards gate serving a turn on the warm child; EVERY one must pass or
-      // the child is evicted + respawned (resuming the captured session when
+      // the child is evicted + respawned, or an adopted parent refuses the turn
+      // while native-child liveness remains unknown (resuming the captured session when
       // supervised, so conversational context survives the respawn). The third,
       // `freshMcpServers`, is documented at its own declaration below:
       //
@@ -1612,6 +1613,16 @@ export async function getOrSpawnSession(
         // Automatic profile-only refresh is safe only for a parent whose complete
         // lifetime this gateway has owned and whose local leases have drained.
         if (freshBoundedProfile || session.adopted || session.activeTurn !== undefined || session.turnSlotHeld > 0) return session
+      }
+      // Adoption cannot reconstruct native-child leases. A quiet parent or a zero
+      // hosted-work count does not establish that those children have finished.
+      // Keep its ownership in the pool: quarantine would permit a duplicate owner,
+      // and reuse would bypass the failed credential/tool/poison guards above.
+      if (session.adopted) {
+        throw new PaneOwnershipRefusedError(
+          'persistent-repl: refusing adopted parent refresh — native-child liveness is unknown; ' +
+          'the existing parent remains owned and this turn cannot run until lifecycle reconciliation',
+        )
       }
       // Set when the poisoned child was QUARANTINED rather than evicted: it stays
       // alive (it hosts live work) and must not be terminated or reported dead.
