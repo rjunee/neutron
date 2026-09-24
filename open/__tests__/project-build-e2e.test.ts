@@ -614,7 +614,7 @@ function fakeGithub(input: { origin: string; repo: string }) {
   }
   const project = async (pr: FakePr, fields: string[]) => {
     const all: Record<string, unknown> = { number: pr.number, state: pr.state, headRefName: pr.headRefName,
-      baseRefName: pr.baseRefName, isCrossRepository: false, headRefOid: await headOf(pr.headRefName), mergeable: 'MERGEABLE', isDraft: pr.isDraft ?? false }
+      baseRefName: pr.baseRefName, baseRefOid: await headOf(pr.baseRefName), isCrossRepository: false, headRefOid: await headOf(pr.headRefName), mergeable: 'MERGEABLE', isDraft: pr.isDraft ?? false }
     return Object.fromEntries(fields.map(field => [field, all[field]]))
   }
   const checkRuns = { total_count: 1, check_runs: [{ name: 'test', status: 'COMPLETED', conclusion: 'SUCCESS' }] }

@@ -1,7 +1,8 @@
 import { assessReviewCi, type ReviewCiSource } from './gates/review-ci.ts'
 import { reviewArtifact } from './gates/review-artifact.ts'
 import { assessReviewSuite, type ReviewSuiteSource } from './gates/review-suite.ts'
-import { awaitReviewReadiness, type ReviewReadinessSource } from './gates/review-readiness.ts'
+import { awaitReviewReadiness, classifyReviewReadiness, type ReadinessClock, type ReviewReadinessSource } from './gates/review-readiness.ts'
+import { awaitMergeReadiness } from './gates/merge-readiness.ts'
 import { executeBoundReview, type BoundReviewOutcome } from './review-run.ts'
 import { checkBuildClaim } from './gates/build-claim.ts'
 import { fixLineage } from './gates/fix-lineage.ts'
@@ -40,6 +41,8 @@ export interface BuildHostOptions {
   local?: { baseBranch: string; worktree: string }
   admission?: AdmissionSource
   reviewReadiness?: ReviewReadinessSource
+  /** Injectable elapsed clock; merge readiness retains the fixed G053 budget/cadence. */
+  mergeReadinessClock?: ReadinessClock
   reviewCi?: ReviewCiSource
   reviewSuite?: ReviewSuiteSource
   /** REQUIRED, not optional. A host that cannot produce terminal full-suite evidence
@@ -86,7 +89,7 @@ export function createBuildHost(options: BuildHostOptions): { deps: BuildRunDeps
     ? localMergeReadiness(options.mutation.run_host, options.mutation.run.repo_path,
       options.mutation.run.branch, options.local.baseBranch, options.local.worktree, snapshot.head, options.mutation.run.id)
     : Promise.resolve(unknown('Local merge configuration is missing'))
-  const deps: BuildRunDeps = {
+  const deps: BuildRunDeps & { mergeGate(snapshot: BuildSnapshot, mergeMode?: 'pr' | 'local', signal?: AbortSignal): Promise<GateResult> } = {
     ...options.effects,
     reviewArtifact,
     // #1133 (G166): the preservation push scans launch-base..head for the session trailer; the
@@ -187,12 +190,43 @@ export function createBuildHost(options: BuildHostOptions): { deps: BuildRunDeps
       if (readiness.kind !== 'allow') return readiness
       return fixLineage(options.mutation.run_host, options.mutation.run.repo_path, options.mutation.run.branch ?? `trident/${options.mutation.run.slug}`, options.reviewed_head, snapshot.head)
     },
-    async mergeGate(snapshot, mergeMode) {
+    async mergeGate(snapshot, mergeMode, signal: AbortSignal = new AbortController().signal) {
       if (mergeMode === 'local') return localReadiness(snapshot)
-      const ci = ciReadinessForHead(snapshot.head, await options.observeCi(snapshot))
-      if (ci.kind === 'cannot-read') return unknown(ci.reason)
-      if (ci.kind !== 'green') return { kind: 'blocked', on: `CI: ${ci.kind}` }
-      return pinnedMergeReadiness(options.mutation.run_host, options.mutation.run.repo_path, snapshot, options.mutation.run.id)
+      const pinned = structuredClone(snapshot)
+      const readBase = async (): Promise<{ kind: 'base'; head: string } | GateResult> => {
+        if (!pinned.pr || pinned.pr.head !== pinned.head || pinned.pr.state !== 'OPEN') return { kind: 'blocked', on: 'Merge requires an open PR at the reviewed head' }
+        const result = await options.mutation.run_host(['gh', 'pr', 'view', String(pinned.pr.number), '--json', 'headRefOid,baseRefOid,state'], options.mutation.run.repo_path)
+        if (!result.ok) return unknown('Merge PR base revision could not be read')
+        const pr = JSON.parse(result.stdout)
+        if (pr?.headRefOid !== pinned.head || pr?.state !== 'OPEN') return { kind: 'blocked', on: 'Remote PR differs from reviewed head' }
+        if (typeof pr.baseRefOid !== 'string' || !/^(?:[0-9a-f]{40}|[0-9a-f]{64})$/.test(pr.baseRefOid)) return unknown('Merge PR base revision is missing or malformed')
+        return { kind: 'base', head: pr.baseRefOid }
+      }
+      return awaitMergeReadiness(async waitSignal => {
+        const before = await readBase()
+        if (before.kind !== 'base') return before
+        if (waitSignal.aborted) return unknown('Merge readiness cancelled')
+        const ci = ciReadinessForHead(pinned.head, await options.observeCi(pinned))
+        if (waitSignal.aborted) return unknown('Merge readiness cancelled')
+        if (ci.kind === 'red' || ci.kind === 'configuration-error' || ci.kind === 'wrong-head') return { kind: 'blocked', on: `CI: ${ci.kind}` }
+        // Reassess remote PR identity and base drift on every acquisition, including
+        // the successful one. A refreshed CI result cannot carry an old merge pin.
+        const readiness = await pinnedMergeReadiness(options.mutation.run_host, options.mutation.run.repo_path, pinned, options.mutation.run.id)
+        if (readiness.kind !== 'allow') return readiness
+        if (waitSignal.aborted) return unknown('Merge readiness cancelled')
+        const after = await readBase()
+        if (after.kind !== 'base') return after
+        if (after.head !== before.head) return { kind: 'pending', detail: 'PR base moved during CI acquisition; reassessing refreshed checks' }
+        if (ci.kind === 'green') return { kind: 'allow' }
+        // The CI rollup represents conflicting and unknown mergeability as running.
+        // Keep the richer readiness source's explicit conflict refusal while waiting.
+        if (options.reviewReadiness && !waitSignal.aborted) {
+          const review = classifyReviewReadiness(pinned, await options.reviewReadiness.observe(pinned, waitSignal))
+          if (review.kind === 'blocked') return review
+          if (review.kind === 'unknown') return { kind: 'pending', detail: review.detail }
+        }
+        return { kind: 'pending', detail: ci.kind === 'cannot-read' ? ci.reason : `CI: ${ci.kind}` }
+      }, signal, options.mergeReadinessClock)
     },
   }
   return {
@@ -206,7 +240,7 @@ export function createBuildHost(options: BuildHostOptions): { deps: BuildRunDeps
         // Return both success and failure directly: neither enters buildRun.
         return executeBoundReview(review.run, review.deps)
       }
-      return buildRun(input, deps, signal)
+      return buildRun(input, { ...deps, mergeGate: (snapshot, mode) => deps.mergeGate(snapshot, mode, signal) }, signal)
     },
   }
 }

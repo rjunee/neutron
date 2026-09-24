@@ -34,7 +34,9 @@ async function fixture() {
   let leakOutput = 'LEAK GATE: INCOMPLETE\nRULES THAT COULD NOT RUN: pii'
   let leakCode = 3
   let selected: typeof singlePlan | null = null
+  let elapsed = 0
   const options: BuildHostOptions = {
+    mergeReadinessClock: { now: () => elapsed, wait: async ms => { elapsed += ms } },
     reviewReadiness: { observe: async () => ({ kind: 'known', head, configuration: { kind: 'resolved', required: ['checks'] }, mergeability: 'mergeable', checksComplete: true, checks: [{ name: 'checks', state: 'passed' }] }) },
     reviewCi: { observe: async snapshot => ({ kind: 'known', head: snapshot.head, status: 'green', failing: [], base: null }) },
     reviewSuite: { observe: async (snapshot, round) => ({ kind: 'known', runId: 'test', head: snapshot.head, round, strategy: '', scope: 'full-suite', report: null }) },
@@ -80,7 +82,7 @@ async function fixture() {
       readClaim: async () => null,
       run_host: async (argv) => {
         calls.push(argv)
-        if (argv.includes('gh')) return { ok: true, exit_code: 0, stdout: JSON.stringify({ headRefName: 'change', baseRefName: 'release', isCrossRepository: false, headRefOid: head, state: 'OPEN' }), stderr: '' }
+        if (argv.includes('gh')) return { ok: true, exit_code: 0, stdout: JSON.stringify({ headRefName: 'change', baseRefName: 'release', baseRefOid: 'b'.repeat(40), isCrossRepository: false, headRefOid: head, state: 'OPEN' }), stderr: '' }
         if (argv.includes('fetch') || argv.includes('ls-remote')) return { ok: true, exit_code: 0, stdout: '', stderr: '' }
         if (argv.includes('rev-parse') && drift === 'unreadable') return { ok: false, exit_code: 128, stdout: '', stderr: '' }
         if (argv.includes('merge-base')) return { ok: drift !== 'unreadable', exit_code: drift === 'unreadable' ? 128 : 0, stdout: drift === 'overlap' ? 'b'.repeat(40) : head, stderr: '' }
@@ -223,18 +225,20 @@ test('publication mutation uses the launch pin without probing mutable base refs
   expect(diffs[0]).toContain(`${f.options.leak.base_sha}...${head}`)
 })
 
-test('CI unreadable stays unknown; red, absent, running and wrong head block', async () => {
+test('CI red and wrong head block; absent, running and unreadable defer on exhaustion', async () => {
   const f = await fixture()
   for (const observation of [
-    { kind: 'absent' }, { kind: 'running', headSha: head },
     { kind: 'completed', headSha: head, conclusion: 'failure' },
     { kind: 'completed', headSha: 'other', conclusion: 'success' },
+    { kind: 'configuration-error', headSha: head, reason: 'missing required check' },
   ] as const) {
     f.options.observeCi = async () => observation
     expect(await f.make().deps.mergeGate(published)).toMatchObject({ kind: 'blocked' })
   }
-  f.options.observeCi = async () => ({ kind: 'unreadable', reason: 'offline' })
-  expect(await f.make().deps.mergeGate(published)).toEqual({ kind: 'unknown', detail: 'offline' })
+  for (const observation of [{ kind: 'absent' }, { kind: 'running', headSha: head }, { kind: 'unreadable', reason: 'offline' }] as const) {
+    f.options.observeCi = async () => observation
+    expect(await f.make().deps.mergeGate(published)).toMatchObject({ kind: 'unknown', detail: expect.stringContaining('budget exhausted') })
+  }
   f.options.observeCi = async () => ({ kind: 'completed', headSha: head, conclusion: 'success' })
   expect(await f.make().deps.mergeGate(published)).toEqual({ kind: 'allow' })
 })
@@ -361,7 +365,7 @@ test('host publication readiness is reached after a measured prose exemption', a
 
 test('host merge eligibility is reached after green CI', async () => {
   const f = await fixture()
-  expect(await f.make().deps.mergeGate(snapshot)).toEqual({ kind: 'blocked', on: 'Merge requires a PR number and full reviewed head OID' })
+  expect(await f.make().deps.mergeGate(snapshot)).toEqual({ kind: 'blocked', on: 'Merge requires an open PR at the reviewed head' })
   expect(await f.make().deps.mergeGate(published)).toEqual({ kind: 'allow' })
 })
 
@@ -576,7 +580,7 @@ test('review composition carries host re-plan usage independently of worker data
   expect(await deps.reviewGate(payload, await deps.observeReview(snapshot, 1), snapshot, 1, 1)).toMatchObject({ kind: 'blocked' })
 })
 
-async function boundFixture(failure = false) {
+async function boundFixture(failure = false, keepMergeGate = false) {
   const f = await fixture()
   const effects: string[] = []
   const commands: string[][] = []
@@ -622,10 +626,137 @@ async function boundFixture(failure = false) {
   host.deps.reviewGate = async (_payload, _observation, _snapshot, _round, _used, record) => { record?.({ findings: [], blockingCount: 0 }); return { kind: 'approve' } }
   host.deps.runLeakGatePreflight = async () => ({ status: 'clean', head, findings: [], skipped_rules: [], attempts: 0, note: '' })
   host.deps.publishGate = async () => ({ kind: 'allow' })
-  host.deps.mergeGate = async () => ({ kind: 'allow' })
+  if (!keepMergeGate) host.deps.mergeGate = async () => ({ kind: 'allow' })
   const input: BuildRunInput = { ...f.input(host), mode: 'bound_pr', bound_pr: 12 }
-  return { host, input, effects, commands, panels: () => panels }
+  return { host, input, effects, commands, options: f.options, panels: () => panels }
 }
+
+for (const settles of ['green', 'red', 'pending', 'abort'] as const) {
+  test(`refreshed merge CI ${settles} preserves one approved build and host suite`, async () => {
+    const f = await boundFixture(false, true)
+    const controller = new AbortController()
+    let suites = 0, probes = 0, elapsed = 0
+    const waits: number[] = []
+    const checkpoints: { stage: string; round: number }[] = []
+    f.options.modes!.saveCheckpoint = async value => { checkpoints.push(value) }
+    f.options.publicationSuite.observe = async (snapshot, round) => {
+      suites++
+      return { kind: 'known', runId: 'test', head: snapshot.head, round,
+        strategy: 'full test suite', scope: 'full-suite', report: { hostExitCode: 0 } }
+    }
+    f.options.mergeReadinessClock = {
+      now: () => elapsed,
+      wait: async ms => {
+        waits.push(ms); elapsed += ms
+        if (settles === 'abort') controller.abort()
+      },
+    }
+    f.options.observeCi = async value => {
+      expect(value).toEqual(published)
+      expect(suites).toBe(1)
+      expect(checkpoints.at(-1)).toMatchObject({ stage: 'approved', round: 1 })
+      probes++
+      return probes === 1 || settles === 'pending' || settles === 'abort'
+        ? { kind: 'running', headSha: head }
+        : { kind: 'completed', headSha: head, conclusion: settles === 'green' ? 'success' : 'failure' }
+    }
+    const outcome = await f.host.run({ ...f.input, mode: 'implementation', merge_mode: 'pr' }, controller.signal)
+    expect(outcome).toMatchObject(settles === 'green' ? { kind: 'merged' }
+      : settles === 'red' ? { kind: 'blocked', phase: 'merge', on: 'CI: red' }
+        : { kind: 'unknown', phase: 'merge', detail: expect.stringContaining(settles === 'abort' ? 'cancelled' : 'budget exhausted') })
+    expect(suites).toBe(1)
+    expect(f.effects).toEqual(['plan', 'build', 'publish', 'review', ...(settles === 'green' ? ['merge'] : [])])
+    expect(waits).toEqual(Array(settles === 'pending' ? 30 : 1).fill(30000))
+    expect(probes).toBe(settles === 'pending' ? 30 : settles === 'abort' ? 1 : 2)
+  })
+}
+
+for (const change of ['head', 'closed', 'base-overlap', 'base-unreadable', 'conflict', 'stable-base'] as const) {
+  test(`refreshed merge CI reassesses ${change} after waiting`, async () => {
+    const f = await fixture()
+    let refreshed = false
+    let elapsed = 0
+    f.options.mergeReadinessClock = { now: () => elapsed, wait: async ms => { elapsed += ms; refreshed = true } }
+    f.options.observeCi = async () => ({ kind: refreshed && change !== 'conflict' ? 'completed' : 'running', headSha: head, conclusion: 'success' })
+    const run = f.options.mutation.run_host
+    f.options.mutation.run_host = async (argv, cwd, env, timeout) => {
+      if (refreshed) {
+        if (change === 'base-overlap') f.setDrift('overlap')
+        if (change === 'base-unreadable') f.setDrift('unreadable')
+        if (argv.includes('gh') && (change === 'head' || change === 'closed')) {
+          return commandResult(JSON.stringify({ headRefName: 'change', baseRefName: 'release', isCrossRepository: false,
+            headRefOid: change === 'head' ? 'c'.repeat(40) : head, state: change === 'closed' ? 'CLOSED' : 'OPEN' }))
+        }
+      }
+      return run(argv, cwd, env, timeout)
+    }
+    if (change === 'conflict') {
+      const observe = f.options.reviewReadiness!.observe
+      f.options.reviewReadiness!.observe = async (value, signal) => refreshed
+        ? { kind: 'known', head, configuration: { kind: 'resolved', required: ['checks'] }, mergeability: 'conflicting', checksComplete: true, checks: [] }
+        : observe(value, signal)
+    }
+    const outcome = await f.make().deps.mergeGate(published)
+    expect(outcome).toMatchObject({ kind: change === 'stable-base' ? 'allow' : change === 'base-unreadable' ? 'unknown' : 'blocked' })
+    expect(elapsed).toBe(30000)
+    expect(f.calls.filter(argv => argv.includes('fetch'))).toHaveLength(change === 'head' || change === 'closed' ? 1 : 2)
+  })
+}
+
+test('refreshed merge CI cannot merge a different PR selected during the wait', async () => {
+  const f = await boundFixture(false, true)
+  const measure = f.options.effects.measure
+  let changed = false, elapsed = 0, probes = 0
+  // The host captured effects at construction; replace its measurement dependency.
+  f.host.deps.measure = async () => {
+    const value = await measure()
+    if (changed && value.kind === 'known' && value.value.pr) value.value.pr.number++
+    return value
+  }
+  f.options.mergeReadinessClock = { now: () => elapsed, wait: async ms => { elapsed += ms; changed = true } }
+  f.options.observeCi = async () => ++probes === 1
+    ? { kind: 'running', headSha: head } : { kind: 'completed', headSha: head, conclusion: 'success' }
+  expect(await f.host.run({ ...f.input, mode: 'implementation', merge_mode: 'pr' }, new AbortController().signal))
+    .toMatchObject({ kind: 'blocked', phase: 'merge', on: 'Revision changed during merge gates' })
+  expect(f.effects).toEqual(['plan', 'build', 'publish', 'review'])
+})
+
+for (const changesBase of [false, true]) {
+  test(`merge CI ${changesBase ? 'discards' : 'accepts'} green when base ${changesBase ? 'moves' : 'stays'} during acquisition`, async () => {
+    const f = await fixture()
+    let base = 'b'.repeat(40), elapsed = 0, probes = 0
+    const waits: number[] = []
+    f.options.mergeReadinessClock = { now: () => elapsed, wait: async ms => { waits.push(ms); elapsed += ms } }
+    const run = f.options.mutation.run_host
+    f.options.mutation.run_host = async (argv, cwd, env, timeout) => {
+      const result = await run(argv, cwd, env, timeout)
+      if (argv.includes('headRefOid,baseRefOid,state')) return { ...result, stdout: JSON.stringify({ ...JSON.parse(result.stdout), baseRefOid: base }) }
+      return result
+    }
+    f.options.observeCi = async () => {
+      probes++
+      if (changesBase && probes === 1) base = 'c'.repeat(40)
+      // The first green result describes the old base. Its replacement checks are
+      // still running on the next acquisition, so using it would merge too early.
+      return probes === 2 ? { kind: 'running', headSha: head } : { kind: 'completed', headSha: head, conclusion: 'success' }
+    }
+    expect(await f.make().deps.mergeGate(published)).toEqual({ kind: 'allow' })
+    expect(probes).toBe(changesBase ? 3 : 1)
+    expect(waits).toEqual(changesBase ? [30000, 30000] : [])
+  })
+}
+
+test('merge readiness refuses an unreadable base revision', async () => {
+  const f = await fixture(), run = f.options.mutation.run_host
+  for (const baseRefOid of [undefined, '', 'short']) {
+    f.options.mutation.run_host = async (argv, cwd, env, timeout) => {
+      const result = await run(argv, cwd, env, timeout)
+      return argv.includes('headRefOid,baseRefOid,state')
+        ? { ...result, stdout: JSON.stringify({ headRefOid: head, state: 'OPEN', baseRefOid }) } : result
+    }
+    expect(await f.make().deps.mergeGate(published)).toEqual({ kind: 'unknown', detail: 'Merge PR base revision is missing or malformed' })
+  }
+})
 
 for (const failure of [false, true]) {
   test(`G019 host retained review ${failure ? 'failure' : 'success'} terminates without build publish or merge`, async () => {
