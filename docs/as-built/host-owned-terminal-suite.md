@@ -33,6 +33,11 @@ every panel veto continue to block.
 Stable suite finding identities feed G070 separately from changing diagnostic
 paths and tails, so a repeated host failure still requires arbitration when
 other panel findings disappear.
+Generic or unparsed failures explicitly carry unknown identity. Their first red
+can receive a fix, and green or earned advisory evidence can proceed. Unresolved
+later red retains G071's readable-count stops; falling counts with unknown
+failure identity remain undecidable under G072, never invented repetition or
+proof of improvement.
 
 Consuming coverage in `open/__tests__/project-build-e2e.test.ts` counts one host
 suite across terminal review and publication, two suites across a code-fix
@@ -42,18 +47,21 @@ wave siblings, whole-map v2 pending recovery, actual targeted base-test
 execution, generic-runner evidence, changed failure/run, mixed Bun crashes,
 empty evidence, panel veto, and repeated-failure arbitration. Focused coverage
 includes `trident/build-run.test.ts`, `trident/project-build-host.test.ts`,
-`trident/gates/review-suite.test.ts`, `trident/suite-failure.test.ts`,
+`trident/gates/review-suite.test.ts`, `trident/gates/review-progress.test.ts`, `trident/suite-failure.test.ts`,
 `trident/test-strategy.test.ts`, and Open wiring tests.
 
-Offline validation: the complete consuming Open file passed 282 tests; the
-later cached-red and G070 legitimate-progress additions passed their focused
-consuming runs. The six focused files passed 532 tests. Both root and Trident
+Offline validation: the complete consuming Open file passed 286 tests. The
+seven focused files passed 536 tests. Both root and Trident
 TypeScript checks passed, and `scripts/ci/typecheck-all.sh` passed all 51
 projects. Semantic mutations were rejected in both directions for G065
 (unearned advisory admitted / earned advisory rejected) and G070 (changing
 diagnostics hide recurrence / every failure falsely treated as repeated).
 Separate consuming mutations also reject dropping the wave worker suite and
-restoring the redundant terminal worker suite. Restored controls pass.
+restoring the redundant terminal worker suite. G072 mutations reject inventing
+progress from missing identities and refusing a resolved green/advisory round.
+Restored controls pass. The generic unchanged/changed-red consumers return
+unknown rather than fabricated repetition, while the earned generic advisory
+still merges.
 
 The host suite still completes before the independent review panel. This
 change neither establishes concurrent proof/review timing nor claims token or

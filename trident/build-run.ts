@@ -111,6 +111,7 @@ function validReviewProgress(value: unknown): value is ReviewProgress {
   const progress = value as ReviewProgress
   return Array.isArray(progress.findings) && progress.findings.every(f => typeof f === 'string' && f.trim().length > 0)
     && Number.isSafeInteger(progress.blockingCount) && progress.blockingCount >= 0
+    && (progress.unknownIdentities === undefined || typeof progress.unknownIdentities === 'boolean')
 }
 
 function recoveryInputs(input: BuildRunInput, maxRounds: number) {
@@ -1000,7 +1001,11 @@ export async function buildRun(input: BuildRunInput, deps: BuildRunDeps, signal:
         const decision = applyReviewCi(suiteDecision, ci)
         if (currentReview) {
           const suiteBlockers = [...suite.findings, ...ci.findings].filter(f => !f.advisory)
-          currentReview = { findings: [...currentReview.findings, ...suiteBlockers.map(f => 'identity' in f && typeof f.identity === 'string' ? f.identity : `${f.title}: ${f.evidence}`)], blockingCount: currentReview.blockingCount + suiteBlockers.length }
+          const unknownIdentities = suiteBlockers.some(f => 'identity' in f && f.identity === null)
+          currentReview = { findings: [...currentReview.findings, ...suiteBlockers.flatMap(f =>
+            'identity' in f && f.identity === null ? [] : ['identity' in f && typeof f.identity === 'string' ? f.identity : `${f.title}: ${f.evidence}`])],
+            blockingCount: currentReview.blockingCount + suiteBlockers.length,
+            ...(unknownIdentities ? { unknownIdentities: true } : {}) }
         }
         if (decision.kind === 'blocked') return blocked(decision.on)
         if (decision.kind === 'unknown') return unknown(decision.detail)

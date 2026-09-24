@@ -34,6 +34,8 @@ test('host named failure identity survives timings and rounds but rejects a diff
     expect(changed.hostFailureId).not.toBe(first.hostFailureId)
     expect(applyReviewSuite({ kind: 'approve' }, await assess(changed, evidence)).kind).toBe('fix')
     expect((await suiteFailure(log, 'other runner')).hostFailureId).not.toBe(changed.hostFailureId)
+    await writeFile(log, transcript('handles SyntaxError and Unhandled errors', 3))
+    expect((await suiteFailure(log, 'bun test')).hostFailureId).toBeDefined()
     for (const broken of [transcript('rejects invalid input', 3) + "error: Cannot find module './broken-by-diff'\n",
       transcript('rejects invalid input', 3).replace('Ran 1 test across 1 file. [3.00ms]', ''),
       transcript('rejects invalid input', 3).replace('1 fail', '2 fail')]) {

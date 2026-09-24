@@ -41,7 +41,7 @@ export async function suiteFailure(logPath: string, command: string, worktree?: 
     if (/^Ran \d+ tests? across \d+ files?\./.test(line)) finished++
     const count = line.match(/^\s*(\d+) fail\s*$/)
     if (count) reported += Number(count[1])
-    if (/^\s*[1-9]\d* errors?\b|Cannot find module|ModuleNotFound|SyntaxError|Unhandled|Segmentation fault|SIG(?:KILL|SEGV|ABRT)|run-tests: FATAL|panic:|^Killed\b/.test(line)) overflow = true
+    if (/^\s*(?:[1-9]\d* errors?\b|(?:error: )?(?:Cannot find module\b|ModuleNotFoundError:|SyntaxError:|Unhandled(?:PromiseRejection| exception| error)|Segmentation fault\b|SIG(?:KILL|SEGV|ABRT)\b|run-tests: FATAL\b|panic:|Killed\b))/.test(line)) overflow = true
     if (/^\s*(?:error|[A-Z]\w*Error):/.test(line)) {
       if (errors.size >= 200) overflow = true
       else errors.add(line.trim())

@@ -1167,6 +1167,26 @@ test('G070 permits a different host failure with fewer blockers and an eventual 
   expect(suites).toBe(3)
 }, 120_000)
 
+for (const changed of [false, true]) test(`G072 generic red with fewer blockers remains undecidable, changed=${changed}`, async () => {
+  const f = await fixture({ namedSuiteFailure: 'generic', blockersByRound: [0, 1, 0], maxRounds: 3 })
+  f.world.suiteReport = async () => ({ testsPassed: false, suiteOutcome: 'deferred', suiteEvidence: '' })
+  let suites = 0
+  const runSuite = f.context.runSuite!
+  f.context.runSuite = async (...args) => {
+    const result = await runSuite(...args)
+    suites++
+    if (changed && suites === 2) {
+      const log = join(f.context.stateRoot, f.row.id, 'suite-round-2.log')
+      await writeFile(log, 'tests/different.test.sh: a different failure\n')
+    }
+    return result
+  }
+  const outcome = await drive(f)
+  expect(outcome, why(f, outcome)).toMatchObject({ kind: 'unknown', detail: 'Review progress cannot compare unidentified host suite failures' })
+  expect(f.world.dispatches.filter(dispatch => dispatch.role === 'fix')).toHaveLength(1)
+  expect(lastCheckpoint(f).previousReview).toEqual({ blockingCount: 1, unknownIdentities: true, findings: [] })
+}, 120_000)
+
 for (const format of ['bun', 'generic'] as const)
 for (const evidence of (format === 'bun' ? ['valid', 'empty', 'changed-failure', 'mixed-crash', 'panel-veto'] : ['valid', 'empty', 'changed-run']) as readonly string[])
 test(`${format} host red reaches targeted base comparison and preserves ${evidence}`, async () => {

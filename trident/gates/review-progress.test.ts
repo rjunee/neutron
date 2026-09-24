@@ -19,3 +19,13 @@ test('G071 compares readable code counts, excluding advisory-only rounds', () =>
   for (const count of [2, 3]) expect(reviewProgress({ findings: ['old'], blockingCount: 2 }, { findings: ['new'], blockingCount: count })).toEqual({ kind: 'blocked', on: 'Review requires orchestrator arbitration: no-progress' })
   for (const [before, after] of [[2, 1], [1, 0], [0, 1], [0, 0]]) expect(reviewProgress({ findings: ['old'], blockingCount: before! }, { findings: ['new'], blockingCount: after! })).toEqual({ kind: 'allow' })
 })
+
+test('G072 unidentified suite failures cannot establish repetition or improvement', () => {
+  const first = { findings: ['panel defect'], blockingCount: 2, unknownIdentities: true }
+  const red = { findings: [], blockingCount: 1, unknownIdentities: true }
+  expect(reviewProgress(undefined, first)).toEqual({ kind: 'allow' })
+  expect(reviewProgress(first, red)).toEqual({ kind: 'unknown', detail: 'Review progress cannot compare unidentified host suite failures' })
+  expect(reviewProgress(red, red)).toEqual({ kind: 'blocked', on: 'Review requires orchestrator arbitration: no-progress' })
+  expect(reviewProgress(first, { findings: [], blockingCount: 0 })).toEqual({ kind: 'allow' })
+  expect(reviewProgress(first, { findings: ['panel defect'], blockingCount: 1 })).toEqual({ kind: 'blocked', on: 'Review requires orchestrator arbitration: repeated finding' })
+})

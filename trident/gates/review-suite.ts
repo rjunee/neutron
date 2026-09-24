@@ -6,7 +6,7 @@ export interface SuiteFinding {
   evidence: string
   advisory: boolean
   /** Host failure identity for progress; diagnostics may contain round-specific paths. */
-  identity?: string
+  identity?: string | null
 }
 export type SuiteAssessment =
   | { kind: 'known'; findings: readonly SuiteFinding[] }
@@ -29,10 +29,10 @@ export interface ReviewSuiteSource {
 }
 const known = (findings: readonly SuiteFinding[] = []): SuiteAssessment => ({ kind: 'known', findings })
 const unknown = (detail: string): SuiteAssessment => ({ kind: 'unknown', detail })
-const blocker = (title: string, evidence: string, identity?: string): SuiteAssessment => known([{ title, evidence, advisory: false, ...(identity ? { identity } : {}) }])
+const blocker = (title: string, evidence: string, identity?: string | null): SuiteAssessment => known([{ title, evidence, advisory: false, ...(identity !== undefined ? { identity } : {}) }])
 const failedPreexisting = (report: { suiteOutcome?: string; suiteEvidence?: string; hostDiagnostics?: string; hostFailureId?: string }): SuiteAssessment => {
   const evidence = typeof report.suiteEvidence === 'string' ? report.suiteEvidence.trim() : ''
-  if (!evidence) return blocker('FAILED-PREEXISTING CLAIMED WITHOUT EVIDENCE', `Re-run the failing files at the base and record the comparison${report.hostDiagnostics ? `\n${report.hostDiagnostics}` : ''}`, report.hostFailureId ?? (report.hostDiagnostics ? 'host-suite:unclassified' : undefined))
+  if (!evidence) return blocker('FAILED-PREEXISTING CLAIMED WITHOUT EVIDENCE', `Re-run the failing files at the base and record the comparison${report.hostDiagnostics ? `\n${report.hostDiagnostics}` : ''}`, report.hostFailureId ?? (report.hostDiagnostics ? null : undefined))
   return known([{ title: 'FULL SUITE RED FOR PRE-EXISTING REASONS', evidence: `Untrusted build transcription; verify the base comparison and named failures before approving:\n${evidence}`, advisory: true }])
 }
 
@@ -68,12 +68,12 @@ export async function assessReviewSuite(source: ReviewSuiteSource | undefined, s
     if (report.hostSuiteWorker === true && report.suiteOutcome === 'failed-preexisting'
       && (report.hostComparisonEligible !== true || report.hostFailureFormat !== 'generic'
         && (!report.hostFailureId || !report.suiteEvidence?.includes(report.hostFailureId)))) {
-      return blocker('HOST SUITE BASE COMPARISON NOT PROVEN', `${report.hostDiagnostics ?? 'Host failure identity unavailable.'}\nRe-run these named failures at the base and include any supplied failure identity and observed comparison in suiteEvidence.`, report.hostFailureId ?? 'host-suite:unclassified')
+      return blocker('HOST SUITE BASE COMPARISON NOT PROVEN', `${report.hostDiagnostics ?? 'Host failure identity unavailable.'}\nRe-run these named failures at the base and include any supplied failure identity and observed comparison in suiteEvidence.`, report.hostFailureId ?? null)
     }
     if (report?.suiteOutcome === 'failed-preexisting') {
       return failedPreexisting(report)
     }
-    return blocker('FULL SUITE NOT PROVEN', report.hostDiagnostics ?? 'Run the required full suite and record its result', report.hostFailureId ?? 'host-suite:unclassified')
+    return blocker('FULL SUITE NOT PROVEN', report.hostDiagnostics ?? 'Run the required full suite and record its result', report.hostFailureId ?? null)
   } catch (error) { return unknownCause('Review suite host observation failed', error, runId) }
 }
 
