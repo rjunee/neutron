@@ -30,7 +30,7 @@ import { modelTier } from '@neutronai/trident/model-tiers.ts'
 import { readProjectRepos } from '@neutronai/trident/project-repos.ts'
 import { buildReflectionGuidance } from '@neutronai/trident/reflection-guidance.ts'
 import { PROJECT_BUILD_WALL_MS } from '@neutronai/trident/project-build-budget.ts'
-import { prepareProjectDependencies, projectSuiteIdentity } from './project-build-dependencies.ts'
+import { prepareProjectDependencies, projectSuiteIdentity, type projectInstallAvailableBytes } from './project-build-dependencies.ts'
 import { parseBuildModeState, readBuildRetrySource } from '@neutronai/trident/build-mode-state.ts'
 import { normalizeLegacyStoredExecutionPlan } from '@neutronai/trident/legacy-execution-compat.ts'
 import { assertProjectSnapshot, PROJECT_SNAPSHOT_SCHEMA } from './project-build-snapshot.ts'
@@ -112,6 +112,8 @@ function liveProjectSessions(projectId: string): Array<[string, PersistentReplSu
 }
 
 export interface ProjectBuildContext {
+  /** Host filesystem measurement at the actual dependency-install boundary. */
+  measureInstallAvailableBytes?: typeof projectInstallAvailableBytes
   store: ProjectBuildHostOptions['production']['store']
   attempts: ProjectBuildHostOptions['attempts']
   runHost: ProjectBuildHostOptions['production']['runHost']
@@ -355,7 +357,7 @@ export async function prepareProjectBuild(input: InnerLoopInput, context: Projec
   const accounting = new AttemptAccounting(context.attempts, state,
     (stage, meta) => context.store.recordStageEvent(run.id, stage, meta))
   await accounting.interval('dependency-preparation', { run_id: run.id },
-    () => prepareProjectDependencies(run.worktree, state, context.runInstall))
+    () => prepareProjectDependencies(run.worktree, state, context.runInstall, context.measureInstallAvailableBytes))
   const topic = run.chat_id ?? context.projectId
   const observerPath = (step: string) => join(state, `claude-observer-${createHash('sha256').update(step).digest('hex')}.json`)
   const codexEnv = { ...context.env, ...(input.codex_home ? { CODEX_HOME: input.codex_home } : {}) }

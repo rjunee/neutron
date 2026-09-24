@@ -50,6 +50,7 @@
  * Everything this does NOT cover is enumerated at the bottom of this file.
  */
 import { LIVE_AGENT_TOOL_NAMES } from '@neutronai/gateway/wiring/build-live-agent-turn.ts'
+import { projectInstallAvailableBytes } from '../wiring/project-build-dependencies.ts'
 import { afterEach, expect, spyOn, test } from 'bun:test'
 import { chmod, copyFile, mkdir, mkdtemp, readFile, readdir, realpath, rename, rm, stat, symlink, utimes, writeFile } from 'node:fs/promises'
 import { tmpdir } from 'node:os'
@@ -2208,6 +2209,45 @@ test('Bun workspace recovery repairs missing dependencies before workers', async
   expect(log.match(/Worktree-local dependency preparation completed/g)).toHaveLength(2)
 }, 120_000)
 
+test('Bun workspace install admission refuses unknown and low space, then admits recovered capacity', async () => {
+  const reserveBytes = 5_368_709_120n
+  for (const observation of [null, -1n, reserveBytes - 1n, 'throws'] as const) {
+    const f = await fixture({ bunWorkspace: true })
+    const original = f.context.runInstall!
+    let commands = 0
+    f.context.runInstall = Object.assign(async (...args: Parameters<typeof original>) => {
+      commands++
+      return original(...args)
+    }, { writesDiffOutput: true as const })
+    f.context.measureInstallAvailableBytes = async worktree => {
+      expect(worktree).toBe(f.store.get(f.row.id)!.worktree!)
+      if (observation === 'throws') throw new Error('measurement unavailable')
+      return observation
+    }
+    await expect(f.prepare()).rejects.toThrow('dependency install paused')
+    expect(commands).toBe(0)
+    expect(f.world.dispatches).toEqual([])
+    const state = join(f.context.stateRoot, encodeURIComponent(f.row.id))
+    await expect(readFile(join(state, 'dependencies-receipt.json'))).rejects.toMatchObject({ code: 'ENOENT' })
+    f.input.run = f.store.get(f.row.id)!
+    // Exact boundary is eligible; it is a start-admission reserve, not an estimate
+    // of the eventual install size or a promise against concurrent disk usage.
+    f.context.measureInstallAvailableBytes = async () => reserveBytes + (observation === 'throws' ? 1n : 0n)
+    await f.prepare()
+    expect(commands).toBe(2)
+    const worktree = f.store.get(f.row.id)!.worktree!
+    expect((await spawnCapture(['bun', 'app/check.ts'], worktree)).stdout).toBe('dependency consumed')
+  }
+}, 120_000)
+
+test('Bun workspace disk measurement reads the destination filesystem and unknown paths refuse', async () => {
+  const f = await fixture({ bunWorkspace: true })
+  const measured = await projectInstallAvailableBytes(f.repo)
+  expect(typeof measured).toBe('bigint')
+  expect(measured! >= 0n).toBe(true)
+  expect(await projectInstallAvailableBytes(join(f.repo, 'absent-filesystem-probe'))).toBeNull()
+})
+
 test('Bun workspace unchanged recovery saves an install and still verifies before merging', async () => {
   const f = await fixture({ bunWorkspace: true })
   const original = f.context.runInstall!
@@ -2218,10 +2258,13 @@ test('Bun workspace unchanged recovery saves an install and still verifies befor
   }, { writesDiffOutput: true as const })
   await f.prepare()
   expect(calls).toEqual(['install', 'verify'])
+  let measured = 0
+  f.context.measureInstallAvailableBytes = async () => { measured++; return 0n }
   f.input.run = f.store.get(f.row.id)!
   const outcome = await drive(f)
   expect(outcome.kind, why(f, outcome)).toBe('merged')
   expect(calls).toEqual(['install', 'verify', 'verify'])
+  expect(measured).toBe(0)
 }, 120_000)
 
 test('package-local workspace resolution retains one host suite through publication', async () => {
