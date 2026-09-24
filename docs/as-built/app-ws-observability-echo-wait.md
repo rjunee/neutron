@@ -1,0 +1,5 @@
+## 2026-09-24 — Wait for the app WebSocket echo in the observability test
+
+The real HTTP suite exposed an ordering race in the app WebSocket observability test. It waited for the server's `turn_completed` log, then immediately checked a client event array that a separate WebSocket `onmessage` callback populates. The server can finish logging before that callback runs. One 100-file lane recorded 1,037 passing tests and this one failure; the same test passed in the preceding lane run without a production or test code change.
+
+The test now waits for the actual `user_message` client event before retaining its echo assertion. Its exact server lifecycle log and turn correlation assertions remain in place. A controlled 500 ms delay to the client callback reproduced the original false assertion and passed with this wait. Removing the product echo made the repaired test time out at the client event wait; removing the `turn_completed` log made it time out at the server log wait. With both temporary mutations restored, the focused eight-case file passed. These are focused results, not a full-suite receipt.
