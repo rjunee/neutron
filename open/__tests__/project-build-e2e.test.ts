@@ -786,6 +786,7 @@ async function fixture(options: { taskSequence?: boolean; moreTasks?: boolean; s
   hostLedger?: boolean
   bunWorkspace?: boolean
   bunWorkspacePeer?: boolean
+  bunWorkspaceSibling?: boolean
   manifest?: Record<string, unknown>
   dispatchTask?: string
   blockersByRound?: readonly number[]; replanRounds?: readonly number[]
@@ -852,7 +853,7 @@ async function fixture(options: { taskSequence?: boolean; moreTasks?: boolean; s
     await mkdir(join(repo, 'app'), { recursive: true })
     await mkdir(join(repo, 'vendor', 'package'), { recursive: true })
     await writeFile(join(repo, '.gitignore'), 'node_modules/\n')
-    await writeFile(join(repo, 'package.json'), JSON.stringify({ name: 'fixture', private: true, workspaces: ['app'],
+    await writeFile(join(repo, 'package.json'), JSON.stringify({ name: 'fixture', private: true, workspaces: options.bunWorkspaceSibling ? ['app', 'cores/sdk'] : ['app'],
       scripts: { postinstall: 'touch lifecycle-ran' } }))
     await writeFile(join(repo, 'bunfig.toml'), '[install]\nlinker = "isolated"\n')
     await writeFile(join(repo, 'vendor', 'package', 'package.json'), JSON.stringify({ name: 'fixture-dependency', version: '1.0.0', main: 'index.js' }))
@@ -865,9 +866,16 @@ async function fixture(options: { taskSequence?: boolean; moreTasks?: boolean; s
       await writeFile(join(repo, 'vendor', 'peer', 'index.js'), 'exports.message = "local peer"\n')
       expect((await spawnCapture(['tar', '-czf', 'peer.tgz', 'peer'], join(repo, 'vendor'))).ok).toBe(true)
     }
-    await writeFile(join(repo, 'app', 'package.json'), JSON.stringify({ name: 'fixture-app', dependencies: { 'fixture-dependency': 'file:../vendor/dependency.tgz' },
+    if (options.bunWorkspaceSibling) {
+      await mkdir(join(repo, 'cores/sdk'), { recursive: true })
+      await writeFile(join(repo, 'cores/sdk', 'package.json'), JSON.stringify({ name: '@fixture/sdk', private: true, main: './index.ts', type: 'module' }))
+      await writeFile(join(repo, 'cores/sdk', 'index.ts'), 'export const message = "local workspace"\n')
+    }
+    await writeFile(join(repo, 'app', 'package.json'), JSON.stringify({ name: 'fixture-app', dependencies: { 'fixture-dependency': 'file:../vendor/dependency.tgz',
+      ...(options.bunWorkspaceSibling ? { '@fixture/sdk': 'workspace:*' } : {}) },
       ...(options.bunWorkspacePeer ? { peerDependencies: { 'fixture-peer': 'file:../vendor/peer.tgz' } } : {}) }))
     await writeFile(join(repo, 'app', 'check.ts'), 'import { message } from "fixture-dependency"; if (message !== "dependency consumed") throw Error("wrong dependency"); console.log(message)\n'
+      + (options.bunWorkspaceSibling ? 'import { message as sibling } from "@fixture/sdk"; if (sibling !== "local workspace") throw Error("wrong workspace");\n' : '')
       + (options.bunWorkspacePeer ? 'import { message as peer } from "fixture-peer"; if (peer !== "local peer") throw Error("wrong peer");\n' : ''))
     await writeFile(join(repo, 'scripts', 'ci', 'verify-workspace-deps.ts'), await readFile(new URL('../../scripts/ci/verify-workspace-deps.ts', import.meta.url), 'utf8'))
     await writeFile(join(repo, 'scripts', 'ci', 'suite.sh'), '#!/usr/bin/env bash\nset -e\nbun scripts/ci/verify-workspace-deps.ts\nbun app/check.ts\n')
@@ -2136,6 +2144,43 @@ test('Bun workspace unchanged recovery saves an install and still verifies befor
   const outcome = await drive(f)
   expect(outcome.kind, why(f, outcome)).toBe('merged')
   expect(calls).toEqual(['install', 'verify', 'verify'])
+}, 120_000)
+
+test('package-local workspace resolution retains one host suite through publication', async () => {
+  const f = await fixture({ bunWorkspace: true, bunWorkspaceSibling: true })
+  // A wrong importer can bypass the correct package-local link and find this
+  // stale ancestor. Actual project execution must keep consuming its local code.
+  const ancestor = join(f.repo, 'node_modules', '@fixture', 'sdk')
+  await mkdir(ancestor, { recursive: true })
+  await writeFile(join(ancestor, 'package.json'), JSON.stringify({ name: '@fixture/sdk', main: 'index.js' }))
+  await writeFile(join(ancestor, 'index.js'), 'exports.message = "stale ancestor"\n')
+  const originalInstall = f.context.runInstall!
+  const originalSuite = f.context.runSuite!
+  let installs = 0, suites = 0
+  f.context.runInstall = Object.assign(async (...args: Parameters<typeof originalInstall>) => {
+    if (!args[0][2]!.includes('verify-workspace-deps.ts')) installs++
+    return originalInstall(...args)
+  }, { writesDiffOutput: true as const })
+  f.context.runSuite = async (...args) => { suites++; return originalSuite(...args) }
+  // Restricted ancestors allow known-path traversal but deny directory listing.
+  // Keep writes for host state creation, and prove this is not a root bypass.
+  await chmod(f.dir, 0o300)
+  cleanups.push(() => chmod(f.dir, 0o700))
+  await expect(readdir(f.dir)).rejects.toMatchObject({ code: 'EACCES' })
+  await f.prepare()
+  const worktree = f.store.get(f.row.id)!.worktree!
+  const receipt = join(f.context.stateRoot, f.row.id, 'dependencies-receipt.json')
+  const consumed = await spawnCapture(['bun', 'app/check.ts'], worktree)
+  expect(consumed.ok, consumed.stderr).toBe(true)
+  expect(consumed.stdout).toBe('dependency consumed')
+  expect(JSON.parse(await readFile(receipt, 'utf8')).resolution).toMatch(/^[a-f0-9]{64}$/)
+  f.input.run = f.store.get(f.row.id)!
+  const outcome = await drive(f)
+  expect(outcome.kind, why(f, outcome)).toBe('merged')
+  expect(installs).toBe(1)
+  expect(suites).toBe(1)
+  const receipts = f.store.stageEvents(f.row.id).filter(event => event.stage === 'build-suite-receipt' && JSON.parse(event.meta!).receipt)
+  expect(receipts).toHaveLength(1)
 }, 120_000)
 
 for (const changed of ['root manifest', 'workspace manifest', 'lockfile', 'config', 'branch verifier',

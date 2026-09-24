@@ -33,7 +33,8 @@ for (const manifestPath of JSON.parse(process.argv[2])) {
   const dependencies = Object.keys({ ...manifest.dependencies, ...manifest.devDependencies, ...manifest.optionalDependencies, ...manifest.peerDependencies }).sort();
   for (const dependency of dependencies) {
     let target;
-    try { target = Bun.resolveSync(dependency, path.dirname(path.join(root, manifestPath))); }
+    // Bun's importer is a file: a directory can skip its package-local links.
+    try { target = Bun.resolveSync(dependency, path.join(root, manifestPath)); }
     catch { observations.push([manifestPath, dependency, null]); continue; }
     const actual = fs.realpathSync(target);
     if (!actual.startsWith(root + path.sep)) process.exit(3);
