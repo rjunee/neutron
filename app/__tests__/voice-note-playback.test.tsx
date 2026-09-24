@@ -213,9 +213,13 @@ describe('a clip that cannot load says so', () => {
   it('surfaces the failure and offers a retry — never a control that does nothing', async () => {
     setHarnessPlatform('web');
     const priorFetch = globalThis.fetch;
+    const unrelatedUrl = 'data:text/plain,voice-note-forward-probe';
     const downstreamCalls: string[] = [];
     globalThis.fetch = ((input: RequestInfo | URL, init?: RequestInit) => {
       downstreamCalls.push(String(input));
+      if (String(input) === unrelatedUrl) {
+        return Promise.resolve(new Response('voice-note-forward-probe', { status: 200 }));
+      }
       return priorFetch(input, init);
     }) as typeof globalThis.fetch;
     const restore = failingFetch(RESOLVED_CLIP);
@@ -229,7 +233,6 @@ describe('a clip that cannot load says so', () => {
       expect(screen.text()).toContain('Voice message unavailable');
       // The fetch replacement spans the process. Prove an unrelated request
       // reaches the implementation it wrapped and returns that response.
-      const unrelatedUrl = 'data:text/plain,voice-note-forward-probe';
       const unrelatedResponse = await globalThis.fetch(unrelatedUrl);
       expect(downstreamCalls).toContain(unrelatedUrl);
       expect(unrelatedResponse.status).toBe(200);
