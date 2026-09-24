@@ -459,10 +459,10 @@ test('non-Claude core and explicit configured peer reach selected transport with
   const source = f.source()
   expect(await f.check(source)).toEqual({ kind: 'approve' })
   expect(f.bindings).toContain('custom:https://192.0.2.1/review:REVIEW_KEY')
-  expect(f.calls.map(row => row.model_id)).toContain('gpt-5.6-sol')
+  expect(f.calls.map(row => row.model_id)).toContain('gpt-6-sol')
   expect(f.calls.map(row => row.model_id)).toContain('review-model')
   const seat = source.seats.find(row => row.id === 'review_adversarial')!
-  expect(await source.readSeat(seat, snapshot, 1)).toMatchObject({ runId: 'host-run', round: 1, provider: 'openai-codex', modelId: 'gpt-5.6-sol' })
+  expect(await source.readSeat(seat, snapshot, 1)).toMatchObject({ runId: 'host-run', round: 1, provider: 'openai-codex', modelId: 'gpt-6-sol' })
   expect(f.calls.every(row => row.run_id === 'host-run' && row.budget.wall_ms === 1000 && !row.writable)).toBe(true)
   const synthesis = JSON.parse(await readFile(f.calls.at(-1)!.brief.path, 'utf8'))
   expect(synthesis.panel).toHaveLength(2)
@@ -470,7 +470,7 @@ test('non-Claude core and explicit configured peer reach selected transport with
   await f.check(source); expect(f.calls).toHaveLength(3)
 })
 test('unknown configured seat refuses by name with a known tier positive control', async () => {
-  const f = await fixture(); expect(f.source().seats[1]!.modelId).toBe('gpt-5.6-sol')
+  const f = await fixture(); expect(f.source().seats[1]!.modelId).toBe('gpt-6-sol')
   f.options.phaseModels = { ...f.options.phaseModels, review_adversarial: { model: 'missing-model' } }
   expect(f.source).toThrow('review_adversarial: unknown configured model missing-model')
 })
@@ -676,7 +676,7 @@ test('observation copies cannot rewrite the authoritative host record', async ()
   const observed = await source.readSeat(seat, snapshot, 1)
   observed!.modelId = 'forged'
   observed!.payload = null
-  expect(await source.readSeat(seat, snapshot, 1)).toMatchObject({ modelId: 'gpt-5.6-sol', payload: approve })
+  expect(await source.readSeat(seat, snapshot, 1)).toMatchObject({ modelId: 'gpt-6-sol', payload: approve })
 })
 
 for (const effort of ['xhigh', 'max'] as const) {

@@ -6,7 +6,7 @@
  * that can actually reach it, and (for a subprocess) an env knob the wrapper really
  * reads. Each part fails differently and silently:
  *
- *   • A drifted id — the registry says `gpt-5.6-sol`, the wrapper's own default says
+ *   • A drifted id — the registry says `gpt-6-sol`, the wrapper's own default says
  *     something else — is invisible until someone compares two files. So the wrapper
  *     SOURCES are read here and pinned against the registry.
  *   • A wrapper that does not read the env var named by its tier turns the whole
@@ -21,6 +21,8 @@
 import { describe, expect, it } from 'bun:test'
 
 import { setBestModelOverride } from '@neutronai/runtime/models.ts'
+import { configuredModels } from '@neutronai/runtime/configured-models.ts'
+import { phaseModelDefaults } from '../phase-models.ts'
 
 import {
   MODEL_TIERS,
@@ -43,6 +45,19 @@ const shellCode = (src: string): string =>
     .join('\n')
 
 describe('every tier is complete and resolvable', () => {
+  it('pins the latest verified ID within each class without substituting Terra', () => {
+    for (const [tier, model_id] of Object.entries({ astra: 'gpt-6-astra', sol: 'gpt-6-sol', terra: 'gpt-5.6-terra', luna: 'gpt-6-luna' })) {
+      expect(modelTier(tier)).toMatchObject({ tier, model_id, provider: 'openai', group: 'codex' })
+    }
+    expect(phaseModelDefaults()['review_codex']!.model).toBe('astra')
+  })
+
+  it('reserves Astra against configured-seat shadowing while permitting new seats', () => {
+    const seat = { tier: 'astra', model: 'other-model', provider: 'other', endpoint: 'https://example.com/v1', credential: 'REVIEW_KEY' }
+    expect(() => configuredModels({ NEUTRON_REVIEW_SEATS: JSON.stringify([seat]) })).toThrow('duplicate')
+    expect(configuredModels({ NEUTRON_REVIEW_SEATS: JSON.stringify([{ ...seat, tier: 'custom-seat' }]) })[0]!.tier).toBe('custom-seat')
+  })
+
   it('resolves each tier to a non-empty id, with no duplicates', () => {
     const registry = modelTierRegistry()
     expect(registry.map((t) => t.tier)).toEqual([...MODEL_TIERS])
@@ -75,7 +90,7 @@ describe('every tier is complete and resolvable', () => {
 
   it('returns null for an unknown or retired tier instead of inventing one', () => {
     expect(modelTier('fable-2')).toBeNull()
-    expect(modelTier('gpt-5.6-sol')).toBeNull()
+    expect(modelTier('gpt-6-sol')).toBeNull()
     expect(isModelTier('')).toBe(false)
   })
 })
@@ -115,19 +130,16 @@ describe('the registry and the wrappers cannot drift apart', () => {
     }
   })
 
-  it("`sol` IS the codex wrapper's own pinned default — one edit retires a model", () => {
+  it("`astra` IS the codex review wrapper's own pinned default", () => {
     // Two places hold this id: the registry (what the workflow threads) and the
     // wrapper (what a human running it by hand gets). They must be the same string,
     // or the default path and the pane would disagree about which model reviewed.
-    expect(modelTier('sol')!.model_id).toBe('gpt-5.6-sol')
-    expect(CODEX_WRAPPER).toContain('CODEX_REVIEW_MODEL-gpt-5.6-sol')
+    expect(modelTier('astra')!.model_id).toBe('gpt-6-astra')
+    expect(CODEX_WRAPPER).toContain('CODEX_REVIEW_MODEL-gpt-6-astra')
   })
 
-  it('keeps the wrapper\'s explicitly-EMPTY-means-CLI-default semantics', () => {
-    // `${VAR-x}` substitutes only when UNSET, so an explicit empty value falls back
-    // to the CLI's own default. `${VAR:-x}` would silently replace it. The
-    // difference is one character and no test would otherwise see it.
-    expect(CODEX_WRAPPER).toContain('"${CODEX_REVIEW_MODEL-gpt-5.6-sol}"')
+  it('defaults only unset model values so empty selections can be refused', () => {
+    expect(CODEX_WRAPPER).toContain('"${CODEX_REVIEW_MODEL-gpt-6-astra}"')
     expect(CODEX_WRAPPER).not.toContain('${CODEX_REVIEW_MODEL:-')
   })
 
@@ -135,7 +147,7 @@ describe('the registry and the wrappers cannot drift apart', () => {
     // The codex tiers now have a SECOND consumer: `trident/codex-build.sh` runs the
     // build. Its standing default has to be the same tier the registry calls `sol`,
     // or the pane and a hand invocation disagree about which GPT model built.
-    expect(CODEX_BUILD).toContain('"${CODEX_BUILD_MODEL-gpt-5.6-sol}"')
+    expect(CODEX_BUILD).toContain('"${CODEX_BUILD_MODEL-gpt-6-sol}"')
     expect(CODEX_BUILD).not.toContain('${CODEX_BUILD_MODEL:-')
 
     // A DIFFERENT knob from the reviewer's, deliberately. `CODEX_REVIEW_MODEL` is
@@ -174,4 +186,3 @@ describe('a tier follows the model, not the process it booted in', () => {
     expect(modelTier('opus')!.model_id).toBe(before)
   })
 })
-

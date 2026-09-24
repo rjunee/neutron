@@ -346,9 +346,12 @@ describe('the HTTP surface', () => {
     // pane showing only the tier cannot answer "which model is that today", and a
     // pane hardcoding the id needs an edit every time a tier's target moves.
     expect(tiers.find((t) => t['tier'] === 'sol')).toMatchObject({
-      model_id: 'gpt-5.6-sol',
+      model_id: 'gpt-6-sol',
       group: 'codex',
       available: true,
+    })
+    expect(tiers.find((t) => t['tier'] === 'astra')).toMatchObject({
+      model_id: 'gpt-6-astra', group: 'codex', available: true,
     })
     const fast = tiers.find((t) => t['tier'] === 'fast')!
     expect(String(fast['model_id'])).toStartWith('claude-haiku')
@@ -394,7 +397,7 @@ describe('the HTTP surface', () => {
     const res = await s.handler(req('GET'))
     const json = (await res!.json()) as Record<string, unknown>
     const tiers = json['model_tiers'] as Array<Record<string, unknown>>
-    for (const tier of ['sol', 'terra', 'luna']) {
+    for (const tier of ['astra', 'sol', 'terra', 'luna']) {
       expect(tiers.find((t) => t['tier'] === tier)).toMatchObject({
         available: false,
         unavailable_reason: 'needs a Codex connection',

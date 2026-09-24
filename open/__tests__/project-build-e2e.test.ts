@@ -1438,7 +1438,7 @@ test.each(['valid', 'wrong-run'] as const)('attempt accounting retains actual he
   expect(result.kind === 'merged').toBe(codexReview === 'valid')
   const attempts = f.context.attempts.list(f.row.id).filter(row => row.provider === 'openai-codex')
   expect(attempts).toHaveLength(1)
-  expect(attempts[0]).toMatchObject({ review_seat: 'review_codex', phase: 'review_codex', requested_model: 'sol', placement: 'headless' })
+  expect(attempts[0]).toMatchObject({ review_seat: 'review_codex', phase: 'review_codex', requested_model: 'sol', resolved_model: 'gpt-6-sol', placement: 'headless' })
   const receipt = f.context.attempts.receipt(attempts[0]!)!
   expect(receipt).toMatchObject({ source: 'codex-cli-jsonl', input_tokens: null, output_tokens: 3, cost_usd: null })
   expect(attempts[0]!.outcome === 'completed').toBe(codexReview === 'valid')
@@ -1641,11 +1641,15 @@ async function codexOwnerWithClaude(identity: 'valid' | 'wrong-schema' = 'valid'
   return { ...f, calls, children }
 }
 
-test('Codex owner routes explicit Claude plan, review and synthesis headlessly and its native build merges', async () => {
+test.each([
+  ['astra', 'gpt-6-astra'], ['sol', 'gpt-6-sol'], ['terra', 'gpt-5.6-terra'], ['luna', 'gpt-6-luna'],
+] as const)('Codex owner forwards %s as %s to its native builder while Claude review stays headless', async (tier, model) => {
   const f = await codexOwnerWithClaude()
+  f.input.phase_models!.build = { model: tier }
   const outcome = await drive(f)
   expect(outcome.kind, why(f, outcome)).toBe('merged')
   expect(f.children.map(request => request.role)).toEqual(['build'])
+  expect(f.children[0]!.model_id).toBe(model)
   const calls = (await readFile(f.calls, 'utf8')).trim().split('\n').map(line => JSON.parse(line))
   expect(calls.map(call => call.request.role)).toEqual(['plan', 'review', 'review', 'synthesis'])
   for (const call of calls) {
@@ -3330,8 +3334,13 @@ test('fresh retry refuses an open PR whose durable publication provenance names 
   expect(f.store.get(f.row.id)).toMatchObject({ pr: null, published_pr: 2 })
 }, 300_000)
 
-test('configured Codex review uses the production read-only headless runner and its exact verdict merges', async () => {
+test.each([
+  [undefined, 'gpt-6-astra'], ['astra', 'gpt-6-astra'], ['sol', 'gpt-6-sol'],
+  ['terra', 'gpt-5.6-terra'], ['luna', 'gpt-6-luna'],
+] as const)('configured Codex review forwards tier %s as %s through the read-only runner and merges', async (tier, model) => {
   const f = await fixture({ codexReview: 'valid' })
+  if (tier === undefined) delete f.input.phase_models!.review_codex
+  else f.input.phase_models!.review_codex = { model: tier }
   const outcome = await drive(f)
   expect(outcome.kind, why(f, outcome)).toBe('merged')
 
@@ -3348,14 +3357,14 @@ test('configured Codex review uses the production read-only headless runner and 
   }
   const run = f.store.get(f.row.id)!
   expect(call.argv).toEqual([
-    'exec', '--json', '--ignore-user-config', '--ignore-rules', '-m', 'gpt-5.6-sol',
+    'exec', '--json', '--ignore-user-config', '--ignore-rules', '-m', model,
     '-c', 'sandbox_mode="read-only"', '--output-schema', expect.any(String),
     '-o', expect.any(String), '-',
   ])
   expect(call.argv.join(' ')).not.toMatch(/danger-full-access|workspace-write|approve-for-me|auto_review|approval_policy|approvals_reviewer|model_reasoning_effort/)
   expect(run.worktree).not.toBeNull()
   expect(call.cwd).toBe(run.worktree!)
-  expect(call.request).toMatchObject({ run_id: f.row.id, role: 'review', model_id: 'gpt-5.6-sol',
+  expect(call.request).toMatchObject({ run_id: f.row.id, role: 'review', model_id: model,
     writable: false, network: true, tools: 'read-only', needs_approval_decision: false,
     result: { schema: 'verdict' } })
   expect(call.brief).toMatchObject({ seat: 'review_codex', round: 1,
