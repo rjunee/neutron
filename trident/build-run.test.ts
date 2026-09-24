@@ -2753,14 +2753,32 @@ test('same-run task-sequence terminal checkpoint preserves review without rebuil
   expect(f.events).toContain('publishGate')
 })
 
-for (const missing of ['count', 'plan', 'count-agreement', 'zero-count-agreement', 'ledger-agreement'] as const)
+test('migrated terminal task-sequence checkpoint resumes fresh review without an invented plan', async () => {
+  const f = modeFixture()
+  f.resume().remainingTasks = 0
+  f.deps.modes!.loadExecutionStrategy = async () => ({ kind: 'known', strategy: 'task_sequence',
+    source: 'legacy', rationale: 'Migrated selection', plan: null })
+  expect((await f.run()).kind).toBe('merged')
+  expect(f.runner.calls).toEqual([])
+  expect(f.cross.calls.map(call => call.role)).toEqual(['review'])
+  expect(f.state.commits).toEqual([])
+  expect(f.state.advances).toBe(0)
+  expect(f.events).toContain('publishGate')
+  expect(f.events).toContain('publicationSuite')
+})
+
+for (const missing of ['count', 'plan', 'legacy-count', 'count-agreement', 'zero-count-agreement', 'legacy-zero-count-agreement', 'ledger-agreement'] as const)
 test(`same-run task-sequence checkpoint refuses missing ${missing}`, async () => {
   const f = modeFixture()
   const checkpoint = f.resume()
   if (missing !== 'count') checkpoint.remainingTasks = missing === 'count-agreement' ? 2 : 1
-  if (missing === 'zero-count-agreement') checkpoint.remainingTasks = 0
-  if (missing === 'plan') f.deps.modes!.loadExecutionStrategy = async () => ({ kind: 'known',
-    strategy: 'task_sequence', source: 'legacy', rationale: 'Migrated selection', plan: null })
+  if (missing === 'zero-count-agreement' || missing === 'legacy-zero-count-agreement') checkpoint.remainingTasks = 0
+  if (missing === 'legacy-count') delete checkpoint.remainingTasks
+  if (missing === 'plan' || missing === 'legacy-count' || missing === 'legacy-zero-count-agreement') {
+    f.deps.modes!.loadExecutionStrategy = async () => ({ kind: 'known',
+      strategy: 'task_sequence', source: 'legacy', rationale: 'Migrated selection',
+      plan: missing === 'legacy-zero-count-agreement' ? f.plan : null })
+  }
   if (missing === 'ledger-agreement') f.plan.implementationPlan = '- [ ] T1: first'
   expect(await f.run()).toMatchObject({ kind: 'unknown',
     detail: 'Task-sequence built checkpoint cannot establish its remaining task handoff' })

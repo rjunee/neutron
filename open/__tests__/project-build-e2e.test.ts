@@ -4453,17 +4453,19 @@ test(`an orchestrated ${mergeMode} retry survives launch falsification: ${scenar
   expect(next.run.max_task_iterations).toBe(dispatched.run.max_task_iterations)
 }, 300_000)
 
-for (const { mergeMode, fixed, moved, preparationFailure } of [
+for (const { mergeMode, fixed, moved, preparationFailure, legacyTerminal = false } of [
   { mergeMode: 'pr', fixed: false, moved: false, preparationFailure: false },
   { mergeMode: 'local', fixed: false, moved: false, preparationFailure: false },
   { mergeMode: 'pr', fixed: true, moved: false, preparationFailure: false },
   { mergeMode: 'pr', fixed: false, moved: true, preparationFailure: false },
   { mergeMode: 'pr', fixed: true, moved: false, preparationFailure: true },
   { mergeMode: 'local', fixed: false, moved: false, preparationFailure: true },
+  { mergeMode: 'pr', fixed: false, moved: false, preparationFailure: false, legacyTerminal: true },
+  { mergeMode: 'local', fixed: false, moved: false, preparationFailure: false, legacyTerminal: true },
 ] as const)
-test(`a cross-run ${mergeMode} retry ${moved ? 'refuses remote movement after dispatch' : `reviews the prior ${fixed ? 'fix' : 'build'} and reaches merged without rebuilding`}${preparationFailure ? ' after a preparation failure' : ''}`, async () => {
+test(`a cross-run ${mergeMode} retry ${moved ? 'refuses remote movement after dispatch' : `reviews the prior ${fixed ? 'fix' : 'build'} and reaches merged without rebuilding`}${preparationFailure ? ' after a preparation failure' : ''}${legacyTerminal ? ' from a migrated terminal task checkpoint' : ''}`, async () => {
   const task = 'Record a note in NOTES.md and verify the resulting change with the complete regression suite'
-  const f = await fixture({ dispatchTask: task, mergeMode, taskSequence: fixed,
+  const f = await fixture({ dispatchTask: task, mergeMode, taskSequence: fixed || legacyTerminal,
     ...(fixed ? { blockersByRound: [0, 1, 0] } : {}) })
   const firstHost = await createProjectBuildHost(await f.prepare())
   if (fixed) {
@@ -4479,6 +4481,13 @@ test(`a cross-run ${mergeMode} retry ${moved ? 'refuses remote movement after di
     .toEqual(fixed ? ['plan', 'build', 'fix'] : ['plan', 'build'])
   const checkpoint = lastCheckpoint(f)
   expect(checkpoint).toMatchObject({ stage: fixed ? 'fixed' : 'built', round: fixed ? 2 : 1 })
+  if (legacyTerminal) {
+    expect(checkpoint.remainingTasks).toBe(0)
+    // A migrated pre-selection run has its authenticated terminal checkpoint,
+    // but no strategy_plan: that column did not exist when the builder finished.
+    f.db.raw().query("UPDATE code_trident_runs SET strategy_source = 'legacy', strategy_plan = NULL WHERE id = ?")
+      .run(f.row.id)
+  }
   const prior = f.store.get(f.row.id)!
   expect(prior.worktree).not.toBeNull()
   // Exercise the actual host cleanup: a pushed PR branch is disposable locally;
@@ -4536,14 +4545,14 @@ test(`a cross-run ${mergeMode} retry ${moved ? 'refuses remote movement after di
   const outcome = await host.run({ mode: 'implementation', start: 'resume' }, new AbortController().signal)
   expect(outcome.kind, why(f, outcome)).toBe('merged')
   expect(f.world.dispatches.some(dispatch => dispatch.role === 'plan' || dispatch.role === 'build' || dispatch.role === 'fix')).toBe(false)
-  expect(dispatchStep(standaloneReview(f.world))).toBe(`${dispatched.run.id}:${fixed ? 'task:0:' : ''}review:${fixed ? 2 : 1}`)
+  expect(dispatchStep(standaloneReview(f.world))).toBe(`${dispatched.run.id}:${fixed || legacyTerminal ? 'task:0:' : ''}review:${fixed ? 2 : 1}`)
   expect(standaloneReview(f.world).measuredHead).toBe(String(checkpoint.head))
   expect(f.world.dispatches.some(dispatch => dispatch.step_id.startsWith(`${prior.id}:`))).toBe(false)
   const saved = f.store.stageEvents(dispatched.run.id).filter(event => event.stage === 'build-mode-state')
   expect(JSON.parse(saved[0]!.meta!).checkpoint).toEqual(checkpoint)
   expect(JSON.parse(saved[0]!.meta!).runId).toBe(dispatched.run.id)
   const merged = await spawnCapture(['git', '-C', mergeMode === 'pr' ? f.origin : f.repo, 'show', 'refs/heads/main:NOTES.md'], f.repo)
-  expect(merged.stdout).toBe(fixed ? `seed\n${prior.id}:task:0:build:0\n${prior.id}:task:0:fix:1` : `seed\n${prior.id}:build:0`)
+  expect(merged.stdout).toBe(fixed ? `seed\n${prior.id}:task:0:build:0\n${prior.id}:task:0:fix:1` : `seed\n${prior.id}:${legacyTerminal ? 'task:0:' : ''}build:0`)
   if (mergeMode === 'local') expect(f.commands.some(argv => argv[0] === 'gh')).toBe(false)
 }, 300_000)
 
