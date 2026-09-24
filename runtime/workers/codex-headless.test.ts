@@ -635,12 +635,14 @@ describe('Codex build wrapper placed in its project Herdr workspace', () => {
     await until(() => rig.server.callsTo('pane.close').length > closes ? true : undefined)
     const [stale] = await rig.receipts(cwd)
     expect(stale).toEqual({ state: 'placed', pane: expect.any(String), pid: expect.any(Number),
-      viewPath: expect.stringMatching(/\.view\.log$/), taskLabel: expect.stringMatching(/^Build · /) })
+      viewPath: expect.stringMatching(/\.view\.log$/), taskLabel: expect.stringMatching(/^Build · /), script: expect.any(String) })
     rig.server.clearFailure('pane.close')
     const tabs = rig.server.workerLayouts().length
     const from = rig.server.calls.length
     const resumed = await createCodexHeadlessRunner({ buildScript: f.script, probe: { ok: true }, placement: rig.placement() })
       .run(request, 'headless', new AbortController().signal)
+    // The retire is detached from the recovered result; wait for its verified close.
+    await until(async () => (await rig.receipts(cwd))[0]?.state === 'closed' ? true : undefined)
     expect(rig.server.calls.slice(from).map(call => call.method).filter(method => method.startsWith('pane.')))
       .toEqual(['pane.get', 'pane.process_info', 'pane.close'])
     expect(resumed.kind).toBe('completed')

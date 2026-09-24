@@ -507,11 +507,13 @@ test('restart adopts the seat receipt: no second model turn, no new tab, the sta
   await until(() => rig.server.callsTo('pane.close').length > closes ? true : undefined)
   const [stale] = await rig.receipts(f.dir)
   expect(stale).toEqual({ state: 'placed', pane: expect.any(String), pid: expect.any(Number),
-    viewPath: expect.stringMatching(/\.view\.log$/), taskLabel: expect.stringMatching(/^Review · /) })
+    viewPath: expect.stringMatching(/\.view\.log$/), taskLabel: expect.stringMatching(/^Review · /), script: expect.any(String) })
   rig.server.clearFailure('pane.close')
   const tabs = rig.server.workerLayouts().length
   const from = rig.server.calls.length
   expect((await placedRunner(f, rig).run(f.req, 'headless', new AbortController().signal)).kind).toBe('completed')
+  // The retire is detached from the recovered verdict; wait for its verified close.
+  await until(async () => (await rig.receipts(f.dir))[0]?.state === 'closed' ? true : undefined)
   expect(rig.server.calls.slice(from).map(call => call.method).filter(method => method.startsWith('pane.')))
     .toEqual(['pane.get', 'pane.process_info', 'pane.close'])
   expect(await f.calls()).toHaveLength(1)

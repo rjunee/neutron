@@ -83,9 +83,11 @@ review and synthesis, the Codex build wrapper and the Codex review seat — now
 get a task-view tab in their dispatch's project workspace (`Neutron General`
 for General), placed through this manager from production composition
 (`open/wiring/project-build.ts`, `open/composer.ts`). The tab shows a copy of
-the worker's own output; results, usage, exit status and cancellation still
-come from the native process. Placement failure runs the worker unplaced and
-records why. View-pane retirement re-verifies the recorded follower identity
+the worker's own output (Claude's single JSON result arrives only at exit, so a
+Claude tab is presence-only while it runs); results, usage, exit status and
+cancellation still come from the native process. Placement failure runs the
+worker unplaced and records why; a failed worker tab in a ready workspace never
+reserves the scope, while an ambiguous creation stays reserved. View-pane retirement re-verifies the recorded follower identity
 through the live pane process sample before any close and refuses changed or
 unknown identity; worker results and receipts are published before view
 cleanup. No acceptance box is ticked: conversation placement, General

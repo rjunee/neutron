@@ -160,7 +160,7 @@ export function workerPlacementRig(directory: string, scope: Partial<WorkerPlace
   const host = createProjectWorkspaceHost(journal, { connect: async () => server, pidWaitMs: 500, outputGateMaxMs: 1, pollIntervalMs: 10 })
   const resolved: WorkerPlacementScope = { instanceId: 'instance', projectId: 'project-one', projectLabel: 'Project One', ...scope }
   const receipts = async (dir: string) => Promise.all((await readdir(dir)).filter(name => name.endsWith('.placement.json')).sort()
-    .map(async name => JSON.parse(await readFile(join(dir, name), 'utf8')) as { state: string; pane?: string; reason?: string; pid?: number; viewPath?: string; taskLabel?: string }))
+    .map(async name => JSON.parse(await readFile(join(dir, name), 'utf8')) as { state: string; pane?: string; reason?: string; pid?: number; viewPath?: string; taskLabel?: string; script?: string }))
   return { server, host, journal, scope: resolved, placement: () => createWorkerPlacement({ host, scope: resolved, ...timeouts }), receipts }
 }
 

@@ -69,6 +69,22 @@ There is never a fallback to an inherited or ambient workspace, and every record
 are identical to an unplaced run. Blocking or failing the build over a missing view would
 put an invisible display surface in front of real work, so this policy was chosen instead.
 
+What a failure does to LATER workers in the same scope (see the third review round below):
+
+- A failed, ambiguous or interrupted worker TAB in a ready, verified workspace affects
+  only that worker. The scope's journal row stays `ready` throughout a worker tab
+  operation, so the next worker in the scope is placed normally, including after a
+  gateway restart in the middle of a placement.
+- A typed server refusal of `workspace.create` (or of a Chat slot repair) created
+  nothing and releases its reservation, so the next worker retries.
+- An AMBIGUOUS creation (a transport error, a deadline, or a restart during
+  `workspace.create`/`report_metadata`) stays reserved, by design: the spec forbids
+  retrying an interrupted or ambiguous creation as a fresh workspace (spec lines 26-28,
+  acceptance 59-62). Later workers in that scope then run unplaced with the receipt
+  reason `placement-refused: project-workspaces: existing ownership is invalid or
+  pending; reconcile before retry`. Clearing that reservation needs the lifecycle
+  reconciler, which is out of scope here.
+
 ### Invariants and their tests (positive and refusing)
 
 | Invariant | Tests |
@@ -76,7 +92,7 @@ put an invisible display surface in front of real work, so this policy was chose
 | Evidence comes from pipes, files and exit status | "screen-independence" in the claude-headless, codex-headless and codex-review suites: a success-shaped screen, and a forced `pane.read` reply, leave a failed worker failed, with the same outcome as the unplaced baseline |
 | One worker process per dispatch | The "placed …" tests in each suite: exactly one CLI, wrapper or model-turn invocation, an outcome identical to baseline, and the view file holding the decoded bytes |
 | Cancellation kills the whole process group | "cancelling a placed …": a forked grandchild dies; every `process.kill` target is `-<worker pid>` and never the gateway's own group; the view pane is closed |
-| Restart adopts, with no duplication | "restart adopts …": a fresh runner reads the durable receipt with zero new CLI invocations and zero new tabs, and closes the stale pane recorded in the placement receipt (`claude-headless.ts:323`, `codex-headless.ts:296`, `codex-review.ts:120`) |
+| Restart adopts, with no duplication | "restart adopts …": a fresh runner reads the durable receipt with zero new CLI invocations and zero new tabs, and closes the stale pane recorded in the placement receipt (`claude-headless.ts:326`, `codex-headless.ts:298`, `codex-review.ts:122`, started and not awaited) |
 | Placement failure is unplaced and never ambient | worker-placement.test.ts (four failure modes); "placement failure …" in each worker suite; the E2E "a refused placement …" and "no terminal host …" |
 | Native children unchanged | project-runners.test.ts, with the cross-provider positive control |
 | General never becomes `general` | worker-placement.test.ts (two workspaces, two journal rows); project-build-terminal.test.ts; the E2E "General-scoped Codex review seat …" |
@@ -192,7 +208,7 @@ the merged head.
   bounded: one idle, credential-free follower (launched under `env -i`) and one tab per
   fault. Evidence is not affected, because no result, usage, exit or cancellation read
   goes through the pane.
-- **M2: the restart path awaits `retire` before decoding the receipt.** The resume
+- **M2 (fixed in the third round, below): the restart path awaited `retire` before decoding the receipt.** The resume
   branches call `await options.placement?.retire(...)` before they read the durable
   receipt (`claude-headless.ts:323`, `codex-headless.ts:296`, `codex-review.ts:120`). On a
   Herdr stall this adds at most `inspectTimeoutMs + closeTimeoutMs`, 5s each by default
@@ -230,6 +246,106 @@ Re-measured on the merged base:
   - Decoding the view file instead of the piped bytes (`claude-headless.ts:374`): 24 fail
     and 18 pass in `claude-headless.test.ts`, including "placed worker: one CLI process,
     identical outcome …". The screen-independence test stays green.
+
+### Third review round (REQUEST_CHANGES at `560bcfb7`) and its fixes
+
+Two opus seats and the synthesis returned REQUEST_CHANGES on one major finding; the
+cross-model seat approved with no findings. The host full suite had one red lane.
+
+**Major: one failed worker tab wedged the whole project scope.** This PR is the first
+production consumer of `ProjectWorkspaceManager`. For a worker tab in an already ready,
+verified workspace, `apply()` rewrote the scope row to `pending` before `tab.move` and the
+worker `layout.apply`, and only a `createdHere` refusal ever put it back. Any typed
+refusal, transport error or tab-move failure there, or a gateway restart mid-placement,
+left the row `pending`, and every later worker in the project was refused with
+`existing ownership is invalid or pending; reconcile before retry`. No reconciler exists.
+
+- The journal records the workspace and its Chat slot, never worker tabs, so a worker
+  tab has nothing for a `pending` row to guard. `apply()` now keeps the row `ready` for a
+  worker tab in a workspace this call did not create (`readyWorker`,
+  `project-workspaces.ts:177`). It still takes the row's revision under compare-and-set as
+  a claim, so two managers acting on the same verified observation cannot both proceed
+  ("ready-record CAS admits only one concurrent manager mutation" stays green). It commits
+  nothing after the tab lands, so a later claim cannot turn a placed tab into a failure.
+- A Chat slot repair inside a ready workspace still holds `pending` while its placeholder
+  is in flight. After the slot is recorded the row returns to `ready`
+  (`project-workspaces.ts:208`). A typed refusal of the repair restores `ready`
+  (`:195`); an ambiguous failure keeps the reservation.
+- A typed `workspace.create` refusal releases the reservation it made (`:159`,
+  `release()` at `:315`); only our exact, workspace-less reservation is removed. A
+  transport failure keeps it, as the spec requires.
+- The creation flow itself is unchanged: `pending` until the first placement completes
+  or its placeholder is verifiably retired.
+
+Tests, positive and refusing:
+
+- project-workspaces.test.ts:
+  - "a failed worker tab in a ready workspace leaves it ready …": typed and transport
+    faults on both `layout.apply` and `tab.move`, followed by healthy placements from
+    the same manager and from a new one. There is one `workspace.create` and the journal
+    reads `ready`.
+  - "the row stays ready WHILE a worker tab is in flight …": the journal is sampled
+    inside the worker `layout.apply` and reads `ready`. The complement is a creation,
+    which reads `pending`.
+  - "Chat slot repair: a typed refusal restores ready; an ambiguous failure keeps the
+    reservation".
+  - "a typed workspace.create refusal releases the reservation; a transport failure
+    keeps it".
+  - Mutation `readyWorker = false`: the first three of these go red (3 fail, 20 pass).
+- worker-placement.test.ts, "a failed worker tab leaves the ready workspace usable …": the
+  reviewers' reproduction. Placement 1 is placed. Placement 2 fails `layout.apply`
+  (transport and typed). Placement 3, with Herdr healthy again, is placed, and the
+  journal reads `ready`. The test is red under the same mutation.
+- E2E, "a refused placement (typed | ambiguous workspace.create failure) …" now asserts
+  each receipt's actual reason instead of the `placement-refused:` prefix:
+  - typed: four `workspace.create` calls, each refused by the server itself.
+  - ambiguous: one `workspace.create`; the other three workers carry the disclosed
+    reservation reason. Both builds merge.
+
+**Minor: the Claude task view was blank for the whole run.** `--output-format json`
+prints one object at exit. The runner now writes a host banner at the top of the view
+(`WorkerPlaceInput.banner`, `worker-placement.ts:408`; `claude-headless.ts:367`). It says
+the worker runs headless and prints its result only when it exits. Claude tabs are
+therefore presence-only while the worker runs; the Codex tabs stream JSONL progress. The
+decoded bytes are untouched. "placed worker: one CLI process …" asserts the banner and
+then the worker's own JSON.
+
+**Minor: recovery awaited `retire` (M2 above).** The three resume branches now start the
+verified retire and do not await it (`claude-headless.ts:326`, `codex-headless.ts:298`,
+`codex-review.ts:122`). `retire` never rejects; `fireAndForget` would log and absorb a rejection regardless.
+"restart recovery republishes the committed result while the stale-pane retire is still
+stalled" holds `pane.get` for a 60s-bounded retire; the replacement returns the committed
+result at once and the pane closes after release. The mutation back to `await` turns it
+red after 5s. The three "restart adopts …" tests now wait for the `closed` receipt.
+
+**Nit: follower identity is self-contained.** A `placed` receipt now records `script`, the
+sha256 of the follower script it launched (`worker-placement.ts:313`). `followerOwnsPane`
+compares the live argv against that digest (`:217`), so a later build that edits
+`VIEW_FOLLOW_SCRIPT` still retires an older build's follower. Receipts without a digest
+predate it and use the current script. "identity is the script the RECEIPT recorded …"
+covers both sides.
+
+**Disclosed, not fixed in this slice (retirement is the lifecycle slice, spec lines 46-51):**
+
+- A receipt left `pending` has no pane handle. If the gateway dies after Herdr created the
+  follower pane but before `spawn` returned, that pane and its tab have no record that
+  could retire them. The window is one RPC round-trip per placement, and the cost is one
+  idle, credential-free follower.
+- A step that is never re-dispatched after a restart (its run is cancelled or terminated
+  instead) keeps its `placed` receipt, so its follower is never retired. `retire` runs
+  only on a same-step resume. As with M1, worker evidence is unaffected, because nothing
+  is read from the pane.
+
+**Host suite red lane, fixed here.** The only failure in `suite-round-1.log` was
+`scripts/__tests__/discover-test-files.test.ts`, "keeps all twelve patterns …". It is
+pre-existing on main and caused by locale:
+
+- `scripts/lib/discover-test-files.sh` sorted with the host's `en_US.UTF-8` collation,
+  which ignores leading punctuation.
+- Base comparison: `LANG=en_US.UTF-8 bun test scripts/__tests__/discover-test-files.test.ts`
+  fails with the unchanged script, and `git diff 1ba43691 560bcfb7 -- scripts/` is empty.
+- Fix: the script now sorts with `LC_ALL=C` (byte order). The test passes under both
+  `en_US.UTF-8` and `C.UTF-8`, and the runner shard and HTTP-lane tests stay green.
 
 ### Out of scope, still open
 

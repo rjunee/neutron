@@ -148,7 +148,17 @@ export class ProjectWorkspaceManager {
     let initialPane: string | undefined
     let createdHere = false
     if (!record.workspace) {
-      const created = object(await client.call('workspace.create', { label: placement.projectId === null ? 'Neutron General' : placement.projectLabel, cwd: root.cwd, focus: false }))
+      let created: Record<string, unknown>
+      try {
+        created = object(await client.call('workspace.create', { label: placement.projectId === null ? 'Neutron General' : placement.projectLabel, cwd: root.cwd, focus: false }))
+      } catch (error) {
+        // A TYPED server refusal is definitive: the server answered and created
+        // nothing, so the reservation guards nothing and is released. Any other
+        // failure (transport, deadline, malformed reply) is ambiguous and stays
+        // reserved: an interrupted creation is never retried as a fresh workspace.
+        if (error instanceof HerdrError) this.release(key, record)
+        throw error
+      }
       const workspace = handle(object(created.workspace).workspace_id)
       createdHere = true
       initialPane = handle(object(created.root_pane).pane_id)
@@ -157,17 +167,36 @@ export class ProjectWorkspaceManager {
     }
 
     const workspace = record.workspace!
+    // A WORKER TAB in a workspace this call did not create is not a reservation-worthy
+    // mutation: the journal records the workspace and its Chat slot, never worker tabs,
+    // so a failed, ambiguous or interrupted worker tab leaves nothing for the row to
+    // guard. Such an operation keeps the row `ready` throughout. It still takes the
+    // row's revision under compare-and-set (a CLAIM) so two managers racing the same
+    // verified observation cannot both act on it. Only the creation flow and a Chat
+    // slot repair hold the row `pending` while their journal-tracked object is in flight.
+    const readyWorker = placement.role === 'worker' && !createdHere
     if (placement.role === 'worker') {
       const live = record.chat ? await this.verifyChat(client, workspace, record.chat) : false
-      record = this.reserve(key, record, { ...record, state: 'pending' })
+      record = this.reserve(key, record, { ...record, state: readyWorker && live ? 'ready' : 'pending' })
       if (!live) {
         const argv = [process.execPath, '-e', PLACEHOLDER, record.token]
-        const placeholder = layout(await client.call('layout.apply', {
-          workspace_id: workspace, tab_label: 'Chat', focus: false,
-          // Herdr merges env into its own environment. The env executable really
-          // clears it before exec; identity probes observe the final Bun argv.
-          root: { type: 'pane', cwd: root.cwd, command: ['/usr/bin/env', '-i', ...argv], label: 'Chat', env: {} },
-        }), workspace)
+        let placeholder: HerdrLayoutApply
+        try {
+          placeholder = layout(await client.call('layout.apply', {
+            workspace_id: workspace, tab_label: 'Chat', focus: false,
+            // Herdr merges env into its own environment. The env executable really
+            // clears it before exec; identity probes observe the final Bun argv.
+            root: { type: 'pane', cwd: root.cwd, command: ['/usr/bin/env', '-i', ...argv], label: 'Chat', env: {} },
+          }), workspace)
+        } catch (error) {
+          // A typed refusal of the slot repair created nothing: the recorded slot is
+          // still the proven-closed one, which the next wake re-verifies. An
+          // ambiguous failure keeps the reservation.
+          if (readyWorker && error instanceof HerdrError) {
+            try { this.reserve(key, record, { ...record, state: 'ready' }) } catch { /* concurrent owner */ }
+          }
+          throw error
+        }
         record = this.reserve(key, record, { ...record, chat: {
           tab: placeholder.layout.tab_id, pane: placeholder.layout.root.pane_id, placeholderArgv: argv,
         } })
@@ -175,6 +204,8 @@ export class ProjectWorkspaceManager {
           await client.call('pane.close', { pane_id: initialPane })
           initialPane = undefined
         }
+        // The repaired slot is recorded: nothing journal-tracked is in flight any more.
+        if (readyWorker) record = this.reserve(key, record, { ...record, state: 'ready' })
       }
       await client.call('tab.move', { tab_id: record.chat!.tab, insert_index: 0 })
     }
@@ -200,7 +231,7 @@ export class ProjectWorkspaceManager {
       }
     }
 
-    record = this.reserve(key, record, { ...record, state: 'pending' })
+    if (!readyWorker) record = this.reserve(key, record, { ...record, state: 'pending' })
     const title = placement.role === 'chat' ? 'Chat' : placement.taskLabel!
     const params = {
       workspace_id: workspace,
@@ -223,10 +254,14 @@ export class ProjectWorkspaceManager {
       // identity probe belongs to someone else and survives this pane-only close.
       if (replacedPlaceholder) await client.call('pane.close', { pane_id: replacedPlaceholder })
       if (initialPane) await client.call('pane.close', { pane_id: initialPane })
-      this.reserve(key, record, {
-        ...record, state: 'ready',
-        ...(placement.role === 'chat' ? { chat: { tab: applied.layout.tab_id, pane: applied.layout.root.pane_id } } : {}),
-      })
+      // A ready-workspace worker tab recorded nothing and has nothing to commit; a
+      // later claim by another manager must not turn this placed tab into a failure.
+      if (!readyWorker) {
+        this.reserve(key, record, {
+          ...record, state: 'ready',
+          ...(placement.role === 'chat' ? { chat: { tab: applied.layout.tab_id, pane: applied.layout.root.pane_id } } : {}),
+        })
+      }
     } catch (error) {
       // The host has not received this pane yet and cannot discharge its normal
       // failed-spawn cleanup. Close only the pane this operation just created.
@@ -274,6 +309,15 @@ export class ProjectWorkspaceManager {
     // whether the workspace/slot is gone before recreating either. Lifecycle
     // reconciliation may reclaim the empty workspace with a server-side guard.
     this.reserve(key, record, { ...record, state: 'ready' })
+  }
+
+  /** Drop our own reservation, and only if it is still exactly ours. */
+  private release(key: string, expected: WorkspaceRecord): void {
+    try {
+      this.journal.update(rows => {
+        if (JSON.stringify(rows[key]) === JSON.stringify(expected) && expected.state === 'pending' && !expected.workspace) delete rows[key]
+      })
+    } catch { /* the reservation stays: refusal, never a guess */ }
   }
 
   private reserve(key: string, expected: WorkspaceRecord, next: WorkspaceRecord): WorkspaceRecord {

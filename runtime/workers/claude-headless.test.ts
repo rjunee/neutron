@@ -483,6 +483,8 @@ test('placed worker: one CLI process, identical outcome, a labelled tab in the p
   const view = (await readdir(f.state)).find(name => name.startsWith('claude-headless-view-'))!
   const shown = await readFile(join(f.state, view), 'utf8')
   expect(shown).toContain('"structured_output"')
+  // Presence-only while it runs: the host says so first, then the worker's own bytes.
+  expect(shown.startsWith('[host] Claude worker running headless; it prints its result only when it exits.\n{')).toBe(true)
   expect(shown.endsWith('[host] worker exited\n')).toBe(true)
   // Finished: the view pane is closed and the receipt says so. Cleanup is detached
   // from the outcome, so it is awaited here, never by the runner.
@@ -563,18 +565,44 @@ test('restart adopts the durable receipt: no new CLI, no new tab, the stale view
   const [stale] = await rig.receipts(f.state)
   // The receipt carries the follower identity the replacement must re-verify.
   expect(stale).toEqual({ state: 'placed', pane: expect.any(String), pid: expect.any(Number),
-    viewPath: expect.stringContaining('claude-headless-view-'), taskLabel: expect.stringMatching(/^Plan · /) })
+    viewPath: expect.stringContaining('claude-headless-view-'), taskLabel: expect.stringMatching(/^Plan · /), script: expect.any(String) })
   rig.server.clearFailure('pane.close')
   const tabs = rig.server.workerLayouts().length
   const replacement = createClaudeHeadlessRunner({ ...f.options, placement: rig.placement() })
   const from = rig.server.calls.length
   expect(await replacement.run(f.req, 'headless', new AbortController().signal)).toEqual(first)
+  // The retire is detached from the recovered result; wait for its verified close.
+  await until(async () => (await rig.receipts(f.state))[0]?.state === 'closed' ? true : undefined)
   expect(rig.server.calls.slice(from).map(call => call.method).filter(method => method.startsWith('pane.')))
     .toEqual(['pane.get', 'pane.process_info', 'pane.close'])
   expect(await readFile(f.counter, 'utf8')).toBe('call\n')
   expect(rig.server.workerLayouts()).toHaveLength(tabs)
   expect(rig.server.panes.has(stale!.pane!)).toBe(false)
   expect(await rig.receipts(f.state)).toEqual([{ state: 'closed', pane: stale!.pane! }])
+})
+
+test('restart recovery republishes the committed result while the stale-pane retire is still stalled', async () => {
+  const f = await fixture()
+  const rig = workerPlacementRig(f.root, {}, { inspectTimeoutMs: 60_000 })
+  expect((await rig.placement().place({ key: 'earlier', taskLabel: 'Plan · earlier', cwd: f.cwd,
+    viewPath: join(f.root, 'earlier.log'), receiptDir: f.root })).kind).toBe('placed')
+  rig.server.failMethod('pane.close')
+  const closes = rig.server.callsTo('pane.close').length
+  const first = await createClaudeHeadlessRunner({ ...f.options, placement: rig.placement() }).run(f.req, 'headless', new AbortController().signal)
+  await until(() => rig.server.callsTo('pane.close').length > closes ? true : undefined)
+  rig.server.clearFailure('pane.close')
+  // The replacement's retire hangs on its identity read (bounded at a full minute).
+  const gets = rig.server.callsTo('pane.get').length
+  const release = rig.server.holdMethod('pane.get')
+  try {
+    const replacement = createClaudeHeadlessRunner({ ...f.options, placement: rig.placement() })
+    expect(await replacement.run(f.req, 'headless', new AbortController().signal)).toEqual(first)
+    // The retire was started (its read is in flight) and the result did not wait for it.
+    expect(rig.server.callsTo('pane.get').length).toBe(gets + 1)
+    expect(await rig.receipts(f.state)).toMatchObject([{ state: 'placed' }])
+  } finally { release() }
+  await until(async () => (await rig.receipts(f.state))[0]?.state === 'closed' ? true : undefined)
+  expect(await readFile(f.counter, 'utf8')).toBe('call\n')
 })
 
 test('without a placement nothing is placed and no receipt or view file exists', async () => {

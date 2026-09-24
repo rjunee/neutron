@@ -79,6 +79,7 @@ import type { InnerLoopInput } from '@neutronai/trident/inner-loop.ts'
 import { PROJECT_SESSION_ACQUIRE_TIMEOUT_MS, prepareProjectBuild, type ProjectBuildContext } from '../wiring/project-build.ts'
 import { CodexOwnerBindings } from '../wiring/codex-owner-binding.ts'
 import { until, workerPlacementRig } from '@neutronai/runtime/adapters/claude-code/persistent/__tests__/herdr-workspace-fake-server.ts'
+import { HerdrError } from '@neutronai/runtime/adapters/claude-code/persistent/herdr-client.ts'
 import { restrictedOwnerFixture } from './fixtures/codex-owner-review.ts'
 import { PROJECT_DEPENDENCIES_TIMEOUT_MS } from '../wiring/project-build-dependencies.ts'
 import { PROJECT_SNAPSHOT_SCHEMA } from '../wiring/project-build-snapshot.ts'
@@ -5232,17 +5233,36 @@ test('General-scoped Codex review seat is placed in Neutron General and its verd
   expect(rows.map(row => row.scope)).toEqual([['instance', null]])
 }, 300_000)
 
-test('a refused placement never blocks or alters the build: unplaced receipts, same merge', async () => {
-  const f = await codexOwnerWithClaude()
-  const rig = await placedTerminal(f, { projectId: 'e2e-project', projectLabel: 'E2E Project' })
-  rig.server.failMethod('workspace.create')
-  const outcome = await drive(f)
-  expect(outcome.kind, why(f, outcome)).toBe('merged')
-  expect(rig.server.callsTo('layout.apply')).toHaveLength(0)
-  const receipts = await placementReceipts(f.context.stateRoot)
-  expect(receipts).toHaveLength(4)
-  for (const receipt of receipts) expect(receipt).toMatchObject({ state: 'unplaced', reason: expect.stringMatching(/^placement-refused: /) })
-}, 300_000)
+for (const fault of ['typed', 'ambiguous'] as const) {
+  test(`a refused placement (${fault} workspace.create failure) never blocks or alters the build: each receipt names its real cause`, async () => {
+    const f = await codexOwnerWithClaude()
+    const rig = await placedTerminal(f, { projectId: 'e2e-project', projectLabel: 'E2E Project' })
+    rig.server.failMethod('workspace.create', fault === 'typed'
+      ? new HerdrError('workspace_create_refused', 'server refused workspace.create')
+      : new Error('fake-herdr: workspace.create transport lost'))
+    const outcome = await drive(f)
+    expect(outcome.kind, why(f, outcome)).toBe('merged')
+    expect(rig.server.callsTo('layout.apply')).toHaveLength(0)
+    const receipts = await placementReceipts(f.context.stateRoot)
+    expect(receipts).toHaveLength(4)
+    for (const receipt of receipts) expect(receipt.state).toBe('unplaced')
+    const reasons = receipts.map(receipt => receipt.reason!).sort()
+    if (fault === 'typed') {
+      // A definitive refusal created nothing and releases its reservation: EVERY worker
+      // retries creation and is refused by the server itself, never by a stale row.
+      expect(rig.server.callsTo('workspace.create')).toHaveLength(4)
+      expect(reasons).toEqual(Array(4).fill('placement-refused: server refused workspace.create'))
+    } else {
+      // An ambiguous creation stays reserved by design (spec: an interrupted or
+      // ambiguous creation is not retried as a fresh workspace), disclosed per receipt.
+      expect(rig.server.callsTo('workspace.create')).toHaveLength(1)
+      expect(reasons).toEqual([
+        'placement-refused: fake-herdr: workspace.create transport lost',
+        ...Array(3).fill('placement-refused: project-workspaces: existing ownership is invalid or pending; reconcile before retry'),
+      ])
+    }
+  }, 300_000)
+}
 
 test('no terminal host: cross-provider workers run unplaced with the reason on record', async () => {
   const f = await codexOwnerWithClaude()

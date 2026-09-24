@@ -4,7 +4,8 @@ import { tmpdir } from 'node:os'
 import { join } from 'node:path'
 import { createProjectWorkspaceHost } from '../adapters/claude-code/persistent/project-workspace-host.ts'
 import { FakeHerdrWorkspaceServer, until } from '../adapters/claude-code/persistent/__tests__/herdr-workspace-fake-server.ts'
-import { createWorkerPlacement, followerOwnsPane, openWorkerView, VIEW_FOLLOW_SCRIPT, workerTaskLabel,
+import { HerdrError } from '../adapters/claude-code/persistent/herdr-client.ts'
+import { createWorkerPlacement, followerOwnsPane, followerScriptDigest, openWorkerView, VIEW_FOLLOW_SCRIPT, workerTaskLabel,
   type WorkerPlacementOptions, type WorkerPlacementScope } from './worker-placement.ts'
 
 const directories: string[] = []
@@ -30,7 +31,8 @@ function fixture(projectId: string | null = 'project-one', server = new FakeHerd
 /** The identity a placed receipt must carry: the pane, the host-reported pid, the view
  * path the follower tails (its last argv token) and the tab label. */
 function placedReceipt(f: ReturnType<typeof fixture>, pane: string, key = 'claude-headless-k1') {
-  return { state: 'placed', pane, pid: f.server.panes.get(pane)!.shell_pid, viewPath: f.input(key).viewPath, taskLabel: 'Review · authentication' }
+  return { state: 'placed', pane, pid: f.server.panes.get(pane)!.shell_pid, viewPath: f.input(key).viewPath, taskLabel: 'Review · authentication',
+    script: followerScriptDigest(VIEW_FOLLOW_SCRIPT) }
 }
 
 const createdWorkspaces = (server: FakeHerdrWorkspaceServer) => new Set([...server.workspaces.keys()])
@@ -224,6 +226,37 @@ test('identity check reads the process sample, never the pane label', () => {
     .toMatchObject({ ok: false, refuse: 'changed' })
   expect(followerOwnsPane(receipt, { kind: 'live', argv: [], pid: 7, label: 'Build · x' })).toMatchObject({ ok: false, refuse: 'unknown' })
   expect(followerOwnsPane(receipt, { kind: 'unavailable', reason: 'socket' })).toMatchObject({ ok: false, refuse: 'unknown' })
+})
+
+test('identity is the script the RECEIPT recorded: an older build\'s follower is still ours, a different script is not', () => {
+  const older = `${VIEW_FOLLOW_SCRIPT}\n// an older build's follower`
+  const receipt = { state: 'placed' as const, pane: 'pane-1', pid: 7, viewPath: '/v/one.log', script: followerScriptDigest(older) }
+  // A later build edited VIEW_FOLLOW_SCRIPT; the pane still runs the recorded older script.
+  expect(followerOwnsPane(receipt, { kind: 'live', argv: ['/bin/bun', '-e', older, '/v/one.log'], pid: 7, label: 'x' })).toEqual({ ok: true })
+  // Complement: the CURRENT script is not what this receipt recorded.
+  expect(followerOwnsPane(receipt, { kind: 'live', argv: ['/bin/bun', '-e', VIEW_FOLLOW_SCRIPT, '/v/one.log'], pid: 7, label: 'x' }))
+    .toMatchObject({ ok: false, refuse: 'changed' })
+  // A receipt without a digest predates it and was written by the current script.
+  const { script: _script, ...legacy } = receipt
+  expect(followerOwnsPane(legacy, { kind: 'live', argv: ['/bin/bun', '-e', VIEW_FOLLOW_SCRIPT, '/v/one.log'], pid: 7, label: 'x' })).toEqual({ ok: true })
+})
+
+test('a failed worker tab leaves the ready workspace usable: the next placement in the scope is placed', async () => {
+  for (const fault of [new Error('transport timeout'), new HerdrError('invalid_layout', 'rejected')]) {
+    const f = fixture()
+    expect((await f.placement.place(f.input('claude-headless-a'))).kind).toBe('placed')
+    f.server.failMethod('layout.apply', fault)
+    expect(await f.placement.place(f.input('claude-headless-b'))).toEqual({ kind: 'unplaced', reason: expect.stringMatching(/^placement-refused: /) })
+    f.server.clearFailure('layout.apply')
+    // Refusing complement of the defect: the THIRD placement, with Herdr healthy again,
+    // is placed — not refused by a row the failed tab left `pending`.
+    const third = await f.placement.place(f.input('claude-headless-c'))
+    expect(third.kind).toBe('placed')
+    expect(f.receipt('claude-headless-c').state).toBe('placed')
+    expect(Object.values(JSON.parse(readFileSync(f.journal, 'utf8'))).map((row: any) => row.state)).toEqual(['ready'])
+    expect(f.server.callsTo('workspace.create')).toHaveLength(1)
+    expect(f.server.workerLayouts().map(call => call.params['tab_label'])).toEqual(Array(3).fill('Review · authentication'))
+  }
 })
 
 test('a failed close keeps the receipt placed so a later retire still owns the pane', async () => {

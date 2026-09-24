@@ -7,6 +7,7 @@ import { CODEX_CLI_AUTH_ENV_VARS } from '../adapters/codex-cli/auth.ts'
 import { readArmedTrailerReservation, reserveTrailerSlot } from './trailer-slot.ts'
 import { codexObservation } from './provider-observation.ts'
 import { createObservationPublisher, decodeObservationReceipt, recoverProviderObservation } from './provider-observation-recovery.ts'
+import { fireAndForget } from '@neutronai/logger/fire-and-forget.ts'
 import { openWorkerView, workerTaskLabel, type WorkerPlacement } from './worker-placement.ts'
 
 export interface CodexReviewContract {
@@ -116,8 +117,9 @@ export function createCodexReviewTransport(options: {
       : await reserveTrailerSlot(reservation, identity, req.result.path)
     if (held.kind === 'unknown') return unknown(held.detail)
     if (held.kind === 'resume') {
-      // Restart: close a stale view pane from its receipt. Never places or spawns.
-      await options.placement?.retire({ key: `codex-review-${key}`, receiptDir: dirname(req.result.path) })
+      // Restart: close a stale view pane from its receipt. Never places or spawns,
+      // and never awaited: cleanup cannot gate the recovered verdict.
+      if (options.placement) fireAndForget('codex-review.retire-view', options.placement.retire({ key: `codex-review-${key}`, receiptDir: dirname(req.result.path) }))
       try { observation = decodeObservationReceipt(await readFile(observationPath, 'utf8'), identity, 'codex-cli-jsonl') } catch { /* legacy or unobserved */ }
       try {
         const receipt = JSON.parse(await readFile(receiptPath, 'utf8'))

@@ -7,6 +7,7 @@ import type { BoundedWorkOutcome, BoundedWorkRequest, ProviderObservation, Usage
 import { readArmedTrailerReservation, reserveTrailerSlot } from './trailer-slot.ts'
 import { claudeObservation } from './provider-observation.ts'
 import { createObservationPublisher, decodeObservationReceipt, recoverProviderObservation } from './provider-observation-recovery.ts'
+import { fireAndForget } from '@neutronai/logger/fire-and-forget.ts'
 import { openWorkerView, workerTaskLabel, type WorkerPlacement, type WorkerViewSession } from './worker-placement.ts'
 
 export interface ClaudeHeadlessRunnerOptions {
@@ -319,8 +320,10 @@ export function createClaudeHeadlessRunner(input: ClaudeHeadlessRunnerOptions): 
           try { observation = decodeObservationReceipt(await readFile(observationPath, 'utf8'), JSON.stringify(req), 'claude-cli-json') } catch { /* legacy or unobserved */ }
           const session = await readFile(sessionPath, 'utf8')
           // Restart: a view pane an earlier host placed for this step is stale. Close
-          // it from its receipt; never place, never launch anything.
-          await options.placement?.retire({ key: `claude-headless-${key}`, receiptDir: state })
+          // it from its receipt; never place, never launch anything. RESULT FIRST, as
+          // in-run: the verified close is started and never awaited, so a stalled pane
+          // RPC cannot delay republishing the committed receipt. It never rejects.
+          if (options.placement) fireAndForget('claude-headless.retire-view', options.placement.retire({ key: `claude-headless-${key}`, receiptDir: state }))
           if (req.thread && req.thread.id !== session || await readFile(threadPath(session), 'utf8') !== binding) return observed(unknown('Claude retained session binding did not match.'))
           const decoded = decode(await readFile(receiptPath, 'utf8'), req, session, validate)
           if (!decoded.envelope) return observed(decoded.outcome)
@@ -358,7 +361,10 @@ export function createClaudeHeadlessRunner(input: ClaudeHeadlessRunnerOptions): 
         const publisher = createObservationPublisher(observationPath, JSON.stringify(req))
         const view = openWorkerView(options.placement, { key: `claude-headless-${key}`,
           taskLabel: workerTaskLabel(req.role, options.taskName ?? req.run_id.slice(0, 8)), cwd,
-          viewPath: join(state, `claude-headless-view-${key}.log`), receiptDir: state })
+          viewPath: join(state, `claude-headless-view-${key}.log`), receiptDir: state,
+          // `--output-format json` prints ONE object at exit and nothing before it, so
+          // this tab is presence-only while the worker runs. Say so on the tab itself.
+          banner: 'Claude worker running headless; it prints its result only when it exits.' })
         let executed: Awaited<ReturnType<typeof execute>>
         try {
           executed = await execute(cli, args, env!, cwd, prompt, signal, deadline - Date.now(),

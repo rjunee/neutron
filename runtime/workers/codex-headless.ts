@@ -20,6 +20,7 @@ import { codexBuildObservation, isCodexBuildObservation, type CodexBuildObservat
 import { codexWorkerEnv, createCodexReviewTransport, type CodexReviewContract } from './codex-review.ts'
 import { createObservationPublisher, recoverProviderObservation } from './provider-observation-recovery.ts'
 import { codexObservation, readProviderObservation } from './provider-observation.ts'
+import { fireAndForget } from '@neutronai/logger/fire-and-forget.ts'
 import { openWorkerView, workerTaskLabel, type WorkerPlacement } from './worker-placement.ts'
 
 type Probe = { ok: true } | { ok: false; reason: RefusalReason; detail: string }
@@ -292,8 +293,9 @@ export function createCodexHeadlessRunner(options: CodexHeadlessRunnerOptions = 
           await rename(`${receiptPath}.tmp`, receiptPath)
         } catch { return { kind: 'unknown', detail: 'Codex build observation could not be committed' } }
       } else {
-        // Restart: close a stale view pane from its receipt. Never places or spawns.
-        await options.placement?.retire({ key: `codex-headless-${key}`, receiptDir: dirname(req.result.path) })
+        // Restart: close a stale view pane from its receipt. Never places or spawns,
+        // and never awaited: cleanup cannot gate the recovered result.
+        if (options.placement) fireAndForget('codex-headless.retire-view', options.placement.retire({ key: `codex-headless-${key}`, receiptDir: dirname(req.result.path) }))
         measured = await runner.observe?.(req)
         // Recovery consumes the original receipt, never the role's mutable slot or
         // a newly requested ID. An uncertain dispatch must not buy another turn.

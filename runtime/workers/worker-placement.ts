@@ -40,7 +40,7 @@
  */
 
 import { closeSync, fsyncSync, openSync, readFileSync, renameSync, writeSync } from 'node:fs'
-import { randomUUID } from 'node:crypto'
+import { createHash, randomUUID } from 'node:crypto'
 import { join } from 'node:path'
 import type { WorkerRole } from '../bounded-work.ts'
 import type { HandleInspection, PtyChild, PtySpawnOpts } from '../adapters/claude-code/persistent/pty-host.ts'
@@ -75,6 +75,9 @@ export interface WorkerPlaceInput {
   cwd: string
   viewPath: string
   receiptDir: string
+  /** A host line written once at the top of the view file, before any worker byte.
+   * Display only; for a worker whose own stdout carries no progress until it exits. */
+  banner?: string
 }
 
 export interface WorkerPlacement {
@@ -96,12 +99,15 @@ export type WorkerPlacementOptions =
  * the follower's last argv token — because a pane id alone is not identity: a Herdr
  * restart re-issues ids, and a saved id can later name somebody else's work
  * (`docs/spec-items/project-herdr-workspaces.md`, "an unverified saved handle").
+ * `script` is the sha256 of the follower script the pane was started with, so the
+ * receipt is self-contained: a later build that edits `VIEW_FOLLOW_SCRIPT` still
+ * recognises (and retires) a follower an older build placed.
  * `disowned` is terminal: the pane is live but no longer runs our follower, so it is
  * never targeted again.
  */
 export type PlacementReceipt =
   | { state: 'pending' }
-  | { state: 'placed'; pane: string; pid?: number; viewPath?: string; taskLabel?: string }
+  | { state: 'placed'; pane: string; pid?: number; viewPath?: string; taskLabel?: string; script?: string }
   | { state: 'closed'; pane?: string }
   | { state: 'unplaced'; reason: string }
   | { state: 'disowned'; pane: string; reason: string }
@@ -147,6 +153,12 @@ export const VIEW_FOLLOW_SCRIPT = [
   'tick()',
   'setInterval(tick, 250)',
 ].join('\n')
+
+/** The follower identity a receipt records: the script's sha256, not its text. */
+export function followerScriptDigest(script: string): string {
+  return createHash('sha256').update(script).digest('hex')
+}
+const VIEW_FOLLOW_SCRIPT_SHA256 = followerScriptDigest(VIEW_FOLLOW_SCRIPT)
 
 export function viewFollowerArgv(viewPath: string): string[] {
   // Herdr MERGES a pane's env into its own environment; `env -i` really clears it
@@ -200,7 +212,10 @@ export function followerOwnsPane(receipt: PlacedReceipt, seen: HandleInspection)
     return { ok: false, refuse: 'unknown', reason: 'receipt records no follower identity' }
   }
   if (seen.argv.length === 0) return { ok: false, refuse: 'unknown', reason: 'no process sample for the pane' }
-  if (seen.argv.at(-1) !== receipt.viewPath || !seen.argv.includes(VIEW_FOLLOW_SCRIPT)) {
+  // The script the RECEIPT recorded; a receipt from before digests existed was written
+  // by a build running the current script.
+  const script = typeof receipt.script === 'string' && receipt.script !== '' ? receipt.script : VIEW_FOLLOW_SCRIPT_SHA256
+  if (seen.argv.at(-1) !== receipt.viewPath || !seen.argv.some(arg => followerScriptDigest(arg) === script)) {
     return { ok: false, refuse: 'changed', reason: 'pane runs another process than the recorded view follower' }
   }
   if (typeof receipt.pid === 'number' && typeof seen.pid === 'number' && receipt.pid !== seen.pid) {
@@ -295,7 +310,7 @@ export function createWorkerPlacement(options: WorkerPlacementOptions): WorkerPl
       return { kind: 'unplaced', reason: 'placement-refused: host returned no durable pane handle' }
     }
     const placed: PlacedReceipt = { state: 'placed', pane, viewPath: input.viewPath, taskLabel: input.taskLabel,
-      ...(typeof child.pid === 'number' && child.pid > 0 ? { pid: child.pid } : {}) }
+      script: VIEW_FOLLOW_SCRIPT_SHA256, ...(typeof child.pid === 'number' && child.pid > 0 ? { pid: child.pid } : {}) }
     return { kind: 'placed', paneHandle: pane, receipt: placed }
   }
 
@@ -390,6 +405,7 @@ export function openWorkerView(placement: WorkerPlacement | undefined, input: Wo
       else writeSync(fd, bytes)
     } catch { /* display only */ }
   }
+  if (input.banner !== undefined && input.banner !== '') write(`[host] ${input.banner.replace(/[\x00-\x1f\x7f]/g, ' ')}\n`)
   let pending: Promise<WorkerView> | undefined
   let released = false
   let cleanup: Promise<WorkerView | undefined> | undefined
