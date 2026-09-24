@@ -5,6 +5,7 @@ import { join } from 'node:path'
 import type { BoundedWorkRequest } from '../bounded-work.ts'
 import { createHash } from 'node:crypto'
 import { createClaudeHeadlessRunner } from './claude-headless.ts'
+import { until, workerPlacementRig } from '../adapters/claude-code/persistent/__tests__/herdr-workspace-fake-server.ts'
 
 const directories: string[] = []
 afterEach(async () => { for (const path of directories.splice(0)) await rm(path, { recursive: true, force: true }) })
@@ -37,6 +38,10 @@ writeFileSync(${JSON.stringify(join(state, 'provider.pid'))},String(process.pid)
 writeFileSync(${JSON.stringify(launched)},JSON.stringify({args,prompt,env:process.env}));
 appendFileSync(${JSON.stringify(counter)},'call\\n');
 if(${JSON.stringify(mode)}==='hang') { setInterval(()=>{},1000); await new Promise(()=>{}); }
+if(${JSON.stringify(mode)}==='hang-grandchild') {
+  // A forked grandchild in the CLI's own process group that heartbeats forever.
+  const g=require('node:child_process').spawn(process.execPath,['-e',${JSON.stringify(`setInterval(()=>require('node:fs').writeFileSync(${JSON.stringify(join(root, 'heartbeat'))},String(Date.now())),20)`)}],{stdio:'ignore'});
+  writeFileSync(${JSON.stringify(join(root, 'grandchild.pid'))},String(g.pid)); setInterval(()=>{},1000); await new Promise(()=>{}); }
 if(${JSON.stringify(mode)}==='overflow') { writeFileSync(1,'x'.repeat(9*1024*1024)); process.exit(0); }
 const req=JSON.parse(prompt.split('Request (data): ')[1].split('\\n')[0]);
 let envelope={schema:req.result.schema,run_id:req.run_id,step_id:req.step_id,kind:'completed',result:{answer:'verified'}};
@@ -448,4 +453,215 @@ test('large briefs use stdin and oversized result output fails closed', async ()
   expect(observed.prompt).toContain(brief)
   expect(observed.args.join(' ').length).toBeLessThan(4096)
   expect(await (await fixture('overflow')).run()).toMatchObject({ kind: 'unknown', detail: 'Claude result exceeded the host output limit.' })
+})
+
+// --- Project Herdr placement: a visible task view, never the evidence path. ---
+
+// A fresh CLI session id per dispatch is expected; everything else must match.
+const comparable = (outcome: { kind: string; observation?: unknown; thread_id?: unknown }) =>
+  ({ ...outcome, observation: undefined, thread_id: typeof outcome.thread_id })
+
+test('placed worker: one CLI process, identical outcome, a labelled tab in the project workspace showing its bytes', async () => {
+  const baseline = await fixture()
+  const expected = await baseline.run()
+  const f = await fixture()
+  const rig = workerPlacementRig(f.root)
+  const runner = createClaudeHeadlessRunner({ ...f.options, placement: rig.placement(), taskName: 'authentication' })
+  const outcome = await runner.run(f.req, 'headless', new AbortController().signal)
+  expect(comparable(outcome)).toEqual(comparable(expected))
+  expect((outcome.observation as { usage: unknown }).usage).toEqual((expected.observation as { usage: unknown }).usage)
+  expect(await readFile(f.counter, 'utf8')).toBe('call\n')
+  expect(rig.server.callsTo('workspace.create').map(call => call.params['label'])).toEqual(['Project One'])
+  const [tab] = rig.server.workerLayouts()
+  expect(rig.server.workerLayouts()).toHaveLength(1)
+  expect(tab!.params['tab_label']).toBe('Plan · authentication')
+  expect(rig.server.workspaces.has(String(tab!.params['workspace_id']))).toBe(true)
+  // The tab runs the credential-free follower, never a second provider process.
+  const command = (tab!.params['root'] as { command: string[] }).command
+  for (const token of command) expect(token).not.toMatch(/(^|\/)claude$/)
+  expect(JSON.stringify(tab!.params)).not.toContain('selected-token')
+  const view = (await readdir(f.state)).find(name => name.startsWith('claude-headless-view-'))!
+  const shown = await readFile(join(f.state, view), 'utf8')
+  expect(shown).toContain('"structured_output"')
+  // Presence-only while it runs: the host says so first, then the worker's own bytes.
+  expect(shown.startsWith('[host] Claude worker running headless; it prints its result only when it exits.\n{')).toBe(true)
+  expect(shown.endsWith('[host] worker exited\n')).toBe(true)
+  // Finished: the view pane is closed and the receipt says so. Cleanup is detached
+  // from the outcome, so it is awaited here, never by the runner.
+  const receipt = await until(async () => { const [r] = await rig.receipts(f.state); return r?.state === 'closed' ? r : undefined })
+  expect(rig.server.closed).toContain(receipt!.pane!)
+  expect(rig.server.callsTo('pane.read')).toHaveLength(0)
+})
+
+test('screen-independence: a success-shaped screen never rescues a failed worker', async () => {
+  const baseline = await fixture('exit-error')
+  const expected = await baseline.run()
+  expect(expected).toMatchObject({ kind: 'failed', class: 'infra' })
+  const f = await fixture('exit-error')
+  const rig = workerPlacementRig(f.root)
+  const success = JSON.stringify({ type: 'result', subtype: 'success', is_error: false, structured_output: { schema: 'test-result',
+    run_id: f.req.run_id, step_id: f.req.step_id, kind: 'completed', result: { answer: 'verified' } } })
+  rig.server.screen = success
+  rig.server.malformMethod('pane.read', { read: { text: success } })
+  const outcome = await createClaudeHeadlessRunner({ ...f.options, placement: rig.placement() }).run(f.req, 'headless', new AbortController().signal)
+  expect(comparable(outcome)).toEqual(comparable(expected))
+  expect(rig.server.workerLayouts()).toHaveLength(1)
+  await expect(readFile(f.req.result.path)).rejects.toMatchObject({ code: 'ENOENT' })
+})
+
+test('placement failure leaves the worker unplaced with its evidence intact and never uses another workspace', async () => {
+  const f = await fixture()
+  const rig = workerPlacementRig(f.root)
+  rig.server.failMethod('layout.apply')
+  const outcome = await createClaudeHeadlessRunner({ ...f.options, placement: rig.placement() }).run(f.req, 'headless', new AbortController().signal)
+  expect(outcome.kind).toBe('completed')
+  expect(JSON.parse(await readFile(f.req.result.path, 'utf8')).result).toEqual({ answer: 'verified' })
+  expect((outcome.observation as { usage: { input_tokens: number } }).usage.input_tokens).toBe(17)
+  expect(await readFile(f.counter, 'utf8')).toBe('call\n')
+  const [receipt] = await rig.receipts(f.state)
+  expect(receipt).toMatchObject({ state: 'unplaced' })
+  expect(receipt!.reason).toMatch(/^placement-refused: /)
+  for (const call of rig.server.callsTo('layout.apply')) expect(rig.server.workspaces.has(String(call.params['workspace_id']))).toBe(true)
+})
+
+test('cancelling a placed worker kills its own process group, grandchild included, and closes the view', async () => {
+  const f = await fixture('hang-grandchild')
+  const rig = workerPlacementRig(f.root)
+  const runner = createClaudeHeadlessRunner({ ...f.options, placement: rig.placement() })
+  const controller = new AbortController()
+  const kill = spyOn(process, 'kill')
+  let grandchild = 0
+  try {
+    const pending = runner.run({ ...f.req, budget: { wall_ms: 60_000 } }, 'headless', controller.signal)
+    grandchild = await until(() => readFile(join(f.root, 'grandchild.pid'), 'utf8').then(Number, () => undefined))
+    await until(() => readFile(join(f.root, 'heartbeat'), 'utf8').then(() => true, () => undefined))
+    await until(async () => (await rig.receipts(f.state))[0]?.state === 'placed' ? true : undefined)
+    const worker = Number(await readFile(join(f.state, 'provider.pid'), 'utf8'))
+    controller.abort()
+    expect(await pending).toMatchObject({ kind: 'failed', class: 'killed' })
+    const targets = kill.mock.calls.filter(([, signal]) => signal !== 0).map(([pid]) => pid)
+    expect(targets.length).toBeGreaterThan(0)
+    expect(new Set(targets)).toEqual(new Set([-worker]))
+    expect(targets).not.toContain(-process.pid)
+  } finally { kill.mockRestore() }
+  await until(() => { try { process.kill(grandchild, 0); return undefined } catch { return true } })
+  const receipt = await until(async () => { const [r] = await rig.receipts(f.state); return r?.state === 'closed' ? r : undefined })
+  expect(rig.server.closed).toContain(receipt!.pane!)
+})
+
+test('restart adopts the durable receipt: no new CLI, no new tab, the stale view pane is closed', async () => {
+  const f = await fixture()
+  const rig = workerPlacementRig(f.root)
+  // The workspace already exists (its setup closes a pane of its own).
+  expect((await rig.placement().place({ key: 'earlier', taskLabel: 'Plan · earlier', cwd: f.cwd,
+    viewPath: join(f.root, 'earlier.log'), receiptDir: f.root })).kind).toBe('placed')
+  // The first host "dies" with its view pane still open: the close never lands.
+  rig.server.failMethod('pane.close')
+  const closes = rig.server.callsTo('pane.close').length
+  const first = await createClaudeHeadlessRunner({ ...f.options, placement: rig.placement() }).run(f.req, 'headless', new AbortController().signal)
+  expect(first.kind).toBe('completed')
+  // The first host's detached cleanup tried its (verified) close, and it failed.
+  await until(() => rig.server.callsTo('pane.close').length > closes ? true : undefined)
+  const [stale] = await rig.receipts(f.state)
+  // The receipt carries the follower identity the replacement must re-verify.
+  expect(stale).toEqual({ state: 'placed', pane: expect.any(String), pid: expect.any(Number),
+    viewPath: expect.stringContaining('claude-headless-view-'), taskLabel: expect.stringMatching(/^Plan · /), script: expect.any(String) })
+  rig.server.clearFailure('pane.close')
+  const tabs = rig.server.workerLayouts().length
+  const replacement = createClaudeHeadlessRunner({ ...f.options, placement: rig.placement() })
+  const from = rig.server.calls.length
+  expect(await replacement.run(f.req, 'headless', new AbortController().signal)).toEqual(first)
+  // The retire is detached from the recovered result; wait for its verified close.
+  await until(async () => (await rig.receipts(f.state))[0]?.state === 'closed' ? true : undefined)
+  expect(rig.server.calls.slice(from).map(call => call.method).filter(method => method.startsWith('pane.')))
+    .toEqual(['pane.get', 'pane.process_info', 'pane.close'])
+  expect(await readFile(f.counter, 'utf8')).toBe('call\n')
+  expect(rig.server.workerLayouts()).toHaveLength(tabs)
+  expect(rig.server.panes.has(stale!.pane!)).toBe(false)
+  expect(await rig.receipts(f.state)).toEqual([{ state: 'closed', pane: stale!.pane! }])
+})
+
+test('restart recovery republishes the committed result while the stale-pane retire is still stalled', async () => {
+  const f = await fixture()
+  const rig = workerPlacementRig(f.root, {}, { inspectTimeoutMs: 60_000 })
+  expect((await rig.placement().place({ key: 'earlier', taskLabel: 'Plan · earlier', cwd: f.cwd,
+    viewPath: join(f.root, 'earlier.log'), receiptDir: f.root })).kind).toBe('placed')
+  rig.server.failMethod('pane.close')
+  const closes = rig.server.callsTo('pane.close').length
+  const first = await createClaudeHeadlessRunner({ ...f.options, placement: rig.placement() }).run(f.req, 'headless', new AbortController().signal)
+  await until(() => rig.server.callsTo('pane.close').length > closes ? true : undefined)
+  rig.server.clearFailure('pane.close')
+  // The replacement's retire hangs on its identity read (bounded at a full minute).
+  const gets = rig.server.callsTo('pane.get').length
+  const release = rig.server.holdMethod('pane.get')
+  try {
+    const replacement = createClaudeHeadlessRunner({ ...f.options, placement: rig.placement() })
+    expect(await replacement.run(f.req, 'headless', new AbortController().signal)).toEqual(first)
+    // The retire was started (its read is in flight) and the result did not wait for it.
+    expect(rig.server.callsTo('pane.get').length).toBe(gets + 1)
+    expect(await rig.receipts(f.state)).toMatchObject([{ state: 'placed' }])
+  } finally { release() }
+  await until(async () => (await rig.receipts(f.state))[0]?.state === 'closed' ? true : undefined)
+  expect(await readFile(f.counter, 'utf8')).toBe('call\n')
+})
+
+test('without a placement nothing is placed and no receipt or view file exists', async () => {
+  const f = await fixture()
+  expect((await f.run()).kind).toBe('completed')
+  expect((await readdir(f.state)).filter(name => name.includes('placement') || name.includes('-view-'))).toEqual([])
+})
+
+// --- Result first: view cleanup never stands between the worker's exit and its result. ---
+
+/** A rig whose workspace already exists, so a held method catches the WORKER's view. */
+async function warmRig(f: Awaited<ReturnType<typeof fixture>>, timeouts: { placeTimeoutMs?: number; closeTimeoutMs?: number } = {}) {
+  const rig = workerPlacementRig(f.root, {}, timeouts)
+  expect((await rig.placement().place({ key: 'warm', taskLabel: 'Plan · warm', cwd: f.cwd,
+    viewPath: join(f.root, 'warm.log'), receiptDir: f.root })).kind).toBe('placed')
+  return rig
+}
+
+test('a stalled view close cannot expire a within-budget result', async () => {
+  const f = await fixture()
+  // The close is bounded at 4s; the dispatch budget is 3s. A runner that waited for
+  // cleanup before its deadline check would turn this completed result into unknown.
+  const rig = await warmRig(f, { closeTimeoutMs: 4_000 })
+  const closes = rig.server.callsTo('pane.close').length
+  const releaseClose = rig.server.holdMethod('pane.close')
+  const runner = createClaudeHeadlessRunner({ ...f.options, placement: rig.placement(), taskName: 'authentication' })
+  const outcome = await runner.run({ ...f.req, budget: { wall_ms: 3_000 } }, 'headless', new AbortController().signal)
+  expect(outcome.kind).toBe('completed')
+  expect(JSON.parse(await readFile(f.req.result.path, 'utf8')).result).toEqual({ answer: 'verified' })
+  expect((outcome.observation as { usage: { input_tokens: number } }).usage.input_tokens).toBe(17)
+  expect((await readdir(f.state)).some(name => name.startsWith('claude-headless-receipt-'))).toBe(true)
+  // The close is still in flight: the pane is on record as placed, not claimed closed.
+  await until(() => rig.server.callsTo('pane.close').length > closes ? true : undefined)
+  const [held] = await rig.receipts(f.state)
+  expect(held).toMatchObject({ state: 'placed' })
+  releaseClose()
+  await until(async () => (await rig.receipts(f.state))[0]?.state === 'closed' ? true : undefined)
+  expect(await readFile(f.counter, 'utf8')).toBe('call\n')
+})
+
+test('a stalled placement neither delays nor changes the result, and its late pane is closed', async () => {
+  const baseline = await fixture()
+  const expected = await baseline.run()
+  const f = await fixture()
+  const rig = await warmRig(f)
+  const layouts = rig.server.workerLayouts().length
+  const releaseApply = rig.server.holdMethod('layout.apply')
+  const runner = createClaudeHeadlessRunner({ ...f.options, placement: rig.placement() })
+  const outcome = await runner.run({ ...f.req, budget: { wall_ms: 3_000 } }, 'headless', new AbortController().signal)
+  expect(comparable(outcome)).toEqual(comparable({ ...expected }))
+  expect(JSON.parse(await readFile(f.req.result.path, 'utf8')).result).toEqual({ answer: 'verified' })
+  // Placement had not answered when the result was published.
+  expect((await rig.receipts(f.state))[0]).toEqual({ state: 'pending' })
+  releaseApply()
+  // Placement lands after the worker exited; the released view closes it through the
+  // verified path.
+  const receipt = await until(async () => { const [r] = await rig.receipts(f.state); return r?.state === 'closed' ? r : undefined })
+  expect(rig.server.closed).toContain(receipt.pane!)
+  expect(rig.server.workerLayouts()).toHaveLength(layouts + 1)
+  expect(rig.server.callsTo('pane.read')).toHaveLength(0)
+  expect(await readFile(f.counter, 'utf8')).toBe('call\n')
 })

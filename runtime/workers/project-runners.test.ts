@@ -5,6 +5,8 @@ import { join } from 'node:path'
 import { fakeRunner, type BoundedWorkRequest, type ProviderObservation } from '../bounded-work.ts'
 import { PROVIDERS, type Provider } from '../provider.ts'
 import { createProjectRunners, decodeProjectTrailer, type ProjectRunnersOptions } from './project-runners.ts'
+import { createCodexHeadlessRunner } from './codex-headless.ts'
+import { workerPlacementRig } from '../adapters/claude-code/persistent/__tests__/herdr-workspace-fake-server.ts'
 
 const directories: string[] = []
 afterEach(async () => { await Promise.all(directories.splice(0).map(path => rm(path, { recursive: true, force: true }))) })
@@ -360,4 +362,23 @@ test('missing or throwing telemetry preserves valid results and rejects invalid 
     expect(decodeProjectTrailer('{', f.request, f.options.trailer).kind).toBe('unknown')
   }
   expect((await (await createProjectRunners(f.options)).inRepl!.run(f.request, 'in-repl', signal())).kind).toBe('completed')
+})
+
+test('native same-provider work is never placed; only the cross-provider headless worker gets a tab', async () => {
+  const f = await fixture('anthropic')
+  const rig = workerPlacementRig(f.dir)
+  const wrapper = join(f.dir, 'wrapper.sh')
+  await writeFile(wrapper, '#!/bin/bash\necho \'{"type":"turn.completed","usage":{"input_tokens":1,"output_tokens":1}}\'\n', { mode: 0o755 })
+  f.options.headless = { 'openai-codex': createCodexHeadlessRunner({ buildScript: wrapper, probe: { ok: true },
+    placement: rig.placement(), taskName: 'native-control' }) }
+  const built = await createProjectRunners(f.options)
+  // Same provider as the conversation: the native in-REPL child, untouched.
+  expect((await built.inRepl!.run(f.request, 'in-repl', signal())).kind).toBe('completed')
+  expect(f.calls).toHaveLength(1)
+  expect(rig.server.calls).toEqual([])
+  expect((await readdir(f.dir)).filter(name => name.endsWith('.placement.json'))).toEqual([])
+  // Positive control: the cross-provider worker in the same project IS placed.
+  await built.headless['openai-codex']!.run({ ...f.request, step_id: 'step-2', budget: { wall_ms: 5_000 } }, 'headless', signal())
+  expect(rig.server.workerLayouts().map(call => call.params['tab_label'])).toEqual(['Build · native-control'])
+  expect(f.calls).toHaveLength(1)
 })

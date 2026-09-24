@@ -2,6 +2,8 @@ import { createProjectLauncher } from '@neutronai/trident/project-launcher.ts'
 import { TridentAttemptLedger } from '@neutronai/trident/attempt-ledger.ts'
 import { buildSubstrateWorkflowFire, buildWorkflowFirer } from '@neutronai/trident/inner-loop.ts'
 import { prepareProjectBuild } from './wiring/project-build.ts'
+import { createWorkerTerminalHost, workerPlacementScope } from './wiring/project-build-terminal.ts'
+import type { WorkerPlacementHost } from '@neutronai/runtime/workers/worker-placement.ts'
 import { CodexOwnerBindings } from './wiring/codex-owner-binding.ts'
 import { nativeOwnerQuestionText } from './wiring/codex-owner-controls.ts'
 import {
@@ -1228,6 +1230,9 @@ export function buildOpenGraphComposer(
       makeWarmFireSubstrate,
       cleanups: substrateCleanups,
     } = wireSubstrates(wiringCtx)
+    // ONE strict project-workspace host for every dispatch's cross-provider workers,
+    // so its manager serializes placements per scope (null off Herdr, e.g. tests).
+    let workerTerminalHost: WorkerPlacementHost | null | undefined
     const tridentFireInnerWorkflow =
       liveAgentSubstrate !== null
         ? createProjectLauncher({
@@ -1235,12 +1240,20 @@ export function buildOpenGraphComposer(
             prepare: (input, signal) => {
               const id = workBoardProjectIdForKey(project_slug, input.run.project_slug) ?? 'general'
               const providerSelection = resolveModelProvider(id)
+              if (workerTerminalHost === undefined) workerTerminalHost = createWorkerTerminalHost(projectBuildStateRoot, { env })
               return prepareProjectBuild(input, {
                 store: boardRunStore, attempts: new TridentAttemptLedger(db), runHost: tridentHostRunner,
                 stateRoot: projectBuildStateRoot,
                 projectDir: joinPath(owner_home, 'Projects', input.run.project_slug),
                 projectId: id, provider: providerSelection.provider, providerSource: providerSelection.source, env,
                 codexOwnerBindings,
+                // The placement scope is the run's OWN scope key: General stays null
+                // (`Neutron General`), never the literal id the line above falls back to.
+                workerTerminal: { host: workerTerminalHost, scope: workerPlacementScope({
+                  instanceId: owner_handle, ownerSlug: project_slug, runScopeKey: input.run.project_slug,
+                  projectName: projectId => db.prepare<{ name: string }, [string]>(
+                    'SELECT name FROM projects WHERE id = ? AND deleted_at IS NULL').get(projectId)?.name,
+                }) },
                 spawnProjectSession: async projectId => {
                   const projectSubstrate = makeProjectLiveAgentSubstrate(projectId)
                   if (projectSubstrate === null) throw new Error('Project conversation substrate is unavailable')
