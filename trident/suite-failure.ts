@@ -1,6 +1,6 @@
 import { createReadStream } from 'node:fs'
 import { createHash } from 'node:crypto'
-import { readFile } from 'node:fs/promises'
+import { lstat, readFile } from 'node:fs/promises'
 import { resolve, sep } from 'node:path'
 
 // Complete diagnostic lines from the partitioned suite can exceed 16K characters (for
@@ -12,6 +12,25 @@ const MAX_SUITE_LINE_LENGTH = 64 * 1024
 async function failureFormat(command: string, worktree?: string): Promise<'bun' | 'generic'> {
   const bun = /\bbun\s+test\b|(?:^|[ /])run-tests\.sh\b/
   if (bun.test(command)) return 'bun'
+  // The strategy renders package.json's test script as a package-manager command.
+  // Admit that wrapper only when the pinned checkout names this partitioned Bun
+  // runner and the runner still contains its execution and coverage-audit seams.
+  // Inspect files only; never execute a script to decide how to read its output.
+  if (worktree && /^(?:export NEUTRON_TEST_(?:JOBS|CONCURRENCY)=[1-9]\d*\n){0,2}bun run test$/.test(command.trim())) {
+    try {
+      const packagePath = resolve(worktree, 'package.json')
+      const runnerPath = resolve(worktree, 'scripts/run-tests.sh')
+      const [packageStat, runnerStat] = await Promise.all([lstat(packagePath), lstat(runnerPath)])
+      if (packageStat.isFile() && runnerStat.isFile() && packageStat.size <= 1024 * 1024 && runnerStat.size <= 1024 * 1024) {
+        const pkg: unknown = JSON.parse(await readFile(packagePath, 'utf8'))
+        const script = await readFile(runnerPath, 'utf8')
+        if ((pkg as { scripts?: { test?: unknown } })?.scripts?.test === 'bash scripts/run-tests.sh'
+          && script.startsWith('#!/usr/bin/env bash\n')
+          && /^\s*NO_COLOR=1 "\$BUN" test\b/m.test(script)
+          && /^\s*echo "---- run-tests coverage audit ----"$/m.test(script)) return 'bun'
+      }
+    } catch { /* An unreadable or changed wrapper remains generic. */ }
+  }
   if (worktree) {
     const script = command.match(/(?:^|\s)(?:bash|sh)\s+([\w./-]+\.sh)(?:\s|$)/)?.[1]
     if (script) {

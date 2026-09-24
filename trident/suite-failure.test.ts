@@ -1,10 +1,46 @@
 import { expect, test } from 'bun:test'
-import { mkdtemp, rm, writeFile } from 'node:fs/promises'
+import { mkdir, mkdtemp, rm, writeFile } from 'node:fs/promises'
 import { tmpdir } from 'node:os'
 import { join } from 'node:path'
 import { suiteFailure } from './suite-failure.ts'
 import { applyReviewSuite, assessReviewSuite } from './gates/review-suite.ts'
 import { reviewProgress } from './gates/review-progress.ts'
+
+test('pinned bun run test wrapper carries named host failures into the fix finding and refuses unrelated wrappers', async () => {
+  const dir = await mkdtemp(join(tmpdir(), 'suite-wrapper-'))
+  try {
+    const log = join(dir, 'suite.log')
+    const pkg = join(dir, 'package.json')
+    const scripts = join(dir, 'scripts')
+    const runner = join(scripts, 'run-tests.sh')
+    await writeFile(log, 'bun test v1.3.13\nscripts/__tests__/discover-test-files.test.ts:\n(fail) keeps discovery order [11.00ms]\n 1 fail\nRan 1 test across 1 file. [11.00ms]\n')
+    await mkdir(scripts)
+    await writeFile(pkg, JSON.stringify({ scripts: { test: 'bash scripts/run-tests.sh' } }))
+    await writeFile(runner, '#!/usr/bin/env bash\nNO_COLOR=1 "$BUN" test\necho "---- run-tests coverage audit ----"\n')
+    const command = 'export NEUTRON_TEST_JOBS=2\nexport NEUTRON_TEST_CONCURRENCY=1\nbun run test'
+    const admitted = await suiteFailure(log, command, dir)
+    expect(admitted.hostFailureFormat).toBe('bun')
+    expect(admitted.hostFailureId).toMatch(/^host-suite:[a-f0-9]{64}$/)
+    expect(admitted.hostDiagnostics).toContain('scripts/__tests__/discover-test-files.test.ts: keeps discovery order')
+    const snapshot = { head: 'a'.repeat(40), diff: '', pr: null }
+    const suite = await assessReviewSuite({ observe: async () => ({ kind: 'known', runId: 'run', head: snapshot.head, round: 1,
+      strategy: command, scope: 'full-suite', report: { hostExitCode: 1, ...admitted } }) }, snapshot, 1, 'run')
+    expect(applyReviewSuite({ kind: 'approve' }, suite)).toMatchObject({ kind: 'fix',
+      findings: [expect.stringContaining('scripts/__tests__/discover-test-files.test.ts: keeps discovery order')] })
+
+    for (const rejectedCommand of ['npm test', 'bun run test && true', 'bun run other', 'export OTHER=1\nbun run test']) {
+      const rejected = await suiteFailure(log, rejectedCommand, dir)
+      expect(rejected.hostFailureFormat).toBe('generic')
+      expect(rejected.hostFailureId).toBeUndefined()
+    }
+    expect((await suiteFailure(log, command)).hostFailureFormat).toBe('generic')
+    await writeFile(pkg, JSON.stringify({ scripts: { test: 'bun test tests/one.test.ts' } }))
+    expect((await suiteFailure(log, command, dir)).hostFailureFormat).toBe('generic')
+    await writeFile(pkg, JSON.stringify({ scripts: { test: 'bash scripts/run-tests.sh' } }))
+    await writeFile(runner, '#!/usr/bin/env bash\necho "---- run-tests coverage audit ----"\n')
+    expect((await suiteFailure(log, command, dir)).hostFailureFormat).toBe('generic')
+  } finally { await rm(dir, { recursive: true, force: true }) }
+})
 
 test('complete large diagnostics preserve named failures, but incomplete or crashing output never earns identity', async () => {
   const dir = await mkdtemp(join(tmpdir(), 'suite-failure-'))
