@@ -159,7 +159,7 @@ test(`fresh pending run persists ${strategy} before its only builder dispatch`, 
   expect(f.runner.calls.map(call => call.role)).toEqual(['plan', 'build'])
   expect(f.selections).toEqual([{ strategy, rationale: f.plan.rationale, plan: f.plan, refresh: false }])
   expect(f.prepared.find(p => p.role === 'build')).toMatchObject({ previous: f.plan,
-    executionStrategy: strategy, suiteScope: strategy === 'single' ? 'full-suite' : 'subset' })
+    executionStrategy: strategy, suiteScope: strategy === 'single' ? 'host-suite' : 'subset' })
 })
 
 for (const strategy of ['single', 'task_sequence'] as const)
@@ -1734,7 +1734,7 @@ for (const remainingTasks of [0, 1]) test(`pending task-sequence build preserves
   f.runner.calls.length = 0
   expect(await f.run()).toMatchObject({ kind: remainingTasks ? 'continued' : 'merged' })
   expect(f.runner.calls.map(request => request.role)).toEqual(['build'])
-  expect(f.prepared.filter(value => value.role === 'build').map(value => value.suiteScope)).toEqual([remainingTasks ? 'subset' : 'full-suite'])
+  expect(f.prepared.filter(value => value.role === 'build').map(value => value.suiteScope)).toEqual([remainingTasks ? 'subset' : 'host-suite'])
   expect(f.state.advances).toBe(remainingTasks ? 1 : 0)
   expect(f.events.includes('publicationSuite')).toBe(remainingTasks === 0)
 })
@@ -2670,7 +2670,7 @@ test('PR identity cannot change between approval and merge', async () => {
   expect(f.events).not.toContain('merge')
 })
 
-test('suite scope follows the validated task-sequence task and never defers non-task-sequence builds or fixes', async () => {
+test('suite scope follows the validated task and assigns terminal builds and fixes to host proof', async () => {
   for (const mode of ['task_sequence', 'single'] as const) {
     for (const remainingTasks of [0, 2]) {
       const f = modeFixture(mode)
@@ -2683,8 +2683,8 @@ test('suite scope follows the validated task-sequence task and never defers non-
       const outcome = await f.run()
       const intermediate = mode === 'task_sequence' && remainingTasks > 0
       expect(outcome.kind).toBe(intermediate ? 'continued' : 'merged')
-      expect(f.prepared.find(p => p.role === 'build')?.suiteScope).toBe(intermediate ? 'subset' : 'full-suite')
-      if (!intermediate) expect(f.prepared.find(p => p.role === 'fix')?.suiteScope).toBe('full-suite')
+      expect(f.prepared.find(p => p.role === 'build')?.suiteScope).toBe(intermediate ? 'subset' : 'host-suite')
+      if (!intermediate) expect(f.prepared.find(p => p.role === 'fix')?.suiteScope).toBe('host-suite')
       expect(f.prepared.find(p => p.role === 'plan')?.suiteScope).toBeUndefined()
     }
   }
@@ -2698,7 +2698,7 @@ test('suite scope uses the measured remaining count rather than a cheap planner 
       sha256: new Bun.CryptoHasher('sha256').update(body).digest('hex') }
     f.setPlan({ ...f.plan, remainingTasks: measuredCount === 1 ? 99 : 0 })
     expect((await f.run()).kind).toBe(measuredCount === 1 ? 'merged' : 'continued')
-    expect(f.prepared.find(p => p.role === 'build')?.suiteScope).toBe(measuredCount === 1 ? 'full-suite' : 'subset')
+    expect(f.prepared.find(p => p.role === 'build')?.suiteScope).toBe(measuredCount === 1 ? 'host-suite' : 'subset')
   }
 })
 

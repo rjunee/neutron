@@ -781,6 +781,16 @@ function stage1Lines(baseBranch: string): string[] {
   ]
 }
 
+/** Terminal workers perform the blast-radius check; the host owns stage 2. */
+export function renderHostSuiteWorkerStrategy(baseBranch: string): string {
+  return ['TEST EXECUTION', '', ...stage1Lines(baseBranch), '',
+    'STAGE 2 — HOST OWNED. Do not run the full suite: host review runs it and publication consumes the same identity-bound receipt.',
+    "Report testsPassed=false and suiteOutcome='deferred' after a green stage 1.",
+    'If host findings contain a red suite log, inspect that exact log and repair its named failures. A stage-1 pre-existing failure cannot explain host stage-2 red.',
+    "To claim suiteOutcome='failed-preexisting', re-run only the named host failures at the base without your diff. Include the supplied host failure identity (when present), named failures, and observed base comparison in suiteEvidence. Generic runner comparisons remain subject to panel verification. Never run a baseline full suite.",
+    ...REDIRECT_DISCIPLINE_LINES].join('\n')
+}
+
 const REDIRECT_DISCIPLINE_LINES = [
   'Keep the redirect discipline for both stages: send stdout+stderr to a log file and read only',
   'the tail — never let raw test output flood your context.',

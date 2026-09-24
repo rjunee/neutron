@@ -5,6 +5,8 @@ export interface SuiteFinding {
   title: string
   evidence: string
   advisory: boolean
+  /** Host failure identity for progress; diagnostics may contain round-specific paths. */
+  identity?: string
 }
 export type SuiteAssessment =
   | { kind: 'known'; findings: readonly SuiteFinding[] }
@@ -19,17 +21,18 @@ export interface SuiteObservation {
   strategy: string
   scope: 'full-suite' | 'subset'
   /** Host-observed suite exit plus untrusted diagnostic detail from the build/fix checkpoint. */
-  report: { hostExitCode?: number; suiteOutcome?: string; suiteEvidence?: string } | null
+  report: { hostExitCode?: number; suiteOutcome?: string; suiteEvidence?: string; hostFailureId?: string; hostDiagnostics?: string;
+    hostSuiteWorker?: boolean; hostComparisonEligible?: boolean; hostFailureFormat?: 'bun' | 'generic' } | null
 }
 export interface ReviewSuiteSource {
   observe(snapshot: BuildSnapshot, round: number): Promise<SuiteObservation | { kind: 'unknown'; detail: string }>
 }
 const known = (findings: readonly SuiteFinding[] = []): SuiteAssessment => ({ kind: 'known', findings })
 const unknown = (detail: string): SuiteAssessment => ({ kind: 'unknown', detail })
-const blocker = (title: string, evidence: string): SuiteAssessment => known([{ title, evidence, advisory: false }])
-const failedPreexisting = (report: { suiteOutcome?: string; suiteEvidence?: string }): SuiteAssessment => {
+const blocker = (title: string, evidence: string, identity?: string): SuiteAssessment => known([{ title, evidence, advisory: false, ...(identity ? { identity } : {}) }])
+const failedPreexisting = (report: { suiteOutcome?: string; suiteEvidence?: string; hostDiagnostics?: string; hostFailureId?: string }): SuiteAssessment => {
   const evidence = typeof report.suiteEvidence === 'string' ? report.suiteEvidence.trim() : ''
-  if (!evidence) return blocker('FAILED-PREEXISTING CLAIMED WITHOUT EVIDENCE', 'Re-run the failing files at the base and record the comparison')
+  if (!evidence) return blocker('FAILED-PREEXISTING CLAIMED WITHOUT EVIDENCE', `Re-run the failing files at the base and record the comparison${report.hostDiagnostics ? `\n${report.hostDiagnostics}` : ''}`, report.hostFailureId ?? (report.hostDiagnostics ? 'host-suite:unclassified' : undefined))
   return known([{ title: 'FULL SUITE RED FOR PRE-EXISTING REASONS', evidence: `Untrusted build transcription; verify the base comparison and named failures before approving:\n${evidence}`, advisory: true }])
 }
 
@@ -55,11 +58,22 @@ export async function assessReviewSuite(source: ReviewSuiteSource | undefined, s
     }
     if (typeof report.hostExitCode !== 'number' || !Number.isInteger(report.hostExitCode)) return unknown('Host-observed review suite exit code is missing or unreadable')
     if ((report.suiteOutcome !== undefined && typeof report.suiteOutcome !== 'string') || (report.suiteEvidence !== undefined && typeof report.suiteEvidence !== 'string')) return unknown('Review suite report is malformed')
+    if ((report.hostSuiteWorker !== undefined && typeof report.hostSuiteWorker !== 'boolean')
+      || (report.hostComparisonEligible !== undefined && typeof report.hostComparisonEligible !== 'boolean')
+      || (report.hostFailureFormat !== undefined && !['bun', 'generic'].includes(report.hostFailureFormat))) return unknown('Host suite comparison provenance is malformed')
     if (report.hostExitCode === 0) return known()
+    if (report.suiteOutcome === 'failed-preexisting' && !report.suiteEvidence?.trim()) return failedPreexisting(report)
+    if (report.hostDiagnostics !== undefined && (typeof report.hostDiagnostics !== 'string'
+      || (report.hostFailureId !== undefined && typeof report.hostFailureId !== 'string'))) return unknown('Host suite diagnostics are malformed')
+    if (report.hostSuiteWorker === true && report.suiteOutcome === 'failed-preexisting'
+      && (report.hostComparisonEligible !== true || report.hostFailureFormat !== 'generic'
+        && (!report.hostFailureId || !report.suiteEvidence?.includes(report.hostFailureId)))) {
+      return blocker('HOST SUITE BASE COMPARISON NOT PROVEN', `${report.hostDiagnostics ?? 'Host failure identity unavailable.'}\nRe-run these named failures at the base and include any supplied failure identity and observed comparison in suiteEvidence.`, report.hostFailureId ?? 'host-suite:unclassified')
+    }
     if (report?.suiteOutcome === 'failed-preexisting') {
       return failedPreexisting(report)
     }
-    return blocker('FULL SUITE NOT PROVEN', 'Run the required full suite and record its result')
+    return blocker('FULL SUITE NOT PROVEN', report.hostDiagnostics ?? 'Run the required full suite and record its result', report.hostFailureId ?? 'host-suite:unclassified')
   } catch (error) { return unknownCause('Review suite host observation failed', error, runId) }
 }
 

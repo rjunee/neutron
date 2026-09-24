@@ -12,6 +12,7 @@ import { createProductionHostEffects, productionCiSource, workContextPath, type 
 import { AttemptAccounting } from './attempt-accounting.ts'
 import type { TridentAttemptLedger } from './attempt-ledger.ts'
 import { createProjectSuiteReceipts } from './project-suite-receipt.ts'
+import { renderHostSuiteWorkerStrategy } from './test-strategy.ts'
 
 /** Bound by the project composition, including its live conversational runner. */
 export interface ProjectBuildSubstrate {
@@ -126,6 +127,10 @@ export async function createProjectBuildHost(options: ProjectBuildHostOptions) {
     effects: { ...production.effects, async prepareWork(request, context) {
       const strategies = options.testStrategies
       const builder = request.role === 'build' || request.role === 'fix'
+      // Already-admitted v2 runs finish the contract embedded in their immutable
+      // brief. Recovery cannot retroactively change a worker's suite obligation.
+      const legacyWorker = request.brief.path.endsWith(`.strategy-v2.brief.${request.role}.host`)
+      const suiteScope = legacyWorker && context.suiteScope === 'host-suite' ? 'full-suite' : context.suiteScope
       const selected = workers[request.role as keyof typeof workers]
       const phase = request.role === 'plan' ? 'decomposition' : request.role === 'review' ? 'review_adversarial' : 'build'
       await accounting.prepare(request, selected.provider, placementFor(selected.provider, options.substrate.provider), {
@@ -133,7 +138,10 @@ export async function createProjectBuildHost(options: ProjectBuildHostOptions) {
         requested_model: options.requestedModels[request.role as keyof typeof workers],
       }, () => production.effects.prepareWork(request, strategies && builder ? {
           ...context,
-          testStrategy: context.suiteScope === 'subset' && strategies.intermediate !== null
+          ...(suiteScope ? { suiteScope } : {}),
+          testStrategy: suiteScope === 'host-suite'
+            ? renderHostSuiteWorkerStrategy(config.baseBranch)
+            : suiteScope === 'subset' && strategies.intermediate !== null
             ? strategies.intermediate : strategies.full,
         } : context))
     } },
@@ -161,7 +169,7 @@ export async function createProjectBuildHost(options: ProjectBuildHostOptions) {
         const live = expected[role]!.request
         const original = originalWorkers?.[role]?.request
         const directory = dirname(live.brief.path)
-        if (live.brief.path !== join(directory, `${role}.strategy-v2.brief.${role}.host`)
+        if (![2, 3].some(version => live.brief.path === join(directory, `${role}.strategy-v${version}.brief.${role}.host`))
           || original?.brief.path !== join(directory, `${role}.brief.${role}.host`)
           || typeof original.brief.integrity !== 'string') {
           return { kind: 'unknown', detail: 'Original worker brief is not the reserved legacy artifact' }

@@ -168,7 +168,7 @@ test('option sources preserve pin, selected provider, workflow and unavailable s
   f.context.runSuite = async argv => argv[0] === 'bash'
     ? { ok: false, exit_code: 7, stdout: '', stderr: 'suite failed' }
     : host(argv)
-  expect((await options.policy.reviewSuite!.readCheckpoint({ head: fixedHead, diff: '', pr: null }, 3))?.report).toEqual({ hostExitCode: 7, suiteOutcome: 'passed' })
+  expect((await options.policy.reviewSuite!.readCheckpoint({ head: fixedHead, diff: '', pr: null }, 3))?.report).toMatchObject({ hostExitCode: 7, suiteOutcome: 'passed', hostDiagnostics: expect.stringContaining('suite-round-3.log') })
   f.context.runSuite = async argv => argv[0] === 'bash'
     ? { ok: false, exit_code: 124, stdout: '', stderr: '', timed_out: true }
     : host(argv)
@@ -275,7 +275,7 @@ test('a later host attempt clears a dead unarmed reservation before rebuilding r
   await expect(readFile(reservation)).rejects.toMatchObject({ code: 'ENOENT' })
 })
 
-test('intermediate reviews defer the full suite and terminal publication runs it once', async () => {
+test('review always selects the full suite even when intermediate worker instructions exist', async () => {
   const f = await fixture()
   f.input.test_strategy = 'TEST EXECUTION\n\nFull suite (stage 2), run exactly this:\n\n  bun test\n'
   f.input.test_strategy_intermediate = 'TEST EXECUTION\n\nSTAGE 2 — DEFERRED (do NOT run the full suite this iteration).'
@@ -288,16 +288,16 @@ test('intermediate reviews defer the full suite and terminal publication runs it
   }
   await writeCompleted(options, 'build', JSON.stringify({ result: { head, payload } }))
   const before = f.commands.length
-  expect(options.policy.reviewSuite?.scope).toBe('subset')
+  expect(options.policy.reviewSuite?.scope).toBe('full-suite')
   expect((await options.policy.reviewSuite!.readCheckpoint({ head, diff: '+one', pr: null }, 1))?.report)
-    .toEqual({ suiteOutcome: 'failed-preexisting', suiteEvidence: 'base red on named.test.ts' })
-  expect(f.commands.slice(before).filter(argv => argv[0] === 'bash')).toHaveLength(0)
+    .toEqual({ hostExitCode: 0, suiteOutcome: 'failed-preexisting', suiteEvidence: 'base red on named.test.ts' })
+  expect(f.commands.slice(before).filter(argv => argv[0] === 'bash')).toHaveLength(1)
 
   expect(options.policy.publicationSuite?.scope).toBe('full-suite')
   expect((await options.policy.publicationSuite!.readCheckpoint({ head, diff: '+one', pr: null }, -1))?.report)
     .toEqual({ hostExitCode: 0 })
   const suites = f.commands.slice(before).filter(argv => argv[0] === 'bash')
-  expect(suites).toHaveLength(1)
+  expect(suites).toHaveLength(2)
   expect(suites[0]![2]).toContain('\nbun test\n')
 })
 
@@ -619,7 +619,7 @@ for (const role of ['plan', 'build', 'review', 'fix'] as const) {
     expect(options.testStrategies).toEqual({ full: strategy, intermediate: null })
     expect(brief.includes('<owner_reflection>')).toBe(builder)
     const contract = [f.input.run.task, builder
-      ? 'Follow the TEST EXECUTION instructions in the host context `testStrategy`. The host selects `suiteScope` after validating this task: `full-suite` requires the full suite; only `subset` defers it for an intermediate task. Never infer scope from the task number or an earlier task.' : '',
+      ? 'Follow the TEST EXECUTION instructions in the host context `testStrategy`. The host selects `suiteScope`: `full-suite` requires the worker full suite for a wave member; `subset` defers it for an intermediate task; `host-suite` leaves the full suite to host review after worker stage 1. Never infer scope from the task number or an earlier task.' : '',
       `Perform the ${role} role.`,
       'Write your result file as a JSON object with EXACTLY these five fields:',
       '  "schema", "run_id", "step_id"  — copy each verbatim from the host context: `request.result.schema`, `request.run_id`, `request.step_id`. Do not invent or reformat them.',
@@ -835,7 +835,7 @@ test('the host suite receipt is an exit code, never the transcript, and an unwri
   // RED. A real nonzero exit still crosses the seam — the redirect must not swallow
   // the status the gate classifies.
   await writeFile(join(options.production.worktree, 'out.sh'), script(3))
-  expect((await options.policy.reviewSuite!.readCheckpoint({ head, diff: '', pr: null }, 2))?.report).toEqual({ hostExitCode: 3 })
+  expect((await options.policy.reviewSuite!.readCheckpoint({ head, diff: '', pr: null }, 2))?.report).toMatchObject({ hostExitCode: 3, hostDiagnostics: expect.stringContaining('trailing diagnostic') })
   expect(captured.at(-1)).toEqual({ stdout: 0, stderr: 0 })
 
   // UNWRITABLE TRANSCRIPT. A directory sitting on the log path defeats the redirect
