@@ -42,6 +42,7 @@ import { dirname, join } from 'node:path'
 import { fileURLToPath } from 'node:url'
 
 import { seedMigratedDb } from '../../tests/support/migrated-db.ts'
+import { manualReminderScheduler } from '@neutronai/reminders/__tests__/manual-scheduler.ts'
 import { ProjectDb, SystemEventsStore, pushSystemEventSink } from '@neutronai/persistence/index.ts'
 import { composeProductionGraph } from '@neutronai/gateway/composition.ts'
 import { drainRealmodeCleanups } from '@neutronai/gateway/index.ts'
@@ -83,6 +84,7 @@ interface Harness {
   base: string
   db: ProjectDb
   captured: ClaudeCodeSubstrateOptions[]
+  reminderTimer: ReturnType<typeof manualReminderScheduler>
   close(): Promise<void>
 }
 let harness: Harness | null = null
@@ -165,8 +167,10 @@ async function startHarness(): Promise<Harness> {
   // has to supply for the journal half to be observable at all.
   clearSink = pushSystemEventSink(new SystemEventsStore({ db }))
   const captured: ClaudeCodeSubstrateOptions[] = []
+  const reminderTimer = manualReminderScheduler()
   const composer = buildOpenGraphComposer({
     env: process.env,
+    reminderScheduler: reminderTimer.scheduler,
     substrateFactory: (opts: ClaudeCodeSubstrateOptions): Substrate => {
       captured.push(opts)
       return cannedSubstrate()
@@ -174,6 +178,7 @@ async function startHarness(): Promise<Harness> {
   })
   const composition = await composer({ db, project_slug: 'owner' })
   const graph = await composeProductionGraph(composition)
+  reminderTimer.assertStarted()
   if (graph.fetch === undefined || graph.websocket === undefined) throw new Error('no fetch/ws')
   const server = Bun.serve({
     port: 0,
@@ -184,9 +189,11 @@ async function startHarness(): Promise<Harness> {
     base: `http://127.0.0.1:${server.port}`,
     db,
     captured,
+    reminderTimer,
     close: async () => {
       await server.stop(true)
       await graph.shutdown()
+      reminderTimer.assertStopped()
       // The PRODUCTION drain, not a local loop. A `realmode_cleanup` is typed
       // `() => void | Promise<void>` and `gateway/index.ts` awaits each one before
       // `db.close()` for a reason — the async ones have in-flight work. Calling
@@ -261,14 +268,12 @@ describe('the REAL composer wires the nudge lane a floor sink that records witho
         Math.floor(Date.now() / 1000) - 5,
         row.id,
       ])
-    // The composition's reminder tick is on a 30s interval, so this waits for a real
-    // sweep rather than poking the dispatcher directly — the compose has to happen on
-    // the production path for the lane's options to be the production ones. Generous
-    // because CI is slower than a laptop and a timeout here would read as a wiring
-    // failure rather than a slow tick.
+    // Invoke the callback registered by the real composition's 30-second timer.
+    // The supervised sweep, store, dispatcher and delivery remain production code.
+    harness.reminderTimer.fire()
     await waitFor(
       () => harness!.captured.some((o) => o.substrate_instance_id === 'cc-nudge-owner'),
-      90_000,
+      10_000,
     )
 
     const agent = harness.captured.find((o) => o.substrate_instance_id === 'cc-agent-owner')!

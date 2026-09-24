@@ -3310,7 +3310,12 @@ generation"), mobile `app/app/codegen.tsx`, both over
   where `model_id` is RESOLVED AT CALL TIME (the Claude tiers through
   `runtime/models.ts`, including the watchdog's adopted `getBestModel()`). Retiring a
   model is a single edit here. Tiers: `fable`/`opus`/`sonnet`/`fast` (Anthropic),
-  `sol`/`terra`/`luna` (GPT 5.6, via Codex), `k3` (Kimi K3).
+  `astra`/`sol`/`luna` (GPT-6, via Codex), `terra` (GPT-5.6 Terra), `k3` (Kimi K3).
+  The Codex review default is Astra; the direct build wrapper defaults to Sol.
+  Each named class follows its latest verified available model (Decisions Log
+  2026-09-24). Terra retains its available ID until a newer Terra is verified.
+  Both wrappers refuse empty model selections; provider errors cannot select a
+  substitute model. Historical model IDs in build records remain unchanged.
 - **A tier carries a TRANSPORT, because that is what makes it reachable.** The
   workflow cannot reach a non-Anthropic model through `agent({model})` — that
   resolves against Claude Code's own endpoint (`trident/kimi-review-cli.ts`). So
@@ -3322,14 +3327,13 @@ generation"), mobile `app/app/codegen.tsx`, both over
   no module resolution.
 - **The cross-model review lanes are routed phases.** `argus:codex` / `argus:kimi`
   (and their retry lanes) were in `UNROUTED_LABELS`; they are the `review_codex` /
-  `review_kimi` phases in `trident/phase-models.ts`, defaulting to `sol` and `k3` —
-  the same models the wrappers pinned themselves, so an install that never opens the
-  pane is unchanged. `trident/__tests__/model-tiers.test.ts` pins the registry
-  against each wrapper's own default (and against the `${VAR-x}` form that lets an
-  explicitly EMPTY `CODEX_REVIEW_MODEL` mean "the CLI default").
+  `review_kimi` phases in `trident/phase-models.ts`, defaulting to `astra` and `k3`.
+  `trident/__tests__/model-tiers.test.ts` pins the registry against each wrapper's
+  own default. The `${VAR-x}` form defaults only an unset model value; an explicitly
+  empty `CODEX_REVIEW_MODEL` is refused before execution.
 - **THE BUILD STEP RUNS ON CODEX TOO.** It is the one step with two executors, and
   the reason is the Anthropic quota: the build is by far the most expensive phase.
-  Pin the **Build** row to `sol`/`terra`/`luna` and `trident/inner-workflow.mjs`
+  Pin the **Build** row to `astra`/`sol`/`terra`/`luna` and `trident/inner-workflow.mjs`
   hands the assembled Forge brief to `trident/codex-build.sh` instead of to
   `agent({model})`; no Anthropic model id is requested for the phase. The wrapper
   runs `codex exec --sandbox danger-full-access` inside the step's isolated worktree,

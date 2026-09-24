@@ -484,7 +484,7 @@ const ROLE_MODEL = {
   // seats never substitute for one another (`routeAvailable`), they only run what was
   // chosen. The list must match `trident/phase-models.ts`; both are walked by
   // `__tests__/cross-model-dispatch.test.ts`.
-  'argus:codex': { ...cliRoute({ tier: 'sol', phaseKey: 'review_codex', group: 'codex' }), dispatchGroups: ['none', 'claude', 'codex', 'kimi', 'api'] },
+  'argus:codex': { ...cliRoute({ tier: 'astra', phaseKey: 'review_codex', group: 'codex' }), dispatchGroups: ['none', 'claude', 'codex', 'kimi', 'api'] },
   'argus:kimi': { ...cliRoute({ tier: 'k3', phaseKey: 'review_kimi', group: 'kimi' }), dispatchGroups: ['none', 'claude', 'codex', 'kimi', 'api'] },
   'checkpoint': { model: MODELS.fast, effort: 'low', phaseKey: 'bookkeeping', dispatchGroups: ['claude'] },
   'terminal-result': { model: MODELS.fast, effort: 'low', phaseKey: 'bookkeeping', dispatchGroups: ['claude'] },
@@ -735,8 +735,7 @@ function withModel(opts, tag) {
  *
  * Returns '' when no registry is threaded, which invokes the wrapper exactly as it was
  * invoked before this existed — the wrapper's own pinned default, including codex's
- * `${CODEX_REVIEW_MODEL-gpt-5.6-sol}` and its deliberate respect for an explicitly
- * EMPTY value.
+ * `${CODEX_REVIEW_MODEL-gpt-6-astra}`. An explicitly empty model is refused.
  */
 function crossModelEnvPrefix(label) {
   const route = routeModel(label)

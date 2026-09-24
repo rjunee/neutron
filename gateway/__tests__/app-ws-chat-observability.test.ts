@@ -170,6 +170,7 @@ describe('app-ws observability — the /ws/app/chat path (ISSUES #557)', () => {
     expect(fieldOf(linesFor('turn_completed')[0] as string, 'turn')).toBe(
       fieldOf(linesFor('turn_dispatched')[0] as string, 'turn'),
     )
+    await waitFor(() => events.some((e) => e.type === 'user_message'))
     expect(events.some((e) => e.type === 'user_message')).toBe(true)
 
     ws.close()

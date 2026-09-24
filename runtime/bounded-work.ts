@@ -106,7 +106,10 @@ export type BoundedWorkOutcome = (
   | { kind: 'blocked'; on: string }
   | { kind: 'refused'; reason: RefusalReason }
   | { kind: 'failed'; class: 'infra' | 'timeout' | 'killed'; detail: string }
-  | { kind: 'unknown'; detail: string }
+  | { kind: 'unknown'; detail: string
+      /** Host decoder observed a current, completed envelope with an invalid payload.
+       * Never inferred from a missing file, timeout, or provider prose. */
+      invalid_result?: { schema: string; payload: unknown } }
 ) & { readonly observation?: ProviderObservation }
 
 /** Host observation of provider transport metadata, independent of result authority.

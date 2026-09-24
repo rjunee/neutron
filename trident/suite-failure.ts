@@ -3,6 +3,11 @@ import { createHash } from 'node:crypto'
 import { readFile } from 'node:fs/promises'
 import { resolve, sep } from 'node:path'
 
+// Complete diagnostic lines from the partitioned suite can exceed 16K characters (for
+// example, a mutation exemption listing hundreds of files). Keep enough to
+// parse those lines without truncation; larger records still fail closed.
+const MAX_SUITE_LINE_LENGTH = 64 * 1024
+
 /** Select the parser from the admitted command/runner, never from output parse success. */
 async function failureFormat(command: string, worktree?: string): Promise<'bun' | 'generic'> {
   const bun = /\bbun\s+test\b|(?:^|[ /])run-tests\.sh\b/
@@ -64,7 +69,7 @@ export async function suiteFailure(logPath: string, command: string, worktree?: 
       const lines = String(chunk).split('\n')
       for (let index = 0; index < lines.length; index++) {
         pending += lines[index]
-        if (pending.length > 16384) { pending = ''; oversized = true; overflow = true }
+        if (pending.length > MAX_SUITE_LINE_LENGTH) { pending = ''; oversized = true; overflow = true }
         if (index < lines.length - 1) {
           if (!oversized) consume(pending.replace(/\r$/, ''))
           pending = ''; oversized = false

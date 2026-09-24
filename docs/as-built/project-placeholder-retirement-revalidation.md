@@ -6,7 +6,10 @@ during those server calls. The manager now rechecks the exact pane response,
 workspace and tab association, workspace ownership marker, and foreground argv
 immediately before its existing pane-only close. Both initial Chat checks also
 require the returned pane and process-info identities to match the requested
-pane. Failed-worker cleanup shares the same final verification.
+pane. Worker operations retain main's durable per-operation reservations:
+typed errors and ambiguous replies do not retire the placeholder or release the
+operation for retry. This integration removes the obsolete failed-worker cleanup
+helper while retaining the final verification for Chat replacement.
 
 Changed or unreadable identity refuses placeholder retirement. Existing failure
 cleanup removes the unreturned replacement pane and retains the pending journal,
@@ -24,11 +27,19 @@ the atomic ownership/contents guard required by the workspace specification.
 This change issues no whole-workspace or whole-tab close. Issue #1226 and its
 sleep/continuity acceptance remain open.
 
-Validation: direct manager tests passed (30 tests, 167 assertions), including
-post-ordering process/placement/ownership changes, wrong response identities,
-unknown observation, and verified retirement beside a late foreign split.
-Consuming host and Claude spawn placement tests passed with local socket binding
-permitted (10 tests, 40 assertions). Root and Trident typechecks passed. Removing
-final revalidation caused seven direct tests to fail; refusing verified retirement
-caused six failures. Restored tests passed. The full suite awaits its scheduled
-exclusive slot; no live pane was mutated.
+Validation includes post-ordering process/placement/ownership changes, wrong
+response identities, unknown observation, and verified retirement beside a late
+foreign split, together with durable worker-operation refusal and recovery.
+The combined manager and host-placement tests passed (51 tests, 311 assertions).
+The actual workspace host, Claude spawn, and complete consuming Open project
+build E2E passed (317 tests, 3,637 assertions). Root and Trident typechecks and
+the repository lint gate passed. Removing final revalidation made the changed
+occupant refusal test fail; substituting whole-tab closure made the late-sibling
+survival test fail. Restoring the implementation returned all 51 manager and
+host-placement tests to green. Both Chat refusal and successful retirement
+assert that existing worker reservation records survive unchanged.
+
+The local leak gate reported 455 findings, and the same scan against the fetched
+main tree at `9c421a27` reported the same 455 findings. This is a failing gate, not a
+clean local purity receipt. The full repository suite and hosted CI were not
+run for this local integration. No live pane was mutated.

@@ -2183,7 +2183,7 @@ describe('the BRIEF is what codex is asked to build', () => {
 
   test('the build model is PINNED, and overridable through CODEX_BUILD_MODEL', () => {
     const dflt = run({ authed: true, codexLoginExit: 0 })
-    expect(dflt.codexArgv).toContain('--model\ngpt-5.6-sol')
+    expect(dflt.codexArgv).toContain('--model\ngpt-6-sol')
 
     const pinned = run({
       authed: true,
@@ -2191,7 +2191,22 @@ describe('the BRIEF is what codex is asked to build', () => {
       env: { CODEX_BUILD_MODEL: 'gpt-5.6-terra' },
     })
     expect(pinned.codexArgv).toContain('--model\ngpt-5.6-terra')
-    expect(pinned.codexArgv).not.toContain('gpt-5.6-sol')
+    expect(pinned.codexArgv).not.toContain('gpt-6-sol')
+  })
+
+  test.each(['gpt-6-astra', 'gpt-6-sol', 'gpt-5.6-terra', 'gpt-6-luna'])('the build forwards the exact selected model %s', (model) => {
+    const result = run({ authed: true, codexLoginExit: 0, env: { CODEX_BUILD_MODEL: model } })
+    expect(result.status).toBe(0)
+    const argv = result.codexArgv.trim().split('\n')
+    expect(argv[argv.indexOf('--model') + 1]).toBe(model)
+    expect(argv.filter(arg => arg === '--model')).toHaveLength(1)
+  })
+
+  test.each(['', '   '])('an empty CODEX_BUILD_MODEL refuses CLI fallback: %j', (model) => {
+    const result = run({ authed: true, codexLoginExit: 0, env: { CODEX_BUILD_MODEL: model } })
+    expect(result.status).toBe(3)
+    expect(result.stderr).toContain('CODEX_BUILD_MODEL_INVALID')
+    expect(result.codexArgv).toBe('')
   })
 
   test('the reasoning effort is PINNED, and overridable through CODEX_BUILD_EFFORT', () => {
@@ -2217,17 +2232,6 @@ describe('the BRIEF is what codex is asked to build', () => {
       env: { CODEX_BUILD_EFFORT: '' },
     })
     expect(codexArgv).not.toContain('model_reasoning_effort')
-  })
-
-  test('an explicitly EMPTY CODEX_BUILD_MODEL falls back to the CLI default', () => {
-    // `${VAR-x}` substitutes only when UNSET, so an empty value is a deliberate
-    // "let codex choose" and not an accident to be overwritten.
-    const { codexArgv } = run({
-      authed: true,
-      codexLoginExit: 0,
-      env: { CODEX_BUILD_MODEL: '' },
-    })
-    expect(codexArgv).not.toContain('--model')
   })
 
   test('the sandbox grant is on the command line, and it is the wide one', () => {
@@ -2920,12 +2924,16 @@ describe('atomic trailer publication', () => {
     expect(readdirSync(r.dir).some((entry) => /^build\.trailer\.tmp\./.test(entry))).toBe(false)
   })
 
-  test('a concurrent reader never observes a partial trailer', async () => {
+  test.each([false, true])('a concurrent reader never observes a partial trailer (paused copy: %s)', async (pauseCopy) => {
     // This observer is a test instrument outside the build lifetime. Leaving it
     // in the build claim makes correct teardown kill it before its next poll.
-    // All atomicity assertions remain unchanged.
+    // Redirection opens observed.trailer BEFORE cat writes it. Wait for a separate
+    // completion receipt, even when the scheduler pauses that copy after open.
+    const pause = pauseCopy
+      ? 'j=0; while [ ! -e "$HOME/release-copy" ] && [ $j -lt 200 ]; do sleep 0.05; j=$((j+1)); done; '
+      : ''
     const observer =
-      `env -u NEUTRON_LANE_CLAIM sh -c 'i=0; while [ $i -lt 600 ]; do if [ -s "$NEUTRON_CODEX_BUILD_TRAILER_FILE" ]; then cat "$NEUTRON_CODEX_BUILD_TRAILER_FILE" > "$HOME/observed.trailer"; exit 0; fi; sleep 0.05; i=$((i+1)); done' >/dev/null 2>&1 &`
+      `env -u NEUTRON_LANE_CLAIM sh -c 'i=0; while [ $i -lt 600 ]; do if [ -s "$NEUTRON_CODEX_BUILD_TRAILER_FILE" ]; then { ${pause}cat "$NEUTRON_CODEX_BUILD_TRAILER_FILE"; } > "$HOME/observed.trailer" && : > "$HOME/observed.done"; exit 0; fi; sleep 0.05; i=$((i+1)); done' >/dev/null 2>&1 &`
     const r = run({
       authed: true,
       codexLoginExit: 0,
@@ -2933,7 +2941,31 @@ describe('atomic trailer publication', () => {
     })
     expect(r.status).toBe(0)
     const observed = join(r.dir, 'observed.trailer')
-    for (let i = 0; i < 200 && !existsSync(observed); i++) await Bun.sleep(50)
+    const completed = join(r.dir, 'observed.done')
+    const waitForCopy = async (): Promise<void> => {
+      for (let i = 0; i < 200 && !existsSync(completed); i++) await Bun.sleep(50)
+    }
+    let copyFinished = false
+    let completion: Promise<void>
+    if (pauseCopy) {
+      for (let i = 0; i < 200 && !existsSync(observed); i++) await Bun.sleep(50)
+      completion = waitForCopy().then(() => { copyFinished = true })
+      // Flush an already-resolved waiter while the child is still held. Waiting
+      // for output existence instead of completion must fail before release.
+      await Promise.resolve()
+      try {
+        expect(existsSync(observed)).toBe(true)
+        expect(readFileSync(observed, 'utf8')).toBe('')
+        expect(existsSync(completed)).toBe(false)
+        expect(copyFinished).toBe(false)
+      } finally {
+        writeFileSync(join(r.dir, 'release-copy'), '')
+      }
+    } else {
+      completion = waitForCopy()
+    }
+    await completion
+    expect(existsSync(completed)).toBe(true)
     expect(existsSync(observed)).toBe(true)
     const observedRaw = readFileSync(observed, 'utf8')
     expect(observedRaw).toBe(r.trailerRaw)

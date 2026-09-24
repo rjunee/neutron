@@ -240,12 +240,11 @@ export const TRIDENT_PHASES: ReadonlyArray<TridentPhase> = Object.freeze([
     description:
       'A second-opinion review seat. Any tier — including a Claude one when the build is on another family — or NONE to turn the seat off.',
     labels: [{ label: 'argus:codex' }, { label: 'argus:codex-retry' }],
-    // `sol` is the flagship GPT 5.6 tier and matches the wrapper's own standing pin,
-    // so an install that never opens the pane dispatches exactly what it dispatched
-    // before this phase existed. The effort below is INERT WHILE THE SEAT IS ON A CLI
+    // Astra is the flagship review tier and matches the wrapper's standing pin.
+    // The effort below is INERT WHILE THE SEAT IS ON A CLI
     // TIER — a CLI chooses its own reasoning effort, and no dispatch reads this value
     // (see `phaseSupportsEffort`); a Claude tier on this seat dispatches at it.
-    default: { tier: 'sol', effort: 'high' },
+    default: { tier: 'astra', effort: 'high' },
     // A CLAUDE TIER IS SELECTABLE HERE, AND IT IS NOT A FALLBACK. The rule these
     // seats enforce (`trident/kimi-review.ts`) forbids a seat SILENTLY degrading to
     // Claude when its CLI fails while still reporting a cross-model review happened —
