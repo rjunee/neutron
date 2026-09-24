@@ -212,7 +212,7 @@ describe('the audio session does not outlive the bubble', () => {
 describe('a clip that cannot load says so', () => {
   it('surfaces the failure and offers a retry — never a control that does nothing', async () => {
     setHarnessPlatform('web');
-    const restore = failingFetch();
+    const restore = failingFetch(RESOLVED_CLIP);
     try {
       const screen = await mountScreen(bubble(CLIP_URL));
       await screen.settle();
@@ -221,6 +221,10 @@ describe('a clip that cannot load says so', () => {
       // carries no headers). A refused fetch is a clip that will never play,
       // and the owner is told so instead of tapping a silent button forever.
       expect(screen.text()).toContain('Voice message unavailable');
+      // The fetch replacement spans the process. An unrelated request must
+      // reach the prior fetch implementation without counting as this clip.
+      await globalThis.fetch('data:text/plain,unrelated').catch(() => undefined);
+      expect(restore.forwarded).toContain('data:text/plain,unrelated');
       expect(restore.calls).toBe(1);
 
       await screen.press('Voice message unavailable, tap to retry');
@@ -241,16 +245,21 @@ function widthPercent(el: HTMLElement | null): number {
   return match === null ? Number.NaN : Math.round(Number(match[1]));
 }
 
-/** Replace `fetch` with one that always refuses, counting attempts. */
-function failingFetch(): { calls: number; undo: () => void } {
+/** Refuse this clip's fetch, counting its attempts without owning other requests. */
+function failingFetch(clipUrl: string): { calls: number; forwarded: string[]; undo: () => void } {
   const real = globalThis.fetch;
   const record = {
     calls: 0,
+    forwarded: [] as string[],
     undo: () => {
       globalThis.fetch = real;
     },
   };
-  globalThis.fetch = (async () => {
+  globalThis.fetch = (async (input: RequestInfo | URL, init?: RequestInit) => {
+    if (String(input) !== clipUrl) {
+      record.forwarded.push(String(input));
+      return real(input, init);
+    }
     record.calls += 1;
     throw new Error('refused');
   }) as unknown as typeof globalThis.fetch;
