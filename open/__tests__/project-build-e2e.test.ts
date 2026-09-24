@@ -2162,7 +2162,7 @@ test('package-local workspace resolution retains one host suite through publicat
     return originalInstall(...args)
   }, { writesDiffOutput: true as const })
   f.context.runSuite = async (...args) => { suites++; return originalSuite(...args) }
-  // Tenant ancestors allow known-path traversal but deny directory listing.
+  // Restricted ancestors allow known-path traversal but deny directory listing.
   // Keep writes for host state creation, and prove this is not a root bypass.
   await chmod(f.dir, 0o300)
   cleanups.push(() => chmod(f.dir, 0o700))
