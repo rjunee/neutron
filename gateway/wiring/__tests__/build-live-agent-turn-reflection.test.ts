@@ -19,6 +19,7 @@ import type { AgentSpec, Substrate } from '@neutronai/runtime/substrate.ts'
 import type { SessionHandle } from '@neutronai/runtime/session-handle.ts'
 import { buildLiveAgentTurn, type LiveAgentReflectionSeam } from '../build-live-agent-turn.ts'
 import type { LiveAgentTurnRequest } from '../../http/chat-bridge.ts'
+import { openAdmission } from './project-admission-fixture.ts'
 
 let tmp: string
 let db: ProjectDb
@@ -82,6 +83,7 @@ describe('build-live-agent-turn — reflection wiring', () => {
       onTurnComplete: (t) => completed.push(t),
     }
     const run = buildLiveAgentTurn({
+      admission: openAdmission(),
       // Turn 1 reply is the message the owner corrects on turn 2.
       substrate: makeStubSubstrate(specs, ['I deployed to prod.', 'Switching to staging.']),
       personaLoader: { async load(): Promise<string> { return 'PERSONA' } },
@@ -118,6 +120,7 @@ describe('build-live-agent-turn — reflection wiring', () => {
       onTurnComplete: (t) => completed.push(t),
     }
     const run = buildLiveAgentTurn({
+      admission: openAdmission(),
       substrate: makeStubSubstrate(specs),
       personaLoader: { async load(): Promise<string> { return 'PERSONA' } },
       reflection,
@@ -138,6 +141,7 @@ describe('build-live-agent-turn — reflection wiring', () => {
       onTurnComplete: () => {},
     }
     const run = buildLiveAgentTurn({
+      admission: openAdmission(),
       substrate: makeStubSubstrate(specs),
       personaLoader: { async load(): Promise<string> { return 'PERSONA' } },
       reflection,
@@ -163,6 +167,7 @@ describe('build-live-agent-turn — reflection wiring', () => {
       },
     }
     const run = buildLiveAgentTurn({
+      admission: openAdmission(),
       substrate: makeStubSubstrate(specs),
       personaLoader: { async load(): Promise<string> { return 'PERSONA' } },
       reflection,

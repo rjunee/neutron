@@ -30,6 +30,7 @@ import { buildLiveAgentTurn } from '../build-live-agent-turn.ts'
 import type { LiveAgentTurnRequest } from '../../http/chat-bridge.ts'
 import { BEST_MODEL, getBestModel, setBestModelOverride } from '@neutronai/runtime/models.ts'
 import { projectModelTier } from '@neutronai/runtime/configured-models.ts'
+import { openAdmission } from './project-admission-fixture.ts'
 
 let tmp: string
 let db: ProjectDb
@@ -79,6 +80,7 @@ function makeStubSubstrate(specs: AgentSpec[]): Substrate {
 /** A runner that does NOT pin `model`, so the dynamic default governs. */
 function makeDefaultModelRunner(substrate: Substrate) {
   return buildLiveAgentTurn({
+    admission: openAdmission(),
     substrate,
     personaLoader: { async load(): Promise<string> { return '' } },
     buttonStore: store,
@@ -106,6 +108,7 @@ describe('build-live-agent-turn — dynamic model resolution (always-latest)', (
       const specs: AgentSpec[] = []
       const env = { NEUTRON_PROJECT_MODELS: JSON.stringify({ [configuredProject]: 'glm' }) }
       const run = buildLiveAgentTurn({
+        admission: openAdmission(),
         substrate: makeStubSubstrate(specs), configuredModel: id => projectModelTier(env, id),
         personaLoader: { async load() { return '' } }, buttonStore: store,
         project_slug: 'alice', owner_home: tmp, now: () => now,
@@ -164,6 +167,7 @@ describe('build-live-agent-turn — dynamic model resolution (always-latest)', (
     const sent: ChatOutbound[] = []
     setBestModelOverride('claude-opus-9-9')
     const run = buildLiveAgentTurn({
+      admission: openAdmission(),
       substrate: makeStubSubstrate(specs),
       personaLoader: { async load(): Promise<string> { return '' } },
       buttonStore: store,

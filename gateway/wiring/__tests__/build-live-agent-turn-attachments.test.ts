@@ -26,6 +26,7 @@ import type { AgentSpec, Substrate } from '@neutronai/runtime/substrate.ts'
 import type { SessionHandle } from '@neutronai/runtime/session-handle.ts'
 import { buildLiveAgentTurn, RETRY_TURN_VALUE } from '../build-live-agent-turn.ts'
 import type { LiveAgentTurnRequest } from '../../http/chat-bridge.ts'
+import { openAdmission } from './project-admission-fixture.ts'
 
 let tmp: string
 let db: ProjectDb
@@ -100,6 +101,7 @@ describe('build-live-agent-turn — attachment threading', () => {
     const specs: AgentSpec[] = []
     const sent: ChatOutbound[] = []
     const run = buildLiveAgentTurn({
+      admission: openAdmission(),
       substrate: makeStubSubstrate(specs),
       personaLoader: { async load() { return '' } },
       resolveAttachment,
@@ -120,6 +122,7 @@ describe('build-live-agent-turn — attachment threading', () => {
     const specs: AgentSpec[] = []
     const sent: ChatOutbound[] = []
     const run = buildLiveAgentTurn({
+      admission: openAdmission(),
       substrate: makeStubSubstrate(specs),
       personaLoader: { async load() { return '' } },
       resolveAttachment,
@@ -144,6 +147,7 @@ describe('build-live-agent-turn — attachment threading', () => {
     const sent: ChatOutbound[] = []
     const captured: { userText: string | null } = { userText: null }
     const run = buildLiveAgentTurn({
+      admission: openAdmission(),
       substrate: makeStubSubstrate(specs),
       personaLoader: { async load() { return '' } },
       resolveAttachment,
@@ -174,6 +178,7 @@ describe('build-live-agent-turn — attachment threading', () => {
     const specs: AgentSpec[] = []
     const sent: ChatOutbound[] = []
     const run = buildLiveAgentTurn({
+      admission: openAdmission(),
       substrate: makeStubSubstrate(specs),
       personaLoader: { async load() { return '' } },
       resolveAttachment,
@@ -194,6 +199,7 @@ describe('build-live-agent-turn — attachment threading', () => {
     const specs: AgentSpec[] = []
     const sent: ChatOutbound[] = []
     const run = buildLiveAgentTurn({
+      admission: openAdmission(),
       substrate: makeStubSubstrate(specs),
       personaLoader: { async load() { return '' } },
       resolveAttachment,
@@ -211,6 +217,7 @@ describe('build-live-agent-turn — attachment threading', () => {
     const specs: AgentSpec[] = []
     const sent: ChatOutbound[] = []
     const run = buildLiveAgentTurn({
+      admission: openAdmission(),
       substrate: makeStubSubstrate(specs),
       personaLoader: { async load() { return '' } },
       buttonStore: store,
@@ -228,6 +235,7 @@ describe('build-live-agent-turn — attachment threading', () => {
     const specs: AgentSpec[] = []
     const sent: ChatOutbound[] = []
     const run = buildLiveAgentTurn({
+      admission: openAdmission(),
       substrate: makeStubSubstrate(specs),
       personaLoader: { async load() { return '' } },
       resolveAttachment,
@@ -259,6 +267,7 @@ describe('build-live-agent-turn — attachment threading', () => {
     const specs: AgentSpec[] = []
     const sent: ChatOutbound[] = []
     const run = buildLiveAgentTurn({
+      admission: openAdmission(),
       substrate: makeStubSubstrate(specs),
       personaLoader: { async load() { return '' } },
       resolveAttachment: (url) =>
@@ -283,6 +292,7 @@ describe('build-live-agent-turn — attachment threading', () => {
     const specs: AgentSpec[] = []
     const sent: ChatOutbound[] = []
     const run = buildLiveAgentTurn({
+      admission: openAdmission(),
       substrate: makeStubSubstrate(specs),
       personaLoader: { async load() { return '' } },
       resolveAttachment: (url) =>
@@ -313,6 +323,7 @@ describe('build-live-agent-turn — attachment threading', () => {
     const sent: ChatOutbound[] = []
     const longText = 'x'.repeat(5000)
     const run = buildLiveAgentTurn({
+      admission: openAdmission(),
       substrate: makeStubSubstrate(specs),
       personaLoader: { async load() { return '' } },
       resolveAttachment: (url) =>
@@ -336,6 +347,7 @@ describe('build-live-agent-turn — attachment threading', () => {
     const specs: AgentSpec[] = []
     const sent: ChatOutbound[] = []
     const run = buildLiveAgentTurn({
+      admission: openAdmission(),
       substrate: makeStubSubstrate(specs),
       personaLoader: { async load() { return '' } },
       resolveAttachment,

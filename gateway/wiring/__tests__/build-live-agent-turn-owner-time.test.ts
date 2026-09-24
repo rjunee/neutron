@@ -12,6 +12,7 @@ import { seedMigratedDb } from '../../../tests/support/migrated-db.ts'
 import { readOwnerTimezone, writeOwnerTimezone } from '../../storage/owner-metadata.ts'
 import type { LiveAgentTurnRequest } from '../../http/chat-bridge.ts'
 import { buildLiveAgentTurn } from '../build-live-agent-turn.ts'
+import { openAdmission } from './project-admission-fixture.ts'
 
 const NOW = Date.parse('2026-08-14T00:30:00.000Z')
 let tmp: string
@@ -59,6 +60,7 @@ describe('live owner clock frame', () => {
     const specs: AgentSpec[] = []
     await writeOwnerTimezone(db, 'owner', 'America/Los_Angeles')
     const run = buildLiveAgentTurn({
+      admission: openAdmission(),
       substrate: substrate(specs),
       personaLoader: { async load() { return '' } },
       ownerTimezone: (slug) => readOwnerTimezone(db, slug),
@@ -81,6 +83,7 @@ describe('live owner clock frame', () => {
   test('an unknown zone is named as unknown instead of using the host clock', async () => {
     const specs: AgentSpec[] = []
     const run = buildLiveAgentTurn({
+      admission: openAdmission(),
       substrate: substrate(specs),
       personaLoader: { async load() { return '' } },
       ownerTimezone: () => null,

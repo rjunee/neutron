@@ -37,6 +37,7 @@ import {
   TIMEOUT_BODY,
 } from '../build-live-agent-turn.ts'
 import type { LiveAgentTurnRequest } from '../../http/chat-bridge.ts'
+import { openAdmission } from './project-admission-fixture.ts'
 
 const TURN_TIMEOUT_ERR = 'cc-llm-call: persistent-repl: turn timeout'
 
@@ -99,6 +100,7 @@ function makeSeqSubstrate(
 
 function makeRunner(substrate: Substrate) {
   return buildLiveAgentTurn({
+    admission: openAdmission(),
     substrate,
     personaLoader: { load: async (): Promise<string> => '' },
     buttonStore: store,

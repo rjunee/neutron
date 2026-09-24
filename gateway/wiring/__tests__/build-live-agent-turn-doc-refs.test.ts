@@ -19,6 +19,7 @@ import type { Event } from '@neutronai/runtime/events.ts'
 import type { AgentSpec, Substrate } from '@neutronai/runtime/substrate.ts'
 import type { SessionHandle } from '@neutronai/runtime/session-handle.ts'
 import { buildLiveAgentTurn } from '../build-live-agent-turn.ts'
+import { openAdmission } from './project-admission-fixture.ts'
 
 let tmp: string
 let db: ProjectDb
@@ -58,6 +59,7 @@ describe('build-live-agent-turn — doc-reference guidance (P-A)', () => {
   test('first-turn system context teaches the docs:/ tappable-link convention', async () => {
     const captured: { spec: AgentSpec | null } = { spec: null }
     const run = buildLiveAgentTurn({
+      admission: openAdmission(),
       substrate: makeCapturingSubstrate(captured),
       personaLoader: { async load(): Promise<string> { return '' } },
       buttonStore: store,

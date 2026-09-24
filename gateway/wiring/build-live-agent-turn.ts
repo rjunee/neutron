@@ -79,6 +79,7 @@ import { buildLiveAgentScopeFragment } from './live-agent-scope-fragment.ts'
 import type { LiveAgentTurnRequest } from '../http/chat-bridge.ts'
 import { fireAndForget, neutralizeAbandonedSettle } from '@neutronai/logger/fire-and-forget.ts'
 import { createLogger } from '@neutronai/logger'
+import type { ProjectAdmission } from '../project-admission.ts'
 
 const moduleLog = createLogger('live-agent-turn')
 
@@ -666,6 +667,15 @@ export interface BuildLiveAgentTurnInput {
    * is per-dispatch and therefore race-free across concurrent topics.
    */
   substrate: Substrate
+  /**
+   * Project admission (#1237). REQUIRED: an unwired gate is a composition bug, not
+   * open admission. Every turn — typed, button, sentinel, `/effective-prompt`, a
+   * parent-input injection and a host acting turn — admits BEFORE it queues or
+   * delivers, holds the durable lease through the queued wait and the body, and
+   * releases it on every unwind. A fenced or unknown scope is refused: nothing is
+   * queued, injected, or persisted as a user turn.
+   */
+  admission: Pick<ProjectAdmission, 'admit'>
   /** Deliver text into the active persistent-REPL turn; false when none is live. */
   injectActiveTurn?: (turn: LiveAgentTurnRequest, text: string) => Promise<boolean>
   /**
@@ -864,6 +874,51 @@ export interface BuildLiveAgentTurnInput {
 export interface LiveAgentTurnResult {
   outcome: 'replied' | 'failed'
   reply_prompt_id: string | null
+  /** Set only when project admission refused the turn before it queued. */
+  refusal?: LiveAgentTurnRefusal
+}
+
+export interface LiveAgentTurnRefusal {
+  code: 'project_fenced' | 'project_unknown'
+  detail: string
+}
+
+/** Live-only notice for a refused turn (never persisted; the turn never ran). */
+export const PROJECT_FENCED_BODY =
+  'This project is paused for maintenance, so I did not run that message. Please send it again in a moment.'
+export const PROJECT_UNKNOWN_BODY =
+  'This project no longer exists, so I did not run that message.'
+
+/** A host acting turn refused by project admission. Thrown before it queues. */
+export class ProjectAdmissionRefusedError extends Error {
+  constructor(readonly refusal: LiveAgentTurnRefusal) {
+    super(`project admission refused: ${refusal.code} (${refusal.detail})`)
+    this.name = 'ProjectAdmissionRefusedError'
+  }
+}
+
+/**
+ * The conversation scope of a host acting turn. `conversationProjectId` is exact
+ * (null = General) when the caller threads it. Legacy callers carry only the
+ * metering id, where every existing acting-turn producer spells General as the
+ * literal `'general'` (see the composer's wake observers and the project-build
+ * General fallback) — that legacy convention is read here and nowhere else.
+ */
+export function actingTurnProjectId(spec: AgentSpec): string | null {
+  const ctx = spec.metering_context
+  if (ctx?.conversationProjectId !== undefined) return ctx.conversationProjectId
+  const legacy = ctx?.project_id
+  return legacy === undefined || legacy === 'general' ? null : legacy
+}
+
+function refusalOf(
+  outcome: { status: 'fenced'; phase: string | null } | { status: 'unknown' },
+  projectId: string | null,
+): LiveAgentTurnRefusal {
+  const scope = projectId === null ? 'General' : `project ${JSON.stringify(projectId)}`
+  return outcome.status === 'fenced'
+    ? { code: 'project_fenced', detail: `${scope} is fenced for maintenance (${outcome.phase ?? 'lifted after refusal'})` }
+    : { code: 'project_unknown', detail: `${scope} is not a live project` }
 }
 
 /** Build the per-turn clock frame from one instant and the owner's IANA zone. */
@@ -1013,6 +1068,10 @@ export function buildLiveAgentTurn(
    * either is pooled — that gap is what this chain closes.
    */
   const turnChains = new Map<string, Promise<void>>()
+  /** Per-topic tail of admission ROUTING decisions (see `admitInOrder`). */
+  const admissionOrder = new Map<string, Promise<void>>()
+  /** Turns per topic that arrived but have not been routed (queued or refused) yet. */
+  const admittingCount = new Map<string, number>()
   const activeTopics = new Set<string>()
   const queuedTurnCount = new Map<string, number>()
 
@@ -1030,17 +1089,106 @@ export function buildLiveAgentTurn(
    */
   function runLiveAgentTurn(turn: LiveAgentTurnRequest): Promise<LiveAgentTurnResult> {
     const topicKey = `${turn.project_slug}:${turn.topic_id}`
-    if (turn.user_text.trim() === '/effective-prompt') return enqueueTurn(turn, topicKey)
-    if (
+    const projectId = turn.project_id ?? null
+    // The inject-vs-enqueue choice is taken on the ARRIVAL state, exactly as before
+    // admission existed: a follow-up may join the one live turn only when nothing
+    // else is queued or still being admitted ahead of it. Admission then decides
+    // whether it may proceed at all.
+    const injectable = turn.user_text.trim() !== '/effective-prompt' &&
       activeTopics.has(topicKey) &&
       queuedTurnCount.get(topicKey) === 1 &&
+      (admittingCount.get(topicKey) ?? 0) === 0 &&
       input.configuredModel?.(turn.project_id) === undefined &&
       input.injectActiveTurn !== undefined &&
       turn.seed_turn !== true &&
       turn.button_prompt_id === undefined &&
       turn.user_text !== RETRY_TURN_VALUE &&
       turn.user_text !== RECONNECT_AUTH_VALUE
-    ) {
+    return admitInOrder(topicKey, projectId, 'chat', `${topicKey}:${turn.observed_at}`, {
+      refused: (refusal) => {
+        moduleLog.warn('live_turn_refused', {
+          project: turn.project_slug, topic: turn.topic_id, code: refusal.code, detail: refusal.detail,
+        })
+        // Live-only notice: the owner is not left in silence, and nothing about
+        // the refused turn is persisted as if it ran.
+        sendSafe(turn.send, {
+          type: 'agent_message',
+          body: refusal.code === 'project_fenced' ? PROJECT_FENCED_BODY : PROJECT_UNKNOWN_BODY,
+          topic_id: turn.topic_id,
+        })
+        return Promise.resolve({ outcome: 'failed', reply_prompt_id: null, refusal })
+      },
+      admitted: () => routeAdmittedTurn(turn, topicKey, injectable),
+    })
+  }
+
+  /**
+   * Admission precedes the queue. Per topic, admissions are decided strictly in
+   * arrival order (each waits only for the previous one's ROUTING decision, never
+   * for its turn to finish), so the inject-vs-enqueue choice and the turn chain
+   * keep the order the turns arrived in. The admitted lease is held through the
+   * queued wait and the body (or the injection delivery) and released on every
+   * unwind. A refusal never reaches the queue, the injection seam or the substrate.
+   */
+  function admitInOrder<T>(
+    topicKey: string,
+    projectId: string | null,
+    producer: 'chat' | 'acting-turn',
+    workRef: string,
+    route: { refused: (refusal: LiveAgentTurnRefusal) => Promise<T>; admitted: () => Promise<T> },
+  ): Promise<T> {
+    const prior = admissionOrder.get(topicKey) ?? Promise.resolve()
+    admittingCount.set(topicKey, (admittingCount.get(topicKey) ?? 0) + 1)
+    let routed!: () => void
+    const decided = new Promise<void>((resolve) => {
+      routed = (): void => {
+        const remaining = (admittingCount.get(topicKey) ?? 1) - 1
+        if (remaining === 0) admittingCount.delete(topicKey)
+        else admittingCount.set(topicKey, remaining)
+        resolve()
+      }
+    })
+    admissionOrder.set(topicKey, decided)
+    neutralizeAbandonedSettle(decided.then(() => {
+      if (admissionOrder.get(topicKey) === decided) admissionOrder.delete(topicKey)
+    }))
+    return prior.then(async () => {
+      let work: Awaited<ReturnType<BuildLiveAgentTurnInput['admission']['admit']>>
+      try {
+        work = await input.admission.admit(projectId, 'conversation', producer, workRef)
+      } catch (err) {
+        routed()
+        throw err
+      }
+      if (work.status !== 'admitted') {
+        routed()
+        return route.refused(refusalOf(work, projectId))
+      }
+      let run: Promise<T>
+      try {
+        run = route.admitted()
+      } finally {
+        routed()
+      }
+      try {
+        return await run
+      } finally {
+        // A lease whose release failed stays durable and keeps maintenance from
+        // advancing: the safe direction. Never let it fail the turn itself.
+        await work.release().catch((err: unknown) => {
+          moduleLog.warn('admission_release_failed', {
+            topic: topicKey, error: err instanceof Error ? err.message : String(err),
+          })
+          return false
+        })
+      }
+    })
+  }
+
+  function routeAdmittedTurn(
+    turn: LiveAgentTurnRequest, topicKey: string, injectable: boolean,
+  ): Promise<LiveAgentTurnResult> {
+    if (injectable && input.injectActiveTurn !== undefined) {
       const attachmentsFragment = buildAttachmentsFragment(
         turn.attachments,
         input.resolveAttachment,
@@ -1120,8 +1268,18 @@ export function buildLiveAgentTurn(
 
   return Object.assign(runLiveAgentTurn, {
     composeActingTurn(topic_id: string, spec: AgentSpec, opts: { timeout_ms: number }): Promise<string> {
-      return enqueue(`${input.project_slug}:${topic_id}`, () =>
-        dispatchSpec(spec, opts.timeout_ms, spec.metering_context?.project_id ?? 'general'))
+      const topicKey = `${input.project_slug}:${topic_id}`
+      const projectId = actingTurnProjectId(spec)
+      return admitInOrder(topicKey, projectId, 'acting-turn', `${topicKey}:${randomUUID()}`, {
+        refused: (refusal) => {
+          moduleLog.warn('acting_turn_refused', {
+            project: input.project_slug, topic: topic_id, code: refusal.code, detail: refusal.detail,
+          })
+          return Promise.reject(new ProjectAdmissionRefusedError(refusal))
+        },
+        admitted: () => enqueue(topicKey, () =>
+          dispatchSpec(spec, opts.timeout_ms, spec.metering_context?.project_id ?? 'general')),
+      })
     },
   })
 

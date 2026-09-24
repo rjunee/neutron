@@ -74,6 +74,7 @@ import {
   PROJECT_REPL_TOOL_DEFS,
 } from '@neutronai/gateway/wiring/build-live-agent-turn.ts'
 import type { LiveAgentOnboardingSeam } from '@neutronai/gateway/wiring/build-live-agent-turn.ts'
+import { ProjectAdmission } from '@neutronai/gateway/project-admission.ts'
 import { buildProjectDocComposer } from '@neutronai/gateway/wiring/build-project-doc-composer.ts'
 import { buildProjectKickoffComposer } from '@neutronai/gateway/wiring/build-project-kickoff-composer.ts'
 import { buildProjectKickoff } from '@neutronai/gateway/wiring/build-project-kickoff.ts'
@@ -246,6 +247,7 @@ export type OpenComposition = CompositionInput &
     Pick<
       CompositionInput,
       | 'db'
+      | 'project_admission'
       | 'project_slug'
       | 'chat_topics_surface'
       | 'chat_history_surface'
@@ -5879,11 +5881,18 @@ export function buildOpenGraphComposer(
           }
         : undefined
 
+    // #1237 — ONE project admission service per boot. Every conversation producer
+    // admits through it before queueing; the per-boot id stamps each durable lease
+    // so a later reconciler can tell this process's leases from a dead one's.
+    // Nothing here fences or replaces anything: no trigger exists in this build.
+    const projectAdmission = new ProjectAdmission({ db, ownerHandle: owner_handle, bootId: randomUUID() })
+
     const appWsChatTurn =
       liveAgentSubstrate !== null
         ? buildLiveAgentTurn({
             configuredModel: (projectId) => projectModelTier(env, projectId),
             substrate: liveAgentSubstrate,
+            admission: projectAdmission,
             injectActiveTurn: (turn, text) => injectPersistentReplActiveTurn({
               substrate_instance_id: `cc-agent-${owner_handle}`,
               user_id: OWNER_USER_ID,
@@ -6905,6 +6914,9 @@ export function buildOpenGraphComposer(
 
     return {
       db,
+      // #1237 — the admission service chat and acting turns already admit
+      // through; later producers and maintenance owners consume this field.
+      project_admission: projectAdmission,
       // The graph binds the tool bridge after this composer returns. Survivors
       // regain authority only after that binding, with no synthetic chat turn.
       on_graph_ready: () => adoptLiveAgentRepls([null, ...listProjectIds()]),

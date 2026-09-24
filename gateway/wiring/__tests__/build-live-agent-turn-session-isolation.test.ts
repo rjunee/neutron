@@ -41,6 +41,7 @@ import {
 import { buildLlmCallSubstrate } from '../build-llm-call-substrate.ts'
 import { buildLiveAgentTurn } from '../build-live-agent-turn.ts'
 import type { LiveAgentTurnRequest } from '../../http/chat-bridge.ts'
+import { openAdmission } from './project-admission-fixture.ts'
 
 let tmp: string
 let db: ProjectDb
@@ -135,6 +136,7 @@ describe('build-live-agent-turn — per-topic warm-session isolation (poolKeyFor
       },
     })!
     const run = buildLiveAgentTurn({
+      admission: openAdmission(),
       substrate,
       personaLoader: { async load(): Promise<string> { return '' } },
       buttonStore: store,
@@ -177,6 +179,7 @@ describe('build-live-agent-turn — per-topic warm-session isolation (poolKeyFor
       },
     })!
     const run = buildLiveAgentTurn({
+      admission: openAdmission(),
       substrate,
       personaLoader: { async load(): Promise<string> { return '' } },
       buttonStore: store,
@@ -213,6 +216,7 @@ describe('build-live-agent-turn — per-topic warm-session isolation (poolKeyFor
       },
     })!
     const run = buildLiveAgentTurn({
+      admission: openAdmission(),
       substrate,
       personaLoader: { async load(): Promise<string> { return '' } },
       buttonStore: store,

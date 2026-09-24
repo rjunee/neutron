@@ -91,6 +91,11 @@ export const MIN_EXPECTED_WIRED_FIELDS = 19
  */
 export const WIRED_FIELDS: readonly CompositionFieldWiredEntry[] = [
   {
+    field: 'project_admission',
+    provides:
+      'the per-boot project admission service chat, parent input and host acting turns admit through before queueing — unset, later producers and the maintenance owner would build a second, disagreeing service over the same durable leases',
+  },
+  {
     field: 'on_graph_ready',
     provides: 'authorized project REPL survivors regain their tool bridge before boot accepts traffic, without a chat turn',
   },

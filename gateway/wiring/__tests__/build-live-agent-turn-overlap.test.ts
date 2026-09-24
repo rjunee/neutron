@@ -41,6 +41,7 @@ import type { Event } from '@neutronai/runtime/events.ts'
 import type { AgentSpec, Substrate } from '@neutronai/runtime/substrate.ts'
 import type { SessionHandle } from '@neutronai/runtime/session-handle.ts'
 import { buildLiveAgentTurn } from '../build-live-agent-turn.ts'
+import { openAdmission } from './project-admission-fixture.ts'
 
 let tmp: string
 let db: ProjectDb
@@ -126,6 +127,7 @@ describe('build-live-agent-turn — overlapping-turn serialization (go-live race
     // Slow enough that the 2nd turn arrives well inside the 1st's cold window.
     const { substrate, dispatches } = makeRecordingSubstrate(60)
     const run = buildLiveAgentTurn({
+      admission: openAdmission(),
       substrate,
       personaLoader: {
         async load(): Promise<string> {
@@ -193,6 +195,7 @@ test('terminal acting turns share chat admission, isolate projects, and never in
   const chatStarted = latch(), chatRelease = latch(), wakeStarted = latch(), wakeRelease = latch()
   const starts: string[] = [], activity: string[] = [], injected: string[] = []
   const run = buildLiveAgentTurn({
+    admission: openAdmission(),
     substrate: {
       start(spec) {
         const name = spec.prompt.includes('chat-first') ? 'chat-first' : spec.prompt
@@ -256,6 +259,7 @@ test('acting turn failures release chat admission and finish observation', async
   const { substrate, dispatches } = makeRecordingSubstrate(0)
   const finished: string[] = []
   const run = buildLiveAgentTurn({
+    admission: openAdmission(),
     substrate: {
       start(spec) {
         if (spec.prompt !== 'broken-wake') return substrate.start(spec)
@@ -277,7 +281,7 @@ test('acting turn failures release chat admission and finish observation', async
 
 test('acting timeout starts after admission and does not include queue waiting', async () => {
   const { substrate } = makeRecordingSubstrate(40)
-  const run = buildLiveAgentTurn({ substrate, personaLoader: { async load() { return '' } },
+  const run = buildLiveAgentTurn({ substrate, admission: openAdmission(), personaLoader: { async load() { return '' } },
     buttonStore: store, project_slug: 'owner', owner_home: tmp })
   const spec: AgentSpec = { prompt: 'wake', tools: [], model_preference: [] }
   const first = run.composeActingTurn('app:u', spec, { timeout_ms: 1000 })
