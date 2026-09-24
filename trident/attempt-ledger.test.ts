@@ -22,6 +22,7 @@ const receipt: AttemptReceipt = {
   model_reported: 'model-observed', input_tokens: 100, output_tokens: 20,
   cache_read_tokens: 50, cache_creation_tokens: 0, cost_usd: 0.1,
 }
+const pickKey = ({ run_id, step_id, attempt_id }: AttemptIdentity) => ({ run_id, step_id, attempt_id })
 const projection = () => new TridentPhaseUsageStore(db).list('run')!.find((row) => row.phase === 'build')!
 beforeEach(async () => {
   dir = mkdtempSync(join(tmpdir(), 'attempt-ledger-'))
@@ -110,6 +111,43 @@ test('same-millisecond provider updates retain increasing absolute usage without
   expect(projection()).toMatchObject({ input_tokens: 100, output_tokens: 21, observed_at: 100 })
   await expect(ledger.observe(identity, receipt)).rejects.toThrow('regressed')
   expect(projection().output_tokens).toBe(21)
+})
+
+test('a measured observation of the same call supersedes an attribution-only receipt, never the reverse', async () => {
+  const unknown = { input_tokens: null, output_tokens: null, cache_read_tokens: null, cache_creation_tokens: null, cost_usd: null }
+  const attributionOnly: AttemptReceipt = { ...receipt, ...unknown, source: 'bounded-worker-metadata', observed_at: 500 }
+  await ledger.admit(identity)
+  expect(await ledger.observe(identity, attributionOnly)).toBe('recorded')
+  expect(projection()).toMatchObject({ status: 'unknown', input_tokens: null })
+  // Different source and an OLDER provider time (call finish precedes the host stamp): measured spend still replaces unknown.
+  expect(await ledger.observe(identity, receipt)).toBe('recorded')
+  expect(ledger.receipt(identity)).toEqual({ ...pickKey(identity), ...receipt })
+  expect(projection()).toMatchObject({ input_tokens: 100, output_tokens: 20, cache_read_tokens: 50 })
+
+  // Call ownership and the reported model still bind the attribution-only receipt.
+  const second = { ...identity, attempt_id: 'second' }
+  await ledger.admit(second)
+  const secondAttribution = { ...attributionOnly, receipt_id: 'provider-call-9' }
+  expect(await ledger.observe(second, secondAttribution)).toBe('recorded')
+  await expect(ledger.observe(second, { ...receipt, receipt_id: 'provider-call-3' })).rejects.toThrow('ownership conflict')
+  expect(ledger.receipt(second)).toEqual({ ...pickKey(second), ...secondAttribution })
+  await expect(ledger.observe(second, { ...receipt, receipt_id: 'provider-call-9', model_reported: 'another-model' })).rejects.toThrow('model conflict')
+  expect(ledger.receipt(second)).toEqual({ ...pickKey(second), ...secondAttribution })
+  expect(await ledger.observe(second, { ...receipt, receipt_id: 'provider-call-9' })).toBe('recorded')
+
+  // A measured receipt is never replaced by an attribution-only one, whatever its source or time.
+  const measured = ledger.receipt(identity)
+  await expect(ledger.observe(identity, { ...attributionOnly, observed_at: 600 })).rejects.toThrow('ownership conflict')
+  await expect(ledger.observe(identity, { ...receipt, ...unknown, observed_at: 600 })).rejects.toThrow('regressed')
+  expect(ledger.receipt(identity)).toEqual(measured)
+
+  // Between measured receipts the replay rules are unchanged: a reopened host replays as stale.
+  const expected = projection()
+  db.close()
+  db = ProjectDb.open(join(dir, 'project.db'))
+  ledger = new TridentAttemptLedger(db)
+  expect(await ledger.observe(identity, receipt)).toBe('stale')
+  expect(projection()).toEqual(expected)
 })
 
 test('lifecycle recovery fills holes in either order without rewriting terminal evidence', async () => {

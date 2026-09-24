@@ -39,6 +39,7 @@ const identityFields = ['run_id', 'step_id', 'attempt_id', 'phase', 'task_id', '
   'review_seat', 'provider', 'requested_model', 'resolved_model', 'placement', 'queued_at'] as const
 const receiptFields = ['receipt_id', 'source', 'observed_at', 'model_reported', 'input_tokens',
   'output_tokens', 'cache_read_tokens', 'cache_creation_tokens', 'cost_usd'] as const
+const counterFields = ['input_tokens', 'output_tokens', 'cache_read_tokens', 'cache_creation_tokens', 'cost_usd'] as const
 const keyValues = (key: AttemptKey) => [key.run_id, key.step_id, key.attempt_id]
 const predicate = 'run_id = ? AND step_id = ? AND attempt_id = ?'
 function finite(values: readonly (number | null)[]): void {
@@ -104,7 +105,16 @@ export class TridentAttemptLedger {
     })
   }
 
-  /** One cumulative receipt per call. Newer observations replace; replay never adds. */
+  /**
+   * One cumulative receipt per call. Newer observations replace; replay never adds.
+   * A receipt whose counters are all null is attribution only (a reported model,
+   * no measurement). The first measured observation of the same call supersedes
+   * it whatever its source or host time: there is no measurement for it to be
+   * newer than, and a provider stamps its own observation at call finish, which
+   * precedes the host's stamp on the attribution. Call ownership (receipt_id) and
+   * the reported-model check still hold, and a measured receipt is never replaced
+   * by an attribution-only one.
+   */
   async observe(key: AttemptKey, receipt: AttemptReceipt): Promise<'recorded' | 'stale'> {
     finite([receipt.observed_at, receipt.input_tokens, receipt.output_tokens,
       receipt.cache_read_tokens, receipt.cache_creation_tokens, receipt.cost_usd])
@@ -113,16 +123,19 @@ export class TridentAttemptLedger {
       if (!row) throw new Error('unknown attempt')
       const previous = this.receipt(key)
       if (previous) {
-        if (previous.receipt_id !== receipt.receipt_id || previous.source !== receipt.source) {
-          throw new Error('attempt receipt ownership conflict')
+        if (previous.receipt_id !== receipt.receipt_id) throw new Error('attempt receipt ownership conflict')
+        const attributionOnly = counterFields.every(field => previous[field] === null)
+        const measured = counterFields.some(field => receipt[field] !== null)
+        if (!(attributionOnly && measured)) {
+          if (previous.source !== receipt.source) throw new Error('attempt receipt ownership conflict')
+          if (receipt.observed_at < previous.observed_at
+            || (receipt.observed_at === previous.observed_at && receiptFields.every(field => receipt[field] === previous[field]))) return 'stale'
         }
-        if (receipt.observed_at < previous.observed_at
-          || (receipt.observed_at === previous.observed_at && receiptFields.every(field => receipt[field] === previous[field]))) return 'stale'
         if (previous.model_reported !== null && receipt.model_reported !== previous.model_reported) {
           throw new Error('attempt reported model conflict')
         }
         // Streaming reports may omit an already measured field. They cannot erase it.
-        for (const field of ['input_tokens', 'output_tokens', 'cache_read_tokens', 'cache_creation_tokens', 'cost_usd'] as const) {
+        for (const field of counterFields) {
           if (previous[field] !== null && (receipt[field] === null || receipt[field]! < previous[field]!)) {
             throw new Error('attempt cumulative measurement regressed')
           }
