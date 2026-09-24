@@ -43,6 +43,10 @@ reference a decision by date rather than restating it.
 `docs/INVARIANTS.md` carries load-bearing invariants. `CONTRIBUTING.md` carries
 the contribution rules. `docs/SYSTEM-OVERVIEW.md` describes how it works now.
 
+For shared-host validation and cutover sequencing, follow
+[`CONTRIBUTING.md` — Shared-host cutover workflow](CONTRIBUTING.md#shared-host-cutover-workflow).
+The operator entry point is `bash scripts/check-shared-host.sh`.
+
 ## Hard rules for this tree
 
 **It is public.** The leak gate (`scripts/ci/leak-gate.sh`, run by CI's `purity`
