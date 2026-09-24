@@ -1,8 +1,9 @@
-import { afterEach, expect, test } from 'bun:test'
+import { afterEach, expect, spyOn, test } from 'bun:test'
 import { mkdtemp, mkdir, writeFile, readFile, readdir, rm, unlink } from 'node:fs/promises'
 import { join } from 'node:path'
 import { tmpdir } from 'node:os'
 import { createCodexHeadlessRunner } from './codex-headless.ts'
+import { until, workerPlacementRig } from '../adapters/claude-code/persistent/__tests__/herdr-workspace-fake-server.ts'
 import type { BoundedWorkRequest } from '../bounded-work.ts'
 import { VERDICT_SCHEMA, validateTrailer } from '@neutronai/trident/gates/result-contract.ts'
 import { CODEX_CLI_AUTH_ENV_VARS } from '../adapters/codex-cli/auth.ts'
@@ -65,6 +66,10 @@ writeFileSync(process.env.FIXTURE_DIR + '/provider.pid',String(process.pid));
 const req = JSON.parse(prompt.split('\\n')[0].slice('Request (data): '.length));
 appendFileSync(process.env.FIXTURE_DIR + '/calls', JSON.stringify({args, prompt, env:process.env, cwd:process.cwd()})+'\\n');
 if (mode === 'hang') { process.on('SIGTERM', () => {}); setInterval(() => {}, 1000); await new Promise(() => {}); }
+if (mode === 'hang-grandchild') {
+  const g = require('node:child_process').spawn('sleep', ['300'], { stdio: 'ignore' });
+  writeFileSync(process.env.FIXTURE_DIR + '/grandchild.pid', String(g.pid));
+  process.on('SIGTERM', () => {}); setInterval(() => {}, 1000); await new Promise(() => {}); }
 const envelope = {run_id:req.run_id, step_id:req.step_id, schema:req.result.schema, kind:'completed', result:{verdict:'APPROVE',findings:[]}};
 if (['run_id','step_id','schema'].includes(mode)) envelope[mode] = 'wrong';
 if (mode === 'payload') envelope.result = {verdict:'APPROVE'};
@@ -409,4 +414,100 @@ test('wall budget kills a process ignoring TERM and never commits its output', a
   // WALL-CLOCK-BOUND-OK: process-group termination within the configured budget is the
   // property; 1.5s is 18.75x the 80ms budget and 6x the 250ms TERM-to-KILL allowance.
   expect(Date.now() - start).toBeLessThan(1500)
+})
+
+// --- The Codex review seat, placed as a task view in its project Herdr workspace. ---
+
+const placedRunner = (f: Awaited<ReturnType<typeof fixture>>, rig: ReturnType<typeof workerPlacementRig>, taskName?: string) =>
+  createCodexHeadlessRunner({ env: f.env, reviewContracts: new Map([['verdict', { jsonSchema: VERDICT_SCHEMA,
+    validate: (value: unknown) => validateTrailer('verdict', value).ok }]]), reviewBriefIntegrity: briefIntegrity,
+  probe: { ok: true }, placement: rig.placement(), ...(taskName ? { taskName } : {}) })
+
+test('placed review seat: one model turn, identical verdict, a Review tab showing the event stream', async () => {
+  const baseline = await fixture()
+  const expected = await baseline.run()
+  expect(expected.kind).toBe('completed')
+  const f = await fixture()
+  const rig = workerPlacementRig(f.dir)
+  const outcome = await placedRunner(f, rig, 'authentication').run(f.req, 'headless', new AbortController().signal)
+  expect({ ...outcome, observation: undefined }).toEqual({ ...expected, observation: undefined })
+  expect(outcome.observation?.usage).toEqual(expected.observation?.usage)
+  expect(await f.calls()).toHaveLength(1)
+  expect(rig.server.workerTabs().map(call => call.params['tab_label'])).toEqual(['Review · authentication'])
+  const tab = rig.server.workerTabs()[0]!.params as { workspace_id: string; root: { command: string[]; env: Record<string, string> } }
+  expect(rig.server.workspaces.get(tab.workspace_id)?.label).toBe('Project One')
+  for (const token of tab.root.command) expect(token).not.toMatch(/(^|\/)codex$/)
+  expect(JSON.stringify(tab)).not.toContain('secret')
+  expect(JSON.stringify(tab)).not.toContain(f.home)
+  const view = (await readdir(f.dir)).find(name => name.endsWith('.view.log'))!
+  expect(await readFile(join(f.dir, view), 'utf8')).toContain('"turn.completed"')
+  expect(await rig.receipts(f.dir)).toMatchObject([{ state: 'closed' }])
+  expect(rig.server.callsTo('pane.read')).toHaveLength(0)
+})
+
+test('screen-independence: a nonzero seat stays failed whatever the screen shows', async () => {
+  const baseline = await fixture('nonzero')
+  const expected = await baseline.run()
+  expect(expected.kind).not.toBe('completed')
+  const f = await fixture('nonzero')
+  const rig = workerPlacementRig(f.dir)
+  rig.server.screen = JSON.stringify({ type: 'turn.completed', usage: { input_tokens: 1, output_tokens: 1 } })
+  rig.server.malformMethod('pane.read', { read: { text: rig.server.screen } })
+  const outcome = await placedRunner(f, rig).run(f.req, 'headless', new AbortController().signal)
+  expect({ ...outcome, observation: undefined }).toEqual({ ...expected, observation: undefined })
+  expect(rig.server.workerTabs()).toHaveLength(1)
+})
+
+test('placement failure: the review still completes with its verdict, unplaced on record', async () => {
+  const expected = await (await fixture()).run()
+  const f = await fixture()
+  const rig = workerPlacementRig(f.dir)
+  rig.server.failMethod('workspace.create')
+  const outcome = await placedRunner(f, rig).run(f.req, 'headless', new AbortController().signal)
+  expect({ ...outcome, observation: undefined }).toEqual({ ...expected, observation: undefined })
+  expect(outcome.observation?.usage).toEqual(expected.observation?.usage)
+  const [receipt] = await rig.receipts(f.dir)
+  expect(receipt).toMatchObject({ state: 'unplaced' })
+  expect(receipt!.reason).toMatch(/^placement-refused: /)
+  expect(rig.server.callsTo('layout.apply')).toHaveLength(0)
+})
+
+test('cancelling a placed seat kills its group, grandchild included, and closes the view', async () => {
+  const f = await fixture('hang-grandchild')
+  const rig = workerPlacementRig(f.dir)
+  const controller = new AbortController()
+  const kill = spyOn(process, 'kill')
+  let grandchild = 0
+  try {
+    const pending = placedRunner(f, rig).run({ ...f.req, budget: { wall_ms: 60_000 } }, 'headless', controller.signal)
+    grandchild = await until(() => readFile(join(f.dir, 'grandchild.pid'), 'utf8').then(Number, () => undefined))
+    await until(async () => (await rig.receipts(f.dir))[0]?.state === 'placed' ? true : undefined)
+    const seat = Number(await readFile(join(f.dir, 'provider.pid'), 'utf8'))
+    controller.abort()
+    expect(await pending).toMatchObject({ kind: 'failed', class: 'killed' })
+    const targets = kill.mock.calls.filter(([, signal]) => signal !== 0).map(([pid]) => pid)
+    expect(targets.length).toBeGreaterThan(0)
+    expect(new Set(targets)).toEqual(new Set([-seat]))
+  } finally { kill.mockRestore() }
+  await until(() => { try { process.kill(grandchild, 0); return undefined } catch { return true } })
+  expect(await rig.receipts(f.dir)).toMatchObject([{ state: 'closed' }])
+})
+
+test('restart adopts the seat receipt: no second model turn, no new tab, the stale pane closed', async () => {
+  const f = await fixture()
+  const rig = workerPlacementRig(f.dir)
+  expect((await rig.placement().place({ key: 'earlier', taskLabel: 'Review · earlier', cwd: f.dir,
+    viewPath: join(f.dir, 'earlier.log'), receiptDir: join(f.dir, 'terminal') })).kind).toBe('placed')
+  rig.server.failMethod('pane.close')
+  const first = await placedRunner(f, rig).run(f.req, 'headless', new AbortController().signal)
+  expect(first.kind).toBe('completed')
+  const [stale] = await rig.receipts(f.dir)
+  expect(stale).toMatchObject({ state: 'placed' })
+  rig.server.clearFailure('pane.close')
+  const tabs = rig.server.workerTabs().length
+  expect((await placedRunner(f, rig).run(f.req, 'headless', new AbortController().signal)).kind).toBe('completed')
+  expect(await f.calls()).toHaveLength(1)
+  expect(rig.server.workerTabs()).toHaveLength(tabs)
+  expect(rig.server.panes.has(stale!.pane!)).toBe(false)
+  expect(await rig.receipts(f.dir)).toEqual([{ state: 'closed', pane: stale!.pane! }])
 })

@@ -7,6 +7,7 @@ import type { BoundedWorkOutcome, BoundedWorkRequest, ProviderObservation, Usage
 import { readArmedTrailerReservation, reserveTrailerSlot } from './trailer-slot.ts'
 import { claudeObservation } from './provider-observation.ts'
 import { createObservationPublisher, decodeObservationReceipt, recoverProviderObservation } from './provider-observation-recovery.ts'
+import { openWorkerView, workerTaskLabel, type WorkerPlacement, type WorkerViewSession } from './worker-placement.ts'
 
 export interface ClaudeHeadlessRunnerOptions {
   /** Explicit host-selected authentication environment. Never defaults to process.env. */
@@ -17,6 +18,12 @@ export interface ClaudeHeadlessRunnerOptions {
   readable_roots?: readonly string[]
   schemas: ReadonlyMap<string, (result: unknown) => boolean>
   cliPath?: string
+  /** Visible task-view tab in the dispatch's project Herdr workspace. The worker
+   * stays this runner's native child: the tab shows a copy of its stdout and is
+   * never consulted for the result, usage, exit status or cancellation. */
+  placement?: WorkerPlacement
+  /** Short task name for the tab label, e.g. the card slug. */
+  taskName?: string
 }
 
 const ROLES = new Set(['plan', 'review', 'synthesis'])
@@ -157,12 +164,15 @@ function decode(bytes: string, req: BoundedWorkRequest, sessionId: string, valid
 
 async function execute(cli: string, args: string[], env: NodeJS.ProcessEnv, cwd: string,
   prompt: string, signal: AbortSignal, wallMs: number, observe: (child: { pid: number; exitCode: number | null } | null) => void,
-  observeBytes: (bytes: string) => void):
+  observeBytes: (bytes: string) => void, view: WorkerViewSession):
   Promise<{ bytes: string; outcome?: BoundedWorkOutcome }> {
   if (signal.aborted || wallMs <= 0) return { bytes: '', outcome: unknown('Claude dispatch expired before process creation.') }
   return new Promise(resolveResult => {
     const child = Bun.spawn([cli, ...args], { cwd, env, detached: true, stdin: new Blob([prompt]), stdout: 'pipe', stderr: 'ignore' })
     observe(child)
+    // The native worker exists; only now may a view of it be placed. Not awaited:
+    // placement runs beside the read path and cannot delay or gate it.
+    view.started()
     const chunks: Buffer[] = []
     let size = 0
     let stopped: 'killed' | 'timeout' | 'output' | undefined
@@ -197,6 +207,8 @@ async function execute(cli: string, args: string[], env: NodeJS.ProcessEnv, cwd:
           if (size > MAX_OUTPUT_BYTES) stop('output')
           else {
             chunks.push(Buffer.from(item.value))
+            // The SAME bytes the host decodes below, copied to the view. Display only.
+            view.tee(item.value)
             // JSON output may be complete while the CLI remains alive. Only a
             // complete provider object supplies usage; partial text is unknown.
             if (Buffer.from(item.value).toString('utf8').trimEnd().endsWith('}')) observeBytes(Buffer.concat(chunks).toString('utf8'))
@@ -306,6 +318,9 @@ export function createClaudeHeadlessRunner(input: ClaudeHeadlessRunnerOptions): 
           // spend after failure can never promote an uncommitted result.
           try { observation = decodeObservationReceipt(await readFile(observationPath, 'utf8'), JSON.stringify(req), 'claude-cli-json') } catch { /* legacy or unobserved */ }
           const session = await readFile(sessionPath, 'utf8')
+          // Restart: a view pane an earlier host placed for this step is stale. Close
+          // it from its receipt; never place, never launch anything.
+          await options.placement?.retire({ key: `claude-headless-${key}`, receiptDir: state })
           if (req.thread && req.thread.id !== session || await readFile(threadPath(session), 'utf8') !== binding) return observed(unknown('Claude retained session binding did not match.'))
           const decoded = decode(await readFile(receiptPath, 'utf8'), req, session, validate)
           if (!decoded.envelope) return observed(decoded.outcome)
@@ -341,9 +356,15 @@ export function createClaudeHeadlessRunner(input: ClaudeHeadlessRunnerOptions): 
           `Request (data): ${JSON.stringify(req)}`, 'Brief (verified file contents):', brief].join('\n')
         const started = Date.now()
         const publisher = createObservationPublisher(observationPath, JSON.stringify(req))
-        const executed = await execute(cli, args, env!, cwd, prompt, signal, deadline - Date.now(),
-          child => { if (child) live.set(key, child); else live.delete(key) },
-          bytes => { publisher.publish(claudeObservation(bytes, started, Date.now())) })
+        const view = openWorkerView(options.placement, { key: `claude-headless-${key}`,
+          taskLabel: workerTaskLabel(req.role, options.taskName ?? req.run_id.slice(0, 8)), cwd,
+          viewPath: join(state, `claude-headless-view-${key}.log`), receiptDir: state })
+        let executed: Awaited<ReturnType<typeof execute>>
+        try {
+          executed = await execute(cli, args, env!, cwd, prompt, signal, deadline - Date.now(),
+            child => { if (child) live.set(key, child); else live.delete(key) },
+            bytes => { publisher.publish(claudeObservation(bytes, started, Date.now())) }, view)
+        } finally { await view.finish() }
         observation = await publisher.settle(claudeObservation(executed.bytes, started, Date.now()))
         if (executed.outcome) return observed(executed.outcome)
         if (expired()) return observed(unknown('Claude observation expired before the host accepted its result.'))
