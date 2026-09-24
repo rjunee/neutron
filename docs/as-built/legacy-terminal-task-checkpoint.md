@@ -5,6 +5,11 @@ Issue #1252. Governing contract:
 migrated checkpoint meaning and continued execution;
 `docs/spec-items/a-retry-must-resume-from-the-checkpoint.md:20-32,65-69`
 preserves completed work across retries.
+`docs/spec-items/same-run-task-sequence-crash-handoff.md` now states the same
+narrow legacy terminal exception in its contract and acceptance criteria;
+modern missing-plan refusal and intermediate count/ledger agreement still bind.
+This preserves the migration decision in `SPEC.md` (2026-09-23) and the locked
+pivot's gates and served/live verification requirement.
 
 A deployed retry carried a host-authenticated completed-build checkpoint with
 `remainingTasks: 0`, an unchanged full commit identity, and a migrated
