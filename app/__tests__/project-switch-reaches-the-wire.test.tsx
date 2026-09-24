@@ -15,6 +15,7 @@
 
 import { afterAll, afterEach, beforeAll, beforeEach, describe, expect, it } from 'bun:test';
 import { act, createElement } from 'react';
+import { advanceHarnessClock, installHarnessClock, uninstallHarnessClock } from './support/harness-clock';
 
 import {
   installNativeHarness,
@@ -119,6 +120,7 @@ beforeEach(() => {
 });
 
 afterEach(() => {
+  uninstallHarnessClock();
   restoreCrypto?.();
   restoreCrypto = null;
   (globalThis as { fetch: typeof fetch }).fetch = realFetch;
@@ -183,11 +185,25 @@ async function tapRail(projectId: string): Promise<void> {
 
 describe('switching projects', () => {
   it('opens the app on one project and puts it on the wire', async () => {
+    installHarnessClock();
+    const gateway = globalThis.fetch;
+    const signals: AbortSignal[] = [];
+    globalThis.fetch = (async (input: RequestInfo | URL, init?: RequestInit) => {
+      if (init?.signal) signals.push(init.signal);
+      return gateway(input, init);
+    }) as typeof fetch;
     const screen = await mountShell('/projects/willow/chat');
-    await waitReal(50, screen);
+    await screen.settle();
 
     expect(socketsFor('willow')).toBeGreaterThan(0);
     expect(screen.byTestId('project-content-loading')).toBeNull();
+    expect(signals.length).toBeGreaterThan(0);
+    await advanceHarnessClock(REQUEST_TIMEOUT_MS, async run => {
+      await act(async () => { run(); });
+      await screen.settle();
+    });
+    expect(signals.every(signal => !signal.aborted)).toBe(true);
+    expect(screen.byTestId('project-load-failed')).toBeNull();
     screen.unmount();
   });
 
@@ -276,6 +292,7 @@ describe('a wait that cannot end is not allowed to be the screen', () => {
       // Bound the request and the pane becomes reachable — with copy that blames
       // the connection rather than the project sitting right there in the rail.
       const passthrough = globalThis.fetch;
+      let pendingSignal: AbortSignal | null | undefined;
       (globalThis as { fetch: typeof fetch }).fetch = (async (
         input: RequestInfo | URL,
         init?: RequestInit,
@@ -283,6 +300,7 @@ describe('a wait that cannot end is not allowed to be the screen', () => {
         const url =
           typeof input === 'string' ? input : input instanceof URL ? input.href : input.url;
         if (url.includes('/projects/acme/settings')) {
+          pendingSignal = init?.signal;
           // Never answers — but honours the abort the client must be arming.
           return new Promise<Response>((_resolve, reject) => {
             init?.signal?.addEventListener('abort', () => {
@@ -296,8 +314,19 @@ describe('a wait that cannot end is not allowed to be the screen', () => {
       const screen = await mountShell('/projects/willow/chat');
       await waitReal(50, screen);
 
+      installHarnessClock();
       await tapRail('acme');
-      await waitReal(REQUEST_TIMEOUT_MS + 600, screen);
+      const advance = (ms: number) => advanceHarnessClock(ms, async (run) => {
+        await act(async () => { run(); });
+        await screen.settle();
+      });
+      await screen.settle();
+      await advance(REQUEST_TIMEOUT_MS - 1);
+      expect(pendingSignal).toBeDefined();
+      expect(pendingSignal?.aborted).toBe(false);
+      expect(screen.byTestId('project-load-failed')).toBeNull();
+      await advance(1);
+      expect(pendingSignal?.aborted).toBe(true);
 
       expect(screen.byTestId('project-content-loading')).toBeNull();
       expect(screen.byTestId('project-load-failed')).not.toBeNull();
