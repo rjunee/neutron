@@ -26,8 +26,7 @@
  */
 
 import { afterEach, describe, expect, it, setDefaultTimeout } from 'bun:test'
-import { existsSync, readFileSync, readdirSync } from 'node:fs'
-import { tmpdir } from 'node:os'
+import { existsSync, readFileSync, statSync } from 'node:fs'
 import { dirname } from 'node:path'
 
 import {
@@ -445,9 +444,14 @@ describe('SECURITY: the untrusted substrates receive nothing', () => {
     // token and every installed server's env VALUES, sitting in `tmpdir()` for the life
     // of the box.
     setReplToolBridge(bridge())
-    const dirsBefore = new Set(readdirSync(tmpdir()).filter((n) => n.startsWith('neutron-repl-')))
+    let cfgPath: string | undefined
     const exploding: PtyHost = {
-      async spawn(): Promise<PtyChild> {
+      async spawn(argv: string[]): Promise<PtyChild> {
+        expect(argv).toContain('--mcp-config')
+        cfgPath = argv[argv.indexOf('--mcp-config') + 1]
+        expect(cfgPath).toBeDefined()
+        expect(existsSync(cfgPath!)).toBe(true)
+        expect(statSync(dirname(cfgPath!)).mode & 0o777).toBe(0o700)
         throw new Error('pty host refused to spawn')
       },
     }
@@ -456,10 +460,9 @@ describe('SECURITY: the untrusted substrates receive nothing', () => {
     )
     await expect(drain(sub.start(spec('hi')))).rejects.toThrow()
 
-    const leaked = readdirSync(tmpdir()).filter(
-      (n) => n.startsWith('neutron-repl-') && !dirsBefore.has(n),
-    )
-    expect(leaked).toEqual([])
+    expect(cfgPath).toBeDefined()
+    expect(existsSync(cfgPath!)).toBe(false)
+    expect(existsSync(dirname(cfgPath!))).toBe(false)
   })
 })
 
@@ -630,8 +633,7 @@ describe('ONE CHILD PER SESSION KEY — resolving the installed set must not reo
     // `shutdownAllPersistentRepls()` with its 0600 config — holding the dev-channel
     // token and every installed server's env VALUES — still on disk in `tmpdir()`.
     setReplToolBridge(bridge())
-    const { host, argvs } = makeCapturingHost()
-    const dirsBefore = new Set(readdirSync(tmpdir()).filter((n) => n.startsWith('neutron-repl-')))
+    const { host, argvs, kills } = makeCapturingHost()
     const sub = createPersistentReplSubstrate(
       opts(host, {
         enableToolBridge: true,
@@ -643,16 +645,17 @@ describe('ONE CHILD PER SESSION KEY — resolving the installed set must not reo
     )
     await Promise.all([drain(sub.start(spec('first'))), drain(sub.start(spec('second')))])
     const spawned = argvs.length
+    // One owner per transcript: two cleaned-up children would still be wrong.
+    expect(spawned).toBe(1)
+    const cfgPath = argvs[0]![argvs[0]!.indexOf('--mcp-config') + 1]!
+    expect(existsSync(cfgPath)).toBe(true)
+    expect(statSync(dirname(cfgPath)).mode & 0o777).toBe(0o700)
 
     await shutdownAllPersistentRepls()
 
-    const leaked = readdirSync(tmpdir()).filter(
-      (n) => n.startsWith('neutron-repl-') && !dirsBefore.has(n),
-    )
-    expect(leaked).toEqual([])
-    // Stated separately so a future regression cannot pass this test by spawning two
-    // children and cleaning both up: one owner per transcript is the invariant.
-    expect(spawned).toBe(1)
+    expect(existsSync(cfgPath)).toBe(false)
+    expect(existsSync(dirname(cfgPath))).toBe(false)
+    expect(kills.n).toBe(1)
   })
 
   it('a COLD start resolves the installed set exactly once — the spawn\'s own read', async () => {
