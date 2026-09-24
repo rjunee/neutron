@@ -190,15 +190,15 @@ describe('SettingsTab personality editor reachability', () => {
 })
 
 describe('SettingsTab Codex override (happy-dom)', () => {
-  it('renders the override section labelled optional', async () => {
+  it('explains the explicit project credential needed for Codex chat', async () => {
     const { container, root } = await mount((url) => {
       if (url.endsWith('/api/app/projects/acme/codex-auth')) {
         return json({ ok: true, status: 'not_connected', scope: null, override_present: false })
       }
       return null
     })
-    expect(container.textContent).toContain('Codex review — project override')
-    expect(container.textContent).toContain('Optional / advanced.')
+    expect(container.textContent).toContain('Project Codex connection')
+    expect(container.textContent).toContain('Codex chat requires a subscription connected explicitly to this project')
     // No override row → no remove button.
     expect(btn(container, 'Remove override')).toBeUndefined()
     root.unmount()

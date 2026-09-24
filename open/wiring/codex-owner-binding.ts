@@ -23,6 +23,7 @@ import type { ResolvedOwnerMcpServer } from '@neutronai/runtime/mcp-servers.ts'
 export interface CodexOwnerProject {
   cwd: string
   codexHome: string
+  credentialIdentity: string
   env: NodeJS.ProcessEnv
 }
 
@@ -66,6 +67,10 @@ export class CodexOwnerBindings {
         throw new Error('Codex owner credential home belongs to another project')
       }
       return entry?.owner
+    },
+    authorize: async projectId => {
+      const entry = await this.owners.get(projectId)
+      if (entry) await this.revalidateProject(projectId, entry.project)
     },
     facts: owner => {
       const facts = this.readBinding(owner.binding)
@@ -258,6 +263,15 @@ export class CodexOwnerBindings {
   }
   private sequence = 0
 
+  private async revalidateProject(projectId: string, previous: CodexOwnerProject, supplied?: CodexOwnerProject): Promise<void> {
+    const current = supplied ?? await this.project(projectId)
+    if (realpathSync(current.cwd) !== previous.cwd || realpathSync(current.codexHome) !== previous.codexHome
+      || !current.credentialIdentity || current.credentialIdentity !== previous.credentialIdentity
+      || JSON.parse(readFileSync(join(current.codexHome, 'project-owner.json'), 'utf8')) !== projectId) {
+      throw new Error('Codex owner project credential identity changed; explicit reconciliation required')
+    }
+  }
+
   constructor(private readonly project: (projectId: string) => Promise<CodexOwnerProject>,
     private readonly bootstrap: (options: OwnerLaunch) => Promise<CodexOwnerBootstrap> = openDurableCodexOwner,
     private readonly readBinding: typeof readCodexOwnerBinding = readCodexOwnerBinding) {}
@@ -267,10 +281,15 @@ export class CodexOwnerBindings {
     if (this.refused.has(projectId)) return Promise.reject(new Error('Codex owner requires native reconciliation'))
     if (!/^[A-Za-z0-9_.-]{1,128}$/.test(projectId)) return Promise.reject(new Error('Codex owner requires a full project id'))
     let pending = this.owners.get(projectId)
+    if (pending) return pending.then(async entry => {
+      await this.revalidateProject(projectId, entry.project)
+      return entry
+    })
     if (!pending) {
       let openingAttempted = false
       pending = (async () => {
         const raw = await this.project(projectId)
+        if (!raw.credentialIdentity) throw new Error('Codex owner requires a project credential identity')
         const project = { ...raw, cwd: realpathSync(raw.cwd), codexHome: realpathSync(raw.codexHome) }
         if (JSON.parse(readFileSync(join(project.codexHome, 'project-owner.json'), 'utf8')) !== projectId) {
           throw new Error('Codex owner credential home belongs to another project')
@@ -402,6 +421,10 @@ export class CodexOwnerBindings {
           return { kind: 'unknown', detail: 'Existing Codex owner must be reattached before build admission' }
         }
         if (owner) {
+          const cached = await this.owners.get(projectId)
+          if (!cached) return { kind: 'unknown', detail: 'Codex owner project authority is unavailable' }
+          try { await this.revalidateProject(projectId, cached.project, project) }
+          catch { return { kind: 'unknown', detail: 'Codex owner project credential identity changed' } }
           this.readBinding(owner.binding)
           await refreshOwner(owner)
           if (this.busy.has(projectId)) return { kind: 'unknown', detail: 'Codex owner has an active host turn' }

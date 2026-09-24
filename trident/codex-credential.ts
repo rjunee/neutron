@@ -21,6 +21,7 @@
  */
 
 import { accessSync, constants, statSync } from 'node:fs'
+import { createHash } from 'node:crypto'
 import { delimiter, join } from 'node:path'
 
 import type { ProjectCredentialStore } from '@neutronai/project-credentials/store.ts'
@@ -251,7 +252,17 @@ export interface CodexStatusResult extends CodexStatusDetail {
    *  the global fallback). Lets the UI always offer to remove a stale override.
    *  Only meaningful when a `project_id` was supplied. */
   override_present?: boolean
+  /** Local credential configuration only; does not attest a live owner or model call. */
+  owner_credential?: CodexOwnerCredentialStatus
 }
+
+export interface CodexOwnerCredentialStatus {
+  configured: boolean | null
+  checked_at: string
+  detail: string
+}
+
+class CodexOwnerCredentialError extends Error {}
 
 export interface CodexCredentialServiceDeps {
   store: ProjectCredentialStore
@@ -303,6 +314,7 @@ export const SEAT_LIVENESS_TTL_MS = 60_000
 interface LivenessEntry {
   verdict: CodexProbeVerdict
   at: number
+  subjectFingerprint?: string
 }
 
 /** One seat as the owner sees it. Never carries token material. */
@@ -486,7 +498,57 @@ export class CodexCredentialService {
       ...deriveCodexStatus(stored, { materialized, now: this.now, probe }),
       scope,
       ...(project_id.length > 0 ? { override_present } : {}),
+      ...(project_id.length > 0 ? { owner_credential: this.projectOwnerCredentialStatus(owner_slug, project_id) } : {}),
     }
+  }
+
+  /** Native owners require an explicit project grant and a stable subscription identity.
+   * Reviewer rotation and inherited global seats cannot authorize a project owner. */
+  private inspectProjectOwnerCredential(owner: OwnerHandle, projectId: string): {
+    home: string; plaintext: string; credentialIdentity: string
+  } {
+    if (!/^[A-Za-z0-9_.-]{1,128}$/.test(projectId)) throw new CodexOwnerCredentialError('Codex chat requires a project')
+    const stored = this.store.resolveProject(owner, projectId, CODEX_CREDENTIAL_SERVICE)
+    if (!stored) throw new CodexOwnerCredentialError('Connect a Codex subscription to this project to use Codex chat')
+    const home = ownedCodexProjectHome(this.codexHome, projectId)
+    const storedAccount = readAccountId(stored.plaintext)
+    if (!validateCodexSubscriptionAuth(stored.plaintext, this.now).ok || !storedAccount) {
+      throw new CodexOwnerCredentialError('The project Codex credential requires a subscription account identity')
+    }
+    const disk = readMaterializedAuth(home)
+    if (disk !== null && (!validateCodexSubscriptionAuth(disk, this.now).ok || readAccountId(disk) !== storedAccount)) {
+      throw new CodexOwnerCredentialError('The project Codex credential identity changed; reconnect the intended project account')
+    }
+    const status = deriveCodexStatus(disk ?? stored.plaintext, {
+      materialized: disk !== null, now: this.now, probe: this.cachedVerdict(owner, projectSeatKey(projectId), disk ?? stored.plaintext),
+    })
+    // Access-token expiry is refreshable by the native CLI; an expired stored
+    // project grant or a positively revoked subscription is not.
+    if (status.status === 'revoked' || status.status === 'not_connected') {
+      throw new CodexOwnerCredentialError(status.detail ?? 'The project Codex credential is unavailable')
+    }
+    return { home, plaintext: stored.plaintext,
+      credentialIdentity: createHash('sha256').update(JSON.stringify(['chatgpt-account', storedAccount])).digest('hex') }
+  }
+
+  projectOwnerCredentialStatus(owner: OwnerHandle, projectId: string): CodexOwnerCredentialStatus {
+    const checked_at = new Date(this.now()).toISOString()
+    try {
+      this.inspectProjectOwnerCredential(owner, projectId)
+      return { configured: true, checked_at, detail: 'Project Codex credential configured; live chat has not been verified by this check' }
+    } catch (error) {
+      return error instanceof CodexOwnerCredentialError
+        ? { configured: false, checked_at, detail: error.message }
+        : { configured: null, checked_at, detail: 'Project Codex credential could not be checked' }
+    }
+  }
+
+  resolveProjectOwnerCredential(owner: OwnerHandle, projectId: string): { codexHome: string; credentialIdentity: string } {
+    const credential = this.inspectProjectOwnerCredential(owner, projectId)
+    this.selfHealAndHarvestBack(owner, CODEX_CREDENTIAL_SERVICE, credential.home, credential.plaintext, {
+      scope: 'project', project_id: projectId,
+    })
+    return { codexHome: credential.home, credentialIdentity: credential.credentialIdentity }
   }
 
   /**
@@ -615,7 +677,8 @@ export class CodexCredentialService {
         return
       }
       if (outcome.kind === 'revoked') {
-        this.liveness.set(key, { verdict: 'revoked', at })
+        this.liveness.set(key, { verdict: 'revoked', at,
+          subjectFingerprint: createHash('sha256').update(subject.accessToken).digest('hex') })
         if (coolSlot !== null) {
           // THE DURABLE HALF. `unauthorized` is the one cooling reason that
           // ignores `cooling_until` forever — precisely the semantics of a
@@ -690,9 +753,15 @@ export class CodexCredentialService {
   }
 
   /** The cached probe verdict for a seat, or `unknown` when the cache is cold/stale. */
-  private cachedVerdict(owner_slug: OwnerHandle, seat: string): CodexProbeVerdict {
+  private cachedVerdict(owner_slug: OwnerHandle, seat: string, auth?: string): CodexProbeVerdict {
     const cached = this.liveness.get(`${owner_slug}|${seat}`)
     if (cached === undefined) return 'unknown'
+    // A project owner may reconnect or refresh while an older probe is in flight.
+    // An old-token revocation cannot revoke the newly supplied credential.
+    if (auth !== undefined && cached.verdict === 'revoked') {
+      const subject = codexProbeSubject(auth, this.now)
+      if (!subject || cached.subjectFingerprint !== createHash('sha256').update(subject.accessToken).digest('hex')) return 'unknown'
+    }
     // A verdict is only as good as its TTL — past it, fall back to the stored
     // bytes rather than reporting a fact that may be hours old.
     if (this.now() - cached.at >= SEAT_LIVENESS_TTL_MS) return 'unknown'
@@ -999,12 +1068,10 @@ export class CodexCredentialService {
     // Fire-and-forget: the resolver is synchronous by contract (the orchestrator
     // calls it at fire time) and a failed re-encrypt must not fail a run — the
     // stored copy simply stays stale until the next resolve tries again.
-    // Carry the EXISTING label through. The store's upsert overwrites `label` on
-    // conflict, so passing null here would erase the name the owner connected the
-    // seat under and leave it anonymous in every generic credential view — a
-    // silent cosmetic regression on a path that runs on its own schedule.
-    const existingLabel =
-      this.store.getMeta(owner_slug, target.project_id, service)?.label ?? null
+    // Refresh token bytes, not the grant: preserve its label AND expiry. Turning
+    // a finite grant into an unlimited one would silently extend owner authority.
+    const existing = this.store.getMeta(owner_slug, target.project_id, service)
+    if (existing === null || existing.scope !== target.scope) return
     fireAndForget(
       'codex_credential_harvest_back',
       this.store
@@ -1013,8 +1080,8 @@ export class CodexCredentialService {
           plaintext: validated.normalized,
           scope: target.scope,
           project_id: target.project_id,
-          label: existingLabel,
-          expires_at: null,
+          label: existing.label,
+          expires_at: existing.expires_at,
         })
         .then(() => {
           // Length only — never the bundle, and never any field of it.

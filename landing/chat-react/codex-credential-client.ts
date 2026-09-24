@@ -51,6 +51,7 @@ export interface CodexAccount {
 }
 
 export interface CodexStatus {
+  owner_credential?: { configured: boolean | null; checked_at: string; detail: string }
   status: CodexConnectionStatus
   materialized?: boolean
   expires_at?: string

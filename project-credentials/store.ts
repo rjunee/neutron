@@ -426,6 +426,15 @@ export class ProjectCredentialStore {
     return this.resolveUnchecked(owner_slug, project_id, service)
   }
 
+  /** An explicit project grant, without consulting or decrypting global defaults. */
+  resolveProject(owner_slug: OwnerHandle, project_id: string, service: string): ResolvedCredential | null {
+    const svc = service.trim().toLowerCase()
+    if (!project_id || isReservedService(svc)) return null
+    const row = this.getRow(owner_slug, project_id, svc)
+    if (row === null || row.scope !== 'project' || this.isExpired(row)) return null
+    return { plaintext: this.crypto.decryptEnvelope(row.ciphertext), scope: 'project', service: svc }
+  }
+
   /** {@link resolve} for the module that owns a reserved namespace — see {@link setReserved}. */
   resolveReserved(
     owner_slug: OwnerHandle,

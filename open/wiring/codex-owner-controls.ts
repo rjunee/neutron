@@ -38,6 +38,7 @@ export class CodexOwnerControls {
   private sequence = 0
   constructor(private readonly deps: {
     lookup(projectId: string): Promise<CodexOwnerBootstrap | undefined>
+    authorize(projectId: string): Promise<void>
     facts(owner: CodexOwnerBootstrap): CodexOwnerBindingFacts
     busy(projectId: string): boolean
     refused(projectId: string): boolean
@@ -98,6 +99,7 @@ export class CodexOwnerControls {
     return this.current(owner, gateway)
   }
   async model(projectId: string, request?: ReplModelSwitch): Promise<ReplModelState> {
+    await this.deps.authorize(projectId)
     const owner = await this.owner(projectId)
     const before = this.identity(projectId, owner)
     if (request && request.sessionId !== this.token(before)) throw new ReplModelError('session-changed', 'Native model state changed. Refresh before switching.')
@@ -195,6 +197,13 @@ export class CodexOwnerControls {
       const question = active.pending.get(action.requestId)
       if (!question) throw new ReplModelError('session-changed', 'Native approval is stale or already answered.')
       const result = approvalResult(question, action.result)
+      // Exact-turn interruption/decline remains available after a project grant
+      // is removed. New approval or input requires the current credential grant.
+      if (result.decision !== 'decline' && result.decision !== 'cancel') await this.deps.authorize(projectId)
+      this.assertIdentity(action, projectId, owner)
+      if (this.active.get(projectId) !== active || active.pending.get(action.requestId) !== question) {
+        throw new ReplModelError('session-changed', 'Native approval is stale or already answered.')
+      }
       // An uncertain reply may have reached native code. Consume before sending,
       // fence on transport failure, and never replay the answer.
       active.pending.delete(action.requestId)

@@ -40,6 +40,7 @@ import {
 } from 'react-native';
 
 import { loadAppConfig } from '../../../lib/config';
+import { ProjectChatSettings } from '../../../components/ProjectChatSettings';
 import {
   ProjectCredentialsClient,
   type ProjectCredentialRecord,
@@ -300,6 +301,7 @@ function SettingsBody({ projectId, token }: { projectId: string; token: string }
       contentContainerStyle={styles.content}
       testID="settings-scroll"
     >
+      <ProjectChatSettings key={projectId} projectId={projectId} baseUrl={config.base_url} token={token} />
       {/* ── Credentials ───────────────────────────────────────────────────── */}
       <Text style={styles.sectionTitle}>Credentials</Text>
       <Text style={styles.sectionHint}>

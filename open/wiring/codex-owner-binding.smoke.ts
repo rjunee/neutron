@@ -42,7 +42,7 @@ const bindings = new CodexOwnerBindings(async projectId => {
   const cwd = join(dir, projectId), codexHome = join(cwd, 'home')
   mkdirSync(codexHome, { recursive: true, mode: 0o700 })
   writeFileSync(join(codexHome, 'project-owner.json'), JSON.stringify(projectId))
-  return { cwd, codexHome, env: { PATH: process.env.PATH, TERM: 'xterm-256color', LANG: 'C.UTF-8' } }
+  return { cwd, codexHome, credentialIdentity: 'fixture', env: { PATH: process.env.PATH, TERM: 'xterm-256color', LANG: 'C.UTF-8' } }
 }, options => {
   launches++
   return bootstrapCodexOwner({ ...options, timeoutMs: 20_000,

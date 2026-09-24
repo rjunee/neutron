@@ -241,6 +241,8 @@ const KNOWN_READERS: Readonly<Record<string, string>> = {
   // Broad regex matches: conservative membership, not evidence of an env read.
   'open/wiring/codex-owner-binding.ts':
     'Broad project-id validation regex matches an identity-name candidate; registered conservatively. No identity env access.',
+  'trident/codex-credential.ts':
+    'Broad project-id validation regex matches identity-name candidates; registered conservatively. No identity env read. Project grant admission is pinned in trident/codex-credential.test.ts.',
   'runtime/adapters/codex-cli/persistent/project-owner-helper-protocol.ts':
     'Broad project-id validation regex matches an identity-name candidate; registered conservatively. No identity env access.',
   'runtime/adapters/codex-cli/persistent/project-owner-helper-registry.ts':

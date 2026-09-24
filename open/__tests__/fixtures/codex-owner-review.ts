@@ -185,7 +185,7 @@ export async function restrictedOwnerFixture(options: {
   let opens = 0
   const bindings = new CodexOwnerBindings(async projectId => {
     assert.equal(projectId, options.projectId)
-    return { cwd: options.cwd, codexHome, env: {} }
+    return { cwd: options.cwd, codexHome, credentialIdentity: 'fixture', env: {} }
   }, async () => {
     opens++
     return { binding, broker: connection.broker, refreshState: connection.refreshState, replyApproval: connection.replyApproval,
