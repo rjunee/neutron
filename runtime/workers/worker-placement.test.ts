@@ -37,6 +37,68 @@ function placedReceipt(f: ReturnType<typeof fixture>, pane: string, key = 'claud
 
 const createdWorkspaces = (server: FakeHerdrWorkspaceServer) => new Set([...server.workspaces.keys()])
 
+test.each(['transport', 'typed'] as const)('A/B/B/C lost %s reply preserves operation and cleanup receipts without duplicate views', async fault => {
+  const f = fixture()
+  const a = await f.placement.place(f.input('a'))
+  expect(a.kind).toBe('placed')
+  const receiptA = f.receipt('a')
+  const originalCall = f.server.call.bind(f.server)
+  let loseReply = true
+  f.server.call = async (method, params) => {
+    const result = await originalCall(method, params)
+    if (loseReply && method === 'layout.apply' && params.tab_label !== 'Chat') {
+      if (fault === 'typed') throw new HerdrError('server_error', 'reply failed after commit')
+      throw new Error('reply lost after commit')
+    }
+    return result
+  }
+  expect((await f.placement.place(f.input('b'))).kind).toBe('unplaced')
+  const receiptB = f.receipt('b')
+  const journal = readFileSync(f.journal, 'utf8')
+  const count = f.server.workerLayouts().length
+  loseReply = false
+  const restarted = createWorkerPlacement({ host: createProjectWorkspaceHost(f.journal, { connect: async () => f.server }), scope: f.scope })
+  expect((await restarted.place(f.input('b'))).kind).toBe('unplaced')
+  expect(f.receipt('a')).toEqual(receiptA)
+  expect(f.receipt('b')).toEqual(receiptB)
+  expect(readFileSync(f.journal, 'utf8')).toBe(journal)
+  expect(f.server.workerLayouts()).toHaveLength(count)
+  expect((await restarted.place(f.input('c'))).kind).toBe('placed')
+  expect(f.server.workerLayouts()).toHaveLength(count + 1)
+  expect(f.server.callsTo('workspace.create')).toHaveLength(1)
+  await restarted.retire({ key: 'a', receiptDir: f.directory })
+  expect(f.receipt('a').state).toBe('closed')
+})
+
+test('stable operation key survives a failed view and duplicate receipt cannot erase cleanup identity', async () => {
+  const f = fixture()
+  const first = await f.placement.place(f.input('a'))
+  expect(first.kind).toBe('placed')
+  const originalReceipt = f.receipt('a')
+  const applies = f.server.callsTo('layout.apply').length
+  expect((await f.placement.place(f.input('a'))).kind).toBe('unplaced')
+  expect(f.receipt('a')).toEqual(originalReceipt)
+  const unavailable = createWorkerPlacement({ host: null, unavailable: 'temporarily offline' })
+  expect((await unavailable.place(f.input('a'))).kind).toBe('unplaced')
+  expect(f.receipt('a')).toEqual(originalReceipt)
+  expect((await unavailable.place(f.input('offline'))).kind).toBe('unplaced')
+  expect(f.receipt('offline')).toEqual({ state: 'unplaced', reason: 'temporarily offline' })
+  expect(f.server.callsTo('layout.apply')).toHaveLength(applies)
+  f.server.failMethod('layout.apply')
+  expect((await f.placement.place(f.input('b'))).kind).toBe('unplaced')
+  f.server.clearFailure('layout.apply')
+  const restarted = createWorkerPlacement({ host: createProjectWorkspaceHost(f.journal, { connect: async () => f.server }), scope: f.scope })
+  expect((await restarted.place(f.input('c'))).kind).toBe('placed')
+  expect(f.server.callsTo('workspace.create')).toHaveLength(1)
+  // Even moving the caller's receipt directory cannot repurchase the same key.
+  const otherReceipts = mkdtempSync(join(tmpdir(), 'worker-retry-')); directories.push(otherReceipts)
+  const before = f.server.callsTo('layout.apply').length
+  expect((await restarted.place({ ...f.input('b'), receiptDir: otherReceipts })).kind).toBe('unplaced')
+  expect(f.server.callsTo('layout.apply')).toHaveLength(before)
+  await restarted.retire({ key: 'a', receiptDir: f.directory })
+  expect(f.receipt('a').state).toBe('closed')
+})
+
 test('worker task label names the role and task, bounded and control-free', () => {
   expect(workerTaskLabel('review', 'authentication')).toBe('Review · authentication')
   expect(workerTaskLabel('build', '  fix\nthe\tbuild  ')).toBe('Build · fix the build')

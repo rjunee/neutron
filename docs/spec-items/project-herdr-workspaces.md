@@ -60,6 +60,13 @@ Gateway restart preserves active work and is not a sleep event.
       reservation, inaccessible server, mismatched marker, or ambiguous result
       refuses new creation; a positively absent old workspace can be recreated.
       Verify: `project-workspaces.test.ts` with both accepting and refusing cases.
+- [ ] Worker placement reserves a stable operation ID and immutable request
+      digest before dispatch. Pending, ambiguous and completed same-ID retries
+      cannot allocate another pane or overwrite the prior cleanup receipt;
+      distinct verified operations remain usable after worker failure. A typed
+      server error alone does not release workspace creation or Chat repair.
+      Verify: `project-workspaces.test.ts`, `worker-placement.test.ts` with
+      lost-reply, restart, changed-payload and distinct-operation controls.
 - [ ] Chat is tab zero, named `Chat`; worker tabs describe their role/task. A
       second spawn cannot replace a live Chat tab, while a proven-closed chat
       can be replaced. Worker-first wake reserves Chat without starting a model;
@@ -86,8 +93,10 @@ for General), placed through this manager from production composition
 the worker's own output (Claude's single JSON result arrives only at exit, so a
 Claude tab is presence-only while it runs); results, usage, exit status and
 cancellation still come from the native process. Placement failure runs the
-worker unplaced and records why; a failed worker tab in a ready workspace never
-reserves the scope, while an ambiguous creation stays reserved. View-pane retirement re-verifies the recorded follower identity
+worker unplaced and records why. Each worker has a durable operation reservation;
+an ambiguous worker blocks its own retry without blocking distinct verified
+operations. Workspace creation and Chat repair stay reserved on ambiguous or
+typed-error replies. View-pane retirement re-verifies the recorded follower identity
 through the live pane process sample before any close and refuses changed or
 unknown identity; worker results and receipts are published before view
 cleanup. No acceptance box is ticked: conversation placement, General

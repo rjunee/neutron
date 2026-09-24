@@ -47,7 +47,7 @@ test('a worker-role spawn through the strict project host sends the exact worksp
   const server = new FakeHerdrWorkspaceServer()
   const directory = mkdtempSync(join(tmpdir(), 'herdr-worker-placement-')); temporary.push(directory)
   const host = createProjectWorkspaceHost(join(directory, 'terminal', 'workspaces.json'), { connect: async () => server, pidWaitMs: 500 })
-  const worker = (taskLabel: string) => ({ instanceId: 'instance', projectId: 'project', projectLabel: 'Project', role: 'worker' as const, taskLabel })
+  const worker = (taskLabel: string) => ({ instanceId: 'instance', projectId: 'project', projectLabel: 'Project', role: 'worker' as const, taskLabel, operationId: taskLabel })
   const first = await host.spawn(['viewer'], { cwd: directory, env: {}, label: 'Review · first', onScreen() {}, projectPlacement: worker('Review · first') })
   first.detach?.()
   expect(server.calls.map(call => call.method)).toEqual(['ping', 'workspace.create', 'workspace.report_metadata',
