@@ -4,10 +4,10 @@
  * separately by leak-gate-nul-tripwire.test.ts; this suite covers the broader
  * vocabulary + structural rules and the clean-tree silence baseline.)
  *
- * Every case runs the REAL gate against a THROWAWAY fixture tree we populate —
- * never the real repo — so the assertions don't depend on the repo staying
- * clean. A fixture with PLANTED findings must FAIL (naming the right rule); a
- * clean fixture must be SILENT.
+ * Gate cases run the REAL gate against THROWAWAY fixture trees we populate,
+ * so assertions don't depend on the repo staying clean. The committed-allowlist
+ * case runs the shared production audit against the real repo. A fixture with
+ * PLANTED findings must FAIL (naming the right rule); a clean fixture must be SILENT.
  *
  * NOTE: the forbidden tokens this suite plants are assembled from FRAGMENTS at
  * runtime (below), never written as literals, so this test's own source never
@@ -32,6 +32,7 @@ import { join } from 'node:path'
 import { fileURLToPath } from 'node:url'
 
 const LEAK_GATE = fileURLToPath(new URL('./leak-gate.sh', import.meta.url))
+const ALLOWLIST_HELPER = fileURLToPath(new URL('./leak-gate-allowlist.sh', import.meta.url))
 const PROSE_AWK = fileURLToPath(new URL('./extract-comment-prose.awk', import.meta.url))
 const REPO_LICENSE = fileURLToPath(new URL('../../LICENSE', import.meta.url))
 const REPO_ROOT = fileURLToPath(new URL('../..', import.meta.url))
@@ -157,6 +158,7 @@ function sandboxGate(dir: string, allowlist: string): string {
   const d = join(dir, 'node_modules', 'leak-gate')
   mkdirSync(d, { recursive: true })
   copyFileSync(LEAK_GATE, join(d, 'leak-gate.sh'))
+  copyFileSync(ALLOWLIST_HELPER, join(d, 'leak-gate-allowlist.sh'))
   copyFileSync(PROSE_AWK, join(d, 'extract-comment-prose.awk'))
   writeFileSync(join(d, 'leak-gate-allowlist.txt'), allowlist)
   return join(d, 'leak-gate.sh')
@@ -840,6 +842,7 @@ function pushFixture(denylistEntries: string[] | null): {
   mkdirSync(join(root, 'scripts', 'ci'), { recursive: true })
   mkdirSync(join(root, '.githooks'), { recursive: true })
   copyFileSync(LEAK_GATE, join(root, 'scripts', 'ci', 'leak-gate.sh'))
+  copyFileSync(ALLOWLIST_HELPER, join(root, 'scripts', 'ci', 'leak-gate-allowlist.sh'))
   copyFileSync(PROSE_AWK, join(root, 'scripts', 'ci', 'extract-comment-prose.awk'))
   copyFileSync(INSTALL_HOOKS, join(root, 'scripts', 'install-git-hooks.sh'))
   copyFileSync(PRE_PUSH_HOOK, join(root, '.githooks', 'pre-push'))
@@ -1420,6 +1423,51 @@ describe('commit-message + PR-body scan', () => {
 })
 
 describe('allowlist audit — an exception must be narrow and live', () => {
+  test.each([`:${T2}-code\n`, 'src/clean.ts:\n'])(
+    'a MALFORMED entry %j is rejected (exit 2)',
+    (entry) => {
+      const dir = freshTree()
+      const gate = sandboxGate(dir, entry)
+      try {
+        const { code, out } = runGate(dir, {}, gate)
+        expect(out).toContain('[allowlist-malformed]')
+        expect(code).toBe(2)
+      } finally {
+        rmSync(dir, { recursive: true, force: true })
+      }
+    },
+  )
+
+  test('a missing shared validator fails closed (exit 2)', () => {
+    const dir = freshTree()
+    const gate = sandboxGate(dir, '')
+    try {
+      rmSync(join(dir, 'node_modules', 'leak-gate', 'leak-gate-allowlist.sh'))
+      const { code, out } = runGate(dir, { LEAK_GATE_PII_DENYLIST_B64: DENYLIST }, gate)
+      expect(code).toBe(2)
+      expect(out).not.toContain('LEAK GATE: SILENT')
+    } finally {
+      rmSync(dir, { recursive: true, force: true })
+    }
+  })
+
+  test.each([
+    ['missing function', '# A loadable library without its required function.\n'],
+    ['failed preparation', 'prepare_leak_gate_allowlist() { return 23; }\n'],
+  ])('a loadable validator with %s fails before scanning (exit 2)', (_, library) => {
+    const dir = freshTree()
+    const gate = sandboxGate(dir, '')
+    try {
+      writeFileSync(join(dir, 'node_modules', 'leak-gate', 'leak-gate-allowlist.sh'), library)
+      const { code, out } = runGate(dir, { LEAK_GATE_PII_DENYLIST_B64: DENYLIST }, gate)
+      expect(code).toBe(2)
+      expect(out).not.toContain('leak-gate — scan root:')
+      expect(out).not.toContain('LEAK GATE: SILENT')
+    } finally {
+      rmSync(dir, { recursive: true, force: true })
+    }
+  })
+
   test('a DIRECTORY GLOB is rejected (exit 2)', () => {
     // The concrete regression: `migrations/*` exempted 120 files to cover 4, and
     // pre-exempted every migration added afterwards.
@@ -1480,14 +1528,35 @@ describe('allowlist audit — an exception must be narrow and live', () => {
   })
 
   test('the COMMITTED allowlist passes its own audit', () => {
-    // Runs the real gate against the real tree. Only the audit verdict is
-    // asserted (the tree's own findings are a separate concern): a config error
-    // exits 2 before any rule runs.
-    const { code, out } = runGate(REPO_ROOT)
-    expect(out).not.toContain('[allowlist-dirglob]')
-    expect(out).not.toContain('[allowlist-breadth]')
-    expect(out).not.toContain('[allowlist-stale]')
-    expect(out).not.toContain('[allowlist-malformed]')
-    expect(code).not.toBe(2)
-  }, 180_000)
+    // Run production's enumeration and validator against the real tree. Content
+    // findings are covered by the fixture controls and the full CI purity job.
+    const out = execFileSync('bash', ['-uc', `
+      HERE="$(dirname "$1")"
+      SCAN_ROOT="$(cd "$2" && pwd)"
+      ALLOWLIST_FILE="$HERE/leak-gate-allowlist.txt"
+      FILELIST="$(mktemp)"
+      trap 'rm -f "$FILELIST"' EXIT
+      source "$1" || exit 2
+      prepare_leak_gate_allowlist
+    `, 'allowlist-audit', ALLOWLIST_HELPER, REPO_ROOT], {
+      encoding: 'utf8',
+      env: gateEnv(),
+    })
+    expect(out).toBe('')
+  })
+
+  test('a valid allowlist still lets the production gate find an unlisted leak', () => {
+    const dir = freshTree()
+    const gate = sandboxGate(dir, `src/db.ts:${T2}-code\nsrc/db.ts:${T2}-purged\n`)
+    try {
+      writeFileSync(join(dir, 'src', 'db.ts'), `export const key = ${CODE_TOKEN}\n`)
+      writeFileSync(join(dir, 'src', 'leak.ts'), `export const key = ${CODE_TOKEN}\n`)
+      const { code, out } = runGate(dir, { LEAK_GATE_PII_DENYLIST_B64: DENYLIST }, gate)
+      expect(code).toBe(1)
+      expect(out).toContain(`[${T2}-code] src/leak.ts:`)
+      expect(out).not.toContain(`[${T2}-code] src/db.ts:`)
+    } finally {
+      rmSync(dir, { recursive: true, force: true })
+    }
+  })
 })

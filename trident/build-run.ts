@@ -521,8 +521,13 @@ export async function buildRun(input: BuildRunInput, deps: BuildRunDeps, signal:
           // A builder checkpoint precedes the ledger/iteration handoff. Reusing
           // its head must not turn an intermediate task into a completed card.
           if (strategy === 'task_sequence' && resume.stage === 'built') {
+            // The pre-selection host persisted the validated terminal remainder,
+            // but had no strategy_plan column. Preserve that migrated checkpoint's
+            // meaning; it authorizes fresh review, never an intermediate handoff.
+            const legacyTerminal = selected?.source === 'legacy' && acceptedPlan === null
+              && resume.remainingTasks === 0
             if (!Number.isSafeInteger(resume.remainingTasks) || resume.remainingTasks! < 0
-              || !acceptedPlan || acceptedPlan.remainingTasks !== resume.remainingTasks || !ledgerAgrees(acceptedPlan)) {
+              || (!legacyTerminal && (!acceptedPlan || acceptedPlan.remainingTasks !== resume.remainingTasks || !ledgerAgrees(acceptedPlan)))) {
               return unknown('Task-sequence built checkpoint cannot establish its remaining task handoff')
             }
             if (resume.remainingTasks !== 0) resumeTaskHandoff = structuredClone(acceptedPlan)

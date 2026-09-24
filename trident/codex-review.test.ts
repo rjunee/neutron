@@ -551,7 +551,7 @@ describe('trident/codex-review.sh — code coverage is exhaustive and character-
 })
 
 describe('trident/codex-review.sh — the review MODEL is pinned', () => {
-  test('pins gpt-5.6-sol by default', () => {
+  test('pins gpt-6-astra by default', () => {
     // UNPINNED, `codex exec` takes the CLI default, and OpenAI moved auto-review to
     // the cheapest 5.6 tier — so the "independent GPT-5 second opinion" would
     // quietly be served by the weakest model available while every exit code and
@@ -559,37 +559,36 @@ describe('trident/codex-review.sh — the review MODEL is pinned', () => {
     const { status, codexArgv } = run({ authed: true, codexLoginExit: 0, diffFileContent: 'diff --git a b\n' })
     expect(status).toBe(0)
     expect(codexArgv).toContain('--model')
-    expect(codexArgv).toContain('gpt-5.6-sol')
+    expect(codexArgv).toContain('gpt-6-astra')
   })
 
-  test('CODEX_REVIEW_MODEL overrides the pin', () => {
+  test.each(['gpt-6-astra', 'gpt-6-sol', 'gpt-5.6-terra', 'gpt-6-luna'])('CODEX_REVIEW_MODEL forwards exactly %s', (model) => {
     const { codexArgv } = run({
       authed: true,
       codexLoginExit: 0,
       diffFileContent: 'diff --git a b\n',
-      env: { CODEX_REVIEW_MODEL: 'gpt-5.6-thinking' },
+      env: { CODEX_REVIEW_MODEL: model },
     })
-    expect(codexArgv).toContain('gpt-5.6-thinking')
-    expect(codexArgv).not.toContain('gpt-5.6-sol')
+    expect(codexArgv.trim().split('\n')).toEqual(['exec', '--model', model, '-'])
   })
 
-  test('an EXPLICITLY EMPTY CODEX_REVIEW_MODEL falls back to the CLI default', () => {
-    // `${VAR-default}` substitutes only when UNSET, so an operator can opt out of
-    // pinning entirely. If this used `:-` instead, empty would silently re-pin.
-    const { codexArgv } = run({
+  test.each(['', '   '])('an empty CODEX_REVIEW_MODEL refuses CLI fallback: %j', (model) => {
+    const { status, stderr, codexArgv } = run({
       authed: true,
       codexLoginExit: 0,
       diffFileContent: 'diff --git a b\n',
-      env: { CODEX_REVIEW_MODEL: '' },
+      env: { CODEX_REVIEW_MODEL: model },
     })
-    expect(codexArgv).not.toContain('--model')
+    expect(status).toBe(5)
+    expect(stderr).toContain('CODEX_REVIEW_MODEL_INVALID')
+    expect(codexArgv).toBe('')
   })
 
   test('the prompt still reaches codex on STDIN, not argv', () => {
     // The pin adds argv entries; the diff must still go via stdin or a near-cap
     // diff blows ARG_MAX and fails before codex runs (a false DEFERRED).
     const { codexArgv } = run({ authed: true, codexLoginExit: 0, diffFileContent: 'diff --git a b\n' })
-    expect(codexArgv.trim().split('\n')).toEqual(['exec', '--model', 'gpt-5.6-sol', '-'])
+    expect(codexArgv.trim().split('\n')).toEqual(['exec', '--model', 'gpt-6-astra', '-'])
   })
 
   test('an explicit adversarial rubric replaces the generic second-opinion rubric', () => {

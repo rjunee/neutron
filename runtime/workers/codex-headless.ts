@@ -20,6 +20,8 @@ import { codexBuildObservation, isCodexBuildObservation, type CodexBuildObservat
 import { codexWorkerEnv, createCodexReviewTransport, type CodexReviewContract } from './codex-review.ts'
 import { createObservationPublisher, recoverProviderObservation } from './provider-observation-recovery.ts'
 import { codexObservation, readProviderObservation } from './provider-observation.ts'
+import { fireAndForget } from '@neutronai/logger/fire-and-forget.ts'
+import { openWorkerView, workerTaskLabel, type WorkerPlacement } from './worker-placement.ts'
 
 type Probe = { ok: true } | { ok: false; reason: RefusalReason; detail: string }
 
@@ -29,6 +31,12 @@ export interface CodexHeadlessRunnerOptions {
   readonly probe?: Probe
   readonly reviewContracts?: ReadonlyMap<string, CodexReviewContract>
   readonly reviewBriefIntegrity?: (text: string) => string
+  /** Visible task-view tab in the dispatch's project Herdr workspace, for the build
+   * wrapper and the review seat alike. The worker stays this runner's native child;
+   * exit code, trailer, receipt and usage are read exactly as without a tab. */
+  readonly placement?: WorkerPlacement
+  /** Short task name for the tab label, e.g. the card slug. */
+  readonly taskName?: string
 }
 
 // Keep the selected contract value intact when passing it to the exec wrapper.
@@ -129,7 +137,9 @@ export function createCodexHeadlessRunner(options: CodexHeadlessRunnerOptions = 
   const buildScript = options.buildScript ?? resolve(import.meta.dir, '../../trident/codex-build.sh')
   const live = new Map<string, { readonly exitCode: number | null }>()
   const review = createCodexReviewTransport({ env: baseEnv, contracts: options.reviewContracts ?? new Map(),
-    briefIntegrity: options.reviewBriefIntegrity, live })
+    briefIntegrity: options.reviewBriefIntegrity, live,
+    ...(options.placement ? { placement: options.placement } : {}),
+    ...(options.taskName !== undefined ? { taskName: options.taskName } : {}) })
   // A production runner with review contracts must reject metered/malformed
   // account files before even --version or login-status launches Codex.
   const probe: Probe = options.probe ?? (options.reviewContracts?.size && !review.connected
@@ -239,12 +249,27 @@ export function createCodexHeadlessRunner(options: CodexHeadlessRunnerOptions = 
         const events = codexBuildObservation(req.thread?.id ?? null)
         const started = Date.now()
         const publisher = createObservationPublisher(`${reservation}.observation`, identity)
-        const child = spawn('/bin/bash', [buildScript], { cwd: req.cwd, env, detached: true, stdio: ['ignore', 'pipe', 'ignore'] })
-        child.stdout!.setEncoding('utf8')
-        child.stdout!.on('data', (chunk: string) => { events.push(chunk); publisher.publish(events.snapshot(started, Date.now())) })
-        live.set(req.step_id, child)
-        const settled = await waitFor(child, signal, req.budget.wall_ms)
-        live.delete(req.step_id)
+        const view = openWorkerView(options.placement, { key: `codex-headless-${key}`,
+          taskLabel: workerTaskLabel(req.role, options.taskName ?? req.run_id.slice(0, 8)), cwd: req.cwd,
+          viewPath: `${reservation}.view.log`, receiptDir: dirname(req.result.path) })
+        let settled: Awaited<ReturnType<typeof waitFor>>
+        try {
+          const child = spawn('/bin/bash', [buildScript], { cwd: req.cwd, env, detached: true, stdio: ['ignore', 'pipe', 'ignore'] })
+          child.stdout!.setEncoding('utf8')
+          child.stdout!.on('data', (chunk: string) => {
+            events.push(chunk); publisher.publish(events.snapshot(started, Date.now()))
+            // The same chunk the observation reads, copied to the view. Display only.
+            view.tee(chunk)
+          })
+          live.set(req.step_id, child)
+          // The native wrapper exists (its pid is the group the kill targets); only
+          // now may a view of it be placed, beside — never in front of — the wait.
+          if (child.pid !== undefined) view.started()
+          settled = await waitFor(child, signal, req.budget.wall_ms)
+          live.delete(req.step_id)
+          // RESULT FIRST: releasing the view starts its cleanup and never waits for it,
+          // so no pane RPC sits between the exit and the trailer/receipt commit.
+        } finally { view.release() }
         // Retry the latest absolute snapshot even if an earlier identical write
         // failed. Never replace newer observed spend with an older disk receipt.
         measured = await publisher.settle(events.snapshot(started, Date.now()))
@@ -268,6 +293,9 @@ export function createCodexHeadlessRunner(options: CodexHeadlessRunnerOptions = 
           await rename(`${receiptPath}.tmp`, receiptPath)
         } catch { return { kind: 'unknown', detail: 'Codex build observation could not be committed' } }
       } else {
+        // Restart: close a stale view pane from its receipt. Never places or spawns,
+        // and never awaited: cleanup cannot gate the recovered result.
+        if (options.placement) fireAndForget('codex-headless.retire-view', options.placement.retire({ key: `codex-headless-${key}`, receiptDir: dirname(req.result.path) }))
         measured = await runner.observe?.(req)
         // Recovery consumes the original receipt, never the role's mutable slot or
         // a newly requested ID. An uncertain dispatch must not buy another turn.

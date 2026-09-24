@@ -150,6 +150,47 @@ sides: frozen history is immutable, while a new well-formed shard is allowed.
 - Match the style of the surrounding code (formatting, naming, comment density).
 - Write clear commit messages explaining the why, not just the what.
 
+### Shared-host cutover workflow
+
+For operator-orchestrated work on a shared Linux host, run
+`bash scripts/check-shared-host.sh` for the two required local checks above.
+It runs `typecheck-all.sh` followed by the complete `run-tests.sh`, under one
+non-waiting lock on the repository's Git common directory, opened read-only and
+shared across its linked worktrees. A busy refusal exits 75 before either check;
+let the admitted run finish before retrying. Coordinate with already running
+suites, other repositories and Trident before starting: this lock coordinates
+cooperating invocations of this entry point in one repository. It does not
+intercept direct runner invocations or protect against replacement of the Git
+directory by another process with write access. CI keeps its existing gates.
+
+The wrapper fixes jobs=4 and chunk-size=100, retains runner-default concurrency,
+and clears inherited test selectors, fixture overrides and tuning knobs.
+Four jobs is a local operating profile, not a universal speed or memory guarantee.
+Monitor the host; evidence of contention calls for revising the profile, not
+starting more suites. The lock covers both checks and is released on failure.
+
+Keep one cutover change on the publication critical path. Independent investigation
+and focused tests can proceed while its suite runs; an unrelated PR is not a
+prerequisite unless repository evidence establishes the dependency. Keep work
+state in GitHub Issues and acceptance in the existing spec item.
+
+Prepare the code, tests, documentation and as-built narrative before expensive
+validation. Run both required local checks, then record their exact local receipt
+once they finish: tested revision, commands, outcomes and any unverified work.
+Freeze and push one final publication head containing that record before starting
+CI. Reuse proof only when its existing measured identity contract matches; a
+subset, another checkout or a changed identity is not a full-suite pass. Recording
+evidence does not transfer a receipt to a different identity. Avoid cosmetic
+follow-up commits that invalidate exact-head CI. Necessary fixes require their
+affected proof again.
+
+Before merge, verify required CI for the exact current PR head and retain the
+pinned merge and review gates. Before claiming cutover complete, identify the
+served revision and retain the positive/negative served controls and unattended
+Work Board dispatch-to-merge witness required by
+[`trident-build-efficiency`](docs/spec-items/trident-build-efficiency.md).
+Green CI alone does not establish that live result or close #1196.
+
 ### If your change adds a status, a guard, or a delegation
 
 Three obligations, from `docs/INVARIANTS.md` §12 (the honesty contract) and §13 (the action

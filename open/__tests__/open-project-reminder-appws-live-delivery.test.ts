@@ -36,6 +36,7 @@ import { dirname, join } from 'node:path'
 import { fileURLToPath } from 'node:url'
 
 import { seedMigratedDb } from '../../tests/support/migrated-db.ts'
+import { manualReminderScheduler } from '@neutronai/reminders/__tests__/manual-scheduler.ts'
 import { ProjectDb } from '@neutronai/persistence/index.ts'
 import { composeProductionGraph } from '@neutronai/gateway/composition.ts'
 import { buildOpenGraphComposer } from '../composer.ts'
@@ -62,7 +63,7 @@ const SAVED_ENV_KEYS = [
 let savedEnv: Record<string, string | undefined> = {}
 let tmpDir: string
 
-interface Harness { base: string; db: ProjectDb; close(): Promise<void> }
+interface Harness { base: string; db: ProjectDb; reminderTimer: ReturnType<typeof manualReminderScheduler>; close(): Promise<void> }
 let harness: Harness | null = null
 
 /** Mock substrate: composes a DISTINCTIVE reminder body so the test can assert
@@ -130,22 +131,26 @@ async function startHarness(): Promise<Harness> {
      VALUES (?, ?, 'private', 'personal', ?, ?)`,
     [PROJECT_ID, 'Acme Launch', '2026-01-01T00:00:00Z', '2026-01-01T00:00:00Z'],
   )
+  const reminderTimer = manualReminderScheduler()
   const composer = buildOpenGraphComposer({
     env: process.env,
-    // eslint-disable-next-line @typescript-eslint/no-explicit-any
-    substrateFactory: (() => recordingSubstrate()) as any,
+    reminderScheduler: reminderTimer.scheduler,
+    substrateFactory: () => recordingSubstrate(),
   })
   const composition = await composer({ db, project_slug: 'owner' })
   const graph = await composeProductionGraph(composition)
+  reminderTimer.assertStarted()
   if (graph.fetch === undefined || graph.websocket === undefined) throw new Error('no fetch/ws')
   const server = Bun.serve({ port: 0, fetch: (req, srv) => graph.fetch!(req, srv), websocket: graph.websocket })
   return {
     base: `http://127.0.0.1:${server.port}`,
     db,
+    reminderTimer,
     close: async () => {
       await server.stop(true)
       for (const cleanup of composition.realmode_cleanups ?? []) { try { cleanup() } catch { /* */ } }
       await graph.shutdown()
+      reminderTimer.assertStopped()
       db.close()
     },
   }
@@ -188,14 +193,15 @@ describe('Open project-scoped reminder app-ws live delivery', () => {
 
     const framesBeforeFire = frames.length
 
-    // Nudge fire_at into the past; the REAL composition tick loop fires it.
+    // Make the row due, then invoke the real composition's registered timer callback.
     harness!.db.raw().run('UPDATE reminders SET fire_at = ? WHERE id = ?', [
       Math.floor(Date.now() / 1000) - 5, row.id,
     ])
+    harness.reminderTimer.fire()
     await waitFor(() => {
       const r = harness!.db.raw().query('SELECT status FROM reminders WHERE id = ?').get(row.id) as { status: string } | null
       return r?.status === 'fired'
-    }, 40_000)
+    }, 10_000)
     await sleep(800)
 
     // (a) The fired PROJECT reminder reached the PROJECT socket LIVE — pre-fix
@@ -257,10 +263,11 @@ describe('Open project-scoped reminder app-ws live delivery', () => {
     harness!.db.raw().run('UPDATE reminders SET fire_at = ? WHERE id = ?', [
       Math.floor(Date.now() / 1000) - 5, row.id,
     ])
+    harness.reminderTimer.fire()
     await waitFor(() => {
       const r = harness!.db.raw().query('SELECT status FROM reminders WHERE id = ?').get(row.id) as { status: string } | null
       return r?.status === 'fired'
-    }, 40_000)
+    }, 10_000)
     await sleep(800)
 
     const durable = harness!.db.raw()

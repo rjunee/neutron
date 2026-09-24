@@ -22,14 +22,17 @@ neutron_discover_test_files() {
     printf '%s\n' ${NEUTRON_TEST_DISCOVER_OVERRIDE}
     return 0
   fi
-  find . -type f \
+  find . -mindepth 1 \
+    \( -type d \( -name node_modules -o -name '.*' \) -prune \) -o \
+    -type f \
     \( -name '*.test.ts'  -o -name '*.test.tsx' \
     -o -name '*.test.js'  -o -name '*.test.jsx' \
     -o -name '*.test.mjs' -o -name '*.test.cjs' \
     -o -name '*.spec.ts'  -o -name '*.spec.tsx' \
     -o -name '*.spec.js'  -o -name '*.spec.jsx' \
     -o -name '*.spec.mjs' -o -name '*.spec.cjs' \) \
-    -not -path '*/node_modules/*' \
-    -not -path '*/.*/*' \
-    | sort
+    -print \
+    | LC_ALL=C sort
+  # Byte order, never the host locale: under en_US.UTF-8 `sort` ignores leading
+  # punctuation, so the partition order (and the discovery test) varied by host.
 }

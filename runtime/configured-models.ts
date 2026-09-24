@@ -1,5 +1,5 @@
 /** Shared configuration for review seats and project chat. Credentials are environment references. */
-export const BUILTIN_MODEL_TIERS = ['none', 'fable', 'opus', 'sonnet', 'fast', 'sol', 'terra', 'luna', 'k3'] as const
+export const BUILTIN_MODEL_TIERS = ['none', 'fable', 'opus', 'sonnet', 'fast', 'astra', 'sol', 'terra', 'luna', 'k3'] as const
 export interface ConfiguredModel {
   tier: string
   provider: string

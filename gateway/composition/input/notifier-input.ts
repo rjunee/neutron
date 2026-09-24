@@ -1,5 +1,5 @@
 import type { CredentialPool } from '@neutronai/runtime/credential-pool.ts'
-import type { ReminderDispatcher } from '@neutronai/reminders/tick.ts'
+import type { ReminderDispatcher, ReminderScheduler } from '@neutronai/reminders/tick.ts'
 import type { ApprovalManager, ApprovalNotifier } from '@neutronai/tools/approval.ts'
 import type {
   HeartbeatTracker,
@@ -30,6 +30,8 @@ export interface NotifierCompositionInput {
   watchdog_notifier: WatchdogNotifier
   /** Reminder dispatcher — substrate-spawn for production, stub for dev. */
   reminder_dispatcher: ReminderDispatcher
+  /** Paired reminder timer seam; production uses the native 30-second interval. */
+  reminder_scheduler?: ReminderScheduler
   /**
    * Install the ritual fire PLANNER (ISSUES #504), called ONCE by
    * `remindersModule` as soon as the graph's `ApprovalManager` — the content-hash

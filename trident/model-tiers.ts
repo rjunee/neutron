@@ -26,8 +26,8 @@ import { BUILTIN_MODEL_TIERS, configuredModels } from '@neutronai/runtime/config
  * ── ONE registry is the point ───────────────────────────────────────────────
  * Retiring a model must be a SINGLE edit here, not a hunt through a settings
  * component, a workflow router and a shell script. `codex-review.sh` keeps its own
- * `${CODEX_REVIEW_MODEL-gpt-5.6-sol}` default for a direct human invocation, and
- * `model-tiers.test.ts` asserts that default and the `sol` entry below are the SAME
+ * `${CODEX_REVIEW_MODEL-gpt-6-astra}` default for a direct human invocation, and
+ * `model-tiers.test.ts` asserts that default and the `astra` entry below are the SAME
  * string — a drift between them is a red test, not a surprise in a review.
  *
  * ── Availability is reported, never hidden ──────────────────────────────────
@@ -147,16 +147,23 @@ const RESOLVERS: Readonly<
     env_var: null,
     requires: null,
   },
-  // ── The GPT 5.6 family, reached through the Codex CLI ─────────────────────
-  // `sol` is the flagship tier and the standing default for the codex panelist:
-  // unpinned, `codex exec` takes the CLI's own default, which OpenAI moved to the
-  // cheapest 5.6 tier — so the "independent GPT-5 second opinion" was quietly being
-  // served by the weakest model available. The pin lives in the wrapper too, for a
-  // direct human invocation; the test pins the two together.
+  // Use the latest verified model within each named class, never a different
+  // class or provider. Astra owns complex/important work and the review default;
+  // Sol handles medium work. Terra keeps its last verified ID: GPT-6 has no Terra
+  // entry. An unavailable model must fail at dispatch, never fall back to Luna.
+  astra: {
+    provider: 'openai',
+    group: 'codex',
+    resolve: () => 'gpt-6-astra',
+    transport: 'cli',
+    wrapper: 'trident/codex-review.sh',
+    env_var: 'CODEX_REVIEW_MODEL',
+    requires: 'codex',
+  },
   sol: {
     provider: 'openai',
     group: 'codex',
-    resolve: () => 'gpt-5.6-sol',
+    resolve: () => 'gpt-6-sol',
     transport: 'cli',
     wrapper: 'trident/codex-review.sh',
     env_var: 'CODEX_REVIEW_MODEL',
@@ -174,7 +181,7 @@ const RESOLVERS: Readonly<
   luna: {
     provider: 'openai',
     group: 'codex',
-    resolve: () => 'gpt-5.6-luna',
+    resolve: () => 'gpt-6-luna',
     transport: 'cli',
     wrapper: 'trident/codex-review.sh',
     env_var: 'CODEX_REVIEW_MODEL',
