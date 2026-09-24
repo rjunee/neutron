@@ -779,6 +779,7 @@ console.log(JSON.stringify({ type: 'result', subtype: 'success', is_error: false
 
 async function fixture(options: { taskSequence?: boolean; moreTasks?: boolean; suiteExit?: number; testStrategy?: string
   namedSuiteFailure?: boolean | 'generic'
+  verboseSuiteDiagnostic?: boolean
   spec?: boolean
   /** `false`: the seed commit carries NO `IMPLEMENTATION_PLAN.md` (default `true`). */
   seedLedger?: boolean
@@ -841,7 +842,9 @@ async function fixture(options: { taskSequence?: boolean; moreTasks?: boolean; s
       await writeFile(join(repo, 'tests', 'preexisting.test.sh'), "echo 'tests/preexisting.test.sh: pre-existing red'\nexit 1\n")
       await writeFile(join(repo, 'scripts', 'ci', 'suite.sh'), 'bash ./tests/preexisting.test.sh\n')
     } else {
-      await writeFile(join(repo, 'tests', 'preexisting.test.ts'), "import { expect, test } from 'bun:test'\ntest('pre-existing red', () => expect(false).toBe(true))\n")
+      await writeFile(join(repo, 'tests', 'preexisting.test.ts'), "import { expect, test } from 'bun:test'\n"
+        + (options.verboseSuiteDiagnostic ? "console.log('[trident] event=mutation_proof_exempt ' + 'x'.repeat(22000))\n" : '')
+        + "test('pre-existing red', () => expect(false).toBe(true))\n")
       await writeFile(join(repo, 'scripts', 'ci', 'suite.sh'), 'bun test ./tests/preexisting.test.ts\n')
     }
   }
@@ -1117,8 +1120,8 @@ test('wave member retains worker full suite and returns before host review', asy
   expect(f.store.stageEvents(f.row.id).some(event => event.stage === 'build-suite-receipt')).toBe(false)
 }, 120_000)
 
-test('G070 repeated host red still arbitrates when a fix removes the other panel blocker', async () => {
-  const f = await fixture({ namedSuiteFailure: true, blockersByRound: [0, 1, 0], maxRounds: 3 })
+test('G070 repeated host red with large diagnostics still arbitrates when a fix removes the other panel blocker', async () => {
+  const f = await fixture({ namedSuiteFailure: true, verboseSuiteDiagnostic: true, blockersByRound: [0, 1, 0], maxRounds: 3 })
   f.world.suiteReport = async () => ({ testsPassed: false, suiteOutcome: 'deferred', suiteEvidence: '' })
   const outcome = await drive(f)
   expect(outcome, why(f, outcome)).toMatchObject({ kind: 'blocked', on: 'Review requires orchestrator arbitration: repeated finding' })
@@ -1145,8 +1148,8 @@ test('same-round cached nonzero host receipt replays red without running the sui
   expect(suites).toBe(1)
 }, 120_000)
 
-test('G070 permits a different host failure with fewer blockers and an eventual green suite', async () => {
-  const f = await fixture({ namedSuiteFailure: true, blockersByRound: [0, 1, 0], maxRounds: 3 })
+test('G070 permits a different host failure with large diagnostics, fewer blockers and an eventual green suite', async () => {
+  const f = await fixture({ namedSuiteFailure: true, verboseSuiteDiagnostic: true, blockersByRound: [0, 1, 0], maxRounds: 3 })
   f.world.suiteReport = async () => ({ testsPassed: false, suiteOutcome: 'deferred', suiteEvidence: '' })
   let suites = 0
   const runSuite = f.context.runSuite!
@@ -1186,9 +1189,9 @@ for (const changed of [false, true]) test(`G072 generic red with fewer blockers 
 }, 120_000)
 
 for (const format of ['bun', 'generic'] as const)
-for (const evidence of (format === 'bun' ? ['valid', 'empty', 'changed-failure', 'mixed-crash', 'panel-veto'] : ['valid', 'empty', 'changed-run']) as readonly string[])
+for (const evidence of (format === 'bun' ? ['valid', 'empty', 'changed-failure', 'mixed-crash', 'oversized-log', 'panel-veto'] : ['valid', 'empty', 'changed-run']) as readonly string[])
 test(`${format} host red reaches targeted base comparison and preserves ${evidence}`, async () => {
-  const f = await fixture({ namedSuiteFailure: format === 'bun' ? true : 'generic', maxRounds: 2,
+  const f = await fixture({ namedSuiteFailure: format === 'bun' ? true : 'generic', verboseSuiteDiagnostic: format === 'bun', maxRounds: 2,
     ...(evidence === 'panel-veto' ? { commentRounds: [2] } : {}) })
   let suites = 0
   let comparisons = 0
@@ -1196,10 +1199,11 @@ test(`${format} host red reaches targeted base comparison and preserves ${eviden
   f.context.runSuite = async (...args) => {
     const result = await runSuite(...args)
     suites++
-    if (['changed-failure', 'mixed-crash'].includes(evidence) && suites === 2) {
+    if (['changed-failure', 'mixed-crash', 'oversized-log'].includes(evidence) && suites === 2) {
       const log = join(f.context.stateRoot, f.row.id, 'suite-round-2.log')
       const text = await readFile(log, 'utf8')
-      await writeFile(log, evidence === 'mixed-crash' ? `${text}\nerror: Cannot find module './broken-by-diff'\n` : text.replaceAll('pre-existing red', 'new regression'))
+      await writeFile(log, evidence === 'mixed-crash' ? `${text}\nerror: Cannot find module './broken-by-diff'\n`
+        : evidence === 'oversized-log' ? `${text}\n${'x'.repeat(65_537)}\n` : text.replaceAll('pre-existing red', 'new regression'))
     }
     return result
   }

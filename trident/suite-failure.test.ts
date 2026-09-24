@@ -4,6 +4,38 @@ import { tmpdir } from 'node:os'
 import { join } from 'node:path'
 import { suiteFailure } from './suite-failure.ts'
 import { applyReviewSuite, assessReviewSuite } from './gates/review-suite.ts'
+import { reviewProgress } from './gates/review-progress.ts'
+
+test('complete large diagnostics preserve named failures, but incomplete or crashing output never earns identity', async () => {
+  const dir = await mkdtemp(join(tmpdir(), 'suite-failure-'))
+  try {
+    const log = join(dir, 'suite.log')
+    const transcript = (diagnostic: string) => `bun test v1.3.13\ntests/example.test.ts:\n${diagnostic}\n(fail) rejects invalid input [3.00ms]\n 1 fail\nRan 1 test across 1 file. [3.00ms]\n`
+    await writeFile(log, transcript('ordinary diagnostic'))
+    const control = await suiteFailure(log, 'bash scripts/run-tests.sh')
+    expect(control.hostFailureId).toBeDefined()
+    for (const length of [21_689, 65_536]) {
+      await writeFile(log, transcript('[trident] event=mutation_proof_exempt '.padEnd(length, 'x')))
+      const measured = await suiteFailure(log, 'bash scripts/run-tests.sh')
+      expect(measured.hostFailureId).toBe(control.hostFailureId)
+      const current = { findings: [measured.hostFailureId!], blockingCount: 1 }
+      expect(reviewProgress({ findings: ['resolved defect'], blockingCount: 2 }, current)).toEqual({ kind: 'allow' })
+      expect(reviewProgress(current, current)).toMatchObject({ kind: 'blocked', on: expect.stringContaining('repeated finding') })
+    }
+    for (const diagnostic of ['x'.repeat(65_537), 'error: Cannot find module '.padEnd(21_689, 'x')]) {
+      await writeFile(log, transcript(diagnostic))
+      const incomplete = await suiteFailure(log, 'bash scripts/run-tests.sh')
+      expect(incomplete.hostFailureId).toBeUndefined()
+      expect(reviewProgress({ findings: ['resolved defect'], blockingCount: 2 },
+        { findings: [], blockingCount: 1, unknownIdentities: true })).toMatchObject({ kind: 'unknown' })
+      const suite = await assessReviewSuite({ observe: async () => ({ kind: 'known', runId: 'run', head: 'head', round: 2,
+        strategy: 'bash scripts/run-tests.sh', scope: 'full-suite', report: { hostExitCode: 1, hostSuiteWorker: true,
+          hostComparisonEligible: true, suiteOutcome: 'failed-preexisting', suiteEvidence: `${control.hostFailureId}: reproduced at base`, ...incomplete } }) },
+      { head: 'head', diff: '', pr: null }, 2, 'run')
+      expect(applyReviewSuite({ kind: 'approve' }, suite).kind).toBe('fix')
+    }
+  } finally { await rm(dir, { recursive: true, force: true }) }
+})
 
 test('host named failure identity survives timings and rounds but rejects a different failure or command', async () => {
   const dir = await mkdtemp(join(tmpdir(), 'suite-failure-'))
