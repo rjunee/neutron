@@ -1,6 +1,5 @@
 import { LIVE_AGENT_TOOL_NAMES } from '@neutronai/gateway/wiring/build-live-agent-turn.ts'
 import { SUBAGENT_TOOL_NAME } from './claude-tool-contract.ts'
-import { CLAUDE_BOUNDED_PROFILE_FINGERPRINT } from './claude-bounded-profile.ts'
 import { afterEach, expect, spyOn, test } from 'bun:test'
 import * as fs from 'node:fs/promises'
 import { appendFile, mkdir, mkdtemp, rename, rm, writeFile } from 'node:fs/promises'
@@ -37,7 +36,7 @@ async function fixture() {
   }
   const binding: ClaudeActingSession = {
     project_id: 'project', topic_id: 'topic', grants: { roots: [], tools: 'edit-and-run', writable: true, network: true },
-    session: { sessionId: 'session', cwd: dir, boundedWorkerProfile: CLAUDE_BOUNDED_PROFILE_FINGERPRINT, toolSurface: LIVE_AGENT_TOOL_NAMES.join(','), acquireTurn: async () => { acquired++; return () => { released++ } },
+    session: { sessionId: 'session', cwd: dir, toolSurface: LIVE_AGENT_TOOL_NAMES.join(','), acquireTurn: async () => { acquired++; return () => { released++ } },
       child: { pid: 123, write() {}, kill() {}, hasExited: () => false, exited: new Promise(() => {}),
         submitLine: async text => { commands.push(text); await writeFile(input.request.result.path, '{}') } } },
   }
@@ -53,22 +52,6 @@ test('Claude positive control forwards spec and effort into one acknowledged lin
   expect(f.released()).toBe(1)
 })
 
-for (const profile of [undefined, 'obsolete-profile']) {
-  test(`Claude refuses missing or obsolete bounded profile (${profile}) before submission`, async () => {
-    const f = await fixture()
-    f.binding.session.boundedWorkerProfile = profile
-    const outcome = await f.run()
-    expect(outcome.kind).toBe('refused')
-    expect(outcome).toMatchObject({ reason: 'capability-unsupported', detail: expect.stringContaining('bounded worker profile') })
-    expect(f.commands).toEqual([])
-    expect(f.acquired()).toBe(0)
-    // The same session is usable after its actual current spawn profile is known.
-    f.binding.session.boundedWorkerProfile = CLAUDE_BOUNDED_PROFILE_FINGERPRINT
-    expect(await f.run()).toEqual({ kind: 'turn-ended' })
-    expect(f.commands).toHaveLength(1)
-  })
-}
-
 test('bound read-only children overlap after serialized parent dispatch and retain busy leases', async () => {
   const f = await fixture()
   f.binding.projects_dir = join(f.dir, 'projects')
@@ -76,7 +59,6 @@ test('bound read-only children overlap after serialized parent dispatch and reta
   const directory = join(transcript.slice(0, -'.jsonl'.length), 'subagents')
   const session = new ReplSession('fixture', 'generation', 'session', 'channel', f.dir)
   session.toolSurface = LIVE_AGENT_TOOL_NAMES.join(',')
-  session.boundedWorkerProfile = CLAUDE_BOUNDED_PROFILE_FINGERPRINT
   session.attachChild(f.binding.session.child)
   f.binding.session = session
   const inputs = ['one', 'two'].map(step => ({ ...f.input, timeout_ms: 10_000,
@@ -205,7 +187,6 @@ for (const grant of ['writable', 'edit tools'] as const) {
     const f = await fixture()
     const session = new ReplSession('fixture', 'generation', 'session', 'channel', f.dir)
     session.toolSurface = LIVE_AGENT_TOOL_NAMES.join(',')
-    session.boundedWorkerProfile = CLAUDE_BOUNDED_PROFILE_FINGERPRINT
     session.attachChild(f.binding.session.child)
     f.binding.session = session
     f.input.timeout_ms = 10_000
@@ -244,7 +225,6 @@ for (const outcome of ['cancelled', 'rate limited', 'lost acknowledgement'] as c
     const childPath = join(directory, 'agent-bound.jsonl')
     const session = new ReplSession('fixture', 'generation', 'session', 'channel', f.dir)
     session.toolSurface = LIVE_AGENT_TOOL_NAMES.join(',')
-    session.boundedWorkerProfile = CLAUDE_BOUNDED_PROFILE_FINGERPRINT
     session.attachChild(f.binding.session.child)
     f.binding.session = session
     const identity = { agentId: 'bound', sessionId: 'session', isSidechain: true }

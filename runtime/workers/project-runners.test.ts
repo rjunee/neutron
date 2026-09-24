@@ -93,7 +93,7 @@ for (const provider of ['anthropic', 'openai-codex', 'pi'] as const) {
     const tool = { anthropic: 'Agent tool', 'openai-codex': 'collaboration.spawn_agent tool', pi: 'subagent tool' }[provider]
     expect(f.calls[0]!.spec.prompt).toContain(tool)
     if (provider === 'anthropic') {
-      expect(JSON.parse(f.calls[0]!.spec.prompt.split('\n')[1]!).subagent_type).toBe('neutron-bounded-worker')
+      expect(JSON.parse(f.calls[0]!.spec.prompt.split('\n')[1]!).subagent_type).toBe('general-purpose')
       expect(f.calls[0]!.spec.tools).toEqual(f.options.conversation.spec.tools)
     }
     expect(f.calls[0]!.timeout_ms).toBeGreaterThan(0)
