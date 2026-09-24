@@ -32,5 +32,7 @@ neutron_discover_test_files() {
     -o -name '*.spec.js'  -o -name '*.spec.jsx' \
     -o -name '*.spec.mjs' -o -name '*.spec.cjs' \) \
     -print \
-    | sort
+    | LC_ALL=C sort
+  # Byte order, never the host locale: under en_US.UTF-8 `sort` ignores leading
+  # punctuation, so the partition order (and the discovery test) varied by host.
 }

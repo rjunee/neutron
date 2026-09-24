@@ -78,6 +78,8 @@ import { buildRun, type BuildRunOutcome } from '@neutronai/trident/build-run.ts'
 import type { InnerLoopInput } from '@neutronai/trident/inner-loop.ts'
 import { PROJECT_SESSION_ACQUIRE_TIMEOUT_MS, prepareProjectBuild, type ProjectBuildContext } from '../wiring/project-build.ts'
 import { CodexOwnerBindings } from '../wiring/codex-owner-binding.ts'
+import { until, workerPlacementRig } from '@neutronai/runtime/adapters/claude-code/persistent/__tests__/herdr-workspace-fake-server.ts'
+import { HerdrError } from '@neutronai/runtime/adapters/claude-code/persistent/herdr-client.ts'
 import { restrictedOwnerFixture } from './fixtures/codex-owner-review.ts'
 import { PROJECT_DEPENDENCIES_TIMEOUT_MS } from '../wiring/project-build-dependencies.ts'
 import { PROJECT_SNAPSHOT_SCHEMA } from '../wiring/project-build-snapshot.ts'
@@ -5162,4 +5164,106 @@ test(`terminal task-sequence ${mergeMode} publication retry re-proves the built 
   const merged = await spawnCapture(['git', '-C', mergeMode === 'pr' ? f.origin : f.repo, 'show', 'refs/heads/main:NOTES.md'], f.repo)
   expect(merged.stdout).toBe(`seed\n${prior.id}:task:0:build:0\n${prior.id}:task:1:build:0${reviewFix ? `\n${dispatched.run.id}:task:1:fix:1` : ''}`)
   if (mergeMode === 'local') expect(f.commands.some(argv => argv[0] === 'gh')).toBe(false)
+}, 300_000)
+
+// --- Cross-provider bounded workers placed in their project Herdr workspace. ---
+// The production composition path (`prepareProjectBuild`) with a real strict
+// project-workspace host over a scripted Herdr server: tabs are asserted on the
+// ACTUAL RPC requests, and the build's outcome is the same as without a terminal.
+
+/** Every placement receipt written anywhere under the run's build state. */
+async function placementReceipts(root: string): Promise<Array<{ state: string; pane?: string; reason?: string }>> {
+  const found: Array<{ state: string; pane?: string; reason?: string }> = []
+  const walk = async (directory: string): Promise<void> => {
+    for (const entry of await readdir(directory, { withFileTypes: true })) {
+      const path = join(directory, entry.name)
+      if (entry.isDirectory()) await walk(path)
+      else if (entry.name.endsWith('.placement.json')) found.push(JSON.parse(await readFile(path, 'utf8')))
+    }
+  }
+  await walk(root)
+  return found
+}
+
+async function placedTerminal(f: Awaited<ReturnType<typeof fixture>>, scope: { projectId: string | null; projectLabel: string }) {
+  const directory = await mkdtemp(join(tmpdir(), 'project-build-terminal-'))
+  cleanups.push(() => rm(directory, { recursive: true, force: true }))
+  const rig = workerPlacementRig(directory, scope)
+  f.context.workerTerminal = { host: rig.host, scope: rig.scope }
+  return rig
+}
+
+test('Codex owner: every cross-provider Claude worker gets a labelled tab in its project workspace; the build still merges', async () => {
+  const f = await codexOwnerWithClaude()
+  const rig = await placedTerminal(f, { projectId: 'e2e-project', projectLabel: 'E2E Project' })
+  const outcome = await drive(f)
+  expect(outcome.kind, why(f, outcome)).toBe('merged')
+  // One provider process per dispatch, exactly as without a terminal.
+  const calls = (await readFile(f.calls, 'utf8')).trim().split('\n').map(line => JSON.parse(line))
+  expect(calls.map(call => call.request.role)).toEqual(['plan', 'review', 'review', 'synthesis'])
+  // The native same-provider (Codex) build is not placed.
+  expect(f.children.map(request => request.role)).toEqual(['build'])
+  const slug = f.row.slug
+  expect(slug.length).toBeLessThanOrEqual(48)
+  expect(rig.server.workerLayouts().map(call => call.params['tab_label']))
+    .toEqual([`Plan · ${slug}`, `Review · ${slug}`, `Review · ${slug}`, `Synthesis · ${slug}`])
+  expect(rig.server.callsTo('workspace.create').map(call => call.params['label'])).toEqual(['E2E Project'])
+  const [workspace] = [...rig.server.workspaces.keys()]
+  for (const call of rig.server.callsTo('layout.apply')) expect(call.params['workspace_id']).toBe(workspace)
+  expect(rig.server.callsTo('pane.read')).toHaveLength(0)
+  // View cleanup is detached from every worker's result, so it may still be landing
+  // when the build merges; each pane is closed through the verified-identity path.
+  const receipts = await until(async () => {
+    const found = await placementReceipts(f.context.stateRoot)
+    return found.length === 4 && found.every(receipt => receipt.state === 'closed') ? found : undefined
+  })
+  expect(receipts).toHaveLength(4)
+  for (const receipt of receipts) expect(rig.server.closed).toContain(receipt.pane!)
+}, 300_000)
+
+test('General-scoped Codex review seat is placed in Neutron General and its verdict merges', async () => {
+  const f = await fixture({ codexReview: 'valid' })
+  const rig = await placedTerminal(f, { projectId: null, projectLabel: 'general' })
+  const outcome = await drive(f)
+  expect(outcome.kind, why(f, outcome)).toBe('merged')
+  expect((await codexReviewEvidence(f)).calls).toHaveLength(1)
+  expect(rig.server.callsTo('workspace.create').map(call => call.params['label'])).toEqual(['Neutron General'])
+  expect(rig.server.workerLayouts().map(call => call.params['tab_label'])).toEqual([`Review · ${f.row.slug}`])
+  const rows = Object.values(JSON.parse(await readFile(rig.journal, 'utf8'))) as Array<{ scope: unknown }>
+  expect(rows.map(row => row.scope)).toEqual([['instance', null]])
+}, 300_000)
+
+for (const fault of ['typed', 'ambiguous'] as const) {
+  test(`a refused placement (${fault} workspace.create failure) never blocks or alters the build: each receipt names its real cause`, async () => {
+    const f = await codexOwnerWithClaude()
+    const rig = await placedTerminal(f, { projectId: 'e2e-project', projectLabel: 'E2E Project' })
+    rig.server.failMethod('workspace.create', fault === 'typed'
+      ? new HerdrError('workspace_create_refused', 'server refused workspace.create')
+      : new Error('fake-herdr: workspace.create transport lost'))
+    const outcome = await drive(f)
+    expect(outcome.kind, why(f, outcome)).toBe('merged')
+    expect(rig.server.callsTo('layout.apply')).toHaveLength(0)
+    const receipts = await placementReceipts(f.context.stateRoot)
+    expect(receipts).toHaveLength(4)
+    for (const receipt of receipts) expect(receipt.state).toBe('unplaced')
+    const reasons = receipts.map(receipt => receipt.reason!).sort()
+    // A typed error alone does not prove pre-allocation rejection. Both failures
+    // retain creation authority; subsequent workers disclose the pending claim.
+    expect(rig.server.callsTo('workspace.create')).toHaveLength(1)
+    expect(reasons).toEqual([
+      fault === 'typed' ? 'placement-refused: server refused workspace.create'
+        : 'placement-refused: fake-herdr: workspace.create transport lost',
+      ...Array(3).fill('placement-refused: project-workspaces: existing ownership is invalid or pending; reconcile before retry'),
+    ].sort())
+  }, 300_000)
+}
+
+test('no terminal host: cross-provider workers run unplaced with the reason on record', async () => {
+  const f = await codexOwnerWithClaude()
+  expect(f.context.workerTerminal).toBeUndefined()
+  const outcome = await drive(f)
+  expect(outcome.kind, why(f, outcome)).toBe('merged')
+  const receipts = await placementReceipts(f.context.stateRoot)
+  expect(receipts).toHaveLength(4)
+  for (const receipt of receipts) expect(receipt).toEqual({ state: 'unplaced', reason: 'herdr-unconfigured' })
 }, 300_000)
