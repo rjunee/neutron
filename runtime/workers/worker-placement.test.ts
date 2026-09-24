@@ -79,7 +79,7 @@ test('General uses Neutron General and the literal project id general is a diffe
   expect(creates).toEqual(['Neutron General', 'general'])
   const rows = Object.values(JSON.parse(readFileSync(general.journal, 'utf8'))) as Array<{ scope: unknown }>
   expect(rows.map(row => row.scope)).toEqual([['instance', null], ['instance', 'general']])
-  const workers = server.workerTabs().map(call => call.params['workspace_id'])
+  const workers = server.workerLayouts().map(call => call.params['workspace_id'])
   expect(new Set(workers).size).toBe(2)
 })
 
@@ -108,12 +108,12 @@ for (const failure of ['ownership-mismatch', 'layout-apply', 'connect', 'invalid
     } else {
       placement = createWorkerPlacement({ host: f.host, scope: { ...f.scope, instanceId: '' } })
     }
-    const before = f.server.workerTabs().length
+    const before = f.server.workerLayouts().length
     const view = await placement.place(f.input())
     expect(view.kind).toBe('unplaced')
     expect((view as { reason: string }).reason).toMatch(/^placement-refused: /)
     expect(f.receipt()).toMatchObject({ state: 'unplaced' })
-    if (failure !== 'layout-apply') expect(f.server.workerTabs()).toHaveLength(before)
+    if (failure !== 'layout-apply') expect(f.server.workerLayouts()).toHaveLength(before)
     // Every layout.apply ever sent names a workspace the manager created and owns.
     for (const call of f.server.callsTo('layout.apply')) expect(f.server.workspaces.has(String(call.params['workspace_id']))).toBe(true)
   })
@@ -133,7 +133,7 @@ test('retire closes the recorded view pane once and ignores unplaced or closed r
   await replacement.retire({ key: 'claude-headless-k1', receiptDir: f.directory })
   await replacement.retire({ key: 'never-placed', receiptDir: f.directory })
   expect(f.server.callsTo('pane.close')).toHaveLength(closes)
-  expect(f.server.workerTabs()).toHaveLength(1)
+  expect(f.server.workerLayouts()).toHaveLength(1)
 })
 
 test('a failed close keeps the receipt placed so a later retire still owns the pane', async () => {

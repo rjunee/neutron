@@ -472,8 +472,8 @@ test('placed worker: one CLI process, identical outcome, a labelled tab in the p
   expect((outcome.observation as { usage: unknown }).usage).toEqual((expected.observation as { usage: unknown }).usage)
   expect(await readFile(f.counter, 'utf8')).toBe('call\n')
   expect(rig.server.callsTo('workspace.create').map(call => call.params['label'])).toEqual(['Project One'])
-  const [tab] = rig.server.workerTabs()
-  expect(rig.server.workerTabs()).toHaveLength(1)
+  const [tab] = rig.server.workerLayouts()
+  expect(rig.server.workerLayouts()).toHaveLength(1)
   expect(tab!.params['tab_label']).toBe('Plan · authentication')
   expect(rig.server.workspaces.has(String(tab!.params['workspace_id']))).toBe(true)
   // The tab runs the credential-free follower, never a second provider process.
@@ -503,7 +503,7 @@ test('screen-independence: a success-shaped screen never rescues a failed worker
   rig.server.malformMethod('pane.read', { read: { text: success } })
   const outcome = await createClaudeHeadlessRunner({ ...f.options, placement: rig.placement() }).run(f.req, 'headless', new AbortController().signal)
   expect(comparable(outcome)).toEqual(comparable(expected))
-  expect(rig.server.workerTabs()).toHaveLength(1)
+  expect(rig.server.workerLayouts()).toHaveLength(1)
   await expect(readFile(f.req.result.path)).rejects.toMatchObject({ code: 'ENOENT' })
 })
 
@@ -561,11 +561,11 @@ test('restart adopts the durable receipt: no new CLI, no new tab, the stale view
   const [stale] = await rig.receipts(f.state)
   expect(stale).toMatchObject({ state: 'placed' })
   rig.server.clearFailure('pane.close')
-  const tabs = rig.server.workerTabs().length
+  const tabs = rig.server.workerLayouts().length
   const replacement = createClaudeHeadlessRunner({ ...f.options, placement: rig.placement() })
   expect(await replacement.run(f.req, 'headless', new AbortController().signal)).toEqual(first)
   expect(await readFile(f.counter, 'utf8')).toBe('call\n')
-  expect(rig.server.workerTabs()).toHaveLength(tabs)
+  expect(rig.server.workerLayouts()).toHaveLength(tabs)
   expect(rig.server.panes.has(stale!.pane!)).toBe(false)
   expect(await rig.receipts(f.state)).toEqual([{ state: 'closed', pane: stale!.pane! }])
 })

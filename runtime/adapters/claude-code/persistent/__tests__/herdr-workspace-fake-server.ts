@@ -1,6 +1,6 @@
 /**
  * herdr-workspace-fake-server.ts — a scripted Herdr server that understands
- * WORKSPACES, TABS and MANY PANES, for tests that drive the real
+ * WORKSPACES, TAB OBJECTS and MANY PANES, for tests that drive the real
  * `ProjectWorkspaceManager` through the real strict `createProjectWorkspaceHost`.
  *
  * `herdr-fake-server.ts` models ONE pane, which is right for the REPL host suites and
@@ -42,7 +42,7 @@ export class FakeHerdrWorkspaceServer implements HerdrRpc {
   callsTo(method: string): RecordedCall[] { return this.calls.filter(call => call.method === method) }
 
   /** Worker tabs: every layout.apply that is not the inert Chat reservation. */
-  workerTabs(): RecordedCall[] { return this.callsTo('layout.apply').filter(call => call.params['tab_label'] !== 'Chat') }
+  workerLayouts(): RecordedCall[] { return this.callsTo('layout.apply').filter(call => call.params['tab_label'] !== 'Chat') }
 
   private next(prefix: string): string { return `${prefix}-${++this.serial}` }
 

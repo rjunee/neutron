@@ -551,8 +551,8 @@ describe('Codex build wrapper placed in its project Herdr workspace', () => {
     expect(readFileSync(f.threads, 'utf8')).toBe('\n')
     // General scope: the manager's own workspace, never a literal "general" project.
     expect(rig.server.callsTo('workspace.create').map(call => call.params['label'])).toEqual(['Neutron General'])
-    expect(rig.server.workerTabs().map(call => call.params['tab_label'])).toEqual(['Build · claim-corroboration'])
-    for (const token of (rig.server.workerTabs()[0]!.params['root'] as { command: string[] }).command) {
+    expect(rig.server.workerLayouts().map(call => call.params['tab_label'])).toEqual(['Build · claim-corroboration'])
+    for (const token of (rig.server.workerLayouts()[0]!.params['root'] as { command: string[] }).command) {
       expect(token).not.toMatch(/codex-build\.sh$|wrapper\.sh$|(^|\/)codex$/)
     }
     const view = readdirSync(f.request().cwd).find(name => name.endsWith('.view.log'))!
@@ -575,7 +575,7 @@ describe('Codex build wrapper placed in its project Herdr workspace', () => {
     const outcome = await createCodexHeadlessRunner({ buildScript: f.script, probe: { ok: true }, placement: rig.placement() })
       .run(f.request(), 'headless', new AbortController().signal)
     expect({ ...outcome, observation: undefined }).toEqual({ ...expected, observation: undefined })
-    expect(rig.server.workerTabs()).toHaveLength(1)
+    expect(rig.server.workerLayouts()).toHaveLength(1)
   })
 
   test('placement failure: the build still completes with its claim and usage, unplaced on record', async () => {
@@ -631,12 +631,12 @@ describe('Codex build wrapper placed in its project Herdr workspace', () => {
     const [stale] = await rig.receipts(cwd)
     expect(stale).toMatchObject({ state: 'placed' })
     rig.server.clearFailure('pane.close')
-    const tabs = rig.server.workerTabs().length
+    const tabs = rig.server.workerLayouts().length
     const resumed = await createCodexHeadlessRunner({ buildScript: f.script, probe: { ok: true }, placement: rig.placement() })
       .run(request, 'headless', new AbortController().signal)
     expect(resumed.kind).toBe('completed')
     expect(readFileSync(f.threads, 'utf8')).toBe('\n')
-    expect(rig.server.workerTabs()).toHaveLength(tabs)
+    expect(rig.server.workerLayouts()).toHaveLength(tabs)
     expect(rig.server.panes.has(stale!.pane!)).toBe(false)
     expect(await rig.receipts(cwd)).toEqual([{ state: 'closed', pane: stale!.pane! }])
   })

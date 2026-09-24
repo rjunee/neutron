@@ -378,6 +378,6 @@ test('native same-provider work is never placed; only the cross-provider headles
   expect((await readdir(f.dir)).filter(name => name.endsWith('.placement.json'))).toEqual([])
   // Positive control: the cross-provider worker in the same project IS placed.
   await built.headless['openai-codex']!.run({ ...f.request, step_id: 'step-2', budget: { wall_ms: 5_000 } }, 'headless', signal())
-  expect(rig.server.workerTabs().map(call => call.params['tab_label'])).toEqual(['Build · native-control'])
+  expect(rig.server.workerLayouts().map(call => call.params['tab_label'])).toEqual(['Build · native-control'])
   expect(f.calls).toHaveLength(1)
 })

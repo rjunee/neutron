@@ -433,8 +433,8 @@ test('placed review seat: one model turn, identical verdict, a Review tab showin
   expect({ ...outcome, observation: undefined }).toEqual({ ...expected, observation: undefined })
   expect(outcome.observation?.usage).toEqual(expected.observation?.usage)
   expect(await f.calls()).toHaveLength(1)
-  expect(rig.server.workerTabs().map(call => call.params['tab_label'])).toEqual(['Review · authentication'])
-  const tab = rig.server.workerTabs()[0]!.params as { workspace_id: string; root: { command: string[]; env: Record<string, string> } }
+  expect(rig.server.workerLayouts().map(call => call.params['tab_label'])).toEqual(['Review · authentication'])
+  const tab = rig.server.workerLayouts()[0]!.params as { workspace_id: string; root: { command: string[]; env: Record<string, string> } }
   expect(rig.server.workspaces.get(tab.workspace_id)?.label).toBe('Project One')
   for (const token of tab.root.command) expect(token).not.toMatch(/(^|\/)codex$/)
   expect(JSON.stringify(tab)).not.toContain('secret')
@@ -455,7 +455,7 @@ test('screen-independence: a nonzero seat stays failed whatever the screen shows
   rig.server.malformMethod('pane.read', { read: { text: rig.server.screen } })
   const outcome = await placedRunner(f, rig).run(f.req, 'headless', new AbortController().signal)
   expect({ ...outcome, observation: undefined }).toEqual({ ...expected, observation: undefined })
-  expect(rig.server.workerTabs()).toHaveLength(1)
+  expect(rig.server.workerLayouts()).toHaveLength(1)
 })
 
 test('placement failure: the review still completes with its verdict, unplaced on record', async () => {
@@ -504,10 +504,10 @@ test('restart adopts the seat receipt: no second model turn, no new tab, the sta
   const [stale] = await rig.receipts(f.dir)
   expect(stale).toMatchObject({ state: 'placed' })
   rig.server.clearFailure('pane.close')
-  const tabs = rig.server.workerTabs().length
+  const tabs = rig.server.workerLayouts().length
   expect((await placedRunner(f, rig).run(f.req, 'headless', new AbortController().signal)).kind).toBe('completed')
   expect(await f.calls()).toHaveLength(1)
-  expect(rig.server.workerTabs()).toHaveLength(tabs)
+  expect(rig.server.workerLayouts()).toHaveLength(tabs)
   expect(rig.server.panes.has(stale!.pane!)).toBe(false)
   expect(await rig.receipts(f.dir)).toEqual([{ state: 'closed', pane: stale!.pane! }])
 })

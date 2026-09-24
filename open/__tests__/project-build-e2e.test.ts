@@ -5110,7 +5110,7 @@ test('Codex owner: every cross-provider Claude worker gets a labelled tab in its
   expect(f.children.map(request => request.role)).toEqual(['build'])
   const slug = f.row.slug
   expect(slug.length).toBeLessThanOrEqual(48)
-  expect(rig.server.workerTabs().map(call => call.params['tab_label']))
+  expect(rig.server.workerLayouts().map(call => call.params['tab_label']))
     .toEqual([`Plan · ${slug}`, `Review · ${slug}`, `Review · ${slug}`, `Synthesis · ${slug}`])
   expect(rig.server.callsTo('workspace.create').map(call => call.params['label'])).toEqual(['E2E Project'])
   const [workspace] = [...rig.server.workspaces.keys()]
@@ -5128,7 +5128,7 @@ test('General-scoped Codex review seat is placed in Neutron General and its verd
   expect(outcome.kind, why(f, outcome)).toBe('merged')
   expect((await codexReviewEvidence(f)).calls).toHaveLength(1)
   expect(rig.server.callsTo('workspace.create').map(call => call.params['label'])).toEqual(['Neutron General'])
-  expect(rig.server.workerTabs().map(call => call.params['tab_label'])).toEqual([`Review · ${f.row.slug}`])
+  expect(rig.server.workerLayouts().map(call => call.params['tab_label'])).toEqual([`Review · ${f.row.slug}`])
   const rows = Object.values(JSON.parse(await readFile(rig.journal, 'utf8'))) as Array<{ scope: unknown }>
   expect(rows.map(row => row.scope)).toEqual([['instance', null]])
 }, 300_000)
