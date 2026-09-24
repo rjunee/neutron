@@ -1,38 +1,48 @@
-## 2026-09-24 — Derive write claims from instructions and accepted path ranges
+## 2026-09-24 — Exempt only complete read-only clauses from file claims
 
 Issue #1294 exposed a false admission conflict: executing the existing Open E2E
-test claimed ownership because its filename contains `build`. The earlier
-line-wide write and negation checks also let a read-only instruction or guard
-rail hide a later explicit write.
+test claimed ownership because its filename contains `build`. Recognizing write
+verbs in arbitrary prose also missed real edits when later nouns such as `test`
+or `read` were interpreted as instructions that canceled the write.
 
-`trident/claimed-paths.ts` now recognizes and normalizes candidate paths once,
-then masks exactly those accepted source ranges while interpreting instruction
-words in source order. Filename verbs cannot become instructions; slash-joined
-verbs such as `Edit/update` remain visible because they are not accepted paths.
-Read instructions change the action associated with subsequent paths. Explicit
-write instructions remain observable after unfamiliar filler or a preceding
-read instruction. Negation ends at a sentence boundary or an explicit transition
-such as `but` or `then`. This remains a bounded lexical heuristic for likely
-write ownership, not a natural-language parser or a filesystem probe.
+`trident/claimed-paths.ts` now defaults to claiming every recognized path. It
+omits paths only when their complete clause matches a narrow read-only or
+prohibition grammar. Canonical direct read/path lists, test/typecheck/script
+invocations and explicit prohibitions have writable and read-only siblings.
+Read-only labels do not bypass complete-clause validation. Unknown prose,
+unsupported command forms, mixed writes and incomplete matches retain claims.
+This deliberately overclaims ambiguous prose: `Edit X and run Y` claims both
+recognized paths; `Edit X; run Y` claims only X. A bare `and` never separates
+verbs that may share an object, such as `Edit and test X`.
 
-Normalization retains extensions, line references, rejected absolute/escaping
-paths, the backtick span bound, deduplication and the 64-claim cap. Claims follow
-source order, including interleaved bare and backticked paths. The atomic store
-transaction is unchanged.
+One recognizer owns normalization and source ranges. Only accepted paths become
+path tokens; `Edit/update` remains visible because it is not a path. Existing
+extension and line-reference handling, the backtick bound, deduplication,
+source order and the 64-path cap remain. There is no filesystem probe, wildcard,
+schema change or structured-claims override. This is a bounded estimate of
+named-path contention, not proof of all files a build might modify. The atomic
+store implementation is unchanged; separate concurrency work is not included.
 
 Focused validation: `bun test trident/claimed-paths.test.ts trident/store.test.ts`
-passed 191 tests. The new store test admits read-only tasks beside a live writer,
-persists legitimate claims, refuses actual overlaps and verifies no row was
-inserted after refusal. It includes all three mixed-instruction review
-counterexamples and slash-joined edit/create verbs with read-only siblings.
+passed 198 tests. Actual store admission accepts canonical read-only tasks
+beside a live writer, persists legitimate claims, refuses real overlaps and
+inserts no row after refusal. Tests cover the mixed-instruction, slash-verb and
+read-noun reviewer counterexamples with canonical read-only siblings.
 
-Four temporary semantic mutants were rejected by assertions, without parser
-errors: suppress every parser claim (15 failures); claim every recognized path
-(8 failures); bypass the atomic path check (1 failure); apply live path claims
-to every admission, including readers (1 failure). All mutations were restored.
+A sanitized equivalent of the General controls task and plan (#1293), with all
+reference clauses explicitly marked, claims only the app client and test files.
+The exact live task and saved plan were also checked: their E2E, Trident config
+and script references are omitted, while unmarked component, authority and
+gateway narrative references remain conservatively claimed. The sanitized
+fixture does not assert more precise behavior for that original prose.
+
+Four temporary semantic mutants failed assertions without parser errors:
+disable exemptions (14 failures); accept a read-head prefix without consuming
+the clause (2 failures); bypass atomic path refusal (1 failure); apply live path
+claims to every admission, including readers (1 failure). All were restored.
 
 The publication receipt must identify the frozen head and outcomes of the
 consuming `open/__tests__/project-build-e2e.test.ts`, root and Trident TypeScript
 checks, and independent review. Full shared-host validation, CI, deployment and
-the served Work Board witness remain separate gates; these focused results do
-not establish them or complete the broader efficiency acceptance.
+the served Work Board witness remain separate gates. Focused results neither
+establish them nor complete the broader efficiency acceptance.
