@@ -4,6 +4,18 @@ Refs #1196; this is a focused slice of
 `docs/spec-items/trident-build-efficiency.md`, not completion of its deployed
 benchmark or live acceptance criteria.
 
+Before this change, the deployed source at `1e0648c2b7b370a0ce54ac6b55b2ab63e597c4d3`
+selected review scope from the presence of an intermediate strategy, even for a
+terminal single build (`open/wiring/project-build.ts:687-688`). In an observed
+live run, the worker's durable `build.result` reported two full-suite runs: an
+atomic-trailer race on the first, then 1,660 files passing on the second. Those
+are worker claims, not independent host measurements. The operator observed
+roughly 53 minutes of child elapsed time; host stage events subsequently showed
+receipt invalidation followed by review dispatch, not a completed host receipt.
+This candidate selects the full suite at terminal review
+(`open/wiring/project-build.ts:702`) and proves review-to-publication reuse in
+consuming tests. No deployed after-timing or live saving is claimed.
+
 Fresh terminal `single` and `task_sequence` workers now perform stage 1. Host
 review runs the full suite, and publication consumes the existing durable
 receipt under its unchanged owner, revision, round, strategy, dependency,
