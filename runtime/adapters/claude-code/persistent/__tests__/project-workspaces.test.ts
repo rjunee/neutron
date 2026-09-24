@@ -22,6 +22,9 @@ class Server implements HerdrRpc {
   failure: string | undefined
   rejectWorker = false
   foreignOnReject = false
+  afterTabMove?: () => void
+  paneResponseId: string | undefined
+  processResponseId: string | undefined
   afterProcessInfo?: (pane: { pane_id: string; workspace_id: string; tab_id: string; argv: unknown }) => void
   serial = 0
   ordering: string[] = []
@@ -72,16 +75,16 @@ class Server implements HerdrRpc {
       case 'pane.get': {
         const pane = this.panes.get(params.pane_id as string)
         if (!pane) throw new HerdrError('pane_not_found', 'gone')
-        return { pane }
+        return { pane: { ...pane, pane_id: this.paneResponseId ?? pane.pane_id } }
       }
       case 'pane.process_info': {
         const pane = this.panes.get(params.pane_id as string)!
-        const result = { process_info: { foreground_processes: [{ argv: pane.argv }] } }
+        const result = { process_info: { pane_id: this.processResponseId ?? pane.pane_id, foreground_processes: [{ argv: pane.argv }] } }
         this.afterProcessInfo?.(pane)
         return result
       }
       case 'tab.get': return { tab: this.tabs.get(params.tab_id as string) }
-      case 'tab.move': this.ordering = [params.tab_id as string, ...this.ordering.filter(id => id !== params.tab_id)]; return {}
+      case 'tab.move': this.ordering = [params.tab_id as string, ...this.ordering.filter(id => id !== params.tab_id)]; this.afterTabMove?.(); return {}
       case 'tab.close': {
         this.tabs.delete(params.tab_id as string)
         for (const [id, pane] of this.panes) if (pane.tab_id === params.tab_id) this.panes.delete(id)
@@ -304,6 +307,76 @@ test('real Chat creation preserves a foreign split arriving after placeholder id
   expect(server.ordering[0]).toBe(chat.layout.tab_id)
   expect(server.calls.filter(call => call.method === 'layout.apply').every(call => call.params.tab_id === undefined)).toBe(true)
 })
+
+for (const change of ['occupant', 'placement', 'workspace-owner', 'pane-response', 'process-response', 'unknown'] as const) {
+  test(`Chat replacement refuses ${change} changed after new tab ordering`, async () => {
+    const { manager, server, path } = fixture()
+    const worker = await manager.applyLayout(server, root, scope('one', 'worker'))
+    const record = Object.values(JSON.parse(readFileSync(path, 'utf8')))[0] as { workspace: string; chat: { pane: string } }
+    const placeholder = server.panes.get(record.chat.pane)!
+    server.afterTabMove = () => {
+      if (change === 'occupant') placeholder.argv = ['foreign-shell']
+      if (change === 'placement') placeholder.tab_id = 'foreign-tab'
+      if (change === 'workspace-owner') server.workspaces.get(record.workspace)!.tokens = { neutron_project_owner: 'foreign' }
+      if (change === 'pane-response') server.paneResponseId = 'another-pane'
+      if (change === 'process-response') server.processResponseId = 'another-pane'
+      if (change === 'unknown') server.failure = 'pane.process_info'
+    }
+    await expect(manager.applyLayout(server, root, scope())).rejects.toThrow()
+    expect(server.panes.has(record.chat.pane)).toBe(true)
+    expect(server.panes.has(worker.layout.root.pane_id)).toBe(true)
+    expect(server.calls.filter(call => call.method === 'pane.close' && call.params.pane_id === record.chat.pane)).toHaveLength(0)
+    expect(server.count('workspace.close')).toBe(0)
+    expect(server.count('tab.close')).toBe(0)
+    expect(Object.values(JSON.parse(readFileSync(path, 'utf8'))).map((row: any) => row.state)).toEqual(['pending'])
+    // The failed new Chat is cleaned up, without publishing it or allowing a
+    // restart to launch a duplicate into an unresolved placement operation.
+    expect(server.panes.size).toBe(2)
+    await expect(new ProjectWorkspaceManager(path).applyLayout(server, root, scope())).rejects.toThrow('pending')
+  })
+}
+
+test('final revalidation retires only verified placeholder beside a late foreign split', async () => {
+  const { manager, server, path } = fixture()
+  const worker = await manager.applyLayout(server, root, scope('one', 'worker'))
+  const record = Object.values(JSON.parse(readFileSync(path, 'utf8')))[0] as { chat: { pane: string } }
+  server.afterTabMove = () => {
+    const placeholder = server.panes.get(record.chat.pane)!
+    server.panes.set('late-sibling', { ...placeholder, pane_id: 'late-sibling', argv: ['foreign-shell'] })
+    server.tabs.get(placeholder.tab_id)!.pane_count += 1
+  }
+  const chat = await manager.applyLayout(server, root, scope())
+  expect(server.panes.has(record.chat.pane)).toBe(false)
+  expect(server.panes.has(worker.layout.root.pane_id)).toBe(true)
+  expect(server.panes.has(chat.layout.root.pane_id)).toBe(true)
+  expect(server.panes.has('late-sibling')).toBe(true)
+  expect(server.ordering[0]).toBe(chat.layout.tab_id)
+  expect(server.calls.filter(call => call.method === 'layout.apply').every(call => call.params.focus === false && call.params.tab_id === undefined)).toBe(true)
+  expect(server.count('workspace.close')).toBe(0)
+  expect(server.count('tab.close')).toBe(0)
+  const closeIndex = server.calls.findLastIndex(call => call.method === 'pane.close')
+  expect(server.calls[closeIndex - 1]).toEqual({ method: 'pane.process_info', params: { pane_id: record.chat.pane } })
+})
+
+for (const response of ['pane', 'process'] as const) {
+  for (const role of ['chat', 'worker'] as const) {
+    test(`${role} refuses ${response} response belonging to another pane before layout mutation`, async () => {
+      const { manager, server } = fixture()
+      await manager.applyLayout(server, root, scope('one', 'worker'))
+      const layouts = server.count('layout.apply')
+      const closes = server.count('pane.close')
+      if (response === 'pane') server.paneResponseId = 'foreign'
+      else server.processResponseId = 'foreign'
+      await expect(manager.applyLayout(server, root, scope('one', role))).rejects.toThrow()
+      expect(server.count('layout.apply')).toBe(layouts)
+      expect(server.count('pane.close')).toBe(closes)
+      server.paneResponseId = undefined
+      server.processResponseId = undefined
+      await manager.applyLayout(server, root, scope('one', role))
+      expect(server.count('layout.apply')).toBe(layouts + 1)
+    })
+  }
+}
 
 test('competing manager cannot acquire a pending creation, but can use ready ownership', async () => {
   const { manager, server, path } = fixture()

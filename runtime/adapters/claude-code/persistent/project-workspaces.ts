@@ -182,7 +182,7 @@ export class ProjectWorkspaceManager {
     if (placement.role === 'chat' && record.chat) {
       try {
         const pane = object(object(await client.call('pane.get', { pane_id: record.chat.pane })).pane)
-        if (pane.workspace_id !== workspace || pane.tab_id !== record.chat.tab) throw new Error('project-workspaces: Chat placement changed')
+        if (pane.pane_id !== record.chat.pane || pane.workspace_id !== workspace || pane.tab_id !== record.chat.tab) throw new Error('project-workspaces: Chat placement changed')
         if (!record.chat.placeholderArgv) throw new Error('project-workspaces: Chat already has a live owner; adopt it')
         const tab = object(object(await client.call('tab.get', { tab_id: record.chat.tab })).tab)
         if (tab.workspace_id !== workspace || tab.tab_id !== record.chat.tab || tab.pane_count !== 1) {
@@ -190,7 +190,7 @@ export class ProjectWorkspaceManager {
         }
         const info = object(object(await client.call('pane.process_info', { pane_id: record.chat.pane })).process_info)
         const foreground = info.foreground_processes
-        if (!Array.isArray(foreground) || foreground.length !== 1
+        if (info.pane_id !== record.chat.pane || !Array.isArray(foreground) || foreground.length !== 1
           || JSON.stringify(object(foreground[0]).argv) !== JSON.stringify(record.chat.placeholderArgv)) {
           throw new Error('project-workspaces: Chat placeholder identity is not verified')
         }
@@ -221,7 +221,12 @@ export class ProjectWorkspaceManager {
       }
       // Never replace the placeholder's entire tab. A split made after our
       // identity probe belongs to someone else and survives this pane-only close.
-      if (replacedPlaceholder) await client.call('pane.close', { pane_id: replacedPlaceholder })
+      if (replacedPlaceholder) {
+        // Creation and ordering yield to the server. Their success is not proof
+        // the former placeholder still has the identity sampled before them.
+        await this.verifyPlaceholderRetirement(client, record)
+        await client.call('pane.close', { pane_id: replacedPlaceholder })
+      }
       if (initialPane) await client.call('pane.close', { pane_id: initialPane })
       this.reserve(key, record, {
         ...record, state: 'ready',
@@ -242,13 +247,13 @@ export class ProjectWorkspaceManager {
   private async verifyChat(client: HerdrRpc, workspace: string, chat: ChatSlot): Promise<boolean> {
     try {
       const pane = object(object(await client.call('pane.get', { pane_id: chat.pane })).pane)
-      if (pane.workspace_id !== workspace || pane.tab_id !== chat.tab) throw new Error('project-workspaces: Chat placement changed')
+      if (pane.pane_id !== chat.pane || pane.workspace_id !== workspace || pane.tab_id !== chat.tab) throw new Error('project-workspaces: Chat placement changed')
       const tab = object(object(await client.call('tab.get', { tab_id: chat.tab })).tab)
       if (tab.workspace_id !== workspace || tab.tab_id !== chat.tab) throw new Error('project-workspaces: Chat tab changed')
       if (chat.placeholderArgv) {
         if (tab.pane_count !== 1) throw new Error('project-workspaces: Chat placeholder tab is no longer exclusively owned')
         const info = object(object(await client.call('pane.process_info', { pane_id: chat.pane })).process_info)
-        if (!Array.isArray(info.foreground_processes) || info.foreground_processes.length !== 1
+        if (info.pane_id !== chat.pane || !Array.isArray(info.foreground_processes) || info.foreground_processes.length !== 1
           || JSON.stringify(object(info.foreground_processes[0]).argv) !== JSON.stringify(chat.placeholderArgv)) {
           throw new Error('project-workspaces: Chat placeholder identity is not verified')
         }
@@ -262,18 +267,32 @@ export class ProjectWorkspaceManager {
 
   private async retireUnusedPlaceholder(client: HerdrRpc, key: string, record: WorkspaceRecord): Promise<void> {
     if (!record.workspace || !record.chat?.placeholderArgv) return
-    const pane = object(object(await client.call('pane.get', { pane_id: record.chat.pane })).pane)
-    if (pane.pane_id !== record.chat.pane || pane.tab_id !== record.chat.tab || pane.workspace_id !== record.workspace) return
-    const found = object(object(await client.call('workspace.get', { workspace_id: record.workspace })).workspace)
-    if (found.workspace_id !== record.workspace || object(found.tokens)[TOKEN] !== record.token) return
-    const info = object(object(await client.call('pane.process_info', { pane_id: record.chat.pane })).process_info)
-    if (!Array.isArray(info.foreground_processes) || info.foreground_processes.length !== 1
-      || JSON.stringify(object(info.foreground_processes[0]).argv) !== JSON.stringify(record.chat.placeholderArgv)) return
+    await this.verifyPlaceholderRetirement(client, record)
     await client.call('pane.close', { pane_id: record.chat.pane })
     // Retain the workspace mapping and closed slot reference. Next wake verifies
     // whether the workspace/slot is gone before recreating either. Lifecycle
     // reconciliation may reclaim the empty workspace with a server-side guard.
     this.reserve(key, record, { ...record, state: 'ready' })
+  }
+
+  /** Verify only the pane being retired: a foreign sibling never authorizes
+   * closing its tab and does not invalidate our exact inert placeholder. This
+   * is a fresh identity sample, not an atomic server-side compare-and-close. */
+  private async verifyPlaceholderRetirement(client: HerdrRpc, record: WorkspaceRecord): Promise<void> {
+    if (!record.workspace || !record.chat?.placeholderArgv) throw new Error('project-workspaces: missing placeholder ownership')
+    const pane = object(object(await client.call('pane.get', { pane_id: record.chat.pane })).pane)
+    if (pane.pane_id !== record.chat.pane || pane.tab_id !== record.chat.tab || pane.workspace_id !== record.workspace) {
+      throw new Error('project-workspaces: Chat placement changed')
+    }
+    const found = object(object(await client.call('workspace.get', { workspace_id: record.workspace })).workspace)
+    if (found.workspace_id !== record.workspace || object(found.tokens)[TOKEN] !== record.token) {
+      throw new Error('project-workspaces: live workspace ownership mismatch')
+    }
+    const info = object(object(await client.call('pane.process_info', { pane_id: record.chat.pane })).process_info)
+    if (info.pane_id !== record.chat.pane || !Array.isArray(info.foreground_processes) || info.foreground_processes.length !== 1
+      || JSON.stringify(object(info.foreground_processes[0]).argv) !== JSON.stringify(record.chat.placeholderArgv)) {
+      throw new Error('project-workspaces: Chat placeholder identity is not verified')
+    }
   }
 
   private reserve(key: string, expected: WorkspaceRecord, next: WorkspaceRecord): WorkspaceRecord {
