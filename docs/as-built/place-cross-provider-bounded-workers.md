@@ -173,6 +173,64 @@ Mutations, run by hand and reverted:
   "placed worker: one CLI process, identical outcome …" red. The screen-independence test
   stays green, because the outcome still comes from the exit status.
 
+#### Second review (APPROVE) and the disposition of its minor findings
+
+The trident review of the fix round (`f307c451`) returned APPROVE with two minor findings
+and two nits. The run that published it then stopped because the cross-model review seat
+failed at host dispatch. That was an infrastructure fault, not a verdict on the code. The
+branch was brought forward onto current main by a merge, with no rebase and no conflict,
+and re-verified there. No runtime code changed in this step. Line numbers below are at
+the merged head.
+
+- **M1: a kept pane is retired only on a same-step resume.** A pane whose close was
+  refused as unknown, or whose close timed out, stays `placed`. Only a later resume of
+  the same step retires it (`retire()`, `worker-placement.ts:340`). The follower
+  (`VIEW_FOLLOW_SCRIPT`, `worker-placement.ts:130-149`) never exits on its own. Each such
+  Herdr fault can therefore leave one idle follower and its tab. Disposition: not fixed in
+  this slice. Pane and workspace retirement belongs to the sleep and wake lifecycle, which
+  the spec puts out of scope here (spec lines 46-51, acceptance 72-75). The cost is
+  bounded: one idle, credential-free follower (launched under `env -i`) and one tab per
+  fault. Evidence is not affected, because no result, usage, exit or cancellation read
+  goes through the pane.
+- **M2: the restart path awaits `retire` before decoding the receipt.** The resume
+  branches call `await options.placement?.retire(...)` before they read the durable
+  receipt (`claude-headless.ts:323`, `codex-headless.ts:296`, `codex-review.ts:120`). On a
+  Herdr stall this adds at most `inspectTimeoutMs + closeTimeoutMs`, 5s each by default
+  (`worker-placement.ts:234-235`). No deadline check follows the wait on these paths.
+  `claude-headless.ts` checks `expired()` only on the fresh-launch path (`:344`, `:373`).
+  The recovered outcome therefore cannot change. Disposition: recorded as a follow-up, to
+  make the resume retire non-blocking the way `release()` is.
+- **Nits.** The composer wiring is asserted by a source-text match in
+  `project-build-terminal.test.ts`. It stays, because it is mutation-red: dropping the
+  wiring turns it and the E2E red. The red trailer-publication lane in the earlier host
+  suite (`trident/codex-build.test.ts`) was unrelated, and main has since fixed it (#1257).
+
+Re-measured on the merged base:
+
+- Placement suites: `worker-placement`, `claude-headless`, `codex-headless`,
+  `codex-review`, `project-runners`, `herdr-project-placement`, `project-workspaces` and
+  `project-build-terminal` give 232 pass, 0 fail.
+- Consuming E2E (`open/__tests__/project-build-e2e.test.ts`, whole file): 308 pass,
+  0 fail. Main's model-tier cases account for the rise from 299.
+- Mutations, each reverted:
+  - `closeOwned` treating every inspection as owned (`worker-placement.ts:260`): 8 fail
+    and 16 pass in `worker-placement.test.ts`. The failures are the three
+    changed-identity tests, the four unknown-identity tests and the in-run refusal. The
+    `project-runners.test.ts` control stays green (36 pass).
+  - `await view.settled()` after `release()`:
+    - `claude-headless.ts:370`: 2 fail, "a stalled view close cannot expire …" and "a
+      stalled placement neither delays …".
+    - `codex-headless.ts:271`: 1 fail, "a stalled view close never holds the build
+      result …".
+    - `codex-review.ts:225`: 1 fail, "a stalled view close never holds the review
+      verdict …".
+  - Dropping `placement: workerPlacement` from the Claude runner
+    (`open/wiring/project-build.ts:494`): the E2E "Codex owner: every cross-provider Claude
+    worker gets a labelled tab …" goes red. It is green in the unmutated whole-file run.
+  - Decoding the view file instead of the piped bytes (`claude-headless.ts:374`): 24 fail
+    and 18 pass in `claude-headless.test.ts`, including "placed worker: one CLI process,
+    identical outcome …". The screen-independence test stays green.
+
 ### Out of scope, still open
 
 This does not retire the Chat placeholder or change conversation placement. It does not
