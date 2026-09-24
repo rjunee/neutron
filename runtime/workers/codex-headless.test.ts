@@ -557,6 +557,8 @@ describe('Codex build wrapper placed in its project Herdr workspace', () => {
     }
     const view = readdirSync(f.request().cwd).find(name => name.endsWith('.view.log'))!
     expect(readFileSync(join(f.request().cwd, view), 'utf8')).toContain('"turn.completed"')
+    // Cleanup is detached from the outcome; the view pane closes after the result.
+    await until(async () => (await rig.receipts(f.request().cwd))[0]?.state === 'closed' ? true : undefined)
     expect(await rig.receipts(f.request().cwd)).toMatchObject([{ state: 'closed' }])
     expect(rig.server.callsTo('pane.read')).toHaveLength(0)
   })
@@ -614,7 +616,7 @@ describe('Codex build wrapper placed in its project Herdr workspace', () => {
       expect(new Set(targets)).toEqual(new Set([-wrapper]))
     } finally { kill.mockRestore() }
     await until(() => { try { process.kill(grandchild, 0); return undefined } catch { return true } })
-    expect(await rig.receipts(cwd)).toMatchObject([{ state: 'closed' }])
+    await until(async () => (await rig.receipts(cwd))[0]?.state === 'closed' ? true : undefined)
   })
 
   test('restart adopts the receipt: no second wrapper, no new tab, the stale view pane closed', async () => {
@@ -624,20 +626,48 @@ describe('Codex build wrapper placed in its project Herdr workspace', () => {
     expect((await rig.placement().place({ key: 'earlier', taskLabel: 'Build · earlier', cwd,
       viewPath: join(cwd, 'earlier.log'), receiptDir: join(cwd, 'terminal') })).kind).toBe('placed')
     rig.server.failMethod('pane.close')
+    const closes = rig.server.callsTo('pane.close').length
     const request = f.request()
     const first = await createCodexHeadlessRunner({ buildScript: f.script, probe: { ok: true }, placement: rig.placement() })
       .run(request, 'headless', new AbortController().signal)
     expect(first.kind).toBe('completed')
+    // The first host's detached cleanup tried its verified close, and it failed.
+    await until(() => rig.server.callsTo('pane.close').length > closes ? true : undefined)
     const [stale] = await rig.receipts(cwd)
-    expect(stale).toMatchObject({ state: 'placed' })
+    expect(stale).toEqual({ state: 'placed', pane: expect.any(String), pid: expect.any(Number),
+      viewPath: expect.stringMatching(/\.view\.log$/), taskLabel: expect.stringMatching(/^Build · /) })
     rig.server.clearFailure('pane.close')
     const tabs = rig.server.workerLayouts().length
+    const from = rig.server.calls.length
     const resumed = await createCodexHeadlessRunner({ buildScript: f.script, probe: { ok: true }, placement: rig.placement() })
       .run(request, 'headless', new AbortController().signal)
+    expect(rig.server.calls.slice(from).map(call => call.method).filter(method => method.startsWith('pane.')))
+      .toEqual(['pane.get', 'pane.process_info', 'pane.close'])
     expect(resumed.kind).toBe('completed')
     expect(readFileSync(f.threads, 'utf8')).toBe('\n')
     expect(rig.server.workerLayouts()).toHaveLength(tabs)
     expect(rig.server.panes.has(stale!.pane!)).toBe(false)
     expect(await rig.receipts(cwd)).toEqual([{ state: 'closed', pane: stale!.pane! }])
+  })
+
+  test('a stalled view close never holds the build result: completed with its claim while the close hangs', async () => {
+    const f = fixture()
+    const cwd = f.request().cwd
+    // The close would wait a full minute; the result must not.
+    const rig = workerPlacementRig(cwd, {}, { closeTimeoutMs: 60_000 })
+    expect((await rig.placement().place({ key: 'warm', taskLabel: 'Build · warm', cwd,
+      viewPath: join(cwd, 'warm.log'), receiptDir: join(cwd, 'terminal') })).kind).toBe('placed')
+    const closes = rig.server.callsTo('pane.close').length
+    const releaseClose = rig.server.holdMethod('pane.close')
+    try {
+      const outcome = await createCodexHeadlessRunner({ buildScript: f.script, probe: { ok: true }, placement: rig.placement() })
+        .run(f.request(), 'headless', new AbortController().signal)
+      expect(outcome).toMatchObject({ kind: 'completed', thread_id: 'observed-first' })
+      if (outcome.kind === 'completed') expect(outcome.result).toEqual(measured)
+      expect(readdirSync(cwd).some(name => name.endsWith('.receipt'))).toBe(true)
+      await until(() => rig.server.callsTo('pane.close').length > closes ? true : undefined)
+      expect(await rig.receipts(cwd)).toMatchObject([{ state: 'placed' }])
+    } finally { releaseClose() }
+    await until(async () => (await rig.receipts(cwd))[0]?.state === 'closed' ? true : undefined)
   })
 })

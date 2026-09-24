@@ -364,7 +364,10 @@ export function createClaudeHeadlessRunner(input: ClaudeHeadlessRunnerOptions): 
           executed = await execute(cli, args, env!, cwd, prompt, signal, deadline - Date.now(),
             child => { if (child) live.set(key, child); else live.delete(key) },
             bytes => { publisher.publish(claudeObservation(bytes, started, Date.now())) }, view)
-        } finally { await view.finish() }
+          // RESULT FIRST. Releasing the view only STARTS its cleanup; the exit is
+          // classified, the deadline checked and the result published without waiting
+          // for any pane RPC, so a stalled close cannot expire a within-budget result.
+        } finally { view.release() }
         observation = await publisher.settle(claudeObservation(executed.bytes, started, Date.now()))
         if (executed.outcome) return observed(executed.outcome)
         if (expired()) return observed(unknown('Claude observation expired before the host accepted its result.'))

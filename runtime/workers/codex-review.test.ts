@@ -441,7 +441,8 @@ test('placed review seat: one model turn, identical verdict, a Review tab showin
   expect(JSON.stringify(tab)).not.toContain(f.home)
   const view = (await readdir(f.dir)).find(name => name.endsWith('.view.log'))!
   expect(await readFile(join(f.dir, view), 'utf8')).toContain('"turn.completed"')
-  expect(await rig.receipts(f.dir)).toMatchObject([{ state: 'closed' }])
+  // Cleanup is detached from the outcome; the view pane closes after the verdict.
+  await until(async () => (await rig.receipts(f.dir))[0]?.state === 'closed' ? true : undefined)
   expect(rig.server.callsTo('pane.read')).toHaveLength(0)
 })
 
@@ -490,7 +491,7 @@ test('cancelling a placed seat kills its group, grandchild included, and closes 
     expect(new Set(targets)).toEqual(new Set([-seat]))
   } finally { kill.mockRestore() }
   await until(() => { try { process.kill(grandchild, 0); return undefined } catch { return true } })
-  expect(await rig.receipts(f.dir)).toMatchObject([{ state: 'closed' }])
+  await until(async () => (await rig.receipts(f.dir))[0]?.state === 'closed' ? true : undefined)
 })
 
 test('restart adopts the seat receipt: no second model turn, no new tab, the stale pane closed', async () => {
@@ -499,15 +500,43 @@ test('restart adopts the seat receipt: no second model turn, no new tab, the sta
   expect((await rig.placement().place({ key: 'earlier', taskLabel: 'Review · earlier', cwd: f.dir,
     viewPath: join(f.dir, 'earlier.log'), receiptDir: join(f.dir, 'terminal') })).kind).toBe('placed')
   rig.server.failMethod('pane.close')
+  const closes = rig.server.callsTo('pane.close').length
   const first = await placedRunner(f, rig).run(f.req, 'headless', new AbortController().signal)
   expect(first.kind).toBe('completed')
+  // The first host's detached cleanup tried its verified close, and it failed.
+  await until(() => rig.server.callsTo('pane.close').length > closes ? true : undefined)
   const [stale] = await rig.receipts(f.dir)
-  expect(stale).toMatchObject({ state: 'placed' })
+  expect(stale).toEqual({ state: 'placed', pane: expect.any(String), pid: expect.any(Number),
+    viewPath: expect.stringMatching(/\.view\.log$/), taskLabel: expect.stringMatching(/^Review · /) })
   rig.server.clearFailure('pane.close')
   const tabs = rig.server.workerLayouts().length
+  const from = rig.server.calls.length
   expect((await placedRunner(f, rig).run(f.req, 'headless', new AbortController().signal)).kind).toBe('completed')
+  expect(rig.server.calls.slice(from).map(call => call.method).filter(method => method.startsWith('pane.')))
+    .toEqual(['pane.get', 'pane.process_info', 'pane.close'])
   expect(await f.calls()).toHaveLength(1)
   expect(rig.server.workerLayouts()).toHaveLength(tabs)
   expect(rig.server.panes.has(stale!.pane!)).toBe(false)
   expect(await rig.receipts(f.dir)).toEqual([{ state: 'closed', pane: stale!.pane! }])
+})
+
+test('a stalled view close never holds the review verdict: completed and committed while the close hangs', async () => {
+  const expected = await (await fixture()).run()
+  const f = await fixture()
+  // The close would wait a full minute; the verdict must not.
+  const rig = workerPlacementRig(f.dir, {}, { closeTimeoutMs: 60_000 })
+  expect((await rig.placement().place({ key: 'warm', taskLabel: 'Review · warm', cwd: f.dir,
+    viewPath: join(f.dir, 'warm.log'), receiptDir: join(f.dir, 'terminal') })).kind).toBe('placed')
+  const closes = rig.server.callsTo('pane.close').length
+  const releaseClose = rig.server.holdMethod('pane.close')
+  try {
+    const outcome = await placedRunner(f, rig).run(f.req, 'headless', new AbortController().signal)
+    expect({ ...outcome, observation: undefined }).toEqual({ ...expected, observation: undefined })
+    expect(outcome.observation?.usage).toEqual(expected.observation?.usage)
+    expect(JSON.parse(await readFile(f.req.result.path, 'utf8'))).toMatchObject({ kind: 'completed', result: { verdict: 'APPROVE' } })
+    await until(() => rig.server.callsTo('pane.close').length > closes ? true : undefined)
+    expect(await rig.receipts(f.dir)).toMatchObject([{ state: 'placed' }])
+  } finally { releaseClose() }
+  await until(async () => (await rig.receipts(f.dir))[0]?.state === 'closed' ? true : undefined)
+  expect(await f.calls()).toHaveLength(1)
 })

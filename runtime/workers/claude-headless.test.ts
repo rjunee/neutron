@@ -484,9 +484,9 @@ test('placed worker: one CLI process, identical outcome, a labelled tab in the p
   const shown = await readFile(join(f.state, view), 'utf8')
   expect(shown).toContain('"structured_output"')
   expect(shown.endsWith('[host] worker exited\n')).toBe(true)
-  // Finished: the view pane is closed and the receipt says so.
-  const [receipt] = await rig.receipts(f.state)
-  expect(receipt).toMatchObject({ state: 'closed' })
+  // Finished: the view pane is closed and the receipt says so. Cleanup is detached
+  // from the outcome, so it is awaited here, never by the runner.
+  const receipt = await until(async () => { const [r] = await rig.receipts(f.state); return r?.state === 'closed' ? r : undefined })
   expect(rig.server.closed).toContain(receipt!.pane!)
   expect(rig.server.callsTo('pane.read')).toHaveLength(0)
 })
@@ -543,8 +543,7 @@ test('cancelling a placed worker kills its own process group, grandchild include
     expect(targets).not.toContain(-process.pid)
   } finally { kill.mockRestore() }
   await until(() => { try { process.kill(grandchild, 0); return undefined } catch { return true } })
-  const [receipt] = await rig.receipts(f.state)
-  expect(receipt).toMatchObject({ state: 'closed' })
+  const receipt = await until(async () => { const [r] = await rig.receipts(f.state); return r?.state === 'closed' ? r : undefined })
   expect(rig.server.closed).toContain(receipt!.pane!)
 })
 
@@ -556,14 +555,22 @@ test('restart adopts the durable receipt: no new CLI, no new tab, the stale view
     viewPath: join(f.root, 'earlier.log'), receiptDir: f.root })).kind).toBe('placed')
   // The first host "dies" with its view pane still open: the close never lands.
   rig.server.failMethod('pane.close')
+  const closes = rig.server.callsTo('pane.close').length
   const first = await createClaudeHeadlessRunner({ ...f.options, placement: rig.placement() }).run(f.req, 'headless', new AbortController().signal)
   expect(first.kind).toBe('completed')
+  // The first host's detached cleanup tried its (verified) close, and it failed.
+  await until(() => rig.server.callsTo('pane.close').length > closes ? true : undefined)
   const [stale] = await rig.receipts(f.state)
-  expect(stale).toMatchObject({ state: 'placed' })
+  // The receipt carries the follower identity the replacement must re-verify.
+  expect(stale).toEqual({ state: 'placed', pane: expect.any(String), pid: expect.any(Number),
+    viewPath: expect.stringContaining('claude-headless-view-'), taskLabel: expect.stringMatching(/^Plan · /) })
   rig.server.clearFailure('pane.close')
   const tabs = rig.server.workerLayouts().length
   const replacement = createClaudeHeadlessRunner({ ...f.options, placement: rig.placement() })
+  const from = rig.server.calls.length
   expect(await replacement.run(f.req, 'headless', new AbortController().signal)).toEqual(first)
+  expect(rig.server.calls.slice(from).map(call => call.method).filter(method => method.startsWith('pane.')))
+    .toEqual(['pane.get', 'pane.process_info', 'pane.close'])
   expect(await readFile(f.counter, 'utf8')).toBe('call\n')
   expect(rig.server.workerLayouts()).toHaveLength(tabs)
   expect(rig.server.panes.has(stale!.pane!)).toBe(false)
@@ -574,4 +581,59 @@ test('without a placement nothing is placed and no receipt or view file exists',
   const f = await fixture()
   expect((await f.run()).kind).toBe('completed')
   expect((await readdir(f.state)).filter(name => name.includes('placement') || name.includes('-view-'))).toEqual([])
+})
+
+// --- Result first: view cleanup never stands between the worker's exit and its result. ---
+
+/** A rig whose workspace already exists, so a held method catches the WORKER's view. */
+async function warmRig(f: Awaited<ReturnType<typeof fixture>>, timeouts: { placeTimeoutMs?: number; closeTimeoutMs?: number } = {}) {
+  const rig = workerPlacementRig(f.root, {}, timeouts)
+  expect((await rig.placement().place({ key: 'warm', taskLabel: 'Plan · warm', cwd: f.cwd,
+    viewPath: join(f.root, 'warm.log'), receiptDir: f.root })).kind).toBe('placed')
+  return rig
+}
+
+test('a stalled view close cannot expire a within-budget result', async () => {
+  const f = await fixture()
+  // The close is bounded at 4s; the dispatch budget is 3s. A runner that waited for
+  // cleanup before its deadline check would turn this completed result into unknown.
+  const rig = await warmRig(f, { closeTimeoutMs: 4_000 })
+  const closes = rig.server.callsTo('pane.close').length
+  const releaseClose = rig.server.holdMethod('pane.close')
+  const runner = createClaudeHeadlessRunner({ ...f.options, placement: rig.placement(), taskName: 'authentication' })
+  const outcome = await runner.run({ ...f.req, budget: { wall_ms: 3_000 } }, 'headless', new AbortController().signal)
+  expect(outcome.kind).toBe('completed')
+  expect(JSON.parse(await readFile(f.req.result.path, 'utf8')).result).toEqual({ answer: 'verified' })
+  expect((outcome.observation as { usage: { input_tokens: number } }).usage.input_tokens).toBe(17)
+  expect((await readdir(f.state)).some(name => name.startsWith('claude-headless-receipt-'))).toBe(true)
+  // The close is still in flight: the pane is on record as placed, not claimed closed.
+  await until(() => rig.server.callsTo('pane.close').length > closes ? true : undefined)
+  const [held] = await rig.receipts(f.state)
+  expect(held).toMatchObject({ state: 'placed' })
+  releaseClose()
+  await until(async () => (await rig.receipts(f.state))[0]?.state === 'closed' ? true : undefined)
+  expect(await readFile(f.counter, 'utf8')).toBe('call\n')
+})
+
+test('a stalled placement neither delays nor changes the result, and its late pane is closed', async () => {
+  const baseline = await fixture()
+  const expected = await baseline.run()
+  const f = await fixture()
+  const rig = await warmRig(f)
+  const layouts = rig.server.workerLayouts().length
+  const releaseApply = rig.server.holdMethod('layout.apply')
+  const runner = createClaudeHeadlessRunner({ ...f.options, placement: rig.placement() })
+  const outcome = await runner.run({ ...f.req, budget: { wall_ms: 3_000 } }, 'headless', new AbortController().signal)
+  expect(comparable(outcome)).toEqual(comparable({ ...expected }))
+  expect(JSON.parse(await readFile(f.req.result.path, 'utf8')).result).toEqual({ answer: 'verified' })
+  // Placement had not answered when the result was published.
+  expect((await rig.receipts(f.state))[0]).toEqual({ state: 'pending' })
+  releaseApply()
+  // Placement lands after the worker exited; the released view closes it through the
+  // verified path.
+  const receipt = await until(async () => { const [r] = await rig.receipts(f.state); return r?.state === 'closed' ? r : undefined })
+  expect(rig.server.closed).toContain(receipt.pane!)
+  expect(rig.server.workerLayouts()).toHaveLength(layouts + 1)
+  expect(rig.server.callsTo('pane.read')).toHaveLength(0)
+  expect(await readFile(f.counter, 'utf8')).toBe('call\n')
 })

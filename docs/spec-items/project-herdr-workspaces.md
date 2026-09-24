@@ -85,7 +85,10 @@ for General), placed through this manager from production composition
 (`open/wiring/project-build.ts`, `open/composer.ts`). The tab shows a copy of
 the worker's own output; results, usage, exit status and cancellation still
 come from the native process. Placement failure runs the worker unplaced and
-records why. No acceptance box is ticked: conversation placement, General
+records why. View-pane retirement re-verifies the recorded follower identity
+through the live pane process sample before any close and refuses changed or
+unknown identity; worker results and receipts are published before view
+cleanup. No acceptance box is ticked: conversation placement, General
 owner admission and sleep/retirement remain open. See
 `docs/as-built/place-cross-provider-bounded-workers.md`.
 

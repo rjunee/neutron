@@ -166,7 +166,7 @@ export function createCodexReviewTransport(options: {
       viewPath: `${reservation}.view.log`, receiptDir: dirname(req.result.path) })
     try {
       child = Bun.spawn(['codex', ...args], { cwd: req.cwd, env, detached: true, stdin: new Blob([prompt]), stdout: 'pipe', stderr: 'ignore' })
-    } catch { await view.finish(); return { kind: 'failed', class: 'infra', detail: 'Codex review could not start' } }
+    } catch { view.release(); return { kind: 'failed', class: 'infra', detail: 'Codex review could not start' } }
     options.live.set(req.step_id, child)
     // The native seat exists; only now may a view of it be placed. Not awaited.
     view.started()
@@ -220,7 +220,9 @@ export function createCodexReviewTransport(options: {
     // Always close the process group, including children that survived the CLI.
     kill('SIGKILL'); clearTimeout(killTimer)
     options.live.delete(req.step_id)
-    await view.finish()
+    // RESULT FIRST: the view's cleanup starts here and is never awaited, so no pane RPC
+    // sits between the seat's exit and the verdict/receipt commit.
+    view.release()
     // A truncated JSONL transport can still end with one complete JSON object.
     // Observe its usage without treating an unterminated event as completion.
     try {

@@ -8,7 +8,9 @@
  * moves its tab, and then adds a worker tab — four objects the single-pane fake cannot
  * tell apart. This fake answers only the methods those two components ask, records
  * every request so tests assert the EXACT RPC sent (not an internal call), and keeps
- * the same three levers: fail a method, malform a reply, or inspect the calls.
+ * the same levers: fail a method, malform a reply, hold a method in flight, or inspect
+ * the calls. `panes` is public so a test can model replaced work (change a pane's
+ * argv or pid) or a vanished pane (delete it).
  * Anything else is refused loudly as a new question the host started asking.
  */
 
@@ -35,10 +37,17 @@ export class FakeHerdrWorkspaceServer implements HerdrRpc {
   private serial = 0
   private readonly failures = new Map<string, Error>()
   private readonly malformed = new Map<string, Record<string, unknown>>()
+  private readonly holds = new Map<string, Promise<void>>()
 
   failMethod(method: string, error?: Error): void { this.failures.set(method, error ?? new Error(`fake-herdr: ${method} refused`)) }
   clearFailure(method: string): void { this.failures.delete(method) }
   malformMethod(method: string, payload: Record<string, unknown>): void { this.malformed.set(method, payload) }
+  /** Make `method` HANG (recorded, unanswered) until the returned function runs. */
+  holdMethod(method: string): () => void {
+    let release: () => void = () => {}
+    this.holds.set(method, new Promise<void>(resolve => { release = () => { this.holds.delete(method); resolve() } }))
+    return () => release()
+  }
   callsTo(method: string): RecordedCall[] { return this.calls.filter(call => call.method === method) }
 
   /** Worker tabs: every layout.apply that is not the inert Chat reservation. */
@@ -54,6 +63,8 @@ export class FakeHerdrWorkspaceServer implements HerdrRpc {
 
   async call(method: string, params: Record<string, unknown>): Promise<Record<string, unknown>> {
     this.calls.push({ method, params })
+    const held = this.holds.get(method)
+    if (held !== undefined) await held
     const injected = this.failures.get(method)
     if (injected !== undefined) throw injected
     const bad = this.malformed.get(method)
@@ -140,7 +151,8 @@ export class FakeHerdrWorkspaceServer implements HerdrRpc {
  * factory for placements in `scope`. `receipts(dir)` reads every placement
  * receipt a runner wrote there, so tests assert the durable record, not a mock.
  */
-export function workerPlacementRig(directory: string, scope: Partial<WorkerPlacementScope> = {}) {
+export function workerPlacementRig(directory: string, scope: Partial<WorkerPlacementScope> = {},
+  timeouts: { placeTimeoutMs?: number; closeTimeoutMs?: number; inspectTimeoutMs?: number } = {}) {
   const server = new FakeHerdrWorkspaceServer()
   const journal = join(directory, 'terminal', 'workspaces.json')
   // Screens are released and polled at once, so a view that is NOT detached shows up
@@ -148,8 +160,8 @@ export function workerPlacementRig(directory: string, scope: Partial<WorkerPlace
   const host = createProjectWorkspaceHost(journal, { connect: async () => server, pidWaitMs: 500, outputGateMaxMs: 1, pollIntervalMs: 10 })
   const resolved: WorkerPlacementScope = { instanceId: 'instance', projectId: 'project-one', projectLabel: 'Project One', ...scope }
   const receipts = async (dir: string) => Promise.all((await readdir(dir)).filter(name => name.endsWith('.placement.json')).sort()
-    .map(async name => JSON.parse(await readFile(join(dir, name), 'utf8')) as { state: string; pane?: string; reason?: string }))
-  return { server, host, journal, scope: resolved, placement: () => createWorkerPlacement({ host, scope: resolved }), receipts }
+    .map(async name => JSON.parse(await readFile(join(dir, name), 'utf8')) as { state: string; pane?: string; reason?: string; pid?: number; viewPath?: string; taskLabel?: string }))
+  return { server, host, journal, scope: resolved, placement: () => createWorkerPlacement({ host, scope: resolved, ...timeouts }), receipts }
 }
 
 /** Poll `probe` until it yields a value; bounded by attempts, never by a clock assertion. */

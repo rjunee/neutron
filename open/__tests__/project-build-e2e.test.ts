@@ -78,7 +78,7 @@ import { buildRun, type BuildRunOutcome } from '@neutronai/trident/build-run.ts'
 import type { InnerLoopInput } from '@neutronai/trident/inner-loop.ts'
 import { PROJECT_SESSION_ACQUIRE_TIMEOUT_MS, prepareProjectBuild, type ProjectBuildContext } from '../wiring/project-build.ts'
 import { CodexOwnerBindings } from '../wiring/codex-owner-binding.ts'
-import { workerPlacementRig } from '@neutronai/runtime/adapters/claude-code/persistent/__tests__/herdr-workspace-fake-server.ts'
+import { until, workerPlacementRig } from '@neutronai/runtime/adapters/claude-code/persistent/__tests__/herdr-workspace-fake-server.ts'
 import { restrictedOwnerFixture } from './fixtures/codex-owner-review.ts'
 import { PROJECT_DEPENDENCIES_TIMEOUT_MS } from '../wiring/project-build-dependencies.ts'
 import { PROJECT_SNAPSHOT_SCHEMA } from '../wiring/project-build-snapshot.ts'
@@ -5172,9 +5172,14 @@ test('Codex owner: every cross-provider Claude worker gets a labelled tab in its
   const [workspace] = [...rig.server.workspaces.keys()]
   for (const call of rig.server.callsTo('layout.apply')) expect(call.params['workspace_id']).toBe(workspace)
   expect(rig.server.callsTo('pane.read')).toHaveLength(0)
-  const receipts = await placementReceipts(f.context.stateRoot)
+  // View cleanup is detached from every worker's result, so it may still be landing
+  // when the build merges; each pane is closed through the verified-identity path.
+  const receipts = await until(async () => {
+    const found = await placementReceipts(f.context.stateRoot)
+    return found.length === 4 && found.every(receipt => receipt.state === 'closed') ? found : undefined
+  })
   expect(receipts).toHaveLength(4)
-  for (const receipt of receipts) expect(receipt.state).toBe('closed')
+  for (const receipt of receipts) expect(rig.server.closed).toContain(receipt.pane!)
 }, 300_000)
 
 test('General-scoped Codex review seat is placed in Neutron General and its verdict merges', async () => {

@@ -266,7 +266,9 @@ export function createCodexHeadlessRunner(options: CodexHeadlessRunnerOptions = 
           if (child.pid !== undefined) view.started()
           settled = await waitFor(child, signal, req.budget.wall_ms)
           live.delete(req.step_id)
-        } finally { await view.finish() }
+          // RESULT FIRST: releasing the view starts its cleanup and never waits for it,
+          // so no pane RPC sits between the exit and the trailer/receipt commit.
+        } finally { view.release() }
         // Retry the latest absolute snapshot even if an earlier identical write
         // failed. Never replace newer observed spend with an older disk receipt.
         measured = await publisher.settle(events.snapshot(started, Date.now()))

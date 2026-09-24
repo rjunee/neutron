@@ -1,25 +1,36 @@
 import { afterEach, expect, test } from 'bun:test'
-import { mkdtempSync, readFileSync, rmSync } from 'node:fs'
+import { mkdtempSync, readFileSync, rmSync, writeFileSync } from 'node:fs'
 import { tmpdir } from 'node:os'
 import { join } from 'node:path'
 import { createProjectWorkspaceHost } from '../adapters/claude-code/persistent/project-workspace-host.ts'
-import { FakeHerdrWorkspaceServer } from '../adapters/claude-code/persistent/__tests__/herdr-workspace-fake-server.ts'
-import { createWorkerPlacement, openWorkerView, VIEW_FOLLOW_SCRIPT, workerTaskLabel, type WorkerPlacementScope } from './worker-placement.ts'
+import { FakeHerdrWorkspaceServer, until } from '../adapters/claude-code/persistent/__tests__/herdr-workspace-fake-server.ts'
+import { createWorkerPlacement, followerOwnsPane, openWorkerView, VIEW_FOLLOW_SCRIPT, workerTaskLabel,
+  type WorkerPlacementOptions, type WorkerPlacementScope } from './worker-placement.ts'
 
 const directories: string[] = []
 afterEach(() => { for (const directory of directories.splice(0)) rmSync(directory, { recursive: true, force: true }) })
 
-function fixture(projectId: string | null = 'project-one', server = new FakeHerdrWorkspaceServer()) {
+type Timeouts = Pick<Extract<WorkerPlacementOptions, { scope: unknown }>, 'placeTimeoutMs' | 'closeTimeoutMs' | 'inspectTimeoutMs'>
+
+function fixture(projectId: string | null = 'project-one', server = new FakeHerdrWorkspaceServer(), timeouts: Timeouts = {}) {
   const directory = mkdtempSync(join(tmpdir(), 'worker-placement-'))
   directories.push(directory)
   const journal = join(directory, 'terminal', 'workspaces.json')
   const host = createProjectWorkspaceHost(journal, { connect: async () => server, pidWaitMs: 500, outputGateMaxMs: 1, pollIntervalMs: 10 })
   const scope: WorkerPlacementScope = { instanceId: 'instance', projectId, projectLabel: 'Project One' }
-  const placement = createWorkerPlacement({ host, scope })
+  const placement = createWorkerPlacement({ host, scope, ...timeouts })
   const input = (key = 'claude-headless-k1', taskLabel = workerTaskLabel('review', 'authentication')) =>
     ({ key, taskLabel, cwd: directory, viewPath: join(directory, `${key}.view.log`), receiptDir: directory })
   const receipt = (key = 'claude-headless-k1') => JSON.parse(readFileSync(join(directory, `${key}.placement.json`), 'utf8'))
-  return { directory, journal, host, server, scope, placement, input, receipt }
+  /** The `pane.*` methods sent from call index `from` on, in order. */
+  const paneCalls = (from: number) => server.calls.slice(from).map(call => call.method).filter(method => method.startsWith('pane.'))
+  return { directory, journal, host, server, scope, placement, input, receipt, paneCalls }
+}
+
+/** The identity a placed receipt must carry: the pane, the host-reported pid, the view
+ * path the follower tails (its last argv token) and the tab label. */
+function placedReceipt(f: ReturnType<typeof fixture>, pane: string, key = 'claude-headless-k1') {
+  return { state: 'placed', pane, pid: f.server.panes.get(pane)!.shell_pid, viewPath: f.input(key).viewPath, taskLabel: 'Review · authentication' }
 }
 
 const createdWorkspaces = (server: FakeHerdrWorkspaceServer) => new Set([...server.workspaces.keys()])
@@ -62,7 +73,9 @@ test('project placement sends the exact workspace/tab RPCs and runs a credential
     // poll intervals have passed (the rig polls every 10ms with no output gate).
     await Bun.sleep(100)
     expect(f.server.callsTo('pane.read')).toHaveLength(0)
-    expect(f.receipt()).toEqual({ state: 'placed', pane: (view as { paneHandle: string }).paneHandle })
+    const pane = (view as { paneHandle: string }).paneHandle
+    expect(f.receipt()).toEqual(placedReceipt(f, pane))
+    expect(typeof f.receipt().pid).toBe('number')
   } finally {
     if (previous === undefined) delete process.env['HERDR_WORKSPACE_ID']
     else process.env['HERDR_WORKSPACE_ID'] = previous
@@ -123,17 +136,94 @@ test('retire closes the recorded view pane once and ignores unplaced or closed r
   const f = fixture()
   const view = await f.placement.place(f.input())
   if (view.kind !== 'placed') throw new Error('expected placement')
-  // A replacement host (fresh placement over the same receipts) retires it.
+  expect(f.receipt()).toEqual(placedReceipt(f, view.paneHandle))
+  // A replacement host (fresh placement over the same receipts) retires it — only after
+  // re-verifying the live pane still runs the recorded follower.
   const replacement = createWorkerPlacement({ host: f.host, scope: f.scope })
+  const from = f.server.calls.length
   await replacement.retire({ key: 'claude-headless-k1', receiptDir: f.directory })
+  expect(f.paneCalls(from)).toEqual(['pane.get', 'pane.process_info', 'pane.close'])
   expect(f.server.closed.filter(pane => pane === view.paneHandle)).toEqual([view.paneHandle])
   expect(f.server.panes.has(view.paneHandle)).toBe(false)
   expect(f.receipt()).toEqual({ state: 'closed', pane: view.paneHandle })
-  const closes = f.server.callsTo('pane.close').length
+  const after = f.server.calls.length
   await replacement.retire({ key: 'claude-headless-k1', receiptDir: f.directory })
   await replacement.retire({ key: 'never-placed', receiptDir: f.directory })
-  expect(f.server.callsTo('pane.close')).toHaveLength(closes)
+  expect(f.server.calls).toHaveLength(after)
   expect(f.server.workerLayouts()).toHaveLength(1)
+})
+
+// --- Retirement re-verifies identity: a saved pane id is a handle, not identity. ---
+
+for (const change of ['argv', 'pid', 'view-path'] as const) {
+  test(`retire REFUSES a pane whose live identity changed (${change}) and disowns it for good`, async () => {
+    const f = fixture()
+    const view = await f.placement.place(f.input())
+    if (view.kind !== 'placed') throw new Error('expected placement')
+    const live = f.server.panes.get(view.paneHandle)!
+    // The server restarted and re-issued this id to somebody else's work.
+    if (change === 'argv') live.argv = ['claude', '--resume', 'someone-else']
+    else if (change === 'pid') live.shell_pid += 1
+    else live.argv = [...live.argv.slice(0, -1), join(f.directory, 'another-dispatch.view.log')]
+    const replacement = createWorkerPlacement({ host: f.host, scope: f.scope })
+    const from = f.server.calls.length
+    await replacement.retire({ key: 'claude-headless-k1', receiptDir: f.directory })
+    expect(f.paneCalls(from)).toEqual(['pane.get', 'pane.process_info'])
+    expect(f.server.panes.has(view.paneHandle)).toBe(true)
+    expect(f.receipt()).toEqual({ state: 'disowned', pane: view.paneHandle, reason: expect.stringMatching(/another process|changed/) })
+    // Disowned is terminal: a later retire sends no RPC at all.
+    const after = f.server.calls.length
+    await replacement.retire({ key: 'claude-headless-k1', receiptDir: f.directory })
+    expect(f.server.calls).toHaveLength(after)
+  })
+}
+
+for (const unknown of ['process-info-fails', 'empty-argv', 'pane-get-transport', 'legacy-receipt'] as const) {
+  test(`retire REFUSES unknown identity (${unknown}) and keeps the receipt for a later re-verify`, async () => {
+    const f = fixture()
+    const view = await f.placement.place(f.input())
+    if (view.kind !== 'placed') throw new Error('expected placement')
+    if (unknown === 'process-info-fails') f.server.failMethod('pane.process_info')
+    else if (unknown === 'empty-argv') f.server.malformMethod('pane.process_info', { process_info: { pane_id: view.paneHandle, foreground_processes: [] } })
+    else if (unknown === 'pane-get-transport') f.server.failMethod('pane.get', new Error('transport'))
+    // A receipt from before identity was recorded: a bare pane id proves nothing.
+    else writeFileSync(join(f.directory, 'claude-headless-k1.placement.json'), JSON.stringify({ state: 'placed', pane: view.paneHandle }))
+    const before = JSON.stringify(f.receipt())
+    const from = f.server.calls.length
+    await f.placement.retire({ key: 'claude-headless-k1', receiptDir: f.directory })
+    expect(f.paneCalls(from)).not.toContain('pane.close')
+    expect(f.server.panes.has(view.paneHandle)).toBe(true)
+    expect(JSON.stringify(f.receipt())).toBe(before)
+    expect(f.receipt().state).toBe('placed')
+    if (unknown === 'process-info-fails') {
+      // Unknown is not "not ours": once identity can be established, retire proceeds.
+      f.server.clearFailure('pane.process_info')
+      await f.placement.retire({ key: 'claude-headless-k1', receiptDir: f.directory })
+      expect(f.server.panes.has(view.paneHandle)).toBe(false)
+      expect(f.receipt()).toEqual({ state: 'closed', pane: view.paneHandle })
+    }
+  })
+}
+
+test('retire of a pane the server positively reports gone records closed without sending a close', async () => {
+  const f = fixture()
+  const view = await f.placement.place(f.input())
+  if (view.kind !== 'placed') throw new Error('expected placement')
+  f.server.panes.delete(view.paneHandle)
+  const from = f.server.calls.length
+  await f.placement.retire({ key: 'claude-headless-k1', receiptDir: f.directory })
+  expect(f.paneCalls(from)).toEqual(['pane.get'])
+  expect(f.receipt()).toEqual({ state: 'closed', pane: view.paneHandle })
+})
+
+test('identity check reads the process sample, never the pane label', () => {
+  const receipt = { state: 'placed' as const, pane: 'pane-1', pid: 7, viewPath: '/v/one.log', taskLabel: 'Build · x' }
+  const argv = ['/bin/bun', '-e', VIEW_FOLLOW_SCRIPT, '/v/one.log']
+  expect(followerOwnsPane(receipt, { kind: 'live', argv, pid: 7, label: 'renamed by the owner' })).toEqual({ ok: true })
+  expect(followerOwnsPane(receipt, { kind: 'live', argv: ['vim', '/v/one.log'], pid: 7, label: 'Build · x' }))
+    .toMatchObject({ ok: false, refuse: 'changed' })
+  expect(followerOwnsPane(receipt, { kind: 'live', argv: [], pid: 7, label: 'Build · x' })).toMatchObject({ ok: false, refuse: 'unknown' })
+  expect(followerOwnsPane(receipt, { kind: 'unavailable', reason: 'socket' })).toMatchObject({ ok: false, refuse: 'unknown' })
 })
 
 test('a failed close keeps the receipt placed so a later retire still owns the pane', async () => {
@@ -142,7 +232,7 @@ test('a failed close keeps the receipt placed so a later retire still owns the p
   if (view.kind !== 'placed') throw new Error('expected placement')
   f.server.failMethod('pane.close')
   await view.close()
-  expect(f.receipt()).toEqual({ state: 'placed', pane: view.paneHandle })
+  expect(f.receipt()).toEqual(placedReceipt(f, view.paneHandle))
   f.server.clearFailure('pane.close')
   expect(f.server.panes.has(view.paneHandle)).toBe(true)
   await f.placement.retire({ key: 'claude-headless-k1', receiptDir: f.directory })
@@ -150,23 +240,82 @@ test('a failed close keeps the receipt placed so a later retire still owns the p
   expect(f.receipt()).toEqual({ state: 'closed', pane: view.paneHandle })
 })
 
-test('view session tees bytes, places after start, and closes on finish; unavailable keeps no view file', async () => {
+test('view session tees bytes, places after start, and closes after release; unavailable keeps no view file', async () => {
   const f = fixture()
   const session = openWorkerView(f.placement, f.input())
   session.tee('{"type":"result"}')
   expect(f.server.calls).toHaveLength(0)
   session.started()
-  const view = await session.finish()
-  expect(view?.kind).toBe('placed')
+  const placed = await until(() => f.receipt().state === 'placed' ? f.receipt() as { pane: string } : undefined)
+  const from = f.server.calls.length
+  // release() is synchronous: the view file is finished before it returns.
+  session.release()
   expect(readFileSync(f.input().viewPath, 'utf8')).toBe('{"type":"result"}\n[host] worker exited\n')
-  expect(f.server.closed).toContain((view as { paneHandle: string }).paneHandle)
-  expect(f.server.panes.has((view as { paneHandle: string }).paneHandle)).toBe(false)
+  const view = await session.settled()
+  expect(view?.kind).toBe('placed')
+  // The in-run close is verified exactly like a restart retire.
+  expect(f.paneCalls(from)).toEqual(['pane.get', 'pane.process_info', 'pane.close'])
+  expect(f.server.closed).toContain(placed.pane)
+  expect(f.server.panes.has(placed.pane)).toBe(false)
+  expect(f.receipt()).toEqual({ state: 'closed', pane: placed.pane })
 
   const unavailable = openWorkerView(createWorkerPlacement({ host: null, unavailable: 'herdr-unconfigured' }), f.input('codex-headless-k9'))
   unavailable.tee('bytes')
   unavailable.started()
-  expect(await unavailable.finish()).toEqual({ kind: 'unplaced', reason: 'herdr-unconfigured' })
+  unavailable.release()
+  expect(await unavailable.settled()).toEqual({ kind: 'unplaced', reason: 'herdr-unconfigured' })
   expect(() => readFileSync(f.input('codex-headless-k9').viewPath)).toThrow()
+})
+
+test('the in-run close refuses a pane whose identity changed while the worker ran', async () => {
+  const f = fixture()
+  const session = openWorkerView(f.placement, f.input())
+  session.started()
+  const placed = await until(() => f.receipt().state === 'placed' ? f.receipt() as { pane: string } : undefined)
+  f.server.panes.get(placed.pane)!.argv = ['claude', '--resume', 'someone-else']
+  const from = f.server.calls.length
+  session.release()
+  expect((await session.settled())?.kind).toBe('placed')
+  expect(f.paneCalls(from)).toEqual(['pane.get', 'pane.process_info'])
+  expect(f.server.panes.has(placed.pane)).toBe(true)
+  expect(f.receipt()).toMatchObject({ state: 'disowned', pane: placed.pane })
+})
+
+test('release never waits for cleanup: a held close leaves the session released and the receipt placed', async () => {
+  const f = fixture()
+  const session = openWorkerView(f.placement, f.input())
+  session.started()
+  const placed = await until(() => f.receipt().state === 'placed' ? f.receipt() as { pane: string } : undefined)
+  const releaseClose = f.server.holdMethod('pane.close')
+  session.release()
+  let settled = false
+  const cleanup = session.settled().then(view => { settled = true; return view })
+  await until(() => f.server.callsTo('pane.close').length > 0 ? true : undefined)
+  expect(settled).toBe(false)
+  expect(f.receipt()).toEqual(placedReceipt(f, placed.pane))
+  releaseClose()
+  expect((await cleanup)?.kind).toBe('placed')
+  expect(f.receipt()).toEqual({ state: 'closed', pane: placed.pane })
+})
+
+test('a placement that outlives its timeout is unplaced; the late pane is closed by the verified path', async () => {
+  const f = fixture('project-one', new FakeHerdrWorkspaceServer(), { placeTimeoutMs: 50 })
+  // Let the workspace and its Chat reservation exist first, so the hold catches the
+  // WORKER's layout.apply.
+  expect((await f.placement.place(f.input('claude-headless-warm'))).kind).toBe('placed')
+  const releaseApply = f.server.holdMethod('layout.apply')
+  const view = await f.placement.place(f.input())
+  expect(view).toEqual({ kind: 'unplaced', reason: 'placement-timeout after 50ms' })
+  expect(f.receipt()).toEqual({ state: 'unplaced', reason: 'placement-timeout after 50ms' })
+  const from = f.server.calls.length
+  const closedBefore = f.server.closed.length
+  releaseApply()
+  const late = await until(() => f.server.closed.length > closedBefore ? f.server.closed.at(-1) : undefined)
+  expect(f.paneCalls(from).slice(-3)).toEqual(['pane.get', 'pane.process_info', 'pane.close'])
+  expect(f.server.panes.has(late)).toBe(false)
+  // The timeout verdict is never rewritten by the late close.
+  expect(f.receipt()).toEqual({ state: 'unplaced', reason: 'placement-timeout after 50ms' })
+  expect(f.server.workerLayouts()).toHaveLength(2)
 })
 
 test('the follower prints the view file as it grows without any provider or credential', async () => {
