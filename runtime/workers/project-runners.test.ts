@@ -288,7 +288,8 @@ for (const [field, replacement, detail] of [
 ] as const) {
   test(`decoder rejects ${field}`, async () => {
     const f = await fixture()
-    expect(f.decode({ ...f.envelope, [field]: replacement })).toEqual({ kind: 'unknown', detail: expect.stringContaining(detail) })
+    expect(f.decode({ ...f.envelope, [field]: replacement })).toEqual({ kind: 'unknown', detail: expect.stringContaining(detail),
+      ...(field === 'result' ? { invalid_result: { schema: f.request.result.schema, payload: replacement } } : {}) })
   })
 }
 

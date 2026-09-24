@@ -342,6 +342,8 @@ interface WorkerWorld {
    */
   hostLedger?: boolean
   synthesisShape: 'legacy' | 'schema-guided' | 'malformed' | 'independent'
+  verdictRepair?: 'repairs' | 'exhausts'
+  repairPaths: string[]
   synthesisSchemaSeen: boolean[]
 }
 
@@ -446,6 +448,12 @@ async function performRole(world: WorkerWorld, request: BoundedWorkRequest, brie
   if (request.result.schema === 'verdict') {
     const panelBrief = JSON.parse(brief)
     const verdict = verdictFor(world, panelBrief.round)
+    if (world.verdictRepair && request.role === 'review' && panelBrief.round === 1) {
+      if (panelBrief.repair) world.repairPaths.push(panelBrief.repair.path)
+      if (!panelBrief.repair || world.verdictRepair === 'exhausts') {
+        return { ...verdict, findings: verdict.findings.map(({ rule: _rule, ...finding }) => finding) }
+      }
+    }
     if (request.role !== 'synthesis' || world.synthesisShape === 'legacy') return verdict
     if (world.synthesisShape === 'independent') {
       // The synthesis is a separate worker, not an echo of the top-level review
@@ -795,6 +803,7 @@ async function fixture(options: { taskSequence?: boolean; moreTasks?: boolean; s
   repeatFirstFinding?: boolean; commentRounds?: readonly number[]
   unavailableSeatRounds?: readonly number[]; codexReview?: 'valid' | 'wrong-run'
   synthesisShape?: WorkerWorld['synthesisShape']; rateLimitedSynthesis?: boolean; nativeUsage?: boolean
+  verdictRepair?: WorkerWorld['verdictRepair']
   /** Real session ownership with only the model boundary held at a barrier. */
   reviewChild?: (request: BoundedWorkRequest, seat: string) => Promise<void>
   reviewVeto?: 'standalone' | 'synthesis'
@@ -923,6 +932,7 @@ async function fixture(options: { taskSequence?: boolean; moreTasks?: boolean; s
     ...(options.reviewVeto ? { reviewVeto: options.reviewVeto } : {}),
     selectedTasks: [], plannerChoices: [], committedPlans: [], hostLedger: options.hostLedger ?? false,
     synthesisShape: options.synthesisShape ?? 'legacy', synthesisSchemaSeen: [],
+    ...(options.verdictRepair ? { verdictRepair: options.verdictRepair } : {}), repairPaths: [],
     blockersByRound: options.blockersByRound ?? [], replanRounds: options.replanRounds ?? [],
     blockRoles: new Set(options.blockRoles ?? []), repeatFirstFinding: options.repeatFirstFinding ?? false,
     commentRounds: new Set(options.commentRounds ?? []),
@@ -3257,6 +3267,25 @@ for (const stop of ['suite', 'review', 'ci'] as const) test(`owned draft is neve
   expect(f.commands.some(argv => argv[0] === 'gh' && ['ready', 'merge'].includes(argv[2]!))).toBe(false)
   expect(f.github.prs).toHaveLength(1)
   expect(f.github.prs.every(pr => pr.state === 'OPEN' && pr.isDraft)).toBe(true)
+}, 300_000)
+
+test.each(['repairs', 'exhausts'] as const)('host verdict repair %s through the production decoder and panel', async verdictRepair => {
+  const f = await fixture({ verdictRepair, blockersByRound: [0, 1, 0] })
+  const outcome = await drive(f)
+  expect(f.world.repairPaths).toEqual(['$.findings[0].rule'])
+  const seatCalls = f.world.dispatches.filter(row => row.schema === 'verdict' && row.role === 'review')
+  expect(seatCalls.slice(0, 2).map(row => row.step_id.split(':').at(-1))).toEqual(['0', '1'])
+  expect(seatCalls[0]!.resultPath).not.toBe(seatCalls[1]!.resultPath)
+  if (verdictRepair === 'repairs') {
+    expect(outcome.kind, why(f, outcome)).toBe('merged')
+    expect(f.world.dispatches.some(row => row.role === 'fix')).toBe(true)
+  } else {
+    expect(outcome, why(f, outcome)).toMatchObject({ kind: 'blocked', phase: 'review',
+      on: expect.stringContaining('repair exhausted: Review verdict missing-field at $.findings[0].rule') })
+    expect(seatCalls).toHaveLength(2)
+    expect(f.world.dispatches.some(row => row.role === 'synthesis' || row.role === 'fix')).toBe(false)
+    expect(f.github.prs[0]!.state).toBe('OPEN')
+  }
 }, 300_000)
 
 test('a synthesis worker guided by the exact verdict schema reaches MERGED unattended', async () => {

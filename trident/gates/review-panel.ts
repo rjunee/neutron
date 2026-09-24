@@ -95,7 +95,13 @@ export async function observeReviewPanel(source: ReviewSource | undefined, snaps
       if (!observed) return infrastructure(`Review seat ${seat.id} (${seat.provider}) has no recorded observation`)
       if (observed.runId !== runId || observed.head !== snapshot.head || observed.round !== round || observed.provider !== seat.provider || observed.modelId !== seat.modelId) return infrastructure(`Review seat ${seat.id} (${seat.provider}) provenance does not match run, revision, round, provider or model`)
       if (observed.family === null) unknownFamily = true
-      if (observed.status !== 'completed') return blocked(`Review seat ${seat.id} (${seat.provider}) is ${observed.status}`)
+      if (observed.status !== 'completed') {
+        const payload = observed.payload as { repair?: unknown; reason?: unknown } | null
+        if (observed.status === 'deferred' && payload?.repair && typeof payload.reason === 'string') {
+          return infrastructure(`Review seat ${seat.id} repair exhausted: ${payload.reason.slice(0, TERMINAL_CAUSE_MAX)}`)
+        }
+        return blocked(`Review seat ${seat.id} (${seat.provider}) is ${observed.status}`)
+      }
       const checked = validateTrailer('verdict', unmarked(observed.payload))
       if (!checked.ok) return infrastructure(`Review seat ${seat.id} (${seat.provider}) verdict is unusable`)
       verdicts.push(checked.value)
