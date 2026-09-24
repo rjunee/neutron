@@ -732,7 +732,7 @@ describe('the args actually carry it (the TS half, end to end)', () => {
       group: 'claude',
     })
     expect(tiers['sol']).toEqual({
-      model_id: 'gpt-5.6-sol',
+      model_id: 'gpt-6-sol',
       transport: 'cli',
       env_var: 'CODEX_REVIEW_MODEL',
       group: 'codex',

@@ -413,12 +413,12 @@ const promptFor = (captured: Captured[], label: string): string => {
 }
 
 describe('THE DEFAULT PATH — an install that never opened the pane', () => {
-  test('codex still reviews on gpt-5.6-sol, and kimi on kimi-k3', async () => {
+  test('codex defaults to flagship gpt-6-astra, and kimi to kimi-k3', async () => {
     const { captured } = await runWorkflow(productionArgs(null))
     // The wrapper's own pin says `sol` too (`model-tiers.test.ts` holds those two
     // together), so this is the behaviour that shipped before the selector existed —
     // now stated by the dispatch instead of left to the CLI's default.
-    expect(promptFor(captured, 'argus:codex')).toContain("CODEX_REVIEW_MODEL='gpt-5.6-sol'")
+    expect(promptFor(captured, 'argus:codex')).toContain("CODEX_REVIEW_MODEL='gpt-6-astra'")
     expect(promptFor(captured, 'argus:kimi')).toContain("KIMI_MODEL='kimi-k3'")
     expect(promptFor(captured, 'argus:codex')).toContain('/tmp/trident-codex-seat-1-')
     expect(promptFor(captured, 'argus:kimi')).toContain('/tmp/trident-kimi-seat-2-')
@@ -521,7 +521,7 @@ describe('AN OVERRIDE REACHES THE DISPATCH', () => {
     const { captured, logs } = await runWorkflow(args)
     const cmd = promptFor(captured, 'argus:codex')
     expect(cmd).toContain("CODEX_REVIEW_MODEL='gpt-5.6-terra'")
-    expect(cmd).not.toContain('gpt-5.6-sol')
+    expect(cmd).not.toContain('gpt-6-sol')
     // And the run says so, because "did my setting take effect?" must be answerable
     // from the output of a build the owner did not watch.
     expect(logs.some((l) => l.includes('label=argus:codex') && l.includes('gpt-5.6-terra'))).toBe(
@@ -1758,7 +1758,7 @@ describe('A CONFIG THAT GOT PAST THE TYPED BOUNDARY DEGRADES VISIBLY', () => {
   test('a tier from an executor this step cannot reach is refused, not handed to agent()', async () => {
     // The rubric reviewer has ONE dispatch, `agent({model})`, which resolves against
     // Claude Code's endpoint. `sol` is a codex tier, so the override is dropped rather
-    // than handed to `agent({model: 'gpt-5.6-sol'})` — a spawn against an endpoint
+    // than handed to `agent({model: 'gpt-6-sol'})` — a spawn against an endpoint
     // that has never heard of it. (The BUILD row is the counter-example, and the whole
     // point of this change: it declares a codex dispatch, so the same tier is accepted
     // there. `alsoRunsOn` is what separates the two.)
@@ -1778,7 +1778,7 @@ describe('A CONFIG THAT GOT PAST THE TYPED BOUNDARY DEGRADES VISIBLY', () => {
   })
 })
 
-for (const [tier, model] of [['k3', 'kimi-k3'], ['sol', 'gpt-5.6-sol']]) {
+for (const [tier, model] of [['k3', 'kimi-k3'], ['sol', 'gpt-6-sol']]) {
   test(`explicit ${tier} without credentials blocks by name`, async () => {
     const args = productionArgs({ review_codex: { model: tier! } })
     args['kimiConfigured'] = false

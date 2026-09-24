@@ -83,7 +83,8 @@ const KIMI = {
 const TIERS = [
   { tier: 'opus', provider: 'anthropic', model_id: 'claude-opus-5', group: 'claude', effort_supported: true, available: true, unavailable_reason: null },
   { tier: 'fast', provider: 'anthropic', model_id: 'claude-haiku-4-5', group: 'claude', effort_supported: true, available: true, unavailable_reason: null },
-  { tier: 'sol', provider: 'openai', model_id: 'gpt-5.6-sol', group: 'codex', effort_supported: false, available: true, unavailable_reason: null },
+  { tier: 'astra', provider: 'openai', model_id: 'gpt-6-astra', group: 'codex', effort_supported: false, available: true, unavailable_reason: null },
+  { tier: 'sol', provider: 'openai', model_id: 'gpt-6-sol', group: 'codex', effort_supported: false, available: true, unavailable_reason: null },
   // UNAVAILABLE on purpose: the case where the two clients could most easily
   // disagree about whether to grey an option or drop it.
   { tier: 'terra', provider: 'openai', model_id: 'gpt-5.6-terra', group: 'codex', effort_supported: false, available: false, unavailable_reason: 'needs a Codex connection' },
@@ -215,7 +216,8 @@ describe('tierChoices — the phone and the browser grey the same options, for t
     // that has become false is worse than the option being absent.
     for (const choices of [web.tierChoices(BUILD, TIERS), mobile.tierChoices(BUILD, TIERS)]) {
       const sol = choices.find((c) => c.tier === 'sol')!
-      expect(sol).toEqual({ tier: 'sol', model_id: 'gpt-5.6-sol', selectable: true, reason: null })
+      expect(choices.find((c) => c.tier === 'astra')).toEqual({ tier: 'astra', model_id: 'gpt-6-astra', selectable: true, reason: null })
+      expect(sol).toEqual({ tier: 'sol', model_id: 'gpt-6-sol', selectable: true, reason: null })
       // The Claude tiers are still selectable — a second executor ADDS a choice.
       expect(choices.find((c) => c.tier === 'opus')!.selectable).toBe(true)
       // …and a codex tier this install has no credential for is still SELECTABLE-
