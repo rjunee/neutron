@@ -9,9 +9,12 @@ legacy_ref: "SPEC.md § Phases → Steps (2026-09-12 split)"
 
 **An infrastructure retry is visible to the owner.** When a run spends its first
 automatic infrastructure retry, the production composition tells the originating
-chat once, and the run's card reads `Retrying` with its attempt count instead of
-`failed`. A run that exhausts the retry budget still fails terminally with a reason
-that names the budget. This shipped in PR #904 (merge commit
+chat once (the notice names attempt 1), and while the run is inside its budget its
+card reads `Retrying` instead of `failed`. The attempt count travels on the
+run-progress wire (`RunProgress.infra_retries`); the card shows the `Retrying` tag
+only and does not print the number, a choice #904 recorded deliberately. A run
+that exhausts the retry budget still fails terminally with a reason that names the
+budget. This shipped in PR #904 (merge commit
 `5d72f26fa5a7d58688d94ebac8a250a91b73d087`, which closed inbox issue #535; record
 `.trident/as-built/fix/535-fix.md`) and is reconciled into the queue by #1212. The
 item was split out on 2026-09-12 from the auto-retry item (DONE via PR #367); the
@@ -32,7 +35,8 @@ with no human in the loop, on a budget separate from the fix-round counter
    (imported at `:80`). `deliverInfraRetry` (`trident/delivery.ts:1451-1466`) posts
    "Infrastructure interrupted this build. Retrying automatically (attempt N)."
    plus the measured cause to the run's originating topic, and is a no-op when the
-   run has no originating chat.
+   run has no originating chat. Because the observer fires only on the first
+   retry (item 2), N is always 1 in practice; later attempts send nothing.
 
 2. **The owner is told once per run, and never when nothing retried.**
    `trident/infrastructure-retry.ts:114-136` spends the durable budget through an
@@ -43,8 +47,8 @@ with no human in the loop, on a budget separate from the fix-round counter
    throws is logged and cannot stop the retries. A genuine failure never enters
    this branch, so a run that retries zero times sends nothing.
 
-3. **The count reaches the card.** `RunStepLabel` includes `retrying`
-   (`trident/run-progress.ts:53`), `RunProgress` carries `infra_retries`
+3. **The count reaches the wire; the card reads `Retrying`.** `RunStepLabel`
+   includes `retrying` (`trident/run-progress.ts:53`), `RunProgress` carries `infra_retries`
    (`:73`), and `deriveRunProgress` projects `step_label: 'retrying'` only while the
    run is non-terminal with `infra_retries > 0`, otherwise the phase-derived label,
    so terminal rows keep `failed` or `done` (`:245-249`). Both clients accept the
@@ -52,7 +56,15 @@ with no human in the loop, on a budget separate from the fix-round counter
    `landing/chat-react/work-board-client.ts:141,424`) and render a build-coloured
    `Retrying` tag whose pulse is gated on a fresh heartbeat
    (`app/lib/work-board-helpers.ts:235,338`,
-   `landing/chat-react/WorkBoardTab.tsx:223,319`).
+   `landing/chat-react/WorkBoardTab.tsx:223,319`). The clients parse
+   `infra_retries` into their wire type (`app/lib/work-board-client.ts:458`,
+   `landing/chat-react/work-board-client.ts:511`) but no card renderer reads it:
+   the tag is the literal `Retrying`, and the card's counter stays the build
+   round display (`roundText`, e.g. `Round 1`). #904's record
+   (`.trident/as-built/fix/535-fix.md`, "Deliberately not changed") keeps the
+   round display authoritative and lets `infra_retries` drive only the `Retrying`
+   outcome. A card that prints "attempt N" has not shipped; if one is wanted it is
+   new work, not part of this item.
 
 4. **Exhaustion still fails terminally.** `trident/infrastructure-retry.ts:93-111`
    fails a run whose `infra_retries` has reached the budget with
@@ -83,13 +95,20 @@ answer to "what is done", so the item stayed open until #1212 reconciled it.
 - [x] `RunProgress` carries the retry count, so the card can render
       "retrying, attempt N". Deleting the field from the wire type must turn a test red.
       verify: `bun test trident/run-progress` and `bun test trident/infra-retry`;
-      `trident/run-progress.test.ts:55-60`, `app/__tests__/work-board-helpers.test.ts:109-119`
-      and the "shows retrying without claiming a pulse" case in
-      `landing/chat-react/__tests__/work-board-tab.test.tsx:250`.
+      `trident/run-progress.test.ts:55-60` ("an infrastructure retry carries its
+      count and never renders failed") asserts `p.infra_retries` is 2, so removing
+      the field reds it, and `app/__tests__/work-board-helpers.test.ts:109-119` reads
+      the count off the wire object the card receives. This criterion is met on the
+      wire only: the card renders the `Retrying` tag without the number (see item 3
+      above), which `app/__tests__/work-board-helpers.test.ts:109-119` and the "shows
+      retrying without claiming a pulse" case in
+      `landing/chat-react/__tests__/work-board-tab.test.tsx:250` pin.
 - [x] A run inside its retry budget does NOT read `failed` on the board. A test pins a
       mid-retry run rendering as retrying; a mutant that reports `failed` goes red.
-      verify: `trident/run-progress.test.ts:58-59`, `trident/infra-retry.test.ts:268`
-      and `:314-326`, `app/__tests__/work-board-helpers.test.ts:109-119`.
+      verify: `trident/run-progress.test.ts:58-59` (`step_label` `retrying`,
+      `phase_label` not `failed`) and `app/__tests__/work-board-helpers.test.ts:109-119`
+      (the card tag reads `Retrying`); `trident/infra-retry.test.ts:268` pins that the
+      run's phase is not `failed` after three in-budget retries.
 - [x] A run that EXHAUSTS the budget still fails terminally, with a reason naming the
       budget. Visibility must not become a path that keeps a dead run alive.
       verify: `trident/infra-retry.test.ts:214-243` (`(budget 2)`, measured cause,

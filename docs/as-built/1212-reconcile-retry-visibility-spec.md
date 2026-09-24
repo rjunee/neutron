@@ -53,7 +53,12 @@ queue kept reporting shipped work as open.
 - Projection: `trident/run-progress.ts:53` (`retrying` label), `:73`
   (`infra_retries`), `:245-249` (`retrying` only while non-terminal with a positive
   count). Both clients accept and render it (`app/lib/work-board-helpers.ts:235,338`,
-  `landing/chat-react/WorkBoardTab.tsx:223,319`).
+  `landing/chat-react/WorkBoardTab.tsx:223,319`) as the literal `Retrying` tag.
+  The clients parse `infra_retries` into their wire type but no card renderer
+  reads it, so the count reaches the wire and the card does not print it; #904's
+  record keeps the round display authoritative. The spec item says this plainly
+  rather than claiming an on-card attempt count, and notes that the once-per-run
+  notice always names attempt 1.
 
 ### Tests
 
@@ -79,6 +84,10 @@ restored and the final diff contains no production change.
 ### Deliberately not changed
 
 - `.trident/as-built/fix/535-fix.md` is #904's own record and stays as written.
+- No "attempt N" counter was added to either card. Criterion 3 asks that the wire
+  carry the count so a card *can* render it, and that deleting the field reds a
+  test; both hold. Printing the number on the card would change runtime UI
+  behaviour, which this reconciliation must not do.
 - `docs/as-built/wire-fable-arbiter.md` and `docs/as-built/spec-items-split.md`
   still describe the historical gap; merged shards are immutable.
 - PR #1213, the failed earlier attempt at this reconciliation, was not adopted,
