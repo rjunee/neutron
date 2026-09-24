@@ -5247,20 +5247,14 @@ for (const fault of ['typed', 'ambiguous'] as const) {
     expect(receipts).toHaveLength(4)
     for (const receipt of receipts) expect(receipt.state).toBe('unplaced')
     const reasons = receipts.map(receipt => receipt.reason!).sort()
-    if (fault === 'typed') {
-      // A definitive refusal created nothing and releases its reservation: EVERY worker
-      // retries creation and is refused by the server itself, never by a stale row.
-      expect(rig.server.callsTo('workspace.create')).toHaveLength(4)
-      expect(reasons).toEqual(Array(4).fill('placement-refused: server refused workspace.create'))
-    } else {
-      // An ambiguous creation stays reserved by design (spec: an interrupted or
-      // ambiguous creation is not retried as a fresh workspace), disclosed per receipt.
-      expect(rig.server.callsTo('workspace.create')).toHaveLength(1)
-      expect(reasons).toEqual([
-        'placement-refused: fake-herdr: workspace.create transport lost',
-        ...Array(3).fill('placement-refused: project-workspaces: existing ownership is invalid or pending; reconcile before retry'),
-      ])
-    }
+    // A typed error alone does not prove pre-allocation rejection. Both failures
+    // retain creation authority; subsequent workers disclose the pending claim.
+    expect(rig.server.callsTo('workspace.create')).toHaveLength(1)
+    expect(reasons).toEqual([
+      fault === 'typed' ? 'placement-refused: server refused workspace.create'
+        : 'placement-refused: fake-herdr: workspace.create transport lost',
+      ...Array(3).fill('placement-refused: project-workspaces: existing ownership is invalid or pending; reconcile before retry'),
+    ].sort())
   }, 300_000)
 }
 

@@ -1,5 +1,5 @@
 import { afterEach, expect, test } from 'bun:test'
-import { mkdtempSync, readFileSync, rmSync } from 'node:fs'
+import { mkdtempSync, readFileSync, rmSync, writeFileSync } from 'node:fs'
 import { join } from 'node:path'
 import { tmpdir } from 'node:os'
 import { ProjectWorkspaceManager, type ProjectPanePlacement } from '../project-workspaces.ts'
@@ -7,10 +7,11 @@ import { HerdrError, type HerdrRpc } from '../herdr-client.ts'
 import { setFlockImplForTests } from '../registry-lock.ts'
 
 const directories: string[] = []
+let operationSerial = 0
 afterEach(() => { setFlockImplForTests(undefined); for (const dir of directories.splice(0)) rmSync(dir, { recursive: true, force: true }) })
 const scope = (projectId: string | null = 'one', role: 'chat' | 'worker' = 'chat'): ProjectPanePlacement => ({
   instanceId: 'instance', projectId, projectLabel: 'Same display name', role,
-  ...(role === 'worker' ? { taskLabel: 'Review · ownership' } : {}),
+  ...(role === 'worker' ? { taskLabel: 'Review · ownership', operationId: `operation-${++operationSerial}` } : {}),
 })
 const root = { type: 'pane' as const, cwd: '/tmp', command: ['test-agent'], env: {} }
 
@@ -20,10 +21,6 @@ class Server implements HerdrRpc {
   panes = new Map<string, { pane_id: string; workspace_id: string; tab_id: string; argv: unknown }>()
   tabs = new Map<string, { tab_id: string; workspace_id: string; pane_count: number }>()
   failure: string | undefined
-  /** A TYPED server refusal (the server answered, created nothing) for this method. */
-  refused: string | undefined
-  /** Runs as a worker layout.apply arrives, before it is answered. */
-  onWorkerApply?: () => void
   rejectWorker = false
   foreignOnReject = false
   afterProcessInfo?: (pane: { pane_id: string; workspace_id: string; tab_id: string; argv: unknown }) => void
@@ -32,8 +29,6 @@ class Server implements HerdrRpc {
   async call(method: string, params: Record<string, unknown>): Promise<Record<string, unknown>> {
     this.calls.push({ method, params })
     if (this.failure === method) throw new Error('transport unavailable')
-    if (this.refused === method) throw new HerdrError('refused', 'server refused')
-    if (method === 'layout.apply' && params.tab_label !== 'Chat') this.onWorkerApply?.()
     switch (method) {
       case 'workspace.create': {
         const workspace_id = `workspace-${++this.serial}`
@@ -228,18 +223,21 @@ test('unavailable lock prevents all external creation; restored lock permits it'
   expect(server.count('workspace.create')).toBe(1)
 })
 
-test('definitely refused first worker retires only its verified placeholder; server removes empty workspace', async () => {
+test('refused first worker retains Chat and its operation reservation; distinct worker reuses workspace', async () => {
   const { manager, server, path } = fixture()
+  const first = scope('one', 'worker')
   server.rejectWorker = true
-  await expect(manager.applyLayout(server, root, scope('one', 'worker'))).rejects.toThrow('worker rejected')
-  expect(server.workspaces.size).toBe(0)
-  expect(server.panes.size).toBe(0)
+  await expect(manager.applyLayout(server, root, first)).rejects.toThrow('worker rejected')
+  expect(server.workspaces.size).toBe(1)
+  expect(server.panes.size).toBe(1)
   expect(Object.values(JSON.parse(readFileSync(path, 'utf8'))).map((row: any) => row.state)).toEqual(['ready'])
   expect(server.count('workspace.close')).toBe(0)
   server.rejectWorker = false
+  await expect(new ProjectWorkspaceManager(path).applyLayout(server, root, first)).rejects.toThrow('ambiguous')
   await manager.applyLayout(server, root, scope('one', 'worker'))
   expect(server.workspaces.size).toBe(1)
   expect(server.panes.size).toBe(2)
+  expect(server.count('workspace.create')).toBe(1)
 })
 
 test('post-spawn ordering failure closes the unreturned real child and retains uncertain claim', async () => {
@@ -262,8 +260,9 @@ test('failed worker never closes workspace after an unrelated pane has arrived',
   expect(server.count('workspace.close')).toBe(0)
 })
 
-test('failed-worker cleanup preserves a foreign split arriving after its final identity sample', async () => {
+test('failed worker preserves placeholder and foreign split arriving after its final identity sample', async () => {
   const { manager, server } = fixture()
+  await manager.applyLayout(server, root, scope('one', 'worker'))
   server.rejectWorker = true
   let placeholder = ''
   server.afterProcessInfo = pane => {
@@ -273,22 +272,217 @@ test('failed-worker cleanup preserves a foreign split arriving after its final i
   }
   await expect(manager.applyLayout(server, root, scope('one', 'worker'))).rejects.toThrow('worker rejected')
   expect(placeholder).not.toBe('')
-  expect(server.panes.has(placeholder)).toBe(false)
+  expect(server.panes.has(placeholder)).toBe(true)
   expect(server.panes.has('late-foreign')).toBe(true)
   expect(server.workspaces.size).toBe(1)
   expect(server.count('workspace.close')).toBe(0)
 })
 
-test('unknown placeholder identity leaves its pane and pending ownership intact', async () => {
+test('unknown placeholder identity refuses a new worker without changing ready ownership', async () => {
   const { manager, server, path } = fixture()
+  await manager.applyLayout(server, root, scope('one', 'worker'))
   server.rejectWorker = true
   server.failure = 'pane.process_info'
-  await expect(manager.applyLayout(server, root, scope('one', 'worker'))).rejects.toThrow('worker rejected')
+  await expect(manager.applyLayout(server, root, scope('one', 'worker'))).rejects.toThrow('transport unavailable')
   const record = Object.values(JSON.parse(readFileSync(path, 'utf8')))[0] as any
-  expect(record.state).toBe('pending')
+  expect(record.state).toBe('ready')
   expect(server.panes.has(record.chat.pane)).toBe(true)
   expect(server.calls.filter(call => call.method === 'pane.close' && call.params.pane_id === record.chat.pane)).toHaveLength(0)
   expect(server.count('workspace.close')).toBe(0)
+})
+
+test.each(['rejection', 'lost-reply', 'typed-after-commit', 'malformed-after-commit'] as const)(
+  'worker operation isolates %s while preserving restart refusal and distinct placement', async failure => {
+    const { manager, server, path } = fixture()
+    const a = scope('one', 'worker'), b = scope('one', 'worker'), c = scope('one', 'worker')
+    const first = await manager.applyLayout(server, root, a)
+    const client: HerdrRpc = { async call(method, params) {
+      if (method !== 'layout.apply') return server.call(method, params)
+      if (failure === 'rejection') throw new HerdrError('invalid_layout', 'rejected before allocation')
+      const result = await server.call(method, params)
+      if (failure === 'malformed-after-commit') return { layout: {} }
+      if (failure === 'typed-after-commit') throw new HerdrError('unknown', 'allocation committed but reply failed')
+      throw new Error('reply lost after allocation')
+    } }
+    await expect(manager.applyLayout(client, root, b)).rejects.toThrow()
+    const beforeRetry = server.count('layout.apply')
+    const restarted = new ProjectWorkspaceManager(path)
+    await expect(restarted.applyLayout(server, root, b)).rejects.toThrow('ambiguous')
+    await expect(restarted.applyLayout(server, { ...root, command: ['changed'] }, b)).rejects.toThrow('payload changed')
+    await expect(restarted.applyLayout(server, root, a)).rejects.toThrow('completed')
+    expect(server.count('layout.apply')).toBe(beforeRetry)
+    const workspace = server.workspaces.get(first.layout.workspace_id!)!
+    const tokens = workspace.tokens
+    workspace.tokens = {}
+    await expect(restarted.applyLayout(server, root, c)).rejects.toThrow('ownership mismatch')
+    expect(server.count('layout.apply')).toBe(beforeRetry)
+    workspace.tokens = tokens
+    const third = await restarted.applyLayout(server, root, c)
+    expect(third.layout.workspace_id).toBe(first.layout.workspace_id)
+    expect(server.count('workspace.create')).toBe(1)
+    expect(server.panes.has(first.layout.root.pane_id)).toBe(true)
+    expect(server.panes.size).toBe(failure === 'rejection' ? 3 : 4)
+    const row = Object.values(JSON.parse(readFileSync(path, 'utf8')))[0] as any
+    expect(row.state).toBe('ready')
+    expect(Object.values(row.workers).map((value: any) => value.state).sort()).toEqual(['ambiguous', 'completed', 'completed'])
+  })
+
+test('pending worker survives manager restart and completion merges with an independent operation', async () => {
+  const { manager, server, path } = fixture()
+  await manager.applyLayout(server, root, scope())
+  let enter!: () => void, release!: () => void
+  const entered = new Promise<void>(resolve => { enter = resolve })
+  const held = new Promise<void>(resolve => { release = resolve })
+  const b = scope('one', 'worker')
+  const client: HerdrRpc = { async call(method, params) {
+    const result = await server.call(method, params)
+    if (method === 'layout.apply') { enter(); await held }
+    return result
+  } }
+  const pending = manager.applyLayout(client, root, b)
+  await entered
+  try {
+    const restarted = new ProjectWorkspaceManager(path)
+    await expect(restarted.applyLayout(server, root, b)).rejects.toThrow('pending')
+    await restarted.applyLayout(server, root, scope('one', 'worker'))
+  } finally { release() }
+  const second = await pending
+  await expect(new ProjectWorkspaceManager(path).applyLayout(server, root, b)).rejects.toThrow('completed')
+  expect(server.panes.has(second.layout.root.pane_id)).toBe(true)
+  expect(server.count('workspace.create')).toBe(1)
+  expect(server.count('layout.apply')).toBe(3)
+  const row = Object.values(JSON.parse(readFileSync(path, 'utf8')))[0] as any
+  expect(Object.values(row.workers).map((value: any) => value.state)).toEqual(['completed', 'completed'])
+})
+
+test('worker operation ID is required and completed reservations survive workspace replacement', async () => {
+  const { manager, server, path } = fixture()
+  const worker = scope('one', 'worker')
+  const missingId = { ...worker }
+  delete missingId.operationId
+  await expect(manager.applyLayout(server, root, missingId)).rejects.toThrow('invalid explicit scope')
+  expect(server.calls).toHaveLength(0)
+  const placed = await manager.applyLayout(server, root, worker)
+  server.workspaces.delete(placed.layout.workspace_id!)
+  await manager.applyLayout(server, root, scope('one', 'worker'))
+  const count = server.count('layout.apply')
+  await expect(new ProjectWorkspaceManager(path).applyLayout(server, root, worker)).rejects.toThrow('completed')
+  expect(server.count('layout.apply')).toBe(count)
+  expect(server.count('workspace.create')).toBe(2)
+})
+
+test('worker completion does not invalidate another manager preparing Chat ordering', async () => {
+  const { manager, server, path } = fixture()
+  await manager.applyLayout(server, root, scope())
+  let enteredWorker!: () => void, releaseWorker!: () => void, enteredOrdering!: () => void, releaseOrdering!: () => void
+  const workerEntered = new Promise<void>(resolve => { enteredWorker = resolve })
+  const workerHeld = new Promise<void>(resolve => { releaseWorker = resolve })
+  const orderingEntered = new Promise<void>(resolve => { enteredOrdering = resolve })
+  const orderingHeld = new Promise<void>(resolve => { releaseOrdering = resolve })
+  const workerClient: HerdrRpc = { async call(method, params) {
+    const result = await server.call(method, params)
+    if (method === 'layout.apply') { enteredWorker(); await workerHeld }
+    return result
+  } }
+  const orderingClient: HerdrRpc = { async call(method, params) {
+    const result = await server.call(method, params)
+    if (method === 'tab.move') { enteredOrdering(); await orderingHeld }
+    return result
+  } }
+  const firstScope = scope('one', 'worker'), secondScope = scope('one', 'worker')
+  const first = manager.applyLayout(workerClient, root, firstScope)
+  await workerEntered
+  const second = new ProjectWorkspaceManager(path).applyLayout(orderingClient, root, secondScope)
+  await orderingEntered
+  releaseWorker()
+  try { await first } finally { releaseOrdering() }
+  await second
+  const row = Object.values(JSON.parse(readFileSync(path, 'utf8')))[0] as any
+  expect(row.state).toBe('ready')
+  expect(Object.values(row.workers).map((value: any) => value.state)).toEqual(['completed', 'completed'])
+  await expect(manager.applyLayout(server, root, firstScope)).rejects.toThrow('completed')
+  await expect(manager.applyLayout(server, root, secondScope)).rejects.toThrow('completed')
+  expect(server.count('layout.apply')).toBe(3)
+})
+
+test('changed ownership during allocation refuses completion without closing an unverified handle', async () => {
+  const { manager, server, path } = fixture()
+  await manager.applyLayout(server, root, scope())
+  const closeCount = server.count('pane.close')
+  const client: HerdrRpc = { async call(method, params) {
+    const result = await server.call(method, params)
+    if (method === 'layout.apply') {
+      const rows = JSON.parse(readFileSync(path, 'utf8'))
+      for (const row of Object.values(rows) as any[]) row.token = 'another-owner'
+      writeFileSync(path, JSON.stringify(rows))
+    }
+    return result
+  } }
+  await expect(manager.applyLayout(client, root, scope('one', 'worker'))).rejects.toThrow('ownership changed concurrently')
+  expect(server.count('pane.close')).toBe(closeCount)
+  expect(server.panes.size).toBe(2)
+  const row = Object.values(JSON.parse(readFileSync(path, 'utf8')))[0] as any
+  expect(Object.values(row.workers).map((value: any) => value.state)).toEqual(['pending'])
+})
+
+test('operation digest binds a snapshot of argv, cwd, environment and task label with stable environment ordering', async () => {
+  const { manager, server, path } = fixture()
+  const worker = scope('one', 'worker')
+  const request = { ...root, command: ['original'], env: { z: 'last', A: 'first' } }
+  const pending = manager.applyLayout(server, request, worker)
+  request.command[0] = 'changed-after-call'
+  request.env.z = 'changed-after-call'
+  await pending
+  expect(server.calls.filter(call => call.method === 'layout.apply').at(-1)!.params.root).toMatchObject({ command: ['original'], env: { z: 'last' } })
+  const same = { ...root, command: ['original'], env: { A: 'first', z: 'last' } }
+  const restarted = new ProjectWorkspaceManager(path)
+  await expect(restarted.applyLayout(server, same, worker)).rejects.toThrow('completed')
+  for (const changed of [{ ...same, cwd: '/another' }, { ...same, env: { ...same.env, z: 'different' } }]) {
+    await expect(restarted.applyLayout(server, changed, worker)).rejects.toThrow('payload changed')
+  }
+  await expect(restarted.applyLayout(server, same, { ...worker, taskLabel: 'Changed task' })).rejects.toThrow('payload changed')
+  expect(server.count('layout.apply')).toBe(2)
+})
+
+for (const phase of ['workspace-create', 'chat-repair'] as const) {
+  test.each(['typed-before', 'typed-after', 'transport-after'] as const)(`${phase} preserves reservation on %s allocation error`, async fault => {
+    const { manager, server, path } = fixture()
+    if (phase === 'chat-repair') {
+      const chat = await manager.applyLayout(server, root, scope())
+      server.panes.delete(chat.layout.root.pane_id)
+    }
+    const methodToFail = phase === 'workspace-create' ? 'workspace.create' : 'layout.apply'
+    let attempts = 0
+    const client: HerdrRpc = { async call(method, params) {
+      if (method !== methodToFail) return server.call(method, params)
+      attempts++
+      if (fault !== 'typed-before') await server.call(method, params)
+      if (fault === 'transport-after') throw new Error('reply lost after allocation')
+      throw new HerdrError('server_error', 'typed error is not absence evidence')
+    } }
+    await expect(manager.applyLayout(client, root, scope('one', 'worker'))).rejects.toThrow()
+    const count = server.count(methodToFail)
+    await expect(new ProjectWorkspaceManager(path).applyLayout(server, root, scope('one', 'worker'))).rejects.toThrow('pending')
+    expect(attempts).toBe(1)
+    expect(server.count(methodToFail)).toBe(count)
+    expect(Object.values(JSON.parse(readFileSync(path, 'utf8'))).map((row: any) => row.state)).toEqual(['pending'])
+  })
+}
+
+test.each(['typed', 'transport'] as const)('Chat ordering %s failure reserves only its worker; a distinct worker succeeds', async fault => {
+  const { manager, server, path } = fixture()
+  await manager.applyLayout(server, root, scope('one', 'worker'))
+  const failed = scope('one', 'worker')
+  const client: HerdrRpc = { async call(method, params) {
+    if (method !== 'tab.move') return server.call(method, params)
+    if (fault === 'typed') throw new HerdrError('server_error', 'ordering refused')
+    throw new Error('ordering reply lost')
+  } }
+  await expect(manager.applyLayout(client, root, failed)).rejects.toThrow()
+  await expect(new ProjectWorkspaceManager(path).applyLayout(server, root, failed)).rejects.toThrow('ambiguous')
+  await new ProjectWorkspaceManager(path).applyLayout(server, root, scope('one', 'worker'))
+  expect(server.count('workspace.create')).toBe(1)
+  expect(server.count('layout.apply')).toBe(3)
 })
 
 test('real Chat creation preserves a foreign split arriving after placeholder identity verification', async () => {
@@ -384,89 +578,4 @@ test.if(process.platform === 'linux')('real placeholder exec clears inherited sy
     reader.releaseLock()
     expect(readFileSync(`/proc/${child.pid}/environ`, 'utf8')).not.toContain('NEUTRON_TEST_INHERITED_SECRET')
   } finally { child.kill(); await child.exited }
-})
-
-// --- A worker TAB in a ready, verified workspace never wedges the scope. ---
-// The journal records the workspace and its Chat slot, not worker tabs, so a failed,
-// ambiguous or interrupted worker tab has nothing for a `pending` row to guard.
-
-const states = (path: string) => Object.values(JSON.parse(readFileSync(path, 'utf8'))).map((row: any) => row.state)
-
-test('a failed worker tab in a ready workspace leaves it ready: the next worker in the scope is placed', async () => {
-  for (const fault of ['typed', 'transport'] as const) {
-    for (const method of ['layout.apply', 'tab.move'] as const) {
-      const { manager, server, path } = fixture()
-      await manager.applyLayout(server, root, scope('one', 'worker'))
-      const workers = () => server.calls.filter(call => call.method === 'layout.apply' && call.params.tab_label !== 'Chat').length
-      if (method === 'layout.apply') server.rejectWorker = fault === 'typed'
-      if (fault === 'transport' || method === 'tab.move') server.failure = method
-      if (fault === 'typed' && method === 'tab.move') { server.failure = undefined; server.refused = method }
-      await expect(manager.applyLayout(server, root, scope('one', 'worker'))).rejects.toThrow()
-      expect(states(path)).toEqual(['ready'])
-      server.rejectWorker = false; server.failure = undefined; server.refused = undefined
-      const before = workers()
-      // A NEW manager too: the row a restart reads back is usable, not a permanent refusal.
-      for (const next of [manager, new ProjectWorkspaceManager(path)]) {
-        const placed = await next.applyLayout(server, root, scope('one', 'worker'))
-        expect(server.panes.has(placed.layout.root.pane_id)).toBe(true)
-      }
-      expect(workers()).toBe(before + 2)
-      expect(server.count('workspace.create')).toBe(1)
-      expect(states(path)).toEqual(['ready'])
-    }
-  }
-})
-
-test('the row stays ready WHILE a worker tab is in flight, so a restart there cannot wedge the scope', async () => {
-  const { manager, server, path } = fixture()
-  await manager.applyLayout(server, root, scope())
-  const seen: unknown[] = []
-  server.onWorkerApply = () => { seen.push(...states(path)) }
-  await manager.applyLayout(server, root, scope('one', 'worker'))
-  expect(seen).toEqual(['ready'])
-  // Complement: a CREATION still holds its reservation while in flight.
-  const other = fixture()
-  other.server.onWorkerApply = () => { seen.push(...states(other.path)) }
-  await other.manager.applyLayout(other.server, root, scope('one', 'worker'))
-  expect(seen).toEqual(['ready', 'pending'])
-})
-
-test('Chat slot repair: a typed refusal restores ready; an ambiguous failure keeps the reservation', async () => {
-  for (const fault of ['typed', 'transport'] as const) {
-    const { manager, server, path } = fixture()
-    const chat = await manager.applyLayout(server, root, scope())
-    server.panes.delete(chat.layout.root.pane_id)
-    if (fault === 'typed') server.refused = 'layout.apply'
-    else server.failure = 'layout.apply'
-    await expect(manager.applyLayout(server, root, scope('one', 'worker'))).rejects.toThrow()
-    server.refused = undefined; server.failure = undefined
-    if (fault === 'typed') {
-      expect(states(path)).toEqual(['ready'])
-      await manager.applyLayout(server, root, scope('one', 'worker'))
-      expect(server.calls.filter(call => call.method === 'layout.apply').map(call => call.params.tab_label))
-        .toEqual(['Chat', 'Chat', 'Chat', 'Review · ownership'])
-    } else {
-      expect(states(path)).toEqual(['pending'])
-      await expect(new ProjectWorkspaceManager(path).applyLayout(server, root, scope('one', 'worker'))).rejects.toThrow('pending')
-    }
-  }
-})
-
-test('a typed workspace.create refusal releases the reservation; a transport failure keeps it', async () => {
-  const typed = fixture()
-  typed.server.refused = 'workspace.create'
-  await expect(typed.manager.applyLayout(typed.server, root, scope('one', 'worker'))).rejects.toThrow('server refused')
-  expect(Object.keys(JSON.parse(readFileSync(typed.path, 'utf8')))).toEqual([])
-  typed.server.refused = undefined
-  await typed.manager.applyLayout(typed.server, root, scope('one', 'worker'))
-  expect(typed.server.count('workspace.create')).toBe(2)
-  expect(typed.server.workspaces.size).toBe(1)
-  expect(states(typed.path)).toEqual(['ready'])
-
-  const ambiguous = fixture()
-  ambiguous.server.failure = 'workspace.create'
-  await expect(ambiguous.manager.applyLayout(ambiguous.server, root, scope('one', 'worker'))).rejects.toThrow('transport unavailable')
-  ambiguous.server.failure = undefined
-  await expect(ambiguous.manager.applyLayout(ambiguous.server, root, scope('one', 'worker'))).rejects.toThrow('pending')
-  expect(ambiguous.server.count('workspace.create')).toBe(1)
 })

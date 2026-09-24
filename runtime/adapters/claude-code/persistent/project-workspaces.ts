@@ -13,9 +13,17 @@ export interface ProjectPanePlacement {
   role: 'chat' | 'worker'
   /** A useful role/task name, e.g. "Review · authentication". Required for workers. */
   taskLabel?: string
+  /** Durable per-dispatch identity, reused on retry. Required for workers. */
+  operationId?: string
 }
 
 interface ChatSlot { tab: string; pane: string; placeholderArgv?: string[] }
+interface WorkerOperation {
+  digest: string
+  state: 'pending' | 'ambiguous' | 'completed'
+  pane?: string
+  tab?: string
+}
 interface WorkspaceRecord {
   version: 1
   revision: string
@@ -24,6 +32,7 @@ interface WorkspaceRecord {
   state: 'pending' | 'ready'
   workspace?: string
   chat?: ChatSlot
+  workers?: Record<string, WorkerOperation>
 }
 
 const TOKEN = 'neutron_project_owner'
@@ -37,7 +46,7 @@ function nonempty(value: unknown): value is string {
 function scopeOf(placement: ProjectPanePlacement): [string, string | null] {
   if (!nonempty(placement.instanceId) || !(placement.projectId === null || nonempty(placement.projectId))
     || !nonempty(placement.projectLabel) || !['chat', 'worker'].includes(placement.role)
-    || placement.role === 'worker' && !nonempty(placement.taskLabel)) {
+    || placement.role === 'worker' && (!nonempty(placement.taskLabel) || !nonempty(placement.operationId))) {
     throw new Error('project-workspaces: invalid explicit scope or task label')
   }
   return [placement.instanceId, placement.projectId]
@@ -108,6 +117,8 @@ export class ProjectWorkspaceManager {
   constructor(journalPath: string) { this.journal = new WorkspaceJournal(journalPath) }
 
   async applyLayout(client: HerdrRpc, root: HerdrLayoutPaneNode, placement: ProjectPanePlacement): Promise<HerdrLayoutApply> {
+    root = structuredClone(root)
+    placement = { ...placement }
     const scope = scopeOf(placement)
     const key = createHash('sha256').update(JSON.stringify(scope)).digest('hex')
     const prior = this.operations.get(key) ?? Promise.resolve()
@@ -118,6 +129,13 @@ export class ProjectWorkspaceManager {
 
   private async apply(client: HerdrRpc, root: HerdrLayoutPaneNode, placement: ProjectPanePlacement,
     scope: [string, string | null], key: string): Promise<HerdrLayoutApply> {
+    const workerKey = placement.role === 'worker'
+      ? createHash('sha256').update(placement.operationId!).digest('hex') : undefined
+    // Store only the digest, not command/environment values in the journal.
+    const digest = createHash('sha256').update(JSON.stringify({
+      scope, root: { type: root.type, command: root.command, cwd: root.cwd,
+        env: Object.entries(root.env ?? {}).sort(([a], [b]) => a < b ? -1 : a > b ? 1 : 0), label: placement.taskLabel },
+    })).digest('hex')
     let record = this.journal.update(rows => {
       const existing = rows[key]
       if (existing !== undefined) {
@@ -125,6 +143,21 @@ export class ProjectWorkspaceManager {
           || !nonempty(existing.token) || existing.state !== 'ready' || !nonempty(existing.workspace)
           || !existing.chat || !nonempty(existing.chat.tab) || !nonempty(existing.chat.pane)) {
           throw new Error('project-workspaces: existing ownership is invalid or pending; reconcile before retry')
+        }
+        if (existing.workers !== undefined) {
+          for (const operation of Object.values(object(existing.workers))) {
+            const saved = object(operation)
+            if (!nonempty(saved.digest) || !['pending', 'ambiguous', 'completed'].includes(saved.state as string)) {
+              throw new Error('project-workspaces: invalid worker operation reservation')
+            }
+          }
+        }
+        if (workerKey && existing.workers?.[workerKey]) {
+          const operation = existing.workers[workerKey]!
+          if (operation.digest !== digest) throw new Error('project-workspaces: worker operation payload changed')
+          // Completed is not an adoption API. HerdrHost would treat the returned
+          // handle as newly created and might close an already-owned pane.
+          throw new Error(`project-workspaces: worker operation ${operation.state}; reconcile before retry`)
         }
         return existing
       }
@@ -141,62 +174,31 @@ export class ProjectWorkspaceManager {
         }
       } catch (error) {
         if (!(error instanceof HerdrError) || error.code !== 'workspace_not_found') throw error
-        record = this.reserve(key, record, { version: 1, revision: randomUUID(), scope, token: randomUUID(), state: 'pending' })
+        record = this.reserve(key, record, { version: 1, revision: randomUUID(), scope, token: randomUUID(), state: 'pending', workers: record.workers ?? {} })
       }
     }
 
     let initialPane: string | undefined
-    let createdHere = false
     if (!record.workspace) {
-      let created: Record<string, unknown>
-      try {
-        created = object(await client.call('workspace.create', { label: placement.projectId === null ? 'Neutron General' : placement.projectLabel, cwd: root.cwd, focus: false }))
-      } catch (error) {
-        // A TYPED server refusal is definitive: the server answered and created
-        // nothing, so the reservation guards nothing and is released. Any other
-        // failure (transport, deadline, malformed reply) is ambiguous and stays
-        // reserved: an interrupted creation is never retried as a fresh workspace.
-        if (error instanceof HerdrError) this.release(key, record)
-        throw error
-      }
+      const created = object(await client.call('workspace.create', { label: placement.projectId === null ? 'Neutron General' : placement.projectLabel, cwd: root.cwd, focus: false }))
       const workspace = handle(object(created.workspace).workspace_id)
-      createdHere = true
       initialPane = handle(object(created.root_pane).pane_id)
       record = this.reserve(key, record, { ...record, workspace })
       await client.call('workspace.report_metadata', { workspace_id: workspace, source: SOURCE, tokens: { [TOKEN]: record.token } })
     }
 
     const workspace = record.workspace!
-    // A WORKER TAB in a workspace this call did not create is not a reservation-worthy
-    // mutation: the journal records the workspace and its Chat slot, never worker tabs,
-    // so a failed, ambiguous or interrupted worker tab leaves nothing for the row to
-    // guard. Such an operation keeps the row `ready` throughout. It still takes the
-    // row's revision under compare-and-set (a CLAIM) so two managers racing the same
-    // verified observation cannot both act on it. Only the creation flow and a Chat
-    // slot repair hold the row `pending` while their journal-tracked object is in flight.
-    const readyWorker = placement.role === 'worker' && !createdHere
     if (placement.role === 'worker') {
       const live = record.chat ? await this.verifyChat(client, workspace, record.chat) : false
-      record = this.reserve(key, record, { ...record, state: readyWorker && live ? 'ready' : 'pending' })
+      record = this.reserve(key, record, { ...record, state: 'pending' })
       if (!live) {
         const argv = [process.execPath, '-e', PLACEHOLDER, record.token]
-        let placeholder: HerdrLayoutApply
-        try {
-          placeholder = layout(await client.call('layout.apply', {
-            workspace_id: workspace, tab_label: 'Chat', focus: false,
-            // Herdr merges env into its own environment. The env executable really
-            // clears it before exec; identity probes observe the final Bun argv.
-            root: { type: 'pane', cwd: root.cwd, command: ['/usr/bin/env', '-i', ...argv], label: 'Chat', env: {} },
-          }), workspace)
-        } catch (error) {
-          // A typed refusal of the slot repair created nothing: the recorded slot is
-          // still the proven-closed one, which the next wake re-verifies. An
-          // ambiguous failure keeps the reservation.
-          if (readyWorker && error instanceof HerdrError) {
-            try { this.reserve(key, record, { ...record, state: 'ready' }) } catch { /* concurrent owner */ }
-          }
-          throw error
-        }
+        const placeholder = layout(await client.call('layout.apply', {
+          workspace_id: workspace, tab_label: 'Chat', focus: false,
+          // Herdr merges env into its own environment. The env executable really
+          // clears it before exec; identity probes observe the final Bun argv.
+          root: { type: 'pane', cwd: root.cwd, command: ['/usr/bin/env', '-i', ...argv], label: 'Chat', env: {} },
+        }), workspace)
         record = this.reserve(key, record, { ...record, chat: {
           tab: placeholder.layout.tab_id, pane: placeholder.layout.root.pane_id, placeholderArgv: argv,
         } })
@@ -204,10 +206,31 @@ export class ProjectWorkspaceManager {
           await client.call('pane.close', { pane_id: initialPane })
           initialPane = undefined
         }
-        // The repaired slot is recorded: nothing journal-tracked is in flight any more.
-        if (readyWorker) record = this.reserve(key, record, { ...record, state: 'ready' })
       }
-      await client.call('tab.move', { tab_id: record.chat!.tab, insert_index: 0 })
+      // Workspace and Chat setup are now acknowledged. Reserve this worker
+      // independently before dispatch so an unanswered worker RPC cannot poison
+      // other operations, or be retried as a second worker after restart.
+      const pending: WorkerOperation = { digest, state: 'pending' }
+      record = this.reserve(key, record, { ...record, state: 'ready',
+        workers: { ...record.workers, [workerKey!]: pending } })
+      let applied: HerdrLayoutApply
+      try {
+        await client.call('tab.move', { tab_id: record.chat!.tab, insert_index: 0 })
+        applied = layout(await client.call('layout.apply', {
+          workspace_id: workspace, tab_label: placement.taskLabel!, focus: false,
+          root: { ...root, label: placement.taskLabel! },
+        } satisfies HerdrProjectLayoutParams), workspace)
+      } catch (error) {
+        // No server error code is assumed to prove absence. Keep the reservation
+        // even for a typed rejection; only a DISTINCT operation may proceed.
+        this.finishWorker(key, record, workerKey!, pending, { digest, state: 'ambiguous' })
+        throw error
+      }
+      // A changed journal identity cannot authorize cleanup of this handle:
+      // another server/workspace may now own it. Failure retains the reservation.
+      this.finishWorker(key, record, workerKey!, pending, { digest, state: 'completed',
+        pane: applied.layout.root.pane_id, tab: applied.layout.tab_id })
+      return applied
     }
     let replacedPlaceholder: string | undefined
     if (placement.role === 'chat' && record.chat) {
@@ -231,21 +254,14 @@ export class ProjectWorkspaceManager {
       }
     }
 
-    if (!readyWorker) record = this.reserve(key, record, { ...record, state: 'pending' })
+    record = this.reserve(key, record, { ...record, state: 'pending' })
     const title = placement.role === 'chat' ? 'Chat' : placement.taskLabel!
     const params = {
       workspace_id: workspace,
       tab_label: title, focus: false, root: { ...root, label: title },
     } satisfies HerdrProjectLayoutParams
     let applied: HerdrLayoutApply
-    try { applied = layout(await client.call('layout.apply', params), workspace) } catch (error) {
-      // Retire only our exact placeholder. A workspace-wide close cannot be made
-      // safe by a prior pane.list: another pane can arrive after that observation.
-      if (createdHere && placement.role === 'worker' && error instanceof HerdrError) {
-        await this.retireUnusedPlaceholder(client, key, record).catch(() => undefined)
-      }
-      throw error
-    }
+    applied = layout(await client.call('layout.apply', params), workspace)
     try {
       if (placement.role === 'chat') {
         await client.call('tab.move', { tab_id: applied.layout.tab_id, insert_index: 0 })
@@ -254,14 +270,10 @@ export class ProjectWorkspaceManager {
       // identity probe belongs to someone else and survives this pane-only close.
       if (replacedPlaceholder) await client.call('pane.close', { pane_id: replacedPlaceholder })
       if (initialPane) await client.call('pane.close', { pane_id: initialPane })
-      // A ready-workspace worker tab recorded nothing and has nothing to commit; a
-      // later claim by another manager must not turn this placed tab into a failure.
-      if (!readyWorker) {
-        this.reserve(key, record, {
-          ...record, state: 'ready',
-          ...(placement.role === 'chat' ? { chat: { tab: applied.layout.tab_id, pane: applied.layout.root.pane_id } } : {}),
-        })
-      }
+      this.reserve(key, record, {
+        ...record, state: 'ready',
+        ...(placement.role === 'chat' ? { chat: { tab: applied.layout.tab_id, pane: applied.layout.root.pane_id } } : {}),
+      })
     } catch (error) {
       // The host has not received this pane yet and cannot discharge its normal
       // failed-spawn cleanup. Close only the pane this operation just created.
@@ -295,35 +307,36 @@ export class ProjectWorkspaceManager {
     }
   }
 
-  private async retireUnusedPlaceholder(client: HerdrRpc, key: string, record: WorkspaceRecord): Promise<void> {
-    if (!record.workspace || !record.chat?.placeholderArgv) return
-    const pane = object(object(await client.call('pane.get', { pane_id: record.chat.pane })).pane)
-    if (pane.pane_id !== record.chat.pane || pane.tab_id !== record.chat.tab || pane.workspace_id !== record.workspace) return
-    const found = object(object(await client.call('workspace.get', { workspace_id: record.workspace })).workspace)
-    if (found.workspace_id !== record.workspace || object(found.tokens)[TOKEN] !== record.token) return
-    const info = object(object(await client.call('pane.process_info', { pane_id: record.chat.pane })).process_info)
-    if (!Array.isArray(info.foreground_processes) || info.foreground_processes.length !== 1
-      || JSON.stringify(object(info.foreground_processes[0]).argv) !== JSON.stringify(record.chat.placeholderArgv)) return
-    await client.call('pane.close', { pane_id: record.chat.pane })
-    // Retain the workspace mapping and closed slot reference. Next wake verifies
-    // whether the workspace/slot is gone before recreating either. Lifecycle
-    // reconciliation may reclaim the empty workspace with a server-side guard.
-    this.reserve(key, record, { ...record, state: 'ready' })
-  }
-
-  /** Drop our own reservation, and only if it is still exactly ours. */
-  private release(key: string, expected: WorkspaceRecord): void {
-    try {
-      this.journal.update(rows => {
-        if (JSON.stringify(rows[key]) === JSON.stringify(expected) && expected.state === 'pending' && !expected.workspace) delete rows[key]
-      })
-    } catch { /* the reservation stays: refusal, never a guess */ }
+  private finishWorker(key: string, expected: WorkspaceRecord, workerKey: string,
+    pending: WorkerOperation, result: WorkerOperation): void {
+    this.journal.update(rows => {
+      const current = rows[key]
+      if (!current || current.token !== expected.token || current.workspace !== expected.workspace
+        || JSON.stringify(current.scope) !== JSON.stringify(expected.scope)
+        || JSON.stringify(current.workers?.[workerKey]) !== JSON.stringify(pending)) {
+        throw new Error('project-workspaces: worker ownership changed concurrently')
+      }
+      // Merge only our operation: another manager can be preparing Chat or a
+      // different worker while this RPC is in flight.
+      rows[key] = { ...current, workers: { ...current.workers, [workerKey]: result } }
+    })
   }
 
   private reserve(key: string, expected: WorkspaceRecord, next: WorkspaceRecord): WorkspaceRecord {
     return this.journal.update(rows => {
-      if (JSON.stringify(rows[key]) !== JSON.stringify(expected)) throw new Error('project-workspaces: ownership changed concurrently')
-      const revised = { ...next, revision: randomUUID() }
+      const current = rows[key]
+      if (!current || JSON.stringify({ ...current, workers: undefined }) !== JSON.stringify({ ...expected, workers: undefined })) {
+        throw new Error('project-workspaces: ownership changed concurrently')
+      }
+      const workers = { ...current.workers }
+      for (const [operationKey, operation] of Object.entries(next.workers ?? {})) {
+        if (JSON.stringify(operation) === JSON.stringify(expected.workers?.[operationKey])) continue
+        if (JSON.stringify(current.workers?.[operationKey]) !== JSON.stringify(expected.workers?.[operationKey])) {
+          throw new Error('project-workspaces: worker ownership changed concurrently')
+        }
+        workers[operationKey] = operation
+      }
+      const revised = { ...next, revision: randomUUID(), workers }
       rows[key] = revised
       return revised
     })

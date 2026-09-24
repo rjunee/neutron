@@ -39,7 +39,7 @@
  * refused and kept for a later retire; changed identity is refused and `disowned`.
  */
 
-import { closeSync, fsyncSync, openSync, readFileSync, renameSync, writeSync } from 'node:fs'
+import { closeSync, fsyncSync, mkdirSync, openSync, readFileSync, renameSync, writeSync } from 'node:fs'
 import { createHash, randomUUID } from 'node:crypto'
 import { join } from 'node:path'
 import type { WorkerRole } from '../bounded-work.ts'
@@ -184,6 +184,19 @@ function record(receiptDir: string, key: string, receipt: Receipt): void {
   try { writeReceipt(receiptDir, key, receipt) } catch { /* evidence of placement only */ }
 }
 
+/** Reserve every placement writer, including an unavailable host: a retry must
+ * never replace an earlier pane's cleanup identity with an unplaced verdict. */
+function reserveReceipt(receiptDir: string, key: string): string | undefined {
+  try {
+    mkdirSync(receiptDir, { recursive: true, mode: 0o700 })
+    const fd = openSync(receiptPath(receiptDir, key), 'wx', 0o600)
+    try { writeSync(fd, JSON.stringify({ state: 'pending' })); fsyncSync(fd) } finally { closeSync(fd) }
+    return undefined
+  } catch (error) {
+    return `placement-reservation-refused: ${errText(error)}`
+  }
+}
+
 function readReceipt(receiptDir: string, key: string): Receipt | undefined {
   try {
     const value = JSON.parse(readFileSync(receiptPath(receiptDir, key), 'utf8'))
@@ -238,6 +251,8 @@ export function createWorkerPlacement(options: WorkerPlacementOptions): WorkerPl
     return {
       available: false,
       async place(input) {
+        const refusal = reserveReceipt(input.receiptDir, input.key)
+        if (refusal !== undefined) return { kind: 'unplaced', reason: refusal }
         record(input.receiptDir, input.key, { state: 'unplaced', reason })
         return { kind: 'unplaced', reason }
       },
@@ -297,7 +312,7 @@ export function createWorkerPlacement(options: WorkerPlacementOptions): WorkerPl
         label: input.taskLabel,
         onScreen() { /* the view is for the owner; its screen is never read */ },
         projectPlacement: { instanceId: scope.instanceId, projectId: scope.projectId,
-          projectLabel: scope.projectLabel, role: 'worker', taskLabel: input.taskLabel },
+          projectLabel: scope.projectLabel, role: 'worker', taskLabel: input.taskLabel, operationId: input.key },
       })
     } catch (error) {
       return { kind: 'unplaced', reason: `placement-refused: ${errText(error)}` }
@@ -317,7 +332,8 @@ export function createWorkerPlacement(options: WorkerPlacementOptions): WorkerPl
   return {
     available: true,
     async place(input) {
-      record(input.receiptDir, input.key, { state: 'pending' })
+      const refusal = reserveReceipt(input.receiptDir, input.key)
+      if (refusal !== undefined) return { kind: 'unplaced', reason: refusal }
       const timeoutReason = `placement-timeout after ${placeTimeoutMs}ms`
       // ONE decision, taken by whichever side gets there first: the attempt's own
       // outcome, or the timeout. The loser never writes the receipt.
