@@ -20,15 +20,20 @@ restoring the old limit loses a legitimate named identity; suppressing overflow
 invalidation invents identity for incomplete output. Initial mutant setup runs
 with unresolved imports were discarded and are not semantic evidence.
 
-The consuming `open/__tests__/project-build-e2e.test.ts` exercises large diagnostics
-through repeated-red arbitration, improving failures followed by green, and
-targeted base comparison. An oversized-log case cannot earn the pre-existing-red
-exemption. Both root and Trident TypeScript checks passed. The consuming run was
-concurrent with another branch's full-suite verification and is not an
-uncontended terminal validation receipt. Its changed cases passed, but unrelated
-owner-session fixtures could not listen on Unix sockets in the restricted
-sandbox (`EPERM`); an unrestricted consuming rerun remains outstanding. No full
-suite was run for this change while that lane owned the slot.
+CI run `35959557000`, shard 1/4 (job `107505001746`), executed all 288 named
+`open/__tests__/project-build-e2e.test.ts` cases: all passed, with no skips.
+These cover repeated-red arbitration, improving failures followed by green,
+targeted base comparison, and oversized-log refusal. The nine owner-session
+cases that hit Unix-socket `EPERM` locally also passed in CI. Both root and
+Trident TypeScript checks passed in job `107505001583`. The CI checkout's tree
+equals reviewed head `5467cf334`; these are explicit consuming and typecheck
+receipts, not an inference from aggregate green.
+
+The concurrent restricted-sandbox local invocation remains RED/nonterminal:
+279 passed and nine failed on socket permissions. No local full suite was run
+for this change while the other lane owned the slot. The remote consuming
+receipt satisfies that implementation check; the deployed live merge criterion
+remains outstanding.
 
 Reparsing the captured failing log now yields a named host-suite identity. That
 proves the parser repair only: other review-progress gates may still stop the
