@@ -50,7 +50,11 @@ cases: 282 passed and nine failed only on sandbox-denied Unix sockets, with no
 skips. Re-running precisely those nine cases with socket access passed all nine
 (125 assertions); the other cases were deliberately filtered in these retries.
 Every consuming case therefore has a passing local receipt, while the original
-restricted invocation remains red. The solo full suite is pending its test slot.
+restricted invocation remains red. The subsequent solo `bash scripts/run-tests.sh`
+on `4a7213f89` exited zero: all 1,665 discovered files executed across 18 lanes,
+with zero failed lanes. This run had socket access and the full consuming file
+passed in its normal suite lane. The only change after that receipt is this
+verification paragraph.
 
 Reparsing the captured failing log now yields a named host-suite identity. That
 proves the parser repair only: other review-progress gates may still stop the
