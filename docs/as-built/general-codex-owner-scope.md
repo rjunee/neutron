@@ -24,6 +24,10 @@ General, and bypassing the fixed authority journal. Independent security review
 found selected-seat fallback and cross-home restart gaps; both were corrected and
 the second review cleared the code.
 
+Process deviation: the branch was pushed before running the local partitioned
+full suite and complete typecheck matrix required by `CONTRIBUTING.md:148-149`.
+Those runs remained pending at PR creation; CI is not a substitute for them.
+
 This change does not complete project workspace placement or sleep lifecycle.
 No live credentials were provisioned, copied or changed, and no live native
 provider launch or deployment was used as evidence. Those consuming placement
