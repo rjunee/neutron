@@ -22,7 +22,9 @@ test('complete large diagnostics preserve named failures, but incomplete or cras
       expect(reviewProgress({ findings: ['resolved defect'], blockingCount: 2 }, current)).toEqual({ kind: 'allow' })
       expect(reviewProgress(current, current)).toMatchObject({ kind: 'blocked', on: expect.stringContaining('repeated finding') })
     }
-    for (const diagnostic of ['x'.repeat(65_537), 'error: Cannot find module '.padEnd(21_689, 'x')]) {
+    for (const diagnostic of ['x'.repeat(65_537), 'error: Cannot find module '.padEnd(21_689, 'x'),
+      '\x1b[31m'.repeat(4_000) + 'SyntaxError: invalid module',
+      'tests/' + 'x'.repeat(65_537) + '.test.ts:']) {
       await writeFile(log, transcript(diagnostic))
       const incomplete = await suiteFailure(log, 'bash scripts/run-tests.sh')
       expect(incomplete.hostFailureId).toBeUndefined()
@@ -34,6 +36,23 @@ test('complete large diagnostics preserve named failures, but incomplete or cras
       { head: 'head', diff: '', pr: null }, 2, 'run')
       expect(applyReviewSuite({ kind: 'approve' }, suite).kind).toBe('fix')
     }
+  } finally { await rm(dir, { recursive: true, force: true }) }
+})
+
+test('large complete file headers change failure identity instead of attributing failures to the preceding file', async () => {
+  const dir = await mkdtemp(join(tmpdir(), 'suite-failure-'))
+  try {
+    const log = join(dir, 'suite.log')
+    const transcript = (header: string) => `bun test v1.3.13\ntests/previous.test.ts:\n${header}\n(fail) same name [3.00ms]\n 1 fail\nRan 1 test across 1 file. [3.00ms]\n`
+    await writeFile(log, transcript(''))
+    const previous = await suiteFailure(log, 'bun test')
+    expect(previous.hostFailureId).toBeDefined()
+    const header = `tests/${'x'.repeat(21_689)}.test.ts`
+    await writeFile(log, transcript(`${header}:`))
+    const current = await suiteFailure(log, 'bun test')
+    expect(current.hostFailureId).toBeDefined()
+    expect(current.hostFailureId).not.toBe(previous.hostFailureId)
+    expect(current.hostDiagnostics).toContain(`${header}: same name`)
   } finally { await rm(dir, { recursive: true, force: true }) }
 })
 

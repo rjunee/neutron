@@ -1189,7 +1189,7 @@ for (const changed of [false, true]) test(`G072 generic red with fewer blockers 
 }, 120_000)
 
 for (const format of ['bun', 'generic'] as const)
-for (const evidence of (format === 'bun' ? ['valid', 'empty', 'changed-failure', 'mixed-crash', 'oversized-log', 'panel-veto'] : ['valid', 'empty', 'changed-run']) as readonly string[])
+for (const evidence of (format === 'bun' ? ['valid', 'empty', 'changed-failure', 'mixed-crash', 'ansi-crash', 'large-file-header', 'oversized-file-header', 'oversized-log', 'panel-veto'] : ['valid', 'empty', 'changed-run']) as readonly string[])
 test(`${format} host red reaches targeted base comparison and preserves ${evidence}`, async () => {
   const f = await fixture({ namedSuiteFailure: format === 'bun' ? true : 'generic', verboseSuiteDiagnostic: format === 'bun', maxRounds: 2,
     ...(evidence === 'panel-veto' ? { commentRounds: [2] } : {}) })
@@ -1199,10 +1199,12 @@ test(`${format} host red reaches targeted base comparison and preserves ${eviden
   f.context.runSuite = async (...args) => {
     const result = await runSuite(...args)
     suites++
-    if (['changed-failure', 'mixed-crash', 'oversized-log'].includes(evidence) && suites === 2) {
+    if (['changed-failure', 'mixed-crash', 'ansi-crash', 'large-file-header', 'oversized-file-header', 'oversized-log'].includes(evidence) && suites === 2) {
       const log = join(f.context.stateRoot, f.row.id, 'suite-round-2.log')
       const text = await readFile(log, 'utf8')
       await writeFile(log, evidence === 'mixed-crash' ? `${text}\nerror: Cannot find module './broken-by-diff'\n`
+        : evidence === 'ansi-crash' ? `${text}\n${'\x1b[31m'.repeat(4_000)}SyntaxError: invalid module\n`
+        : evidence.endsWith('file-header') ? text.replace(/^(\(fail\))/m, `tests/${'x'.repeat(evidence === 'large-file-header' ? 21_689 : 65_537)}.test.ts:\n$1`)
         : evidence === 'oversized-log' ? `${text}\n${'x'.repeat(65_537)}\n` : text.replaceAll('pre-existing red', 'new regression'))
     }
     return result
