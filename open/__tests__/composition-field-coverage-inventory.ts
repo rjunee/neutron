@@ -254,6 +254,13 @@ export const UNWIRED_FIELDS: readonly CompositionFieldUnwiredEntry[] = [
     costs: 'nothing. Setting it in production would replace a real liveness check with an injected one.',
   },
   {
+    field: 'reminder_scheduler',
+    why:
+      'DECISION — paired timer test seam, omitted by default. Open forwards an injected reminderScheduler at open/composer.ts:6975; gateway/composition/build-core-modules.ts:431 passes it to ReminderTickLoop. Without injection, reminders/tick.ts:130 retains the 30,000 ms cadence and loop/index.ts:230 uses native interval timers. The consuming reminder tests exercise the injected callback through the real store, dispatcher and delivery path.',
+    costs:
+      'nothing in production. The default composition intentionally retains native timers; tests inject a controlled scheduler to avoid waiting for the cadence.',
+  },
+  {
     field: 'onboarding_telemetry',
     why:
       "DECISION, not a gap — reclassified 2026-08-03 after reading what the cron actually sends. Every sub-field is optional and `gateway/composition/build-core-modules.ts:710-721` reads them all with `?.`, so telemetry itself still builds with its default stdout logger; the only thing the omission drops is the `sean_ellis` cron, which registers ONLY when the config supplies a channel + topic resolver. Leaving that unsupplied in Open is CORRECT. The message is a product-market-fit survey — `onboarding/telemetry/sean-ellis-trigger.ts:53` asks 'How would you feel if you could no longer use Neutron?' four weeks in — and a self-hoster INSTALLED this thing and may well be building on it. Surveying them about losing access to software they run themselves is a category error, and the answer would land in `sean_ellis_responses` in their OWN database where nobody reads it. So this is per-deployment config in the same family as the Google OAuth client: absent by default, supplied by a deployment that actually wants the signal. A hosted deployment that wants PMF data supplies channel + topic like any other config; it does not require changing Open.",

@@ -29,7 +29,7 @@
 
 import { nextCronFire, parseCron } from '@neutronai/cron'
 import { createLogger } from '@neutronai/logger'
-import { SupervisedLoop, type LoopDescriptor } from '@neutronai/loop'
+import { SupervisedLoop, type LoopDescriptor, type SupervisedLoopOptions } from '@neutronai/loop'
 
 import type { DeliveryObservation } from './delivery.ts'
 import { isRecurring, type Reminder, type ReminderRecurrence, type ReminderStore } from './store.ts'
@@ -58,6 +58,9 @@ export interface ReminderDispatcher {
   dispatch(reminder: Reminder): Promise<DeliveryObservation | void>
 }
 
+/** Paired timer operations; omitted in production to use the native interval. */
+export type ReminderScheduler = Required<Pick<SupervisedLoopOptions, 'setTimer' | 'clearTimer'>>
+
 /**
  * THERE IS NO POST-DISPATCH PUSH HOOK, and its absence is deliberate (2026-08-09).
  *
@@ -82,6 +85,8 @@ export interface ReminderTickOptions {
   dispatcher: ReminderDispatcher
   /** Default 30 s — matches Nova. */
   tick_interval_ms?: number
+  /** Timer seam for composition tests; does not change cadence or the tick body. */
+  scheduler?: ReminderScheduler
   /** Per-tick max reminders to fire. Default 50. */
   per_tick_limit?: number
   /** Injectable clock for tests. Default Date.now. */
@@ -130,6 +135,7 @@ export class ReminderTickLoop {
       name: 'reminders',
       intervalMs: this.interval_ms,
       tick: () => this.tickBody(),
+      ...options.scheduler,
     })
   }
 
