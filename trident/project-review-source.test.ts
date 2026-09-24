@@ -4,7 +4,7 @@ import { tmpdir } from 'node:os'
 import { join, dirname } from 'node:path'
 import type { BoundedWorkOutcome, BoundedWorkRequest, WorkerRunner } from '@neutronai/runtime/bounded-work.ts'
 import { decodeProjectTrailer, type ProjectTrailerOutcome } from '@neutronai/runtime/workers/project-runners.ts'
-import { createProjectReviewSource, type ProjectReviewSourceOptions } from './project-review-source.ts'
+import { createProjectReviewSource, reconcileProjectReviewSource, type ProjectReviewSourceOptions } from './project-review-source.ts'
 import { decideReviewPanel, observeReviewPanel, reviewPanel } from './gates/review-panel.ts'
 import { validateTrailer, VERDICT_SCHEMA } from './gates/result-contract.ts'
 import { AttemptAccounting } from './attempt-accounting.ts'
@@ -60,8 +60,84 @@ async function durableFixture() {
   return f
 }
 
+test('evidence-only reconciliation reuses completed seats and synthesis without dispatch', async () => {
+  const f = await durableFixture()
+  expect(await f.check()).toEqual({ kind: 'approve' })
+  const original = structuredClone(f.calls)
+  expect(await f.check(reconcileProjectReviewSource(f.options))).toEqual({ kind: 'approve' })
+  expect(f.calls).toEqual(original)
+  expect(f.recoveries).toEqual([])
+})
+
+test('evidence-only reconciliation refuses missing seats synthesis and retry without purchasing work', async () => {
+  for (const missing of ['seat', 'synthesis', 'retry'] as const) {
+    const f = await durableFixture()
+    const source = f.source()
+    if (missing === 'retry') f.answer(async () => ({ kind: 'failed', class: 'infra', detail: 'deferred' }))
+    if (missing !== 'seat') await source.readSeat(source.seats[1]!, snapshot, 1)
+    const count = f.calls.length
+    const attempts = f.options.accounting.ledger.list(f.options.runId).length
+    const recovery = reconcileProjectReviewSource(f.options)
+    if (missing === 'seat') await expect(recovery.readSeat(recovery.seats[1]!, snapshot, 1)).rejects.toThrow('original receipt is unavailable')
+    else {
+      await recovery.readSeat(recovery.seats[1]!, snapshot, 1)
+      await expect(missing === 'synthesis' ? recovery.readSynthesis(snapshot, 1)
+        : recovery.retrySeat(recovery.seats[1]!, snapshot, 1)).rejects.toThrow('original receipt is unavailable')
+    }
+    expect(f.calls).toHaveLength(count)
+    expect(f.options.accounting.ledger.list(f.options.runId)).toHaveLength(attempts)
+    expect(f.recoveries).toEqual([])
+  }
+})
+
+test('evidence-only reconciliation recovers the original pending request and retains uncertainty', async () => {
+  for (const complete of [false, true]) {
+    const f = await durableFixture()
+    f.answer(async () => ({ kind: 'unknown', detail: 'lost acknowledgement' }))
+    const source = f.source()
+    await expect(source.readSeat(source.seats[1]!, snapshot, 1)).rejects.toThrow()
+    const original = structuredClone(f.calls[0]!)
+    f.recover(async () => complete ? completed() : { kind: 'unknown', detail: 'still live or unreadable' })
+    const recovery = reconcileProjectReviewSource(f.options)
+    const result = recovery.readSeat(recovery.seats[1]!, snapshot, 1)
+    if (complete) expect(await result).toMatchObject({ status: 'completed', runId: original.run_id })
+    else await expect(result).rejects.toThrow()
+    expect(f.calls).toEqual([original])
+    expect(f.recoveries).toEqual([original])
+  }
+})
+
+test('evidence-only reconciliation rejects changed identity without dispatch', async () => {
+  for (const changed of ['task', 'head', 'model', 'credential', 'policy', 'run', 'cwd'] as const) {
+    const f = await durableFixture()
+    expect(await f.check()).toEqual({ kind: 'approve' })
+    const count = f.calls.length
+    let measured = snapshot
+    if (changed === 'task') f.options.taskInput = () => 'changed task'
+    if (changed === 'head') measured = { ...snapshot, head: 'b'.repeat(40) }
+    if (changed === 'model') f.options.phaseModels = { ...f.options.phaseModels, review_adversarial: { model: 'astra' } }
+    if (changed === 'credential') f.options.credentialIdentity = async () => 'changed account'
+    if (changed === 'policy') f.options.wallMs += 1
+    if (changed === 'run') f.options.runId = 'other-run'
+    if (changed === 'cwd') f.options.cwd = join(f.options.cwd, 'other')
+    const recovery = reconcileProjectReviewSource(f.options)
+    await expect(recovery.readSeat(recovery.seats[1]!, measured, 1)).rejects.toThrow('original receipt is unavailable')
+    expect(f.calls).toHaveLength(count)
+    expect(f.recoveries).toEqual([])
+  }
+})
+
 const repairVerdict = { verdict: 'REQUEST_CHANGES', findings: [{ severity: 'major', title: 'Measured defect',
   file: 'src/example.ts', line: 4, symbol: 'example', rule: 'Preserve the measured invariant', evidence: 'Observed counterexample' }] }
+test('evidence-only reconciliation preserves a completed rejection', async () => {
+  const f = await durableFixture()
+  f.answer(async () => completed(repairVerdict))
+  expect(await f.check()).toMatchObject({ kind: 'fix' })
+  const original = structuredClone(f.calls)
+  expect(await f.check(reconcileProjectReviewSource(f.options))).toMatchObject({ kind: 'fix' })
+  expect(f.calls).toEqual(original)
+})
+
 const invalidVerdict = () => {
   const result = structuredClone(repairVerdict)
   delete (result.findings[0] as Partial<typeof result.findings[0]>).rule

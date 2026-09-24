@@ -55,3 +55,41 @@ test('verdict repair semantic mutants fail closed and fail open with a passing c
     }
   } finally { rmSync(directory, { recursive: true, force: true }) }
 }, 60_000)
+
+test('evidence-only reconciliation mutations detect both replay and refused valid reuse', () => {
+  const parent = join(root, '.trident-mutants')
+  mkdirSync(parent, { recursive: true })
+  const directory = mkdtempSync(join(parent, 'review-reconciliation-'))
+  const subject = join(directory, 'project-review-source.ts')
+  const tests = join(directory, 'project-review-source.test.ts')
+  const report = join(directory, 'report.xml')
+  const refusalCase = 'evidence-only reconciliation refuses missing seats synthesis and retry without purchasing work'
+  const reuseCase = 'evidence-only reconciliation reuses completed seats and synthesis without dispatch'
+  const anchor = "purpose === 'reconciliation' && !stored"
+  try {
+    expect(source.split(anchor)).toHaveLength(2)
+    writeFileSync(tests, imports(suite, subject))
+    const run = (text: string, filter = 'evidence-only') => {
+      writeFileSync(subject, imports(text, subject))
+      const result = Bun.spawnSync([process.execPath, 'test', tests, '-t', filter, '--reporter=junit', `--reporter-outfile=${report}`], {
+        cwd: root, stdout: 'pipe', stderr: 'pipe', timeout: 30_000,
+      })
+      return { code: result.exitCode, output: result.stdout.toString() + result.stderr.toString(), report: readFileSync(report, 'utf8') }
+    }
+    const control = run(source)
+    expect(control.code, control.output).toBe(0)
+    expect(passedCase(control.report, refusalCase)).toBe(true)
+    expect(passedCase(control.report, reuseCase)).toBe(true)
+    for (const [replacement, killedBy, survives] of [
+      ['false', refusalCase, reuseCase],
+      ["purpose === 'reconciliation'", reuseCase, 'evidence-only reconciliation rejects changed identity without dispatch'],
+    ]) {
+      const mutant = run(source.replace(anchor, replacement!))
+      expect(mutant.code, mutant.output).not.toBe(0)
+      expect(mutant.output).toContain(`(fail) ${killedBy}`)
+      const sibling = run(source.replace(anchor, replacement!), survives!)
+      expect(sibling.code, sibling.output).toBe(0)
+      expect(passedCase(sibling.report, survives!), sibling.report).toBe(true)
+    }
+  } finally { rmSync(directory, { recursive: true, force: true }) }
+}, 60_000)

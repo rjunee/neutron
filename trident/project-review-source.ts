@@ -39,6 +39,17 @@ export interface ProjectReviewSourceOptions {
 /** One source per admitted build. Host-owned receipts retain completed observations
  * and consumed attempts across source replacement; pending work remains uncertain. */
 export function createProjectReviewSource(input: ProjectReviewSourceOptions): ReviewSource {
+  return projectReviewSource(input, 'review')
+}
+
+/** Reconcile only original receipts. Callers must supply the original run and
+ * evidence scope; this source cannot purchase missing seats, retries or synthesis.
+ * This is not authority to import its observations into a different run. */
+export function reconcileProjectReviewSource(input: ProjectReviewSourceOptions): ReviewSource {
+  return projectReviewSource(input, 'reconciliation')
+}
+
+function projectReviewSource(input: ProjectReviewSourceOptions, purpose: 'review' | 'reconciliation'): ReviewSource {
   const options = { ...input }
   if (!options.runId || !options.projectSlug || !Number.isSafeInteger(options.wallMs) || options.wallMs <= 0) throw Error('Review source requires host identity and a positive wall budget')
   const configured = configuredModels(options.env)
@@ -139,6 +150,7 @@ export function createProjectReviewSource(input: ProjectReviewSourceOptions): Re
       }
     }
     const stored = await readReviewReceipt(directory, identity)
+    if (purpose === 'reconciliation' && !stored) throw Error(`Review seat ${route.seat.id}: original receipt is unavailable for reconciliation`)
     if (stored?.invalidated) throw Error(`Review seat ${route.seat.id}: original pending attempt had changed inputs`)
     if (stored?.state === 'settled') {
       const observed = stored.observation!
