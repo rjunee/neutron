@@ -78,6 +78,17 @@ The first change supplies workspace ownership and terminal placement only.
 Production composition and safe sleep/retirement are subsequent slices; this
 item remains open until those consuming paths and live behaviour are verified.
 
+2026-09-24 (refs #1226): cross-provider bounded workers — headless Claude plan,
+review and synthesis, the Codex build wrapper and the Codex review seat — now
+get a task-view tab in their dispatch's project workspace (`Neutron General`
+for General), placed through this manager from production composition
+(`open/wiring/project-build.ts`, `open/composer.ts`). The tab shows a copy of
+the worker's own output; results, usage, exit status and cancellation still
+come from the native process. Placement failure runs the worker unplaced and
+records why. No acceptance box is ticked: conversation placement, General
+owner admission and sleep/retirement remain open. See
+`docs/as-built/place-cross-provider-bounded-workers.md`.
+
 ## Production composition investigation
 
 General already follows the instance provider choice

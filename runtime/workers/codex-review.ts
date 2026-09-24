@@ -7,6 +7,7 @@ import { CODEX_CLI_AUTH_ENV_VARS } from '../adapters/codex-cli/auth.ts'
 import { readArmedTrailerReservation, reserveTrailerSlot } from './trailer-slot.ts'
 import { codexObservation } from './provider-observation.ts'
 import { createObservationPublisher, decodeObservationReceipt, recoverProviderObservation } from './provider-observation-recovery.ts'
+import { openWorkerView, workerTaskLabel, type WorkerPlacement } from './worker-placement.ts'
 
 export interface CodexReviewContract {
   jsonSchema: unknown
@@ -56,6 +57,9 @@ export function createCodexReviewTransport(options: {
   contracts: ReadonlyMap<string, CodexReviewContract>
   briefIntegrity: ((text: string) => string) | undefined
   live: Map<string, { readonly exitCode: number | null }>
+  /** Task-view tab for the seat. Never read for the verdict, usage or exit. */
+  placement?: WorkerPlacement
+  taskName?: string
 }) {
   const env = codexWorkerEnv(options.env)
   const connected = subscriptionReady(env)
@@ -112,6 +116,8 @@ export function createCodexReviewTransport(options: {
       : await reserveTrailerSlot(reservation, identity, req.result.path)
     if (held.kind === 'unknown') return unknown(held.detail)
     if (held.kind === 'resume') {
+      // Restart: close a stale view pane from its receipt. Never places or spawns.
+      await options.placement?.retire({ key: `codex-review-${key}`, receiptDir: dirname(req.result.path) })
       try { observation = decodeObservationReceipt(await readFile(observationPath, 'utf8'), identity, 'codex-cli-jsonl') } catch { /* legacy or unobserved */ }
       try {
         const receipt = JSON.parse(await readFile(receiptPath, 'utf8'))
@@ -155,10 +161,15 @@ export function createCodexReviewTransport(options: {
     let child: Bun.Subprocess<Blob, 'pipe', 'ignore'>
     const started = Date.now()
     const publisher = createObservationPublisher(observationPath, identity)
+    const view = openWorkerView(options.placement, { key: `codex-review-${key}`,
+      taskLabel: workerTaskLabel(req.role, options.taskName ?? req.run_id.slice(0, 8)), cwd: req.cwd,
+      viewPath: `${reservation}.view.log`, receiptDir: dirname(req.result.path) })
     try {
       child = Bun.spawn(['codex', ...args], { cwd: req.cwd, env, detached: true, stdin: new Blob([prompt]), stdout: 'pipe', stderr: 'ignore' })
-    } catch { return { kind: 'failed', class: 'infra', detail: 'Codex review could not start' } }
+    } catch { await view.finish(); return { kind: 'failed', class: 'infra', detail: 'Codex review could not start' } }
     options.live.set(req.step_id, child)
+    // The native seat exists; only now may a view of it be placed. Not awaited.
+    view.started()
     const kill = (signal: NodeJS.Signals) => {
       try { if (child.pid) process.kill(-child.pid, signal) } catch { /* Already exited. */ }
     }
@@ -169,6 +180,8 @@ export function createCodexReviewTransport(options: {
     const readEvents = async () => {
       const decoder = new TextDecoder()
       for await (const chunk of child.stdout) {
+        // The same bytes the event parser reads, copied to the view. Display only.
+        view.tee(chunk)
         pending += decoder.decode(chunk, { stream: true })
         if (pending.length > 1024 * 1024) { invalid = true; pending = ''; stop(); return }
         let end: number
@@ -207,6 +220,7 @@ export function createCodexReviewTransport(options: {
     // Always close the process group, including children that survived the CLI.
     kill('SIGKILL'); clearTimeout(killTimer)
     options.live.delete(req.step_id)
+    await view.finish()
     // A truncated JSONL transport can still end with one complete JSON object.
     // Observe its usage without treating an unterminated event as completion.
     try {
