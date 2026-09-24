@@ -3,12 +3,12 @@ import { existsSync, readFileSync, writeFileSync } from 'node:fs'
 import { join } from 'node:path'
 import { isDeepStrictEqual } from 'node:util'
 import { attachCodexOwner, readCodexOwnerBinding, type bootstrapCodexOwner, type CodexOwnerAttachment } from '@neutronai/runtime/adapters/codex-cli/persistent/project-control-bootstrap.ts'
-import { assertProjectOwner, helperIdentity, privatePath, readOwnerHelperDescriptor } from '@neutronai/runtime/adapters/codex-cli/persistent/project-owner-helper-protocol.ts'
+import { assertOwnerScope, helperIdentity, privatePath, readOwnerHelperDescriptor } from '@neutronai/runtime/adapters/codex-cli/persistent/project-owner-helper-protocol.ts'
 import { HerdrHost } from '@neutronai/runtime/adapters/claude-code/persistent/herdr-host.ts'
 import { createHerdrRpc } from '@neutronai/runtime/adapters/claude-code/persistent/herdr-client.ts'
 import { readAccountId, validateCodexSubscriptionAuth } from '@neutronai/trident/codex-auth.ts'
 
-export type OwnerLaunch = Parameters<typeof bootstrapCodexOwner>[0] & { projectId: string }
+export type OwnerLaunch = Parameters<typeof bootstrapCodexOwner>[0] & { projectId: string | null; generalAuthorityPath?: string }
 
 /** Account identity survives native access/id/refresh-token rotation. The private
  * credential service's file is the source; JWT bodies are not invented authority. */
@@ -22,7 +22,7 @@ export function codexOwnerCredentialIdentity(bytes: string): string {
 /** Host journal is written before launch. Any incomplete/uncertain prior launch
  * refuses replacement; only an authenticated exact surviving helper is adopted. */
 export async function openDurableCodexOwner(options: OwnerLaunch): Promise<CodexOwnerAttachment> {
-  assertProjectOwner(options.codexHome, options.projectId)
+  assertOwnerScope(options.codexHome, options.projectId)
   const descriptorPath = join(options.codexHome, '.neutron-owner-helper.json')
   const launchPath = join(options.codexHome, '.neutron-owner-launch.json')
   const authorityPath = join(options.codexHome, '.neutron-owner-authority.json')
@@ -34,6 +34,18 @@ export async function openDurableCodexOwner(options: OwnerLaunch): Promise<Codex
   privatePath(credentialPath, 'file')
   const credential = codexOwnerCredentialIdentity(readFileSync(credentialPath, 'utf8'))
   const scope = { projectId: options.projectId, cwd: options.cwd, codexHome: options.codexHome, credential }
+  if (options.projectId === null) {
+    const path = options.generalAuthorityPath
+    if (!path) throw new Error('General owner requires its fixed instance authority journal')
+    // Reserve the General owner independently of the rotating credential home.
+    // A different seat or account after restart cannot create a second owner.
+    try { writeFileSync(path, JSON.stringify(scope), { flag: 'wx', mode: 0o600 }) }
+    catch (error) { if ((error as NodeJS.ErrnoException).code !== 'EEXIST') throw error }
+    privatePath(path, 'file')
+    if (!isDeepStrictEqual(JSON.parse(readFileSync(path, 'utf8')), scope)) {
+      throw new Error('General owner credential or directory changed; explicit reconciliation required')
+    }
+  }
   let authority: ReturnType<typeof readOwnerHelperDescriptor> | undefined
   let launchedPid: number | undefined
   if (existsSync(launchPath)) {

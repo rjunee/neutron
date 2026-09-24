@@ -1110,6 +1110,26 @@ describe('wireSubstrates — on-demand helpers', () => {
     expect(w.utilitySubstrate).toBeNull()
   })
 
+  test('General owner uses the live instance choice and keeps project general separate', async () => {
+    let selected: 'openai-codex' | 'anthropic' = 'openai-codex'
+    const admitted: (string | undefined)[] = []
+    const { ctx, captured } = makeCtx({
+      providerResolver: () => ({ provider: selected, source: 'instance' }),
+      startCodexOwner: projectId => { admitted.push(projectId); return cannedHandle('native-owner') },
+    })
+    const wired = wireSubstrates(ctx)
+    for await (const event of wired.liveAgentSubstrate!.start(SESSIONLESS_SPEC).events) {
+      if (event.kind === 'completion') expect(event.substrate_instance_id).toBe('native-owner')
+    }
+    for await (const _ of wired.makeProjectLiveAgentSubstrate('general')!.start(SESSIONLESS_SPEC).events) { /* drain */ }
+    expect(admitted).toEqual([undefined, 'general'])
+    expect(captured).toHaveLength(0)
+    selected = 'anthropic'
+    for await (const _ of wired.liveAgentSubstrate!.start(SESSIONLESS_SPEC).events) { /* drain */ }
+    expect(captured).toHaveLength(1)
+    expect(admitted).toEqual([undefined, 'general'])
+  })
+
   test('owner Codex binding availability preserves credential-less Claude and admits selected Codex', async () => {
     const { ctx } = makeCtx({ llmPool: null, startCodexOwner: () => cannedHandle('native-owner'),
       providerResolver: projectId => ({ provider: projectId === 'codex-project' ? 'openai-codex' : 'anthropic', source: 'project' }) })

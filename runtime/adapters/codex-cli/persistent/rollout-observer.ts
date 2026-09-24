@@ -3,7 +3,7 @@ import type { Event, TokenUsage } from '../../../events.ts'
 
 /** Supplied by the host's verified pane binding, never discovered by cwd/mtime. */
 export interface CodexRolloutIdentity {
-  readonly projectId: string
+  readonly projectId: string | null
   readonly paneHandle: string
   readonly threadId: string
   readonly rolloutPath: string
@@ -65,7 +65,7 @@ export class CodexRolloutObserver {
   private inode: number | undefined
 
   constructor(readonly identity: CodexRolloutIdentity, private readonly prompt: string) {
-    if ([identity.projectId, identity.paneHandle, identity.threadId, identity.cwd, identity.rolloutPath].some(value => !value)) {
+    if (identity.projectId !== null && !identity.projectId || [identity.paneHandle, identity.threadId, identity.cwd, identity.rolloutPath].some(value => !value)) {
       throw new Error('codex rollout refused: incomplete native identity')
     }
     this.rolloutPath = identity.rolloutPath

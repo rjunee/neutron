@@ -82,14 +82,13 @@ item remains open until those consuming paths and live behaviour are verified.
 
 General already follows the instance provider choice
 (`instance-project-provider-resolution.md:10-13`, `open/composer.ts:850-858`),
-and the Codex credential resolver selects a configured global seat when project
-scope is absent (`trident/codex-credential.ts:739-754`). Native owner integration
-is incomplete: `open/wiring/codex-owner-binding.ts:520` refuses absent project
-selection, and `runtime/adapters/codex-cli/persistent/project-owner-helper-protocol.ts:43-48`
-requires a project-owned credential directory. Completing that integration must
-preserve an explicit General owner namespace and reuse the selected credential
-in place; credential copies violate `trident/codex-credential.ts:396-399`.
-Until wired, the selected provider must refuse visibly. The terminal manager's
+and native owner admission uses the selected configured global seat in place
+(`CodexCredentialService.resolveGeneralOwnerCredential`). General is an explicit
+null owner namespace through conversation, controls, installed MCP and helper
+admission; project owners still require their own complete project marker and
+credential grant. Missing General credentials refuse visibly without reviewer
+rotation or credential copies. This owner integration does not yet establish
+production terminal placement or safe workspace retirement. The terminal manager's
 `null` General scope must never become the literal project id `general` to bypass
 those checks. Adapter placement propagation alone does not complete this criterion.
 

@@ -1090,7 +1090,9 @@ export function buildOpenGraphComposer(
       }
       const credential = codexCredentialService.resolveProjectOwnerCredential(asOwnerHandle(owner_handle), projectId)
       return { cwd: joinPath(owner_home, 'Projects', projectId), ...credential, env }
-    })
+    }, undefined, undefined, async () => ({ cwd: owner_home,
+      generalAuthorityPath: joinPath(owner_home, '.neutron-general-codex-owner.json'),
+      ...codexCredentialService.resolveGeneralOwnerCredential(asOwnerHandle(owner_handle)), env }))
     const codexOwnerProjects = (await projectSettingsStore.list(project_slug))
       .filter(project => resolveModelProvider(project.id).provider === 'openai-codex')
       .map(project => project.id)
@@ -1117,9 +1119,9 @@ export function buildOpenGraphComposer(
     codexOwnerBindings.onOwnerQuestion = async (projectId, question) => {
       const deliver = noticeDeliverHolder.deliver
       if (!deliver) throw new Error('Native owner question delivery is unavailable')
-      const receipt = await deliver(appWsProjectTopicId(OWNER_USER_ID, projectId), {
+      const receipt = await deliver(projectId === null ? appWsTopicId(OWNER_USER_ID) : appWsProjectTopicId(OWNER_USER_ID, projectId), {
         body: nativeOwnerQuestionText(question), durability: 'reply',
-        idempotency_key: `codex-question:${projectId}:${String(question.params.turnId)}:${String(question.requestId)}`,
+        idempotency_key: `codex-question:${JSON.stringify(projectId)}:${String(question.params.turnId)}:${String(question.requestId)}`,
       })
       if (!receipt.persisted) throw new Error('Native owner question was not durably delivered')
     }
@@ -1844,7 +1846,9 @@ export function buildOpenGraphComposer(
     // Recovery reads this credential service through the shared owner resolver.
     // Reconcile only after materialization; an earlier lookup is caught as an
     // unavailable credential and silently skips surviving project owners.
-    await codexOwnerBindings.reconcile(codexOwnerProjects)
+    await codexOwnerBindings.reconcile([
+      ...(resolveModelProvider(undefined).provider === 'openai-codex' ? [null] : []), ...codexOwnerProjects,
+    ])
     const coresSubstrate =
       llmPool !== null ? makeEphemeralSubstrate('cc-cores')(owner_home) : null
     // Plan task 8 — the agent-callable ritual registration service. Assigned LATE
@@ -3854,8 +3858,8 @@ export function buildOpenGraphComposer(
     const appNativeOwnerControlSurface = createAppNativeOwnerControlSurface({
       auth: appOwnerAuth,
       canAccess: async (userId, ownerSlug, projectId) => userId === OWNER_USER_ID && ownerSlug === project_slug
-        && resolveModelProvider(projectId).provider === 'openai-codex'
-        && (await projectSettingsStore.list(project_slug)).some(project => project.id === projectId),
+        && resolveModelProvider(projectId ?? undefined).provider === 'openai-codex'
+        && (projectId === null || (await projectSettingsStore.list(project_slug)).some(project => project.id === projectId)),
       read: projectId => codexOwnerBindings.controls.state(projectId),
       act: (projectId, request) => codexOwnerBindings.controls.act(projectId, request),
     })

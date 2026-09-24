@@ -9,7 +9,7 @@ import { parseOwnerMcpServerInput, type ResolvedOwnerMcpServer } from '../../../
 
 /** Supplied by the authenticated project transport, never by MCP request params. */
 export interface ApprovedMcpContext {
-  projectId: string
+  projectId: string | null
   sessionId: string
   threadId: string
   generation: string

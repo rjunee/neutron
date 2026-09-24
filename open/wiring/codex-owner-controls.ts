@@ -33,26 +33,26 @@ interface ActiveTurn {
 /** Controls consume the same opaque owner and original turn writer as chat.
  * Reads never bootstrap, resume, seed a turn, or infer identity from a topic. */
 export class CodexOwnerControls {
-  private readonly active = new Map<string, ActiveTurn>()
-  private readonly switching = new Set<string>()
+  private readonly active = new Map<string | null, ActiveTurn>()
+  private readonly switching = new Set<string | null>()
   private sequence = 0
   constructor(private readonly deps: {
-    lookup(projectId: string): Promise<CodexOwnerBootstrap | undefined>
-    authorize(projectId: string): Promise<void>
+    lookup(projectId: string | null): Promise<CodexOwnerBootstrap | undefined>
+    authorize(projectId: string | null): Promise<void>
     facts(owner: CodexOwnerBootstrap): CodexOwnerBindingFacts
-    busy(projectId: string): boolean
-    refused(projectId: string): boolean
-    fence(projectId: string): void
+    busy(projectId: string | null): boolean
+    refused(projectId: string | null): boolean
+    fence(projectId: string | null): void
   }) {}
 
-  isSwitching(projectId: string): boolean { return this.switching.has(projectId) }
+  isSwitching(projectId: string | null): boolean { return this.switching.has(projectId) }
 
-  private identity(projectId: string, owner: CodexOwnerBootstrap): NativeOwnerIdentity {
+  private identity(projectId: string | null, owner: CodexOwnerBootstrap): NativeOwnerIdentity {
     const facts = this.deps.facts(owner), state = owner.broker.state()
     return { projectId, threadId: facts.threadId, bindingRevision: facts.bindingRevision,
       generation: state.generation, epoch: state.epoch, turnId: state.activeTurnId }
   }
-  private async owner(projectId: string): Promise<CodexOwnerBootstrap> {
+  private async owner(projectId: string | null): Promise<CodexOwnerBootstrap> {
     const owner = await this.deps.lookup(projectId)
     if (owner && 'refreshState' in owner) await (owner as CodexOwnerAttachment).refreshState()
     if (!owner || this.deps.refused(projectId) || ['closed', 'recovery'].includes(owner.broker.state().phase)) {
@@ -63,13 +63,13 @@ export class CodexOwnerControls {
   private token(identity: NativeOwnerIdentity): string {
     return JSON.stringify([identity.projectId, identity.threadId, identity.bindingRevision, identity.generation, identity.epoch, identity.turnId])
   }
-  private assertIdentity(expected: NativeOwnerIdentity, projectId: string, owner: CodexOwnerBootstrap): void {
+  private assertIdentity(expected: NativeOwnerIdentity, projectId: string | null, owner: CodexOwnerBootstrap): void {
     if (this.token(expected) !== this.token(this.identity(projectId, owner))) {
       throw new ReplModelError('session-changed', 'Native project, thread, turn or revision changed. Refresh the controls.')
     }
   }
   private async models(gateway: ProjectControlGateway): Promise<ReplModelState['availableModels']> {
-    const models: ReplModelState['availableModels'] = [], cursors = new Set<string>()
+    const models: ReplModelState['availableModels'] = [], cursors = new Set<string | null>()
     let cursor: string | undefined
     for (let page = 0; page < 20; page++) {
       const value = await gateway.request('model/list', { limit: 100, includeHidden: false, ...(cursor ? { cursor } : {}) })
@@ -98,7 +98,7 @@ export class CodexOwnerControls {
   turnModel(owner: CodexOwnerBootstrap, gateway: ProjectControlGateway): Promise<string> {
     return this.current(owner, gateway)
   }
-  async model(projectId: string, request?: ReplModelSwitch): Promise<ReplModelState> {
+  async model(projectId: string | null, request?: ReplModelSwitch): Promise<ReplModelState> {
     await this.deps.authorize(projectId)
     const owner = await this.owner(projectId)
     const before = this.identity(projectId, owner)
@@ -137,7 +137,7 @@ export class CodexOwnerControls {
     } finally { gateway.close(); if (request) this.switching.delete(projectId) }
   }
 
-  register(projectId: string, owner: CodexOwnerBootstrap, gateway: ProjectControlGateway, onQuestion: (question: NativeOwnerQuestion) => void, clientId?: string,
+  register(projectId: string | null, owner: CodexOwnerBootstrap, gateway: ProjectControlGateway, onQuestion: (question: NativeOwnerQuestion) => void, clientId?: string,
     onTool?: (request: { id: string | number; method: string; params: Record<string, unknown> }) => void) {
     const active: ActiveTurn = { owner, gateway, clientId, facts: this.deps.facts(owner), pending: new Map(), seen: new Set() }
     this.active.set(projectId, active)
@@ -170,13 +170,13 @@ export class CodexOwnerControls {
       close: () => { unsubscribe(); if (this.active.get(projectId) === active) this.active.delete(projectId) },
     }
   }
-  async state(projectId: string): Promise<NativeOwnerControlState> {
+  async state(projectId: string | null): Promise<NativeOwnerControlState> {
     const owner = await this.owner(projectId)
     const identity = this.identity(projectId, owner), active = this.active.get(projectId)
     return { ...identity, status: owner.broker.state().phase,
       pending: active?.turnId === identity.turnId ? structuredClone([...active.pending.values()]) : [] }
   }
-  async act(projectId: string, action: NativeOwnerAction): Promise<NativeOwnerControlState> {
+  async act(projectId: string | null, action: NativeOwnerAction): Promise<NativeOwnerControlState> {
     const owner = await this.owner(projectId)
     this.assertIdentity(action, projectId, owner)
     const active = this.active.get(projectId)
