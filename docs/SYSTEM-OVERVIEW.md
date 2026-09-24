@@ -6961,13 +6961,17 @@ planner, but its presence or absence never selects execution grouping. Both
 strategies are valid for repositories with or without a `SPEC.md`:
 
 - **`single`** — one builder invocation completes the whole accepted plan. Its
-  terminal validation uses the full-suite scope before review and publication.
+  worker runs stage 1; terminal host review runs the full suite, and publication
+  reuses that receipt only under the existing complete suite identity. New
+  workers receive the `host-suite` context scope. Already-admitted v2 briefs
+  retain their full-suite worker contract throughout recovery.
 - **`task_sequence`** — each builder invocation completes exactly the
   host-selected task. The host validates the committed ledger, task identity,
   remaining count, and mutation evidence; while tasks remain it records a
   `task-built` handoff and defers review and publication. The terminal task
-  receives the full-suite scope, and only the cumulative result is reviewed and
-  published. A continuation planner may refresh execution details within this
+  receives worker stage 1 followed by the host-owned full suite, and only the
+  cumulative result is reviewed and published. Wave members return before host
+  review and therefore retain the worker full-suite obligation. A continuation planner may refresh execution details within this
   strategy, but cannot reclassify the run.
 
 Selection is immutable across continuation, restart, infrastructure retry,

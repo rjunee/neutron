@@ -64,7 +64,7 @@ test('G063 rejects a nonzero host receipt — advisory only for an EVIDENCED fai
   f.observation.scope = 'full-suite'
   f.observation.report = { hostExitCode: 1, suiteOutcome: 'failed-preexisting' }
   expect(await f.decide()).toMatchObject({ kind: 'fix', findings: [expect.stringContaining('WITHOUT EVIDENCE')] })
-  f.observation.report = { hostExitCode: 1, suiteOutcome: 'failed-preexisting', suiteEvidence: 'base red on x.test.ts; re-ran at merge-base: red' }
+  f.observation.report = { hostExitCode: 1, suiteOutcome: 'failed-preexisting', hostFailureId: 'host-suite:x', suiteEvidence: 'host-suite:x; base red on x.test.ts; re-ran at merge-base: red' }
   // Evidenced: advisory, so the panel's approve stands — the human verifies the comparison.
   expect(await f.decide()).toEqual(approve)
   f.observation.report = null
@@ -94,12 +94,28 @@ test('G065 evidence earns an advisory finding and never waives panel rejection',
     f.observation.report = { hostExitCode: 1, suiteOutcome: 'failed-preexisting', ...(suiteEvidence === undefined ? {} : { suiteEvidence }) }
     expect(await f.decide()).toMatchObject({ kind: 'fix', findings: [expect.stringContaining('WITHOUT EVIDENCE')] })
   }
-  f.observation.report!.suiteEvidence = 'base: named.test.ts fails without diff'
+  f.observation.report!.hostFailureId = 'host-suite:named'
+  f.observation.report!.suiteEvidence = 'host-suite:named; base: named.test.ts fails without diff'
   const suite = await f.assess()
   expect(suite).toMatchObject({ kind: 'known', findings: [{ advisory: true, evidence: expect.stringContaining('base: named.test.ts') }] })
   expect(applyReviewSuite(approve, suite)).toEqual(approve)
   const rejection = { kind: 'fix', findings: ['code defect'], blockingCount: 1 } as const
   expect(applyReviewSuite(rejection, suite)).toEqual(rejection)
+})
+
+test('G065 preserves legacy full-suite evidence while host-suite generic evidence requires an actual prior host-red fix dispatch', async () => {
+  const f = fixture()
+  f.observation.report = { hostExitCode: 1, suiteOutcome: 'failed-preexisting', suiteEvidence: 'pytest tests/test_base.py is also red at base without diff', hostFailureFormat: 'generic' }
+  expect(await f.decide()).toEqual(approve)
+  f.observation.report.hostSuiteWorker = true
+  expect((await f.decide()).kind).toBe('fix')
+  f.observation.report.hostComparisonEligible = true
+  expect(await f.decide()).toEqual(approve)
+  f.observation.report.hostFailureFormat = 'bun'
+  expect((await f.decide()).kind).toBe('fix')
+  f.observation.report.hostFailureFormat = 'generic'
+  f.observation.report.suiteEvidence = ''
+  expect((await f.decide()).kind).toBe('fix')
 })
 test('suite observation must establish source, identity and dispatch configuration', async () => {
   expect(await assessReviewSuite(undefined, snapshot, 2, 'run')).toMatchObject({ kind: 'unknown' })

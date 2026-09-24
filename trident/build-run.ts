@@ -111,6 +111,7 @@ function validReviewProgress(value: unknown): value is ReviewProgress {
   const progress = value as ReviewProgress
   return Array.isArray(progress.findings) && progress.findings.every(f => typeof f === 'string' && f.trim().length > 0)
     && Number.isSafeInteger(progress.blockingCount) && progress.blockingCount >= 0
+    && (progress.unknownIdentities === undefined || typeof progress.unknownIdentities === 'boolean')
 }
 
 function recoveryInputs(input: BuildRunInput, maxRounds: number) {
@@ -176,7 +177,7 @@ export interface BuildRunDeps {
   /** Narrow compatibility for the original, still-reserved legacy request. Never
    * authorize new work or substitute provider, grants, budget or worker identity. */
   validateLegacyPendingRequest?(workers: PendingRecovery['inputs']['workers']): Promise<GateResult>
-  prepareWork(request: BoundedWorkRequest, context: { snapshot: BuildSnapshot; previous: unknown; findings: readonly string[]; planner?: 'full' | 'next'; executionStrategy?: ExecutionStrategy | null; committedPlan?: PlanProbe; suiteScope?: 'full-suite' | 'subset'; testStrategy?: string }): Promise<void>
+  prepareWork(request: BoundedWorkRequest, context: { snapshot: BuildSnapshot; previous: unknown; findings: readonly string[]; planner?: 'full' | 'next'; executionStrategy?: ExecutionStrategy | null; committedPlan?: PlanProbe; suiteScope?: 'full-suite' | 'subset' | 'host-suite'; testStrategy?: string }): Promise<void>
   /** Read back the materialized review input after preparation, before dispatch. */
   reviewArtifact?(request: BoundedWorkRequest, snapshot: BuildSnapshot): Promise<GateResult>
   measure(): Promise<Measurement>
@@ -613,10 +614,11 @@ export async function buildRun(input: BuildRunInput, deps: BuildRunDeps, signal:
       }
       const execute = recovery ? runner.recover?.bind(runner) : runner.run.bind(runner)
       if (!execute) return { stop: unknown('Pending worker runner cannot recover without dispatch') }
-      // Only the validated plan can defer a task-sequence builder's full suite. Fixes and
-      // terminal tasks require it, regardless of a strategy supplied at launch.
-      const suiteScope = role === 'build' && strategy === 'task_sequence' && plan !== null && plan.remainingTasks > 0
-        ? 'subset' : 'full-suite'
+      // Wave members return before host review, so their worker retains stage 2.
+      // Terminal implementation workers leave stage 2 to the host review receipt.
+      const suiteScope = input.mode !== 'implementation' ? 'full-suite'
+        : role === 'build' && strategy === 'task_sequence' && plan !== null && plan.remainingTasks > 0
+          ? 'subset' : 'host-suite'
       if (!recovery) await deps.prepareWork(boundedRequest, { snapshot: structuredClone(snapshot), previous: previousPayload, findings, planner,
         executionStrategy: strategy,
         ...(committedPlan ? { committedPlan } : {}), ...((role === 'build' || role === 'fix') ? { suiteScope } : {}) })
@@ -999,7 +1001,11 @@ export async function buildRun(input: BuildRunInput, deps: BuildRunDeps, signal:
         const decision = applyReviewCi(suiteDecision, ci)
         if (currentReview) {
           const suiteBlockers = [...suite.findings, ...ci.findings].filter(f => !f.advisory)
-          currentReview = { findings: [...currentReview.findings, ...suiteBlockers.map(f => `${f.title}: ${f.evidence}`)], blockingCount: currentReview.blockingCount + suiteBlockers.length }
+          const unknownIdentities = suiteBlockers.some(f => 'identity' in f && f.identity === null)
+          currentReview = { findings: [...currentReview.findings, ...suiteBlockers.flatMap(f =>
+            'identity' in f && f.identity === null ? [] : ['identity' in f && typeof f.identity === 'string' ? f.identity : `${f.title}: ${f.evidence}`])],
+            blockingCount: currentReview.blockingCount + suiteBlockers.length,
+            ...(unknownIdentities ? { unknownIdentities: true } : {}) }
         }
         if (decision.kind === 'blocked') return blocked(decision.on)
         if (decision.kind === 'unknown') return unknown(decision.detail)

@@ -37,6 +37,7 @@ import { AttemptAccounting } from '@neutronai/trident/attempt-accounting.ts'
 import { createProjectWorkerContinuity } from '@neutronai/trident/project-worker-continuity.ts'
 import { recoveredBuildArtifact } from '@neutronai/trident/recover-builder-commit.ts'
 import { TRIDENT_SCRIPT_DIR } from '@neutronai/trident/script-dir.ts'
+import { suiteFailure } from '@neutronai/trident/suite-failure.ts'
 
 /** Match the selected adapters' credential source without storing its contents.
  * Rotation is conservatively a different owner until account identity is attested. */
@@ -511,8 +512,8 @@ export async function prepareProjectBuild(input: InnerLoopInput, context: Projec
     const provider: Provider = descriptor.group === 'claude' ? 'anthropic' : descriptor.group === 'codex' ? 'openai-codex' : 'pi'
     // Owner guidance and test execution instructions belong only to the builders.
     const isBuilder = role === 'build' || role === 'fix'
-    const brief = [run.task, isBuilder
-      ? 'Follow the TEST EXECUTION instructions in the host context `testStrategy`. The host selects `suiteScope` after validating this task: `full-suite` requires the full suite; only `subset` defers it for an intermediate task. Never infer scope from the task number or an earlier task.' : '',
+    let brief = [run.task, isBuilder
+      ? 'Follow the TEST EXECUTION instructions in the host context `testStrategy`. The host selects `suiteScope`: `full-suite` requires the worker full suite for a wave member; `subset` defers it for an intermediate task; `host-suite` leaves the full suite to host review after worker stage 1. Never infer scope from the task number or an earlier task.' : '',
       // THE BRIEF MUST STATE THE ENVELOPE, AND THE WORKER MUST COPY ITS IDS.
       // `decodeProjectTrailer` (`runtime/workers/project-runners.ts:44-58`) reads
       // `{ schema, run_id, step_id, kind, result }` and refuses unless `run_id`,
@@ -543,9 +544,19 @@ export async function prepareProjectBuild(input: InnerLoopInput, context: Projec
       ...(isBuilder ? [`Commit only through the host wrapper with argv ${JSON.stringify(['bash', join(TRIDENT_SCRIPT_DIR, 'commit-with-resolved-head.sh'), run.branch])}, followed by your git commit arguments. Never invoke git commit directly. Do not add a Claude-Session: trailer; keep Co-Authored-By. After the wrapper returns, read the final OID with git rev-parse HEAD for both result.head and payload.commitSha.`] : []),
       'Never publish or merge; the host owns those actions.',
     ].join('\n\n') + (isBuilder ? buildReflectionGuidance(input.reflection_context) : '')
-    // Never overwrite the original brief of a still-reserved pre-cutover worker.
-    const path = join(state, `${role}.strategy-v2.brief`)
-    await writeFile(path, brief, { mode: 0o600 })
+    // Reconstruct an admitted v2 request byte-for-byte during pending recovery.
+    // New runs get a versioned brief; neither version is rewritten on restart.
+    let path = join(state, `${role}.strategy-v3.brief`)
+    try {
+      brief = await readFile(join(state, `${role}.strategy-v2.brief`), 'utf8')
+      path = join(state, `${role}.strategy-v2.brief`)
+    } catch (error) {
+      if ((error as NodeJS.ErrnoException).code !== 'ENOENT') throw error
+      try { await writeFile(path, brief, { flag: 'wx', mode: 0o600 }) }
+      catch (error) {
+        if ((error as NodeJS.ErrnoException).code !== 'EEXIST' || await readFile(path, 'utf8') !== brief) throw error
+      }
+    }
     workers[role] = { provider, request: {
       model_id: descriptor.model_id, effort: selected?.effort ?? phase.default.effort,
       cwd: run.worktree, writable: role !== 'review', network: role !== 'review',
@@ -688,16 +699,15 @@ export async function prepareProjectBuild(input: InnerLoopInput, context: Projec
         }
         return null
       } },
-      reviewSuite: { strategy: input.test_strategy_intermediate ?? input.test_strategy ?? '',
-        scope: input.test_strategy_intermediate ? 'subset' : 'full-suite',
+      reviewSuite: { strategy: input.test_strategy ?? '', scope: 'full-suite',
         // G063 REQUIRES A BUILD/FIX CHECKPOINT FOR THIS REVISION. Stubbed to `null`,
         // the source returns `unknown` (`project-observation-sources.ts:76`) for EVERY
         // card and any strategy — measured — and `applyReviewSuite` propagates it, so
         // the review decision is `unknown` and no dispatched card can reach `merged`.
         //
-        // The checkpoint establishes which revision finished. An intermediate strategy
-        // deliberately defers its full suite; without one, the host retains the original
-        // full-suite observation in that worktree. A timeout has no usable verdict.
+        // Intermediate tasks return before review. Every terminal review observes the
+        // full suite, and publication consumes its existing identity-bound receipt.
+        // A timeout has no usable verdict.
         //
         // THE IDENTITY IS THE HOST'S. The original carried the claim in a round-labelled
         // checkpoint (`forge-done` / `fix-round-N`); here each role overwrites one result
@@ -706,24 +716,43 @@ export async function prepareProjectBuild(input: InnerLoopInput, context: Projec
         // answers nothing — `fix` is read first because it is the fresher of the two.
         readCheckpoint: async (snapshot, round) => {
           for (const role of ['fix', 'build'] as const) {
-            let value: { result?: { head?: unknown; payload?: unknown } }
-            try { value = JSON.parse((await readArtifact(role, snapshot.head)).text) }
+            let value: { step_id?: string; result?: { head?: unknown; payload?: unknown } }
+            let artifact: Awaited<ReturnType<typeof readArtifact>>
+            try { artifact = await readArtifact(role, snapshot.head); value = JSON.parse(artifact.text) }
             catch { continue }
             if (value?.result?.head !== snapshot.head) continue
             const checked = validateTrailer('forge', value.result.payload)
             if (!checked.ok) continue
             const claim = checked.value
-            if (input.test_strategy_intermediate) return { runId: run.id, head: snapshot.head, round, report: {
-              ...(claim.suiteOutcome === undefined ? {} : { suiteOutcome: claim.suiteOutcome }),
-              ...(claim.suiteEvidence === undefined ? {} : { suiteEvidence: claim.suiteEvidence }),
-            } }
             const command = fullSuiteCommand(input.test_strategy)
             if (!command) return { runId: run.id, head: snapshot.head, round, report: null }
             const logPath = join(state, `suite-round-${round}.log`)
             const observed = await (context.runSuite ?? spawnCapture)(['bash', '-lc', suiteScript(command, logPath)], run.worktree, undefined, REVIEW_SUITE_TIMEOUT_MS)
             const unopenable = observed.stdout.trimStart().startsWith(SUITE_LOG_UNAVAILABLE)
+            const pending = context.store.stageEvents(artifact.source.id).filter(event => event.stage === 'build-mode-state')
+              .map(event => parseBuildModeState(event.meta, artifact.source, true).checkpoint?.pending)
+              .find(pending => pending?.step_id === value.step_id)?.recovery
+            const hostSuiteWorker = !!pending && Reflect.get(pending.inputs, 'mode') === 'implementation'
+              && pending.request.brief.path.endsWith(`.strategy-v3.brief.${role}.host`)
+            // A new stage-1 worker can compare only red the host actually gave its
+            // fix turn. Legacy full-suite workers keep their original G065 contract.
+            const hostComparisonEligible = role === 'fix' && artifact.source.id === run.id && !!pending
+              && pending.findings.some(finding => finding.includes('Host full suite log:'))
+              && context.store.stageEvents(run.id).some(event => {
+                if (event.stage !== 'build-suite-receipt') return false
+                try {
+                  const receipt = JSON.parse(event.meta!).receipt
+                  return receipt?.runId === run.id && receipt.head === pending.snapshot.head
+                    && receipt.round === pending.round && receipt.strategy === (input.test_strategy ?? '')
+                    && receipt.scope === 'full-suite' && Number.isInteger(receipt.report?.hostExitCode)
+                    && receipt.report.hostExitCode !== 0
+                } catch { return false }
+              })
             return { runId: run.id, head: snapshot.head, round, report: {
               ...(observed.timed_out || unopenable ? {} : { hostExitCode: observed.exit_code }),
+              ...(!observed.timed_out && !unopenable && observed.exit_code !== 0 ? {
+                ...await suiteFailure(logPath, command, run.worktree), hostSuiteWorker, hostComparisonEligible,
+              } : {}),
               ...(claim.suiteOutcome === undefined ? {} : { suiteOutcome: claim.suiteOutcome }),
               ...(claim.suiteEvidence === undefined ? {} : { suiteEvidence: claim.suiteEvidence }),
             } }
@@ -738,7 +767,8 @@ export async function prepareProjectBuild(input: InnerLoopInput, context: Projec
           const observed = await (context.runSuite ?? spawnCapture)(['bash', '-lc', suiteScript(command, logPath)], run.worktree, undefined, REVIEW_SUITE_TIMEOUT_MS)
           const unopenable = observed.stdout.trimStart().startsWith(SUITE_LOG_UNAVAILABLE)
           return { runId: run.id, head: snapshot.head, round, report:
-            observed.timed_out || unopenable ? {} : { hostExitCode: observed.exit_code } }
+            observed.timed_out || unopenable ? {} : { hostExitCode: observed.exit_code,
+              ...(observed.exit_code !== 0 ? await suiteFailure(logPath, command, run.worktree) : {}) } }
         } },
       review: { evidenceRoot: state, env: codexEnv, phaseModels: config, wallMs: 2_700_000, signal,
         credentialIdentity: reviewCredentialIdentity,

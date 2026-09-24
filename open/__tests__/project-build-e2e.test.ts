@@ -51,7 +51,7 @@
  */
 import { LIVE_AGENT_TOOL_NAMES } from '@neutronai/gateway/wiring/build-live-agent-turn.ts'
 import { afterEach, expect, spyOn, test } from 'bun:test'
-import { chmod, mkdir, mkdtemp, readFile, readdir, realpath, rename, rm, symlink, writeFile } from 'node:fs/promises'
+import { chmod, copyFile, mkdir, mkdtemp, readFile, readdir, realpath, rename, rm, symlink, writeFile } from 'node:fs/promises'
 import { tmpdir } from 'node:os'
 import { dirname, join } from 'node:path'
 import { fileURLToPath } from 'node:url'
@@ -71,6 +71,7 @@ import { spawnCapture, type HostCommandResult } from '@neutronai/trident/git-mod
 import { gitRangeArgv } from '@neutronai/trident/git-range.ts'
 import { VERDICT_SCHEMA } from '@neutronai/trident/gates/result-contract.ts'
 import { taskLedgerPath, workContextPath } from '@neutronai/trident/production-host-effects.ts'
+import { briefIntegrity } from '@neutronai/trident/gates/brief-integrity.ts'
 import { pool, supervisedBySessionKey } from '@neutronai/runtime/adapters/claude-code/persistent/pool-state.ts'
 import type { BoundedWorkRequest } from '@neutronai/runtime/bounded-work.ts'
 import { buildRun, type BuildRunOutcome } from '@neutronai/trident/build-run.ts'
@@ -280,6 +281,7 @@ async function measureDiff(run: Runner, repo: string, base: string, head: string
 }
 
 interface WorkerWorld {
+  suiteReport?: (role: string, context: { findings: string[] }) => Promise<Record<string, unknown>>
   strategy: 'single' | 'task_sequence'
   plannerPatch?: Record<string, unknown>
   builderObservations: { strategy: unknown; rationale: unknown; plan: unknown; scope: unknown; previous: unknown; contextStrategy: unknown }[]
@@ -584,6 +586,7 @@ async function performRole(world: WorkerWorld, request: BoundedWorkRequest, brie
         control: [...(world.mutationArgv === 'valid' ? ['bun', 'test'] : []), 'tests/control.test.ts'] } : null,
       worktreePath: cwd, branch, commitSha: head, prNumber: null,
       diffFile: '', testsPassed: true, suiteOutcome: 'passed', suiteEvidence: 'harness stub suite',
+      ...(await world.suiteReport?.(request.role, context) ?? {}),
     } }
   }
 
@@ -775,6 +778,7 @@ console.log(JSON.stringify({ type: 'result', subtype: 'success', is_error: false
 `
 
 async function fixture(options: { taskSequence?: boolean; moreTasks?: boolean; suiteExit?: number; testStrategy?: string
+  namedSuiteFailure?: boolean | 'generic'
   spec?: boolean
   /** `false`: the seed commit carries NO `IMPLEMENTATION_PLAN.md` (default `true`). */
   seedLedger?: boolean
@@ -831,6 +835,16 @@ async function fixture(options: { taskSequence?: boolean; moreTasks?: boolean; s
   // this path before it runs anything (`leak-preflight.ts:281`).
   await writeFile(join(repo, 'scripts', 'ci', 'leak-gate.sh'), LEAK_GATE_STUB, { mode: 0o755 })
   await writeFile(join(repo, 'scripts', 'ci', 'suite.sh'), suiteScript(options.suiteExit ?? 0), { mode: 0o755 })
+  if (options.namedSuiteFailure) {
+    await mkdir(join(repo, 'tests'), { recursive: true })
+    if (options.namedSuiteFailure === 'generic') {
+      await writeFile(join(repo, 'tests', 'preexisting.test.sh'), "echo 'tests/preexisting.test.sh: pre-existing red'\nexit 1\n")
+      await writeFile(join(repo, 'scripts', 'ci', 'suite.sh'), 'bash ./tests/preexisting.test.sh\n')
+    } else {
+      await writeFile(join(repo, 'tests', 'preexisting.test.ts'), "import { expect, test } from 'bun:test'\ntest('pre-existing red', () => expect(false).toBe(true))\n")
+      await writeFile(join(repo, 'scripts', 'ci', 'suite.sh'), 'bun test ./tests/preexisting.test.ts\n')
+    }
+  }
   if (options.manifest) await writeFile(join(repo, 'package.json'), JSON.stringify(options.manifest))
   if (options.bunWorkspace) {
     // A real tarball dependency keeps this fixture offline while exercising Bun's
@@ -1040,6 +1054,187 @@ async function drive(f: Awaited<ReturnType<typeof fixture>>): Promise<ProjectBui
   const host = await createProjectBuildHost(options)
   return host.run({ mode: 'implementation', start: 'fresh' }, new AbortController().signal)
 }
+
+for (const taskSequence of [false, true]) test(`terminal ${taskSequence ? 'task-sequence' : 'single'} runs one host suite for review and publication`, async () => {
+  const f = await fixture({ taskSequence })
+  f.input.test_strategy_intermediate = 'Intermediate stage 1 only.'
+  let suites = 0
+  const runSuite = f.context.runSuite!
+  f.context.runSuite = async (...args) => { suites++; return runSuite(...args) }
+  f.world.suiteReport = async () => ({ testsPassed: false, suiteOutcome: 'deferred', suiteEvidence: '' })
+  const outcome = await drive(f)
+  expect(outcome.kind, why(f, outcome)).toBe('merged')
+  expect(f.world.builderObservations[0]?.scope).toBe('host-suite')
+  expect(suites).toBe(1)
+  const receipts = f.store.stageEvents(f.row.id).filter(event => event.stage === 'build-suite-receipt' && JSON.parse(event.meta!).receipt)
+  expect(receipts).toHaveLength(1)
+  expect(JSON.parse(receipts[0]!.meta!).receipt).toMatchObject({ scope: 'full-suite', round: 1, report: { hostExitCode: 0 } })
+}, 120_000)
+
+test('v2 pending builder reconstruction preserves every brief and its later fix contract', async () => {
+  const f = await fixture({ blockersByRound: [0, 1, 0] })
+  const prepared = await f.prepare()
+  for (const [role, worker] of Object.entries(prepared.workers)) {
+    const path = join(f.context.stateRoot, f.row.id, `${role}.strategy-v2.brief`)
+    const brief = (await readFile(worker.request.brief.path, 'utf8')).replace(
+      'The host selects `suiteScope`: `full-suite` requires the worker full suite for a wave member; `subset` defers it for an intermediate task; `host-suite` leaves the full suite to host review after worker stage 1.',
+      'The host selects `suiteScope` after validating this task: `full-suite` requires the full suite; only `subset` defers it for an intermediate task.')
+    await writeFile(path, brief)
+    worker.request = { ...worker.request, brief: { path, integrity: briefIntegrity(brief) } }
+  }
+  const first = await createProjectBuildHost(prepared)
+  const original = Object.fromEntries(Object.entries(first.workers).map(([role, worker]) => [role, worker.request.brief]))
+  const runner = first.workers.build.runner
+  first.workers.build.runner = { ...runner, run: async (...args) => {
+    expect((await runner.run(...args)).kind).toBe('completed')
+    return { kind: 'unknown', detail: 'completed worker acknowledgement lost' }
+  } }
+  expect(await buildRun({ mode: 'implementation', start: 'fresh', run_id: f.row.id,
+    workers: first.workers, repl_provider: 'anthropic', merge_mode: 'pr' }, first.deps, new AbortController().signal))
+    .toMatchObject({ kind: 'unknown', phase: 'build' })
+  const recovered = await createProjectBuildHost(await f.prepare())
+  expect(Object.fromEntries(Object.entries(recovered.workers).map(([role, worker]) => [role, worker.request.brief]))).toEqual(original)
+  const outcome = await recovered.run({ mode: 'implementation', start: 'resume' }, new AbortController().signal)
+  expect(outcome.kind, why(f, outcome)).toBe('merged')
+  expect(f.world.dispatches.filter(dispatch => dispatch.role === 'build')).toHaveLength(1)
+  expect(f.world.dispatches.filter(dispatch => dispatch.role === 'fix')).toHaveLength(1)
+  for (const role of ['build', 'fix'] as const) {
+    const context = JSON.parse(await readFile(workContextPath(recovered.workers[role].request.brief.path), 'utf8'))
+    expect(context.suiteScope).toBe('full-suite')
+    expect(context.testStrategy).toBe(f.input.test_strategy)
+  }
+}, 120_000)
+
+test('wave member retains worker full suite and returns before host review', async () => {
+  const f = await fixture({ taskSequence: true, moreTasks: true })
+  const host = await createProjectBuildHost(await f.prepare())
+  const outcome = await host.run({ mode: 'wave', pinnedTaskId: 'T1', start: 'fresh' }, new AbortController().signal)
+  expect(outcome.kind, why(f, outcome)).toBe('built')
+  const context = JSON.parse(await readFile(workContextPath(host.workers.build.request.brief.path), 'utf8'))
+  expect(context.suiteScope).toBe('full-suite')
+  expect(context.testStrategy).toBe(f.input.test_strategy)
+  expect(f.world.dispatches.some(dispatch => dispatch.role === 'review')).toBe(false)
+  expect(f.store.stageEvents(f.row.id).some(event => event.stage === 'build-suite-receipt')).toBe(false)
+}, 120_000)
+
+test('G070 repeated host red still arbitrates when a fix removes the other panel blocker', async () => {
+  const f = await fixture({ namedSuiteFailure: true, blockersByRound: [0, 1, 0], maxRounds: 3 })
+  f.world.suiteReport = async () => ({ testsPassed: false, suiteOutcome: 'deferred', suiteEvidence: '' })
+  const outcome = await drive(f)
+  expect(outcome, why(f, outcome)).toMatchObject({ kind: 'blocked', on: 'Review requires orchestrator arbitration: repeated finding' })
+  expect(f.world.dispatches.filter(dispatch => dispatch.role === 'fix')).toHaveLength(1)
+  const rejected = f.store.stageEvents(f.row.id).filter(event => event.stage === 'build-mode-state')
+    .map(event => JSON.parse(event.meta!).checkpoint).filter(checkpoint => checkpoint.stage === 'rejected')
+  expect(rejected.at(-1).previousReview.blockingCount).toBe(1)
+  expect(rejected[0].previousReview.blockingCount).toBe(4) // Three panel seats plus the host suite.
+  expect(rejected.at(-1).previousReview.findings).toContain(rejected[0].previousReview.findings.find((value: string) => value.startsWith('host-suite:')))
+}, 120_000)
+
+test('same-round cached nonzero host receipt replays red without running the suite again', async () => {
+  const f = await fixture({ suiteExit: 1 })
+  let suites = 0
+  const runSuite = f.context.runSuite!
+  f.context.runSuite = async (...args) => { suites++; return runSuite(...args) }
+  let host = await createProjectBuildHost(await f.prepare())
+  const measured = await host.deps.measure()
+  if (measured.kind !== 'known') throw Error('Expected measured fixture')
+  const first = await host.deps.publicationSuite(measured.value)
+  expect(first).toMatchObject({ kind: 'known', findings: [{ advisory: false }] })
+  host = await createProjectBuildHost(await f.prepare())
+  expect(await host.deps.publicationSuite(measured.value)).toEqual(first)
+  expect(suites).toBe(1)
+}, 120_000)
+
+test('G070 permits a different host failure with fewer blockers and an eventual green suite', async () => {
+  const f = await fixture({ namedSuiteFailure: true, blockersByRound: [0, 1, 0], maxRounds: 3 })
+  f.world.suiteReport = async () => ({ testsPassed: false, suiteOutcome: 'deferred', suiteEvidence: '' })
+  let suites = 0
+  const runSuite = f.context.runSuite!
+  f.context.runSuite = async (...args) => {
+    const result = await runSuite(...args)
+    suites++
+    if (suites === 2) {
+      const log = join(f.context.stateRoot, f.row.id, 'suite-round-2.log')
+      await writeFile(log, (await readFile(log, 'utf8')).replaceAll('pre-existing red', 'different remaining failure'))
+    }
+    return suites === 3 ? { ...result, ok: true, exit_code: 0 } : result
+  }
+  const outcome = await drive(f)
+  expect(outcome.kind, why(f, outcome)).toBe('merged')
+  expect(f.world.dispatches.filter(dispatch => dispatch.role === 'fix')).toHaveLength(2)
+  expect(suites).toBe(3)
+}, 120_000)
+
+for (const changed of [false, true]) test(`G072 generic red with fewer blockers remains undecidable, changed=${changed}`, async () => {
+  const f = await fixture({ namedSuiteFailure: 'generic', blockersByRound: [0, 1, 0], maxRounds: 3 })
+  f.world.suiteReport = async () => ({ testsPassed: false, suiteOutcome: 'deferred', suiteEvidence: '' })
+  let suites = 0
+  const runSuite = f.context.runSuite!
+  f.context.runSuite = async (...args) => {
+    const result = await runSuite(...args)
+    suites++
+    if (changed && suites === 2) {
+      const log = join(f.context.stateRoot, f.row.id, 'suite-round-2.log')
+      await writeFile(log, 'tests/different.test.sh: a different failure\n')
+    }
+    return result
+  }
+  const outcome = await drive(f)
+  expect(outcome, why(f, outcome)).toMatchObject({ kind: 'unknown', detail: 'Review progress cannot compare unidentified host suite failures' })
+  expect(f.world.dispatches.filter(dispatch => dispatch.role === 'fix')).toHaveLength(1)
+  expect(lastCheckpoint(f).previousReview).toEqual({ blockingCount: 1, unknownIdentities: true, findings: [] })
+}, 120_000)
+
+for (const format of ['bun', 'generic'] as const)
+for (const evidence of (format === 'bun' ? ['valid', 'empty', 'changed-failure', 'mixed-crash', 'panel-veto'] : ['valid', 'empty', 'changed-run']) as readonly string[])
+test(`${format} host red reaches targeted base comparison and preserves ${evidence}`, async () => {
+  const f = await fixture({ namedSuiteFailure: format === 'bun' ? true : 'generic', maxRounds: 2,
+    ...(evidence === 'panel-veto' ? { commentRounds: [2] } : {}) })
+  let suites = 0
+  let comparisons = 0
+  const runSuite = f.context.runSuite!
+  f.context.runSuite = async (...args) => {
+    const result = await runSuite(...args)
+    suites++
+    if (['changed-failure', 'mixed-crash'].includes(evidence) && suites === 2) {
+      const log = join(f.context.stateRoot, f.row.id, 'suite-round-2.log')
+      const text = await readFile(log, 'utf8')
+      await writeFile(log, evidence === 'mixed-crash' ? `${text}\nerror: Cannot find module './broken-by-diff'\n` : text.replaceAll('pre-existing red', 'new regression'))
+    }
+    return result
+  }
+  f.world.suiteReport = async (role, context) => {
+    if (role !== 'fix') return { testsPassed: false, suiteOutcome: 'failed-preexisting', suiteEvidence: 'unrelated stage-1 base red' }
+    const findings = context.findings.join('\n')
+    expect(findings).toContain('suite-round-1.log')
+    const file = format === 'bun' ? 'preexisting.test.ts' : 'preexisting.test.sh'
+    expect(findings).toContain(file)
+    const identity = findings.match(/host-suite:[a-f0-9]{64}/)?.[0]
+    if (format === 'bun') expect(identity).toBeDefined()
+    const base = await spawnCapture(['git', 'show', `${f.baseSha}:tests/${file}`], f.repo)
+    expect(base.ok).toBe(true)
+    const directory = join(f.dir, 'targeted-base')
+    await mkdir(directory, { recursive: true })
+    await writeFile(join(directory, file), base.stdout)
+    const compared = await spawnCapture(format === 'bun' ? ['bun', 'test', `./${file}`] : ['bash', `./${file}`], directory)
+    comparisons++
+    expect(compared.exit_code).toBe(1)
+    if (evidence === 'changed-run') {
+      const events = f.store.stageEvents(f.row.id).filter(event => event.stage === 'build-suite-receipt')
+      for (const event of events) {
+        const value = JSON.parse(event.meta!)
+        if (value.receipt) value.receipt.runId = 'different-run'
+        f.db.raw().query('UPDATE code_trident_stage_events SET meta = ? WHERE id = ?').run(JSON.stringify(value), event.id)
+      }
+    }
+    return { testsPassed: false, suiteOutcome: 'failed-preexisting',
+      suiteEvidence: evidence === 'empty' ? '' : `${identity ?? 'generic runner'}; tests/${file}: pre-existing red failed at base ${f.baseSha} without the diff; targeted test exit ${compared.exit_code}` }
+  }
+  const outcome = await drive(f)
+  expect(outcome.kind, why(f, outcome)).toBe(evidence === 'valid' ? 'merged' : 'blocked')
+  expect(comparisons).toBe(1)
+  expect(suites).toBe(2)
+}, 120_000)
 
 for (const attribution of ['direct', 'wrapped'] as const) for (const fix of [false, true])
 test(`host commit recovery merges unattended with ${attribution} attribution, fix=${fix}`, async () => {
@@ -1526,7 +1721,7 @@ test(`prepared recurring conversation refuses changed ${changed} and still admit
   expect(calls[1].request.thread.id).toBe(JSON.parse(saved).thread)
 }, 30_000)
 
-for (const changed of ['none', 'head', 'strategy', 'dependencies', 'missing', 'corrupt', 'subset'] as const)
+for (const changed of ['none', 'head', 'strategy', 'dependencies', 'runtime', 'workspace', 'missing', 'corrupt', 'subset'] as const)
 test(`prepared host suite receipt survives reconstruction and handles ${changed} inputs`, async () => {
   const f = await fixture({ bunWorkspace: true })
   const original = f.context.runSuite!
@@ -1546,6 +1741,22 @@ test(`prepared host suite receipt survives reconstruction and handles ${changed}
     // The lockfile, manifest, and git head stay unchanged; installed bytes alone
     // must invalidate the proof acquired against the previous installation.
     await writeFile(join(worktree, 'node_modules', 'proof-input'), 'changed installation')
+  }
+  if (changed === 'runtime') {
+    const directory = join(f.dir, 'alternate-runtime')
+    await mkdir(directory)
+    await copyFile(process.execPath, join(directory, 'bun'))
+    await chmod(join(directory, 'bun'), 0o755)
+    const path = process.env.PATH
+    cleanups.push(() => { if (path === undefined) delete process.env.PATH; else process.env.PATH = path })
+    process.env.PATH = `${directory}:${path ?? ''}`
+  }
+  if (changed === 'workspace') {
+    const prior = `${worktree}.prior`
+    await rename(worktree, prior)
+    await mkdir(worktree)
+    for (const entry of await readdir(prior)) await rename(join(prior, entry), join(worktree, entry))
+    await rm(prior, { recursive: true })
   }
   if (changed === 'strategy') f.input.test_strategy += '\nAdditional host strategy identity.'
   if (changed === 'missing') f.db.raw().query('DELETE FROM code_trident_stage_events WHERE run_id = ? AND stage = ?').run(f.row.id, 'build-suite-receipt')
@@ -1892,7 +2103,7 @@ test('Bun workspace dependencies are local before workers and publication consum
   expect(outcome.kind, why(f, outcome)).toBe('merged')
   const state = join(f.context.stateRoot, encodeURIComponent(f.row.id))
   expect(await readFile(join(state, 'dependencies.log'), 'utf8')).toContain('Worktree-local dependency preparation completed')
-  expect(await readFile(join(state, 'suite-publication.log'), 'utf8')).toContain('dependency consumed')
+  expect(await readFile(join(state, 'suite-round-1.log'), 'utf8')).toContain('dependency consumed')
 }, 120_000)
 
 test('Bun workspace recovery repairs missing dependencies before workers', async () => {
@@ -2167,7 +2378,7 @@ test('Bun workspace publication suite still refuses merge when dependencies disa
   expect(f.github.prs).toHaveLength(1)
   expect(f.github.prs[0]!.state).toBe('OPEN')
   expect(await gitOut(spawnCapture, f.origin, ['rev-parse', 'refs/heads/main'])).toBe(f.baseSha)
-  expect(await readFile(join(f.context.stateRoot, encodeURIComponent(f.row.id), 'suite-publication.log'), 'utf8'))
+  expect(await readFile(join(f.context.stateRoot, encodeURIComponent(f.row.id), 'suite-round-1.log'), 'utf8'))
     .toContain('node_modules/.bun does not exist')
 }, 120_000)
 
@@ -2488,7 +2699,7 @@ test(`initial planner chooses ${strategy} through board and launcher ${spec ? 'w
   const observed = f.world.builderObservations[0]!
   expect(observed).toMatchObject({ strategy, contextStrategy: strategy,
     rationale: 'The accepted plan determines the useful execution boundary.',
-    scope: strategy === 'single' ? 'full-suite' : 'subset' })
+    scope: strategy === 'single' ? 'host-suite' : 'subset' })
   expect(JSON.parse(observed.plan as string)).toMatchObject({ strategy, implementationPlan: '- [ ] T1 record the note\n- [ ] T2 record another note\n' })
   expect(observed.previous).toMatchObject({ strategy, implementationPlan: '- [ ] T1 record the note\n- [ ] T2 record another note\n' })
   expect(f.world.selectedTasks).toEqual(strategy === 'single'
@@ -3608,8 +3819,8 @@ test(`a ${mergeMode} retry of a run that died after a task-sequence handoff resu
   expect(f.world.selectedTasks).toEqual(['- [ ] T2 record another note'])
   expect(f.world.dispatches.some(dispatch => dispatch.step_id.startsWith(`${prior.id}:`))).toBe(false)
   // The plan turn's host context as the worker read it off disk (`project-build-host.ts`
-  // writes `<role>.strategy-v2.brief.<role>.host`, and its context beside it).
-  const planContext = JSON.parse(await readFile(workContextPath(join(f.context.stateRoot, run.id, 'plan.strategy-v2.brief.plan.host')), 'utf8'))
+  // writes `<role>.strategy-v3.brief.<role>.host`, and its context beside it).
+  const planContext = JSON.parse(await readFile(workContextPath(join(f.context.stateRoot, run.id, 'plan.strategy-v3.brief.plan.host')), 'utf8'))
   expect(planContext.request.step_id).toBe(`${run.id}:task:1:plan:0`)
   expect(planContext.planner).toBe('next')
   expect(planContext.committedPlan).toMatchObject({ found: true, body: HANDOFF_LEDGER, sha256: sha256(HANDOFF_LEDGER), uncheckedCount: 1 })
@@ -3892,7 +4103,7 @@ test(`historical pending ${strategy} planner recovers its original schema and re
   expect(f.world.dispatches.filter(d => d.role === 'plan')).toEqual([])
   expect(f.world.dispatches.filter(d => d.role === 'build')).toHaveLength(1)
   expect(f.world.builderObservations[0]).toMatchObject({ strategy: strategy === 'wave' ? 'single' : strategy,
-    scope: strategy === 'task_sequence' ? 'subset' : 'full-suite' })
+    scope: strategy === 'task_sequence' ? 'subset' : strategy === 'wave' ? 'full-suite' : 'host-suite' })
   if (strategy === 'wave') {
     expect(f.world.selectedTasks).toEqual(['- [ ] T1 record the note'])
     expect(f.world.dispatches.some(d => d.role === 'review')).toBe(false)
@@ -4649,7 +4860,7 @@ function registerSession(f: Awaited<ReturnType<typeof fixture>>, session: Record
 
 const neverSettles = () => new Promise<never>(() => {})
 
-test('terminal task-sequence task receives full-suite instructions after an intermediate task deferred them', async () => {
+test('terminal task-sequence task receives host-suite instructions after an intermediate task deferred proof', async () => {
   const { renderTestStrategy, FULL_SUITE_REQUIRED, INTERMEDIATE_SUITE_DEFERRED } = await import('@neutronai/trident/test-strategy.ts')
   const f = await fixture({ taskSequence: true, moreTasks: true })
   const strategy = { resolution: { command: 'bun test', source: 'package-json' as const }, jobs: 1, base_branch: 'main',
@@ -4672,8 +4883,8 @@ test('terminal task-sequence task receives full-suite instructions after an inte
   const request = resumed.workers.build.request
   const context = JSON.parse(await readFile(workContextPath(request.brief.path), 'utf8'))
   expect(context.previous.remainingTasks).toBe(0)
-  expect(context.suiteScope).toBe('full-suite')
-  expect(context.testStrategy).toContain(FULL_SUITE_REQUIRED)
+  expect(context.suiteScope).toBe('host-suite')
+  expect(context.testStrategy).toContain('STAGE 2 — HOST OWNED')
   expect(context.testStrategy).not.toContain(INTERMEDIATE_SUITE_DEFERRED)
   const brief = await readFile(request.brief.path, 'utf8')
   expect(brief).toContain('host context `testStrategy`')
@@ -4714,7 +4925,7 @@ for (const seam of ['submitLine', 'acquireTurn', 'silent-worker'] as const) {
 
 for (const mergeMode of ['pr', 'local'] as const)
 for (const reviewFix of [false, true])
-test(`terminal task-sequence ${mergeMode} publication retry re-proves the built head without new planning or building${reviewFix ? ' and gives its review-requested fix the full suite' : ''}`, async () => {
+test(`terminal task-sequence ${mergeMode} publication retry re-proves the built head without new planning or building${reviewFix ? ' and assigns its review-requested fix to host suite proof' : ''}`, async () => {
   const { renderTestStrategy, FULL_SUITE_REQUIRED, INTERMEDIATE_SUITE_DEFERRED } = await import('@neutronai/trident/test-strategy.ts')
   const task = 'Record a note in NOTES.md and verify the resulting change with the complete regression suite\nMORE TASKS'
   const f = await fixture({ dispatchTask: task, mergeMode, taskSequence: true, moreTasks: true, seedLedger: false, hostLedger: true,
@@ -4748,8 +4959,8 @@ test(`terminal task-sequence ${mergeMode} publication retry re-proves the built 
   expect(first.kind, why(f, first)).toBe('unknown')
   const terminalContext = JSON.parse(await readFile(workContextPath(firstHost.workers.build.request.brief.path), 'utf8'))
   expect(terminalContext.previous.remainingTasks).toBe(0)
-  expect(terminalContext.suiteScope).toBe('full-suite')
-  expect(terminalContext.testStrategy).toContain(FULL_SUITE_REQUIRED)
+  expect(terminalContext.suiteScope).toBe('host-suite')
+  expect(terminalContext.testStrategy).toContain('STAGE 2 — HOST OWNED')
   expect(terminalContext.testStrategy).not.toContain(INTERMEDIATE_SUITE_DEFERRED)
   const checkpoint = lastCheckpoint(f)
   expect(checkpoint).toMatchObject({ stage: 'built', remainingTasks: 0, round: 1 })
@@ -4787,12 +4998,12 @@ test(`terminal task-sequence ${mergeMode} publication retry re-proves the built 
     // A resumed build skips planAndBuild; the in-memory plan is null. The review
     // payload in previous is not a replacement ExecutionPlan.
     expect(fixContext.previous.remainingTasks).toBeUndefined()
-    expect(fixContext.suiteScope).toBe('full-suite')
-    expect(fixContext.testStrategy).toContain(FULL_SUITE_REQUIRED)
+    expect(fixContext.suiteScope).toBe('host-suite')
+    expect(fixContext.testStrategy).toContain('STAGE 2 — HOST OWNED')
     expect(fixContext.testStrategy).not.toContain(INTERMEDIATE_SUITE_DEFERRED)
     expect(f.world.dispatches.filter(dispatch => dispatch.schema === 'project-review')).toHaveLength(2)
   }
-  const publicationLog = await readFile(join(f.context.stateRoot, dispatched.run.id, 'suite-publication.log'), 'utf8')
+  const publicationLog = await readFile(join(f.context.stateRoot, dispatched.run.id, `suite-round-${reviewFix ? 2 : 1}.log`), 'utf8')
   expect(publicationLog).toContain('HARNESS SUITE ran in')
   const merged = await spawnCapture(['git', '-C', mergeMode === 'pr' ? f.origin : f.repo, 'show', 'refs/heads/main:NOTES.md'], f.repo)
   expect(merged.stdout).toBe(`seed\n${prior.id}:task:0:build:0\n${prior.id}:task:1:build:0${reviewFix ? `\n${dispatched.run.id}:task:1:fix:1` : ''}`)
