@@ -23,6 +23,50 @@ const spec = (prompt: string): AgentSpec => ({ prompt, tools: [], model_preferen
 async function collect(handle: SessionHandle) { const events = []; for await (const event of handle.events) events.push(event); return events }
 const line = (type: string, payload: unknown) => JSON.stringify({ type, payload }) + '\n'
 
+test('General owner dispatch, native controls and MCP approval scope remain distinct from project general', async () => {
+  const f = fixture(false, true)
+  const mcpScopes: (string | null)[] = []
+  f.bindings.resolveApprovedServers = async scope => { mcpScopes.push(scope); return [] }
+  expect((await collect(f.chat.start(spec('General turn')))).at(-1)?.kind).toBe('completion')
+  expect((await collect(f.bindings.start('general', spec('project turn')))).at(-1)?.kind).toBe('completion')
+  expect(f.launched).toEqual([null, 'general'])
+  expect(f.calls.map(call => call.project)).toEqual([null, 'general'])
+  expect(mcpScopes).toEqual([null, 'general'])
+  const generalModel = await f.bindings.controls.model(null)
+  const projectModel = await f.bindings.controls.model('general')
+  expect(generalModel.sessionId).not.toBe(projectModel.sessionId)
+  expect((await f.bindings.controls.state(null)).projectId).toBeNull()
+  expect((await f.bindings.controls.state('general')).projectId).toBe('general')
+  const api = controlSurfaces(f)
+  expect((await api('model', undefined, '~general')).status).toBe(200)
+  const generalControl = await (await api('control', undefined, '~general')).json() as NativeOwnerControlState
+  expect(generalControl.projectId).toBeNull()
+  expect((await api('control', { ...generalControl, projectId: 'general', action: 'interrupt', turnId: 'foreign' }, '~general')).status).toBe(400)
+  expect((await api('control', undefined, '~general', 'stranger')).status).toBe(404)
+  f.authorize(false)
+  expect(await collect(f.chat.start(spec('revoked')))).toContainEqual(expect.objectContaining({ kind: 'error' }))
+  await expect(f.bindings.controls.model(null)).rejects.toThrow('credential')
+  expect(f.calls).toHaveLength(2)
+  await f.bindings.close()
+})
+
+test('General missing credential, changed account and project marker confusion refuse before native delivery', async () => {
+  const missing = fixture()
+  expect(await collect(missing.chat.start(spec('missing General')))).toContainEqual(expect.objectContaining({ kind: 'error' }))
+  expect(missing.launched).toEqual([])
+  await missing.bindings.close()
+  const f = fixture(false, true)
+  await collect(f.chat.start(spec('positive General')))
+  f.credential('replacement-account')
+  expect(await collect(f.chat.start(spec('wrong account')))).toContainEqual(expect.objectContaining({ kind: 'error' }))
+  f.credential('fixture-credential')
+  writeFileSync(join(f.homes.get(null)!, 'project-owner.json'), JSON.stringify('general'))
+  expect(await collect(f.chat.start(spec('project marker')))).toContainEqual(expect.objectContaining({ kind: 'error' }))
+  expect(f.calls).toHaveLength(1)
+  expect(f.launched).toEqual([null])
+  await f.bindings.close()
+})
+
 test('pre-gateway owner survives an explicit installed-MCP upgrade refusal without replacement', async () => {
   const f = fixture()
   f.bindings.resolveApprovedServers = async () => []
@@ -37,21 +81,21 @@ test('pre-gateway owner survives an explicit installed-MCP upgrade refusal witho
   await f.bindings.close()
 })
 
-function fixture(remote = false) {
+function fixture(remote = false, general = false) {
   const dir = mkdtempSync(join(tmpdir(), 'owner-binding-test-')); dirs.push(dir)
   const facts = new Map<CodexOwnerBinding, CodexOwnerBindingFacts>()
   const owners = new Map<string, CodexOwnerBootstrap>()
-  const calls: { project: string; thread: string; prompt: string }[] = []
-  const launched: string[] = []
+  const calls: { project: string | null; thread: string; prompt: string }[] = []
+  const launched: (string | null)[] = []
   const rpc: { client: string; method: string; params: Record<string, unknown>; epoch: number | undefined }[] = []
   const replies: { client: string; id: string | number; result: unknown; epoch: number }[] = []
-  const emitters = new Map<string, (method: string, params: Record<string, unknown>) => void>()
-  const finishers = new Map<string, () => void>()
+  const emitters = new Map<string | null, (method: string, params: Record<string, unknown>) => void>()
+  const finishers = new Map<string | null, () => void>()
   let held = false
   let wrongModel = false
   let failReply = false
   let interruptFault: 'lost' | 'wrong-turn' | 'child' | 'unsolicited' | undefined
-  const homes = new Map<string, string>()
+  const homes = new Map<string | null, string>()
   let fail = false
   let authorized = true
   let credentialIdentity = 'fixture-credential'
@@ -63,16 +107,17 @@ function fixture(remote = false) {
   let openingGate: Promise<void> | undefined
   let modelGate: Promise<void> | undefined
   let onPrompt: ((prompt: string) => void) | undefined
-  const bindings = new CodexOwnerBindings(async projectId => {
+  const resolveProject = async (projectId: string | null) => {
     await projectGate
     if (!authorized) throw new Error('No connected project credential')
-    const cwd = join(dir, projectId), codexHome = join(cwd, 'home')
+    const cwd = join(dir, projectId ?? 'general-owner-fixture'), codexHome = join(cwd, 'home')
     mkdirSync(codexHome, { recursive: true, mode: 0o700 })
-    if (!existsSync(join(codexHome, 'project-owner.json'))) writeFileSync(join(codexHome, 'project-owner.json'), JSON.stringify(projectId))
+    if (projectId !== null && !existsSync(join(codexHome, 'project-owner.json'))) writeFileSync(join(codexHome, 'project-owner.json'), JSON.stringify(projectId))
     homes.set(projectId, codexHome)
     return { cwd, codexHome, credentialIdentity, env: { OPENAI_API_KEY: 'must-not-reach-native', PATH: process.env.PATH } }
-  }, async options => {
-    const project = JSON.parse(await Bun.file(join(options.codexHome, 'project-owner.json')).text()) as string
+  }
+  const bindings = new CodexOwnerBindings(resolveProject, async options => {
+    const project = options.projectId
     launched.push(project)
     await openingGate
     expect(options.env.OPENAI_API_KEY).toBeUndefined()
@@ -158,7 +203,7 @@ function fixture(remote = false) {
     const identity = facts.get(binding)
     if (!identity) throw new Error('Unattested owner binding')
     return identity
-  })
+  }, general ? () => resolveProject(null) : undefined)
   const chat = buildLlmCallSubstrate({ resolvePool: async () => null, substrate_instance_id: 'owner-test', ownerConversation: true,
     provider: 'openai-codex', startCodexOwner: (id, input) => bindings.start(id, input),
     configuredChat: { env: { NEUTRON_PROJECT_MODELS: '{"project-one":"glm"}' }, fetchImpl: (() => { throw new Error('Unexpected configured API call') }) as unknown as typeof fetch },
@@ -857,7 +902,7 @@ test('foreign project marker and forged factory binding never submit native work
   const bindings = new CodexOwnerBindings(async () => ({ cwd: dir, codexHome: dir, credentialIdentity: 'fixture', env: {} }), async () => {
     launches++; return { binding: {}, async close() {} } as CodexOwnerBootstrap
   })
-  expect((await collect(bindings.start('project-one', spec('hello')))).at(-1)).toMatchObject({ kind: 'error', message: 'Codex owner credential home belongs to another project' })
+  expect((await collect(bindings.start('project-one', spec('hello')))).at(-1)).toMatchObject({ kind: 'error', message: expect.stringContaining('another project') })
   expect(launches).toBe(0)
   writeFileSync(join(dir, 'project-owner.json'), JSON.stringify('project-two'))
   expect((await collect(bindings.start('project-two', spec('hello')))).at(-1)).toMatchObject({ kind: 'error', message: 'Unattested owner binding' })
@@ -874,7 +919,7 @@ function controlSurfaces(f: ReturnType<typeof fixture>) {
     readCodex: id => f.bindings.controls.model(id), switchCodex: (id, request) => f.bindings.controls.model(id, request),
   })
   const turn = createAppNativeOwnerControlSurface({ auth,
-    canAccess: async (user, owner, id) => user === 'owner' && owner === 'instance' && ['project-one', 'project-two'].includes(id),
+    canAccess: async (user, owner, id) => user === 'owner' && owner === 'instance' && (id === null || ['project-one', 'project-two'].includes(id)),
     read: id => f.bindings.controls.state(id), act: (id, request) => f.bindings.controls.act(id, request),
   })
   return async (kind: 'model' | 'control', body?: unknown, project = 'project-one', token: string | null = 'owner') => {

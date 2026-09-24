@@ -8,10 +8,10 @@ import { CodexOwnerInstalledGateway, OWNER_INSTALLED_GATEWAY_TOOL } from './owne
 const cleanups: Array<() => Promise<void>> = []
 afterEach(async () => { for (const cleanup of cleanups.splice(0)) await cleanup() })
 
-async function fixture() {
+async function fixture(projectId: string | null = 'project') {
   const dir = mkdtempSync(join(tmpdir(), 'owner-gateway-'))
   const log = join(dir, 'peer.log')
-  const context: ApprovedMcpContext = { projectId: 'project', sessionId: 'binding', threadId: 'thread',
+  const context: ApprovedMcpContext = { projectId, sessionId: 'binding', threadId: 'thread',
     generation: 'daemon', leaseId: 'owner', phase: 'active', idle: true }
   let owner = true
   let claimed = true
@@ -50,8 +50,8 @@ async function fixture() {
     revoke: () => { approved = false }, loseClaim: () => { claimed = false }, rotate: () => { secretValue = 'rotated' } }
 }
 
-test('fixed gateway preserves complete approved discovery and original MCP results; refuses unapproved and injected authority', async () => {
-  const f = await fixture()
+test.each([null, 'project'])('fixed gateway preserves approved discovery/results and refuses injected authority for scope %s', async projectId => {
+  const f = await fixture(projectId)
   const discovered = await f.call({ action: 'discover' })
   expect(discovered.servers[0].capabilities.resources.subscribe).toBe(true)
   expect(discovered.servers[0].catalog.map((page: { method: string }) => page.method)).toEqual([

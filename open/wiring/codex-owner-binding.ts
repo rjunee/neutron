@@ -19,12 +19,15 @@ import { ReviewPermissionBusy } from '@neutronai/runtime/adapters/codex-cli/pers
 import { CodexRolloutObserver } from '@neutronai/runtime/adapters/codex-cli/persistent/rollout-observer.ts'
 import { DurableOwnerMcp } from '@neutronai/runtime/adapters/codex-cli/persistent/durable-owner-mcp.ts'
 import type { ResolvedOwnerMcpServer } from '@neutronai/runtime/mcp-servers.ts'
+import { assertOwnerScope } from '@neutronai/runtime/adapters/codex-cli/persistent/project-owner-helper-protocol.ts'
 
 export interface CodexOwnerProject {
   cwd: string
   codexHome: string
   credentialIdentity: string
   env: NodeJS.ProcessEnv
+  /** Fixed instance locator, independent of the selected global credential home. */
+  generalAuthorityPath?: string
 }
 
 async function refreshOwner(owner: CodexOwnerBootstrap): Promise<void> {
@@ -32,40 +35,39 @@ async function refreshOwner(owner: CodexOwnerBootstrap): Promise<void> {
   if (remote.refreshState) await remote.refreshState()
 }
 
-/** One host-owned authority per full project id, shared by chat and builds.
+/** One host-owned authority per explicit scope: null General or full project id.
+ * Project chat and builds share their authority; General never gains a project grant.
  * Failed opening and uncertain delivery remain fenced for this host's lifetime.
  * Production attaches only to an independently hosted durable native owner.
  */
 export class CodexOwnerBindings {
-  resolveApprovedServers?: (projectId: string) => Promise<readonly ResolvedOwnerMcpServer[]>
-  private readonly installedMcp = new Map<string, DurableOwnerMcp>()
-  private readonly owners = new Map<string, Promise<{ owner: CodexOwnerBootstrap; project: CodexOwnerProject }>>()
-  private readonly busy = new Set<string>()
-  private readonly refused = new Set<string>()
-  private readonly decodingBuilds = new Set<string>()
-  private readonly reviewReady = new Set<string>()
-  private readonly reviews = new Map<string, ReviewPermissionLease>()
-  private readonly reviewQueue = new Map<string, Promise<void>>()
-  private readonly cleanReviewRefusals = new Set<string>()
-  private readonly buildObservations = new Map<string, { attempted: boolean; terminal: boolean; closed: boolean }>()
-  private readonly nativeDispatches = new Map<string, number>()
-  private readonly conversationHosts = new Map<string, CodexConversationHost>()
-  private readonly builds = new Map<string, {
+  resolveApprovedServers?: (projectId: string | null) => Promise<readonly ResolvedOwnerMcpServer[]>
+  private readonly installedMcp = new Map<string | null, DurableOwnerMcp>()
+  private readonly owners = new Map<string | null, Promise<{ owner: CodexOwnerBootstrap; project: CodexOwnerProject }>>()
+  private readonly busy = new Set<string | null>()
+  private readonly refused = new Set<string | null>()
+  private readonly decodingBuilds = new Set<string | null>()
+  private readonly reviewReady = new Set<string | null>()
+  private readonly reviews = new Map<string | null, ReviewPermissionLease>()
+  private readonly reviewQueue = new Map<string | null, Promise<void>>()
+  private readonly cleanReviewRefusals = new Set<string | null>()
+  private readonly buildObservations = new Map<string | null, { attempted: boolean; terminal: boolean; closed: boolean }>()
+  private readonly nativeDispatches = new Map<string | null, number>()
+  private readonly conversationHosts = new Map<string | null, CodexConversationHost>()
+  private readonly builds = new Map<string | null, {
     session: NonNullable<CodexActingSession['session']>
     input?: Parameters<ProjectActingTurn>[0]
   }>()
   private closed = false
-  private readonly ownerProjects = new WeakMap<CodexOwnerBootstrap, string>()
+  private readonly ownerProjects = new WeakMap<CodexOwnerBootstrap, string | null>()
   private readonly ownerFacts = new WeakMap<CodexOwnerBootstrap, CodexOwnerBindingFacts>()
-  private readonly resolvedOwners = new Map<string, CodexOwnerBootstrap>()
-  private readonly questionSinks = new Map<string, (question: NativeOwnerQuestion) => void>()
-  onOwnerQuestion?: (projectId: string, question: NativeOwnerQuestion) => Promise<void>
+  private readonly resolvedOwners = new Map<string | null, CodexOwnerBootstrap>()
+  private readonly questionSinks = new Map<string | null, (question: NativeOwnerQuestion) => void>()
+  onOwnerQuestion?: (projectId: string | null, question: NativeOwnerQuestion) => Promise<void>
   readonly controls = new CodexOwnerControls({
     lookup: async projectId => {
       const entry = await this.owners.get(projectId)
-      if (entry && JSON.parse(readFileSync(join(entry.project.codexHome, 'project-owner.json'), 'utf8')) !== projectId) {
-        throw new Error('Codex owner credential home belongs to another project')
-      }
+      if (entry) assertOwnerScope(entry.project.codexHome, projectId)
       return entry?.owner
     },
     authorize: async projectId => {
@@ -75,9 +77,8 @@ export class CodexOwnerBindings {
     facts: owner => {
       const facts = this.readBinding(owner.binding)
       const projectId = this.ownerProjects.get(owner)
-      if (!projectId || JSON.parse(readFileSync(join(facts.codexHome, 'project-owner.json'), 'utf8')) !== projectId) {
-        throw new Error('Codex owner credential home identity changed')
-      }
+      if (projectId === undefined) throw new Error('Codex owner credential home identity changed')
+      assertOwnerScope(facts.codexHome, projectId)
       return facts
     },
     busy: projectId => this.busy.has(projectId) || !!this.builds.get(projectId)?.input || this.decodingBuilds.has(projectId),
@@ -136,7 +137,7 @@ export class CodexOwnerBindings {
       })
       const current = (): boolean => {
         try {
-          if (JSON.parse(readFileSync(join(project.codexHome, 'project-owner.json'), 'utf8')) !== options.projectId) return false
+          assertOwnerScope(project.codexHome, options.projectId)
           const now = this.readBinding(owner.binding)
           return !released && now.bindingRevision === facts.bindingRevision
             && owner.broker.state().phase !== 'closed' && !this.refused.has(options.projectId)
@@ -263,23 +264,30 @@ export class CodexOwnerBindings {
   }
   private sequence = 0
 
-  private async revalidateProject(projectId: string, previous: CodexOwnerProject, supplied?: CodexOwnerProject): Promise<void> {
-    const current = supplied ?? await this.project(projectId)
+  private async revalidateProject(projectId: string | null, previous: CodexOwnerProject, supplied?: CodexOwnerProject): Promise<void> {
+    const current = supplied ?? await this.scopeProject(projectId)
     if (realpathSync(current.cwd) !== previous.cwd || realpathSync(current.codexHome) !== previous.codexHome
-      || !current.credentialIdentity || current.credentialIdentity !== previous.credentialIdentity
-      || JSON.parse(readFileSync(join(current.codexHome, 'project-owner.json'), 'utf8')) !== projectId) {
+      || !current.credentialIdentity || current.credentialIdentity !== previous.credentialIdentity) {
       throw new Error('Codex owner project credential identity changed; explicit reconciliation required')
     }
+    assertOwnerScope(current.codexHome, projectId)
   }
 
   constructor(private readonly project: (projectId: string) => Promise<CodexOwnerProject>,
     private readonly bootstrap: (options: OwnerLaunch) => Promise<CodexOwnerBootstrap> = openDurableCodexOwner,
-    private readonly readBinding: typeof readCodexOwnerBinding = readCodexOwnerBinding) {}
+    private readonly readBinding: typeof readCodexOwnerBinding = readCodexOwnerBinding,
+    private readonly general?: () => Promise<CodexOwnerProject>) {}
 
-  private resolve(projectId: string, beforeOpening?: (project: CodexOwnerProject) => void): Promise<{ owner: CodexOwnerBootstrap; project: CodexOwnerProject }> {
+  private scopeProject(projectId: string | null): Promise<CodexOwnerProject> {
+    if (projectId !== null) return this.project(projectId)
+    if (!this.general) return Promise.reject(new Error('Codex General owner credential is unavailable'))
+    return this.general()
+  }
+
+  private resolve(projectId: string | null, beforeOpening?: (project: CodexOwnerProject) => void): Promise<{ owner: CodexOwnerBootstrap; project: CodexOwnerProject }> {
     if (this.closed) return Promise.reject(new Error('Codex owner host is closed'))
     if (this.refused.has(projectId)) return Promise.reject(new Error('Codex owner requires native reconciliation'))
-    if (!/^[A-Za-z0-9_.-]{1,128}$/.test(projectId)) return Promise.reject(new Error('Codex owner requires a full project id'))
+    if (projectId !== null && !/^[A-Za-z0-9_.-]{1,128}$/.test(projectId)) return Promise.reject(new Error('Codex owner requires a full project id'))
     let pending = this.owners.get(projectId)
     if (pending) return pending.then(async entry => {
       await this.revalidateProject(projectId, entry.project)
@@ -288,12 +296,10 @@ export class CodexOwnerBindings {
     if (!pending) {
       let openingAttempted = false
       pending = (async () => {
-        const raw = await this.project(projectId)
-        if (!raw.credentialIdentity) throw new Error('Codex owner requires a project credential identity')
+        const raw = await this.scopeProject(projectId)
+        if (!raw.credentialIdentity) throw new Error('Codex owner requires a credential identity')
         const project = { ...raw, cwd: realpathSync(raw.cwd), codexHome: realpathSync(raw.codexHome) }
-        if (JSON.parse(readFileSync(join(project.codexHome, 'project-owner.json'), 'utf8')) !== projectId) {
-          throw new Error('Codex owner credential home belongs to another project')
-        }
+        assertOwnerScope(project.codexHome, projectId)
         const env: Record<string, string> = {}
         for (const [key, value] of Object.entries(project.env)) {
           if (value !== undefined && !CODEX_CLI_AUTH_ENV_VARS.includes(key)) env[key] = value
@@ -302,7 +308,8 @@ export class CodexOwnerBindings {
         beforeOpening?.(project)
         openingAttempted = true
         const owner = await this.bootstrap({ projectId, binary: 'codex', socketPath: join(project.codexHome, 'owner.sock'),
-          cwd: project.cwd, codexHome: project.codexHome, env })
+          cwd: project.cwd, codexHome: project.codexHome, env,
+          ...(projectId === null ? { generalAuthorityPath: project.generalAuthorityPath } : {}) })
         try {
           const facts = this.readBinding(owner.binding)
           if (existsSync(join(project.codexHome, '.neutron-owner-work.json'))) throw new Error('Codex interrupted host work requires native reconciliation')
@@ -343,10 +350,10 @@ export class CodexOwnerBindings {
   }
 
   /** Boot recovery never creates cold owners. Missing journals remain lazy. */
-  async reconcile(projectIds: readonly string[]): Promise<void> {
+  async reconcile(projectIds: readonly (string | null)[]): Promise<void> {
     for (const projectId of projectIds) {
       let project: CodexOwnerProject
-      try { project = await this.project(projectId) }
+      try { project = await this.scopeProject(projectId) }
       catch { continue } // No authorized home is not evidence of an uncertain owner.
       if (!existsSync(join(project.codexHome, '.neutron-owner-launch.json'))) continue
       try { await this.resolve(projectId) }
@@ -363,13 +370,13 @@ export class CodexOwnerBindings {
     if (!existsSync(path)) writeFileSync(path, JSON.stringify({ threadId: facts.threadId, bindingRevision: facts.bindingRevision }), { flag: 'wx', mode: 0o600 })
   }
 
-  private finishWork(projectId: string, owner: CodexOwnerBootstrap): void {
+  private finishWork(projectId: string | null, owner: CodexOwnerBootstrap): void {
     if (!('refreshState' in owner) || this.refused.has(projectId)) return
     const path = join(this.readBinding(owner.binding).codexHome, '.neutron-owner-work.json')
     if (existsSync(path)) unlinkSync(path)
   }
 
-  private fence(projectId: string): void {
+  private fence(projectId: string | null): void {
     this.refused.add(projectId)
     this.reviews.get(projectId)?.abandon()
     // Capture failures in owner controls as well as active build/chat leases.
@@ -404,7 +411,7 @@ export class CodexOwnerBindings {
         const admissionTimer = new AbortController()
         try {
           project = await Promise.race([
-            this.project(projectId),
+            this.scopeProject(projectId),
             delay(request.budget.wall_ms, undefined, { signal: AbortSignal.any([signal, admissionTimer.signal]) })
               .then(() => { throw new Error('Owner admission expired') }),
           ])
@@ -525,7 +532,7 @@ export class CodexOwnerBindings {
   }
 
   start(projectId: string | undefined, spec: AgentSpec): SessionHandle {
-    return this.startTurn(projectId, spec)
+    return this.startTurn(projectId ?? null, spec)
   }
 
   /** Readiness attests the existing owner capability; it does not grant permissions. */
@@ -535,12 +542,11 @@ export class CodexOwnerBindings {
     this.reviewReady.add(projectId)
   }
 
-  private startTurn(projectId: string | undefined, spec: AgentSpec, buildDispatch = false): SessionHandle {
+  private startTurn(projectId: string | null, spec: AgentSpec, buildDispatch = false): SessionHandle {
     const abort = new AbortController()
     let inner: SessionHandle | undefined
     const events = (async function* (bindings: CodexOwnerBindings) {
       try {
-        if (projectId === undefined) throw new Error('Codex owner chat requires a project selection')
         if (!buildDispatch && (bindings.builds.get(projectId)?.input || bindings.decodingBuilds.has(projectId))) {
           throw new Error('Codex owner build result is still pending')
         }

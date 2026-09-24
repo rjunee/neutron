@@ -1,10 +1,37 @@
 import { afterEach, expect, test } from 'bun:test'
-import { mkdirSync, mkdtempSync, rmSync, writeFileSync } from 'node:fs'
+import { mkdirSync, mkdtempSync, rmSync, unlinkSync, writeFileSync } from 'node:fs'
 import { tmpdir } from 'node:os'
 import { join } from 'node:path'
 import { codexOwnerCredentialIdentity, openDurableCodexOwner } from '../wiring/codex-durable-owner.ts'
+import { assertOwnerScope } from '@neutronai/runtime/adapters/codex-cli/persistent/project-owner-helper-protocol.ts'
 
 const roots: string[] = []
+test('General helper admission refuses project homes and project admission refuses unmarked General homes', () => {
+  const options = fixture()
+  expect(() => assertOwnerScope(options.codexHome, 'project-one')).not.toThrow()
+  expect(() => assertOwnerScope(options.codexHome, null)).toThrow('General owner')
+  unlinkSync(join(options.codexHome, 'project-owner.json'))
+  expect(() => assertOwnerScope(options.codexHome, null)).not.toThrow()
+  expect(() => assertOwnerScope(options.codexHome, 'general')).toThrow()
+})
+
+test('General fixed authority refuses another selected home after restart and preserves the first reservation', async () => {
+  const first = fixture(), second = fixture()
+  for (const options of [first, second]) {
+    unlinkSync(join(options.codexHome, 'project-owner.json'))
+    writeFileSync(join(options.codexHome, '.neutron-owner-helper.json'), '{}', { mode: 0o600 })
+  }
+  const generalAuthorityPath = join(first.cwd, 'general-owner.json')
+  // A positive namespace admission reaches the existing provenance refusal;
+  // no native process is required to exercise the production reservation.
+  await expect(openDurableCodexOwner({ ...first, projectId: null, generalAuthorityPath })).rejects.toThrow('provenance')
+  await expect(openDurableCodexOwner({ ...second, cwd: first.cwd, projectId: null, generalAuthorityPath })).rejects.toThrow('General owner credential or directory changed')
+  await expect(openDurableCodexOwner({ ...first, projectId: null, generalAuthorityPath })).rejects.toThrow('provenance')
+  writeFileSync(join(first.codexHome, 'auth.json'), JSON.stringify({ tokens: {
+    account_id: 'replacement-account', access_token: 'replacement-access', refresh_token: 'replacement-refresh',
+  } }), { mode: 0o600 })
+  await expect(openDurableCodexOwner({ ...first, projectId: null, generalAuthorityPath })).rejects.toThrow('General owner credential or directory changed')
+})
 afterEach(() => { for (const root of roots.splice(0)) rmSync(root, { recursive: true, force: true }) })
 function fixture() {
   const root = mkdtempSync(join(tmpdir(), 'durable-owner-refusal-')); roots.push(root)
