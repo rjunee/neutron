@@ -37,17 +37,24 @@ Both the owner-status display and adjacent credential panel are project-scoped:
 pending reads hide the previous project's status and removal control, and failed
 reads report unknown rather than disconnected.
 
-Local verification passed 262 consuming build integration tests, 176 credential,
+Local verification passed 267 consuming build integration tests, 176 credential,
 rotation and probe tests, 74 native-owner tests plus the focused grant-removal
 approval/decline test, 15 shared-client/web tests, and the rendered phone route test.
-The six affected TypeScript projects and changed-file lint passed. Two temporary
+All 51 TypeScript projects, the layering gate and changed-file lint passed. Two temporary
 mutations (restoring global fallback and removing cached account comparison) made
 their negative controls fail; both guards were restored and the controls passed.
 Review regressions additionally went red when restoring cross-project credential
 display and clearing expiry during refresh; both fixes passed after restoration.
-Full-repository verification is not claimed: the local purity gate reported 456
-findings across the tree and linked-worktree metadata, and the partitioned whole
-suite, full typecheck matrix and layering gate remain separate pre-merge checks.
+The pre-rebase partitioned suite executed all 1,654 discovered files, with 25,105
+passing tests and two failing identity-registry assertions. The broad project-ID
+validation regex conservatively matches the registry's identity-name candidates;
+an explanatory registry entry fixes membership without weakening its detector.
+All 21 registry tests passed after the correction. After a clean rebase, 151
+credential/owner/HTTP tests, 15 shared-client/web tests, the phone test, 267 consuming
+build tests, all 51 TypeScript projects and the layering gate passed again.
+This is not a claim of a green whole-suite local rerun on the final head; CI must
+provide that witness. The local purity gate still reported 456 findings across
+the tree and linked-worktree metadata, so local purity is not claimed green.
 
 This change does not provision an account, inspect live secrets, deploy, or satisfy
 #978. Served owner-to-build-to-restart acceptance and the positive installed-MCP
