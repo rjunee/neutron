@@ -20,8 +20,16 @@ the first task.
 
 On a same-head resume, a task-sequence `built` checkpoint is terminal only when
 its host-recorded remaining count is zero and agrees with the persisted,
-validated execution plan. Every count must match that plan; a positive remainder
-must also agree with its unchecked ledger. Recovery of an intermediate task must
+validated execution plan. The sole missing-plan
+exception preserves a host-authenticated migrated checkpoint: the persisted
+selection source is `legacy`, the accepted plan is null, and the checkpoint
+explicitly records `remainingTasks: 0`. It may resume fresh review only after
+the existing full-commit-identity and nonempty regenerated-diff checks pass.
+It cannot authorize intermediate handoff or bypass review, suite proof,
+publication, or merge gates. Modern selections still require the accepted plan;
+any persisted plan must agree with the count, including at zero.
+A positive remainder always requires that plan and its matching unchecked
+ledger. Recovery of an intermediate task must
 commit that plan's ticked ledger and durably advance the existing iteration before
 returning `continued`, using the ordinary idempotent handoff. It must not dispatch
 another planner/builder, publish, review, or merge that intermediate task. Missing
@@ -66,12 +74,18 @@ or malformed evidence never authorizes adoption of a moved revision.
       ledger-only and spend checks, and refuse valid recovery; all must fail.
       verify: `trident/production-host-effects.test.ts` and
       `trident/task-ledger-intent-mutation.test.ts`.
-- [x] Missing remaining count, missing plan, or count/ledger disagreement (including
+- [x] Missing remaining count, missing plan outside the authenticated legacy
+      terminal exception above, or count/ledger disagreement (including
       a zero checkpoint whose accepted plan still has work remaining) returns
       `unknown` without handoff or review. A blanket refusal also fails acceptance:
       a matching positive remainder must hand off, while a terminal zero-remainder
       checkpoint must review and merge without new planning or building.
-      verify: the same consuming test file and `trident/build-run.test.ts`.
+      A migrated legacy checkpoint with no accepted plan and explicit zero
+      remainder must resume fresh review and merge without inventing a plan or
+      replaying planning/building; positive or missing legacy remainders and
+      contradictory persisted legacy plans must still return `unknown`.
+      verify: the same consuming test file, `trident/build-run.test.ts`, and
+      `trident/legacy-terminal-checkpoint-mutation.test.ts`.
 - [x] Paired semantic mutations reinstate premature terminal reuse and refuse
       legitimate terminal reuse. Each must fail its named behavioral test;
       unmutated tests must pass first. Both consuming and focused tests remain
