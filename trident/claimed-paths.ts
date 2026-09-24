@@ -137,7 +137,22 @@ function clauses(line: string, paths: PathRange[]): ClaimToken[][] {
       result.push([])
     } else result[result.length - 1]!.push(token)
   }
-  return result
+  // A boundary cannot discard an incomplete request: "Edit then run X"
+  // still has an unresolved prefix. Keep its boundary token too, so joining
+  // fragments cannot manufacture a newly valid exemption ("Do not; edit X").
+  const complete: ClaimToken[][] = []
+  let pending: ClaimToken[] = []
+  for (const clause of result) {
+    if (clause.length === 0) continue
+    if (clause.some(token => token.path !== undefined)) {
+      complete.push([...pending, ...clause])
+      pending = []
+    } else if (pending.length > 0 || !isExemptClause(clause.map(token => token.word))) {
+      for (const token of clause) pending.push(token)
+      pending.push({ word: '@boundary' })
+    }
+  }
+  return complete
 }
 
 /** A small complete grammar, deliberately not a natural-language classifier. */
@@ -171,7 +186,9 @@ function isExemptClause(input: string[]): boolean {
     return command(words)
   }
   if (!['edit', 'touch', 'change', 'modify', 'create', 'remove', 'update', 'editing', 'touching', 'changing'].includes(words.shift() ?? '')) return false
-  return pathList(words)
+  // A complete objectless prohibition is independently read-only; it must
+  // not taint a later canonical execution clause with unresolved write scope.
+  return words.length === 0 || pathList(words)
 }
 
 function pathList(words: string[]): boolean {

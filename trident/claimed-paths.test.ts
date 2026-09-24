@@ -24,9 +24,9 @@ describe('deriveClaimedPaths', () => {
   })
 
   for (const [task, paths, sibling] of [
-    ['Run tests before you edit trident/store.ts', ['trident/store.ts'], 'Run tests before inspect trident/store.ts'],
-    ['Review the plan before you create trident/new-store.ts', ['trident/new-store.ts'], 'Review the plan before inspect trident/new-store.ts'],
-    ['Check the result then carefully move trident/store.ts to trident/new-store.ts', ['trident/store.ts', 'trident/new-store.ts'], 'Check the result then inspect trident/store.ts and trident/new-store.ts'],
+    ['Run tests before you edit trident/store.ts', ['trident/store.ts'], 'Inspect trident/store.ts'],
+    ['Review the plan before you create trident/new-store.ts', ['trident/new-store.ts'], 'Inspect trident/new-store.ts'],
+    ['Check the result then carefully move trident/store.ts to trident/new-store.ts', ['trident/store.ts', 'trident/new-store.ts'], 'Inspect trident/store.ts and trident/new-store.ts'],
     ['Run checks and with previously unseen filler edit/update trident/store.ts', ['trident/store.ts'], 'Inspect trident/store.ts'],
     ['Do not edit trident/store.ts, but with due care edit trident/new-store.ts', ['trident/new-store.ts'], 'Do not edit trident/store.ts, but inspect trident/new-store.ts'],
     ['Add a test in trident/store.test.ts', ['trident/store.test.ts'], 'Run trident/store.test.ts'],
@@ -34,6 +34,10 @@ describe('deriveClaimedPaths', () => {
     ['Edit the read helper in trident/store.ts', ['trident/store.ts'], 'Read trident/store.ts'],
     ['Edit the test and read helpers in trident/store.ts', ['trident/store.ts'], 'Review trident/store.ts'],
     ['Edit and test trident/store.ts', ['trident/store.ts'], 'Run trident/store.ts'],
+    ['Edit then run trident/store.ts', ['trident/store.ts'], 'Run trident/store.ts'],
+    ['Create, then inspect trident/store.ts', ['trident/store.ts'], 'Inspect trident/store.ts'],
+    ['Do not edit then edit trident/store.ts', ['trident/store.ts'], 'Do not edit; Run trident/store.ts'],
+    ['Do not; edit trident/store.ts', ['trident/store.ts'], 'Do not edit trident/store.ts'],
   ] as const) {
     test(`instruction scope: ${task}`, () => {
       expect(deriveClaimedPaths({ task })).toEqual([...paths])
@@ -60,6 +64,12 @@ describe('deriveClaimedPaths', () => {
     ]) expect(deriveClaimedPaths({ task })).toEqual(['trident/store.ts', 'trident/tick.ts'])
     expect(deriveClaimedPaths({ task: 'Run tests before you inspect trident/store.ts' })).toEqual(['trident/store.ts'])
     expect(deriveClaimedPaths({ task: 'Read-only check: run trident/store.ts and edit trident/tick.ts' })).toEqual(['trident/store.ts', 'trident/tick.ts'])
+    expect(deriveClaimedPaths({ task: 'Unfamiliar request then run trident/store.ts' })).toEqual(['trident/store.ts'])
+    expect(deriveClaimedPaths({ task: 'Edit. Run trident/store.ts' })).toEqual(['trident/store.ts'])
+  })
+
+  test('a newline starts an independent instruction, unlike an inline incomplete prefix', () => {
+    expect(deriveClaimedPaths({ task: 'Add an as-built shard under docs/as-built/.\nRead-only check: Run open/__tests__/project-build-e2e.test.ts' })).toEqual([])
   })
 
   test('sanitized General controls task and plan with explicit reference clauses claim only app writes', () => {
@@ -141,7 +151,7 @@ describe('deriveClaimedPaths', () => {
 
   test('does not claim guard rails, package specifiers, directories, or incidental references', () => {
     expect(deriveClaimedPaths({
-      task: 'Avoid `trident/inner-workflow.mjs` entirely. Import @neutronai/logger. See docs/AS_BUILT.md.',
+      task: 'Avoid `trident/inner-workflow.mjs` entirely.\nImport @neutronai/logger.\nSee docs/AS_BUILT.md.',
     })).toEqual([])
     expect(deriveClaimedPaths({ task: 'Edit docs/as-built/ and `@neutronai/logger`.' })).toEqual([])
   })
