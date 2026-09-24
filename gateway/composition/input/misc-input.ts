@@ -1,8 +1,16 @@
 import type { CronJobRegistry } from '@neutronai/cron/jobs.ts'
 import type { LoopRegistry } from '@neutronai/loop'
 import type { ProjectDb } from '@neutronai/persistence/index.ts'
+import type { ProjectAdmission } from '../../project-admission.ts'
 
 export interface MiscCompositionInput {
+  /**
+   * #1237 — the per-boot project admission service. Chat, parent input and host
+   * acting turns admit through it before queueing; the remaining producers and
+   * the maintenance owner consume this same instance. Exposed only — boot runs no
+   * maintenance of its own.
+   */
+  project_admission?: ProjectAdmission
   /** Awaited after graph tools and HTTP wiring exist, before accepting traffic. */
   on_graph_ready?: () => Promise<void>
   db: ProjectDb

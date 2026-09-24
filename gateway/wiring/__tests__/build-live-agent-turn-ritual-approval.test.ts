@@ -28,6 +28,7 @@ import type { AgentSpec, Substrate } from '@neutronai/runtime/substrate.ts'
 import type { SessionHandle } from '@neutronai/runtime/session-handle.ts'
 import { buildLiveAgentTurn } from '../build-live-agent-turn.ts'
 import type { LiveAgentTurnRequest } from '../../http/chat-bridge.ts'
+import { openAdmission } from './project-admission-fixture.ts'
 
 const RAP_VALUE = `rap:${'A'.repeat(22)}:a`
 
@@ -97,6 +98,7 @@ function makeCapture(reply: { body: string } | null): CaptureProbe {
 
 function makeRunner(reply: string, capture: CaptureProbe['fn'], specs: AgentSpec[]) {
   return buildLiveAgentTurn({
+    admission: openAdmission(),
     substrate: makeStubSubstrate(reply, specs),
     personaLoader: { load: async (): Promise<string> => '' },
     buttonStore: store,

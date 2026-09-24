@@ -21,6 +21,7 @@ import type { AgentSpec, Substrate } from '@neutronai/runtime/substrate.ts'
 import type { SessionHandle } from '@neutronai/runtime/session-handle.ts'
 import { buildLiveAgentTurn } from '../build-live-agent-turn.ts'
 import type { LiveAgentTurnRequest } from '../../http/chat-bridge.ts'
+import { openAdmission } from './project-admission-fixture.ts'
 
 let tmp: string
 let db: ProjectDb
@@ -79,6 +80,7 @@ describe('RB1 memory-index injection', () => {
     const sent: ChatOutbound[] = []
     let calls = 0
     const run = buildLiveAgentTurn({
+      admission: openAdmission(),
       substrate: makeStubSubstrate(specs),
       personaLoader: { async load() { return '' } },
       memoryIndexSnapshot: async () => {
@@ -110,6 +112,7 @@ describe('RB1 memory-index injection', () => {
     const specs: AgentSpec[] = []
     const sent: ChatOutbound[] = []
     const run = buildLiveAgentTurn({
+      admission: openAdmission(),
       substrate: makeStubSubstrate(specs),
       personaLoader: { async load() { return '' } },
       memoryIndexSnapshot: () => {
@@ -130,6 +133,7 @@ describe('RB1 memory-index injection', () => {
     const specs: AgentSpec[] = []
     const sent: ChatOutbound[] = []
     const run = buildLiveAgentTurn({
+      admission: openAdmission(),
       substrate: makeStubSubstrate(specs),
       personaLoader: { async load() { return '' } },
       buttonStore: store,

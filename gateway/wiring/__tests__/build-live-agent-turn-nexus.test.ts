@@ -22,6 +22,7 @@ import type { AgentSpec, Substrate } from '@neutronai/runtime/substrate.ts'
 import type { SessionHandle } from '@neutronai/runtime/session-handle.ts'
 import { buildLiveAgentTurn } from '../build-live-agent-turn.ts'
 import type { LiveAgentTurnRequest } from '../../http/chat-bridge.ts'
+import { openAdmission } from './project-admission-fixture.ts'
 
 let tmp: string
 let db: ProjectDb
@@ -83,6 +84,7 @@ describe('agent-nexus per-turn injection (RC3)', () => {
     // every warm turn) is caught: the warm turn must carry the SECOND call's fresh block.
     let nexusCalls = 0
     const run = buildLiveAgentTurn({
+      admission: openAdmission(),
       substrate: makeStubSubstrate(specs),
       personaLoader: {
         async load() {
@@ -123,6 +125,7 @@ describe('agent-nexus per-turn injection (RC3)', () => {
     const specs: AgentSpec[] = []
     const sent: ChatOutbound[] = []
     const run = buildLiveAgentTurn({
+      admission: openAdmission(),
       substrate: makeStubSubstrate(specs),
       personaLoader: {
         async load() {
@@ -145,6 +148,7 @@ describe('agent-nexus per-turn injection (RC3)', () => {
     const specs: AgentSpec[] = []
     const sent: ChatOutbound[] = []
     const run = buildLiveAgentTurn({
+      admission: openAdmission(),
       substrate: makeStubSubstrate(specs),
       personaLoader: {
         async load() {
@@ -169,6 +173,7 @@ describe('agent-nexus per-turn injection (RC3)', () => {
     const specs: AgentSpec[] = []
     const sent: ChatOutbound[] = []
     const run = buildLiveAgentTurn({
+      admission: openAdmission(),
       substrate: makeStubSubstrate(specs),
       personaLoader: {
         async load() {

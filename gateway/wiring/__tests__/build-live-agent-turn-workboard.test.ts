@@ -22,6 +22,7 @@ import type { AgentSpec, Substrate } from '@neutronai/runtime/substrate.ts'
 import type { SessionHandle } from '@neutronai/runtime/session-handle.ts'
 import { buildLiveAgentTurn } from '../build-live-agent-turn.ts'
 import type { LiveAgentTurnRequest } from '../../http/chat-bridge.ts'
+import { openAdmission } from './project-admission-fixture.ts'
 
 let tmp: string
 let db: ProjectDb
@@ -76,6 +77,7 @@ describe('Work Board per-turn injection', () => {
     const specs: AgentSpec[] = []
     const sent: ChatOutbound[] = []
     const run = buildLiveAgentTurn({
+      admission: openAdmission(),
       substrate: makeStubSubstrate(specs),
       personaLoader: { async load() { return '' } },
       workBoardSnapshot: () => BOARD,
@@ -102,6 +104,7 @@ describe('Work Board per-turn injection', () => {
     const specs: AgentSpec[] = []
     const sent: ChatOutbound[] = []
     const run = buildLiveAgentTurn({
+      admission: openAdmission(),
       substrate: makeStubSubstrate(specs),
       personaLoader: { async load() { return '' } },
       workBoardSnapshot: () => {
@@ -122,6 +125,7 @@ describe('Work Board per-turn injection', () => {
     const specs: AgentSpec[] = []
     const sent: ChatOutbound[] = []
     const run = buildLiveAgentTurn({
+      admission: openAdmission(),
       substrate: makeStubSubstrate(specs),
       personaLoader: { async load() { return '' } },
       buttonStore: store,

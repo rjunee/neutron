@@ -211,6 +211,9 @@ const EXPECTED_COMPOSITION_KEYS = [
   // reporter had nowhere to post and the owner never saw the result.
   'onboarding_overnight_cron',
   'platform',
+  // #1237 — the project admission service the chat runner and acting turns
+  // already admit through; exposed for the remaining producers to share.
+  'project_admission',
   'project_slug',
   'realmode_cleanups',
   'reminder_dispatcher',

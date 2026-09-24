@@ -89,6 +89,28 @@ export class ProjectAdmissionStore {
     return this.transition(fence, 'open');
   }
 
+  /** Restart continuity: recover the persisted maintenance ownership for a scope
+   * whose acknowledgement was lost (crash between the fence commit and the caller
+   * recording it). Read-only; returns null for an open or unregistered scope. */
+  resume(scope: ProjectAdmissionScope): MaintenanceFence | null {
+    const row = this.db.get<FenceRow>('SELECT generation, phase, maintenance_token FROM project_admission_fences WHERE scope_key = ?', [scopeKey(scope)]);
+    if (!row || row.phase === 'open' || row.maintenance_token === null) return null;
+    return { scope: { ...scope }, generation: row.generation, token: row.maintenance_token, phase: row.phase };
+  }
+
+  /** Give up maintenance BEFORE anything was replaced: draining|quiesced -> open.
+   * Admitted work keeps draining, so no lease check applies. A replacing or
+   * attesting generation is refused: once replacement began, only attestation
+   * of the actual replacement may reopen admission. */
+  async abandon(fence: MaintenanceFence): Promise<boolean> {
+    if (fence.phase !== 'draining' && fence.phase !== 'quiesced') return false;
+    const key = scopeKey(fence.scope);
+    return this.db.transaction(tx => tx.runSync(`UPDATE project_admission_fences
+      SET phase = 'open', maintenance_token = NULL WHERE scope_key = ? AND generation = ?
+      AND maintenance_token = ? AND phase = ? AND phase IN ('draining', 'quiesced')`,
+    [key, fence.generation, fence.token, fence.phase]).changes === 1);
+  }
+
   /** Restart inspection never modifies state or assumes orphaned leases expired. */
   inspect(scope: ProjectAdmissionScope): { generation: number; phase: FenceRow['phase']; leases: number } | null {
     const key = scopeKey(scope);
