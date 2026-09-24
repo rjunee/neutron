@@ -2,6 +2,52 @@ import { describe, expect, test } from 'bun:test'
 import { deriveClaimedPaths } from './claimed-paths.ts'
 
 describe('deriveClaimedPaths', () => {
+  const evidence = 'open/__tests__/project-build-e2e.test.ts, trident/tsconfig.json and scripts/ci/typecheck-all.sh'
+  test('read-only E2E, config, scripts and filename verbs acquire no ownership', () => {
+    for (const task of [
+      `Run ${evidence}`, `Inspect ${evidence}`, `Review ${evidence}`,
+      'Run `bun test open/__tests__/project-build-e2e.test.ts`, `tsc -p trident/tsconfig.json`, and `bash scripts/ci/typecheck-all.sh`.',
+      'Tests: run the build checks in open/__tests__/project-build-e2e.test.ts and trident/tsconfig.json.',
+      'Run `bun run build` with `trident/tsconfig.json`.',
+      'Inspect `pkg/edit-handler.ts` and pkg/create-handler.ts.',
+      'Do not edit; run open/__tests__/project-build-e2e.test.ts.',
+    ]) expect(deriveClaimedPaths({ task })).toEqual([])
+  })
+
+  test('explicit writes retain exact claims including slash-joined verbs', () => {
+    for (const verb of ['Edit', 'Create', 'Update', 'Remove', 'Edit/update', 'Create/edit']) {
+      expect(deriveClaimedPaths({ task: `${verb} ${evidence}` })).toEqual([
+        'open/__tests__/project-build-e2e.test.ts', 'trident/tsconfig.json', 'scripts/ci/typecheck-all.sh',
+      ])
+      expect(deriveClaimedPaths({ task: `${verb} trident/new-store.ts` })).toEqual(['trident/new-store.ts'])
+    }
+  })
+
+  for (const [task, paths, sibling] of [
+    ['Run tests before you edit trident/store.ts', ['trident/store.ts'], 'Run tests before you inspect trident/store.ts'],
+    ['Review the plan before you create trident/new-store.ts', ['trident/new-store.ts'], 'Review the plan before you inspect trident/new-store.ts'],
+    ['Check the result then carefully move trident/store.ts to trident/new-store.ts', ['trident/store.ts', 'trident/new-store.ts'], 'Check the result then carefully inspect trident/store.ts and trident/new-store.ts'],
+    ['Run checks and with previously unseen filler edit/update trident/store.ts', ['trident/store.ts'], 'Run checks and with previously unseen filler inspect trident/store.ts'],
+    ['Do not edit trident/store.ts, but with due care edit trident/new-store.ts', ['trident/new-store.ts'], 'Do not edit trident/store.ts, but with due care inspect trident/new-store.ts'],
+  ] as const) {
+    test(`instruction scope: ${task}`, () => {
+      expect(deriveClaimedPaths({ task })).toEqual([...paths])
+      expect(deriveClaimedPaths({ task: sibling })).toEqual([])
+    })
+  }
+
+  test('mixed instructions preserve only the write paths across separators', () => {
+    for (const separator of ['; ', '. ', ' and ', ', then ', ' then ', ' before you ', ' after ', ' and then you ']) {
+      expect(deriveClaimedPaths({ task: `Edit trident/store.ts${separator}run ${evidence}` })).toEqual(['trident/store.ts'])
+      expect(deriveClaimedPaths({ task: `Run ${evidence}${separator}create trident/new-store.ts` })).toEqual(['trident/new-store.ts'])
+    }
+    expect(deriveClaimedPaths({ task: 'Do not edit trident/store.ts or change trident/tick.ts; create trident/new-store.ts' })).toEqual(['trident/new-store.ts'])
+    expect(deriveClaimedPaths({ task: 'Edit trident/store.ts without touching trident/tick.ts' })).toEqual(['trident/store.ts'])
+  })
+
+  test('accepted ranges preserve offsets, lexical order, line refs and filename verbs', () => {
+    expect(deriveClaimedPaths({ task: '🛠 Edit pkg/run-and-edit.ts:12:4 and `SPEC.md`, then `pkg/create.ts` and pkg/run-and-edit.ts.' })).toEqual(['pkg/run-and-edit.ts', 'SPEC.md', 'pkg/create.ts'])
+  })
   test('extracts a bare repo-relative path from prose', () => {
     const paths = deriveClaimedPaths({
       task: 'The publish step in trident/inner-workflow.mjs trims the replay patch.',

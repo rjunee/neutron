@@ -91,33 +91,77 @@ function normalize(raw: string): string | null {
 export function deriveClaimedPaths(sources: { task: string; planDoc?: string | null }): string[] {
   const seen = new Set<string>()
   const out: string[] = []
-  const take = (candidate: string): void => {
+  const take = (path: string): void => {
     if (out.length >= MAX_CLAIMED_PATHS) return
-    const path = normalize(candidate)
-    if (path === null || seen.has(path)) return
+    if (seen.has(path)) return
     seen.add(path)
     out.push(path)
   }
-  // Claims come only from actionable sentences. Design docs routinely mention
-  // reference files, historical evidence and explicit "do not touch" guard
-  // rails; treating every slash token as an intended edit serialises unrelated
-  // lanes. Split backtick spans and comma/"and" lists into individual paths.
   const text = `${sources.task}\n${sources.planDoc ?? ''}`
   for (const line of text.split('\n')) {
-    if (/\b(?:do not|don't|never|avoid|without (?:editing|touching|changing))\b/i.test(line)) continue
-    if (!/\b(?:add|append|build|change|create|edit|fix|implement|modify|move|publish|remove|rename|replace|rewrite|touch|update|wire)\b/i.test(line)) continue
-    for (const m of line.matchAll(BACKTICKED)) {
-      const span = m[1] ?? ''
-      // Split on ONE character class, which is a linear scan. The obvious
-      // `/\s+(?:and|or)\s+|\s*,\s*/i` is quadratic on a span of many spaces
-      // (CodeQL js/polynomial-redos, high), because `\s+`/`\s*` on both sides of
-      // an alternation give the engine an ambiguous split point to backtrack
-      // over. Nothing is lost by widening it: a repo-relative path cannot
-      // contain whitespace, and a bare `and` / `or` left as its own token is
-      // dropped by `normalize` for having no extension.
-      for (const candidate of span.split(/[\s,]+/)) take(candidate)
+    const paths = recognizePaths(line)
+    // The recognizer is the sole owner of masking: rejected candidates (such
+    // as Edit/update) remain instruction text. Keep offsets in UTF-16 units.
+    const masked = line.split('')
+    for (const path of paths) masked.fill(' ', path.start, path.end)
+    const instructions = masked.join('')
+    let cursor = 0
+    let writing = false
+    let reading = false
+    let negated = false
+    const words = instructions.matchAll(/\b[a-z]+(?:'[a-z]+)?\b|[.;!?]/gi)
+    for (const word of words) {
+      while (cursor < paths.length && paths[cursor]!.start < word.index) {
+        if (writing && !negated) take(paths[cursor]!.path)
+        cursor++
+      }
+      const token = word[0].toLowerCase()
+      if (/^[.;!?]$/.test(token)) {
+        writing = reading = negated = false
+      } else if (['but', 'then', 'before', 'after'].includes(token)) {
+        negated = false
+      } else if (['not', "don't", 'never', 'avoid', 'without'].includes(token)) {
+        negated = true
+      } else if (READ_ACTIONS.has(token)) {
+        reading = true
+        writing = false
+      } else if (WRITE_ACTIONS.has(token)) {
+        // "run build checks" is execution; explicit edit/create/etc. still
+        // wins in mixed prose even with previously unseen intervening words.
+        if (token !== 'build' || !reading) {
+          writing = true
+          reading = false
+        }
+      }
     }
-    for (const m of line.matchAll(BARE_PATH)) take(m[1] ?? '')
+    while (cursor < paths.length) {
+      if (writing && !negated) take(paths[cursor]!.path)
+      cursor++
+    }
   }
   return out
+}
+
+const WRITE_ACTIONS = new Set('add append build change create edit fix implement modify move publish remove rename replace rewrite touch update wire editing touching changing'.split(' '))
+const READ_ACTIONS = new Set('run execute test inspect review read check verify validate consult see'.split(' '))
+
+type PathRange = { start: number; end: number; path: string }
+
+/** Extract and normalize once; only these exact source ranges may be masked. */
+function recognizePaths(line: string): PathRange[] {
+  const paths: PathRange[] = []
+  const accept = (raw: string, start: number): void => {
+    const path = normalize(raw)
+    if (path !== null) paths.push({ start, end: start + raw.length, path })
+  }
+  for (const span of line.matchAll(BACKTICKED)) {
+    for (const token of span[1]!.matchAll(/[^\s,]+/g)) {
+      accept(token[0], span.index + 1 + token.index)
+    }
+  }
+  for (const token of line.matchAll(BARE_PATH)) {
+    accept(token[1]!, token.index + token[0].length - token[1]!.length)
+  }
+  paths.sort((a, b) => a.start - b.start || b.end - a.end)
+  return paths.filter((path, index) => index === 0 || path.start >= paths[index - 1]!.end)
 }
