@@ -51,11 +51,20 @@ export function createProjectSuiteReceipts(options: {
       if (version === null) return unknown('Suite acquisition ownership changed or run stopped')
       const receipt = await source.observe(snapshot, round)
       const after = await measure(snapshot)
-      if (identity && after !== identity) return unknown('Suite inputs changed during host observation')
+      const stable = identity !== null && after === identity
+      // The identity is the REUSE key, not a precondition for running the suite.
+      // Known-before with a changed or unmeasurable after: the inputs moved during
+      // observation, so the result is attributable to no identity and settles
+      // unknown. Unknown-before (null): decode() refused any prior receipt and this
+      // one is never saved, so the caller consumes the observation exactly once as
+      // a fresh, unproven, non-reusable result and the next observation re-runs
+      // the suite. Turning unknown-before into unknown would let one over-deadline
+      // walk veto every green suite without adding proof.
+      if (identity !== null && !stable) return unknown('Suite inputs changed during host observation')
       if (receipt.kind === 'known' && receipt.runId === run.id && receipt.head === snapshot.head
         && receipt.round === round && receipt.strategy === strategy && receipt.scope === 'full-suite'
         && scope === 'full-suite' && receipt.report && Number.isInteger(receipt.report.hostExitCode)
-        && identity && identity === after && currentOwner() === boundOwner) {
+        && stable && currentOwner() === boundOwner) {
         const saved = await store.appendSuiteReceipt(run.id, version,
           JSON.stringify({ version: 1, owner: boundOwner, identity, receipt }))
         if (saved === null) return unknown('Suite completion ownership changed or run stopped')

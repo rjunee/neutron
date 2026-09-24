@@ -91,8 +91,22 @@ async function preparationKey(worktree: string, workspaces: unknown[], executabl
 
 /** A bounded native metadata walk avoids one JS filesystem round trip per file.
  * NUL fields preserve arbitrary whitespace; undecodable names refuse reuse.
- * find never follows links: the host validates their targets before measuring
- * additional local roots, so an external tree is never traversed. */
+ * find never follows links: the host validates every link target before
+ * measuring more, so an external tree is never traversed.
+ *
+ * Only INSTALLED-DEPENDENCY trees are walked and hashed: the root node_modules,
+ * any in-root target that lives inside a node_modules tree (the Bun store), and
+ * a plain-directory node_modules nested under a linked first-party package.
+ * A link whose target is a FIRST-PARTY path (a workspace package, a file:
+ * dependency, a .bin entry pointing at a source file) is RECORDED as
+ * link -> resolved target and never stat'ed or walked. Git HEAD plus a clean
+ * status already prove those sources, and suite tests legitimately create and
+ * delete temporary files inside package directories, which moves directory
+ * timestamps without changing any input; hashing them made every green full
+ * suite read as "inputs changed". Recording the resolved target still detects a
+ * retargeted link. A target outside the root, a nested node_modules that is not
+ * a plain directory, or a first-party target git ignores (so neither HEAD nor
+ * status covers it) refuses. */
 export async function projectInstalledTreeIdentity(worktree: string,
   run: typeof spawnCapture = spawnCapture): Promise<string | null> {
   try {
@@ -102,6 +116,8 @@ export async function projectInstalledTreeIdentity(worktree: string,
   if (!(await lstat(modules)).isDirectory()) return null
   const hash = createHash('sha256')
   const covered: string[] = []
+  const firstParty: [string, string][] = []
+  const within = (path: string, bases: string[]) => bases.some(base => path === base || path.startsWith(`${base}${sep}`))
   let pending = [modules]
   const deadline = performance.now() + 5000
   while (pending.length > 0) {
@@ -131,12 +147,35 @@ export async function projectInstalledTreeIdentity(worktree: string,
     // Resolve only links, in bounded groups; ordinary files require no JS stat.
     for (let offset = 0; offset < links.length; offset += 64) {
       if (performance.now() >= deadline) return null
-      const targets = await Promise.all(links.slice(offset, offset + 64).map(path => realpath(path)))
-      for (const actual of targets) {
+      const group = links.slice(offset, offset + 64)
+      const targets = await Promise.all(group.map(path => realpath(path)))
+      for (const [position, actual] of targets.entries()) {
         if (!actual.startsWith(`${root}${sep}`)) return null
-        if (!covered.some(base => actual === base || actual.startsWith(`${base}${sep}`))
-          && !pending.includes(actual)) pending.push(actual)
+        if (within(actual, covered) || within(actual, pending)) continue
+        // Anything inside a node_modules tree is installed dependency content.
+        if (actual.slice(root.length + 1).split(sep).includes('node_modules')) {
+          pending.push(actual)
+          continue
+        }
+        firstParty.push([group[position]!, actual])
+        if (!(await lstat(actual)).isDirectory()) continue
+        const nested = join(actual, 'node_modules')
+        if (!await exists(nested)) continue
+        if (!(await lstat(nested)).isDirectory()) return null
+        if (!within(nested, covered) && !within(nested, pending)) pending.push(nested)
       }
+    }
+  }
+  if (firstParty.length > 0) {
+    const remaining = Math.floor(deadline - performance.now())
+    if (remaining <= 0) return null
+    const relative = [...new Set(firstParty.map(([, actual]) => actual.slice(root.length + 1)))].sort()
+    // Exit 1 means no path is ignored; 0 means at least one is, so git covers
+    // neither that source nor its contents. Anything else is unmeasurable.
+    const ignored = await run(['git', 'check-ignore', '--', ...relative], root, undefined, remaining)
+    if (ignored.timed_out || ignored.exit_code !== 1) return null
+    for (const record of firstParty.sort((a, b) => a[0] < b[0] ? -1 : a[0] > b[0] ? 1 : 0)) {
+      hash.update(JSON.stringify(['link', ...record]))
     }
   }
   if (performance.now() >= deadline) return null

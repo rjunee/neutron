@@ -51,7 +51,7 @@
  */
 import { LIVE_AGENT_TOOL_NAMES } from '@neutronai/gateway/wiring/build-live-agent-turn.ts'
 import { afterEach, expect, spyOn, test } from 'bun:test'
-import { chmod, copyFile, mkdir, mkdtemp, readFile, readdir, realpath, rename, rm, symlink, writeFile } from 'node:fs/promises'
+import { chmod, copyFile, mkdir, mkdtemp, readFile, readdir, realpath, rename, rm, symlink, utimes, writeFile } from 'node:fs/promises'
 import { tmpdir } from 'node:os'
 import { dirname, join } from 'node:path'
 import { fileURLToPath } from 'node:url'
@@ -1735,7 +1735,7 @@ test(`prepared recurring conversation refuses changed ${changed} and still admit
   expect(calls[1].request.thread.id).toBe(JSON.parse(saved).thread)
 }, 30_000)
 
-for (const changed of ['none', 'head', 'strategy', 'dependencies', 'runtime', 'workspace', 'missing', 'corrupt', 'subset'] as const)
+for (const changed of ['none', 'workspace-scratch', 'head', 'strategy', 'dependencies', 'runtime', 'workspace', 'missing', 'corrupt', 'subset'] as const)
 test(`prepared host suite receipt survives reconstruction and handles ${changed} inputs`, async () => {
   const f = await fixture({ bunWorkspace: true })
   const original = f.context.runSuite!
@@ -1755,6 +1755,14 @@ test(`prepared host suite receipt survives reconstruction and handles ${changed}
     // The lockfile, manifest, and git head stay unchanged; installed bytes alone
     // must invalidate the proof acquired against the previous installation.
     await writeFile(join(worktree, 'node_modules', 'proof-input'), 'changed installation')
+  }
+  if (changed === 'workspace-scratch') {
+    // A suite that creates and removes a temporary file in a first-party
+    // workspace moves only directory timestamps; git and installs are unchanged.
+    await writeFile(join(worktree, 'app', 'scratch.tmp'), 'temporary')
+    await rm(join(worktree, 'app', 'scratch.tmp'))
+    const future = new Date(Date.now() + 5000)
+    await utimes(join(worktree, 'app'), future, future)
   }
   if (changed === 'runtime') {
     const directory = join(f.dir, 'alternate-runtime')
@@ -1783,7 +1791,7 @@ test(`prepared host suite receipt survives reconstruction and handles ${changed}
   measured = await host.deps.measure()
   if (measured.kind !== 'known') throw Error('expected measured fixture')
   expect(await host.deps.publicationSuite(measured.value)).toMatchObject({ kind: 'known' })
-  expect(suites).toBe(changed === 'none' ? 1 : 2)
+  expect(suites).toBe(changed === 'none' || changed === 'workspace-scratch' ? 1 : 2)
   expect(f.world.dispatches).toHaveLength(0)
 }, 120_000)
 
