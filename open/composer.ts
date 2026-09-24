@@ -675,6 +675,8 @@ export interface BuildOpenGraphComposerOptions {
   ) => import('@neutronai/runtime/substrate.ts').Substrate
   /** Test-only cadence override for production-composition watcher reachability. */
   agentWatcherPollIntervalMs?: number
+  /** Drive the real reminder loop with a controlled timer in composition tests. */
+  reminderScheduler?: import('@neutronai/reminders/tick.ts').ReminderScheduler
   /**
    * Install-token handoff seam (E2E). Production leaves this undefined →
    * `buildOpenInstallTokenHandler` with the real `.env`-persist + supervisor-
@@ -6970,6 +6972,7 @@ export function buildOpenGraphComposer(
       // replacing the no-op. Fully guarded; never throws into the tick.
       watchdog_notifier: watchdogNotifier,
       reminder_dispatcher,
+      ...(options.reminderScheduler ? { reminder_scheduler: options.reminderScheduler } : {}),
       // Executor-mode reminders (plan task 4) — the ritual executor factory
       // (llmPool-gated). `remindersModule` invokes it with the graph's
       // ApprovalManager and wires the tick's ritual dispatch branch.

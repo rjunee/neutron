@@ -428,6 +428,7 @@ export function buildCoreModules(
       const loopOpts: ConstructorParameters<typeof ReminderTickLoop>[0] = {
         store,
         dispatcher: input.reminder_dispatcher,
+        ...(input.reminder_scheduler ? { scheduler: input.reminder_scheduler } : {}),
         // ISSUES #40 — resolve a cron reminder's wall clock in the OWNER's zone.
         // Before this, the tick loop had no zone wired and defaulted to the HOST
         // zone, so on a UTC server every recurring reminder fired at its stored
