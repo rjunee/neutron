@@ -249,6 +249,14 @@ Re-measured on the merged base:
 
 ### Third review round (REQUEST_CHANGES at `560bcfb7`) and its fixes
 
+**Superseded (recovery path).** The `readyWorker` mechanism and the `project-workspaces.ts`
+line pointers in this section describe `4da4cba89`. An independent replay on that head
+showed a same-key retry allocating a second pane after a lost layout reply and a manager
+restart, so run d950ef99 was stopped before merge. PR #1285 (refs #1282) replaced the path
+with a durable operation-keyed reservation, recorded in
+`docs/as-built/project-worker-operation-recovery.md`. The paragraphs below are kept as the
+historical record; see "Fourth round" for the current tree.
+
 Two opus seats and the synthesis returned REQUEST_CHANGES on one major finding; the
 cross-model seat approved with no findings. The host full suite had one red lane.
 
@@ -346,6 +354,56 @@ pre-existing on main and caused by locale:
   fails with the unchanged script, and `git diff 1ba43691 560bcfb7 -- scripts/` is empty.
 - Fix: the script now sorts with `LC_ALL=C` (byte order). The test passes under both
   `en_US.UTF-8` and `C.UTF-8`, and the runner shard and HTTP-lane tests stay green.
+
+### Fourth round: integration of PR #1285 and re-verification on current main
+
+The branch head `2eee6ff0` (the merge of PR #1285 over `4da4cba89`) fast-forwards from
+main `1ba43691`; `f307c451`, `4da4cba89` and `465aa407` are its ancestors. This round adds
+no runtime change: it re-measures the merged tree and records the result.
+
+CI on `2eee6ff0`: typecheck, lint, purity, layering, CodeQL, shards 1-4 of 4 and `test`
+all pass.
+
+Suites on the merged tree, unmodified:
+
+- `worker-placement`, `claude-headless`, `codex-headless`, `codex-review`,
+  `project-runners`, `project-workspaces`, `herdr-project-placement`,
+  `spawn-project-placement`, `project-build-terminal` and `discover-test-files`: 259 pass,
+  0 fail across 10 files. `discover-test-files` also passes under `LANG=en_US.UTF-8`.
+- The whole consuming E2E, `open/__tests__/project-build-e2e.test.ts`: 309 pass, 0 fail.
+
+Mutations, each applied to the merged tree, measured and reverted:
+
+- Nominated: the same-key refusal in `apply()` (`project-workspaces.ts:160`, ``throw new
+  Error(`project-workspaces: worker operation ${operation.state}; reconcile before retry`)``)
+  replaced by `return existing`. `project-workspaces.test.ts`: 11 fail, 25 pass, including
+  "pending worker survives manager restart and completion merges with an independent
+  operation", "worker operation ID is required and completed reservations survive workspace
+  replacement" and the four "worker operation isolates …" retry cases.
+  `worker-placement.test.ts`: 1 fail, 28 pass ("stable operation key survives a failed view
+  and duplicate receipt cannot erase cleanup identity"). Control
+  `herdr-project-placement.test.ts`: 4 pass, 0 fail. Without the refusal, a retried or
+  lost-reply worker operation allocates a second pane, the defect that stopped d950ef99.
+- `followerOwnsPane` bypassed (`worker-placement.ts:290`): `worker-placement.test.ts` 8
+  fail, 21 pass (the changed- and unknown-identity retire refusals).
+- Awaiting `view.settled()` after `view.release()`: `claude-headless.ts:376` 2 fail, 41 pass
+  ("a stalled view close cannot expire a within-budget result", "a stalled placement
+  neither delays nor changes the result …"); `codex-headless.ts:272` 1 fail, 54 pass;
+  `codex-review.ts:227` 1 fail, 47 pass.
+- Dropping `placement: workerPlacement` from the Claude runner (`open/wiring/project-build.ts:494`):
+  the E2E "… gets a labelled tab in its project workspace …" goes red (1 fail).
+- Decoding the view file instead of the piped bytes (`claude-headless.ts:380`): 25 fail, 18
+  pass in `claude-headless.test.ts`. On this head "placed worker: one CLI process …" stays
+  green under this mutant (the view carries the host banner ahead of the worker's JSON);
+  the red set is the unplaced, recovery and completion cases.
+- A typed `workspace.create` error releasing the scope reservation (the #1285 mutant):
+  `project-workspaces.test.ts` 2 fail, 34 pass ("workspace-create preserves reservation on
+  typed-before / typed-after allocation error"); E2E "a refused placement (typed …)" red;
+  `worker-placement.test.ts` stays green (29 pass).
+
+Carried forward, not fixed here: a view pane from a step that is never re-dispatched after
+a restart is never retired; orphan followers and legacy pending workspace journals still
+need reconciliation. No automatic retry, pruning or lifecycle completion is claimed.
 
 ### Out of scope, still open
 
