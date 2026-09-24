@@ -12,7 +12,7 @@ const SUFFIXES = [
 ]
 
 describe('test-file discovery', () => {
-  test('keeps all twelve patterns, root files, and nested files while excluding dependency and dot directories', () => {
+  test('returns byte-ordered files in C and en_US locales while excluding dependency and dot directories', () => {
     const root = mkdtempSync(join(tmpdir(), 'neutron-discovery-'))
     try {
       const add = (path: string) => {
@@ -34,23 +34,32 @@ describe('test-file discovery', () => {
       add('pkg/node_modules.test.ts') // A file named like a directory is included.
       add('pkg/ordinary.ts')
 
-      const env = { ...process.env }
-      delete env.NEUTRON_TEST_DISCOVER_OVERRIDE
-      const result = spawnSync('bash', ['-c', '. "$1"; neutron_discover_test_files', '_', DISCOVER], {
-        cwd: root,
-        env,
-        encoding: 'utf8',
-      })
-
-      expect(result.status).toBe(0)
-      expect(result.stderr).toBe('')
       const expected = [
         './.visible.test.ts',
         './pkg/.visible.spec.ts',
         './pkg/node_modules.test.ts',
         ...SUFFIXES.flatMap((suffix, i) => [`./root-${i}${suffix}`, `./pkg/nested-${i}${suffix}`]),
       ].sort()
-      expect(result.stdout.trimEnd().split('\n')).toEqual(expected)
+
+      for (const locale of ['en_US.UTF-8', 'C']) {
+        const env: NodeJS.ProcessEnv = { ...process.env, LC_COLLATE: locale }
+        delete env.LC_ALL
+        delete env.NEUTRON_TEST_DISCOVER_OVERRIDE
+        const result = spawnSync('bash', ['-c', '. "$1"; neutron_discover_test_files', '_', DISCOVER], {
+          cwd: root,
+          env,
+          encoding: 'utf8',
+        })
+
+        expect(result.status).toBe(0)
+        expect(result.stderr).toBe('')
+        const files = result.stdout.trimEnd().split('\n')
+        expect(files).toEqual(expected)
+        expect(files).toContain('./.visible.test.ts')
+        expect(files).toContain('./pkg/.visible.spec.ts')
+        expect(files).toContain('./pkg/node_modules.test.ts')
+        expect(files.some((file) => file.includes('/node_modules/') || file.includes('/.hidden/'))).toBe(false)
+      }
     } finally {
       rmSync(root, { recursive: true, force: true })
     }
