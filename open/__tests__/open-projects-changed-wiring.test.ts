@@ -18,9 +18,8 @@
  * onboarding turn, and asserts a `projects_changed` frame carrying the new
  * project arrives on the socket — no reload.
  *
- * No ANTHROPIC_API_KEY is set — the box boots LLM-less; the onboarding engine
- * walks its static phase prompts and the emit wiring does not depend on LLM
- * credentials.
+ * Explicit and ambient Claude credentials are disabled for this fixture, so
+ * the onboarding engine walks its static phase prompts without a live provider.
  */
 
 import type { Server, ServerWebSocket } from 'bun'
@@ -36,6 +35,7 @@ import { ProjectDb } from '@neutronai/persistence/index.ts'
 import { composeProductionGraph } from '@neutronai/gateway/composition.ts'
 import type { AppWsOutbound } from '@neutronai/channels/adapters/app-ws/envelope.ts'
 import { buildOpenGraphComposer } from '../composer.ts'
+import { detectAmbientClaudeAuth } from '../ambient-claude-auth.ts'
 
 const HERE = dirname(fileURLToPath(import.meta.url))
 const LANDING_DIR = join(HERE, '..', '..', 'landing')
@@ -49,6 +49,7 @@ const SAVED_ENV_KEYS = [
   'NEUTRON_ONBOARDING_CHAT_COOKIE_SECRET',
   'ANTHROPIC_API_KEY',
   'CLAUDE_CODE_OAUTH_TOKEN',
+  'NEUTRON_DISABLE_AMBIENT_CLAUDE_AUTH',
   'NOTIFY_SOCKET',
 ] as const
 
@@ -77,6 +78,7 @@ beforeEach(() => {
   process.env['NEUTRON_ONBOARDING_CHAT_COOKIE_SECRET'] = 'open-test-secret-0123456789'
   delete process.env['ANTHROPIC_API_KEY']
   delete process.env['CLAUDE_CODE_OAUTH_TOKEN']
+  process.env['NEUTRON_DISABLE_AMBIENT_CLAUDE_AUTH'] = '1'
   delete process.env['NOTIFY_SOCKET']
 })
 
@@ -166,6 +168,19 @@ async function waitFor(pred: () => boolean, timeoutMs = 8000): Promise<void> {
 }
 
 describe('Open projects_changed live-refresh wiring', () => {
+  test('the fixture excludes ambient auth without disabling the production probe', () => {
+    const credentialPresent = {
+      platform: 'linux' as const,
+      hasKeychainItem: () => false,
+      hasCredentialsFile: () => true,
+    }
+    expect(detectAmbientClaudeAuth(process.env, credentialPresent)).toBe(false)
+    expect(detectAmbientClaudeAuth(
+      { ...process.env, NEUTRON_DISABLE_AMBIENT_CLAUDE_AUTH: undefined },
+      credentialPresent,
+    )).toBe(true)
+  })
+
   test('fans a projects_changed frame after onboarding creates a project', async () => {
     harness = await startHarness()
     const wsUrl = harness.base.replace(/^http/, 'ws')
