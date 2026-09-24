@@ -212,7 +212,7 @@ note_unrun() { UNRUN_RULES="${UNRUN_RULES}${UNRUN_RULES:+, }$1"; }
 
 # Use the same preparation and validator as the focused allowlist self-test.
 source "$HERE/leak-gate-allowlist.sh" || exit 2
-prepare_leak_gate_allowlist
+prepare_leak_gate_allowlist || exit 2
 
 # ── Finding accumulation ──────────────────────────────────────────────────────
 TOTAL_FINDINGS=0; ALLOWLISTED_COUNT=0; SUMMARY=""; MAX_SHOWN_PER_RULE=5

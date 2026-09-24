@@ -1451,6 +1451,23 @@ describe('allowlist audit — an exception must be narrow and live', () => {
     }
   })
 
+  test.each([
+    ['missing function', '# A loadable library without its required function.\n'],
+    ['failed preparation', 'prepare_leak_gate_allowlist() { return 23; }\n'],
+  ])('a loadable validator with %s fails before scanning (exit 2)', (_, library) => {
+    const dir = freshTree()
+    const gate = sandboxGate(dir, '')
+    try {
+      writeFileSync(join(dir, 'node_modules', 'leak-gate', 'leak-gate-allowlist.sh'), library)
+      const { code, out } = runGate(dir, { LEAK_GATE_PII_DENYLIST_B64: DENYLIST }, gate)
+      expect(code).toBe(2)
+      expect(out).not.toContain('leak-gate — scan root:')
+      expect(out).not.toContain('LEAK GATE: SILENT')
+    } finally {
+      rmSync(dir, { recursive: true, force: true })
+    }
+  })
+
   test('a DIRECTORY GLOB is rejected (exit 2)', () => {
     // The concrete regression: `migrations/*` exempted 120 files to cover 4, and
     // pre-exempted every migration added afterwards.
@@ -1525,10 +1542,6 @@ describe('allowlist audit — an exception must be narrow and live', () => {
       encoding: 'utf8',
       env: gateEnv(),
     })
-    expect(out).not.toContain('[allowlist-dirglob]')
-    expect(out).not.toContain('[allowlist-breadth]')
-    expect(out).not.toContain('[allowlist-stale]')
-    expect(out).not.toContain('[allowlist-malformed]')
     expect(out).toBe('')
   })
 
