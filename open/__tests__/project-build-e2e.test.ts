@@ -51,7 +51,7 @@
  */
 import { LIVE_AGENT_TOOL_NAMES } from '@neutronai/gateway/wiring/build-live-agent-turn.ts'
 import { afterEach, expect, spyOn, test } from 'bun:test'
-import { chmod, copyFile, mkdir, mkdtemp, readFile, readdir, realpath, rename, rm, symlink, writeFile } from 'node:fs/promises'
+import { chmod, copyFile, mkdir, mkdtemp, readFile, readdir, realpath, rename, rm, stat, symlink, utimes, writeFile } from 'node:fs/promises'
 import { tmpdir } from 'node:os'
 import { dirname, join } from 'node:path'
 import { fileURLToPath } from 'node:url'
@@ -1784,6 +1784,62 @@ test(`prepared host suite receipt survives reconstruction and handles ${changed}
   if (measured.kind !== 'known') throw Error('expected measured fixture')
   expect(await host.deps.publicationSuite(measured.value)).toMatchObject({ kind: 'known' })
   expect(suites).toBe(changed === 'none' ? 1 : 2)
+  expect(f.world.dispatches).toHaveLength(0)
+}, 120_000)
+
+test('workspace scratch churn permits host receipt reuse while generated content changes require fresh proof', async () => {
+  const f = await fixture({ bunWorkspace: true })
+  await f.prepare()
+  const worktree = f.store.get(f.row.id)!.worktree!
+  const nested = join(worktree, 'app', 'tools')
+  const manifestPath = join(worktree, 'package.json')
+  const manifest = JSON.parse(await readFile(manifestPath, 'utf8'))
+  await writeFile(manifestPath, JSON.stringify({ ...manifest, dependencies: { 'fixture-app': 'workspace:*' } }))
+  await mkdir(nested)
+  await writeFile(join(nested, '.gitignore'), 'scratch-*\ngenerated.js\n')
+  expect((await spawnCapture(['git', 'add', '.'], worktree)).ok).toBe(true)
+  expect((await spawnCapture(['git', 'commit', '-m', 'test: workspace scratch fixture'], worktree)).ok).toBe(true)
+  const generated = join(nested, 'generated.js')
+  await writeFile(generated, 'module.exports = 1')
+  const rewriteGenerated = async (value: number) => {
+    const original = await stat(generated)
+    await writeFile(generated, `module.exports = ${value}`)
+    await utimes(generated, original.atime, original.mtime)
+  }
+  let suites = 0, changeDuringSuite = false
+  const original = f.context.runSuite!
+  f.context.runSuite = async (...args) => {
+    suites++
+    const scratch = await mkdtemp(join(nested, 'scratch-'))
+    await writeFile(join(scratch, 'temporary'), 'temporary test input')
+    const result = await original(...args)
+    await rm(scratch, { recursive: true })
+    if (changeDuringSuite) await rewriteGenerated(3)
+    return result
+  }
+  const observe = async () => {
+    const host = await createProjectBuildHost(await f.prepare())
+    const measured = await host.deps.measure()
+    if (measured.kind !== 'known') throw Error('expected measured workspace fixture')
+    return host.deps.publicationSuite(measured.value)
+  }
+  expect(await observe()).toMatchObject({ kind: 'known', findings: [] })
+  expect(suites).toBe(1)
+  // A reconstructed host must reuse the actual receipt despite scratch churn.
+  expect(await observe()).toMatchObject({ kind: 'known', findings: [] })
+  expect(suites).toBe(1)
+  await rewriteGenerated(2)
+  expect(await observe()).toMatchObject({ kind: 'known', findings: [] })
+  expect(suites).toBe(2)
+  await rewriteGenerated(1)
+  changeDuringSuite = true
+  expect(await observe()).toMatchObject({ kind: 'unknown', detail: 'Suite inputs changed during host observation' })
+  expect(suites).toBe(3)
+  changeDuringSuite = false
+  expect(await observe()).toMatchObject({ kind: 'known', findings: [] })
+  expect(suites).toBe(4)
+  expect(await observe()).toMatchObject({ kind: 'known', findings: [] })
+  expect(suites).toBe(4)
   expect(f.world.dispatches).toHaveLength(0)
 }, 120_000)
 

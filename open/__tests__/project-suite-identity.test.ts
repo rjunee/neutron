@@ -1,5 +1,5 @@
 import { afterEach, expect, test } from 'bun:test'
-import { copyFile, mkdir, mkdtemp, rename, rm, stat, symlink, utimes, writeFile } from 'node:fs/promises'
+import { chmod, copyFile, mkdir, mkdtemp, rename, rm, stat, symlink, utimes, writeFile } from 'node:fs/promises'
 import { join } from 'node:path'
 import { tmpdir } from 'node:os'
 import { projectInstalledTreeIdentity, projectSuiteIdentity } from '../wiring/project-build-dependencies.ts'
@@ -152,4 +152,102 @@ test('native dependency observation follows only validated local link targets an
   await writeFile(join(external, 'code.js'), 'outside')
   await symlink(external, join(workspace, 'external'))
   expect(await projectInstalledTreeIdentity(root)).toBeNull()
+})
+
+async function workspaceFixture() {
+  const f = await fixture()
+  const workspace = join(f.root, 'pkg')
+  const nested = join(workspace, 'tools')
+  await mkdir(nested, { recursive: true })
+  await mkdir(join(f.root, 'node_modules'))
+  await writeFile(join(workspace, 'package.json'), '{"name":"local","main":"index.js"}')
+  await writeFile(join(workspace, 'index.js'), 'module.exports = 1')
+  await writeFile(join(nested, '.gitignore'), 'generated.js\nscratch-*\n')
+  await symlink(workspace, join(f.root, 'node_modules', 'local'))
+  await f.git('add', '.')
+  await f.git('commit', '-qm', 'workspace')
+  return { ...f, workspace, nested }
+}
+
+test('workspace directory scratch churn preserves suite identity, including nested directory size and timestamps', async () => {
+  const { root, workspace, nested } = await workspaceFixture()
+  const before = await projectSuiteIdentity(root)
+  expect(before).toMatch(/^[a-f0-9]{64}$/)
+  const original = await stat(nested)
+  for (let index = 0; index < 128; index++) await mkdir(join(nested, `scratch-${index}`))
+  for (let index = 0; index < 128; index++) await rm(join(nested, `scratch-${index}`), { recursive: true })
+  await utimes(nested, original.atime, new Date(original.mtimeMs + 5000))
+  expect((await stat(nested)).mtimeMs).not.toBe(original.mtimeMs)
+  expect(await projectSuiteIdentity(root)).toBe(before)
+  // Exercise size canonicalization independently of the filesystem's directory
+  // allocation policy; retain a real, valid native observation for every field.
+  const changedSize = Object.assign(async (...args: Parameters<typeof spawnCapture>) => {
+    const result = await spawnCapture(...args)
+    const fields = result.stdout.split('\0')
+    for (let index = 0; index + 8 < fields.length; index += 9) {
+      if (fields[index] === nested) fields[index + 4] = String(Number(fields[index + 4]) + 4096)
+    }
+    return { ...result, stdout: fields.join('\0') }
+  }, { writesDiffOutput: true as const })
+  expect(await projectInstalledTreeIdentity(root, changedSize)).toBe(await projectInstalledTreeIdentity(root))
+  await chmod(workspace, 0o700)
+  expect(await projectSuiteIdentity(root)).not.toBe(before)
+})
+
+for (const target of ['ignored generated file', 'local symlink target', 'deep installed dependency'] as const) {
+  test(`workspace observation detects same-size ${target} rewrite with restored mtime`, async () => {
+    const { root, git, nested } = await workspaceFixture()
+    let input = join(nested, 'generated.js')
+    if (target === 'local symlink target') {
+      input = join(root, 'generated-target.js')
+      await writeFile(join(root, '.gitignore'), 'node_modules/\ngenerated-target.js\n')
+      await symlink(input, join(nested, 'local.js'))
+      await git('add', '.')
+      await git('commit', '-qm', 'local link')
+    }
+    if (target === 'deep installed dependency') {
+      const dependency = join(nested, 'node_modules', 'deep')
+      await mkdir(dependency, { recursive: true })
+      input = join(dependency, 'implementation.js')
+    }
+    await writeFile(input, 'module.exports = 1')
+    const before = await projectSuiteIdentity(root)
+    expect(before).toMatch(/^[a-f0-9]{64}$/)
+    const original = await stat(input)
+    await writeFile(input, 'module.exports = 2')
+    await utimes(input, original.atime, original.mtime)
+    expect((await stat(input)).size).toBe(original.size)
+    const after = await projectSuiteIdentity(root)
+    expect(after).toMatch(/^[a-f0-9]{64}$/)
+    expect(after).not.toBe(before)
+  })
+}
+
+test('workspace observation refuses a tracked external symlink even with clean git status', async () => {
+  const { root, git, nested } = await workspaceFixture()
+  const external = await mkdtemp(join(tmpdir(), 'suite-external-'))
+  roots.push(external)
+  await writeFile(join(external, 'code.js'), 'outside')
+  await symlink(join(external, 'code.js'), join(nested, 'external.js'))
+  await git('add', '.')
+  await git('commit', '-qm', 'external link')
+  expect((await spawnCapture(['git', 'status', '--porcelain'], root)).stdout).toBe('')
+  expect(await projectSuiteIdentity(root)).toBeNull()
+  await rm(join(nested, 'external.js'))
+  await git('add', '.')
+  await git('commit', '-qm', 'remove external link')
+  expect(await projectSuiteIdentity(root)).toMatch(/^[a-f0-9]{64}$/)
+})
+
+test('workspace observation retains directory timestamps inside deeply nested node_modules', async () => {
+  const { root, nested } = await workspaceFixture()
+  const dependency = join(nested, 'node_modules', 'deep')
+  await mkdir(dependency, { recursive: true })
+  const before = await projectSuiteIdentity(root)
+  expect(before).toMatch(/^[a-f0-9]{64}$/)
+  const original = await stat(dependency)
+  await utimes(dependency, original.atime, new Date(original.mtimeMs + 5000))
+  const after = await projectSuiteIdentity(root)
+  expect(after).toMatch(/^[a-f0-9]{64}$/)
+  expect(after).not.toBe(before)
 })
