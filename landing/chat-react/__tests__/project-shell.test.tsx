@@ -82,6 +82,69 @@ const GLOBAL_TABS = [
   { key: 'admin', label: 'Admin', scope: 'global', source: 'builtin', order: 0, mount: { kind: 'builtin', target: 'admin' } },
 ]
 
+describe('ProjectShell native Codex controls', () => {
+  for (const projectId of [null, 'general']) {
+    it(`reaches the native owner from the deployed shell for ${JSON.stringify(projectId)}`, async () => {
+      const { createRoot } = await import('react-dom/client')
+      const { act } = await import('react')
+      const { AssistantRuntimeProvider } = await import('@assistant-ui/react')
+      const { InMemoryStore, WebChatSession } = await import('@neutronai/chat-core')
+      const { NeutronChatController } = await import('../controller.ts')
+      const { useNeutronChat } = await import('../useNeutronChat.ts')
+      const { useAttachmentDraft } = await import('../useAttachmentDraft.ts')
+      const { ProjectShell } = await import('../ProjectShell.tsx')
+      const scope = projectId ?? '~general'
+      const owner = { projectId, threadId: 'native-thread', bindingRevision: 'binding', generation: 1,
+        epoch: 2, turnId: 'native-turn', status: 'busy', pending: [] }
+      const calls: { url: string; init?: RequestInit }[] = []
+      const fetchImpl = async (url: string, init?: RequestInit): Promise<Response> => {
+        calls.push({ url, ...(init ? { init } : {}) })
+        const json = (value: unknown) => new Response(JSON.stringify(value), { headers: { 'content-type': 'application/json' } })
+        if (url.endsWith('/repl-model')) return json({ harness: 'codex', sessionId: 'model-session', currentModel: 'deep',
+          availableModels: [], status: 'busy' })
+        if (url.endsWith('/repl-control')) return json(owner)
+        if (url.endsWith('/tabs')) return json({ ok: true, scope: projectId === null ? 'global' : 'project',
+          project_id: projectId, tabs: projectId === null ? GLOBAL_TABS : RESOLVED_TABS })
+        return new Response('not found', { status: 404 })
+      }
+      const controller = new NeutronChatController({ projectId,
+        createSession: sinks => new WebChatSession({ url: 'wss://t/ws/app/chat', topic_id: TOPIC, store: new InMemoryStore(),
+          createSocket: () => ({ onopen: null, onmessage: null, onclose: null, onerror: null, send() {}, close() {} }) as never,
+          onChange: sinks.onChange, onStatus: sinks.onStatus, onFrame: sinks.onFrame }),
+      })
+      const config = { wsUrl: 'wss://t/ws/app/chat', topicId: TOPIC, userId: 'sam', projectId,
+        projects: [{ id: 'general', label: 'A project called general' }], origin: 'https://test.example',
+        deviceId: 'device-test', token: 'owner-token' }
+      function Harness(): React.JSX.Element {
+        const draft = useAttachmentDraft({ token: config.token })
+        const { runtime, vm } = useNeutronChat(controller, config.origin, draft)
+        return <AssistantRuntimeProvider runtime={runtime}>
+          <ProjectShell vm={vm} controller={controller} config={config} draft={draft} fetchImpl={fetchImpl} />
+        </AssistantRuntimeProvider>
+      }
+      const host = document.createElement('div')
+      document.body.appendChild(host)
+      const root = createRoot(host)
+      try {
+        await act(async () => { root.render(<Harness />); await tick(); await tick() })
+        await act(async () => { await tick(); await tick() })
+        const interrupt = host.querySelector<HTMLButtonElement>('[aria-label="Interrupt Codex turn"]')
+        expect(interrupt).not.toBeNull()
+        expect(calls.some(call => call.url === `https://test.example/api/app/projects/${scope}/repl-control`)).toBe(true)
+        await act(async () => { interrupt!.click(); await tick(); await tick() })
+        const posts = calls.filter(call => call.init?.method === 'POST' && call.url.endsWith('/repl-control'))
+        expect(posts).toHaveLength(1)
+        expect(posts[0]!.url).toBe(`https://test.example/api/app/projects/${scope}/repl-control`)
+        expect(JSON.parse(String(posts[0]!.init?.body))).toEqual({ projectId, threadId: 'native-thread',
+          bindingRevision: 'binding', generation: 1, epoch: 2, turnId: 'native-turn', action: 'interrupt' })
+      } finally {
+        await act(async () => { root.unmount() })
+        host.remove()
+      }
+    })
+  }
+})
+
 describe('ProjectShell render (happy-dom)', () => {
   it('renders the resolved tab set, shows ChatApp on Chat, and switches tabs', async () => {
     const { createRoot } = await import('react-dom/client')
@@ -972,9 +1035,9 @@ describe('ProjectShell desktop Work slide-out (≥1024px)', () => {
     // GATE the tab resolver so the shell sits in the `resolving` (tabsScope ===
     // null) window deterministically — the pane must NOT mount there even though
     // the outgoing `tabs` still carries a Work descriptor.
-    let releaseTabs: () => void = () => {}
+    let releaseResolver: () => void = () => {}
     const tabsPending = new Promise<void>((res) => {
-      releaseTabs = res
+      releaseResolver = res
     })
     const boardUrls: string[] = []
     const fetchImpl = async (url: string): Promise<Response> => {
@@ -1047,7 +1110,7 @@ describe('ProjectShell desktop Work slide-out (≥1024px)', () => {
 
     // Release the resolver → still mounted; no change of scope.
     await act(async () => {
-      releaseTabs()
+      releaseResolver()
       await tick()
       await tick()
     })
@@ -1073,7 +1136,7 @@ describe('ProjectShell desktop Work slide-out (≥1024px)', () => {
 
   it('W7 — desktop never shows BOTH a seated Work tab AND the pane, even during a scope-switch resolving window (Codex P1)', async () => {
     // Codex P1 repro: pane eligibility (`paneEligible = isDesktop`) mounts the pane
-    // immediately, but the seated Work TAB is dropped from `visibleTabs` on the
+    // immediately, but the seated Work tab is removed from the displayed set on the
     // SAME viewport gate — so during a switch, while the new scope's tabs are still
     // pending (`tabsScope === null`, stale outgoing `tabs` still carrying Work), the
     // seated Work tab must NOT reappear alongside the mounted pane. One Work surface

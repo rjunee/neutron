@@ -2,6 +2,7 @@
 export interface ReplModelState {
   harness: 'claude-code' | 'codex'
   sessionId: string
+  conversationId?: string
   currentModel: string | null
   availableModels: { id: string; label: string }[]
   status: 'ready' | 'busy' | 'unsupported' | 'unknown'
@@ -23,6 +24,7 @@ function decodeState(raw: unknown): ReplModelState {
   if (
     (r['harness'] !== 'claude-code' && r['harness'] !== 'codex') ||
     typeof r['sessionId'] !== 'string' ||
+    (r['conversationId'] !== undefined && (typeof r['conversationId'] !== 'string' || !r['conversationId'])) ||
     (!r['sessionId'] && (r['status'] === 'ready' || r['status'] === 'busy')) ||
     (r['currentModel'] !== null && typeof r['currentModel'] !== 'string') ||
     !Array.isArray(r['availableModels']) ||

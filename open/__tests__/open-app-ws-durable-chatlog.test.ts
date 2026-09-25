@@ -33,7 +33,7 @@
  */
 
 import { afterEach, beforeEach, describe, expect, spyOn, test } from 'bun:test'
-import { mkdtempSync, rmSync } from 'node:fs'
+import { mkdirSync, mkdtempSync, rmSync } from 'node:fs'
 import { tmpdir } from 'node:os'
 import { dirname, join } from 'node:path'
 import { fileURLToPath } from 'node:url'
@@ -45,6 +45,12 @@ import { buildOpenGraphComposer } from '../composer.ts'
 import * as ambientAuth from '../ambient-claude-auth.ts'
 import { CodexOwnerBindings } from '../wiring/codex-owner-binding.ts'
 import { CodexOwnerControls } from '../wiring/codex-owner-controls.ts'
+import * as durableOwner from '../wiring/codex-durable-owner.ts'
+import { restrictedOwnerFixture } from './fixtures/codex-owner-review.ts'
+import { attachCodexOwner } from '@neutronai/runtime/adapters/codex-cli/persistent/project-control-bootstrap.ts'
+import { readOwnerHelperDescriptor } from '@neutronai/runtime/adapters/codex-cli/persistent/project-owner-helper-protocol.ts'
+import { CodexCredentialService } from '@neutronai/trident/codex-credential.ts'
+import { WebReplModelClient } from '@neutronai/landing/chat-react/repl-model-client.ts'
 import { SqliteProjectSettingsStore } from '@neutronai/gateway/projects/sqlite-store.ts'
 import type { AgentSpec, Substrate } from '@neutronai/runtime/substrate.ts'
 import type { SessionHandle } from '@neutronai/runtime/session-handle.ts'
@@ -185,6 +191,61 @@ const framesOfType = (frames: Array<Record<string, unknown>>, type: string): Arr
   frames.filter((f) => f['type'] === type)
 
 describe('Open app-ws durable chat-log + typing (real instance)', () => {
+  test('browser client consumes native model epoch acknowledgements through the composed Open route', async () => {
+    const projectId = 'native-project'
+    const cwd = join(tmpDir, 'Projects', projectId)
+    mkdirSync(cwd, { recursive: true })
+    // Only the subscription lookup and native process launch are fixtures. The
+    // production owner binding, controls, helper transport and HTTP route execute.
+    const native = await restrictedOwnerFixture({ projectId, cwd, async execute() {} })
+    const credential = spyOn(CodexCredentialService.prototype, 'resolveProjectOwnerCredential').mockImplementation((_owner, id) => {
+      expect(id).toBe(projectId)
+      return { codexHome: native.codexHome, credentialIdentity: 'fixture' }
+    })
+    const launch = spyOn(durableOwner, 'openDurableCodexOwner').mockImplementation(async options => {
+      expect(options.projectId).toBe(projectId)
+      expect(options.cwd).toBe(cwd)
+      const descriptorPath = join(native.codexHome, '..', 'helper.json')
+      return attachCodexOwner({ descriptorPath, expected: readOwnerHelperDescriptor(descriptorPath).facts })
+    })
+    let socket: OpenSocket | undefined
+    try {
+      harness = await startHarness({ nativeProject: true })
+      const client = new WebReplModelClient({ base_url: harness.base, token: 'dev:owner' })
+      await expect(client.current(projectId)).rejects.toThrow()
+      expect(launch).not.toHaveBeenCalled()
+      socket = await openSocket(harness.base, `token=dev:owner&platform=web&device_id=native-model&project_id=${projectId}`)
+      await waitFor(() => framesOfType(socket!.frames, 'session_ready').length > 0)
+      socket.ws.send(JSON.stringify({ v: 1, type: 'user_message', body: 'start native model conversation', client_msg_id: 'native-model-start' }))
+      await waitFor(() => framesOfType(socket!.frames, 'agent_message').some(frame => String(frame.body).includes('dispatch complete')))
+      const before = await client.current(projectId)
+      expect(before).toMatchObject({ harness: 'codex', currentModel: 'small', status: 'ready' })
+      expect(before.conversationId).toBeTruthy()
+      const after = await client.switch(projectId, 'large', before.sessionId)
+      expect(after.currentModel).toBe('large')
+      expect(after.conversationId).toBe(before.conversationId)
+      expect(after.sessionId).not.toBe(before.sessionId)
+      const switches = () => native.native.filter(message => message.method === 'thread/settings/update')
+      expect(switches()).toHaveLength(1)
+      await expect(client.switch(projectId, 'small', before.sessionId)).rejects.toThrow('Refresh before switching')
+      const unauthenticated = new WebReplModelClient({ base_url: harness.base, token: 'invalid' })
+      await expect(unauthenticated.switch(projectId, 'small', after.sessionId)).rejects.toThrow()
+      await expect(client.switch('missing-project', 'small', after.sessionId)).rejects.toThrow()
+      expect(switches()).toHaveLength(1)
+      const second = await client.switch(projectId, 'small', after.sessionId)
+      expect(second.currentModel).toBe('small')
+      expect(second.conversationId).toBe(before.conversationId)
+      expect(second.sessionId).not.toBe(after.sessionId)
+      expect(switches()).toHaveLength(2)
+      expect(launch).toHaveBeenCalledTimes(1)
+    } finally {
+      socket?.close()
+      if (harness) { await harness.close(); harness = null }
+      launch.mockRestore(); credential.mockRestore()
+      await native.close()
+    }
+  }, 30_000)
+
   test('composed native model and turn-control routes require owner scope and share the selected project binding', async () => {
     const calls: unknown[][] = []
     const identity = { projectId: 'native-project', threadId: 'native-thread', bindingRevision: 'revision', generation: 1, epoch: 2, turnId: 'turn' }
