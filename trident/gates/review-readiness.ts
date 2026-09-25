@@ -50,8 +50,8 @@ export function classifyReviewReadiness(snapshot: BuildSnapshot, observation: Re
     if (matching.length === 0 || matching.some(row => row.state === 'running')) return { kind: 'pending', detail: `Required check ${name} has not run and settled` }
   }
   if (required.length === 0 && (ran.length === 0 || ran.some(row => row.state === 'running'))) return { kind: 'pending', detail: 'At least one check must run and all participating checks must settle' }
-  const participating = required.length ? ran.filter(row => required.includes(row.name)) : ran
-  const failed = [...new Set(participating.filter(row => row.state === 'failed').map(row => row.name))]
+  // Required names govern waiting; every observed failure supplies G055 evidence.
+  const failed = [...new Set(ran.filter(row => row.state === 'failed').map(row => row.name))]
   return { kind: failed.length ? 'failed' : 'passed', failed }
 }
 

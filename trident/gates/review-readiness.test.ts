@@ -33,6 +33,15 @@ test('G052 unnamed checks cannot be empty, skipped-only or unsettled', () => {
   for (const checks of [[], [{ name: 'test', state: 'skipped' }], [{ name: 'test', state: 'passed' }, { name: 'other', state: 'running' }]] as Known['checks'][]) expect(classify({ configuration, checks })).toMatchObject({ kind: 'pending' })
   expect(classify({ configuration })).toMatchObject({ kind: 'passed' })
 })
+test('G055 settled optional failures remain visible alongside required green and optional running', () => {
+  expect(classify({ checks: [
+    { name: 'test', state: 'passed' },
+    { name: 'CodeQL', state: 'failed' },
+    { name: 'lint', state: 'failed' },
+    { name: 'CodeQL', state: 'failed' },
+    { name: 'other', state: 'running' },
+  ] })).toEqual({ kind: 'failed', failed: ['CodeQL', 'lint'] })
+})
 test('G053 readiness spends 900000 ms in 30000 ms waits without review', async () => {
   const c = clock(); let probes = 0
   const result = await awaitReviewReadiness({ observe: async () => { probes++; return observation({ checks: [] }) } }, snapshot, new AbortController().signal, c.time)

@@ -313,7 +313,7 @@ test('project composition binds review source to admitted run and worktree', asy
 // These exercise the acquisition adapters through the certified gate vocabulary.
 import { createProjectObservationSources } from './project-observation-sources.ts'
 import { classifyReviewReadiness } from './gates/review-readiness.ts'
-import { assessReviewCi } from './gates/review-ci.ts'
+import { applyReviewCi, assessReviewCi } from './gates/review-ci.ts'
 import { assessReviewSuite } from './gates/review-suite.ts'
 
 const observedHead = 'b'.repeat(40)
@@ -389,6 +389,49 @@ test('observation CI preserves unknown, pending and named actionable red without
   expect(await assess()).toMatchObject({ kind: 'unknown', detail: expect.stringContaining('Required check test has not run and settled') })
   f.options.ci.required = async () => ({ kind: 'unknown', reason: 'denied' })
   expect(await assess()).toMatchObject({ kind: 'unknown', detail: expect.stringContaining('denied') })
+})
+
+for (const name of ['CodeQL', 'lint', 'test']) {
+  test(`observation CI G055 makes settled ${name} failure actionable with optional pending`, async () => {
+    const f = observationFixture()
+    f.raw.rows = [
+      { name: 'test', status: 'COMPLETED', conclusion: 'SUCCESS' },
+      { name, status: 'COMPLETED', conclusion: 'FAILURE' },
+      { context: 'optional', state: 'PENDING' },
+    ]
+    const ci = await assessReviewCi(f.sources.reviewCi, observedSnapshot, 'a'.repeat(40), 'run')
+    expect(ci).toMatchObject({ kind: 'known', findings: [{ title: `CI FAILING: ${name}`, advisory: false }] })
+    expect(applyReviewCi({ kind: 'approve' }, ci)).toMatchObject({ kind: 'fix', findings: [expect.stringContaining(`CI FAILING: ${name}`)] })
+  })
+}
+
+test('observation CI G055 optional running, skipped and green checks preserve approval', async () => {
+  const f = observationFixture()
+  f.raw.rows = [
+    { name: 'test', status: 'COMPLETED', conclusion: 'SUCCESS' },
+    { context: 'CodeQL', state: 'PENDING' },
+    { name: 'lint', status: 'COMPLETED', conclusion: 'SKIPPED' },
+    { name: 'other', status: 'COMPLETED', conclusion: 'SUCCESS' },
+  ]
+  const ci = await assessReviewCi(f.sources.reviewCi, observedSnapshot, 'a'.repeat(40), 'run')
+  expect(ci).toEqual({ kind: 'known', findings: [] })
+  expect(applyReviewCi({ kind: 'approve' }, ci)).toEqual({ kind: 'approve' })
+})
+
+test('observation CI G056 unknown or incomplete evidence cannot approve or fabricate actionable red', async () => {
+  for (const failure of ['configuration', 'unreadable', 'incomplete'] as const) {
+    const f = observationFixture()
+    f.raw.rows = [
+      { name: 'test', status: 'COMPLETED', conclusion: 'SUCCESS' },
+      { name: 'CodeQL', status: 'COMPLETED', conclusion: 'FAILURE' },
+    ]
+    if (failure === 'configuration') f.options.ci.required = async () => ({ kind: 'unknown', reason: 'denied' })
+    if (failure === 'unreadable') f.options.ci.readiness = async () => ({ unreadable: 'offline' })
+    if (failure === 'incomplete') f.raw.checksComplete = false
+    const ci = await assessReviewCi(f.sources.reviewCi, observedSnapshot, 'a'.repeat(40), 'run')
+    expect(ci.kind, failure).toBe('unknown')
+    expect(applyReviewCi({ kind: 'approve' }, ci).kind, failure).toBe('unknown')
+  }
 })
 
 test('observation CI re-observes pending readiness and preserves terminal classifications', async () => {
