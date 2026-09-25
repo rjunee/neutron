@@ -25,6 +25,7 @@ import {
 } from './build-workspace.ts'
 import { spawnCapture, type HostCommandResult } from './git-mode.ts'
 import { TridentRunStore } from './store.ts'
+import { fixtureDispatchAdmission } from './__tests__/dispatch-admission-fixture.ts'
 
 let home: string
 beforeEach(() => {
@@ -190,6 +191,7 @@ describe('dispatchBoardBoundBuild resolves a per-project git workspace', () => {
       { board_item_id: item.id, task: 'build the export' },
       {
         store,
+        projectAdmission: fixtureDispatchAdmission(db),
         board,
         project_slug: 'litewal',
         // The owner HOME base — NO pre-existing code repo for this project.
@@ -215,6 +217,7 @@ describe('dispatchBoardBoundBuild resolves a per-project git workspace', () => {
     const b = await board.create('beta', { title: 'wire the import button to the new CSV endpoint with tests' })
     const base = {
       store,
+      projectAdmission: fixtureDispatchAdmission(db),
       board,
       repo_path: home,
       resolveMergeMode: async () => 'local' as const,

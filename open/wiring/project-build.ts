@@ -5,7 +5,7 @@ import { mkdir, readFile, writeFile, lstat, open } from 'node:fs/promises'
 import { constants } from 'node:fs'
 import { join, resolve } from 'node:path'
 import { createHash } from 'node:crypto'
-import { createProjectRunners, type ProjectTrailerDecoder, type ProjectActingTurn } from '@neutronai/runtime/workers/project-runners.ts'
+import { createProjectRunners, decodeProjectTrailer, type ProjectTrailerDecoder, type ProjectActingTurn } from '@neutronai/runtime/workers/project-runners.ts'
 import { createClaudeActingTurn } from '@neutronai/runtime/workers/claude-acting-turn.ts'
 import { observeClaudeChildUsage } from '@neutronai/runtime/workers/claude-child-observation.ts'
 import { sessionJsonlPath } from '@neutronai/runtime/adapters/claude-code/persistent/jsonl-resumability.ts'
@@ -16,9 +16,11 @@ import { reconcileStoppedTrailerReservations } from '@neutronai/runtime/workers/
 import { PROJECT_REPL_TOOL_DEFS } from '@neutronai/gateway/wiring/build-live-agent-turn.ts'
 import type { CodexOwnerBindings } from './codex-owner-binding.ts'
 import { codexBuildResultTransport } from './codex-build-result.ts'
-import { pool, supervisedBySessionKey } from '@neutronai/runtime/adapters/claude-code/persistent/pool-state.ts'
+import { pool } from '@neutronai/runtime/adapters/claude-code/persistent/pool-state.ts'
+import { liveProjectSessions } from '@neutronai/runtime/adapters/claude-code/persistent/live-project-sessions.ts'
 import { mergeEnv } from '@neutronai/runtime/adapters/claude-code/persistent/repl-session.ts'
-import type { PersistentReplSubstrateOptions } from '@neutronai/runtime/adapters/claude-code/persistent/types.ts'
+import type { NativeChildAdmission } from '@neutronai/gateway/project-admission.ts'
+import { createLogger } from '@neutronai/logger'
 import type { Provider } from '@neutronai/runtime/provider.ts'
 import type { ProviderSelectionSource } from '@neutronai/runtime/adapters/select-substrate.ts'
 import type { ProjectBuildHostOptions } from '@neutronai/trident/project-build-host.ts'
@@ -97,19 +99,13 @@ async function workerCredentialIdentity(provider: Provider, env: NodeJS.ProcessE
 // Match the conversational prewarm allowance; a stuck prewarm cannot clear this timer.
 export const PROJECT_SESSION_ACQUIRE_TIMEOUT_MS = 35_000
 
-/**
- * The live `cc-agent-*` supervised sessions scoped to one project id.
- *
- * ONE reader, called twice by the acting turn — before the spawn and after it —
- * because the second call is the ONLY evidence a spawn produced anything (see the
- * comment at its second call site). Extracted so the two reads cannot drift: they
- * are the same question asked at two times, and a filter that differed between them
- * would make "it appeared" and "I looked differently" indistinguishable.
- */
-function liveProjectSessions(projectId: string): Array<[string, PersistentReplSubstrateOptions]> {
-  return [...supervisedBySessionKey].filter(([, options]) =>
-    options.project_id === projectId && options.substrate_instance_id.startsWith('cc-agent-'))
-}
+const log = createLogger('project-build')
+
+// `liveProjectSessions` — the live `cc-agent-*` supervised sessions scoped to one
+// project id — is ONE reader, called twice by the acting turn: before the spawn and
+// after it, because the second call is the ONLY evidence a spawn produced anything
+// (see the comment at its second call site). It lives in the runtime
+// (`live-project-sessions.ts`) so the liveness census asks the very same question.
 
 export interface ProjectBuildContext {
   /** Host filesystem measurement at the actual dependency-install boundary. */
@@ -129,6 +125,12 @@ export interface ProjectBuildContext {
   providerSource: ProviderSelectionSource
   env: NodeJS.ProcessEnv
   spawnProjectSession: (projectId: string) => Promise<void>
+  /**
+   * #1237 — the lease every NATIVE CHILD of this run's project REPL holds. REQUIRED:
+   * an unwired gate is a composition bug, not open admission. The acting turn admits
+   * before it resolves or spawns any REPL; a fenced or unknown scope refuses the step.
+   */
+  nativeChildAdmission: NativeChildAdmission
   /** The same host-owned resolver consumed by owner chat. Never creates a build session. */
   codexOwnerBindings?: Pick<CodexOwnerBindings, 'actingTurn' | 'guardBuildRunner'> & Partial<Pick<CodexOwnerBindings, 'prepareReview'>>
   /** Where this dispatch's CROSS-PROVIDER bounded workers (Claude headless, the Codex
@@ -389,6 +391,80 @@ export async function prepareProjectBuild(input: InnerLoopInput, context: Projec
   const workerPlacement = createWorkerPlacement(context.workerTerminal?.host
     ? { host: context.workerTerminal.host, scope: context.workerTerminal.scope }
     : { host: null, unavailable: 'herdr-unconfigured' })
+  // The same-provider native-child step, run only AFTER its lease was admitted
+  // (see the acting turn below). Resolves or spawns the project REPL and hands
+  // the step to it as a native child.
+  const nativeChildTurn = async (turn: Parameters<ProjectActingTurn>[0]): ReturnType<ProjectActingTurn> => {
+    let candidates = liveProjectSessions(context.projectId)
+    // MISSING AND AMBIGUOUS ARE NOT ONE FACT (#1085). Both ended here as the
+    // single string "Project conversation session is missing or ambiguous", and
+    // that string is the ONLY thing an operator gets: it travels out through
+    // `runtime/workers/project-runners.ts:145` as the run's uncertainty detail.
+    // The two call for opposite acts — none means "start one", several means
+    // "something is spawning twice under one project id" — and a reader could not
+    // tell which had happened, on the very path that goes dark when an instance
+    // loses its project REPL. Zero is not handled here at all: it is the case the
+    // spawn below EXISTS for, and returning on it would disable the recovery.
+    if (candidates.length > 1) return { kind: 'unknown', detail: `Project conversation session is AMBIGUOUS: ${candidates.length} live cc-agent sessions carry project id "${context.projectId}"` }
+    if (candidates.length === 1) {
+      const [, options] = candidates[0]!
+      if (options.skip_permissions !== true || options.restricted || options.permissions) return { kind: 'refused', reason: 'capability-unsupported', detail: 'Project launch grants cannot authorize bounded build work' }
+    }
+    const candidatePending = candidates.length === 1 ? pool.get(candidates[0]![0]) : undefined
+    const candidateSession = candidatePending !== undefined && Bun.peek.status(candidatePending) === 'fulfilled'
+      ? await candidatePending
+      : undefined
+    if (candidateSession === undefined || candidateSession.hasChildExited()) {
+      // WHY WE ARE SPAWNING, captured BEFORE the attempt, so the refusal below can
+      // say whether the instance had no project REPL at all or had one whose child
+      // had gone. #1085 is the first shape ("nothing respawned it"); they are not
+      // interchangeable and the old wording covered both with neither.
+      const had = candidates.length === 0 ? 'none existed' : 'the one that existed had a dead child'
+      let timer: ReturnType<typeof setTimeout> | undefined
+      try {
+        const expired = new Promise<true>(resolve => {
+          timer = setTimeout(() => resolve(true), PROJECT_SESSION_ACQUIRE_TIMEOUT_MS)
+        })
+        const timedOut = await Promise.race([
+          context.spawnProjectSession(context.projectId).then(() => false), expired,
+        ])
+        if (timedOut) return { kind: 'unknown', detail: `Project conversation session acquisition timed out after ${PROJECT_SESSION_ACQUIRE_TIMEOUT_MS}ms (${had})` }
+      }
+      catch (error) { return { kind: 'unknown', detail: `Project conversation session could not be started (${had}): ${error instanceof Error ? error.message : String(error)}` } }
+      finally { clearTimeout(timer) }
+      // THE RE-READ IS THE ONLY EVIDENCE THE SPAWN WORKED, and that is not a
+      // belt-and-braces re-check — it is the sole one. `spawnProjectSession`
+      // (`open/composer.ts`) awaits `prewarmSubstrate`, which swallows every error
+      // and NEVER rejects (`open/composer.ts` `prewarmSubstrate`: the catch emits a
+      // journal row and the promise still resolves). So the call resolving says
+      // nothing whatsoever about whether a REPL now exists; only the registry does.
+      // Any design that "prewarms a session and reports success" through this seam
+      // reports a success it has not observed.
+      candidates = liveProjectSessions(context.projectId)
+      if (candidates.length === 0) return { kind: 'unknown', detail: `Project conversation session was NOT created: the spawn for project id "${context.projectId}" returned without error (${had}) and no live cc-agent session exists for it` }
+    }
+    if (candidates.length !== 1) return { kind: 'unknown', detail: `Project conversation session is AMBIGUOUS after a spawn: ${candidates.length} live cc-agent sessions carry project id "${context.projectId}"` }
+    const [key, options] = candidates[0]!
+    const pending = pool.get(key)
+    if (!pending || Bun.peek.status(pending) !== 'fulfilled') return { kind: 'unknown', detail: 'Project conversation is not ready' }
+    const session = await pending
+    if (!session || session.hasChildExited()) return { kind: 'unknown', detail: 'Project conversation child is unavailable' }
+    // Restricted launches do not attest the edit/run grants required by this bridge.
+    if (options.skip_permissions !== true || options.restricted || options.permissions) return { kind: 'refused', reason: 'capability-unsupported', detail: 'Project launch grants cannot authorize bounded build work' }
+    const transcript = sessionJsonlPath(session.sessionId, session.cwd, resolveTranscriptProjectsDir(options))
+    const observer = JSON.stringify({ request: turn.request, session: session.sessionId,
+      directory: join(transcript.slice(0, -'.jsonl'.length), 'subagents') })
+    try { await writeFile(observerPath(turn.request.step_id), observer, { flag: 'wx', mode: 0o600 }) }
+    catch (error) {
+      if ((error as NodeJS.ErrnoException).code !== 'EEXIST' || await readFile(observerPath(turn.request.step_id), 'utf8') !== observer) {
+        // Observer binding cannot reroute or block paid work; its absence stays
+        // explicit unknown telemetry rather than selecting a different session.
+        await accounting.recordEvent('attempt-observer-binding-unavailable', { run_id: run.id, step_id: turn.request.step_id })
+      }
+    }
+    return createClaudeActingTurn({ project_id: context.projectId, topic_id: topic, session, projects_dir: resolveTranscriptProjectsDir(options),
+      grants: { tools: 'edit-and-run', writable: true, network: true, roots: options.extra_dirs ?? [] } })(turn)
+  }
   const substrate = await createProjectRunners({
     conversation: { project_id: context.projectId, topic_id: topic, provider: context.provider,
       // THE SURFACE MUST MATCH THE SESSION'S, OR THE REUSE GUARD RESPAWNS IT.
@@ -408,75 +484,30 @@ export async function prepareProjectBuild(input: InnerLoopInput, context: Projec
         return context.codexOwnerBindings.actingTurn(context.projectId, topic, context.projectDir, [run.worktree])(turn)
       }
       if (context.provider !== 'anthropic') return { kind: 'refused', reason: 'capability-unsupported', detail: `No live acting-turn binding for ${context.provider} selected at ${context.providerSource} level` }
-      let candidates = liveProjectSessions(context.projectId)
-      // MISSING AND AMBIGUOUS ARE NOT ONE FACT (#1085). Both ended here as the
-      // single string "Project conversation session is missing or ambiguous", and
-      // that string is the ONLY thing an operator gets: it travels out through
-      // `runtime/workers/project-runners.ts:145` as the run's uncertainty detail.
-      // The two call for opposite acts — none means "start one", several means
-      // "something is spawning twice under one project id" — and a reader could not
-      // tell which had happened, on the very path that goes dark when an instance
-      // loses its project REPL. Zero is not handled here at all: it is the case the
-      // spawn below EXISTS for, and returning on it would disable the recovery.
-      if (candidates.length > 1) return { kind: 'unknown', detail: `Project conversation session is AMBIGUOUS: ${candidates.length} live cc-agent sessions carry project id "${context.projectId}"` }
-      if (candidates.length === 1) {
-        const [, options] = candidates[0]!
-        if (options.skip_permissions !== true || options.restricted || options.permissions) return { kind: 'refused', reason: 'capability-unsupported', detail: 'Project launch grants cannot authorize bounded build work' }
+      // #1237 — THE NATIVE CHILD'S LEASE, taken BEFORE any REPL is resolved or
+      // spawned, so a fenced project never gains a child. The child joins the run's
+      // `build` lease (it is that run draining); the Codex branch above takes none —
+      // it is the cross-provider observed owner thread, not a child of this REPL.
+      const child = await context.nativeChildAdmission.admit(run.id, turn.request.step_id)
+      if (child.status !== 'admitted') {
+        log.warn('native_child_refused', { run_id: run.id, step_id: turn.request.step_id, status: child.status })
+        return { kind: 'refused', reason: 'capability-unsupported', detail: `Project admission refused the native child (${child.status})` }
       }
-      const candidatePending = candidates.length === 1 ? pool.get(candidates[0]![0]) : undefined
-      const candidateSession = candidatePending !== undefined && Bun.peek.status(candidatePending) === 'fulfilled'
-        ? await candidatePending
-        : undefined
-      if (candidateSession === undefined || candidateSession.hasChildExited()) {
-        // WHY WE ARE SPAWNING, captured BEFORE the attempt, so the refusal below can
-        // say whether the instance had no project REPL at all or had one whose child
-        // had gone. #1085 is the first shape ("nothing respawned it"); they are not
-        // interchangeable and the old wording covered both with neither.
-        const had = candidates.length === 0 ? 'none existed' : 'the one that existed had a dead child'
-        let timer: ReturnType<typeof setTimeout> | undefined
-        try {
-          const expired = new Promise<true>(resolve => {
-            timer = setTimeout(() => resolve(true), PROJECT_SESSION_ACQUIRE_TIMEOUT_MS)
-          })
-          const timedOut = await Promise.race([
-            context.spawnProjectSession(context.projectId).then(() => false), expired,
-          ])
-          if (timedOut) return { kind: 'unknown', detail: `Project conversation session acquisition timed out after ${PROJECT_SESSION_ACQUIRE_TIMEOUT_MS}ms (${had})` }
-        }
-        catch (error) { return { kind: 'unknown', detail: `Project conversation session could not be started (${had}): ${error instanceof Error ? error.message : String(error)}` } }
-        finally { clearTimeout(timer) }
-        // THE RE-READ IS THE ONLY EVIDENCE THE SPAWN WORKED, and that is not a
-        // belt-and-braces re-check — it is the sole one. `spawnProjectSession`
-        // (`open/composer.ts`) awaits `prewarmSubstrate`, which swallows every error
-        // and NEVER rejects (`open/composer.ts` `prewarmSubstrate`: the catch emits a
-        // journal row and the promise still resolves). So the call resolving says
-        // nothing whatsoever about whether a REPL now exists; only the registry does.
-        // Any design that "prewarms a session and reports success" through this seam
-        // reports a success it has not observed.
-        candidates = liveProjectSessions(context.projectId)
-        if (candidates.length === 0) return { kind: 'unknown', detail: `Project conversation session was NOT created: the spawn for project id "${context.projectId}" returned without error (${had}) and no live cc-agent session exists for it` }
+      let outcome: Awaited<ReturnType<ProjectActingTurn>> | undefined
+      try {
+        outcome = await nativeChildTurn(turn)
+        return outcome
+      } finally {
+        // Parent-turn completion does not establish child completion. Only a
+        // refusal before dispatch releases here; the consuming trailer validator
+        // below owns all post-dispatch releases, including restart recovery.
+        if (outcome?.kind === 'refused') {
+          // A failed release preserves ownership and must not turn a refusal into
+          // a dispatch retry.
+          await child.release().catch((error: unknown) => log.warn('native_child_release_failed', {
+            run_id: run.id, step_id: turn.request.step_id, error: error instanceof Error ? error.message : String(error) }))
+        } else log.info('native_child_lease_retained', { run_id: run.id, step_id: turn.request.step_id, outcome: outcome?.kind ?? 'threw' })
       }
-      if (candidates.length !== 1) return { kind: 'unknown', detail: `Project conversation session is AMBIGUOUS after a spawn: ${candidates.length} live cc-agent sessions carry project id "${context.projectId}"` }
-      const [key, options] = candidates[0]!
-      const pending = pool.get(key)
-      if (!pending || Bun.peek.status(pending) !== 'fulfilled') return { kind: 'unknown', detail: 'Project conversation is not ready' }
-      const session = await pending
-      if (!session || session.hasChildExited()) return { kind: 'unknown', detail: 'Project conversation child is unavailable' }
-      // Restricted launches do not attest the edit/run grants required by this bridge.
-      if (options.skip_permissions !== true || options.restricted || options.permissions) return { kind: 'refused', reason: 'capability-unsupported', detail: 'Project launch grants cannot authorize bounded build work' }
-      const transcript = sessionJsonlPath(session.sessionId, session.cwd, resolveTranscriptProjectsDir(options))
-      const observer = JSON.stringify({ request: turn.request, session: session.sessionId,
-        directory: join(transcript.slice(0, -'.jsonl'.length), 'subagents') })
-      try { await writeFile(observerPath(turn.request.step_id), observer, { flag: 'wx', mode: 0o600 }) }
-      catch (error) {
-        if ((error as NodeJS.ErrnoException).code !== 'EEXIST' || await readFile(observerPath(turn.request.step_id), 'utf8') !== observer) {
-          // Observer binding cannot reroute or block paid work; its absence stays
-          // explicit unknown telemetry rather than selecting a different session.
-          await accounting.recordEvent('attempt-observer-binding-unavailable', { run_id: run.id, step_id: turn.request.step_id })
-        }
-      }
-      return createClaudeActingTurn({ project_id: context.projectId, topic_id: topic, session, projects_dir: resolveTranscriptProjectsDir(options),
-        grants: { tools: 'edit-and-run', writable: true, network: true, roots: options.extra_dirs ?? [] } })(turn)
     }, { observeUsage: async (request: Parameters<NonNullable<ProjectActingTurn['observeUsage']>>[0]) => {
       if (context.provider !== 'anthropic' || request.run_id !== run.id) return undefined
       try {
@@ -502,6 +533,29 @@ export async function prepareProjectBuild(input: InnerLoopInput, context: Projec
       }, validate: (value: unknown) => validSnapshot(value, 'verdict') }],
     ]) }) },
   })
+  // Only the consuming runner's validated trailer establishes child completion.
+  // Recovery uses the same request identity against the existing durable authority.
+  if (context.provider === 'anthropic' && substrate.inRepl) {
+    const runner = substrate.inRepl
+    const finish: typeof runner.run = async (...args) => {
+      const outcome = await runner.run(...args)
+      if (outcome.kind === 'completed' || outcome.kind === 'blocked') await releaseValidatedChild(args[0])
+      return outcome
+    }
+    const releaseValidatedChild = async (request: Parameters<typeof runner.run>[0]) => {
+      try {
+        const result = decodeProjectTrailer(await readFile(request.result.path, 'utf8'), request, trailer)
+        if (result.kind === 'completed' || result.kind === 'blocked') {
+          await context.nativeChildAdmission.complete(request.run_id, request.step_id)
+        }
+      } catch { /* Missing evidence or failed durable release preserves ownership. */ }
+    }
+    substrate.inRepl = { ...runner, run: finish, ...(runner.recover ? { recover: async (...args: Parameters<NonNullable<typeof runner.recover>>) => {
+      const outcome = await runner.recover!(...args)
+      if (outcome.kind === 'completed' || outcome.kind === 'blocked') await releaseValidatedChild(args[0])
+      return outcome
+    } } : {}) }
+  }
   if (context.provider === 'openai-codex' && context.codexOwnerBindings && substrate.inRepl) {
     substrate.inRepl = context.codexOwnerBindings.guardBuildRunner(context.projectId, substrate.inRepl)
   }

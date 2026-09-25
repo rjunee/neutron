@@ -25,6 +25,7 @@ import { LIVE_AGENT_TOOL_NAMES } from '../build-live-agent-turn.ts'
 import { buildLiveAgentTurn, RETRY_TURN_VALUE } from '../build-live-agent-turn.ts'
 import { MISSING_CREDENTIAL_DOCTRINE } from '../operating-doctrine.ts'
 import type { LiveAgentTurnRequest } from '../../http/chat-bridge.ts'
+import { openAdmission } from './project-admission-fixture.ts'
 
 let tmp: string
 let db: ProjectDb
@@ -106,6 +107,7 @@ function makeRunner(over: {
         }
       : undefined
   return buildLiveAgentTurn({
+    admission: openAdmission(),
     substrate: over.substrate,
     ...(over.injectActiveTurn !== undefined ? { injectActiveTurn: over.injectActiveTurn } : {}),
     ...(over.resolveAttachment !== undefined ? { resolveAttachment: over.resolveAttachment } : {}),

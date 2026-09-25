@@ -2485,6 +2485,12 @@ async function adoptRow(
   session.toolSurface = reuse.tool_surface
   session.toolBridgeActive = reuse.tool_bridge
   session.authFingerprint = typeof reuse.auth_fingerprint === 'string' ? reuse.auth_fingerprint : ''
+  // #1237 — the admission generation the child was SPAWNED under, exactly as its row
+  // recorded it. A row without the field is a legacy parent and stays `undefined`:
+  // detected by ABSENCE, never inferred from the scope's current fence.
+  session.admissionGeneration = Number.isSafeInteger(record.admission_generation) && record.admission_generation! >= 0
+    ? record.admission_generation
+    : undefined
   // The temp config files this child was spawned with, derived from the channel name
   // the row carries, so the exit path can still unlink them — they hold the child's
   // sink credential in plaintext.

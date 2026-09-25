@@ -441,6 +441,8 @@ describe('Open foundational-Trident prod-boot wiring', () => {
       { board_item_id: item.id, task: 'build the export' },
       {
         store: tbd.store,
+        // The composition's OWN admission factory — the production spelling.
+        projectAdmission: tbd.project_admission('owner'),
         board: tbd.work_board,
         project_slug: 'owner',
         repo_path: tbd.repo_path,
@@ -1653,4 +1655,163 @@ describe('Open foundational-Trident prod-boot wiring', () => {
       }
     }
   }, 20_000)
+})
+
+describe('project admission reaches every production dispatch site and every terminal chain (#1237)', () => {
+  // PARSED, NOT GREPPED: a comment is not a property and a decoy object is not the
+  // dispatch site, so both questions are asked of the compiler's own AST of
+  // `composer.ts` — each OBJECT LITERAL that carries the landed probe must carry
+  // project admission as a DIRECT property of itself. `BoardBoundBuildDeps.
+  // projectAdmission` is required, so tsc catches an absent key at the three
+  // chokepoint-deps sites; this pins the pairing (a new dispatch site cannot be
+  // wired for landing but not for admission) and the /code + tool-factory
+  // spellings, whose names differ.
+  const parse = (text: string): ts.SourceFile =>
+    ts.createSourceFile('composer.scan.ts', text, ts.ScriptTarget.Latest, true, ts.ScriptKind.TS)
+  const propName = (p: ts.ObjectLiteralElementLike): string | null =>
+    p.name !== undefined && (ts.isIdentifier(p.name) || ts.isStringLiteral(p.name)) ? p.name.text : null
+  const walk = (node: ts.Node, visit: (n: ts.Node) => void): void => {
+    visit(node)
+    node.forEachChild((child) => walk(child, visit))
+  }
+
+  function dispatchSites(text: string): Array<{ line: number; admission: string | null }> {
+    const file = parse(text)
+    const out: Array<{ line: number; admission: string | null }> = []
+    walk(file, (node) => {
+      if (!ts.isObjectLiteralExpression(node)) return
+      const props = node.properties
+      if (!props.some((p) => ['landedProbe', 'landed_probe'].includes(propName(p) ?? ''))) return
+      const admission = props.find((p) => ['projectAdmission', 'project_admission'].includes(propName(p) ?? ''))
+      out.push({
+        line: file.getLineAndCharacterOfPosition(node.getStart(file)).line + 1,
+        admission: admission !== undefined && ts.isPropertyAssignment(admission) ? admission.initializer.getText(file) : null,
+      })
+    })
+    return out
+  }
+
+  /** Every array literal composing a trident terminal chain (the ones naming the skill-forge observer). */
+  function terminalChains(text: string): string[][] {
+    const out: string[][] = []
+    walk(parse(text), (node) => {
+      if (!ts.isArrayLiteralExpression(node)) return
+      const names = node.elements.map((e) => (ts.isIdentifier(e) ? e.text : e.getText()))
+      if (names.includes('skillForgeOnRunTerminal')) out.push(names)
+    })
+    return out
+  }
+
+  const raw = readFileSync(join(HERE, '..', 'composer.ts'), 'utf8')
+
+  test('every dispatch site that carries the landed probe carries project admission', () => {
+    const sites = dispatchSites(raw)
+    // /code's context, the ▶ start, the hold sweep, and the agent-native tools.
+    expect(sites).toHaveLength(4)
+    for (const site of sites) expect({ line: site.line, admission: site.admission }).toEqual({ line: site.line, admission: expect.stringContaining('dispatchAdmissionForKey(') })
+    // The hold sweep is the one UNATTENDED entry, and admits as such.
+    expect(sites.filter((s) => s.admission!.includes("'hold-drain'"))).toHaveLength(1)
+    // The tool surface takes a FACTORY (scope → admission), not one admission.
+    expect(sites.filter((s) => /^\(scope_key: string\) =>/.test(s.admission!))).toHaveLength(1)
+
+    // Mutant (must come out RED): the hold sweep's admission commented out.
+    const mutant = raw.replace(
+      "projectAdmission: dispatchAdmissionForKey(hold.project_slug, 'hold-drain'),",
+      "// projectAdmission: dispatchAdmissionForKey(hold.project_slug, 'hold-drain'),",
+    )
+    expect(mutant).not.toBe(raw)
+    expect(dispatchSites(mutant).filter((s) => s.admission === null)).toHaveLength(1)
+  })
+
+  /** The `nativeChildAdmission` initializer of every `prepareProjectBuild(input, {...})` call. */
+  function nativeChildSites(text: string): Array<string | null> {
+    const file = parse(text)
+    const out: Array<string | null> = []
+    walk(file, (node) => {
+      if (!ts.isCallExpression(node) || node.expression.getText(file) !== 'prepareProjectBuild') return
+      const context = node.arguments[1]
+      if (context === undefined || !ts.isObjectLiteralExpression(context)) { out.push(null); return }
+      const prop = context.properties.find((p) => propName(p) === 'nativeChildAdmission')
+      out.push(prop !== undefined && ts.isPropertyAssignment(prop) ? prop.initializer.getText(file).replace(/\s+/g, ' ') : null)
+    })
+    return out
+  }
+
+  test('the bounded-build acting turn admits native children for the RUN\'s own scope', () => {
+    const sites = nativeChildSites(raw)
+    expect(sites).toHaveLength(1)
+    // The run's scope from its board key — the same derivation dispatch admission uses —
+    // never the pool's `'general'` sentinel reversed.
+    expect(sites[0]).toBe('projectAdmission.forNativeChild( workBoardProjectIdForKey(project_slug, input.run.project_slug) ?? null)')
+
+    // Mutant (must come out RED): the child scoped to the literal pool id instead.
+    const mutant = raw.replace(
+      'nativeChildAdmission: projectAdmission.forNativeChild(\n                  workBoardProjectIdForKey(project_slug, input.run.project_slug) ?? null),',
+      'nativeChildAdmission: projectAdmission.forNativeChild(id),',
+    )
+    expect(mutant).not.toBe(raw)
+    expect(nativeChildSites(mutant)[0]).not.toBe(sites[0])
+  })
+
+  test('the build-lease release observer runs FIRST in all three terminal chains', () => {
+    const chains = terminalChains(raw)
+    expect(chains).toHaveLength(3)
+    for (const chain of chains) expect(chain[0]).toBe('releaseBuildLeaseOnTerminal')
+
+    // Mutant (must come out RED): the release moved behind the board reconcile in one chain.
+    const mutant = raw.replace(
+      '[releaseBuildLeaseOnTerminal, buildBoardReconcileObserver(workBoardStore),',
+      '[buildBoardReconcileObserver(workBoardStore), releaseBuildLeaseOnTerminal,',
+    )
+    expect(mutant).not.toBe(raw)
+    expect(terminalChains(mutant).filter((c) => c[0] !== 'releaseBuildLeaseOnTerminal')).toHaveLength(1)
+  })
+})
+
+// #1237 — the maintenance owner is EXPOSED with no trigger. The ONLY production
+// maintenance call is the boot-time `resume` inside `on_graph_ready`; nothing calls
+// `replace` on the maintenance surface, and the runtime replacement primitive is
+// bound only by the maintenance wiring.
+describe('project maintenance has no production trigger', () => {
+  const REPO = join(HERE, '..', '..')
+  const ROOTS = ['open', 'gateway', 'runtime', 'trident', 'work-board', 'reminders', 'cron', 'agent-dispatch']
+  function productionSources(): Array<{ path: string; text: string }> {
+    const out: Array<{ path: string; text: string }> = []
+    for (const root of ROOTS) {
+      const glob = new Bun.Glob('**/*.ts')
+      for (const rel of glob.scanSync({ cwd: join(REPO, root) })) {
+        if (rel.includes('node_modules/') || rel.includes('__tests__/') || rel.endsWith('.test.ts')) continue
+        out.push({ path: `${root}/${rel}`, text: readFileSync(join(REPO, root, rel), 'utf8') })
+      }
+    }
+    return out
+  }
+  const count = (text: string, re: RegExp): number => (text.match(re) ?? []).length
+  const RESUME_CALL = /\b(?:projectMaintenance|project_maintenance)\??\.resume\(/g
+  const REPLACE_CALL = /\b(?:projectMaintenance|project_maintenance|maintenance)\??\.replace\(/g
+  const PRIMITIVE_CALL = /\breplaceQuiescentPooledSession\(/g
+
+  test('exactly one resume call site, inside on_graph_ready (positive control: the scan finds it)', () => {
+    const sites = productionSources().filter((f) => count(f.text, RESUME_CALL) > 0)
+    expect(sites.map((f) => f.path)).toEqual(['open/composer.ts'])
+    const composer = sites[0]!.text
+    expect(count(composer, RESUME_CALL)).toBe(1)
+    const hook = composer.slice(composer.indexOf('on_graph_ready: async'))
+    expect(hook.slice(0, hook.indexOf('\n      },')).match(RESUME_CALL)).not.toBeNull()
+  })
+
+  test('zero production callers of replace on the maintenance surface (guard)', () => {
+    const sources = productionSources()
+    expect(sources.length).toBeGreaterThan(100)
+    expect(sources.filter((f) => count(f.text, REPLACE_CALL) > 0).map((f) => f.path)).toEqual([])
+    // The scan would see one: a planted trigger is counted (the guard is live).
+    expect(count('void projectMaintenance.replace(null)', REPLACE_CALL)).toBe(1)
+  })
+
+  test('the runtime replacement primitive is bound only by the maintenance wiring', () => {
+    const callers = productionSources()
+      .filter((f) => count(f.text, PRIMITIVE_CALL) > 0 && !f.path.endsWith('persistent/generation-replacement.ts'))
+      .map((f) => f.path)
+    expect(callers).toEqual(['open/wiring/project-maintenance.ts'])
+  })
 })

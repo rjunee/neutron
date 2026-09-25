@@ -155,6 +155,15 @@ export interface OpenWiringContext {
    */
   resolveMcpServers?: () => Promise<ReadonlyArray<ResolvedOwnerMcpServer>>
   /**
+   * #1237 — the CURRENT project admission generation for a pool project id
+   * (`'general'`/absent = General), read ONCE by the spawn of a project PARENT and
+   * stamped into its registry row. Wired onto the live-chat (`cc-agent-*`) family
+   * ONLY — the owner's live chat and `makeProjectLiveAgentSubstrate`; the nudge,
+   * compose and fire substrates are not project parents. REQUIRED: a parent spawned
+   * without it is indistinguishable from a legacy one. `undefined` = unknown scope.
+   */
+  admissionGenerationFor: (project_id: string | undefined) => Promise<number | undefined>
+  /**
    * O6 / #106 — the owner reconnect channel (`app:<owner>`) recorded on a dropped-
    * turn entry so the substrate's replay path can route a recovered reply to the
    * `liveAgentRecoveredReplySink`. Threaded alongside the sink (both wired only on

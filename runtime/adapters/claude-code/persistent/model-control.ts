@@ -1,4 +1,5 @@
 import { NativeModelPicker } from '../../native-model-picker.ts'
+import { hasUnresolvedNativeChild } from './native-child-liveness.ts'
 import { ReplModelError, type ReplModelState, type ReplModelSwitch } from '../../../repl-model.ts'
 import { pool, supervisedBySessionKey } from './pool-state.ts'
 import { withOwnedRegistry } from './repl-registry.ts'
@@ -23,12 +24,13 @@ async function control(scope: PersistentReplModelScope, request?: ReplModelSwitc
   const [key, options] = matches[0]!
   const session = await pool.get(key)!
   if (request && request.sessionId !== session.sessionId) throw new ReplModelError('session-changed', 'Conversation session changed; refresh before switching.')
-  if (session.activeTurn || session.turnSlotHeld > 0) {
+  if (session.activeTurn || session.turnSlotHeld > 0 || hasUnresolvedNativeChild(options)) {
     if (request) throw new ReplModelError('busy', 'Conversation has a turn in progress.')
     return { harness: 'claude-code', sessionId: session.sessionId, currentModel: null, availableModels: [], status: 'busy' }
   }
   const release = await session.acquireTurn()
   try {
+    if (hasUnresolvedNativeChild(options)) throw new ReplModelError('busy', 'Conversation has an unresolved native child.')
     if (request && options.replRegistryPath === undefined) throw new ReplModelError('unavailable', 'Conversation has no durable model preference store.')
     const state = await new NativeModelPicker('claude-code', session.sessionId, session.child).run(request)
     if (request && state.status === 'ready' && state.currentModel !== null) {

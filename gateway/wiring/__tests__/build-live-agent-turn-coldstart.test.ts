@@ -20,6 +20,7 @@ import type { Event } from '@neutronai/runtime/events.ts'
 import type { AgentSpec, Substrate } from '@neutronai/runtime/substrate.ts'
 import type { SessionHandle } from '@neutronai/runtime/session-handle.ts'
 import { buildLiveAgentTurn } from '../build-live-agent-turn.ts'
+import { openAdmission } from './project-admission-fixture.ts'
 
 let tmp: string
 let db: ProjectDb
@@ -61,6 +62,7 @@ function makeSlowSubstrate(reply: string, delay_ms: number): Substrate {
 
 function makeRunner(substrate: Substrate, ack_delay_ms: number) {
   return buildLiveAgentTurn({
+    admission: openAdmission(),
     substrate,
     personaLoader: { async load(): Promise<string> { return '' } },
     buttonStore: store,

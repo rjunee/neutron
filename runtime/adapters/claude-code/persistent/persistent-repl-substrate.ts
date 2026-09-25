@@ -102,3 +102,14 @@ export {
   type ReplWatchdogOptions,
   type ReplWatchdog,
 } from './supervision.ts'
+export {
+  replaceQuiescentPooledSession,
+  observePooledSession,
+  requestedProfileFor,
+  type ExpectedParent,
+  type ReplacementRefusal,
+  type ReplacementRefusalReason,
+  type ReplacementResult,
+  type ReplacementObservation,
+  type ReplacementDeps,
+} from './generation-replacement.ts'

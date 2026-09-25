@@ -24,7 +24,7 @@
  * `drain_dispatch_holds` is `undefined` and this test fails.
  */
 
-import { afterAll, beforeAll, describe, expect, test } from 'bun:test'
+import { afterAll, beforeAll, describe, expect, spyOn, test } from 'bun:test'
 import { mkdtempSync, rmSync } from 'node:fs'
 import { tmpdir } from 'node:os'
 import { dirname, join } from 'node:path'
@@ -36,6 +36,8 @@ import type { Event } from '@neutronai/runtime/events.ts'
 import type { SessionHandle } from '@neutronai/runtime/session-handle.ts'
 import type { AgentSpec, Substrate } from '@neutronai/runtime/substrate.ts'
 import { DispatchHoldStore } from '@neutronai/trident/dispatch-holds.ts'
+import { WorkBoardStore } from '@neutronai/work-board/store.ts'
+import { ProjectAdmission } from '@neutronai/gateway/project-admission.ts'
 import { buildOpenGraphComposer } from '../composer.ts'
 
 const HERE = dirname(fileURLToPath(import.meta.url))
@@ -145,5 +147,47 @@ describe('open/composer.ts hands the trident tick a real dispatch-hold drain', (
     await drain()
 
     expect(holds.getByItem('owner', 'a-card-that-is-not-on-any-board')).toBeNull()
+  })
+})
+
+describe('the composed drain passes the SAME project admission as every other entry (#1237)', () => {
+  test('a hold whose project is fenced is RETAINED by the product drain — no run, no lease', async () => {
+    expect(typeof drain).toBe('function')
+    if (typeof drain !== 'function') return
+    // The composition's owner boundary is its instance slug; General is the owner's board scope.
+    const maintenance = new ProjectAdmission({ db, ownerHandle: 'owner', bootId: 'fence-owner' })
+    await maintenance.maintenance.register(maintenance.scopeFor(null))
+    const fence = await maintenance.maintenance.beginMaintenance(maintenance.scopeFor(null))
+    expect(fence).not.toBeNull()
+    try {
+      const card = await new WorkBoardStore(db).create('owner', {
+        title: 'wire the export button to the new CSV endpoint with regression tests',
+      })
+      const holds = new DispatchHoldStore(db)
+      await holds.upsert({
+        project_slug: 'owner',
+        board_item_id: card.id,
+        task: 'wire the export button to the new CSV endpoint with regression tests',
+        hold_kind: 'path',
+        hold_reason: 'queued while the project was fenced for maintenance',
+      })
+      const runsBefore = db.raw().query<{ n: number }, []>('SELECT COUNT(*) AS n FROM code_trident_runs').get()?.n
+
+      const warns = spyOn(console, 'warn').mockImplementation(() => {})
+      try {
+        await drain()
+        // The gate that refused is the ADMISSION gate, not some earlier refusal.
+        expect(warns.mock.calls.flat().join(' ')).toContain('dispatch_project_fenced')
+      } finally {
+        warns.mockRestore()
+      }
+
+      expect(holds.getByItem('owner', card.id)).not.toBeNull()
+      expect(db.raw().query<{ n: number }, []>('SELECT COUNT(*) AS n FROM code_trident_runs').get()?.n).toBe(runsBefore)
+      expect(maintenance.listLeases('build')).toEqual([])
+      await holds.deleteByItem('owner', card.id)
+    } finally {
+      await maintenance.maintenance.abandon(fence!)
+    }
   })
 })

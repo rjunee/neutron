@@ -80,6 +80,7 @@ import { buildTridentOrchestrator } from './orchestrator.ts'
 import { TridentTickLoop } from './tick.ts'
 import { buildWorkflowArgs, type InnerLoopInput } from './inner-loop.ts'
 import { slugifyTask } from './slugify-task.ts'
+import { fixtureDispatchAdmission } from './__tests__/dispatch-admission-fixture.ts'
 
 const HEAD = 'a'.repeat(40)
 const MOVED = 'b'.repeat(40)
@@ -162,6 +163,7 @@ async function priorRun(
 function deps(over: Partial<BoardBoundBuildDeps> = {}): BoardBoundBuildDeps {
   return {
     store,
+    projectAdmission: fixtureDispatchAdmission(db),
     board,
     project_slug: 'proj-1',
     repo_path: tmp,

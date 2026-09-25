@@ -32,6 +32,7 @@ import {
   TIMEOUT_BODY,
 } from '../build-live-agent-turn.ts'
 import type { LiveAgentTurnRequest } from '../../http/chat-bridge.ts'
+import { openAdmission } from './project-admission-fixture.ts'
 
 /** The message the substrate's `failAuthInvalid` (pool.ts) surfaces, as the caller
  *  sees it after `collectTokensToString` prefixes `cc-llm-call: `. */
@@ -88,6 +89,7 @@ function makeRunner(
   reconnectHandoff?: () => Promise<{ command: string } | null>,
 ) {
   return buildLiveAgentTurn({
+    admission: openAdmission(),
     substrate,
     personaLoader: { load: async (): Promise<string> => '' },
     buttonStore: store,

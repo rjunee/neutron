@@ -413,7 +413,11 @@ for (const { site, profile, extra } of SITES) {
       const { frontier_model_floor, ...rest } = viaProfile
       expect(rest).toEqual(viaInline)
     } else if (!isTrident) {
-      expect(viaProfile).toEqual(viaInline)
+      if (profile === PROFILE_PHASE_SPEC) {
+        expect(viaProfile.nativeChildCensusRole).toBe('setup')
+        const { nativeChildCensusRole, ...rest } = viaProfile
+        expect(rest).toEqual(viaInline)
+      } else expect(viaProfile).toEqual(viaInline)
       // Every OTHER site must be untouched by both applied fields.
       expect(viaProfile.turn_inactivity_ms).toBeUndefined()
       expect(viaProfile.frontier_model_floor).toBeUndefined()

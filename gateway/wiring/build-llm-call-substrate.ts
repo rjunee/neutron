@@ -1,4 +1,5 @@
 import { projectModelTier } from '@neutronai/runtime/configured-models.ts'
+import { actingTurnProjectId } from './conversation-scope.ts'
 import { createConfiguredChatSubstrate } from '@neutronai/runtime/adapters/configured-chat/index.ts'
 /**
  * @neutronai/gateway/wiring — shared CC-subprocess LLM-call substrate.
@@ -78,7 +79,7 @@ import type { SessionHandle } from '@neutronai/runtime/session-handle.ts'
 import type { AgentSpec, Substrate } from '@neutronai/runtime/substrate.ts'
 import type { OAuthCredentialSource } from './resolve-llm-credentials.ts'
 import { createLogger } from '@neutronai/logger'
-import { githubSpawnEnvRef, type SubstrateProfile } from './substrate-profiles.ts'
+import { githubSpawnEnvRef, PROFILE_PHASE_SPEC, PROFILE_WARM_FIRE, type SubstrateProfile } from './substrate-profiles.ts'
 
 const substrateLog = createLogger('substrate')
 
@@ -417,6 +418,10 @@ export interface BuildLlmCallSubstrateInput {
    *  (see `PersistentReplSubstrateOptions.hostsLiveWork`). Wired on the trident
    *  fire substrate only. */
   hostsLiveWork?: (childGeneration: string) => number
+  /** #1237 — the project admission generation for the project id a dispatch
+   *  resolves, bound per spawn onto `PersistentReplSubstrateOptions.admissionGeneration`
+   *  (see there). Wired on the live-chat (`cc-agent-*`) family only. */
+  admissionGeneration?: (projectId: string | undefined) => Promise<number | undefined>
   onSizeAlert?: (info: { sessionKey: string; severity: SizeSeverity; sizeBytes: number }) => void
   onRateLimitBanner?: (notice: RateLimitBannerNotice) => void | Promise<void>
   /** Floor-clamp notice — an owner-facing spawn was resolved below the configured
@@ -763,6 +768,13 @@ async function claudeOptionsFor(
     substrate_instance_id: input.substrate_instance_id,
     env: spawnEnv,
   }
+  // Exact internal profile identity is the authority here, not a caller-supplied
+  // instance name or a structurally similar profile. Owner scope always wins
+  // over this provenance at the runtime census boundary.
+  if (input.ownerConversation !== true) {
+    if (input.profile === PROFILE_PHASE_SPEC) opts.nativeChildCensusRole = 'setup'
+    else if (input.profile === PROFILE_WARM_FIRE) opts.nativeChildCensusRole = 'fire'
+  }
   if (input.repl_pane_label !== undefined) opts.repl_pane_label = input.repl_pane_label
   if (input.cwd !== undefined) opts.cwd = input.cwd
   // Ritual executor (plan task 4) — a non-default system prompt file so the
@@ -815,6 +827,12 @@ async function claudeOptionsFor(
   if (input.onDeadTurnNotice !== undefined) opts.onDeadTurnNotice = input.onDeadTurnNotice
   if (input.onChildCrash !== undefined) opts.onChildCrash = input.onChildCrash
   if (input.hostsLiveWork !== undefined) opts.hostsLiveWork = input.hostsLiveWork
+  if (input.admissionGeneration !== undefined) {
+    // Bound to THIS dispatch's resolved project, so the spawn it may cause stamps
+    // the parent with its own scope's generation.
+    const readGeneration = input.admissionGeneration
+    opts.admissionGeneration = () => readGeneration(projectId)
+  }
   if (input.onSizeAlert !== undefined) opts.onSizeAlert = input.onSizeAlert
   if (input.onRateLimitBanner !== undefined) opts.onRateLimitBanner = input.onRateLimitBanner
   if (input.onModelFloorApplied !== undefined) {
@@ -996,7 +1014,9 @@ export function buildLlmCallSubstrate(
       // General is explicitly null in the conversation scope. The legacy pool's
       // 'general' sentinel must never select a real project's provider override.
       const conversationProjectId = input.conversationProjectId !== undefined
-        ? input.conversationProjectId : spec.metering_context?.conversationProjectId
+        ? input.conversationProjectId : spec.metering_context?.conversationProjectId !== undefined
+          ? spec.metering_context.conversationProjectId
+          : (input.ownerConversation ? input.projectIdResolver?.() ?? actingTurnProjectId(spec) : undefined)
       const projectId = conversationProjectId !== undefined
         ? conversationProjectId ?? undefined
         : input.projectIdResolver?.() ?? spec.metering_context?.project_id
@@ -1115,7 +1135,8 @@ export function buildLlmCallSubstrate(
         const cred = { id: resolved.cred_id }
         const opts = await claudeOptionsFor(
           input, resolved,
-          () => input.projectIdResolver?.() ?? spec.metering_context?.project_id,
+          () => conversationProjectId !== undefined ? conversationProjectId ?? 'general'
+            : input.projectIdResolver?.() ?? spec.metering_context?.project_id,
           () => {
             // A Claude turn invalidates this scope's OpenAI continuation before
             // remaining option getters, so switching back replays full history.

@@ -39,6 +39,7 @@ import {
   type LiveAgentOnboardingSeam,
 } from '../build-live-agent-turn.ts'
 import type { LiveAgentTurnRequest } from '../../http/chat-bridge.ts'
+import { openAdmission } from './project-admission-fixture.ts'
 
 // Mirrors the production constants (build-live-agent-turn.ts): the activity-based
 // inactivity windows + the absolute-ceiling backstop.
@@ -112,6 +113,7 @@ function makeRunner(opts: {
   onboarding?: boolean
 }) {
   return buildLiveAgentTurn({
+    admission: openAdmission(),
     substrate: opts.substrate,
     personaLoader: { load: async (): Promise<string> => '' },
     buttonStore: store,

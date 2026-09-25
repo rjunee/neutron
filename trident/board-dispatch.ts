@@ -96,6 +96,7 @@ import { detectBaseBranch } from './merge.ts'
 import { slugifyTask } from './slugify-task.ts'
 import { isTerminalPhase } from './state-machine.ts'
 import type { DispatchHoldInput, DispatchHoldPayload, DispatchHoldStore } from './dispatch-holds.ts'
+import type { DispatchAdmission, DispatchAdmitted } from './dispatch-admission.ts'
 import { deriveClaimedPaths } from './claimed-paths.ts'
 import { defaultBranchHolderProbe, type BranchHolderProbe } from './fire-evidence-probes.ts'
 import type { MergeMode, TridentRun, TridentRunStore } from './store.ts'
@@ -508,6 +509,19 @@ export interface BoardBoundBuildDeps {
    * required never to throw and to refuse only on a POSITIVE verdict.
    */
   preflight?: () => Promise<{ ok: true } | { ok: false; reason: string }>
+  /**
+   * PROJECT ADMISSION (#1237), pre-scoped to this dispatch's project and producer
+   * by the composition root. REQUIRED: an unwired gate is a composition bug, not a
+   * permissive default — a build that holds no lease is invisible to a maintenance
+   * fence, which could then advance to `quiesced` under a live build.
+   *
+   * Asked after the cheap refusals (item, blocked, bound_pr, review intent,
+   * underspecified, executor) and BEFORE any git/gh/row work, so a fenced project
+   * does none. An admitted lease names the run id the row is created with; it is
+   * KEPT when a run row exists (the run owns it until its terminal event releases
+   * it) and released on every other unwind.
+   */
+  projectAdmission: DispatchAdmission
 }
 
 export type BoardBoundBuildRejectionCode =
@@ -544,6 +558,13 @@ export type BoardBoundBuildRejectionCode =
   | 'branch_live'
   | 'executor_unavailable'
   | 'backend_error'
+  // THE PROJECT IS FENCED FOR MAINTENANCE (#1237). Refused AND QUEUED, like
+  // `branch_live`: the condition ends when admission reopens, and the hold sweep
+  // re-asks on its cadence. Nothing git/gh/row-shaped ran.
+  | 'project_fenced'
+  // THE SCOPE IS NOT A LIVE PROJECT (#1237). NOT queued and nothing deleted: there
+  // is no condition a sweep could re-test for a project that is not live.
+  | 'project_unknown'
 
 export type BoardBoundBuildResult =
   | { ok: true; run: TridentRun; merge_mode: MergeMode; execution_strategy: 'single' | 'task_sequence' | null }
@@ -563,10 +584,10 @@ export type BoardBoundBuildResult =
       // (never `code === 'branch_live'`, which both members admit). Argus r6,
       // minor: this comment used to read as "both codes ALWAYS carry a hold",
       // which stopped being true the moment the queue decision moved to the write.
-      code: 'held' | 'branch_live'
+      code: 'held' | 'branch_live' | 'project_fenced'
       message: string
       hold: {
-        kind: 'blocker' | 'path' | 'branch'
+        kind: 'blocker' | 'path' | 'branch' | 'fence'
         blocker_id?: string
         holding_run_id?: string
         path?: string
@@ -663,13 +684,54 @@ interface QueueOutcome {
 }
 
 /**
+ * The project lease a dispatch holds, owned by {@link dispatchBoardBoundBuild}
+ * and filled in by the gate inside {@link dispatchUnderAdmission}. `kept` flips
+ * the instant a run row exists: from then on the lease belongs to that run and
+ * only its terminal event (or restart reconciliation) releases it.
+ */
+interface DispatchLeaseSlot {
+  lease: DispatchAdmitted | null
+  kept: boolean
+}
+
+/**
  * Create a board-bound trident run, enforcing the required-item + ask-gate
  * chokepoint rules. Pure of any chat/tool framing — the two callers wrap the
  * typed result in their own response shape.
+ *
+ * THE PROJECT LEASE IS RELEASED ON EVERY UNWIND THAT CREATED NO RUN (#1237) —
+ * every non-ok return and every throw, from the blockers gate to the end. It is
+ * kept only once a run row exists, including the rare case where the row was
+ * written and a later step (`attachRun`, the hold delete) failed: that run is
+ * live, so the lease must stay for the life of the run, and the terminal
+ * observer releases it exactly as for an ok dispatch. A failed release is
+ * logged, never thrown: a stuck lease blocks maintenance, not builds — the safe
+ * direction.
  */
 export async function dispatchBoardBoundBuild(
   input: BoardBoundBuildInput,
   deps: BoardBoundBuildDeps,
+): Promise<BoardBoundBuildResult> {
+  const slot: DispatchLeaseSlot = { lease: null, kept: false }
+  try {
+    return await dispatchUnderAdmission(input, deps, slot)
+  } finally {
+    if (slot.lease !== null && !slot.kept) {
+      await slot.lease.release().catch((err: unknown) => {
+        log.warn('dispatch_project_lease_release_failed', {
+          project: deps.project_slug,
+          item: typeof input.board_item_id === 'string' ? input.board_item_id : null,
+          error: err instanceof Error ? err.message : String(err),
+        })
+      })
+    }
+  }
+}
+
+async function dispatchUnderAdmission(
+  input: BoardBoundBuildInput,
+  deps: BoardBoundBuildDeps,
+  slot: DispatchLeaseSlot,
 ): Promise<BoardBoundBuildResult> {
   // (1) REQUIRED board_item_id — no untracked dispatches.
   const board_item_id = typeof input.board_item_id === 'string' ? input.board_item_id.trim() : ''
@@ -915,6 +977,65 @@ export async function dispatchBoardBoundBuild(
       're-dispatch on its own; re-dispatch it yourself once the reason above clears.'
     )
   }
+
+  // (3c) PROJECT ADMISSION (#1237) — the last gate before any git/gh/row work.
+  // The run id is minted HERE so the durable lease names the run the row will be
+  // created with; `createIfClaimsAvailable` below is handed the same id.
+  const runId = crypto.randomUUID()
+  const projectLease = await deps.projectAdmission.admit(runId)
+  if (projectLease.status === 'fenced') {
+    // QUEUED, like `branch_live`: the fence ends when admission reopens, and the
+    // hold sweep re-runs this gate on its cadence. The stored kind stays inside
+    // migration 0139's CHECK (`'path'`, exactly as `branch_live` records it);
+    // the SURFACE kind is `'fence'`. Decided synchronously with the write — see
+    // `queueDecision` for why the answer may not be carried across an await.
+    const decision = queueDecision()
+    const message =
+      `Refused: this project is fenced for maintenance (${projectLease.phase ?? 'reopening'}) and admits no ` +
+      'new build right now. Nothing was dispatched; ' +
+      (decision.queued
+        ? 'this card is QUEUED and starts automatically when admission reopens.'
+        : decision.notQueuedClause)
+    const outcome = await queueHold(
+      {
+        project_slug: deps.project_slug,
+        board_item_id,
+        task: input.task,
+        payload: holdPayload,
+        hold_kind: 'path',
+        hold_reason: message,
+        held_on_run_id: null,
+      },
+      decision,
+    )
+    log.warn('dispatch_project_fenced', {
+      project: deps.project_slug,
+      item: board_item_id,
+      phase: projectLease.phase,
+      queued: outcome.queued,
+      ...(outcome.error !== null ? { hold_write_failed: outcome.error } : {}),
+    })
+    return {
+      ok: false,
+      code: 'project_fenced',
+      message: message + queueFailureClause(outcome),
+      ...(outcome.queued ? { hold: { kind: 'fence' as const } } : {}),
+    }
+  }
+  if (projectLease.status === 'unknown') {
+    // NOT queued, and nothing deleted: a sweep has no condition to re-test for a
+    // scope that is not a live project, and an existing hold is left for the
+    // sweep's own policy (it retains one whose project may yet be restored).
+    log.warn('dispatch_project_unknown', { project: deps.project_slug, item: board_item_id })
+    return {
+      ok: false,
+      code: 'project_unknown',
+      message:
+        `Refused: the board scope "${deps.project_slug}" is not a live project, so no build can be admitted ` +
+        'for it. Nothing was dispatched and nothing was queued.',
+    }
+  }
+  slot.lease = projectLease
 
   // (4) DECLARED BLOCKERS — do not fan out onto an unmet dependency.
   //
@@ -1656,6 +1777,9 @@ export async function dispatchBoardBoundBuild(
   })
   try {
     const admission = await deps.store.createIfClaimsAvailable({
+      // THE ID THE PROJECT LEASE ALREADY NAMES (#1237) — minted at the admission
+      // gate, so the lease's work reference is this run from before it exists.
+      id: runId,
       slug,
       project_slug: deps.project_slug,
       repo_path,
@@ -1795,6 +1919,9 @@ export async function dispatchBoardBoundBuild(
     }
     const run = admission.run
     createdRunId = run.id
+    // The run exists: from here the project lease is the RUN's, released by its
+    // terminal event (or restart reconciliation), never by this call's unwind.
+    slot.kept = true
     // ONE LINE PER DISPATCH THAT HAD A PRIOR TERMINAL RUN TO ASK ABOUT, EMITTED ONLY
     // NOW — after the row exists (adversarial review, P3). It used to be emitted
     // before the plan-doc await and before three refusal returns, so a dispatch that

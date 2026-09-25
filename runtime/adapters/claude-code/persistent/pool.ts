@@ -1,4 +1,5 @@
 import { observeSession } from './observe-workers.ts'
+import { hasUnresolvedNativeChild } from './native-child-liveness.ts'
 import { describeWorkerObservation, unclassifiedObservation, type WorkerObservation } from './worker-observation.ts'
 // persistent-repl-substrate.ts → pool.ts
 // The warm pool, the createPersistentReplSubstrate turn driver, ephemeral
@@ -396,6 +397,7 @@ export async function retirePersistentRepl(
   sessionKey: string,
   existing?: { registryPath: string; requireFreshIdle: true },
 ): Promise<HelperRetirement> {
+  if (hasUnresolvedNativeChild(supervisedBySessionKey.get(sessionKey))) return 'refused'
   // Registry discovery is not ownership. Legacy cleanup cannot acquire, probe,
   // adopt or close a registry-only survivor. Nor may it borrow a same-key pool
   // entry belonging to another registry. Refuse before any mutable marker.
@@ -496,6 +498,7 @@ async function retireOwnedPersistentRepl(
   }
   // Do not discard a row or pool entry merely because termination was requested.
   // terminateChild has a bounded force deadline, so independently confirm death.
+  if (hasUnresolvedNativeChild(supervisedBySessionKey.get(sessionKey))) return 'refused'
   attempt.beganTermination = true
   await terminateChild(session.child)
   if (!session.hasChildExited()) return 'refused'
@@ -1415,7 +1418,7 @@ export async function evictWarmReplsForMcpSurfaceChange(): Promise<{
     // the child a COMMITTED dispatch was about to inject into, stranding the turn: exactly
     // the outcome the paragraph above says this function refuses. `turnSlotHeld` is taken
     // the instant the slot is won, so it covers the gap.
-    if (session.activeTurn !== undefined || session.turnSlotHeld > 0) {
+    if (session.activeTurn !== undefined || session.turnSlotHeld > 0 || hasUnresolvedNativeChild(supervisedBySessionKey.get(key))) {
       session.poisoned = true
       // AND RETIRED THE MOMENT THE TURN ENDS, not merely at the next dispatch. `poisoned`
       // alone is a promise the NEXT dispatch will respawn cleanly — and nothing in this
@@ -1444,6 +1447,7 @@ export async function evictWarmReplsForMcpSurfaceChange(): Promise<{
  * disagree about, say, unregistering the reply sink.
  */
 async function retireWarmSession(key: string, session: ReplSession): Promise<void> {
+  if (hasUnresolvedNativeChild(supervisedBySessionKey.get(key))) return
   pool.delete(key)
   if (childByKey.get(key) === session.child) childByKey.delete(key)
   try {

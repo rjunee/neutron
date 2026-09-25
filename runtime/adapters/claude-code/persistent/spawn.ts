@@ -23,6 +23,7 @@ import { paneClaimBlocksUs, spawnReservationBlocksUs } from './signatures.ts'
 import { applyModelFloor } from './model-floor.ts'
 import { type InFlightGate, makeInFlightGate } from './in-flight-gate.ts'
 import { childByKey, pendingSpawns, pool, replToolBridgeRef, respawnGates, sink } from './pool-state.ts'
+import { hasUnresolvedNativeChild } from './native-child-liveness.ts'
 import {
   registerLiveProcessSafe,
   type LiveProcessHandle,
@@ -381,6 +382,10 @@ async function spawnSession(
   // Stamp the auth fingerprint the child is being spawned with so the warm-reuse
   // freshness guard can evict on a same-credential-id token refresh (Codex r2 P1).
   session.authFingerprint = authFingerprintFor(options.env, options.sinkTokenPath)
+  // #1237 — the admission generation this parent is spawned under, read ONCE and
+  // BEFORE the child is launched, so the stamp can only describe the scope as it
+  // stood when this child began. Persisted below in the same write as `reuse`.
+  session.admissionGeneration = await readAdmissionGeneration(options, sessionKey)
 
   // Pre-seed the first-run trust + bypass-permissions acceptance so the
   // interactive REPL doesn't wedge on a blocking Ink dialog before it loads
@@ -805,6 +810,9 @@ async function spawnSession(
         tool_bridge: session.toolBridgeActive,
         auth_fingerprint: session.authFingerprint,
       }
+      // #1237 — omitted, never written as null, when the reader answered nothing: the
+      // row must then read as legacy-unknown, exactly like a row from before the field.
+      if (session.admissionGeneration !== undefined) record.admission_generation = session.admissionGeneration
       try {
         // Merge onto any prior row BUT clear the transient `respawn_in_flight_at`
         // stamp: this spawn just COMPLETED the in-flight respawn, so a stale stamp
@@ -828,8 +836,15 @@ async function spawnSession(
             // child that is RUNNING, so a value inherited from its predecessor is a
             // claim about a pane this child does not have. It is re-stated below from
             // `record` when this spawn actually produced one.
+            //
+            // #1237 — `admission_generation` is dropped for the same reason: it describes
+            // the admission state THIS child was spawned under, so a stamp inherited from
+            // a predecessor would let an unstamped child read as participating. It is
+            // re-stated below only when this spawn stamped one.
+            admission_generation: _priorAdmissionGeneration,
             ...merged
           } = prev ? { ...prev, ...record } : record
+          if (record.admission_generation !== undefined) (merged as ReplRegistryRecord).admission_generation = record.admission_generation
           if (selected === undefined) delete merged.owner_selected_model
           // #539 — OWNERSHIP IS NOT MERGED, IT IS RE-STATED, and the handle and its claim
           // move together. A spread carries the PRIOR row's `pane_handle` through whenever
@@ -1087,6 +1102,23 @@ export function resolveResumeDirective(
   return undefined
 }
 
+/** The parent's spawn-time admission generation (#1237), fail-safe to `undefined`: an
+ *  unwired, throwing, rejecting or non-integer reader spawns UNSTAMPED (legacy-unknown)
+ *  with one stderr line — never a failed spawn. Mirrors {@link countHostedLiveWork}. */
+async function readAdmissionGeneration(
+  options: PersistentReplSubstrateOptions,
+  sessionKey: string,
+): Promise<number | undefined> {
+  if (options.admissionGeneration === undefined) return undefined
+  try {
+    const generation = await options.admissionGeneration()
+    return Number.isSafeInteger(generation) && generation! >= 0 ? generation : undefined
+  } catch (err) {
+    process.stderr.write(`[repl] admissionGeneration failed for key=${sessionKey.slice(0, 24)}: ${String(err)}\n`)
+    return undefined
+  }
+}
+
 /** The eviction guard's answer, fail-safe to 0 (an unwired or throwing counter
  *  evicts exactly as before — the guard can only ever SPARE a child). */
 function countHostedLiveWork(options: PersistentReplSubstrateOptions, childGeneration: string): number {
@@ -1251,7 +1283,7 @@ export function quarantinedChildCount(): number {
 /** Deliver an eviction to the durable crash sink with the EVICTED generation.
  *  Mirrors the supervision watchdog's `onChildCrash` call for a pid-dead child;
  *  this is the edge that watchdog structurally cannot observe. */
-async function notifyEvictedChild(
+export async function notifyEvictedChild(
   options: PersistentReplSubstrateOptions,
   sessionKey: string,
   childGeneration: string,
@@ -1409,6 +1441,23 @@ class PaneOwnershipRefusedError extends Error implements SubstrateClassed {
  *  to a RETRYABLE refusal rather than to an unbounded recursion. */
 const STALE_TURN_REENTRY_LIMIT = 3
 
+/**
+ * The spawn-time profile a request presents to the warm-reuse guard: the `--tools`
+ * surface (`spec.tools` names, comma-joined — the `session.toolSurface` rule) and
+ * whether the tool bridge is requested. ONE definition: the reuse guard below and
+ * the #1237 replacement attestation (`generation-replacement.ts`) both read it, so
+ * an attested replacement is exactly what the next dispatch will accept.
+ */
+export function requestedReplProfile(
+  options: PersistentReplSubstrateOptions,
+  spec: AgentSpec,
+): { toolSurface: string; toolBridge: boolean } {
+  return {
+    toolSurface: spec.tools.map((t) => t.name).join(','),
+    toolBridge: options.enableToolBridge === true && replToolBridgeRef.current !== undefined,
+  }
+}
+
 export async function getOrSpawnSession(
   sessionKey: string,
   options: PersistentReplSubstrateOptions,
@@ -1459,15 +1508,13 @@ export async function getOrSpawnSession(
   // awaited: adding an await here would reorder the synchronous prefix two
   // concurrent dispatches rely on, and a reap is never on this turn's path.
   fireAndForget('persistent-repl.quarantine-sweep', sweepQuarantinedChildren())
-  const requestedToolSurface = spec.tools.map((t) => t.name).join(',')
   // P0-1 defense-in-depth (Codex r1 [P2]): the native-MCP tool bridge is a
   // SPAWN-time property of the REPL, exactly like the tool surface. Compute what
   // THIS request would attach so the reuse guard can refuse to serve a
   // bridge-mismatched warm child — making the bridge restriction LOCAL, not
   // dependent on `substrate_instance_id` keying (today they align, so this never
   // fires; it survives a future edit that varies the bridge at a finer grain).
-  const requestedToolBridge =
-    options.enableToolBridge === true && replToolBridgeRef.current !== undefined
+  const { toolSurface: requestedToolSurface, toolBridge: requestedToolBridge } = requestedReplProfile(options, spec)
   // ── THE COLD PATH MUST NOT SUSPEND, AND "READ FIRST" IS NOT ENOUGH ──────────
   // Two concurrent dispatches on one key de-duplicate onto a single spawn only
   // because NOTHING SUSPENDS between this read and the `pool.set` at the end of the
@@ -1606,7 +1653,7 @@ export async function getOrSpawnSession(
       // hosted-work count does not establish that those children have finished.
       // Keep its ownership in the pool: quarantine would permit a duplicate owner,
       // and reuse would bypass the failed credential/tool/poison guards above.
-      if (session.adopted) {
+      if (session.adopted || hasUnresolvedNativeChild(options)) {
         throw new PaneOwnershipRefusedError(
           'persistent-repl: refusing adopted parent refresh — native-child liveness is unknown; ' +
           'the existing parent remains owned and this turn cannot run until lifecycle reconciliation',

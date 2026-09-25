@@ -211,6 +211,14 @@ const EXPECTED_COMPOSITION_KEYS = [
   // reporter had nowhere to post and the owner never saw the result.
   'onboarding_overnight_cron',
   'platform',
+  // #1237 — the project admission service the chat runner and acting turns
+  // already admit through; exposed for the remaining producers to share.
+  'project_admission',
+  // #1237 — the read-only project liveness census (parent, native children,
+  // shells) a maintenance owner consumes; nothing triggers it in this build.
+  'project_liveness',
+  // #1237 — the maintenance owner: `replace` (no caller) and boot-time `resume`.
+  'project_maintenance',
   'project_slug',
   'realmode_cleanups',
   'reminder_dispatcher',

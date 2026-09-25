@@ -2,6 +2,8 @@ import { createProjectLauncher } from '@neutronai/trident/project-launcher.ts'
 import { TridentAttemptLedger } from '@neutronai/trident/attempt-ledger.ts'
 import { buildSubstrateWorkflowFire, buildWorkflowFirer } from '@neutronai/trident/inner-loop.ts'
 import { prepareProjectBuild } from './wiring/project-build.ts'
+import { buildProjectLiveness } from './wiring/project-liveness.ts'
+import { buildProjectMaintenance } from './wiring/project-maintenance.ts'
 import { createWorkerTerminalHost, workerPlacementScope } from './wiring/project-build-terminal.ts'
 import type { WorkerPlacementHost } from '@neutronai/runtime/workers/worker-placement.ts'
 import { CodexOwnerBindings } from './wiring/codex-owner-binding.ts'
@@ -74,6 +76,10 @@ import {
   PROJECT_REPL_TOOL_DEFS,
 } from '@neutronai/gateway/wiring/build-live-agent-turn.ts'
 import type { LiveAgentOnboardingSeam } from '@neutronai/gateway/wiring/build-live-agent-turn.ts'
+import { ProjectAdmission } from '@neutronai/gateway/project-admission.ts'
+import { setNativeChildLiveness } from '@neutronai/runtime/adapters/claude-code/persistent/native-child-liveness.ts'
+import { reconcileBuildLeases } from '@neutronai/gateway/project-admission-reconcile.ts'
+import { buildAdmissionReleaseObserver } from '@neutronai/gateway/proactive/admission-release.ts'
 import { buildProjectDocComposer } from '@neutronai/gateway/wiring/build-project-doc-composer.ts'
 import { buildProjectKickoffComposer } from '@neutronai/gateway/wiring/build-project-kickoff-composer.ts'
 import { buildProjectKickoff } from '@neutronai/gateway/wiring/build-project-kickoff.ts'
@@ -246,6 +252,9 @@ export type OpenComposition = CompositionInput &
     Pick<
       CompositionInput,
       | 'db'
+      | 'project_admission'
+      | 'project_liveness'
+      | 'project_maintenance'
       | 'project_slug'
       | 'chat_topics_surface'
       | 'chat_history_surface'
@@ -1192,6 +1201,18 @@ export function buildOpenGraphComposer(
     const resolveMcpServers = async (): Promise<ReadonlyArray<ResolvedOwnerMcpServer>> =>
       mcpServerStoreHolder.store === undefined ? [] : await mcpServerStoreHolder.store.resolveApproved()
     codexOwnerBindings.resolveApprovedServers = () => resolveMcpServers()
+    // #1237 — ONE project admission service per boot. Every conversation producer
+    // admits through it before queueing; the per-boot id stamps each durable lease
+    // so a later reconciler can tell this process's leases from a dead one's.
+    // Nothing here fences or replaces anything: no trigger exists in this build.
+    // Constructed HERE — ahead of the substrates and every terminal chain — because
+    // the project parents' spawn-time generation stamp (`admissionGenerationFor`
+    // below), the native-child lease of every bounded build step, and the
+    // build-lease release composed into all three terminal chains all read it. It
+    // needs only the database and the owner handle.
+    const projectAdmission = new ProjectAdmission({ db, ownerHandle: owner_handle, bootId: randomUUID() })
+    setNativeChildLiveness(OWNER_USER_ID, projectId => projectAdmission.listLeases('liveChild')
+      .some(lease => lease.scope.projectId === projectId))
     const wiringCtx: OpenWiringContext = {
       llmPool,
       owner_handle,
@@ -1217,6 +1238,14 @@ export function buildOpenGraphComposer(
       // which is what confines an owner-installed subprocess to the owner's own
       // session.
       resolveMcpServers,
+      // #1237 — the admission generation a project PARENT is spawned under, stamped
+      // into its registry row by the spawn that made it. The pool names General
+      // `'general'` (or leaves it absent) — see `ReplSession.projectId` — so that is
+      // mapped to admission's null here; the conflation is the pool's existing
+      // boundary, not a new one. A real project whose id is literally `general`
+      // shares that pool value today, and so shares this answer.
+      admissionGenerationFor: (id) =>
+        projectAdmission.generationFor(id === undefined || id === 'general' ? null : id),
     }
     const {
       llmCallSubstrate,
@@ -1256,6 +1285,12 @@ export function buildOpenGraphComposer(
                   projectName: projectId => db.prepare<{ name: string }, [string]>(
                     'SELECT name FROM projects WHERE id = ? AND deleted_at IS NULL').get(projectId)?.name,
                 }) },
+                // #1237 — every native child of this run's project REPL holds a
+                // lease, for the run's OWN scope computed from the board key (as
+                // `dispatchAdmissionForKey` does) — never by reversing the pool's
+                // `'general'` sentinel on the line above.
+                nativeChildAdmission: projectAdmission.forNativeChild(
+                  workBoardProjectIdForKey(project_slug, input.run.project_slug) ?? null),
                 spawnProjectSession: async projectId => {
                   const projectSubstrate = makeProjectLiveAgentSubstrate(projectId)
                   if (projectSubstrate === null) throw new Error('Project conversation substrate is unavailable')
@@ -1659,9 +1694,21 @@ export function buildOpenGraphComposer(
     // fabricates an authenticated verdict. Reuses the SAME `NexusStore`
     // `wireMemory` built (reflection's `learning` emitter rides it), always live
     // now that the agent-nexus is the base behavior.
+    // The dispatch chokepoint's admission for a BOARD SCOPE KEY — the trident
+    // `project_slug` IS that key (owner slug = General, otherwise the project id),
+    // and `workBoardProjectIdForKey` inverts it to the exact admission scope.
+    const dispatchAdmissionForKey = (key: string, producer: 'work-board' | 'hold-drain') =>
+      projectAdmission.forDispatch(workBoardProjectIdForKey(project_slug, key) ?? null, producer)
+    // A TERMINAL run's build lease is released FIRST in every terminal chain —
+    // before the board reconcile and the hold sweep — so a dependent card the sweep
+    // re-dispatches observes it gone. Idempotent; never throws.
+    const releaseBuildLeaseOnTerminal = buildAdmissionReleaseObserver({
+      releaseBuild: (run) =>
+        projectAdmission.releaseBuild(workBoardProjectIdForKey(project_slug, run.project_slug) ?? null, run.id),
+    })
     const tridentOnRunTerminal = buildTridentTerminalObserver({
       nexus: nexusStore,
-      observers: [skillForgeOnRunTerminal],
+      observers: [releaseBuildLeaseOnTerminal, skillForgeOnRunTerminal],
     })
 
     // RC3 ([BEHAVIOR]) — the live-agent turn's agent-nexus READER seam, always
@@ -2405,6 +2452,8 @@ export function buildOpenGraphComposer(
           hostRunner: tridentHostRunner,
           preflight: tridentCodexBuildPreflight,
           holds: tridentDispatchHolds,
+          // #1237 — the build admits a durable project lease for its board scope.
+          project_admission: dispatchAdmissionForKey(workBoardScopeKey(project_slug, input.project_id), 'work-board'),
         }
       },
       // Runs started here originate on the app socket, so the terminal result is
@@ -3170,7 +3219,7 @@ export function buildOpenGraphComposer(
       const observeTerminalDeployWake = buildTerminalDeployWakeObserver({
         llm: liveAgentSubstrate === null ? null : {
           compose: (spec, opts) => appWsChatTurn!.composeActingTurn(
-            spec.metering_context?.project_id === 'general'
+            spec.metering_context?.conversationProjectId === null
               ? ownerTopic
               : `${ownerTopic}:${spec.metering_context?.project_id ?? ''}`,
             spec,
@@ -3178,7 +3227,7 @@ export function buildOpenGraphComposer(
           ),
         },
         projectChatScope: (topic_id) =>
-          topic_id.startsWith(`${ownerTopic}:`) ? topic_id.slice(ownerTopic.length + 1) : 'general',
+          topic_id.startsWith(`${ownerTopic}:`) ? topic_id.slice(ownerTopic.length + 1) : null,
         post: async (topic_id, reply, opts) => {
           const result = await deliver(topic_id, {
             body: reply,
@@ -4429,6 +4478,17 @@ export function buildOpenGraphComposer(
     // phase/round/elapsed/stalled from its `linked_run_id`'s `code_trident_runs`
     // row. Stateless wrapper — a second instance elsewhere is harmless.
     const boardRunStore = new TridentRunStore(db)
+    // #1237 — RESTART RECONCILIATION of build leases, ONCE, before any loop that
+    // could create, advance or terminalize a run starts (the tick loop, the hold
+    // drain, the work-wakeup sweep). A lease naming a terminal or missing run is
+    // released; a live run with no lease is re-leased when its scope is open, and
+    // counted + warned when it is fenced (the maintenance census must read it busy).
+    const admissionReconciled = await reconcileBuildLeases({
+      admission: projectAdmission,
+      runs: boardRunStore,
+      projectIdForRun: (run) => workBoardProjectIdForKey(project_slug, run.project_slug) ?? null,
+    })
+    log.info('project_admission_reconciled', { ...admissionReconciled })
     const projectBuildStateRoot = joinPath(owner_home, '.trident', 'project-builds')
     const projectBuildStateReaper = new SupervisedLoop({
       name: 'project-build-state-reaper',
@@ -4682,13 +4742,12 @@ export function buildOpenGraphComposer(
       // Its queue admits the wake before the timeout starts, on the project REPL.
       llm: liveAgentSubstrate === null ? null : {
         compose: (spec, opts) => appWsChatTurn!.composeActingTurn(
-          tridentDeliveryChatId(spec.metering_context?.project_id === 'general'
-            ? null : spec.metering_context?.project_id ?? null),
+          tridentDeliveryChatId(spec.metering_context?.conversationProjectId ?? null),
           spec,
           { timeout_ms: opts?.timeout_ms ?? TERMINAL_BUILD_WAKE_TURN_TIMEOUT_MS },
         ),
       },
-      projectChatScope: (run) => workBoardProjectIdForKey(project_slug, run.project_slug) ?? 'general',
+      projectChatScope: (run) => workBoardProjectIdForKey(project_slug, run.project_slug) ?? null,
       // Durable inert row + live push to the run's own chat; buzz only when loud.
       post: async (run, reply, opts) => {
         const result = await deliver(run.chat_id ?? tridentDeliveryChatId(null), {
@@ -4773,6 +4832,8 @@ export function buildOpenGraphComposer(
                 // one this gate originally missed.
                 preflight: tridentCodexBuildPreflight,
                 holds: tridentDispatchHolds,
+                // #1237 — the build admits a durable project lease for its board scope.
+                projectAdmission: dispatchAdmissionForKey(slug, 'work-board'),
               },
             )
             if (result.ok) return { ok: true, run_id: result.run.id }
@@ -5884,6 +5945,7 @@ export function buildOpenGraphComposer(
         ? buildLiveAgentTurn({
             configuredModel: (projectId) => projectModelTier(env, projectId),
             substrate: liveAgentSubstrate,
+            admission: projectAdmission,
             injectActiveTurn: (turn, text) => injectPersistentReplActiveTurn({
               substrate_instance_id: `cc-agent-${owner_handle}`,
               user_id: OWNER_USER_ID,
@@ -6390,6 +6452,9 @@ export function buildOpenGraphComposer(
         landedProbe: tridentLandedProbe,
         hostRunner: tridentHostRunner,
         preflight: tridentCodexBuildPreflight,
+        // #1237 — an unattended re-dispatch admits for the hold's own scope, so a
+        // fenced project keeps its card queued until admission reopens.
+        projectAdmission: dispatchAdmissionForKey(hold.project_slug, 'hold-drain'),
         // Replay the ORIGINATING turn's chat/limits context, so a build that
         // finally starts an hour later still answers into the conversation that
         // asked for it instead of going silently to no one.
@@ -6407,7 +6472,7 @@ export function buildOpenGraphComposer(
         store: boardRunStore,
         observer: composeTerminalHook(
           buildTridentDelivery({ sink: channelRouter }),
-          [buildBoardReconcileObserver(workBoardStore), skillForgeOnRunTerminal, terminalBuildWake, tridentHoldSweep].filter(
+          [releaseBuildLeaseOnTerminal, buildBoardReconcileObserver(workBoardStore), skillForgeOnRunTerminal, terminalBuildWake, tridentHoldSweep].filter(
             (o): o is (run: TridentRun) => Promise<void> => o !== null,
           ),
         ),
@@ -6428,7 +6493,7 @@ export function buildOpenGraphComposer(
         store: boardRunStore,
         observer: composeTerminalHook(
           { onTerminal: async (): Promise<void> => {} },
-          [buildBoardReconcileObserver(workBoardStore), skillForgeOnRunTerminal, terminalBuildWake, tridentHoldSweep].filter(
+          [releaseBuildLeaseOnTerminal, buildBoardReconcileObserver(workBoardStore), skillForgeOnRunTerminal, terminalBuildWake, tridentHoldSweep].filter(
             (o): o is (run: TridentRun) => Promise<void> => o !== null,
           ),
         ),
@@ -6805,6 +6870,12 @@ export function buildOpenGraphComposer(
       // and therefore the warm-pool key: asking about any other string would
       // answer about a different child than the one that would serialize.
       agentBusy: (chat_scope: string): boolean => isBackgroundComposeInFlight(chat_scope),
+      // #1237 — the sweep composes on the background child DIRECTLY, not through
+      // the chat runner's admitted acting turn, so it admits its own lease for the
+      // exact project scope, held through compose + post.
+      admission: {
+        admit: (projectId, workRef) => projectAdmission.admit(projectId, 'queuedDispatch', 'wakeup', workRef),
+      },
       // The SAME warm-substrate wrapper the fired-reminder path composes
       // through — one substrate entry point, two callers — and on the SAME
       // background REPL (`cc-nudge-*`), never the owner's chat REPL. This wakeup is
@@ -6903,11 +6974,56 @@ export function buildOpenGraphComposer(
       telegramWebhookSurface = null
     }
 
+    // #1237 — the READ-ONLY liveness census of one project scope (parent, native
+    // children, shells), and the maintenance owner that consumes it.
+    const projectLiveness = buildProjectLiveness({
+      admission: projectAdmission,
+      turnInFlight: (projectId) => activityInspector.snapshot(inspectorScopeKey(projectId)).turn_in_flight,
+      runs: boardRunStore,
+      projectIdForRun: (run) => workBoardProjectIdForKey(project_slug, run.project_slug) ?? null,
+    })
+    const projectMaintenance = buildProjectMaintenance({
+      admission: projectAdmission,
+      liveness: projectLiveness,
+      log: {
+        info: (event, fields) => log.info(event, fields),
+        error: (event, fields) => log.error(event, fields),
+      },
+    })
     return {
       db,
+      // #1237 — the admission service chat and acting turns already admit
+      // through; later producers and maintenance owners consume this field.
+      project_admission: projectAdmission,
+      // #1237 — exposed only: no loop, no trigger, nothing fences or replaces on
+      // the census's answer in this build.
+      project_liveness: projectLiveness,
+      // #1237 — the maintenance owner: exact-generation replacement (`replace`) and
+      // restart continuity (`resume`). `replace` has NO caller — no loop, watchdog,
+      // admin route or reminder reaches it in this build. `resume` runs only from
+      // `on_graph_ready` below.
+      project_maintenance: projectMaintenance,
       // The graph binds the tool bridge after this composer returns. Survivors
       // regain authority only after that binding, with no synthetic chat turn.
-      on_graph_ready: () => adoptLiveAgentRepls([null, ...listProjectIds()]),
+      // THEN restart continuity for every scope, the ONLY production maintenance
+      // call: a pre-replacement fence a crash left behind is released, and a
+      // replacing/attesting fence reopens only when its already-spawned replacement
+      // attests — otherwise it stays fenced. Boot never spawns or kills a parent here.
+      on_graph_ready: async () => {
+        const scopes = [null, ...listProjectIds()]
+        await adoptLiveAgentRepls(scopes)
+        for (const projectId of scopes) {
+          const outcome = await projectMaintenance.resume(projectId)
+          if (outcome.status !== 'open') {
+            log.info('project_maintenance_resumed', {
+              projectId,
+              status: outcome.status,
+              ...('phase' in outcome ? { phase: outcome.phase } : {}),
+              ...('reasons' in outcome ? { reasons: outcome.reasons.join('; ') } : {}),
+            })
+          }
+        }
+      },
       project_slug,
       // ALWAYS set, never conditionally spread. A field the composer assigns
       // only sometimes is exactly the ambiguity `composition-field-coverage`
@@ -7507,6 +7623,8 @@ export function buildOpenGraphComposer(
               // second copy. Three entries, one gate.
               preflight: tridentCodexBuildPreflight,
               holds: tridentDispatchHolds,
+              // #1237 — each call admits for the board scope it derives.
+              project_admission: (scope_key: string) => dispatchAdmissionForKey(scope_key, 'work-board'),
             },
           }
         : {}),

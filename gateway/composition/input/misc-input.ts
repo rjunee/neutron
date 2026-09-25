@@ -1,8 +1,36 @@
 import type { CronJobRegistry } from '@neutronai/cron/jobs.ts'
 import type { LoopRegistry } from '@neutronai/loop'
 import type { ProjectDb } from '@neutronai/persistence/index.ts'
+import type { ProjectAdmission } from '../../project-admission.ts'
 
 export interface MiscCompositionInput {
+  /**
+   * #1237 — the per-boot project admission service. Chat, parent input and host
+   * acting turns admit through it before queueing; the remaining producers and
+   * the maintenance owner consume this same instance. Exposed only — boot runs no
+   * maintenance of its own.
+   */
+  project_admission?: ProjectAdmission
+  /**
+   * #1237 — the READ-ONLY liveness census of one project scope (`null` = General):
+   * its parent REPL, the parent's native children and its shells, each `idle`,
+   * `busy` or `unknown`. Exposed for a maintenance owner; boot runs no census, and
+   * nothing fences or replaces on its answer.
+   */
+  project_liveness?: {
+    census(projectId: string | null): Promise<import('../../project-liveness-census.ts').ProjectLivenessCensus>
+  }
+  /**
+   * #1237 — the project maintenance owner (`null` = General). `replace` fences the
+   * scope, proves its exact parent generation quiescent, replaces it with a resume of
+   * the same conversation and attests the replacement before reopening; NOTHING in
+   * production calls it. `resume` is restart continuity for a fence a previous
+   * process left behind, and runs at boot only.
+   */
+  project_maintenance?: {
+    replace(projectId: string | null): Promise<import('../../project-generation-replacement.ts').ReplacementOutcome>
+    resume(projectId: string | null): Promise<import('../../project-generation-replacement.ts').ResumeOutcome>
+  }
   /** Awaited after graph tools and HTTP wiring exist, before accepting traffic. */
   on_graph_ready?: () => Promise<void>
   db: ProjectDb
@@ -469,6 +497,12 @@ export interface MiscCompositionInput {
      * itself: builds still start, they just stop respecting dependencies.
      */
     holds?: import('@neutronai/trident/dispatch-holds.ts').DispatchHoldStore
+    /**
+     * #1237 — project admission for the board scope key each call derives
+     * (producer `work-board`). REQUIRED: a dispatch without a lease is invisible
+     * to a maintenance fence.
+     */
+    project_admission: (scope_key: string) => import('@neutronai/trident/dispatch-admission.ts').DispatchAdmission
   }
   /**
    * Codex connect/status agent tools (Part B) — when supplied, the `tools`

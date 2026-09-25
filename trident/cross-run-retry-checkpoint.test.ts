@@ -11,6 +11,7 @@ import { spawnCapture } from './git-mode.ts'
 import { slugifyTask } from './slugify-task.ts'
 import type { ResumeCheckpoint } from './build-run.ts'
 import { readBuildRetrySource } from './build-mode-state.ts'
+import { fixtureDispatchAdmission } from './__tests__/dispatch-admission-fixture.ts'
 
 const cleanups: (() => void)[] = []
 afterEach(() => { for (const cleanup of cleanups.splice(0)) cleanup() })
@@ -49,7 +50,7 @@ async function fixture(over: { checkpoint?: Partial<ResumeCheckpoint>; phase?: '
   await store.update(prior.id, { phase: over.phase ?? 'failed' })
   const tipReads: string[] = []
   const dispatch = (tip: string | ((mode: string) => string) = HEAD, linkedRun: string | null = prior.id, task = TASK) => dispatchBoardBoundBuild({ task, board_item_id: 'card' }, {
-    store, project_slug: 'project', repo_path: dir,
+    store, projectAdmission: fixtureDispatchAdmission(db), project_slug: 'project', repo_path: dir,
     board: { get: () => ({ id: 'card', title: TASK, design_doc_ref: null, linked_run_id: linkedRun,
       execution_strategy: 'task_sequence', strategy_source: 'planner',
       ...(over.cardRound === undefined ? {} : { task_iteration: over.cardRound, max_task_iterations: 8 }) }),

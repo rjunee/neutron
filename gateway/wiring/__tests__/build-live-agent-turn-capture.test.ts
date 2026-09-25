@@ -32,6 +32,7 @@ import type { AgentSpec, Substrate } from '@neutronai/runtime/substrate.ts'
 import type { SessionHandle } from '@neutronai/runtime/session-handle.ts'
 import { buildLiveAgentTurn, type LiveAgentOnboardingSeam } from '../build-live-agent-turn.ts'
 import type { LiveAgentTurnRequest } from '../../http/chat-bridge.ts'
+import { openAdmission } from './project-admission-fixture.ts'
 
 let tmp: string
 let db: ProjectDb
@@ -107,6 +108,7 @@ function makeSeam(opts: { finalized: boolean }): SeamProbe {
 
 function makeRunner(reply: string, seam: LiveAgentOnboardingSeam, specs: AgentSpec[]) {
   return buildLiveAgentTurn({
+    admission: openAdmission(),
     substrate: makeStubSubstrate(reply, specs),
     personaLoader: { load: async (): Promise<string> => '' },
     buttonStore: store,

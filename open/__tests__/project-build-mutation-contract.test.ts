@@ -49,6 +49,7 @@ async function fixture() {
     store, attempts: new TridentAttemptLedger(db), projectDir: dir, projectId: 'contract-project',
     stateRoot: join(dir, 'state'), provider: 'anthropic', providerSource: 'application', env: {}, runHost: spawnCapture,
     spawnProjectSession: async () => { throw new Error('brief preparation must not dispatch a worker') },
+    nativeChildAdmission: { complete: async () => 0, admit: async () => { throw new Error('brief preparation must not admit a native child') } },
   }, new AbortController().signal)
   return { options, run: store.get(row.id)!, head }
 }

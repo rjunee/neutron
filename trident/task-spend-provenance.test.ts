@@ -10,6 +10,7 @@ import { createProductionHostEffects } from './production-host-effects.ts'
 import { dispatchBoardBoundBuild } from './board-dispatch.ts'
 import { slugifyTask } from './slugify-task.ts'
 import { spawnCapture } from './git-mode.ts'
+import { fixtureDispatchAdmission } from './__tests__/dispatch-admission-fixture.ts'
 
 const cleanups: (() => void)[] = []
 afterEach(() => { for (const cleanup of cleanups.splice(0)) cleanup() })
@@ -40,7 +41,7 @@ async function fixture(cap = 1) {
   const handoff = { ...JSON.parse(first.meta!), iteration: 1, consumed: { round: 0, head: HEAD },
     checkpoint: { ...JSON.parse(first.meta!).checkpoint, stage: 'task-built', round: 0 } }
   const dispatch = (tip = HEAD, task = TASK) => dispatchBoardBoundBuild({ task, board_item_id: card.id }, {
-    store, board, project_slug: 'project', repo_path: dir,
+    store, projectAdmission: fixtureDispatchAdmission(db), board, project_slug: 'project', repo_path: dir,
     resolveBuildRepo: async () => dir, resolveMergeMode: async () => 'local', readBranchTip: async () => tip,
   })
   return { db, store, board, card, run, options, host, first, handoff, dispatch }

@@ -255,6 +255,17 @@ export interface ReplRegistryRecord {
    * interactive-login sentinel and is compatible across the representation change.
    */
   reuse?: ReplReuseProperties
+  /**
+   * #1237 — THE PROJECT ADMISSION GENERATION THIS CHILD WAS SPAWNED UNDER. Written by
+   * the spawn that made the child, in the same write as `reuse`, from the host's
+   * reader (`PersistentReplSubstrateOptions.admissionGeneration`).
+   *
+   * ABSENT on every row from before this field existed and on a spawn whose reader
+   * answered nothing. Absence is the LEGACY-UNKNOWN parent: its native children held
+   * no leases, so nothing can prove them finished. It is NEVER inferred from the
+   * current fence — adoption restores exactly what the row says, or nothing.
+   */
+  admission_generation?: number
   /** Model id the REPL spawned with — replayed on `--resume` so a respawn keeps
    *  the same `--model`. */
   model?: string

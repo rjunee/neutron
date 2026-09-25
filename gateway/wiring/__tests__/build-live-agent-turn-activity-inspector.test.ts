@@ -23,6 +23,7 @@ import type { Event } from '@neutronai/runtime/events.ts'
 import type { AgentSpec, Substrate } from '@neutronai/runtime/substrate.ts'
 import type { SessionHandle } from '@neutronai/runtime/session-handle.ts'
 import { buildLiveAgentTurn } from '../build-live-agent-turn.ts'
+import { openAdmission } from './project-admission-fixture.ts'
 
 let tmp: string
 let db: ProjectDb
@@ -72,6 +73,7 @@ interface Capture {
 
 function makeRunner(substrate: Substrate, cap: Capture) {
   return buildLiveAgentTurn({
+    admission: openAdmission(),
     substrate,
     activityInspector: {
       on_event: (scope, ev) => cap.events.push({ scope, ev: ev as Event }),
@@ -158,6 +160,7 @@ describe('build-live-agent-turn — activity inspector tee', () => {
     // from a `wedged` one. Without it, every stale-clock scope reads as wedged.
     const order: string[] = []
     const run = buildLiveAgentTurn({
+      admission: openAdmission(),
       substrate: makeSubstrate(REPLY),
       activityInspector: {
         on_event: () => order.push('event'),
@@ -217,6 +220,7 @@ describe('build-live-agent-turn — activity inspector tee', () => {
     // Observe-only contract, asserted at the runner (not just the drain): a broken
     // inspector must never cost the owner a reply.
     const run = buildLiveAgentTurn({
+      admission: openAdmission(),
       substrate: makeSubstrate(REPLY),
       activityInspector: {
         on_event: () => {
@@ -253,6 +257,7 @@ describe('build-live-agent-turn — activity inspector tee', () => {
 
   test('omitting the inspector leaves the turn byte-identical (no tee at all)', async () => {
     const run = buildLiveAgentTurn({
+      admission: openAdmission(),
       substrate: makeSubstrate(REPLY),
       personaLoader: {
         async load(): Promise<string> {

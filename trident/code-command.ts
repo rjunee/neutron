@@ -26,6 +26,7 @@ import { describeBuildFleet } from './active-runs.ts'
 import type { Topic } from '@neutronai/channels/types.ts'
 import type { MergeMode, TridentRun, TridentRunStore } from './store.ts'
 import type { EnvCapableHostRunner } from './git-mode.ts'
+import type { DispatchAdmission } from './dispatch-admission.ts'
 import { buildTridentTerminator } from './terminate.ts'
 import { buildBoardReconcileObserver } from './board-reconcile.ts'
 import { composeTerminalHook } from './terminal-observer.ts'
@@ -186,6 +187,13 @@ export interface TridentCodeContext {
    * unchanged behaviour.
    */
   preflight?: () => Promise<{ ok: true } | { ok: false; reason: string }>
+  /**
+   * PROJECT ADMISSION for this `/code` message's board scope (#1237), forwarded to
+   * the chokepoint (`BoardBoundBuildDeps.projectAdmission`). REQUIRED — `/code` is
+   * a production dispatch entry, and a build without a lease is invisible to a
+   * maintenance fence.
+   */
+  project_admission: DispatchAdmission
 }
 
 /** Dispatch the parsed command. */
@@ -249,6 +257,7 @@ async function executeDispatch(
     ...(ctx.max_rounds !== undefined ? { max_rounds: ctx.max_rounds } : {}),
     ...(ctx.max_task_iterations !== undefined ? { max_task_iterations: ctx.max_task_iterations } : {}),
     ...(ctx.preflight !== undefined ? { preflight: ctx.preflight } : {}),
+    projectAdmission: ctx.project_admission,
   }
   const result = await dispatchBoardBoundBuild({ task: cmd.task, board_item_id: cmd.board_item_id }, deps)
 

@@ -29,6 +29,7 @@ import {
   type LiveAgentOnboardingSeam,
 } from '../build-live-agent-turn.ts'
 import type { LiveAgentTurnRequest } from '../../http/chat-bridge.ts'
+import { openAdmission } from './project-admission-fixture.ts'
 
 let tmp: string
 let db: ProjectDb
@@ -84,6 +85,7 @@ function makeOnboardingSeam(active: boolean): LiveAgentOnboardingSeam {
 function makeRunner(reply: string, opts: { onboarding?: boolean }) {
   const specs: AgentSpec[] = []
   const runner = buildLiveAgentTurn({
+    admission: openAdmission(),
     substrate: makeStubSubstrate(reply, specs),
     personaLoader: { load: async (): Promise<string> => '' },
     buttonStore: store,

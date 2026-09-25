@@ -28,6 +28,7 @@ import type { SessionHandle } from '@neutronai/runtime/session-handle.ts'
 import { buildLiveAgentTurn } from '../build-live-agent-turn.ts'
 import type { LiveAgentTurnRequest } from '../../http/chat-bridge.ts'
 import { projectModelTier } from '@neutronai/runtime/configured-models.ts'
+import { openAdmission } from './project-admission-fixture.ts'
 
 let tmp: string
 let db: ProjectDb
@@ -175,6 +176,7 @@ describe('Layer B — context-reset rehydration seam', () => {
     let indexCalls = 0
     const bus = makeSignal()
     const run = buildLiveAgentTurn({
+      admission: openAdmission(),
       substrate: makeStubSubstrate(specs),
       personaLoader: { async load() { return '' } },
       memoryIndexSnapshot: async () => {
@@ -213,6 +215,7 @@ describe('Layer B — context-reset rehydration seam', () => {
     const sent: ChatOutbound[] = []
     const bus = makeSignal()
     const run = buildLiveAgentTurn({
+      admission: openAdmission(),
       substrate: makeStubSubstrate(specs),
       personaLoader: { async load() { return '' } },
       memoryIndexSnapshot: async () => INDEX,
@@ -256,6 +259,7 @@ describe('Layer B — context-reset rehydration seam', () => {
       if (callIndex === 1) bus.fire('proj-A')
     })
     const run = buildLiveAgentTurn({
+      admission: openAdmission(),
       substrate,
       personaLoader: { async load() { return '' } },
       memoryIndexSnapshot: async () => {
@@ -293,6 +297,7 @@ describe('Layer B — context-reset rehydration seam', () => {
     const sent: ChatOutbound[] = []
     const bus = makeSignal()
     const run = buildLiveAgentTurn({
+      admission: openAdmission(),
       substrate: makeStubSubstrate(specs),
       personaLoader: { async load() { return '' } },
       memoryIndexSnapshot: async () => INDEX,
@@ -337,6 +342,7 @@ describe('Layer B — context-reset rehydration seam', () => {
       }
     })
     const run = buildLiveAgentTurn({
+      admission: openAdmission(),
       substrate,
       personaLoader: { async load() { return '' } },
       memoryIndexSnapshot: async () => {
@@ -385,6 +391,7 @@ test('configured chat rehydrates every turn and restores cold context when retur
   const sent: ChatOutbound[] = []
   let selected: string | undefined
   const run = buildLiveAgentTurn({
+    admission: openAdmission(),
     substrate: makeStubSubstrate(specs),
     configuredModel: () => selected,
     personaLoader: { async load() { return '' } },
@@ -406,6 +413,7 @@ test('configured chat rehydrates every turn and restores cold context when retur
 test('configured chat failure names the selected tier in the user bubble', async () => {
   const sent: ChatOutbound[] = []
   const run = buildLiveAgentTurn({
+    admission: openAdmission(),
     substrate: { start() { return { ...makeStubSubstrate([]).start({ prompt: '', tools: [], model_preference: [] }),
       events: (async function* (): AsyncGenerator<Event> { yield { kind: 'error', code: 'no_credentials', retryable: false, message: 'missing credential' } })(),
     } } },
@@ -426,6 +434,7 @@ test(`configured literal-general tier isolates overlapping input for ${projectId
   let injected = 0
   const sent: ChatOutbound[] = []
   const run = buildLiveAgentTurn({
+    admission: openAdmission(),
     substrate: { start() { return {
       ...makeStubSubstrate([]).start({ prompt: '', tools: [], model_preference: [] }),
       events: (async function* (): AsyncGenerator<Event> {

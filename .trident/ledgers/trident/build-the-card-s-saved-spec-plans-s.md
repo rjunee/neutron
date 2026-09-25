@@ -1,0 +1,4 @@
+- [x] T1: Admission service over the store (scope rules, existence-verified registration, resume/abandon), chat and parent-input gate in the live-agent turn, wired in the Open composer
+- [x] T2: Work Board dispatch, hold drain and queued wakeups admit through the same scope; build leases release on run terminal and reconcile on restart; fenced holds are retained
+- [x] T3: Native-child leases from the acting turn, the parent/child/shell liveness census, and the registry admission generation stamp that keeps legacy adopted parents unknown
+- [ ] T4: Exact-generation replacement preserving the resumed conversation, tool-profile attestation before reopen, exposed in composition with no trigger, e2e cases and the as-built shard

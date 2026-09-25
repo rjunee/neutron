@@ -3,6 +3,7 @@
 // the model-update watchdog, and test/operator introspection (D2 split).
 
 import { existsSync, statSync } from 'node:fs'
+import { hasUnresolvedNativeChild } from './native-child-liveness.ts'
 import { emitSystemEvent } from '@neutronai/persistence/index.ts'
 import { getBestModel, getKnownFallbackModels, setBestModelOverride } from '../../../models.ts'
 import type { AgentSpec } from '../../../substrate.ts'
@@ -56,7 +57,12 @@ export function registerSupervisedSubstrate(options: PersistentReplSubstrateOpti
     if (state.kind === 'unreadable' || (state.kind === 'loaded' &&
         (state.droppedKeys.includes(key) || (state.registry[key] !== undefined &&
           !registryConversationScopeMatches(state.registry[key]!, options))))) return
-    supervisedBySessionKey.set(key, options)
+    const prior = supervisedBySessionKey.get(key)
+    // A same-key wake cannot erase the owner's previously attested scope.
+    if (prior?.conversationProjectId !== undefined) {
+      if (options.conversationProjectId !== undefined && options.conversationProjectId !== prior.conversationProjectId) return
+      supervisedBySessionKey.set(key, { ...options, conversationProjectId: prior.conversationProjectId })
+    } else supervisedBySessionKey.set(key, options)
   }
 }
 
@@ -253,6 +259,7 @@ export function respawnReplSession(
       | { kind: 'go'; record: ReplRegistryRecord }
       | { kind: 'registry-write-refused' }
       | { kind: 'scope-refused' }
+      | { kind: 'child-unresolved' }
       | { kind: 'no-record' }
       | { kind: 'in-flight' }
       | { kind: 'capped'; just_tripped?: boolean }
@@ -263,6 +270,12 @@ export function respawnReplSession(
       // eventual spawn: executeRespawn kills and evicts before it spawns.
       if (!registryConversationScopeMatches(rec, options)) {
         return { registry, result: { kind: 'scope-refused' }, skipSave: true }
+      }
+      // Establish ownership before consulting this scope's child authority.
+      // A wedged parent does not prove its native children are terminal; force
+      // bypasses cooldown/cap only, never this guard or its no-write refusal.
+      if (hasUnresolvedNativeChild(options)) {
+        return { registry, result: { kind: 'child-unresolved' }, skipSave: true }
       }
       const inFlight =
         rec.respawn_in_flight_at !== undefined && now - rec.respawn_in_flight_at < RESPAWN_IN_FLIGHT_TTL_MS
@@ -308,6 +321,8 @@ export function respawnReplSession(
 
     if (decision.kind === 'scope-refused') return { ok: false, reason: 'spawn-failed', sessionKey,
       error: new RespawnClaimRefusedError('Conversation scope is ambiguous or mismatched; refusing respawn') }
+    if (decision.kind === 'child-unresolved') return { ok: false, reason: 'spawn-failed', sessionKey,
+      error: new RespawnClaimRefusedError('Native child liveness is unresolved; refusing parent respawn') }
     if (decision.kind === 'no-record') return { ok: false, reason: 'session-not-found', sessionKey }
     if (decision.kind === 'in-flight') return { ok: false, reason: 'spawn-failed', sessionKey }
     if (decision.kind === 'capped') {
@@ -334,6 +349,9 @@ export function respawnReplSession(
       execute: (plan) => {
         const rec = getRecord(registryPath, sessionKey)
         if (!rec) return { ok: false, reason: 'session-not-found' }
+        // Re-read durable ownership at the consuming edge after the registry
+        // claim. Refusal clears that claim below, before any kill or eviction.
+        if (hasUnresolvedNativeChild(options)) return { ok: false, reason: 'spawn-failed' }
         const outcome = executeRespawn(rec, plan, trigger, reason, deps)
         return outcome.reason !== undefined
           ? { ok: outcome.ok, reason: outcome.reason }

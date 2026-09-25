@@ -26,6 +26,7 @@ import {
   type BoardBoundBuildDeps,
   type TridentBoardBinder,
 } from './board-dispatch.ts'
+import { fixtureBuildLeases, fixtureDispatchAdmission, fixtureProjectAdmission } from './__tests__/dispatch-admission-fixture.ts'
 
 let tmp: string
 let db: ProjectDb
@@ -80,6 +81,7 @@ function deps(
 } {
   return {
     store,
+    projectAdmission: fixtureDispatchAdmission(db),
     board,
     project_slug: SLUG,
     repo_path: '/home/owner',
@@ -1288,5 +1290,83 @@ describe('listByProject — the board surfaces read holds per project', () => {
     expect(row?.board_item_id).toBe('B')
     // The exact text the chat message carried is the text the board will show.
     expect(row?.hold_reason).toBe(res.message)
+  })
+})
+
+describe('PROJECT FENCED IS TRANSIENT — the sweep retains a fenced hold (#1237)', () => {
+  const card = (): StubBoard =>
+    stubBoard([{ id: 'A', title: 'the card whose project is fenced for maintenance', design_doc_ref: null, status: 'upcoming' }])
+
+  async function fenceGeneral() {
+    const admission = fixtureProjectAdmission(db)
+    await admission.maintenance.register(admission.scopeFor(null))
+    const fence = await admission.maintenance.beginMaintenance(admission.scopeFor(null))
+    expect(fence).not.toBeNull()
+    return { admission, fence: fence! }
+  }
+
+  async function queueFencedHold(board: StubBoard) {
+    const fenced = await fenceGeneral()
+    const first = await dispatchBoardBoundBuild({ task: 'edit trident/foo.ts', board_item_id: 'A' }, deps(board))
+    expect(first).toMatchObject({ ok: false, code: 'project_fenced' })
+    expect(holds.getByItem(SLUG, 'A')).not.toBeNull()
+    return fenced
+  }
+
+  test('a fenced hold is RETAINED and not dispatched; reopening lets the next sweep dispatch it', async () => {
+    const board = card()
+    const { admission, fence } = await queueFencedHold(board)
+
+    const sweep = buildDispatchHoldSweep({ holds, board, makeDispatchDeps: () => deps(board) })
+    await sweep({ id: 'unrelated' } as never)
+    // Still fenced: nothing ran, the card is STILL QUEUED, no lease is held.
+    expect(runCount()).toBe(0)
+    expect(holds.getByItem(SLUG, 'A')).not.toBeNull()
+    expect(fixtureBuildLeases(db)).toEqual([])
+
+    // Admission reopens → the very next sweep dispatches the card. No human acted.
+    expect(await admission.maintenance.abandon(fence)).toBe(true)
+    await sweep({ id: 'unrelated' } as never)
+    expect(runCount()).toBe(1)
+    expect(holds.getByItem(SLUG, 'A')).toBeNull()
+    expect(board.attached.map((x) => x.id)).toEqual(['A'])
+    expect(fixtureBuildLeases(db).map((l) => l.workRef)).toEqual([board.attached[0]!.run_id])
+  })
+
+  test('an UNKNOWN-project hold is retained with a warn line; a non-retained code still deletes', async () => {
+    const board = card()
+    const { admission, fence } = await queueFencedHold(board)
+    expect(await admission.maintenance.abandon(fence)).toBe(true)
+
+    const warns = spyOn(console, 'warn').mockImplementation(() => {})
+    try {
+      await buildDispatchHoldSweep({
+        holds,
+        board,
+        makeDispatchDeps: () => deps(board, { projectAdmission: fixtureDispatchAdmission(db, 'gone-project') }),
+      })({ id: 'unrelated' } as never)
+      expect(warns.mock.calls.flat().join(' ')).toContain('dispatch_hold_project_unknown')
+    } finally {
+      warns.mockRestore()
+    }
+    expect(holds.getByItem(SLUG, 'A')).not.toBeNull()
+    expect(runCount()).toBe(0)
+
+    // Opposite control: a refusal the sweep does NOT retain (a throwing
+    // merge-mode probe → backend_error) deletes the same hold.
+    const quiet = spyOn(console, 'warn').mockImplementation(() => {})
+    try {
+      await buildDispatchHoldSweep({
+        holds,
+        board,
+        makeDispatchDeps: () => deps(board, { resolveMergeMode: async () => { throw new Error('probe exploded') } }),
+      })({ id: 'unrelated' } as never)
+      expect(quiet.mock.calls.flat().join(' ')).toContain('dispatch_hold_rejected')
+    } finally {
+      quiet.mockRestore()
+    }
+    expect(holds.getByItem(SLUG, 'A')).toBeNull()
+    expect(runCount()).toBe(0)
+    expect(fixtureBuildLeases(db)).toEqual([])
   })
 })

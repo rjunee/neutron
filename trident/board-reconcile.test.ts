@@ -19,6 +19,7 @@ import { isTerminalPhase } from './state-machine.ts'
 import { TridentRunStore } from './store.ts'
 import { TridentTickLoop } from './tick.ts'
 import { honourDiffOutput } from './testing/diff-output-host.ts'
+import { fixtureDispatchAdmission } from './__tests__/dispatch-admission-fixture.ts'
 
 let tmp: string
 let db: ProjectDb
@@ -266,6 +267,7 @@ describe('end-to-end — the tick loop reconciles the board on a terminal run', 
     })
     const deps = {
       store,
+      projectAdmission: fixtureDispatchAdmission(db),
       board,
       project_slug: 'proj-1',
       repo_path: '/repo',
@@ -310,6 +312,7 @@ describe('end-to-end — the tick loop reconciles the board on a terminal run', 
       { board_item_id: item.id, task: 'wire the widget' },
       {
         store,
+        projectAdmission: fixtureDispatchAdmission(db),
         board,
         project_slug: 'proj-1',
         repo_path: '/repo',

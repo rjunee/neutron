@@ -17,6 +17,7 @@ import { join } from 'node:path'
 import { ProjectDb } from '@neutronai/persistence/index.ts'
 import { TridentRunStore } from '@neutronai/trident/store.ts'
 import { TridentAttemptLedger } from '@neutronai/trident/attempt-ledger.ts'
+import { ProjectAdmission } from '@neutronai/gateway/project-admission.ts'
 import { seedMigratedDb } from '../../tests/support/migrated-db.ts'
 import { reserveFreePort } from '../../tests/support/test-isolation.ts'
 import * as runners from '@neutronai/runtime/workers/project-runners.ts'
@@ -97,7 +98,10 @@ async function fixture() {
   cleanup.push(() => { runnerSpy.mockRestore(); codexSpy.mockRestore() })
   const commands: string[][] = []
   let spawnProjectSession = async (_projectId: string): Promise<void> => {}
+  // #1237 — the REAL admission over the fixture's migrated db; General is always live.
+  const admission = new ProjectAdmission({ db, ownerHandle: 'fixture-owner', bootId: 'fixture-boot' })
   const context: ProjectBuildContext = { store, attempts: new TridentAttemptLedger(db), projectDir: dir, projectId: 'fixture-project',
+    nativeChildAdmission: admission.forNativeChild(null),
     stateRoot: join(dir, 'state'), provider: 'anthropic', providerSource: 'application', env: {}, spawnProjectSession: projectId => spawnProjectSession(projectId), runHost: async argv => {
       commands.push([...argv])
       return { ok: true, exit_code: 0, stdout: argv.includes('symbolic-ref') ? 'refs/heads/change' : '', stderr: '' }
@@ -105,7 +109,7 @@ async function fixture() {
   context.runSuite = context.runHost
   const input: InnerLoopInput = { run: store.get(row.id)!, base_branch: 'main', db_path: join(dir, 'db'), max_rounds: 3 }
   const prepare = () => prepareProjectBuild(input, context, new AbortController().signal)
-  return { dir, input, context, prepare, commands, captured: () => captured,
+  return { dir, db, admission, input, context, prepare, commands, captured: () => captured,
     setSpawnProjectSession: (spawn: (projectId: string) => Promise<void>) => { spawnProjectSession = spawn } }
 }
 

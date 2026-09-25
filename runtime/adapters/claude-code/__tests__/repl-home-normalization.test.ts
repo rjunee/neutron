@@ -185,6 +185,14 @@ function registeredFor(instanceId: string): PersistentReplSubstrateOptions | und
   return undefined
 }
 
+test('adapter forwards trusted auxiliary provenance into supervised persistent options', () => {
+  for (const role of ['setup', 'fire'] as const) {
+    const id = `auxiliary-adapter-${role}`
+    build({ substrate_instance_id: id, cwd: tempHome(`auxiliary-${role}-`), nativeChildCensusRole: role })
+    expect(registeredFor(id)?.nativeChildCensusRole).toBe(role)
+  }
+})
+
 /** Every instance id this FILE constructed, so teardown can name them. */
 const ourInstanceIds: string[] = []
 

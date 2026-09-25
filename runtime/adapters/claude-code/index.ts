@@ -187,6 +187,8 @@ export interface ClaudeCodeSubstrateOptions {
   user_id?: string
   project_id?: string
   conversationProjectId?: string | null
+  /** Trusted setup/FIRE constructor provenance; explicit conversation scope wins. */
+  nativeChildCensusRole?: 'setup' | 'fire'
   credential_identity?: string
   /** S3 §2 — owning instance slug (advisory: redelivery logging / scoping). */
   instance_slug?: string
@@ -213,6 +215,8 @@ export interface ClaudeCodeSubstrateOptions {
   onChildCrash?: (info: ChildCrashInfo) => void | Promise<void>
   /** Eviction guard — see `PersistentReplSubstrateOptions.hostsLiveWork`. */
   hostsLiveWork?: (childGeneration: string) => number
+  /** #1237 — see `PersistentReplSubstrateOptions.admissionGeneration`. */
+  admissionGeneration?: () => Promise<number | undefined>
   onSizeAlert?: (info: { sessionKey: string; severity: SizeSeverity; sizeBytes: number }) => void
   onRateLimitBanner?: (notice: RateLimitBannerNotice) => void | Promise<void>
   /** Notice-family DI seam (row #16) — fired ONCE (edge) when the model-update
@@ -538,6 +542,7 @@ function prepareClaudeCodeOptions(options: ClaudeCodeSubstrateOptions) {
   if (options.user_id !== undefined) p.user_id = options.user_id
   if (options.project_id !== undefined) p.project_id = options.project_id
   if (options.conversationProjectId !== undefined) p.conversationProjectId = options.conversationProjectId
+  if (options.nativeChildCensusRole !== undefined) p.nativeChildCensusRole = options.nativeChildCensusRole
   if (options.credential_identity !== undefined) p.credential_identity = options.credential_identity
   // S3 #106 — redelivery routing + injected sink.
   if (options.instance_slug !== undefined) p.instance_slug = options.instance_slug
@@ -548,6 +553,7 @@ function prepareClaudeCodeOptions(options: ClaudeCodeSubstrateOptions) {
   if (options.onDeadTurnNotice !== undefined) p.onDeadTurnNotice = options.onDeadTurnNotice
   if (options.onChildCrash !== undefined) p.onChildCrash = options.onChildCrash
   if (options.hostsLiveWork !== undefined) p.hostsLiveWork = options.hostsLiveWork
+  if (options.admissionGeneration !== undefined) p.admissionGeneration = options.admissionGeneration
   if (options.onSizeAlert !== undefined) p.onSizeAlert = options.onSizeAlert
   if (options.onRateLimitBanner !== undefined) p.onRateLimitBanner = options.onRateLimitBanner
   if (options.onModelUpdate !== undefined) p.onModelUpdate = options.onModelUpdate

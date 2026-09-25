@@ -30,6 +30,18 @@
 
 import { withCapturedStderr } from './capture-stderr.ts'
 import { describe, it, expect, afterEach } from 'bun:test'
+import { mkdtempSync, rmSync } from 'node:fs'
+import { join } from 'node:path'
+import { tmpdir } from 'node:os'
+import { ProjectDb } from '@neutronai/persistence/index.ts'
+import { ProjectAdmission } from '@neutronai/gateway/project-admission.ts'
+import { seedMigratedDb } from '../../../../../tests/support/migrated-db.ts'
+import { buildLlmCallSubstrate } from '@neutronai/gateway/wiring/build-llm-call-substrate.ts'
+import { PROFILE_PHASE_SPEC, PROFILE_WARM_FIRE } from '@neutronai/gateway/wiring/substrate-profiles.ts'
+import { newCredentialPool } from '../../../../credential-pool.ts'
+import { setNativeChildLiveness } from '../native-child-liveness.ts'
+import { committedDispatches } from '../pool-state.ts'
+import { poolKeyFor } from '../pool.ts'
 import type { AgentSpec } from '../../../../substrate.ts'
 import type { SessionHandle } from '../../../../session-handle.ts'
 import type { Event } from '../../../../events.ts'
@@ -172,6 +184,45 @@ async function waitUntil(pred: () => boolean, budgetMs = 2000): Promise<void> {
 }
 
 describe('warm reused session — an abandoned/runaway turn must not poison the next turn', () => {
+  for (const profile of [PROFILE_PHASE_SPEC, PROFILE_WARM_FIRE]) {
+    it(`trusted ${profile === PROFILE_PHASE_SPEC ? 'setup' : 'FIRE'} constructor refreshes its abandoned helper with an empty durable child census`, async () => {
+      const dir = mkdtempSync(join(tmpdir(), 'aux-refresh-'))
+      const path = join(dir, 'project.db')
+      seedMigratedDb(path)
+      const db = ProjectDb.open(path)
+      const admission = new ProjectAdmission({ db, ownerHandle: 'aux-refresh-owner', bootId: 'proof' })
+      setNativeChildLiveness('aux-refresh-owner', id => admission.listLeases('liveChild').some(row => row.scope.projectId === id))
+      try {
+        const { host, spawnCount } = makeWedgeThenHealthyHost()
+        let key = ''
+        const sub = buildLlmCallSubstrate({ profile,
+          pool: newCredentialPool({ strategy: 'fill_first', credentials: [{ id: 'anthropic:aux', kind: 'api_key', secret: 'fixture' }] }),
+          substrate_instance_id: 'aux-refresh', user_id: 'aux-refresh-owner', cwd: dir,
+          substrateFactory: resolved => {
+            key = poolKeyFor(resolved)
+            return createPersistentReplSubstrate({ ...resolved, ptyHost: host, skipTrustSeed: true,
+            turnTimeoutMs: 400, idleQuietMs: 0, idleMaxMs: 50,
+            captureConfig: { maxAttempts: 1, attemptDelayMs: 1 },
+            assertConfig: { readyBudgetMs: 5000, readyIntervalMs: 25, healthBudgetMs: 5000, healthIntervalMs: 25 } })
+          },
+        })!
+        expect((await drain(sub.start(spec('wedged')))).errored).toBe(true)
+        expect(spawnCount()).toBe(1)
+        const result = await drain(sub.start(spec('fresh')))
+        expect(result).toEqual({ text: 'reply-from-repl-2', errored: false })
+        expect(spawnCount()).toBe(2)
+        expect(admission.listLeases('liveChild')).toEqual([])
+        // Completion is emitted before the driver's finally releases its slot.
+        await waitUntil(() => (committedDispatches.get(key) ?? 0) === 0)
+        expect((await sub.retire()).map(row => row.outcome)).toEqual(['retired'])
+      } finally {
+        await shutdownAllPersistentRepls()
+        setNativeChildLiveness('aux-refresh-owner', undefined)
+        db.close()
+        rmSync(dir, { recursive: true, force: true })
+      }
+    })
+  }
   it('substrate turn-timeout: after a wedged turn times out, the NEXT turn delivers on a fresh REPL', async () => {
     const { host, spawnCount } = makeWedgeThenHealthyHost()
     const sub = createPersistentReplSubstrate(opts(host, { turnTimeoutMs: 400 }))

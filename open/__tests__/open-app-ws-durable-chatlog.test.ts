@@ -134,11 +134,14 @@ async function waitFor(pred: () => boolean, timeoutMs = 15_000): Promise<void> {
   }
 }
 
-async function startHarness(options: { nativeProject?: boolean } = {}): Promise<Harness> {
+async function startHarness(options: { nativeProject?: boolean; typingProject?: boolean } = {}): Promise<Harness> {
   seedMigratedDb(process.env['NEUTRON_DB_PATH']!)
   const db = ProjectDb.open(process.env['NEUTRON_DB_PATH']!)
   if (options.nativeProject !== undefined) await new SqliteProjectSettingsStore(db).update('owner', 'native-project', {
     name: 'Native project', model_provider: options.nativeProject ? 'openai-codex' : 'anthropic',
+  })
+  if (options.typingProject) await new SqliteProjectSettingsStore(db).update('owner', 'typing-project', {
+    name: 'Typing project',
   })
   const composer = buildOpenGraphComposer({
     env: process.env,
@@ -265,7 +268,7 @@ describe('Open app-ws durable chat-log + typing (real instance)', () => {
   }, 30_000)
 
   test('connect-time typing is targeted, non-durable, and leaves the next turn usable', async () => {
-    harness = await startHarness()
+    harness = await startHarness({ typingProject: true })
     const projectQuery = 'token=dev:owner&platform=web&device_id=devA&project_id=typing-project'
     const first = await openSocket(harness.base, projectQuery)
     await waitFor(() => framesOfType(first.frames, 'session_ready').length > 0)
