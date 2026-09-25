@@ -144,9 +144,18 @@ function clauses(line: string, paths: PathRange[]): ClaimToken[][] {
   let pending: ClaimToken[] = []
   for (const clause of result) {
     if (clause.length === 0) continue
-    if (clause.some(token => token.path !== undefined)) {
+    const lastPath = clause.findLastIndex(token => token.path !== undefined)
+    if (lastPath !== -1) {
       complete.push([...pending, ...clause])
       pending = []
+      // A preceding reference is not the object of a later request:
+      // "Inspect X and create, then inspect Y" still owes "create" an object.
+      // Carry unknown trailing prose conservatively, but not a complete exempt
+      // clause or a comma that merely introduces the next instruction.
+      const trailing = clause.slice(lastPath + 1).filter(token => token.word !== ',')
+      if (trailing.length > 0 && !isExemptClause(clause.map(token => token.word))) {
+        pending = [...trailing, { word: '@boundary' }]
+      }
     } else if (pending.length > 0 || !isExemptClause(clause.map(token => token.word))) {
       for (const token of clause) pending.push(token)
       pending.push({ word: '@boundary' })

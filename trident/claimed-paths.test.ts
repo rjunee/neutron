@@ -53,6 +53,22 @@ describe('deriveClaimedPaths', () => {
     expect(deriveClaimedPaths({ task: 'Do not edit trident/store.ts; Do not change trident/tick.ts; create trident/new-store.ts' })).toEqual(['trident/new-store.ts'])
   })
 
+  test('a reference path cannot close a later unresolved inline write', () => {
+    for (const boundary of ['; ', ', then ', ' before ', ' after ']) {
+      for (const verb of ['edit', 'create', 'carefully edit/update']) {
+        expect(deriveClaimedPaths({ task: `Inspect trident/store.ts and ${verb}${boundary}inspect trident/new-store.ts` }))
+          .toEqual(['trident/store.ts', 'trident/new-store.ts'])
+      }
+      expect(deriveClaimedPaths({ task: `Inspect trident/store.ts${boundary}inspect trident/new-store.ts` })).toEqual([])
+      expect(deriveClaimedPaths({ task: `Edit trident/store.ts${boundary}inspect trident/new-store.ts` })).toEqual(['trident/store.ts'])
+    }
+    expect(deriveClaimedPaths({ task: 'Review docs/spec.md and edit, then run scripts/ci/typecheck-all.sh' }))
+      .toEqual(['docs/spec.md', 'scripts/ci/typecheck-all.sh'])
+    expect(deriveClaimedPaths({ task: 'Inspect trident/store.ts and create, then wait, then inspect trident/new-store.ts' }))
+      .toEqual(['trident/store.ts', 'trident/new-store.ts'])
+    expect(deriveClaimedPaths({ task: 'Avoid trident/store.ts entirely; inspect trident/new-store.ts' })).toEqual([])
+  })
+
   test('unknown and ambiguous prose conservatively claims every recognized path', () => {
     for (const task of [
       'Run trident/store.ts and edit trident/tick.ts',

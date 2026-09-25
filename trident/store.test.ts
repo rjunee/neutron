@@ -2579,6 +2579,24 @@ describe('countRunningByLauncher — live runs hosted by one launcher generation
 // re-takes the same liveness fact, so the race resolves as a refusal.
 // ---------------------------------------------------------------------------
 describe('createIfClaimsAvailable — the branch/slug conflict is a refusal, not a thrown constraint', () => {
+  for (const [label, target, task, allowed] of [
+    ['script unresolved edit', 'scripts/ci/typecheck-all.sh', 'Review docs/spec.md and edit, then run scripts/ci/typecheck-all.sh', false],
+    ['script read-only sibling', 'scripts/ci/typecheck-all.sh', 'Review docs/spec.md, then run scripts/ci/typecheck-all.sh', true],
+    ['store unresolved create', 'trident/new-store.ts', 'Inspect trident/store.ts and create, then inspect trident/new-store.ts', false],
+    ['store read-only sibling', 'trident/new-store.ts', 'Inspect trident/store.ts, then inspect trident/new-store.ts', true],
+    ['completed independent edit sibling', 'trident/new-store.ts', 'Edit trident/store.ts; inspect trident/new-store.ts', true],
+  ] as const) test(`trailing inline instruction admission: ${label}`, async () => {
+    const store = new TridentRunStore(db)
+    const holder = await store.create({ slug: 'holder', project_slug: 't1', repo_path: '/r', task: 'holder', claimed_paths: [target] })
+    const before = db.prepare<{ n: number }, []>('SELECT COUNT(*) AS n FROM code_trident_runs').get()!.n
+    const claims = deriveClaimedPaths({ task })
+    const admission = await store.createIfClaimsAvailable({ slug: 'contender', project_slug: 't1', repo_path: '/r', task, claimed_paths: claims })
+    expect(admission.ok).toBe(allowed)
+    if (admission.ok) expect(new TridentRunStore(db).get(admission.run.id)?.claimed_paths).toEqual(claims)
+    else expect(admission).toMatchObject({ conflict: 'path', path: target, holding_run: { id: holder.id } })
+    expect(db.prepare<{ n: number }, []>('SELECT COUNT(*) AS n FROM code_trident_runs').get()!.n).toBe(before + (allowed ? 1 : 0))
+  })
+
   test('derived read-only claims admit while exact and mixed edits refuse atomically', async () => {
     const store = new TridentRunStore(db)
     const paths = ['open/__tests__/project-build-e2e.test.ts', 'trident/tsconfig.json', 'scripts/ci/typecheck-all.sh', 'trident/store.ts', 'trident/new-store.ts', 'trident/store.test.ts']
