@@ -42,6 +42,11 @@ with:
   classifier inside `gbrain-memory/__tests__/boot-pglite-brain.ts` already
   self-heals most individual boots; this lane retry is the belt-and-braces.)
 
+A retry requires one recognized boot-error header, a final `1 fail` summary,
+and no Bun test-timeout diagnostic. Independent errors and timeouts stop the
+lane red after one attempt, even if another log line mentions a recognized boot
+error. Ordinary mentions of timeout diagnostics do not veto a boot retry.
+
 Lane membership is **content-derived** — any test file that mentions `pglite` is
 quarantined automatically, so a new PGLite test needs no allowlist edit. Coverage
 is unchanged: lane files are still counted in the audit (`RAN_TOTAL`).

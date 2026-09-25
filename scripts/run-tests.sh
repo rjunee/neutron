@@ -702,6 +702,10 @@ pglite_retryable_failure() {
   # failure. A second error, another failing test, or an unstructured log is
   # ambiguous and therefore not retryable. Generic WASM text elsewhere in the
   # output cannot turn a deterministic assertion failure into a retry.
+  # Bun reports a timeout beneath `(fail)` without an error header. A logged
+  # boot message must not turn that independent deterministic failure green
+  # on another attempt. Anchor the diagnostic so ordinary mentions still retry.
+  LC_ALL=C grep -aqE '^[[:space:]]*\^ this test timed out after [0-9]+ms\.' "$log" && return 1
   [ "$(LC_ALL=C grep -aciE '^[[:space:]]*(error: |[a-z][a-z0-9_]*Error: )' "$log" || true)" = "1" ] || return 1
   failures="$(LC_ALL=C grep -aE '^[[:space:]]*[0-9]+ fail([[:space:]]|$)' "$log" | tail -1 | LC_ALL=C sed -E 's/^[[:space:]]*([0-9]+) fail.*/\1/')"
   [ "$failures" = "1" ] || return 1

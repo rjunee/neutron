@@ -57,6 +57,9 @@ if [ -n "\${FAKE_BUN_LANE_SCENARIO:-}" ]; then
   [ ! -f "$FAKE_BUN_LANE_CALLS" ] || calls="$(cat "$FAKE_BUN_LANE_CALLS")"
   calls=$((calls+1))
   echo "$calls" > "$FAKE_BUN_LANE_CALLS"
+  if [ "$FAKE_BUN_LANE_SCENARIO" = 'real_output' ]; then
+    exec "$REAL_BUN" "$@"
+  fi
   case "$FAKE_BUN_LANE_SCENARIO" in
     deterministic)
       echo 'PGLite WASM mentioned by unrelated setup log'
@@ -285,6 +288,50 @@ describe('G8 run-tests.sh — PGLite quarantine lane split', () => {
 })
 
 describe('run-tests.sh — PGLite retry classification', () => {
+  // Run real Bun fixtures through the lane (the wrapper only fakes discovery
+  // and counts attempts). Bun timeout diagnostics are not error headers, so
+  // invented error/summary output alone cannot prove mixed-failure refusal.
+  for (const [scenario, failure, attempts, code] of [
+    ['timeout', `console.error('error: PGLite failed to initialize its WASM runtime.'); await new Promise(() => {})`, 1, 1],
+    ['assertion', `console.error('error: PGLite failed to initialize its WASM runtime.'); expect(1).toBe(2)`, 1, 1],
+    ['native error', `console.error('error: PGLite failed to initialize its WASM runtime.'); throw new TypeError('independent deterministic failure')`, 1, 1],
+    ['boot failure', `throw new Error('PGLite failed to initialize its WASM runtime.')`, 2, 0],
+    ['boot failure mentioning timeout', `console.log('diagnostic example: ^ this test timed out after 20ms.'); throw new Error('PGLite failed to initialize its WASM runtime.')`, 2, 0],
+  ] as const) {
+    test(`real Bun ${scenario}: exactly ${attempts} lane attempt(s), exit ${code}`, () => {
+      const h = harness(1, [0])
+      try {
+        const calls = join(h.dir, 'lane-calls')
+        writeFileSync(h.files[0]!, `
+import { expect, test } from 'bun:test'
+import { readFileSync } from 'node:fs'
+test(${JSON.stringify(scenario)}, async () => {
+  if (Number(readFileSync(process.env.FAKE_BUN_LANE_CALLS!, 'utf8')) === 1) {
+    ${failure}
+  }
+}, 50)
+`)
+        const result = runRunTests(h, {
+          FAKE_BUN_DISC: '1',
+          FAKE_BUN_LANE_SCENARIO: 'real_output',
+          FAKE_BUN_LANE_CALLS: calls,
+          REAL_BUN: process.execPath,
+          NO_COLOR: '1',
+        })
+        expect(Number(readFileSync(calls, 'utf8').trim())).toBe(attempts)
+        expect(result.code).toBe(code)
+        expect(result.out).toContain('files executed: 1')
+        expect(result.out).toContain(code === 0 ? 'run-tests: PASS' : 'run-tests: FAIL')
+        expect(result.out).toContain('PGLite failed to initialize its WASM runtime.')
+        if (scenario === 'timeout') expect(result.out).toContain('^ this test timed out after 50ms.')
+        if (code === 1) expect(result.out).toContain('no retry')
+        else expect(result.out).toContain('retrying recognized WASM-init/boot failure')
+      } finally {
+        rmSync(h.dir, { recursive: true, force: true })
+      }
+    })
+  }
+
   for (const [scenario, attempts, code] of [
     ['deterministic', 1, 1],
     ['transient_then_pass', 2, 0],
