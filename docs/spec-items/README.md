@@ -16,6 +16,7 @@ at the old name. Retitle through the `title:` frontmatter instead.
 
 These are the items the harness-orchestrator cutover is gated on.
 
+- [`host-test-suite-efficiency`](host-test-suite-efficiency.md) — Diagnose early and remove measured host test-suite waste
 - [`planner-selected-execution-strategy`](planner-selected-execution-strategy.md) — Let the initial planner select a persisted execution strategy
 - [`refreshed-ci-merge-readiness`](refreshed-ci-merge-readiness.md) — Wait for refreshed CI without rebuilding an approved revision
 - [`salvage-publication-provenance`](salvage-publication-provenance.md) — Preserve publication ownership when salvaging a failed build
@@ -42,6 +43,7 @@ branch is cut (standard §3.1, §3.2).
 |---|---|---|---|
 | [`a-retry-must-resume-from-the-checkpoint`](a-retry-must-resume-from-the-checkpoint.md) | Carry a dead run's checkpoint and task iteration into its retry | P0 | yes |
 | [`a-terminal-cause-on-every-terminal-path`](a-terminal-cause-on-every-terminal-path.md) | Emit a terminal cause on every terminal path, and report it | P0 | yes |
+| [`host-test-suite-efficiency`](host-test-suite-efficiency.md) | Diagnose early and remove measured host test-suite waste | P0 | yes |
 | [`planner-selected-execution-strategy`](planner-selected-execution-strategy.md) | Let the initial planner select a persisted execution strategy | P0 | yes |
 | [`refreshed-ci-merge-readiness`](refreshed-ci-merge-readiness.md) | Wait for refreshed CI without rebuilding an approved revision | P0 | yes |
 | [`resolve-the-review-diff-base`](resolve-the-review-diff-base.md) | Rev-range base: the pinned sha, else a ref nobody can mistake | P0 | yes |
