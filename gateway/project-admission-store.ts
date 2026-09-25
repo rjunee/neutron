@@ -5,7 +5,23 @@ export type AdmissionReason = 'conversation' | 'queuedDispatch' | 'build' | 'app
 export type MaintenancePhase = 'draining' | 'quiesced' | 'replacing' | 'attesting';
 export interface AdmissionLease { scope: ProjectAdmissionScope; generation: number; token: string }
 export interface MaintenanceFence extends AdmissionLease { phase: MaintenancePhase }
+/** One durable lease row, its scope decoded. `workRef` is the producer's work id. */
+export interface AdmissionLeaseRow extends AdmissionLease { reason: AdmissionReason; producer: string; workRef: string }
 interface FenceRow { generation: number; phase: 'open' | MaintenancePhase; maintenance_token: string | null }
+interface LeaseDbRow { token: string; scope_key: string; generation: number; reason: AdmissionReason; producer: string; work_ref: string }
+
+/** Inverse of {@link scopeKey}; null for a row this encoding did not write. */
+function parseScopeKey(key: string): ProjectAdmissionScope | null {
+  try {
+    const parsed: unknown = JSON.parse(key);
+    if (!Array.isArray(parsed) || parsed.length !== 2) return null;
+    const [ownerHandle, projectId] = parsed as unknown[];
+    if (typeof ownerHandle !== 'string' || (projectId !== null && typeof projectId !== 'string')) return null;
+    return { ownerHandle, projectId };
+  } catch {
+    return null;
+  }
+}
 
 function scopeKey(scope: ProjectAdmissionScope): string {
   if (!scope.ownerHandle.trim() || (scope.projectId !== null && !scope.projectId.trim())) {
@@ -109,6 +125,33 @@ export class ProjectAdmissionStore {
       SET phase = 'open', maintenance_token = NULL WHERE scope_key = ? AND generation = ?
       AND maintenance_token = ? AND phase = ? AND phase IN ('draining', 'quiesced')`,
     [key, fence.generation, fence.token, fence.phase]).changes === 1);
+  }
+
+  /** Release every lease of ONE piece of work — by scope, reason and work
+   * reference — whatever generation or token it was admitted under. This is not a
+   * foreign release: it is bound to the work, and is for work whose activity has
+   * provably ENDED in every generation (a terminal build run). Returns the count
+   * removed; a second call removes 0. */
+  async releaseWork(scope: ProjectAdmissionScope, reason: AdmissionReason, workRef: string): Promise<number> {
+    if (!workRef.trim()) throw new Error('Work reference required');
+    const key = scopeKey(scope);
+    return this.db.transaction(tx => tx.runSync(`DELETE FROM project_admission_leases
+      WHERE scope_key = ? AND reason = ? AND work_ref = ?`, [key, reason, workRef]).changes);
+  }
+
+  /** Every durable lease (optionally of one reason), scope decoded. Read-only;
+   * a row whose scope key this encoding did not write is skipped. */
+  listLeases(reason?: AdmissionReason): AdmissionLeaseRow[] {
+    const rows = reason === undefined
+      ? this.db.all<LeaseDbRow>('SELECT token, scope_key, generation, reason, producer, work_ref FROM project_admission_leases ORDER BY rowid')
+      : this.db.all<LeaseDbRow>('SELECT token, scope_key, generation, reason, producer, work_ref FROM project_admission_leases WHERE reason = ? ORDER BY rowid', [reason]);
+    const out: AdmissionLeaseRow[] = [];
+    for (const row of rows) {
+      const scope = parseScopeKey(row.scope_key);
+      if (scope === null) continue;
+      out.push({ scope, generation: row.generation, token: row.token, reason: row.reason, producer: row.producer, workRef: row.work_ref });
+    }
+    return out;
   }
 
   /** Restart inspection never modifies state or assumes orphaned leases expired. */

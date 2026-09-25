@@ -9,6 +9,7 @@ import { parseAndExecuteCodeCommand } from '@neutronai/trident/code-command.ts'
 import { TridentRunStore } from '@neutronai/trident/store.ts'
 import { WorkBoardStore } from '@neutronai/work-board/store.ts'
 import { buildTridentCodeBoardBinder } from '../composer.ts'
+import { fixtureDispatchAdmission } from '@neutronai/trident/__tests__/dispatch-admission-fixture.ts'
 
 describe('Open /code stop board binder', () => {
   let tmp: string
@@ -46,6 +47,7 @@ describe('Open /code stop board binder', () => {
 
     const response = await parseAndExecuteCodeCommand('/code stop', {
       store: runStore,
+      project_admission: fixtureDispatchAdmission(db),
       work_board: binder,
       project_slug: scope,
       repo_path: '/repo',

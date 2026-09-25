@@ -75,6 +75,8 @@ import {
 } from '@neutronai/gateway/wiring/build-live-agent-turn.ts'
 import type { LiveAgentOnboardingSeam } from '@neutronai/gateway/wiring/build-live-agent-turn.ts'
 import { ProjectAdmission } from '@neutronai/gateway/project-admission.ts'
+import { reconcileBuildLeases } from '@neutronai/gateway/project-admission-reconcile.ts'
+import { buildAdmissionReleaseObserver } from '@neutronai/gateway/proactive/admission-release.ts'
 import { buildProjectDocComposer } from '@neutronai/gateway/wiring/build-project-doc-composer.ts'
 import { buildProjectKickoffComposer } from '@neutronai/gateway/wiring/build-project-kickoff-composer.ts'
 import { buildProjectKickoff } from '@neutronai/gateway/wiring/build-project-kickoff.ts'
@@ -1661,9 +1663,28 @@ export function buildOpenGraphComposer(
     // fabricates an authenticated verdict. Reuses the SAME `NexusStore`
     // `wireMemory` built (reflection's `learning` emitter rides it), always live
     // now that the agent-nexus is the base behavior.
+    // #1237 — ONE project admission service per boot. Every conversation producer
+    // admits through it before queueing; the per-boot id stamps each durable lease
+    // so a later reconciler can tell this process's leases from a dead one's.
+    // Nothing here fences or replaces anything: no trigger exists in this build.
+    // Constructed HERE, ahead of every terminal chain, because the build-lease
+    // release below is composed into all three of them.
+    const projectAdmission = new ProjectAdmission({ db, ownerHandle: owner_handle, bootId: randomUUID() })
+    // The dispatch chokepoint's admission for a BOARD SCOPE KEY — the trident
+    // `project_slug` IS that key (owner slug = General, otherwise the project id),
+    // and `workBoardProjectIdForKey` inverts it to the exact admission scope.
+    const dispatchAdmissionForKey = (key: string, producer: 'work-board' | 'hold-drain') =>
+      projectAdmission.forDispatch(workBoardProjectIdForKey(project_slug, key) ?? null, producer)
+    // A TERMINAL run's build lease is released FIRST in every terminal chain —
+    // before the board reconcile and the hold sweep — so a dependent card the sweep
+    // re-dispatches observes it gone. Idempotent; never throws.
+    const releaseBuildLeaseOnTerminal = buildAdmissionReleaseObserver({
+      releaseBuild: (run) =>
+        projectAdmission.releaseBuild(workBoardProjectIdForKey(project_slug, run.project_slug) ?? null, run.id),
+    })
     const tridentOnRunTerminal = buildTridentTerminalObserver({
       nexus: nexusStore,
-      observers: [skillForgeOnRunTerminal],
+      observers: [releaseBuildLeaseOnTerminal, skillForgeOnRunTerminal],
     })
 
     // RC3 ([BEHAVIOR]) — the live-agent turn's agent-nexus READER seam, always
@@ -2407,6 +2428,8 @@ export function buildOpenGraphComposer(
           hostRunner: tridentHostRunner,
           preflight: tridentCodexBuildPreflight,
           holds: tridentDispatchHolds,
+          // #1237 — the build admits a durable project lease for its board scope.
+          project_admission: dispatchAdmissionForKey(workBoardScopeKey(project_slug, input.project_id), 'work-board'),
         }
       },
       // Runs started here originate on the app socket, so the terminal result is
@@ -4431,6 +4454,17 @@ export function buildOpenGraphComposer(
     // phase/round/elapsed/stalled from its `linked_run_id`'s `code_trident_runs`
     // row. Stateless wrapper — a second instance elsewhere is harmless.
     const boardRunStore = new TridentRunStore(db)
+    // #1237 — RESTART RECONCILIATION of build leases, ONCE, before any loop that
+    // could create, advance or terminalize a run starts (the tick loop, the hold
+    // drain, the work-wakeup sweep). A lease naming a terminal or missing run is
+    // released; a live run with no lease is re-leased when its scope is open, and
+    // counted + warned when it is fenced (the maintenance census must read it busy).
+    const admissionReconciled = await reconcileBuildLeases({
+      admission: projectAdmission,
+      runs: boardRunStore,
+      projectIdForRun: (run) => workBoardProjectIdForKey(project_slug, run.project_slug) ?? null,
+    })
+    log.info('project_admission_reconciled', { ...admissionReconciled })
     const projectBuildStateRoot = joinPath(owner_home, '.trident', 'project-builds')
     const projectBuildStateReaper = new SupervisedLoop({
       name: 'project-build-state-reaper',
@@ -4775,6 +4809,8 @@ export function buildOpenGraphComposer(
                 // one this gate originally missed.
                 preflight: tridentCodexBuildPreflight,
                 holds: tridentDispatchHolds,
+                // #1237 — the build admits a durable project lease for its board scope.
+                projectAdmission: dispatchAdmissionForKey(slug, 'work-board'),
               },
             )
             if (result.ok) return { ok: true, run_id: result.run.id }
@@ -5881,12 +5917,6 @@ export function buildOpenGraphComposer(
           }
         : undefined
 
-    // #1237 — ONE project admission service per boot. Every conversation producer
-    // admits through it before queueing; the per-boot id stamps each durable lease
-    // so a later reconciler can tell this process's leases from a dead one's.
-    // Nothing here fences or replaces anything: no trigger exists in this build.
-    const projectAdmission = new ProjectAdmission({ db, ownerHandle: owner_handle, bootId: randomUUID() })
-
     const appWsChatTurn =
       liveAgentSubstrate !== null
         ? buildLiveAgentTurn({
@@ -6399,6 +6429,9 @@ export function buildOpenGraphComposer(
         landedProbe: tridentLandedProbe,
         hostRunner: tridentHostRunner,
         preflight: tridentCodexBuildPreflight,
+        // #1237 — an unattended re-dispatch admits for the hold's own scope, so a
+        // fenced project keeps its card queued until admission reopens.
+        projectAdmission: dispatchAdmissionForKey(hold.project_slug, 'hold-drain'),
         // Replay the ORIGINATING turn's chat/limits context, so a build that
         // finally starts an hour later still answers into the conversation that
         // asked for it instead of going silently to no one.
@@ -6416,7 +6449,7 @@ export function buildOpenGraphComposer(
         store: boardRunStore,
         observer: composeTerminalHook(
           buildTridentDelivery({ sink: channelRouter }),
-          [buildBoardReconcileObserver(workBoardStore), skillForgeOnRunTerminal, terminalBuildWake, tridentHoldSweep].filter(
+          [releaseBuildLeaseOnTerminal, buildBoardReconcileObserver(workBoardStore), skillForgeOnRunTerminal, terminalBuildWake, tridentHoldSweep].filter(
             (o): o is (run: TridentRun) => Promise<void> => o !== null,
           ),
         ),
@@ -6437,7 +6470,7 @@ export function buildOpenGraphComposer(
         store: boardRunStore,
         observer: composeTerminalHook(
           { onTerminal: async (): Promise<void> => {} },
-          [buildBoardReconcileObserver(workBoardStore), skillForgeOnRunTerminal, terminalBuildWake, tridentHoldSweep].filter(
+          [releaseBuildLeaseOnTerminal, buildBoardReconcileObserver(workBoardStore), skillForgeOnRunTerminal, terminalBuildWake, tridentHoldSweep].filter(
             (o): o is (run: TridentRun) => Promise<void> => o !== null,
           ),
         ),
@@ -6814,6 +6847,12 @@ export function buildOpenGraphComposer(
       // and therefore the warm-pool key: asking about any other string would
       // answer about a different child than the one that would serialize.
       agentBusy: (chat_scope: string): boolean => isBackgroundComposeInFlight(chat_scope),
+      // #1237 — the sweep composes on the background child DIRECTLY, not through
+      // the chat runner's admitted acting turn, so it admits its own lease for the
+      // exact project scope, held through compose + post.
+      admission: {
+        admit: (projectId, workRef) => projectAdmission.admit(projectId, 'queuedDispatch', 'wakeup', workRef),
+      },
       // The SAME warm-substrate wrapper the fired-reminder path composes
       // through — one substrate entry point, two callers — and on the SAME
       // background REPL (`cc-nudge-*`), never the owner's chat REPL. This wakeup is
@@ -7519,6 +7558,8 @@ export function buildOpenGraphComposer(
               // second copy. Three entries, one gate.
               preflight: tridentCodexBuildPreflight,
               holds: tridentDispatchHolds,
+              // #1237 — each call admits for the board scope it derives.
+              project_admission: (scope_key: string) => dispatchAdmissionForKey(scope_key, 'work-board'),
             },
           }
         : {}),

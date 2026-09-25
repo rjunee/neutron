@@ -50,6 +50,7 @@ import {
 import { executeCodeCommand } from '../code-command.ts'
 import type { GitModeProbe } from '../git-mode.ts'
 import { briefIntegrity } from '../brief-parts.ts'
+import { fixtureDispatchAdmission } from './dispatch-admission-fixture.ts'
 
 const HERE = dirname(fileURLToPath(import.meta.url))
 const REPO = join(HERE, '..', '..')
@@ -866,6 +867,7 @@ describe('dispatch preflight (P4)', () => {
     const reg = new ToolRegistry()
     registerTridentBuildToolSurface(reg, {
       store: runs,
+      project_admission: () => fixtureDispatchAdmission(db),
       work_board: board(),
       repo_path: '/repo',
       resolveBuildRepo: async (home) => home,
@@ -936,6 +938,7 @@ describe('dispatch preflight (P4)', () => {
   ): BoardBoundBuildDeps {
     return {
       store: runs,
+      projectAdmission: fixtureDispatchAdmission(db),
       board: board(),
       project_slug: 'proj-1',
       repo_path: '/repo',
@@ -995,6 +998,7 @@ describe('dispatch preflight (P4)', () => {
       { kind: 'dispatch', task: READY, board_item_id: 'ready' },
       {
         store: runs,
+        project_admission: fixtureDispatchAdmission(db),
         work_board: board(),
         project_slug: 'proj-1',
         repo_path: '/repo',
@@ -1013,6 +1017,7 @@ describe('dispatch preflight (P4)', () => {
       { kind: 'dispatch', task: READY, board_item_id: 'ready' },
       {
         store: runs,
+        project_admission: fixtureDispatchAdmission(db),
         work_board: board(),
         project_slug: 'proj-1',
         repo_path: '/repo',

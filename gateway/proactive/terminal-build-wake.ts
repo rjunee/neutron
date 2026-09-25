@@ -7,7 +7,7 @@ import { FIRE_SETTLE_TIMEOUT_ERROR, isPublishedUnreviewedReason } from '@neutron
 import { isTerminalPhase } from '@neutronai/trident/state-machine.ts'
 import type { TridentRun } from '@neutronai/trident/store.ts'
 import { deriveEscalationBlock } from '@neutronai/trident/escalation-block.ts'
-import { LIVE_AGENT_TOOL_NAMES } from '../wiring/build-live-agent-turn.ts'
+import { LIVE_AGENT_TOOL_NAMES, ProjectAdmissionRefusedError } from '../wiring/build-live-agent-turn.ts'
 import type { WakeupLlm } from './work-wakeup.ts'
 
 /** Acting-turn budget; failed admission leaves the durable run pending for retry. */
@@ -21,7 +21,11 @@ export interface TerminalBuildWakeDeps {
   llm: WakeupLlm | null
   projectChatScope(run: TridentRun): string
   post(run: TridentRun, reply: string, opts: { loud: boolean }): boolean | Promise<boolean>
-  logger: { error(message: string, fields?: Record<string, unknown>): void }
+  logger: {
+    error(message: string, fields?: Record<string, unknown>): void
+    /** Optional so a bare error-only logger still satisfies the seam; absent → `error`. */
+    warn?(message: string, fields?: Record<string, unknown>): void
+  }
 }
 
 export function buildTerminalBuildWakePrompt(args: { run: TridentRun; board_item_id: string | null }): string {
@@ -138,6 +142,17 @@ export function buildTerminalBuildWakeObserver(deps: TerminalBuildWakeDeps): (ru
       if (!(await deps.post(run, reply, { loud: run.phase !== 'done' }))) return
       await deps.claimWake(run.id)
     } catch (error) {
+      // PROJECT ADMISSION REFUSED THE WAKE (#1237) — the acting turn's gate, not a
+      // new one here. Said at warn with the refusal code; the wake stays pending
+      // exactly as for any other failure (`claimWake` was never reached), so the
+      // retry sweep delivers it once admission reopens.
+      // A refusal is expected state, not a fault, so it is not ALSO logged as one.
+      if (error instanceof ProjectAdmissionRefusedError) {
+        const fields = { run_id: run.id, code: error.refusal.code, detail: error.refusal.detail }
+        if (deps.logger.warn !== undefined) deps.logger.warn('terminal_build_wake_refused', fields)
+        else deps.logger.error('terminal_build_wake_refused', fields)
+        return
+      }
       deps.logger.error('terminal_build_wake_pending', {
         run_id: run.id, error: error instanceof Error ? error.message : String(error),
       })

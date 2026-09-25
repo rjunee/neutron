@@ -102,6 +102,7 @@ import type { ToolDef } from '@neutronai/cores-sdk/manifest'
 import { builtinToolDefs } from '../wiring/build-live-agent-turn.ts'
 import { SupervisedLoop, type LoopDescriptor } from '@neutronai/loop'
 import { createLogger } from '@neutronai/logger'
+import type { AdmissionOutcome } from '../project-admission.ts'
 
 const log = createLogger('work-wakeup')
 
@@ -259,6 +260,12 @@ export interface WakeupProjectWork {
    * of a parallel one.
    */
   chat_scope: string
+  /**
+   * The EXACT project admission scope (#1237): null for General, the project id
+   * otherwise. Distinct from `chat_scope`, whose `'general'` spelling is the
+   * warm-pool key and would name a real project literally called `general`.
+   */
+  project_id: string | null
   /** Human label for the prompt + failure notices. */
   label: string
   items: WakeupWorkItem[]
@@ -323,6 +330,18 @@ export interface WorkWakeupDeps {
    * cadence, describing as broken the very work it was interrupting.
    */
   agentBusy?(chat_scope: string): boolean | Promise<boolean>
+  /**
+   * PROJECT ADMISSION (#1237), asked after the agent-busy gate and before the
+   * spec is built. REQUIRED — this sweep composes on the background child
+   * DIRECTLY (not through the chat runner's admitted acting turn), so without
+   * its own lease a wakeup would run under a maintenance fence. The composer
+   * binds reason `queuedDispatch` and producer `wakeup`. A refusal skips the
+   * project for this tick: nothing failed, so no streak and no owner post. An
+   * admitted lease is held through compose AND post and released on every unwind.
+   */
+  admission: {
+    admit(projectId: string | null, workRef: string): Promise<AdmissionOutcome>
+  }
   llm: WakeupLlm
   /**
    * Post one report/notice to the project's chat topic. `loud: false` ⇒ durable
@@ -390,6 +409,12 @@ export interface WakeupSweepResult {
    * that reads as ordinary owner activity.
    */
   skipped_agent_busy: number
+  /**
+   * Projects skipped because project admission refused the wakeup (#1237) — the
+   * scope is fenced for maintenance, or is not a live project. Its own counter:
+   * this is neither the owner nor another machine driving, and nothing failed.
+   */
+  skipped_admission: number
 }
 
 /**
@@ -469,6 +494,16 @@ function releaseLogKey(project_key: string, run_id: string): string {
  * a literal NUL makes this file binary to `scripts/ci/leak-gate.sh`.
  */
 const UNAVAILABLE_LOG_KEY = '\u0000unavailable'
+
+/**
+ * The admission-refusal rate-limit key: project + refusal status. Disjoint from
+ * every other key space by the same construction as {@link UNAVAILABLE_LOG_KEY}:
+ * it begins with a NUL and its second character is `a`. Kept by the sweep's prune
+ * for every project with wakeable items, so the window holds across ticks.
+ */
+function admissionLogKey(project_key: string, status: string): string {
+  return `\u0000a${status}\u0000${project_key}`
+}
 
 /** Truncate for a prompt line / a log field — bounded, marked, never thrown. */
 function bound(text: string, max: number): string {
@@ -572,6 +607,7 @@ export async function runWorkWakeupSweep(
     deferred_to_run: 0,
     released_stalled_run: 0,
     skipped_agent_busy: 0,
+    skipped_admission: 0,
   }
 
   // THE PRECONDITION IS ASKED BEFORE ANYTHING IS SELECTED, AND ITS ABSENCE IS SAID
@@ -640,6 +676,12 @@ export async function runWorkWakeupSweep(
       p.items.flatMap((it) =>
         it.stalled_run === undefined ? [] : [releaseLogKey(p.project_key, it.stalled_run.run_id)],
       ),
+    ),
+    // A refusal's window survives for as long as the project has wakeable work.
+    ...projects.flatMap((p) =>
+      p.items.length === 0
+        ? []
+        : [admissionLogKey(p.project_key, 'fenced'), admissionLogKey(p.project_key, 'unknown')],
     ),
   ])
   for (const key of [...deferralLog.keys()]) {
@@ -736,6 +778,43 @@ export async function runWorkWakeupSweep(
       continue
     }
 
+    // PROJECT ADMISSION (#1237) — after both activity gates, before the spec is
+    // built. A refused scope (fenced for maintenance, or not a live project) is
+    // SKIPPED for this tick: nothing failed, so the failure streak is untouched and
+    // nothing is posted to the owner. The next tick re-asks.
+    const admitted = await deps.admission.admit(
+      project.project_id,
+      `wakeup:${project.project_key}:${new Date(now()).toISOString()}`,
+    )
+    if (admitted.status !== 'admitted') {
+      result.skipped_admission += 1
+      const logKey = admissionLogKey(project.project_key, admitted.status)
+      const lastLoggedAt = deferralLog.get(logKey)
+      if (lastLoggedAt === undefined || now() - lastLoggedAt >= WAKEUP_DEFERRAL_LOG_WINDOW_MS) {
+        deferralLog.set(logKey, now())
+        log.info('wakeup_skipped_admission', {
+          project: project.project_key,
+          status: admitted.status,
+          ...(admitted.status === 'fenced' ? { phase: admitted.phase } : {}),
+        })
+      }
+      continue
+    }
+    try {
+      await wakeAdmittedProject(project)
+    } finally {
+      // Held through compose AND post; released on every unwind, a throw included.
+      await admitted.release().catch((err: unknown) => {
+        log.warn('wakeup_admission_release_failed', {
+          project: project.project_key,
+          reason: bound(err instanceof Error ? err.message : String(err), 200),
+        })
+      })
+    }
+  }
+  return result
+
+  async function wakeAdmittedProject(project: WakeupProjectWork): Promise<void> {
     const tools: ToolDef[] = builtinToolDefs(deps.tool_names)
     const spec: AgentSpec = {
       prompt: buildWakeupPrompt({
@@ -822,7 +901,7 @@ export async function runWorkWakeupSweep(
           })
         }
       }
-      continue
+      return
     }
 
     failureStreaks.delete(project.project_key)
@@ -847,7 +926,6 @@ export async function runWorkWakeupSweep(
     result.woke += 1
     log.info('wakeup_fired', { project: project.project_key, blocked })
   }
-  return result
 }
 
 export interface WorkWakeupLoop {
@@ -892,7 +970,8 @@ export function buildWorkWakeupLoop(deps: WorkWakeupDeps): WorkWakeupLoop {
         result.deferred_to_run > 0 ||
         result.released_stalled_run > 0 ||
         result.skipped_active > 0 ||
-        result.skipped_agent_busy > 0
+        result.skipped_agent_busy > 0 ||
+        result.skipped_admission > 0
       ) {
         log.info('wakeup_sweep', {
           unavailable: result.unavailable,
@@ -913,6 +992,7 @@ export function buildWorkWakeupLoop(deps: WorkWakeupDeps): WorkWakeupLoop {
           released_stalled_run: result.released_stalled_run,
           skipped_owner_active: result.skipped_active,
           skipped_agent_busy: result.skipped_agent_busy,
+          skipped_admission: result.skipped_admission,
         })
       }
     },

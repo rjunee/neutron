@@ -21,14 +21,21 @@ import {
   type WakeupReadiness,
   type WorkWakeupDeps,
 } from '../work-wakeup.ts'
+import { openAdmission, type FixtureAdmission } from '../../wiring/__tests__/project-admission-fixture.ts'
 
 const NOW = 1_700_000_000_000
+
+/** The production spelling (`open/composer.ts`): a `queuedDispatch` lease from the `wakeup` producer. */
+function wakeupAdmission(fx: FixtureAdmission): WorkWakeupDeps['admission'] {
+  return { admit: (projectId, workRef) => fx.admit(projectId, 'queuedDispatch', 'wakeup', workRef) }
+}
 const TOOLS = ['Read', 'Glob', 'Grep', 'Write', 'Edit', 'Bash'] as const
 
 function project(over: Partial<WakeupProjectWork> = {}): WakeupProjectWork {
   return {
     project_key: 'acme',
     chat_scope: 'acme',
+    project_id: 'acme',
     label: 'project "acme"',
     items: [{ title: 'Ship the importer' }],
     deferred: [],
@@ -133,6 +140,8 @@ function harness(over: {
   agentBusy?: (chat_scope: string) => boolean
   readiness?: () => WakeupReadiness
   now?: () => number
+  /** Defaults to a REAL admission over the migrated fixture database (#1237). */
+  admission?: WorkWakeupDeps['admission']
 } = {}): Harness {
   const specs: AgentSpec[] = []
   const composeOpts: Array<{ timeout_ms?: number } | undefined> = []
@@ -163,6 +172,7 @@ function harness(over: {
     tool_names: TOOLS,
     resolveModel: () => 'model-x',
     now: over.now ?? ((): number => NOW),
+    admission: over.admission ?? wakeupAdmission(openAdmission()),
   }
   return { deps, specs, composeOpts, posts, selections }
 }
@@ -172,7 +182,7 @@ describe('runWorkWakeupSweep — the wake path', () => {
     const h = harness()
     const result = await runWorkWakeupSweep(h.deps, new Map())
 
-    expect(result).toEqual({ unavailable: 0, woke: 1, skipped_active: 0, failed: 0, failed_by_reason: {}, failed_no_progress: 0, failed_budget_ceiling: 0, deferred_to_run: 0, released_stalled_run: 0, skipped_agent_busy: 0 })
+    expect(result).toEqual({ unavailable: 0, woke: 1, skipped_active: 0, failed: 0, failed_by_reason: {}, failed_no_progress: 0, failed_budget_ceiling: 0, deferred_to_run: 0, released_stalled_run: 0, skipped_agent_busy: 0, skipped_admission: 0 })
     expect(h.specs).toHaveLength(1)
     const spec = h.specs[0]!
     // The warm-pool key — what lands the turn ON the owner's session.
@@ -216,7 +226,7 @@ describe('runWorkWakeupSweep — the wake path', () => {
   test('owner active inside the grace window → skipped, and the session is NEVER entered', async () => {
     const h = harness({ activity: NOW - (WORK_WAKEUP_OWNER_GRACE_MS - 1) })
     const result = await runWorkWakeupSweep(h.deps, new Map())
-    expect(result).toEqual({ unavailable: 0, woke: 0, skipped_active: 1, failed: 0, failed_by_reason: {}, failed_no_progress: 0, failed_budget_ceiling: 0, deferred_to_run: 0, released_stalled_run: 0, skipped_agent_busy: 0 })
+    expect(result).toEqual({ unavailable: 0, woke: 0, skipped_active: 1, failed: 0, failed_by_reason: {}, failed_no_progress: 0, failed_budget_ceiling: 0, deferred_to_run: 0, released_stalled_run: 0, skipped_agent_busy: 0, skipped_admission: 0 })
     expect(h.specs).toHaveLength(0)
     expect(h.posts).toHaveLength(0)
   })
@@ -245,7 +255,7 @@ describe('runWorkWakeupSweep — the wake path', () => {
       failed_budget_ceiling: 0,
       deferred_to_run: 0,
       released_stalled_run: 0,
-      skipped_agent_busy: 1,
+      skipped_agent_busy: 1, skipped_admission: 0,
     })
     expect(h.specs).toHaveLength(0)
     // THE POINT OF THE WHOLE FIX. The old behaviour composed anyway, queued,
@@ -391,7 +401,7 @@ describe('runWorkWakeupSweep — the wake path', () => {
   test('a project with zero items is not woken', async () => {
     const h = harness({ projects: [project({ items: [] })] })
     const result = await runWorkWakeupSweep(h.deps, new Map())
-    expect(result).toEqual({ unavailable: 0, woke: 0, skipped_active: 0, failed: 0, failed_by_reason: {}, failed_no_progress: 0, failed_budget_ceiling: 0, deferred_to_run: 0, released_stalled_run: 0, skipped_agent_busy: 0 })
+    expect(result).toEqual({ unavailable: 0, woke: 0, skipped_active: 0, failed: 0, failed_by_reason: {}, failed_no_progress: 0, failed_budget_ceiling: 0, deferred_to_run: 0, released_stalled_run: 0, skipped_agent_busy: 0, skipped_admission: 0 })
     expect(h.specs).toHaveLength(0)
   })
 
@@ -413,7 +423,7 @@ describe('runWorkWakeupSweep — the wake path', () => {
       ],
     })
     const result = await runWorkWakeupSweep(h.deps, new Map())
-    expect(result).toEqual({ unavailable: 0, woke: 0, skipped_active: 0, failed: 0, failed_by_reason: {}, failed_no_progress: 0, failed_budget_ceiling: 0, deferred_to_run: 1, released_stalled_run: 0, skipped_agent_busy: 0 })
+    expect(result).toEqual({ unavailable: 0, woke: 0, skipped_active: 0, failed: 0, failed_by_reason: {}, failed_no_progress: 0, failed_budget_ceiling: 0, deferred_to_run: 1, released_stalled_run: 0, skipped_agent_busy: 0, skipped_admission: 0 })
     expect(h.specs).toHaveLength(0)
   })
 
@@ -733,7 +743,7 @@ describe('runWorkWakeupSweep — the wake path', () => {
       ],
     })
     const result = await runWorkWakeupSweep(h.deps, new Map())
-    expect(result).toEqual({ unavailable: 0, woke: 0, skipped_active: 1, failed: 0, failed_by_reason: {}, failed_no_progress: 0, failed_budget_ceiling: 0, deferred_to_run: 1, released_stalled_run: 0, skipped_agent_busy: 0 })
+    expect(result).toEqual({ unavailable: 0, woke: 0, skipped_active: 1, failed: 0, failed_by_reason: {}, failed_no_progress: 0, failed_budget_ceiling: 0, deferred_to_run: 1, released_stalled_run: 0, skipped_agent_busy: 0, skipped_admission: 0 })
   })
 
   test('an over-long report is truncated to the bound, never dropped', async () => {
@@ -885,7 +895,7 @@ describe('runWorkWakeupSweep — loud failure, bounded siren', () => {
       failed_budget_ceiling: 0,
       deferred_to_run: 0,
       released_stalled_run: 0,
-      skipped_agent_busy: 0,
+      skipped_agent_busy: 0, skipped_admission: 0,
     })
   })
 })
@@ -1103,7 +1113,7 @@ describe('runWorkWakeupSweep — a missing precondition is never silence (#1085)
     expect(result).toEqual({
       unavailable: 1, woke: 0, skipped_active: 0, failed: 0, failed_by_reason: {},
       failed_no_progress: 0, failed_budget_ceiling: 0,
-      deferred_to_run: 0, released_stalled_run: 0, skipped_agent_busy: 0,
+      deferred_to_run: 0, released_stalled_run: 0, skipped_agent_busy: 0, skipped_admission: 0,
     })
   })
 
@@ -1236,4 +1246,78 @@ test('a sweep with no failures omits `failed_by_reason` and still prints the zer
   expect(summaries[0]).toContain('failed_no_progress=0')
   expect(summaries[0]).toContain('failed_budget_ceiling=0')
   expect(summaries[0]).not.toContain('failed_by_reason')
+})
+
+describe('runWorkWakeupSweep — project admission (#1237)', () => {
+  const queued = (fx: FixtureAdmission): number => fx.service.listLeases('queuedDispatch').length
+
+  test('a FENCED project is skipped: no compose, no post, streak untouched — reopening wakes it', async () => {
+    const fx = openAdmission()
+    await fx.admit('acme', 'conversation', 'chat', 'seed-registration')
+    const scope = fx.service.scopeFor('acme')
+    const fence = (await fx.service.maintenance.beginMaintenance(scope))!
+    expect(fence).not.toBeNull()
+    const h = harness({ admission: wakeupAdmission(fx) })
+    const streaks = new Map([['acme', 2]])
+
+    const result = await runWorkWakeupSweep(h.deps, streaks)
+
+    expect(result).toMatchObject({ woke: 0, failed: 0, skipped_admission: 1 })
+    expect(h.specs).toHaveLength(0)
+    expect(h.posts).toHaveLength(0)
+    expect(streaks.get('acme')).toBe(2)
+    expect(queued(fx)).toBe(0)
+
+    // Opposite control: the same project, reopened, wakes on the next tick.
+    expect(await fx.service.maintenance.abandon(fence)).toBe(true)
+    const reopened = await runWorkWakeupSweep(h.deps, streaks)
+    expect(reopened).toMatchObject({ woke: 1, skipped_admission: 0 })
+    expect(h.specs).toHaveLength(1)
+  })
+
+  test('an OPEN project composes UNDER a queuedDispatch lease, and the lease is released after the post', async () => {
+    const fx = openAdmission()
+    const heldDuringCompose: number[] = []
+    const h = harness({
+      admission: wakeupAdmission(fx),
+      compose: async () => {
+        heldDuringCompose.push(queued(fx))
+        return 'Pushed the fix branch; next: green CI.'
+      },
+    })
+
+    const result = await runWorkWakeupSweep(h.deps, new Map())
+
+    expect(result).toMatchObject({ woke: 1, skipped_admission: 0 })
+    expect(heldDuringCompose).toEqual([1])
+    expect(h.posts).toHaveLength(1)
+    expect(queued(fx)).toBe(0)
+  })
+
+  test('a THROWING compose still releases the lease', async () => {
+    const fx = openAdmission()
+    const heldDuringCompose: number[] = []
+    const h = harness({
+      admission: wakeupAdmission(fx),
+      compose: async () => {
+        heldDuringCompose.push(queued(fx))
+        throw new Error('compose exploded')
+      },
+    })
+
+    await runWorkWakeupSweep(h.deps, new Map()).catch(() => undefined)
+
+    expect(heldDuringCompose).toEqual([1])
+    expect(queued(fx)).toBe(0)
+  })
+
+  test('an UNKNOWN project is skipped the same way and never composes', async () => {
+    // The fixture database is shared per process, so name an id no fixture seeds.
+    const fx = openAdmission({ projects: [] })
+    const h = harness({ admission: wakeupAdmission(fx), projects: [project({ project_id: 'never-a-live-project' })] })
+    const result = await runWorkWakeupSweep(h.deps, new Map())
+    expect(result).toMatchObject({ woke: 0, failed: 0, skipped_admission: 1 })
+    expect(h.specs).toHaveLength(0)
+    expect(h.posts).toHaveLength(0)
+  })
 })

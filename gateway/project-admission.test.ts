@@ -143,3 +143,51 @@ test('abandon reopens from draining or quiesced even with draining work, never f
   expect(admission.inspect(null)?.phase).toBe('attesting')
   expect(await store.reopen(fence)).toBe(true)
 })
+
+test('releaseWork removes only the matching work — other work and other scopes survive (#1237)', async () => {
+  const { db, admission } = fixture()
+  seedProject(db, 'alpha')
+  const run1 = await admission.admit(null, 'build', 'work-board', 'run-1')
+  await admission.admit(null, 'build', 'work-board', 'run-2')
+  await admission.admit('alpha', 'build', 'work-board', 'run-1')
+  await admission.admit(null, 'conversation', 'chat', 'run-1')
+  expect(run1.status).toBe('admitted')
+
+  // Two rows for the SAME work in the same scope (a re-lease) both go.
+  await admission.admit(null, 'build', 'hold-drain', 'run-1')
+  expect(await admission.releaseBuild(null, 'run-1')).toBe(2)
+  // Idempotent: a second release removes nothing.
+  expect(await admission.releaseBuild(null, 'run-1')).toBe(0)
+
+  // Controls: another run's build lease, the same run id in ANOTHER scope, and a
+  // non-build lease naming the same work reference are all untouched.
+  expect(admission.listLeases('build').map((l) => [l.scope.projectId, l.workRef]))
+    .toEqual([[null, 'run-2'], ['alpha', 'run-1']])
+  expect(admission.listLeases('conversation').map((l) => l.workRef)).toEqual(['run-1'])
+})
+
+test('listLeases decodes the scope, reason, producer and work reference, and is owner-scoped (#1237)', async () => {
+  const f = fixture()
+  seedProject(f.db, 'alpha')
+  await f.admission.admit('alpha', 'build', 'hold-drain', 'run-9')
+  await f.admission.admit(null, 'queuedDispatch', 'wakeup', 'wake-1')
+  const other = new ProjectAdmission({ db: f.db, ownerHandle: 'owner-b', bootId: 'boot-b' })
+  await other.admit(null, 'build', 'work-board', 'foreign-run')
+
+  expect(f.admission.listLeases('build')).toEqual([
+    expect.objectContaining({
+      scope: { ownerHandle: 'owner-a', projectId: 'alpha' },
+      reason: 'build', producer: 'hold-drain:boot-a', workRef: 'run-9', generation: 0,
+    }),
+  ])
+  expect(f.admission.listLeases().map((l) => l.reason)).toEqual(['build', 'queuedDispatch'])
+  // Another owner's leases are never this owner's to reconcile.
+  expect(other.listLeases().map((l) => l.workRef)).toEqual(['foreign-run'])
+  // forDispatch is the same admission, scoped: its lease is a `build` lease.
+  const dispatch = f.admission.forDispatch('alpha', 'work-board')
+  const out = await dispatch.admit('run-10')
+  expect(out.status).toBe('admitted')
+  expect(f.admission.listLeases('build').map((l) => l.workRef)).toEqual(['run-9', 'run-10'])
+  if (out.status === 'admitted') expect(await out.release()).toBe(true)
+  expect(f.admission.listLeases('build').map((l) => l.workRef)).toEqual(['run-9'])
+})

@@ -26,6 +26,7 @@ import type { JsonSchemaDocument } from '@neutronai/cores-sdk/manifest'
 import type { ToolRegistry } from '@neutronai/tools/registry.ts'
 import type { Topic } from '@neutronai/channels/types.ts'
 import type { DispatchHoldStore } from './dispatch-holds.ts'
+import type { DispatchAdmission } from './dispatch-admission.ts'
 import {
   dispatchBoardBoundBuild,
   type BoardBoundBuildDeps,
@@ -185,6 +186,13 @@ export interface TridentBuildToolDeps {
    * Absent → unchanged behaviour (the gates fail open).
    */
   holds?: DispatchHoldStore
+  /**
+   * PROJECT ADMISSION (#1237), resolved PER CALL from the board scope key the
+   * tool derives from the composing turn (`workBoardScopeKey`), then forwarded to
+   * the chokepoint (`BoardBoundBuildDeps.projectAdmission`). REQUIRED — a factory
+   * rather than one gate because one registered tool serves every project.
+   */
+  project_admission: (scope_key: string) => DispatchAdmission
 }
 
 /** First non-empty line of a task, truncated — the ack title when a board item
@@ -269,6 +277,7 @@ export function registerTridentBuildToolSurface(
         // shares (see BoardBoundBuildDeps.preflight).
         ...(deps.preflight !== undefined ? { preflight: deps.preflight } : {}),
         ...(deps.holds !== undefined ? { holds: deps.holds } : {}),
+        projectAdmission: deps.project_admission(scope),
       }
       const result = await dispatchBoardBoundBuild(
         { board_item_id, task, ...(bound_pr !== undefined ? { bound_pr } : {}) },
@@ -396,6 +405,7 @@ export function registerTridentBuildToolSurface(
         // shares (see BoardBoundBuildDeps.preflight).
         ...(deps.preflight !== undefined ? { preflight: deps.preflight } : {}),
         ...(deps.holds !== undefined ? { holds: deps.holds } : {}),
+        projectAdmission: deps.project_admission(scope),
       }
       const result = await dispatchBoardBoundBuild({ board_item_id, task }, buildDeps)
       if (!result.ok) {

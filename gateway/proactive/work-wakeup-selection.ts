@@ -94,6 +94,8 @@ export function selectWakeupWork(input: WakeupSelectionInput): WakeupProjectWork
       // id verbatim otherwise (`turn.project_id ?? 'general'`,
       // `gateway/wiring/build-live-agent-turn.ts`).
       chat_scope: project_id ?? 'general',
+      // The EXACT admission scope (#1237): General is null, never `'general'`.
+      project_id: project_id ?? null,
       label: project_id === undefined ? 'your General workspace' : `project "${project_id}"`,
       items: [],
       deferred: [],

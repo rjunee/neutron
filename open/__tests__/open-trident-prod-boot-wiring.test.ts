@@ -441,6 +441,8 @@ describe('Open foundational-Trident prod-boot wiring', () => {
       { board_item_id: item.id, task: 'build the export' },
       {
         store: tbd.store,
+        // The composition's OWN admission factory — the production spelling.
+        projectAdmission: tbd.project_admission('owner'),
         board: tbd.work_board,
         project_slug: 'owner',
         repo_path: tbd.repo_path,
@@ -1653,4 +1655,85 @@ describe('Open foundational-Trident prod-boot wiring', () => {
       }
     }
   }, 20_000)
+})
+
+describe('project admission reaches every production dispatch site and every terminal chain (#1237)', () => {
+  // PARSED, NOT GREPPED: a comment is not a property and a decoy object is not the
+  // dispatch site, so both questions are asked of the compiler's own AST of
+  // `composer.ts` — each OBJECT LITERAL that carries the landed probe must carry
+  // project admission as a DIRECT property of itself. `BoardBoundBuildDeps.
+  // projectAdmission` is required, so tsc catches an absent key at the three
+  // chokepoint-deps sites; this pins the pairing (a new dispatch site cannot be
+  // wired for landing but not for admission) and the /code + tool-factory
+  // spellings, whose names differ.
+  const parse = (text: string): ts.SourceFile =>
+    ts.createSourceFile('composer.scan.ts', text, ts.ScriptTarget.Latest, true, ts.ScriptKind.TS)
+  const propName = (p: ts.ObjectLiteralElementLike): string | null =>
+    p.name !== undefined && (ts.isIdentifier(p.name) || ts.isStringLiteral(p.name)) ? p.name.text : null
+  const walk = (node: ts.Node, visit: (n: ts.Node) => void): void => {
+    visit(node)
+    node.forEachChild((child) => walk(child, visit))
+  }
+
+  function dispatchSites(text: string): Array<{ line: number; admission: string | null }> {
+    const file = parse(text)
+    const out: Array<{ line: number; admission: string | null }> = []
+    walk(file, (node) => {
+      if (!ts.isObjectLiteralExpression(node)) return
+      const props = node.properties
+      if (!props.some((p) => ['landedProbe', 'landed_probe'].includes(propName(p) ?? ''))) return
+      const admission = props.find((p) => ['projectAdmission', 'project_admission'].includes(propName(p) ?? ''))
+      out.push({
+        line: file.getLineAndCharacterOfPosition(node.getStart(file)).line + 1,
+        admission: admission !== undefined && ts.isPropertyAssignment(admission) ? admission.initializer.getText(file) : null,
+      })
+    })
+    return out
+  }
+
+  /** Every array literal composing a trident terminal chain (the ones naming the skill-forge observer). */
+  function terminalChains(text: string): string[][] {
+    const out: string[][] = []
+    walk(parse(text), (node) => {
+      if (!ts.isArrayLiteralExpression(node)) return
+      const names = node.elements.map((e) => (ts.isIdentifier(e) ? e.text : e.getText()))
+      if (names.includes('skillForgeOnRunTerminal')) out.push(names)
+    })
+    return out
+  }
+
+  const raw = readFileSync(join(HERE, '..', 'composer.ts'), 'utf8')
+
+  test('every dispatch site that carries the landed probe carries project admission', () => {
+    const sites = dispatchSites(raw)
+    // /code's context, the ▶ start, the hold sweep, and the agent-native tools.
+    expect(sites).toHaveLength(4)
+    for (const site of sites) expect({ line: site.line, admission: site.admission }).toEqual({ line: site.line, admission: expect.stringContaining('dispatchAdmissionForKey(') })
+    // The hold sweep is the one UNATTENDED entry, and admits as such.
+    expect(sites.filter((s) => s.admission!.includes("'hold-drain'"))).toHaveLength(1)
+    // The tool surface takes a FACTORY (scope → admission), not one admission.
+    expect(sites.filter((s) => /^\(scope_key: string\) =>/.test(s.admission!))).toHaveLength(1)
+
+    // Mutant (must come out RED): the hold sweep's admission commented out.
+    const mutant = raw.replace(
+      "projectAdmission: dispatchAdmissionForKey(hold.project_slug, 'hold-drain'),",
+      "// projectAdmission: dispatchAdmissionForKey(hold.project_slug, 'hold-drain'),",
+    )
+    expect(mutant).not.toBe(raw)
+    expect(dispatchSites(mutant).filter((s) => s.admission === null)).toHaveLength(1)
+  })
+
+  test('the build-lease release observer runs FIRST in all three terminal chains', () => {
+    const chains = terminalChains(raw)
+    expect(chains).toHaveLength(3)
+    for (const chain of chains) expect(chain[0]).toBe('releaseBuildLeaseOnTerminal')
+
+    // Mutant (must come out RED): the release moved behind the board reconcile in one chain.
+    const mutant = raw.replace(
+      '[releaseBuildLeaseOnTerminal, buildBoardReconcileObserver(workBoardStore),',
+      '[buildBoardReconcileObserver(workBoardStore), releaseBuildLeaseOnTerminal,',
+    )
+    expect(mutant).not.toBe(raw)
+    expect(terminalChains(mutant).filter((c) => c[0] !== 'releaseBuildLeaseOnTerminal')).toHaveLength(1)
+  })
 })

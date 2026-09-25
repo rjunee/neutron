@@ -1,8 +1,9 @@
 import type { ProjectDb } from '@neutronai/persistence/index.ts';
 import { ProjectAdmissionStore } from './project-admission-store.ts';
 import type {
-  AdmissionLease, AdmissionReason, MaintenancePhase, ProjectAdmissionScope,
+  AdmissionLease, AdmissionLeaseRow, AdmissionReason, MaintenancePhase, ProjectAdmissionScope,
 } from './project-admission-store.ts';
+import type { DispatchAdmission } from '@neutronai/trident/dispatch-admission.ts';
 
 /** A participating producer's admission. `release` binds the exact lease
  * (scope + generation + token) and is idempotent: only the first call reports true. */
@@ -117,6 +118,37 @@ export class ProjectAdmission {
     } finally {
       await admitted.release();
     }
+  }
+
+  /**
+   * The trident build chokepoint's admission for ONE project scope (#1237):
+   * reason `build`, the lease's work reference = the run id the dispatch will
+   * create. The lease outlives the dispatch call — the run owns it until
+   * {@link releaseBuild} runs on its terminal event (or restart reconciliation).
+   */
+  forDispatch(projectId: string | null, producer: AdmissionProducer): DispatchAdmission {
+    return {
+      admit: async (runId) => {
+        const out = await this.admit(projectId, 'build', producer, runId);
+        if (out.status !== 'admitted') return out;
+        return { status: 'admitted', generation: out.generation, release: out.release };
+      },
+    };
+  }
+
+  /**
+   * Release a run's build lease(s) when the run is TERMINAL. Work-bound and
+   * generation-independent ({@link ProjectAdmissionStore.releaseWork}): a terminal
+   * run's activity is over in every generation. Idempotent — a second call
+   * releases 0.
+   */
+  async releaseBuild(projectId: string | null | undefined, runId: string): Promise<number> {
+    return this.store.releaseWork(this.scopeFor(projectId), 'build', runId);
+  }
+
+  /** This owner's durable leases (optionally of one reason). Read-only. */
+  listLeases(reason?: AdmissionReason): AdmissionLeaseRow[] {
+    return this.store.listLeases(reason).filter((row) => row.scope.ownerHandle === this.ownerHandle);
   }
 
   inspect(projectId: string | null | undefined): ReturnType<ProjectAdmissionStore['inspect']> {
