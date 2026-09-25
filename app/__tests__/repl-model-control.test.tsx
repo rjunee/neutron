@@ -24,6 +24,7 @@ let getBody: unknown = states.cheap;
 let deferPost = false;
 let completePost: (() => void) | null = null;
 let deferGetAt = 0;
+let deferGetToken: string | null = null;
 let getCount = 0;
 let completeGet: (() => void) | null = null;
 
@@ -38,6 +39,7 @@ beforeEach(() => {
   deferPost = false;
   completePost = null;
   deferGetAt = 0;
+  deferGetToken = null;
   getCount = 0;
   completeGet = null;
   globalThis.fetch = (async (input, init) => {
@@ -54,7 +56,8 @@ beforeEach(() => {
     if (method === 'POST' && deferPost) {
       await new Promise<void>((resolve) => { completePost = resolve; });
     }
-    if (method === 'GET' && getCount === deferGetAt) {
+    if (method === 'GET' && (getCount === deferGetAt ||
+      (deferGetToken !== null && new Headers(init?.headers).get('authorization') === deferGetToken))) {
       await new Promise<void>((resolve) => { completeGet = resolve; });
     }
     return new Response(JSON.stringify(responseBody), {
@@ -251,10 +254,13 @@ describe('conversation REPL model on phone', () => {
     await press('repl-model-option-frontier');
     expect(document.querySelector('[data-testid="repl-model-open"]')?.textContent).toContain('frontier');
 
-    deferGetAt = 2;
+    // A background read can consume the next GET ordinal before focus changes.
+    await fetch('https://example.test/api/app/projects/willow/repl-model');
+    deferGetToken = 'Bearer second-token';
     getBody = { ...states.cheap, sessionId: 'session-two', currentModel: 'other' };
     await screen.rerender(createElement(ReplModelControl,
       { projectId: 'willow', baseUrl: 'https://example.test', token: 'second-token' }));
+    expect(calls.some(call => call.method === 'GET' && call.token === deferGetToken)).toBe(true);
     expect(completeGet).not.toBeNull();
     expect(document.querySelector('[data-testid="repl-model-open"]')?.textContent).toContain('unknown');
     await act(async () => { completeGet?.(); await Promise.resolve(); });
