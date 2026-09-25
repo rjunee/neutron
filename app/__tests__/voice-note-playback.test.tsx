@@ -212,7 +212,17 @@ describe('the audio session does not outlive the bubble', () => {
 describe('a clip that cannot load says so', () => {
   it('surfaces the failure and offers a retry — never a control that does nothing', async () => {
     setHarnessPlatform('web');
-    const restore = failingFetch();
+    const priorFetch = globalThis.fetch;
+    const unrelatedUrl = 'data:text/plain,voice-note-forward-probe';
+    const downstreamCalls: string[] = [];
+    globalThis.fetch = ((input: RequestInfo | URL, init?: RequestInit) => {
+      downstreamCalls.push(String(input));
+      if (String(input) === unrelatedUrl) {
+        return Promise.resolve(new Response('voice-note-forward-probe', { status: 200 }));
+      }
+      return priorFetch(input, init);
+    }) as typeof globalThis.fetch;
+    const restore = failingFetch(RESOLVED_CLIP);
     try {
       const screen = await mountScreen(bubble(CLIP_URL));
       await screen.settle();
@@ -221,6 +231,12 @@ describe('a clip that cannot load says so', () => {
       // carries no headers). A refused fetch is a clip that will never play,
       // and the owner is told so instead of tapping a silent button forever.
       expect(screen.text()).toContain('Voice message unavailable');
+      // The fetch replacement spans the process. Prove an unrelated request
+      // reaches the implementation it wrapped and returns that response.
+      const unrelatedResponse = await globalThis.fetch(unrelatedUrl);
+      expect(downstreamCalls).toContain(unrelatedUrl);
+      expect(unrelatedResponse.status).toBe(200);
+      expect(await unrelatedResponse.text()).toBe('voice-note-forward-probe');
       expect(restore.calls).toBe(1);
 
       await screen.press('Voice message unavailable, tap to retry');
@@ -230,6 +246,7 @@ describe('a clip that cannot load says so', () => {
       screen.unmount();
     } finally {
       restore.undo();
+      globalThis.fetch = priorFetch;
     }
   });
 });
@@ -241,8 +258,8 @@ function widthPercent(el: HTMLElement | null): number {
   return match === null ? Number.NaN : Math.round(Number(match[1]));
 }
 
-/** Replace `fetch` with one that always refuses, counting attempts. */
-function failingFetch(): { calls: number; undo: () => void } {
+/** Refuse this clip's fetch, counting its attempts without owning other requests. */
+function failingFetch(clipUrl: string): { calls: number; undo: () => void } {
   const real = globalThis.fetch;
   const record = {
     calls: 0,
@@ -250,7 +267,10 @@ function failingFetch(): { calls: number; undo: () => void } {
       globalThis.fetch = real;
     },
   };
-  globalThis.fetch = (async () => {
+  globalThis.fetch = (async (input: RequestInfo | URL, init?: RequestInit) => {
+    if (String(input) !== clipUrl) {
+      return real(input, init);
+    }
     record.calls += 1;
     throw new Error('refused');
   }) as unknown as typeof globalThis.fetch;
