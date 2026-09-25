@@ -3,6 +3,7 @@
 // helpers (D2 split).
 
 import { dropLocalOwnership, noteLocalOwnership } from './local-ownership.ts'
+import { fireAndForget } from '@neutronai/logger/fire-and-forget.ts'
 import { randomBytes, scryptSync } from 'node:crypto'
 import { realpathSync, rmdirSync, unlinkSync } from 'node:fs'
 import { tmpdir } from 'node:os'
@@ -575,7 +576,7 @@ export class ReplSession {
     // Only the host's validated completion (also used by recovery) releases it.
     const completion = workspace && nativeChildWorkspaceCompletion(workspace)
     if (completion) {
-      void completion.then(finish)
+      fireAndForget('persistent-repl.native-child-completion', completion.then(finish))
       return () => {
         if (yielded || released || ambiguousUnqueued) return
         ambiguousUnqueued = true
