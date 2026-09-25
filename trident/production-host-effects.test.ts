@@ -1387,8 +1387,14 @@ test('production checkpoint append refuses a terminal transition after host obse
   expect(f.store.stageEvents(f.row.id).filter(e => e.stage === 'build-mode-state')).toHaveLength(1)
 })
 
-test('production rejected review survives a crash before the next fix', async () => {
+for (const previousCount of [1, 2])
+test(`production rejected review survives a crash before the next fix (${previousCount} -> 1 blockers)`, async () => {
   const f = await resumeFixture(1, 0)
+  if (previousCount === 2) {
+    const checkpoint = (await f.deps.modes!.loadResume())!
+    await f.deps.modes!.saveCheckpoint({ ...checkpoint,
+      previousReview: { findings: ['new issue', 'resolved issue'], blockingCount: previousCount } })
+  }
   f.deps.reviewGate = async (_p, _observation, _s, _r, _u, record) => { record?.({ findings: ['second issue'], blockingCount: 1 }); return { kind: 'fix', findings: ['second issue'] } }
   const save = f.deps.modes!.saveCheckpoint!
   f.deps.modes!.saveCheckpoint = async checkpoint => {
@@ -1399,8 +1405,28 @@ test('production rejected review survives a crash before the next fix', async ()
   const restarted = createProductionHostEffects(f.options)
   expect(await restarted.modes.loadResume()).toMatchObject({ stage: 'rejected', round: 2, replansUsed: 0,
     findings: [{ kind: 'code', actionable: true, text: 'second issue' }], previousFindings: ['new issue'] })
+  const rejected = (await restarted.modes.loadResume())!
+  const dispatchesBeforeRecovery = f.runner.calls.map(c => c.step_id)
+  const rejectedHead = (await measured(f)).head
   f.deps.modes = restarted.modes
   f.deps.reviewGate = async (_p, _observation, _s, _r, _u, record) => { record?.({ findings: [], blockingCount: 0 }); return { kind: 'approve' } }
+  if (previousCount === 1) {
+    // Equal counts already vetoed the next fix before the injected crash. The
+    // durable production checkpoint must re-deliver that veto, not bypass G071.
+    expect(rejected.reviewStop).toMatchObject({ trigger: 'no-progress', round: 2,
+      previous: { findings: ['new issue'], blockingCount: 1 },
+      current: { findings: ['second issue'], blockingCount: 1 }, reviewedHead: rejectedHead, panelDecision: 'fix' })
+    expect(await f.run()).toMatchObject({ kind: 'blocked', phase: 'review',
+      on: 'Review requires orchestrator arbitration: no-progress', reviewStop: rejected.reviewStop })
+    expect(f.runner.calls.map(c => c.step_id)).toEqual(dispatchesBeforeRecovery)
+    expect(dispatchesBeforeRecovery).toEqual([`${f.row.id}:fix:1`, `${f.row.id}:review:2:head:${rejectedHead}`])
+    expect((await measured(f)).head).toBe(rejectedHead)
+    expect(await restarted.modes.loadResume()).toEqual(rejected)
+    return
+  }
+  // A genuinely decreasing review still buys the interrupted fix: rejection by
+  // itself is not a terminal arithmetic STOP.
+  expect(rejected.reviewStop).toBeUndefined()
   expect(await f.run()).toMatchObject({ kind: 'blocked', on: 'fixture stops before merge' })
   const landed = (await measured(f)).head
   const firstFix = (await f.command(['git', '-C', f.repo, 'rev-parse', `${landed}^`])).trim()

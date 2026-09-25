@@ -79,6 +79,17 @@ Validation:
   dispatch a second fix and merge; treating every rejected checkpoint as a veto
   refuses the decreasing control. Both failed and were restored before final
   validation.
+- The production host-effects crash fixture now distinguishes equal blocker
+  counts from decreasing counts. Its old equal-count expectation demanded another
+  fix after G071, reproducing the bypass rather than valid recovery. The real-Git
+  persistence controls require 1→1 to retain STOP with no new dispatch and 2→1 to
+  resume its fix; the runtime is unchanged by this test correction.
+  The complete production-host-effects suite plus the seven host/Nexus suites
+  passed 621 tests; the focused Open consumer passed all 16 cases, and both root
+  and Trident typechecks passed. Removing veto replay fails the equal-count case
+  while decreasing still passes; overapplying the veto to every round-two
+  rejection fails decreasing while equal still passes. Both mutations were
+  restored before those final runs.
 - Root and Trident TypeScript projects passed `tsc --noEmit`.
 
 This change satisfies the typed-host status subset of the locked review-loop
