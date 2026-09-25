@@ -146,7 +146,7 @@ export function ReplModelControl({ projectId, baseUrl, token }: {
           ))}
         </View>
       )}
-      {projectId.length > 0 && state?.harness === 'codex' && (state.status === 'ready' || state.status === 'busy') && (
+      {state?.harness === 'codex' && (state.status === 'ready' || state.status === 'busy') && (
         <NativeOwnerControl key={projectId} projectId={projectId} baseUrl={baseUrl} token={token} />
       )}
     </View>

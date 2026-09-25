@@ -19,16 +19,19 @@ let postStatus: number;
 let deferPost: boolean;
 let completePost: (() => void) | undefined;
 let getPayload: unknown;
+let controlPaths: string[];
 beforeAll(installNativeHarness);
 afterAll(resetHarnessGlobals);
 beforeEach(() => {
   document.body.innerHTML = '';
   state = initial(); posts = []; postStatus = 200; deferPost = false; completePost = undefined; getPayload = undefined;
+  controlPaths = [];
   globalThis.fetch = (async (input, init) => {
     expect(new Headers(init?.headers).get('authorization')).toBe('Bearer owner-token');
     if (String(input).endsWith('/repl-model')) return Response.json({ harness: 'codex', sessionId: 'session', currentModel: 'small',
       availableModels: [{ id: 'small', label: 'Small' }], status: 'busy' });
     expect(String(input)).toMatch(/\/api\/app\/projects\/[^/]+\/repl-control$/);
+    controlPaths.push(new URL(String(input)).pathname);
     if (init?.method !== 'POST') return Response.json(getPayload ?? state);
     const body = JSON.parse(String(init.body));
     posts.push(body);
@@ -49,6 +52,39 @@ async function mount() { const screen = await mountScreen(createElement(NativeOw
 
 describe.each(['ios', 'web'] as const)('native owner controls on %s', platform => {
   beforeEach(() => setHarnessPlatform(platform));
+
+  it.each([
+    ['~general', null], ['', null], ['general', 'general'], ['willow', 'willow'],
+  ] as const)('preserves native scope for %s through approval and interruption', async (routeId, nativeId) => {
+    state = { ...state, projectId: nativeId };
+    const screen = await mountScreen(createElement(ReplModelControl, { ...props, projectId: routeId })); await settle();
+    expect(document.body.textContent).toContain('Run the tests?');
+    await press('native-owner-accept');
+    await press('native-owner-interrupt');
+    expect(posts).toEqual([
+      { ...identity, projectId: nativeId, action: 'reply', requestId: 17, result: { decision: 'accept' } },
+      { ...identity, projectId: nativeId, action: 'interrupt' },
+    ]);
+    expect(controlPaths.length).toBeGreaterThanOrEqual(3);
+    expect(new Set(controlPaths)).toEqual(new Set([
+      `/api/app/projects/${nativeId === null ? '~general' : nativeId}/repl-control`,
+    ]));
+    expect(document.querySelector('[data-testid="native-owner-error"]')).toBeNull();
+    expect(document.querySelector('[data-testid="native-owner-interrupt"]')).toBeNull();
+    screen.unmount();
+  });
+
+  it.each([
+    ['~general', 'general'], ['~general', 'willow'], ['general', null], ['willow', null],
+  ] as const)('refuses foreign native scope %s / %s from the model selector', async (routeId, nativeId) => {
+    getPayload = { ...state, projectId: nativeId };
+    const screen = await mountScreen(createElement(ReplModelControl, { ...props, projectId: routeId })); await settle();
+    expect(document.querySelector('[data-testid="native-owner-error"]')?.textContent).toContain('invalid Codex control state');
+    expect(document.querySelector('[data-testid="native-owner-accept"]')).toBeNull();
+    expect(document.querySelector('[data-testid="native-owner-interrupt"]')).toBeNull();
+    expect(posts).toHaveLength(0);
+    screen.unmount();
+  });
 
   it('reaches approvals from the existing model selector and sends only one-time exact identity approval', async () => {
     const screen = await mountScreen(createElement(ReplModelControl, props)); await settle();
