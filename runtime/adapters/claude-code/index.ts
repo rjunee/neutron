@@ -213,6 +213,8 @@ export interface ClaudeCodeSubstrateOptions {
   onChildCrash?: (info: ChildCrashInfo) => void | Promise<void>
   /** Eviction guard — see `PersistentReplSubstrateOptions.hostsLiveWork`. */
   hostsLiveWork?: (childGeneration: string) => number
+  /** #1237 — see `PersistentReplSubstrateOptions.admissionGeneration`. */
+  admissionGeneration?: () => Promise<number | undefined>
   onSizeAlert?: (info: { sessionKey: string; severity: SizeSeverity; sizeBytes: number }) => void
   onRateLimitBanner?: (notice: RateLimitBannerNotice) => void | Promise<void>
   /** Notice-family DI seam (row #16) — fired ONCE (edge) when the model-update
@@ -548,6 +550,7 @@ function prepareClaudeCodeOptions(options: ClaudeCodeSubstrateOptions) {
   if (options.onDeadTurnNotice !== undefined) p.onDeadTurnNotice = options.onDeadTurnNotice
   if (options.onChildCrash !== undefined) p.onChildCrash = options.onChildCrash
   if (options.hostsLiveWork !== undefined) p.hostsLiveWork = options.hostsLiveWork
+  if (options.admissionGeneration !== undefined) p.admissionGeneration = options.admissionGeneration
   if (options.onSizeAlert !== undefined) p.onSizeAlert = options.onSizeAlert
   if (options.onRateLimitBanner !== undefined) p.onRateLimitBanner = options.onRateLimitBanner
   if (options.onModelUpdate !== undefined) p.onModelUpdate = options.onModelUpdate

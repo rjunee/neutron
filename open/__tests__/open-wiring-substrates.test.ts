@@ -102,6 +102,8 @@ function makeCtx(
     env: {} as NodeJS.ProcessEnv,
     db: {} as OpenWiringContext['db'],
     substrateFactory,
+    // #1237 — no project parent in this fixture is stamped (legacy-unknown).
+    admissionGenerationFor: async () => undefined,
     prewarmSubstrate: async (s: Substrate): Promise<void> => {
       prewarmCalls.push(s)
     },
@@ -305,6 +307,26 @@ describe('wireSubstrates — instance ids + tool-bridge invariants', () => {
     const others = captured.filter((o) => o.substrate_instance_id !== 'cc-agent-owner')
     expect(others.length).toBeGreaterThanOrEqual(4)
     for (const o of others) expect(o.resolveExtraMcpServers).toBeUndefined()
+  })
+
+  test('ONLY cc-agent-* stamps an admission generation, and each parent reads its OWN scope (#1237)', async () => {
+    const asked: Array<string | undefined> = []
+    const { ctx, captured } = makeCtx({
+      admissionGenerationFor: async (projectId) => { asked.push(projectId); return projectId === 'project-x' ? 5 : 2 },
+    })
+    const w = wireSubstrates(ctx)
+    await drain(w.makeProjectLiveAgentSubstrate('project-x')!)
+    await drainEveryWiredSubstrate(w)
+
+    const agents = captured.filter((o) => o.substrate_instance_id === 'cc-agent-owner')
+    expect(agents.length).toBeGreaterThanOrEqual(2)
+    for (const a of agents) expect(typeof a.admissionGeneration).toBe('function')
+    // The reader is bound per dispatch to the project the spawn is FOR.
+    expect(await agents[0]!.admissionGeneration!()).toBe(5)
+    expect(asked).toEqual(['project-x'])
+    const others = captured.filter((o) => o.substrate_instance_id !== 'cc-agent-owner')
+    expect(others.length).toBeGreaterThanOrEqual(4)
+    for (const o of others) expect(o.admissionGeneration).toBeUndefined()
   })
 
   test('makeComposeSubstrate: per-project ISOLATED compose session — keyed by project_id, distinct pool key from cc-agent, TOOLLESS (#377/#378 white-box)', async () => {

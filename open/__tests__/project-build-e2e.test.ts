@@ -1040,6 +1040,7 @@ async function fixture(options: { taskSequence?: boolean; moreTasks?: boolean; s
         : registration.state === 'exited' ? { ...session, hasChildExited: () => true } : registeredSession) as never))
   }
 
+  const admission = new ProjectAdmission({ db, ownerHandle: 'e2e-owner', bootId: 'e2e-fixture' })
   const context: ProjectBuildContext = {
     store, attempts: new TridentAttemptLedger(db), runHost, runSuite: runHost,
     runInstall: Object.assign((argv: string[], cwd?: string, env?: Record<string, string>, timeout?: number) =>
@@ -1052,6 +1053,8 @@ async function fixture(options: { taskSequence?: boolean; moreTasks?: boolean; s
       register()
       await Promise.resolve()
     },
+    // #1237 — the REAL native-child admission over the fixture's own database.
+    nativeChildAdmission: admission.forNativeChild(null),
   }
 
   const input: InnerLoopInput = {
@@ -1076,7 +1079,7 @@ async function fixture(options: { taskSequence?: boolean; moreTasks?: boolean; s
   }
 
   return { dir, repo, origin, baseSha, db, store, row, input, context, prepare, github, commands, world,
-    register, key, codexCalls }
+    register, key, codexCalls, admission }
 }
 
 async function drive(f: Awaited<ReturnType<typeof fixture>>): Promise<ProjectBuildOutcome> {
@@ -5352,8 +5355,12 @@ test('project admission end to end: fenced dispatch queues, reopened dispatch le
   if (!dispatched.ok) return
   expect(buildLeases(admission)).toEqual([dispatched.run.id])
   expect(holds.getByItem(OWNER_SLUG, 'fence-card')).toBeNull()
+  // A step's native child joins the run: its lease names the RUN id.
+  const childLeases = (a: ProjectAdmission) => a.listLeases('liveChild').map((l) => l.workRef)
+  expect((await admission.forNativeChild(null).admit(dispatched.run.id, 'plan:0')).status).toBe('admitted')
+  expect(childLeases(admission)).toEqual([dispatched.run.id])
 
-  // 3. TERMINAL: the composed chain — release observer first — hands the lease back.
+  // 3. TERMINAL: the composed chain — release observer first — hands BOTH leases back.
   await f.store.update(dispatched.run.id, { phase: 'failed' })
   const chain = buildTridentTerminalObserver({
     nexus: null,
@@ -5361,6 +5368,7 @@ test('project admission end to end: fenced dispatch queues, reopened dispatch le
   })
   await chain(f.store.get(dispatched.run.id)!)
   expect(buildLeases(admission)).toEqual([])
+  expect(childLeases(admission)).toEqual([])
 
   // 4. RESTART: a second connection on the same file. The fixture's own run is
   // still non-terminal; its lease was lost (deleted), so reconciliation re-leases it.
@@ -5374,4 +5382,10 @@ test('project admission end to end: fenced dispatch queues, reopened dispatch le
   const reconciled = await reconcileBuildLeases({ admission: restarted, runs: new TridentRunStore(reopened), projectIdForRun })
   expect(reconciled).toMatchObject({ released: 0, leased: 1 })
   expect(buildLeases(restarted)).toEqual([f.row.id])
+
+  // 5. RESTART with a live run's child lease: kept, counted, never re-leased.
+  expect((await restarted.forNativeChild(null).admit(f.row.id, 'build:0')).status).toBe('admitted')
+  const again = await reconcileBuildLeases({ admission: restarted, runs: new TridentRunStore(reopened), projectIdForRun })
+  expect(again).toMatchObject({ released: 0, kept: 1, children_kept: 1, leased: 0 })
+  expect(childLeases(restarted)).toEqual([f.row.id])
 }, 120_000)

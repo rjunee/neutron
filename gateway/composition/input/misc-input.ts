@@ -11,6 +11,15 @@ export interface MiscCompositionInput {
    * maintenance of its own.
    */
   project_admission?: ProjectAdmission
+  /**
+   * #1237 — the READ-ONLY liveness census of one project scope (`null` = General):
+   * its parent REPL, the parent's native children and its shells, each `idle`,
+   * `busy` or `unknown`. Exposed for a maintenance owner; boot runs no census, and
+   * nothing fences or replaces on its answer.
+   */
+  project_liveness?: {
+    census(projectId: string | null): Promise<import('../../project-liveness-census.ts').ProjectLivenessCensus>
+  }
   /** Awaited after graph tools and HTTP wiring exist, before accepting traffic. */
   on_graph_ready?: () => Promise<void>
   db: ProjectDb

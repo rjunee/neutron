@@ -137,3 +137,33 @@ test('the composed app exposes the admission service and its chat runner refuses
   ws.close()
   await sleep(50)
 }, 30_000)
+
+test('the composed app exposes the liveness census over the SAME admission service', async () => {
+  seedMigratedDb(process.env['NEUTRON_DB_PATH']!)
+  const db = ProjectDb.open(process.env['NEUTRON_DB_PATH']!)
+  const composer = buildOpenGraphComposer({ env: process.env, substrateFactory: () => recordingSubstrate([]) })
+  const composition = await composer({ db, project_slug: 'owner' })
+  const graph = await composeProductionGraph(composition)
+  close = async () => {
+    for (const cleanup of composition.realmode_cleanups ?? []) { try { await cleanup() } catch { /* best-effort */ } }
+    await graph.shutdown()
+    db.close()
+  }
+  const liveness = composition.project_liveness
+  const admission = composition.project_admission
+  if (liveness === undefined || admission === undefined) throw new Error('composition did not expose the census and admission')
+
+  const quiet = await liveness.census(null)
+  expect(quiet.parent).toEqual({ kind: 'absent' })
+  expect(quiet.scope).toEqual(admission.scopeFor(null))
+  expect(quiet.verdict).toBe('idle')
+
+  // A native child admitted through the composed service is what the census reads.
+  const child = await admission.forNativeChild(null).admit('census-run', 'build:0')
+  if (child.status !== 'admitted') throw new Error(`expected admission, got ${child.status}`)
+  const busy = await liveness.census(null)
+  expect(busy.children).toBe('busy')
+  expect(busy.verdict).toBe('busy')
+  expect(await child.release()).toBe(true)
+  expect((await liveness.census(null)).verdict).toBe('idle')
+}, 30_000)

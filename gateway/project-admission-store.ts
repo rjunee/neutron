@@ -64,6 +64,42 @@ export class ProjectAdmissionStore {
     });
   }
 
+  /**
+   * Admit a CHILD of already-admitted work (#1237): a native child a bounded
+   * build step creates inside the project REPL. One transaction: the same
+   * writer-lock UPDATE as {@link admit}, then the fence row (`unknown` when none),
+   * then the PARENT lease — the first row of `parent.reason` naming
+   * `parent.workRef` in this scope (`no-parent` when none) — then the child lease
+   * under the PARENT'S generation, REGARDLESS of fence phase.
+   *
+   * A child of admitted work IS that work draining ({@link release}'s contract:
+   * existing admitted work can drain after fencing). Refusing it would strand a
+   * build the fence must wait for, while {@link transition} still refuses to leave
+   * `draining` until the child row is gone, so quiescence stays exact.
+   */
+  async admitChild(
+    scope: ProjectAdmissionScope,
+    parent: { reason: AdmissionReason; workRef: string },
+    reason: AdmissionReason,
+    producer: string,
+    workRef: string,
+  ): Promise<{ status: 'admitted'; lease: AdmissionLease } | { status: 'no-parent' } | { status: 'unknown' }> {
+    if (!producer.trim() || !workRef.trim() || !parent.workRef.trim()) throw new Error('Producer and work reference required');
+    const key = scopeKey(scope);
+    return this.db.transaction(async tx => {
+      await tx.run('UPDATE project_admission_fences SET generation = generation WHERE scope_key = ?', [key]);
+      const row = tx.get<FenceRow>('SELECT generation, phase, maintenance_token FROM project_admission_fences WHERE scope_key = ?', [key]);
+      if (!row) return { status: 'unknown' as const };
+      const owner = tx.get<{ generation: number }>(`SELECT generation FROM project_admission_leases
+        WHERE scope_key = ? AND reason = ? AND work_ref = ? ORDER BY rowid LIMIT 1`, [key, parent.reason, parent.workRef]);
+      if (!owner) return { status: 'no-parent' as const };
+      const token = crypto.randomUUID();
+      tx.runSync(`INSERT INTO project_admission_leases (token, scope_key, generation, reason, producer, work_ref)
+        VALUES (?, ?, ?, ?, ?, ?)`, [token, key, owner.generation, reason, producer, workRef]);
+      return { status: 'admitted' as const, lease: { scope: { ...scope }, generation: owner.generation, token } };
+    });
+  }
+
   /** Existing admitted work can drain after fencing. A stale/foreign release
    * cannot remove another generation's durable activity. */
   async release(lease: AdmissionLease): Promise<boolean> {

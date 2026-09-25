@@ -381,6 +381,10 @@ async function spawnSession(
   // Stamp the auth fingerprint the child is being spawned with so the warm-reuse
   // freshness guard can evict on a same-credential-id token refresh (Codex r2 P1).
   session.authFingerprint = authFingerprintFor(options.env, options.sinkTokenPath)
+  // #1237 — the admission generation this parent is spawned under, read ONCE and
+  // BEFORE the child is launched, so the stamp can only describe the scope as it
+  // stood when this child began. Persisted below in the same write as `reuse`.
+  session.admissionGeneration = await readAdmissionGeneration(options, sessionKey)
 
   // Pre-seed the first-run trust + bypass-permissions acceptance so the
   // interactive REPL doesn't wedge on a blocking Ink dialog before it loads
@@ -805,6 +809,9 @@ async function spawnSession(
         tool_bridge: session.toolBridgeActive,
         auth_fingerprint: session.authFingerprint,
       }
+      // #1237 — omitted, never written as null, when the reader answered nothing: the
+      // row must then read as legacy-unknown, exactly like a row from before the field.
+      if (session.admissionGeneration !== undefined) record.admission_generation = session.admissionGeneration
       try {
         // Merge onto any prior row BUT clear the transient `respawn_in_flight_at`
         // stamp: this spawn just COMPLETED the in-flight respawn, so a stale stamp
@@ -828,8 +835,15 @@ async function spawnSession(
             // child that is RUNNING, so a value inherited from its predecessor is a
             // claim about a pane this child does not have. It is re-stated below from
             // `record` when this spawn actually produced one.
+            //
+            // #1237 — `admission_generation` is dropped for the same reason: it describes
+            // the admission state THIS child was spawned under, so a stamp inherited from
+            // a predecessor would let an unstamped child read as participating. It is
+            // re-stated below only when this spawn stamped one.
+            admission_generation: _priorAdmissionGeneration,
             ...merged
           } = prev ? { ...prev, ...record } : record
+          if (record.admission_generation !== undefined) (merged as ReplRegistryRecord).admission_generation = record.admission_generation
           if (selected === undefined) delete merged.owner_selected_model
           // #539 — OWNERSHIP IS NOT MERGED, IT IS RE-STATED, and the handle and its claim
           // move together. A spread carries the PRIOR row's `pane_handle` through whenever
@@ -1085,6 +1099,23 @@ export function resolveResumeDirective(
     return { sessionId: resolution.sessionId }
   }
   return undefined
+}
+
+/** The parent's spawn-time admission generation (#1237), fail-safe to `undefined`: an
+ *  unwired, throwing, rejecting or non-integer reader spawns UNSTAMPED (legacy-unknown)
+ *  with one stderr line — never a failed spawn. Mirrors {@link countHostedLiveWork}. */
+async function readAdmissionGeneration(
+  options: PersistentReplSubstrateOptions,
+  sessionKey: string,
+): Promise<number | undefined> {
+  if (options.admissionGeneration === undefined) return undefined
+  try {
+    const generation = await options.admissionGeneration()
+    return Number.isSafeInteger(generation) && generation! >= 0 ? generation : undefined
+  } catch (err) {
+    process.stderr.write(`[repl] admissionGeneration failed for key=${sessionKey.slice(0, 24)}: ${String(err)}\n`)
+    return undefined
+  }
 }
 
 /** The eviction guard's answer, fail-safe to 0 (an unwired or throwing counter

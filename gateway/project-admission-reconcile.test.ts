@@ -53,13 +53,13 @@ test('reconcile releases a terminal or missing run, keeps a live run, and re-lea
 
   const result = await reconcileBuildLeases({ admission, runs, projectIdForRun })
 
-  expect(result).toEqual({ released: 2, kept: 1, leased: 1, unleased_fenced: 0, unleased_unknown: 0 })
+  expect(result).toEqual({ released: 2, kept: 1, children_kept: 0, leased: 1, unleased_fenced: 0, unleased_unknown: 0 })
   expect(buildLeases(admission)).toEqual([[null, live.id], ['alpha', unleased.id]])
   expect(admission.listLeases('conversation').map((l) => l.workRef)).toEqual([terminal.id])
 
   // Idempotent: a second pass finds everything already consistent.
   expect(await reconcileBuildLeases({ admission, runs, projectIdForRun }))
-    .toEqual({ released: 0, kept: 2, leased: 0, unleased_fenced: 0, unleased_unknown: 0 })
+    .toEqual({ released: 0, kept: 2, children_kept: 0, leased: 0, unleased_fenced: 0, unleased_unknown: 0 })
 })
 
 test('a FENCED scope is not re-leased — the live run is counted and logged at warn', async () => {
@@ -79,7 +79,7 @@ test('a FENCED scope is not re-leased — the live run is counted and logged at 
   } finally {
     warns.mockRestore()
   }
-  expect(result).toEqual({ released: 0, kept: 0, leased: 0, unleased_fenced: 1, unleased_unknown: 0 })
+  expect(result).toEqual({ released: 0, kept: 0, children_kept: 0, leased: 0, unleased_fenced: 1, unleased_unknown: 0 })
   expect(buildLeases(admission)).toEqual([])
 
   // Opposite control: the same run in the same scope IS re-leased once it reopens.
@@ -94,7 +94,7 @@ test('a live run in a scope that is not a live project is counted as unknown, ne
   const warns = spyOn(console, 'warn').mockImplementation(() => {})
   try {
     expect(await reconcileBuildLeases({ admission, runs, projectIdForRun }))
-      .toEqual({ released: 0, kept: 0, leased: 0, unleased_fenced: 0, unleased_unknown: 1 })
+      .toEqual({ released: 0, kept: 0, children_kept: 0, leased: 0, unleased_fenced: 0, unleased_unknown: 1 })
   } finally {
     warns.mockRestore()
   }
@@ -113,8 +113,34 @@ test('RESTART: leases written through one connection are reconciled through a se
   const second = first.open('boot-b')
   expect(buildLeases(second.admission)).toEqual([[null, done.id], [null, running.id]])
   const result = await reconcileBuildLeases({ admission: second.admission, runs: second.runs, projectIdForRun })
-  expect(result).toEqual({ released: 1, kept: 1, leased: 0, unleased_fenced: 0, unleased_unknown: 0 })
+  expect(result).toEqual({ released: 1, kept: 1, children_kept: 0, leased: 0, unleased_fenced: 0, unleased_unknown: 0 })
   expect(buildLeases(second.admission)).toEqual([[null, running.id]])
   // The survivor keeps the PRODUCER of the boot that admitted it — reconcile does not re-stamp live work.
   expect(second.admission.listLeases('build')[0]!.producer).toBe('work-board:boot-a')
+})
+
+test('reconcile releases a terminal run\'s child lease, keeps a live run\'s, and never re-leases a child (#1237)', async () => {
+  const first = fixture()
+  const done = await makeRun(first.runs, 'done-with-child')
+  const live = await makeRun(first.runs, 'live-with-child')
+  for (const run of [done, live]) {
+    await first.admission.forDispatch(null, 'work-board').admit(run.id)
+    expect((await first.admission.forNativeChild(null).admit(run.id, 'build:0')).status).toBe('admitted')
+  }
+  // A child lease whose run row is gone entirely.
+  expect((await first.admission.forNativeChild(null).admit('vanished-run', 'plan:0')).status).toBe('admitted')
+  await first.runs.update(done.id, { phase: 'failed' })
+
+  // Through a second connection: the terminal observer's release was "lost".
+  const second = first.open('boot-b')
+  const result = await reconcileBuildLeases({ admission: second.admission, runs: second.runs, projectIdForRun })
+  expect(result).toEqual({ released: 3, kept: 1, children_kept: 1, leased: 0, unleased_fenced: 0, unleased_unknown: 0 })
+  expect(second.admission.listLeases().map((l) => [l.reason, l.workRef]))
+    .toEqual([['build', live.id], ['liveChild', live.id]])
+
+  // Never re-leased: a live run whose child lease is gone gets no new child row.
+  await second.admission.releaseBuild(null, live.id)
+  const again = await reconcileBuildLeases({ admission: second.admission, runs: second.runs, projectIdForRun })
+  expect(again).toMatchObject({ leased: 1, children_kept: 0 })
+  expect(second.admission.listLeases('liveChild')).toEqual([])
 })

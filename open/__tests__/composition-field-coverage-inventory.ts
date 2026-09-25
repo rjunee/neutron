@@ -91,6 +91,11 @@ export const MIN_EXPECTED_WIRED_FIELDS = 19
  */
 export const WIRED_FIELDS: readonly CompositionFieldWiredEntry[] = [
   {
+    field: 'project_liveness',
+    provides:
+      'the read-only liveness census of one project scope (parent turn, native children, shells) a maintenance owner reads before it may call a generation quiescent — unset, quiescence would rest on lease counts alone, which cannot see a legacy parent or a live shell',
+  },
+  {
     field: 'project_admission',
     provides:
       'the per-boot project admission service chat, parent input and host acting turns admit through before queueing — unset, later producers and the maintenance owner would build a second, disagreeing service over the same durable leases',

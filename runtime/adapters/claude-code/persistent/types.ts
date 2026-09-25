@@ -280,6 +280,14 @@ export interface PersistentReplSubstrateOptions {
    *  of all trident run deaths). Omitted → 0 → evict exactly as before. Must be
    *  cheap and synchronous (one indexed count); a throw is treated as 0. */
   hostsLiveWork?: (childGeneration: string) => number
+  /** #1237 — THE PARENT'S ADMISSION GENERATION. Awaited ONCE by the spawn, before the
+   *  child is launched, and stamped onto `ReplSession.admissionGeneration` and the
+   *  registry row (`admission_generation`) in the same write as `reuse`. A project
+   *  maintenance owner compares it with the fence generation to tell a parent that
+   *  participates in admission from a legacy one. Same contract as `hostsLiveWork`:
+   *  a throw or rejection is `undefined` plus one stderr line, never a failed spawn.
+   *  Omitted or `undefined` → the row carries no stamp (legacy-unknown). */
+  admissionGeneration?: () => Promise<number | undefined>
   /** Rate-limit / overload BANNER notice sink (master-table row #10). Fired on the
    *  rising edge when the output scanner sees a `temporary` (429/529/overload/502)
    *  or `usage-cap` (subscription window) banner in the ring — NOTIFY-ONLY, no

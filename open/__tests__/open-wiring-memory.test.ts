@@ -87,6 +87,8 @@ function makeCtx(overrides: Partial<OpenWiringContext> = {}): OpenWiringContext 
     env: {} as NodeJS.ProcessEnv,
     db: {} as OpenWiringContext['db'],
     substrateFactory,
+    // #1237 — no project parent in this fixture is stamped (legacy-unknown).
+    admissionGenerationFor: async () => undefined,
     prewarmSubstrate: async (): Promise<void> => {},
     ...overrides,
   }
