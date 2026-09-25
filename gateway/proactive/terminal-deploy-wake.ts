@@ -16,7 +16,7 @@ export const TERMINAL_DEPLOY_WAKE_TURN_TIMEOUT_MS = 4 * 60_000
 
 export interface TerminalDeployWakeDeps {
   llm: WakeupLlm | null
-  projectChatScope(topic_id: string): string
+  projectChatScope(topic_id: string): string | null
   post(topic_id: string, reply: string, opts: { loud: boolean }): boolean | Promise<boolean>
   logger: { error(message: string, fields?: Record<string, unknown>): void }
 }
@@ -55,12 +55,13 @@ export function buildTerminalDeployWakeObserver(
         output_schema: { type: 'object' },
         capability_required: 'fs:project_data',
       }))
+      const conversationProjectId = deps.projectChatScope(outcome.topic_id)
       const spec: AgentSpec = {
         prompt: buildTerminalDeployWakePrompt(outcome),
         tools,
         model_preference: [getBestModel()],
         max_tokens: 4096,
-        metering_context: { project_id: deps.projectChatScope(outcome.topic_id) },
+        metering_context: { project_id: conversationProjectId ?? 'general', conversationProjectId },
       }
       const reply = await deps.llm.compose(spec, { timeout_ms: TERMINAL_DEPLOY_WAKE_TURN_TIMEOUT_MS })
       await deps.post(outcome.topic_id, reply, { loud: outcome.kind !== 'accepted' })

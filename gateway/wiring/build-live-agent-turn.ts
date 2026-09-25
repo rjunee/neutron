@@ -1,4 +1,6 @@
 import { effectivePromptPath, readEffectivePrompt, recordEffectivePrompt } from './effective-prompt.ts'
+import { actingTurnProjectId } from './conversation-scope.ts'
+export { actingTurnProjectId } from './conversation-scope.ts'
 /**
  * @neutronai/gateway/wiring — post-onboarding live-agent chat turn.
  *
@@ -897,20 +899,6 @@ export class ProjectAdmissionRefusedError extends Error {
   }
 }
 
-/**
- * The conversation scope of a host acting turn. `conversationProjectId` is exact
- * (null = General) when the caller threads it. Legacy callers carry only the
- * metering id, where every existing acting-turn producer spells General as the
- * literal `'general'` (see the composer's wake observers and the project-build
- * General fallback) — that legacy convention is read here and nowhere else.
- */
-export function actingTurnProjectId(spec: AgentSpec): string | null {
-  const ctx = spec.metering_context
-  if (ctx?.conversationProjectId !== undefined) return ctx.conversationProjectId
-  const legacy = ctx?.project_id
-  return legacy === undefined || legacy === 'general' ? null : legacy
-}
-
 function refusalOf(
   outcome: { status: 'fenced'; phase: string | null } | { status: 'unknown' },
   projectId: string | null,
@@ -1278,7 +1266,8 @@ export function buildLiveAgentTurn(
           return Promise.reject(new ProjectAdmissionRefusedError(refusal))
         },
         admitted: () => enqueue(topicKey, () =>
-          dispatchSpec(spec, opts.timeout_ms, spec.metering_context?.project_id ?? 'general')),
+          dispatchSpec({ ...spec, metering_context: { ...spec.metering_context, project_id: spec.metering_context?.project_id ?? 'general', conversationProjectId: projectId } },
+            opts.timeout_ms, spec.metering_context?.project_id ?? 'general')),
       })
     },
   })

@@ -39,6 +39,12 @@ function harness(error?: Error) {
 }
 
 describe('terminal build wake', () => {
+  test.each([null, 'general', 'alpha'])('carries exact conversation scope %s', async scope => {
+    const h = harness()
+    h.deps.projectChatScope = () => scope
+    await buildTerminalBuildWakeObserver(h.deps)(run())
+    expect(h.specs[0]?.metering_context).toEqual({ project_id: scope ?? 'general', conversationProjectId: scope })
+  })
   const escalationRun = (kind = 'missing-dependency', over: Partial<TridentRun> = {}) => run({
     phase: 'failed', harvested_at: 123,
     inner_result: JSON.stringify({

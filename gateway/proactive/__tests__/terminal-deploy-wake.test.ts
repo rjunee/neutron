@@ -44,6 +44,14 @@ function harness(): {
 }
 
 describe('terminal deploy wake', () => {
+  test.each([null, 'general', 'alpha'])('carries exact conversation scope %s', async scope => {
+    const h = harness()
+    h.deps.projectChatScope = () => scope
+    let observed: unknown
+    h.deps.llm = { compose: async spec => { observed = spec.metering_context; return 'continued' } }
+    await buildTerminalDeployWakeObserver(h.deps)(outcome())
+    expect(observed).toEqual({ project_id: scope ?? 'general', conversationProjectId: scope })
+  })
   test('an accepted deploy wakes and replies on the requesting project conversation', async () => {
     const h = harness()
     await buildTerminalDeployWakeObserver(h.deps)(outcome())

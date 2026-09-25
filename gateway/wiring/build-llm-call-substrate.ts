@@ -1,4 +1,5 @@
 import { projectModelTier } from '@neutronai/runtime/configured-models.ts'
+import { actingTurnProjectId } from './conversation-scope.ts'
 import { createConfiguredChatSubstrate } from '@neutronai/runtime/adapters/configured-chat/index.ts'
 /**
  * @neutronai/gateway/wiring — shared CC-subprocess LLM-call substrate.
@@ -1006,7 +1007,9 @@ export function buildLlmCallSubstrate(
       // General is explicitly null in the conversation scope. The legacy pool's
       // 'general' sentinel must never select a real project's provider override.
       const conversationProjectId = input.conversationProjectId !== undefined
-        ? input.conversationProjectId : spec.metering_context?.conversationProjectId
+        ? input.conversationProjectId : spec.metering_context?.conversationProjectId !== undefined
+          ? spec.metering_context.conversationProjectId
+          : (input.ownerConversation ? input.projectIdResolver?.() ?? actingTurnProjectId(spec) : undefined)
       const projectId = conversationProjectId !== undefined
         ? conversationProjectId ?? undefined
         : input.projectIdResolver?.() ?? spec.metering_context?.project_id
@@ -1125,7 +1128,8 @@ export function buildLlmCallSubstrate(
         const cred = { id: resolved.cred_id }
         const opts = await claudeOptionsFor(
           input, resolved,
-          () => input.projectIdResolver?.() ?? spec.metering_context?.project_id,
+          () => conversationProjectId !== undefined ? conversationProjectId ?? 'general'
+            : input.projectIdResolver?.() ?? spec.metering_context?.project_id,
           () => {
             // A Claude turn invalidates this scope's OpenAI continuation before
             // remaining option getters, so switching back replays full history.

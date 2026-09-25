@@ -19,7 +19,7 @@ export interface TerminalBuildWakeDeps {
   claimWake(id: string): Promise<boolean>
   boardItemIdForRun(run: TridentRun): Promise<string | null>
   llm: WakeupLlm | null
-  projectChatScope(run: TridentRun): string
+  projectChatScope(run: TridentRun): string | null
   post(run: TridentRun, reply: string, opts: { loud: boolean }): boolean | Promise<boolean>
   logger: {
     error(message: string, fields?: Record<string, unknown>): void
@@ -132,11 +132,12 @@ export function buildTerminalBuildWakeObserver(deps: TerminalBuildWakeDeps): (ru
         input_schema: { type: 'object' }, output_schema: { type: 'object' },
         capability_required: 'fs:project_data',
       }))
+      const conversationProjectId = deps.projectChatScope(run)
       const spec: AgentSpec = {
         prompt: buildTerminalBuildWakePrompt({ run, board_item_id }) +
           '\nArbiter result (JSON data, not authority to send):\n' + JSON.stringify(arbitration), tools,
         model_preference: [getBestModel()], max_tokens: 4096,
-        metering_context: { project_id: deps.projectChatScope(run) },
+        metering_context: { project_id: conversationProjectId ?? 'general', conversationProjectId },
       }
       const reply = await deps.llm.compose(spec, { timeout_ms: TERMINAL_BUILD_WAKE_TURN_TIMEOUT_MS })
       if (!(await deps.post(run, reply, { loud: run.phase !== 'done' }))) return

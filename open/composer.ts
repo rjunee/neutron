@@ -3219,7 +3219,7 @@ export function buildOpenGraphComposer(
       const observeTerminalDeployWake = buildTerminalDeployWakeObserver({
         llm: liveAgentSubstrate === null ? null : {
           compose: (spec, opts) => appWsChatTurn!.composeActingTurn(
-            spec.metering_context?.project_id === 'general'
+            spec.metering_context?.conversationProjectId === null
               ? ownerTopic
               : `${ownerTopic}:${spec.metering_context?.project_id ?? ''}`,
             spec,
@@ -3227,7 +3227,7 @@ export function buildOpenGraphComposer(
           ),
         },
         projectChatScope: (topic_id) =>
-          topic_id.startsWith(`${ownerTopic}:`) ? topic_id.slice(ownerTopic.length + 1) : 'general',
+          topic_id.startsWith(`${ownerTopic}:`) ? topic_id.slice(ownerTopic.length + 1) : null,
         post: async (topic_id, reply, opts) => {
           const result = await deliver(topic_id, {
             body: reply,
@@ -4742,13 +4742,12 @@ export function buildOpenGraphComposer(
       // Its queue admits the wake before the timeout starts, on the project REPL.
       llm: liveAgentSubstrate === null ? null : {
         compose: (spec, opts) => appWsChatTurn!.composeActingTurn(
-          tridentDeliveryChatId(spec.metering_context?.project_id === 'general'
-            ? null : spec.metering_context?.project_id ?? null),
+          tridentDeliveryChatId(spec.metering_context?.conversationProjectId ?? null),
           spec,
           { timeout_ms: opts?.timeout_ms ?? TERMINAL_BUILD_WAKE_TURN_TIMEOUT_MS },
         ),
       },
-      projectChatScope: (run) => workBoardProjectIdForKey(project_slug, run.project_slug) ?? 'general',
+      projectChatScope: (run) => workBoardProjectIdForKey(project_slug, run.project_slug) ?? null,
       // Durable inert row + live push to the run's own chat; buzz only when loud.
       post: async (run, reply, opts) => {
         const result = await deliver(run.chat_id ?? tridentDeliveryChatId(null), {

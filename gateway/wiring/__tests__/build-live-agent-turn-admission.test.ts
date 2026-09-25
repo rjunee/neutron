@@ -54,9 +54,11 @@ function latch() {
 /** Substrate that records every start and blocks the prompt containing `block`. */
 function gatedSubstrate(block: string) {
   const starts: string[] = []
+  const scopes: AgentSpec['metering_context'][] = []
   const started = latch(), release = latch()
   const substrate: Substrate = {
     start(spec: AgentSpec) {
+      scopes.push(spec.metering_context)
       const name = spec.prompt.includes(block) ? block : spec.prompt.split('\n').pop()!.trim()
       starts.push(name)
       async function* events(): AsyncGenerator<Event> {
@@ -67,7 +69,7 @@ function gatedSubstrate(block: string) {
       return { events: events(), async respondToTool() {}, async cancel() {}, tool_resolution: 'internal' }
     },
   }
-  return { substrate, starts, started, release }
+  return { substrate, starts, scopes, started, release }
 }
 
 function runner(admission: ProjectAdmission, substrate: Substrate, injectActiveTurn?: (text: string) => Promise<boolean>) {
@@ -244,6 +246,14 @@ test('host acting turns admit through the same scope and are refused while fence
   await reopenFrom(admission, fence)
   expect(await run.composeActingTurn('app:u', spec('wake-general', { project_id: 'general' }), { timeout_ms: 1000 }))
     .toBe('reply:wake-general')
+  expect(g.scopes).toEqual([
+    { project_id: 'project-a', conversationProjectId: 'project-a' },
+    { project_id: 'general', conversationProjectId: null },
+  ])
+  seedProject(db, 'general')
+  expect(await run.composeActingTurn('app:u:general', spec('wake-literal', { project_id: 'general', conversationProjectId: 'general' }), { timeout_ms: 1000 }))
+    .toBe('reply:wake-literal')
+  expect(g.scopes.at(-1)).toEqual({ project_id: 'general', conversationProjectId: 'general' })
   const leases = db.get<{ n: number }>('SELECT COUNT(*) AS n FROM project_admission_leases')
   expect(leases?.n).toBe(0)
 })

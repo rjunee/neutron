@@ -1,4 +1,4 @@
-import { afterEach, expect, test } from 'bun:test'
+import { afterEach, beforeEach, expect, test } from 'bun:test'
 import { getPersistentReplModel, switchPersistentReplModel } from '../model-control.ts'
 import { pool, supervisedBySessionKey, childByKey, retiringSessionKeys } from '../pool-state.ts'
 import { poolKeyFor, retirePersistentRepl } from '../pool.ts'
@@ -13,6 +13,7 @@ import { ReplSession } from '../repl-session.ts'
 import type { PersistentReplSubstrateOptions } from '../types.ts'
 
 const keys: string[] = []
+beforeEach(() => setNativeChildLiveness('owner', undefined))
 afterEach(() => { for (const key of keys.splice(0)) { pool.delete(key); supervisedBySessionKey.delete(key); childByKey.delete(key); retiringSessionKeys.delete(key) } })
 
 function register(scope: string | null | undefined, sessionId: string, extra: Partial<PersistentReplSubstrateOptions> = {}) {

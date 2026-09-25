@@ -56,7 +56,12 @@ export function registerSupervisedSubstrate(options: PersistentReplSubstrateOpti
     if (state.kind === 'unreadable' || (state.kind === 'loaded' &&
         (state.droppedKeys.includes(key) || (state.registry[key] !== undefined &&
           !registryConversationScopeMatches(state.registry[key]!, options))))) return
-    supervisedBySessionKey.set(key, options)
+    const prior = supervisedBySessionKey.get(key)
+    // A same-key wake cannot erase the owner's previously attested scope.
+    if (prior?.conversationProjectId !== undefined) {
+      if (options.conversationProjectId !== undefined && options.conversationProjectId !== prior.conversationProjectId) return
+      supervisedBySessionKey.set(key, { ...options, conversationProjectId: prior.conversationProjectId })
+    } else supervisedBySessionKey.set(key, options)
   }
 }
 
