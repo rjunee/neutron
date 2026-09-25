@@ -191,6 +191,34 @@ export const PLAN_LEDGER_CONTRACT = [
  */
 export const REVIEW_SUITE_TIMEOUT_MS = 45 * 60_000
 
+/** The builder TEST EXECUTION sentence of every brief rendered today (strategy v3). */
+const TEST_EXECUTION_V3 = 'Follow the TEST EXECUTION instructions in the host context `testStrategy`. The host selects `suiteScope`: `full-suite` requires the worker full suite for a wave member; `subset` defers it for an intermediate task; `host-suite` leaves the full suite to host review after worker stage 1. Never infer scope from the task number or an earlier task.'
+/**
+ * The same sentence as the strategy-v2 renderer wrote it, byte-exact. It is the
+ * ONLY line v2 and v3 disagreed on, so it is what lets a legacy v2 brief be
+ * re-rendered from current inputs and compared instead of trusted (#1296).
+ */
+const TEST_EXECUTION_LEGACY_V2 = 'Follow the TEST EXECUTION instructions in the host context `testStrategy`. The host selects `suiteScope` after validating this task: `full-suite` requires the full suite; only `subset` defers it for an intermediate task. Never infer scope from the task number or an earlier task.'
+
+/**
+ * Why a stored legacy brief matches none of the renderings of the current inputs.
+ * Each rendering is `task + '\n\n' + contract + reflection`; the fixed contract is
+ * located in the stored bytes and the text on either side compared with the
+ * current task and reflection. Nothing is inferred when the contract itself
+ * differs: that is `unrecognized`, never a reason to reuse or to refuse.
+ */
+function legacyBriefChange(stored: string, renderings: readonly string[], task: string,
+  reflection: string): 'task' | 'reflection' | 'unrecognized' {
+  for (const rendering of renderings) {
+    const contract = '\n\n' + rendering.slice(task.length + 2, rendering.length - reflection.length)
+    const at = stored.indexOf(contract)
+    if (at < 0) continue
+    if (stored.slice(0, at) !== task) return 'task'
+    if (stored.slice(at + contract.length) !== reflection) return 'reflection'
+  }
+  return 'unrecognized'
+}
+
 /**
  * THE SUITE TRANSCRIPT MUST NOT TRAVEL THROUGH THE GATEWAY'S HEAP.
  *
@@ -611,6 +639,18 @@ export async function prepareProjectBuild(input: InnerLoopInput, context: Projec
   }
   const workers = {} as ProjectBuildHostOptions['workers']
   const requestedModels = {} as ProjectBuildHostOptions['requestedModels']
+  const invalidated: { role: string; cause: 'task' | 'reflection' }[] = []
+  // Whether THIS run's latest persisted reservation was admitted with a v2 brief.
+  // A checkpoint this run cannot parse names no brief; it changes no decision.
+  const pendingLegacyBrief = (role: string): boolean => {
+    let latest: string | undefined
+    for (const event of context.store.stageEvents(run.id)) {
+      if (event.stage !== 'build-mode-state') continue
+      try { latest = parseBuildModeState(event.meta, run, true).checkpoint.pending?.recovery?.request.brief.path }
+      catch { /* Not an identity this run can read. */ }
+    }
+    return latest?.endsWith(`.strategy-v2.brief.${role}.host`) ?? false
+  }
   for (const role of ['plan', 'build', 'review', 'fix'] as const) {
     const phase = phaseByKey(role === 'plan' ? 'decomposition' : role === 'review' ? 'review_adversarial' : 'build')!
     const selected = config[phase.key]
@@ -620,8 +660,9 @@ export async function prepareProjectBuild(input: InnerLoopInput, context: Projec
     const provider: Provider = descriptor.group === 'claude' ? 'anthropic' : descriptor.group === 'codex' ? 'openai-codex' : 'pi'
     // Owner guidance and test execution instructions belong only to the builders.
     const isBuilder = role === 'build' || role === 'fix'
-    let brief = [run.task, isBuilder
-      ? 'Follow the TEST EXECUTION instructions in the host context `testStrategy`. The host selects `suiteScope`: `full-suite` requires the worker full suite for a wave member; `subset` defers it for an intermediate task; `host-suite` leaves the full suite to host review after worker stage 1. Never infer scope from the task number or an earlier task.' : '',
+    const reflectionSuffix = isBuilder ? buildReflectionGuidance(input.reflection_context) : ''
+    const renderBrief = ({ testExecution, commitWrapper }: { testExecution: string; commitWrapper: boolean }) => [run.task, isBuilder
+      ? testExecution : '',
       // THE BRIEF MUST STATE THE ENVELOPE, AND THE WORKER MUST COPY ITS IDS.
       // `decodeProjectTrailer` (`runtime/workers/project-runners.ts:44-58`) reads
       // `{ schema, run_id, step_id, kind, result }` and refuses unless `run_id`,
@@ -649,17 +690,58 @@ export async function prepareProjectBuild(input: InnerLoopInput, context: Projec
       JSON.stringify(role === 'plan' ? PLAN_SCHEMA : role === 'review' ? VERDICT_SCHEMA : FORGE_SCHEMA),
       ...(role === 'plan' ? [PLAN_LEDGER_CONTRACT] : []),
       ...(isBuilder ? ['EXECUTION SCOPE. Read the host context `executionStrategy` and validated plan in `previous`. For `single`, implement the WHOLE accepted plan and executionSpec. For `task_sequence`, implement only the host-selected `topTask` and its executionSpec; leave later tasks to later calls. Never select a strategy or task yourself. A fix addresses the host-provided findings without changing strategy. A wave member implements only its host-pinned task.'] : []),
-      ...(isBuilder ? [`Commit only through the host wrapper with argv ${JSON.stringify(['bash', join(TRIDENT_SCRIPT_DIR, 'commit-with-resolved-head.sh'), run.branch])}, followed by your git commit arguments. Never invoke git commit directly. Do not add a Claude-Session: trailer; keep Co-Authored-By. After the wrapper returns, read the final OID with git rev-parse HEAD for both result.head and payload.commitSha.`] : []),
+      ...(isBuilder && commitWrapper ? [`Commit only through the host wrapper with argv ${JSON.stringify(['bash', join(TRIDENT_SCRIPT_DIR, 'commit-with-resolved-head.sh'), run.branch])}, followed by your git commit arguments. Never invoke git commit directly. Do not add a Claude-Session: trailer; keep Co-Authored-By. After the wrapper returns, read the final OID with git rev-parse HEAD for both result.head and payload.commitSha.`] : []),
       'Never publish or merge; the host owns those actions.',
-    ].join('\n\n') + (isBuilder ? buildReflectionGuidance(input.reflection_context) : '')
-    // Reconstruct an admitted v2 request byte-for-byte during pending recovery.
-    // New runs get a versioned brief; neither version is rewritten on restart.
+    ].join('\n\n') + reflectionSuffix
+    let brief = renderBrief({ testExecution: TEST_EXECUTION_V3, commitWrapper: true })
+    // A LEGACY V2 BRIEF IS EVIDENCE, NOT AUTHORITY (#1296). A pending reservation
+    // is identified by `{ brief.path, brief.integrity }` alone (`build-run.ts`
+    // resume validation), and neither the task text nor the owner reflection is
+    // part of that identity — reflection is even re-read live on every fire. So
+    // adopting a stored v2 brief unconditionally recovered a v2 result that was
+    // produced for a task or reflection that no longer holds.
+    //
+    // Reuse therefore needs the stored bytes to EQUAL a rendering of the CURRENT
+    // inputs in one of the two known v2 shapes: the v2 TEST EXECUTION sentence
+    // with the builder commit-wrapper line, and the same before #1238 added that
+    // line. Byte-exact against known renderings, never a fuzzy match: anything
+    // else is either a changed input (refused) or unrecognized (uncertain).
+    //
+    // A changed task or reflection THROWS after every role is classified: the
+    // attempt journal makes step_id the idempotency key, so the same step cannot
+    // be re-dispatched with a different brief. Re-execution is the cross-run
+    // retry's fresh step; this prepare dispatches nothing and consumes nothing.
+    //
+    // Missing or unrecognized evidence stays explicit, bounded uncertainty: the
+    // current v3 identity is presented, it cannot match the v2 reservation, and
+    // build-run answers its typed `unknown` with the reservation intact.
     let path = join(state, `${role}.strategy-v3.brief`)
-    try {
-      brief = await readFile(join(state, `${role}.strategy-v2.brief`), 'utf8')
-      path = join(state, `${role}.strategy-v2.brief`)
-    } catch (error) {
-      if ((error as NodeJS.ErrnoException).code !== 'ENOENT') throw error
+    const legacyPath = join(state, `${role}.strategy-v2.brief`)
+    let stored: string | null = null
+    try { stored = await readFile(legacyPath, 'utf8') }
+    catch (error) { if ((error as NodeJS.ErrnoException).code !== 'ENOENT') throw error }
+    const legacy = [renderBrief({ testExecution: TEST_EXECUTION_LEGACY_V2, commitWrapper: true }),
+      renderBrief({ testExecution: TEST_EXECUTION_LEGACY_V2, commitWrapper: false })]
+    const reconcile = (meta: Record<string, unknown>) =>
+      context.store.recordStageEvent(run.id, 'build-legacy-brief-reconciled', JSON.stringify({ role, ...meta }))
+    let adopt = false
+    if (stored !== null && legacy.includes(stored)) {
+      adopt = true
+      await reconcile({ decision: 'reused', stored: briefIntegrity(stored) })
+    } else if (stored !== null) {
+      const cause = legacyBriefChange(stored, legacy, run.task, reflectionSuffix)
+      const meta = { stored: briefIntegrity(stored), rendered: legacy.map(briefIntegrity) }
+      if (cause !== 'unrecognized') {
+        await reconcile({ decision: 'invalidated', cause, ...meta })
+        invalidated.push({ role, cause })
+        continue
+      }
+      await reconcile({ decision: 'unrecognized', ...meta })
+    } else if (pendingLegacyBrief(role)) await reconcile({ decision: 'missing' })
+    if (adopt) {
+      brief = stored!
+      path = legacyPath
+    } else {
       try { await writeFile(path, brief, { flag: 'wx', mode: 0o600 }) }
       catch (error) {
         if ((error as NodeJS.ErrnoException).code !== 'EEXIST' || await readFile(path, 'utf8') !== brief) throw error
@@ -673,6 +755,10 @@ export async function prepareProjectBuild(input: InnerLoopInput, context: Projec
       result: { schema: role === 'plan' ? 'project-plan-v2' : role === 'review' ? 'project-review' : 'project-build', path: join(state, `${role}.result`) },
       thread: null, budget: { wall_ms: PROJECT_BUILD_WALL_MS[role] },
     } }
+  }
+  if (invalidated.length > 0) {
+    const { role, cause } = invalidated[0]!
+    throw new Error(`Legacy v2 ${role} brief was rendered from different ${cause === 'task' ? 'task text' : 'reflection guidance'}; its reserved result is invalidated and the step must be re-executed`)
   }
   const bodyFile = join(state, 'publication.md')
   // A retried build keeps its completed worker artifacts under the ORIGINAL

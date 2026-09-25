@@ -81,6 +81,7 @@ import { gitRangeArgv } from '@neutronai/trident/git-range.ts'
 import { VERDICT_SCHEMA } from '@neutronai/trident/gates/result-contract.ts'
 import { taskLedgerPath, workContextPath } from '@neutronai/trident/production-host-effects.ts'
 import { briefIntegrity } from '@neutronai/trident/gates/brief-integrity.ts'
+import { buildReflectionGuidance } from '@neutronai/trident/reflection-guidance.ts'
 import { pool, supervisedBySessionKey } from '@neutronai/runtime/adapters/claude-code/persistent/pool-state.ts'
 import type { BoundedWorkRequest } from '@neutronai/runtime/bounded-work.ts'
 import { buildRun, type BuildRunOutcome } from '@neutronai/trident/build-run.ts'
@@ -1346,6 +1347,163 @@ test('v2 pending builder reconstruction preserves every brief and its later fix 
     expect(context.suiteScope).toBe('full-suite')
     expect(context.testStrategy).toBe(f.input.test_strategy)
   }
+}, 120_000)
+
+// ── #1296: a stored legacy v2 brief is reconciled against CURRENT inputs. ──
+// The legacy sentence stays a literal here: it is the independent oracle for the
+// renderer's own copy, so a drift in either one reddens these tests.
+const CURRENT_SUITE_SCOPE = 'The host selects `suiteScope`: `full-suite` requires the worker full suite for a wave member; `subset` defers it for an intermediate task; `host-suite` leaves the full suite to host review after worker stage 1.'
+const LEGACY_SUITE_SCOPE = 'The host selects `suiteScope` after validating this task: `full-suite` requires the full suite; only `subset` defers it for an intermediate task.'
+const LEGACY_ROLES = ['plan', 'build', 'review', 'fix'] as const
+
+/** A v2-era run: only v2 briefs on disk, a completed build whose acknowledgement
+ * was lost, and the pending build reservation that names the v2 brief. */
+async function legacyV2LostBuildAck(f: Awaited<ReturnType<typeof fixture>>, commitWrapper: boolean) {
+  const state = join(f.context.stateRoot, f.row.id)
+  const prepared = await f.prepare()
+  for (const [role, worker] of Object.entries(prepared.workers)) {
+    const current = await readFile(worker.request.brief.path, 'utf8')
+    let brief = current.replace(CURRENT_SUITE_SCOPE, LEGACY_SUITE_SCOPE)
+    // Before #1238 the v2 builder brief carried no commit-wrapper paragraph.
+    if (!commitWrapper) brief = brief.replace(/\n\nCommit only through the host wrapper[^\n]*/, '')
+    expect(brief !== current).toBe(role === 'build' || role === 'fix')
+    const path = join(state, `${role}.strategy-v2.brief`)
+    await writeFile(path, brief)
+    await rm(worker.request.brief.path)
+    worker.request = { ...worker.request, brief: { path, integrity: briefIntegrity(brief) } }
+  }
+  const first = await createProjectBuildHost(prepared)
+  const runner = first.workers.build.runner
+  first.workers.build.runner = { ...runner, run: async (...args) => {
+    expect((await runner.run(...args)).kind).toBe('completed')
+    return { kind: 'unknown', detail: 'completed worker acknowledgement lost' }
+  } }
+  expect(await buildRun({ mode: 'implementation', start: 'fresh', run_id: f.row.id,
+    workers: first.workers, repl_provider: 'anthropic', merge_mode: 'pr' }, first.deps, new AbortController().signal))
+    .toMatchObject({ kind: 'unknown', phase: 'build' })
+  const pending = lastCheckpoint(f).pending as { phase: string; recovery: { request: { brief: { path: string } } } }
+  expect(pending).toMatchObject({ phase: 'build', step_id: `${f.row.id}:build:0` })
+  expect(pending.recovery.request.brief.path).toBe(join(state, 'build.strategy-v2.brief.build.host'))
+  const buildResult = await readFile(join(state, 'build.result'), 'utf8')
+  expect(JSON.parse(buildResult)).toMatchObject({ kind: 'completed', step_id: `${f.row.id}:build:0` })
+  expect(f.world.dispatches.map(dispatch => dispatch.role)).toEqual(['plan', 'build'])
+  f.world.dispatches.length = 0
+  return { state, pending, buildResult }
+}
+
+const legacyBriefEvents = (f: Awaited<ReturnType<typeof fixture>>, runId: string) => f.store.stageEvents(runId)
+  .filter(event => event.stage === 'build-legacy-brief-reconciled').map(event => JSON.parse(event.meta!) as {
+    role: string; decision: string; cause?: string; stored?: string; rendered?: string[] })
+
+const exists = (path: string) => stat(path).then(() => true, () => false)
+/** Specified enough for the real board dispatch to accept its retry. */
+const LEGACY_TASK = 'Record a note in NOTES.md and verify the recovered legacy build keeps the recorded note'
+
+for (const commitWrapper of [true, false]) test(`legacy v2 reservation with unchanged inputs recovers without a new dispatch (${commitWrapper ? 'with' : 'before'} the commit-wrapper line)`, async () => {
+  const f = await fixture()
+  const { state, buildResult } = await legacyV2LostBuildAck(f, commitWrapper)
+  const outcome = await restartThroughGateway(f)
+  expect(outcome.kind, why(f, outcome)).toBe('merged')
+  // EXACT RECOVERY: no planner, builder or fixer turn; only the review it had not reached.
+  expect(f.world.dispatches.filter(dispatch => ['plan', 'build', 'fix'].includes(dispatch.role))).toEqual([])
+  expect(await readFile(join(state, 'build.result'), 'utf8')).toBe(buildResult)
+  expect(legacyBriefEvents(f, f.row.id).map(event => [event.role, event.decision]))
+    .toEqual(LEGACY_ROLES.map(role => [role, 'reused']))
+  for (const role of LEGACY_ROLES) expect(await exists(join(state, `${role}.strategy-v3.brief`))).toBe(false)
+  const merged = await spawnCapture(['git', '-C', f.origin, 'show', 'refs/heads/main:NOTES.md'], f.origin)
+  expect(merged.stdout).toBe(`seed\n${f.row.id}:build:0`)
+}, 120_000)
+
+/** Refuse at prepare, then re-execute through the real cross-run retry. */
+async function refuseThenRetry(f: Awaited<ReturnType<typeof fixture>>, change: 'task' | 'reflection') {
+  const { state, pending, buildResult } = await legacyV2LostBuildAck(f, true)
+  const task = change === 'task' ? 'Record a changed note in NOTES.md and verify the retried build records the changed note' : f.row.task
+  if (change === 'task') {
+    f.db.raw().query('UPDATE code_trident_runs SET task = ? WHERE id = ?').run(task, f.row.id)
+    f.input.run = f.store.get(f.row.id)!
+  } else f.input.reflection_context = 'Prefer one commit per change.'
+  const checkpoints = f.store.stageEvents(f.row.id).filter(event => event.stage === 'build-mode-state').length
+  const refusal = await f.prepare().then(() => null, (error: unknown) => error)
+  // A thrown refusal naming the cause — a JSON, EEXIST or journal error is not this.
+  expect(refusal).toBeInstanceOf(Error)
+  expect((refusal as Error).message).toBe(change === 'task'
+    ? 'Legacy v2 plan brief was rendered from different task text; its reserved result is invalidated and the step must be re-executed'
+    : 'Legacy v2 build brief was rendered from different reflection guidance; its reserved result is invalidated and the step must be re-executed')
+  expect(f.world.dispatches).toEqual([])
+  expect(lastCheckpoint(f).pending).toEqual(pending)
+  expect(f.store.stageEvents(f.row.id).filter(event => event.stage === 'build-mode-state')).toHaveLength(checkpoints)
+  expect(await readFile(join(state, 'build.result'), 'utf8')).toBe(buildResult)
+  const events = legacyBriefEvents(f, f.row.id)
+  // Semantic, not a whole-file compare: briefs without a reflection still match.
+  expect(events.map(event => [event.role, event.decision, event.cause])).toEqual(change === 'task'
+    ? LEGACY_ROLES.map(role => [role, 'invalidated', 'task'])
+    : [['plan', 'reused', undefined], ['build', 'invalidated', 'reflection'], ['review', 'reused', undefined], ['fix', 'invalidated', 'reflection']])
+  for (const event of events.filter(event => event.decision === 'invalidated')) {
+    expect(event.rendered).toHaveLength(2)
+    expect(event.rendered).not.toContain(event.stored)
+    expect(await exists(join(state, `${event.role}.strategy-v3.brief`))).toBe(false)
+  }
+
+  // RE-EXECUTION is the retry's fresh step, never the reserved one again.
+  const prior = f.store.get(f.row.id)!
+  expect((await spawnCapture(['git', '-C', f.repo, 'worktree', 'remove', '--force', prior.worktree!], f.repo)).ok).toBe(true)
+  // The invalidated build commit is unconsumed, unpublished work. The wrong-base
+  // guard refuses to build over it on a same-slug retry until it is salvaged the
+  // way the guard prescribes: a create-only tag, then the local branch released.
+  const stale = await gitOut(spawnCapture, f.repo, ['rev-parse', `refs/heads/${prior.branch}`])
+  await gitOut(spawnCapture, f.repo, ['tag', `trident-salvage/${prior.id}`, stale])
+  await gitOut(spawnCapture, f.repo, ['branch', '-D', prior.branch!])
+  await f.store.update(prior.id, { phase: 'failed', worktree: null })
+  const dispatched = await dispatchBoardBoundBuild({ task, board_item_id: 'legacy-card' }, {
+    store: f.store, projectAdmission: fixtureDispatchAdmission(f.db), project_slug: 'project', repo_path: f.repo,
+    board: { get: () => ({ id: 'legacy-card', title: task, design_doc_ref: null, linked_run_id: prior.id }), attachRun: async () => {} },
+    resolveBuildRepo: async () => f.repo, resolveMergeMode: async () => 'pr',
+  })
+  expect(dispatched.ok, JSON.stringify(dispatched)).toBe(true)
+  if (!dispatched.ok) throw new Error('retry was not dispatched')
+  // Launched as a dispatched run really is, so the gateway pins its base.
+  const launched = await launchThroughGateway(f, dispatched.run.id, () => {})
+  expect(launched.errors).toEqual([])
+  expect(launched.outcome, launched.stepped.failure_reason ?? '').not.toBeNull()
+  const outcome = launched.outcome!
+  expect(outcome.kind, why(f, outcome)).toBe('merged')
+  const steps = f.world.dispatches.map(dispatch => dispatch.step_id)
+  expect(steps).toContain(`${dispatched.run.id}:plan:0`)
+  expect(steps).toContain(`${dispatched.run.id}:build:0`)
+  expect(steps.some(step => step.startsWith(`${prior.id}:`))).toBe(false)
+  expect(await readFile(join(state, 'build.result'), 'utf8')).toBe(buildResult)
+  // Only the re-executed build landed; the invalidated commit was never consumed.
+  const merged = await spawnCapture(['git', '-C', f.origin, 'show', 'refs/heads/main:NOTES.md'], f.origin)
+  expect(merged.stdout).toBe(`seed\n${dispatched.run.id}:build:0`)
+  const retried = legacyBriefEvents(f, dispatched.run.id)
+  expect(retried).toEqual([])
+  return { brief: await readFile(join(f.context.stateRoot, dispatched.run.id, 'build.strategy-v3.brief'), 'utf8'), task }
+}
+
+test('legacy v2 reservation refuses reuse after the task text changed and the retry re-executes the build', async () => {
+  const f = await fixture({ dispatchTask: LEGACY_TASK })
+  const { brief, task } = await refuseThenRetry(f, 'task')
+  expect(brief.startsWith(`${task}\n\n`)).toBe(true)
+}, 120_000)
+
+test('legacy v2 reservation refuses reuse after the reflection changed and the retry re-executes the build', async () => {
+  const f = await fixture({ dispatchTask: LEGACY_TASK })
+  const { brief } = await refuseThenRetry(f, 'reflection')
+  expect(brief.endsWith(buildReflectionGuidance('Prefer one commit per change.'))).toBe(true)
+}, 120_000)
+
+test('missing legacy v2 evidence stays explicit uncertainty without a dispatch', async () => {
+  const f = await fixture()
+  const { state, pending, buildResult } = await legacyV2LostBuildAck(f, true)
+  await rm(join(state, 'build.strategy-v2.brief'))
+  const outcome = await restartThroughGateway(f)
+  expect(outcome).toMatchObject({ kind: 'unknown', detail: 'Resume cannot validate the original pending worker request and context' })
+  expect(f.world.dispatches).toEqual([])
+  expect(lastCheckpoint(f).pending).toEqual(pending)
+  expect(await readFile(join(state, 'build.result'), 'utf8')).toBe(buildResult)
+  expect(legacyBriefEvents(f, f.row.id).map(event => [event.role, event.decision]))
+    .toEqual([['plan', 'reused'], ['build', 'missing'], ['review', 'reused'], ['fix', 'reused']])
+  expect(f.github.prs).toEqual([])
 }, 120_000)
 
 test('wave member retains worker full suite and returns before host review', async () => {
