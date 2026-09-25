@@ -4725,7 +4725,8 @@ test('a design-gap escalation re-plans and rebuilds instead of dispatching a fix
   expect(f.github.prs[0]!.state).toBe('MERGED')
 }, 300_000)
 
-for (const scenario of ['no-progress', 'repeat', 'decreasing', 'host-only', 'no-progress-replan', 'repeat-replan', 'repeat-approve'] as const) test(`review arithmetic STOP terminal transport (${scenario})`, async () => {
+for (const interrupted of [false, true])
+for (const scenario of ['no-progress', 'repeat', 'decreasing', 'host-only', 'no-progress-replan', 'repeat-replan', 'repeat-approve'] as const) test(`review arithmetic STOP terminal transport (${scenario}${interrupted ? ', checkpoint interruption' : ''})`, async () => {
   const repeated = scenario.startsWith('repeat')
   const replan = scenario.endsWith('replan')
   const f = await fixture({ taskSequence: true, blockersByRound: scenario.startsWith('no-progress') ? [0, 8, 17] : [0, 8, 7, 0],
@@ -4756,9 +4757,42 @@ for (const scenario of ['no-progress', 'repeat', 'decreasing', 'host-only', 'no-
   const orch = buildTridentOrchestrator({ fire_workflow: launcher, db_path: f.input.db_path,
     base_branch: 'main', run_host: Object.assign(f.context.runHost, { writesDiffOutput: true as const }),
     read_run: id => f.store.get(id), sleep: async () => {} })
-  const advanced = await orch.step(f.store.get(f.row.id)!)
-  expect(await f.store.saveIfActive(advanced.run)).toBe(true)
-  await completion
+  if (interrupted) {
+    const host = await createProjectBuildHost(await f.prepare())
+    const save = host.deps.modes!.saveCheckpoint
+    host.deps.modes!.saveCheckpoint = async checkpoint => {
+      await save(checkpoint)
+      if (checkpoint.stage === 'rejected' && checkpoint.round === 2 && !checkpoint.pending) {
+        throw new Error('simulated process death after durable review rejection')
+      }
+    }
+    const stopped = await buildRun({ mode: 'implementation', start: 'fresh', taskIteration: 0,
+      run_id: f.row.id, workers: host.workers, repl_provider: 'anthropic', merge_mode: 'pr' },
+    host.deps, new AbortController().signal)
+    expect(stopped).toMatchObject({ kind: 'unknown', detail: 'simulated process death after durable review rejection' })
+    const saved = lastCheckpoint(f)
+    expect(saved).toMatchObject({ stage: 'rejected', round: 2 })
+    expect(saved.pending).toBeUndefined()
+    const dispatchCount = f.world.dispatches.length
+    const spend = f.store.get(f.row.id)!.task_iteration
+    recording.mockRestore() // The recovery helper owns its own settlement observer.
+    const recovered = await restartThroughGateway(f)
+    expect(f.store.get(f.row.id)!.task_iteration).toBe(spend)
+    if (scenario === 'decreasing') {
+      expect(saved.reviewStop).toBeUndefined()
+      expect(recovered.kind, why(f, recovered)).toBe('merged')
+      expect(f.world.dispatches[dispatchCount]?.role).toBe('fix')
+    } else {
+      expect(recovered.kind, why(f, recovered)).toBe('blocked')
+      expect(f.world.dispatches).toHaveLength(dispatchCount)
+      if (recovered.kind === 'blocked') expect(saved.reviewStop).toEqual(recovered.reviewStop)
+      expect(lastCheckpoint(f)).toEqual(saved)
+    }
+  } else {
+    const advanced = await orch.step(f.store.get(f.row.id)!)
+    expect(await f.store.saveIfActive(advanced.run)).toBe(true)
+    await completion
+  }
   expect(errors).toEqual([])
   const outcome: ProjectBuildOutcome = JSON.parse(f.store.get(f.row.id)!.inner_result!).projectBuild
   if (scenario === 'decreasing') {

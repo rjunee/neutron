@@ -7,7 +7,7 @@ reconciliation uses that reader to select BLOCKED (`trident/board-reconcile.ts:1
 The missing pair made a deliberate stop look like an ordinary failed build.
 
 `trident/gates/review-progress.ts:12` now carries the host's trigger and both review
-observations; `trident/build-run.ts:338` adds the actual review round while forwarding
+observations; `trident/build-run.ts:341` adds the actual review round while forwarding
 the stop. The launcher translates that evidence to the existing canonical escalation
 shape (`trident/project-launcher.ts:103`). The original structured outcome retains
 all identities/counts, while the bounded owner-facing text starts with the counts.
@@ -19,7 +19,12 @@ as `REQUEST_CHANGES` while preserving the panel's `argus-approved` or
 `argus-request-changes` checkpoint, carrying the round/head into harvest. Nexus
 attributes the actual reviewer checkpoint to Argus and the final host outcome to
 the handoff. Every arithmetic STOP writes a rejected typed checkpoint, including
-when it overrides a panel approval or re-plan. Nomination-repair
+when it overrides a panel approval or re-plan. The checkpoint also records the
+arithmetic veto in that same write (`trident/build-run.ts:1057`): after a crash
+before terminal delivery, same-run recovery validates and rechecks it before any
+fix or head-moved rebuild (`trident/build-run.ts:491`).
+This preserves the original head/round/panel decision and spends no new worker
+turn. Nomination-repair
 arithmetic before review carries no reviewed-head proof and retains `REVIEW_NOT_RUN`.
 
 Scope is the arithmetic STOP transport. Ordinary failures and host blocks without
@@ -27,14 +32,15 @@ arithmetic evidence retain their existing classification. Review provenance is
 added only for a stop reached after a verified panel, never from its phase label
 or reason string. No historical row is rewritten and no automatic recovery is introduced.
 The latest rejected typed checkpoint still refuses ordinary cross-run adoption
-(`trident/build-mode-state.ts:125`); widening it alone would enter the resume-fix
-path without re-running G071 (`trident/build-run.ts:904`). The governed recovery
+(`trident/build-mode-state.ts:125`). Historical rejected checkpoints lack the new
+durable veto and are not backfilled; widening ordinary cross-run adoption would
+still invent recovery authority. The governed recovery
 proposal and real-Git test plan are in
 `docs/spec-items/the-review-loop-must-stop-and-re-plan.md` under the follow-up proposal.
 
 Validation:
 
-- 481 host, launcher, arithmetic-gate, disposition, escalation and Nexus tests passed;
+- 490 host, launcher, arithmetic-gate, disposition, escalation and Nexus tests passed;
   the launcher controls include
   a matching reason without structured evidence, a real failure, an unharvested
   result and a stopped run.
@@ -62,6 +68,17 @@ Validation:
 - Restoring the old fix-only rejected-checkpoint condition fails all three
   re-plan/approve consuming cases. Restoring Nexus attribution from the host
   verdict fails the panel-approve/host-veto case. Both were restored.
+- Seven additional real-Git consuming cases interrupt immediately after saving
+  the round-two rejected checkpoint, then restart through the actual gateway.
+  Both arithmetic triggers, re-plan/approval overrides and the zero-review host
+  STOP replay without a single new worker dispatch, preserve spend and reach the
+  same BLOCKED card/Nexus evidence. The distinct decreasing control resumes its
+  permitted fix and merges. Host controls also reject malformed veto evidence
+  and preserve STOP even if the branch head moved.
+- Crash-boundary mutations: removing veto replay makes the no-progress case
+  dispatch a second fix and merge; treating every rejected checkpoint as a veto
+  refuses the decreasing control. Both failed and were restored before final
+  validation.
 - Root and Trident TypeScript projects passed `tsc --noEmit`.
 
 This change satisfies the typed-host status subset of the locked review-loop

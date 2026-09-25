@@ -64,6 +64,13 @@ export interface PlanProbe {
 }
 export type PlanCommit = { kind: 'known'; head: string } | Exclude<GateResult, { kind: 'allow' }>
 export interface TaskHandoffIntent { iteration: number; builtHead: string; body: string }
+export interface HostReviewStop extends ReviewStop {
+  round: number
+  /** Set only after the host has consumed a verified panel for this head. */
+  reviewedHead?: string
+  /** The panel's decision before host suite, CI or progress overrides. */
+  panelDecision?: 'approve' | 'fix' | 're-plan'
+}
 export interface ResumeCheckpoint {
   head: string | null
   stage: 'built' | 'approved' | 'rejected' | 'fixed' | 'task-built' | 'task-built-deviated'
@@ -81,6 +88,8 @@ export interface ResumeCheckpoint {
   previousReview?: ReviewProgress | null
   /** Explicit provenance, independent of round numbers and branch movement. */
   reviewBaseline?: 'none' | 'required'
+  /** A durable arithmetic veto must survive process death before terminal delivery. */
+  reviewStop?: HostReviewStop | undefined
   /** Re-present only the original request to its idempotent runner. Legacy pending
    * rows without the host continuation remain unknown. */
   pending?: { phase: WorkPhase; step_id: string; recovery?: PendingRecovery } | undefined
@@ -217,13 +226,7 @@ export interface BuildRunDeps {
 
 export type BuildRunOutcome =
   | { kind: 'merged'; snapshot: BuildSnapshot }
-  | { kind: 'blocked'; phase: BuildPhase; on: string; recipient: 'orchestrator'; reviewStop?: ReviewStop & {
-      round: number
-      /** Set only after the host has consumed a verified panel for this head. */
-      reviewedHead?: string
-      /** The panel's decision before host suite, CI or progress overrides. */
-      panelDecision?: 'approve' | 'fix' | 're-plan'
-    } }
+  | { kind: 'blocked'; phase: BuildPhase; on: string; recipient: 'orchestrator'; reviewStop?: HostReviewStop }
   | { kind: 'built'; snapshot: BuildSnapshot; cause: 'wave-member-built' }
   | { kind: 'continued'; snapshot: BuildSnapshot; remainingTasks: number; cause: 'task-built' }
   | { kind: 'refused'; reason: 'worker-unsupported'; detail: string }
@@ -484,6 +487,26 @@ export async function buildRun(input: BuildRunInput, deps: BuildRunDeps, signal:
     if (resume && (!validReviewBaseline(resume.reviewBaseline, resume.previousReview)
         || ((replansUsed > 0 || resume.stage === 'fixed' || resume.stage === 'rejected') && resume.reviewBaseline !== 'required'))) {
       return unknown('Resume prior review baseline is missing or invalid')
+    }
+    if (resume?.reviewStop !== undefined) {
+      const stop = resume.reviewStop
+      if (!stop || resume.stage !== 'rejected' || resume.pending !== undefined || !fullOid(resume.head)
+        || !Number.isSafeInteger(stop.round) || stop.round < 1 || stop.round !== resume.round
+        || !validReviewProgress(stop.previous) || !validReviewProgress(stop.current)
+        || !isDeepStrictEqual(stop.current, resume.previousReview)
+        || (stop.reviewedHead === undefined ? stop.panelDecision !== undefined
+          : stop.reviewedHead !== resume.head || !['approve', 'fix', 're-plan'].includes(stop.panelDecision ?? ''))) {
+        return unknown('Resume arithmetic STOP evidence is invalid')
+      }
+      const gate = reviewProgress(stop.previous, stop.current)
+      if (gate.kind !== 'blocked' || gate.reviewStop?.trigger !== stop.trigger) {
+        return unknown('Resume arithmetic STOP evidence does not establish its veto')
+      }
+      // Re-deliver the checkpointed veto before either a fix or a head-moved
+      // rebuild. Restart is not orchestrator authorization to spend another turn.
+      phase = stop.reviewedHead === undefined ? 'publish' : 'review'
+      return gateStop(gate, stop.round, stop.reviewedHead === undefined ? undefined
+        : { head: stop.reviewedHead, decision: stop.panelDecision! })!
     }
     let previousReview: ReviewProgress | undefined = resume?.previousReview ?? undefined
     let reviewBaseline: 'none' | 'required' = resume?.reviewBaseline ?? 'none'
@@ -917,12 +940,13 @@ export async function buildRun(input: BuildRunInput, deps: BuildRunDeps, signal:
     async function repairNomination(repair: NominationRepair, round: number): Promise<BuildRunOutcome | null> {
       if (recovery) return unknown('Pending worker must be reconciled before nomination repair')
       findings = [repair.finding]
-      await checkpoint({ head: snapshot.head, stage: 'rejected', round, pending: undefined,
-        previousReview: { findings, blockingCount: 1 }, reviewBaseline: 'required',
-        findings: findings.map(text => ({ kind: 'code' as const, actionable: true, text })) })
-      if (round >= maxRounds) return blocked('Review requires orchestrator arbitration: round ceiling')
       const current = { findings, blockingCount: 1 }
       const progress = gateStop(reviewProgress(previousReview, current), round)
+      await checkpoint({ head: snapshot.head, stage: 'rejected', round, pending: undefined,
+        previousReview: current, reviewBaseline: 'required',
+        reviewStop: progress?.kind === 'blocked' ? progress.reviewStop : undefined,
+        findings: findings.map(text => ({ kind: 'code' as const, actionable: true, text })) })
+      if (round >= maxRounds) return blocked('Review requires orchestrator arbitration: round ceiling')
       if (progress) return progress
       previousReview = current
       reviewBaseline = 'required'
@@ -1032,6 +1056,7 @@ export async function buildRun(input: BuildRunInput, deps: BuildRunDeps, signal:
         if (decision.kind === 'fix' || progress?.kind === 'blocked') {
           await checkpoint({ head: snapshot.head, stage: 'rejected', round, pending: undefined,
             previousReview: currentReview ?? null, reviewBaseline: 'required',
+            reviewStop: progress?.kind === 'blocked' ? progress.reviewStop : undefined,
             findings: (decision.kind === 'approve' ? currentReview!.findings : decision.findings)
               .map(text => ({ kind: 'code' as const, actionable: true, text })) })
         }

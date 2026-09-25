@@ -86,6 +86,15 @@ must remain `REVIEW_NOT_RUN` with no reviewer decision event.
       rejection. Every arithmetic STOP persists the rejected typed checkpoint even
       when the underlying panel decision is approve or re-plan.
       verify: `bun test open/__tests__/project-build-e2e.test.ts -t 'review arithmetic STOP'`
+- [x] The rejected checkpoint and its arithmetic veto are one durable write. A
+      crash after that write but before returning STOP cannot authorize another
+      fix or rebuild: same-run recovery validates and rechecks the saved arithmetic,
+      then re-delivers BLOCKED with the same round, head and actual panel decision
+      without dispatching work or resetting spend. A distinct decreasing-count
+      rejection still resumes its permitted fix. Malformed veto evidence refuses
+      continuation; legacy rows are not backfilled with invented STOP evidence.
+      verify: `bun test open/__tests__/project-build-e2e.test.ts -t 'review arithmetic STOP.*checkpoint interruption'`
+      verify: `bun test trident/build-run.test.ts -t 'checkpointed arithmetic STOP'`
 - [x] Repeated identities yield the same BLOCKED transport even when counts fall;
       distinct decreasing counts still continue. An ordinary host failure, a blocked
       outcome without arithmetic evidence, and an unharvested result are not relabeled
@@ -97,9 +106,11 @@ must remain `REVIEW_NOT_RUN` with no reviewer decision event.
 ### Follow-up proposal: orchestrator-authorized re-plan from a rejected head
 
 This is a separate recovery change, not permission to widen ordinary retry's
-checkpoint whitelist. `build-mode-state.ts` refuses a `rejected` terminal source;
-`build-run.ts` resumes such a checkpoint into a fix without re-running G071. Making
-that source eligible alone would silently authorize another fix after STOP.
+checkpoint whitelist. `build-mode-state.ts` refuses a `rejected` terminal source.
+Same-run recovery re-delivers a checkpointed arithmetic veto; other rejected
+checkpoints can still resume their permitted fix. Neither path authorizes a new
+orchestrator re-plan, and historical rows without the durable veto are not upgraded
+by widening the terminal-source whitelist.
 
 The proposed recovery action belongs to the authenticated project-chat
 orchestrator. It records a durable, one-use decision bound to project, card, prior
