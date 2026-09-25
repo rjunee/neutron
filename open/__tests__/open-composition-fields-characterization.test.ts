@@ -219,6 +219,9 @@ const EXPECTED_COMPOSITION_KEYS = [
   'project_liveness',
   // #1237 — the maintenance owner: `replace` (no caller) and boot-time `resume`.
   'project_maintenance',
+  // #1226 — the project-scope lifecycle owner the live-chat substrate consults for
+  // a verified Chat credential handoff; sleep/wake reuses this instance.
+  'project_scope_lifecycle',
   'project_slug',
   'realmode_cleanups',
   'reminder_dispatcher',

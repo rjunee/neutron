@@ -84,6 +84,8 @@ const TRANSITIONS = [
   'disownPane',
   'handOverPane',
   'refreshPaneClaim',
+  // #1226 — putting a conversation to sleep drops the handle and claim with its pid.
+  'sleepPane',
   'reservePaneSpawn',
   'releasePaneSpawnReservation',
 ]

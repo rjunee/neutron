@@ -103,6 +103,43 @@ cleanup. No acceptance box is ticked: conversation placement, General
 owner admission and sleep/retirement remain open. See
 `docs/as-built/place-cross-provider-bounded-workers.md`.
 
+2026-09-25 (refs #1226): production composition now places every owner
+conversation (Claude REPL and Codex native owner) as its scope's `Chat` through
+the shared strict host, for the dispatch's exact scope (General is the manager's
+null scope; a literal `general` project keeps its id); a missing manager on Herdr
+refuses rather than inherit a workspace. A credential rotation is a verified
+handoff through the ONE composer lifecycle owner
+(`open/wiring/project-scope-lifecycle.ts`): the old exact REPL is retired through
+the pool before the manager places the new Chat. The same owner adds safe sleep:
+it reads the #1237 leases (any boot), pending approvals, the liveness census and
+owner foreground activity read-only, refuses busy/queued/build/approval/child/
+uncertain/foreign/unverified scopes, and retires an idle owned Chat pane-only with
+its transcript and a resumable registry row kept; wake is the next admitted
+dispatch, which resumes the same session in a fresh Chat of the same workspace;
+the wake pin is the durable registry row (`asleep_at`), so it survives a gateway
+restart. A per-scope lifecycle lock plus the pool's fenced, synchronous re-read of
+the admitted evidence immediately before termination refuses work admitted during
+a sleep. An idle timer (`NEUTRON_PROJECT_SLEEP_IDLE_MS`, default 30 min, `0`
+disables) re-arms on every exit of a dispatch. A live survivor adopted on boot is
+never slept blind (a pre-#1237 parent reads `legacy-unknown`). Deferred: no
+producer admits an `approval` lease yet (pending approvals are read from
+`tool_approvals`; instance grants are skipped, and any other approval whose topic
+cannot be attributed keeps every scope awake); #1237's maintenance fence was not
+used for sleep because it bumps the generation and survives a crash; Codex owners have no exact retirement
+authority, so their sleep refuses; the workspace itself is never closed until an
+atomic server-side guard exists. No acceptance box is ticked: the live-cycle box
+needs a fresh deployed live cycle. See
+`docs/as-built/project-herdr-workspaces-routing-and-sleep.md`.
+
+2026-09-25 review round (refs #1226): a live Claude -> Codex switch hands the
+Claude Chat off resumably before the Codex owner starts; Codex -> Claude is
+refused up front with its recovery path (no Codex retirement authority yet). The
+handoff re-censuses after waiting the owner's turn out and needs parent turn,
+children and shells positively idle. A spawn in flight is never absence. Sleep
+checks that the manager's live Chat is the pool owner's pane. A pending record
+whose workspace is positively absent is recreated; other pending records still
+refuse (operator remedy recorded in the as-built). Still no acceptance box ticked.
+
 ## Production composition investigation
 
 General already follows the instance provider choice

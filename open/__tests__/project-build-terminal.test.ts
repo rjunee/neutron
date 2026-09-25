@@ -45,9 +45,15 @@ test('off Herdr there is no worker terminal host; on Herdr one strict host journ
   expect((await stat(join(root, WORKER_TERMINAL_DIR))).mode & 0o077).toBe(0)
 })
 
-test('production composition hands every build the shared worker terminal and the run scope', async () => {
+test('production composition hands every build AND every owner conversation the one shared terminal host', async () => {
   const source = await readFile(new URL('../composer.ts', import.meta.url), 'utf8')
-  expect(source).toContain('workerTerminalHost = createWorkerTerminalHost(projectBuildStateRoot, { env })')
+  expect(source.match(/createWorkerTerminalHost\(/g)).toHaveLength(1)
+  expect(source).toContain('const projectTerminalHost = createWorkerTerminalHost(projectBuildStateRoot, { env })')
   const call = source.slice(source.indexOf('return prepareProjectBuild(input, {'))
-  expect(call.slice(0, call.indexOf('}, signal)'))).toMatch(/workerTerminal: \{ host: workerTerminalHost, scope: workerPlacementScope\(\{\s+instanceId: owner_handle, ownerSlug: project_slug, runScopeKey: input\.run\.project_slug,/)
+  expect(call.slice(0, call.indexOf('}, signal)'))).toMatch(/workerTerminal: \{ host: projectTerminalHost, scope: workerPlacementScope\(\{\s+instanceId: owner_handle, ownerSlug: project_slug, runScopeKey: input\.run\.project_slug,/)
+  // The conversation terminal is built over the SAME host, before the substrates consume it.
+  expect(source).toMatch(/createConversationTerminal\(\{\s+host: projectTerminalHost,/)
+  expect(source.indexOf('createConversationTerminal({')).toBeLessThan(source.indexOf('} = wireSubstrates(wiringCtx)'))
+  expect(source).toContain("...(conversationTerminal === undefined ? {} : { conversationTerminal }),")
+  expect(source).toContain('codexOwnerBindings.projectWorkspace = projectId => ({ journalPath, placement: conversationTerminal.placementFor(projectId) })')
 })

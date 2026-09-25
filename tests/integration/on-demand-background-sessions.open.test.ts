@@ -7,7 +7,7 @@ import { createPersistentReplSubstrate, shutdownAllPersistentRepls } from '@neut
 import { pool, ephemeralSessions } from '@neutronai/runtime/adapters/claude-code/persistent/pool-state.ts'
 import { createIsolatedHome } from '../support/test-isolation.ts'
 import { seedMigratedDb } from '../support/migrated-db.ts'
-import { lifecycleReplHost } from '../support/lifecycle-repl-host.ts'
+import { lifecycleReplHost } from '@neutronai/runtime/adapters/claude-code/persistent/__tests__/lifecycle-repl-host.ts'
 
 async function until(check: () => boolean): Promise<void> {
   const deadline = Date.now() + 5000

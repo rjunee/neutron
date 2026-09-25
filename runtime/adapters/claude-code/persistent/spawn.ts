@@ -842,6 +842,8 @@ async function spawnSession(
             // a predecessor would let an unstamped child read as participating. It is
             // re-stated below only when this spawn stamped one.
             admission_generation: _priorAdmissionGeneration,
+            // #1226 — this child is running: the row is no longer an asleep conversation.
+            asleep_at: _wasAsleep,
             ...merged
           } = prev ? { ...prev, ...record } : record
           if (record.admission_generation !== undefined) (merged as ReplRegistryRecord).admission_generation = record.admission_generation

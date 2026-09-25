@@ -49,6 +49,8 @@ import type { DeadTurnNotice } from './persistent/api5xx-dead-turn-watcher.ts'
 import type { ModelFloorNotice } from './persistent/model-floor.ts'
 import type { SizeSeverity } from './persistent/session-size-watchdog.ts'
 import type { SettingsPermissions } from './persistent/build-settings.ts'
+import type { PtyHost } from './persistent/pty-host.ts'
+import type { ProjectPanePlacement } from './persistent/project-workspaces.ts'
 import { SINK_TOKEN_FILENAME } from './persistent/sink-coordinates.ts'
 // ISSUES #537 — the reply sink's port override, wired from the resolved BootConfig
 // by the composer. Re-exported at THIS boundary (never a deep `persistent/*` path)
@@ -187,6 +189,13 @@ export interface ClaudeCodeSubstrateOptions {
   user_id?: string
   project_id?: string
   conversationProjectId?: string | null
+  /** The owner conversation's explicit Chat placement for THIS dispatch's exact
+   *  scope, and the strict project-workspace host that honours it. Composition
+   *  sets both on the owner-conversation family only; every other substrate
+   *  leaves them unset and keeps the configured host. Forwarded verbatim onto the
+   *  persistent options: a seam dropped here would look wired and place nothing. */
+  projectPlacement?: ProjectPanePlacement
+  ptyHost?: PtyHost
   /** Trusted setup/FIRE constructor provenance; explicit conversation scope wins. */
   nativeChildCensusRole?: 'setup' | 'fire'
   credential_identity?: string
@@ -542,6 +551,8 @@ function prepareClaudeCodeOptions(options: ClaudeCodeSubstrateOptions) {
   if (options.user_id !== undefined) p.user_id = options.user_id
   if (options.project_id !== undefined) p.project_id = options.project_id
   if (options.conversationProjectId !== undefined) p.conversationProjectId = options.conversationProjectId
+  if (options.projectPlacement !== undefined) p.projectPlacement = options.projectPlacement
+  if (options.ptyHost !== undefined) p.ptyHost = options.ptyHost
   if (options.nativeChildCensusRole !== undefined) p.nativeChildCensusRole = options.nativeChildCensusRole
   if (options.credential_identity !== undefined) p.credential_identity = options.credential_identity
   // S3 #106 — redelivery routing + injected sink.

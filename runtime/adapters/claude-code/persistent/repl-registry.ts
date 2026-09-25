@@ -266,6 +266,15 @@ export interface ReplRegistryRecord {
    * current fence — adoption restores exactly what the row says, or nothing.
    */
   admission_generation?: number
+  /**
+   * #1226 — WHEN THIS CONVERSATION WAS PUT TO SLEEP (epoch ms), written only by
+   * {@link sleepPane} under the ownership lock. Present only on a row with no live
+   * child (no pid, no handle, no claim): the durable wake pin. A process restart
+   * loses every in-memory fact, so the next dispatch reads the scope's asleep row to
+   * key the SAME credential and `--resume` this session. The spawn that wakes it drops
+   * the stamp (`spawn.ts`), so a live row never carries it.
+   */
+  asleep_at?: number
   /** Model id the REPL spawned with — replayed on `--resume` so a respawn keeps
    *  the same `--model`. */
   model?: string
@@ -626,6 +635,16 @@ export function disownPane(prev: ReplRegistryRecord): ReplRegistryRecord {
     ...rest
   } = prev
   return rest
+}
+
+/** SLEEP (#1226): the child is CONFIRMED GONE and the conversation stays resumable. The
+ *  handle, the claim, the pid and the dev-channel port leave together (a row with no pid
+ *  is skipped by the crash watchdog; boot adoption reads it `no-handle`), while the exact
+ *  session identity stays, so the next spawn's `resolveResumeDirective` `--resume`s it.
+ *  `asleep_at` is the durable wake pin. Called only under `withOwnedRegistry`. */
+export function sleepPane(prev: ReplRegistryRecord, now: number): ReplRegistryRecord {
+  const { pid: _pid, devchannel_port: _port, ...rest } = disownPane(prev)
+  return { ...rest, asleep_at: now }
 }
 
 /** HAND OVER: stop owning a pane that is STILL RUNNING, so the next construction can

@@ -20,6 +20,7 @@ import { CodexRolloutObserver } from '@neutronai/runtime/adapters/codex-cli/pers
 import { DurableOwnerMcp } from '@neutronai/runtime/adapters/codex-cli/persistent/durable-owner-mcp.ts'
 import type { ResolvedOwnerMcpServer } from '@neutronai/runtime/mcp-servers.ts'
 import { assertOwnerScope } from '@neutronai/runtime/adapters/codex-cli/persistent/project-owner-helper-protocol.ts'
+import type { ProjectWorkspaceLaunch } from '@neutronai/runtime/adapters/claude-code/persistent/project-workspace-host.ts'
 
 export interface CodexOwnerProject {
   cwd: string
@@ -42,6 +43,13 @@ async function refreshOwner(owner: CodexOwnerBootstrap): Promise<void> {
  */
 export class CodexOwnerBindings {
   resolveApprovedServers?: (projectId: string | null) => Promise<readonly ResolvedOwnerMcpServer[]>
+  /** #1226 — the owner's project workspace for an explicit scope (null is General),
+   * handed to a FRESH durable owner launch so its native TUI becomes that scope's
+   * `Chat`. Unset (off Herdr) ⇒ launches exactly as before. */
+  projectWorkspace?: (projectId: string | null) => ProjectWorkspaceLaunch | undefined
+  /** #1226 — the composition's shared strict host, used for the gateway-side helper-tab
+   * placement of a placed launch (never serialized across the helper boundary). */
+  projectWorkspaceHost?: OwnerLaunch['projectWorkspaceHost']
   private readonly installedMcp = new Map<string | null, DurableOwnerMcp>()
   private readonly owners = new Map<string | null, Promise<{ owner: CodexOwnerBootstrap; project: CodexOwnerProject }>>()
   private readonly busy = new Set<string | null>()
@@ -306,9 +314,12 @@ export class CodexOwnerBindings {
         }
         env.CODEX_HOME = project.codexHome
         beforeOpening?.(project)
+        const projectWorkspace = this.projectWorkspace?.(projectId)
         openingAttempted = true
         const owner = await this.bootstrap({ projectId, binary: 'codex', socketPath: join(project.codexHome, 'owner.sock'),
           cwd: project.cwd, codexHome: project.codexHome, env,
+          ...(projectWorkspace === undefined ? {} : { projectWorkspace,
+            ...(this.projectWorkspaceHost === undefined ? {} : { projectWorkspaceHost: this.projectWorkspaceHost }) }),
           ...(projectId === null ? { generalAuthorityPath: project.generalAuthorityPath } : {}) })
         try {
           const facts = this.readBinding(owner.binding)

@@ -96,6 +96,11 @@ export const WIRED_FIELDS: readonly CompositionFieldWiredEntry[] = [
       'the project maintenance owner: exact-generation replacement with attestation (no caller in this build) and the boot-time restart continuity that releases a crashed pre-replacement fence or reopens only an attested replacement — unset, a fence a crash left behind would hold the scope closed forever',
   },
   {
+    field: 'project_scope_lifecycle',
+    provides:
+      'the project-scope lifecycle owner the live-chat substrate consults per dispatch: the Chat credential pin and the verified handoff that retires the old exact owner before a rotated Chat spawns — unset, a credential rotation on Herdr would meet the manager\'s single-live-Chat refusal and the owner conversation would stop answering',
+  },
+  {
     field: 'project_liveness',
     provides:
       'the read-only liveness census of one project scope (parent turn, native children, shells) a maintenance owner reads before it may call a generation quiescent — unset, quiescence would rest on lease counts alone, which cannot see a legacy parent or a live shell',

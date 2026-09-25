@@ -654,3 +654,33 @@ test.if(process.platform === 'linux')('real placeholder exec clears inherited sy
     expect(readFileSync(`/proc/${child.pid}/environ`, 'utf8')).not.toContain('NEUTRON_TEST_INHERITED_SECRET')
   } finally { child.kill(); await child.exited }
 })
+
+test('#1226 reconciliation: a pending Chat record whose workspace is POSITIVELY gone is recreated; a surviving workspace still refuses', async () => {
+  const { manager, server, path } = fixture()
+  server.failure = 'tab.move'
+  await expect(manager.applyLayout(server, root, scope())).rejects.toThrow('transport unavailable')
+  server.failure = undefined
+  expect(Object.values(JSON.parse(readFileSync(path, 'utf8'))).map((row: any) => row.state)).toEqual(['pending'])
+  // The workspace survives: uncertain work is never reclaimed.
+  await expect(new ProjectWorkspaceManager(path).applyLayout(server, root, scope())).rejects.toThrow('pending')
+  expect(server.count('workspace.create')).toBe(1)
+  // The operator closes it (or it vanished): positive absence recreates the scope.
+  server.workspaces.clear()
+  const chat = await new ProjectWorkspaceManager(path).applyLayout(server, root, scope())
+  expect(server.count('workspace.create')).toBe(2)
+  expect(Object.values(JSON.parse(readFileSync(path, 'utf8'))).map((row: any) => row.state)).toEqual(['ready'])
+  expect(server.panes.has(chat.layout.root.pane_id)).toBe(true)
+  expect(server.count('workspace.close')).toBe(0)
+})
+
+test('#1226 reconciliation never probes a pending record with no workspace (a creation reply may be lost)', async () => {
+  const { server, path } = fixture()
+  const client: HerdrRpc = { async call(method, params) {
+    if (method === 'workspace.create') { await server.call(method, params); throw new Error('reply lost after allocation') }
+    return server.call(method, params)
+  } }
+  await expect(new ProjectWorkspaceManager(path).applyLayout(client, root, scope())).rejects.toThrow('reply lost')
+  server.workspaces.clear()
+  await expect(new ProjectWorkspaceManager(path).applyLayout(server, root, scope())).rejects.toThrow('pending')
+  expect(server.count('workspace.create')).toBe(1)
+})

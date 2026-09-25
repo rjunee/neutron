@@ -48,7 +48,10 @@ const LIVE_RUNS_LIMIT = 1_000_000
 /**
  * The pool names General `'general'` or leaves it absent (`ReplSession.projectId`);
  * admission names it null. A real project whose id is literally `general` shares
- * that pool value today — the pool's existing boundary, not a new one.
+ * that pool value, so the sessions probe also drops candidates whose RECORDED
+ * conversation scope is positively another one (#1226: General and the literal
+ * `general` project are two scopes). A candidate with no recorded scope stays — it
+ * cannot be attributed, so it still reads ambiguous rather than absent.
  */
 function poolProjectIds(projectId: string | null): ReadonlyArray<string | undefined> {
   return projectId === null ? ['general', undefined] : [projectId]
@@ -57,7 +60,9 @@ function poolProjectIds(projectId: string | null): ReadonlyArray<string | undefi
 export function buildProjectLivenessProbes(deps: ProjectLivenessProbeDeps): ProjectLivenessProbes {
   return {
     sessions: async (projectId) => {
-      const resolved = await resolveLiveProjectSessions(poolProjectIds(projectId))
+      const resolved = await resolveLiveProjectSessions(poolProjectIds(projectId), {
+        excludeConversationScopesOtherThan: projectId,
+      })
       return {
         kind: 'answered',
         unresolved: resolved.unresolved,
