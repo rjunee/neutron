@@ -1211,8 +1211,9 @@ export function buildOpenGraphComposer(
     // build-lease release composed into all three terminal chains all read it. It
     // needs only the database and the owner handle.
     const projectAdmission = new ProjectAdmission({ db, ownerHandle: owner_handle, bootId: randomUUID() })
-    setNativeChildLiveness(OWNER_USER_ID, projectId => projectAdmission.listLeases('liveChild')
-      .some(lease => lease.scope.projectId === projectId))
+    setNativeChildLiveness(OWNER_USER_ID,
+      projectId => projectAdmission.listLeases('liveChild').some(lease => lease.scope.projectId === projectId),
+      projectId => projectAdmission.hasUnresolvedNativeChildForChat(projectId))
     const wiringCtx: OpenWiringContext = {
       llmPool,
       owner_handle,

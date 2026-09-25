@@ -524,6 +524,7 @@ export async function prepareProjectBuild(input: InnerLoopInput, context: Projec
         outcome = await nativeChildTurn(turn, child.generation)
         return outcome
       } finally {
+        context.nativeChildAdmission.finishPreparing?.(child.lease)
         // Parent-turn completion does not establish child completion. Only a
         // refusal before dispatch releases here; the consuming trailer validator
         // below owns all post-dispatch releases, including restart recovery.

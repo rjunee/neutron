@@ -16,7 +16,7 @@ import type { SessionSizeWatchdog } from './session-size-watchdog.ts'
 import { CHILD_KILL_GRACE_MS, ZERO_USAGE, defaultIsPidAlive } from './signatures.ts'
 import type { ActiveTurn } from './types.ts'
 import { defaultSinkTokenPath, loadOrCreateSinkToken } from './sink-coordinates.ts'
-import { independentNativeChildren, nativeChildWorkspaceCompletion, type NativeChildWorkspace } from '../../../workers/native-child-workspace.ts'
+import { independentNativeChildren, markNativeChildWorkspaceAmbiguous, nativeChildWorkspaceAmbiguous, nativeChildWorkspaceCompletion, type NativeChildWorkspace } from '../../../workers/native-child-workspace.ts'
 
 // ---------------------------------------------------------------------------
 // ReplSession — one warm REPL + its dev-channel + its turn serialization.
@@ -544,13 +544,18 @@ export class ReplSession {
     // completion, and the teardown happens the moment no committed turn is left.
     this.turnSlotHeld += 1
     await prev
+    // An ambiguous child retains its durable lease, not an unfinishable local
+    // queue wait. The caller reaches the lease guard and receives a refusal.
     await Promise.all([...this.backgroundChildren].filter(([, prior]) =>
-      !backgroundDispatch || !independentNativeChildren(workspace, prior)).map(([done]) => done))
+      !nativeChildWorkspaceAmbiguous(prior) && (!backgroundDispatch || !independentNativeChildren(workspace, prior))).map(([done]) => done))
     let released = false
     let finishReader!: () => void
     const reader = new Promise<void>(resolve => { finishReader = resolve })
+    let yielded = false
+    let ambiguousUnqueued = false
     backgroundDispatch?.(() => {
       if (released) return
+      yielded = true
       this.backgroundChildren.set(reader, workspace)
       release()
     })
@@ -571,7 +576,13 @@ export class ReplSession {
     const completion = workspace && nativeChildWorkspaceCompletion(workspace)
     if (completion) {
       void completion.then(finish)
-      return () => {}
+      return () => {
+        if (yielded || released || ambiguousUnqueued) return
+        ambiguousUnqueued = true
+        markNativeChildWorkspaceAmbiguous(workspace)
+        this.backgroundChildren.set(reader, workspace)
+        release()
+      }
     }
     return finish
   }

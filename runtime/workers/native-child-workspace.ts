@@ -18,6 +18,7 @@ interface Record {
   common: string
   readOnly: boolean
   bound: boolean
+  ambiguous: boolean
   completed: boolean
   done: Promise<void>
   finish(): void
@@ -60,7 +61,7 @@ export async function admitNativeChildWorkspace(input: {
   const record: Record = { session: input.session, request: structuredClone(input.request), identity, pending: input.pending,
     paths: [root, result], directory, common, branch, inode: `${info.dev}:${info.ino}`,
     readOnly: !input.request.writable && (input.request.tools === 'none' || input.request.tools === 'read-only'),
-    bound: false, completed: false, done, finish }
+    bound: false, ambiguous: false, completed: false, done, finish }
   const admission: NativeChildWorkspace = Object.freeze({ kind: 'native-child-workspace' })
   records.set(admission, record)
   const owned = sessions.get(input.session) ?? new Set<Record>()
@@ -78,18 +79,29 @@ export function ownsNativeChildWorkspace(admission: NativeChildWorkspace, sessio
  * Such work must be reconciled through its original reservation before dispatch. */
 export function nativeChildCensusKnown(admission: NativeChildWorkspace): boolean {
   const record = records.get(admission)
-  if (!record || record.completed) return false
+  if (!record || record.completed || record.ambiguous) return false
   try {
     const pending = record.pending()
     return pending.filter(row => isDeepStrictEqual(row, record.identity)).length === 1
       && pending.every((row, index) => pending.findIndex(other => isDeepStrictEqual(row, other)) === index
-        && [...sessions.get(record.session) ?? []].some(other => !other.completed && isDeepStrictEqual(other.identity, row)))
+        && [...sessions.get(record.session) ?? []].some(other => !other.completed && !other.ambiguous && isDeepStrictEqual(other.identity, row)))
   } catch { return false }
 }
 
 export function bindNativeChildWorkspace(admission: NativeChildWorkspace): void {
   const record = records.get(admission)
   if (record) record.bound = true
+}
+
+/** The parent returned without binding a submitted child. Preserve its durable
+ * ownership, but let queued callers reach the explicit lease refusal. */
+export function markNativeChildWorkspaceAmbiguous(admission: NativeChildWorkspace): void {
+  const record = records.get(admission)
+  if (record && !record.completed && !record.bound) record.ambiguous = true
+}
+
+export function nativeChildWorkspaceAmbiguous(admission: NativeChildWorkspace | undefined): boolean {
+  return !!admission && records.get(admission)?.ambiguous === true
 }
 
 export function independentNativeChildren(next: NativeChildWorkspace | undefined, prior: NativeChildWorkspace | undefined): boolean {

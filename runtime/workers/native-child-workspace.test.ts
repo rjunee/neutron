@@ -186,19 +186,36 @@ test('an unrepresented restart lease exhausts the original admission budget with
   f.complete(0)
 })
 
-test('unknown writer retains the busy fence until original request reconciliation', async () => {
+test('unknown writer retains durable ownership but cannot wedge the local queue', async () => {
   const f = await fixture()
   f.session.child.submitLine = async () => { throw new Error('lost acknowledgement') }
   await expect(createClaudeActingTurn(f.binding(0))(f.input(0))).rejects.toThrow('lost acknowledgement')
   expect(f.session.turnSlotHeld).toBe(1)
-  let entered = false
-  const waiting = f.session.acquireTurn().then(release => { entered = true; release() })
-  for (let n = 0; n < 8; n++) await Promise.resolve()
-  expect(entered).toBe(false)
+  expect(nativeChildCensusKnown(f.workspaces[1]!)).toBe(false)
+  const waiting = f.session.acquireTurn().then(release => { release(); return true })
+  expect(await Promise.race([waiting, new Promise<false>(resolve => setTimeout(() => resolve(false), 100))])).toBe(true)
+  expect(f.session.turnSlotHeld).toBe(1)
   completeNativeChildWorkspaceRequest(f.session, { ...f.requests[0]!, step_id: 'wrong' })
   await Promise.resolve()
-  expect(entered).toBe(false)
+  expect(f.session.turnSlotHeld).toBe(1)
+  expect(nativeChildCensusKnown(f.workspaces[1]!)).toBe(false)
   completeNativeChildWorkspaceRequest(f.session, f.requests[0]!)
-  await waiting
-  expect(entered).toBe(true)
+  await Promise.resolve()
+  expect(f.session.turnSlotHeld).toBe(0)
+})
+
+test('acknowledged dispatch without a bound child returns unknown and leaves the next turn bounded', async () => {
+  const f = await fixture()
+  let submissions = 0
+  f.session.child.submitLine = async () => { submissions++ }
+  const outcome = await createClaudeActingTurn(f.binding(0))({ ...f.input(0), timeout_ms: 40 })
+  expect(outcome.kind).toBe('unknown')
+  expect(submissions).toBe(1)
+  expect(nativeChildCensusKnown(f.workspaces[1]!)).toBe(false)
+  const next = f.session.acquireTurn().then(release => { release(); return true })
+  expect(await Promise.race([next, new Promise<false>(resolve => setTimeout(() => resolve(false), 100))])).toBe(true)
+  expect(f.session.turnSlotHeld).toBe(1)
+  f.complete(0)
+  await Promise.resolve()
+  expect(f.session.turnSlotHeld).toBe(0)
 })

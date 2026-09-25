@@ -289,3 +289,27 @@ test('RESTART / lost acknowledgement: a child lease written by one connection is
   expect(await restarted.forNativeChild(null).complete('run-x', 'build:0')).toBe(1)
   expect(restarted.inspect(null)?.leases).toBe(0)
 })
+
+test('ordinary chat passes only a unique locally preparing native child, never submitted or foreign work', async () => {
+  const f = fixture()
+  seedProject(f.db, 'project-a')
+  seedProject(f.db, 'project-b')
+  expect((await f.admission.forDispatch('project-a', 'work-board').admit('run-a')).status).toBe('admitted')
+  const native = f.admission.forNativeChild('project-a')
+  const first = await native.admit('run-a', 'build:0')
+  if (first.status !== 'admitted') throw new Error('expected native child admission')
+  expect(f.admission.hasUnresolvedNativeChildForChat('project-a')).toBe(false)
+  expect(f.admission.hasUnresolvedNativeChildForChat('project-b')).toBe(false)
+
+  const duplicate = await native.admit('run-a', 'build:0')
+  if (duplicate.status !== 'admitted') throw new Error('expected duplicate fixture admission')
+  expect(f.admission.hasUnresolvedNativeChildForChat('project-a')).toBe(true)
+  expect(await duplicate.release()).toBe(true)
+  expect(f.admission.hasUnresolvedNativeChildForChat('project-a')).toBe(false)
+
+  native.finishPreparing?.(first.lease)
+  expect(f.admission.hasUnresolvedNativeChildForChat('project-a')).toBe(true)
+  expect(f.open('boot-b').admission.hasUnresolvedNativeChildForChat('project-a')).toBe(true)
+  expect(await first.release()).toBe(true)
+  expect(f.admission.hasUnresolvedNativeChildForChat('project-a')).toBe(false)
+})

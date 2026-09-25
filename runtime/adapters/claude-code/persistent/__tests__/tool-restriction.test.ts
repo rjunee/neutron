@@ -143,12 +143,14 @@ describe('persistent REPL — tool restriction (Codex-r1-P1 SECURITY)', () => {
     const tools = ['Agent', 'Read', 'Write']
     expect(await drain(sub.start(spec('before child', tools)))).toBe('seen=0 got=before child')
     try {
+      setNativeChildLiveness('native-fence-owner', scope => scope === 'native-project', () => false)
+      expect(await drain(sub.start(spec('local child still preparing', tools)))).toBe('seen=1 got=local child still preparing')
       setNativeChildLiveness('native-fence-owner', scope => scope === 'native-project')
       await expect(drain(sub.start(spec('must stay fenced', tools)))).rejects.toThrow('native child ownership remains unresolved')
       setNativeChildLiveness('native-fence-owner', () => { throw new Error('unreadable durable census') })
       await expect(drain(sub.start(spec('unknown stays fenced', tools)))).rejects.toThrow('native child ownership remains unresolved')
       setNativeChildLiveness('native-fence-owner', () => false)
-      expect(await drain(sub.start(spec('after validated child', tools)))).toBe('seen=1 got=after validated child')
+      expect(await drain(sub.start(spec('after validated child', tools)))).toBe('seen=2 got=after validated child')
       expect(spawnCount()).toBe(1)
     } finally { setNativeChildLiveness('native-fence-owner', undefined) }
   })

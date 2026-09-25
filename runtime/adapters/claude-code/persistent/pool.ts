@@ -1,5 +1,5 @@
 import { observeSession } from './observe-workers.ts'
-import { hasUnresolvedNativeChild } from './native-child-liveness.ts'
+import { hasUnresolvedNativeChild, hasUnresolvedNativeChildForChat } from './native-child-liveness.ts'
 import { describeWorkerObservation, unclassifiedObservation, type WorkerObservation } from './worker-observation.ts'
 // persistent-repl-substrate.ts → pool.ts
 // The warm pool, the createPersistentReplSubstrate turn driver, ephemeral
@@ -649,7 +649,7 @@ export function createPersistentReplSubstrate(options: PersistentReplSubstrateOp
         release = await session.acquireTurn()
         // The local queue can be empty after restart while durable native children
         // still own work. An ordinary turn cannot bypass their unresolved lease.
-        if (hasUnresolvedNativeChild(options)) {
+        if (hasUnresolvedNativeChildForChat(options)) {
           channel.push({ kind: 'error', message: 'persistent-repl: native child ownership remains unresolved; reconcile before an ordinary turn', retryable: false })
           channel.close()
           release()

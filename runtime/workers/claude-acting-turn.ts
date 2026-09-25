@@ -223,23 +223,28 @@ export function createClaudeActingTurn(binding: ClaudeActingSession, clock: Obse
     // actuation. Racing acquisition must never dispatch after the caller times out.
     let readingConsumption = false
     let submitted = false
+    let releaseTurn: (() => void) | undefined
     const observe = async () => {
       let yieldDispatch: (() => void) | undefined
       const readOnly = !request.writable && toolRank[request.tools] <= toolRank['read-only']
       const workspace = binding.workspace
+      const beforeDispatchExpired = () => workspace
+        ? refuse('Native child admission did not become available before the original dispatch budget expired.')
+        : unknown()
       if (workspace && !ownsNativeChildWorkspace(workspace, session, request)) {
         return refuse('Native child workspace ownership is unavailable; reconcile existing admitted children first.')
       }
       const release = await session.acquireTurn(readOnly || workspace ? yieldSlot => { yieldDispatch = yieldSlot } : undefined, workspace)
+      releaseTurn = release
       try {
-        if (expired()) return unknown()
+        if (expired()) return beforeDispatchExpired()
         // Sibling admissions acquire their durable lease before asynchronously
         // measuring the worktree. Wait for those local proofs under the original
         // budget; a restart/foreign lease never becomes proof merely by waiting.
         while (workspace && !nativeChildCensusKnown(workspace) && !expired()) {
           await delay(Math.min(25, Math.max(1, deadline - clock.now())), undefined, { signal: stopped })
         }
-        if (expired()) return unknown()
+        if (expired()) return beforeDispatchExpired()
         // JSON escapes newlines: submitLine accepts one line and owns text/Enter ordering.
         // Forward the complete dispatch spec and effort as data, not shell commands.
         // A submit that THREW propagates, by an existing contract the suite pins
@@ -249,7 +254,7 @@ export function createClaudeActingTurn(binding: ClaudeActingSession, clock: Obse
         // swallow it here to add a detail that already exists.
         const dispatch = 'Execute the prompt in this JSON dispatch specification: ' + JSON.stringify({ ...spec, effort: request.effort })
         const boundary = await transcriptBoundary(transcript)
-        if (expired()) return unknown()
+        if (expired()) return beforeDispatchExpired()
         submitted = true
         await child.submitLine!(dispatch, stopped)
         const dispatchDeadline = Math.min(deadline, clock.now() + DISPATCH_TIMEOUT_MS)
@@ -319,6 +324,9 @@ export function createClaudeActingTurn(binding: ClaudeActingSession, clock: Obse
           timer.abort()
           return observation
         }
+        // The outer deadline can win while submitLine or observation is still
+        // pending. Unqueue now; the durable lease still forbids another write.
+        if (binding.workspace && submitted) releaseTurn?.()
         return unknown()
       }
       return await Promise.race([
