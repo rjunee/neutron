@@ -51,7 +51,7 @@
  */
 import { LIVE_AGENT_TOOL_NAMES } from '@neutronai/gateway/wiring/build-live-agent-turn.ts'
 import { projectInstallAvailableBytes } from '../wiring/project-build-dependencies.ts'
-import { afterEach, expect, spyOn, test } from 'bun:test'
+import { afterEach, beforeEach, expect, spyOn, test } from 'bun:test'
 import { chmod, copyFile, mkdir, mkdtemp, readFile, readdir, realpath, rename, rm, stat, symlink, utimes, writeFile } from 'node:fs/promises'
 import { tmpdir } from 'node:os'
 import { dirname, join } from 'node:path'
@@ -97,7 +97,41 @@ import { EfficiencyTrace, EFFICIENCY_SCENARIOS, assertEfficient, compareEfficien
 import { ReplSession } from '@neutronai/runtime/adapters/claude-code/persistent/repl-session.ts'
 
 const cleanups: (() => void | Promise<void>)[] = []
-afterEach(async () => { for (const fn of cleanups.splice(0).reverse()) await fn() })
+type FixtureTiming = {
+  sequence: number
+  variant: Record<string, unknown>
+  phasesMs: Record<string, number>
+  cleanupMs: number
+  prepareMs: number
+  prepareCalls: number
+}
+const fixtureTimings: FixtureTiming[] = []
+let fixtureSequence = 0
+let caseStartedAt = 0
+// Diagnostic only: set OPEN_E2E_FIXTURE_TIMING=1 for JSON timing lines. Case
+// body includes every fixture's setup and prepare calls; all_cleanup includes
+// fixture-owned cleanup. These nested measurements must not be added together.
+beforeEach(() => { caseStartedAt = performance.now() })
+afterEach(async () => {
+  const cleanupStartedAt = performance.now()
+  try {
+    for (const fn of cleanups.splice(0).reverse()) await fn()
+  } finally {
+    const cleanupEndedAt = performance.now()
+    if (process.env.OPEN_E2E_FIXTURE_TIMING === '1') {
+      const timings = fixtureTimings.splice(0)
+      for (const timing of timings) {
+        process.stderr.write(`OPEN_E2E_FIXTURE_TIMING ${JSON.stringify({ sequence: timing.sequence,
+          variant: timing.variant, phasesMs: { ...timing.phasesMs,
+            prepare_project_build: +timing.prepareMs.toFixed(3), fixture_owned_cleanup: +timing.cleanupMs.toFixed(3) },
+          prepareCalls: timing.prepareCalls })}\n`)
+      }
+      process.stderr.write(`OPEN_E2E_CASE_TIMING ${JSON.stringify({ fixtureSequences: timings.map(timing => timing.sequence),
+        phasesMs: { body_including_fixture_setup: +(cleanupStartedAt - caseStartedAt).toFixed(3),
+          all_cleanup: +(cleanupEndedAt - cleanupStartedAt).toFixed(3) } })}\n`)
+    } else fixtureTimings.length = 0
+  }
+})
 
 test.each(['denied', 'secret-rotation'] as const)('idle Codex MCP revocation kills only the quiet revoked peer and preserves successor chat and unrelated handles: %s', async change => {
   const cwd = await mkdtemp(join(tmpdir(), 'idle-owner-mcp-'))
@@ -850,8 +884,28 @@ async function fixture(options: { taskSequence?: boolean; moreTasks?: boolean; s
   reviewVeto?: 'standalone' | 'synthesis'
   efficiencyTrace?: EfficiencyTrace
 } = {}) {
+  const timingEnabled = process.env.OPEN_E2E_FIXTURE_TIMING === '1'
+  const timingStart = performance.now()
+  let timingMark = timingStart
+  const phasesMs: Record<string, number> = {}
+  const mark = (phase: string) => {
+    const now = performance.now()
+    phasesMs[phase] = +(now - timingMark).toFixed(3)
+    timingMark = now
+  }
+  const timing: FixtureTiming = { sequence: ++fixtureSequence,
+    variant: Object.fromEntries(Object.entries(options).map(([key, value]) => [key,
+      value instanceof EfficiencyTrace ? '[EfficiencyTrace]' : typeof value === 'function' ? '[function]' : value])),
+    phasesMs, cleanupMs: 0, prepareMs: 0, prepareCalls: 0 }
+  const fixtureCleanup = (fn: () => void | Promise<void>) => {
+    if (!timingEnabled) { cleanups.push(fn); return }
+    cleanups.push(async () => {
+      const started = performance.now()
+      try { await fn() } finally { timing.cleanupMs += performance.now() - started }
+    })
+  }
   const dir = await mkdtemp(join(tmpdir(), 'project-build-e2e-'))
-  cleanups.push(() => rm(dir, { recursive: true, force: true }))
+  fixtureCleanup(() => rm(dir, { recursive: true, force: true }))
   const origin = join(dir, 'origin.git')
   const repo = join(dir, 'code')
   const scratch = join(dir, 'scratch')
@@ -871,6 +925,7 @@ async function fixture(options: { taskSequence?: boolean; moreTasks?: boolean; s
     await writeFile(executable, fakeCodex(codexCalls, options.codexReview))
     await chmod(executable, 0o755)
   }
+  mark('temporary_paths')
 
   const git = async (cwd: string, args: string[]) => {
     const result = await spawnCapture(['git', '-C', cwd, ...args], cwd)
@@ -882,6 +937,7 @@ async function fixture(options: { taskSequence?: boolean; moreTasks?: boolean; s
   await git(repo, ['config', 'user.email', 'harness@example.invalid'])
   await git(repo, ['config', 'user.name', 'Harness'])
   await git(repo, ['config', 'commit.gpgsign', 'false'])
+  mark('git_init')
   await mkdir(join(repo, 'scripts', 'ci'), { recursive: true })
   // The repo OPTS IN to the leak gate; `runLeakGatePreflight` probes for exactly
   // this path before it runs anything (`leak-preflight.ts:281`).
@@ -946,18 +1002,20 @@ async function fixture(options: { taskSequence?: boolean; moreTasks?: boolean; s
     await writeFile(join(repo, 'IMPLEMENTATION_PLAN.md'),
       `- [ ] T1 record the note\n${options.moreTasks ? '- [ ] T2 record another note\n' : ''}`)
   }
+  mark('seed_files')
   await git(repo, ['add', '-A'])
   await git(repo, ['commit', '-m', 'chore: seed'])
   await git(repo, ['remote', 'add', 'origin', origin])
   await git(repo, ['push', '-u', 'origin', 'main'])
   const baseSha = await git(repo, ['rev-parse', '--verify', 'refs/heads/main^{commit}'])
+  mark('git_seed')
 
   await writeFile(join(dir, 'project-repos.json'), JSON.stringify({
     repos: [{ name: 'project', path: 'code', remote: null, ciWorkflow: 'ci.yml' }], default: 'project' }))
 
   seedMigratedDb(join(dir, 'project.db'))
   const db = ProjectDb.open(join(dir, 'project.db'))
-  cleanups.push(() => db.close())
+  fixtureCleanup(() => db.close())
   const store = new TridentRunStore(db)
   const row = await store.create({ slug: options.dispatchTask ? slugifyTask(options.dispatchTask) : 'card', project_slug: 'project', repo_path: repo,
     task: options.dispatchTask ?? `Record a note in NOTES.md.${options.moreTasks ? '\nMORE TASKS' : ''}`,
@@ -965,6 +1023,7 @@ async function fixture(options: { taskSequence?: boolean; moreTasks?: boolean; s
     // ceiling case pins its own rather than leaning on the schema default of 8/10.
     ...(options.maxRounds === undefined ? {} : { max_rounds: options.maxRounds }) })
   await store.update(row.id, { merge_mode: options.mergeMode ?? 'pr', base_sha: baseSha })
+  mark('database')
 
   const github = fakeGithub({ origin, repo })
   const commands: string[][] = []
@@ -989,7 +1048,7 @@ async function fixture(options: { taskSequence?: boolean; moreTasks?: boolean; s
   // seam; the entries it writes are the ones `prepareProjectBuild` reads back
   // (`open/wiring/project-build.ts:214-251`).
   const key = `e2e-${row.id}`
-  cleanups.push(() => { pool.delete(key); supervisedBySessionKey.delete(key) })
+  fixtureCleanup(() => { pool.delete(key); supervisedBySessionKey.delete(key) })
   const worker = literalWorker(world)
   const projectsDir = join(dir, 'claude-projects')
   const session = { sessionId: 'e2e-session', authFingerprint: 'fixture-spawned-credential', toolSurface: LIVE_AGENT_TOOL_NAMES.join(','), cwd: dir, hasChildExited: () => false,
@@ -1060,13 +1119,13 @@ async function fixture(options: { taskSequence?: boolean; moreTasks?: boolean; s
         }).catch(error => { errors.push(error) }))
       } })
     registeredSession = live
-    cleanups.push(async () => { await Promise.all(children); expect(errors).toEqual([]); expect(live.turnSlotHeld).toBe(0) })
+    fixtureCleanup(async () => { await Promise.all(children); expect(errors).toEqual([]); expect(live.turnSlotHeld).toBe(0) })
   }
 
   const register = (registration: { key?: string; projectId?: string; instanceId?: string
     state?: 'ready' | 'pending' | 'missing' | 'empty' | 'exited' } = {}) => {
     const sessionKey = registration.key ?? key
-    cleanups.push(() => { pool.delete(sessionKey); supervisedBySessionKey.delete(sessionKey) })
+    fixtureCleanup(() => { pool.delete(sessionKey); supervisedBySessionKey.delete(sessionKey) })
     supervisedBySessionKey.set(sessionKey, {
       substrate_instance_id: registration.instanceId ?? 'cc-agent-e2e',
       project_id: registration.projectId ?? 'e2e-project',
@@ -1112,11 +1171,21 @@ async function fixture(options: { taskSequence?: boolean; moreTasks?: boolean; s
   }
 
   const prepare = async () => {
-    const options = await prepareProjectBuild(input, context, new AbortController().signal)
-    // The leak SCANNER is stubbed; the preflight module around it is not.
-    options.policy.leak.gate_script = join(repo, 'scripts', 'ci', 'leak-gate.sh')
-    return options
+    const started = performance.now()
+    try {
+      const options = await prepareProjectBuild(input, context, new AbortController().signal)
+      // The leak SCANNER is stubbed; the preflight module around it is not.
+      options.policy.leak.gate_script = join(repo, 'scripts', 'ci', 'leak-gate.sh')
+      return options
+    } finally {
+      timing.prepareCalls++
+      timing.prepareMs += performance.now() - started
+    }
   }
+  // This is fixture wiring; runner construction and session acquisition happen
+  // later in prepare/run and are included in the case body wall time.
+  mark('transport_fixture_wiring')
+  fixtureTimings.push(timing)
 
   return { dir, repo, origin, baseSha, db, store, row, input, context, prepare, github, commands, world,
     register, key, codexCalls, admission }
