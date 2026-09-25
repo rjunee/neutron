@@ -136,6 +136,38 @@ function runCount(): number {
 }
 
 describe('OVERLAP HELD — two cards naming the same file cannot both be in flight', () => {
+  test('read-only test execution passes a live writer while an edit of that test is held', async () => {
+    const path = 'open/__tests__/project-build-e2e.test.ts'
+    const writer = await store.create({
+      slug: 'writer', project_slug: SLUG, repo_path: REPO,
+      task: `Edit ${path}`, claimed_paths: [path],
+    })
+    const board = stubBoard([
+      { id: 'read', title: 'run the existing Open E2E test to verify project build dispatch', design_doc_ref: null, status: 'upcoming' },
+      { id: 'edit', title: 'update the Open E2E test to cover project build dispatch', design_doc_ref: null, status: 'upcoming' },
+    ])
+
+    const read = await dispatchBoardBoundBuild(
+      { task: `Run ${path}`, board_item_id: 'read' }, deps(board),
+    )
+    expect(read).toMatchObject({ ok: true })
+    if (!read.ok) return
+    expect(read.run.claimed_paths).toEqual([])
+    expect(holds.getByItem(SLUG, 'read')).toBeNull()
+
+    const edit = await dispatchBoardBoundBuild(
+      { task: `Edit ${path}`, board_item_id: 'edit' }, deps(board),
+    )
+    expect(edit.ok).toBe(false)
+    if (edit.ok) return
+    expect(edit.code).toBe('held')
+    expect(edit.message).toContain(path)
+    expect(holds.getByItem(SLUG, 'edit')).toMatchObject({
+      hold_kind: 'path', held_on_run_id: writer.id, claimed_paths: [path],
+    })
+    expect(runCount()).toBe(2)
+  })
+
   test('concurrent dispatches atomically admit only one overlapping run', async () => {
     const board = stubBoard([
       { id: 'A', title: 'first concurrent card with a detailed implementation', design_doc_ref: 'neutron-docs:a', status: 'upcoming' },
