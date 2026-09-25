@@ -31,7 +31,7 @@ export function createTimelineHandler(options: TimelineServerOptions): (request:
   if (!options.username.trim() || options.username.includes(':') || !options.password.trim()) {
     throw new Error('Timeline Basic credentials must be configured')
   }
-  const expected = createHash('sha256').update(`${options.username}:${options.password}`).digest()
+  const expected = Buffer.from(`${options.username}:${options.password}`, 'utf8')
   const scriptHash = createHash('sha256').update(TIMELINE_SCRIPT).digest('base64')
   const headers = {
     'Cache-Control': 'no-store',
@@ -44,9 +44,8 @@ export function createTimelineHandler(options: TimelineServerOptions): (request:
   return async request => {
     const header = request.headers.get('authorization')
     const match = /^Basic ([A-Za-z0-9+/]+={0,2})$/i.exec(header ?? '')
-    const supplied = match ? Buffer.from(match[1]!, 'base64').toString('utf8') : ''
-    const digest = createHash('sha256').update(supplied).digest()
-    if (!match || !timingSafeEqual(expected, digest)) {
+    const supplied = match ? Buffer.from(match[1]!, 'base64') : Buffer.alloc(0)
+    if (!match || supplied.length !== expected.length || !timingSafeEqual(expected, supplied)) {
       return reply('Authentication required', 401, { 'WWW-Authenticate': 'Basic realm="Build timelines", charset="UTF-8"' })
     }
     if (request.method !== 'GET') return reply('Method not allowed', 405, { Allow: 'GET' })
