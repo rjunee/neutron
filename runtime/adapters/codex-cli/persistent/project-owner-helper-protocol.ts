@@ -47,6 +47,17 @@ export function assertProjectOwner(codexHome: string, projectId: string): void {
   if (!/^[A-Za-z0-9_.-]{1,128}$/.test(projectId) || !info.isFile() || info.uid !== process.getuid?.()
     || JSON.parse(readFileSync(marker, 'utf8')) !== projectId) throw new Error('Owner helper credential home belongs to another project')
 }
+/** Null is the instance's General owner, never a synthetic project grant. */
+export function assertOwnerScope(codexHome: string, projectId: string | null): void {
+  if (projectId !== null) return assertProjectOwner(codexHome, projectId)
+  privatePath(codexHome, 'directory')
+  try { lstatSync(join(codexHome, 'project-owner.json')) }
+  catch (error) {
+    if ((error as NodeJS.ErrnoException).code === 'ENOENT') return
+    throw error
+  }
+  throw new Error('General owner cannot use a project credential home')
+}
 export function socketIdentity(path: string): string {
   privatePath(path, 'socket')
   const info = lstatSync(path)

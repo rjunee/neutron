@@ -51,7 +51,7 @@
  */
 import { LIVE_AGENT_TOOL_NAMES } from '@neutronai/gateway/wiring/build-live-agent-turn.ts'
 import { afterEach, expect, spyOn, test } from 'bun:test'
-import { chmod, copyFile, mkdir, mkdtemp, readFile, readdir, realpath, rename, rm, symlink, writeFile } from 'node:fs/promises'
+import { chmod, copyFile, mkdir, mkdtemp, readFile, readdir, realpath, rename, rm, stat, symlink, utimes, writeFile } from 'node:fs/promises'
 import { tmpdir } from 'node:os'
 import { dirname, join } from 'node:path'
 import { fileURLToPath } from 'node:url'
@@ -78,6 +78,8 @@ import { buildRun, type BuildRunOutcome } from '@neutronai/trident/build-run.ts'
 import type { InnerLoopInput } from '@neutronai/trident/inner-loop.ts'
 import { PROJECT_SESSION_ACQUIRE_TIMEOUT_MS, prepareProjectBuild, type ProjectBuildContext } from '../wiring/project-build.ts'
 import { CodexOwnerBindings } from '../wiring/codex-owner-binding.ts'
+import { until, workerPlacementRig } from '@neutronai/runtime/adapters/claude-code/persistent/__tests__/herdr-workspace-fake-server.ts'
+import { HerdrError } from '@neutronai/runtime/adapters/claude-code/persistent/herdr-client.ts'
 import { restrictedOwnerFixture } from './fixtures/codex-owner-review.ts'
 import { PROJECT_DEPENDENCIES_TIMEOUT_MS } from '../wiring/project-build-dependencies.ts'
 import { PROJECT_SNAPSHOT_SCHEMA } from '../wiring/project-build-snapshot.ts'
@@ -342,6 +344,8 @@ interface WorkerWorld {
    */
   hostLedger?: boolean
   synthesisShape: 'legacy' | 'schema-guided' | 'malformed' | 'independent'
+  verdictRepair?: 'repairs' | 'exhausts'
+  repairPaths: string[]
   synthesisSchemaSeen: boolean[]
 }
 
@@ -446,6 +450,12 @@ async function performRole(world: WorkerWorld, request: BoundedWorkRequest, brie
   if (request.result.schema === 'verdict') {
     const panelBrief = JSON.parse(brief)
     const verdict = verdictFor(world, panelBrief.round)
+    if (world.verdictRepair && request.role === 'review' && panelBrief.round === 1) {
+      if (panelBrief.repair) world.repairPaths.push(panelBrief.repair.path)
+      if (!panelBrief.repair || world.verdictRepair === 'exhausts') {
+        return { ...verdict, findings: verdict.findings.map(({ rule: _rule, ...finding }) => finding) }
+      }
+    }
     if (request.role !== 'synthesis' || world.synthesisShape === 'legacy') return verdict
     if (world.synthesisShape === 'independent') {
       // The synthesis is a separate worker, not an echo of the top-level review
@@ -779,6 +789,7 @@ console.log(JSON.stringify({ type: 'result', subtype: 'success', is_error: false
 
 async function fixture(options: { taskSequence?: boolean; moreTasks?: boolean; suiteExit?: number; testStrategy?: string
   namedSuiteFailure?: boolean | 'generic'
+  verboseSuiteDiagnostic?: boolean
   spec?: boolean
   /** `false`: the seed commit carries NO `IMPLEMENTATION_PLAN.md` (default `true`). */
   seedLedger?: boolean
@@ -786,6 +797,7 @@ async function fixture(options: { taskSequence?: boolean; moreTasks?: boolean; s
   hostLedger?: boolean
   bunWorkspace?: boolean
   bunWorkspacePeer?: boolean
+  bunWorkspaceSibling?: boolean
   manifest?: Record<string, unknown>
   dispatchTask?: string
   blockersByRound?: readonly number[]; replanRounds?: readonly number[]
@@ -793,6 +805,7 @@ async function fixture(options: { taskSequence?: boolean; moreTasks?: boolean; s
   repeatFirstFinding?: boolean; commentRounds?: readonly number[]
   unavailableSeatRounds?: readonly number[]; codexReview?: 'valid' | 'wrong-run'
   synthesisShape?: WorkerWorld['synthesisShape']; rateLimitedSynthesis?: boolean; nativeUsage?: boolean
+  verdictRepair?: WorkerWorld['verdictRepair']
   /** Real session ownership with only the model boundary held at a barrier. */
   reviewChild?: (request: BoundedWorkRequest, seat: string) => Promise<void>
   reviewVeto?: 'standalone' | 'synthesis'
@@ -841,7 +854,9 @@ async function fixture(options: { taskSequence?: boolean; moreTasks?: boolean; s
       await writeFile(join(repo, 'tests', 'preexisting.test.sh'), "echo 'tests/preexisting.test.sh: pre-existing red'\nexit 1\n")
       await writeFile(join(repo, 'scripts', 'ci', 'suite.sh'), 'bash ./tests/preexisting.test.sh\n')
     } else {
-      await writeFile(join(repo, 'tests', 'preexisting.test.ts'), "import { expect, test } from 'bun:test'\ntest('pre-existing red', () => expect(false).toBe(true))\n")
+      await writeFile(join(repo, 'tests', 'preexisting.test.ts'), "import { expect, test } from 'bun:test'\n"
+        + (options.verboseSuiteDiagnostic ? "console.log('[trident] event=mutation_proof_exempt ' + 'x'.repeat(22000))\n" : '')
+        + "test('pre-existing red', () => expect(false).toBe(true))\n")
       await writeFile(join(repo, 'scripts', 'ci', 'suite.sh'), 'bun test ./tests/preexisting.test.ts\n')
     }
   }
@@ -852,7 +867,7 @@ async function fixture(options: { taskSequence?: boolean; moreTasks?: boolean; s
     await mkdir(join(repo, 'app'), { recursive: true })
     await mkdir(join(repo, 'vendor', 'package'), { recursive: true })
     await writeFile(join(repo, '.gitignore'), 'node_modules/\n')
-    await writeFile(join(repo, 'package.json'), JSON.stringify({ name: 'fixture', private: true, workspaces: ['app'],
+    await writeFile(join(repo, 'package.json'), JSON.stringify({ name: 'fixture', private: true, workspaces: options.bunWorkspaceSibling ? ['app', 'cores/sdk'] : ['app'],
       scripts: { postinstall: 'touch lifecycle-ran' } }))
     await writeFile(join(repo, 'bunfig.toml'), '[install]\nlinker = "isolated"\n')
     await writeFile(join(repo, 'vendor', 'package', 'package.json'), JSON.stringify({ name: 'fixture-dependency', version: '1.0.0', main: 'index.js' }))
@@ -865,9 +880,16 @@ async function fixture(options: { taskSequence?: boolean; moreTasks?: boolean; s
       await writeFile(join(repo, 'vendor', 'peer', 'index.js'), 'exports.message = "local peer"\n')
       expect((await spawnCapture(['tar', '-czf', 'peer.tgz', 'peer'], join(repo, 'vendor'))).ok).toBe(true)
     }
-    await writeFile(join(repo, 'app', 'package.json'), JSON.stringify({ name: 'fixture-app', dependencies: { 'fixture-dependency': 'file:../vendor/dependency.tgz' },
+    if (options.bunWorkspaceSibling) {
+      await mkdir(join(repo, 'cores/sdk'), { recursive: true })
+      await writeFile(join(repo, 'cores/sdk', 'package.json'), JSON.stringify({ name: '@fixture/sdk', private: true, main: './index.ts', type: 'module' }))
+      await writeFile(join(repo, 'cores/sdk', 'index.ts'), 'export const message = "local workspace"\n')
+    }
+    await writeFile(join(repo, 'app', 'package.json'), JSON.stringify({ name: 'fixture-app', dependencies: { 'fixture-dependency': 'file:../vendor/dependency.tgz',
+      ...(options.bunWorkspaceSibling ? { '@fixture/sdk': 'workspace:*' } : {}) },
       ...(options.bunWorkspacePeer ? { peerDependencies: { 'fixture-peer': 'file:../vendor/peer.tgz' } } : {}) }))
     await writeFile(join(repo, 'app', 'check.ts'), 'import { message } from "fixture-dependency"; if (message !== "dependency consumed") throw Error("wrong dependency"); console.log(message)\n'
+      + (options.bunWorkspaceSibling ? 'import { message as sibling } from "@fixture/sdk"; if (sibling !== "local workspace") throw Error("wrong workspace");\n' : '')
       + (options.bunWorkspacePeer ? 'import { message as peer } from "fixture-peer"; if (peer !== "local peer") throw Error("wrong peer");\n' : ''))
     await writeFile(join(repo, 'scripts', 'ci', 'verify-workspace-deps.ts'), await readFile(new URL('../../scripts/ci/verify-workspace-deps.ts', import.meta.url), 'utf8'))
     await writeFile(join(repo, 'scripts', 'ci', 'suite.sh'), '#!/usr/bin/env bash\nset -e\nbun scripts/ci/verify-workspace-deps.ts\nbun app/check.ts\n')
@@ -912,6 +934,7 @@ async function fixture(options: { taskSequence?: boolean; moreTasks?: boolean; s
     ...(options.reviewVeto ? { reviewVeto: options.reviewVeto } : {}),
     selectedTasks: [], plannerChoices: [], committedPlans: [], hostLedger: options.hostLedger ?? false,
     synthesisShape: options.synthesisShape ?? 'legacy', synthesisSchemaSeen: [],
+    ...(options.verdictRepair ? { verdictRepair: options.verdictRepair } : {}), repairPaths: [],
     blockersByRound: options.blockersByRound ?? [], replanRounds: options.replanRounds ?? [],
     blockRoles: new Set(options.blockRoles ?? []), repeatFirstFinding: options.repeatFirstFinding ?? false,
     commentRounds: new Set(options.commentRounds ?? []),
@@ -1117,8 +1140,8 @@ test('wave member retains worker full suite and returns before host review', asy
   expect(f.store.stageEvents(f.row.id).some(event => event.stage === 'build-suite-receipt')).toBe(false)
 }, 120_000)
 
-test('G070 repeated host red still arbitrates when a fix removes the other panel blocker', async () => {
-  const f = await fixture({ namedSuiteFailure: true, blockersByRound: [0, 1, 0], maxRounds: 3 })
+test('G070 repeated host red with large diagnostics still arbitrates when a fix removes the other panel blocker', async () => {
+  const f = await fixture({ namedSuiteFailure: true, verboseSuiteDiagnostic: true, blockersByRound: [0, 1, 0], maxRounds: 3 })
   f.world.suiteReport = async () => ({ testsPassed: false, suiteOutcome: 'deferred', suiteEvidence: '' })
   const outcome = await drive(f)
   expect(outcome, why(f, outcome)).toMatchObject({ kind: 'blocked', on: 'Review requires orchestrator arbitration: repeated finding' })
@@ -1145,8 +1168,8 @@ test('same-round cached nonzero host receipt replays red without running the sui
   expect(suites).toBe(1)
 }, 120_000)
 
-test('G070 permits a different host failure with fewer blockers and an eventual green suite', async () => {
-  const f = await fixture({ namedSuiteFailure: true, blockersByRound: [0, 1, 0], maxRounds: 3 })
+test('G070 permits a different host failure with large diagnostics, fewer blockers and an eventual green suite', async () => {
+  const f = await fixture({ namedSuiteFailure: true, verboseSuiteDiagnostic: true, blockersByRound: [0, 1, 0], maxRounds: 3 })
   f.world.suiteReport = async () => ({ testsPassed: false, suiteOutcome: 'deferred', suiteEvidence: '' })
   let suites = 0
   const runSuite = f.context.runSuite!
@@ -1186,9 +1209,9 @@ for (const changed of [false, true]) test(`G072 generic red with fewer blockers 
 }, 120_000)
 
 for (const format of ['bun', 'generic'] as const)
-for (const evidence of (format === 'bun' ? ['valid', 'empty', 'changed-failure', 'mixed-crash', 'panel-veto'] : ['valid', 'empty', 'changed-run']) as readonly string[])
+for (const evidence of (format === 'bun' ? ['valid', 'empty', 'changed-failure', 'mixed-crash', 'ansi-crash', 'large-file-header', 'oversized-file-header', 'oversized-log', 'panel-veto'] : ['valid', 'empty', 'changed-run']) as readonly string[])
 test(`${format} host red reaches targeted base comparison and preserves ${evidence}`, async () => {
-  const f = await fixture({ namedSuiteFailure: format === 'bun' ? true : 'generic', maxRounds: 2,
+  const f = await fixture({ namedSuiteFailure: format === 'bun' ? true : 'generic', verboseSuiteDiagnostic: format === 'bun', maxRounds: 2,
     ...(evidence === 'panel-veto' ? { commentRounds: [2] } : {}) })
   let suites = 0
   let comparisons = 0
@@ -1196,10 +1219,13 @@ test(`${format} host red reaches targeted base comparison and preserves ${eviden
   f.context.runSuite = async (...args) => {
     const result = await runSuite(...args)
     suites++
-    if (['changed-failure', 'mixed-crash'].includes(evidence) && suites === 2) {
+    if (['changed-failure', 'mixed-crash', 'ansi-crash', 'large-file-header', 'oversized-file-header', 'oversized-log'].includes(evidence) && suites === 2) {
       const log = join(f.context.stateRoot, f.row.id, 'suite-round-2.log')
       const text = await readFile(log, 'utf8')
-      await writeFile(log, evidence === 'mixed-crash' ? `${text}\nerror: Cannot find module './broken-by-diff'\n` : text.replaceAll('pre-existing red', 'new regression'))
+      await writeFile(log, evidence === 'mixed-crash' ? `${text}\nerror: Cannot find module './broken-by-diff'\n`
+        : evidence === 'ansi-crash' ? `${text}\n${'\x1b[31m'.repeat(4_000)}SyntaxError: invalid module\n`
+        : evidence.endsWith('file-header') ? text.replace(/^(\(fail\))/m, `tests/${'x'.repeat(evidence === 'large-file-header' ? 21_689 : 65_537)}.test.ts:\n$1`)
+        : evidence === 'oversized-log' ? `${text}\n${'x'.repeat(65_537)}\n` : text.replaceAll('pre-existing red', 'new regression'))
     }
     return result
   }
@@ -1424,7 +1450,7 @@ test.each(['valid', 'wrong-run'] as const)('attempt accounting retains actual he
   expect(result.kind === 'merged').toBe(codexReview === 'valid')
   const attempts = f.context.attempts.list(f.row.id).filter(row => row.provider === 'openai-codex')
   expect(attempts).toHaveLength(1)
-  expect(attempts[0]).toMatchObject({ review_seat: 'review_codex', phase: 'review_codex', requested_model: 'sol', placement: 'headless' })
+  expect(attempts[0]).toMatchObject({ review_seat: 'review_codex', phase: 'review_codex', requested_model: 'sol', resolved_model: 'gpt-6-sol', placement: 'headless' })
   const receipt = f.context.attempts.receipt(attempts[0]!)!
   expect(receipt).toMatchObject({ source: 'codex-cli-jsonl', input_tokens: null, output_tokens: 3, cost_usd: null })
   expect(attempts[0]!.outcome === 'completed').toBe(codexReview === 'valid')
@@ -1627,11 +1653,15 @@ async function codexOwnerWithClaude(identity: 'valid' | 'wrong-schema' = 'valid'
   return { ...f, calls, children }
 }
 
-test('Codex owner routes explicit Claude plan, review and synthesis headlessly and its native build merges', async () => {
+test.each([
+  ['astra', 'gpt-6-astra'], ['sol', 'gpt-6-sol'], ['terra', 'gpt-5.6-terra'], ['luna', 'gpt-6-luna'],
+] as const)('Codex owner forwards %s as %s to its native builder while Claude review stays headless', async (tier, model) => {
   const f = await codexOwnerWithClaude()
+  f.input.phase_models!.build = { model: tier }
   const outcome = await drive(f)
   expect(outcome.kind, why(f, outcome)).toBe('merged')
   expect(f.children.map(request => request.role)).toEqual(['build'])
+  expect(f.children[0]!.model_id).toBe(model)
   const calls = (await readFile(f.calls, 'utf8')).trim().split('\n').map(line => JSON.parse(line))
   expect(calls.map(call => call.request.role)).toEqual(['plan', 'review', 'review', 'synthesis'])
   for (const call of calls) {
@@ -1770,6 +1800,62 @@ test(`prepared host suite receipt survives reconstruction and handles ${changed}
   if (measured.kind !== 'known') throw Error('expected measured fixture')
   expect(await host.deps.publicationSuite(measured.value)).toMatchObject({ kind: 'known' })
   expect(suites).toBe(changed === 'none' ? 1 : 2)
+  expect(f.world.dispatches).toHaveLength(0)
+}, 120_000)
+
+test('workspace scratch churn permits host receipt reuse while generated content changes require fresh proof', async () => {
+  const f = await fixture({ bunWorkspace: true })
+  await f.prepare()
+  const worktree = f.store.get(f.row.id)!.worktree!
+  const nested = join(worktree, 'app', 'tools')
+  const manifestPath = join(worktree, 'package.json')
+  const manifest = JSON.parse(await readFile(manifestPath, 'utf8'))
+  await writeFile(manifestPath, JSON.stringify({ ...manifest, dependencies: { 'fixture-app': 'workspace:*' } }))
+  await mkdir(nested)
+  await writeFile(join(nested, '.gitignore'), 'scratch-*\ngenerated.js\n')
+  expect((await spawnCapture(['git', 'add', '.'], worktree)).ok).toBe(true)
+  expect((await spawnCapture(['git', 'commit', '-m', 'test: workspace scratch fixture'], worktree)).ok).toBe(true)
+  const generated = join(nested, 'generated.js')
+  await writeFile(generated, 'module.exports = 1')
+  const rewriteGenerated = async (value: number) => {
+    const original = await stat(generated)
+    await writeFile(generated, `module.exports = ${value}`)
+    await utimes(generated, original.atime, original.mtime)
+  }
+  let suites = 0, changeDuringSuite = false
+  const original = f.context.runSuite!
+  f.context.runSuite = async (...args) => {
+    suites++
+    const scratch = await mkdtemp(join(nested, 'scratch-'))
+    await writeFile(join(scratch, 'temporary'), 'temporary test input')
+    const result = await original(...args)
+    await rm(scratch, { recursive: true })
+    if (changeDuringSuite) await rewriteGenerated(3)
+    return result
+  }
+  const observe = async () => {
+    const host = await createProjectBuildHost(await f.prepare())
+    const measured = await host.deps.measure()
+    if (measured.kind !== 'known') throw Error('expected measured workspace fixture')
+    return host.deps.publicationSuite(measured.value)
+  }
+  expect(await observe()).toMatchObject({ kind: 'known', findings: [] })
+  expect(suites).toBe(1)
+  // A reconstructed host must reuse the actual receipt despite scratch churn.
+  expect(await observe()).toMatchObject({ kind: 'known', findings: [] })
+  expect(suites).toBe(1)
+  await rewriteGenerated(2)
+  expect(await observe()).toMatchObject({ kind: 'known', findings: [] })
+  expect(suites).toBe(2)
+  await rewriteGenerated(1)
+  changeDuringSuite = true
+  expect(await observe()).toMatchObject({ kind: 'unknown', detail: 'Suite inputs changed during host observation' })
+  expect(suites).toBe(3)
+  changeDuringSuite = false
+  expect(await observe()).toMatchObject({ kind: 'known', findings: [] })
+  expect(suites).toBe(4)
+  expect(await observe()).toMatchObject({ kind: 'known', findings: [] })
+  expect(suites).toBe(4)
   expect(f.world.dispatches).toHaveLength(0)
 }, 120_000)
 
@@ -2136,6 +2222,43 @@ test('Bun workspace unchanged recovery saves an install and still verifies befor
   const outcome = await drive(f)
   expect(outcome.kind, why(f, outcome)).toBe('merged')
   expect(calls).toEqual(['install', 'verify', 'verify'])
+}, 120_000)
+
+test('package-local workspace resolution retains one host suite through publication', async () => {
+  const f = await fixture({ bunWorkspace: true, bunWorkspaceSibling: true })
+  // A wrong importer can bypass the correct package-local link and find this
+  // stale ancestor. Actual project execution must keep consuming its local code.
+  const ancestor = join(f.repo, 'node_modules', '@fixture', 'sdk')
+  await mkdir(ancestor, { recursive: true })
+  await writeFile(join(ancestor, 'package.json'), JSON.stringify({ name: '@fixture/sdk', main: 'index.js' }))
+  await writeFile(join(ancestor, 'index.js'), 'exports.message = "stale ancestor"\n')
+  const originalInstall = f.context.runInstall!
+  const originalSuite = f.context.runSuite!
+  let installs = 0, suites = 0
+  f.context.runInstall = Object.assign(async (...args: Parameters<typeof originalInstall>) => {
+    if (!args[0][2]!.includes('verify-workspace-deps.ts')) installs++
+    return originalInstall(...args)
+  }, { writesDiffOutput: true as const })
+  f.context.runSuite = async (...args) => { suites++; return originalSuite(...args) }
+  // Restricted ancestors allow known-path traversal but deny directory listing.
+  // Keep writes for host state creation, and prove this is not a root bypass.
+  await chmod(f.dir, 0o300)
+  cleanups.push(() => chmod(f.dir, 0o700))
+  await expect(readdir(f.dir)).rejects.toMatchObject({ code: 'EACCES' })
+  await f.prepare()
+  const worktree = f.store.get(f.row.id)!.worktree!
+  const receipt = join(f.context.stateRoot, f.row.id, 'dependencies-receipt.json')
+  const consumed = await spawnCapture(['bun', 'app/check.ts'], worktree)
+  expect(consumed.ok, consumed.stderr).toBe(true)
+  expect(consumed.stdout).toBe('dependency consumed')
+  expect(JSON.parse(await readFile(receipt, 'utf8')).resolution).toMatch(/^[a-f0-9]{64}$/)
+  f.input.run = f.store.get(f.row.id)!
+  const outcome = await drive(f)
+  expect(outcome.kind, why(f, outcome)).toBe('merged')
+  expect(installs).toBe(1)
+  expect(suites).toBe(1)
+  const receipts = f.store.stageEvents(f.row.id).filter(event => event.stage === 'build-suite-receipt' && JSON.parse(event.meta!).receipt)
+  expect(receipts).toHaveLength(1)
 }, 120_000)
 
 for (const changed of ['root manifest', 'workspace manifest', 'lockfile', 'config', 'branch verifier',
@@ -3152,6 +3275,25 @@ for (const stop of ['suite', 'review', 'ci'] as const) test(`owned draft is neve
   expect(f.github.prs.every(pr => pr.state === 'OPEN' && pr.isDraft)).toBe(true)
 }, 300_000)
 
+test.each(['repairs', 'exhausts'] as const)('host verdict repair %s through the production decoder and panel', async verdictRepair => {
+  const f = await fixture({ verdictRepair, blockersByRound: [0, 1, 0] })
+  const outcome = await drive(f)
+  expect(f.world.repairPaths).toEqual(['$.findings[0].rule'])
+  const seatCalls = f.world.dispatches.filter(row => row.schema === 'verdict' && row.role === 'review')
+  expect(seatCalls.slice(0, 2).map(row => row.step_id.split(':').at(-1))).toEqual(['0', '1'])
+  expect(seatCalls[0]!.resultPath).not.toBe(seatCalls[1]!.resultPath)
+  if (verdictRepair === 'repairs') {
+    expect(outcome.kind, why(f, outcome)).toBe('merged')
+    expect(f.world.dispatches.some(row => row.role === 'fix')).toBe(true)
+  } else {
+    expect(outcome, why(f, outcome)).toMatchObject({ kind: 'blocked', phase: 'review',
+      on: expect.stringContaining('repair exhausted: Review verdict missing-field at $.findings[0].rule') })
+    expect(seatCalls).toHaveLength(2)
+    expect(f.world.dispatches.some(row => row.role === 'synthesis' || row.role === 'fix')).toBe(false)
+    expect(f.github.prs[0]!.state).toBe('OPEN')
+  }
+}, 300_000)
+
 test('a synthesis worker guided by the exact verdict schema reaches MERGED unattended', async () => {
   const f = await fixture({ synthesisShape: 'schema-guided' })
   const outcome = await drive(f)
@@ -3223,8 +3365,13 @@ test('fresh retry refuses an open PR whose durable publication provenance names 
   expect(f.store.get(f.row.id)).toMatchObject({ pr: null, published_pr: 2 })
 }, 300_000)
 
-test('configured Codex review uses the production read-only headless runner and its exact verdict merges', async () => {
+test.each([
+  [undefined, 'gpt-6-astra'], ['astra', 'gpt-6-astra'], ['sol', 'gpt-6-sol'],
+  ['terra', 'gpt-5.6-terra'], ['luna', 'gpt-6-luna'],
+] as const)('configured Codex review forwards tier %s as %s through the read-only runner and merges', async (tier, model) => {
   const f = await fixture({ codexReview: 'valid' })
+  if (tier === undefined) delete f.input.phase_models!.review_codex
+  else f.input.phase_models!.review_codex = { model: tier }
   const outcome = await drive(f)
   expect(outcome.kind, why(f, outcome)).toBe('merged')
 
@@ -3241,14 +3388,14 @@ test('configured Codex review uses the production read-only headless runner and 
   }
   const run = f.store.get(f.row.id)!
   expect(call.argv).toEqual([
-    'exec', '--json', '--ignore-user-config', '--ignore-rules', '-m', 'gpt-5.6-sol',
+    'exec', '--json', '--ignore-user-config', '--ignore-rules', '-m', model,
     '-c', 'sandbox_mode="read-only"', '--output-schema', expect.any(String),
     '-o', expect.any(String), '-',
   ])
   expect(call.argv.join(' ')).not.toMatch(/danger-full-access|workspace-write|approve-for-me|auto_review|approval_policy|approvals_reviewer|model_reasoning_effort/)
   expect(run.worktree).not.toBeNull()
   expect(call.cwd).toBe(run.worktree!)
-  expect(call.request).toMatchObject({ run_id: f.row.id, role: 'review', model_id: 'gpt-5.6-sol',
+  expect(call.request).toMatchObject({ run_id: f.row.id, role: 'review', model_id: model,
     writable: false, network: true, tools: 'read-only', needs_approval_decision: false,
     result: { schema: 'verdict' } })
   expect(call.brief).toMatchObject({ seat: 'review_codex', round: 1,
@@ -4453,17 +4600,19 @@ test(`an orchestrated ${mergeMode} retry survives launch falsification: ${scenar
   expect(next.run.max_task_iterations).toBe(dispatched.run.max_task_iterations)
 }, 300_000)
 
-for (const { mergeMode, fixed, moved, preparationFailure } of [
+for (const { mergeMode, fixed, moved, preparationFailure, legacyTerminal = false } of [
   { mergeMode: 'pr', fixed: false, moved: false, preparationFailure: false },
   { mergeMode: 'local', fixed: false, moved: false, preparationFailure: false },
   { mergeMode: 'pr', fixed: true, moved: false, preparationFailure: false },
   { mergeMode: 'pr', fixed: false, moved: true, preparationFailure: false },
   { mergeMode: 'pr', fixed: true, moved: false, preparationFailure: true },
   { mergeMode: 'local', fixed: false, moved: false, preparationFailure: true },
+  { mergeMode: 'pr', fixed: false, moved: false, preparationFailure: false, legacyTerminal: true },
+  { mergeMode: 'local', fixed: false, moved: false, preparationFailure: false, legacyTerminal: true },
 ] as const)
-test(`a cross-run ${mergeMode} retry ${moved ? 'refuses remote movement after dispatch' : `reviews the prior ${fixed ? 'fix' : 'build'} and reaches merged without rebuilding`}${preparationFailure ? ' after a preparation failure' : ''}`, async () => {
+test(`a cross-run ${mergeMode} retry ${moved ? 'refuses remote movement after dispatch' : `reviews the prior ${fixed ? 'fix' : 'build'} and reaches merged without rebuilding`}${preparationFailure ? ' after a preparation failure' : ''}${legacyTerminal ? ' from a migrated terminal task checkpoint' : ''}`, async () => {
   const task = 'Record a note in NOTES.md and verify the resulting change with the complete regression suite'
-  const f = await fixture({ dispatchTask: task, mergeMode, taskSequence: fixed,
+  const f = await fixture({ dispatchTask: task, mergeMode, taskSequence: fixed || legacyTerminal,
     ...(fixed ? { blockersByRound: [0, 1, 0] } : {}) })
   const firstHost = await createProjectBuildHost(await f.prepare())
   if (fixed) {
@@ -4479,6 +4628,13 @@ test(`a cross-run ${mergeMode} retry ${moved ? 'refuses remote movement after di
     .toEqual(fixed ? ['plan', 'build', 'fix'] : ['plan', 'build'])
   const checkpoint = lastCheckpoint(f)
   expect(checkpoint).toMatchObject({ stage: fixed ? 'fixed' : 'built', round: fixed ? 2 : 1 })
+  if (legacyTerminal) {
+    expect(checkpoint.remainingTasks).toBe(0)
+    // A migrated pre-selection run has its authenticated terminal checkpoint,
+    // but no strategy_plan: that column did not exist when the builder finished.
+    f.db.raw().query("UPDATE code_trident_runs SET strategy_source = 'legacy', strategy_plan = NULL WHERE id = ?")
+      .run(f.row.id)
+  }
   const prior = f.store.get(f.row.id)!
   expect(prior.worktree).not.toBeNull()
   // Exercise the actual host cleanup: a pushed PR branch is disposable locally;
@@ -4536,14 +4692,14 @@ test(`a cross-run ${mergeMode} retry ${moved ? 'refuses remote movement after di
   const outcome = await host.run({ mode: 'implementation', start: 'resume' }, new AbortController().signal)
   expect(outcome.kind, why(f, outcome)).toBe('merged')
   expect(f.world.dispatches.some(dispatch => dispatch.role === 'plan' || dispatch.role === 'build' || dispatch.role === 'fix')).toBe(false)
-  expect(dispatchStep(standaloneReview(f.world))).toBe(`${dispatched.run.id}:${fixed ? 'task:0:' : ''}review:${fixed ? 2 : 1}`)
+  expect(dispatchStep(standaloneReview(f.world))).toBe(`${dispatched.run.id}:${fixed || legacyTerminal ? 'task:0:' : ''}review:${fixed ? 2 : 1}`)
   expect(standaloneReview(f.world).measuredHead).toBe(String(checkpoint.head))
   expect(f.world.dispatches.some(dispatch => dispatch.step_id.startsWith(`${prior.id}:`))).toBe(false)
   const saved = f.store.stageEvents(dispatched.run.id).filter(event => event.stage === 'build-mode-state')
   expect(JSON.parse(saved[0]!.meta!).checkpoint).toEqual(checkpoint)
   expect(JSON.parse(saved[0]!.meta!).runId).toBe(dispatched.run.id)
   const merged = await spawnCapture(['git', '-C', mergeMode === 'pr' ? f.origin : f.repo, 'show', 'refs/heads/main:NOTES.md'], f.repo)
-  expect(merged.stdout).toBe(fixed ? `seed\n${prior.id}:task:0:build:0\n${prior.id}:task:0:fix:1` : `seed\n${prior.id}:build:0`)
+  expect(merged.stdout).toBe(fixed ? `seed\n${prior.id}:task:0:build:0\n${prior.id}:task:0:fix:1` : `seed\n${prior.id}:${legacyTerminal ? 'task:0:' : ''}build:0`)
   if (mergeMode === 'local') expect(f.commands.some(argv => argv[0] === 'gh')).toBe(false)
 }, 300_000)
 
@@ -5008,4 +5164,106 @@ test(`terminal task-sequence ${mergeMode} publication retry re-proves the built 
   const merged = await spawnCapture(['git', '-C', mergeMode === 'pr' ? f.origin : f.repo, 'show', 'refs/heads/main:NOTES.md'], f.repo)
   expect(merged.stdout).toBe(`seed\n${prior.id}:task:0:build:0\n${prior.id}:task:1:build:0${reviewFix ? `\n${dispatched.run.id}:task:1:fix:1` : ''}`)
   if (mergeMode === 'local') expect(f.commands.some(argv => argv[0] === 'gh')).toBe(false)
+}, 300_000)
+
+// --- Cross-provider bounded workers placed in their project Herdr workspace. ---
+// The production composition path (`prepareProjectBuild`) with a real strict
+// project-workspace host over a scripted Herdr server: tabs are asserted on the
+// ACTUAL RPC requests, and the build's outcome is the same as without a terminal.
+
+/** Every placement receipt written anywhere under the run's build state. */
+async function placementReceipts(root: string): Promise<Array<{ state: string; pane?: string; reason?: string }>> {
+  const found: Array<{ state: string; pane?: string; reason?: string }> = []
+  const walk = async (directory: string): Promise<void> => {
+    for (const entry of await readdir(directory, { withFileTypes: true })) {
+      const path = join(directory, entry.name)
+      if (entry.isDirectory()) await walk(path)
+      else if (entry.name.endsWith('.placement.json')) found.push(JSON.parse(await readFile(path, 'utf8')))
+    }
+  }
+  await walk(root)
+  return found
+}
+
+async function placedTerminal(f: Awaited<ReturnType<typeof fixture>>, scope: { projectId: string | null; projectLabel: string }) {
+  const directory = await mkdtemp(join(tmpdir(), 'project-build-terminal-'))
+  cleanups.push(() => rm(directory, { recursive: true, force: true }))
+  const rig = workerPlacementRig(directory, scope)
+  f.context.workerTerminal = { host: rig.host, scope: rig.scope }
+  return rig
+}
+
+test('Codex owner: every cross-provider Claude worker gets a labelled tab in its project workspace; the build still merges', async () => {
+  const f = await codexOwnerWithClaude()
+  const rig = await placedTerminal(f, { projectId: 'e2e-project', projectLabel: 'E2E Project' })
+  const outcome = await drive(f)
+  expect(outcome.kind, why(f, outcome)).toBe('merged')
+  // One provider process per dispatch, exactly as without a terminal.
+  const calls = (await readFile(f.calls, 'utf8')).trim().split('\n').map(line => JSON.parse(line))
+  expect(calls.map(call => call.request.role)).toEqual(['plan', 'review', 'review', 'synthesis'])
+  // The native same-provider (Codex) build is not placed.
+  expect(f.children.map(request => request.role)).toEqual(['build'])
+  const slug = f.row.slug
+  expect(slug.length).toBeLessThanOrEqual(48)
+  expect(rig.server.workerLayouts().map(call => call.params['tab_label']))
+    .toEqual([`Plan · ${slug}`, `Review · ${slug}`, `Review · ${slug}`, `Synthesis · ${slug}`])
+  expect(rig.server.callsTo('workspace.create').map(call => call.params['label'])).toEqual(['E2E Project'])
+  const [workspace] = [...rig.server.workspaces.keys()]
+  for (const call of rig.server.callsTo('layout.apply')) expect(call.params['workspace_id']).toBe(workspace)
+  expect(rig.server.callsTo('pane.read')).toHaveLength(0)
+  // View cleanup is detached from every worker's result, so it may still be landing
+  // when the build merges; each pane is closed through the verified-identity path.
+  const receipts = await until(async () => {
+    const found = await placementReceipts(f.context.stateRoot)
+    return found.length === 4 && found.every(receipt => receipt.state === 'closed') ? found : undefined
+  })
+  expect(receipts).toHaveLength(4)
+  for (const receipt of receipts) expect(rig.server.closed).toContain(receipt.pane!)
+}, 300_000)
+
+test('General-scoped Codex review seat is placed in Neutron General and its verdict merges', async () => {
+  const f = await fixture({ codexReview: 'valid' })
+  const rig = await placedTerminal(f, { projectId: null, projectLabel: 'general' })
+  const outcome = await drive(f)
+  expect(outcome.kind, why(f, outcome)).toBe('merged')
+  expect((await codexReviewEvidence(f)).calls).toHaveLength(1)
+  expect(rig.server.callsTo('workspace.create').map(call => call.params['label'])).toEqual(['Neutron General'])
+  expect(rig.server.workerLayouts().map(call => call.params['tab_label'])).toEqual([`Review · ${f.row.slug}`])
+  const rows = Object.values(JSON.parse(await readFile(rig.journal, 'utf8'))) as Array<{ scope: unknown }>
+  expect(rows.map(row => row.scope)).toEqual([['instance', null]])
+}, 300_000)
+
+for (const fault of ['typed', 'ambiguous'] as const) {
+  test(`a refused placement (${fault} workspace.create failure) never blocks or alters the build: each receipt names its real cause`, async () => {
+    const f = await codexOwnerWithClaude()
+    const rig = await placedTerminal(f, { projectId: 'e2e-project', projectLabel: 'E2E Project' })
+    rig.server.failMethod('workspace.create', fault === 'typed'
+      ? new HerdrError('workspace_create_refused', 'server refused workspace.create')
+      : new Error('fake-herdr: workspace.create transport lost'))
+    const outcome = await drive(f)
+    expect(outcome.kind, why(f, outcome)).toBe('merged')
+    expect(rig.server.callsTo('layout.apply')).toHaveLength(0)
+    const receipts = await placementReceipts(f.context.stateRoot)
+    expect(receipts).toHaveLength(4)
+    for (const receipt of receipts) expect(receipt.state).toBe('unplaced')
+    const reasons = receipts.map(receipt => receipt.reason!).sort()
+    // A typed error alone does not prove pre-allocation rejection. Both failures
+    // retain creation authority; subsequent workers disclose the pending claim.
+    expect(rig.server.callsTo('workspace.create')).toHaveLength(1)
+    expect(reasons).toEqual([
+      fault === 'typed' ? 'placement-refused: server refused workspace.create'
+        : 'placement-refused: fake-herdr: workspace.create transport lost',
+      ...Array(3).fill('placement-refused: project-workspaces: existing ownership is invalid or pending; reconcile before retry'),
+    ].sort())
+  }, 300_000)
+}
+
+test('no terminal host: cross-provider workers run unplaced with the reason on record', async () => {
+  const f = await codexOwnerWithClaude()
+  expect(f.context.workerTerminal).toBeUndefined()
+  const outcome = await drive(f)
+  expect(outcome.kind, why(f, outcome)).toBe('merged')
+  const receipts = await placementReceipts(f.context.stateRoot)
+  expect(receipts).toHaveLength(4)
+  for (const receipt of receipts) expect(receipt).toEqual({ state: 'unplaced', reason: 'herdr-unconfigured' })
 }, 300_000)

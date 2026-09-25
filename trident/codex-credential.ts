@@ -551,6 +551,30 @@ export class CodexCredentialService {
     return { codexHome: credential.home, credentialIdentity: credential.credentialIdentity }
   }
 
+  /** General uses the selected global seat in place. Owner admission never
+   * rotates reviewer seats or copies a refresh-token bundle to another home. */
+  resolveGeneralOwnerCredential(owner: OwnerHandle): { codexHome: string; credentialIdentity: string } {
+    const slots = this.rotation.listSlots(owner)
+    const selected = this.rotation.getActiveSlot(owner) ?? DEFAULT_SLOT
+    const slot = slots.find(slot => slot.slot === selected)
+    if (slot?.cooling_reason === 'unauthorized') throw new CodexOwnerCredentialError('Connect a global Codex subscription to use General chat')
+    const stored = this.store.resolve(owner, undefined, codexSlotService(selected))
+    const codexHome = this.slotHome(selected)
+    const disk = readMaterializedAuth(codexHome)
+    const account = stored && readAccountId(stored.plaintext)
+    if (!stored || stored.scope !== 'global' || !account || !disk
+      || !validateCodexSubscriptionAuth(stored.plaintext, this.now).ok
+      || !validateCodexSubscriptionAuth(disk, this.now).ok || readAccountId(disk) !== account) {
+      throw new CodexOwnerCredentialError('General Codex requires its configured global subscription in place')
+    }
+    const status = deriveCodexStatus(disk, { materialized: true, now: this.now,
+      probe: this.cachedVerdict(owner, selected, disk) })
+    if (status.status === 'revoked' || status.status === 'not_connected') {
+      throw new CodexOwnerCredentialError('General Codex subscription is unavailable')
+    }
+    return { codexHome, credentialIdentity: createHash('sha256').update(JSON.stringify(['chatgpt-account', account])).digest('hex') }
+  }
+
   /**
    * ASK THE SERVER whether each connected seat's token still works, and remember
    * the answer for {@link SEAT_LIVENESS_TTL_MS}.

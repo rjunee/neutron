@@ -11,6 +11,7 @@ import { observeClaudeChildUsage } from '@neutronai/runtime/workers/claude-child
 import { sessionJsonlPath } from '@neutronai/runtime/adapters/claude-code/persistent/jsonl-resumability.ts'
 import { createCodexHeadlessRunner } from '@neutronai/runtime/workers/codex-headless.ts'
 import { createClaudeHeadlessRunner } from '@neutronai/runtime/workers/claude-headless.ts'
+import { createWorkerPlacement, type WorkerPlacementHost, type WorkerPlacementScope } from '@neutronai/runtime/workers/worker-placement.ts'
 import { reconcileStoppedTrailerReservations } from '@neutronai/runtime/workers/trailer-slot.ts'
 import { PROJECT_REPL_TOOL_DEFS } from '@neutronai/gateway/wiring/build-live-agent-turn.ts'
 import type { CodexOwnerBindings } from './codex-owner-binding.ts'
@@ -128,6 +129,12 @@ export interface ProjectBuildContext {
   spawnProjectSession: (projectId: string) => Promise<void>
   /** The same host-owned resolver consumed by owner chat. Never creates a build session. */
   codexOwnerBindings?: Pick<CodexOwnerBindings, 'actingTurn' | 'guardBuildRunner'> & Partial<Pick<CodexOwnerBindings, 'prepareReview'>>
+  /** Where this dispatch's CROSS-PROVIDER bounded workers (Claude headless, the Codex
+   * build wrapper, the Codex review seat) get a visible task tab: the shared strict
+   * project-workspace host (null when this process is not on Herdr) and the run's
+   * own scope (`projectId` null for General). Absent or null host → every worker runs
+   * unplaced and records why. The tab is a view; evidence never comes from it. */
+  workerTerminal?: { host: WorkerPlacementHost | null; scope: WorkerPlacementScope }
 }
 
 /**
@@ -374,6 +381,12 @@ export async function prepareProjectBuild(input: InnerLoopInput, context: Projec
     if (!context.codexOwnerBindings?.prepareReview) throw new Error('Codex owner lacks attested read-only child execution with isolated result output')
     await context.codexOwnerBindings.prepareReview(context.projectId)
   }
+  // Cross-provider workers only: the same-provider native child is untouched. Without
+  // a Herdr host every worker runs unplaced and its receipt says so — never an
+  // inherited or ambient workspace.
+  const workerPlacement = createWorkerPlacement(context.workerTerminal?.host
+    ? { host: context.workerTerminal.host, scope: context.workerTerminal.scope }
+    : { host: null, unavailable: 'herdr-unconfigured' })
   const substrate = await createProjectRunners({
     conversation: { project_id: context.projectId, topic_id: topic, provider: context.provider,
       // THE SURFACE MUST MATCH THE SESSION'S, OR THE REUSE GUARD RESPAWNS IT.
@@ -478,8 +491,9 @@ export async function prepareProjectBuild(input: InnerLoopInput, context: Projec
       projectId: context.projectId, projectDir: context.projectDir, stateDir: state, runId: run.id, trailer,
     }) } : {}),
     headless: { anthropic: createClaudeHeadlessRunner({ env: context.env, cwd: run.worktree,
-      state_dir: state, schemas: trailer.schemas }),
-      'openai-codex': createCodexHeadlessRunner({ env: codexEnv, reviewBriefIntegrity: briefIntegrity, reviewContracts: new Map([
+      state_dir: state, schemas: trailer.schemas, placement: workerPlacement, taskName: run.slug }),
+      'openai-codex': createCodexHeadlessRunner({ env: codexEnv, placement: workerPlacement, taskName: run.slug,
+        reviewBriefIntegrity: briefIntegrity, reviewContracts: new Map([
       ['verdict', { jsonSchema: VERDICT_SCHEMA, validate: (value: unknown) => validateTrailer('verdict', value).ok }],
       ['project-review', { jsonSchema: { ...PROJECT_SNAPSHOT_SCHEMA,
         properties: { ...PROJECT_SNAPSHOT_SCHEMA.properties, payload: VERDICT_SCHEMA },

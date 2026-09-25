@@ -180,7 +180,12 @@ describe('(b) genuine failures never auto-retry', () => {
     // MUTANT KILLED: widening `classifyInnerFailure` to treat every no-APPROVE
     // result as infrastructure (dropping either the infra-only conjunct or the
     // closed-word check) makes THIS test retry and fail.
-    const h = harness()
+    const calls: Array<{ attempt: number; cause: string }> = []
+    const h = harness({
+      on_infra_retry: async (_run, attempt, cause) => {
+        calls.push({ attempt, cause })
+      },
+    })
     const run = await createRun('genuine-request-changes')
     await h.loop.runOnce()
     await store.update(run.id, { inner_checkpoint_findings: '[{"severity":"blocker"}]' })
@@ -199,6 +204,8 @@ describe('(b) genuine failures never auto-retry', () => {
     expect(after.phase).toBe('failed')
     expect(after.inner_verdict).toBe('REQUEST_CHANGES')
     expect(after.infra_retries).toBe(0)
+    // surface-infra-retries-to-the-owner, criterion 2 negative: zero retries, zero notifications.
+    expect(calls).toEqual([])
     expect(h.inputs).toHaveLength(1)
   })
 })

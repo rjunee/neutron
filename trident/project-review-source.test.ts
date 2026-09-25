@@ -4,7 +4,7 @@ import { tmpdir } from 'node:os'
 import { join, dirname } from 'node:path'
 import type { BoundedWorkOutcome, BoundedWorkRequest, WorkerRunner } from '@neutronai/runtime/bounded-work.ts'
 import { decodeProjectTrailer, type ProjectTrailerOutcome } from '@neutronai/runtime/workers/project-runners.ts'
-import { createProjectReviewSource, type ProjectReviewSourceOptions } from './project-review-source.ts'
+import { createProjectReviewSource, reconcileProjectReviewSource, type ProjectReviewSourceOptions } from './project-review-source.ts'
 import { decideReviewPanel, observeReviewPanel, reviewPanel } from './gates/review-panel.ts'
 import { validateTrailer, VERDICT_SCHEMA } from './gates/result-contract.ts'
 import { AttemptAccounting } from './attempt-accounting.ts'
@@ -59,6 +59,183 @@ async function durableFixture() {
   f.options.credentialIdentity = async provider => `selected-test-account:${provider}`
   return f
 }
+
+test('evidence-only reconciliation reuses completed seats and synthesis without dispatch', async () => {
+  const f = await durableFixture()
+  expect(await f.check()).toEqual({ kind: 'approve' })
+  const original = structuredClone(f.calls)
+  expect(await f.check(reconcileProjectReviewSource(f.options))).toEqual({ kind: 'approve' })
+  expect(f.calls).toEqual(original)
+  expect(f.recoveries).toEqual([])
+})
+
+test('evidence-only reconciliation refuses missing seats synthesis and retry without purchasing work', async () => {
+  for (const missing of ['seat', 'synthesis', 'retry'] as const) {
+    const f = await durableFixture()
+    const source = f.source()
+    if (missing === 'retry') f.answer(async () => ({ kind: 'failed', class: 'infra', detail: 'deferred' }))
+    if (missing !== 'seat') await source.readSeat(source.seats[1]!, snapshot, 1)
+    const count = f.calls.length
+    const attempts = f.options.accounting.ledger.list(f.options.runId).length
+    const recovery = reconcileProjectReviewSource(f.options)
+    if (missing === 'seat') await expect(recovery.readSeat(recovery.seats[1]!, snapshot, 1)).rejects.toThrow('original receipt is unavailable')
+    else {
+      await recovery.readSeat(recovery.seats[1]!, snapshot, 1)
+      await expect(missing === 'synthesis' ? recovery.readSynthesis(snapshot, 1)
+        : recovery.retrySeat(recovery.seats[1]!, snapshot, 1)).rejects.toThrow('original receipt is unavailable')
+    }
+    expect(f.calls).toHaveLength(count)
+    expect(f.options.accounting.ledger.list(f.options.runId)).toHaveLength(attempts)
+    expect(f.recoveries).toEqual([])
+  }
+})
+
+test('evidence-only reconciliation recovers the original pending request and retains uncertainty', async () => {
+  for (const complete of [false, true]) {
+    const f = await durableFixture()
+    f.answer(async () => ({ kind: 'unknown', detail: 'lost acknowledgement' }))
+    const source = f.source()
+    await expect(source.readSeat(source.seats[1]!, snapshot, 1)).rejects.toThrow()
+    const original = structuredClone(f.calls[0]!)
+    f.recover(async () => complete ? completed() : { kind: 'unknown', detail: 'still live or unreadable' })
+    const recovery = reconcileProjectReviewSource(f.options)
+    const result = recovery.readSeat(recovery.seats[1]!, snapshot, 1)
+    if (complete) expect(await result).toMatchObject({ status: 'completed', runId: original.run_id })
+    else await expect(result).rejects.toThrow()
+    expect(f.calls).toEqual([original])
+    expect(f.recoveries).toEqual([original])
+  }
+})
+
+test('evidence-only reconciliation rejects changed identity without dispatch', async () => {
+  for (const changed of ['task', 'head', 'model', 'credential', 'policy', 'run', 'cwd'] as const) {
+    const f = await durableFixture()
+    expect(await f.check()).toEqual({ kind: 'approve' })
+    const count = f.calls.length
+    let measured = snapshot
+    if (changed === 'task') f.options.taskInput = () => 'changed task'
+    if (changed === 'head') measured = { ...snapshot, head: 'b'.repeat(40) }
+    if (changed === 'model') f.options.phaseModels = { ...f.options.phaseModels, review_adversarial: { model: 'astra' } }
+    if (changed === 'credential') f.options.credentialIdentity = async () => 'changed account'
+    if (changed === 'policy') f.options.wallMs += 1
+    if (changed === 'run') f.options.runId = 'other-run'
+    if (changed === 'cwd') f.options.cwd = join(f.options.cwd, 'other')
+    const recovery = reconcileProjectReviewSource(f.options)
+    await expect(recovery.readSeat(recovery.seats[1]!, measured, 1)).rejects.toThrow('original receipt is unavailable')
+    expect(f.calls).toHaveLength(count)
+    expect(f.recoveries).toEqual([])
+  }
+})
+
+const repairVerdict = { verdict: 'REQUEST_CHANGES', findings: [{ severity: 'major', title: 'Measured defect',
+  file: 'src/example.ts', line: 4, symbol: 'example', rule: 'Preserve the measured invariant', evidence: 'Observed counterexample' }] }
+test('evidence-only reconciliation preserves a completed rejection', async () => {
+  const f = await durableFixture()
+  f.answer(async () => completed(repairVerdict))
+  expect(await f.check()).toMatchObject({ kind: 'fix' })
+  const original = structuredClone(f.calls)
+  expect(await f.check(reconcileProjectReviewSource(f.options))).toMatchObject({ kind: 'fix' })
+  expect(f.calls).toEqual(original)
+})
+
+const invalidVerdict = () => {
+  const result = structuredClone(repairVerdict)
+  delete (result.findings[0] as Partial<typeof result.findings[0]>).rule
+  return result
+}
+const rejectedVerdict = (request: BoundedWorkRequest): BoundedWorkOutcome => decodeProjectTrailer(JSON.stringify({
+  run_id: request.run_id, step_id: request.step_id, schema: 'verdict', kind: 'completed', result: invalidVerdict(),
+}), request, { schemas: new Map([['verdict', result => validateTrailer('verdict', result).ok]]), metadata: () => undefined }) as BoundedWorkOutcome
+
+test('verdict repair carries the exact host path once and preserves a repaired rejection across restart', async () => {
+  const f = await durableFixture()
+  f.answer(async request => {
+    if (request.role === 'synthesis') return completed()
+    const brief = JSON.parse(await readFile(request.brief.path, 'utf8'))
+    if (request.step_id.endsWith(':0')) return rejectedVerdict(request)
+    expect(brief.repair).toMatchObject({ reason: 'missing-field', path: '$.findings[0].rule', result: invalidVerdict() })
+    expect(brief.repair.instruction).toContain('do not invent or default')
+    return completed(repairVerdict)
+  })
+  expect(await f.check()).toMatchObject({ kind: 'fix', blockingCount: 1 })
+  expect(f.calls.map(row => row.step_id.split(':').at(-1))).toEqual(['0', '1', '0'])
+  const first = JSON.parse(await readFile(join(dirname(f.calls[0]!.result.path), 'receipt.json'), 'utf8'))
+  expect(first).toMatchObject({ state: 'settled', observation: { status: 'deferred' } })
+  expect(await f.check()).toMatchObject({ kind: 'fix', blockingCount: 1 })
+  expect(f.calls).toHaveLength(3)
+})
+
+test('verdict repair exhaustion blocks without synthesis or a third purchase after restart', async () => {
+  const f = await durableFixture(); f.answer(async request => rejectedVerdict(request))
+  for (let i = 0; i < 2; i++) {
+    expect(await f.check()).toMatchObject({ kind: 'blocked', on: expect.stringContaining('infra-only: Review seat review_adversarial repair exhausted: Review verdict missing-field at $.findings[0].rule') })
+    expect(f.calls).toHaveLength(2)
+  }
+  const source = f.source()
+  await source.readSeat(source.seats[1]!, snapshot, 1)
+  await expect(source.retrySeat(source.seats[1]!, snapshot, 1)).rejects.toThrow('retry already consumed')
+  expect(f.calls.every(row => row.role === 'review')).toBe(true)
+})
+
+test('verdict repair does not reinterpret uncertain pending recovery as a fresh attempt', async () => {
+  const f = await durableFixture()
+  f.answer(async () => ({ kind: 'unknown', detail: 'timeout without observed result' }))
+  expect(await f.check()).toMatchObject({ kind: 'blocked' })
+  f.recover(async request => rejectedVerdict(request))
+  expect(await f.check()).toMatchObject({ kind: 'blocked' })
+  expect(f.calls).toHaveLength(1)
+  expect(f.recoveries).toHaveLength(1)
+  expect(JSON.parse(await readFile(join(dirname(f.calls[0]!.result.path), 'receipt.json'), 'utf8')).state).toBe('pending')
+})
+
+test('verdict repair never infers retryability from an invalid file beside an unknown dispatch', async () => {
+  const f = await durableFixture()
+  f.answer(async request => {
+    await writeFile(request.result.path, JSON.stringify({ schema: 'verdict', run_id: request.run_id,
+      step_id: request.step_id, kind: 'completed', result: invalidVerdict() }))
+    return { kind: 'unknown', detail: 'Host stopped observing before this file arrived' }
+  })
+  expect(await f.check()).toMatchObject({ kind: 'blocked' })
+  expect(f.calls).toHaveLength(1)
+  expect(JSON.parse(await readFile(join(dirname(f.calls[0]!.result.path), 'receipt.json'), 'utf8')).state).toBe('pending')
+})
+
+test('verdict repair recovers the exact pending retry without a third purchase', async () => {
+  const f = await durableFixture()
+  f.answer(async request => {
+    if (request.role === 'synthesis') return completed()
+    if (request.step_id.endsWith(':0')) return rejectedVerdict(request)
+    await writeFile(request.result.path, JSON.stringify({ schema: 'verdict', run_id: request.run_id,
+      step_id: request.step_id, kind: 'completed', result: repairVerdict }))
+    return { kind: 'unknown', detail: 'Repair written but acknowledgement lost' }
+  })
+  expect(await f.check()).toMatchObject({ kind: 'blocked' })
+  expect(f.calls).toHaveLength(2)
+  const retry = structuredClone(f.calls[1]!)
+  const brief = await readFile(retry.brief.path, 'utf8')
+  f.recover(async request => {
+    expect(request).toEqual(retry)
+    expect(await readFile(request.brief.path, 'utf8')).toBe(brief)
+    return decodeProjectTrailer(await readFile(request.result.path, 'utf8'), request, {
+      schemas: new Map([['verdict', result => validateTrailer('verdict', result).ok]]), metadata: () => undefined,
+    }) as BoundedWorkOutcome
+  })
+  expect(await f.check()).toMatchObject({ kind: 'fix', blockingCount: 1 })
+  expect(f.recoveries).toEqual([retry])
+  expect(f.calls.map(row => row.role)).toEqual(['review', 'review', 'synthesis'])
+})
+
+test.each(['path', 'reason'] as const)('verdict repair refuses corrupted original %s before dispatching its retry', async field => {
+  const f = await durableFixture(); f.answer(async request => rejectedVerdict(request))
+  const source = f.source()
+  await source.readSeat(source.seats[1]!, snapshot, 1)
+  const receiptPath = join(dirname(f.calls[0]!.result.path), 'receipt.json')
+  const receipt = JSON.parse(await readFile(receiptPath, 'utf8'))
+  receipt.observation.payload.repair[field] = 'corrupted'
+  await writeFile(receiptPath, JSON.stringify(receipt))
+  await expect(source.retrySeat(source.seats[1]!, snapshot, 1)).rejects.toThrow('repair evidence does not match host validation')
+  expect(f.calls).toHaveLength(1)
+})
 
 test('durable panel recovery reuses completed seat and synthesis without buying either again', async () => {
   const f = await durableFixture()
@@ -459,10 +636,10 @@ test('non-Claude core and explicit configured peer reach selected transport with
   const source = f.source()
   expect(await f.check(source)).toEqual({ kind: 'approve' })
   expect(f.bindings).toContain('custom:https://192.0.2.1/review:REVIEW_KEY')
-  expect(f.calls.map(row => row.model_id)).toContain('gpt-5.6-sol')
+  expect(f.calls.map(row => row.model_id)).toContain('gpt-6-sol')
   expect(f.calls.map(row => row.model_id)).toContain('review-model')
   const seat = source.seats.find(row => row.id === 'review_adversarial')!
-  expect(await source.readSeat(seat, snapshot, 1)).toMatchObject({ runId: 'host-run', round: 1, provider: 'openai-codex', modelId: 'gpt-5.6-sol' })
+  expect(await source.readSeat(seat, snapshot, 1)).toMatchObject({ runId: 'host-run', round: 1, provider: 'openai-codex', modelId: 'gpt-6-sol' })
   expect(f.calls.every(row => row.run_id === 'host-run' && row.budget.wall_ms === 1000 && !row.writable)).toBe(true)
   const synthesis = JSON.parse(await readFile(f.calls.at(-1)!.brief.path, 'utf8'))
   expect(synthesis.panel).toHaveLength(2)
@@ -470,7 +647,7 @@ test('non-Claude core and explicit configured peer reach selected transport with
   await f.check(source); expect(f.calls).toHaveLength(3)
 })
 test('unknown configured seat refuses by name with a known tier positive control', async () => {
-  const f = await fixture(); expect(f.source().seats[1]!.modelId).toBe('gpt-5.6-sol')
+  const f = await fixture(); expect(f.source().seats[1]!.modelId).toBe('gpt-6-sol')
   f.options.phaseModels = { ...f.options.phaseModels, review_adversarial: { model: 'missing-model' } }
   expect(f.source).toThrow('review_adversarial: unknown configured model missing-model')
 })
@@ -532,7 +709,8 @@ for (const role of ['review', 'synthesis'] as const) {
       ok: false, reason: 'unexpected-field', path: '$.synthesis',
     })
     expect(await f.check()).toMatchObject({ kind: 'blocked', on: expect.stringContaining('infra-only:') })
-    expect(decoded.at(-1)).toEqual({ kind: 'unknown', detail: 'Trailer result failed host schema validation.' })
+    expect(decoded.at(-1)).toEqual({ kind: 'unknown', detail: 'Trailer result failed host schema validation.',
+      invalid_result: { schema: 'verdict', payload: { ...approve, synthesis: 'extra summary' } } })
     // An unknown headless result retains its lock. A separate run-owned evidence
     // directory is the positive control; uncertainty cannot authorize redispatch.
     malformed = false
@@ -676,7 +854,7 @@ test('observation copies cannot rewrite the authoritative host record', async ()
   const observed = await source.readSeat(seat, snapshot, 1)
   observed!.modelId = 'forged'
   observed!.payload = null
-  expect(await source.readSeat(seat, snapshot, 1)).toMatchObject({ modelId: 'gpt-5.6-sol', payload: approve })
+  expect(await source.readSeat(seat, snapshot, 1)).toMatchObject({ modelId: 'gpt-6-sol', payload: approve })
 })
 
 for (const effort of ['xhigh', 'max'] as const) {

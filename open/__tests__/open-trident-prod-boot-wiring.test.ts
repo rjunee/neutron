@@ -143,13 +143,13 @@ function panelCompletingSubstrate(): Substrate {
   }
 }
 
-test.each([false, true])('production Codex recovery resolves materialized credentials before inspecting a surviving owner: journal=%s', async journal => {
+test.each([[false, true], [true, true], [true, false]])('production Codex recovery resolves materialized credentials before inspecting a surviving owner: journal=%s private=%s', async (journal, privateHome) => {
   delete process.env['ANTHROPIC_API_KEY']
   delete process.env['OPENAI_API_KEY']
   await new SqliteProjectSettingsStore(db).update('owner', 'project-one', { name: 'Project One', model_provider: 'openai-codex' })
   const cwd = join(tmpDir, 'Projects', 'project-one')
   const codexHome = join(cwd, '.codex')
-  mkdirSync(codexHome, { recursive: true })
+  mkdirSync(codexHome, { recursive: true, mode: privateHome ? 0o700 : 0o755 })
   writeFileSync(join(codexHome, 'project-owner.json'), JSON.stringify('project-one'))
   if (journal) writeFileSync(join(codexHome, '.neutron-owner-launch.json'), '{}')
   const order: string[] = []
@@ -170,7 +170,7 @@ test.each([false, true])('production Codex recovery resolves materialized creden
     await buildOpenGraphComposer({ env: process.env, substrateFactory: () => recordingSubstrate([]) })({ db, project_slug: 'owner' })
     expect(order.indexOf('materialized')).toBeGreaterThanOrEqual(0)
     expect(order.indexOf('project-credential')).toBeGreaterThan(order.indexOf('materialized'))
-    expect(attach).toHaveBeenCalledTimes(journal ? 1 : 0)
+    expect(attach).toHaveBeenCalledTimes(journal && privateHome ? 1 : 0)
   } finally { attach.mockRestore(); resolve.mockRestore(); materialize.mockRestore() }
 })
 

@@ -4,14 +4,14 @@ import { join } from 'node:path'
 import { bootstrapCodexOwner, readCodexOwnerBinding, type CodexOwnerBootstrap } from './project-control-bootstrap.ts'
 import { BROKER_MAX_MESSAGE_BYTES } from './project-control-broker-transport.ts'
 import { OwnerHelperRegistry } from './project-owner-helper-registry.ts'
-import { assertProjectOwner, exactFacts, helperIdentity, object, requireIndependentOwnerHost, socketIdentity, type HelperIdentity, type OwnerHelperDescriptor } from './project-owner-helper-protocol.ts'
+import { assertOwnerScope, exactFacts, helperIdentity, object, requireIndependentOwnerHost, socketIdentity, type HelperIdentity, type OwnerHelperDescriptor } from './project-owner-helper-protocol.ts'
 
 /** The caller must launch this helper through an independent durable host.
  * Closing a frontend never calls this service's destroy operation.
  */
-export async function startCodexOwnerHelper(options: Parameters<typeof bootstrapCodexOwner>[0] & { projectId: string; gatewayIdentity: HelperIdentity }) {
+export async function startCodexOwnerHelper(options: Parameters<typeof bootstrapCodexOwner>[0] & { projectId: string | null; gatewayIdentity: HelperIdentity }) {
   requireIndependentOwnerHost(options.gatewayIdentity)
-  assertProjectOwner(options.codexHome, options.projectId)
+  assertOwnerScope(options.codexHome, options.projectId)
   const socketPath = join(options.codexHome, '.neutron-owner-helper.sock')
   const descriptorPath = join(options.codexHome, '.neutron-owner-helper.json')
   if (existsSync(socketPath) || existsSync(descriptorPath)) throw new Error('Existing owner helper requires reconciliation')
@@ -20,11 +20,11 @@ export async function startCodexOwnerHelper(options: Parameters<typeof bootstrap
   catch (error) { await owner.close(); throw error }
 }
 
-function serveOwnerHelper(owner: CodexOwnerBootstrap, socketPath: string, descriptorPath: string, projectId: string) {
+function serveOwnerHelper(owner: CodexOwnerBootstrap, socketPath: string, descriptorPath: string, projectId: string | null) {
   const facts = readCodexOwnerBinding(owner.binding)
   const helper = helperIdentity()
   const token = randomBytes(32).toString('hex')
-  const assertOwner = () => { assertProjectOwner(facts.codexHome, projectId); readCodexOwnerBinding(owner.binding) }
+  const assertOwner = () => { assertOwnerScope(facts.codexHome, projectId); readCodexOwnerBinding(owner.binding) }
   const registry = new OwnerHelperRegistry(owner.broker, assertOwner)
   let observation = 0
   const respond = (value: Record<string, unknown>) => Response.json({ ...value, state: owner.broker.state(), observation: ++observation })

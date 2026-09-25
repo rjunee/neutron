@@ -599,6 +599,10 @@ export class NexusStore {
    *      sidecar mid-upgrade is classified the same as one already
    *      converted.
    *
+   * Startup and migration contention have separate bounded retry budgets.
+   * Opening after the final startup retry still leaves room to recover a
+   * stale-ledger collision. Neither counter resets on successful progress.
+   *
    * All three self-heal on re-run: the pragma set is idempotent, and
    * the runner re-reads `_migrations` and skips the competitor's
    * committed version (the 0001 body is additionally CREATE-IF-NOT-
@@ -612,12 +616,15 @@ export class NexusStore {
     const dir = join(this.resolveProjectRoot(project_id), NEXUS_DIR)
     mkdirSync(dir, { recursive: true })
     const nexus_db_path = join(dir, NEXUS_DB)
-    for (let attempt = 0; ; attempt++) {
+    let openRetries = 0
+    let migrationRetries = 0
+    for (;;) {
       let db: Database
       try {
         db = openSidecar(nexus_db_path)
       } catch (err) {
-        if (isInitRaceError(err) && attempt < INIT_MAX_RETRIES) {
+        if (isInitRaceError(err) && openRetries < INIT_MAX_RETRIES) {
+          openRetries++
           await Bun.sleep(initRaceJitterMs())
           continue
         }
@@ -635,7 +642,8 @@ export class NexusStore {
         } catch {
           /* ignore */
         }
-        if (isInitRaceError(err) && attempt < INIT_MAX_RETRIES) {
+        if (isInitRaceError(err) && migrationRetries < INIT_MAX_RETRIES) {
+          migrationRetries++
           await Bun.sleep(initRaceJitterMs())
           continue
         }
@@ -693,10 +701,9 @@ export class NexusStore {
   }
 }
 
-/** Attempts for the fresh-sidecar init race (see `initHandle`).
- *  10 × ~20-60 ms of jitter comfortably outlasts a sibling process's
- *  full open+migrate window while keeping a genuinely broken sidecar
- *  failing fast (worst case well under a second). */
+/** Retries per stage for the fresh-sidecar init race (see `initHandle`).
+ *  At most 10 startup retries plus 10 migration retries: 20 jitter waits
+ *  of 20-60 ms, in addition to SQLite's bounded busy waits. */
 const INIT_MAX_RETRIES = 10
 
 function initRaceJitterMs(): number {

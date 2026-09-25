@@ -3,6 +3,7 @@ import { mkdtempSync, rmSync, writeFileSync } from 'node:fs'
 import { tmpdir } from 'node:os'
 import { join } from 'node:path'
 import { seedMigratedDb } from '../tests/support/migrated-db.ts'
+import { manualReminderScheduler } from './__tests__/manual-scheduler.ts'
 import { ProjectDb } from '@neutronai/persistence/index.ts'
 import { ReminderStore, type Reminder } from './store.ts'
 import {
@@ -31,6 +32,54 @@ const recordingDispatcher = (): ReminderDispatcher & { fired: Reminder[] } => {
     dispatch: async (r) => { fired.push(r); return { state: 'delivered' } },
   }
 }
+
+test('scheduled reminder ticks retain cadence, single-flight and quiescing stop', async () => {
+  const store = new ReminderStore(db)
+  const now = 10_000_000
+  const row = await store.create({ owner_slug: 't1', topic_id: null, fire_at: now / 1000 - 1, message: 'due' })
+  const timer = manualReminderScheduler()
+  const entered = Promise.withResolvers<void>()
+  const release = Promise.withResolvers<void>()
+  let dispatches = 0
+  const loop = new ReminderTickLoop({
+    store, now: () => now, scheduler: timer.scheduler,
+    dispatcher: { dispatch: async () => {
+      dispatches++
+      entered.resolve()
+      await release.promise
+      return { state: 'delivered' }
+    } },
+  })
+  try {
+    expect(() => timer.fire()).toThrow('not armed')
+    loop.start()
+    loop.start()
+    timer.assertStarted()
+    expect(dispatches).toBe(0)
+    expect(loop.describe().cadenceMs).toBe(30_000)
+    timer.fire()
+    await entered.promise
+    timer.fire()
+    expect(loop.stats().skipped_ticks).toBe(1)
+    expect(dispatches).toBe(1)
+    expect(store.get(row.id)?.status).toBe('pending')
+    let stopped = false
+    const stopping = loop.stop().then(() => { stopped = true })
+    await Promise.resolve()
+    timer.assertStopped()
+    expect(stopped).toBe(false)
+    expect(() => timer.fire()).toThrow('not armed')
+    release.resolve()
+    await stopping
+    expect(store.get(row.id)?.status).toBe('fired')
+    await loop.stop()
+    timer.assertStopped()
+    expect(dispatches).toBe(1)
+  } finally {
+    release.resolve()
+    await loop.stop()
+  }
+})
 
 describe('ReminderTickLoop.runOnce', () => {
   test('fires due reminders + flips status to fired', async () => {

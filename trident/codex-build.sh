@@ -1391,17 +1391,14 @@ set -- --strict-config \
   -c "shell_environment_policy.set.NEUTRON_LANE_CLAIM='${NEUTRON_LANE_CLAIM}'" \
   -c 'shell_environment_policy.exclude=["ANTHROPIC_*","CLAUDE_*","KIMI_*","GH_*","GITHUB_*"]'
 
-# PIN THE BUILD MODEL, for the same reason the review lane pins its own: unpinned,
-# `codex exec` takes the CLI's own default, which OpenAI moved to the cheapest 5.6
-# tier — so an owner who moved the build to the flagship tier would silently get the
-# weakest one. Set CODEX_BUILD_MODEL to the EMPTY string to fall back to the CLI
-# default (the `-` in `${VAR-x}` substitutes only when UNSET, so an explicit empty
-# value is respected). `trident/__tests__/model-tiers.test.ts` pins this literal to
-# the `sol` registry entry, so the two cannot drift.
-BUILD_MODEL="${CODEX_BUILD_MODEL-gpt-5.6-sol}"
-if [ -n "$BUILD_MODEL" ]; then
-  set -- "$@" --model "$BUILD_MODEL"
+# Pin the medium-work Sol default. The workflow forwards the selected tier's exact
+# ID. Empty selections refuse instead of delegating model choice to the CLI.
+BUILD_MODEL="${CODEX_BUILD_MODEL-gpt-6-sol}"
+if [[ -z "${BUILD_MODEL//[[:space:]]/}" ]]; then
+  echo "CODEX_BUILD_MODEL_INVALID: empty model; refusing CLI fallback. DEFERRED." >&2
+  exit 3
 fi
+set -- "$@" --model "$BUILD_MODEL"
 
 # PIN THE REASONING EFFORT, for exactly the reason the model above is pinned. Unpinned,
 # the CLI default for this tier is `none`, and every launch banner read

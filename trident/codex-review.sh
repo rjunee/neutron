@@ -501,12 +501,17 @@ esac
 # ── TRUNCATION DISCLOSURE ─────────────────────────────────────────────────────
 # Every character is assigned to exactly one call. Coverage is measured over the
 # complete filtered file set, never inferred from a reviewed prefix.
-REVIEW_RUBRIC="${NEUTRON_CODEX_REVIEW_RUBRIC:-You are a CROSS-MODEL code reviewer (GPT-5 via the Codex CLI), giving an INDEPENDENT second opinion alongside Claude/Argus on a trident build.
+REVIEW_RUBRIC="${NEUTRON_CODEX_REVIEW_RUBRIC:-You are a CROSS-MODEL code reviewer (OpenAI via the Codex CLI), giving an INDEPENDENT second opinion alongside Claude/Argus on a trident build.
 Review the git diff below for correctness, security, spec/as-built drift, and TEST-QUALITY (reject assertion-free / call-count-only tests; demand boundary coverage). Every finding needs EVIDENCE (file:line or a concrete repro) — verify before you assert.}"
 
 # ── Run the review SYNCHRONOUSLY (never backgrounded) ─────────────────────────
 # `codex exec` is the CLI's non-interactive one-shot form. A test seam
 # (NEUTRON_CODEX_EXEC_CMD) replaces the real invocation so tests never call OpenAI.
+REVIEW_MODEL="${CODEX_REVIEW_MODEL-gpt-6-astra}"
+if [[ -z "${REVIEW_MODEL//[[:space:]]/}" ]]; then
+  echo "CODEX_REVIEW_MODEL_INVALID: empty model; refusing CLI fallback. DEFERRED." >&2
+  exit 5
+fi
 CODEX_STDERR_FILE=$(mktemp "${TMPDIR:-/tmp}/trident-codex-review-stderr.XXXXXX") || CODEX_STDERR_FILE=/dev/null
 # With the /dev/null fallback the refusal DIAGNOSIS degrades to the generic
 # empty-output message, but the fail-closed gate itself never degrades.
@@ -518,7 +523,6 @@ CHUNK_NUMBER=1
 CHUNK_OFFSET=0
 REVIEW_OUTPUT=''
 CALL_EXIT=0
-REVIEW_MODEL="${CODEX_REVIEW_MODEL-gpt-5.6-sol}"
 while [ "$CHUNK_OFFSET" -lt "$DIFF_CHARACTERS" ]; do
   CHUNK=${DIFF:$CHUNK_OFFSET:$DIFF_CHARACTER_LIMIT}
   PROMPT="${REVIEW_RUBRIC}
@@ -533,7 +537,7 @@ ${CHUNK}"
     CHUNK_OUTPUT=$(printf '%s' "$PROMPT" | sh -c "$NEUTRON_CODEX_EXEC_CMD" 2>>"$CODEX_STDERR_FILE")
     CALL_EXIT=$?
   else
-    if [ -n "$REVIEW_MODEL" ]; then set -- --model "$REVIEW_MODEL"; else set --; fi
+    set -- --model "$REVIEW_MODEL"
     if [ -n "${NEUTRON_CODEX_THREAD_ID:-}" ]; then
       CHUNK_OUTPUT=$(printf '%s' "$PROMPT" | codex exec resume "${NEUTRON_CODEX_THREAD_ID}" "$@" - 2>>"$CODEX_STDERR_FILE")
     else

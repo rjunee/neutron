@@ -39,6 +39,8 @@
 
 import { afterAll, afterEach, beforeAll, beforeEach, describe, expect, it } from 'bun:test';
 import { act, createElement } from 'react';
+import { setTimeout as realSetTimeout, clearTimeout as realClearTimeout } from 'node:timers';
+import { advanceHarnessClock, installHarnessClock, uninstallHarnessClock } from './support/harness-clock';
 
 import {
   installNativeHarness,
@@ -87,6 +89,7 @@ beforeEach(() => {
 });
 
 afterEach(() => {
+  uninstallHarnessClock();
   restoreCrypto?.();
   restoreCrypto = null;
   clearSessionCache();
@@ -123,16 +126,18 @@ function fake(id: string): { session: Session; stopped: () => number } {
  * into a failure.
  */
 async function within<T>(ms: number, p: Promise<T>): Promise<T> {
-  let handle: ReturnType<typeof setTimeout> | undefined;
+  // The failure watchdog must stay real even while production deadlines use
+  // the harness clock, or a hung promise could also freeze its own watchdog.
+  let handle: ReturnType<typeof realSetTimeout> | undefined;
   try {
     return await Promise.race([
       p,
       new Promise<never>((_, reject) => {
-        handle = setTimeout(() => reject(new Error(`did not settle within ${String(ms)}ms`)), ms);
+        handle = realSetTimeout(() => reject(new Error(`did not settle within ${String(ms)}ms`)), ms);
       }),
     ]);
   } finally {
-    if (handle !== undefined) clearTimeout(handle);
+    if (handle !== undefined) realClearTimeout(handle);
   }
 }
 
@@ -159,10 +164,32 @@ async function waitReal(ms: number, screen?: { settle(): Promise<void> }): Promi
   await screen?.settle();
 }
 
+async function advanceDeadline(ms: number, screen?: { settle(): Promise<void> }): Promise<void> {
+  await advanceHarnessClock(ms, async (run) => {
+    await act(async () => { run(); });
+    await screen?.settle();
+  });
+}
+
 describe('a project whose first session construction WEDGES', () => {
+  it('a construction completing before its deadline remains cached after that deadline', async () => {
+    installHarnessClock();
+    const built = fake('app:owner:healthy');
+    let complete!: (session: Session) => void;
+    const pending = acquireSession('app:owner:healthy', () => new Promise(resolve => { complete = resolve; }))
+      .then(session => ({ session }), error => ({ error }));
+    await advanceDeadline(SESSION_BUILD_TIMEOUT_MS - 1);
+    complete(built.session);
+    expect(await pending).toEqual({ session: built.session });
+    await advanceDeadline(1);
+    expect(sessionCacheKeys()).toContain('app:owner:healthy');
+    expect(built.stopped()).toBe(0);
+  });
+
   it(
     'still gets onto the wire — the owner is not locked out of it for the life of the process',
     async () => {
+      installHarnessClock();
       // THE FAILING CONDITION, end to end. An earlier attempt for this scope is
       // stuck mid-construction and will never answer (on the device: a store
       // open that does not come back). Under the shipped code every later mount
@@ -179,8 +206,11 @@ describe('a project whose first session construction WEDGES', () => {
 
       // The construction deadline retracts the dead attempt, the surface reports
       // the failure instead of swallowing it, and the retry rebuilds.
-      await waitReal(SESSION_BUILD_TIMEOUT_MS + 250, screen);
-      await waitReal(ATTACH_RETRY_DELAY_MS + 250, screen);
+      await advanceDeadline(SESSION_BUILD_TIMEOUT_MS - 1, screen);
+      expect(socketsFor('orchard')).toBe(0);
+      await advanceDeadline(1, screen);
+      expect(socketsFor('orchard')).toBe(0);
+      await advanceDeadline(ATTACH_RETRY_DELAY_MS, screen);
 
       expect(socketsFor('orchard')).toBeGreaterThan(0);
       screen.unmount();
@@ -191,6 +221,7 @@ describe('a project whose first session construction WEDGES', () => {
   it(
     'does not pin the cache key — the attempt after it builds a fresh session',
     async () => {
+      installHarnessClock();
       const key = 'app:owner:stuck';
       void acquireSession(key, () => new Promise<Session>(() => {})).catch(() => {
         /* the wedged attempt */
@@ -199,11 +230,16 @@ describe('a project whose first session construction WEDGES', () => {
 
       // A mount that arrives DURING the wedge joins it, and must therefore end —
       // bounded — rather than wait out the life of the process.
+      let outcome = 'pending';
       const joined = acquireSession(key, async () => fake(key).session).then(
         () => 'built' as const,
         () => 'gave-up' as const,
-      );
-      expect(await within(SESSION_BUILD_TIMEOUT_MS + 4_000, joined)).toBe('gave-up');
+      ).then(value => { outcome = value; return value; });
+      await advanceDeadline(SESSION_BUILD_TIMEOUT_MS - 1);
+      expect(outcome).toBe('pending');
+      await advanceDeadline(1);
+      expect(outcome).toBe('gave-up');
+      expect(await joined).toBe('gave-up');
 
       // And the key is FREE. This is the assertion the shipped code could not
       // satisfy at any point in the future: `pending` was cleared only on settle,

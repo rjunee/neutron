@@ -23,10 +23,13 @@ export interface CodexConversationHost {
    * rollout; cwd/latest-file inference does not satisfy this contract. Abort
    * while queued must withdraw the request without acquiring a later lease.
    */
-  acquireTurn(options: OpenCodexProjectSessionOptions, signal: AbortSignal): Promise<CodexConversationLease>
+  acquireTurn(options: CodexOwnerSessionOptions, signal: AbortSignal): Promise<CodexConversationLease>
 }
 
-export interface CodexConversationalSubstrateOptions extends OpenCodexProjectSessionOptions {
+export interface CodexOwnerSessionOptions extends Omit<OpenCodexProjectSessionOptions, 'projectId'> {
+  readonly projectId: string | null
+}
+export interface CodexConversationalSubstrateOptions extends CodexOwnerSessionOptions {
   readonly host: CodexConversationHost
   readonly pollMs?: number
   readonly timeoutMs?: number
@@ -34,7 +37,7 @@ export interface CodexConversationalSubstrateOptions extends OpenCodexProjectSes
 
 // An unresolved delivery cannot be retried by creating another wrapper around
 // the same shared host. Recovery must provide a newly reconciled host.
-const refusedProjects = new WeakMap<CodexConversationHost, Set<string>>()
+const refusedProjects = new WeakMap<CodexConversationHost, Set<string | null>>()
 
 function untilAborted<T>(operation: Promise<T>, signal: AbortSignal): Promise<T> {
   return new Promise<T>((resolve, reject) => {
@@ -128,7 +131,7 @@ export function createCodexConversationalSubstrate(options: CodexConversationalS
         } finally {
           clearTimeout(timer)
           if (lease !== undefined && !succeeded && !interrupted) {
-            const refused = refusedProjects.get(options.host) ?? new Set<string>()
+            const refused = refusedProjects.get(options.host) ?? new Set<string | null>()
             refused.add(options.projectId)
             refusedProjects.set(options.host, refused)
           }

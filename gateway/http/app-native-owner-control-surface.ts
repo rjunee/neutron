@@ -4,7 +4,7 @@ import { jsonError, jsonResponse, readJsonBody, resolveBearer } from './surface-
 import { resolveScopeSegment } from './scope-segment.ts'
 
 export interface NativeOwnerIdentity {
-  projectId: string
+  projectId: string | null
   threadId: string
   bindingRevision: string
   generation: number
@@ -16,9 +16,9 @@ export type NativeOwnerAction = NativeOwnerIdentity & ({ action: 'interrupt' } |
 /** An authenticated owner action on an observed native turn, never a raw RPC proxy. */
 export function createAppNativeOwnerControlSurface(opts: {
   auth: AppWsAuthResolver
-  canAccess(userId: string, ownerSlug: string, projectId: string): Promise<boolean>
-  read(projectId: string): Promise<unknown>
-  act(projectId: string, request: NativeOwnerAction): Promise<unknown>
+  canAccess(userId: string, ownerSlug: string, projectId: string | null): Promise<boolean>
+  read(projectId: string | null): Promise<unknown>
+  act(projectId: string | null, request: NativeOwnerAction): Promise<unknown>
 }) {
   const failure = (status: number, code: string, message: string): Response => {
     const response = jsonError(status, code, message)
@@ -30,8 +30,9 @@ export function createAppNativeOwnerControlSurface(opts: {
     if (!match) return null
     const auth = await resolveBearer(req, opts.auth)
     if ('code' in auth) return failure(401, auth.code, auth.message)
-    const projectId = resolveScopeSegment(match[1])
-    if (!projectId || projectId === '~general') return failure(400, 'invalid_project_id', 'Native controls require a project.')
+    const segment = resolveScopeSegment(match[1])
+    if (!segment) return failure(400, 'invalid_project_id', 'Native controls require a valid scope.')
+    const projectId = segment === '~general' ? null : segment
     try {
       if (!await opts.canAccess(auth.user_id, auth.project_slug, projectId)) return failure(404, 'project_not_found', 'Project not found')
       let state: unknown

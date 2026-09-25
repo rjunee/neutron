@@ -7,6 +7,7 @@ import { buildRun, type BuildSnapshot, type BuildRunDeps, type ExecutionPlan } f
 import { fakeRunner, type BoundedWorkOutcome } from '../bounded-work.ts'
 import type { BoundedWorkRequest } from '../bounded-work.ts'
 import { createCodexHeadlessRunner } from './codex-headless.ts'
+import { until, workerPlacementRig } from '../adapters/claude-code/persistent/__tests__/herdr-workspace-fake-server.ts'
 
 const measured: BuildSnapshot = { head: 'measured-head', diff: '+built\nline=two\n', pr: null }
 const singlePlan: ExecutionPlan = {
@@ -534,3 +535,141 @@ for (const effort of ['xhigh', 'max'] as const) {
     expect(readFileSync(f.seen, 'utf8').split('\n').find(line => line.startsWith('CODEX_BUILD_EFFORT='))).toBe(`CODEX_BUILD_EFFORT=${effort}`)
   })
 }
+
+describe('Codex build wrapper placed in its project Herdr workspace', () => {
+
+  test('one wrapper process, identical outcome, a Build tab in the project workspace showing its stream', async () => {
+    const baseline = fixture()
+    const expected = await createCodexHeadlessRunner({ buildScript: baseline.script, probe: { ok: true } })
+      .run(baseline.request(), 'headless', new AbortController().signal)
+    const f = fixture()
+    const rig = workerPlacementRig(f.request().cwd, { projectId: null, projectLabel: 'ignored' })
+    const outcome = await createCodexHeadlessRunner({ buildScript: f.script, probe: { ok: true }, placement: rig.placement(), taskName: 'claim-corroboration' })
+      .run(f.request(), 'headless', new AbortController().signal)
+    expect({ ...outcome, observation: undefined }).toEqual({ ...expected, observation: undefined })
+    expect(outcome.observation?.usage).toEqual(expected.observation?.usage)
+    expect(readFileSync(f.threads, 'utf8')).toBe('\n')
+    // General scope: the manager's own workspace, never a literal "general" project.
+    expect(rig.server.callsTo('workspace.create').map(call => call.params['label'])).toEqual(['Neutron General'])
+    expect(rig.server.workerLayouts().map(call => call.params['tab_label'])).toEqual(['Build · claim-corroboration'])
+    for (const token of (rig.server.workerLayouts()[0]!.params['root'] as { command: string[] }).command) {
+      expect(token).not.toMatch(/codex-build\.sh$|wrapper\.sh$|(^|\/)codex$/)
+    }
+    const view = readdirSync(f.request().cwd).find(name => name.endsWith('.view.log'))!
+    expect(readFileSync(join(f.request().cwd, view), 'utf8')).toContain('"turn.completed"')
+    // Cleanup is detached from the outcome; the view pane closes after the result.
+    await until(async () => (await rig.receipts(f.request().cwd))[0]?.state === 'closed' ? true : undefined)
+    expect(await rig.receipts(f.request().cwd)).toMatchObject([{ state: 'closed' }])
+    expect(rig.server.callsTo('pane.read')).toHaveLength(0)
+  })
+
+  test('screen-independence: exit status decides, not a success-shaped screen', async () => {
+    const baseline = fixture()
+    writeFileSync(baseline.script, readFileSync(baseline.script, 'utf8') + 'exit 3\n')
+    const expected = await createCodexHeadlessRunner({ buildScript: baseline.script, probe: { ok: true } })
+      .run(baseline.request(), 'headless', new AbortController().signal)
+    expect(expected.kind).not.toBe('completed')
+    const f = fixture()
+    writeFileSync(f.script, readFileSync(f.script, 'utf8') + 'exit 3\n')
+    const rig = workerPlacementRig(f.request().cwd)
+    rig.server.screen = '{"type":"turn.completed"}\nNEUTRON_CODEX_BUILD_HEAD=measured-head\n'
+    rig.server.malformMethod('pane.read', { read: { text: rig.server.screen } })
+    const outcome = await createCodexHeadlessRunner({ buildScript: f.script, probe: { ok: true }, placement: rig.placement() })
+      .run(f.request(), 'headless', new AbortController().signal)
+    expect({ ...outcome, observation: undefined }).toEqual({ ...expected, observation: undefined })
+    expect(rig.server.workerLayouts()).toHaveLength(1)
+  })
+
+  test('placement failure: the build still completes with its claim and usage, unplaced on record', async () => {
+    const f = fixture()
+    const rig = workerPlacementRig(f.request().cwd)
+    rig.server.failMethod('layout.apply')
+    const outcome = await createCodexHeadlessRunner({ buildScript: f.script, probe: { ok: true }, placement: rig.placement() })
+      .run(f.request(), 'headless', new AbortController().signal)
+    expect(outcome).toMatchObject({ kind: 'completed', thread_id: 'observed-first' })
+    if (outcome.kind === 'completed') expect(outcome.result).toEqual(measured)
+    expect(outcome.observation?.usage.input_tokens).toBe(12)
+    const [receipt] = await rig.receipts(f.request().cwd)
+    expect(receipt).toMatchObject({ state: 'unplaced' })
+    expect(receipt!.reason).toMatch(/^placement-refused: /)
+  })
+
+  test('cancellation kills the wrapper group, grandchild included, and closes the view', async () => {
+    const f = fixture()
+    const cwd = f.request().cwd
+    writeFileSync(f.script, readFileSync(f.script, 'utf8') +
+      `printf '%s' "$$" > wrapper.pid\n(exec sleep 300) &\nprintf '%s' "$!" > grandchild.pid\nwait\n`)
+    const rig = workerPlacementRig(cwd)
+    const controller = new AbortController()
+    const kill = spyOn(process, 'kill')
+    let grandchild = 0
+    try {
+      const pending = createCodexHeadlessRunner({ buildScript: f.script, probe: { ok: true }, placement: rig.placement() })
+        .run(f.request({ budget: { wall_ms: 60_000 } }), 'headless', controller.signal)
+      grandchild = await until(() => { try { return Number(readFileSync(join(cwd, 'grandchild.pid'), 'utf8')) || undefined } catch { return undefined } })
+      await until(async () => (await rig.receipts(cwd))[0]?.state === 'placed' ? true : undefined)
+      const wrapper = Number(readFileSync(join(cwd, 'wrapper.pid'), 'utf8'))
+      controller.abort()
+      expect(await pending).toMatchObject({ kind: 'failed', class: 'killed' })
+      const targets = kill.mock.calls.filter(([, signal]) => signal !== 0).map(([pid]) => pid)
+      expect(targets.length).toBeGreaterThan(0)
+      expect(new Set(targets)).toEqual(new Set([-wrapper]))
+    } finally { kill.mockRestore() }
+    await until(() => { try { process.kill(grandchild, 0); return undefined } catch { return true } })
+    await until(async () => (await rig.receipts(cwd))[0]?.state === 'closed' ? true : undefined)
+  })
+
+  test('restart adopts the receipt: no second wrapper, no new tab, the stale view pane closed', async () => {
+    const f = fixture()
+    const cwd = f.request().cwd
+    const rig = workerPlacementRig(cwd)
+    expect((await rig.placement().place({ key: 'earlier', taskLabel: 'Build · earlier', cwd,
+      viewPath: join(cwd, 'earlier.log'), receiptDir: join(cwd, 'terminal') })).kind).toBe('placed')
+    rig.server.failMethod('pane.close')
+    const closes = rig.server.callsTo('pane.close').length
+    const request = f.request()
+    const first = await createCodexHeadlessRunner({ buildScript: f.script, probe: { ok: true }, placement: rig.placement() })
+      .run(request, 'headless', new AbortController().signal)
+    expect(first.kind).toBe('completed')
+    // The first host's detached cleanup tried its verified close, and it failed.
+    await until(() => rig.server.callsTo('pane.close').length > closes ? true : undefined)
+    const [stale] = await rig.receipts(cwd)
+    expect(stale).toEqual({ state: 'placed', pane: expect.any(String), pid: expect.any(Number),
+      viewPath: expect.stringMatching(/\.view\.log$/), taskLabel: expect.stringMatching(/^Build · /), script: expect.any(String) })
+    rig.server.clearFailure('pane.close')
+    const tabs = rig.server.workerLayouts().length
+    const from = rig.server.calls.length
+    const resumed = await createCodexHeadlessRunner({ buildScript: f.script, probe: { ok: true }, placement: rig.placement() })
+      .run(request, 'headless', new AbortController().signal)
+    // The retire is detached from the recovered result; wait for its verified close.
+    await until(async () => (await rig.receipts(cwd))[0]?.state === 'closed' ? true : undefined)
+    expect(rig.server.calls.slice(from).map(call => call.method).filter(method => method.startsWith('pane.')))
+      .toEqual(['pane.get', 'pane.process_info', 'pane.close'])
+    expect(resumed.kind).toBe('completed')
+    expect(readFileSync(f.threads, 'utf8')).toBe('\n')
+    expect(rig.server.workerLayouts()).toHaveLength(tabs)
+    expect(rig.server.panes.has(stale!.pane!)).toBe(false)
+    expect(await rig.receipts(cwd)).toEqual([{ state: 'closed', pane: stale!.pane! }])
+  })
+
+  test('a stalled view close never holds the build result: completed with its claim while the close hangs', async () => {
+    const f = fixture()
+    const cwd = f.request().cwd
+    // The close would wait a full minute; the result must not.
+    const rig = workerPlacementRig(cwd, {}, { closeTimeoutMs: 60_000 })
+    expect((await rig.placement().place({ key: 'warm', taskLabel: 'Build · warm', cwd,
+      viewPath: join(cwd, 'warm.log'), receiptDir: join(cwd, 'terminal') })).kind).toBe('placed')
+    const closes = rig.server.callsTo('pane.close').length
+    const releaseClose = rig.server.holdMethod('pane.close')
+    try {
+      const outcome = await createCodexHeadlessRunner({ buildScript: f.script, probe: { ok: true }, placement: rig.placement() })
+        .run(f.request(), 'headless', new AbortController().signal)
+      expect(outcome).toMatchObject({ kind: 'completed', thread_id: 'observed-first' })
+      if (outcome.kind === 'completed') expect(outcome.result).toEqual(measured)
+      expect(readdirSync(cwd).some(name => name.endsWith('.receipt'))).toBe(true)
+      await until(() => rig.server.callsTo('pane.close').length > closes ? true : undefined)
+      expect(await rig.receipts(cwd)).toMatchObject([{ state: 'placed' }])
+    } finally { releaseClose() }
+    await until(async () => (await rig.receipts(cwd))[0]?.state === 'closed' ? true : undefined)
+  })
+})

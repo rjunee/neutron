@@ -13,6 +13,7 @@ import type { AttemptAccounting } from './attempt-accounting.ts'
 import { bindReviewRequest, claimReviewReceipt, invalidateReviewReceipt, readReviewJson, readReviewReceipt, settleReviewReceipt } from './project-review-receipt.ts'
 
 const activeReviewAttempts = new Set<string>()
+type RepairFeedback = { reason: string; path: string; result: unknown }
 
 export interface ProjectReviewSourceOptions {
   runId: string
@@ -38,6 +39,17 @@ export interface ProjectReviewSourceOptions {
 /** One source per admitted build. Host-owned receipts retain completed observations
  * and consumed attempts across source replacement; pending work remains uncertain. */
 export function createProjectReviewSource(input: ProjectReviewSourceOptions): ReviewSource {
+  return projectReviewSource(input, 'review')
+}
+
+/** Reconcile only original receipts. Callers must supply the original run and
+ * evidence scope; this source cannot purchase missing seats, retries or synthesis.
+ * This is not authority to import its observations into a different run. */
+export function reconcileProjectReviewSource(input: ProjectReviewSourceOptions): ReviewSource {
+  return projectReviewSource(input, 'reconciliation')
+}
+
+function projectReviewSource(input: ProjectReviewSourceOptions, purpose: 'review' | 'reconciliation'): ReviewSource {
   const options = { ...input }
   if (!options.runId || !options.projectSlug || !Number.isSafeInteger(options.wallMs) || options.wallMs <= 0) throw Error('Review source requires host identity and a positive wall budget')
   const configured = configuredModels(options.env)
@@ -83,7 +95,7 @@ export function createProjectReviewSource(input: ProjectReviewSourceOptions): Re
     credential: await options.credentialIdentity?.(route.seat.provider) ?? null,
     runner: options.runnerFor(route.model, route.seat), provider: route.seat.provider,
   })
-  type Operation = Awaited<ReturnType<typeof operationFor>>
+  type Operation = Awaited<ReturnType<typeof operationFor>> & { repair?: RepairFeedback }
   const assertScope = async (operation: Operation) => {
     if (operation.taskId !== options.taskId() || operation.task !== (options.taskInput?.() ?? null)
       || operation.credential !== (await options.credentialIdentity?.(operation.provider) ?? null)) {
@@ -99,8 +111,9 @@ export function createProjectReviewSource(input: ProjectReviewSourceOptions): Re
     if (!route) throw Error(`Review seat ${seat.id}: configuration does not belong to this source`)
     return route
   }
-  const reviewBrief = (route: typeof synthesisRoute, snapshot: BuildSnapshot, round: number, panel?: SeatObservation[]) => JSON.stringify({
+  const reviewBrief = (route: typeof synthesisRoute, snapshot: BuildSnapshot, round: number, panel?: SeatObservation[], repair?: RepairFeedback) => JSON.stringify({
     project: options.projectSlug, seat: route.seat.id, snapshot, round, panel, verdictSchema: VERDICT_SCHEMA,
+    ...(repair ? { repair: { ...repair, instruction: 'The host rejected your previous result at the given validation path. Repair the result against verdictSchema using evidence; do not invent or default missing finding fields, erase findings, or change the verdict merely to pass validation. If you cannot substantiate the required fields, report blocked. Write the full envelope for THIS request, not the previous step.' } } : {}),
     instruction: 'Review the measured diff. The result must conform exactly to verdictSchema, including findings and file/line evidence. Do not add fields to result or its nested objects beyond those declared in verdictSchema. Synthesis must account for every supplied seat within this same schema.',
     resultFile: 'Write your result file as a JSON object with EXACTLY these five fields: "schema", "run_id" and "step_id", each copied verbatim from this dispatch\'s request (`request.result.schema`, `request.run_id`, `request.step_id`) — do not invent or reformat them; "kind", which is "completed" when you produced a verdict or "blocked" when you could not; and "result", the verdict payload itself, omitted when blocked. When blocked, add "on": a non-empty sentence saying what stopped you. Report blocked rather than inventing a verdict.',
   })
@@ -122,7 +135,22 @@ export function createProjectReviewSource(input: ProjectReviewSourceOptions): Re
   async function dispatch(route: typeof synthesisRoute, snapshot: BuildSnapshot, round: number, attempt: number, operation: Operation, panel?: SeatObservation[]): Promise<SeatObservation> {
     const { identity, directory } = receiptFor(route, snapshot, round, attempt, operation, panel)
     await assertScope(operation)
+    if (attempt === 1 && panel === undefined) {
+      // Attempt zero and its directory identity stay unchanged. The host's
+      // settled receipt supplies repair data; the retry's immutable request hash
+      // binds the augmented brief on dispatch and on evidence-only recovery.
+      const initial = receiptFor(route, snapshot, round, 0, operation)
+      const prior = await readReviewReceipt(initial.directory, initial.identity)
+      if (prior?.state !== 'settled' || prior.observation?.status !== 'deferred') throw Error('Review retry lacks its original deferred receipt')
+      const payload = prior.observation.payload as { repair?: RepairFeedback } | null
+      if (payload?.repair) {
+        const checked = validateTrailer('verdict', payload.repair.result)
+        if (checked.ok || checked.reason !== payload.repair.reason || checked.path !== payload.repair.path) throw Error('Review repair evidence does not match host validation')
+        operation = { ...operation, repair: payload.repair }
+      }
+    }
     const stored = await readReviewReceipt(directory, identity)
+    if (purpose === 'reconciliation' && !stored) throw Error(`Review seat ${route.seat.id}: original receipt is unavailable for reconciliation`)
     if (stored?.invalidated) throw Error(`Review seat ${route.seat.id}: original pending attempt had changed inputs`)
     if (stored?.state === 'settled') {
       const observed = stored.observation!
@@ -155,7 +183,7 @@ export function createProjectReviewSource(input: ProjectReviewSourceOptions): Re
         if (!stored.requestHash || !priorAttempt || priorAttempt.started_at === null) throw Error('Pending review lacks its original dispatched request')
         const original = await readReviewJson(join(directory, 'request.json')) as BoundedWorkRequest
         if (!original || digest(original) !== stored.requestHash) throw Error('Pending review request identity is invalid')
-        const expected = makeRequest(route, snapshot, round, attempt, directory, panel, original.thread)
+        const expected = makeRequest(route, snapshot, round, attempt, directory, panel, original.thread, operation.repair)
         if (JSON.stringify(original) !== JSON.stringify(expected)
           || (original.thread !== null && (typeof original.thread !== 'object' || typeof original.thread.id !== 'string' || !original.thread.id))) {
           throw Error('Pending review request does not match its original scope')
@@ -238,9 +266,9 @@ export function createProjectReviewSource(input: ProjectReviewSourceOptions): Re
     }
   }
   const makeRequest = (route: typeof synthesisRoute, snapshot: BuildSnapshot, round: number, attempt: number, directory: string, panel: SeatObservation[] | undefined,
-    thread: { id: string } | null): BoundedWorkRequest => ({ run_id: options.runId, step_id: `${directory.split('/').at(-1)}:${round}:${attempt}`,
+    thread: { id: string } | null, repair?: RepairFeedback): BoundedWorkRequest => ({ run_id: options.runId, step_id: `${directory.split('/').at(-1)}:${round}:${attempt}`,
     role: panel === undefined ? 'review' : 'synthesis', model_id: route.seat.modelId, effort: route.effort, cwd: options.cwd, writable: false,
-    network: true, tools: 'read-only', brief: { path: join(directory, 'brief.json'), integrity: briefIntegrity(reviewBrief(route, snapshot, round, panel)) },
+    network: true, tools: 'read-only', brief: { path: join(directory, 'brief.json'), integrity: briefIntegrity(reviewBrief(route, snapshot, round, panel, repair)) },
     result: { schema: 'verdict', path: join(directory, 'result.json') }, thread,
     budget: { wall_ms: options.wallMs }, needs_approval_decision: false })
   async function dispatchTurn(route: typeof synthesisRoute, snapshot: BuildSnapshot, round: number, attempt: number, directory: string, operation: Operation, panel?: SeatObservation[],
@@ -262,9 +290,9 @@ export function createProjectReviewSource(input: ProjectReviewSourceOptions): Re
     // than by a fourth dispatch.
     //
     // The host derives step_id from the retained input identity, round and attempt.
-    const text = reviewBrief(route, snapshot, round, panel)
+    const text = reviewBrief(route, snapshot, round, panel, operation.repair)
     const briefPath = join(directory, 'brief.json')
-    const request = makeRequest(route, snapshot, round, attempt, directory, panel, thread)
+    const request = makeRequest(route, snapshot, round, attempt, directory, panel, thread, operation.repair)
     // Retain the exact original request, including its initial thread binding.
     // Pending receipts never synthesize a new request from a later thread state.
     await writeFile(join(directory, 'request.json'), JSON.stringify(request), { mode: 0o600, flag: 'wx' })
@@ -301,6 +329,13 @@ export function createProjectReviewSource(input: ProjectReviewSourceOptions): Re
       // damaged or unresolved provider evidence retains the original pending
       // claim so restoring that evidence can recover it without a new attempt.
       if (recovering && outcome.kind !== 'completed') throw Error('Original review outcome remains pending')
+      if (request.role === 'review' && outcome.kind === 'unknown' && outcome.invalid_result?.schema === 'verdict') {
+        const checked = validateTrailer('verdict', outcome.invalid_result.payload)
+        if (!checked.ok) return { ...identity, status: 'deferred', payload: {
+          reason: `Review verdict ${checked.reason} at ${checked.path}`,
+          repair: { reason: checked.reason, path: checked.path, result: structuredClone(outcome.invalid_result.payload) },
+        } }
+      }
       if (outcome.kind === 'completed') {
         if (recovering && !validateTrailer('verdict', outcome.result).ok) throw Error('Recovered review verdict is invalid')
         await rememberThread?.(outcome.thread_id)

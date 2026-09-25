@@ -2,6 +2,8 @@ import { createProjectLauncher } from '@neutronai/trident/project-launcher.ts'
 import { TridentAttemptLedger } from '@neutronai/trident/attempt-ledger.ts'
 import { buildSubstrateWorkflowFire, buildWorkflowFirer } from '@neutronai/trident/inner-loop.ts'
 import { prepareProjectBuild } from './wiring/project-build.ts'
+import { createWorkerTerminalHost, workerPlacementScope } from './wiring/project-build-terminal.ts'
+import type { WorkerPlacementHost } from '@neutronai/runtime/workers/worker-placement.ts'
 import { CodexOwnerBindings } from './wiring/codex-owner-binding.ts'
 import { nativeOwnerQuestionText } from './wiring/codex-owner-controls.ts'
 import {
@@ -675,6 +677,8 @@ export interface BuildOpenGraphComposerOptions {
   ) => import('@neutronai/runtime/substrate.ts').Substrate
   /** Test-only cadence override for production-composition watcher reachability. */
   agentWatcherPollIntervalMs?: number
+  /** Drive the real reminder loop with a controlled timer in composition tests. */
+  reminderScheduler?: import('@neutronai/reminders/tick.ts').ReminderScheduler
   /**
    * Install-token handoff seam (E2E). Production leaves this undefined →
    * `buildOpenInstallTokenHandler` with the real `.env`-persist + supervisor-
@@ -1090,7 +1094,9 @@ export function buildOpenGraphComposer(
       }
       const credential = codexCredentialService.resolveProjectOwnerCredential(asOwnerHandle(owner_handle), projectId)
       return { cwd: joinPath(owner_home, 'Projects', projectId), ...credential, env }
-    })
+    }, undefined, undefined, async () => ({ cwd: owner_home,
+      generalAuthorityPath: joinPath(owner_home, '.neutron-general-codex-owner.json'),
+      ...codexCredentialService.resolveGeneralOwnerCredential(asOwnerHandle(owner_handle)), env }))
     const codexOwnerProjects = (await projectSettingsStore.list(project_slug))
       .filter(project => resolveModelProvider(project.id).provider === 'openai-codex')
       .map(project => project.id)
@@ -1117,9 +1123,9 @@ export function buildOpenGraphComposer(
     codexOwnerBindings.onOwnerQuestion = async (projectId, question) => {
       const deliver = noticeDeliverHolder.deliver
       if (!deliver) throw new Error('Native owner question delivery is unavailable')
-      const receipt = await deliver(appWsProjectTopicId(OWNER_USER_ID, projectId), {
+      const receipt = await deliver(projectId === null ? appWsTopicId(OWNER_USER_ID) : appWsProjectTopicId(OWNER_USER_ID, projectId), {
         body: nativeOwnerQuestionText(question), durability: 'reply',
-        idempotency_key: `codex-question:${projectId}:${String(question.params.turnId)}:${String(question.requestId)}`,
+        idempotency_key: `codex-question:${JSON.stringify(projectId)}:${String(question.params.turnId)}:${String(question.requestId)}`,
       })
       if (!receipt.persisted) throw new Error('Native owner question was not durably delivered')
     }
@@ -1226,6 +1232,9 @@ export function buildOpenGraphComposer(
       makeWarmFireSubstrate,
       cleanups: substrateCleanups,
     } = wireSubstrates(wiringCtx)
+    // ONE strict project-workspace host for every dispatch's cross-provider workers,
+    // so its manager serializes placements per scope (null off Herdr, e.g. tests).
+    let workerTerminalHost: WorkerPlacementHost | null | undefined
     const tridentFireInnerWorkflow =
       liveAgentSubstrate !== null
         ? createProjectLauncher({
@@ -1233,12 +1242,20 @@ export function buildOpenGraphComposer(
             prepare: (input, signal) => {
               const id = workBoardProjectIdForKey(project_slug, input.run.project_slug) ?? 'general'
               const providerSelection = resolveModelProvider(id)
+              if (workerTerminalHost === undefined) workerTerminalHost = createWorkerTerminalHost(projectBuildStateRoot, { env })
               return prepareProjectBuild(input, {
                 store: boardRunStore, attempts: new TridentAttemptLedger(db), runHost: tridentHostRunner,
                 stateRoot: projectBuildStateRoot,
                 projectDir: joinPath(owner_home, 'Projects', input.run.project_slug),
                 projectId: id, provider: providerSelection.provider, providerSource: providerSelection.source, env,
                 codexOwnerBindings,
+                // The placement scope is the run's OWN scope key: General stays null
+                // (`Neutron General`), never the literal id the line above falls back to.
+                workerTerminal: { host: workerTerminalHost, scope: workerPlacementScope({
+                  instanceId: owner_handle, ownerSlug: project_slug, runScopeKey: input.run.project_slug,
+                  projectName: projectId => db.prepare<{ name: string }, [string]>(
+                    'SELECT name FROM projects WHERE id = ? AND deleted_at IS NULL').get(projectId)?.name,
+                }) },
                 spawnProjectSession: async projectId => {
                   const projectSubstrate = makeProjectLiveAgentSubstrate(projectId)
                   if (projectSubstrate === null) throw new Error('Project conversation substrate is unavailable')
@@ -1844,7 +1861,9 @@ export function buildOpenGraphComposer(
     // Recovery reads this credential service through the shared owner resolver.
     // Reconcile only after materialization; an earlier lookup is caught as an
     // unavailable credential and silently skips surviving project owners.
-    await codexOwnerBindings.reconcile(codexOwnerProjects)
+    await codexOwnerBindings.reconcile([
+      ...(resolveModelProvider(undefined).provider === 'openai-codex' ? [null] : []), ...codexOwnerProjects,
+    ])
     const coresSubstrate =
       llmPool !== null ? makeEphemeralSubstrate('cc-cores')(owner_home) : null
     // Plan task 8 — the agent-callable ritual registration service. Assigned LATE
@@ -3854,8 +3873,8 @@ export function buildOpenGraphComposer(
     const appNativeOwnerControlSurface = createAppNativeOwnerControlSurface({
       auth: appOwnerAuth,
       canAccess: async (userId, ownerSlug, projectId) => userId === OWNER_USER_ID && ownerSlug === project_slug
-        && resolveModelProvider(projectId).provider === 'openai-codex'
-        && (await projectSettingsStore.list(project_slug)).some(project => project.id === projectId),
+        && resolveModelProvider(projectId ?? undefined).provider === 'openai-codex'
+        && (projectId === null || (await projectSettingsStore.list(project_slug)).some(project => project.id === projectId)),
       read: projectId => codexOwnerBindings.controls.state(projectId),
       act: (projectId, request) => codexOwnerBindings.controls.act(projectId, request),
     })
@@ -6970,6 +6989,7 @@ export function buildOpenGraphComposer(
       // replacing the no-op. Fully guarded; never throws into the tick.
       watchdog_notifier: watchdogNotifier,
       reminder_dispatcher,
+      ...(options.reminderScheduler ? { reminder_scheduler: options.reminderScheduler } : {}),
       // Executor-mode reminders (plan task 4) — the ritual executor factory
       // (llmPool-gated). `remindersModule` invokes it with the graph's
       // ApprovalManager and wires the tick's ritual dispatch branch.

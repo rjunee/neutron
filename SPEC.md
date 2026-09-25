@@ -322,6 +322,19 @@ references decisions by date; none is a second home for a decision.
 
 ## Decisions Log (immutable audit trail — NOT the build spec)
 
+### 2026-09-24 — Latest available models within explicit Trident tiers.
+
+Owner-directed: Astra handles the most complex or important work, Sol medium
+work, and Terra mechanical work. A named tier selects the latest verified model
+available in that class, without substituting another model class or provider.
+The verified Codex catalog maps Astra/Sol/Luna to GPT-6 and Terra to GPT-5.6;
+there is no verified GPT-6 Terra entry. Explicit phase choices retain their tier.
+The flagship Codex review default is Astra; direct build invocations default to
+Sol. An empty model selection or an unavailable selected model must refuse rather
+than silently use the CLI default. Model turnover preserves provider placement,
+review independence, vetoes, arbitration, mutation proof, leak preflight, full
+suite and pinned merge. Historical records keep their original model IDs.
+
 ### 2026-09-23 — Project-owned Herdr workspaces, useful tab names, and sleeping projects.
 
 Owner-directed: one Herdr workspace per active project, main project chat first,

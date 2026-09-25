@@ -33,7 +33,8 @@ for (const manifestPath of JSON.parse(process.argv[2])) {
   const dependencies = Object.keys({ ...manifest.dependencies, ...manifest.devDependencies, ...manifest.optionalDependencies, ...manifest.peerDependencies }).sort();
   for (const dependency of dependencies) {
     let target;
-    try { target = Bun.resolveSync(dependency, path.dirname(path.join(root, manifestPath))); }
+    // Bun's importer is a file: a directory can skip its package-local links.
+    try { target = Bun.resolveSync(dependency, path.join(root, manifestPath)); }
     catch { observations.push([manifestPath, dependency, null]); continue; }
     const actual = fs.realpathSync(target);
     if (!actual.startsWith(root + path.sep)) process.exit(3);
@@ -113,7 +114,6 @@ export async function projectInstalledTreeIdentity(worktree: string,
       root, { LC_ALL: 'C' }, remaining)
     if (!measured.ok || measured.timed_out || measured.stdout.length > 64 * 1024 * 1024
       || !measured.stdout.endsWith('\0') || measured.stdout.includes('\uFFFD')) return null
-    hash.update(measured.stdout)
     const fields = measured.stdout.split('\0')
     fields.pop()
     if (fields.length === 0 || fields.length % 9 !== 0) return null
@@ -126,7 +126,19 @@ export async function projectInstalledTreeIdentity(worktree: string,
       const kind = fields[index + 7]
       if (kind === 'l') links.push(path)
       else if (kind !== 'f' && kind !== 'd') return null
+      // Workspace links reach first-party directories where tests create and
+      // remove scratch entries. Their size/mtime/ctime describe that churn, not
+      // surviving inputs. Keep directory identity and permissions, every child,
+      // and all metadata inside installed trees (including nested node_modules).
+      const canonicalizeWorkspaceDirectory = kind === 'd'
+        && !path.slice(root.length + 1).split(sep).includes('node_modules')
+      if (canonicalizeWorkspaceDirectory) {
+        fields[index + 4] = '0'
+        fields[index + 5] = '0'
+        fields[index + 6] = '0'
+      }
     }
+    hash.update(fields.join('\0') + '\0')
     // Resolve only links, in bounded groups; ordinary files require no JS stat.
     for (let offset = 0; offset < links.length; offset += 64) {
       if (performance.now() >= deadline) return null
