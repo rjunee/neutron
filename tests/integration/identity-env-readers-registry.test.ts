@@ -403,6 +403,8 @@ const KNOWN_READERS: Readonly<Record<string, string>> = {
     'Broad regex literal at scribe/reflect/reflect-pass.ts:1097 matches an identity-name candidate; registered conservatively, without claiming an env read or trimming behavior.',
   'scripts/spec-items-index.ts':
     'Broad regex literal at scripts/spec-items-index.ts:99 matches an identity-name candidate; registered conservatively, without claiming an env read or trimming behavior.',
+  'scripts/build-timeline-codex-import.ts':
+    'Opaque evidence-reference validation regex at scripts/build-timeline-codex-import.ts:90 accepts identity-name candidates. No identity environment access; the importer reads explicitly supplied rollout/config paths. Regex-only classification and an actual-reader control are pinned below.',
   'skill-forge/command.ts':
     'Broad regex literal at skill-forge/command.ts:74 matches an identity-name candidate; registered conservatively, without claiming an env read or trimming behavior.',
   'skill-forge/distiller.ts':
@@ -955,6 +957,17 @@ test('claimed-path tokenizer is a regex match, not a direct identity env reader'
   expect(READ_PATTERNS.some((pattern) => pattern.test(realReader))).toBe(true)
   expect(processEnvAccess.test(realReader)).toBe(true)
   expect(identityKeyAccess.test(realReader)).toBe(true)
+})
+
+test('timeline importer evidence-reference validator is a conservative regex match', () => {
+  const importer = readFileSync(join(ROOT, 'scripts/build-timeline-codex-import.ts'), 'utf8')
+  const realReader = readFileSync(join(ROOT, 'migrations/db-path.ts'), 'utf8')
+  const processEnvAccess = /\bprocess\s*\.\s*env\b/
+  expect(namesIdentityVar(importer, 'scripts/build-timeline-codex-import.ts')).toBe(true)
+  expect(READ_PATTERNS.some((pattern) => pattern.test(importer))).toBe(false)
+  expect(processEnvAccess.test(importer)).toBe(false)
+  expect(READ_PATTERNS.some((pattern) => pattern.test(realReader))).toBe(true)
+  expect(processEnvAccess.test(realReader)).toBe(true)
 })
 
 test('NO FILE IS BLIND TO A PLAINLY-SPELLED READ — the answer cannot depend on which file', () => {
