@@ -59,8 +59,14 @@ import { createHash } from 'node:crypto'
 import { ProjectDb } from '@neutronai/persistence/index.ts'
 import { seedMigratedDb } from '../../tests/support/migrated-db.ts'
 import { TridentRunStore } from '@neutronai/trident/store.ts'
-import { WorkBoardStore } from '@neutronai/work-board/store.ts'
-import { dispatchBoardBoundBuild } from '@neutronai/trident/board-dispatch.ts'
+import { WorkBoardStore, workBoardProjectIdForKey } from '@neutronai/work-board/store.ts'
+import { dispatchBoardBoundBuild, type BoardBoundBuildDeps } from '@neutronai/trident/board-dispatch.ts'
+import { DispatchHoldStore } from '@neutronai/trident/dispatch-holds.ts'
+import { ProjectAdmission } from '@neutronai/gateway/project-admission.ts'
+import { reconcileBuildLeases } from '@neutronai/gateway/project-admission-reconcile.ts'
+import { buildAdmissionReleaseObserver } from '@neutronai/gateway/proactive/admission-release.ts'
+import { buildTridentTerminalObserver } from '../wiring/trident-nexus-observer.ts'
+import { fixtureDispatchAdmission } from '@neutronai/trident/__tests__/dispatch-admission-fixture.ts'
 import { buildTridentOrchestrator } from '@neutronai/trident/orchestrator.ts'
 import { createProjectLauncher } from '@neutronai/trident/project-launcher.ts'
 import { slugifyTask } from '@neutronai/trident/slugify-task.ts'
@@ -1319,7 +1325,7 @@ test('historical carrier checkpoints remain refused on resume and are not adopte
   expect(await gitOut(spawnCapture, f.repo, ['rev-parse', `refs/heads/${prior.branch}`])).toBe(String(checkpoint.head))
   await f.store.update(prior.id, { phase: 'failed', worktree: null })
   const dispatched = await dispatchBoardBoundBuild({ task, board_item_id: 'retry-card' }, {
-    store: f.store, project_slug: 'project', repo_path: f.repo,
+    store: f.store, projectAdmission: fixtureDispatchAdmission(f.db), project_slug: 'project', repo_path: f.repo,
     board: { get: () => ({ id: 'retry-card', title: task, design_doc_ref: null, linked_run_id: prior.id }), attachRun: async () => {} },
     resolveBuildRepo: async () => f.repo, resolveMergeMode: async () => 'pr', hostRunner: f.context.runHost,
   })
@@ -2693,7 +2699,7 @@ for (const owned of [true, false]) test(`salvaged publication ${owned ? 'carries
   expect((await spawnCapture(['git', '-C', f.repo, 'worktree', 'remove', '--force', prior.worktree!], f.repo)).ok).toBe(true)
   await f.store.save({ ...salvaged!, worktree: null })
   const dispatched = await dispatchBoardBoundBuild({ task, board_item_id: 'salvage-retry-card' }, {
-    store: f.store, project_slug: 'project', repo_path: f.repo,
+    store: f.store, projectAdmission: fixtureDispatchAdmission(f.db), project_slug: 'project', repo_path: f.repo,
     board: { get: () => ({ id: 'salvage-retry-card', title: task, design_doc_ref: null, linked_run_id: prior.id }), attachRun: async () => {} },
     resolveBuildRepo: async () => f.repo, resolveMergeMode: async () => 'pr',
   })
@@ -2802,7 +2808,7 @@ test(`initial planner chooses ${strategy} through board and launcher ${spec ? 'w
   const f = await fixture({ spec, taskSequence: strategy === 'task_sequence', moreTasks: true, seedLedger: false, hostLedger: true })
   const task = 'Record and verify both requested notes with the complete regression suite. MORE TASKS'
   const dispatched = await dispatchBoardBoundBuild({ task, board_item_id: 'strategy-card' }, {
-    store: f.store, project_slug: 'project', repo_path: f.repo,
+    store: f.store, projectAdmission: fixtureDispatchAdmission(f.db), project_slug: 'project', repo_path: f.repo,
     board: { get: () => ({ id: 'strategy-card', title: task, design_doc_ref: null, linked_run_id: null }), attachRun: async () => {} },
     resolveBuildRepo: async () => f.repo, resolveMergeMode: async () => 'pr', hostRunner: f.context.runHost,
   })
@@ -3892,7 +3898,7 @@ async function handOffThenDie(f: Awaited<ReturnType<typeof fixture>>, mergeMode:
 
 function redispatchContinuation(f: Awaited<ReturnType<typeof fixture>>, priorId: string, mergeMode: 'pr' | 'local') {
   return dispatchBoardBoundBuild({ task: CONTINUATION_TASK, board_item_id: 'card' }, {
-    store: f.store, project_slug: 'project', repo_path: f.repo,
+    store: f.store, projectAdmission: fixtureDispatchAdmission(f.db), project_slug: 'project', repo_path: f.repo,
     board: { get: () => ({ id: 'card', title: CONTINUATION_TASK, design_doc_ref: null, linked_run_id: priorId }),
       attachRun: async () => {} },
     resolveBuildRepo: async () => f.repo, resolveMergeMode: async () => mergeMode,
@@ -4438,7 +4444,7 @@ test(`unchanged-tip retry consumes prior ${scenario} mutation nomination despite
   }
   const retainedArtifact = await readFile(join(f.context.stateRoot, prior.id, 'build.result'), 'utf8')
   const dispatched = await dispatchBoardBoundBuild({ task, board_item_id: 'retry-card' }, {
-    store: f.store, project_slug: 'project', repo_path: f.repo,
+    store: f.store, projectAdmission: fixtureDispatchAdmission(f.db), project_slug: 'project', repo_path: f.repo,
     max_rounds: scenario === 'exhausted' ? 1 : 5,
     board: { get: () => ({ id: 'retry-card', title: task, design_doc_ref: null, linked_run_id: prior.id }), attachRun: async () => {} },
     resolveBuildRepo: async () => f.repo, resolveMergeMode: async () => 'pr',
@@ -4522,7 +4528,7 @@ test(`an orchestrated ${mergeMode} retry survives launch falsification: ${scenar
   const checkpoint = lastCheckpoint(f)
   await f.store.update(f.row.id, { phase: 'failed', worktree: null })
   const redispatch = (priorId: string) => dispatchBoardBoundBuild({ task, board_item_id: 'retry-card' }, {
-    store: f.store, project_slug: 'project', repo_path: f.repo,
+    store: f.store, projectAdmission: fixtureDispatchAdmission(f.db), project_slug: 'project', repo_path: f.repo,
     board: { get: () => ({ id: 'retry-card', title: task, design_doc_ref: null, linked_run_id: priorId }), attachRun: async () => {} },
     resolveBuildRepo: async () => f.repo, resolveMergeMode: async () => mergeMode,
   })
@@ -4644,7 +4650,7 @@ test(`a cross-run ${mergeMode} retry ${moved ? 'refuses remote movement after di
   await f.store.update(prior.id, { phase: 'failed', worktree: null })
 
   const redispatch = (priorId: string) => dispatchBoardBoundBuild({ task, board_item_id: 'retry-card' }, {
-    store: f.store, project_slug: 'project', repo_path: f.repo,
+    store: f.store, projectAdmission: fixtureDispatchAdmission(f.db), project_slug: 'project', repo_path: f.repo,
     board: { get: () => ({ id: 'retry-card', title: task, design_doc_ref: null, linked_run_id: priorId }),
       attachRun: async () => {} },
     resolveBuildRepo: async () => f.repo, resolveMergeMode: async () => mergeMode,
@@ -5123,7 +5129,7 @@ test(`terminal task-sequence ${mergeMode} publication retry re-proves the built 
   const prior = f.store.get(f.row.id)!
   await f.store.update(prior.id, { phase: 'failed', worktree: null })
   const dispatched = await dispatchBoardBoundBuild({ task, board_item_id: 'retry-card' }, {
-    store: f.store, project_slug: 'project', repo_path: f.repo,
+    store: f.store, projectAdmission: fixtureDispatchAdmission(f.db), project_slug: 'project', repo_path: f.repo,
     board: { get: () => ({ id: 'retry-card', title: task, design_doc_ref: null, linked_run_id: prior.id }), attachRun: async () => {} },
     resolveBuildRepo: async () => f.repo, resolveMergeMode: async () => mergeMode,
   })
@@ -5267,3 +5273,62 @@ test('no terminal host: cross-provider workers run unplaced with the reason on r
   expect(receipts).toHaveLength(4)
   for (const receipt of receipts) expect(receipt).toEqual({ state: 'unplaced', reason: 'herdr-unconfigured' })
 }, 300_000)
+
+test('project admission end to end: fenced dispatch queues, reopened dispatch leases run.id, terminal chain releases, restart re-leases (#1237)', async () => {
+  const f = await fixture({})
+  // The composer's wiring, over the fixture's own database: the board scope key
+  // `'project'` is the owner slug, so every run here is in the General scope.
+  const OWNER_SLUG = 'project'
+  const projectIdForRun = (run: { project_slug: string }) => workBoardProjectIdForKey(OWNER_SLUG, run.project_slug) ?? null
+  const admission = new ProjectAdmission({ db: f.db, ownerHandle: 'e2e-owner', bootId: 'e2e-boot-a' })
+  const holds = new DispatchHoldStore(f.db)
+  const task = 'Record and verify the requested note with the complete regression suite.'
+  const deps = (): BoardBoundBuildDeps => ({
+    store: f.store, projectAdmission: admission.forDispatch(null, 'work-board'), holds, project_slug: OWNER_SLUG, repo_path: f.repo,
+    board: { get: () => ({ id: 'fence-card', title: task, design_doc_ref: null, linked_run_id: null }), attachRun: async () => {} },
+    resolveBuildRepo: async () => f.repo, resolveMergeMode: async () => 'pr', hostRunner: f.context.runHost,
+  })
+  const runRows = (): number => f.db.raw().query<{ n: number }, []>('SELECT COUNT(*) AS n FROM code_trident_runs').get()!.n
+  const buildLeases = (a: ProjectAdmission) => a.listLeases('build').map((l) => l.workRef)
+  const rowsBefore = runRows()
+
+  // 1. FENCED: refused and queued; nothing git- or row-shaped happened.
+  await admission.maintenance.register(admission.scopeFor(null))
+  const fence = (await admission.maintenance.beginMaintenance(admission.scopeFor(null)))!
+  expect(fence).not.toBeNull()
+  const fenced = await dispatchBoardBoundBuild({ task, board_item_id: 'fence-card' }, deps())
+  expect(fenced).toMatchObject({ ok: false, code: 'project_fenced', hold: { kind: 'fence' } })
+  expect(holds.getByItem(OWNER_SLUG, 'fence-card')).not.toBeNull()
+  expect(runRows()).toBe(rowsBefore)
+  expect(buildLeases(admission)).toEqual([])
+
+  // 2. REOPENED: the same dispatch is admitted and the run owns the lease.
+  expect(await admission.maintenance.abandon(fence)).toBe(true)
+  const dispatched = await dispatchBoardBoundBuild({ task, board_item_id: 'fence-card' }, deps())
+  expect(dispatched.ok, JSON.stringify(dispatched)).toBe(true)
+  if (!dispatched.ok) return
+  expect(buildLeases(admission)).toEqual([dispatched.run.id])
+  expect(holds.getByItem(OWNER_SLUG, 'fence-card')).toBeNull()
+
+  // 3. TERMINAL: the composed chain — release observer first — hands the lease back.
+  await f.store.update(dispatched.run.id, { phase: 'failed' })
+  const chain = buildTridentTerminalObserver({
+    nexus: null,
+    observers: [buildAdmissionReleaseObserver({ releaseBuild: (run) => admission.releaseBuild(projectIdForRun(run), run.id) })],
+  })
+  await chain(f.store.get(dispatched.run.id)!)
+  expect(buildLeases(admission)).toEqual([])
+
+  // 4. RESTART: a second connection on the same file. The fixture's own run is
+  // still non-terminal; its lease was lost (deleted), so reconciliation re-leases it.
+  const reopened = ProjectDb.open(join(f.dir, 'project.db'))
+  cleanups.push(() => reopened.close())
+  const restarted = new ProjectAdmission({ db: reopened, ownerHandle: 'e2e-owner', bootId: 'e2e-boot-b' })
+  const live = await restarted.admit(null, 'build', 'work-board', f.row.id)
+  expect(live.status).toBe('admitted')
+  reopened.runSync('DELETE FROM project_admission_leases WHERE work_ref = ?', [f.row.id])
+  expect(buildLeases(restarted)).toEqual([])
+  const reconciled = await reconcileBuildLeases({ admission: restarted, runs: new TridentRunStore(reopened), projectIdForRun })
+  expect(reconciled).toMatchObject({ released: 0, leased: 1 })
+  expect(buildLeases(restarted)).toEqual([f.row.id])
+}, 120_000)

@@ -3,7 +3,9 @@ import type { AgentSpec } from '@neutronai/runtime/substrate.ts'
 import { FIRE_PUBLISHED_REASON_MARKER, FIRE_SETTLE_TIMEOUT_ERROR, publishedFailureReason } from '@neutronai/trident/fire-evidence.ts'
 import type { TridentRun } from '@neutronai/trident/store.ts'
 import { makeTridentRun } from '@neutronai/trident/testing/make-trident-run.ts'
-import { LIVE_AGENT_TOOL_NAMES } from '../../wiring/build-live-agent-turn.ts'
+import { randomUUID } from 'node:crypto'
+import { LIVE_AGENT_TOOL_NAMES, ProjectAdmissionRefusedError } from '../../wiring/build-live-agent-turn.ts'
+import { openAdmission, type FixtureAdmission } from '../../wiring/__tests__/project-admission-fixture.ts'
 import {
   buildTerminalBuildWakeObserver,
   buildTerminalBuildWakePrompt,
@@ -230,5 +232,69 @@ describe('terminal build wake', () => {
       expect(prompt.split('\n')).toContain(ORIGINAL_INSTRUCTION_2)
       expect(prompt).not.toContain('Do NOT relaunch this build yet')
     }
+  })
+})
+
+describe('terminal build wake — project admission refusal (#1237)', () => {
+  /**
+   * The acting turn's own gate, as `composeActingTurn` spells it: admit an
+   * `acting-turn` lease over a REAL admission, reject with the typed refusal when
+   * the scope is fenced, release after the compose.
+   */
+  function gatedHarness(fx: FixtureAdmission) {
+    const h = harness()
+    const warns: Array<{ message: string; fields: Record<string, unknown> | undefined }> = []
+    const errors: string[] = []
+    h.deps.llm = {
+      compose: async (spec) => {
+        const out = await fx.admit('acme', 'liveChild', 'acting-turn', `wake:${randomUUID()}`)
+        if (out.status === 'fenced') {
+          throw new ProjectAdmissionRefusedError({ code: 'project_fenced', detail: `project "acme" is fenced for maintenance (${out.phase})` })
+        }
+        if (out.status !== 'admitted') throw new ProjectAdmissionRefusedError({ code: 'project_unknown', detail: 'not live' })
+        try {
+          h.specs.push(spec)
+          return 'Acted.'
+        } finally {
+          await out.release()
+        }
+      },
+    }
+    h.deps.logger = {
+      error: (message) => { errors.push(message) },
+      warn: (message, fields) => { warns.push({ message, fields }) },
+    }
+    return { ...h, warns, errors }
+  }
+
+  test('a FENCED project refuses the wake: claimWake is never called and the refusal is logged at warn', async () => {
+    const fx = openAdmission()
+    await fx.admit('acme', 'conversation', 'chat', 'seed-registration')
+    const fence = (await fx.service.maintenance.beginMaintenance(fx.service.scopeFor('acme')))!
+    expect(fence).not.toBeNull()
+    const h = gatedHarness(fx)
+
+    await buildTerminalBuildWakeObserver(h.deps)(run())
+
+    expect(h.claims).toEqual([])
+    expect(h.posts).toEqual([])
+    expect(h.warns.map((w) => w.message)).toEqual(['terminal_build_wake_refused'])
+    expect(h.warns[0]!.fields).toMatchObject({ run_id: 'run-123', code: 'project_fenced' })
+    // A refusal is expected state, not a fault: nothing at error.
+    expect(h.errors).toEqual([])
+
+    // Reopen: the SAME wake (still pending, never claimed) now completes.
+    expect(await fx.service.maintenance.abandon(fence)).toBe(true)
+    await buildTerminalBuildWakeObserver(h.deps)(run())
+    expect(h.claims).toEqual(['run-123'])
+    expect(h.posts).toEqual([false])
+    expect(h.specs).toHaveLength(1)
+  })
+
+  test('a non-admission compose failure still logs terminal_build_wake_pending at error (control)', async () => {
+    const h = harness(new Error('provider down'))
+    await buildTerminalBuildWakeObserver(h.deps)(run())
+    expect(h.claims).toEqual([])
+    expect(h.logs).toEqual([expect.objectContaining({ run_id: 'run-123', error: 'provider down' })])
   })
 })

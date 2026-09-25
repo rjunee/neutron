@@ -37,6 +37,7 @@ import {
   type TridentBoardBinder,
 } from './board-dispatch.ts'
 import type { TridentRun } from './store.ts'
+import type { DispatchAdmission } from './dispatch-admission.ts'
 
 const log = createLogger('trident')
 
@@ -281,10 +282,14 @@ function staleHoldAgeMs(created_at: string, nowMs: number): number | null {
  * the queue converges without this function ever calling itself.
  *
  * Each hold is handled in its own try/catch so one bad row can never block the
- * rest, and a non-`held` REJECTION drops the hold with a warn log: the card is
- * not silently lost (it sits un-dispatched on the board and the reason is in the
- * log), but neither is it retried forever against a rejection that will not
- * change on its own.
+ * rest. The TRANSIENT refusals RETAIN the hold — `held`, `branch_live`,
+ * `project_fenced` (the gate refreshed the row; admission reopening is the event
+ * that clears it) and `project_unknown` (a soft-deleted project can be restored,
+ * and a hold nothing re-dispatches is the worse outcome — the same reasoning as
+ * {@link BRANCH_LIVE_HOLD_STALE_MS}). Every OTHER rejection drops the hold with a
+ * warn log: the card is not silently lost (it sits un-dispatched on the board
+ * and the reason is in the log), but neither is it retried forever against a
+ * rejection that will not change on its own.
  */
 export function buildDispatchHoldSweep(deps: {
   holds: DispatchHoldStore
@@ -316,6 +321,12 @@ export function buildDispatchHoldSweep(deps: {
      * keeps the composer's `makeDispatchDeps` honest.
      */
     hostRunner: NonNullable<BoardBoundBuildDeps['hostRunner']>
+    /**
+     * PROJECT ADMISSION for the hold's own scope (#1237), producer `hold-drain`.
+     * Already required by `BoardBoundBuildDeps`; restated so this unattended
+     * entry's contract names every gate it re-runs.
+     */
+    projectAdmission: DispatchAdmission
   }
   /** Injectable clock (ms) for the stale-hold age line; defaults to wall clock. */
   now?: () => number
@@ -378,6 +389,21 @@ export function buildDispatchHoldSweep(deps: {
           continue
         }
         if (result.code === 'held') continue // still blocked; the gate refreshed the row
+        // FENCED FOR MAINTENANCE (#1237) — transient exactly like `held`: the gate
+        // refreshed this row, and the next sweep after admission reopens dispatches it.
+        if (result.code === 'project_fenced') continue
+        // NOT A LIVE PROJECT (#1237) — RETAINED, never deleted. A soft-deleted
+        // project can be restored, and deleting would drop a queued card that
+        // nothing else ever re-dispatches (the `BRANCH_LIVE_HOLD_STALE_MS`
+        // reasoning). Said out loud so a hold parked here is legible.
+        if (result.code === 'project_unknown') {
+          log.warn('dispatch_hold_project_unknown', {
+            project: hold.project_slug,
+            item: hold.board_item_id,
+            held_since: hold.created_at,
+          })
+          continue
+        }
         // `branch_live` IS TRANSIENT, EXACTLY LIKE `held`. The dispatch gate
         // refuses when a live worktree lock (or a non-terminal same-branch run)
         // holds the card's branch — a condition that ends the moment that lane

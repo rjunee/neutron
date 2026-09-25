@@ -61,6 +61,7 @@ import {
   buildOpenAiToolManifest,
   resolveOpenConversationalProvider,
 } from '../composer.ts'
+import { fixtureDispatchAdmission } from '@neutronai/trident/__tests__/dispatch-admission-fixture.ts'
 
 function cannedHandle(instanceId: string): SessionHandle {
   const events = (async function* (): AsyncGenerator<Event, void, void> {
@@ -599,6 +600,7 @@ describe('wireSubstrates — instance ids + tool-bridge invariants', () => {
         { board_item_id: item.id, task: 'build the email core' },
         {
           store: runs,
+          projectAdmission: fixtureDispatchAdmission(db),
           board,
           project_slug: 'owner',
           repo_path: '/repo/dead',

@@ -29,6 +29,7 @@ import { isTerminalPhase } from './state-machine.ts'
 import { TridentRunStore, type TridentRun } from './store.ts'
 import { TridentTickLoop } from './tick.ts'
 import { honourDiffOutput } from './testing/diff-output-host.ts'
+import { fixtureDispatchAdmission } from './__tests__/dispatch-admission-fixture.ts'
 
 let tmp: string
 let db: ProjectDb
@@ -90,6 +91,7 @@ function boardStub(over: Partial<TridentBoardBinder> = {}): TridentBoardBinder {
 function ctx(over: Partial<TridentCodeContext> = {}): TridentCodeContext {
   return {
     store,
+    project_admission: fixtureDispatchAdmission(db),
     work_board: boardStub(),
     project_slug: 'proj-1',
     repo_path: '/repo',

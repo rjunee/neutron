@@ -24,6 +24,7 @@ import {
 import type { EnvCapableHostRunner, GitModeProbe } from './git-mode.ts'
 import { makeCredentialedHostRunner } from './git-mode.ts'
 import { slugifyTask } from './slugify-task.ts'
+import { fixtureDispatchAdmission } from './__tests__/dispatch-admission-fixture.ts'
 
 /**
  * A merge-mode probe that never shells out. `hasGithubOrigin: false` short-
@@ -102,6 +103,7 @@ function toolFor() {
   const reg = new ToolRegistry()
   registerTridentBuildToolSurface(reg, {
     store,
+    project_admission: () => fixtureDispatchAdmission(db),
     work_board: board(),
     repo_path: '/repo',
     // Identity workspace resolver — keep repo_path as-is, no real fs/git in unit tests.
@@ -116,6 +118,7 @@ describe('work_board_dispatch_build tool', () => {
     const reg = new ToolRegistry()
     registerTridentBuildToolSurface(reg, {
       store,
+      project_admission: () => fixtureDispatchAdmission(db),
       work_board: board(),
       repo_path: '/repo',
       merge_mode_probe: localProbe(),
@@ -175,6 +178,7 @@ describe('work_board_dispatch_build tool', () => {
     const reg = new ToolRegistry()
     registerTridentBuildToolSurface(reg, {
       store,
+      project_admission: () => fixtureDispatchAdmission(db),
       work_board: board(),
       repo_path: '/repo',
       resolveBuildRepo: async (home) => home,
@@ -222,6 +226,7 @@ describe('work_board_dispatch_build tool', () => {
     const reg = new ToolRegistry()
     registerTridentBuildToolSurface(reg, {
       store,
+      project_admission: () => fixtureDispatchAdmission(db),
       work_board: board(),
       repo_path: '/repo',
       resolveBuildRepo: async (home) => home,
@@ -268,6 +273,7 @@ describe('active-project scoping (P0: a named-project build lands on that projec
     const reg = new ToolRegistry()
     registerTridentBuildToolSurface(reg, {
       store,
+      project_admission: () => fixtureDispatchAdmission(db),
       work_board: board_stub,
       repo_path: '/repo',
       resolveBuildRepo: async (home) => home,
@@ -307,6 +313,7 @@ describe('active-project scoping (P0: a named-project build lands on that projec
     const resolveSlugs: string[] = []
     registerTridentBuildToolSurface(reg, {
       store,
+      project_admission: () => fixtureDispatchAdmission(db),
       work_board: recordingBoard(seen),
       repo_path: '/repo',
       resolveBuildRepo: async (home) => home,
@@ -330,6 +337,7 @@ function startToolFor(resolve_task?: (slug: string, item: { title: string; desig
   const reg = new ToolRegistry()
   registerTridentBuildToolSurface(reg, {
     store,
+    project_admission: () => fixtureDispatchAdmission(db),
     work_board: board(),
     repo_path: '/repo',
     // Identity workspace resolver — keep repo_path as-is, no real fs/git in unit tests.
@@ -483,6 +491,7 @@ describe('chat-ack seam (#429 task 4)', () => {
     const reg = new ToolRegistry()
     registerTridentBuildToolSurface(reg, {
       store,
+      project_admission: () => fixtureDispatchAdmission(db),
       work_board: board(),
       repo_path: '/repo',
       resolveBuildRepo: async (home) => home,
@@ -658,6 +667,7 @@ describe('the seed tip probe is credentialed on EVERY tool entry (private origin
     const reg = new ToolRegistry()
     registerTridentBuildToolSurface(reg, {
       store,
+      project_admission: () => fixtureDispatchAdmission(db),
       work_board: binder(),
       repo_path: tmp,
       resolveBuildRepo: async (home) => home,

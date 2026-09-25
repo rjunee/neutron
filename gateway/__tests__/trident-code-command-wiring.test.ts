@@ -17,6 +17,7 @@ import { ProjectDb } from '@neutronai/persistence/index.ts'
 import { TridentRunStore } from '@neutronai/trident/store.ts'
 import type { TridentCodeContext } from '@neutronai/trident/code-command.ts'
 import { buildTridentCodeChatCommandFilter } from '../boot-helpers.ts'
+import { ProjectAdmission } from '../project-admission.ts'
 
 let tmp: string
 let db: ProjectDb
@@ -45,6 +46,8 @@ const matchInput = (body: string) => ({
 function ctxFor(): TridentCodeContext {
   return {
     store,
+    project_admission: new ProjectAdmission({ db, ownerHandle: 'code-wiring-owner', bootId: 'code-wiring-boot' })
+      .forDispatch(null, 'work-board'),
     // Phase 2b — a board binder with one ready item ('it1', detailed title).
     work_board: {
       get: (_slug, id) =>

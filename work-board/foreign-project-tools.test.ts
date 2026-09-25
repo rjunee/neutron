@@ -7,6 +7,7 @@ import { ToolRegistry } from '@neutronai/tools/registry.ts'
 import { seedMigratedDb } from '../tests/support/migrated-db.ts'
 import { TridentRunStore } from '@neutronai/trident/store.ts'
 import { registerTridentBuildToolSurface } from '@neutronai/trident/work-board-build-tool.ts'
+import { fixtureDispatchAdmission } from '@neutronai/trident/__tests__/dispatch-admission-fixture.ts'
 import { registerWorkBoardToolSurface } from './agent-tool.ts'
 import { WorkBoardStore } from './store.ts'
 import { WorkBoardRemovalService } from './removal.ts'
@@ -26,6 +27,8 @@ beforeEach(() => {
   registerWorkBoardToolSurface(registry, store, { removal: new WorkBoardRemovalService({ store }) })
   registerTridentBuildToolSurface(registry, {
     store: new TridentRunStore(db), work_board: store, repo_path: tmp,
+    // Admission is not this suite's subject: every scope admits through General.
+    project_admission: () => fixtureDispatchAdmission(db),
     resolveBuildRepo: async () => tmp,
     merge_mode_probe: {
       credential: { owner_handle: 'test-owner', source: 'fixture', load: async () => ({}) },

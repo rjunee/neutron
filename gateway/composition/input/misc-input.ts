@@ -477,6 +477,12 @@ export interface MiscCompositionInput {
      * itself: builds still start, they just stop respecting dependencies.
      */
     holds?: import('@neutronai/trident/dispatch-holds.ts').DispatchHoldStore
+    /**
+     * #1237 — project admission for the board scope key each call derives
+     * (producer `work-board`). REQUIRED: a dispatch without a lease is invisible
+     * to a maintenance fence.
+     */
+    project_admission: (scope_key: string) => import('@neutronai/trident/dispatch-admission.ts').DispatchAdmission
   }
   /**
    * Codex connect/status agent tools (Part B) — when supplied, the `tools`

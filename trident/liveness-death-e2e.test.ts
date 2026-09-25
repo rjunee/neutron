@@ -30,6 +30,7 @@ import {
   registerTridentBuildToolSurface,
   WORK_BOARD_START_TOOL,
 } from './work-board-build-tool.ts'
+import { fixtureDispatchAdmission } from './__tests__/dispatch-admission-fixture.ts'
 
 let scratchpad: string
 let db: ProjectDb
@@ -147,6 +148,7 @@ describe('external launcher death reaches the real orchestrator without killing 
     const registry = new ToolRegistry()
     registerTridentBuildToolSurface(registry, {
       store,
+      project_admission: () => fixtureDispatchAdmission(db),
       work_board: board,
       repo_path: '/repo',
       resolveBuildRepo: async (home) => home,

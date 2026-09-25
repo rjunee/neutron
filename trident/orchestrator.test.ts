@@ -48,6 +48,7 @@ import { buildTestStrategyDetail, readHostBudget } from './test-strategy.ts'
 import { buildTridentDelivery, composeTerminalDelivery, type OutboundSink } from './delivery.ts'
 import { honourDiffOutput } from './testing/diff-output-host.ts'
 import { makeTridentRun } from './testing/make-trident-run.ts'
+import { fixtureDispatchAdmission } from './__tests__/dispatch-admission-fixture.ts'
 
 /**
  * Trident v2 (Work Board Phase 2a exec-model) — the orchestrator step now FIRES
@@ -4980,7 +4981,7 @@ describe('orchestrator — TASK SEQUENCE RE-FIRE (#362): multi-task build re-fir
     const dispatched = await dispatchBoardBoundBuild(
       { task: TASK, board_item_id: 'ready' },
       {
-        store, board, project_slug: 't1', repo_path: tmp,
+        store, projectAdmission: fixtureDispatchAdmission(db), board, project_slug: 't1', repo_path: tmp,
         resolveBuildRepo: async () => '/repo',
         resolveMergeMode: async () => 'pr',
         readBranchTip: async () => HEAD40,

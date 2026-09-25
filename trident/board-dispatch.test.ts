@@ -17,6 +17,7 @@ import { makeCredentialedHostRunner } from './git-mode.ts'
 import type { EnvCapableHostRunner, HostCommandResult } from './git-mode.ts'
 import type { BranchHolderProbe } from './fire-evidence-probes.ts'
 import { slugifyTask } from './slugify-task.ts'
+import { fixtureBuildLeases, fixtureDispatchAdmission, fixtureProjectAdmission } from './__tests__/dispatch-admission-fixture.ts'
 
 let tmp: string
 let db: ProjectDb
@@ -84,6 +85,7 @@ function dispatch(repoDir: string, secretsStore: { get: () => Promise<string | n
     { task: 'build the thing', board_item_id: 'ready' },
     {
       store,
+      projectAdmission: fixtureDispatchAdmission(db),
       board,
       project_slug: 'proj-1',
       repo_path: tmp,
@@ -98,6 +100,7 @@ function dispatch(repoDir: string, secretsStore: { get: () => Promise<string | n
 function localDeps(boardOverride: TridentBoardBinder = board): BoardBoundBuildDeps {
   return {
     store,
+    projectAdmission: fixtureDispatchAdmission(db),
     board: boardOverride,
     project_slug: 'proj-1',
     repo_path: tmp,
@@ -524,6 +527,7 @@ describe('dispatch refuses a card whose work already landed', () => {
         { task: 'build the thing', board_item_id: 'ready' },
         {
           store,
+          projectAdmission: fixtureDispatchAdmission(db),
           board: recordingBoard,
           project_slug: 'proj-1',
           repo_path: tmp,
@@ -633,6 +637,7 @@ describe('dispatch refuses a card whose work already landed', () => {
         { task: 'build the thing', board_item_id: 'ready' },
         {
           store,
+          projectAdmission: fixtureDispatchAdmission(db),
           board,
           project_slug: 'proj-1',
           repo_path: tmp,
@@ -697,6 +702,7 @@ describe('branch liveness refusal (branch_live)', () => {
   function livenessDeps(repoDir: string, over: Partial<BoardBoundBuildDeps> = {}): BoardBoundBuildDeps {
     return {
       store,
+      projectAdmission: fixtureDispatchAdmission(db),
       board,
       holds: new DispatchHoldStore(db),
       project_slug: 'proj-1',
@@ -1552,6 +1558,7 @@ describe('dispatch seeds a resume from a built-but-never-reviewed prior run', ()
         { task: TASK, board_item_id: 'ready' },
         {
           store,
+          projectAdmission: fixtureDispatchAdmission(db),
           board,
           project_slug: 'proj-1',
           repo_path: tmp,
@@ -1622,6 +1629,7 @@ describe('dispatch seeds a resume from a built-but-never-reviewed prior run', ()
     /** Everything the three production callers actually pass — and nothing else. */
     const productionDeps = (): BoardBoundBuildDeps => ({
       store,
+      projectAdmission: fixtureDispatchAdmission(db),
       board,
       project_slug: 'proj-1',
       repo_path: tmp,
@@ -1704,6 +1712,7 @@ describe('dispatch seeds a resume from a built-but-never-reviewed prior run', ()
         { task: TASK, board_item_id: 'ready' },
         {
           store,
+          projectAdmission: fixtureDispatchAdmission(db),
           board,
           project_slug: 'proj-1',
           repo_path: tmp,
@@ -2293,4 +2302,136 @@ test('production resolver uses declared card repo and refuses undeclared repo be
   expect(built.ok).toBe(true)
   expect(db.prepare<{ repo_path: string }, []>('SELECT repo_path FROM code_trident_runs').get()?.repo_path)
     .toBe(join(project, 'repos', 'docs'))
+})
+
+describe('project admission at the dispatch chokepoint (#1237)', () => {
+  const TASK = 'build the thing'
+  const runRows = (): number =>
+    db.raw().query<{ count: number }, []>('SELECT COUNT(*) AS count FROM code_trident_runs').get()?.count ?? -1
+
+  function committedRepo(name: string): string {
+    const dir = join(tmp, name)
+    mkdirSync(dir)
+    expect(Bun.spawnSync(['git', 'init'], { cwd: dir }).exitCode).toBe(0)
+    expect(Bun.spawnSync(['git', '-C', dir, '-c', 'user.email=t@t', '-c', 'user.name=t',
+      'commit', '--allow-empty', '-m', 'init']).exitCode).toBe(0)
+    return dir
+  }
+
+  function admissionDeps(repoDir: string, over: Partial<BoardBoundBuildDeps> = {}): BoardBoundBuildDeps & { repoCalls: { n: number } } {
+    const repoCalls = { n: 0 }
+    return {
+      store,
+      projectAdmission: fixtureDispatchAdmission(db),
+      board,
+      holds: new DispatchHoldStore(db),
+      project_slug: 'proj-1',
+      repo_path: tmp,
+      resolveBuildRepo: async () => {
+        repoCalls.n += 1
+        return repoDir
+      },
+      resolveMergeMode: async () => 'local',
+      ...over,
+      repoCalls,
+    }
+  }
+
+  async function fenceGeneral() {
+    const admission = fixtureProjectAdmission(db)
+    // A fence applies to a PROVISIONED scope (the first admission registers it).
+    await admission.maintenance.register(admission.scopeFor(null))
+    const fence = await admission.maintenance.beginMaintenance(admission.scopeFor(null))
+    expect(fence).not.toBeNull()
+    return { admission, fence: fence! }
+  }
+
+  test('a FENCED project refuses with project_fenced, queues a hold, and does no git or row work', async () => {
+    const repoDir = committedRepo('repo-fenced')
+    await fenceGeneral()
+    const deps = admissionDeps(repoDir)
+
+    const result = await dispatchBoardBoundBuild({ task: TASK, board_item_id: 'ready' }, deps)
+
+    expect(result.ok).toBe(false)
+    if (result.ok) return
+    expect(result.code).toBe('project_fenced')
+    expect(result.message).toContain('fenced for maintenance (draining)')
+    expect(result.message).toContain('QUEUED')
+    expect('hold' in result && result.hold).toEqual({ kind: 'fence' })
+    // The hold row exists, stored inside the table's CHECK as a `path` hold.
+    const hold = new DispatchHoldStore(db).getByItem('proj-1', 'ready')
+    expect(hold).toMatchObject({ hold_kind: 'path', task: TASK })
+    // ZERO run rows, and the workspace resolver — the first git-shaped step — never ran.
+    expect(runRows()).toBe(0)
+    expect(deps.repoCalls.n).toBe(0)
+    expect(fixtureBuildLeases(db)).toEqual([])
+  })
+
+  test('REOPENING admits the same dispatch, and the run owns exactly one build lease naming run.id', async () => {
+    const repoDir = committedRepo('repo-reopened')
+    const { admission, fence } = await fenceGeneral()
+    const fenced = await dispatchBoardBoundBuild({ task: TASK, board_item_id: 'ready' }, admissionDeps(repoDir))
+    expect(fenced).toMatchObject({ ok: false, code: 'project_fenced' })
+
+    expect(await admission.maintenance.abandon(fence)).toBe(true)
+    const result = await dispatchBoardBoundBuild({ task: TASK, board_item_id: 'ready' }, admissionDeps(repoDir))
+
+    expect(result.ok).toBe(true)
+    if (!result.ok) return
+    const leases = fixtureBuildLeases(db)
+    expect(leases).toHaveLength(1)
+    expect(leases[0]!.workRef).toBe(result.run.id)
+    expect(leases[0]!.producer).toBe('work-board:dispatch-fixture-boot')
+    expect(runRows()).toBe(1)
+  })
+
+  test('an UNKNOWN project refuses with project_unknown — no hold, no run, no lease', async () => {
+    const repoDir = committedRepo('repo-unknown')
+    const deps = admissionDeps(repoDir, { projectAdmission: fixtureDispatchAdmission(db, 'no-such-project') })
+
+    const result = await dispatchBoardBoundBuild({ task: TASK, board_item_id: 'ready' }, deps)
+
+    expect(result).toMatchObject({ ok: false, code: 'project_unknown' })
+    expect(result.ok || 'hold' in result).toBe(false)
+    expect(new DispatchHoldStore(db).getByItem('proj-1', 'ready')).toBeNull()
+    expect(runRows()).toBe(0)
+    expect(deps.repoCalls.n).toBe(0)
+    expect(fixtureBuildLeases(db)).toEqual([])
+  })
+
+  // Every refusal AFTER the admission gate must hand the lease back: a leaked
+  // lease is invisible work that blocks a maintenance fence forever.
+  const blockerBoard: TridentBoardBinder = {
+    get: (_slug, id) =>
+      id === 'dep-card'
+        ? { id: 'dep-card', title: 'the dependency', design_doc_ref: null, status: 'in_progress' }
+        : { id: 'ready', title: 'wire the CSV export button to the new endpoint with tests', design_doc_ref: null,
+            blockers: ['dep-card'] },
+    attachRun: async () => {},
+  }
+  const refusalsAfterAdmission: Array<[string, string, (repoDir: string) => Partial<BoardBoundBuildDeps>]> = [
+    ['a declared blocker', 'held', () => ({ board: blockerBoard })],
+    ['a live branch holder', 'branch_live', () => ({
+      branchHolderProbe: async (): Promise<BranchHolderProbe> => ({
+        worktree_basename: 'wt-x', lock_reason: 'claude agent wf (pid 4242 start 1)', pid: 4242, pid_live: true, mtime_ms: null,
+      }),
+    })],
+    ['work that already landed', 'already_landed', () => ({
+      resolveMergeMode: async () => 'pr',
+      landedProbe: async () => ({ pr: 336, merged_at: '2026-08-16T23:27:00Z', head_on_base: true, base: 'main' }),
+    })],
+    ['a throwing merge-mode resolver', 'backend_error', () => ({
+      resolveMergeMode: async () => { throw new Error('probe exploded') },
+    })],
+  ]
+  for (const [label, code, over] of refusalsAfterAdmission) {
+    test(`${label} (${code}) releases the admitted lease — ZERO leases, zero runs`, async () => {
+      const repoDir = committedRepo(`repo-release-${code}`)
+      const result = await dispatchBoardBoundBuild({ task: TASK, board_item_id: 'ready' }, admissionDeps(repoDir, over(repoDir)))
+      expect(result).toMatchObject({ ok: false, code })
+      expect(runRows()).toBe(0)
+      expect(fixtureBuildLeases(db)).toEqual([])
+    })
+  }
 })
