@@ -91,6 +91,11 @@ export const MIN_EXPECTED_WIRED_FIELDS = 19
  */
 export const WIRED_FIELDS: readonly CompositionFieldWiredEntry[] = [
   {
+    field: 'project_maintenance',
+    provides:
+      'the project maintenance owner: exact-generation replacement with attestation (no caller in this build) and the boot-time restart continuity that releases a crashed pre-replacement fence or reopens only an attested replacement — unset, a fence a crash left behind would hold the scope closed forever',
+  },
+  {
     field: 'project_liveness',
     provides:
       'the read-only liveness census of one project scope (parent turn, native children, shells) a maintenance owner reads before it may call a generation quiescent — unset, quiescence would rest on lease counts alone, which cannot see a legacy parent or a live shell',

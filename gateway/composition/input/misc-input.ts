@@ -20,6 +20,17 @@ export interface MiscCompositionInput {
   project_liveness?: {
     census(projectId: string | null): Promise<import('../../project-liveness-census.ts').ProjectLivenessCensus>
   }
+  /**
+   * #1237 — the project maintenance owner (`null` = General). `replace` fences the
+   * scope, proves its exact parent generation quiescent, replaces it with a resume of
+   * the same conversation and attests the replacement before reopening; NOTHING in
+   * production calls it. `resume` is restart continuity for a fence a previous
+   * process left behind, and runs at boot only.
+   */
+  project_maintenance?: {
+    replace(projectId: string | null): Promise<import('../../project-generation-replacement.ts').ReplacementOutcome>
+    resume(projectId: string | null): Promise<import('../../project-generation-replacement.ts').ResumeOutcome>
+  }
   /** Awaited after graph tools and HTTP wiring exist, before accepting traffic. */
   on_graph_ready?: () => Promise<void>
   db: ProjectDb

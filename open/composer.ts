@@ -3,6 +3,7 @@ import { TridentAttemptLedger } from '@neutronai/trident/attempt-ledger.ts'
 import { buildSubstrateWorkflowFire, buildWorkflowFirer } from '@neutronai/trident/inner-loop.ts'
 import { prepareProjectBuild } from './wiring/project-build.ts'
 import { buildProjectLiveness } from './wiring/project-liveness.ts'
+import { buildProjectMaintenance } from './wiring/project-maintenance.ts'
 import { createWorkerTerminalHost, workerPlacementScope } from './wiring/project-build-terminal.ts'
 import type { WorkerPlacementHost } from '@neutronai/runtime/workers/worker-placement.ts'
 import { CodexOwnerBindings } from './wiring/codex-owner-binding.ts'
@@ -252,6 +253,7 @@ export type OpenComposition = CompositionInput &
       | 'db'
       | 'project_admission'
       | 'project_liveness'
+      | 'project_maintenance'
       | 'project_slug'
       | 'chat_topics_surface'
       | 'chat_history_surface'
@@ -6970,23 +6972,56 @@ export function buildOpenGraphComposer(
       telegramWebhookSurface = null
     }
 
+    // #1237 — the READ-ONLY liveness census of one project scope (parent, native
+    // children, shells), and the maintenance owner that consumes it.
+    const projectLiveness = buildProjectLiveness({
+      admission: projectAdmission,
+      turnInFlight: (projectId) => activityInspector.snapshot(inspectorScopeKey(projectId)).turn_in_flight,
+      runs: boardRunStore,
+      projectIdForRun: (run) => workBoardProjectIdForKey(project_slug, run.project_slug) ?? null,
+    })
+    const projectMaintenance = buildProjectMaintenance({
+      admission: projectAdmission,
+      liveness: projectLiveness,
+      log: {
+        info: (event, fields) => log.info(event, fields),
+        error: (event, fields) => log.error(event, fields),
+      },
+    })
     return {
       db,
       // #1237 — the admission service chat and acting turns already admit
       // through; later producers and maintenance owners consume this field.
       project_admission: projectAdmission,
-      // #1237 — the READ-ONLY liveness census of one project scope (parent, native
-      // children, shells). Exposed only: no loop, no trigger, nothing fences or
-      // replaces on its answer in this build.
-      project_liveness: buildProjectLiveness({
-        admission: projectAdmission,
-        turnInFlight: (projectId) => activityInspector.snapshot(inspectorScopeKey(projectId)).turn_in_flight,
-        runs: boardRunStore,
-        projectIdForRun: (run) => workBoardProjectIdForKey(project_slug, run.project_slug) ?? null,
-      }),
+      // #1237 — exposed only: no loop, no trigger, nothing fences or replaces on
+      // the census's answer in this build.
+      project_liveness: projectLiveness,
+      // #1237 — the maintenance owner: exact-generation replacement (`replace`) and
+      // restart continuity (`resume`). `replace` has NO caller — no loop, watchdog,
+      // admin route or reminder reaches it in this build. `resume` runs only from
+      // `on_graph_ready` below.
+      project_maintenance: projectMaintenance,
       // The graph binds the tool bridge after this composer returns. Survivors
       // regain authority only after that binding, with no synthetic chat turn.
-      on_graph_ready: () => adoptLiveAgentRepls([null, ...listProjectIds()]),
+      // THEN restart continuity for every scope, the ONLY production maintenance
+      // call: a pre-replacement fence a crash left behind is released, and a
+      // replacing/attesting fence reopens only when its already-spawned replacement
+      // attests — otherwise it stays fenced. Boot never spawns or kills a parent here.
+      on_graph_ready: async () => {
+        const scopes = [null, ...listProjectIds()]
+        await adoptLiveAgentRepls(scopes)
+        for (const projectId of scopes) {
+          const outcome = await projectMaintenance.resume(projectId)
+          if (outcome.status !== 'open') {
+            log.info('project_maintenance_resumed', {
+              projectId,
+              status: outcome.status,
+              ...('phase' in outcome ? { phase: outcome.phase } : {}),
+              ...('reasons' in outcome ? { reasons: outcome.reasons.join('; ') } : {}),
+            })
+          }
+        }
+      },
       project_slug,
       // ALWAYS set, never conditionally spread. A field the composer assigns
       // only sometimes is exactly the ambiguity `composition-field-coverage`

@@ -1767,3 +1767,51 @@ describe('project admission reaches every production dispatch site and every ter
     expect(terminalChains(mutant).filter((c) => c[0] !== 'releaseBuildLeaseOnTerminal')).toHaveLength(1)
   })
 })
+
+// #1237 — the maintenance owner is EXPOSED with no trigger. The ONLY production
+// maintenance call is the boot-time `resume` inside `on_graph_ready`; nothing calls
+// `replace` on the maintenance surface, and the runtime replacement primitive is
+// bound only by the maintenance wiring.
+describe('project maintenance has no production trigger', () => {
+  const REPO = join(HERE, '..', '..')
+  const ROOTS = ['open', 'gateway', 'runtime', 'trident', 'work-board', 'reminders', 'cron', 'agent-dispatch']
+  function productionSources(): Array<{ path: string; text: string }> {
+    const out: Array<{ path: string; text: string }> = []
+    for (const root of ROOTS) {
+      const glob = new Bun.Glob('**/*.ts')
+      for (const rel of glob.scanSync({ cwd: join(REPO, root) })) {
+        if (rel.includes('node_modules/') || rel.includes('__tests__/') || rel.endsWith('.test.ts')) continue
+        out.push({ path: `${root}/${rel}`, text: readFileSync(join(REPO, root, rel), 'utf8') })
+      }
+    }
+    return out
+  }
+  const count = (text: string, re: RegExp): number => (text.match(re) ?? []).length
+  const RESUME_CALL = /\b(?:projectMaintenance|project_maintenance)\??\.resume\(/g
+  const REPLACE_CALL = /\b(?:projectMaintenance|project_maintenance|maintenance)\??\.replace\(/g
+  const PRIMITIVE_CALL = /\breplaceQuiescentPooledSession\(/g
+
+  test('exactly one resume call site, inside on_graph_ready (positive control: the scan finds it)', () => {
+    const sites = productionSources().filter((f) => count(f.text, RESUME_CALL) > 0)
+    expect(sites.map((f) => f.path)).toEqual(['open/composer.ts'])
+    const composer = sites[0]!.text
+    expect(count(composer, RESUME_CALL)).toBe(1)
+    const hook = composer.slice(composer.indexOf('on_graph_ready: async'))
+    expect(hook.slice(0, hook.indexOf('\n      },')).match(RESUME_CALL)).not.toBeNull()
+  })
+
+  test('zero production callers of replace on the maintenance surface (guard)', () => {
+    const sources = productionSources()
+    expect(sources.length).toBeGreaterThan(100)
+    expect(sources.filter((f) => count(f.text, REPLACE_CALL) > 0).map((f) => f.path)).toEqual([])
+    // The scan would see one: a planted trigger is counted (the guard is live).
+    expect(count('void projectMaintenance.replace(null)', REPLACE_CALL)).toBe(1)
+  })
+
+  test('the runtime replacement primitive is bound only by the maintenance wiring', () => {
+    const callers = productionSources()
+      .filter((f) => count(f.text, PRIMITIVE_CALL) > 0 && !f.path.endsWith('persistent/generation-replacement.ts'))
+      .map((f) => f.path)
+    expect(callers).toEqual(['open/wiring/project-maintenance.ts'])
+  })
+})

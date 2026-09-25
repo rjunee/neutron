@@ -65,6 +65,8 @@ import { dispatchBoardBoundBuild, type BoardBoundBuildDeps } from '@neutronai/tr
 import { DispatchHoldStore } from '@neutronai/trident/dispatch-holds.ts'
 import { ProjectAdmission } from '@neutronai/gateway/project-admission.ts'
 import { reconcileBuildLeases } from '@neutronai/gateway/project-admission-reconcile.ts'
+import { replaceProjectGeneration, type ProjectMaintenancePorts } from '@neutronai/gateway/project-generation-replacement.ts'
+import { runProjectLivenessCensus, type ProjectLivenessProbes } from '@neutronai/gateway/project-liveness-census.ts'
 import { buildAdmissionReleaseObserver } from '@neutronai/gateway/proactive/admission-release.ts'
 import { buildTridentTerminalObserver } from '../wiring/trident-nexus-observer.ts'
 import { fixtureDispatchAdmission } from '@neutronai/trident/__tests__/dispatch-admission-fixture.ts'
@@ -5388,4 +5390,72 @@ test('project admission end to end: fenced dispatch queues, reopened dispatch le
   const again = await reconcileBuildLeases({ admission: restarted, runs: new TridentRunStore(reopened), projectIdForRun })
   expect(again).toMatchObject({ released: 0, kept: 1, children_kept: 1, leased: 0 })
   expect(childLeases(restarted)).toEqual([f.row.id])
+
+  // 6. MAINTENANCE over the same scope. The fixture has no pool, so the parent is
+  // injected; everything else — leases, fence, phases, dispatch — is real.
+  const generationBefore = restarted.inspect(null)!.generation
+  const parent = (admissionGeneration: number | undefined) => ({
+    sessionKey: 'cc-agent-e2e', childGeneration: 'gen-e2e-old', sessionId: 'conversation-e2e', pid: 4242, admissionGeneration,
+    activeTurn: false, turnSlotHeld: 0, poisoned: false, retiring: false, subagentsDirectory: null as string | null,
+  })
+  const probes = (admissionGeneration: number | undefined): ProjectLivenessProbes => ({
+    sessions: async () => ({ kind: 'answered', live: [{ ...parent(admissionGeneration), subagentsDirectory: join(f.dir, 'no-subagents') }], unresolved: 0 }),
+    turnInFlight: () => false,
+    subagentActivity: async () => ({ verdict: 'idle', reasons: [] }),
+    descendants: async () => ({ verdict: 'idle', reasons: [] }),
+  })
+  const replacedWith: string[] = []
+  const ports = (admissionGeneration: number | undefined): ProjectMaintenancePorts => ({
+    census: (projectId) => runProjectLivenessCensus({ admission: restarted, probes: probes(admissionGeneration) }, projectId),
+    replace: async (expected) => { replacedWith.push(expected.childGeneration); return { status: 'replaced', session: {} as never } },
+    observe: () => {
+      const g = restarted.inspect(null)!.generation
+      return { sessionId: 'conversation-e2e', childGeneration: 'gen-e2e-new', pid: 5151, exited: false, identified: true,
+        admissionGeneration: g, toolSurface: 'Read,Agent', toolBridgeActive: true, adopted: false,
+        registry: { sessionId: 'conversation-e2e', admission_generation: g, tool_surface: 'Read,Agent', tool_bridge: true } }
+    },
+    identity: () => ({ start_ticks: 1, boot_id: 'e2e' }),
+    expectedProfile: () => ({ toolSurface: 'Read,Agent', toolBridge: true }),
+    drainPollMs: 1, drainBudgetMs: 5,
+  })
+  // BUSY (guard): the live run's kept child lease holds the generation; nothing is
+  // replaced, the run's leases are intact, and the fence is released.
+  const busy = await replaceProjectGeneration({ admission: restarted, ports: ports(generationBefore) }, null)
+  expect(busy.status).toBe('busy')
+  expect(replacedWith).toEqual([])
+  expect(buildLeases(restarted)).toEqual([f.row.id])
+  expect(childLeases(restarted)).toEqual([f.row.id])
+  expect(restarted.inspect(null)?.phase).toBe('open')
+
+  // The run ends: the composed terminal chain hands its leases back.
+  await f.store.update(f.row.id, { phase: 'failed' })
+  const restartChain = buildTridentTerminalObserver({
+    nexus: null,
+    observers: [buildAdmissionReleaseObserver({ releaseBuild: (run) => restarted.releaseBuild(projectIdForRun(run), run.id) })],
+  })
+  await restartChain(f.store.get(f.row.id)!)
+  expect(buildLeases(restarted)).toEqual([])
+
+  // REPLACED (control): the exact parent is replaced and admission reopens under the
+  // NEW generation — the next dispatch is admitted and its lease carries it.
+  const fenceGeneration = restarted.inspect(null)!.generation + 1
+  const replaced = await replaceProjectGeneration({ admission: restarted, ports: ports(fenceGeneration - 2) }, null)
+  expect(replaced).toEqual({ status: 'replaced', generation: fenceGeneration, parent: { sessionId: 'conversation-e2e', from: 'gen-e2e-old', to: 'gen-e2e-new' } })
+  expect(replacedWith).toEqual(['gen-e2e-old'])
+  expect(restarted.inspect(null)).toMatchObject({ phase: 'open', generation: fenceGeneration })
+  const next = await dispatchBoardBoundBuild({ task, board_item_id: 'after-replace' }, {
+    ...deps(),
+    board: { get: () => ({ id: 'after-replace', title: task, design_doc_ref: null, linked_run_id: null }), attachRun: async () => {} },
+  })
+  expect(next.ok, JSON.stringify(next)).toBe(true)
+  if (!next.ok) return
+  expect(restarted.listLeases('build').filter((l) => l.workRef === next.run.id).map((l) => l.generation)).toEqual([fenceGeneration])
+
+  // PROTECTED (guard): an unstamped (legacy) parent is never replaced.
+  await f.store.update(next.run.id, { phase: 'failed' })
+  await restartChain(f.store.get(next.run.id)!)
+  const legacy = await replaceProjectGeneration({ admission: restarted, ports: ports(undefined) }, null)
+  expect(legacy.status).toBe('protected')
+  expect(replacedWith).toEqual(['gen-e2e-old'])
+  expect(restarted.inspect(null)?.phase).toBe('open')
 }, 120_000)
