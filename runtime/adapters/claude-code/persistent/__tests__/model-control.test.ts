@@ -2,7 +2,7 @@ import { afterEach, beforeEach, expect, test } from 'bun:test'
 import { getPersistentReplModel, switchPersistentReplModel } from '../model-control.ts'
 import { pool, supervisedBySessionKey, childByKey, retiringSessionKeys } from '../pool-state.ts'
 import { poolKeyFor, retirePersistentRepl } from '../pool.ts'
-import { setNativeChildLiveness } from '../native-child-liveness.ts'
+import { hasUnresolvedNativeChild, setNativeChildLiveness } from '../native-child-liveness.ts'
 import { ProjectAdmission } from '@neutronai/gateway/project-admission.ts'
 import { ProjectDb } from '@neutronai/persistence/index.ts'
 import { seedMigratedDb } from '../../../../../tests/support/migrated-db.ts'
@@ -98,7 +98,8 @@ test('restart durable child blocks only its exact owner and project retirement a
     expect(await retirePersistentRepl(target.key)).toBe('retired')
     expect(killed).toBe(true)
   } finally {
-    setNativeChildLiveness('owner', () => false)
+    setNativeChildLiveness('owner', undefined)
+    expect(hasUnresolvedNativeChild({ user_id: 'owner' })).toBe(false)
     db.close()
     rmSync(dir, { recursive: true, force: true })
   }

@@ -79,7 +79,7 @@ import type { SessionHandle } from '@neutronai/runtime/session-handle.ts'
 import type { AgentSpec, Substrate } from '@neutronai/runtime/substrate.ts'
 import type { OAuthCredentialSource } from './resolve-llm-credentials.ts'
 import { createLogger } from '@neutronai/logger'
-import { githubSpawnEnvRef, type SubstrateProfile } from './substrate-profiles.ts'
+import { githubSpawnEnvRef, PROFILE_PHASE_SPEC, PROFILE_WARM_FIRE, type SubstrateProfile } from './substrate-profiles.ts'
 
 const substrateLog = createLogger('substrate')
 
@@ -767,6 +767,13 @@ async function claudeOptionsFor(
   const opts: ClaudeCodeSubstrateOptions = {
     substrate_instance_id: input.substrate_instance_id,
     env: spawnEnv,
+  }
+  // Exact internal profile identity is the authority here, not a caller-supplied
+  // instance name or a structurally similar profile. Owner scope always wins
+  // over this provenance at the runtime census boundary.
+  if (input.ownerConversation !== true) {
+    if (input.profile === PROFILE_PHASE_SPEC) opts.nativeChildCensusRole = 'setup'
+    else if (input.profile === PROFILE_WARM_FIRE) opts.nativeChildCensusRole = 'fire'
   }
   if (input.repl_pane_label !== undefined) opts.repl_pane_label = input.repl_pane_label
   if (input.cwd !== undefined) opts.cwd = input.cwd
