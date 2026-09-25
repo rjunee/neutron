@@ -401,6 +401,33 @@ function dispatchStep(dispatch: WorkerWorld['dispatches'][number]): string {
 
 const standaloneReview = (world: WorkerWorld) => world.dispatches.find(dispatch => dispatch.schema === 'project-review')!
 
+/** Standalone review is independent of the panel. Normalize only its position
+ * within a contiguous review cohort; keep the panel's actual review→synthesis
+ * order and every boundary to plan/build/fix intact. */
+function dispatchRoles(world: WorkerWorld): string[] {
+  const roles: string[] = []
+  let cohort: WorkerWorld['dispatches'] = []
+  const flush = () => {
+    roles.push(...cohort.filter(call => call.schema === 'project-review').map(call => call.role),
+      ...cohort.filter(call => call.schema !== 'project-review').map(call => call.role))
+    cohort = []
+  }
+  for (const call of world.dispatches) {
+    if (call.role === 'review' || call.role === 'synthesis') cohort.push(call)
+    else { flush(); roles.push(call.role) }
+  }
+  flush()
+  return roles
+}
+
+test('review trace normalization accepts standalone independence but preserves panel dependency and phase boundaries', () => {
+  const trace = (roles: [string, string][]) => dispatchRoles({ dispatches: roles.map(([role, schema]) => ({ role, schema, step_id: 'step', wrote: [] })) } as unknown as WorkerWorld)
+  expect(trace([['review', 'verdict'], ['synthesis', 'verdict'], ['review', 'project-review']])).toEqual(['review', 'review', 'synthesis'])
+  expect(trace([['synthesis', 'verdict'], ['review', 'verdict'], ['review', 'project-review']])).toEqual(['review', 'synthesis', 'review'])
+  expect(trace([['review', 'verdict'], ['fix', 'project-build'], ['review', 'project-review'], ['synthesis', 'verdict']]))
+    .toEqual(['review', 'fix', 'review', 'synthesis'])
+})
+
 /**
  * THE ONLY FAKE MODEL IN THIS FILE.
  *
@@ -818,6 +845,7 @@ async function fixture(options: { taskSequence?: boolean; moreTasks?: boolean; s
   verdictRepair?: WorkerWorld['verdictRepair']
   /** Real session ownership with only the model boundary held at a barrier. */
   reviewChild?: (request: BoundedWorkRequest, seat: string) => Promise<void>
+  nativeChild?: (request: BoundedWorkRequest) => Promise<void>
   reviewVeto?: 'standalone' | 'synthesis'
   efficiencyTrace?: EfficiencyTrace
 } = {}) {
@@ -1002,7 +1030,7 @@ async function fixture(options: { taskSequence?: boolean; moreTasks?: boolean; s
     } }, acquireTurn: async () => () => {} }
 
   let registeredSession: typeof session | ReplSession = session
-  if (options.reviewChild) {
+  if (options.reviewChild || options.nativeChild) {
     const live = new ReplSession(key, 'e2e-generation', 'e2e-session', 'e2e-channel', dir)
     live.authFingerprint = session.authFingerprint
     live.toolSurface = session.toolSurface
@@ -1014,7 +1042,7 @@ async function fixture(options: { taskSequence?: boolean; moreTasks?: boolean; s
         const args = JSON.parse(String(spec.prompt).slice(String(spec.prompt).indexOf('{')))
         const requestLine = String(args.prompt).split('\n').find(row => row.startsWith('Request (data): '))!
         const request: BoundedWorkRequest = JSON.parse(requestLine.slice('Request (data): '.length))
-        if (request.role !== 'review') return session.child.submitLine(line)
+        if (request.role !== 'review' && !options.nativeChild) return session.child.submitLine(line)
         const seat = request.result.schema === 'verdict' ? JSON.parse(await readFile(request.brief.path, 'utf8')).seat : 'standalone'
         const directory = join(projectsDir, dir.replace(/\//g, '-'), 'e2e-session', 'subagents')
         await mkdir(directory, { recursive: true })
@@ -1024,7 +1052,11 @@ async function fixture(options: { taskSequence?: boolean; moreTasks?: boolean; s
           isSidechain: true, type: 'user', message: { role: 'user', content: args.prompt } }) + '\n')
         // Acceptance returns immediately; the independently owned child remains
         // live until its barrier opens. Production owns submission serialization.
-        children.push(options.reviewChild!(request, seat).then(() => worker(line)).catch(error => { errors.push(error) }))
+        children.push((options.nativeChild ? options.nativeChild(request) : options.reviewChild!(request, seat)).then(async () => {
+          if (options.nativeChild) await writeFile(request.result.path, JSON.stringify({ schema: request.result.schema,
+            run_id: request.run_id, step_id: request.step_id, kind: 'blocked', on: 'Fixture native task finished.' }))
+          else await worker(line)
+        }).catch(error => { errors.push(error) }))
       } })
     registeredSession = live
     cleanups.push(async () => { await Promise.all(children); expect(errors).toEqual([]); expect(live.turnSlotHeld).toBe(0) })
@@ -1088,6 +1120,83 @@ async function fixture(options: { taskSequence?: boolean; moreTasks?: boolean; s
   return { dir, repo, origin, baseSha, db, store, row, input, context, prepare, github, commands, world,
     register, key, codexCalls, admission }
 }
+
+test.each(['independent', 'simultaneous', 'aliased'] as const)('native writable children consume host workspace admission: %s', async layout => {
+  let release!: () => void, firstStarted!: () => void, bothStarted!: () => void
+  const hold = new Promise<void>(resolve => { release = resolve })
+  const first = new Promise<void>(resolve => { firstStarted = resolve })
+  const both = new Promise<void>(resolve => { bothStarted = resolve })
+  const started: BoundedWorkRequest[] = []
+  const f = await fixture({ nativeChild: async request => {
+    started.push(request)
+    if (started.length === 1) firstStarted()
+    if (started.length === 2) bothStarted()
+    await hold
+  } })
+  const one = await f.prepare()
+  const second = await f.store.create({ slug: 'second-card', project_slug: 'project', repo_path: f.repo, task: 'Independent native task' })
+  await f.store.update(second.id, { merge_mode: 'pr', base_sha: f.baseSha })
+  if (layout === 'aliased') {
+    const alias = join(f.dir, 'workspace-alias')
+    await symlink(one.workers.build.request.cwd, alias)
+    await f.store.update(second.id, { branch: f.store.get(f.row.id)!.branch, worktree: alias })
+  }
+  const two = await prepareProjectBuild({ ...f.input, run: f.store.get(second.id)! }, f.context, new AbortController().signal)
+  const call = (prepared: typeof one, runId: string) => prepared.substrate.inRepl!.run({ ...prepared.workers.build.request,
+    run_id: runId, step_id: `${runId}:build:0`, role: 'build', needs_approval_decision: false }, 'in-repl', new AbortController().signal)
+  const running = [call(one, f.row.id)]
+  let timer: ReturnType<typeof setTimeout> | undefined
+  try {
+    if (layout === 'simultaneous') running.push(call(two, second.id))
+    await first
+    if (layout !== 'simultaneous') running.push(call(two, second.id))
+    if (layout !== 'aliased') {
+      await Promise.race([both, new Promise<never>((_, reject) => {
+        timer = setTimeout(() => reject(new Error('Independent native writers stayed serialized')), 10_000)
+      })])
+      expect(started.map(request => request.run_id).sort()).toEqual([f.row.id, second.id].sort())
+      expect(f.admission.listLeases('liveChild')).toHaveLength(2)
+      expect((await pool.get(f.key))!.turnSlotHeld).toBe(2)
+    } else {
+      // Observe the second caller queued in the actual session. No elapsed-time
+      // claim: it must hold a slot while its model boundary has not been entered.
+      for (let n = 0; n < 200 && (await pool.get(f.key))!.turnSlotHeld < 2; n++) await Bun.sleep(5)
+      expect((await pool.get(f.key))!.turnSlotHeld).toBe(2)
+      expect(started).toHaveLength(1)
+    }
+  } finally { clearTimeout(timer); release(); await Promise.all(running) }
+  expect((await Promise.all(running)).map(result => result.kind)).toEqual(['blocked', 'blocked'])
+  expect(started).toHaveLength(2)
+  expect(f.admission.listLeases('liveChild')).toEqual([])
+  expect((await pool.get(f.key))!.turnSlotHeld).toBe(0)
+}, 30_000)
+
+test('native writer lost acknowledgement retains its lease and recovers the original child without redispatch', async () => {
+  let release!: () => void, started!: () => void
+  const hold = new Promise<void>(resolve => { release = resolve })
+  const entered = new Promise<void>(resolve => { started = resolve })
+  let calls = 0
+  const f = await fixture({ nativeChild: async () => { calls++; started(); await hold } })
+  const prepared = await f.prepare()
+  await f.context.spawnProjectSession(f.context.projectId)
+  const session = (await pool.get(f.key))!
+  const submit = session.child.submitLine!.bind(session.child)
+  session.child.submitLine = async (...args) => { await submit(...args); throw new Error('lost native acknowledgement') }
+  const request: BoundedWorkRequest = { ...prepared.workers.build.request, run_id: f.row.id, step_id: `${f.row.id}:build:0`, role: 'build', needs_approval_decision: false }
+  const signal = new AbortController().signal
+  try {
+    expect((await prepared.substrate.inRepl!.run(request, 'in-repl', signal)).kind).toBe('unknown')
+    await entered
+    expect(calls).toBe(1)
+    expect(session.turnSlotHeld).toBe(1)
+    expect(f.admission.listLeases('liveChild')).toHaveLength(1)
+  } finally { release() }
+  const reconstructed = await f.prepare()
+  expect((await reconstructed.substrate.inRepl!.recover!(request, 'in-repl', signal)).kind).toBe('blocked')
+  expect(calls).toBe(1)
+  expect(session.turnSlotHeld).toBe(0)
+  expect(f.admission.listLeases('liveChild')).toEqual([])
+}, 30_000)
 
 test.each(['run', 'recover'] as const)('native child %s refuses changed request and path before releasing original ownership', async method => {
   const f = await fixture({ malformedNativeTrailer: true })
@@ -3872,7 +3981,7 @@ test(`same-run terminal task-sequence crash in ${mergeMode} resumes review witho
   const resumed = await createProjectBuildHost(await f.prepare())
   const outcome = await resumed.run({ mode: 'implementation', start: 'resume' }, new AbortController().signal)
   expect(outcome.kind, why(f, outcome)).toBe('merged')
-  expect(f.world.dispatches.map(dispatch => dispatch.role)).toEqual(['review', 'review', 'synthesis'])
+  expect(dispatchRoles(f.world)).toEqual(['review', 'review', 'synthesis'])
   expect(standaloneReview(f.world).measuredHead).toBe(checkpoint.head as string)
   const merged = await spawnCapture(['git', '-C', mergeMode === 'pr' ? f.origin : f.repo, 'show', 'main:NOTES.md'], f.repo)
   expect(merged.stdout.trim()).toBe(`seed\n${f.row.id}:task:0:build:0`)
@@ -4157,10 +4266,9 @@ test('a REQUEST_CHANGES panel dispatches a fix worker and the re-review merges',
   const outcome = await drive(f)
   expect(outcome.kind, why(f, outcome)).toBe('merged')
 
-  // The exact sequence, not merely the ending. `work('review')` dispatches the
-  // review ROLE first; `reviewGate` then reads the adversarial seat and the
-  // synthesis through the same transport (`gates/review-panel.ts:85,99`).
-  expect(f.world.dispatches.map(d => d.role)).toEqual([
+  // Exact phase sequence and counts, preserving panel review before synthesis;
+  // the independent standalone review can finish anywhere within that cohort.
+  expect(dispatchRoles(f.world)).toEqual([
     'plan', 'build', 'review', 'review', 'synthesis',
     'fix', 'review', 'review', 'synthesis',
   ])
@@ -4199,7 +4307,7 @@ test('a COMMENT panel stops as an unresolved verdict and never merges', async ()
     kind: 'blocked', phase: 'review', recipient: 'orchestrator',
     on: 'Review has an unresolved verdict without nonblocking findings',
   })
-  expect(f.world.dispatches.map(dispatch => dispatch.role))
+  expect(dispatchRoles(f.world))
     .toEqual(['plan', 'build', 'review', 'review', 'synthesis'])
   expect(f.world.dispatches.filter(dispatch => dispatch.role === 'fix')).toEqual([])
   expect(f.github.prs).toHaveLength(1)
@@ -4230,8 +4338,8 @@ test('a provider rate-limited synthesis stops with its cause without a trailer, 
   const outcome = await drive(f)
   expect(outcome, why(f, outcome)).toMatchObject({ kind: 'blocked', phase: 'review', recipient: 'orchestrator',
     on: 'infra-only: Review synthesis unavailable: Review seat synthesis: Claude child stopped at the provider rate limit (HTTP 429).' })
-  expect(f.world.dispatches.map(dispatch => dispatch.role)).toEqual(['plan', 'build', 'review', 'review', 'synthesis'])
-  expect(f.world.dispatches.at(-1)?.wrote).toEqual([])
+  expect(dispatchRoles(f.world)).toEqual(['plan', 'build', 'review', 'review', 'synthesis'])
+  expect(f.world.dispatches.find(call => call.role === 'synthesis')?.wrote).toEqual([])
   expect(f.github.prs).toHaveLength(1)
   expect(f.github.prs[0]!.state).toBe('OPEN')
   const originMain = await spawnCapture(['git', '-C', f.origin, 'rev-parse', 'refs/heads/main'], f.origin)
@@ -4248,7 +4356,7 @@ test('a design-gap escalation re-plans and rebuilds instead of dispatching a fix
   const outcome = await drive(f)
   expect(outcome.kind, why(f, outcome)).toBe('merged')
 
-  expect(f.world.dispatches.map(dispatch => dispatch.role)).toEqual([
+  expect(dispatchRoles(f.world)).toEqual([
     'plan', 'build', 'review', 'review', 'synthesis',
     'plan', 'build', 'review', 'review', 'synthesis',
   ])
@@ -4842,7 +4950,7 @@ test('a driver restarted between the build and review re-adopts the build instea
 
   // RE-ADOPTED, NOT REDONE: no plan and no build in the second process, and the
   // review it did run is round 1 — the round the first process had reached.
-  expect(f.world.dispatches.map(dispatch => dispatch.role)).toEqual(['review', 'review', 'synthesis'])
+  expect(dispatchRoles(f.world)).toEqual(['review', 'review', 'synthesis'])
   expect(dispatchStep(standaloneReview(f.world))).toBe(`${f.row.id}:review:1`)
   expect(standaloneReview(f.world).measuredHead).toBe(built.stdout)
   // The merged revision is the one process 1 built: one note, not two.
@@ -4878,7 +4986,7 @@ test('a driver resumed after the branch head moved rebuilds instead of adopting 
   f.world.dispatches.length = 0
   const outcome = await restartThroughGateway(f)
   expect(outcome.kind, why(f, outcome)).toBe('merged')
-  expect(f.world.dispatches.map(dispatch => dispatch.role)).toEqual([
+  expect(dispatchRoles(f.world)).toEqual([
     'plan', 'build', 'review', 'review', 'synthesis',
   ])
   expect(f.world.dispatches[0]!.step_id).toBe(`${f.row.id}:plan:1`)
@@ -4994,7 +5102,7 @@ test('a driver resumed from a rejected checkpoint dispatches the deferred fix', 
   const resumed = await createProjectBuildHost(await f.prepare())
   const outcome = await resumed.run({ mode: 'implementation', start: 'resume' }, new AbortController().signal)
   expect(outcome.kind, why(f, outcome)).toBe('merged')
-  expect(f.world.dispatches.map(dispatch => dispatch.role)).toEqual([
+  expect(dispatchRoles(f.world)).toEqual([
     'fix', 'review', 'review', 'synthesis',
   ])
   expect(f.world.dispatches[0]!.step_id).toBe(`${f.row.id}:fix:1`)
@@ -5013,7 +5121,7 @@ test('local merge mode reaches merged with no PR, no push and no gh call', async
   const f = await fixture({ mergeMode: 'local' })
   const outcome = await drive(f)
   expect(outcome.kind, why(f, outcome)).toBe('merged')
-  expect(f.world.dispatches.map(dispatch => dispatch.role))
+  expect(dispatchRoles(f.world))
     .toEqual(['plan', 'build', 'review', 'review', 'synthesis'])
 
   // NOTHING WENT TO GITHUB. No PR record, and — the stronger claim — the driver

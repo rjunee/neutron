@@ -32,6 +32,8 @@ export type AdmissionProducer = 'chat' | 'acting-turn' | 'work-board' | 'hold-dr
 export interface NativeChildAdmission {
   admit(runId: string, stepId: string): Promise<AdmittedWork | AdmissionRefusal>
   complete(runId: string, stepId: string): Promise<number>
+  /** Exact-scope census. Unreadable identities throw; never infer an empty scope. */
+  pending?(): readonly { runId: string; stepId: string; generation: number }[]
 }
 
 export interface ProjectAdmissionOptions {
@@ -161,6 +163,13 @@ export class ProjectAdmission {
    */
   forNativeChild(projectId: string | null): NativeChildAdmission {
     return {
+      pending: () => this.listLeases('liveChild').filter(row => row.scope.projectId === projectId).map(row => {
+        const identity: unknown = JSON.parse(row.workRef);
+        if (!Array.isArray(identity) || identity.length !== 2 || identity.some(part => typeof part !== 'string' || !part.trim())) {
+          throw new Error('Native child lease identity is unreadable');
+        }
+        return { runId: identity[0] as string, stepId: identity[1] as string, generation: row.generation };
+      }),
       complete: (runId, stepId) => this.store.releaseWork(this.scopeFor(projectId), 'liveChild', JSON.stringify([runId, stepId])),
       admit: async (runId, stepId) => {
         if (!stepId.trim()) throw new Error('Step reference required');

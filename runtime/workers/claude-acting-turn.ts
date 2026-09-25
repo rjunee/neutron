@@ -9,6 +9,7 @@ import { claudeChildRateLimited } from './claude-child-rate-limit.ts'
 import { observeClaudeChildUsage } from './claude-child-observation.ts'
 import type { ReplSession } from '../adapters/claude-code/persistent/repl-session.ts'
 import { projectTrailerStep, type ProjectActingTurn } from './project-runners.ts'
+import { bindNativeChildWorkspace, nativeChildCensusKnown, ownsNativeChildWorkspace, type NativeChildWorkspace } from './native-child-workspace.ts'
 
 /** Host-owned launch observation, bound to this exact live session. The host must
  * replace this binding when the session is replaced; never derive it from a request.
@@ -19,6 +20,8 @@ export interface ClaudeActingSession {
   session: Pick<ReplSession, 'sessionId' | 'cwd' | 'child' | 'acquireTurn' | 'toolSurface'>
   projects_dir?: string
   grants: { tools: ToolGrant; writable: boolean; network: boolean; roots: readonly string[] }
+  /** Host-only admission after durable child lease and assigned worktree checks. */
+  workspace?: NativeChildWorkspace
 }
 
 const toolRank: Record<ToolGrant, number> = { none: 0, 'read-only': 1, edit: 2, 'edit-and-run': 3 }
@@ -219,11 +222,23 @@ export function createClaudeActingTurn(binding: ClaudeActingSession, clock: Obse
     // The late-acquired slot releases itself, and checks the deadline before any
     // actuation. Racing acquisition must never dispatch after the caller times out.
     let readingConsumption = false
+    let submitted = false
     const observe = async () => {
       let yieldDispatch: (() => void) | undefined
       const readOnly = !request.writable && toolRank[request.tools] <= toolRank['read-only']
-      const release = await session.acquireTurn(readOnly ? yieldSlot => { yieldDispatch = yieldSlot } : undefined)
+      const workspace = binding.workspace
+      if (workspace && !ownsNativeChildWorkspace(workspace, session, request)) {
+        return refuse('Native child workspace ownership is unavailable; reconcile existing admitted children first.')
+      }
+      const release = await session.acquireTurn(readOnly || workspace ? yieldSlot => { yieldDispatch = yieldSlot } : undefined, workspace)
       try {
+        if (expired()) return unknown()
+        // Sibling admissions acquire their durable lease before asynchronously
+        // measuring the worktree. Wait for those local proofs under the original
+        // budget; a restart/foreign lease never becomes proof merely by waiting.
+        while (workspace && !nativeChildCensusKnown(workspace) && !expired()) {
+          await delay(Math.min(25, Math.max(1, deadline - clock.now())), undefined, { signal: stopped })
+        }
         if (expired()) return unknown()
         // JSON escapes newlines: submitLine accepts one line and owns text/Enter ordering.
         // Forward the complete dispatch spec and effort as data, not shell commands.
@@ -235,6 +250,7 @@ export function createClaudeActingTurn(binding: ClaudeActingSession, clock: Obse
         const dispatch = 'Execute the prompt in this JSON dispatch specification: ' + JSON.stringify({ ...spec, effort: request.effort })
         const boundary = await transcriptBoundary(transcript)
         if (expired()) return unknown()
+        submitted = true
         await child.submitLine!(dispatch, stopped)
         const dispatchDeadline = Math.min(deadline, clock.now() + DISPATCH_TIMEOUT_MS)
         let accepted = false
@@ -255,10 +271,11 @@ export function createClaudeActingTurn(binding: ClaudeActingSession, clock: Obse
           seen = await observeSubagents(subagents, `${request.role}: ${request.step_id}`, request, session.sessionId)
           if (seen.rateLimited) return { kind: 'blocked' as const, on: 'Claude child stopped at the provider rate limit (HTTP 429).' }
           // Terminal acknowledgement, parent consumption, and description-only
-          // metadata cannot transfer ownership. Only a uniquely bound read-only
-          // child permits another parent submission while this result is pending.
+          // metadata cannot transfer ownership. A uniquely bound reader or
+          // host-admitted independent writer permits another parent submission.
           // Keep the busy lease so revocation/model switching still sees live work.
           if (seen.bound) {
+            if (workspace) bindNativeChildWorkspace(workspace)
             yieldDispatch?.()
             yieldDispatch = undefined
           }
@@ -297,6 +314,7 @@ export function createClaudeActingTurn(binding: ClaudeActingSession, clock: Obse
       if (expired()) return unknown()
       const observation = observe()
       const interrupted = () => {
+        if (binding.workspace && !submitted) return refuse('Native child admission did not become available before the original dispatch budget expired.')
         if (readingConsumption) {
           timer.abort()
           return observation
