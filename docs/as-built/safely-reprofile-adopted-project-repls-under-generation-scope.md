@@ -101,6 +101,14 @@ integration review found the safety patch unchanged by the rebase. This is
 local verification of the pre-publication revision; hosted CI, deployment and
 live adopted-REPL acceptance are not claimed here.
 
+The later scope-order correction at
+`d7e06df58a904ddac9cd53fca2230db262c4dcca` also passed the complete
+`bash scripts/check-shared-host.sh` gate with local listener access: 51
+TypeScript projects and all 1,685 declared, discovered, assigned and executed
+files across 18 lanes, zero failed lanes. This is the code revision to use for
+the next PR head; the earlier `a3a36ca6` receipt is pre-correction evidence.
+Fresh CI, deployment and live adopted-REPL acceptance remain outstanding.
+
 **Not claimed.** Nothing triggers replacement, and nothing about it is
 activated or deployed. #1237 stays open until deployed activation and live
 proof. #1233's profile remains rolled back. The adopted-parent refusal in

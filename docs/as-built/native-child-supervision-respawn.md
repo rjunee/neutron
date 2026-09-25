@@ -19,11 +19,13 @@ also refused. Exact completion permits a real acknowledged kill and reaches the
 mocked resume boundary. Another project's unresolved child does not block it.
 The tests also cover child ownership discovered after the registry claim.
 
-The focused supervision suite passes 69 tests, and five consuming Open build
+The initial supervision slice passed 69 focused tests, and five consuming Open build
 E2Es pass. Root and Trident typechecks pass. Removing both child checks produces
 six failing tests; refusing all respawns also produces six failures, including
-the legitimate completion and unrelated-project controls. No full canonical
-suite, live provider restart proof, or deployed validation is claimed.
+the legitimate completion and unrelated-project controls. That slice did not run
+the full canonical suite, a live provider restart proof, or deployed validation.
+The integrated host suite subsequently passed before the scope-order correction
+below; the fresh full run on the corrected head is recorded below.
 
 The integrated CI shard exposed an ordering defect: the initial child check ran
 before durable scope validation, so an installed census could mask a scope
@@ -52,6 +54,11 @@ With local listener access, the combined suite including REPL supervision passes
 81 tests. Seven real Open native-child/project-admission E2Es pass, and root and
 Trident typechecks pass. The CI predecessor composition fixture followed by the
 scope suite passes 32 tests in one process. Sandboxed listener tests failed due
-to unavailable local sockets; the full consuming file was stopped after that failure and only the
-seven relevant cases were retried. Full host-suite and fresh CI verification of
-this correction remain required before merge.
+to unavailable local sockets; the full consuming file was stopped after that
+failure and only the seven relevant cases were retried. The corrected code head
+`d7e06df58a904ddac9cd53fca2230db262c4dcca` then passed
+`bash scripts/check-shared-host.sh` with local listener access: 51 TypeScript
+projects, all 1,685 declared/discovered/assigned/executed files across 18 lanes,
+zero failed lanes. The same command in a listener-denied sandbox was stopped
+after unrelated socket tests failed; it is not counted as a code failure or
+successful gate. Fresh final-head CI remains required before merge.
