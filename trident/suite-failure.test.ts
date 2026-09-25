@@ -1,10 +1,79 @@
 import { expect, test } from 'bun:test'
-import { mkdtemp, rm, writeFile } from 'node:fs/promises'
+import { mkdir, mkdtemp, rm, writeFile } from 'node:fs/promises'
 import { tmpdir } from 'node:os'
 import { join } from 'node:path'
 import { suiteFailure } from './suite-failure.ts'
 import { applyReviewSuite, assessReviewSuite } from './gates/review-suite.ts'
 import { reviewProgress } from './gates/review-progress.ts'
+
+test('generic bun run test carries bounded untrusted names to the fix finding without minting identity', async () => {
+  const dir = await mkdtemp(join(tmpdir(), 'suite-wrapper-'))
+  try {
+    const log = join(dir, 'suite.log')
+    const name = 'scripts/__tests__/discover-test-files.test.ts: keeps discovery order'
+    await writeFile(log, `bun test v1.3.13\nscripts/__tests__/discover-test-files.test.ts:\n(fail) keeps discovery order [11.00ms]\n 1 fail\nRan 1 test across 1 file. [11.00ms]\n${'tail filler\n'.repeat(800)}`)
+    const command = 'export NEUTRON_TEST_JOBS=2\nexport NEUTRON_TEST_CONCURRENCY=1\nbun run test'
+    const observed = await suiteFailure(log, command, dir)
+    expect(observed.hostFailureFormat).toBe('generic')
+    expect(observed.hostFailureId).toBeUndefined()
+    expect(observed.hostDiagnostics).toContain(`Untrusted Bun-shaped failure lines (verify in the host log):\n${name}`)
+    expect(observed.hostDiagnostics.split('Log tail:\n')[1]).not.toContain(name)
+    expect(observed.hostDiagnostics.length).toBeLessThan(11_000)
+    const snapshot = { head: 'a'.repeat(40), diff: '', pr: null }
+    const suite = await assessReviewSuite({ observe: async () => ({ kind: 'known', runId: 'run', head: snapshot.head, round: 1,
+      strategy: command, scope: 'full-suite', report: { hostExitCode: 1, ...observed } }) }, snapshot, 1, 'run')
+    expect(applyReviewSuite({ kind: 'approve' }, suite)).toMatchObject({ kind: 'fix',
+      findings: [expect.stringContaining(name)] })
+    for (const other of ['npm test', 'bun run other', 'export OTHER=1\nbun run test']) {
+      const generic = await suiteFailure(log, other, dir)
+      expect(generic.hostFailureFormat).toBe('generic')
+      expect(generic.hostFailureId).toBeUndefined()
+    }
+  } finally { await rm(dir, { recursive: true, force: true }) }
+})
+
+test('real Bun lifecycle hooks and PATH shadowing make package-wrapper bytes untrustworthy', async () => {
+  const dir = await mkdtemp(join(tmpdir(), 'suite-wrapper-exec-'))
+  try {
+    const pkg = join(dir, 'package.json')
+    const run = () => {
+      const result = Bun.spawnSync(['bun', 'run', 'test'], { cwd: dir, stdout: 'pipe', stderr: 'pipe' })
+      return { code: result.exitCode, output: new TextDecoder().decode(result.stdout) + new TextDecoder().decode(result.stderr) }
+    }
+    await writeFile(pkg, JSON.stringify({ scripts: { test: 'echo MAIN' } }))
+    expect(run()).toMatchObject({ code: 0, output: expect.stringContaining('MAIN') })
+    await writeFile(pkg, JSON.stringify({ scripts: { pretest: 'echo PRE; exit 7', test: 'echo MAIN' } }))
+    const pretest = run()
+    expect(pretest.code).toBe(7)
+    expect(pretest.output).toContain('PRE')
+    expect(pretest.output).not.toContain('MAIN')
+    await mkdir(join(dir, 'node_modules', '.bin'), { recursive: true })
+    await writeFile(join(dir, 'node_modules', '.bin', 'bash'), '#!/bin/sh\necho SHADOW\nexit 7\n', { mode: 0o755 })
+    await writeFile(pkg, JSON.stringify({ scripts: { test: "bash -c 'echo REAL'" } }))
+    const shadow = run()
+    expect(shadow.code).toBe(7)
+    expect(shadow.output).toContain('SHADOW')
+    expect(shadow.output).not.toMatch(/(?:^|\n)REAL(?:\n|$)/)
+  } finally { await rm(dir, { recursive: true, force: true }) }
+})
+
+test('generic failure hints are capped even when a log contains many long names', async () => {
+  const dir = await mkdtemp(join(tmpdir(), 'suite-wrapper-bounds-'))
+  try {
+    const log = join(dir, 'suite.log')
+    const lines = Array.from({ length: 30 }, (_, index) =>
+      `tests/case-${String(index).padStart(2, '0')}.test.ts:\n(fail) ${'x'.repeat(300)} [1.00ms]\n`)
+    await writeFile(log, `bun test v1.3.13\n${lines.join('')}30 fail\nRan 30 tests across 30 files. [1.00ms]\n${'tail filler\n'.repeat(800)}`)
+    const result = await suiteFailure(log, 'bun run test')
+    const hints = result.hostDiagnostics.split('Untrusted Bun-shaped failure lines (verify in the host log):\n')[1]!
+      .split('Log tail:\n')[0]!.trimEnd().split('\n')
+    expect(result.hostFailureFormat).toBe('generic')
+    expect(result.hostFailureId).toBeUndefined()
+    expect(hints).toHaveLength(20)
+    expect(hints.every(line => line.length <= 240)).toBe(true)
+    expect(result.hostDiagnostics).not.toContain('tests/case-29.test.ts')
+  } finally { await rm(dir, { recursive: true, force: true }) }
+})
 
 test('complete large diagnostics preserve named failures, but incomplete or crashing output never earns identity', async () => {
   const dir = await mkdtemp(join(tmpdir(), 'suite-failure-'))

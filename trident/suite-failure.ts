@@ -7,6 +7,8 @@ import { resolve, sep } from 'node:path'
 // example, a mutation exemption listing hundreds of files). Keep enough to
 // parse those lines without truncation; larger records still fail closed.
 const MAX_SUITE_LINE_LENGTH = 64 * 1024
+const MAX_GENERIC_FAILURE_NAMES = 20
+const MAX_GENERIC_FAILURE_NAME_CHARS = 240
 
 /** Select the parser from the admitted command/runner, never from output parse success. */
 async function failureFormat(command: string, worktree?: string): Promise<'bun' | 'generic'> {
@@ -79,12 +81,17 @@ export async function suiteFailure(logPath: string, command: string, worktree?: 
     if (!oversized && pending) consume(pending)
   } catch (error) { overflow = true; tail = `Log unavailable: ${String(error)}` }
   const names = [...failures].sort()
+  // A generic wrapper can still show a worker where to look. These are hints
+  // from untrusted output, not the complete identity required for G065/G070.
+  const genericNames = names.filter(name => !name.startsWith(': '))
+    .slice(0, MAX_GENERIC_FAILURE_NAMES)
+    .map(name => name.slice(0, MAX_GENERIC_FAILURE_NAME_CHARS))
   const hostFailureId = hostFailureFormat === 'bun' && names.length > 0 && !overflow
     && started > 0 && started === finished && failed === reported
     ? `host-suite:${createHash('sha256').update(JSON.stringify([command, names, [...errors].sort()])).digest('hex')}` : undefined
   return {
     ...(hostFailureId ? { hostFailureId } : {}),
     hostFailureFormat,
-    hostDiagnostics: `Host full suite log: ${logPath}\n${hostFailureId ? `Failure identity: ${hostFailureId}\nNamed failures:\n${names.join('\n')}\n` : hostFailureFormat === 'generic' ? 'Generic runner: the panel must verify the named failures and targeted base comparison.\n' : 'Complete Bun failure identity unavailable; this receipt cannot earn a pre-existing-red exemption.\n'}Log tail:\n${tail}`,
+    hostDiagnostics: `Host full suite log: ${logPath}\n${hostFailureId ? `Failure identity: ${hostFailureId}\nNamed failures:\n${names.join('\n')}\n` : hostFailureFormat === 'generic' ? `Generic runner: the panel must verify the named failures and targeted base comparison.\n${genericNames.length ? `Untrusted Bun-shaped failure lines (verify in the host log):\n${genericNames.join('\n')}\n` : ''}` : 'Complete Bun failure identity unavailable; this receipt cannot earn a pre-existing-red exemption.\n'}Log tail:\n${tail}`,
   }
 }
