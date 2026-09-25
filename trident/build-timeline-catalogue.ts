@@ -141,6 +141,7 @@ export function combineTimelineSources(catalogue: PrCatalogue, observations: Dir
   }
   const sorted = [...cards.values()].sort((a, b) => (b.latestStart ?? -1) - (a.latestStart ?? -1) ||
     (b.start ?? -1) - (a.start ?? -1) || a.key.localeCompare(b.key))
-  return { observedAt: now, cards: sorted, maxDurationMs: Math.max(1, ...sorted.map(card =>
+  return { observedAt: now, cards: sorted, prCount: sorted.filter(card => card.pr !== null).length,
+    runOnlyCount: sorted.filter(card => card.pr === null).length, maxDurationMs: Math.max(1, ...sorted.map(card =>
     card.start === null || card.end === null ? 0 : card.end - card.start)), limit: sorted.length, warnings }
 }

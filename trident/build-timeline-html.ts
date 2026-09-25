@@ -29,7 +29,7 @@ function tone(label: string): string {
 export function renderTimeline(snapshot: TimelineSnapshot): string {
   const h = escapeTimelineHtml
   const pct = (duration: number) => (100 * duration / snapshot.maxDurationMs).toFixed(5)
-  return `<p class="refreshed" data-page="${snapshot.page ?? 0}" data-pages="${snapshot.totalPages ?? 1}">Observed ${h(new Date(snapshot.observedAt).toISOString())} · newest first · ${snapshot.cards.length} PR / run groups</p>
+  return `<p class="refreshed" data-page="${snapshot.page ?? 0}" data-pages="${snapshot.totalPages ?? 1}">Observed ${h(new Date(snapshot.observedAt).toISOString())} · newest first · ${snapshot.prCount.toLocaleString('en-US')} PRs · ${snapshot.runOnlyCount.toLocaleString('en-US')} run-only groups · ${snapshot.cards.length} groups shown</p>
   ${snapshot.warnings.map(warning => `<p class="warning" role="status">${h(warning)}</p>`).join('')}
   <p class="scope">Recorded build activity. Gaps mean unattributed time, not idle time. Overlapping work uses separate lanes. Dashed spans have no recorded end; elapsed time is not proof of liveness. Tokens are provider observations, never estimates.</p>
   <div class="legend"><span class="plan">Planning</span><span class="build">Building</span><span class="review">Review</span><span class="cross">Cross-model</span><span class="fix">Fixing</span><span class="test">Tests / CI</span><span class="deploy">Deploy</span><span class="gap">Unattributed</span></div>

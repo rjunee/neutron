@@ -95,6 +95,46 @@ const observation = (overrides: Partial<DirectObservation> = {}): DirectObservat
   ...overrides,
 })
 
+test('real legacy PR sentinels stay separate run-only rows before SQLite group limiting', async () => {
+  const dir = mkdtempSync(join(tmpdir(), 'timeline-sentinel-')); temporary.push(dir)
+  const path = join(dir, 'project.db'); seedMigratedDb(path)
+  const db = ProjectDb.open(path), store = new TridentRunStore(db, () => iso(0))
+  try {
+    for (const [id, pr, published, start] of [
+      ['zero', 0, null, 5], ['other-zero', 0, 0, 10],
+      ['positive', 7, 0, 1], ['published', 0, 8, 2],
+    ] as const) {
+      await store.create({ id, slug: id, project_slug: 'project', repo_path: '/fixture/open', task: 'test' })
+      await db.run("UPDATE code_trident_runs SET pr = ?, published_pr = ?, started_at = ?, phase = 'done', last_advanced_at = ? WHERE id = ?", [pr, published, iso(start), iso(20), id])
+    }
+    const reader = openTimelineReader(path, '/fixture/open'), limited = openTimelineReader(path, '/fixture/open', 1)
+    try {
+      const snapshot = reader.read(at(30))
+      expect(snapshot).toMatchObject({ prCount: 2, runOnlyCount: 2 })
+      expect(snapshot.cards.map(card => [card.key, card.pr])).toEqual([
+        ['run:other-zero', null], ['run:zero', null], ['pr:8', 8], ['pr:7', 7],
+      ])
+      expect(snapshot.cards.flatMap(card => card.runs).filter(run => run.published).map(run => run.id)).toEqual(['published'])
+      expect(limited.read(at(30)).cards.map(card => card.key)).toEqual(['run:other-zero'])
+      const html = renderTimeline(snapshot)
+      expect(html).not.toContain('PR #0')
+      expect(html).toContain('Unpublished run')
+      expect(html).toContain('PR #7')
+      expect(html).toContain('PR #8')
+      expect(html).toContain('2 PRs · 2 run-only groups')
+    } finally { reader.close(); limited.close() }
+  } finally { db.close() }
+})
+
+test('projection rejects invalid identifiers while retaining real PR identity', () => {
+  const snapshot = projectTimeline([0, -1, 1.5, Number.MAX_SAFE_INTEGER + 1, 42].map((pr, index) => ({
+    id: `run-${index}`, slug: 'run', phase: 'done', pr, published_pr: null, started_at: iso(0), last_advanced_at: iso(1),
+  })), [], [], [], at(2))
+  expect(snapshot.cards.filter(card => card.pr === null)).toHaveLength(4)
+  expect(snapshot.cards.filter(card => card.pr !== null).map(card => card.pr)).toEqual([42])
+  expect(snapshot).toMatchObject({ prCount: 1, runOnlyCount: 4 })
+})
+
 test('all repositories and manual PRs remain visible with shared spans and honest lifecycle gaps', () => {
   const snapshot = combineTimelineSources(catalogue(), [observation({ links: [
     { repository: 'example/open', prNumber: 2 }, { repository: 'example/hosted', prNumber: 1 },

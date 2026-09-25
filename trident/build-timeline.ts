@@ -83,6 +83,8 @@ export interface TimelineCard {
 export interface TimelineSnapshot {
   observedAt: number
   cards: TimelineCard[]
+  prCount: number
+  runOnlyCount: number
   maxDurationMs: number
   limit: number
   warnings: string[]
@@ -93,6 +95,10 @@ export interface TimelineSnapshot {
 const TERMINAL = new Set(['done', 'failed', 'stopped'])
 const UNKNOWN: Counters = { input_tokens: null, output_tokens: null, cache_read_tokens: null,
   cache_creation_tokens: null, cost_usd: null, source: null, observed_at: null }
+
+const positivePr = (value: number | null): number | null =>
+  value !== null && Number.isSafeInteger(value) && value > 0 ? value : null
+const runPr = (run: RunRow): number | null => positivePr(run.published_pr) ?? positivePr(run.pr)
 
 export function timelineUsage(row: Counters): TimelineUsage {
   const fields = [row.input_tokens, row.output_tokens, row.cache_read_tokens, row.cache_creation_tokens]
@@ -131,7 +137,7 @@ export function projectTimeline(
 ): TimelineSnapshot {
   const groups = new Map<string, RunRow[]>()
   for (const run of runs) {
-    const pr = run.published_pr ?? run.pr
+    const pr = runPr(run)
     const key = pr === null ? `run:${run.id}` : `pr:${pr}`
     const group = groups.get(key) ?? []
     group.push(run)
@@ -144,11 +150,11 @@ export function projectTimeline(
     const active = group.some(run => !TERMINAL.has(run.phase))
     const ends = group.map(run => stamp(run.last_advanced_at)).filter((at): at is number => at !== null && at <= now)
     const card: TimelineCard = {
-      key, repository: '', url: null, lifecycle: 'Recorded Trident run span', pr: group[0]!.published_pr ?? group[0]!.pr, title: group[0]!.slug,
+      key, repository: '', url: null, lifecycle: 'Recorded Trident run span', pr: runPr(group[0]!), title: group[0]!.slug,
       start: starts.length ? Math.min(...starts) : null,
       latestStart: starts.length ? Math.max(...starts) : null,
       end: active ? now : ends.length ? Math.max(...ends) : null, active,
-      runs: group.map(run => ({ id: run.id, phase: run.phase, published: run.published_pr !== null })),
+      runs: group.map(run => ({ id: run.id, phase: run.phase, published: positivePr(run.published_pr) !== null })),
       segments: [], lanes: 1, gaps: [], events: [], phaseTotals: [], warnings: [],
     }
     if (starts.length !== group.length || ends.length !== group.length) card.warnings.push('Some run timestamps are missing, invalid, or in the future.')
@@ -254,7 +260,8 @@ export function projectTimeline(
     cards.push(card)
   }
   cards.sort((a, b) => (b.latestStart ?? -1) - (a.latestStart ?? -1) || a.key.localeCompare(b.key))
-  return { observedAt: now, cards, maxDurationMs: Math.max(1, ...cards.map(card =>
+  return { observedAt: now, cards, prCount: cards.filter(card => card.pr !== null).length,
+    runOnlyCount: cards.filter(card => card.pr === null).length, maxDurationMs: Math.max(1, ...cards.map(card =>
     card.start === null || card.end === null ? 0 : card.end - card.start)), limit, warnings: [] }
 }
 
@@ -267,10 +274,15 @@ export function openTimelineReader(path: string, repoPath: string, limit = -1) {
     close: () => db.close(),
     read: (now = Date.now()): TimelineSnapshot => db.transaction(() => {
       // Select complete PR lineages for the newest groups, not a truncated page of run rows.
-      const runs = db.query<RunRow, [string, number]>(`WITH scoped AS (
+      const runs = db.query<RunRow, [string, number]>(`WITH normalized AS (
+        SELECT id, slug, phase,
+          CASE WHEN typeof(pr) = 'integer' AND pr BETWEEN 1 AND 9007199254740991 THEN pr END AS pr,
+          CASE WHEN typeof(published_pr) = 'integer' AND published_pr BETWEEN 1 AND 9007199254740991 THEN published_pr END AS published_pr,
+          started_at, last_advanced_at FROM code_trident_runs WHERE repo_path = ?
+      ), scoped AS (
         SELECT id, slug, phase, pr, published_pr, started_at, last_advanced_at,
           CASE WHEN COALESCE(published_pr, pr) IS NULL THEN 'run:' || id ELSE 'pr:' || COALESCE(published_pr, pr) END AS card_key
-        FROM code_trident_runs WHERE repo_path = ?
+        FROM normalized
       ), latest AS (SELECT card_key FROM scoped GROUP BY card_key ORDER BY MAX(started_at) DESC LIMIT ?)
       SELECT id, slug, phase, pr, published_pr, started_at, last_advanced_at FROM scoped
       WHERE card_key IN (SELECT card_key FROM latest) ORDER BY started_at DESC`).all(repoPath, limit)
