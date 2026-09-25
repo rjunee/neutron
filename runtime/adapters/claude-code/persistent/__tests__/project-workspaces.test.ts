@@ -684,3 +684,29 @@ test('#1226 reconciliation never probes a pending record with no workspace (a cr
   await expect(new ProjectWorkspaceManager(path).applyLayout(server, root, scope())).rejects.toThrow('pending')
   expect(server.count('workspace.create')).toBe(1)
 })
+
+test('#1226 a pending record never skips the same-ID worker check: changed payload and retry refuse before any RPC; a distinct ID still recreates', async () => {
+  const { manager, server, path } = fixture()
+  const worker = scope('one', 'worker')
+  await manager.applyLayout(server, root, worker)
+  // A later Chat placement fails mid-flight: the record is left pending, naming its workspace.
+  server.failure = 'tab.move'
+  await expect(manager.applyLayout(server, root, scope())).rejects.toThrow('transport unavailable')
+  server.failure = undefined
+  const row = () => Object.values(JSON.parse(readFileSync(path, 'utf8')))[0] as any
+  expect(row().state).toBe('pending')
+  expect(Object.values(row().workers).map((value: any) => value.state)).toEqual(['completed'])
+  // The workspace is POSITIVELY gone, which alone would license recreation.
+  server.workspaces.clear()
+  const calls = server.calls.length
+  const changed = { ...root, command: ['another-agent'] }
+  await expect(new ProjectWorkspaceManager(path).applyLayout(server, changed, worker)).rejects.toThrow('worker operation payload changed')
+  await expect(new ProjectWorkspaceManager(path).applyLayout(server, root, worker)).rejects.toThrow('worker operation completed; reconcile before retry')
+  expect(server.calls.length).toBe(calls)
+  expect(server.count('workspace.create')).toBe(1)
+  // Control: a DISTINCT operation after proven absence recreates the scope as before.
+  const distinct = await new ProjectWorkspaceManager(path).applyLayout(server, root, scope('one', 'worker'))
+  expect(server.count('workspace.create')).toBe(2)
+  expect(server.panes.has(distinct.layout.root.pane_id)).toBe(true)
+  expect(Object.values(row().workers).map((value: any) => value.state)).toEqual(['completed', 'completed'])
+})

@@ -134,11 +134,19 @@ needs a fresh deployed live cycle. See
 2026-09-25 review round (refs #1226): a live Claude -> Codex switch hands the
 Claude Chat off resumably before the Codex owner starts; Codex -> Claude is
 refused up front with its recovery path (no Codex retirement authority yet). The
-handoff re-censuses after waiting the owner's turn out and needs parent turn,
+handoff re-censuses after waiting the owner's turn out and needs the exact pooled
+owner's parent turn (excluding the pending requesting dispatch's inspector signal),
 children and shells positively idle. A spawn in flight is never absence. Sleep
 checks that the manager's live Chat is the pool owner's pane. A pending record
 whose workspace is positively absent is recreated; other pending records still
 refuse (operator remedy recorded in the as-built). Still no acceptance box ticked.
+2026-09-25 round 2 (refs #1226, PR #1309): the census exempts owner-installed MCP
+servers whose running argv is exactly an approved configured launch, so they no
+longer read as busy shells. A `refused` handoff is yielded non-retryable with its
+recovery path; `busy` and `unknown` stay retryable. An ambiguous Chat owner never
+licenses a new Chat spawn: only a same-key join onto a survivor proceeds. A
+pending workspace record no longer skips the same-ID worker digest and state check
+(:63-68).
 
 ## Production composition investigation
 

@@ -275,8 +275,9 @@ export type ConversationOwner =
   }
   | { kind: 'none' }
   /** More than one owner for the exact scope (pre-#1226 rotations left survivors).
-   * `credentialIds` are theirs, so a dispatch can be served by one of them. */
-  | { kind: 'ambiguous'; count: number; credentialIds?: string[] }
+   * `credentialIds` are theirs, so a dispatch can be served by one of them;
+   * `sessionKeys` are their exact pool keys, the only keys a dispatch may JOIN. */
+  | { kind: 'ambiguous'; count: number; credentialIds?: string[]; sessionKeys?: string[] }
 
 /** The verified Chat handoff's outcome. Only `ready` licenses the next spawn. */
 export type ChatHandoffOutcome =
@@ -310,6 +311,20 @@ async function* armIdleOnSettle<T>(events: AsyncIterable<T>, arm: (() => void) |
   try { for await (const event of events) yield event } finally { arm?.() }
 }
 
+/**
+ * The terminal event of a handoff that did not license a spawn (#1226). `refused` is a
+ * FINAL decision (native child work, the pool refusing retirement, a Chat held by an
+ * owner of another provider): retrying the same dispatch cannot change it, so it is
+ * non-retryable and its reason carries the recovery path. `busy` and `unknown` are
+ * transient evidence and stay retryable. Neither is a credential fault.
+ */
+function chatHandoffError(what: string, handoff: Exclude<ChatHandoffOutcome, { status: 'ready' }>): Event {
+  return {
+    kind: 'error', retryable: handoff.status !== 'refused', code: `chat_handoff_${handoff.status}`,
+    message: `${what} ${handoff.status}: ${handoff.reason}`,
+  }
+}
+
 /** The pool-key namespace a Codex owner hands off to: never a Claude pool key. */
 const CODEX_CHAT_HANDOFF_KEY = 'codex-owner-chat'
 
@@ -319,8 +334,9 @@ const CODEX_CHAT_HANDOFF_KEY = 'codex-owner-chat'
  * manager refuse the Codex TUI's Chat placement (and wedge its durable launch). The
  * Claude owner is therefore handed off first, through the SAME verified handoff a
  * credential rotation uses, keeping its row RESUMABLE so switching back resumes the
- * Claude conversation. Only `ready` starts the Codex owner; anything else yields the
- * retryable `chat_handoff_*` error and starts nothing. No Claude owner: unchanged.
+ * Claude conversation. Only `ready` starts the Codex owner; anything else yields a
+ * `chat_handoff_*` error ({@link chatHandoffError}: `refused` final, `busy`/`unknown`
+ * retryable) and starts nothing. No Claude owner: unchanged.
  */
 function startCodexAfterClaudeHandoff(lifecycle: ConversationLifecycle, scope: string | null,
   start: () => SessionHandle): SessionHandle {
@@ -334,10 +350,7 @@ function startCodexAfterClaudeHandoff(lifecycle: ConversationLifecycle, scope: s
       const handoff = await lifecycle.handoffChat(scope,
         { sessionKey: `${CODEX_CHAT_HANDOFF_KEY}:${scope ?? ''}`, credentialId: 'openai-codex' }, { keepResumable: true })
       if (handoff.status !== 'ready') {
-        yield {
-          kind: 'error', retryable: true, code: `chat_handoff_${handoff.status}`,
-          message: `Chat provider handoff ${handoff.status}: ${handoff.reason}`,
-        }
+        yield chatHandoffError('Chat provider handoff', handoff)
         return
       }
     }
@@ -1263,10 +1276,11 @@ export function buildLlmCallSubstrate(
           // DOCUMENTED BYPASS (as-built deviation): several owners for one exact scope
           // are survivors of pre-#1226 rotations. Nothing picks one to kill (no census can
           // prove which is idle) and nothing reconciles them automatically. The dispatch
-          // is pinned to a survivor's credential so the pool SERVES that survivor instead
-          // of growing the set; only when none of their credentials is usable does it
-          // spawn as before #1226 (the manager then refuses a second live Chat). Sleep
-          // refuses the scope while it stays ambiguous.
+          // is pinned to a survivor's credential so the pool SERVES that survivor (a
+          // same-key join) instead of growing the set. A dispatch that would SPAWN — no
+          // survivor's key is usable — fails closed below (`chat_handoff_unknown`): an
+          // ambiguous owner never licenses another conversation. Sleep refuses the scope
+          // while it stays ambiguous.
           substrateLog.warn('chat_owner_ambiguous', {
             substrate_instance_id: input.substrate_instance_id, scope, count: owner.count,
           })
@@ -1332,7 +1346,26 @@ export function buildLlmCallSubstrate(
           yield { kind: 'error', retryable: false, message: 'Helper session lifecycle has completed' }
           return
         }
-        if (lifecycle !== undefined && owner?.kind !== 'ambiguous') {
+        if (owner?.kind === 'ambiguous') {
+          // Only a same-key join onto a survivor may proceed; anything else would spawn
+          // another conversation beside the survivors. No credential fault is reported,
+          // and a parked-everything pool already answered `all_cooldown` above.
+          const key = poolKeyFor(opts)
+          const joins = owner.sessionKeys !== undefined
+            ? owner.sessionKeys.includes(key)
+            : (owner.credentialIds ?? []).includes(resolved.cred_id)
+          if (!joins) {
+            substrateLog.warn('chat_owner_ambiguous_refused', {
+              substrate_instance_id: input.substrate_instance_id, scope, count: owner.count,
+            })
+            yield {
+              kind: 'error', retryable: true, code: 'chat_handoff_unknown',
+              message: `Chat credential handoff unknown: ambiguous Chat owner: ${owner.count} live sessions ` +
+                'for the scope and none can serve this dispatch; nothing was started',
+            }
+            return
+          }
+        } else if (lifecycle !== undefined) {
           // A re-keyed Chat (credential rotation) is a HANDOFF: the old exact owner is
           // retired through the pool first, so the manager's next Chat placement finds
           // the slot positively empty. Anything but `ready` spawns nothing and is not a
@@ -1341,10 +1374,7 @@ export function buildLlmCallSubstrate(
           // earlier retirement completed, so rotating back is never blocked.
           const handoff = await lifecycle.handoffChat(scope, { sessionKey: poolKeyFor(opts), credentialId: resolved.cred_id })
           if (handoff.status !== 'ready') {
-            yield {
-              kind: 'error', retryable: true, code: `chat_handoff_${handoff.status}`,
-              message: `Chat credential handoff ${handoff.status}: ${handoff.reason}`,
-            }
+            yield chatHandoffError('Chat credential handoff', handoff)
             return
           }
         }

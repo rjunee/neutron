@@ -7065,6 +7065,9 @@ export function buildOpenGraphComposer(
       turnInFlight: (projectId) => activityInspector.snapshot(inspectorScopeKey(projectId)).turn_in_flight,
       runs: boardRunStore,
       projectIdForRun: (run) => workBoardProjectIdForKey(project_slug, run.project_slug) ?? null,
+      // The owner's installed MCP servers — the SAME resolver the live-chat spawn
+      // writes into the parent's MCP configuration — are its own services, not shells.
+      ownServices: resolveMcpServers,
     })
     livenessHolder.surface = projectLiveness
     const projectMaintenance = buildProjectMaintenance({

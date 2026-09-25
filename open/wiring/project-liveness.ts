@@ -20,9 +20,11 @@ import {
 } from '@neutronai/runtime/adapters/claude-code/persistent/signatures.ts'
 import type { ProjectAdmission } from '@neutronai/gateway/project-admission.ts'
 import {
+  matchesConfiguredService,
   readSubagentActivity,
   runProjectLivenessCensus,
   walkProcessDescendants,
+  type ConfiguredServiceLaunch,
   type ProjectLivenessCensus,
   type ProjectLivenessProbes,
 } from '@neutronai/gateway/project-liveness-census.ts'
@@ -30,7 +32,9 @@ import type { TridentRun } from '@neutronai/trident/store.ts'
 
 /** The census surface the composition exposes. `null` is General. */
 export interface ProjectLivenessSurface {
-  census(projectId: string | null): Promise<ProjectLivenessCensus>
+  /** Handoff excludes the requesting dispatch's scope activity; the exact pool
+   * session's turn state and all descendant evidence remain authoritative. */
+  census(projectId: string | null, options?: { excludePendingDispatch?: boolean }): Promise<ProjectLivenessCensus>
 }
 
 export interface ProjectLivenessProbeDeps {
@@ -40,6 +44,10 @@ export interface ProjectLivenessProbeDeps {
   /** Live (non-terminal) build runs, and the admission scope each belongs to. */
   runs?: { listNonTerminal(limit: number): TridentRun[] }
   projectIdForRun?(run: TridentRun): string | null
+  /** The owner-installed stdio MCP servers the parent's MCP configuration launches
+   * (the SAME registry the spawn reads). A direct child whose argv is exactly one of
+   * these launches is an own service, not a shell. Absent = only the built-ins. */
+  ownServices?(): Promise<ReadonlyArray<ConfiguredServiceLaunch>> | ReadonlyArray<ConfiguredServiceLaunch>
 }
 
 /** Listing limit for live runs — explicit and large; a truncated list would hide one. */
@@ -99,15 +107,28 @@ export function buildProjectLivenessProbes(deps: ProjectLivenessProbeDeps): Proj
         }
       : {}),
     subagentActivity: (directory, nowMs) => readSubagentActivity(directory, nowMs),
-    descendants: (pid) => walkProcessDescendants(pid, {
-      // The parent's own stdio MCP servers (the dev channel and the tools bridge)
-      // run for its whole life by design; they are not shells.
-      isOwnService: (argv) => argv.includes(DEFAULT_DEV_CHANNEL_PATH) || argv.includes(DEFAULT_TOOLS_BRIDGE_PATH),
-    }),
+    descendants: async (pid) => {
+      // The parent's own stdio MCP servers (the dev channel, the tools bridge and every
+      // owner-installed server its configuration launches) run for its whole life by
+      // design; they are not shells. Their descendants are still walked. An unreadable
+      // registry proves nothing: only the built-ins are exempt, so a server reads busy.
+      let installed: ReadonlyArray<ConfiguredServiceLaunch> = []
+      try { installed = (await deps.ownServices?.()) ?? [] } catch { /* fail closed: built-ins only */ }
+      return walkProcessDescendants(pid, {
+        isOwnService: (argv) => argv.includes(DEFAULT_DEV_CHANNEL_PATH) || argv.includes(DEFAULT_TOOLS_BRIDGE_PATH)
+          || matchesConfiguredService(argv, installed),
+      })
+    },
   }
 }
 
 export function buildProjectLiveness(deps: ProjectLivenessProbeDeps): ProjectLivenessSurface {
   const probes = buildProjectLivenessProbes(deps)
-  return { census: (projectId) => runProjectLivenessCensus({ admission: deps.admission, probes }, projectId) }
+  return { census: (projectId, options) => runProjectLivenessCensus({
+    admission: deps.admission,
+    // A handoff's requesting dispatch is already visible to ActivityInspector,
+    // but has not entered the old owner. Its turn is measured by the pool's
+    // activeTurn/turnSlotHeld/poisoned evidence; descendants still need proof.
+    probes: options?.excludePendingDispatch === true ? { ...probes, turnInFlight: () => false } : probes,
+  }, projectId) }
 }

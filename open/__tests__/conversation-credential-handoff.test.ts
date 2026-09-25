@@ -10,7 +10,7 @@
  * real dev-channel peer (`lifecycleReplHost`), so assertions read actual children,
  * actual kills and the RPCs actually sent.
  */
-import { afterEach, expect, test } from 'bun:test'
+import { afterEach, expect, spyOn, test } from 'bun:test'
 import { mkdirSync, mkdtempSync, realpathSync, rmSync } from 'node:fs'
 import { tmpdir } from 'node:os'
 import { join } from 'node:path'
@@ -28,13 +28,18 @@ import { setNativeChildLiveness } from '@neutronai/runtime/adapters/claude-code/
 import type { PtyChild, PtyHost } from '@neutronai/runtime/adapters/claude-code/persistent/pty-host.ts'
 import { FakeHerdrWorkspaceServer } from '@neutronai/runtime/adapters/claude-code/persistent/__tests__/herdr-workspace-fake-server.ts'
 import type { AdmissionLeaseRow } from '@neutronai/gateway/project-admission-store.ts'
+import * as censusProbes from '@neutronai/gateway/project-liveness-census.ts'
+import { buildLiveAgentTurn } from '@neutronai/gateway/wiring/build-live-agent-turn.ts'
+import { openAdmission } from '@neutronai/gateway/wiring/__tests__/project-admission-fixture.ts'
+import { ButtonStore } from '@neutronai/channels/button-store.ts'
 import { lifecycleReplHost } from '@neutronai/runtime/adapters/claude-code/persistent/__tests__/lifecycle-repl-host.ts'
 import { OWNER_USER_ID } from '../owner-identity.ts'
 import type { OpenWiringContext } from '../wiring/context.ts'
 import { wireSubstrates } from '../wiring/substrates.ts'
 import { createConversationTerminal, createWorkerTerminalHost } from '../wiring/project-build-terminal.ts'
 import { createProjectScopeLifecycle, type ProjectScopeLifecycleDeps } from '../wiring/project-scope-lifecycle.ts'
-import type { ProjectLivenessSurface } from '../wiring/project-liveness.ts'
+import { buildProjectLiveness, type ProjectLivenessSurface } from '../wiring/project-liveness.ts'
+import { ActivityInspector, inspectorScopeKey } from '../activity-inspector.ts'
 
 const dirs: string[] = []
 const peers: Array<ReturnType<typeof lifecycleReplHost>> = []
@@ -103,7 +108,7 @@ interface Rig {
   wire(lifecycleOverrides?: Partial<ProjectScopeLifecycleDeps>): ReturnType<typeof wireSubstrates>
 }
 
-async function rig(options: { herdr: boolean }): Promise<Rig> {
+async function rig(options: { herdr: boolean; admissionGeneration?: number; credentials?: string[] }): Promise<Rig> {
   // Composer suites in the same process register a global owner native-child census;
   // this fixture owns that identity (a case that needs one sets it explicitly).
   setNativeChildLiveness(OWNER_USER_ID, undefined)
@@ -125,9 +130,8 @@ async function rig(options: { herdr: boolean }): Promise<Rig> {
   const reservation = Bun.serve({ port: 0, fetch: () => new Response('reserved') })
   const sinkPort = reservation.port!
   await reservation.stop(true)
-  const pool = newCredentialPool({ strategy: 'round_robin', credentials: [
-    { id: 'anthropic:a', kind: 'api_key', secret: 'sk-a' }, { id: 'anthropic:b', kind: 'api_key', secret: 'sk-b' },
-  ] })
+  const pool = newCredentialPool({ strategy: 'round_robin', credentials: (options.credentials ?? ['a', 'b'])
+    .map(name => ({ id: `anthropic:${name}`, kind: 'api_key' as const, secret: `sk-${name}` })) })
   const leases: AdmissionLeaseRow[] = []
   const logged: Rig['logged'] = []
   const factorySpawns: ClaudeCodeSubstrateOptions[] = []
@@ -142,6 +146,7 @@ async function rig(options: { herdr: boolean }): Promise<Rig> {
       ...(opts.credential_identity === undefined ? {} : { credential_identity: opts.credential_identity }),
       ...(opts.conversationProjectId === undefined ? {} : { conversationProjectId: opts.conversationProjectId }),
       ...(opts.projectPlacement === undefined ? {} : { projectPlacement: opts.projectPlacement }),
+      ...(opts.admissionGeneration === undefined ? {} : { admissionGeneration: opts.admissionGeneration }),
       ptyHost: opts.ptyHost === undefined ? peer.host : placedHost,
       replRegistryPath: join(root, 'repl-registry.json'),
       skipTrustSeed: true, idleQuietMs: 0, sinkPort,
@@ -169,7 +174,7 @@ async function rig(options: { herdr: boolean }): Promise<Rig> {
       const ctx: OpenWiringContext = {
         llmPool: pool, owner_handle: 'owner', owner_home: join(root, 'cwd'), project_slug: 'owner',
         env: {} as NodeJS.ProcessEnv, db: {} as OpenWiringContext['db'],
-        admissionGenerationFor: async () => undefined, prewarmSubstrate: async () => {},
+        admissionGenerationFor: async () => options.admissionGeneration, prewarmSubstrate: async () => {},
         ...(conversationTerminal === undefined ? {} : { conversationTerminal }),
         conversationLifecycle, substrateFactory: factory,
       }
@@ -186,6 +191,108 @@ const useCount = (pool: CredentialPool, id: string) => pool.credentials.find(c =
 /** Closes of anything but a workspace's initial shell pane (the manager retires it). */
 const chatCloses = (r: Rig) => r.server.callsTo('pane.close').filter(call => !r.shells.has(String(call.params['pane_id'])))
 const alive = (r: Rig) => r.peer.children.filter(c => !c.child.hasExited())
+
+test('live runner handoff excludes its requesting turn, preserves exact-owner busy and descendant refusal', async () => {
+  const r = await rig({ herdr: true, admissionGeneration: 0 })
+  const admission = openAdmission({ projects: ['p-one'] })
+  const inspector = new ActivityInspector()
+  const surface = buildProjectLiveness({
+    admission: admission.service,
+    turnInFlight: scope => inspector.snapshot(inspectorScopeKey(scope)).turn_in_flight,
+  })
+  // The peer has a synthetic process id. Only its OS/transcript boundaries are
+  // scripted: pool identity/turn state, census decision, lifecycle and runner are real.
+  let shells: censusProbes.Verdict = 'idle'
+  let children: censusProbes.Verdict = 'idle'
+  const descendants = spyOn(censusProbes, 'walkProcessDescendants').mockImplementation(async () => ({ verdict: shells, reasons: [] }))
+  const subagents = spyOn(censusProbes, 'readSubagentActivity').mockImplementation(async () => ({ verdict: children, reasons: [] }))
+  const observed: Array<{ requesting: boolean; parentTurn: string }> = []
+  const read = surface.census.bind(surface)
+  surface.census = async (scope, options) => {
+    const census = await read(scope, options)
+    if (options?.excludePendingDispatch) observed.push({
+      requesting: inspector.snapshot(inspectorScopeKey(scope)).turn_in_flight,
+      parentTurn: census.parentTurn,
+    })
+    return census
+  }
+  const wired = r.wire({ liveness: () => surface, waitMs: 60 })
+  let servedSpec!: AgentSpec
+  const run = buildLiveAgentTurn({
+    admission, substrate: { start(spec) {
+      servedSpec = spec
+      return wired.liveAgentSubstrate!.start(spec)
+    } },
+    activityInspector: {
+      on_event() {},
+      turn_started: scope => inspector.turnStarted(inspectorScopeKey(scope)),
+      turn_finished: scope => inspector.turnFinished(inspectorScopeKey(scope)),
+    },
+    personaLoader: { load: async () => '' },
+    buttonStore: new ButtonStore({ db: admission.db }),
+    project_slug: 'owner', owner_home: tempDir('live-handoff-runner-'), model: 'sonnet',
+  })
+  const turn = () => run({
+    project_slug: 'owner', user_id: 'owner', topic_id: 'web:handoff',
+    project_id: 'p-one', user_text: 'hello', send() {}, observed_at: 0,
+  })
+  let release: (() => void) | undefined
+  let inFlight: Promise<Event[]> | undefined
+  try {
+    expect((await turn()).outcome).toBe('replied')
+    const gate = new Promise<void>(resolve => { release = resolve })
+    r.peer.holdReplies(() => gate)
+    inFlight = collect(wired.liveAgentSubstrate!.start(servedSpec))
+    await until(() => r.peer.children[0]!.prompts.length === 2)
+    reportFailure(r.pool, 'anthropic:a', 429)
+    expect((await surface.census('p-one', { excludePendingDispatch: true })).parentTurn).toBe('busy')
+    expect((await turn()).outcome).toBe('failed')
+    expect(r.logged.at(-1)?.event).toBe('chat_handoff_busy')
+    expect(chatCloses(r)).toHaveLength(0)
+    expect(r.peer.children).toHaveLength(1)
+    r.peer.holdReplies()
+    release!()
+    expect(completed(await inFlight)).toBe(true)
+    await until(() => [...committedDispatches.values()].every(count => count === 0))
+    // The completed old turn reports credential success; park it again to rotate.
+    reportFailure(r.pool, 'anthropic:a', 429)
+
+    for (const [childVerdict, shellVerdict, code] of [
+      ['unknown', 'busy', 'chat_handoff_unknown'],
+      ['idle', 'unknown', 'chat_handoff_unknown'],
+      ['busy', 'idle', 'chat_handoff_refused'],
+      ['idle', 'busy', 'chat_handoff_busy'],
+    ] as const) {
+      children = childVerdict
+      shells = shellVerdict
+      expect((await turn()).outcome).toBe('failed')
+      expect(r.logged.at(-1)?.event).toBe(code)
+      expect(r.peer.children).toHaveLength(1)
+      expect(r.peer.children[0]!.child.hasExited()).toBe(false)
+      expect(chatCloses(r)).toHaveLength(0)
+    }
+    children = shells = 'idle'
+    // Sleep/maintenance still see pending scope activity; only handoff excludes it.
+    inspector.turnStarted('p-one')
+    expect((await surface.census('p-one')).parentTurn).toBe('busy')
+    inspector.turnFinished('p-one')
+    expect((await turn()).outcome).toBe('replied')
+    expect(observed).toContainEqual({ requesting: true, parentTurn: 'idle' })
+    expect(r.peer.children).toHaveLength(2)
+    expect(r.peer.children[0]!.child.hasExited()).toBe(true)
+    expect(r.peer.children[1]!.prompts).toHaveLength(1)
+    expect(alive(r)).toHaveLength(1)
+    expect(chatLayouts(r.server)).toHaveLength(2)
+    expect(r.server.callsTo('workspace.create')).toHaveLength(1)
+    expect(inspector.snapshot('p-one').turn_in_flight).toBe(false)
+  } finally {
+    r.peer.holdReplies()
+    release?.()
+    await inFlight
+    descendants.mockRestore()
+    subagents.mockRestore()
+  }
+})
 
 test('pin: consecutive turns for one scope stay on the Chat owner credential under round_robin', async () => {
   const r = await rig({ herdr: true })
@@ -273,7 +380,9 @@ test('an unresolved native child refuses the handoff: the old Chat stays, nothin
   r.leases.push({ scope: { ownerHandle: 'owner', projectId: 'p-one' }, reason: 'liveChild', workRef: 'child-1' } as unknown as AdmissionLeaseRow)
   reportFailure(r.pool, 'anthropic:a', 429)
   const events = await collect(wired.liveAgentSubstrate!.start(specFor('p-one')))
-  expect(events).toEqual([expect.objectContaining({ kind: 'error', code: 'chat_handoff_refused', retryable: true })])
+  // A refusal is a final decision: non-retryable, with its reason carried.
+  expect(events).toEqual([expect.objectContaining({ kind: 'error', code: 'chat_handoff_refused', retryable: false,
+    message: expect.stringContaining('unresolved native child') })])
   expect(r.peer.children).toHaveLength(1)
   expect(r.peer.children[0]!.child.hasExited()).toBe(false)
   expect(chatCloses(r)).toHaveLength(0)
@@ -406,7 +515,8 @@ test('handoff census: a busy verdict never masks unknown descendants, and busy c
   for (const [parts, code] of cases) {
     current = participating(parts)
     const events = await collect(wired.liveAgentSubstrate!.start(specFor('p-one')))
-    expect(events).toEqual([expect.objectContaining({ kind: 'error', code, retryable: true })])
+    // Only `refused` is final; busy/unknown evidence is transient and retryable.
+    expect(events).toEqual([expect.objectContaining({ kind: 'error', code, retryable: code !== 'chat_handoff_refused' })])
     expect(r.peer.children).toHaveLength(1)
     expect(r.peer.children[0]!.child.hasExited()).toBe(false)
     expect(chatCloses(r)).toHaveLength(0)
@@ -434,27 +544,45 @@ test('a Chat spawn in flight is not absence: ownerFor reports it, a different ke
   expect(await lifecycle.handoffChat('p-one', { sessionKey: 'key-a', credentialId: 'anthropic:a' })).toEqual({ status: 'ready' })
 })
 
-test('ambiguous owners (documented bypass): the dispatch is pinned to a survivor credential, never growing the set; none usable spawns as before', async () => {
-  const r = await rig({ herdr: false })
-  const survivor = (credential: string) => ({ sessionKey: `survivor-${credential}`,
-    options: { conversationProjectId: 'p-one', credential_identity: credential } as unknown as PersistentReplSubstrateOptions,
-    session: { sessionId: `s-${credential}`, child: {} } as never })
-  const wired = r.wire({ sessions: async () => ({ live: [survivor('anthropic:b'), survivor('anthropic:b')], unresolved: 0 }) })
-  // Round-robin alone would pick `a`; the survivors' credential is the pin.
+test('ambiguous owners: a same-key join serves a survivor; a dispatch that would spawn fails closed; all parked is all_cooldown', async () => {
+  const r = await rig({ herdr: false, credentials: ['a', 'b', 'c'] })
+  // Two REAL live survivors for one scope, as pre-#1226 rotations left them: a
+  // lifecycle blind to the pool never retires the first owner.
+  const blind = r.wire({ sessions: async () => ({ live: [], unresolved: 0 }) })
+  expect(completed(await collect(blind.liveAgentSubstrate!.start(specFor('p-one'))))).toBe(true)
+  reportFailure(r.pool, 'anthropic:a', 429)
+  expect(completed(await collect(blind.liveAgentSubstrate!.start(specFor('p-one'))))).toBe(true)
+  expect(credentialsServed(r)).toEqual(['anthropic:a', 'anthropic:b'])
+  expect(alive(r)).toHaveLength(2)
+  const wired = r.wire()
+  // Control — a survivor's credential is usable: the pin joins that survivor's exact key.
   expect(completed(await collect(wired.liveAgentSubstrate!.start(specFor('p-one'))))).toBe(true)
-  expect(credentialsServed(r)).toEqual(['anthropic:b'])
-  expect(r.logged.filter(entry => entry.event.startsWith('chat_handoff'))).toEqual([])
-  // No survivor credential usable: the pre-#1226 path (the strategy chooses).
+  expect(r.peer.children).toHaveLength(2)
+  expect(r.peer.children[1]!.prompts).toHaveLength(2)
+  // Every survivor's credential is parked: `c` would SPAWN a third conversation. Refused.
   reportFailure(r.pool, 'anthropic:b', 429)
-  expect(completed(await collect(wired.liveAgentSubstrate!.start(specFor('p-one'))))).toBe(true)
-  expect(credentialsServed(r)).toEqual(['anthropic:b', 'anthropic:a'])
+  const spawnsBefore = r.factorySpawns.length
+  const refused = await collect(wired.liveAgentSubstrate!.start(specFor('p-one')))
+  expect(refused).toEqual([expect.objectContaining({ kind: 'error', code: 'chat_handoff_unknown', retryable: true,
+    message: expect.stringContaining('ambiguous Chat owner: 2 live sessions') })])
+  expect(r.peer.children).toHaveLength(2)
+  expect(r.factorySpawns).toHaveLength(spawnsBefore)
+  expect(r.pool.credentials.find(c => c.id === 'anthropic:c')!.consecutive_failures).toBe(0)
+  // Every credential parked: the pool's own `all_cooldown` answers first; still no spawn.
+  reportFailure(r.pool, 'anthropic:c', 429)
+  expect(await collect(wired.liveAgentSubstrate!.start(specFor('p-one')))).toEqual([expect.objectContaining({
+    kind: 'error', code: 'all_cooldown', retryable: true })])
+  expect(r.peer.children).toHaveLength(2)
+  expect(r.factorySpawns).toHaveLength(spawnsBefore)
+  expect(alive(r)).toHaveLength(2)
 })
 
 test('Codex -> Claude switch: a Chat held by a live non-Claude owner refuses the Claude spawn with its recovery path; nothing is closed', async () => {
   const r = await rig({ herdr: true })
   const wired = r.wire({ conversationTerminal: { inspectChat: async () => ({ status: 'live', pane: 'codex-tui' }) } })
   const events = await collect(wired.liveAgentSubstrate!.start(specFor('p-one')))
-  expect(events).toEqual([expect.objectContaining({ kind: 'error', code: 'chat_handoff_refused', retryable: true,
+  // The documented refusal is final (non-retryable) and carries its recovery path.
+  expect(events).toEqual([expect.objectContaining({ kind: 'error', code: 'chat_handoff_refused', retryable: false,
     message: expect.stringContaining('switch the project back to Codex') })])
   expect(r.peer.children).toHaveLength(0)
   expect(r.factorySpawns).toHaveLength(0)

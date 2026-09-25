@@ -179,16 +179,9 @@ export class ProjectWorkspaceManager {
     let record = this.journal.update(rows => {
       const existing = rows[key]
       if (existing !== undefined) {
-        if (existing.version === 1 && JSON.stringify(existing.scope) === JSON.stringify(scope) && nonempty(existing.token)
-          && existing.state === 'pending' && nonempty(existing.workspace)) {
-          probePendingAbsence = true
-          return existing
-        }
-        if (existing.version !== 1 || JSON.stringify(existing.scope) !== JSON.stringify(scope)
-          || !nonempty(existing.token) || existing.state !== 'ready' || !nonempty(existing.workspace)
-          || !existing.chat || !nonempty(existing.chat.tab) || !nonempty(existing.chat.pane)) {
-          throw new ProjectWorkspaceRefusal('project-workspaces: existing ownership is invalid or pending; reconcile before retry')
-        }
+        // The worker reservations are checked for EVERY existing record, pending
+        // included (spec :63-68): a same-ID retry must never reach the pending-absence
+        // recreation below and be placed a second time, nor change its payload.
         if (existing.workers !== undefined) {
           for (const operation of Object.values(object(existing.workers))) {
             const saved = object(operation)
@@ -203,6 +196,16 @@ export class ProjectWorkspaceManager {
           // Completed is not an adoption API. HerdrHost would treat the returned
           // handle as newly created and might close an already-owned pane.
           throw new ProjectWorkspaceRefusal(`project-workspaces: worker operation ${operation.state}; reconcile before retry`)
+        }
+        if (existing.version === 1 && JSON.stringify(existing.scope) === JSON.stringify(scope) && nonempty(existing.token)
+          && existing.state === 'pending' && nonempty(existing.workspace)) {
+          probePendingAbsence = true
+          return existing
+        }
+        if (existing.version !== 1 || JSON.stringify(existing.scope) !== JSON.stringify(scope)
+          || !nonempty(existing.token) || existing.state !== 'ready' || !nonempty(existing.workspace)
+          || !existing.chat || !nonempty(existing.chat.tab) || !nonempty(existing.chat.pane)) {
+          throw new ProjectWorkspaceRefusal('project-workspaces: existing ownership is invalid or pending; reconcile before retry')
         }
         return existing
       }

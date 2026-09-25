@@ -245,7 +245,8 @@ export function createProjectScopeLifecycle(deps: ProjectScopeLifecycleDeps): Pr
     if (count > 1) {
       const credentialIds = [...new Set([...owners.map(row => row.options), ...spawning.map(row => row.options)]
         .map(options => options.credential_identity ?? '_nocred'))]
-      return { kind: 'ambiguous', count, credentialIds }
+      const sessionKeys = [...owners, ...spawning].map(row => row.sessionKey)
+      return { kind: 'ambiguous', count, credentialIds, sessionKeys }
     }
     if (owners.length === 0) {
       const spawn = spawning[0]!
@@ -287,7 +288,7 @@ export function createProjectScopeLifecycle(deps: ProjectScopeLifecycleDeps): Pr
     // Unbound (composition still building): the pool's own exact authority stands alone.
     if (surface === undefined) return undefined
     let census: Awaited<ReturnType<ProjectLivenessSurface['census']>>
-    try { census = await surface.census(scope) } catch (error) {
+    try { census = await surface.census(scope, { excludePendingDispatch: true }) } catch (error) {
       const reason = `liveness census failed: ${error instanceof Error ? error.message : String(error)}`
       log.warn('chat_handoff_unknown', { ...fields, reason })
       return { status: 'unknown', reason }

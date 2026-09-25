@@ -133,10 +133,75 @@ the control `open/__tests__/conversation-credential-handoff.test.ts` stayed gree
   (`projectWorkspaceHost`, never written to the launch file), and a journal refusal raised
   before any Herdr RPC (`ProjectWorkspaceRefusal`) unwinds the exclusive launch file.
 
+**Round-2 repair (PR #1309, owner finding).**
+- Requester-aware handoff census. `buildLiveAgentTurn` marks its dispatch active in
+  ActivityInspector before the substrate drains, and the credential handoff runs inside that
+  drain, so the scope-wide inspector signal counted the REQUESTING turn as the old owner being
+  busy: an idle owner answered `chat_handoff_busy`. `ProjectLivenessSurface.census` takes
+  `{ excludePendingDispatch }`; the handoff gate asks for it and the production census then
+  omits only the inspector signal. The pool's exact-session active turn, held turn slot and
+  poisoned state still decide the parent turn; child, shell, identity and unknown rules are
+  untouched. Sleep and maintenance keep the scope-wide census.
+- Own MCP services. The shell probe exempted only the dev channel and the tools bridge, so an
+  owner-installed stdio MCP server (a direct child of the REPL for its whole life) made every
+  census read shells `busy`, blocking handoff and sleep. `ProjectLivenessProbeDeps.ownServices`
+  now receives the composer's `resolveMcpServers` (the same resolver the spawn writes into the
+  parent's MCP configuration). A DIRECT child is an own service only when its argv is exactly a
+  configured launch (`matchesConfiguredService` in `gateway/project-liveness-census.ts`: the
+  command token, exact or by final path segment for a bare command, at most two interpreter
+  tokens before it, then exactly the configured args to the end). Never a process-name match;
+  its descendants are still walked; an unreadable registry exempts nothing.
+- Final refusals. A `refused` handoff (native child work, an unresolved native child, the pool
+  refusing retirement, a Chat held by a non-Claude owner) is yielded `retryable: false` with its
+  reason (and so its recovery path) in the message, on both the Claude credential handoff and
+  the Claude -> Codex switch; `busy` and `unknown` stay retryable. `code` is unchanged.
+- Ambiguous owner fails closed. With several live owners for one exact scope the dispatch is
+  still pinned to a survivor's credential, and a same-key join onto a survivor (the ambiguous
+  owner now carries the survivors' exact pool keys) is served as before. A dispatch that would
+  SPAWN instead yields the retryable `chat_handoff_unknown` ("ambiguous Chat owner: N live
+  sessions ...") and starts nothing; an all-parked pool still answers `all_cooldown` first.
+- Pending worker digest (spec :63-68). `ProjectWorkspaceManager` returned a pending record for
+  the absence probe BEFORE validating worker reservations, so a same-ID worker retry against a
+  pending record whose workspace was positively gone was recreated and placed a second time.
+  The reservation validation and the same-ID digest/state check now run first for every
+  existing record: a changed payload refuses as `worker operation payload changed`, the same
+  payload as `worker operation <state>; reconcile before retry`, both before any Herdr RPC. A
+  distinct operation ID after proven absence still recreates the scope.
+- Evidence. `open/__tests__/conversation-credential-handoff.test.ts` drives the REAL
+  `buildLiveAgentTurn`, ActivityInspector, `buildProjectLiveness` over the real admission
+  fixture, the lifecycle, pool and workspace manager (only the child's OS and transcript probes
+  are scripted): a held old-owner turn is `chat_handoff_busy`; unknown child or shell is
+  `chat_handoff_unknown`; a busy child is `chat_handoff_refused`; a busy shell is
+  `chat_handoff_busy`; the plain census still reports pending scope activity busy; idle
+  rotation succeeds while the requester is active, with one surviving Chat, one
+  `workspace.create` and the old child exited. The same suite rebuilds the ambiguous case over
+  two REAL live survivors (join served; would-spawn refused with no spawn and no credential
+  fault; all parked is `all_cooldown`) and asserts refusal retryability.
+  `open/__tests__/project-scope-sleep.test.ts` covers the Claude -> Codex refusal (final) and
+  busy (retryable) with no Codex start and the Chat untouched.
+  `open/__tests__/project-liveness-wiring.test.ts` proves the handoff census never consults
+  the inspector signal while the default census does, and reads a real process tree: an exact
+  configured launch is idle, the same binary unconfigured or an unreadable registry is busy.
+  `gateway/project-liveness-census.test.ts` pins the matcher and the descendant walk (a
+  configured server's own shell is busy). `open/__tests__/open-mcp-servers-wiring.test.ts`
+  proves through the production composer that approving a server turns its running process
+  from a busy shell into an own service. `runtime/.../__tests__/project-workspaces.test.ts`
+  pins the pending-record digest refusal and the distinct-ID recreation.
+- Mutations. Guard `open/__tests__/conversation-credential-handoff.test.ts`, control
+  `open/__tests__/project-scope-sleep.test.ts`: (a) the handoff census counting the requester
+  again reds the consuming test's idle rotation (`failed` instead of `replied`) while the
+  control stays green; (b) the opposite direction, the handoff census gate licensing
+  unconditionally (a foreign/unverified close allowed), reds the same test at descendant
+  refusal (`replied` instead of `failed`). Also: dropping the ambiguous fail-closed branch
+  reds the ambiguous test; mapping `refused` back to retryable reds the four refusal
+  assertions; removing the composer's `ownServices` line reds the composer test; restoring
+  the old pending-first order reds the digest test. Each was restored before the gates.
+
 **Blocked work / deviations.**
 - Codex -> Claude live switch: a durable Codex owner has no exact retirement authority, so a
   Claude dispatch for a scope whose Chat slot holds a live non-Claude owner is refused up front
-  (`chat_handoff_refused`, nothing closed, no spawn) with its recovery path in the message:
+  (`chat_handoff_refused`, final so non-retryable, nothing closed, no spawn) with its
+  recovery path in the message:
   switch the project back to Codex, or end that owner session. Pinned by
   `conversation-credential-handoff.test.ts`. Retiring a Codex owner is future work.
 - Operator remedy for a stuck pending Chat record (a placement interrupted mid-operation,
@@ -146,9 +211,11 @@ the control `open/__tests__/conversation-credential-handoff.test.ts` stayed gree
 - Ambiguous owners (several live owners for one exact scope, left by pre-#1226 rotations) are
   a DOCUMENTED BYPASS, not a handoff: nothing picks one to kill, and nothing reconciles them
   automatically (restart adoption adopts each survivor). The dispatch is pinned to a survivor's
-  credential so the pool serves that survivor instead of spawning another; only when no
-  survivor credential is usable does it spawn as before #1226. Sleep refuses the scope while
-  it stays ambiguous. Pinned by `conversation-credential-handoff.test.ts`.
+  credential so the pool serves that survivor (a same-key join); a dispatch that would spawn
+  another conversation fails closed with the retryable `chat_handoff_unknown` (round 2). While
+  every survivor's credential is parked the scope therefore cannot be served until a park
+  lifts or the survivors are reconciled by hand. Sleep refuses the scope while it stays
+  ambiguous. Pinned by `conversation-credential-handoff.test.ts`.
 - Rotation on an adopted pre-#1237 survivor: its census parent reads `legacy-unknown`, so when
   its credential is parked (429/401) every dispatch in that scope fails with the retryable
   `chat_handoff_unknown` until the park lifts or the survivor is replaced. Before #1226 the
@@ -171,9 +238,11 @@ the control `open/__tests__/conversation-credential-handoff.test.ts` stayed gree
   wake spawns a FRESH session on the selected credential's key (the old transcript stays on
   disk, not resumed). The old row is left in place: inert (no pid, pane or claim), outranked by
   any newer asleep row of the scope, and never swept.
-- Evidence gap: the census's descendant walk excludes only the dev channel and the tools
-  bridge, so any other stdio MCP server of the parent may read as a busy descendant (sleep
-  then refuses; it never licenses a close).
+- Evidence gap (narrowed in round 2): the census's descendant walk exempts the dev channel,
+  the tools bridge and every CURRENTLY approved owner-installed server launched exactly as
+  configured. A server launched through a wrapper that forks (so the configured argv is not a
+  direct child), or one whose grant changed while its old child still runs, still reads as a
+  busy descendant (sleep and handoff then wait or refuse; it never licenses a close).
 - The adopted-survivor case covers refusal only: a survivor predating #1237 always reads
   `legacy-unknown`, so no fixture can sleep one without faking the census.
 - The T2 rig is duplicated in the new suite rather than extracted to `tests/support/`.
@@ -185,3 +254,12 @@ the control `open/__tests__/conversation-credential-handoff.test.ts` stayed gree
   publication is a lease-checked force push that would have overwritten PR #1309.
 - Host-owned, left as is: the task ledger under `.trident/ledgers/` at the PR head already shows
   T3 ticked by the earlier worker fix round.
+- Round 2: the candidate's separate as-built shard for the requester-aware census was folded
+  into this one, because the as-built guard allows one new shard per branch.
+- Round 2, host-owned, recorded not edited: the launch again created the branch empty at main
+  (a stopped prior run is no retry source; the leftover-branch guard reads only the local ref),
+  and the plan step fast-forwarded to the published head b7070a3f instead of rebuilding,
+  because publication is a lease-checked force push that would have overwritten PR #1309.
+- Round 2, host-owned, left as is: the ledger under `.trident/ledgers/` already shows T3 ticked.
+- Round 2: the spec's suggested `worker-placement.test.ts` does not exist; the pending-record
+  digest tests live in `project-workspaces.test.ts`, beside the other journal tests.

@@ -25,7 +25,7 @@
  */
 
 import { afterEach, beforeEach, describe, expect, spyOn, test } from 'bun:test'
-import { mkdtempSync, rmSync } from 'node:fs'
+import { mkdtempSync, readFileSync, rmSync } from 'node:fs'
 import { tmpdir } from 'node:os'
 import { dirname, join } from 'node:path'
 import { fileURLToPath } from 'node:url'
@@ -41,7 +41,9 @@ import type { PtyChild } from '@neutronai/runtime/adapters/claude-code/persisten
 import {
   childByKey,
   pool,
+  supervisedBySessionKey,
 } from '@neutronai/runtime/adapters/claude-code/persistent/pool-state.ts'
+import type { PersistentReplSubstrateOptions } from '@neutronai/runtime/adapters/claude-code/persistent/types.ts'
 import { buildOpenGraphComposer } from '../composer.ts'
 import { CodexOwnerBindings } from '../wiring/codex-owner-binding.ts'
 
@@ -346,6 +348,67 @@ describe('the production composer wires installable MCP servers end to end', () 
       childByKey.delete('mcp-wiring-probe')
       b.cleanup()
       codexRetirement.mockRestore()
+    }
+  })
+
+  test.if(process.platform === 'linux')('the liveness census reads an APPROVED server\'s process as the parent\'s own service, not a shell', async () => {
+    // #1226 round 2. The census's shell probe must see the SAME registry the spawn
+    // writes into the parent's MCP configuration; without the composer's
+    // `ownServices` line every installed server reads as a busy shell, and a scope
+    // with one can never hand off its Chat or sleep. A REAL parent process whose one
+    // direct child runs exactly the installed launch stands in for the REPL.
+    const sleepPath = Bun.which('sleep')
+    if (sleepPath === null) throw new Error('sleep is required')
+    const parent = Bun.spawn(['/bin/sh', '-c', `'${sleepPath}' 30 & wait`], { stdout: 'ignore', stderr: 'ignore' })
+    const limit = Date.now() + 5000
+    for (;;) {
+      try {
+        const child = readFileSync(`/proc/${parent.pid}/task/${parent.pid}/children`, 'utf8').trim().split(/\s+/)[0]
+        if (child && readFileSync(`/proc/${child}/cmdline`, 'utf8') === `${sleepPath}\x0030\x00`) break
+      } catch { /* not started yet */ }
+      if (Date.now() > limit) throw new Error('the server stand-in never started')
+      await Bun.sleep(10)
+    }
+    const KEY = 'cc-agent-census-probe'
+    const b = await boot()
+    try {
+      const child = { pid: parent.pid, hasExited: (): boolean => false, kill: (): void => {}, exited: Promise.resolve(0) }
+      const session = {
+        sessionId: 'census-probe', cwd: tmpDir!, childGeneration: 'census-probe-gen', child,
+        admissionGeneration: undefined, activeTurn: undefined, turnSlotHeld: 0, poisoned: false,
+        hasChildExited: (): boolean => false,
+      }
+      supervisedBySessionKey.set(KEY, { substrate_instance_id: 'cc-agent-census-probe', project_id: 'general',
+        conversationProjectId: null, cwd: tmpDir! } as unknown as PersistentReplSubstrateOptions)
+      pool.set(KEY, Promise.resolve(session as unknown as ReplSession))
+      childByKey.set(KEY, child as unknown as PtyChild)
+      const liveness = b.composition['project_liveness'] as
+        | { census(projectId: string | null): Promise<{ parent: { kind: string }; shells: string }> }
+        | undefined
+      if (liveness === undefined) throw new Error('composition did not expose the census')
+
+      // Not installed: the child is an unconfigured process, so a busy shell.
+      const before = await liveness.census(null)
+      expect(before.parent.kind).not.toBe('absent')
+      expect(before.shells).toBe('busy')
+
+      const installed = await b.api('POST', '/api/app/mcp-servers', { name: 'census-server', command: sleepPath, args: ['30'] })
+      expect(installed.status).toBe(200)
+      // Installed but not approved: still not wired, still a shell.
+      expect((await liveness.census(null)).shells).toBe('busy')
+      const rows = ((await installed.json()) as { servers: Array<{ grant_hash: string }> }).servers
+      const decided = await b.api('POST', '/api/app/mcp-servers/decision', {
+        name: 'census-server', decision: 'approve', grant_hash: rows[0]!.grant_hash,
+      })
+      expect(decided.status).toBe(200)
+      expect((await liveness.census(null)).shells).toBe('idle')
+    } finally {
+      supervisedBySessionKey.delete(KEY)
+      pool.delete(KEY)
+      childByKey.delete(KEY)
+      b.cleanup()
+      parent.kill()
+      await parent.exited
     }
   })
 

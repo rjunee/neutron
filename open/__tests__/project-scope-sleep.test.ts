@@ -595,6 +595,24 @@ test('live provider switch Claude -> Codex: the Claude Chat is handed off RESUMA
   expect(resumeArgv[resumeArgv.indexOf('--resume') + 1]).toBe(first.sessionId)
 })
 
+test('Claude -> Codex: a REFUSED handoff is final (non-retryable, reason carried), a busy one retryable; neither starts Codex nor closes the Chat', async () => {
+  const r = await rig({ waitMs: 50 }, { codex: true })
+  expect(await turn(r, 'p-one')).toBe(true)
+  r.provider.value = 'openai-codex'
+  r.census.value = { ...censusOf('busy'), parentTurn: 'idle', children: 'busy', shells: 'idle' } as Census
+  expect(await collect(r.wired.liveAgentSubstrate!.start(specFor('p-one')))).toEqual([expect.objectContaining({
+    kind: 'error', code: 'chat_handoff_refused', retryable: false, message: expect.stringContaining('native child work in progress') })])
+  r.census.value = { ...censusOf('busy'), parentTurn: 'idle', children: 'idle', shells: 'busy' } as Census
+  expect(await collect(r.wired.liveAgentSubstrate!.start(specFor('p-one')))).toEqual([expect.objectContaining({
+    kind: 'error', code: 'chat_handoff_busy', retryable: true })])
+  expect(r.codexStarts).toEqual([])
+  expectUntouched(r)
+  // Control: a positively idle census hands off and starts the Codex owner.
+  r.census.value = censusOf('idle')
+  expect(completed(await collect(r.wired.liveAgentSubstrate!.start(specFor('p-one'))))).toBe(true)
+  expect(r.codexStarts).toEqual(['p-one'])
+})
+
 test('Codex refusal is decided by the FOUND owner: a Claude owner left in a scope now set to Codex still sleeps', async () => {
   const r = await rig({}, { codex: true })
   expect(await turn(r, 'p-one')).toBe(true)
