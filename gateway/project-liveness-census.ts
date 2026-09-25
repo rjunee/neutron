@@ -260,6 +260,37 @@ export interface ProcWalkDeps {
   isOwnService?: (argv: string[]) => boolean
 }
 
+/** One configured stdio server's launch, as the parent's MCP configuration names it. */
+export interface ConfiguredServiceLaunch {
+  command: string
+  args?: readonly string[]
+}
+
+/** Interpreter tokens a launch may carry ahead of its command (`node <script>`,
+ *  `/bin/sh <script>`: a shebang script is exec'd as its interpreter's argument). */
+const MAX_INTERPRETER_TOKENS = 2
+
+/**
+ * Whether a process argv IS the launch of one configured stdio server: the
+ * configured command token followed by EXACTLY its configured args, to the end of
+ * the argv. The command token matches exactly, or — for a bare command resolved
+ * through `PATH` — by its final path segment; at most {@link MAX_INTERPRETER_TOKENS}
+ * interpreter tokens may precede it. Never a process-name match: a command with
+ * other arguments, or an unconfigured command, is not a configured service.
+ */
+export function matchesConfiguredService(argv: readonly string[], servers: ReadonlyArray<ConfiguredServiceLaunch>): boolean {
+  for (const server of servers) {
+    const args = server.args ?? []
+    const at = argv.length - 1 - args.length
+    if (server.command.length === 0 || at < 0 || at > MAX_INTERPRETER_TOKENS) continue
+    const token = argv[at]!
+    const command = token === server.command
+      || (!server.command.includes('/') && token.slice(token.lastIndexOf('/') + 1) === server.command)
+    if (command && args.every((arg, index) => argv[at + 1 + index] === arg)) return true
+  }
+  return false
+}
+
 const sameIdentity = (a: ProcessIdentity | undefined, b: ProcessIdentity | undefined): boolean =>
   a !== undefined && b !== undefined && a.start_ticks === b.start_ticks && a.boot_id === b.boot_id
 

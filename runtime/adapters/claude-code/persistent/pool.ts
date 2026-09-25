@@ -15,7 +15,7 @@ import { SUBSTRATE_ERROR_CODES } from '../../../errors.ts'
 import { EventChannel } from './event-channel.ts'
 import { type PendingRespawnEntry, enqueuePendingRespawn } from './pending-respawns-queue.ts'
 import { REPL_DEBUG, activeModelWatchdogs, activeWatchdogs, childByKey, committedDispatches, cwdDriftAlertState, cwdDriftRespawnState, ephemeralSessions, pendingChildKills, pendingSpawns, pool, respawnGates, sink, supervisedBySessionKey, wedgeAlertState, retiringSessionKeys } from './pool-state.ts'
-import { getRecord, refreshPaneClaim, registryConversationScopeMatches, withOwnedRegistry, type ReplRegistryRecord } from './repl-registry.ts'
+import { getRecord, refreshPaneClaim, registryConversationScopeMatches, sleepPane, withOwnedRegistry, type ReplRegistryRecord } from './repl-registry.ts'
 import {
   SHUTDOWN_PENDING_SPAWN_GRACE_MS,
   cancellableWait,
@@ -388,6 +388,29 @@ export async function spawnEphemeralSession(
 
 export type HelperRetirement = 'absent' | 'deferred' | 'retired' | 'refused'
 
+/**
+ * #1226 SLEEP: retire an idle owner conversation and keep it RESUMABLE. The row keeps
+ * its exact session identity and loses every liveness/ownership fact ({@link sleepPane}),
+ * so the next spawn `--resume`s its transcript.
+ *
+ * A sleep is never a scheduled retirement. `stillIdle` is the caller's whole-scope awake
+ * evidence, re-read SYNCHRONOUSLY after the key is fenced and immediately before the
+ * child is terminated — nothing can be admitted between that read and actuation. Any
+ * other outcome (a turn or spawn in flight, work that arrived, a claim that changed)
+ * lifts this call's fence and schedules NOTHING: the pool's drain retry never retires a
+ * conversation the sleeper did not re-verify.
+ *
+ * A #1226 Chat HANDOFF uses the same RE-VERIFIED mode with `keepResumableRow: false`
+ * (a credential rotation deletes the row, as any retirement does) or `true` (a
+ * provider switch keeps the Claude conversation resumable): its caller re-censuses the
+ * scope after waiting the owner's turn out, so the pool must never retire the key on its
+ * own drain retry, which would skip that re-census.
+ */
+export interface SleepRetirement {
+  keepResumableRow: boolean
+  stillIdle: () => boolean
+}
+
 /** Retire an exact, already owned pool identity. Never discovers or kills by prefix.
  * The caller stops admitting work first. Busy/spawning sessions finish normally;
  * the turn driver's finally retries once its last committed dispatch has left.
@@ -396,8 +419,12 @@ export type HelperRetirement = 'absent' | 'deferred' | 'retired' | 'refused'
 export async function retirePersistentRepl(
   sessionKey: string,
   existing?: { registryPath: string; requireFreshIdle: true },
+  sleep?: SleepRetirement,
 ): Promise<HelperRetirement> {
   if (hasUnresolvedNativeChild(supervisedBySessionKey.get(sessionKey))) return 'refused'
+  // #1226 sleep never joins a retirement already in motion (a handoff, a migration):
+  // that one owns the key, and a sleep may only retire what it re-verified itself.
+  if (sleep !== undefined && (existing !== undefined || retiringSessionKeys.has(sessionKey))) return 'refused'
   // Registry discovery is not ownership. Legacy cleanup cannot acquire, probe,
   // adopt or close a registry-only survivor. Nor may it borrow a same-key pool
   // entry belonging to another registry. Refuse before any mutable marker.
@@ -410,16 +437,23 @@ export async function retirePersistentRepl(
   retiringSessionKeys.add(sessionKey)
   const gate = gateFor(sessionKey)
   if (!gate.claim()) {
-    if (existing !== undefined && !alreadyRetiring) retiringSessionKeys.delete(sessionKey)
+    if ((existing !== undefined || sleep !== undefined) && !alreadyRetiring) retiringSessionKeys.delete(sessionKey)
     return 'refused'
   }
   const attempt = { beganTermination: false }
   let outcome: HelperRetirement = 'refused'
   try {
-    outcome = await retireOwnedPersistentRepl(sessionKey, attempt, existing?.registryPath)
+    outcome = await retireOwnedPersistentRepl(sessionKey, attempt, existing?.registryPath, sleep)
     return outcome
   } finally {
     gate.release()
+    // A sleep leaves the key ADMITTING work: a completed sleep is not a completed
+    // lifecycle (the next dispatch resumes the conversation), and one that did not
+    // retire leaves the key exactly as it found it, with nothing scheduled. Only a
+    // child whose termination began without a confirmed exit keeps the fence.
+    if (sleep !== undefined && !alreadyRetiring && (outcome === 'retired' || !attempt.beganTermination)) {
+      retiringSessionKeys.delete(sessionKey)
+    }
     // A rejected migration is observational: keep the survivor's normal
     // admission and supervision. Never undo a prior explicit retirement.
     if (existing !== undefined && outcome === 'refused' && !alreadyRetiring && !attempt.beganTermination) {
@@ -428,16 +462,44 @@ export async function retirePersistentRepl(
   }
 }
 
+/** Read-only view of an exact key for a caller waiting on {@link retirePersistentRepl}
+ * (#1226 Chat handoff). `absent`: no pool entry (retired or never spawned). `busy`: a
+ * spawn is pending or a dispatch/turn is still committed, so the pool's own drain
+ * retry owns the next step. `idle`: an entry with nothing in flight. Never mutates. */
+export async function persistentReplRetirementPhase(sessionKey: string): Promise<'absent' | 'busy' | 'idle'> {
+  const pending = pool.get(sessionKey)
+  if (pending === undefined) return 'absent'
+  if (pendingSpawns.get(sessionKey) === pending || (committedDispatches.get(sessionKey) ?? 0) > 0) return 'busy'
+  let session: ReplSession
+  try { session = await pending } catch { return 'absent' }
+  if (pool.get(sessionKey) !== pending) return 'busy'
+  return session.activeTurn !== undefined || session.turnSlotHeld > 0 ? 'busy' : 'idle'
+}
+
+/** Lift a COMPLETED retirement's admission fence so the exact key may serve a fresh
+ * conversation again (#1226: a credential handoff back to a previously retired Chat
+ * credential). Only when the key has no pool entry, no pending spawn and no committed
+ * dispatch — a retirement still in motion keeps its fence. Returns whether the key
+ * now admits work. */
+export function readmitRetiredPersistentRepl(sessionKey: string): boolean {
+  if (!retiringSessionKeys.has(sessionKey)) return true
+  if (pool.has(sessionKey) || pendingSpawns.has(sessionKey) || (committedDispatches.get(sessionKey) ?? 0) > 0) return false
+  retiringSessionKeys.delete(sessionKey)
+  return true
+}
+
 async function retireOwnedPersistentRepl(
   sessionKey: string,
   attempt: { beganTermination: boolean },
   expectedRegistryPath?: string,
+  sleep?: SleepRetirement,
 ): Promise<HelperRetirement> {
   const requireFreshIdle = expectedRegistryPath !== undefined
   const pending = pool.get(sessionKey)
   if (pending === undefined) return requireFreshIdle ? 'refused' : 'absent'
   if (pendingSpawns.get(sessionKey) === pending) {
-    neutralizeAbandonedSettle(pending.then(() => retirePersistentRepl(sessionKey)))
+    // A sleep schedules nothing: its caller re-reads the scope later.
+    if (sleep === undefined) neutralizeAbandonedSettle(pending.then(() => retirePersistentRepl(sessionKey)))
     return 'deferred'
   }
   if ((committedDispatches.get(sessionKey) ?? 0) > 0) return requireFreshIdle ? 'refused' : 'deferred'
@@ -499,6 +561,9 @@ async function retireOwnedPersistentRepl(
   // Do not discard a row or pool entry merely because termination was requested.
   // terminateChild has a bounded force deadline, so independently confirm death.
   if (hasUnresolvedNativeChild(supervisedBySessionKey.get(sessionKey))) return 'refused'
+  // #1226 sleep: the scope's awake evidence, re-read with the key fenced and no await
+  // between this read and the termination below. Work that arrived keeps the Chat.
+  if (sleep !== undefined && !sleep.stillIdle()) return 'deferred'
   attempt.beganTermination = true
   await terminateChild(session.child)
   if (!session.hasChildExited()) return 'refused'
@@ -511,7 +576,9 @@ async function retireOwnedPersistentRepl(
             !(row.adoption_claim_by === undefined && row.pane_handle === undefined))) {
         return { registry, result: false, skipSave: true }
       }
-      delete registry[sessionKey]
+      // #1226 sleep keeps the conversation resumable; every other retirement deletes.
+      if (sleep?.keepResumableRow === true && row.has_session) registry[sessionKey] = sleepPane(row, Date.now())
+      else delete registry[sessionKey]
       return { registry, result: true }
     }, () => false)
     if (!removed.persisted || !removed.result) return 'refused'

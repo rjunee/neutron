@@ -22,6 +22,7 @@ import { resetBootAdoptionForTests, setReplToolBridge, shutdownAllPersistentRepl
 import type { AdoptableHost, PtyChild, PtySpawnOpts } from '@neutronai/runtime/adapters/claude-code/persistent/pty-host.ts'
 import type { ReplRegistry, ReplRegistryRecord } from '@neutronai/runtime/adapters/claude-code/persistent/repl-registry.ts'
 import { buildOpenGraphComposer } from '../composer.ts'
+import type { ProjectScopeLifecycle } from '../wiring/project-scope-lifecycle.ts'
 import { ProjectAdmission } from '@neutronai/gateway/project-admission.ts'
 import { hasUnresolvedNativeChildForChat, setNativeChildLiveness } from '@neutronai/runtime/adapters/claude-code/persistent/native-child-liveness.ts'
 import type { Substrate } from '@neutronai/runtime/substrate.ts'
@@ -328,6 +329,58 @@ test('production graph grants two project survivors only after bridge wiring, wi
     expect(constructed.some((opts) => opts.substrate_instance_id.startsWith('cc-agent-'))).toBe(false)
     const persisted = JSON.parse(readFileSync(paths.replRegistryPath, 'utf8')) as ReplRegistry
     for (const [key, row] of Object.entries(badRows)) expect(persisted[key]).toEqual(row)
+  } finally {
+    for (const cleanup of composition.realmode_cleanups ?? []) await cleanup()
+  }
+}, 60_000)
+
+test('#1226 a live survivor adopted on boot is never slept over: the lifecycle refuses without closing it or spawning a second Chat', async () => {
+  process.env['NEUTRON_DB_PATH'] = join(home!, 'sleep-survivor.db')
+  seedMigratedDb(process.env['NEUTRON_DB_PATH']!)
+  db = ProjectDb.open(process.env['NEUTRON_DB_PATH']!)
+  seedProject(PROJECT)
+  const host = patchHost()
+  devChannel = Bun.serve({ hostname: '127.0.0.1', port: 0, fetch(request) {
+    if (new URL(request.url).pathname === '/health') return Response.json({ ok: true, session_id: SESSION })
+    return new Response('not found', { status: 404 })
+  } })
+  const paths = deriveReplSupervisionPaths(home!)
+  mkdirSync(paths.stateDir, { recursive: true })
+  const key = poolKeyFor({ substrate_instance_id: 'cc-agent-owner', cwd: home!, user_id: 'owner',
+    project_id: PROJECT, credential_identity: 'anthropic:ANTHROPIC_API_KEY' })
+  const row = registryRow(key, HANDLE, GENERATION, devChannel.port!)
+  writeFileSync(paths.replRegistryPath, JSON.stringify({ [key]: row }, null, 2))
+  const composer = buildOpenGraphComposer({ env: process.env, substrateFactory: options => ({
+    start: () => ({
+      events: (async function* () { yield { kind: 'completion' as const,
+        usage: { input_tokens: 0, output_tokens: 0 }, substrate_instance_id: options.substrate_instance_id } })(),
+      respondToTool: async () => {}, cancel: async () => {}, tool_resolution: 'internal',
+    }),
+  }) })
+  const composition = await composer({ db, project_slug: 'owner' })
+  try {
+    graph = await composeProductionGraph(composition)
+    expect(host.attached).toEqual([HANDLE])
+    expect((await pool.get(key))?.child.pid).toBe(PID)
+    // The composer's one lifecycle owner (typed on the composition as its narrower port).
+    const lifecycle = composition.project_scope_lifecycle as ProjectScopeLifecycle
+    expect(lifecycle).toBeDefined()
+    // The adopted survivor IS the scope's one owner: nothing is asleep.
+    expect(await lifecycle.isAsleep(PROJECT)).toBe(false)
+    const outcome = await lifecycle.sleep(PROJECT)
+    // A survivor's idleness is not established by this gateway: a pre-#1237 parent's
+    // native children held no leases, so the census reads it `legacy-unknown`, and
+    // unknown liveness never licenses closure — it is never retired blind.
+    expect(outcome.status).toBe('unknown')
+    expect((outcome as { reason: string }).reason).toContain('legacy-unknown')
+    expect(host.closed).toEqual([])
+    expect(host.spawns()).toBe(0)
+    expect(host.survivor.attachedVia).toBe(HANDLE)
+    expect((await pool.get(key))?.child.pid).toBe(PID)
+    const persisted = (JSON.parse(readFileSync(paths.replRegistryPath, 'utf8')) as ReplRegistry)[key]!
+    expect(persisted.pane_handle).toBe(HANDLE)
+    expect(persisted.asleep_at).toBeUndefined()
+    expect(await lifecycle.isAsleep(PROJECT)).toBe(false)
   } finally {
     for (const cleanup of composition.realmode_cleanups ?? []) await cleanup()
   }

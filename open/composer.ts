@@ -4,9 +4,11 @@ import { buildSubstrateWorkflowFire, buildWorkflowFirer } from '@neutronai/tride
 import { prepareProjectBuild } from './wiring/project-build.ts'
 import { buildProjectLiveness } from './wiring/project-liveness.ts'
 import { buildProjectMaintenance } from './wiring/project-maintenance.ts'
-import { createWorkerTerminalHost, workerPlacementScope } from './wiring/project-build-terminal.ts'
-import type { WorkerPlacementHost } from '@neutronai/runtime/workers/worker-placement.ts'
+import { createProjectScopeLifecycle, isInstanceGrantApproval, projectSleepIdleMs } from './wiring/project-scope-lifecycle.ts'
+import type { ProjectLivenessSurface } from './wiring/project-liveness.ts'
+import { createConversationTerminal, createWorkerTerminalHost, projectWorkspaceJournalPath, workerPlacementScope } from './wiring/project-build-terminal.ts'
 import { CodexOwnerBindings } from './wiring/codex-owner-binding.ts'
+import { HerdrHost } from '@neutronai/runtime/adapters/claude-code/persistent/herdr-host.ts'
 import { nativeOwnerQuestionText } from './wiring/codex-owner-controls.ts'
 import {
   PROJECT_BUILD_STATE_REAP_INTERVAL_MS,
@@ -255,6 +257,7 @@ export type OpenComposition = CompositionInput &
       | 'project_admission'
       | 'project_liveness'
       | 'project_maintenance'
+      | 'project_scope_lifecycle'
       | 'project_slug'
       | 'chat_topics_surface'
       | 'chat_history_surface'
@@ -357,6 +360,8 @@ import {
   ReminderStore,
   REMINDER_FALLBACK_TIME_ZONE,
   RITUAL_RUN_RETENTION_MS,
+  ritualApprovalToolName,
+  ritualEgressApprovalToolName,
 } from '@neutronai/reminders/index.ts'
 import type { RitualFirePlanner, RitualRegistrationService } from '@neutronai/reminders/index.ts'
 // L3 (2026-07) — the reminder delivery impl moved UP into the gateway
@@ -447,6 +452,7 @@ import { APPROVAL_DEFAULT_TTL_MS } from '@neutronai/tools/approval.ts'
 import {
   createHostDeployService,
   HOST_DEPLOY_APPROVAL_SWEEP_INTERVAL_MS,
+  HOST_DEPLOY_APPROVAL_TOOL_NAME,
   HOST_DEPLOY_TOKEN_SERVICE,
   HOST_DEPLOY_URL_SERVICE,
   resolveHostDeployConfig,
@@ -495,7 +501,7 @@ import {
 import { createVoiceTranscriptionSurface } from '@neutronai/gateway/http/voice-transcription-surface.ts'
 import { createEmailDigestSettingsSurface } from '@neutronai/gateway/http/email-digest-settings-surface.ts'
 import { createAppMcpServersSurface } from '@neutronai/gateway/http/app-mcp-servers-surface.ts'
-import { OwnerMcpServerStore } from '@neutronai/gateway/mcp-servers/store.ts'
+import { OwnerMcpServerStore, mcpServerApprovalToolName } from '@neutronai/gateway/mcp-servers/store.ts'
 import type { ResolvedOwnerMcpServer } from '@neutronai/runtime/mcp-servers.ts'
 import { createTridentPhaseModelsSurface } from '@neutronai/gateway/http/trident-phase-models-surface.ts'
 import { createAppDiagnosticsSurface } from '@neutronai/gateway/http/app-diagnostics-surface.ts'
@@ -625,6 +631,13 @@ import { fireAndForget } from '@neutronai/logger/fire-and-forget.ts'
 import { createLogger } from '@neutronai/logger'
 
 const log = createLogger('open-composer')
+
+/** #1226 sleep: the instance capability grants (`isInstanceGrantApproval`), named by
+ * their owners' own tool-name functions so a rename cannot drift from this list. */
+export const INSTANCE_GRANT_APPROVALS = {
+  exact: [HOST_DEPLOY_APPROVAL_TOOL_NAME],
+  prefixes: [ritualApprovalToolName(''), ritualEgressApprovalToolName(''), mcpServerApprovalToolName('')],
+} as const
 
 /** The production `/code` board boundary. Resolve lazily because the canonical
  * board store is composed after the chat-command filter that consumes it. */
@@ -1214,8 +1227,83 @@ export function buildOpenGraphComposer(
     setNativeChildLiveness(OWNER_USER_ID,
       projectId => projectAdmission.listLeases('liveChild').some(lease => lease.scope.projectId === projectId),
       projectId => projectAdmission.hasUnresolvedNativeChildForChat(projectId))
+    // #1226 — ONE strict project-workspace host for the whole composition: every
+    // dispatch's cross-provider workers AND every owner conversation (Claude REPL,
+    // Codex native owner) are placed through its one `ProjectWorkspaceManager`, so
+    // placements serialize per scope and a Chat is tab zero of its own workspace.
+    // Null off Herdr (e.g. tests), where nothing is placed. Built BEFORE the
+    // substrates, which consume it.
+    const projectBuildStateRoot = joinPath(owner_home, '.trident', 'project-builds')
+    const projectTerminalHost = createWorkerTerminalHost(projectBuildStateRoot, { env })
+    const projectNameFor = (projectId: string): string | undefined => db.prepare<{ name: string }, [string]>(
+      'SELECT name FROM projects WHERE id = ? AND deleted_at IS NULL').get(projectId)?.name
+    const conversationTerminal = createConversationTerminal({
+      host: projectTerminalHost, instanceId: owner_handle, projectName: projectNameFor,
+    })
+    if (conversationTerminal !== undefined) {
+      // The durable Codex owner crosses a process boundary: hand it the journal PATH
+      // and the Chat placement for its exact scope (null is General), never the host.
+      const journalPath = projectWorkspaceJournalPath(projectBuildStateRoot)
+      codexOwnerBindings.projectWorkspace = projectId => ({ journalPath, placement: conversationTerminal.placementFor(projectId) })
+      // The gateway-side helper-tab placement shares the composition's ONE strict host,
+      // so it serializes per scope with every other placement (#1226).
+      if (conversationTerminal.host instanceof HerdrHost) codexOwnerBindings.projectWorkspaceHost = conversationTerminal.host
+    }
+    // #1226 — the ONE project-scope lifecycle owner. The live-chat substrate consults it
+    // per dispatch (Chat credential pin + verified handoff through the pool's exact
+    // retirement); sleep/wake reuses this instance. Built beside admission, before the
+    // substrates; the liveness census is built much later, so it is late-bound and
+    // the owner answers without it (never a closure licence) until then.
+    const livenessHolder: { surface?: ProjectLivenessSurface } = {}
+    // #1226 sleep: the owner's two chat topic roots. `<root>` is General and
+    // `<root>:<project>` is that project; any other topic cannot be attributed.
+    const ownerTopicRoots = [webTopicId(OWNER_USER_ID), appWsTopicId(OWNER_USER_ID)]
+    const projectScopeLifecycle = createProjectScopeLifecycle({
+      admission: projectAdmission,
+      liveness: () => livenessHolder.surface,
+      // Read-only awake evidence beyond the leases: pending tool approvals (no
+      // producer admits an `approval` lease yet) and the owner's foreground activity
+      // (the same person-only watermark the wakeup sweep trusts). Instance grants
+      // (ritual, host deploy, MCP server; or no topic at all) hold no scope's work.
+      pendingApprovals: () => db.prepare<{ topic_id: string | null; tool_name: string }, [string]>(
+        `SELECT topic_id, tool_name FROM tool_approvals WHERE project_slug = ? AND status = 'pending'`,
+      ).all(project_slug).map(row => ({
+        topicId: row.topic_id,
+        instanceGrant: isInstanceGrantApproval({ topicId: row.topic_id, toolName: row.tool_name }, INSTANCE_GRANT_APPROVALS),
+      })),
+      // The durable REPL registry the live-chat substrate spawns against: the wake pin.
+      registryPath: deriveReplSupervisionPaths(owner_home).replRegistryPath,
+      topicScope: topicId => {
+        if (topicId === null) return undefined
+        for (const root of ownerTopicRoots) {
+          if (topicId === root) return { scope: null }
+          if (topicId.startsWith(`${root}:`)) return { scope: topicId.slice(root.length + 1) }
+        }
+        return undefined
+      },
+      foregroundMs: async scope => {
+        // `landing` is built later in this composer; the lifecycle only asks once a
+        // turn has settled, long after composition finished.
+        const rows = await landing.buttonStore.listTopicsByUser({ user_id_prefix: ownerTopicRoots, now: Date.now() })
+        let max: number | null = null
+        for (const row of rows) {
+          if (row.project_id !== scope || row.last_user_activity_at === null) continue
+          if (max === null || row.last_user_activity_at > max) max = row.last_user_activity_at
+        }
+        return max
+      },
+      ...(conversationTerminal === undefined ? {} : { conversationTerminal }),
+      providerFor: scope => resolveModelProvider(scope ?? undefined).provider,
+      idleMs: projectSleepIdleMs(env),
+      log: {
+        info: (event, fields) => log.info(event, fields),
+        warn: (event, fields) => log.warn(event, fields),
+      },
+    })
     const wiringCtx: OpenWiringContext = {
       llmPool,
+      ...(conversationTerminal === undefined ? {} : { conversationTerminal }),
+      conversationLifecycle: projectScopeLifecycle,
       owner_handle,
       owner_home,
       project_slug,
@@ -1262,9 +1350,6 @@ export function buildOpenGraphComposer(
       makeWarmFireSubstrate,
       cleanups: substrateCleanups,
     } = wireSubstrates(wiringCtx)
-    // ONE strict project-workspace host for every dispatch's cross-provider workers,
-    // so its manager serializes placements per scope (null off Herdr, e.g. tests).
-    let workerTerminalHost: WorkerPlacementHost | null | undefined
     const tridentFireInnerWorkflow =
       liveAgentSubstrate !== null
         ? createProjectLauncher({
@@ -1272,7 +1357,6 @@ export function buildOpenGraphComposer(
             prepare: (input, signal) => {
               const id = workBoardProjectIdForKey(project_slug, input.run.project_slug) ?? 'general'
               const providerSelection = resolveModelProvider(id)
-              if (workerTerminalHost === undefined) workerTerminalHost = createWorkerTerminalHost(projectBuildStateRoot, { env })
               return prepareProjectBuild(input, {
                 store: boardRunStore, attempts: new TridentAttemptLedger(db), runHost: tridentHostRunner,
                 stateRoot: projectBuildStateRoot,
@@ -1281,10 +1365,9 @@ export function buildOpenGraphComposer(
                 codexOwnerBindings,
                 // The placement scope is the run's OWN scope key: General stays null
                 // (`Neutron General`), never the literal id the line above falls back to.
-                workerTerminal: { host: workerTerminalHost, scope: workerPlacementScope({
+                workerTerminal: { host: projectTerminalHost, scope: workerPlacementScope({
                   instanceId: owner_handle, ownerSlug: project_slug, runScopeKey: input.run.project_slug,
-                  projectName: projectId => db.prepare<{ name: string }, [string]>(
-                    'SELECT name FROM projects WHERE id = ? AND deleted_at IS NULL').get(projectId)?.name,
+                  projectName: projectNameFor,
                 }) },
                 // #1237 — every native child of this run's project REPL holds a
                 // lease, for the run's OWN scope computed from the board key (as
@@ -1599,6 +1682,7 @@ export function buildOpenGraphComposer(
     // substrate wiring's inline cleanups previously ran. None exist today (the
     // array is empty), but the contract stays wired for the C3b-d carves.
     for (const cleanup of substrateCleanups) realmodeCleanups.push(cleanup)
+    realmodeCleanups.push(() => projectScopeLifecycle.close())
 
     // ── Doc search (QMD-equivalent) — index + agent tools ──────────────────
     // gap-audit P1 #9 / cat 13: Neutron agents could read a KNOWN doc path
@@ -4490,7 +4574,6 @@ export function buildOpenGraphComposer(
       projectIdForRun: (run) => workBoardProjectIdForKey(project_slug, run.project_slug) ?? null,
     })
     log.info('project_admission_reconciled', { ...admissionReconciled })
-    const projectBuildStateRoot = joinPath(owner_home, '.trident', 'project-builds')
     const projectBuildStateReaper = new SupervisedLoop({
       name: 'project-build-state-reaper',
       intervalMs: PROJECT_BUILD_STATE_REAP_INTERVAL_MS,
@@ -6982,7 +7065,11 @@ export function buildOpenGraphComposer(
       turnInFlight: (projectId) => activityInspector.snapshot(inspectorScopeKey(projectId)).turn_in_flight,
       runs: boardRunStore,
       projectIdForRun: (run) => workBoardProjectIdForKey(project_slug, run.project_slug) ?? null,
+      // The owner's installed MCP servers — the SAME resolver the live-chat spawn
+      // writes into the parent's MCP configuration — are its own services, not shells.
+      ownServices: resolveMcpServers,
     })
+    livenessHolder.surface = projectLiveness
     const projectMaintenance = buildProjectMaintenance({
       admission: projectAdmission,
       liveness: projectLiveness,
@@ -6999,6 +7086,9 @@ export function buildOpenGraphComposer(
       // #1237 — exposed only: no loop, no trigger, nothing fences or replaces on
       // the census's answer in this build.
       project_liveness: projectLiveness,
+      // #1226 — the project-scope lifecycle owner the live-chat substrate already
+      // consults (Chat credential pin + verified handoff); sleep/wake reuses it.
+      project_scope_lifecycle: projectScopeLifecycle,
       // #1237 — the maintenance owner: exact-generation replacement (`replace`) and
       // restart continuity (`resume`). `replace` has NO caller — no loop, watchdog,
       // admin route or reminder reaches it in this build. `resume` runs only from

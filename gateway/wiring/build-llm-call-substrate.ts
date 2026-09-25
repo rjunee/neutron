@@ -40,6 +40,7 @@ import { createConfiguredChatSubstrate } from '@neutronai/runtime/adapters/confi
  */
 
 import { poolKeyFor, retirePersistentRepl, type HelperRetirement } from '@neutronai/runtime/adapters/claude-code/persistent/pool.ts'
+import type { ConversationTerminal } from '@neutronai/runtime/adapters/claude-code/persistent/project-workspace-host.ts'
 import {
   createClaudeCodeSubstrateAuto,
   existingClaudeRepl,
@@ -70,6 +71,7 @@ import {
   reportFailure,
   reportSuccess,
   selectCredential,
+  selectCredentialById,
   type CredentialPool,
   type PooledCredential,
   type FailureOrigin,
@@ -163,6 +165,11 @@ export interface ResolveScrubbedAuthEnvResult {
  */
 export async function resolveScrubbedAuthEnv(
   input: ResolveScrubbedAuthEnvInput,
+  options: {
+    preferCredentialId?: string
+    /** #1226 — tried in order after `preferCredentialId`; the first usable one wins. */
+    preferCredentialIds?: readonly string[]
+  } = {},
 ): Promise<ResolveScrubbedAuthEnvResult> {
   let pool: CredentialPool
   if (input.pool !== undefined) {
@@ -184,7 +191,15 @@ export async function resolveScrubbedAuthEnv(
       'resolveScrubbedAuthEnv: neither `pool` nor `resolvePool` supplied',
     )
   }
-  const cred = selectCredential(pool)
+  // #1226 — an owner Chat's credential is sticky while it stays usable: the pool's
+  // strategy only chooses for a first spawn, or once the owning credential is parked.
+  let preferred: PooledCredential | null = null
+  for (const id of [...(options.preferCredentialId === undefined ? [] : [options.preferCredentialId]),
+    ...(options.preferCredentialIds ?? [])]) {
+    preferred = selectCredentialById(pool, id)
+    if (preferred !== null) break
+  }
+  const cred = preferred ?? selectCredential(pool)
   if (cred === null) {
     throw new ScrubbedAuthEnvError(
       'all_cooldown',
@@ -249,10 +264,132 @@ async function resolveCredentialAuthEnv(
   return { env, pool, cred_id: cred.id }
 }
 
+/** A scope's live owner conversation, by the pool's exact-identity rule (#1226). */
+export type ConversationOwner =
+  | {
+    kind: 'owner'; sessionKey: string; credentialId: string; sessionId: string
+    /** The owner child's terminal pane (on Herdr), compared with the manager's Chat sample. */
+    pane?: string
+    /** The owner is a spawn still in flight: a Chat about to exist, never absence. */
+    spawning?: true
+  }
+  | { kind: 'none' }
+  /** More than one owner for the exact scope (pre-#1226 rotations left survivors).
+   * `credentialIds` are theirs, so a dispatch can be served by one of them;
+   * `sessionKeys` are their exact pool keys, the only keys a dispatch may JOIN. */
+  | { kind: 'ambiguous'; count: number; credentialIds?: string[]; sessionKeys?: string[] }
+
+/** The verified Chat handoff's outcome. Only `ready` licenses the next spawn. */
+export type ChatHandoffOutcome =
+  | { status: 'ready'; retired?: { sessionKey: string; sessionId: string } }
+  | { status: 'busy' | 'refused' | 'unknown'; reason: string }
+
+/**
+ * The project-scope lifecycle owner's conversation port (#1226), implemented at the
+ * composer boundary (`open/wiring/project-scope-lifecycle.ts`). `ownerFor` is
+ * read-only; `handoffChat` retires the scope's old exact owner through the pool
+ * before a re-keyed (credential-rotated) Chat may spawn.
+ */
+export interface ConversationLifecycle {
+  ownerFor(scope: string | null): Promise<ConversationOwner>
+  handoffChat(scope: string | null, next: { sessionKey: string; credentialId: string },
+    options?: { waitMs?: number; keepResumable?: boolean }): Promise<ChatHandoffOutcome>
+  /** #1226 sleep: the credential of the scope's ASLEEP conversation, so the wake
+   * spawn keys the same pool identity and `--resume`s it (while that credential is usable). */
+  resumeCredentialFor?(scope: string | null): string | undefined
+  /** #1226 sleep: a dispatch for the scope is starting — cancel its idle timer. */
+  disarmIdle?(scope: string | null): void
+  /** #1226 sleep: the scope's turn settled — arm its idle timer (sleep re-checks every awake condition). */
+  armIdle?(scope: string | null): void
+}
+
+/** Forward a dispatch's events; once the stream settles by ANY exit (completion,
+ * error, an early refusal before the spawn, cancel or throw) arm the scope's idle
+ * timer (#1226), so every disarm at dispatch start has its matching arm. Sleep itself
+ * re-reads every awake condition, so an early arm can never retire a working scope. */
+async function* armIdleOnSettle<T>(events: AsyncIterable<T>, arm: (() => void) | undefined): AsyncGenerator<T, void, void> {
+  try { for await (const event of events) yield event } finally { arm?.() }
+}
+
+/**
+ * The terminal event of a handoff that did not license a spawn (#1226). `refused` is a
+ * FINAL decision (native child work, the pool refusing retirement, a Chat held by an
+ * owner of another provider): retrying the same dispatch cannot change it, so it is
+ * non-retryable and its reason carries the recovery path. `busy` and `unknown` are
+ * transient evidence and stay retryable. Neither is a credential fault.
+ */
+function chatHandoffError(what: string, handoff: Exclude<ChatHandoffOutcome, { status: 'ready' }>): Event {
+  return {
+    kind: 'error', retryable: handoff.status !== 'refused', code: `chat_handoff_${handoff.status}`,
+    message: `${what} ${handoff.status}: ${handoff.reason}`,
+  }
+}
+
+/** The pool-key namespace a Codex owner hands off to: never a Claude pool key. */
+const CODEX_CHAT_HANDOFF_KEY = 'codex-owner-chat'
+
+/**
+ * A live provider switch Claude -> Codex (#1226). Both owner kinds are placed as the
+ * scope's ONE `Chat`, so a Claude owner left from before the switch would make the
+ * manager refuse the Codex TUI's Chat placement (and wedge its durable launch). The
+ * Claude owner is therefore handed off first, through the SAME verified handoff a
+ * credential rotation uses, keeping its row RESUMABLE so switching back resumes the
+ * Claude conversation. Only `ready` starts the Codex owner; anything else yields a
+ * `chat_handoff_*` error ({@link chatHandoffError}: `refused` final, `busy`/`unknown`
+ * retryable) and starts nothing. No Claude owner: unchanged.
+ */
+function startCodexAfterClaudeHandoff(lifecycle: ConversationLifecycle, scope: string | null,
+  start: () => SessionHandle): SessionHandle {
+  let inner: SessionHandle | undefined
+  let cancelled = false
+  const events = (async function* (): AsyncGenerator<Event, void, void> {
+    // Only an exact Claude owner is handed off; ambiguous pre-#1226 survivors never
+    // held the manager's Chat slot, so the Codex owner's own placement decides.
+    const owner = await lifecycle.ownerFor(scope)
+    if (owner.kind === 'owner') {
+      const handoff = await lifecycle.handoffChat(scope,
+        { sessionKey: `${CODEX_CHAT_HANDOFF_KEY}:${scope ?? ''}`, credentialId: 'openai-codex' }, { keepResumable: true })
+      if (handoff.status !== 'ready') {
+        yield chatHandoffError('Chat provider handoff', handoff)
+        return
+      }
+    }
+    if (cancelled) return
+    inner = start()
+    yield* inner.events
+  })()
+  return {
+    events,
+    tool_resolution: 'internal',
+    async respondToTool(call_id: string, result: unknown): Promise<void> {
+      if (inner === undefined) throw new Error('Codex owner conversation has not started')
+      await inner.respondToTool(call_id, result)
+    },
+    async cancel(): Promise<void> {
+      cancelled = true
+      await inner?.cancel()
+    },
+  }
+}
+
 export interface BuildLlmCallSubstrateInput {
   /** Owner chat uses the composition's shared native binding, before tier routing. */
   ownerConversation?: boolean
   startCodexOwner?: (projectId: string | undefined, spec: AgentSpec) => SessionHandle
+  /**
+   * The owner conversation's project-workspace terminal (#1226). Honoured ONLY with
+   * `ownerConversation`: each Claude spawn this substrate causes carries the Chat
+   * placement for the dispatch's exact conversation scope (null is General), through
+   * the shared strict host. Absent (off Herdr, tests) ⇒ the configured host, as before.
+   */
+  conversationTerminal?: ConversationTerminal
+  /**
+   * The project-scope lifecycle owner (#1226). Honoured ONLY with `ownerConversation`
+   * and a defined conversation scope: the scope's Chat credential is pinned while
+   * usable, and a re-key retires the old exact owner BEFORE the new Chat spawns, so
+   * a rotation is a verified handoff rather than a second Chat the manager refuses.
+   */
+  conversationLifecycle?: ConversationLifecycle
   /**
    * Resolved by `resolveLlmCredentials({provider:'anthropic',...})`. When
    * supplied (and `resolvePool` is absent), the substrate uses this pool
@@ -868,6 +1005,20 @@ async function claudeOptionsFor(
   return opts
 }
 
+/**
+ * Place an owner-conversation spawn in its dispatch's project workspace (#1226).
+ * The scope is the EXACT conversation scope — null is General, a string (the
+ * literal `general` included) is that project — never the pool key's `'general'`
+ * sentinel. The placement is set even when no strict host exists, so the configured
+ * manager-less Herdr host refuses the spawn rather than use an inherited workspace.
+ */
+function placeConversation(opts: ClaudeCodeSubstrateOptions, input: BuildLlmCallSubstrateInput,
+  conversationProjectId: string | null): void {
+  if (input.ownerConversation !== true || input.conversationTerminal === undefined) return
+  opts.projectPlacement = input.conversationTerminal.placementFor(conversationProjectId)
+  if (input.conversationTerminal.host !== undefined) opts.ptyHost = input.conversationTerminal.host
+}
+
 export interface LlmCallSubstrate extends Substrate {
   /** Retire already-owned exact helper keys; preserve registry-only survivors. */
   retireExistingHelpers(projectIds?: readonly (string | undefined)[]): Promise<ReadonlyArray<{ sessionKey: string; outcome: HelperRetirement }>>
@@ -990,6 +1141,8 @@ export function buildLlmCallSubstrate(
             }, pool, credential)
             const opts = await claudeOptionsFor(input, resolved, () => conversationProjectId ?? 'general')
             opts.conversationProjectId = conversationProjectId
+            // An adopted survivor that later respawns is placed like a fresh one.
+            placeConversation(opts, input, conversationProjectId)
             await reconcileExistingClaudeRepl(opts)
           } catch (error) {
             substrateLog.warn('boot_repl_adoption_unavailable', {
@@ -1034,7 +1187,12 @@ export function buildLlmCallSubstrate(
       const provider = normalizeProvider(effectiveProvider)
       if (input.ownerConversation && provider === 'openai-codex') {
         openaiSessions.delete(openAiSessionScopeKey(input.user_id ?? '_platform', projectId))
-        if (input.startCodexOwner) return input.startCodexOwner(projectId, spec)
+        if (input.startCodexOwner) {
+          const codexLifecycle = conversationProjectId !== undefined ? input.conversationLifecycle : undefined
+          if (codexLifecycle === undefined) return input.startCodexOwner(projectId, spec)
+          return startCodexAfterClaudeHandoff(codexLifecycle, conversationProjectId ?? null,
+            () => input.startCodexOwner!(projectId, spec))
+        }
         return {
           events: (async function* () { yield { kind: 'error' as const, retryable: false,
             message: 'Codex owner conversation binding is unavailable' } })(),
@@ -1097,7 +1255,11 @@ export function buildLlmCallSubstrate(
       }
       let innerHandle: SessionHandle | null = null
       let cancelled = false
-      const events = (async function* (): AsyncGenerator<Event, void, void> {
+      // #1226 — the scope's lifecycle owner. Only the owner conversation with an exact scope.
+      const lifecycle = input.ownerConversation === true && conversationProjectId !== undefined
+        ? input.conversationLifecycle : undefined
+      const scope = conversationProjectId ?? null
+      const events = armIdleOnSettle((async function* (): AsyncGenerator<Event, void, void> {
         // DECISION doc Part 3c — credential selection + Max-OAuth refresh +
         // ISSUES-#49 env-scrubbing is now the shared `resolveScrubbedAuthEnv`
         // helper (so the warm reused router process applies the IDENTICAL
@@ -1105,6 +1267,24 @@ export function buildLlmCallSubstrate(
         // `ScrubbedAuthEnvError`; we catch and re-yield the EXACT terminal
         // `Event` (message + retryable) this generator emitted inline before
         // the refactor, so the substrate's behaviour + tests are unchanged.
+        // #1226 — the scope's live Chat owner, read before credential selection so
+        // its credential is the pin. A dispatch for this scope is starting: it is not
+        // idle, so its idle timer is disarmed (re-armed by `armIdleOnSettle` on EVERY exit).
+        lifecycle?.disarmIdle?.(scope)
+        const owner = lifecycle === undefined ? undefined : await lifecycle.ownerFor(scope)
+        if (owner?.kind === 'ambiguous') {
+          // DOCUMENTED BYPASS (as-built deviation): several owners for one exact scope
+          // are survivors of pre-#1226 rotations. Nothing picks one to kill (no census can
+          // prove which is idle) and nothing reconciles them automatically. The dispatch
+          // is pinned to a survivor's credential so the pool SERVES that survivor (a
+          // same-key join) instead of growing the set. A dispatch that would SPAWN — no
+          // survivor's key is usable — fails closed below (`chat_handoff_unknown`): an
+          // ambiguous owner never licenses another conversation. Sleep refuses the scope
+          // while it stays ambiguous.
+          substrateLog.warn('chat_owner_ambiguous', {
+            substrate_instance_id: input.substrate_instance_id, scope, count: owner.count,
+          })
+        }
         let resolved: ResolveScrubbedAuthEnvResult
         try {
           const helperInput: ResolveScrubbedAuthEnvInput = {}
@@ -1114,7 +1294,15 @@ export function buildLlmCallSubstrate(
           if (input.owner_handle !== undefined) {
             helperInput.owner_handle = input.owner_handle
           }
-          resolved = await resolveScrubbedAuthEnv(helperInput)
+          // The live owner's credential is the pin; with no live owner, an asleep
+          // conversation's credential is, so the wake resumes it (#1226 sleep).
+          const pinned = owner?.kind === 'owner' ? owner.credentialId
+            : owner?.kind === 'none' ? lifecycle?.resumeCredentialFor?.(scope) : undefined
+          const survivors = owner?.kind === 'ambiguous' ? owner.credentialIds ?? [] : []
+          resolved = await resolveScrubbedAuthEnv(helperInput, {
+            ...(pinned === undefined ? {} : { preferCredentialId: pinned }),
+            ...(survivors.length === 0 ? {} : { preferCredentialIds: survivors }),
+          })
         } catch (err) {
           if (err instanceof ScrubbedAuthEnvError) {
             // `all_cooldown` was retryable:true; `no_credentials` and
@@ -1150,10 +1338,45 @@ export function buildLlmCallSubstrate(
         // interactive-REPL substrate (the sole spawn shape post-S3-rip-replace).
         // The `substrateFactory` seam lets tests inject a fake substrate.
         const factory = input.substrateFactory ?? createClaudeCodeSubstrateAuto
-        if (conversationProjectId !== undefined) opts.conversationProjectId = conversationProjectId
+        if (conversationProjectId !== undefined) {
+          opts.conversationProjectId = conversationProjectId
+          placeConversation(opts, input, conversationProjectId)
+        }
         if (retired) {
           yield { kind: 'error', retryable: false, message: 'Helper session lifecycle has completed' }
           return
+        }
+        if (owner?.kind === 'ambiguous') {
+          // Only a same-key join onto a survivor may proceed; anything else would spawn
+          // another conversation beside the survivors. No credential fault is reported,
+          // and a parked-everything pool already answered `all_cooldown` above.
+          const key = poolKeyFor(opts)
+          const joins = owner.sessionKeys !== undefined
+            ? owner.sessionKeys.includes(key)
+            : (owner.credentialIds ?? []).includes(resolved.cred_id)
+          if (!joins) {
+            substrateLog.warn('chat_owner_ambiguous_refused', {
+              substrate_instance_id: input.substrate_instance_id, scope, count: owner.count,
+            })
+            yield {
+              kind: 'error', retryable: true, code: 'chat_handoff_unknown',
+              message: `Chat credential handoff unknown: ambiguous Chat owner: ${owner.count} live sessions ` +
+                'for the scope and none can serve this dispatch; nothing was started',
+            }
+            return
+          }
+        } else if (lifecycle !== undefined) {
+          // A re-keyed Chat (credential rotation) is a HANDOFF: the old exact owner is
+          // retired through the pool first, so the manager's next Chat placement finds
+          // the slot positively empty. Anything but `ready` spawns nothing and is not a
+          // credential fault (no reportFailure). The same owner key is `ready` at once
+          // unless an earlier retirement still fences it; `none` readmits a key whose
+          // earlier retirement completed, so rotating back is never blocked.
+          const handoff = await lifecycle.handoffChat(scope, { sessionKey: poolKeyFor(opts), credentialId: resolved.cred_id })
+          if (handoff.status !== 'ready') {
+            yield chatHandoffError('Chat credential handoff', handoff)
+            return
+          }
         }
         if (opts.ephemeral !== true) servedClaudeKeys.add(poolKeyFor(opts))
         innerHandle = factory(opts).start(spec)
@@ -1350,7 +1573,7 @@ export function buildLlmCallSubstrate(
           }
           yield ev
         }
-      })()
+      })(), lifecycle?.armIdle === undefined ? undefined : () => lifecycle.armIdle!(scope))
       const handle: SessionHandle = {
         events,
         async respondToTool(call_id: string, result: unknown): Promise<void> {

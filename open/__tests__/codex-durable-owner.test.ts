@@ -83,3 +83,30 @@ test('changed launch credentials refuse before any attachment or launch', async 
   writeFileSync(join(options.codexHome, '.neutron-owner-authority.json'), '{}', { mode: 0o600 })
   await expect(openDurableCodexOwner(options)).rejects.toThrow('credential or project changed')
 })
+
+test('#1226: a placed launch uses the SHARED host; a journal refusal before any RPC unwinds the launch reservation, any other failure keeps it', async () => {
+  const { existsSync, readFileSync: read } = await import('node:fs')
+  const { ProjectWorkspaceRefusal } = await import('@neutronai/runtime/adapters/claude-code/persistent/project-workspaces.ts')
+  const options = fixture()
+  const launchPath = join(options.codexHome, '.neutron-owner-launch.json')
+  const projectWorkspace = { journalPath: join(options.cwd, 'journal.json'),
+    placement: { instanceId: 'owner', projectId: 'project-one', projectLabel: 'Project One', role: 'chat' as const } }
+  const placements: unknown[] = []
+  let failure: Error = new ProjectWorkspaceRefusal('project-workspaces: existing ownership is invalid or pending; reconcile before retry')
+  let launchFile: Record<string, unknown> | undefined
+  const shared = { async spawn(_argv: string[], spawnOptions: { projectPlacement?: unknown }) {
+    placements.push(spawnOptions.projectPlacement)
+    launchFile = JSON.parse(read(launchPath, 'utf8'))
+    throw failure
+  } } as unknown as NonNullable<Parameters<typeof openDurableCodexOwner>[0]['projectWorkspaceHost']>
+  await expect(openDurableCodexOwner({ ...options, projectWorkspace, projectWorkspaceHost: shared })).rejects.toThrow('reconcile before retry')
+  expect(placements).toEqual([expect.objectContaining({ role: 'worker', projectId: 'project-one', taskLabel: 'Owner helper · Codex' })])
+  expect(launchFile).not.toHaveProperty('projectWorkspaceHost')
+  expect(launchFile).toHaveProperty('helperOperationId')
+  expect(existsSync(launchPath)).toBe(false)
+  // Not a pre-RPC refusal: a pane may exist, so the reservation stays for reconciliation.
+  failure = new Error('layout reply lost')
+  await expect(openDurableCodexOwner({ ...options, projectWorkspace, projectWorkspaceHost: shared })).rejects.toThrow('layout reply lost')
+  expect(existsSync(launchPath)).toBe(true)
+  expect(placements).toHaveLength(2)
+})

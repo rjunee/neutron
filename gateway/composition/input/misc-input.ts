@@ -21,6 +21,13 @@ export interface MiscCompositionInput {
     census(projectId: string | null): Promise<import('../../project-liveness-census.ts').ProjectLivenessCensus>
   }
   /**
+   * #1226 — the project-scope lifecycle owner (`null` = General). The live-chat
+   * substrate consults it per dispatch: the scope's Chat credential is pinned while
+   * usable, and a re-key (credential rotation) retires the old exact owner through
+   * the pool before the new Chat spawns. Exposed so sleep/wake reuses this instance.
+   */
+  project_scope_lifecycle?: import('../../wiring/build-llm-call-substrate.ts').ConversationLifecycle
+  /**
    * #1237 — the project maintenance owner (`null` = General). `replace` fences the
    * scope, proves its exact parent generation quiescent, replaces it with a resume of
    * the same conversation and attests the replacement before reopening; NOTHING in

@@ -250,6 +250,14 @@ export function wireSubstrates(ctx: OpenWiringContext): WiredSubstrates {
           substrate_instance_id: `cc-agent-${owner_handle}`,
           ownerConversation: true,
           ...(ctx.startCodexOwner === undefined ? {} : { startCodexOwner: ctx.startCodexOwner }),
+          // #1226 — each conversation spawn is placed as its dispatch's `Chat` tab,
+          // for the dispatch's exact scope (resolved per turn: this one substrate
+          // serves General AND every project). Only this family; nudge, compose,
+          // fire and the disposable substrates keep the configured host.
+          ...(ctx.conversationTerminal === undefined ? {} : { conversationTerminal: ctx.conversationTerminal }),
+          // #1226 — credential rotation is a verified Chat handoff at the scope's
+          // lifecycle owner (pin while usable; retire the old exact owner first).
+          ...(ctx.conversationLifecycle === undefined ? {} : { conversationLifecycle: ctx.conversationLifecycle }),
           repl_pane_label: `chat · ${project_slug}`,
           cwd: owner_home,
           owner_handle,

@@ -89,6 +89,7 @@ import type { InnerLoopInput } from '@neutronai/trident/inner-loop.ts'
 import { PROJECT_SESSION_ACQUIRE_TIMEOUT_MS, prepareProjectBuild, type ProjectBuildContext } from '../wiring/project-build.ts'
 import { CodexOwnerBindings } from '../wiring/codex-owner-binding.ts'
 import { until, workerPlacementRig } from '@neutronai/runtime/adapters/claude-code/persistent/__tests__/herdr-workspace-fake-server.ts'
+import { workerPlacementScope } from '../wiring/project-build-terminal.ts'
 import { HerdrError } from '@neutronai/runtime/adapters/claude-code/persistent/herdr-client.ts'
 import { restrictedOwnerFixture } from './fixtures/codex-owner-review.ts'
 import { PROJECT_DEPENDENCIES_TIMEOUT_MS } from '../wiring/project-build-dependencies.ts'
@@ -5843,6 +5844,58 @@ for (const fault of ['typed', 'ambiguous'] as const) {
     ].sort())
   }, 300_000)
 }
+
+test('per-dispatch scope routing (#1226): two projects and General sharing one display name each build in their OWN workspace of ONE manager', async () => {
+  // One strict manager, as production composes it; each run's placement scope comes
+  // from the composer's own resolver over the run's scope key. The two projects share
+  // a display name, and one of them is the literal id `general`.
+  const directory = await mkdtemp(join(tmpdir(), 'project-build-routing-'))
+  cleanups.push(() => rm(directory, { recursive: true, force: true }))
+  const rig = workerPlacementRig(directory)
+  const OWNER_SLUG = 'owner-slug'
+  const scopeFor = (runScopeKey: string) => workerPlacementScope({
+    instanceId: 'instance', ownerSlug: OWNER_SLUG, runScopeKey, projectName: () => 'Same Name',
+  })
+  const workspaceFor = new Map<string, string>()
+  for (const [key, label] of [['alpha', 'Same Name'], ['general', 'Same Name'], [OWNER_SLUG, 'Neutron General']] as const) {
+    const f = await codexOwnerWithClaude()
+    f.context.workerTerminal = { host: rig.host, scope: scopeFor(key) }
+    const before = new Set(rig.server.workspaces.keys())
+    const layoutsBefore = rig.server.callsTo('layout.apply').length
+    const workersBefore = rig.server.workerLayouts().length
+    const outcome = await drive(f)
+    expect(outcome.kind, why(f, outcome)).toBe('merged')
+    const created = [...rig.server.workspaces.keys()].filter(id => !before.has(id))
+    expect(created).toHaveLength(1)
+    expect(rig.server.workspaces.get(created[0]!)!.label).toBe(label)
+    workspaceFor.set(key, created[0]!)
+    // Every worker of THIS dispatch landed in THIS scope's workspace.
+    expect(rig.server.workerLayouts().slice(workersBefore).map(call => call.params['tab_label']))
+      .toEqual(['Plan', 'Review', 'Review', 'Synthesis'].map(role => `${role} · ${f.row.slug}`))
+    for (const call of rig.server.callsTo('layout.apply').slice(layoutsBefore)) expect(call.params['workspace_id']).toBe(created[0])
+  }
+  expect(new Set(workspaceFor.values()).size).toBe(3)
+  const rows = Object.values(JSON.parse(await readFile(rig.journal, 'utf8'))) as Array<{ scope: unknown }>
+  expect(rows.map(row => row.scope).sort()).toEqual([['instance', 'alpha'], ['instance', 'general'], ['instance', null]].sort())
+}, 300_000)
+
+test('an invalid placement identity refuses: no workspace is created or inherited, the build still merges', async () => {
+  const f = await codexOwnerWithClaude()
+  const directory = await mkdtemp(join(tmpdir(), 'project-build-routing-'))
+  cleanups.push(() => rm(directory, { recursive: true, force: true }))
+  const rig = workerPlacementRig(directory)
+  f.context.workerTerminal = { host: rig.host, scope: workerPlacementScope({ instanceId: '', ownerSlug: 'owner-slug', runScopeKey: 'alpha' }) }
+  const outcome = await drive(f)
+  expect(outcome.kind, why(f, outcome)).toBe('merged')
+  expect(rig.server.callsTo('workspace.create')).toHaveLength(0)
+  expect(rig.server.callsTo('layout.apply')).toHaveLength(0)
+  const receipts = await placementReceipts(f.context.stateRoot)
+  expect(receipts).toHaveLength(4)
+  for (const receipt of receipts) {
+    expect(receipt.state).toBe('unplaced')
+    expect(receipt.reason).toContain('invalid explicit scope')
+  }
+}, 300_000)
 
 test('no terminal host: cross-provider workers run unplaced with the reason on record', async () => {
   const f = await codexOwnerWithClaude()

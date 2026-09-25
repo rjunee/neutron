@@ -13,6 +13,7 @@ import {
   NATIVE_CHILD_RECENT_MS,
   combineVerdicts,
   decideProjectLiveness,
+  matchesConfiguredService,
   readSubagentActivity,
   runProjectLivenessCensus,
   walkProcessDescendants,
@@ -212,6 +213,46 @@ describe('the /proc descendant walk', () => {
     // Control: with no grandchild, the own services alone are idle.
     tree[11] = []
     expect(await walkProcessDescendants(10, deps)).toEqual({ verdict: 'idle', reasons: [] })
+  })
+
+  test('owner-installed MCP servers: an exact configured launch is an own service, never a process-name match', () => {
+    const servers = [{ command: '/opt/mcp/server-a', args: ['--stdio'] }, { command: 'npx', args: ['-y', 'pkg-b'] }]
+    expect(matchesConfiguredService(['/opt/mcp/server-a', '--stdio'], servers)).toBe(true)
+    // A bare command resolved through PATH, and a shebang script exec'd by its interpreter.
+    expect(matchesConfiguredService(['npx', '-y', 'pkg-b'], servers)).toBe(true)
+    expect(matchesConfiguredService(['node', '/usr/local/bin/npx', '-y', 'pkg-b'], servers)).toBe(true)
+    expect(matchesConfiguredService(['/bin/sh', '/opt/mcp/server-a', '--stdio'], servers)).toBe(true)
+    // The same binary with other arguments, a prefix of the args, or another command: not configured.
+    expect(matchesConfiguredService(['/opt/mcp/server-a', '--stdio', '--extra'], servers)).toBe(false)
+    expect(matchesConfiguredService(['/opt/mcp/server-a'], servers)).toBe(false)
+    expect(matchesConfiguredService(['/elsewhere/server-a', '--stdio'], servers)).toBe(false)
+    expect(matchesConfiguredService(['bash', '-c', 'npx -y pkg-b'], servers)).toBe(false)
+    expect(matchesConfiguredService(['npx', '-y', 'pkg-b'], [])).toBe(false)
+  })
+
+  test('a configured server is idle with its descendants still walked; the same binary unconfigured, or its own shell, is busy', async () => {
+    const tree: Record<number, number[]> = { 10: [11], 11: [], 12: [] }
+    const argv: Record<number, string> = { 11: '/opt/mcp/server-a\0--stdio\0', 12: 'bash\0-c\0work\0' }
+    const deps = (servers: Array<{ command: string; args?: string[] }>) => ({
+      identity: () => ({ start_ticks: 1, boot_id: 'b' }) as never,
+      readdir: async (path: string) => [path.split('/')[2]!],
+      readFile: async (path: string) => {
+        const pid = Number(path.split('/')[2])
+        if (path.endsWith('/children')) return (tree[pid] ?? []).join(' ')
+        if (path.endsWith('/cmdline')) return argv[pid] ?? ''
+        if (path.endsWith('/comm')) return pid === 12 ? 'bash\n' : 'server-a\n'
+        throw new Error('unexpected')
+      },
+      isOwnService: (a: string[]) => matchesConfiguredService(a, servers),
+    })
+    const configured = [{ command: '/opt/mcp/server-a', args: ['--stdio'] }]
+    expect(await walkProcessDescendants(10, deps(configured))).toEqual({ verdict: 'idle', reasons: [] })
+    expect(await walkProcessDescendants(10, deps([{ command: '/opt/mcp/server-a', args: ['--other'] }])))
+      .toEqual({ verdict: 'busy', reasons: ['parent descendants running: 1 (server-a)'] })
+    expect(await walkProcessDescendants(10, deps([]))).toEqual({ verdict: 'busy', reasons: ['parent descendants running: 1 (server-a)'] })
+    // The configured server spawns a shell of its own: that descendant is busy.
+    tree[11] = [12]
+    expect(await walkProcessDescendants(10, deps(configured))).toEqual({ verdict: 'busy', reasons: ['parent descendants running: 1 (bash)'] })
   })
 
   test('a real child process reads busy while it runs and idle after it exits', async () => {
