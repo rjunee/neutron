@@ -27,6 +27,7 @@ let deferGetAt = 0;
 let deferGetToken: string | null = null;
 let getCount = 0;
 let completeGet: (() => void) | null = null;
+let notifyGet: ((count: number) => void) | null = null;
 
 beforeAll(installNativeHarness);
 afterAll(resetHarnessGlobals);
@@ -42,6 +43,7 @@ beforeEach(() => {
   deferGetToken = null;
   getCount = 0;
   completeGet = null;
+  notifyGet = null;
   globalThis.fetch = (async (input, init) => {
     if (String(input).endsWith('/repl-control')) {
       return Response.json({ projectId: decodeURIComponent(String(input).split('/').at(-2)!), threadId: 'native-thread',
@@ -49,7 +51,10 @@ beforeEach(() => {
     }
     const method = init?.method ?? 'GET';
     const responseBody = method === 'POST' ? postBody : getBody;
-    if (method === 'GET') getCount += 1;
+    if (method === 'GET') {
+      getCount += 1;
+      notifyGet?.(getCount);
+    }
     calls.push({ url: String(input), method,
       body: typeof init?.body === 'string' ? JSON.parse(init.body) : null,
       token: new Headers(init?.headers).get('authorization') });
@@ -84,13 +89,21 @@ async function press(id: string) {
   await act(async () => { element.click(); await new Promise((resolve) => setTimeout(resolve, 0)); });
 }
 
+async function waitForGetCount(expected: number) {
+  if (getCount >= expected) return;
+  await new Promise<void>((resolve) => {
+    notifyGet = (count) => { if (count >= expected) resolve(); };
+  });
+}
+
 describe('conversation REPL model on phone', () => {
   it('discovers an owner started after the screen opened and mounts native controls', async () => {
     getBody = { ...states.cheap, sessionId: '', currentModel: null, availableModels: [], status: 'unsupported' };
     const screen = await mount();
     expect(document.querySelector('[data-testid="native-owner-control"]')).toBeNull();
     getBody = states.cheap;
-    await act(async () => { await new Promise(resolve => setTimeout(resolve, 5_100)); });
+    await act(async () => { await waitForGetCount(2); });
+    await settle();
     expect(document.querySelector('[data-testid="repl-model-open"]')?.textContent).toContain('cheap');
     expect(document.querySelector('[data-testid="native-owner-control"]')).not.toBeNull();
     screen.unmount();
@@ -99,7 +112,7 @@ describe('conversation REPL model on phone', () => {
   it('does not let a background model read roll back an acknowledged switch', async () => {
     const screen = await mount();
     deferGetAt = 2;
-    await act(async () => { await new Promise(resolve => setTimeout(resolve, 5_100)); });
+    await act(async () => { await waitForGetCount(2); });
     expect(completeGet).not.toBeNull();
     await press('repl-model-open');
     await press('repl-model-option-frontier');
