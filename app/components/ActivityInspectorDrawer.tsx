@@ -2,7 +2,7 @@
  * @neutronai/app — the ACTIVITY INSPECTOR drawer (SPEC § WAVE 3.5).
  *
  * The mobile half of the tmux replacement. Ryan cannot tell whether a project's
- * agent session is working or hung; in Vajra he attached to tmux, and Neutron's
+ * agent is doing useful work; a terminal pane made that visible, but headless
  * server-side sessions offered no equivalent. Tapping the per-project activity dot
  * opens this, which streams the raw substrate + tool events for that scope live.
  *

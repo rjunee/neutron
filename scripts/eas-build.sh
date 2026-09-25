@@ -30,6 +30,9 @@ set -euo pipefail
 REPO_ROOT="$(cd "$(dirname "${BASH_SOURCE[0]}")/.." && pwd)"
 cd "$REPO_ROOT"
 
+# Resolve private config before any fingerprint, remote lookup, or submission.
+node -e 'require("./app/app.config.js")()'
+
 echo "── EAS build preflight ─────────────────────────────────────────────────"
 bun "scripts/ci/eas-build-preflight.ts" "$REPO_ROOT"
 

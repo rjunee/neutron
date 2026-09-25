@@ -41,6 +41,9 @@ if [ "$BRANCH" = "production" ]; then
   exit 2
 fi
 
+# Resolve private config before deleting the previous export or publishing.
+node -e 'require(process.argv[1])()' "$APP_DIR/app.config.js"
+
 echo "eas-update: exporting (branch=$BRANCH)"
 cd "$APP_DIR"
 # A stale dist would let a FAILED export publish the PREVIOUS run's bundle, which
