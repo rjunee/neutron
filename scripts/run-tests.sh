@@ -377,9 +377,10 @@ if [ "$NO_DEVICE_LANE" != "1" ]; then
 fi
 # A direct Bun.serve is the common surface-harness shape. `await boot(` and
 # `await bootSignup(` cover tests that exercise production boot helpers whose
-# listener call lives outside the test file. Content-derived membership means a
-# newly-added real listener joins the lane without an allowlist update.
-HTTP_MATCH="$(LC_ALL=C grep -lE 'Bun[.]serve[[:space:]]*[(]|await[[:space:]]+(boot|bootSignup)[[:space:]]*[(]' "${FILES[@]}" 2>/dev/null || true)"
+# listener call lives outside the test file. A test that spawns a helper which
+# opens the listener marks that indirect ownership with a standalone comment.
+# Keep the marker anchored so ordinary prose cannot move a file into this lane.
+HTTP_MATCH="$(LC_ALL=C grep -lE 'Bun[.]serve[[:space:]]*[(]|await[[:space:]]+(boot|bootSignup)[[:space:]]*[(]|^[[:space:]]*// @neutron-real-http[[:space:]]*$' "${FILES[@]}" 2>/dev/null || true)"
 for f in "${FILES[@]}"; do
   # PGLite wins a tie: a hypothetical file in both would need the WASM lane's
   # serial execution + retry budget more than it needs DOM isolation.
