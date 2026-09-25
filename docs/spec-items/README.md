@@ -63,6 +63,7 @@ branch is cut (standard §3.1, §3.2).
 | [`premerge-session-trailer-admission`](premerge-session-trailer-admission.md) | Independently scan reviewed commit messages before merge | P1 | — |
 | [`publish-only-resume-without-re-running-forge`](publish-only-resume-without-re-running-forge.md) | Re-publish a built commit after a credential blink, without rebuilding | P1 | — |
 | [`run-head-hash-width`](run-head-hash-width.md) | Accept full SHA-1 and SHA-256 run heads and checkpoints | P1 | — |
+| [`trident-install-disk-admission`](trident-install-disk-admission.md) | Admit dependency installation only with measured disk headroom | P1 | — |
 | [`codex-control-socket-path-fits-sun-len`](codex-control-socket-path-fits-sun-len.md) | Keep Codex control sockets within Linux sun_path | P2 | — |
 | [`codex-project-directory-names-its-owner`](codex-project-directory-names-its-owner.md) | Codex project credential directories name their owning project | P2 | — |
 | [`surface-infra-retries-to-the-owner`](surface-infra-retries-to-the-owner.md) | Surface infrastructure retries to the owner | P2 | — |

@@ -1,10 +1,20 @@
-import { appendFile, lstat, readFile, readdir, realpath, rename, unlink, writeFile } from 'node:fs/promises'
+import { appendFile, lstat, readFile, readdir, realpath, rename, statfs, unlink, writeFile } from 'node:fs/promises'
 import { join, resolve, sep } from 'node:path'
 import { createHash, randomUUID } from 'node:crypto'
 import { fileURLToPath } from 'node:url'
 import { spawnCapture } from '@neutronai/trident/git-mode.ts'
 
 export const PROJECT_DEPENDENCIES_TIMEOUT_MS = 10 * 60_000
+export const PROJECT_INSTALL_RESERVE_BYTES = 5n * 1024n ** 3n
+
+/** Measure blocks available to the installer, including filesystem reservations. */
+export async function projectInstallAvailableBytes(worktree: string): Promise<bigint | null> {
+  try {
+    const observed = await statfs(worktree, { bigint: true })
+    if (observed.bavail < 0n || observed.bsize <= 0n) return null
+    return observed.bavail * observed.bsize
+  } catch { return null }
+}
 
 async function exists(path: string): Promise<boolean> {
   try { await lstat(path); return true }
@@ -191,7 +201,8 @@ export async function projectSuiteIdentity(worktree: string, expectedHead?: stri
 /** Provision declared Bun workspaces. Recovery can reuse a measured installation
  * only after checking the same inputs and running the host readiness verifier. */
 export async function prepareProjectDependencies(worktree: string, state: string,
-  run: typeof spawnCapture = spawnCapture): Promise<void> {
+  run: typeof spawnCapture = spawnCapture,
+  measureAvailableBytes: typeof projectInstallAvailableBytes = projectInstallAvailableBytes): Promise<void> {
   const receiptPath = join(state, 'dependencies-receipt.json')
   const invalidate = async () => { try { await unlink(receiptPath) } catch (error) {
     if ((error as NodeJS.ErrnoException).code !== 'ENOENT') throw error
@@ -253,7 +264,17 @@ export async function prepareProjectDependencies(worktree: string, state: string
   // This host preparation phase must not execute package lifecycle scripts.
   // A project requiring generated artifacts still has to satisfy its full suite.
   if (reuse) await appendFile(log, 'Reusing validated worktree dependency receipt\n')
-  else await execute([bun, 'install', '--frozen-lockfile', '--ignore-scripts'], 'bun install')
+  else {
+    let available: bigint | null = null
+    try { available = await measureAvailableBytes(worktree) } catch { /* Unknown refuses admission. */ }
+    if (typeof available !== 'bigint' || available < 0n) {
+      await refuse('available disk space is unknown; dependency install paused')
+    }
+    if (available! < PROJECT_INSTALL_RESERVE_BYTES) {
+      await refuse(`available disk space ${available} bytes is below the 5 GiB reserve; dependency install paused`)
+    }
+    await execute([bun, 'install', '--frozen-lockfile', '--ignore-scripts'], 'bun install')
+  }
   // A zero exit is insufficient: a no-op executable must not admit workers into
   // the same empty tree that caused the publication failure.
   if (!await exists(modules) || !(await lstat(modules)).isDirectory() || (await readdir(modules)).length === 0) {
