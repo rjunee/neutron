@@ -33,6 +33,7 @@ These are the items the harness-orchestrator cutover is gated on.
 An open question sits at the top of each body and must be answered before a
 branch is cut (standard §3.1, §3.2).
 
+- [`build-timeline-core`](build-timeline-core.md) — Distribute portable PR build observability as a Core after cutover
 - [`per-project-context-for-agent-tools`](per-project-context-for-agent-tools.md) — Scope agent tool state to the active project everywhere
 
 ## All items
@@ -115,6 +116,8 @@ branch is cut (standard §3.1, §3.2).
 | [`live-agent-turn-must-know-the-owner-timezone`](live-agent-turn-must-know-the-owner-timezone.md) | Give the live agent turn the owner's timezone and local time | P1 | — |
 | [`observable-pane-adoption`](observable-pane-adoption.md) | Require observable pane adoption and bounded pane-loss recovery | P1 | — |
 | [`project-code-repos-and-vault-split`](project-code-repos-and-vault-split.md) | Split a project into declared code repos and a versioned vault | P1 | — |
+| [`temporary-build-timeline-dashboard`](temporary-build-timeline-dashboard.md) | Observe PR wall-clock phases in a temporary authenticated dashboard | P1 | — |
+| [`build-timeline-core`](build-timeline-core.md) | Distribute portable PR build observability as a Core after cutover | P2 | — · needs-spec |
 | [`owner-installable-mcp-servers`](owner-installable-mcp-servers.md) | Owner-installable MCP servers | P2 | yes |
 | [`per-project-context-for-agent-tools`](per-project-context-for-agent-tools.md) | Scope agent tool state to the active project everywhere | P2 | — · needs-spec |
 | [`stale-approval-is-re-raised`](stale-approval-is-re-raised.md) | Re-raise forgotten ritual approvals at a bounded daily cadence | P2 | — |
