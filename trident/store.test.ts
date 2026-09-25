@@ -6,6 +6,7 @@ import { seedMigratedDb } from '../tests/support/migrated-db.ts'
 import { applyMigrations } from '@neutronai/migrations/runner.ts'
 import { ProjectDb } from '@neutronai/persistence/index.ts'
 import { WorkBoardStore } from '@neutronai/work-board/store.ts'
+import { deriveClaimedPaths } from './claimed-paths.ts'
 import {
   changeSignatureEntries,
   COLS,
@@ -2578,6 +2579,43 @@ describe('countRunningByLauncher — live runs hosted by one launcher generation
 // re-takes the same liveness fact, so the race resolves as a refusal.
 // ---------------------------------------------------------------------------
 describe('createIfClaimsAvailable — the branch/slug conflict is a refusal, not a thrown constraint', () => {
+  test('derived read-only claims admit while exact and mixed edits refuse atomically', async () => {
+    const store = new TridentRunStore(db)
+    const paths = ['open/__tests__/project-build-e2e.test.ts', 'trident/tsconfig.json', 'scripts/ci/typecheck-all.sh', 'trident/store.ts', 'trident/new-store.ts', 'trident/store.test.ts']
+    const holder = await store.create({ slug: 'writer', project_slug: 't1', repo_path: '/r', task: 'holder', claimed_paths: paths })
+    let sequence = 0
+    for (const task of [
+      `Run ${paths.join(', ')}`,
+      'Inspect trident/store.ts',
+      'Inspect trident/new-store.ts',
+      'Inspect trident/store.ts and trident/new-store.ts',
+      'Do not edit trident/store.ts, but inspect trident/new-store.ts',
+      'Run trident/store.test.ts', 'Inspect trident/store.test.ts', 'Read trident/store.ts',
+      'Run trident/store.ts', 'Do not edit; Run trident/store.ts',
+      'Edit trident/independent.ts',
+    ]) {
+      const admission = await store.createIfClaimsAvailable({ slug: `reader-${sequence++}`, project_slug: 't1', repo_path: '/r', task, claimed_paths: deriveClaimedPaths({ task }) })
+      expect(admission.ok).toBe(true)
+      if (admission.ok) expect(store.get(admission.run.id)?.claimed_paths).toEqual(deriveClaimedPaths({ task }))
+    }
+    const count = db.prepare<{ n: number }, []>('SELECT COUNT(*) AS n FROM code_trident_runs').get()!.n
+    for (const task of [
+      ...paths.map(path => `Edit ${path}`),
+      'Edit/update trident/store.ts', 'Create/edit trident/new-store.ts',
+      'Run tests before you edit trident/store.ts',
+      'Review the plan before you create trident/new-store.ts',
+      'Check the result then carefully move trident/store.ts to trident/new-store.ts',
+      'Do not edit trident/store.ts, but carefully edit trident/new-store.ts',
+      'Add a test in trident/store.test.ts', 'Update the test in trident/store.test.ts',
+      'Edit the read helper in trident/store.ts',
+      'Edit then run trident/store.ts', 'Create, then inspect trident/store.ts',
+      'Do not edit then edit trident/store.ts', 'Do not; edit trident/store.ts',
+    ]) {
+      const admission = await store.createIfClaimsAvailable({ slug: `blocked-${sequence++}`, project_slug: 't1', repo_path: '/r', task, claimed_paths: deriveClaimedPaths({ task }) })
+      expect(admission).toMatchObject({ ok: false, conflict: 'path', holding_run: { id: holder.id }, path: deriveClaimedPaths({ task })[0] })
+      expect(db.prepare<{ n: number }, []>('SELECT COUNT(*) AS n FROM code_trident_runs').get()!.n).toBe(count)
+    }
+  })
   test('a live run already carrying the branch in this repo refuses with conflict "branch"', async () => {
     const store = new TridentRunStore(db)
     const holder = await store.create({

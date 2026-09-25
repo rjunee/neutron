@@ -91,33 +91,154 @@ function normalize(raw: string): string | null {
 export function deriveClaimedPaths(sources: { task: string; planDoc?: string | null }): string[] {
   const seen = new Set<string>()
   const out: string[] = []
-  const take = (candidate: string): void => {
+  const take = (path: string): void => {
     if (out.length >= MAX_CLAIMED_PATHS) return
-    const path = normalize(candidate)
-    if (path === null || seen.has(path)) return
+    if (seen.has(path)) return
     seen.add(path)
     out.push(path)
   }
-  // Claims come only from actionable sentences. Design docs routinely mention
-  // reference files, historical evidence and explicit "do not touch" guard
-  // rails; treating every slash token as an intended edit serialises unrelated
-  // lanes. Split backtick spans and comma/"and" lists into individual paths.
   const text = `${sources.task}\n${sources.planDoc ?? ''}`
   for (const line of text.split('\n')) {
-    if (/\b(?:do not|don't|never|avoid|without (?:editing|touching|changing))\b/i.test(line)) continue
-    if (!/\b(?:add|append|build|change|create|edit|fix|implement|modify|move|publish|remove|rename|replace|rewrite|touch|update|wire)\b/i.test(line)) continue
-    for (const m of line.matchAll(BACKTICKED)) {
-      const span = m[1] ?? ''
-      // Split on ONE character class, which is a linear scan. The obvious
-      // `/\s+(?:and|or)\s+|\s*,\s*/i` is quadratic on a span of many spaces
-      // (CodeQL js/polynomial-redos, high), because `\s+`/`\s*` on both sides of
-      // an alternation give the engine an ambiguous split point to backtrack
-      // over. Nothing is lost by widening it: a repo-relative path cannot
-      // contain whitespace, and a bare `and` / `or` left as its own token is
-      // dropped by `normalize` for having no extension.
-      for (const candidate of span.split(/[\s,]+/)) take(candidate)
+    const paths = recognizePaths(line)
+    for (const clause of clauses(line, paths)) {
+      // Unknown prose is not evidence of read-only scope. An exemption must
+      // consume the WHOLE clause; later nouns can never cancel a write.
+      if (!isExemptClause(clause.map(token => token.word))) {
+        for (const token of clause) if (token.path !== undefined) take(token.path)
+      }
     }
-    for (const m of line.matchAll(BARE_PATH)) take(m[1] ?? '')
   }
   return out
+}
+
+type ClaimToken = { word: string; path?: string }
+const PATH_WORD = '@path'
+
+/** Only accepted path ranges are replaced; all other source text stays visible. */
+function clauses(line: string, paths: PathRange[]): ClaimToken[][] {
+  const tokens: ClaimToken[] = []
+  const prose = (text: string): void => {
+    for (const match of text.matchAll(/[a-z0-9_]+(?:[-'][a-z0-9_]+)*|[^\s`]/gi)) {
+      tokens.push({ word: match[0].toLowerCase() })
+    }
+  }
+  let cursor = 0
+  for (const path of paths) {
+    prose(line.slice(cursor, path.start))
+    tokens.push({ word: PATH_WORD, path: path.path })
+    cursor = path.end
+  }
+  prose(line.slice(cursor))
+  const result: ClaimToken[][] = [[]]
+  for (const token of tokens) {
+    // A bare "and" may join verbs sharing an object ("edit and test X").
+    // Only clear boundaries separate independently exemptible instructions.
+    if (['.', ';', '!', '?', 'but', 'then', 'before', 'after'].includes(token.word)) {
+      result.push([])
+    } else result[result.length - 1]!.push(token)
+  }
+  // A boundary cannot discard an incomplete request: "Edit then run X"
+  // still has an unresolved prefix. Keep its boundary token too, so joining
+  // fragments cannot manufacture a newly valid exemption ("Do not; edit X").
+  const complete: ClaimToken[][] = []
+  let pending: ClaimToken[] = []
+  for (const clause of result) {
+    if (clause.length === 0) continue
+    if (clause.some(token => token.path !== undefined)) {
+      complete.push([...pending, ...clause])
+      pending = []
+    } else if (pending.length > 0 || !isExemptClause(clause.map(token => token.word))) {
+      for (const token of clause) pending.push(token)
+      pending.push({ word: '@boundary' })
+    }
+  }
+  return complete
+}
+
+/** A small complete grammar, deliberately not a natural-language classifier. */
+function isExemptClause(input: string[]): boolean {
+  let start = 0
+  while (input[start] === '-' || input[start] === '#') start++
+  const words = input.slice(start)
+  while (words.at(-1) === ',') words.pop()
+  if (words[0] === 'read-only' && ['check', 'checks', 'reference', 'references'].includes(words[1] ?? '') && words[2] === ':') {
+    words.splice(0, 3)
+    if (pathList(words)) return true
+  }
+  if (words[0] === 'tests' && words[1] === ':') words.splice(0, 2)
+  if (words[0] === 'reference' && words[1] === ':') return pathList(words.slice(2))
+
+  if (words[0] === 'do' && words[1] === 'not') words.splice(0, 2)
+  else if (["don't", 'never', 'avoid', 'without'].includes(words[0] ?? '')) {
+    const prefix = words.shift()
+    if (prefix === 'avoid') {
+      if (words.at(-1) === 'entirely') words.pop()
+      return pathList(words)
+    }
+  } else {
+    if (['run', 'execute', 'inspect', 'review', 'read', 'check', 'verify', 'validate', 'see', 'consult'].includes(words[0] ?? '')) {
+      words.shift()
+      // Canonical test-run framing, not arbitrary words between a read verb
+      // and its objects. Anything outside these complete forms stays claimed.
+      if (words.slice(0, 5).join(' ') === 'the build checks in @path') words.splice(0, 4)
+      return readTargets(words)
+    }
+    return command(words)
+  }
+  if (!['edit', 'touch', 'change', 'modify', 'create', 'remove', 'update', 'editing', 'touching', 'changing'].includes(words.shift() ?? '')) return false
+  // A complete objectless prohibition is independently read-only; it must
+  // not taint a later canonical execution clause with unresolved write scope.
+  return words.length === 0 || pathList(words)
+}
+
+function pathList(words: string[]): boolean {
+  if (words[0] !== PATH_WORD) return false
+  let index = 1
+  while (index < words.length) {
+    if (words[index] === ',') index++
+    if (words[index] === 'and' || words[index] === 'or') index++
+    if (words[index] !== PATH_WORD) return false
+    index++
+  }
+  return true
+}
+
+function command(words: string[]): boolean {
+  if (words[0] === 'bun' && words[1] === 'test') return pathList(words.slice(2))
+  if (words.slice(0, 4).join(' ') === 'bun run build with') return pathList(words.slice(4))
+  if (words.slice(0, 3).join(' ') === 'tsc - p') return words.length === 4 && words[3] === PATH_WORD
+  return words.length === 2 && words[0] === 'bash' && words[1] === PATH_WORD
+}
+
+function readTargets(words: string[]): boolean {
+  if (pathList(words) || command(words)) return true
+  // Lists of complete invocations, e.g. bun test X, tsc -p Y, and bash Z.
+  const groups: string[][] = [[]]
+  for (const word of words) {
+    if (word === ',' || word === 'and') {
+      if (groups.at(-1)!.length > 0) groups.push([])
+    } else groups.at(-1)!.push(word)
+  }
+  return groups.length > 1 && groups.every(group => pathList(group) || command(group))
+}
+
+type PathRange = { start: number; end: number; path: string }
+
+/** Extract and normalize once; only these exact source ranges may be masked. */
+function recognizePaths(line: string): PathRange[] {
+  const paths: PathRange[] = []
+  const accept = (raw: string, start: number): void => {
+    const path = normalize(raw)
+    if (path !== null) paths.push({ start, end: start + raw.length, path })
+  }
+  for (const span of line.matchAll(BACKTICKED)) {
+    for (const token of span[1]!.matchAll(/[^\s,]+/g)) {
+      accept(token[0], span.index + 1 + token.index)
+    }
+  }
+  for (const token of line.matchAll(BARE_PATH)) {
+    accept(token[1]!, token.index + token[0].length - token[1]!.length)
+  }
+  paths.sort((a, b) => a.start - b.start || b.end - a.end)
+  return paths.filter((path, index) => index === 0 || path.start >= paths[index - 1]!.end)
 }
