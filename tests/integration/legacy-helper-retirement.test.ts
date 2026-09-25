@@ -11,8 +11,10 @@ import { pool, childByKey, committedDispatches, respawnGates, retiringSessionKey
 import { loadRegistry, saveRegistry, type ReplRegistryRecord } from '@neutronai/runtime/adapters/claude-code/persistent/repl-registry.ts'
 import { ReplSession } from '@neutronai/runtime/adapters/claude-code/persistent/repl-session.ts'
 import type { PtyChild } from '@neutronai/runtime/adapters/claude-code/persistent/pty-host.ts'
+import { setNativeChildLiveness } from '@neutronai/runtime/adapters/claude-code/persistent/native-child-liveness.ts'
 
 const cleanups: Array<() => void> = []
+const projectId = 'helper-project'
 afterEach(() => { for (const cleanup of cleanups.splice(0).reverse()) cleanup() })
 
 function fixture() {
@@ -21,11 +23,18 @@ function fixture() {
   const { stateDir, replRegistryPath } = adapter.deriveReplSupervisionPaths(cwd)
   mkdirSync(stateDir, { recursive: true })
   const identity = { substrate_instance_id: `cc-nudge-${randomUUID()}`, cwd,
-    user_id: 'owner', credential_identity: 'ambient-test' }
+    user_id: `helper-owner-${randomUUID()}`, credential_identity: 'ambient-test',
+    project_id: projectId, conversationProjectId: projectId }
+  // Own the census as well as the pool identity: earlier composer tests register
+  // one for their owner, and absent scope correctly refuses when a census exists.
+  const censusReads: Array<string | null> = []
+  let census: (scope: string | null) => boolean = () => false
+  setNativeChildLiveness(identity.user_id, scope => { censusReads.push(scope); return census(scope) })
+  cleanups.push(() => setNativeChildLiveness(identity.user_id, undefined))
   const key = poolKeyFor(identity)
   const row: ReplRegistryRecord = { sessionKey: key, sessionId: randomUUID(),
     child_generation: randomUUID(), cwd, channelName: `neutron-${randomUUID().replaceAll('-', '')}`,
-    has_session: true, pane_handle: 'test:p-helper' }
+    has_session: true, pane_handle: 'test:p-helper', conversationProjectId: projectId }
   const helper = buildLlmCallSubstrate({
     ...identity,
     pool: newCredentialPool({ strategy: 'fill_first', credentials: [{ id: 'ambient-test', kind: 'ambient', secret: '' }] }),
@@ -68,7 +77,8 @@ function fixture() {
     })
     return { session, ownedRow, kills: () => kills }
   }
-  return { helper, key, row, path: replRegistryPath, adoption, own }
+  return { helper, key, row, path: replRegistryPath, adoption, own, censusReads,
+    setCensus(query: typeof census) { census = query } }
 }
 
 test.each(['missing-health', 'expired-evidence', 'missing-reuse', 'host-change', 'active-native-work'])
@@ -80,7 +90,7 @@ test.each(['missing-health', 'expired-evidence', 'missing-reuse', 'host-change',
     ...(failure === 'host-change' ? { pane_handle: 'other-host:p-helper' } : {}),
   }
   saveRegistry(f.path, { [f.key]: row })
-  expect(await f.helper.retireExistingHelpers()).toEqual([{ sessionKey: f.key, outcome: 'refused' }])
+  expect(await f.helper.retireExistingHelpers([projectId])).toEqual([{ sessionKey: f.key, outcome: 'refused' }])
   expect(f.adoption).not.toHaveBeenCalled()
   expect(loadRegistry(f.path)[f.key]).toEqual(row)
   expect(retiringSessionKeys.has(f.key)).toBe(false)
@@ -101,7 +111,7 @@ test.each(['idle', 'busy', 'unknown', 'capture-failed', 'generation-changed', 'r
   const chat = f.own({ ...f.row, sessionKey: chatKey, sessionId: randomUUID(), pane_handle: 'test:p-chat' })
   const row = { ...owned.ownedRow, ...(state === 'generation-changed' ? { child_generation: randomUUID() } : {}) }
   saveRegistry(f.path, { [f.key]: row, [chatKey]: chat.ownedRow })
-  expect(await f.helper.retireExistingHelpers()).toEqual([{ sessionKey: f.key,
+  expect(await f.helper.retireExistingHelpers([projectId])).toEqual([{ sessionKey: f.key,
     outcome: state === 'idle' ? 'retired' : 'refused' }])
   expect(f.adoption).not.toHaveBeenCalled()
   expect(owned.kills()).toBe(state === 'idle' ? 1 : 0)
@@ -117,7 +127,7 @@ test('an active gateway helper is preserved before any idle capture or retiremen
   const owned = f.own(f.row, async () => { captures += 1; return '❯\n' })
   saveRegistry(f.path, { [f.key]: owned.ownedRow })
   committedDispatches.set(f.key, 1)
-  expect(await f.helper.retireExistingHelpers()).toEqual([{ sessionKey: f.key, outcome: 'refused' }])
+  expect(await f.helper.retireExistingHelpers([projectId])).toEqual([{ sessionKey: f.key, outcome: 'refused' }])
   expect(captures).toBe(0)
   expect(owned.kills()).toBe(0)
   expect(retiringSessionKeys.has(f.key)).toBe(false)
@@ -129,7 +139,7 @@ test('concurrent cleanup retires one owned helper at most once', async () => {
   let captures = 0
   const owned = f.own(f.row, async () => { captures += 1; return '❯\n' })
   saveRegistry(f.path, { [f.key]: owned.ownedRow })
-  const results = await Promise.all([f.helper.retireExistingHelpers(), f.helper.retireExistingHelpers()])
+  const results = await Promise.all([f.helper.retireExistingHelpers([projectId]), f.helper.retireExistingHelpers([projectId])])
   expect(results.flat().map(result => result.outcome).sort()).toEqual(['refused', 'retired'])
   expect(captures).toBe(1)
   expect(owned.kills()).toBe(1)
@@ -145,7 +155,7 @@ test('retirement renews the exact owned claim through the ownership funnel befor
   })
   const row = { ...owned.ownedRow, adoption_claim_at: 1, adoption_claim_pid: 123 }
   saveRegistry(f.path, { [f.key]: row })
-  expect(await f.helper.retireExistingHelpers()).toEqual([{ sessionKey: f.key, outcome: 'retired' }])
+  expect(await f.helper.retireExistingHelpers([projectId])).toEqual([{ sessionKey: f.key, outcome: 'retired' }])
   expect(atTermination?.adoption_claim_at).toBeGreaterThan(1)
   expect(atTermination).toEqual({ ...row, adoption_claim_at: atTermination!.adoption_claim_at!,
     adoption_claim_pid: process.pid })
@@ -159,9 +169,50 @@ test('a post-exit registry change is preserved without reopening admission or re
     saveRegistry(f.path, { [f.key]: replacement })
   })
   saveRegistry(f.path, { [f.key]: owned.ownedRow })
-  expect(await f.helper.retireExistingHelpers()).toEqual([{ sessionKey: f.key, outcome: 'refused' }])
+  expect(await f.helper.retireExistingHelpers([projectId])).toEqual([{ sessionKey: f.key, outcome: 'refused' }])
   expect(owned.kills()).toBe(1)
   expect(loadRegistry(f.path)[f.key]).toEqual(replacement)
   expect(retiringSessionKeys.has(f.key)).toBe(true)
+  expect(f.adoption).not.toHaveBeenCalled()
+})
+
+test.each(['same-project-child', 'other-project-child', 'census-error', 'unknown-scope'])
+('owned helper retirement requires a clear census for its exact project: %s', async state => {
+  const f = fixture()
+  let captures = 0
+  const owned = f.own(f.row, async () => { captures += 1; return '❯\n' })
+  saveRegistry(f.path, { [f.key]: owned.ownedRow })
+  f.setCensus(scope => {
+    if (state === 'census-error') throw new Error('census unavailable')
+    return scope === (state === 'other-project-child' ? 'another-project' : projectId)
+  })
+  if (state === 'unknown-scope') {
+    const { project_id: _project, conversationProjectId: _scope, ...unscoped } = supervisedBySessionKey.get(f.key)!
+    supervisedBySessionKey.set(f.key, unscoped)
+  }
+  const retired = state === 'other-project-child'
+  expect(await f.helper.retireExistingHelpers([projectId])).toEqual([{ sessionKey: f.key,
+    outcome: retired ? 'retired' : 'refused' }])
+  expect(captures).toBe(retired ? 1 : 0)
+  expect(owned.kills()).toBe(retired ? 1 : 0)
+  expect(loadRegistry(f.path)[f.key]).toEqual(retired ? undefined : owned.ownedRow)
+  expect(retiringSessionKeys.has(f.key)).toBe(retired)
+  expect(f.censusReads).toEqual(state === 'unknown-scope' ? [] : retired ? [projectId, projectId] : [projectId])
+  expect(f.adoption).not.toHaveBeenCalled()
+})
+
+test('a native child admitted during idle capture prevents owned helper termination', async () => {
+  const f = fixture()
+  const owned = f.own(f.row, async () => {
+    f.setCensus(scope => scope === projectId)
+    return '❯\n'
+  })
+  saveRegistry(f.path, { [f.key]: owned.ownedRow })
+  expect(await f.helper.retireExistingHelpers([projectId])).toEqual([{ sessionKey: f.key, outcome: 'refused' }])
+  expect(f.censusReads).toEqual([projectId, projectId])
+  expect(owned.kills()).toBe(0)
+  const row = loadRegistry(f.path)[f.key]!
+  expect(row).toEqual({ ...owned.ownedRow, adoption_claim_at: row.adoption_claim_at!, adoption_claim_pid: process.pid })
+  expect(retiringSessionKeys.has(f.key)).toBe(false)
   expect(f.adoption).not.toHaveBeenCalled()
 })
