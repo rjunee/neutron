@@ -68,7 +68,10 @@ export function ReplModelControl({ projectId, origin, token, fetchImpl }: {
       const requestedSessionId = state.sessionId
       const next = await client.switch(projectId, model, requestedSessionId)
       if (generation !== requestGeneration.current) return
-      if (next.sessionId !== requestedSessionId) {
+      // Codex advances its conditional token when settings change; the stable
+      // conversation identity must remain the same. Claude retains its session token.
+      if (next.harness !== state.harness ||
+        (next.conversationId ?? next.sessionId) !== (state.conversationId ?? state.sessionId)) {
         throw new Error('Session changed before the model switch was confirmed')
       }
       setState(next)

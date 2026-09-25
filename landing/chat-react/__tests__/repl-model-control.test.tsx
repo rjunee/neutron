@@ -18,6 +18,59 @@ const json = (value: unknown, status = 200) => new Response(JSON.stringify(value
 })
 
 describe('web REPL model switch', () => {
+  for (const outcome of ['same-conversation', 'foreign-conversation', 'foreign-harness', 'missing-conversation', 'unauthenticated'] as const) {
+    it(`handles Codex conditional token advancement: ${outcome}`, async () => {
+      const { createRoot } = await import('react-dom/client')
+      const { act } = await import('react')
+      const { ReplModelControl } = await import('../ReplModelControl.tsx')
+      const posts: unknown[] = []
+      let model = 'cheap'
+      let epoch = 0
+      const native = () => ({ ...state(model, `epoch-${epoch}`), harness: 'codex', conversationId: 'stable-owner' })
+      const fetchImpl = async (url: string, init?: RequestInit): Promise<Response> => {
+        if (url.endsWith('/repl-control')) return json({ projectId: 'project-1', threadId: 'thread', bindingRevision: 'binding',
+          generation: 1, epoch, turnId: null, status: 'idle', pending: [] })
+        expect(url).toBe('https://test.example/api/app/projects/project-1/repl-model')
+        if (init?.method !== 'POST') return json(native())
+        const body = JSON.parse(String(init.body))
+        posts.push(body)
+        if (outcome === 'unauthenticated') return json({ message: 'Invalid bearer' }, 401)
+        if (outcome === 'same-conversation') { model = body.model; epoch++ }
+        return json({ ...native(), currentModel: body.model, sessionId: `epoch-${posts.length}`,
+          ...(outcome === 'foreign-conversation' ? { conversationId: 'other-owner' } : {}),
+          ...(outcome === 'missing-conversation' ? { conversationId: undefined } : {}),
+          ...(outcome === 'foreign-harness' ? { harness: 'claude-code' } : {}) })
+      }
+      const host = document.createElement('div')
+      document.body.appendChild(host)
+      const root = createRoot(host)
+      try {
+        await act(async () => { root.render(<ReplModelControl projectId="project-1" origin="https://test.example" token="secret" fetchImpl={fetchImpl} />); await tick() })
+        const select = host.querySelector('select') as HTMLSelectElement
+        await act(async () => { select.value = 'deep'; select.dispatchEvent(new Event('change', { bubbles: true })); await tick() })
+        expect(posts).toEqual([{ model: 'deep', sessionId: 'epoch-0' }])
+        if (outcome === 'same-conversation') {
+          expect(select.value).toBe('deep')
+          expect(host.querySelector('[role="alert"]')).toBeNull()
+          await act(async () => { select.value = 'cheap'; select.dispatchEvent(new Event('change', { bubbles: true })); await tick() })
+          expect(posts).toEqual([{ model: 'deep', sessionId: 'epoch-0' }, { model: 'cheap', sessionId: 'epoch-1' }])
+          expect(select.value).toBe('cheap')
+          expect(host.querySelector('[role="alert"]')).toBeNull()
+        } else {
+          expect(select.value).toBe('cheap')
+          expect(host.querySelector('[role="alert"]')?.textContent).toContain(outcome === 'unauthenticated' ? 'Invalid bearer' : 'Session changed')
+        }
+      } finally { await act(async () => { root.unmount() }); host.remove() }
+    })
+  }
+
+  for (const conversationId of ['', null, 42]) it(`rejects malformed conversation identity ${JSON.stringify(conversationId)}`, async () => {
+    const { WebReplModelClient } = await import('../repl-model-client.ts')
+    const client = new WebReplModelClient({ base_url: 'https://test.example', token: 'secret',
+      fetchImpl: async () => json({ ...state('cheap'), conversationId }) })
+    await expect(client.current('project-1')).rejects.toThrow('Invalid model response')
+  })
+
   it('uses the scoped bearer route and last-read session', async () => {
     const { createRoot } = await import('react-dom/client')
     const { act } = await import('react')
