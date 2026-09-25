@@ -33,6 +33,7 @@ describe('bounded native Codex operation reconstruction', () => {
       expect((await run([command(cmd)])).observations).toEqual([])
     }
     expect((await run([command("bun test x --test-name-pattern 'one | two'")])).observations).toHaveLength(1)
+    expect((await run([command(undefined, { command: ['/bin/bash', '-nc', 'bun test x'] })])).observations).toEqual([])
   })
   test('recognizes the complete host suite and preserves overlapping envelopes', async () => {
     const result = await run([command('bash scripts/run-tests.sh'), command('bun test x', { id: 'exec-2', exit_code: 1, status: 'failed' }, { started_at_ms: 3000, completed_at_ms: 5000 })])

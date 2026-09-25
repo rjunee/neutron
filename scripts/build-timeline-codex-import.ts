@@ -63,7 +63,7 @@ function words(command: string): string[] | null {
 }
 function argv(value: unknown): string[] | null {
   if (!Array.isArray(value) || !value.every(v => typeof v === 'string')) return null
-  if (value.length === 3 && /(?:^|\/)(?:ba|z)?sh$/.test(value[0]!) && /^-[a-z]*c[a-z]*$/.test(value[1]!)) return words(value[2]!)
+  if (value.length === 3 && /(?:^|\/)(?:ba|z)?sh$/.test(value[0]!) && ['-c', '-lc'].includes(value[1]!)) return words(value[2]!)
   return value
 }
 function classify(args: string[]): { phase: string; label: string } | null {
