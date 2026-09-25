@@ -96,6 +96,14 @@ describe('timeline catalogue', () => {
     expect(refreshed.fullObservedAt).toBe(baseline.observedAt)
     expect(refreshed.apiRequests).toBe(1)
     expect(calls[1]).toContain('sort=updated')
+    const oldPr = refreshed.repositories[0]!.prs.find((pr) => pr.number === 2)!
+    oldPr.ciCoverage = 'head-only'
+    oldPr.ciObservedAt = refreshed.observedAt
+    const full = await refreshPullRequestCatalogue(refreshed, ['example/open'], {
+      fetcher, now: () => baseline.observedAt + 600_000,
+    })
+    expect(full.repositories[0]?.prs.find((pr) => pr.number === 2)?.ciCoverage).toBe('head-only')
+    expect(full.fullObservedAt).toBe(baseline.observedAt + 600_000)
   })
 
   test('samples only bounded current heads; parallel checks remain separate lanes and terminal heads are cached', async () => {

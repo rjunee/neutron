@@ -162,7 +162,21 @@ export async function refreshPullRequestCatalogue(
   if (!Number.isSafeInteger(previous.fullObservedAt) || now - previous.fullObservedAt >= 600_000 ||
       now < previous.observedAt || repositories.some((repo) =>
         !previous.repositories.some((entry) => entry.repository === repo && entry.error === null))) {
-    return collectPullRequestCatalogue(repositories, options)
+    const full = await collectPullRequestCatalogue(repositories, options)
+    for (const repository of full.repositories) {
+      const prior = previous.repositories.find((entry) => entry.repository === repository.repository)
+      const oldByNumber = new Map(prior?.prs.map((pr) => [pr.number, pr]) ?? [])
+      for (const pr of repository.prs) {
+        const old = oldByNumber.get(pr.number)
+        if (old?.headSha === pr.headSha) {
+          pr.ciCoverage = old.ciCoverage
+          pr.ciObservedAt = old.ciObservedAt
+          pr.ciPending = old.ciPending
+          pr.ciError = old.ciError
+        }
+      }
+    }
+    return full
   }
   const fetcher = options.fetcher ?? fetch
   const apiUrl = (options.apiUrl ?? 'https://api.github.com').replace(/\/$/, '')
