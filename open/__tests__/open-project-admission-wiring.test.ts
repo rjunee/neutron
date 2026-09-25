@@ -167,3 +167,72 @@ test('the composed app exposes the liveness census over the SAME admission servi
   expect(await child.release()).toBe(true)
   expect((await liveness.census(null)).verdict).toBe('idle')
 }, 30_000)
+
+/** Boot the real composition, optionally after `before(db)` prepared the database. */
+async function bootComposed(prompts: string[], before?: (db: ProjectDb) => Promise<void>) {
+  seedMigratedDb(process.env['NEUTRON_DB_PATH']!)
+  const db = ProjectDb.open(process.env['NEUTRON_DB_PATH']!)
+  if (before !== undefined) await before(db)
+  const composer = buildOpenGraphComposer({ env: process.env, substrateFactory: () => recordingSubstrate(prompts) })
+  const composition = await composer({ db, project_slug: 'owner' })
+  const graph = await composeProductionGraph(composition)
+  const server = Bun.serve({ port: 0, fetch: (req, srv) => graph.fetch!(req, srv), websocket: graph.websocket! })
+  close = async () => {
+    await server.stop(true)
+    for (const cleanup of composition.realmode_cleanups ?? []) { try { await cleanup() } catch { /* best-effort */ } }
+    await graph.shutdown()
+    db.close()
+  }
+  const frames: string[] = []
+  const ws = new WebSocket(`ws://127.0.0.1:${server.port}/ws/app/chat?token=dev:owner&platform=web`)
+  ws.onmessage = (e) => { frames.push(String(e.data)) }
+  await new Promise<void>((resolve, reject) => {
+    ws.onopen = () => resolve()
+    ws.onerror = (e) => reject(new Error(`ws error: ${JSON.stringify(e)}`))
+  })
+  return { composition, frames, ws }
+}
+
+/** A General fence a previous process left at `phase` (owner handle = the slug). */
+async function fenceGeneralBeforeBoot(db: ProjectDb, phase: 'draining' | 'replacing'): Promise<void> {
+  const crashed = new ProjectAdmission({ db, ownerHandle: 'owner', bootId: 'crashed-boot' })
+  await crashed.generationFor(null)
+  let fence = (await crashed.maintenance.beginMaintenance(crashed.scopeFor(null)))!
+  while (fence.phase !== phase) fence = (await crashed.maintenance.advance(fence))!
+}
+
+test('the composed app exposes project maintenance; replace on a parentless General is absent and admission stays open (control)', async () => {
+  const { composition, ws } = await bootComposed([])
+  ws.close()
+  await sleep(50)
+  const maintenance = composition.project_maintenance
+  const admission = composition.project_admission
+  if (maintenance === undefined || admission === undefined) throw new Error('composition did not expose maintenance and admission')
+  const before = admission.inspect(null)!.generation
+  expect(await maintenance.replace(null)).toEqual({ status: 'absent' })
+  expect(admission.inspect(null)).toMatchObject({ phase: 'open', generation: before + 1 })
+  expect(await maintenance.resume(null)).toEqual({ status: 'open' })
+}, 30_000)
+
+test('a replacing fence left by a crash is HELD at boot and chat answers fenced (guard: fail-closed restart)', async () => {
+  const prompts: string[] = []
+  const { composition, frames, ws } = await bootComposed(prompts, (db) => fenceGeneralBeforeBoot(db, 'replacing'))
+  expect(composition.project_admission!.inspect(null)?.phase).toBe('replacing')
+  expect(await composition.project_maintenance!.resume(null)).toMatchObject({ status: 'held', phase: 'replacing' })
+  ws.send(JSON.stringify({ v: 1, type: 'user_message', body: 'after crash', client_msg_id: 'c-held' }))
+  await waitFor(() => frames.some((f) => f.includes(PROJECT_FENCED_BODY)))
+  expect(prompts.filter((p) => p.includes(COLD_PROMPT_MARKER)).length).toBe(0)
+  ws.close()
+  await sleep(50)
+}, 30_000)
+
+test('a draining fence left by a crash is released at boot and chat is answered (control)', async () => {
+  const prompts: string[] = []
+  const { composition, frames, ws } = await bootComposed(prompts, (db) => fenceGeneralBeforeBoot(db, 'draining'))
+  expect(composition.project_admission!.inspect(null)?.phase).toBe('open')
+  ws.send(JSON.stringify({ v: 1, type: 'user_message', body: 'after crash', client_msg_id: 'c-released' }))
+  await waitFor(() => frames.some((f) => f.includes('admitted-reply')))
+  expect(frames.some((f) => f.includes(PROJECT_FENCED_BODY))).toBe(false)
+  ws.close()
+  await sleep(50)
+}, 30_000)

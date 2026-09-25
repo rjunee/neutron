@@ -217,6 +217,8 @@ const EXPECTED_COMPOSITION_KEYS = [
   // #1237 — the read-only project liveness census (parent, native children,
   // shells) a maintenance owner consumes; nothing triggers it in this build.
   'project_liveness',
+  // #1237 — the maintenance owner: `replace` (no caller) and boot-time `resume`.
+  'project_maintenance',
   'project_slug',
   'realmode_cleanups',
   'reminder_dispatcher',

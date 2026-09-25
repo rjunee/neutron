@@ -1282,7 +1282,7 @@ export function quarantinedChildCount(): number {
 /** Deliver an eviction to the durable crash sink with the EVICTED generation.
  *  Mirrors the supervision watchdog's `onChildCrash` call for a pid-dead child;
  *  this is the edge that watchdog structurally cannot observe. */
-async function notifyEvictedChild(
+export async function notifyEvictedChild(
   options: PersistentReplSubstrateOptions,
   sessionKey: string,
   childGeneration: string,
@@ -1440,6 +1440,23 @@ class PaneOwnershipRefusedError extends Error implements SubstrateClassed {
  *  to a RETRYABLE refusal rather than to an unbounded recursion. */
 const STALE_TURN_REENTRY_LIMIT = 3
 
+/**
+ * The spawn-time profile a request presents to the warm-reuse guard: the `--tools`
+ * surface (`spec.tools` names, comma-joined — the `session.toolSurface` rule) and
+ * whether the tool bridge is requested. ONE definition: the reuse guard below and
+ * the #1237 replacement attestation (`generation-replacement.ts`) both read it, so
+ * an attested replacement is exactly what the next dispatch will accept.
+ */
+export function requestedReplProfile(
+  options: PersistentReplSubstrateOptions,
+  spec: AgentSpec,
+): { toolSurface: string; toolBridge: boolean } {
+  return {
+    toolSurface: spec.tools.map((t) => t.name).join(','),
+    toolBridge: options.enableToolBridge === true && replToolBridgeRef.current !== undefined,
+  }
+}
+
 export async function getOrSpawnSession(
   sessionKey: string,
   options: PersistentReplSubstrateOptions,
@@ -1490,15 +1507,13 @@ export async function getOrSpawnSession(
   // awaited: adding an await here would reorder the synchronous prefix two
   // concurrent dispatches rely on, and a reap is never on this turn's path.
   fireAndForget('persistent-repl.quarantine-sweep', sweepQuarantinedChildren())
-  const requestedToolSurface = spec.tools.map((t) => t.name).join(',')
   // P0-1 defense-in-depth (Codex r1 [P2]): the native-MCP tool bridge is a
   // SPAWN-time property of the REPL, exactly like the tool surface. Compute what
   // THIS request would attach so the reuse guard can refuse to serve a
   // bridge-mismatched warm child — making the bridge restriction LOCAL, not
   // dependent on `substrate_instance_id` keying (today they align, so this never
   // fires; it survives a future edit that varies the bridge at a finer grain).
-  const requestedToolBridge =
-    options.enableToolBridge === true && replToolBridgeRef.current !== undefined
+  const { toolSurface: requestedToolSurface, toolBridge: requestedToolBridge } = requestedReplProfile(options, spec)
   // ── THE COLD PATH MUST NOT SUSPEND, AND "READ FIRST" IS NOT ENOUGH ──────────
   // Two concurrent dispatches on one key de-duplicate onto a single spawn only
   // because NOTHING SUSPENDS between this read and the `pool.set` at the end of the
