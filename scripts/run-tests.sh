@@ -666,7 +666,49 @@ if [ "$NHTTP" -gt 0 ]; then
 fi
 
 WORK="$(mktemp -d "${TMPDIR:-/tmp}/neutron-runtests-XXXXXX")"
-trap 'rm -rf "$WORK"' EXIT
+RUN_LANES_SETTLED=0
+# mktemp -d makes this per-run directory private (0700). Once logs exist, keep
+# this run's chunk/lane logs on a nonzero exit so truncated terminal output does
+# not erase the failing case. Successful runs still leave no temp logs.
+cleanup_work() {
+  local status=$?
+  if [ "$status" -eq 0 ]; then
+    rm -rf -- "$WORK"
+  else
+    echo "run-tests: retained lane logs at $WORK" >&2
+    # A signal can reach this EXIT trap while a background chunk still writes.
+    # Such a directory remains private and unmarked, so another run cannot
+    # mistake it for a completed receipt and delete an active writer's logs.
+    [ "$RUN_LANES_SETTLED" -eq 1 ] || return 0
+    # Only settled failed runs carry this marker. Prune this runner's exact
+    # sibling prefix under the same temp parent, keeping the current receipt
+    # plus two older failures for comparison.
+    : > "$WORK/.retained-failure"
+    local parent="${WORK%/*}" candidate oldest count=0
+    for candidate in "$parent"/neutron-runtests-*; do
+      if [ -d "$candidate" ] && [ ! -L "$candidate" ] && [ -f "$candidate/.retained-failure" ]; then
+        count=$((count + 1))
+      fi
+    done
+    while [ "$count" -gt 3 ]; do
+      oldest=""
+      for candidate in "$parent"/neutron-runtests-*; do
+        [ "$candidate" = "$WORK" ] && continue
+        [ -d "$candidate" ] && [ ! -L "$candidate" ] && [ -f "$candidate/.retained-failure" ] || continue
+        if [ -z "$oldest" ] || [ "$candidate/.retained-failure" -ot "$oldest/.retained-failure" ]; then oldest="$candidate"; fi
+      done
+      [ -n "$oldest" ] || break
+      if ! rm -rf -- "$oldest"; then
+        echo "run-tests: could not prune older retained lane logs at $oldest" >&2
+        break
+      fi
+      count=$((count - 1))
+    done
+  fi
+}
+trap cleanup_work EXIT
+trap 'exit 143' TERM
+trap 'exit 130' INT
 
 run_chunk() {
   local idx="$1"
@@ -834,6 +876,7 @@ fi
 if [ "$NHTTP" -gt 0 ]; then
   run_http_lane
 fi
+RUN_LANES_SETTLED=1
 
 
 # --- 4. Aggregate + coverage audit -------------------------------------------
