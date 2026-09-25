@@ -5258,12 +5258,11 @@ test('local merge mode reaches merged with no PR, no push and no gh call', async
  *   • `acquireTurn`  — the session's turn mutex is never granted;
  *   • silent worker  — the line lands and no result file is ever written.
  *
- * All three stop, in ~1.6s, as a measured `unknown` naming which seam it was. So
- * the wall DOES fire, the dispatch path IS bounded, and a park cannot be produced
- * here — which is what moved the investigation downstream, to what the LAUNCHER
- * does with an `unknown` (`trident/project-launcher.ts`) rather than to what the
- * dispatch does. Keep these: they are the control that says a future park is not
- * in this path.
+ * All three must stop within the test timeout. Hung acquisition can report a
+ * pre-submission refusal or the outer runner's unknown, depending on which wall
+ * wins. Once submission starts, only unknown is justified and the child lease
+ * stays owned. These controls pin bounded waiting and the submission boundary;
+ * they do not measure throughput or promise which deadline callback runs first.
  *
  * WHAT THEY DO NOT COVER: a seam that hangs the event loop itself, and the real
  * herdr transport. Both are faked here by construction.
@@ -5309,16 +5308,25 @@ test('terminal task-sequence task receives host-suite instructions after an inte
 }, 300_000)
 
 for (const seam of ['submitLine', 'acquireTurn', 'silent-worker'] as const) {
-  test(`a hung ${seam} stops the plan step at its wall as a measured unknown`, async () => {
+  test(`a hung ${seam} stops the plan step at its wall without an unobserved dispatch`, async () => {
     const f = await fixture()
+    let released!: () => void
+    const releaseObserved = new Promise<void>(resolve => { released = resolve })
+    const admission = f.context.nativeChildAdmission
+    f.context.nativeChildAdmission = { ...admission, admit: async (...args) => {
+      const child = await admission.admit(...args)
+      if (child.status !== 'admitted') return child
+      return { ...child, release: async () => { const result = await child.release(); released(); return result } }
+    } }
     const options = await f.prepare()
     // The real wall is 15 minutes (`PROJECT_BUILD_WALL_MS.plan`); only its LENGTH is
     // shortened here, not the mechanism that enforces it.
     options.workers.plan.request = { ...options.workers.plan.request, budget: { wall_ms: 1_500 } }
+    let acquisitions = 0, submissions = 0
     registerSession(f, {
       sessionId: 'e2e-session', toolSurface: LIVE_AGENT_TOOL_NAMES.join(','), cwd: f.dir, hasChildExited: () => false,
-      child: { submitLine: seam === 'submitLine' ? neverSettles : async () => {} },
-      acquireTurn: seam === 'acquireTurn' ? neverSettles : async () => () => {},
+      child: { submitLine: async () => { submissions++; if (seam === 'submitLine') await neverSettles() } },
+      acquireTurn: async () => { acquisitions++; if (seam === 'acquireTurn') await neverSettles(); return () => {} },
     })
     const host = await createProjectBuildHost(options)
     // IT STOPS is the load-bearing half, and the TEST TIMEOUT is what asserts it.
@@ -5329,16 +5337,35 @@ for (const seam of ['submitLine', 'acquireTurn', 'silent-worker'] as const) {
     // fire, and was observed doing so: forcing both walls to an hour (the control for
     // this case) fails it with `timed out after 60000ms`.
     const outcome = await host.run({ mode: 'implementation', start: 'fresh' }, new AbortController().signal)
-    expect(outcome, why(f, outcome)).toMatchObject({ kind: 'unknown', phase: 'plan' })
-    // WHICH uncertainty is deliberately not pinned. `claudeInReplRunner`'s dispatch
-    // wall (`claude-in-repl.ts:76`) and `createClaudeActingTurn`'s own
-    // (`claude-acting-turn.ts:73`) are armed from the SAME budget microseconds apart,
-    // so either may win the race and each words its stop differently. Both are
-    // `unknown`; nothing here depends on which one spoke.
-    expect((outcome as { detail: string }).detail, why(f, outcome)).toMatch(/unknown/)
+    // Both walls share the original deadline. Before submission, the acting
+    // turn can prove refusal while the outer runner can only report unknown.
+    // After submission neither wall proves completion, so only unknown is valid.
+    if (seam === 'acquireTurn' && outcome.kind === 'blocked') {
+      expect(outcome, why(f, outcome)).toMatchObject({ phase: 'plan', on: 'Worker refused: capability-unsupported' })
+    } else {
+      expect(outcome, why(f, outcome)).toMatchObject({ kind: 'unknown', phase: 'plan' })
+      expect((outcome as { detail: string }).detail, why(f, outcome)).toMatch(/unknown/)
+    }
+    expect(acquisitions).toBe(1)
+    expect(submissions).toBe(seam === 'acquireTurn' ? 0 : 1)
+    if (seam === 'acquireTurn') {
+      await releaseObserved
+      expect(f.admission.listLeases('liveChild')).toEqual([])
+    } else expect(f.admission.listLeases('liveChild')).toHaveLength(1)
     expect(f.github.prs).toEqual([])
   }, 60_000)
 }
+
+test('a plan turn acquired within its wall dispatches once and validates its native result', async () => {
+  const f = await fixture()
+  const options = await f.prepare()
+  options.workers.plan.request = { ...options.workers.plan.request, budget: { wall_ms: 10_000 } }
+  const host = await createProjectBuildHost(options)
+  const outcome = await host.run({ mode: 'implementation', start: 'fresh' }, new AbortController().signal)
+  expect(outcome, why(f, outcome)).toMatchObject({ kind: 'merged' })
+  expect(f.world.dispatches.filter(call => call.role === 'plan').map(call => call.step_id)).toEqual([`${f.row.id}:plan:0`])
+  expect(f.admission.listLeases('liveChild')).toEqual([])
+}, 20_000)
 
 for (const mergeMode of ['pr', 'local'] as const)
 for (const reviewFix of [false, true])
