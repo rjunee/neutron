@@ -21,8 +21,11 @@ The locked pivot keeps the gates (`docs/plans/harness-orchestrator-pivot-2026-09
 The Trident efficiency item explicitly retains the full suite, mutation proof,
 leak preflight and pinned merge, with forbidden and legitimate sibling mutations
 for touched guards (`docs/spec-items/trident-build-efficiency.md:190-201`).
-G063 requires a host-observed zero exit on the merge-gating full-suite round;
-worker claims cannot supply that receipt (`docs/trident-gates-inventory.md:148`).
+G063 requires a host-observed zero exit to prove that the merge-gating full
+suite passed; an eligible, evidenced `failed-preexisting` result instead becomes
+an advisory for independent panel verification, while host-selected subset
+rounds do not require a full-suite receipt. Worker claims cannot select the
+scope or replace a required host receipt (`docs/trident-gates-inventory.md:148-150`).
 This item changes neither that requirement nor the suite's discovered-file and
 executed-file coverage audit (`scripts/run-tests.sh:19-25`, `:805-816`).
 
@@ -110,11 +113,16 @@ semantics, suite skip, or guard weakening earns acceptance under this item.
       at the exact ceiling and leave the runner red; a mixed failure does not
       retry. Verify attempt counts, final exit and retained diagnostics with
       `bun test scripts/run-tests-selftest.test.ts`.
-- [ ] On the consuming Trident path, only a completed host full-suite receipt
-      with exit zero authorizes G063. An early socket refusal, exhausted PGLite
-      retry, missing receipt, or incomplete coverage remains non-authorizing;
-      the green full suite remains authorizing. Verify:
-      `bun test trident/gates/review-suite.test.ts open/__tests__/project-build-e2e.test.ts`
+- [ ] On a host-selected full-suite round, a completed host receipt with exit
+      zero proves the suite passed. An early socket refusal, exhausted PGLite
+      retry, missing or unreadable receipt, or incomplete coverage cannot be
+      reported as a pass. A qualifying `failed-preexisting` claim with the
+      applicable failure identity and base-comparison evidence required by
+      G065 remains an advisory for independent panel verification; missing
+      evidence, an ineligible claim, or a newly red suite remains blocking.
+      Panel vetoes remain binding. A host-selected subset round retains its existing
+      no-full-suite-receipt semantics. Verify positive and negative siblings in
+      `bun test trident/gates/review-suite.test.ts trident/suite-failure.test.ts open/__tests__/project-build-e2e.test.ts`
       and semantic mutations in both directions in the implementation record.
 - [ ] The implementation PR's required full `bash scripts/run-tests.sh` run
       completes with discovered and executed files matching, all assigned
