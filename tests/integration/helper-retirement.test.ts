@@ -2,6 +2,7 @@ import { afterEach, expect, test } from 'bun:test'
 import { mkdtempSync, rmSync } from 'node:fs'
 import { join } from 'node:path'
 import { tmpdir } from 'node:os'
+import { randomUUID } from 'node:crypto'
 import { lifecycleReplHost } from '../support/lifecycle-repl-host.ts'
 import { createPersistentReplSubstrate, poolKeyFor, retirePersistentRepl, shutdownAllPersistentRepls } from '@neutronai/runtime/adapters/claude-code/persistent/pool.ts'
 import { pool, retiringSessionKeys, supervisedBySessionKey, committedDispatches } from '@neutronai/runtime/adapters/claude-code/persistent/pool-state.ts'
@@ -9,11 +10,15 @@ import { saveRegistry, loadRegistry } from '@neutronai/runtime/adapters/claude-c
 import { respawnReplSession, runReplWatchdogTick } from '@neutronai/runtime/adapters/claude-code/persistent/supervision.ts'
 import type { SessionHandle } from '@neutronai/runtime/session-handle.ts'
 import type { PersistentReplSubstrateOptions } from '@neutronai/runtime/adapters/claude-code/persistent/types.ts'
+import { setNativeChildLiveness } from '@neutronai/runtime/adapters/claude-code/persistent/native-child-liveness.ts'
 
 const dirs: string[] = []
+const censusOwners: string[] = []
+const projectId = 'helper-project'
 afterEach(async () => {
   await shutdownAllPersistentRepls()
   retiringSessionKeys.clear()
+  for (const owner of censusOwners.splice(0)) setNativeChildLiveness(owner, undefined)
   for (const dir of dirs.splice(0)) rmSync(dir, { recursive: true, force: true })
 })
 async function until(check: () => boolean) {
@@ -30,17 +35,26 @@ async function drain(handle: SessionHandle) {
 async function setup() {
   const cwd = mkdtempSync(join(tmpdir(), 'helper-retirement-'))
   dirs.push(cwd)
+  // Composer tests register a process-global owner census. Own this fixture's
+  // identity and scope so ordered runs exercise retirement past that preflight.
+  const owner = `helper-owner-${randomUUID()}`
+  const censusReads: Array<string | null> = []
+  let census: (scope: string | null) => boolean = () => false
+  setNativeChildLiveness(owner, scope => { censusReads.push(scope); return census(scope) })
+  censusOwners.push(owner)
   const peer = lifecycleReplHost()
   const reservation = Bun.serve({ port: 0, fetch: () => new Response('reserved') })
   const sinkPort = reservation.port!
   await reservation.stop(true)
   const options: PersistentReplSubstrateOptions = {
-    substrate_instance_id: `cc-llm-${cwd}`, cwd, user_id: 'owner', credential_identity: 'credential',
+    substrate_instance_id: `cc-llm-${cwd}`, cwd, user_id: owner, credential_identity: 'credential',
+    project_id: projectId, conversationProjectId: projectId,
     ptyHost: peer.host, skipTrustSeed: true, idleQuietMs: 0, sinkPort,
   }
   const substrate = createPersistentReplSubstrate(options)
   const spec = { prompt: 'onboarding detail', tools: [], model_preference: ['sonnet'] }
-  return { cwd, peer, options, substrate, spec, key: poolKeyFor(options) }
+  return { cwd, peer, options, substrate, spec, key: poolKeyFor(options), censusReads,
+    setCensus(query: typeof census) { census = query } }
 }
 
 test('setup keeps one child through onboarding, retires when complete and fences respawn', async () => {
@@ -84,7 +98,7 @@ test('changed registry generation refuses retirement and preserves its row and l
   const path = join(s.cwd, 'repl-registry.json')
   supervisedBySessionKey.set(s.key, { ...s.options, replRegistryPath: path })
   const row = { sessionKey: s.key, sessionId: session.sessionId, child_generation: 'replacement',
-    cwd: s.cwd, channelName: session.channelName, has_session: true }
+    cwd: s.cwd, channelName: session.channelName, has_session: true, conversationProjectId: projectId }
   saveRegistry(path, { [s.key]: row })
   expect(await retirePersistentRepl(s.key)).toBe('refused')
   expect(s.peer.children[0]!.child.hasExited()).toBe(false)
@@ -99,7 +113,7 @@ test('matching registry identity is removed only after the child exits; other ro
   const path = join(s.cwd, 'repl-registry.json')
   supervisedBySessionKey.set(s.key, { ...s.options, replRegistryPath: path })
   const row = { sessionKey: s.key, sessionId: session.sessionId, child_generation: session.childGeneration,
-    cwd: s.cwd, channelName: session.channelName, has_session: true }
+    cwd: s.cwd, channelName: session.channelName, has_session: true, conversationProjectId: projectId }
   const unrelated = { ...row, sessionKey: 'owner-chat', sessionId: 'different-session' }
   saveRegistry(path, { [s.key]: row, 'owner-chat': unrelated })
   const kill = s.peer.children[0]!.child.kill
@@ -169,7 +183,7 @@ test('a watchdog probe already in flight cannot report a deliberately retired he
   supervisedBySessionKey.set(s.key, options)
   saveRegistry(path, { [s.key]: { sessionKey: s.key, sessionId: session.sessionId,
     child_generation: session.childGeneration, cwd: s.cwd, channelName: session.channelName,
-    has_session: true, first_ready_at: Date.now() - 100_000 } })
+    has_session: true, conversationProjectId: projectId, first_ready_at: Date.now() - 100_000 } })
   let release!: () => void
   let probing = false
   const gate = new Promise<void>(resolve => { release = resolve })
@@ -180,4 +194,34 @@ test('a watchdog probe already in flight cannot report a deliberately retired he
   await tick
   expect(crashReports).toBe(0)
   expect(s.peer.children).toHaveLength(1)
+})
+
+test.each(['same-project-child', 'other-project-child', 'census-error', 'unknown-scope'])
+('supervised HTTP helper retirement requires a clear project census: %s', async state => {
+  const s = await setup()
+  await drain(s.substrate.start(s.spec))
+  await until(() => (committedDispatches.get(s.key) ?? 0) === 0)
+  const session = await pool.get(s.key)!
+  const path = join(s.cwd, 'repl-registry.json')
+  const options = { ...s.options, replRegistryPath: path }
+  if (state === 'unknown-scope') {
+    delete options.project_id
+    delete options.conversationProjectId
+  }
+  supervisedBySessionKey.set(s.key, options)
+  const row = { sessionKey: s.key, sessionId: session.sessionId, child_generation: session.childGeneration,
+    cwd: s.cwd, channelName: session.channelName, has_session: true, conversationProjectId: projectId }
+  saveRegistry(path, { [s.key]: row })
+  s.setCensus(scope => {
+    if (state === 'census-error') throw new Error('census unavailable')
+    return scope === (state === 'other-project-child' ? 'another-project' : projectId)
+  })
+  s.censusReads.length = 0
+  const retired = state === 'other-project-child'
+  expect(await retirePersistentRepl(s.key)).toBe(retired ? 'retired' : 'refused')
+  expect(s.peer.children[0]!.child.hasExited()).toBe(retired)
+  expect(loadRegistry(path)[s.key]).toEqual(retired ? undefined : row)
+  expect(pool.has(s.key)).toBe(!retired)
+  expect(retiringSessionKeys.has(s.key)).toBe(retired)
+  expect(s.censusReads).toEqual(state === 'unknown-scope' ? [] : retired ? [projectId, projectId] : [projectId])
 })
