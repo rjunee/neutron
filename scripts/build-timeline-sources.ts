@@ -413,9 +413,14 @@ export function validatePhaseObservation(value: unknown): DirectPhaseObservation
 }
 
 function identity(record: DirectPhaseObservation): string {
+  // GitHub can revise a queued check's start when the runner actually starts.
+  // The check ID, not that mutable timestamp, identifies this provider snapshot.
+  const checkRun = record.source.kind === 'github' && record.phase === 'ci' &&
+    record.phaseId.startsWith('github-check:') && /^[1-9]\d*$/.test(record.source.sourceEventId ?? '')
   return JSON.stringify({
     links: [...record.links].sort((a, b) => a.repository.localeCompare(b.repository) || a.prNumber - b.prNumber),
-    phase: record.phase, model: record.model, startedAt: record.startedAt,
+    phase: record.phase, model: record.model, startedAt: checkRun ? null : record.startedAt,
+    checkRunId: checkRun ? record.source.sourceEventId : null,
     sourceKind: record.source.kind, sourceSession: record.source.sessionId ?? null,
     sourceTurn: record.source.turnId ?? null,
   })

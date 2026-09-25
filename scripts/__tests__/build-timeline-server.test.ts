@@ -5,6 +5,7 @@ import { join } from 'node:path'
 import { createTimelineHandler, startTimelineServer, timelineWindow, timelineSourceReader } from '../build-timeline-server.ts'
 import { appendPhaseObservation } from '../build-timeline-sources.ts'
 import { combineTimelineSources } from '@neutronai/trident/build-timeline-catalogue.ts'
+import { projectTimeline, type TimelineSnapshot } from '@neutronai/trident/build-timeline.ts'
 
 const auth = `Basic ${Buffer.from('viewer:test-secret').toString('base64')}`
 const snapshot = () => combineTimelineSources({ observedAt: 1000, repositories: [] }, [], [], 1000)
@@ -63,13 +64,35 @@ test('view pagination is explicit and a work window does not manufacture missing
       closedAt: null, mergedAt: null, state: 'open' })) }] }, [], [], 1000)
   const first = timelineWindow(raw, 0, 'lifecycle'), last = timelineWindow(raw, 1, 'work')
   expect(first.cards).toHaveLength(50)
+  expect(first).toMatchObject({ prCount: 51, runOnlyCount: 0 })
   expect(first.warnings.join(' ')).toContain('of 51')
   expect(last.cards).toHaveLength(1)
+  expect(last).toMatchObject({ prCount: 51, runOnlyCount: 0 })
   expect(last.cards[0]!.start).toBeNull()
   expect(last.cards[0]!.segments).toHaveLength(0)
   expect(last.page).toBe(1)
   expect(last.totalPages).toBe(2)
   expect(timelineWindow(raw, 900, 'lifecycle').cards).toEqual(timelineWindow(raw, 1, 'lifecycle').cards)
+})
+
+test('authenticated view and API distinguish real PRs from legacy run-only sentinels', async () => {
+  const raw = projectTimeline([0, 42].map(pr => ({ id: `run-${pr}`, slug: 'recorded run', phase: 'done',
+    pr, published_pr: null, started_at: '2026-09-25T00:00:00Z', last_advanced_at: '2026-09-25T00:01:00Z' })), [], [], [], Date.UTC(2026, 8, 25, 0, 2))
+  const combined = combineTimelineSources({ observedAt: raw.observedAt, repositories: [] }, [], [{ repository: 'example/open', snapshot: raw }], raw.observedAt)
+  const handler = createTimelineHandler({ username: 'viewer', password: 'test-secret', read: () => combined })
+  const view = await handler(new Request('http://localhost/timeline', { headers: { authorization: auth } }))
+  expect(view.status).toBe(200)
+  const html = await view.text()
+  expect(html).not.toContain('PR #0')
+  expect(html).not.toContain('/pull/0')
+  expect(html).toContain('PR #42')
+  expect(html).toContain('Unpublished run')
+  expect(html).toContain('1 PRs · 1 run-only groups')
+  const response = await handler(new Request('http://localhost/api/timeline', { headers: { authorization: auth } }))
+  expect(response.status).toBe(200)
+  const data = await response.json() as TimelineSnapshot
+  expect(data).toMatchObject({ prCount: 1, runOnlyCount: 1 })
+  expect(data.cards.map((card: { pr: number | null }) => card.pr).sort()).toEqual([42, null])
 })
 
 test('file sources reach authenticated HTML/JSON and import failures preserve catalogue visibility', async () => {

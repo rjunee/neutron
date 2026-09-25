@@ -52,6 +52,9 @@ spans carry unknown tokens unless a provider actually attributed usage.
       readable repositories. Trident-free PRs retain unknown phase coverage.
 - [ ] Reverse chronology follows recent recorded activity, including a new retry
       of an older PR. Repository badges distinguish equal PR numbers across repos.
+      Only positive safe-integer PR identifiers count as PRs. Legacy sentinel
+      values remain separate run-only rows, with real PR and run-only totals
+      explicitly distinguished across pagination.
 - [ ] Widths represent actual timestamp differences on a shared scale. Concurrent
       review, suites and CI stay overlapping; sequential siblings reuse lanes.
       Repeated host stage names pair by their recorded start identity. Ambiguous
@@ -61,6 +64,9 @@ spans carry unknown tokens unless a provider actually attributed usage.
       mapping and invoking model context; absent context stays unknown. Explicit
       forward phase records support planning, building, fixing, review, tests,
       CI and deploy without reconstructing invented history.
+      GitHub CI snapshots may revise the recorded start for the same check-run
+      identity; the newest observation supplies timing without rewriting earlier
+      snapshots. Non-GitHub phase start identities remain immutable.
 - [ ] Unknown, partial and complete metrics remain distinct, costs are never
       estimated, and phase totals cannot double-count attempt receipts. Multi-PR
       linked observations are marked shared and not summed.

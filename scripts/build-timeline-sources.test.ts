@@ -145,9 +145,47 @@ describe('timeline catalogue', () => {
     expect(result.catalogue.repositories[0]?.prs[0]?.ciCoverage).toBe('unavailable')
     expect(result.catalogue.repositories[0]?.prs[0]?.ciError).toContain('No check runs')
   })
+
+  test('collector appends revised GitHub check start snapshots through completion', async () => withLog(async (file) => {
+    let cycle = 0
+    const base = Date.parse('2026-09-02T00:00:00Z')
+    const fetcher = (async (url: string | URL | Request) => Response.json(String(url).includes('/check-runs') ? {
+      check_runs: [{ id: 10, name: 'suite', status: cycle === 2 ? 'completed' : 'in_progress',
+        started_at: new Date(base + (cycle === 0 ? 0 : 3000)).toISOString(),
+        completed_at: cycle === 2 ? new Date(base + 60000).toISOString() : null }],
+    } : [pull(1)])) as typeof fetch
+    let previous = await collectPullRequestCatalogue(['example/open'], { fetcher, now: () => base })
+    for (cycle = 0; cycle < 3; cycle++) {
+      const result = await collectCiCheckRuns(previous, { previous, fetcher, now: () => base + 30000 * (cycle + 1) })
+      expect(await appendChangedPhaseObservations(file, result.observations)).toBe(1)
+      previous = result.catalogue
+    }
+    const latest = await readPhaseObservations(file)
+    expect(latest).toHaveLength(1)
+    expect(latest[0]).toMatchObject({ startedAt: base + 3000, endedAt: base + 60000,
+      phaseId: 'github-check:example/open#1:head-1:10', source: { sourceEventId: '10' } })
+    const history = (await readFile(file, 'utf8')).trim().split('\n').map(line => JSON.parse(line))
+    expect(history.map(row => row.startedAt)).toEqual([base, base + 3000, base + 3000])
+    expect(new Set(history.map(row => row.eventId)).size).toBe(3)
+  }))
 })
 
 describe('direct phase observations', () => {
+  test('timestamp revisions stay forbidden outside exact GitHub CI check identity', async () => withLog(async (file) => {
+    await appendPhaseObservation(file, observation())
+    await expect(appendPhaseObservation(file, observation({ eventId: 'revised', observedAt: 4000, startedAt: 1001 })))
+      .rejects.toThrow('conflicting phase identity')
+    const check = observation({ eventId: 'check', phaseId: 'github-check:example/open#7:head:10', phase: 'ci',
+      source: { kind: 'github', sourceEventId: '10', attribution: 'explicit', basis: 'check run' } })
+    await appendPhaseObservation(file, check)
+    await expect(appendPhaseObservation(file, { ...check, eventId: 'wrong-check', observedAt: 4000,
+      source: { ...check.source, sourceEventId: '11' } })).rejects.toThrow('conflicting phase identity')
+    const other = { ...check, eventId: 'other', phaseId: 'other-github-event' }
+    await appendPhaseObservation(file, other)
+    await expect(appendPhaseObservation(file, { ...other, eventId: 'other-revised', observedAt: 4000, startedAt: 1001 }))
+      .rejects.toThrow('conflicting phase identity')
+    expect((await readPhaseObservations(file)).map(row => row.startedAt)).toEqual([1000, 1000, 1000])
+  }))
   test('keeps unknown measurements null and explicit zero observed', async () => withLog(async (file) => {
     expect(await readPhaseObservations(file)).toEqual([])
     await appendPhaseObservation(file, observation())
