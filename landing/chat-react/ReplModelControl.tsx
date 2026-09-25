@@ -1,5 +1,6 @@
 import { useEffect, useMemo, useRef, useState } from 'react'
 import { WebReplModelClient, type ReplModelState } from './repl-model-client.ts'
+import { NativeOwnerControl } from './NativeOwnerControl.tsx'
 
 type FetchImpl = (input: string, init?: RequestInit) => Promise<Response>
 
@@ -109,6 +110,10 @@ export function ReplModelControl({ projectId, origin, token, fetchImpl }: {
         <button type="button" disabled={refreshing || switching} onClick={() => { void refresh() }}>
           {refreshing ? 'Refreshing…' : 'Refresh model'}
         </button>
+      )}
+      {state?.harness === 'codex' && (state.status === 'ready' || state.status === 'busy') && (
+        <NativeOwnerControl key={projectId ?? '~general'} projectId={projectId} origin={origin} token={token}
+          {...(fetchImpl !== undefined ? { fetchImpl } : {})} />
       )}
     </div>
   )

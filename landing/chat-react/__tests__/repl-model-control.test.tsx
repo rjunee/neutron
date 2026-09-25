@@ -9,7 +9,7 @@ afterAll(async () => { await GlobalRegistrator.unregister() })
 
 const tick = () => new Promise((resolve) => setTimeout(resolve, 0))
 const state = (currentModel: string, sessionId = 'session-1') => ({
-  harness: 'codex', sessionId, currentModel,
+  harness: 'claude-code', sessionId, currentModel,
   availableModels: [{ id: 'cheap', label: 'Cheap' }, { id: 'deep', label: 'Deep' }],
   status: 'ready',
 })
