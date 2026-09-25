@@ -6,7 +6,7 @@ to its durable run/step/generation lease, exact session object and complete
 request. It measures the assigned linked Git worktree, branch, canonical paths,
 Git directory and filesystem identity before granting overlap
 (`runtime/workers/native-child-workspace.ts:32`,
-`open/wiring/project-build.ts:467`). Request flags, role names and distinct path
+`open/wiring/project-build.ts:477`). Request flags, role names and distinct path
 spellings cannot supply that authority.
 
 Terminal text/Enter remains serialized. Only unique provider child evidence
@@ -18,6 +18,14 @@ or foreign durable leases remain a fence
 (`runtime/workers/claude-acting-turn.ts:233`). No headless same-provider route or
 new budget is introduced. These checks govern scheduling; the existing harness
 tool and workspace grants still govern the child's task.
+
+The runner forwards one absolute dispatch deadline and its cancellation signal
+through host preparation into the acting turn. Git measurements receive only the
+remaining budget; expiry checks before and after preparation prevent a delayed
+measurement from dispatching after the caller returned unknown
+(`runtime/workers/claude-in-repl.ts:75`, `open/wiring/project-build.ts:400`).
+The durable request reservation remains the recovery identity, never a second
+permission to dispatch.
 
 The child retains its busy lease through timeout, cancellation and lost
 acknowledgement. Validated terminal evidence releases the original durable lease
@@ -36,6 +44,9 @@ and cover unknown ownership plus legitimate readers and ordinary successor turns
 Both root and Trident TypeScript checks passed. Semantic mutants forcing serial
 execution, admitting aliased worktrees, accepting metadata as child proof,
 dropping unknown ownership and bypassing the durable census fail assertions.
+Barrier-driven preparation tests also preserve legitimate within-budget dispatch
+while rejecting dispatch after expiry or cancellation; deadline mutants cover
+both over-admission and over-refusal.
 
 The repository-wide suite and live deployment are outside this change's local
 verification; this record does not claim a deployed throughput measurement.

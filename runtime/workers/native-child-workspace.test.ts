@@ -66,6 +66,7 @@ async function fixture(alias = false, readOnly = false) {
 
 test.each(['writers', 'readers'] as const)('admitted %s overlap only after exact child proof and keep leases until host validation', async mode => {
   const f = await fixture(mode === 'readers', mode === 'readers'), submitted = barrier(), ack = barrier(), both = barrier(), finish = barrier()
+  const controller = new AbortController()
   let writes = 0, activeWrites = 0, maxWrites = 0, polls = 0
   f.session.child.submitLine = async () => {
     const index = writes++
@@ -77,7 +78,7 @@ test.each(['writers', 'readers'] as const)('admitted %s overlap only after exact
   const run = (index: number) => createClaudeActingTurn(f.binding(index), { now: () => 0, pause: async () => {
     if (++polls === 2) both.release()
     await finish.promise
-  } })(f.input(index))
+  } })({ ...f.input(index), signal: controller.signal })
   const first = run(0)
   await submitted.promise
   const second = run(1)
@@ -101,6 +102,7 @@ test.each(['writers', 'readers'] as const)('admitted %s overlap only after exact
     expect(ordinary).toBe(true)
     expect(f.session.turnSlotHeld).toBe(0)
   } finally {
+    controller.abort()
     for (const request of f.requests) await writeFile(request.result.path, '{}')
     finish.release(); f.complete(0); f.complete(1)
     await Promise.all([first, second])

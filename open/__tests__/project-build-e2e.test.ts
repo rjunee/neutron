@@ -1171,6 +1171,56 @@ test.each(['independent', 'simultaneous', 'aliased'] as const)('native writable 
   expect((await pool.get(f.key))!.turnSlotHeld).toBe(0)
 }, 30_000)
 
+test.each(['within budget', 'expired', 'cancelled'] as const)('native workspace preparation preserves the original deadline: %s', async scenario => {
+  let releasePreparation!: () => void, enteredPreparation!: () => void, observedLifecycle!: (kind: 'release' | 'dispatch') => void
+  const hold = new Promise<void>(resolve => { releasePreparation = resolve })
+  const entered = new Promise<void>(resolve => { enteredPreparation = resolve })
+  const lifecycle = new Promise<'release' | 'dispatch'>(resolve => { observedLifecycle = resolve })
+  let children = 0
+  const f = await fixture({ nativeChild: async () => { children++; observedLifecycle('dispatch') } })
+  const admission = f.context.nativeChildAdmission
+  f.context.nativeChildAdmission = { ...admission, admit: async (...args) => {
+    const child = await admission.admit(...args)
+    if (child.status !== 'admitted') return child
+    return { ...child, release: async () => { const released = await child.release(); observedLifecycle('release'); return released } }
+  } }
+  const prepared = await f.prepare()
+  const runHost = f.context.runHost
+  const commandBudgets: number[] = []
+  f.context.runHost = async (argv, cwd, env, timeout) => {
+    if (argv.includes('--absolute-git-dir')) {
+      commandBudgets.push(timeout ?? Infinity)
+      enteredPreparation()
+      await hold
+    }
+    return runHost(argv, cwd, env, timeout)
+  }
+  const controller = new AbortController()
+  const budget = scenario === 'expired' ? 100 : 1000
+  const request: BoundedWorkRequest = { ...prepared.workers.build.request, run_id: f.row.id,
+    step_id: `${f.row.id}:preparation-deadline`, role: 'build', needs_approval_decision: false, budget: { wall_ms: budget } }
+  const running = prepared.substrate.inRepl!.run(request, 'in-repl', controller.signal)
+  try {
+    // The preparation barrier is reached before forcing expiry/cancellation.
+    // Awaiting the runner's own deadline avoids guessing how long Git will take.
+    expect(await Promise.race([entered.then(() => 'preparing'), lifecycle])).toBe('preparing')
+    expect(commandBudgets[0]).toBeGreaterThan(0)
+    expect(commandBudgets[0]).toBeLessThanOrEqual(budget)
+    if (scenario === 'cancelled') controller.abort()
+    if (scenario !== 'within budget') expect((await running).kind).toBe('unknown')
+    releasePreparation()
+    expect(await lifecycle).toBe(scenario === 'within budget' ? 'dispatch' : 'release')
+    expect((await running).kind).toBe(scenario === 'within budget' ? 'blocked' : 'unknown')
+    expect(children).toBe(scenario === 'within budget' ? 1 : 0)
+    expect(f.admission.listLeases('liveChild')).toEqual([])
+    // A replacement runner cannot buy another child for this reserved request.
+    if (scenario !== 'within budget') {
+      expect((await prepared.substrate.inRepl!.recover!(request, 'in-repl', new AbortController().signal)).kind).toBe('unknown')
+      expect(children).toBe(0)
+    }
+  } finally { releasePreparation(); await running }
+}, 10_000)
+
 test('native writer lost acknowledgement retains its lease and recovers the original child without redispatch', async () => {
   let release!: () => void, started!: () => void
   const hold = new Promise<void>(resolve => { release = resolve })

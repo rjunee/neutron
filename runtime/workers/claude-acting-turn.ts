@@ -183,7 +183,7 @@ export function createClaudeActingTurn(binding: ClaudeActingSession, clock: Obse
   const child = session.child
   const transcript = sessionJsonlPath(session.sessionId, session.cwd, binding.projects_dir)
   const subagents = join(transcript.slice(0, -'.jsonl'.length), 'subagents')
-  const actingTurn: ProjectActingTurn = async ({ conversation, request, spec, timeout_ms, signal }) => {
+  const actingTurn: ProjectActingTurn = async ({ conversation, request, spec, timeout_ms, deadline_ms, signal }) => {
     const refuse = (detail: string) => ({ kind: 'refused' as const, reason: 'capability-unsupported' as const, detail })
     if (conversation.provider !== 'anthropic') return refuse(`Claude acting turn refuses provider ${conversation.provider}.`)
     if (conversation.project_id !== project_id || conversation.topic_id !== topic_id) return refuse('Project conversation does not match the bound Claude session.')
@@ -214,7 +214,7 @@ export function createClaudeActingTurn(binding: ClaudeActingSession, clock: Obse
       return refuse(`Claude session cannot create a subagent: its tool surface (${session.toolSurface || '<empty>'}) does not carry ${SUBAGENT_TOOL_NAME}.`)
     }
 
-    const deadline = clock.now() + Math.min(timeout_ms, request.budget.wall_ms)
+    const deadline = Math.min(deadline_ms ?? Infinity, clock.now() + Math.min(timeout_ms, request.budget.wall_ms))
     const timer = new AbortController()
     const stopped = AbortSignal.any([signal, timer.signal])
     const expired = () => stopped.aborted || clock.now() >= deadline

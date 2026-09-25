@@ -336,7 +336,7 @@ describe('two incarnations racing for one row', () => {
       composeActingTurn: async (_topic, childSpec, opts) => {
         expect(await acting({
           conversation: { project_id: 'proj', topic_id: 'topic', provider: 'anthropic', spec },
-          request, spec: childSpec, signal: new AbortController().signal, ...opts,
+          request, spec: childSpec, ...opts,
         })).toEqual({ kind: 'turn-ended' })
         return 'dispatch acknowledged'
       },

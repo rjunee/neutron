@@ -397,6 +397,11 @@ export async function prepareProjectBuild(input: InnerLoopInput, context: Projec
   // the step to it as a native child.
   const nativeWorkspaces = new Map<string, NativeChildWorkspace>()
   const nativeChildTurn = async (turn: Parameters<ProjectActingTurn>[0], generation: number): ReturnType<ProjectActingTurn> => {
+    const deadline = turn.deadline_ms ?? Date.now() + Math.min(turn.timeout_ms, turn.request.budget.wall_ms)
+    const expired = () => turn.signal.aborted || Date.now() >= deadline
+    const expiredBeforeDispatch = () => ({ kind: 'refused' as const, reason: 'capability-unsupported' as const,
+      detail: 'Native child preparation exhausted the original dispatch deadline.' })
+    if (expired()) return expiredBeforeDispatch()
     let candidates = liveProjectSessions(context.projectId)
     // MISSING AND AMBIGUOUS ARE NOT ONE FACT (#1085). Both ended here as the
     // single string "Project conversation session is missing or ambiguous", and
@@ -417,6 +422,7 @@ export async function prepareProjectBuild(input: InnerLoopInput, context: Projec
       ? await candidatePending
       : undefined
     if (candidateSession === undefined || candidateSession.hasChildExited()) {
+      if (expired()) return expiredBeforeDispatch()
       // WHY WE ARE SPAWNING, captured BEFORE the attempt, so the refusal below can
       // say whether the instance had no project REPL at all or had one whose child
       // had gone. #1085 is the first shape ("nothing respawned it"); they are not
@@ -425,7 +431,7 @@ export async function prepareProjectBuild(input: InnerLoopInput, context: Projec
       let timer: ReturnType<typeof setTimeout> | undefined
       try {
         const expired = new Promise<true>(resolve => {
-          timer = setTimeout(() => resolve(true), PROJECT_SESSION_ACQUIRE_TIMEOUT_MS)
+          timer = setTimeout(() => resolve(true), Math.min(PROJECT_SESSION_ACQUIRE_TIMEOUT_MS, Math.max(1, deadline - Date.now())))
         })
         const timedOut = await Promise.race([
           context.spawnProjectSession(context.projectId).then(() => false), expired,
@@ -465,20 +471,25 @@ export async function prepareProjectBuild(input: InnerLoopInput, context: Projec
       }
     }
     let workspace: NativeChildWorkspace | undefined
+    if (expired()) return expiredBeforeDispatch()
     if (context.nativeChildAdmission.pending) {
       try {
         workspace = await admitNativeChildWorkspace({ session, request: turn.request, runId: run.id,
           worktree: run.worktree, branch: run.branch, generation, pending: () => context.nativeChildAdmission.pending!(),
           git: async args => {
-            const result = await context.runHost(['git', '-C', run.worktree, ...args], run.worktree)
+            if (expired()) throw new Error('Native workspace deadline expired')
+            const result = await context.runHost(['git', '-C', run.worktree, ...args], run.worktree, undefined, Math.max(1, deadline - Date.now()))
+            if (expired()) throw new Error('Native workspace deadline expired')
             if (!result.ok || result.timed_out) throw new Error('Native worktree identity unavailable')
             return result.stdout.trim()
           } })
         nativeWorkspaces.set(turn.request.step_id, workspace)
       } catch { return { kind: 'refused', reason: 'capability-unsupported', detail: 'Native writer has no checked independent worktree admission.' } }
     }
+    if (expired()) return expiredBeforeDispatch()
     return createClaudeActingTurn({ project_id: context.projectId, topic_id: topic, session, projects_dir: resolveTranscriptProjectsDir(options), ...(workspace ? { workspace } : {}),
-      grants: { tools: 'edit-and-run', writable: true, network: true, roots: options.extra_dirs ?? [] } })(turn)
+      grants: { tools: 'edit-and-run', writable: true, network: true, roots: options.extra_dirs ?? [] } })({ ...turn,
+        deadline_ms: deadline, timeout_ms: Math.max(1, deadline - Date.now()) })
   }
   const substrate = await createProjectRunners({
     conversation: { project_id: context.projectId, topic_id: topic, provider: context.provider,
