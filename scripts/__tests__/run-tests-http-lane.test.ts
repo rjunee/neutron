@@ -10,6 +10,14 @@ const ROOT = join(HERE, '..', '..')
 const RUN_TESTS = join(ROOT, 'scripts', 'run-tests.sh')
 
 describe('run-tests.sh real-HTTP isolation lane', () => {
+  test('the spawned gateway fixture declares its indirect listener', () => {
+    const source = readFileSync(join(ROOT, 'gateway', '__tests__', 'sigterm-survivor.test.ts'), 'utf8')
+    const helper = readFileSync(join(ROOT, 'gateway', '__tests__', 'fixtures', 'sigterm-survivor.ts'), 'utf8')
+    expect(source).toMatch(/^\/\/ @neutron-real-http$/m)
+    expect(source).toContain("join(import.meta.dir, 'fixtures/sigterm-survivor.ts')")
+    expect(helper).toMatch(/await boot\(\{ port: 0 \}\)/)
+  })
+
   test('listener-opening files run serially with the unchanged per-test timeout', () => {
     const root = mkdtempSync(join(tmpdir(), 'neutron-http-lane-'))
     try {
@@ -23,6 +31,14 @@ describe('run-tests.sh real-HTTP isolation lane', () => {
         join(root, 'pkg', 'boot-http.test.ts'),
         "test('boot', async () => { const handle = await boot({ port: 0 }); await handle.shutdown() })\n",
       )
+      writeFileSync(
+        join(root, 'pkg', 'indirect-http.test.ts'),
+        "// @neutron-real-http\ntest('helper', () => spawnHelper())\n",
+      )
+      writeFileSync(
+        join(root, 'pkg', 'marker-prose.test.ts'),
+        "test('plain', () => { /* @neutron-real-http */ })\n",
+      )
 
       const calls = join(root, 'bun-calls.txt')
       const fakeBun = join(root, 'fake-bun')
@@ -32,7 +48,7 @@ describe('run-tests.sh real-HTTP isolation lane', () => {
 printf '%s\\n' "$*" >> "${calls}"
 count=0
 for arg in "$@"; do case "$arg" in *.test.ts|*.test.tsx) count=$((count + 1));; esac; done
-if [ "$count" -eq 0 ]; then count=3; fi
+if [ "$count" -eq 0 ]; then count=5; fi
 echo "Ran 1 tests across $count files."
 `,
       )
@@ -54,7 +70,7 @@ echo "Ran 1 tests across $count files."
           NEUTRON_TEST_ROOT: root,
           NEUTRON_BUN_BIN: fakeBun,
           NEUTRON_TEST_DISCOVER_OVERRIDE:
-            './pkg/plain.test.ts ./pkg/direct-http.test.ts ./pkg/boot-http.test.ts',
+            './pkg/plain.test.ts ./pkg/direct-http.test.ts ./pkg/boot-http.test.ts ./pkg/indirect-http.test.ts ./pkg/marker-prose.test.ts',
           NEUTRON_TEST_CONCURRENCY: '7',
           NEUTRON_TEST_TIMEOUT: '1234',
         },
@@ -63,7 +79,7 @@ echo "Ran 1 tests across $count files."
       const output = `${result.stdout}${result.stderr}`
       expect(result.status).toBe(0)
       expect(output).toContain(
-        'real-HTTP isolation lane batch 1/1: 2 files (own process, max-concurrency=1, timeout=1234ms)',
+        'real-HTTP isolation lane batch 1/1: 3 files (own process, max-concurrency=1, timeout=1234ms)',
       )
 
       const invocations = readFileSync(calls, 'utf8').trim().split('\n')
@@ -72,9 +88,13 @@ echo "Ran 1 tests across $count files."
       expect(general).toContain('--max-concurrency=7')
       expect(general).not.toContain('direct-http.test.ts')
       expect(general).not.toContain('boot-http.test.ts')
+      expect(general).toContain('marker-prose.test.ts')
+      expect(general).not.toContain('indirect-http.test.ts')
 
       const http = invocations.find((line) => line.includes('./pkg/direct-http.test.ts'))
       expect(http).toContain('./pkg/boot-http.test.ts')
+      expect(http).toContain('./pkg/indirect-http.test.ts')
+      expect(http).not.toContain('./pkg/marker-prose.test.ts')
       expect(http).toContain('--timeout=1234')
       expect(http).toContain('--max-concurrency=1')
     } finally {

@@ -21,7 +21,8 @@
  */
 import { describe, expect, test } from 'bun:test'
 import { execFileSync } from 'node:child_process'
-import { chmodSync, mkdtempSync, rmSync, writeFileSync } from 'node:fs'
+import { chmodSync, existsSync, mkdtempSync, readFileSync, rmSync, writeFileSync } from 'node:fs'
+import { createServer } from 'node:net'
 import { tmpdir } from 'node:os'
 import { join } from 'node:path'
 import { fileURLToPath } from 'node:url'
@@ -39,6 +40,7 @@ const RUN_TESTS = fileURLToPath(new URL('./run-tests.sh', import.meta.url))
  * It tells the probe apart from a chunk run by the no-match sentinel arg.
  */
 const FAKE_BUN = `#!/usr/bin/env bash
+if [ -n "\${FAKE_BUN_ANY_CALLS:-}" ]; then echo "$*" >> "$FAKE_BUN_ANY_CALLS"; fi
 is_probe=0
 for a in "$@"; do
   [ "$a" = "__neutron_runtests_no_match__" ] && is_probe=1
@@ -49,6 +51,73 @@ if [ "$is_probe" = "1" ]; then
     *) echo "Ran 0 tests across \${FAKE_BUN_DISC} files. [0.00s]" ;;
   esac
   exit 0
+fi
+if [ -n "\${FAKE_BUN_LANE_SCENARIO:-}" ]; then
+  calls=0
+  [ ! -f "$FAKE_BUN_LANE_CALLS" ] || calls="$(cat "$FAKE_BUN_LANE_CALLS")"
+  calls=$((calls+1))
+  echo "$calls" > "$FAKE_BUN_LANE_CALLS"
+  if [ "$FAKE_BUN_LANE_SCENARIO" = 'real_output' ]; then
+    exec "$REAL_BUN" "$@"
+  fi
+  case "$FAKE_BUN_LANE_SCENARIO" in
+    deterministic)
+      echo 'PGLite WASM mentioned by unrelated setup log'
+      echo 'error: expect(received).toBe(expected)'
+      echo '1 fail'
+      ;;
+    transient_then_pass)
+      if [ "$calls" -gt 1 ]; then
+        echo '1 pass'
+        echo 'Ran 1 tests across 1 files.'
+        exit 0
+      fi
+      echo 'error: PGLite failed to initialize its WASM runtime.'
+      echo '1 fail'
+      ;;
+    probe_then_pass|bundle_then_pass)
+      if [ "$calls" -gt 1 ]; then
+        echo '1 pass'
+        echo 'Ran 1 tests across 1 files.'
+        exit 0
+      fi
+      if [ "$FAKE_BUN_LANE_SCENARIO" = 'probe_then_pass' ]; then
+        echo "TypeError: undefined is not an object (evaluating 'probe.pages_exists')"
+      else
+        echo 'Error: Invalid FS bundle size: 0 !== 12345678'
+      fi
+      echo '1 fail'
+      ;;
+    exhausted)
+      echo 'error: PGLite failed to initialize its WASM runtime.'
+      echo '1 fail'
+      ;;
+    mixed)
+      echo 'error: PGLite failed to initialize its WASM runtime.'
+      echo 'error: expect(received).toBe(expected)'
+      echo '1 fail' # earlier log-like text cannot override Bun's final summary
+      echo '2 fail'
+      ;;
+    mixed_summary)
+      echo 'error: PGLite failed to initialize its WASM runtime.'
+      echo '1 fail' # earlier log-like text cannot override Bun's final summary
+      echo '2 fail'
+      ;;
+    mixed_native_typeerror)
+      echo 'error: PGLite failed to initialize its WASM runtime.'
+      echo "TypeError: undefined is not an object (evaluating 'operation.digest')"
+      echo '1 fail'
+      ;;
+    malformed)
+      echo 'error: PGLite failed to initialize its WASM runtime.'
+      ;;
+    unknown)
+      echo 'error: syntax error at or near SELCT'
+      echo '1 fail'
+      ;;
+  esac
+  echo 'Ran 1 tests across 1 files.'
+  exit 1
 fi
 nfiles=0
 for a in "$@"; do
@@ -212,6 +281,200 @@ describe('G8 run-tests.sh — PGLite quarantine lane split', () => {
         NEUTRON_TEST_NO_PGLITE_LANE: '1',
       })
       expect(out).toContain('0-file PGLite lane')
+    } finally {
+      rmSync(h.dir, { recursive: true, force: true })
+    }
+  })
+})
+
+describe('run-tests.sh — PGLite retry classification', () => {
+  // Run real Bun fixtures through the lane (the wrapper only fakes discovery
+  // and counts attempts). Bun timeout diagnostics are not error headers, so
+  // invented error/summary output alone cannot prove mixed-failure refusal.
+  for (const [scenario, failure, attempts, code] of [
+    ['timeout', `console.error('error: PGLite failed to initialize its WASM runtime.'); await new Promise(() => {})`, 1, 1],
+    ['assertion', `console.error('error: PGLite failed to initialize its WASM runtime.'); expect(1).toBe(2)`, 1, 1],
+    ['native error', `console.error('error: PGLite failed to initialize its WASM runtime.'); throw new TypeError('independent deterministic failure')`, 1, 1],
+    ['boot failure', `throw new Error('PGLite failed to initialize its WASM runtime.')`, 2, 0],
+    ['boot failure mentioning timeout', `console.log('diagnostic example: ^ this test timed out after 20ms.'); throw new Error('PGLite failed to initialize its WASM runtime.')`, 2, 0],
+  ] as const) {
+    test(`real Bun ${scenario}: exactly ${attempts} lane attempt(s), exit ${code}`, () => {
+      const h = harness(1, [0])
+      try {
+        const calls = join(h.dir, 'lane-calls')
+        writeFileSync(h.files[0]!, `
+import { expect, test } from 'bun:test'
+import { readFileSync } from 'node:fs'
+test(${JSON.stringify(scenario)}, async () => {
+  if (Number(readFileSync(process.env.FAKE_BUN_LANE_CALLS!, 'utf8')) === 1) {
+    ${failure}
+  }
+}, 50)
+`)
+        const result = runRunTests(h, {
+          FAKE_BUN_DISC: '1',
+          FAKE_BUN_LANE_SCENARIO: 'real_output',
+          FAKE_BUN_LANE_CALLS: calls,
+          REAL_BUN: process.execPath,
+          NO_COLOR: '1',
+        })
+        expect(Number(readFileSync(calls, 'utf8').trim())).toBe(attempts)
+        expect(result.code).toBe(code)
+        expect(result.out).toContain('files executed: 1')
+        expect(result.out).toContain(code === 0 ? 'run-tests: PASS' : 'run-tests: FAIL')
+        expect(result.out).toContain('PGLite failed to initialize its WASM runtime.')
+        if (scenario === 'timeout') expect(result.out).toContain('^ this test timed out after 50ms.')
+        if (code === 1) expect(result.out).toContain('no retry')
+        else expect(result.out).toContain('retrying recognized WASM-init/boot failure')
+      } finally {
+        rmSync(h.dir, { recursive: true, force: true })
+      }
+    })
+  }
+
+  for (const [scenario, attempts, code] of [
+    ['deterministic', 1, 1],
+    ['transient_then_pass', 2, 0],
+    ['probe_then_pass', 2, 0],
+    ['bundle_then_pass', 2, 0],
+    ['exhausted', 3, 1],
+    ['mixed', 1, 1],
+    ['mixed_summary', 1, 1],
+    ['mixed_native_typeerror', 1, 1],
+    ['malformed', 1, 1],
+    ['unknown', 1, 1],
+  ] as const) {
+    test(`${scenario}: exactly ${attempts} lane attempt(s), exit ${code}`, () => {
+      const h = harness(1, [0])
+      try {
+        const calls = join(h.dir, 'lane-calls')
+        const result = runRunTests(h, {
+          FAKE_BUN_DISC: '1',
+          FAKE_BUN_LANE_SCENARIO: scenario,
+          FAKE_BUN_LANE_CALLS: calls,
+        })
+        expect(Number(readFileSync(calls, 'utf8').trim())).toBe(attempts)
+        expect(result.code).toBe(code)
+        expect(result.out).toContain(`attempt ${attempts}/3`)
+        expect(result.out).toContain('files executed: 1')
+        expect(result.out).toContain(code === 0 ? 'run-tests: PASS' : 'run-tests: FAIL')
+        if (scenario === 'exhausted') {
+          expect(result.out).toContain('exhausted 3')
+          expect(result.out.match(/error: PGLite failed to initialize its WASM runtime/g)).toHaveLength(3)
+        }
+        if (scenario === 'mixed' || scenario === 'mixed_summary' || scenario === 'mixed_native_typeerror' || scenario === 'deterministic') {
+          expect(result.out).toContain('no retry')
+          expect(result.out).not.toContain('attempt 2/3')
+        }
+      } finally {
+        rmSync(h.dir, { recursive: true, force: true })
+      }
+    })
+  }
+
+  test('configured retry ceiling still bounds recognized boot failures', () => {
+    const h = harness(1, [0])
+    try {
+      const calls = join(h.dir, 'lane-calls')
+      const result = runRunTests(h, {
+        FAKE_BUN_DISC: '1',
+        FAKE_BUN_LANE_SCENARIO: 'exhausted',
+        FAKE_BUN_LANE_CALLS: calls,
+        NEUTRON_TEST_PGLITE_RETRIES: '1',
+      })
+      expect(Number(readFileSync(calls, 'utf8').trim())).toBe(2)
+      expect(result.out).toContain('attempt 2/2')
+      expect(result.out).toContain('exhausted 2')
+      expect(result.code).toBe(1)
+    } finally {
+      rmSync(h.dir, { recursive: true, force: true })
+    }
+  })
+})
+
+describe('run-tests.sh — early socket capability preflight', () => {
+  test('denied bind refuses before discovery or a lane invokes Bun', () => {
+    const h = harness(1)
+    try {
+      const calls = join(h.dir, 'bun-calls')
+      const result = runRunTests(h, {
+        FAKE_BUN_DISC: '1',
+        FAKE_BUN_ANY_CALLS: calls,
+        NEUTRON_TEST_ROOT: h.dir,
+        NEUTRON_TEST_SOCKET_PREFLIGHT: '1',
+        NEUTRON_TEST_SOCKET_PROBE_DENY: '1',
+      })
+      expect(result.code).toBe(3)
+      expect(result.out).toContain('EACCES: synthetic bind denial')
+      expect(result.out).toContain('REFUSED')
+      expect(result.out).not.toContain('bun-discovered:')
+      expect(existsSync(calls)).toBe(false)
+    } finally {
+      rmSync(h.dir, { recursive: true, force: true })
+    }
+  })
+
+  test('allowed real listener closes before discovery, and later failure stays red', async () => {
+    const h = harness(1)
+    try {
+      const result = runRunTests(h, {
+        FAKE_BUN_DISC: '1',
+        FAKE_BUN_CHUNK_RC: '1',
+        NEUTRON_TEST_SOCKET_PREFLIGHT: '1',
+      })
+      const match = result.out.match(/socket preflight passed \(127\.0\.0\.1:(\d+); listener closed\)/)
+      expect(match).not.toBeNull()
+      expect(result.code).toBe(1)
+      expect(result.out).toContain('bun-discovered: 1')
+      expect(result.out).toContain('run-tests: FAIL')
+      const server = createServer()
+      try {
+        await new Promise<void>((resolve, reject) => {
+          server.once('error', reject)
+          server.listen(Number(match![1]), '127.0.0.1', resolve)
+        })
+      } finally {
+        await new Promise<void>((resolve) => server.close(() => resolve()))
+      }
+    } finally {
+      rmSync(h.dir, { recursive: true, force: true })
+    }
+  })
+
+  test('plan-only mode skips even a requested denied probe', () => {
+    const h = harness(1)
+    try {
+      const result = runRunTests(h, {
+        NEUTRON_TEST_PLAN_ONLY: '1',
+        NEUTRON_TEST_SOCKET_PREFLIGHT: '1',
+        NEUTRON_TEST_SOCKET_PROBE_DENY: '1',
+      })
+      expect(result.code).toBe(0)
+      expect(result.out).toContain('PLAN-ONLY END')
+      expect(result.out).not.toContain('socket preflight')
+    } finally {
+      rmSync(h.dir, { recursive: true, force: true })
+    }
+  })
+
+  test('zero files and invalid shard refuse before a requested socket probe', () => {
+    const h = harness(1)
+    try {
+      for (const [extra, message] of [
+        [{ NEUTRON_TEST_DISCOVER_OVERRIDE: '   ' }, 'discovered 0 test files'],
+        [{ NEUTRON_TEST_SHARD: 'bad' }, "must be <i>/<n>"],
+      ] as const) {
+        const result = runRunTests(h, {
+          NEUTRON_TEST_ROOT: h.dir,
+          NEUTRON_TEST_SOCKET_PREFLIGHT: '1',
+          NEUTRON_TEST_SOCKET_PROBE_DENY: '1',
+          ...extra,
+        })
+        expect(result.code).toBe(1)
+        expect(result.out).toContain(message)
+        expect(result.out).not.toContain('socket preflight')
+        expect(result.out).not.toContain('synthetic bind denial')
+      }
     } finally {
       rmSync(h.dir, { recursive: true, force: true })
     }

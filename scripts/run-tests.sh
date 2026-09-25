@@ -259,6 +259,52 @@ if [ "$TOTAL" -eq 0 ]; then
   exit 1
 fi
 
+# Refuse an unusable host before Bun loads every test file. Cheap config and
+# zero-file refusals above do not need a socket. Synthetic fixture roots and
+# fake-Bun selftests opt in explicitly; a plan never binds.
+if [ "${NEUTRON_TEST_PLAN_ONLY:-0}" != "1" ] && {
+  { [ -z "${NEUTRON_TEST_ROOT:-}" ] && [ -z "${NEUTRON_BUN_BIN:-}" ]; } ||
+  [ "${NEUTRON_TEST_SOCKET_PREFLIGHT:-0}" = "1" ];
+}; then
+  # The denial seam is effective only for a synthetic fixture with fake Bun.
+  probe_deny=0
+  if [ -n "${NEUTRON_TEST_ROOT:-}" ] && [ -n "${NEUTRON_BUN_BIN:-}" ] &&
+     [ "${NEUTRON_TEST_SOCKET_PROBE_DENY:-0}" = "1" ]; then
+    probe_deny=1
+  fi
+  if ! NEUTRON_TEST_SOCKET_PROBE_DENY="$probe_deny" bun -e '
+    import { createServer } from "node:net";
+    const server = createServer();
+    const deadline = setTimeout(() => {
+      console.error("loopback listener bind timed out after 5 seconds");
+      process.exit(1);
+    }, 5000);
+    const fail = (error) => {
+      clearTimeout(deadline);
+      console.error(`loopback listener bind failed: ${error.code ?? "ERROR"}: ${error.message}`);
+      process.exitCode = 1;
+    };
+    server.once("error", fail);
+    if (process.env.NEUTRON_TEST_SOCKET_PROBE_DENY === "1") {
+      fail(Object.assign(new Error("synthetic bind denial"), { code: "EACCES" }));
+    } else {
+      server.listen(0, "127.0.0.1", () => {
+        const port = server.address().port;
+        server.close((error) => {
+          if (error) fail(error);
+          else {
+            clearTimeout(deadline);
+            console.log(`run-tests: socket preflight passed (127.0.0.1:${port}; listener closed)`);
+          }
+        });
+      });
+    }
+  '; then
+    echo "run-tests: REFUSED — cannot bind an ephemeral 127.0.0.1 listener; check host socket permissions and namespace. No discovery or tests were run." >&2
+    exit 3
+  fi
+fi
+
 # --- 2. Cross-check coverage against bun's OWN discovery ----------------------
 # PLAN-ONLY skips this block. It is the expensive step (bun WALKS AND LOADS every
 # test file), and the shard-partition tests invoke the planner ~25 times — paying
@@ -331,9 +377,10 @@ if [ "$NO_DEVICE_LANE" != "1" ]; then
 fi
 # A direct Bun.serve is the common surface-harness shape. `await boot(` and
 # `await bootSignup(` cover tests that exercise production boot helpers whose
-# listener call lives outside the test file. Content-derived membership means a
-# newly-added real listener joins the lane without an allowlist update.
-HTTP_MATCH="$(LC_ALL=C grep -lE 'Bun[.]serve[[:space:]]*[(]|await[[:space:]]+(boot|bootSignup)[[:space:]]*[(]' "${FILES[@]}" 2>/dev/null || true)"
+# listener call lives outside the test file. A test that spawns a helper which
+# opens the listener marks that indirect ownership with a standalone comment.
+# Keep the marker anchored so ordinary prose cannot move a file into this lane.
+HTTP_MATCH="$(LC_ALL=C grep -lE 'Bun[.]serve[[:space:]]*[(]|await[[:space:]]+(boot|bootSignup)[[:space:]]*[(]|^[[:space:]]*// @neutron-real-http[[:space:]]*$' "${FILES[@]}" 2>/dev/null || true)"
 for f in "${FILES[@]}"; do
   # PGLite wins a tie: a hypothetical file in both would need the WASM lane's
   # serial execution + retry budget more than it needs DOM isolation.
@@ -643,9 +690,29 @@ run_chunk() {
 }
 
 # Run the PGLite-WASM files in their own serial lane with a bounded retry budget.
-# A transient lane failure (the #79 boot race / #327 WASM-init flake) re-runs the
-# WHOLE lane up to PGLITE_RETRIES extra times before the run is declared failed.
+# A positively identified transient lane failure re-runs the WHOLE lane up to
+# PGLITE_RETRIES extra times. Other failures stop after one attempt.
 # Lane files are still counted in the coverage audit (RAN_TOTAL).
+pglite_retryable_failure() {
+  local log="$1"
+  local failures
+  # Bun prints assertion failures as `error: ...` but native thrown errors can
+  # instead begin `TypeError: ...` or `Error: ...` with no prefix. Its final
+  # failing-test summary and sole error line must identify one known boot
+  # failure. A second error, another failing test, or an unstructured log is
+  # ambiguous and therefore not retryable. Generic WASM text elsewhere in the
+  # output cannot turn a deterministic assertion failure into a retry.
+  # Bun reports a timeout beneath `(fail)` without an error header. A logged
+  # boot message must not turn that independent deterministic failure green
+  # on another attempt. Anchor the diagnostic so ordinary mentions still retry.
+  LC_ALL=C grep -aqE '^[[:space:]]*\^ this test timed out after [0-9]+ms\.' "$log" && return 1
+  [ "$(LC_ALL=C grep -aciE '^[[:space:]]*(error: |[a-z][a-z0-9_]*Error: )' "$log" || true)" = "1" ] || return 1
+  failures="$(LC_ALL=C grep -aE '^[[:space:]]*[0-9]+ fail([[:space:]]|$)' "$log" | tail -1 | LC_ALL=C sed -E 's/^[[:space:]]*([0-9]+) fail.*/\1/')"
+  [ "$failures" = "1" ] || return 1
+  LC_ALL=C grep -aiE '^[[:space:]]*(error: |[a-z][a-z0-9_]*Error: )' "$log" | LC_ALL=C grep -qiE \
+    '^[[:space:]]*((error: |Error: )(PGLite failed to initialize its WASM runtime|Invalid FS bundle size:)|(error: )?TypeError: undefined is not an object \(evaluating .probe\.)'
+}
+
 run_pglite_lane() {
   local llog="$WORK/lane-pglite.log"
   local attempt=1 max=$(( PGLITE_RETRIES + 1 )) rc=1 ran=0
@@ -658,8 +725,14 @@ run_pglite_lane() {
     ran="$(LC_ALL=C grep -aoE 'across [0-9]+ file' "$llog" | LC_ALL=C grep -aoE '[0-9]+' | tail -1)"
     cat "$llog"
     [ "$rc" = "0" ] && break
+    if ! pglite_retryable_failure "$llog"; then
+      echo "run-tests: PGLite lane attempt ${attempt}/${max} failed (rc=${rc}) — no retry: no isolated recognized boot failure."
+      break
+    fi
     if [ "$attempt" -lt "$max" ]; then
-      echo "run-tests: PGLite lane attempt ${attempt}/${max} failed (rc=${rc}) — retrying (transient WASM-init/boot flake, ISSUES #79/#327)…"
+      echo "run-tests: PGLite lane attempt ${attempt}/${max} failed (rc=${rc}) — retrying recognized WASM-init/boot failure…"
+    else
+      echo "run-tests: PGLite lane exhausted ${max} recognized boot-failure attempt(s)."
     fi
     attempt=$(( attempt + 1 ))
   done
