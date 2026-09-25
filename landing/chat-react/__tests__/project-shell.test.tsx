@@ -1035,9 +1035,9 @@ describe('ProjectShell desktop Work slide-out (≥1024px)', () => {
     // GATE the tab resolver so the shell sits in the `resolving` (tabsScope ===
     // null) window deterministically — the pane must NOT mount there even though
     // the outgoing `tabs` still carries a Work descriptor.
-    let releaseTabs: () => void = () => {}
+    let releaseResolver: () => void = () => {}
     const tabsPending = new Promise<void>((res) => {
-      releaseTabs = res
+      releaseResolver = res
     })
     const boardUrls: string[] = []
     const fetchImpl = async (url: string): Promise<Response> => {
@@ -1110,7 +1110,7 @@ describe('ProjectShell desktop Work slide-out (≥1024px)', () => {
 
     // Release the resolver → still mounted; no change of scope.
     await act(async () => {
-      releaseTabs()
+      releaseResolver()
       await tick()
       await tick()
     })
@@ -1136,7 +1136,7 @@ describe('ProjectShell desktop Work slide-out (≥1024px)', () => {
 
   it('W7 — desktop never shows BOTH a seated Work tab AND the pane, even during a scope-switch resolving window (Codex P1)', async () => {
     // Codex P1 repro: pane eligibility (`paneEligible = isDesktop`) mounts the pane
-    // immediately, but the seated Work TAB is dropped from `visibleTabs` on the
+    // immediately, but the seated Work tab is removed from the displayed set on the
     // SAME viewport gate — so during a switch, while the new scope's tabs are still
     // pending (`tabsScope === null`, stale outgoing `tabs` still carrying Work), the
     // seated Work tab must NOT reappear alongside the mounted pane. One Work surface
