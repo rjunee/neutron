@@ -10,8 +10,9 @@
  * project's last build is over.
  *
  * The run's steps' native children hold `liveChild` leases under the same run id;
- * a step whose outcome was unknown retains its child's lease on purpose, so this
- * terminal release covers those too.
+ * a step whose outcome was unknown retains its child's lease on purpose. Build
+ * termination releases only build leases; native-child leases survive until
+ * affirmative child-completion evidence releases them.
  *
  * Idempotent (a second fire releases 0) and it never throws: a failed release is
  * logged, and restart reconciliation (`gateway/project-admission-reconcile.ts`)
@@ -24,8 +25,8 @@ import { isTerminalPhase } from '@neutronai/trident/state-machine.ts'
 const log = createLogger('project-admission')
 
 export interface AdmissionReleaseDeps {
-  /** Release every lease naming this run — its `build` lease(s) and any
-   *  `liveChild` lease a step's native child retained; returns the count removed. */
+  /** Release this run's `build` leases only; retained `liveChild` leases survive.
+   *  Returns the count removed. */
   releaseBuild(run: TridentRun): Promise<number>
 }
 

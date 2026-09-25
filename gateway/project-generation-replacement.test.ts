@@ -18,7 +18,7 @@ import type {
 import type { ReplSession } from '@neutronai/runtime/adapters/claude-code/persistent/repl-session.ts'
 import { seedMigratedDb } from '../tests/support/migrated-db.ts'
 import { ProjectAdmission } from './project-admission.ts'
-import { decideProjectLiveness, type CensusEvidence, type ParentObservation, type ProjectLivenessCensus } from './project-liveness-census.ts'
+import { decideProjectLiveness, walkProcessDescendants, type CensusEvidence, type ParentObservation, type ProjectLivenessCensus } from './project-liveness-census.ts'
 import {
   attestReplacement,
   replaceProjectGeneration,
@@ -120,6 +120,44 @@ function harness(opts: {
 }
 
 describe('legitimate exact-generation replacement', () => {
+  for (const mode of ['empty', 'exited', 'reaped-during-read', 'permission-list', 'permission-read', 'thread-vanished', 'shell'] as const) {
+    test(`real descendant walker gates replacement: ${mode}`, async () => {
+      let reaped = false
+      const fail = (code: string): never => { throw Object.assign(new Error(code), { code }) }
+      const descendants = () => walkProcessDescendants(OLD.pid, {
+        identity: () => IDENTITY,
+        isOwnService: (argv) => argv.includes('own-service'),
+        readdir: async (path) => {
+          if (path === '/proc/11/task') {
+            if (mode === 'permission-list') fail('EACCES')
+            if (mode === 'exited' || reaped) fail('ENOENT')
+          }
+          return [path.split('/')[2]!]
+        },
+        readFile: async (path) => {
+          if (path === `/proc/${OLD.pid}/task/${OLD.pid}/children`) return '11'
+          if (path === '/proc/11/cmdline') return 'bun\0own-service\0'
+          if (path === '/proc/11/task/11/children') {
+            if (mode === 'permission-read') fail('EACCES')
+            if (mode === 'thread-vanished') fail('ENOENT')
+            if (mode === 'reaped-during-read') { reaped = true; fail('ENOENT') }
+            return mode === 'shell' ? '12' : ''
+          }
+          if (path === '/proc/12/comm') return 'bash'
+          if (path === '/proc/12/task/12/children') return ''
+          throw new Error(`unexpected proc read: ${path}`)
+        },
+      })
+      const allowed = ['empty', 'exited', 'reaped-during-read'].includes(mode)
+      const answer = await descendants()
+      const h = harness({ census: async (_call, admission) => censusOf(admission, {}, { descendants: await descendants() }) })
+      const outcome = await replaceProjectGeneration({ admission: h.admission, ports: h.ports }, null)
+      expect(outcome.status).toBe(allowed ? 'replaced' : mode === 'shell' ? 'busy' : 'unknown')
+      expect(h.replaced.length).toBe(allowed ? 1 : 0)
+      expect(answer.verdict).toBe(allowed ? 'idle' : mode === 'shell' ? 'busy' : 'unknown')
+    })
+  }
+
   test('a participating idle parent is replaced through every phase and admission reopens (control)', async () => {
     const h = harness()
     const before = await h.admission.generationFor(null)

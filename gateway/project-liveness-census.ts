@@ -279,11 +279,23 @@ export async function walkProcessDescendants(pid: number, deps: ProcWalkDeps = {
 
   const childrenOf = async (p: number): Promise<number[] | null> => {
     let tids: string[]
-    try { tids = await list(`/proc/${p}/task`) } catch { return null }
+    try { tids = await list(`/proc/${p}/task`) } catch (error) {
+      // Only positive process absence licenses an empty descendant list.
+      return (error as NodeJS.ErrnoException).code === 'ENOENT' ? [] : null
+    }
     const out: number[] = []
     for (const tid of tids) {
       let raw: string
-      try { raw = await readText(`/proc/${p}/task/${tid}/children`) } catch { return null }
+      try { raw = await readText(`/proc/${p}/task/${tid}/children`) } catch (error) {
+        // A vanished thread does not prove its process exited. Confirm absence
+        // at the process directory; permission and other failures stay unknown.
+        if ((error as NodeJS.ErrnoException).code === 'ENOENT') {
+          try { await list(`/proc/${p}/task`) } catch (probeError) {
+            if ((probeError as NodeJS.ErrnoException).code === 'ENOENT') return []
+          }
+        }
+        return null
+      }
       for (const token of raw.trim().split(/\s+/)) {
         const child = Number.parseInt(token, 10)
         if (Number.isInteger(child) && child > 0) out.push(child)
@@ -295,6 +307,7 @@ export async function walkProcessDescendants(pid: number, deps: ProcWalkDeps = {
   const rootChildren = await childrenOf(pid)
   if (rootChildren === null) return { verdict: 'unknown', reasons: ['parent process tree unreadable'] }
   const shells: string[] = []
+  let unreadable = false
   const seen = new Set<number>([pid])
   const queue = rootChildren.map((child) => ({ pid: child, direct: true }))
   while (queue.length > 0) {
@@ -313,13 +326,16 @@ export async function walkProcessDescendants(pid: number, deps: ProcWalkDeps = {
       try { comm = (await readText(`/proc/${next.pid}/comm`)).trim() || 'unknown' } catch { /* keep placeholder */ }
       shells.push(comm)
     }
-    // A descendant that exited mid-walk simply has no children to add.
+    // An exempt service still has to prove its descendants are absent.
     const grand = await childrenOf(next.pid)
+    if (grand === null) unreadable = true
     for (const g of grand ?? []) queue.push({ pid: g, direct: false })
   }
 
   if (!sameIdentity(before, identity(pid))) return { verdict: 'unknown', reasons: ['parent pid changed identity during the census'] }
-  if (shells.length === 0) return { verdict: 'idle', reasons: [] }
+  if (shells.length === 0) return unreadable
+    ? { verdict: 'unknown', reasons: ['descendant process tree unreadable'] }
+    : { verdict: 'idle', reasons: [] }
   const names = shells.slice(0, SHELL_REASON_LIMIT).join(', ')
   return { verdict: 'busy', reasons: [`parent descendants running: ${shells.length} (${names}${shells.length > SHELL_REASON_LIMIT ? ', …' : ''})`] }
 }

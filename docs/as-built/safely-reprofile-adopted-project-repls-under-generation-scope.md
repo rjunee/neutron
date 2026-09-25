@@ -75,10 +75,22 @@ Each one turns its guard red while the opposite control stays green:
 - a boot resume that reopens `replacing` blind;
 - spawning after an old child that has not exited.
 
+The descendant walker also preserves unknown reads beneath exempt own services:
+an unreadable task list or children file cannot license replacement. Only an
+absent process task directory proves a listed service exited; a vanished thread
+alone does not. The additional seven walker-to-replacement cases cover both
+permission failures, a vanished thread, a known shell, and the legitimate empty,
+exited, and reaped-during-read controls.
+Suppressing the unknown descendant flag fails all three refusal cases while the
+four controls pass. Treating affirmative process absence as unknown fails both
+exit controls while the other five cases pass. Both mutations were reverted.
+
 **Not claimed.** Nothing triggers replacement, and nothing about it is
 activated or deployed. #1237 stays open until deployed activation and live
 proof. #1233's profile remains rolled back. The adopted-parent refusal in
-`spawn.ts`, `respawnReplSession` and `project-workspaces.ts` are unchanged.
+`spawn.ts` and `project-workspaces.ts` are unchanged. `respawnReplSession` was
+modified to preserve native-child supervision; see
+[`native-child-supervision-respawn.md`](native-child-supervision-respawn.md).
 #1226 still owns credential handoff: a rotation that re-keys the parent is not
 a replacement. A `replacing` or `attesting` fence that cannot attest stays
 closed by design.
