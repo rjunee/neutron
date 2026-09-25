@@ -3,6 +3,7 @@
 // the model-update watchdog, and test/operator introspection (D2 split).
 
 import { existsSync, statSync } from 'node:fs'
+import { hasUnresolvedNativeChild } from './native-child-liveness.ts'
 import { emitSystemEvent } from '@neutronai/persistence/index.ts'
 import { getBestModel, getKnownFallbackModels, setBestModelOverride } from '../../../models.ts'
 import type { AgentSpec } from '../../../substrate.ts'
@@ -242,6 +243,12 @@ export function respawnReplSession(
   if (registryPath === undefined) {
     return { ok: false, reason: 'session-not-found', sessionKey }
   }
+  // A wedged or silent parent does not prove its native children are terminal.
+  // Force bypasses cooldown/cap only; it cannot authorize killing unknown work.
+  if (hasUnresolvedNativeChild(options)) {
+    return { ok: false, reason: 'spawn-failed', sessionKey,
+      error: new RespawnClaimRefusedError('Native child liveness is unresolved; refusing parent respawn') }
+  }
   const gate = gateFor(sessionKey)
   if (!gate.claim()) {
     // Another respawn for this key is already running in-process. The
@@ -339,6 +346,9 @@ export function respawnReplSession(
       execute: (plan) => {
         const rec = getRecord(registryPath, sessionKey)
         if (!rec) return { ok: false, reason: 'session-not-found' }
+        // Re-read durable ownership at the consuming edge after the registry
+        // claim. Refusal clears that claim below, before any kill or eviction.
+        if (hasUnresolvedNativeChild(options)) return { ok: false, reason: 'spawn-failed' }
         const outcome = executeRespawn(rec, plan, trigger, reason, deps)
         return outcome.reason !== undefined
           ? { ok: outcome.ok, reason: outcome.reason }
