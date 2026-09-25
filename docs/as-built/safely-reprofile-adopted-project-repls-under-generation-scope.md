@@ -85,6 +85,22 @@ Suppressing the unknown descendant flag fails all three refusal cases while the
 four controls pass. Treating affirmative process absence as unknown fails both
 exit controls while the other five cases pass. Both mutations were reverted.
 
+**Combined host verification.** The integrated revision
+`a3a36ca628cd785781078c26acd35705135ccdc3`, rebased on merged main
+`d371923b397ee7b798550b4900924a81e4819b62`, passed
+`bash scripts/check-shared-host.sh`: 51 TypeScript projects checked, and all
+1,685 declared, Bun-discovered, assigned and executed test files passed across
+18 bounded-memory lanes with zero failed lanes. The complete consuming
+`open/__tests__/project-build-e2e.test.ts` also passed separately: 316 tests,
+3,718 assertions. The host run reported 23 skipped tests; file coverage does
+not turn those into live acceptance. Additional exact-revision semantic review
+detected 22 guard mutations and six filtered consuming-E2E ownership mutations,
+each with passing restored controls. Some pool, model and spawn probes were
+disposable review fixtures, not tests added to this commit. The independent
+integration review found the safety patch unchanged by the rebase. This is
+local verification of the pre-publication revision; hosted CI, deployment and
+live adopted-REPL acceptance are not claimed here.
+
 **Not claimed.** Nothing triggers replacement, and nothing about it is
 activated or deployed. #1237 stays open until deployed activation and live
 proof. #1233's profile remains rolled back. The adopted-parent refusal in
