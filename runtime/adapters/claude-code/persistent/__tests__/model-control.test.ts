@@ -1,12 +1,19 @@
 import { afterEach, expect, test } from 'bun:test'
 import { getPersistentReplModel, switchPersistentReplModel } from '../model-control.ts'
-import { pool, supervisedBySessionKey } from '../pool-state.ts'
-import { poolKeyFor } from '../pool.ts'
+import { pool, supervisedBySessionKey, childByKey, retiringSessionKeys } from '../pool-state.ts'
+import { poolKeyFor, retirePersistentRepl } from '../pool.ts'
+import { setNativeChildLiveness } from '../native-child-liveness.ts'
+import { ProjectAdmission } from '@neutronai/gateway/project-admission.ts'
+import { ProjectDb } from '@neutronai/persistence/index.ts'
+import { seedMigratedDb } from '../../../../../tests/support/migrated-db.ts'
+import { mkdtempSync, rmSync } from 'node:fs'
+import { tmpdir } from 'node:os'
+import { join } from 'node:path'
 import { ReplSession } from '../repl-session.ts'
 import type { PersistentReplSubstrateOptions } from '../types.ts'
 
 const keys: string[] = []
-afterEach(() => { for (const key of keys.splice(0)) { pool.delete(key); supervisedBySessionKey.delete(key) } })
+afterEach(() => { for (const key of keys.splice(0)) { pool.delete(key); supervisedBySessionKey.delete(key); childByKey.delete(key); retiringSessionKeys.delete(key) } })
 
 function register(scope: string | null | undefined, sessionId: string, extra: Partial<PersistentReplSubstrateOptions> = {}) {
   const options: PersistentReplSubstrateOptions = {
@@ -56,4 +63,42 @@ test('an auxiliary floored substrate never becomes the conversation model contro
   register(null, 'conversation')
   register(undefined, 'nudge', { substrate_instance_id: 'cc-nudge-model-test' })
   expect((await getPersistentReplModel({ userId: 'owner', projectId: null })).sessionId).toBe('conversation')
+})
+
+test('restart durable child blocks only its exact owner and project retirement and model control', async () => {
+  const dir = mkdtempSync(join(tmpdir(), 'model-child-'))
+  const path = join(dir, 'project.db')
+  seedMigratedDb(path)
+  let db = ProjectDb.open(path)
+  try {
+    const admission = new ProjectAdmission({ db, ownerHandle: 'durable-owner', bootId: 'before' })
+    await admission.forNativeChild(null).admit('failed-run', 'build:0')
+    await admission.releaseBuild(null, 'failed-run')
+    db.close()
+    db = ProjectDb.open(path)
+    const restarted = new ProjectAdmission({ db, ownerHandle: 'durable-owner', bootId: 'after' })
+    setNativeChildLiveness('owner', projectId => restarted.listLeases('liveChild').some(row => row.scope.projectId === projectId))
+    const target = register(null, 'child-parent')
+    let killed = false
+    let acknowledge!: (code: number | null) => void
+    target.session.attachChild({ pid: 2, write() {}, kill() { killed = true; acknowledge(0) },
+      hasExited: () => killed, exited: new Promise(resolve => { acknowledge = resolve }) })
+    childByKey.set(target.key, target.session.child)
+    register('general', 'other-project')
+    expect(await retirePersistentRepl(target.key)).toBe('refused')
+    expect(killed).toBe(false)
+    expect(pool.has(target.key)).toBe(true)
+    await expect(switchPersistentReplModel({ userId: 'owner', projectId: null }, { sessionId: 'child-parent', model: 'haiku' })).rejects.toMatchObject({ code: 'busy' })
+    expect((await getPersistentReplModel({ userId: 'owner', projectId: 'general' })).status).toBe('unsupported')
+    register(null, 'other-owner', { user_id: 'someone-else' })
+    expect((await getPersistentReplModel({ userId: 'someone-else', projectId: null })).status).toBe('unsupported')
+    await restarted.forNativeChild(null).complete('failed-run', 'build:0')
+    expect((await getPersistentReplModel({ userId: 'owner', projectId: null })).status).toBe('unsupported')
+    expect(await retirePersistentRepl(target.key)).toBe('retired')
+    expect(killed).toBe(true)
+  } finally {
+    setNativeChildLiveness('owner', () => false)
+    db.close()
+    rmSync(dir, { recursive: true, force: true })
+  }
 })

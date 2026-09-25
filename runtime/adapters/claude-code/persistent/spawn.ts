@@ -23,6 +23,7 @@ import { paneClaimBlocksUs, spawnReservationBlocksUs } from './signatures.ts'
 import { applyModelFloor } from './model-floor.ts'
 import { type InFlightGate, makeInFlightGate } from './in-flight-gate.ts'
 import { childByKey, pendingSpawns, pool, replToolBridgeRef, respawnGates, sink } from './pool-state.ts'
+import { hasUnresolvedNativeChild } from './native-child-liveness.ts'
 import {
   registerLiveProcessSafe,
   type LiveProcessHandle,
@@ -1652,7 +1653,7 @@ export async function getOrSpawnSession(
       // hosted-work count does not establish that those children have finished.
       // Keep its ownership in the pool: quarantine would permit a duplicate owner,
       // and reuse would bypass the failed credential/tool/poison guards above.
-      if (session.adopted) {
+      if (session.adopted || hasUnresolvedNativeChild(options)) {
         throw new PaneOwnershipRefusedError(
           'persistent-repl: refusing adopted parent refresh — native-child liveness is unknown; ' +
           'the existing parent remains owned and this turn cannot run until lifecycle reconciliation',

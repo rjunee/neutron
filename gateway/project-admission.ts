@@ -25,11 +25,13 @@ export type AdmissionProducer = 'chat' | 'acting-turn' | 'work-board' | 'hold-dr
 /**
  * The admission a bounded build step takes for the NATIVE CHILD it creates inside
  * the project REPL (#1237). `admit` names the run and the step; the lease's work
- * reference is the RUN id, so the run's terminal release covers every step's child.
- * Per-step release is the returned token-bound {@link AdmittedWork.release}.
+ * reference is the JSON tuple [run id, step id]. Run termination cannot establish
+ * child termination. `complete` requires validated terminal evidence for that request;
+ * token-bound `release` is reserved for refusal before child dispatch.
  */
 export interface NativeChildAdmission {
   admit(runId: string, stepId: string): Promise<AdmittedWork | AdmissionRefusal>
+  complete(runId: string, stepId: string): Promise<number>
 }
 
 export interface ProjectAdmissionOptions {
@@ -159,31 +161,30 @@ export class ProjectAdmission {
    */
   forNativeChild(projectId: string | null): NativeChildAdmission {
     return {
+      complete: (runId, stepId) => this.store.releaseWork(this.scopeFor(projectId), 'liveChild', JSON.stringify([runId, stepId])),
       admit: async (runId, stepId) => {
         if (!stepId.trim()) throw new Error('Step reference required');
         const scope = this.scopeFor(projectId);
         if (!(await this.registerIfLive(scope))) return { status: 'unknown' };
         const joined = await this.store.admitChild(
-          scope, { reason: 'build', workRef: runId }, 'liveChild', this.producerFor('native-child'), runId);
+          scope, { reason: 'build', workRef: runId }, 'liveChild', this.producerFor('native-child'), JSON.stringify([runId, stepId]));
         if (joined.status === 'admitted') return this.admittedWork(joined.lease);
         if (joined.status === 'unknown') return { status: 'unknown' };
-        return this.admit(projectId, 'liveChild', 'native-child', runId);
+        return this.admit(projectId, 'liveChild', 'native-child', JSON.stringify([runId, stepId]));
       },
     };
   }
 
   /**
-   * Release EVERY lease a TERMINAL run holds: its `build` lease(s) and the
-   * `liveChild` leases its steps' native children left behind (a step whose outcome
-   * was unknown retains its child lease on purpose). Work-bound and
+   * Release a TERMINAL run's `build` leases only. Native children can outlive the
+   * run and retain their leases until request-specific terminal evidence. Work-bound and
    * generation-independent ({@link ProjectAdmissionStore.releaseWork}): a terminal
-   * run's activity is over in every generation. Returns the total removed;
+   * run's build activity is over in every generation. Returns the total removed;
    * idempotent — a second call releases 0.
    */
   async releaseBuild(projectId: string | null | undefined, runId: string): Promise<number> {
     const scope = this.scopeFor(projectId);
-    return (await this.store.releaseWork(scope, 'build', runId))
-      + (await this.store.releaseWork(scope, 'liveChild', runId));
+    return this.store.releaseWork(scope, 'build', runId);
   }
 
   /**

@@ -119,7 +119,7 @@ test('RESTART: leases written through one connection are reconciled through a se
   expect(second.admission.listLeases('build')[0]!.producer).toBe('work-board:boot-a')
 })
 
-test('reconcile releases a terminal run\'s child lease, keeps a live run\'s, and never re-leases a child (#1237)', async () => {
+test('reconcile preserves terminal, missing and live runs unresolved children', async () => {
   const first = fixture()
   const done = await makeRun(first.runs, 'done-with-child')
   const live = await makeRun(first.runs, 'live-with-child')
@@ -134,13 +134,12 @@ test('reconcile releases a terminal run\'s child lease, keeps a live run\'s, and
   // Through a second connection: the terminal observer's release was "lost".
   const second = first.open('boot-b')
   const result = await reconcileBuildLeases({ admission: second.admission, runs: second.runs, projectIdForRun })
-  expect(result).toEqual({ released: 3, kept: 1, children_kept: 1, leased: 0, unleased_fenced: 0, unleased_unknown: 0 })
-  expect(second.admission.listLeases().map((l) => [l.reason, l.workRef]))
-    .toEqual([['build', live.id], ['liveChild', live.id]])
+  expect(result).toEqual({ released: 1, kept: 1, children_kept: 3, leased: 0, unleased_fenced: 0, unleased_unknown: 0 })
+  expect(second.admission.listLeases('liveChild')).toHaveLength(3)
 
   // Never re-leased: a live run whose child lease is gone gets no new child row.
   await second.admission.releaseBuild(null, live.id)
   const again = await reconcileBuildLeases({ admission: second.admission, runs: second.runs, projectIdForRun })
-  expect(again).toMatchObject({ leased: 1, children_kept: 0 })
-  expect(second.admission.listLeases('liveChild')).toEqual([])
+  expect(again).toMatchObject({ leased: 1, children_kept: 3 })
+  expect(second.admission.listLeases('liveChild')).toHaveLength(3)
 })

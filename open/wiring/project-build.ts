@@ -5,7 +5,7 @@ import { mkdir, readFile, writeFile, lstat, open } from 'node:fs/promises'
 import { constants } from 'node:fs'
 import { join, resolve } from 'node:path'
 import { createHash } from 'node:crypto'
-import { createProjectRunners, type ProjectTrailerDecoder, type ProjectActingTurn } from '@neutronai/runtime/workers/project-runners.ts'
+import { createProjectRunners, decodeProjectTrailer, type ProjectTrailerDecoder, type ProjectActingTurn } from '@neutronai/runtime/workers/project-runners.ts'
 import { createClaudeActingTurn } from '@neutronai/runtime/workers/claude-acting-turn.ts'
 import { observeClaudeChildUsage } from '@neutronai/runtime/workers/claude-child-observation.ts'
 import { sessionJsonlPath } from '@neutronai/runtime/adapters/claude-code/persistent/jsonl-resumability.ts'
@@ -498,14 +498,12 @@ export async function prepareProjectBuild(input: InnerLoopInput, context: Projec
         outcome = await nativeChildTurn(turn)
         return outcome
       } finally {
-        // Released only when the step's child is PROVABLY over: `turn-ended`, or a
-        // refusal before anything ran. On `unknown`, `blocked` or a throw the child
-        // may still be live (it runs in the background after the dispatch turn), so
-        // its lease is RETAINED; the run's terminal release or boot reconcile ends it.
-        if (outcome?.kind === 'turn-ended' || outcome?.kind === 'refused') {
-          // A failed release leaves a stale lease (blocks maintenance, never builds);
-          // the terminal release or boot reconcile removes it. It must not turn a
-          // finished step into a failed one.
+        // Parent-turn completion does not establish child completion. Only a
+        // refusal before dispatch releases here; the consuming trailer validator
+        // below owns all post-dispatch releases, including restart recovery.
+        if (outcome?.kind === 'refused') {
+          // A failed release preserves ownership and must not turn a refusal into
+          // a dispatch retry.
           await child.release().catch((error: unknown) => log.warn('native_child_release_failed', {
             run_id: run.id, step_id: turn.request.step_id, error: error instanceof Error ? error.message : String(error) }))
         } else log.info('native_child_lease_retained', { run_id: run.id, step_id: turn.request.step_id, outcome: outcome?.kind ?? 'threw' })
@@ -535,6 +533,29 @@ export async function prepareProjectBuild(input: InnerLoopInput, context: Projec
       }, validate: (value: unknown) => validSnapshot(value, 'verdict') }],
     ]) }) },
   })
+  // Only the consuming runner's validated trailer establishes child completion.
+  // Recovery uses the same request identity against the existing durable authority.
+  if (context.provider === 'anthropic' && substrate.inRepl) {
+    const runner = substrate.inRepl
+    const finish: typeof runner.run = async (...args) => {
+      const outcome = await runner.run(...args)
+      if (outcome.kind === 'completed' || outcome.kind === 'blocked') await releaseValidatedChild(args[0])
+      return outcome
+    }
+    const releaseValidatedChild = async (request: Parameters<typeof runner.run>[0]) => {
+      try {
+        const result = decodeProjectTrailer(await readFile(request.result.path, 'utf8'), request, trailer)
+        if (result.kind === 'completed' || result.kind === 'blocked') {
+          await context.nativeChildAdmission.complete(request.run_id, request.step_id)
+        }
+      } catch { /* Missing evidence or failed durable release preserves ownership. */ }
+    }
+    substrate.inRepl = { ...runner, run: finish, ...(runner.recover ? { recover: async (...args: Parameters<NonNullable<typeof runner.recover>>) => {
+      const outcome = await runner.recover!(...args)
+      if (outcome.kind === 'completed' || outcome.kind === 'blocked') await releaseValidatedChild(args[0])
+      return outcome
+    } } : {}) }
+  }
   if (context.provider === 'openai-codex' && context.codexOwnerBindings && substrate.inRepl) {
     substrate.inRepl = context.codexOwnerBindings.guardBuildRunner(context.projectId, substrate.inRepl)
   }

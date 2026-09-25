@@ -208,12 +208,12 @@ test('a native child JOINS its run under a draining fence, under the parent gene
   if (child.status !== 'admitted') return
   expect(child.generation).toBe(0)
   const row = admission.listLeases('liveChild')[0]!
-  expect(row).toMatchObject({ reason: 'liveChild', producer: 'native-child:boot-a', workRef: 'run-1', generation: 0 })
+  expect(row).toMatchObject({ reason: 'liveChild', producer: 'native-child:boot-a', workRef: '["run-1","build:0"]', generation: 0 })
 
   // Opposite control: a run with NO build lease has no drain right; the fence refuses it.
   expect(await admission.forNativeChild(null).admit('run-unleased', 'build:0'))
     .toEqual({ status: 'fenced', phase: 'draining' })
-  expect(childLeases(admission)).toEqual([[null, 'run-1', 0]])
+  expect(childLeases(admission)).toEqual([[null, '["run-1","build:0"]', 0]])
 
   // Quiescence stays exact: the fence cannot leave draining while the child row exists.
   if (run.status === 'admitted') expect(await run.release()).toBe(true)
@@ -228,23 +228,26 @@ test('a native child of an open scope with no build lease admits as ordinary wor
   const { admission } = fixture()
   const child = await admission.forNativeChild(null).admit('run-free', 'plan:0')
   expect(child.status).toBe('admitted')
-  expect(childLeases(admission)).toEqual([[null, 'run-free', 0]])
+  expect(childLeases(admission)).toEqual([[null, '["run-free","plan:0"]', 0]])
   expect(await admission.forNativeChild('ghost').admit('run-free', 'plan:0')).toEqual({ status: 'unknown' })
   expect(admission.inspect('ghost')).toBeNull()
 })
 
-test('releaseBuild removes the run\'s build AND liveChild rows and leaves another run\'s (#1237)', async () => {
+test('releaseBuild preserves every unresolved child; completion releases only the exact request', async () => {
   const { admission } = fixture()
   await admission.forDispatch(null, 'work-board').admit('run-1')
   await admission.forDispatch(null, 'work-board').admit('run-2')
   await admission.forNativeChild(null).admit('run-1', 'plan:0')
   await admission.forNativeChild(null).admit('run-1', 'build:0')
   await admission.forNativeChild(null).admit('run-2', 'plan:0')
-  expect(await admission.releaseBuild(null, 'run-1')).toBe(3)
+  expect(await admission.releaseBuild(null, 'run-1')).toBe(1)
   expect(await admission.releaseBuild(null, 'run-1')).toBe(0)
   // Control: the other run keeps both of its rows.
-  expect(admission.listLeases().map((l) => [l.reason, l.workRef]))
-    .toEqual([['build', 'run-2'], ['liveChild', 'run-2']])
+  expect(admission.listLeases('liveChild')).toHaveLength(3)
+  expect(await admission.forNativeChild(null).complete('run-1', 'plan:0')).toBe(1)
+  expect(admission.listLeases('liveChild').map(l => l.workRef)).toEqual([
+    '["run-1","build:0"]', '["run-2","plan:0"]',
+  ])
 })
 
 test('generationFor reads a live scope\'s current generation and is undefined for an unknown scope', async () => {
@@ -264,7 +267,9 @@ test('RESTART / lost acknowledgement: a child lease written by one connection is
   // The child's acknowledgement is lost with the process: no handle survives.
   expect((await f.admission.forNativeChild(null).admit('run-x', 'build:0')).status).toBe('admitted')
   const restarted = f.open('boot-b').admission
-  expect(childLeases(restarted)).toEqual([[null, 'run-x', 0]])
-  expect(await restarted.releaseBuild(null, 'run-x')).toBe(2)
+  expect(childLeases(restarted)).toEqual([[null, '["run-x","build:0"]', 0]])
+  expect(await restarted.releaseBuild(null, 'run-x')).toBe(1)
+  expect(restarted.inspect(null)?.leases).toBe(1)
+  expect(await restarted.forNativeChild(null).complete('run-x', 'build:0')).toBe(1)
   expect(restarted.inspect(null)?.leases).toBe(0)
 })

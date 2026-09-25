@@ -21,11 +21,9 @@
  * scope as busy. An unknown scope is counted and logged the same way. Nothing
  * here fences, advances or replaces anything.
  *
- * Native-child (`liveChild`) leases name their RUN too, and step (a) walks them
- * the same way: a terminal or missing run's child lease is released (counted in
- * `released`); a live run's is kept (`children_kept`). A child lease is NEVER
- * re-leased: an unknown child's liveness is not evidence, and its run's kept
- * `build` lease already blocks the fence.
+ * Native-child (`liveChild`) leases survive regardless of run state. Neither a
+ * terminal run nor a missing run proves child completion. This includes legacy
+ * run-only references: only request-specific terminal evidence may release a child.
  */
 import { createLogger } from '@neutronai/logger';
 import type { TridentRun } from '@neutronai/trident/store.ts';
@@ -56,7 +54,7 @@ export interface BuildLeaseReconcileResult {
   released: number;
   /** Leases kept because their run is live. */
   kept: number;
-  /** Native-child leases kept because their run is live. */
+  /** Native-child leases kept because child completion remains unresolved. */
   children_kept: number;
   /** Live runs with no lease that were admitted one. */
   leased: number;
@@ -87,20 +85,7 @@ export async function reconcileBuildLeases(deps: BuildLeaseReconcileDeps): Promi
     result.kept += 1;
     leasedRuns.add(JSON.stringify([lease.scope.projectId, run.id]));
   }
-  // Native-child leases: released with a terminal or missing run, kept with a live
-  // one. `releaseBuild` removes a run's build AND child rows, so a run released
-  // above is skipped here (its child rows are already gone).
-  for (const lease of deps.admission.listLeases('liveChild')) {
-    const run = deps.runs.get(lease.workRef);
-    if (run === null || isTerminalPhase(run.phase)) {
-      const key = JSON.stringify([lease.scope.projectId, lease.workRef]);
-      if (releasedWork.has(key)) continue;
-      releasedWork.add(key);
-      result.released += await deps.admission.releaseBuild(lease.scope.projectId, lease.workRef);
-      continue;
-    }
-    result.children_kept += 1;
-  }
+  result.children_kept = deps.admission.listLeases('liveChild').length;
 
   // (b) Live runs with no lease in their own scope.
   for (const run of deps.runs.listNonTerminal(RECONCILE_NON_TERMINAL_LIMIT)) {

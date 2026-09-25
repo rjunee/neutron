@@ -50,6 +50,7 @@ async function fixture() {
   const admitCalls: string[] = []
   const real = admission.forNativeChild(null)
   const nativeChildAdmission: NativeChildAdmission = {
+    complete: real.complete,
     admit: (runId, stepId) => { admitCalls.push(stepId); return real.admit(runId, stepId) },
   }
   let spawns = 0
@@ -79,7 +80,7 @@ async function fixture() {
     registerSession, admitCalls, spawns: () => spawns, prepare: () => prepareProjectBuild(input, context, new AbortController().signal) }
 }
 
-test('a run holding a build lease runs its step under a draining fence; the child lease is released on turn-ended', async () => {
+test('a malformed trailer and ended parent turn cannot release the child under a draining fence', async () => {
   const f = await fixture()
   expect((await f.admission.forDispatch(null, 'work-board').admit(f.row.id)).status).toBe('admitted')
   const fence = await f.admission.maintenance.beginMaintenance(f.admission.scopeFor(null))
@@ -90,21 +91,21 @@ test('a run holding a build lease runs its step under a draining fence; the chil
   await writeFile(f.request.result.path, '{}')
 
   expect((await f.captured().actingTurn(f.turn())).kind).toBe('turn-ended')
-  // The child lease existed WHILE the child ran, naming the run...
-  expect(f.observedDuringTurn).toEqual([[f.row.id]])
-  // ...and is gone once the step provably ended. The run's build lease remains.
-  expect(f.childLeases()).toEqual([])
+  // The child lease existed while the child ran, naming the exact request.
+  expect(f.observedDuringTurn).toEqual([[JSON.stringify([f.row.id, 'build:0'])]])
+  // Malformed evidence cannot release it. The run's build lease also remains.
+  expect(f.childLeases()).toEqual([JSON.stringify([f.row.id, 'build:0'])])
   expect(f.admission.listLeases('build').map((lease) => lease.workRef)).toEqual([f.row.id])
 })
 
-test('an UNKNOWN outcome retains the child lease; the composed terminal chain releases it', async () => {
+test('an UNKNOWN outcome retains the child lease through the composed terminal chain', async () => {
   const f = await fixture()
   expect((await f.admission.forDispatch(null, 'work-board').admit(f.row.id)).status).toBe('admitted')
   // No session and a spawn that produces none: the step's outcome is unknown.
   const outcome = await f.captured().actingTurn(f.turn())
   expect(outcome.kind).toBe('unknown')
   // Guard: the child may still be live, so its lease is RETAINED.
-  expect(f.childLeases()).toEqual([f.row.id])
+  expect(f.childLeases()).toEqual([JSON.stringify([f.row.id, 'build:0'])])
 
   await f.store.update(f.row.id, { phase: 'failed' })
   const chain = buildTridentTerminalObserver({
@@ -112,7 +113,7 @@ test('an UNKNOWN outcome retains the child lease; the composed terminal chain re
     observers: [buildAdmissionReleaseObserver({ releaseBuild: (run) => f.admission.releaseBuild(null, run.id) })],
   })
   await chain(f.store.get(f.row.id)!)
-  expect(f.childLeases()).toEqual([])
+  expect(f.childLeases()).toEqual([JSON.stringify([f.row.id, 'build:0'])])
   expect(f.admission.listLeases('build')).toEqual([])
 })
 

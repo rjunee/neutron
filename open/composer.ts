@@ -77,6 +77,7 @@ import {
 } from '@neutronai/gateway/wiring/build-live-agent-turn.ts'
 import type { LiveAgentOnboardingSeam } from '@neutronai/gateway/wiring/build-live-agent-turn.ts'
 import { ProjectAdmission } from '@neutronai/gateway/project-admission.ts'
+import { setNativeChildLiveness } from '@neutronai/runtime/adapters/claude-code/persistent/native-child-liveness.ts'
 import { reconcileBuildLeases } from '@neutronai/gateway/project-admission-reconcile.ts'
 import { buildAdmissionReleaseObserver } from '@neutronai/gateway/proactive/admission-release.ts'
 import { buildProjectDocComposer } from '@neutronai/gateway/wiring/build-project-doc-composer.ts'
@@ -1210,6 +1211,8 @@ export function buildOpenGraphComposer(
     // build-lease release composed into all three terminal chains all read it. It
     // needs only the database and the owner handle.
     const projectAdmission = new ProjectAdmission({ db, ownerHandle: owner_handle, bootId: randomUUID() })
+    setNativeChildLiveness(OWNER_USER_ID, projectId => projectAdmission.listLeases('liveChild')
+      .some(lease => lease.scope.projectId === projectId))
     const wiringCtx: OpenWiringContext = {
       llmPool,
       owner_handle,

@@ -797,6 +797,7 @@ console.log(JSON.stringify({ type: 'result', subtype: 'success', is_error: false
 `
 
 async function fixture(options: { taskSequence?: boolean; moreTasks?: boolean; suiteExit?: number; testStrategy?: string
+  malformedNativeTrailer?: boolean
   namedSuiteFailure?: boolean | 'generic'
   verboseSuiteDiagnostic?: boolean
   spec?: boolean
@@ -968,6 +969,10 @@ async function fixture(options: { taskSequence?: boolean; moreTasks?: boolean; s
       const args = JSON.parse(String(spec.prompt).slice(String(spec.prompt).indexOf('{')))
       const requestLine = String(args.prompt).split('\n').find(row => row.startsWith('Request (data): '))!
       const request: BoundedWorkRequest = JSON.parse(requestLine.slice('Request (data): '.length))
+      if (options.malformedNativeTrailer) {
+        await writeFile(request.result.path, '{}')
+        return
+      }
       if (options.nativeUsage) {
         const directory = join(projectsDir, dir.replace(/\//g, '-'), 'e2e-session', 'subagents')
         await mkdir(directory, { recursive: true })
@@ -1083,6 +1088,50 @@ async function fixture(options: { taskSequence?: boolean; moreTasks?: boolean; s
   return { dir, repo, origin, baseSha, db, store, row, input, context, prepare, github, commands, world,
     register, key, codexCalls, admission }
 }
+
+test.each(['run', 'recover'] as const)('native child %s refuses changed request and path before releasing original ownership', async method => {
+  const f = await fixture({ malformedNativeTrailer: true })
+  const prepared = await f.prepare()
+  const worker = { request: prepared.workers.build.request, runner: prepared.substrate.inRepl! }
+  const request: BoundedWorkRequest = { ...worker.request, run_id: f.row.id, step_id: 'identity-recovery', role: 'build', needs_approval_decision: false }
+  const signal = new AbortController().signal
+  expect((await worker.runner.run(request, 'in-repl', signal)).kind).toBe('unknown')
+  const owned = f.admission.listLeases('liveChild')
+  expect(owned).toHaveLength(1)
+  const terminal = JSON.stringify({ run_id: request.run_id, step_id: request.step_id, schema: request.result.schema, kind: 'blocked', on: 'verified bounded child completion' })
+  await writeFile(request.result.path, terminal)
+  const alternatePath = request.result.path + '.other'
+  await writeFile(alternatePath, terminal)
+  for (const changed of [
+    { ...request, result: { ...request.result, path: alternatePath } },
+    { ...request, cwd: request.cwd + '/changed' },
+  ]) {
+    expect((await worker.runner[method]!(changed, 'in-repl', signal)).kind).toBe('unknown')
+    expect(f.admission.listLeases('liveChild')).toEqual(owned)
+  }
+  expect((await worker.runner[method]!(request, 'in-repl', signal)).kind).toBe('blocked')
+  expect(f.admission.listLeases('liveChild')).toEqual([])
+}, 120_000)
+
+test.each([false, true])('native child durable ownership follows validated consuming results (malformed=%s)', async malformedNativeTrailer => {
+  const f = await fixture({ malformedNativeTrailer })
+  const outcome = await drive(f)
+  const children = f.admission.listLeases('liveChild')
+  if (malformedNativeTrailer) {
+    expect(outcome.kind).toBe('unknown')
+    expect(children).toHaveLength(1)
+    await f.store.update(f.row.id, { phase: 'failed' })
+    await f.admission.releaseBuild(null, f.row.id)
+    const reopened = ProjectDb.open(join(f.dir, 'project.db'))
+    cleanups.push(() => reopened.close())
+    const restarted = new ProjectAdmission({ db: reopened, ownerHandle: 'e2e-owner', bootId: 'restart-child' })
+    await reconcileBuildLeases({ admission: restarted, runs: new TridentRunStore(reopened), projectIdForRun: () => null })
+    expect(restarted.listLeases('liveChild')).toEqual(children)
+  } else {
+    expect(outcome.kind, why(f, outcome)).toBe('merged')
+    expect(children).toEqual([])
+  }
+}, 120_000)
 
 async function drive(f: Awaited<ReturnType<typeof fixture>>): Promise<ProjectBuildOutcome> {
   const options = await f.prepare()
@@ -5357,12 +5406,12 @@ test('project admission end to end: fenced dispatch queues, reopened dispatch le
   if (!dispatched.ok) return
   expect(buildLeases(admission)).toEqual([dispatched.run.id])
   expect(holds.getByItem(OWNER_SLUG, 'fence-card')).toBeNull()
-  // A step's native child joins the run: its lease names the RUN id.
+  // A step's native child joins the run with its exact request identity.
   const childLeases = (a: ProjectAdmission) => a.listLeases('liveChild').map((l) => l.workRef)
   expect((await admission.forNativeChild(null).admit(dispatched.run.id, 'plan:0')).status).toBe('admitted')
-  expect(childLeases(admission)).toEqual([dispatched.run.id])
+  expect(childLeases(admission)).toEqual([JSON.stringify([dispatched.run.id, 'plan:0'])])
 
-  // 3. TERMINAL: the composed chain — release observer first — hands BOTH leases back.
+  // 3. TERMINAL: the observer releases the build, preserving unresolved children.
   await f.store.update(dispatched.run.id, { phase: 'failed' })
   const chain = buildTridentTerminalObserver({
     nexus: null,
@@ -5370,7 +5419,7 @@ test('project admission end to end: fenced dispatch queues, reopened dispatch le
   })
   await chain(f.store.get(dispatched.run.id)!)
   expect(buildLeases(admission)).toEqual([])
-  expect(childLeases(admission)).toEqual([])
+  expect(childLeases(admission)).toEqual([JSON.stringify([dispatched.run.id, 'plan:0'])])
 
   // 4. RESTART: a second connection on the same file. The fixture's own run is
   // still non-terminal; its lease was lost (deleted), so reconciliation re-leases it.
@@ -5388,8 +5437,9 @@ test('project admission end to end: fenced dispatch queues, reopened dispatch le
   // 5. RESTART with a live run's child lease: kept, counted, never re-leased.
   expect((await restarted.forNativeChild(null).admit(f.row.id, 'build:0')).status).toBe('admitted')
   const again = await reconcileBuildLeases({ admission: restarted, runs: new TridentRunStore(reopened), projectIdForRun })
-  expect(again).toMatchObject({ released: 0, kept: 1, children_kept: 1, leased: 0 })
-  expect(childLeases(restarted)).toEqual([f.row.id])
+  expect(again).toMatchObject({ released: 0, kept: 1, children_kept: 2, leased: 0 })
+  const unresolved = [JSON.stringify([dispatched.run.id, 'plan:0']), JSON.stringify([f.row.id, 'build:0'])]
+  expect(childLeases(restarted)).toEqual(unresolved)
 
   // 6. MAINTENANCE over the same scope. The fixture has no pool, so the parent is
   // injected; everything else — leases, fence, phases, dispatch — is real.
@@ -5424,10 +5474,10 @@ test('project admission end to end: fenced dispatch queues, reopened dispatch le
   expect(busy.status).toBe('busy')
   expect(replacedWith).toEqual([])
   expect(buildLeases(restarted)).toEqual([f.row.id])
-  expect(childLeases(restarted)).toEqual([f.row.id])
+  expect(childLeases(restarted)).toEqual(unresolved)
   expect(restarted.inspect(null)?.phase).toBe('open')
 
-  // The run ends: the composed terminal chain hands its leases back.
+  // Run failure releases only the build. Both unknown children still prevent replacement.
   await f.store.update(f.row.id, { phase: 'failed' })
   const restartChain = buildTridentTerminalObserver({
     nexus: null,
@@ -5435,11 +5485,20 @@ test('project admission end to end: fenced dispatch queues, reopened dispatch le
   })
   await restartChain(f.store.get(f.row.id)!)
   expect(buildLeases(restarted)).toEqual([])
+  expect(childLeases(restarted)).toEqual(unresolved)
+  expect((await replaceProjectGeneration({ admission: restarted, ports: ports(generationBefore) }, null)).status).toBe('busy')
+  expect(replacedWith).toEqual([])
+  expect(await restarted.forNativeChild(null).complete(f.row.id, 'build:0')).toBe(1)
+  expect(childLeases(restarted)).toEqual([unresolved[0]!])
+  expect((await replaceProjectGeneration({ admission: restarted, ports: ports(generationBefore) }, null)).status).toBe('busy')
+  expect(replacedWith).toEqual([])
+  expect(await restarted.forNativeChild(null).complete(dispatched.run.id, 'plan:0')).toBe(1)
+  expect(childLeases(restarted)).toEqual([])
 
   // REPLACED (control): the exact parent is replaced and admission reopens under the
   // NEW generation — the next dispatch is admitted and its lease carries it.
   const fenceGeneration = restarted.inspect(null)!.generation + 1
-  const replaced = await replaceProjectGeneration({ admission: restarted, ports: ports(fenceGeneration - 2) }, null)
+  const replaced = await replaceProjectGeneration({ admission: restarted, ports: ports(generationBefore) }, null)
   expect(replaced).toEqual({ status: 'replaced', generation: fenceGeneration, parent: { sessionId: 'conversation-e2e', from: 'gen-e2e-old', to: 'gen-e2e-new' } })
   expect(replacedWith).toEqual(['gen-e2e-old'])
   expect(restarted.inspect(null)).toMatchObject({ phase: 'open', generation: fenceGeneration })
