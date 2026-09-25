@@ -56,3 +56,11 @@ consuming `open/__tests__/project-build-e2e.test.ts`, root and Trident TypeScrip
 checks, and independent review. Full shared-host validation, CI, deployment and
 the served Work Board witness remain separate gates. Focused results neither
 establish them nor complete the broader efficiency acceptance.
+
+CI's identity-env registry initially reported `trident/claimed-paths.ts` as
+unregistered because its new tokenizer regexes match identity-variable names.
+The parser does not read those variables. The registry now records this
+conservative regex match, with a static control that distinguishes the tokenizer
+from an actual identity-env reader. The registry detector remains unchanged.
+The registry suite passes 22 tests, the parser/store suites pass 203 tests, and
+root and Trident TypeScript checks pass on this repair.

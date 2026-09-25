@@ -411,6 +411,8 @@ const KNOWN_READERS: Readonly<Record<string, string>> = {
     'Broad regex literal at trident/codex-project-owner.ts:17 matches an identity-name candidate; registered conservatively, without claiming an env read or trimming behavior.',
   'trident/code-command.ts':
     'Broad regex literal at trident/code-command.ts:74 matches an identity-name candidate; registered conservatively, without claiming an env read or trimming behavior.',
+  'trident/claimed-paths.ts':
+    'Broad path-tokenizer regexes match identity-name candidates; registered conservatively. No identity env access; pinned by the direct-access control below.',
   'runtime/configured-models.ts':
     'Broad credential-name validation regex at runtime/configured-models.ts:28 matches identity-name candidates; registered conservatively. Configuration reads the supplied env at runtime/configured-models.ts:11, not an identity variable.',
   'trident/mutation-prover.ts':
@@ -938,6 +940,20 @@ test('the registry is not vacuous — the readers the four rounds missed are all
     expect(actual).toContain(reader)
   }
 }, TREE_BUDGET_MS)
+
+test('claimed-path tokenizer is a regex match, not a direct identity env reader', () => {
+  const claimedPaths = readFileSync(join(ROOT, 'trident/claimed-paths.ts'), 'utf8')
+  const realReader = readFileSync(join(ROOT, 'migrations/db-path.ts'), 'utf8')
+  const processEnvAccess = /\bprocess\s*\.\s*env\b/
+  const identityKeyAccess = /\benv\s*\[\s*['"`](?:NEUTRON_HOME|OWNER_HOME|NEUTRON_DB_PATH)['"`]\s*\]/
+
+  expect(namesIdentityVar(claimedPaths, 'trident/claimed-paths.ts')).toBe(true)
+  expect(processEnvAccess.test(claimedPaths)).toBe(false)
+  expect(identityKeyAccess.test(claimedPaths)).toBe(false)
+  // The same check must recognize an actual registered reader.
+  expect(processEnvAccess.test(realReader)).toBe(true)
+  expect(identityKeyAccess.test(realReader)).toBe(true)
+})
 
 test('NO FILE IS BLIND TO A PLAINLY-SPELLED READ — the answer cannot depend on which file', () => {
   // THE TITLE NAMES THE SPELLING, because the check uses ONE spelling and an
