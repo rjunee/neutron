@@ -75,5 +75,11 @@ breaks alias serialization, and weakening global liveness breaks model-control
 checks. The exact callback runs before `submitLine`; pre-submission refusal does
 not end the preparation exemption early.
 
-The repository-wide suite and live deployment are outside this change's local
-verification; this record does not claim a deployed throughput measurement.
+The exact integrated code-and-test head `1b903c8f` passed the shared-host gate:
+all 51 TypeScript configurations, all 1,686 discovered test files, and all 18
+bounded-memory lanes. The first full gate on `66e918f17` was red in the
+build-wiring and boot-adoption fixtures. Their linked-worktree/request-identity
+and test-owned liveness-query repairs were verified through the real consuming
+Open E2E and HTTP lanes in the green gate. This as-built update follows the
+tested head; CI must still check the final PR revision. Live deployment and a
+throughput measurement remain outstanding.
