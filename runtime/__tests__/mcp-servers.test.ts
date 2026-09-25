@@ -26,6 +26,7 @@ import {
   MCP_SERVER_BANNED_CHARS_RE,
   MCP_SERVER_ENV_TOTAL_MAX,
   MCP_SERVER_ENV_VALUE_MAX,
+  OWN_SERVICE_PROVENANCE_ENV,
   computeMcpServerGrantHash,
   isReservedMcpServerName,
   mcpSurfaceFingerprint,
@@ -73,6 +74,17 @@ describe('parseOwnerMcpServerInput — the one validator', () => {
     expect(isReservedMcpServerName('neutron')).toBe(true)
     expect(isReservedMcpServerName('neutron-deadbeef')).toBe(true)
     expect(isReservedMcpServerName('example-server')).toBe(false)
+  })
+
+  test('refuses the env NAME the spawn path reserves for service provenance', () => {
+    // The liveness census exempts a process from the busy-shell count only on this
+    // marker; an owner-declared value must not be accepted as if it could stand.
+    const refused = parseOwnerMcpServerInput({ ...GOOD, env: { ...GOOD.env, [OWN_SERVICE_PROVENANCE_ENV]: 'forged' } })
+    expect(refused.spec).toBeNull()
+    expect(refused.errors.join(' ')).toContain(`'${OWN_SERVICE_PROVENANCE_ENV}' is reserved`)
+    expect(refused.errors.join(' ')).not.toContain('forged')
+    // Control: the same server without it is accepted.
+    expect(parseOwnerMcpServerInput(GOOD).errors).toEqual([])
   })
 
   test('refuses a command carrying a newline or a bidi override', () => {

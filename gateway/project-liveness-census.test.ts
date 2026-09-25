@@ -4,9 +4,11 @@
  */
 import { afterEach, describe, expect, test } from 'bun:test'
 import { mkdirSync, mkdtempSync, rmSync, utimesSync, writeFileSync } from 'node:fs'
+import { readFile } from 'node:fs/promises'
 import { tmpdir } from 'node:os'
 import { join } from 'node:path'
 import { ProjectDb } from '@neutronai/persistence/index.ts'
+import { OWN_SERVICE_PROVENANCE_ENV } from '@neutronai/runtime/mcp-servers.ts'
 import { seedMigratedDb } from '../tests/support/migrated-db.ts'
 import { ProjectAdmission } from './project-admission.ts'
 import {
@@ -192,26 +194,144 @@ describe('the /proc descendant walk', () => {
     expect(out).toEqual({ verdict: 'unknown', reasons: ['parent pid changed identity during the census'] })
   })
 
-  test('own services are not shells, but their descendants are; names only', async () => {
-    const tree: Record<number, number[]> = { 10: [11, 12], 11: [13], 12: [], 13: [] }
-    const argv: Record<number, string> = { 11: 'bun\0dev-channel\0', 12: 'bun\0tools-bridge\0', 13: 'bash\0-c\0secret\0' }
-    const deps = {
+  // A fake /proc: `tree` is the children, `environ` the NUL-joined environment
+  // (a missing key reads ENOENT, the string 'EACCES' throws a permission error),
+  // `argv` the cmdline — which the walk must NOT consult for ownership.
+  const MARKER = OWN_SERVICE_PROVENANCE_ENV
+  const GEN = 'gen-a'
+  function fakeProc(tree: Record<number, number[]>, environ: Record<number, string>, comm: Record<number, string>,
+    argv: Record<number, string> = {}) {
+    const fail = (code: string): never => { throw Object.assign(new Error(code), { code }) }
+    return {
       identity: () => ({ start_ticks: 1, boot_id: 'b' }) as never,
       readdir: async (path: string) => [path.split('/')[2]!],
       readFile: async (path: string) => {
         const pid = Number(path.split('/')[2])
         if (path.endsWith('/children')) return (tree[pid] ?? []).join(' ')
+        if (path.endsWith('/environ')) {
+          const env = environ[pid]
+          if (env === undefined) return fail('ENOENT')
+          if (env === 'EACCES') return fail('EACCES')
+          return env
+        }
         if (path.endsWith('/cmdline')) return argv[pid] ?? ''
-        if (path.endsWith('/comm')) return pid === 13 ? 'bash\n' : 'bun\n'
-        throw new Error('unexpected')
+        if (path.endsWith('/comm')) return `${comm[pid] ?? 'unknown'}\n`
+        throw new Error(`unexpected proc read: ${path}`)
       },
-      isOwnService: (a: string[]) => a.includes('dev-channel') || a.includes('tools-bridge'),
     }
-    const out = await walkProcessDescendants(10, deps)
+  }
+  const env = (...entries: string[]) => `${entries.join('\0')}\0`
+  /** The first child of `pid`, waited for (0 when none appeared). */
+  async function grandchildOf(pid: number): Promise<number> {
+    for (let i = 0; i < 150; i++) {
+      const kids = (await readFile(`/proc/${pid}/task/${pid}/children`, 'utf8').catch(() => '')).trim()
+      if (kids !== '') return Number.parseInt(kids.split(/\s+/)[0]!, 10)
+      await Bun.sleep(20)
+    }
+    return 0
+  }
+  /** Kill a spawned wrapper AND the grandchild it started, so no `sleep` outlives the test. */
+  async function killTree(p: ReturnType<typeof Bun.spawn>): Promise<void> {
+    const kids = (await readFile(`/proc/${p.pid}/task/${p.pid}/children`, 'utf8').catch(() => '')).trim()
+    for (const kid of kids === '' ? [] : kids.split(/\s+/)) {
+      try { process.kill(Number.parseInt(kid, 10), 'SIGKILL') } catch { /* already gone */ }
+    }
+    p.kill()
+    await p.exited
+  }
+  const own = { ownService: { env: MARKER, value: GEN } }
+
+  test('(a) a marked wrapper and the grandchild it starts (the npx shape) are the parent\'s own service: idle', async () => {
+    const proc = fakeProc({ 10: [11], 11: [13], 13: [] },
+      { 11: env('PATH=/bin', `${MARKER}=${GEN}`), 13: env(`${MARKER}=${GEN}`, 'HOME=/h') },
+      { 11: 'npm exec', 13: 'node' })
+    expect(await walkProcessDescendants(10, { ...proc, ...own })).toEqual({ verdict: 'idle', reasons: [] })
+  })
+
+  test('(b) work a service starts OUTSIDE its provenance is still a shell; names only', async () => {
+    const proc = fakeProc({ 10: [11, 12], 11: [13], 12: [], 13: [] },
+      { 11: env(`${MARKER}=${GEN}`), 12: env(`${MARKER}=${GEN}`), 13: env('PATH=/bin') },
+      { 11: 'bun', 12: 'bun', 13: 'bash' }, { 13: 'bash\0-c\0secret\0' })
+    const out = await walkProcessDescendants(10, { ...proc, ...own })
     expect(out).toEqual({ verdict: 'busy', reasons: ['parent descendants running: 1 (bash)'] })
-    // Control: with no grandchild, the own services alone are idle.
-    tree[11] = []
-    expect(await walkProcessDescendants(10, deps)).toEqual({ verdict: 'idle', reasons: [] })
+    expect(JSON.stringify(out)).not.toContain('secret')
+    expect(JSON.stringify(out)).not.toContain(GEN)
+  })
+
+  test('(c) NEGATIVE CONTROL: the configured argv with no provenance is a shell', async () => {
+    const proc = fakeProc({ 10: [11], 11: [] }, { 11: env('PATH=/bin') }, { 11: 'bun' },
+      { 11: 'bun\0dev-channel\0' })
+    expect(await walkProcessDescendants(10, { ...proc, ...own }))
+      .toEqual({ verdict: 'busy', reasons: ['parent descendants running: 1 (bun)'] })
+  })
+
+  test('(d) a marker from ANOTHER generation, or only as a later duplicate, is not this parent\'s', async () => {
+    const stale = fakeProc({ 10: [11], 11: [] }, { 11: env(`${MARKER}=gen-old`) }, { 11: 'bun' })
+    expect((await walkProcessDescendants(10, { ...stale, ...own })).verdict).toBe('busy')
+    // getenv reads the FIRST entry; a later matching duplicate proves nothing.
+    const dup = fakeProc({ 10: [11], 11: [] }, { 11: env(`${MARKER}=gen-old`, `${MARKER}=${GEN}`) }, { 11: 'bun' })
+    expect((await walkProcessDescendants(10, { ...dup, ...own })).verdict).toBe('busy')
+    // A value that merely starts with the generation is not it.
+    const prefix = fakeProc({ 10: [11], 11: [] }, { 11: env(`${MARKER}=${GEN}x`) }, { 11: 'bun' })
+    expect((await walkProcessDescendants(10, { ...prefix, ...own })).verdict).toBe('busy')
+  })
+
+  test('(e) an unreadable or absent environ is unproven: busy, never idle', async () => {
+    const denied = fakeProc({ 10: [11], 11: [] }, { 11: 'EACCES' }, { 11: 'bun' })
+    expect(await walkProcessDescendants(10, { ...denied, ...own }))
+      .toEqual({ verdict: 'busy', reasons: ['parent descendants running: 1 (bun)'] })
+    const absent = fakeProc({ 10: [11], 11: [] }, {}, { 11: 'bun' })
+    expect((await walkProcessDescendants(10, { ...absent, ...own })).verdict).toBe('busy')
+    const empty = fakeProc({ 10: [11], 11: [] }, { 11: '' }, { 11: 'bun' })
+    expect((await walkProcessDescendants(10, { ...empty, ...own })).verdict).toBe('busy')
+  })
+
+  test('(f) no provenance given, or an empty generation, exempts nothing', async () => {
+    const proc = fakeProc({ 10: [11], 11: [] }, { 11: env(`${MARKER}=`) }, { 11: 'bun' })
+    expect((await walkProcessDescendants(10, proc)).verdict).toBe('busy')
+    expect((await walkProcessDescendants(10, { ...proc, ownService: { env: MARKER, value: '' } })).verdict).toBe('busy')
+    // Control: the same process marked with the parent's generation is idle.
+    const marked = fakeProc({ 10: [11], 11: [] }, { 11: env(`${MARKER}=${GEN}`) }, { 11: 'bun' })
+    expect((await walkProcessDescendants(10, { ...marked, ...own })).verdict).toBe('idle')
+  })
+
+  test('(g) an own service whose children cannot be read is unknown, not idle', async () => {
+    const proc = fakeProc({ 10: [11] }, { 11: env(`${MARKER}=${GEN}`) }, { 11: 'bun' })
+    const out = await walkProcessDescendants(10, { ...proc, ...own,
+      readFile: async (path: string) => {
+        if (path === '/proc/11/task/11/children') throw Object.assign(new Error('EACCES'), { code: 'EACCES' })
+        return proc.readFile(path)
+      } })
+    expect(out).toEqual({ verdict: 'unknown', reasons: ['descendant process tree unreadable'] })
+  })
+
+  test.if(process.platform === 'linux')('a REAL process tree: the marked subtree is own, the same argv unmarked is a shell', async () => {
+    const REAL_GEN = `gen-real-${process.pid}-${Date.now()}`
+    const argv = ['/bin/sh', '-c', 'sleep 30 & wait']
+    const marked = Bun.spawn(argv, { env: { ...process.env, [MARKER]: REAL_GEN }, stdout: 'ignore', stderr: 'ignore' })
+    let unmarked: ReturnType<typeof Bun.spawn> | undefined
+    try {
+      const deps = { ownService: { env: MARKER, value: REAL_GEN } }
+      // Wait for the marked wrapper to start its grandchild, so the idle read below
+      // is about a real two-level tree and not a race.
+      expect(await grandchildOf(marked.pid)).toBeGreaterThan(0)
+      const markedOnly = await walkProcessDescendants(process.pid, deps)
+      expect(markedOnly.reasons.join('')).not.toContain('sleep')
+      // The identical argv, spawned without the marker: a shell.
+      unmarked = Bun.spawn(argv, { stdout: 'ignore', stderr: 'ignore' })
+      let both = await walkProcessDescendants(process.pid, deps)
+      for (let i = 0; i < 100 && !both.reasons.join('').includes('sleep'); i++) {
+        await Bun.sleep(20)
+        both = await walkProcessDescendants(process.pid, deps)
+      }
+      expect(both.verdict).toBe('busy')
+      expect(both.reasons.join('')).toContain('sleep')
+    } finally {
+      for (const p of [marked, unmarked]) {
+        if (p === undefined) continue
+        await killTree(p)
+      }
+    }
   })
 
   test('a real child process reads busy while it runs and idle after it exits', async () => {

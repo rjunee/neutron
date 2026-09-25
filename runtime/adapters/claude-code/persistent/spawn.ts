@@ -9,7 +9,7 @@ import { dropLocalOwnership } from './local-ownership.ts'
 import { randomUUID, randomBytes } from 'node:crypto'
 import { mkdirSync, writeFileSync } from 'node:fs'
 import { join } from 'node:path'
-import { mcpSurfaceFingerprint } from '../../../mcp-servers.ts'
+import { OWN_SERVICE_PROVENANCE_ENV, mcpSurfaceFingerprint } from '../../../mcp-servers.ts'
 import type { AgentSpec } from '../../../substrate.ts'
 import { type DeadTurnNotice, startApi5xxDeadTurnWatcher } from './api5xx-dead-turn-watcher.ts'
 import { buildReplArgv, resolveReplEffort } from './build-repl-argv.ts'
@@ -188,6 +188,12 @@ async function spawnSession(
     replSessionConfigPaths(channelName)
   mkdirSync(cfgDir, { recursive: true, mode: 0o700 })
 
+  // SERVICE PROVENANCE (#1226) — every entry below carries
+  // `OWN_SERVICE_PROVENANCE_ENV = childGeneration` in its `env` block, and ONLY there:
+  // never in `childEnv`, so what the REPL starts through its Bash tool does not carry
+  // it. The project liveness census reads it back from `/proc/<pid>/environ` to tell
+  // the REPL's own MCP services (and an `npx`/`uvx` wrapper's real server) from shells.
+  //
   // P0-1 — the dev-channel reply sink is ALWAYS present (`server:<name>`). When
   // this REPL opted into the tool bridge AND a `ReplToolBridge` is wired AND the
   // registry exposes ≥1 tool, add a SECOND `mcpServers` entry: a stdio bridge
@@ -204,6 +210,7 @@ async function spawnSession(
         SINK_TOKEN: childToken,
         SESSION_ID: sessionId,
         CHANNEL_NAME: channelName,
+        [OWN_SERVICE_PROVENANCE_ENV]: childGeneration,
       },
     },
   }
@@ -222,6 +229,7 @@ async function spawnSession(
           SESSION_ID: sessionId,
           TOOLS_MANIFEST_PATH: toolsManifestPath,
           BRIDGE_SERVER_NAME: TOOLS_BRIDGE_SERVER_NAME,
+          [OWN_SERVICE_PROVENANCE_ENV]: childGeneration,
         },
       }
       toolBridgeActive = true
@@ -264,7 +272,9 @@ async function spawnSession(
     mcpServers[server.name] = {
       command: server.command,
       args: [...server.args],
-      env: { ...server.env },
+      // The provenance marker LAST, so no owner-declared value can override it (the
+      // validator refuses the name as well). See `OWN_SERVICE_PROVENANCE_ENV`.
+      env: { ...server.env, [OWN_SERVICE_PROVENANCE_ENV]: childGeneration },
     }
     wiredExtraNames.push(server.name)
   }
@@ -391,6 +401,10 @@ async function spawnSession(
   // interactive REPL doesn't wedge on a blocking Ink dialog before it loads
   // the dev-channel MCP server (the `no-channel-ready` failure class).
   const childEnv = mergeEnv(options.env)
+  // The service provenance marker rides ONLY in the mcp-config `env` blocks above.
+  // Scrub any inherited copy from the REPL's own environment, or everything the agent
+  // starts through its Bash tool would carry it and read as the REPL's own service.
+  delete childEnv[OWN_SERVICE_PROVENANCE_ENV]
   // Force `claude` to load the `--mcp-config` dev-channel SYNCHRONOUSLY (await the
   // stdio MCP connect group at startup) instead of its default async, non-blocking
   // load. `claude`'s loader reads `MCP_CONNECTION_NONBLOCKING`: an explicit
