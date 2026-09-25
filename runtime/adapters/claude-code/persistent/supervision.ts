@@ -243,12 +243,6 @@ export function respawnReplSession(
   if (registryPath === undefined) {
     return { ok: false, reason: 'session-not-found', sessionKey }
   }
-  // A wedged or silent parent does not prove its native children are terminal.
-  // Force bypasses cooldown/cap only; it cannot authorize killing unknown work.
-  if (hasUnresolvedNativeChild(options)) {
-    return { ok: false, reason: 'spawn-failed', sessionKey,
-      error: new RespawnClaimRefusedError('Native child liveness is unresolved; refusing parent respawn') }
-  }
   const gate = gateFor(sessionKey)
   if (!gate.claim()) {
     // Another respawn for this key is already running in-process. The
@@ -265,6 +259,7 @@ export function respawnReplSession(
       | { kind: 'go'; record: ReplRegistryRecord }
       | { kind: 'registry-write-refused' }
       | { kind: 'scope-refused' }
+      | { kind: 'child-unresolved' }
       | { kind: 'no-record' }
       | { kind: 'in-flight' }
       | { kind: 'capped'; just_tripped?: boolean }
@@ -275,6 +270,12 @@ export function respawnReplSession(
       // eventual spawn: executeRespawn kills and evicts before it spawns.
       if (!registryConversationScopeMatches(rec, options)) {
         return { registry, result: { kind: 'scope-refused' }, skipSave: true }
+      }
+      // Establish ownership before consulting this scope's child authority.
+      // A wedged parent does not prove its native children are terminal; force
+      // bypasses cooldown/cap only, never this guard or its no-write refusal.
+      if (hasUnresolvedNativeChild(options)) {
+        return { registry, result: { kind: 'child-unresolved' }, skipSave: true }
       }
       const inFlight =
         rec.respawn_in_flight_at !== undefined && now - rec.respawn_in_flight_at < RESPAWN_IN_FLIGHT_TTL_MS
@@ -320,6 +321,8 @@ export function respawnReplSession(
 
     if (decision.kind === 'scope-refused') return { ok: false, reason: 'spawn-failed', sessionKey,
       error: new RespawnClaimRefusedError('Conversation scope is ambiguous or mismatched; refusing respawn') }
+    if (decision.kind === 'child-unresolved') return { ok: false, reason: 'spawn-failed', sessionKey,
+      error: new RespawnClaimRefusedError('Native child liveness is unresolved; refusing parent respawn') }
     if (decision.kind === 'no-record') return { ok: false, reason: 'session-not-found', sessionKey }
     if (decision.kind === 'in-flight') return { ok: false, reason: 'spawn-failed', sessionKey }
     if (decision.kind === 'capped') {

@@ -14,9 +14,11 @@ import type { PersistentReplSubstrateOptions } from '../types.ts'
 import type { PtyChild } from '../pty-host.ts'
 import type { ReplSession } from '../repl-session.ts'
 import { setBestModelOverride } from '../../../../models.ts'
+import { setNativeChildLiveness } from '../native-child-liveness.ts'
 
 const dirs: string[] = []
 afterEach(async () => {
+  setNativeChildLiveness('supervision-scope-owner', undefined)
   childByKey.clear(); pool.clear(); supervisedBySessionKey.clear()
   await shutdownAllPersistentRepls()
   resetBootAdoptionForTests()
@@ -29,7 +31,7 @@ function fixture(kind: 'legacy' | 'mismatch' | 'project') {
   dirs.push(dir)
   const paths = deriveReplSupervisionPaths(dir)
   const options: PersistentReplSubstrateOptions = {
-    substrate_instance_id: 'scope-test', user_id: 'owner', credential_identity: 'cred', cwd: dir,
+    substrate_instance_id: 'scope-test', user_id: 'supervision-scope-owner', credential_identity: 'cred', cwd: dir,
     project_id: kind === 'project' ? 'project' : 'general',
     ...(kind === 'mismatch' ? { conversationProjectId: null } : {}),
     replRegistryPath: paths.replRegistryPath, pendingRespawnsPath: paths.pendingRespawnsPath,
@@ -70,20 +72,30 @@ for (const kind of ['legacy', 'mismatch'] as const) {
   })
 
   for (const force of [false, true]) {
-    test(`${kind} respawn refuses before force/cap writes, kill, or eviction (force=${force})`, () => {
-      const { options, key, paths } = fixture(kind)
-      let killed = 0
-      const child = { hasExited: () => false, kill: () => { killed++ } } as unknown as PtyChild
-      childByKey.set(key, child)
-      const pooled = new Promise<never>(() => {})
-      pool.set(key, pooled)
-      const before = readFileSync(paths.replRegistryPath, 'utf8')
-      const result = respawnReplSession(options, key, 'admin-endpoint', 'scope test', force)
-      expect(result.ok).toBe(false)
-      expect(result.error?.message).toContain('scope')
-      expect(killed).toBe(0); expect(childByKey.get(key)).toBe(child); expect(pool.get(key)).toBe(pooled)
-      expect(readFileSync(paths.replRegistryPath, 'utf8')).toBe(before)
-    })
+    for (const census of ['absent', 'idle', 'busy', 'unreadable'] as const) {
+      test(`${kind} respawn refuses before force/cap writes, kill, or eviction (force=${force}, census=${census})`, () => {
+        const { options, key, row, paths } = fixture(kind)
+        saveRegistry(paths.replRegistryPath, { [key]: { ...row, capped_at: 1 } })
+        let censusReads = 0
+        if (census !== 'absent') setNativeChildLiveness(options.user_id!, () => {
+          censusReads++
+          if (census === 'unreadable') throw new Error('child authority unavailable')
+          return census === 'busy'
+        })
+        let killed = 0
+        const child = { hasExited: () => false, kill: () => { killed++ } } as unknown as PtyChild
+        childByKey.set(key, child)
+        const pooled = new Promise<never>(() => {})
+        pool.set(key, pooled)
+        const before = readFileSync(paths.replRegistryPath, 'utf8')
+        const result = respawnReplSession(options, key, 'admin-endpoint', 'scope test', force)
+        expect(result.ok).toBe(false)
+        expect(result.error?.message).toContain('scope')
+        expect(censusReads).toBe(0)
+        expect(killed).toBe(0); expect(childByKey.get(key)).toBe(child); expect(pool.get(key)).toBe(pooled)
+        expect(readFileSync(paths.replRegistryPath, 'utf8')).toBe(before)
+      })
+    }
   }
 
   test(`${kind} stale registration cannot consume pending inbound`, async () => {
