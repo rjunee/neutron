@@ -81,6 +81,8 @@ function buildCtx(): OpenWiringContext {
     project_slug: 'owner',
     env: {},
     db,
+    // #1237 — no project parent in this fixture is stamped (legacy-unknown).
+    admissionGenerationFor: async () => undefined,
     prewarmSubstrate: async () => {},
   }
 }

@@ -2,6 +2,7 @@ import { createProjectLauncher } from '@neutronai/trident/project-launcher.ts'
 import { TridentAttemptLedger } from '@neutronai/trident/attempt-ledger.ts'
 import { buildSubstrateWorkflowFire, buildWorkflowFirer } from '@neutronai/trident/inner-loop.ts'
 import { prepareProjectBuild } from './wiring/project-build.ts'
+import { buildProjectLiveness } from './wiring/project-liveness.ts'
 import { createWorkerTerminalHost, workerPlacementScope } from './wiring/project-build-terminal.ts'
 import type { WorkerPlacementHost } from '@neutronai/runtime/workers/worker-placement.ts'
 import { CodexOwnerBindings } from './wiring/codex-owner-binding.ts'
@@ -250,6 +251,7 @@ export type OpenComposition = CompositionInput &
       CompositionInput,
       | 'db'
       | 'project_admission'
+      | 'project_liveness'
       | 'project_slug'
       | 'chat_topics_surface'
       | 'chat_history_surface'
@@ -1196,6 +1198,16 @@ export function buildOpenGraphComposer(
     const resolveMcpServers = async (): Promise<ReadonlyArray<ResolvedOwnerMcpServer>> =>
       mcpServerStoreHolder.store === undefined ? [] : await mcpServerStoreHolder.store.resolveApproved()
     codexOwnerBindings.resolveApprovedServers = () => resolveMcpServers()
+    // #1237 — ONE project admission service per boot. Every conversation producer
+    // admits through it before queueing; the per-boot id stamps each durable lease
+    // so a later reconciler can tell this process's leases from a dead one's.
+    // Nothing here fences or replaces anything: no trigger exists in this build.
+    // Constructed HERE — ahead of the substrates and every terminal chain — because
+    // the project parents' spawn-time generation stamp (`admissionGenerationFor`
+    // below), the native-child lease of every bounded build step, and the
+    // build-lease release composed into all three terminal chains all read it. It
+    // needs only the database and the owner handle.
+    const projectAdmission = new ProjectAdmission({ db, ownerHandle: owner_handle, bootId: randomUUID() })
     const wiringCtx: OpenWiringContext = {
       llmPool,
       owner_handle,
@@ -1221,6 +1233,14 @@ export function buildOpenGraphComposer(
       // which is what confines an owner-installed subprocess to the owner's own
       // session.
       resolveMcpServers,
+      // #1237 — the admission generation a project PARENT is spawned under, stamped
+      // into its registry row by the spawn that made it. The pool names General
+      // `'general'` (or leaves it absent) — see `ReplSession.projectId` — so that is
+      // mapped to admission's null here; the conflation is the pool's existing
+      // boundary, not a new one. A real project whose id is literally `general`
+      // shares that pool value today, and so shares this answer.
+      admissionGenerationFor: (id) =>
+        projectAdmission.generationFor(id === undefined || id === 'general' ? null : id),
     }
     const {
       llmCallSubstrate,
@@ -1260,6 +1280,12 @@ export function buildOpenGraphComposer(
                   projectName: projectId => db.prepare<{ name: string }, [string]>(
                     'SELECT name FROM projects WHERE id = ? AND deleted_at IS NULL').get(projectId)?.name,
                 }) },
+                // #1237 — every native child of this run's project REPL holds a
+                // lease, for the run's OWN scope computed from the board key (as
+                // `dispatchAdmissionForKey` does) — never by reversing the pool's
+                // `'general'` sentinel on the line above.
+                nativeChildAdmission: projectAdmission.forNativeChild(
+                  workBoardProjectIdForKey(project_slug, input.run.project_slug) ?? null),
                 spawnProjectSession: async projectId => {
                   const projectSubstrate = makeProjectLiveAgentSubstrate(projectId)
                   if (projectSubstrate === null) throw new Error('Project conversation substrate is unavailable')
@@ -1663,13 +1689,6 @@ export function buildOpenGraphComposer(
     // fabricates an authenticated verdict. Reuses the SAME `NexusStore`
     // `wireMemory` built (reflection's `learning` emitter rides it), always live
     // now that the agent-nexus is the base behavior.
-    // #1237 — ONE project admission service per boot. Every conversation producer
-    // admits through it before queueing; the per-boot id stamps each durable lease
-    // so a later reconciler can tell this process's leases from a dead one's.
-    // Nothing here fences or replaces anything: no trigger exists in this build.
-    // Constructed HERE, ahead of every terminal chain, because the build-lease
-    // release below is composed into all three of them.
-    const projectAdmission = new ProjectAdmission({ db, ownerHandle: owner_handle, bootId: randomUUID() })
     // The dispatch chokepoint's admission for a BOARD SCOPE KEY — the trident
     // `project_slug` IS that key (owner slug = General, otherwise the project id),
     // and `workBoardProjectIdForKey` inverts it to the exact admission scope.
@@ -6956,6 +6975,15 @@ export function buildOpenGraphComposer(
       // #1237 — the admission service chat and acting turns already admit
       // through; later producers and maintenance owners consume this field.
       project_admission: projectAdmission,
+      // #1237 — the READ-ONLY liveness census of one project scope (parent, native
+      // children, shells). Exposed only: no loop, no trigger, nothing fences or
+      // replaces on its answer in this build.
+      project_liveness: buildProjectLiveness({
+        admission: projectAdmission,
+        turnInFlight: (projectId) => activityInspector.snapshot(inspectorScopeKey(projectId)).turn_in_flight,
+        runs: boardRunStore,
+        projectIdForRun: (run) => workBoardProjectIdForKey(project_slug, run.project_slug) ?? null,
+      }),
       // The graph binds the tool bridge after this composer returns. Survivors
       // regain authority only after that binding, with no synthetic chat turn.
       on_graph_ready: () => adoptLiveAgentRepls([null, ...listProjectIds()]),

@@ -1723,6 +1723,36 @@ describe('project admission reaches every production dispatch site and every ter
     expect(dispatchSites(mutant).filter((s) => s.admission === null)).toHaveLength(1)
   })
 
+  /** The `nativeChildAdmission` initializer of every `prepareProjectBuild(input, {...})` call. */
+  function nativeChildSites(text: string): Array<string | null> {
+    const file = parse(text)
+    const out: Array<string | null> = []
+    walk(file, (node) => {
+      if (!ts.isCallExpression(node) || node.expression.getText(file) !== 'prepareProjectBuild') return
+      const context = node.arguments[1]
+      if (context === undefined || !ts.isObjectLiteralExpression(context)) { out.push(null); return }
+      const prop = context.properties.find((p) => propName(p) === 'nativeChildAdmission')
+      out.push(prop !== undefined && ts.isPropertyAssignment(prop) ? prop.initializer.getText(file).replace(/\s+/g, ' ') : null)
+    })
+    return out
+  }
+
+  test('the bounded-build acting turn admits native children for the RUN\'s own scope', () => {
+    const sites = nativeChildSites(raw)
+    expect(sites).toHaveLength(1)
+    // The run's scope from its board key — the same derivation dispatch admission uses —
+    // never the pool's `'general'` sentinel reversed.
+    expect(sites[0]).toBe('projectAdmission.forNativeChild( workBoardProjectIdForKey(project_slug, input.run.project_slug) ?? null)')
+
+    // Mutant (must come out RED): the child scoped to the literal pool id instead.
+    const mutant = raw.replace(
+      'nativeChildAdmission: projectAdmission.forNativeChild(\n                  workBoardProjectIdForKey(project_slug, input.run.project_slug) ?? null),',
+      'nativeChildAdmission: projectAdmission.forNativeChild(id),',
+    )
+    expect(mutant).not.toBe(raw)
+    expect(nativeChildSites(mutant)[0]).not.toBe(sites[0])
+  })
+
   test('the build-lease release observer runs FIRST in all three terminal chains', () => {
     const chains = terminalChains(raw)
     expect(chains).toHaveLength(3)

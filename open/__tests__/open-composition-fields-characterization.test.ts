@@ -214,6 +214,9 @@ const EXPECTED_COMPOSITION_KEYS = [
   // #1237 — the project admission service the chat runner and acting turns
   // already admit through; exposed for the remaining producers to share.
   'project_admission',
+  // #1237 — the read-only project liveness census (parent, native children,
+  // shells) a maintenance owner consumes; nothing triggers it in this build.
+  'project_liveness',
   'project_slug',
   'realmode_cleanups',
   'reminder_dispatcher',

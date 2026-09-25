@@ -86,6 +86,8 @@ function makeCtx(): OpenWiringContext {
     project_slug: OWNER,
     env: {} as NodeJS.ProcessEnv,
     db,
+    // #1237 — no project parent in this fixture is stamped (legacy-unknown).
+    admissionGenerationFor: async () => undefined,
     prewarmSubstrate: async (): Promise<void> => {},
   }
 }

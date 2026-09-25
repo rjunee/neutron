@@ -22,6 +22,16 @@ export type AdmissionOutcome = AdmittedWork | AdmissionRefusal;
  * a later reconciler can tell a dead gateway's durable leases from live ones. */
 export type AdmissionProducer = 'chat' | 'acting-turn' | 'work-board' | 'hold-drain' | 'wakeup' | 'native-child';
 
+/**
+ * The admission a bounded build step takes for the NATIVE CHILD it creates inside
+ * the project REPL (#1237). `admit` names the run and the step; the lease's work
+ * reference is the RUN id, so the run's terminal release covers every step's child.
+ * Per-step release is the returned token-bound {@link AdmittedWork.release}.
+ */
+export interface NativeChildAdmission {
+  admit(runId: string, stepId: string): Promise<AdmittedWork | AdmissionRefusal>
+}
+
 export interface ProjectAdmissionOptions {
   db: ProjectDb;
   /** The immutable instance owner boundary of every scope this service admits. */
@@ -88,7 +98,10 @@ export class ProjectAdmission {
       const phase = this.store.inspect(scope)?.phase;
       return { status: 'fenced', phase: phase === undefined || phase === 'open' ? null : phase };
     }
-    const lease = admitted.lease;
+    return this.admittedWork(admitted.lease);
+  }
+
+  private admittedWork(lease: AdmissionLease): AdmittedWork {
     let releasing = false;
     return {
       status: 'admitted',
@@ -137,13 +150,52 @@ export class ProjectAdmission {
   }
 
   /**
-   * Release a run's build lease(s) when the run is TERMINAL. Work-bound and
+   * The native-child admission for ONE project scope (#1237). A child joins its
+   * run's `build` lease ({@link ProjectAdmissionStore.admitChild}) under that
+   * lease's generation, even while the scope is fenced: it is the admitted run
+   * draining. A run holding NO build lease has no drain right, so it falls back to
+   * an ordinary admission — which a fenced scope refuses. Registration is
+   * existence-verified exactly as {@link admit}'s.
+   */
+  forNativeChild(projectId: string | null): NativeChildAdmission {
+    return {
+      admit: async (runId, stepId) => {
+        if (!stepId.trim()) throw new Error('Step reference required');
+        const scope = this.scopeFor(projectId);
+        if (!(await this.registerIfLive(scope))) return { status: 'unknown' };
+        const joined = await this.store.admitChild(
+          scope, { reason: 'build', workRef: runId }, 'liveChild', this.producerFor('native-child'), runId);
+        if (joined.status === 'admitted') return this.admittedWork(joined.lease);
+        if (joined.status === 'unknown') return { status: 'unknown' };
+        return this.admit(projectId, 'liveChild', 'native-child', runId);
+      },
+    };
+  }
+
+  /**
+   * Release EVERY lease a TERMINAL run holds: its `build` lease(s) and the
+   * `liveChild` leases its steps' native children left behind (a step whose outcome
+   * was unknown retains its child lease on purpose). Work-bound and
    * generation-independent ({@link ProjectAdmissionStore.releaseWork}): a terminal
-   * run's activity is over in every generation. Idempotent — a second call
-   * releases 0.
+   * run's activity is over in every generation. Returns the total removed;
+   * idempotent — a second call releases 0.
    */
   async releaseBuild(projectId: string | null | undefined, runId: string): Promise<number> {
-    return this.store.releaseWork(this.scopeFor(projectId), 'build', runId);
+    const scope = this.scopeFor(projectId);
+    return (await this.store.releaseWork(scope, 'build', runId))
+      + (await this.store.releaseWork(scope, 'liveChild', runId));
+  }
+
+  /**
+   * The CURRENT admission generation of a live scope, for stamping a parent REPL
+   * at spawn (#1237): `undefined` for an unknown scope (no live project row).
+   * Registers the scope like any admission does. It is the stamp's source, never a
+   * reading of any existing child's generation.
+   */
+  async generationFor(projectId: string | null | undefined): Promise<number | undefined> {
+    const scope = this.scopeFor(projectId);
+    if (!(await this.registerIfLive(scope))) return undefined;
+    return this.store.inspect(scope)?.generation;
   }
 
   /** This owner's durable leases (optionally of one reason). Read-only. */

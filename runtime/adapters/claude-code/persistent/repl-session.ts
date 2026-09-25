@@ -331,6 +331,15 @@ export class ReplSession {
    * for; {@link mayHoldPriorContext} is the one such inference in the tree.
    */
   adopted = false
+  /**
+   * #1237 — the project admission generation this child was SPAWNED under, read by
+   * the spawn that made it (`PersistentReplSubstrateOptions.admissionGeneration`) and
+   * persisted as the registry row's `admission_generation`. An adopted session gets
+   * the row's value back; a row without one (from before the field, or a spawn whose
+   * reader answered nothing) leaves this `undefined` — a LEGACY parent whose native
+   * children cannot be accounted for. Never inferred from the current fence.
+   */
+  admissionGeneration: number | undefined = undefined
 
   /**
    * Might this REPL's context already contain a previous turn?

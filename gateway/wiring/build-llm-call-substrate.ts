@@ -417,6 +417,10 @@ export interface BuildLlmCallSubstrateInput {
    *  (see `PersistentReplSubstrateOptions.hostsLiveWork`). Wired on the trident
    *  fire substrate only. */
   hostsLiveWork?: (childGeneration: string) => number
+  /** #1237 — the project admission generation for the project id a dispatch
+   *  resolves, bound per spawn onto `PersistentReplSubstrateOptions.admissionGeneration`
+   *  (see there). Wired on the live-chat (`cc-agent-*`) family only. */
+  admissionGeneration?: (projectId: string | undefined) => Promise<number | undefined>
   onSizeAlert?: (info: { sessionKey: string; severity: SizeSeverity; sizeBytes: number }) => void
   onRateLimitBanner?: (notice: RateLimitBannerNotice) => void | Promise<void>
   /** Floor-clamp notice — an owner-facing spawn was resolved below the configured
@@ -815,6 +819,12 @@ async function claudeOptionsFor(
   if (input.onDeadTurnNotice !== undefined) opts.onDeadTurnNotice = input.onDeadTurnNotice
   if (input.onChildCrash !== undefined) opts.onChildCrash = input.onChildCrash
   if (input.hostsLiveWork !== undefined) opts.hostsLiveWork = input.hostsLiveWork
+  if (input.admissionGeneration !== undefined) {
+    // Bound to THIS dispatch's resolved project, so the spawn it may cause stamps
+    // the parent with its own scope's generation.
+    const readGeneration = input.admissionGeneration
+    opts.admissionGeneration = () => readGeneration(projectId)
+  }
   if (input.onSizeAlert !== undefined) opts.onSizeAlert = input.onSizeAlert
   if (input.onRateLimitBanner !== undefined) opts.onRateLimitBanner = input.onRateLimitBanner
   if (input.onModelFloorApplied !== undefined) {

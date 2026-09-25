@@ -282,6 +282,11 @@ export function wireSubstrates(ctx: OpenWiringContext): WiredSubstrates {
           ...(ctx.resolveMcpServers !== undefined
             ? { resolveExtraMcpServers: ctx.resolveMcpServers }
             : {}),
+          // #1237 — the project PARENT's spawn-time admission-generation stamp. Keyed
+          // by the project id the dispatch resolves (this substrate serves every
+          // project's live chat), so a parent is stamped with its OWN scope's
+          // generation. Only this family: nudge, compose and fire are not parents.
+          admissionGeneration: ctx.admissionGenerationFor,
           // O6 — the notice-family sinks + recovered-reply sink are wired ONLY
           // here (the owner's conversational REPL). So a rising-edge dead-turn /
           // size-alert / rate-limit-banner state surfaces as an owner chat bubble
