@@ -43,6 +43,11 @@ publication still requires the normal purity check. Clean git exports of the bas
 and integrated head produced identical leak findings; only the scan-root name and
 candidate file count differed.
 
+CI also exercised the identity-reader registry: the importer's opaque evidence
+reference regex conservatively matches identity-name candidates. It is registered
+as a regex-only match, with an actual-reader positive control; the detector and
+its fail-closed membership rule are unchanged.
+
 The complete shared-host suite is deferred while the live build lane owns host
 validation; no concurrent full suite was started. Full CI and
 external HTTPS served verification remain publication/deployment gates. Local
