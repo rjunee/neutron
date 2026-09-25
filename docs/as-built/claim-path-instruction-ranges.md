@@ -60,7 +60,8 @@ establish them nor complete the broader efficiency acceptance.
 CI's identity-env registry initially reported `trident/claimed-paths.ts` as
 unregistered because its new tokenizer regexes match identity-variable names.
 The parser does not read those variables. The registry now records this
-conservative regex match, with a static control that distinguishes the tokenizer
-from an actual identity-env reader. The registry detector remains unchanged.
+conservative regex match, with static literal-key and direct-access controls
+that distinguish the tokenizer from an actual identity-env reader. The registry
+detector remains unchanged.
 The registry suite passes 22 tests, the parser/store suites pass 203 tests, and
 root and Trident TypeScript checks pass on this repair.
