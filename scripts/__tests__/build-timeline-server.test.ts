@@ -4,7 +4,7 @@ import { tmpdir } from 'node:os'
 import { join } from 'node:path'
 import { createTimelineHandler, startTimelineServer, timelineWindow, timelineSourceReader } from '../build-timeline-server.ts'
 import { appendPhaseObservation } from '../build-timeline-sources.ts'
-import { combineTimelineSources } from '../../trident/build-timeline-catalogue.ts'
+import { combineTimelineSources } from '@neutronai/trident/build-timeline-catalogue.ts'
 
 const auth = `Basic ${Buffer.from('viewer:test-secret').toString('base64')}`
 const snapshot = () => combineTimelineSources({ observedAt: 1000, repositories: [] }, [], [], 1000)

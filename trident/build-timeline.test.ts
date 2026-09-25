@@ -49,7 +49,7 @@ test('real SQLite writer → read-only timeline preserves overlaps, receipts, PR
       const key = { run_id: 'one', step_id: step, attempt_id: 'dispatch' }
       await ledger.admit({ ...key, phase, role, task_id: 'task', head_sha: 'a'.repeat(40),
         review_seat: role === 'review' ? step : null, provider: 'codex', requested_model: 'model',
-        resolved_model: 'observed-model', placement: 'headless', queued_at: at(1) })
+        resolved_model: 'requested-model', placement: 'headless', queued_at: at(1) })
       await ledger.lifecycle(key, { started_at: at(start), ended_at: at(end), outcome: 'completed' })
       if (step === 'build') await ledger.observe(key, { receipt_id: 'receipt', source: 'provider',
         observed_at: at(10), model_reported: 'observed-model', input_tokens: 5, output_tokens: 3,
@@ -64,6 +64,10 @@ test('real SQLite writer → read-only timeline preserves overlaps, receipts, PR
       expect(card.end! - card.start!).toBe(30_000)
       expect(card.segments.map(span => span.lane)).toEqual([0, 0, 1])
       expect(card.segments[0]!.usage.tokens).toBe(20)
+      expect(card.segments[0]!.detail).toContain('provider-reported model')
+      expect(card.segments[1]!.detail).toContain('actual model unreported')
+      expect(card.segments[0]!.model).toBe('observed-model')
+      expect(card.segments[1]!.model).toBe('requested-model')
       expect(card.segments[1]!.usage.tokens).toBeNull()
       expect(card.phaseTotals.some(row => row.runId === 'one' && row.phase === 'build')).toBe(false)
       expect(card.gaps.map(gap => [gap.start - at(0), gap.end - at(0)])).toEqual([[0, 2000], [10000, 12000], [24000, 30000]])

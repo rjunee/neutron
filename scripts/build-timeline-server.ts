@@ -1,8 +1,8 @@
 import { createHash, timingSafeEqual } from 'node:crypto'
 import { readFile, stat } from 'node:fs/promises'
-import { openTimelineReader, type TimelineSnapshot } from '../trident/build-timeline.ts'
-import { combineTimelineSources, type PrCatalogue } from '../trident/build-timeline-catalogue.ts'
-import { renderTimeline, TIMELINE_PAGE, TIMELINE_SCRIPT } from '../trident/build-timeline-html.ts'
+import { openTimelineReader, type TimelineSnapshot } from '@neutronai/trident/build-timeline.ts'
+import { combineTimelineSources, type PrCatalogue } from '@neutronai/trident/build-timeline-catalogue.ts'
+import { renderTimeline, TIMELINE_PAGE, TIMELINE_SCRIPT } from '@neutronai/trident/build-timeline-html.ts'
 import { readPhaseObservations } from './build-timeline-sources.ts'
 
 export interface TimelineServerOptions {

@@ -39,6 +39,7 @@ describe('bounded native Codex operation reconstruction', () => {
     const result = await run([command('bash scripts/run-tests.sh'), command('bun test x', { id: 'exec-2', exit_code: 1, status: 'failed' }, { started_at_ms: 3000, completed_at_ms: 5000 })])
     expect(result.observations.map(o => [o.label, o.startedAt, o.endedAt])).toEqual([['Host test suite', 2000, 4000], ['Local test command', 3000, 5000]])
     expect(result.observations[1]!.source.basis).toContain('exit 1')
+    expect((await run([command('bash scripts/check-shared-host.sh')])).observations[0]!.label).toBe('Shared-host validation')
   })
   test('rejects missing, expired, ambiguous and wrong-cwd bindings', async () => {
     for (const bindings of [[], [{ ...options.bindings![0]!, endedAt: 3000 }], [options.bindings![0]!, options.bindings![0]!], [{ ...options.bindings![0]!, cwd: '/tmp/other' }]]) {

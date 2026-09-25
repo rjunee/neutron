@@ -71,6 +71,7 @@ function classify(args: string[]): { phase: string; label: string } | null {
   while (/^[A-Za-z_][A-Za-z0-9_]*=/.test(a[0] ?? '')) a = a.slice(1)
   if ((a[0] === 'bun' && a[1] === 'test') || (['npm', 'pnpm', 'yarn'].includes(a[0] ?? '') && a[1] === 'test')) return { phase: 'test', label: 'Local test command' }
   if (['bash', 'sh'].includes(a[0] ?? '') && a[1] === 'scripts/run-tests.sh') return { phase: 'test', label: 'Host test suite' }
+  if (['bash', 'sh'].includes(a[0] ?? '') && a[1] === 'scripts/check-shared-host.sh') return { phase: 'test', label: 'Shared-host validation' }
   if (a[0] === 'gh' && a[1] === 'pr' && ['create', 'merge'].includes(a[2] ?? '')) return { phase: a[2] === 'merge' ? 'merge' : 'publish', label: a[2] === 'merge' ? 'PR merge command' : 'PR create command' }
   return null
 }

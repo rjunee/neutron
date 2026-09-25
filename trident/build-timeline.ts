@@ -39,6 +39,7 @@ interface AttemptRow extends Counters {
   role: string
   review_seat: string | null
   resolved_model: string
+  model_reported: string | null
   queued_at: number
   started_at: number | null
   ended_at: number | null
@@ -158,7 +159,7 @@ export function projectTimeline(
     }
     for (const attempt of attempts.filter(row => ids.has(row.run_id))) {
       const usage = timelineUsage(attempt)
-      const detail = `${attempt.step_id} · ${attempt.review_seat ?? attempt.role} · ${attempt.resolved_model} · ${attempt.outcome ?? 'no recorded outcome'}`
+      const detail = `${attempt.step_id} · ${attempt.review_seat ?? attempt.role} · ${attempt.outcome ?? 'no recorded outcome'} · ${attempt.model_reported === null ? 'resolved model request; actual model unreported' : 'provider-reported model'}`
       if (attempt.started_at === null || card.start === null || card.end === null) {
         card.warnings.push(`${detail}: start unrecorded; tokens ${usage.tokens ?? 'unknown'} (${usage.coverage}).`)
         continue
@@ -173,7 +174,7 @@ export function projectTimeline(
       card.segments.push({
         id: `${attempt.run_id}/${attempt.step_id}/${attempt.attempt_id}`, runId: attempt.run_id,
         label: label(attempt), phase: attempt.phase, start: attempt.started_at, end,
-        timing: attempt.ended_at === null ? 'open' : 'recorded', lane: 0, usage, detail, model: attempt.resolved_model,
+        timing: attempt.ended_at === null ? 'open' : 'recorded', lane: 0, usage, detail, model: attempt.model_reported ?? attempt.resolved_model,
       })
     }
     for (const run of group) {
@@ -276,7 +277,7 @@ export function openTimelineReader(path: string, repoPath: string, limit = -1) {
       const attempts: AttemptRow[] = [], stages: StageRow[] = [], phases: PhaseRow[] = []
       for (const run of runs) {
         attempts.push(...db.query<AttemptRow, [string]>(`SELECT a.run_id, a.step_id, a.attempt_id, a.phase,
-          a.role, a.review_seat, a.resolved_model, a.queued_at, a.started_at, a.ended_at, a.outcome,
+          a.role, a.review_seat, a.resolved_model, r.model_reported, a.queued_at, a.started_at, a.ended_at, a.outcome,
           r.input_tokens, r.output_tokens, r.cache_read_tokens, r.cache_creation_tokens, r.cost_usd, r.source, r.observed_at
           FROM code_trident_attempts a LEFT JOIN code_trident_attempt_receipts r
           ON a.run_id = r.run_id AND a.step_id = r.step_id AND a.attempt_id = r.attempt_id WHERE a.run_id = ?`).all(run.id))

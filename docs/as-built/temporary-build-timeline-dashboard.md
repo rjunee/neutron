@@ -29,7 +29,7 @@ only the known refresh script. Host-specific HTTPS/service configuration remains
 outside this public tree. See `docs/build-timeline-dashboard.md` for operation.
 
 Local verification on this branch: the integrated focused/source/importer/HTTP
-and generated-index tests passed **71 tests, 581 assertions**. Both root and
+and generated-index tests passed **71 tests, 586 assertions**. Both root and
 Trident TypeScript checks passed. Six deliberate semantic mutations were killed:
 anonymous-auth bypass, refusal of valid auth, unknown tokens changed to zero,
 explicit zero changed to unknown, orphan stage ends admitted, and valid paired
@@ -39,7 +39,9 @@ Independent cross-model review found no blocking runtime, authentication or
 attribution defect in the integrated projection, renderer and server. The review
 specifically checked shared spans, escaping/CSP, credential gates and stale/unknown
 coverage. The local whole-tree leak scan encountered existing denylist matches;
-publication still requires the normal purity check.
+publication still requires the normal purity check. Clean git exports of the base
+and integrated head produced identical leak findings; only the scan-root name and
+candidate file count differed.
 
 The complete shared-host suite is deferred while the live build lane owns host
 validation; no concurrent full suite was started. Full CI and
