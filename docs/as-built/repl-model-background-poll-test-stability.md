@@ -1,0 +1,9 @@
+## 2026-09-25 — Synchronize the REPL model poll race test with the request
+
+Refs #1320. Governing spec: `docs/spec-items/repl-model-background-poll-test-stability.md`.
+
+The device test for a background REPL model read racing an acknowledged switch could fail at its setup assertion under shared host load. It slept 5.1 seconds for a production interval scheduled at 5 seconds and then assumed the second GET had begun. The same timing assumption was present in the test that discovers an owner after opening the screen.
+
+An exact-head host run exposed a second failure in owner discovery: the test observed the second GET but still rendered `Model: unknown`. Its signal ran at request start, before response parsing and React's render. The mock's process-global GET count could also include other mounted test components. The test now captures and fires the component's 5-second poll callback, then holds its GET by a test-specific auth token. Owner discovery checks that no native controls appear while the response is pending, releases it, and waits for the rendered model and controls. The background-switch case releases its stale response only after the POST acknowledgement. The model control and its production poll are unchanged.
+
+The focused 18-test file passed in an isolated exact-head checkout, including the positive case that applies the next focus GET after it completes. A shared-process run with the adjacent reachability and usage-dashboard files passed 46/46 tests. A temporary reverse mutation removing the component's generation check made the stale-response case fail with `Model: cheap` instead of `frontier`; removing the poll's state update made owner discovery fail after response release. Both mutations were restored. Root, app and Trident TypeScript checks passed. The earlier exact-head host receipt remains failed; this revision needs a new host receipt before merge and is not a served-product verification.
