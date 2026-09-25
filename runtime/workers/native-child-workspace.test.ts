@@ -179,17 +179,20 @@ test('an unrepresented restart lease exhausts the original admission budget with
   f.setPending([{ runId: f.requests[0]!.run_id, stepId: f.requests[0]!.step_id, generation: 0 },
     { runId: 'prior-gateway', stepId: 'unknown-child', generation: 0 }])
   let writes = 0
+  let preparationEnds = 0
   f.session.child.submitLine = async () => { writes++ }
-  const outcome = await createClaudeActingTurn(f.binding(0))({ ...f.input(0), timeout_ms: 30 })
+  const outcome = await createClaudeActingTurn({ ...f.binding(0), onDispatchSubmitted: () => { preparationEnds++ } })({ ...f.input(0), timeout_ms: 30 })
   expect(outcome.kind).toBe('refused')
   expect(writes).toBe(0)
+  expect(preparationEnds).toBe(0)
   f.complete(0)
 })
 
 test('unknown writer retains durable ownership but cannot wedge the local queue', async () => {
   const f = await fixture()
-  f.session.child.submitLine = async () => { throw new Error('lost acknowledgement') }
-  await expect(createClaudeActingTurn(f.binding(0))(f.input(0))).rejects.toThrow('lost acknowledgement')
+  let preparing = true
+  f.session.child.submitLine = async () => { expect(preparing).toBe(false); throw new Error('lost acknowledgement') }
+  await expect(createClaudeActingTurn({ ...f.binding(0), onDispatchSubmitted: () => { preparing = false } })(f.input(0))).rejects.toThrow('lost acknowledgement')
   expect(f.session.turnSlotHeld).toBe(1)
   expect(nativeChildCensusKnown(f.workspaces[1]!)).toBe(false)
   const waiting = f.session.acquireTurn().then(release => { release(); return true })
@@ -207,8 +210,9 @@ test('unknown writer retains durable ownership but cannot wedge the local queue'
 test('acknowledged dispatch without a bound child returns unknown and leaves the next turn bounded', async () => {
   const f = await fixture()
   let submissions = 0
-  f.session.child.submitLine = async () => { submissions++ }
-  const outcome = await createClaudeActingTurn(f.binding(0))({ ...f.input(0), timeout_ms: 40 })
+  let preparing = true
+  f.session.child.submitLine = async () => { expect(preparing).toBe(false); submissions++ }
+  const outcome = await createClaudeActingTurn({ ...f.binding(0), onDispatchSubmitted: () => { preparing = false } })({ ...f.input(0), timeout_ms: 40 })
   expect(outcome.kind).toBe('unknown')
   expect(submissions).toBe(1)
   expect(nativeChildCensusKnown(f.workspaces[1]!)).toBe(false)

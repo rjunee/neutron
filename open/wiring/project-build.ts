@@ -396,7 +396,7 @@ export async function prepareProjectBuild(input: InnerLoopInput, context: Projec
   // (see the acting turn below). Resolves or spawns the project REPL and hands
   // the step to it as a native child.
   const nativeWorkspaces = new Map<string, NativeChildWorkspace>()
-  const nativeChildTurn = async (turn: Parameters<ProjectActingTurn>[0], generation: number): ReturnType<ProjectActingTurn> => {
+  const nativeChildTurn = async (turn: Parameters<ProjectActingTurn>[0], generation: number, onDispatchSubmitted: () => void): ReturnType<ProjectActingTurn> => {
     const deadline = turn.deadline_ms ?? Date.now() + Math.min(turn.timeout_ms, turn.request.budget.wall_ms)
     const expired = () => turn.signal.aborted || Date.now() >= deadline
     const expiredBeforeDispatch = () => ({ kind: 'refused' as const, reason: 'capability-unsupported' as const,
@@ -487,7 +487,7 @@ export async function prepareProjectBuild(input: InnerLoopInput, context: Projec
       } catch { return { kind: 'refused', reason: 'capability-unsupported', detail: 'Native writer has no checked independent worktree admission.' } }
     }
     if (expired()) return expiredBeforeDispatch()
-    return createClaudeActingTurn({ project_id: context.projectId, topic_id: topic, session, projects_dir: resolveTranscriptProjectsDir(options), ...(workspace ? { workspace } : {}),
+    return createClaudeActingTurn({ project_id: context.projectId, topic_id: topic, session, projects_dir: resolveTranscriptProjectsDir(options), ...(workspace ? { workspace } : {}), onDispatchSubmitted,
       grants: { tools: 'edit-and-run', writable: true, network: true, roots: options.extra_dirs ?? [] } })({ ...turn,
         deadline_ms: deadline, timeout_ms: Math.max(1, deadline - Date.now()) })
   }
@@ -521,7 +521,7 @@ export async function prepareProjectBuild(input: InnerLoopInput, context: Projec
       }
       let outcome: Awaited<ReturnType<ProjectActingTurn>> | undefined
       try {
-        outcome = await nativeChildTurn(turn, child.generation)
+        outcome = await nativeChildTurn(turn, child.generation, () => context.nativeChildAdmission.finishPreparing?.(child.lease))
         return outcome
       } finally {
         context.nativeChildAdmission.finishPreparing?.(child.lease)

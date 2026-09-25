@@ -12,7 +12,7 @@ spellings cannot supply that authority.
 Terminal text/Enter remains serialized. Only unique provider child evidence
 matching the complete request and parent session yields the submission slot.
 Disjoint admitted writers then overlap, as do admitted readers; conflicting
-writers and ordinary turns wait. Sibling admissions finish their workspace
+writers and ordinary turns behind bound children wait. Sibling admissions finish their workspace
 measurements within the original request budget before dispatch, while unknown
 or foreign durable leases remain a fence
 (`runtime/workers/claude-acting-turn.ts:233`). No headless same-provider route or
@@ -34,6 +34,23 @@ turns also refuse unresolved durable children when a restarted process has no
 local waiter. The exact-scope census exposes run, step and generation only;
 General, a named project called `general`, and different owners remain separate.
 
+Adversarial review of the integrated candidate found two liveness mistakes.
+A submitted child with no binding or terminal evidence retained its durable
+lease correctly, but also held the in-process queue forever. The queue now
+unwedges into an explicit refusal: the unknown lease is never released or
+eligible for redispatch, and the next child cannot claim independent ownership
+(`runtime/adapters/claude-code/persistent/repl-session.ts`,
+`runtime/workers/native-child-workspace.ts`). A unique child admitted by this
+boot but still preparing has not written to the REPL, so ordinary chat may take
+its queued slot; the exception ends synchronously immediately before a possible
+submission, not on the later acting-turn unwind. Duplicate, submitted,
+ambiguous and previous-boot leases remain refusals. The exception applies only
+to chat: eviction, model control, adoption and `/clear` reset continue to see
+every unresolved lease (`gateway/project-admission.ts`,
+`runtime/adapters/claude-code/persistent/native-child-liveness.ts`,
+`runtime/adapters/claude-code/persistent/context-reset.ts`). Both user reset
+and periodic sweep consume the guarded reset actuator.
+
 Verification includes the real consuming
 `open/__tests__/project-build-e2e.test.ts` barriers: two independent writable
 children held concurrently, simultaneous admissions, aliased worktrees remaining
@@ -47,6 +64,16 @@ dropping unknown ownership and bypassing the durable census fail assertions.
 Barrier-driven preparation tests also preserve legitimate within-budget dispatch
 while rejecting dispatch after expiry or cancellation; deadline mutants cover
 both over-admission and over-refusal.
+
+Follow-up controls cover lost acknowledgement and acknowledged-but-unbound
+submission, a bounded next queue turn, legitimate local preparation, duplicate
+and previous-boot refusals, strict global liveness, and `/clear` refusal while
+unknown followed by a permitted reset after reconciliation. Disabling unknown
+unqueueing, bypassing an unresolved lease, or dropping the chat preparation
+exemption each turns a relevant test red; marking every bound child ambiguous
+breaks alias serialization, and weakening global liveness breaks model-control
+checks. The exact callback runs before `submitLine`; pre-submission refusal does
+not end the preparation exemption early.
 
 The repository-wide suite and live deployment are outside this change's local
 verification; this record does not claim a deployed throughput measurement.

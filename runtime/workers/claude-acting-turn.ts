@@ -22,6 +22,9 @@ export interface ClaudeActingSession {
   grants: { tools: ToolGrant; writable: boolean; network: boolean; roots: readonly string[] }
   /** Host-only admission after durable child lease and assigned worktree checks. */
   workspace?: NativeChildWorkspace
+  /** Ends the chat-only preparation exemption immediately before the first
+   * possible submission; it does not release the durable child lease. */
+  onDispatchSubmitted?: () => void
 }
 
 const toolRank: Record<ToolGrant, number> = { none: 0, 'read-only': 1, edit: 2, 'edit-and-run': 3 }
@@ -255,6 +258,7 @@ export function createClaudeActingTurn(binding: ClaudeActingSession, clock: Obse
         const dispatch = 'Execute the prompt in this JSON dispatch specification: ' + JSON.stringify({ ...spec, effort: request.effort })
         const boundary = await transcriptBoundary(transcript)
         if (expired()) return beforeDispatchExpired()
+        binding.onDispatchSubmitted?.()
         submitted = true
         await child.submitLine!(dispatch, stopped)
         const dispatchDeadline = Math.min(deadline, clock.now() + DISPATCH_TIMEOUT_MS)

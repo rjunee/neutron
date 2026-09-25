@@ -20,7 +20,8 @@
 
 import { existsSync } from 'node:fs'
 import { fireAndForget } from '@neutronai/logger/fire-and-forget.ts'
-import { pool } from './pool-state.ts'
+import { pool, supervisedBySessionKey } from './pool-state.ts'
+import { hasUnresolvedNativeChild } from './native-child-liveness.ts'
 import type { ReplSession } from './repl-session.ts'
 import { measurePostCompactSize, sessionJsonlPath } from './session-size-watchdog.ts'
 import {
@@ -198,6 +199,8 @@ export async function actuateSessionContextReset(
 ): Promise<ActuateContextResetOutcome> {
   // Pre-mutex liveness: an already-exited child has nothing to clear.
   if (session.hasChildExited()) return { status: 'dead' }
+  const childUnresolved = () => hasUnresolvedNativeChild(supervisedBySessionKey.get(session.sessionKey))
+  if (childUnresolved()) return { status: 'busy' }
 
   // BOUNDED acquire: `acquireTurn()` enqueues the slot SYNCHRONOUSLY on call, so
   // once we've called it the slot WILL eventually be granted. Race it against a
@@ -223,10 +226,12 @@ export async function actuateSessionContextReset(
     // Re-check liveness under the mutex — the child could have exited while we
     // waited for the slot.
     if (session.hasChildExited()) return { status: 'dead' }
+    if (childUnresolved()) return { status: 'busy' }
     // The pool.ts:378-385 sequence verbatim: settle idle, write `/clear`, force a
     // beat so the idle wait can't short-circuit before the TUI reacts, settle idle
     // again so the REPL is clean + at rest for the next turn.
     await waitForReplIdle(session, opts.idle_quiet_ms, opts.idle_max_ms)
+    if (childUnresolved()) return { status: 'busy' }
     // TEXT, THEN AN `enter` KEY — herdr's `pane.send_text` does not submit. The
     // submit is MANDATORY, and it is AWAITED: this function's whole output is a
     // claim about whether the reset happened, so it may not be built on a
