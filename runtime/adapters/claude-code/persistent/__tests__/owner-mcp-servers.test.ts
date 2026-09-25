@@ -37,7 +37,7 @@ import {
   OWNER_MCP_STARTUP_TIMEOUT_MS,
   mcpStartupTimeoutMs,
 } from '../signatures.ts'
-import { MCP_SERVERS_MAX } from '../../../../mcp-servers.ts'
+import { MCP_SERVERS_MAX, OWN_SERVICE_PROVENANCE_ENV } from '../../../../mcp-servers.ts'
 
 import type { Event } from '../../../../events.ts'
 import type { ResolvedOwnerMcpServer } from '../../../../mcp-servers.ts'
@@ -267,7 +267,53 @@ describe('an approved server reaches BOTH the config and the allow-list', () => 
     // The exact argv the approval prompt described — not a normalised variant.
     expect(entry!.command).toBe('/usr/local/bin/example-mcp')
     expect(entry!.args).toEqual(['--stdio', '--region', 'eu'])
-    expect(entry!.env).toEqual({ EXAMPLE_API_KEY: 'sk-not-a-real-key' })
+    // The owner's env, plus the spawn-correlated provenance marker (#1226) — nothing else.
+    const session = await [...pool.values()][0]!
+    expect(entry!.env).toEqual({ EXAMPLE_API_KEY: 'sk-not-a-real-key', [OWN_SERVICE_PROVENANCE_ENV]: session.childGeneration })
+  })
+
+  it('stamps EVERY entry with the SAME provenance marker — this child\'s generation — and never the REPL\'s own env', async () => {
+    // The liveness census exempts a process from the busy-shell count only when its
+    // environ carries this marker with the parent's `childGeneration`. It must reach
+    // the dev channel, the bridge and the owner's server alike, and must NOT reach the
+    // REPL's environment, or everything the agent starts through Bash would carry it.
+    const inherited = process.env[OWN_SERVICE_PROVENANCE_ENV]
+    process.env[OWN_SERVICE_PROVENANCE_ENV] = 'inherited-by-the-gateway'
+    try {
+      setReplToolBridge(bridge())
+      const { host, argvs, envs } = makeCapturingHost()
+      const sub = createPersistentReplSubstrate(
+        opts(host, { enableToolBridge: true, resolveExtraMcpServers: async () => [EXAMPLE] }),
+      )
+      await drain(sub.start(spec('hi')))
+
+      const session = await [...pool.values()][0]!
+      expect(session.childGeneration.length).toBeGreaterThan(0)
+      const servers = mcpConfig(argvs[0]!).mcpServers
+      const devChannel = Object.keys(servers).find((n) => n.startsWith('neutron-'))!
+      for (const name of [devChannel, 'neutron', 'example-server']) {
+        expect(servers[name]!.env[OWN_SERVICE_PROVENANCE_ENV]).toBe(session.childGeneration)
+      }
+      expect(envs[0]![OWN_SERVICE_PROVENANCE_ENV]).toBeUndefined()
+    } finally {
+      if (inherited === undefined) delete process.env[OWN_SERVICE_PROVENANCE_ENV]
+      else process.env[OWN_SERVICE_PROVENANCE_ENV] = inherited
+    }
+  })
+
+  it('an owner-declared value under the marker name can never override the session\'s', async () => {
+    // The validator refuses the name; this is the spawn-side half: the marker is
+    // written LAST, so even a server that reached the spawn carrying it is re-stamped.
+    setReplToolBridge(bridge())
+    const { host, argvs } = makeCapturingHost()
+    const forged: ResolvedOwnerMcpServer = { ...EXAMPLE, env: { ...EXAMPLE.env, [OWN_SERVICE_PROVENANCE_ENV]: 'forged' } }
+    const sub = createPersistentReplSubstrate(
+      opts(host, { enableToolBridge: true, resolveExtraMcpServers: async () => [forged] }),
+    )
+    await drain(sub.start(spec('hi')))
+
+    const session = await [...pool.values()][0]!
+    expect(mcpConfig(argvs[0]!).mcpServers['example-server']!.env[OWN_SERVICE_PROVENANCE_ENV]).toBe(session.childGeneration)
   })
 
   it('gets its OWN mcp__<name> grant, alongside the tool bridge\'s', async () => {
