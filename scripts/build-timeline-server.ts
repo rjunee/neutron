@@ -11,19 +11,22 @@ export interface TimelineServerOptions {
   read: () => TimelineSnapshot | Promise<TimelineSnapshot>
 }
 
-export function timelineWindow(snapshot: TimelineSnapshot, page: number, mode: string): TimelineSnapshot {
+export function timelineWindow(snapshot: TimelineSnapshot, page: number, search = '', repository = ''): TimelineSnapshot {
   const pageSize = 50
-  const total = snapshot.cards.length
+  const query = search.trim().toLowerCase()
+  const source = snapshot.cards.filter(card => card.pr !== null &&
+    (!query || `${card.repository} ${card.pr} ${card.title}`.toLowerCase().includes(query)) &&
+    (!repository || (repository === 'managed' ? /managed/i.test(card.repository) : repository === 'open' ? !/managed/i.test(card.repository) : card.repository === repository)))
+  const total = source.length
   const first = Math.min(Math.max(0, Math.floor(page)) * pageSize, Math.max(0, Math.floor((total - 1) / pageSize) * pageSize))
-  const cards = snapshot.cards.slice(first, first + pageSize).map(card => {
-    if (mode !== 'work') return card
+  const cards = source.slice(first, first + pageSize).map(card => {
     if (!card.segments.length) return { ...card, start: null, end: null, gaps: [] }
     const start = Math.min(...card.segments.map(span => span.start)), end = Math.max(...card.segments.map(span => span.end))
     return { ...card, start, end, gaps: card.gaps.map(gap => ({ start: Math.max(start, gap.start), end: Math.min(end, gap.end) })).filter(gap => gap.end > gap.start) }
   })
-  return { ...snapshot, cards, page: Math.floor(first / pageSize), totalPages: Math.max(1, Math.ceil(total / pageSize)),
+  return { ...snapshot, cards, prCount: total, page: Math.floor(first / pageSize), totalPages: Math.max(1, Math.ceil(total / pageSize)),
     maxDurationMs: Math.max(1, ...cards.map(card => card.start === null || card.end === null ? 0 : card.end - card.start)),
-    warnings: [...snapshot.warnings, `Showing ${total ? first + 1 : 0}–${Math.min(first + pageSize, total)} of ${total} PR / run groups. Page ${Math.floor(first / pageSize) + 1} of ${Math.max(1, Math.ceil(total / pageSize))}. ${mode === 'work' ? 'Observed-work window; PRs without phase evidence have unknown work duration.' : 'PR lifecycle / run envelope; gaps are not proven build time.'}`] }
+    warnings: [...snapshot.warnings, `Showing ${total ? first + 1 : 0}–${Math.min(first + pageSize, total)} of ${total} PRs. Page ${Math.floor(first / pageSize) + 1} of ${Math.max(1, Math.ceil(total / pageSize))}. Observed-work window; PRs without phase evidence have unknown work duration.`] }
 }
 
 /** One credential gate covers the page, fragment, JSON and unknown routes alike. */
@@ -56,7 +59,7 @@ export function createTimelineHandler(options: TimelineServerOptions): (request:
       const snapshot = await options.read()
       return path === '/api/timeline'
         ? reply(JSON.stringify(snapshot), 200, { 'Content-Type': 'application/json' })
-        : reply(renderTimeline(timelineWindow(snapshot, Math.max(0, Math.min(100_000, Number(url.searchParams.get('page')) || 0)), url.searchParams.get('mode') ?? 'lifecycle')), 200, { 'Content-Type': 'text/html; charset=utf-8' })
+        : reply(renderTimeline(timelineWindow(snapshot, Math.max(0, Math.min(100_000, Number(url.searchParams.get('page')) || 0)), url.searchParams.get('search') ?? '', url.searchParams.get('repository') ?? '')), 200, { 'Content-Type': 'text/html; charset=utf-8' })
     } catch {
       // Never return database paths, credentials, command output, or raw logs to the browser.
       return reply('Timeline source unavailable. Previous data may be stale.', 503)
