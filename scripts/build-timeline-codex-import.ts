@@ -1,6 +1,5 @@
 /** Read native operation receipts; never execute transcript content or infer whole-turn phases. */
-import { createReadStream } from 'node:fs'
-import { readFile } from 'node:fs/promises'
+import { open, readFile } from 'node:fs/promises'
 import { createInterface } from 'node:readline'
 import { fileURLToPath } from 'node:url'
 import type { DirectPhaseObservation } from './build-timeline-sources.ts'
@@ -151,16 +150,59 @@ export async function importCodexOperations(lines: AsyncIterable<string> | Itera
   return { observations, coverage }
 }
 
+/** A tail refresh has explicit partial coverage. Callers retain prior observations by eventId. */
+export async function importCodexFile(path: string, options: CodexImportOptions, tailBytes?: number) {
+  if (tailBytes !== undefined && (!stamp(tailBytes) || tailBytes < 1)) throw new Error('Invalid tail bound')
+  const file = await open(path, 'r')
+  try {
+    const stat = await file.stat()
+    if (!stat.isFile() || stat.size === 0) throw new Error('Native rollout must be a nonempty regular file')
+    const startByte = tailBytes === undefined ? 0 : Math.max(0, stat.size - tailBytes)
+    let metadata = ''
+    if (startByte > 0) {
+      const chunks: Buffer[] = []
+      let offset = 0, found = false
+      while (offset < Math.min(stat.size, 8 * 1024 * 1024)) {
+        const buffer = Buffer.alloc(Math.min(65536, stat.size - offset))
+        const { bytesRead } = await file.read(buffer, 0, buffer.length, offset)
+        if (!bytesRead) break
+        const bytes = buffer.subarray(0, bytesRead), end = bytes.indexOf(10)
+        chunks.push(end < 0 ? bytes : bytes.subarray(0, end))
+        offset += bytesRead
+        if (end >= 0) { found = true; break }
+      }
+      if (!found) throw new Error('Native metadata exceeds bounds')
+      metadata = Buffer.concat(chunks).toString('utf8')
+      const first: unknown = JSON.parse(metadata)
+      if (!object(first) || first.type !== 'session_meta') throw new Error('Missing initial native identity')
+    }
+    const stream = file.createReadStream({ start: startByte, end: stat.size - 1, autoClose: false })
+    const input = createInterface({ input: stream, crlfDelay: Infinity })
+    async function* scopedLines() {
+      if (startByte > 0) yield metadata
+      let first = true
+      for await (const line of input) {
+        // The first tail line may begin inside a JSON record. Drop it unconditionally.
+        if (first && startByte > 0) { first = false; continue }
+        first = false
+        yield line
+      }
+    }
+    try {
+      const result = await importCodexOperations(scopedLines(), { ...options, evidenceRef: startByte > 0 ? `${options.evidenceRef}:tail-${startByte}` : options.evidenceRef })
+      return { ...result, scan: { sourceBytes: stat.size, startByte, partial: startByte > 0,
+        detail: startByte > 0 ? 'Recent byte window only; older phases and model contexts may be missing. Retain previous observations; run a full import for historical coverage.' : 'Full source snapshot; attribution coverage is reported separately.' } }
+    } finally { input.close(); stream.destroy() }
+  } finally { await file.close() }
+}
+
 if (import.meta.main) {
   try {
     const [rollout, config, ...extra] = process.argv.slice(2)
-    if (!rollout || !config || extra.length) throw new Error('Usage: bun scripts/build-timeline-codex-import.ts ROLLOUT.jsonl PRIVATE-CONFIG.json')
+    if (!rollout || !config || (extra.length > 0 && (extra.length !== 2 || extra[0] !== '--tail-bytes'))) throw new Error('Usage: bun scripts/build-timeline-codex-import.ts ROLLOUT.jsonl PRIVATE-CONFIG.json [--tail-bytes N]')
     const options: CodexImportOptions = JSON.parse(await readFile(config, 'utf8'))
-    const input = createInterface({ input: createReadStream(rollout), crlfDelay: Infinity })
-    try {
-      const result = await importCodexOperations(input, options)
-      for (const observation of result.observations) process.stdout.write(JSON.stringify(observation) + '\n')
-      process.stderr.write(JSON.stringify(result.coverage) + '\n')
-    } finally { input.close() }
+    const result = await importCodexFile(rollout, options, extra.length ? Number(extra[1]) : undefined)
+    for (const observation of result.observations) process.stdout.write(JSON.stringify(observation) + '\n')
+    process.stderr.write(JSON.stringify({ ...result.coverage, scan: result.scan }) + '\n')
   } catch { process.stderr.write('Codex operation import refused: check scope, native input, and bounds.\n'); process.exitCode = 1 }
 }

@@ -1,5 +1,8 @@
 import { describe, expect, test } from 'bun:test'
-import { importCodexOperations, type CodexImportOptions } from './build-timeline-codex-import.ts'
+import { mkdtemp, rm, writeFile } from 'node:fs/promises'
+import { tmpdir } from 'node:os'
+import { join } from 'node:path'
+import { importCodexFile, importCodexOperations, type CodexImportOptions } from './build-timeline-codex-import.ts'
 import { validatePhaseObservation } from './build-timeline-sources.ts'
 
 const repo = 'example/project'
@@ -23,7 +26,7 @@ describe('bounded native Codex operation reconstruction', () => {
     expect(observations[0]).toMatchObject({ phase: 'test', model: 'model-a', startedAt: 2000, endedAt: 4000, inputTokens: null,
       links: [{ repository: repo, prNumber: 7 }], source: { parentSessionId: 'parent-1', turnId: 'turn-1', sourceEventId: 'exec-1', attribution: 'reconstructed' } })
     expect(coverage.tokenCoverage).toBe('unknown')
-    expect(validatePhaseObservation(observations[0])).toEqual(observations[0])
+    expect(validatePhaseObservation(observations[0])).toEqual(observations[0]!)
   })
   test('does not mistake searched, printed, compound or substituted commands for tests', async () => {
     for (const cmd of ["rg 'bun test' .", "echo 'bun test'", 'bun test x; echo done', 'bun test $(touch /tmp/nope)', 'bash -c "bun test"', 'bun test > test.log', 'bun test\nother']) {
@@ -83,5 +86,25 @@ describe('bounded native Codex operation reconstruction', () => {
     await expect(run([command()], { ...options, maxBytes: 10 })).rejects.toThrow('bounded')
     await expect(run([meta])).rejects.toThrow('Repeated')
     await expect(run([command()], { ...options, evidenceRef: '/absolute/path' })).rejects.toThrow('scope')
+  })
+  test('bounded tail retains native identity, declares missing history, and leaves absent model unknown', async () => {
+    const directory = await mkdtemp(join(tmpdir(), 'codex-import-fixture-'))
+    try {
+      const path = join(directory, 'rollout.jsonl')
+      const operation = command() + '\n'
+      await writeFile(path, [meta, context(), record('response_item', { text: 'padding'.repeat(1000) })].join('\n') + '\n' + operation)
+      const full = await importCodexFile(path, options)
+      const tail = await importCodexFile(path, options, Buffer.byteLength(operation) + 25)
+      expect(full.scan.partial).toBe(false)
+      expect(tail.scan.partial).toBe(true)
+      expect(tail.scan.startByte).toBeGreaterThan(0)
+      expect(tail.observations).toHaveLength(1)
+      expect(tail.observations[0]!.eventId).toBe(full.observations[0]!.eventId)
+      expect(tail.observations[0]!.model).toBeNull()
+      expect(tail.observations[0]!.source.parentSessionId).toBe('parent-1')
+      expect(tail.observations[0]!.source.evidenceRef).toContain(':tail-')
+      expect(validatePhaseObservation(tail.observations[0])).toEqual(tail.observations[0]!)
+      await expect(importCodexFile(path, options, -1)).rejects.toThrow('tail')
+    } finally { await rm(directory, { recursive: true, force: true }) }
   })
 })
