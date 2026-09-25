@@ -32,6 +32,10 @@ export type AdmissionProducer = 'chat' | 'acting-turn' | 'work-board' | 'hold-dr
 export interface NativeChildAdmission {
   admit(runId: string, stepId: string): Promise<AdmittedWork | AdmissionRefusal>
   complete(runId: string, stepId: string): Promise<number>
+  /** Ends only this process's pre-dispatch exemption, not the durable lease. */
+  finishPreparing?(lease: AdmissionLease): void
+  /** Exact-scope census. Unreadable identities throw; never infer an empty scope. */
+  pending?(): readonly { runId: string; stepId: string; generation: number }[]
 }
 
 export interface ProjectAdmissionOptions {
@@ -65,6 +69,7 @@ export class ProjectAdmission {
   /** Scope keys already registered by this process (registration is idempotent;
    * this only spares a write per admission). Existence is re-verified every time. */
   private readonly registered = new Set<string>();
+  private readonly preparingNativeChildTokens = new Set<string>();
   readonly ownerHandle: string;
   readonly bootId: string;
 
@@ -161,6 +166,14 @@ export class ProjectAdmission {
    */
   forNativeChild(projectId: string | null): NativeChildAdmission {
     return {
+      finishPreparing: lease => { this.preparingNativeChildTokens.delete(lease.token); },
+      pending: () => this.listLeases('liveChild').filter(row => row.scope.projectId === projectId).map(row => {
+        const identity: unknown = JSON.parse(row.workRef);
+        if (!Array.isArray(identity) || identity.length !== 2 || identity.some(part => typeof part !== 'string' || !part.trim())) {
+          throw new Error('Native child lease identity is unreadable');
+        }
+        return { runId: identity[0] as string, stepId: identity[1] as string, generation: row.generation };
+      }),
       complete: (runId, stepId) => this.store.releaseWork(this.scopeFor(projectId), 'liveChild', JSON.stringify([runId, stepId])),
       admit: async (runId, stepId) => {
         if (!stepId.trim()) throw new Error('Step reference required');
@@ -168,11 +181,27 @@ export class ProjectAdmission {
         if (!(await this.registerIfLive(scope))) return { status: 'unknown' };
         const joined = await this.store.admitChild(
           scope, { reason: 'build', workRef: runId }, 'liveChild', this.producerFor('native-child'), JSON.stringify([runId, stepId]));
-        if (joined.status === 'admitted') return this.admittedWork(joined.lease);
+        if (joined.status === 'admitted') {
+          this.preparingNativeChildTokens.add(joined.lease.token);
+          return this.admittedWork(joined.lease);
+        }
         if (joined.status === 'unknown') return { status: 'unknown' };
-        return this.admit(projectId, 'liveChild', 'native-child', JSON.stringify([runId, stepId]));
+        const admitted = await this.admit(projectId, 'liveChild', 'native-child', JSON.stringify([runId, stepId]));
+        if (admitted.status === 'admitted') this.preparingNativeChildTokens.add(admitted.lease.token);
+        return admitted;
       },
     };
+  }
+
+  /** An ordinary turn may pass a unique child that this process is still
+   * preparing: session queueing will order them. Submitted, duplicate and
+   * previous-boot children keep the durable refusal. */
+  hasUnresolvedNativeChildForChat(projectId: string | null): boolean {
+    const leases = this.listLeases('liveChild').filter(row => row.scope.projectId === projectId);
+    const counts = new Map<string, number>();
+    for (const row of leases) counts.set(row.workRef, (counts.get(row.workRef) ?? 0) + 1);
+    return leases.some(row => row.producer !== this.producerFor('native-child')
+      || !this.preparingNativeChildTokens.has(row.token) || counts.get(row.workRef) !== 1);
   }
 
   /**

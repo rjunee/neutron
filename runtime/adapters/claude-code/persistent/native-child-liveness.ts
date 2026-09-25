@@ -1,15 +1,17 @@
 import type { PersistentReplSubstrateOptions } from './types.ts'
 
 // Queries, not cached liveness: the gateway owns durable child admission.
-const queries = new Map<string, (projectId: string | null) => boolean>()
-export function setNativeChildLiveness(owner: string, query: ((projectId: string | null) => boolean) | undefined): void {
-  if (query) queries.set(owner, query)
+type Query = (projectId: string | null) => boolean
+const queries = new Map<string, { all: Query; chat: Query }>()
+export function setNativeChildLiveness(owner: string, query: Query | undefined, chatQuery?: Query): void {
+  if (query) queries.set(owner, { all: query, chat: chatQuery ?? query })
   else queries.delete(owner)
 }
 
-export function hasUnresolvedNativeChild(options: Pick<PersistentReplSubstrateOptions, 'user_id' | 'conversationProjectId' | 'project_id' | 'nativeChildCensusRole'> | undefined): boolean {
+type ScopedOptions = Pick<PersistentReplSubstrateOptions, 'user_id' | 'conversationProjectId' | 'project_id' | 'nativeChildCensusRole'>
+function unresolved(options: ScopedOptions | undefined, role: 'all' | 'chat'): boolean {
   if (!options || options.user_id === undefined) return false
-  const query = queries.get(options.user_id)
+  const query = queries.get(options.user_id)?.[role]
   if (!query) return false
   // Only known unscoped auxiliary constructors are exempt. Explicit owner scope
   // cannot be weakened by an auxiliary marker, and missing provenance is unknown.
@@ -21,4 +23,14 @@ export function hasUnresolvedNativeChild(options: Pick<PersistentReplSubstrateOp
     : options.project_id && options.project_id !== 'general' && options.project_id !== 'default' ? options.project_id : undefined
   if (scope === undefined) return true
   try { return query(scope) } catch { return true }
+}
+
+export function hasUnresolvedNativeChild(options: ScopedOptions | undefined): boolean {
+  return unresolved(options, 'all')
+}
+
+/** Only ordinary chat can queue ahead of a unique locally preparing child.
+ * Eviction, model changes and adoption still read every durable child lease. */
+export function hasUnresolvedNativeChildForChat(options: ScopedOptions | undefined): boolean {
+  return unresolved(options, 'chat')
 }

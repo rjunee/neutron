@@ -113,6 +113,21 @@ async function fixture() {
     setSpawnProjectSession: (spawn: (projectId: string) => Promise<void>) => { spawnProjectSession = spawn } }
 }
 
+/** Successful native admission measures a real linked worktree, beyond the
+ * command-only host used by the preparation and publication fixtures. */
+async function prepareNativeWorktree(f: Awaited<ReturnType<typeof fixture>>, options: ProjectBuildHostOptions) {
+  const repo = join(f.dir, 'native-repo')
+  for (const argv of [
+    ['git', 'init', '--initial-branch=main', repo],
+    ['git', '-C', repo, '-c', 'user.name=Fixture', '-c', 'user.email=fixture@example.invalid', 'commit', '--allow-empty', '-m', 'Fixture base'],
+    ['git', '-C', repo, 'worktree', 'add', '-b', 'change', options.production.worktree],
+  ]) expect((await spawnCapture(argv)).ok).toBe(true)
+  const host = f.context.runHost
+  f.context.runHost = (argv, cwd, env, timeoutMs) => argv[0] === 'git'
+    ? spawnCapture(argv, cwd, env, timeoutMs)
+    : host(argv, cwd, env, timeoutMs)
+}
+
 test('option sources preserve pin, selected provider, workflow and unavailable suite evidence', async () => {
   const f = await fixture()
   f.input.test_strategy = 'TEST EXECUTION\n\nFull suite (stage 2), run exactly this:\n\n  bun test\n\nSTAGE 2 — the full suite, REQUIRED.'
@@ -428,36 +443,32 @@ test('preparation refuses missing pins, missing rows, unknown branches, failed a
   await f.prepare()
 })
 
-test('acting turn requires the selected live project session and observed grants', async () => {
+test.each(['missing-launch', 'missing-session', 'pending-session', 'ambiguous', 'exited', 'restricted', 'live'] as const)(
+  'acting turn requires the selected live project session and observed grants: %s', async state => {
   const f = await fixture()
   const options = await f.prepare()
+  await prepareNativeWorktree(f, options)
   const captured = f.captured()
   const request: BoundedWorkRequest = { ...options.workers.build.request, run_id: f.input.run.id, step_id: 'fixture-step', role: 'build', needs_approval_decision: false }
-  const turn = { conversation: captured.conversation, request, spec: { ...captured.conversation.spec, prompt: 'bounded work' }, timeout_ms: 50, signal: new AbortController().signal }
-  const act = () => captured.actingTurn(turn)
-  expect((await act()).kind).toBe('unknown')
+  const turn = { conversation: captured.conversation, request, spec: { ...captured.conversation.spec, prompt: 'bounded work' }, timeout_ms: 1_000, signal: new AbortController().signal }
   const key = 'fixture-project-launch'
   const config = { substrate_instance_id: 'cc-agent-fixture', project_id: f.context.projectId, skip_permissions: true, extra_dirs: [f.dir] }
-  const session = { sessionId: 'fixture-session', toolSurface: LIVE_AGENT_TOOL_NAMES.join(','), cwd: f.dir, hasChildExited: () => false, child: { submitLine: async () => {} }, acquireTurn: async () => () => {} }
+  let submissions = 0
+  const session = { sessionId: 'fixture-session', toolSurface: LIVE_AGENT_TOOL_NAMES.join(','), cwd: f.dir,
+    hasChildExited: () => state === 'exited', child: { submitLine: async () => { submissions += 1 } }, acquireTurn: async () => () => {} }
   cleanup.push(() => { pool.delete(key); supervisedBySessionKey.delete(key); supervisedBySessionKey.delete(key + '-other') })
-  supervisedBySessionKey.set(key, config)
-  expect((await act()).kind).toBe('unknown')
-  pool.set(key, new Promise(() => {}))
-  expect((await act()).kind).toBe('unknown')
-  pool.set(key, Promise.resolve(session as never))
+  // Each scenario owns a fresh admission. Reusing an unknown request creates
+  // duplicate durable leases, which correctly prevent a later dispatch.
+  if (state !== 'missing-launch') supervisedBySessionKey.set(key, { ...config, restricted: state === 'restricted' })
+  if (state !== 'missing-launch' && state !== 'missing-session') {
+    pool.set(key, state === 'pending-session' ? new Promise(() => {}) : Promise.resolve(session as never))
+  }
   await Promise.resolve()
-  supervisedBySessionKey.set(key + '-other', config)
-  expect((await act()).kind).toBe('unknown')
-  supervisedBySessionKey.delete(key + '-other')
-  session.hasChildExited = () => true
-  expect((await act()).kind).toBe('unknown')
-  session.hasChildExited = () => false
-  supervisedBySessionKey.set(key, { ...config, restricted: true })
-  expect((await act()).kind).toBe('refused')
-  supervisedBySessionKey.set(key, config)
+  if (state === 'ambiguous') supervisedBySessionKey.set(key + '-other', config)
   await mkdir(join(f.dir, 'state'), { recursive: true })
   await writeFile(request.result.path, '{}')
-  expect((await act()).kind).toBe('turn-ended')
+  expect((await captured.actingTurn(turn)).kind).toBe(state === 'live' ? 'turn-ended' : state === 'restricted' ? 'refused' : 'unknown')
+  expect(submissions).toBe(state === 'live' ? 1 : 0)
   f.context.provider = 'pi'
   await f.prepare()
   expect((await f.captured().actingTurn({ ...turn, conversation: f.captured().conversation })).kind).toBe('refused')
@@ -527,15 +538,18 @@ test('unwired provider refusal names the project, instance, and application sele
   expect(new Set(details).size).toBe(3)
 })
 
-test('acting turn lazily starts and retains a cold project session', async () => {
+test('acting turn lazily starts and retains a cold project session without redispatching the same request', async () => {
   const f = await fixture()
   const options = await f.prepare()
+  await prepareNativeWorktree(f, options)
   const captured = f.captured()
   const request: BoundedWorkRequest = { ...options.workers.build.request, run_id: f.input.run.id, step_id: 'fixture-step', role: 'build', needs_approval_decision: false }
-  const turn = { conversation: captured.conversation, request, spec: { ...captured.conversation.spec, prompt: 'bounded work' }, timeout_ms: 50, signal: new AbortController().signal }
+  const turn = { conversation: captured.conversation, request, spec: { ...captured.conversation.spec, prompt: 'bounded work' }, timeout_ms: 1_000, signal: new AbortController().signal }
   const key = 'cold-project-launch'
   const config = { substrate_instance_id: 'cc-agent-fixture', project_id: f.context.projectId, skip_permissions: true, extra_dirs: [f.dir] }
-  const session = { sessionId: 'fixture-session', toolSurface: LIVE_AGENT_TOOL_NAMES.join(','), cwd: f.dir, hasChildExited: () => false, child: { submitLine: async () => {} }, acquireTurn: async () => () => {} }
+  let submissions = 0
+  const session = { sessionId: 'fixture-session', toolSurface: LIVE_AGENT_TOOL_NAMES.join(','), cwd: f.dir, hasChildExited: () => false,
+    child: { submitLine: async () => { submissions += 1 } }, acquireTurn: async () => () => {} }
   let spawns = 0
   cleanup.push(() => { pool.delete(key); supervisedBySessionKey.delete(key) })
   f.setSpawnProjectSession(async projectId => {
@@ -548,8 +562,37 @@ test('acting turn lazily starts and retains a cold project session', async () =>
   await mkdir(join(f.dir, 'state'), { recursive: true })
   await writeFile(request.result.path, '{}')
   expect((await captured.actingTurn(turn)).kind).toBe('turn-ended')
-  expect((await captured.actingTurn(turn)).kind).toBe('turn-ended')
+  // Parent completion is not child completion: a repeat must reconcile the
+  // existing request before another admission can dispatch it.
+  expect(await captured.actingTurn(turn)).toMatchObject({ kind: 'refused',
+    detail: 'Native writer has no checked independent worktree admission.' })
   expect(spawns).toBe(1)
+  expect(submissions).toBe(1)
+})
+
+for (const shape of ['missing', 'unlinked'] as const) test(`native admission refuses a ${shape} assigned worktree before submission`, async () => {
+  const f = await fixture()
+  const options = await f.prepare()
+  const captured = f.captured()
+  if (shape === 'unlinked') {
+    expect((await spawnCapture(['git', 'init', '--initial-branch=change', options.production.worktree])).ok).toBe(true)
+  }
+  f.context.runHost = spawnCapture
+  const request: BoundedWorkRequest = { ...options.workers.build.request, run_id: f.input.run.id, step_id: 'fixture-step', role: 'build', needs_approval_decision: false }
+  let submissions = 0
+  const key = `invalid-worktree-${shape}`
+  const session = { sessionId: 'fixture-session', toolSurface: LIVE_AGENT_TOOL_NAMES.join(','), cwd: f.dir,
+    hasChildExited: () => false, child: { submitLine: async () => { submissions += 1 } }, acquireTurn: async () => () => {} }
+  cleanup.push(() => { pool.delete(key); supervisedBySessionKey.delete(key) })
+  supervisedBySessionKey.set(key, { substrate_instance_id: 'cc-agent-fixture', project_id: f.context.projectId, skip_permissions: true, extra_dirs: [f.dir] })
+  pool.set(key, Promise.resolve(session as never))
+  await Promise.resolve()
+  await writeFile(request.result.path, '{}')
+  expect(await captured.actingTurn({ conversation: captured.conversation, request,
+    spec: { ...captured.conversation.spec, prompt: 'bounded work' }, timeout_ms: 1_000,
+    signal: new AbortController().signal })).toEqual({ kind: 'refused', reason: 'capability-unsupported',
+    detail: 'Native writer has no checked independent worktree admission.' })
+  expect(submissions).toBe(0)
 })
 
 test('acting turn keeps ambiguity and spawn/grant outcomes distinct', async () => {

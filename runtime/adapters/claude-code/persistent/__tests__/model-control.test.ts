@@ -2,7 +2,7 @@ import { afterEach, beforeEach, expect, test } from 'bun:test'
 import { getPersistentReplModel, switchPersistentReplModel } from '../model-control.ts'
 import { pool, supervisedBySessionKey, childByKey, retiringSessionKeys } from '../pool-state.ts'
 import { poolKeyFor, retirePersistentRepl } from '../pool.ts'
-import { hasUnresolvedNativeChild, setNativeChildLiveness } from '../native-child-liveness.ts'
+import { hasUnresolvedNativeChild, hasUnresolvedNativeChildForChat, setNativeChildLiveness } from '../native-child-liveness.ts'
 import { ProjectAdmission } from '@neutronai/gateway/project-admission.ts'
 import { ProjectDb } from '@neutronai/persistence/index.ts'
 import { seedMigratedDb } from '../../../../../tests/support/migrated-db.ts'
@@ -15,6 +15,17 @@ import type { PersistentReplSubstrateOptions } from '../types.ts'
 const keys: string[] = []
 beforeEach(() => setNativeChildLiveness('owner', undefined))
 afterEach(() => { for (const key of keys.splice(0)) { pool.delete(key); supervisedBySessionKey.delete(key); childByKey.delete(key); retiringSessionKeys.delete(key) } })
+
+test('a local chat preparation exemption never weakens model and retirement liveness', () => {
+  const scope = { user_id: 'owner', conversationProjectId: 'project-a' }
+  setNativeChildLiveness('owner', projectId => projectId === 'project-a', () => false)
+  expect(hasUnresolvedNativeChild(scope)).toBe(true)
+  expect(hasUnresolvedNativeChildForChat(scope)).toBe(false)
+  expect(hasUnresolvedNativeChild({ ...scope, conversationProjectId: 'project-b' })).toBe(false)
+  setNativeChildLiveness('owner', undefined)
+  expect(hasUnresolvedNativeChild(scope)).toBe(false)
+  expect(hasUnresolvedNativeChildForChat(scope)).toBe(false)
+})
 
 function register(scope: string | null | undefined, sessionId: string, extra: Partial<PersistentReplSubstrateOptions> = {}) {
   const options: PersistentReplSubstrateOptions = {

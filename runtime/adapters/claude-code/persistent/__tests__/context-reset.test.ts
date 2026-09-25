@@ -39,6 +39,8 @@ import {
   type PersistentReplSubstrateOptions,
 } from '../persistent-repl-substrate.ts'
 import { resetPooledSessionContext } from '../context-reset.ts'
+import { setNativeChildLiveness } from '../native-child-liveness.ts'
+import { pool, supervisedBySessionKey } from '../pool-state.ts'
 import { CONTEXT_RESET_COMMAND } from '../signatures.ts'
 
 afterEach(async () => {
@@ -222,6 +224,32 @@ async function waitForMessage(timeline: Timeline, count: number): Promise<void> 
 }
 
 describe('resetPooledSessionContext — /reset runtime primitive', () => {
+  it('never clears an unknown child even when its local queue was unwedged', async () => {
+    const { host, timeline } = makeRecordingHost()
+    const options = opts(host, 'proj-A')
+    const sub = createPersistentReplSubstrate(options)
+    expect(await drain(sub.start(spec('warm')))).toBe('seen=0 got=warm')
+    // The native build path uses a supervised owner. This fake host has no
+    // registry, so stamp the equivalent owner options explicitly.
+    const session = await [...pool.values()][0]!
+    supervisedBySessionKey.set(session.sessionKey, options)
+    try {
+      // An ordinary chat may have a preparation exemption; /clear never does.
+      setNativeChildLiveness('u-1', scope => scope === 'proj-A', () => false)
+      const refused = await resetPooledSessionContext({
+        substrate_instance_id: 'cc-agent-acme', user_id: 'u-1', project_scope: 'proj-A', ...RESET_ARGS,
+      })
+      expect(refused).toEqual({ ok: false, reason: 'busy' })
+      expect(CLEAR_WRITES(timeline)).toHaveLength(0)
+      setNativeChildLiveness('u-1', undefined)
+      const permitted = await resetPooledSessionContext({
+        substrate_instance_id: 'cc-agent-acme', user_id: 'u-1', project_scope: 'proj-A', ...RESET_ARGS,
+      })
+      expect(permitted).toEqual({ ok: true, sessions_reset: 1 })
+      expect(CLEAR_WRITES(timeline)).toHaveLength(1)
+    } finally { setNativeChildLiveness('u-1', undefined) }
+  })
+
   it('clears the warm REPL for the scope: one /clear\\r written AFTER the turn, process survives', async () => {
     const { host, spawnCount, timeline } = makeRecordingHost()
     const sub = createPersistentReplSubstrate(opts(host, 'proj-A'))

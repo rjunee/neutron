@@ -3,6 +3,7 @@
 // helpers (D2 split).
 
 import { dropLocalOwnership, noteLocalOwnership } from './local-ownership.ts'
+import { fireAndForget } from '@neutronai/logger/fire-and-forget.ts'
 import { randomBytes, scryptSync } from 'node:crypto'
 import { realpathSync, rmdirSync, unlinkSync } from 'node:fs'
 import { tmpdir } from 'node:os'
@@ -16,6 +17,7 @@ import type { SessionSizeWatchdog } from './session-size-watchdog.ts'
 import { CHILD_KILL_GRACE_MS, ZERO_USAGE, defaultIsPidAlive } from './signatures.ts'
 import type { ActiveTurn } from './types.ts'
 import { defaultSinkTokenPath, loadOrCreateSinkToken } from './sink-coordinates.ts'
+import { independentNativeChildren, markNativeChildWorkspaceAmbiguous, nativeChildWorkspaceAmbiguous, nativeChildWorkspaceCompletion, type NativeChildWorkspace } from '../../../workers/native-child-workspace.ts'
 
 // ---------------------------------------------------------------------------
 // ReplSession — one warm REPL + its dev-channel + its turn serialization.
@@ -516,13 +518,13 @@ export class ReplSession {
     t.settle()
   }
 
-  private readonly backgroundReaders = new Set<Promise<void>>()
+  private readonly backgroundChildren = new Map<Promise<void>, NativeChildWorkspace | undefined>()
 
-  /** Acquire the per-session write slot and a busy lease. A read-only background
-   * dispatcher may yield the write slot after binding its child. Other read-only
-   * dispatchers can follow; ordinary/writable turns wait for all retained readers.
+  /** Acquire the per-session write slot and a busy lease. A background dispatcher
+   * may yield only after binding its child. Readers can overlap readers; host
+   * admitted writers can overlap disjoint admitted writers. Other turns wait.
    * A queued writer owns the queue before waiting, so later readers cannot starve it. */
-  async acquireTurn(backgroundDispatch?: (yieldDispatch: () => void) => void): Promise<() => void> {
+  async acquireTurn(backgroundDispatch?: (yieldDispatch: () => void) => void, workspace?: NativeChildWorkspace): Promise<() => void> {
     let release: () => void = () => {}
     const prev = this.turnTail
     this.turnTail = new Promise<void>((res) => {
@@ -543,27 +545,47 @@ export class ReplSession {
     // completion, and the teardown happens the moment no committed turn is left.
     this.turnSlotHeld += 1
     await prev
-    if (!backgroundDispatch) await Promise.all(this.backgroundReaders)
+    // An ambiguous child retains its durable lease, not an unfinishable local
+    // queue wait. The caller reaches the lease guard and receives a refusal.
+    await Promise.all([...this.backgroundChildren].filter(([, prior]) =>
+      !nativeChildWorkspaceAmbiguous(prior) && (!backgroundDispatch || !independentNativeChildren(workspace, prior))).map(([done]) => done))
     let released = false
     let finishReader!: () => void
     const reader = new Promise<void>(resolve => { finishReader = resolve })
+    let yielded = false
+    let ambiguousUnqueued = false
     backgroundDispatch?.(() => {
       if (released) return
-      this.backgroundReaders.add(reader)
+      yielded = true
+      this.backgroundChildren.set(reader, workspace)
       release()
     })
-    return () => {
+    const finish = () => {
       // IDEMPOTENT. Several of `start`'s early-return paths call the release they were
       // handed, and a plain `res()` tolerated being called twice because re-resolving a
       // promise is a no-op — a bare decrement would not, and would drive the count
       // negative, which reads as "idle" to the evictor.
       if (released) return
       released = true
-      this.backgroundReaders.delete(reader)
+      this.backgroundChildren.delete(reader)
       finishReader()
       this.turnSlotHeld -= 1
       release()
     }
+    // A writable child outlives observation timeout, cancellation and lost ack.
+    // Only the host's validated completion (also used by recovery) releases it.
+    const completion = workspace && nativeChildWorkspaceCompletion(workspace)
+    if (completion) {
+      fireAndForget('persistent-repl.native-child-completion', completion.then(finish))
+      return () => {
+        if (yielded || released || ambiguousUnqueued) return
+        ambiguousUnqueued = true
+        markNativeChildWorkspaceAmbiguous(workspace)
+        this.backgroundChildren.set(reader, workspace)
+        release()
+      }
+    }
+    return finish
   }
 }
 

@@ -16,6 +16,7 @@
 import { describe, it, expect, afterEach } from 'bun:test'
 import { pool } from '../pool-state.ts'
 import { getOrSpawnSession } from '../spawn.ts'
+import { setNativeChildLiveness } from '../native-child-liveness.ts'
 import type { AgentSpec } from '../../../../substrate.ts'
 import type { SessionHandle } from '../../../../session-handle.ts'
 import type { Event } from '../../../../events.ts'
@@ -134,6 +135,26 @@ function toolsValue(argv: string[]): string | undefined {
 }
 
 describe('persistent REPL — tool restriction (Codex-r1-P1 SECURITY)', () => {
+  it('ordinary turns cannot bypass durable children when the local session queue is empty', async () => {
+    const { host, spawnCount } = makeCapturingHost()
+    const options = opts(host, { substrate_instance_id: 'cc-agent-native-fence', user_id: 'native-fence-owner',
+      project_id: 'native-project', conversationProjectId: 'native-project', credential_identity: 'native-credential' })
+    const sub = createPersistentReplSubstrate(options)
+    const tools = ['Agent', 'Read', 'Write']
+    expect(await drain(sub.start(spec('before child', tools)))).toBe('seen=0 got=before child')
+    try {
+      setNativeChildLiveness('native-fence-owner', scope => scope === 'native-project', () => false)
+      expect(await drain(sub.start(spec('local child still preparing', tools)))).toBe('seen=1 got=local child still preparing')
+      setNativeChildLiveness('native-fence-owner', scope => scope === 'native-project')
+      await expect(drain(sub.start(spec('must stay fenced', tools)))).rejects.toThrow('native child ownership remains unresolved')
+      setNativeChildLiveness('native-fence-owner', () => { throw new Error('unreadable durable census') })
+      await expect(drain(sub.start(spec('unknown stays fenced', tools)))).rejects.toThrow('native child ownership remains unresolved')
+      setNativeChildLiveness('native-fence-owner', () => false)
+      expect(await drain(sub.start(spec('after validated child', tools)))).toBe('seen=2 got=after validated child')
+      expect(spawnCount()).toBe(1)
+    } finally { setNativeChildLiveness('native-fence-owner', undefined) }
+  })
+
   it('reuses the native parent while a child is busy and another dispatch is queued', async () => {
     const { host, argvs, spawnCount } = makeCapturingHost()
     const options = opts(host, {

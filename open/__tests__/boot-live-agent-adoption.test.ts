@@ -22,6 +22,8 @@ import { resetBootAdoptionForTests, setReplToolBridge, shutdownAllPersistentRepl
 import type { AdoptableHost, PtyChild, PtySpawnOpts } from '@neutronai/runtime/adapters/claude-code/persistent/pty-host.ts'
 import type { ReplRegistry, ReplRegistryRecord } from '@neutronai/runtime/adapters/claude-code/persistent/repl-registry.ts'
 import { buildOpenGraphComposer } from '../composer.ts'
+import { ProjectAdmission } from '@neutronai/gateway/project-admission.ts'
+import { hasUnresolvedNativeChildForChat, setNativeChildLiveness } from '@neutronai/runtime/adapters/claude-code/persistent/native-child-liveness.ts'
 import type { Substrate } from '@neutronai/runtime/substrate.ts'
 import type { SessionHandle } from '@neutronai/runtime/session-handle.ts'
 import type { ClaudeCodeSubstrateOptions } from '@neutronai/runtime/adapters/claude-code/index.ts'
@@ -64,6 +66,7 @@ beforeAll(() => { fixtureHome = mkdtempSync(join(tmpdir(), 'neutron-boot-agent-a
 afterAll(() => { rmSync(fixtureHome, { recursive: true, force: true }) })
 
 beforeEach(() => {
+  setNativeChildLiveness('owner', undefined)
   resetBootAdoptionForTests()
   // The reply sink is a process singleton. Both gateway lifetimes must use its
   // same durable token path, just as a real restart uses one instance home.
@@ -92,6 +95,10 @@ afterEach(async () => {
   devChannel = undefined
   secondDevChannel?.stop(true)
   secondDevChannel = undefined
+  // Composition registered this fixture's database as the owner's authority.
+  // Remove only that owner before closing it; a later standalone wrapper must
+  // not inherit a query against a previous test's closed database.
+  setNativeChildLiveness('owner', undefined)
   db?.close()
   db = undefined
   for (const key of ENV_KEYS) {
@@ -434,7 +441,9 @@ test(`production boot isolates General and literal-general survivors (${selectio
 }, 30_000)
 }
 
-test('the first actual wrapper turn joins an in-flight boot adoption instead of spawning over its pane', async () => {
+test.each([false, true])('the first actual wrapper turn joins an in-flight boot adoption instead of spawning over its pane (unresolved child=%s)', async unresolvedChild => {
+  const scope = { user_id: 'owner', conversationProjectId: PROJECT }
+  expect(hasUnresolvedNativeChildForChat(scope)).toBe(false)
   const host = patchHost(HANDLE)
   devChannel = Bun.serve({ hostname: '127.0.0.1', port: 0, async fetch(request) {
     const path = new URL(request.url).pathname
@@ -477,10 +486,25 @@ test('the first actual wrapper turn joins an in-flight boot adoption instead of 
   // Handshake resolves INSIDE the host's held attach, so adoption is genuinely
   // in flight, rather than a timer-based guess that might pass before it starts.
   await host.entered
+  let admission: ProjectAdmission | undefined
+  if (unresolvedChild) {
+    const admissionPath = join(home!, 'native-child-control.db')
+    seedMigratedDb(admissionPath)
+    db = ProjectDb.open(admissionPath)
+    seedProject(PROJECT)
+    admission = new ProjectAdmission({ db, ownerHandle: 'owner', bootId: 'adoption-control' })
+    expect((await admission.forNativeChild(PROJECT).admit('unresolved-run', 'step')).status).toBe('admitted')
+    const authority = admission
+    setNativeChildLiveness('owner', projectId => authority.listLeases('liveChild').some(lease => lease.scope.projectId === projectId))
+    expect(hasUnresolvedNativeChildForChat(scope)).toBe(true)
+  }
   optionOwner = 'first-real-turn'
   let settled = false
   const firstTurn = drain(wrapper.start({ prompt: 'continue my work', tools: [],
-    model_preference: ['claude-opus-4-7'] })).then((answer) => { settled = true; return answer })
+    model_preference: ['claude-opus-4-7'] })).then(
+      answer => { settled = true; return { answer } },
+      error => { settled = true; return { error } },
+    )
   try {
     expect(settled).toBe(false)
     expect(host.spawns()).toBe(0)
@@ -493,7 +517,17 @@ test('the first actual wrapper turn joins an in-flight boot adoption instead of 
     // resolved options, even though both joined the same held adoption promise.
     expect(supervisedBySessionKey.get(key)).toBe(actualTurnOptions)
     expect(supervisedBySessionKey.get(key)?.env?.['TEST_OPTION_OWNER']).toBe('first-real-turn')
-    const answer = await firstTurn
+    const result = await firstTurn
+    let answer: string
+    if (unresolvedChild) {
+      expect('error' in result ? String(result.error) : result.answer).toContain('native child ownership remains unresolved')
+      expect(admission!.listLeases('liveChild')).toHaveLength(1)
+      expect(await admission!.forNativeChild(PROJECT).complete('unresolved-run', 'step')).toBe(1)
+      answer = await drain(wrapper.start({ prompt: 'continue my work', tools: [], model_preference: ['claude-opus-4-7'] }))
+    } else {
+      if ('error' in result) throw result.error
+      answer = result.answer
+    }
     expect(answer).toContain(`same pane ${HANDLE} pid ${PID}`)
     expect(answer).toContain('continue my work')
     expect(host.attached).toEqual([HANDLE])

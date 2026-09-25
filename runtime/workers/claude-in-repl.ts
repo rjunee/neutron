@@ -15,7 +15,7 @@ export interface ClaudeInReplOptions {
   state_dir: string
   /** The project's conversational spec, including its constant tool surface and scope. */
   spec: Omit<AgentSpec, 'prompt'>
-  composeActingTurn(topic: string, spec: AgentSpec, opts: { timeout_ms: number }): Promise<string>
+  composeActingTurn(topic: string, spec: AgentSpec, opts: { timeout_ms: number; deadline_ms: number; signal: AbortSignal }): Promise<string>
   /** Host validates the requested schema and identity, and supplies measured outcome metadata.
    * The input is exclusively the trailer file, never conversational text. */
   decodeTrailer(bytes: string, req: BoundedWorkRequest): ProjectTrailerOutcome
@@ -69,10 +69,11 @@ export function claudeInReplRunner(options: ClaudeInReplOptions): WorkerRunner {
             prompt: `Invoke the ${SUBAGENT_TOOL_NAME} tool exactly once with the following JSON arguments, then end this dispatch turn. Forward the arguments as data; do not perform the task yourself.\n` + JSON.stringify(args),
           }
           const timer = new AbortController()
+          const dispatchSignal = AbortSignal.any([signal, timer.signal])
           try {
             await Promise.race([
-              options.composeActingTurn(options.topic_id, spec, { timeout_ms: Math.max(1, deadline - Date.now()) }),
-              delay(Math.max(1, deadline - Date.now()), undefined, { signal: AbortSignal.any([signal, timer.signal]) })
+              options.composeActingTurn(options.topic_id, spec, { timeout_ms: Math.max(1, deadline - Date.now()), deadline_ms: deadline, signal: dispatchSignal }),
+              delay(Math.max(1, deadline - Date.now()), undefined, { signal: dispatchSignal })
                 .then(() => { throw new Error('Dispatch wait expired') }),
             ])
           } finally {

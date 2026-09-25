@@ -7,6 +7,7 @@ import { join, resolve } from 'node:path'
 import { createHash } from 'node:crypto'
 import { createProjectRunners, decodeProjectTrailer, type ProjectTrailerDecoder, type ProjectActingTurn } from '@neutronai/runtime/workers/project-runners.ts'
 import { createClaudeActingTurn } from '@neutronai/runtime/workers/claude-acting-turn.ts'
+import { admitNativeChildWorkspace, completeNativeChildWorkspace, completeNativeChildWorkspaceRequest, type NativeChildWorkspace } from '@neutronai/runtime/workers/native-child-workspace.ts'
 import { observeClaudeChildUsage } from '@neutronai/runtime/workers/claude-child-observation.ts'
 import { sessionJsonlPath } from '@neutronai/runtime/adapters/claude-code/persistent/jsonl-resumability.ts'
 import { createCodexHeadlessRunner } from '@neutronai/runtime/workers/codex-headless.ts'
@@ -394,7 +395,13 @@ export async function prepareProjectBuild(input: InnerLoopInput, context: Projec
   // The same-provider native-child step, run only AFTER its lease was admitted
   // (see the acting turn below). Resolves or spawns the project REPL and hands
   // the step to it as a native child.
-  const nativeChildTurn = async (turn: Parameters<ProjectActingTurn>[0]): ReturnType<ProjectActingTurn> => {
+  const nativeWorkspaces = new Map<string, NativeChildWorkspace>()
+  const nativeChildTurn = async (turn: Parameters<ProjectActingTurn>[0], generation: number, onDispatchSubmitted: () => void): ReturnType<ProjectActingTurn> => {
+    const deadline = turn.deadline_ms ?? Date.now() + Math.min(turn.timeout_ms, turn.request.budget.wall_ms)
+    const expired = () => turn.signal.aborted || Date.now() >= deadline
+    const expiredBeforeDispatch = () => ({ kind: 'refused' as const, reason: 'capability-unsupported' as const,
+      detail: 'Native child preparation exhausted the original dispatch deadline.' })
+    if (expired()) return expiredBeforeDispatch()
     let candidates = liveProjectSessions(context.projectId)
     // MISSING AND AMBIGUOUS ARE NOT ONE FACT (#1085). Both ended here as the
     // single string "Project conversation session is missing or ambiguous", and
@@ -415,6 +422,7 @@ export async function prepareProjectBuild(input: InnerLoopInput, context: Projec
       ? await candidatePending
       : undefined
     if (candidateSession === undefined || candidateSession.hasChildExited()) {
+      if (expired()) return expiredBeforeDispatch()
       // WHY WE ARE SPAWNING, captured BEFORE the attempt, so the refusal below can
       // say whether the instance had no project REPL at all or had one whose child
       // had gone. #1085 is the first shape ("nothing respawned it"); they are not
@@ -423,7 +431,7 @@ export async function prepareProjectBuild(input: InnerLoopInput, context: Projec
       let timer: ReturnType<typeof setTimeout> | undefined
       try {
         const expired = new Promise<true>(resolve => {
-          timer = setTimeout(() => resolve(true), PROJECT_SESSION_ACQUIRE_TIMEOUT_MS)
+          timer = setTimeout(() => resolve(true), Math.min(PROJECT_SESSION_ACQUIRE_TIMEOUT_MS, Math.max(1, deadline - Date.now())))
         })
         const timedOut = await Promise.race([
           context.spawnProjectSession(context.projectId).then(() => false), expired,
@@ -462,8 +470,26 @@ export async function prepareProjectBuild(input: InnerLoopInput, context: Projec
         await accounting.recordEvent('attempt-observer-binding-unavailable', { run_id: run.id, step_id: turn.request.step_id })
       }
     }
-    return createClaudeActingTurn({ project_id: context.projectId, topic_id: topic, session, projects_dir: resolveTranscriptProjectsDir(options),
-      grants: { tools: 'edit-and-run', writable: true, network: true, roots: options.extra_dirs ?? [] } })(turn)
+    let workspace: NativeChildWorkspace | undefined
+    if (expired()) return expiredBeforeDispatch()
+    if (context.nativeChildAdmission.pending) {
+      try {
+        workspace = await admitNativeChildWorkspace({ session, request: turn.request, runId: run.id,
+          worktree: run.worktree, branch: run.branch, generation, pending: () => context.nativeChildAdmission.pending!(),
+          git: async args => {
+            if (expired()) throw new Error('Native workspace deadline expired')
+            const result = await context.runHost(['git', '-C', run.worktree, ...args], run.worktree, undefined, Math.max(1, deadline - Date.now()))
+            if (expired()) throw new Error('Native workspace deadline expired')
+            if (!result.ok || result.timed_out) throw new Error('Native worktree identity unavailable')
+            return result.stdout.trim()
+          } })
+        nativeWorkspaces.set(turn.request.step_id, workspace)
+      } catch { return { kind: 'refused', reason: 'capability-unsupported', detail: 'Native writer has no checked independent worktree admission.' } }
+    }
+    if (expired()) return expiredBeforeDispatch()
+    return createClaudeActingTurn({ project_id: context.projectId, topic_id: topic, session, projects_dir: resolveTranscriptProjectsDir(options), ...(workspace ? { workspace } : {}), onDispatchSubmitted,
+      grants: { tools: 'edit-and-run', writable: true, network: true, roots: options.extra_dirs ?? [] } })({ ...turn,
+        deadline_ms: deadline, timeout_ms: Math.max(1, deadline - Date.now()) })
   }
   const substrate = await createProjectRunners({
     conversation: { project_id: context.projectId, topic_id: topic, provider: context.provider,
@@ -495,13 +521,16 @@ export async function prepareProjectBuild(input: InnerLoopInput, context: Projec
       }
       let outcome: Awaited<ReturnType<ProjectActingTurn>> | undefined
       try {
-        outcome = await nativeChildTurn(turn)
+        outcome = await nativeChildTurn(turn, child.generation, () => context.nativeChildAdmission.finishPreparing?.(child.lease))
         return outcome
       } finally {
+        context.nativeChildAdmission.finishPreparing?.(child.lease)
         // Parent-turn completion does not establish child completion. Only a
         // refusal before dispatch releases here; the consuming trailer validator
         // below owns all post-dispatch releases, including restart recovery.
         if (outcome?.kind === 'refused') {
+          const workspace = nativeWorkspaces.get(turn.request.step_id)
+          if (workspace) completeNativeChildWorkspace(workspace)
           // A failed release preserves ownership and must not turn a refusal into
           // a dispatch retry.
           await child.release().catch((error: unknown) => log.warn('native_child_release_failed', {
@@ -547,6 +576,15 @@ export async function prepareProjectBuild(input: InnerLoopInput, context: Projec
         const result = decodeProjectTrailer(await readFile(request.result.path, 'utf8'), request, trailer)
         if (result.kind === 'completed' || result.kind === 'blocked') {
           await context.nativeChildAdmission.complete(request.run_id, request.step_id)
+          const workspace = nativeWorkspaces.get(request.step_id)
+          if (workspace) completeNativeChildWorkspace(workspace)
+          for (const [key] of liveProjectSessions(context.projectId)) {
+            const pending = pool.get(key)
+            if (pending && Bun.peek.status(pending) === 'fulfilled') {
+              const session = await pending
+              if (session) completeNativeChildWorkspaceRequest(session, request)
+            }
+          }
         }
       } catch { /* Missing evidence or failed durable release preserves ownership. */ }
     }

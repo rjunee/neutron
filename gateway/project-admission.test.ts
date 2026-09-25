@@ -195,6 +195,22 @@ test('listLeases decodes the scope, reason, producer and work reference, and is 
 const childLeases = (admission: ProjectAdmission): Array<[string | null, string, number]> =>
   admission.listLeases('liveChild').map((l) => [l.scope.projectId, l.workRef, l.generation])
 
+test('native child pending identities are exact-scope, durable and never expose release authority', async () => {
+  const f = fixture()
+  seedProject(f.db, 'general')
+  await f.admission.forNativeChild(null).admit('run', 'one')
+  await f.admission.forNativeChild('general').admit('run', 'two')
+  const other = new ProjectAdmission({ db: f.db, ownerHandle: 'other-owner', bootId: 'other' })
+  await other.forNativeChild(null).admit('foreign', 'three')
+  const expected = [{ runId: 'run', stepId: 'one', generation: 0 }]
+  expect(f.admission.forNativeChild(null).pending!()).toEqual(expected)
+  expect(f.open('restart').admission.forNativeChild(null).pending!()).toEqual(expected)
+  expect(f.admission.forNativeChild('general').pending!()).toEqual([{ runId: 'run', stepId: 'two', generation: 0 }])
+  f.db.runSync("UPDATE project_admission_leases SET work_ref = 'malformed' WHERE work_ref = ?", ['["run","one"]'])
+  expect(() => f.admission.forNativeChild(null).pending!()).toThrow()
+  expect(f.admission.forNativeChild('general').pending!()).toHaveLength(1)
+})
+
 test('a native child JOINS its run under a draining fence, under the parent generation (#1237)', async () => {
   const { admission } = fixture()
   const run = await admission.forDispatch(null, 'work-board').admit('run-1')
@@ -272,4 +288,28 @@ test('RESTART / lost acknowledgement: a child lease written by one connection is
   expect(restarted.inspect(null)?.leases).toBe(1)
   expect(await restarted.forNativeChild(null).complete('run-x', 'build:0')).toBe(1)
   expect(restarted.inspect(null)?.leases).toBe(0)
+})
+
+test('ordinary chat passes only a unique locally preparing native child, never submitted or foreign work', async () => {
+  const f = fixture()
+  seedProject(f.db, 'project-a')
+  seedProject(f.db, 'project-b')
+  expect((await f.admission.forDispatch('project-a', 'work-board').admit('run-a')).status).toBe('admitted')
+  const native = f.admission.forNativeChild('project-a')
+  const first = await native.admit('run-a', 'build:0')
+  if (first.status !== 'admitted') throw new Error('expected native child admission')
+  expect(f.admission.hasUnresolvedNativeChildForChat('project-a')).toBe(false)
+  expect(f.admission.hasUnresolvedNativeChildForChat('project-b')).toBe(false)
+
+  const duplicate = await native.admit('run-a', 'build:0')
+  if (duplicate.status !== 'admitted') throw new Error('expected duplicate fixture admission')
+  expect(f.admission.hasUnresolvedNativeChildForChat('project-a')).toBe(true)
+  expect(await duplicate.release()).toBe(true)
+  expect(f.admission.hasUnresolvedNativeChildForChat('project-a')).toBe(false)
+
+  native.finishPreparing?.(first.lease)
+  expect(f.admission.hasUnresolvedNativeChildForChat('project-a')).toBe(true)
+  expect(f.open('boot-b').admission.hasUnresolvedNativeChildForChat('project-a')).toBe(true)
+  expect(await first.release()).toBe(true)
+  expect(f.admission.hasUnresolvedNativeChildForChat('project-a')).toBe(false)
 })
