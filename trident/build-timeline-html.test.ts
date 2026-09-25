@@ -45,14 +45,32 @@ test('an unrecorded end does not paint unknown elapsed time as recorded work', (
   expect(html).toContain('end unrecorded')
 })
 
+test('focus clips only the viewport and makes every later phase available through the overflow popover', () => {
+  const pr = card([segment('first', 0, 60_000, 'build'), segment('late', 7_200_000, 7_260_000, 'review')], 7_260_000)
+  pr.prState = 'open'; pr.active = true
+  const snapshot = { observedAt: 7_260_000, cards: [pr], prCount: 1, runOnlyCount: 0, maxDurationMs: 7_260_000,
+    viewDurationMs: 3_600_000, scaleMode: 'focus' as const, limit: 50, warnings: [] }
+  const html = renderTimeline(snapshot)
+  expect(html).toContain('0–1h focus window')
+  expect(html).toContain('width:100.00000%')
+  expect(html).toContain('class="overflow-button"')
+  expect(html).toContain('Beyond the focus window')
+  expect(html).toContain('&quot;label&quot;:&quot;review&quot;')
+  expect(html).toContain('No live signal')
+  expect(html).not.toContain('CI running')
+  expect(html).toContain('aria-haspopup="dialog"')
+  expect(renderTimeline({ ...snapshot, viewDurationMs: 7_260_000, scaleMode: 'all' })).not.toContain('class="overflow-button"')
+})
+
 test('a filter refresh requested during a fetch is replayed with the latest query', async () => {
   const elements = new Map<string, Record<string, unknown>>()
   const requests: string[] = []
   let finishFirst!: (value: { ok: boolean; text: () => Promise<string> }) => void
   const first = new Promise<{ ok: boolean; text: () => Promise<string> }>(resolve => { finishFirst = resolve })
   const location = { search: '', href: 'http://localhost/' }
-  const context = createContext({ location, URLSearchParams, AbortSignal, setInterval: () => 0,
-    document: { querySelectorAll: () => [], querySelector: () => null, getElementById: (id: string) => {
+  const context = createContext({ location, URLSearchParams, AbortSignal, setInterval: () => 0, clearTimeout,
+    window: { addEventListener: () => {} },
+    document: { addEventListener: () => {}, querySelectorAll: () => [], querySelector: () => null, getElementById: (id: string) => {
       if (!elements.has(id)) elements.set(id, { addEventListener: () => {} })
       return elements.get(id)
     } },

@@ -6,7 +6,7 @@ export interface PrCatalogue {
   repositories: Array<{
     repository: string
     error: string | null
-    prs: Array<{ number: number; title: string; url: string; createdAt: string; updatedAt?: string; closedAt: string | null; mergedAt: string | null; state: string; ciCoverage?: string; ciError?: string | null }>
+    prs: Array<{ number: number; title: string; url: string; createdAt: string; updatedAt?: string; closedAt: string | null; mergedAt: string | null; state: string; ciCoverage?: string; ciError?: string | null; ciObservedAt?: number | null; ciPending?: boolean; ciRunning?: boolean }>
   }>
 }
 
@@ -50,6 +50,11 @@ export function combineTimelineSources(catalogue: PrCatalogue, observations: Dir
       const key = `${source.repository}#${pr.number}`
       const start = validStamp(pr.createdAt), closed = validStamp(pr.closedAt) ?? validStamp(pr.mergedAt)
       const active = pr.state.toUpperCase() === 'OPEN'
+      const prState = pr.state.toLowerCase()
+      const freshCi = source.error === null && !pr.ciError &&
+        (pr.ciCoverage === 'head-only' || pr.ciCoverage === 'partial') &&
+        typeof pr.ciObservedAt === 'number' && Number.isFinite(pr.ciObservedAt) &&
+        pr.ciObservedAt <= now && now - pr.ciObservedAt <= 60_000
       const end = active ? now : closed
       const ordered = start !== null && end !== null && start <= end && start <= now && end <= now
       cards.set(key, {
@@ -57,6 +62,9 @@ export function combineTimelineSources(catalogue: PrCatalogue, observations: Dir
         lifecycle: `PR ${pr.state.toLowerCase()} · created ${pr.createdAt}${closed === null ? '' : ` · closed ${new Date(closed).toISOString()}`} · envelope includes linked work`,
         pr: pr.number, title: pr.title, start: ordered ? start : null, end: ordered ? end : null,
         latestStart: validStamp(pr.updatedAt ?? null) ?? start, active, runs: [], segments: [], lanes: 1, gaps: [], events: [], phaseTotals: [],
+        prState: prState === 'open' || prState === 'merged' || prState === 'closed' ? prState : 'unknown',
+        workSignal: { state: freshCi && pr.ciPending ? pr.ciRunning === true ? 'running' : 'pending' : 'unknown',
+          observedAt: freshCi ? pr.ciObservedAt! : null, source: 'GitHub check status for sampled PR head' },
         warnings: [
           ...(ordered ? [] : ['PR lifecycle duration unknown: missing or invalid timestamps.']),
           ...(pr.ciCoverage ? [pr.ciCoverage === 'head-only' ? 'CI observations cover the sampled head only; earlier push cycles remain unknown.' :
@@ -120,6 +128,11 @@ export function combineTimelineSources(catalogue: PrCatalogue, observations: Dir
     }
   }
   for (const card of cards.values()) {
+    const lastEnded = Math.max(-1, ...card.segments.filter(s => s.timing === 'recorded').map(s => s.end))
+    if ((!card.workSignal || card.workSignal.state === 'unknown') && lastEnded >= 0 && lastEnded <= now && now - lastEnded <= 600_000) {
+      card.workSignal = { state: 'recent', observedAt: lastEnded,
+        source: 'Recorded phase ended within the last 10 minutes; not evidence that work is still running' }
+    }
     card.segments.sort((a, b) => a.start - b.start || a.end - b.end || a.id.localeCompare(b.id))
     const lanes: number[] = []
     for (const segment of card.segments) {
