@@ -540,9 +540,16 @@ describe('a slow poll never rolls the screen backwards', () => {
     // chosen here rather than raced for.
     const gates: Array<() => void> = [];
     let call = 0;
+    const priorFetch = globalThis.fetch;
     (globalThis as unknown as { fetch: unknown }).fetch = async (
       input: string | URL,
+      init?: RequestInit,
     ): Promise<Response> => {
+      // Other mounted screens can make requests in the same device-lane process.
+      // They are not usage polls and must not consume a response gate or an ordinal.
+      if (!String(input).endsWith('/api/app/usage/dashboard')) {
+        return priorFetch(input, init);
+      }
       requested.push(String(input));
       const n = call++;
       // Call 0 is the OLD reading (25%), call 1 the NEW one (75%).
@@ -590,6 +597,12 @@ describe('a slow poll never rolls the screen backwards', () => {
         ticks[ticks.length - 1]!();
         await new Promise((r) => setTimeout(r, 0));
       });
+      // An unrelated request during the overlap reaches the fetch this test
+      // replaced, without becoming a third held dashboard response.
+      const probeUrl = 'data:application/json,%7B%22probe%22%3Atrue%7D';
+      const probe = await globalThis.fetch(probeUrl);
+      expect(probe.status).toBe(200);
+      expect(requested).toContain(probeUrl);
       expect(gates.length).toBe(2);
 
       // THE NEWER ONE LANDS FIRST…
@@ -610,6 +623,7 @@ describe('a slow poll never rolls the screen backwards', () => {
       });
       expect(textOf('usage-anthropic-acct-0-session-pct')).toBe('75%');
     } finally {
+      globalThis.fetch = priorFetch;
       (globalThis as unknown as Record<string, unknown>)['setInterval'] = realSetInterval;
     }
   });
