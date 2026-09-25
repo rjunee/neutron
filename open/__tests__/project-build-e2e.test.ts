@@ -4643,7 +4643,7 @@ test(`pending native fix recovery preserves repeated-finding enforcement with ${
   const outcome = await restartThroughGateway(f)
   if (progress === 'valid') {
     expect(outcome).toMatchObject({ kind: 'blocked', phase: 'review', on: 'Review requires orchestrator arbitration: repeated finding' })
-    expect(f.world.dispatches.slice(before).map(call => call.role)).toEqual(['review', 'review', 'synthesis'])
+    expect(dispatchRoles({ ...f.world, dispatches: f.world.dispatches.slice(before) })).toEqual(['review', 'review', 'synthesis'])
   } else {
     expect(outcome.kind).toBe('unknown')
     expect(f.world.dispatches).toHaveLength(before)
