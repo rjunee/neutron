@@ -20,17 +20,22 @@
  *
  * MECHANICS. The copy lives in a DOT-DIRECTORY, which `scripts/lib/
  * discover-test-files.sh` and bun's own discovery both exclude, so the mutants
- * can never join the real suite. It is removed on the way out and is gitignored
- * so a killed run cannot leave a committable stray.
+ * can never join the real suite. This test owns one child of that directory;
+ * cleanup removes only that child so concurrent mutation tests keep theirs.
+ * The parent is gitignored so a killed run cannot leave a committable stray.
  */
 import { afterAll, beforeAll, describe, expect, test } from 'bun:test'
-import { cpSync, mkdirSync, readFileSync, rmSync, writeFileSync } from 'node:fs'
-import { join } from 'node:path'
+import { cpSync, mkdirSync, mkdtempSync, readFileSync, rmSync, writeFileSync } from 'node:fs'
+import { join, relative } from 'node:path'
 
 const TRIDENT_DIR = import.meta.dir
 const REPO_ROOT = join(TRIDENT_DIR, '..')
-const MUTANT_DIR = join(REPO_ROOT, '.trident-mutants')
-const MUTANT_SOURCE = join(MUTANT_DIR, 'git-mode.ts')
+const MUTANT_PARENT = join(REPO_ROOT, '.trident-mutants')
+let mutantDir = ''
+function mutantPath(name: string): string {
+  if (!mutantDir) throw new Error('git-mode mutant directory was not created')
+  return join(mutantDir, name)
+}
 /**
  * The `./` is load-bearing. Bun's own discovery skips dot-directories — which is
  * WHY the mutants live in one — so a bare `.trident-mutants/…` filter matches no
@@ -39,7 +44,9 @@ const MUTANT_SOURCE = join(MUTANT_DIR, 'git-mode.ts')
  * harness would report every mutation as caught while never running a single
  * test. The positive control is what surfaced it.
  */
-const MUTANT_SUITE = './.trident-mutants/git-mode.test.ts'
+function mutantSuite(): string {
+  return `./${relative(REPO_ROOT, mutantPath('git-mode.test.ts'))}`
+}
 
 const ORIGINAL = readFileSync(join(TRIDENT_DIR, 'git-mode.ts'), 'utf8')
 
@@ -229,7 +236,7 @@ const MUTATIONS: readonly Mutation[] = [
 
 /** Run the copied suite against whatever `git-mode.ts` currently sits beside it. */
 function runMutantSuite(): { exitCode: number; output: string } {
-  const proc = Bun.spawnSync(['bun', 'test', MUTANT_SUITE], {
+  const proc = Bun.spawnSync(['bun', 'test', mutantSuite()], {
     cwd: REPO_ROOT,
     stdout: 'pipe',
     stderr: 'pipe',
@@ -263,28 +270,28 @@ function applyMutation(mutation: Mutation): string {
 
 describe('mutation acceptance — each re-introduced misclassification is CAUGHT', () => {
   beforeAll(() => {
-    rmSync(MUTANT_DIR, { recursive: true, force: true })
-    mkdirSync(MUTANT_DIR, { recursive: true })
+    mkdirSync(MUTANT_PARENT, { recursive: true })
+    mutantDir = mkdtempSync(join(MUTANT_PARENT, 'git-mode-'))
     // The real suite, run verbatim against a swappable source. `store.ts` comes
     // along because both files import its types; `@neutronai/*` specifiers still
     // resolve, because node walks up to the repo root's `node_modules`.
-    cpSync(join(TRIDENT_DIR, 'git-mode.test.ts'), join(MUTANT_DIR, 'git-mode.test.ts'))
-    cpSync(join(TRIDENT_DIR, 'store.ts'), join(MUTANT_DIR, 'store.ts'))
+    cpSync(join(TRIDENT_DIR, 'git-mode.test.ts'), mutantPath('git-mode.test.ts'))
+    cpSync(join(TRIDENT_DIR, 'store.ts'), mutantPath('store.ts'))
   })
 
   afterAll(() => {
-    rmSync(MUTANT_DIR, { recursive: true, force: true })
+    if (mutantDir) rmSync(mutantDir, { recursive: true, force: true })
   })
 
   test('POSITIVE CONTROL — the UNMUTATED copy is green, so a red below means something', () => {
-    writeFileSync(MUTANT_SOURCE, ORIGINAL)
+    writeFileSync(mutantPath('git-mode.ts'), ORIGINAL)
     const { exitCode, output } = runMutantSuite()
     expect([exitCode, output.includes('0 fail')]).toEqual([0, true])
   })
 
   for (const mutation of MUTATIONS) {
     test(`CAUGHT: ${mutation.name}`, () => {
-      writeFileSync(MUTANT_SOURCE, applyMutation(mutation))
+      writeFileSync(mutantPath('git-mode.ts'), applyMutation(mutation))
       const { exitCode, output } = runMutantSuite()
       // Red, AND red for the right reason: the named guard must be among the
       // failures. `[name, …]` so a failure here reports which mutation escaped.
