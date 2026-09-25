@@ -51,8 +51,8 @@
  */
 import { LIVE_AGENT_TOOL_NAMES } from '@neutronai/gateway/wiring/build-live-agent-turn.ts'
 import { projectInstallAvailableBytes } from '../wiring/project-build-dependencies.ts'
-import { afterEach, beforeEach, expect, spyOn, test } from 'bun:test'
-import { chmod, copyFile, mkdir, mkdtemp, readFile, readdir, realpath, rename, rm, stat, symlink, utimes, writeFile } from 'node:fs/promises'
+import { afterAll, afterEach, beforeEach, expect, spyOn, test } from 'bun:test'
+import { chmod, copyFile, cp, mkdir, mkdtemp, readFile, readdir, realpath, rename, rm, stat, symlink, utimes, writeFile } from 'node:fs/promises'
 import { tmpdir } from 'node:os'
 import { dirname, join } from 'node:path'
 import { fileURLToPath } from 'node:url'
@@ -97,6 +97,13 @@ import { EfficiencyTrace, EFFICIENCY_SCENARIOS, assertEfficient, compareEfficien
 import { ReplSession } from '@neutronai/runtime/adapters/claude-code/persistent/repl-session.ts'
 
 const cleanups: (() => void | Promise<void>)[] = []
+// Templates are never handed to a host. Every fixture owns both repositories,
+// including its refs, index, objects and working files; reuse copies every file.
+const gitFixtureSeeds = new Map<string, string>()
+afterAll(async () => {
+  for (const dir of gitFixtureSeeds.values()) await rm(dir, { recursive: true, force: true })
+  gitFixtureSeeds.clear()
+})
 type FixtureTiming = {
   sequence: number
   variant: Record<string, unknown>
@@ -932,83 +939,113 @@ async function fixture(options: { taskSequence?: boolean; moreTasks?: boolean; s
     if (!result.ok) throw new Error(`setup: git ${args.join(' ')}: ${result.stderr}`)
     return result.stdout.trim()
   }
-  await spawnCapture(['git', 'init', '--bare', '--initial-branch=main', origin], dir)
-  await spawnCapture(['git', 'init', '--initial-branch=main', repo], dir)
-  await git(repo, ['config', 'user.email', 'harness@example.invalid'])
-  await git(repo, ['config', 'user.name', 'Harness'])
-  await git(repo, ['config', 'commit.gpgsign', 'false'])
-  mark('git_init')
-  await mkdir(join(repo, 'scripts', 'ci'), { recursive: true })
-  // The repo OPTS IN to the leak gate; `runLeakGatePreflight` probes for exactly
-  // this path before it runs anything (`leak-preflight.ts:281`).
-  await writeFile(join(repo, 'scripts', 'ci', 'leak-gate.sh'), LEAK_GATE_STUB, { mode: 0o755 })
-  await writeFile(join(repo, 'scripts', 'ci', 'suite.sh'), suiteScript(options.suiteExit ?? 0), { mode: 0o755 })
-  if (options.namedSuiteFailure) {
-    await mkdir(join(repo, 'tests'), { recursive: true })
-    if (options.namedSuiteFailure === 'generic') {
-      await writeFile(join(repo, 'tests', 'preexisting.test.sh'), "echo 'tests/preexisting.test.sh: pre-existing red'\nexit 1\n")
-      await writeFile(join(repo, 'scripts', 'ci', 'suite.sh'), 'bash ./tests/preexisting.test.sh\n')
-    } else {
-      await writeFile(join(repo, 'tests', 'preexisting.test.ts'), "import { expect, test } from 'bun:test'\n"
-        + (options.verboseSuiteDiagnostic ? "console.log('[trident] event=mutation_proof_exempt ' + 'x'.repeat(22000))\n" : '')
-        + "test('pre-existing red', () => expect(false).toBe(true))\n")
-      await writeFile(join(repo, 'scripts', 'ci', 'suite.sh'), 'bun test ./tests/preexisting.test.ts\n')
+  const gitSeedKey = JSON.stringify({ suiteExit: options.suiteExit ?? 0,
+    namedSuiteFailure: options.namedSuiteFailure ?? false, verboseSuiteDiagnostic: options.verboseSuiteDiagnostic ?? false,
+    manifest: options.manifest, bunWorkspace: options.bunWorkspace ?? false,
+    bunWorkspacePeer: options.bunWorkspacePeer ?? false, bunWorkspaceSibling: options.bunWorkspaceSibling ?? false,
+    spec: options.spec ?? false, seedLedger: options.seedLedger ?? true, moreTasks: options.moreTasks ?? false })
+  // Workspace fixtures prove real pack/install/lifecycle behavior on every
+  // setup. Keep those assertions executing independently for each fixture.
+  const existingSeed = options.bunWorkspace ? undefined : gitFixtureSeeds.get(gitSeedKey)
+  if (existingSeed) {
+    await cp(join(existingSeed, 'origin.git'), origin, { recursive: true })
+    await cp(join(existingSeed, 'code'), repo, { recursive: true })
+    // Worktrees resolve relative remote URLs against their own cwd. Keep this
+    // fixture's absolute origin, never the template or a sibling fixture's URL.
+    await git(repo, ['remote', 'set-url', 'origin', origin])
+    mark('git_seed_copy')
+  } else {
+    await spawnCapture(['git', 'init', '--bare', '--initial-branch=main', origin], dir)
+    await spawnCapture(['git', 'init', '--initial-branch=main', repo], dir)
+    await git(repo, ['config', 'user.email', 'harness@example.invalid'])
+    await git(repo, ['config', 'user.name', 'Harness'])
+    await git(repo, ['config', 'commit.gpgsign', 'false'])
+    mark('git_init')
+    await mkdir(join(repo, 'scripts', 'ci'), { recursive: true })
+    // The repo OPTS IN to the leak gate; `runLeakGatePreflight` probes for exactly
+    // this path before it runs anything (`leak-preflight.ts:281`).
+    await writeFile(join(repo, 'scripts', 'ci', 'leak-gate.sh'), LEAK_GATE_STUB, { mode: 0o755 })
+    await writeFile(join(repo, 'scripts', 'ci', 'suite.sh'), suiteScript(options.suiteExit ?? 0), { mode: 0o755 })
+    if (options.namedSuiteFailure) {
+      await mkdir(join(repo, 'tests'), { recursive: true })
+      if (options.namedSuiteFailure === 'generic') {
+        await writeFile(join(repo, 'tests', 'preexisting.test.sh'), "echo 'tests/preexisting.test.sh: pre-existing red'\nexit 1\n")
+        await writeFile(join(repo, 'scripts', 'ci', 'suite.sh'), 'bash ./tests/preexisting.test.sh\n')
+      } else {
+        await writeFile(join(repo, 'tests', 'preexisting.test.ts'), "import { expect, test } from 'bun:test'\n"
+          + (options.verboseSuiteDiagnostic ? "console.log('[trident] event=mutation_proof_exempt ' + 'x'.repeat(22000))\n" : '')
+          + "test('pre-existing red', () => expect(false).toBe(true))\n")
+        await writeFile(join(repo, 'scripts', 'ci', 'suite.sh'), 'bun test ./tests/preexisting.test.ts\n')
+      }
+    }
+    if (options.manifest) await writeFile(join(repo, 'package.json'), JSON.stringify(options.manifest))
+    if (options.bunWorkspace) {
+      // A real tarball dependency keeps this fixture offline while exercising Bun's
+      // isolated store and package-local resolution, just like the production suite.
+      await mkdir(join(repo, 'app'), { recursive: true })
+      await mkdir(join(repo, 'vendor', 'package'), { recursive: true })
+      await writeFile(join(repo, '.gitignore'), 'node_modules/\n')
+      await writeFile(join(repo, 'package.json'), JSON.stringify({ name: 'fixture', private: true, workspaces: options.bunWorkspaceSibling ? ['app', 'cores/sdk'] : ['app'],
+        scripts: { postinstall: 'touch lifecycle-ran' } }))
+      await writeFile(join(repo, 'bunfig.toml'), '[install]\nlinker = "isolated"\n')
+      await writeFile(join(repo, 'vendor', 'package', 'package.json'), JSON.stringify({ name: 'fixture-dependency', version: '1.0.0', main: 'index.js' }))
+      await writeFile(join(repo, 'vendor', 'package', 'index.js'), 'exports.message = "dependency consumed"\n')
+      const packed = await spawnCapture(['tar', '-czf', 'dependency.tgz', 'package'], join(repo, 'vendor'))
+      expect(packed.ok).toBe(true)
+      if (options.bunWorkspacePeer) {
+        await mkdir(join(repo, 'vendor', 'peer'), { recursive: true })
+        await writeFile(join(repo, 'vendor', 'peer', 'package.json'), JSON.stringify({ name: 'fixture-peer', version: '1.0.0', main: 'index.js' }))
+        await writeFile(join(repo, 'vendor', 'peer', 'index.js'), 'exports.message = "local peer"\n')
+        expect((await spawnCapture(['tar', '-czf', 'peer.tgz', 'peer'], join(repo, 'vendor'))).ok).toBe(true)
+      }
+      if (options.bunWorkspaceSibling) {
+        await mkdir(join(repo, 'cores/sdk'), { recursive: true })
+        await writeFile(join(repo, 'cores/sdk', 'package.json'), JSON.stringify({ name: '@fixture/sdk', private: true, main: './index.ts', type: 'module' }))
+        await writeFile(join(repo, 'cores/sdk', 'index.ts'), 'export const message = "local workspace"\n')
+      }
+      await writeFile(join(repo, 'app', 'package.json'), JSON.stringify({ name: 'fixture-app', dependencies: { 'fixture-dependency': 'file:../vendor/dependency.tgz',
+        ...(options.bunWorkspaceSibling ? { '@fixture/sdk': 'workspace:*' } : {}) },
+        ...(options.bunWorkspacePeer ? { peerDependencies: { 'fixture-peer': 'file:../vendor/peer.tgz' } } : {}) }))
+      await writeFile(join(repo, 'app', 'check.ts'), 'import { message } from "fixture-dependency"; if (message !== "dependency consumed") throw Error("wrong dependency"); console.log(message)\n'
+        + (options.bunWorkspaceSibling ? 'import { message as sibling } from "@fixture/sdk"; if (sibling !== "local workspace") throw Error("wrong workspace");\n' : '')
+        + (options.bunWorkspacePeer ? 'import { message as peer } from "fixture-peer"; if (peer !== "local peer") throw Error("wrong peer");\n' : ''))
+      await writeFile(join(repo, 'scripts', 'ci', 'verify-workspace-deps.ts'), await readFile(new URL('../../scripts/ci/verify-workspace-deps.ts', import.meta.url), 'utf8'))
+      await writeFile(join(repo, 'scripts', 'ci', 'suite.sh'), '#!/usr/bin/env bash\nset -e\nbun scripts/ci/verify-workspace-deps.ts\nbun app/check.ts\n')
+      const installed = await spawnCapture(['bun', 'install'], repo, { BUN_INSTALL_CACHE_DIR: join(dir, 'bun-cache') })
+      expect(installed.ok, installed.stderr).toBe(true)
+      // Positive control: this lifecycle script really runs without --ignore-scripts.
+      expect(await readFile(join(repo, 'lifecycle-ran'), 'utf8')).toBe('')
+      await rm(join(repo, 'lifecycle-ran'))
+      await rm(join(repo, 'node_modules'), { recursive: true, force: true })
+      await rm(join(repo, 'app', 'node_modules'), { recursive: true, force: true })
+    }
+    await writeFile(join(repo, 'NOTES.md'), 'seed\n')
+    if (options.spec) await writeFile(join(repo, 'SPEC.md'), '# Project specification\n\nRecord and verify notes.\n')
+    if (options.seedLedger ?? true) {
+      await writeFile(join(repo, 'IMPLEMENTATION_PLAN.md'),
+        `- [ ] T1 record the note\n${options.moreTasks ? '- [ ] T2 record another note\n' : ''}`)
+    }
+    mark('seed_files')
+    await git(repo, ['add', '-A'])
+    await git(repo, ['commit', '-m', 'chore: seed'])
+    await git(repo, ['remote', 'add', 'origin', origin])
+    await git(repo, ['push', '-u', 'origin', 'main'])
+    mark('git_seed')
+    if (!options.bunWorkspace) {
+      const seed = await mkdtemp(join(tmpdir(), 'project-build-git-seed-'))
+      try {
+        await cp(origin, join(seed, 'origin.git'), { recursive: true })
+        await cp(repo, join(seed, 'code'), { recursive: true })
+        gitFixtureSeeds.set(gitSeedKey, seed)
+      } catch (error) {
+        await rm(seed, { recursive: true, force: true })
+        throw error
+      }
+      mark('git_seed_template')
     }
   }
-  if (options.manifest) await writeFile(join(repo, 'package.json'), JSON.stringify(options.manifest))
-  if (options.bunWorkspace) {
-    // A real tarball dependency keeps this fixture offline while exercising Bun's
-    // isolated store and package-local resolution, just like the production suite.
-    await mkdir(join(repo, 'app'), { recursive: true })
-    await mkdir(join(repo, 'vendor', 'package'), { recursive: true })
-    await writeFile(join(repo, '.gitignore'), 'node_modules/\n')
-    await writeFile(join(repo, 'package.json'), JSON.stringify({ name: 'fixture', private: true, workspaces: options.bunWorkspaceSibling ? ['app', 'cores/sdk'] : ['app'],
-      scripts: { postinstall: 'touch lifecycle-ran' } }))
-    await writeFile(join(repo, 'bunfig.toml'), '[install]\nlinker = "isolated"\n')
-    await writeFile(join(repo, 'vendor', 'package', 'package.json'), JSON.stringify({ name: 'fixture-dependency', version: '1.0.0', main: 'index.js' }))
-    await writeFile(join(repo, 'vendor', 'package', 'index.js'), 'exports.message = "dependency consumed"\n')
-    const packed = await spawnCapture(['tar', '-czf', 'dependency.tgz', 'package'], join(repo, 'vendor'))
-    expect(packed.ok).toBe(true)
-    if (options.bunWorkspacePeer) {
-      await mkdir(join(repo, 'vendor', 'peer'), { recursive: true })
-      await writeFile(join(repo, 'vendor', 'peer', 'package.json'), JSON.stringify({ name: 'fixture-peer', version: '1.0.0', main: 'index.js' }))
-      await writeFile(join(repo, 'vendor', 'peer', 'index.js'), 'exports.message = "local peer"\n')
-      expect((await spawnCapture(['tar', '-czf', 'peer.tgz', 'peer'], join(repo, 'vendor'))).ok).toBe(true)
-    }
-    if (options.bunWorkspaceSibling) {
-      await mkdir(join(repo, 'cores/sdk'), { recursive: true })
-      await writeFile(join(repo, 'cores/sdk', 'package.json'), JSON.stringify({ name: '@fixture/sdk', private: true, main: './index.ts', type: 'module' }))
-      await writeFile(join(repo, 'cores/sdk', 'index.ts'), 'export const message = "local workspace"\n')
-    }
-    await writeFile(join(repo, 'app', 'package.json'), JSON.stringify({ name: 'fixture-app', dependencies: { 'fixture-dependency': 'file:../vendor/dependency.tgz',
-      ...(options.bunWorkspaceSibling ? { '@fixture/sdk': 'workspace:*' } : {}) },
-      ...(options.bunWorkspacePeer ? { peerDependencies: { 'fixture-peer': 'file:../vendor/peer.tgz' } } : {}) }))
-    await writeFile(join(repo, 'app', 'check.ts'), 'import { message } from "fixture-dependency"; if (message !== "dependency consumed") throw Error("wrong dependency"); console.log(message)\n'
-      + (options.bunWorkspaceSibling ? 'import { message as sibling } from "@fixture/sdk"; if (sibling !== "local workspace") throw Error("wrong workspace");\n' : '')
-      + (options.bunWorkspacePeer ? 'import { message as peer } from "fixture-peer"; if (peer !== "local peer") throw Error("wrong peer");\n' : ''))
-    await writeFile(join(repo, 'scripts', 'ci', 'verify-workspace-deps.ts'), await readFile(new URL('../../scripts/ci/verify-workspace-deps.ts', import.meta.url), 'utf8'))
-    await writeFile(join(repo, 'scripts', 'ci', 'suite.sh'), '#!/usr/bin/env bash\nset -e\nbun scripts/ci/verify-workspace-deps.ts\nbun app/check.ts\n')
-    const installed = await spawnCapture(['bun', 'install'], repo, { BUN_INSTALL_CACHE_DIR: join(dir, 'bun-cache') })
-    expect(installed.ok, installed.stderr).toBe(true)
-    // Positive control: this lifecycle script really runs without --ignore-scripts.
-    expect(await readFile(join(repo, 'lifecycle-ran'), 'utf8')).toBe('')
-    await rm(join(repo, 'lifecycle-ran'))
-    await rm(join(repo, 'node_modules'), { recursive: true, force: true })
-    await rm(join(repo, 'app', 'node_modules'), { recursive: true, force: true })
-  }
-  await writeFile(join(repo, 'NOTES.md'), 'seed\n')
-  if (options.spec) await writeFile(join(repo, 'SPEC.md'), '# Project specification\n\nRecord and verify notes.\n')
-  if (options.seedLedger ?? true) {
-    await writeFile(join(repo, 'IMPLEMENTATION_PLAN.md'),
-      `- [ ] T1 record the note\n${options.moreTasks ? '- [ ] T2 record another note\n' : ''}`)
-  }
-  mark('seed_files')
-  await git(repo, ['add', '-A'])
-  await git(repo, ['commit', '-m', 'chore: seed'])
-  await git(repo, ['remote', 'add', 'origin', origin])
-  await git(repo, ['push', '-u', 'origin', 'main'])
   const baseSha = await git(repo, ['rev-parse', '--verify', 'refs/heads/main^{commit}'])
-  mark('git_seed')
+  mark('git_seed_head')
 
   await writeFile(join(dir, 'project-repos.json'), JSON.stringify({
     repos: [{ name: 'project', path: 'code', remote: null, ciWorkflow: 'ci.yml' }], default: 'project' }))
@@ -1367,6 +1404,40 @@ async function drive(f: Awaited<ReturnType<typeof fixture>>): Promise<ProjectBui
   const host = await createProjectBuildHost(options)
   return host.run({ mode: 'implementation', start: 'fresh' }, new AbortController().signal)
 }
+
+test('Git fixture seed preserves independent mutable siblings and real option variants', async () => {
+  const first = await fixture()
+  const sibling = await fixture()
+  const git = async (cwd: string, ...args: string[]) => {
+    const result = await spawnCapture(['git', '-C', cwd, ...args], cwd)
+    expect(result.ok, result.stderr).toBe(true)
+    return result.stdout.trim()
+  }
+  expect(await git(first.repo, 'remote', 'get-url', 'origin')).toBe(first.origin)
+  expect(await git(sibling.repo, 'remote', 'get-url', 'origin')).toBe(sibling.origin)
+  await writeFile(join(sibling.repo, 'NOTES.md'), 'sibling mutation\n')
+  await git(sibling.repo, 'add', 'NOTES.md')
+  await git(sibling.repo, 'commit', '-m', 'test: sibling mutation')
+  await git(sibling.repo, 'branch', 'sibling-only')
+  await git(sibling.repo, 'push', 'origin', 'main', 'sibling-only')
+  expect(await readFile(join(first.repo, 'NOTES.md'), 'utf8')).toBe('seed\n')
+  expect(await git(first.repo, 'rev-parse', 'main')).toBe(first.baseSha)
+  expect(await git(first.origin, 'rev-parse', 'main')).toBe(first.baseSha)
+  expect(await git(first.origin, 'for-each-ref', '--format=%(refname)', 'refs/heads/sibling-only')).toBe('')
+  expect(await git(sibling.origin, 'rev-parse', 'main')).not.toBe(first.baseSha)
+  expect(first.store.get(sibling.row.id)).toBeNull()
+  const later = await fixture()
+  expect(await readFile(join(later.repo, 'NOTES.md'), 'utf8')).toBe('seed\n')
+  expect(await git(later.repo, 'rev-parse', 'main')).toBe(first.baseSha)
+  const variant = await fixture({ seedLedger: false })
+  expect(await git(variant.repo, 'ls-tree', '--name-only', 'HEAD', 'IMPLEMENTATION_PLAN.md')).toBe('')
+  expect(await git(first.repo, 'ls-tree', '--name-only', 'HEAD', 'IMPLEMENTATION_PLAN.md')).toBe('IMPLEMENTATION_PLAN.md')
+  const specified = await fixture({ spec: true })
+  expect(await readFile(join(specified.repo, 'SPEC.md'), 'utf8')).toContain('Record and verify notes.')
+  const failing = await fixture({ suiteExit: 1 })
+  expect((await spawnCapture(['bash', 'scripts/ci/suite.sh'], failing.repo)).exit_code).toBe(1)
+  expect((await spawnCapture(['bash', 'scripts/ci/suite.sh'], first.repo)).ok).toBe(true)
+})
 
 for (const taskSequence of [false, true]) test(`terminal ${taskSequence ? 'task-sequence' : 'single'} runs one host suite for review and publication`, async () => {
   const f = await fixture({ taskSequence })
