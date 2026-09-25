@@ -83,3 +83,16 @@ and test-owned liveness-query repairs were verified through the real consuming
 Open E2E and HTTP lanes in the green gate. This as-built update follows the
 tested head; CI must still check the final PR revision. Live deployment and a
 throughput measurement remain outstanding.
+
+The first hosted CI pass found two final-head gaps after that host receipt. Lint
+rejected a bare voided completion continuation; the named fire-and-forget
+observer now records any rejection while preserving lease release. A consuming
+E2E asserted that a hung turn acquisition always reports unknown, but the
+pre-submission refusal and outer unknown timers share the same deadline and
+either may win. The revised control requires one acquisition, zero submissions,
+no PR, and eventual exact lease release for that seam. Post-submission hangs
+still require unknown and retain ownership; an in-time plan remains a positive
+control. Four focused E2E tests, 105 native-child/acting-turn tests, both
+TypeScript checks, and lint passed locally. Opposing over-/under-admission
+mutants each turned the relevant control red; restored tests passed. The final
+hosted CI rerun is still required.
