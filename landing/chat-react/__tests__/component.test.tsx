@@ -43,6 +43,13 @@ afterAll(async () => {
 const TOPIC = 'app:sam'
 const tick = () => new Promise((r) => setTimeout(r, 0))
 const ready = () => ({ v: 1, type: 'session_ready', user_id: 'sam', topic_id: TOPIC, ts: 0 })
+const isCreateProjectPost = (url: string, init?: RequestInit): boolean =>
+  url === 'https://sam.neutron.test/api/app/projects' && init?.method === 'POST'
+const isGet = (init?: RequestInit) => init?.method === undefined || init.method === 'GET'
+const emptyControlResponse = (projectId: string | null) => new Response(JSON.stringify({
+  projectId, threadId: 'thread-test', bindingRevision: 'binding-test', generation: 1,
+  epoch: 0, turnId: null, status: 'idle', pending: [],
+}), { status: 200, headers: { 'content-type': 'application/json' } })
 
 describe('ChatApp render (happy-dom)', () => {
   it('kills disabled-composer, IME-submit, and concurrent-send mutations while streaming', async () => {
@@ -899,12 +906,17 @@ describe('ChatApp render (happy-dom)', () => {
       token: 'dev:sam',
     }
 
-    // Capture the create POST; return a created project the controller navigates to.
+    // Count only the create mutation; the shell also makes read requests on mount.
     const calls: Array<{ url: string; init?: RequestInit }> = []
+    const controlReads: string[] = []
+    const unexpectedRequests: Array<{ url: string; method: string }> = []
     const fetchImpl = (url: string, init?: RequestInit): Promise<Response> => {
-      // The shell resolves its tab set (global, then per-project after navigate);
-      // serve those empty and DON'T record them so `calls` is just the create POST.
-      if (url.endsWith('/tabs')) {
+      // The shell resolves its tab set (global, then per-project after navigate).
+      if (isGet(init) && [
+        'https://sam.neutron.test/api/app/tabs',
+        'https://sam.neutron.test/api/app/projects/~general/tabs',
+        'https://sam.neutron.test/api/app/projects/taxes/tabs',
+      ].includes(url)) {
         return Promise.resolve(
           new Response(JSON.stringify({ ok: true, tabs: [] }), {
             status: 200,
@@ -912,10 +924,11 @@ describe('ChatApp render (happy-dom)', () => {
           }),
         )
       }
-      // General now mounts the Work pane (happy-dom reports a desktop viewport), so
-      // its WorkBoardTab lists the board on mount — serve it empty and DON'T record
-      // it so `calls` stays just the create POST.
-      if (url.includes('/work-board')) {
+      // General now mounts the Work pane (happy-dom reports a desktop viewport).
+      if (isGet(init) && [
+        'https://sam.neutron.test/api/app/projects/~general/work-board',
+        'https://sam.neutron.test/api/app/projects/taxes/work-board',
+      ].includes(url)) {
         return Promise.resolve(
           new Response(JSON.stringify({ ok: true, items: [], project_id: 'general' }), {
             status: 200,
@@ -923,10 +936,8 @@ describe('ChatApp render (happy-dom)', () => {
           }),
         )
       }
-      // The shell's tab-band divider polls the usage meter on mount — shell
-      // chrome, like the two above, and not what `calls` is counting. Serve the
-      // unavailable answer (the meter then draws a plain divider) and don't record it.
-      if (url.includes('/api/app/usage')) {
+      // The shell's tab-band divider polls the usage meter on mount.
+      if (isGet(init) && url === 'https://sam.neutron.test/api/app/usage') {
         return Promise.resolve(
           new Response(JSON.stringify({ available: false, reason: 'no_credential' }), {
             status: 200,
@@ -936,19 +947,31 @@ describe('ChatApp render (happy-dom)', () => {
       }
       // The shell also reads the active REPL model; it is unrelated to the
       // create-project mutation whose calls this test counts.
-      if (url.endsWith('/repl-model')) {
+      if (isGet(init) && [
+        'https://sam.neutron.test/api/app/projects/~general/repl-model',
+        'https://sam.neutron.test/api/app/projects/taxes/repl-model',
+      ].includes(url)) {
         return Promise.resolve(new Response(JSON.stringify({
           harness: 'codex', sessionId: 'test-session', currentModel: 'cheap',
           availableModels: [{ id: 'cheap', label: 'Cheap' }], status: 'ready',
         }), { status: 200, headers: { 'content-type': 'application/json' } }))
       }
-      calls.push({ url, ...(init !== undefined ? { init } : {}) })
-      return Promise.resolve(
-        new Response(JSON.stringify({ ok: true, project: { id: 'taxes', label: 'Taxes' }, created: true }), {
+      if (init?.method === 'GET' && [
+        'https://sam.neutron.test/api/app/projects/~general/repl-control',
+        'https://sam.neutron.test/api/app/projects/taxes/repl-control',
+      ].includes(url)) {
+        controlReads.push(url)
+        return Promise.resolve(emptyControlResponse(url.includes('/taxes/') ? 'taxes' : null))
+      }
+      if (isCreateProjectPost(url, init)) {
+        calls.push({ url, init: init! })
+        return Promise.resolve(new Response(JSON.stringify({ ok: true, project: { id: 'taxes', label: 'Taxes' }, created: true }), {
           status: 201,
           headers: { 'content-type': 'application/json' },
-        }),
-      )
+        }))
+      }
+      unexpectedRequests.push({ url, method: init?.method ?? 'GET' })
+      return Promise.resolve(new Response('{}', { status: 500 }))
     }
     function Harness(): React.JSX.Element {
       const draft = useAttachmentDraft({ token: config.token })
@@ -1002,6 +1025,8 @@ describe('ChatApp render (happy-dom)', () => {
 
     // It POSTed the trimmed name to the create endpoint with the bearer token…
     expect(calls.length).toBe(1)
+    expect(controlReads).toContain('https://sam.neutron.test/api/app/projects/~general/repl-control')
+    expect(unexpectedRequests).toEqual([])
     expect(calls[0]!.url).toBe('https://sam.neutron.test/api/app/projects')
     expect(calls[0]!.init?.method).toBe('POST')
     expect(JSON.parse(String(calls[0]!.init?.body))).toEqual({ name: 'Taxes' })
@@ -1064,10 +1089,15 @@ describe('ChatApp render (happy-dom)', () => {
       token: 'dev:sam',
     }
 
-    const calls: Array<{ url: string }> = []
-    const fetchImpl = (url: string): Promise<Response> => {
-      // Serve the shell's tab resolver empty without recording it (see above).
-      if (url.endsWith('/tabs')) {
+    const calls: Array<{ url: string; init?: RequestInit }> = []
+    const controlReads: string[] = []
+    const unexpectedRequests: Array<{ url: string; method: string }> = []
+    const fetchImpl = (url: string, init?: RequestInit): Promise<Response> => {
+      // Serve the shell's tab resolver empty (see above).
+      if (isGet(init) && [
+        'https://sam.neutron.test/api/app/tabs',
+        'https://sam.neutron.test/api/app/projects/~general/tabs',
+      ].includes(url)) {
         return Promise.resolve(
           new Response(JSON.stringify({ ok: true, tabs: [] }), {
             status: 200,
@@ -1075,9 +1105,8 @@ describe('ChatApp render (happy-dom)', () => {
           }),
         )
       }
-      // General's Work pane lists its board on mount (desktop viewport) — serve it
-      // empty and don't record it, so `calls` reflects only the create flow.
-      if (url.includes('/work-board')) {
+      // General's Work pane lists its board on mount (desktop viewport).
+      if (isGet(init) && url === 'https://sam.neutron.test/api/app/projects/~general/work-board') {
         return Promise.resolve(
           new Response(JSON.stringify({ ok: true, items: [], project_id: 'general' }), {
             status: 200,
@@ -1085,10 +1114,8 @@ describe('ChatApp render (happy-dom)', () => {
           }),
         )
       }
-      // The shell's tab-band divider polls the usage meter on mount — shell
-      // chrome, like the two above, and not what `calls` is counting. Serve the
-      // unavailable answer (the meter then draws a plain divider) and don't record it.
-      if (url.includes('/api/app/usage')) {
+      // The shell's tab-band divider polls the usage meter on mount.
+      if (isGet(init) && url === 'https://sam.neutron.test/api/app/usage') {
         return Promise.resolve(
           new Response(JSON.stringify({ available: false, reason: 'no_credential' }), {
             status: 200,
@@ -1096,14 +1123,22 @@ describe('ChatApp render (happy-dom)', () => {
           }),
         )
       }
-      if (url.endsWith('/repl-model')) {
+      if (isGet(init) && url === 'https://sam.neutron.test/api/app/projects/~general/repl-model') {
         return Promise.resolve(new Response(JSON.stringify({
           harness: 'codex', sessionId: 'test-session', currentModel: 'cheap',
           availableModels: [{ id: 'cheap', label: 'Cheap' }], status: 'ready',
         }), { status: 200, headers: { 'content-type': 'application/json' } }))
       }
-      calls.push({ url })
-      return Promise.resolve(new Response('{}', { status: 201 }))
+      if (url === 'https://sam.neutron.test/api/app/projects/~general/repl-control' && init?.method === 'GET') {
+        controlReads.push(url)
+        return Promise.resolve(emptyControlResponse(null))
+      }
+      if (isCreateProjectPost(url, init)) {
+        calls.push({ url, init: init! })
+        return Promise.resolve(new Response('{}', { status: 201 }))
+      }
+      unexpectedRequests.push({ url, method: init?.method ?? 'GET' })
+      return Promise.resolve(new Response('{}', { status: 500 }))
     }
 
     function Harness(): React.JSX.Element {
@@ -1137,6 +1172,8 @@ describe('ChatApp render (happy-dom)', () => {
       await tick()
     })
     expect(calls.length).toBe(0)
+    expect(controlReads).toContain('https://sam.neutron.test/api/app/projects/~general/repl-control')
+    expect(unexpectedRequests).toEqual([])
     expect(container.querySelector('.car-rail-create-error')).not.toBeNull()
 
     // Escape closes the form (still no POST); the header "+" stays present.
@@ -1145,6 +1182,7 @@ describe('ChatApp render (happy-dom)', () => {
       await tick()
     })
     expect(calls.length).toBe(0)
+    expect(unexpectedRequests).toEqual([])
     expect(container.querySelector('.car-rail-input')).toBeNull()
     expect(container.querySelector('.car-rail-newp')).not.toBeNull()
 

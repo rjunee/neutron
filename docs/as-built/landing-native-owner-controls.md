@@ -37,5 +37,35 @@ landing/chat-react/__tests__/project-shell.test.tsx`, plus `bunx tsc --noEmit -p
 landing/chat-react/tsconfig.json` and `bunx tsc --noEmit -p landing/tsconfig.json`.
 The focused run passed 38 tests with 221 assertions; both TypeScript commands
 exited zero after restoring the mutations.
-The canonical shared-host checks, integrated app/web head, CI, and deployed
-controls are separate publication evidence; they have not run for this slice.
+The canonical shared-host checks, CI, and deployed controls remain separate
+publication evidence; they have not run for this slice.
+
+### Fresh-main integration
+
+Integrated the functional delta from `dfc43d83c` onto fetched public main
+`b046589034de0569208da4c6b9a69e571fbdedaf`, alongside the General phone-scope
+and browser model-acknowledgement changes. The original candidate's unrelated
+history was not imported. Two test-fixture dependencies were retained:
+`2535be496`/`4352fca17` make the native-controls fixture release only its own
+DOM; `fa867f930`/`d9964f0c4` distinguish the create-project POST from expected
+control reads and reject unexpected requests. Without these fixes the browser
+suite had two create-project failures and the mixed phone/browser run had a
+DOM registration failure.
+
+On the integrated code, `bun test` with the four browser files
+`native-owner-control`, `repl-model-control`, `project-shell`, and `component`
+under `landing/chat-react/__tests__/` passed 66 tests / 423 assertions. The
+mixed run of both app control suites and the browser native-control suite
+passed 73 tests / 581 assertions. Suppressing the browser control killed both
+consuming ProjectShell cases (11 pass / 2 fail); removing scope equality killed
+four wrong-scope cases (11 pass / 4 fail). Both mutations were restored and
+the browser and mixed suites passed again. TypeScript checks for the root,
+Trident, app, landing chat, landing, and Open configurations all exited zero.
+
+The voice-note oracle and its record are already tracked in this base through
+`e0f4032ea`; its test is byte-identical to the old candidate and required no
+import. App controls plus that voice-note suite passed 72 tests / 531 assertions.
+These are focused local receipts, not the full shared-host suite or a physical
+device/live-provider witness. Final composition with the workspace-lifecycle
+change, independent review, full local validation, CI and live cutover evidence
+remain outstanding. No publication or deployment was performed.

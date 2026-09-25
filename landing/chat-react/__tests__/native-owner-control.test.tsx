@@ -2,11 +2,15 @@ import { afterAll, beforeAll, describe, expect, it } from 'bun:test'
 import { GlobalRegistrator } from '@happy-dom/global-registrator'
 import type { NativeOwnerControlState, FetchImpl } from '../native-owner-control-client.ts'
 
+let ownsDom = false
 beforeAll(() => {
-  GlobalRegistrator.register({ url: 'https://test.example/chat' })
+  // The native app harness keeps its DOM registered between co-resident files.
+  // Reuse that DOM; component requests already receive an explicit origin.
+  ownsDom = !GlobalRegistrator.isRegistered
+  if (ownsDom) GlobalRegistrator.register({ url: 'https://test.example/chat' })
   ;(globalThis as unknown as Record<string, unknown>)['IS_REACT_ACT_ENVIRONMENT'] = true
 })
-afterAll(async () => { await GlobalRegistrator.unregister() })
+afterAll(async () => { if (ownsDom) await GlobalRegistrator.unregister() })
 const tick = () => new Promise(resolve => setTimeout(resolve, 0))
 const json = (value: unknown, status = 200) => new Response(JSON.stringify(value), { status })
 const snapshot = (projectId: string | null): NativeOwnerControlState => ({

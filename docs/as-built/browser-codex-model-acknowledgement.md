@@ -36,3 +36,26 @@ token-equality comparison made the same-conversation test fail; removing the
 identity guard made both foreign-conversation and foreign-harness cases fail.
 Both mutations were restored before the passing focused runs. The canonical
 full suite, CI and deployment were deliberately left to integration ownership.
+
+### Fresh-main integration
+
+The functional delta from `c2d04648a41ddc3e7aff53792561332676a3caec` was
+integrated onto public main `b046589034de0569208da4c6b9a69e571fbdedaf`
+alongside browser native controls and the single General phone-scope delta.
+The four-file browser run including the create-project consuming fixture
+passed 66 tests / 423 assertions. The real Open chat-log file passed 10 tests /
+68 assertions with loopback sockets enabled; the initial sandboxed run could
+not open its listeners and is not treated as product-failure evidence.
+
+Restoring pre-switch token equality killed the same-conversation case (17 pass /
+1 fail). Removing the identity guard killed foreign conversation, foreign harness,
+missing conversation and Claude session-replacement cases (14 pass / 4 fail).
+Both mutations were restored before the passing browser rerun. Root, Trident,
+app, landing chat, landing and Open TypeScript checks exited zero.
+
+This consuming test still simulates provider credentials and process launch as
+described above; it does not satisfy the live Codex build required by
+`docs/spec-items/instance-project-provider-resolution.md:82-84`. Final
+workspace-lifecycle composition, independent review, the full shared-host suite,
+exact-head CI and live cutover acceptance remain outstanding. Nothing was
+pushed, merged or deployed.

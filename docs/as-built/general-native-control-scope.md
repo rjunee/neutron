@@ -34,3 +34,22 @@ Independent Astra review approved the scoped app boundary with the separate
 web-selector limitation above. The changed-file leak preflight, including the
 local PII denylist, reported zero findings. The required full local validation is pending
 the coordinated shared-host slot. No deployment or live owner session changed.
+
+### Fresh-main integration
+
+The single functional delta from `d15de34fe` was integrated onto public main
+`b046589034de0569208da4c6b9a69e571fbdedaf` with browser owner controls and
+model acknowledgement; the patch-identical `8769ffe11` was not imported again.
+The app native/model-control suites plus the already-published voice-note
+oracle passed 72 tests / 531 assertions. The mixed app controls and browser
+native-controls suites passed 73 tests / 581 assertions after the browser
+fixture's DOM ownership fix.
+
+Both semantic mutation directions were measured on this integration: refusing
+null identity killed four General cases while 36 controls passed; removing
+scope equality killed ten foreign-scope cases while 30 controls passed. The
+mutations were restored and the mixed consuming suites passed again. Root,
+Trident, app, landing chat, landing and Open TypeScript checks exited zero.
+The canonical full suite, final workspace-lifecycle composition, independent
+review, exact-head CI and live acceptance remain outstanding. No deployment
+or physical-device acceptance is claimed.
