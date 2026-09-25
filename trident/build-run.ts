@@ -19,7 +19,7 @@ import {
 import type { LeakPreflightOutcome } from './leak-preflight.ts'
 import type { MergeDiffAssessment } from './merge.ts'
 import { applyReviewSuite, type SuiteAssessment } from './gates/review-suite.ts'
-import { reviewProgress, type ReviewProgress } from './gates/review-progress.ts'
+import { reviewProgress, type ReviewProgress, type ReviewStop } from './gates/review-progress.ts'
 import type { TerminalCause } from './terminal-cause.ts'
 import type { ReviewPanelObservation } from './gates/review-panel.ts'
 
@@ -38,7 +38,7 @@ export interface BuildSnapshot {
   pr: { number: number; head: string; state: 'OPEN' | 'CLOSED' | 'MERGED' } | null
 }
 export type Measurement = { kind: 'known'; value: BuildSnapshot } | { kind: 'unknown'; detail: string }
-export type GateResult = { kind: 'allow' } | { kind: 'blocked'; on: string } | { kind: 'unknown'; detail: string }
+export type GateResult = { kind: 'allow' } | { kind: 'blocked'; on: string; reviewStop?: ReviewStop } | { kind: 'unknown'; detail: string }
 export type NominationRepair = { kind: 'repair-nomination'; finding: string }
 export type PublicationGateResult = GateResult | NominationRepair
 export type ReviewDecision =
@@ -217,7 +217,13 @@ export interface BuildRunDeps {
 
 export type BuildRunOutcome =
   | { kind: 'merged'; snapshot: BuildSnapshot }
-  | { kind: 'blocked'; phase: BuildPhase; on: string; recipient: 'orchestrator' }
+  | { kind: 'blocked'; phase: BuildPhase; on: string; recipient: 'orchestrator'; reviewStop?: ReviewStop & {
+      round: number
+      /** Set only after the host has consumed a verified panel for this head. */
+      reviewedHead?: string
+      /** The panel's decision before host suite, CI or progress overrides. */
+      panelDecision?: 'approve' | 'fix' | 're-plan'
+    } }
   | { kind: 'built'; snapshot: BuildSnapshot; cause: 'wave-member-built' }
   | { kind: 'continued'; snapshot: BuildSnapshot; remainingTasks: number; cause: 'task-built' }
   | { kind: 'refused'; reason: 'worker-unsupported'; detail: string }
@@ -329,8 +335,10 @@ export async function buildRun(input: BuildRunInput, deps: BuildRunDeps, signal:
   const blocked = (on: string): BuildRunOutcome => ({ kind: 'blocked', phase, on, recipient: 'orchestrator' })
   const unknown = (detail: string): BuildRunOutcome => ({ kind: 'unknown', phase, step_id, detail })
   const failed = (detail: string, cause: TerminalCause = 'workflow-threw'): BuildRunOutcome => ({ kind: 'failed', phase, detail, cause })
-  const gateStop = (gate: GateResult): BuildRunOutcome | null => {
-    if (gate.kind === 'blocked') return blocked(gate.on)
+  const gateStop = (gate: GateResult, round = 0, panel?: { head: string; decision: 'approve' | 'fix' | 're-plan' }): BuildRunOutcome | null => {
+    if (gate.kind === 'blocked') return { kind: 'blocked', phase, on: gate.on, recipient: 'orchestrator',
+      ...(gate.reviewStop ? { reviewStop: { ...gate.reviewStop, round,
+        ...(panel ? { reviewedHead: panel.head, panelDecision: panel.decision } : {}) } } : {}) }
     if (gate.kind === 'unknown') return unknown(gate.detail)
     return null
   }
@@ -914,7 +922,7 @@ export async function buildRun(input: BuildRunInput, deps: BuildRunDeps, signal:
         findings: findings.map(text => ({ kind: 'code' as const, actionable: true, text })) })
       if (round >= maxRounds) return blocked('Review requires orchestrator arbitration: round ceiling')
       const current = { findings, blockingCount: 1 }
-      const progress = gateStop(reviewProgress(previousReview, current))
+      const progress = gateStop(reviewProgress(previousReview, current), round)
       if (progress) return progress
       previousReview = current
       reviewBaseline = 'required'
@@ -1018,13 +1026,16 @@ export async function buildRun(input: BuildRunInput, deps: BuildRunDeps, signal:
         // exhausted round ends the run, and the orchestrator resumes from this row;
         // writing it only on the paths that continue would lose exactly the rounds
         // that need it.
-        if (decision.kind === 'fix') {
+        const progress = gateStop(reviewProgress(previousReview, currentReview), round,
+          panel.kind === 'approve' || panel.kind === 'fix' || panel.kind === 're-plan'
+            ? { head: snapshot.head, decision: panel.kind } : undefined)
+        if (decision.kind === 'fix' || progress?.kind === 'blocked') {
           await checkpoint({ head: snapshot.head, stage: 'rejected', round, pending: undefined,
             previousReview: currentReview ?? null, reviewBaseline: 'required',
-            findings: decision.findings.map(text => ({ kind: 'code' as const, actionable: true, text })) })
+            findings: (decision.kind === 'approve' ? currentReview!.findings : decision.findings)
+              .map(text => ({ kind: 'code' as const, actionable: true, text })) })
         }
         if (decision.kind === 're-plan' && replansUsed !== 0) return blocked('Review requires orchestrator arbitration: re-plan already spent')
-        const progress = gateStop(reviewProgress(previousReview, currentReview))
         if (progress) return progress
         if (decision.kind === 'approve') {
           await checkpoint({ head: snapshot.head, stage: 'approved', round, pending: undefined, findings: [] })

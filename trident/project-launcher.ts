@@ -74,20 +74,40 @@ export function projectBuildDriverReservation(raw: string | null): string | null
 export function projectBuildResult(outcome: ProjectBuildOutcome, input: InnerLoopInput): string {
   if (outcome.kind === 'unknown') return JSON.stringify({ projectBuild: outcome })
   const snapshot = 'snapshot' in outcome ? outcome.snapshot : null
+  // Preserve the host's arithmetic STOP as canonical escalation evidence. The
+  // harvest, board, delivery and project-chat wake share that existing decoder.
+  // An ordinary blocked/failed result has no such evidence and stays a failure.
+  const reviewStop = outcome.kind === 'blocked' ? outcome.reviewStop : undefined
+  // Nomination repair also uses progress arithmetic, before a panel can run.
+  // Only the panel consumer can attach a reviewed head; a reason/phase alone
+  // must never turn such a host stop into an Argus decision.
+  const reviewedStop = reviewStop && typeof reviewStop.reviewedHead === 'string'
+    && /^(?:[0-9a-f]{40}|[0-9a-f]{64})$/.test(reviewStop.reviewedHead)
+    && ['approve', 'fix', 're-plan'].includes(reviewStop.panelDecision ?? '')
+    && Number.isSafeInteger(reviewStop.round) && reviewStop.round > 0 ? reviewStop : undefined
   return JSON.stringify({
     projectBuild: outcome,
     ok: outcome.kind === 'merged' || outcome.kind === 'built' || outcome.kind === 'continued',
     prMerged: outcome.kind === 'merged',
     publishRequested: outcome.kind === 'continued',
     built: outcome.kind === 'built' || outcome.kind === 'continued',
-    verdict: outcome.kind === 'merged' ? 'APPROVE' : null,
+    verdict: outcome.kind === 'merged' ? 'APPROVE' : reviewedStop ? 'REQUEST_CHANGES' : null,
     branch: input.run.branch, worktreePath: input.run.worktree,
     prNumber: snapshot?.pr?.number ?? input.run.pr,
-    commitSha: snapshot?.head, reviewedHead: snapshot?.head,
+    commitSha: snapshot?.head ?? reviewedStop?.reviewedHead, reviewedHead: snapshot?.head ?? reviewedStop?.reviewedHead,
     remainingTasks: outcome.kind === 'continued' ? outcome.remainingTasks : undefined,
-    checkpoint: outcome.kind === 'merged' ? 'merged' : outcome.kind === 'built' ? 'wave-member-built' : outcome.kind === 'continued' ? 'task-built' : 'inner-error',
+    checkpoint: outcome.kind === 'merged' ? 'merged' : outcome.kind === 'built' ? 'wave-member-built' : outcome.kind === 'continued' ? 'task-built'
+      : reviewedStop ? reviewedStop.panelDecision === 'approve' ? 'argus-approved' : 'argus-request-changes' : 'inner-error',
     terminalCauseKind: outcome.kind === 'failed' ? outcome.cause : undefined,
     terminalCause: outcome.kind === 'blocked' ? outcome.on : 'detail' in outcome ? outcome.detail : undefined,
+    ...(reviewStop ? {
+      round: reviewStop.round,
+      blockKind: 'not-converging',
+      escalation: { kind: 'not-converging', whatIsMissing: outcome.kind === 'blocked' ? outcome.on : '',
+        triggers: [reviewStop.trigger], round: reviewStop.round,
+        evidence: `Blocker/major count ${reviewStop.previous.blockingCount} -> ${reviewStop.current.blockingCount}; `
+          + `previous identities ${JSON.stringify(reviewStop.previous.findings)}; current identities ${JSON.stringify(reviewStop.current.findings)}` },
+    } : {}),
   })
 }
 

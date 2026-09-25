@@ -19,6 +19,8 @@ import { buildTridentOrchestrator } from './orchestrator.ts'
 import { terminalRunDisposition } from './run-disposition.ts'
 import { parseInnerResult, type InnerLoopInput } from './inner-loop.ts'
 import type { ProjectBuildOutcome } from './project-build-host.ts'
+import { deriveEscalationBlock } from './escalation-block.ts'
+import { recordedTerminalVerdict } from './bound-review.ts'
 
 const cleanup: (() => Promise<void> | void)[] = []
 afterEach(async () => { for (const fn of cleanup.splice(0).reverse()) await fn() })
@@ -49,6 +51,43 @@ async function fixture() {
   return { store, input, complete, errors, options, starts: () => starts, construct }
 }
 async function settle() { for (let i = 0; i < 5; i++) await Bun.sleep(1) }
+
+test('only structured review STOP evidence becomes an escalation, never a matching reason alone', async () => {
+  const f = await fixture()
+  const reason = 'Review requires orchestrator arbitration: no-progress'
+  const stopped: ProjectBuildOutcome = { kind: 'blocked', phase: 'review', recipient: 'orchestrator', on: reason,
+    cleanup: { kind: 'cleaned', detail: '' }, reviewStop: { trigger: 'no-progress', round: 2,
+      previous: { findings: ['old'], blockingCount: 8 }, current: { findings: ['new'], blockingCount: 17 } } }
+  const raw = projectBuildResult(stopped, f.input)
+  expect(parseInnerResult(raw)).toMatchObject({ verdict: null, round: 2,
+    block_kind: 'not-converging', escalation: { triggers: ['no-progress'], round: 2 } })
+  const terminal = { phase: 'failed' as const, harvested_at: 123, inner_result: raw }
+  expect(deriveEscalationBlock(terminal)).toMatchObject({ kind: 'not-converging', whatIsMissing: reason,
+    evidence: 'Blocker/major count 8 -> 17; previous identities ["old"]; current identities ["new"]' })
+  expect(deriveEscalationBlock({ ...terminal, harvested_at: null })).toBeNull()
+  expect(deriveEscalationBlock({ ...terminal, phase: 'stopped' })).toBeNull()
+  const reviewed = { ...stopped, reviewStop: { ...stopped.reviewStop!, reviewedHead: 'b'.repeat(40), panelDecision: 'fix' as const } }
+  const reviewedResult = parseInnerResult(projectBuildResult(reviewed, f.input))!
+  expect(reviewedResult).toMatchObject({ verdict: 'REQUEST_CHANGES', checkpoint: 'argus-request-changes', round: 2 })
+  expect(recordedTerminalVerdict(reviewedResult, null)).toBe('REQUEST_CHANGES')
+  const approvedPanel = parseInnerResult(projectBuildResult({ ...reviewed,
+    reviewStop: { ...reviewed.reviewStop, panelDecision: 'approve' } }, f.input))!
+  expect(approvedPanel).toMatchObject({ verdict: 'REQUEST_CHANGES', checkpoint: 'argus-approved' })
+  expect(recordedTerminalVerdict(approvedPanel, null)).toBe('REQUEST_CHANGES')
+  for (const reviewStop of [stopped.reviewStop!, { ...reviewed.reviewStop, reviewedHead: 'b'.repeat(7) },
+    { ...reviewed.reviewStop, round: 0 }, { ...reviewed.reviewStop, round: NaN }]) {
+    const result = parseInnerResult(projectBuildResult({ ...stopped, reviewStop }, f.input))!
+    expect(result).toMatchObject({ verdict: null, checkpoint: 'inner-error' })
+    expect(recordedTerminalVerdict(result, null)).toBe('REVIEW_NOT_RUN')
+  }
+  const { reviewStop: _evidence, ...ordinary } = stopped
+  for (const outcome of [ordinary, { kind: 'failed' as const, phase: 'review' as const, detail: reason,
+    cause: 'workflow-threw' as const, cleanup: stopped.cleanup }]) {
+    const inner_result = projectBuildResult(outcome, f.input)
+    expect(parseInnerResult(inner_result)?.escalation).toBeNull()
+    expect(deriveEscalationBlock({ ...terminal, inner_result })).toBeNull()
+  }
+})
 
 test('launch returns before completion and hands terminal result to the existing harvest', async () => {
   const f = await fixture()

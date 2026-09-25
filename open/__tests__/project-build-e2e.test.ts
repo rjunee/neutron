@@ -69,9 +69,13 @@ import { replaceProjectGeneration, type ProjectMaintenancePorts } from '@neutron
 import { runProjectLivenessCensus, type ProjectLivenessProbes } from '@neutronai/gateway/project-liveness-census.ts'
 import { buildAdmissionReleaseObserver } from '@neutronai/gateway/proactive/admission-release.ts'
 import { buildTridentTerminalObserver } from '../wiring/trident-nexus-observer.ts'
+import { NexusStore } from '@neutronai/gateway/nexus/nexus-store.ts'
 import { fixtureDispatchAdmission } from '@neutronai/trident/__tests__/dispatch-admission-fixture.ts'
 import { buildTridentOrchestrator } from '@neutronai/trident/orchestrator.ts'
 import { createProjectLauncher } from '@neutronai/trident/project-launcher.ts'
+import { buildBoardReconcileObserver } from '@neutronai/trident/board-reconcile.ts'
+import { deriveEscalationBlock } from '@neutronai/trident/escalation-block.ts'
+import { buildTerminalBuildWakePrompt } from '@neutronai/gateway/proactive/terminal-build-wake.ts'
 import { slugifyTask } from '@neutronai/trident/slugify-task.ts'
 import { TridentPhaseUsageStore } from '@neutronai/trident/phase-usage.ts'
 import { TridentAttemptLedger } from '@neutronai/trident/attempt-ledger.ts'
@@ -356,6 +360,8 @@ interface WorkerWorld {
    * array — is an APPROVE with no findings.
    */
   blockersByRound: readonly number[]
+  /** Demote these rounds' findings to minor while retaining their identities. */
+  minorRounds?: ReadonlySet<number>
   /** Keep the first finding's identity stable across rounds to exercise G070. */
   repeatFirstFinding: boolean
   /**
@@ -417,9 +423,9 @@ interface WorkerWorld {
 function verdictFor(world: WorkerWorld, round: number) {
   const blockers = world.blockersByRound[round] ?? 0
   return {
-    verdict: world.commentRounds.has(round) ? 'COMMENT' : blockers > 0 ? 'REQUEST_CHANGES' : 'APPROVE',
+    verdict: world.commentRounds.has(round) ? 'COMMENT' : blockers > 0 && !world.minorRounds?.has(round) ? 'REQUEST_CHANGES' : 'APPROVE',
     findings: Array.from({ length: blockers }, (_, index) => ({
-      severity: 'major',
+      severity: world.minorRounds?.has(round) ? 'minor' : 'major',
       title: `NOTES.md is missing the round ${round} marker (${index})`,
       evidence: `NOTES.md carries no marker for round ${round}, finding ${index}`,
       file: 'NOTES.md', symbol: world.repeatFirstFinding && index === 0 ? 'note-repeated-f0' : `note-r${round}-f${index}`,
@@ -4717,6 +4723,117 @@ test('a design-gap escalation re-plans and rebuilds instead of dispatching a fix
   const merged = await spawnCapture(['git', '-C', f.origin, 'show', 'refs/heads/main:NOTES.md'], f.origin)
   expect(merged.stdout).toBe(`seed\n${f.row.id}:build:0\n${f.row.id}:build:1`)
   expect(f.github.prs[0]!.state).toBe('MERGED')
+}, 300_000)
+
+for (const scenario of ['no-progress', 'repeat', 'decreasing', 'host-only', 'no-progress-replan', 'repeat-replan', 'repeat-approve'] as const) test(`review arithmetic STOP terminal transport (${scenario})`, async () => {
+  const repeated = scenario.startsWith('repeat')
+  const replan = scenario.endsWith('replan')
+  const f = await fixture({ taskSequence: true, blockersByRound: scenario.startsWith('no-progress') ? [0, 8, 17] : [0, 8, 7, 0],
+    repeatFirstFinding: repeated, replanRounds: replan ? [2] : [] })
+  if (scenario === 'host-only') f.world.mutationArgv = 'bare'
+  const panelApproved = scenario === 'repeat-approve'
+  if (panelApproved) f.world.minorRounds = new Set([2])
+  const board = new WorkBoardStore(f.db)
+  const card = await board.create(f.row.project_slug, { title: 'Review recovery evidence' })
+  await board.attachRun(f.row.project_slug, card.id, f.row.id)
+  const nexus = new NexusStore({ owner_home: join(f.dir, 'nexus') })
+  cleanups.push(() => nexus.closeAll())
+  const terminalObserver = buildTridentTerminalObserver({ nexus,
+    observers: [buildBoardReconcileObserver(board, { resolveRepoWebUrl: async () => null })!] })
+  let settled!: () => void
+  const completion = new Promise<void>(resolve => { settled = resolve })
+  const record = f.store.recordStageEvent.bind(f.store)
+  const recording = spyOn(f.store, 'recordStageEvent').mockImplementation(async (...args) => {
+    await record(...args)
+    if (args[1] === 'build-driver-settled') settled()
+  })
+  cleanups.push(() => recording.mockRestore())
+  const errors: unknown[] = []
+  const launcher = createProjectLauncher({ store: f.store, onError: error => errors.push(error), prepare: async input => {
+    f.input.run = input.run
+    return f.prepare()
+  } })
+  const orch = buildTridentOrchestrator({ fire_workflow: launcher, db_path: f.input.db_path,
+    base_branch: 'main', run_host: Object.assign(f.context.runHost, { writesDiffOutput: true as const }),
+    read_run: id => f.store.get(id), sleep: async () => {} })
+  const advanced = await orch.step(f.store.get(f.row.id)!)
+  expect(await f.store.saveIfActive(advanced.run)).toBe(true)
+  await completion
+  expect(errors).toEqual([])
+  const outcome: ProjectBuildOutcome = JSON.parse(f.store.get(f.row.id)!.inner_result!).projectBuild
+  if (scenario === 'decreasing') {
+    expect(outcome.kind, why(f, outcome)).toBe('merged')
+    const terminal = await orch.step(f.store.get(f.row.id)!)
+    expect(await f.store.saveIfActive(terminal.run)).toBe(true)
+    expect(deriveEscalationBlock(terminal.run)).toBeNull()
+    await terminalObserver(terminal.run)
+    expect(await board.get(f.row.project_slug, card.id)).toMatchObject({ status: 'done' })
+    expect(f.world.dispatches.filter(dispatch => dispatch.role === 'fix').map(dispatch => dispatch.step_id))
+      .toEqual([`${f.row.id}:task:0:fix:1`, `${f.row.id}:task:0:fix:2`])
+    expect(f.github.prs[0]!.state).toBe('MERGED')
+    const events = await nexus.readRecent(f.row.project_slug, { limit: 100 })
+    expect(events.find(event => event.kind === 'decision')?.actor_kind).toBe('argus')
+    expect(events.find(event => event.kind === 'decision')?.body).toContain('APPROVE')
+    return
+  }
+  expect(outcome.kind, why(f, outcome)).toBe('blocked')
+  if (outcome.kind !== 'blocked') return
+  if (scenario === 'host-only') {
+    expect(outcome.reviewStop).toMatchObject({ trigger: 'repeat-finding', round: 2 })
+    expect(outcome.reviewStop?.reviewedHead).toBeUndefined()
+    expect(f.world.dispatches.some(dispatch => dispatch.role === 'review')).toBe(false)
+    const terminal = await orch.step(f.store.get(f.row.id)!)
+    expect(await f.store.saveIfActive(terminal.run)).toBe(true)
+    expect(terminal.run).toMatchObject({ inner_verdict: 'REVIEW_NOT_RUN', inner_checkpoint: 'inner-error', phase: 'failed' })
+    await terminalObserver(terminal.run)
+    expect(await board.get(f.row.project_slug, card.id)).toMatchObject({ status: 'blocked' })
+    const events = await nexus.readRecent(f.row.project_slug, { limit: 100 })
+    expect(events).toHaveLength(1)
+    expect(events[0]?.kind).toBe('handoff')
+    expect(events[0]?.body).toContain('REVIEW_NOT_RUN')
+    return
+  }
+  // Each of the fixture's three reviewers reports the configured count; the
+  // host records their total and deduplicates identities independently.
+  expect(outcome.reviewStop).toMatchObject({ trigger: repeated ? 'repeat-finding' : 'no-progress', round: 2,
+    panelDecision: panelApproved ? 'approve' : replan ? 're-plan' : 'fix',
+    previous: { blockingCount: 24 }, current: { blockingCount: panelApproved ? 0 : repeated ? 21 : 51 } })
+  expect(f.world.dispatches.filter(dispatch => dispatch.role === 'fix').map(dispatch => dispatch.step_id)).toEqual([`${f.row.id}:task:0:fix:1`])
+  expect(lastCheckpoint(f)).toMatchObject({ stage: 'rejected', round: 2 })
+  if (replan) {
+    // Real decoded panel declarations reach `re-plan`; arithmetic wins before
+    // another planner runs, but its rejected round must still be recoverable.
+    expect(lastCheckpoint(f)).toMatchObject({ replansUsed: 0, previousReview: outcome.reviewStop?.current })
+    expect(f.world.dispatches.filter(dispatch => dispatch.role === 'plan')).toHaveLength(1)
+  }
+  expect(outcome.reviewStop?.reviewedHead).toBe(String(lastCheckpoint(f).head))
+  // Consume the real launcher's stored result through harvest and the board writer.
+  const terminal = await orch.step(f.store.get(f.row.id)!)
+  expect(await f.store.saveIfActive(terminal.run)).toBe(true)
+  expect(terminal.run.phase).toBe('failed')
+  expect(terminal.run).toMatchObject({ inner_verdict: 'REQUEST_CHANGES', inner_checkpoint: panelApproved ? 'argus-approved' : 'argus-request-changes', round: 2 })
+  expect(JSON.parse(terminal.run.inner_result!).reviewedHead).toBe(lastCheckpoint(f).head)
+  expect(JSON.parse(terminal.run.inner_result!).projectBuild.reviewStop.panelDecision)
+    .toBe(panelApproved ? 'approve' : replan ? 're-plan' : 'fix')
+  expect(terminal.run.failure_reason).toContain('BLOCKED')
+  const escalation = deriveEscalationBlock(terminal.run)
+  expect(escalation).toMatchObject({ kind: 'not-converging', round: 2, triggers: [repeated ? 'repeat-finding' : 'no-progress'] })
+  expect(escalation?.evidence).toContain(`24 -> ${panelApproved ? 0 : repeated ? 21 : 51}`)
+  await terminalObserver(terminal.run)
+  const events = await nexus.readRecent(f.row.project_slug, { limit: 100 })
+  expect(events).toHaveLength(2)
+  expect(events.find(event => event.kind === 'handoff')?.body).toContain('REQUEST_CHANGES')
+  expect(events.find(event => event.kind === 'handoff')?.body).toContain('round 2')
+  expect(events.find(event => event.kind === 'decision')?.actor_kind).toBe('argus')
+  expect(events.find(event => event.kind === 'decision')?.body).toContain(panelApproved ? 'APPROVE' : 'REQUEST_CHANGES')
+  if (panelApproved) expect(events.find(event => event.kind === 'decision')?.body).not.toContain('REQUEST_CHANGES')
+  expect(events.some(event => event.body.includes('REVIEW_NOT_RUN'))).toBe(false)
+  expect(await board.get(f.row.project_slug, card.id)).toMatchObject({ status: 'blocked', linked_run_id: f.row.id, completed_at: null })
+  const prompt = buildTerminalBuildWakePrompt({ run: terminal.run, board_item_id: card.id })
+  expect(prompt).toContain('Escalation evidence')
+  expect(prompt).toContain(repeated ? 'repeat-finding' : 'no-progress')
+  expect(f.github.prs[0]!.state).toBe('OPEN')
+  expect((await spawnCapture(['git', '-C', f.origin, 'rev-parse', 'refs/heads/main'], f.origin)).stdout).toBe(f.baseSha)
 }, 300_000)
 
 test('a second unconverged round stops at the row-configured ceiling, not at a verdict', async () => {
