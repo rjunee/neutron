@@ -1,8 +1,8 @@
 import { afterEach, expect, spyOn, test } from 'bun:test'
 import * as codexActing from '@neutronai/runtime/workers/codex-acting-turn.ts'
-import { appendFileSync, chmodSync, existsSync, mkdirSync, mkdtempSync, readFileSync, rmSync, writeFileSync } from 'node:fs'
+import { appendFileSync, chmodSync, existsSync, mkdirSync, mkdtempSync, readFileSync, renameSync, rmSync, writeFileSync } from 'node:fs'
 import { tmpdir } from 'node:os'
-import { join } from 'node:path'
+import { dirname, join } from 'node:path'
 import { createHash } from 'node:crypto'
 import { CodexOwnerBindings } from '../wiring/codex-owner-binding.ts'
 import { buildLlmCallSubstrate } from '@neutronai/gateway/wiring/build-llm-call-substrate.ts'
@@ -384,18 +384,28 @@ async function consumingBuild(f: ReturnType<typeof fixture>, options: { cwd?: st
 
 async function interruptedBoundedWork() {
   const f = fixture(true)
-  const build = await consumingBuild(f)
+  const build = await consumingBuild(f, { transport: true })
+  let nativePath = ''
   // Parent completes, but host schema decoding cannot yet consume the child.
-  f.onPrompt(() => writeFileSync(build.request.result.path, JSON.stringify({ schema: 'fixture',
-    run_id: build.request.run_id, step_id: build.request.step_id, kind: 'completed', result: { malformed: true } })))
+  f.onPrompt(prompt => {
+    const dispatch = JSON.parse(prompt.slice('Execute the prompt in this JSON dispatch specification: '.length))
+    const args = JSON.parse(dispatch.prompt.slice(dispatch.prompt.indexOf('\n') + 1))
+    const child = JSON.parse(args.message.split('\n').find((line: string) => line.startsWith('Request (data): ')).slice('Request (data): '.length))
+    nativePath = child.result.path
+    writeFileSync(nativePath, JSON.stringify({ schema: 'fixture', run_id: build.request.run_id,
+      step_id: build.request.step_id, kind: 'completed', result: { malformed: true } }))
+  })
   expect((await build.worker.run(build.request, 'in-repl', new AbortController().signal)).kind).toBe('unknown')
   const path = join(f.homes.get('project-one')!, '.neutron-owner-work.json')
   const bytes = readFileSync(path, 'utf8')
-  expect(JSON.parse(bytes)).toMatchObject({ kind: 'bounded-work', request: build.request, turnId: 'turn-1' })
-  writeFileSync(build.request.result.path, JSON.stringify({ schema: 'fixture', run_id: build.request.run_id,
+  expect(JSON.parse(bytes)).toMatchObject({ kind: 'bounded-work', request: build.request,
+    nativeRequest: { ...build.request, result: { ...build.request.result, path: nativePath } }, turnId: 'turn-1' })
+  expect(nativePath).not.toBe(build.request.result.path)
+  expect(existsSync(build.request.result.path)).toBe(false)
+  writeFileSync(nativePath, JSON.stringify({ schema: 'fixture', run_id: build.request.run_id,
     step_id: build.request.step_id, kind: 'completed', result: { answer: 'retained native child' } }))
   const restarted = f.restart()
-  return { f, build, path, bytes, restarted,
+  return { f, build, path, bytes, nativePath, restarted,
     recover: (request = build.request) => restarted.guardBuildRunner('project-one', build.rawWorker)
       .recover!(request, 'in-repl', new AbortController().signal) }
 }
@@ -406,6 +416,7 @@ test('exact bounded recovery consumes the original child after boot refusal with
   expect(await x.restarted.recoverExisting('project-one')).toMatchObject({ status: 'refused', retryable: true })
   expect(readFileSync(x.path, 'utf8')).toBe(x.bytes)
   expect(await x.recover()).toMatchObject({ kind: 'completed', result: { answer: 'retained native child' } })
+  expect(readFileSync(x.build.request.result.path, 'utf8')).toBe(readFileSync(x.nativePath, 'utf8'))
   expect(existsSync(x.path)).toBe(false)
   expect(x.f.calls).toHaveLength(1)
   expect((await x.recover()).kind).toBe('completed')
@@ -416,7 +427,7 @@ test('exact bounded recovery consumes the original child after boot refusal with
   await x.restarted.close()
 })
 
-for (const fault of ['legacy', 'no-receipt', 'run', 'step', 'request', 'credential', 'generation', 'epoch',
+for (const fault of ['legacy', 'no-receipt', 'run', 'step', 'request', 'native-path', 'native-request', 'credential', 'generation', 'epoch',
   'foreign-turn', 'active-turn', 'interrupted-turn', 'missing-turn', 'partial-history', 'cursor', 'child', 'review'] as const) {
   test(`exact bounded recovery retains ${fault} uncertainty without dispatch or clearing work`, async () => {
     const x = await interruptedBoundedWork()
@@ -427,6 +438,8 @@ for (const fault of ['legacy', 'no-receipt', 'run', 'step', 'request', 'credenti
     if (fault === 'credential') { work.credentialIdentity = 'other'; writeFileSync(x.path, JSON.stringify(work)) }
     if (fault === 'generation') { work.facts.generation++; writeFileSync(x.path, JSON.stringify(work)) }
     if (fault === 'epoch') { work.epoch++; writeFileSync(x.path, JSON.stringify(work)) }
+    if (fault === 'native-path') { work.nativeRequest.result.path += '.foreign'; writeFileSync(x.path, JSON.stringify(work)) }
+    if (fault === 'native-request') { work.nativeRequest.model_id = 'other'; writeFileSync(x.path, JSON.stringify(work)) }
     if (fault === 'run') request = { ...request, run_id: 'other' }
     if (fault === 'step') request = { ...request, step_id: 'other' }
     if (fault === 'request') request = { ...request, model_id: 'other' }
@@ -477,12 +490,12 @@ test('exact bounded recovery requires paired native child completion and validat
       agentThreadId: 'original-child', agentPath: '/root/original-child' }))
     return value
   })
-  const result = readFileSync(x.build.request.result.path, 'utf8')
-  writeFileSync(x.build.request.result.path, '{invalid')
+  const result = readFileSync(x.nativePath, 'utf8')
+  writeFileSync(x.nativePath, '{invalid')
   expect((await x.recover()).kind).toBe('unknown')
   expect(readFileSync(x.path, 'utf8')).toBe(x.bytes)
   expect(await x.restarted.recoverExisting('project-one')).toMatchObject({ status: 'refused', retryable: true })
-  writeFileSync(x.build.request.result.path, result)
+  writeFileSync(x.nativePath, result)
   expect((await x.recover()).kind).toBe('completed')
   expect(existsSync(x.path)).toBe(false)
   expect(x.f.calls).toHaveLength(1)
@@ -497,6 +510,20 @@ test('exact bounded recovery leaves unresolved broker state and cancelled work f
   owner.broker.state = () => ({ ...state(), phase: 'recovery', unresolved: 'turn/start' })
   expect((await x.recover()).kind).toBe('unknown')
   expect(readFileSync(x.path, 'utf8')).toBe(x.bytes)
+  expect(x.f.calls).toHaveLength(1)
+  await x.restarted.close()
+})
+
+test('exact bounded recovery refuses a substituted staging inode even with a valid child result', async () => {
+  const x = await interruptedBoundedWork()
+  const result = readFileSync(x.nativePath, 'utf8')
+  const stage = dirname(x.nativePath)
+  renameSync(stage, `${stage}.original`)
+  mkdirSync(stage, { mode: 0o700 })
+  writeFileSync(x.nativePath, result)
+  expect((await x.recover()).kind).toBe('unknown')
+  expect(readFileSync(x.path, 'utf8')).toBe(x.bytes)
+  expect(existsSync(x.build.request.result.path)).toBe(false)
   expect(x.f.calls).toHaveLength(1)
   await x.restarted.close()
 })

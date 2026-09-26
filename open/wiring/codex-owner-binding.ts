@@ -30,6 +30,7 @@ interface BoundedOwnerWork {
   credentialIdentity: string
   facts: CodexOwnerBindingFacts
   request: BoundedWorkRequest
+  nativeRequest: BoundedWorkRequest
   turnId: string | null
   epoch: number | null
 }
@@ -38,6 +39,14 @@ function ownerWorkBytes(home: string): string {
   privatePath(path, 'file')
   if (lstatSync(path).size > 256 * 1024) throw new Error('Codex work evidence exceeds its bound')
   return readFileSync(path, 'utf8')
+}
+
+function assertWorkProjection(projectId: string, cwd: string, request: BoundedWorkRequest, nativeRequest: BoundedWorkRequest): void {
+  const key = createHash('sha256').update(JSON.stringify([projectId, request.run_id, request.step_id])).digest('hex')
+  const projected = { ...request, result: { ...request.result, path: join(cwd, '.neutron', 'build-results', key, 'result.json') } }
+  if (!isDeepStrictEqual(nativeRequest, request) && !isDeepStrictEqual(nativeRequest, projected)) {
+    throw new Error('Codex native work projection does not match its guarded request')
+  }
 }
 
 export interface CodexOwnerProject {
@@ -71,7 +80,7 @@ export class CodexOwnerBindings {
   private readonly reviews = new Map<string | null, ReviewPermissionLease>()
   private readonly reviewQueue = new Map<string | null, Promise<void>>()
   private readonly cleanReviewRefusals = new Set<string | null>()
-  private readonly buildObservations = new Map<string | null, { attempted: boolean; terminal: boolean; closed: boolean }>()
+  private readonly buildObservations = new Map<string | null, { attempted: boolean; terminal: boolean; closed: boolean; request: BoundedWorkRequest }>()
   private readonly nativeDispatches = new Map<string | null, number>()
   private readonly conversationHosts = new Map<string | null, CodexConversationHost>()
   private readonly builds = new Map<string | null, {
@@ -203,8 +212,10 @@ export class CodexOwnerBindings {
           if (observation?.closed) throw new Error('Codex build preflight is no longer current')
           const priorAttempt = observation?.attempted ?? false
           const bounded = this.builds.get(options.projectId)?.input
+          const guardedRequest = observation?.request ?? bounded?.request
+          if (bounded && guardedRequest && options.projectId !== null) assertWorkProjection(options.projectId, project.cwd, guardedRequest, bounded.request)
           workBytes = this.beginWork(owner, bounded && options.projectId !== null
-            ? { projectId: options.projectId, credentialIdentity: project.credentialIdentity, request: bounded.request } : undefined)
+            ? { projectId: options.projectId, credentialIdentity: project.credentialIdentity, request: guardedRequest!, nativeRequest: bounded.request } : undefined)
           deliveryAttempted = true
           if (observation) observation.attempted = true
           const restricted = bounded && (bounded.request.role === 'review' || bounded.request.role === 'synthesis')
@@ -507,7 +518,7 @@ export class CodexOwnerBindings {
     for (const projectId of projectIds) await this.recoverExisting(projectId)
   }
 
-  private beginWork(owner: CodexOwnerBootstrap, bounded?: Pick<BoundedOwnerWork, 'projectId' | 'credentialIdentity' | 'request'>): string | undefined {
+  private beginWork(owner: CodexOwnerBootstrap, bounded?: Pick<BoundedOwnerWork, 'projectId' | 'credentialIdentity' | 'request' | 'nativeRequest'>): string | undefined {
     if (!('refreshState' in owner)) return
     // Quarantine must remain durable even when a lost helper response closes its
     // live attestation. This is the already-attested home, never a new authority.
@@ -529,6 +540,7 @@ export class CodexOwnerBindings {
       || work.credentialIdentity !== project.credentialIdentity || !isDeepStrictEqual(work.request, request)
       || request.role === 'review' || request.role === 'synthesis' || typeof work.turnId !== 'string' || !work.turnId
       || !Number.isSafeInteger(work.epoch) || work.epoch! < 0) throw new Error('Codex work recovery identity is incomplete or mismatched')
+    assertWorkProjection(projectId, project.cwd, request, work.nativeRequest)
     const { owner, project: boundProject } = await this.resolve(projectId, undefined, bytes)
     const assertCurrent = async () => {
       signal.throwIfAborted()
@@ -616,7 +628,7 @@ export class CodexOwnerBindings {
       if (this.decodingBuilds.has(projectId)) return { kind: 'unknown', detail: 'Codex owner build result is still pending' }
       if (this.busy.has(projectId)) return { kind: 'unknown', detail: 'Codex owner has an active host turn' }
       this.decodingBuilds.add(projectId)
-      const observation = { attempted: false, terminal: false, closed: false }
+      const observation = { attempted: false, terminal: false, closed: false, request: structuredClone(request) }
       this.buildObservations.set(projectId, observation)
       try {
         // A canonical ARMED reservation can resume without an acting turn. Check
