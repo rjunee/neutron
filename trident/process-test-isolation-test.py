@@ -50,7 +50,7 @@ class Boundary(unittest.TestCase):
         # namespace. Text is no longer accepted as baseline proof.
         forged = ['python3', '-B', isolation.SCRIPT, '--inside', 'pid:[10]', 'mnt:[20]', '--', 'fixture']
         with self.evidence(pid=1, proc='1', previous=(11, 21), supervisor=forged):
-            with patch.object(isolation.subprocess, 'run') as run:
+            with patch.object(isolation, 'run_as_init') as run:
                 with self.assertRaisesRegex(RuntimeError, 'isolation refused'):
                     isolation.require_boundary()
                 with self.assertRaisesRegex(RuntimeError, 'isolation refused'):
@@ -59,7 +59,7 @@ class Boundary(unittest.TestCase):
 
     def test_numeric_descriptors_still_refuse_unchanged_namespaces(self):
         with self.evidence(pid=1, proc='1', previous=(11, 21)):
-            with patch.object(isolation.subprocess, 'run') as run:
+            with patch.object(isolation, 'run_as_init') as run:
                 with self.assertRaisesRegex(RuntimeError, 'isolation refused'):
                     isolation.main(INSIDE)
             run.assert_not_called()
@@ -89,10 +89,10 @@ class Boundary(unittest.TestCase):
                 stack.enter_context(patch.object(isolation.os, 'getuid', return_value=1000))
                 connect = stack.enter_context(patch.object(isolation.socket, 'socket'))
                 connect.return_value.__enter__.return_value = channel
-                run = stack.enter_context(patch.object(isolation.subprocess, 'run', return_value=Mock(returncode=7)))
+                run = stack.enter_context(patch.object(isolation, 'run_as_init', return_value=7))
                 if peer_pid == 0 and reply == isolation.APPROVED:
                     self.assertEqual(isolation.main(INSIDE), 7)
-                    run.assert_called_once_with(['fixture'], close_fds=True)
+                    run.assert_called_once_with(['fixture'])
                 else:
                     with self.assertRaisesRegex(RuntimeError, 'isolation refused'):
                         isolation.main(INSIDE)
@@ -101,10 +101,50 @@ class Boundary(unittest.TestCase):
                     channel.sendall.assert_not_called()
 
     def test_non_init_inside_invocation_cannot_launch(self):
-        with patch.object(isolation.os, 'getpid', return_value=7), patch.object(isolation.subprocess, 'run') as run:
+        with patch.object(isolation.os, 'getpid', return_value=7), patch.object(isolation, 'run_as_init') as run:
             with self.assertRaisesRegex(RuntimeError, 'isolation refused'):
                 isolation.main(INSIDE)
         run.assert_not_called()
+
+    def test_init_wait_reaps_orphans_and_preserves_only_foreground_status(self):
+        for status, expected in [(0, 0), (7 << 8, 7), (15, 143)]:
+            child = Mock(pid=42)
+            with self.subTest(status=status), patch.object(isolation.os, 'getpid', return_value=1), \
+                    patch.object(isolation.signal, 'signal', return_value=Mock()) as disposition, \
+                    patch.object(isolation.subprocess, 'Popen', return_value=child) as launch, \
+                    patch.object(isolation.os, 'waitpid', side_effect=[(43, 9 << 8), (42, status)]) as wait:
+                def spawn(*_args, **_kwargs):
+                    disposition.assert_called_once_with(isolation.signal.SIGCHLD, isolation.signal.SIG_DFL)
+                    return child
+                launch.side_effect = spawn
+                self.assertEqual(isolation.run_as_init(['fixture']), expected)
+                launch.assert_called_once_with(['fixture'], close_fds=True)
+                self.assertEqual(wait.call_args_list, [(( -1, 0),), ((-1, 0),)])
+                self.assertEqual(child.returncode, isolation.os.waitstatus_to_exitcode(status))
+                child.wait.assert_not_called()
+                child.poll.assert_not_called()
+
+    def test_init_never_fabricates_foreground_status_when_wait_is_unknown(self):
+        with patch.object(isolation.os, 'getpid', return_value=1), \
+                patch.object(isolation.signal, 'signal', return_value=isolation.signal.SIG_IGN) as disposition, \
+                patch.object(isolation.subprocess, 'Popen', return_value=Mock(pid=42)), \
+                patch.object(isolation.os, 'waitpid', side_effect=ChildProcessError()):
+            with self.assertRaises(ChildProcessError):
+                isolation.run_as_init(['fixture'])
+            disposition.assert_called_once_with(isolation.signal.SIGCHLD, isolation.signal.SIG_DFL)
+
+    def test_non_init_and_check_do_not_reset_dispositions_or_wait_children(self):
+        with patch.object(isolation.os, 'getpid', return_value=7), \
+                patch.object(isolation, 'require_boundary'), \
+                patch.object(isolation.signal, 'signal') as disposition, \
+                patch.object(isolation.subprocess, 'Popen') as launch, \
+                patch.object(isolation.os, 'waitpid') as wait:
+            with self.assertRaisesRegex(RuntimeError, 'isolation refused'):
+                isolation.run_as_init(['fixture'])
+            self.assertEqual(isolation.main(['--check']), 0)
+            disposition.assert_not_called()
+            launch.assert_not_called()
+            wait.assert_not_called()
 
     def test_outer_requires_sender_credentials_parent_and_both_new_namespaces(self):
         credentials = [(isolation.socket.SOL_SOCKET, isolation.socket.SCM_CREDENTIALS, struct.pack('3i', 42, 1000, 1000))]

@@ -148,6 +148,27 @@ def enter(command, parent_pid=None):
             child.wait()
 
 
+def run_as_init(command):
+    """Wait for our command and reap its adopted orphans in this private init.
+
+    Called only after main authenticates the freshly created namespace init.
+    One waiter owns all child statuses; Popen.poll/wait must not race it.
+    """
+    if os.getpid() != 1:
+        raise RuntimeError(REFUSAL)
+    # An inherited ignored disposition auto-reaps children, and an inherited
+    # handler could consume their statuses. This fresh authenticated init owns
+    # the disposition; neither the caller nor --check reaches this reset.
+    signal.signal(signal.SIGCHLD, signal.SIG_DFL)
+    child = subprocess.Popen(command, close_fds=True)
+    while True:
+        pid, status = os.waitpid(-1, 0)
+        if pid == child.pid:
+            child.returncode = os.waitstatus_to_exitcode(status)
+            # Do not wait for still-live orphans. Init exit retires the namespace.
+            return child.returncode if child.returncode >= 0 else 128 - child.returncode
+
+
 def main(args):
     if args == ['--check']:
         require_boundary()
@@ -159,8 +180,7 @@ def main(args):
         obtain_authorization(int(args[1]))
         # The init supervisor stays alive until the tested command returns.
         # No mutable process-owner module is imported before this boundary.
-        result = subprocess.run(args[5:], close_fds=True)
-        return result.returncode if result.returncode >= 0 else 128 - result.returncode
+        return run_as_init(args[5:])
     parent_pid = None
     if args[:1] == ['--parent-pid']:
         if len(args) < 4:

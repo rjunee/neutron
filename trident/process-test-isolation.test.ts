@@ -36,7 +36,17 @@ test('namespace refusal and honest-boundary controls use only mocked process ope
   const [status, stdout, stderr] = await Promise.all([child.exited,
     new Response(child.stdout).text(), new Response(child.stderr).text()])
   expect({ status, stdout, stderr: status === 0 ? '' : stderr }).toEqual({ status: 0, stdout: '', stderr: '' })
-  expect(stderr).toContain('Ran 13 tests')
+  expect(stderr).toContain('Ran 16 tests')
+})
+
+test('private namespace init reaps exited orphans and preserves live children and foreground outcomes', async () => {
+  const child = Bun.spawn(['python3', '-B', fileURLToPath(new URL('./process-test-init-test.py', import.meta.url)), '-v'], {
+    stdout: 'pipe', stderr: 'pipe', env: { ...process.env },
+  })
+  const [status, stdout, stderr] = await Promise.all([child.exited,
+    new Response(child.stdout).text(), new Response(child.stderr).text()])
+  expect({ status, stdout, stderr: status === 0 ? '' : stderr }).toEqual({ status: 0, stdout: '', stderr: '' })
+  expect(stderr).toContain('Ran 3 tests')
 })
 
 for (const refuseCheck of [true, false]) test(refuseCheck
