@@ -424,29 +424,18 @@ export class DocVersionStore {
         `sha=${target_sha} does not exist as a commit in the version store`,
       )
     }
-    // SHA exists. Now read the file at that SHA. A failure here means
-    // "this path was deleted at that commit" (legitimate revert-to-
-    // delete) — return `deleted: true` so the surface routes to the
-    // delete branch.
-    const args = this.gitDirArgs(project_id).concat([
-      'cat-file',
-      'blob',
-      `${target_sha}:${await this.pathAt(project_id, target_sha, relPath)}`,
-    ])
-    try {
-      const { stdout } = await this.gitExec(args)
-      return {
-        content: stdout,
-        deleted: false,
-        target_short_sha: target_sha.slice(0, 7),
-      }
-    } catch {
-      return {
-        content: null,
-        deleted: true,
-        target_short_sha: target_sha.slice(0, 7),
-      }
+    const path = await this.pathAt(project_id, target_sha, relPath)
+    const found = await this.gitExec(this.gitDirArgs(project_id).concat([
+      'ls-tree', '-z', target_sha, '--', path,
+    ]))
+    if (!found.stdout) {
+      return { content: null, deleted: true, target_short_sha: target_sha.slice(0, 7) }
     }
+    // An unreadable existing blob is a failure, never a request to delete a doc.
+    const { stdout } = await this.gitExec(this.gitDirArgs(project_id).concat([
+      'cat-file', 'blob', `${target_sha}:${path}`,
+    ]))
+    return { content: stdout, deleted: false, target_short_sha: target_sha.slice(0, 7) }
   }
 
   /**
@@ -558,7 +547,7 @@ export class DocVersionStore {
         stderr: typeof stderr === 'string' ? stderr : stderr.toString('utf8'),
       }
     } catch (err) {
-      if (opts.allowNonZero === true && isExecChildError(err)) {
+      if (opts.allowNonZero === true && isExecChildError(err) && (err.code === 1 || err.code === '1')) {
         return {
           stdout: typeof err.stdout === 'string' ? err.stdout : '',
           stderr: typeof err.stderr === 'string' ? err.stderr : '',
@@ -679,22 +668,6 @@ function isExecChildError(err: unknown): err is ExecChildError {
 function errMessage(err: unknown): string {
   if (err instanceof Error) return err.message
   return String(err)
-}
-
-function errCode(err: unknown): string {
-  if (err instanceof Error && (err as ExecChildError).code !== undefined) {
-    return String((err as ExecChildError).code)
-  }
-  return 'unknown'
-}
-
-function errStderr(err: unknown): string {
-  if (err instanceof Error) {
-    const raw = (err as ExecChildError).stderr
-    if (typeof raw === 'string') return raw
-    if (Buffer.isBuffer(raw)) return raw.toString('utf8')
-  }
-  return ''
 }
 
 /** Ensure the parent dir of `abs` exists. */

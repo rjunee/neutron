@@ -91,6 +91,10 @@ describe('canonical vault history reconciliation', () => {
       expect((await git([`--git-dir=${restored}`, 'show', `${h.oldSha}:note.md`])).stdout).toBe('old doc bytes')
       expect((await git([`--git-dir=${restored}`, 'show', `${latest}:docs/note.md`])).stdout).toBe('canonical edit')
       expect((await git([`--git-dir=${restored}`, 'show', `${h.rootSha}:README.md`])).stdout).toBe('original root document')
+      const recoveredFiles = join(h.owner, 'restored-files')
+      await mkdir(recoveredFiles)
+      await git([`--git-dir=${restored}`, `--work-tree=${recoveredFiles}`, 'checkout', 'main', '--', 'docs/note.md'])
+      expect(await readFile(join(recoveredFiles, 'docs', 'note.md'), 'utf8')).toBe('canonical edit')
     }, 30_000)
   }
 
@@ -115,5 +119,24 @@ describe('canonical vault history reconciliation', () => {
     await expect(importLegacyVaultHistories(h.root, canonical, git)).rejects.toThrow()
     expect(existsSync(join(h.root, '.docs-versions', 'objects'))).toBe(true)
     expect((await git([`--git-dir=${canonical}`, 'show', `${h.rootSha}:README.md`])).stdout).toBe('original root document')
+  })
+
+  test('an unreadable existing historical blob cannot be mistaken for a deleted doc', async () => {
+    const h = await fixture(0)
+    const canonical = join(h.root, '.project-backup')
+    await git(['init', '--bare', canonical])
+    await importLegacyVaultHistories(h.root, canonical, git)
+    // Inject only the unavailable blob read; the real commit/tree and path remain.
+    const docs = new DocVersionStore({
+      owner_home: h.owner, project_slug: 'demo',
+      backupStore: { ensureInit: async () => true, commitDocument: async () => {} },
+    })
+    const internals = docs as unknown as { gitExec: typeof git }
+    internals.gitExec = async (args, options) => {
+      if (args.includes('blob')) throw new Error('missing historical blob')
+      return git(args, options)
+    }
+    await expect(docs.revertContent('demo', 'note.md', h.oldSha)).rejects.toThrow('missing historical blob')
+    expect(await docs.revertContent('demo', 'absent.md', h.oldSha)).toMatchObject({ deleted: true })
   })
 })
