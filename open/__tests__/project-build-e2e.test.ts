@@ -119,7 +119,7 @@ let caseStartedAt = 0
 type CommandCategory = 'fake_api_ref' | 'host_git' | 'worker_git' | 'suite_install' | 'fixture_git' | 'other'
 const commandScope = new AsyncLocalStorage<CommandCategory>()
 const commandIntervals: { category: CommandCategory; startMs: number; endMs: number }[] = []
-const spawnCapture: typeof captureProcess = async (...args) => {
+const spawnCapture: typeof captureProcess = Object.assign(async (...args: Parameters<typeof captureProcess>) => {
   if (process.env.OPEN_E2E_FIXTURE_TIMING !== '1') return captureProcess(...args)
   const startMs = performance.now() - caseStartedAt
   const scope = commandScope.getStore()
@@ -128,7 +128,7 @@ const spawnCapture: typeof captureProcess = async (...args) => {
   try { return await captureProcess(...args) } finally {
     commandIntervals.push({ category, startMs, endMs: performance.now() - caseStartedAt })
   }
-}
+}, { writesDiffOutput: true as const })
 function intervalUnion(rows: typeof commandIntervals): number {
   let end = 0, total = 0
   for (const row of [...rows].sort((a, b) => a.startMs - b.startMs)) {
