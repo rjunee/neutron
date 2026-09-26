@@ -37,6 +37,19 @@ an explicit PR-body input with zero findings. A private positive control using
 an existing prohibited denylist term returned the expected failure without
 displaying the term. This establishes added-text coverage, not full-tree purity.
 Initial checks with borrowed
-dependencies were discarded as validation evidence. The shared-host suite and
-deployment verification remain outstanding; these synthetic checks do not prove
-live source coverage or served behavior at a deployed revision.
+dependencies were discarded as validation evidence.
+
+The canonical `bash scripts/check-shared-host.sh` completed with exit 0 on tested
+revision `236fabd6bc4720d7ab22a3eeacb301ea1fd02bac`, tree
+`cd025049ba7e9854c7d701a2d0bd0f5c8d8316cb`. All 51 project-owned TypeScript
+configurations passed. The partitioned suite declared, discovered, assigned and
+executed all 1,698 files: 1,464 general, 22 PGLite, 43 device and 169 real-HTTP.
+All 18 bounded-memory lanes passed with zero failed lanes: 25,894 tests passed,
+23 skipped, zero failed and 118,055 assertions. PGLite passed on its first attempt.
+The retained local log has SHA-256
+`2e21dbc39d091b1f0fc84d7b2a2ace4e3fb555696158c6cb75a4b677ad66c889`.
+The receipt-only commit changes this unmerged record; every other tracked blob
+remains identical to the tested revision. This records local proof on that
+revision, not exact-head CI on the receipt commit. CI and deployment verification
+remain pending. These local checks do not prove external browser behavior, live
+authentication, inclusive live sources or served behavior at a deployed revision.
