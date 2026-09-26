@@ -1,12 +1,13 @@
 import { afterEach, describe, expect, test } from 'bun:test'
 import { existsSync } from 'node:fs'
-import { mkdir, mkdtemp, readFile, rm, writeFile } from 'node:fs/promises'
+import { mkdir, mkdtemp, readFile, readdir, rm, writeFile } from 'node:fs/promises'
 import { join } from 'node:path'
 import { tmpdir } from 'node:os'
 import { createGitExec } from '../git/git-exec.ts'
 import { importLegacyVaultHistories } from '../git/vault-history-migration.ts'
 import { DocVersionStore, UnknownShaError } from '../git/doc-version-store.ts'
 import { localVaultBackup } from '../../tests/support/vault-backup.ts'
+import { LEGACY_DOC_VERSION_GITIGNORE } from '../git/legacy-doc-ignore.ts'
 
 const git = createGitExec('git')
 const roots: string[] = []
@@ -123,6 +124,43 @@ describe('canonical vault history reconciliation', () => {
     expect((await git([`--git-dir=${canonical}`, 'show', `${h.nextSha}:note.md`])).stdout).toBe('edited old doc bytes')
     expect((await git([`--git-dir=${canonical}`, 'for-each-ref', '--format=%(refname)'])).stdout)
       .toContain(`refs/vault-history/docs/${h.nextSha}`)
+  })
+
+  test('retiring generated binary ignores preserves owner rules and original ignore history', async () => {
+    const h = await fixture(0)
+    const original = '# Owner prefix\nowner-private.txt\n' + LEGACY_DOC_VERSION_GITIGNORE + '# Owner suffix\n*.secret\n'
+    const originalSha = await h.edit('.gitignore', original, 'legacy generated ignore plus owner rules')
+    await writeFile(join(h.root, 'docs', 'image.png'), 'binary fixture')
+    await writeFile(join(h.root, 'docs', 'owner-private.txt'), 'private fixture')
+    await writeFile(join(h.root, 'docs', 'owner.secret'), 'private fixture')
+    const canonical = join(h.root, '.project-backup')
+    await git(['init', '--bare', canonical])
+    await importLegacyVaultHistories(h.root, canonical, git)
+    expect(await readFile(join(h.root, 'docs', '.gitignore'), 'utf8'))
+      .toBe('# Owner prefix\nowner-private.txt\n# Owner suffix\n*.secret\n')
+    const archive = (await readdir(join(h.root, '.docs-versions'))).find((name) => /^vault-migration-ignore-.*\.txt$/.test(name))
+    expect(archive).toBeDefined()
+    expect(await readFile(join(h.root, '.docs-versions', archive!), 'utf8')).toBe(original)
+    expect((await git([`--git-dir=${canonical}`, 'show', `${originalSha}:.gitignore`])).stdout).toBe(original)
+    await git([`--git-dir=${canonical}`, `--work-tree=${h.root}`, 'add', '--', 'docs'], { cwd: h.root })
+    const files = (await git([`--git-dir=${canonical}`, 'ls-files'])).stdout
+    expect(files).toContain('docs/image.png')
+    expect(files).not.toContain('owner-private.txt')
+    expect(files).not.toContain('owner.secret')
+    await importLegacyVaultHistories(h.root, canonical, git)
+    expect(await readFile(join(h.root, 'docs', '.gitignore'), 'utf8'))
+      .toBe('# Owner prefix\nowner-private.txt\n# Owner suffix\n*.secret\n')
+  })
+
+  test('an owner-edited generated ignore block remains unchanged', async () => {
+    const h = await fixture(0)
+    const original = LEGACY_DOC_VERSION_GITIGNORE.replace('*.png\n', '')
+    await h.edit('.gitignore', original, 'owner changed binary exclusions')
+    const canonical = join(h.root, '.project-backup')
+    await git(['init', '--bare', canonical])
+    await importLegacyVaultHistories(h.root, canonical, git)
+    expect(await readFile(join(h.root, 'docs', '.gitignore'), 'utf8')).toBe(original)
+    expect((await readdir(join(h.root, '.docs-versions'))).some((name) => name.startsWith('vault-migration-ignore-'))).toBe(false)
   })
 
   test('a corrupt legacy repository refuses migration without deleting either history', async () => {

@@ -1,6 +1,7 @@
 import { existsSync } from 'node:fs'
 import { join } from 'node:path'
 import type { GitExecFn } from './git-exec.ts'
+import { reconcileLegacyDocIgnore } from './legacy-doc-ignore.ts'
 
 /** Original objects stay addressable by SHA; source repositories are never removed.
  * SHA-named refs are append-only, including tips retained only by a reflog. A retry
@@ -38,4 +39,5 @@ export async function importLegacyVaultHistories(
   }
   // A successful ref update alone is insufficient when an object store is damaged.
   await git([`--git-dir=${gitDir}`, 'rev-list', '--objects', '--missing=error', '--all'])
+  if (existsSync(join(root, '.docs-versions'))) await reconcileLegacyDocIgnore(root)
 }
