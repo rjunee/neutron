@@ -17,6 +17,7 @@ import { TRIDENT_SCRIPT_DIR } from './script-dir.ts'
 import { BUILDER_COMMIT_RECOVERY, recoverBuilderCommit } from './recover-builder-commit.ts'
 import { parseBuildModeState, readBuildRetrySource, type BuildModeState } from './build-mode-state.ts'
 import { isPlainBranchName } from './mutation-prover.ts'
+import { readPublicationResponse, recordPublicationResponse } from './project-publication-receipt.ts'
 
 const oid = /^(?:[0-9a-f]{40}|[0-9a-f]{64})$/
 /**
@@ -523,9 +524,13 @@ export function createProductionHostEffects(options: ProductionHostOptions) {
       if (!pushed.ok || pushed.timed_out) return unknown('Publication push was not confirmed')
       const witness = await git('ls-remote', '--heads', 'origin', `refs/heads/${branch}`)
       if (!witness.ok || witness.timed_out || witness.stdout.trim().split(/\s+/).join(' ') !== `${snapshot.head} refs/heads/${branch}`) return unknown('Published head was not witnessed')
-      let pr = await readPr(current)
-      let createdNumber: number | null = null
+      // The create response may have survived a restart before its independent
+      // observation. Inspect that exact PR; never create again over its receipt.
+      let createdNumber = current.published_pr === null
+        ? readPublicationResponse(store, current, baseBranch, snapshot.head) : null
+      let pr = await readPr(createdNumber === null ? current : { ...current, pr: createdNumber })
       if (pr === null) {
+        if (createdNumber !== null) return unknown('Retained publication response has no corroborating PR')
         const created = await runHost(['gh', 'pr', 'create', '--head', branch, '--base', baseBranch,
           '--title', publication.title, '--body-file', publication.bodyFile], repo)
         if (!created.ok || created.timed_out) return unknown('PR creation was not confirmed')
@@ -533,8 +538,9 @@ export function createProductionHostEffects(options: ProductionHostOptions) {
         const receipt = /^https:\/\/[^/\s]+\/[^/\s]+\/[^/\s]+\/pull\/([1-9]\d*)$/.exec(created.stdout.trim())
         createdNumber = receipt ? Number(receipt[1]) : null
         if (createdNumber === null || !Number.isSafeInteger(createdNumber)) return unknown('PR creation receipt is malformed')
+        await recordPublicationResponse(store, current, baseBranch, snapshot.head, createdNumber)
         pr = await readPr({ ...current, pr: createdNumber })
-      } else if (pr.number !== current.published_pr) {
+      } else if (pr.number !== current.published_pr && pr.number !== createdNumber) {
         return blocked('Discovered PR has no publication provenance')
       }
       // GitHub's PR projection may still expose the witnessed pre-push remote
@@ -553,6 +559,10 @@ export function createProductionHostEffects(options: ProductionHostOptions) {
         pr = await readPr({ ...current, pr: pr.number })
       }
       if (!pr || pr.state !== 'OPEN' || pr.head !== snapshot.head) return unknown('Published PR does not match the reviewed head')
+      const after = row()
+      if (after.base_sha !== current.base_sha || after.pr !== current.pr
+        || after.published_pr !== current.published_pr || after.merge_mode !== current.merge_mode
+        || await head() !== snapshot.head) return unknown('Publication pins changed before receipt settlement')
       if (!await store.update(runId, { pr: pr.number, ...(createdNumber !== null ? { published_pr: createdNumber } : {}) })) return unknown('Published PR could not be persisted')
       return { kind: 'allow' }
     } catch (error) { return unknown(String(error)) }
