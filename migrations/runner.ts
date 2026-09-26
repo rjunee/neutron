@@ -1,5 +1,5 @@
 import { Database } from 'bun:sqlite'
-import { existsSync, mkdirSync, readdirSync, readFileSync, realpathSync, writeFileSync } from 'node:fs'
+import { existsSync, linkSync, lstatSync, mkdirSync, mkdtempSync, readdirSync, readFileSync, realpathSync, rmSync, writeFileSync } from 'node:fs'
 import { dirname, join, resolve } from 'node:path'
 import { fileURLToPath } from 'node:url'
 
@@ -1436,11 +1436,16 @@ export function applyMigrations(db: Database, dir: string = HERE): ApplyResult {
   if (typeof dbFile === 'string' && dbFile.length > 0 && dbFile !== ':memory:') {
     const markerPath = migrateOwnerMarkerPath(dbFile)
     const runnerOwner = canonicalOwnerPath(HERE)
-    let marker: string | null = null
-    try {
-      marker = readFileSync(markerPath, 'utf8')
-    } catch (err) {
-      if (!(err instanceof Error && 'code' in err && err.code === 'ENOENT')) {
+    const readMarker = (): string | null => {
+      try {
+        return readFileSync(markerPath, 'utf8')
+      } catch (err) {
+        if (err instanceof Error && 'code' in err && err.code === 'ENOENT') {
+          // A dangling symlink is an existing unreadable claim, not an empty home.
+          try { lstatSync(markerPath) } catch (statError) {
+            if (statError instanceof Error && 'code' in statError && statError.code === 'ENOENT') return null
+          }
+        }
         const detail = err instanceof Error ? err.message : String(err)
         throw new Error(
           formatOwnerRefusal(
@@ -1454,18 +1459,41 @@ export function applyMigrations(db: Database, dir: string = HERE): ApplyResult {
       }
     }
 
+    let marker = readMarker()
     if (marker === null) {
+      let stagingDir: string | undefined
+      let publicationError: unknown
       try {
+        // Complete the bytes privately, then publish without replacing a winner.
+        // Opening the public marker with 'wx' exposes an empty inode to readers.
+        stagingDir = mkdtempSync(join(dirname(markerPath), '.migrate-owner-'))
+        const stagedMarker = join(stagingDir, 'owner')
         writeFileSync(
-          markerPath,
+          stagedMarker,
           `${runnerOwner}\nclaimed_at=${new Date().toISOString()}\nclaimed_by=migrations/runner.ts\n`,
           { flag: 'wx' },
         )
+        try { linkSync(stagedMarker, markerPath) } catch (err) { publicationError = err }
       } catch {
         // The marker is protective bookkeeping beside the database, never a
         // database write. Read-only media and backup inspection must still work.
+      } finally {
+        if (stagingDir !== undefined) {
+          try { rmSync(stagingDir, { recursive: true, force: true }) } catch { /* best effort */ }
+        }
       }
-    } else {
+      // EEXIST means another claimant won. Its identity still gates this runner;
+      // a failed first claim is tolerated only while the marker remains absent.
+      marker = readMarker()
+      if (marker === null && publicationError !== undefined) {
+        const detail = publicationError instanceof Error ? publicationError.message : String(publicationError)
+        throw new Error(formatOwnerRefusal(
+          dbFile, markerPath, `(unpublished — ${detail})`, runnerOwner,
+          'the ownership marker could not be published',
+        ))
+      }
+    }
+    if (marker !== null) {
       const recordedOwner = marker.split(/\r?\n/, 1)[0]?.trim() ?? ''
       if (recordedOwner.length === 0) {
         throw new Error(
