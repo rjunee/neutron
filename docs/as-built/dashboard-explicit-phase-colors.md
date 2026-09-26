@@ -24,7 +24,12 @@ tests with 274 assertions.
 After this worktree's own frozen dependency installation and successful workspace
 dependency verifier, the five focused timeline renderer, projection, server,
 source and importer files passed 49 tests with 560 assertions. Root and Trident
-TypeScript checks and focused ESLint passed. Initial checks with borrowed
+TypeScript checks, focused ESLint and the full local `scripts/ci/lint.sh` gate
+passed. The strict as-built write guard passed against the freshly fetched base.
+The commit-message privacy gate passed with zero findings. The full tree privacy
+gate failed with 452 findings, including the worktree metadata pointer and
+existing-file denylist hits; this is not a clean full-tree privacy result.
+Initial checks with borrowed
 dependencies were discarded as validation evidence. The shared-host suite and
 deployment verification remain outstanding; these synthetic checks do not prove
 live source coverage or served behavior at a deployed revision.
