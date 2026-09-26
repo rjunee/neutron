@@ -72,6 +72,9 @@ export interface TimelineCard {
   end: number | null
   latestStart: number | null
   active: boolean
+  /** PR lifecycle is independent of worker/check activity. */
+  prState?: 'open' | 'merged' | 'closed' | 'unknown'
+  workSignal?: { state: 'running' | 'pending' | 'recent' | 'unknown'; observedAt: number | null; source: string }
   runs: Array<{ id: string; phase: string; published: boolean }>
   segments: TimelineSegment[]
   lanes: number
@@ -90,6 +93,8 @@ export interface TimelineSnapshot {
   warnings: string[]
   page?: number
   totalPages?: number
+  viewDurationMs?: number
+  scaleMode?: 'focus' | 'all'
 }
 
 const TERMINAL = new Set(['done', 'failed', 'stopped'])

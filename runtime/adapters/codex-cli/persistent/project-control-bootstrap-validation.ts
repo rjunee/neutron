@@ -1,6 +1,7 @@
 import { lstatSync } from 'node:fs'
 import { isAbsolute, join, relative, sep } from 'node:path'
 import { validateProjectControlScope } from './project-control-broker-scope.ts'
+import type { CodexOwnerBindingFacts } from './project-control-bootstrap.ts'
 
 type Rpc = Record<string, unknown>
 const object = (value: unknown): value is Rpc => typeof value === 'object' && value !== null && !Array.isArray(value)
@@ -21,7 +22,8 @@ export function validateBootstrapMultiAgent(features: unknown): void {
 }
 
 /** Internal validation, never a constructor for an authoritative binding handle. */
-export function validateBootstrapThread(thread: unknown, event: Rpc | undefined, cwd: string, codexHome: string): asserts thread is Rpc & {
+export function validateBootstrapThread(thread: unknown, event: Rpc | undefined, cwd: string, codexHome: string,
+  resumed?: CodexOwnerBindingFacts): asserts thread is Rpc & {
   id: string; sessionId: string; path: string; source: string; originator: string; modelProvider: string
 } {
   if (!object(thread) || !event || ['id', 'sessionId', 'cwd', 'path', 'source', 'originator', 'ephemeral', 'modelProvider'].some(key => thread[key] !== event[key])
@@ -30,8 +32,14 @@ export function validateBootstrapThread(thread: unknown, event: Rpc | undefined,
     || typeof thread.path !== 'string' || !isAbsolute(thread.path) || thread.cwd !== cwd
     || thread.ephemeral !== false || thread.originator !== OWNER_BOOTSTRAP_ORIGINATOR || typeof thread.source !== 'string' || !thread.source
     || typeof thread.modelProvider !== 'string' || !thread.modelProvider
-    || thread.parentThreadId != null || thread.forkedFromId != null || !Array.isArray(thread.turns) || thread.turns.length !== 0) {
+    || thread.parentThreadId != null || thread.forkedFromId != null || !Array.isArray(thread.turns)
+    || resumed === undefined && thread.turns.length !== 0) {
     throw new Error('Native owner binding mismatch')
+  }
+  if (resumed && (thread.id !== resumed.threadId || thread.sessionId !== resumed.sessionId
+    || thread.path !== resumed.rolloutPath || thread.source !== resumed.nativeMetadata.source
+    || thread.originator !== resumed.nativeMetadata.originator || thread.modelProvider !== resumed.modelProvider)) {
+    throw new Error('Native resumed owner identity mismatch')
   }
   const path = relative(join(codexHome, 'sessions'), thread.path)
   if (!path || path.startsWith('..') || isAbsolute(path) || join(codexHome, 'sessions', path) !== thread.path) throw new Error('Foreign rollout namespace')

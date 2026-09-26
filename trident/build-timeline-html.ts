@@ -1,4 +1,5 @@
 import type { TimelineCard, TimelineSegment, TimelineSnapshot, TimelineUsage } from './build-timeline.ts'
+import { PHASE_POPOVER_SCRIPT, PHASE_POPOVER_STYLE } from './build-timeline-popover.ts'
 
 export function escapeTimelineHtml(value: unknown): string {
   return String(value).replace(/[&<>"']/g, char => ({ '&': '&amp;', '<': '&lt;', '>': '&gt;', '"': '&quot;', "'": '&#39;' })[char]!)
@@ -37,23 +38,36 @@ export function barIntervals(card: TimelineCard): Array<{ start: number; end: nu
 
 export function renderTimeline(snapshot: TimelineSnapshot): string {
   const h = escapeTimelineHtml
-  const pct = (ms: number) => (100 * ms / snapshot.maxDurationMs).toFixed(5)
+  const scale = snapshot.viewDurationMs ?? snapshot.maxDurationMs
+  const pct = (ms: number) => (100 * ms / scale).toFixed(5)
+  let previousGroup = ''
   const time = (ms: number) => new Date(ms).toISOString().replace('T', ' ').replace('.000Z', ' UTC')
   const warnings = snapshot.warnings.filter(w => !w.startsWith('Showing '))
-  return `<div class="chart-meta" data-page="${snapshot.page ?? 0}" data-pages="${snapshot.totalPages ?? 1}"><span>${snapshot.prCount.toLocaleString('en-US')} PRs <span class="muted">· latest activity first</span></span><span class="muted">Updated ${h(new Date(snapshot.observedAt).toISOString().slice(11, 16))} UTC</span></div>
+  return `<div class="chart-meta" data-page="${snapshot.page ?? 0}" data-pages="${snapshot.totalPages ?? 1}"><span>${snapshot.prCount.toLocaleString('en-US')} PRs <span class="muted">· open first · newest activity in each group</span></span><span class="muted">Updated ${h(new Date(snapshot.observedAt).toISOString().slice(11, 16))} UTC</span></div>
   ${warnings.length ? `<details class="source-note"><summary>Source coverage notes</summary>${warnings.map(w => `<p>${h(w)}</p>`).join('')}</details>` : ''}
-  <div class="chart-axis"><span>Pull request</span><div><span>0</span><span>${h(durationLabel(snapshot.maxDurationMs / 2))}</span><span>${h(durationLabel(snapshot.maxDurationMs))}</span></div><span>Wall time</span></div>
+  <div class="scale-tools"><span>${snapshot.scaleMode === 'focus' ? '0–1h focus window · longer bars continue ›' : 'Full range · one shared wall-clock scale'}</span><div class="scale-switch" role="group" aria-label="Time scale"><button type="button" data-scale="focus" aria-pressed="${snapshot.scaleMode !== 'all'}">Focus 1h</button><button type="button" data-scale="all" aria-pressed="${snapshot.scaleMode === 'all'}">Fit all</button></div></div>
+  <div class="chart-axis"><span>Pull request</span><div><span>0</span><span>${h(durationLabel(scale / 2))}</span><span>${h(durationLabel(scale))}</span></div><span>Wall time</span></div>
   <div class="rows">${snapshot.cards.length === 0 ? '<p class="empty">No pull requests match this view.</p>' : snapshot.cards.map(card => {
     const elapsed = card.start === null || card.end === null ? null : card.end - card.start
-    const status = /\bmerged\b/i.test(card.lifecycle) ? 'merged' : /\bclosed\b/i.test(card.lifecycle) ? 'closed' : 'open'
-    return `<details class="pr-row" data-card="${h(card.key)}"><summary class="row-summary" title="Click for phase details">
-      <span class="pr-label"><span class="pr-id"><span class="status ${status}" aria-label="${status}"></span>${h(card.repository.split('/').pop())} <b>${card.pr === null ? 'Unpublished run' : `PR #${card.pr}`}</b></span><span class="pr-title">${h(card.title)}</span></span>
-      <span class="bar-track" aria-label="${elapsed === null ? 'Duration unknown' : `${h(durationLabel(elapsed))} wall-clock timeline`}">${elapsed === null ? '<span class="unknown">No phase timing recorded</span>' : `<span class="bar" style="width:${pct(elapsed)}%">${barIntervals(card).map(interval => {
+    const status = card.prState ?? 'unknown'
+    const work = card.workSignal?.state ?? 'unknown'
+    const workLabel = work === 'running' ? 'CI running' : work === 'pending' ? 'CI pending' : work === 'recent' ? 'Recent work · within 10m' : 'No live signal'
+    const workDetail = work === 'unknown' ? 'No fresh authoritative work signal. This does not mean idle or finished.' : `${card.workSignal!.source} · observed ${time(card.workSignal!.observedAt!)}`
+    const group = status === 'open' ? 'Open pull requests' : status === 'merged' || status === 'closed' ? 'Merged & closed' : 'PR state unknown'
+    const heading = group === previousGroup ? '' : `<h2 class="lifecycle-heading">${group}</h2>`
+    previousGroup = group
+    const phaseInfo = (segments: TimelineSegment[]) => segments.map(s => ({ label: s.label, duration: durationLabel(s.end - s.start), tokens: usageLabel(s.usage), model: s.model ?? 'Model unknown', open: s.timing === 'open', crossesWindow: elapsed !== null && elapsed > scale && s.start < card.start! + scale && s.end > card.start! + scale }))
+    const clipped = elapsed !== null && elapsed > scale
+    const remainder = card.segments.filter(s => s.end > card.start! + scale)
+    return `${heading}<details class="pr-row" data-state="${status}" data-card="${h(card.key)}"><summary class="row-summary">
+      <span class="pr-label"><span class="pr-id">${h(card.repository.split('/').pop())} <b>${card.pr === null ? 'Unpublished run' : `PR #${card.pr}`}</b><span class="status-pill ${status}">${h(status[0]!.toUpperCase() + status.slice(1))}</span></span><span class="pr-title">${h(card.title)}</span><span class="work-signal ${work}" title="${h(workDetail)}">${h(workLabel)}</span></span>
+      <span class="bar-track" aria-label="${elapsed === null ? 'Duration unknown' : `${h(durationLabel(elapsed))} wall-clock timeline`}">${elapsed === null ? '<span class="unknown">No phase timing recorded</span>' : `<span class="bar" style="width:${pct(Math.min(elapsed, scale))}%">${barIntervals(card).filter(interval => interval.start < card.start! + scale).map(interval => {
         const tones = interval.tones.length ? interval.tones : ['gap']
         const background = !interval.tones.length && interval.segments.length ? `repeating-linear-gradient(135deg,${colors.gap},${colors.gap} 4px,#58616f 4px,#58616f 6px)` : tones.length === 1 ? colors[tones[0]!] : `linear-gradient(to bottom,${tones.flatMap((t, i) => [`${colors[t]} ${i * 100 / tones.length}%`, `${colors[t]} ${(i + 1) * 100 / tones.length}%`]).join(',')})`
-        const detail = interval.segments.length ? interval.segments.map(s => `${s.label} · ${durationLabel(s.end - s.start)} · ${s.model ?? 'Model unknown'} · ${usageLabel(s.usage)}${s.timing === 'open' ? ' · end unrecorded' : ''}`).join('\n') : `Unattributed · ${durationLabel(interval.end - interval.start)}`
-        return `<span class="bar-piece${interval.segments.some(s => s.timing === 'open') ? ' unfinished' : ''}" style="left:${100 * (interval.start - card.start!) / Math.max(1, elapsed)}%;width:${100 * (interval.end - interval.start) / Math.max(1, elapsed)}%;background:${background}" title="${h(detail)}"></span>`
-      }).join('')}</span>`}</span><span class="duration">${elapsed === null ? '—' : h(durationLabel(elapsed))}<span class="chevron" aria-hidden="true">⌄</span></span></summary>
+        const info = { title: interval.segments.length > 1 ? 'Concurrent phases' : interval.segments[0]?.label ?? 'Unattributed time',
+          duration: durationLabel(Math.min(interval.end, card.start! + scale) - interval.start), actions: phaseInfo(interval.segments) }
+        return `<button type="button" class="bar-piece${interval.segments.some(s => s.timing === 'open') ? ' unfinished' : ''}" style="left:${100 * (interval.start - card.start!) / Math.max(1, Math.min(elapsed, scale))}%;width:${100 * (Math.min(interval.end, card.start! + scale) - interval.start) / Math.max(1, Math.min(elapsed, scale))}%;background:${background}" aria-label="${h(`${info.title} · ${info.duration}. Show phase details`)}" aria-haspopup="dialog" data-phase-key="${h(`${card.key}:${interval.start}`)}" data-phase-info="${h(JSON.stringify(info))}"></button>`
+      }).join('')}</span>${clipped ? `<button type="button" class="overflow-button" aria-label="${h(`${durationLabel(elapsed!)} total. Show phases beyond the 1h focus window`)}" aria-haspopup="dialog" data-phase-key="${h(`${card.key}:overflow`)}" data-phase-info="${h(JSON.stringify({ title: 'Beyond the focus window', duration: durationLabel(elapsed! - scale), windowLabel: `${durationLabel(elapsed!)} total · ${durationLabel(elapsed! - scale)} beyond the visible window`, actions: phaseInfo(remainder) }))}">›</button>` : ''}`}</span><button type="button" class="phase-picker" aria-label="${h(`Explore all phases for PR #${card.pr}`)}" aria-haspopup="dialog" data-phase-key="${h(`${card.key}:all`)}" data-phase-info="${h(JSON.stringify({ title: 'All recorded phases', duration: elapsed === null ? 'Unknown duration' : durationLabel(elapsed), windowLabel: elapsed === null ? 'No phase timing recorded' : `${durationLabel(elapsed)} total wall-clock span · full action durations below`, actions: phaseInfo(card.segments) }))}">${elapsed === null ? '—' : h(durationLabel(elapsed))}<span class="chevron" aria-hidden="true">⋯</span></button></summary>
       <div class="pr-details"><div class="detail-heading"><strong>${h(card.title)}</strong>${card.url ? `<a href="${h(card.url)}" rel="noreferrer" target="_blank">Open PR ↗</a>` : ''}</div>
       <p class="muted">${h(card.repository)} · ${h(card.lifecycle)}</p><p class="muted">${card.start === null ? 'No phase timing recorded.' : `${h(time(card.start))} → ${h(time(card.end!))}`}</p>
       <p class="muted">Overlapping phases share the same time; different colors stack inside the bar. Unattributed time is unknown, not idle. Dashed spans have no recorded end.</p>
@@ -69,6 +83,7 @@ export const TIMELINE_STYLE = `
 `
 
 export const TIMELINE_SCRIPT = `
+${PHASE_POPOVER_SCRIPT}
 let inFlight = false;
 let pending = false;
 async function refresh() {
@@ -79,8 +94,13 @@ async function refresh() {
   try {
     const response = await fetch('/timeline' + location.search, {cache:'no-store', signal:AbortSignal.timeout(10000)});
     if (!response.ok) throw new Error('HTTP ' + response.status);
+    const phaseState = capturePhasePopover();
+    const focusedPhaseKey = document.activeElement?.dataset.phaseKey;
+    hidePhasePopover();
     document.getElementById('timeline').innerHTML = await response.text();
     document.querySelectorAll('.pr-row').forEach(el => { if (open.has(el.dataset.card)) el.open = true; });
+    restorePhasePopover(phaseState);
+    if (!phaseState) restorePhaseFocus(focusedPhaseKey);
     const rendered = document.querySelector('[data-page]');
     const page = Number(rendered?.dataset.page) || 0, pages = Number(rendered?.dataset.pages) || 1;
     document.getElementById('page-label').textContent = (page + 1) + ' / ' + pages;
@@ -93,6 +113,12 @@ async function refresh() {
   } finally { inFlight = false; if (pending) { pending = false; refresh(); } }
 }
 document.getElementById('refresh').addEventListener('click', refresh);
+document.addEventListener('click', event => {
+  const scale = event.target.closest('[data-scale]');
+  if (!scale) return;
+  const url = new URL(location.href); url.searchParams.set('scale', scale.dataset.scale);
+  history.replaceState(null, '', url); refresh();
+});
 for (const [id, delta] of [['previous', -1], ['next', 1]]) document.getElementById(id).addEventListener('click', () => {
   const rendered = document.querySelector('[data-page]');
   const current = Number(rendered?.dataset.page) || 0, pages = Number(rendered?.dataset.pages) || 1;
@@ -115,4 +141,4 @@ setInterval(refresh, 30000);
 refresh();
 `
 
-export const TIMELINE_PAGE = `<!doctype html><html lang="en"><head><meta charset="utf-8"><meta name="viewport" content="width=device-width,initial-scale=1"><title>PR timeline</title><style>${TIMELINE_STYLE}</style></head><body><main><header><div><p class="eyebrow">Engineering</p><h1>PR timeline</h1><p class="subtitle">Build phases, measured in wall-clock time.</p></div><div class="tools"><input id="search" type="search" placeholder="Search PRs…" aria-label="Search pull requests"><select id="repository" aria-label="Repository"><option value="">All repositories</option><option value="open">Open</option><option value="managed">Managed</option></select><button id="refresh" type="button" aria-label="Refresh timeline">↻</button></div></header><div class="legend" aria-label="Phase colors">${Object.entries(names).map(([key, name]) => `<span><i style="background:${colors[key]}"></i>${name}</span>`).join('')}</div><p id="error" role="alert" hidden></p><section id="timeline" aria-label="Pull request timelines"><p class="empty">Loading pull requests…</p></section><nav class="pagination" aria-label="Timeline pages"><button id="previous" type="button">Previous</button><span id="page-label"></span><button id="next" type="button">Next</button></nav></main><script>${TIMELINE_SCRIPT}</script></body></html>`
+export const TIMELINE_PAGE = `<!doctype html><html lang="en"><head><meta charset="utf-8"><meta name="viewport" content="width=device-width,initial-scale=1"><title>PR timeline</title><style>${TIMELINE_STYLE}${PHASE_POPOVER_STYLE}</style></head><body><main><header><div><p class="eyebrow">Engineering</p><h1>PR timeline</h1><p class="subtitle">Build phases, measured in wall-clock time.</p></div><div class="tools"><input id="search" type="search" placeholder="Search PRs…" aria-label="Search pull requests"><select id="repository" aria-label="Repository"><option value="">All repositories</option><option value="open">Open</option><option value="managed">Managed</option></select><button id="refresh" type="button" aria-label="Refresh timeline">↻</button></div></header><div class="legend" aria-label="Phase colors">${Object.entries(names).map(([key, name]) => `<span><i style="background:${colors[key]}"></i>${name}</span>`).join('')}</div><p id="error" role="alert" hidden></p><section id="timeline" aria-label="Pull request timelines"><p class="empty">Loading pull requests…</p></section><nav class="pagination" aria-label="Timeline pages"><button id="previous" type="button">Previous</button><span id="page-label"></span><button id="next" type="button">Next</button></nav></main><aside id="phase-popover" class="phase-popover" role="dialog" aria-label="Phase details" hidden></aside><script>${TIMELINE_SCRIPT}</script></body></html>`
