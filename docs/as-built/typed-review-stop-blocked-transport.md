@@ -135,8 +135,36 @@ Final narrow-fix validation passed 556 tests across the six host, launcher,
 progress, panel, production-effects and Nexus suites; 23 Open consuming cases;
 38 spec-index tests; and both root and Trident TypeScript checks.
 
-Full shared-host validation, refreshed exact-head CI and served production
-controls remain required before publication/merge and cutover claims.
+Full shared-host validation completed on the tested revision recorded below.
+Refreshed exact-head CI remains required before merge, and served production
+controls remain required before cutover claims.
+
+### Canonical local validation receipt — 2026-09-26
+
+`bash scripts/check-shared-host.sh` completed with exit 0 on revision
+`e87b3063bf668eb10a782d532f273607e0dbff13`, tree
+`35fcd354abe78a263e72cdc9c9bc2ac6f3c206c9`. The checkout was clean and used
+its own installed dependency tree. The admitted wrapper ran
+`bash scripts/ci/typecheck-all.sh` followed by the complete
+`bash scripts/run-tests.sh`, with jobs=4, chunk-size=100 and the runner's
+default concurrency. All 51 discovered TypeScript projects passed.
+
+Declared, Bun-discovered, assigned and executed test-file counts all matched
+at 1,696: 1,462 general files, 22 PGLite files, 43 device files and 169 real-HTTP
+files. All 15 general chunks and all three special lanes passed; the final
+coverage audit reported zero failed lanes across all 18 lanes. The complete
+run included `open/__tests__/project-build-e2e.test.ts`; no test selector was
+used. The real-listener preflight passed. Existing test-level skips remained
+reported by their suites; file coverage is not a claim of live-provider or
+served-production validation.
+
+The retained combined log has SHA-256
+`b5d2f8a85af66e8f5cfcc143f5fa1dfa58adc65d76249058c773e671f5481037`.
+Early `bash scripts/ci/lint.sh` and `bash scripts/ci/depcruise.sh` also exited
+0 on this tested revision, including the console logging guard. This receipt
+changes only this change's unmerged as-built shard; every other tracked blob
+is byte-identical to the tested revision. It records local source validation
+and does not transfer an exact-head CI receipt to the later publication head.
 
 This change satisfies the typed-host status subset of the locked review-loop
 specification. Explicitly authorized re-planning from a published rejected head,
