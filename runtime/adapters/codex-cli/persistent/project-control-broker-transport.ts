@@ -1,5 +1,6 @@
 import { spawn } from 'node:child_process'
 import { isAbsolute } from 'node:path'
+import { nativeBunEnvironment } from './native-bun-cache.ts'
 
 export interface ProjectControlTransport {
   send(message: Record<string, unknown>): void
@@ -18,9 +19,10 @@ export function createProjectControlStdioTransport(options: {
   configOverrides?: readonly string[]
 }): ProjectControlTransport {
   if (!isAbsolute(options.cwd) || !isAbsolute(options.codexHome)) throw new Error('Explicit project paths required')
+  const env = nativeBunEnvironment(options.env)
   const child = spawn(options.binary, ['app-server', '--listen', 'stdio://',
     ...(options.configOverrides ?? []).flatMap(value => ['-c', value])], {
-    cwd: options.cwd, env: { ...options.env, CODEX_HOME: options.codexHome }, stdio: ['pipe', 'pipe', 'pipe'],
+    cwd: options.cwd, env: { ...env, CODEX_HOME: options.codexHome }, stdio: ['pipe', 'pipe', 'pipe'],
   })
   let receive: ((value: unknown) => void) | undefined
   let disconnect: ((error: Error) => void) | undefined
