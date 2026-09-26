@@ -354,13 +354,13 @@ export class DocVersionStore {
     if (!ready) {
       throw new VersionNotFoundError(`no version store for project=${project_id}`)
     }
-    const args = this.gitDirArgs(project_id).concat([
-      'cat-file',
-      'blob',
-      `${sha}:${await this.pathAt(project_id, sha, relPath)}`,
-    ])
     let stdout: string
     try {
+      const args = this.gitDirArgs(project_id).concat([
+        'cat-file',
+        'blob',
+        `${sha}:${await this.pathAt(project_id, sha, relPath)}`,
+      ])
       const result = await this.gitExec(args)
       stdout = result.stdout
     } catch (err) {

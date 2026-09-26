@@ -161,7 +161,7 @@ describe('DocVersionStore — init + identity', () => {
       '-1',
       '--pretty=format:%an <%ae>',
     ])
-    expect(out.trim()).toBe(`Neutron Agent <neutron@${PROJECT_SLUG}.local>`)
+    expect(out.trim()).toBe(`Neutron Backup <backup@${PROJECT_SLUG}.local>`)
   })
 
   it('captures pre-existing docs content in the init baseline commit', async () => {
