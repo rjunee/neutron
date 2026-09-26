@@ -68,7 +68,7 @@ The paired A/B runs shared the same wrapper; the marker correction was applied
 after pairing and did not change either projection mechanism. `git diff --check`
 passed. Subsequent changes only add this validation receipt.
 
-Required full host coverage and CI remain unverified for this candidate. This
+At the bounded experiment stage, full host coverage and CI were unverified. This
 bounded receipt does not complete the full acceptance of
 `docs/spec-items/host-test-suite-efficiency.md` or supersede its full-host gate.
 
@@ -95,5 +95,25 @@ commands above both exited 0 on the composition. The fresh-ref control and
 the three previously measured consumers passed together (4 pass, 0 fail,
 33 assertions); this consuming regression check was not another paired timing
 experiment. `git diff --check` passed. The only later edit is this receipt.
-The composed candidate is prepared for required full-host validation; no
-full-host receipt, publication or CI result is established by these checks.
+These composition checks prepared the candidate for required full-host
+validation; they did not establish a full-host receipt, publication or CI result.
+
+The subsequent canonical full local gate ran on frozen revision
+`f83f5df62131f9f45bae67ededd2f5e4ac0badde`, tree
+`0b9599a6d9bed5e1d0f6063f2c02f1f4b649fb2e`, using
+`bash scripts/check-shared-host.sh`. Its actual process completed with exit 0.
+The wrapper admitted this run under its shared nonwaiting lock, checked all
+51 project-owned tsconfigs successfully, and ran the complete partitioned suite
+with jobs=4, chunk-size=100 and runner-default concurrency. Final coverage was
+declared = Bun-discovered = assigned = executed = 1,699 files: 1,465 general,
+22 PGLite, 43 device and 169 real-HTTP, across 18 lanes with zero failed lanes.
+The runner's ordinary live/PTY opt-in skips remained visible in its diagnostics;
+the full receipt proves discovered-file coverage and a successful normal suite,
+not execution of those external-service opt-ins.
+
+This final edit records the receipt in this change's own shard. Every other
+tracked blob remains identical to the tested revision; the receipt does not
+rename the tested revision or establish full-suite proof for a different tree.
+Fresh exact-head CI, publication and served/live acceptance remain unverified.
+The full gate is coverage evidence, not a repeated before/after performance
+experiment or proof of a whole-file or whole-suite speedup.
