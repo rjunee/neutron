@@ -20,7 +20,7 @@ Focused validation on the candidate based on `a1145a499`:
   unshelving, deletion, board isolation, stale callback and live-shelving refusal
   (`work-board/terminal-attempts.test.ts:18`).
 - Client parser contract (`gateway/__tests__/work-board-attempt-client-contract.test.ts`):
-  2 passed; mobile row rendering: 8 passed. Web rendering
+  2 passed; mobile rendering: 9 passed. Web rendering
   includes initially collapsed history and resolved-link/plain-text controls.
 - Consuming `open/__tests__/project-build-e2e.test.ts` handoff retry cases: both
   local and PR modes passed, 115 assertions. They now use the real board store,
@@ -48,3 +48,10 @@ The parser parity test lives in the gateway consumer package, which already
 declares the phone and web dependencies. Its assertions exercise both real
 parsers through workspace imports; the database tests likewise import the real
 migration runner through its declared workspace package.
+
+Phone rendering now proves that the real Shelved section starts collapsed,
+reveals the attempt only after expansion, and hides it on collapse. The row
+distinguishes a resolved PR link from unresolved PR plain text. Making every PR
+plain text, making every PR a link, or starting the shelf expanded each fails
+the focused behavioral assertion; restoring the production code passes all
+9 mobile rendering tests (33 assertions).

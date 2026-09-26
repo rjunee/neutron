@@ -75,6 +75,38 @@ function item(over: Partial<WorkBoardItem> = {}): WorkBoardItem {
 }
 
 describe('WorkBoardRow brief alerts (mobile)', () => {
+  it('keeps terminal attempts hidden until the phone shelf is expanded', async () => {
+    const { FakeChatSocket } = await import('./support/mount');
+    const { installRouting, resetRouting } = await import('./support/stubs/expo-router');
+    const { AuthSessionProvider } = await import('../lib/session');
+    const { default: WorkBoardTab } = await import('../app/projects/[id]/workboard');
+    const originalFetch = globalThis.fetch;
+    const originalSocket = globalThis.WebSocket;
+    FakeChatSocket.install();
+    installRouting({ path: '/projects/board/workboard', routes: {} });
+    globalThis.fetch = Object.assign(async () => new Response(JSON.stringify({ items: [item({
+      status: 'archived', linked_run_id: null, run_progress: undefined,
+      attempts: [{ run_id: 'shelved-run', outcome: 'failed', pr: null, pr_url: null, recorded_at: '2026-09-20' }],
+    })], rows: [], turns_in_flight: 0 }), { headers: { 'content-type': 'application/json' } }), { preconnect: originalFetch.preconnect });
+    let screen: Awaited<ReturnType<typeof mountScreen>> | undefined;
+    try {
+      screen = await mountScreen(createElement(AuthSessionProvider, {
+        initialUser: { id: 'owner', email: 'owner@example.test', displayName: 'Owner', provider: 'google', token: 'test-token' },
+      }, createElement(WorkBoardTab)));
+      expect(screen.byTestId('workboard-archived-toggle')).not.toBeNull();
+      expect(screen.text()).not.toContain('Past attempt');
+      await screen.press('Shelved, 1 items');
+      expect(screen.text()).toContain('Past attempt · failed · shelved-run');
+      await screen.press('Shelved, 1 items');
+      expect(screen.text()).not.toContain('Past attempt');
+    } finally {
+      screen?.unmount();
+      globalThis.fetch = originalFetch;
+      globalThis.WebSocket = originalSocket;
+      resetRouting();
+    }
+  });
+
   it('renders shelved terminal attempts without claiming shipment or inventing PR links', async () => {
     const screen = await mountScreen(createElement(WorkBoardCompletedRow, {
       item: item({ status: 'archived', attempts: [
@@ -85,6 +117,8 @@ describe('WorkBoardRow brief alerts (mobile)', () => {
     expect(screen.text()).toContain('Past attempt · failed · failed-run');
     expect(screen.text()).toContain('Past attempt · blocked · blocked-run');
     expect(screen.text()).toContain('PR #13');
+    expect(screen.host.querySelector('[aria-label="PR #12"]')?.getAttribute('role')).toBe('link');
+    expect(screen.host.querySelector('[aria-label="PR #13"]') === null).toBe(true);
     expect(screen.text()).not.toContain('Merged');
     screen.unmount();
   });
