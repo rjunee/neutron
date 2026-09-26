@@ -29,6 +29,10 @@ passed. The strict as-built write guard passed against the freshly fetched base.
 The commit-message privacy gate passed with zero findings. The full tree privacy
 gate failed with 452 findings, including the worktree metadata pointer and
 existing-file denylist hits; this is not a clean full-tree privacy result.
+All added text across this PR's four files also passed the same privacy gate as
+an explicit PR-body input with zero findings. A private positive control using
+an existing prohibited denylist term returned the expected failure without
+displaying the term. This establishes added-text coverage, not full-tree purity.
 Initial checks with borrowed
 dependencies were discarded as validation evidence. The shared-host suite and
 deployment verification remain outstanding; these synthetic checks do not prove
