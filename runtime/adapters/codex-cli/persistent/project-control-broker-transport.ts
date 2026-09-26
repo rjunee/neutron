@@ -1,6 +1,7 @@
 import { spawn } from 'node:child_process'
 import { isAbsolute } from 'node:path'
 import { readFileSync } from 'node:fs'
+import { fireAndForget } from '@neutronai/logger/fire-and-forget.ts'
 
 export interface ProjectControlTransport {
   send(message: Record<string, unknown>): void
@@ -48,7 +49,7 @@ export function createProjectControlStdioTransport(options: {
     child.once('error', reject)
   })
   // Ordinary close callers need not consume the optional exit proof.
-  void exited.catch(() => {})
+  fireAndForget('codex-cli.project-control-transport.exit', exited)
   const decoder = new TextDecoder('utf-8', { fatal: true })
   const fail = (error: Error): void => {
     if (failure) return

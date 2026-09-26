@@ -111,3 +111,11 @@ runtime/adapters/codex-cli/persistent/project-owner-retirement.smoke.ts` against
 the same unchanged implementation using the disposable synthetic provider.
 It exited zero with both retired receipts and the native busy-refusal,
 exact-exit, immutable-predecessor and same-thread-history accepting controls.
+
+Publication CI caught the transport's bare discarded exit-proof promise in the
+fire-and-forget guard. Its observer now uses the standard logging wrapper while
+the original exit promise remains available to retirement callers. The shared-host
+receipt above predates that observer change and is not claimed for it.
+After the correction, the transport and retirement files passed ten tests with
+60 assertions, the disposable native retirement/resume smoke passed again,
+the runtime TypeScript project passed, and the complete lint script exited zero.
