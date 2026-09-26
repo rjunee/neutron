@@ -32,6 +32,17 @@ bidirectional guard requirements in
 `docs/spec-items/trident-build-efficiency.md:190-201` and failure attribution
 requirements in `:100-115`.
 
-Full partitioned suite, all-project typecheck, leak preflight, and canonical-host
-validation remain required before publication. No full-host run or CI rerun was
-used to diagnose this fixture.
+After the focused diagnosis, the canonical shared-host wrapper passed at source
+commit `bdb49f4a5d7db8fed4b21f25ba039e555de224cb`, tree
+`4ad863dc908abe05edfa2a716fbbcdee96e52d06`: all 51 TypeScript projects and all
+1,693 test files across 18 lanes passed, with coverage accounting for 1,459
+general, 22 PGLite, 43 device and 169 real-HTTP files. The wrapper exited zero;
+the source remained unchanged throughout the run. Independent review approved
+the focused repair. This receipt changes documentation only.
+
+Clean tracked archives at the parent and source commit produced identical
+complete privacy finding sets: 451 rule findings each, zero added and zero
+removed. Both baseline tree scans remain red; parity does not establish a clean
+public tree. Final source commit messages and the prepared PR title/body passed
+the local prepublication gate with zero findings. Authoritative PR CI and purity
+remain required. No CI rerun was used to diagnose this fixture.
