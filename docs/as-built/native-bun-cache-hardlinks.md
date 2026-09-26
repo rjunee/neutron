@@ -120,6 +120,19 @@ TypeScript checks and the full local CI lint script passed. The prior full-suite
 receipt remains evidence for revision `27bd615237917899c5f07908c9f67e37e0b1e516`;
 this fixture source change requires fresh canonical validation and remote CI.
 
+Fresh canonical validation subsequently completed with exit zero for
+`bash scripts/check-shared-host.sh` at clean revision
+`d5b50bf748b02126f0ce49fcdff469f1b4f2c730`, tree
+`9724a7e18b01f26592d2d41bbcd3f51f1ed346c3`. All 51 TypeScript configurations
+and all 1,697 discovered files across 18 lanes passed. Lane summaries total
+25,865 passing tests, 23 skips, zero failures and 117,601 assertions. The
+retained log's SHA-256 is
+`da697875babe13e4eed9f33fcbb13f05f25a2b0bdf65cb2368e0ec5690bdf71b`.
+The following receipt-only commit preserves all tested source and dependency
+blobs; exact-head remote CI remains separate. The revised smoke proves actual
+native execution and per-command fixture receipts; it does not claim to verify
+that tool-output text is relayed into the model's subsequent input.
+
 Coverage is deliberately bounded: new Linux native app-server launches and
 ordinary installs into scratch on the same writable mount. Explicit
 cache/backend/environment configuration and separately mounted workspaces can
