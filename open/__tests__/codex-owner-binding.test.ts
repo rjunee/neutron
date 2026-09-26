@@ -1,8 +1,9 @@
 import { afterEach, expect, spyOn, test } from 'bun:test'
 import * as codexActing from '@neutronai/runtime/workers/codex-acting-turn.ts'
-import { appendFileSync, existsSync, mkdirSync, mkdtempSync, rmSync, writeFileSync } from 'node:fs'
+import { appendFileSync, chmodSync, existsSync, mkdirSync, mkdtempSync, rmSync, writeFileSync } from 'node:fs'
 import { tmpdir } from 'node:os'
 import { join } from 'node:path'
+import { createHash } from 'node:crypto'
 import { CodexOwnerBindings } from '../wiring/codex-owner-binding.ts'
 import { buildLlmCallSubstrate } from '@neutronai/gateway/wiring/build-llm-call-substrate.ts'
 import type { AgentSpec } from '@neutronai/runtime/substrate.ts'
@@ -16,6 +17,8 @@ import { composeReplModelSurface } from '@neutronai/gateway/composition/repl-mod
 import { createAppNativeOwnerControlSurface } from '@neutronai/gateway/http/app-native-owner-control-surface.ts'
 import type { ReplModelState } from '@neutronai/runtime/repl-model.ts'
 import type { NativeOwnerControlState } from '../wiring/codex-owner-controls.ts'
+import { recoverDurableOwnerRetirement } from '../wiring/codex-durable-owner.ts'
+import { helperIdentity } from '@neutronai/runtime/adapters/codex-cli/persistent/project-owner-helper-protocol.ts'
 
 const dirs: string[] = []
 afterEach(() => { for (const dir of dirs.splice(0)) rmSync(dir, { recursive: true, force: true }) })
@@ -125,12 +128,12 @@ function fixture(remote = false, general = false) {
     const binding = {} as CodexOwnerBinding
     const identity: CodexOwnerBindingFacts = { capabilities: { multiAgentV2: true, evidence: 'native-thread-feature-report' }, threadId: `native-${project}`, sessionId: `session-${project}`,
       cwd: options.cwd, codexHome: options.codexHome, rolloutPath: join(options.codexHome, 'rollout.jsonl'),
-      paneHandle: `pane-${project}`, bindingRevision: `revision-${project}`, generation: 1, brokerGeneration: 1,
+      paneHandle: `pane-${project}`, bindingRevision: createHash('sha256').update(`${project}:${launched.length}`).digest('hex'), generation: 1, brokerGeneration: 1,
       credentialFingerprint: 'fixture', modelProvider: 'fixture', controlSocketPath: options.socketPath,
       nativeMetadata: { sessionId: `session-${project}`, source: 'vscode', originator: 'owner-bootstrap-probe' } }
     if (!capability) Reflect.deleteProperty(identity, 'capabilities')
     facts.set(binding, identity)
-    let count = 0
+    let count = calls.filter(call => call.project === project).length
     let epoch = 0
     let model = 'small'
     let phase: 'idle' | 'turn' = 'idle'
@@ -209,6 +212,8 @@ function fixture(remote = false, general = false) {
     configuredChat: { env: { NEUTRON_PROJECT_MODELS: '{"project-one":"glm"}' }, fetchImpl: (() => { throw new Error('Unexpected configured API call') }) as unknown as typeof fetch },
   })!
   return { dir, calls, launched, homes, bindings, chat,
+    owner: (projectId: string | null) => owners.get(homes.get(projectId)!)!,
+    factsFor: (projectId: string | null) => facts.get(owners.get(homes.get(projectId)!)!.binding)!,
     nativeTurn: async (projectId = 'project-one') => {
       const owner = owners.get(homes.get(projectId)!)!, identity = facts.get(owner.binding)!
       return owner.broker.gateway('terminal-native').request('turn/start', { threadId: identity.threadId, input: [{ text: 'terminal input' }] }, owner.broker.state().epoch)
@@ -236,6 +241,121 @@ function fixture(remote = false, general = false) {
     noCapability: () => { capability = false },
     onPrompt: (fn: (prompt: string) => void) => { onPrompt = fn } }
 }
+
+test('retirement refuses an admitted conversation, then permits exact idle retirement and lazy wake', async () => {
+  const f = fixture(false, true)
+  expect(await f.bindings.retireScope(null)).toEqual({ status: 'absent' })
+  expect(f.launched).toHaveLength(0)
+  f.hold(true)
+  const conversation = collect(f.bindings.start('project-one', spec('held conversation')))
+  while (!f.calls.length) await Bun.sleep(1)
+  let retirements = 0
+  const owner = f.owner('project-one')
+  owner.retire = async () => {
+    retirements++
+    return { status: 'retired', receipt: { version: 1,
+      facts: f.factsFor('project-one'),
+      terminal: { pid: 1, boot: 'fixture', start: '1' }, native: { identity: { pid: 2, boot: 'fixture', start: '2' }, code: 0, signal: null } } }
+  }
+  expect((await f.bindings.retireScope('project-one')).status).toBe('busy')
+  expect(retirements).toBe(0)
+  f.finish(); await conversation
+  expect((await f.bindings.retireScope('project-one')).status).toBe('retired')
+  expect(retirements).toBe(1)
+  expect(f.launched).toEqual(['project-one'])
+  f.hold(false)
+  expect((await collect(f.bindings.start('project-one', spec('wake')))).at(-1)?.kind).toBe('completion')
+  expect(f.launched).toEqual(['project-one', 'project-one'])
+  await f.bindings.close()
+})
+
+test('empty frontend cache refuses durable surviving ownership and accepts positively absent scope', async () => {
+  const f = fixture()
+  const child = Bun.spawn(['sleep', '30'], { stdout: 'ignore', stderr: 'ignore' })
+  try {
+    expect(await f.bindings.retireScope('project-one')).toEqual({ status: 'absent' })
+    const identity = helperIdentity(child.pid)
+    writeFileSync(join(f.homes.get('project-one')!, '.neutron-owner-launch.json'), JSON.stringify({ helper: identity }), { mode: 0o600 })
+    expect(await f.bindings.retireScope('project-one')).toMatchObject({ status: 'unknown', reason: expect.stringContaining('attachment') })
+    expect(helperIdentity(child.pid)).toEqual(identity)
+    expect(f.launched).toHaveLength(0)
+  } finally { child.kill(); await child.exited; await f.bindings.close() }
+})
+
+test('late durable retirement receipt recovers through the consuming binding after frontend loss', async () => {
+  const f = fixture(true)
+  const child = Bun.spawn(['sleep', '30'], { stdout: 'ignore', stderr: 'ignore' })
+  try {
+    await collect(f.bindings.start('project-one', spec('before lost retirement reply')))
+    const owner = f.owner('project-one'), facts = f.factsFor('project-one'), home = f.homes.get('project-one')!
+    const helper = helperIdentity(child.pid)
+    owner.recoverRetirement = () => recoverDurableOwnerRetirement(home, facts)
+    owner.retire = async () => {
+      Object.assign(owner, { async refreshState() { throw new Error('Frontend transport was lost') } })
+      return { status: 'unknown', reason: 'Retirement reply lost before reservation appeared' }
+    }
+    expect((await f.bindings.retireScope('project-one')).status).toBe('unknown')
+    expect((await f.bindings.retireScope('project-one')).status).toBe('unknown')
+    writeFileSync(join(home, '.neutron-owner-authority.json'), JSON.stringify({ facts, helper }), { mode: 0o600 })
+    writeFileSync(join(home, '.neutron-owner-retired.json'), JSON.stringify({ version: 1, facts, helper,
+      terminal: helper, native: { identity: helper, code: null, signal: 'SIGTERM' } }), { mode: 0o600 })
+    // A receipt alone cannot license release while its exact helper is alive.
+    expect((await f.bindings.retireScope('project-one')).status).toBe('unknown')
+    child.kill(); await child.exited
+    expect((await f.bindings.retireScope('project-one')).status).toBe('retired')
+    expect(f.launched).toEqual(['project-one'])
+    expect((await collect(f.bindings.start('project-one', spec('after recovered retirement')))).at(-1)?.kind).toBe('completion')
+    expect(f.launched).toEqual(['project-one', 'project-one'])
+  } finally { child.kill(); await child.exited; await f.bindings.close() }
+})
+
+test('inaccessible successor journals remain unknown, never absent after frontend restart', async () => {
+  const f = fixture()
+  const child = Bun.spawn(['sleep', '30'], { stdout: 'ignore', stderr: 'ignore' })
+  let next: string | undefined
+  let restarted: CodexOwnerBindings | undefined
+  try {
+    await collect(f.bindings.start('project-one', spec('predecessor')))
+    const facts = f.factsFor('project-one'), home = f.homes.get('project-one')!, helper = helperIdentity(child.pid)
+    child.kill(); await child.exited
+    writeFileSync(join(home, '.neutron-owner-authority.json'), JSON.stringify({ facts, helper }), { mode: 0o600 })
+    writeFileSync(join(home, '.neutron-owner-retired.json'), JSON.stringify({ version: 1, facts, helper,
+      terminal: helper, native: { identity: helper, code: null, signal: 'SIGTERM' } }), { mode: 0o600 })
+    next = join(home, '.neutron-owner-generations', facts.bindingRevision)
+    mkdirSync(next, { recursive: true, mode: 0o700 })
+    restarted = f.restart()
+    expect(await restarted.retireScope('project-one')).toEqual({ status: 'absent' })
+    writeFileSync(join(next, '.neutron-owner-launch.json'), '{}', { mode: 0o600 })
+    chmodSync(next, 0)
+    expect(await restarted.retireScope('project-one')).toMatchObject({ status: 'unknown', reason: expect.stringContaining('EACCES') })
+    chmodSync(next, 0o700)
+    expect(await restarted.retireScope('project-one')).toMatchObject({ status: 'unknown', reason: expect.stringContaining('attachment') })
+    expect(f.launched).toEqual(['project-one'])
+  } finally {
+    if (next) chmodSync(next, 0o700)
+    child.kill(); await child.exited; await restarted?.close(); await f.bindings.close()
+  }
+})
+
+test('retirement admission fences its exact scope and re-admits after a clean busy refusal', async () => {
+  const f = fixture(false, true)
+  await collect(f.chat.start(spec('initial General')))
+  await collect(f.bindings.start('general', spec('initial literal project')))
+  let entered!: () => void, release!: () => void
+  const started = new Promise<void>(resolve => { entered = resolve })
+  const gate = new Promise<void>(resolve => { release = resolve })
+  f.owner(null).retire = async () => { entered(); await gate; return { status: 'busy', reason: 'native work arrived' } }
+  const retiring = f.bindings.retireScope(null)
+  await started
+  expect(await collect(f.chat.start(spec('fenced General')))).toContainEqual(expect.objectContaining({ kind: 'error' }))
+  expect((await collect(f.bindings.start('general', spec('unrelated project stays usable')))).at(-1)?.kind).toBe('completion')
+  expect(f.calls.filter(call => call.project === null)).toHaveLength(1)
+  release()
+  expect((await retiring).status).toBe('busy')
+  expect((await collect(f.chat.start(spec('General resumes after refusal')))).at(-1)?.kind).toBe('completion')
+  expect(f.launched).toEqual([null, 'general'])
+  await f.bindings.close()
+})
 
 async function consumingBuild(f: ReturnType<typeof fixture>, options: { cwd?: string; roots?: string[]; wall?: number; transport?: boolean } = {}) {
   const cwd = join(f.dir, 'project-one')

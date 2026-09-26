@@ -99,10 +99,15 @@ describe('timeline catalogue', () => {
     const oldPr = refreshed.repositories[0]!.prs.find((pr) => pr.number === 2)!
     oldPr.ciCoverage = 'head-only'
     oldPr.ciObservedAt = refreshed.observedAt
+    oldPr.ciPending = true
+    oldPr.ciRunning = true
+    const incremental = await refreshPullRequestCatalogue(refreshed, ['example/open'], { fetcher, now: () => refreshed.observedAt + 1 })
+    expect(incremental.repositories[0]?.prs.find((pr) => pr.number === 2)?.ciRunning).toBe(true)
     const full = await refreshPullRequestCatalogue(refreshed, ['example/open'], {
       fetcher, now: () => baseline.observedAt + 600_000,
     })
     expect(full.repositories[0]?.prs.find((pr) => pr.number === 2)?.ciCoverage).toBe('head-only')
+    expect(full.repositories[0]?.prs.find((pr) => pr.number === 2)?.ciRunning).toBe(true)
     expect(full.fullObservedAt).toBe(baseline.observedAt + 600_000)
   })
 
@@ -146,6 +151,26 @@ describe('timeline catalogue', () => {
     expect(result.catalogue.repositories[0]?.prs[0]?.ciError).toContain('No check runs')
   })
 
+  test('only explicit provider statuses establish running or pending check evidence', async () => {
+    const base = Date.parse('2026-09-02T00:00:00Z')
+    for (const status of ['queued', 'in_progress', 'completed', undefined, 'unexpected']) {
+      const fetcher = (async (url: string | URL | Request) => Response.json(String(url).includes('/check-runs') ? {
+        check_runs: [{ id: 10, name: 'suite', status, started_at: new Date(base).toISOString(),
+          completed_at: status === 'completed' ? new Date(base + 1000).toISOString() : null }],
+      } : [pull(1)])) as typeof fetch
+      const catalogue = await collectPullRequestCatalogue(['example/open'], { fetcher, now: () => base + 2000 })
+      const result = await collectCiCheckRuns(catalogue, { fetcher, now: () => base + 3000 })
+      const pr = result.catalogue.repositories[0]!.prs[0]!
+      if (status === undefined || status === 'unexpected') {
+        expect(pr.ciCoverage).toBe('unavailable')
+        expect(result.observations).toHaveLength(0)
+      } else {
+        expect(pr.ciPending).toBe(status !== 'completed')
+        expect(pr.ciRunning).toBe(status === 'in_progress')
+      }
+    }
+  })
+
   test('collector appends revised GitHub check start snapshots through completion', async () => withLog(async (file) => {
     let cycle = 0
     const base = Date.parse('2026-09-02T00:00:00Z')
@@ -157,6 +182,8 @@ describe('timeline catalogue', () => {
     let previous = await collectPullRequestCatalogue(['example/open'], { fetcher, now: () => base })
     for (cycle = 0; cycle < 3; cycle++) {
       const result = await collectCiCheckRuns(previous, { previous, fetcher, now: () => base + 30000 * (cycle + 1) })
+      expect(result.catalogue.repositories[0]?.prs[0]?.ciRunning).toBe(cycle !== 2)
+      expect(result.catalogue.repositories[0]?.prs[0]?.ciPending).toBe(cycle !== 2)
       expect(await appendChangedPhaseObservations(file, result.observations)).toBe(1)
       previous = result.catalogue
     }

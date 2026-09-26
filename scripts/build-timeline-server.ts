@@ -11,12 +11,14 @@ export interface TimelineServerOptions {
   read: () => TimelineSnapshot | Promise<TimelineSnapshot>
 }
 
-export function timelineWindow(snapshot: TimelineSnapshot, page: number, search = '', repository = ''): TimelineSnapshot {
+export function timelineWindow(snapshot: TimelineSnapshot, page: number, search = '', repository = '', scale = 'focus'): TimelineSnapshot {
   const pageSize = 50
   const query = search.trim().toLowerCase()
   const source = snapshot.cards.filter(card => card.pr !== null &&
     (!query || `${card.repository} ${card.pr} ${card.title}`.toLowerCase().includes(query)) &&
     (!repository || (repository === 'managed' ? /managed/i.test(card.repository) : repository === 'open' ? !/managed/i.test(card.repository) : card.repository === repository)))
+  const group = (state: typeof source[number]['prState']) => state === 'open' ? 0 : state === 'merged' || state === 'closed' ? 1 : 2
+  source.sort((a, b) => group(a.prState) - group(b.prState) || (b.latestStart ?? -1) - (a.latestStart ?? -1))
   const total = source.length
   const first = Math.min(Math.max(0, Math.floor(page)) * pageSize, Math.max(0, Math.floor((total - 1) / pageSize) * pageSize))
   const cards = source.slice(first, first + pageSize).map(card => {
@@ -24,8 +26,9 @@ export function timelineWindow(snapshot: TimelineSnapshot, page: number, search 
     const start = Math.min(...card.segments.map(span => span.start)), end = Math.max(...card.segments.map(span => span.end))
     return { ...card, start, end, gaps: card.gaps.map(gap => ({ start: Math.max(start, gap.start), end: Math.min(end, gap.end) })).filter(gap => gap.end > gap.start) }
   })
+  const maxDurationMs = Math.max(1, ...cards.map(card => card.start === null || card.end === null ? 0 : card.end - card.start))
   return { ...snapshot, cards, prCount: total, page: Math.floor(first / pageSize), totalPages: Math.max(1, Math.ceil(total / pageSize)),
-    maxDurationMs: Math.max(1, ...cards.map(card => card.start === null || card.end === null ? 0 : card.end - card.start)),
+    maxDurationMs, viewDurationMs: scale === 'all' ? maxDurationMs : 3_600_000, scaleMode: scale === 'all' ? 'all' : 'focus',
     warnings: [...snapshot.warnings, `Showing ${total ? first + 1 : 0}–${Math.min(first + pageSize, total)} of ${total} PRs. Page ${Math.floor(first / pageSize) + 1} of ${Math.max(1, Math.ceil(total / pageSize))}. Observed-work window; PRs without phase evidence have unknown work duration.`] }
 }
 
@@ -59,7 +62,7 @@ export function createTimelineHandler(options: TimelineServerOptions): (request:
       const snapshot = await options.read()
       return path === '/api/timeline'
         ? reply(JSON.stringify(snapshot), 200, { 'Content-Type': 'application/json' })
-        : reply(renderTimeline(timelineWindow(snapshot, Math.max(0, Math.min(100_000, Number(url.searchParams.get('page')) || 0)), url.searchParams.get('search') ?? '', url.searchParams.get('repository') ?? '')), 200, { 'Content-Type': 'text/html; charset=utf-8' })
+        : reply(renderTimeline(timelineWindow(snapshot, Math.max(0, Math.min(100_000, Number(url.searchParams.get('page')) || 0)), url.searchParams.get('search') ?? '', url.searchParams.get('repository') ?? '', url.searchParams.get('scale') ?? 'focus')), 200, { 'Content-Type': 'text/html; charset=utf-8' })
     } catch {
       // Never return database paths, credentials, command output, or raw logs to the browser.
       return reply('Timeline source unavailable. Previous data may be stale.', 503)

@@ -1,9 +1,10 @@
 import { existsSync, lstatSync, readFileSync, realpathSync, unlinkSync, writeFileSync } from 'node:fs'
 import { dirname, join, relative, sep } from 'node:path'
 import { createHash } from 'node:crypto'
+import { isDeepStrictEqual } from 'node:util'
 import { setTimeout as delay } from 'node:timers/promises'
-import { readCodexOwnerBinding, type CodexOwnerBootstrap, type CodexOwnerAttachment, type CodexOwnerBindingFacts } from '@neutronai/runtime/adapters/codex-cli/persistent/project-control-bootstrap.ts'
-import { openDurableCodexOwner, type OwnerLaunch } from './codex-durable-owner.ts'
+import { readCodexOwnerBinding, type CodexOwnerBootstrap, type CodexOwnerAttachment, type CodexOwnerBindingFacts, type CodexOwnerRetirement } from '@neutronai/runtime/adapters/codex-cli/persistent/project-control-bootstrap.ts'
+import { durableOwnerPathExists, locateDurableOwnerGeneration, openDurableCodexOwner, type OwnerLaunch } from './codex-durable-owner.ts'
 import { createCodexConversationalSubstrate, type CodexConversationHost } from '@neutronai/runtime/adapters/codex-cli/persistent/conversational-substrate.ts'
 import { createCodexActingTurn, type CodexActingSession } from '@neutronai/runtime/workers/codex-acting-turn.ts'
 import { decodeProjectTrailer, type ProjectActingTurn } from '@neutronai/runtime/workers/project-runners.ts'
@@ -45,6 +46,7 @@ export class CodexOwnerBindings {
   private readonly installedMcp = new Map<string | null, DurableOwnerMcp>()
   private readonly owners = new Map<string | null, Promise<{ owner: CodexOwnerBootstrap; project: CodexOwnerProject }>>()
   private readonly busy = new Set<string | null>()
+  private readonly retiring = new Set<string | null>()
   private readonly refused = new Set<string | null>()
   private readonly decodingBuilds = new Set<string | null>()
   private readonly reviewReady = new Set<string | null>()
@@ -81,7 +83,7 @@ export class CodexOwnerBindings {
       assertOwnerScope(facts.codexHome, projectId)
       return facts
     },
-    busy: projectId => this.busy.has(projectId) || !!this.builds.get(projectId)?.input || this.decodingBuilds.has(projectId),
+    busy: projectId => this.retiring.has(projectId) || this.busy.has(projectId) || !!this.builds.get(projectId)?.input || this.decodingBuilds.has(projectId),
     refused: projectId => this.closed || this.refused.has(projectId),
     fence: projectId => { this.fence(projectId) },
   })
@@ -95,7 +97,7 @@ export class CodexOwnerBindings {
       signal.throwIfAborted()
       if (realpathSync(options.cwd) !== project.cwd) throw new Error('Codex owner project directory changed')
       if (this.refused.has(options.projectId)) throw new Error('Codex owner requires native reconciliation')
-      if (this.busy.has(options.projectId) || this.controls.isSwitching(options.projectId) || owner.broker.state().phase !== 'idle') throw new Error('Codex owner is busy or requires recovery')
+      if (this.retiring.has(options.projectId) || this.busy.has(options.projectId) || this.controls.isSwitching(options.projectId) || owner.broker.state().phase !== 'idle') throw new Error('Codex owner is busy or requires recovery')
       const facts = this.readBinding(owner.binding)
       const clientId = `owner-turn-${++this.sequence}`
       const gateway = owner.broker.gateway(clientId)
@@ -285,6 +287,7 @@ export class CodexOwnerBindings {
   }
 
   private resolve(projectId: string | null, beforeOpening?: (project: CodexOwnerProject) => void): Promise<{ owner: CodexOwnerBootstrap; project: CodexOwnerProject }> {
+    if (this.retiring.has(projectId)) return Promise.reject(new Error('Codex owner is retiring'))
     if (this.closed) return Promise.reject(new Error('Codex owner host is closed'))
     if (this.refused.has(projectId)) return Promise.reject(new Error('Codex owner requires native reconciliation'))
     if (projectId !== null && !/^[A-Za-z0-9_.-]{1,128}$/.test(projectId)) return Promise.reject(new Error('Codex owner requires a full project id'))
@@ -345,6 +348,62 @@ export class CodexOwnerBindings {
     await Promise.allSettled([...this.owners.values()].map(async pending => { await (await pending).owner.close() }))
   }
 
+  /** Exact native retirement authority for provider handoff and project sleep.
+   * This never opens a cold conversation to make it eligible for retirement.
+   */
+  async retireScope(projectId: string | null): Promise<CodexOwnerRetirement | { status: 'absent' }> {
+    if (this.closed || this.refused.has(projectId)) return { status: 'unknown', reason: 'Codex owner requires native reconciliation' }
+    if (this.retiring.has(projectId) || this.busy.has(projectId) || this.controls.isSwitching(projectId)
+      || this.decodingBuilds.has(projectId) || this.builds.get(projectId)?.input || this.reviews.has(projectId)
+      || this.reviewQueue.has(projectId) || this.buildObservations.has(projectId)) {
+      return { status: 'busy', reason: 'Codex owner has admitted work' }
+    }
+    if (!this.owners.has(projectId)) {
+      this.retiring.add(projectId)
+      try {
+        const project = await this.scopeProject(projectId)
+        assertOwnerScope(project.codexHome, projectId)
+        const generation = locateDurableOwnerGeneration(project.codexHome, project.cwd)
+        if (['.neutron-owner-launch.json', '.neutron-owner-helper.json', '.neutron-owner-authority.json', '.neutron-owner-retiring.json']
+          .some(file => durableOwnerPathExists(join(generation.stateDirectory, file)))) {
+          return { status: 'unknown', reason: 'Durable Codex owner requires attachment before retirement' }
+        }
+        if (this.owners.has(projectId)) return { status: 'busy', reason: 'Codex owner admission began before retirement inspection' }
+        return { status: 'absent' }
+      } catch (error) {
+        return { status: 'unknown', reason: error instanceof Error ? error.message : 'Durable Codex owner presence is unknown' }
+      } finally { this.retiring.delete(projectId) }
+    }
+    const owner = this.resolvedOwners.get(projectId)
+    if (!owner) return { status: 'busy', reason: 'Codex owner admission is still pending' }
+    if (!owner.retire) return { status: 'unknown', reason: 'Codex owner has no native retirement authority' }
+    this.retiring.add(projectId)
+    try {
+      const entry = await this.owners.get(projectId)!
+      await this.revalidateProject(projectId, entry.project)
+      const facts = this.ownerFacts.get(owner) ?? this.readBinding(owner.binding)
+      let outcome = owner.recoverRetirement?.()
+      if (outcome === undefined) {
+        await refreshOwner(owner)
+        outcome = await owner.retire(owner.broker.state().epoch)
+      }
+      if (outcome.status !== 'retired') return outcome
+      if (!isDeepStrictEqual(outcome.receipt.facts, facts)) return { status: 'unknown', reason: 'Codex retirement receipt names another owner' }
+      await this.installedMcp.get(projectId)?.close()
+      this.installedMcp.delete(projectId)
+      this.owners.delete(projectId)
+      this.resolvedOwners.delete(projectId)
+      this.reviewReady.delete(projectId)
+      this.cleanReviewRefusals.delete(projectId)
+      this.builds.delete(projectId)
+      this.ownerFacts.delete(owner)
+      this.ownerProjects.delete(owner)
+      return outcome
+    } catch (error) {
+      return { status: 'unknown', reason: error instanceof Error ? error.message : 'Codex retirement failed' }
+    } finally { this.retiring.delete(projectId) }
+  }
+
   async retireRevokedMcpServers(): Promise<void> {
     await Promise.all([...this.installedMcp.values()].map(surface => surface.retireRevoked()))
   }
@@ -355,7 +414,10 @@ export class CodexOwnerBindings {
       let project: CodexOwnerProject
       try { project = await this.scopeProject(projectId) }
       catch { continue } // No authorized home is not evidence of an uncertain owner.
-      if (!existsSync(join(project.codexHome, '.neutron-owner-launch.json'))) continue
+      try {
+        const generation = locateDurableOwnerGeneration(project.codexHome, project.cwd)
+        if (!durableOwnerPathExists(join(generation.stateDirectory, '.neutron-owner-launch.json'))) continue
+      } catch { this.refused.add(projectId); continue }
       try { await this.resolve(projectId) }
       catch { this.refused.add(projectId) }
     }
@@ -391,6 +453,7 @@ export class CodexOwnerBindings {
       ? { ok: false, reason: 'capability-unsupported', detail: 'Codex owner lacks attested read-only child execution with isolated result output' }
       : worker.supports(role, placement)
     const execute = (recovery: boolean): WorkerRunner['run'] => async (request, placement, signal) => {
+      if (this.retiring.has(projectId)) return { kind: 'unknown', detail: 'Codex owner is retiring' }
       if (recovery && !worker.recover) return { kind: 'unknown', detail: 'Codex worker has no recovery capability' }
       const deadline = Date.now() + request.budget.wall_ms
       const supported = supports(request.role, placement)
@@ -417,7 +480,7 @@ export class CodexOwnerBindings {
           ])
         } catch { return { kind: 'unknown', detail: 'Owner authority was unavailable before dispatch' } }
         finally { admissionTimer.abort() }
-        if (this.closed || this.refused.has(projectId)) return { kind: 'unknown', detail: 'Codex owner requires native reconciliation' }
+        if (this.retiring.has(projectId) || this.closed || this.refused.has(projectId)) return { kind: 'unknown', detail: 'Codex owner requires native reconciliation' }
         if (this.busy.has(projectId)) return { kind: 'unknown', detail: 'Codex owner has an active host turn' }
         if (existsSync(join(project.codexHome, '.neutron-owner-work.json'))) {
           this.refused.add(projectId)
@@ -647,7 +710,7 @@ export class CodexOwnerBindings {
       let build = this.builds.get(projectId)
       if (!build) {
         const session: NonNullable<CodexActingSession['session']> = {
-          projectId, isLive: () => !this.refused.has(projectId) && owner.broker.state().phase === 'idle',
+          projectId, isLive: () => !this.retiring.has(projectId) && !this.refused.has(projectId) && owner.broker.state().phase === 'idle',
           screenPrompt: () => undefined, answerApproval: async () => { throw new Error('Codex bounded approval refused') },
           submitLine: async (prompt, dispatch) => {
             const active = this.builds.get(projectId)?.input
