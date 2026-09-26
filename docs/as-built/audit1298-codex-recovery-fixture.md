@@ -1,14 +1,15 @@
-## 2026-09-26 — Bound Codex recovery authority fixture setup separately
+## 2026-09-26 — Bound Codex recovery authority fixture requests separately
 
 Audit #1298 investigated a recovery-authority success fixture failing during
 PR #1322 CI. The historical assertion reported only `kind: failed`; its failure
 class was not captured, so this change does not claim that failure was a proven
 timeout.
 
-The two review/synthesis recovery-authority cases now give their real fake-CLI
-setup turn a bounded 10-second request budget and a 15-second test deadline
-(`runtime/workers/codex-review.test.ts:105-148`). They assert the whole initial
-outcome, exposing the failure class and detail if setup fails again. Snapshot
+The two review/synthesis recovery-authority cases now use a bounded 10-second
+fixture request budget for their real fake-CLI setup and recovery calls, with a
+15-second test deadline (`runtime/workers/codex-review.test.ts:105-148`). Their
+initial assertion matches the completed kind against the full returned object,
+exposing the failure class and detail in diagnostics if setup fails again. Snapshot
 and one-call assertions still exercise absent, foreign, corrupt and lost
 dispatch authority, and committed receipt recovery still equals the successful
 turn. The fixture default remains 2 seconds (`:97`); the explicit timeout
