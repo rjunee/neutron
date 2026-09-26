@@ -45,3 +45,22 @@ identified and prompted fixes to status cache propagation, malformed status,
 boundary labels, tiny targets and refresh focus. Deployment must update both the
 standalone server revision and the collector's source revision; operational proof
 is recorded after merge rather than claimed by these preview observations.
+
+The recovered shared-host validation on 2026-09-26 tested revision
+`78270cfca92806a653baf71a0ad86531031f7fca` with
+`bash scripts/check-shared-host.sh`: all 51 TypeScript projects passed, followed
+by the complete suite with 1,692 declared, Bun-discovered, assigned and executed
+files (1,458 general, 22 PGLite, 43 device and 169 real-HTTP). All 18 bounded-memory
+lanes passed with zero failed lanes. The wrapper used jobs=4, chunk-size=100 and
+runner-default concurrency. An initial sandboxed invocation passed the same
+typecheck matrix but refused the loopback preflight before discovery; the
+successful invocation had host loopback access. Full logs were retained locally.
+This receipt belongs to the tested revision; the publication commit adds this
+record and does not transfer local exact-revision proof to a new head. Exact-head
+CI and operational deployment verification remain separate gates.
+
+The dependency layering check passed with no new violations. The local purity
+scan is not green: the existing local denylist produces 451 findings in the
+current-main archive; a working-tree scan adds its untracked Git pointer as a
+452nd finding. Publication still requires authoritative CI purity, with the
+candidate archive comparison and commit-message/PR-text scans checked separately.
