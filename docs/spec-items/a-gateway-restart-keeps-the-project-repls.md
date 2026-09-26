@@ -322,8 +322,8 @@ it must not swallow.
       asserting the refusal, the child terminated, no ownership confirmed and the registry
       bytes unchanged, asserting what was written, what the caller did about it and
       the class it emitted, each with a lock-held positive control),
-      `__tests__/pane-ownership-is-one-fact.test.ts` (no transition is called under the entry
-      point that does not consume the outcome), and
+      `__tests__/pane-ownership-is-one-fact.test.ts` (ownership writes require the entry
+      point that consumes the outcome; pure comparison operands are permitted), and
       `gateway/wiring/__tests__/build-llm-call-substrate.test.ts` (the credential is NOT
       cooled, asserted at the surface that spends the money, with a genuine-429 control).
 - [ ] **A CLAIM PRECEDES CAPABILITY, NOT PUBLICATION.** An adopted pane's wrapper is blind and

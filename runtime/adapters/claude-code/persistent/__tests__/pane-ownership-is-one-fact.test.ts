@@ -40,6 +40,9 @@ import { describe, expect, it } from 'bun:test'
 import { readFileSync, readdirSync } from 'node:fs'
 import { dirname, join } from 'node:path'
 import { fileURLToPath } from 'node:url'
+import ts from 'typescript'
+import { disownPane, type ReplRegistryRecord } from '../repl-registry.ts'
+import { dropLocalOwnership, isHeldLocally, noteLocalOwnership } from '../local-ownership.ts'
 
 const HERE = dirname(fileURLToPath(import.meta.url))
 const SUBSYSTEM = join(HERE, '..')
@@ -78,7 +81,7 @@ function writesOf(source: string): string[] {
   return hits
 }
 
-/** The four named transitions. A call to any of them IS an ownership write. */
+/** Treat transition calls as writes unless their copies only feed a pure comparison. */
 const TRANSITIONS = [
   'ownPane',
   'disownPane',
@@ -88,14 +91,59 @@ const TRANSITIONS = [
   'releasePaneSpawnReservation',
 ]
 
+/** Only direct, unshadowed imports comparing two disowned identifier operands qualify.
+ * Mask the callee names, not the line: another transition on that line must still fail.
+ * Assignments, nested calls and other argument expressions never qualify. */
+function maskPureOwnershipComparisons(source: string): string {
+  const ast = ts.createSourceFile('ownership-scan.ts', source, ts.ScriptTarget.Latest, true)
+  const imports = new Map([['isDeepStrictEqual', 'node:util'], ['disownPane', './repl-registry.ts']])
+  const found = new Set<string>()
+  let ambiguous = false
+  const masks: [number, number][] = []
+  function visit(node: ts.Node): void {
+    if (ts.isIdentifier(node) && imports.has(node.text)) {
+      const parent = node.parent
+      if (ts.isImportSpecifier(parent) && parent.name === node && parent.propertyName === undefined) {
+        const declaration = parent.parent.parent.parent
+        if (ts.isImportDeclaration(declaration) && ts.isStringLiteral(declaration.moduleSpecifier) &&
+            declaration.moduleSpecifier.text === imports.get(node.text) &&
+            !parent.isTypeOnly && !declaration.importClause?.isTypeOnly) found.add(node.text)
+        else ambiguous = true
+      } else if (!(ts.isCallExpression(parent) && parent.expression === node)) {
+        // Includes shadowing parameters/declarations and reassignment of either import.
+        ambiguous = true
+      }
+    }
+    if (ts.isCallExpression(node) && ts.isIdentifier(node.expression) &&
+        node.expression.text === 'isDeepStrictEqual' && !node.questionDotToken && node.arguments.length === 2) {
+      const operands = node.arguments
+      if (operands.every(arg => ts.isCallExpression(arg) && ts.isIdentifier(arg.expression) &&
+          arg.expression.text === 'disownPane' && !arg.questionDotToken && arg.arguments.length === 1 &&
+          ts.isIdentifier(arg.arguments[0]!))) {
+        for (const arg of operands) {
+          const callee = (arg as ts.CallExpression).expression
+          masks.push([callee.getStart(ast), callee.end])
+        }
+      }
+    }
+    ts.forEachChild(node, visit)
+  }
+  visit(ast)
+  if (ambiguous || found.size !== imports.size) return source
+  for (const [start, end] of masks.sort((a, b) => b[0] - a[0])) {
+    source = source.slice(0, start) + ' '.repeat(end - start) + source.slice(end)
+  }
+  return source
+}
+
 /**
  * Which registry entry point encloses each transition CALL — found by walking back to the
- * nearest preceding `with…Registry(` in the file. Crude on purpose: a heuristic that can be
- * read in one sitting and whose failures are visible as a named line, rather than a parser
- * nobody will maintain.
+ * nearest preceding `with…Registry(` in the file. Entry-point tracking remains a lexical
+ * heuristic; the AST above only identifies the narrowly allowed pure comparison operands.
  */
 function transitionsNotUnderTheOwnedEntryPoint(source: string): string[] {
-  const lines = source.split('\n')
+  const lines = maskPureOwnershipComparisons(source).split('\n')
+  const originalLines = source.split('\n')
   const bad: string[] = []
   let enclosing: 'owned' | 'plain' | 'none' = 'none'
   for (const [i, rawLine] of lines.entries()) {
@@ -105,15 +153,73 @@ function transitionsNotUnderTheOwnedEntryPoint(source: string): string[] {
     else if (line.includes('withRegistry(')) enclosing = 'plain'
     for (const t of TRANSITIONS) {
       // A CALL, not an import or a type reference.
-      if (!new RegExp(`\\b${t}\\(`).test(line)) continue
-      if (enclosing !== 'owned') bad.push(`${i + 1}: ${line.slice(0, 100)}`)
+      if (!new RegExp(`\\b${t}\\s*\\(`).test(line)) continue
+      if (enclosing !== 'owned') bad.push(`${i + 1}: ${originalLines[i]!.trim().slice(0, 100)}`)
     }
   }
   return bad
 }
 
 describe('an ownership write goes through the entry point that consumes the lock outcome', () => {
-  it('no transition is called under plain withRegistry', () => {
+  const comparisonImports = "import { isDeepStrictEqual } from 'node:util'\nimport { disownPane } from './repl-registry.ts'\n"
+  const comparison = 'isDeepStrictEqual(disownPane(row), disownPane(before))'
+
+  it('permits pure normalization in the real recovery consumer and still detects an adjacent write', () => {
+    const source = readFileSync(join(SUBSYSTEM, 'startup-recovery.ts'), 'utf8')
+    expect(source).toContain(comparison)
+    expect(transitionsNotUnderTheOwnedEntryPoint(source)).toEqual([])
+    const mutated = source.replace(comparison, `(${comparison}, registry[key] = disownPane(row))`)
+    expect(transitionsNotUnderTheOwnedEntryPoint(mutated)).toHaveLength(1)
+  })
+
+  it('permits the comparison outside a write or under either registry entry point', () => {
+    for (const prefix of ['', 'withRegistry(path, registry => {\n', 'withOwnedRegistry(path, registry => {\n']) {
+      expect(transitionsNotUnderTheOwnedEntryPoint(comparisonImports + prefix + comparison)).toEqual([])
+    }
+  })
+
+  it('rejects assignments, nested transitions, adjacent writes and shadowed comparators', () => {
+    for (const expression of [
+      'isDeepStrictEqual(disownPane(registry[key] = row), disownPane(before))',
+      'isDeepStrictEqual(registry[key] = disownPane(row), disownPane(before))',
+      'isDeepStrictEqual(disownPane(ownPane(row, owner)), disownPane(before))',
+      `${comparison}; registry[key] = disownPane(row)`,
+      `${comparison}; registry[key] = disownPane (row)`,
+      `function check(isDeepStrictEqual) { return ${comparison} }`,
+      `function check(disownPane) { return ${comparison} }`,
+    ]) {
+      expect(transitionsNotUnderTheOwnedEntryPoint(comparisonImports + expression).length).toBeGreaterThan(0)
+    }
+    expect(transitionsNotUnderTheOwnedEntryPoint(comparisonImports.replace('node:util', './custom.ts') + comparison).length).toBeGreaterThan(0)
+  })
+
+  it('requires the owned entry point for every transition that supplies a row', () => {
+    for (const transition of TRANSITIONS) {
+      const write = `registry[key] = ${transition}(row)`
+      expect(transitionsNotUnderTheOwnedEntryPoint(write)).toHaveLength(1)
+      expect(transitionsNotUnderTheOwnedEntryPoint(`withRegistry(path, registry => {\n${write}`)).toHaveLength(1)
+      expect(transitionsNotUnderTheOwnedEntryPoint(`withOwnedRegistry(path, registry => {\n${write}`)).toEqual([])
+    }
+  })
+
+  it('disown normalization preserves the input and retains non-ownership differences', () => {
+    const base = { sessionId: 'conversation', sessionKey: 'key', cwd: '/project', channelName: 'channel', has_session: true }
+    const row: ReplRegistryRecord = Object.freeze({ ...base, pane_handle: 'pane', adoption_claim_by: 'guard-purity-owner', adoption_claim_at: 1, adoption_claim_pid: 123 })
+    const before = structuredClone(row)
+    noteLocalOwnership(row.adoption_claim_by)
+    try {
+      expect(isHeldLocally(row.adoption_claim_by)).toBe(true)
+      expect(disownPane(row)).toEqual(base)
+      expect(disownPane(row)).not.toBe(row)
+      expect(row).toEqual(before)
+      expect(isHeldLocally(row.adoption_claim_by)).toBe(true)
+      expect(disownPane({ ...row, sessionId: 'replacement' })).not.toEqual(disownPane(row))
+    } finally {
+      dropLocalOwnership(row.adoption_claim_by)
+    }
+  })
+
+  it('ownership writes require withOwnedRegistry', () => {
     // ARGUS r41. `withFlockSync` runs its callback even when `flock` FAILS and
     // `withRegistry` saves what it returns, so an ownership write that does not consume
     // the acquisition outcome rewrites the whole registry from a snapshot nobody had the
