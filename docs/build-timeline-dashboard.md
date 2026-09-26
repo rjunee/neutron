@@ -35,7 +35,14 @@ from first recorded phase start to last recorded phase end; missing phases remai
 unknown. Widths share the current page's scale. Each PR is one bar, with overlapping
 phases partitioned on the same wall-clock axis rather than added together. Concurrent
 phase categories share the height of the bar. Hover reveals phase information;
-click or keyboard activation opens full phase, model, token and coverage details.
+focus or tap opens a custom phase popover; the full-size duration control exposes
+all actions, including tiny spans. Clicking the PR label opens complete evidence.
+Open PRs form the first section, with merged/closed below and recent activity
+ordering within each section. Explicit PR state is separate from fresh provider
+work signals. The default shared 1h focus window clips longer bars with an explicit
+overflow control; Fit all shows their complete proportional extent. The locked
+[timeline spec](spec-items/temporary-build-timeline-dashboard.md) owns status
+freshness thresholds and the focus-window contract.
 Source failures have a visible coverage disclosure and refresh failures an alert.
 Run-only records remain in the authenticated JSON API, outside the PR chart.
 

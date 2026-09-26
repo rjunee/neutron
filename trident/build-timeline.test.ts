@@ -181,6 +181,27 @@ test('an older PR with a fresh recorded retry sorts above a newer quiet PR', () 
   expect(snapshot.cards[0]!.start).toBe(at(1))
 })
 
+test('PR lifecycle, fresh provider running state and recent work remain independent', () => {
+  const source = catalogue()
+  const pr = source.repositories[0]!.prs[1]!
+  Object.assign(pr, { ciCoverage: 'head-only', ciObservedAt: at(39), ciPending: true, ciRunning: true })
+  const live = combineTimelineSources(source, [], [], at(40)).cards.find(c => c.pr === 2)!
+  expect(live).toMatchObject({ prState: 'open', workSignal: { state: 'running', observedAt: at(39) } })
+  pr.ciRunning = false
+  expect(combineTimelineSources(source, [], [], at(40)).cards.find(c => c.pr === 2)!.workSignal!.state).toBe('pending')
+  for (const [ciObservedAt, ciCoverage, ciError] of [[at(-21), 'head-only', null], [at(41), 'head-only', null], [at(39), 'unavailable', null], [at(39), 'head-only', 'failed']] as const) {
+    Object.assign(pr, { ciObservedAt, ciCoverage, ciError, ciRunning: true })
+    expect(combineTimelineSources(source, [], [], at(40)).cards.find(c => c.pr === 2)!.workSignal!.state).toBe('unknown')
+  }
+  Object.assign(pr, { ciObservedAt: at(39), ciCoverage: 'head-only', ciError: null, state: 'merged' })
+  expect(combineTimelineSources(source, [], [], at(40)).cards.find(c => c.pr === 2)!).toMatchObject({ prState: 'merged', workSignal: { state: 'running' } })
+  pr.ciObservedAt = null
+  const recent = combineTimelineSources(source, [observation()], [], at(40)).cards.find(c => c.pr === 2)!
+  expect(recent.workSignal).toMatchObject({ state: 'recent', observedAt: at(32) })
+  expect(combineTimelineSources(source, [observation({ endedAt: null })], [], at(40)).cards.find(c => c.pr === 2)!.workSignal!.state).toBe('unknown')
+  expect(combineTimelineSources(source, [observation()], [], at(633)).cards.find(c => c.pr === 2)!.workSignal!.state).toBe('unknown')
+})
+
 test('host stage identity preserves repeat suites and overlapping CI waits; missing starts never invent spans', () => {
   const runs = [{ id: 'run', slug: 'run', phase: 'done', pr: 1, published_pr: 1, started_at: iso(0), last_advanced_at: iso(40) }]
   const event = (id: number, stage: string, start: number, end: number | null) => ({ id, run_id: 'run',
