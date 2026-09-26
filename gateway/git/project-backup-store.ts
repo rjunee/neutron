@@ -101,12 +101,6 @@ export type { RestoreResult } from './restore.ts'
 
 const execFileAsync = promisify(execFile)
 
-/**
- * Push timeout — project backups can be larger than per-edit doc
- * commits (binaries, Cores SQLite). Brief § 2.7 pins 5 minutes.
- * (The 30s non-push ceiling lives in `git-exec.ts`.)
- */
-
 /** Sigil dir inside the project that owns the backup git repo. */
 const BACKUP_GIT_DIR = '.project-backup'
 
@@ -185,9 +179,8 @@ const DEFAULT_LOGGER: ProjectBackupLogger = (event, fields) => {
 }
 
 export interface ProjectBackupStoreOptions {
-  /** Platform adapter — used to read per-project remote config + the
-   *  `project_backup` capability flag + the Managed lazy-provisioning
-   *  hook. */
+  /** Platform adapter — legacy configuration is detected and explicitly refused;
+   *  destinations are now encrypted and owner-scoped. */
   platform: PlatformAdapter
   /** Absolute path to the per-instance `<owner_home>` dir. */
   owner_home: string

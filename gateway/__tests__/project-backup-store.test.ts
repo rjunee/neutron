@@ -1343,6 +1343,19 @@ describe('ProjectBackupStore — vault snapshot safety', () => {
     expect((await h.store.getStatus(PROJECT_ID)).state).toBe('ok')
   })
 
+  it('refuses deleting a database created after the selected snapshot', async () => {
+    await h.store.backupNow(PROJECT_ID)
+    const snapshot = (await git(h.projectRoot, [`--git-dir=${join(h.projectRoot, '.project-backup')}`, 'rev-parse', 'HEAD'])).trim()
+    const live = new Database(join(h.projectRoot, 'new.db'))
+    try {
+      live.exec('PRAGMA journal_mode=WAL; CREATE TABLE entries (body TEXT);')
+      live.exec("INSERT INTO entries VALUES ('new database')")
+      await expect(h.store.restore(PROJECT_ID, snapshot, null)).rejects.toThrow('SQLite in-place restore')
+      await expect(h.store.restore(PROJECT_ID, snapshot, 'new.db')).rejects.toThrow('SQLite in-place restore')
+      expect(live.query('SELECT body FROM entries').all()).toEqual([{ body: 'new database' }])
+    } finally { live.close() }
+  })
+
   it('pushes encrypted owner-level history and restores it through a fresh clone', async () => {
     const keyFile = join(h.owner_home, 'recovery.key')
     await generateBackupKey(keyFile)
@@ -1387,6 +1400,7 @@ describe('ProjectBackupStore — vault snapshot safety', () => {
     writeFileSync(outside, 'owner content')
     require('node:fs').symlinkSync(outside, join(h.projectRoot, '.gitignore'))
     expect((await h.store.backupNow(PROJECT_ID)).ok).toBe(false)
+    expect((await h.store.getStatus(PROJECT_ID)).state).toBe('error')
     expect(require('node:fs').readFileSync(outside, 'utf8')).toBe('owner content')
   })
 

@@ -51,14 +51,21 @@ commits use the same safe staging helper.
 
 Verification at the integration checkpoint: 266 tests / 1,252 assertions across
 13 consuming suites passed. The served composition suites separately passed 20
-tests with loopback binding available. Root and Trident TypeScript passed after
-the review fixes; the dependency boundary check passed before that delta. An
+tests with loopback binding available. The restore HTTP surface and production
+composer passed another 44 tests / 186 assertions, including explicit offline
+SQLite guidance and a successful document-only control. Root and Trident TypeScript passed after
+the review fixes; the dependency boundary check passed with 3,057 modules and
+8,201 dependencies (eight pre-existing exceptions). An
 independent recheck closed all three findings with four real-store tests and
 26 assertions. Final gate evidence accompanies the reviewed PR. Semantic mutations were red for raw SQLite
 staging, over-excluding ordinary zero-repository vault content, omitting scheduler
 start, removing the SQLite restore refusal, refusing unrelated document restore,
 and omitting failure-status persistence. Transport tests exercise privacy and
 authentication refusal in both directions.
+
+The local clean-archive leak scan is not green: both the base and candidate
+report 451 findings under the supplied host denylist. This change does not weaken
+that gate; publication still requires the authoritative leak check to pass.
 
 Not claimed: live offsite push/restore, owner custody of a recovery key, a full
 shared-host gate at this checkpoint, deletion of retained legacy repositories,
