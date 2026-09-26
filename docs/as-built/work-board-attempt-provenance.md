@@ -19,7 +19,8 @@ Focused validation on the candidate based on `a1145a499`:
   observation, PR-less retry, blocked and done outcomes, restart, shelving,
   unshelving, deletion, board isolation, stale callback and live-shelving refusal
   (`work-board/terminal-attempts.test.ts:18`).
-- Client parser contract: 2 passed; mobile row rendering: 8 passed. Web rendering
+- Client parser contract (`gateway/__tests__/work-board-attempt-client-contract.test.ts`):
+  2 passed; mobile row rendering: 8 passed. Web rendering
   includes initially collapsed history and resolved-link/plain-text controls.
 - Consuming `open/__tests__/project-build-e2e.test.ts` handoff retry cases: both
   local and PR modes passed, 115 assertions. They now use the real board store,
@@ -42,3 +43,8 @@ Real-runner database tests cover fresh 0160 backfill, pending application below
 an already recorded higher ordinal, and a database that recorded this same name
 at 0159: the latter preserves its exact ledger row and observations without
 rerunning the renamed SQL. No applied ledger ordinal is rewritten.
+
+The parser parity test lives in the gateway consumer package, which already
+declares the phone and web dependencies. Its assertions exercise both real
+parsers through workspace imports; the database tests likewise import the real
+migration runner through its declared workspace package.

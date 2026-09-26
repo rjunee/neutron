@@ -1,7 +1,7 @@
 import { afterEach, beforeEach, expect, test } from 'bun:test'
 import { mkdtempSync, readFileSync, rmSync, mkdirSync, writeFileSync, renameSync } from 'node:fs'
 import { Database } from 'bun:sqlite'
-import { applyMigrations } from '../migrations/runner.ts'
+import { applyMigrations } from '@neutronai/migrations/runner.ts'
 import { tmpdir } from 'node:os'
 import { join } from 'node:path'
 import { ProjectDb } from '@neutronai/persistence/index.ts'

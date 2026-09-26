@@ -1,6 +1,6 @@
 import { expect, test } from 'bun:test'
-import { parseWorkBoardAttempts as phone } from '../app/lib/work-board-client.ts'
-import { parseWorkBoardAttempts as web } from '../landing/chat-react/work-board-client.ts'
+import { parseWorkBoardAttempts as phone } from '@neutronai/app/lib/work-board-client'
+import { parseWorkBoardAttempts as web } from '@neutronai/landing/chat-react/work-board-client.ts'
 
 for (const [name, parse] of [['phone', phone], ['web', web]] as const) {
   test(`${name} preserves terminal observations and refuses malformed or invented links`, () => {
