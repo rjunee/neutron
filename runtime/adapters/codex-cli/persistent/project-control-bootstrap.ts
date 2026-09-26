@@ -37,6 +37,7 @@ export interface CodexOwnerBindingFacts {
   readonly modelProvider: string
   readonly controlSocketPath: string
   readonly nativeMetadata: Readonly<{ sessionId: string; source: string; originator: string }>
+  readonly processes?: Readonly<{ native: HelperIdentity; terminal: HelperIdentity }>
   /** Native thread feature report, observed before sealing; no model turn is seeded. */
   readonly capabilities: Readonly<{ multiAgentV2: true; evidence: 'native-thread-feature-report'; ownerInstalledMcp?: true }>
 }
@@ -73,6 +74,7 @@ export async function attachCodexOwner(options: {
 }
 
 export interface CodexOwnerBootstrap {
+  readonly recoveryKind?: 'adopted' | 'resumed'
   readonly binding: CodexOwnerBinding
   readonly broker: ProjectControlBroker
   /** Terminal bytes, not model input; future pane integration owns presentation. */
@@ -87,8 +89,8 @@ export interface CodexOwnerBootstrap {
 export type CodexOwnerRetirement = { status: 'busy' | 'unknown'; reason: string }
   | { status: 'retired'; receipt: Omit<CodexOwnerRetirementReceipt, 'helper'> }
 
-/** One native owner per immutable generation. A prior sealed or uncertain
- * generation refuses; a completed predecessor permits exact-thread resume in
+/** One native owner per immutable generation. An uncertain generation refuses;
+ * a retired or independently proven dead predecessor permits exact-thread resume in
  * its reserved successor directory, without rewriting the prior attestation.
  * The random bearer authenticates the launched TUI, not a hostile same-UID
  * process able to read its environment or ptrace it. No Unix-auth downgrade.
@@ -126,7 +128,7 @@ export async function bootstrapCodexOwner(options: {
   // The fixed namespace is claimed before any child or native request exists.
   const stateDirectory = options.ownerStateDirectory ?? options.codexHome
   if (options.resume) validateOwnerResume(stateDirectory, options.resume, options.cwd, options.codexHome)
-  else if (stateDirectory !== options.codexHome) throw new Error('New generation requires completed owner retirement')
+  else if (stateDirectory !== options.codexHome) throw new Error('New generation requires verified owner resume evidence')
   const journal = openProjectControlJournal({ ...options, socketPath: join(stateDirectory, '.neutron-owner-bootstrap'), threadId: 'fresh-owner-bootstrap' })
   let upstream: ProjectControlTransport | undefined
   let broker: ProjectControlBroker | undefined
@@ -211,8 +213,9 @@ export async function bootstrapCodexOwner(options: {
     const token = randomBytes(32).toString('hex')
     const bind = async (response: Rpc): Promise<void> => {
       const thread = response.thread
-      while ((!nativeThread || !tui) && !closed) await Bun.sleep(5)
+      while ((!nativeThread || !tui || !terminalIdentity) && !closed) await Bun.sleep(5)
       if (closed) throw new Error('Owner closed before terminal binding')
+      if (!upstream!.processIdentity) throw new Error('Native owner process identity is unavailable')
       validateBootstrapThread(thread, nativeThread, options.cwd, options.codexHome, options.resume?.receipt.facts)
       validateBootstrapMultiAgent(await native('experimentalFeature/list', { threadId: thread.id, limit: 1000 }))
       const transport: ProjectControlTransport = {
@@ -232,6 +235,7 @@ export async function bootstrapCodexOwner(options: {
         paneHandle: tui!.paneHandle ?? `owned-pty:${tui!.pid}`, bindingRevision: randomBytes(32).toString('hex'),
         generation: journal.generation, brokerGeneration: broker.state().generation, credentialFingerprint,
         modelProvider: thread.modelProvider, controlSocketPath: options.socketPath,
+        processes: Object.freeze({ native: upstream!.processIdentity, terminal: terminalIdentity! }),
         capabilities: Object.freeze({ multiAgentV2: true, evidence: 'native-thread-feature-report', ownerInstalledMcp: true }),
         nativeMetadata: Object.freeze({ sessionId: thread.sessionId, source: thread.source, originator: thread.originator }) })
       journal.sealAttestation(JSON.stringify(facts))

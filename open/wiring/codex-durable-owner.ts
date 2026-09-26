@@ -8,8 +8,12 @@ import { HerdrHost } from '@neutronai/runtime/adapters/claude-code/persistent/he
 import { createHerdrRpc } from '@neutronai/runtime/adapters/claude-code/persistent/herdr-client.ts'
 import { readAccountId, validateCodexSubscriptionAuth } from '@neutronai/trident/codex-auth.ts'
 import { nextOwnerDirectory, readCompletedOwnerRetirement, type CodexOwnerResume } from '@neutronai/runtime/adapters/codex-cli/persistent/project-owner-retirement.ts'
+import { readCrashedOwner, recordCrashedOwner } from '@neutronai/runtime/adapters/codex-cli/persistent/project-owner-crash-recovery.ts'
 
 export type OwnerLaunch = Parameters<typeof bootstrapCodexOwner>[0] & { projectId: string | null; generalAuthorityPath?: string }
+
+/** Only pre-attachment host inspection is retryable; uncertain launch is not. */
+export class CodexOwnerRecoveryUnavailable extends Error {}
 
 /** Only ENOENT proves absence. Inaccessible journals retain ownership. */
 export function durableOwnerPathExists(path: string): boolean {
@@ -38,9 +42,11 @@ export function locateDurableOwnerGeneration(codexHome: string, cwd: string): {
   let stateDirectory = codexHome
   let resume: CodexOwnerResume | undefined
   const predecessors: string[] = []
-  while (durableOwnerPathExists(join(stateDirectory, '.neutron-owner-retired.json'))) {
+  while (durableOwnerPathExists(join(stateDirectory, '.neutron-owner-retired.json'))
+    || durableOwnerPathExists(join(stateDirectory, '.neutron-owner-crashed.json'))) {
     if (predecessors.length >= 1000 || predecessors.includes(stateDirectory)) throw new Error('Owner retirement history is unbounded')
-    const receipt = readCompletedOwnerRetirement(stateDirectory)
+    const receipt = durableOwnerPathExists(join(stateDirectory, '.neutron-owner-retired.json'))
+      ? readCompletedOwnerRetirement(stateDirectory) : readCrashedOwner(stateDirectory)
     if (receipt.facts.codexHome !== codexHome || receipt.facts.cwd !== cwd) throw new Error('Foreign retired owner')
     predecessors.push(stateDirectory)
     resume = { predecessorDirectory: stateDirectory, receipt }
@@ -58,8 +64,8 @@ export function codexOwnerCredentialIdentity(bytes: string): string {
   throw new Error('Codex owner credential identity is unavailable')
 }
 
-/** Host journal is written before launch. Any incomplete/uncertain prior launch
- * refuses replacement; only an authenticated exact surviving helper is adopted. */
+/** Host journal is written before launch. Uncertain prior launches refuse;
+ * positively dead, sealed owners resume only in their reserved next generation. */
 export async function openDurableCodexOwner(options: OwnerLaunch): Promise<CodexOwnerAttachment> {
   assertOwnerScope(options.codexHome, options.projectId)
   const { stateDirectory, resume, predecessors } = locateDurableOwnerGeneration(options.codexHome, options.cwd)
@@ -103,6 +109,18 @@ export async function openDurableCodexOwner(options: OwnerLaunch): Promise<Codex
     const previous = JSON.parse(readFileSync(launchPath, 'utf8'))
     if (!isDeepStrictEqual(previous.scope, scope)) throw new Error('Codex owner launch credential or project changed')
     authority = JSON.parse(readFileSync(authorityPath, 'utf8'))
+    // A failed live descriptor is never itself evidence of death. The crash
+    // path independently corroborates all process and immutable binding facts.
+    try { readOwnerHelperDescriptor(descriptorPath) }
+    catch {
+      privatePath(panePath, 'file')
+      const previousPane = JSON.parse(readFileSync(panePath, 'utf8'))
+      if (typeof previousPane.handle !== 'string') throw new Error('Codex helper pane authority is incomplete')
+      const inspection = await host.inspectHandle(previousPane.handle)
+      if (inspection.kind === 'unavailable') throw new CodexOwnerRecoveryUnavailable(inspection.reason)
+      recordCrashedOwner(stateDirectory)
+      return openDurableCodexOwner(options)
+    }
   } else {
     if (existsSync(descriptorPath) || existsSync(authorityPath)) throw new Error('Codex owner launch provenance is missing')
     // Exclusive creation is the no-second-owner guard across gateway processes.
@@ -126,6 +144,7 @@ export async function openDurableCodexOwner(options: OwnerLaunch): Promise<Codex
   const pane = JSON.parse(readFileSync(panePath, 'utf8'))
   if (typeof pane.handle !== 'string' || !isDeepStrictEqual(pane.identity, descriptor.helper)) throw new Error('Codex helper pane identity changed')
   const inspected = await host.inspectHandle(pane.handle)
+  if (inspected.kind === 'unavailable' && launchedPid === undefined) throw new CodexOwnerRecoveryUnavailable(inspected.reason)
   if (inspected.kind !== 'live' || inspected.pid !== descriptor.helper.pid) throw new Error('Codex helper pane cannot be attested')
   if (authority && !isDeepStrictEqual(authority, descriptor)) throw new Error('Codex owner helper authority changed')
   if (descriptor.facts.cwd !== options.cwd || descriptor.facts.codexHome !== options.codexHome) throw new Error('Foreign Codex owner helper')
@@ -134,6 +153,7 @@ export async function openDurableCodexOwner(options: OwnerLaunch): Promise<Codex
     readCodexOwnerBinding(owner.binding)
     if (!authority) writeFileSync(authorityPath, JSON.stringify(descriptor), { flag: 'wx', mode: 0o600 })
     return { ...owner,
+      recoveryKind: launchedPid !== undefined && resume ? 'resumed' : 'adopted',
       recoverRetirement: () => recoverDurableOwnerRetirement(stateDirectory, descriptor.facts),
       async retire(expectedEpoch) {
       const outcome = await owner.retire!(expectedEpoch)

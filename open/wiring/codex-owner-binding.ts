@@ -4,7 +4,7 @@ import { createHash } from 'node:crypto'
 import { isDeepStrictEqual } from 'node:util'
 import { setTimeout as delay } from 'node:timers/promises'
 import { readCodexOwnerBinding, type CodexOwnerBootstrap, type CodexOwnerAttachment, type CodexOwnerBindingFacts, type CodexOwnerRetirement } from '@neutronai/runtime/adapters/codex-cli/persistent/project-control-bootstrap.ts'
-import { durableOwnerPathExists, locateDurableOwnerGeneration, openDurableCodexOwner, type OwnerLaunch } from './codex-durable-owner.ts'
+import { CodexOwnerRecoveryUnavailable, durableOwnerPathExists, locateDurableOwnerGeneration, openDurableCodexOwner, type OwnerLaunch } from './codex-durable-owner.ts'
 import { createCodexConversationalSubstrate, type CodexConversationHost } from '@neutronai/runtime/adapters/codex-cli/persistent/conversational-substrate.ts'
 import { createCodexActingTurn, type CodexActingSession } from '@neutronai/runtime/workers/codex-acting-turn.ts'
 import { decodeProjectTrailer, type ProjectActingTurn } from '@neutronai/runtime/workers/project-runners.ts'
@@ -334,7 +334,7 @@ export class CodexOwnerBindings {
       })().catch(error => {
         // A failed credential lookup never acquired native authority. Retry that
         // read after connection, but retain uncertainty once opening was attempted.
-        if (!openingAttempted) this.owners.delete(projectId)
+        if (!openingAttempted || error instanceof CodexOwnerRecoveryUnavailable) this.owners.delete(projectId)
         throw error
       })
       this.owners.set(projectId, pending)
@@ -408,19 +408,62 @@ export class CodexOwnerBindings {
     await Promise.all([...this.installedMcp.values()].map(surface => surface.retireRevoked()))
   }
 
-  /** Boot recovery never creates cold owners. Missing journals remain lazy. */
-  async reconcile(projectIds: readonly (string | null)[]): Promise<void> {
-    for (const projectId of projectIds) {
-      let project: CodexOwnerProject
-      try { project = await this.scopeProject(projectId) }
-      catch { continue } // No authorized home is not evidence of an uncertain owner.
-      try {
-        const generation = locateDurableOwnerGeneration(project.codexHome, project.cwd)
-        if (!durableOwnerPathExists(join(generation.stateDirectory, '.neutron-owner-launch.json'))) continue
-      } catch { this.refused.add(projectId); continue }
-      try { await this.resolve(projectId) }
-      catch { this.refused.add(projectId) }
+  /** Boot admission is restricted to a previously awake owner. An explicit
+   * completed retirement without a successor remains asleep. No turn is sent. */
+  async recoverExisting(projectId: string | null): Promise<
+    { status: 'adopted' | 'resumed' | 'skipped' } | { status: 'refused'; reason: string; retryable: boolean }
+  > {
+    let project: CodexOwnerProject
+    try { project = await this.scopeProject(projectId) }
+    catch { return { status: 'skipped' } }
+    try {
+      if (this.closed || this.refused.has(projectId)) throw new Error('Codex owner requires native reconciliation')
+      if (this.retiring.has(projectId)) return { status: 'skipped' }
+      const cached = this.resolvedOwners.get(projectId)
+      if (cached) {
+        await this.revalidateProject(projectId, (await this.owners.get(projectId)!).project, project)
+        try {
+          this.readBinding(cached.binding)
+          await refreshOwner(cached)
+          if (cached.broker.state().phase === 'closed') throw new Error('Codex owner frontend is closed')
+          return { status: 'adopted' }
+        } catch (error) {
+          // A detached idle frontend may be replaced; durable work and admitted
+          // consumers never are. Native ownership is re-proved by openDurable.
+          if (this.refused.has(projectId) || this.retiring.has(projectId) || this.busy.has(projectId)
+            || this.controls.isSwitching(projectId) || this.decodingBuilds.has(projectId)
+            || this.builds.get(projectId)?.input || this.reviews.has(projectId)
+            || this.reviewQueue.has(projectId) || this.buildObservations.has(projectId)
+            || durableOwnerPathExists(join(project.codexHome, '.neutron-owner-work.json'))) throw error
+          this.retiring.add(projectId)
+          try {
+            await cached.close()
+            await this.installedMcp.get(projectId)?.close()
+            this.installedMcp.delete(projectId)
+            this.owners.delete(projectId)
+            this.resolvedOwners.delete(projectId)
+            this.ownerFacts.delete(cached)
+            this.ownerProjects.delete(cached)
+            this.reviewReady.delete(projectId)
+          } finally { this.retiring.delete(projectId) }
+        }
+      }
+      const generation = locateDurableOwnerGeneration(project.codexHome, project.cwd)
+      if (!durableOwnerPathExists(join(generation.stateDirectory, '.neutron-owner-launch.json'))
+        && !(generation.resume && 'kind' in generation.resume.receipt && generation.resume.receipt.kind === 'crash')) {
+        return { status: 'skipped' }
+      }
+      const { owner } = await this.resolve(projectId)
+      return { status: owner.recoveryKind ?? 'adopted' }
+    } catch (error) {
+      const retryable = error instanceof CodexOwnerRecoveryUnavailable
+      if (!retryable) this.refused.add(projectId)
+      return { status: 'refused', reason: error instanceof Error ? error.message : 'Codex recovery evidence unavailable', retryable }
     }
+  }
+
+  async reconcile(projectIds: readonly (string | null)[]): Promise<void> {
+    for (const projectId of projectIds) await this.recoverExisting(projectId)
   }
 
   private beginWork(owner: CodexOwnerBootstrap): void {
