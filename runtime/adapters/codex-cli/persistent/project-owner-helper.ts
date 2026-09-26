@@ -1,10 +1,11 @@
 import { randomBytes } from 'node:crypto'
-import { chmodSync, existsSync, writeFileSync } from 'node:fs'
+import { chmodSync, existsSync, readFileSync, unlinkSync, writeFileSync } from 'node:fs'
 import { join } from 'node:path'
 import { bootstrapCodexOwner, readCodexOwnerBinding, type CodexOwnerBootstrap } from './project-control-bootstrap.ts'
 import { BROKER_MAX_MESSAGE_BYTES } from './project-control-broker-transport.ts'
 import { OwnerHelperRegistry } from './project-owner-helper-registry.ts'
 import { assertOwnerScope, exactFacts, helperIdentity, object, requireIndependentOwnerHost, socketIdentity, type HelperIdentity, type OwnerHelperDescriptor } from './project-owner-helper-protocol.ts'
+import { validateOwnerResume, type CodexOwnerRetirementReceipt } from './project-owner-retirement.ts'
 
 /** The caller must launch this helper through an independent durable host.
  * Closing a frontend never calls this service's destroy operation.
@@ -12,21 +13,34 @@ import { assertOwnerScope, exactFacts, helperIdentity, object, requireIndependen
 export async function startCodexOwnerHelper(options: Parameters<typeof bootstrapCodexOwner>[0] & { projectId: string | null; gatewayIdentity: HelperIdentity }) {
   requireIndependentOwnerHost(options.gatewayIdentity)
   assertOwnerScope(options.codexHome, options.projectId)
+  const stateDirectory = options.ownerStateDirectory ?? options.codexHome
+  // Keep Unix socket lengths bounded; journals/descriptors remain immutable in
+  // generation directories, while this exact dead predecessor socket is reused.
   const socketPath = join(options.codexHome, '.neutron-owner-helper.sock')
-  const descriptorPath = join(options.codexHome, '.neutron-owner-helper.json')
+  const descriptorPath = join(stateDirectory, '.neutron-owner-helper.json')
+  if (options.resume) {
+    validateOwnerResume(stateDirectory, options.resume, options.cwd, options.codexHome)
+    if (existsSync(socketPath)) {
+      const previous = JSON.parse(readFileSync(join(options.resume.predecessorDirectory, '.neutron-owner-authority.json'), 'utf8')) as OwnerHelperDescriptor
+      if (socketIdentity(socketPath) !== previous.socketIdentity) throw new Error('Retired helper socket identity changed')
+      unlinkSync(socketPath)
+    }
+  }
   if (existsSync(socketPath) || existsSync(descriptorPath)) throw new Error('Existing owner helper requires reconciliation')
   const owner = await bootstrapCodexOwner(options)
-  try { return serveOwnerHelper(owner, socketPath, descriptorPath, options.projectId) }
+  try { return serveOwnerHelper(owner, socketPath, descriptorPath, options.projectId, stateDirectory) }
   catch (error) { await owner.close(); throw error }
 }
 
-function serveOwnerHelper(owner: CodexOwnerBootstrap, socketPath: string, descriptorPath: string, projectId: string | null) {
+function serveOwnerHelper(owner: CodexOwnerBootstrap, socketPath: string, descriptorPath: string, projectId: string | null, stateDirectory: string) {
   const facts = readCodexOwnerBinding(owner.binding)
   const helper = helperIdentity()
   const token = randomBytes(32).toString('hex')
   const assertOwner = () => { assertOwnerScope(facts.codexHome, projectId); readCodexOwnerBinding(owner.binding) }
   const registry = new OwnerHelperRegistry(owner.broker, assertOwner)
   let observation = 0
+  let resolveRetired!: () => void
+  const retired = new Promise<void>(resolve => { resolveRetired = resolve })
   const respond = (value: Record<string, unknown>) => Response.json({ ...value, state: owner.broker.state(), observation: ++observation })
   const server = Bun.serve({ unix: socketPath, maxRequestBodySize: BROKER_MAX_MESSAGE_BYTES,
     async fetch(request) {
@@ -36,6 +50,25 @@ function serveOwnerHelper(owner: CodexOwnerBootstrap, socketPath: string, descri
         assertOwner()
         const raw: unknown = await request.json()
         if (!object(raw)) throw new Error('Invalid owner helper request')
+        if (raw.operation === 'retire') {
+          if (!registry.canRetire(raw.grant)) return respond({ status: 'busy', reason: 'Retained native writer has unfinished work' })
+          if (!Number.isSafeInteger(raw.epoch) || !owner.retire) throw new Error('Native owner retirement is unavailable')
+          const outcome = await owner.retire(raw.epoch as number, () => {
+            const path = join(stateDirectory, '.neutron-owner-retiring.json')
+            const reservation = JSON.stringify({ facts, helper })
+            try { writeFileSync(path, reservation, { flag: 'wx', mode: 0o600 }) }
+            catch (error) {
+              if ((error as NodeJS.ErrnoException).code !== 'EEXIST' || readFileSync(path, 'utf8') !== reservation) throw error
+            }
+          })
+          if (outcome.status !== 'retired') return respond(outcome)
+          const receipt: CodexOwnerRetirementReceipt = { ...outcome.receipt, helper }
+          writeFileSync(join(stateDirectory, '.neutron-owner-retired.json'), JSON.stringify(receipt), { flag: 'wx', mode: 0o600 })
+          // The completed receipt survives a lost reply. The host requires this
+          // helper's proven death before traversing to the next generation.
+          setTimeout(resolveRetired, 0)
+          return respond({ status: 'retired', receipt })
+        }
         if (raw.operation === 'attach') {
           exactFacts(raw.expected, facts)
           if (typeof raw.challenge !== 'string' || !/^[a-f0-9]{64}$/.test(raw.challenge)) throw new Error('Invalid attachment challenge')
@@ -49,5 +82,7 @@ function serveOwnerHelper(owner: CodexOwnerBootstrap, socketPath: string, descri
   const descriptor: OwnerHelperDescriptor = { version: 1, socketPath, socketIdentity: socketIdentity(socketPath), token, helper, facts }
   try { writeFileSync(descriptorPath, JSON.stringify(descriptor), { flag: 'wx', mode: 0o600 }) }
   catch (error) { registry.destroy(); server.stop(true); throw error }
-  return { descriptorPath, facts, async destroy() { registry.destroy(); server.stop(true); await owner.close() } }
+  return { descriptorPath, facts, retired,
+    async finishRetirement() { registry.destroy(); await server.stop(false) },
+    async destroy() { registry.destroy(); server.stop(true); await owner.close() } }
 }

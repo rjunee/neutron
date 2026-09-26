@@ -6,6 +6,8 @@ import { BROKER_MAX_MESSAGE_BYTES, type ProjectControlTransport } from './projec
 import { validateProjectControlScope } from './project-control-broker-scope.ts'
 import { openProjectControlJournal } from './project-control-broker-journal.ts'
 import { createReviewPermissionTransaction, type ReviewPermissionLease, type ReviewPermissionRequest } from './project-review-permissions.ts'
+import { inspectNativeRetirement, type PreparedNativeRetirement, type NativeOwnerRetirement } from './project-control-retirement.ts'
+export type { PreparedNativeRetirement, NativeOwnerRetirement } from './project-control-retirement.ts'
 
 type Rpc = Record<string, unknown>
 type Id = string | number
@@ -46,6 +48,7 @@ export interface ProjectControlBroker {
   gateway(clientId: string): ProjectControlGateway
   /** Host-only exact-stage transaction; never exposed through the control socket. */
   reviewPermissions?(request: ReviewPermissionRequest, expectedEpoch: number): Promise<ReviewPermissionLease>
+  prepareRetirement?(expectedEpoch: number): Promise<PreparedNativeRetirement>
   close(): void
 }
 type Client = { name: string; initialized: boolean; emit(message: Rpc): void; closed: boolean }
@@ -62,7 +65,7 @@ export async function createProjectControlBroker(options: {
   codexHome: string
   upstream: ProjectControlTransport
   requestTimeoutMs?: number
-}): Promise<ProjectControlBroker & { reviewPermissions(request: ReviewPermissionRequest, expectedEpoch: number): Promise<ReviewPermissionLease> }> {
+}): Promise<ProjectControlBroker & { reviewPermissions(request: ReviewPermissionRequest, expectedEpoch: number): Promise<ReviewPermissionLease>; prepareRetirement(expectedEpoch: number): Promise<PreparedNativeRetirement> }> {
   const { upstream } = options
   let upstreamClosed = false
   const closeUpstream = (): void => {
@@ -91,6 +94,10 @@ export async function createProjectControlBroker(options: {
   let current: Work | undefined
   let active: { client: Client; epoch: number; turnId: string | null; completed: boolean } | undefined
   let review: ReturnType<typeof createReviewPermissionTransaction> | undefined
+  let retirement: object | undefined
+  let retiringProcess = false
+  let nativeRevision = 0
+  const observedThreads = new Set<string>()
   let server: ReturnType<typeof Bun.serve<{ client: Client }>> | undefined
   const refusal = (message: string): ProjectControlRefusal => new ProjectControlRefusal(message)
   const admissionRefusal = (message: string): ProjectControlAdmissionRefusal => new ProjectControlAdmissionRefusal(message)
@@ -114,12 +121,17 @@ export async function createProjectControlBroker(options: {
       upstream.send(message)
     } catch { close(new Error('Native transport or broker generation failed')); throw closed }
   }
-  const native = (method: string, params: Rpc): Promise<unknown> => {
+  const native = (method: string, params: Rpc, censusRead = false): Promise<unknown> => {
     if (closed) return Promise.reject(closed)
     if (pending.size >= 128) return Promise.reject(refusal('Too many pending requests'))
     const requestId = `broker-${++sequence}`
     return new Promise((resolve, reject) => {
-      const timer = setTimeout(() => close(new Error('Native response deadline expired; mutation outcome unknown')), timeout)
+      const timer = setTimeout(() => {
+        if (censusRead) {
+          pending.delete(requestId)
+          reject(new Error('Native retirement census deadline expired; liveness unknown'))
+        } else close(new Error('Native response deadline expired; mutation outcome unknown'))
+      }, timeout)
       pending.set(requestId, { method, resolve, reject, timer })
       try { send({ id: requestId, method, params }) } catch (error) { reject(error as Error) }
     })
@@ -147,10 +159,15 @@ export async function createProjectControlBroker(options: {
       return
     }
     const params = object(raw.params) ? raw.params : {}
+    // Include child/global notifications before project filtering. Any native
+    // activity invalidates an in-flight census, including an unseen child.
+    nativeRevision++
     if (review && id(raw.id)) {
       send({ id: raw.id, error: { code: -32001, message: 'Review permission lease forbids approvals' } }); return
     }
     const threadId = params.threadId ?? (object(params.thread) ? params.thread.id : undefined)
+    if (typeof threadId === 'string') observedThreads.add(threadId)
+    if (object(params.item) && params.item.type === 'subAgentActivity' && typeof params.item.agentThreadId === 'string') observedThreads.add(params.item.agentThreadId)
     if (threadId !== undefined && threadId !== options.threadId) {
       // Native children may inherit the fixed tool declaration, never its grant.
       // Reject requests explicitly so a child cannot hang awaiting an owner tool.
@@ -177,7 +194,7 @@ export async function createProjectControlBroker(options: {
     }
     // Project events only. Unknown global notifications are not a cross-project feed.
     if (threadId === options.threadId) for (const client of clients) if (client.initialized && !client.closed) client.emit(raw)
-  }, error => close(error)) } catch (error) { close(); throw error }
+  }, error => { if (!retiringProcess) close(error) }) } catch (error) { close(); throw error }
 
   let initialized: unknown
   try {
@@ -247,6 +264,7 @@ export async function createProjectControlBroker(options: {
   const request = (client: Client, method: string, params: Rpc, expectedEpoch?: number): Promise<unknown> => {
     try {
       if (closed || client.closed) throw closed ?? refusal('Client closed')
+      if (retirement) throw admissionRefusal('Project writer busy with native retirement')
       params = structuredClone(params)
       validate(method, params)
       if (classifyProjectControlMethod(method) === 'read') return native(method, params).then(result => filter(method, result))
@@ -264,6 +282,7 @@ export async function createProjectControlBroker(options: {
     } catch (error) { return Promise.reject(error) }
   }
   const reply = (client: Client, requestId: Id, result: unknown, expectedEpoch?: number): void => {
+    if (retirement) throw admissionRefusal('Project writer busy with native retirement')
     const approval = approvals.get(requestId)
     if (!approval || approval.client !== client || client.closed || !active || active.epoch !== approval.epoch
       || expectedEpoch !== undefined && expectedEpoch !== epoch) throw refusal('Stale or foreign approval reply')
@@ -327,9 +346,54 @@ export async function createProjectControlBroker(options: {
     journal.bound()
   } catch (error) { close(); throw error }
   return {
-    state: () => ({ generation: journal.generation, epoch, phase: closed ? 'closed' : journal.unresolved !== null ? 'recovery' : active ? 'turn' : review || current || queue.length ? 'mutation' : 'idle', activeTurnId: active?.turnId ?? null, unresolved: journal.unresolved }),
+    state: () => ({ generation: journal.generation, epoch, phase: closed ? 'closed' : journal.unresolved !== null ? 'recovery' : active ? 'turn' : retirement || review || current || queue.length ? 'mutation' : 'idle', activeTurnId: active?.turnId ?? null, unresolved: journal.unresolved }),
+    async prepareRetirement(expectedEpoch) {
+      if (closed || journal.unresolved !== null || expectedEpoch !== epoch) return { status: 'unknown', reason: 'Native owner generation is not current' }
+      if (retirement || review || active || current || queue.length || pending.size || approvals.size) return { status: 'busy', reason: 'Native owner has admitted work' }
+      if (!upstream.exited) return { status: 'unknown', reason: 'Native transport cannot prove process exit' }
+      const token = retirement = {}
+      const inspect = async () => {
+        const revision = nativeRevision
+        const result = await inspectNativeRetirement((method, params) => native(method, params, true), options.threadId, observedThreads)
+        if (closed || retirement !== token) return { status: 'unknown' as const, reason: 'Native retirement lost its owner' }
+        try { journal.assertOwned() } catch { return { status: 'unknown' as const, reason: 'Native retirement lost its generation' } }
+        if (revision !== nativeRevision) return { status: 'busy' as const, reason: 'Native activity changed during retirement census' }
+        return result
+      }
+      const observed = await inspect()
+      if (observed.status !== 'idle') { if (retirement === token) retirement = undefined; return observed }
+      const facts = { generation: journal.generation, epoch, threadId: options.threadId, rolloutPath: observed.rolloutPath }
+      let consumed = false
+      return { status: 'prepared', lease: { ...facts,
+        abort() { if (!consumed && retirement === token) { consumed = true; retirement = undefined } },
+        async retire(): Promise<NativeOwnerRetirement> {
+          if (consumed || closed || retirement !== token) return { status: 'unknown', reason: 'Native retirement lease is no longer current' }
+          consumed = true
+          const final = await inspect()
+          if (final.status !== 'idle') { if (retirement === token) retirement = undefined; return final }
+          if (final.rolloutPath !== facts.rolloutPath) { retirement = undefined; return { status: 'unknown', reason: 'Native resume identity changed' } }
+          try {
+            journal.record('native-retirement')
+            retiringProcess = true
+            closeUpstream()
+            let timer: ReturnType<typeof setTimeout> | undefined
+            const exit = await Promise.race([upstream.exited!, new Promise<never>((_, reject) => {
+              timer = setTimeout(() => reject(new Error('Native process exit unconfirmed')), timeout)
+            })]).finally(() => { if (timer) clearTimeout(timer) })
+            if (closed || retirement !== token) throw new Error('Native retirement owner changed before exit')
+            journal.assertOwned()
+            journal.settle()
+            close()
+            return { status: 'retired', ...facts, exit }
+          } catch (error) {
+            close(new Error('Native retirement outcome unknown'))
+            return { status: 'unknown', reason: error instanceof Error ? error.message : 'Native retirement failed' }
+          }
+        },
+      } }
+    },
     async reviewPermissions(request, expectedEpoch) {
-      if (closed || review || active || current || queue.length || journal.unresolved !== null || expectedEpoch !== epoch) throw new ReviewPermissionBusy('Native review requires the idle current project writer')
+      if (closed || retirement || review || active || current || queue.length || journal.unresolved !== null || expectedEpoch !== epoch) throw new ReviewPermissionBusy('Native review requires the idle current project writer')
       review = createReviewPermissionTransaction({ cwd: options.cwd, codexHome: options.codexHome, threadId: options.threadId, rpc: native,
         assertCurrent() { if (closed) throw closed; journal.assertOwned() },
         finish() { if (closed) throw closed; journal.assertOwned(); journal.settle(); review = undefined },

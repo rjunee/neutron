@@ -104,7 +104,9 @@ process.exit(mode === 'nonzero' ? 2 : 0);
 for (const role of ['review', 'synthesis'] as const) {
   test(`Codex ${role} recovery never invokes CLI or creates missing dispatch authority`, async () => {
     const f = await fixture()
-    const req = { ...f.req, role }
+    // This turn establishes a committed receipt for authority recovery checks;
+    // CLI startup under shard load is not the timeout property tested below.
+    const req = { ...f.req, role, budget: { wall_ms: 10_000 } }
     const runner = f.runner(), signal = new AbortController().signal
     const snapshot = async () => Object.fromEntries(await Promise.all((await readdir(f.dir)).filter(name => name !== 'account').sort()
       .map(async name => [name, await readFile(join(f.dir, name), 'utf8')])))
@@ -113,7 +115,7 @@ for (const role of ['review', 'synthesis'] as const) {
     expect((await runner.recover!(req, 'headless', signal)).kind).toBe('unknown')
     expect(await snapshot()).toEqual(initial)
     const first = await runner.run(req, 'headless', signal)
-    expect(first.kind).toBe('completed')
+    expect(first).toMatchObject({ kind: 'completed' })
     expect(await f.calls()).toHaveLength(1)
     const replacement = f.runner()
     const retained = await snapshot()
@@ -143,7 +145,7 @@ for (const role of ['review', 'synthesis'] as const) {
     expect((await replacement.recover!(req, 'headless', signal)).kind).toBe('unknown')
     expect(await snapshot()).toEqual(lost)
     expect(await f.calls()).toHaveLength(1)
-  })
+  }, 15_000)
 }
 
 test('Codex review host death after provider usage recovers spend without child completion or replay', async () => {

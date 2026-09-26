@@ -1,7 +1,7 @@
 import { randomBytes } from 'node:crypto'
 import { isDeepStrictEqual } from 'node:util'
 import { fireAndForget } from '@neutronai/logger/fire-and-forget.ts'
-import type { CodexOwnerBindingFacts } from './project-control-bootstrap.ts'
+import type { CodexOwnerBindingFacts, CodexOwnerRetirement } from './project-control-bootstrap.ts'
 import { ProjectControlAdmissionRefusal, ReviewPermissionBusy, type ProjectControlBroker, type ProjectControlGateway, type ProjectControlState } from './project-control-broker.ts'
 import { BROKER_MAX_MESSAGE_BYTES } from './project-control-broker-transport.ts'
 import { exactFacts, object, readOwnerHelperDescriptor, socketIdentity, type Rpc } from './project-owner-helper-protocol.ts'
@@ -33,6 +33,7 @@ export async function connectCodexOwnerHelper(options: { descriptorPath: string;
   let state: ProjectControlState
   let grant: string
   let observation = 0
+  let retirementPending = false
   type Writer = { listeners: Set<(message: Rpc) => void>; approvals: Map<string | number, Rpc>; ready: Promise<void>; writerGrant: string; cursor: number; detached: boolean }
   const writers = new Map<string, Writer>()
   const close = (error = new Error('Owner frontend detached')) => { closed ??= error; abort.abort(); for (const writer of writers.values()) writer.listeners.clear() }
@@ -72,7 +73,7 @@ export async function connectCodexOwnerHelper(options: { descriptorPath: string;
     try { await call({ operation: 'state', grant }); return { ...state } }
     catch (error) { close(error as Error); throw error }
   }
-  const watchState = async () => { while (!closed) { await Bun.sleep(100); if (!closed) await refreshState() } }
+  const watchState = async () => { while (!closed) { await Bun.sleep(100); if (!closed && !retirementPending) await refreshState() } }
   fireAndForget('codex-cli.owner-helper.watch-state', watchState(), error => close(error as Error))
   const writerCall = (clientId: string, writer: Writer, body: Rpc) => call({ ...body, grant, clientId, writerGrant: writer.writerGrant })
   const poll = async (clientId: string, writer: Writer) => {
@@ -204,5 +205,23 @@ export async function connectCodexOwnerHelper(options: { descriptorPath: string;
   }
   const facts = Object.freeze({ ...descriptor.facts, nativeMetadata: Object.freeze({ ...descriptor.facts.nativeMetadata }),
     capabilities: Object.freeze({ ...descriptor.facts.capabilities }) })
-  return { facts, assertCurrent, broker, refreshState, replyApproval, reviewPrepare, close: () => close() }
+  const retire = async (expectedEpoch: number): Promise<CodexOwnerRetirement> => {
+    if (retirementPending) return { status: 'busy', reason: 'Native owner retirement is already pending' }
+    retirementPending = true
+    try {
+      const response = await call({ operation: 'retire', grant, epoch: expectedEpoch })
+      if (response.status === 'busy' || response.status === 'unknown') {
+        retirementPending = false
+        return { status: response.status, reason: typeof response.reason === 'string' ? response.reason : 'Native retirement refused' }
+      }
+      if (response.status !== 'retired' || !object(response.receipt)) throw new Error('Native retirement acknowledgement is incomplete')
+      exactFacts(response.receipt.facts, expected)
+      close(new Error('Native owner retired'))
+      return { status: 'retired', receipt: response.receipt as unknown as Extract<CodexOwnerRetirement, { status: 'retired' }>['receipt'] }
+    } catch (error) {
+      close(error as Error)
+      return { status: 'unknown', reason: error instanceof Error ? error.message : 'Native retirement reply lost' }
+    }
+  }
+  return { facts, assertCurrent, broker, refreshState, replyApproval, reviewPrepare, retire, close: () => close() }
 }
