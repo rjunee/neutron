@@ -85,8 +85,14 @@ the whole local tree scan reported existing denylist matches and the untracked
 worktree gitdir pointer, so it is not reported as a whole-tree pass. A temporary
 attempt to resolve full TypeScript checks through another checkout's dependencies
 failed on package-resolution artifacts and is not counted as validation.
-Full local suite, remote CI and publication remain pending the shared
-host validation schedule; the local full-suite gate is not waived.
+The full consuming native end-to-end file passed at revision
+`84bf812235a3ff0f6d03fcc66f6f3c53025926db`: 331 tests, zero failures and
+3,986 assertions in 475.23 seconds. This receipt is distinct from the full
+repository shared-host suite, which remains pending alongside remote CI and
+publication; the local full-suite gate is not waived. Integration of current
+main preserved all four authored native cache implementation/test files byte
+for byte. Post-integration focused cache and generated-index checks passed
+54 tests with 424 assertions.
 
 Coverage is deliberately bounded: new Linux native app-server launches and
 ordinary installs into scratch on the same writable mount. Explicit
