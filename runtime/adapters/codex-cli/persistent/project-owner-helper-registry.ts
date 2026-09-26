@@ -19,6 +19,13 @@ export class OwnerHelperRegistry {
     this.frontendGrant = randomBytes(32).toString('hex')
     return { grant: this.frontendGrant }
   }
+  canRetire(grant: unknown): boolean {
+    this.assertOwner()
+    if (!this.frontendGrant || grant !== this.frontendGrant) throw new Error('Stale owner frontend grant')
+    if (this.broker.state().phase !== 'idle') return false
+    this.review.assertWriterAvailable()
+    return [...this.writers.values()].every(writer => writer.canRetire())
+  }
   async handle(raw: Rpc, signal: AbortSignal): Promise<Rpc> {
     this.assertOwner()
     if (!this.frontendGrant || raw.grant !== this.frontendGrant) throw new Error('Stale owner frontend grant')

@@ -1,11 +1,17 @@
 import { spawn } from 'node:child_process'
 import { isAbsolute } from 'node:path'
+import { readFileSync } from 'node:fs'
+import { fireAndForget } from '@neutronai/logger/fire-and-forget.ts'
 
 export interface ProjectControlTransport {
   send(message: Record<string, unknown>): void
   listen(message: (value: unknown) => void, disconnect: (error: Error) => void): void
   close(): void
+  /** Exact spawned child exit; absent on transports that cannot prove death. */
+  readonly exited?: Promise<NativeProcessExit>
 }
+
+export interface NativeProcessExit { pid: number; boot: string; start: string; code: number | null; signal: NodeJS.Signals | null }
 
 export const BROKER_MAX_MESSAGE_BYTES = 4 * 1024 * 1024
 
@@ -26,6 +32,24 @@ export function createProjectControlStdioTransport(options: {
   let disconnect: ((error: Error) => void) | undefined
   let failure: Error | undefined
   let buffer = ''
+  let identity: { pid: number; boot: string; start: string } | undefined
+  try {
+    if (child.pid !== undefined) {
+      const boot = readFileSync('/proc/sys/kernel/random/boot_id', 'utf8').trim()
+      const stat = readFileSync(`/proc/${child.pid}/stat`, 'utf8')
+      const start = stat.slice(stat.lastIndexOf(')') + 2).split(' ')[19]
+      if (boot && start && /^\d+$/.test(start)) identity = { pid: child.pid, boot, start }
+    }
+  } catch { /* An unobserved process identity cannot yield a retirement receipt. */ }
+  const exited = new Promise<NativeProcessExit>((resolve, reject) => {
+    child.once('exit', (code, signal) => {
+      if (!identity) reject(new Error('Native child identity missing'))
+      else resolve({ ...identity, code, signal })
+    })
+    child.once('error', reject)
+  })
+  // Ordinary close callers need not consume the optional exit proof.
+  fireAndForget('codex-cli.project-control-transport.exit', exited)
   const decoder = new TextDecoder('utf-8', { fatal: true })
   const fail = (error: Error): void => {
     if (failure) return
@@ -52,6 +76,7 @@ export function createProjectControlStdioTransport(options: {
   child.on('error', () => fail(new Error('Native child could not start')))
   child.on('close', () => fail(new Error('Native child disconnected')))
   return {
+    exited,
     listen(message, onDisconnect) { receive = message; disconnect = onDisconnect; if (failure) disconnect(failure) },
     send(message) {
       if (failure) throw failure

@@ -1,14 +1,53 @@
 import { createHash } from 'node:crypto'
-import { existsSync, readFileSync, writeFileSync } from 'node:fs'
+import { existsSync, lstatSync, mkdirSync, readFileSync, writeFileSync } from 'node:fs'
 import { join } from 'node:path'
 import { isDeepStrictEqual } from 'node:util'
-import { attachCodexOwner, readCodexOwnerBinding, type bootstrapCodexOwner, type CodexOwnerAttachment } from '@neutronai/runtime/adapters/codex-cli/persistent/project-control-bootstrap.ts'
+import { attachCodexOwner, readCodexOwnerBinding, type bootstrapCodexOwner, type CodexOwnerAttachment, type CodexOwnerBindingFacts, type CodexOwnerRetirement } from '@neutronai/runtime/adapters/codex-cli/persistent/project-control-bootstrap.ts'
 import { assertOwnerScope, helperIdentity, privatePath, readOwnerHelperDescriptor } from '@neutronai/runtime/adapters/codex-cli/persistent/project-owner-helper-protocol.ts'
 import { HerdrHost } from '@neutronai/runtime/adapters/claude-code/persistent/herdr-host.ts'
 import { createHerdrRpc } from '@neutronai/runtime/adapters/claude-code/persistent/herdr-client.ts'
 import { readAccountId, validateCodexSubscriptionAuth } from '@neutronai/trident/codex-auth.ts'
+import { nextOwnerDirectory, readCompletedOwnerRetirement, type CodexOwnerResume } from '@neutronai/runtime/adapters/codex-cli/persistent/project-owner-retirement.ts'
 
 export type OwnerLaunch = Parameters<typeof bootstrapCodexOwner>[0] & { projectId: string | null; generalAuthorityPath?: string }
+
+/** Only ENOENT proves absence. Inaccessible journals retain ownership. */
+export function durableOwnerPathExists(path: string): boolean {
+  try { lstatSync(path); return true }
+  catch (error) {
+    if ((error as NodeJS.ErrnoException).code === 'ENOENT') return false
+    throw error
+  }
+}
+
+/** Read-only recovery, independent of a frontend whose lost reply fenced it. */
+export function recoverDurableOwnerRetirement(stateDirectory: string, expected: CodexOwnerBindingFacts): CodexOwnerRetirement | undefined {
+  try {
+    if (!durableOwnerPathExists(join(stateDirectory, '.neutron-owner-retired.json'))) return undefined
+    const receipt = readCompletedOwnerRetirement(stateDirectory)
+    if (!isDeepStrictEqual(receipt.facts, expected)) throw new Error('Retired owner identity changed')
+    return { status: 'retired', receipt }
+  } catch (error) {
+    return { status: 'unknown', reason: error instanceof Error ? error.message : 'Owner retirement evidence unavailable' }
+  }
+}
+
+export function locateDurableOwnerGeneration(codexHome: string, cwd: string): {
+  stateDirectory: string; resume?: CodexOwnerResume; predecessors: string[]
+} {
+  let stateDirectory = codexHome
+  let resume: CodexOwnerResume | undefined
+  const predecessors: string[] = []
+  while (durableOwnerPathExists(join(stateDirectory, '.neutron-owner-retired.json'))) {
+    if (predecessors.length >= 1000 || predecessors.includes(stateDirectory)) throw new Error('Owner retirement history is unbounded')
+    const receipt = readCompletedOwnerRetirement(stateDirectory)
+    if (receipt.facts.codexHome !== codexHome || receipt.facts.cwd !== cwd) throw new Error('Foreign retired owner')
+    predecessors.push(stateDirectory)
+    resume = { predecessorDirectory: stateDirectory, receipt }
+    stateDirectory = nextOwnerDirectory(receipt.facts)
+  }
+  return { stateDirectory, ...(resume ? { resume } : {}), predecessors }
+}
 
 /** Account identity survives native access/id/refresh-token rotation. The private
  * credential service's file is the source; JWT bodies are not invented authority. */
@@ -23,10 +62,16 @@ export function codexOwnerCredentialIdentity(bytes: string): string {
  * refuses replacement; only an authenticated exact surviving helper is adopted. */
 export async function openDurableCodexOwner(options: OwnerLaunch): Promise<CodexOwnerAttachment> {
   assertOwnerScope(options.codexHome, options.projectId)
-  const descriptorPath = join(options.codexHome, '.neutron-owner-helper.json')
-  const launchPath = join(options.codexHome, '.neutron-owner-launch.json')
-  const authorityPath = join(options.codexHome, '.neutron-owner-authority.json')
-  const panePath = join(options.codexHome, '.neutron-owner-pane.json')
+  const { stateDirectory, resume, predecessors } = locateDurableOwnerGeneration(options.codexHome, options.cwd)
+  if (resume) {
+    mkdirSync(stateDirectory, { recursive: true, mode: 0o700 })
+    privatePath(stateDirectory, 'directory')
+    options = { ...options, ownerStateDirectory: stateDirectory, resume }
+  }
+  const descriptorPath = join(stateDirectory, '.neutron-owner-helper.json')
+  const launchPath = join(stateDirectory, '.neutron-owner-launch.json')
+  const authorityPath = join(stateDirectory, '.neutron-owner-authority.json')
+  const panePath = join(stateDirectory, '.neutron-owner-pane.json')
   const socketPath = options.env.HERDR_SOCKET_PATH
   const host = new HerdrHost({ ...(socketPath ? { connect: async () => createHerdrRpc({ socketPath }) } : {}),
     ...(options.env.HERDR_WORKSPACE_ID ? { workspaceId: options.env.HERDR_WORKSPACE_ID } : {}) })
@@ -34,6 +79,11 @@ export async function openDurableCodexOwner(options: OwnerLaunch): Promise<Codex
   privatePath(credentialPath, 'file')
   const credential = codexOwnerCredentialIdentity(readFileSync(credentialPath, 'utf8'))
   const scope = { projectId: options.projectId, cwd: options.cwd, codexHome: options.codexHome, credential }
+  for (const directory of predecessors) {
+    const path = join(directory, '.neutron-owner-launch.json')
+    privatePath(path, 'file')
+    if (!isDeepStrictEqual(JSON.parse(readFileSync(path, 'utf8')).scope, scope)) throw new Error('Retired owner launch credential or project changed')
+  }
   if (options.projectId === null) {
     const path = options.generalAuthorityPath
     if (!path) throw new Error('General owner requires its fixed instance authority journal')
@@ -83,6 +133,25 @@ export async function openDurableCodexOwner(options: OwnerLaunch): Promise<Codex
   try {
     readCodexOwnerBinding(owner.binding)
     if (!authority) writeFileSync(authorityPath, JSON.stringify(descriptor), { flag: 'wx', mode: 0o600 })
-    return owner
+    return { ...owner,
+      recoverRetirement: () => recoverDurableOwnerRetirement(stateDirectory, descriptor.facts),
+      async retire(expectedEpoch) {
+      const outcome = await owner.retire!(expectedEpoch)
+      if (outcome.status === 'busy') return outcome
+      // A lost HTTP reply is recoverable only from the completed immutable
+      // receipt plus actual process death, never from the caller's timeout.
+      const deadline = Date.now() + (options.timeoutMs ?? 30_000)
+      let reason = outcome.status === 'unknown' ? outcome.reason : 'Owner helper exit is not confirmed'
+      do {
+        try {
+          const receipt = readCompletedOwnerRetirement(stateDirectory)
+          if (!isDeepStrictEqual(receipt.facts, descriptor.facts)) throw new Error('Retired owner identity changed')
+          return { status: 'retired', receipt }
+        } catch (error) { reason = error instanceof Error ? error.message : 'Owner retirement evidence unavailable' }
+        if (!existsSync(join(stateDirectory, '.neutron-owner-retiring.json'))) break
+        await Bun.sleep(25)
+      } while (Date.now() < deadline)
+      return { status: 'unknown', reason }
+    } }
   } catch (error) { await owner.close(); throw error }
 }
