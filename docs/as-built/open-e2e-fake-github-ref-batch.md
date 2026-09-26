@@ -58,6 +58,16 @@ Both mutants were removed. Private logs retain the initial audit, paired runs,
 controls and mutant failures; raw commands and fixture paths are not emitted
 by the added diagnostics.
 
+After freezing source at `f1a7c352805c622faf78bcd7f0b41447a856b22f`, both
+`bunx --no-install tsc --noEmit -p tsconfig.json` and
+`bunx --no-install tsc --noEmit -p trident/tsconfig.json` exited 0. The focused
+ref/merge control also exited 0 on that source. An initial root type check had
+reported the diagnostic wrapper's missing `writesDiffOutput` capability marker;
+the wrapper now preserves the original marker and the repeated checks passed.
+The paired A/B runs shared the same wrapper; the marker correction was applied
+after pairing and did not change either projection mechanism. `git diff --check`
+passed. Subsequent changes only add this validation receipt.
+
 Required full host coverage and CI remain unverified for this candidate. This
 bounded receipt does not complete the full acceptance of
 `docs/spec-items/host-test-suite-efficiency.md` or supersede its full-host gate.
