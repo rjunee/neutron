@@ -106,6 +106,20 @@ This is local full-suite evidence for that measured identity. The later
 receipt-only commit changes this record, not the tested source or dependency
 inputs; remote CI and publication still require their own exact-head evidence.
 
+Exact-head CI subsequently refused the smoke's bare console diagnostic. The
+fixture now emits its success through the approved logger. During revalidation,
+one native command's aggregate output omitted the peer-test summary even though
+the command exited zero. The fixture now records environment, peer-test output
+and invalid-TypeScript output separately inside each generated worktree, and
+checks both commands' actual receipts alongside their exit status. This avoids
+depending on retained tool-output text without removing any consuming control.
+The revised real native smoke passed with matching cache/install inodes, runtime
+peers, compiler siblings and usable dependencies after isolated cache removal.
+Focused cache checks passed 16 tests with 34 assertions; root and Trident
+TypeScript checks and the full local CI lint script passed. The prior full-suite
+receipt remains evidence for revision `27bd615237917899c5f07908c9f67e37e0b1e516`;
+this fixture source change requires fresh canonical validation and remote CI.
+
 Coverage is deliberately bounded: new Linux native app-server launches and
 ordinary installs into scratch on the same writable mount. Explicit
 cache/backend/environment configuration and separately mounted workspaces can

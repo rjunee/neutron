@@ -4,9 +4,10 @@
  * scheduler 0.26.0 and TypeScript 5.9.3. No live credential or owner is used.
  */
 import assert from 'node:assert/strict'
-import { linkSync, lstatSync, mkdirSync, mkdtempSync, readdirSync, rmSync, writeFileSync } from 'node:fs'
+import { linkSync, lstatSync, mkdirSync, mkdtempSync, readFileSync, readdirSync, rmSync, writeFileSync } from 'node:fs'
 import { tmpdir } from 'node:os'
 import { join } from 'node:path'
+import { createLogger } from '@neutronai/logger'
 import { createProjectControlStdioTransport, type ProjectControlTransport } from './project-control-broker-transport.ts'
 import { prepareNativeBunCache } from './native-bun-cache.ts'
 
@@ -53,15 +54,13 @@ async function main(): Promise<void> {
     return path
   })
   let commandIndex = 0, completed = false
-  const outputs: string[] = []
   const commands: Rpc[] = []
   const provider = Bun.serve({ hostname: '127.0.0.1', port: 0, async fetch(request) {
-    const body = await request.json() as Rpc
-    outputs.push(JSON.stringify(body.input))
+    await request.json()
     const index = commandIndex++
     const item: Rpc = index < worktrees.length
       ? { type: 'function_call', id: `install-${index}`, call_id: `install-${index}`, name: 'exec_command', status: 'completed',
-        arguments: JSON.stringify({ workdir: worktrees[index], cmd: 'printenv BUN_INSTALL_CACHE_DIR && bun install --frozen-lockfile --ignore-scripts && bun test runtime.test.ts && bunx --no-install tsc --noEmit --target ES2022 --lib es2022 valid.ts && if bunx --no-install tsc --noEmit --target ES2022 --lib es2022 invalid.ts; then exit 91; fi', yield_time_ms: 10000, max_output_tokens: 2000 }) }
+        arguments: JSON.stringify({ workdir: worktrees[index], cmd: 'printenv BUN_INSTALL_CACHE_DIR > env.receipt && bun install --frozen-lockfile --ignore-scripts && bun test runtime.test.ts > peer.receipt 2>&1 && bunx --no-install tsc --noEmit --target ES2022 --lib es2022 valid.ts && if bunx --no-install tsc --noEmit --target ES2022 --lib es2022 invalid.ts > invalid.receipt 2>&1; then exit 91; fi', yield_time_ms: 10000, max_output_tokens: 2000 }) }
       : { type: 'message', id: 'answer', role: 'assistant', status: 'completed', content: [{ type: 'output_text', text: 'DONE', annotations: [] }] }
     const events = [
       { type: 'response.created', response: { id: `response-${index}`, status: 'in_progress', output: [] } },
@@ -102,12 +101,14 @@ async function main(): Promise<void> {
     assert.equal(commands.length, 2, 'both real native commands must complete')
     for (const command of commands) {
       assert.equal(command.exitCode, 0, 'each direct install/runtime/compiler command must pass')
-      assert(command.aggregatedOutput.includes('TS2322'), 'each invalid TypeScript sibling must fail')
-      assert(command.aggregatedOutput.includes('1 pass'), 'each real peer dependency test must pass')
     }
-    assert(outputs.at(-1)!.includes(cache), 'real direct native shell must inherit prepared cache')
-    assert(outputs.at(-1)!.includes('TS2322'), 'invalid TypeScript must actually fail')
-    assert(outputs.at(-1)!.includes('1 pass'), 'real peer dependency test must pass')
+    // Native tool output may retain only a tail. Read each command's actual
+    // fixture output instead, without weakening the positive/negative proof.
+    for (const path of worktrees) {
+      assert.equal(readFileSync(join(path, 'env.receipt'), 'utf8').trim(), cache, 'real direct native shell must inherit prepared cache')
+      assert(readFileSync(join(path, 'invalid.receipt'), 'utf8').includes('TS2322'), 'each invalid TypeScript sibling must fail')
+      assert(readFileSync(join(path, 'peer.receipt'), 'utf8').includes('1 pass'), 'each real peer dependency test must pass')
+    }
     const original = lstatSync(join(cache, 'typescript@5.9.3@@@1', 'lib', 'typescript.js'))
     const inodes = [[original.dev, original.ino]]
     for (const path of worktrees) {
@@ -123,7 +124,7 @@ async function main(): Promise<void> {
       const valid = Bun.spawnSync(['bunx', '--no-install', 'tsc', '--noEmit', '--target', 'ES2022', '--lib', 'es2022', 'valid.ts'], { cwd: path })
       assert.equal(valid.exitCode, 0, 'cache retirement must preserve installed compiler')
     }
-    console.log('PASS: production transport, direct native installs, inode sharing, runtime peers, TypeScript siblings and retired cache', JSON.stringify({ inodes }))
+    createLogger('native-bun-cache-smoke').info('passed', { inodes: JSON.stringify(inodes) })
   } finally {
     transport?.close(); stopProvider?.()
     rmSync(root, { recursive: true, force: true })
