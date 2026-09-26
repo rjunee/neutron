@@ -82,6 +82,20 @@ The local clean-archive leak scan is not green: both the base and candidate
 report 451 findings under the supplied host denylist. This change does not weaken
 that gate; publication still requires the authoritative leak check to pass.
 
+The first complete shared-host wrapper tested
+`b5a9be174255f51163089260b9b7aea428e9da40` (tree
+`dafc323544768bf87314adcdc4e5829b409e24c6`) after fresh frozen-lockfile
+dependency preparation. All 51 TypeScript projects passed and all 1,695 discovered
+files executed across 18 lanes. The wrapper exited 1: two identity-registry tests
+failed because the repository-name regex had moved to `contracts/project-repos.ts`
+and the new CLI help string names `OWNER_HOME`. Neither classified site reads
+identity environment variables. The registry now names their actual locations
+and classifications; its scanner, exact-set check and file-independence control
+are unchanged. Both new classification tests include an actual-reader positive
+control. Temporary environment-read mutations made both tests fail; after restoring
+the production files, the complete registry suite passed 25 tests / 113 assertions.
+That focused result does not turn the failed full-suite receipt into a pass.
+
 Not claimed: live offsite push/restore, owner custody of a recovery key, a full
 shared-host gate at this checkpoint, deletion of retained legacy repositories,
 or location-independent classification of public versus private files. The last
