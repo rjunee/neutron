@@ -28,8 +28,11 @@ and own-owner refusal. The control passes; every mutant fails an assertion.
 Independent review found the dangling-marker and unsupported-link cases; both
 were fixed and the follow-up review found no remaining blocker.
 
-Verification: 167 tests passed across the Nexus suites, migration runner,
-ownership-refusal and mutation suites, and generated spec-index checks. Root
-and Trident TypeScript checks passed. The full shared-host suite is reserved
-for the integration candidate; this record does not claim that gate or deploy
-verification.
+Verification on the main-based candidate `e7bb6785cd5aba8202b3c40fea3783dc7576f1d1`:
+166 focused tests passed across the Nexus suites, migration runner,
+ownership-refusal and mutation suites, and generated spec-index checks. The
+required `bash scripts/check-shared-host.sh` passed: all 51 TypeScript
+configurations, then all 1,693 discovered and executed test files across 18
+lanes (1,459 general, 22 PGLite, 43 device, 169 real-HTTP), with zero failing
+lanes. The final publication commit adds this receipt; CI on that final head
+and served deployment verification remain separate gates.
