@@ -111,6 +111,20 @@ describe('canonical vault history reconciliation', () => {
     expect((await git([`--git-dir=${canonical}`, 'show', `${h.oldSha}:note.md`])).stdout).toBe('old doc bytes')
   })
 
+  test('a reset legacy branch retains its reflog-only version in the canonical vault', async () => {
+    const h = await fixture(0)
+    const source = join(h.root, '.docs-versions')
+    await git([`--git-dir=${source}`, 'update-ref', 'refs/heads/main', h.oldSha])
+    expect((await git([`--git-dir=${source}`, 'rev-parse', 'main'])).stdout.trim()).toBe(h.oldSha)
+    expect((await git([`--git-dir=${source}`, 'reflog', 'show', '--all', '--format=%H'])).stdout).toContain(h.nextSha)
+    const canonical = join(h.root, '.project-backup')
+    await git(['init', '--bare', canonical])
+    await importLegacyVaultHistories(h.root, canonical, git)
+    expect((await git([`--git-dir=${canonical}`, 'show', `${h.nextSha}:note.md`])).stdout).toBe('edited old doc bytes')
+    expect((await git([`--git-dir=${canonical}`, 'for-each-ref', '--format=%(refname)'])).stdout)
+      .toContain(`refs/vault-history/docs/${h.nextSha}`)
+  })
+
   test('a corrupt legacy repository refuses migration without deleting either history', async () => {
     const h = await fixture(0)
     const canonical = join(h.root, '.project-backup')

@@ -310,10 +310,12 @@ export class DocVersionStore {
     const stdout = canonical.stdout + '\n' + legacy.stdout
     const lines = stdout.split('\n').filter((line) => line.length > 0)
     const all: CommitSummary[] = []
+    const seen = new Set<string>()
     for (const line of lines) {
       const parts = line.split('\u0000')
       const [sha = '', parent = '', date = '', ...subjectParts] = parts
-      if (sha.length === 0 || all.some((entry) => entry.sha === sha)) continue
+      if (sha.length === 0 || seen.has(sha)) continue
+      seen.add(sha)
       const message = subjectParts.join('\u0000')
       const parentSha = parent.split(' ')[0] ?? ''
       all.push({
