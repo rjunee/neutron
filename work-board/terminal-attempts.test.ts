@@ -1,5 +1,7 @@
 import { afterEach, beforeEach, expect, test } from 'bun:test'
-import { mkdtempSync, readFileSync, rmSync } from 'node:fs'
+import { mkdtempSync, readFileSync, rmSync, mkdirSync, writeFileSync, renameSync } from 'node:fs'
+import { Database } from 'bun:sqlite'
+import { applyMigrations } from '../migrations/runner.ts'
 import { tmpdir } from 'node:os'
 import { join } from 'node:path'
 import { ProjectDb } from '@neutronai/persistence/index.ts'
@@ -72,7 +74,7 @@ test('upgrade backfills only linked terminal observations and is idempotent', as
   await store.create('board', { title: 'Unlinked terminal', status: 'done' })
   // Recreate the pre-upgrade boundary with existing card rows, then run the exact migration.
   db.raw().exec('DROP TABLE work_board_terminal_attempts')
-  const sql = readFileSync(new URL('../migrations/0159_work_board_terminal_attempts.sql', import.meta.url), 'utf8')
+  const sql = readFileSync(new URL('../migrations/0160_work_board_terminal_attempts.sql', import.meta.url), 'utf8')
   db.raw().exec(sql)
   db.raw().exec(sql)
   const rows = db.prepare('SELECT run_id, outcome, pr, pr_url, recorded_at FROM work_board_terminal_attempts ORDER BY outcome').all()
@@ -80,3 +82,38 @@ test('upgrade backfills only linked terminal observations and is idempotent', as
     run_id: `run-${outcome}`, outcome, pr: 7, pr_url: 'https://example.test/pull/7', recorded_at: '2026-09-20T00:00:00Z',
   })))
 })
+
+for (const originalOrdinal of [159, 160]) {
+  test(`real runner applies terminal backfill at ${originalOrdinal} below a recorded higher ordinal and preserves name identity after renumber`, () => {
+    const tree = join(dir, 'migration-tree')
+    mkdirSync(tree)
+    const fixture = new Database(join(dir, 'ordinal.db'), { create: true })
+    try {
+      fixture.exec(`CREATE TABLE work_board_items (
+        id TEXT PRIMARY KEY, project_slug TEXT, linked_run_id TEXT, status TEXT,
+        pr INTEGER, pr_url TEXT, updated_at TEXT
+      );
+      INSERT INTO work_board_items VALUES
+        ('failed', 'board', 'run-failed', 'failed', 12, 'https://example.test/pull/12', '2026-09-20'),
+        ('blocked', 'board', 'run-blocked', 'blocked', NULL, NULL, '2026-09-20'),
+        ('done', 'board', 'run-done', 'done', NULL, NULL, '2026-09-20'),
+        ('active', 'board', 'run-active', 'in_progress', NULL, NULL, '2026-09-20'),
+        ('unlinked', 'board', NULL, 'failed', NULL, NULL, '2026-09-20');`)
+      writeFileSync(join(tree, '0170_fixture_marker.sql'), 'CREATE TABLE fixture_marker (id INTEGER);')
+      expect(applyMigrations(fixture, tree).applied).toEqual([170])
+      const filename = `0${originalOrdinal}_work_board_terminal_attempts.sql`
+      writeFileSync(join(tree, filename), readFileSync(new URL('../migrations/0160_work_board_terminal_attempts.sql', import.meta.url)))
+      expect(applyMigrations(fixture, tree).applied).toEqual([originalOrdinal])
+      const observations = fixture.query('SELECT * FROM work_board_terminal_attempts ORDER BY run_id').all()
+      expect(observations.map(row => (row as { run_id: string }).run_id)).toEqual(['run-blocked', 'run-done', 'run-failed'])
+      const ledger = fixture.query("SELECT * FROM _migrations WHERE name = 'work_board_terminal_attempts'").get()
+      expect(ledger).toMatchObject({ version: originalOrdinal })
+      // This new terminal card would be backfilled if the renamed SQL ran again.
+      fixture.exec("UPDATE work_board_items SET status = 'failed' WHERE id = 'active'")
+      if (originalOrdinal === 159) renameSync(join(tree, filename), join(tree, '0160_work_board_terminal_attempts.sql'))
+      expect(applyMigrations(fixture, tree)).toEqual({ applied: [], skipped: [160, 170] })
+      expect(fixture.query("SELECT * FROM _migrations WHERE name = 'work_board_terminal_attempts'").get()).toEqual(ledger)
+      expect(fixture.query('SELECT * FROM work_board_terminal_attempts ORDER BY run_id').all()).toEqual(observations)
+    } finally { fixture.close() }
+  })
+}
