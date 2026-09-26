@@ -9,8 +9,11 @@ encrypted exports. Filenames, commit messages and historical content inside the
 vault bundle are encrypted; ciphertext sizes and upload timing are visible.
 
 Provision one private GitHub repository with an initialized `main` branch and
-SSH push access. The GitHub CLI must also be authenticated to inspect that
-repository. Record the repository's numeric ID as well as its `owner/name`.
+HTTPS push access through an authenticated GitHub CLI. Record the repository's
+numeric ID as well as its `owner/name`. Git uses a per-command credential helper
+scoped to `https://github.com`; global and system Git configuration are ignored,
+ambient credential helpers are reset, and HTTP redirects are refused. Credential
+bytes are never written into the remote URL, command arguments or Git config.
 Each push and restore checks the private repository identity through GitHub's
 API; unavailability refuses the operation. A repository replacement, rename,
 privacy change or missing key must be resolved explicitly.
@@ -43,8 +46,8 @@ Create `<owner-home>/.vault-backup/config.json` after securing the recovery copy
 There is no default destination. Omitted configuration leaves local history
 available. Invalid configuration refuses remote backup. Keys must be regular,
 non-symlink files, exactly 32 bytes, owned by the process user and inaccessible
-to group and others. The SSH and GitHub CLI credentials are independent of the
-encryption key and are required again on a replacement host.
+to group and others. GitHub CLI authentication is independent of the encryption
+key and must be provisioned again on a replacement host.
 
 Run an export after the project store has taken a safe snapshot:
 

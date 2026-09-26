@@ -6,7 +6,7 @@ import { tmpdir } from 'node:os'
 import { createHash, randomBytes } from 'node:crypto'
 import {
   generateBackupKey, pushEncryptedProjectBackup, readOwnerBackupConfig,
-  restoreEncryptedProjectBackup, runBackupCommand, MAX_BACKUP_BUNDLE_BYTES, BACKUP_CHUNK_BYTES, type BackupCommand, type OwnerBackupConfig,
+  restoreEncryptedProjectBackup, runBackupCommand, backupGitArgs, MAX_BACKUP_BUNDLE_BYTES, BACKUP_CHUNK_BYTES, type BackupCommand, type OwnerBackupConfig,
 } from '../git/project-backup-remote.ts'
 
 const dirs: string[] = []
@@ -42,7 +42,7 @@ async function fixture() {
       if (offline) throw new Error('network unavailable')
       return JSON.stringify(metadata)
     }
-    const local = args.map(arg => arg === `git@github.com:${config.repository}.git` ? remote : arg)
+    const local = args.map(arg => arg === `https://github.com/${config.repository}.git` ? remote : arg)
     return git(local, cwd)
   }
   return { root, project, config, remote, command, calls, git, first,
@@ -54,6 +54,12 @@ describe('encrypted project vault remote', () => {
     const f = await fixture()
     const pushed = await pushEncryptedProjectBackup({ projectDir: f.project, projectId: 'private-project', config: f.config, command: f.command })
     expect(pushed.pushed).toBe(true)
+    const cloneCall = f.calls.find(call => call.includes('--no-checkout'))!
+    expect(cloneCall).toContain(`https://github.com/${f.config.repository}.git`)
+    expect(cloneCall).toContain('credential.helper=')
+    expect(cloneCall).toContain('credential.https://github.com.helper=!gh auth git-credential')
+    expect(cloneCall).toContain('http.followRedirects=false')
+    expect(f.calls.some(call => call.some(arg => arg.startsWith('git@github.com:')))).toBe(false)
     const names = (await f.git([`--git-dir=${f.remote}`, 'ls-tree', '-r', '--name-only', 'main'])).trim().split('\n')
     expect(names).toHaveLength(2)
     expect(names[0]).toMatch(/^[a-f0-9]{64}\.nvb\/000000\.chunk$/)
@@ -202,6 +208,43 @@ describe('encrypted project vault remote', () => {
     await expect(readOwnerBackupConfig(f.root)).rejects.toThrow('recovery_unconfirmed')
     await writeFile(path, JSON.stringify(f.config))
     expect(await readOwnerBackupConfig(f.root)).toEqual(f.config)
+  })
+
+  test('HTTPS helper serves only GitHub, bypasses ambient helpers and never persists credentials', async () => {
+    const f = await fixture()
+    const bin = join(f.root, 'bin'); await mkdir(bin)
+    const marker = join(f.root, 'helper-call')
+    const secret = 'fixture-credential-that-must-not-be-persisted'
+    // Fake only the credential provider. Real git selects and invokes the helper.
+    await writeFile(join(bin, 'gh'), `#!/bin/sh\n[ "$1 $2 $3" = "auth git-credential get" ] || exit 2\nwhile IFS= read -r line && [ -n "$line" ]; do :; done\nprintf invoked > "$FIXTURE_HELPER_MARKER"\nprintf 'username=fixture\\npassword=%s\\n' "$FIXTURE_CREDENTIAL"\n`, { mode: 0o700 })
+    const globalConfig = join(f.root, 'ambient.gitconfig')
+    const ambientMarker = join(f.root, 'ambient-helper-call')
+    await writeFile(globalConfig, `[credential]\n\thelper = "!touch '${ambientMarker}'; false"\n`)
+    const env = { ...process.env, PATH: `${bin}:${process.env.PATH}`, GIT_CONFIG_GLOBAL: globalConfig,
+      GIT_CONFIG_NOSYSTEM: '1', GIT_TERMINAL_PROMPT: '0', FIXTURE_HELPER_MARKER: marker, FIXTURE_CREDENTIAL: secret }
+    const args = backupGitArgs(['credential', 'fill'])
+    const fill = async (host: string) => {
+      const child = Bun.spawn(['git', ...args], { cwd: f.root, env,
+        stdin: new Blob([`protocol=https\nhost=${host}\n\n`]), stdout: 'pipe', stderr: 'pipe' })
+      const [code, stdout, stderr] = await Promise.all([child.exited, new Response(child.stdout).text(), new Response(child.stderr).text()])
+      return { code, stdout, stderr }
+    }
+    const good = await fill('github.com')
+    expect(good.code).toBe(0)
+    expect(good.stdout.includes(secret)).toBe(true)
+    expect(good.stderr.includes(secret)).toBe(false)
+    expect(await readFile(marker, 'utf8')).toBe('invoked')
+    expect((await readdir(f.root)).includes('ambient-helper-call')).toBe(false)
+    await rm(marker)
+    const wrongHost = await fill('example.invalid')
+    expect(wrongHost.code).not.toBe(0)
+    expect(wrongHost.stdout.includes(secret)).toBe(false)
+    expect((await readdir(f.root)).includes('helper-call')).toBe(false)
+    expect(args.join(' ').includes(secret)).toBe(false)
+    expect(await readFile(globalConfig, 'utf8')).not.toContain(secret)
+    const config = await f.git([`--git-dir=${f.remote}`, 'config', '--local', '--list'])
+    expect(config).not.toContain(secret)
+    expect(config).not.toContain('credential')
   })
 
   test('multiple bounded chunks restore exact bytes; changed chunk size removes stale tails', async () => {

@@ -38,7 +38,7 @@ export const runBackupCommand: BackupCommand = async (binary, args, cwd) => {
       for (const name of Object.keys(env)) if (name.startsWith('GIT_')) delete env[name]
       Object.assign(env, {
         GIT_CONFIG_NOSYSTEM: '1', GIT_CONFIG_GLOBAL: '/dev/null',
-        GIT_TERMINAL_PROMPT: '0', GIT_SSH_COMMAND: 'ssh -o BatchMode=yes',
+        GIT_TERMINAL_PROMPT: '0',
       })
     }
     const result = await exec(binary, args, {
@@ -195,15 +195,20 @@ async function verifyDestination(config: OwnerBackupConfig, command: BackupComma
     || repository.archived || repository.disabled) throw new EncryptedBackupError('destination_identity_or_privacy_changed')
 }
 
-const git = (command: BackupCommand, args: string[], cwd?: string) => command('git', [
+/** Ephemeral host-scoped helper configuration; credential bytes never enter argv or Git config. */
+export const backupGitArgs = (args: string[]): string[] => [
   '-c', 'core.hooksPath=/dev/null', '-c', 'commit.gpgsign=false',
-  '-c', 'protocol.ext.allow=never', ...args,
-], cwd)
+  '-c', 'protocol.ext.allow=never', '-c', 'credential.helper=',
+  '-c', 'credential.https://github.com.helper=!gh auth git-credential',
+  '-c', 'http.followRedirects=false', ...args,
+]
+
+const git = (command: BackupCommand, args: string[], cwd?: string) => command('git', backupGitArgs(args), cwd)
 
 async function cloneRemote(config: OwnerBackupConfig, directory: string, command: BackupCommand): Promise<void> {
   await verifyDestination(config, command)
   await git(command, ['clone', '--depth', '1', '--no-checkout', '--single-branch', '--branch', 'main',
-    `git@github.com:${config.repository}.git`, directory])
+    `https://github.com/${config.repository}.git`, directory])
 }
 
 interface CommonOptions { projectId: string; config: OwnerBackupConfig; command?: BackupCommand }
