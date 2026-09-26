@@ -1,4 +1,4 @@
-import { localVaultBackup } from '../../tests/support/vault-backup.ts'
+import { localVaultBackup } from './support/vault-backup.ts'
 /**
  * P7.4 Phase 1 — gateway app-docs surface HTTP tests for the new
  * history / version / revert / diff routes.

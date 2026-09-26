@@ -1,6 +1,6 @@
 /** Local administration. Keys are read from protected files and never printed. */
 import { generateBackupKey, readOwnerBackupConfig, pushEncryptedProjectBackup,
-  restoreEncryptedProjectBackup, EncryptedBackupError } from '../gateway/git/project-backup-remote.ts'
+  restoreEncryptedProjectBackup, EncryptedBackupError } from '@neutronai/gateway/git/project-backup-remote.ts'
 
 async function main(args: string[]) {
   const [operation, ownerHome, projectId, path] = args

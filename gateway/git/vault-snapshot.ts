@@ -3,7 +3,7 @@ import { lstat, mkdtemp, open, readdir, rm } from 'node:fs/promises'
 import { existsSync } from 'node:fs'
 import { tmpdir } from 'node:os'
 import { join } from 'node:path'
-import { readProjectRepos } from '../../contracts/project-repos.ts'
+import { readProjectRepos } from '@neutronai/contracts/project-repos.ts'
 import type { GitExecFn } from './git-exec.ts'
 
 const metadata = new Set(['.git', '.project-backup', '.docs-versions', 'node_modules'])

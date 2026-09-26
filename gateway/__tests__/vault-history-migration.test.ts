@@ -6,7 +6,7 @@ import { tmpdir } from 'node:os'
 import { createGitExec } from '../git/git-exec.ts'
 import { importLegacyVaultHistories } from '../git/vault-history-migration.ts'
 import { DocVersionStore, UnknownShaError } from '../git/doc-version-store.ts'
-import { localVaultBackup } from '../../tests/support/vault-backup.ts'
+import { localVaultBackup } from './support/vault-backup.ts'
 import { LEGACY_DOC_VERSION_GITIGNORE } from '../git/legacy-doc-ignore.ts'
 
 const git = createGitExec('git')

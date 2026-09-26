@@ -1,5 +1,5 @@
-import { ProjectBackupStore } from '../../gateway/git/project-backup-store.ts'
-import type { PlatformAdapter } from '../../runtime/platform-adapter.ts'
+import { ProjectBackupStore } from '../../git/project-backup-store.ts'
+import type { PlatformAdapter } from '@neutronai/runtime/platform-adapter.ts'
 
 /** Real local Git history, with no configured remote or provisioning service. */
 export function localVaultBackup(owner_home: string, project_slug: string): ProjectBackupStore {

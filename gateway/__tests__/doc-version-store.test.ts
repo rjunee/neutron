@@ -1,4 +1,4 @@
-import { localVaultBackup } from '../../tests/support/vault-backup.ts'
+import { localVaultBackup } from './support/vault-backup.ts'
 import { PROJECT_BACKUP_GITIGNORE } from '../git/project-backup-store.ts'
 /**
  * P7.4 Phase 1 — DocVersionStore unit + failure-mode + concurrency tests.

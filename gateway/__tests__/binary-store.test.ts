@@ -27,7 +27,7 @@ import {
   BinaryTypeError,
   type BinaryPutResult,
 } from '../storage/binary-types.ts'
-import { localVaultBackup } from '../../tests/support/vault-backup.ts'
+import { localVaultBackup } from './support/vault-backup.ts'
 
 const PROJECT_ID = 'demo-project'
 

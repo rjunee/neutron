@@ -1,4 +1,4 @@
-import { localVaultBackup } from '../../tests/support/vault-backup.ts'
+import { localVaultBackup } from '@neutronai/gateway/__tests__/support/vault-backup.ts'
 import { afterEach, beforeEach, describe, expect, test } from 'bun:test'
 import { mkdirSync, mkdtempSync, readFileSync, rmSync } from 'node:fs'
 import { tmpdir } from 'node:os'
