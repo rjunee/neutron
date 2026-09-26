@@ -1378,7 +1378,10 @@ describe('ProjectBackupStore — vault snapshot safety', () => {
     await restoreEncryptedProjectBackup({ projectId: PROJECT_ID, destination, config, command })
     expect(require('node:fs').readFileSync(join(destination, 'private-notes.md'), 'utf8')).toBe('owner private recovery control')
     const files = await git(h.tmp, [`--git-dir=${remote}`, 'ls-tree', '-r', '--name-only', 'main'])
-    expect(files.trim()).toMatch(/^[a-f0-9]{64}\.nvb$/)
+    const paths = files.trim().split('\n')
+    expect(paths.every(path => /^[a-f0-9]{64}\.nvb\/(manifest\.json|[0-9]{6}\.chunk)$/.test(path))).toBe(true)
+    expect(paths.filter(path => path.endsWith('/manifest.json'))).toHaveLength(1)
+    expect(paths.some(path => path.endsWith('/000000.chunk'))).toBe(true)
   })
 
   it('malformed owner backup configuration keeps local recovery but never falls through to plaintext', async () => {

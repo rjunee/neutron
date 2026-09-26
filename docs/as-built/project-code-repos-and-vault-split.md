@@ -32,7 +32,12 @@ and no longer writes a separate repository
 
 The owner transport encrypts complete all-ref bundles with AES-256-GCM and checks
 pinned private GitHub identity before remote writes. Fresh-clone recovery restores
-archived refs as well as main. Configuration requires an explicit off-host-key
+archived refs as well as main. Authenticated bounded chunks carry up to a 1 GiB
+bundle, with 32 MiB maximum objects; a real 96 MiB incompressible fixture proves
+the former single-object limit is overcome. Missing, extra, reordered or corrupted
+chunks refuse before Git consumes plaintext. Every export retains full history;
+remote storage grows with exports and no retention deletion is implemented.
+Configuration requires an explicit off-host-key
 custody attestation; no secret is generated or uploaded by this change. Legacy
 plaintext destinations and automatic provisioning are refused, including the old
 HTTP configuration route (`gateway/http/app-admin-surface.ts:531`). No destination
