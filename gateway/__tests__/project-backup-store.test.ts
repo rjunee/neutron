@@ -29,6 +29,8 @@ import { mkdir, writeFile } from 'node:fs/promises'
 import { tmpdir } from 'node:os'
 import { join } from 'node:path'
 import { promisify } from 'node:util'
+import { Database } from 'bun:sqlite'
+import { generateBackupKey, restoreEncryptedProjectBackup, runBackupCommand, type BackupCommand } from '../git/project-backup-remote.ts'
 
 import {
   ProjectBackupStore,
@@ -187,16 +189,17 @@ describe('ProjectBackupStore — init + identity', () => {
     expect(secondHead).toBe(firstHead)
   })
 
-  it('writes the brief-pinned .gitignore at the project root', async () => {
+  it('applies required vault exclusions at the project root', async () => {
     if (!GIT_AVAILABLE) return
     await h.store.ensureInit(PROJECT_ID)
     const gitignorePath = join(h.projectRoot, '.gitignore')
     expect(existsSync(gitignorePath)).toBe(true)
     const content = require('node:fs').readFileSync(gitignorePath, 'utf8')
-    expect(content).toBe(PROJECT_BACKUP_GITIGNORE)
+    expect(content).toContain(PROJECT_BACKUP_GITIGNORE)
+    expect(content).toContain('/code/')
   })
 
-  it('Argus r1 MINOR #6 — backupNow rewrites a user-edited .gitignore back to spec', async () => {
+  it('reapplies required exclusions while preserving user ignore rules', async () => {
     if (!GIT_AVAILABLE) return
     await h.store.ensureInit(PROJECT_ID)
     const fs = require('node:fs')
@@ -206,7 +209,8 @@ describe('ProjectBackupStore — init + identity', () => {
     expect(fs.readFileSync(gitignorePath, 'utf8')).not.toBe(PROJECT_BACKUP_GITIGNORE)
     // Next backup tick must reset the file to the canonical body.
     await h.store.backupNow(PROJECT_ID)
-    expect(fs.readFileSync(gitignorePath, 'utf8')).toBe(PROJECT_BACKUP_GITIGNORE)
+    expect(fs.readFileSync(gitignorePath, 'utf8')).toContain(PROJECT_BACKUP_GITIGNORE)
+    expect(fs.readFileSync(gitignorePath, 'utf8')).toContain('*.bogus')
   })
 
   it('seeds the synthetic Neutron Backup identity', async () => {
@@ -300,7 +304,7 @@ describe('ProjectBackupStore — backupNow snapshot pipeline', () => {
     expect(files).not.toContain('server.log')
   })
 
-  it('SQLite WAL files are committed (no binary exclusion at the project-backup level)', async () => {
+  it('applied exclusions omit SQLite journals while retaining database files', async () => {
     if (!GIT_AVAILABLE) return
     await h.store.backupNow(PROJECT_ID)
     mkdirSync(join(h.projectRoot, 'Cores'), { recursive: true })
@@ -319,8 +323,8 @@ describe('ProjectBackupStore — backupNow snapshot pipeline', () => {
     ])
     const files = out.split('\n').map((s) => s.trim())
     expect(files).toContain('Cores/r.db')
-    expect(files).toContain('Cores/r.db-wal')
-    expect(files).toContain('Cores/r.db-shm')
+    expect(files).not.toContain('Cores/r.db-wal')
+    expect(files).not.toContain('Cores/r.db-shm')
   })
 
   it('runs only ONE backup when two concurrent backupNow calls fire', async () => {
@@ -354,9 +358,7 @@ describe('ProjectBackupStore — push pipeline', () => {
   beforeEach(() => {
     h = makeHarness()
     bareDir = mkdtempSync(join(tmpdir(), 'p74p2-bare-'))
-    // Initialize a bare repo to push against. SSH transport isn't
-    // testable without a real ssh daemon, but file:// remotes exercise
-    // the full ensureRemote + push flow without that.
+    // A real writable remote is the positive control for refusing plaintext.
     require('node:child_process').execFileSync(
       'git',
       ['init', '--bare', '--initial-branch=main', bareDir],
@@ -368,12 +370,8 @@ describe('ProjectBackupStore — push pipeline', () => {
     rmSync(bareDir, { recursive: true, force: true })
   })
 
-  it('pushes to a configured (file://) remote on backupNow', async () => {
+  it('refuses legacy plaintext remotes even when writable', async () => {
     if (!GIT_AVAILABLE) return
-    // Set the remote config to point at the local bare repo. We DO
-    // need to override the doPush invocation to NOT inject GIT_SSH_COMMAND
-    // for a file:// URL — we'll bypass that by writing the config
-    // with a 'file:' URL AND manually setting up the remote.
     h.platform.remoteState.config = {
       remote_url: `file://${bareDir}`,
       ssh_key_path: '/dev/null',
@@ -383,13 +381,12 @@ describe('ProjectBackupStore — push pipeline', () => {
     await h.store.ensureInit(PROJECT_ID)
     writeFileSync(join(h.projectRoot, 'pushable.md'), 'content')
     const result = await h.store.backupNow(PROJECT_ID)
-    expect(result.ok).toBe(true)
+    expect(result.ok).toBe(false)
     expect(result.commit_sha).not.toBeNull()
-    expect(result.pushed).toBe(true)
-    expect(result.push_error).toBeNull()
-    // Bare repo should now have the same HEAD as the local repo.
-    const bareHead = await git(bareDir, ['rev-parse', 'HEAD'])
-    expect(bareHead.trim()).toBe(result.commit_sha!)
+    expect(result.pushed).toBe(false)
+    expect(result.local_snapshot_complete).toBe(true)
+    expect(result.push_error?.message).toContain('plaintext')
+    expect(await git(bareDir, ['for-each-ref', '--format=%(refname)'])).toBe('')
   })
 
   it('push failure does not lose the local commit', async () => {
@@ -536,7 +533,7 @@ describe('ProjectBackupStore — Managed lazy provisioning', () => {
   })
   afterEach(() => cleanup(h))
 
-  it('invokes autoProvisionProjectBackupRemote on first backup when no remote exists', async () => {
+  it('never auto-provisions a legacy plaintext destination', async () => {
     if (!GIT_AVAILABLE) return
     let calls = 0
     h.platform.remoteState.config = null
@@ -553,13 +550,11 @@ describe('ProjectBackupStore — Managed lazy provisioning', () => {
     }
     h.platform.capabilitiesMut.project_backup = true
     const result = await h.store.backupNow(PROJECT_ID)
-    expect(calls).toBe(1)
-    // Push fails (no real remote), but the local commit + lazy
-    // provisioning both ran.
+    expect(calls).toBe(0)
     expect(result.commit_sha).toBeNull() // clean working tree
     const status = await h.store.getStatus(PROJECT_ID)
-    expect(status.remote_url).toBe('git@github.com:neutron-managed/x-y-z-backup.git')
-    expect(status.is_managed_remote).toBe(true)
+    expect(status.remote_url).toBeNull()
+    expect(status.is_managed_remote).toBe(false)
   })
 })
 
@@ -580,25 +575,20 @@ describe('ProjectBackupStore — restore smoke', () => {
     rmSync(bareDir, { recursive: true, force: true })
   })
 
-  it('clones from the bare-repo remote produces the project content', async () => {
+  it('a local canonical clone recovers the project without an offsite destination', async () => {
     if (!GIT_AVAILABLE) return
-    h.platform.remoteState.config = {
-      remote_url: `file://${bareDir}`,
-      ssh_key_path: '/dev/null',
-      source: 'user_connected',
-      configured_at: new Date().toISOString(),
-    }
     // Seed some content.
     mkdirSync(join(h.projectRoot, 'docs'), { recursive: true })
     writeFileSync(join(h.projectRoot, 'docs', 'spec.md'), '# Spec')
     mkdirSync(join(h.projectRoot, 'Cores'), { recursive: true })
     writeFileSync(join(h.projectRoot, 'Cores', 'data.db'), 'sqlite')
     const result = await h.store.backupNow(PROJECT_ID)
-    expect(result.pushed).toBe(true)
+    expect(result.pushed).toBe(false)
+    expect(result.local_snapshot_complete).toBe(true)
     // Simulate disaster + restore.
     const restoreDir = mkdtempSync(join(tmpdir(), 'p74p2-restore-target-'))
     try {
-      await execFileAsync('git', ['clone', `file://${bareDir}`, restoreDir])
+      await execFileAsync('git', ['clone', join(h.projectRoot, '.project-backup'), restoreDir])
       expect(existsSync(join(restoreDir, 'docs', 'spec.md'))).toBe(true)
       expect(existsSync(join(restoreDir, 'Cores', 'data.db'))).toBe(true)
       expect(existsSync(join(restoreDir, 'README.md'))).toBe(true)
@@ -1302,6 +1292,161 @@ describe('ProjectBackupStore — concurrent restore queue (ISSUE #46)', () => {
       ).trim()
     }
     expect(new Set(chain)).toEqual(new Set(recoveryShas))
+  })
+})
+
+describe('ProjectBackupStore — vault snapshot safety', () => {
+  let h: Harness
+  beforeEach(() => { h = makeHarness() })
+  afterEach(() => cleanup(h))
+
+  it('refuses live SQLite restore but permits an unrelated document restore', async () => {
+    const dbPath = join(h.projectRoot, 'state.db')
+    const live = new Database(dbPath)
+    try {
+      live.exec('PRAGMA journal_mode=WAL; PRAGMA wal_autocheckpoint=0; CREATE TABLE entries (body TEXT);')
+      live.exec("INSERT INTO entries VALUES ('old')")
+      writeFileSync(join(h.projectRoot, 'note.md'), 'old note')
+      await h.store.backupNow(PROJECT_ID)
+      const snapshot = (await git(h.projectRoot, [`--git-dir=${join(h.projectRoot, '.project-backup')}`, 'rev-parse', 'HEAD'])).trim()
+      live.exec("INSERT INTO entries VALUES ('new')")
+      writeFileSync(join(h.projectRoot, 'note.md'), 'new note')
+      await expect(h.store.restore(PROJECT_ID, snapshot, null)).rejects.toThrow('SQLite in-place restore')
+      await expect(h.store.restore(PROJECT_ID, snapshot, 'state.db')).rejects.toThrow('SQLite in-place restore')
+      expect(live.query('SELECT body FROM entries').all()).toEqual([{ body: 'old' }, { body: 'new' }])
+      expect(require('node:fs').readFileSync(join(h.projectRoot, 'note.md'), 'utf8')).toBe('new note')
+      await h.store.restore(PROJECT_ID, snapshot, 'note.md')
+      expect(require('node:fs').readFileSync(join(h.projectRoot, 'note.md'), 'utf8')).toBe('old note')
+      expect(live.query('PRAGMA integrity_check').get()).toEqual({ integrity_check: 'ok' })
+    } finally { live.close() }
+  })
+
+  it('reports failed snapshots without losing the last valid snapshot and recovers on retry', async () => {
+    await h.store.backupNow(PROJECT_ID)
+    writeFileSync(join(h.projectRoot, 'note.md'), 'valid capture')
+    await h.store.backupNow(PROJECT_ID)
+    const before = await h.store.getStatus(PROJECT_ID)
+    writeFileSync(join(h.projectRoot, 'broken.db'), Buffer.from('SQLite format 3\0malformed'))
+    writeFileSync(join(h.projectRoot, 'note.md'), 'unsaved latest edit')
+    const failure = await h.store.backupNow(PROJECT_ID)
+    expect(failure.ok).toBe(false)
+    expect(failure.local_snapshot_complete).toBe(false)
+    const failed = await h.store.getStatus(PROJECT_ID)
+    expect(failed.state).toBe('error')
+    expect(failed.last_push_error).not.toBeNull()
+    expect(failed.last_commit_sha).toBe(before.last_commit_sha)
+    expect(Date.parse(failed.last_check_at!)).toBeGreaterThanOrEqual(Date.parse(before.last_check_at!))
+    await expect(h.store.restore(PROJECT_ID, before.last_commit_sha!, 'note.md')).rejects.toThrow('Local safety snapshot failed')
+    expect(require('node:fs').readFileSync(join(h.projectRoot, 'note.md'), 'utf8')).toBe('unsaved latest edit')
+    writeFileSync(join(h.projectRoot, 'broken.db'), 'ordinary file now')
+    expect((await h.store.backupNow(PROJECT_ID)).ok).toBe(true)
+    expect((await h.store.getStatus(PROJECT_ID)).state).toBe('ok')
+  })
+
+  it('pushes encrypted owner-level history and restores it through a fresh clone', async () => {
+    const keyFile = join(h.owner_home, 'recovery.key')
+    await generateBackupKey(keyFile)
+    mkdirSync(join(h.owner_home, '.vault-backup'))
+    const config = { version: 1 as const, repository: 'example/vault', repositoryId: 123, keyFile, recoveryConfirmed: true as const }
+    writeFileSync(join(h.owner_home, '.vault-backup', 'config.json'), JSON.stringify(config))
+    const seed = join(h.tmp, 'seed')
+    await git(h.tmp, ['init', '--initial-branch=main', seed])
+    await git(seed, ['-c', 'user.name=Test', '-c', 'user.email=test@example.invalid', 'commit', '--allow-empty', '-qm', 'seed'])
+    const remote = join(h.tmp, 'encrypted.git')
+    await git(h.tmp, ['clone', '--bare', seed, remote])
+    const command: BackupCommand = (binary, args, cwd) => binary === 'gh'
+      ? Promise.resolve(JSON.stringify({ id: 123, private: true, full_name: config.repository }))
+      : runBackupCommand(binary, args.map(arg => arg === 'git@github.com:example/vault.git' ? remote : arg), cwd)
+    const store = new ProjectBackupStore({ platform: h.platform, owner_home: h.owner_home, project_slug: PROJECT_SLUG, encryptedBackupCommand: command })
+    writeFileSync(join(h.projectRoot, 'private-notes.md'), 'owner private recovery control')
+    expect((await store.backupNow(PROJECT_ID)).pushed).toBe(true)
+    expect((await store.getStatus(PROJECT_ID)).remote_url).toBe('https://github.com/example/vault')
+    const destination = join(h.tmp, 'restored')
+    await restoreEncryptedProjectBackup({ projectId: PROJECT_ID, destination, config, command })
+    expect(require('node:fs').readFileSync(join(destination, 'private-notes.md'), 'utf8')).toBe('owner private recovery control')
+    const files = await git(h.tmp, [`--git-dir=${remote}`, 'ls-tree', '-r', '--name-only', 'main'])
+    expect(files.trim()).toMatch(/^[a-f0-9]{64}\.nvb$/)
+  })
+
+  it('malformed owner backup configuration keeps local recovery but never falls through to plaintext', async () => {
+    mkdirSync(join(h.owner_home, '.vault-backup'))
+    writeFileSync(join(h.owner_home, '.vault-backup', 'config.json'), '{broken')
+    let plaintextLookups = 0
+    h.platform.getProjectBackupRemoteConfig = async () => { plaintextLookups++; return null }
+    const result = await h.store.backupNow(PROJECT_ID)
+    expect(result.ok).toBe(false)
+    expect(result.pushed).toBe(false)
+    expect(plaintextLookups).toBe(0)
+    expect(await git(h.projectRoot, [`--git-dir=${join(h.projectRoot, '.project-backup')}`, 'show', 'HEAD:README.md'])).toBe('# Demo\n')
+    await h.store.commitDocument(PROJECT_ID, 'Local edit after failed remote')
+    expect((await h.store.getStatus(PROJECT_ID)).state).toBe('error')
+  })
+
+  it('refuses a symlinked ignore file without replacing outside content', async () => {
+    const outside = join(h.tmp, 'owner-rules')
+    writeFileSync(outside, 'owner content')
+    require('node:fs').symlinkSync(outside, join(h.projectRoot, '.gitignore'))
+    expect((await h.store.backupNow(PROJECT_ID)).ok).toBe(false)
+    expect(require('node:fs').readFileSync(outside, 'utf8')).toBe('owner content')
+  })
+
+  it('honors zero and multiple declared repositories independently of checkout markers', async () => {
+    mkdirSync(join(h.projectRoot, 'code'), { recursive: true })
+    writeFileSync(join(h.projectRoot, 'code', 'ordinary.md'), 'vault content when zero repositories are declared')
+    writeFileSync(join(h.projectRoot, 'project-repos.json'), JSON.stringify({ repos: [], default: null }))
+    await h.store.backupNow(PROJECT_ID)
+    const args = [`--git-dir=${join(h.projectRoot, '.project-backup')}`, 'ls-tree', '-r', '--name-only', 'HEAD']
+    expect(await git(h.projectRoot, args)).toContain('code/ordinary.md')
+    mkdirSync(join(h.projectRoot, 'repos', 'second'), { recursive: true })
+    writeFileSync(join(h.projectRoot, 'repos', 'second', 'private-code.md'), 'separate code')
+    writeFileSync(join(h.projectRoot, 'project-repos.json'), JSON.stringify({ repos: [
+      { name: 'first', path: 'code', remote: null },
+      { name: 'second', path: 'repos/second', remote: null },
+    ], default: 'first' }))
+    await h.store.backupNow(PROJECT_ID)
+    const files = await git(h.projectRoot, args)
+    expect(files).not.toContain('code/')
+    expect(files).not.toContain('repos/second/')
+    expect(files).toContain('README.md')
+  })
+
+  it('keeps ordinary vault files but excludes nested repository trees and gitlinks', async () => {
+    const nested = join(h.projectRoot, 'research', 'checkout')
+    mkdirSync(nested, { recursive: true })
+    await git(nested, ['init', '-q'])
+    writeFileSync(join(nested, 'code.txt'), 'separate repository content')
+    await git(nested, ['add', '.'])
+    await git(nested, ['-c', 'user.name=Test', '-c', 'user.email=test@example.invalid', 'commit', '-qm', 'seed'])
+    writeFileSync(join(h.projectRoot, 'research', 'notes.md'), 'vault research')
+    expect((await h.store.backupNow(PROJECT_ID)).ok).toBe(true)
+    const tree = await git(h.projectRoot, [`--git-dir=${join(h.projectRoot, '.project-backup')}`, 'ls-tree', '-r', 'HEAD'])
+    expect(tree).toContain('research/notes.md')
+    expect(tree).not.toContain('research/checkout')
+    expect(tree).not.toContain('160000')
+  })
+
+  it('recovers committed WAL-only rows from a standalone snapshot database', async () => {
+    const dbPath = join(h.projectRoot, 'state.db')
+    const live = new Database(dbPath)
+    try {
+      live.exec('PRAGMA journal_mode=WAL; PRAGMA wal_autocheckpoint=0; CREATE TABLE entries (body TEXT);')
+      live.exec("INSERT INTO entries VALUES ('committed in WAL')")
+      expect(existsSync(`${dbPath}-wal`)).toBe(true)
+      expect((await h.store.backupNow(PROJECT_ID)).ok).toBe(true)
+      const gitDir = `--git-dir=${join(h.projectRoot, '.project-backup')}`
+      const tree = await git(h.projectRoot, [gitDir, 'ls-tree', '-r', '--name-only', 'HEAD'])
+      expect(tree).toContain('state.db')
+      expect(tree).not.toContain('state.db-wal')
+      expect(tree).not.toContain('state.db-shm')
+      const { stdout } = await execFileAsync('git', [gitDir, 'show', 'HEAD:state.db'], { encoding: 'buffer' })
+      const restoredPath = join(h.tmp, 'restored.db')
+      writeFileSync(restoredPath, stdout)
+      const restored = new Database(restoredPath, { readonly: true })
+      try {
+        expect(restored.query('SELECT body FROM entries').all()).toEqual([{ body: 'committed in WAL' }])
+        expect(restored.query('PRAGMA integrity_check').get()).toEqual({ integrity_check: 'ok' })
+      } finally { restored.close() }
+    } finally { live.close() }
   })
 })
 

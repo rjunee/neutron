@@ -1,97 +1,18 @@
 /**
- * @neutronai/gateway/git — per-project project-level backup store (P7.4 Phase 2).
- *
- * Per docs/plans/P7.4-phase2-project-backup-sprint-brief.md.
- * Phase 2 ships a SECOND, INDEPENDENT git repo per project at
- * `<project>/.project-backup/`, sibling-of-and-independent-of Phase 1's
- * `<project>/.docs-versions/`. Whereas Phase 1 commits per doc edit
- * scoped to `<project>/docs/`, Phase 2 snapshots the WHOLE project tree
- * every 6 hours (driven by `ProjectBackupScheduler`) and optionally
- * pushes to a remote.
- *
- * On-disk layout (per project):
- *
- *   <owner_home>/Projects/<project_id>/
- *   ├── docs/                            ← Phase 1 working tree
- *   ├── .docs-versions/                  ← Phase 1 git dir (excluded)
- *   ├── .project-backup/                 ← THIS module owns the git dir
- *   │   ├── HEAD
- *   │   ├── objects/
- *   │   ├── refs/heads/main
- *   │   ├── index
- *   │   └── .last-attempted.json         ← scheduler sidecar (NOT in working tree)
- *   ├── .gitignore                       ← seeded on init (filters .docs-versions/, node_modules/, etc.)
- *   ├── .project-backup-remote.json      ← OPTIONAL — written by the configure-remote endpoint
- *   ├── .secrets/                        ← (when present) project secrets, encrypted on disk
- *   ├── Cores/                           ← (when present) per-Core SQLite sidecar
- *   ├── README.md / STATUS.md / src/     ← (when present) arbitrary user content
- *   └── ...
- *
- * The working tree IS `<project>/`. Every git invocation passes
- * `--git-dir=<...>/.project-backup` and `--work-tree=<...>/<project>`
- * explicitly so the on-disk git config stays at the defaults.
- *
- * What's INCLUDED (excerpted from brief § 2.5):
- *   - Every user-edited file under `<project>/` not gitignored
- *   - Per-Core SQLite namespaces (`.db` + `.db-wal` + `.db-shm`)
- *   - Encrypted per-project secrets at `<project>/.secrets/`
- *   - Arbitrary user content (markdown, src/, binaries — for v1 no LFS)
- *
- * What's EXCLUDED (per the brief-pinned `.gitignore` block):
- *   - `.docs-versions/` (Phase 1's repo — backing it up would double doc storage)
- *   - `.project-backup/` (this repo's own metadata)
- *   - `node_modules/`, build outputs, IDE config, logs
- *   - The `.project-backup-remote.json` (per-project remote config — local-only)
- *
- * NOT backed up:
- *   - `<owner_home>/.neutron-aes-key` (lives outside the project tree; key-loss-on-restore is the user's problem).
- *
- * Snapshot pipeline (per brief § 2.6):
- *   1. ensureInit — idempotent (create dir, set config, write .gitignore, take baseline commit).
- *   2. `git add -A` — stage everything that's changed under the working tree.
- *   3. `git diff --cached --quiet` — exits 1 iff staged changes exist.
- *   4. When changed: `git commit -m "backup: <iso>"`; record SHA.
- *   5. When a `ProjectBackupRemoteConfig` exists: `git push origin main` over the per-project SSH key.
- *   6. Persist status to a sidecar JSON used by the admin /status route.
- *
- * Failure semantics (per brief § 2.8):
- *   - No transient retry inside `backupNow`. The 6-hour scheduler IS the retry.
- *   - Push failure is classified `auth | branch_protection | remote_not_empty | transient | unknown`.
- *   - Auth + branch_protection + remote_not_empty are surfaced as "user action needed".
- *
- * Concurrency (per brief § 2.9):
- *   - Per-project mutex serializes `backupNow(project_id)` across the
- *     scheduler tick AND the `/run-now` HTTP endpoint. Two callers in
- *     the same wall-clock second share one result; no double commit.
- *
- * Forbidden patterns (do NOT implement here):
- *   - Per-keystroke commit cadence (that's Phase 1's `DocVersionStore`).
- *   - Backing up the per-instance AES key.
- *   - Backing up `.docs-versions/` content.
- *   - Force-push or history rewrite (`+main`, `--force`).
- *   - Fetch / pull from the remote (push-only).
- *   - Branch / merge / multi-remote.
- *
- * Module layout (refactor plan 2026-07-02 § D4 — THIS file is the
- * stable facade; the public export surface is unchanged):
- *   - `git-exec.ts`        — shared `git` process wrapper + child-error
- *                            introspection helpers (leaf; the same code
- *                            `doc-version-store.ts` still duplicates
- *                            privately — keep in sync).
- *   - `snapshot-reader.ts` — read-only snapshot surface (list / preview /
- *                            file body / file diff) + typed errors +
- *                            sha/path validators, re-exported below.
- *   - `restore.ts`         — the destructive restore op + preflight,
- *                            re-exported below.
- *   The facade keeps: ensureInit, backupNow (+ push pipeline + status
- *   sidecars) and ALL FIVE concurrency maps — the backup/restore mutex
- *   interlock stays HERE and must not distribute.
+ * Canonical project-vault history at <project>/.project-backup/.
+ * The scheduler, document editor and backup HTTP surface share this store and
+ * its index mutex. Declared and discovered code repositories are excluded;
+ * SQLite databases enter commits as standalone consistent snapshots.
+ * Local history remains recoverable without any remote. Owner backup config
+ * selects an encrypted transport; code repository remotes are never inferred.
+ * Snapshot reads and restore remain delegated to the existing leaf modules.
  */
 
 import { execFile } from 'node:child_process'
 import { existsSync } from 'node:fs'
 import {
   mkdir,
+  lstat,
   readFile,
   rename,
   unlink,
@@ -102,7 +23,6 @@ import { promisify } from 'node:util'
 
 import type {
   PlatformAdapter,
-  ProjectBackupRemoteConfig,
 } from '@neutronai/runtime/platform-adapter.ts'
 
 import {
@@ -129,6 +49,10 @@ import type {
 } from './snapshot-reader.ts'
 import { performRestore, preflightRestore } from './restore.ts'
 import type { RestoreDeps, RestoreResult } from './restore.ts'
+import { ignoreVaultRepo, stageVaultSnapshot, vaultExcludedRepos } from './vault-snapshot.ts'
+import { pushEncryptedProjectBackup, readOwnerBackupConfig } from './project-backup-remote.ts'
+import type { BackupCommand } from './project-backup-remote.ts'
+import { importLegacyVaultHistories } from './vault-history-migration.ts'
 
 // Re-export the split-out public surface so every importer keeps using
 // `gateway/git/project-backup-store.ts` (D4 facade contract: the export
@@ -182,7 +106,6 @@ const execFileAsync = promisify(execFile)
  * commits (binaries, Cores SQLite). Brief § 2.7 pins 5 minutes.
  * (The 30s non-push ceiling lives in `git-exec.ts`.)
  */
-const PUSH_TIMEOUT_MS = 300_000
 
 /** Sigil dir inside the project that owns the backup git repo. */
 const BACKUP_GIT_DIR = '.project-backup'
@@ -198,19 +121,22 @@ const LAST_ATTEMPTED_FILENAME = '.last-attempted.json'
 const STATUS_FILENAME = '.last-status.json'
 
 /**
- * Brief-pinned `.gitignore` body (committed at `<project>/.gitignore`
- * on first init). Forge: do not editorialize — the brief § 2.4 fixes
- * this verbatim.
+ * Required vault exclusions, reapplied inside a managed block on every snapshot.
+ * User-authored ignore rules outside that block remain intact.
  */
-export const PROJECT_BACKUP_GITIGNORE = `# P7.4 Phase 2 project-backup. Snapshot is taken every 6 hours and pushed
-# to an optional remote. The two git dirs (.docs-versions for the doc
-# editor's per-edit history; .project-backup for THIS repo) are excluded
-# so neither repo ever sees the other's metadata.
+export const PROJECT_BACKUP_GITIGNORE = `# Vault snapshots exclude repository metadata and live database journals.
+# Preserved legacy history directories never enter the current vault tree.
 
 # Other git repos under this tree
 .docs-versions/
 .project-backup/
+.project-backup.broken-*/
 .git/
+
+# Live SQLite journals are replaced by consistent standalone database images.
+*-wal
+*-shm
+*-journal
 
 # Per-project remote config (local-only — has SSH key path inside)
 .project-backup-remote.json
@@ -279,6 +205,8 @@ export interface ProjectBackupStoreOptions {
   now?: () => number
   /** Override the `git` binary. */
   gitBinary?: string
+  /** Command seam for consuming encrypted-transport tests. */
+  encryptedBackupCommand?: BackupCommand
 }
 
 /** Failure taxonomy for a push attempt (brief § 2.8). */
@@ -296,6 +224,8 @@ export interface PushError {
 
 export interface BackupResult {
   ok: boolean
+  /** Local pre-restore safety is independent of remote availability. */
+  local_snapshot_complete: boolean
   /** sha of the snapshot commit, or null if nothing changed since the last commit. */
   commit_sha: string | null
   /** True iff a remote was configured AND the push succeeded. */
@@ -359,6 +289,7 @@ export class ProjectBackupStore {
   private readonly logger: ProjectBackupLogger
   private readonly nowFn: () => number
   private readonly gitBinary: string
+  private readonly encryptedBackupCommand: BackupCommand | undefined
 
   /** Bound `git` runner (see `git-exec.ts`). */
   private readonly execGit: GitExecFn
@@ -374,7 +305,8 @@ export class ProjectBackupStore {
   private gitAvailableProbe: Promise<boolean> | null = null
 
   /** Per-project init guard so concurrent first-backups share one init. */
-  private readonly initLocks = new Map<string, Promise<void>>()
+  private readonly initLocks = new Map<string, Promise<boolean>>()
+  private readonly importedLegacy = new Set<string>()
 
   /** Per-project in-flight `backupNow` mutex — shares result across
    *  concurrent callers (scheduler tick + run-now HTTP). */
@@ -404,6 +336,7 @@ export class ProjectBackupStore {
     this.logger = opts.logger ?? DEFAULT_LOGGER
     this.nowFn = opts.now ?? ((): number => Date.now())
     this.gitBinary = opts.gitBinary ?? 'git'
+    this.encryptedBackupCommand = opts.encryptedBackupCommand
     this.execGit = createGitExec(this.gitBinary)
     this.repo = {
       gitExec: (args, execOpts) => this.gitExec(args, execOpts),
@@ -446,22 +379,20 @@ export class ProjectBackupStore {
 
   /**
    * Idempotent first-init for a project. Safe to call concurrently.
-   * Creates `.project-backup/`, writes the brief-pinned `.gitignore`
-   * at `<project>/.gitignore` (only if absent — Phase 1's gitignore
-   * lives at `<project>/docs/.gitignore` so the two don't collide),
-   * and takes a baseline commit.
+   * Creates `.project-backup/`, imports retained histories, applies vault
+   * exclusions and takes a baseline commit. A failed import is not readiness.
    */
-  async ensureInit(project_id: string): Promise<boolean> {
+  async ensureInit(project_id: string, initialMessage?: string): Promise<boolean> {
     if (!(await this.isGitAvailable())) return false
     if (!existsSync(this.resolveProjectRoot(project_id))) return false
     const existing = this.initLocks.get(project_id)
     if (existing !== undefined) {
-      await existing
-      return existsSync(join(this.gitDir(project_id), 'HEAD'))
+      return await existing
     }
-    const run = (async (): Promise<void> => {
+    const run = (async (): Promise<boolean> => {
       try {
-        await this.doEnsureInit(project_id)
+        await this.doEnsureInit(project_id, initialMessage)
+        return true
       } catch (err) {
         this.logger('init_failed', {
           project_id,
@@ -469,7 +400,8 @@ export class ProjectBackupStore {
         })
         if (await this.tryRecoverCorruption(project_id, err)) {
           try {
-            await this.doEnsureInit(project_id)
+            await this.doEnsureInit(project_id, initialMessage)
+            return true
           } catch (err2) {
             this.logger('init_failed_after_recovery', {
               project_id,
@@ -477,21 +409,24 @@ export class ProjectBackupStore {
             })
           }
         }
+        return false
       }
     })()
     this.initLocks.set(project_id, run)
     try {
-      await run
+      return await run
     } finally {
       this.initLocks.delete(project_id)
     }
-    return existsSync(join(this.gitDir(project_id), 'HEAD'))
   }
 
-  private async doEnsureInit(project_id: string): Promise<void> {
+  private async doEnsureInit(project_id: string, initialMessage?: string): Promise<void> {
     const gitDir = this.gitDir(project_id)
     const workTree = this.workTree(project_id)
-    if (existsSync(join(gitDir, 'HEAD'))) return
+    if (existsSync(join(gitDir, 'HEAD'))) {
+      await this.importLegacy(project_id)
+      return
+    }
     await mkdir(gitDir, { recursive: true })
     // Same bare-init-then-flip dance Phase 1 uses; see
     // `doc-version-store.ts:doEnsureInit` for the rationale.
@@ -523,13 +458,8 @@ export class ProjectBackupStore {
     await this.gitExec(
       this.gitDirArgs(project_id).concat(['config', 'gc.auto', '0']),
     )
-    // Seed the brief-pinned `.gitignore` at the project root. Per
-    // brief § 2.4 the body is verbatim — re-writing it is idempotent
-    // (same bytes) AND self-healing: if a user (or rogue tooling)
-    // edits it, the next backup tick rewrites it to spec. See
-    // `seedGitignore` for the rewrite contract; `backupNow` also
-    // calls it on every snapshot so already-initialized projects
-    // converge to the canonical body.
+    await this.importLegacy(project_id)
+    // Apply required exclusions before the first snapshot too.
     await this.seedGitignore(project_id)
     // Baseline commit captures whatever's already in the tree (docs/
     // content, README.md, etc.) so the first scheduled backup of an
@@ -537,31 +467,47 @@ export class ProjectBackupStore {
     // commit. Without this, a project that's been on disk for a year
     // would, at hour-0, produce a single huge "import" commit; we
     // want that import to be tagged "init" rather than "backup".
-    await this.gitExec(this.workArgs(project_id).concat(['add', '-A']), {
-      cwd: workTree,
-    })
+    await stageVaultSnapshot(workTree, this.workArgs(project_id), this.execGit)
     await this.gitExec(
       this.workArgs(project_id).concat([
         'commit',
         '--allow-empty',
         '-m',
-        `init: project-backup ${new Date(this.nowFn()).toISOString()}`,
+        initialMessage ?? `init: project-backup ${new Date(this.nowFn()).toISOString()}`,
       ]),
       { cwd: workTree },
     )
   }
 
+  private async importLegacy(project_id: string): Promise<void> {
+    if (this.importedLegacy.has(project_id)) return
+    await importLegacyVaultHistories(this.workTree(project_id), this.gitDir(project_id), this.execGit)
+    this.importedLegacy.add(project_id)
+  }
+
   /**
-   * Write the brief-pinned `.gitignore` body to `<project>/.gitignore`,
-   * unconditionally overwriting whatever is there. Same bytes every
-   * call so concurrent invocations cannot race in any meaningful way,
-   * and an unchanged file produces no working-tree dirt for the next
-   * `git add -A`. Argus r1 MINOR #6: the previous "if missing, write"
-   * gate let user edits drift from spec forever.
+   * Reconcile required exclusions without replacing the owner's ignore rules.
    */
   private async seedGitignore(project_id: string): Promise<void> {
     const gitignorePath = join(this.workTree(project_id), '.gitignore')
-    await writeFile(gitignorePath, PROJECT_BACKUP_GITIGNORE, 'utf8')
+    const repositories = await vaultExcludedRepos(this.workTree(project_id), project_id)
+    const begin = '# BEGIN NEUTRON VAULT EXCLUSIONS'
+    const end = '# END NEUTRON VAULT EXCLUSIONS'
+    let existing = ''
+    try {
+      if (!(await lstat(gitignorePath)).isFile()) throw new Error('Vault .gitignore must be a regular file')
+      existing = await readFile(gitignorePath, 'utf8')
+    } catch (error) {
+      if ((error as NodeJS.ErrnoException).code !== 'ENOENT') throw error
+    }
+    const start = existing.indexOf(begin)
+    if (start !== -1) {
+      const finish = existing.indexOf(end, start)
+      if (finish === -1) throw new Error('Incomplete managed vault exclusion block')
+      existing = existing.slice(0, start) + existing.slice(finish + end.length).replace(/^\n/, '')
+    }
+    const prefix = existing.length === 0 || existing.endsWith('\n') ? existing : existing + '\n'
+    await writeFile(gitignorePath, prefix + begin + '\n' + PROJECT_BACKUP_GITIGNORE + repositories.map(ignoreVaultRepo).join('\n') + '\n' + end + '\n', 'utf8')
   }
 
   /**
@@ -632,7 +578,22 @@ export class ProjectBackupStore {
     }
   }
 
-  private async doBackupNow(project_id: string): Promise<BackupResult> {
+  /** Per-edit history shares the vault index and waits instead of coalescing edits. */
+  async commitDocument(project_id: string, message: string): Promise<void> {
+    while (true) {
+      const active = this.inFlight.get(project_id) ?? this.inFlightRestore.get(project_id)
+      if (active === undefined) break
+      try { await active } catch { /* each operation reports its own failure */ }
+    }
+    const run = this.doBackupNow(project_id, { message, localOnly: true })
+    this.inFlight.set(project_id, run)
+    try {
+      const result = await run
+      if (!result.ok) throw new Error(result.push_error?.message ?? 'Document vault snapshot failed')
+    } finally { this.inFlight.delete(project_id) }
+  }
+
+  private async doBackupNow(project_id: string, options: { message?: string; localOnly?: boolean } = {}): Promise<BackupResult> {
     const completed_at_ms = (): number => this.nowFn()
     if (!(await this.isGitAvailable())) {
       const err: PushError = {
@@ -641,36 +602,26 @@ export class ProjectBackupStore {
       }
       const result: BackupResult = {
         ok: false,
+        local_snapshot_complete: false,
         commit_sha: null,
         pushed: false,
         push_error: err,
         completed_at_ms: completed_at_ms(),
       }
+      if (existsSync(this.workTree(project_id))) await this.recordBackupResult(project_id, result)
       return result
     }
     this.backingUp.add(project_id)
     try {
-      await this.ensureInit(project_id)
-      if (!existsSync(join(this.gitDir(project_id), 'HEAD'))) {
+      const initialized = await this.ensureInit(project_id, options.message)
+      if (!initialized) {
         // Init never completed (deferred because project dir didn't
         // exist OR a corruption-recovery loop bailed). Surface as
         // not-ok with a clear error code.
-        return {
-          ok: false,
-          commit_sha: null,
-          pushed: false,
-          push_error: { code: 'unknown', message: 'backup repo init failed' },
-          completed_at_ms: completed_at_ms(),
-        }
+        throw new Error('backup repo init failed')
       }
       const workTree = this.workTree(project_id)
-      // Re-seed the brief-pinned `.gitignore` BEFORE staging so a
-      // user-edited file is reset to spec on every snapshot. The
-      // write is idempotent (canonical bytes) so when the file is
-      // already correct the working tree stays clean — `git add -A`
-      // below sees nothing-to-stage. Argus r1 MINOR #6: previous
-      // wiring only seeded on first init, which let user edits
-      // diverge from the brief forever.
+      // Reapply exclusions before staging, including newly declared code repos.
       try {
         await this.seedGitignore(project_id)
       } catch (err) {
@@ -678,13 +629,12 @@ export class ProjectBackupStore {
           project_id,
           error_message: errMessage(err),
         })
-        // Non-fatal — fall through and let the snapshot run anyway.
+        // Exclusion failure must never become a seemingly complete snapshot.
+        throw err
       }
       // 1. Stage everything.
       try {
-        await this.gitExec(this.workArgs(project_id).concat(['add', '-A']), {
-          cwd: workTree,
-        })
+        await stageVaultSnapshot(workTree, this.workArgs(project_id), this.execGit)
       } catch (err) {
         this.logger('stage_failed', {
           project_id,
@@ -692,19 +642,13 @@ export class ProjectBackupStore {
         })
         // Recover from corruption mid-stage if possible.
         await this.tryRecoverCorruption(project_id, err)
-        return {
-          ok: false,
-          commit_sha: null,
-          pushed: false,
-          push_error: { code: 'unknown', message: errMessage(err) },
-          completed_at_ms: completed_at_ms(),
-        }
+        throw err
       }
       // 2. Detect staged changes via `diff --cached --quiet`.
       let commit_sha: string | null = null
       const hasChanges = await this.hasStagedChanges(project_id)
       if (hasChanges) {
-        const msg = `backup: ${new Date(this.nowFn()).toISOString()}`
+        const msg = options.message ?? `backup: ${new Date(this.nowFn()).toISOString()}`
         try {
           await this.gitExec(
             this.workArgs(project_id).concat(['commit', '-m', msg]),
@@ -731,6 +675,7 @@ export class ProjectBackupStore {
           }
           await this.recordBackupResult(project_id, {
             ok: false,
+            local_snapshot_complete: false,
             commit_sha: null,
             pushed: false,
             push_error: { code: 'unknown', message: errMessage(err) },
@@ -738,6 +683,7 @@ export class ProjectBackupStore {
           })
           return {
             ok: false,
+            local_snapshot_complete: false,
             commit_sha: null,
             pushed: false,
             push_error: { code: 'unknown', message: errMessage(err) },
@@ -749,40 +695,28 @@ export class ProjectBackupStore {
       let pushed = false
       let push_error: PushError | null = null
       let last_push_at_ms: number | null = null
-      let remote = await this.platform.getProjectBackupRemoteConfig(project_id)
-      // 3.a. Managed: lazy-provision a remote at first backup if the
-      // adapter advertises `project_backup` and no remote exists yet.
-      const tryAutoProvision =
-        remote === null &&
-        this.platform.capabilities.project_backup === true &&
-        this.platform.autoProvisionProjectBackupRemote !== undefined
-      if (tryAutoProvision) {
+      let encryptedConfigured = false
+      if (!options.localOnly) {
         try {
-          remote = await this.platform.autoProvisionProjectBackupRemote!(
-            project_id,
-          )
-        } catch (err) {
-          this.logger('auto_provision_failed', {
-            project_id,
-            error_message: errMessage(err),
-          })
-          // Treat provisioning failure as a push failure so the
-          // status surface can show "remote not yet available".
-          push_error = { code: 'transient', message: errMessage(err) }
+          const ownerRemote = await readOwnerBackupConfig(this.owner_home)
+          if (ownerRemote !== null) {
+            encryptedConfigured = true
+            await pushEncryptedProjectBackup({
+              projectDir: workTree, projectId: project_id, config: ownerRemote,
+              ...(this.encryptedBackupCommand ? { command: this.encryptedBackupCommand } : {}),
+            })
+            pushed = true
+            last_push_at_ms = this.nowFn()
+          }
+        } catch (error) {
+          // A failed encrypted destination never falls through to a plaintext push.
+          encryptedConfigured = true
+          push_error = { code: 'unknown', message: errMessage(error) }
         }
       }
-      if (remote !== null) {
-        const pushResult = await this.doPush(project_id, remote)
-        pushed = pushResult.ok
-        if (!pushResult.ok) {
-          push_error = pushResult.error
-        } else {
-          last_push_at_ms = this.nowFn()
-        }
+      if (!options.localOnly && !encryptedConfigured && await this.platform.getProjectBackupRemoteConfig(project_id) !== null) {
+        push_error = { code: 'unknown', message: 'Legacy plaintext backup remote is disabled; configure the encrypted owner backup destination' }
       }
-      const ok = push_error === null || push_error.code === 'transient'
-        ? commit_sha !== null || !hasChanges
-        : false
       // Even when push failed, the commit lives in the local repo
       // (per brief § 8.1 "Push failure does not lose the local commit").
       // `ok` for the BackupResult reflects "did SOMETHING useful land":
@@ -791,7 +725,8 @@ export class ProjectBackupStore {
       // (the admin UI is told to surface the error so the user can
       // act). The completed_at_ms IS populated in both cases.
       const result: BackupResult = {
-        ok: ok && push_error === null,
+        ok: push_error === null,
+        local_snapshot_complete: true,
         commit_sha,
         pushed,
         push_error,
@@ -799,96 +734,40 @@ export class ProjectBackupStore {
       }
       await this.recordBackupResult(project_id, result, {
         last_push_at_ms,
+        preserve_remote: options.localOnly === true,
       })
+      return result
+    } catch (error) {
+      const result: BackupResult = {
+        ok: false, local_snapshot_complete: false, commit_sha: null, pushed: false,
+        push_error: { code: 'unknown', message: errMessage(error) },
+        completed_at_ms: completed_at_ms(),
+      }
+      await this.recordBackupResult(project_id, result)
       return result
     } finally {
       this.backingUp.delete(project_id)
     }
   }
 
-  /**
-   * Push pipeline (brief § 2.7) — sets `origin` idempotently, builds
-   * the `GIT_SSH_COMMAND` from the per-project key, runs
-   * `git push origin main` with a 5 min cap. Auth / branch-protection /
-   * remote-not-empty / transient classification per brief § 2.8.
-   */
-  private async doPush(
-    project_id: string,
-    remote: ProjectBackupRemoteConfig,
-  ): Promise<{ ok: true } | { ok: false; error: PushError }> {
-    try {
-      await this.ensureRemote(project_id, remote.remote_url)
-    } catch (err) {
-      return {
-        ok: false,
-        error: { code: 'unknown', message: errMessage(err) },
-      }
-    }
-    const env = {
-      ...process.env,
-      // Quoting the path: SSH does NOT shell-eval the value the way
-      // a CLI invocation would, but a path with spaces would break
-      // an unquoted IdentityFile line. `ssh -i` accepts a single
-      // argv element so we don't need quoting if we hand argv to ssh
-      // via OpenSSH's own parser — but here we're handing `ssh ...`
-      // to git as a string that git re-parses (via /bin/sh -c style),
-      // so quoting protects against spaces in the key path.
-      GIT_SSH_COMMAND: `ssh -i ${shellQuote(remote.ssh_key_path)} -o IdentitiesOnly=yes -o StrictHostKeyChecking=accept-new -o UserKnownHostsFile=/dev/null -o BatchMode=yes`,
-      GIT_TERMINAL_PROMPT: '0',
-    }
-    try {
-      await execFileAsync(
-        this.gitBinary,
-        this.gitDirArgs(project_id).concat(['push', 'origin', 'main']),
-        {
-          timeout: PUSH_TIMEOUT_MS,
-          maxBuffer: 16 * 1024 * 1024,
-          env,
-        },
-      )
-      return { ok: true }
-    } catch (err) {
-      return { ok: false, error: classifyPushFailure(err) }
-    }
-  }
-
-  /** Idempotent `git remote set-url`/`git remote add origin`. */
-  private async ensureRemote(
-    project_id: string,
-    remote_url: string,
-  ): Promise<void> {
-    try {
-      await this.gitExec(
-        this.gitDirArgs(project_id).concat([
-          'remote',
-          'set-url',
-          'origin',
-          remote_url,
-        ]),
-      )
-    } catch {
-      // `set-url` fails when no remote exists yet; `add` is the
-      // create-or-fail path. Either way, the loop converges.
-      await this.gitExec(
-        this.gitDirArgs(project_id).concat([
-          'remote',
-          'add',
-          'origin',
-          remote_url,
-        ]),
-      )
-    }
-  }
 
   /** Read the persisted backup status for the admin /status route. */
   async getStatus(project_id: string): Promise<ProjectBackupStatus> {
     const remote = await this.platform.getProjectBackupRemoteConfig(project_id)
+    let ownerRemote: Awaited<ReturnType<typeof readOwnerBackupConfig>> = null
+    let configError: PushError | null = null
+    try { ownerRemote = await readOwnerBackupConfig(this.owner_home) } catch (error) {
+      configError = { code: 'unknown', message: errMessage(error) }
+    }
+    if (ownerRemote === null && remote !== null && configError === null) {
+      configError = { code: 'unknown', message: 'Legacy plaintext backup remote is disabled; configure the encrypted owner backup destination' }
+    }
     const persisted = await this.readPersistedStatus(project_id)
     const ready =
       (await this.isGitAvailable()) &&
       existsSync(join(this.gitDir(project_id), 'HEAD'))
     const state: ProjectBackupStatus['state'] = !ready
-      ? 'not_configured'
+      ? persisted.last_push_error !== null ? 'error' : 'not_configured'
       : this.backingUp.has(project_id)
         ? 'backing_up'
         : persisted.last_push_error !== null && !isUserResolvableTransient(persisted.last_push_error.code)
@@ -902,14 +781,14 @@ export class ProjectBackupStore {
                 : 'configured'
     const next = this.nextScheduled.get(project_id) ?? null
     return {
-      state,
+      state: configError ? 'error' : state,
       last_backup_at: tsToIso(persisted.last_backup_at_ms),
       last_check_at: tsToIso(persisted.last_check_at_ms),
       last_commit_sha: persisted.last_commit_sha,
       last_push_at: tsToIso(persisted.last_push_at_ms),
-      last_push_error: persisted.last_push_error,
-      remote_url: remote === null ? null : remote.remote_url,
-      is_managed_remote: remote !== null && remote.source === 'managed_provisioned',
+      last_push_error: configError ?? persisted.last_push_error,
+      remote_url: ownerRemote ? `https://github.com/${ownerRemote.repository}` : configError ? null : remote === null ? null : remote.remote_url,
+      is_managed_remote: ownerRemote === null && !configError && remote !== null && remote.source === 'managed_provisioned',
       next_scheduled_at: tsToIso(next),
     }
   }
@@ -1145,7 +1024,7 @@ export class ProjectBackupStore {
   private async recordBackupResult(
     project_id: string,
     result: BackupResult,
-    extra: { last_push_at_ms?: number | null } = {},
+    extra: { last_push_at_ms?: number | null; preserve_remote?: boolean } = {},
   ): Promise<void> {
     const dir = this.gitDir(project_id)
     if (!existsSync(dir)) await mkdir(dir, { recursive: true })
@@ -1157,12 +1036,12 @@ export class ProjectBackupStore {
       last_check_at_ms: now,
       last_commit_sha: result.commit_sha ?? prior.last_commit_sha,
       last_push_at_ms:
-        extra.last_push_at_ms !== undefined
+        extra.preserve_remote ? prior.last_push_at_ms : extra.last_push_at_ms !== undefined
           ? extra.last_push_at_ms
           : result.pushed
             ? now
             : prior.last_push_at_ms,
-      last_push_error: result.push_error,
+      last_push_error: extra.preserve_remote ? prior.last_push_error : result.push_error,
       last_op_ok: result.ok,
     }
     const path = join(dir, STATUS_FILENAME)
@@ -1244,6 +1123,7 @@ export class ProjectBackupStore {
     const broken = `${gitDir}.broken-${stamp}`
     try {
       await rename(gitDir, broken)
+      this.importedLegacy.delete(project_id)
       this.logger('recovered_from_corruption', {
         project_id,
         broken_dir: broken,
@@ -1339,11 +1219,6 @@ function isUserResolvableTransient(code: PushFailureKind): boolean {
 function tsToIso(ms: number | null): string | null {
   if (ms === null) return null
   return new Date(ms).toISOString()
-}
-
-/** Conservatively single-quote a value for the GIT_SSH_COMMAND shell. */
-function shellQuote(s: string): string {
-  return `'${s.replace(/'/g, "'\\''")}'`
 }
 
 /** Ensure the parent dir of `abs` exists. */

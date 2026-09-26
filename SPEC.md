@@ -97,6 +97,13 @@ Implementation truth — the current, verified "how it actually works" — lives
 
 ## Architecture
 
+Project working context lives in a private vault with zero or more declared code
+repositories. The canonical vault history is `.project-backup/`; document edits,
+materialization and scheduled backups share its writer. Optional owner-wide
+offsite backup exports encrypted history to an explicitly configured private
+GitHub repository (Decisions Log 2026-09-26). Acceptance and limits live in
+`docs/spec-items/project-code-repos-and-vault-split.md`.
+
 Summary + pointers only. Implementation truth lives in `docs/SYSTEM-OVERVIEW.md`
 and the `README.md` "Architecture at a glance" diagram; this section states the
 load-bearing shapes and the module boundaries, not the mechanics.
@@ -321,6 +328,26 @@ references decisions by date; none is a second home for a decision.
 | `docs/plans/*` | Per-sprint mechanics briefs (referenced from `docs/spec-items/`) |
 
 ## Decisions Log (immutable audit trail — NOT the build spec)
+
+### 2026-09-26 — One canonical vault history and one encrypted owner backup destination.
+
+Owner-approved: retain the existing `ProjectBackupStore` repository at
+`.project-backup/` as canonical; reconcile the materializer's `.git` and the
+document editor's `.docs-versions` into it. Preserve original histories and
+import their refs, including reflog-only tips, before relying on canonical
+recovery. Retire the duplicate writers; do not delete retained source history.
+The same store owns per-edit local commits, scheduled snapshots and the backup
+surface. Declared and discovered nested code repositories are excluded, and
+live SQLite enters history through consistent standalone images.
+
+The owner also selected a private encrypted GitHub backup destination shared by
+all vaults. Transport encrypts complete canonical history before remote staging,
+pins private repository identity and requires an off-host recovery-key attestation.
+It never borrows a declared code remote or falls back to plaintext after an
+encryption/configuration failure. A local snapshot is recoverable without a
+remote; offsite success requires push and fresh-clone recovery evidence.
+File-level publication classification independent of folder placement remains
+open in the vault spec item; encrypted backup does not settle that separate rule.
 
 ### 2026-09-24 — Latest available models within explicit Trident tiers.
 

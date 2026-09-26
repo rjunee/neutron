@@ -28,6 +28,7 @@ These are the items the harness-orchestrator cutover is gated on.
 - [`a-gateway-restart-keeps-the-project-repls`](a-gateway-restart-keeps-the-project-repls.md) — A gateway restart keeps the project REPLs, conversation and all
 - [`durable-reply-sink-coordinates`](durable-reply-sink-coordinates.md) — The sink's coordinates outlive the gateway, and an orphan must not
 - [`project-herdr-workspaces`](project-herdr-workspaces.md) — Project-owned Herdr workspaces and sleep lifecycle
+- [`project-code-repos-and-vault-split`](project-code-repos-and-vault-split.md) — Split a project into declared code repos and a versioned vault
 
 ## Not buildable yet
 
@@ -117,14 +118,14 @@ branch is cut (standard §3.1, §3.2).
 | [`instance-project-provider-resolution`](instance-project-provider-resolution.md) | Resolve the model provider per instance and project | P1 | — |
 | [`live-agent-turn-must-know-the-owner-timezone`](live-agent-turn-must-know-the-owner-timezone.md) | Give the live agent turn the owner's timezone and local time | P1 | — |
 | [`observable-pane-adoption`](observable-pane-adoption.md) | Require observable pane adoption and bounded pane-loss recovery | P1 | — |
-| [`project-code-repos-and-vault-split`](project-code-repos-and-vault-split.md) | Split a project into declared code repos and a versioned vault | P1 | — |
+| [`project-code-repos-and-vault-split`](project-code-repos-and-vault-split.md) | Split a project into declared code repos and a versioned vault | P1 | yes |
+| [`start-the-project-backup-scheduler-loop`](start-the-project-backup-scheduler-loop.md) | Start the dormant per-project backup scheduler loop | P1 | yes |
 | [`temporary-build-timeline-dashboard`](temporary-build-timeline-dashboard.md) | Observe PR wall-clock phases in a temporary authenticated dashboard | P1 | — |
 | [`build-timeline-core`](build-timeline-core.md) | Distribute portable PR build observability as a Core after cutover | P2 | — · needs-spec |
 | [`owner-installable-mcp-servers`](owner-installable-mcp-servers.md) | Owner-installable MCP servers | P2 | yes |
 | [`per-project-context-for-agent-tools`](per-project-context-for-agent-tools.md) | Scope agent tool state to the active project everywhere | P2 | — · needs-spec |
 | [`stale-approval-is-re-raised`](stale-approval-is-re-raised.md) | Re-raise forgotten ritual approvals at a bounded daily cadence | P2 | — |
 | [`start-the-comments-agent-watcher-loop`](start-the-comments-agent-watcher-loop.md) | Start the dormant comments AgentWatcher loop | P2 | — |
-| [`start-the-project-backup-scheduler-loop`](start-the-project-backup-scheduler-loop.md) | Start the dormant per-project backup scheduler loop | P2 | — |
 | [`hitl-prompt-user-enforcement-policy`](hitl-prompt-user-enforcement-policy.md) | Lock the HITL prompt-user enforcement policy | P3 | — |
 
 ### security

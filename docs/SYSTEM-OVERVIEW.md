@@ -124,6 +124,31 @@ can never shadow `completed`. Columns naming ANOTHER instance are explicitly
 excluded; `migrations/__tests__/scope-sweep-coverage.test.ts` forces every new
 slug-ish column to be classified as swept or excluded.
 
+## Project vault recovery
+
+Open constructs one `ProjectBackupStore` for document writes, materialization,
+the backup HTTP surface and the six-hour scheduler. The canonical Git directory
+is `<project>/.project-backup/`. Prior materializer and document histories remain
+on disk and are imported under immutable `refs/vault-history/` refs. New writes
+use only the canonical store (`gateway/git/project-backup-store.ts`,
+`gateway/git/vault-history-migration.ts`).
+
+Snapshot staging honors declared code repositories, discovers other nested
+checkouts and excludes both. It captures SQLite through `VACUUM INTO` images
+while omitting live journals; consistency is per database, not across all files.
+An owner-level private GitHub destination receives AES-GCM encrypted bundles of
+all canonical refs, with repository identity and privacy verified before push.
+No configuration means local history only; legacy plaintext destinations are
+refused, and failed encrypted configuration never falls back to a plaintext push (`gateway/git/vault-snapshot.ts`,
+`gateway/git/project-backup-remote.ts`).
+
+The key must be retained outside the host. Configuration records that custody as
+an operator attestation; it cannot measure it. Encrypted recovery targets a new
+directory. In-place history restore requires a successful local safety snapshot
+and refuses any SQLite-affecting restore; unrelated document restores remain
+available. See [the recovery procedure](vault-backup-recovery.md) for credentials,
+size limits, replay limitations and the fresh-clone drill.
+
 ## Cores
 
 Bundled Cores live under `cores/free/`. Each Core's production runtime is

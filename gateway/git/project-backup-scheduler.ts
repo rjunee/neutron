@@ -171,10 +171,8 @@ export class ProjectBackupScheduler {
   }
 
   /** §F2 — live LoopRegistry descriptor (name `project-backup-scheduler`,
-   *  cadence = inner poll interval). D-7: this scheduler is DORMANT (never
-   *  started in any composition today); the method exists so the loop registers
-   *  itself the moment its wiring lands in a post-window feature PR. Call after
-   *  `start()`. */
+   *  cadence = inner poll interval). Open constructs and starts this scheduler
+   *  with the same store used by its backup HTTP surface. */
   describe(): LoopDescriptor {
     return this.loop.describe()
   }

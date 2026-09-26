@@ -21,7 +21,8 @@
  */
 
 import { afterEach, beforeEach, expect, test } from 'bun:test'
-import { mkdtempSync, readFileSync, rmSync } from 'node:fs'
+import { mkdirSync, mkdtempSync, readFileSync, rmSync, writeFileSync } from 'node:fs'
+import { execFileSync } from 'node:child_process'
 import { dirname, join } from 'node:path'
 import { tmpdir } from 'node:os'
 import { fileURLToPath } from 'node:url'
@@ -61,6 +62,7 @@ const EXPECTED_RUNNING_LOOPS = [
   // probe: a tick with no key stored does one cheap store read and no network
   // call, so a key entered in Settings starts being metered without a restart.
   'kimi-usage',
+  'project-backup-scheduler',
   // #1060 — hourly age-based cleanup for retained per-run project-build state,
   // with an immediate boot sweep. Registered here so a built-but-unwired reaper
   // cannot pass on its direct unit tests alone.
@@ -94,7 +96,7 @@ const EXPECTED_RUNNING_LOOPS = [
   'work-wakeup',
 ] as const
 /** The D-7 dormant loops (built, never started). */
-const EXPECTED_DORMANT_LOOPS = ['project-backup-scheduler'] as const
+const EXPECTED_DORMANT_LOOPS: readonly string[] = []
 
 const SAVED_ENV_KEYS = [
   'NEUTRON_HOME',
@@ -167,7 +169,9 @@ async function bootRealOpen(): Promise<Harness> {
   const db = ProjectDb.open(process.env['NEUTRON_DB_PATH']!)
   // 1) REAL Open composer — starts the sweeper + (credentialed) lifecycle watchdog
   //    and registers them into `composition.loop_registry`.
-  const composer = buildOpenGraphComposer({ env: process.env, substrateFactory })
+  const composer = buildOpenGraphComposer({ env: process.env, substrateFactory,
+    projectBackupScheduler: { pollIntervalMs: 20, tickIntervalMs: 200, jitterMaxMs: 0 },
+  })
   const composition = await composer({ db, project_slug: 'owner' })
   // 2) The production graph — adds reminders / trident / cron / watchdog to the
   //    SAME registry threaded through `composition.loop_registry`.
@@ -200,6 +204,30 @@ afterEach(async () => {
 test('the real Open boundary starts EXACTLY the complete loop set', () => {
   expect(harness.graph.loopRegistry.names()).toEqual([...EXPECTED_RUNNING_LOOPS])
 })
+
+test('the composed scheduler repeatedly captures changed vault files without an HTTP backup request', async () => {
+  const root = join(tmpDir!, 'Projects', 'scheduled-vault')
+  mkdirSync(root, { recursive: true })
+  writeFileSync(join(root, 'project-repos.json'), JSON.stringify({ repos: [], default: null }))
+  writeFileSync(join(root, 'notes.md'), 'first automatic version')
+  const gitArgs = [`--git-dir=${join(root, '.project-backup')}`]
+  async function waitForBody(expected: string): Promise<string> {
+    const deadline = Date.now() + 5000
+    while (Date.now() < deadline) {
+      try {
+        const content = execFileSync('git', [...gitArgs, 'show', 'HEAD:notes.md'], { encoding: 'utf8', stdio: ['ignore', 'pipe', 'ignore'] })
+        if (content === expected) return execFileSync('git', [...gitArgs, 'rev-parse', 'HEAD'], { encoding: 'utf8' }).trim()
+      } catch { /* initial snapshot is still in progress */ }
+      await Bun.sleep(30)
+    }
+    throw new Error(`Composed scheduler did not capture ${expected}`)
+  }
+  const first = await waitForBody('first automatic version')
+  writeFileSync(join(root, 'notes.md'), 'second automatic version')
+  const second = await waitForBody('second automatic version')
+  expect(second).not.toBe(first)
+  expect(execFileSync('git', [...gitArgs, 'show', `${first}:notes.md`], { encoding: 'utf8' })).toBe('first automatic version')
+}, 15000)
 
 test('gateway + Open composer share ONE registry instance', () => {
   // The registry the composer threaded IS the one the graph inventories — so the
@@ -238,7 +266,7 @@ test('the ONE boot line names every running loop + the dormant set', () => {
   expect(line).toContain(`${EXPECTED_RUNNING_LOOPS.length} loop(s) running`)
   for (const name of EXPECTED_RUNNING_LOOPS) expect(line).toContain(name)
   expect(line).toMatch(/cron \(\d+ jobs/)
-  expect(line).toContain('1 dormant (deferred): [project-backup-scheduler]')
+  expect(line).not.toContain('dormant (deferred)')
 })
 
 /**
