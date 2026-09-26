@@ -119,3 +119,16 @@ receipt above predates that observer change and is not claimed for it.
 After the correction, the transport and retirement files passed ten tests with
 60 assertions, the disposable native retirement/resume smoke passed again,
 the runtime TypeScript project passed, and the complete lint script exited zero.
+
+The refreshed admitted `bash scripts/check-shared-host.sh` run then tested clean
+revision `7af3c061f3feb123100b2d5dcc9ce042922c504d`, tree
+`78956e0e35041ca0a539afa61a4805f194038508`, after explicit release of the prior
+shared-host slot. Start and terminal observations confirmed that exact clean
+identity. The original wrapper exited zero: all 51 TypeScript projects passed,
+and the final coverage audit matched all 1,695 declared, discovered, assigned
+and executed files across 18 lanes with zero failed lanes. Commands and tuning
+were the same admitted wrapper profile recorded above. This receipt includes
+the corrected exit observer; the subsequent publication change adds only this
+documentation. Independent bounded review of the observer delta returned GO,
+and all required remote checks passed on `7af3c061f`; publication-head checks
+must still finish on the final receipt commit before merge.
