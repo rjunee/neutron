@@ -75,6 +75,20 @@ function item(over: Partial<WorkBoardItem> = {}): WorkBoardItem {
 }
 
 describe('WorkBoardRow brief alerts (mobile)', () => {
+  it('renders shelved terminal attempts without claiming shipment or inventing PR links', async () => {
+    const screen = await mountScreen(createElement(WorkBoardCompletedRow, {
+      item: item({ status: 'archived', attempts: [
+        { run_id: 'failed-run', outcome: 'failed', pr: 12, pr_url: 'https://example.test/pull/12', recorded_at: '2026-09-20' },
+        { run_id: 'blocked-run', outcome: 'blocked', pr: 13, pr_url: null, recorded_at: '2026-09-21' },
+      ] }), busy: false, variant: 'archived', onDelete: () => {},
+    }));
+    expect(screen.text()).toContain('Past attempt · failed · failed-run');
+    expect(screen.text()).toContain('Past attempt · blocked · blocked-run');
+    expect(screen.text()).toContain('PR #13');
+    expect(screen.text()).not.toContain('Merged');
+    screen.unmount();
+  });
+
   it('renders pending, single, task-sequence and terminal progress distinctly', async () => {
     for (const [strategy, task, total, step, label] of [
       [null, null, null, 'building', 'Planning pending'],

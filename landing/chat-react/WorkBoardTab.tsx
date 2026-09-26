@@ -1004,6 +1004,18 @@ export function WorkBoardTab({
                             </button>
                           )}
                         </div>
+                        {(it.attempts ?? []).map((attempt) => (
+                          <div className="cwb-row-meta" key={attempt.run_id}>
+                            Past attempt · {attempt.outcome} · <code>{attempt.run_id}</code>
+                            {attempt.pr !== null ? (
+                              attempt.pr_url ? (
+                                <a href={attempt.pr_url} target="_blank" rel="noopener noreferrer">
+                                  {' '}PR #{attempt.pr}
+                                </a>
+                              ) : <span> PR #{attempt.pr}</span>
+                            ) : null}
+                          </div>
+                        ))}
                       </li>
                     ))}
                   </ul>

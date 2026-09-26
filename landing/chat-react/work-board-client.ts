@@ -90,6 +90,7 @@ export type WorkBoardTaskType = 'build' | 'research'
  * satisfy the SAME type without the tab caring which path produced it.
  */
 export interface WorkBoardItem {
+  attempts?: WorkBoardTerminalAttempt[]
   id: string
   project_slug?: string
   title: string
@@ -369,6 +370,38 @@ export function docLinkLabel(ref: string | null | undefined): string | null {
  * server-only `project_slug`), so a live apply is interchangeable with a
  * re-fetch.
  */
+export interface WorkBoardTerminalAttempt {
+  run_id: string
+  outcome: 'done' | 'failed' | 'blocked'
+  pr: number | null
+  pr_url: string | null
+  recorded_at: string
+}
+
+export function parseWorkBoardAttempts(raw: unknown): WorkBoardTerminalAttempt[] {
+  if (!Array.isArray(raw)) return []
+  return raw.flatMap((value): WorkBoardTerminalAttempt[] => {
+    if (typeof value !== 'object' || value === null) return []
+    const r = value as Record<string, unknown>
+    if (typeof r.run_id !== 'string' || !r.run_id ||
+        !['done', 'failed', 'blocked'].includes(String(r.outcome)) ||
+        typeof r.recorded_at !== 'string') return []
+    const pr = typeof r.pr === 'number' && Number.isSafeInteger(r.pr) && r.pr > 0 ? r.pr : null
+    let pr_url: string | null = null
+    if (pr !== null && typeof r.pr_url === 'string') {
+      try {
+        const url = new URL(r.pr_url)
+        if (url.protocol === 'https:' && !url.username && !url.password) pr_url = url.href
+      } catch { /* An unresolved PR remains plain text. */ }
+    }
+    return [{
+      run_id: r.run_id,
+      outcome: r.outcome as WorkBoardTerminalAttempt['outcome'],
+      pr, pr_url, recorded_at: r.recorded_at,
+    }]
+  })
+}
+
 export function parseWorkBoardItems(raw: unknown): WorkBoardItem[] {
   if (!Array.isArray(raw)) return []
   const out: WorkBoardItem[] = []
@@ -387,6 +420,7 @@ export function parseWorkBoardItems(raw: unknown): WorkBoardItem[] {
     const run_progress = parseRunProgress(r['run_progress'])
     const task_type = r['task_type'] === 'research' ? 'research' : 'build'
     out.push({
+      attempts: parseWorkBoardAttempts(r['attempts']),
       id,
       title,
       status,

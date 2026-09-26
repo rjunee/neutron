@@ -4472,14 +4472,26 @@ test(`a ${mergeMode} retry of a run that died after a task-sequence handoff resu
   // merge at all: it owed a proof and had no legal target.
   const { prior, h2, branch } = await handOffThenDie(f, mergeMode)
   expect(f.world.plannerChoices).toEqual(['full'])
+  const board = new WorkBoardStore(f.db)
+  const card = await board.create('project', { title: CONTINUATION_TASK })
+  await board.attachRun('project', card.id, prior.id)
+  await board.detachRun('project', prior.id, 'failed')
+  const history = board.get('project', card.id)!.attempts!
+  expect(history).toHaveLength(1)
+  expect(history[0]).toMatchObject({ run_id: prior.id, outcome: 'failed', pr: null, pr_url: null })
 
   // ── THE DISPATCH: the dead run's checkpoint and round travel onto a NEW row.
   const dispatchStart = f.commands.length
-  const dispatched = await redispatchContinuation(f, prior.id, mergeMode)
+  const dispatched = await dispatchBoardBoundBuild({ task: CONTINUATION_TASK, board_item_id: card.id }, {
+    store: f.store, projectAdmission: fixtureDispatchAdmission(f.db), project_slug: 'project', repo_path: f.repo,
+    board, resolveBuildRepo: async () => f.repo, resolveMergeMode: async () => mergeMode,
+    hostRunner: f.context.runHost,
+  })
   expect(dispatched.ok, JSON.stringify(dispatched)).toBe(true)
   if (!dispatched.ok) return
   const run = dispatched.run
   expect(run.id).not.toBe(prior.id)
+  expect(board.get('project', card.id)).toMatchObject({ linked_run_id: run.id, pr: null, attempts: history })
   expect(run.inner_checkpoint).toBe('task-built')
   expect(run.inner_checkpoint_head).toBe(h2)
   expect(run.base_sha).toBe(f.baseSha)

@@ -154,6 +154,23 @@ function listOf(rows: WorkBoardItem[]): Handler {
 }
 
 describe('WorkBoardTab (happy-dom)', () => {
+  it('keeps past attempts collapsed until the shelf is opened and renders only resolved PR links', async () => {
+    const { container, root, act } = await mount(listOf([item({ status: 'archived', attempts: [
+      { run_id: 'failed-run', outcome: 'failed', pr: 12, pr_url: 'https://example.test/pull/12', recorded_at: '2026-09-20' },
+      { run_id: 'blocked-run', outcome: 'blocked', pr: 13, pr_url: null, recorded_at: '2026-09-21' },
+    ] }), item({ id: 'legacy', status: 'archived' })]))
+    const shelf = Array.from(container.querySelectorAll('button')).find(button => button.textContent?.includes('Shelved ·'))!
+    expect(shelf.getAttribute('aria-expanded')).toBe('false')
+    expect(container.textContent).not.toContain('failed-run')
+    await act(async () => shelf.click())
+    expect(container.textContent).toContain('Past attempt · failed · failed-run')
+    expect(container.textContent).toContain('Past attempt · blocked · blocked-run')
+    expect(container.querySelector('a[href="https://example.test/pull/12"]')?.textContent).toContain('PR #12')
+    expect(container.textContent).toContain('PR #13')
+    expect(Array.from(container.querySelectorAll('a')).some(a => a.textContent?.includes('#13'))).toBe(false)
+    await act(async () => root.unmount())
+  })
+
   it('opens a linked plan from the card title while an unlinked title remains editable', async () => {
     const opened: Array<{ projectId: string; path: string }> = []
     const rows = [

@@ -13,6 +13,10 @@
     "current writer set \u2014 the test picks it up automatically."
   ],
   "tables": {
+    "work_board_terminal_attempts": {
+      "owner": "work-board/store.ts",
+      "writers": ["work-board/store.ts"]
+    },
     "project_admission_fences": {
       "owner": "gateway/project-admission-store.ts",
       "writers": ["gateway/project-admission-store.ts"]
