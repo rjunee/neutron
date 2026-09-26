@@ -55,3 +55,15 @@ distinguishes a resolved PR link from unresolved PR plain text. Making every PR
 plain text, making every PR a link, or starting the shelf expanded each fails
 the focused behavioral assertion; restoring the production code passes all
 9 mobile rendering tests (33 assertions).
+
+The shared-host gate tested `ca715c5f0701b47a7a38fb0cafa1f8b7ffbf973d`
+(tree `1611cd75d2f210fd92bb6db6949f13c39b5f5a43`). All 51 TypeScript
+configurations passed. The complete runner executed all 1,698 discovered files
+and exited 1: six consuming expectations omitted the new table, migration 0160,
+or the empty `attempts` default. Database, device and real-HTTP lanes passed.
+The retained gate log has SHA-256
+`0ec1f41109720ca795030c08940d5fe7ef6e75d27ea05b9564187cbc4e953f25`.
+The schema snapshot and exact migration lists now include the new table and
+ordinal, and the web parser's exact default object includes empty history;
+the equality and ownership assertions remain intact. This failed full run is
+not a full-suite receipt for the corrected candidate.
