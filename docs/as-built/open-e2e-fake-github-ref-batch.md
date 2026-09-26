@@ -71,3 +71,29 @@ passed. Subsequent changes only add this validation receipt.
 Required full host coverage and CI remain unverified for this candidate. This
 bounded receipt does not complete the full acceptance of
 `docs/spec-items/host-test-suite-efficiency.md` or supersede its full-host gate.
+
+Publication composition merged freshly fetched main
+`06ddd90bb232bac0811363b22267f9f4e24c725b` into candidate source at
+`c099fad77fae6d51a9ecf7b3000ec9404d5d96cb`. The fixture blob stayed exactly
+`753571b3eaf1da6b2f4682de4ac123cab34bdc88`. The relevant upstream consumer
+change moves the project repository validator behind the reexport at
+`trident/project-repos.ts:2`, consumed by `open/wiring/project-build.ts:33`;
+`contracts/project-repos.ts:1-71` is byte-identical to the previous implementation.
+The authored diff against that fetched main still contains only the fixture
+and this new record. Prior ref/merge review and semantic controls apply to the
+unchanged fixture source; the original paired timing remains evidence only for
+its original measured environment and is not a new composition timing receipt.
+
+The composition's first dependency verifier refused an absent local Bun store;
+its first lint attempt could not parse an empty ESLint report. Neither was a
+source validation pass. A worktree-local
+`bun install --frozen-lockfile --offline --ignore-scripts` then exited 0.
+`bun scripts/ci/verify-workspace-deps.ts` exited 0 (30/32 workspace dependency
+probes resolved, with two MCP SDK resolution notes), and the complete
+`bash scripts/ci/lint.sh` exited 0. Root and Trident type checks using the two
+commands above both exited 0 on the composition. The fresh-ref control and
+the three previously measured consumers passed together (4 pass, 0 fail,
+33 assertions); this consuming regression check was not another paired timing
+experiment. `git diff --check` passed. The only later edit is this receipt.
+The composed candidate is prepared for required full-host validation; no
+full-host receipt, publication or CI result is established by these checks.
