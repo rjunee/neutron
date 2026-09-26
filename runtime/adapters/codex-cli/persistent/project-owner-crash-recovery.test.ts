@@ -3,7 +3,7 @@ import { Database } from 'bun:sqlite'
 import { chmodSync, existsSync, mkdirSync, mkdtempSync, readFileSync, rmSync, writeFileSync } from 'node:fs'
 import { tmpdir } from 'node:os'
 import { join } from 'node:path'
-import { assertCrashedOwnerDead, assertNoOtherCodexOwner, readCrashedOwner, recordCrashedOwner, type OwnerCrashProbes, type OwnerProcessCensus } from './project-owner-crash-recovery.ts'
+import { assertCrashedOwnerDead, assertNoOtherCodexOwner, observeOwnerNativeStop, readCrashedOwner, recordCrashedOwner, type OwnerCrashProbes, type OwnerProcessCensus } from './project-owner-crash-recovery.ts'
 import type { OwnerHelperDescriptor } from './project-owner-helper-protocol.ts'
 
 const dirs: string[] = []
@@ -70,6 +70,22 @@ test('each live/unknown native, terminal or helper identity refuses with no rece
     expect(existsSync(join(f.dir, '.neutron-owner-crashed.json'))).toBe(false)
     expect(f.census()).toBe(0)
   }
+})
+
+test('live helper with dead native children is draining, never dead until all three birth identities are proven gone', () => {
+  const f = fixture(), deadPids = new Set<number>()
+  const dead = (identity: { pid: number }) => { if (!deadPids.has(identity.pid)) throw new Error('live or unknown') }
+  expect(observeOwnerNativeStop(f.dir, f.authority, dead)).toBe('unknown')
+  deadPids.add(12)
+  expect(observeOwnerNativeStop(f.dir, f.authority, dead)).toBe('draining')
+  deadPids.add(13)
+  expect(observeOwnerNativeStop(f.dir, f.authority, dead)).toBe('draining')
+  deadPids.add(11)
+  expect(observeOwnerNativeStop(f.dir, f.authority, dead)).toBe('dead')
+  expect(existsSync(join(f.dir, '.neutron-owner-crashed.json'))).toBe(false)
+  expect(() => observeOwnerNativeStop(f.dir, { ...f.authority, helper: { ...f.authority.helper, start: 'changed' } }, dead)).toThrow('exact process authority')
+  expect(() => recordCrashedOwner(f.dir, f.probe, { ...f.authority, helper: { ...f.authority.helper, start: 'changed' } })).toThrow('changed during attachment')
+  expect(existsSync(join(f.dir, '.neutron-owner-crashed.json'))).toBe(false)
 })
 
 test('competing transcript owner, unavailable census, and missing boot refuse before successor authority', () => {

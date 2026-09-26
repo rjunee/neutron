@@ -1,5 +1,5 @@
 import { afterEach, expect, spyOn, test } from 'bun:test'
-import { mkdirSync, mkdtempSync, readFileSync, rmSync, writeFileSync } from 'node:fs'
+import { existsSync, mkdirSync, mkdtempSync, readFileSync, rmSync, writeFileSync } from 'node:fs'
 import { tmpdir } from 'node:os'
 import { join } from 'node:path'
 import { CodexOwnerBindings } from '../wiring/codex-owner-binding.ts'
@@ -109,7 +109,7 @@ test('completed explicit retirement stays asleep, and interrupted host work is n
   await interrupted.bindings.close()
 })
 
-test('durable recovery launches exactly one successor for the same thread and adopts it on the next opening', async () => {
+for (const failure of ['dead-helper', 'dead-native', 'descriptor-race', 'pane-race', 'binding-race', 'draining-native', 'unknown-native', 'foreign-native']) test(`durable recovery ${failure}: exact successor or fenced refusal`, async () => {
   const f = fixture()
   const oldHelper = { pid: 10, boot: 'fixture-prior-boot', start: '10' }
   const old = { version: 1 as const, token: 'a'.repeat(64), socketPath: join(f.home, 'helper.sock'), socketIdentity: '1:1', facts: f.facts, helper: oldHelper }
@@ -120,11 +120,26 @@ test('durable recovery launches exactly one successor for the same thread and ad
   f.write('.neutron-owner-launch.json', { scope })
   f.write('.neutron-owner-authority.json', old)
   f.write('.neutron-owner-pane.json', { handle: 'old-pane', identity: oldHelper })
+  let descriptorReads = 0
   const descriptor = spyOn(protocol, 'readOwnerHelperDescriptor').mockImplementation(path => {
-    if (!path.startsWith(next)) throw new Error('stale descriptor')
+    if (!path.startsWith(next)) {
+      if (failure === 'dead-helper' || failure === 'descriptor-race' && ++descriptorReads > 1) throw new Error('stale descriptor')
+      return old
+    }
     return current
   }); restores.push(() => descriptor.mockRestore())
-  const record = spyOn(crash, 'recordCrashedOwner').mockImplementation(() => { f.write('.neutron-owner-crashed.json', receipt); return receipt })
+  const observe = spyOn(crash, 'observeOwnerNativeStop').mockReturnValue(failure === 'foreign-native' ? 'dead'
+    : failure === 'dead-native' || failure === 'draining-native' ? 'draining' : 'unknown')
+  restores.push(() => observe.mockRestore())
+  let recordAttempts = 0
+  const record = spyOn(crash, 'recordCrashedOwner').mockImplementation(() => {
+    recordAttempts++
+    if (failure === 'foreign-native') throw new Error('Competing native owner')
+    if (failure === 'draining-native' || failure === 'unknown-native' || failure === 'dead-native' && recordAttempts === 1) {
+      throw new Error('Helper process still live or unknown')
+    }
+    f.write('.neutron-owner-crashed.json', receipt); return receipt
+  })
   restores.push(() => record.mockRestore())
   const read = spyOn(crash, 'readCrashedOwner').mockReturnValue(receipt); restores.push(() => read.mockRestore())
   let spawns = 0
@@ -134,12 +149,29 @@ test('durable recovery launches exactly one successor for the same thread and ad
     return { pid: process.pid, paneHandle: 'new-pane', detach() {} } as never
   }); restores.push(() => spawn.mockRestore())
   const inspect = spyOn(HerdrHost.prototype, 'inspectHandle').mockImplementation(async handle => handle === 'old-pane'
-    ? { kind: 'gone' } : { kind: 'live', pid: process.pid, argv: [] })
+    ? failure === 'dead-helper' || failure === 'pane-race' ? { kind: 'gone' } : { kind: 'live', pid: oldHelper.pid, argv: [] }
+    : { kind: 'live', pid: process.pid, argv: [] })
   restores.push(() => inspect.mockRestore())
-  const attach = spyOn(bootstrap, 'attachCodexOwner').mockResolvedValue(f.owner as bootstrap.CodexOwnerAttachment)
+  const attach = spyOn(bootstrap, 'attachCodexOwner').mockImplementation(async options => {
+    if (!options.descriptorPath.startsWith(next) && failure !== 'binding-race') throw new Error('Stale owner binding')
+    return f.owner as bootstrap.CodexOwnerAttachment
+  })
   restores.push(() => attach.mockRestore())
-  const readBinding = spyOn(bootstrap, 'readCodexOwnerBinding').mockReturnValue(current.facts); restores.push(() => readBinding.mockRestore())
-  const options = { projectId: 'project-one', binary: 'must-not-launch', cwd: f.dir, codexHome: f.home, socketPath: join(f.home, 'owner.sock'), env: {} }
+  let bindingReads = 0
+  const readBinding = spyOn(bootstrap, 'readCodexOwnerBinding').mockImplementation(() => {
+    if (failure === 'binding-race' && bindingReads++ === 0) throw new Error('Stale owner binding')
+    return current.facts
+  }); restores.push(() => readBinding.mockRestore())
+  const options = { projectId: 'project-one', binary: 'must-not-launch', cwd: f.dir, codexHome: f.home, socketPath: join(f.home, 'owner.sock'), env: {}, timeoutMs: failure === 'dead-native' ? 200 : 1 }
+  if (failure === 'draining-native' || failure === 'unknown-native' || failure === 'foreign-native') {
+    if (failure === 'draining-native') await expect(openDurableCodexOwner(options)).rejects.toBeInstanceOf(CodexOwnerRecoveryUnavailable)
+    else if (failure === 'foreign-native') await expect(openDurableCodexOwner(options)).rejects.toThrow('Competing native owner')
+    else await expect(openDurableCodexOwner(options)).rejects.toThrow('Stale owner binding')
+    expect(spawns).toBe(0)
+    expect(existsSync(join(f.home, '.neutron-owner-crashed.json'))).toBe(false)
+    expect(JSON.parse(readFileSync(join(f.home, '.neutron-owner-authority.json'), 'utf8'))).toEqual(old)
+    return
+  }
   expect((await openDurableCodexOwner(options)).recoveryKind).toBe('resumed')
   const launch = JSON.parse(readFileSync(join(next, '.neutron-owner-launch.json'), 'utf8'))
   expect(launch.resume.receipt.facts.threadId).toBe('thread-one')
@@ -147,5 +179,5 @@ test('durable recovery launches exactly one successor for the same thread and ad
   expect(launch.scope).toEqual(scope)
   expect((await openDurableCodexOwner(options)).recoveryKind).toBe('adopted')
   expect(spawns).toBe(1)
-  expect(record).toHaveBeenCalledTimes(1)
+  expect(record).toHaveBeenCalledTimes(failure === 'dead-native' ? 2 : 1)
 })

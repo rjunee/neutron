@@ -124,6 +124,20 @@ function readCrashAuthority(directory: string): OwnerHelperDescriptor {
   return authority
 }
 
+/** A live helper can outlast native shutdown. Report only independently observed
+ * deaths from its sealed generation, never infer them from a failed attachment. */
+export function observeOwnerNativeStop(directory: string, expected: OwnerHelperDescriptor,
+  dead: (identity: HelperIdentity) => void = assertOwnerProcessDead): 'dead' | 'draining' | 'unknown' {
+  const authority = readCrashAuthority(directory)
+  if (!isDeepStrictEqual(authority, expected) || !authority.facts.processes) {
+    throw new Error('Native owner shutdown lacks exact process authority')
+  }
+  const proven = (identity: HelperIdentity): boolean => { try { dead(identity); return true } catch { return false } }
+  const native = proven(authority.facts.processes.native), terminal = proven(authority.facts.processes.terminal)
+  if (!native && !terminal) return 'unknown'
+  return native && terminal && proven(authority.helper) ? 'dead' : 'draining'
+}
+
 export function readCrashedOwner(directory: string, probe: OwnerCrashProbes = probes): CodexOwnerCrashReceipt {
   const authority = readCrashAuthority(directory)
   const path = join(directory, '.neutron-owner-crashed.json')
@@ -138,8 +152,9 @@ export function readCrashedOwner(directory: string, probe: OwnerCrashProbes = pr
 
 /** An exclusive successor launch remains the single-owner claim. This immutable
  * record preserves the predecessor and cannot erase an unresolved work marker. */
-export function recordCrashedOwner(directory: string, probe: OwnerCrashProbes = probes): CodexOwnerCrashReceipt {
+export function recordCrashedOwner(directory: string, probe: OwnerCrashProbes = probes, expected?: OwnerHelperDescriptor): CodexOwnerCrashReceipt {
   const authority = readCrashAuthority(directory)
+  if (expected && !isDeepStrictEqual(authority, expected)) throw new Error('Codex crash authority changed during attachment')
   assertCrashedOwnerDead(authority, probe)
   probe.noOtherOwner(authority.facts)
   // An interrupted explicit sleep/provider handoff is not an awake crash.

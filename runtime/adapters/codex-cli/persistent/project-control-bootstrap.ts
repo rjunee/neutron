@@ -12,6 +12,7 @@ import { admitsBootstrapConfig, admitsOwnerTui, OWNER_BOOTSTRAP_ORIGINATOR as OR
 import { OWNER_INSTALLED_GATEWAY_TOOL } from './owner-installed-gateway.ts'
 import { helperIdentity, type HelperIdentity } from './project-owner-helper-protocol.ts'
 import { validateOwnerResume, type CodexOwnerResume, type CodexOwnerRetirementReceipt } from './project-owner-retirement.ts'
+import { ownerNativeStopObservation } from './project-owner-helper-lifetime.ts'
 
 type Rpc = Record<string, unknown>
 const object = (value: unknown): value is Rpc => typeof value === 'object' && value !== null && !Array.isArray(value)
@@ -74,6 +75,9 @@ export async function attachCodexOwner(options: {
 }
 
 export interface CodexOwnerBootstrap {
+  /** Unexpected bootstrap shutdown after both owned exit observations settle.
+   * It does not substitute for independent process-death proof. */
+  readonly nativeStopped?: Promise<void>
   readonly recoveryKind?: 'adopted' | 'resumed'
   readonly binding: CodexOwnerBinding
   readonly broker: ProjectControlBroker
@@ -138,6 +142,7 @@ export async function bootstrapCodexOwner(options: {
   let socket: ServerWebSocket<undefined> | undefined
   let closed = false
   let retiring = false
+  let disposing = false
   let terminalIdentity: HelperIdentity | undefined
   let failure: Error | undefined
   let upstreamReceive: ((message: unknown) => void) | undefined
@@ -151,6 +156,7 @@ export async function bootstrapCodexOwner(options: {
   let resolveReady!: (value: CodexOwnerBootstrap) => void
   let rejectReady!: (error: Error) => void
   const ready = new Promise<CodexOwnerBootstrap>((resolve, reject) => { resolveReady = resolve; rejectReady = reject })
+  const nativeStop = ownerNativeStopObservation()
   // Avoid an unhandled rejection if initialization fails before awaiting ready.
   ready.catch(() => {})
   const stop = (error = new Error('Owner bootstrap closed')): void => {
@@ -163,6 +169,7 @@ export async function bootstrapCodexOwner(options: {
     gateway?.close(); broker?.close(); upstream?.close()
     tui?.kill(); server?.stop(true)
     if (!retiring) journal.close()
+    nativeStop.observe(retiring || disposing, upstream?.exited, tui?.exited)
   }
   const deadline = setTimeout(() => stop(new Error('Owner bootstrap deadline expired')), timeout)
   const emit = (message: Rpc): void => { socket?.send(JSON.stringify(message)) }
@@ -248,8 +255,8 @@ export async function bootstrapCodexOwner(options: {
       for (const event of held.splice(0)) {
         if (object(event.params) && object(event.params.thread) && event.params.thread.id === thread.id) emit(event)
       }
-      resolveReady({ binding: handle, broker, writeTerminal(bytes) { assertCurrent(); tui!.write(bytes) },
-        async close() { stop(); await tui?.exited; tui?.dispose() },
+      resolveReady({ binding: handle, broker, nativeStopped: nativeStop.stopped, writeTerminal(bytes) { assertCurrent(); tui!.write(bytes) },
+        async close() { disposing = true; stop(); await tui?.exited; tui?.dispose() },
         async retire(expectedEpoch, beforeExit) {
           try {
             assertCurrent()
