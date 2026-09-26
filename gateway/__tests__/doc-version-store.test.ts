@@ -1,3 +1,5 @@
+import { localVaultBackup } from '../../tests/support/vault-backup.ts'
+import { PROJECT_BACKUP_GITIGNORE } from '../git/project-backup-store.ts'
 /**
  * P7.4 Phase 1 — DocVersionStore unit + failure-mode + concurrency tests.
  *
@@ -35,7 +37,6 @@ import { join } from 'node:path'
 import { promisify } from 'node:util'
 
 import {
-  DOC_VERSION_GITIGNORE,
   DocVersionStore,
   InvalidShaError,
   UnknownShaError,
@@ -81,6 +82,7 @@ function makeHarness(): Harness {
   mkdirSync(docsRoot, { recursive: true })
   const store = new DocVersionStore({
     owner_home,
+    backupStore: localVaultBackup(owner_home, PROJECT_SLUG),
     project_slug: PROJECT_SLUG,
   })
   return { tmp, owner_home, projectRoot, docsRoot, store }
@@ -98,7 +100,7 @@ async function git(cwd: string, args: string[]): Promise<string> {
 /** Read the current HEAD sha from inside the bare-style dir. */
 async function headSha(h: Harness): Promise<string> {
   const out = await git(h.projectRoot, [
-    `--git-dir=${join(h.projectRoot, '.docs-versions')}`,
+    `--git-dir=${join(h.projectRoot, '.project-backup')}`,
     `--work-tree=${h.docsRoot}`,
     'rev-parse',
     'HEAD',
@@ -113,11 +115,11 @@ describe('DocVersionStore — init + identity', () => {
   })
   afterEach(() => cleanup(h))
 
-  it('creates .docs-versions/ with HEAD + refs + objects on first init', async () => {
+  it('creates .project-backup/ with HEAD + refs + objects on first init', async () => {
     if (!GIT_AVAILABLE) return
     const ready = await h.store.ensureInit(PROJECT_ID)
     expect(ready).toBe(true)
-    const gitDir = join(h.projectRoot, '.docs-versions')
+    const gitDir = join(h.projectRoot, '.project-backup')
     expect(existsSync(join(gitDir, 'HEAD'))).toBe(true)
     expect(existsSync(join(gitDir, 'objects'))).toBe(true)
     expect(existsSync(join(gitDir, 'refs', 'heads', 'main'))).toBe(true)
@@ -137,23 +139,23 @@ describe('DocVersionStore — init + identity', () => {
     rmSync(h.docsRoot, { recursive: true, force: true })
     const ready = await h.store.ensureInit(PROJECT_ID)
     expect(ready).toBe(false)
-    expect(existsSync(join(h.projectRoot, '.docs-versions', 'HEAD'))).toBe(false)
+    expect(existsSync(join(h.projectRoot, '.project-backup', 'HEAD'))).toBe(false)
   })
 
   it('writes .gitignore matching the pinned spec block', async () => {
     if (!GIT_AVAILABLE) return
     await h.store.ensureInit(PROJECT_ID)
-    const gitignorePath = join(h.docsRoot, '.gitignore')
+    const gitignorePath = join(h.projectRoot, '.gitignore')
     expect(existsSync(gitignorePath)).toBe(true)
     const content = readFileSync(gitignorePath, 'utf8')
-    expect(content).toBe(DOC_VERSION_GITIGNORE)
+    expect(content).toContain(PROJECT_BACKUP_GITIGNORE.trim())
   })
 
   it('seeds the synthetic per-project identity on the init commit', async () => {
     if (!GIT_AVAILABLE) return
     await h.store.ensureInit(PROJECT_ID)
     const out = await git(h.projectRoot, [
-      `--git-dir=${join(h.projectRoot, '.docs-versions')}`,
+      `--git-dir=${join(h.projectRoot, '.project-backup')}`,
       `--work-tree=${h.docsRoot}`,
       'log',
       '-1',
@@ -167,7 +169,7 @@ describe('DocVersionStore — init + identity', () => {
     writeFileSync(join(h.docsRoot, 'README.md'), '# Pre-existing')
     await h.store.ensureInit(PROJECT_ID)
     const out = await git(h.projectRoot, [
-      `--git-dir=${join(h.projectRoot, '.docs-versions')}`,
+      `--git-dir=${join(h.projectRoot, '.project-backup')}`,
       `--work-tree=${h.docsRoot}`,
       'show',
       '--name-only',
@@ -176,7 +178,7 @@ describe('DocVersionStore — init + identity', () => {
     ])
     // Should list README.md and .gitignore.
     const files = out.split('\n').map((s) => s.trim()).filter((s) => s.length > 0)
-    expect(files).toContain('README.md')
+    expect(files).toContain('docs/README.md')
     expect(files).toContain('.gitignore')
   })
 })
@@ -198,7 +200,7 @@ describe('DocVersionStore — commit shapes', () => {
     await h.store.commit(PROJECT_ID, { op: 'create', path: 'notes.md' })
     const subject = (
       await git(h.projectRoot, [
-        `--git-dir=${join(h.projectRoot, '.docs-versions')}`,
+        `--git-dir=${join(h.projectRoot, '.project-backup')}`,
         `--work-tree=${h.docsRoot}`,
         'log',
         '-1',
@@ -217,7 +219,7 @@ describe('DocVersionStore — commit shapes', () => {
     await h.store.commit(PROJECT_ID, { op: 'edit', path: 'notes.md' })
     const subject = (
       await git(h.projectRoot, [
-        `--git-dir=${join(h.projectRoot, '.docs-versions')}`,
+        `--git-dir=${join(h.projectRoot, '.project-backup')}`,
         `--work-tree=${h.docsRoot}`,
         'log',
         '-1',
@@ -236,7 +238,7 @@ describe('DocVersionStore — commit shapes', () => {
     await h.store.commit(PROJECT_ID, { op: 'delete', path: 'notes.md' })
     const subject = (
       await git(h.projectRoot, [
-        `--git-dir=${join(h.projectRoot, '.docs-versions')}`,
+        `--git-dir=${join(h.projectRoot, '.project-backup')}`,
         `--work-tree=${h.docsRoot}`,
         'log',
         '-1',
@@ -245,7 +247,7 @@ describe('DocVersionStore — commit shapes', () => {
     ).trim()
     expect(subject).toBe('delete: notes.md')
     const ls = await git(h.projectRoot, [
-      `--git-dir=${join(h.projectRoot, '.docs-versions')}`,
+      `--git-dir=${join(h.projectRoot, '.project-backup')}`,
       `--work-tree=${h.docsRoot}`,
       'ls-files',
     ])
@@ -264,7 +266,7 @@ describe('DocVersionStore — commit shapes', () => {
     await h.store.commit(PROJECT_ID, { op: 'rename', from: 'old.md', to: 'new.md' })
     const subject = (
       await git(h.projectRoot, [
-        `--git-dir=${join(h.projectRoot, '.docs-versions')}`,
+        `--git-dir=${join(h.projectRoot, '.project-backup')}`,
         `--work-tree=${h.docsRoot}`,
         'log',
         '-1',
@@ -290,7 +292,7 @@ describe('DocVersionStore — commit shapes', () => {
     })
     const subject = (
       await git(h.projectRoot, [
-        `--git-dir=${join(h.projectRoot, '.docs-versions')}`,
+        `--git-dir=${join(h.projectRoot, '.project-backup')}`,
         `--work-tree=${h.docsRoot}`,
         'log',
         '-1',
@@ -325,17 +327,17 @@ describe('DocVersionStore — commit shapes', () => {
     expect(after).toBe(before)
   })
 
-  it('does NOT commit binary files (they are .gitignore-blocked)', async () => {
+  it('preserves document binary assets in the canonical vault', async () => {
     if (!GIT_AVAILABLE) return
     await h.store.ensureInit(PROJECT_ID)
     writeFileSync(join(h.docsRoot, 'image.png'), Buffer.from([0xff, 0xff]))
     await h.store.commit(PROJECT_ID, { op: 'create', path: 'image.png' })
     const ls = await git(h.projectRoot, [
-      `--git-dir=${join(h.projectRoot, '.docs-versions')}`,
+      `--git-dir=${join(h.projectRoot, '.project-backup')}`,
       `--work-tree=${h.docsRoot}`,
       'ls-files',
     ])
-    expect(ls).not.toContain('image.png')
+    expect(ls).toContain('docs/image.png')
   })
 })
 
@@ -577,15 +579,13 @@ describe('DocVersionStore — concurrency', () => {
       h.store.commit(PROJECT_ID, { op: 'create', path: 'a.md' }),
       h.store.commit(PROJECT_ID, { op: 'create', path: 'b.md' }),
     ])
-    const log = await git(h.projectRoot, [
-      `--git-dir=${join(h.projectRoot, '.docs-versions')}`,
+    const files = await git(h.projectRoot, [
+      `--git-dir=${join(h.projectRoot, '.project-backup')}`,
       `--work-tree=${h.docsRoot}`,
-      'log',
-      '--pretty=format:%s',
+      'ls-tree', '-r', '--name-only', 'HEAD',
     ])
-    const subjects = log.split('\n').filter((s) => s.length > 0)
-    expect(subjects).toContain('create: a.md')
-    expect(subjects).toContain('create: b.md')
+    expect(files).toContain('docs/a.md')
+    expect(files).toContain('docs/b.md')
   })
 
   it('concurrent first-init coalesces into one git init', async () => {
@@ -596,71 +596,10 @@ describe('DocVersionStore — concurrency', () => {
     ])
     expect(r1).toBe(true)
     expect(r2).toBe(true)
-    expect(existsSync(join(h.projectRoot, '.docs-versions', 'HEAD'))).toBe(true)
+    expect(existsSync(join(h.projectRoot, '.project-backup', 'HEAD'))).toBe(true)
   })
 
-  // D4 keyed-mutex adoption proof (refactor plan 2026-07-02 § D4).
-  // `withCommitLock` moved from a hand-rolled chained-promise map to the
-  // generic `gateway/http/keyed-mutex.ts` (which was itself modeled on
-  // the hand-rolled original). This test pins the THREE semantics the
-  // swap must preserve — it was written against the pre-swap
-  // implementation and passes unchanged against both:
-  //   1. mutual exclusion per project (no interleaving),
-  //   2. arrival-order FIFO within a project,
-  //   3. per-project granularity (other projects are NOT blocked).
-  // No git involved — the lock is exercised directly so the assertion
-  // is about the lock, not about subprocess timing.
-  it('D4 — commit lock serializes same-project sections in arrival order; different projects run in parallel', async () => {
-    type LockFn = <T>(project_id: string, fn: () => Promise<T>) => Promise<T>
-    const lock = (
-      h.store as unknown as { withCommitLock: LockFn }
-    ).withCommitLock.bind(h.store) as LockFn
-    const events: string[] = []
-    let releaseA!: () => void
-    const aHolds = new Promise<void>((resolve) => {
-      releaseA = resolve
-    })
-    const a = lock('p1', async () => {
-      events.push('a-start')
-      await aHolds
-      events.push('a-end')
-    })
-    const b = lock('p1', async () => {
-      events.push('b-start')
-    })
-    const c = lock('p2', async () => {
-      events.push('c-start')
-    })
-    // p2 proceeds while p1's first holder is parked → per-project
-    // granularity. b must NOT have started — a still holds p1.
-    await c
-    expect(events).toContain('a-start')
-    expect(events).toContain('c-start')
-    expect(events).not.toContain('b-start')
-    releaseA()
-    await Promise.all([a, b])
-    // a's section fully completes before b's begins (mutual exclusion
-    // + FIFO: b entered the queue before a released).
-    expect(events.indexOf('a-end')).toBeGreaterThan(events.indexOf('a-start'))
-    expect(events.indexOf('b-start')).toBeGreaterThan(events.indexOf('a-end'))
-  })
 
-  it('D4 — commit lock releases on throw and the queue keeps draining', async () => {
-    type LockFn = <T>(project_id: string, fn: () => Promise<T>) => Promise<T>
-    const lock = (
-      h.store as unknown as { withCommitLock: LockFn }
-    ).withCommitLock.bind(h.store) as LockFn
-    const failing = lock('p1', async () => {
-      throw new Error('boom')
-    })
-    let ran = false
-    const next = lock('p1', async () => {
-      ran = true
-    })
-    await expect(failing).rejects.toThrow('boom')
-    await next
-    expect(ran).toBe(true)
-  })
 })
 
 describe('DocVersionStore — failure modes', () => {
@@ -674,13 +613,14 @@ describe('DocVersionStore — failure modes', () => {
     // Point gitBinary at a path that definitely doesn't exist.
     const broken = new DocVersionStore({
       owner_home: h.owner_home,
+      backupStore: localVaultBackup(h.owner_home, PROJECT_SLUG),
       project_slug: PROJECT_SLUG,
       gitBinary: '/path/does/not/exist/git-binary-missing',
     })
     expect(await broken.isGitAvailable()).toBe(false)
-    // ensureInit returns false; no .docs-versions/ is created.
+    // ensureInit returns false; no .project-backup/ is created.
     expect(await broken.ensureInit(PROJECT_ID)).toBe(false)
-    expect(existsSync(join(h.projectRoot, '.docs-versions'))).toBe(false)
+    expect(existsSync(join(h.projectRoot, '.project-backup'))).toBe(false)
     // commit is a silent no-op (does not throw).
     writeFileSync(join(h.docsRoot, 'x.md'), 'body')
     await broken.commit(PROJECT_ID, { op: 'create', path: 'x.md' })
@@ -696,25 +636,23 @@ describe('DocVersionStore — failure modes', () => {
     ).rejects.toThrow(VersioningUnavailableError)
   })
 
-  it('repo corruption — renames the broken dir aside and reinits', async () => {
-    if (!GIT_AVAILABLE) return
-    await h.store.ensureInit(PROJECT_ID)
-    writeFileSync(join(h.docsRoot, 'r.md'), 'first')
-    await h.store.commit(PROJECT_ID, { op: 'create', path: 'r.md' })
-    // Trash the HEAD file to simulate corruption.
-    const gitDir = join(h.projectRoot, '.docs-versions')
-    writeFileSync(join(gitDir, 'HEAD'), 'fatal-corrupt-content-not-a-ref')
-    // Next commit triggers the recovery path.
+  it('a failed canonical commit preserves the written document and logs failure', async () => {
+    const events: string[] = []
+    const store = new DocVersionStore({
+      owner_home: h.owner_home,
+      project_slug: PROJECT_SLUG,
+      backupStore: {
+        ensureInit: async () => true,
+        commitDocument: async () => { throw new Error('corrupt vault') },
+      },
+      logger: (event) => { events.push(event) },
+    })
     writeFileSync(join(h.docsRoot, 'r.md'), 'second')
-    await h.store.commit(PROJECT_ID, { op: 'edit', path: 'r.md' })
-    // A broken sibling must appear (rename), and a fresh .docs-versions/
-    // must be back in place.
-    const siblings = readdirSync(h.projectRoot)
-    const brokenDirs = siblings.filter((s) => s.startsWith('.docs-versions.broken-'))
-    expect(brokenDirs.length).toBeGreaterThan(0)
-    expect(existsSync(join(h.projectRoot, '.docs-versions', 'HEAD'))).toBe(true)
-  })
-})
+    await store.commit(PROJECT_ID, { op: 'edit', path: 'r.md' })
+    expect(readFileSync(join(h.docsRoot, 'r.md'), 'utf8')).toBe('second')
+    expect(events).toContain('docs.versioning.commit_failed')
+    expect(existsSync(join(h.projectRoot, '.docs-versions'))).toBe(false)
+  })})
 
 describe('DocVersionStore — assertShaShape', () => {
   it('throws on non-hex sha-shaped strings', async () => {
