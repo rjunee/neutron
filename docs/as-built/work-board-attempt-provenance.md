@@ -81,3 +81,18 @@ attempt sweep or rewriting the distinct project's history each fails the
 exact-row assertion; restoring the predicate passes. This does not establish
 isolation for a project whose spelling equals the owner key, the existing
 raw-key conflation documented by `workBoardScopeKey`.
+
+Final canonical local validation passed on source commit
+`a029e8ad99be482e1c178e8137decbe12f9a20fd`, tree
+`11f1397d76d03c4dcd3d7667ceb4224b1b535737`, with physical dependencies
+installed in the tested worktree. `bash scripts/check-shared-host.sh` exited 0:
+all 51 TypeScript configurations passed, followed by all 1,698 discovered,
+assigned and executed test files across 18 lanes (1,464 general, 22 database,
+43 device and 169 real-HTTP), with zero failed lanes. The runner used jobs=4,
+chunk-size=100 and its default concurrency, without selectors or a fake Bun.
+The complete run included `open/__tests__/project-build-e2e.test.ts`.
+The retained full log has SHA-256
+`1b47044f61ff27ae4c56d39c2a1691053a4935e508c3ba4052402b66f9a15077`.
+The final local commit adds this receipt only; every other tracked blob matches
+the tested source. Exact publication-head CI and served verification remain
+separate gates. The earlier failed full runs above are retained as failures.
