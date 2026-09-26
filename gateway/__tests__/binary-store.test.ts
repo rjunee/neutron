@@ -3,12 +3,11 @@
  *
  * Covers the brief's § 8.1 (init), § 8.2 (put/get), § 8.3 (refcount),
  * § 8.4 (failure modes — disk-level corruption / orphan blob / missing
- * blob), and the spec-pin from § 6.1 (every BINARY_EXTENSIONS entry is
- * present in the P7.4 DOC_VERSION_GITIGNORE so a stray git-add can't
- * inflate the markdown repo).
+ * blob), and preservation of binary content in the canonical vault backup.
  */
 
 import { afterEach, beforeEach, describe, expect, it } from 'bun:test'
+import { execFileSync } from 'node:child_process'
 import {
   existsSync,
   mkdirSync,
@@ -22,14 +21,13 @@ import { join } from 'node:path'
 
 import { BinaryStore, parseMarkdownBinaryLinks } from '../storage/binary-store.ts'
 import {
-  BINARY_EXTENSIONS,
   BinaryCorruptedError,
   BinaryNotFoundError,
   BinarySizeError,
   BinaryTypeError,
   type BinaryPutResult,
 } from '../storage/binary-types.ts'
-import { DOC_VERSION_GITIGNORE } from '../git/doc-version-store.ts'
+import { localVaultBackup } from '../../tests/support/vault-backup.ts'
 
 const PROJECT_ID = 'demo-project'
 
@@ -123,11 +121,16 @@ describe('BinaryStore — init + schema', () => {
     expect(rows).toEqual([])
   })
 
-  it('BINARY_EXTENSIONS is a subset of DOC_VERSION_GITIGNORE (no drift vs P7.4)', () => {
-    for (const ext of BINARY_EXTENSIONS) {
-      // `.gitignore` lines look like `*.png` — match the bare extension.
-      expect(DOC_VERSION_GITIGNORE).toContain(`*${ext}`)
-    }
+  it('canonical vault backup preserves uploaded binary bytes', async () => {
+    const bytes = pngBytes()
+    const uploaded = await h.store.put(PROJECT_ID, 'shot.png', bytes, 'image/png')
+    const backup = localVaultBackup(h.owner_home, 'demo')
+    expect(await backup.ensureInit(PROJECT_ID)).toBe(true)
+    const blobPath = `.docs-blobs/${uploaded.hash.slice(0, 2)}/${uploaded.hash.slice(2)}`
+    const restored = execFileSync('git', [
+      `--git-dir=${join(h.project_root, '.project-backup')}`, 'show', `HEAD:${blobPath}`,
+    ])
+    expect(Array.from(restored)).toEqual(Array.from(bytes))
   })
 })
 
