@@ -88,11 +88,23 @@ failed on package-resolution artifacts and is not counted as validation.
 The full consuming native end-to-end file passed at revision
 `84bf812235a3ff0f6d03fcc66f6f3c53025926db`: 331 tests, zero failures and
 3,986 assertions in 475.23 seconds. This receipt is distinct from the full
-repository shared-host suite, which remains pending alongside remote CI and
-publication; the local full-suite gate is not waived. Integration of current
+repository shared-host suite, which was pending alongside remote CI and
+publication at that point; the local full-suite gate was not waived. Integration of current
 main preserved all four authored native cache implementation/test files byte
 for byte. Post-integration focused cache and generated-index checks passed
 54 tests with 424 assertions.
+
+On 2026-09-26, `bash scripts/check-shared-host.sh` completed with exit zero at
+revision `27bd615237917899c5f07908c9f67e37e0b1e516`, tree
+`ec993a82144e2b8be58f9def073015b0435ec188`, with a clean worktree and its own
+verified dependency installation. All 51 TypeScript configurations passed.
+The coverage audit executed all 1,697 discovered files across 18 lanes with
+zero failed lanes; lane summaries total 25,865 passing tests, 23 skips,
+zero failures and 117,597 assertions. The retained log's SHA-256 is
+`3b7c907e245b3e43a3461f99fcdf7fe4a52e1710d644c62e870b4045390be5ca`.
+This is local full-suite evidence for that measured identity. The later
+receipt-only commit changes this record, not the tested source or dependency
+inputs; remote CI and publication still require their own exact-head evidence.
 
 Coverage is deliberately bounded: new Linux native app-server launches and
 ordinary installs into scratch on the same writable mount. Explicit
