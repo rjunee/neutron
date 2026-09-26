@@ -1035,6 +1035,10 @@ export async function buildRun(input: BuildRunInput, deps: BuildRunDeps, signal:
         const panel = await deps.reviewGate(result.payload, result.review, snapshot, round, replansUsed, value => {
           currentReview = { findings: [...value.findings], blockingCount: value.blockingCount }
         })
+        // The panel can discover a missing approval checkpoint after recording
+        // findings. That infrastructure refusal is not a reviewed decision and
+        // cannot supply arithmetic STOP provenance.
+        if (panel.kind === 'blocked' && panel.on.startsWith('infra-only:')) return blocked(panel.on)
         const suiteDecision = applyReviewSuite(panel, suite)
         const decision = applyReviewCi(suiteDecision, ci)
         if (currentReview) {

@@ -94,7 +94,7 @@ Validation:
 
 The simultaneous-guard correction preserves a proven arithmetic STOP before a
 nomination round ceiling or another panel block (`trident/build-run.ts:949`,
-`trident/build-run.ts:1067`). The real panel refuses a second re-plan before
+`trident/build-run.ts:1071`). The real panel refuses a second re-plan before
 returning `re-plan`, so handling only the host's re-plan cap would miss the
 production path (`trident/gates/review-panel.ts:142`). A verified `blocked`
 panel decision now has explicit typed provenance; it does not become a claim
@@ -115,6 +115,25 @@ consuming cases, 38 spec-index tests, and both root and Trident typechecks.
 The host and production re-plan crash fixtures now each exercise distinct and
 repeated findings: both refuse another re-plan, and only the repeated case
 retains the arithmetic veto.
+
+The final infrastructure-boundary correction returns an `infra-only` panel
+refusal before arithmetic evaluation or reviewed provenance can be attached
+(`trident/build-run.ts:1041`). The panel records findings before checking that
+an otherwise nonblocking synthesis earned its approval checkpoint
+(`trident/gates/review-panel.ts:137`, `trident/gates/review-panel.ts:152`), so
+progress callback execution alone cannot establish a usable reviewed decision.
+The Open consumer now emits a valid minor-only `REQUEST_CHANGES` synthesis
+after a fix while retaining a repeated finding. Its late infrastructure refusal
+keeps the original cause, no durable arithmetic veto, `REVIEW_NOT_RUN`, a FAILED
+card, one Nexus handoff and no Argus decision; the PR remains open and its base
+unchanged (`open/__tests__/project-build-e2e.test.ts:4813`).
+Removing the narrow refusal fails that consuming case while both spent-re-plan
+controls pass. Returning every blocked panel before arithmetic does the reverse:
+the infrastructure case passes, but immediate and interrupted spent-re-plan
+controls fail. Both mutations were restored before final validation.
+Final narrow-fix validation passed 556 tests across the six host, launcher,
+progress, panel, production-effects and Nexus suites; 23 Open consuming cases;
+38 spec-index tests; and both root and Trident TypeScript checks.
 
 Full shared-host validation, refreshed exact-head CI and served production
 controls remain required before publication/merge and cutover claims.

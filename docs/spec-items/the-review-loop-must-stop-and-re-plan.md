@@ -90,6 +90,9 @@ must remain `REVIEW_NOT_RUN` with no reviewer decision event.
       the same BLOCKED classification and reviewed provenance. An exhausted
       re-plan with distinct decreasing findings retains its ordinary refusal;
       it does not acquire an arithmetic veto.
+      A late infrastructure refusal after recording findings, including a missing
+      synthesis approval checkpoint, retains its infrastructure cause and cannot
+      acquire arithmetic STOP evidence or an Argus decision.
       verify: `bun test open/__tests__/project-build-e2e.test.ts -t 'review arithmetic STOP'`
 - [x] The rejected checkpoint and its arithmetic veto are one durable write. A
       crash after that write but before returning STOP cannot authorize another

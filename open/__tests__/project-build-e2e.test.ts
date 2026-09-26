@@ -362,6 +362,8 @@ interface WorkerWorld {
   blockersByRound: readonly number[]
   /** Demote these rounds' findings to minor while retaining their identities. */
   minorRounds?: ReadonlySet<number>
+  /** A valid minor-only synthesis without the approval needed by its host checkpoint. */
+  unapprovedMinorSynthesis?: boolean
   /** Keep the first finding's identity stable across rounds to exercise G070. */
   repeatFirstFinding: boolean
   /**
@@ -534,6 +536,9 @@ async function performRole(world: WorkerWorld, request: BoundedWorkRequest, brie
   if (request.result.schema === 'verdict') {
     const panelBrief = JSON.parse(brief)
     const verdict = verdictFor(world, panelBrief.round)
+    if (world.unapprovedMinorSynthesis && request.role === 'synthesis' && world.minorRounds?.has(panelBrief.round)) {
+      return { ...verdict, verdict: 'REQUEST_CHANGES' }
+    }
     if (world.verdictRepair && request.role === 'review' && panelBrief.round === 1) {
       if (panelBrief.repair) world.repairPaths.push(panelBrief.repair.path)
       if (!panelBrief.repair || world.verdictRepair === 'exhausts') {
@@ -4727,7 +4732,7 @@ test('a design-gap escalation re-plans and rebuilds instead of dispatching a fix
 
 for (const interrupted of [false, true])
 for (const scenario of ['no-progress', 'repeat', 'decreasing', 'host-only', 'host-only-ceiling', 'no-progress-replan', 'repeat-replan', 'no-progress-replan-spent', 'repeat-replan-spent', 'repeat-approve',
-  ...(interrupted ? [] : ['decreasing-replan-spent'] as const)] as const) test(`review arithmetic STOP terminal transport (${scenario}${interrupted ? ', checkpoint interruption' : ''})`, async () => {
+  ...(interrupted ? [] : ['decreasing-replan-spent', 'repeat-infra-approval'] as const)] as const) test(`review arithmetic STOP terminal transport (${scenario}${interrupted ? ', checkpoint interruption' : ''})`, async () => {
   const repeated = scenario.startsWith('repeat')
   const replan = scenario.includes('replan')
   const spentReplan = scenario.endsWith('spent')
@@ -4737,7 +4742,9 @@ for (const scenario of ['no-progress', 'repeat', 'decreasing', 'host-only', 'hos
     ...(scenario === 'host-only-ceiling' ? { maxRounds: 2 } : {}) })
   if (hostOnly) f.world.mutationArgv = 'bare'
   const panelApproved = scenario === 'repeat-approve'
-  if (panelApproved) f.world.minorRounds = new Set([2])
+  const lateInfrastructure = scenario === 'repeat-infra-approval'
+  if (panelApproved || lateInfrastructure) f.world.minorRounds = new Set([2])
+  if (lateInfrastructure) f.world.unapprovedMinorSynthesis = true
   const board = new WorkBoardStore(f.db)
   const card = await board.create(f.row.project_slug, { title: 'Review recovery evidence' })
   await board.attachRun(f.row.project_slug, card.id, f.row.id)
@@ -4799,6 +4806,29 @@ for (const scenario of ['no-progress', 'repeat', 'decreasing', 'host-only', 'hos
   }
   expect(errors).toEqual([])
   const outcome: ProjectBuildOutcome = JSON.parse(f.store.get(f.row.id)!.inner_result!).projectBuild
+  if (lateInfrastructure) {
+    // The real panel records repeated minor findings before discovering that
+    // its synthesis did not earn an approval checkpoint. Keep that late refusal
+    // distinct from an authored decision or a proven arithmetic STOP.
+    expect(outcome).toMatchObject({ kind: 'blocked', on: 'infra-only: Review recorded approval checkpoint is missing' })
+    if (outcome.kind !== 'blocked') return
+    expect(outcome.reviewStop).toBeUndefined()
+    expect(lastCheckpoint(f).reviewStop).toBeUndefined()
+    expect(f.world.dispatches.filter(dispatch => dispatch.role === 'fix')).toHaveLength(1)
+    const terminal = await orch.step(f.store.get(f.row.id)!)
+    expect(await f.store.saveIfActive(terminal.run)).toBe(true)
+    expect(terminal.run).toMatchObject({ inner_verdict: 'REVIEW_NOT_RUN', inner_checkpoint: 'inner-error', phase: 'failed' })
+    expect(deriveEscalationBlock(terminal.run)).toBeNull()
+    await terminalObserver(terminal.run)
+    expect(await board.get(f.row.project_slug, card.id)).toMatchObject({ status: 'failed' })
+    const events = await nexus.readRecent(f.row.project_slug, { limit: 100 })
+    expect(events).toHaveLength(1)
+    expect(events[0]?.kind).toBe('handoff')
+    expect(events[0]?.body).toContain('REVIEW_NOT_RUN')
+    expect(f.github.prs[0]!.state).toBe('OPEN')
+    expect((await spawnCapture(['git', '-C', f.origin, 'rev-parse', 'refs/heads/main'], f.origin)).stdout).toBe(f.baseSha)
+    return
+  }
   if (scenario === 'decreasing-replan-spent') {
     // An exhausted re-plan alone is not arithmetic evidence. Keep its refusal,
     // but do not invent a durable arithmetic veto or authorize more work.
