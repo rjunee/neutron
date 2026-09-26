@@ -248,6 +248,7 @@ describe('parseWorkBoardItems', () => {
       // Durable PR provenance — absent on an older frame, never undefined.
       pr: null,
       pr_url: null,
+      attempts: [],
     })
   })
 

@@ -66,6 +66,8 @@ export type WorkBoardTaskType = 'build' | 'research'
 
 /** Public, fully-typed board item. */
 export interface WorkBoardItem {
+  /** Terminal observations survive replacement of the current run binding. */
+  attempts?: WorkBoardTerminalAttempt[]
   execution_strategy?: 'single' | 'task_sequence' | null
   strategy_rationale?: string | null
   strategy_plan?: string | null
@@ -151,6 +153,14 @@ export interface WorkBoardItemUpdate {
  *  'upcoming', where it would sit looking startable and be dispatched again to re-learn
  *  the same block. */
 export type RunReconcileOutcome = 'done' | 'failed' | 'blocked'
+
+export interface WorkBoardTerminalAttempt {
+  run_id: string
+  outcome: RunReconcileOutcome
+  pr: number | null
+  pr_url: string | null
+  recorded_at: string
+}
 
 /**
  * The terminal run's PR provenance, handed to {@link WorkBoardStore.detachRun}
@@ -669,6 +679,14 @@ export class WorkBoardRunStillLiveError extends Error {
 }
 
 export class WorkBoardStore {
+  private itemWithAttempts = (row: WorkBoardItemDbRow): WorkBoardItem => ({
+    ...rowToItem(row),
+    attempts: this.db.prepare<WorkBoardTerminalAttempt, [string, string]>(
+      `SELECT run_id, outcome, pr, pr_url, recorded_at
+         FROM work_board_terminal_attempts WHERE project_slug = ? AND item_id = ?
+         ORDER BY recorded_at, run_id`,
+    ).all(row.project_slug, row.id),
+  })
   private readonly db: ProjectDb
   private readonly now: () => string
   private readonly ulid: () => string
@@ -829,7 +847,7 @@ export class WorkBoardStore {
         `SELECT ${COLS} FROM work_board_items WHERE project_slug = ? AND id = ?`,
       )
       .get(project_slug, id)
-    return row === null ? null : rowToItem(row)
+    return row === null ? null : this.itemWithAttempts(row)
   }
 
   /** The ACTIVE lane: everything that is neither shipped nor shelved
@@ -842,7 +860,7 @@ export class WorkBoardStore {
           ORDER BY sort_order ASC`,
       )
       .all(project_slug)
-      .map(rowToItem)
+      .map(this.itemWithAttempts)
   }
 
   /**
@@ -861,7 +879,7 @@ export class WorkBoardStore {
           ORDER BY project_slug ASC, sort_order ASC`,
       )
       .all()
-      .map(rowToItem)
+      .map(this.itemWithAttempts)
   }
 
   /** Completed (status = done) reverse-chronological (newest first). */
@@ -873,7 +891,7 @@ export class WorkBoardStore {
           ORDER BY completed_at DESC, updated_at DESC`,
       )
       .all(project_slug)
-      .map(rowToItem)
+      .map(this.itemWithAttempts)
   }
 
   /**
@@ -891,7 +909,7 @@ export class WorkBoardStore {
           ORDER BY updated_at DESC`,
       )
       .all(project_slug)
-      .map(rowToItem)
+      .map(this.itemWithAttempts)
   }
 
   /**
@@ -1301,7 +1319,7 @@ export class WorkBoardStore {
           LIMIT 1`,
       )
       .get(project_slug, run_id)
-    return row === null ? null : rowToItem(row)
+    return row === null ? null : this.itemWithAttempts(row)
   }
 
   /**
@@ -1384,6 +1402,18 @@ export class WorkBoardStore {
     const result = await this.db.transaction(async (tx): Promise<WorkBoardItem | null> => {
       const current = this.getByRunId(project_slug, run_id)
       if (current === null) return null
+      await tx.run(
+        `INSERT INTO work_board_terminal_attempts
+           (project_slug, item_id, run_id, outcome, pr, pr_url, recorded_at)
+         VALUES (?, ?, ?, ?, ?, ?, ?)
+         ON CONFLICT(project_slug, item_id, run_id) DO UPDATE SET
+           outcome = excluded.outcome,
+           pr = COALESCE(excluded.pr, work_board_terminal_attempts.pr),
+           pr_url = CASE WHEN excluded.pr IS NOT NULL THEN excluded.pr_url
+                     ELSE work_board_terminal_attempts.pr_url END`,
+        [project_slug, current.id, run_id, outcome, pr_info?.pr ?? null,
+          pr_info?.pr != null ? pr_info.pr_url : null, this.now()],
+      )
       const sets = ['inline_active = 0']
       const params: (string | number | null)[] = []
       if (pr_info?.execution_strategy != null) {

@@ -33,6 +33,7 @@ import {
   Alert,
   Animated,
   Easing,
+  Linking,
   PanResponder,
   Pressable,
   StyleSheet,
@@ -420,7 +421,19 @@ function WorkBoardCompletedRowImpl({
       </View>
       {/* A completed row always carries its "Merged · <date>" on line 2; a
           shelved row carries no datestamp at all. */}
-      {archived ? null : (
+      {archived ? (item.attempts ?? []).map((attempt) => (
+        <View style={styles.meta} key={attempt.run_id}>
+          <Text style={styles.date}>Past attempt · {attempt.outcome} · {attempt.run_id}</Text>
+          {attempt.pr !== null ? (
+            attempt.pr_url ? (
+              <Pressable accessibilityRole="link" accessibilityLabel={`PR #${attempt.pr}`}
+                onPress={() => { void Linking.openURL(attempt.pr_url!).catch(() => Alert.alert('Could not open PR')); }}>
+                <Text style={styles.date}>PR #{attempt.pr}</Text>
+              </Pressable>
+            ) : <Text style={styles.date}>PR #{attempt.pr}</Text>
+          ) : null}
+        </View>
+      )) : (
         <View style={styles.meta}>
           <Text style={styles.date}>Merged · {formatCompletedShort(item.completed_at)}</Text>
           {alert !== null && alert.tone === 'alert' ? (

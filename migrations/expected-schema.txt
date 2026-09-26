@@ -1742,6 +1742,19 @@ CREATE TABLE "work_board_items" (
 , repo_name TEXT, task_total INTEGER
     CHECK (task_total IS NULL OR (typeof(task_total) = 'integer' AND task_total > 0 AND task_total <= 9007199254740991)), execution_strategy TEXT CHECK (execution_strategy IN ('single', 'task_sequence')), strategy_rationale TEXT, strategy_plan TEXT, strategy_source TEXT CHECK (strategy_source IN ('planner', 'legacy'))) STRICT
 
+[table] work_board_terminal_attempts (tbl=work_board_terminal_attempts)
+CREATE TABLE work_board_terminal_attempts (
+    project_slug TEXT NOT NULL,
+    item_id TEXT NOT NULL,
+    run_id TEXT NOT NULL,
+    outcome TEXT NOT NULL CHECK (outcome IN ('done', 'failed', 'blocked')),
+    pr INTEGER,
+    pr_url TEXT,
+    recorded_at TEXT NOT NULL,
+    PRIMARY KEY (project_slug, item_id, run_id),
+    FOREIGN KEY (item_id) REFERENCES work_board_items(id) ON DELETE CASCADE
+)
+
 [table] workspace_members (tbl=workspace_members)
 CREATE TABLE workspace_members (
     user_id TEXT PRIMARY KEY NOT NULL,                   -- the Neutron user_id from the auth service (Zone C); TEXT PRIMARY KEY is implicitly nullable on rowid tables, pin it

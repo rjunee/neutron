@@ -71,6 +71,7 @@ export function isWorkBoardStatus(value: unknown): value is WorkBoardStatus {
 
 
 export interface WorkBoardItem {
+  attempts?: WorkBoardTerminalAttempt[]
   id: string;
   /** Server-only; absent on the live `work_board_changed` frame. */
   project_slug?: string;
@@ -320,6 +321,38 @@ export function docLinkLabel(ref: string | null | undefined): string | null {
  * {@link WorkBoardItem}s, dropping malformed entries. Shared by the live
  * subscriber so a garbled frame can't crash the screen.
  */
+export interface WorkBoardTerminalAttempt {
+  run_id: string
+  outcome: 'done' | 'failed' | 'blocked'
+  pr: number | null
+  pr_url: string | null
+  recorded_at: string
+}
+
+export function parseWorkBoardAttempts(raw: unknown): WorkBoardTerminalAttempt[] {
+  if (!Array.isArray(raw)) return []
+  return raw.flatMap((value): WorkBoardTerminalAttempt[] => {
+    if (typeof value !== 'object' || value === null) return []
+    const r = value as Record<string, unknown>
+    if (typeof r.run_id !== 'string' || !r.run_id ||
+        !['done', 'failed', 'blocked'].includes(String(r.outcome)) ||
+        typeof r.recorded_at !== 'string') return []
+    const pr = typeof r.pr === 'number' && Number.isSafeInteger(r.pr) && r.pr > 0 ? r.pr : null
+    let pr_url: string | null = null
+    if (pr !== null && typeof r.pr_url === 'string') {
+      try {
+        const url = new URL(r.pr_url)
+        if (url.protocol === 'https:' && !url.username && !url.password) pr_url = url.href
+      } catch { /* An unresolved PR remains plain text. */ }
+    }
+    return [{
+      run_id: r.run_id,
+      outcome: r.outcome as WorkBoardTerminalAttempt['outcome'],
+      pr, pr_url, recorded_at: r.recorded_at,
+    }]
+  })
+}
+
 export function parseWorkBoardItems(raw: unknown): WorkBoardItem[] {
   if (!Array.isArray(raw)) return [];
   const out: WorkBoardItem[] = [];
@@ -337,6 +370,7 @@ export function parseWorkBoardItems(raw: unknown): WorkBoardItem[] {
       continue;
     const run_progress = parseRunProgress(r['run_progress']);
     out.push({
+      attempts: parseWorkBoardAttempts(r['attempts']),
       id,
       title,
       status,
