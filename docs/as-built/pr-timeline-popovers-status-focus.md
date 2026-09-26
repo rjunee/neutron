@@ -1,5 +1,8 @@
 ## 2026-09-25 — Explicit PR state, phase popovers and a useful time scale
 
+This UX follow-up addresses #1329. Its normative scope remains in
+`docs/spec-items/temporary-build-timeline-dashboard.md`.
+
 The first compact chart still relied on native hover titles for tiny phase spans,
 unlabeled lifecycle dots and a maximum-duration scale that compressed ordinary PRs.
 The chart now groups Open PRs first, with a visible section heading and subtle row
