@@ -2,6 +2,7 @@ import { afterEach, beforeEach, expect, test } from 'bun:test'
 import { mkdtempSync, readFileSync, rmSync, mkdirSync, writeFileSync, renameSync } from 'node:fs'
 import { Database } from 'bun:sqlite'
 import { applyMigrations } from '@neutronai/migrations/runner.ts'
+import { reconcileInstanceScope } from '@neutronai/migrations/scope-rekey.ts'
 import { tmpdir } from 'node:os'
 import { join } from 'node:path'
 import { ProjectDb } from '@neutronai/persistence/index.ts'
@@ -16,6 +17,45 @@ beforeEach(() => {
   db = ProjectDb.open(join(dir, 'project.db'))
 })
 afterEach(() => { db.close(); rmSync(dir, { recursive: true, force: true }) })
+
+test('instance rekey moves General card and terminal history together while preserving a distinct project across restart', async () => {
+  const before = 'owner-before'
+  const after = 'owner-after'
+  const project = 'distinct-project'
+  const store = new WorkBoardStore(db)
+  const generalCard = await store.create(before, { title: 'General attempt' })
+  const projectCard = await store.create(project, { title: 'Project attempt' })
+  await store.attachRun(before, generalCard.id, 'general-run')
+  await store.detachRun(before, 'general-run', 'failed')
+  await store.attachRun(project, projectCard.id, 'project-run')
+  await store.detachRun(project, 'project-run', 'blocked')
+  const generalHistory = store.get(before, generalCard.id)!.attempts!
+  const projectHistory = store.get(project, projectCard.id)!.attempts!
+  expect(generalHistory).toHaveLength(1)
+  expect(projectHistory).toHaveLength(1)
+  db.close()
+  const dbPath = join(dir, 'project.db')
+  const raw = new Database(dbPath)
+  try {
+    raw.run('INSERT INTO instance_scope_ledger (id, project_slug, updated_at) VALUES (1, ?, 1)', [before])
+    raw.run("INSERT INTO tasks (id, project_slug, title, created_at, updated_at) VALUES ('instance-task', ?, 'Task', '2026-01-01', '2026-01-01')", [before])
+    expect(reconcileInstanceScope(raw, after, { dbPath, currentSlugIsFallback: false }).action).toBe('rekeyed')
+    expect(raw.query("SELECT project_slug FROM tasks WHERE id = 'instance-task'").get()).toEqual({ project_slug: after })
+    expect(raw.query('SELECT project_slug, item_id, run_id FROM work_board_terminal_attempts ORDER BY run_id').all()).toEqual([
+      { project_slug: after, item_id: generalCard.id, run_id: 'general-run' },
+      { project_slug: project, item_id: projectCard.id, run_id: 'project-run' },
+    ])
+  } finally {
+    raw.close()
+    db = ProjectDb.open(dbPath)
+  }
+  const restarted = new WorkBoardStore(db)
+  expect(restarted.get(after, generalCard.id)?.attempts).toEqual(generalHistory)
+  expect(restarted.get(before, generalCard.id)).toBeNull()
+  expect(restarted.get(project, projectCard.id)?.attempts).toEqual(projectHistory)
+  expect(restarted.get(after, projectCard.id)).toBeNull()
+  expect(restarted.get(project, generalCard.id)).toBeNull()
+});
 
 test('terminal evidence survives retry, shelving, restart and unshelving without borrowing PRs', async () => {
   const store = new WorkBoardStore(db)

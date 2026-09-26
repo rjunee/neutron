@@ -67,3 +67,17 @@ The schema snapshot and exact migration lists now include the new table and
 ordinal, and the web parser's exact default object includes empty history;
 the equality and ownership assertions remain intact. This failed full run is
 not a full-suite receipt for the corrected candidate.
+
+The corrected `7be1ed6d20d27357dda014748df30f5bcf0e7c4c` full run again
+passed all 51 configurations and executed all 1,698 files, but exited 1 on the
+scope-classification guard: the new table's board key was not yet classified.
+Its log SHA-256 is
+`553cb92087f1597773d0d092db97373b6768474aa20e42a20dc21709129bc7cd`.
+Terminal attempts now participate in the same exact-key scope sweep as their
+parent cards. A real consuming rekey regression proves General's card and
+history move together, a distinct project retains its history, an instance
+task moves, and restarted board reads reject foreign scopes. Omitting the
+attempt sweep or rewriting the distinct project's history each fails the
+exact-row assertion; restoring the predicate passes. This does not establish
+isolation for a project whose spelling equals the owner key, the existing
+raw-key conflation documented by `workBoardScopeKey`.
