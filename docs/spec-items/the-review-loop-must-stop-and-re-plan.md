@@ -60,6 +60,110 @@ card, that a build stopped because it was blocked rather than because it failed.
 
 ## Acceptance
 
+### Typed host terminal transport (2026-09-25)
+
+The host's arithmetic G070/G071 STOP carries structured trigger, previous/current
+finding identities, blocker/major counts and round through the launcher into the
+canonical escalation result. The terminal harvest, Work Board reconciliation,
+delivery and project-chat wake consume that result through the existing escalation
+decoder. A host STOP must not be reduced to a generic `inner-error` without its
+escalation evidence. The stored full host result retains the identities; bounded
+owner-facing evidence begins with the counts so truncation cannot hide them.
+The verified-panel consumer attaches the reviewed head and panel decision before
+suite, CI and arithmetic overrides. For those stops the launcher records the host's
+`REQUEST_CHANGES` while preserving the actual panel's `argus-approved` or
+`argus-request-changes` checkpoint, exact head and round. Nexus attributes the
+actual panel decision to Argus and the host terminal result to the handoff. Host-only
+nomination repair also uses arithmetic but cannot attach a reviewed head, and
+must remain `REVIEW_NOT_RUN` with no reviewer decision event.
+
+- [x] A nondecreasing second review stops before a second fix, persists a rejected
+      checkpoint, and yields a BLOCKED card with the specific cause and project-chat
+      escalation evidence. Its published PR stays open and its base remains unmoved.
+      The composed terminal observer persists a `REQUEST_CHANGES` host handoff and
+      the actual Argus decision in Nexus, never a misleading `REVIEW_NOT_RUN` handoff.
+      A panel approval followed by G070 remains a host veto, not an invented Argus
+      rejection. Every arithmetic STOP persists the rejected typed checkpoint even
+      when the underlying panel decision is approve, re-plan, or a verified block.
+      A simultaneous nomination round ceiling or exhausted re-plan cannot erase
+      the arithmetic evidence. Immediate delivery and checkpoint recovery retain
+      the same BLOCKED classification and reviewed provenance. An exhausted
+      re-plan with distinct decreasing findings retains its ordinary refusal;
+      it does not acquire an arithmetic veto.
+      A late infrastructure refusal after recording findings, including a missing
+      synthesis approval checkpoint, retains its infrastructure cause and cannot
+      acquire arithmetic STOP evidence or an Argus decision.
+      verify: `bun test open/__tests__/project-build-e2e.test.ts -t 'review arithmetic STOP'`
+- [x] The rejected checkpoint and its arithmetic veto are one durable write. A
+      crash after that write but before returning STOP cannot authorize another
+      fix or rebuild: same-run recovery validates and rechecks the saved arithmetic,
+      then re-delivers BLOCKED with the same round, head and actual panel decision
+      without dispatching work or resetting spend. A distinct decreasing-count
+      rejection still resumes its permitted fix. Malformed veto evidence refuses
+      continuation; legacy rows are not backfilled with invented STOP evidence.
+      verify: `bun test open/__tests__/project-build-e2e.test.ts -t 'review arithmetic STOP.*checkpoint interruption'`
+      verify: `bun test trident/build-run.test.ts -t 'checkpointed arithmetic STOP'`
+- [x] Repeated identities yield the same BLOCKED transport even when counts fall;
+      distinct decreasing counts still continue. An ordinary host failure, a blocked
+      outcome without arithmetic evidence, and an unharvested result are not relabeled
+      as escalation. A reason string resembling the STOP cannot manufacture evidence.
+      Host-only arithmetic with zero reviewers may report BLOCKED but cannot
+      manufacture reviewed provenance or an Argus decision.
+      verify: `bun test trident/gates/review-progress.test.ts trident/project-launcher.test.ts`
+
+### Follow-up proposal: orchestrator-authorized re-plan from a rejected head
+
+This is a separate recovery change, not permission to widen ordinary retry's
+checkpoint whitelist. `build-mode-state.ts` refuses a `rejected` terminal source.
+Same-run recovery re-delivers a checkpointed arithmetic veto; other rejected
+checkpoints can still resume their permitted fix. Neither path authorizes a new
+orchestrator re-plan, and historical rows without the durable veto are not upgraded
+by widening the terminal-source whitelist.
+
+The proposed recovery action belongs to the authenticated project-chat
+orchestrator. It records a durable, one-use decision bound to project, card, prior
+run, exact latest checkpoint event, base OID, published PR number and head OID,
+and a nonempty reason/revised planning direction. Neither model output nor an
+ordinary retry boolean is authority. The action must atomically claim its source;
+parallel requests and replay after consumption cannot launch another recovery.
+
+Before admitting work, resolve the open PR in the expected repository and prove
+its head equals the rejected checkpoint and the remote branch tip. A deleted local
+branch/worktree may be reconstructed from that verified published head; missing,
+moved, closed, merged, unowned or unreadable evidence refuses without fresh-build
+fallback. Launch rechecks the same evidence after any dispatch/launch race.
+
+Import the checkpoint and findings under a distinct recovery-source type, retaining
+task spend/cap, review round/cap, accepted strategy, base and previous review
+baseline. Consume the single bounded re-plan allowance across the lineage before
+the planner runs. Pass the prior findings and the orchestrator's direction to a
+full re-plan, then build and independently review. G070/G071 compare the resulting
+review against the retained baseline; neither an unchanged/worse result nor a
+second re-plan is authorized. If a review round or task budget is exhausted, refuse
+without resetting it. Approval and provider receipts are never inherited.
+
+Every refusal stays visible on the card and preserves its source binding and
+BLOCKED lane. Delivering that refusal surface requires the dispatch API, durable
+board reason storage and both card renderers, beyond the terminal transport fix.
+
+Real-Git test plan for that follow-up:
+
+- Recover a published rejected head after removing its local branch and worktree;
+  assert exact parent/base ancestry, imported findings/counters, one planner/build,
+  subsequent fresh review and no merge before approval.
+- Repeat with moved remote head, wrong PR/repository/card/source event, unreadable
+  ref, active worktree holder, exhausted task/review/re-plan budget and ordinary
+  redispatch: no worker, no fresh row that refunds spend, visible refusal.
+- Change the remote between dispatch and launch; race/replay the same authorization;
+  crash before/after its consumption. Each source grants at most one re-plan and
+  every restart retains the imported budget and baseline.
+- After the authorized build, repeat a finding or keep/increase the count: STOP
+  again. The positive sibling uses distinct decreasing findings and completes the
+  normal governed review loop. Root and Trident TypeScript checks plus the Open
+  consuming harness are required; mocks of source selection alone are insufficient.
+
+### Original workflow acceptance
+
 Built on branch `fix/review-loop-stop-and-escalate`; record at
 `.trident/as-built/fix/review-loop-stop-and-escalate.md`.
 

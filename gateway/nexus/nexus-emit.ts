@@ -282,9 +282,9 @@ const ARGUS_CHECKPOINTS = new Set(['argus-approved', 'argus-request-changes'])
  *     decision, even if a stale Argus checkpoint remains on the row. A
  *     pre-verdict failure (`inner-error`, Forge crash) has NO Argus verdict, so
  *     no `argus` decision is fabricated — RC3 can trust a `decision` event's
- *     provenance. The verdict is `inner_verdict` verbatim: a committed `APPROVE`
- *     is only ever produced by the server provenance gate on a recorded
- *     `argus-approved`, so it is trustworthy.
+ *     provenance. `inner_verdict` is the host's terminal decision; a review
+ *     approval can still meet a host arithmetic veto. The canonical reviewer
+ *     checkpoint retains that approval independently of the host rejection.
  *
  * AWAITED appends (each guarded) — the caller (`on_terminal`) awaits this so the
  * events are persisted before the hook resolves (a GRACEFUL drain won't lose
@@ -331,7 +331,8 @@ export async function emitTridentTerminalEvents(
       run.inner_checkpoint !== null &&
       ARGUS_CHECKPOINTS.has(run.inner_checkpoint))
   if (argusReviewed) {
-    const verdict = run.inner_verdict === 'APPROVE' ? 'APPROVE' : 'REQUEST_CHANGES'
+    const verdict = run.inner_verdict === 'APPROVE' || run.inner_checkpoint === 'argus-approved'
+      ? 'APPROVE' : 'REQUEST_CHANGES'
     await appendNexusEventDurable(
       store,
       run.project_slug,

@@ -294,6 +294,9 @@ export interface TridentRun {
    * orchestrator. `REVIEW_NOT_RUN` means the run reached terminal without a
    * reviewer producing a verdict (crash, infrastructure stop, provenance reject,
    * or lost round); it is never a judgement about the code. Null while in flight.
+   * This is the host's final acceptance decision: a typed review STOP preserves
+   * the panel's own decision separately in inner_result and its Argus checkpoint,
+   * because a panel approval can still be vetoed by the host's progress gate.
    */
   inner_verdict: TridentVerdict | null
   /**

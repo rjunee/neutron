@@ -301,6 +301,15 @@ describe('emitTridentTerminalEvents', () => {
     expect(decision?.body).not.toContain(': APPROVE')
   })
 
+  it('a host veto preserves the panel approval separately from the terminal rejection', async () => {
+    await emitTridentTerminalEvents(h.store, terminalRun({ inner_verdict: 'REQUEST_CHANGES',
+      inner_checkpoint: 'argus-approved', failure_reason: 'Host progress gate stopped a repeated finding' }), { harvested: true })
+    const rows = await h.store.readRecent('proj-a', { limit: 100 })
+    expect(rows.find(row => row.kind === 'handoff')?.body).toContain('REQUEST_CHANGES')
+    expect(rows.find(row => row.kind === 'decision')?.body).toContain('APPROVE')
+    expect(rows.find(row => row.kind === 'decision')?.body).not.toContain('REQUEST_CHANGES')
+  })
+
   it('a pre-verdict failure (inner-error, NO argus checkpoint): handoff only, NO fabricated argus decision', async () => {
     await emitTridentTerminalEvents(
       h.store,

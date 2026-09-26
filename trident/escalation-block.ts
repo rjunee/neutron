@@ -13,8 +13,10 @@
  * module answers "was the MACHINE broken?"; this one answers "was the PLAN wrong?".
  * They are mutually exclusive by construction (one `block_kind` per result) and they
  * are kept apart because the two stops say opposite things about the review panel: an
- * infra block asserts NO seat judged the code, while an escalation is only ever reached
- * from a round a full panel judged.
+ * infra block asserts NO seat judged the code. Legacy review escalation follows a full
+ * panel; typed host arithmetic can also stop repeated nomination failures before review.
+ * Escalation alone therefore does not prove a panel verdict: the host records reviewed
+ * provenance separately, and a pre-review stop remains REVIEW_NOT_RUN.
  *
  * THE GATE, and why each condition is load-bearing — the same three `infra-block.ts`
  * applies, for the same reasons:

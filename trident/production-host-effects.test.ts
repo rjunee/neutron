@@ -1360,12 +1360,13 @@ test('production plan refuses a committed link to host bytes', async () => {
   await expect(f.modes.probePlan(snapshot.head)).rejects.toThrow('regular file')
 })
 
-test('production re-plan spend survives a crash before replanning begins', async () => {
+for (const repeated of [false, true])
+test(`production re-plan spend survives a crash before replanning begins (repeated=${repeated})`, async () => {
   const f = await resumeFixture(2, 0)
   const save = f.deps.modes!.saveCheckpoint!
   f.deps.reviewGate = async (_p, _observation, _s, _r, _u, record) => { // A design gap is not a code blocker: reporting one here would read as
   // no progress against the resumed round and stop before the re-plan.
-  record?.({ findings: ['design gap'], blockingCount: 0 }); return { kind: 're-plan', findings: ['design gap'], whatIsMissing: 'redesign' } }
+  record?.({ findings: [repeated ? 'design gap' : `design gap ${_r}`], blockingCount: 0 }); return { kind: 're-plan', findings: ['design gap'], whatIsMissing: 'redesign' } }
   f.deps.modes!.saveCheckpoint = async checkpoint => {
     await save(checkpoint)
     if (checkpoint.replansUsed === 1 && checkpoint.head === null) throw new Error('crash before re-plan')
@@ -1374,7 +1375,14 @@ test('production re-plan spend survives a crash before replanning begins', async
   const restarted = createProductionHostEffects(f.options)
   expect(await restarted.modes.loadResume()).toMatchObject({ head: null, replansUsed: 1, round: 4 })
   f.deps.modes = restarted.modes
-  expect(await f.run()).toMatchObject({ kind: 'blocked', on: expect.stringContaining('re-plan already spent') })
+  const outcome = await f.run()
+  expect(outcome).toMatchObject({ kind: 'blocked', on: expect.stringContaining(repeated ? 'repeated finding' : 're-plan already spent') })
+  if (outcome.kind === 'blocked') {
+    if (repeated) {
+      expect(outcome.reviewStop).toMatchObject({ trigger: 'repeat-finding', panelDecision: 're-plan', round: 4 })
+      expect(await restarted.modes.loadResume()).toMatchObject({ stage: 'rejected', replansUsed: 1, reviewStop: outcome.reviewStop })
+    } else expect(outcome.reviewStop).toBeUndefined()
+  }
 })
 
 test('production checkpoint append refuses a terminal transition after host observation', async () => {
@@ -1387,8 +1395,14 @@ test('production checkpoint append refuses a terminal transition after host obse
   expect(f.store.stageEvents(f.row.id).filter(e => e.stage === 'build-mode-state')).toHaveLength(1)
 })
 
-test('production rejected review survives a crash before the next fix', async () => {
+for (const previousCount of [1, 2])
+test(`production rejected review survives a crash before the next fix (${previousCount} -> 1 blockers)`, async () => {
   const f = await resumeFixture(1, 0)
+  if (previousCount === 2) {
+    const checkpoint = (await f.deps.modes!.loadResume())!
+    await f.deps.modes!.saveCheckpoint({ ...checkpoint,
+      previousReview: { findings: ['new issue', 'resolved issue'], blockingCount: previousCount } })
+  }
   f.deps.reviewGate = async (_p, _observation, _s, _r, _u, record) => { record?.({ findings: ['second issue'], blockingCount: 1 }); return { kind: 'fix', findings: ['second issue'] } }
   const save = f.deps.modes!.saveCheckpoint!
   f.deps.modes!.saveCheckpoint = async checkpoint => {
@@ -1399,8 +1413,28 @@ test('production rejected review survives a crash before the next fix', async ()
   const restarted = createProductionHostEffects(f.options)
   expect(await restarted.modes.loadResume()).toMatchObject({ stage: 'rejected', round: 2, replansUsed: 0,
     findings: [{ kind: 'code', actionable: true, text: 'second issue' }], previousFindings: ['new issue'] })
+  const rejected = (await restarted.modes.loadResume())!
+  const dispatchesBeforeRecovery = f.runner.calls.map(c => c.step_id)
+  const rejectedHead = (await measured(f)).head
   f.deps.modes = restarted.modes
   f.deps.reviewGate = async (_p, _observation, _s, _r, _u, record) => { record?.({ findings: [], blockingCount: 0 }); return { kind: 'approve' } }
+  if (previousCount === 1) {
+    // Equal counts already vetoed the next fix before the injected crash. The
+    // durable production checkpoint must re-deliver that veto, not bypass G071.
+    expect(rejected.reviewStop).toMatchObject({ trigger: 'no-progress', round: 2,
+      previous: { findings: ['new issue'], blockingCount: 1 },
+      current: { findings: ['second issue'], blockingCount: 1 }, reviewedHead: rejectedHead, panelDecision: 'fix' })
+    expect(await f.run()).toMatchObject({ kind: 'blocked', phase: 'review',
+      on: 'Review requires orchestrator arbitration: no-progress', reviewStop: rejected.reviewStop })
+    expect(f.runner.calls.map(c => c.step_id)).toEqual(dispatchesBeforeRecovery)
+    expect(dispatchesBeforeRecovery).toEqual([`${f.row.id}:fix:1`, `${f.row.id}:review:2:head:${rejectedHead}`])
+    expect((await measured(f)).head).toBe(rejectedHead)
+    expect(await restarted.modes.loadResume()).toEqual(rejected)
+    return
+  }
+  // A genuinely decreasing review still buys the interrupted fix: rejection by
+  // itself is not a terminal arithmetic STOP.
+  expect(rejected.reviewStop).toBeUndefined()
   expect(await f.run()).toMatchObject({ kind: 'blocked', on: 'fixture stops before merge' })
   const landed = (await measured(f)).head
   const firstFix = (await f.command(['git', '-C', f.repo, 'rev-parse', `${landed}^`])).trim()

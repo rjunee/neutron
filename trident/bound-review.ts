@@ -14,8 +14,10 @@ import type { TridentRun } from './store.ts'
 import type { DiffOutputHost } from './git-mode.ts'
 
 /**
- * REQUEST_CHANGES is reserved for a reviewer that judged the code and recorded
- * at least one finding. `round-lost` and `infra-only` both mean the code was not
+ * REQUEST_CHANGES is the host's terminal refusal after a reviewer judged the code
+ * and recorded findings or escalation evidence. A panel approval can still meet
+ * a host arithmetic veto; its canonical reviewer checkpoint retains that approval.
+ * `round-lost` and `infra-only` both mean the code was not
  * (re-)judged (the inner workflow's own terminology), while an empty finding set
  * is either approval or infrastructure failure — never a rejection.
  *

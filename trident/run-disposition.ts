@@ -33,7 +33,11 @@
  *                          that rejection has been judged by nobody. Handing it
  *                          to a review is the correct next step, which is exactly
  *                          what `resumeOnUnchangedHead` does with the name.
- *   reviewed-rejected      a reviewer looked and said no.
+ *   reviewed-rejected      review ran and the host's terminal gate refused.
+ *                          A panel approval can still meet an arithmetic STOP;
+ *                          its own decision remains in the typed result and
+ *                          canonical reviewer checkpoint, separately from this
+ *                          final host disposition.
  *
  * That distinguishability is the point: a trustworthy count of REAL rejections is
  * `disposition === 'reviewed-rejected'`, and everything else stops being counted

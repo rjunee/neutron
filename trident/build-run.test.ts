@@ -1205,6 +1205,32 @@ test('G039 only actionable code findings buy a resumed fix', async () => {
   }
 })
 
+for (const scenario of ['valid', 'moved-head', 'wrong-round', 'wrong-head', 'wrong-panel', 'wrong-trigger', 'wrong-current', 'not-a-stop', 'invalid-count'] as const)
+test(`checkpointed arithmetic STOP resumes without work (${scenario})`, async () => {
+  const f = modeFixture('single')
+  const current = { findings: ['new'], blockingCount: 2 }
+  const checkpoint = f.resume('rejected', 2, current)
+  checkpoint.findings = [{ kind: 'code', actionable: true, text: 'new' }]
+  checkpoint.reviewStop = { trigger: 'no-progress', previous: { findings: ['old'], blockingCount: 1 },
+    current, round: 2, reviewedHead: checkpoint.head!, panelDecision: 'fix' }
+  if (scenario === 'moved-head') f.snapshot.head = 'b'.repeat(40)
+  if (scenario === 'wrong-round') checkpoint.reviewStop.round = 1
+  if (scenario === 'wrong-head') checkpoint.reviewStop.reviewedHead = 'b'.repeat(40)
+  if (scenario === 'wrong-panel') delete checkpoint.reviewStop.panelDecision
+  if (scenario === 'wrong-trigger') checkpoint.reviewStop.trigger = 'repeat-finding'
+  if (scenario === 'wrong-current') checkpoint.reviewStop.current = { findings: ['other'], blockingCount: 2 }
+  if (scenario === 'not-a-stop') checkpoint.reviewStop.previous.blockingCount = 3
+  if (scenario === 'invalid-count') checkpoint.reviewStop.previous.blockingCount = -1
+  const outcome = await f.run()
+  if (scenario === 'valid' || scenario === 'moved-head') {
+    expect(outcome).toMatchObject({ kind: 'blocked', phase: 'review', recipient: 'orchestrator',
+      on: 'Review requires orchestrator arbitration: no-progress', reviewStop: checkpoint.reviewStop })
+  } else expect(outcome.kind).toBe('unknown')
+  expect(f.runner.calls).toHaveLength(0)
+  expect(f.cross.calls).toHaveLength(0)
+  expect(f.state.checkpoints).toHaveLength(0)
+})
+
 test('G040 resume diff is regenerated from pinned OID and empty diff rebuilds', async () => {
   for (const diff of ['', '+built\n']) {
     const f = modeFixture('single'); f.resume(); f.state.regenerated = diff
@@ -1955,11 +1981,20 @@ test('design gap re-plans once and continues with fresh measurements and spent r
   expect(counts).toEqual([0, 1, 1])
   expect(f.reads()).toBe(24)
 })
-test('host refuses a second re-plan even when worker claims zero spent', async () => {
+for (const repeated of [false, true])
+test(`host refuses a second re-plan even when worker claims zero spent (repeated=${repeated})`, async () => {
   const f = fixture()
   f.outcomes.set('run:review:2', f.completed({ ...f.snapshot, payload: { replansUsed: 0 } }))
-  f.deps.reviewGate = async (_payload, _observation, _snapshot, _round, used, record) => { record?.({ findings: gap.findings, blockingCount: 2 }); return { ...gap, whatIsMissing: `host count ${used}` } }
-  expect(await f.run()).toMatchObject({ kind: 'blocked', on: expect.stringContaining('already spent'), recipient: 'orchestrator' })
+  f.deps.reviewGate = async (_payload, _observation, _snapshot, round, used, record) => {
+    record?.({ findings: repeated ? gap.findings : [`gap-${round}`], blockingCount: 3 - round })
+    return { ...gap, whatIsMissing: `host count ${used}` }
+  }
+  const outcome = await f.run()
+  expect(outcome).toMatchObject({ kind: 'blocked', on: expect.stringContaining(repeated ? 'repeated finding' : 'already spent'), recipient: 'orchestrator' })
+  if (outcome.kind === 'blocked') {
+    if (repeated) expect(outcome.reviewStop).toMatchObject({ trigger: 'repeat-finding', panelDecision: 're-plan', round: 2 })
+    else expect(outcome.reviewStop).toBeUndefined()
+  }
   expect(f.runner.calls.filter(c => c.role === 'plan')).toHaveLength(2)
 })
 for (const decision of [

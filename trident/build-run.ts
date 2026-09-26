@@ -19,7 +19,7 @@ import {
 import type { LeakPreflightOutcome } from './leak-preflight.ts'
 import type { MergeDiffAssessment } from './merge.ts'
 import { applyReviewSuite, type SuiteAssessment } from './gates/review-suite.ts'
-import { reviewProgress, type ReviewProgress } from './gates/review-progress.ts'
+import { reviewProgress, type ReviewProgress, type ReviewStop } from './gates/review-progress.ts'
 import type { TerminalCause } from './terminal-cause.ts'
 import type { ReviewPanelObservation } from './gates/review-panel.ts'
 
@@ -38,7 +38,7 @@ export interface BuildSnapshot {
   pr: { number: number; head: string; state: 'OPEN' | 'CLOSED' | 'MERGED' } | null
 }
 export type Measurement = { kind: 'known'; value: BuildSnapshot } | { kind: 'unknown'; detail: string }
-export type GateResult = { kind: 'allow' } | { kind: 'blocked'; on: string } | { kind: 'unknown'; detail: string }
+export type GateResult = { kind: 'allow' } | { kind: 'blocked'; on: string; reviewStop?: ReviewStop } | { kind: 'unknown'; detail: string }
 export type NominationRepair = { kind: 'repair-nomination'; finding: string }
 export type PublicationGateResult = GateResult | NominationRepair
 export type ReviewDecision =
@@ -64,6 +64,13 @@ export interface PlanProbe {
 }
 export type PlanCommit = { kind: 'known'; head: string } | Exclude<GateResult, { kind: 'allow' }>
 export interface TaskHandoffIntent { iteration: number; builtHead: string; body: string }
+export interface HostReviewStop extends ReviewStop {
+  round: number
+  /** Set only after the host has consumed a verified panel for this head. */
+  reviewedHead?: string
+  /** The panel's decision before host suite, CI or progress overrides. */
+  panelDecision?: 'approve' | 'fix' | 're-plan' | 'blocked'
+}
 export interface ResumeCheckpoint {
   head: string | null
   stage: 'built' | 'approved' | 'rejected' | 'fixed' | 'task-built' | 'task-built-deviated'
@@ -81,6 +88,8 @@ export interface ResumeCheckpoint {
   previousReview?: ReviewProgress | null
   /** Explicit provenance, independent of round numbers and branch movement. */
   reviewBaseline?: 'none' | 'required'
+  /** A durable arithmetic veto must survive process death before terminal delivery. */
+  reviewStop?: HostReviewStop | undefined
   /** Re-present only the original request to its idempotent runner. Legacy pending
    * rows without the host continuation remain unknown. */
   pending?: { phase: WorkPhase; step_id: string; recovery?: PendingRecovery } | undefined
@@ -217,7 +226,7 @@ export interface BuildRunDeps {
 
 export type BuildRunOutcome =
   | { kind: 'merged'; snapshot: BuildSnapshot }
-  | { kind: 'blocked'; phase: BuildPhase; on: string; recipient: 'orchestrator' }
+  | { kind: 'blocked'; phase: BuildPhase; on: string; recipient: 'orchestrator'; reviewStop?: HostReviewStop }
   | { kind: 'built'; snapshot: BuildSnapshot; cause: 'wave-member-built' }
   | { kind: 'continued'; snapshot: BuildSnapshot; remainingTasks: number; cause: 'task-built' }
   | { kind: 'refused'; reason: 'worker-unsupported'; detail: string }
@@ -329,8 +338,10 @@ export async function buildRun(input: BuildRunInput, deps: BuildRunDeps, signal:
   const blocked = (on: string): BuildRunOutcome => ({ kind: 'blocked', phase, on, recipient: 'orchestrator' })
   const unknown = (detail: string): BuildRunOutcome => ({ kind: 'unknown', phase, step_id, detail })
   const failed = (detail: string, cause: TerminalCause = 'workflow-threw'): BuildRunOutcome => ({ kind: 'failed', phase, detail, cause })
-  const gateStop = (gate: GateResult): BuildRunOutcome | null => {
-    if (gate.kind === 'blocked') return blocked(gate.on)
+  const gateStop = (gate: GateResult, round = 0, panel?: { head: string; decision: NonNullable<HostReviewStop['panelDecision']> }): BuildRunOutcome | null => {
+    if (gate.kind === 'blocked') return { kind: 'blocked', phase, on: gate.on, recipient: 'orchestrator',
+      ...(gate.reviewStop ? { reviewStop: { ...gate.reviewStop, round,
+        ...(panel ? { reviewedHead: panel.head, panelDecision: panel.decision } : {}) } } : {}) }
     if (gate.kind === 'unknown') return unknown(gate.detail)
     return null
   }
@@ -476,6 +487,26 @@ export async function buildRun(input: BuildRunInput, deps: BuildRunDeps, signal:
     if (resume && (!validReviewBaseline(resume.reviewBaseline, resume.previousReview)
         || ((replansUsed > 0 || resume.stage === 'fixed' || resume.stage === 'rejected') && resume.reviewBaseline !== 'required'))) {
       return unknown('Resume prior review baseline is missing or invalid')
+    }
+    if (resume?.reviewStop !== undefined) {
+      const stop = resume.reviewStop
+      if (!stop || resume.stage !== 'rejected' || resume.pending !== undefined || !fullOid(resume.head)
+        || !Number.isSafeInteger(stop.round) || stop.round < 1 || stop.round !== resume.round
+        || !validReviewProgress(stop.previous) || !validReviewProgress(stop.current)
+        || !isDeepStrictEqual(stop.current, resume.previousReview)
+        || (stop.reviewedHead === undefined ? stop.panelDecision !== undefined
+          : stop.reviewedHead !== resume.head || !['approve', 'fix', 're-plan', 'blocked'].includes(stop.panelDecision ?? ''))) {
+        return unknown('Resume arithmetic STOP evidence is invalid')
+      }
+      const gate = reviewProgress(stop.previous, stop.current)
+      if (gate.kind !== 'blocked' || gate.reviewStop?.trigger !== stop.trigger) {
+        return unknown('Resume arithmetic STOP evidence does not establish its veto')
+      }
+      // Re-deliver the checkpointed veto before either a fix or a head-moved
+      // rebuild. Restart is not orchestrator authorization to spend another turn.
+      phase = stop.reviewedHead === undefined ? 'publish' : 'review'
+      return gateStop(gate, stop.round, stop.reviewedHead === undefined ? undefined
+        : { head: stop.reviewedHead, decision: stop.panelDecision! })!
     }
     let previousReview: ReviewProgress | undefined = resume?.previousReview ?? undefined
     let reviewBaseline: 'none' | 'required' = resume?.reviewBaseline ?? 'none'
@@ -909,12 +940,14 @@ export async function buildRun(input: BuildRunInput, deps: BuildRunDeps, signal:
     async function repairNomination(repair: NominationRepair, round: number): Promise<BuildRunOutcome | null> {
       if (recovery) return unknown('Pending worker must be reconciled before nomination repair')
       findings = [repair.finding]
-      await checkpoint({ head: snapshot.head, stage: 'rejected', round, pending: undefined,
-        previousReview: { findings, blockingCount: 1 }, reviewBaseline: 'required',
-        findings: findings.map(text => ({ kind: 'code' as const, actionable: true, text })) })
-      if (round >= maxRounds) return blocked('Review requires orchestrator arbitration: round ceiling')
       const current = { findings, blockingCount: 1 }
-      const progress = gateStop(reviewProgress(previousReview, current))
+      const progress = gateStop(reviewProgress(previousReview, current), round)
+      await checkpoint({ head: snapshot.head, stage: 'rejected', round, pending: undefined,
+        previousReview: current, reviewBaseline: 'required',
+        reviewStop: progress?.kind === 'blocked' ? progress.reviewStop : undefined,
+        findings: findings.map(text => ({ kind: 'code' as const, actionable: true, text })) })
+      if (progress?.kind === 'blocked') return progress
+      if (round >= maxRounds) return blocked('Review requires orchestrator arbitration: round ceiling')
       if (progress) return progress
       previousReview = current
       reviewBaseline = 'required'
@@ -1002,6 +1035,10 @@ export async function buildRun(input: BuildRunInput, deps: BuildRunDeps, signal:
         const panel = await deps.reviewGate(result.payload, result.review, snapshot, round, replansUsed, value => {
           currentReview = { findings: [...value.findings], blockingCount: value.blockingCount }
         })
+        // The panel can discover a missing approval checkpoint after recording
+        // findings. That infrastructure refusal is not a reviewed decision and
+        // cannot supply arithmetic STOP provenance.
+        if (panel.kind === 'blocked' && panel.on.startsWith('infra-only:')) return blocked(panel.on)
         const suiteDecision = applyReviewSuite(panel, suite)
         const decision = applyReviewCi(suiteDecision, ci)
         if (currentReview) {
@@ -1012,19 +1049,28 @@ export async function buildRun(input: BuildRunInput, deps: BuildRunDeps, signal:
             blockingCount: currentReview.blockingCount + suiteBlockers.length,
             ...(unknownIdentities ? { unknownIdentities: true } : {}) }
         }
-        if (decision.kind === 'blocked') return blocked(decision.on)
         if (decision.kind === 'unknown') return unknown(decision.detail)
         // The rejection is recorded BEFORE the stops below. A repeated finding or an
         // exhausted round ends the run, and the orchestrator resumes from this row;
         // writing it only on the paths that continue would lose exactly the rounds
         // that need it.
-        if (decision.kind === 'fix') {
+        const progress = gateStop(reviewProgress(previousReview, currentReview), round,
+          // Progress is recorded only after the panel's run/head/round is verified.
+          // A refused second re-plan is still a real panel decision, not infrastructure.
+          currentReview && (panel.kind === 'approve' || panel.kind === 'fix' || panel.kind === 're-plan' || panel.kind === 'blocked')
+            ? { head: snapshot.head, decision: panel.kind } : undefined)
+        if (decision.kind === 'fix' || progress?.kind === 'blocked') {
           await checkpoint({ head: snapshot.head, stage: 'rejected', round, pending: undefined,
             previousReview: currentReview ?? null, reviewBaseline: 'required',
-            findings: decision.findings.map(text => ({ kind: 'code' as const, actionable: true, text })) })
+            reviewStop: progress?.kind === 'blocked' ? progress.reviewStop : undefined,
+            findings: (decision.kind === 'approve' || decision.kind === 'blocked' ? currentReview!.findings : decision.findings)
+              .map(text => ({ kind: 'code' as const, actionable: true, text })) })
         }
+        // Preserve the durable arithmetic veto even when another terminal guard
+        // fires in this round. Normal delivery and crash recovery must agree.
+        if (progress?.kind === 'blocked') return progress
+        if (decision.kind === 'blocked') return blocked(decision.on)
         if (decision.kind === 're-plan' && replansUsed !== 0) return blocked('Review requires orchestrator arbitration: re-plan already spent')
-        const progress = gateStop(reviewProgress(previousReview, currentReview))
         if (progress) return progress
         if (decision.kind === 'approve') {
           await checkpoint({ head: snapshot.head, stage: 'approved', round, pending: undefined, findings: [] })
