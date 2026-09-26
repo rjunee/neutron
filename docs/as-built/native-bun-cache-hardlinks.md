@@ -21,10 +21,20 @@ focused tests (34 assertions), and the real native smoke reproduced two direct
 installs sharing the cache's inode, working React peers, valid TypeScript,
 TS2322 for invalid TypeScript, and usable installed dependencies after fixture
 cache removal. Isolated mutation copies independently failed when environment
-delivery was removed and when hardlink seeding was replaced with copying.
+delivery was removed, when hardlink seeding was replaced with copying, when
+the private-directory mode check was removed, and when every cache was refused.
 A fresh worktree dependency install using the existing scratch cache installed
 2,503 packages in 758 ms. Historical measurements are not substituted for
 current full-suite or review results.
+
+Current independent review reproduced focused and consuming native proof and
+found a smoke-fixture cleanup gap before its original `try/finally`. Setup now
+shares the cleanup boundary: an actual sandbox provider-bind refusal leaves
+zero new fixture/cache directories, and the host consuming smoke still passes.
+Root, runtime and Trident TypeScript checks passed; the spec-index tests passed
+38 cases. The as-built guard and commit-message leak scan passed. A scan of the
+seven authored paths plus the license passed; a whole local tree scan reported
+452 findings, so it is not claimed as a whole-tree purity pass.
 
 `native-bun-cache.ts` prepares a UID-owned 0700 scratch cache before the native
 app-server is spawned. Existing package files are hardlinked, never copied;

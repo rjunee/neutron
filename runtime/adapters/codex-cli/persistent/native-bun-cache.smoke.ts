@@ -15,6 +15,10 @@ async function main(): Promise<void> {
   const inputCache = process.env.NATIVE_BUN_SMOKE_SOURCE
   if (!inputCache) throw new Error('NATIVE_BUN_SMOKE_SOURCE must name the explicit fixture package cache')
   const root = mkdtempSync(join(tmpdir(), 'native-bun-smoke-'))
+  let cache: string | undefined
+  let transport: ProjectControlTransport | undefined
+  let stopProvider: (() => void) | undefined
+  try {
   const source = join(root, 'source'), cwd = join(root, 'owner'), codexHome = join(root, 'home')
   for (const path of [source, cwd, codexHome]) mkdirSync(path, { mode: 0o700 })
   const mirror = (from: string, to: string): void => {
@@ -28,7 +32,7 @@ async function main(): Promise<void> {
   for (const name of ['react@19.1.0@@@1', 'react-dom@19.1.0@@@1', 'scheduler@0.26.0@@@1', 'typescript@5.9.3@@@1']) {
     mirror(join(inputCache, name), join(source, name))
   }
-  const cache = prepareNativeBunCache(source, tmpdir(), process.getuid!())
+  cache = prepareNativeBunCache(source, tmpdir(), process.getuid!())
   const lock = {
     lockfileVersion: 1, configVersion: 1,
     workspaces: { '': { name: 'native-cache-fixture', dependencies: { react: '19.1.0', 'react-dom': '19.1.0', typescript: '5.9.3' } } },
@@ -67,8 +71,7 @@ async function main(): Promise<void> {
     ]
     return new Response(events.map(event => `event: ${event.type}\ndata: ${JSON.stringify(event)}\n\n`).join(''), { headers: { 'content-type': 'text/event-stream' } })
   } })
-  let transport: ProjectControlTransport | undefined
-  try {
+    stopProvider = () => { provider.stop(true) }
     transport = createProjectControlStdioTransport({ binary: 'codex', cwd, codexHome,
       env: { PATH: process.env.PATH ?? '/usr/bin:/bin', HOME: codexHome, BUN_INSTALL_CACHE_DIR: source },
       configOverrides: ['model_provider="fixture"', 'model="gpt-5.5"', 'features.code_mode=false', 'analytics.enabled=false', 'feedback.enabled=false', 'check_for_update_on_startup=false',
@@ -122,8 +125,9 @@ async function main(): Promise<void> {
     }
     console.log('PASS: production transport, direct native installs, inode sharing, runtime peers, TypeScript siblings and retired cache', JSON.stringify({ inodes }))
   } finally {
-    transport?.close(); provider.stop(true)
-    rmSync(root, { recursive: true, force: true }); rmSync(cache, { recursive: true, force: true })
+    transport?.close(); stopProvider?.()
+    rmSync(root, { recursive: true, force: true })
+    if (cache) rmSync(cache, { recursive: true, force: true })
   }
 }
 await main()
