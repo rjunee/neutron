@@ -36,6 +36,7 @@ import {
 import { tmpdir } from 'node:os'
 import { join } from 'node:path'
 import { promisify } from 'node:util'
+import { Database } from 'bun:sqlite'
 
 import {
   ProjectBackupStore,
@@ -513,6 +514,7 @@ interface ServerHarness {
   server: import('bun').Server<unknown>
   base: string
   store: ProjectBackupStore
+  projectRoot: string
   cleanup: () => void
 }
 
@@ -549,6 +551,7 @@ function startServer(opts: { project_slug?: string } = {}): ServerHarness {
     server,
     base,
     store,
+    projectRoot,
     cleanup: () => {
       void server.stop(true)
       rmSync(tmp, { recursive: true, force: true })
@@ -586,7 +589,7 @@ describe('app-backups HTTP surface', () => {
   let projectRoot: string
   beforeEach(() => {
     h = startServer()
-    projectRoot = (h as unknown as { _projectRoot?: string })._projectRoot ?? ''
+    projectRoot = h.projectRoot
   })
   afterEach(() => {
     h.cleanup()
@@ -695,6 +698,22 @@ describe('app-backups HTTP surface', () => {
     expect(restore['snapshot_sha']).toBe(sha)
     expect(typeof restore['recovery_commit_sha']).toBe('string')
     expect(typeof restore['prior_head_sha']).toBe('string')
+  })
+
+  it('POST /backups/restore returns explicit offline guidance for live SQLite, but permits a document', async () => {
+    const live = new Database(join(projectRoot, 'state.db'))
+    try {
+      live.exec('PRAGMA journal_mode=WAL; CREATE TABLE entries (body TEXT);')
+      live.exec("INSERT INTO entries VALUES ('old')")
+      const sha = await ensureOneSnapshot()
+      live.exec("INSERT INTO entries VALUES ('new')")
+      const refused = await call(h.base, 'POST', `/api/app/projects/${PROJECT_ID}/backups/restore`, { snapshot_sha: sha })
+      expect(refused.status).toBe(503)
+      expect(refused.json['message']).toContain('fresh-directory')
+      const allowed = await call(h.base, 'POST', `/api/app/projects/${PROJECT_ID}/backups/restore`, { snapshot_sha: sha, file_path: 'README.md' })
+      expect(allowed.status).toBe(200)
+      expect(live.query('SELECT body FROM entries').all()).toEqual([{ body: 'old' }, { body: 'new' }])
+    } finally { live.close() }
   })
 
   it('POST /backups/restore rejects a missing snapshot_sha with 400', async () => {

@@ -405,6 +405,8 @@ const KNOWN_READERS: Readonly<Record<string, string>> = {
     'Broad regex literal at scripts/spec-items-index.ts:99 matches an identity-name candidate; registered conservatively, without claiming an env read or trimming behavior.',
   'scripts/build-timeline-codex-import.ts':
     'Opaque evidence-reference validation regex at scripts/build-timeline-codex-import.ts:90 accepts identity-name candidates. No identity environment access; the importer reads explicitly supplied rollout/config paths. Regex-only classification and an actual-reader control are pinned below.',
+  'scripts/vault-backup.ts':
+    'CLI usage text at scripts/vault-backup.ts:13 names OWNER_HOME. The owner-home argument comes from argv, not the environment. Help-string classification and an actual-reader control are pinned below.',
   'skill-forge/command.ts':
     'Broad regex literal at skill-forge/command.ts:74 matches an identity-name candidate; registered conservatively, without claiming an env read or trimming behavior.',
   'skill-forge/distiller.ts':
@@ -419,8 +421,8 @@ const KNOWN_READERS: Readonly<Record<string, string>> = {
     'Broad credential-name validation regex at runtime/configured-models.ts:28 matches identity-name candidates; registered conservatively. Configuration reads the supplied env at runtime/configured-models.ts:11, not an identity variable.',
   'trident/mutation-prover.ts':
     'Broad regex literal at trident/mutation-prover.ts:1050 matches an identity-name candidate; registered conservatively, without claiming an env read or trimming behavior.',
-  'trident/project-repos.ts':
-    'Broad repo-name regex at trident/project-repos.ts:16 allows underscores and therefore matches an identity-name candidate; registered conservatively. Project resolution takes projectDir as an input and does not read the environment.',
+  'contracts/project-repos.ts':
+    'Broad repo-name regex at contracts/project-repos.ts:18 allows underscores and therefore matches an identity-name candidate; registered conservatively. Project resolution takes projectDir as an input and does not read the environment. Regex-only classification and an actual-reader control are pinned below.',
   'trident/project-worker-continuity.ts':
     'Broad retained-thread validation regex at trident/project-worker-continuity.ts:25 allows underscores and therefore matches identity-name candidates. NOT an env reader: credential identity is supplied by ProjectWorkerContinuityOptions.credentialIdentity, and the file never touches process.env. Thread and changed-credential continuity are pinned in trident/project-worker-continuity.test.ts.',
   'trident/slugify-task.ts':
@@ -966,6 +968,29 @@ test('timeline importer evidence-reference validator is a conservative regex mat
   expect(namesIdentityVar(importer, 'scripts/build-timeline-codex-import.ts')).toBe(true)
   expect(READ_PATTERNS.some((pattern) => pattern.test(importer))).toBe(false)
   expect(processEnvAccess.test(importer)).toBe(false)
+  expect(READ_PATTERNS.some((pattern) => pattern.test(realReader))).toBe(true)
+  expect(processEnvAccess.test(realReader)).toBe(true)
+})
+
+test('project repository declarations are a conservative regex match', () => {
+  const declarations = readFileSync(join(ROOT, 'contracts/project-repos.ts'), 'utf8')
+  const realReader = readFileSync(join(ROOT, 'migrations/db-path.ts'), 'utf8')
+  const processEnvAccess = /\bprocess\s*\.\s*env\b/
+  expect(namesIdentityVar(declarations, 'contracts/project-repos.ts')).toBe(true)
+  expect(READ_PATTERNS.some((pattern) => pattern.test(declarations))).toBe(false)
+  expect(processEnvAccess.test(declarations)).toBe(false)
+  expect(READ_PATTERNS.some((pattern) => pattern.test(realReader))).toBe(true)
+  expect(processEnvAccess.test(realReader)).toBe(true)
+})
+
+test('vault backup names OWNER_HOME in CLI help rather than reading the environment', () => {
+  const cli = readFileSync(join(ROOT, 'scripts/vault-backup.ts'), 'utf8')
+  const realReader = readFileSync(join(ROOT, 'migrations/db-path.ts'), 'utf8')
+  const processEnvAccess = /\bprocess\s*\.\s*env\b/
+  expect(namesIdentityVar(cli, 'scripts/vault-backup.ts')).toBe(true)
+  expect(cli).toContain('push OWNER_HOME PROJECT_ID PROJECT_DIR')
+  expect(cli).toContain('main(process.argv.slice(2))')
+  expect(processEnvAccess.test(cli)).toBe(false)
   expect(READ_PATTERNS.some((pattern) => pattern.test(realReader))).toBe(true)
   expect(processEnvAccess.test(realReader)).toBe(true)
 })

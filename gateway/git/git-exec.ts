@@ -26,8 +26,8 @@ import { promisify } from 'node:util'
 const execFileAsync = promisify(execFile)
 
 /**
- * Hard timeout per `git` invocation for non-push ops. Push gets a
- * longer ceiling — see `PUSH_TIMEOUT_MS` in `project-backup-store.ts`.
+ * Hard timeout per local `git` invocation. The encrypted remote transport
+ * owns its independent network-command deadline.
  * A healthy commit on a small repo runs in <100 ms; a runaway is most
  * likely a wedge.
  */

@@ -3,71 +3,45 @@ title: Split a project into declared code repos and a versioned vault
 group: platform
 status: open
 priority: P1
-cutover: false
+cutover: true
 legacy_ref: "SPEC.md § Phases → Steps (2026-09-12 split)"
 ---
 
-> **ONE MEASUREMENT BELOW IS NOW STALE (2026-09-12, at the split).** Mechanism (c)
-> is described as *"Also built, tested, and never constructed"*. Half of that has
-> changed: **`ProjectBackupStore` IS constructed in the production composition** at
-> `open/composer.ts:3975`, behind the app-backups surface. What is still never
-> constructed is the **scheduler** — `ProjectBackupScheduler` appears outside its own
-> test only in `loop/registry.ts:9`, which still lists it among the loops that "never
-> start in ANY composition". Mechanism (b), `doc-version-store.ts`, has no production
-> construction at all, so its "built, tested, never constructed" stands.
->
-> This does not change the item: the work is still deciding the model and then
-> reconciling three overlapping mechanisms, not writing a fourth.
+A project owns a private vault and zero or more declared code repositories.
+The vault includes working documents, plans, notes, research and per-Core data;
+code repositories have independent remotes and publication rules. A project
+without a code repository is fully supported.
 
-**A project needs a first-class split between its CODE REPO(s) and its VAULT — and the vault must be
-versioned and backed up whether or not any repo exists** (owner-directed 2026-08-14: *"every project
-needs to have the notion of things that are inside the repo … and also things that are outside the repo,
-which is working documents, stuff that only I need … we need to make sure that all the stuff that's
-considered outside the repo is still backed up, still tracked as a git repo, even though it's not
-necessarily pushed anywhere. Or it may be pushed somewhere as one master backup."*). THE MODEL HE ASKED
-FOR, generalised: a project owns a private **vault** (docs, plans, notes, research, per-Core sidecars —
-everything that is only his) and **zero or more code repos**, each with its own remote and its own
-publication rules. `neutron-open` is the demanding case: the vault is private, and `code/` is a clone of
-a PUBLIC repo that must contain only a subset of the project. Most projects have no code repo at all;
-some will have several; the model must not assume one.
-MEASURED on this instance, 2026-08-14 — the current state is NOT a design, it is three overlapping
-mechanisms of which only the weakest runs:
-(a) `Projects/<id>/.git` — created by the materialize path, **one commit ("Neutron materialize: <id>"),
-dated 2026-07-22, on every project, and never committed to since. No remote on any of them. No
-`.gitignore`.** 9 of 16 project folders have one; 7 have no git at all.
-(b) `gateway/git/doc-version-store.ts` — P7.4 Phase 1, a per-doc-edit repo at `<project>/.docs-versions/`.
-**Built, tested, and never constructed: no `.docs-versions/` exists for any project.**
-(c) `gateway/git/project-backup-store.ts` + `ProjectBackupScheduler` — P7.4 Phase 2, a whole-tree
-snapshot every 6h at `<project>/.project-backup/` with an OPTIONAL per-project remote and push-failure
-classification. **Built, tested, and — as of 2026-09-12 — the STORE is constructed (`open/composer.ts:3975`) but the
-SCHEDULER never is** (`loop/registry.ts` already names it as a
-loop that "never starts in ANY composition"; the existing backlog line "Wire `ProjectBackupScheduler`
-(D-7)" is the same defect seen from the other end — these two entries must be resolved together).
-NET EFFECT: the owner's private working context — every plan doc, note and research artifact across 16
-projects — is un-versioned and un-backed-up on one volume. `neutron-backup.sh` would cover it, but it
-backs up `NEUTRON_HOME` and **this instance's `NEUTRON_HOME` is not a git repo** — the script has never
-been run here, and the one backup timer installed on this host does not cover the owner's data at all.
-TWO HAZARDS THE FIX MUST HANDLE, both measured:
-1. **A nested code repo is not just another directory.** `code/` is a real clone and is neither tracked
-   nor ignored by the vault repo. `git add -An` in the vault emits *"warning: adding embedded git
-   repository: code"* — a naive whole-tree backup stores a gitlink, so the backup contains a pointer to
-   content it does not have, while looking complete. A vault backup must EXCLUDE nested repo working
-   trees by rule (they have their own remote and their own recovery story), not by luck.
-2. **Live SQLite is in the tree.** The same dry-run would stage `.nexus/nexus.db-wal`,
-   `.comments/comments.db-wal` and `calendar/calendar.db-wal`. Phase 2's seeded `.gitignore` is the
-   designed answer; whatever ships must actually apply it, and a mid-write WAL must not be committed as
-   if it were a consistent snapshot.
-Acceptance: a project declares its code repos (path + remote) as data rather than by their presence on
-disk, and a project with none is a fully supported shape; the vault is committed automatically on
-change, with nested repo trees excluded by rule and a recoverable history; a project with no remote is
-still recoverable from local history, and a single owner-level backup remote can be configured for all
-vaults at once (his *"one master backup"*); and the public/private boundary is explicit enough that
-asking "is this file publishable?" has an answer that does not depend on which folder someone happened
-to save it in. Phases 1 and 2 are ALREADY BUILT — the work is deciding the model, then wiring and
-reconciling them against the materialize `.git`, NOT writing a third mechanism.
-OPEN, owner's call, deliberately not decided here: whether the vault's canonical git is the materialize
-`.git` or Phase 2's `.project-backup/` (three repos over one tree is one too many); whether the master
-backup remote is per-project or one owner-level remote holding every vault.
+The owner selected the existing `.project-backup/` repository as the canonical
+vault history on 2026-09-26, with one private encrypted GitHub destination for
+all vaults. The materializer and document editor must share that writer.
+Original `.git` and `.docs-versions` histories are imported under immutable
+SHA-named refs and retained on disk; this change does not delete legacy data.
+There is no fourth store. Local history is useful without a remote, and a remote
+failure must not discard a local snapshot or fall back to plaintext publication.
+
+Snapshots exclude declared repository paths and discovered nested repositories.
+A gitlink alone is not recoverable code and must never masquerade as vault data.
+Live SQLite databases enter Git through a consistent standalone image containing
+committed WAL transactions; live journal files never enter a new snapshot.
+Database consistency is per database, not a transaction across every project file.
+In-place restore refuses database replacement or removal: live connections and
+WAL must be quiesced through offline/fresh-directory recovery. Document-only
+restore remains available when an unrelated database exists. Every destructive
+restore first requires a successful local safety snapshot.
+
+The scheduler runs every six hours, with boot backfill and jitter, using the same
+store as the owner backup surface. Document edits record local history immediately.
+The owner remote receives authenticated encrypted bundles of all canonical refs,
+including imported history. Configuration pins private repository identity and
+requires an owner attestation that the recovery key is held off the host.
+See [backup recovery](../vault-backup-recovery.md) for operational limits and the
+fresh-host restore procedure. A local fixture restore is not evidence of live
+offsite recovery or of physical recovery-key custody.
+
+The location-independent publication-classification criterion below remains open.
+Repository declarations and encrypted transport prevent automatic vault publication;
+they cannot classify a private note copied into a public code checkout.
 Repo location and selection are resolved by Decisions Log 2026-09-15 (#935).
 
 ## Acceptance
@@ -82,19 +56,37 @@ Repo location and selection are resolved by Decisions Log 2026-09-15 (#935).
       selected by name and by default). This is the same criterion the #935 addendum below
       already records; it was left unticked here when that section was added.
       Verify: `bun test trident/project-repos.test.ts`.
-- [ ] The vault is committed automatically on change, with a recoverable history.
-- [ ] Nested repo working trees are excluded **by rule, not by luck**. Assert a vault
+- [x] The vault is committed automatically on change, with a recoverable history.
+      Verify: `open/__tests__/loop-inventory-open-composer.test.ts` captures two
+      scheduled versions and reads the first after the second lands.
+- [x] A scheduled or run-now backup overlapping a local document commit still
+      performs the configured encrypted push. Concurrent full backups share one
+      push, and queued document edits and restores retain their history.
+      Verify: `gateway/__tests__/project-backup-store.test.ts` — configured backup
+      scheduling with document writers; the skipped-push and duplicate-push
+      mutations must fail these consuming tests.
+- [x] Nested repo working trees are excluded **by rule, not by luck**. Assert a vault
       backup of a tree containing a nested clone stores no gitlink pointing at content the
       backup does not hold.
-- [ ] Live SQLite is never committed mid-write. Assert `.db-wal` files are excluded by the
+      Verify: `gateway/__tests__/project-backup-store.test.ts` covers discovered
+      clones, zero declarations, multiple declarations and previously tracked paths.
+- [x] Live SQLite is never committed mid-write. Assert `.db-wal` files are excluded by the
       applied `.gitignore`, not merely by the seeded one.
-- [ ] A project with no remote is still recoverable from local history, and a single
+      Verify: the same store test restores committed WAL-only rows from a standalone
+      database blob and runs `PRAGMA integrity_check`.
+- [x] A project with no remote is still recoverable from local history, and a single
       owner-level backup remote can be configured for all vaults at once.
+      Verify: `gateway/__tests__/project-backup-store.test.ts` and
+      `gateway/__tests__/project-backup-remote.test.ts` exercise local recovery,
+      encrypted remote push and fresh-clone restore, including archived refs.
 - [ ] Asking "is this file publishable?" has an answer that does not depend on which
       folder someone happened to save it in.
-- [ ] No third mechanism is written. The change reconciles the materialize `.git`,
+- [x] No third mechanism is written. The change reconciles the materialize `.git`,
       `doc-version-store.ts` and `project-backup-store.ts`; a diff that adds a fourth
       store fails this criterion.
+      Verify: `gateway/__tests__/vault-history-migration.test.ts`,
+      `gateway/__tests__/doc-version-store.test.ts` and
+      `onboarding/wow-moment/__tests__/project-materializer.test.ts`.
 
 ### Repo declaration model (#935)
 

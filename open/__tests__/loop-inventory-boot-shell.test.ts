@@ -59,6 +59,7 @@ const EXPECTED_RUNNING_LOOPS = [
   // The Kimi gauge — the second pool's poller, armed on the same unconditional
   // terms as the credential probe above.
   'kimi-usage',
+  'project-backup-scheduler',
   // #1060 — immediate boot sweep and hourly cleanup of expired build state.
   'project-build-state-reaper',
   'reflect-consolidation',
@@ -199,5 +200,5 @@ test('the real boot EMITS exactly ONE complete boot-inventory line (captured fro
   expect(line).toContain(`${EXPECTED_RUNNING_LOOPS.length} loop(s) running`)
   for (const name of EXPECTED_RUNNING_LOOPS) expect(line).toContain(name)
   // #533 started the comments AgentWatcher, so it moved from dormant to running.
-  expect(line).toContain('1 dormant (deferred): [project-backup-scheduler]')
+  expect(line).not.toContain('dormant (deferred)')
 }, 60_000)

@@ -911,7 +911,7 @@ with cross-references noted inline.
 90. Cron's `started` flag prevents double-binding between the `start()` sweep and `onRegister`;
     catch-up fires once, never per missed occurrence. `scheduler.ts:87-266`. (Cross-ref #49.)
     Protects: **F2**.
-91. Backup scheduler (when wired): `writeLastAttemptedAt` BEFORE the snapshot fires is the
+91. Backup scheduler (wired in Open): `writeLastAttemptedAt` BEFORE the snapshot fires is the
     restart-loop guard. `project-backup-scheduler.ts:176-194`. (Cross-ref #74.)
     Protects: **D4**.
 92. Ephemeral one-shots must never enter the pending-respawn queue — replayed internal prompts

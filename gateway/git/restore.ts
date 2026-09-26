@@ -18,8 +18,8 @@
  * facade's `inFlightRestore.set(...)` line runs; that exact ordering
  * carries the Argus r2 no-self-deadlock proof documented in the facade.
  *
- * Layering: downward-only leaf — imports node builtins, `./git-exec.ts`
- * and `./snapshot-reader.ts` only. Never imports the facade.
+ * Layering: downward-only leaf using shared snapshot helpers; never imports
+ * the facade.
  */
 
 import { existsSync } from 'node:fs'
@@ -27,6 +27,7 @@ import { unlink } from 'node:fs/promises'
 import { join } from 'node:path'
 
 import { errMessage } from './git-exec.ts'
+import { stageVaultSnapshot } from './vault-snapshot.ts'
 import type { GitRepoContext } from './git-exec.ts'
 import {
   assertSnapshotExists,
@@ -61,9 +62,8 @@ export interface RestoreResult {
  * the `.gitignore` re-seeder, the structured-log sink and the clock.
  */
 export interface RestoreDeps {
-  /** The facade's `backupNow` — carries its own `inFlight` mutex. The
-   *  result shape is irrelevant here; only completion is awaited. */
-  backupNow(project_id: string): Promise<unknown>
+  /** Local capture must succeed before any destructive restore operation. */
+  backupNow(project_id: string): Promise<{ local_snapshot_complete: boolean }>
   /** Re-write the brief-pinned `.gitignore` (idempotent bytes). */
   seedGitignore(project_id: string): Promise<void>
   logger: (event: string, fields: Record<string, unknown>) => void
@@ -149,28 +149,46 @@ export async function performRestore(
   // `prior_head_sha` (read below) captures the user's work as a
   // reachable git object, recoverable via the undo banner.
   //
-  // `backupNow` is a no-op (returns `commit_sha: null`) when the
-  // tree is clean, so the only on-disk cost when the user has
-  // nothing dirty is one `git add -A` + `git diff --cached --quiet`
-  // probe. Uses the (now-separate) `inFlight` backup mutex; the
+  // `backupNow` returns `commit_sha: null` when the staged tree is clean.
+  // It uses the separate `inFlight` backup mutex; the
   // restore's own `inFlightRestore` entry keeps a second restore
   // from racing.
   try {
-    await deps.backupNow(project_id)
+    const backup = await deps.backupNow(project_id)
+    if (!backup.local_snapshot_complete) throw new Error('Pre-restore local snapshot failed')
   } catch (err) {
-    // A backup failure is loud but not fatal — proceed with the
-    // restore using HEAD-as-prior-head and document the gap. The
-    // alternative (abort restore on backup failure) would leave
-    // the user unable to recover from a corrupt working tree.
     deps.logger('restore_pre_snapshot_failed', {
       project_id,
       error_message: errMessage(err),
     })
+    throw new RestoreUnavailableError('Local safety snapshot failed; use fresh-directory recovery')
   }
   const priorHead = await ctx.gitExec(
     ctx.gitDirArgs(project_id).concat(['rev-parse', 'HEAD']),
   )
   const prior_head_sha = priorHead.stdout.trim()
+  // Replacing a SQLite main file while a live WAL/connection survives can
+  // replay newer transactions into the restored image. In-place database
+  // recovery requires lifecycle coordination this surface does not own.
+  for (const sha of new Set([snapshot_sha, prior_head_sha])) {
+    let candidates: string
+    try {
+      const result = await ctx.gitExec(ctx.gitDirArgs(project_id).concat([
+        'grep', '-a', '-l', '-z', '-e', '^SQLite format 3', sha,
+        '--', ...(file_path === null ? [] : [file_path]),
+      ]))
+      candidates = result.stdout
+    } catch (error) {
+      if ((error as { code?: unknown }).code === 1) continue
+      throw new RestoreUnavailableError('Cannot verify database safety; use fresh-directory recovery')
+    }
+    for (const candidate of candidates.split('\0').filter(Boolean)) {
+      const blob = await ctx.gitExec(ctx.gitDirArgs(project_id).concat(['cat-file', 'blob', candidate]))
+      if (blob.stdout.startsWith('SQLite format 3\0')) {
+        throw new RestoreUnavailableError('SQLite in-place restore requires offline coordination; use fresh-directory recovery')
+      }
+    }
+  }
   // Argus r3 BLOCKER #1 — the preflight `snapshotHasPath` probe says
   // the path is absent at the requested snapshot. That's a valid
   // restore request ONLY if the path actually exists somewhere in
@@ -292,9 +310,7 @@ export async function performRestore(
   // into a separate commit, so they remain reachable via the undo
   // banner — they just don't belong inside THIS commit.
   if (file_path === null) {
-    await ctx.gitExec(ctx.workArgs(project_id).concat(['add', '-A']), {
-      cwd: workTree,
-    })
+    await stageVaultSnapshot(workTree, ctx.workArgs(project_id), ctx.gitExec)
   } else if (snapshotHasPath) {
     await ctx.gitExec(
       ctx.workArgs(project_id).concat(['add', '--', file_path]),

@@ -20,9 +20,7 @@
  *      SECOND real timer on the same object, registered through
  *      `TridentTickLoop.describeAll()` so a watcher that is failing every two
  *      seconds appears in the inventory instead of only in `watch_failed` logs.
- *   2. The two D-7 DORMANT loops (`project-backup-scheduler`, comments
- *      `agent-watcher`) are NOT running — explicitly enumerated in
- *      `DORMANT_LOOPS`, never silently dead.
+ *   2. The historical D-7 deferred loops now run in Open; no dormant loops remain.
  *   3. The Open-composer loops are NOT in the gateway-only registry — proving the
  *      cross-boundary threading (not the gateway alone) is what surfaces them.
  *   4. The ONE boot inventory line names every running loop (cron with its job
@@ -60,10 +58,11 @@ const OPEN_COMPOSER_LOOPS = [
   'agent-watcher',
   'chunked-upload-sweeper',
   'dispatch-lifecycle-watchdog',
+  'project-backup-scheduler',
   'terminal-build-decisions',
 ] as const
 /** The exact set of D-7 dormant loops (built, never started). */
-const EXPECTED_DORMANT_LOOPS = ['project-backup-scheduler'] as const
+const EXPECTED_DORMANT_LOOPS: readonly string[] = []
 
 const noOpInputBase = {
   topic_handler: async () => {},
@@ -158,7 +157,7 @@ test('the ONE boot line names running loops (with cron jobs) + the dormant set',
   expect(line).toContain('5 loop(s) running')
   for (const name of EXPECTED_GATEWAY_LOOPS) expect(line).toContain(name)
   expect(line).toMatch(/cron \(\d+ jobs/)
-  expect(line).toContain('1 dormant (deferred): [project-backup-scheduler]')
+  expect(line).not.toContain('dormant (deferred)')
 })
 
 test('the watcher cadence is CONFIGURABLE from the production wiring, not just the type', async () => {

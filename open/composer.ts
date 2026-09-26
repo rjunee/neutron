@@ -463,6 +463,8 @@ import { createAdminPersonalitySurface } from '@neutronai/gateway/http/admin-per
 import { createAppBackupsSurface } from '@neutronai/gateway/http/app-backups-surface.ts'
 import { buildTelegramWebhookSurface } from '@neutronai/gateway/wiring/build-telegram-webhook.ts'
 import { ProjectBackupStore } from '@neutronai/gateway/git/project-backup-store.ts'
+import { ProjectBackupScheduler } from '@neutronai/gateway/git/project-backup-scheduler.ts'
+import { enumerateVaultProjects } from '@neutronai/gateway/git/vault-snapshot.ts'
 import { DevicePushTokenStore } from '@neutronai/gateway/push/store.ts'
 import { createPushDispatcher } from '@neutronai/gateway/push/dispatcher.ts'
 import { parseAppWsSendMarker, shouldNotifyForSend } from './wiring/app-ws-marker.ts'
@@ -686,6 +688,8 @@ export interface BuildOpenGraphComposerOptions {
   ) => import('@neutronai/runtime/substrate.ts').Substrate
   /** Test-only cadence override for production-composition watcher reachability. */
   agentWatcherPollIntervalMs?: number
+  /** Controlled scheduler timers for real composition backup tests. */
+  projectBackupScheduler?: Omit<import('@neutronai/gateway/git/project-backup-scheduler.ts').ProjectBackupSchedulerOptions, 'store' | 'enumerateProjects'>
   /** Drive the real reminder loop with a controlled timer in composition tests. */
   reminderScheduler?: import('@neutronai/reminders/tick.ts').ReminderScheduler
   /**
@@ -3824,7 +3828,8 @@ export function buildOpenGraphComposer(
     await migrateGeneralDocsScope(owner_home)
     const anchorWalker = new AnchorWalker({ commentStore, owner_home })
     let syncPlanDocTitle: ((projectId: string, path: string) => Promise<void>) | null = null
-    const docVersionStore = new DocVersionStore({ owner_home, project_slug })
+    const projectBackupStore = new ProjectBackupStore({ platform, owner_home, project_slug })
+    const docVersionStore = new DocVersionStore({ owner_home, project_slug, backupStore: projectBackupStore })
     const docStore = new DocStore({
       owner_home,
       versionStore: docVersionStore,
@@ -4279,15 +4284,21 @@ export function buildOpenGraphComposer(
     // Degraded hosts stay defined rather than broken: with no `git` binary the
     // store's probe fails and the routes answer `RestoreUnavailableError` → 503
     // (`app-backups-surface.ts` `jsonForError`), not a 404 and not a crash.
-    const projectBackupStore = new ProjectBackupStore({
-      platform,
-      owner_home,
-      project_slug,
-    })
     const appBackupsSurface = createAppBackupsSurface({
       auth: appOwnerAuth,
       project_slug,
       store: projectBackupStore,
+    })
+    const projectBackupScheduler = new ProjectBackupScheduler({
+      ...options.projectBackupScheduler,
+      store: projectBackupStore,
+      enumerateProjects: () => enumerateVaultProjects(owner_home),
+    })
+    loopRegistry.register(projectBackupScheduler.describe())
+    projectBackupScheduler.start()
+    realmodeCleanups.push(async () => {
+      await projectBackupScheduler.stop()
+      await projectBackupStore.drain()
     })
 
     // Operator recovery for a hard-capped or channel-wedged REPL. The registry
@@ -5374,6 +5385,7 @@ export function buildOpenGraphComposer(
       owner_home,
       project_slug,
       db,
+      initializeVault: (projectId) => projectBackupStore.ensureInit(projectId),
       ...(projectDocComposer !== null ? { projectDocComposer } : {}),
       gbrainSyncHook,
     }

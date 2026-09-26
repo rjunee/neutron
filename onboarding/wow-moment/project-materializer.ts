@@ -4,7 +4,7 @@
  * Per docs/plans/post-onboarding-experience-spec-2026-06-10.md § ITEM 4 +
  * docs/plans/project-folder-convention.md § 3 (standard doc set) / § 4
  * (STATUS.md frontmatter schema): a confirmed project is not just a
- * `projects` DB row — it is a REAL self-contained git repo at
+ * `projects` DB row — it is a REAL project vault at
  * `<OWNER_ROOT>/Projects/<id>/` carrying the standard doc set the
  * post-onboarding agent (Item 1) and the opening-message generator
  * (Item 5) draw on.
@@ -13,7 +13,7 @@
  *
  *   1. The § 3.1 layout — `README.md`, `CLAUDE.md`, `STATUS.md` (with the
  *      § 4 required frontmatter), plus `docs/` `research/` `notes/`
- *      `archive/` subdirs, `git init`ed + committed (§ 3.3 mandatory git).
+ *      `archive/` subdirs, committed through the canonical vault store.
  *   2. Per-project transcript slices — raw `import_pass1_chunks.chunk_text`
  *      rows (retained since migration 0063) whose Pass-1 candidate
  *      entities/topics relate to the project, written to
@@ -36,11 +36,9 @@
  * overwriting anything a user touched.
  */
 
-import { execFile } from 'node:child_process'
 import { createLogger } from '@neutronai/logger'
 import { existsSync, mkdirSync, readFileSync, writeFileSync } from 'node:fs'
 import { join } from 'node:path'
-import { promisify } from 'node:util'
 import type { ProjectDb } from '@neutronai/persistence/index.ts'
 import { parseJsonColumn } from '@neutronai/persistence/index.ts'
 import type { ImportResult } from '../history-import/types.ts'
@@ -54,8 +52,6 @@ import {
   weaveRelatedSignal,
   type RelatedImportSignal,
 } from './project-identity.ts'
-
-const execFileAsync = promisify(execFile)
 
 const log = createLogger('project-materializer')
 
@@ -133,8 +129,8 @@ export interface ProjectMaterializerDeps {
   now(): number
   composer?: ProjectDocComposer | null
   indexer?: ProjectPageIndexFn | null
-  /** Test seam — git subprocess runner. Default shells out to `git`. */
-  runGit?: (args: string[], cwd: string) => Promise<void>
+  /** Canonical vault initialization supplied by the host's ProjectBackupStore. */
+  initializeVault?: (projectId: string) => Promise<boolean>
   /** Failure sink. Defaults to the `project-materializer` logger. */
   logFailure?: (stage: string, owner_slug: string, err: unknown) => void
 }
@@ -196,7 +192,6 @@ export function buildProjectMaterializer(deps: ProjectMaterializerDeps): Project
         error: err instanceof Error ? err.message : String(err),
       })
     })
-  const runGit = deps.runGit ?? defaultRunGit
 
   return {
     async materialize(input: MaterializeProjectInput): Promise<MaterializeOutcome> {
@@ -221,20 +216,15 @@ export function buildProjectMaterializer(deps: ProjectMaterializerDeps): Project
         // Idempotency marker — STATUS.md is written LAST among the doc
         // set, so its presence means a prior run completed the docs. The
         // daily overnight re-fire lands here and must never clobber user
-        // edits — but the two TRAILING best-effort steps (git, index) are
-        // retried so a transient failure on the first run self-heals
-        // (Codex r1 P2): git repairs only when the repo/initial commit is
-        // missing (a daily auto-commit of the user's stray edits would be
-        // surprising); the indexer re-runs unconditionally because
-        // writeEntity short-circuits byte-identical pages (changed:false
-        // → no GBrain traffic), so a healthy project re-index is free.
+        // edits. Canonical vault initialization and the indexer retry so
+        // transient first-run failures self-heal.
         if (existsSync(join(root, 'STATUS.md'))) {
           out.reason = 'already_materialized'
           out.summary_written = existsSync(join(root, TRANSCRIPT_SUMMARY_RELPATH))
           // A prior run wrote a transcript-summary only when it matched slices,
           // so `summary_written` stands in for "had slices" on the re-fire path.
           out.has_context = importCtx || out.summary_written
-          await repairGitIfNeeded(root, slug, runGit, out, logFailure)
+          await initializeVault(deps, slug, out, logFailure)
           await runIndexerStep(deps, input, root, out, logFailure)
           return out
         }
@@ -358,9 +348,9 @@ export function buildProjectMaterializer(deps: ProjectMaterializerDeps): Project
           out,
         )
 
-        // 8) git init + commit (§ 3.3). Failure-isolated: the docs are
+        // 8) Initialize canonical vault history. Failure-isolated: the docs are
         // already on disk; a box without git still gets the doc set.
-        await gitInitAndCommit(root, slug, runGit, out, logFailure)
+        await initializeVault(deps, slug, out, logFailure)
 
         // 9) Memory-layer index (GBrain via writeEntity in production).
         await runIndexerStep(deps, input, root, out, logFailure)
@@ -376,71 +366,20 @@ export function buildProjectMaterializer(deps: ProjectMaterializerDeps): Project
   }
 }
 
-/** Shared git step: init when missing, stage, commit (identity pinned). */
-async function gitInitAndCommit(
-  root: string,
+/** Only the canonical backup store writes project history. Legacy .git stays intact. */
+async function initializeVault(
+  deps: ProjectMaterializerDeps,
   slug: string,
-  runGit: (args: string[], cwd: string) => Promise<void>,
   out: MaterializeOutcome,
   logFailure: (stage: string, owner_slug: string, err: unknown) => void,
 ): Promise<void> {
   try {
-    if (!existsSync(join(root, '.git'))) {
-      await runGit(['init', '-q'], root)
-    }
-    await runGit(['add', '-A'], root)
-    await runGit(
-      [
-        '-c',
-        'user.name=Neutron',
-        '-c',
-        'user.email=neutron@localhost',
-        '-c',
-        'commit.gpgsign=false',
-        'commit',
-        '-q',
-        '-m',
-        `materialize: ${slug}`,
-      ],
-      root,
-    )
-    out.git_ok = true
+    if (!deps.initializeVault) throw new Error('canonical vault initializer unavailable')
+    out.git_ok = await deps.initializeVault(slug)
+    if (!out.git_ok) throw new Error('canonical vault initialization failed')
   } catch (err) {
-    // "nothing to commit" on a re-run with a pre-existing repo is
-    // benign; everything else is logged. Either way the docs stand.
-    const msg = err instanceof Error ? err.message : String(err)
-    if (/nothing to commit|nothing added to commit/.test(msg)) {
-      out.git_ok = true
-    } else {
-      logFailure('git', slug, err)
-    }
+    logFailure('git', slug, err)
   }
-}
-
-/**
- * Repair path (Codex r1 P2) — on an already-materialized project, redo
- * the git step ONLY when the repo or its initial commit is missing (a
- * prior run's transient git failure). A healthy repo is left strictly
- * alone: auto-committing the user's stray working-tree edits on every
- * daily overnight re-fire would be surprising.
- */
-async function repairGitIfNeeded(
-  root: string,
-  slug: string,
-  runGit: (args: string[], cwd: string) => Promise<void>,
-  out: MaterializeOutcome,
-  logFailure: (stage: string, owner_slug: string, err: unknown) => void,
-): Promise<void> {
-  if (existsSync(join(root, '.git'))) {
-    try {
-      await runGit(['rev-parse', '--verify', 'HEAD'], root)
-      out.git_ok = true
-      return
-    } catch {
-      // .git exists but no commit landed — fall through to commit.
-    }
-  }
-  await gitInitAndCommit(root, slug, runGit, out, logFailure)
 }
 
 /**
@@ -844,12 +783,4 @@ function writeDocIfMissing(
 function readDoc(abs: string): string | null {
   if (!existsSync(abs)) return null
   return readFileSync(abs, 'utf8')
-}
-
-async function defaultRunGit(args: string[], cwd: string): Promise<void> {
-  await execFileAsync('git', args, {
-    cwd,
-    env: { ...process.env, GIT_TERMINAL_PROMPT: '0' },
-    timeout: 30_000,
-  })
 }
