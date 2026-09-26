@@ -83,5 +83,31 @@ working turn, exact process exit, immutable predecessor, same-thread/session
 resume, retained transcript prefix and prior user input, and resumed native
 collaboration plus the installed root MCP tool. Its fixture-only migration-notice
 acknowledgement prevents native onboarding from blocking the test. It does not
-use a live account or workspace. Full shared-host validation and live retirement
-are not claimed by these focused receipts.
+use a live account or workspace. Live retirement is not claimed by these
+disposable receipts.
+
+The admitted `bash scripts/check-shared-host.sh` run started on the clean
+implementation revision `7ed219f417381213511b3ffecb5a01ab440b3896`, tree
+`337173fad98fa4e6f2b04545dbfda2301e4ccfd2`, on 2026-09-26 after the preceding
+shared-host run released admission. The retained start observation binds that
+revision to the run; the log itself does not embed a Git identity. Recovery
+confirmed the same clean revision and tree and the log's terminal receipt:
+all 51 TypeScript projects passed, and all 1,695 declared, discovered, assigned
+and executed test files passed across 18 bounded-memory lanes with zero failed
+lanes. The wrapper ran `bash scripts/ci/typecheck-all.sh` followed by
+`bash scripts/run-tests.sh`, with jobs=4, chunk-size=100 and runner-default
+concurrency. This receipt documents that implementation revision; adding this
+record does not transfer the local measurement to another revision. Final
+publication-head CI remains required before merge.
+
+Independent adversarial review returned GO after the strict ENOENT/EACCES
+absence controls and delayed completed-receipt recovery were verified; its
+five targeted tests passed with 64 assertions. The archived base and candidate
+leak scans each reported the same 451 baseline findings, so neither is claimed
+as a clean full-tree purity receipt.
+
+Recovery also reran `bun run
+runtime/adapters/codex-cli/persistent/project-owner-retirement.smoke.ts` against
+the same unchanged implementation using the disposable synthetic provider.
+It exited zero with both retired receipts and the native busy-refusal,
+exact-exit, immutable-predecessor and same-thread-history accepting controls.
