@@ -71,7 +71,9 @@ export class FakeHerdrWorkspaceServer implements HerdrRpc {
     if (bad !== undefined) return bad
     switch (method) {
       case 'ping':
-        return { type: 'pong', version: '0.8.2', protocol: 20 }
+        // Independently pin the measured server contract; importing the client's
+        // expected protocol would hide drift in the compatibility gate.
+        return { type: 'pong', version: '0.9.1', protocol: 22 }
       case 'workspace.create': {
         const workspace_id = this.next('workspace')
         const tab_id = this.next('tab')
