@@ -722,6 +722,7 @@ export async function boot(options: BootOptions = {}): Promise<BootHandle> {
   // §F1 — a cleanup may be async (the upload sweeper's quiescing `stop()`); the
   // shutdown drain awaits each before `db.close()`.
   let realmode_cleanups: Array<() => void | Promise<void>> = []
+  let onShutdownStart: (() => Promise<void>) | undefined
   let composedHttpHandler: HttpHandler | undefined
   // RA2 — the composer's memory-backend health, hoisted so BOTH the terminal
   // `/healthz` (composition.default_handler, chained path) AND the dev
@@ -759,6 +760,7 @@ export async function boot(options: BootOptions = {}): Promise<BootHandle> {
       watchdogTimer = null
       livenessActive = false
     }
+    await onShutdownStart?.()
     if (graph !== null) {
       try {
         await graph.shutdown()
@@ -789,6 +791,7 @@ export async function boot(options: BootOptions = {}): Promise<BootHandle> {
       if (composition.realmode_cleanups !== undefined) {
         realmode_cleanups = composition.realmode_cleanups
       }
+      onShutdownStart = composition.on_shutdown_start
       // F4 — capture the periodic-tick hook so the WATCHDOG setInterval can pulse
       // the supervision-watchdog heartbeat.
       onGatewayTick = composition.on_gateway_tick
@@ -1093,6 +1096,10 @@ export async function boot(options: BootOptions = {}): Promise<BootHandle> {
       watchdogTimer = null
       livenessActive = false // §F2 — the gateway-liveness loop is now stopped.
     }
+    // Recovery can finish by publishing an owner and arming its watchdogs.
+    // Drain it BEFORE the graph and persistent pool stop those resources, not
+    // in the later realmode cleanup phase. A failed drain must not race teardown.
+    await onShutdownStart?.()
     if (graph !== null) {
       try {
         await graph.shutdown()

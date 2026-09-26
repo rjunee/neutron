@@ -277,6 +277,7 @@ export type OpenComposition = CompositionInput &
       | 'onboarding_overnight_cron'
       | 'skill_forge'
       | 'realmode_cleanups'
+      | 'on_shutdown_start'
       | 'landing_server'
       | 'app_ws_surface'
       | 'app_docs_surface'
@@ -1593,8 +1594,10 @@ export function buildOpenGraphComposer(
     // `stop()`); the gateway shutdown runner awaits each before `db.close()`.
     const realmodeCleanups: Array<() => void | Promise<void>> = []
     let stopChatRecovery: (() => Promise<void>) | undefined
-    // Cleanup drains forward: stop recovery before closing the owners it uses.
-    realmodeCleanups.push(async () => { await stopChatRecovery?.() })
+    const quiesceChatRecovery = async (): Promise<void> => { await stopChatRecovery?.() }
+    // Boot invokes this at shutdown entry, BEFORE persistent REPL teardown.
+    // Retain idempotent disposal for callers that compose without boot().
+    realmodeCleanups.push(quiesceChatRecovery)
     realmodeCleanups.push(() => codexOwnerBindings.close())
     // §F2 — the SINGLE loop inventory for this Open boot. The Open composer
     // starts long-lived loops OUTSIDE `composeProductionGraph` (the
@@ -7024,8 +7027,9 @@ export function buildOpenGraphComposer(
       // regain authority only after that binding, with no synthetic chat turn.
       // Maintenance resumes its existing generation fences before pure startup
       // recovery can resume a lost parent. Recovery never takes a turn/build lease.
+      on_shutdown_start: quiesceChatRecovery,
       on_graph_ready: async () => {
-        stopChatRecovery = await startProjectChatRecovery(async () => {
+        const recovery = startProjectChatRecovery(async () => {
           const scopes = [null, ...listProjectIds()]
           await adoptLiveAgentRepls(scopes)
           for (const projectId of scopes) {
@@ -7051,6 +7055,8 @@ export function buildOpenGraphComposer(
         }, error => log.warn('project_chat_recovery_unavailable', {
           reason: error instanceof Error ? error.message : String(error),
         }))
+        stopChatRecovery = recovery.stop
+        await recovery.ready
       },
       project_slug,
       // ALWAYS set, never conditionally spread. A field the composer assigns
