@@ -109,6 +109,20 @@ test('search and repository filters apply before pagination without losing unkno
   expect(timelineWindow(raw, 1, '', 'open').cards).toHaveLength(10)
 })
 
+test('open PRs precede newer merged PRs before paging; focus and fit-all share honest scales', () => {
+  const raw = combineTimelineSources({ observedAt: 100_000, repositories: [{ repository: 'example/open', error: null,
+    prs: Array.from({ length: 52 }, (_, i) => ({ number: i + 1, title: `PR ${i + 1}`, url: `https://github.com/example/open/pull/${i + 1}`,
+      createdAt: new Date(i).toISOString(), closedAt: i === 0 ? null : new Date(i + 1).toISOString(), mergedAt: null, state: i === 0 ? 'open' : 'closed' })) }] }, [], [], 100_000)
+  raw.cards.find(c => c.pr === 1)!.segments = [{ id: 'long', runId: '', label: 'Build', phase: 'build', start: 0, end: 46_800_000,
+    lane: 0, timing: 'recorded', model: null, detail: 'fixture', usage: { tokens: null, input: null, output: null, cacheRead: null, cacheCreation: null, costUsd: null, source: null, observedAt: null, coverage: 'unknown' } }]
+  const focused = timelineWindow(raw, 0), all = timelineWindow(raw, 0, '', '', 'all')
+  expect(focused.cards[0]!.pr).toBe(1)
+  expect(focused.cards[1]!.pr).toBe(52)
+  expect(focused.viewDurationMs).toBe(3_600_000)
+  expect(all.viewDurationMs).toBe(46_800_000)
+  expect(all.cards).toEqual(focused.cards)
+})
+
 test('file sources reach authenticated HTML/JSON and import failures preserve catalogue visibility', async () => {
   const dir = await mkdtemp(join(tmpdir(), 'timeline-source-'))
   const catalogue = join(dir, 'catalogue.json'), observations = join(dir, 'observations.jsonl'), importStatus = join(dir, 'import.json')

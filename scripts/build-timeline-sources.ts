@@ -18,6 +18,8 @@ export type CataloguePullRequest = {
   ciCoverage: 'not-sampled' | 'head-only' | 'partial' | 'unavailable'
   ciObservedAt: number | null
   ciPending: boolean
+  /** Explicit provider status, never inferred from missing completed_at. */
+  ciRunning?: boolean
   ciError: string | null
 }
 
@@ -172,6 +174,7 @@ export async function refreshPullRequestCatalogue(
           pr.ciCoverage = old.ciCoverage
           pr.ciObservedAt = old.ciObservedAt
           pr.ciPending = old.ciPending
+          if (old.ciRunning !== undefined) pr.ciRunning = old.ciRunning
           pr.ciError = old.ciError
         }
       }
@@ -206,6 +209,7 @@ export async function refreshPullRequestCatalogue(
             pr.ciCoverage = old.ciCoverage
             pr.ciObservedAt = old.ciObservedAt
             pr.ciPending = old.ciPending
+            if (old.ciRunning !== undefined) pr.ciRunning = old.ciRunning
             pr.ciError = old.ciError
           }
           prs.set(pr.number, pr)
@@ -273,11 +277,13 @@ export async function collectCiCheckRuns(
       pr.ciCoverage = old.ciCoverage
       pr.ciObservedAt = old.ciObservedAt
       pr.ciPending = old.ciPending
+      if (old.ciRunning !== undefined) pr.ciRunning = old.ciRunning
       continue
     }
     try {
       let partial = false
       let pending = false
+      let running = false
       const checkIds = new Set<number>()
       for (let page = 1; ; page += 1) {
         const path = `/repos/${repository}/commits/${pr.headSha}/check-runs?filter=all&per_page=100&page=${page}`
@@ -294,7 +300,11 @@ export async function collectCiCheckRuns(
           }
           if (checkIds.has(Number(raw.id))) throw new Error('GitHub check run repeated across pages')
           checkIds.add(Number(raw.id))
+          if (typeof raw.status !== 'string' || !['queued', 'in_progress', 'completed', 'waiting', 'requested', 'pending'].includes(raw.status)) {
+            throw new Error('GitHub check run has invalid status')
+          }
           if (raw.status !== 'completed') pending = true
+          if (raw.status === 'in_progress') running = true
           if (raw.started_at === null) { partial = true; continue }
           const startedAt = Date.parse(isoTimestamp(raw.started_at, 'check started_at')!)
           const endedAt = raw.completed_at === null
@@ -318,6 +328,7 @@ export async function collectCiCheckRuns(
       pr.ciCoverage = checkIds.size === 0 ? 'unavailable' : partial ? 'partial' : 'head-only'
       pr.ciObservedAt = now
       pr.ciPending = pending
+      pr.ciRunning = running
       if (checkIds.size === 0) pr.ciError = 'No check runs reported for sampled head'
     } catch (error) {
       pr.ciCoverage = 'unavailable'

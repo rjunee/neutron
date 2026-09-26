@@ -31,11 +31,29 @@ a PR or working in a checkout does not assign an entire session's tokens to it.
 
 PR lifecycle (creation through close, or refresh while open) is distinct from
 observed work. Work preceding PR creation and deployment following merge remain
-visible when linked by evidence. Rows sort by latest observed activity. Equal time
-uses equal width across rows; simultaneous phases use parallel lanes. Gaps are
+visible when linked by evidence. Open PRs appear first, followed by merged/closed
+PRs and then unknown lifecycle records. Rows sort by latest observed activity
+within each section, before pagination. Explicit text states and a subtle Open-row
+accent distinguish lifecycle from work activity. Equal time uses equal width
+across rows; simultaneous phases share the height of one bar. Gaps are
 unattributed time, not proven waiting or idleness. A known waiting interval may be
 named only by its producer. A missing end stays open/dashed and does not establish
 worker liveness. Legacy stage pairs require unambiguous observed endpoints.
+
+The default chart is a shared linear 0–1 hour focus window, never a per-row
+normalization. Longer rows retain their full duration label and show an overflow
+control exposing all later phases. Fit all restores the complete shared range.
+A phase crossing the boundary reports its full action duration with an explicit
+crossing note; overlapping action durations are never added together.
+
+PR state comes from the GitHub catalogue. The old aggregate `active` value is not
+work liveness. “CI running” requires explicit current-head `in_progress` check
+status from a successful sample no older than 60 seconds; a queued or otherwise
+pending check is “CI pending,” not running. Unknown/invalid statuses, source
+errors, future observations and stale samples do not establish live work.
+“Recent work” means a recorded phase ended within the last 10 minutes and makes
+no running claim. Otherwise show “No live signal,” which does not mean idle or
+finished. Merged PRs may still have independently observed CI or deployment work.
 
 Attempt receipts are absolute observations. Phase snapshots are cumulative
 run/phase totals and cannot be apportioned across repeated spans or added to their
@@ -50,16 +68,25 @@ spans carry unknown tokens unless a provider actually attributed usage.
 - [ ] All PRs returned by each configured repository's paginated catalogue appear;
       an inaccessible repository produces a source-error banner without erasing
       readable repositories. Trident-free PRs retain unknown phase coverage.
-- [ ] Reverse chronology follows recent recorded activity, including a new retry
-      of an older PR. Repository badges distinguish equal PR numbers across repos.
+- [ ] Open PRs have their own first section, with merged/closed below. Reverse
+      chronology within each lifecycle group follows recent recorded activity,
+      including a retry of an older PR. Repository labels distinguish equal PR numbers.
       Only positive safe-integer PR identifiers count as PRs. Legacy sentinel
       values remain separate run-only rows, with real PR and run-only totals
       explicitly distinguished across pagination.
-- [ ] Widths represent actual timestamp differences on a shared scale. Concurrent
-      review, suites and CI stay overlapping; sequential siblings reuse lanes.
+- [ ] Widths represent timestamp differences on a shared linear scale, with a
+      labeled 1h focus window, explicit overflow and Fit all. Every clipped phase
+      remains reachable through overflow or the full-size phase explorer control.
+      Concurrent review, suites and CI overlap inside one fixed-height bar.
       Repeated host stage names pair by their recorded start identity. Ambiguous
       pairs remain unknown. Phase labels, wall time, models and coverage are readable
-      on desktop and phone, with a work-focused view for long lifecycle envelopes.
+      on desktop and phone. A custom popover opens immediately on hover/focus and
+      pins on tap; Escape/close/outside interaction dismiss it. Tiny spans remain
+      accessible via a full-size phase explorer. Popovers preserve focus and remain
+      readable across data refreshes. Expanded PR evidence remains available.
+- [ ] Lifecycle text never substitutes for work status. Fresh explicit provider
+      running, pending, recently ended work and unknown liveness remain distinct.
+      Verify stale, invalid, future and missing-end cases in consuming tests.
 - [ ] Native direct command spans use recorded start/end, explicit time-scoped PR
       mapping and invoking model context; absent context stays unknown. Explicit
       forward phase records support planning, building, fixing, review, tests,
@@ -83,7 +110,7 @@ spans carry unknown tokens unless a provider actually attributed usage.
       Merge alone does not satisfy served verification (harness-orchestrator
       pivot plan §4, lines 278-279).
 
-Verify: `bun test trident/build-timeline.test.ts scripts/__tests__/build-timeline-server.test.ts`
+Verify: `bun test trident/build-timeline.test.ts trident/build-timeline-html.test.ts scripts/__tests__/build-timeline-server.test.ts`
 plus the catalogue/recorder/importer focused tests, then
 `bash scripts/check-shared-host.sh`. The deployment criterion stays open until its
 separate operational evidence exists.
