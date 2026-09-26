@@ -5,9 +5,8 @@
  * boot-time visibility into the loop mesh was cron's ad-hoc
  * `[cron-scheduler] … N job(s) ticking` line (S15); the reminders tick loop, the
  * trident tick loop, the watchdog supervisor, and the chunked-upload sweeper all
- * started silently, and — worse — the audit (D-7) found TWO fully-built loops
- * (`ProjectBackupScheduler` and, before issue #533, comments `AgentWatcher`)
- * that never started in ANY composition, with nothing surfacing that fact.
+ * started silently. The audit's two dormant loops now start in Open:
+ * project backups and the comments watcher both register with this inventory.
  *
  * `LoopRegistry` generalises cron's boot alarm to EVERY loop:
  *
@@ -73,9 +72,8 @@ export interface LoopDescriptor {
 
 /**
  * A loop that is BUILT but deliberately NOT started in the current composition.
- * Per decision D-7 (2026-07-02 Decisions Log): the two dormant loops are
- * documented as dormant now and their real wiring is deferred to post-window
- * feature PRs (seeded into the SPEC roadmap). Enumerating them here makes the
+ * The historical D-7 loops now run in Open. Future deliberate deferrals use
+ * this shape and a concrete work item. Enumerating them here makes the
  * dormancy EXPLICIT + boot-observable + test-pinned — the exact opposite of the
  * "silently never runs in ANY composition" anti-pattern F2 exists to kill.
  */

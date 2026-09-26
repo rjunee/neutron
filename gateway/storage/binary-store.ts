@@ -3,7 +3,7 @@
  *
  * Per docs/plans/P7.5-binary-large-file-handling-sprint-brief.md § 2.
  *
- * Per-project layout (sibling of the P7.4 `.docs-versions/`):
+ * Per-project layout (included in canonical `.project-backup/` snapshots):
  *
  *   <project>/.docs-blobs/
  *     ├─ index.sqlite              ← path → hash + refcount sidecar

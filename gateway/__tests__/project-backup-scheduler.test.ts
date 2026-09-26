@@ -34,6 +34,7 @@ class StubStore {
     this.attempts.set(project_id, (this.attempts.get(project_id) ?? 0) + 1)
     return {
       ok: true,
+      local_snapshot_complete: true,
       commit_sha: null,
       pushed: false,
       push_error: null,
@@ -240,7 +241,7 @@ describe('ProjectBackupScheduler', () => {
       entered = true
       store.attempts.set(project_id, (store.attempts.get(project_id) ?? 0) + 1)
       await gate
-      return { ok: true, commit_sha: null, pushed: false, push_error: null, completed_at_ms: now }
+      return { ok: true, local_snapshot_complete: true, commit_sha: null, pushed: false, push_error: null, completed_at_ms: now }
     }
     let jitterCb: (() => void) | null = null
     const sched = new ProjectBackupScheduler({

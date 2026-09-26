@@ -528,44 +528,8 @@ async function handleProjectBackupConfigure(opts: {
   if (opts.platform.capabilities.project_backup !== true) {
     return jsonError(503, 'backup_unavailable', 'platform adapter does not expose project_backup capability')
   }
-  const body = await readJsonBody(opts.req)
-  if (body === null) {
-    return jsonError(400, 'malformed_json', 'expected JSON body')
-  }
-  const fields = body as Record<string, unknown>
-  const remote_url = fields['remote_url']
-  if (typeof remote_url !== 'string') {
-    return jsonError(400, 'invalid_remote_url', 'remote_url must be a string')
-  }
-  const ssh_key_pem = typeof fields['ssh_key_pem'] === 'string' ? (fields['ssh_key_pem'] as string) : undefined
-  const generated_key_request_id =
-    typeof fields['generated_key_request_id'] === 'string'
-      ? (fields['generated_key_request_id'] as string)
-      : undefined
-  try {
-    const input: { remote_url: string; ssh_key_pem?: string; generated_key_request_id?: string } = {
-      remote_url,
-    }
-    if (ssh_key_pem !== undefined) input.ssh_key_pem = ssh_key_pem
-    if (generated_key_request_id !== undefined)
-      input.generated_key_request_id = generated_key_request_id
-    const config = await opts.platform.setProjectBackupRemoteConfig(opts.project_id, input)
-    // Immediately run a validation backup so the user knows whether
-    // their wiring works. Even when push fails (the most common
-    // failure mode on a fresh remote), the local commit lands and
-    // the status reflects the error.
-    const backup = await opts.store.backupNow(opts.project_id)
-    return jsonOk({ remote: config, backup })
-  } catch (err) {
-    if (err instanceof PlatformOperationUnsupportedError) {
-      return jsonResponse(405, {
-        ok: false,
-        code: 'managed_auto_provisioned',
-        message: err.message,
-      })
-    }
-    return jsonError(400, 'configure_failed', err instanceof Error ? err.message : String(err))
-  }
+  return jsonError(409, 'encrypted_owner_configuration_required',
+    'Per-project plaintext destinations are retired. Configure the encrypted owner backup destination and retain an off-host recovery key; see docs/vault-backup-recovery.md.')
 }
 
 async function handleProjectBackupDisconnect(opts: {

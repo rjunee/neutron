@@ -50,6 +50,7 @@ import { defaultProjectEmoji } from '../projects/default-emoji.ts'
  */
 export interface ProjectScaffoldDeps {
   owner_home: string
+  initializeVault?: (projectId: string) => Promise<boolean>
   /** Instance internal handle / project_slug (materializer origin + topic binding). */
   project_slug: string
   db: ProjectDb
@@ -183,6 +184,7 @@ export function buildScaffoldMaterializer(
     owner_slug: deps.project_slug,
     db: deps.db,
     now,
+    ...(deps.initializeVault ? { initializeVault: deps.initializeVault } : {}),
     composer: deps.projectDocComposer ?? null,
     indexer: buildProjectPageIndexer({
       ownerDataDir: deps.owner_home,

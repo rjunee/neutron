@@ -1,3 +1,4 @@
+import { localVaultBackup } from '@neutronai/gateway/__tests__/support/vault-backup.ts'
 import { afterEach, beforeEach, describe, expect, test } from 'bun:test'
 import { mkdirSync, mkdtempSync, readFileSync, rmSync } from 'node:fs'
 import { tmpdir } from 'node:os'
@@ -35,12 +36,12 @@ afterEach(() => {
 describe('card plan-doc versioning', () => {
   test('the production composer supplies the version store to its document writer', () => {
     const source = readFileSync(join(import.meta.dir, '..', 'composer.ts'), 'utf8')
-    expect(source).toContain('const docVersionStore = new DocVersionStore({ owner_home, project_slug })')
+    expect(source).toMatch(/new DocVersionStore\(\{[^}]*backupStore: projectBackupStore/)
     expect(source).toMatch(/new DocStore\(\{[\s\S]*?versionStore: docVersionStore,[\s\S]*?onMutationSuccess:/)
   })
 
   test('the writer commits the visible doc and the run retains the dispatched version', async () => {
-    const versions = new DocVersionStore({ owner_home: tempRoot, project_slug: SCOPE })
+    const versions = new DocVersionStore({ owner_home: tempRoot, project_slug: SCOPE, backupStore: localVaultBackup(tempRoot, SCOPE) })
     const docs = new DocStore({ owner_home: tempRoot, versionStore: versions })
     const board = new WorkBoardStore(db)
     const service = new WorkBoardSpecDocService({ docs, board })

@@ -276,7 +276,7 @@ describe('app-admin project-backup routes — Open tier', () => {
     expect(typeof json['public_key']).toBe('string')
   })
 
-  it('POST /project-backup/<id>/configure (path A) wires the remote + runs a validation backup', async () => {
+  it('POST /project-backup/<id>/configure refuses a plaintext destination', async () => {
     const { status, json } = await call(
       h,
       'POST',
@@ -287,10 +287,10 @@ describe('app-admin project-backup routes — Open tier', () => {
           '-----BEGIN OPENSSH PRIVATE KEY-----\nfake\n-----END OPENSSH PRIVATE KEY-----\n',
       },
     )
-    expect(status).toBe(200)
-    expect(json['ok']).toBe(true)
-    expect(json['remote']).toBeDefined()
-    expect(json['backup']).toBeDefined()
+    expect(status).toBe(409)
+    expect(json['ok']).toBe(false)
+    expect(json['code']).toBe('encrypted_owner_configuration_required')
+    expect(json['remote']).toBeUndefined()
   })
 
   it('POST /project-backup/<id>/disconnect-remote clears the config', async () => {
@@ -309,7 +309,7 @@ describe('app-admin project-backup routes — Open tier', () => {
     expect(json['disconnected']).toBe(true)
   })
 
-  it('POST /project-backup/<id>/configure rejects HTTPS URLs with code=configure_failed', async () => {
+  it('POST /project-backup/<id>/configure also refuses HTTPS destinations', async () => {
     const { status, json } = await call(
       h,
       'POST',
@@ -319,8 +319,8 @@ describe('app-admin project-backup routes — Open tier', () => {
         ssh_key_pem: '...',
       },
     )
-    expect(status).toBe(400)
-    expect(json['code']).toBe('configure_failed')
+    expect(status).toBe(409)
+    expect(json['code']).toBe('encrypted_owner_configuration_required')
   })
 
   it('returns 404 for unknown subroutes', async () => {
@@ -342,7 +342,7 @@ describe('app-admin project-backup routes — Managed tier', () => {
     await h.close()
   })
 
-  it('POST /configure returns 405 with code=managed_auto_provisioned', async () => {
+  it('POST /configure refuses plaintext even with a managed adapter', async () => {
     const { status, json } = await call(
       h,
       'POST',
@@ -352,8 +352,8 @@ describe('app-admin project-backup routes — Managed tier', () => {
         ssh_key_pem: '...',
       },
     )
-    expect(status).toBe(405)
-    expect(json['code']).toBe('managed_auto_provisioned')
+    expect(status).toBe(409)
+    expect(json['code']).toBe('encrypted_owner_configuration_required')
   })
 
   it('POST /disconnect-remote returns 405 with code=managed_auto_provisioned', async () => {

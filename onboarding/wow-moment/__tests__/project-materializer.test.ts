@@ -39,7 +39,7 @@ afterEach(() => {
 
 /** No-op git so unit tests stay subprocess-free (git itself is covered
  *  by the action-level reproduce test). */
-const noopGit = async (): Promise<void> => {}
+const noopVault = async (): Promise<boolean> => true
 
 function buildDeps(overrides: Partial<ProjectMaterializerDeps> = {}): ProjectMaterializerDeps {
   return {
@@ -47,7 +47,7 @@ function buildDeps(overrides: Partial<ProjectMaterializerDeps> = {}): ProjectMat
     owner_slug: 't1',
     db,
     now: () => 1_700_000_000_000,
-    runGit: noopGit,
+    initializeVault: noopVault,
     logFailure: () => {},
     ...overrides,
   }
@@ -137,7 +137,7 @@ describe('project-materializer', () => {
   test('git failure never sinks the doc set', async () => {
     const m = buildProjectMaterializer(
       buildDeps({
-        runGit: async () => {
+        initializeVault: async () => {
           throw new Error('git: command not found')
         },
       }),
@@ -301,10 +301,10 @@ describe('project-materializer', () => {
 
   test('repair path: a transient git/index failure on the first run self-heals on re-fire', async () => {
     // First run: git AND indexer both fail transiently.
-    let gitCalls: string[][] = []
+    let vaultCalls: string[] = []
     const failing = buildProjectMaterializer(
       buildDeps({
-        runGit: async () => {
+        initializeVault: async () => {
           throw new Error('git: transient failure')
         },
         indexer: async () => {
@@ -326,8 +326,9 @@ describe('project-materializer', () => {
     const indexed: string[] = []
     const healed = buildProjectMaterializer(
       buildDeps({
-        runGit: async (args) => {
-          gitCalls.push(args)
+        initializeVault: async (slug) => {
+          vaultCalls.push(slug)
+          return true
         },
         indexer: async (i) => {
           indexed.push(i.owner_slug)
@@ -337,7 +338,7 @@ describe('project-materializer', () => {
     const second = await healed.materialize(input)
     expect(second.reason).toBe('already_materialized')
     // Git repaired (init ran — .git was never created by the failing run)…
-    expect(gitCalls.some((args) => args[0] === 'init')).toBe(true)
+    expect(vaultCalls).toEqual(['topline'])
     expect(second.git_ok).toBe(true)
     // …and the idempotent index re-ran.
     expect(indexed).toEqual(['topline'])
@@ -350,10 +351,10 @@ describe('project-materializer', () => {
     // real runner would have created; the stub's no-throw rev-parse
     // models a repo with a valid HEAD.)
     mkdirSync(join(dir, 'Projects', 'topline', '.git'), { recursive: true })
-    gitCalls = []
+    vaultCalls = []
     const third = await healed.materialize(input)
     expect(third.reason).toBe('already_materialized')
-    expect(gitCalls.map((args) => args[0])).toEqual(['rev-parse'])
+    expect(vaultCalls).toEqual(['topline'])
     expect(third.git_ok).toBe(true)
   })
 

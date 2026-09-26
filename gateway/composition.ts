@@ -56,18 +56,10 @@ export type { MemoryHealthSummary, MemoryHealthProvider } from './composition/ty
  * production-composer test PINS the set — a future silently-added dead loop, or
  * a silent deletion of one of these, breaks that test.
  *
- * D-7 (2026-07-02 Decisions Log) deferred both loops to feature PRs. Issue #533
- * supplied the comments watcher's missing composition infrastructure, so only
- * the backup scheduler remains deliberately dormant here.
+ * D-7's comments watcher and project backup scheduler now both run in Open.
+ * Keep the inventory for future deliberately deferred loops.
  */
-export const DORMANT_LOOPS: readonly DormantLoop[] = [
-  {
-    name: 'project-backup-scheduler',
-    reason:
-      'built (gateway/git/project-backup-scheduler.ts) but never constructed in any composition; needs a wired ProjectBackupStore + project enumerator (P7.4 backup sprint).',
-    deferredTo: 'D-7 → SPEC roadmap post-window feature PR',
-  },
-]
+export const DORMANT_LOOPS: readonly DormantLoop[] = []
 
 /**
  * Return shape from `composeProductionGraph` after ISSUE #32. The
