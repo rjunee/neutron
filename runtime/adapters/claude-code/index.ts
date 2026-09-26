@@ -28,6 +28,8 @@ import { readRegistryState, registryConversationScopeMatches } from './persisten
 import { beginBootAdoption } from './persistent/boot-adoption.ts'
 import { supervisedBySessionKey } from './persistent/pool-state.ts'
 import { authFingerprintFor } from './persistent/repl-session.ts'
+import { readStartupRepl, recoverStartupRepl, type StartupRecoveryOutcome } from './persistent/startup-recovery.ts'
+import type { ReplSpawnProfile } from './persistent/spawn.ts'
 
 import { createLogger } from '@neutronai/logger'
 
@@ -461,6 +463,34 @@ export async function reconcileExistingClaudeRepl(
   if (!supervisedBySessionKey.has(existing.sessionKey)) registerSupervisedSubstrate(p)
   startReplWatchdog(p, { heartbeatFile: paths.heartbeatFile })
   startModelUpdateWatchdogForInstance(p)
+}
+
+/** Durable discovery does not require a surviving pane: dead-pane reconciliation
+ * removes the handle while deliberately retaining the session and launch profile. */
+export function hasRecoverableClaudeRepl(options: ClaudeCodeSubstrateOptions): boolean {
+  const { p, resolved } = prepareClaudeCodeOptions(options)
+  if (resolved.home === undefined) return false
+  applySupervisionPaths(p, deriveReplSupervisionPaths(resolved.home))
+  return readStartupRepl(p, poolKeyFor(p)) !== undefined
+}
+
+export async function recoverExistingClaudeRepl(
+  options: ClaudeCodeSubstrateOptions, tools: ReplSpawnProfile['tools'],
+): Promise<StartupRecoveryOutcome> {
+  const { p, resolved } = prepareClaudeCodeOptions(options)
+  if (resolved.home === undefined) return { status: 'skipped' }
+  const paths = deriveReplSupervisionPaths(resolved.home)
+  applySupervisionPaths(p, paths)
+  const key = poolKeyFor(p)
+  const recorded = readStartupRepl(p, key)
+  if (recorded?.effort !== undefined) p.effort = recorded.effort
+  const outcome = await recoverStartupRepl(p, key, tools)
+  if (outcome.status === 'adopted' || outcome.status === 'resumed') {
+    if (!supervisedBySessionKey.has(key)) registerSupervisedSubstrate(p)
+    startReplWatchdog(p, { heartbeatFile: paths.heartbeatFile })
+    startModelUpdateWatchdogForInstance(p)
+  }
+  return outcome
 }
 
 function applySupervisionPaths(p: PersistentReplSubstrateOptions, paths: ReplSupervisionPaths): void {

@@ -49,9 +49,11 @@ import type { OpenWiringContext } from './context.ts'
 import { TridentRunStore } from '@neutronai/trident/store.ts'
 import { buildTridentChildCrashSink } from './trident-child-crash-sink.ts'
 import { fireAndForget } from '@neutronai/logger/fire-and-forget.ts'
+import { PROJECT_REPL_TOOL_DEFS } from '@neutronai/gateway/wiring/build-live-agent-turn.ts'
 
 export interface WiredSubstrates {
   adoptLiveAgentRepls: (projectIds: readonly (string | null)[]) => Promise<void>
+  recoverLiveAgentRepls: (projectIds: readonly (string | null)[]) => Promise<void>
   /** Warm onboarding phase-spec substrate (`cc-llm-*`); null when LLM-less. */
   llmCallSubstrate: Substrate | null
   /** Stateless, toolless jobs after onboarding; each turn owns a disposable worker. */
@@ -607,6 +609,7 @@ export function wireSubstrates(ctx: OpenWiringContext): WiredSubstrates {
       }
     },
     adoptLiveAgentRepls: async projectIds => { await liveAgentSubstrate?.adoptExisting(projectIds) },
+    recoverLiveAgentRepls: async projectIds => { await liveAgentSubstrate?.recoverExisting(projectIds, PROJECT_REPL_TOOL_DEFS) },
     llmCallSubstrate,
     utilitySubstrate,
     liveAgentSubstrate,

@@ -22,27 +22,30 @@ The owner's acceptance criterion, verbatim: *a gateway restart brings every proj
 REPL back with its conversation intact.*
 
 **What "every" means here, stated so it is checkable:** Open boot reconciles
-General and each non-deleted project's durable live-chat (`cc-agent-*`) pane rows
-whose provider is Claude and whose credential identity is currently authorized.
+General and each non-deleted project's durable active Claude or Codex conversation
+whose selected provider and credential identity are currently authorized.
 It derives exact pool keys from those authoritative inputs; it never parses
 opaque registry keys or assigns another row's options. Reconciliation is awaited
 after the production graph binds the tool bridge and before it accepts traffic.
-No app message or synthetic chat turn is needed, and missing/dead rows do not
-become cold spawns or watchdog registrations.
+No app message or synthetic chat turn is needed. A surviving pane is adopted;
+a proven-dead recorded conversation resumes its native session and launch profile.
+Clearing a dead pane handle does not erase the registry's session identity.
+Explicitly retired sessions remain asleep; absent conversation authority never
+becomes a fresh conversation. Unavailable terminal hosts are retried automatically.
 
 Other substrate families retain reconciliation before their first turn. Foreign
-identities, deleted projects, revoked credential identities and non-Claude
-project routes are not boot-adopted. These are deliberate scope boundaries,
-not evidence that those panes have been reconciled or reaped. See the residual
-below and Decisions Log 2026-09-19.
+identities, deleted projects, revoked credential identities and routes without a
+native persistent owner are excluded. These are deliberate scope boundaries,
+not evidence that those panes have been reconciled or reaped. Decisions Log
+2026-09-26 supersedes the narrower 2026-09-19 startup policy.
 
 **Say which process restarted, always.** A REPL is a pane of the **herdr server**, so:
 
 - a **gateway** restart does not end it — the pane is in neither the gateway's process
   tree nor its cgroup — and this item is about re-finding it;
-- a **herdr server** restart DOES end it, because panes are its children. Nothing here
-  changes that, and no prose about this item may imply it does. What survives a herdr
-  restart is the transcript, recovered the pre-existing way: `--resume`.
+- a **herdr server** restart or **whole-host reboot** ends the process. Neutron
+  automatically starts the recorded native session again after proving its prior
+  owner is gone. The transcript survives; the process identity does not.
 
 ## What was true before
 
@@ -125,6 +128,28 @@ would be the worse defect — but it is a gap, not a covered case.
 
 ## Acceptance
 
+The 2026-09-26 expansion is tracked in #1342. Existing adoption controls below
+still bind; their old no-dead-spawn policy is superseded only for exact authorized
+recorded project conversations. Workflow recovery keeps its existing durable
+claims and budgets; chat readiness must never dispatch a second build.
+
+- [ ] **AUTOMATIC RESUME WITHOUT A TURN.** After gateway, terminal-host or host
+      restart, authorized active Claude and Codex conversations return on their
+      recorded native session with intact history and exact scope/model/credential.
+      Cleared dead handles still recover; an absent record, explicit retirement,
+      deleted project, changed credential, ambiguous owner or unavailable transcript
+      cannot start a fresh conversation. Verify isolated startup recovery tests and
+      consuming Open boot tests, with positive and refusing controls.
+- [ ] **RETRY AND FENCING.** Terminal-host startup delay requires no client action;
+      retries never overlap and shutdown drains them. A changed registry row,
+      concurrent claimant or fenced project prevents spawning. Recovery neither
+      acquires a chat/build lease nor replays a native turn. Verify scheduler,
+      pre-spawn reservation and provider recovery tests.
+- [ ] **WORKFLOW CONTINUITY.** Previously active workflows resume through their
+      durable continuation ledger, harvest completed work before relaunch, and
+      preserve at-most-one dispatch and the existing review/merge gates. Verify
+      `open/__tests__/project-build-e2e.test.ts` and a served unattended witness.
+
 Bidirectional throughout: an adoption path that refuses everything satisfies every
 refusal criterion and delivers nothing, so each refusal is paired with the acceptance
 it must not swallow.
@@ -136,7 +161,9 @@ it must not swallow.
       project-scoped tool call. No synthetic turn or fresh spawn occurs. Foreign
       owners, deleted projects, revoked identities, non-Claude routes, unknown
       registry state and absent/dead candidates never gain authority or a
-      watchdog registration. A real first turn joining adoption retains its own
+      watchdog registration during adoption. Dead recorded conversations are
+      separately eligible for the authorized startup-resume criteria above.
+      A real first turn joining adoption retains its own
       supervision options and waits for the same pass.
       Stable credential IDs also require the survivor's recorded auth fingerprint
       to match the final current environment, including explicit empty ambient
@@ -454,13 +481,18 @@ refusing.
 
 ## Residual, named rather than hidden
 
-**Boot adoption is scoped to authorized live-chat identities.** General and
-non-deleted projects on Claude routes with currently authorized credential IDs
+**Startup recovery is scoped to authorized live-chat identities.** General and
+non-deleted projects on Claude or Codex routes with currently authorized credential IDs
 are reconciled without an app turn once graph tools are ready. Other substrate
 families retain lazy reconciliation. A row excluded by ownership, project,
 provider or credential eligibility is left untouched and is not claimed as
 reconciled or reaped. Missing registry evidence is reported as unknown rather
-than silently treated as successful recovery.
+than silently treated as successful recovery. Legacy Codex generations without
+complete process-birth evidence can prove death after a machine reboot, but
+same-boot legacy crash recovery remains refused. Interrupted native work with
+unresolved durable work/lease evidence stays fenced until its authoritative
+workflow reconciliation establishes what can continue; restored chat readiness
+alone is not a workflow-continuation receipt.
 
 **The close is licensed by the row as well as the process, but the window is narrowed
 rather than eliminated.** A pane is only closed when the row still names it — checked
