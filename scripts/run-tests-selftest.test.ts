@@ -20,8 +20,8 @@
  * each fixture is a real temp file whose content we control.
  */
 import { describe, expect, test } from 'bun:test'
-import { execFileSync } from 'node:child_process'
-import { chmodSync, existsSync, mkdtempSync, readFileSync, rmSync, writeFileSync } from 'node:fs'
+import { execFileSync, spawn } from 'node:child_process'
+import { chmodSync, existsSync, mkdirSync, mkdtempSync, readFileSync, readdirSync, rmSync, statSync, writeFileSync } from 'node:fs'
 import { createServer } from 'node:net'
 import { tmpdir } from 'node:os'
 import { join } from 'node:path'
@@ -51,6 +51,10 @@ if [ "$is_probe" = "1" ]; then
     *) echo "Ran 0 tests across \${FAKE_BUN_DISC} files. [0.00s]" ;;
   esac
   exit 0
+fi
+if [ -n "\${FAKE_BUN_HOLD_FILE:-}" ]; then
+  echo "$BASHPID" > "$FAKE_BUN_HOLD_FILE"
+  until [ -e "$FAKE_BUN_RELEASE_FILE" ]; do sleep 0.05; done
 fi
 if [ -n "\${FAKE_BUN_LANE_SCENARIO:-}" ]; then
   calls=0
@@ -192,6 +196,7 @@ function runRunTests(h: Harness, extraEnv: Record<string, string> = {}): RunResu
         ),
         NEUTRON_TEST_DISCOVER_OVERRIDE: h.files.join(' '),
         NEUTRON_BUN_BIN: h.fakeBun,
+        TMPDIR: h.dir,
         ...extraEnv,
       },
     })
@@ -516,6 +521,150 @@ describe('G8 run-tests.sh — empty BUN_DISC is LOUD (G8 fix)', () => {
 })
 
 describe('G8 run-tests.sh — coverage drift + audit-failure paths', () => {
+  test('a red lane retains its private chunk log and remains red', () => {
+    const h = harness(1)
+    try {
+      const logs = join(h.dir, 'runner-logs')
+      mkdirSync(logs)
+      const { code, out } = runRunTests(h, {
+        TMPDIR: logs,
+        FAKE_BUN_DISC: '1',
+        FAKE_BUN_CHUNK_RC: '1',
+        NEUTRON_TEST_NO_PGLITE_LANE: '1',
+      })
+      expect(code).toBe(1)
+      expect(out).toContain('run-tests: FAIL')
+      const retained = out.match(/run-tests: retained lane logs at (.+)\n/)
+      expect(retained).not.toBeNull()
+      const path = retained![1]!
+      expect(path.startsWith(`${logs}/neutron-runtests-`)).toBe(true)
+      expect(statSync(path).mode & 0o777).toBe(0o700)
+      expect(readdirSync(logs)).toEqual([path.slice(logs.length + 1)])
+      expect(readFileSync(join(path, 'chunk-000.log'), 'utf8')).toContain('Ran 3 tests across 1 files.')
+    } finally {
+      rmSync(h.dir, { recursive: true, force: true })
+    }
+  })
+
+  test('an early coverage refusal retains its existing chunk log', () => {
+    const h = harness(1)
+    try {
+      const logs = join(h.dir, 'runner-logs')
+      mkdirSync(logs)
+      const { code, out } = runRunTests(h, {
+        TMPDIR: logs,
+        FAKE_BUN_DISC: '1',
+        FAKE_BUN_CHUNK_RAN: 'none',
+        NEUTRON_TEST_NO_PGLITE_LANE: '1',
+      })
+      expect(code).toBe(1)
+      expect(out).toContain('coverage hole')
+      const retained = out.match(/run-tests: retained lane logs at (.+)\n/)
+      expect(retained).not.toBeNull()
+      expect(readFileSync(join(retained![1]!, 'chunk-000.log'), 'utf8')).toContain('==== chunk 1/1')
+    } finally {
+      rmSync(h.dir, { recursive: true, force: true })
+    }
+  })
+
+  test('a green run removes its own logs and prints no retained path', () => {
+    const h = harness(1)
+    try {
+      const logs = join(h.dir, 'runner-logs')
+      mkdirSync(logs)
+      const { code, out } = runRunTests(h, {
+        TMPDIR: logs,
+        FAKE_BUN_DISC: '1',
+        NEUTRON_TEST_NO_PGLITE_LANE: '1',
+      })
+      expect(code).toBe(0)
+      expect(out).toContain('run-tests: PASS')
+      expect(out).not.toContain('retained lane logs')
+      expect(readdirSync(logs)).toEqual([])
+    } finally {
+      rmSync(h.dir, { recursive: true, force: true })
+    }
+  })
+
+  test('retention caps completed failures and leaves an active run alone', () => {
+    const h = harness(1)
+    try {
+      const active = mkdtempSync(join(h.dir, 'neutron-runtests-'))
+      writeFileSync(join(active, 'still-running'), 'active')
+      let latest = ''
+      for (let i = 0; i < 4; i++) {
+        const { code, out } = runRunTests(h, {
+          FAKE_BUN_DISC: '1', FAKE_BUN_CHUNK_RC: '1', NEUTRON_TEST_NO_PGLITE_LANE: '1',
+        })
+        expect(code).toBe(1)
+        latest = out.match(/run-tests: retained lane logs at (.+)\n/)?.[1] ?? ''
+        expect(latest).not.toBe('')
+      }
+      expect(readFileSync(join(active, 'still-running'), 'utf8')).toBe('active')
+      expect(existsSync(join(latest, 'chunk-000.log'))).toBe(true)
+      expect(readdirSync(h.dir).filter(name => name.startsWith('neutron-runtests-')
+        && existsSync(join(h.dir, name, '.retained-failure')))).toHaveLength(3)
+    } finally {
+      rmSync(h.dir, { recursive: true, force: true })
+    }
+  })
+
+  test('TERM during a parallel chunk retains unmarked logs that later runs cannot prune', async () => {
+    const h = harness(1)
+    const logs = join(h.dir, 'runner-logs')
+    const started = join(h.dir, 'writer-started')
+    const release = join(h.dir, 'writer-release')
+    mkdirSync(logs)
+    const env = {
+      ...Object.fromEntries(Object.entries(process.env).filter(([key]) => !key.startsWith('NEUTRON_TEST_'))),
+      TMPDIR: logs,
+      NEUTRON_TEST_DISCOVER_OVERRIDE: h.files.join(' '),
+      NEUTRON_BUN_BIN: h.fakeBun,
+      NEUTRON_TEST_NO_PGLITE_LANE: '1',
+      NEUTRON_TEST_JOBS: '2',
+      FAKE_BUN_DISC: '1',
+      FAKE_BUN_HOLD_FILE: started,
+      FAKE_BUN_RELEASE_FILE: release,
+    }
+    const child = spawn('bash', [RUN_TESTS], { env, stdio: ['ignore', 'pipe', 'pipe'] })
+    let out = ''
+    child.stdout.on('data', chunk => { out += chunk.toString() })
+    child.stderr.on('data', chunk => { out += chunk.toString() })
+    const exited = new Promise<{ code: number | null; signal: NodeJS.Signals | null }>(resolve => {
+      child.on('exit', (code, signal) => resolve({ code, signal }))
+    })
+    const drained = new Promise<void>(resolve => { child.on('close', () => resolve()) })
+    try {
+      for (let i = 0; i < 100 && !existsSync(started); i++) await new Promise(resolve => setTimeout(resolve, 20))
+      expect(existsSync(started)).toBe(true)
+      const writer = Number(readFileSync(started, 'utf8'))
+      expect(process.kill(writer, 0)).toBe(true)
+      child.kill('SIGTERM')
+      const result = await Promise.race([
+        exited,
+        new Promise<never>((_, reject) => setTimeout(() => reject(new Error('runner did not exit on TERM')), 3000)),
+      ])
+      expect(result.code === 0).toBe(false)
+      expect(out).toContain('retained lane logs')
+      const retained = out.match(/run-tests: retained lane logs at (.+)\n/)
+      expect(retained).not.toBeNull()
+      const path = retained![1]!
+      expect(existsSync(join(path, 'chunk-000.log'))).toBe(true)
+      expect(existsSync(join(path, '.retained-failure'))).toBe(false)
+      expect(process.kill(writer, 0)).toBe(true)
+      for (let i = 0; i < 4; i++) {
+        const red = runRunTests(h, { TMPDIR: logs, FAKE_BUN_DISC: '1', FAKE_BUN_CHUNK_RC: '1', NEUTRON_TEST_NO_PGLITE_LANE: '1' })
+        expect(red.code).toBe(1)
+      }
+      expect(existsSync(join(path, 'chunk-000.log'))).toBe(true)
+      expect(existsSync(join(path, '.retained-failure'))).toBe(false)
+    } finally {
+      writeFileSync(release, '')
+      await Promise.race([drained, new Promise<void>(resolve => setTimeout(resolve, 1000))])
+      rmSync(h.dir, { recursive: true, force: true })
+    }
+  })
+
   test('bun-discovered count != find count → FATAL coverage drift', () => {
     const h = harness(3)
     try {

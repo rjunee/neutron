@@ -4,6 +4,15 @@
 real-source test suite to completion with **bounded memory**. Use it for the
 suite; use bare `bun test <file>` for a single file.
 
+After a nonzero exit, the runner prints the path to that run's chunk and lane
+logs in a private temporary directory. Inspect the named log when terminal
+output is truncated, then remove that directory after diagnosis. A passing run
+removes its temporary logs automatically. At most three settled failed runs
+are retained under the same temporary parent. A signal-interrupted run stays
+unmarked because a chunk may still be writing; it is never automatically
+pruned, so its reported private directory needs operator cleanup after diagnosis.
+Refusals before any lane starts have no lane logs to retain.
+
 ```bash
 bash scripts/run-tests.sh          # whole suite, bounded memory
 bun test gateway/__tests__/app-tasks-surface.test.ts   # one file (fine, cheap)
