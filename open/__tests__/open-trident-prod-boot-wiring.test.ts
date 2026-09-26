@@ -143,7 +143,7 @@ function panelCompletingSubstrate(): Substrate {
   }
 }
 
-test.each([[false, true], [true, true], [true, false]])('production Codex recovery resolves materialized credentials before inspecting a surviving owner: journal=%s private=%s', async (journal, privateHome) => {
+test.each([[false, true, true], [true, true, true], [true, false, true], [true, true, false]])('production Codex recovery resolves materialized credentials before inspecting a surviving owner: journal=%s private=%s authorized=%s', async (journal, privateHome, authorized) => {
   delete process.env['ANTHROPIC_API_KEY']
   delete process.env['OPENAI_API_KEY']
   await new SqliteProjectSettingsStore(db).update('owner', 'project-one', { name: 'Project One', model_provider: 'openai-codex' })
@@ -157,6 +157,7 @@ test.each([[false, true], [true, true], [true, false]])('production Codex recove
   const resolve = spyOn(CodexCredentialService.prototype, 'resolveProjectOwnerCredential').mockImplementation((_owner, projectId) => {
     if (projectId !== 'project-one') throw new Error('No project credential')
     order.push('project-credential')
+    if (!authorized) throw new Error('Fixture project credential revoked')
     return { codexHome, credentialIdentity: 'fixture' }
   })
   const attach = spyOn(durableCodexOwner, 'openDurableCodexOwner').mockImplementation(async options => {
@@ -166,12 +167,25 @@ test.each([[false, true], [true, true], [true, false]])('production Codex recove
     order.push('reattach')
     throw new Error('Fixture survivor requires reconciliation')
   })
+  let composition: Awaited<ReturnType<ReturnType<typeof buildOpenGraphComposer>>> | undefined
   try {
-    await buildOpenGraphComposer({ env: process.env, substrateFactory: () => recordingSubstrate([]) })({ db, project_slug: 'owner' })
+    composition = await buildOpenGraphComposer({ env: process.env, substrateFactory: () => recordingSubstrate([]) })({ db, project_slug: 'owner' })
     expect(order.indexOf('materialized')).toBeGreaterThanOrEqual(0)
-    expect(order.indexOf('project-credential')).toBeGreaterThan(order.indexOf('materialized'))
-    expect(attach).toHaveBeenCalledTimes(journal && privateHome ? 1 : 0)
-  } finally { attach.mockRestore(); resolve.mockRestore(); materialize.mockRestore() }
+    expect(resolve).not.toHaveBeenCalled()
+    expect(attach).not.toHaveBeenCalled()
+    // The gateway invokes readiness once after binding the graph's tool bridge.
+    // Merely constructing the composer must not recover native authority early.
+    expect(composition.on_graph_ready).toBeFunction()
+    order.push('graph-ready')
+    await composition.on_graph_ready!()
+    expect(order.indexOf('graph-ready')).toBeGreaterThan(order.indexOf('materialized'))
+    expect(order.indexOf('project-credential')).toBeGreaterThan(order.indexOf('graph-ready'))
+    expect(attach).toHaveBeenCalledTimes(journal && privateHome && authorized ? 1 : 0)
+    if (journal && privateHome && authorized) expect(order.indexOf('reattach')).toBeGreaterThan(order.indexOf('project-credential'))
+  } finally {
+    await composition?.on_shutdown_start?.()
+    attach.mockRestore(); resolve.mockRestore(); materialize.mockRestore()
+  }
 })
 
 test.each([
