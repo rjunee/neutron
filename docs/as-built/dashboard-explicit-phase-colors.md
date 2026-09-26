@@ -7,12 +7,15 @@ the existing renderer classifier (`trident/build-timeline-html.ts:15-30`). Both
 interval bars and expanded detail dots consume that classifier. Unknown,
 host-stage and legacy categories retain the existing inference fallback.
 
-The category vocabulary follows the existing attempt labels
-(`trident/build-timeline.ts:127-130`), phase routes
-(`trident/inner-workflow.mjs:442-488`), native test importer
+The recognized subset draws on existing attempt-role labels
+(`trident/build-timeline.ts:127-130`), selected phase routes
+(`trident/inner-workflow.mjs:442-488`), native test observations
 (`scripts/build-timeline-codex-import.ts:72-74`) and GitHub CI observations
-(`scripts/build-timeline-sources.ts:316`). The dashboard spec clarifies the
-observable precedence rule without adding colors or changing timing attribution.
+(`scripts/build-timeline-sources.ts:316`). Role-label keys are not evidence of all
+persisted phase keys. This correction does not establish a complete canonical
+phase taxonomy: known route keys such as decomposition and bookkeeping retain
+the unchanged inference fallback. The dashboard spec clarifies the observable
+precedence rule without adding colors or changing timing attribution.
 
 Consuming tests (`trident/build-timeline-html.test.ts:15-50`) exercise conflicting
 labels across existing categories, genuine fix phases, legacy/unknown inference,
