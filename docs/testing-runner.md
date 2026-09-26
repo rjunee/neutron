@@ -144,8 +144,11 @@ This requires Linux, Python pidfds and `bubblewrap` with user/PID/mount namespac
 permission. The launcher retains the invoking UID/GID, supplies private `/proc`
 and `/dev`, verifies typed namespace handles and the outer launcher handshake,
 and binds the launcher chain to parent death. An unavailable boundary fails
-closed. CI installs `bubblewrap` when absent and exercises a harmless command
-through the boundary before tests; no kernel-policy relaxation is performed.
+closed. CI provisions `bubblewrap` and AppArmor tools when absent and loads an
+AppArmor user-namespace admission profile attached only to `/usr/bin/bwrap` on
+ephemeral GitHub-hosted Linux runners. Global kernel restrictions stay enabled.
+It then exercises a harmless command through the same authenticated boundary,
+as the invoking user, before tests. Local test entrypoints never provision policy.
 
 ### Environment scrubbing
 

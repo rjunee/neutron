@@ -63,8 +63,11 @@ Process-signalling tests require Linux, Python 3.9+ with pidfd support, and
 The first test preload runs affected Bun invocations inside that boundary, with
 private `/proc` and `/dev` mounts and the invoking user's UID/GID. Missing or
 denied isolation fails the invocation before process fixtures load. CI installs
-the distribution's `bubblewrap` package when absent and checks the boundary
-before running tests; it does not change kernel policy or run tests as root.
+the distribution's `bubblewrap` and AppArmor tools when absent, loads an
+executable-scoped user-namespace admission profile for `/usr/bin/bwrap` on its
+ephemeral GitHub-hosted Linux runners, and checks the boundary before running
+tests. It preserves global kernel policy and runs the probe and tests as the
+invoking user. Local test entrypoints do not provision host policy.
 
 Do NOT run bare `bun test` for the whole suite — it loads every discovered file
 into one long-lived process and its peak memory footprint will OOM most
