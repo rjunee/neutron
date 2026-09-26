@@ -16,10 +16,9 @@
 export const MAX_BINARY_BYTES = 25 * 1024 * 1024
 
 /**
- * Extensions the binary surface accepts. The list is also asserted to
- * be a strict subset of `DOC_VERSION_GITIGNORE` in
- * binary-store-init.test.ts so a future drift (someone adds an ext
- * here but forgets the .gitignore in P7.4) lights up a unit failure.
+ * Extensions the binary surface accepts. Content-addressed bytes are
+ * included in canonical vault snapshots; binary-store.test.ts verifies
+ * uploaded bytes can be read intact from the snapshot.
  */
 export const BINARY_EXTENSIONS = Object.freeze([
   // Images
