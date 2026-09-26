@@ -96,8 +96,20 @@ control. Temporary environment-read mutations made both tests fail; after restor
 the production files, the complete registry suite passed 25 tests / 113 assertions.
 That focused result does not turn the failed full-suite receipt into a pass.
 
-Not claimed: live offsite push/restore, owner custody of a recovery key, a full
-shared-host gate at this checkpoint, deletion of retained legacy repositories,
+The corrected frozen revision `0115ce92d5533af3d83c15da12f872937bf2e1d1`
+(tree `c65fe538d9ee0726437d189e6ed3bc75c9f2a79a`) then completed
+`bash scripts/check-shared-host.sh` with exit 0. All 51 TypeScript projects passed,
+including root and Trident. The canonical runner discovered, assigned and executed
+all 1,695 files: 1,461 general, 22 PGLite, 43 device and 169 real-HTTP, across 18
+lanes with zero failed lanes. The PGLite lane passed on its first attempt.
+The worktree remained clean at that exact revision after the run. The local log
+SHA-256 is `8617512a539bf198993d4e2a67f3bb3e4e52b40dfbcaef86829a47179bea2382`.
+This receipt is a documentation-only addition after validation; it does not
+transfer the local receipt to a different source identity. Publication still
+requires CI on the final PR head.
+
+Not claimed: live offsite push/restore, owner custody of a recovery key,
+deletion of retained legacy repositories,
 or location-independent classification of public versus private files. The last
 criterion remains open in `project-code-repos-and-vault-split.md`; folder exclusion
 and encrypted backup do not settle publication policy.
