@@ -3,7 +3,7 @@ title: Preserve terminal Work Board attempts across retry and shelving
 group: trident
 status: open
 priority: P1
-cutover: false
+cutover: true
 ---
 
 The card owns its terminal attempt provenance independently of its current run

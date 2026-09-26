@@ -24,6 +24,7 @@ These are the items the harness-orchestrator cutover is gated on.
 - [`the-orchestrator-owns-the-build-loop`](the-orchestrator-owns-the-build-loop.md) — The project REPL owns the build loop
 - [`the-review-loop-must-stop-and-re-plan`](the-review-loop-must-stop-and-re-plan.md) — Stop and escalate a review loop instead of iterating on a bad plan
 - [`trident-build-efficiency`](trident-build-efficiency.md) — Avoid repeated build work and measure Trident's time and token costs
+- [`work-board-attempt-provenance`](work-board-attempt-provenance.md) — Preserve terminal Work Board attempts across retry and shelving
 - [`repl-model-background-poll-test-stability`](repl-model-background-poll-test-stability.md) — Synchronize the REPL model background-poll race test
 - [`a-gateway-restart-keeps-the-project-repls`](a-gateway-restart-keeps-the-project-repls.md) — A gateway restart keeps the project REPLs, conversation and all
 - [`durable-reply-sink-coordinates`](durable-reply-sink-coordinates.md) — The sink's coordinates outlive the gateway, and an orphan must not
@@ -68,7 +69,7 @@ branch is cut (standard §3.1, §3.2).
 | [`publish-only-resume-without-re-running-forge`](publish-only-resume-without-re-running-forge.md) | Re-publish a built commit after a credential blink, without rebuilding | P1 | — |
 | [`run-head-hash-width`](run-head-hash-width.md) | Accept full SHA-1 and SHA-256 run heads and checkpoints | P1 | — |
 | [`trident-install-disk-admission`](trident-install-disk-admission.md) | Admit dependency installation only with measured disk headroom | P1 | — |
-| [`work-board-attempt-provenance`](work-board-attempt-provenance.md) | Preserve terminal Work Board attempts across retry and shelving | P1 | — |
+| [`work-board-attempt-provenance`](work-board-attempt-provenance.md) | Preserve terminal Work Board attempts across retry and shelving | P1 | yes |
 | [`codex-control-socket-path-fits-sun-len`](codex-control-socket-path-fits-sun-len.md) | Keep Codex control sockets within Linux sun_path | P2 | — |
 | [`codex-project-directory-names-its-owner`](codex-project-directory-names-its-owner.md) | Codex project credential directories name their owning project | P2 | — |
 | [`surface-infra-retries-to-the-owner`](surface-infra-retries-to-the-owner.md) | Surface infrastructure retries to the owner | P2 | — |

@@ -31,5 +31,7 @@ Focused validation on the candidate based on `a1145a499`:
   assertion; inventing failed observations for active rows failed the same
   exact-row backfill assertion. All mutations were reverted.
 
-The shared-host full suite, independent review, PR CI and publication remain
+Independent review of `cc69793df` returned GO with no blocking findings. This
+work is assigned to Cutover so failed cards can be shelved without losing their
+attempt evidence. The shared-host full suite, PR CI and publication remain
 pending. No live Work Board rows were changed by this work.
