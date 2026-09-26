@@ -3,7 +3,8 @@
 The canonical vault history remains `<project>/.project-backup/`. The remote
 transport exports all of its refs (including archived legacy histories) as a complete Git bundle and encrypts it
 with AES-256-GCM before adding any object to the remote Git repository. Each
-project has one opaque, keyed filename. The remote's Git history retains earlier
+project has one opaque, keyed directory containing a manifest and numbered
+ciphertext chunks. The remote's Git history retains earlier
 encrypted exports. Filenames, commit messages and historical content inside the
 vault bundle are encrypted; ciphertext sizes and upload timing are visible.
 
@@ -56,7 +57,15 @@ history, so the store's exclusions and SQLite snapshot rules remain responsible
 for what enters that history. Each export uses a fresh remote clone and a normal
 fast-forward push. Concurrent pushes may refuse and need another scheduled
 attempt; they never force-push or overwrite another project's changes.
-Exports larger than 95 MiB including envelope overhead refuse before upload.
+Ciphertext chunks are at most 32 MiB each, keeping every uploaded object below
+GitHub's individual-file limit. The bundle may be up to 1 GiB; larger bundles
+refuse explicitly before upload. Processing keeps at most one chunk of plaintext
+and ciphertext in memory. The format version, complete byte count, chunk count,
+and chunk size are authenticated alongside the repository and project identity.
+Restore rejects missing, additional, resized, reordered or corrupted chunks;
+no decrypted bundle is passed to Git before its final authentication succeeds.
+The latest export is fetched with a shallow clone; each exported bundle itself
+still includes all canonical and archived history refs.
 Temporary plaintext bundles are kept inside mode-0700 scratch directories and
 removed after the operation; process termination can leave scratch directories
 for host cleanup. Storage encryption remains the host operator's responsibility.

@@ -20,9 +20,12 @@ export class EncryptedBackupError extends Error {
   constructor(public readonly reason: string) { super(`Encrypted vault backup refused: ${reason}`) }
 }
 
-const MAGIC = Buffer.from('NVB1')
-// GitHub rejects large individual Git objects. Refuse before staging/uploading.
-export const MAX_ENCRYPTED_BACKUP_BYTES = 95 * 1024 * 1024
+// Each Git object stays below GitHub's individual-file limit. The whole bundle
+// is processed one chunk at a time, never held in memory as one Buffer.
+export const MAX_BACKUP_BUNDLE_BYTES = 1024 * 1024 * 1024
+export const BACKUP_CHUNK_BYTES = 32 * 1024 * 1024
+const MIN_CHUNK_BYTES = 1024 * 1024
+const MAX_MANIFEST_BYTES = 4096
 const exec = promisify(execFile)
 export type BackupCommand = (binary: 'git' | 'gh', args: string[], cwd?: string) => Promise<string>
 
@@ -99,30 +102,88 @@ async function loadKey(config: OwnerBackupConfig, projectDir?: string): Promise<
 
 function context(config: OwnerBackupConfig, projectId: string): Buffer {
   if (!projectId || projectId.length > 1024) throw new EncryptedBackupError('invalid_project_identity')
-  return Buffer.from(JSON.stringify(['neutron-vault-backup', 1, config.repositoryId, projectId]))
+  return Buffer.from(JSON.stringify(['neutron-vault-backup', 2, config.repositoryId, projectId]))
 }
 
 function artifactName(key: Buffer, projectId: string): string {
   return createHmac('sha256', key).update('vault-path\0').update(projectId).digest('hex') + '.nvb'
 }
 
-function encrypt(plain: Buffer, key: Buffer, aad: Buffer): Buffer {
-  const nonce = randomBytes(12)
-  const cipher = createCipheriv('aes-256-gcm', key, nonce)
-  cipher.setAAD(aad)
-  const ciphertext = Buffer.concat([cipher.update(plain), cipher.final()])
-  return Buffer.concat([MAGIC, nonce, cipher.getAuthTag(), ciphertext])
+interface ChunkManifest {
+  version: 2
+  bytes: number
+  chunkBytes: number
+  count: number
+  nonce: string
+  tag: string
 }
 
-function decrypt(envelope: Buffer, key: Buffer, aad: Buffer): Buffer {
+const chunkName = (index: number) => `${String(index).padStart(6, '0')}.chunk`
+const layoutAAD = (aad: Buffer, manifest: ChunkManifest) => Buffer.from(JSON.stringify([
+  aad.toString('utf8'), manifest.version, manifest.bytes, manifest.chunkBytes, manifest.count,
+]))
+
+function validateManifest(value: unknown): ChunkManifest {
+  const m = value as ChunkManifest | null
+  if (!m || m.version !== 2 || !Number.isSafeInteger(m.bytes) || m.bytes < 1
+    || m.bytes > MAX_BACKUP_BUNDLE_BYTES || !Number.isSafeInteger(m.chunkBytes)
+    || m.chunkBytes < MIN_CHUNK_BYTES || m.chunkBytes > BACKUP_CHUNK_BYTES
+    || m.count !== Math.ceil(m.bytes / m.chunkBytes)
+    || typeof m.nonce !== 'string' || !/^[a-f0-9]{24}$/.test(m.nonce)
+    || typeof m.tag !== 'string' || !/^[a-f0-9]{32}$/.test(m.tag)) {
+    throw new EncryptedBackupError('invalid_chunk_manifest')
+  }
+  return m
+}
+
+async function encryptBundle(bundle: string, directory: string, key: Buffer, aad: Buffer,
+  bytes: number, chunkBytes: number): Promise<ChunkManifest> {
+  if (!Number.isSafeInteger(chunkBytes) || chunkBytes < MIN_CHUNK_BYTES || chunkBytes > BACKUP_CHUNK_BYTES) {
+    throw new EncryptedBackupError('invalid_chunk_size')
+  }
+  const manifest: ChunkManifest = { version: 2, bytes, chunkBytes,
+    count: Math.ceil(bytes / chunkBytes), nonce: randomBytes(12).toString('hex'), tag: '' }
+  const cipher = createCipheriv('aes-256-gcm', key, Buffer.from(manifest.nonce, 'hex'))
+  cipher.setAAD(layoutAAD(aad, manifest))
+  await mkdir(directory, { mode: 0o700 })
+  const input = await open(bundle, 'r')
+  const buffer = Buffer.alloc(Math.min(bytes, chunkBytes))
   try {
-    if (envelope.length < 33 || envelope.length > MAX_ENCRYPTED_BACKUP_BYTES
-      || !envelope.subarray(0, 4).equals(MAGIC)) throw new Error('bad_envelope')
-    const cipher = createDecipheriv('aes-256-gcm', key, envelope.subarray(4, 16))
-    cipher.setAAD(aad)
-    cipher.setAuthTag(envelope.subarray(16, 32))
-    return Buffer.concat([cipher.update(envelope.subarray(32)), cipher.final()])
+    for (let i = 0; i < manifest.count; i++) {
+      const length = Math.min(chunkBytes, bytes - i * chunkBytes)
+      let offset = 0
+      while (offset < length) {
+        const read = await input.read(buffer, offset, length - offset, i * chunkBytes + offset)
+        if (!read.bytesRead) throw new EncryptedBackupError('bundle_changed_during_read')
+        offset += read.bytesRead
+      }
+      await writeFile(join(directory, chunkName(i)), cipher.update(buffer.subarray(0, length)), { mode: 0o600 })
+    }
+    cipher.final()
+    manifest.tag = cipher.getAuthTag().toString('hex')
+    await writeFile(join(directory, 'manifest.json'), JSON.stringify(manifest), { mode: 0o600 })
+    return manifest
+  } finally { buffer.fill(0); await input.close() }
+}
+
+async function decryptBundle(directory: string, bundle: string, manifest: ChunkManifest, key: Buffer, aad: Buffer): Promise<void> {
+  const cipher = createDecipheriv('aes-256-gcm', key, Buffer.from(manifest.nonce, 'hex'))
+  cipher.setAAD(layoutAAD(aad, manifest))
+  cipher.setAuthTag(Buffer.from(manifest.tag, 'hex'))
+  const output = await open(bundle, 'wx', 0o600)
+  try {
+    for (let i = 0; i < manifest.count; i++) {
+      const encrypted = await readFile(join(directory, chunkName(i)))
+      if (encrypted.length !== Math.min(manifest.chunkBytes, manifest.bytes - i * manifest.chunkBytes)) {
+        throw new EncryptedBackupError('chunk_set_incomplete')
+      }
+      const plain = cipher.update(encrypted)
+      try { await output.writeFile(plain) } finally { plain.fill(0) }
+    }
+    // Plaintext is private scratch until this succeeds; Git is invoked only afterwards.
+    cipher.final()
   } catch { throw new EncryptedBackupError('authentication_failed') }
+  finally { await output.close() }
 }
 
 async function verifyDestination(config: OwnerBackupConfig, command: BackupCommand): Promise<void> {
@@ -141,14 +202,18 @@ const git = (command: BackupCommand, args: string[], cwd?: string) => command('g
 
 async function cloneRemote(config: OwnerBackupConfig, directory: string, command: BackupCommand): Promise<void> {
   await verifyDestination(config, command)
-  await git(command, ['clone', '--no-checkout', '--single-branch', '--branch', 'main',
+  await git(command, ['clone', '--depth', '1', '--no-checkout', '--single-branch', '--branch', 'main',
     `git@github.com:${config.repository}.git`, directory])
 }
 
 interface CommonOptions { projectId: string; config: OwnerBackupConfig; command?: BackupCommand }
 
 /** Caller holds the store's project mutex. Nothing under the live vault is staged remotely. */
-export async function pushEncryptedProjectBackup(options: CommonOptions & { projectDir: string }): Promise<{
+export async function pushEncryptedProjectBackup(options: CommonOptions & {
+  projectDir: string
+  /** Smaller chunks are useful for constrained hosts; the same size bounds apply. */
+  chunkBytes?: number
+}): Promise<{
   pushed: true; commit: string; snapshot: string
 }> {
   const config = validateOwnerBackupConfig(options.config)
@@ -160,23 +225,27 @@ export async function pushEncryptedProjectBackup(options: CommonOptions & { proj
     const bundle = join(temp, 'history.bundle')
     const gitDir = join(resolve(options.projectDir), '.project-backup')
     await git(command, [`--git-dir=${gitDir}`, 'bundle', 'create', bundle, '--all'])
-    if ((await stat(bundle)).size + 32 > MAX_ENCRYPTED_BACKUP_BYTES) throw new EncryptedBackupError('bundle_too_large')
+    const bytes = (await stat(bundle)).size
+    if (bytes < 1 || bytes > MAX_BACKUP_BUNDLE_BYTES) throw new EncryptedBackupError('bundle_too_large')
     // Read the advertised bundle head, not a second resolution of the mutable local ref.
     const advertised = await git(command, ['bundle', 'list-heads', bundle, 'refs/heads/main'])
     const snapshot = advertised.trim().split(' ')[0] ?? ''
     if (!/^(?:[a-f0-9]{40}|[a-f0-9]{64})$/.test(snapshot)) throw new EncryptedBackupError('invalid_bundle_head')
-    const plain = await readFile(bundle)
-    let encrypted: Buffer
-    try { encrypted = encrypt(plain, key, aad) } finally { plain.fill(0) }
+    const encryptedDir = join(temp, 'encrypted')
+    const manifest = await encryptBundle(bundle, encryptedDir, key, aad, bytes, options.chunkBytes ?? BACKUP_CHUNK_BYTES)
     const remote = join(temp, 'remote')
     await cloneRemote(config, remote, command)
     // No checkout: remote-controlled symlinks/attributes can never redirect staging.
     await git(command, ['read-tree', 'HEAD'], remote)
     const name = artifactName(key, options.projectId)
-    const blobFile = join(temp, 'encrypted.nvb')
-    await writeFile(blobFile, encrypted, { mode: 0o600 })
-    const blob = (await git(command, ['hash-object', '-w', '--no-filters', blobFile], remote)).trim()
-    await git(command, ['update-index', '--add', '--cacheinfo', `100644,${blob},${name}`], remote)
+    // Remove the previous complete chunk set from the index before replacing it.
+    // Without this, a smaller subsequent export would retain stale tail chunks.
+    const previous = (await git(command, ['ls-files', '-z', '--', name], remote)).split('\0').filter(Boolean)
+    for (const path of previous) await git(command, ['update-index', '--force-remove', '--', path], remote)
+    for (const file of ['manifest.json', ...Array.from({ length: manifest.count }, (_, i) => chunkName(i))]) {
+      const blob = (await git(command, ['hash-object', '-w', '--no-filters', join(encryptedDir, file)], remote)).trim()
+      await git(command, ['update-index', '--add', '--cacheinfo', `100644,${blob},${name}/${file}`], remote)
+    }
     await git(command, ['-c', 'user.name=Neutron Vault Backup', '-c', 'user.email=vault-backup@localhost',
       'commit', '-m', 'Encrypted vault snapshot'], remote)
     const commit = (await git(command, ['rev-parse', 'HEAD'], remote)).trim()
@@ -205,18 +274,30 @@ export async function restoreEncryptedProjectBackup(options: CommonOptions & { d
     const remote = join(temp, 'remote')
     await cloneRemote(config, remote, command)
     const name = artifactName(key, options.projectId)
-    const info = (await git(command, ['ls-tree', 'HEAD', '--', name], remote)).trim()
-    if (!new RegExp(`^100644 blob (?:[a-f0-9]{40}|[a-f0-9]{64})\\t${name.replace('.', '\\.')}$`).test(info)) {
-      throw new EncryptedBackupError('encrypted_artifact_missing')
+    const tree = await git(command, ['ls-tree', '-r', '-l', 'HEAD', '--', name], remote)
+    const entries = new Map<string, number>()
+    for (const line of tree.split('\n').filter(Boolean)) {
+      const entry = /^100644 blob (?:[a-f0-9]{40}|[a-f0-9]{64}) +([0-9]+)\t(.+)$/.exec(line)
+      if (!entry || !entry[2]?.startsWith(name + '/')) throw new EncryptedBackupError('invalid_chunk_tree')
+      entries.set(entry[2].slice(name.length + 1), Number(entry[1]))
     }
-    const size = (await git(command, ['cat-file', '-s', `HEAD:${name}`], remote)).trim()
-    if (!/^[0-9]+$/.test(size) || Number(size) > MAX_ENCRYPTED_BACKUP_BYTES) throw new EncryptedBackupError('bundle_too_large')
-    // Checkout exactly the validated regular ciphertext file. No other remote paths are materialized.
+    const manifestSize = entries.get('manifest.json')
+    if (manifestSize === undefined) throw new EncryptedBackupError('encrypted_artifact_missing')
+    if (manifestSize < 1 || manifestSize > MAX_MANIFEST_BYTES) throw new EncryptedBackupError('invalid_chunk_manifest')
+    let manifest: ChunkManifest
+    try { manifest = validateManifest(JSON.parse(await git(command, ['show', `HEAD:${name}/manifest.json`], remote))) }
+    catch { throw new EncryptedBackupError('invalid_chunk_manifest') }
+    if (entries.size !== manifest.count + 1) throw new EncryptedBackupError('chunk_set_incomplete')
+    for (let i = 0; i < manifest.count; i++) {
+      if (entries.get(chunkName(i)) !== Math.min(manifest.chunkBytes, manifest.bytes - i * manifest.chunkBytes)) {
+        throw new EncryptedBackupError('chunk_set_incomplete')
+      }
+    }
+    // Only validated, bounded regular ciphertext files are materialized.
     await git(command, ['read-tree', 'HEAD'], remote)
-    await git(command, ['checkout-index', '--', name], remote)
-    const plain = decrypt(await readFile(join(remote, name)), key, aad)
+    for (let i = 0; i < manifest.count; i++) await git(command, ['checkout-index', '--', `${name}/${chunkName(i)}`], remote)
     const bundle = join(temp, 'history.bundle')
-    try { await writeFile(bundle, plain, { mode: 0o600 }) } finally { plain.fill(0) }
+    await decryptBundle(join(remote, name), bundle, manifest, key, aad)
     const restored = join(temp, 'restored')
     await mkdir(restored, { mode: 0o700 })
     const gitDir = join(restored, '.project-backup')

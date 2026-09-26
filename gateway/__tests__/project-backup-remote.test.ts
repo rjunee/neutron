@@ -1,10 +1,12 @@
 import { afterEach, describe, expect, test } from 'bun:test'
-import { chmod, mkdir, mkdtemp, readFile, readdir, rm, symlink, truncate, writeFile } from 'node:fs/promises'
+import { chmod, mkdir, mkdtemp, open, readFile, readdir, rm, symlink, truncate, writeFile } from 'node:fs/promises'
+import { createReadStream } from 'node:fs'
 import { join } from 'node:path'
 import { tmpdir } from 'node:os'
+import { createHash, randomBytes } from 'node:crypto'
 import {
   generateBackupKey, pushEncryptedProjectBackup, readOwnerBackupConfig,
-  restoreEncryptedProjectBackup, runBackupCommand, MAX_ENCRYPTED_BACKUP_BYTES, type BackupCommand, type OwnerBackupConfig,
+  restoreEncryptedProjectBackup, runBackupCommand, MAX_BACKUP_BUNDLE_BYTES, BACKUP_CHUNK_BYTES, type BackupCommand, type OwnerBackupConfig,
 } from '../git/project-backup-remote.ts'
 
 const dirs: string[] = []
@@ -53,12 +55,13 @@ describe('encrypted project vault remote', () => {
     const pushed = await pushEncryptedProjectBackup({ projectDir: f.project, projectId: 'private-project', config: f.config, command: f.command })
     expect(pushed.pushed).toBe(true)
     const names = (await f.git([`--git-dir=${f.remote}`, 'ls-tree', '-r', '--name-only', 'main'])).trim().split('\n')
-    expect(names).toHaveLength(1)
-    expect(names[0]).toMatch(/^[a-f0-9]{64}\.nvb$/)
+    expect(names).toHaveLength(2)
+    expect(names[0]).toMatch(/^[a-f0-9]{64}\.nvb\/000000\.chunk$/)
+    expect(names[1]).toMatch(/^[a-f0-9]{64}\.nvb\/manifest\.json$/)
     const fresh = join(f.root, 'fresh')
     await f.git(['clone', f.remote, fresh])
     const ciphertext = await readFile(join(fresh, names[0]!))
-    expect(ciphertext.subarray(0, 4).toString()).toBe('NVB1')
+    expect(JSON.parse(await readFile(join(fresh, names[1]!), 'utf8')).version).toBe(2)
     expect(ciphertext.includes(Buffer.from('fixture-secret'))).toBe(false)
     expect(ciphertext.includes(Buffer.from('private-project'))).toBe(false)
     // Positive control: same scan recognizes known plaintext in the source.
@@ -116,7 +119,7 @@ describe('encrypted project vault remote', () => {
       const result = await f.command(binary, args, cwd)
       const create = args.indexOf('create')
       if (binary === 'git' && args.includes('bundle') && create >= 0) {
-        await truncate(args[create + 1]!, MAX_ENCRYPTED_BACKUP_BYTES)
+        await truncate(args[create + 1]!, MAX_BACKUP_BUNDLE_BYTES + 1)
       }
       return result
     }
@@ -132,7 +135,9 @@ describe('encrypted project vault remote', () => {
     const clone = join(f.root, 'substitution'); await f.git(['clone', f.remote, clone])
     const names = (await readdir(clone)).filter(name => name.endsWith('.nvb'))
     expect(names).toHaveLength(2)
-    await writeFile(join(clone, names[1]!), await readFile(join(clone, names[0]!)))
+    for (const file of await readdir(join(clone, names[0]!))) {
+      await writeFile(join(clone, names[1]!, file), await readFile(join(clone, names[0]!, file)))
+    }
     await f.git(['add', '.'], clone)
     await f.git(['-c', 'user.name=Fixture', '-c', 'user.email=fixture@localhost', 'commit', '-m', 'Substitution'], clone)
     await f.git(['push', 'origin', 'main'], clone)
@@ -165,8 +170,8 @@ describe('encrypted project vault remote', () => {
     await pushEncryptedProjectBackup({ projectDir: f.project, projectId: 'p', config: f.config, command: f.command })
     const corrupt = join(f.root, 'corrupt'); await f.git(['clone', f.remote, corrupt])
     const name = (await readdir(corrupt)).find(name => name.endsWith('.nvb'))!
-    const bytes = await readFile(join(corrupt, name)); bytes[bytes.length - 1] = bytes[bytes.length - 1]! ^ 1
-    await writeFile(join(corrupt, name), bytes)
+    const bytes = await readFile(join(corrupt, name, '000000.chunk')); bytes[bytes.length - 1] = bytes[bytes.length - 1]! ^ 1
+    await writeFile(join(corrupt, name, '000000.chunk'), bytes)
     await f.git(['add', name], corrupt)
     await f.git(['-c', 'user.name=Fixture', '-c', 'user.email=fixture@localhost', 'commit', '-m', 'Damaged payload'], corrupt)
     await f.git(['push', 'origin', 'main'], corrupt)
@@ -197,5 +202,94 @@ describe('encrypted project vault remote', () => {
     await expect(readOwnerBackupConfig(f.root)).rejects.toThrow('recovery_unconfirmed')
     await writeFile(path, JSON.stringify(f.config))
     expect(await readOwnerBackupConfig(f.root)).toEqual(f.config)
+  })
+
+  test('multiple bounded chunks restore exact bytes; changed chunk size removes stale tails', async () => {
+    const f = await fixture()
+    const payload = randomBytes(2 * 1024 * 1024)
+    await writeFile(join(f.project, 'binary.dat'), payload)
+    const prefix = [`--git-dir=${join(f.project, '.project-backup')}`, `--work-tree=${f.project}`]
+    await f.git([...prefix, 'add', '.'])
+    await f.git([...prefix, '-c', 'user.name=Fixture', '-c', 'user.email=fixture@localhost', 'commit', '-m', 'Large fixture'])
+    await pushEncryptedProjectBackup({ projectDir: f.project, projectId: 'p', config: f.config, command: f.command, chunkBytes: 1024 * 1024 })
+    const clone = join(f.root, 'chunked'); await f.git(['clone', f.remote, clone])
+    const name = (await readdir(clone)).find(name => name.endsWith('.nvb'))!
+    const manifest = JSON.parse(await readFile(join(clone, name, 'manifest.json'), 'utf8'))
+    expect(manifest.count).toBeGreaterThan(2)
+    expect(manifest.chunkBytes).toBeLessThanOrEqual(BACKUP_CHUNK_BYTES)
+    const destination = join(f.root, 'restored-large')
+    await restoreEncryptedProjectBackup({ projectId: 'p', destination, config: f.config, command: f.command })
+    expect(await readFile(join(destination, 'binary.dat'))).toEqual(payload)
+    await pushEncryptedProjectBackup({ projectDir: f.project, projectId: 'p', config: f.config, command: f.command })
+    const names = (await f.git([`--git-dir=${f.remote}`, 'ls-tree', '-r', '--name-only', 'main'])).trim().split('\n')
+    expect(names).toHaveLength(2)
+    await restoreEncryptedProjectBackup({ projectId: 'p', destination: join(f.root, 'restored-repacked'), config: f.config, command: f.command })
+  })
+
+  test('a bundle above the former single-file ceiling restores with every object below the GitHub limit', async () => {
+    const f = await fixture()
+    const handle = await open(join(f.project, 'large.dat'), 'wx')
+    const expected = createHash('sha256')
+    try {
+      for (let i = 0; i < 96; i++) {
+        const bytes = randomBytes(1024 * 1024)
+        expected.update(bytes); await handle.writeFile(bytes)
+      }
+    } finally { await handle.close() }
+    const prefix = [`--git-dir=${join(f.project, '.project-backup')}`, `--work-tree=${f.project}`]
+    await f.git([...prefix, 'add', '.'])
+    await f.git([...prefix, '-c', 'user.name=Fixture', '-c', 'user.email=fixture@localhost', 'commit', '-m', 'Large bundle fixture'])
+    await pushEncryptedProjectBackup({ projectDir: f.project, projectId: 'p', config: f.config, command: f.command })
+    const tree = await f.git([`--git-dir=${f.remote}`, 'ls-tree', '-r', '-l', 'main'])
+    const sizes = tree.trim().split('\n').map(line => Number(line.split(/\s+/)[3]))
+    expect(sizes.length).toBeGreaterThan(3)
+    expect(sizes.reduce((sum, size) => sum + size, 0)).toBeGreaterThan(95 * 1024 * 1024)
+    expect(sizes.every(size => size <= BACKUP_CHUNK_BYTES)).toBe(true)
+    const destination = join(f.root, 'restored-above-single-file-limit')
+    await restoreEncryptedProjectBackup({ projectId: 'p', destination, config: f.config, command: f.command })
+    const actual = createHash('sha256')
+    for await (const bytes of createReadStream(join(destination, 'large.dat'))) actual.update(bytes)
+    expect(actual.digest('hex')).toBe(expected.digest('hex'))
+  }, 120_000)
+
+  test.each(['missing', 'reordered', 'truncated', 'extra', 'oversize-manifest', 'changed-layout'])('rejects %s chunks before Git can consume plaintext', async (damage) => {
+    const f = await fixture()
+    await writeFile(join(f.project, 'binary.dat'), randomBytes(2 * 1024 * 1024))
+    const prefix = [`--git-dir=${join(f.project, '.project-backup')}`, `--work-tree=${f.project}`]
+    await f.git([...prefix, 'add', '.'])
+    await f.git([...prefix, '-c', 'user.name=Fixture', '-c', 'user.email=fixture@localhost', 'commit', '-m', 'Large fixture'])
+    await pushEncryptedProjectBackup({ projectDir: f.project, projectId: 'p', config: f.config, command: f.command, chunkBytes: 1024 * 1024 })
+    const clone = join(f.root, 'damaged'); await f.git(['clone', f.remote, clone])
+    const name = (await readdir(clone)).find(name => name.endsWith('.nvb'))!
+    const directory = join(clone, name)
+    const first = join(directory, '000000.chunk'); const second = join(directory, '000001.chunk')
+    if (damage === 'missing') await rm(second)
+    if (damage === 'reordered') {
+      const bytes = await readFile(first)
+      await writeFile(first, await readFile(second)); await writeFile(second, bytes)
+    }
+    if (damage === 'truncated') await truncate(first, 100)
+    if (damage === 'extra') await writeFile(join(directory, '000099.chunk'), 'extra')
+    if (damage === 'oversize-manifest') {
+      const path = join(directory, 'manifest.json')
+      const manifest = JSON.parse(await readFile(path, 'utf8')); manifest.bytes = MAX_BACKUP_BUNDLE_BYTES + 1
+      await writeFile(path, JSON.stringify(manifest))
+    }
+    if (damage === 'changed-layout') {
+      const path = join(directory, 'manifest.json')
+      const manifest = JSON.parse(await readFile(path, 'utf8'))
+      const bytes = Buffer.concat(await Promise.all(['000000.chunk', '000001.chunk', '000002.chunk'].map(file => readFile(join(directory, file)))))
+      manifest.chunkBytes = BACKUP_CHUNK_BYTES; manifest.count = 1
+      await writeFile(first, bytes); await rm(second); await rm(join(directory, '000002.chunk'))
+      await writeFile(path, JSON.stringify(manifest))
+    }
+    await f.git(['add', '-A'], clone)
+    await f.git(['-c', 'user.name=Fixture', '-c', 'user.email=fixture@localhost', 'commit', '-m', 'Damaged chunk fixture'], clone)
+    await f.git(['push', 'origin', 'main'], clone)
+    f.calls.length = 0
+    const destination = join(f.root, 'refused-chunks')
+    await expect(restoreEncryptedProjectBackup({ projectId: 'p', destination, config: f.config, command: f.command })).rejects.toThrow()
+    expect(f.calls.some(call => call.includes('--mirror') || call.includes('fsck'))).toBe(false)
+    expect((await readdir(f.root)).includes('refused-chunks')).toBe(false)
   })
 })
