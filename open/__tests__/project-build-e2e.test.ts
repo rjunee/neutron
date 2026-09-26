@@ -57,6 +57,7 @@ import { tmpdir } from 'node:os'
 import { dirname, join } from 'node:path'
 import { fileURLToPath } from 'node:url'
 import { createHash } from 'node:crypto'
+import { AsyncLocalStorage } from 'node:async_hooks'
 import { ProjectDb } from '@neutronai/persistence/index.ts'
 import { seedMigratedDb } from '../../tests/support/migrated-db.ts'
 import { TridentRunStore } from '@neutronai/trident/store.ts'
@@ -76,7 +77,7 @@ import { slugifyTask } from '@neutronai/trident/slugify-task.ts'
 import { TridentPhaseUsageStore } from '@neutronai/trident/phase-usage.ts'
 import { TridentAttemptLedger } from '@neutronai/trident/attempt-ledger.ts'
 import { createProjectBuildHost, type ProjectBuildOutcome } from '@neutronai/trident/project-build-host.ts'
-import { spawnCapture, type HostCommandResult } from '@neutronai/trident/git-mode.ts'
+import { spawnCapture as captureProcess, type HostCommandResult } from '@neutronai/trident/git-mode.ts'
 import { gitRangeArgv } from '@neutronai/trident/git-range.ts'
 import { VERDICT_SCHEMA } from '@neutronai/trident/gates/result-contract.ts'
 import { taskLedgerPath, workContextPath } from '@neutronai/trident/production-host-effects.ts'
@@ -115,10 +116,31 @@ type FixtureTiming = {
 const fixtureTimings: FixtureTiming[] = []
 let fixtureSequence = 0
 let caseStartedAt = 0
+type CommandCategory = 'fake_api_ref' | 'host_git' | 'worker_git' | 'suite_install' | 'fixture_git' | 'other'
+const commandScope = new AsyncLocalStorage<CommandCategory>()
+const commandIntervals: { category: CommandCategory; startMs: number; endMs: number }[] = []
+const spawnCapture: typeof captureProcess = async (...args) => {
+  if (process.env.OPEN_E2E_FIXTURE_TIMING !== '1') return captureProcess(...args)
+  const startMs = performance.now() - caseStartedAt
+  const scope = commandScope.getStore()
+  const category = scope === 'fake_api_ref' || scope === 'suite_install' ? scope
+    : args[0][0] === 'git' ? scope ?? 'fixture_git' : 'other'
+  try { return await captureProcess(...args) } finally {
+    commandIntervals.push({ category, startMs, endMs: performance.now() - caseStartedAt })
+  }
+}
+function intervalUnion(rows: typeof commandIntervals): number {
+  let end = 0, total = 0
+  for (const row of [...rows].sort((a, b) => a.startMs - b.startMs)) {
+    total += Math.max(0, row.endMs - Math.max(end, row.startMs))
+    end = Math.max(end, row.endMs)
+  }
+  return +total.toFixed(3)
+}
 // Diagnostic only: set OPEN_E2E_FIXTURE_TIMING=1 for JSON timing lines. Case
 // body includes every fixture's setup and prepare calls; all_cleanup includes
 // fixture-owned cleanup. These nested measurements must not be added together.
-beforeEach(() => { caseStartedAt = performance.now() })
+beforeEach(() => { caseStartedAt = performance.now(); commandIntervals.length = 0 })
 afterEach(async () => {
   const cleanupStartedAt = performance.now()
   try {
@@ -134,6 +156,11 @@ afterEach(async () => {
           prepareCalls: timing.prepareCalls })}\n`)
       }
       process.stderr.write(`OPEN_E2E_CASE_TIMING ${JSON.stringify({ fixtureSequences: timings.map(timing => timing.sequence),
+        commands: { count: commandIntervals.length, unionMs: intervalUnion(commandIntervals),
+          categories: Object.fromEntries([...new Set(commandIntervals.map(row => row.category))].map(category => {
+            const rows = commandIntervals.filter(row => row.category === category)
+            return [category, { count: rows.length, unionMs: intervalUnion(rows) }]
+          })), intervals: commandIntervals },
         phasesMs: { body_including_fixture_setup: +(cleanupStartedAt - caseStartedAt).toFixed(3),
           all_cleanup: +(cleanupEndedAt - cleanupStartedAt).toFixed(3) } })}\n`)
     } else fixtureTimings.length = 0
@@ -492,7 +519,7 @@ function literalWorker(world: WorkerWorld) {
     const panelRound = request.result.schema === 'verdict' ? JSON.parse(brief).round as number : undefined
     const stopped = world.blockRoles.has(request.role)
       || (request.role === 'review' && panelRound !== undefined && world.unavailableSeatRounds.has(panelRound))
-    let inner = stopped ? undefined : await performRole(world, request, brief)
+    let inner = stopped ? undefined : await commandScope.run('worker_git', () => performRole(world, request, brief))
     if ((world.reviewVeto === 'standalone' && request.role === 'review' && request.result.schema !== 'verdict')
         || (world.reviewVeto === 'synthesis' && request.role === 'synthesis')) {
       const veto = { verdict: 'COMMENT', findings: [] }
@@ -700,12 +727,21 @@ function fakeGithub(input: { origin: string; repo: string }) {
   const ok = (stdout = ''): HostCommandResult => ({ ok: true, exit_code: 0, stdout, stderr: '' })
   const json = (value: unknown) => ok(JSON.stringify(value))
   const headOf = async (branch: string) => {
-    const result = await spawnCapture(['git', '-C', input.origin, 'rev-parse', '--verify', `refs/heads/${branch}^{commit}`], input.origin)
+    const result = await commandScope.run('fake_api_ref', () => spawnCapture(['git', '-C', input.origin, 'rev-parse', '--verify', `refs/heads/${branch}^{commit}`], input.origin))
     return result.ok ? result.stdout.trim() : ''
   }
   const project = async (pr: FakePr, fields: string[]) => {
+    // One fresh snapshot of both refs. Patterns may also match descendants;
+    // exact lookup preserves rev-parse's missing-ref behavior for each branch.
+    const refs = [`refs/heads/${pr.baseRefName}`, `refs/heads/${pr.headRefName}`]
+    const result = await commandScope.run('fake_api_ref', () => spawnCapture(
+      ['git', '-C', input.origin, 'for-each-ref', '--format=%(refname) %(objectname)', ...refs], input.origin))
+    const heads = new Map(result.ok ? result.stdout.split('\n').map(line => {
+      const [ref, head] = line.split(' ')
+      return [ref!, head!] as const
+    }) : [])
     const all: Record<string, unknown> = { number: pr.number, state: pr.state, headRefName: pr.headRefName,
-      baseRefName: pr.baseRefName, baseRefOid: await headOf(pr.baseRefName), isCrossRepository: false, headRefOid: await headOf(pr.headRefName), mergeable: 'MERGEABLE', isDraft: pr.isDraft ?? false }
+      baseRefName: pr.baseRefName, baseRefOid: heads.get(refs[0]!) ?? '', isCrossRepository: false, headRefOid: heads.get(refs[1]!) ?? '', mergeable: 'MERGEABLE', isDraft: pr.isDraft ?? false }
     return Object.fromEntries(fields.map(field => [field, all[field]]))
   }
   const checkRuns = { total_count: 1, check_runs: [{ name: 'test', status: 'COMPLETED', conclusion: 'SUCCESS' }] }
@@ -1077,7 +1113,7 @@ async function fixture(options: { taskSequence?: boolean; moreTasks?: boolean; s
   const runHost = Object.assign(async (argv: string[], cwd?: string, env?: Record<string, string>, timeout?: number) => {
     commands.push([...argv])
     if (argv[0] === 'gh') return github.handle(argv)
-    return spawnCapture(argv, cwd, env, timeout)
+    return commandScope.run(commandScope.getStore() ?? 'host_git', () => spawnCapture(argv, cwd, env, timeout))
   }, { writesDiffOutput: true as const })
   world.run = runHost
 
@@ -1178,9 +1214,10 @@ async function fixture(options: { taskSequence?: boolean; moreTasks?: boolean; s
 
   const admission = new ProjectAdmission({ db, ownerHandle: 'e2e-owner', bootId: 'e2e-fixture' })
   const context: ProjectBuildContext = {
-    store, attempts: new TridentAttemptLedger(db), runHost, runSuite: runHost,
+    store, attempts: new TridentAttemptLedger(db), runHost,
+    runSuite: Object.assign((...args: Parameters<typeof runHost>) => commandScope.run('suite_install', () => runHost(...args)), { writesDiffOutput: true as const }),
     runInstall: Object.assign((argv: string[], cwd?: string, env?: Record<string, string>, timeout?: number) =>
-      spawnCapture(argv, cwd, { ...env, BUN_INSTALL_CACHE_DIR: join(dir, 'bun-cache') }, timeout),
+      commandScope.run('suite_install', () => spawnCapture(argv, cwd, { ...env, BUN_INSTALL_CACHE_DIR: join(dir, 'bun-cache') }, timeout)),
     { writesDiffOutput: true as const }),
     stateRoot: join(dir, 'state'), projectDir: dir, projectId: 'e2e-project',
     provider: 'anthropic', providerSource: 'application',
@@ -1404,6 +1441,40 @@ async function drive(f: Awaited<ReturnType<typeof fixture>>): Promise<ProjectBui
   const host = await createProjectBuildHost(options)
   return host.run({ mode: 'implementation', start: 'fresh' }, new AbortController().signal)
 }
+
+test('fake GitHub projection freshly resolves each exact ref and preserves missing refs and pinned merge', async () => {
+  const f = await fixture()
+  const git = (cwd: string, args: string[]) => gitOut(spawnCapture, cwd, args)
+  const moved = await git(f.repo, ['-c', 'user.name=Fixture', '-c', 'user.email=fixture@example.invalid',
+    'commit-tree', `${f.baseSha}^{tree}`, '-p', f.baseSha, '-m', 'fixture moved head'])
+  await git(f.origin, ['update-ref', 'refs/heads/topic', f.baseSha])
+  f.github.prs.push({ number: 1, state: 'OPEN', baseRefName: 'main', headRefName: 'topic' })
+  const fields = 'number,state,headRefName,baseRefName,baseRefOid,isCrossRepository,headRefOid,mergeable,isDraft'
+  const view = async () => JSON.parse((await f.github.handle(['gh', 'pr', 'view', '1', '--json', fields])).stdout)
+  expect(await view()).toEqual({ number: 1, state: 'OPEN', headRefName: 'topic', baseRefName: 'main',
+    baseRefOid: f.baseSha, isCrossRepository: false, headRefOid: f.baseSha, mergeable: 'MERGEABLE', isDraft: false })
+  await git(f.repo, ['push', 'origin', `${moved}:refs/heads/topic`])
+  expect((await view()).headRefOid).toBe(moved)
+  expect((await view()).baseRefOid).toBe(f.baseSha)
+  await git(f.origin, ['update-ref', 'refs/heads/main', moved])
+  expect((await view()).baseRefOid).toBe(moved)
+  await git(f.origin, ['update-ref', '-d', 'refs/heads/topic'])
+  // A descendant must never be borrowed as the missing branch's value.
+  await git(f.origin, ['update-ref', 'refs/heads/topic/child', moved])
+  expect(await view()).toMatchObject({ baseRefOid: moved, headRefOid: '' })
+  await git(f.origin, ['update-ref', '-d', 'refs/heads/main'])
+  expect(await view()).toMatchObject({ baseRefOid: '', headRefOid: '' })
+  await git(f.origin, ['update-ref', '-d', 'refs/heads/topic/child'])
+  await git(f.origin, ['update-ref', 'refs/heads/topic', moved])
+  expect(await view()).toMatchObject({ baseRefOid: '', headRefOid: moved })
+  await git(f.origin, ['update-ref', 'refs/heads/main', f.baseSha])
+  expect((await f.github.handle(['gh', 'pr', 'merge', '1', '--match-head-commit', f.baseSha])).ok).toBe(false)
+  expect(await git(f.origin, ['rev-parse', 'refs/heads/main'])).toBe(f.baseSha)
+  expect(f.github.prs[0]!.state).toBe('OPEN')
+  expect((await f.github.handle(['gh', 'pr', 'merge', '1', '--match-head-commit', moved])).ok).toBe(true)
+  expect(await git(f.origin, ['rev-parse', 'refs/heads/main'])).toBe(moved)
+  expect(f.github.prs[0]!.state).toBe('MERGED')
+})
 
 test('Git fixture seed preserves independent mutable siblings and real option variants', async () => {
   const first = await fixture()
