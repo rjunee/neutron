@@ -1369,7 +1369,7 @@ describe('ProjectBackupStore — vault snapshot safety', () => {
     await git(h.tmp, ['clone', '--bare', seed, remote])
     const command: BackupCommand = (binary, args, cwd) => binary === 'gh'
       ? Promise.resolve(JSON.stringify({ id: 123, private: true, full_name: config.repository }))
-      : runBackupCommand(binary, args.map(arg => arg === 'git@github.com:example/vault.git' ? remote : arg), cwd)
+      : runBackupCommand(binary, args.map(arg => arg === 'https://github.com/example/vault.git' ? remote : arg), cwd)
     const store = new ProjectBackupStore({ platform: h.platform, owner_home: h.owner_home, project_slug: PROJECT_SLUG, encryptedBackupCommand: command })
     writeFileSync(join(h.projectRoot, 'private-notes.md'), 'owner private recovery control')
     expect((await store.backupNow(PROJECT_ID)).pushed).toBe(true)

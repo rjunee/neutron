@@ -44,6 +44,16 @@ HTTP configuration route (`gateway/http/app-admin-surface.ts:531`). No destinati
 means local recovery only. See `docs/vault-backup-recovery.md` for operational
 limits and the owner procedure.
 
+The sole remote route is fixed-host HTTPS using an ephemeral, GitHub-scoped
+`gh auth git-credential` helper (`gateway/git/project-backup-remote.ts:198`).
+Ambient Git configuration/helpers are isolated and redirects are refused;
+credentials never enter URLs or stored Git configuration. A real-Git fixture
+checks intended-host success, wrong-host refusal and non-persistence. A read-only
+private-destination identity check and `ls-remote` probe passed using the exact
+integrated command builder. That proves read access, not push or restoration.
+The integrated store/transport rerun passed 64 tests / 294 assertions; independent
+HTTPS security review reproduced 21 tests / 94 assertions and found no blocker.
+
 Review reproduced two additional failures and the consuming regressions now pin
 their fixes: failed snapshot staging persists an error without losing the prior
 valid SHA; destructive restore requires a successful local safety snapshot.
