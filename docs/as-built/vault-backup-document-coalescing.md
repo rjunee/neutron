@@ -38,3 +38,22 @@ server in the sandbox. The isolated restore surface subsequently passed all
 controls were rerun after strengthening the restore-byte assertions. These are
 focused local receipts; the complete shared-host gate and live offsite recovery
 are separate evidence.
+
+Final local validation ran `bash scripts/check-shared-host.sh` on clean revision
+`8f364536073f1df5760d5e7fed7c03480cb575ac` (tree
+`79f6fe7e717cc422fc94565eba94762b3ab7d20b`). The initial restricted-environment
+attempt passed all 51 TypeScript configurations, then refused loopback socket
+preflight with exit 3 before test execution. Its log SHA-256 is
+`648bb1e881cd50cb93aadb8c436393c69aa6d422fc71a9777181a7475605cf91`;
+that attempt is not a full-suite pass.
+
+The authorized normal-host attempt completed with exit 0. All 51 TypeScript
+configurations passed, including root and Trident. Declared, Bun-discovered,
+assigned and executed counts were each 1,698 files: 1,464 general, 22 PGLite,
+43 device and 169 real-HTTP. All 18 bounded-memory lanes passed, with 25,892
+tests passed, 23 skipped, zero failures and 117,804 assertions. The general
+lane included `open/__tests__/project-build-e2e.test.ts`; PGLite passed on its
+first attempt. The completed log SHA-256 is
+`de56ff24048b70494acdde90757da540cfb8747cee9da569f4343c3220fec16f`.
+This receipt records the measured revision above; adding the receipt does not
+transfer its identity to a later commit. Live offsite recovery remains unverified.
