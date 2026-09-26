@@ -26,3 +26,8 @@ hook back after REPL teardown made the held-recovery control fail because
 teardown had already run. Restoring the ordering restored the passing result.
 Root and Open TypeScript checks passed. Full-suite and served restart evidence
 remain coordinated integration gates, not receipts earned by this correction.
+
+The integrated CI lint gate identified the consuming gateway fixture's relative
+import across workspace packages. The fixture now uses the public
+`@neutronai/open/wiring/project-chat-recovery.ts` package export for the same
+helper; shutdown behavior and assertions are unchanged.

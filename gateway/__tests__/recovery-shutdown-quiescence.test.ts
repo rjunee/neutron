@@ -5,7 +5,7 @@ import { join } from 'node:path'
 import { boot } from '../index.ts'
 import * as repl from '@neutronai/runtime/adapters/claude-code/persistent/persistent-repl-substrate.ts'
 import { STUB_PLATFORM } from '@neutronai/runtime/__tests__/stub-platform.ts'
-import { startProjectChatRecovery } from '../../open/wiring/project-chat-recovery.ts'
+import { startProjectChatRecovery } from '@neutronai/open/wiring/project-chat-recovery.ts'
 
 function deferred() {
   let resolve!: () => void
