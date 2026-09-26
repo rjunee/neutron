@@ -2,10 +2,12 @@
  * herdr-protocol.ts — the wire vocabulary of herdr's unix-socket API, and the
  * constants the polling bridge is bounded by.
  *
- * § herdr step 2b. Everything in this file was MEASURED against the live server
+ * § herdr step 2b. The original wire vocabulary was MEASURED against the live server
  * on 2026-09-12 (herdr 0.8.2, protocol 20) rather than read off a document, and
  * the measurement is recorded beside each value because several of them are
- * load-bearing in a way their plain reading does not suggest.
+ * load-bearing in a way their plain reading does not suggest. The consumed JSON
+ * methods were revalidated against Herdr v0.9.1 (065ef9d), protocol 22, on
+ * 2026-09-26; see docs/as-built/herdr-protocol-22-compatibility.md.
  *
  * The framing is newline-delimited JSON in both directions: a request is
  * `{ id, method, params }`, a reply is `{ id, result }` or `{ id, error }`.
@@ -26,7 +28,7 @@ import type { Key, NamedKey } from './keystrokes.ts'
  * drift underneath a REPL supervisor is the failure this constant exists to
  * prevent.
  */
-export const HERDR_PROTOCOL_VERSION = 20
+export const HERDR_PROTOCOL_VERSION = 22
 
 /**
  * How often the bridge polls `pane.read` to synthesize `onScreen`.
@@ -335,7 +337,7 @@ export interface HerdrLayoutApply {
   }
 }
 
-/** Project placement uses these protocol-20 fields in addition to pane labels.
+/** Project placement uses these protocol-22 fields in addition to pane labels.
  * A tab label belongs to layout.apply, not its root pane node. */
 export type HerdrProjectLayoutParams = ({ workspace_id: string; tab_id?: never } | { tab_id: string; workspace_id?: never }) & {
   tab_label: string

@@ -206,7 +206,7 @@ export class FakeHerdrServer implements HerdrRpc {
     if (bad !== undefined) return bad
     switch (method) {
       case 'ping':
-        return { type: 'pong', version: '0.8.2', protocol: 20 }
+        return { type: 'pong', version: '0.9.1', protocol: 22 }
       case 'layout.apply':
         // The real server REPLACES the tab and mints new ids, so the host must read
         // the pane id out of the reply. Hand back an id it could not have guessed.

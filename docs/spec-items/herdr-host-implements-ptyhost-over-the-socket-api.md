@@ -312,7 +312,10 @@ not-new. That is accepted and recorded here rather than hidden.
 - [ ] The client `ping`s and **fails loudly** on a protocol mismatch, naming both
       the expected and the received number. A client with no check at all passes
       the matching case, so assert the **mismatch** case separately: a stub server
-      reporting protocol 21 must make `spawn` reject, and 20 must not.
+      reporting protocol 20, 21 or 23 must make `spawn` reject, and the supported
+      protocol 22 (Herdr v0.9.1) must not. The consumed JSON methods are revalidated
+      in `herdr-protocol-22-compatibility.test.ts`; historical measurements below
+      remain evidence about the original protocol-20 implementation.
       ASSERTED THROUGH `spawn`, WHICH IS WHERE THE GUARANTEE LIVES — and for several
       rounds that was unwritable. The gate ran only when no `connect` dependency was
       injected: a runtime `if` keyed on whether a TEST SEAM was present, so the seam's
