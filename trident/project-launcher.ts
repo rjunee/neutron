@@ -83,7 +83,7 @@ export function projectBuildResult(outcome: ProjectBuildOutcome, input: InnerLoo
   // must never turn such a host stop into an Argus decision.
   const reviewedStop = reviewStop && typeof reviewStop.reviewedHead === 'string'
     && /^(?:[0-9a-f]{40}|[0-9a-f]{64})$/.test(reviewStop.reviewedHead)
-    && ['approve', 'fix', 're-plan'].includes(reviewStop.panelDecision ?? '')
+    && ['approve', 'fix', 're-plan', 'blocked'].includes(reviewStop.panelDecision ?? '')
     && Number.isSafeInteger(reviewStop.round) && reviewStop.round > 0 ? reviewStop : undefined
   return JSON.stringify({
     projectBuild: outcome,

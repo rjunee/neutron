@@ -1981,11 +1981,20 @@ test('design gap re-plans once and continues with fresh measurements and spent r
   expect(counts).toEqual([0, 1, 1])
   expect(f.reads()).toBe(24)
 })
-test('host refuses a second re-plan even when worker claims zero spent', async () => {
+for (const repeated of [false, true])
+test(`host refuses a second re-plan even when worker claims zero spent (repeated=${repeated})`, async () => {
   const f = fixture()
   f.outcomes.set('run:review:2', f.completed({ ...f.snapshot, payload: { replansUsed: 0 } }))
-  f.deps.reviewGate = async (_payload, _observation, _snapshot, _round, used, record) => { record?.({ findings: gap.findings, blockingCount: 2 }); return { ...gap, whatIsMissing: `host count ${used}` } }
-  expect(await f.run()).toMatchObject({ kind: 'blocked', on: expect.stringContaining('already spent'), recipient: 'orchestrator' })
+  f.deps.reviewGate = async (_payload, _observation, _snapshot, round, used, record) => {
+    record?.({ findings: repeated ? gap.findings : [`gap-${round}`], blockingCount: 3 - round })
+    return { ...gap, whatIsMissing: `host count ${used}` }
+  }
+  const outcome = await f.run()
+  expect(outcome).toMatchObject({ kind: 'blocked', on: expect.stringContaining(repeated ? 'repeated finding' : 'already spent'), recipient: 'orchestrator' })
+  if (outcome.kind === 'blocked') {
+    if (repeated) expect(outcome.reviewStop).toMatchObject({ trigger: 'repeat-finding', panelDecision: 're-plan', round: 2 })
+    else expect(outcome.reviewStop).toBeUndefined()
+  }
   expect(f.runner.calls.filter(c => c.role === 'plan')).toHaveLength(2)
 })
 for (const decision of [

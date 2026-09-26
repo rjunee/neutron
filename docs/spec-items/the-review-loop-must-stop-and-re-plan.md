@@ -84,7 +84,12 @@ must remain `REVIEW_NOT_RUN` with no reviewer decision event.
       the actual Argus decision in Nexus, never a misleading `REVIEW_NOT_RUN` handoff.
       A panel approval followed by G070 remains a host veto, not an invented Argus
       rejection. Every arithmetic STOP persists the rejected typed checkpoint even
-      when the underlying panel decision is approve or re-plan.
+      when the underlying panel decision is approve, re-plan, or a verified block.
+      A simultaneous nomination round ceiling or exhausted re-plan cannot erase
+      the arithmetic evidence. Immediate delivery and checkpoint recovery retain
+      the same BLOCKED classification and reviewed provenance. An exhausted
+      re-plan with distinct decreasing findings retains its ordinary refusal;
+      it does not acquire an arithmetic veto.
       verify: `bun test open/__tests__/project-build-e2e.test.ts -t 'review arithmetic STOP'`
 - [x] The rejected checkpoint and its arithmetic veto are one durable write. A
       crash after that write but before returning STOP cannot authorize another

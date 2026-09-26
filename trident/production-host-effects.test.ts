@@ -1360,12 +1360,13 @@ test('production plan refuses a committed link to host bytes', async () => {
   await expect(f.modes.probePlan(snapshot.head)).rejects.toThrow('regular file')
 })
 
-test('production re-plan spend survives a crash before replanning begins', async () => {
+for (const repeated of [false, true])
+test(`production re-plan spend survives a crash before replanning begins (repeated=${repeated})`, async () => {
   const f = await resumeFixture(2, 0)
   const save = f.deps.modes!.saveCheckpoint!
   f.deps.reviewGate = async (_p, _observation, _s, _r, _u, record) => { // A design gap is not a code blocker: reporting one here would read as
   // no progress against the resumed round and stop before the re-plan.
-  record?.({ findings: ['design gap'], blockingCount: 0 }); return { kind: 're-plan', findings: ['design gap'], whatIsMissing: 'redesign' } }
+  record?.({ findings: [repeated ? 'design gap' : `design gap ${_r}`], blockingCount: 0 }); return { kind: 're-plan', findings: ['design gap'], whatIsMissing: 'redesign' } }
   f.deps.modes!.saveCheckpoint = async checkpoint => {
     await save(checkpoint)
     if (checkpoint.replansUsed === 1 && checkpoint.head === null) throw new Error('crash before re-plan')
@@ -1374,7 +1375,14 @@ test('production re-plan spend survives a crash before replanning begins', async
   const restarted = createProductionHostEffects(f.options)
   expect(await restarted.modes.loadResume()).toMatchObject({ head: null, replansUsed: 1, round: 4 })
   f.deps.modes = restarted.modes
-  expect(await f.run()).toMatchObject({ kind: 'blocked', on: expect.stringContaining('re-plan already spent') })
+  const outcome = await f.run()
+  expect(outcome).toMatchObject({ kind: 'blocked', on: expect.stringContaining(repeated ? 'repeated finding' : 're-plan already spent') })
+  if (outcome.kind === 'blocked') {
+    if (repeated) {
+      expect(outcome.reviewStop).toMatchObject({ trigger: 'repeat-finding', panelDecision: 're-plan', round: 4 })
+      expect(await restarted.modes.loadResume()).toMatchObject({ stage: 'rejected', replansUsed: 1, reviewStop: outcome.reviewStop })
+    } else expect(outcome.reviewStop).toBeUndefined()
+  }
 })
 
 test('production checkpoint append refuses a terminal transition after host observation', async () => {

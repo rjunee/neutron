@@ -4726,12 +4726,16 @@ test('a design-gap escalation re-plans and rebuilds instead of dispatching a fix
 }, 300_000)
 
 for (const interrupted of [false, true])
-for (const scenario of ['no-progress', 'repeat', 'decreasing', 'host-only', 'no-progress-replan', 'repeat-replan', 'repeat-approve'] as const) test(`review arithmetic STOP terminal transport (${scenario}${interrupted ? ', checkpoint interruption' : ''})`, async () => {
+for (const scenario of ['no-progress', 'repeat', 'decreasing', 'host-only', 'host-only-ceiling', 'no-progress-replan', 'repeat-replan', 'no-progress-replan-spent', 'repeat-replan-spent', 'repeat-approve',
+  ...(interrupted ? [] : ['decreasing-replan-spent'] as const)] as const) test(`review arithmetic STOP terminal transport (${scenario}${interrupted ? ', checkpoint interruption' : ''})`, async () => {
   const repeated = scenario.startsWith('repeat')
-  const replan = scenario.endsWith('replan')
+  const replan = scenario.includes('replan')
+  const spentReplan = scenario.endsWith('spent')
+  const hostOnly = scenario.startsWith('host-only')
   const f = await fixture({ taskSequence: true, blockersByRound: scenario.startsWith('no-progress') ? [0, 8, 17] : [0, 8, 7, 0],
-    repeatFirstFinding: repeated, replanRounds: replan ? [2] : [] })
-  if (scenario === 'host-only') f.world.mutationArgv = 'bare'
+    repeatFirstFinding: repeated, replanRounds: spentReplan ? [1, 2] : replan ? [2] : [],
+    ...(scenario === 'host-only-ceiling' ? { maxRounds: 2 } : {}) })
+  if (hostOnly) f.world.mutationArgv = 'bare'
   const panelApproved = scenario === 'repeat-approve'
   if (panelApproved) f.world.minorRounds = new Set([2])
   const board = new WorkBoardStore(f.db)
@@ -4795,6 +4799,24 @@ for (const scenario of ['no-progress', 'repeat', 'decreasing', 'host-only', 'no-
   }
   expect(errors).toEqual([])
   const outcome: ProjectBuildOutcome = JSON.parse(f.store.get(f.row.id)!.inner_result!).projectBuild
+  if (scenario === 'decreasing-replan-spent') {
+    // An exhausted re-plan alone is not arithmetic evidence. Keep its refusal,
+    // but do not invent a durable arithmetic veto or authorize more work.
+    expect(outcome).toMatchObject({ kind: 'blocked', on: expect.stringContaining('design-gap') })
+    if (outcome.kind !== 'blocked') return
+    expect(outcome.reviewStop).toBeUndefined()
+    expect(lastCheckpoint(f).reviewStop).toBeUndefined()
+    expect(f.world.dispatches.filter(dispatch => dispatch.role === 'plan')).toHaveLength(2)
+    expect(f.world.dispatches.filter(dispatch => dispatch.role === 'fix')).toHaveLength(0)
+    const terminal = await orch.step(f.store.get(f.row.id)!)
+    expect(await f.store.saveIfActive(terminal.run)).toBe(true)
+    expect(deriveEscalationBlock(terminal.run)).toBeNull()
+    await terminalObserver(terminal.run)
+    expect(await board.get(f.row.project_slug, card.id)).toMatchObject({ status: 'failed' })
+    expect(f.github.prs[0]!.state).toBe('OPEN')
+    expect((await spawnCapture(['git', '-C', f.origin, 'rev-parse', 'refs/heads/main'], f.origin)).stdout).toBe(f.baseSha)
+    return
+  }
   if (scenario === 'decreasing') {
     expect(outcome.kind, why(f, outcome)).toBe('merged')
     const terminal = await orch.step(f.store.get(f.row.id)!)
@@ -4812,7 +4834,7 @@ for (const scenario of ['no-progress', 'repeat', 'decreasing', 'host-only', 'no-
   }
   expect(outcome.kind, why(f, outcome)).toBe('blocked')
   if (outcome.kind !== 'blocked') return
-  if (scenario === 'host-only') {
+  if (hostOnly) {
     expect(outcome.reviewStop).toMatchObject({ trigger: 'repeat-finding', round: 2 })
     expect(outcome.reviewStop?.reviewedHead).toBeUndefined()
     expect(f.world.dispatches.some(dispatch => dispatch.role === 'review')).toBe(false)
@@ -4830,15 +4852,15 @@ for (const scenario of ['no-progress', 'repeat', 'decreasing', 'host-only', 'no-
   // Each of the fixture's three reviewers reports the configured count; the
   // host records their total and deduplicates identities independently.
   expect(outcome.reviewStop).toMatchObject({ trigger: repeated ? 'repeat-finding' : 'no-progress', round: 2,
-    panelDecision: panelApproved ? 'approve' : replan ? 're-plan' : 'fix',
+    panelDecision: panelApproved ? 'approve' : spentReplan ? 'blocked' : replan ? 're-plan' : 'fix',
     previous: { blockingCount: 24 }, current: { blockingCount: panelApproved ? 0 : repeated ? 21 : 51 } })
-  expect(f.world.dispatches.filter(dispatch => dispatch.role === 'fix').map(dispatch => dispatch.step_id)).toEqual([`${f.row.id}:task:0:fix:1`])
+  expect(f.world.dispatches.filter(dispatch => dispatch.role === 'fix').map(dispatch => dispatch.step_id)).toEqual(spentReplan ? [] : [`${f.row.id}:task:0:fix:1`])
   expect(lastCheckpoint(f)).toMatchObject({ stage: 'rejected', round: 2 })
   if (replan) {
     // Real decoded panel declarations reach `re-plan`; arithmetic wins before
     // another planner runs, but its rejected round must still be recoverable.
-    expect(lastCheckpoint(f)).toMatchObject({ replansUsed: 0, previousReview: outcome.reviewStop?.current })
-    expect(f.world.dispatches.filter(dispatch => dispatch.role === 'plan')).toHaveLength(1)
+    expect(lastCheckpoint(f)).toMatchObject({ replansUsed: spentReplan ? 1 : 0, previousReview: outcome.reviewStop?.current })
+    expect(f.world.dispatches.filter(dispatch => dispatch.role === 'plan')).toHaveLength(spentReplan ? 2 : 1)
   }
   expect(outcome.reviewStop?.reviewedHead).toBe(String(lastCheckpoint(f).head))
   // Consume the real launcher's stored result through harvest and the board writer.
@@ -4848,7 +4870,7 @@ for (const scenario of ['no-progress', 'repeat', 'decreasing', 'host-only', 'no-
   expect(terminal.run).toMatchObject({ inner_verdict: 'REQUEST_CHANGES', inner_checkpoint: panelApproved ? 'argus-approved' : 'argus-request-changes', round: 2 })
   expect(JSON.parse(terminal.run.inner_result!).reviewedHead).toBe(lastCheckpoint(f).head)
   expect(JSON.parse(terminal.run.inner_result!).projectBuild.reviewStop.panelDecision)
-    .toBe(panelApproved ? 'approve' : replan ? 're-plan' : 'fix')
+    .toBe(panelApproved ? 'approve' : spentReplan ? 'blocked' : replan ? 're-plan' : 'fix')
   expect(terminal.run.failure_reason).toContain('BLOCKED')
   const escalation = deriveEscalationBlock(terminal.run)
   expect(escalation).toMatchObject({ kind: 'not-converging', round: 2, triggers: [repeated ? 'repeat-finding' : 'no-progress'] })

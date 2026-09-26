@@ -92,6 +92,33 @@ Validation:
   restored before those final runs.
 - Root and Trident TypeScript projects passed `tsc --noEmit`.
 
+The simultaneous-guard correction preserves a proven arithmetic STOP before a
+nomination round ceiling or another panel block (`trident/build-run.ts:949`,
+`trident/build-run.ts:1067`). The real panel refuses a second re-plan before
+returning `re-plan`, so handling only the host's re-plan cap would miss the
+production path (`trident/gates/review-panel.ts:142`). A verified `blocked`
+panel decision now has explicit typed provenance; it does not become a claim
+that another re-plan was authorized. Unknown review evidence remains unknown.
+
+The consuming Open matrix covers nomination failure at the round ceiling and
+both arithmetic triggers after the one re-plan has been spent, including
+checkpoint interruption. The seven added cases also include the negative
+sibling: distinct decreasing findings with an exhausted re-plan stay an ordinary
+refusal without a fabricated arithmetic veto. Before the correction, five of
+the six new overlap cases failed; the existing host-only crash replay was the
+one passing case, demonstrating the disagreement between immediate delivery and
+recovery. The reverse mutation that treats decreasing counts as no-progress
+failed all three decreasing controls while both genuine STOP cases passed.
+Both mutations were restored. Final focused validation passed 537 tests across
+the host, launcher, progress, production-effects and Nexus suites, 22 Open
+consuming cases, 38 spec-index tests, and both root and Trident typechecks.
+The host and production re-plan crash fixtures now each exercise distinct and
+repeated findings: both refuse another re-plan, and only the repeated case
+retains the arithmetic veto.
+
+Full shared-host validation, refreshed exact-head CI and served production
+controls remain required before publication/merge and cutover claims.
+
 This change satisfies the typed-host status subset of the locked review-loop
 specification. Explicitly authorized re-planning from a published rejected head,
 including a durable decision, one-use consumption and visible retry refusals,

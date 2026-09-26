@@ -69,7 +69,7 @@ export interface HostReviewStop extends ReviewStop {
   /** Set only after the host has consumed a verified panel for this head. */
   reviewedHead?: string
   /** The panel's decision before host suite, CI or progress overrides. */
-  panelDecision?: 'approve' | 'fix' | 're-plan'
+  panelDecision?: 'approve' | 'fix' | 're-plan' | 'blocked'
 }
 export interface ResumeCheckpoint {
   head: string | null
@@ -338,7 +338,7 @@ export async function buildRun(input: BuildRunInput, deps: BuildRunDeps, signal:
   const blocked = (on: string): BuildRunOutcome => ({ kind: 'blocked', phase, on, recipient: 'orchestrator' })
   const unknown = (detail: string): BuildRunOutcome => ({ kind: 'unknown', phase, step_id, detail })
   const failed = (detail: string, cause: TerminalCause = 'workflow-threw'): BuildRunOutcome => ({ kind: 'failed', phase, detail, cause })
-  const gateStop = (gate: GateResult, round = 0, panel?: { head: string; decision: 'approve' | 'fix' | 're-plan' }): BuildRunOutcome | null => {
+  const gateStop = (gate: GateResult, round = 0, panel?: { head: string; decision: NonNullable<HostReviewStop['panelDecision']> }): BuildRunOutcome | null => {
     if (gate.kind === 'blocked') return { kind: 'blocked', phase, on: gate.on, recipient: 'orchestrator',
       ...(gate.reviewStop ? { reviewStop: { ...gate.reviewStop, round,
         ...(panel ? { reviewedHead: panel.head, panelDecision: panel.decision } : {}) } } : {}) }
@@ -495,7 +495,7 @@ export async function buildRun(input: BuildRunInput, deps: BuildRunDeps, signal:
         || !validReviewProgress(stop.previous) || !validReviewProgress(stop.current)
         || !isDeepStrictEqual(stop.current, resume.previousReview)
         || (stop.reviewedHead === undefined ? stop.panelDecision !== undefined
-          : stop.reviewedHead !== resume.head || !['approve', 'fix', 're-plan'].includes(stop.panelDecision ?? ''))) {
+          : stop.reviewedHead !== resume.head || !['approve', 'fix', 're-plan', 'blocked'].includes(stop.panelDecision ?? ''))) {
         return unknown('Resume arithmetic STOP evidence is invalid')
       }
       const gate = reviewProgress(stop.previous, stop.current)
@@ -946,6 +946,7 @@ export async function buildRun(input: BuildRunInput, deps: BuildRunDeps, signal:
         previousReview: current, reviewBaseline: 'required',
         reviewStop: progress?.kind === 'blocked' ? progress.reviewStop : undefined,
         findings: findings.map(text => ({ kind: 'code' as const, actionable: true, text })) })
+      if (progress?.kind === 'blocked') return progress
       if (round >= maxRounds) return blocked('Review requires orchestrator arbitration: round ceiling')
       if (progress) return progress
       previousReview = current
@@ -1044,22 +1045,27 @@ export async function buildRun(input: BuildRunInput, deps: BuildRunDeps, signal:
             blockingCount: currentReview.blockingCount + suiteBlockers.length,
             ...(unknownIdentities ? { unknownIdentities: true } : {}) }
         }
-        if (decision.kind === 'blocked') return blocked(decision.on)
         if (decision.kind === 'unknown') return unknown(decision.detail)
         // The rejection is recorded BEFORE the stops below. A repeated finding or an
         // exhausted round ends the run, and the orchestrator resumes from this row;
         // writing it only on the paths that continue would lose exactly the rounds
         // that need it.
         const progress = gateStop(reviewProgress(previousReview, currentReview), round,
-          panel.kind === 'approve' || panel.kind === 'fix' || panel.kind === 're-plan'
+          // Progress is recorded only after the panel's run/head/round is verified.
+          // A refused second re-plan is still a real panel decision, not infrastructure.
+          currentReview && (panel.kind === 'approve' || panel.kind === 'fix' || panel.kind === 're-plan' || panel.kind === 'blocked')
             ? { head: snapshot.head, decision: panel.kind } : undefined)
         if (decision.kind === 'fix' || progress?.kind === 'blocked') {
           await checkpoint({ head: snapshot.head, stage: 'rejected', round, pending: undefined,
             previousReview: currentReview ?? null, reviewBaseline: 'required',
             reviewStop: progress?.kind === 'blocked' ? progress.reviewStop : undefined,
-            findings: (decision.kind === 'approve' ? currentReview!.findings : decision.findings)
+            findings: (decision.kind === 'approve' || decision.kind === 'blocked' ? currentReview!.findings : decision.findings)
               .map(text => ({ kind: 'code' as const, actionable: true, text })) })
         }
+        // Preserve the durable arithmetic veto even when another terminal guard
+        // fires in this round. Normal delivery and crash recovery must agree.
+        if (progress?.kind === 'blocked') return progress
+        if (decision.kind === 'blocked') return blocked(decision.on)
         if (decision.kind === 're-plan' && replansUsed !== 0) return blocked('Review requires orchestrator arbitration: re-plan already spent')
         if (progress) return progress
         if (decision.kind === 'approve') {
