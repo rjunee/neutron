@@ -131,6 +131,24 @@ bun test --isolate app/__tests__/ --max-concurrency=4
 
 ## Hermeticity — the env a test run sees
 
+### Process-signalling fixtures
+
+The first preload, `tests/support/process-test-isolation-preload.ts`, places an
+invocation containing the lane-process, host-suite, Codex wrapper, or consuming
+Open build tests inside a private PID namespace before test modules load. It
+replays the original Bun arguments, preserving filters, counts, timeouts and
+shared hooks. Direct fixture entry points also require the kernel boundary.
+Parent-only `/proc` mocks do not contain a fresh owner interpreter.
+
+This requires Linux, Python pidfds and `bubblewrap` with user/PID/mount namespace
+permission. The launcher retains the invoking UID/GID, supplies private `/proc`
+and `/dev`, verifies typed namespace handles and the outer launcher handshake,
+and binds the launcher chain to parent death. An unavailable boundary fails
+closed. CI installs `bubblewrap` when absent and exercises a harmless command
+through the boundary before tests; no kernel-policy relaxation is performed.
+
+### Environment scrubbing
+
 `bunfig.toml`'s `[test].preload` runs two scrubs, in this order, before every
 `bun test` process **started from the repo root**:
 

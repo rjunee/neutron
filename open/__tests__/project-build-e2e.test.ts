@@ -50,6 +50,9 @@
  * Everything this does NOT cover is enumerated at the bottom of this file.
  */
 import { LIVE_AGENT_TOOL_NAMES } from '@neutronai/gateway/wiring/build-live-agent-turn.ts'
+import { routeCodegenCancel } from '@neutronai/gateway/codegen-cancel-router.ts'
+import { CodegenTaskNotFoundError, type CodegenOrchestrator } from '@neutronai/codegen-core'
+import { buildTridentTerminator } from '@neutronai/trident/terminate.ts'
 import { projectInstallAvailableBytes } from '../wiring/project-build-dependencies.ts'
 import { afterAll, afterEach, beforeEach, expect, spyOn, test } from 'bun:test'
 import { chmod, copyFile, cp, mkdir, mkdtemp, readFile, readdir, realpath, rename, rm, stat, symlink, utimes, writeFile } from 'node:fs/promises'
@@ -100,6 +103,9 @@ import { PROJECT_DEPENDENCIES_TIMEOUT_MS } from '../wiring/project-build-depende
 import { PROJECT_SNAPSHOT_SCHEMA } from '../wiring/project-build-snapshot.ts'
 import { EfficiencyTrace, EFFICIENCY_SCENARIOS, assertEfficient, compareEfficiency, type EfficiencyReport, type EfficiencyScenario } from './fixtures/trident-efficiency-benchmark.ts'
 import { ReplSession } from '@neutronai/runtime/adapters/claude-code/persistent/repl-session.ts'
+import { assertProcessTestIsolation } from '@neutronai/trident/process-test-isolation.ts'
+
+assertProcessTestIsolation()
 
 const cleanups: (() => void | Promise<void>)[] = []
 // Templates are never handed to a host. Every fixture owns both repositories,
@@ -1452,6 +1458,98 @@ async function drive(f: Awaited<ReturnType<typeof fixture>>): Promise<ProjectBui
   const host = await createProjectBuildHost(options)
   return host.run({ mode: 'implementation', start: 'fresh' }, new AbortController().signal)
 }
+
+test('fake GitHub projection freshly resolves each exact ref and preserves missing refs and pinned merge', async () => {
+  const f = await fixture()
+  const git = (cwd: string, args: string[]) => gitOut(spawnCapture, cwd, args)
+  const moved = await git(f.repo, ['-c', 'user.name=Fixture', '-c', 'user.email=fixture@example.invalid',
+    'commit-tree', `${f.baseSha}^{tree}`, '-p', f.baseSha, '-m', 'fixture moved head'])
+  await git(f.origin, ['update-ref', 'refs/heads/topic', f.baseSha])
+  f.github.prs.push({ number: 1, state: 'OPEN', baseRefName: 'main', headRefName: 'topic' })
+  const fields = 'number,state,headRefName,baseRefName,baseRefOid,isCrossRepository,headRefOid,mergeable,isDraft'
+  const view = async () => JSON.parse((await f.github.handle(['gh', 'pr', 'view', '1', '--json', fields])).stdout)
+  expect(await view()).toEqual({ number: 1, state: 'OPEN', headRefName: 'topic', baseRefName: 'main',
+    baseRefOid: f.baseSha, isCrossRepository: false, headRefOid: f.baseSha, mergeable: 'MERGEABLE', isDraft: false })
+  await git(f.repo, ['push', 'origin', `${moved}:refs/heads/topic`])
+  expect((await view()).headRefOid).toBe(moved)
+  expect((await view()).baseRefOid).toBe(f.baseSha)
+  await git(f.origin, ['update-ref', 'refs/heads/main', moved])
+  expect((await view()).baseRefOid).toBe(moved)
+  await git(f.origin, ['update-ref', '-d', 'refs/heads/topic'])
+  // A descendant must never be borrowed as the missing branch's value.
+  await git(f.origin, ['update-ref', 'refs/heads/topic/child', moved])
+  expect(await view()).toMatchObject({ baseRefOid: moved, headRefOid: '' })
+  await git(f.origin, ['update-ref', '-d', 'refs/heads/main'])
+  expect(await view()).toMatchObject({ baseRefOid: '', headRefOid: '' })
+  await git(f.origin, ['update-ref', '-d', 'refs/heads/topic/child'])
+  await git(f.origin, ['update-ref', 'refs/heads/topic', moved])
+  expect(await view()).toMatchObject({ baseRefOid: '', headRefOid: moved })
+  await git(f.origin, ['update-ref', 'refs/heads/main', f.baseSha])
+  expect((await f.github.handle(['gh', 'pr', 'merge', '1', '--match-head-commit', f.baseSha])).ok).toBe(false)
+  expect(await git(f.origin, ['rev-parse', 'refs/heads/main'])).toBe(f.baseSha)
+  expect(f.github.prs[0]!.state).toBe('OPEN')
+  expect((await f.github.handle(['gh', 'pr', 'merge', '1', '--match-head-commit', moved])).ok).toBe(true)
+  expect(await git(f.origin, ['rev-parse', 'refs/heads/main'])).toBe(moved)
+  expect(f.github.prs[0]!.state).toBe('MERGED')
+})
+
+test('codegen_cancel stops the actual host suite and its detached test child without approving the run', async () => {
+  const f = await fixture()
+  // Exercise the production process runner, not the injected fixture host.
+  delete f.context.runSuite
+  const options = await f.prepare()
+  const cwd = options.workers.build.request.cwd
+  const root = join(f.dir, 'suite-processes')
+  await mkdir(root)
+  const program = `import os, pathlib, signal, subprocess, sys, time
+root = pathlib.Path(sys.argv[1])
+role = sys.argv[2]
+child = subprocess.Popen([sys.executable, __file__, str(root), 'child'], start_new_session=True) if role == 'parent' else None
+signal.signal(signal.SIGTERM, signal.SIG_IGN)
+(root / (role + '.pid')).write_text(str(os.getpid()))
+deadline = time.monotonic() + 15
+count = 0
+while not (root / 'release').exists() and time.monotonic() < deadline:
+    count += 1
+    (root / (role + '.heartbeat')).write_text(str(count))
+    time.sleep(0.02)
+if child:
+    child.wait()
+`
+  await writeFile(join(cwd, 'scripts', 'ci', 'cancellable-suite.py'), program)
+  await writeFile(join(cwd, 'scripts', 'ci', 'suite.sh'),
+    `#!/usr/bin/env bash\nexec python3 scripts/ci/cancellable-suite.py '${root.replaceAll("'", "'\\''")}' parent\n`)
+  const host = await createProjectBuildHost(options)
+  let settled = false
+  const running = host.run({ mode: 'implementation', start: 'fresh' }, new AbortController().signal)
+    .finally(() => { settled = true })
+  // Ensure the original regression also cleans its deliberately resistant children.
+  try {
+    await until(async () => {
+      try { return Number(await readFile(join(root, 'child.heartbeat'), 'utf8')) > 2 || undefined }
+      catch { return undefined }
+    })
+    const cancel = routeCodegenCancel({ cancel: async ({ task_id }: { task_id: string }) => { throw new CodegenTaskNotFoundError(task_id) } } as unknown as CodegenOrchestrator,
+      f.store, 'fixture-owner', buildTridentTerminator({ store: f.store }))
+    const nativeLeases = f.admission.listLeases('liveChild')
+    expect(await cancel.cancel({ task_id: f.row.id })).toMatchObject({ cancelled: true, phase: 'stopped' })
+    await until(() => settled || undefined, 400, 10)
+    const outcome = await running
+    expect(outcome.kind).not.toBe('merged')
+    const before = await Promise.all(['parent', 'child'].map(role => readFile(join(root, `${role}.heartbeat`), 'utf8')))
+    await Bun.sleep(100)
+    expect(await Promise.all(['parent', 'child'].map(role => readFile(join(root, `${role}.heartbeat`), 'utf8')))).toEqual(before)
+    expect(f.store.get(f.row.id)?.phase).toBe('stopped')
+    expect(f.admission.listLeases('liveChild')).toEqual(nativeLeases)
+    expect(f.world.dispatches.some(dispatch => dispatch.role === 'review' || dispatch.role === 'fix')).toBe(false)
+    expect(f.github.prs.some(pr => pr.state === 'MERGED')).toBe(false)
+    expect(f.store.stageEvents(f.row.id).filter(event => event.stage === 'build-suite-receipt')
+      .map(event => JSON.parse(event.meta!)).filter(record => record.receipt !== undefined)).toEqual([])
+  } finally {
+    await writeFile(join(root, 'release'), '')
+    await running.catch(() => {})
+  }
+}, 25_000)
 
 test('fake GitHub projection freshly resolves each exact ref and preserves missing refs and pinned merge', async () => {
   const f = await fixture()

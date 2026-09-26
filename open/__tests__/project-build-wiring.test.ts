@@ -952,6 +952,36 @@ test('the full-suite command parses from the real generator, knob and plain shap
 })
 
 
+for (const boundary of ['reviewSuite', 'publicationSuite'] as const) {
+  for (const scenario of ['terminal', 'aborted', 'zero-exit-race', 'signal-zero-exit-race', 'live'] as const) {
+    test(`${boundary} cancellation admission and receipt: ${scenario}`, async () => {
+      const f = await fixture()
+      f.input.test_strategy = 'Full suite (stage 2), run exactly this:\n\n  bash suite.sh\n'
+      const controller = new AbortController()
+      const options = await prepareProjectBuild(f.input, f.context, controller.signal)
+      const head = 'a'.repeat(40)
+      await writeCompleted(options, 'build', JSON.stringify({ result: { head, payload: {
+        mutationClaim: { file: 'guard.ts', find: 'before', replace: 'after', guard: ['bun', 'test'], control: ['bun', 'test'] },
+        worktreePath: options.production.worktree, branch: 'change', commitSha: head,
+        prNumber: null, diffFile: 'diff', testsPassed: true,
+      } } }))
+      let starts = 0
+      f.context.runSuite = async () => {
+        starts++
+        if (scenario === 'zero-exit-race') await f.context.store.terminalTransition(f.input.run.id, { phase: 'stopped' })
+        if (scenario === 'signal-zero-exit-race') controller.abort()
+        return { ok: true, exit_code: 0, stdout: '', stderr: '' }
+      }
+      if (scenario === 'terminal') await f.context.store.terminalTransition(f.input.run.id, { phase: 'stopped' })
+      if (scenario === 'aborted') controller.abort()
+      const observed = options.policy[boundary]!.readCheckpoint({ head, diff: '', pr: null }, 1)
+      if (scenario === 'live') expect((await observed)?.report).toEqual({ hostExitCode: 0 })
+      else await expect(observed).rejects.toThrow('Host suite run was cancelled or is terminal')
+      expect(starts).toBe(scenario === 'terminal' || scenario === 'aborted' ? 0 : 1)
+    })
+  }
+}
+
 test('suite child excludes the stored GitHub credential while git push retains it', async () => {
   const f = await fixture()
   f.input.test_strategy = 'Full suite (stage 2), run exactly this:\n\n  bash inspect-env.sh\n'

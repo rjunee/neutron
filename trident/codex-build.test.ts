@@ -35,6 +35,9 @@ import { basename, delimiter, dirname, join, relative } from 'node:path'
 import { fileURLToPath } from 'node:url'
 import { seedMigratedDb } from '../tests/support/migrated-db.ts'
 import { applyMigrations } from '@neutronai/migrations/runner.ts'
+import { assertProcessTestIsolation } from './process-test-isolation.ts'
+
+assertProcessTestIsolation()
 
 const HERE = dirname(fileURLToPath(import.meta.url))
 const SCRIPT = join(HERE, 'codex-build.sh')
@@ -285,6 +288,8 @@ interface RunOpts {
    * RECORDED for it (see `supervisorStatus`).
    */
   killWrapperWith?: 'TERM' | 'INT'
+  /** Override only the cleanup observation in the real process-owner consumer. */
+  cleanupObservation?: 'known' | 'unknown'
 }
 
 const DEFAULT_BRIEF = 'You are FORGE. Build the thing on branch trident/a-run.\n'
@@ -386,6 +391,30 @@ function run(opts: RunOpts = {}): RunResult {
 
   const bin = join(dir, 'bin')
   mkdirSync(bin, { recursive: true })
+  if (opts.cleanupObservation !== undefined) {
+    const python = spawnSync('python3', ['-c', 'import sys; print(sys.executable)'], { encoding: 'utf8' })
+    if (python.status !== 0) throw new Error('Python fixture interpreter unavailable')
+    const executable = python.stdout.trim()
+    const shim = join(bin, 'python3')
+    writeFileSync(shim, `#!${executable}
+import importlib.util,os,sys
+from pathlib import Path
+if Path(sys.argv[1]).name != 'lane-processes.py': os.execv(${JSON.stringify(executable)},[${JSON.stringify(executable)},*sys.argv[1:]])
+spec=importlib.util.spec_from_file_location('lanes',sys.argv[1])
+lanes=importlib.util.module_from_spec(spec)
+spec.loader.exec_module(lanes)
+real_sweep=lanes.sweep
+def observe(**kwargs):
+ report=real_sweep(**kwargs)
+ report['unknown']=${opts.cleanupObservation === 'unknown' ? 1 : 0}
+ Path(os.environ['HOME'],'cleanup-observed').write_text(str(report['unknown']))
+ return report
+lanes.sweep=observe
+sys.argv=sys.argv[1:]
+sys.exit(lanes.main())
+`)
+    chmodSync(shim, 0o755)
+  }
   if (opts.withPerl) symlinkSync('/usr/bin/perl', join(bin, 'perl'))
   const path =
     opts.codexLoginExit === null || opts.bareBin === true
@@ -1179,6 +1208,30 @@ describe('the mid-exec liveness heartbeat', () => {
     // read a killed wrapper as a successful one on any path.
     expect(r.trailerRaw).toBe('')
   }, 60_000)
+
+  for (const cleanupObservation of ['known', 'unknown'] as const) {
+    test(`SIGNAL SAFETY: ${cleanupObservation} cleanup preserves the shipped supervisor signal contract`, () => {
+      const r = run({ authed: true, codexLoginExit: 0, mergeMode: 'local', codexExecSleepSecs: 6,
+        killWrapperWith: 'TERM', cleanupObservation })
+      expect(existsSync(join(r.dir, 'codex-running'))).toBe(true)
+      expect(readFileSync(join(r.dir, 'cleanup-observed'), 'utf8')).toBe(cleanupObservation === 'unknown' ? '1' : '0')
+      expect(r.supervisorStatus).toBe('143')
+      expect(r.trailerRaw).toBe('')
+      if (cleanupObservation === 'unknown') expect(r.stderr).toContain('LANE_PROCESS_CLEANUP_UNCONFIRMED')
+      else expect(r.stderr).not.toContain('LANE_PROCESS_CLEANUP_UNCONFIRMED')
+    }, 60_000)
+  }
+
+  test('unknown cleanup leaves the shipped primary brief refusal byte-exact', () => {
+    const brief = 'corrupt', intended = 'intended'
+    const r = run({ authed: true, codexLoginExit: 0, brief, integrity: briefIntegrity(intended), cleanupObservation: 'unknown' })
+    const sentence = `CODEX_BUILD_BRIEF_CORRUPT: the brief in ${join(r.dir, 'build.brief')} measures ${briefIntegrity(brief)} but the workflow composed ${briefIntegrity(intended)} (<bytes>:<fnv32>) — it was truncated or altered on the way here. DEFERRED: building against an approximation of the brief produces a real commit for a task nobody wrote.`
+    expect(readFileSync(join(r.dir, 'cleanup-observed'), 'utf8')).toBe('1')
+    expect(r.status).toBe(3)
+    expect(r.stderr).toBe(`${sentence}\n`)
+    expect(r.codexArgv).toBe('')
+    expect(r.trailerRaw).toBe('')
+  })
 
   // NO SIGINT TWIN FOR THIS WRAPPER, DELIBERATELY. The production launch is
   // `nohup setsid sh -c '... "$@" ...' ... &` (inner-workflow.mjs), and a shell with

@@ -1,5 +1,7 @@
 import { resolveTranscriptProjectsDir } from '@neutronai/runtime/adapters/claude-code/persistent/signatures.ts'
 import { spawnCapture, type HostCommandResult } from '@neutronai/trident/git-mode.ts'
+import { runHostSuite, type SuiteCommandRunner } from '@neutronai/trident/host-suite.ts'
+import { isTerminalPhase } from '@neutronai/trident/state-machine.ts'
 import { runWorktreePath } from '@neutronai/trident/merge.ts'
 import { mkdir, readFile, writeFile, lstat, open } from 'node:fs/promises'
 import { constants } from 'node:fs'
@@ -114,9 +116,9 @@ export interface ProjectBuildContext {
   store: ProjectBuildHostOptions['production']['store']
   attempts: ProjectBuildHostOptions['attempts']
   runHost: ProjectBuildHostOptions['production']['runHost']
-  /** Test seam for suite execution. Production uses plain spawnCapture, without
+  /** Test seam for suite execution. Production owns the suite's process claim, without
    * the GitHub environment loaded by the publication runner. */
-  runSuite?: ProjectBuildHostOptions['production']['runHost']
+  runSuite?: SuiteCommandRunner
   /** Test seam for dependency setup; production does not use publisher credentials. */
   runInstall?: typeof spawnCapture
   stateRoot: string
@@ -332,6 +334,15 @@ function worktreeAddDiagnostic(result: HostCommandResult | null) {
 export async function prepareProjectBuild(input: InnerLoopInput, context: ProjectBuildContext, signal: AbortSignal): Promise<ProjectBuildHostOptions> {
   const run = { ...input.run, branch: input.run.branch ?? `trident/${input.run.slug}`,
     worktree: input.run.worktree ?? runWorktreePath(input.run.repo_path, input.run) }
+  const runSuite = (command: string, logPath: string) => runHostSuite({
+    argv: ['bash', '-lc', suiteScript(command, logPath)], cwd: run.worktree,
+    timeoutMs: REVIEW_SUITE_TIMEOUT_MS, signal,
+    isRunActive: () => {
+      const current = context.store.get(run.id)
+      return current !== null && !isTerminalPhase(current.phase)
+    },
+    ...(context.runSuite === undefined ? {} : { run: context.runSuite }),
+  })
   if (!run.base_sha) throw Error('Dispatched build has no pinned base')
   const git = async (args: string[]) => context.runHost(['git', '-C', run.repo_path, ...args], run.repo_path)
   await context.store.invalidateRetrySource(run)
@@ -921,7 +932,7 @@ export async function prepareProjectBuild(input: InnerLoopInput, context: Projec
             const command = fullSuiteCommand(input.test_strategy)
             if (!command) return { runId: run.id, head: snapshot.head, round, report: null }
             const logPath = join(state, `suite-round-${round}.log`)
-            const observed = await (context.runSuite ?? spawnCapture)(['bash', '-lc', suiteScript(command, logPath)], run.worktree, undefined, REVIEW_SUITE_TIMEOUT_MS)
+            const observed = await runSuite(command, logPath)
             const unopenable = observed.stdout.trimStart().startsWith(SUITE_LOG_UNAVAILABLE)
             const pending = context.store.stageEvents(artifact.source.id).filter(event => event.stage === 'build-mode-state')
               .map(event => parseBuildModeState(event.meta, artifact.source, true).checkpoint?.pending)
@@ -958,7 +969,7 @@ export async function prepareProjectBuild(input: InnerLoopInput, context: Projec
           const command = fullSuiteCommand(input.test_strategy)
           if (!command) return { runId: run.id, head: snapshot.head, round, report: null }
           const logPath = join(state, 'suite-publication.log')
-          const observed = await (context.runSuite ?? spawnCapture)(['bash', '-lc', suiteScript(command, logPath)], run.worktree, undefined, REVIEW_SUITE_TIMEOUT_MS)
+          const observed = await runSuite(command, logPath)
           const unopenable = observed.stdout.trimStart().startsWith(SUITE_LOG_UNAVAILABLE)
           return { runId: run.id, head: snapshot.head, round, report:
             observed.timed_out || unopenable ? {} : { hostExitCode: observed.exit_code,

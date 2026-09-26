@@ -58,6 +58,14 @@ bun run start          # onboarding + chat at http://127.0.0.1:7800/chat
 
 ## Tests
 
+Process-signalling tests require Linux, Python 3.9+ with pidfd support, and
+`bubblewrap` (`bwrap`) with permission to create user, PID, and mount namespaces.
+The first test preload runs affected Bun invocations inside that boundary, with
+private `/proc` and `/dev` mounts and the invoking user's UID/GID. Missing or
+denied isolation fails the invocation before process fixtures load. CI installs
+the distribution's `bubblewrap` package when absent and checks the boundary
+before running tests; it does not change kernel policy or run tests as root.
+
 Do NOT run bare `bun test` for the whole suite — it loads every discovered file
 into one long-lived process and its peak memory footprint will OOM most
 machines (the suite has grown past 800+ files). Use the partitioned runner

@@ -111,6 +111,10 @@ def sweep(repos=(), protected=(), finished=None, grace=1):
             if os.stat(f'/proc/{pid}').st_uid != os.getuid():
                 continue
             fd = os.pidfd_open(pid)
+            # A prior cleanup pass leaves exited (possibly unreaped) processes
+            # in /proc. Their unreadable environment is not live uncertainty.
+            if select.select([fd], [], [], 0)[0]:
+                continue
             c = environment_claim(pid)
             if finished is not None:
                 eligible = c is not None and c == finished
@@ -132,10 +136,13 @@ def sweep(repos=(), protected=(), finished=None, grace=1):
             signal.pidfd_send_signal(fd, signal.SIGTERM)
             targets.append((pid, fd))
             fd = None
-        except ProcessLookupError:
-            pass
+        except (FileNotFoundError, ProcessLookupError):
+            if fd is not None and not select.select([fd], [], [], 0)[0]:
+                report['unknown'] += 1
         except (OSError, ValueError, IndexError):
-            report['unknown'] += 1
+            # An exit racing a metadata read is resolved only by its pidfd.
+            if fd is None or not select.select([fd], [], [], 0)[0]:
+                report['unknown'] += 1
         finally:
             if fd is not None:
                 os.close(fd)
@@ -215,16 +222,68 @@ def census():
             'observed_at': observed, 'lanes': list(lanes.values())}
 
 
-def run(command):
+def run(command, report_path=None, report_token=None):
     # Publish the complete claim through exec before any build code can run.
     c = {'id': uuid.uuid4().hex, 'pid': os.getpid(), 'start': birth(os.getpid())[0], 'boot': boot()}
     env = dict(os.environ, **{CLAIM: json.dumps(c, separators=(',', ':'))})
-    child = subprocess.Popen(command, env=env)
-    code = child.wait()
-    report = sweep(finished=c)
-    if report['reaped'] or report['survived']:
-        print(json.dumps(report), file=sys.stderr)
-    return code if code >= 0 else 128 - code
+    cancelled = None
+
+    def cancel(signum, _frame):
+        nonlocal cancelled
+        if cancelled is None:
+            cancelled = signum
+
+    # Keep this owner alive until its exact claim has been reaped. Killing only
+    # the wrapper would leave detached test/build children running until a sweep.
+    previous = {s: signal.getsignal(s) for s in (signal.SIGTERM, signal.SIGINT)}
+    for s, handler in previous.items():
+        # Asynchronous shell launches inherit ignored INT. Do not turn it into
+        # a new cancellation route that the shell wrapper never supported.
+        if handler != signal.SIG_IGN:
+            signal.signal(s, cancel)
+    try:
+        if cancelled:
+            return 128 + cancelled
+        child = subprocess.Popen(command, env=env)
+        while child.poll() is None and not cancelled:
+            try:
+                child.wait(timeout=.05)
+            except subprocess.TimeoutExpired:
+                pass
+        confirmed = False
+        # TERM handlers can create new claim-bearing descendants after the
+        # snapshot. Require a subsequent empty, known census; bound adversarial
+        # fork-on-TERM chains rather than claiming their cleanup succeeded.
+        for _ in range(4):
+            report = sweep(finished=c)
+            if report_path is None and (report['reaped'] or report['survived']):
+                print(json.dumps(report), file=sys.stderr)
+            # Unknown unrelated metadata must not prevent later passes from
+            # stopping newly-created, positively owned descendants. It still
+            # prevents confirmation unless a later census is fully known.
+            if not report['reaped'] and not report['survived'] and not report.get('unknown', 0):
+                confirmed = True
+                break
+        foreground = child.poll()
+        foreground_exit = None if foreground is None else foreground if foreground >= 0 else 128 - foreground
+        code = 128 + cancelled if cancelled else foreground_exit if foreground_exit is not None else 3
+        if report_path is not None:
+            # The host requests an identity-bound report separately from command
+            # stderr. Legacy shell callers retain their exact refusal sentences.
+            with open(report_path, 'x') as destination:
+                json.dump({'event': 'lane-process-cleanup', 'token': report_token,
+                           'owner_pid': os.getpid(), 'signal': cancelled,
+                           'exit_code': code, 'foreground_exit': foreground_exit,
+                           'status': 'confirmed' if confirmed else 'unknown',
+                           **report}, destination)
+        if (cancelled and not confirmed) or foreground is None:
+            print('LANE_PROCESS_CLEANUP_UNCONFIRMED', file=sys.stderr)
+        # Cleanup uncertainty is not a pre-build refusal. Preserve the actual
+        # signal outcome; the host independently refuses unconfirmed closure.
+        return code
+    finally:
+        for s, handler in previous.items():
+            signal.signal(s, handler)
 
 
 def main():
@@ -232,6 +291,8 @@ def main():
     parser.add_argument('mode', choices=['run', 'sweep', 'census'])
     parser.add_argument('--repo', action='append', default=[])
     parser.add_argument('--protect', action='append', default=[])
+    parser.add_argument('--report-path')
+    parser.add_argument('--report-token')
     args, command = parser.parse_known_args()
     if command[:1] == ['--']:
         command = command[1:]
@@ -246,7 +307,9 @@ def main():
     if args.mode == 'run':
         if not command:
             parser.error('run requires a command after --')
-        return run(command)
+        if bool(args.report_path) != bool(args.report_token):
+            parser.error('report path and token must be supplied together')
+        return run(command, args.report_path, args.report_token)
     if command:
         parser.error('unexpected sweep arguments')
     print(json.dumps(census() if args.mode == 'census' else sweep(args.repo, args.protect)))

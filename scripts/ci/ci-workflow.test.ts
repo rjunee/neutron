@@ -34,6 +34,53 @@ const yml = readFileSync(CI_YML, 'utf8')
 
 const REPO_ROOT = fileURLToPath(new URL('../..', import.meta.url))
 
+function processIsolationSetup(workflow: string): string | null {
+  const shard = workflow.match(/^  shard:\n[\s\S]*?(?=^  [a-z][a-z_-]*:|$(?![\s\S]))/m)?.[0] ?? ''
+  const step = shard.match(/      - name: Prepare process-test isolation\n        run: \|\n((?:          .*\n)+)/)
+  if (!step || shard.indexOf(step[0]) > shard.indexOf('run: bash scripts/run-tests.sh')) return null
+  const commands = step[1]!.split('\n').map(line => line.slice(10)).join('\n')
+  if (!commands.includes('command -v bwrap') || !commands.includes('sudo apt-get install --yes bubblewrap')
+    || !commands.includes("python3 -B trident/process-test-isolation.py -- python3 -B -c 'pass'")) return null
+  return commands
+}
+
+describe('process-test namespace prerequisite', () => {
+  test('every shard prepares the dependency before tests; missing or late setup refuses', () => {
+    expect(processIsolationSetup(yml)).not.toBeNull()
+    const step = yml.match(/      - name: Prepare process-test isolation\n        run: \|\n(?:          .*\n)+/)![0]
+    const missing = yml.replace(step, '')
+    expect(processIsolationSetup(missing)).toBeNull()
+    expect(processIsolationSetup(missing.replace('        run: bash scripts/run-tests.sh\n',
+      '        run: bash scripts/run-tests.sh\n' + step))).toBeNull()
+  })
+
+  test('setup installs an absent dependency, reuses an installed one, and propagates capability refusal', () => {
+    const commands = processIsolationSetup(yml)
+    expect(commands).not.toBeNull()
+    const dir = mkdtempSync(join(tmpdir(), 'process-prerequisite-proof-'))
+    const bin = join(dir, 'bin'), log = join(dir, 'calls'), template = join(dir, 'bwrap-template')
+    mkdirSync(bin)
+    try {
+      // These executables only record setup decisions. No install, namespace,
+      // privileged command, or process-signalling fixture is executed.
+      writeFileSync(template, '#!/bin/sh\nexit 0\n', { mode: 0o755 })
+      writeFileSync(join(bin, 'sudo'), '#!/bin/sh\nprintf "%s\\n" "$*" >> "$SETUP_LOG"\n'
+        + 'if [ "$*" = "apt-get install --yes bubblewrap" ]; then /bin/cp "$BWRAP_TEMPLATE" "$SETUP_BIN/bwrap"; fi\n', { mode: 0o755 })
+      writeFileSync(join(bin, 'python3'), '#!/bin/sh\nprintf "probe\\n" >> "$SETUP_LOG"\nexit "${PROBE_EXIT:-0}"\n', { mode: 0o755 })
+      const env = { PATH: bin, SETUP_LOG: log, SETUP_BIN: bin, BWRAP_TEMPLATE: template }
+      execFileSync('/bin/bash', ['-e', '-c', commands!], { env })
+      expect(readFileSync(log, 'utf8')).toBe('apt-get update\napt-get install --yes bubblewrap\nprobe\n')
+      expect(existsSync(join(bin, 'bwrap'))).toBe(true)
+      writeFileSync(log, '')
+      execFileSync('/bin/bash', ['-e', '-c', commands!], { env })
+      expect(readFileSync(log, 'utf8')).toBe('probe\n')
+      expect(() => execFileSync('/bin/bash', ['-e', '-c', commands!], { env: { ...env, PROBE_EXIT: '3' } })).toThrow()
+    } finally {
+      rmSync(dir, { recursive: true, force: true })
+    }
+  })
+})
+
 describe('#321 ci.yml test-gate always fires on PRs to main', () => {
   test('triggers on pull_request with no branch/type filter that could exclude PRs', () => {
     // `pull_request:` present with no nested `branches:`/`types:` narrowing.
