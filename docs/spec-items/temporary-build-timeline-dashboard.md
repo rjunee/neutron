@@ -84,6 +84,9 @@ spans carry unknown tokens unless a provider actually attributed usage.
       pins on tap; Escape/close/outside interaction dismiss it. Tiny spans remain
       accessible via a full-size phase explorer. Popovers preserve focus and remain
       readable across data refreshes. Expanded PR evidence remains available.
+      Recognized explicit phase categories determine bar and detail-dot colors
+      regardless of incidental action-label words; unknown and legacy categories
+      retain label-based inference.
 - [ ] Lifecycle text never substitutes for work status. Fresh explicit provider
       running, pending, recently ended work and unknown liveness remain distinct.
       Verify stale, invalid, future and missing-end cases in consuming tests.

@@ -12,6 +12,44 @@ const card = (segments: TimelineSegment[], end = 100): TimelineCard => ({ key: '
   start: 0, end, latestStart: 0, active: false, runs: [], segments, lanes: 25, gaps: [], events: [], phaseTotals: [], warnings: [],
 })
 
+test('recorded phase categories determine bars and detail dots despite conflicting action labels', () => {
+  const categories: Array<[string, string, string]> = [
+    ['plan', 'plan', '#a78bfa'], ['replan', 'plan', '#a78bfa'],
+    ['build', 'build', '#5b9df5'], ['build_mechanical', 'build', '#5b9df5'],
+    ['fix', 'fix', '#ed7d94'], ['fix-leak', 'fix', '#ed7d94'],
+    ...['review', 'review_rubric', 'review_adversarial', 'review_codex', 'review_kimi', 'synthesis']
+      .map(phase => [phase, 'review', '#e7ae55'] as [string, string, string]),
+    ['test', 'test', '#5ac8ad'], ['ci', 'test', '#5ac8ad'], ['probe', 'test', '#5ac8ad'],
+    ['deploy', 'deploy', '#a8cb73'],
+  ]
+  for (const [phase, expected, color] of categories) {
+    for (const label of ['Action', 'Fixture build/test', 'prefix', 'suffix', 'plan fix review test deploy']) {
+      const pr = card([{ ...segment('action', 0, 100, phase), label }])
+      expect(barIntervals(pr)[0]!.tones).toEqual([expected])
+      const html = renderTimeline({ observedAt: 100, cards: [pr], prCount: 1, runOnlyCount: 0,
+        maxDurationMs: 100, limit: 50, warnings: [] })
+      expect(html).toContain(`background:${color}\" aria-label=`)
+      expect(html).toContain(`class="phase-dot" style="background:${color}"`)
+    }
+  }
+})
+
+test('unknown and legacy phases retain label inference and recognized phases retain review overlap', () => {
+  for (const [phase, label, expected] of [
+    ['legacy', 'Planning', 'plan'], ['legacy', 'Building', 'build'],
+    ['host-stage', 'Shared-host suite', 'test'], ['unknown', 'Fixing leak', 'fix'],
+    ['unknown', 'Cross-model review', 'review'], ['unknown', 'Deploy', 'deploy'],
+    ['unknown', 'Action', 'build'], ['custom-test', 'Action', 'test'],
+  ] as const) {
+    expect(barIntervals(card([{ ...segment('action', 0, 100, phase), label }]))[0]!.tones).toEqual([expected])
+  }
+  expect(barIntervals(card([
+    { ...segment('build', 0, 100, 'build'), label: 'Fixture build' },
+    { ...segment('review', 0, 100, 'review_codex'), label: 'Plan fix tests' },
+    { ...segment('ci', 0, 100, 'ci'), label: 'Fixture test' },
+  ]))[0]!.tones).toEqual(['build', 'review', 'test'])
+})
+
 test('concurrent CI jobs occupy one wall-clock bar without multiplying its width or height', () => {
   const pr = card(Array.from({ length: 25 }, (_, i) => segment(`job-${i}`, 10, 90)))
   const intervals = barIntervals(pr)

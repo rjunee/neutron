@@ -13,6 +13,14 @@ export function usageLabel(usage: TimelineUsage): string {
   return usage.tokens === null ? 'Tokens unknown' : `${usage.tokens.toLocaleString('en-US')} observed tokens${usage.coverage === 'partial' ? ' · partial' : ''}`
 }
 function tone(segment: TimelineSegment): string {
+  // Recorded categories outrank incidental words in human-readable action labels.
+  const phase = segment.phase.toLowerCase()
+  if (/^(plan|replan)$/.test(phase)) return 'plan'
+  if (/^(build|build_mechanical)$/.test(phase)) return 'build'
+  if (/^(fix|fix-leak)$/.test(phase)) return 'fix'
+  if (/^(review|review_rubric|review_adversarial|review_codex|review_kimi|synthesis)$/.test(phase)) return 'review'
+  if (/^(test|ci|probe)$/.test(phase)) return 'test'
+  if (phase === 'deploy') return 'deploy'
   const label = `${segment.phase} ${segment.label}`
   if (/plan/i.test(label)) return 'plan'
   if (/fix/i.test(label)) return 'fix'
