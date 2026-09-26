@@ -150,6 +150,48 @@ test('inherited prose range overrides are cleared before the consuming guard run
   } finally { rmSync(f.scratch, { recursive: true, force: true }) }
 })
 
+test('cleared range overrides preserve the real guard veto and admit corrected prose', () => {
+  const f = fixture()
+  const git = (...args: string[]) => execFileSync('git', ['-C', f.root, ...args], { stdio: 'pipe' })
+  const commit = () => {
+    git('add', '.')
+    git('-c', 'user.name=Fixture', '-c', 'user.email=fixture@example.invalid', '-c', 'commit.gpgsign=false', 'commit', '-qm', 'prose fixture')
+  }
+  try {
+    writeFileSync(join(f.root, 'limit.ts'), 'export const LIMIT = 4\n')
+    commit()
+    git('push', '--quiet', 'origin', 'main')
+    const base = git('rev-parse', 'HEAD').toString().trim()
+    writeFileSync(join(f.root, 'limit.ts'), 'export const LIMIT = 5\n')
+    writeFileSync(join(f.root, 'limit.md'), 'LIMIT is 4.\n')
+    commit()
+    const overrides = { STALE_PROSE_BASE_SHA: base, STALE_PROSE_HEAD_SHA: base, FIXTURE_RUN_STALE_PROSE_GUARD: '1' }
+    const refused = f.run(overrides)
+    expect(refused.status).toBe(1)
+    expect(refused.stderr).toContain('stale-prose-guard: FAILED')
+    expect(f.calls()).toBe('typecheck\nsuite\n4/default/100\n')
+    writeFileSync(join(f.root, 'limit.md'), 'LIMIT is 5.\n')
+    commit()
+    const admitted = f.run(overrides)
+    expect(admitted.status).toBe(0)
+    expect(admitted.stdout).toContain('stale-prose-guard: OK')
+  } finally { rmSync(f.scratch, { recursive: true, force: true }) }
+})
+
+test('a current tracking ref with no merge base refuses before either gate', () => {
+  const f = fixture()
+  try {
+    execFileSync('git', ['-C', f.root, 'checkout', '--quiet', '--orphan', 'unrelated'])
+    execFileSync('git', ['-C', f.root, '-c', 'user.name=Fixture', '-c', 'user.email=fixture@example.invalid', '-c', 'commit.gpgsign=false', 'commit', '-qm', 'unrelated root'])
+    const refused = f.run()
+    expect(refused.status).toBe(2)
+    expect(refused.stderr).toContain('could not size the stale-prose diff')
+    expect(() => f.calls()).toThrow()
+    execFileSync('git', ['-C', f.root, 'checkout', '--quiet', 'main'])
+    expect(f.run().status).toBe(0)
+  } finally { rmSync(f.scratch, { recursive: true, force: true }) }
+})
+
 test('an authoritative base still refuses a branch whose prose diff exceeds the guard reader', () => {
   const f = fixture()
   try {

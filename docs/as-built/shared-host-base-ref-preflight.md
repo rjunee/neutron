@@ -41,3 +41,25 @@ reported zero findings when scoped to the three changed files plus the required
 license. Its full-tree run found 452 unrelated findings in this worktree and
 was not a passing receipt. The GitHub remote was unreachable in this sandbox,
 so no real host full-suite result is claimed for this change.
+
+On 2026-09-26, bounded recovery at published head
+`322b3e43cc3f713c861b44c77cd4e2697ade49f8` added two real-Git controls without
+changing the wrapper: unrelated history must refuse a failed diff before either
+gate, while returning to the related branch admits both; deceptive inherited
+base=head overrides must not hide a real stale-prose assertion, while corrected
+prose passes the same consuming guard. The focused file then reported 13 pass,
+0 fail. Six isolated semantic mutations were killed: allowing stale refs
+(10 pass, 3 fail), refusing current refs (2 pass, 11 fail), allowing oversized
+diffs (12 pass, 1 fail), refusing small diffs (3 pass, 10 fail), retaining prose
+overrides (11 pass, 2 fail), and removing pipeline failure propagation (12 pass,
+1 fail). These were behavior failures, not parser failures.
+
+With a physically owned frozen dependency install, `bash scripts/ci/lint.sh`,
+`tsc -p tsconfig.json --noEmit`, `tsc -p trident/tsconfig.json --noEmit`, shell
+syntax and whitespace checks passed. The conservative consuming check
+`bun test open/__tests__/project-build-e2e.test.ts` passed 331 tests with 0 failures
+in 419.58 seconds. The leak gate passed when scoped to the three change files,
+license and proposed commit message, using the actual local denylist. The
+published head's GitHub CI checks were green when read during recovery; that
+receipt does not cover the subsequent test and record edits. No new all-project
+TypeScript, full host-suite or served-product receipt is claimed by this recovery.
