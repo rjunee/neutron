@@ -29,10 +29,36 @@ bun scripts/build-timeline-sources.ts catalogue \
 The collector uses `GH_TOKEN` or `GITHUB_TOKEN` when supplied. It fetches the
 inclusive paginated history, then refreshes changed PRs between full sweeps. CI
 sampling is bounded to recent/current heads; each PR states its coverage. The
-web page refreshes every 30 seconds, shows source failures, and pages 50 cards at
-a time with an explicit total. Switch between lifecycle and observed-work windows
-when long PR lifetimes obscure short operations. Widths share the current page's
-scale; details expose the exact phase duration and model/usage coverage.
+web page refreshes every 30 seconds and pages 50 PRs at a time. Search and repository
+filters apply before pagination. The default chart shows the observed-work window,
+from first recorded phase start to last recorded phase end; missing phases remain
+unknown. Widths share the current page's scale. Each PR is one bar, with overlapping
+phases partitioned on the same wall-clock axis rather than added together. Concurrent
+phase categories share the height of the bar. Hover reveals phase information;
+focus or tap opens a custom phase popover; the full-size duration control exposes
+all actions, including tiny spans. Clicking the PR label opens complete evidence.
+Open PRs form the first section, with merged/closed below and recent activity
+ordering within each section. Explicit PR state is separate from fresh provider
+work signals. The default shared 1h focus window clips longer bars with an explicit
+overflow control; Fit all shows their complete proportional extent. The locked
+[timeline spec](spec-items/temporary-build-timeline-dashboard.md) owns status
+freshness thresholds and the focus-window contract.
+Source failures have a visible coverage disclosure and refresh failures an alert.
+Run-only records remain in the authenticated JSON API, outside the PR chart.
+
+## Readable chart acceptance
+
+- Every displayed PR has one fixed-height bar; 25 parallel CI jobs cannot make the
+  row taller or multiply wall time. `trident/build-timeline-html.test.ts` verifies
+  interval partitions, overlaps, gaps and proportional widths.
+- Labels and durations sit outside bars, so small phases never contain clipped
+  text. Unknown phase timing never fabricates a build duration.
+- The page remains usable at desktop and 390-pixel phone width without horizontal
+  document scrolling. Phase details are available by hover, click and keyboard.
+  Verify using real browser screenshots and interaction checks.
+- Search covers the whole catalogue before pagination, and source-level unknown
+  model/token data stays unknown. The authenticated API retains run-only groups.
+  `scripts/__tests__/build-timeline-server.test.ts` verifies filtering and auth.
 
 Record forward orchestration phases through the validated recorder:
 

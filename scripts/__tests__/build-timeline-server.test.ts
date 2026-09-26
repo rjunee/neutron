@@ -38,7 +38,7 @@ test('authenticated served page refreshes within a minute; view and JSON actuall
     expect(page.headers.get('content-security-policy')).toContain("script-src 'sha256-")
     const view = await fetch(`${server.url}timeline`, { headers: { authorization: auth } })
     expect(view.status).toBe(200)
-    expect(await view.text()).toContain('No PR or run records')
+    expect(await view.text()).toContain('No pull requests match')
     const data = await fetch(`${server.url}api/timeline`, { headers: { authorization: auth } })
     expect(data.status).toBe(200)
     expect(await data.json()).toEqual(snapshot())
@@ -62,7 +62,7 @@ test('view pagination is explicit and a work window does not manufacture missing
     prs: Array.from({ length: 51 }, (_, index) => ({ number: index + 1, title: `PR ${index + 1}`,
       url: `https://github.com/example/open/pull/${index + 1}`, createdAt: new Date(index).toISOString(),
       closedAt: null, mergedAt: null, state: 'open' })) }] }, [], [], 1000)
-  const first = timelineWindow(raw, 0, 'lifecycle'), last = timelineWindow(raw, 1, 'work')
+  const first = timelineWindow(raw, 0), last = timelineWindow(raw, 1)
   expect(first.cards).toHaveLength(50)
   expect(first).toMatchObject({ prCount: 51, runOnlyCount: 0 })
   expect(first.warnings.join(' ')).toContain('of 51')
@@ -72,7 +72,7 @@ test('view pagination is explicit and a work window does not manufacture missing
   expect(last.cards[0]!.segments).toHaveLength(0)
   expect(last.page).toBe(1)
   expect(last.totalPages).toBe(2)
-  expect(timelineWindow(raw, 900, 'lifecycle').cards).toEqual(timelineWindow(raw, 1, 'lifecycle').cards)
+  expect(timelineWindow(raw, 900).cards).toEqual(timelineWindow(raw, 1).cards)
 })
 
 test('authenticated view and API distinguish real PRs from legacy run-only sentinels', async () => {
@@ -86,13 +86,41 @@ test('authenticated view and API distinguish real PRs from legacy run-only senti
   expect(html).not.toContain('PR #0')
   expect(html).not.toContain('/pull/0')
   expect(html).toContain('PR #42')
-  expect(html).toContain('Unpublished run')
+  expect(html).not.toContain('Unpublished run')
   expect(html).toContain('1 PRs · 1 run-only groups')
+  const bookmarked = await handler(new Request('http://localhost/timeline?mode=lifecycle', { headers: { authorization: auth } }))
+  expect(await bookmarked.text()).toContain('No phase timing recorded')
   const response = await handler(new Request('http://localhost/api/timeline', { headers: { authorization: auth } }))
   expect(response.status).toBe(200)
   const data = await response.json() as TimelineSnapshot
   expect(data).toMatchObject({ prCount: 1, runOnlyCount: 1 })
   expect(data.cards.map((card: { pr: number | null }) => card.pr).sort()).toEqual([42, null])
+})
+
+test('search and repository filters apply before pagination without losing unknown-timing PRs', () => {
+  const raw = combineTimelineSources({ observedAt: 1000, repositories: ['example/open', 'example/managed'].map(repository => ({
+    repository, error: null, prs: Array.from({ length: 60 }, (_, i) => ({ number: i + 1, title: i === 4 ? 'needle' : 'ordinary',
+      url: `https://github.com/${repository}/pull/${i + 1}`, createdAt: new Date(i).toISOString(), closedAt: null, mergedAt: null, state: 'open' })),
+  })) }, [], [], 1000)
+  const result = timelineWindow(raw, 0, 'needle', 'managed')
+  expect(result.cards.map(c => [c.repository, c.pr, c.start])).toEqual([['example/managed', 5, null]])
+  expect(result.prCount).toBe(1)
+  expect(timelineWindow(raw, 0, 'absent').cards).toHaveLength(0)
+  expect(timelineWindow(raw, 1, '', 'open').cards).toHaveLength(10)
+})
+
+test('open PRs precede newer merged PRs before paging; focus and fit-all share honest scales', () => {
+  const raw = combineTimelineSources({ observedAt: 100_000, repositories: [{ repository: 'example/open', error: null,
+    prs: Array.from({ length: 52 }, (_, i) => ({ number: i + 1, title: `PR ${i + 1}`, url: `https://github.com/example/open/pull/${i + 1}`,
+      createdAt: new Date(i).toISOString(), closedAt: i === 0 ? null : new Date(i + 1).toISOString(), mergedAt: null, state: i === 0 ? 'open' : 'closed' })) }] }, [], [], 100_000)
+  raw.cards.find(c => c.pr === 1)!.segments = [{ id: 'long', runId: '', label: 'Build', phase: 'build', start: 0, end: 46_800_000,
+    lane: 0, timing: 'recorded', model: null, detail: 'fixture', usage: { tokens: null, input: null, output: null, cacheRead: null, cacheCreation: null, costUsd: null, source: null, observedAt: null, coverage: 'unknown' } }]
+  const focused = timelineWindow(raw, 0), all = timelineWindow(raw, 0, '', '', 'all')
+  expect(focused.cards[0]!.pr).toBe(1)
+  expect(focused.cards[1]!.pr).toBe(52)
+  expect(focused.viewDurationMs).toBe(3_600_000)
+  expect(all.viewDurationMs).toBe(46_800_000)
+  expect(all.cards).toEqual(focused.cards)
 })
 
 test('file sources reach authenticated HTML/JSON and import failures preserve catalogue visibility', async () => {

@@ -34,6 +34,83 @@ async function probe(mode: string) {
   }
 }
 
+async function ownerProbe(mode: string) {
+  const root = mkdtempSync(join(tmpdir(), 'nexus-owner-publication-'))
+  roots.push(root)
+  const child = Bun.spawn([process.execPath, join(import.meta.dir, 'fixtures/owner-publication.ts'), mode, root], {
+    stdout: 'pipe', stderr: 'pipe',
+  })
+  const deadline = setTimeout(() => child.kill(), 10_000)
+  try {
+    const [stdout, stderr, exit] = await Promise.all([
+      new Response(child.stdout).text(), new Response(child.stderr).text(), child.exited,
+    ])
+    expect({ exit, stderr }).toEqual({ exit: 0, stderr: '' })
+    return JSON.parse(stdout)
+  } finally {
+    clearTimeout(deadline)
+    child.kill()
+    await child.exited
+  }
+}
+
+test('migration ownership publication never exposes a partial owner to another first writer', async () => {
+  const result = await ownerProbe('publish')
+  expect(result.injected).toBe(true)
+  expect(result.visibleDuringWrite).toBeNull()
+  expect(result.contender).toEqual({ exit: 0, error: null })
+  expect(result.error).toBeNull()
+  expect(result.events).toEqual([{ body: 'contender owner' }, { body: 'published owner' }])
+  expect(result.ledger).toEqual([{ name: 'rc1_initial_schema' }])
+  expect(result.marker).toContain('claimed_by=migrations/runner.ts')
+  expect(result.staging).toEqual([])
+})
+
+test('migration ownership publication tolerates a failed private write without publishing a malformed marker', async () => {
+  const result = await ownerProbe('failed-write')
+  expect(result.injected).toBe(true)
+  expect(result.marker).toBeNull()
+  expect(result.error).toBeNull()
+  expect(result.events).toEqual([{ body: 'published owner' }])
+  expect(result.staging).toEqual([])
+})
+
+for (const mode of ['foreign', 'foreign-winner', 'malformed', 'malformed-winner']) {
+  test(`migration ownership publication refuses ${mode} before any schema or ledger write`, async () => {
+    const result = await ownerProbe(mode)
+    expect(result.error).not.toBeNull()
+    expect(result.error).toContain('Migration ownership refusal')
+    expect(result.error).toContain(mode.startsWith('foreign') ? 'not this runner checkout' : 'malformed')
+    expect(result.marker).toBe(mode.startsWith('foreign') ? '/nonexistent-other-checkout/migrations\n' : ' \n')
+    expect(result.events).toEqual([])
+    expect(result.ledger).toEqual([])
+    expect(result.tables).toEqual([])
+    expect(result.staging).toEqual([])
+  })
+}
+
+test('migration ownership publication refuses an unreadable dangling marker without replacing it', async () => {
+  const result = await ownerProbe('dangling')
+  expect(result.error).not.toBeNull()
+  expect(result.error).toContain('the ownership marker could not be read')
+  expect(result.dangling).toBe('missing-owner')
+  expect(result.injected).toBe(false)
+  expect(result.events).toEqual([])
+  expect(result.ledger).toEqual([])
+  expect(result.tables).toEqual([])
+})
+
+test('migration ownership publication refuses a failed publish on writable media', async () => {
+  const result = await ownerProbe('failed-link')
+  expect(result.error).not.toBeNull()
+  expect(result.error).toContain('the ownership marker could not be published')
+  expect(result.marker).toBeNull()
+  expect(result.events).toEqual([])
+  expect(result.ledger).toEqual([])
+  expect(result.tables).toEqual([])
+  expect(result.staging).toEqual([])
+})
+
 test('final startup retry leaves a migration retry for a real competing ledger commit', async () => {
   const result = await probe('late-ledger-race')
   expect(result.error).toBeNull()

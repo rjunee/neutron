@@ -5,7 +5,7 @@ import { tmpdir } from 'node:os'
 import { join } from 'node:path'
 import { admitsBootstrapConfig, admitsOwnerTui, OWNER_BOOTSTRAP_ORIGINATOR, validateBootstrapMultiAgent, validateBootstrapThread } from './project-control-bootstrap-validation.ts'
 import { openProjectControlJournal } from './project-control-broker-journal.ts'
-import { readCodexOwnerBinding } from './project-control-bootstrap.ts'
+import { readCodexOwnerBinding, type CodexOwnerBindingFacts } from './project-control-bootstrap.ts'
 
 describe('owner bootstrap attestation', () => {
   test('only the exact required native feature can cross the bootstrap config boundary', () => {
@@ -39,6 +39,16 @@ describe('owner bootstrap attestation', () => {
       parentThreadId: null, forkedFromId: null, environments: [{ environmentId: 'local', cwd, runtimeWorkspaceRoots: [cwd] }] }
     try {
       expect(() => validateBootstrapThread(thread, structuredClone(thread), cwd, codexHome)).not.toThrow()
+      const previous: CodexOwnerBindingFacts = { threadId: thread.id, sessionId: thread.sessionId, cwd, codexHome,
+        rolloutPath: thread.path, paneHandle: 'prior-pane', bindingRevision: 'a'.repeat(64), generation: 1,
+        brokerGeneration: 1, credentialFingerprint: 'prior-account', modelProvider: thread.modelProvider,
+        controlSocketPath: join(codexHome, 'owner.sock'), nativeMetadata: { sessionId: thread.sessionId, source: thread.source, originator: thread.originator },
+        capabilities: { multiAgentV2: true, evidence: 'native-thread-feature-report' } }
+      const resumed = { ...thread, turns: [{ id: 'retained-history' }] }
+      expect(() => validateBootstrapThread(resumed, resumed, cwd, codexHome, previous)).not.toThrow()
+      expect(() => validateBootstrapThread(resumed, resumed, cwd, codexHome)).toThrow('binding mismatch')
+      expect(() => validateBootstrapThread(resumed, resumed, cwd, codexHome, { ...previous, threadId: 'foreign' })).toThrow('resumed owner identity')
+      expect(() => validateBootstrapThread(resumed, resumed, cwd, codexHome, { ...previous, rolloutPath: join(codexHome, 'sessions', 'foreign') })).toThrow('resumed owner identity')
       for (const patch of [
         { id: 'foreign' }, { sessionId: 'foreign' }, { source: 'cli' }, { originator: 'codex-tui' },
         { path: join(dir, 'foreign.jsonl') }, { cwd: dir }, { modelProvider: 'other' },

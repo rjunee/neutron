@@ -1,97 +1,144 @@
-import type { TimelineSnapshot, TimelineUsage } from './build-timeline.ts'
+import type { TimelineCard, TimelineSegment, TimelineSnapshot, TimelineUsage } from './build-timeline.ts'
+import { PHASE_POPOVER_SCRIPT, PHASE_POPOVER_STYLE } from './build-timeline-popover.ts'
 
 export function escapeTimelineHtml(value: unknown): string {
   return String(value).replace(/[&<>"']/g, char => ({ '&': '&amp;', '<': '&lt;', '>': '&gt;', '"': '&quot;', "'": '&#39;' })[char]!)
 }
-
 export function durationLabel(ms: number): string {
   if (ms < 60_000) return `${Math.round(ms / 1000)}s`
-  if (ms < 3_600_000) return `${(ms / 60_000).toFixed(1)}m`
-  return `${(ms / 3_600_000).toFixed(2)}h`
+  if (ms < 3_600_000) return `${Math.round(ms / 60_000)}m`
+  return `${(ms / 3_600_000).toFixed(1)}h`
 }
-
 export function usageLabel(usage: TimelineUsage): string {
-  if (usage.tokens === null) return 'Tokens unknown'
-  return `${usage.tokens.toLocaleString('en-US')} observed tokens${usage.coverage === 'partial' ? ' · partial' : ''}`
+  return usage.tokens === null ? 'Tokens unknown' : `${usage.tokens.toLocaleString('en-US')} observed tokens${usage.coverage === 'partial' ? ' · partial' : ''}`
 }
-
-function tone(label: string): string {
+function tone(segment: TimelineSegment): string {
+  const label = `${segment.phase} ${segment.label}`
   if (/plan/i.test(label)) return 'plan'
   if (/fix/i.test(label)) return 'fix'
-  if (/cross/i.test(label)) return 'cross'
-  if (/review|synth/i.test(label)) return 'review'
-  if (/test|CI/i.test(label)) return 'test'
+  if (/review|synth|cross/i.test(label)) return 'review'
+  if (/test|\bCI\b|suite|probe/i.test(label)) return 'test'
   if (/deploy/i.test(label)) return 'deploy'
   return 'build'
 }
+const colors: Record<string, string> = { plan: '#a78bfa', build: '#5b9df5', review: '#e7ae55', fix: '#ed7d94', test: '#5ac8ad', deploy: '#a8cb73', gap: '#303945' }
+const names: Record<string, string> = { plan: 'Plan', build: 'Build', review: 'Review', fix: 'Fix', test: 'Tests / CI', deploy: 'Deploy', gap: 'Unattributed' }
 
-/** Data enters HTML only through escaping; bar dimensions come from validated timestamps. */
+/** Partition time instead of adding concurrent durations: one horizontal bar per PR. */
+export function barIntervals(card: TimelineCard): Array<{ start: number; end: number; tones: string[]; segments: TimelineSegment[] }> {
+  if (card.start === null || card.end === null) return []
+  const boundaries = [...new Set([card.start, card.end, ...card.segments.flatMap(s => [Math.max(card.start!, s.start), Math.min(card.end!, s.end)])])]
+    .filter(at => at >= card.start! && at <= card.end!).sort((a, b) => a - b)
+  return boundaries.slice(0, -1).map((start, i) => {
+    const end = boundaries[i + 1]!
+    const segments = card.segments.filter(s => s.start < end && s.end > start)
+    return { start, end, segments, tones: [...new Set(segments.filter(s => s.timing === 'recorded').map(tone))].sort() }
+  })
+}
+
 export function renderTimeline(snapshot: TimelineSnapshot): string {
   const h = escapeTimelineHtml
-  const pct = (duration: number) => (100 * duration / snapshot.maxDurationMs).toFixed(5)
-  return `<p class="refreshed" data-page="${snapshot.page ?? 0}" data-pages="${snapshot.totalPages ?? 1}">Observed ${h(new Date(snapshot.observedAt).toISOString())} · newest first · ${snapshot.prCount.toLocaleString('en-US')} PRs · ${snapshot.runOnlyCount.toLocaleString('en-US')} run-only groups · ${snapshot.cards.length} groups shown</p>
-  ${snapshot.warnings.map(warning => `<p class="warning" role="status">${h(warning)}</p>`).join('')}
-  <p class="scope">Recorded build activity. Gaps mean unattributed time, not idle time. Overlapping work uses separate lanes. Dashed spans have no recorded end; elapsed time is not proof of liveness. Tokens are provider observations, never estimates.</p>
-  <div class="legend"><span class="plan">Planning</span><span class="build">Building</span><span class="review">Review</span><span class="cross">Cross-model</span><span class="fix">Fixing</span><span class="test">Tests / CI</span><span class="deploy">Deploy</span><span class="gap">Unattributed</span></div>
-  <p class="scale">Shared time scale: full width = ${h(durationLabel(snapshot.maxDurationMs))}. Each row starts at its own first recorded timestamp.</p>
-  ${snapshot.cards.length === 0 ? '<p class="empty">No PR or run records in the configured sources.</p>' : snapshot.cards.map(card => {
+  const scale = snapshot.viewDurationMs ?? snapshot.maxDurationMs
+  const pct = (ms: number) => (100 * ms / scale).toFixed(5)
+  let previousGroup = ''
+  const time = (ms: number) => new Date(ms).toISOString().replace('T', ' ').replace('.000Z', ' UTC')
+  const warnings = snapshot.warnings.filter(w => !w.startsWith('Showing '))
+  return `<div class="chart-meta" data-page="${snapshot.page ?? 0}" data-pages="${snapshot.totalPages ?? 1}"><span>${snapshot.prCount.toLocaleString('en-US')} PRs <span class="muted">· open first · newest activity in each group</span></span><span class="muted">Updated ${h(new Date(snapshot.observedAt).toISOString().slice(11, 16))} UTC</span></div>
+  ${warnings.length ? `<details class="source-note"><summary>Source coverage notes</summary>${warnings.map(w => `<p>${h(w)}</p>`).join('')}</details>` : ''}
+  <div class="scale-tools"><span>${snapshot.scaleMode === 'focus' ? '0–1h focus window · longer bars continue ›' : 'Full range · one shared wall-clock scale'}</span><div class="scale-switch" role="group" aria-label="Time scale"><button type="button" data-scale="focus" aria-pressed="${snapshot.scaleMode !== 'all'}">Focus 1h</button><button type="button" data-scale="all" aria-pressed="${snapshot.scaleMode === 'all'}">Fit all</button></div></div>
+  <div class="chart-axis"><span>Pull request</span><div><span>0</span><span>${h(durationLabel(scale / 2))}</span><span>${h(durationLabel(scale))}</span></div><span>Wall time</span></div>
+  <div class="rows">${snapshot.cards.length === 0 ? '<p class="empty">No pull requests match this view.</p>' : snapshot.cards.map(card => {
     const elapsed = card.start === null || card.end === null ? null : card.end - card.start
-    return `<article class="card" data-card="${h(card.key)}">
-      <header><h2>${h(card.repository)} · ${card.url ? `<a href="${h(card.url)}" rel="noreferrer">PR #${card.pr}</a>` : card.pr === null ? 'Unpublished run' : `PR #${card.pr}`} <span>${h(card.title)}</span></h2>
-      <strong>${elapsed === null ? 'Duration unknown' : h(durationLabel(elapsed))}</strong></header>
-      <p class="meta">${h(card.lifecycle)} · ${card.active ? 'Elapsed through refresh' : 'Recorded end'} · ${card.start === null ? 'Start unknown' : h(new Date(card.start).toISOString())} · ${card.runs.map(run => h(run.phase)).join(', ')}</p>
-      ${elapsed === null ? '' : `<div class="timeline" style="height:${card.lanes * 42 + 18}px" aria-label="Elapsed timeline">
-        <div class="extent" style="width:${pct(elapsed)}%"></div>
-        ${card.gaps.map(gap => `<div class="unattributed" style="left:${pct(gap.start - card.start!)}%;width:${pct(gap.end - gap.start)}%" title="Unattributed: ${h(durationLabel(gap.end - gap.start))}"></div>`).join('')}
-        ${card.segments.map(segment => `<div tabindex="0" class="segment ${tone(segment.label)} ${segment.timing}" data-segment="${h(segment.id)}" data-duration-ms="${segment.end - segment.start}" style="left:${pct(segment.start - card.start!)}%;width:${pct(segment.end - segment.start)}%;top:${segment.lane * 42 + 9}px" title="${h(`${segment.label} · ${durationLabel(segment.end - segment.start)} · ${segment.model ?? 'model unknown'} · ${usageLabel(segment.usage)} · ${segment.detail}${segment.timing === 'open' ? ' · end unrecorded' : ''}`)}"><b>${h(segment.label)}</b><small>${h(usageLabel(segment.usage))}</small></div>`).join('')}
-      </div>`}
-      <details><summary>Phase details, models and coverage (${card.segments.length} spans)</summary>
-        <div class="table-wrap"><table><thead><tr><th>Phase</th><th>Wall time</th><th>Model</th><th>Observed tokens</th><th>Evidence</th></tr></thead><tbody>
-        ${card.segments.map(segment => `<tr><td>${h(segment.label)}</td><td>${h(durationLabel(segment.end - segment.start))}${segment.timing === 'open' ? ' · end unknown' : ''}</td><td>${h(segment.model ?? 'Unknown')}</td><td>${h(usageLabel(segment.usage))}<small>Input ${h(segment.usage.input ?? '?')} · output ${h(segment.usage.output ?? '?')} · cache read ${h(segment.usage.cacheRead ?? '?')} · cache create ${h(segment.usage.cacheCreation ?? '?')} · USD ${h(segment.usage.costUsd ?? '?')}</small></td><td>${h(segment.detail)}<small>${h(segment.usage.source ?? 'No usage report')}${segment.usage.observedAt === null ? '' : ` · ${h(new Date(segment.usage.observedAt).toISOString())}`}</small></td></tr>`).join('')}
-        </tbody></table></div>
-        ${card.segments.length === 0 ? '<p>No attributable phase spans. Phase timing, models and tokens remain unknown.</p>' : ''}
-        ${card.warnings.map(warning => `<p class="warning">${h(warning)}</p>`).join('')}
-        ${card.phaseTotals.length ? `<h3>Legacy phase snapshots</h3><p>Cumulative run/phase totals. Cannot allocate to individual spans; never added to attempt receipts.</p><ul>${card.phaseTotals.map(row => `<li>${h(row.phase)} · ${h(usageLabel(row.usage))} · run ${h(row.runId)}</li>`).join('')}</ul>` : ''}
-        ${card.events.length ? `<h3>Recorded stage events</h3><ul>${card.events.map(event => `<li>${h(new Date(event.at).toISOString())} · ${h(event.stage)}</li>`).join('')}</ul>` : ''}
-      </details>
-    </article>`
-  }).join('')}`
+    const status = card.prState ?? 'unknown'
+    const work = card.workSignal?.state ?? 'unknown'
+    const workLabel = work === 'running' ? 'CI running' : work === 'pending' ? 'CI pending' : work === 'recent' ? 'Recent work · within 10m' : 'No live signal'
+    const workDetail = work === 'unknown' ? 'No fresh authoritative work signal. This does not mean idle or finished.' : `${card.workSignal!.source} · observed ${time(card.workSignal!.observedAt!)}`
+    const group = status === 'open' ? 'Open pull requests' : status === 'merged' || status === 'closed' ? 'Merged & closed' : 'PR state unknown'
+    const heading = group === previousGroup ? '' : `<h2 class="lifecycle-heading">${group}</h2>`
+    previousGroup = group
+    const phaseInfo = (segments: TimelineSegment[]) => segments.map(s => ({ label: s.label, duration: durationLabel(s.end - s.start), tokens: usageLabel(s.usage), model: s.model ?? 'Model unknown', open: s.timing === 'open', crossesWindow: elapsed !== null && elapsed > scale && s.start < card.start! + scale && s.end > card.start! + scale }))
+    const clipped = elapsed !== null && elapsed > scale
+    const remainder = card.segments.filter(s => s.end > card.start! + scale)
+    return `${heading}<details class="pr-row" data-state="${status}" data-card="${h(card.key)}"><summary class="row-summary">
+      <span class="pr-label"><span class="pr-id">${h(card.repository.split('/').pop())} <b>${card.pr === null ? 'Unpublished run' : `PR #${card.pr}`}</b><span class="status-pill ${status}">${h(status[0]!.toUpperCase() + status.slice(1))}</span></span><span class="pr-title">${h(card.title)}</span><span class="work-signal ${work}" title="${h(workDetail)}">${h(workLabel)}</span></span>
+      <span class="bar-track" aria-label="${elapsed === null ? 'Duration unknown' : `${h(durationLabel(elapsed))} wall-clock timeline`}">${elapsed === null ? '<span class="unknown">No phase timing recorded</span>' : `<span class="bar" style="width:${pct(Math.min(elapsed, scale))}%">${barIntervals(card).filter(interval => interval.start < card.start! + scale).map(interval => {
+        const tones = interval.tones.length ? interval.tones : ['gap']
+        const background = !interval.tones.length && interval.segments.length ? `repeating-linear-gradient(135deg,${colors.gap},${colors.gap} 4px,#58616f 4px,#58616f 6px)` : tones.length === 1 ? colors[tones[0]!] : `linear-gradient(to bottom,${tones.flatMap((t, i) => [`${colors[t]} ${i * 100 / tones.length}%`, `${colors[t]} ${(i + 1) * 100 / tones.length}%`]).join(',')})`
+        const info = { title: interval.segments.length > 1 ? 'Concurrent phases' : interval.segments[0]?.label ?? 'Unattributed time',
+          duration: durationLabel(Math.min(interval.end, card.start! + scale) - interval.start), actions: phaseInfo(interval.segments) }
+        return `<button type="button" class="bar-piece${interval.segments.some(s => s.timing === 'open') ? ' unfinished' : ''}" style="left:${100 * (interval.start - card.start!) / Math.max(1, Math.min(elapsed, scale))}%;width:${100 * (Math.min(interval.end, card.start! + scale) - interval.start) / Math.max(1, Math.min(elapsed, scale))}%;background:${background}" aria-label="${h(`${info.title} · ${info.duration}. Show phase details`)}" aria-haspopup="dialog" data-phase-key="${h(`${card.key}:${interval.start}`)}" data-phase-info="${h(JSON.stringify(info))}"></button>`
+      }).join('')}</span>${clipped ? `<button type="button" class="overflow-button" aria-label="${h(`${durationLabel(elapsed!)} total. Show phases beyond the 1h focus window`)}" aria-haspopup="dialog" data-phase-key="${h(`${card.key}:overflow`)}" data-phase-info="${h(JSON.stringify({ title: 'Beyond the focus window', duration: durationLabel(elapsed! - scale), windowLabel: `${durationLabel(elapsed!)} total · ${durationLabel(elapsed! - scale)} beyond the visible window`, actions: phaseInfo(remainder) }))}">›</button>` : ''}`}</span><button type="button" class="phase-picker" aria-label="${h(`Explore all phases for PR #${card.pr}`)}" aria-haspopup="dialog" data-phase-key="${h(`${card.key}:all`)}" data-phase-info="${h(JSON.stringify({ title: 'All recorded phases', duration: elapsed === null ? 'Unknown duration' : durationLabel(elapsed), windowLabel: elapsed === null ? 'No phase timing recorded' : `${durationLabel(elapsed)} total wall-clock span · full action durations below`, actions: phaseInfo(card.segments) }))}">${elapsed === null ? '—' : h(durationLabel(elapsed))}<span class="chevron" aria-hidden="true">⋯</span></button></summary>
+      <div class="pr-details"><div class="detail-heading"><strong>${h(card.title)}</strong>${card.url ? `<a href="${h(card.url)}" rel="noreferrer" target="_blank">Open PR ↗</a>` : ''}</div>
+      <p class="muted">${h(card.repository)} · ${h(card.lifecycle)}</p><p class="muted">${card.start === null ? 'No phase timing recorded.' : `${h(time(card.start))} → ${h(time(card.end!))}`}</p>
+      <p class="muted">Overlapping phases share the same time; different colors stack inside the bar. Unattributed time is unknown, not idle. Dashed spans have no recorded end.</p>
+      <div class="phase-list">${card.segments.map(s => `<div class="phase-detail" data-segment="${h(s.id)}" data-duration-ms="${s.end - s.start}"><div><span class="phase-dot" style="background:${colors[tone(s)]}"></span><strong>${h(s.label)}</strong><span>${h(durationLabel(s.end - s.start))}${s.timing === 'open' ? ' · end unrecorded' : ''}</span></div><p>${h(s.model ?? 'Model unknown')} · ${h(usageLabel(s.usage))}</p><small>${h(time(s.start))} → ${h(time(s.end))}</small><small>Input ${h(s.usage.input ?? '?')} · output ${h(s.usage.output ?? '?')} · cache read ${h(s.usage.cacheRead ?? '?')} · cache create ${h(s.usage.cacheCreation ?? '?')} · USD ${h(s.usage.costUsd ?? '?')}</small><small>${h(s.detail)} · ${h(s.usage.source ?? 'No usage report')}</small></div>`).join('')}</div>
+      ${card.warnings.map(w => `<p class="muted">${h(w)}</p>`).join('')}
+      ${card.phaseTotals.length ? `<details><summary>Unallocated phase totals</summary><p>Legacy cumulative totals cannot be allocated to spans or added to attempt receipts.</p>${card.phaseTotals.map(p => `<p>${h(p.phase)} · ${h(usageLabel(p.usage))} · ${h(p.runId)}</p>`).join('')}</details>` : ''}
+      ${card.events.length ? `<details><summary>Recorded events</summary>${card.events.map(e => `<p>${h(time(e.at))} · ${h(e.stage)}</p>`).join('')}</details>` : ''}</div></details>`
+  }).join('')}</div><div class="chart-footer"><span>Recorded work · one shared time scale · ${snapshot.cards.length} shown</span><span>${snapshot.prCount} PRs · ${snapshot.runOnlyCount} run-only groups in source</span></div>`
 }
 
 export const TIMELINE_STYLE = `
-:root{color-scheme:dark;font:15px/1.5 system-ui,sans-serif;background:#0c1220;color:#e5edf9}*{box-sizing:border-box}body{margin:0}main{max-width:1440px;margin:auto;padding:24px}h1{font-size:28px;margin:0}h2{font-size:16px;margin:0}h2 span{font-weight:400;color:#bfcade}h3{font-size:15px}.subtitle,.scope,.meta,.refreshed,.scale{color:#a8b7d0}.subtitle{margin-top:4px}.scope{max-width:1000px}.refreshed,.meta{font-size:12px}.legend{display:flex;flex-wrap:wrap;gap:8px}.legend span{padding:3px 9px;border-radius:5px;font-size:12px}.plan{background:#3e377c}.build{background:#164a6e}.review{background:#365880}.cross{background:#633976}.fix{background:#784727}.test{background:#225c56}.deploy{background:#475927}.gap{background:repeating-linear-gradient(45deg,#253047,#253047 3px,#172136 3px,#172136 7px)}.card{border:1px solid #29344b;border-radius:10px;margin:16px 0;padding:16px;background:#111b2d}.card header{display:flex;gap:16px;justify-content:space-between;align-items:baseline}.card header strong{white-space:nowrap;font-size:18px}.timeline{position:relative;margin:12px 0;overflow:hidden}.extent{position:absolute;inset:0 auto 0 0;background:#162136;border:1px solid #34425b}.unattributed{position:absolute;top:0;bottom:0;background:repeating-linear-gradient(45deg,transparent,transparent 4px,#2e3e5755 4px,#2e3e5755 7px)}.segment{position:absolute;height:34px;overflow:hidden;white-space:nowrap;border:1px solid #ffffff35;border-radius:3px;padding:0 5px;line-height:16px;font-size:11px}.segment small{display:block;font-size:10px}.segment.open{border:2px dashed #d3dbe9;opacity:.7}.segment:focus{outline:2px solid white;z-index:1}details{font-size:13px}summary{cursor:pointer;color:#c4d8f8}.table-wrap{overflow:auto}table{width:100%;border-collapse:collapse;margin:12px 0}th,td{text-align:left;padding:8px;border-bottom:1px solid #2a354b;vertical-align:top}td small{display:block;color:#a8b7d0;white-space:normal}td{min-width:90px}#error,.warning{color:#ffd29a}#error{border:1px solid #9b7046;padding:12px}#error[hidden]{display:none}button{background:#263954;border:1px solid #527297;color:white;padding:7px 12px;border-radius:6px;cursor:pointer}.top{display:flex;justify-content:space-between;gap:12px}.empty{padding:40px;text-align:center}a{color:#b8d8ff}@media(max-width:600px){main{padding:12px}.card{padding:10px}.card header{align-items:flex-start}h1{font-size:22px}h2{font-size:14px}h2 span{display:block}.segment{padding:0 2px}.card header strong{font-size:15px}.scale,.scope{font-size:12px}}
+:root{color-scheme:dark;font:14px/1.5 -apple-system,BlinkMacSystemFont,"Segoe UI",sans-serif;background:#11151b;color:#e9edf3;--muted:#9da9b9;--line:#29313c}*{box-sizing:border-box}body{margin:0}button,input,select{font:inherit}main{max-width:1500px;margin:0 auto;padding:44px 48px 28px}header{display:flex;justify-content:space-between;align-items:center;gap:20px;margin-bottom:28px}.eyebrow{font-size:11px;letter-spacing:.16em;color:var(--muted);text-transform:uppercase;margin:0 0 6px}h1{font-size:28px;letter-spacing:-.035em;font-weight:600;margin:0}.subtitle{margin:5px 0 0;color:var(--muted);font-size:13px}.tools{display:flex;align-items:center;gap:8px}input,select,button{background:#1a2029;color:#dfe6ef;border:1px solid #35404e;border-radius:6px;min-height:36px;padding:7px 10px}input{width:190px}button,select,summary{cursor:pointer}button:hover{background:#293342}button:disabled{opacity:.4;cursor:default}a{color:#9ec5ff;text-decoration:none}a:hover{text-decoration:underline}:focus-visible{outline:2px solid #a6cbff;outline-offset:3px}.legend{display:flex;flex-wrap:wrap;gap:18px;margin:0 0 24px;color:#bdc7d5;font-size:12px}.legend span{display:inline-flex;gap:7px;align-items:center}.legend i,.phase-dot{display:inline-block;width:8px;height:8px;border-radius:2px;flex-shrink:0}.chart-meta{display:flex;justify-content:space-between;gap:12px;padding-bottom:16px;font-size:12px}.muted{color:var(--muted)}.chart-axis,.row-summary{display:grid;grid-template-columns:340px minmax(0,1fr) 72px;gap:22px;align-items:center}.chart-axis{color:var(--muted);font-size:11px;padding-bottom:10px}.chart-axis>div{display:flex;justify-content:space-between}.chart-axis>span:last-child{text-align:right}.rows{border-top:1px solid var(--line)}.pr-row{border-bottom:1px solid var(--line)}.row-summary{min-height:70px;padding:13px 0;list-style:none}.row-summary::-webkit-details-marker{display:none}.row-summary:hover{background:#19202a}.pr-label{min-width:0}.pr-id{display:flex;align-items:center;gap:7px;color:var(--muted);font-size:11px;margin-bottom:3px}.pr-id b{font-weight:600;color:#d4deed}.status{width:6px;height:6px;border-radius:50%;background:#65c9a5}.status.merged{background:#ae91e2}.status.closed{background:#e98585}.pr-title{display:block;white-space:nowrap;overflow:hidden;text-overflow:ellipsis;font-size:13px}.bar-track{display:block;position:relative;height:24px;background:linear-gradient(to right,transparent calc(50% - .5px),#303947 50%,transparent calc(50% + .5px));border-left:1px solid #303947;border-right:1px solid #303947}.bar{display:block;position:relative;height:24px;border-radius:3px;overflow:hidden}.bar-piece{position:absolute;height:100%;display:block}.bar-piece.unfinished{border-top:2px dashed #ecf1f9;border-bottom:2px dashed #ecf1f9}.duration{display:flex;align-items:center;justify-content:flex-end;gap:12px;font-variant-numeric:tabular-nums;font-size:13px;font-weight:600}.chevron{color:var(--muted);font-weight:400}.pr-row[open] .chevron{transform:rotate(180deg)}.unknown{font-size:11px;color:var(--muted);padding-left:8px;white-space:nowrap}.pr-details{padding:22px 24px;margin:0 0 18px;background:#191f28;border:1px solid #303a47;border-radius:6px;font-size:13px}.detail-heading{display:flex;justify-content:space-between;gap:15px}.detail-heading a{white-space:nowrap}.pr-details p{margin:8px 0}.phase-list{display:grid;grid-template-columns:repeat(auto-fit,minmax(280px,1fr));gap:10px;margin:20px 0}.phase-detail{padding:14px;background:#111820;border:1px solid #2b3644;border-radius:5px;min-width:0}.phase-detail>div{display:flex;gap:8px;align-items:center}.phase-detail>div>span:last-child{margin-left:auto;white-space:nowrap;color:#c6d1e1}.phase-detail small{display:block;color:var(--muted);overflow-wrap:anywhere}.source-note{font-size:12px;color:#deb889;margin-bottom:14px}.source-note p{margin:6px 0}.chart-footer{display:flex;justify-content:space-between;flex-wrap:wrap;gap:8px;font-size:11px;color:var(--muted);padding:16px 0}.pagination{display:flex;align-items:center;justify-content:center;gap:14px;margin-top:12px;font-size:12px}.pagination button{min-width:78px}#error{padding:12px;border:1px solid #a37b45;color:#efcda0;border-radius:5px}.empty{padding:48px;text-align:center;color:var(--muted)}@media(min-width:1600px){main{padding-top:56px}}@media(max-width:1000px){main{padding:28px 24px}.chart-axis,.row-summary{grid-template-columns:260px minmax(0,1fr) 64px;gap:16px}.tools input{width:140px}}@media(max-width:700px){main{padding:24px 18px}header{align-items:flex-start;flex-direction:column;gap:18px;margin-bottom:20px}h1{font-size:26px}.tools{width:100%}.tools input{flex:1;min-width:0}.tools select{max-width:130px}.legend{gap:10px 14px;margin-bottom:20px;font-size:11px}.chart-meta{font-size:11px}.chart-meta .muted{display:none}.chart-axis{display:flex;justify-content:space-between}.chart-axis>span:first-child{display:none}.chart-axis>div{flex:1;margin-right:70px}.chart-axis>span:last-child{position:absolute;right:18px}.row-summary{grid-template-columns:minmax(0,1fr) 60px;gap:10px 12px;padding:14px 0;min-height:100px}.pr-label{grid-column:1 / -1}.pr-title{font-size:13px}.bar-track{height:20px}.bar{height:20px}.duration{font-size:12px;gap:8px}.pr-details{padding:15px 12px}.detail-heading{display:block}.detail-heading a{display:inline-block;margin-top:8px}.phase-list{grid-template-columns:1fr}.phase-detail>div{flex-wrap:wrap}.chart-footer>span:last-child{display:none}.unknown{font-size:10px}}
 `
 
 export const TIMELINE_SCRIPT = `
+${PHASE_POPOVER_SCRIPT}
 let inFlight = false;
+let pending = false;
 async function refresh() {
-  if (inFlight) return;
+  if (inFlight) { pending = true; return; }
   inFlight = true;
   const error = document.getElementById('error');
+  const open = new Set(Array.from(document.querySelectorAll('.pr-row[open]')).map(el => el.dataset.card));
   try {
     const response = await fetch('/timeline' + location.search, {cache:'no-store', signal:AbortSignal.timeout(10000)});
     if (!response.ok) throw new Error('HTTP ' + response.status);
+    const phaseState = capturePhasePopover();
+    const focusedPhaseKey = document.activeElement?.dataset.phaseKey;
+    hidePhasePopover();
     document.getElementById('timeline').innerHTML = await response.text();
+    document.querySelectorAll('.pr-row').forEach(el => { if (open.has(el.dataset.card)) el.open = true; });
+    restorePhasePopover(phaseState);
+    if (!phaseState) restorePhaseFocus(focusedPhaseKey);
+    const rendered = document.querySelector('[data-page]');
+    const page = Number(rendered?.dataset.page) || 0, pages = Number(rendered?.dataset.pages) || 1;
+    document.getElementById('page-label').textContent = (page + 1) + ' / ' + pages;
+    document.getElementById('previous').disabled = page === 0;
+    document.getElementById('next').disabled = page + 1 >= pages;
     error.hidden = true;
   } catch (failure) {
-    error.textContent = 'Refresh failed. Displayed data may be stale. ' + failure.message + '. Retrying within 30 seconds.';
+    error.textContent = 'Refresh failed. Displayed data may be stale. Retrying within 30 seconds.';
     error.hidden = false;
-  } finally { inFlight = false; }
+  } finally { inFlight = false; if (pending) { pending = false; refresh(); } }
 }
 document.getElementById('refresh').addEventListener('click', refresh);
-document.getElementById('mode').value = new URLSearchParams(location.search).get('mode') || 'lifecycle';
-document.getElementById('mode').addEventListener('change', event => {
-  const url = new URL(location.href); url.searchParams.set('mode', event.target.value); url.searchParams.set('page', '0');
+document.addEventListener('click', event => {
+  const scale = event.target.closest('[data-scale]');
+  if (!scale) return;
+  const url = new URL(location.href); url.searchParams.set('scale', scale.dataset.scale);
   history.replaceState(null, '', url); refresh();
 });
 for (const [id, delta] of [['previous', -1], ['next', 1]]) document.getElementById(id).addEventListener('click', () => {
   const rendered = document.querySelector('[data-page]');
   const current = Number(rendered?.dataset.page) || 0, pages = Number(rendered?.dataset.pages) || 1;
   const url = new URL(location.href); url.searchParams.set('page', String(Math.max(0, Math.min(pages - 1, current + delta))));
-  history.replaceState(null, '', url); refresh();
+  history.replaceState(null, '', url); refresh(); window.scrollTo({top:0});
 });
+let searchTimer;
+for (const id of ['search', 'repository']) {
+  document.getElementById(id).value = new URLSearchParams(location.search).get(id) || '';
+  document.getElementById(id).addEventListener(id === 'search' ? 'input' : 'change', event => {
+    clearTimeout(searchTimer); searchTimer = setTimeout(() => {
+      const url = new URL(location.href);
+      for (const key of ['search', 'repository']) url.searchParams.set(key, document.getElementById(key).value);
+      url.searchParams.set('page', '0');
+      history.replaceState(null, '', url); refresh();
+    }, id === 'search' ? 220 : 0);
+  });
+}
 setInterval(refresh, 30000);
 refresh();
 `
 
-export const TIMELINE_PAGE = `<!doctype html><html lang="en"><head><meta charset="utf-8"><meta name="viewport" content="width=device-width,initial-scale=1"><title>Build timelines</title><style>${TIMELINE_STYLE}</style></head><body><main><div class="top"><div><h1>Build timelines</h1><p class="subtitle">Wall-clock time · observed phases · model and token coverage</p></div><button id="refresh" type="button">Refresh</button></div><nav aria-label="Timeline view"><label>Time window <select id="mode"><option value="lifecycle">PR lifecycle</option><option value="work">Observed work</option></select></label> <button id="previous" type="button">Previous 50</button> <button id="next" type="button">Next 50</button></nav><p id="error" role="alert" hidden></p><section id="timeline" aria-live="polite"><p>Loading recorded activity…</p></section></main><script>${TIMELINE_SCRIPT}</script></body></html>`
+export const TIMELINE_PAGE = `<!doctype html><html lang="en"><head><meta charset="utf-8"><meta name="viewport" content="width=device-width,initial-scale=1"><title>PR timeline</title><style>${TIMELINE_STYLE}${PHASE_POPOVER_STYLE}</style></head><body><main><header><div><p class="eyebrow">Engineering</p><h1>PR timeline</h1><p class="subtitle">Build phases, measured in wall-clock time.</p></div><div class="tools"><input id="search" type="search" placeholder="Search PRs…" aria-label="Search pull requests"><select id="repository" aria-label="Repository"><option value="">All repositories</option><option value="open">Open</option><option value="managed">Managed</option></select><button id="refresh" type="button" aria-label="Refresh timeline">↻</button></div></header><div class="legend" aria-label="Phase colors">${Object.entries(names).map(([key, name]) => `<span><i style="background:${colors[key]}"></i>${name}</span>`).join('')}</div><p id="error" role="alert" hidden></p><section id="timeline" aria-label="Pull request timelines"><p class="empty">Loading pull requests…</p></section><nav class="pagination" aria-label="Timeline pages"><button id="previous" type="button">Previous</button><span id="page-label"></span><button id="next" type="button">Next</button></nav></main><aside id="phase-popover" class="phase-popover" role="dialog" aria-label="Phase details" hidden></aside><script>${TIMELINE_SCRIPT}</script></body></html>`

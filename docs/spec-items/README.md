@@ -24,6 +24,7 @@ These are the items the harness-orchestrator cutover is gated on.
 - [`the-orchestrator-owns-the-build-loop`](the-orchestrator-owns-the-build-loop.md) — The project REPL owns the build loop
 - [`the-review-loop-must-stop-and-re-plan`](the-review-loop-must-stop-and-re-plan.md) — Stop and escalate a review loop instead of iterating on a bad plan
 - [`trident-build-efficiency`](trident-build-efficiency.md) — Avoid repeated build work and measure Trident's time and token costs
+- [`repl-model-background-poll-test-stability`](repl-model-background-poll-test-stability.md) — Synchronize the REPL model background-poll race test
 - [`a-gateway-restart-keeps-the-project-repls`](a-gateway-restart-keeps-the-project-repls.md) — A gateway restart keeps the project REPLs, conversation and all
 - [`durable-reply-sink-coordinates`](durable-reply-sink-coordinates.md) — The sink's coordinates outlive the gateway, and an orphan must not
 - [`project-herdr-workspaces`](project-herdr-workspaces.md) — Project-owned Herdr workspaces and sleep lifecycle
@@ -99,6 +100,7 @@ branch is cut (standard §3.1, §3.2).
 
 | Item | Title | Priority | Cutover |
 |---|---|---|---|
+| [`repl-model-background-poll-test-stability`](repl-model-background-poll-test-stability.md) | Synchronize the REPL model background-poll race test | P0 | yes |
 | [`message-rejection-correlation`](message-rejection-correlation.md) | Attribute explicit send rejections to the originating message | P1 | — |
 | [`native-crash-visibility-for-the-mobile-app`](native-crash-visibility-for-the-mobile-app.md) | Make a native process-start crash diagnosable without a cable | P3 | — |
 
@@ -109,6 +111,7 @@ branch is cut (standard §3.1, §3.2).
 | [`a-gateway-restart-keeps-the-project-repls`](a-gateway-restart-keeps-the-project-repls.md) | A gateway restart keeps the project REPLs, conversation and all | P0 | yes |
 | [`durable-reply-sink-coordinates`](durable-reply-sink-coordinates.md) | The sink's coordinates outlive the gateway, and an orphan must not | P0 | yes |
 | [`herdr-host-implements-ptyhost-over-the-socket-api`](herdr-host-implements-ptyhost-over-the-socket-api.md) | HerdrHost implements PtyHost over the herdr socket API | P0 | yes |
+| [`migration-owner-atomic-publication`](migration-owner-atomic-publication.md) | Publish complete migration ownership markers without replacement | P0 | yes |
 | [`project-herdr-workspaces`](project-herdr-workspaces.md) | Project-owned Herdr workspaces and sleep lifecycle | P0 | yes |
 | [`an-abandoned-dispatch-cannot-actuate-later`](an-abandoned-dispatch-cannot-actuate-later.md) | An abandoned dispatch cannot actuate later | P1 | — |
 | [`configured-models-for-review-and-chat`](configured-models-for-review-and-chat.md) | Configure models once for review and project chat | P1 | — |

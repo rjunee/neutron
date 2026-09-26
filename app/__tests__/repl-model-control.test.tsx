@@ -67,9 +67,9 @@ beforeEach(() => {
   }) as typeof fetch;
 });
 
-async function mount(projectId = 'willow') {
+async function mount(projectId = 'willow', token = 'test-token') {
   const screen = await mountScreen(createElement(ReplModelControl,
-    { projectId, baseUrl: 'https://example.test', token: 'test-token' }));
+    { projectId, baseUrl: 'https://example.test', token }));
   await settle();
   return screen;
 }
@@ -84,28 +84,85 @@ async function press(id: string) {
   await act(async () => { element.click(); await new Promise((resolve) => setTimeout(resolve, 0)); });
 }
 
+function captureModelPoll() {
+  const originalSet = globalThis.setInterval;
+  const originalClear = globalThis.clearInterval;
+  const handle = Symbol('model poll') as unknown as ReturnType<typeof setInterval>;
+  let fire: (() => void) | null = null;
+  globalThis.setInterval = ((callback: (...args: unknown[]) => void, ms?: number, ...args: unknown[]) => {
+    if (ms === 5_000) {
+      fire = () => callback(...args);
+      return handle;
+    }
+    return (originalSet as (...values: unknown[]) => unknown)(callback, ms, ...args);
+  }) as typeof setInterval;
+  globalThis.clearInterval = ((timer: unknown) => {
+    if (timer === handle) { fire = null; return; }
+    (originalClear as (value: unknown) => void)(timer);
+  }) as typeof clearInterval;
+  return {
+    fire() {
+      if (fire === null) throw new Error('The model poll was not scheduled');
+      fire();
+    },
+    restore() {
+      globalThis.setInterval = originalSet;
+      globalThis.clearInterval = originalClear;
+    },
+  };
+}
+
+async function waitForRendered(check: () => boolean) {
+  for (let attempt = 0; attempt < 20 && !check(); attempt++) await settle();
+  expect(check()).toBe(true);
+}
+
 describe('conversation REPL model on phone', () => {
   it('discovers an owner started after the screen opened and mounts native controls', async () => {
     getBody = { ...states.cheap, sessionId: '', currentModel: null, availableModels: [], status: 'unsupported' };
-    const screen = await mount();
-    expect(document.querySelector('[data-testid="native-owner-control"]')).toBeNull();
-    getBody = states.cheap;
-    await act(async () => { await new Promise(resolve => setTimeout(resolve, 5_100)); });
-    expect(document.querySelector('[data-testid="repl-model-open"]')?.textContent).toContain('cheap');
-    expect(document.querySelector('[data-testid="native-owner-control"]')).not.toBeNull();
-    screen.unmount();
+    const poll = captureModelPoll();
+    let screen: Awaited<ReturnType<typeof mount>> | null = null;
+    try {
+      screen = await mount('owner-discovery-test', 'owner-discovery-token');
+      expect(screen.byTestId('repl-model-open')?.textContent).toContain('unknown');
+      expect(screen.byTestId('native-owner-control')).toBeNull();
+
+      getBody = states.cheap;
+      deferGetToken = 'Bearer owner-discovery-token';
+      await act(async () => { poll.fire(); });
+      expect(completeGet).not.toBeNull();
+      expect(screen.byTestId('repl-model-open')?.textContent).toContain('unknown');
+      expect(screen.byTestId('native-owner-control')).toBeNull();
+
+      await act(async () => { completeGet!(); await Promise.resolve(); });
+      await waitForRendered(() => screen!.byTestId('repl-model-open')?.textContent?.includes('cheap') === true &&
+        screen!.byTestId('native-owner-control') !== null);
+      expect(screen.byTestId('repl-model-open')?.textContent).toContain('cheap');
+      expect(screen.byTestId('native-owner-control')).not.toBeNull();
+    } finally {
+      screen?.unmount();
+      poll.restore();
+    }
   }, 10_000);
 
   it('does not let a background model read roll back an acknowledged switch', async () => {
-    const screen = await mount();
-    deferGetAt = 2;
-    await act(async () => { await new Promise(resolve => setTimeout(resolve, 5_100)); });
-    expect(completeGet).not.toBeNull();
-    await press('repl-model-open');
-    await press('repl-model-option-frontier');
-    await act(async () => { completeGet!(); }); await settle();
-    expect(document.querySelector('[data-testid="repl-model-open"]')?.textContent).toContain('frontier');
-    screen.unmount();
+    const poll = captureModelPoll();
+    let screen: Awaited<ReturnType<typeof mount>> | null = null;
+    try {
+      screen = await mount('model-poll-race-test', 'model-poll-race-token');
+      deferGetToken = 'Bearer model-poll-race-token';
+      await act(async () => { poll.fire(); });
+      expect(completeGet).not.toBeNull();
+      await press('repl-model-open');
+      await press('repl-model-option-frontier');
+      expect(screen.byTestId('repl-model-open')?.textContent).toContain('frontier');
+      await act(async () => { completeGet!(); await Promise.resolve(); });
+      await settle();
+      expect(screen.byTestId('repl-model-open')?.textContent).toContain('frontier');
+    } finally {
+      screen?.unmount();
+      poll.restore();
+    }
   }, 10_000);
 
   it('accepts a new conditional revision on the same native conversation and uses it next time', async () => {
