@@ -59,6 +59,12 @@ Repo location and selection are resolved by Decisions Log 2026-09-15 (#935).
 - [x] The vault is committed automatically on change, with a recoverable history.
       Verify: `open/__tests__/loop-inventory-open-composer.test.ts` captures two
       scheduled versions and reads the first after the second lands.
+- [x] A scheduled or run-now backup overlapping a local document commit still
+      performs the configured encrypted push. Concurrent full backups share one
+      push, and queued document edits and restores retain their history.
+      Verify: `gateway/__tests__/project-backup-store.test.ts` — configured backup
+      scheduling with document writers; the skipped-push and duplicate-push
+      mutations must fail these consuming tests.
 - [x] Nested repo working trees are excluded **by rule, not by luck**. Assert a vault
       backup of a tree containing a nested clone stores no gitlink pointing at content the
       backup does not hold.

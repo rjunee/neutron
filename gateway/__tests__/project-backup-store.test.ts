@@ -38,6 +38,7 @@ import {
   classifyPushFailure,
 } from '../git/project-backup-store.ts'
 import type { BackupResult, RestoreResult } from '../git/project-backup-store.ts'
+import { ProjectBackupScheduler, DEFAULT_TICK_INTERVAL_MS } from '../git/project-backup-scheduler.ts'
 import type { PlatformAdapter } from '@neutronai/runtime/platform-adapter.ts'
 
 const execFileAsync = promisify(execFile)
@@ -146,6 +147,52 @@ function makeHarness(): Harness {
 
 function cleanup(h: Harness): void {
   rmSync(h.tmp, { recursive: true, force: true })
+}
+
+function latch() {
+  let release!: () => void
+  const promise = new Promise<void>(resolve => { release = resolve })
+  return { promise, release }
+}
+
+async function encryptedRemote(h: Harness, beforePush: () => Promise<void> = async () => {}) {
+  const keyFile = join(h.owner_home, 'recovery.key')
+  await generateBackupKey(keyFile)
+  mkdirSync(join(h.owner_home, '.vault-backup'))
+  const config = { version: 1 as const, repository: 'example/vault', repositoryId: 123, keyFile, recoveryConfirmed: true as const }
+  writeFileSync(join(h.owner_home, '.vault-backup', 'config.json'), JSON.stringify(config))
+  const seed = join(h.tmp, 'seed')
+  await git(h.tmp, ['init', '--initial-branch=main', seed])
+  await git(seed, ['-c', 'user.name=Test', '-c', 'user.email=test@example.invalid', 'commit', '--allow-empty', '-qm', 'seed'])
+  const remote = join(h.tmp, 'encrypted.git')
+  await git(h.tmp, ['clone', '--bare', seed, remote])
+  let pushes = 0
+  const command: BackupCommand = async (binary, args, cwd) => {
+    if (binary === 'gh') return JSON.stringify({ id: 123, private: true, full_name: config.repository })
+    if (args.includes('push')) { pushes++; await beforePush() }
+    return runBackupCommand(binary, args.map(arg => arg === 'https://github.com/example/vault.git' ? remote : arg), cwd)
+  }
+  const store = new ProjectBackupStore({ platform: h.platform, owner_home: h.owner_home, project_slug: PROJECT_SLUG, encryptedBackupCommand: command })
+  return { store, config, command, pushes: () => pushes }
+}
+
+/** Pause real git at an operation boundary, keeping the actual store writer active. */
+function pauseGit(store: ProjectBackupStore, matches: (args: string[]) => boolean) {
+  const entered = latch()
+  const resume = latch()
+  type GitExec = (args: string[], opts?: { allowNonZero?: boolean; cwd?: string }) => Promise<{ stdout: string; stderr: string }>
+  const internals = store as unknown as { gitExec: GitExec }
+  const original = internals.gitExec.bind(store)
+  let paused = false
+  internals.gitExec = async (args, opts) => {
+    if (!paused && matches(args)) {
+      paused = true
+      entered.release()
+      await resume.promise
+    }
+    return original(args, opts)
+  }
+  return { entered: entered.promise, resume: resume.release }
 }
 
 async function git(cwd: string, args: string[]): Promise<string> {
@@ -703,6 +750,128 @@ describe('ProjectBackupStore — restore preserves uncommitted edits (Argus r1 B
   })
 })
 
+describe('ProjectBackupStore — configured backup scheduling with document writers', () => {
+  let h: Harness
+  beforeEach(() => { h = makeHarness() })
+  afterEach(() => cleanup(h))
+
+  it('a scheduled backup and run-now wait for a local document commit and share one encrypted push', async () => {
+    const remote = await encryptedRemote(h)
+    const { store } = remote
+    await store.ensureInit(PROJECT_ID)
+    writeFileSync(join(h.projectRoot, 'notes.md'), 'document edit before scheduled backup\n')
+    const gate = pauseGit(store, args => args.includes('commit') && args.includes('Document edit'))
+    const edit = store.commitDocument(PROJECT_ID, 'Document edit')
+    await gate.entered
+    let timer: (() => void) | undefined
+    const completed: Record<string, unknown>[] = []
+    const now = 1_000_000
+    const scheduler = new ProjectBackupScheduler({
+      store, enumerateProjects: async () => [PROJECT_ID], now: () => now, jitterMaxMs: 0,
+      setTimeout: callback => { timer = callback; return 1 as unknown as NodeJS.Timeout },
+      clearTimeout: () => {},
+      logger: (event, fields) => { if (event === 'backup_completed') completed.push(fields) },
+    })
+    try {
+      await scheduler.poll()
+      expect(timer).toBeDefined()
+      expect(await store.readLastAttemptedAt(PROJECT_ID)).toBe(now)
+      timer!()
+      const runNow = store.backupNow(PROJECT_ID)
+      const secondRunNow = store.backupNow(PROJECT_ID)
+      expect(remote.pushes()).toBe(0)
+      gate.resume()
+      await edit
+      const results = await Promise.all([runNow, secondRunNow])
+      await scheduler.stop()
+      expect(results.every(result => result.ok && result.pushed)).toBe(true)
+      expect(remote.pushes()).toBe(1)
+      expect(completed).toHaveLength(1)
+      expect(completed[0]!.pushed).toBe(true)
+      expect((await store.getStatus(PROJECT_ID)).next_scheduled_at).toBe(new Date(now + DEFAULT_TICK_INTERVAL_MS).toISOString())
+      const args = [`--git-dir=${join(h.projectRoot, '.project-backup')}`]
+      expect((await git(h.projectRoot, [...args, 'log', '-1', '--format=%s'])).trim()).toBe('Document edit')
+      const destination = join(h.tmp, 'scheduled-restored')
+      await restoreEncryptedProjectBackup({ projectId: PROJECT_ID, destination, config: remote.config, command: remote.command })
+      expect(require('node:fs').readFileSync(join(destination, 'notes.md'), 'utf8')).toBe('document edit before scheduled backup\n')
+      expect((await git(destination, [`--git-dir=${join(destination, '.project-backup')}`, 'rev-parse', 'HEAD'])).trim()).toBe(await headSha(h))
+    } finally {
+      gate.resume()
+      await edit
+      await scheduler.stop()
+      await store.drain()
+    }
+  })
+
+  it('ordinary overlapping backups share one push while a queued document edit records its own history', async () => {
+    const entered = latch()
+    const resume = latch()
+    const remote = await encryptedRemote(h, async () => { entered.release(); await resume.promise })
+    const first = remote.store.backupNow(PROJECT_ID)
+    await entered.promise
+    const second = remote.store.backupNow(PROJECT_ID)
+    writeFileSync(join(h.projectRoot, 'notes.md'), 'edit while upload is active\n')
+    const edit = remote.store.commitDocument(PROJECT_ID, 'Edit queued behind upload')
+    resume.release()
+    try {
+      const results = await Promise.all([first, second])
+      await edit
+      expect(results.every(result => result.ok && result.pushed)).toBe(true)
+      expect(remote.pushes()).toBe(1)
+      expect(results[0]).toEqual(results[1])
+      const args = [`--git-dir=${join(h.projectRoot, '.project-backup')}`]
+      expect((await git(h.projectRoot, [...args, 'log', '-1', '--format=%s'])).trim()).toBe('Edit queued behind upload')
+      expect(await git(h.projectRoot, [...args, 'show', 'HEAD:notes.md'])).toBe('edit while upload is active\n')
+      expect((await remote.store.getStatus(PROJECT_ID)).last_push_at).not.toBeNull()
+    } finally { resume.release(); await Promise.allSettled([first, second, edit]); await remote.store.drain() }
+  })
+
+  it('backups waiting on a document writer recheck queued restores and preserve recovery parents', async () => {
+    const remote = await encryptedRemote(h)
+    const { store } = remote
+    writeFileSync(join(h.projectRoot, 'notes.md'), 'original\n')
+    await store.commitDocument(PROJECT_ID, 'Original document')
+    const original = await headSha(h)
+    writeFileSync(join(h.projectRoot, 'notes.md'), 'second\n')
+    await store.commitDocument(PROJECT_ID, 'Second document')
+    const second = await headSha(h)
+    writeFileSync(join(h.projectRoot, 'notes.md'), 'latest edit\n')
+    const gate = pauseGit(store, args => args.includes('commit') && args.includes('Latest document'))
+    const edit = store.commitDocument(PROJECT_ID, 'Latest document')
+    await gate.entered
+    // Preflight runs real git. Wait for both restores to reach their writer
+    // fence before releasing the edit, so the backup must recheck after it.
+    const queued = latch()
+    const restoreLocks = (store as unknown as { inFlightRestore: Map<string, Promise<RestoreResult>> }).inFlightRestore
+    const getRestore = restoreLocks.get.bind(restoreLocks)
+    let fenceReads = 0
+    restoreLocks.get = projectId => {
+      if (++fenceReads === 2) queued.release()
+      return getRestore(projectId)
+    }
+    const restores = [store.restore(PROJECT_ID, original, 'notes.md'), store.restore(PROJECT_ID, second, 'notes.md')]
+    await queued.promise
+    restoreLocks.get = getRestore
+    const backup = store.backupNow(PROJECT_ID)
+    gate.resume()
+    try {
+      await edit
+      const results = await Promise.all(restores)
+      expect((await backup).pushed).toBe(true)
+      expect(new Set(results.map(result => result.recovery_commit_sha)).size).toBe(2)
+      const args = [`--git-dir=${join(h.projectRoot, '.project-backup')}`]
+      const priorContents: string[] = []
+      for (const result of results) {
+        expect((await git(h.projectRoot, [...args, 'rev-parse', `${result.recovery_commit_sha}^`])).trim()).toBe(result.prior_head_sha)
+        priorContents.push(await git(h.projectRoot, [...args, 'show', `${result.prior_head_sha}:notes.md`]))
+        expect(await git(h.projectRoot, [...args, 'show', `${result.recovery_commit_sha}:notes.md`])).toBe(await git(h.projectRoot, [...args, 'show', `${result.snapshot_sha}:notes.md`]))
+      }
+      expect(priorContents).toContain('latest edit\n')
+      expect((await git(h.projectRoot, [...args, 'rev-list', 'HEAD'])).trim().split('\n')).toEqual(expect.arrayContaining(results.map(result => result.recovery_commit_sha)))
+    } finally { gate.resume(); await Promise.allSettled([edit, backup, ...restores]); await store.drain() }
+  })
+})
+
 describe('ProjectBackupStore — concurrent backupNow during restore (Argus r2 NEW BLOCKER)', () => {
   let h: Harness
   beforeEach(() => {
@@ -1185,7 +1354,7 @@ describe('ProjectBackupStore — concurrent restore queue (ISSUE #46)', () => {
     type StoreInternals = {
       gitExec: GitExecFn
       backingUp: Set<string>
-      inFlight: Map<string, Promise<BackupResult>>
+      inFlight: Map<string, { kind: 'backup' | 'document'; run: Promise<BackupResult> }>
     }
     const internals = h.store as unknown as StoreInternals
     const original = internals.gitExec.bind(h.store)

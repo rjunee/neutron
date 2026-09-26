@@ -301,9 +301,11 @@ export class ProjectBackupStore {
   private readonly initLocks = new Map<string, Promise<boolean>>()
   private readonly importedLegacy = new Set<string>()
 
-  /** Per-project in-flight `backupNow` mutex — shares result across
-   *  concurrent callers (scheduler tick + run-now HTTP). */
-  private readonly inFlight = new Map<string, Promise<BackupResult>>()
+  /** Shared vault writer; only full backups can satisfy scheduler/run-now callers. */
+  private readonly inFlight = new Map<string, {
+    kind: 'backup' | 'document'
+    run: Promise<BackupResult>
+  }>()
 
   /** Per-project in-flight `restore` mutex — separate from `inFlight`
    *  so concurrent backupNow callers never receive a RestoreResult by
@@ -511,79 +513,41 @@ export class ProjectBackupStore {
    * snapshot.
    */
   async backupNow(project_id: string): Promise<BackupResult> {
-    const existing = this.inFlight.get(project_id)
-    if (existing !== undefined) return existing
-    // Argus r2 NEW BLOCKER — also serialize against an in-flight
-    // restore. r2's map split correctly isolated backup vs restore
-    // result shapes but left `backupNow` walking past `inFlightRestore`
-    // entirely. Between restore()'s implicit pre-restore backupNow
-    // clearing `inFlight` (the `await deps.backupNow` at the top of
-    // `performRestore` in restore.ts) and the recovery commit landing
-    // (end of `performRestore`), a scheduler tick / run-now HTTP would:
-    //   (a) race on `.project-backup/index.lock` (visible as
-    //       stage_failed / commit_failed; recovery commit may not land)
-    //   (b) land a backup commit of the partial-restore tree, leaving
-    //       the recovery commit parented on that racing commit instead
-    //       of `prior_head_sha` — breaking the append-only undo-banner
-    //       semantics (the banner's "walk back to prior_head" would
-    //       jump two commits, not one).
-    //
-    // SAFE WITH THE IMPLICIT PRE-RESTORE backupNow: restore() calls
-    // `performRestore(...)` (an async function — its body runs
-    // synchronously up to its first await, which IS the implicit
-    // `await deps.backupNow(...)`) BEFORE the outer
-    // `this.inFlightRestore.set(project_id, op)` runs (performRestore
-    // yields on that implicit backupNow's first await, and the set runs
-    // synchronously after that yield) — so this check observes
-    // `undefined` for the implicit call. No self-deadlock.
-    // Loop pattern (not a single await) — with ISSUE #46's restore()
-    // fix in place, multiple restores can legitimately stack up on
-    // `inFlightRestore`. A single await would let backupNow slip
-    // through between two queued restore ops and race their working
-    // tree / index. Re-reading the map after each await drains the
-    // entire queue before backupNow proceeds. ISSUE #46.
-    let restoreInflight: Promise<RestoreResult> | undefined
-    const sawRestoreInflight = this.inFlightRestore.get(project_id) !== undefined
-    while (
-      (restoreInflight = this.inFlightRestore.get(project_id)) !== undefined
-    ) {
-      try {
-        await restoreInflight
-      } catch {
-        /* prior restore failure is its caller's problem */
-      }
-    }
-    // Preserves the r2 coalesce: if we yielded at all (i.e. there was
-    // at least one restore to wait on), another concurrent backupNow
-    // may have already raced ahead, passed THIS check, and set
-    // `inFlight`. Coalesce so two `doBackupNow` runs don't race on
-    // `index.lock` themselves.
-    if (sawRestoreInflight) {
-      const racer = this.inFlight.get(project_id)
-      if (racer !== undefined) return racer
+    // Recheck BOTH writers after every wait: a document edit, backup, or
+    // queued restore may acquire the index before this caller resumes.
+    // Restore invokes its safety backup synchronously before publishing its
+    // own restore lock, so the idle path must not yield before installing ours.
+    while (true) {
+      const existing = this.inFlight.get(project_id)
+      if (existing?.kind === 'backup') return existing.run
+      const active = existing?.run ?? this.inFlightRestore.get(project_id)
+      if (active === undefined) break
+      try { await active } catch { /* each operation reports its own failure */ }
     }
     const run = this.doBackupNow(project_id)
-    this.inFlight.set(project_id, run)
+    this.inFlight.set(project_id, { kind: 'backup', run })
     try {
       return await run
     } finally {
-      this.inFlight.delete(project_id)
+      if (this.inFlight.get(project_id)?.run === run) this.inFlight.delete(project_id)
     }
   }
 
   /** Per-edit history shares the vault index and waits instead of coalescing edits. */
   async commitDocument(project_id: string, message: string): Promise<void> {
     while (true) {
-      const active = this.inFlight.get(project_id) ?? this.inFlightRestore.get(project_id)
+      const active = this.inFlight.get(project_id)?.run ?? this.inFlightRestore.get(project_id)
       if (active === undefined) break
       try { await active } catch { /* each operation reports its own failure */ }
     }
     const run = this.doBackupNow(project_id, { message, localOnly: true })
-    this.inFlight.set(project_id, run)
+    this.inFlight.set(project_id, { kind: 'document', run })
     try {
       const result = await run
       if (!result.ok) throw new Error(result.push_error?.message ?? 'Document vault snapshot failed')
-    } finally { this.inFlight.delete(project_id) }
+    } finally {
+      if (this.inFlight.get(project_id)?.run === run) this.inFlight.delete(project_id)
+    }
   }
 
   private async doBackupNow(project_id: string, options: { message?: string; localOnly?: boolean } = {}): Promise<BackupResult> {
@@ -951,7 +915,7 @@ export class ProjectBackupStore {
     // direction — that restore's outer combined loop would await us).
     while (true) {
       const r = this.inFlightRestore.get(project_id)
-      const b = this.inFlight.get(project_id)
+      const b = this.inFlight.get(project_id)?.run
       if (r === undefined && b === undefined) break
       try {
         await (r ?? b)
@@ -985,7 +949,7 @@ export class ProjectBackupStore {
   /** Force-close any per-project state (graceful shutdown). */
   async drain(): Promise<void> {
     const inFlights: Promise<unknown>[] = [
-      ...this.inFlight.values(),
+      ...[...this.inFlight.values()].map(({ run }) => run),
       ...this.inFlightRestore.values(),
     ]
     await Promise.allSettled(inFlights)
