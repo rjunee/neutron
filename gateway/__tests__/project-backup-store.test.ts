@@ -826,7 +826,7 @@ describe('ProjectBackupStore — configured backup scheduling with document writ
     } finally { resume.release(); await Promise.allSettled([first, second, edit]); await remote.store.drain() }
   })
 
-  it('backups waiting on a document writer recheck queued restores and preserve recovery parents', async () => {
+  it('a backup shares the first queued restore safety backup while document history and recovery parents survive', async () => {
     const remote = await encryptedRemote(h)
     const { store } = remote
     writeFileSync(join(h.projectRoot, 'notes.md'), 'original\n')
