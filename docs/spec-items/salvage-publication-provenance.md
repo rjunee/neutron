@@ -58,3 +58,29 @@ evidence under the locked pivot
   revision, source-control evidence, dispatch/run identity and resulting merge.
   This live dispatch establishes the served end-to-end regression; the static
   consuming E2E cases above establish the salvage seam.
+
+## Interrupted project publication
+
+The project driver must retain a successful PR creation response before its
+independent PR inspection. Store that response in the run's existing stage
+events, bound to its run, project, repository, worktree, branch, base, merge
+mode, target branch and published head. A response alone grants no ownership:
+the restarted host must independently observe the exact PR, OPEN at the same
+head on the same source and target branches, before recording `published_pr`.
+The publication, review and pinned merge gates still apply.
+
+- [ ] Restart after the response is saved but before PR inspection or ownership
+  persistence resumes publication with exactly one creation, including repeated
+  recovery. Verify: `trident/production-host-effects.test.ts`, `publication restart`.
+- [ ] Missing, corrupt, mismatched or uncorroborated response evidence cannot
+  authorize ownership or repeat creation. A malformed latest response cannot
+  revive an older valid one. Verify: the same tests and the existing foreign-PR
+  discovery refusal control.
+- [ ] A failed response write leaves the independently discovered PR unowned.
+  Recovery never infers the lost response from a branch or matching head.
+  Verify: `publication restart cannot invent a create response when its durable write failed`.
+
+A crash before the successful response reaches durable storage remains
+unresolved. This slice does not establish interrupted native worker recovery,
+release native-child leases, or prove unattended recovery across an actual
+gateway, terminal-host or machine restart.

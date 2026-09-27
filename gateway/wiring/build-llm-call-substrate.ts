@@ -43,7 +43,9 @@ import { poolKeyFor, retirePersistentRepl, type HelperRetirement } from '@neutro
 import {
   createClaudeCodeSubstrateAuto,
   existingClaudeRepl,
+  hasRecoverableClaudeRepl,
   reconcileExistingClaudeRepl,
+  recoverExistingClaudeRepl,
   type ChildCrashInfo,
   type ClaudeCodeSubstrateOptions,
   type RecoveredReply,
@@ -876,6 +878,8 @@ export interface LlmCallSubstrate extends Substrate {
   /** Reconcile durable Claude survivors without turns. Exact conversation scopes:
    * null is General; strings are actual project ids (never sentinel aliases). */
   adoptExisting(projectIds: readonly (string | null)[]): Promise<void>
+  /** Resume recorded active conversations without submitting a turn. */
+  recoverExisting(projectIds: readonly (string | null)[], tools: readonly Pick<ToolDef, 'name'>[]): Promise<void>
 }
 
 /**
@@ -918,6 +922,46 @@ export function buildLlmCallSubstrate(
   // Credential-pool failure accounting for every turn this substrate serves.
   // Absent ⇒ `'interactive'`, which is what every pre-existing call site meant.
   const failureLane: FailureOrigin = input.credential_failure_lane ?? 'interactive'
+  async function reconcileAuthorized(
+    projectIds: readonly (string | null)[],
+    reconcile: (options: ClaudeCodeSubstrateOptions) => Promise<void>,
+  ): Promise<void> {
+    if (input.ephemeral === true || retired) return
+    for (const conversationProjectId of new Set(projectIds)) {
+      const projectId = conversationProjectId ?? undefined
+      if (input.configuredChat?.env !== undefined &&
+          projectModelTier(input.configuredChat.env, projectId) !== undefined) continue
+      const selection = input.providerResolver?.(projectId, 'conversation')
+      const selected = typeof selection === 'object' ? selection.provider : selection
+      if (normalizeProvider(selected?.trim() ? selected : input.provider) !== 'anthropic') continue
+      const pool = input.pool ?? await input.resolvePool?.()
+      if (!pool) continue
+      for (const credential of pool.credentials) {
+        const identity = {
+          substrate_instance_id: input.substrate_instance_id,
+          ...(input.cwd === undefined ? {} : { cwd: input.cwd }),
+          ...(input.user_id === undefined ? {} : { user_id: input.user_id }),
+          project_id: conversationProjectId ?? 'general', conversationProjectId,
+          credential_identity: credential.id,
+        }
+        try {
+          if (!hasRecoverableClaudeRepl(identity)) continue
+          const resolved = await resolveCredentialAuthEnv({
+            ...(input.oauthRefresh === undefined ? {} : { oauthRefresh: input.oauthRefresh }),
+            ...(input.owner_handle === undefined ? {} : { owner_handle: input.owner_handle }),
+          }, pool, credential)
+          const opts = await claudeOptionsFor(input, resolved, () => conversationProjectId ?? 'general')
+          opts.conversationProjectId = conversationProjectId
+          await reconcile(opts)
+        } catch (error) {
+          substrateLog.warn('boot_repl_recovery_unavailable', {
+            substrate_instance_id: input.substrate_instance_id, project_id: projectId,
+            reason: error instanceof Error ? error.message : String(error),
+          })
+        }
+      }
+    }
+  }
   return {
     async retireExistingHelpers(projectIds = [undefined]) {
       const outcomes: Array<{ sessionKey: string; outcome: HelperRetirement }> = []
@@ -958,47 +1002,13 @@ export function buildLlmCallSubstrate(
       })))
     },
     async adoptExisting(projectIds): Promise<void> {
-      if (input.ephemeral === true) return
-      for (const conversationProjectId of new Set(projectIds)) {
-        const projectId = conversationProjectId ?? undefined
-        // Mirror dispatch precedence: configured models never use a Claude REPL.
-        if (input.configuredChat?.env !== undefined &&
-            projectModelTier(input.configuredChat.env, projectId) !== undefined) continue
-        const selection = input.providerResolver?.(projectId, 'conversation')
-        const selected = typeof selection === 'object' ? selection.provider : selection
-        const provider = normalizeProvider(selected?.trim() ? selected : input.provider)
-        if (provider !== 'anthropic') continue
-        const pool = input.pool ?? await input.resolvePool?.()
-        if (pool === undefined || pool === null) continue
-        for (const credential of pool.credentials) {
-          // Discovery reads identities only. An absent/revoked key never reaches
-          // credential resolution, adapter registration or watchdog construction.
-          const identity = {
-            substrate_instance_id: input.substrate_instance_id,
-            ...(input.cwd === undefined ? {} : { cwd: input.cwd }),
-            ...(input.user_id === undefined ? {} : { user_id: input.user_id }),
-            project_id: conversationProjectId ?? 'general', conversationProjectId,
-            credential_identity: credential.id,
-          }
-          try {
-            if (existingClaudeRepl(identity) === undefined) continue
-            // Adoption authorizes an existing identity, never selects a new turn
-            // credential or changes the rotation/cooldown accounting.
-            const resolved = await resolveCredentialAuthEnv({
-              ...(input.oauthRefresh === undefined ? {} : { oauthRefresh: input.oauthRefresh }),
-              ...(input.owner_handle === undefined ? {} : { owner_handle: input.owner_handle }),
-            }, pool, credential)
-            const opts = await claudeOptionsFor(input, resolved, () => conversationProjectId ?? 'general')
-            opts.conversationProjectId = conversationProjectId
-            await reconcileExistingClaudeRepl(opts)
-          } catch (error) {
-            substrateLog.warn('boot_repl_adoption_unavailable', {
-              substrate_instance_id: input.substrate_instance_id, project_id: projectId,
-              reason: error instanceof Error ? error.message : String(error),
-            })
-          }
-        }
-      }
+      await reconcileAuthorized(projectIds, reconcileExistingClaudeRepl)
+    },
+    async recoverExisting(projectIds, tools): Promise<void> {
+      await reconcileAuthorized(projectIds, async options => {
+        const result = await recoverExistingClaudeRepl(options, tools)
+        if (result.status === 'refused') throw new Error(result.reason)
+      })
     },
     start(spec: AgentSpec): SessionHandle {
       if (retired) throw new Error('Helper session lifecycle has completed')

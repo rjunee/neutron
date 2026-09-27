@@ -452,6 +452,8 @@ jobs:
       - run: bun install --frozen-lockfile
         env:
           BUN_INSTALL_CACHE_DIR: ${{ runner.temp }}/bun-install-cache
+      - name: Prepare process-test isolation
+        run: bash scripts/ci/prepare-process-test-isolation.sh
       # One leg deliberately co-locates EVERY app test file. `--isolate` is the
       # runner-owned per-file boundary: global/module mocks cannot leak between
       # files, while all files still participate in one invocation. Keeping this

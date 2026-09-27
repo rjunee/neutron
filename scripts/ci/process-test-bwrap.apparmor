@@ -1,0 +1,8 @@
+# Ubuntu 24.04's documented executable-scoped user namespace admission:
+# https://discourse.ubuntu.com/t/ubuntu-24-04-lts-noble-numbat-release-notes/39890
+abi <abi/4.0>,
+include <tunables/global>
+
+profile bwrap /usr/bin/bwrap flags=(unconfined) {
+  userns,
+}

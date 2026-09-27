@@ -1,4 +1,5 @@
 import importlib.util
+import io
 import json
 import os
 from pathlib import Path
@@ -9,7 +10,19 @@ import sys
 import tempfile
 import time
 import unittest
-from unittest.mock import patch
+from unittest.mock import Mock, patch
+
+boundary_spec = importlib.util.spec_from_file_location('isolation', Path(__file__).with_name('process-test-isolation.py'))
+boundary = importlib.util.module_from_spec(boundary_spec)
+boundary_spec.loader.exec_module(boundary)
+# Establish the kernel boundary BEFORE loading the owner, including a mutated
+# owner. A parent mock cannot constrain a fresh interpreter started by run().
+try:
+    boundary.require_boundary()
+except RuntimeError:
+    if __name__ != '__main__':
+        raise
+    sys.exit(boundary.enter([sys.executable, '-B', str(Path(__file__).resolve()), *sys.argv[1:]]))
 
 spec = importlib.util.spec_from_file_location('lanes', Path(__file__).with_name('lane-processes.py'))
 lanes = importlib.util.module_from_spec(spec)
@@ -35,8 +48,9 @@ class LaneProcesses(unittest.TestCase):
         self.children = []
         self.handles = []
         self.subject_pids = []
-        # Never let a deliberately broken mutation target processes outside this
-        # fixture. The real proc reads/pidfds/signals still run for every subject.
+        # Select deterministic census subjects inside the verified namespace.
+        # This mock is NOT containment: fresh owner interpreters do not inherit it.
+        # The kernel boundary above contains every exec and later descendant.
         self.proc_listing = patch.object(lanes.os, 'listdir', side_effect=lambda path: [str(p.pid) for p in self.children] + [str(pid) for pid in self.subject_pids])
         self.proc_listing.start()
 
@@ -361,6 +375,163 @@ class LaneProcesses(unittest.TestCase):
         self.handles.append(fd)
         self.assertEqual(p.wait(timeout=5), 0)
         self.assertTrue(select.select([fd], [], [], 0)[0])
+
+    def test_run_preserves_natural_exit_and_restores_signal_handlers(self):
+        handlers = {s: signal.getsignal(s) for s in (signal.SIGTERM, signal.SIGINT)}
+        for code in (0, 7):
+            with self.subTest(code=code):
+                self.assertEqual(lanes.run([sys.executable, '-c', f'raise SystemExit({code})']), code)
+                self.assertEqual({s: signal.getsignal(s) for s in handlers}, handlers)
+
+    def test_owner_term_confirms_child_exit_before_returning(self):
+        owner, _ = self.owner()
+        childfd = self.handles[-1]
+        owner.terminate()
+        self.assertEqual(owner.wait(timeout=5), 143)
+        self.assertTrue(select.select([childfd], [], [], 0)[0])
+
+    def test_unconfirmed_cleanup_never_returns_success(self):
+        # Inject only cleanup observations, never a widened real process census.
+        for child_live, survived in ((False, [123]), (True, [])):
+            with self.subTest(child_live=child_live, survived=survived):
+                child = Mock(returncode=0)
+                child.poll.return_value = None if child_live else 0
+                def launch(*_args, **_kwargs):
+                    signal.raise_signal(signal.SIGTERM)
+                    return child
+                stderr = io.StringIO()
+                with patch.object(lanes.subprocess, 'Popen', side_effect=launch), \
+                        patch.object(lanes, 'sweep', return_value={'reaped': [], 'survived': survived}), \
+                        patch.object(sys, 'stderr', stderr):
+                    self.assertEqual(lanes.run(['fixture-only']), 143)
+                self.assertIn('LANE_PROCESS_CLEANUP_UNCONFIRMED', stderr.getvalue())
+
+    def test_term_spawned_detached_descendant_is_reaped_and_sibling_survives(self):
+        late_code = "import os,signal,time; from pathlib import Path; signal.signal(signal.SIGTERM,signal.SIG_IGN); Path('late').write_text(str(os.getpid())); time.sleep(30)"
+        code = "import signal,subprocess,sys,time; from pathlib import Path\ndef stop(*_):\n subprocess.Popen([sys.executable,'-c'," + repr(late_code) + "], start_new_session=True, stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL)\n sys.exit(0)\nsignal.signal(signal.SIGTERM,stop)\nPath('ready').write_text('yes')\ntime.sleep(30)"
+        owner = self.launch([sys.executable, str(Path(lanes.__file__).resolve()), 'run', '--', sys.executable, '-c', code], cwd=self.root)
+        self.wait_file('ready')
+        sibling, siblingfd = self.child()
+        owner.terminate()
+        latefd = os.pidfd_open(int(self.wait_file('late')))
+        self.handles.append(latefd)
+        status = owner.wait(timeout=5)
+        self.assertTrue(select.select([latefd], [], [], 0)[0])
+        self.assertEqual(status, 143)
+        self.assert_survives(sibling, siblingfd, 'late-descendant cleanup', {})
+
+    def test_cleanup_requires_known_empty_census_with_bounded_rescans(self):
+        child = Mock(returncode=0)
+        child.poll.return_value = 0
+        def launch(*_args, **_kwargs):
+            signal.raise_signal(signal.SIGTERM)
+            return child
+        for report, expected_calls in (({'reaped': [123], 'survived': [], 'unknown': 0}, 4),
+                                       ({'reaped': [], 'survived': [], 'unknown': 1}, 4)):
+            with self.subTest(report=report), patch.object(lanes.subprocess, 'Popen', side_effect=launch), \
+                    patch.object(lanes, 'sweep', return_value=report) as sweep, \
+                    patch.object(sys, 'stderr', io.StringIO()) as stderr:
+                self.assertEqual(lanes.run(['fixture-only']), 143)
+                self.assertEqual(sweep.call_count, expected_calls)
+                self.assertIn('LANE_PROCESS_CLEANUP_UNCONFIRMED', stderr.getvalue())
+
+    def test_foreground_exit_and_cleanup_unknown_are_independent(self):
+        for code in (0, 7):
+            report = self.root / f'cleanup-{code}.json'
+            child = Mock(returncode=code)
+            child.poll.return_value = code
+            with self.subTest(code=code), patch.object(lanes.subprocess, 'Popen', return_value=child), \
+                    patch.object(lanes, 'sweep', return_value={'reaped': [], 'survived': [], 'unknown': 1}), \
+                    patch.object(sys, 'stderr', io.StringIO()) as stderr:
+                self.assertEqual(lanes.run(['fixture-only'], report, 'request'), code)
+                self.assertEqual(stderr.getvalue(), '')
+                observed = json.loads(report.read_text())
+                self.assertEqual(observed['status'], 'unknown')
+                self.assertEqual(observed['foreground_exit'], code)
+                self.assertEqual(observed['exit_code'], code)
+                self.assertEqual(observed['token'], 'request')
+                self.assertEqual(observed['owner_pid'], os.getpid())
+                self.assertIsNone(observed['signal'])
+
+    def test_no_report_shell_caller_retains_exact_primary_stderr(self):
+        child = Mock(returncode=3)
+        child.poll.return_value = 3
+        def launch(*_args, **_kwargs):
+            print('EXACT_REFUSAL', file=sys.stderr)
+            return child
+        with patch.object(lanes.subprocess, 'Popen', side_effect=launch), \
+                patch.object(lanes, 'sweep', return_value={'reaped': [], 'survived': [], 'unknown': 1}), \
+                patch.object(sys, 'stderr', io.StringIO()) as stderr:
+            self.assertEqual(lanes.run(['fixture-only']), 3)
+            self.assertEqual(stderr.getvalue(), 'EXACT_REFUSAL\n')
+
+    def test_owner_preserves_each_signal_and_reports_unknown_closure(self):
+        for signum in (signal.SIGTERM, signal.SIGINT):
+            report = self.root / f'signal-{signum}.json'
+            child = Mock(returncode=0)
+            child.poll.return_value = 0
+            def launch(*_args, **_kwargs):
+                signal.raise_signal(signum)
+                return child
+            with self.subTest(signum=signum), patch.object(lanes.subprocess, 'Popen', side_effect=launch), \
+                    patch.object(lanes, 'sweep', return_value={'reaped': [], 'survived': [], 'unknown': 1}), \
+                    patch.object(sys, 'stderr', io.StringIO()) as stderr:
+                self.assertEqual(lanes.run(['fixture-only'], report, 'request'), 128 + signum)
+                self.assertIn('LANE_PROCESS_CLEANUP_UNCONFIRMED', stderr.getvalue())
+                observed = json.loads(report.read_text())
+                self.assertEqual(observed['status'], 'unknown')
+                self.assertEqual(observed['signal'], signum)
+                self.assertEqual(observed['exit_code'], 128 + signum)
+
+    def test_inherited_ignored_int_remains_ignored(self):
+        previous = signal.signal(signal.SIGINT, signal.SIG_IGN)
+        child = Mock(returncode=0)
+        child.poll.return_value = 0
+        def launch(*_args, **_kwargs):
+            self.assertEqual(signal.getsignal(signal.SIGINT), signal.SIG_IGN)
+            signal.raise_signal(signal.SIGINT)
+            return child
+        try:
+            with patch.object(lanes.subprocess, 'Popen', side_effect=launch), \
+                    patch.object(lanes, 'sweep', return_value={'reaped': [], 'survived': [], 'unknown': 0}):
+                self.assertEqual(lanes.run(['fixture-only']), 0)
+                self.assertEqual(signal.getsignal(signal.SIGINT), signal.SIG_IGN)
+        finally:
+            signal.signal(signal.SIGINT, previous)
+
+    def test_cancellation_during_normal_cleanup_requires_known_empty(self):
+        child = Mock(returncode=0)
+        child.poll.return_value = 0
+        def sweep(**_kwargs):
+            signal.raise_signal(signal.SIGTERM)
+            return {'reaped': [], 'survived': [], 'unknown': 1}
+        with patch.object(lanes.subprocess, 'Popen', return_value=child), \
+                patch.object(lanes, 'sweep', side_effect=sweep), \
+                patch.object(sys, 'stderr', io.StringIO()) as stderr:
+            self.assertEqual(lanes.run(['fixture-only']), 143)
+            self.assertIn('LANE_PROCESS_CLEANUP_UNCONFIRMED', stderr.getvalue())
+
+    def test_unknown_census_does_not_skip_later_owned_descendant_cleanup(self):
+        child = Mock(returncode=0)
+        child.poll.return_value = 0
+        reports = [{'reaped': [123], 'survived': [], 'unknown': 1},
+                   {'reaped': [456], 'survived': [], 'unknown': 1},
+                   {'reaped': [], 'survived': [], 'unknown': 0}]
+        with patch.object(lanes.subprocess, 'Popen', return_value=child), \
+                patch.object(lanes, 'sweep', side_effect=reports) as sweep, \
+                patch.object(sys, 'stderr', io.StringIO()):
+            self.assertEqual(lanes.run(['fixture-only']), 0)
+            self.assertEqual(sweep.call_count, 3)
+
+    def test_exited_handle_is_resolved_but_live_unreadable_claim_is_unknown(self):
+        child, fd = self.child()
+        with patch.object(lanes, 'environment_claim', side_effect=FileNotFoundError()):
+            self.assertGreater(lanes.sweep()['unknown'], 0)
+        with patch.object(lanes, 'environment_claim', side_effect=PermissionError()):
+            self.assertGreater(lanes.sweep()['unknown'], 0)
+            child.kill()
+            self.assertTrue(select.select([fd], [], [], 3)[0])
+            self.assertEqual(lanes.sweep()['unknown'], 0)
 
 
 class Census(unittest.TestCase):

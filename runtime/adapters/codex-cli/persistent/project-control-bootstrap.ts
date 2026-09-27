@@ -12,6 +12,7 @@ import { admitsBootstrapConfig, admitsOwnerTui, OWNER_BOOTSTRAP_ORIGINATOR as OR
 import { OWNER_INSTALLED_GATEWAY_TOOL } from './owner-installed-gateway.ts'
 import { helperIdentity, type HelperIdentity } from './project-owner-helper-protocol.ts'
 import { validateOwnerResume, type CodexOwnerResume, type CodexOwnerRetirementReceipt } from './project-owner-retirement.ts'
+import { ownerNativeStopObservation } from './project-owner-helper-lifetime.ts'
 
 type Rpc = Record<string, unknown>
 const object = (value: unknown): value is Rpc => typeof value === 'object' && value !== null && !Array.isArray(value)
@@ -37,6 +38,7 @@ export interface CodexOwnerBindingFacts {
   readonly modelProvider: string
   readonly controlSocketPath: string
   readonly nativeMetadata: Readonly<{ sessionId: string; source: string; originator: string }>
+  readonly processes?: Readonly<{ native: HelperIdentity; terminal: HelperIdentity }>
   /** Native thread feature report, observed before sealing; no model turn is seeded. */
   readonly capabilities: Readonly<{ multiAgentV2: true; evidence: 'native-thread-feature-report'; ownerInstalledMcp?: true }>
 }
@@ -73,6 +75,10 @@ export async function attachCodexOwner(options: {
 }
 
 export interface CodexOwnerBootstrap {
+  /** Unexpected bootstrap shutdown after both owned exit observations settle.
+   * It does not substitute for independent process-death proof. */
+  readonly nativeStopped?: Promise<void>
+  readonly recoveryKind?: 'adopted' | 'resumed'
   readonly binding: CodexOwnerBinding
   readonly broker: ProjectControlBroker
   /** Terminal bytes, not model input; future pane integration owns presentation. */
@@ -87,8 +93,8 @@ export interface CodexOwnerBootstrap {
 export type CodexOwnerRetirement = { status: 'busy' | 'unknown'; reason: string }
   | { status: 'retired'; receipt: Omit<CodexOwnerRetirementReceipt, 'helper'> }
 
-/** One native owner per immutable generation. A prior sealed or uncertain
- * generation refuses; a completed predecessor permits exact-thread resume in
+/** One native owner per immutable generation. An uncertain generation refuses;
+ * a retired or independently proven dead predecessor permits exact-thread resume in
  * its reserved successor directory, without rewriting the prior attestation.
  * The random bearer authenticates the launched TUI, not a hostile same-UID
  * process able to read its environment or ptrace it. No Unix-auth downgrade.
@@ -126,7 +132,7 @@ export async function bootstrapCodexOwner(options: {
   // The fixed namespace is claimed before any child or native request exists.
   const stateDirectory = options.ownerStateDirectory ?? options.codexHome
   if (options.resume) validateOwnerResume(stateDirectory, options.resume, options.cwd, options.codexHome)
-  else if (stateDirectory !== options.codexHome) throw new Error('New generation requires completed owner retirement')
+  else if (stateDirectory !== options.codexHome) throw new Error('New generation requires verified owner resume evidence')
   const journal = openProjectControlJournal({ ...options, socketPath: join(stateDirectory, '.neutron-owner-bootstrap'), threadId: 'fresh-owner-bootstrap' })
   let upstream: ProjectControlTransport | undefined
   let broker: ProjectControlBroker | undefined
@@ -136,6 +142,7 @@ export async function bootstrapCodexOwner(options: {
   let socket: ServerWebSocket<undefined> | undefined
   let closed = false
   let retiring = false
+  let disposing = false
   let terminalIdentity: HelperIdentity | undefined
   let failure: Error | undefined
   let upstreamReceive: ((message: unknown) => void) | undefined
@@ -149,6 +156,7 @@ export async function bootstrapCodexOwner(options: {
   let resolveReady!: (value: CodexOwnerBootstrap) => void
   let rejectReady!: (error: Error) => void
   const ready = new Promise<CodexOwnerBootstrap>((resolve, reject) => { resolveReady = resolve; rejectReady = reject })
+  const nativeStop = ownerNativeStopObservation()
   // Avoid an unhandled rejection if initialization fails before awaiting ready.
   ready.catch(() => {})
   const stop = (error = new Error('Owner bootstrap closed')): void => {
@@ -161,6 +169,7 @@ export async function bootstrapCodexOwner(options: {
     gateway?.close(); broker?.close(); upstream?.close()
     tui?.kill(); server?.stop(true)
     if (!retiring) journal.close()
+    nativeStop.observe(retiring || disposing, upstream?.exited, tui?.exited)
   }
   const deadline = setTimeout(() => stop(new Error('Owner bootstrap deadline expired')), timeout)
   const emit = (message: Rpc): void => { socket?.send(JSON.stringify(message)) }
@@ -211,8 +220,9 @@ export async function bootstrapCodexOwner(options: {
     const token = randomBytes(32).toString('hex')
     const bind = async (response: Rpc): Promise<void> => {
       const thread = response.thread
-      while ((!nativeThread || !tui) && !closed) await Bun.sleep(5)
+      while ((!nativeThread || !tui || !terminalIdentity) && !closed) await Bun.sleep(5)
       if (closed) throw new Error('Owner closed before terminal binding')
+      if (!upstream!.processIdentity) throw new Error('Native owner process identity is unavailable')
       validateBootstrapThread(thread, nativeThread, options.cwd, options.codexHome, options.resume?.receipt.facts)
       validateBootstrapMultiAgent(await native('experimentalFeature/list', { threadId: thread.id, limit: 1000 }))
       const transport: ProjectControlTransport = {
@@ -232,6 +242,7 @@ export async function bootstrapCodexOwner(options: {
         paneHandle: tui!.paneHandle ?? `owned-pty:${tui!.pid}`, bindingRevision: randomBytes(32).toString('hex'),
         generation: journal.generation, brokerGeneration: broker.state().generation, credentialFingerprint,
         modelProvider: thread.modelProvider, controlSocketPath: options.socketPath,
+        processes: Object.freeze({ native: upstream!.processIdentity, terminal: terminalIdentity! }),
         capabilities: Object.freeze({ multiAgentV2: true, evidence: 'native-thread-feature-report', ownerInstalledMcp: true }),
         nativeMetadata: Object.freeze({ sessionId: thread.sessionId, source: thread.source, originator: thread.originator }) })
       journal.sealAttestation(JSON.stringify(facts))
@@ -244,8 +255,8 @@ export async function bootstrapCodexOwner(options: {
       for (const event of held.splice(0)) {
         if (object(event.params) && object(event.params.thread) && event.params.thread.id === thread.id) emit(event)
       }
-      resolveReady({ binding: handle, broker, writeTerminal(bytes) { assertCurrent(); tui!.write(bytes) },
-        async close() { stop(); await tui?.exited; tui?.dispose() },
+      resolveReady({ binding: handle, broker, nativeStopped: nativeStop.stopped, writeTerminal(bytes) { assertCurrent(); tui!.write(bytes) },
+        async close() { disposing = true; stop(); await tui?.exited; tui?.dispose() },
         async retire(expectedEpoch, beforeExit) {
           try {
             assertCurrent()

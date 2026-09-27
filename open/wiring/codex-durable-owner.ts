@@ -8,8 +8,12 @@ import { HerdrHost } from '@neutronai/runtime/adapters/claude-code/persistent/he
 import { createHerdrRpc } from '@neutronai/runtime/adapters/claude-code/persistent/herdr-client.ts'
 import { readAccountId, validateCodexSubscriptionAuth } from '@neutronai/trident/codex-auth.ts'
 import { nextOwnerDirectory, readCompletedOwnerRetirement, type CodexOwnerResume } from '@neutronai/runtime/adapters/codex-cli/persistent/project-owner-retirement.ts'
+import { observeOwnerNativeStop, readCrashedOwner, recordCrashedOwner } from '@neutronai/runtime/adapters/codex-cli/persistent/project-owner-crash-recovery.ts'
 
 export type OwnerLaunch = Parameters<typeof bootstrapCodexOwner>[0] & { projectId: string | null; generalAuthorityPath?: string }
+
+/** Only pre-attachment host inspection is retryable; uncertain launch is not. */
+export class CodexOwnerRecoveryUnavailable extends Error {}
 
 /** Only ENOENT proves absence. Inaccessible journals retain ownership. */
 export function durableOwnerPathExists(path: string): boolean {
@@ -38,9 +42,11 @@ export function locateDurableOwnerGeneration(codexHome: string, cwd: string): {
   let stateDirectory = codexHome
   let resume: CodexOwnerResume | undefined
   const predecessors: string[] = []
-  while (durableOwnerPathExists(join(stateDirectory, '.neutron-owner-retired.json'))) {
+  while (durableOwnerPathExists(join(stateDirectory, '.neutron-owner-retired.json'))
+    || durableOwnerPathExists(join(stateDirectory, '.neutron-owner-crashed.json'))) {
     if (predecessors.length >= 1000 || predecessors.includes(stateDirectory)) throw new Error('Owner retirement history is unbounded')
-    const receipt = readCompletedOwnerRetirement(stateDirectory)
+    const receipt = durableOwnerPathExists(join(stateDirectory, '.neutron-owner-retired.json'))
+      ? readCompletedOwnerRetirement(stateDirectory) : readCrashedOwner(stateDirectory)
     if (receipt.facts.codexHome !== codexHome || receipt.facts.cwd !== cwd) throw new Error('Foreign retired owner')
     predecessors.push(stateDirectory)
     resume = { predecessorDirectory: stateDirectory, receipt }
@@ -58,8 +64,8 @@ export function codexOwnerCredentialIdentity(bytes: string): string {
   throw new Error('Codex owner credential identity is unavailable')
 }
 
-/** Host journal is written before launch. Any incomplete/uncertain prior launch
- * refuses replacement; only an authenticated exact surviving helper is adopted. */
+/** Host journal is written before launch. Uncertain prior launches refuse;
+ * positively dead, sealed owners resume only in their reserved next generation. */
 export async function openDurableCodexOwner(options: OwnerLaunch): Promise<CodexOwnerAttachment> {
   assertOwnerScope(options.codexHome, options.projectId)
   const { stateDirectory, resume, predecessors } = locateDurableOwnerGeneration(options.codexHome, options.cwd)
@@ -98,11 +104,42 @@ export async function openDurableCodexOwner(options: OwnerLaunch): Promise<Codex
   }
   let authority: ReturnType<typeof readOwnerHelperDescriptor> | undefined
   let launchedPid: number | undefined
+  const recoverStoppedOwner = async (error: unknown, expected = authority): Promise<CodexOwnerAttachment> => {
+    if (!expected || launchedPid !== undefined) throw error
+    const deadline = Date.now() + (options.timeoutMs ?? 30_000)
+    let draining = false
+    do {
+      let refusal: unknown
+      try { recordCrashedOwner(stateDirectory, undefined, expected) }
+      catch (error) { refusal = error }
+      if (refusal === undefined) return openDurableCodexOwner(options)
+      const state = observeOwnerNativeStop(stateDirectory, expected)
+      // All processes died, but another guard (for example a foreign owner)
+      // still refused the crash receipt. Waiting cannot overrule that refusal.
+      if (state === 'dead') throw refusal
+      draining ||= state === 'draining'
+      if (Date.now() >= deadline) break
+      await Bun.sleep(25)
+    } while (Date.now() < deadline)
+    if (draining) throw new CodexOwnerRecoveryUnavailable('Codex child exit observed; complete process shutdown is unproven')
+    throw error
+  }
   if (existsSync(launchPath)) {
     privatePath(launchPath, 'file'); privatePath(authorityPath, 'file')
     const previous = JSON.parse(readFileSync(launchPath, 'utf8'))
     if (!isDeepStrictEqual(previous.scope, scope)) throw new Error('Codex owner launch credential or project changed')
     authority = JSON.parse(readFileSync(authorityPath, 'utf8'))
+    // A failed live descriptor is never itself evidence of death. The crash
+    // path independently corroborates all process and immutable binding facts.
+    try { readOwnerHelperDescriptor(descriptorPath) }
+    catch (error) {
+      privatePath(panePath, 'file')
+      const previousPane = JSON.parse(readFileSync(panePath, 'utf8'))
+      if (typeof previousPane.handle !== 'string') throw new Error('Codex helper pane authority is incomplete')
+      const inspection = await host.inspectHandle(previousPane.handle)
+      if (inspection.kind === 'unavailable') throw new CodexOwnerRecoveryUnavailable(inspection.reason)
+      return recoverStoppedOwner(error)
+    }
   } else {
     if (existsSync(descriptorPath) || existsSync(authorityPath)) throw new Error('Codex owner launch provenance is missing')
     // Exclusive creation is the no-second-owner guard across gateway processes.
@@ -120,20 +157,30 @@ export async function openDurableCodexOwner(options: OwnerLaunch): Promise<Codex
       await Bun.sleep(25)
     }
   }
-  const descriptor = readOwnerHelperDescriptor(descriptorPath)
+  let descriptor: ReturnType<typeof readOwnerHelperDescriptor>
+  try { descriptor = readOwnerHelperDescriptor(descriptorPath) }
+  catch (error) { return recoverStoppedOwner(error) }
   if (launchedPid !== undefined && descriptor.helper.pid !== launchedPid) throw new Error('Codex helper launch process changed')
   privatePath(panePath, 'file')
   const pane = JSON.parse(readFileSync(panePath, 'utf8'))
   if (typeof pane.handle !== 'string' || !isDeepStrictEqual(pane.identity, descriptor.helper)) throw new Error('Codex helper pane identity changed')
-  const inspected = await host.inspectHandle(pane.handle)
-  if (inspected.kind !== 'live' || inspected.pid !== descriptor.helper.pid) throw new Error('Codex helper pane cannot be attested')
   if (authority && !isDeepStrictEqual(authority, descriptor)) throw new Error('Codex owner helper authority changed')
   if (descriptor.facts.cwd !== options.cwd || descriptor.facts.codexHome !== options.codexHome) throw new Error('Foreign Codex owner helper')
-  const owner = await attachCodexOwner({ descriptorPath, expected: descriptor.facts })
+  const inspected = await host.inspectHandle(pane.handle)
+  if (inspected.kind === 'unavailable' && launchedPid === undefined) throw new CodexOwnerRecoveryUnavailable(inspected.reason)
+  if (inspected.kind !== 'live' || inspected.pid !== descriptor.helper.pid) return recoverStoppedOwner(new Error('Codex helper pane cannot be attested'), descriptor)
+  let owner: CodexOwnerAttachment
+  try { owner = await attachCodexOwner({ descriptorPath, expected: descriptor.facts }) }
+  catch (error) {
+    // Native/TUI failure closes the helper only after their exit observations.
+    // Keep the generation fenced while it drains; attachment failure is not death.
+    return recoverStoppedOwner(error, descriptor)
+  }
   try {
     readCodexOwnerBinding(owner.binding)
     if (!authority) writeFileSync(authorityPath, JSON.stringify(descriptor), { flag: 'wx', mode: 0o600 })
     return { ...owner,
+      recoveryKind: launchedPid !== undefined && resume ? 'resumed' : 'adopted',
       recoverRetirement: () => recoverDurableOwnerRetirement(stateDirectory, descriptor.facts),
       async retire(expectedEpoch) {
       const outcome = await owner.retire!(expectedEpoch)
@@ -153,5 +200,5 @@ export async function openDurableCodexOwner(options: OwnerLaunch): Promise<Codex
       } while (Date.now() < deadline)
       return { status: 'unknown', reason }
     } }
-  } catch (error) { await owner.close(); throw error }
+  } catch (error) { await owner.close(); return recoverStoppedOwner(error, descriptor) }
 }

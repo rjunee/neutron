@@ -88,6 +88,15 @@ describe('the protocol version gate', () => {
     expect(got.protocol).toBe(HERDR_PROTOCOL_VERSION)
   })
 
+  it('accepts the independently pinned official v0.9.1 protocol', async () => {
+    expect(HERDR_PROTOCOL_VERSION).toBe(22)
+    const got = await herdrPing({
+      socketPath: '/f',
+      connect: replying('{"id":"r","result":{"type":"pong","version":"0.9.1","protocol":22}}\n').connect,
+    })
+    expect(got).toEqual({ type: 'pong', version: '0.9.1', protocol: 22 })
+  })
+
   it('REFUSES a higher protocol, naming both numbers', async () => {
     const e = await herdrPing({
       socketPath: '/f',
@@ -511,6 +520,16 @@ describe('the version gate holds SPAWN, not just the ping function', () => {
       sleep: (ms) => Bun.sleep(ms),
       workspaceId: 'w9',
     })
+
+  for (const protocol of [20, 21, 23]) {
+    it(`refuses protocol ${protocol} before creating a pane`, async () => {
+      const server = new FakeHerdrServer()
+      server.malformMethod('ping', { type: 'pong', version: '0.9.1', protocol })
+      await expect(hostWith(server).spawn(['claude'], { cwd: '/tmp', env: {} }))
+        .rejects.toThrow(`protocol ${protocol}`)
+      expect(server.callsTo('layout.apply')).toEqual([])
+    })
+  }
 
   it('a stub reporting protocol 21 makes spawn REJECT, naming both numbers', async () => {
     const server = new FakeHerdrServer()

@@ -269,6 +269,8 @@ export interface ReplRegistryRecord {
   /** Model id the REPL spawned with — replayed on `--resume` so a respawn keeps
    *  the same `--model`. */
   model?: string
+  /** Effective spawn effort, including the deliberate empty native-default value. */
+  effort?: string
   /** Explicit native session selection; only this exact model bypasses the default floor. */
   owner_selected_model?: string
   /** Epoch ms the REPL first reached `/health` ok — the boot-grace gate input. */

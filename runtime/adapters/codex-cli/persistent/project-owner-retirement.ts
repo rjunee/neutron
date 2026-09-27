@@ -1,8 +1,11 @@
-import { lstatSync, readFileSync } from 'node:fs'
+import { readFileSync } from 'node:fs'
 import { join } from 'node:path'
 import { isDeepStrictEqual } from 'node:util'
 import type { CodexOwnerBindingFacts } from './project-control-bootstrap.ts'
-import { helperIdentity, privatePath, type HelperIdentity, type OwnerHelperDescriptor } from './project-owner-helper-protocol.ts'
+import { privatePath, type HelperIdentity, type OwnerHelperDescriptor } from './project-owner-helper-protocol.ts'
+import { assertNoOtherCodexOwner, readCrashedOwner, type CodexOwnerCrashReceipt } from './project-owner-crash-recovery.ts'
+import { assertOwnerProcessDead, nextOwnerDirectory } from './project-owner-generation.ts'
+export { assertOwnerProcessDead, nextOwnerDirectory } from './project-owner-generation.ts'
 
 /** Completed exit evidence, never a request to terminate or a timeout. */
 export interface CodexOwnerRetirementReceipt {
@@ -15,31 +18,7 @@ export interface CodexOwnerRetirementReceipt {
 
 export interface CodexOwnerResume {
   predecessorDirectory: string
-  receipt: CodexOwnerRetirementReceipt
-}
-
-/** A reused PID is not the recorded process; unreadable procfs is not death. */
-export function assertOwnerProcessDead(identity: HelperIdentity): void {
-  if (!identity || !Number.isSafeInteger(identity.pid) || identity.pid <= 0
-    || typeof identity.boot !== 'string' || !identity.boot || !/^\d+$/.test(identity.start)) {
-    throw new Error('Retired owner process identity is incomplete')
-  }
-  const boot = readFileSync('/proc/sys/kernel/random/boot_id', 'utf8').trim()
-  if (!boot) throw new Error('Owner process liveness is unknown')
-  if (boot !== identity.boot) return
-  try {
-    // Read the process directory separately: helperIdentity refuses zombies, which
-    // is not by itself the positive absence proof required to reuse ownership.
-    lstatSync(`/proc/${identity.pid}`)
-    if (isDeepStrictEqual(helperIdentity(identity.pid), identity)) throw new Error('Retired owner process is still live')
-  } catch (error) {
-    if ((error as NodeJS.ErrnoException).code !== 'ENOENT') throw error
-  }
-}
-
-export function nextOwnerDirectory(facts: CodexOwnerBindingFacts): string {
-  if (!/^[a-f0-9]{64}$/.test(facts.bindingRevision)) throw new Error('Invalid retired owner revision')
-  return join(facts.codexHome, '.neutron-owner-generations', facts.bindingRevision)
+  receipt: CodexOwnerRetirementReceipt | CodexOwnerCrashReceipt
 }
 
 /** The prior generation's immutable host attestation corroborates the receipt.
@@ -65,9 +44,11 @@ export function readCompletedOwnerRetirement(directory: string): CodexOwnerRetir
 }
 
 export function validateOwnerResume(directory: string, resume: CodexOwnerResume, cwd: string, codexHome: string): void {
-  const receipt = readCompletedOwnerRetirement(resume.predecessorDirectory)
+  const receipt = 'kind' in resume.receipt && resume.receipt.kind === 'crash'
+    ? readCrashedOwner(resume.predecessorDirectory) : readCompletedOwnerRetirement(resume.predecessorDirectory)
   if (!isDeepStrictEqual(receipt, resume.receipt) || directory !== nextOwnerDirectory(receipt.facts)
     || receipt.facts.cwd !== cwd || receipt.facts.codexHome !== codexHome) {
     throw new Error('Owner resume does not match its completed predecessor')
   }
+  if ('kind' in receipt && receipt.kind === 'crash') assertNoOtherCodexOwner(receipt.facts)
 }

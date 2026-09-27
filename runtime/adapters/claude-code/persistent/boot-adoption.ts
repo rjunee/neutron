@@ -458,6 +458,14 @@ export function beginBootAdoption(
   }
   const live = forRegistry.get(sessionKey)
   if (live !== undefined) {
+    // An adoption is a fact about a living owner, not a permanent startup fact.
+    // Herdr can restart while this gateway stays alive. Child-exit teardown
+    // removes its exact pool entry; re-probe before claiming readiness again.
+    if (live.settled && !pool.has(sessionKey) &&
+        (Bun.peek(live.promise) as RowAdoptionOutcome).kind === 'adopted') {
+      forRegistry.delete(sessionKey)
+      return beginBootAdoption(options, sessionKey, deps)
+    }
     if (deps.expectedAuthFingerprint !== undefined &&
         live.expectedAuthFingerprint !== deps.expectedAuthFingerprint) {
       // A real turn may already own an unguarded pass. Await its gate but do

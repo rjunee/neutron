@@ -5,6 +5,7 @@ import { HerdrHost } from '../../claude-code/persistent/herdr-host.ts'
 import { createHerdrRpc } from '../../claude-code/persistent/herdr-client.ts'
 import { privatePath } from './project-owner-helper-protocol.ts'
 import { startCodexOwnerHelper } from './project-owner-helper.ts'
+import { finishOwnerHelperLifetime } from './project-owner-helper-lifetime.ts'
 
 if (import.meta.main) {
   const path = process.argv[2]
@@ -15,10 +16,7 @@ if (import.meta.main) {
   const terminalHost = new HerdrHost({ connect: async () => createHerdrRpc({ socketPath }) })
   const helper = await startCodexOwnerHelper({ ...options, terminalHost })
   process.stdout.write('Native Codex owner helper ready; gateway clients may attach.\n')
-  fireAndForget('codex-owner-helper.retired', helper.retired.then(async () => {
-    await helper.finishRetirement()
-    process.exit(0)
-  }), () => process.exit(1))
+  fireAndForget('codex-owner-helper.lifetime', finishOwnerHelperLifetime(helper, code => process.exit(code)), () => process.exit(1))
   let stopping = false
   const stop = () => {
     if (stopping) return

@@ -1,15 +1,15 @@
 import { afterEach, expect, spyOn, test } from 'bun:test'
 import * as codexActing from '@neutronai/runtime/workers/codex-acting-turn.ts'
-import { appendFileSync, chmodSync, existsSync, mkdirSync, mkdtempSync, rmSync, writeFileSync } from 'node:fs'
+import { appendFileSync, chmodSync, existsSync, mkdirSync, mkdtempSync, readFileSync, renameSync, rmSync, writeFileSync } from 'node:fs'
 import { tmpdir } from 'node:os'
-import { join } from 'node:path'
+import { dirname, join } from 'node:path'
 import { createHash } from 'node:crypto'
 import { CodexOwnerBindings } from '../wiring/codex-owner-binding.ts'
 import { buildLlmCallSubstrate } from '@neutronai/gateway/wiring/build-llm-call-substrate.ts'
 import type { AgentSpec } from '@neutronai/runtime/substrate.ts'
 import type { SessionHandle } from '@neutronai/runtime/session-handle.ts'
 import type { CodexOwnerBinding, CodexOwnerBindingFacts, CodexOwnerBootstrap } from '@neutronai/runtime/adapters/codex-cli/persistent/project-control-bootstrap.ts'
-import { fakeRunner, type BoundedWorkRequest } from '@neutronai/runtime/bounded-work.ts'
+import { fakeRunner, type BoundedWorkRequest, type WorkerRunner } from '@neutronai/runtime/bounded-work.ts'
 import { createProjectRunners } from '@neutronai/runtime/workers/project-runners.ts'
 import { codexBuildResultTransport } from '../wiring/codex-build-result.ts'
 import { restrictedOwnerFixture } from './fixtures/codex-owner-review.ts'
@@ -110,6 +110,7 @@ function fixture(remote = false, general = false) {
   let openingGate: Promise<void> | undefined
   let modelGate: Promise<void> | undefined
   let onPrompt: ((prompt: string) => void) | undefined
+  let historyFault: ((value: Record<string, unknown>) => Record<string, unknown>) | undefined
   const resolveProject = async (projectId: string | null) => {
     await projectGate
     if (!authorized) throw new Error('No connected project credential')
@@ -139,8 +140,10 @@ function fixture(remote = false, general = false) {
     let phase: 'idle' | 'turn' = 'idle'
     let completedRemotely = false
     let listener: ((message: Record<string, unknown>) => void) | undefined
+    const history: { id: string; status: string; itemsView: string; items: unknown[] }[] = []
     emitters.set(project, (method, params) => listener?.({ id: 'approval', method, params: { threadId: identity.threadId, turnId: `turn-${count}`, ...params } }))
     const finish = (): void => {
+      if (history.length) history.at(-1)!.status = 'completed'
       appendFileSync(identity.rolloutPath, line('event_msg', { type: 'task_complete', turn_id: `turn-${count}`, last_agent_message: `reply-${count}` }))
       if (remote) completedRemotely = true
       else phase = 'idle'
@@ -158,6 +161,10 @@ function fixture(remote = false, general = false) {
               : { data: [{ model: 'small', displayName: 'Small' }], nextCursor: 'second' }
             expect(params.threadId).toBe(identity.threadId)
             if (method === 'thread/read') { await modelGate; return { thread: { ...identity, id: identity.threadId, model } } }
+            if (method === 'thread/turns/list') {
+              const value = { data: structuredClone(history), nextCursor: null }
+              return historyFault ? historyFault(value) : value
+            }
             if (method === 'thread/settings/update') { epoch++; if (!wrongModel) model = params.model as string; return {} }
             if (method === 'turn/interrupt') {
               if (interruptFault === 'child') appendFileSync(identity.rolloutPath, line('event_msg', {
@@ -175,6 +182,7 @@ function fixture(remote = false, general = false) {
             const prompt = (params.input as { text: string }[])[0]!.text
             calls.push({ project, thread: params.threadId as string, prompt })
             const turn = `turn-${++count}`
+            history.push({ id: turn, status: 'inProgress', itemsView: 'full', items: [] })
             epoch++
             phase = 'turn'
             if (count === 1) writeFileSync(identity.rolloutPath, line('session_meta', { id: identity.threadId,
@@ -224,6 +232,7 @@ function fixture(remote = false, general = false) {
     gateProject: (gate: Promise<void> | undefined) => { projectGate = gate },
     gateOpening: (gate: Promise<void> | undefined) => { openingGate = gate },
     gateModel: (gate: Promise<void> | undefined) => { modelGate = gate },
+    historyFault: (fault: typeof historyFault) => { historyFault = fault },
     restart: () => new CodexOwnerBindings(async projectId => ({ cwd: join(dir, projectId), codexHome: homes.get(projectId)!, credentialIdentity, env: {} }),
       async options => owners.get(options.codexHome)!, binding => facts.get(binding)!),
     rpc, replies, hold: (value: boolean) => { held = value }, finish: (project = 'project-one') => finishers.get(project)!(),
@@ -372,6 +381,152 @@ async function consumingBuild(f: ReturnType<typeof fixture>, options: { cwd?: st
     trailer, headless: {} })
   return { request, rawWorker: runners.inRepl!, worker: f.bindings.guardBuildRunner('project-one', runners.inRepl!) }
 }
+
+async function interruptedBoundedWork() {
+  const f = fixture(true)
+  const build = await consumingBuild(f, { transport: true })
+  let nativePath = ''
+  // Parent completes, but host schema decoding cannot yet consume the child.
+  f.onPrompt(prompt => {
+    const dispatch = JSON.parse(prompt.slice('Execute the prompt in this JSON dispatch specification: '.length))
+    const args = JSON.parse(dispatch.prompt.slice(dispatch.prompt.indexOf('\n') + 1))
+    const child = JSON.parse(args.message.split('\n').find((line: string) => line.startsWith('Request (data): ')).slice('Request (data): '.length))
+    nativePath = child.result.path
+    writeFileSync(nativePath, JSON.stringify({ schema: 'fixture', run_id: build.request.run_id,
+      step_id: build.request.step_id, kind: 'completed', result: { malformed: true } }))
+  })
+  expect((await build.worker.run(build.request, 'in-repl', new AbortController().signal)).kind).toBe('unknown')
+  const path = join(f.homes.get('project-one')!, '.neutron-owner-work.json')
+  const bytes = readFileSync(path, 'utf8')
+  expect(JSON.parse(bytes)).toMatchObject({ kind: 'bounded-work', request: build.request,
+    nativeRequest: { ...build.request, result: { ...build.request.result, path: nativePath } }, turnId: 'turn-1' })
+  expect(nativePath).not.toBe(build.request.result.path)
+  expect(existsSync(build.request.result.path)).toBe(false)
+  writeFileSync(nativePath, JSON.stringify({ schema: 'fixture', run_id: build.request.run_id,
+    step_id: build.request.step_id, kind: 'completed', result: { answer: 'retained native child' } }))
+  const restarted = f.restart()
+  return { f, build, path, bytes, nativePath, restarted,
+    recover: (request = build.request) => restarted.guardBuildRunner('project-one', build.rawWorker)
+      .recover!(request, 'in-repl', new AbortController().signal) }
+}
+
+test('exact bounded recovery consumes the original child after boot refusal without another native turn', async () => {
+  const x = await interruptedBoundedWork()
+  writeFileSync(join(x.f.homes.get('project-one')!, '.neutron-owner-launch.json'), '{}')
+  expect(await x.restarted.recoverExisting('project-one')).toMatchObject({ status: 'refused', retryable: true })
+  expect(readFileSync(x.path, 'utf8')).toBe(x.bytes)
+  expect(await x.recover()).toMatchObject({ kind: 'completed', result: { answer: 'retained native child' } })
+  expect(readFileSync(x.build.request.result.path, 'utf8')).toBe(readFileSync(x.nativePath, 'utf8'))
+  expect(existsSync(x.path)).toBe(false)
+  expect(x.f.calls).toHaveLength(1)
+  expect((await x.recover()).kind).toBe('completed')
+  expect(x.f.calls).toHaveLength(1)
+  x.f.onPrompt(() => {})
+  expect((await collect(x.restarted.start('project-one', spec('after proof')))).at(-1)?.kind).toBe('completion')
+  expect(x.f.calls).toHaveLength(2)
+  await x.restarted.close()
+})
+
+for (const fault of ['legacy', 'no-receipt', 'run', 'step', 'request', 'native-path', 'native-request', 'credential', 'generation', 'epoch',
+  'foreign-turn', 'active-turn', 'interrupted-turn', 'missing-turn', 'partial-history', 'cursor', 'child', 'review'] as const) {
+  test(`exact bounded recovery retains ${fault} uncertainty without dispatch or clearing work`, async () => {
+    const x = await interruptedBoundedWork()
+    const work = JSON.parse(x.bytes)
+    let request = x.build.request
+    if (fault === 'legacy') writeFileSync(x.path, JSON.stringify({ threadId: work.facts.threadId, bindingRevision: work.facts.bindingRevision }))
+    if (fault === 'no-receipt') { work.turnId = null; writeFileSync(x.path, JSON.stringify(work)) }
+    if (fault === 'credential') { work.credentialIdentity = 'other'; writeFileSync(x.path, JSON.stringify(work)) }
+    if (fault === 'generation') { work.facts.generation++; writeFileSync(x.path, JSON.stringify(work)) }
+    if (fault === 'epoch') { work.epoch++; writeFileSync(x.path, JSON.stringify(work)) }
+    if (fault === 'native-path') { work.nativeRequest.result.path += '.foreign'; writeFileSync(x.path, JSON.stringify(work)) }
+    if (fault === 'native-request') { work.nativeRequest.model_id = 'other'; writeFileSync(x.path, JSON.stringify(work)) }
+    if (fault === 'run') request = { ...request, run_id: 'other' }
+    if (fault === 'step') request = { ...request, step_id: 'other' }
+    if (fault === 'request') request = { ...request, model_id: 'other' }
+    if (fault === 'review') { request = { ...request, role: 'review' }; work.request = request; writeFileSync(x.path, JSON.stringify(work)) }
+    x.f.historyFault(value => {
+      const turns = value.data as { id: string; status: string; itemsView: string; items: unknown[] }[]
+      if (fault === 'foreign-turn') turns[0]!.id = 'other'
+      if (fault === 'active-turn') turns[0]!.status = 'inProgress'
+      if (fault === 'interrupted-turn') turns[0]!.status = 'interrupted'
+      if (fault === 'missing-turn') value.data = []
+      if (fault === 'partial-history') turns[0]!.itemsView = 'summary'
+      if (fault === 'cursor') value.nextCursor = 'again'
+      if (fault === 'child') turns[0]!.items = [{ type: 'subAgentActivity', kind: 'started', agentThreadId: 'child', agentPath: '/root/child' }]
+      return value
+    })
+    const before = readFileSync(x.path, 'utf8')
+    expect((await x.recover(request)).kind).toBe(fault === 'review' ? 'refused' : 'unknown')
+    expect(readFileSync(x.path, 'utf8')).toBe(before)
+    expect(x.f.calls).toHaveLength(1)
+    expect((await collect(x.restarted.start('project-one', spec('must remain fenced')))).at(-1)?.kind).toBe('error')
+    expect(x.f.calls).toHaveLength(1)
+    await x.restarted.close()
+  })
+}
+
+test('exact bounded recovery preserves a replacement marker and refuses a changed native epoch', async () => {
+  for (const fault of ['marker', 'epoch'] as const) {
+    const x = await interruptedBoundedWork()
+    const worker = { ...x.build.rawWorker, recover: async (...args: Parameters<WorkerRunner['run']>) => {
+      const result = await x.build.rawWorker.recover!(...args)
+      if (fault === 'marker') writeFileSync(x.path, JSON.stringify({ replacement: true }))
+      else await x.f.nativeTurn()
+      return result
+    } }
+    const outcome = await x.restarted.guardBuildRunner('project-one', worker).recover!(x.build.request, 'in-repl', new AbortController().signal)
+    expect(outcome.kind).toBe('unknown')
+    expect(readFileSync(x.path, 'utf8')).toBe(fault === 'marker' ? JSON.stringify({ replacement: true }) : x.bytes)
+    expect(x.f.calls).toHaveLength(fault === 'marker' ? 1 : 2)
+    await x.restarted.close()
+  }
+})
+
+test('exact bounded recovery requires paired native child completion and validated consuming result', async () => {
+  const x = await interruptedBoundedWork()
+  x.f.historyFault(value => {
+    const turns = value.data as { items: unknown[] }[]
+    turns[0]!.items = ['started', 'completed'].map(kind => ({ type: 'subAgentActivity', kind,
+      agentThreadId: 'original-child', agentPath: '/root/original-child' }))
+    return value
+  })
+  const result = readFileSync(x.nativePath, 'utf8')
+  writeFileSync(x.nativePath, '{invalid')
+  expect((await x.recover()).kind).toBe('unknown')
+  expect(readFileSync(x.path, 'utf8')).toBe(x.bytes)
+  expect(await x.restarted.recoverExisting('project-one')).toMatchObject({ status: 'refused', retryable: true })
+  writeFileSync(x.nativePath, result)
+  expect((await x.recover()).kind).toBe('completed')
+  expect(existsSync(x.path)).toBe(false)
+  expect(x.f.calls).toHaveLength(1)
+  await x.restarted.close()
+})
+
+test('exact bounded recovery leaves unresolved broker state and cancelled work fenced', async () => {
+  const x = await interruptedBoundedWork()
+  const guarded = x.restarted.guardBuildRunner('project-one', x.build.rawWorker)
+  expect((await guarded.recover!(x.build.request, 'in-repl', AbortSignal.abort())).kind).toBe('unknown')
+  const owner = x.f.owner('project-one'), state = owner.broker.state.bind(owner.broker)
+  owner.broker.state = () => ({ ...state(), phase: 'recovery', unresolved: 'turn/start' })
+  expect((await x.recover()).kind).toBe('unknown')
+  expect(readFileSync(x.path, 'utf8')).toBe(x.bytes)
+  expect(x.f.calls).toHaveLength(1)
+  await x.restarted.close()
+})
+
+test('exact bounded recovery refuses a substituted staging inode even with a valid child result', async () => {
+  const x = await interruptedBoundedWork()
+  const result = readFileSync(x.nativePath, 'utf8')
+  const stage = dirname(x.nativePath)
+  renameSync(stage, `${stage}.original`)
+  mkdirSync(stage, { mode: 0o700 })
+  writeFileSync(x.nativePath, result)
+  expect((await x.recover()).kind).toBe('unknown')
+  expect(readFileSync(x.path, 'utf8')).toBe(x.bytes)
+  expect(existsSync(x.build.request.result.path)).toBe(false)
+  expect(x.f.calls).toHaveLength(1)
+  await x.restarted.close()
+})
 
 test('cached owner rechecks credential authorization and account identity before chat, controls and build recovery', async () => {
   const f = fixture()

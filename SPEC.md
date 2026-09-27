@@ -192,15 +192,19 @@ subagent placement (Decisions Log 2026-09-23, project workspaces;
 A warm REPL runs in a **herdr pane** (Decisions Log 2026-09-12, "the REPL
 substrate becomes selectable"), which makes it a child of the herdr server
 rather than of the gateway: a **gateway** restart leaves it running and the next
-gateway re-adopts it with its conversation intact **when that gateway constructs
-the substrate it belongs to** (Decisions Log 2026-09-13), while a **herdr
-server** restart does end it and recovery there is `--resume` onto the transcript
-(Decisions Log 2026-09-12, "a gateway restart keeps its project REPLs"). A
+gateway re-adopts it with its conversation intact. After a **herdr server**
+restart or a whole-host reboot, Neutron automatically resumes previously active
+Claude and Codex project conversations from their durable native session identities,
+after graph tools and current credential authority are ready. No app message is
+required. Explicitly retired conversations remain asleep; missing or uncertain
+identity never licenses a new conversation. Recovery retries terminal-host
+unavailability and preserves the existing workflow claims and continuation gates
+(Decisions Log 2026-09-26, automatic restart recovery). A
 surviving REPL is only ever left alive when a persisted registry row names its
 pane and its child generation; anything that cannot be found again is still
 killed at shutdown, and so is a spawn still settling when the shutdown reaches
-the pool, whatever row it goes on to write (#674). Until its substrate is constructed, such a pane is neither
-reconciled nor reaped by anything — the supervision tick skips a key it has no
+the pool, whatever row it goes on to write (#674). Other substrate families remain
+lazy: until constructed, their panes are neither reconciled nor reaped — the supervision tick skips a key it has no
 options for (`unregistered-skip`) rather than actuating it under another
 substrate's identity.
 
@@ -328,6 +332,27 @@ references decisions by date; none is a second home for a decision.
 | `docs/plans/*` | Per-sprint mechanics briefs (referenced from `docs/spec-items/`) |
 
 ## Decisions Log (immutable audit trail — NOT the build spec)
+
+### 2026-09-26 — Automatically recover active project conversations after service, terminal-host, and machine restart.
+
+Owner-directed: “Even if whole VPS reboots I want everything to recover on its own.”
+This supersedes the 2026-09-19 restriction to surviving Claude panes and its
+prohibition on boot resuming dead recorded project conversations. Neutron owns
+automatic Claude and Codex conversation recovery, including General, after its
+graph tools and authorized credentials are ready. Surviving exact owners are
+adopted; proven-dead owners resume their durable native conversation, model and
+project identity without a synthetic model turn. Terminal-host unavailability
+is retried without requiring a client reconnect. Herdr native agent auto-resume
+remains disabled so two systems cannot launch the same transcript.
+
+Explicit retirement remains asleep. Deleted projects, revoked credentials,
+foreign or ambiguous owners and absent conversation authority cannot be guessed
+into new sessions. Existing ownership reservations, admission-generation fences
+and workflow continuation claims remain binding; startup process readiness is
+not a turn, build admission or replay of a previously dispatched operation.
+The pinned review, leak, merge and served verification gates remain unchanged.
+Acceptance lives in `docs/spec-items/a-gateway-restart-keeps-the-project-repls.md`;
+work state is tracked in #1342. A merged change alone is not a served recovery witness.
 
 ### 2026-09-26 — One canonical vault history and one encrypted owner backup destination.
 

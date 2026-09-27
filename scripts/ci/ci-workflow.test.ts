@@ -34,6 +34,32 @@ const yml = readFileSync(CI_YML, 'utf8')
 
 const REPO_ROOT = fileURLToPath(new URL('../..', import.meta.url))
 
+function processIsolationSetup(workflow: string): string | null {
+  const shard = workflow.match(/^  shard:\n[\s\S]*?(?=^  [a-z][a-z_-]*:|$(?![\s\S]))/m)?.[0] ?? ''
+  const step = shard.match(/      - name: Prepare process-test isolation\n((?:        .*\n)+)/)
+  if (step?.[1] !== '        run: bash scripts/ci/prepare-process-test-isolation.sh\n') return null
+  if (!step || shard.indexOf(step[0]) > shard.indexOf('run: bun test --isolate')
+    || shard.indexOf(step[0]) > shard.indexOf('run: bash scripts/run-tests.sh')) return null
+  return step[1]!.trim().slice('run: '.length)
+}
+
+describe('process-test namespace prerequisite', () => {
+  test('every shard prepares the dependency before tests; missing or late setup refuses', () => {
+    expect(processIsolationSetup(yml)).not.toBeNull()
+    const step = yml.match(/      - name: Prepare process-test isolation\n        run: bash scripts\/ci\/prepare-process-test-isolation\.sh\n/)![0]
+    const missing = yml.replace(step, '')
+    expect(processIsolationSetup(missing)).toBeNull()
+    expect(processIsolationSetup(missing.replace('        run: bash scripts/run-tests.sh\n',
+      '        run: bash scripts/run-tests.sh\n' + step))).toBeNull()
+    expect(processIsolationSetup(yml.replace('        run: bash scripts/ci/prepare-process-test-isolation.sh',
+      '        if: matrix.shard == 1\n        run: bash scripts/ci/prepare-process-test-isolation.sh'))).toBeNull()
+    expect(processIsolationSetup(yml.replace('run: bash scripts/ci/prepare-process-test-isolation.sh',
+      'run: bash scripts/ci/prepare-process-test-isolation.sh || true'))).toBeNull()
+    expect(processIsolationSetup(yml.replace(step, step + '        continue-on-error: true\n'))).toBeNull()
+    expect(processIsolationSetup(yml.replace(step, step + '        if: false\n'))).toBeNull()
+  })
+})
+
 describe('#321 ci.yml test-gate always fires on PRs to main', () => {
   test('triggers on pull_request with no branch/type filter that could exclude PRs', () => {
     // `pull_request:` present with no nested `branches:`/`types:` narrowing.

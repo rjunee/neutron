@@ -44,6 +44,7 @@ import {
   type HerdrPong,
 } from './herdr-protocol.ts'
 import { fireAndForget } from '@neutronai/logger/fire-and-forget.ts'
+import { SpawnConfigurationError } from './spawn-configuration-error.ts'
 
 /** Rejects invalid UTF-8 instead of substituting U+FFFD. Shared: a decoder is stateless
  *  between `decode()` calls when `stream` is not set. */
@@ -616,13 +617,13 @@ export async function verifyHerdrProtocol(
   const protocol = result['protocol']
   const version = result['version']
   if (typeof protocol !== 'number' || typeof version !== 'string') {
-    throw new Error(
+    throw new SpawnConfigurationError(
       `herdr: ping reply carried no usable protocol/version (${JSON.stringify(result).slice(0, 160)}) — ` +
         `refusing to drive a server whose protocol cannot be established.`,
     )
   }
   if (protocol !== expected) {
-    throw new Error(
+    throw new SpawnConfigurationError(
       `herdr: protocol ${protocol} (server ${version}) is not the ${expected} this client was ` +
         `measured against — refusing to drive it. Every call below assumes 'measured on ${expected}' ` +
         `semantics, and a server that has moved on answers them differently with no error anywhere.`,

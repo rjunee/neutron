@@ -1,16 +1,17 @@
 # Bun configuration.
 #
 # [test].preload runs once before the test files in every `bun test`
-# invocation. We use it to scrub substrate-credential env vars that Bun
+# invocation. Process-signalling suites first enter a private PID namespace.
+# The remaining preloads scrub substrate-credential env vars that Bun
 # auto-loads from `.env`, so the unit suite is hermetic and never inherits
 # a developer's live Claude Max token. See the preload file for the full
 # rationale.
 #
-# The second entry scrubs the live-instance env (data home, identity, OAuth) so
+# The final entry scrubs the live-instance env (data home, identity, OAuth) so
 # the suite sees the same clean baseline CI has; see that file for the full
 # rationale.
 [test]
-preload = ["./tests/support/scrub-substrate-env.ts", "./tests/support/scrub-instance-env.ts"]
+preload = ["./tests/support/process-test-isolation-preload.ts", "./tests/support/scrub-substrate-env.ts", "./tests/support/scrub-instance-env.ts"]
 
 # Image assets. Metro turns `require('…/icon.png')` into an asset reference; bun's
 # test runner otherwise tries to PARSE the PNG as JavaScript and dies on the first

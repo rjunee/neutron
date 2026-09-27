@@ -1,5 +1,8 @@
 import { expect, test } from 'bun:test'
 import { fileURLToPath } from 'node:url'
+import { assertProcessTestIsolation } from './process-test-isolation.ts'
+
+assertProcessTestIsolation()
 
 test('real lane process lifecycle and pidfd refusal proofs', async () => {
   // unittest's verbose stream names the exact lifecycle proof before running it.

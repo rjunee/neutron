@@ -33,6 +33,7 @@ export async function startCodexOwnerHelper(options: Parameters<typeof bootstrap
 }
 
 function serveOwnerHelper(owner: CodexOwnerBootstrap, socketPath: string, descriptorPath: string, projectId: string | null, stateDirectory: string) {
+  if (!owner.nativeStopped) throw new Error('Native owner shutdown observation is unavailable')
   const facts = readCodexOwnerBinding(owner.binding)
   const helper = helperIdentity()
   const token = randomBytes(32).toString('hex')
@@ -82,7 +83,8 @@ function serveOwnerHelper(owner: CodexOwnerBootstrap, socketPath: string, descri
   const descriptor: OwnerHelperDescriptor = { version: 1, socketPath, socketIdentity: socketIdentity(socketPath), token, helper, facts }
   try { writeFileSync(descriptorPath, JSON.stringify(descriptor), { flag: 'wx', mode: 0o600 }) }
   catch (error) { registry.destroy(); server.stop(true); throw error }
-  return { descriptorPath, facts, retired,
+  return { descriptorPath, facts, retired, nativeStopped: owner.nativeStopped,
     async finishRetirement() { registry.destroy(); await server.stop(false) },
+    async finishNativeStop() { registry.destroy(); await server.stop(true) },
     async destroy() { registry.destroy(); server.stop(true); await owner.close() } }
 }

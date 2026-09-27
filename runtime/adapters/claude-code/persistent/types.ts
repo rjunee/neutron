@@ -16,6 +16,7 @@ import { AUTH_FAILURE_BOTTOM_N, matchAuthFailure } from './auth-failure-signatur
 import type { CaptureSessionConfig } from './session-capture.ts'
 import type { SizeSeverity } from './session-size-watchdog.ts'
 import type { ReplSession } from './repl-session.ts'
+import type { ReplRegistryRecord } from './repl-registry.ts'
 
 /** A rate-limit / overload banner that crossed the rising edge (master-table row
  *  #10). Surfaced through the injected {@link PersistentReplSubstrateOptions.onRateLimitBanner}
@@ -674,6 +675,9 @@ export interface PersistentReplSubstrateOptions {
  *  registry, or passed by the respawn actuation. */
 export interface ResumeDirective {
   sessionId: string
+  /** Startup recovery may resume only this exact durable row. Rechecked under
+   * the pre-spawn reservation lock; retirement or a new writer wins the race. */
+  expectedRecord?: ReplRegistryRecord
 }
 
 export interface ActiveTurn {

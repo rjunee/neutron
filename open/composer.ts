@@ -277,6 +277,7 @@ export type OpenComposition = CompositionInput &
       | 'onboarding_overnight_cron'
       | 'skill_forge'
       | 'realmode_cleanups'
+      | 'on_shutdown_start'
       | 'landing_server'
       | 'app_ws_surface'
       | 'app_docs_surface'
@@ -455,6 +456,7 @@ import {
 import { createHostDeployDispatch, createHostDeployRemoteGit } from './host-deploy-runtime.ts'
 import { createDeployMigrationPreflight } from './deploy-migration-preflight.ts'
 import { buildHostDeployPromptRetirer } from './wiring/host-deploy-prompt-retirer.ts'
+import { startProjectChatRecovery } from './wiring/project-chat-recovery.ts'
 import { createAppTasksSurface } from '@neutronai/gateway/http/app-tasks-surface.ts'
 import { createAppRemindersSurface } from '@neutronai/gateway/http/app-reminders-surface.ts'
 import { createAppDevicesSurface } from '@neutronai/gateway/http/app-devices-surface.ts'
@@ -1260,6 +1262,7 @@ export function buildOpenGraphComposer(
       liveAgentSubstrate,
       makeProjectLiveAgentSubstrate,
       adoptLiveAgentRepls,
+      recoverLiveAgentRepls,
       makeComposeSubstrate,
       reminderComposeSubstrate,
       makeEphemeralSubstrate,
@@ -1590,6 +1593,11 @@ export function buildOpenGraphComposer(
     // §F1 — a cleanup may be async (e.g. the upload sweeper's quiescing
     // `stop()`); the gateway shutdown runner awaits each before `db.close()`.
     const realmodeCleanups: Array<() => void | Promise<void>> = []
+    let stopChatRecovery: (() => Promise<void>) | undefined
+    const quiesceChatRecovery = async (): Promise<void> => { await stopChatRecovery?.() }
+    // Boot invokes this at shutdown entry, BEFORE persistent REPL teardown.
+    // Retain idempotent disposal for callers that compose without boot().
+    realmodeCleanups.push(quiesceChatRecovery)
     realmodeCleanups.push(() => codexOwnerBindings.close())
     // §F2 — the SINGLE loop inventory for this Open boot. The Open composer
     // starts long-lived loops OUTSIDE `composeProductionGraph` (the
@@ -1913,9 +1921,8 @@ export function buildOpenGraphComposer(
     // Recovery reads this credential service through the shared owner resolver.
     // Reconcile only after materialization; an earlier lookup is caught as an
     // unavailable credential and silently skips surviving project owners.
-    await codexOwnerBindings.reconcile([
-      ...(resolveModelProvider(undefined).provider === 'openai-codex' ? [null] : []), ...codexOwnerProjects,
-    ])
+    // Owner attachment/recovery runs after graph readiness, when project-bound
+    // tools and owner-question delivery are available.
     const coresSubstrate =
       llmPool !== null ? makeEphemeralSubstrate('cc-cores')(owner_home) : null
     // Plan task 8 — the agent-callable ritual registration service. Assigned LATE
@@ -7018,24 +7025,38 @@ export function buildOpenGraphComposer(
       project_maintenance: projectMaintenance,
       // The graph binds the tool bridge after this composer returns. Survivors
       // regain authority only after that binding, with no synthetic chat turn.
-      // THEN restart continuity for every scope, the ONLY production maintenance
-      // call: a pre-replacement fence a crash left behind is released, and a
-      // replacing/attesting fence reopens only when its already-spawned replacement
-      // attests — otherwise it stays fenced. Boot never spawns or kills a parent here.
+      // Maintenance resumes its existing generation fences before pure startup
+      // recovery can resume a lost parent. Recovery never takes a turn/build lease.
+      on_shutdown_start: quiesceChatRecovery,
       on_graph_ready: async () => {
-        const scopes = [null, ...listProjectIds()]
-        await adoptLiveAgentRepls(scopes)
-        for (const projectId of scopes) {
-          const outcome = await projectMaintenance.resume(projectId)
-          if (outcome.status !== 'open') {
-            log.info('project_maintenance_resumed', {
-              projectId,
-              status: outcome.status,
-              ...('phase' in outcome ? { phase: outcome.phase } : {}),
-              ...('reasons' in outcome ? { reasons: outcome.reasons.join('; ') } : {}),
-            })
+        const recovery = startProjectChatRecovery(async () => {
+          const scopes = [null, ...listProjectIds()]
+          await adoptLiveAgentRepls(scopes)
+          for (const projectId of scopes) {
+            const outcome = await projectMaintenance.resume(projectId)
+            if (outcome.status !== 'open') {
+              log.info('project_maintenance_resumed', {
+                projectId,
+                status: outcome.status,
+                ...('phase' in outcome ? { phase: outcome.phase } : {}),
+                ...('reasons' in outcome ? { reasons: outcome.reasons.join('; ') } : {}),
+              })
+              continue
+            }
+            await recoverLiveAgentRepls([projectId])
+            if (projectModelTier(env, projectId ?? undefined) === undefined &&
+                resolveModelProvider(projectId ?? undefined).provider === 'openai-codex') {
+              const recovered = await codexOwnerBindings.recoverExisting(projectId)
+              if (recovered.status === 'refused') log.warn('codex_owner_recovery_refused', {
+                projectId, reason: recovered.reason, retryable: recovered.retryable,
+              })
+            }
           }
-        }
+        }, error => log.warn('project_chat_recovery_unavailable', {
+          reason: error instanceof Error ? error.message : String(error),
+        }))
+        stopChatRecovery = recovery.stop
+        await recovery.ready
       },
       project_slug,
       // ALWAYS set, never conditionally spread. A field the composer assigns

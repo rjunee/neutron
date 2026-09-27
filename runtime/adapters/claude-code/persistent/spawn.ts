@@ -7,6 +7,7 @@ import { describeWorkerObservation } from './worker-observation.ts'
 import { requireReplCwd } from './spawn-configuration-error.ts'
 import { dropLocalOwnership } from './local-ownership.ts'
 import { randomUUID, randomBytes } from 'node:crypto'
+import { isDeepStrictEqual } from 'node:util'
 import { mkdirSync, writeFileSync } from 'node:fs'
 import { join } from 'node:path'
 import { mcpSurfaceFingerprint } from '../../../mcp-servers.ts'
@@ -54,7 +55,8 @@ import {
   type ShutdownExitWatch,
 } from './gateway-shutdown-kill.ts'
 import { resolveRespawnStrategy } from './respawn-strategy.ts'
-import { createResumePickerDetector } from './resume-picker-detector.ts'
+import { createResumePickerDetector, isResumeSessionPicker, RESUME_PICKER_BOTTOM_N } from './resume-picker-detector.ts'
+import { buildDetectorContext } from './output-scan.ts'
 import { captureSession, makeJsonlExistsProbe } from './session-capture.ts'
 import { measurePostCompactSize, sessionJsonlPath, startSessionSizeWatchdog } from './session-size-watchdog.ts'
 import { dashifyCwd } from './session-validation.ts'
@@ -68,10 +70,16 @@ import { registerReplDetectors } from './repl-detectors.ts'
 import { adoptionPermitsSpawn, armSelfFence, beginBootAdoption } from './boot-adoption.ts'
 import { fireAndForget } from '@neutronai/logger/fire-and-forget.ts'
 
+/** Starting/resuming a process is independent of submitting a model turn. */
+export type ReplSpawnProfile = {
+  tools: readonly Pick<AgentSpec['tools'][number], 'name'>[]
+  model_preference: readonly string[]
+} & Partial<Omit<AgentSpec, 'tools' | 'model_preference'>>
+
 async function spawnSession(
   sessionKey: string,
   options: PersistentReplSubstrateOptions,
-  spec: AgentSpec,
+  spec: ReplSpawnProfile,
   resume?: ResumeDirective,
 ): Promise<ReplSession> {
   const cwd = requireReplCwd(options.cwd)
@@ -109,7 +117,7 @@ async function spawnSession(
   }
   const selected = resume !== undefined && previousModel?.sessionId === resume.sessionId &&
     typeof previousModel.owner_selected_model === 'string' && previousModel.owner_selected_model.trim() !== ''
-    ? previousModel.owner_selected_model : undefined
+    ? previousModel.owner_selected_model : resume?.expectedRecord?.model
   const model = applyModelFloor({
     requested: selected ?? requestedModel,
     enabled: options.frontierModelFloor === true && selected === undefined,
@@ -492,7 +500,7 @@ async function spawnSession(
     cwd,
     channelName,
     hasSession: resume !== undefined,
-  })
+  }, resume?.expectedRecord)
   if (reservation === 'taken' || reservation === 'unwritable') {
     // NOTHING WAS STARTED AND NOTHING WAS REGISTERED (r63). The sink registration used to be
     // taken one line ABOVE this decision, which made a losing contender capable of revoking
@@ -532,6 +540,8 @@ async function spawnSession(
   // the sink refuses fails this turn rather than serving a child nothing can authorize.
   sink.register(sessionId, session)
   try {
+    let startupReady = false
+    let startupResumeRejected = false
     let child: Awaited<ReturnType<typeof ptyHost.spawn>>
     try {
       child = await ptyHost.spawn(argv, {
@@ -558,6 +568,13 @@ async function spawnSession(
         // no ambient registry is registered; the handle identity-guards so it only
         // ever touches THIS child's entry.
         liveHandle?.touch()
+        // Startup recovery is tied to one transcript. Never run the ordinary
+        // picker escape/latest-transcript ladder against a rejected exact resume.
+        if (!startupReady && resume?.expectedRecord !== undefined &&
+            isResumeSessionPicker(buildDetectorContext(screen, RESUME_PICKER_BOTTOM_N, now))) {
+          startupResumeRejected = true
+          return
+        }
         const target = scanChild
         if (target === undefined) return
         // Run the registered detectors against the ring and actuate the ones that
@@ -664,7 +681,7 @@ async function spawnSession(
     const assertion = await assertReplAlive(
       { pid: child.pid },
       {
-        isChildAlive: () => !child.hasExited(),
+        isChildAlive: () => !startupResumeRejected && !child.hasExited(),
         getChannelPort: () => session.channelPort,
         hasHttpHealth: (port) => httpHealth(port),
         // Stage 4 (channel-MCP-bound, port row #6): the dev-channel posts
@@ -678,6 +695,12 @@ async function spawnSession(
       },
       options.assertConfig ?? {},
     )
+    if (startupResumeRejected) {
+      if (childByKey.get(sessionKey) === child) childByKey.delete(sessionKey)
+      sink.unregisterIf(sessionId, session)
+      await terminateChild(child)
+      throw new Error('startup recovery native harness rejected the recorded transcript')
+    }
     if (!assertion.ok) {
       // Capture before termination while the host can still read the prompt.
       const observation = await observeSession(session)
@@ -736,6 +759,7 @@ async function spawnSession(
     // quiet ≥ SESSION_COMPACT_IDLE_QUIESCE_MS (never mid-turn). Edge-latched +
     // debounced in the watchdog so a still-large session can't re-fire. NOT a
     // feature flag — the policy is on wherever a live PTY child is wired.
+    startupReady = true
     session.sizeWatchdog = startSessionSizeWatchdog({
       readSize: () => measurePostCompactSize(sessionJsonlPath(sessionId, cwd, options.projectsDir)),
       surface: (severity, sizeBytes) =>
@@ -778,6 +802,7 @@ async function spawnSession(
             ? true
             : resume !== undefined,
         model,
+        effort,
         pid: child.pid,
         child_generation: childGeneration,
         first_ready_at: Date.now(),
@@ -1028,7 +1053,7 @@ async function spawnSession(
 export async function spawnWithChannelWedgeRespawn(
   sessionKey: string,
   options: PersistentReplSubstrateOptions,
-  spec: AgentSpec,
+  spec: ReplSpawnProfile,
   resume?: ResumeDirective,
 ): Promise<ReplSession> {
   const alert =
@@ -1331,6 +1356,7 @@ function reserveSpawnForKey(
   ourPid: number,
   /** What a row for this key must carry to be READABLE — see the note at the write below. */
   identity: { sessionId: string; cwd: string; channelName: string; hasSession: boolean },
+  expectedRecord?: ReplRegistryRecord,
 ): 'reserved' | 'taken' | 'unwritable' | 'unsupervised' {
   const registryPath = options.replRegistryPath
   if (registryPath === undefined) return 'unsupervised'
@@ -1339,6 +1365,9 @@ function reserveSpawnForKey(
       registryPath,
       (registry) => {
         const prev = registry[sessionKey]
+        if (expectedRecord !== undefined && !isDeepStrictEqual(prev, expectedRecord)) {
+          return { registry, result: 'taken', skipSave: true as const }
+        }
         if (
           prev !== undefined &&
           spawnReservationBlocksUs(prev, {
@@ -1450,7 +1479,7 @@ const STALE_TURN_REENTRY_LIMIT = 3
  */
 export function requestedReplProfile(
   options: PersistentReplSubstrateOptions,
-  spec: AgentSpec,
+  spec: ReplSpawnProfile,
 ): { toolSurface: string; toolBridge: boolean } {
   return {
     toolSurface: spec.tools.map((t) => t.name).join(','),
@@ -1461,7 +1490,7 @@ export function requestedReplProfile(
 export async function getOrSpawnSession(
   sessionKey: string,
   options: PersistentReplSubstrateOptions,
-  spec: AgentSpec,
+  spec: ReplSpawnProfile,
   forceResume?: ResumeDirective,
   /** INTERNAL. Counts this turn's re-entries after losing the pool to a concurrent publish
    *  (see the stale-turn branch below). Callers pass nothing. */

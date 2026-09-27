@@ -292,6 +292,69 @@ test('publication preserves existing provenance without another create receipt',
   expect(f.calls.some(argv => argv[2] === 'create')).toBe(false)
 })
 
+for (const crash of ['observation', 'ownership-write'] as const) {
+  test(`publication restart recovers a durable create response after interrupted ${crash}`, async () => {
+    const f = await fixture()
+    const snapshot = await measured(f)
+    const update = f.store.update.bind(f.store)
+    if (crash === 'ownership-write') f.store.update = async () => null
+    else f.intercept(argv => argv[0] === 'gh' && argv[2] === 'view' ? bad() : undefined)
+    expect(await f.publishChecked(snapshot)).toMatchObject({ kind: 'unknown' })
+    expect(f.store.get(f.row.id)?.published_pr).toBeNull()
+    const receipts = f.store.stageEvents(f.row.id).filter(event => event.stage === 'build-publication-create-response')
+    f.store.update = update
+    f.intercept(undefined)
+    // Construct a new host over durable evidence; no old closure supplies the PR.
+    const restarted = createProductionHostEffects(f.options)
+    expect(await restarted.publishChecked(await measured(f))).toEqual({ kind: 'allow' })
+    expect(receipts).toHaveLength(1)
+    expect(JSON.parse(receipts[0]!.meta!).number).toBe(12)
+    expect(f.store.get(f.row.id)).toMatchObject({ pr: 12, published_pr: 12 })
+    expect(f.calls.filter(argv => argv[0] === 'gh' && argv[2] === 'create')).toHaveLength(1)
+    expect(await restarted.publishChecked(await measured(f))).toEqual({ kind: 'allow' })
+    expect(f.calls.filter(argv => argv[0] === 'gh' && argv[2] === 'create')).toHaveLength(1)
+  })
+}
+
+for (const fault of ['identity', 'number', 'malformed', 'foreign-pr', 'head', 'base', 'missing-pr'] as const) {
+  test(`publication restart refuses ${fault} evidence without recreating or granting ownership`, async () => {
+    const f = await fixture()
+    f.intercept(argv => argv[0] === 'gh' && argv[2] === 'view' ? bad() : undefined)
+    expect(await f.publishChecked(await measured(f))).toMatchObject({ kind: 'unknown' })
+    f.intercept(undefined)
+    const snapshot = await measured(f)
+    const event = f.store.stageEvents(f.row.id).find(event => event.stage === 'build-publication-create-response')!
+    const value = JSON.parse(event.meta!)
+    if (fault === 'identity' || fault === 'number' || fault === 'malformed') {
+      if (fault === 'identity') value.identity = 'another run'
+      if (fault === 'number') value.number = 0
+      await f.store.recordStageEvent(f.row.id, event.stage, fault === 'malformed' ? '{' : JSON.stringify(value))
+    } else {
+      f.intercept(argv => argv[0] === 'gh' && argv[2] === 'view' ? ok(JSON.stringify(fault === 'missing-pr' ? null : {
+        number: fault === 'foreign-pr' ? 73 : 12, headRefOid: fault === 'head' ? f.base : f.tip,
+        state: 'OPEN', headRefName: 'change', baseRefName: fault === 'base' ? 'other' : 'main', isCrossRepository: false,
+      })) : undefined)
+    }
+    const restarted = createProductionHostEffects(f.options)
+    expect(await restarted.publishChecked(snapshot)).toMatchObject({ kind: 'unknown' })
+    expect(f.store.get(f.row.id)).toMatchObject({ pr: null, published_pr: null })
+    expect(f.calls.filter(argv => argv[0] === 'gh' && argv[2] === 'create')).toHaveLength(1)
+    expect(f.store.stageEvents(f.row.id).filter(entry => entry.stage === event.stage)[0]).toEqual(event)
+  })
+}
+
+test('publication restart cannot invent a create response when its durable write failed', async () => {
+  const f = await fixture()
+  const record = f.store.recordStageEvent.bind(f.store)
+  f.store.recordStageEvent = async () => { throw new Error('receipt storage unavailable') }
+  expect(await f.publishChecked(await measured(f))).toMatchObject({ kind: 'unknown' })
+  f.store.recordStageEvent = record
+  const restarted = createProductionHostEffects(f.options)
+  expect(await restarted.publishChecked(await measured(f))).toEqual({ kind: 'blocked', on: 'Discovered PR has no publication provenance' })
+  expect(f.store.get(f.row.id)?.published_pr).toBeNull()
+  expect(f.calls.filter(argv => argv[0] === 'gh' && argv[2] === 'create')).toHaveLength(1)
+})
+
 async function publicationLagFixture() {
   const f = await fixture()
   await f.command(['git', '-C', f.repo, 'push', 'origin', `${f.base}:refs/heads/change`])

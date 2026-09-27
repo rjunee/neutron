@@ -10,6 +10,8 @@ export interface ProjectControlTransport {
   close(): void
   /** Exact spawned child exit; absent on transports that cannot prove death. */
   readonly exited?: Promise<NativeProcessExit>
+  /** Captured at spawn, before any native request; also survives in the attestation. */
+  readonly processIdentity?: { pid: number; boot: string; start: string }
 }
 
 export interface NativeProcessExit { pid: number; boot: string; start: string; code: number | null; signal: NodeJS.Signals | null }
@@ -79,6 +81,7 @@ export function createProjectControlStdioTransport(options: {
   child.on('close', () => fail(new Error('Native child disconnected')))
   return {
     exited,
+    ...(identity ? { processIdentity: identity } : {}),
     listen(message, onDisconnect) { receive = message; disconnect = onDisconnect; if (failure) disconnect(failure) },
     send(message) {
       if (failure) throw failure

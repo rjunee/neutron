@@ -110,6 +110,10 @@ export const WIRED_FIELDS: readonly CompositionFieldWiredEntry[] = [
     provides: 'authorized project REPL survivors regain their tool bridge before boot accepts traffic, without a chat turn',
   },
   {
+    field: 'on_shutdown_start',
+    provides: 'startup recovery drains before persistent owners and watchdogs are torn down, preventing a late recovery from rearming them',
+  },
+  {
     field: 'slug_is_fallback',
     provides:
       'the credential surfaces\' direction guard — unset, an explicit migration on a fallback boot claims rows belonging to a configured handle, which is the defect this field exists to close',
