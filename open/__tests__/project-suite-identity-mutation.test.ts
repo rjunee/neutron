@@ -48,6 +48,24 @@ test('byte identity mutations preserve hardlink siblings and catch changed bytes
       expect(mutant.output).toContain('(fail) shared dependency entrypoint hardlink churn')
       expect(mutant.output).toContain('error: expect(received)')
     }
+    await writeFile(subject, prepared)
+    const resolutionFilter = 'manifest-free suite identity|manifest resolution refuses'
+    const resolutionControl = await run(suite, resolutionFilter)
+    expect(resolutionControl.code, resolutionControl.output).toBe(0)
+    expect(resolutionControl.output).toContain('2 pass')
+    const parse = 'try { observations = JSON.parse(result.stdout) } catch { return null }'
+    expect(prepared.split(parse)).toHaveLength(2)
+    for (const [replacement, failed, assertion] of [
+      ['observations = JSON.parse(result.stdout)', 'manifest-free suite identity', 'error: Received value must be a string: null'],
+      ['try { observations = JSON.parse(result.stdout) } catch { observations = [] }', 'manifest resolution refuses', 'error: expect(received).toBeNull()'],
+    ]) {
+      await writeFile(subject, prepared.replace(parse, replacement!))
+      const mutant = await run(suite, resolutionFilter)
+      expect(mutant.code, mutant.output).not.toBe(0)
+      expect(mutant.output).toContain(`(fail) ${failed}`)
+      expect(mutant.output).toContain(assertion!)
+      expect(mutant.output).not.toContain('SyntaxError: Unexpected')
+    }
     await writeFile(helper, native)
     const filter = 'stable byte observations|during a pinned read|confined byte observation'
     const nativeControl = await run(probes, filter)

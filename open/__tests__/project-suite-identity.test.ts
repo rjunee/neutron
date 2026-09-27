@@ -53,6 +53,43 @@ test('suite identity preserves identical input and invalidates dependencies, cod
   expect(await projectSuiteIdentity(root)).not.toBe(first)
 })
 
+test('manifest-free suite identity remains known and still binds installed bytes', async () => {
+  const { root, git } = await fixture()
+  await git('rm', 'package.json')
+  await git('commit', '-qm', 'manifest-free fixture')
+  await mkdir(join(root, 'node_modules'))
+  const installed = join(root, 'node_modules', 'input.js')
+  await writeFile(installed, 'one')
+  const before = await projectSuiteIdentity(root)
+  expect(before).toMatch(/^[a-f0-9]{64}$/)
+  expect(await projectSuiteIdentity(root)).toBe(before)
+  await writeFile(installed, 'two')
+  const after = await projectSuiteIdentity(root)
+  expect(after).toMatch(/^[a-f0-9]{64}$/)
+  expect(after).not.toBe(before)
+})
+
+test('manifest resolution refuses incomplete successful output but accepts a complete empty mapping', async () => {
+  const { root } = await fixture()
+  const toolDir = await mkdtemp(join(tmpdir(), 'suite-resolution-tool-'))
+  roots.push(toolDir)
+  const executable = join(toolDir, 'bun'), oldPath = process.env.PATH
+  try {
+    process.env.PATH = `${toolDir}:${oldPath ?? ''}`
+    for (const output of ['', 'incomplete', '{}']) {
+      await writeFile(executable, `#!/bin/sh\nprintf '%s\\n' '${output}'\n`, { mode: 0o755 })
+      expect(await projectSuiteIdentity(root)).toBeNull()
+    }
+    await writeFile(executable, "#!/bin/sh\nprintf '%s\\n' '[]'\n", { mode: 0o755 })
+    const known = await projectSuiteIdentity(root)
+    expect(known).toMatch(/^[a-f0-9]{64}$/)
+    expect(await projectSuiteIdentity(root)).toBe(known)
+  } finally {
+    if (oldPath === undefined) delete process.env.PATH
+    else process.env.PATH = oldPath
+  }
+})
+
 test('suite identity binds the host runtime executable and worktree location', async () => {
   const { root } = await fixture()
   const first = await projectSuiteIdentity(root)

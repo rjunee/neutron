@@ -73,7 +73,10 @@ async function resolutionKey(worktree: string, workspaces: unknown[], bun: strin
   const result = await spawnCapture([bun, '--config=/dev/null', '--no-env-file', '--eval', RESOLUTION_PROBE,
     worktree, JSON.stringify(manifests)], hostDirectory, undefined, 30_000)
   if (!result.ok || result.timed_out || result.stdout.length > 1024 * 1024) return null
-  const observations: unknown = JSON.parse(result.stdout)
+  // A successful process is not proof of a complete resolution transcript.
+  // Keep unavailable resolution explicit, including repositories without a manifest.
+  let observations: unknown
+  try { observations = JSON.parse(result.stdout) } catch { return null }
   if (!Array.isArray(observations) || !observations.every(row => Array.isArray(row) && row.length === 3
     && typeof row[0] === 'string' && typeof row[1] === 'string' && (row[2] === null || typeof row[2] === 'string'))) return null
   const root = await realpath(worktree)
