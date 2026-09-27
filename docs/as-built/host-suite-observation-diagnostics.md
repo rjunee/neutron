@@ -52,3 +52,16 @@ head CI, and a new deployed host observation remain for the coordinated
 publication workflow. Existing cached third-party dependencies were used with
 workspace aliases pointing at this worktree for the focused checks; these checks
 are not an isolated-install or full-suite reuse receipt.
+
+The first complete gate on `6ec0843f8a8f3b91c6990f53443fe9ee16835aae`
+executed all 1,726 declared/discovered/assigned files in 18 settled lanes and
+passed all 51 TypeScript configurations, but exited one on the resistant-process
+cancellation test. Its Python fixture truncated a heartbeat before rewriting it;
+the consuming reader interpreted empty contents as zero. The fixture now
+publishes counters by atomic replacement and requires a fresh post-cancellation
+sibling acknowledgement. Production cancellation behavior and timeouts are
+unchanged. A surviving resistant target, an incorrectly stopped sibling, and a
+stale acknowledgement each fail both cancellation variants. After restoration,
+all 26 host-suite tests and both root/Trident typechecks passed. The repaired
+candidate still requires the complete gate; the first gate is recorded as red,
+not reused as passing evidence.

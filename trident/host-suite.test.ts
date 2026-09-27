@@ -152,7 +152,18 @@ test(`${source} run cancellation reaps its resistant process while a sibling sui
   const dir = await mkdtemp(join(tmpdir(), 'host-suite-cancel-'))
   const target = new AbortController(), sibling = new AbortController()
   let active = true
-  const code = "import pathlib,signal,sys,time; signal.signal(signal.SIGTERM,signal.SIG_IGN); p=pathlib.Path(sys.argv[1]); n=0\nwhile True:\n n+=1; p.write_text(str(n)); time.sleep(.02)"
+  // Publish complete counters atomically: write_text alone exposes an empty
+  // file between truncation and writing, which reads as a false zero heartbeat.
+  // A probe is acknowledged only after publishing a subsequent heartbeat.
+  const code = `import pathlib,signal,sys,time
+signal.signal(signal.SIGTERM,signal.SIG_IGN)
+p=pathlib.Path(sys.argv[1]); pending=p.with_suffix('.pending'); probe=p.with_suffix('.probe'); ack=p.with_suffix('.ack'); n=0
+while True:
+ requested=probe.exists()
+ n+=1; pending.write_text(str(n)); pending.replace(p)
+ if requested: ack.write_text(str(n)); probe.unlink()
+ time.sleep(.02)
+`
   const launch = (name: string, signal: AbortSignal, isRunActive: () => boolean) => runHostSuite({
     argv: ['python3', '-c', code, join(dir, name)], cwd: dir, timeoutMs: 10_000, signal, isRunActive,
   }).then(value => ({ value }), error => ({ error }))
@@ -168,7 +179,10 @@ test(`${source} run cancellation reaps its resistant process while a sibling sui
     const before = await heartbeat(join(dir, 'target'))
     const siblingBefore = await heartbeat(join(dir, 'sibling'))
     await Bun.sleep(120)
+    await writeFile(join(dir, 'sibling.probe'), '')
+    for (let i = 0; i < 200 && await heartbeat(join(dir, 'sibling.ack')) <= siblingBefore; i++) await Bun.sleep(10)
     expect(await heartbeat(join(dir, 'target'))).toBe(before)
+    expect(await heartbeat(join(dir, 'sibling.ack'))).toBeGreaterThan(siblingBefore)
     expect(await heartbeat(join(dir, 'sibling'))).toBeGreaterThan(siblingBefore)
   } finally {
     target.abort(); sibling.abort()
