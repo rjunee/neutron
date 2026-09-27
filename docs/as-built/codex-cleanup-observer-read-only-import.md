@@ -41,3 +41,19 @@ the old test writer must be legitimately refreshed and prove its new inputs;
 deploying this fixture fix cannot change an already-frozen old candidate. The
 coordinated complete gate, exact-head CI and fresh deployed evidence remain
 required. Focused reproduction is not a claim of unattended live success.
+
+The coordinated local `bash scripts/check-shared-host.sh` gate subsequently passed at frozen revision
+`f3d25471cb8f3b26ceaaafc580f8e62310644d61`: all 51 TypeScript configurations
+and all 1,731 declared, discovered, assigned and executed files passed across
+18 lanes, with zero failed lanes. Both the gate and its identity wrapper exited
+zero. Production suite identity remained
+`c9ffc4c615188044bf0cb893b723a3545bdf28a2d320c815aa9a4e70c42b4144`
+before and after; installed-tree identity remained
+`c483f22c85019e8a2e629b8b450b726a51a69a69754b2a7e0d0266b8db16c28d`.
+The tested head stayed clean and unchanged. This paragraph is recorded after
+that gate; it does not transfer the receipt to the later publication identity.
+Exact publication-head CI, deployment and fresh live acceptance remain separate.
+The retained complete gate log has SHA-256
+`24ca8aa18dc8ba1e284208f6bf4c6b53496cfb2f9c6193994723e17e1fac7e98`;
+its before/after identity artifact has SHA-256
+`0aa6b4a12350482cb80eab910fd663dc90f5d8a016d7b2d272374dcbba732a41`.
