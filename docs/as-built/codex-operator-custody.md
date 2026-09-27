@@ -56,8 +56,22 @@ a healthy successor, or bypassed disconnect serialization failed the new paired
 controls. All mutants were restored. These checks are local implementation
 evidence, not exact publication
 head CI or live migration evidence. Independent Astra review and bounded Fable
-review approved the repaired source. The complete shared-host release gate
-remains required on the frozen candidate before publication.
+review approved the repaired source. The frozen implementation subsequently
+passed the complete shared-host release gate recorded below.
+
+Final local receipt (2026-09-27): tested implementation revision
+`0a70e5855b7ed120ed75f1a27df88dfe60529a86`, with a clean worktree before
+this receipt edit. `bash scripts/check-shared-host.sh` ran
+`bash scripts/ci/typecheck-all.sh` and `bash scripts/run-tests.sh`; the owning
+runner confirmed terminal exit 0. All 51 TypeScript configurations passed,
+including root and Trident. The coverage audit matched 1,724 declared,
+Bun-discovered, assigned and executed files: 1,488 general, 22 PGLite,
+43 device and 171 real-HTTP files. All 18 lanes were green with zero failed
+lanes. The consuming file `open/__tests__/project-build-e2e.test.ts` was included;
+its operator-adopted custody/selected-home merged-build case passed.
+This receipt establishes local validation of the named implementation revision.
+It does not transfer that validation to the documentation publication head;
+exact publication-head CI, deployment and live account adoption remain unproved.
 
 Adoption is limited to existing default/named canonical homes. It preserves
 existing Open metadata; offline callers must independently establish legacy
