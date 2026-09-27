@@ -38,5 +38,11 @@ parent remained at 56. The release fallback and awaited owners completed before
 the test returned. Restoring descendant signalling passed the same focused test;
 both TypeScript checks passed again after the observation-floor correction.
 
-This shard records the bounded consuming-test slice. The canonical full suite
-and fresh CI remain required on the integrated head before issue closure.
+This shard records the bounded consuming-test slice. Frozen integration revision
+`57dae6c04922cb5a6eaa469e449b22f5451b3691` subsequently passed
+`bash scripts/check-shared-host.sh` with exit zero: 51 TypeScript configurations
+and all 1,731 test files across 18 lanes, with zero failed lanes. The complete log
+SHA-256 is `030f031cccf2d99f8b6035a983a7794ecf7cad7898ce9a0b0369ec5aa716a1e8`.
+This tested revision differs from the later publication head recording its
+receipt. Exact-head CI and fresh served cancellation evidence remain required
+before issue closure; no runtime receipt is transferred by this record.

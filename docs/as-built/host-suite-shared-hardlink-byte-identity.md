@@ -64,7 +64,18 @@ together (18 tests, 138 assertions, 37.13 seconds). The final focused identity,
 native-reader and eight-mutant controls passed (29 tests, 198 assertions,
 15.84 seconds), as did both TypeScript preflights. Semantic parser mutants cover both rejecting the legitimate
 manifest-free case and accepting malformed manifest-present output. A new
-complete integration gate is still required; the failed gate is not reused.
+complete integration gate was run separately; the failed gate was not reused.
+
+The corrected frozen integration revision
+`57dae6c04922cb5a6eaa469e449b22f5451b3691` passed
+`bash scripts/check-shared-host.sh` with process exit zero: all 51 TypeScript
+configurations passed, and all 1,731 declared, discovered, assigned and executed
+test files passed across 18 bounded-memory lanes with zero failed lanes. The
+complete log SHA-256 is
+`030f031cccf2d99f8b6035a983a7794ecf7cad7898ce9a0b0369ec5aa716a1e8`.
+That is the tested revision, not the later publication head that records this
+receipt. Exact-head CI, deployment and fresh unattended live acceptance remain
+required; this documentation update does not transfer a runtime suite receipt.
 
 A real dependency tree with 69,524 unique regular files and 1,044,814,946 bytes
 produced a known complete suite identity in 5.184 seconds overall. Two simultaneous
