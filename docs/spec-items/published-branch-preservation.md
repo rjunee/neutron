@@ -36,6 +36,13 @@ Neither requires replacing the original branch. Stop-is-discard is unchanged.
   exactly the candidate tree. An unavailable or ambiguous fork, conflict, or
   different merged tree refuses. Replacement refs, grafts, shallow views and
   checkout-configured merge drivers cannot fabricate preservation.
+- [ ] Authenticate the complete reachable snapshot independently before any
+  unequal-head ancestry or merge decision. Verify both original commit OIDs,
+  use only the private validated copy, and never borrow mutable source objects
+  during calculation. Unavailable, incomplete or invalid snapshots refuse.
+  Snapshot commands share a 60-second deadline; the generated pack and index
+  share a 512-MiB ceiling enforced during generation and validation. Exhaustion
+  refuses and removes the temporary snapshot; no cached proof is inherited.
 - [ ] G100 creates the deterministic `refs/heads/trident-preserved/<candidate-OID>`
   with an expected-absence lease. An existing exact match is an observed no-op;
   a foreign or unreadable value refuses. Witness the exact origin ref and OID

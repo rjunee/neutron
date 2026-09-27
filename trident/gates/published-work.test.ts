@@ -1,5 +1,5 @@
-import { afterEach, expect, test } from 'bun:test'
-import { mkdtemp, rm, writeFile } from 'node:fs/promises'
+import { afterEach, expect, spyOn, test } from 'bun:test'
+import { access, mkdtemp, rename, rm, truncate, writeFile } from 'node:fs/promises'
 import { join } from 'node:path'
 import { tmpdir } from 'node:os'
 import { publishedWorkPreserved } from './published-work.ts'
@@ -66,6 +66,104 @@ test('preservation refuses unavailable evidence and does not weaken the observed
   expect((await publishedWorkPreserved(spawnCapture, w.repo, w.old, candidate)).kind).toBe('allow')
   await w.git('push', `--force-with-lease=refs/heads/change:${w.old}`, 'origin', `${w.fresh}:refs/heads/change`)
   expect((await spawnCapture(['git', '-C', w.repo, 'push', `--force-with-lease=refs/heads/change:${w.old}`, 'origin', `${candidate}:refs/heads/change`], w.repo)).ok).toBe(false)
+})
+
+test('snapshot capture, indexing, strict validation and exact roots are mandatory before ancestry', async () => {
+  const w = await world()
+  await w.git('switch', 'change')
+  const candidate = await w.commit('next.txt', 'normal descendant\n')
+  for (const failed of ['pack-objects', 'index-pack', 'fsck', 'root']) {
+    let scratch = '', ancestry = false
+    const run: RunHostCommand = async (args, cwd, env, timeout) => {
+      if (args.includes('init')) scratch = args.at(-1)!
+      if (args.includes('merge-base')) ancestry = true
+      if (args.includes(failed)) return { ok: false, exit_code: 128, stdout: '', stderr: 'ordinary unavailable data' }
+      if (failed === 'root' && args.includes('rev-parse')) return { ok: true, exit_code: 0, stdout: w.base, stderr: '' }
+      return spawnCapture(args, cwd, env, timeout)
+    }
+    expect((await publishedWorkPreserved(run, w.repo, w.old, candidate)).kind).toBe('unknown')
+    expect(ancestry).toBe(false)
+    expect(scratch).not.toBe('')
+    expect(await access(scratch).then(() => true, () => false)).toBe(false)
+    expect(await w.git('ls-remote', '--heads', 'origin', 'refs/heads/change')).toStartWith(w.old)
+  }
+})
+
+test('ordinary truncated pack and oversized snapshot refuse before calculation and clean up', async () => {
+  const w = await world()
+  for (const fault of ['truncated', 'oversized']) {
+    let scratch = '', ancestry = false
+    const run: RunHostCommand = async (args, cwd, env, timeout) => {
+      if (args.includes('init')) scratch = args.at(-1)!
+      if (args.includes('merge-base')) ancestry = true
+      if (fault === 'truncated' && args.includes('index-pack')) await truncate(join(scratch, 'snapshot.pack'), 10)
+      const result = await spawnCapture(args, cwd, env, timeout)
+      // A sparse oversized file exercises the size refusal without allocating
+      // a huge fixture or attempting object identity substitution.
+      if (fault === 'oversized' && args.includes('pack-objects')) await truncate(join(scratch, 'snapshot.pack'), 512 * 1024 * 1024)
+      return result
+    }
+    expect((await publishedWorkPreserved(run, w.repo, w.old, w.fresh)).kind).toBe('unknown')
+    expect(ancestry).toBe(false)
+    expect(await access(scratch).then(() => true, () => false)).toBe(false)
+    expect(await w.git('ls-remote', '--heads', 'origin', 'refs/heads/change')).toStartWith(w.old)
+  }
+})
+
+test('all snapshot commands share one deadline and generation plus index share one size budget', async () => {
+  const w = await world()
+  let clock = 0, scratch = '', expired = false
+  const timeouts: number[] = [], limits: number[] = []
+  const now = spyOn(performance, 'now').mockImplementation(() => clock)
+  try {
+    const run: RunHostCommand = async (args, cwd, env, timeout) => {
+      timeouts.push(timeout!)
+      if (args.includes('init')) scratch = args.at(-1)!
+      if (args[0] === 'bash') limits.push(Number(args[args.indexOf('--') + 1]))
+      const result = await spawnCapture(args, cwd, env, timeout)
+      clock += 1000
+      if (expired && args.includes('fsck')) clock += 60_000
+      return result
+    }
+    expect((await publishedWorkPreserved(run, w.repo, w.old, w.fresh)).kind).toBe('blocked')
+    expect(limits[0]).toBe(512 * 1024)
+    expect(limits[1]).toBeLessThan(limits[0]!)
+    expect(timeouts[0]).toBe(60_000)
+    expect(timeouts.every((n, i) => i === 0 || n < timeouts[i - 1]!)).toBe(true)
+    expired = true
+    expect((await publishedWorkPreserved(run, w.repo, w.old, w.fresh)).kind).toBe('unknown')
+    expect(await access(scratch).then(() => true, () => false)).toBe(false)
+  } finally { now.mockRestore() }
+})
+
+test('verified snapshot does not borrow source objects during ancestry or merge', async () => {
+  const w = await world()
+  await w.git('cherry-pick', w.old)
+  const candidate = await w.git('rev-parse', 'HEAD')
+  let detached = false, validated = false
+  const run: RunHostCommand = async (args, cwd, env, timeout) => {
+    if (args.includes('merge-base') && !detached) {
+      expect(validated).toBe(true)
+      await rename(join(w.repo, '.git'), join(w.repo, 'detached-git'))
+      detached = true
+    }
+    const result = await spawnCapture(args, cwd, env, timeout)
+    if (args.includes('fsck')) validated = result.ok
+    return result
+  }
+  try {
+    expect((await publishedWorkPreserved(run, w.repo, w.old, candidate)).kind).toBe('allow')
+    expect(detached).toBe(true)
+  } finally { if (detached) await rename(join(w.repo, 'detached-git'), join(w.repo, '.git')) }
+})
+
+test('inherited Git object-store selectors cannot redirect the verified snapshot', async () => {
+  const w = await world()
+  const redirected = { GIT_OBJECT_DIRECTORY: join(w.dir, 'unavailable-objects'),
+    GIT_ALTERNATE_OBJECT_DIRECTORIES: join(w.dir, 'unavailable-alternates'), GIT_COMMON_DIR: join(w.dir, 'unavailable-common') }
+  expect((await spawnCapture(['git', '-C', w.repo, 'cat-file', '-e', w.old], w.repo, redirected)).ok).toBe(false)
+  const run: RunHostCommand = (args, cwd, env, timeout) => spawnCapture(args, cwd, { ...env, ...redirected }, timeout)
+  expect((await publishedWorkPreserved(run, w.repo, w.old, w.fresh)).kind).toBe('blocked')
 })
 
 test('replacement parents and a shallow view cannot manufacture published-work ancestry', async () => {

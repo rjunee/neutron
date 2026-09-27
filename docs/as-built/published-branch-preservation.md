@@ -13,6 +13,19 @@ the candidate. The calculation uses an isolated Git configuration and raw object
 graph, preventing local replacement refs, grafts, shallow views and custom merge
 drivers from manufacturing approval. Unknown or conflicting evidence refuses.
 
+Independent review required authenticating and stabilizing every object used by
+that calculation, not only reading commit names through mutable alternates. The
+guard now captures a compressed reachable pack, independently indexes it, runs
+full strict Git integrity validation, and verifies both original commit roots.
+Only that private snapshot supplies ancestry and merge; inherited object-store
+selectors are removed. Pack and index generation share a 512-MiB ceiling and
+all commands share a 60-second deadline. Failure refuses and cleans up. This
+small implementation copies historical blobs too: an intact 1,245-commit
+measurement used 32.7 MB and approximately seven seconds. There is no cache.
+Focused controls cover unavailable validation, truncated and oversized packs,
+aggregate deadline exhaustion, inherited object-store selectors, and a valid
+replay measured after the source Git directory becomes unavailable.
+
 G100 preservation now creates a deterministic candidate-specific recovery ref
 with an expected-absence lease. An exact existing match is a measured no-op;
 foreign or unreadable state refuses. The refusal names the witnessed ref, the
