@@ -93,7 +93,7 @@ export function createNativeDispatchSigner() {
   }
 }
 
-export function nativeDispatchReceiptPath(directory: string, request: BoundedWorkRequest): string {
+export function nativeDispatchReceiptPath(directory: string, request: Pick<BoundedWorkRequest, 'run_id' | 'step_id'>): string {
   const key = createHash('sha256').update(JSON.stringify([request.run_id, request.step_id])).digest('hex')
   return join(directory, `claude-native-dispatch-${key}.jsonl`)
 }
@@ -126,7 +126,7 @@ export function createClaudeNativeDispatchReceipt(directory: string, request: Bo
 
 /** Worker-readable storage is NOT authority. Consumers must verify against the
  * still-stored lease's pinned public key, never a key selected by the file. */
-export function readClaudeNativeDispatchReceipt(directory: string, request: BoundedWorkRequest): unknown {
+export function readClaudeNativeDispatchReceipt(directory: string, request: Pick<BoundedWorkRequest, 'run_id' | 'step_id'>): unknown {
   let fd: number | undefined
   try {
     fd = openSync(nativeDispatchReceiptPath(directory, request), constants.O_RDONLY | constants.O_NOFOLLOW | constants.O_NONBLOCK)
