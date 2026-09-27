@@ -104,9 +104,26 @@ run_shared_host_checks() (
     esac
   done < <(compgen -A variable)
   export NEUTRON_TEST_JOBS=4 NEUTRON_TEST_CHUNK_SIZE=100
+  local identity_before identity_after gate_status=0
+  identity_before="$(NEUTRON_LOG_LEVEL=error bun --config=/dev/null --no-env-file scripts/shared-host-suite-identity.ts "$check_root")" || {
+    echo 'shared-host-check: REFUSED — suite input identity is unavailable; no checks started.' >&2
+    exit 2
+  }
+  if [[ ! "$identity_before" =~ ^[a-f0-9]{64}$ ]]; then
+    echo 'shared-host-check: REFUSED — invalid suite input identity; no checks started.' >&2
+    exit 2
+  fi
   echo 'shared-host-check: admitted; jobs=4 chunk-size=100; runner-default concurrency'
-  bash scripts/ci/typecheck-all.sh || exit "$?"
-  bash scripts/run-tests.sh
+  bash scripts/ci/typecheck-all.sh || gate_status=$?
+  if [ "$gate_status" -eq 0 ]; then bash scripts/run-tests.sh || gate_status=$?; fi
+  identity_after="$(NEUTRON_LOG_LEVEL=error bun --config=/dev/null --no-env-file scripts/shared-host-suite-identity.ts "$check_root")" || identity_after=''
+  if [[ ! "$identity_after" =~ ^[a-f0-9]{64}$ || "$identity_before" != "$identity_after" ]]; then
+    echo 'shared-host-check: REFUSED — suite input identity changed or became unavailable; checks do not establish a receipt.' >&2
+    if [ "$gate_status" -ne 0 ]; then exit "$gate_status"; fi
+    exit 2
+  fi
+  echo "shared-host-check: suite input identity unchanged ($identity_after)"
+  exit "$gate_status"
 )
 
 if [[ "${BASH_SOURCE[0]}" == "$0" ]]; then

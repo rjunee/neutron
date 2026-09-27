@@ -39,6 +39,7 @@ import { buildReflectionGuidance } from '@neutronai/trident/reflection-guidance.
 import { PROJECT_BUILD_WALL_MS } from '@neutronai/trident/project-build-budget.ts'
 import { prepareProjectDependencies, projectSuiteIdentity, type projectInstallAvailableBytes } from './project-build-dependencies.ts'
 import { parseBuildModeState, readBuildRetrySource } from '@neutronai/trident/build-mode-state.ts'
+import { pendingReviewCheckoutHead } from '@neutronai/trident/pending-review-checkout.ts'
 import { normalizeLegacyStoredExecutionPlan } from '@neutronai/trident/legacy-execution-compat.ts'
 import { assertProjectSnapshot, PROJECT_SNAPSHOT_SCHEMA } from './project-build-snapshot.ts'
 import { AttemptAccounting } from '@neutronai/trident/attempt-accounting.ts'
@@ -172,6 +173,10 @@ export const PLAN_LEDGER_CONTRACT = [
   'After a build that leaves tasks remaining, the host ticks the top task and commits the ledger itself, at a per-branch path under `.trident/ledgers/`, on a PUBLIC branch whose files and commit messages are leak-scanned: no hostnames, usernames or absolute paths in any line. Do not write or edit that file, or a repo-root IMPLEMENTATION_PLAN.md, yourself.',
   'CONTINUATION. When the host context carries `planner: "next"` and `committedPlan`, the committed ledger IS the plan: return `committedPlan.body` unchanged as `implementationPlan`, its first unchecked line as `topTask`, and its unchecked count minus one as `remainingTasks`, and write only the `executionSpec` for that task. Do not re-survey the repository or re-plan the remaining tasks.',
 ].join('\n')
+
+// Separate from the historical ledger contract so admitted v2/v3 briefs can
+// still be reconciled byte-for-byte without rewriting a pending worker's input.
+const PLAN_WORK_BOUNDARY = 'PLANNING WORK. Produce evidence-backed executable instructions. Before a probe, name the specific planning uncertainty it resolves and use the smallest relevant check. Leave candidate implementation, acceptance validation, mutation trials and gate diagnosis to the builder unless a targeted probe is necessary to resolve that uncertainty. Do not build and validate a complete trial candidate, then discard or reset it solely for the builder to repeat. Planning remains writable: preserve useful preparatory changes, measure and report their resulting head and diff honestly, and describe the work remaining for the builder. A changed input still requires the affected builder validation and host proof; a planning probe does not replace either. Capture complete probe output to a log once and inspect that log; do not rerun an unchanged check merely because earlier output was filtered or truncated.'
 
 /**
  * WATCHDOG FOR THE HOST'S OWN SUITE RUN.
@@ -358,9 +363,11 @@ export async function prepareProjectBuild(input: InnerLoopInput, context: Projec
     if (branch.timed_out || (!branch.ok && branch.exit_code !== 1)) throw Error('Build branch existence is unknown')
     let start = run.base_sha
     if (!branch.ok) {
-      const source = readBuildRetrySource(context.store, saved)
-      if (source) {
-        const expected = source.state.checkpoint.head!
+      // Cleanup can remove a published branch even when this same run still has
+      // a pending review. Its own latest checkpoint outranks an imported retry.
+      const pendingHead = await pendingReviewCheckoutHead(context.store, saved, input.base_branch, context.runHost)
+      const expected = pendingHead ?? readBuildRetrySource(context.store, saved)?.state.checkpoint.head
+      if (expected) {
         // PR cleanup deletes a local branch only after proving origin holds it.
         // Re-fetch that branch and pin the observed commit before restoring it;
         // a moved remote must not be silently reset to the predecessor's head.
@@ -706,7 +713,7 @@ export async function prepareProjectBuild(input: InnerLoopInput, context: Projec
     // Owner guidance and test execution instructions belong only to the builders.
     const isBuilder = role === 'build' || role === 'fix'
     const reflectionSuffix = isBuilder ? buildReflectionGuidance(input.reflection_context) : ''
-    const renderBrief = ({ testExecution, commitWrapper }: { testExecution: string; commitWrapper: boolean }) => [run.task, isBuilder
+    const renderBrief = ({ testExecution, commitWrapper, planWorkBoundary = false }: { testExecution: string; commitWrapper: boolean; planWorkBoundary?: boolean }) => [run.task, isBuilder
       ? testExecution : '',
       // THE BRIEF MUST STATE THE ENVELOPE, AND THE WORKER MUST COPY ITS IDS.
       // `decodeProjectTrailer` (`runtime/workers/project-runners.ts:44-58`) reads
@@ -734,11 +741,12 @@ export async function prepareProjectBuild(input: InnerLoopInput, context: Projec
       `\`result.payload\` must satisfy the ${role === 'plan' ? 'plan' : role === 'review' ? 'verdict' : 'forge'} trailer contract below. Read the host context for the measured snapshot.`,
       JSON.stringify(role === 'plan' ? PLAN_SCHEMA : role === 'review' ? VERDICT_SCHEMA : FORGE_SCHEMA),
       ...(role === 'plan' ? [PLAN_LEDGER_CONTRACT] : []),
+      ...(role === 'plan' && planWorkBoundary ? [PLAN_WORK_BOUNDARY] : []),
       ...(isBuilder ? ['EXECUTION SCOPE. Read the host context `executionStrategy` and validated plan in `previous`. For `single`, implement the WHOLE accepted plan and executionSpec. For `task_sequence`, implement only the host-selected `topTask` and its executionSpec; leave later tasks to later calls. Never select a strategy or task yourself. A fix addresses the host-provided findings without changing strategy. A wave member implements only its host-pinned task.'] : []),
       ...(isBuilder && commitWrapper ? [`Commit only through the host wrapper with argv ${JSON.stringify(['bash', join(TRIDENT_SCRIPT_DIR, 'commit-with-resolved-head.sh'), run.branch])}, followed by your git commit arguments. Never invoke git commit directly. Do not add a Claude-Session: trailer; keep Co-Authored-By. After the wrapper returns, read the final OID with git rev-parse HEAD for both result.head and payload.commitSha.`] : []),
       'Never publish or merge; the host owns those actions.',
     ].join('\n\n') + reflectionSuffix
-    let brief = renderBrief({ testExecution: TEST_EXECUTION_V3, commitWrapper: true })
+    let brief = renderBrief({ testExecution: TEST_EXECUTION_V3, commitWrapper: true, planWorkBoundary: true })
     // A LEGACY V2 BRIEF IS EVIDENCE, NOT AUTHORITY (#1296). A pending reservation
     // is identified by `{ brief.path, brief.integrity }` alone (`build-run.ts`
     // resume validation), and neither the task text nor the owner reflection is
@@ -758,9 +766,9 @@ export async function prepareProjectBuild(input: InnerLoopInput, context: Projec
     // retry's fresh step; this prepare dispatches nothing and consumes nothing.
     //
     // Missing or unrecognized evidence stays explicit, bounded uncertainty: the
-    // current v3 identity is presented, it cannot match the v2 reservation, and
+    // current brief identity is presented, it cannot match the v2 reservation, and
     // build-run answers its typed `unknown` with the reservation intact.
-    let path = join(state, `${role}.strategy-v3.brief`)
+    let path = join(state, `${role}.strategy-v${role === 'plan' ? 4 : 3}.brief`)
     const legacyPath = join(state, `${role}.strategy-v2.brief`)
     let stored: string | null = null
     try { stored = await readFile(legacyPath, 'utf8') }
@@ -787,6 +795,21 @@ export async function prepareProjectBuild(input: InnerLoopInput, context: Projec
       brief = stored!
       path = legacyPath
     } else {
+      if (role === 'plan') {
+        const priorPath = join(state, 'plan.strategy-v3.brief')
+        let prior: string | null = null
+        try { prior = await readFile(priorPath, 'utf8') }
+        catch (error) { if ((error as NodeJS.ErrnoException).code !== 'ENOENT') throw error }
+        if (prior !== null) {
+          // Preserve admitted inputs, not arbitrary old text. Changed task bytes
+          // cannot be laundered into a new brief for the same reserved step.
+          if (prior !== renderBrief({ testExecution: TEST_EXECUTION_V3, commitWrapper: true })) {
+            throw new Error('Stored v3 planner brief does not match current inputs; its reserved identity cannot be rewritten')
+          }
+          brief = prior
+          path = priorPath
+        }
+      }
       try { await writeFile(path, brief, { flag: 'wx', mode: 0o600 }) }
       catch (error) {
         if ((error as NodeJS.ErrnoException).code !== 'EEXIST' || await readFile(path, 'utf8') !== brief) throw error

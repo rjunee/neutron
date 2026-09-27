@@ -67,8 +67,37 @@ async function fixture() {
     workers: { plan: { provider: 'pi', request }, build: { provider: 'pi', request },
       review: { provider: 'pi', request }, fix: { provider: 'pi', request } },
   }
-  return { options, path, placements }
+  return { options, path, placements, db }
 }
+
+test.each([
+  ['plan', 2, true], ['plan', 3, true], ['plan', 4, true], ['plan', 5, false],
+  ['build', 4, false], ['review', 4, false], ['fix', 4, false],
+] as const)('legacy reservation recognizes only supported current brief identities: %s v%i', async (changedRole, version, allowed) => {
+  const f = await fixture()
+  const { store, runId, repo } = f.options.production
+  f.db.raw().query("UPDATE code_trident_runs SET execution_strategy = 'single', strategy_source = 'legacy' WHERE id = ?").run(runId)
+  expect(store.get(runId)!.strategy_source).toBe('legacy')
+  for (const role of ['plan', 'build', 'review', 'fix'] as const) {
+    const path = join(repo, `${role}.strategy-v${role === changedRole ? version : 3}.brief`)
+    const body = `Current ${role} instructions`
+    await writeFile(path, body)
+    f.options.workers[role].request = { ...f.options.workers[role].request,
+      brief: { path, integrity: briefIntegrity(body) } }
+  }
+  const host = await createProjectBuildHost(f.options)
+  const originalWorkers = Object.fromEntries(await Promise.all(Object.entries(host.workers).map(async ([role, worker]) => {
+    const path = join(repo, `${role}.brief.${role}.host`)
+    const body = `Original admitted ${role} instructions`
+    await writeFile(path, body)
+    return [role, { provider: worker.runner.provider, request: { ...worker.request,
+      brief: { path, integrity: briefIntegrity(body) },
+      ...(role === 'plan' ? { result: { ...worker.request.result, schema: 'project-plan' } } : {}),
+    } }]
+  })))
+  expect(await host.deps.validateLegacyPendingRequest!(originalWorkers)).toEqual(allowed
+    ? { kind: 'allow' } : { kind: 'unknown', detail: 'Original worker brief is not the reserved legacy artifact' })
+})
 
 test('project build wrappers preserve accounting recovery without preparation or dispatch on restart', async () => {
   const f = await fixture(), raw = fakeRunner('pi')

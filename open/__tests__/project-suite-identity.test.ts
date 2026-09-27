@@ -2,7 +2,7 @@ import { afterEach, expect, spyOn, test } from 'bun:test'
 import { chmod, copyFile, link, mkdir, mkdtemp, readFile, rename, rm, stat, symlink, utimes, writeFile } from 'node:fs/promises'
 import { join } from 'node:path'
 import { tmpdir } from 'node:os'
-import { projectInstalledTreeIdentity, projectSuiteIdentity } from '../wiring/project-build-dependencies.ts'
+import { PROJECT_INSTALLED_IDENTITY_TIMEOUT_MS, projectInstalledTreeIdentity, projectSuiteIdentity } from '../wiring/project-build-dependencies.ts'
 import { spawnCapture } from '@neutronai/trident/git-mode.ts'
 
 const roots: string[] = []
@@ -172,10 +172,95 @@ test('native dependency observation is one bounded argv call and preserves unusu
   expect(calls[0]![0][4]).toBe(root)
   expect(JSON.parse(calls[0]![0][7]!)).toEqual([modules])
   expect(calls[0]![3]).toBeGreaterThan(0)
-  expect(calls[0]![3]).toBeLessThanOrEqual(5000)
+  expect(calls[0]![3]).toBeLessThanOrEqual(PROJECT_INSTALLED_IDENTITY_TIMEOUT_MS)
   expect(await projectInstalledTreeIdentity(root)).toBe(before)
   await writeFile(unusual, 'two')
   expect(await projectInstalledTreeIdentity(root)).not.toBe(before)
+})
+
+test('installed identity deadline admits a complete slow walk and still distinguishes changed bytes', async () => {
+  const { root } = await fixture()
+  await mkdir(join(root, 'node_modules'))
+  const local = join(root, 'local')
+  await mkdir(local)
+  const input = join(local, 'input.js')
+  await writeFile(input, 'one')
+  await symlink(local, join(root, 'node_modules', 'local'))
+  const before = await projectInstalledTreeIdentity(root)
+  expect(before).toMatch(/^[a-f0-9]{64}$/)
+  const now = performance.now.bind(performance)
+  let elapsed = 0
+  const clock = spyOn(performance, 'now').mockImplementation(() => now() + elapsed)
+  const slow = Object.assign(async (...args: Parameters<typeof spawnCapture>) => {
+    const result = await spawnCapture(...args)
+    // Model six seconds of shared-host scheduling without making every suite
+    // spend six real seconds. The native observations and link reads are real.
+    elapsed = 6000
+    return result
+  }, { writesDiffOutput: true as const })
+  try {
+    expect(await projectInstalledTreeIdentity(root, slow)).toBe(before)
+    elapsed = 0
+    const original = await stat(input)
+    await writeFile(input, 'two')
+    await utimes(input, original.atime, original.mtime)
+    const changed = await projectInstalledTreeIdentity(root, slow)
+    expect(changed).toMatch(/^[a-f0-9]{64}$/)
+    expect(changed).not.toBe(before)
+  } finally { clock.mockRestore() }
+})
+
+test('installed identity deadline refuses complete output returned after the total budget', async () => {
+  const { root } = await fixture()
+  await mkdir(join(root, 'node_modules'))
+  const now = performance.now.bind(performance)
+  let elapsed = 0
+  const clock = spyOn(performance, 'now').mockImplementation(() => now() + elapsed)
+  const late = Object.assign(async (...args: Parameters<typeof spawnCapture>) => {
+    const result = await spawnCapture(...args)
+    elapsed = PROJECT_INSTALLED_IDENTITY_TIMEOUT_MS + 1000
+    return result
+  }, { writesDiffOutput: true as const })
+  try { expect(await projectInstalledTreeIdentity(root, late)).toBeNull() }
+  finally { clock.mockRestore() }
+  expect(await projectInstalledTreeIdentity(root)).toMatch(/^[a-f0-9]{64}$/)
+})
+
+test('installed identity deadline carries the remaining budget to a hung local-target probe', async () => {
+  const { root } = await fixture()
+  await mkdir(join(root, 'node_modules'))
+  const local = join(root, 'local')
+  await mkdir(local)
+  await symlink(local, join(root, 'node_modules', 'local'))
+  const now = performance.now.bind(performance)
+  let elapsed = 0, calls = 0
+  let remaining: number | undefined, nativeRemaining: string | undefined
+  let killed = false
+  const clock = spyOn(performance, 'now').mockImplementation(() => now() + elapsed)
+  const hung = Object.assign(async (...args: Parameters<typeof spawnCapture>) => {
+    if (++calls === 1) {
+      const result = await spawnCapture(...args)
+      elapsed = PROJECT_INSTALLED_IDENTITY_TIMEOUT_MS - 500
+      return result
+    }
+    remaining = args[3]
+    nativeRemaining = args[0][8]
+    // A real child hangs indefinitely. Cap the test's watchdog independently
+    // so a reset-budget mutation fails its assertion without delaying CI.
+    const result = await spawnCapture([args[0][0]!, '-I', '-S', '-c', 'import time; time.sleep(3600)'],
+      args[1], args[2], Math.min(remaining ?? Infinity, 500))
+    killed = result.timed_out === true
+    return result
+  }, { writesDiffOutput: true as const })
+  try {
+    expect(await projectInstalledTreeIdentity(root, hung)).toBeNull()
+    expect(calls).toBe(2)
+    expect(remaining).toBeGreaterThan(0)
+    expect(remaining).toBeLessThanOrEqual(500)
+    expect(nativeRemaining).toBe(String(remaining))
+    expect(killed).toBe(true)
+  } finally { clock.mockRestore() }
+  expect(await projectInstalledTreeIdentity(root)).toMatch(/^[a-f0-9]{64}$/)
 })
 
 for (const failure of ['timeout', 'exit', 'malformed'] as const) {

@@ -10,6 +10,9 @@ const digest = (value: string) => createHash('sha256').update(value).digest('hex
 
 export const PROJECT_DEPENDENCIES_TIMEOUT_MS = 10 * 60_000
 export const PROJECT_INSTALL_RESERVE_BYTES = 5n * 1024n ** 3n
+// One wall budget for the complete byte walk, including local link targets.
+// A full installation can exceed five seconds on a busy shared host.
+export const PROJECT_INSTALLED_IDENTITY_TIMEOUT_MS = 30_000
 
 /** Measure blocks available to the installer, including filesystem reservations. */
 export async function projectInstallAvailableBytes(worktree: string): Promise<bigint | null> {
@@ -190,7 +193,7 @@ export async function projectInstalledTreeIdentity(worktree: string,
   const hash = createHash('sha256')
   const covered: string[] = []
   let pending = [modules]
-  const deadline = performance.now() + 5000
+  const deadline = performance.now() + PROJECT_INSTALLED_IDENTITY_TIMEOUT_MS
   while (pending.length > 0) {
     const batch = pending.sort()
     pending = []

@@ -55,7 +55,7 @@ import { CodegenTaskNotFoundError, type CodegenOrchestrator } from '@neutronai/c
 import { buildTridentTerminator } from '@neutronai/trident/terminate.ts'
 import { projectInstallAvailableBytes } from '../wiring/project-build-dependencies.ts'
 import { afterAll, afterEach, beforeEach, expect, spyOn, test } from 'bun:test'
-import { chmod, copyFile, cp, link, mkdir, mkdtemp, readFile, readdir, realpath, rename, rm, stat, symlink, utimes, writeFile } from 'node:fs/promises'
+import { chmod, copyFile, cp, link, lstat, mkdir, mkdtemp, readFile, readdir, realpath, rename, rm, stat, symlink, utimes, writeFile } from 'node:fs/promises'
 import { tmpdir } from 'node:os'
 import { dirname, join } from 'node:path'
 import { fileURLToPath } from 'node:url'
@@ -379,7 +379,8 @@ interface WorkerWorld {
   suiteReport?: (role: string, context: { findings: string[] }) => Promise<Record<string, unknown>>
   strategy: 'single' | 'task_sequence'
   plannerPatch?: Record<string, unknown>
-  builderObservations: { strategy: unknown; rationale: unknown; plan: unknown; scope: unknown; previous: unknown; contextStrategy: unknown }[]
+  planProbe?: (request: BoundedWorkRequest, brief: string) => Promise<void>
+  builderObservations: { strategy: unknown; rationale: unknown; plan: unknown; scope: unknown; previous: unknown; contextStrategy: unknown; snapshotHead: string }[]
   readSelectedRun: (runId: string) => ReturnType<TridentRunStore['get']>
   reviewVeto?: 'standalone' | 'synthesis'
   numericBuildPr?: boolean
@@ -612,7 +613,12 @@ async function performRole(world: WorkerWorld, request: BoundedWorkRequest, brie
   const cwd = request.cwd
 
   if (request.role === 'plan') {
-    // A plan turn writes no commit, so the measured revision is unchanged.
+    if (world.planProbe) {
+      await world.planProbe(request, brief)
+      const head = await gitOut(world.run, cwd, ['rev-parse', 'HEAD'])
+      snapshot.diff = await measureDiff(world.run, cwd, snapshot.head, head, world.scratch)
+      snapshot.head = head
+    }
     world.plannerChoices.push(context.planner)
     world.committedPlans.push(context.committedPlan?.body)
     if (context.planner === 'next') {
@@ -654,7 +660,8 @@ async function performRole(world: WorkerWorld, request: BoundedWorkRequest, brie
     if (request.role === 'build') {
       const row = world.readSelectedRun(request.run_id)!
       world.builderObservations.push({ strategy: row.execution_strategy, rationale: row.strategy_rationale,
-        plan: row.strategy_plan, scope: context.suiteScope, previous: context.previous, contextStrategy: context.executionStrategy })
+        plan: row.strategy_plan, scope: context.suiteScope, previous: context.previous, contextStrategy: context.executionStrategy,
+        snapshotHead: snapshot.head })
     }
     const selected = context.previous as { implementationPlan?: string; topTask?: string }
     const commitsPlan = request.role === 'build' && selected.topTask
@@ -1724,7 +1731,7 @@ test('v2 pending builder reconstruction preserves every brief and its later fix 
   const prepared = await f.prepare()
   for (const [role, worker] of Object.entries(prepared.workers)) {
     const path = join(f.context.stateRoot, f.row.id, `${role}.strategy-v2.brief`)
-    const brief = (await readFile(worker.request.brief.path, 'utf8')).replace(
+    const brief = (await readFile(worker.request.brief.path, 'utf8')).replace(/\n\nPLANNING WORK\.[^\n]*/, '').replace(
       'The host selects `suiteScope`: `full-suite` requires the worker full suite for a wave member; `subset` defers it for an intermediate task; `host-suite` leaves the full suite to host review after worker stage 1.',
       'The host selects `suiteScope` after validating this task: `full-suite` requires the full suite; only `subset` defers it for an intermediate task.')
     await writeFile(path, brief)
@@ -1767,10 +1774,10 @@ async function legacyV2LostBuildAck(f: Awaited<ReturnType<typeof fixture>>, comm
   const prepared = await f.prepare()
   for (const [role, worker] of Object.entries(prepared.workers)) {
     const current = await readFile(worker.request.brief.path, 'utf8')
-    let brief = current.replace(CURRENT_SUITE_SCOPE, LEGACY_SUITE_SCOPE)
+    let brief = current.replace(/\n\nPLANNING WORK\.[^\n]*/, '').replace(CURRENT_SUITE_SCOPE, LEGACY_SUITE_SCOPE)
     // Before #1238 the v2 builder brief carried no commit-wrapper paragraph.
     if (!commitWrapper) brief = brief.replace(/\n\nCommit only through the host wrapper[^\n]*/, '')
-    expect(brief !== current).toBe(role === 'build' || role === 'fix')
+    expect(brief !== current).toBe(role !== 'review')
     const path = join(state, `${role}.strategy-v2.brief`)
     await writeFile(path, brief)
     await rm(worker.request.brief.path)
@@ -3890,6 +3897,71 @@ test('session acquisition: hung prewarm expires and late completion never dispat
   }
 }, 30_000)
 
+test('planner work boundary reaches the writable child and preserves its useful changed head for the builder', async () => {
+  const f = await fixture()
+  let probeHead = ''
+  let delivered: { request: BoundedWorkRequest; brief: string } | undefined
+  f.world.planProbe = async (request, brief) => {
+    // This proves instruction delivery and a real writable handoff, not that a
+    // model will obey the prose or that any measured production spend is saved.
+    delivered = { request, brief }
+    await writeFile(join(request.cwd, 'PROBE.md'), 'Useful preparation retained for the builder.\n')
+    await gitOut(f.world.run, request.cwd, ['add', 'PROBE.md'])
+    await gitOut(f.world.run, request.cwd, ['-c', 'user.email=worker@example.invalid', '-c', 'user.name=Worker',
+      '-c', 'commit.gpgsign=false', 'commit', '-m', 'Record useful planning preparation'])
+    probeHead = await gitOut(f.world.run, request.cwd, ['rev-parse', 'HEAD'])
+  }
+  const outcome = await drive(f)
+  expect(delivered?.brief).toContain('Before a probe, name the specific planning uncertainty it resolves')
+  expect(delivered?.brief).toContain('Do not build and validate a complete trial candidate, then discard or reset it solely for the builder to repeat')
+  expect(delivered?.brief).toContain('Capture complete probe output to a log once and inspect that log')
+  expect(delivered?.brief).toContain('A changed input still requires the affected builder validation and host proof')
+  expect(delivered?.request).toMatchObject({ writable: true, tools: 'edit-and-run' })
+  expect(outcome.kind, why(f, outcome)).toBe('merged')
+  expect(probeHead).not.toBe(f.baseSha)
+  expect(f.world.builderObservations[0]).toMatchObject({ snapshotHead: probeHead, scope: 'host-suite', strategy: 'single' })
+  expect(f.world.dispatches.filter(call => call.role === 'plan')).toHaveLength(1)
+  expect(f.world.dispatches.filter(call => call.role === 'build')).toHaveLength(1)
+  expect(await gitOut(f.world.run, f.origin, ['show', 'refs/heads/main:PROBE.md'])).toBe('Useful preparation retained for the builder.')
+  expect(await gitOut(f.world.run, f.origin, ['show', 'refs/heads/main:NOTES.md'])).toContain(`${f.row.id}:build:0`)
+}, 60_000)
+
+test.each(['unchanged', 'changed task', 'changed planner contract'] as const)('planner work boundary preserves immutable v3 planner inputs: %s', async scenario => {
+  const f = await fixture()
+  const prepared = await f.prepare()
+  const worker = prepared.workers.plan
+  expect(worker.request.brief.path).toEndWith('plan.strategy-v4.brief')
+  const current = await readFile(worker.request.brief.path, 'utf8')
+  const old = current.replace(/\n\nPLANNING WORK\.[^\n]*/, '')
+  expect(old).not.toBe(current)
+  const priorPath = join(f.context.stateRoot, f.row.id, 'plan.strategy-v3.brief')
+  await writeFile(priorPath, old)
+  worker.request = { ...worker.request, brief: { path: priorPath, integrity: briefIntegrity(old) } }
+  const first = await createProjectBuildHost(prepared)
+  const runner = first.workers.plan.runner
+  first.workers.plan.runner = { ...runner, run: async (...args) => {
+    expect((await runner.run(...args)).kind).toBe('completed')
+    return { kind: 'unknown', detail: 'completed planner acknowledgement lost' }
+  } }
+  expect(await first.run({ mode: 'implementation', start: 'fresh' }, new AbortController().signal))
+    .toMatchObject({ kind: 'unknown', phase: 'plan' })
+  const retained = scenario === 'changed planner contract' ? `${old}\nUnrecognized planner instructions.\n` : old
+  if (scenario !== 'unchanged') {
+    if (scenario === 'changed task') {
+      f.db.raw().query('UPDATE code_trident_runs SET task = ? WHERE id = ?').run('Different planning inputs', f.row.id)
+      f.input.run = f.store.get(f.row.id)!
+    } else await writeFile(priorPath, retained)
+    await expect(f.prepare()).rejects.toThrow('Stored v3 planner brief does not match current inputs')
+  } else {
+    const recovered = await createProjectBuildHost(await f.prepare())
+    expect(recovered.workers.plan.request.brief).toEqual(first.workers.plan.request.brief)
+    expect((await recovered.run({ mode: 'implementation', start: 'resume' }, new AbortController().signal)).kind).toBe('merged')
+  }
+  expect(await readFile(priorPath, 'utf8')).toBe(retained)
+  expect(await readFile(worker.request.brief.path.replace('strategy-v3', 'strategy-v4'), 'utf8')).toBe(current)
+  expect(f.world.dispatches.filter(call => call.role === 'plan')).toHaveLength(1)
+}, 60_000)
+
 test('every dispatched brief states the envelope the decoder requires', async () => {
   const f = await fixture()
   const options = await f.prepare()
@@ -4920,8 +4992,13 @@ test(`a ${mergeMode} retry of a run that died after a task-sequence handoff resu
   expect(f.world.selectedTasks).toEqual(['- [ ] T2 record another note'])
   expect(f.world.dispatches.some(dispatch => dispatch.step_id.startsWith(`${prior.id}:`))).toBe(false)
   // The plan turn's host context as the worker read it off disk (`project-build-host.ts`
-  // writes `<role>.strategy-v3.brief.<role>.host`, and its context beside it).
-  const planContext = JSON.parse(await readFile(workContextPath(join(f.context.stateRoot, run.id, 'plan.strategy-v3.brief.plan.host')), 'utf8'))
+  // writes the admitted brief path and its context beside it). Use the actual
+  // worker reservation, so a filename-version change cannot hide the assertion.
+  const planReservation = f.store.stageEvents(run.id).filter(event => event.stage === 'build-mode-state')
+    .map(event => JSON.parse(event.meta!).checkpoint?.pending?.recovery?.request)
+    .find(request => request?.role === 'plan')
+  expect(planReservation?.step_id).toBe(`${run.id}:task:1:plan:0`)
+  const planContext = JSON.parse(await readFile(workContextPath(planReservation.brief.path), 'utf8'))
   expect(planContext.request.step_id).toBe(`${run.id}:task:1:plan:0`)
   expect(planContext.planner).toBe('next')
   expect(planContext.committedPlan).toMatchObject({ found: true, body: HANDOFF_LEDGER, sha256: sha256(HANDOFF_LEDGER), uncheckedCount: 1 })
@@ -5361,8 +5438,11 @@ test(`historical pending ${strategy} planner recovers its original schema and re
   const prepared = await f.prepare()
   for (const [role, worker] of Object.entries(prepared.workers)) {
     const path = join(f.context.stateRoot, f.row.id, `${role}.brief`)
-    await writeFile(path, await readFile(worker.request.brief.path, 'utf8'))
-    worker.request = { ...worker.request, brief: { ...worker.request.brief, path },
+    const currentBrief = await readFile(worker.request.brief.path, 'utf8')
+    const originalBrief = currentBrief.replace(/\n\nPLANNING WORK\.[^\n]*/, '')
+    if (role === 'plan') expect(originalBrief).not.toBe(currentBrief)
+    await writeFile(path, originalBrief)
+    worker.request = { ...worker.request, brief: { integrity: briefIntegrity(originalBrief), path },
       result: { ...worker.request.result, ...(role === 'plan' ? { schema: 'project-plan' } : {}) } }
   }
   const host = await createProjectBuildHost(prepared)
@@ -5412,8 +5492,11 @@ test(`historical pending ${strategy} builder recovers only with ${source} proven
   const prepared = await f.prepare()
   for (const [role, worker] of Object.entries(prepared.workers)) {
     const path = join(f.context.stateRoot, f.row.id, `${role}.brief`)
-    await writeFile(path, await readFile(worker.request.brief.path, 'utf8'))
-    worker.request = { ...worker.request, brief: { ...worker.request.brief, path } }
+    const currentBrief = await readFile(worker.request.brief.path, 'utf8')
+    const originalBrief = currentBrief.replace(/\n\nPLANNING WORK\.[^\n]*/, '')
+    if (role === 'plan') expect(originalBrief).not.toBe(currentBrief)
+    await writeFile(path, originalBrief)
+    worker.request = { ...worker.request, brief: { integrity: briefIntegrity(originalBrief), path } }
   }
   // The native pending reservation is created using the original path and
   // integrity before dispatch. Recovery cannot manufacture a replacement.
@@ -5846,6 +5929,71 @@ test(`a cross-run ${mergeMode} retry ${moved ? 'refuses remote movement after di
   const merged = await spawnCapture(['git', '-C', mergeMode === 'pr' ? f.origin : f.repo, 'show', 'refs/heads/main:NOTES.md'], f.repo)
   expect(merged.stdout).toBe(fixed ? `seed\n${prior.id}:task:0:build:0\n${prior.id}:task:0:fix:1` : `seed\n${prior.id}:${legacyTerminal ? 'task:0:' : ''}build:0`)
   if (mergeMode === 'local') expect(f.commands.some(argv => argv[0] === 'gh')).toBe(false)
+}, 300_000)
+
+for (const change of ['none', 'remote', 'fetch-moved', 'closed', 'unowned', 'unreadable', 'checkout'] as const)
+test(`same-run pending review reconstructs its cleaned checkout: ${change}`, async () => {
+  const f = await fixture()
+  const first = await createProjectBuildHost(await f.prepare())
+  const review = first.workers.review.runner
+  first.workers.review.runner = { ...review, run: async (...args) => {
+    await review.run(...args)
+    return { kind: 'unknown', detail: 'Deferred review observation' }
+  } }
+  const deferred = await first.run({ mode: 'implementation', start: 'fresh' }, new AbortController().signal)
+  expect(deferred.kind, why(f, deferred)).toBe('unknown')
+  expect(deferred.cleanup.kind).toBe('cleaned')
+  const checkpoint = lastCheckpoint(f)
+  expect(checkpoint.pending).toMatchObject({ phase: 'review' })
+  const saved = f.store.get(f.row.id)!
+  expect(saved.published_pr).toBe(1)
+  expect((await spawnCapture(['git', '-C', f.repo, 'show-ref', '--verify', '--quiet', `refs/heads/${saved.branch}`], f.repo)).exit_code).toBe(1)
+  expect(await lstat(saved.worktree!).then(() => true, () => false)).toBe(false)
+  f.input.run = saved
+  f.world.dispatches.length = 0
+  if (change === 'remote') {
+    const moved = await gitOut(f.world.run, f.repo, ['commit-tree', `${checkpoint.head}^{tree}`, '-p', String(checkpoint.head), '-m', 'advance remote'])
+    await gitOut(f.world.run, f.repo, ['push', 'origin', `${moved}:refs/heads/${saved.branch}`])
+  }
+  if (change === 'closed') f.github.prs[0]!.state = 'CLOSED'
+  if (change === 'unowned') await f.store.update(saved.id, { published_pr: null })
+  if (change === 'unreadable') f.github.refuse.add('view')
+  if (change === 'fetch-moved') {
+    const runHost = f.context.runHost
+    f.context.runHost = async (...args) => {
+      if (args[0].includes('fetch')) {
+        const moved = await gitOut(f.world.run, f.repo, ['commit-tree', `${checkpoint.head}^{tree}`, '-p', String(checkpoint.head), '-m', 'advance after PR observation'])
+        await gitOut(f.world.run, f.repo, ['push', 'origin', `${moved}:refs/heads/${saved.branch}`])
+      }
+      return runHost(...args)
+    }
+  }
+  if (!['none', 'checkout'].includes(change)) {
+    await expect(f.prepare()).rejects.toThrow(change === 'fetch-moved' ? 'Retry branch moved after dispatch' : 'Pending review')
+    expect(f.world.dispatches).toHaveLength(0)
+    expect((await spawnCapture(['git', '-C', f.repo, 'show-ref', '--verify', '--quiet', `refs/heads/${saved.branch}`], f.repo)).exit_code).toBe(1)
+    return
+  }
+  const prepared = await f.prepare()
+  expect(await gitOut(f.world.run, saved.worktree!, ['rev-parse', 'HEAD'])).toBe(String(checkpoint.head))
+  if (change === 'checkout') await gitOut(f.world.run, saved.worktree!, ['reset', '--hard', f.baseSha])
+  const resumed = await createProjectBuildHost(prepared)
+  // Recover the actual completed original worker; no replacement paid turn.
+  let recovered = 0
+  const reviewRecovery = resumed.workers.review.runner
+  resumed.workers.review.runner = { ...reviewRecovery, recover: async (...args) => {
+    recovered++; return reviewRecovery.recover!(...args)
+  } }
+  const outcome = await resumed.run({ mode: 'implementation', start: 'resume' }, new AbortController().signal)
+  if (change === 'checkout') expect(outcome).toMatchObject({ kind: 'unknown', detail: 'Pending worker input revision changed before recovery' })
+  else expect(outcome.kind, why(f, outcome)).toBe('merged')
+  expect(recovered).toBe(change === 'checkout' ? 0 : 1)
+  expect(f.world.dispatches).toHaveLength(0)
+  if (change === 'checkout') expect(lastCheckpoint(f)).toEqual(checkpoint)
+  else expect(lastCheckpoint(f)).toMatchObject({ round: checkpoint.round, head: checkpoint.head })
+  expect(f.github.prs[0]!.state).toBe(change === 'checkout' ? 'OPEN' : 'MERGED')
+  expect(outcome.cleanup.kind).toBe(change === 'checkout' ? 'preserved' : 'cleaned')
+  if (change === 'none') expect(await lstat(saved.worktree!).then(() => true, () => false)).toBe(false)
 }, 300_000)
 
 test('a driver restarted between the build and review re-adopts the build instead of redoing it', async () => {
