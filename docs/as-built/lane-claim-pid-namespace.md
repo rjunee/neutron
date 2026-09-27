@@ -58,3 +58,15 @@ These are focused regression results; full repository gates and deployment are
 separate checks. Namespace identities are liveness evidence, not authority to
 signal through a different process view. Existing claims lacking that evidence
 remain visible with unknown owner liveness until their original lifecycle ends.
+
+The first complete shared-host gate at `6bf99ae4` passed all 51 TypeScript
+configurations and executed all 1,727 declared files across 18 settled lanes,
+but exited 1: 14 copied host-suite report fixtures could not resolve the logger
+workspace package. This was not a full-suite pass. The fixture previously linked
+only the Trident-local dependency directory, losing production's ancestor
+workspace resolution. `trident/host-suite.test.ts:19` now resolves the logger from
+the production module's directory and links only that package into its temporary
+fixture. Assertions and production behavior are unchanged. The focused host-suite
+run passed 26 tests; deliberately breaking the logger link failed its positive
+control, and restoration returned all 26 tests to green. Independent review
+approved this fixture correction. A corrected complete gate remains required.
