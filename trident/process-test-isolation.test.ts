@@ -1,6 +1,6 @@
 import { expect, test } from 'bun:test'
 import { readFileSync } from 'node:fs'
-import { chmod, mkdtemp, readFile, rm, writeFile } from 'node:fs/promises'
+import { chmod, mkdir, mkdtemp, readFile, rm, stat, writeFile } from 'node:fs/promises'
 import { tmpdir } from 'node:os'
 import { join } from 'node:path'
 import { fileURLToPath } from 'node:url'
@@ -47,6 +47,63 @@ test('private namespace init reaps exited orphans and preserves live children an
     new Response(child.stdout).text(), new Response(child.stderr).text()])
   expect({ status, stdout, stderr: status === 0 ? '' : stderr }).toEqual({ status: 0, stdout: '', stderr: '' })
   expect(stderr).toContain('Ran 3 tests')
+})
+
+for (const installed of [true, false]) test(`private boundary isolates operator authority with installed=${installed} and preserves neighboring configuration`, async () => {
+  const dir = await mkdtemp(join(tmpdir(), 'process-operator-boundary-'))
+  const etc = join(dir, 'etc'), neutron = join(etc, 'neutron')
+  const uid = process.getuid!(), gid = process.getgid!()
+  const authority = join(neutron, 'native-host-recovery', `${uid}.json`)
+  const marker = 'operator authority must stay outside the test instance\n'
+  try {
+    await mkdir(neutron, { recursive: true })
+    await writeFile(join(neutron, 'boundary-neighbor'), 'neighbor preserved\n')
+    if (installed) {
+      await mkdir(join(neutron, 'native-host-recovery'))
+      await writeFile(authority, marker)
+    }
+    const before = installed ? await stat(authority) : undefined
+    const proof = join(dir, 'proof.py')
+    await writeFile(proof, `import importlib.util
+import os
+from pathlib import Path
+spec = importlib.util.spec_from_file_location('isolation', ${JSON.stringify(processTestLauncher)})
+isolation = importlib.util.module_from_spec(spec)
+spec.loader.exec_module(isolation)
+isolation.require_boundary()
+assert os.getuid() == ${uid} and os.getgid() == ${gid}
+assert Path('/etc/neutron/boundary-neighbor').read_text() == 'neighbor preserved\\n'
+config = Path('/etc/neutron/native-host-recovery') / (str(os.geteuid()) + '.json')
+assert not config.exists(), 'live operator authority leaked into the test instance'
+if ${installed ? 'True' : 'False'}:
+    config.write_text('private test authority')
+    assert config.read_text() == 'private test authority'
+print('private authority boundary verified')
+`)
+    // A synthetic /etc is mounted only in this disposable outer namespace.
+    // The inner launcher must hide its authority while retaining its neighbor.
+    const child = Bun.spawn(['bwrap', '--unshare-user', '--uid', String(uid), '--gid', String(gid),
+      '--die-with-parent', '--bind', '/', '/', '--ro-bind', etc, '/etc',
+      'python3', '-B', processTestLauncher, '--', 'python3', '-B', proof], {
+      stdout: 'pipe', stderr: 'pipe', env: { ...process.env },
+    })
+    const [status, stdout, stderr] = await Promise.all([child.exited,
+      new Response(child.stdout).text(), new Response(child.stderr).text()])
+    expect({ status, stderr: status === 0 ? '' : stderr }).toEqual({ status: 0, stderr: '' })
+    expect(stdout).toContain('private authority boundary verified')
+    expect(await readFile(join(neutron, 'boundary-neighbor'), 'utf8')).toBe('neighbor preserved\n')
+    if (installed) {
+      expect(await readFile(authority, 'utf8')).toBe(marker)
+      const after = await stat(authority)
+      for (const key of ['dev', 'ino', 'uid', 'gid', 'mode', 'size', 'mtimeMs', 'ctimeMs'] as const) {
+        expect(after[key]).toBe(before![key])
+      }
+    } else {
+      await expect(stat(join(neutron, 'native-host-recovery'))).rejects.toThrow()
+    }
+  } finally {
+    await rm(dir, { recursive: true, force: true })
+  }
 })
 
 for (const refuseCheck of [true, false]) test(refuseCheck

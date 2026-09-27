@@ -7,6 +7,7 @@ export interface AdmissionLease { scope: ProjectAdmissionScope; generation: numb
 export interface MaintenanceFence extends AdmissionLease { phase: MaintenancePhase }
 /** One durable lease row, its scope decoded. `workRef` is the producer's work id. */
 export interface AdmissionLeaseRow extends AdmissionLease { reason: AdmissionReason; producer: string; workRef: string }
+export interface NativeHostTerminationRow { operationId: string; scope: ProjectAdmissionScope; preparation: string; termination: string | null }
 interface FenceRow { generation: number; phase: 'open' | MaintenancePhase; maintenance_token: string | null }
 interface LeaseDbRow { token: string; scope_key: string; generation: number; reason: AdmissionReason; producer: string; work_ref: string }
 
@@ -56,6 +57,7 @@ export class ProjectAdmissionStore {
       await tx.run('UPDATE project_admission_fences SET generation = generation WHERE scope_key = ?', [key]);
       const row = tx.get<FenceRow>('SELECT generation, phase, maintenance_token FROM project_admission_fences WHERE scope_key = ?', [key]);
       if (!row) return { status: 'unknown' as const };
+      if (this.hasPreparedHostTermination(scope)) return { status: 'fenced' as const };
       if (row.phase !== 'open') return { status: 'fenced' as const };
       const token = crypto.randomUUID();
       tx.runSync(`INSERT INTO project_admission_leases (token, scope_key, generation, reason, producer, work_ref)
@@ -90,6 +92,7 @@ export class ProjectAdmissionStore {
       await tx.run('UPDATE project_admission_fences SET generation = generation WHERE scope_key = ?', [key]);
       const row = tx.get<FenceRow>('SELECT generation, phase, maintenance_token FROM project_admission_fences WHERE scope_key = ?', [key]);
       if (!row) return { status: 'unknown' as const };
+      if (this.hasPreparedHostTermination(scope)) return { status: 'unknown' as const };
       const owner = tx.get<{ generation: number }>(`SELECT generation FROM project_admission_leases
         WHERE scope_key = ? AND reason = ? AND work_ref = ? ORDER BY rowid LIMIT 1`, [key, parent.reason, parent.workRef]);
       if (!owner) return { status: 'no-parent' as const };
@@ -101,11 +104,67 @@ export class ProjectAdmissionStore {
   }
 
   /** Existing admitted work can drain after fencing. A stale/foreign release
-   * cannot remove another generation's durable activity. */
+   * cannot remove another generation's durable activity. A prepared physical
+   * recovery reserves its exact token for that authenticated consumer. */
   async release(lease: AdmissionLease): Promise<boolean> {
     return this.db.transaction(tx => tx.runSync(`DELETE FROM project_admission_leases
-      WHERE scope_key = ? AND generation = ? AND token = ?`,
+      WHERE scope_key = ? AND generation = ? AND token = ?
+      AND NOT EXISTS (SELECT 1 FROM native_host_terminations
+        WHERE lease_token = project_admission_leases.token AND termination IS NULL)`,
     [scopeKey(lease.scope), lease.generation, lease.token]).changes === 1);
+  }
+
+  /** Separate from maintenance replacement: this gate authorizes no parent
+   * retirement and blocks even children joining previously admitted work. */
+  hasPreparedHostTermination(scope: ProjectAdmissionScope): boolean {
+    return !!this.db.get('SELECT 1 FROM native_host_terminations WHERE scope_key = ? AND termination IS NULL LIMIT 1', [scopeKey(scope)]);
+  }
+
+  listHostTerminations(): NativeHostTerminationRow[] {
+    return this.db.all<{ operation_id: string; scope_key: string; preparation: string; termination: string | null }>(
+      'SELECT operation_id, scope_key, preparation, termination FROM native_host_terminations ORDER BY rowid').map(row => {
+      const scope = parseScopeKey(row.scope_key);
+      if (!scope) throw new Error('Unreadable host termination scope');
+      return { operationId: row.operation_id, scope, preparation: row.preparation, termination: row.termination };
+    });
+  }
+
+  /** Only the authenticated recovery consumer calls this. Work eligibility is
+   * rechecked under the writer lock; an existing operation is never rewritten. */
+  async prepareHostTermination(operationId: string, lease: AdmissionLeaseRow, preparation: string, eligible: () => boolean): Promise<boolean> {
+    return this.db.transaction(async tx => {
+      const key = scopeKey(lease.scope);
+      await tx.run('UPDATE project_admission_fences SET generation = generation WHERE scope_key = ?', [key]);
+      if (lease.reason !== 'liveChild' || !eligible()) return false;
+      const exact = tx.get(`SELECT 1 FROM project_admission_leases WHERE scope_key = ? AND generation = ? AND token = ?
+        AND reason = ? AND producer = ? AND work_ref = ?`, [key, lease.generation, lease.token, lease.reason, lease.producer, lease.workRef]);
+      if (!exact) return false;
+      const previous = tx.get<{ preparation: string; termination: string | null }>(
+        'SELECT preparation, termination FROM native_host_terminations WHERE operation_id = ?', [operationId]);
+      if (previous) return previous.termination === null && previous.preparation === preparation;
+      return tx.runSync(`INSERT OR IGNORE INTO native_host_terminations (operation_id, scope_key, lease_token, preparation)
+        VALUES (?, ?, ?, ?)`, [operationId, key, lease.token, preparation]).changes === 1;
+    });
+  }
+
+  /** Physical termination and exact lease deletion are one transaction. This
+   * never updates the run, attempt, armed request, result, or publication. */
+  async consumeHostTermination(operationId: string, lease: AdmissionLeaseRow, preparation: string, termination: string, eligible: () => boolean): Promise<boolean> {
+    return this.db.transaction(async tx => {
+      const key = scopeKey(lease.scope);
+      await tx.run('UPDATE project_admission_fences SET generation = generation WHERE scope_key = ?', [key]);
+      if (lease.reason !== 'liveChild' || !eligible()) return false;
+      const pending = tx.get(`SELECT 1 FROM native_host_terminations WHERE operation_id = ? AND scope_key = ?
+        AND lease_token = ? AND preparation = ? AND termination IS NULL`, [operationId, key, lease.token, preparation]);
+      if (!pending) return false;
+      const released = tx.runSync(`DELETE FROM project_admission_leases WHERE scope_key = ? AND generation = ? AND token = ?
+        AND reason = ? AND producer = ? AND work_ref = ?`, [key, lease.generation, lease.token, lease.reason, lease.producer, lease.workRef]).changes;
+      if (released !== 1) return false;
+      const recorded = tx.runSync(`UPDATE native_host_terminations SET termination = ? WHERE operation_id = ?
+        AND preparation = ? AND termination IS NULL`, [termination, operationId, preparation]).changes;
+      if (recorded !== 1) throw new Error('Host termination evidence could not commit');
+      return true;
+    });
   }
 
   async beginMaintenance(scope: ProjectAdmissionScope): Promise<MaintenanceFence | null> {
@@ -163,16 +222,18 @@ export class ProjectAdmissionStore {
     [key, fence.generation, fence.token, fence.phase]).changes === 1);
   }
 
-  /** Release every lease of ONE piece of work — by scope, reason and work
+  /** Release every unreserved lease of ONE piece of work — by scope, reason and work
    * reference — whatever generation or token it was admitted under. This is not a
    * foreign release: it is bound to the work, and is for work whose activity has
    * provably ENDED in every generation (a terminal build run). Returns the count
-   * removed; a second call removes 0. */
+   * removed; a second call removes 0. Pending host recovery owns its reserved token. */
   async releaseWork(scope: ProjectAdmissionScope, reason: AdmissionReason, workRef: string): Promise<number> {
     if (!workRef.trim()) throw new Error('Work reference required');
     const key = scopeKey(scope);
     return this.db.transaction(tx => tx.runSync(`DELETE FROM project_admission_leases
-      WHERE scope_key = ? AND reason = ? AND work_ref = ?`, [key, reason, workRef]).changes);
+      WHERE scope_key = ? AND reason = ? AND work_ref = ?
+      AND NOT EXISTS (SELECT 1 FROM native_host_terminations
+        WHERE lease_token = project_admission_leases.token AND termination IS NULL)`, [key, reason, workRef]).changes);
   }
 
   /** Every durable lease (optionally of one reason), scope decoded. Read-only;

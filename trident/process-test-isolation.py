@@ -129,9 +129,14 @@ def enter(command, parent_pid=None):
         outer.setsockopt(socket.SOL_SOCKET, socket.SO_PASSCRED, 1)
         outer.settimeout(5)
         inherited = (inner.fileno(), *handles)
+        # The invoking host's operator authority belongs to its live instance.
+        # Mask only that directory in this private mount namespace. Do not ask
+        # bwrap to create missing parents through the host's bind-mounted root.
+        authority_root = '/etc/neutron/native-host-recovery'
+        operator_mount = ['--tmpfs', authority_root] if os.path.isdir(authority_root) else []
         argv = ['bwrap', '--unshare-user', '--uid', str(os.getuid()), '--gid', str(os.getgid()),
                 '--unshare-pid', '--as-pid-1', '--die-with-parent', '--bind', '/', '/', '--dev', '/dev', '--proc', '/proc',
-                sys.executable, '-B', SCRIPT, '--inside', *map(str, inherited), '--', *command]
+                *operator_mount, sys.executable, '-B', SCRIPT, '--inside', *map(str, inherited), '--', *command]
         # Only bootstrap descriptors cross exec, never an unrelated inherited pidfd.
         child = subprocess.Popen(argv, close_fds=True, pass_fds=inherited,
                                  preexec_fn=partial(bind_to_parent, os.getpid()))

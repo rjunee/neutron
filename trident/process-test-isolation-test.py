@@ -177,6 +177,7 @@ class Boundary(unittest.TestCase):
             stack.enter_context(patch.object(isolation.os, 'getppid', return_value=39))
             stack.enter_context(patch.object(isolation.os, 'getuid', return_value=1000))
             stack.enter_context(patch.object(isolation.os, 'getgid', return_value=1001))
+            stack.enter_context(patch.object(isolation.os.path, 'isdir', return_value=False))
             stack.enter_context(patch.object(isolation.os, 'open', side_effect=[9, 10]))
             stack.enter_context(patch.object(isolation.os, 'close'))
             stack.enter_context(patch.object(isolation, 'namespace_identity', side_effect=[(1, 10), (1, 20)]))

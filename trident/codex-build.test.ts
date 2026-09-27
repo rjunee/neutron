@@ -826,7 +826,7 @@ describe("the wrapper BINDS the worktree to the run's branch — the binding is 
     const branchHead = spawnSync('git', ['rev-parse', 'refs/heads/trident/a-run'], { cwd: r.dir, encoding: 'utf8' }).stdout.trim()
     const holderBranch = spawnSync('git', ['rev-parse', '--abbrev-ref', 'HEAD'], { cwd: holder, encoding: 'utf8' }).stdout.trim()
     const worktrees = spawnSync('git', ['worktree', 'list', '--porcelain'], { cwd: r.dir, encoding: 'utf8' }).stdout
-    expect(r.status).toBe(0)
+    expect(r.status, `wrapper signal=${r.signal ?? 'none'} stderr=${r.stderr}`).toBe(0)
     expect(r.stderr).toContain('CODEX_BUILD_BRANCH_RECLAIMED')
     expect(r.trailer['NEUTRON_CODEX_BUILD_BRANCH']).toBe('trident/a-run')
     expect(r.trailer['NEUTRON_CODEX_BUILD_HEAD']).toHaveLength(40)

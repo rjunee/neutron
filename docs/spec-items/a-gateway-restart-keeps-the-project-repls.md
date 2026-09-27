@@ -494,6 +494,73 @@ unresolved durable work/lease evidence stays fenced until its authoritative
 workflow reconciliation establishes what can continue; restored chat readiness
 alone is not a workflow-continuation receipt.
 
+### Prepared whole-host termination of unresolved native work
+
+An independent host/operator authority may prepare physical recovery of an exact
+native-child lease after corroborating historical local placement with retained
+host journal, original request/session evidence, and the deployed local transport.
+The placement evidence establishes the hosting boundary, never child completion.
+An unsigned legacy dispatch is eligible for this distinct termination protocol;
+it cannot acquire a fabricated original `not-submitted` receipt.
+
+Preparation binds the full stored lease, canonical database installation,
+authenticated hosting identity, evidence-bundle digest, and current kernel boot.
+It commits on that same kernel boot and creates a durable scope admission gate,
+including against children joining already-admitted work. Only a canonical
+terminal run with its original prepared/started native dispatch attempt qualifies;
+this operation does not stop live workflows or authorize a reboot.
+
+The operator delivers the signed preparation on stdin to
+`bun open/prepare-native-host-termination.ts`, running as the server's effective
+UID with its ordinary install environment. The bridge uses the standard frozen
+configuration and existing database, never creates or migrates one, and obtains
+its pin from the same protected operator configuration as the server. It emits
+only `{"status":"prepared"}` (exit zero) or `{"status":"refused"}` (exit one).
+Preparation is a durable hold, not evidence of termination or reboot permission.
+
+On startup, before native actor construction or workflow/chat replay, Open asks
+the independently pinned authority for a fresh challenged boot attestation and
+compares it with the local kernel. A different kernel boot on the same authenticated
+host can retire an already-prepared lease. An application boot UUID, machine-id
+alone, restored chat, missing process, or provider prose cannot establish this.
+Authority/key provisioning must be outside worker-writable state; an
+envelope cannot supply its own public key. Without authority, recovery stays held.
+
+The standard Open entrypoint loads this capability from the fixed operator-owned
+`/etc/neutron/native-host-recovery/<effective-uid>.json`, never an environment-selected
+key. Its version-one object names `publicKey` (Ed25519 PEM), `hostId`, `instanceId`
+(the canonical database installation), and an absolute `socketPath`. The file and
+every ancestor are root-owned, non-symlink and not group/other writable. A present
+unsafe or malformed configuration refuses startup. Each request rechecks the
+root-owned Unix socket and its protected ancestry. The supervisor authenticates
+the peer UID and authorizes it for the requested instance. One newline-delimited
+`{version:1,kind:"host-boot-request",instanceId,challenge}` receives one bounded
+signed envelope; Open verifies the pinned key, identities, fresh challenge and
+local kernel observation. Hosting identity must be independently authenticated,
+not copied solely from machine-id. Supervisor deployment owns that measurement.
+
+The consumer records `terminated-by-host-reboot` and deletes only the unchanged
+scope/generation/token/reason/producer/work-reference lease in one transaction.
+Preparation is consumed once. It preserves run, attempt, result, armed-request,
+and publication provenance and never redispatches work. Other unresolved leases
+remain held; existing maintenance replacement fences remain independent. Invalid,
+foreign, replayed, same-boot, changed-lease, or interrupted evidence cannot reopen
+the prepared scope. Hosting restoration must prevent independent agent replay
+before this consumer runs; configuring or enabling a daemon alone is not proof.
+Ordinary completion/release cannot delete a lease reserved by pending preparation;
+unrelated releases still work. Operators retain the independently protected trust
+pin until its preparations are consumed. An unavailable or changed pin holds
+recovery; restoring the original authority allows authenticated consumption, not
+an unsigned cancellation or a replacement key supplied by the worker.
+
+Verify: `open/wiring/__tests__/native-host-termination.test.ts`, including actual
+Open startup consumption, exact-scope admission, both directions of the kernel
+boot gate and atomic rollback; `open/__tests__/project-build-e2e.test.ts` remains
+the consuming workflow check. `open/__tests__/native-host-recovery-authority.test.ts`
+checks the protected pin, transport refusals and actual server-entrypoint wiring.
+Live host attestation and reboot restoration are
+separate deployment acceptance and are not established by these offline tests.
+
 **The close is licensed by the row as well as the process, but the window is narrowed
 rather than eliminated.** A pane is only closed when the row still names it — checked
 under the flock immediately before the close — because a newer incarnation of ours on a
