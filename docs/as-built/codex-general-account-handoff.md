@@ -84,6 +84,16 @@ rejected. A separate positive sealed-crash control verifies missing predecessor
 authority already refuses recovery; that guard was not relaxed in response to
 an unsubstantiated review premise.
 
+The CI architecture gate caught a runtime import cycle between account handoff
+and retirement policy after the full host tests had passed. The immutable receipt
+type and byte-identical validation function now live in a shared evidence module;
+same-home resume and account handoff consume it without depending on one another
+for completed-exit evidence. Existing retirement imports remain compatible via
+re-export. No receipt format, death check, layering rule or baseline changed.
+The unchanged whole-graph dependency gate reproduced the cycle and then passed
+after extraction. Consuming retirement tests additionally isolate each live
+native, terminal and helper identity so no sibling death can hide a missing check.
+
 This implements General's handoff of an already selected global seat, not a new
 quota-threshold selector, periodic probing loop, project grant policy, or Claude
 retirement authority. Project conversations still need their explicit project
