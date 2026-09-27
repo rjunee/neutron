@@ -17,6 +17,7 @@ at the old name. Retitle through the `title:` frontmatter instead.
 These are the items the harness-orchestrator cutover is gated on.
 
 - [`cancel-stops-host-review-suite`](cancel-stops-host-review-suite.md) — Cancellation stops the run's host review suite
+- [`codex-review-provider-limit`](codex-review-provider-limit.md) — Preserve explicit Codex provider usage limits at the review gate
 - [`host-test-suite-efficiency`](host-test-suite-efficiency.md) — Diagnose early and remove measured host test-suite waste
 - [`planner-selected-execution-strategy`](planner-selected-execution-strategy.md) — Let the initial planner select a persisted execution strategy
 - [`published-branch-preservation`](published-branch-preservation.md) — Preserve previously published work across fresh dispatch and replay
@@ -52,6 +53,7 @@ branch is cut (standard §3.1, §3.2).
 | [`a-retry-must-resume-from-the-checkpoint`](a-retry-must-resume-from-the-checkpoint.md) | Carry a dead run's checkpoint and task iteration into its retry | P0 | yes |
 | [`a-terminal-cause-on-every-terminal-path`](a-terminal-cause-on-every-terminal-path.md) | Emit a terminal cause on every terminal path, and report it | P0 | yes |
 | [`cancel-stops-host-review-suite`](cancel-stops-host-review-suite.md) | Cancellation stops the run's host review suite | P0 | yes |
+| [`codex-review-provider-limit`](codex-review-provider-limit.md) | Preserve explicit Codex provider usage limits at the review gate | P0 | yes |
 | [`host-test-suite-efficiency`](host-test-suite-efficiency.md) | Diagnose early and remove measured host test-suite waste | P0 | yes |
 | [`planner-selected-execution-strategy`](planner-selected-execution-strategy.md) | Let the initial planner select a persisted execution strategy | P0 | yes |
 | [`published-branch-preservation`](published-branch-preservation.md) | Preserve previously published work across fresh dispatch and replay | P0 | yes |

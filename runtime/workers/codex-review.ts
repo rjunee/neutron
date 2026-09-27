@@ -156,6 +156,8 @@ export function createCodexReviewTransport(options: {
     let providerUsage: unknown
     let completed = false
     let invalid = false
+    let malformed = false
+    let usageLimitReached = false
     let pending = ''
     let timedOut = false
     let killTimer: ReturnType<typeof setTimeout> | undefined
@@ -185,7 +187,7 @@ export function createCodexReviewTransport(options: {
         // The same bytes the event parser reads, copied to the view. Display only.
         view.tee(chunk)
         pending += decoder.decode(chunk, { stream: true })
-        if (pending.length > 1024 * 1024) { invalid = true; pending = ''; stop(); return }
+        if (pending.length > 1024 * 1024) { invalid = true; malformed = true; pending = ''; stop(); return }
         let end: number
         while ((end = pending.indexOf('\n')) >= 0) {
           const line = pending.slice(0, end); pending = pending.slice(end + 1)
@@ -196,6 +198,11 @@ export function createCodexReviewTransport(options: {
               else thread = event.thread_id
             }
             if (event.type === 'turn.failed' || event.type === 'error') invalid = true
+            // Only the native terminal failure owns this signal. Quoted assistant
+            // text, token_count credit balances and generic error events cannot
+            // establish that this requested model was refused for usage limits.
+            if (event.type === 'turn.failed' && typeof event.error?.message === 'string'
+              && /^You[’']ve hit your usage limit\.(?: |$)/.test(event.error.message)) usageLimitReached = true
             // Only transport event metadata counts. Candidate JSON, assistant
             // text and nested worker-authored envelopes are never usage sources.
             if ((event.type === 'turn.completed' || event.type === 'turn.failed') && event.usage && thread !== null && !threadConflict) {
@@ -211,12 +218,12 @@ export function createCodexReviewTransport(options: {
                   ...(Number.isSafeInteger(u.cached_input_tokens) && u.cached_input_tokens >= 0 ? { cache_read_input_tokens: u.cached_input_tokens } : {}) }
               }
             }
-          } catch { invalid = true }
+          } catch { invalid = true; malformed = true }
         }
       }
     }
     const [code] = await Promise.all([child.exited.then(code => { kill('SIGKILL'); return code }),
-      readEvents().catch(() => { invalid = true; stop() })])
+      readEvents().catch(() => { invalid = true; malformed = true; stop() })])
     clearTimeout(timer)
     signal.removeEventListener('abort', stop)
     // Always close the process group, including children that survived the CLI.
@@ -234,6 +241,13 @@ export function createCodexReviewTransport(options: {
     observation = await publisher.settle(codexObservation(providerUsage, thread, started, Date.now()))
     if (signal.aborted) return observed({ kind: 'failed', class: 'killed', detail: 'Codex review was cancelled' })
     if (timedOut) return observed({ kind: 'failed', class: 'timeout', detail: 'Codex review exceeded its wall-clock budget' })
+    // This is eligibility for this review request, not evidence that every model
+    // or account quota is spent. Do not infer a global cooldown or parse a reset
+    // from provider prose without a timezone.
+    if (code !== null && code !== 0 && usageLimitReached && thread !== null && !threadConflict
+      && !completed && !malformed && !pending.trim()) {
+      return observed({ kind: 'failed', class: 'rate-limit', detail: 'Codex provider rejected this review request at its usage limit' })
+    }
     if (code !== 0) return observed({ kind: 'failed', class: 'infra', detail: `Codex review exited ${code ?? 'without status'}` })
     if (invalid || !completed || !thread || pending.trim()) return observed(unknown('Codex review lacks a valid completed turn and thread observation'))
     try {

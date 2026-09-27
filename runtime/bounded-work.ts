@@ -105,7 +105,7 @@ export type BoundedWorkOutcome = (
   /** §3.2: "If it cannot proceed it returns 'blocked on X' to the orchestrator." */
   | { kind: 'blocked'; on: string }
   | { kind: 'refused'; reason: RefusalReason }
-  | { kind: 'failed'; class: 'infra' | 'timeout' | 'killed'; detail: string }
+  | { kind: 'failed'; class: 'infra' | 'timeout' | 'killed' | 'rate-limit'; detail: string }
   | { kind: 'unknown'; detail: string
       /** Host decoder observed a current, completed envelope with an invalid payload.
        * Never inferred from a missing file, timeout, or provider prose. */

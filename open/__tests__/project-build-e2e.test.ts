@@ -872,7 +872,7 @@ const suiteStrategy = 'TEST EXECUTION: run the card regression.\n\n'
  * final network boundary: it records the exact process request and writes the
  * structured final message a successful Codex turn would have written.
  */
-const fakeCodex = (calls: string, identity: 'valid' | 'wrong-run') => `#!/usr/bin/env bun
+const fakeCodex = (calls: string, identity: 'valid' | 'wrong-run' | 'usage-limit' | 'transport-error') => `#!/usr/bin/env bun
 import { appendFileSync, readFileSync, writeFileSync } from 'node:fs'
 const argv = process.argv.slice(2)
 appendFileSync(${JSON.stringify(`${calls}.invocations`)}, JSON.stringify(argv) + '\\n')
@@ -891,6 +891,11 @@ if (!requestLine) process.exit(91)
 const request = JSON.parse(requestLine.slice('Request (data): '.length))
 const brief = JSON.parse(readFileSync(request.brief.path, 'utf8'))
 appendFileSync(${JSON.stringify(calls)}, JSON.stringify({ argv, cwd: process.cwd(), codexHome: process.env.CODEX_HOME, request, brief }) + '\\n')
+if (${JSON.stringify(identity)} === 'usage-limit' || ${JSON.stringify(identity)} === 'transport-error') {
+  console.log(JSON.stringify({ type: 'thread.started', thread_id: 'e2e-codex-thread' }))
+  console.log(JSON.stringify({ type: 'turn.failed', error: { message: ${JSON.stringify(identity === 'usage-limit' ? 'You’ve hit your usage limit. Try again later.' : 'Connection closed by upstream.')} } }))
+  process.exit(1)
+}
 const output = argv[argv.indexOf('-o') + 1]
 const envelope = { schema: request.result.schema,
   run_id: ${identity === 'wrong-run' ? "'some-other-run'" : 'request.run_id'}, step_id: request.step_id,
@@ -947,7 +952,7 @@ async function fixture(options: { taskSequence?: boolean; moreTasks?: boolean; s
   blockersByRound?: readonly number[]; replanRounds?: readonly number[]
   maxRounds?: number; mergeMode?: 'pr' | 'local'; blockRoles?: readonly string[]
   repeatFirstFinding?: boolean; commentRounds?: readonly number[]
-  unavailableSeatRounds?: readonly number[]; codexReview?: 'valid' | 'wrong-run'
+  unavailableSeatRounds?: readonly number[]; codexReview?: 'valid' | 'wrong-run' | 'usage-limit' | 'transport-error'
   synthesisShape?: WorkerWorld['synthesisShape']; rateLimitedSynthesis?: boolean; nativeUsage?: boolean
   verdictRepair?: WorkerWorld['verdictRepair']
   /** Real session ownership with only the model boundary held at a barrier. */
@@ -2441,6 +2446,16 @@ async function codexOwnerWithClaude(identity: 'valid' | 'wrong-schema' = 'valid'
   }
   return { ...f, calls, children }
 }
+
+test.each(['usage-limit', 'transport-error'] as const)('Codex %s retains reviewer veto and only retries infrastructure failures', async codexReview => {
+  const f = await fixture({ codexReview })
+  const outcome = await drive(f)
+  expect(outcome.kind, why(f, outcome)).not.toBe('merged')
+  const calls = (await readFile(f.codexCalls, 'utf8')).trim().split('\n').map(line => JSON.parse(line))
+  expect(calls).toHaveLength(codexReview === 'usage-limit' ? 1 : 2)
+  expect(calls.every(call => call.request.role === 'review')).toBe(true)
+  expect(JSON.stringify(outcome)).toContain(codexReview === 'usage-limit' ? 'rate-limited' : 'deferred')
+}, 300_000)
 
 test('operator-adopted Codex accounts preserve custody and selected home reaches the merged build', async () => {
   const f = await fixture({ codexReview: 'valid' })
