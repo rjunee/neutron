@@ -12,7 +12,7 @@
 // its fate. `runSync` (behavior-identical by contract) shares the pin.
 
 import { afterEach, beforeEach, describe, expect, test } from 'bun:test'
-import { mkdtempSync, rmSync } from 'node:fs'
+import { existsSync, mkdtempSync, rmSync } from 'node:fs'
 import { tmpdir } from 'node:os'
 import { join } from 'node:path'
 import { ProjectDb } from './db.ts'
@@ -30,6 +30,22 @@ beforeEach(async () => {
 afterEach(() => {
   db.close()
   rmSync(tmp, { recursive: true, force: true })
+})
+
+test('existing-only writable open preserves no-create and readonly boundaries', () => {
+  const absent = join(tmp, 'absent.db')
+  expect(() => ProjectDb.open(absent, { create: false })).toThrow(PersistenceError)
+  expect(existsSync(absent)).toBe(false)
+  const writer = ProjectDb.open(join(tmp, 'owner.db'), { create: false })
+  try { writer.runSync('INSERT INTO t (v) VALUES (?)', ['existing-only']) }
+  finally { writer.close() }
+  expect(db.get<{ v: string }>('SELECT v FROM t')?.v).toBe('existing-only')
+  const reader = ProjectDb.open(join(tmp, 'owner.db'), { create: false, readonly: true })
+  try {
+    expect(reader.get<{ v: string }>('SELECT v FROM t')?.v).toBe('existing-only')
+    expect(() => reader.runSync('INSERT INTO t (v) VALUES (?)', ['forbidden'])).toThrow()
+  } finally { reader.close() }
+  expect(db.get<{ n: number }>('SELECT count(*) AS n FROM t')?.n).toBe(1)
 })
 
 describe('ProjectDb.get', () => {

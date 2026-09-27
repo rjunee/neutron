@@ -225,6 +225,7 @@ export class ProjectAdmission {
    * preparing: session queueing will order them. Submitted, duplicate and
    * previous-boot children keep the durable refusal. */
   hasUnresolvedNativeChildForChat(projectId: string | null): boolean {
+    if (this.store.hasPreparedHostTermination(this.scopeFor(projectId))) return true;
     const leases = this.listLeases('liveChild').filter(row => row.scope.projectId === projectId);
     const counts = new Map<string, number>();
     for (const row of leases) counts.set(row.workRef, (counts.get(row.workRef) ?? 0) + 1);

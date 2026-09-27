@@ -80,6 +80,8 @@ import { ProjectAdmission } from '@neutronai/gateway/project-admission.ts'
 import { setNativeChildLiveness } from '@neutronai/runtime/adapters/claude-code/persistent/native-child-liveness.ts'
 import { reconcileBuildLeases } from '@neutronai/gateway/project-admission-reconcile.ts'
 import { reconcileClaudeNativeDispatches } from './wiring/claude-native-dispatch-reconcile.ts'
+import { reconcileNativeHostTerminations } from './wiring/native-host-termination.ts'
+import type { NativeHostRecoveryAuthority } from '@neutronai/runtime/workers/native-host-termination.ts'
 import { buildAdmissionReleaseObserver } from '@neutronai/gateway/proactive/admission-release.ts'
 import { buildProjectDocComposer } from '@neutronai/gateway/wiring/build-project-doc-composer.ts'
 import { buildProjectKickoffComposer } from '@neutronai/gateway/wiring/build-project-kickoff-composer.ts'
@@ -648,6 +650,9 @@ export function buildTridentCodeBoardBinder(
 }
 
 export interface BuildOpenGraphComposerOptions {
+  /** Independent host/operator trust pin and challenged boot attestation. This
+   * capability must not be constructed from tenant-writable keys or receipts. */
+  nativeHostRecoveryAuthority?: NativeHostRecoveryAuthority | undefined
   /** Override the process env (tests). Defaults to `process.env`. */
   env?: NodeJS.ProcessEnv
   /**
@@ -1218,6 +1223,16 @@ export function buildOpenGraphComposer(
     // build-lease release composed into all three terminal chains all read it. It
     // needs only the database and the owner handle.
     const projectAdmission = new ProjectAdmission({ db, ownerHandle: owner_handle, bootId: randomUUID() })
+    // This must finish before substrates, workflow replay, or chat reconstruction
+    // can act. Without authority, prepared recovery gates and child leases survive.
+    const hostTerminations = await reconcileNativeHostTerminations({
+      authority: options.nativeHostRecoveryAuthority, admission: projectAdmission,
+      runs: new TridentRunStore(db), attempts: new TridentAttemptLedger(db),
+      projectIdForRun: run => workBoardProjectIdForKey(project_slug, run.project_slug) ?? null,
+      listProjectIds: () => db.all<{ id: string }>('SELECT id FROM projects WHERE deleted_at IS NULL').map(row => row.id),
+    })
+    if (hostTerminations.status === 'unavailable') log.warn('native_host_termination_recovery_unavailable')
+    else if (hostTerminations.released > 0) log.info('native_host_terminations_reconciled', hostTerminations)
     setNativeChildLiveness(OWNER_USER_ID,
       projectId => projectAdmission.listLeases('liveChild').some(lease => lease.scope.projectId === projectId),
       projectId => projectAdmission.hasUnresolvedNativeChildForChat(projectId))

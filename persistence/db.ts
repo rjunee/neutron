@@ -76,7 +76,7 @@ export class ProjectDb {
     const readonly = options.readonly ?? false
     let db: Database
     try {
-      db = new Database(path, { create, readonly })
+      db = new Database(path, { create, readonly, readwrite: !readonly })
     } catch (err) {
       throw new PersistenceError(`failed to open SQLite at ${path}`, err)
     }

@@ -31,6 +31,7 @@ import { resolveBootConfig, envShimFromBootConfig } from '@neutronai/config/inde
 import { resolveNeutronHome } from '@neutronai/migrations/db-path.ts'
 
 import { buildOpenGraphComposer } from './composer.ts'
+import { loadNativeHostRecoveryAuthority } from './native-host-recovery-authority.ts'
 import { loadPersistedInstallToken } from './install-token-env.ts'
 import { resolvePersistedCookieSecret } from './session-cookie-secret.ts'
 import { resolveOwnerBearer } from './owner-bearer.ts'
@@ -167,7 +168,8 @@ export async function startOpenServer(): Promise<BootHandle> {
   // the owner's data dir is.
   applyEnvShim(env, envShimFromBootConfig(config))
 
-  const composer = buildOpenGraphComposer({ env, config, ownerBearer: ownerBearer.value })
+  const nativeHostRecoveryAuthority = loadNativeHostRecoveryAuthority()
+  const composer = buildOpenGraphComposer({ env, config, ownerBearer: ownerBearer.value, nativeHostRecoveryAuthority })
   const handle = await boot({ composer, config })
 
   const slug = resolveOwnerSlugFromConfig(config)

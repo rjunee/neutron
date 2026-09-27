@@ -310,6 +310,10 @@ CREATE INDEX invites_pending_expiry
 CREATE INDEX invites_workspace
     ON invites (workspace_instance_slug, created_at_ms)
 
+[index] native_host_terminations_pending (tbl=native_host_terminations)
+CREATE INDEX native_host_terminations_pending
+  ON native_host_terminations(scope_key) WHERE termination IS NULL
+
 [index] onboarding_state_phase (tbl=onboarding_state)
 CREATE INDEX onboarding_state_phase
     ON onboarding_state (phase, last_advanced_at)
@@ -1065,6 +1069,17 @@ CREATE TABLE max_subs_unimplemented (
     -- classes and writes raw SQL, the row never lands.
     placeholder TEXT NOT NULL CHECK (1 = 0)
 ) STRICT
+
+[table] native_host_terminations (tbl=native_host_terminations)
+CREATE TABLE native_host_terminations (
+  operation_id TEXT PRIMARY KEY,
+  scope_key TEXT NOT NULL,
+  lease_token TEXT NOT NULL UNIQUE,
+  preparation TEXT NOT NULL,
+  termination TEXT,
+  CHECK (length(operation_id) > 0),
+  CHECK (length(lease_token) > 0)
+)
 
 [table] onboarding_state (tbl=onboarding_state)
 CREATE TABLE "onboarding_state" (
