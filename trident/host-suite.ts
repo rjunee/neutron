@@ -50,6 +50,7 @@ function readCleanupReport(path: string, token: string, pid: number, exitCode: n
 /** Each suite receives the existing lane owner's unique claim. The owner handles
  * TERM by reaping only that claim through pidfds, including detached descendants. */
 const spawnOwnedSuite: SuiteCommandRunner = async (argv, cwd, env, timeoutMs, signal) => {
+  const started = performance.now()
   if (signal?.aborted) throw new Error('Host suite cancelled before process creation')
   const owner = fileURLToPath(new URL('./lane-processes.py', import.meta.url))
   const reportDir = mkdtempSync(join(tmpdir(), 'host-suite-owner-'))
@@ -97,6 +98,10 @@ const spawnOwnedSuite: SuiteCommandRunner = async (argv, cwd, env, timeoutMs, si
       }),
     ])
     const cleanup = readCleanupReport(reportPath, reportToken, child.pid, exitCode)
+    log.info('host_suite_process_observed', { owner_pid: child.pid, exit_code: exitCode,
+      timed_out: timedOut, aborted: signal?.aborted === true, timeout_ms: timeoutMs,
+      elapsed_ms: Math.round(performance.now() - started), cleanup_status: cleanup.status,
+      owner_signal: cleanup.signal, foreground_exit: cleanup.foreground_exit })
     if (cleanup.status === 'unknown') log.warn('host_suite_cleanup_unknown', { owner_pid: cleanup.owner_pid, report: JSON.stringify(cleanup) })
     // A valid ordinary exit remains usable even if unrelated process metadata
     // was unreadable. Interruption requires the separate, known closure proof.

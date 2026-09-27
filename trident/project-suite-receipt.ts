@@ -41,23 +41,36 @@ export function createProjectSuiteReceipts(options: {
     async observe(source: ReviewSuiteSource, snapshot: BuildSnapshot, round: number,
       strategy: string | undefined, scope: SuiteObservation['scope'] | undefined) {
       const identity = await measure(snapshot)
+      const before = { identity, at: new Date().toISOString() }
       const event = latest()
       const prior = scope === 'full-suite' && strategy !== undefined
         ? decode(event?.meta, snapshot, round, strategy, identity) : null
       if (prior) return prior
       // A missing/corrupt/mismatched receipt is not proof. Atomic invalidation
       // prevents a failed acquisition, or a stale host, reviving old success.
-      const version = await store.appendSuiteReceipt(run.id, event?.id ?? null, JSON.stringify({ version: 1, owner: boundOwner }))
+      const version = await store.appendSuiteReceipt(run.id, event?.id ?? null,
+        JSON.stringify({ version: 1, owner: boundOwner, observation: { before } }))
       if (version === null) return unknown('Suite acquisition ownership changed or run stopped')
       const receipt = await source.observe(snapshot, round)
       const after = await measure(snapshot)
-      if (identity && after !== identity) return unknown('Suite inputs changed during host observation')
+      // Keep measurements independently of reusable proof. Unknown is not a
+      // changed hash, and neither may hide the host's already observed exit.
+      const observation = { before, after: { identity: after, at: new Date().toISOString() },
+        hostExitCode: receipt.kind === 'known' && Number.isInteger(receipt.report?.hostExitCode)
+          ? receipt.report!.hostExitCode : null }
+      if (identity && after !== identity) {
+        const saved = await store.appendSuiteReceipt(run.id, version,
+          JSON.stringify({ version: 1, owner: boundOwner, observation }))
+        if (saved === null) return unknown('Suite completion ownership changed or run stopped')
+        return unknown(after === null ? 'Suite input identity is unavailable after host observation'
+          : 'Suite inputs changed during host observation')
+      }
       if (receipt.kind === 'known' && receipt.runId === run.id && receipt.head === snapshot.head
         && receipt.round === round && receipt.strategy === strategy && receipt.scope === 'full-suite'
         && scope === 'full-suite' && receipt.report && Number.isInteger(receipt.report.hostExitCode)
         && identity && identity === after && currentOwner() === boundOwner) {
         const saved = await store.appendSuiteReceipt(run.id, version,
-          JSON.stringify({ version: 1, owner: boundOwner, identity, receipt }))
+          JSON.stringify({ version: 1, owner: boundOwner, identity, receipt, observation }))
         if (saved === null) return unknown('Suite completion ownership changed or run stopped')
       }
       return receipt

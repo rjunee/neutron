@@ -1,4 +1,4 @@
-import { expect, test } from 'bun:test'
+import { expect, spyOn, test } from 'bun:test'
 import { mkdtemp, readFile, rm, symlink, writeFile } from 'node:fs/promises'
 import { tmpdir } from 'node:os'
 import { join } from 'node:path'
@@ -62,11 +62,18 @@ for (const exit of [0, 7]) {
 }
 
 test('reported known cleanup is a positive control for the report consumer', async () => {
-  await withReportedOwner({}, async run => {
+  const diagnostic = spyOn(console, 'log').mockImplementation(() => {})
+  try { await withReportedOwner({}, async run => {
     expect(await run({ argv: ['true'], cwd: '/tmp', timeoutMs: 3_000,
       signal: new AbortController().signal, isRunActive: () => true })).toMatchObject({ ok: true,
       cleanup: { status: 'confirmed', unknown: 0, signal: null } })
   })
+    const text = diagnostic.mock.calls.flat().join('\n')
+    expect(text).toContain('event=host_suite_process_observed')
+    expect(text).toContain('exit_code=0 timed_out=false aborted=false timeout_ms=3000')
+    expect(text).toContain('cleanup_status=confirmed owner_signal=null foreground_exit=0')
+    expect(text).not.toContain('/tmp')
+  } finally { diagnostic.mockRestore() }
 })
 
 for (const fault of ['absent', 'malformed', 'wrong-token', 'wrong-pid', 'wrong-exit', 'false-confirmed', 'missing-signal', 'invalid-count']) {
