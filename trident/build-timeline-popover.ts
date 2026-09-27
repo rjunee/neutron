@@ -8,6 +8,10 @@ export const PHASE_POPOVER_STYLE = `
 export const PHASE_POPOVER_SCRIPT = `
 const popover = document.getElementById('phase-popover');
 let phaseTrigger = null, phasePinned = false, phaseHideTimer, suppressPhaseFocus = false;
+let phaseTouchTrigger = null, phaseTouchFocusTrigger = null, phaseTouchResetTimer;
+function clearPhaseTouch() {
+  clearTimeout(phaseTouchResetTimer); phaseTouchTrigger = null; phaseTouchFocusTrigger = null;
+}
 function hidePhasePopover() {
   clearTimeout(phaseHideTimer);
   if (phaseTrigger) phaseTrigger.setAttribute('aria-expanded', 'false');
@@ -85,16 +89,40 @@ document.addEventListener('pointerout', event => {
   if (related && (popover.contains(related) || phaseTrigger?.contains(related))) return;
   if (popover.contains(event.target) || phaseTrigger?.contains(event.target)) phaseHideTimer = setTimeout(hidePhasePopover, 160);
 });
-document.addEventListener('focusin', event => { const trigger = event.target.closest('[data-phase-info]'); if (trigger && !suppressPhaseFocus) showPhasePopover(trigger); });
+document.addEventListener('pointerdown', event => {
+  clearPhaseTouch();
+  if (event.pointerType === 'touch') phaseTouchTrigger = event.target.closest('[data-phase-info]');
+});
+document.addEventListener('mousedown', event => {
+  const trigger = event.target.closest('[data-phase-info]');
+  const touch = trigger && trigger === phaseTouchTrigger;
+  clearPhaseTouch();
+  if (touch) {
+    // Touch compatibility mouse events may arrive in a later task than pointerup.
+    // Suppress only this mousedown's default focus, then expire even without click.
+    phaseTouchFocusTrigger = trigger;
+    phaseTouchResetTimer = setTimeout(clearPhaseTouch, 0);
+  }
+});
+document.addEventListener('pointercancel', clearPhaseTouch);
+document.addEventListener('focusin', event => {
+  const trigger = event.target.closest('[data-phase-info]');
+  const touchFocus = trigger && trigger === phaseTouchFocusTrigger;
+  clearPhaseTouch();
+  // Opening a phone sheet here can cover the release target and retarget the
+  // native click to the body. The click itself opens and pins the sheet.
+  if (trigger && !suppressPhaseFocus && !touchFocus) showPhasePopover(trigger);
+});
 document.addEventListener('focusout', event => {
   if (!phasePinned && !popover.contains(event.relatedTarget) && !phaseTrigger?.contains(event.relatedTarget)) phaseHideTimer = setTimeout(hidePhasePopover, 160);
 });
 document.addEventListener('click', event => {
+  clearPhaseTouch();
   const trigger = event.target.closest('[data-phase-info]');
   if (trigger) { event.preventDefault(); event.stopPropagation(); if (phasePinned && phaseTrigger === trigger) hidePhasePopover(); else showPhasePopover(trigger, true); }
   else if (!popover.contains(event.target)) hidePhasePopover();
 });
-document.addEventListener('keydown', event => { if (event.key === 'Escape' && !popover.hidden) { event.preventDefault(); dismissPhasePopover(); } });
+document.addEventListener('keydown', event => { clearPhaseTouch(); if (event.key === 'Escape' && !popover.hidden) { event.preventDefault(); dismissPhasePopover(); } });
 window.addEventListener('resize', positionPhasePopover);
 window.addEventListener('scroll', positionPhasePopover, {passive:true});
 `
