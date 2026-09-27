@@ -9,6 +9,8 @@ import { join, resolve } from 'node:path'
 import { createHash } from 'node:crypto'
 import { createProjectRunners, decodeProjectTrailer, type ProjectTrailerDecoder, type ProjectActingTurn } from '@neutronai/runtime/workers/project-runners.ts'
 import { createClaudeActingTurn } from '@neutronai/runtime/workers/claude-acting-turn.ts'
+import { createClaudeNativeDispatchReceipt, readClaudeNativeDispatchReceipt, type NativeDispatchEvidence } from '@neutronai/runtime/workers/claude-native-dispatch-receipt.ts'
+import { readProcessIdentity } from '@neutronai/runtime/adapters/claude-code/persistent/process-identity.ts'
 import { admitNativeChildWorkspace, completeNativeChildWorkspace, completeNativeChildWorkspaceRequest, type NativeChildWorkspace } from '@neutronai/runtime/workers/native-child-workspace.ts'
 import { observeClaudeChildUsage } from '@neutronai/runtime/workers/claude-child-observation.ts'
 import { sessionJsonlPath } from '@neutronai/runtime/adapters/claude-code/persistent/jsonl-resumability.ts'
@@ -435,7 +437,8 @@ export async function prepareProjectBuild(input: InnerLoopInput, context: Projec
   // (see the acting turn below). Resolves or spawns the project REPL and hands
   // the step to it as a native child.
   const nativeWorkspaces = new Map<string, NativeChildWorkspace>()
-  const nativeChildTurn = async (turn: Parameters<ProjectActingTurn>[0], generation: number, onDispatchSubmitted: () => void): ReturnType<ProjectActingTurn> => {
+  const nativeChildTurn = async (turn: Parameters<ProjectActingTurn>[0], generation: number, onDispatchSubmitted: () => void,
+    evidence: (event: NativeDispatchEvidence) => void, enterActor: () => void): ReturnType<ProjectActingTurn> => {
     const deadline = turn.deadline_ms ?? Date.now() + Math.min(turn.timeout_ms, turn.request.budget.wall_ms)
     const expired = () => turn.signal.aborted || Date.now() >= deadline
     const expiredBeforeDispatch = () => ({ kind: 'refused' as const, reason: 'capability-unsupported' as const,
@@ -498,6 +501,8 @@ export async function prepareProjectBuild(input: InnerLoopInput, context: Projec
     if (!session || session.hasChildExited()) return { kind: 'unknown', detail: 'Project conversation child is unavailable' }
     // Restricted launches do not attest the edit/run grants required by this bridge.
     if (options.skip_permissions !== true || options.restricted || options.permissions) return { kind: 'refused', reason: 'capability-unsupported', detail: 'Project launch grants cannot authorize bounded build work' }
+    evidence({ kind: 'parent-bound', parent: { sessionId: session.sessionId, childGeneration: session.childGeneration,
+      pid: session.child.pid, processIdentity: readProcessIdentity(session.child.pid) ?? null } })
     const transcript = sessionJsonlPath(session.sessionId, session.cwd, resolveTranscriptProjectsDir(options))
     const observer = JSON.stringify({ request: turn.request, session: session.sessionId,
       directory: join(transcript.slice(0, -'.jsonl'.length), 'subagents') })
@@ -526,7 +531,8 @@ export async function prepareProjectBuild(input: InnerLoopInput, context: Projec
       } catch { return { kind: 'refused', reason: 'capability-unsupported', detail: 'Native writer has no checked independent worktree admission.' } }
     }
     if (expired()) return expiredBeforeDispatch()
-    return createClaudeActingTurn({ project_id: context.projectId, topic_id: topic, session, projects_dir: resolveTranscriptProjectsDir(options), ...(workspace ? { workspace } : {}), onDispatchSubmitted,
+    enterActor()
+    return createClaudeActingTurn({ project_id: context.projectId, topic_id: topic, session, projects_dir: resolveTranscriptProjectsDir(options), ...(workspace ? { workspace } : {}), onDispatchSubmitted, onNativeDispatchEvidence: evidence,
       grants: { tools: 'edit-and-run', writable: true, network: true, roots: options.extra_dirs ?? [] } })({ ...turn,
         deadline_ms: deadline, timeout_ms: Math.max(1, deadline - Date.now()) })
   }
@@ -559,15 +565,38 @@ export async function prepareProjectBuild(input: InnerLoopInput, context: Projec
         return { kind: 'refused', reason: 'capability-unsupported', detail: `Project admission refused the native child (${child.status})` }
       }
       let outcome: Awaited<ReturnType<ProjectActingTurn>> | undefined
+      let receipt: ReturnType<typeof createClaudeNativeDispatchReceipt> | undefined
+      let actorEntered = false
+      let notSubmitted = false
+      const evidence = (event: NativeDispatchEvidence) => {
+        if (!receipt) throw new Error('Original native dispatch receipt is unavailable')
+        receipt.record(event)
+        if (event.kind === 'not-submitted') notSubmitted = true
+      }
       try {
-        outcome = await nativeChildTurn(turn, child.generation, () => context.nativeChildAdmission.finishPreparing?.(child.lease))
+        const authority = context.nativeChildAdmission.dispatchAuthority?.(child.lease, turn.request)
+        if (!authority) return { kind: 'unknown', detail: 'Original native dispatch signing authority is unavailable' }
+        try { receipt = createClaudeNativeDispatchReceipt(state, turn.request, authority) }
+        catch { return { kind: 'unknown', detail: 'Original native dispatch receipt cannot be exclusively established' } }
+        outcome = await nativeChildTurn(turn, child.generation, () => context.nativeChildAdmission.finishPreparing?.(child.lease),
+          evidence, () => { actorEntered = true })
+        return outcome
+      } catch {
+        outcome = { kind: 'unknown', detail: 'Original native dispatch evidence or observation was interrupted.' }
         return outcome
       } finally {
+        // No acting invocation was entered: even an acquisition timeout is a
+        // positive pre-input refusal. Once entered, only the original actor's
+        // terminal callback may prove that; unknown submit acknowledgements stay held.
+        if (receipt && !actorEntered) {
+          try { evidence({ kind: 'not-submitted' }) } catch { /* Incomplete durable evidence keeps the lease. */ }
+        }
+        receipt?.close()
         context.nativeChildAdmission.finishPreparing?.(child.lease)
         // Parent-turn completion does not establish child completion. Only a
         // refusal before dispatch releases here; the consuming trailer validator
         // below owns all post-dispatch releases, including restart recovery.
-        if (outcome?.kind === 'refused') {
+        if (notSubmitted) {
           const workspace = nativeWorkspaces.get(turn.request.step_id)
           if (workspace) completeNativeChildWorkspace(workspace)
           // A failed release preserves ownership and must not turn a refusal into
@@ -628,6 +657,11 @@ export async function prepareProjectBuild(input: InnerLoopInput, context: Projec
       } catch { /* Missing evidence or failed durable release preserves ownership. */ }
     }
     substrate.inRepl = { ...runner, run: finish, ...(runner.recover ? { recover: async (...args: Parameters<NonNullable<typeof runner.recover>>) => {
+      try {
+        if (args[0].run_id === run.id && await context.nativeChildAdmission.releaseUnsubmitted?.(args[0], readClaudeNativeDispatchReceipt(state, args[0]))) {
+          return { kind: 'failed' as const, class: 'killed' as const, detail: 'Original native dispatch actor durably refused before submitting input.' }
+        }
+      } catch { return { kind: 'unknown' as const, detail: 'Original native dispatch lease reconciliation is unavailable.' } }
       const outcome = await runner.recover!(...args)
       if (outcome.kind === 'completed' || outcome.kind === 'blocked') await releaseValidatedChild(args[0])
       return outcome

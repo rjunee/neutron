@@ -34,7 +34,7 @@ test('reaps expired terminal state while retaining live, recent, and unknown sta
   await writeFile(join(root, 'not-a-directory'), 'keep')
 
   // Directory enumeration order varies across filesystems; assert exact membership.
-  const removed = await reapProjectBuildState({ stateRoot: root, runs: { get: id => rows.get(id) ?? null }, now })
+  const removed = await reapProjectBuildState({ stateRoot: root, runs: { get: id => rows.get(id) ?? null }, nativeChildren: () => [], now })
   expect(removed.sort())
     .toEqual(['done-old', 'failed-old'])
 
@@ -52,5 +52,5 @@ test('reaps expired terminal state while retaining live, recent, and unknown sta
 test('a missing state root is an empty successful sweep', async () => {
   const parent = await mkdtemp(join(tmpdir(), 'project-build-state-reaper-missing-'))
   cleanup.push(parent)
-  expect(await reapProjectBuildState({ stateRoot: join(parent, 'absent'), runs: { get: () => null } })).toEqual([])
+  expect(await reapProjectBuildState({ stateRoot: join(parent, 'absent'), runs: { get: () => null }, nativeChildren: () => [] })).toEqual([])
 })

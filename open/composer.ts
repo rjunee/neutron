@@ -79,6 +79,7 @@ import type { LiveAgentOnboardingSeam } from '@neutronai/gateway/wiring/build-li
 import { ProjectAdmission } from '@neutronai/gateway/project-admission.ts'
 import { setNativeChildLiveness } from '@neutronai/runtime/adapters/claude-code/persistent/native-child-liveness.ts'
 import { reconcileBuildLeases } from '@neutronai/gateway/project-admission-reconcile.ts'
+import { reconcileClaudeNativeDispatches } from './wiring/claude-native-dispatch-reconcile.ts'
 import { buildAdmissionReleaseObserver } from '@neutronai/gateway/proactive/admission-release.ts'
 import { buildProjectDocComposer } from '@neutronai/gateway/wiring/build-project-doc-composer.ts'
 import { buildProjectKickoffComposer } from '@neutronai/gateway/wiring/build-project-kickoff-composer.ts'
@@ -4497,6 +4498,19 @@ export function buildOpenGraphComposer(
     // phase/round/elapsed/stalled from its `linked_run_id`'s `code_trident_runs`
     // row. Stateless wrapper — a second instance elsewhere is harmless.
     const boardRunStore = new TridentRunStore(db)
+    const projectBuildStateRoot = joinPath(owner_home, '.trident', 'project-builds')
+    const reconcileNativeDispatches = async () => {
+      const result = await reconcileClaudeNativeDispatches({
+        stateRoot: projectBuildStateRoot, admission: projectAdmission, runs: boardRunStore,
+        attempts: new TridentAttemptLedger(db), listProjectIds,
+        projectIdForRun: run => workBoardProjectIdForKey(project_slug, run.project_slug) ?? null,
+      })
+      if (result.status === 'unavailable') log.warn('native_dispatch_refusals_unavailable')
+      else if (result.released > 0) log.info('native_dispatch_refusals_reconciled', result)
+    }
+    // Includes failed/terminal runs excluded by the workflow tick. Only a signed
+    // original pre-input refusal can release; terminal status alone never does.
+    await reconcileNativeDispatches()
     // #1237 — RESTART RECONCILIATION of build leases, ONCE, before any loop that
     // could create, advance or terminalize a run starts (the tick loop, the hold
     // drain, the work-wakeup sweep). A lease naming a terminal or missing run is
@@ -4508,13 +4522,13 @@ export function buildOpenGraphComposer(
       projectIdForRun: (run) => workBoardProjectIdForKey(project_slug, run.project_slug) ?? null,
     })
     log.info('project_admission_reconciled', { ...admissionReconciled })
-    const projectBuildStateRoot = joinPath(owner_home, '.trident', 'project-builds')
     const projectBuildStateReaper = new SupervisedLoop({
       name: 'project-build-state-reaper',
       intervalMs: PROJECT_BUILD_STATE_REAP_INTERVAL_MS,
       immediate: true,
       tick: async () => {
-        const removed = await reapProjectBuildState({ stateRoot: projectBuildStateRoot, runs: boardRunStore })
+        const removed = await reapProjectBuildState({ stateRoot: projectBuildStateRoot, runs: boardRunStore,
+          nativeChildren: () => projectAdmission.listLeases('liveChild') })
         if (removed.length > 0) log.info('project_build_state_reaped', { count: removed.length })
       },
       onError: (_name, error) => log.error('project_build_state_reap_failed', { error: String(error) }),
@@ -7030,6 +7044,7 @@ export function buildOpenGraphComposer(
       on_shutdown_start: quiesceChatRecovery,
       on_graph_ready: async () => {
         const recovery = startProjectChatRecovery(async () => {
+          await reconcileNativeDispatches()
           const scopes = [null, ...listProjectIds()]
           await adoptLiveAgentRepls(scopes)
           for (const projectId of scopes) {

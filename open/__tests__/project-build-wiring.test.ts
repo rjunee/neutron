@@ -454,8 +454,8 @@ test.each(['missing-launch', 'missing-session', 'pending-session', 'ambiguous', 
   const key = 'fixture-project-launch'
   const config = { substrate_instance_id: 'cc-agent-fixture', project_id: f.context.projectId, skip_permissions: true, extra_dirs: [f.dir] }
   let submissions = 0
-  const session = { sessionId: 'fixture-session', toolSurface: LIVE_AGENT_TOOL_NAMES.join(','), cwd: f.dir,
-    hasChildExited: () => state === 'exited', child: { submitLine: async () => { submissions += 1 } }, acquireTurn: async () => () => {} }
+  const session = { sessionId: 'fixture-session', childGeneration: 'fixture-generation', toolSurface: LIVE_AGENT_TOOL_NAMES.join(','), cwd: f.dir,
+    hasChildExited: () => state === 'exited', child: { pid: process.pid, submitLine: async () => { submissions += 1 } }, acquireTurn: async () => () => {} }
   cleanup.push(() => { pool.delete(key); supervisedBySessionKey.delete(key); supervisedBySessionKey.delete(key + '-other') })
   // Each scenario owns a fresh admission. Reusing an unknown request creates
   // duplicate durable leases, which correctly prevent a later dispatch.
@@ -548,8 +548,8 @@ test('acting turn lazily starts and retains a cold project session without redis
   const key = 'cold-project-launch'
   const config = { substrate_instance_id: 'cc-agent-fixture', project_id: f.context.projectId, skip_permissions: true, extra_dirs: [f.dir] }
   let submissions = 0
-  const session = { sessionId: 'fixture-session', toolSurface: LIVE_AGENT_TOOL_NAMES.join(','), cwd: f.dir, hasChildExited: () => false,
-    child: { submitLine: async () => { submissions += 1 } }, acquireTurn: async () => () => {} }
+  const session = { sessionId: 'fixture-session', childGeneration: 'fixture-generation', toolSurface: LIVE_AGENT_TOOL_NAMES.join(','), cwd: f.dir, hasChildExited: () => false,
+    child: { pid: process.pid, submitLine: async () => { submissions += 1 } }, acquireTurn: async () => () => {} }
   let spawns = 0
   cleanup.push(() => { pool.delete(key); supervisedBySessionKey.delete(key) })
   f.setSpawnProjectSession(async projectId => {
@@ -564,8 +564,8 @@ test('acting turn lazily starts and retains a cold project session without redis
   expect((await captured.actingTurn(turn)).kind).toBe('turn-ended')
   // Parent completion is not child completion: a repeat must reconcile the
   // existing request before another admission can dispatch it.
-  expect(await captured.actingTurn(turn)).toMatchObject({ kind: 'refused',
-    detail: 'Native writer has no checked independent worktree admission.' })
+  expect(await captured.actingTurn(turn)).toMatchObject({ kind: 'unknown',
+    detail: 'Original native dispatch receipt cannot be exclusively established' })
   expect(spawns).toBe(1)
   expect(submissions).toBe(1)
 })
@@ -581,8 +581,8 @@ for (const shape of ['missing', 'unlinked'] as const) test(`native admission ref
   const request: BoundedWorkRequest = { ...options.workers.build.request, run_id: f.input.run.id, step_id: 'fixture-step', role: 'build', needs_approval_decision: false }
   let submissions = 0
   const key = `invalid-worktree-${shape}`
-  const session = { sessionId: 'fixture-session', toolSurface: LIVE_AGENT_TOOL_NAMES.join(','), cwd: f.dir,
-    hasChildExited: () => false, child: { submitLine: async () => { submissions += 1 } }, acquireTurn: async () => () => {} }
+  const session = { sessionId: 'fixture-session', childGeneration: 'fixture-generation', toolSurface: LIVE_AGENT_TOOL_NAMES.join(','), cwd: f.dir,
+    hasChildExited: () => false, child: { pid: process.pid, submitLine: async () => { submissions += 1 } }, acquireTurn: async () => () => {} }
   cleanup.push(() => { pool.delete(key); supervisedBySessionKey.delete(key) })
   supervisedBySessionKey.set(key, { substrate_instance_id: 'cc-agent-fixture', project_id: f.context.projectId, skip_permissions: true, extra_dirs: [f.dir] })
   pool.set(key, Promise.resolve(session as never))
@@ -608,7 +608,7 @@ test('acting turn keeps ambiguity and spawn/grant outcomes distinct', async () =
   supervisedBySessionKey.set('one', { ...config, restricted: true })
   pool.set('one', Promise.resolve(session as never))
   await Promise.resolve()
-  expect((await captured.actingTurn(turn)).kind).toBe('refused')
+  expect((await captured.actingTurn({ ...turn, request: { ...request, step_id: 'fixture-restricted' } })).kind).toBe('refused')
   supervisedBySessionKey.set('two', config)
   pool.set('two', Promise.resolve(session as never))
   await Promise.resolve()
@@ -618,7 +618,7 @@ test('acting turn keeps ambiguity and spawn/grant outcomes distinct', async () =
   // session to an already-ambiguous project. So count the spawns, not just the kind.
   let ambiguousSpawns = 0
   f.setSpawnProjectSession(async () => { ambiguousSpawns += 1 })
-  expect((await captured.actingTurn(turn)).kind).toBe('unknown')
+  expect((await captured.actingTurn({ ...turn, request: { ...request, step_id: 'fixture-ambiguous' } })).kind).toBe('unknown')
   expect(ambiguousSpawns).toBe(0)
   cleanup.push(() => { for (const key of ['one', 'two']) { pool.delete(key); supervisedBySessionKey.delete(key) } })
 })

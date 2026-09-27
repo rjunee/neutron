@@ -224,7 +224,8 @@ test('a native child JOINS its run under a draining fence, under the parent gene
   if (child.status !== 'admitted') return
   expect(child.generation).toBe(0)
   const row = admission.listLeases('liveChild')[0]!
-  expect(row).toMatchObject({ reason: 'liveChild', producer: 'native-child:boot-a', workRef: '["run-1","build:0"]', generation: 0 })
+  expect(row).toMatchObject({ reason: 'liveChild', producer: admission.producerFor('native-child'), workRef: '["run-1","build:0"]', generation: 0 })
+  expect(row.producer).toMatch(/^native-child:boot-a:[a-f0-9]{64}$/)
 
   // Opposite control: a run with NO build lease has no drain right; the fence refuses it.
   expect(await admission.forNativeChild(null).admit('run-unleased', 'build:0'))
