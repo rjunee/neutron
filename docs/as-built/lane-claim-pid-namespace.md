@@ -87,3 +87,20 @@ Optional external-provider, PTY and system-manager cases explicitly skipped by
 the suite remain unverified by this receipt. This final receipt-only addition
 does not transfer local evidence to a different source identity; exact publication
 head CI, deployment and a fresh unattended live build remain separate gates.
+
+Publication CI at `66f18e7a` subsequently failed the already-cancelled stalled
+transcript-open regression: the second submission was present, but its release
+count was sampled before completion. The test raced that completion against
+40 ms, asserted two releases, and only then awaited the second turn. The test
+now awaits the same completion before inspecting its release receipt, while
+the first transcript operation remains blocked. Both original turn budgets and
+all unknown/cleanup assertions remain unchanged; production code is unchanged.
+
+A controlled 80 ms delay in the second result read reproduced the old assertion
+failure (two releases expected, one observed). The causal assertion passed all
+seven stalled-transcript cases under that same delay. Suppressing the first
+slot's release still failed the second completion assertion within its original
+1,000 ms budget. Restored source passed all 93 acting-turn tests with 398
+assertions, and both runtime and root TypeScript checks passed. This necessary
+test correction requires renewed complete-gate and publication CI evidence;
+the earlier complete receipt does not cover this changed source.
