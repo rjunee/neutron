@@ -50,6 +50,24 @@ these focused results are not a whole-suite or deployment receipt. Independent
 review is complete; the shared-host full gate, CI and served acceptance remain
 outstanding.
 
+The first complete-gate attempt subsequently exited 1 and was incomplete:
+1,728 files assigned, 1,630 reported, with eight failed or incomplete chunks.
+It was not a baseline pass. Its publication failures exposed two stale fixture
+contracts. The orchestrator's command double returned success without writing a
+snapshot pack; its test-only adapter now translates symbolic fixture commit
+labels to a tiny real Git graph and executes actual pack, index, strict integrity
+and ancestry commands. Missing-work and unavailable-pack controls refuse through
+that same adapter. Existing lease, review and diagnostic assertions remain.
+The owned-PR retry fixture actually omitted the prior publication's note. It now
+tests both that refusal with an unchanged remote and a worker reconciliation
+that retains the note through merge. These fixture corrections do not change the
+production preservation guard. A new complete-gate receipt remains required.
+The fixture-focused rerun passed all 333 orchestrator tests, both fresh-branch
+consuming cases and both owned-PR retry cases, plus both TypeScript projects.
+The consuming owned-PR loss test went red when loss was allowed; the separate
+rewritten-replay consuming test went red when tree equivalence was rejected.
+Both mutations were removed and all four consuming cases passed again.
+
 Independent native review approved frozen preservation source
 `00d22cdd1bf117c03d5a89d3a815400ebad00b36`, including the reachable-object repair.
 Two bounded Fable attempts returned no verdict before their deadlines and were

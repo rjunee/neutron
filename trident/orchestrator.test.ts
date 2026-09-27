@@ -49,6 +49,8 @@ import { buildTridentDelivery, composeTerminalDelivery, type OutboundSink } from
 import { honourDiffOutput } from './testing/diff-output-host.ts'
 import { makeTridentRun } from './testing/make-trident-run.ts'
 import { fixtureDispatchAdmission } from './__tests__/dispatch-admission-fixture.ts'
+import { preservationFixtureHost } from './testing/preservation-host.ts'
+import { publishedWorkPreserved } from './gates/published-work.ts'
 
 /**
  * Trident v2 (Work Board Phase 2a exec-model) — the orchestrator step now FIRES
@@ -123,6 +125,7 @@ interface Harness {
 }
 
 function buildHarness(opts: {
+  preservation_graph?: 'preserved' | 'missing'
   prove_mutation?: Parameters<typeof buildTridentOrchestrator>[0]['prove_mutation']
   plan: (input: InnerLoopInput) => SimPlan
   hostResponder?: (cmd: string[]) => HostCommandResult
@@ -175,8 +178,11 @@ function buildHarness(opts: {
   store = new TridentRunStore(db, now)
   const sim = buildSimFirer(db, store, opts.plan)
   const preservationRefs = new Map<string, string>()
-  const host = async (cmd: string[]): Promise<HostCommandResult> => {
+  const snapshotHost = preservationFixtureHost(tmp, opts.preservation_graph)
+  const host: import('./merge.ts').RunHostCommand = async (cmd, cwd, env, timeout): Promise<HostCommandResult> => {
     hostCalls.push(cmd)
+    const snapshot = await snapshotHost(cmd, cwd, env, timeout)
+    if (snapshot !== undefined) return snapshot
     const joined = cmd.join(' ')
     const preservationRef = cmd.find(arg => arg.startsWith('refs/heads/trident-preserved/'))
     if (cmd.includes('ls-remote') && preservationRef) {
@@ -592,7 +598,24 @@ describe('project-driver gateway recovery', () => {
 })
 
 describe('G085 publication remote observation', () => {
-  for (const state of ['present', 'absent', 'unknown'] as const) {
+  test('the real snapshot fixture cannot authorize publication with an unavailable pack', async () => {
+    const fixture = preservationFixtureHost(tmp)
+    let scratch = '', calculated = false
+    const run: import('./merge.ts').RunHostCommand = async (...args) => {
+      const cmd = args[0]
+      if (cmd.includes('init')) scratch = cmd.at(-1)!
+      if (cmd.includes('index-pack')) rmSync(cmd.at(-1)!)
+      if (cmd.includes('merge-base')) calculated = true
+      const result = await fixture(...args)
+      if (!result) throw Error('Snapshot fixture did not own its command')
+      return result
+    }
+    expect((await publishedWorkPreserved(run, '/repo', 'b'.repeat(40), 'a'.repeat(40))).kind).toBe('unknown')
+    expect(calculated).toBe(false)
+    expect(scratch).not.toBe('')
+    expect(existsSync(scratch)).toBe(false)
+  })
+  for (const state of ['present', 'absent', 'unknown', 'lost'] as const) {
     test(`${state} controls publication and review dispatch`, async () => {
       const head = 'a'.repeat(40)
       const previous = 'b'.repeat(40)
@@ -600,6 +623,7 @@ describe('G085 publication remote observation', () => {
       let pushed = false
       let fires = 0
       const h = buildHarness({
+        preservation_graph: state === 'lost' ? 'missing' : 'preserved',
         plan: () => ++fires === 1
           ? { result: { verdict: 'REQUEST_CHANGES', branch: 'feat-x', publishRequested: true, publishHead: head } }
           : { result: { verdict: 'APPROVE', prNumber: 42, branch: 'feat-x' } },
@@ -626,6 +650,13 @@ describe('G085 publication remote observation', () => {
         expect(final.phase).toBe('failed')
         expect(final.failure_reason).toContain('read the remote state of')
         expect(pushes).toHaveLength(0)
+        expect(h.inputs).toHaveLength(1)
+        expect(h.refirePatches).toHaveLength(0)
+      } else if (state === 'lost') {
+        expect(final.phase).toBe('failed')
+        expect(final.failure_reason).toContain('discard previously published work')
+        expect(pushes).toHaveLength(0)
+        expect(pushed).toBe(false)
         expect(h.inputs).toHaveLength(1)
         expect(h.refirePatches).toHaveLength(0)
       } else {
@@ -747,7 +778,7 @@ describe('orchestrator — APPROVE → done → merge (server-gated)', () => {
     const head = 'a'.repeat(width)
     // The remote is BEHIND the local head, so this exercises the real lease push; a remote
     // already AT the head is the no-op-success path, tested below.
-    const stale = '9'.repeat(40)
+    const stale = '9'.repeat(width)
     let fires = 0
     let prLists = 0
     let lsRemotes = 0

@@ -4140,19 +4140,42 @@ test('an extra synthesis payload field still blocks review and leaves the PR ope
   expect(originMain.stdout.trim()).toBe(f.baseSha)
 }, 300_000)
 
-test('fresh retry rebuilds and republishes its prior open PR from a different real head', async () => {
+test.each(['missing', 'reconciled'] as const)('fresh retry with %s prior work rebuilds its owned open PR from a different real head', async mode => {
   const f = await fixture()
   const seeded = await seedPriorPublication(f, 1)
   expect(await gitOut(spawnCapture, seeded.worktree, ['rev-parse', 'HEAD^{commit}'])).toBe(f.baseSha)
   expect(seeded.priorHead).not.toBe(f.baseSha)
 
   const host = await createProjectBuildHost(seeded.options)
+  if (mode === 'reconciled') {
+    const runner = host.workers.build.runner
+    host.workers.build.runner = { ...runner, run: async (...args) => {
+      // The retry still starts from the pinned base. Its worker must reconcile
+      // already-published work before authoring the new note, not silently drop
+      // the prior process's content merely because it owns the same PR.
+      await gitOut(spawnCapture, seeded.worktree, ['merge', '--ff-only', seeded.priorHead])
+      expect(await gitOut(spawnCapture, seeded.worktree, ['rev-parse', 'HEAD'])).toBe(seeded.priorHead)
+      return runner.run(...args)
+    } }
+  }
   const outcome = await host.run({ mode: 'implementation', start: 'fresh' }, new AbortController().signal)
+  if (mode === 'missing') {
+    expect(outcome, why(f, outcome)).toMatchObject({ kind: 'unknown', phase: 'publish',
+      detail: expect.stringContaining('discard previously published work') })
+    expect(await gitOut(spawnCapture, f.origin, ['rev-parse', `refs/heads/${seeded.branch}^{commit}`])).toBe(seeded.priorHead)
+    expect(await gitOut(spawnCapture, f.origin, ['show', `refs/heads/${seeded.branch}:NOTES.md`])).toBe('seed\nprior publication')
+    expect(await gitOut(spawnCapture, f.origin, ['rev-parse', 'refs/heads/main^{commit}'])).toBe(f.baseSha)
+    expect(f.github.prs).toEqual([{ number: 1, state: 'OPEN', headRefName: seeded.branch, baseRefName: 'main' }])
+    expect(f.world.dispatches.map(dispatch => dispatch.role)).toEqual(['plan', 'build'])
+    expect(f.commands.some(argv => argv[0] === 'gh' && argv.includes('create'))).toBe(false)
+    return
+  }
   expect(outcome.kind, why(f, outcome)).toBe('merged')
 
   const finalHead = await gitOut(spawnCapture, f.origin, ['rev-parse', `refs/heads/${seeded.branch}^{commit}`])
   expect(finalHead).not.toBe(seeded.priorHead)
   expect(await gitOut(spawnCapture, f.origin, ['rev-parse', 'refs/heads/main^{commit}'])).toBe(finalHead)
+  expect(await gitOut(spawnCapture, f.origin, ['show', 'refs/heads/main:NOTES.md'])).toContain('prior publication\n')
   expect(f.github.prs).toEqual([{ number: 1, state: 'MERGED', headRefName: seeded.branch, baseRefName: 'main' }])
   expect(f.store.get(f.row.id)).toMatchObject({ pr: 1, published_pr: 1 })
   const roles = f.world.dispatches.map(dispatch => dispatch.role)
