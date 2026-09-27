@@ -370,6 +370,9 @@ test('buildWorktreeReaperLoop is immediate and uses the default descriptor', asy
   let repoCalls = 0
   let timerMs = 0
   let cleared = false
+  const commands: string[][] = []
+  let releaseSweep!: () => void
+  const sweepBlocked = new Promise<void>((resolve) => { releaseSweep = resolve })
   const options = {
     store: {
       listRepoPaths: () => {
@@ -379,7 +382,13 @@ test('buildWorktreeReaperLoop is immediate and uses the default descriptor', asy
       listNonTerminal: () => [],
       listBranchOwners: () => [],
     },
-    run_host: spawnCapture,
+    run_host: async (argv: string[]) => {
+      commands.push([...argv])
+      // This timer test must not launch a real process-signalling sweep. Hold
+      // its command response so startup and stop drainage are deterministic.
+      await sweepBlocked
+      return { ok: true, exit_code: 0, stdout: '{}', stderr: '' }
+    },
     proc_root: proc,
     setTimer: (_fn: () => void, ms: number) => {
       timerMs = ms
@@ -395,14 +404,25 @@ test('buildWorktreeReaperLoop is immediate and uses the default descriptor', asy
   expect(loop.describe().name).toBe('trident-worktree-reaper')
   expect(loop.describe().cadenceMs).toBe(DEFAULT_REAP_INTERVAL_MS)
   loop.start()
-  const deadline = Date.now() + 1_000
-  while (repoCalls < 2 && Date.now() < deadline) {
-    await new Promise((resolve) => setTimeout(resolve, 5))
+  try {
+    expect(repoCalls).toBe(1)
+    expect(commands).toEqual([
+      ['python3', join(dirname(new URL(import.meta.url).pathname), 'lane-processes.py'), 'sweep'],
+    ])
+    expect(timerMs).toBe(DEFAULT_REAP_INTERVAL_MS)
+    let stopped = false
+    const stopping = loop.stop().then(() => { stopped = true })
+    await Promise.resolve()
+    expect(cleared).toBe(true)
+    expect(stopped).toBe(false)
+    releaseSweep()
+    await stopping
+    expect(repoCalls).toBe(2)
+    expect(stopped).toBe(true)
+  } finally {
+    releaseSweep()
+    await loop.stop()
   }
-  expect(repoCalls).toBe(2)
-  expect(timerMs).toBe(DEFAULT_REAP_INTERVAL_MS)
-  await loop.stop()
-  expect(cleared).toBe(true)
 })
 
 test('workflow generation claims a matching worktree basename', async () => {
