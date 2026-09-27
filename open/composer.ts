@@ -1110,9 +1110,9 @@ export function buildOpenGraphComposer(
       }
       const credential = codexCredentialService.resolveProjectOwnerCredential(asOwnerHandle(owner_handle), projectId)
       return { cwd: joinPath(owner_home, 'Projects', projectId), ...credential, env }
-    }, undefined, undefined, async () => ({ cwd: owner_home,
+    }, undefined, undefined, async retainedHome => ({ cwd: owner_home,
       generalAuthorityPath: joinPath(owner_home, '.neutron-general-codex-owner.json'),
-      ...codexCredentialService.resolveGeneralOwnerCredential(asOwnerHandle(owner_handle)), env }))
+      ...codexCredentialService.resolveGeneralOwnerCredential(asOwnerHandle(owner_handle), retainedHome), env }))
     const codexOwnerProjects = (await projectSettingsStore.list(project_slug))
       .filter(project => resolveModelProvider(project.id).provider === 'openai-codex')
       .map(project => project.id)

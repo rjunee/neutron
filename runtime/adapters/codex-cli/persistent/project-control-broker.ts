@@ -366,12 +366,16 @@ export async function createProjectControlBroker(options: {
       let consumed = false
       return { status: 'prepared', lease: { ...facts,
         abort() { if (!consumed && retirement === token) { consumed = true; retirement = undefined } },
-        async retire(): Promise<NativeOwnerRetirement> {
+        async retire(beforeExit): Promise<NativeOwnerRetirement> {
           if (consumed || closed || retirement !== token) return { status: 'unknown', reason: 'Native retirement lease is no longer current' }
           consumed = true
           const final = await inspect()
           if (final.status !== 'idle') { if (retirement === token) retirement = undefined; return final }
           if (final.rolloutPath !== facts.rolloutPath) { retirement = undefined; return { status: 'unknown', reason: 'Native resume identity changed' } }
+          // Publish durable retirement intent only after the last idle census.
+          // A failed publication retains this lease but cannot kill the owner.
+          try { beforeExit?.() }
+          catch (error) { return { status: 'unknown', reason: error instanceof Error ? error.message : 'Native retirement preparation failed' } }
           try {
             journal.record('native-retirement')
             retiringProcess = true

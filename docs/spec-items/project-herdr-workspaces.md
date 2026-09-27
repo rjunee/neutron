@@ -126,6 +126,83 @@ Connecting that manager to conversation dispatch without coordinating scope-wide
 admission, live child/work evidence and exact old-owner retirement would block
 credential rotation. Optional adapter plumbing does not provide that handoff.
 
+### Native Codex account handoff
+
+Account selection and native conversation ownership are separate claims. Changing
+a selected seat, a credential file, or `CODEX_HOME` does not transfer an existing
+conversation. The account's refreshable credential stays in its one canonical
+home; transcript transfer must not copy or link credential material. A project
+still requires its explicit project grant: permission to use a global review
+seat is not permission to replace a project conversation's account.
+
+The implementation sequence is: reserve scope-wide admission; verify the target
+grant and identity; obtain complete native idle evidence and the exact old-owner
+retirement receipt; exclusively stage the original transcript in the target
+account's namespace; resume and attest the same native thread/session and the
+target account; only then publish the successor owner. Until that acknowledgement,
+the old owner is retired, not silently reusable, and the new one is not admitted.
+An ambiguous intermediate result stays reserved across restart. Existing owner
+records remain immutable evidence, not files to delete to make admission pass.
+The exact source binding and target are durably prepared before the retirement
+request. A clean authenticated busy refusal, corroborated by the unchanged live
+binding and absence of retirement markers, may record an explicit immutable
+abort. Unknown or lost replies never abort. Restart may finish preparation only
+from the exact completed retirement/death receipt; it cannot first wake the old
+account in an ordinary successor generation. This includes the crash boundary
+after retirement completes but before transcript staging is reserved.
+The retiring marker is published only after the final fenced native census is
+idle, immediately before process close, with no intervening asynchronous gap.
+Late-busy evidence creates no marker and permits the explicit abort above.
+Failure to publish the marker is unknown: retain reservation without closing
+the native owner. Canonical path aliases may name the same configured grant;
+normalization must not change account identity or admit an unconfigured home.
+
+General admission consumes the existing selected global seat as a candidate;
+selection is not itself ownership. Before retiring the retained owner, an
+on-demand metadata-only native read must report the expected backend account and
+explicit permission for ordinary included usage. Its process must have exited
+before successor launch. The successor repeats that check in its own native
+process. Missing windows, reset times and available reset credits do not establish
+permission. This is not a periodic generative probe or a new quota selector.
+
+The native path override is not itself identity: the installed protocol permits
+it to override a supplied thread id. Check the returned identity and an independent
+native read against the reserved predecessor. The transcript destination may
+change; the original conversation, project scope and history must not.
+
+- [ ] The native capability check proves same-thread/session/history continuation
+      between disposable homes with no credential file or upstream provider.
+      Same-home resume is a positive control; a missing target transcript must
+      not be mistaken for a successful transfer. Verify:
+      `runtime/adapters/codex-cli/persistent/project-owner-cross-home.smoke.ts`.
+- [ ] The consuming handoff checks both target grant and account identity and
+      rejects missing, changed, foreign or merely reviewer-scoped authority.
+      General and an actual project named `general` remain distinct.
+- [ ] Busy, pending native requests, descendants, raw input and unknown ownership
+      refuse retirement. A fully idle, exactly attested owner can transition.
+      Retirement and target admission share a scope reservation; a second caller
+      cannot start a competing owner between them.
+- [ ] Transcript transfer is reserved before writing and corroborated by the
+      completed retirement receipt, exact predecessor identity and content digest.
+      Existing foreign destinations, symlinks, changed source bytes and ambiguous
+      partial writes refuse. No credential bundle is copied or linked.
+- [ ] Resume preserves the native thread/session and original history, while
+      independently attesting the selected target account. A successful RPC for a
+      different thread, account or project cannot commit the owner pointer.
+- [ ] Failure or restart at every transition boundary neither resurrects the
+      retired owner nor creates a second one. A completed transition remains
+      adoptable with its immutable predecessor and successor evidence.
+
+The General implementation and native capability measurement are recorded in
+`docs/as-built/codex-general-account-handoff.md`. These criteria do not claim that
+project-account rotation or authenticated production switching has been verified.
+The consuming checks are `open/__tests__/codex-account-handoff.test.ts` and the
+`project-owner-account-handoff`, `project-account-probe`,
+`project-control-bootstrap-handoff`, `project-owner-helper-retirement` and
+`project-control-retirement` tests under
+`runtime/adapters/codex-cli/persistent/`. Project-wide grant selection and Claude's
+complete native idle authority remain outside this General handoff slice.
+
 Cross-provider headless workers currently consume pipes and process exit status
 (`runtime/workers/claude-headless.ts:158-164`, `runtime/workers/codex-headless.ts:242-246`).
 Herdr supplies rendered screens and no exit code. Their terminal placement must

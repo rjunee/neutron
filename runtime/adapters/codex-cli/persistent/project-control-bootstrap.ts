@@ -13,6 +13,8 @@ import { OWNER_INSTALLED_GATEWAY_TOOL } from './owner-installed-gateway.ts'
 import { helperIdentity, type HelperIdentity } from './project-owner-helper-protocol.ts'
 import { validateOwnerResume, type CodexOwnerResume, type CodexOwnerRetirementReceipt } from './project-owner-retirement.ts'
 import { ownerNativeStopObservation } from './project-owner-helper-lifetime.ts'
+import { readAccountHandoff } from './project-owner-account-handoff.ts'
+import { attestCodexAccountViability } from './project-account-probe.ts'
 
 type Rpc = Record<string, unknown>
 const object = (value: unknown): value is Rpc => typeof value === 'object' && value !== null && !Array.isArray(value)
@@ -35,6 +37,8 @@ export interface CodexOwnerBindingFacts {
   readonly generation: number
   readonly brokerGeneration: number
   readonly credentialFingerprint: string
+  /** Identity-bound native quota read for an acknowledged account handoff. */
+  readonly credentialIdentity?: string
   readonly modelProvider: string
   readonly controlSocketPath: string
   readonly nativeMetadata: Readonly<{ sessionId: string; source: string; originator: string }>
@@ -217,13 +221,22 @@ export async function bootstrapCodexOwner(options: {
     const account = await native('account/read', {})
     // Native account evidence is hashed; no email, account ID, or credential is journaled.
     const credentialFingerprint = createHash('sha256').update(JSON.stringify(account)).digest('hex')
+    const handoff = options.resume?.handoff ? readAccountHandoff(options.resume.handoff) : undefined
+    let credentialIdentity: string | undefined
+    if (handoff) {
+      // Metadata only: no thread, turn, reset-credit redemption, or synthetic prompt.
+      // The backend's explicit permission is authoritative; percentages are not.
+      const quota = await native('account/rateLimits/read', { excludeResetCreditDetails: true, supportsLunaReserve: false })
+      credentialIdentity = attestCodexAccountViability(account, quota, handoff.target.credential)
+    }
     const token = randomBytes(32).toString('hex')
     const bind = async (response: Rpc): Promise<void> => {
       const thread = response.thread
       while ((!nativeThread || !tui || !terminalIdentity) && !closed) await Bun.sleep(5)
       if (closed) throw new Error('Owner closed before terminal binding')
       if (!upstream!.processIdentity) throw new Error('Native owner process identity is unavailable')
-      validateBootstrapThread(thread, nativeThread, options.cwd, options.codexHome, options.resume?.receipt.facts)
+      validateBootstrapThread(thread, nativeThread, options.cwd, options.codexHome,
+        handoff ? { ...handoff.receipt.facts, rolloutPath: handoff.rolloutPath } : options.resume?.receipt.facts)
       validateBootstrapMultiAgent(await native('experimentalFeature/list', { threadId: thread.id, limit: 1000 }))
       const transport: ProjectControlTransport = {
         listen(receive, disconnect) { upstreamReceive = receive; upstreamDisconnect = disconnect },
@@ -241,6 +254,7 @@ export async function bootstrapCodexOwner(options: {
         cwd: options.cwd, codexHome: options.codexHome, rolloutPath: thread.path,
         paneHandle: tui!.paneHandle ?? `owned-pty:${tui!.pid}`, bindingRevision: randomBytes(32).toString('hex'),
         generation: journal.generation, brokerGeneration: broker.state().generation, credentialFingerprint,
+        ...(credentialIdentity ? { credentialIdentity } : {}),
         modelProvider: thread.modelProvider, controlSocketPath: options.socketPath,
         processes: Object.freeze({ native: upstream!.processIdentity, terminal: terminalIdentity! }),
         capabilities: Object.freeze({ multiAgentV2: true, evidence: 'native-thread-feature-report', ownerInstalledMcp: true }),
@@ -276,9 +290,8 @@ export async function bootstrapCodexOwner(options: {
               prepared.lease.abort()
               return { status: 'unknown', reason: 'Native retirement transcript does not match the bound owner' }
             }
-            try { beforeExit?.() } catch (error) { prepared.lease.abort(); throw error }
             retiring = true
-            const retired = await prepared.lease.retire()
+            const retired = await prepared.lease.retire(beforeExit)
             if (retired.status !== 'retired') {
               retiring = false
               if (broker!.state().phase === 'closed') stop(new Error('Native retirement lost its transport'))
@@ -332,7 +345,7 @@ export async function bootstrapCodexOwner(options: {
           || !admitsBootstrapConfig(params.config)) throw new Error('Bootstrap resume scope refused')
         validateProjectControlScope('thread/resume', params, options.cwd, message => new Error(message))
         started = true; journal.record('thread/resume')
-        const response = await native(raw.method, params)
+        const response = await native(raw.method, handoff ? { ...params, path: handoff.rolloutPath } : params)
         // Cold resume emits status changes, not thread/started. Corroborate the
         // response with an independent native read and the immutable predecessor.
         const observed = await native('thread/read', { threadId: expected.threadId, includeTurns: false })

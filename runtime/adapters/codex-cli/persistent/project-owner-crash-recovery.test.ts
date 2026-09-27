@@ -1,6 +1,6 @@
 import { afterEach, expect, test } from 'bun:test'
 import { Database } from 'bun:sqlite'
-import { chmodSync, existsSync, mkdirSync, mkdtempSync, readFileSync, rmSync, writeFileSync } from 'node:fs'
+import { chmodSync, existsSync, mkdirSync, mkdtempSync, readFileSync, rmSync, unlinkSync, writeFileSync } from 'node:fs'
 import { tmpdir } from 'node:os'
 import { join } from 'node:path'
 import { assertCrashedOwnerDead, assertNoOtherCodexOwner, observeOwnerNativeStop, readCrashedOwner, recordCrashedOwner, type OwnerCrashProbes, type OwnerProcessCensus } from './project-owner-crash-recovery.ts'
@@ -51,6 +51,18 @@ test('proven same-boot crash preserves exact transcript and immutable predecesso
   expect(readFileSync(join(f.dir, '.neutron-owner-authority.json'), 'utf8')).toBe(before)
   expect(readFileSync(f.authority.facts.rolloutPath, 'utf8')).toBe('existing conversation\n')
   expect(existsSync(join(f.dir, '.neutron-owner-retired.json'))).toBe(false)
+})
+
+test('a descriptor without sealed predecessor authority cannot create or consume a crash receipt', () => {
+  const f = fixture()
+  expect(recordCrashedOwner(f.dir, f.probe, f.authority).facts).toEqual(f.authority.facts)
+  const receipt = readFileSync(join(f.dir, '.neutron-owner-crashed.json'), 'utf8')
+  unlinkSync(join(f.dir, '.neutron-owner-authority.json'))
+  expect(() => recordCrashedOwner(f.dir, f.probe, f.authority)).toThrow()
+  expect(() => readCrashedOwner(f.dir, f.probe)).toThrow()
+  expect(readFileSync(join(f.dir, '.neutron-owner-crashed.json'), 'utf8')).toBe(receipt)
+  f.seal()
+  expect(readCrashedOwner(f.dir, f.probe).facts).toEqual(f.authority.facts)
 })
 
 test('legacy attestation resumes after proven reboot, but same-boot death lacks required evidence', () => {

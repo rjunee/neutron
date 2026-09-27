@@ -1,5 +1,5 @@
 import { afterEach, expect, test } from 'bun:test'
-import { existsSync, mkdtempSync, readFileSync, rmSync, unlinkSync, writeFileSync } from 'node:fs'
+import { existsSync, mkdtempSync, readFileSync, realpathSync, rmSync, symlinkSync, unlinkSync, writeFileSync } from 'node:fs'
 import { tmpdir } from 'node:os'
 import { join } from 'node:path'
 import { seedMigratedDb } from '../../tests/support/migrated-db.ts'
@@ -15,17 +15,33 @@ const owner = asOwnerHandle('owner')
 const auth = (account = 'account-one', revision = 1) => JSON.stringify({ tokens: {
   account_id: account, access_token: `access-${revision}`, refresh_token: `refresh-${revision}`,
 } })
-function fixture() {
+function fixture(alias = false) {
   const root = mkdtempSync(join(tmpdir(), 'general-codex-credential-'))
   const path = join(root, 'project.db'); seedMigratedDb(path)
   const db = ProjectDb.open(path)
   const store = new ProjectCredentialStore(db, { crypto: new SecretsStore({ data_dir: root, db }) })
   const rotation = new SqliteCodexRotationStore(db)
-  const codexHome = join(root, 'codex')
+  const aliasRoot = join(root, 'alias')
+  if (alias) symlinkSync(root, aliasRoot)
+  const codexHome = join(alias ? aliasRoot : root, 'codex')
   const service = new CodexCredentialService({ store, rotation, codexHome, probe: async () => ({ kind: 'ok', httpStatus: 200 }) })
   cleanup.push(() => { db.close(); rmSync(root, { recursive: true, force: true }) })
   return { service, rotation, codexHome, store }
 }
+
+test('retained canonical home resolves only its configured aliased global seat', async () => {
+  const f = fixture(true)
+  await f.service.connectAccount(owner, auth(), { slot: 'default' })
+  await f.service.connectAccount(owner, auth('alternate-account'), { slot: 'alternate' })
+  f.rotation.setActiveSlot(owner, 'alternate', Date.now())
+  const retained = f.service.resolveGeneralOwnerCredential(owner, realpathSync(f.codexHome))
+  expect(retained.codexHome).toBe(realpathSync(f.codexHome))
+  expect(retained.credentialIdentity).not.toBe(f.service.resolveGeneralOwnerCredential(owner).credentialIdentity)
+  expect(f.rotation.getActiveSlot(owner)).toBe('alternate')
+  expect(() => f.service.resolveGeneralOwnerCredential(owner, realpathSync(join(f.codexHome, '..')))).toThrow('configured global seat')
+  writeFileSync(join(f.codexHome, 'auth.json'), auth('foreign'))
+  expect(() => f.service.resolveGeneralOwnerCredential(owner, realpathSync(f.codexHome))).toThrow('in place')
+})
 
 test('General reuses the configured credential path and accepts refresh without copying; project grants stay explicit', async () => {
   const f = fixture()
@@ -75,4 +91,20 @@ test('removed and expired selected global grants refuse despite an available alt
   expect(() => f.service.resolveGeneralOwnerCredential(owner)).toThrow()
   f.rotation.setActiveSlot(owner, 'alternate', Date.now())
   expect(f.service.resolveGeneralOwnerCredential(owner).codexHome).toBe(f.service.slotHome('alternate'))
+})
+
+test('retained General lookup names only its configured canonical account and never copies or broadens a project grant', async () => {
+  const f = fixture()
+  await f.service.connectAccount(owner, auth('first'), { slot: 'default' })
+  await f.service.connectAccount(owner, auth('second'), { slot: 'alternate' })
+  f.rotation.setActiveSlot(owner, 'alternate', Date.now())
+  f.rotation.setCooldown(owner, 'default', { cooling_until: Date.now(), cooling_reason: 'unauthorized' })
+  const bytes = readFileSync(join(f.codexHome, 'auth.json'), 'utf8')
+  expect(f.service.resolveGeneralOwnerCredential(owner).codexHome).toBe(f.service.slotHome('alternate'))
+  expect(f.service.resolveGeneralOwnerCredential(owner, f.codexHome).codexHome).toBe(f.codexHome)
+  expect(readFileSync(join(f.codexHome, 'auth.json'), 'utf8')).toBe(bytes)
+  expect(() => f.service.resolveGeneralOwnerCredential(owner, join(f.codexHome, 'foreign'))).toThrow('configured global')
+  expect(() => f.service.resolveProjectOwnerCredential(owner, 'general')).toThrow('Connect')
+  writeFileSync(join(f.codexHome, 'auth.json'), auth('foreign'))
+  expect(() => f.service.resolveGeneralOwnerCredential(owner, f.codexHome)).toThrow('in place')
 })

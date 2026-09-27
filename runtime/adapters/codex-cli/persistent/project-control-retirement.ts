@@ -8,7 +8,7 @@ export interface NativeRetirementFacts { generation: number; epoch: number; thre
 export type NativeOwnerRetirement = RetirementRefusal | (NativeRetirementFacts & { status: 'retired'; exit: NativeProcessExit })
 export type PreparedNativeRetirement = RetirementRefusal | { status: 'prepared'; lease: NativeRetirementFacts & {
   abort(): void
-  retire(): Promise<NativeOwnerRetirement>
+  retire(beforeExit?: () => void): Promise<NativeOwnerRetirement>
 } }
 
 class CensusRefusal extends Error {

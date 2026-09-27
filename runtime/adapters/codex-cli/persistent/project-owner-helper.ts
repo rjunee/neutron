@@ -1,6 +1,6 @@
-import { randomBytes } from 'node:crypto'
+import { createHash, randomBytes } from 'node:crypto'
 import { chmodSync, existsSync, readFileSync, unlinkSync, writeFileSync } from 'node:fs'
-import { join } from 'node:path'
+import { dirname, join } from 'node:path'
 import { bootstrapCodexOwner, readCodexOwnerBinding, type CodexOwnerBootstrap } from './project-control-bootstrap.ts'
 import { BROKER_MAX_MESSAGE_BYTES } from './project-control-broker-transport.ts'
 import { OwnerHelperRegistry } from './project-owner-helper-registry.ts'
@@ -16,12 +16,18 @@ export async function startCodexOwnerHelper(options: Parameters<typeof bootstrap
   const stateDirectory = options.ownerStateDirectory ?? options.codexHome
   // Keep Unix socket lengths bounded; journals/descriptors remain immutable in
   // generation directories, while this exact dead predecessor socket is reused.
-  const socketPath = join(options.codexHome, '.neutron-owner-helper.sock')
+  let socketPath = join(options.codexHome, options.resume?.handoff
+    ? `.neutron-handoff-${createHash('sha256').update(stateDirectory).digest('hex').slice(0, 12)}.sock` : '.neutron-owner-helper.sock')
   const descriptorPath = join(stateDirectory, '.neutron-owner-helper.json')
   if (options.resume) {
     validateOwnerResume(stateDirectory, options.resume, options.cwd, options.codexHome)
+    const previous = JSON.parse(readFileSync(join(options.resume.predecessorDirectory, '.neutron-owner-authority.json'), 'utf8')) as OwnerHelperDescriptor
+    if (!options.resume.handoff) {
+      if (dirname(previous.socketPath) !== options.codexHome) throw new Error('Retired helper socket is outside its account home')
+      socketPath = previous.socketPath
+    }
     if (existsSync(socketPath)) {
-      const previous = JSON.parse(readFileSync(join(options.resume.predecessorDirectory, '.neutron-owner-authority.json'), 'utf8')) as OwnerHelperDescriptor
+      if (options.resume.handoff) throw new Error('Reserved account helper socket already exists')
       if (socketIdentity(socketPath) !== previous.socketIdentity) throw new Error('Retired helper socket identity changed')
       unlinkSync(socketPath)
     }

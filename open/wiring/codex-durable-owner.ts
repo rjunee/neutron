@@ -9,6 +9,7 @@ import { createHerdrRpc } from '@neutronai/runtime/adapters/claude-code/persiste
 import { readAccountId, validateCodexSubscriptionAuth } from '@neutronai/trident/codex-auth.ts'
 import { nextOwnerDirectory, readCompletedOwnerRetirement, type CodexOwnerResume } from '@neutronai/runtime/adapters/codex-cli/persistent/project-owner-retirement.ts'
 import { observeOwnerNativeStop, readCrashedOwner, recordCrashedOwner } from '@neutronai/runtime/adapters/codex-cli/persistent/project-owner-crash-recovery.ts'
+import { acknowledgeAccountHandoff, readGeneralOwnerAuthority, stageAccountHandoff } from '@neutronai/runtime/adapters/codex-cli/persistent/project-owner-account-handoff.ts'
 
 export type OwnerLaunch = Parameters<typeof bootstrapCodexOwner>[0] & { projectId: string | null; generalAuthorityPath?: string }
 
@@ -36,11 +37,11 @@ export function recoverDurableOwnerRetirement(stateDirectory: string, expected: 
   }
 }
 
-export function locateDurableOwnerGeneration(codexHome: string, cwd: string): {
+export function locateDurableOwnerGeneration(codexHome: string, cwd: string, rootDirectory = codexHome, initialResume?: CodexOwnerResume): {
   stateDirectory: string; resume?: CodexOwnerResume; predecessors: string[]
 } {
-  let stateDirectory = codexHome
-  let resume: CodexOwnerResume | undefined
+  let stateDirectory = rootDirectory
+  let resume: CodexOwnerResume | undefined = initialResume
   const predecessors: string[] = []
   while (durableOwnerPathExists(join(stateDirectory, '.neutron-owner-retired.json'))
     || durableOwnerPathExists(join(stateDirectory, '.neutron-owner-crashed.json'))) {
@@ -68,7 +69,15 @@ export function codexOwnerCredentialIdentity(bytes: string): string {
  * positively dead, sealed owners resume only in their reserved next generation. */
 export async function openDurableCodexOwner(options: OwnerLaunch): Promise<CodexOwnerAttachment> {
   assertOwnerScope(options.codexHome, options.projectId)
-  const { stateDirectory, resume, predecessors } = locateDurableOwnerGeneration(options.codexHome, options.cwd)
+  const general = options.projectId === null && options.generalAuthorityPath
+    ? readGeneralOwnerAuthority(options.generalAuthorityPath) : undefined
+  if (general?.preparing) throw new Error('General account retirement preparation requires corroborated completion before owner admission')
+  if (general && (general.scope.cwd !== options.cwd || general.scope.codexHome !== options.codexHome)) {
+    throw new Error('General owner credential or directory changed; explicit reconciliation required')
+  }
+  const initialResume = general?.pending ? stageAccountHandoff(general.pending.locator) : undefined
+  const { stateDirectory, resume, predecessors } = locateDurableOwnerGeneration(options.codexHome, options.cwd, general?.rootDirectory, initialResume)
+  if (general?.pending && stateDirectory !== general.rootDirectory) throw new Error('Unacknowledged account successor needs explicit reconciliation')
   if (resume) {
     mkdirSync(stateDirectory, { recursive: true, mode: 0o700 })
     privatePath(stateDirectory, 'directory')
@@ -98,13 +107,14 @@ export async function openDurableCodexOwner(options: OwnerLaunch): Promise<Codex
     try { writeFileSync(path, JSON.stringify(scope), { flag: 'wx', mode: 0o600 }) }
     catch (error) { if ((error as NodeJS.ErrnoException).code !== 'EEXIST') throw error }
     privatePath(path, 'file')
-    if (!isDeepStrictEqual(JSON.parse(readFileSync(path, 'utf8')), scope)) {
+    if (!isDeepStrictEqual(readGeneralOwnerAuthority(path)?.scope, scope)) {
       throw new Error('General owner credential or directory changed; explicit reconciliation required')
     }
   }
   let authority: ReturnType<typeof readOwnerHelperDescriptor> | undefined
   let launchedPid: number | undefined
   const recoverStoppedOwner = async (error: unknown, expected = authority): Promise<CodexOwnerAttachment> => {
+    if (general?.pending) throw error
     if (!expected || launchedPid !== undefined) throw error
     const deadline = Date.now() + (options.timeoutMs ?? 30_000)
     let draining = false
@@ -179,6 +189,10 @@ export async function openDurableCodexOwner(options: OwnerLaunch): Promise<Codex
   try {
     readCodexOwnerBinding(owner.binding)
     if (!authority) writeFileSync(authorityPath, JSON.stringify(descriptor), { flag: 'wx', mode: 0o600 })
+    if (general?.pending) {
+      if (codexOwnerCredentialIdentity(readFileSync(credentialPath, 'utf8')) !== scope.credential) throw new Error('General target credential changed during native acknowledgement')
+      acknowledgeAccountHandoff(general.pending.locator, readCodexOwnerBinding(owner.binding))
+    }
     return { ...owner,
       recoveryKind: launchedPid !== undefined && resume ? 'resumed' : 'adopted',
       recoverRetirement: () => recoverDurableOwnerRetirement(stateDirectory, descriptor.facts),
