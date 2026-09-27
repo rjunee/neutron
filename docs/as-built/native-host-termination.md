@@ -80,4 +80,19 @@ the known-present neighbor control. Both mutants retain the valid absent case.
 The actual dual-entrypoint regression passes seven tests with 20 assertions,
 and the unchanged authority guards pass 20 tests with 57 assertions. An early
 nested-runtime fixture crash was discarded as fixture failure, not counted as
-mutation evidence. The final combined gate remains required on this correction.
+mutation evidence. A final combined gate was required on this correction.
+
+That final gate completed with exit 0 at clean implementation revision
+`c1f8f958600d6f804c3893dba717ad08fc706b0f`, using
+`python3 -B trident/process-test-isolation.py -- bash scripts/check-shared-host.sh`.
+All 51 TypeScript configurations passed, explicitly including root and Trident.
+All 1,725 declared, discovered, assigned and executed files were accounted for:
+1,489 general, 22 database, 43 device and 171 HTTP files; all 18 partitions passed.
+The actual `open/__tests__/project-build-e2e.test.ts` consuming surface executed,
+and the previously failing dual-entrypoint control passed in the HTTP partition.
+The source hashes and worktree were unchanged before and after this gate. This
+receipt identifies the tested implementation revision, not a later publication
+head; exact-head CI remains required. Independent Astra and bounded Fable reviews
+approved the recovery implementation and final harness correction. No live
+preparation, physical restart, deployment restoration or unattended merge follows
+from these offline results.
