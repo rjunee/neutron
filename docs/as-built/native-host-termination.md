@@ -96,3 +96,25 @@ head; exact-head CI remains required. Independent Astra and bounded Fable review
 approved the recovery implementation and final harness correction. No live
 preparation, physical restart, deployment restoration or unattended merge follows
 from these offline results.
+
+Publication CI subsequently rejected the operator bridge's bare `console.log`
+under the existing console guard. The necessary repair at
+`open/prepare-native-host-termination.ts:49` writes the same newline-terminated
+JSON directly to stdout, following the existing machine-output convention at
+`open/diagnostics-cli-impl.ts:228`. The signed-input, configuration, database and
+admission checks and the exit-code mapping are unchanged. No guard exemption or
+logger prefix was added.
+
+On the repaired source, the actual `bash scripts/ci/lint.sh` completed with exit
+0, including zero console violations. The native-host termination and protected
+authority test files passed all 53 tests with 203 assertions; root and Trident
+TypeScript checks passed. The configured-preparation positive control at
+`open/wiring/__tests__/native-host-termination.test.ts:68` accepts valid signed
+evidence, and its actual CLI refusal checks at lines 79–84 require exit one,
+exact `{"status":"refused"}` plus newline, and empty stderr. An independent
+mutation adding an invalid stdout prefix failed the exact-output assertion at
+line 83; restoring the source passed the operator test with 13 assertions.
+The repaired CLI source SHA-256 is
+`8e7d51d666ef8296ecb92fbcd652b5415ce0cc8babf606eb8fa4ab8410cea501`.
+These focused checks do not transfer the earlier combined-gate receipt to the
+changed source; publication CI must validate the repaired head.

@@ -46,6 +46,6 @@ if (import.meta.main) {
   try {
     if (process.argv.length === 2) prepared = await prepareConfiguredNativeHostTermination(await readHostTerminationPreparation(process.stdin))
   } catch { /* Refusal deliberately does not print signed evidence or local paths. */ }
-  console.log(JSON.stringify({ status: prepared ? 'prepared' : 'refused' }))
+  process.stdout.write(JSON.stringify({ status: prepared ? 'prepared' : 'refused' }) + '\n')
   process.exitCode = prepared ? 0 : 1
 }
