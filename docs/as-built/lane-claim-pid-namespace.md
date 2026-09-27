@@ -104,3 +104,21 @@ slot's release still failed the second completion assertion within its original
 assertions, and both runtime and root TypeScript checks passed. This necessary
 test correction requires renewed complete-gate and publication CI evidence;
 the earlier complete receipt does not cover this changed source.
+
+Renewed complete validation passed on clean tested revision
+`7a114b7e93780794018757f9f6a56b0651d05643` with actual exit zero:
+`python3 -B trident/process-test-isolation.py -- bash scripts/check-shared-host.sh`.
+The verified private PID/proc boundary ran as the physical unprivileged identity.
+All 51 TypeScript configurations passed, including root and Trident. All 1,727
+declared, Bun-discovered, assigned and executed test files completed across
+18 green lanes: 1,491 general, 22 database, 43 device and 171 real-HTTP files.
+The consuming project-build E2E and corrected already-cancelled transcript case
+both executed successfully. The before/after source aggregate remained
+`83cf8ff489a125580e612b461407329f5bf95891ed310f8ae56bb3a26a86e13f`.
+The complete log SHA-256 is
+`9b95f916de6bdf98a5a51112a80fcdb5c4bb6f3584aa8582cd9c1eb382be7c25`.
+
+Independent native review and a bounded one-turn Fable review approved the
+causal fixture correction. This final receipt addition is not a transfer of
+the tested identity: exact publication-head CI, deployment controls and the
+fresh unattended live merge still remain to be proved.
