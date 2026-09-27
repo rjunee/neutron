@@ -90,6 +90,15 @@ spans carry unknown tokens unless a provider actually attributed usage.
 - [ ] Lifecycle text never substitutes for work status. Fresh explicit provider
       running, pending, recently ended work and unknown liveness remain distinct.
       Verify stale, invalid, future and missing-end cases in consuming tests.
+- [ ] Each PR distinguishes its GitHub opened timestamp from the first observed
+      work timestamp. Both render in the browser's local timezone with a date and
+      12-hour AM/PM time. Every phase exposes its recorded start and completion
+      timestamps in the same format; an unrecorded completion explicitly stays
+      unknown. Missing PR metadata never borrows a work timestamp, and an earlier
+      work span never moves the PR's opened timestamp. Refresh preserves local
+      formatting and phase details. Verify positive and missing/invalid timestamp
+      controls in `trident/build-timeline.test.ts`,
+      `trident/build-timeline-html.test.ts` and the popover consuming tests.
 - [ ] Native direct command spans use recorded start/end, explicit time-scoped PR
       mapping and invoking model context; absent context stays unknown. Explicit
       forward phase records support planning, building, fixing, review, tests,
