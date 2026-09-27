@@ -243,6 +243,19 @@ export interface CodexConnectResult {
   error?: string
 }
 
+export type CodexOperatorResult =
+  | { ok: true; changed: boolean; active: string | null; accounts: string[];
+      status: 'rotated' | 'already_active' | 'freed' | 'already_free' | 'adopted' | 'already_adopted'; from?: string | null; to?: string }
+  | { ok: false; code: string; error: string }
+
+export interface CodexAdoptionInitialState {
+  label?: string
+  coolingUntil?: number
+  usageSince?: number
+  /** Explicitly retain the live default home as selected; never force an existing pointer. */
+  active?: boolean
+}
+
 /** Status + which scope supplied the resolved credential (project vs global). */
 export interface CodexStatusResult extends CodexStatusDetail {
   /** The scope that supplied the resolved credential, or null when unset. */
@@ -337,7 +350,7 @@ export interface CodexAccountSummary {
 
 export class CodexCredentialService {
   /**
-   * One in-flight `connectAccount` per owner, serialized.
+   * One in-flight account mutation per owner, serialized.
    *
    * The duplicate-account guard reads the existing seats and THEN writes the new
    * one. Two connects for the same ChatGPT account under different seat names can
@@ -371,7 +384,8 @@ export class CodexCredentialService {
    * IN-PROCESS AND DELIBERATELY NOT PERSISTED. The durable half of a `revoked`
    * verdict is the `unauthorized` cooldown this writes into the rotation store —
    * a state that already exists, already survives a restart, and is already
-   * cleared only by a reconnect. Persisting the cache too would be a second
+   * cleared by reconnect, a successful probe, or explicit operator release.
+   * Persisting the cache too would be a second
    * source of truth for the same fact, and the two would disagree the first time
    * one was written without the other.
    */
@@ -829,6 +843,7 @@ export class CodexCredentialService {
    */
   async disconnect(owner_slug: OwnerHandle, target?: CodexTarget): Promise<{ ok: boolean }> {
     const { scope, project_id } = this.normalizeTarget(target)
+    if (scope === 'global') return this.removeAccount(owner_slug, DEFAULT_SLOT)
     this.homeFor(scope, project_id)
     const removed = await this.store.delete(owner_slug, project_id, CODEX_CREDENTIAL_SERVICE)
     removeCodexAuth(this.homeFor(scope, project_id))
@@ -1052,8 +1067,8 @@ export class CodexCredentialService {
     // a week-old file — the inverse of the bug above and just as wrong.
     //
     // `unauthorized` is never cleared here. A revoked refresh token is not a
-    // usage state and no amount of usage evidence repairs it; only a reconnect
-    // does, which is why that reason ignores the clock in `isCooling`.
+    // usage state and no amount of usage evidence repairs it. Reconnection,
+    // successful probing and explicit operator release remain separate actions.
     const fresh = outcome.snapshot.windows.some((w) => !w.expired)
     if (!fresh) return
     if (current === undefined || current.cooling_until === null) return
@@ -1183,6 +1198,10 @@ export class CodexCredentialService {
     pasted: unknown,
     opts?: { slot?: string; label?: string | null },
   ): Promise<CodexConnectResult & { slot?: string; replaced?: boolean }> {
+    return this.serializeAccountMutation(owner_slug, () => this.connectAccountSerialized(owner_slug, pasted, opts))
+  }
+
+  private async serializeAccountMutation<T>(owner_slug: OwnerHandle, action: () => Promise<T>): Promise<T> {
     // Serialize per owner so the duplicate check and the write that follows it
     // cannot interleave with another connect. Chained rather than locked: the
     // previous call's REJECTION must not poison the queue, hence the catch.
@@ -1192,7 +1211,7 @@ export class CodexCredentialService {
     // queue for everyone behind it.
     const run = prior
       .catch(() => undefined)
-      .then(() => this.connectAccountSerialized(owner_slug, pasted, opts))
+      .then(action)
     const tail = run.catch(() => undefined)
     this.connectChain.set(key, tail)
     try {
@@ -1202,6 +1221,147 @@ export class CodexCredentialService {
       // of the process and a queued caller cannot lose its predecessor.
       if (this.connectChain.get(key) === tail) this.connectChain.delete(key)
     }
+  }
+
+  /** Stored selection and configured seats, without harvesting, probing or selecting. */
+  accountSelection(owner: OwnerHandle): {
+    active: string | null
+    accounts: { slot: string; label: string | null; cooling_until: number | null; cooling_reason: SlotRecord['cooling_reason'] }[]
+  } {
+    const states = this.rotation.listSlots(owner)
+    return { active: this.rotation.getActiveSlot(owner), accounts: this.store.listGlobal(owner).flatMap(meta => {
+      const slot = codexServiceSlot(meta.service)
+      if (slot === null) return []
+      const state = states.find(s => s.slot === slot)
+      return [{ slot, label: state?.label ?? meta.label, cooling_until: state?.cooling_until ?? null, cooling_reason: state?.cooling_reason ?? null }]
+    }) }
+  }
+
+  /** Explicit operator selection. Only a named target overrides its cooling. */
+  async rotateAccount(owner: OwnerHandle, opts: { to?: string } = {}): Promise<CodexOperatorResult> {
+    return this.serializeAccountMutation(owner, async () => {
+      const requested = opts.to === undefined ? undefined : normalizeSlot(opts.to)
+      if (requested === null) return { ok: false, code: 'invalid_account', error: 'Invalid Codex account slot' }
+      await Promise.all([...this.livenessInflight.entries()].filter(([key]) => key.startsWith(`${owner}|`)).map(([, job]) => job))
+      const slots = this.syncSlots(owner)
+      const before = this.rotation.getActiveSlot(owner)
+      const incumbent = before ?? slots[0]?.slot ?? null
+      if (incumbent === null) return { ok: false, code: 'codex_not_connected', error: 'No Codex accounts are connected' }
+      const now = this.now()
+      const hasUsableCustody = (slot: string): boolean => {
+        const stored = this.store.resolve(owner, undefined, codexSlotService(slot))
+        const disk = readMaterializedAuth(this.slotHome(slot))
+        return stored !== null && validateCodexSubscriptionAuth(stored.plaintext, this.now).ok &&
+          (disk === null || (validateCodexSubscriptionAuth(disk, this.now).ok && readAccountId(disk) === readAccountId(stored.plaintext)))
+      }
+      // Skip the incumbent in this selection only; operator Codex rotation
+      // preserves the departure's stored availability. Unusable grants must not
+      // hide a later eligible successor; the exclusions never change custody.
+      const candidates = requested === undefined
+        ? slots.filter(s => s.slot === incumbent || (!isCooling(s, now) && hasUsableCustody(s.slot)))
+        : []
+      const selected = requested === undefined
+        ? selectNextSlot(candidates.map(s => s.slot === incumbent ? { ...s, cooling_until: now + 1 } : s), incumbent, now)
+        : null
+      const target = requested ?? (selected?.exhausted === false ? selected.slot : null)
+      if (target === null) return { ok: false, code: 'no_eligible_account', error: 'No other Codex account is eligible' }
+      if (!slots.some(s => s.slot === target)) return { ok: false, code: 'codex_not_connected', error: 'Unknown Codex account' }
+      if (!hasUsableCustody(target)) {
+        return { ok: false, code: 'account_custody_conflict', error: 'Target Codex credential is unavailable or has conflicting identity' }
+      }
+      const targetState = this.rotation.listSlots(owner).find(s => s.slot === target)
+      const cachedRevoked = this.liveness.get(`${owner}|${target}`)?.verdict === 'revoked'
+      if (requested !== undefined) {
+        this.rotation.setCooldown(owner, target, null)
+        // Give the explicit release the existing harvest interval before old
+        // rollout evidence can cool this same account again on consumption.
+        if (before !== target || targetState?.cooling_until != null || targetState?.cooling_reason != null || cachedRevoked) this.rotation.markHarvested(owner, target, now)
+        this.liveness.delete(`${owner}|${target}`)
+      }
+      this.rotation.setActiveSlot(owner, target, now)
+      return { ok: true, changed: before !== target || (requested !== undefined && (targetState?.cooling_until != null || targetState?.cooling_reason != null || cachedRevoked)), status: before === target ? 'already_active' : 'rotated', from: before, to: target, active: target, accounts: [target] }
+    })
+  }
+
+  /** Release operator cooling/quarantine without selecting or reconnecting. */
+  async freeAccount(owner: OwnerHandle, account: string): Promise<CodexOperatorResult> {
+    return this.serializeAccountMutation(owner, async () => {
+      const requested = account === 'all' ? 'all' : normalizeSlot(account)
+      if (requested === null) return { ok: false, code: 'invalid_account', error: 'Invalid Codex account slot' }
+      const slots = this.syncSlots(owner).filter(s => requested === 'all' || s.slot === requested)
+      if (slots.length === 0 && requested !== 'all') return { ok: false, code: 'codex_not_connected', error: 'Unknown Codex account' }
+      await Promise.all(slots.map(s => this.livenessInflight.get(`${owner}|${s.slot}`)))
+      const changed: string[] = []
+      for (const slot of this.rotation.listSlots(owner).filter(s => slots.some(target => target.slot === s.slot))) {
+        if (slot.cooling_until !== null || slot.cooling_reason !== null || this.liveness.get(`${owner}|${slot.slot}`)?.verdict === 'revoked') {
+          changed.push(slot.slot)
+          this.rotation.markHarvested(owner, slot.slot, this.now())
+        }
+        this.rotation.setCooldown(owner, slot.slot, null)
+        this.liveness.delete(`${owner}|${slot.slot}`)
+      }
+      return { ok: true, changed: changed.length > 0, status: changed.length > 0 ? 'freed' : 'already_free', active: this.rotation.getActiveSlot(owner), accounts: changed }
+    })
+  }
+
+  /** Adopt existing canonical custody; never writes or copies a live auth file. */
+  async adoptAccount(owner: OwnerHandle, input: { slot: string; accountId: string; initial?: CodexAdoptionInitialState }): Promise<CodexOperatorResult> {
+    return this.serializeAccountMutation(owner, async () => {
+      const slot = normalizeSlot(input.slot)
+      if (slot === null) return { ok: false, code: 'invalid_account', error: 'Invalid Codex account slot' }
+      const initial = input.initial
+      if (initial !== undefined && (initial === null || typeof initial !== 'object' || Array.isArray(initial) ||
+          Object.keys(initial).some(key => !['label', 'coolingUntil', 'usageSince', 'active'].includes(key)) ||
+          (initial.label !== undefined && (typeof initial.label !== 'string' || initial.label.trim().length > 256)) ||
+          (initial.active !== undefined && typeof initial.active !== 'boolean') ||
+          [initial.coolingUntil, initial.usageSince].some(value => value !== undefined && (!Number.isSafeInteger(value) || value < 0)))) {
+        return { ok: false, code: 'invalid_initial_state', error: 'Invalid initial account metadata' }
+      }
+      const active = this.rotation.getActiveSlot(owner)
+      if (initial?.active === true && (slot !== DEFAULT_SLOT || (active !== null && active !== slot))) {
+        return { ok: false, code: 'account_selection_conflict', error: 'Adoption cannot replace an existing account selection' }
+      }
+      const service = codexSlotService(slot)
+      const disk = readMaterializedAuth(this.slotHome(slot))
+      const meta = this.store.getMeta(owner, '', service)
+      const stored = this.store.resolve(owner, undefined, service)
+      const refuse = (code: string, error: string): CodexOperatorResult => ({ ok: false, code, error })
+      if (disk === null || !validateCodexSubscriptionAuth(disk, this.now).ok) return refuse('account_auth_unavailable', 'Existing account home requires readable subscription auth')
+      if (!input.accountId || readAccountId(disk) !== input.accountId ||
+          (stored !== null && readAccountId(stored.plaintext) !== input.accountId)) return refuse('account_identity_conflict', 'Confirmed account identity does not match existing custody')
+      if (meta !== null && stored === null) return refuse('account_grant_unavailable', 'Existing credential grant is unavailable; adoption cannot renew it')
+      if (stored !== null && !validateCodexSubscriptionAuth(stored.plaintext, this.now).ok) return refuse('account_auth_unavailable', 'Existing stored credential is not valid subscription auth')
+      for (const other of this.store.listGlobal(owner)) {
+        const otherSlot = codexServiceSlot(other.service)
+        if (otherSlot === null || otherSlot === slot) continue
+        const otherStored = this.store.resolve(owner, undefined, other.service)
+        const otherDisk = readMaterializedAuth(this.slotHome(otherSlot))
+        if ((otherStored && readAccountId(otherStored.plaintext) === input.accountId) ||
+            (otherDisk && readAccountId(otherDisk) === input.accountId)) return refuse('duplicate_account', 'Account already belongs to another slot')
+      }
+      if (stored !== null && disk !== stored.plaintext) {
+        const diskAuth = validateCodexSubscriptionAuth(disk, this.now)
+        const storedAuth = validateCodexSubscriptionAuth(stored.plaintext, this.now)
+        if (diskAuth.normalized !== storedAuth.normalized &&
+            !shouldHarvestBack(JSON.parse(disk).last_refresh, JSON.parse(stored.plaintext).last_refresh)) {
+          return refuse('account_freshness_conflict', 'Existing credential versions cannot establish a newer live bundle')
+        }
+      }
+      const registered = this.rotation.listSlots(owner).find(s => s.slot === slot)
+      const changed = stored?.plaintext !== disk || registered === undefined ||
+        (initial?.usageSince !== undefined && (registered.connected_at === null || initial.usageSince > registered.connected_at)) ||
+        (initial?.active === true && active === null)
+      if (stored?.plaintext !== disk) await this.store.set(owner, {
+        service, plaintext: disk, scope: 'global', project_id: '', label: meta === null ? initial?.label ?? null : meta.label, expires_at: meta?.expires_at ?? null,
+      })
+      this.rotation.adoptSlot(owner, slot, { label: initial?.label ?? null, cooling_until: initial?.coolingUntil ?? null, usage_since: initial?.usageSince ?? null })
+      if (initial?.active === true && active === null) {
+        const selected = this.rotation.getActiveSlot(owner)
+        if (selected !== null && selected !== slot) return refuse('account_selection_changed', 'Account custody was adopted but selection changed during persistence; selection was preserved')
+        if (selected === null) this.rotation.setActiveSlot(owner, slot, this.now())
+      }
+      return { ok: true, changed, status: changed ? 'adopted' : 'already_adopted', active: this.rotation.getActiveSlot(owner), accounts: [slot] }
+    })
   }
 
   private async connectAccountSerialized(
@@ -1290,8 +1450,9 @@ export class CodexCredentialService {
     })
     const { path } = materializeCodexAuth({ codexHome: this.slotHome(requested), authJson: v.normalized })
     this.rotation.upsertSlot(owner_slug, requested, opts?.label ?? null)
-    // A reconnect is the ONLY thing that clears an `unauthorized` cooldown, since
-    // a revoked refresh token does not heal by waiting. It also stamps the seat
+    // A reconnect clears an `unauthorized` cooldown; waiting alone cannot.
+    // Explicit operator release and successful probes can also clear it.
+    // Reconnection additionally stamps the seat
     // so the harvest ignores the previous occupant's rollouts.
     this.rotation.markConnected(owner_slug, requested, this.now())
     const status = deriveCodexStatus(v.normalized, { materialized: true, now: this.now })
@@ -1415,12 +1576,14 @@ export class CodexCredentialService {
    * and are not part of the global seat pool.
    */
   async disconnectAllAccounts(owner_slug: OwnerHandle): Promise<{ ok: boolean; removed: string[] }> {
-    const removed: string[] = []
-    for (const slot of this.connectedSlots(owner_slug)) {
-      const { ok } = await this.removeAccount(owner_slug, slot)
-      if (ok) removed.push(slot)
-    }
-    return { ok: removed.length > 0, removed }
+    return this.serializeAccountMutation(owner_slug, async () => {
+      const removed: string[] = []
+      for (const slot of this.connectedSlots(owner_slug)) {
+        const { ok } = await this.removeAccountSerialized(owner_slug, slot)
+        if (ok) removed.push(slot)
+      }
+      return { ok: removed.length > 0, removed }
+    })
   }
 
   /** Slot ids that currently have a global credential row, first seat included. */
@@ -1436,6 +1599,10 @@ export class CodexCredentialService {
 
   /** Disconnect one seat: delete its credential and remove its `auth.json`. */
   async removeAccount(owner_slug: OwnerHandle, slot: string): Promise<{ ok: boolean }> {
+    return this.serializeAccountMutation(owner_slug, () => this.removeAccountSerialized(owner_slug, slot))
+  }
+
+  private async removeAccountSerialized(owner_slug: OwnerHandle, slot: string): Promise<{ ok: boolean }> {
     const normalized = normalizeSlot(slot)
     if (normalized === null) return { ok: false }
     const removed = await this.store.delete(owner_slug, '', codexSlotService(normalized))

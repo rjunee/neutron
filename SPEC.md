@@ -43,6 +43,11 @@ Project-scoped Codex credential access verifies the full project id recorded in
 its directory. Existing unmarked directories require explicit offline migration
 before use (Decisions Log 2026-09-14, #742).
 
+Codex account custody and operator selection belong to the owner-scoped
+credential service. Explicit adoption preserves existing account directories;
+operator rotation selects a directory by pointer, and named rotation/free can
+clear quarantine without asserting token health (Decisions Log 2026-09-27).
+
 ## Canonical doc set
 
 | Concern | Doc |
@@ -332,6 +337,22 @@ references decisions by date; none is a second home for a decision.
 | `docs/plans/*` | Per-sprint mechanics briefs (referenced from `docs/spec-items/`) |
 
 ## Decisions Log (immutable audit trail — NOT the build spec)
+
+### 2026-09-27 — Codex operator custody stays with the credential service.
+
+Open owns account selection and credential custody through its owner-scoped
+service and authenticated account surface. An explicit named rotation clears
+the destination's cooldown or quarantine and adds none to the departure;
+unnamed rotation selects an eligible successor without adding departure cooling.
+Freeing one account or all
+accounts clears cooling without moving the pointer. These operator actions do
+not assert server-side credential health. Existing account homes are adopted
+explicitly, with confirmed account identity and unambiguous freshness; adoption
+preserves live bytes, labels, grant expiry and rotation history. Selection points
+at the account's existing directory and never swaps credential bundles. Project
+grants and General's idle, viable-target and retirement revalidation remain
+independent admission boundaries. Acceptance:
+`docs/spec-items/codex-operator-custody.md`.
 
 ### 2026-09-26 — Automatically recover active project conversations after service, terminal-host, and machine restart.
 

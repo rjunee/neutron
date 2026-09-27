@@ -17,6 +17,10 @@
  *   - `GET    /api/app/codex-auth`                       → global status + every seat
  *   - `POST   /api/app/codex-auth`                       → connect a seat (body: { auth, account?, label? })
  *   - `DELETE /api/app/codex-auth[?account=<slot>]`      → disconnect one seat
+ *   - `GET    /api/app/codex-auth/rotation`             → stored pointer + account metadata, no probe
+ *   - `POST   /api/app/codex-auth/rotate`               → select next or force { to: slot }
+ *   - `POST   /api/app/codex-auth/free`                 → release { account: slot | 'all' }
+ *   - `POST   /api/app/codex-auth/adopt`                → adopt existing { account: slot, account_id }
  *
  * MULTIPLE SEATS. The owner may connect more than one ChatGPT subscription; each
  * is a named `account` slot, and trident picks one per run, skipping any that has
@@ -46,7 +50,7 @@ import { asOwnerHandle } from '@neutronai/persistence/index.ts'
 import { ProjectCredentialValidationError } from '@neutronai/project-credentials/store.ts'
 import { sanitizeProjectId } from '@neutronai/channels/adapters/app-ws/envelope.ts'
 import type { AppWsAuthResolver } from '@neutronai/channels/adapters/app-ws/auth.ts'
-import type { CodexCredentialService, CodexTarget } from '@neutronai/trident/codex-credential.ts'
+import type { CodexAdoptionInitialState, CodexCredentialService, CodexTarget } from '@neutronai/trident/codex-credential.ts'
 import { CodexProjectOwnerError } from '@neutronai/trident/codex-project-owner.ts'
 import { jsonError, jsonOk, readJsonBody, resolveBearer } from './surface-kit.ts'
 
@@ -73,11 +77,12 @@ export function createCodexCredentialSurface(
     handler: async (req) => {
       const url = new URL(req.url)
       const pathname = url.pathname
+      const operator = /^\/api\/app\/codex-auth\/(rotation|rotate|free|adopt)$/.exec(pathname)?.[1]
 
       // Resolve the target scope from the path: the global route carries no
       // project segment; the project route pins the URL project id as an override.
       let target: CodexTarget
-      if (pathname === GLOBAL_CODEX_AUTH_PATH) {
+      if (pathname === GLOBAL_CODEX_AUTH_PATH || operator !== undefined) {
         target = { scope: 'global' }
       } else if (pathname.startsWith(PROJECT_PREFIX)) {
         const match = PROJECT_CODEX_AUTH_PATH_RE.exec(pathname)
@@ -105,6 +110,26 @@ export function createCodexCredentialSurface(
       const isGlobal = target.scope !== 'project'
 
       try {
+        if (operator !== undefined) {
+          if (operator === 'rotation') {
+            if (req.method !== 'GET') return jsonError(405, 'method_not_allowed', 'Codex rotation metadata requires GET')
+            return jsonOk(service.accountSelection(owner_slug))
+          }
+          if (req.method !== 'POST') return jsonError(405, 'method_not_allowed', 'Codex operator actions require POST')
+          const body = await readJsonBody(req) as Record<string, unknown> | null
+          if (body === null || Array.isArray(body) || typeof body !== 'object') return jsonError(400, 'malformed_json', 'expected JSON object')
+          if (operator === 'rotate' && body['to'] !== undefined && typeof body['to'] !== 'string') return jsonError(400, 'invalid_account', 'to must be an account slot')
+          if (operator !== 'rotate' && typeof body['account'] !== 'string') return jsonError(400, 'invalid_account', 'account must be a slot or all for free')
+          if (operator === 'adopt' && typeof body['account_id'] !== 'string') return jsonError(400, 'account_identity_conflict', 'account_id must confirm the existing account identity')
+          const result = operator === 'rotate'
+            ? await service.rotateAccount(owner_slug, body['to'] === undefined ? {} : { to: body['to'] as string })
+            : operator === 'free'
+              ? await service.freeAccount(owner_slug, body['account'] as string)
+              : await service.adoptAccount(owner_slug, { slot: body['account'] as string, accountId: body['account_id'] as string,
+                  ...(body['initial'] === undefined ? {} : { initial: body['initial'] as CodexAdoptionInitialState }) })
+          if (!result.ok) return jsonError(result.code.startsWith('invalid_') ? 400 : 409, result.code, result.error)
+          return jsonOk(result)
+        }
         switch (req.method) {
           case 'GET': {
             // Status resolves project → global for the override route (effective
