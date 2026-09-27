@@ -25,6 +25,7 @@ These are the items the harness-orchestrator cutover is gated on.
 - [`the-orchestrator-owns-the-build-loop`](the-orchestrator-owns-the-build-loop.md) — The project REPL owns the build loop
 - [`the-review-loop-must-stop-and-re-plan`](the-review-loop-must-stop-and-re-plan.md) — Stop and escalate a review loop instead of iterating on a bad plan
 - [`trident-build-efficiency`](trident-build-efficiency.md) — Avoid repeated build work and measure Trident's time and token costs
+- [`codex-operator-custody`](codex-operator-custody.md) — Adopt Codex account custody and expose bounded operator rotation
 - [`work-board-attempt-provenance`](work-board-attempt-provenance.md) — Preserve terminal Work Board attempts across retry and shelving
 - [`repl-model-background-poll-test-stability`](repl-model-background-poll-test-stability.md) — Synchronize the REPL model background-poll race test
 - [`a-gateway-restart-keeps-the-project-repls`](a-gateway-restart-keeps-the-project-repls.md) — A gateway restart keeps the project REPLs, conversation and all
@@ -66,6 +67,7 @@ branch is cut (standard §3.1, §3.2).
 | [`blocked-is-not-slow`](blocked-is-not-slow.md) | Distinguish blocked workers from slow and unclassified work | P1 | — |
 | [`build-fleet-process-census`](build-fleet-process-census.md) | Count the local build fleet from live processes | P1 | — |
 | [`checkpoint-write-contention`](checkpoint-write-contention.md) | Checkpoint writes survive build-load contention | P1 | — |
+| [`codex-operator-custody`](codex-operator-custody.md) | Adopt Codex account custody and expose bounded operator rotation | P1 | yes |
 | [`codex-work-runs-headless-per-call-on-a-reused-thread`](codex-work-runs-headless-per-call-on-a-reused-thread.md) | Run cross-model codex work headless per call on a reused thread | P1 | — |
 | [`dead-lane-process-reaping`](dead-lane-process-reaping.md) | Reap child processes left by dead build lanes | P1 | — |
 | [`launcher-crash-report-precedence`](launcher-crash-report-precedence.md) | Prefer the better-informed launcher death report | P1 | — |
