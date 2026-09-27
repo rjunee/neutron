@@ -1,0 +1,81 @@
+## 2026-09-27 — Retain host-suite identity and process observations
+
+A host-selected full-suite attempt ended with an interrupted chunk and incomplete
+coverage. Its terminal message said the suite inputs changed, but the receipt
+consumer used that same message when the follow-up identity measurement returned
+null. The old event retained neither measurement. The retained runner log showed
+private PID/mount isolation for the interrupted chunk and a completed coverage
+audit; it did not identify the TERM sender or the failing identity component.
+Those historical causes remain unknown. This change does not claim to repair the
+interruption or establish a passing full-suite observation.
+
+`trident/project-suite-receipt.ts:43` now stores the first measurement before
+execution. At completion it retains both hashes/timestamps and the observed host
+exit even when the identity guard refuses proof (`:58`). An unavailable second
+measurement has its own unknown reason; a different measured hash retains the
+existing changed-input reason. Diagnostic metadata has no `receipt` or top-level
+reusable `identity`. The existing atomic ownership check controls its write, and
+the existing identity/owner/scope/revision/round/strategy checks still control
+reusable proof (`:68`).
+
+`open/wiring/project-build-dependencies.ts:113` identifies failed installed-tree
+probes using fixed reason codes and elapsed time, including the existing five
+second deadline. Suite-level probes also report their stage and safe component
+digests (`:183`, `:229`). Logs exclude raw workspace paths, status output, file
+contents and exception text. `trident/host-suite.ts:101` records the actual process
+exit, elapsed time, configured deadline, timeout/cancellation flags and validated
+owner cleanup outcome before disposing of the temporary report. None of these
+diagnostics is suite evidence or permission to bypass G063/G065.
+
+Validation on base `8cb600a4eb415b0104fada2d2c5bf518c532820b` plus this diff:
+
+- `bun test trident/project-suite-receipt.test.ts trident/project-build-host.test.ts open/__tests__/project-suite-identity.test.ts`:
+  71 passed, zero failed. Real database events distinguish both measurement
+  outcomes for host exits zero and one; recovery reacquires refused observations,
+  while unchanged measurements reuse their original receipt.
+- `bun test trident/host-suite.test.ts open/__tests__/project-build-e2e.test.ts -t 'prepared host suite receipt|workspace scratch churn|package-local workspace resolution|reported known cleanup|suite timeout stays|low suite timeout'`:
+  14 passed, zero failed, 368 filtered, in the required private process namespace.
+  These consuming cases exercise reconstruction, input changes, scratch churn,
+  generated-file rewrites, publication reuse and timeout refusal.
+- `bunx --no-install tsc --noEmit -p tsconfig.json` and
+  `bunx --no-install tsc --noEmit -p trident/tsconfig.json`: both exited zero.
+- Semantic mutations of the receipt identity guard were restored after testing.
+  Disabling refusal produced six assertion failures and two passing unchanged
+  siblings: changed/unavailable inputs incorrectly returned known observations.
+  Refusing every nonempty identity produced eight assertion failures, including
+  both legitimate unchanged observations. Restoring the guard returned the
+  focused command to 71 passes. These were behavior assertion failures, not
+  parser failures.
+
+The complete partitioned suite, all-project typecheck wrapper, exact publication
+head CI, and a new deployed host observation remain for the coordinated
+publication workflow. Existing cached third-party dependencies were used with
+workspace aliases pointing at this worktree for the focused checks; these checks
+are not an isolated-install or full-suite reuse receipt.
+
+The first complete gate on `6ec0843f8a8f3b91c6990f53443fe9ee16835aae`
+executed all 1,726 declared/discovered/assigned files in 18 settled lanes and
+passed all 51 TypeScript configurations, but exited one on the resistant-process
+cancellation test. Its Python fixture truncated a heartbeat before rewriting it;
+the consuming reader interpreted empty contents as zero. The fixture now
+publishes counters by atomic replacement and requires a fresh post-cancellation
+sibling acknowledgement. Production cancellation behavior and timeouts are
+unchanged. A surviving resistant target, an incorrectly stopped sibling, and a
+stale acknowledgement each fail both cancellation variants. After restoration,
+all 26 host-suite tests and both root/Trident typechecks passed. The repaired
+candidate still requires the complete gate; the first gate is recorded as red,
+not reused as passing evidence.
+
+The repaired implementation, integrated with merged account controls, passed the
+complete shared-host gate at `b97c7971468fa5608529ca459ad25e59f69e5f5f`.
+`python3 -B trident/process-test-isolation.py -- bash scripts/check-shared-host.sh`
+exited zero: all 51 TypeScript configurations passed, including root and Trident;
+all 1,727 declared, Bun-discovered, assigned and executed files matched across
+18 green lanes (1,491 general, 22 PGLite, 43 device and 171 HTTP). The complete
+`open/__tests__/project-build-e2e.test.ts` and both repaired cancellation variants
+executed. The worktree was clean and the source aggregate
+`541677fa2026c0180c22751900bd1a25ee3becee01605be13c4b16b4f38992de`
+was unchanged before/after. This publication record is a documentation-only
+child of that tested revision, not a transferable receipt for a different
+runtime, environment or deployed observation. Exact-head CI and fresh live
+host-selected suite evidence remain required.

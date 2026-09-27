@@ -3,6 +3,10 @@ import { join, resolve, sep } from 'node:path'
 import { createHash, randomUUID } from 'node:crypto'
 import { fileURLToPath } from 'node:url'
 import { spawnCapture } from '@neutronai/trident/git-mode.ts'
+import { createLogger } from '@neutronai/logger'
+
+const log = createLogger('project-build')
+const digest = (value: string) => createHash('sha256').update(value).digest('hex')
 
 export const PROJECT_DEPENDENCIES_TIMEOUT_MS = 10 * 60_000
 export const PROJECT_INSTALL_RESERVE_BYTES = 5n * 1024n ** 3n
@@ -105,37 +109,45 @@ async function preparationKey(worktree: string, workspaces: unknown[], executabl
  * additional local roots, so an external tree is never traversed. */
 export async function projectInstalledTreeIdentity(worktree: string,
   run: typeof spawnCapture = spawnCapture): Promise<string | null> {
+  const started = performance.now()
+  const refuse = (reason: string): null => {
+    log.warn('suite_installed_identity_unavailable', { workspace: digest(worktree), reason,
+      elapsed_ms: Math.round(performance.now() - started) })
+    return null
+  }
   try {
   const root = await realpath(worktree)
   const modules = join(root, 'node_modules')
   if (!await exists(modules)) return 'absent'
-  if (!(await lstat(modules)).isDirectory()) return null
+  if (!(await lstat(modules)).isDirectory()) return refuse('modules-not-directory')
   const hash = createHash('sha256')
   const covered: string[] = []
   let pending = [modules]
   const deadline = performance.now() + 5000
   while (pending.length > 0) {
     const remaining = Math.floor(deadline - performance.now())
-    if (remaining <= 0) return null
+    if (remaining <= 0) return refuse('deadline')
     const batch = pending.sort()
     pending = []
     covered.push(...batch)
     const measured = await run(['find', '-P', ...batch, '-printf', '%p\\0%D\\0%i\\0%m\\0%s\\0%T@\\0%C@\\0%y\\0%l\\0'],
       root, { LC_ALL: 'C' }, remaining)
-    if (!measured.ok || measured.timed_out || measured.stdout.length > 64 * 1024 * 1024
-      || !measured.stdout.endsWith('\0') || measured.stdout.includes('\uFFFD')) return null
+    if (measured.timed_out) return refuse('find-timeout')
+    if (!measured.ok) return refuse('find-exit')
+    if (measured.stdout.length > 64 * 1024 * 1024) return refuse('output-limit')
+    if (!measured.stdout.endsWith('\0') || measured.stdout.includes('\uFFFD')) return refuse('invalid-output')
     const fields = measured.stdout.split('\0')
     fields.pop()
-    if (fields.length === 0 || fields.length % 9 !== 0) return null
+    if (fields.length === 0 || fields.length % 9 !== 0) return refuse('invalid-fields')
     const links: string[] = []
     for (let index = 0; index < fields.length; index += 9) {
       const path = fields[index]!
-      if (!batch.some(base => path === base || path.startsWith(`${base}${sep}`))) return null
+      if (!batch.some(base => path === base || path.startsWith(`${base}${sep}`))) return refuse('path-outside-batch')
       if (!fields.slice(index + 1, index + 5).every(value => /^\d+$/.test(value))
-        || !fields.slice(index + 5, index + 7).every(value => /^-?\d+(?:\.\d+)?$/.test(value))) return null
+        || !fields.slice(index + 5, index + 7).every(value => /^-?\d+(?:\.\d+)?$/.test(value))) return refuse('invalid-metadata')
       const kind = fields[index + 7]
       if (kind === 'l') links.push(path)
-      else if (kind !== 'f' && kind !== 'd') return null
+      else if (kind !== 'f' && kind !== 'd') return refuse('unsupported-entry')
       // Workspace links reach first-party directories where tests create and
       // remove scratch entries. Their size/mtime/ctime describe that churn, not
       // surviving inputs. Keep directory identity and permissions, every child,
@@ -151,51 +163,75 @@ export async function projectInstalledTreeIdentity(worktree: string,
     hash.update(fields.join('\0') + '\0')
     // Resolve only links, in bounded groups; ordinary files require no JS stat.
     for (let offset = 0; offset < links.length; offset += 64) {
-      if (performance.now() >= deadline) return null
+      if (performance.now() >= deadline) return refuse('deadline')
       const targets = await Promise.all(links.slice(offset, offset + 64).map(path => realpath(path)))
       for (const actual of targets) {
-        if (!actual.startsWith(`${root}${sep}`)) return null
+        if (!actual.startsWith(`${root}${sep}`)) return refuse('external-link')
         if (!covered.some(base => actual === base || actual.startsWith(`${base}${sep}`))
           && !pending.includes(actual)) pending.push(actual)
       }
     }
   }
-  if (performance.now() >= deadline) return null
+  if (performance.now() >= deadline) return refuse('deadline')
   return hash.digest('hex')
-  } catch { return null }
+  } catch { return refuse('filesystem-or-process-error') }
 }
 
 /** Fresh host measurement for suite reuse. Unknown or dirty inputs never reuse
  * proof. This shares preparation's manifest/toolchain and local-resolution keys. */
 export async function projectSuiteIdentity(worktree: string, expectedHead?: string): Promise<string | null> {
+  const started = performance.now()
+  let probe = 'revision'
+  const refuse = (reason: string): null => {
+    log.warn('suite_identity_unavailable', { workspace: digest(worktree), probe, reason,
+      elapsed_ms: Math.round(performance.now() - started) })
+    return null
+  }
   try {
     const revision = await spawnCapture(['git', 'rev-parse', '--verify', 'HEAD'], worktree)
-    if (!revision.ok || (expectedHead !== undefined && revision.stdout.trim() !== expectedHead)) return null
+    if (!revision.ok) return refuse('unreadable')
+    if (expectedHead !== undefined && revision.stdout.trim() !== expectedHead) return refuse('head-mismatch')
+    probe = 'git-status'
     const clean = await spawnCapture(['git', 'status', '--porcelain', '--untracked-files=all'], worktree)
-    if (!clean.ok || clean.stdout.trim()) return null
+    if (!clean.ok) return refuse('unreadable')
+    if (clean.stdout.trim()) return refuse('dirty')
+    probe = 'runtime'
     const executable = Bun.which('bun', { PATH: process.env.PATH ?? '' })
-    if (!executable) return null
+    if (!executable) return refuse('missing-executable')
     const bun = await realpath(executable)
+    probe = 'manifest'
     const manifestPath = join(worktree, 'package.json')
     const manifest = await exists(manifestPath) ? JSON.parse(await readFile(manifestPath, 'utf8')) : {}
     const workspaces = Array.isArray(manifest.workspaces) ? manifest.workspaces : manifest.workspaces?.packages ?? []
-    if (!Array.isArray(workspaces)) return null
+    if (!Array.isArray(workspaces)) return refuse('invalid-workspaces')
+    probe = 'preparation'
     const key = await preparationKey(worktree, workspaces, bun)
+    if (!key) return refuse('unavailable')
+    probe = 'resolution'
     const resolution = await resolutionKey(worktree, workspaces, bun)
+    if (await exists(manifestPath) && !resolution) return refuse('unavailable')
+    probe = 'installed-tree'
     const installed = await projectInstalledTreeIdentity(worktree)
     // Repositories without a manifest have no package resolution contract.
-    if (!key || !installed || (await exists(manifestPath) && !resolution)) return null
+    if (!installed) return refuse('unavailable')
+    probe = 'installation'
     const modules = join(worktree, 'node_modules')
     let installation = null
     if (await exists(modules)) {
       const stat = await lstat(modules)
-      if (!stat.isDirectory()) return null
+      if (!stat.isDirectory()) return refuse('modules-not-directory')
       installation = [stat.dev, stat.ino]
-    } else if (Object.keys({ ...manifest.dependencies, ...manifest.devDependencies }).length > 0) return null
+    } else if (Object.keys({ ...manifest.dependencies, ...manifest.devDependencies }).length > 0) return refuse('missing-dependencies')
+    probe = 'workspace'
     const workspace = await lstat(await realpath(worktree))
-    return createHash('sha256').update(JSON.stringify([key, resolution, installed, installation,
+    const identity = createHash('sha256').update(JSON.stringify([key, resolution, installed, installation,
       workspace.dev, workspace.ino])).digest('hex')
-  } catch { return null }
+    log.info('suite_identity_measured', { workspace: digest(worktree), identity, preparation: key,
+      resolution, installed, installation: digest(JSON.stringify(installation)),
+      workspace_identity: digest(JSON.stringify([workspace.dev, workspace.ino])),
+      elapsed_ms: Math.round(performance.now() - started) })
+    return identity
+  } catch { return refuse('filesystem-or-process-error') }
 }
 
 /** Provision declared Bun workspaces. Recovery can reuse a measured installation

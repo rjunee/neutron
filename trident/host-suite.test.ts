@@ -1,4 +1,4 @@
-import { expect, test } from 'bun:test'
+import { expect, spyOn, test } from 'bun:test'
 import { mkdtemp, readFile, rm, symlink, writeFile } from 'node:fs/promises'
 import { tmpdir } from 'node:os'
 import { join } from 'node:path'
@@ -62,11 +62,18 @@ for (const exit of [0, 7]) {
 }
 
 test('reported known cleanup is a positive control for the report consumer', async () => {
-  await withReportedOwner({}, async run => {
+  const diagnostic = spyOn(console, 'log').mockImplementation(() => {})
+  try { await withReportedOwner({}, async run => {
     expect(await run({ argv: ['true'], cwd: '/tmp', timeoutMs: 3_000,
       signal: new AbortController().signal, isRunActive: () => true })).toMatchObject({ ok: true,
       cleanup: { status: 'confirmed', unknown: 0, signal: null } })
   })
+    const text = diagnostic.mock.calls.flat().join('\n')
+    expect(text).toContain('event=host_suite_process_observed')
+    expect(text).toContain('exit_code=0 timed_out=false aborted=false timeout_ms=3000')
+    expect(text).toContain('cleanup_status=confirmed owner_signal=null foreground_exit=0')
+    expect(text).not.toContain('/tmp')
+  } finally { diagnostic.mockRestore() }
 })
 
 for (const fault of ['absent', 'malformed', 'wrong-token', 'wrong-pid', 'wrong-exit', 'false-confirmed', 'missing-signal', 'invalid-count']) {
@@ -145,7 +152,18 @@ test(`${source} run cancellation reaps its resistant process while a sibling sui
   const dir = await mkdtemp(join(tmpdir(), 'host-suite-cancel-'))
   const target = new AbortController(), sibling = new AbortController()
   let active = true
-  const code = "import pathlib,signal,sys,time; signal.signal(signal.SIGTERM,signal.SIG_IGN); p=pathlib.Path(sys.argv[1]); n=0\nwhile True:\n n+=1; p.write_text(str(n)); time.sleep(.02)"
+  // Publish complete counters atomically: write_text alone exposes an empty
+  // file between truncation and writing, which reads as a false zero heartbeat.
+  // A probe is acknowledged only after publishing a subsequent heartbeat.
+  const code = `import pathlib,signal,sys,time
+signal.signal(signal.SIGTERM,signal.SIG_IGN)
+p=pathlib.Path(sys.argv[1]); pending=p.with_suffix('.pending'); probe=p.with_suffix('.probe'); ack=p.with_suffix('.ack'); n=0
+while True:
+ requested=probe.exists()
+ n+=1; pending.write_text(str(n)); pending.replace(p)
+ if requested: ack.write_text(str(n)); probe.unlink()
+ time.sleep(.02)
+`
   const launch = (name: string, signal: AbortSignal, isRunActive: () => boolean) => runHostSuite({
     argv: ['python3', '-c', code, join(dir, name)], cwd: dir, timeoutMs: 10_000, signal, isRunActive,
   }).then(value => ({ value }), error => ({ error }))
@@ -161,7 +179,10 @@ test(`${source} run cancellation reaps its resistant process while a sibling sui
     const before = await heartbeat(join(dir, 'target'))
     const siblingBefore = await heartbeat(join(dir, 'sibling'))
     await Bun.sleep(120)
+    await writeFile(join(dir, 'sibling.probe'), '')
+    for (let i = 0; i < 200 && await heartbeat(join(dir, 'sibling.ack')) <= siblingBefore; i++) await Bun.sleep(10)
     expect(await heartbeat(join(dir, 'target'))).toBe(before)
+    expect(await heartbeat(join(dir, 'sibling.ack'))).toBeGreaterThan(siblingBefore)
     expect(await heartbeat(join(dir, 'sibling'))).toBeGreaterThan(siblingBefore)
   } finally {
     target.abort(); sibling.abort()

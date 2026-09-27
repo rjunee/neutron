@@ -1,4 +1,4 @@
-import { afterEach, expect, test } from 'bun:test'
+import { afterEach, expect, spyOn, test } from 'bun:test'
 import { chmod, copyFile, mkdir, mkdtemp, rename, rm, stat, symlink, utimes, writeFile } from 'node:fs/promises'
 import { join } from 'node:path'
 import { tmpdir } from 'node:os'
@@ -71,6 +71,26 @@ test('suite identity binds the host runtime executable and worktree location', a
   expect(await projectSuiteIdentity(moved)).not.toBe(first)
 })
 
+test('identity diagnostics distinguish dirty inputs from measured hashes without leaking paths or contents', async () => {
+  const { root } = await fixture()
+  const known = spyOn(console, 'log').mockImplementation(() => {})
+  const unknown = spyOn(console, 'warn').mockImplementation(() => {})
+  try {
+    const identity = await projectSuiteIdentity(root)
+    expect(identity).toMatch(/^[a-f0-9]{64}$/)
+    expect(known.mock.calls.flat().join('\n')).toContain(`identity=${identity}`)
+    expect(known.mock.calls.flat().join('\n')).toContain('preparation=')
+    await writeFile(join(root, 'private-filename'), 'private contents')
+    expect(await projectSuiteIdentity(root)).toBeNull()
+    const diagnostic = unknown.mock.calls.flat().join('\n')
+    expect(diagnostic).toContain('probe=git-status reason=dirty')
+    for (const sensitive of [root, 'private-filename', 'private contents']) {
+      expect(diagnostic).not.toContain(sensitive)
+      expect(known.mock.calls.flat().join('\n')).not.toContain(sensitive)
+    }
+  } finally { known.mockRestore(); unknown.mockRestore() }
+})
+
 test('suite identity detects internal dependency changes even when entrypoint and mtime stay unchanged', async () => {
   const { root, git } = await fixture()
   await writeFile(join(root, 'package.json'), JSON.stringify({ dependencies: { example: '1.0.0' } }))
@@ -130,7 +150,12 @@ for (const failure of ['timeout', 'exit', 'malformed'] as const) {
         ...(failure === 'malformed' ? { stdout: 'partial' } : {}),
         ...(failure === 'timeout' ? { timed_out: true } : {}) }
     }, { writesDiffOutput: true as const })
-    expect(await projectInstalledTreeIdentity(root, run)).toBeNull()
+    const warning = spyOn(console, 'warn').mockImplementation(() => {})
+    try {
+      expect(await projectInstalledTreeIdentity(root, run)).toBeNull()
+      expect(warning.mock.calls.flat().join('\n')).toContain(`reason=${failure === 'malformed' ? 'invalid-output' : `find-${failure}`}`)
+      expect(warning.mock.calls.flat().join('\n')).not.toContain(root)
+    } finally { warning.mockRestore() }
     expect(await projectInstalledTreeIdentity(root)).toMatch(/^[a-f0-9]{64}$/)
   })
 }
