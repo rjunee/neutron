@@ -47,7 +47,25 @@ acceptance and ancestry-only rejection of valid content-preserving replay.
 Both were removed after measurement. Root and Trident TypeScript checks passed.
 The exact focused commands and final results accompany this change's handoff;
 these focused results are not a whole-suite or deployment receipt. Independent
-review, shared-host full gate, CI and served acceptance remain outstanding.
+review is complete; the shared-host full gate, CI and served acceptance remain
+outstanding.
+
+Independent native review approved frozen preservation source
+`00d22cdd1bf117c03d5a89d3a815400ebad00b36`, including the reachable-object repair.
+Two bounded Fable attempts returned no verdict before their deadlines and were
+not counted as approval. An explicitly narrowed production-only Opus review
+then approved the complete helper and both publisher/G100 production deltas in
+one 53-second turn. Its scope excluded test/documentation bulk; native review
+and the measured consuming and mutation checks establish those separate parts.
+Nonblocking operating-envelope notes are retained in issue #1352, not another
+fix round.
+
+Root composed the independent namespace correction at
+`7a114b7e93780794018757f9f6a56b0651d05643`, producing
+`3468bf0a4a1e65a8ba95aae5b6b3aaaa4a52a029`. The two changes have no overlapping
+files: comparisons to each parent establish that all reviewed source bytes are
+unchanged. This composition receives its own complete validation; neither
+parent's focused or full-suite receipt is transferred to it.
 
 A rewritten history that intentionally removes prior content without retaining
 ancestry or a separately verified transformation cannot establish preservation
