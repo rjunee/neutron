@@ -47,13 +47,17 @@ do not include underlying filesystem errors or private paths.
 
 Validation on base `71f4aa84803735102c71d79f8836ae974383e507` with producer blob
 `40dc7ec17b02891ca321b107f44dcbd463a8b27c` and test blob
-`f493ee72ce7d0109a27372ff703a205dd91431dd`: both
+`f4bcefb644f3850b00a3bd0461a7cdcf9872d2ea`: both
 `bunx --no-install tsc --noEmit` and
 `bunx --no-install tsc --noEmit -p trident/tsconfig.json` exited 0.
 `bun test scripts/build-timeline-command.test.ts scripts/build-timeline-sources.test.ts scripts/build-timeline-codex-import.test.ts trident/build-timeline.test.ts trident/build-timeline-html.test.ts scripts/__tests__/build-timeline-server.test.ts`
 passed 58 tests with 652 assertions, zero failures. The initial checks required
 repairing local dependency links and permitting the server fixture's loopback
 listener; the final run passed with those test prerequisites satisfied.
+The actual `bash scripts/ci/lint.sh` gate initially rejected the test's two
+relative cross-workspace imports. Both now use `@neutronai/trident` aliases
+(`scripts/build-timeline-command.test.ts:7`); the complete lint gate exited 0,
+and the focused tests and both TypeScript checks passed again after that change.
 The command fixtures verify durable start-before-execution, actual failed
 exit and duration, multi-PR consumption, unknown metrics, invalid/missing links,
 public metadata refusal, literal argv, unexported command output, spawn failure,

@@ -4,8 +4,8 @@ import { tmpdir } from 'node:os'
 import { join } from 'node:path'
 import { recordCommandPhase, type CommandPhaseOptions } from './build-timeline-command.ts'
 import { readPhaseObservations, type DirectPhaseObservation } from './build-timeline-sources.ts'
-import { combineTimelineSources } from '../trident/build-timeline-catalogue.ts'
-import { renderTimeline } from '../trident/build-timeline-html.ts'
+import { combineTimelineSources } from '@neutronai/trident/build-timeline-catalogue.ts'
+import { renderTimeline } from '@neutronai/trident/build-timeline-html.ts'
 
 const directories: string[] = []
 afterEach(async () => { for (const directory of directories.splice(0)) await rm(directory, { recursive: true, force: true }) })
