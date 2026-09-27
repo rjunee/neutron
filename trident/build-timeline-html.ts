@@ -74,7 +74,7 @@ export function renderTimeline(snapshot: TimelineSnapshot): string {
     const phaseInfo = (segments: TimelineSegment[]) => segments.map(s => ({ label: s.label, duration: durationLabel(s.end - s.start), tokens: usageLabel(s.usage), model: s.model ?? 'Model unknown', startedAt: s.start, completedAt: s.timing === 'recorded' ? s.end : null, open: s.timing === 'open', crossesWindow: elapsed !== null && elapsed > scale && s.start < card.start! + scale && s.end > card.start! + scale }))
     const createdAt = 'createdAt' in card && typeof card.createdAt === 'number' ? card.createdAt : null
     const firstWorkAt = card.segments.length ? Math.min(...card.segments.map(s => s.start)) : null
-    const coverageNote = card.segments.some(s => /^(build|build_mechanical)$/.test(s.phase)) && card.segments.some(s => /^(review|review_rubric|review_adversarial|review_codex|review_kimi|synthesis)$/.test(s.phase)) && card.segments.some(s => /^(fix|fix-leak)$/.test(s.phase)) && card.gaps.length === 0 ? '' : '<span class="coverage-note" title="Missing phases are unknown, not zero or skipped">Phase data incomplete</span>'
+    const coverageNote = card.segments.some(s => s.timing === 'recorded' && /^(build|build_mechanical)$/.test(s.phase)) && card.segments.some(s => s.timing === 'recorded' && /^(review|review_rubric|review_adversarial|review_codex|review_kimi|synthesis)$/.test(s.phase)) && card.gaps.length === 0 ? '' : '<span class="coverage-note" title="Missing phase evidence is unknown, not zero or skipped">Phase data incomplete</span>'
     const clipped = elapsed !== null && elapsed > scale
     const remainder = card.segments.filter(s => s.end > card.start! + scale)
     return `${heading}<details class="pr-row" data-state="${status}" data-card="${h(card.key)}"><summary class="row-summary">
@@ -89,7 +89,7 @@ export function renderTimeline(snapshot: TimelineSnapshot): string {
       <div class="pr-details"><div class="detail-heading"><strong>${h(card.title)}</strong>${card.url ? `<a href="${h(card.url)}" rel="noreferrer" target="_blank">Open PR ↗</a>` : ''}</div>
       <p class="muted">${h(card.repository)} · ${h(card.lifecycle)}</p><p>PR opened: ${createdAt === null ? 'unknown' : timeElement(createdAt)}${firstWorkAt === null ? ' · Observed work start: unknown' : ` · Observed work started: ${timeElement(firstWorkAt)}`}</p><p class="muted">${card.start === null ? 'No phase timing recorded.' : `Observed span ${timeElement(card.start)} → ${timeElement(card.end!)}`}</p>
       <p class="muted">Overlapping phases share the same time; different colors stack inside the bar. Unattributed time is unknown, not idle. Dashed spans have no recorded end.</p>
-      <div class="phase-list">${card.segments.map(s => `<div class="phase-detail" data-segment="${h(s.id)}" data-duration-ms="${s.end - s.start}"><div><span class="phase-dot" style="background:${colors[tone(s)]}"></span><strong>${h(s.label)}</strong><span>${h(durationLabel(s.end - s.start))}${s.timing === 'open' ? ' · end unrecorded' : ''}</span></div><p>${h(s.model ?? 'Model unknown')} · ${h(usageLabel(s.usage))}</p><small>Started ${timeElement(s.start)} · ${s.timing === 'recorded' ? `Completed ${timeElement(s.end)}` : 'In progress · completion unrecorded'}</small><small>Input ${h(s.usage.input ?? '?')} · output ${h(s.usage.output ?? '?')} · cache read ${h(s.usage.cacheRead ?? '?')} · cache create ${h(s.usage.cacheCreation ?? '?')} · USD ${h(s.usage.costUsd ?? '?')}</small><small>${h(s.detail)} · ${h(s.usage.source ?? 'No usage report')}</small></div>`).join('')}</div>
+      <div class="phase-list">${card.segments.map(s => `<div class="phase-detail" data-segment="${h(s.id)}" data-duration-ms="${s.end - s.start}"><div><span class="phase-dot" style="background:${colors[tone(s)]}"></span><strong>${h(s.label)}</strong><span>${h(durationLabel(s.end - s.start))}${s.timing === 'open' ? ' · end unrecorded' : ''}</span></div><p>${h(s.model ?? 'Model unknown')} · ${h(usageLabel(s.usage))}</p><small>Started ${timeElement(s.start)} · ${s.timing === 'recorded' ? `Completed ${timeElement(s.end)}` : 'Completion not recorded'}</small><small>Input ${h(s.usage.input ?? '?')} · output ${h(s.usage.output ?? '?')} · cache read ${h(s.usage.cacheRead ?? '?')} · cache create ${h(s.usage.cacheCreation ?? '?')} · USD ${h(s.usage.costUsd ?? '?')}</small><small>${h(s.detail)} · ${h(s.usage.source ?? 'No usage report')}</small></div>`).join('')}</div>
       ${card.warnings.map(w => `<p class="muted">${h(w)}</p>`).join('')}
       ${card.phaseTotals.length ? `<details><summary>Unallocated phase totals</summary><p>Legacy cumulative totals cannot be allocated to spans or added to attempt receipts.</p>${card.phaseTotals.map(p => `<p>${h(p.phase)} · ${h(usageLabel(p.usage))} · ${h(p.runId)}</p>`).join('')}</details>` : ''}
       ${card.events.length ? `<details><summary>Recorded events</summary>${card.events.map(e => `<p>${h(time(e.at))} · ${h(e.stage)}</p>`).join('')}</details>` : ''}</div></details>`
@@ -103,13 +103,6 @@ export const TIMELINE_STYLE = `
 
 export const TIMELINE_SCRIPT = `
 ${PHASE_POPOVER_SCRIPT}
-function formatTimelineClock(at) {
-  if (typeof at !== 'number' || !Number.isFinite(at)) return 'Unknown time';
-  const date = new Date(at);
-  const clock = new Intl.DateTimeFormat('en-US', {hour:'numeric', minute:'2-digit', hour12:true}).format(date);
-  const context = new Intl.DateTimeFormat('en-US', {month:'short', day:'numeric', year:'numeric', timeZoneName:'short'}).format(date);
-  return clock + ' · ' + context;
-}
 function localizeTimelineTimes() {
   document.querySelectorAll('[data-local-time]').forEach(node => {
     const at = Number(node.dataset.localTime);

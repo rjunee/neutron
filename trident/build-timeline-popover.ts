@@ -7,6 +7,13 @@ export const PHASE_POPOVER_STYLE = `
 
 /** All phase text is assigned through textContent, never interpreted as markup. */
 export const PHASE_POPOVER_SCRIPT = `
+function formatTimelineClock(at) {
+  if (typeof at !== 'number' || !Number.isFinite(at)) return 'Unknown time';
+  const date = new Date(at);
+  const clock = new Intl.DateTimeFormat('en-US', {hour:'numeric', minute:'2-digit', hour12:true}).format(date);
+  const context = new Intl.DateTimeFormat('en-US', {month:'short', day:'numeric', year:'numeric', timeZoneName:'short'}).format(date);
+  return clock + ' · ' + context;
+}
 const popover = document.getElementById('phase-popover');
 let phaseTrigger = null, phasePinned = false, phaseHideTimer, suppressPhaseFocus = false;
 let phaseTouchTrigger = null, phaseTouchFocusTrigger = null, phaseTouchResetTimer;
@@ -61,7 +68,7 @@ function showPhasePopover(trigger, pinned = false) {
   for (const action of info.actions) {
     const row = phaseNode('div', 'popover-action', ''); row.append(phaseNode('strong', '', action.label));
     row.append(phaseNode('small', 'popover-time', 'Started ' + formatTimelineClock(action.startedAt)));
-    row.append(phaseNode('small', 'popover-time', action.completedAt === null ? 'In progress · completion unrecorded' : 'Completed ' + formatTimelineClock(action.completedAt)));
+    row.append(phaseNode('small', 'popover-time', typeof action.completedAt === 'number' ? 'Completed ' + formatTimelineClock(action.completedAt) : 'Completion not recorded'));
     const metrics = phaseNode('div', 'popover-metrics', '');
     metrics.append(phaseNode('span', 'popover-duration', action.duration), phaseNode('span', 'popover-tokens', action.tokens)); row.append(metrics);
     row.append(phaseNode('small', 'popover-model', action.model));

@@ -99,12 +99,24 @@ test('PR and phase timestamps expose clock context without turning missing evide
   expect(html).toContain(`&quot;completedAt&quot;:${completed}`)
   expect(html).toContain('&quot;completedAt&quot;:null')
   expect(html).toContain('Phase data incomplete')
-  expect(html).toContain('In progress · completion unrecorded')
+  expect(html).toContain('Completion not recorded')
+  expect(html).not.toContain('In progress')
   const unknown = renderTimeline({ observedAt: completed, cards: [{ ...card([]), start: null, end: null }],
     prCount: 1, runOnlyCount: 0, maxDurationMs: 1, limit: 50, warnings: [] })
   expect(unknown).toContain('Opened unknown')
   expect(unknown).toContain('Observed work start: unknown')
   expect(unknown).not.toContain('Completed 1970')
+})
+
+test('a build and review without a correction phase does not imply missing phase evidence', () => {
+  const pr = card([segment('build', 0, 50, 'build'), segment('review', 50, 100, 'review')])
+  const html = renderTimeline({ observedAt: 100, cards: [pr], prCount: 1, runOnlyCount: 0,
+    maxDurationMs: 100, limit: 50, warnings: [] })
+  expect(html).not.toContain('Phase data incomplete')
+  expect(html).not.toContain('Fixing')
+  const gap = renderTimeline({ observedAt: 100, cards: [{ ...pr, segments: [segment('ci', 0, 100, 'ci')] }],
+    prCount: 1, runOnlyCount: 0, maxDurationMs: 100, limit: 50, warnings: [] })
+  expect(gap).toContain('Phase data incomplete')
 })
 
 test('focus clips only the viewport and makes every later phase available through the overflow popover', () => {
@@ -139,8 +151,8 @@ test('a filter refresh requested during a fetch is replayed with the latest quer
     fetch: (url: string) => { requests.push(url); return requests.length === 1 ? first : Promise.resolve({ ok: true, text: async () => 'fresh query results' }) },
   })
   runInContext(TIMELINE_SCRIPT, context)
-  const clock = runInContext("formatTimelineClock(Date.parse('2026-09-26T16:33:00Z'))", context) as string
-  expect(clock).toMatch(/\d{1,2}:33 (AM|PM) · Sep 26, 2026/)
+  const clock = runInContext('formatTimelineClock(new Date(2026, 8, 26, 16, 33).getTime())', context) as string
+  expect(clock).toMatch(/^4:33 PM · Sep 26, 2026/)
   expect(clock).toMatch(/(?:UTC|GMT|[A-Z]{2,5}|GMT[+-]\d+)/)
   expect(runInContext('formatTimelineClock(new Date(2026, 8, 26, 23, 59).getTime())', context))
     .toMatch(/^11:59 PM · Sep 26, 2026/)

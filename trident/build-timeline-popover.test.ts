@@ -2,7 +2,7 @@ import { expect, test } from 'bun:test'
 import { createContext, runInContext } from 'node:vm'
 import { PHASE_POPOVER_SCRIPT } from './build-timeline-popover.ts'
 
-function fixture() {
+function fixture(completedAt: number | null = new Date(2026, 8, 27, 0, 1).getTime()) {
   const handlers = new Map<string, Array<(event: any) => void>>()
   const timers = new Map<number, () => void>()
   let timerId = 0
@@ -50,7 +50,8 @@ function fixture() {
   const makeTrigger = () => {
     const trigger = new Node()
     trigger.dataset = { phaseKey: 'example:phase', phaseInfo: JSON.stringify({
-      title: 'Build', duration: '5m', actions: [{ label: 'Build', duration: '5m', tokens: '100 tokens', model: 'Example model' }],
+      title: 'Build', duration: '5m', actions: [{ label: 'Build', duration: '5m', tokens: '100 tokens', model: 'Example model',
+        startedAt: new Date(2026, 8, 26, 23, 59).getTime(), completedAt }],
     }) }
     return trigger
   }
@@ -78,6 +79,22 @@ function fixture() {
     },
   }
 }
+
+test('popover shows local 12-hour start and completion clocks across midnight, or unknown completion', () => {
+  const complete = fixture(); complete.trigger.focus()
+  const completeTimes = complete.popover.querySelector('.popover-action')!.children
+    .filter(node => node.className === 'popover-time').map(node => node.textContent)
+  expect(completeTimes[0]).toMatch(/^Started 11:59 PM · /)
+  expect(completeTimes[0]).toContain('Sep 26, 2026')
+  expect(completeTimes[1]).toMatch(/^Completed 12:01 AM · /)
+  expect(completeTimes[1]).toContain('Sep 27, 2026')
+
+  const unknown = fixture(null); unknown.trigger.focus()
+  const unknownTimes = unknown.popover.querySelector('.popover-action')!.children
+    .filter(node => node.className === 'popover-time').map(node => node.textContent)
+  expect(unknownTimes[1]).toBe('Completion not recorded')
+  expect(unknownTimes.join(' ')).not.toContain('In progress')
+})
 
 test('touch focus leaves the release target uncovered until the native click pins details', () => {
   const f = fixture()
