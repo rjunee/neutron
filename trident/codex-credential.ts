@@ -20,7 +20,7 @@
  * re-write it so the loop's CODEX_HOME is always populated.
  */
 
-import { accessSync, constants, statSync } from 'node:fs'
+import { accessSync, constants, realpathSync, statSync } from 'node:fs'
 import { createHash } from 'node:crypto'
 import { delimiter, join } from 'node:path'
 
@@ -552,14 +552,28 @@ export class CodexCredentialService {
   }
 
   /** General uses the selected global seat in place. Owner admission never
-   * rotates reviewer seats or copies a refresh-token bundle to another home. */
-  resolveGeneralOwnerCredential(owner: OwnerHandle): { codexHome: string; credentialIdentity: string } {
+   * rotates reviewer seats or copies a refresh-token bundle to another home.
+   * A retained-home lookup corroborates an existing owner's grant for retirement
+   * or recovery; it does not pronounce that account healthy or select it. */
+  resolveGeneralOwnerCredential(owner: OwnerHandle, retainedHome?: string): { codexHome: string; credentialIdentity: string } {
     const slots = this.rotation.listSlots(owner)
-    const selected = this.rotation.getActiveSlot(owner) ?? DEFAULT_SLOT
+    let retainedCanonical: string | undefined
+    if (retainedHome !== undefined) {
+      try { retainedCanonical = realpathSync(retainedHome) }
+      catch { throw new CodexOwnerCredentialError('Retained General account is not a configured global seat') }
+    }
+    const canonicalHome = (slot: string): string | undefined => {
+      try { return realpathSync(this.slotHome(slot)) }
+      catch (error) { if ((error as NodeJS.ErrnoException).code === 'ENOENT') return undefined; throw error }
+    }
+    const selected = retainedHome === undefined ? this.rotation.getActiveSlot(owner) ?? DEFAULT_SLOT
+      : [DEFAULT_SLOT, ...slots.map(slot => slot.slot)].find(slot => canonicalHome(slot) === retainedCanonical)
+    if (selected === undefined) throw new CodexOwnerCredentialError('Retained General account is not a configured global seat')
     const slot = slots.find(slot => slot.slot === selected)
-    if (slot?.cooling_reason === 'unauthorized') throw new CodexOwnerCredentialError('Connect a global Codex subscription to use General chat')
+    if (retainedHome === undefined && slot?.cooling_reason === 'unauthorized') throw new CodexOwnerCredentialError('Connect a global Codex subscription to use General chat')
     const stored = this.store.resolve(owner, undefined, codexSlotService(selected))
-    const codexHome = this.slotHome(selected)
+    const codexHome = canonicalHome(selected)
+    if (!codexHome) throw new CodexOwnerCredentialError('General Codex requires its configured global subscription in place')
     const disk = readMaterializedAuth(codexHome)
     const account = stored && readAccountId(stored.plaintext)
     if (!stored || stored.scope !== 'global' || !account || !disk
@@ -569,7 +583,7 @@ export class CodexCredentialService {
     }
     const status = deriveCodexStatus(disk, { materialized: true, now: this.now,
       probe: this.cachedVerdict(owner, selected, disk) })
-    if (status.status === 'revoked' || status.status === 'not_connected') {
+    if (retainedHome === undefined && (status.status === 'revoked' || status.status === 'not_connected')) {
       throw new CodexOwnerCredentialError('General Codex subscription is unavailable')
     }
     return { codexHome, credentialIdentity: createHash('sha256').update(JSON.stringify(['chatgpt-account', account])).digest('hex') }

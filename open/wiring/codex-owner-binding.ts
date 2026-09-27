@@ -21,6 +21,8 @@ import { CodexRolloutObserver } from '@neutronai/runtime/adapters/codex-cli/pers
 import { DurableOwnerMcp } from '@neutronai/runtime/adapters/codex-cli/persistent/durable-owner-mcp.ts'
 import type { ResolvedOwnerMcpServer } from '@neutronai/runtime/mcp-servers.ts'
 import { assertOwnerScope, privatePath } from '@neutronai/runtime/adapters/codex-cli/persistent/project-owner-helper-protocol.ts'
+import { abortAccountHandoff, completeAccountHandoff, prepareAccountHandoff, readGeneralOwnerAuthority } from '@neutronai/runtime/adapters/codex-cli/persistent/project-owner-account-handoff.ts'
+import { probeCodexAccountViability } from '@neutronai/runtime/adapters/codex-cli/persistent/project-account-probe.ts'
 
 class CodexWorkRecoveryRequired extends Error {}
 interface BoundedOwnerWork {
@@ -306,8 +308,9 @@ export class CodexOwnerBindings {
   private sequence = 0
 
   private async revalidateProject(projectId: string | null, previous: CodexOwnerProject, supplied?: CodexOwnerProject): Promise<void> {
-    const current = supplied ?? await this.scopeProject(projectId)
-    if (realpathSync(current.cwd) !== previous.cwd || realpathSync(current.codexHome) !== previous.codexHome
+    const raw = supplied ?? await this.scopeProject(projectId)
+    const current = { ...raw, cwd: realpathSync(raw.cwd), codexHome: realpathSync(raw.codexHome) }
+    if (current.cwd !== previous.cwd || current.codexHome !== previous.codexHome
       || !current.credentialIdentity || current.credentialIdentity !== previous.credentialIdentity) {
       throw new Error('Codex owner project credential identity changed; explicit reconciliation required')
     }
@@ -317,12 +320,29 @@ export class CodexOwnerBindings {
   constructor(private readonly project: (projectId: string) => Promise<CodexOwnerProject>,
     private readonly bootstrap: (options: OwnerLaunch) => Promise<CodexOwnerBootstrap> = openDurableCodexOwner,
     private readonly readBinding: typeof readCodexOwnerBinding = readCodexOwnerBinding,
-    private readonly general?: () => Promise<CodexOwnerProject>) {}
+    private readonly general?: (retainedHome?: string) => Promise<CodexOwnerProject>) {}
 
   private scopeProject(projectId: string | null): Promise<CodexOwnerProject> {
     if (projectId !== null) return this.project(projectId)
     if (!this.general) return Promise.reject(new Error('Codex General owner credential is unavailable'))
-    return this.general()
+    return this.general().then(async raw => {
+      const selected = { ...raw, cwd: realpathSync(raw.cwd), codexHome: realpathSync(raw.codexHome) }
+      let authority = selected.generalAuthorityPath ? readGeneralOwnerAuthority(selected.generalAuthorityPath) : undefined
+      if (authority?.preparing) {
+        // Missing or uncertain retirement evidence throws. Never ordinary-resume
+        // the source account across a gateway crash in the handoff transaction.
+        completeAccountHandoff(authority.preparing.locator)
+        authority = readGeneralOwnerAuthority(selected.generalAuthorityPath!)
+      }
+      if (!authority) return selected
+      const retainedRaw = authority.scope.codexHome === selected.codexHome ? selected : await this.general!(authority.scope.codexHome)
+      const retained = { ...retainedRaw, cwd: realpathSync(retainedRaw.cwd), codexHome: realpathSync(retainedRaw.codexHome) }
+      if (retained.codexHome !== authority.scope.codexHome || retained.cwd !== authority.scope.cwd
+        || retained.credentialIdentity !== authority.scope.credential || retained.generalAuthorityPath !== selected.generalAuthorityPath) {
+        throw new Error('Retained General account grant or identity changed')
+      }
+      return retained
+    })
   }
 
   private resolve(projectId: string | null, beforeOpening?: (project: CodexOwnerProject) => void, recoveringWork?: string): Promise<{ owner: CodexOwnerBootstrap; project: CodexOwnerProject }> {
@@ -337,7 +357,7 @@ export class CodexOwnerBindings {
         && ownerWorkBytes(entry.project.codexHome) !== recoveringWork) {
         throw new CodexWorkRecoveryRequired('Codex interrupted host work requires native reconciliation')
       }
-      return entry
+      return projectId === null ? this.handoffGeneral(entry) : entry
     })
     if (!pending) {
       let openingAttempted = false
@@ -388,7 +408,97 @@ export class CodexOwnerBindings {
       })
       this.owners.set(projectId, pending)
     }
-    return pending
+    return pending.then(entry => projectId === null ? this.handoffGeneral(entry) : entry)
+  }
+
+  /** A selected seat is only a candidate. Native ownership changes under the
+   * same host admission fence as complete retirement and acknowledged resume. */
+  private async handoffGeneral(entry: { owner: CodexOwnerBootstrap; project: CodexOwnerProject }): Promise<typeof entry> {
+    const raw = await this.general!()
+    const target = { ...raw, cwd: realpathSync(raw.cwd), codexHome: realpathSync(raw.codexHome) }
+    if (target.codexHome === entry.project.codexHome) {
+      await this.revalidateProject(null, entry.project, target)
+      return entry
+    }
+    if (!target.generalAuthorityPath || target.generalAuthorityPath !== entry.project.generalAuthorityPath
+      || target.cwd !== entry.project.cwd || !target.credentialIdentity || target.credentialIdentity === entry.project.credentialIdentity) {
+      throw new Error('General account transition requires distinct configured authority')
+    }
+    assertOwnerScope(target.codexHome, null)
+    if (this.closed || this.refused.has(null)) throw new Error('Codex owner requires native reconciliation')
+    if (this.retiring.has(null) || this.busy.has(null) || this.controls.isSwitching(null) || this.decodingBuilds.has(null)
+      || this.builds.get(null)?.input || this.reviews.has(null) || this.reviewQueue.has(null) || this.buildObservations.has(null)) {
+      throw new Error('General account transition requires idle host admission')
+    }
+    if (!entry.owner.retire) throw new Error('General account transition has no complete native retirement authority')
+    this.retiring.add(null)
+    let retirementAttempted = false
+    try {
+      await this.revalidateProject(null, entry.project)
+      for (const home of [entry.project.codexHome, target.codexHome]) {
+        if (durableOwnerPathExists(join(home, '.neutron-owner-work.json'))) throw new Error('General account transition has unresolved work')
+      }
+      const authority = readGeneralOwnerAuthority(target.generalAuthorityPath)
+      if (!authority || authority.pending || authority.preparing) throw new Error('General account transition already reserved or unknown')
+      const previous = locateDurableOwnerGeneration(entry.project.codexHome, entry.project.cwd, authority.rootDirectory)
+      const facts = this.ownerFacts.get(entry.owner) ?? this.readBinding(entry.owner.binding)
+      const vacancy = locateDurableOwnerGeneration(target.codexHome, target.cwd)
+      if (['.neutron-owner-launch.json', '.neutron-owner-helper.json', '.neutron-owner-authority.json', '.neutron-owner-retiring.json']
+        .some(file => durableOwnerPathExists(join(vacancy.stateDirectory, file)))) throw new Error('Target account has unresolved native ownership')
+      const env: Record<string, string> = {}
+      for (const [key, value] of Object.entries(target.env)) {
+        if (value !== undefined && !CODEX_CLI_AUTH_ENV_VARS.includes(key)) env[key] = value
+      }
+      env.CODEX_HOME = target.codexHome
+      await probeCodexAccountViability({ binary: 'codex', cwd: target.cwd, codexHome: target.codexHome, env,
+        credentialIdentity: target.credentialIdentity })
+      await this.revalidateProject(null, entry.project)
+      await this.revalidateProject(null, target, await this.general!())
+      await refreshOwner(entry.owner)
+      const preparation = prepareAccountHandoff(target.generalAuthorityPath,
+        { projectId: null, cwd: entry.project.cwd, codexHome: entry.project.codexHome, credential: entry.project.credentialIdentity },
+        { projectId: null, cwd: target.cwd, codexHome: target.codexHome, credential: target.credentialIdentity }, previous.stateDirectory, facts)
+      retirementAttempted = true
+      const outcome = entry.owner.recoverRetirement?.() ?? await entry.owner.retire(entry.owner.broker.state().epoch)
+      if (outcome.status === 'busy') {
+        // The authenticated busy reply and still-current original binding are
+        // both needed; an unknown/lost reply can never release preparation.
+        abortAccountHandoff(preparation, this.readBinding(entry.owner.binding))
+        retirementAttempted = false
+        throw new Error('General account transition has native work')
+      }
+      if (outcome.status !== 'retired' || !isDeepStrictEqual(outcome.receipt.facts, facts)) throw new Error('General account retirement is unproven')
+      completeAccountHandoff(preparation)
+      await this.installedMcp.get(null)?.close()
+      this.installedMcp.delete(null)
+      // Recheck the configured target after retirement, before native launch.
+      await this.revalidateProject(null, target, await this.general!())
+      const owner = await this.bootstrap({ projectId: null, binary: 'codex', socketPath: join(target.codexHome, 'owner.sock'),
+        cwd: target.cwd, codexHome: target.codexHome, env, generalAuthorityPath: target.generalAuthorityPath })
+      try {
+        const successor = this.readBinding(owner.binding)
+        const committed = readGeneralOwnerAuthority(target.generalAuthorityPath)
+        if (!committed || committed.pending || committed.scope.codexHome !== target.codexHome
+          || committed.scope.credential !== target.credentialIdentity || successor.threadId !== facts.threadId
+          || successor.sessionId !== facts.sessionId || successor.credentialIdentity !== target.credentialIdentity) {
+          throw new Error('General native successor acknowledgement is missing')
+        }
+        await refreshOwner(owner)
+        if (owner.broker.state().phase !== 'idle' || this.closed) throw new Error('General native successor is not idle')
+        this.ownerProjects.set(owner, null); this.ownerFacts.set(owner, successor)
+      } catch (error) { await owner.close(); throw error }
+      this.ownerProjects.delete(entry.owner); this.ownerFacts.delete(entry.owner)
+      this.resolvedOwners.set(null, owner)
+      const successor = { owner, project: target }
+      this.owners.set(null, Promise.resolve(successor))
+      this.conversationHosts.delete(null)
+      return successor
+    } catch (error) {
+      // Durable preparation owns this uncertainty. No model input was dispatched;
+      // do not invent a conversation-work marker in the retired account.
+      if (retirementAttempted) this.refused.add(null)
+      throw error
+    } finally { this.retiring.delete(null) }
   }
 
   async close(): Promise<void> {
@@ -412,7 +522,8 @@ export class CodexOwnerBindings {
       try {
         const project = await this.scopeProject(projectId)
         assertOwnerScope(project.codexHome, projectId)
-        const generation = locateDurableOwnerGeneration(project.codexHome, project.cwd)
+        const general = projectId === null && project.generalAuthorityPath ? readGeneralOwnerAuthority(project.generalAuthorityPath) : undefined
+        const generation = locateDurableOwnerGeneration(project.codexHome, project.cwd, general?.rootDirectory)
         if (['.neutron-owner-launch.json', '.neutron-owner-helper.json', '.neutron-owner-authority.json', '.neutron-owner-retiring.json']
           .some(file => durableOwnerPathExists(join(generation.stateDirectory, file)))) {
           return { status: 'unknown', reason: 'Durable Codex owner requires attachment before retirement' }
@@ -500,7 +611,8 @@ export class CodexOwnerBindings {
           } finally { this.retiring.delete(projectId) }
         }
       }
-      const generation = locateDurableOwnerGeneration(project.codexHome, project.cwd)
+      const general = projectId === null && project.generalAuthorityPath ? readGeneralOwnerAuthority(project.generalAuthorityPath) : undefined
+      const generation = locateDurableOwnerGeneration(project.codexHome, project.cwd, general?.rootDirectory)
       if (!durableOwnerPathExists(join(generation.stateDirectory, '.neutron-owner-launch.json'))
         && !(generation.resume && 'kind' in generation.resume.receipt && generation.resume.receipt.kind === 'crash')) {
         return { status: 'skipped' }

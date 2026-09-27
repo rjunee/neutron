@@ -5,6 +5,7 @@ import type { CodexOwnerBindingFacts } from './project-control-bootstrap.ts'
 import { privatePath, type HelperIdentity, type OwnerHelperDescriptor } from './project-owner-helper-protocol.ts'
 import { assertNoOtherCodexOwner, readCrashedOwner, type CodexOwnerCrashReceipt } from './project-owner-crash-recovery.ts'
 import { assertOwnerProcessDead, nextOwnerDirectory } from './project-owner-generation.ts'
+import { readAccountHandoff, validateAccountHandoffTranscript, type AccountHandoffLocator } from './project-owner-account-handoff.ts'
 export { assertOwnerProcessDead, nextOwnerDirectory } from './project-owner-generation.ts'
 
 /** Completed exit evidence, never a request to terminate or a timeout. */
@@ -19,6 +20,8 @@ export interface CodexOwnerRetirementReceipt {
 export interface CodexOwnerResume {
   predecessorDirectory: string
   receipt: CodexOwnerRetirementReceipt | CodexOwnerCrashReceipt
+  /** Explicit General transition; never inferred from a changed CODEX_HOME. */
+  handoff?: AccountHandoffLocator
 }
 
 /** The prior generation's immutable host attestation corroborates the receipt.
@@ -44,6 +47,16 @@ export function readCompletedOwnerRetirement(directory: string): CodexOwnerRetir
 }
 
 export function validateOwnerResume(directory: string, resume: CodexOwnerResume, cwd: string, codexHome: string): void {
+  if (resume.handoff) {
+    const handoff = readAccountHandoff(resume.handoff)
+    if (directory !== handoff.stateDirectory || cwd !== handoff.target.cwd || codexHome !== handoff.target.codexHome
+      || resume.predecessorDirectory !== handoff.predecessorDirectory || !isDeepStrictEqual(resume.receipt, handoff.receipt)) {
+      throw new Error('Owner resume does not match its reserved account handoff')
+    }
+    validateAccountHandoffTranscript(handoff)
+    assertNoOtherCodexOwner({ ...handoff.receipt.facts, codexHome: handoff.target.codexHome, rolloutPath: handoff.rolloutPath })
+    return
+  }
   const receipt = 'kind' in resume.receipt && resume.receipt.kind === 'crash'
     ? readCrashedOwner(resume.predecessorDirectory) : readCompletedOwnerRetirement(resume.predecessorDirectory)
   if (!isDeepStrictEqual(receipt, resume.receipt) || directory !== nextOwnerDirectory(receipt.facts)
