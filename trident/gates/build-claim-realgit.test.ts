@@ -29,7 +29,7 @@ import { join } from 'node:path'
 
 import { spawnCapture } from '../git-mode.ts'
 import type { RunHostCommand } from '../merge.ts'
-import { checkBuildClaim } from './build-claim.ts'
+import { checkBuildClaim, buildPreservationRef } from './build-claim.ts'
 
 const BRANCH = 'trident/card'
 const TRAILER = 'Claude-Session: https://claude.ai/code/session_01PRESERVE'
@@ -44,15 +44,15 @@ async function git(repo: string, ...args: string[]): Promise<string> {
 }
 
 /** The sha origin holds for the branch ('' when it does not exist), read the way the lease reads it. */
-async function observeRemote(repo: string): Promise<string> {
-  const res = await spawnCapture(['git', '-C', repo, 'ls-remote', '--heads', 'origin', `refs/heads/${BRANCH}`], repo)
+async function observeRemote(repo: string, head?: string): Promise<string> {
+  const res = await spawnCapture(['git', '-C', repo, 'ls-remote', '--heads', 'origin', head ? buildPreservationRef(head) : `refs/heads/${BRANCH}`], repo)
   return res.stdout.trim().split(/\s+/)[0] ?? ''
 }
 
 interface World { repo: string; base: string; own: string; foreign: string }
 
 /**
- * A bare origin with nothing on it, a checkout on BRANCH whose history is
+ * A bare origin holding the original base, a checkout on BRANCH whose history is
  * base <- own(<ownParagraphs>) <- foreign('foreign on top'): `own` is the commit Forge made and
  * will claim, `foreign` is what the branch names when the host measures it.
  */
@@ -81,6 +81,7 @@ async function seedWorld(ownParagraphs: string[]): Promise<World> {
   await git(repo, 'add', 'more.txt')
   await git(repo, 'commit', '-q', '-m', 'foreign on top')
   const foreign = await git(repo, 'rev-parse', 'HEAD')
+  await git(repo, 'push', 'origin', `${base}:refs/heads/${BRANCH}`)
   return { repo, base, own, foreign }
 }
 
@@ -95,15 +96,16 @@ function host(): { run: RunHostCommand; calls: string[][] } {
 
 test('#1133 G166 preservation: positive control — a claim conflict on clean history is preserved on origin', async () => {
   const world = await seedWorld(['feat: built work', CO_AUTHOR])
-  expect(await observeRemote(world.repo)).toBe('')
+  expect(await observeRemote(world.repo)).toBe(world.base)
   const h = host()
   const result = await checkBuildClaim(h.run, world.repo, BRANCH, world.base, world.own.slice(0, 7), { head: world.foreign, diff: '+built', pr: null }, 'run')
-  expect(result).toEqual({ kind: 'blocked', on: `Build claim ${world.own.slice(0, 7)} resolves to ${world.own} but measured head is ${world.foreign}; branch preserved on origin` })
-  expect(await observeRemote(world.repo)).toBe(world.foreign)
+  expect(result).toEqual({ kind: 'blocked', on: `Build claim ${world.own.slice(0, 7)} resolves to ${world.own} but measured head is ${world.foreign}; branch preserved on origin at ${buildPreservationRef(world.foreign)}` })
+  expect(await observeRemote(world.repo, world.foreign)).toBe(world.foreign)
+  expect(await observeRemote(world.repo)).toBe(world.base)
   // The scan ran on this path: the raw objects of both branch commits were read before the push.
   const push = h.calls.findIndex(argv => argv.includes('push'))
   expect(push).toBeGreaterThanOrEqual(0)
-  expect(h.calls[push]).toEqual(['git', '-C', world.repo, 'push', `--force-with-lease=refs/heads/${BRANCH}:`, 'origin', `${world.foreign}:refs/heads/${BRANCH}`])
+  expect(h.calls[push]).toEqual(['git', '-C', world.repo, 'push', `--force-with-lease=${buildPreservationRef(world.foreign)}:`, 'origin', `${world.foreign}:${buildPreservationRef(world.foreign)}`])
   for (const sha of [world.own, world.foreign]) {
     const read = h.calls.findIndex(argv => argv.includes('cat-file') && argv.includes(sha))
     expect(read).toBeGreaterThanOrEqual(0)
@@ -120,17 +122,18 @@ test('#1133 G166 preservation: a carrier in launch-base..head is preserved on or
   // path observes and names the carrier so the branch is stripped before any PR. It is not a veto.
   expect(result).toEqual({
     kind: 'blocked',
-    on: `Build claim ${world.own.slice(0, 7)} resolves to ${world.own} but measured head is ${world.foreign}; branch preserved on origin; preserved range: Publication branch carries a Claude-Session trailer on 1 commit(s) above the launch base: ${world.own} -- strip before any PR`,
+    on: `Build claim ${world.own.slice(0, 7)} resolves to ${world.own} but measured head is ${world.foreign}; branch preserved on origin at ${buildPreservationRef(world.foreign)}; preserved range: Publication branch carries a Claude-Session trailer on 1 commit(s) above the launch base: ${world.own} -- strip before any PR`,
   })
   const push = h.calls.findIndex(argv => argv.includes('push'))
   expect(push).toBeGreaterThanOrEqual(0)
-  expect(h.calls[push]).toEqual(['git', '-C', world.repo, 'push', `--force-with-lease=refs/heads/${BRANCH}:`, 'origin', `${world.foreign}:refs/heads/${BRANCH}`])
+  expect(h.calls[push]).toEqual(['git', '-C', world.repo, 'push', `--force-with-lease=${buildPreservationRef(world.foreign)}:`, 'origin', `${world.foreign}:${buildPreservationRef(world.foreign)}`])
   // The scan read the carrier's raw object BEFORE the push: what was named is what was pushed.
   const read = h.calls.findIndex(argv => argv.includes('cat-file') && argv.includes(world.own))
   expect(read).toBeGreaterThanOrEqual(0)
   expect(read).toBeLessThan(push)
   // Origin holds the measured head (the work is not stranded), and the local branch is where it was.
-  expect(await observeRemote(world.repo)).toBe(world.foreign)
+  expect(await observeRemote(world.repo, world.foreign)).toBe(world.foreign)
+  expect(await observeRemote(world.repo)).toBe(world.base)
   expect(await git(world.repo, 'rev-parse', `refs/heads/${BRANCH}`)).toBe(world.foreign)
 })
 
@@ -142,8 +145,9 @@ test('#1133 G166 preservation: a range that cannot be measured is still preserve
   const result = await checkBuildClaim(h.run, world.repo, BRANCH, '1'.repeat(40), world.own.slice(0, 7), { head: world.foreign, diff: '+built', pr: null }, 'run')
   expect(result).toEqual({
     kind: 'blocked',
-    on: `Build claim ${world.own.slice(0, 7)} resolves to ${world.own} but measured head is ${world.foreign}; branch preserved on origin; session-trailer scan unmeasured: Publication commit range could not be listed`,
+    on: `Build claim ${world.own.slice(0, 7)} resolves to ${world.own} but measured head is ${world.foreign}; branch preserved on origin at ${buildPreservationRef(world.foreign)}; session-trailer scan unmeasured: Publication commit range could not be listed`,
   })
   expect(h.calls.some(argv => argv.includes('push'))).toBe(true)
-  expect(await observeRemote(world.repo)).toBe(world.foreign)
+  expect(await observeRemote(world.repo, world.foreign)).toBe(world.foreign)
+  expect(await observeRemote(world.repo)).toBe(world.base)
 })

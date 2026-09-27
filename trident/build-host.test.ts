@@ -933,7 +933,7 @@ test('G100 composed host preserves a real Git branch before reporting conflict',
   f.options.leak.base_sha = old
   const deps = f.make().deps
   expect(await deps.checkBuildClaim!(old.slice(0, 7), { ...snapshot, head: built })).toEqual({ kind: 'blocked', on: expect.stringContaining('; branch preserved on origin') })
-  expect(await git('--git-dir', remote, 'rev-parse', 'refs/heads/change')).toBe(built)
+  expect(await git('--git-dir', remote, 'rev-parse', `refs/heads/trident-preserved/${built}`)).toBe(built)
   expect(await git('rev-parse', 'refs/heads/change')).toBe(built)
   expect(await deps.checkBuildClaim!(built.slice(0, 7), { ...snapshot, head: built })).toEqual({ kind: 'allow' })
   expect(await deps.checkBuildClaim!('deadbeef', { ...snapshot, head: built })).toEqual({ kind: 'allow' })
@@ -966,9 +966,9 @@ test('G100/G166 composed host threads the launch base into the preservation scan
   // Owner decision 2026-09-19: G100 preserves; the G166 scan on this path names the carrier.
   expect(await deps.checkBuildClaim!(old.slice(0, 7), { ...snapshot, head: built })).toEqual({
     kind: 'blocked',
-    on: expect.stringContaining(`; branch preserved on origin; preserved range: Publication branch carries a Claude-Session trailer on 1 commit(s) above the launch base: ${built}`),
+    on: expect.stringContaining(`; branch preserved on origin at refs/heads/trident-preserved/${built}; preserved range: Publication branch carries a Claude-Session trailer on 1 commit(s) above the launch base: ${built}`),
   })
-  expect(await git('--git-dir', remote, 'rev-parse', 'refs/heads/change')).toBe(built)
+  expect(await git('--git-dir', remote, 'rev-parse', `refs/heads/trident-preserved/${built}`)).toBe(built)
 })
 
 test('G023 host derives branch assignment from the run', async () => {

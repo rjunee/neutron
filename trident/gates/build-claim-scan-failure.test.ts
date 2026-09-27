@@ -4,7 +4,7 @@ import { tmpdir } from 'node:os'
 import { join } from 'node:path'
 import { makeLazyCredentialedHostRunner, spawnCapture } from '../git-mode.ts'
 import type { RunHostCommand } from '../merge.ts'
-import { checkBuildClaim } from './build-claim.ts'
+import { checkBuildClaim, buildPreservationRef } from './build-claim.ts'
 import { publicationReadiness } from './release-readiness.ts'
 
 const directories: string[] = []
@@ -68,12 +68,12 @@ for (const fault of [undefined, 'rev-list', 'cat-file', 'size'] as const) {
     const h = host(fault)
     const verdict = await checkBuildClaim(h.run, w.repo, 'change', w.base, w.base, w.snapshot, 'preservation-test')
     // Observe the bare origin independently, not just the command or reported outcome.
-    expect(await git(w.origin, 'rev-parse', '--verify', 'refs/heads/change')).toBe(w.head)
+    expect(await git(w.origin, 'rev-parse', '--verify', buildPreservationRef(w.head))).toBe(w.head)
     expect(verdict.kind).toBe('blocked')
     if (verdict.kind !== 'blocked') throw new Error('Preservation must refuse review')
     expect(verdict.on).toContain('branch preserved on origin')
     expect(h.calls.filter(argv => argv.includes('push'))).toEqual([
-      ['git', '-C', w.repo, 'push', '--force-with-lease=refs/heads/change:', 'origin', `${w.head}:refs/heads/change`],
+      ['git', '-C', w.repo, 'push', `--force-with-lease=${buildPreservationRef(w.head)}:`, 'origin', `${w.head}:${buildPreservationRef(w.head)}`],
     ])
     expect(h.calls.findIndex(argv => argv.includes('rev-list'))).toBeLessThan(h.calls.findIndex(argv => argv.includes('push')))
     expect(h.failures()).toBe(fault ? 1 : 0)
@@ -101,14 +101,14 @@ test('G100 real origin stays untouched without a measured claim conflict', async
   // Positive control: the same repository and host can measure a conflict and preserve it.
   const h = host()
   expect((await checkBuildClaim(h.run, w.repo, 'change', w.base, w.base, w.snapshot, 'preservation-test')).kind).toBe('blocked')
-  expect(await git(w.origin, 'rev-parse', '--verify', 'refs/heads/change')).toBe(w.head)
+  expect(await git(w.origin, 'rev-parse', '--verify', buildPreservationRef(w.head))).toBe(w.head)
 })
 
 test('G100 scan exception containment does not authorize subsequent publication', async () => {
   const w = await world()
   const h = host('rev-list')
   expect((await checkBuildClaim(h.run, w.repo, 'change', w.base, w.base, w.snapshot, 'preservation-test')).kind).toBe('blocked')
-  expect(await git(w.origin, 'rev-parse', '--verify', 'refs/heads/change')).toBe(w.head)
+  expect(await git(w.origin, 'rev-parse', '--verify', buildPreservationRef(w.head))).toBe(w.head)
   expect(await publicationReadiness(h.run, w.repo, 'change', 'main', w.base, w.snapshot, 'preservation-test')).toMatchObject({
     kind: 'unknown', detail: expect.stringContaining('credential loader unavailable'),
   })

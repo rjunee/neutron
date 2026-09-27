@@ -1463,6 +1463,44 @@ async function drive(f: Awaited<ReturnType<typeof fixture>>): Promise<ProjectBui
   return host.run({ mode: 'implementation', start: 'fresh' }, new AbortController().signal)
 }
 
+test.each(['missing', 'replayed'] as const)('published branch preservation consumes fresh build with %s earlier work', async mode => {
+  const f = await fixture()
+  const git = async (repo: string, args: string[]) => {
+    const result = await spawnCapture(['git', '-C', repo, ...args], repo)
+    expect(result.ok, result.stderr).toBe(true)
+    return result.stdout.trim()
+  }
+  const prepared = await f.prepare()
+  const row = f.store.get(f.row.id)!
+  const priorTree = join(f.dir, 'prior-work')
+  await git(f.repo, ['worktree', 'add', '--detach', priorTree, f.baseSha])
+  await writeFile(join(priorTree, 'EARLIER.md'), 'Previously published task\n')
+  await git(priorTree, ['add', 'EARLIER.md'])
+  await git(priorTree, ['commit', '-m', 'Earlier task'])
+  const prior = await git(priorTree, ['rev-parse', 'HEAD'])
+  await git(f.repo, ['push', 'origin', `${prior}:refs/heads/${row.branch}`])
+  const host = await createProjectBuildHost(prepared)
+  if (mode === 'replayed') {
+    const runner = host.workers.build.runner
+    host.workers.build.runner = { ...runner, run: async (...args) => {
+      await git(row.worktree!, ['commit', '--allow-empty', '-m', 'Fresh dispatch foundation'])
+      await git(row.worktree!, ['cherry-pick', prior])
+      const head = await git(row.worktree!, ['rev-parse', 'HEAD'])
+      expect((await spawnCapture(['git', '-C', f.repo, 'merge-base', '--is-ancestor', prior, head], f.repo)).exit_code).toBe(1)
+      return runner.run(...args)
+    } }
+  }
+  const result = await host.run({ mode: 'implementation', start: 'fresh' }, new AbortController().signal)
+  if (mode === 'missing') {
+    expect(result, why(f, result)).toMatchObject({ kind: 'unknown', phase: 'publish', detail: expect.stringContaining('discard previously published work') })
+    expect(await git(f.repo, ['ls-remote', '--heads', 'origin', `refs/heads/${row.branch}`])).toStartWith(prior)
+    expect(f.commands.some(argv => argv[0] === 'gh' && argv.includes('create'))).toBe(false)
+  } else {
+    expect(result.kind, why(f, result)).toBe('merged')
+    expect(await git(f.origin, ['show', 'refs/heads/main:EARLIER.md'])).toBe('Previously published task')
+  }
+}, 120_000)
+
 test('fake GitHub projection freshly resolves each exact ref and preserves missing refs and pinned merge', async () => {
   const f = await fixture()
   const git = (cwd: string, args: string[]) => gitOut(spawnCapture, cwd, args)

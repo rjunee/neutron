@@ -12,22 +12,26 @@ import { unknownCause } from './unknown-cause.ts'
 const fullOid = (value: string) => /^(?:[a-f0-9]{40}|[a-f0-9]{64})$/.test(value)
 const unknown = (detail: string): GateResult => ({ kind: 'unknown', detail })
 
+/** One immutable recovery location per exact candidate, never the live PR branch. */
+export const buildPreservationRef = (head: string): string => `refs/heads/trident-preserved/${head}`
+
 /** G100: independently resolve the claim, then preserve before refusing review.
  *
  * The preservation push is G100's guarantee (`docs/trident-gates-inventory.md`, G100): a real
- * claim/head disagreement refuses PR creation and review AFTER the measured branch is on
+ * claim/head disagreement refuses PR creation and review AFTER the measured candidate is on
  * origin, so good work is never stranded by the refusal. Owner decision 2026-09-19: G100 is
  * not superseded by G166 -- the push happens whatever the scan finds.
  *
  * `launchBase` is the run's pinned launch base (the same value `publicationReadiness` scans
- * from). The push is an origin-facing push of the build branch, so it runs the #1133 (G166)
+ * from). The push creates an immutable candidate ref on origin, so it runs the #1133 (G166)
  * session-trailer scan the other publishers run, and it runs it BEFORE the push over the same
  * raw objects the push publishes. A claim that differs from the measured head is exactly the
  * state the commit wrapper's provenance refusal (exit 76) leaves behind -- Forge reports the
  * sha it created while the branch names a later commit -- and the commit it created may carry
  * the trailer. On THIS path the scan observes and names; it does not veto: the refusal already
  * stands (no PR, no review), and it carries the carriers or the unmeasured detail so the branch
- * is stripped before anything is published as a PR. The checked publishers and the salvage
+ * is stripped before anything is published as a PR. It never replaces the original branch.
+ * The checked publishers and the salvage
  * push (`release-readiness.ts`, `publication.ts`) stay fail-closed; G100 is the one push whose
  * job is to preserve, and it preserves.
  */
@@ -35,8 +39,8 @@ export async function checkBuildClaim(run: RunHostCommand, repo: string, branch:
   claim: string, snapshot: BuildSnapshot, runId: string): Promise<GateResult> {
   try {
     if (!fullOid(snapshot.head)) return unknown('Measured build head is not a full commit OID')
-    const ref = `refs/heads/${branch}`
-    const valid = await run(['git', 'check-ref-format', ref], repo)
+    const ref = buildPreservationRef(snapshot.head)
+    const valid = await run(['git', 'check-ref-format', `refs/heads/${branch}`], repo)
     if (!valid.ok) return unknown('Build branch reference is invalid')
     const resolved = await run(['git', '-C', repo, 'rev-parse', '--verify', '--quiet', '--end-of-options', `${claim}^{commit}`], repo)
     // Quiet rev-parse exit 1 establishes that this claim names no commit.
@@ -45,7 +49,7 @@ export async function checkBuildClaim(run: RunHostCommand, repo: string, branch:
     if (resolved.stdout.trim().toLowerCase() === snapshot.head.toLowerCase()) return { kind: 'allow' }
     const conflict = `Build claim ${claim} resolves to ${resolved.stdout.trim()} but measured head is ${snapshot.head}`
     const observed = await run(['git', '-C', repo, 'ls-remote', '--heads', 'origin', ref], repo)
-    if (!observed.ok) return unknown('Preservation remote head could not be read')
+    if (!observed.ok || observed.timed_out) return unknown('Preservation remote head could not be read')
     const parse = (text: string): string | null => {
       if (!text.trim()) return ''
       const fields = text.trim().split(/\s+/)
@@ -53,6 +57,7 @@ export async function checkBuildClaim(run: RunHostCommand, repo: string, branch:
     }
     const before = parse(observed.stdout)
     if (before === null) return unknown('Preservation remote head is malformed')
+    if (before !== '' && before !== snapshot.head) return unknown('Immutable preservation ref names another commit')
     let scanned = ''
     if (before !== snapshot.head) {
       // #1133 (G166): scan launchBase..head for a `Claude-Session:` line BEFORE the push, over
@@ -72,10 +77,10 @@ export async function checkBuildClaim(run: RunHostCommand, repo: string, branch:
       else if (trailers.kind === 'unknown') scanned = `; session-trailer scan unmeasured: ${trailers.detail}`
       // Push the measured object, never a branch that can move after measurement.
       const pushed = await run(['git', '-C', repo, 'push', `--force-with-lease=${ref}:${before}`, 'origin', `${snapshot.head}:${ref}`], repo)
-      if (!pushed.ok) return unknown('Build branch preservation push was not confirmed')
+      if (!pushed.ok || pushed.timed_out) return unknown('Build branch preservation push was not confirmed')
       const receipt = await run(['git', '-C', repo, 'ls-remote', '--heads', 'origin', ref], repo)
-      if (!receipt.ok || parse(receipt.stdout) !== snapshot.head) return unknown('Build branch preservation receipt does not match measured head')
+      if (!receipt.ok || receipt.timed_out || parse(receipt.stdout) !== snapshot.head) return unknown('Build branch preservation receipt does not match measured head')
     }
-    return { kind: 'blocked', on: `${conflict}; branch preserved on origin${scanned}` }
+    return { kind: 'blocked', on: `${conflict}; branch preserved on origin at ${ref}${scanned}` }
   } catch (error) { return unknownCause('Build claim resolution or preservation failed', error, runId) }
 }

@@ -174,9 +174,20 @@ function buildHarness(opts: {
   // fake clock (mismatched clocks would make `elapsedSinceAdvance` meaningless).
   store = new TridentRunStore(db, now)
   const sim = buildSimFirer(db, store, opts.plan)
+  const preservationRefs = new Map<string, string>()
   const host = async (cmd: string[]): Promise<HostCommandResult> => {
     hostCalls.push(cmd)
     const joined = cmd.join(' ')
+    const preservationRef = cmd.find(arg => arg.startsWith('refs/heads/trident-preserved/'))
+    if (cmd.includes('ls-remote') && preservationRef) {
+      const head = preservationRefs.get(preservationRef)
+      return ok(head ? `${head}\t${preservationRef}` : '')
+    }
+    if (cmd.includes('push') && cmd.at(-1)?.includes(':refs/heads/trident-preserved/')) {
+      const [head, ref] = cmd.at(-1)!.split(':')
+      preservationRefs.set(ref!, head!)
+      return ok()
+    }
     // THE DEPTH PROBE IS STUBBABLE, and defaults to a COMPLETE checkout. The launch ancestry
     // guard reads it to decide whether `merge-base --is-ancestor` exit 1 is a proven "no" or a
     // shallow boundary lying — so a scenario must be able to say "this clone is shallow". The
@@ -214,6 +225,10 @@ function buildHarness(opts: {
     // only ever resolves NAMED refs (`origin/main^{commit}`,
     // `refs/heads/<branch>^{commit}`), so the ref shape discriminates cleanly.
     //
+    // Replay fixtures' behind-main answers exclude the raw published-work
+    // ancestry probe: they model preserving the prior branch while moving its
+    // base. Loss and rewritten equivalence use real Git in published-work.test.ts
+    // and publication-session-trailer-realgit.test.ts, not this command double.
     // `merge-base` MUST stay in this list. Dropping it on the theory that an
     // unresolvable ref "fails open" costs 33 tests (vs 5 with it): the gate
     // fails CLOSED when materiality is unassessable, which is correct — it
@@ -1983,7 +1998,7 @@ describe('orchestrator — APPROVE → done → merge (server-gated)', () => {
           return ok(lsRemotesBranch === 1 ? `${preRebase}\trefs/heads/feat-x` : `${newHead}\trefs/heads/feat-x`)
         }
         // `main` is NOT an ancestor of the branch — this is the genuinely-behind case.
-        if (joined.includes('merge-base --is-ancestor')) return failWith('')
+        if (joined.includes('merge-base --is-ancestor') && !cmd.includes('--no-replace-objects')) return failWith('')
         // The publisher's OWN read of the head (T1) is `rev-parse --verify refs/heads/<branch>` —
         // matched BEFORE the rebase step's generic `rev-parse --verify <baseSha>^{commit}` probe.
         if (joined.includes('rev-parse --verify refs/heads/feat-x')) return ok(oldHead)
@@ -2076,7 +2091,7 @@ describe('orchestrator — APPROVE → done → merge (server-gated)', () => {
           lsRemotesBranch += 1
           return ok(lsRemotesBranch === 1 ? `${preRebase}\trefs/heads/feat-x` : `${newHead}\trefs/heads/feat-x`)
         }
-        if (joined.includes('merge-base --is-ancestor')) return failWith('')
+        if (joined.includes('merge-base --is-ancestor') && !cmd.includes('--no-replace-objects')) return failWith('')
         // The FORK POINT — what `gh pr diff` computes server-side, and what the replay must use.
         if (joined.includes('merge-base ')) return ok(forkPoint)
         if (joined.includes('rev-parse --verify refs/heads/feat-x')) return ok(oldHead)
@@ -2137,7 +2152,7 @@ describe('orchestrator — APPROVE → done → merge (server-gated)', () => {
           lsRemotesBranch += 1
           return ok(`${preRebase}\trefs/heads/feat-x`)
         }
-        if (joined.includes('merge-base --is-ancestor')) return failWith('')
+        if (joined.includes('merge-base --is-ancestor') && !cmd.includes('--no-replace-objects')) return failWith('')
         // The shallow boundary: merge-base cannot answer, before OR after the deepen.
         if (joined.includes('merge-base ')) return failWith('fatal: refusing to work with a shallow history')
         if (joined.includes('rev-parse --verify refs/heads/feat-x')) return ok(oldHead)
@@ -2379,7 +2394,7 @@ describe('orchestrator — APPROVE → done → merge (server-gated)', () => {
         const joined = cmd.join(' ')
         if (joined.includes('ls-remote --heads origin refs/heads/main')) return ok(`${newBaseSha}\trefs/heads/main`)
         if (joined.includes('ls-remote --heads origin refs/heads/feat-x')) return ok(`${head}\trefs/heads/feat-x`)
-        if (joined.includes('merge-base --is-ancestor')) return failWith('')
+        if (joined.includes('merge-base --is-ancestor') && !cmd.includes('--no-replace-objects')) return failWith('')
         // Publisher's own head read (T1) before the rebase step's generic `--verify` probe.
         if (/rev-parse (--verify )?refs\/heads\/feat-x/.test(joined)) return ok(head)
         if (joined.includes('rev-parse --verify')) return ok(newBaseSha)
@@ -2462,7 +2477,7 @@ describe('orchestrator — APPROVE → done → merge (server-gated)', () => {
           lsRemotesBranch += 1
           return ok(lsRemotesBranch === 1 ? `${preRebase}\trefs/heads/feat-x` : `${newHead}\trefs/heads/feat-x`)
         }
-        if (joined.includes('merge-base --is-ancestor')) return failWith('')
+        if (joined.includes('merge-base --is-ancestor') && !cmd.includes('--no-replace-objects')) return failWith('')
         if (joined.includes('rev-parse --verify refs/heads/feat-x')) return ok(head)
         if (joined.includes(`--end-of-options ${head}^{commit}`)) return ok(head)
         if (joined.includes('rev-parse --verify')) return ok(newBaseSha)
@@ -2535,7 +2550,7 @@ describe('orchestrator — APPROVE → done → merge (server-gated)', () => {
         const joined = cmd.join(' ')
         if (joined.includes('ls-remote --heads origin refs/heads/main')) return ok(`${newBaseSha}\trefs/heads/main`)
         if (joined.includes('ls-remote --heads origin refs/heads/feat-x')) return ok(`${head}\trefs/heads/feat-x`)
-        if (joined.includes('merge-base --is-ancestor')) return failWith('')
+        if (joined.includes('merge-base --is-ancestor') && !cmd.includes('--no-replace-objects')) return failWith('')
         if (/rev-parse (--verify )?refs\/heads\/feat-x/.test(joined)) return ok(head)
         if (joined.includes('rev-parse --verify')) return ok(newBaseSha)
         if (joined.includes('gh pr list')) return ok('42')
@@ -2586,7 +2601,7 @@ describe('orchestrator — APPROVE → done → merge (server-gated)', () => {
         const joined = cmd.join(' ')
         if (joined.includes('ls-remote --heads origin refs/heads/main')) return ok(`${newBaseSha}\trefs/heads/main`)
         if (joined.includes('ls-remote --heads origin refs/heads/feat-x')) return ok(`${head}\trefs/heads/feat-x`)
-        if (joined.includes('merge-base --is-ancestor')) return failWith('')
+        if (joined.includes('merge-base --is-ancestor') && !cmd.includes('--no-replace-objects')) return failWith('')
         if (/rev-parse (--verify )?refs\/heads\/feat-x/.test(joined)) return ok(head)
         if (joined.includes('rev-parse --verify')) return ok(newBaseSha)
         if (joined.includes('gh pr list')) return ok('42')
@@ -2630,7 +2645,7 @@ describe('orchestrator — APPROVE → done → merge (server-gated)', () => {
         const joined = cmd.join(' ')
         if (joined.includes('ls-remote --heads origin refs/heads/main')) return ok(`${newBaseSha}\trefs/heads/main`)
         if (joined.includes('ls-remote --heads origin refs/heads/feat-x')) return ok(`${head}\trefs/heads/feat-x`)
-        if (joined.includes('merge-base --is-ancestor')) return failWith('')
+        if (joined.includes('merge-base --is-ancestor') && !cmd.includes('--no-replace-objects')) return failWith('')
         if (/rev-parse (--verify )?refs\/heads\/feat-x/.test(joined)) return ok(head)
         if (joined.includes('rev-parse --verify')) return ok(newBaseSha)
         if (joined.includes('gh pr list')) return ok('42')
@@ -2691,7 +2706,7 @@ describe('orchestrator — APPROVE → done → merge (server-gated)', () => {
           const joined = cmd.join(' ')
           if (joined.includes('ls-remote --heads origin refs/heads/main')) return ok(`${newBaseSha}\trefs/heads/main`)
           if (joined.includes('ls-remote --heads origin refs/heads/feat-x')) return ok(`${head}\trefs/heads/feat-x`)
-          if (joined.includes('merge-base --is-ancestor')) return failWith('')
+          if (joined.includes('merge-base --is-ancestor') && !cmd.includes('--no-replace-objects')) return failWith('')
           if (/rev-parse (--verify )?refs\/heads\/feat-x/.test(joined)) return ok(head)
           if (joined.includes('rev-parse --verify')) return ok(newBaseSha)
           if (joined.includes('gh pr list')) return ok('42')
@@ -2763,7 +2778,7 @@ describe('orchestrator — APPROVE → done → merge (server-gated)', () => {
           lsRemotesBranch += 1
           return ok(lsRemotesBranch === 1 ? `${preRebase}\trefs/heads/feat-x` : `${newHead}\trefs/heads/feat-x`)
         }
-        if (joined.includes('merge-base --is-ancestor')) return failWith('')
+        if (joined.includes('merge-base --is-ancestor') && !cmd.includes('--no-replace-objects')) return failWith('')
         if (joined.includes('rev-parse --verify refs/heads/feat-x')) return ok(head)
         if (joined.includes(`--end-of-options ${head}^{commit}`)) return ok(head)
         if (joined.includes('rev-parse --verify')) return ok(newBaseSha)
@@ -2832,7 +2847,7 @@ describe('orchestrator — APPROVE → done → merge (server-gated)', () => {
           lsRemotesBranch += 1
           return ok(lsRemotesBranch === 1 ? `${preRebase}\trefs/heads/feat-x` : `${newHead}\trefs/heads/feat-x`)
         }
-        if (joined.includes('merge-base --is-ancestor')) return failWith('')
+        if (joined.includes('merge-base --is-ancestor') && !cmd.includes('--no-replace-objects')) return failWith('')
         if (joined.includes('rev-parse --verify refs/heads/feat-x')) return ok(head)
         if (joined.includes(`--end-of-options ${head}^{commit}`)) return ok(head)
         if (joined.includes('rev-parse --verify')) return ok(newBaseSha)
@@ -2896,7 +2911,7 @@ describe('orchestrator — APPROVE → done → merge (server-gated)', () => {
           const joined = cmd.join(' ')
           if (joined.includes('ls-remote --heads origin refs/heads/main')) return ok(`${newBaseSha}\trefs/heads/main`)
           if (joined.includes('ls-remote --heads origin refs/heads/feat-x')) return ok(`${head}\trefs/heads/feat-x`)
-          if (joined.includes('merge-base --is-ancestor')) return failWith('')
+          if (joined.includes('merge-base --is-ancestor') && !cmd.includes('--no-replace-objects')) return failWith('')
           if (/rev-parse (--verify )?refs\/heads\/feat-x/.test(joined)) return ok(head)
           if (joined.includes('rev-parse --verify')) return ok(newBaseSha)
           if (joined.includes('gh pr list')) return ok('42')
@@ -2957,7 +2972,7 @@ describe('orchestrator — APPROVE → done → merge (server-gated)', () => {
           lsRemotesBranch += 1
           return ok(lsRemotesBranch === 1 ? `${preRebase}\trefs/heads/feat-x` : `${newHead}\trefs/heads/feat-x`)
         }
-        if (joined.includes('merge-base --is-ancestor')) return failWith('')
+        if (joined.includes('merge-base --is-ancestor') && !cmd.includes('--no-replace-objects')) return failWith('')
         if (joined.includes('rev-parse --verify refs/heads/feat-x')) return ok(head)
         if (joined.includes(`--end-of-options ${head}^{commit}`)) return ok(head)
         if (joined.includes('rev-parse --verify')) return ok(newBaseSha)
@@ -3004,7 +3019,7 @@ describe('orchestrator — APPROVE → done → merge (server-gated)', () => {
         const joined = cmd.join(' ')
         if (joined.includes('ls-remote --heads origin refs/heads/main')) return ok(`${newBaseSha}\trefs/heads/main`)
         if (joined.includes('ls-remote --heads origin refs/heads/feat-x')) return ok(`${head}\trefs/heads/feat-x`)
-        if (joined.includes('merge-base --is-ancestor')) return failWith('')
+        if (joined.includes('merge-base --is-ancestor') && !cmd.includes('--no-replace-objects')) return failWith('')
         if (/rev-parse (--verify )?refs\/heads\/feat-x/.test(joined)) return ok(head)
         if (joined.includes('rev-parse --verify')) return ok(newBaseSha)
         if (joined.includes('gh pr list')) return ok('42')
@@ -3043,7 +3058,7 @@ describe('orchestrator — APPROVE → done → merge (server-gated)', () => {
         const joined = cmd.join(' ')
         if (joined.includes('ls-remote --heads origin refs/heads/main')) return ok(`${newBaseSha}\trefs/heads/main`)
         if (joined.includes('ls-remote --heads origin refs/heads/feat-x')) return ok(`${head}\trefs/heads/feat-x`)
-        if (joined.includes('merge-base --is-ancestor')) return failWith('')
+        if (joined.includes('merge-base --is-ancestor') && !cmd.includes('--no-replace-objects')) return failWith('')
         if (/rev-parse (--verify )?refs\/heads\/feat-x/.test(joined)) return ok(head)
         if (joined.includes('rev-parse --verify')) return ok(newBaseSha)
         if (joined.includes('gh pr list')) return ok('42')
@@ -3080,7 +3095,7 @@ describe('orchestrator — APPROVE → done → merge (server-gated)', () => {
         const joined = cmd.join(' ')
         if (joined.includes('ls-remote --heads origin refs/heads/main')) return ok(`${newBaseSha}\trefs/heads/main`)
         if (joined.includes('ls-remote --heads origin refs/heads/feat-x')) return ok(`${head}\trefs/heads/feat-x`)
-        if (joined.includes('merge-base --is-ancestor')) return failWith('')
+        if (joined.includes('merge-base --is-ancestor') && !cmd.includes('--no-replace-objects')) return failWith('')
         if (/rev-parse (--verify )?refs\/heads\/feat-x/.test(joined)) return ok(head)
         if (joined.includes('rev-parse --verify')) return ok(newBaseSha)
         if (joined.includes('gh pr list')) return ok('42')
@@ -3119,7 +3134,7 @@ describe('orchestrator — APPROVE → done → merge (server-gated)', () => {
         const joined = cmd.join(' ')
         if (joined.includes('ls-remote --heads origin refs/heads/main')) return ok(`${newBaseSha}\trefs/heads/main`)
         if (joined.includes('ls-remote --heads origin refs/heads/feat-x')) return ok(`${head}\trefs/heads/feat-x`)
-        if (joined.includes('merge-base --is-ancestor')) return failWith('')
+        if (joined.includes('merge-base --is-ancestor') && !cmd.includes('--no-replace-objects')) return failWith('')
         if (/rev-parse (--verify )?refs\/heads\/feat-x/.test(joined)) return ok(head)
         if (joined.includes('rev-parse --verify')) return ok(newBaseSha)
         if (joined.includes('gh pr list')) return ok('42')

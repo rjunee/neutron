@@ -20,6 +20,7 @@ import { join } from 'node:path'
 
 import { spawnCapture, type DiffOutputHost } from './git-mode.ts'
 import { publishBuiltCommit, type PublicationDeps } from './publication.ts'
+import { buildPreservationRef } from './gates/build-claim.ts'
 import type { TridentRun } from './store.ts'
 
 const BRANCH = 'trident/card-trailer'
@@ -166,6 +167,39 @@ function deps(world: World): PublicationDeps & { calls: string[][]; prCreated: (
 
 const TRAILER = 'Claude-Session: https://claude.ai/code/session_01SALVAGE'
 const CO_AUTHOR = 'Co-Authored-By: Trident Test <trident-test@neutron.local>'
+
+test('legacy claim refusal preserves the exact candidate without replacing the original branch', async () => {
+  const world = await seedWorld(['Built task'])
+  await git(world.checkout, 'push', 'origin', `${world.baseSha}:refs/heads/${BRANCH}`)
+  const d = deps(world)
+  await expect(publishBuiltCommit(d, salvageRun(world), world.baseSha)).rejects.toThrow(buildPreservationRef(world.branchTip))
+  expect(await observeRemote(world.checkout, `refs/heads/${BRANCH}`)).toBe(world.baseSha)
+  expect(await observeRemote(world.checkout, buildPreservationRef(world.branchTip))).toBe(world.branchTip)
+  expect(d.prCreated()).toBe(false)
+})
+
+test.each(['missing', 'replayed'] as const)('legacy publisher preserves previously published work: %s', async mode => {
+  const world = await seedWorld(['Earlier task'])
+  const prior = world.branchTip
+  await git(world.checkout, 'push', 'origin', `refs/heads/${BRANCH}`)
+  await git(world.checkout, 'switch', '-C', BRANCH, world.baseSha)
+  writeFileSync(join(world.checkout, 'fresh.txt'), 'fresh task\n')
+  await git(world.checkout, 'add', 'fresh.txt')
+  await git(world.checkout, 'commit', '-qm', 'Fresh task')
+  if (mode === 'replayed') await git(world.checkout, 'cherry-pick', prior)
+  world.branchTip = (await git(world.checkout, 'rev-parse', 'HEAD')).trim()
+  const d = deps(world)
+  d.detectExistingPr = async () => 7
+  if (mode === 'missing') {
+    await expect(publishBuiltCommit(d, salvageRun(world), null)).rejects.toThrow('discard previously published work')
+    expect(await observeRemote(world.checkout, `refs/heads/${BRANCH}`)).toBe(prior)
+    expect(d.calls.some(args => args.includes('push'))).toBe(false)
+  } else {
+    expect((await publishBuiltCommit(d, salvageRun(world), null)).head).toBe(world.branchTip)
+    expect(await observeRemote(world.checkout, `refs/heads/${BRANCH}`)).toBe(world.branchTip)
+    expect((await git(world.checkout, 'ls-tree', '-r', '--name-only', world.branchTip)).trim()).toBe('README.md\nfresh.txt\nlib.txt')
+  }
+})
 
 test('#1133 G166 salvage: positive control — a branch with only Co-Authored-By is pushed and a PR is opened', async () => {
   const world = await seedWorld(['feat: built work', CO_AUTHOR])

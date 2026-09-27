@@ -9,6 +9,8 @@ import { rebaseOntoObservedBase } from './replay.ts'
 import { publishFailureReason } from './publish-failure.ts'
 import { fixLineage } from './gates/fix-lineage.ts'
 import { sessionTrailerReadiness } from './gates/release-readiness.ts'
+import { publishedWorkPreserved } from './gates/published-work.ts'
+import { checkBuildClaim } from './gates/build-claim.ts'
 import { runLeakGatePreflight, type LeakPreflightFixer } from './leak-preflight.ts'
 import type { TridentRun } from './store.ts'
 
@@ -115,9 +117,8 @@ export async function publishBuiltCommit(
   // anything. A claim naming no git object is ABSENT, not a conflict (there is only
   // one candidate commit: git's). Resolved OIDs are compared for EQUALITY — a prefix
   // compare is wrong both ways: a hallucinated prefix refused a good build, and a
-  // short sha of the right commit is only honored by resolving it. The refusal
-  // itself is DEFERRED until after the push (see below) so it can never strand the
-  // commit; it remains only for two real, resolvable, DIFFERENT commits.
+  // short sha of the right commit is only honored by resolving it. A real conflict
+  // uses G100's immutable candidate ref before refusing, leaving the PR branch intact.
   const resolvedClaim = await resolveClaimedCommit(opts.run_host, run.repo_path, claimedHead)
   const claimConflict = resolvedClaim !== null && resolvedClaim !== resolvedHead
   // FIX-ROUND ANCESTRY GATE (mandated by the Fable arbitration on #289 vs #318).
@@ -199,6 +200,12 @@ export async function publishBuiltCommit(
   // Everything downstream publishes the REBASED head: the post-push confirm, the review diff,
   // and the `outer-published:<head>` checkpoint the re-fired workflow reads back.
   let headToPublish = rebased.head
+  if (claimConflict) {
+    const preserved = await checkBuildClaim(opts.run_host, run.repo_path, branch, run.base_sha ?? '',
+      claimedHead!, { head: resolvedHead, diff: '', pr: null }, run.id)
+    throw new Error(preserved.kind === 'blocked' ? preserved.on
+      : preserved.kind === 'unknown' ? preserved.detail : 'Build claim changed during preservation; refusing publication')
+  }
   // PURITY PREFLIGHT (2026-08-31): 3 of 4 PRs that night were red on exactly one
   // check — the public leak gate — every finding in the branch's own regenerated
   // plan doc. Run the gate on the branch tree HERE, after the replay and before
@@ -306,6 +313,8 @@ export async function publishBuiltCommit(
   // checked publisher (`production-host-effects.ts`) and G100's preservation push use.
   const alreadyPublished = remoteAlreadyAtPublishHead(expected, headToPublish)
   if (!alreadyPublished) {
+    const preservation = await publishedWorkPreserved(opts.run_host, run.repo_path, expected, headToPublish)
+    if (preservation.kind !== 'allow') throw new Error(preservation.kind === 'blocked' ? preservation.on : preservation.detail)
     const pushed = await runWithRetries([
       'git',
       '-C',
@@ -329,17 +338,6 @@ export async function publishBuiltCommit(
   }
   // On the no-op path the `observed` read above IS the witness: origin was measured at
   // exactly `headToPublish` moments ago and this publisher performed no write since.
-
-  // THE REFUSAL FIRES ONLY AFTER THE PUSH IS CONFIRMED (defect 2, 2026-08-14: the
-  // throw preceded the push, so a wrong refusal left the commit unreachable —
-  // 924b4290ea81… was stranded). A refusal is about which commit to REVIEW, not
-  // about whether the work may exist: the branch is on origin for inspection; only
-  // the PR / review dispatch is refused.
-  if (claimConflict) {
-    throw new Error(
-      `outer publisher refused: the build reported commit '${claimedHead}' (resolves to '${resolvedClaim}') but branch ${branch} resolved to '${resolvedHead}' before publish — the branch was pushed to origin for inspection; no PR or review was dispatched`,
-    )
-  }
 
   let pr = prBefore
   let publishedPr = pr !== null && run.published_pr === pr ? pr : null
