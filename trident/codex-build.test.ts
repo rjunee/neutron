@@ -398,6 +398,7 @@ function run(opts: RunOpts = {}): RunResult {
     const shim = join(bin, 'python3')
     writeFileSync(shim, `#!${executable}
 import importlib.util,os,sys
+sys.dont_write_bytecode = True
 from pathlib import Path
 if Path(sys.argv[1]).name != 'lane-processes.py': os.execv(${JSON.stringify(executable)},[${JSON.stringify(executable)},*sys.argv[1:]])
 spec=importlib.util.spec_from_file_location('lanes',sys.argv[1])
@@ -1231,6 +1232,29 @@ describe('the mid-exec liveness heartbeat', () => {
     expect(r.stderr).toBe(`${sentence}\n`)
     expect(r.codexArgv).toBe('')
     expect(r.trailerRaw).toBe('')
+  })
+
+  test('cleanup observation imports the real owner without adding bytecode to measured inputs', () => {
+    const r = run({ authed: true, codexLoginExit: 0, brief: 'corrupt',
+      integrity: briefIntegrity('intended'), cleanupObservation: 'unknown' })
+    expect(r.status).toBe(3)
+    const shim = readFileSync(join(r.dir, 'bin', 'python3'), 'utf8')
+    for (const writesBytecode of [false, true]) {
+      const directory = join(r.dir, writesBytecode ? 'writing-control' : 'read-only-control')
+      mkdirSync(directory)
+      const owner = join(directory, 'lane-processes.py'), observer = join(directory, 'python3')
+      copyFileSync(join(HERE, 'lane-processes.py'), owner)
+      writeFileSync(observer, writesBytecode
+        ? shim.replace('sys.dont_write_bytecode = True', 'sys.dont_write_bytecode = False') : shim, { mode: 0o755 })
+      const observed = spawnSync(observer, [owner, 'run', '--', 'true'], {
+        cwd: directory, env: { ...process.env, HOME: directory }, encoding: 'utf8', timeout: 5_000,
+      })
+      expect(observed.status, observed.stderr).toBe(0)
+      expect(readFileSync(join(directory, 'cleanup-observed'), 'utf8')).toBe('1')
+      // The same real import with suppression removed must expose the writer.
+      expect(existsSync(join(directory, '__pycache__'))).toBe(writesBytecode)
+      if (writesBytecode) expect(readdirSync(join(directory, '__pycache__')).some(name => name.endsWith('.pyc'))).toBe(true)
+    }
   })
 
   // NO SIGINT TWIN FOR THIS WRAPPER, DELIBERATELY. The production launch is
