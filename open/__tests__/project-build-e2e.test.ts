@@ -1141,8 +1141,8 @@ async function fixture(options: { taskSequence?: boolean; moreTasks?: boolean; s
   fixtureCleanup(() => { pool.delete(key); supervisedBySessionKey.delete(key) })
   const worker = literalWorker(world)
   const projectsDir = join(dir, 'claude-projects')
-  const session = { sessionId: 'e2e-session', authFingerprint: 'fixture-spawned-credential', toolSurface: LIVE_AGENT_TOOL_NAMES.join(','), cwd: dir, hasChildExited: () => false,
-    child: { submitLine: async (line: string) => {
+  const session = { sessionId: 'e2e-session', childGeneration: 'e2e-generation', authFingerprint: 'fixture-spawned-credential', toolSurface: LIVE_AGENT_TOOL_NAMES.join(','), cwd: dir, hasChildExited: () => false,
+    child: { pid: process.pid, submitLine: async (line: string) => {
       const spec = JSON.parse(line.slice(line.indexOf('{')))
       const args = JSON.parse(String(spec.prompt).slice(String(spec.prompt).indexOf('{')))
       const requestLine = String(args.prompt).split('\n').find(row => row.startsWith('Request (data): '))!
@@ -6006,8 +6006,8 @@ for (const seam of ['submitLine', 'acquireTurn', 'silent-worker'] as const) {
     options.workers.plan.request = { ...options.workers.plan.request, budget: { wall_ms: 1_500 } }
     let acquisitions = 0, submissions = 0
     registerSession(f, {
-      sessionId: 'e2e-session', toolSurface: LIVE_AGENT_TOOL_NAMES.join(','), cwd: f.dir, hasChildExited: () => false,
-      child: { submitLine: async () => { submissions++; if (seam === 'submitLine') await neverSettles() } },
+      sessionId: 'e2e-session', childGeneration: 'e2e-generation', toolSurface: LIVE_AGENT_TOOL_NAMES.join(','), cwd: f.dir, hasChildExited: () => false,
+      child: { pid: process.pid, submitLine: async () => { submissions++; if (seam === 'submitLine') await neverSettles() } },
       acquireTurn: async () => { acquisitions++; if (seam === 'acquireTurn') await neverSettles(); return () => {} },
     })
     const host = await createProjectBuildHost(options)

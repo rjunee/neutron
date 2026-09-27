@@ -4,6 +4,9 @@ import type {
   AdmissionLease, AdmissionLeaseRow, AdmissionReason, MaintenancePhase, ProjectAdmissionScope,
 } from './project-admission-store.ts';
 import type { DispatchAdmission } from '@neutronai/trident/dispatch-admission.ts';
+import type { BoundedWorkRequest } from '@neutronai/runtime/bounded-work.ts';
+import { createNativeDispatchSigner, verifyNativeDispatchNotSubmitted,
+  type NativeDispatchAuthority, type NativeDispatchLease } from '@neutronai/runtime/workers/claude-native-dispatch-receipt.ts';
 
 /** A participating producer's admission. `release` binds the exact lease
  * (scope + generation + token) and is idempotent: only the first call reports true. */
@@ -34,6 +37,10 @@ export interface NativeChildAdmission {
   complete(runId: string, stepId: string): Promise<number>
   /** Ends only this process's pre-dispatch exemption, not the durable lease. */
   finishPreparing?(lease: AdmissionLease): void
+  /** Original actor only; the signing key remains private to this admission process. */
+  dispatchAuthority?(lease: AdmissionLease, request: BoundedWorkRequest): NativeDispatchAuthority
+  /** Exact signed pre-input refusal, not run termination or a worker-written flag. */
+  releaseUnsubmitted?(request: BoundedWorkRequest, receipt: unknown): Promise<boolean>
   /** Exact-scope census. Unreadable identities throw; never infer an empty scope. */
   pending?(): readonly { runId: string; stepId: string; generation: number }[]
 }
@@ -70,6 +77,7 @@ export class ProjectAdmission {
    * this only spares a write per admission). Existence is re-verified every time. */
   private readonly registered = new Set<string>();
   private readonly preparingNativeChildTokens = new Set<string>();
+  private readonly nativeDispatchSigner = createNativeDispatchSigner();
   readonly ownerHandle: string;
   readonly bootId: string;
 
@@ -86,9 +94,10 @@ export class ProjectAdmission {
     return { ownerHandle: this.ownerHandle, projectId: projectId ?? null };
   }
 
-  /** The producer string persisted on a lease: `<kind>:<bootId>`. */
+  /** Native children additionally pin this actor's public signing-key digest.
+   * Existing producer strings are never rewritten during restart. */
   producerFor(producer: AdmissionProducer): string {
-    return `${producer}:${this.bootId}`;
+    return `${producer}:${this.bootId}${producer === 'native-child' ? `:${this.nativeDispatchSigner.keyDigest}` : ''}`;
   }
 
   async admit(
@@ -166,6 +175,25 @@ export class ProjectAdmission {
    */
   forNativeChild(projectId: string | null): NativeChildAdmission {
     return {
+      dispatchAuthority: (lease, request) => {
+        const row = this.listLeases('liveChild').find(row => row.token === lease.token);
+        if (!row || row.scope.ownerHandle !== lease.scope.ownerHandle || row.scope.projectId !== projectId
+          || lease.scope.projectId !== projectId || row.generation !== lease.generation
+          || row.producer !== this.producerFor('native-child')
+          || !this.preparingNativeChildTokens.has(row.token)
+          || row.workRef !== JSON.stringify([request.run_id, request.step_id])) throw new Error('Original native child admission is unavailable');
+        return this.nativeDispatchSigner.begin({ ...row, reason: 'liveChild' }, request);
+      },
+      releaseUnsubmitted: async (request, receipt) => {
+        // Check against authoritative stored rows, never select authority from the
+        // mutable run directory. Signature binds scope, generation, token, producer,
+        // request and original parent. Old unsigned producer rows remain unresolved.
+        const row = this.listLeases('liveChild').find(row => row.scope.projectId === projectId
+          && row.workRef === JSON.stringify([request.run_id, request.step_id])
+          && verifyNativeDispatchNotSubmitted(receipt, request, { ...row, reason: 'liveChild' } satisfies NativeDispatchLease));
+        if (!row) return false;
+        return this.store.release(row);
+      },
       finishPreparing: lease => { this.preparingNativeChildTokens.delete(lease.token); },
       pending: () => this.listLeases('liveChild').filter(row => row.scope.projectId === projectId).map(row => {
         const identity: unknown = JSON.parse(row.workRef);
