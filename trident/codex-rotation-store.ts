@@ -46,6 +46,8 @@ export interface CodexRotationStore {
   listSlots(owner_slug: OwnerHandle): SlotRecord[]
   /** Register a slot (idempotent); appends at the end of the ring when new. */
   upsertSlot(owner_slug: OwnerHandle, slot: string, label: string | null): void
+  /** Initialize migration metadata; never replace an existing cooldown or lower its usage floor. */
+  adoptSlot(owner_slug: OwnerHandle, slot: string, initial: { label: string | null; cooling_until: number | null; usage_since: number | null }): void
   removeSlot(owner_slug: OwnerHandle, slot: string): void
   getActiveSlot(owner_slug: OwnerHandle): string | null
   setActiveSlot(owner_slug: OwnerHandle, slot: string, now: number): void
@@ -55,7 +57,7 @@ export interface CodexRotationStore {
    * Mark a (re)connection: stamp `connected_at` and DISCARD everything the
    * previous occupant of this slot left behind — its cooldown and its usage
    * figures. Pasting a fresh bundle is the owner saying "this seat works now",
-   * and it is the only thing that clears an `unauthorized` state.
+   * A successful probe or explicit operator release can also clear quarantine.
    */
   markConnected(owner_slug: OwnerHandle, slot: string, now: number): void
   /** Record that a harvest was attempted, so the next one can be throttled. */
@@ -192,6 +194,17 @@ export class SqliteCodexRotationStore implements CodexRotationStore {
     // to the ring head silently; clearing it makes the next resolve re-choose.
     if (this.getActiveSlot(owner_slug) === slot) {
       this.db.runSync(`DELETE FROM codex_rotation_active WHERE owner_slug = ?`, [owner_slug])
+    }
+  }
+
+  adoptSlot(owner_slug: OwnerHandle, slot: string, initial: { label: string | null; cooling_until: number | null; usage_since: number | null }): void {
+    const existing = this.listSlots(owner_slug).find(row => row.slot === slot)
+    this.upsertSlot(owner_slug, slot, existing === undefined ? initial.label : null)
+    if (existing === undefined && initial.cooling_until !== null) {
+      this.setCooldown(owner_slug, slot, { cooling_until: initial.cooling_until, cooling_reason: 'manual' })
+    }
+    if (initial.usage_since !== null && (existing?.connected_at == null || existing.connected_at < initial.usage_since)) {
+      this.db.runSync('UPDATE codex_rotation_slots SET connected_at = ? WHERE owner_slug = ? AND slot = ?', [initial.usage_since, owner_slug, slot])
     }
   }
 

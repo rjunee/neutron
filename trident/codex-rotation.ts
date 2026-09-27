@@ -193,8 +193,9 @@ export function normalizeSlot(raw: unknown): string | null {
  * refresh token does not heal by waiting — the owner has to paste a fresh
  * bundle — so letting an unauthorized cooldown expire on a timer would rotate
  * the run back onto a seat guaranteed to fail, on a schedule. The state is
- * cleared by reconnecting the slot, which is the only thing that actually fixes
- * it. Encoding that here rather than by writing a far-future timestamp means no
+ * cleared by reconnecting, successful probing or explicit operator release;
+ * release itself does not prove credential health. Encoding that here rather
+ * than by writing a far-future timestamp means no
  * caller can accidentally "expire" it by comparing clocks.
  */
 export function isCooling(state: SlotState, now: number): boolean {

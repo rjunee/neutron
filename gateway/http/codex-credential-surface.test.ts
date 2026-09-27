@@ -9,7 +9,7 @@
  */
 
 import { afterEach, beforeEach, describe, expect, test } from 'bun:test'
-import { existsSync, mkdtempSync, rmSync, writeFileSync } from 'node:fs'
+import { existsSync, mkdirSync, mkdtempSync, readFileSync, rmSync, writeFileSync } from 'node:fs'
 import { tmpdir } from 'node:os'
 import { join } from 'node:path'
 import { seedMigratedDb } from '../../tests/support/migrated-db.ts'
@@ -77,6 +77,38 @@ afterEach(() => {
 })
 
 describe('codex-auth HTTP surface — GLOBAL (primary)', () => {
+  test('operator routes require authentication and use only server owner and canonical homes', async () => {
+    for (const action of ['rotation', 'rotate', 'free', 'adopt']) {
+      expect((await surface.handler(req(action === 'rotation' ? 'GET' : 'POST', `${GLOBAL}/${action}`, undefined, false)))?.status).toBe(401)
+    }
+    mkdirSync(codexHome, { recursive: true })
+    const bytes = JSON.stringify({ tokens: { access_token: 'fixture-access', refresh_token: 'fixture-refresh', account_id: 'fixture-account' }, last_refresh: '2026-09-26T00:00:00Z' }) + '\n'
+    writeFileSync(codexAuthPath(codexHome), bytes)
+    const adopted = await surface.handler(req('POST', `${GLOBAL}/adopt`, { account: 'default', account_id: 'fixture-account', owner_slug: 'foreign-owner' }))
+    expect(adopted?.status).toBe(200)
+    expect(await adopted!.json()).toMatchObject({ status: 'adopted', changed: true })
+    expect(db.all<{ owner_slug: string }>('SELECT owner_slug FROM project_credentials')).toEqual([{ owner_slug: SLUG }])
+    expect(readFileSync(codexAuthPath(codexHome), 'utf8')).toBe(bytes)
+    expect(await (await surface.handler(req('GET', `${GLOBAL}/rotation`)))!.json()).toMatchObject({ active: null, accounts: [{ slot: 'default' }] })
+    const rotated = await (await surface.handler(req('POST', `${GLOBAL}/rotate`, { to: 'default' })))!.json()
+    expect(rotated).toMatchObject({ status: 'rotated', from: null, to: 'default', active: 'default' })
+    expect(await (await surface.handler(req('POST', `${GLOBAL}/rotate`, { to: 'default' })))!.json()).toMatchObject({ status: 'already_active', changed: false })
+    expect(await (await surface.handler(req('POST', `${GLOBAL}/free`, { account: 'all' })))!.json()).toMatchObject({ status: 'already_free', active: 'default' })
+    expect(JSON.stringify(rotated)).not.toContain('fixture-account')
+    expect(JSON.stringify(rotated)).not.toContain('fixture-refresh')
+  })
+
+  test('operator refusal leaves selection intact and cannot address project rotation', async () => {
+    expect(await surface.handler(req('POST', `${PROJECT}/rotate`, {}))).toBeNull()
+    expect((await surface.handler(req('GET', `${GLOBAL}/rotate`)))?.status).toBe(405)
+    expect((await surface.handler(req('POST', `${GLOBAL}/rotation`, {})))?.status).toBe(405)
+    for (const [action, body, status] of [
+      ['rotate', { to: '../bad' }, 400], ['rotate', { to: 7 }, 400], ['rotate', { to: 'missing' }, 409],
+      ['free', {}, 400], ['free', { account: 'missing' }, 409], ['adopt', { account: 'default' }, 400],
+      ['adopt', { account: 'default', account_id: 'unknown' }, 409], ['free', [], 400],
+    ] as const) expect((await surface.handler(req('POST', `${GLOBAL}/${action}`, body)))?.status).toBe(status)
+    expect(await (await surface.handler(req('GET', `${GLOBAL}/rotation`)))!.json()).toMatchObject({ active: null, accounts: [] })
+  })
   test('project response distinguishes inherited reviewer connection from explicit owner credential configuration', async () => {
     const auth = JSON.stringify({ tokens: { access_token: 'fixture-access', refresh_token: 'fixture-refresh', account_id: 'fixture-account' } })
     await surface.handler(req('POST', GLOBAL, { auth }))

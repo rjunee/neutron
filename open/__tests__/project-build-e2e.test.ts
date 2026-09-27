@@ -61,7 +61,11 @@ import { dirname, join } from 'node:path'
 import { fileURLToPath } from 'node:url'
 import { createHash } from 'node:crypto'
 import { AsyncLocalStorage } from 'node:async_hooks'
-import { ProjectDb } from '@neutronai/persistence/index.ts'
+import { ProjectDb, asOwnerHandle } from '@neutronai/persistence/index.ts'
+import { SecretsStore } from '@neutronai/auth/secrets-store.ts'
+import { ProjectCredentialStore } from '@neutronai/project-credentials/store.ts'
+import { CodexCredentialService } from '@neutronai/trident/codex-credential.ts'
+import { SqliteCodexRotationStore } from '@neutronai/trident/codex-rotation-store.ts'
 import { seedMigratedDb } from '../../tests/support/migrated-db.ts'
 import { TridentRunStore } from '@neutronai/trident/store.ts'
 import { WorkBoardStore, workBoardProjectIdForKey } from '@neutronai/work-board/store.ts'
@@ -878,7 +882,7 @@ const requestLine = prompt.split('\\n').find(line => line.startsWith('Request (d
 if (!requestLine) process.exit(91)
 const request = JSON.parse(requestLine.slice('Request (data): '.length))
 const brief = JSON.parse(readFileSync(request.brief.path, 'utf8'))
-appendFileSync(${JSON.stringify(calls)}, JSON.stringify({ argv, cwd: process.cwd(), request, brief }) + '\\n')
+appendFileSync(${JSON.stringify(calls)}, JSON.stringify({ argv, cwd: process.cwd(), codexHome: process.env.CODEX_HOME, request, brief }) + '\\n')
 const output = argv[argv.indexOf('-o') + 1]
 const envelope = { schema: request.result.schema,
   run_id: ${identity === 'wrong-run' ? "'some-other-run'" : 'request.run_id'}, step_id: request.step_id,
@@ -2350,6 +2354,35 @@ async function codexOwnerWithClaude(identity: 'valid' | 'wrong-schema' = 'valid'
   }
   return { ...f, calls, children }
 }
+
+test('operator-adopted Codex accounts preserve custody and selected home reaches the merged build', async () => {
+  const f = await fixture({ codexReview: 'valid' })
+  const rootHome = f.input.codex_home!
+  const credentials = new ProjectCredentialStore(f.db, { crypto: new SecretsStore({ data_dir: f.dir, db: f.db }) })
+  const rotation = new SqliteCodexRotationStore(f.db)
+  const service = new CodexCredentialService({ store: credentials, rotation, codexHome: rootHome })
+  const owner = asOwnerHandle('e2e-owner')
+  const bundles = new Map<string, string>()
+  for (const slot of ['default', 'second']) {
+    const bytes = JSON.stringify({ tokens: { access_token: 'fixture-access', refresh_token: 'fixture-refresh', account_id: `fixture-${slot}` }, last_refresh: '2026-09-26T00:00:00Z' }) + '\n'
+    bundles.set(slot, bytes)
+    await mkdir(service.slotHome(slot), { recursive: true })
+    await writeFile(join(service.slotHome(slot), 'auth.json'), bytes)
+    expect(await service.adoptAccount(owner, { slot, accountId: `fixture-${slot}` })).toMatchObject({ ok: true, status: 'adopted' })
+  }
+  rotation.setCooldown(owner, 'second', { cooling_until: Date.now(), cooling_reason: 'unauthorized' })
+  expect(await service.rotateAccount(owner, { to: 'second' })).toMatchObject({ ok: true, active: 'second' })
+  f.input.codex_home = service.resolveActiveCodexHome(owner)!
+  expect(f.input.codex_home).toBe(service.slotHome('second'))
+  const outcome = await drive(f)
+  expect(outcome.kind, why(f, outcome)).toBe('merged')
+  const calls = (await readFile(f.codexCalls, 'utf8')).trim().split('\n').map(line => JSON.parse(line))
+  expect(calls).toHaveLength(1)
+  expect(calls[0].codexHome).toBe(service.slotHome('second'))
+  expect(await service.rotateAccount(owner, { to: 'default' })).toMatchObject({ ok: true, active: 'default' })
+  expect(service.resolveActiveCodexHome(owner)).toBe(rootHome)
+  for (const [slot, bytes] of bundles) expect(await readFile(join(service.slotHome(slot), 'auth.json'), 'utf8')).toBe(bytes)
+}, 300_000)
 
 test.each([
   ['astra', 'gpt-6-astra'], ['sol', 'gpt-6-sol'], ['terra', 'gpt-5.6-terra'], ['luna', 'gpt-6-luna'],
