@@ -55,7 +55,7 @@ import { CodegenTaskNotFoundError, type CodegenOrchestrator } from '@neutronai/c
 import { buildTridentTerminator } from '@neutronai/trident/terminate.ts'
 import { projectInstallAvailableBytes } from '../wiring/project-build-dependencies.ts'
 import { afterAll, afterEach, beforeEach, expect, spyOn, test } from 'bun:test'
-import { chmod, copyFile, cp, mkdir, mkdtemp, readFile, readdir, realpath, rename, rm, stat, symlink, utimes, writeFile } from 'node:fs/promises'
+import { chmod, copyFile, cp, link, mkdir, mkdtemp, readFile, readdir, realpath, rename, rm, stat, symlink, utimes, writeFile } from 'node:fs/promises'
 import { tmpdir } from 'node:os'
 import { dirname, join } from 'node:path'
 import { fileURLToPath } from 'node:url'
@@ -2612,6 +2612,35 @@ test(`prepared host suite receipt survives reconstruction and handles ${changed}
   expect(await host.deps.publicationSuite(measured.value)).toMatchObject({ kind: 'known' })
   expect(suites).toBe(changed === 'none' ? 1 : 2)
   expect(f.world.dispatches).toHaveLength(0)
+}, 120_000)
+
+test('shared dependency hardlink churn retains one host suite through publication', async () => {
+  const f = await fixture({ bunWorkspace: true })
+  const originalSuite = f.context.runSuite!
+  const originalInstall = f.context.runInstall!
+  let suites = 0, installs = 0, measuredChurn = 0
+  f.context.runInstall = Object.assign(async (...args: Parameters<typeof originalInstall>) => {
+    if (!args[0][2]!.includes('verify-workspace-deps.ts')) installs++
+    return originalInstall(...args)
+  }, { writesDiffOutput: true as const })
+  f.context.runSuite = async (...args) => {
+    suites++
+    const worktree = f.store.get(f.row.id)!.worktree!
+    const input = await realpath(Bun.resolveSync('fixture-dependency', join(worktree, 'app', 'check.ts')))
+    const before = await stat(input, { bigint: true }), bytes = await readFile(input)
+    const independent = join(f.dir, 'independent-install.js')
+    await link(input, independent)
+    expect((await stat(independent, { bigint: true })).ino).toBe(before.ino)
+    const result = await originalSuite(...args)
+    await rm(independent)
+    expect((await stat(input, { bigint: true })).ctimeNs).not.toBe(before.ctimeNs)
+    expect(await readFile(input)).toEqual(bytes)
+    measuredChurn++
+    return result
+  }
+  const outcome = await drive(f)
+  expect(outcome.kind, why(f, outcome)).toBe('merged')
+  expect({ suites, installs, measuredChurn }).toEqual({ suites: 1, installs: 1, measuredChurn: 1 })
 }, 120_000)
 
 test('workspace scratch churn permits host receipt reuse while generated content changes require fresh proof', async () => {

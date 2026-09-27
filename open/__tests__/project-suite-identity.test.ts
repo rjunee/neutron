@@ -1,5 +1,5 @@
 import { afterEach, expect, spyOn, test } from 'bun:test'
-import { chmod, copyFile, mkdir, mkdtemp, rename, rm, stat, symlink, utimes, writeFile } from 'node:fs/promises'
+import { chmod, copyFile, link, mkdir, mkdtemp, readFile, rename, rm, stat, symlink, utimes, writeFile } from 'node:fs/promises'
 import { join } from 'node:path'
 import { tmpdir } from 'node:os'
 import { projectInstalledTreeIdentity, projectSuiteIdentity } from '../wiring/project-build-dependencies.ts'
@@ -131,7 +131,9 @@ test('native dependency observation is one bounded argv call and preserves unusu
   const before = await projectInstalledTreeIdentity(root, observed)
   expect(before).toMatch(/^[a-f0-9]{64}$/)
   expect(calls).toHaveLength(1)
-  expect(calls[0]![0]).toEqual(['find', '-P', modules, '-printf', '%p\\0%D\\0%i\\0%m\\0%s\\0%T@\\0%C@\\0%y\\0%l\\0'])
+  expect(calls[0]![0].slice(1, 4)).toEqual(['-I', '-S', new URL('../wiring/project-build-installed-tree.py', import.meta.url).pathname])
+  expect(calls[0]![0][4]).toBe(root)
+  expect(JSON.parse(calls[0]![0][7]!)).toEqual([modules])
   expect(calls[0]![3]).toBeGreaterThan(0)
   expect(calls[0]![3]).toBeLessThanOrEqual(5000)
   expect(await projectInstalledTreeIdentity(root)).toBe(before)
@@ -153,7 +155,7 @@ for (const failure of ['timeout', 'exit', 'malformed'] as const) {
     const warning = spyOn(console, 'warn').mockImplementation(() => {})
     try {
       expect(await projectInstalledTreeIdentity(root, run)).toBeNull()
-      expect(warning.mock.calls.flat().join('\n')).toContain(`reason=${failure === 'malformed' ? 'invalid-output' : `find-${failure}`}`)
+      expect(warning.mock.calls.flat().join('\n')).toContain(`reason=${failure === 'malformed' ? 'invalid-output' : `probe-${failure}`}`)
       expect(warning.mock.calls.flat().join('\n')).not.toContain(root)
     } finally { warning.mockRestore() }
     expect(await projectInstalledTreeIdentity(root)).toMatch(/^[a-f0-9]{64}$/)
@@ -209,7 +211,7 @@ test('workspace directory scratch churn preserves suite identity, including nest
   const changedSize = Object.assign(async (...args: Parameters<typeof spawnCapture>) => {
     const result = await spawnCapture(...args)
     const fields = result.stdout.split('\0')
-    for (let index = 0; index + 8 < fields.length; index += 9) {
+    for (let index = 0; index + 11 < fields.length; index += 12) {
       if (fields[index] === nested) fields[index + 4] = String(Number(fields[index + 4]) + 4096)
     }
     return { ...result, stdout: fields.join('\0') }
@@ -218,6 +220,44 @@ test('workspace directory scratch churn preserves suite identity, including nest
   await chmod(workspace, 0o700)
   expect(await projectSuiteIdentity(root)).not.toBe(before)
 })
+
+for (const target of ['entrypoint', 'internal'] as const) {
+  test(`shared dependency ${target} hardlink churn preserves proof while changed bytes require proof again`, async () => {
+    const { root, git } = await fixture()
+    const dependency = join(root, 'node_modules', 'example')
+    await mkdir(dependency, { recursive: true })
+    await writeFile(join(root, 'package.json'), '{"dependencies":{"example":"1.0.0"}}')
+    await writeFile(join(dependency, 'package.json'), '{"name":"example","main":"index.js"}')
+    await writeFile(join(dependency, 'index.js'), 'module.exports = require("./internal.js")')
+    await writeFile(join(dependency, 'internal.js'), 'module.exports = 1')
+    await git('add', '.'); await git('commit', '-qm', 'dependency')
+    const input = join(dependency, target === 'entrypoint' ? 'index.js' : 'internal.js')
+    const pinned = new Date('2020-01-01T00:00:00.000Z')
+    await utimes(input, pinned, pinned)
+    const other = await mkdtemp(join(tmpdir(), 'independent-install-'))
+    roots.push(other)
+    const before = await projectSuiteIdentity(root)
+    expect(before).toMatch(/^[a-f0-9]{64}$/)
+    const original = await stat(input, { bigint: true })
+    const bytes = await readFile(input)
+    await link(input, join(other, 'shared.js'))
+    const shared = await stat(input, { bigint: true })
+    expect(shared.ino).toBe(original.ino)
+    expect(shared.nlink).toBe(original.nlink + 1n)
+    expect(shared.ctimeNs).not.toBe(original.ctimeNs)
+    expect(await readFile(input)).toEqual(bytes)
+    expect(await projectSuiteIdentity(root)).toBe(before)
+    await rm(join(other, 'shared.js'))
+    expect(await projectSuiteIdentity(root)).toBe(before)
+    // Same inode, same length, restored mtime: content is the required evidence.
+    const metadata = await stat(input)
+    await writeFile(input, bytes.toString().replace(target === 'entrypoint' ? 'require' : '1', target === 'entrypoint' ? 'REQUIRE' : '2'))
+    await utimes(input, metadata.atime, metadata.mtime)
+    expect((await stat(input)).size).toBe(metadata.size)
+    expect((await stat(input, { bigint: true })).mtimeNs).toBe(original.mtimeNs)
+    expect(await projectSuiteIdentity(root)).not.toBe(before)
+  })
+}
 
 for (const target of ['ignored generated file', 'local symlink target', 'deep installed dependency'] as const) {
   test(`workspace observation detects same-size ${target} rewrite with restored mtime`, async () => {
