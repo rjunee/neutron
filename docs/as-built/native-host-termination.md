@@ -65,3 +65,19 @@ signalling host processes. Its focused test passed; independent mutations that
 disabled immediate startup or changed the default cadence failed their semantic
 assertions. These necessary fixture repairs do not substitute for the final
 combined gate on the frozen repaired candidate.
+
+A later combined run passed all 51 TypeScript configurations and executed all
+1,725 test files, with 17 of 18 lanes passing. Its remaining entrypoint failure
+was test-environment coupling: a configured installation's protected authority
+became an unmapped owner inside the test user namespace, and the production
+root-ownership guard correctly refused it. The test launcher now privately masks
+only the existing fixed authority directory, without changing host files or the
+production loader. Installed and absent synthetic configurations pass actual
+namespace controls, retain neighboring configuration, and preserve original file
+bytes and metadata. Eight boundary tests pass with 49 assertions; removing the
+overlay fails the authority-absence assertion, while masking its parent fails
+the known-present neighbor control. Both mutants retain the valid absent case.
+The actual dual-entrypoint regression passes seven tests with 20 assertions,
+and the unchanged authority guards pass 20 tests with 57 assertions. An early
+nested-runtime fixture crash was discarded as fixture failure, not counted as
+mutation evidence. The final combined gate remains required on this correction.

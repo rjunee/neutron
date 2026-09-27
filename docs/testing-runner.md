@@ -150,6 +150,13 @@ ephemeral GitHub-hosted Linux runners. Global kernel restrictions stay enabled.
 It then exercises a harmless command through the same authenticated boundary,
 as the invoking user, before tests. Local test entrypoints never provision policy.
 
+When `/etc/neutron/native-host-recovery` exists, the test boundary mounts a private
+empty filesystem over that directory so a test server does not inherit the live
+instance's operator authority. Neighboring configuration stays visible; the host
+directory and its contents are unchanged. An absent directory stays absent. The
+production loader still uses its fixed effective-UID path and refuses unsafe
+present authority; no environment selector or ownership exception is introduced.
+
 ### Environment scrubbing
 
 `bunfig.toml`'s `[test].preload` runs two scrubs, in this order, before every
