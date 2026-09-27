@@ -13,11 +13,8 @@ import { join } from 'node:path'
 import { retiringSessionKeys } from '@neutronai/runtime/adapters/claude-code/persistent/pool-state.ts'
 import { resolveLiveProjectSessions } from '@neutronai/runtime/adapters/claude-code/persistent/live-project-sessions.ts'
 import { sessionJsonlPath } from '@neutronai/runtime/adapters/claude-code/persistent/jsonl-resumability.ts'
-import {
-  DEFAULT_DEV_CHANNEL_PATH,
-  DEFAULT_TOOLS_BRIDGE_PATH,
-  resolveTranscriptProjectsDir,
-} from '@neutronai/runtime/adapters/claude-code/persistent/signatures.ts'
+import { resolveTranscriptProjectsDir } from '@neutronai/runtime/adapters/claude-code/persistent/signatures.ts'
+import { OWN_SERVICE_PROVENANCE_ENV } from '@neutronai/runtime/mcp-servers.ts'
 import type { ProjectAdmission } from '@neutronai/gateway/project-admission.ts'
 import {
   readSubagentActivity,
@@ -94,10 +91,14 @@ export function buildProjectLivenessProbes(deps: ProjectLivenessProbeDeps): Proj
         }
       : {}),
     subagentActivity: (directory, nowMs) => readSubagentActivity(directory, nowMs),
-    descendants: (pid) => walkProcessDescendants(pid, {
-      // The parent's own stdio MCP servers (the dev channel and the tools bridge)
-      // run for its whole life by design; they are not shells.
-      isOwnService: (argv) => argv.includes(DEFAULT_DEV_CHANNEL_PATH) || argv.includes(DEFAULT_TOOLS_BRIDGE_PATH),
+    descendants: ({ pid, childGeneration }) => walkProcessDescendants(pid, {
+      // The parent's own stdio MCP servers — the dev channel, the tools bridge and
+      // every owner-installed server, including the real server an `npx`/`uvx`
+      // wrapper starts — run for its whole life by design and are not shells. They
+      // are recognised ONLY by the provenance marker the spawn wrote into their
+      // mcp-config env, valued with this parent's `childGeneration` (the spawn
+      // record), never by argv. An empty generation exempts nothing.
+      ownService: { env: OWN_SERVICE_PROVENANCE_ENV, value: childGeneration },
     }),
   }
 }

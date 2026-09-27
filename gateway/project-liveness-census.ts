@@ -26,6 +26,12 @@
  *   - "false and unknown must not share a branch": an unreadable `/proc`, a
  *     recycled parent pid, or an unreadable transcript directory is `unknown`, never
  *     idle.
+ *   - A descendant is the parent's OWN MCP service (not a shell) only by
+ *     SPAWN-CORRELATED provenance: its `/proc/<pid>/environ` carries the marker the
+ *     spawn wrote into the parent's mcp-config, valued with the parent's
+ *     `childGeneration` ({@link ProcWalkDeps.ownService}). Never by argv — any
+ *     process can run the configured command with the exact args — and an absent,
+ *     mismatched or unreadable marker exempts nothing.
  */
 import { readdir, readFile, stat } from 'node:fs/promises'
 import { join } from 'node:path'
@@ -75,8 +81,9 @@ export interface ProjectLivenessProbes {
   unleasedLiveRuns?(projectId: string | null): number
   /** Recent native-child transcript activity in a parent's `subagents` directory. */
   subagentActivity(directory: string, nowMs: number): Promise<ProbeAnswer>
-  /** Any descendant process of the parent pid. */
-  descendants(pid: number): Promise<ProbeAnswer>
+  /** Any descendant process of the parent (its pid), other than the parent's own
+   *  MCP services as proven by its spawn record (`childGeneration`). */
+  descendants(parent: Pick<ParentObservation, 'pid' | 'childGeneration'>): Promise<ProbeAnswer>
   /** Optional terminal-host view of the parent's pane (herdr `pane.process_info`). */
   paneForeground?(sessionKey: string): Promise<ProbeAnswer>
 }
@@ -214,7 +221,7 @@ export async function runProjectLivenessCensus(deps: {
     evidence.subagents = parent.subagentsDirectory === null
       ? { verdict: 'unknown', reasons: ['native-child directory unresolvable'] }
       : await guard(deps.probes.subagentActivity(parent.subagentsDirectory, now()), 'native-child directory')
-    evidence.descendants = await guard(deps.probes.descendants(parent.pid), 'shell')
+    evidence.descendants = await guard(deps.probes.descendants({ pid: parent.pid, childGeneration: parent.childGeneration }), 'shell')
     if (deps.probes.paneForeground !== undefined) {
       evidence.pane = await guard(deps.probes.paneForeground(parent.sessionKey), 'pane')
     }
@@ -255,9 +262,25 @@ export interface ProcWalkDeps {
   readFile?: (path: string) => Promise<string>
   readdir?: (path: string) => Promise<string[]>
   identity?: (pid: number) => ProcessIdentity | undefined
-  /** A DIRECT child the parent always runs by design (its own stdio MCP servers):
-   *  not a shell. Its descendants are still walked. */
-  isOwnService?: (argv: string[]) => boolean
+  /**
+   * The parent's spawn-recorded service provenance. A descendant (direct or not) is
+   * the parent's own MCP service — not a shell — only when its OWN
+   * `/proc/<pid>/environ` carries `env=value` (the first `env=` entry, as `getenv`
+   * reads it), `value` being the parent's `childGeneration` the spawn wrote into
+   * every mcp-config entry. An absent, mismatched or unreadable marker, an empty
+   * `value`, or no `ownService` at all exempts nothing. Its descendants are still
+   * walked, and each is judged by its own environ.
+   */
+  ownService?: { env: string; value: string }
+}
+
+/** The value of the FIRST `name=` entry of a NUL-separated environ, or undefined. */
+function environValue(environ: string, name: string): string | undefined {
+  const prefix = `${name}=`
+  for (const entry of environ.split('\0')) {
+    if (entry.startsWith(prefix)) return entry.slice(prefix.length)
+  }
+  return undefined
 }
 
 const sameIdentity = (a: ProcessIdentity | undefined, b: ProcessIdentity | undefined): boolean =>
@@ -267,7 +290,8 @@ const sameIdentity = (a: ProcessIdentity | undefined, b: ProcessIdentity | undef
  * Every descendant of `pid`, walked through `/proc/<pid>/task/<tid>/children`. The
  * parent's identity is read before the walk and re-checked after it, so a pid
  * recycled mid-walk cannot answer. Unreadable `/proc` or identity → unknown; any
- * descendant (other than the parent's own services) → busy, recording up to
+ * descendant (other than the parent's own services, proven by
+ * {@link ProcWalkDeps.ownService}) → busy, recording up to
  * {@link SHELL_REASON_LIMIT} `comm` names — never a path or an argv.
  */
 export async function walkProcessDescendants(pid: number, deps: ProcWalkDeps = {}): Promise<ProbeAnswer> {
@@ -309,27 +333,27 @@ export async function walkProcessDescendants(pid: number, deps: ProcWalkDeps = {
   const shells: string[] = []
   let unreadable = false
   const seen = new Set<number>([pid])
-  const queue = rootChildren.map((child) => ({ pid: child, direct: true }))
+  const provenance = deps.ownService !== undefined && deps.ownService.value !== '' ? deps.ownService : undefined
+  const queue = [...rootChildren]
   while (queue.length > 0) {
     const next = queue.shift()!
-    if (seen.has(next.pid)) continue
-    seen.add(next.pid)
+    if (seen.has(next)) continue
+    seen.add(next)
     let own = false
-    if (next.direct && deps.isOwnService !== undefined) {
+    if (provenance !== undefined) {
       try {
-        const argv = (await readText(`/proc/${next.pid}/cmdline`)).split('\0').filter(Boolean)
-        own = deps.isOwnService(argv)
-      } catch { /* vanished or unreadable: counted as a shell below if still listed */ }
+        own = environValue(await readText(`/proc/${next}/environ`), provenance.env) === provenance.value
+      } catch { /* vanished or unreadable: unproven, counted as a shell below */ }
     }
     if (!own) {
       let comm = 'unknown'
-      try { comm = (await readText(`/proc/${next.pid}/comm`)).trim() || 'unknown' } catch { /* keep placeholder */ }
+      try { comm = (await readText(`/proc/${next}/comm`)).trim() || 'unknown' } catch { /* keep placeholder */ }
       shells.push(comm)
     }
     // An exempt service still has to prove its descendants are absent.
-    const grand = await childrenOf(next.pid)
+    const grand = await childrenOf(next)
     if (grand === null) unreadable = true
-    for (const g of grand ?? []) queue.push({ pid: g, direct: false })
+    queue.push(...(grand ?? []))
   }
 
   if (!sameIdentity(before, identity(pid))) return { verdict: 'unknown', reasons: ['parent pid changed identity during the census'] }

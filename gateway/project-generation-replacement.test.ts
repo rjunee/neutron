@@ -16,6 +16,7 @@ import type {
   ReplacementResult,
 } from '@neutronai/runtime/adapters/claude-code/persistent/generation-replacement.ts'
 import type { ReplSession } from '@neutronai/runtime/adapters/claude-code/persistent/repl-session.ts'
+import { OWN_SERVICE_PROVENANCE_ENV } from '@neutronai/runtime/mcp-servers.ts'
 import { seedMigratedDb } from '../tests/support/migrated-db.ts'
 import { ProjectAdmission } from './project-admission.ts'
 import { decideProjectLiveness, walkProcessDescendants, type CensusEvidence, type ParentObservation, type ProjectLivenessCensus } from './project-liveness-census.ts'
@@ -126,7 +127,7 @@ describe('legitimate exact-generation replacement', () => {
       const fail = (code: string): never => { throw Object.assign(new Error(code), { code }) }
       const descendants = () => walkProcessDescendants(OLD.pid, {
         identity: () => IDENTITY,
-        isOwnService: (argv) => argv.includes('own-service'),
+        ownService: { env: OWN_SERVICE_PROVENANCE_ENV, value: 'gen-own' },
         readdir: async (path) => {
           if (path === '/proc/11/task') {
             if (mode === 'permission-list') fail('EACCES')
@@ -136,7 +137,8 @@ describe('legitimate exact-generation replacement', () => {
         },
         readFile: async (path) => {
           if (path === `/proc/${OLD.pid}/task/${OLD.pid}/children`) return '11'
-          if (path === '/proc/11/cmdline') return 'bun\0own-service\0'
+          if (path === '/proc/11/environ') return `PATH=/bin\0${OWN_SERVICE_PROVENANCE_ENV}=gen-own\0`
+          if (path === '/proc/12/environ') return 'PATH=/bin\0'
           if (path === '/proc/11/task/11/children') {
             if (mode === 'permission-read') fail('EACCES')
             if (mode === 'thread-vanished') fail('ENOENT')

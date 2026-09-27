@@ -160,6 +160,31 @@ export function isReservedMcpServerName(name: string): boolean {
 }
 
 /**
+ * THE SPAWN-CORRELATED PROVENANCE MARKER of the REPL's own MCP services (#1226).
+ *
+ * The spawn path writes this env var, valued with the parent REPL's `childGeneration`,
+ * into EVERY `mcpServers` entry of the per-session `--mcp-config` — the dev channel,
+ * the tools bridge and each owner-installed server — and into nothing else. `claude`
+ * hands an entry's `env` block only to the stdio server it starts from that entry, and
+ * a wrapper such as `npx -y pkg` or `uvx pkg` passes it on to the real server it
+ * starts, so the marker is present in exactly the processes the REPL's MCP config
+ * launched. It is NEVER put in the REPL's own environment, so a process the agent
+ * starts through its Bash tool does not carry it.
+ *
+ * `childGeneration` is the spawn record: minted once per child, persisted as the
+ * registry row's `child_generation`, restored on adoption, and read by the project
+ * liveness census (`gateway/project-liveness-census.ts`) from the parent it observed.
+ * The census exempts a descendant from the busy-shell count only when that
+ * process's own `/proc/<pid>/environ` carries this name with that exact value — never
+ * on argv, which any process can reproduce.
+ *
+ * The name is therefore RESERVED: an owner-installed server may not declare it (see
+ * {@link parseOwnerMcpServerInput}), and the spawn path writes it last so no merge
+ * order can let a declared value win.
+ */
+export const OWN_SERVICE_PROVENANCE_ENV = 'NEUTRON_REPL_SERVICE_PROVENANCE'
+
+/**
  * Characters refused outright — never stripped — in a command, an arg or an
  * env-var name, so a payload cannot hide from the owner reading the approval
  * prompt.
@@ -375,6 +400,13 @@ export function parseOwnerMcpServerInput(raw: unknown): ParsedOwnerMcpServer {
           // The NAME is echoed because it is not a secret and the owner needs to
           // know which row is wrong. A VALUE is never echoed, here or anywhere.
           errors.push(`env name '${key.slice(0, MCP_SERVER_ENV_NAME_MAX)}' must be A-Z, digits and underscores`)
+          continue
+        }
+        if (key === OWN_SERVICE_PROVENANCE_ENV) {
+          // Reserved: it is the provenance marker the spawn path stamps on the REPL's
+          // own MCP services. A declared value would be overwritten at spawn anyway;
+          // refusing it says so instead of silently discarding the owner's input.
+          errors.push(`env name '${key}' is reserved by Neutron's own MCP plumbing`)
           continue
         }
         if (typeof value !== 'string' || value.length === 0) {
