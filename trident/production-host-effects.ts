@@ -7,6 +7,7 @@ import { classifyCiRollup, confirmConfigurationError, type CiRunObservation, typ
 import { briefIntegrity } from './gates/brief-integrity.ts'
 import type { AdmissionSource } from './gates/project-admission.ts'
 import { pinnedMergeReadiness, publicationReadiness, sessionTrailerReadinessForBase } from './gates/release-readiness.ts'
+import { publishedWorkPreserved } from './gates/published-work.ts'
 import { unknownCause } from './gates/unknown-cause.ts'
 import { mergeLocalReviewed } from './merge.ts'
 import { gitRangeArgv } from './git-range.ts'
@@ -520,6 +521,8 @@ export function createProductionHostEffects(options: ProductionHostOptions) {
       const lines = remote.stdout.trim()
       const expected = lines === '' ? '' : lines.split(/\s+/)[0]!
       if (lines !== '' && (!oid.test(expected) || lines.split(/\s+/).length !== 2 || lines.split(/\s+/)[1] !== `refs/heads/${branch}`)) return unknown('Publication lease is malformed')
+      const preserved = await publishedWorkPreserved(runHost, repo, expected, snapshot.head)
+      if (preserved.kind !== 'allow') return preserved
       const pushed = await git('push', `--force-with-lease=refs/heads/${branch}:${expected}`, 'origin', `${snapshot.head}:refs/heads/${branch}`)
       if (!pushed.ok || pushed.timed_out) return unknown('Publication push was not confirmed')
       const witness = await git('ls-remote', '--heads', 'origin', `refs/heads/${branch}`)

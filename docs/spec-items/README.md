@@ -19,6 +19,7 @@ These are the items the harness-orchestrator cutover is gated on.
 - [`cancel-stops-host-review-suite`](cancel-stops-host-review-suite.md) — Cancellation stops the run's host review suite
 - [`host-test-suite-efficiency`](host-test-suite-efficiency.md) — Diagnose early and remove measured host test-suite waste
 - [`planner-selected-execution-strategy`](planner-selected-execution-strategy.md) — Let the initial planner select a persisted execution strategy
+- [`published-branch-preservation`](published-branch-preservation.md) — Preserve previously published work across fresh dispatch and replay
 - [`refreshed-ci-merge-readiness`](refreshed-ci-merge-readiness.md) — Wait for refreshed CI without rebuilding an approved revision
 - [`salvage-publication-provenance`](salvage-publication-provenance.md) — Preserve publication ownership when salvaging a failed build
 - [`same-run-task-sequence-crash-handoff`](same-run-task-sequence-crash-handoff.md) — Recover an intermediate task checkpoint before reviewing the card
@@ -53,6 +54,7 @@ branch is cut (standard §3.1, §3.2).
 | [`cancel-stops-host-review-suite`](cancel-stops-host-review-suite.md) | Cancellation stops the run's host review suite | P0 | yes |
 | [`host-test-suite-efficiency`](host-test-suite-efficiency.md) | Diagnose early and remove measured host test-suite waste | P0 | yes |
 | [`planner-selected-execution-strategy`](planner-selected-execution-strategy.md) | Let the initial planner select a persisted execution strategy | P0 | yes |
+| [`published-branch-preservation`](published-branch-preservation.md) | Preserve previously published work across fresh dispatch and replay | P0 | yes |
 | [`refreshed-ci-merge-readiness`](refreshed-ci-merge-readiness.md) | Wait for refreshed CI without rebuilding an approved revision | P0 | yes |
 | [`resolve-the-review-diff-base`](resolve-the-review-diff-base.md) | Rev-range base: the pinned sha, else a ref nobody can mistake | P0 | yes |
 | [`salvage-publication-provenance`](salvage-publication-provenance.md) | Preserve publication ownership when salvaging a failed build | P0 | yes |

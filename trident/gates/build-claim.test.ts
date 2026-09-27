@@ -1,6 +1,6 @@
 import { expect, test } from 'bun:test'
 import { createHash } from 'node:crypto'
-import { checkBuildClaim } from './build-claim.ts'
+import { checkBuildClaim, buildPreservationRef } from './build-claim.ts'
 import type { RunHostCommand } from '../merge.ts'
 const head = 'a'.repeat(40), other = 'b'.repeat(40), base = 'c'.repeat(40)
 const snapshot = { head, diff: '+code', pr: null }
@@ -25,7 +25,7 @@ function fixture(measuredHead = head, object = rawCommit(CO_AUTHOR)) {
     calls.push(argv)
     envs.push(extraEnv)
     if (argv.includes('rev-parse')) return ok(other)
-    if (argv.includes('ls-remote')) return ok(remote ? `${remote}\trefs/heads/change` : '')
+    if (argv.includes('ls-remote')) return ok(remote ? `${remote}\t${buildPreservationRef(measuredHead)}` : '')
     // G166: the trailer scan lists base..head; one clean commit by default.
     if (argv.includes('rev-list')) return ok(`${measuredHead}\n`)
     if (argv.includes('cat-file') && argv.includes('-s')) return sized(object)
@@ -52,7 +52,7 @@ test('G100 resolves full and abbreviated conflict, pushes pinned object and witn
     // be able to report the substitute's size and make a short read look whole.
     expect(f.calls[5]).toEqual(['git', '--no-replace-objects', '-C', 'repo', 'cat-file', '-s', head])
     expect(f.calls.every(argv => argv[0] === 'git')).toBe(true)
-    expect(f.calls[6]).toEqual(['git', '-C', 'repo', 'push', '--force-with-lease=refs/heads/change:', 'origin', `${head}:refs/heads/change`])
+    expect(f.calls[6]).toEqual(['git', '-C', 'repo', 'push', `--force-with-lease=${buildPreservationRef(head)}:`, 'origin', `${head}:${buildPreservationRef(head)}`])
   }
 })
 test('G100 same or nonexistent claim allows; uncertain resolution stays unknown', async () => {
@@ -138,13 +138,13 @@ test('G100/G166 a carrier in launch-base..head is preserved (G100) and the refus
   const f = fixture(carrierHead, carrier)
   expect(await checkBuildClaim(f.run, 'repo', 'change', base, other, { ...snapshot, head: carrierHead }, 'run')).toEqual({
     kind: 'blocked',
-    on: `Build claim ${other} resolves to ${other} but measured head is ${carrierHead}; branch preserved on origin; preserved range: Publication branch carries a Claude-Session trailer on 1 commit(s) above the launch base: ${carrierHead} -- strip before any PR`,
+    on: `Build claim ${other} resolves to ${other} but measured head is ${carrierHead}; branch preserved on origin at ${buildPreservationRef(carrierHead)}; preserved range: Publication branch carries a Claude-Session trailer on 1 commit(s) above the launch base: ${carrierHead} -- strip before any PR`,
   })
   // Owner decision 2026-09-19: G100's preservation push is not withheld by the scan. The scan
   // still runs first (rev-list, cat-file) and the object pushed is the object scanned.
   const push = f.calls.findIndex(c => c.includes('push'))
   expect(push).toBeGreaterThanOrEqual(0)
-  expect(f.calls[push]).toEqual(['git', '-C', 'repo', 'push', '--force-with-lease=refs/heads/change:', 'origin', `${carrierHead}:refs/heads/change`])
+  expect(f.calls[push]).toEqual(['git', '-C', 'repo', 'push', `--force-with-lease=${buildPreservationRef(carrierHead)}:`, 'origin', `${carrierHead}:${buildPreservationRef(carrierHead)}`])
   expect(f.calls.findIndex(c => c.includes('cat-file'))).toBeLessThan(push)
 })
 test('G100/G166 a range that cannot be measured is still preserved (G100), and the refusal says the scan was unmeasured', async () => {
@@ -157,7 +157,7 @@ test('G100/G166 a range that cannot be measured is still preserved (G100), and t
     const run: RunHostCommand = (argv, cwd) => failing !== '' && argv.includes(failing) ? Promise.resolve(ok('', 128)) : f.run(argv, cwd)
     expect(await checkBuildClaim(run, 'repo', 'change', launchBase, other, snapshot, 'run')).toEqual({
       kind: 'blocked',
-      on: `Build claim ${other} resolves to ${other} but measured head is ${head}; branch preserved on origin; session-trailer scan unmeasured: ${detail}`,
+      on: `Build claim ${other} resolves to ${other} but measured head is ${head}; branch preserved on origin at ${buildPreservationRef(head)}; session-trailer scan unmeasured: ${detail}`,
     })
     expect(f.calls.some(c => c.includes('push'))).toBe(true)
   }
