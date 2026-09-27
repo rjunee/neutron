@@ -68,8 +68,10 @@ prevented otherwise eligible recovery before the authority comparison ran.
 The corrected host recognizes v4 only for the planner. Other roles still accept
 only v2/v3; the original historical filename, observed byte integrity, provider,
 model, effort, grants, budget, workspace and result path remain exact checks.
-Historical fixtures now record the actual pre-boundary prompt bytes and their
-integrity before dispatch. Continuation evidence is read through the persisted
+Historical fixtures now reconstruct pre-boundary prompt bytes by removing the
+new planning paragraph, assert that removal changed the planner brief, and
+record the reconstructed bytes and their integrity before dispatch. Continuation
+evidence is read through the persisted
 planner reservation rather than an invented filename. The independent wiring
 oracle includes the new paragraph. A host matrix exercises plan v2/v3/v4 success,
 plan v5 refusal and v4 refusal for build/review/fix.

@@ -5438,7 +5438,9 @@ test(`historical pending ${strategy} planner recovers its original schema and re
   const prepared = await f.prepare()
   for (const [role, worker] of Object.entries(prepared.workers)) {
     const path = join(f.context.stateRoot, f.row.id, `${role}.brief`)
-    const originalBrief = (await readFile(worker.request.brief.path, 'utf8')).replace(/\n\nPLANNING WORK\.[^\n]*/, '')
+    const currentBrief = await readFile(worker.request.brief.path, 'utf8')
+    const originalBrief = currentBrief.replace(/\n\nPLANNING WORK\.[^\n]*/, '')
+    if (role === 'plan') expect(originalBrief).not.toBe(currentBrief)
     await writeFile(path, originalBrief)
     worker.request = { ...worker.request, brief: { integrity: briefIntegrity(originalBrief), path },
       result: { ...worker.request.result, ...(role === 'plan' ? { schema: 'project-plan' } : {}) } }
@@ -5490,7 +5492,9 @@ test(`historical pending ${strategy} builder recovers only with ${source} proven
   const prepared = await f.prepare()
   for (const [role, worker] of Object.entries(prepared.workers)) {
     const path = join(f.context.stateRoot, f.row.id, `${role}.brief`)
-    const originalBrief = (await readFile(worker.request.brief.path, 'utf8')).replace(/\n\nPLANNING WORK\.[^\n]*/, '')
+    const currentBrief = await readFile(worker.request.brief.path, 'utf8')
+    const originalBrief = currentBrief.replace(/\n\nPLANNING WORK\.[^\n]*/, '')
+    if (role === 'plan') expect(originalBrief).not.toBe(currentBrief)
     await writeFile(path, originalBrief)
     worker.request = { ...worker.request, brief: { integrity: briefIntegrity(originalBrief), path } }
   }
