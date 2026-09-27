@@ -405,6 +405,8 @@ const KNOWN_READERS: Readonly<Record<string, string>> = {
     'Broad regex literal at scripts/spec-items-index.ts:99 matches an identity-name candidate; registered conservatively, without claiming an env read or trimming behavior.',
   'scripts/build-timeline-codex-import.ts':
     'Opaque evidence-reference validation regex at scripts/build-timeline-codex-import.ts:90 accepts identity-name candidates. No identity environment access; the importer reads explicitly supplied rollout/config paths. Regex-only classification and an actual-reader control are pinned below.',
+  'scripts/build-timeline-command.ts':
+    'Public label/model validation regex at scripts/build-timeline-command.ts:29 accepts identity-name candidates. No direct identity environment access; the recorder accepts explicit command options. Conservative regex classification and an actual-reader control are pinned below.',
   'scripts/vault-backup.ts':
     'CLI usage text at scripts/vault-backup.ts:13 names OWNER_HOME. The owner-home argument comes from argv, not the environment. Help-string classification and an actual-reader control are pinned below.',
   'skill-forge/command.ts':
@@ -968,6 +970,18 @@ test('timeline importer evidence-reference validator is a conservative regex mat
   expect(namesIdentityVar(importer, 'scripts/build-timeline-codex-import.ts')).toBe(true)
   expect(READ_PATTERNS.some((pattern) => pattern.test(importer))).toBe(false)
   expect(processEnvAccess.test(importer)).toBe(false)
+  expect(READ_PATTERNS.some((pattern) => pattern.test(realReader))).toBe(true)
+  expect(processEnvAccess.test(realReader)).toBe(true)
+})
+
+test('timeline command public-text validator is a conservative regex match', () => {
+  const recorder = readFileSync(join(ROOT, 'scripts/build-timeline-command.ts'), 'utf8')
+  const realReader = readFileSync(join(ROOT, 'migrations/db-path.ts'), 'utf8')
+  const processEnvAccess = /\bprocess\s*\.\s*env\b/
+  expect(namesIdentityVar(recorder, 'scripts/build-timeline-command.ts')).toBe(true)
+  expect(READ_PATTERNS.some((pattern) => pattern.test(recorder))).toBe(false)
+  expect(processEnvAccess.test(recorder)).toBe(false)
+  expect(namesIdentityVar(realReader, 'migrations/db-path.ts')).toBe(true)
   expect(READ_PATTERNS.some((pattern) => pattern.test(realReader))).toBe(true)
   expect(processEnvAccess.test(realReader)).toBe(true)
 })

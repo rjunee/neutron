@@ -67,3 +67,20 @@ for missing attribution, and refusing null model context. Each targeted control
 exited 1; both mutations were reverted. Full shared-host suite, CI and live
 deployment remain separate operational validation; this record does not claim
 those checks or historical phase completeness.
+
+Combined-candidate CI at `d1b4da4ed1d47fb2ea9df7343fb9c7b33ffc7701`
+subsequently exposed two registry assertions naming the command producer as
+unregistered. The existing identity-name detector conservatively matches the
+public-text validator's character classes (`scripts/build-timeline-command.ts:29`).
+The new registration describes that regex match without claiming a direct
+environment read (`tests/integration/identity-env-readers-registry.test.ts:408`).
+A consuming test at `:977` compares the producer's source against the real
+`migrations/db-path.ts` reader, preserving positive and negative controls.
+The detector and producer are unchanged. Temporarily removing the registration
+reproduced both CI failures with exit 1; restoring it passed the registry suite
+(26 tests, 119 assertions). Adding that exact registry suite to the focused
+command above passed 84 tests across seven files with 771 assertions. This repair
+was checked on `15fcc895efcad96690fef09cd3996e8126b80a43` plus registry blob
+`d9d39f3441cf5c924273ebeb7cd8e00e4075268a`. Both root and Trident
+TypeScript commands above and the actual `bash scripts/ci/lint.sh` gate exited 0
+again. No full-suite rerun or publication was performed in this repair worktree.
