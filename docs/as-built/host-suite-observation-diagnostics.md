@@ -65,3 +65,17 @@ stale acknowledgement each fail both cancellation variants. After restoration,
 all 26 host-suite tests and both root/Trident typechecks passed. The repaired
 candidate still requires the complete gate; the first gate is recorded as red,
 not reused as passing evidence.
+
+The repaired implementation, integrated with merged account controls, passed the
+complete shared-host gate at `b97c7971468fa5608529ca459ad25e59f69e5f5f`.
+`python3 -B trident/process-test-isolation.py -- bash scripts/check-shared-host.sh`
+exited zero: all 51 TypeScript configurations passed, including root and Trident;
+all 1,727 declared, Bun-discovered, assigned and executed files matched across
+18 green lanes (1,491 general, 22 PGLite, 43 device and 171 HTTP). The complete
+`open/__tests__/project-build-e2e.test.ts` and both repaired cancellation variants
+executed. The worktree was clean and the source aggregate
+`541677fa2026c0180c22751900bd1a25ee3becee01605be13c4b16b4f38992de`
+was unchanged before/after. This publication record is a documentation-only
+child of that tested revision, not a transferable receipt for a different
+runtime, environment or deployed observation. Exact-head CI and fresh live
+host-selected suite evidence remain required.
