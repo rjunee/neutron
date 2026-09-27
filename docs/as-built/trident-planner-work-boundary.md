@@ -57,6 +57,31 @@ Validation on the candidate based on `71f4aa84`:
   installed locally with the frozen lockfile and copyfile backend; no lockfile
   change was required.
 
+Integration CI on `d1b4da4ed1d47fb2ea9df7343fb9c7b33ffc7701` subsequently exposed
+coverage missing from that selected run: the wiring test's exact prompt oracle,
+two continuation fixtures reading a hard-coded v3 filename, and historical
+planner/builder recovery. The last group was a production omission:
+`trident/project-build-host.ts` recognized only live v2/v3 brief paths while
+validating original historical reservations. Fresh v4 planner paths therefore
+prevented otherwise eligible recovery before the authority comparison ran.
+
+The corrected host recognizes v4 only for the planner. Other roles still accept
+only v2/v3; the original historical filename, observed byte integrity, provider,
+model, effort, grants, budget, workspace and result path remain exact checks.
+Historical fixtures now record the actual pre-boundary prompt bytes and their
+integrity before dispatch. Continuation evidence is read through the persisted
+planner reservation rather than an invented filename. The independent wiring
+oracle includes the new paragraph. A host matrix exercises plan v2/v3/v4 success,
+plan v5 refusal and v4 refusal for build/review/fix.
+The complete consuming Open E2E and wiring files passed together (418 cases,
+5,143 assertions), as did the complete host file (55 cases, 201 assertions).
+Two restored semantic mutations of the role/version guard failed by assertion:
+removing planner v4 made its legitimate recovery case red (six controls still
+passed); admitting v4 for build/review/fix made all three forbidden-role cases
+red (four controls still passed). Restoring the exact guard made all seven
+role/version cases pass. Both root and Trident TypeScript checks and the actual
+repository lint passed after the correction.
+
 The tests prove delivered instructions and preserved host behavior with scripted
 workers. They do not prove that a model follows the instructions or establish
 deployed time/token savings. No active run artifact was changed. Complete

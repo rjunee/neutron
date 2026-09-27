@@ -169,7 +169,8 @@ export async function createProjectBuildHost(options: ProjectBuildHostOptions) {
         const live = expected[role]!.request
         const original = originalWorkers?.[role]?.request
         const directory = dirname(live.brief.path)
-        if (![2, 3].some(version => live.brief.path === join(directory, `${role}.strategy-v${version}.brief.${role}.host`))
+        const versions = role === 'plan' ? [2, 3, 4] : [2, 3]
+        if (!versions.some(version => live.brief.path === join(directory, `${role}.strategy-v${version}.brief.${role}.host`))
           || original?.brief.path !== join(directory, `${role}.brief.${role}.host`)
           || typeof original.brief.integrity !== 'string') {
           return { kind: 'unknown', detail: 'Original worker brief is not the reserved legacy artifact' }

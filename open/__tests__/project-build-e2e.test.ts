@@ -4992,8 +4992,13 @@ test(`a ${mergeMode} retry of a run that died after a task-sequence handoff resu
   expect(f.world.selectedTasks).toEqual(['- [ ] T2 record another note'])
   expect(f.world.dispatches.some(dispatch => dispatch.step_id.startsWith(`${prior.id}:`))).toBe(false)
   // The plan turn's host context as the worker read it off disk (`project-build-host.ts`
-  // writes `<role>.strategy-v3.brief.<role>.host`, and its context beside it).
-  const planContext = JSON.parse(await readFile(workContextPath(join(f.context.stateRoot, run.id, 'plan.strategy-v3.brief.plan.host')), 'utf8'))
+  // writes the admitted brief path and its context beside it). Use the actual
+  // worker reservation, so a filename-version change cannot hide the assertion.
+  const planReservation = f.store.stageEvents(run.id).filter(event => event.stage === 'build-mode-state')
+    .map(event => JSON.parse(event.meta!).checkpoint?.pending?.recovery?.request)
+    .find(request => request?.role === 'plan')
+  expect(planReservation?.step_id).toBe(`${run.id}:task:1:plan:0`)
+  const planContext = JSON.parse(await readFile(workContextPath(planReservation.brief.path), 'utf8'))
   expect(planContext.request.step_id).toBe(`${run.id}:task:1:plan:0`)
   expect(planContext.planner).toBe('next')
   expect(planContext.committedPlan).toMatchObject({ found: true, body: HANDOFF_LEDGER, sha256: sha256(HANDOFF_LEDGER), uncheckedCount: 1 })
@@ -5433,8 +5438,9 @@ test(`historical pending ${strategy} planner recovers its original schema and re
   const prepared = await f.prepare()
   for (const [role, worker] of Object.entries(prepared.workers)) {
     const path = join(f.context.stateRoot, f.row.id, `${role}.brief`)
-    await writeFile(path, await readFile(worker.request.brief.path, 'utf8'))
-    worker.request = { ...worker.request, brief: { ...worker.request.brief, path },
+    const originalBrief = (await readFile(worker.request.brief.path, 'utf8')).replace(/\n\nPLANNING WORK\.[^\n]*/, '')
+    await writeFile(path, originalBrief)
+    worker.request = { ...worker.request, brief: { integrity: briefIntegrity(originalBrief), path },
       result: { ...worker.request.result, ...(role === 'plan' ? { schema: 'project-plan' } : {}) } }
   }
   const host = await createProjectBuildHost(prepared)
@@ -5484,8 +5490,9 @@ test(`historical pending ${strategy} builder recovers only with ${source} proven
   const prepared = await f.prepare()
   for (const [role, worker] of Object.entries(prepared.workers)) {
     const path = join(f.context.stateRoot, f.row.id, `${role}.brief`)
-    await writeFile(path, await readFile(worker.request.brief.path, 'utf8'))
-    worker.request = { ...worker.request, brief: { ...worker.request.brief, path } }
+    const originalBrief = (await readFile(worker.request.brief.path, 'utf8')).replace(/\n\nPLANNING WORK\.[^\n]*/, '')
+    await writeFile(path, originalBrief)
+    worker.request = { ...worker.request, brief: { integrity: briefIntegrity(originalBrief), path } }
   }
   // The native pending reservation is created using the original path and
   // integrity before dispatch. Recovery cannot manufacture a replacement.
