@@ -1,12 +1,13 @@
 import { expect, test } from 'bun:test'
 import { execFileSync, spawn, spawnSync } from 'node:child_process'
-import { copyFileSync, mkdtempSync, mkdirSync, readFileSync, rmSync, writeFileSync } from 'node:fs'
+import { copyFileSync, mkdtempSync, mkdirSync, readFileSync, rmSync, symlinkSync, writeFileSync } from 'node:fs'
 import { tmpdir } from 'node:os'
-import { join } from 'node:path'
+import { basename, join } from 'node:path'
 import { fileURLToPath } from 'node:url'
 
 const script = fileURLToPath(new URL('./check-shared-host.sh', import.meta.url))
 const staleProseGuard = fileURLToPath(new URL('./ci/stale-prose-guard.ts', import.meta.url))
+const identityReader = fileURLToPath(new URL('./shared-host-suite-identity.ts', import.meta.url))
 
 function fixture(gitRepo = true) {
   const scratch = mkdtempSync(join(tmpdir(), 'shared-host-check-test-'))
@@ -16,9 +17,11 @@ function fixture(gitRepo = true) {
   mkdirSync(join(root, 'scripts/ci'), { recursive: true })
   copyFileSync(script, join(root, 'scripts/check-shared-host.sh'))
   copyFileSync(staleProseGuard, join(root, 'scripts/ci/stale-prose-guard.ts'))
+  symlinkSync(identityReader, join(root, 'scripts/shared-host-suite-identity.ts'))
+  writeFileSync(join(root, '.gitignore'), 'node_modules/\nlinked-workspace/\n')
   const assertHeld = 'exec 8<"$FIXTURE_COMMON_DIR"\nif flock -n 8; then exit 98; fi\n'
-  writeFileSync(join(root, 'scripts/ci/typecheck-all.sh'), assertHeld + 'echo typecheck >> calls\nif [ "${FIXTURE_HOLD:-0}" = 1 ]; then echo ready; read -r release; fi\nexit "${FIXTURE_TYPECHECK_EXIT:-0}"\n')
-  writeFileSync(join(root, 'scripts/run-tests.sh'), assertHeld + 'echo suite >> calls\nprintf "%s\\n" "$NEUTRON_TEST_JOBS/${NEUTRON_TEST_CONCURRENCY:-default}/$NEUTRON_TEST_CHUNK_SIZE" >> calls\n[ -z "${NEUTRON_TEST_SHARD:-}${NEUTRON_TEST_PLAN_ONLY:-}${NEUTRON_TEST_ROOT:-}${NEUTRON_TEST_DISCOVER_OVERRIDE:-}${NEUTRON_BUN_BIN:-}" ] || exit 99\nif [ "${FIXTURE_RUN_STALE_PROSE_GUARD:-0}" = 1 ]; then bun scripts/ci/stale-prose-guard.ts || exit "$?"; fi\nexit "${FIXTURE_SUITE_EXIT:-0}"\n')
+  writeFileSync(join(root, 'scripts/ci/typecheck-all.sh'), assertHeld + 'echo typecheck >> "$FIXTURE_CALLS"\nif [ "${FIXTURE_HOLD:-0}" = 1 ]; then echo ready; read -r release; fi\nexit "${FIXTURE_TYPECHECK_EXIT:-0}"\n')
+  writeFileSync(join(root, 'scripts/run-tests.sh'), assertHeld + 'echo suite >> "$FIXTURE_CALLS"\nprintf "%s\\n" "$NEUTRON_TEST_JOBS/${NEUTRON_TEST_CONCURRENCY:-default}/$NEUTRON_TEST_CHUNK_SIZE" >> "$FIXTURE_CALLS"\n[ -z "${NEUTRON_TEST_SHARD:-}${NEUTRON_TEST_PLAN_ONLY:-}${NEUTRON_TEST_ROOT:-}${NEUTRON_TEST_DISCOVER_OVERRIDE:-}${NEUTRON_BUN_BIN:-}" ] || exit 99\nif [ "${FIXTURE_RUN_STALE_PROSE_GUARD:-0}" = 1 ]; then bun scripts/ci/stale-prose-guard.ts || exit "$?"; fi\nif [ -n "${FIXTURE_MUTATE_INPUT:-}" ]; then printf changed > "$FIXTURE_MUTATE_INPUT"; fi\nexit "${FIXTURE_SUITE_EXIT:-0}"\n')
   if (gitRepo) {
     const git = (...args: string[]) => execFileSync('git', ['-C', root, ...args], { stdio: 'pipe' })
     git('init', '--quiet')
@@ -31,9 +34,10 @@ function fixture(gitRepo = true) {
     execFileSync('git', ['--git-dir', remote, 'symbolic-ref', 'HEAD', 'refs/heads/main'])
     git('worktree', 'add', '--quiet', '--detach', peer)
   }
-  const env = (extra: Record<string, string> = {}) => ({ ...process.env, FIXTURE_COMMON_DIR: join(root, '.git'), ...extra })
-  const run = (extra: Record<string, string> = {}, checkout = root) => spawnSync('bash', [join(checkout, 'scripts/check-shared-host.sh')], { encoding: 'utf8', env: env(extra) })
-  return { scratch, root, peer, remote, env, run, calls: (checkout = root) => readFileSync(join(checkout, 'calls'), 'utf8') }
+  const callsPath = (checkout: string) => join(scratch, `${basename(checkout)}-calls`)
+  const env = (extra: Record<string, string> = {}, checkout = root) => ({ ...process.env, FIXTURE_COMMON_DIR: join(root, '.git'), FIXTURE_CALLS: callsPath(checkout), ...extra })
+  const run = (extra: Record<string, string> = {}, checkout = root) => spawnSync('bash', [join(checkout, 'scripts/check-shared-host.sh')], { encoding: 'utf8', env: env(extra, checkout) })
+  return { scratch, root, peer, remote, env, run, calls: (checkout = root) => readFileSync(callsPath(checkout), 'utf8') }
 }
 
 test('executable runs both unchanged gates with the directory lock held and no subset selectors', () => {
@@ -42,6 +46,53 @@ test('executable runs both unchanged gates with the directory lock held and no s
     const result = f.run({ NEUTRON_TEST_SHARD: '1/8', NEUTRON_TEST_PLAN_ONLY: '1', NEUTRON_TEST_ROOT: '/unused-fixture', NEUTRON_TEST_DISCOVER_OVERRIDE: 'subset', NEUTRON_BUN_BIN: 'fake', NEUTRON_TEST_JOBS: '18' })
     expect(result.status).toBe(0)
     expect(f.calls()).toBe('typecheck\nsuite\n4/default/100\n')
+  } finally { rmSync(f.scratch, { recursive: true, force: true }) }
+})
+
+test('dirty inputs are refused before either expensive gate', () => {
+  const f = fixture()
+  try {
+    writeFileSync(join(f.root, 'untracked-input.ts'), '// changed input\n')
+    const result = f.run()
+    expect(result.status).toBe(2)
+    expect(result.stderr).toContain('suite input identity is unavailable; no checks started')
+    expect(() => f.calls()).toThrow()
+  } finally { rmSync(f.scratch, { recursive: true, force: true }) }
+})
+
+test.each(['installed', 'linked workspace', 'tracked'])('a successful suite cannot establish a receipt after %s inputs change', (input) => {
+  const f = fixture()
+  try {
+    mkdirSync(join(f.root, 'node_modules'))
+    let path: string
+    if (input === 'linked workspace') {
+      mkdirSync(join(f.root, 'linked-workspace'))
+      path = join(f.root, 'linked-workspace/input.js')
+      symlinkSync('../linked-workspace', join(f.root, 'node_modules/workspace'))
+    } else if (input === 'installed') path = join(f.root, 'node_modules/input.js')
+    else path = join(f.root, 'scripts/ci/stale-prose-guard.ts')
+    if (input !== 'tracked') writeFileSync(path, 'original')
+    // Both real observations must succeed for the unchanged sibling, including
+    // a manifest-free root and an installed link to a local workspace.
+    const unchanged = f.run()
+    expect(unchanged.status).toBe(0)
+    expect(unchanged.stdout).toMatch(/suite input identity unchanged \([a-f0-9]{64}\)/)
+    const changed = f.run({ FIXTURE_MUTATE_INPUT: path })
+    expect(changed.status).toBe(2)
+    expect(changed.stderr).toContain('suite input identity changed or became unavailable')
+    expect(f.calls()).toBe('typecheck\nsuite\n4/default/100\ntypecheck\nsuite\n4/default/100\n')
+  } finally { rmSync(f.scratch, { recursive: true, force: true }) }
+})
+
+test('input drift preserves a nonzero suite status', () => {
+  const f = fixture()
+  try {
+    mkdirSync(join(f.root, 'node_modules'))
+    const path = join(f.root, 'node_modules/input.js')
+    writeFileSync(path, 'original')
+    const result = f.run({ FIXTURE_MUTATE_INPUT: path, FIXTURE_SUITE_EXIT: '17' })
+    expect(result.status).toBe(17)
+    expect(result.stderr).toContain('suite input identity changed or became unavailable')
   } finally { rmSync(f.scratch, { recursive: true, force: true }) }
 })
 
@@ -220,14 +271,14 @@ test('a local source clone with stale main follows its upstream, then admits a c
     execFileSync('git', ['-C', writer, 'push', '--quiet', 'origin', 'main'])
     execFileSync('git', ['-C', source, 'fetch', '--quiet', 'origin', 'main'])
     // Source main and nested origin/main remain old while source origin/main is fresh.
-    const result = spawnSync('bash', [join(nested, 'scripts/check-shared-host.sh')], { encoding: 'utf8', env: f.env({ FIXTURE_COMMON_DIR: join(nested, '.git') }) })
+    const result = spawnSync('bash', [join(nested, 'scripts/check-shared-host.sh')], { encoding: 'utf8', env: f.env({ FIXTURE_COMMON_DIR: join(nested, '.git') }, nested) })
     expect(result.status).toBe(2)
     expect(result.stderr).toContain('origin/main is stale')
-    expect(() => readFileSync(join(nested, 'calls'), 'utf8')).toThrow()
+    expect(() => f.calls(nested)).toThrow()
     execFileSync('git', ['-C', source, 'merge', '--ff-only', 'origin/main'])
     execFileSync('git', ['-C', nested, 'fetch', '--quiet', 'origin', 'main'])
-    const admitted = spawnSync('bash', [join(nested, 'scripts/check-shared-host.sh')], { encoding: 'utf8', env: f.env({ FIXTURE_COMMON_DIR: join(nested, '.git') }) })
+    const admitted = spawnSync('bash', [join(nested, 'scripts/check-shared-host.sh')], { encoding: 'utf8', env: f.env({ FIXTURE_COMMON_DIR: join(nested, '.git') }, nested) })
     expect(admitted.status).toBe(0)
-    expect(readFileSync(join(nested, 'calls'), 'utf8')).toBe('typecheck\nsuite\n4/default/100\n')
+    expect(f.calls(nested)).toBe('typecheck\nsuite\n4/default/100\n')
   } finally { rmSync(f.scratch, { recursive: true, force: true }) }
 })
