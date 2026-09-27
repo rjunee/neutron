@@ -89,3 +89,16 @@ A rewritten history that intentionally removes prior content without retaining
 ancestry or a separately verified transformation cannot establish preservation
 from its final tree alone; it stays refused. No intention is inferred from prose,
 and no old approval, suite or mutation proof transfers to a moved head.
+
+The corrected complete shared-host gate exited 0 on frozen candidate
+`47d2363eb5d8f1afecf1a976b88be2109a99ed4f`, clean before and after.
+All 51 TypeScript projects passed, including root and Trident. Declared,
+discovered, assigned and executed counts all equalled 1,728 files across 18
+settled lanes with zero failed lanes: 1,492 general, 22 PGLite, 43 device and
+171 HTTP files. The consuming Open E2E, published-work and orchestrator suites
+were executed. The source aggregate was unchanged:
+`3f94baed2876a8432e70ed51279bc34d3397c471e60f0ee7bbafe196763bf20a`.
+The retained complete-gate log has SHA-256
+`366618d90514877c81bfee783347c5da3f8d7c688a236cf97ece57436cbed7c4`.
+This final receipt changes documentation only; exact-head CI, deployment and
+fresh adopted-chat unattended acceptance remain outstanding.
