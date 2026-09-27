@@ -55,7 +55,7 @@ import { CodegenTaskNotFoundError, type CodegenOrchestrator } from '@neutronai/c
 import { buildTridentTerminator } from '@neutronai/trident/terminate.ts'
 import { projectInstallAvailableBytes } from '../wiring/project-build-dependencies.ts'
 import { afterAll, afterEach, beforeEach, expect, spyOn, test } from 'bun:test'
-import { chmod, copyFile, cp, link, mkdir, mkdtemp, readFile, readdir, realpath, rename, rm, stat, symlink, utimes, writeFile } from 'node:fs/promises'
+import { chmod, copyFile, cp, link, lstat, mkdir, mkdtemp, readFile, readdir, realpath, rename, rm, stat, symlink, utimes, writeFile } from 'node:fs/promises'
 import { tmpdir } from 'node:os'
 import { dirname, join } from 'node:path'
 import { fileURLToPath } from 'node:url'
@@ -5925,6 +5925,71 @@ test(`a cross-run ${mergeMode} retry ${moved ? 'refuses remote movement after di
   const merged = await spawnCapture(['git', '-C', mergeMode === 'pr' ? f.origin : f.repo, 'show', 'refs/heads/main:NOTES.md'], f.repo)
   expect(merged.stdout).toBe(fixed ? `seed\n${prior.id}:task:0:build:0\n${prior.id}:task:0:fix:1` : `seed\n${prior.id}:${legacyTerminal ? 'task:0:' : ''}build:0`)
   if (mergeMode === 'local') expect(f.commands.some(argv => argv[0] === 'gh')).toBe(false)
+}, 300_000)
+
+for (const change of ['none', 'remote', 'fetch-moved', 'closed', 'unowned', 'unreadable', 'checkout'] as const)
+test(`same-run pending review reconstructs its cleaned checkout: ${change}`, async () => {
+  const f = await fixture()
+  const first = await createProjectBuildHost(await f.prepare())
+  const review = first.workers.review.runner
+  first.workers.review.runner = { ...review, run: async (...args) => {
+    await review.run(...args)
+    return { kind: 'unknown', detail: 'Deferred review observation' }
+  } }
+  const deferred = await first.run({ mode: 'implementation', start: 'fresh' }, new AbortController().signal)
+  expect(deferred.kind, why(f, deferred)).toBe('unknown')
+  expect(deferred.cleanup.kind).toBe('cleaned')
+  const checkpoint = lastCheckpoint(f)
+  expect(checkpoint.pending).toMatchObject({ phase: 'review' })
+  const saved = f.store.get(f.row.id)!
+  expect(saved.published_pr).toBe(1)
+  expect((await spawnCapture(['git', '-C', f.repo, 'show-ref', '--verify', '--quiet', `refs/heads/${saved.branch}`], f.repo)).exit_code).toBe(1)
+  expect(await lstat(saved.worktree!).then(() => true, () => false)).toBe(false)
+  f.input.run = saved
+  f.world.dispatches.length = 0
+  if (change === 'remote') {
+    const moved = await gitOut(f.world.run, f.repo, ['commit-tree', `${checkpoint.head}^{tree}`, '-p', String(checkpoint.head), '-m', 'advance remote'])
+    await gitOut(f.world.run, f.repo, ['push', 'origin', `${moved}:refs/heads/${saved.branch}`])
+  }
+  if (change === 'closed') f.github.prs[0]!.state = 'CLOSED'
+  if (change === 'unowned') await f.store.update(saved.id, { published_pr: null })
+  if (change === 'unreadable') f.github.refuse.add('view')
+  if (change === 'fetch-moved') {
+    const runHost = f.context.runHost
+    f.context.runHost = async (...args) => {
+      if (args[0].includes('fetch')) {
+        const moved = await gitOut(f.world.run, f.repo, ['commit-tree', `${checkpoint.head}^{tree}`, '-p', String(checkpoint.head), '-m', 'advance after PR observation'])
+        await gitOut(f.world.run, f.repo, ['push', 'origin', `${moved}:refs/heads/${saved.branch}`])
+      }
+      return runHost(...args)
+    }
+  }
+  if (!['none', 'checkout'].includes(change)) {
+    await expect(f.prepare()).rejects.toThrow(change === 'fetch-moved' ? 'Retry branch moved after dispatch' : 'Pending review')
+    expect(f.world.dispatches).toHaveLength(0)
+    expect((await spawnCapture(['git', '-C', f.repo, 'show-ref', '--verify', '--quiet', `refs/heads/${saved.branch}`], f.repo)).exit_code).toBe(1)
+    return
+  }
+  const prepared = await f.prepare()
+  expect(await gitOut(f.world.run, saved.worktree!, ['rev-parse', 'HEAD'])).toBe(String(checkpoint.head))
+  if (change === 'checkout') await gitOut(f.world.run, saved.worktree!, ['reset', '--hard', f.baseSha])
+  const resumed = await createProjectBuildHost(prepared)
+  // Recover the actual completed original worker; no replacement paid turn.
+  let recovered = 0
+  const reviewRecovery = resumed.workers.review.runner
+  resumed.workers.review.runner = { ...reviewRecovery, recover: async (...args) => {
+    recovered++; return reviewRecovery.recover!(...args)
+  } }
+  const outcome = await resumed.run({ mode: 'implementation', start: 'resume' }, new AbortController().signal)
+  if (change === 'checkout') expect(outcome).toMatchObject({ kind: 'unknown', detail: 'Pending worker input revision changed before recovery' })
+  else expect(outcome.kind, why(f, outcome)).toBe('merged')
+  expect(recovered).toBe(change === 'checkout' ? 0 : 1)
+  expect(f.world.dispatches).toHaveLength(0)
+  if (change === 'checkout') expect(lastCheckpoint(f)).toEqual(checkpoint)
+  else expect(lastCheckpoint(f)).toMatchObject({ round: checkpoint.round, head: checkpoint.head })
+  expect(f.github.prs[0]!.state).toBe(change === 'checkout' ? 'OPEN' : 'MERGED')
+  expect(outcome.cleanup.kind).toBe(change === 'checkout' ? 'preserved' : 'cleaned')
+  if (change === 'none') expect(await lstat(saved.worktree!).then(() => true, () => false)).toBe(false)
 }, 300_000)
 
 test('a driver restarted between the build and review re-adopts the build instead of redoing it', async () => {

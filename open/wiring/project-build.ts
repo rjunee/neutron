@@ -39,6 +39,7 @@ import { buildReflectionGuidance } from '@neutronai/trident/reflection-guidance.
 import { PROJECT_BUILD_WALL_MS } from '@neutronai/trident/project-build-budget.ts'
 import { prepareProjectDependencies, projectSuiteIdentity, type projectInstallAvailableBytes } from './project-build-dependencies.ts'
 import { parseBuildModeState, readBuildRetrySource } from '@neutronai/trident/build-mode-state.ts'
+import { pendingReviewCheckoutHead } from '@neutronai/trident/pending-review-checkout.ts'
 import { normalizeLegacyStoredExecutionPlan } from '@neutronai/trident/legacy-execution-compat.ts'
 import { assertProjectSnapshot, PROJECT_SNAPSHOT_SCHEMA } from './project-build-snapshot.ts'
 import { AttemptAccounting } from '@neutronai/trident/attempt-accounting.ts'
@@ -362,9 +363,11 @@ export async function prepareProjectBuild(input: InnerLoopInput, context: Projec
     if (branch.timed_out || (!branch.ok && branch.exit_code !== 1)) throw Error('Build branch existence is unknown')
     let start = run.base_sha
     if (!branch.ok) {
-      const source = readBuildRetrySource(context.store, saved)
-      if (source) {
-        const expected = source.state.checkpoint.head!
+      // Cleanup can remove a published branch even when this same run still has
+      // a pending review. Its own latest checkpoint outranks an imported retry.
+      const pendingHead = await pendingReviewCheckoutHead(context.store, saved, input.base_branch, context.runHost)
+      const expected = pendingHead ?? readBuildRetrySource(context.store, saved)?.state.checkpoint.head
+      if (expected) {
         // PR cleanup deletes a local branch only after proving origin holds it.
         // Re-fetch that branch and pin the observed commit before restoring it;
         // a moved remote must not be silently reset to the predecessor's head.
