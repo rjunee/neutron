@@ -60,7 +60,8 @@ export function combineTimelineSources(catalogue: PrCatalogue, observations: Dir
       cards.set(key, {
         key, repository: source.repository, url: /^https:\/\/github\.com\//.test(pr.url) ? pr.url : null,
         lifecycle: `PR ${pr.state.toLowerCase()} · created ${pr.createdAt}${closed === null ? '' : ` · closed ${new Date(closed).toISOString()}`} · envelope includes linked work`,
-        pr: pr.number, title: pr.title, start: ordered ? start : null, end: ordered ? end : null,
+        pr: pr.number, title: pr.title, createdAt: start !== null && start <= now ? start : null,
+        start: ordered ? start : null, end: ordered ? end : null,
         latestStart: validStamp(pr.updatedAt ?? null) ?? start, active, runs: [], segments: [], lanes: 1, gaps: [], events: [], phaseTotals: [],
         prState: prState === 'open' || prState === 'merged' || prState === 'closed' ? prState : 'unknown',
         workSignal: { state: freshCi && pr.ciPending ? pr.ciRunning === true ? 'running' : 'pending' : 'unknown',

@@ -68,6 +68,8 @@ export interface TimelineCard {
   lifecycle: string
   pr: number | null
   title: string
+  /** GitHub PR creation time; independent of the linked observed-work envelope. */
+  createdAt?: number | null
   start: number | null
   end: number | null
   latestStart: number | null
