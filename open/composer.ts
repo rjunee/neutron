@@ -651,7 +651,7 @@ export function buildTridentCodeBoardBinder(
 
 export interface BuildOpenGraphComposerOptions {
   /** Independent host/operator trust pin and challenged boot attestation. This
-   * capability must not be constructed from tenant-writable keys or receipts. */
+   * capability must not be constructed from installation-writable keys or receipts. */
   nativeHostRecoveryAuthority?: NativeHostRecoveryAuthority | undefined
   /** Override the process env (tests). Defaults to `process.env`. */
   env?: NodeJS.ProcessEnv
