@@ -1,4 +1,4 @@
-import { projectSuiteIdentity } from '../open/wiring/project-build-dependencies.ts'
+import { projectSuiteIdentity } from '@neutronai/open/wiring/project-build-dependencies.ts'
 
 // Use the publication reader's complete contract, including its clean-tree
 // requirement. Unknown inputs cannot establish a shared-host suite receipt.
