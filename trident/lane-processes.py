@@ -2,7 +2,7 @@
 """Linux lane ownership: random claims identify children; pidfds address signals.
 
 No registry is required: the claim travels in the initial exec environment, including
-socket-created children. PID/start/boot are only evidence of the owner's liveness.
+socket-created children. PID namespace/start/boot bind owner liveness evidence.
 Unclaimed processes are eligible only in a removed wf_* root of an explicitly named
 repository. Unsupported kernels and unreadable evidence refuse cleanup.
 """
@@ -31,14 +31,25 @@ def boot():
     return Path('/proc/sys/kernel/random/boot_id').read_text().strip()
 
 
+def pid_namespace():
+    # Numeric PIDs are meaningful only in this proc view. A host proc mount
+    # inherited inside a PID namespace cannot supply evidence for getpid().
+    visible_pids = next((line.split()[1:] for line in Path('/proc/self/status').read_text().splitlines()
+                         if line.startswith('NSpid:')), [])
+    if visible_pids != [str(os.getpid())]:
+        raise OSError('proc does not address the current PID namespace')
+    return os.readlink('/proc/self/ns/pid')
+
+
 def parse_claim(raw):
     try:
         c = json.loads(raw)
-        if (set(c) != {'id', 'pid', 'start', 'boot'} or
+        if (set(c) not in ({'id', 'pid', 'start', 'boot'}, {'id', 'pid', 'start', 'boot', 'pidns'}) or
                 not re.fullmatch(r'[0-9a-f]{32}', c['id']) or
                 type(c['pid']) is not int or c['pid'] <= 1 or
                 not isinstance(c['start'], str) or not c['start'].isdigit() or
-                not isinstance(c['boot'], str) or not c['boot']):
+                not isinstance(c['boot'], str) or not c['boot'] or
+                ('pidns' in c and (not isinstance(c['pidns'], str) or not re.fullmatch(r'pid:\[[0-9]+\]', c['pidns'])))):
             return None
         return c
     except (ValueError, TypeError, KeyError):
@@ -46,6 +57,14 @@ def parse_claim(raw):
 
 
 def owner_state(c):
+    try:
+        # A missing or recycled number in another namespace says nothing about
+        # this owner. Preserve inherited claims; the originating owner can
+        # still perform exact-claim teardown from its own process view.
+        if c['pidns'] != pid_namespace():
+            return 'unknown'
+    except (OSError, KeyError):
+        return 'unknown'
     try:
         current_boot = boot()
     except OSError:
@@ -224,7 +243,8 @@ def census():
 
 def run(command, report_path=None, report_token=None):
     # Publish the complete claim through exec before any build code can run.
-    c = {'id': uuid.uuid4().hex, 'pid': os.getpid(), 'start': birth(os.getpid())[0], 'boot': boot()}
+    c = {'id': uuid.uuid4().hex, 'pid': os.getpid(), 'start': birth(os.getpid())[0],
+         'boot': boot(), 'pidns': pid_namespace()}
     env = dict(os.environ, **{CLAIM: json.dumps(c, separators=(',', ':'))})
     cancelled = None
 
