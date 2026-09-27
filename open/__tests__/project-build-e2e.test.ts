@@ -2643,6 +2643,43 @@ test('shared dependency hardlink churn retains one host suite through publicatio
   expect({ suites, installs, measuredChurn }).toEqual({ suites: 1, installs: 1, measuredChurn: 1 })
 }, 120_000)
 
+for (const suppressBytecode of [true, false])
+test(`workspace Python import with bytecode suppression ${suppressBytecode} preserves the measured-input gate`, async () => {
+  const f = await fixture({ bunWorkspace: true })
+  await f.prepare()
+  const worktree = f.store.get(f.row.id)!.worktree!
+  const manifestPath = join(worktree, 'package.json')
+  const manifest = JSON.parse(await readFile(manifestPath, 'utf8'))
+  await writeFile(manifestPath, JSON.stringify({ ...manifest, dependencies: { 'fixture-app': 'workspace:*' } }))
+  await writeFile(join(worktree, 'app', '.gitignore'), '__pycache__/\n')
+  const module = join(worktree, 'app', 'observed.py')
+  await writeFile(module, 'VALUE = 17\n')
+  expect((await spawnCapture(['git', 'add', '.'], worktree)).ok).toBe(true)
+  expect((await spawnCapture(['git', 'commit', '-m', 'test: observed Python workspace'], worktree)).ok).toBe(true)
+  let suites = 0
+  const original = f.context.runSuite!
+  f.context.runSuite = async (...args) => {
+    suites++
+    const result = await original(...args)
+    const imported = await spawnCapture(['python3', ...(suppressBytecode ? ['-B'] : []), '-c',
+      'import importlib.util,sys; spec=importlib.util.spec_from_file_location("observed",sys.argv[1]); module=importlib.util.module_from_spec(spec); spec.loader.exec_module(module); print(module.VALUE)', module], worktree, { PYTHONDONTWRITEBYTECODE: '' })
+    expect(imported).toMatchObject({ ok: true, stdout: '17' })
+    return result
+  }
+  const observe = async () => {
+    const host = await createProjectBuildHost(await f.prepare())
+    const measured = await host.deps.measure()
+    if (measured.kind !== 'known') throw Error('expected measured Python workspace')
+    return host.deps.publicationSuite(measured.value)
+  }
+  expect(await observe()).toMatchObject(suppressBytecode ? { kind: 'known', findings: [] }
+    : { kind: 'unknown', detail: 'Suite inputs changed during host observation' })
+  expect(suites).toBe(1)
+  expect((await spawnCapture(['git', 'status', '--porcelain', '--untracked-files=all'], worktree)).stdout).toBe('')
+  expect(await observe()).toMatchObject({ kind: 'known', findings: [] })
+  expect(suites).toBe(suppressBytecode ? 1 : 2)
+}, 120_000)
+
 test('workspace scratch churn permits host receipt reuse while generated content changes require fresh proof', async () => {
   const f = await fixture({ bunWorkspace: true })
   await f.prepare()
