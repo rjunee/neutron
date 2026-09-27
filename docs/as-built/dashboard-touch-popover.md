@@ -34,3 +34,13 @@ focus. No synthetic click or forced click was used. A focused strict TypeScript
 check of the changed source and test passed. Full repository verification and
 served-site acceptance remain separate integration checks; this record does not
 claim that the hosted dashboard has been updated.
+
+Independent native review and a bounded root-run cross-model review approved
+the touch-event change. Both repository TypeScript checks passed on the original
+candidate. Integration now includes merged revision
+`520796435076461a65ab9a7f49c335a9062410a5`, whose namespace-aware process
+ownership fix is required for reliable shared-host validation. Composition
+changed only that fix's eight files; the reviewed popover and existing HTML
+renderer remained byte-for-byte unchanged. The complete local gate is still
+required on this composed candidate before publication; no receipt transfers
+from either constituent revision.
