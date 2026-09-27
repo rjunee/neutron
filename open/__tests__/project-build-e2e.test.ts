@@ -55,7 +55,7 @@ import { CodegenTaskNotFoundError, type CodegenOrchestrator } from '@neutronai/c
 import { buildTridentTerminator } from '@neutronai/trident/terminate.ts'
 import { projectInstallAvailableBytes } from '../wiring/project-build-dependencies.ts'
 import { afterAll, afterEach, beforeEach, expect, spyOn, test } from 'bun:test'
-import { chmod, copyFile, cp, mkdir, mkdtemp, readFile, readdir, realpath, rename, rm, stat, symlink, utimes, writeFile } from 'node:fs/promises'
+import { chmod, copyFile, cp, link, mkdir, mkdtemp, readFile, readdir, realpath, rename, rm, stat, symlink, utimes, writeFile } from 'node:fs/promises'
 import { tmpdir } from 'node:os'
 import { dirname, join } from 'node:path'
 import { fileURLToPath } from 'node:url'
@@ -89,6 +89,7 @@ import { TridentPhaseUsageStore } from '@neutronai/trident/phase-usage.ts'
 import { TridentAttemptLedger } from '@neutronai/trident/attempt-ledger.ts'
 import { createProjectBuildHost, type ProjectBuildOutcome } from '@neutronai/trident/project-build-host.ts'
 import { spawnCapture as captureProcess, type HostCommandResult } from '@neutronai/trident/git-mode.ts'
+import { runHostSuite } from '@neutronai/trident/host-suite.ts'
 import { gitRangeArgv } from '@neutronai/trident/git-range.ts'
 import { VERDICT_SCHEMA } from '@neutronai/trident/gates/result-contract.ts'
 import { taskLedgerPath, workContextPath } from '@neutronai/trident/production-host-effects.ts'
@@ -1537,12 +1538,17 @@ test('fake GitHub projection freshly resolves each exact ref and preserves missi
 
 test('codegen_cancel stops the actual host suite and its detached test child without approving the run', async () => {
   const f = await fixture()
+  const sibling = await fixture()
   // Exercise the production process runner, not the injected fixture host.
   delete f.context.runSuite
+  delete sibling.context.runSuite
   const options = await f.prepare()
+  const siblingOptions = await sibling.prepare()
   const cwd = options.workers.build.request.cwd
   const root = join(f.dir, 'suite-processes')
+  const siblingRoot = join(sibling.dir, 'suite-processes')
   await mkdir(root)
+  await mkdir(siblingRoot)
   const program = `import os, pathlib, signal, subprocess, sys, time
 root = pathlib.Path(sys.argv[1])
 role = sys.argv[2]
@@ -1552,25 +1558,46 @@ signal.signal(signal.SIGTERM, signal.SIG_IGN)
 deadline = time.monotonic() + 15
 count = 0
 while not (root / 'release').exists() and time.monotonic() < deadline:
+    requested = (root / (role + '.probe')).exists()
     count += 1
-    (root / (role + '.heartbeat')).write_text(str(count))
+    pending = root / (role + '.pending')
+    pending.write_text(str(count))
+    pending.replace(root / (role + '.heartbeat'))
+    if requested:
+        pending.write_text(str(count))
+        pending.replace(root / (role + '.ack'))
+        (root / (role + '.probe')).unlink()
     time.sleep(0.02)
 if child:
     child.wait()
 `
-  await writeFile(join(cwd, 'scripts', 'ci', 'cancellable-suite.py'), program)
-  await writeFile(join(cwd, 'scripts', 'ci', 'suite.sh'),
-    `#!/usr/bin/env bash\nexec python3 scripts/ci/cancellable-suite.py '${root.replaceAll("'", "'\\''")}' parent\n`)
+  for (const [suiteCwd, suiteRoot] of [[cwd, root], [siblingOptions.workers.build.request.cwd, siblingRoot]] as const) {
+    await writeFile(join(suiteCwd, 'scripts', 'ci', 'cancellable-suite.py'), program)
+    await writeFile(join(suiteCwd, 'scripts', 'ci', 'suite.sh'),
+      `#!/usr/bin/env bash\nexec python3 scripts/ci/cancellable-suite.py '${suiteRoot.replaceAll("'", "'\\''")}' parent\n`)
+  }
   const host = await createProjectBuildHost(options)
+  const targetSignal = new AbortController(), siblingSignal = new AbortController()
+  await sibling.store.update(sibling.row.id, { phase: 'task-build' })
   let settled = false
-  const running = host.run({ mode: 'implementation', start: 'fresh' }, new AbortController().signal)
+  const running = host.run({ mode: 'implementation', start: 'fresh' }, targetSignal.signal)
     .finally(() => { settled = true })
+  const siblingRunning = runHostSuite({
+    argv: ['python3', 'scripts/ci/cancellable-suite.py', siblingRoot, 'parent'],
+    cwd: siblingOptions.workers.build.request.cwd, timeoutMs: 20_000, signal: siblingSignal.signal,
+    isRunActive: () => sibling.store.get(sibling.row.id)?.phase === 'task-build',
+  })
+    .then(outcome => ({ outcome }), error => ({ error }))
+  const heartbeat = async (suiteRoot: string, role: string, suffix = 'heartbeat') => {
+    try {
+      const value = Number(await readFile(join(suiteRoot, `${role}.${suffix}`), 'utf8'))
+      return Number.isInteger(value) && value > 0 ? value : undefined
+    } catch { return undefined }
+  }
   // Ensure the original regression also cleans its deliberately resistant children.
   try {
-    await until(async () => {
-      try { return Number(await readFile(join(root, 'child.heartbeat'), 'utf8')) > 2 || undefined }
-      catch { return undefined }
-    })
+    await until(async () => (await heartbeat(root, 'child') ?? 0) > 2
+      && (await heartbeat(siblingRoot, 'child') ?? 0) > 2 || undefined, 400, 10)
     const cancel = routeCodegenCancel({ cancel: async ({ task_id }: { task_id: string }) => { throw new CodegenTaskNotFoundError(task_id) } } as unknown as CodegenOrchestrator,
       f.store, 'fixture-owner', buildTridentTerminator({ store: f.store }))
     const nativeLeases = f.admission.listLeases('liveChild')
@@ -1579,8 +1606,20 @@ if child:
     const outcome = await running
     expect(outcome.kind).not.toBe('merged')
     const before = await Promise.all(['parent', 'child'].map(role => readFile(join(root, `${role}.heartbeat`), 'utf8')))
+    // Preserve a full observation window for a surviving target descendant:
+    // the sibling can acknowledge sooner than that descendant's next tick.
     await Bun.sleep(100)
+    const siblingBefore = await Promise.all(['parent', 'child'].map(role => heartbeat(siblingRoot, role)))
+    expect(siblingBefore.every(value => value !== undefined)).toBe(true)
+    // Acknowledgement requires a heartbeat published after this post-cancel
+    // request. A stale file or a still-live wrapper cannot satisfy the control.
+    await Promise.all(['parent', 'child'].map(role => writeFile(join(siblingRoot, `${role}.probe`), '')))
+    await until(async () => {
+      const acks = await Promise.all(['parent', 'child'].map(role => heartbeat(siblingRoot, role, 'ack')))
+      return acks.every((value, index) => value !== undefined && value > siblingBefore[index]!) || undefined
+    }, 200, 10)
     expect(await Promise.all(['parent', 'child'].map(role => readFile(join(root, `${role}.heartbeat`), 'utf8')))).toEqual(before)
+    expect(sibling.store.get(sibling.row.id)?.phase).toBe('task-build')
     expect(f.store.get(f.row.id)?.phase).toBe('stopped')
     expect(f.admission.listLeases('liveChild')).toEqual(nativeLeases)
     expect(f.world.dispatches.some(dispatch => dispatch.role === 'review' || dispatch.role === 'fix')).toBe(false)
@@ -1588,10 +1627,13 @@ if child:
     expect(f.store.stageEvents(f.row.id).filter(event => event.stage === 'build-suite-receipt')
       .map(event => JSON.parse(event.meta!)).filter(record => record.receipt !== undefined)).toEqual([])
   } finally {
-    await writeFile(join(root, 'release'), '')
-    await running.catch(() => {})
+    targetSignal.abort(); siblingSignal.abort()
+    // Each host owns a distinct random process claim. Release is also a finite
+    // fallback if a mutant disables cancellation observation or signalling.
+    await Promise.all([root, siblingRoot].map(suiteRoot => writeFile(join(suiteRoot, 'release'), '')))
+    await Promise.all([running.catch(() => {}), siblingRunning])
   }
-}, 25_000)
+}, 30_000)
 
 test('fake GitHub projection freshly resolves each exact ref and preserves missing refs and pinned merge', async () => {
   const f = await fixture()
@@ -2570,6 +2612,35 @@ test(`prepared host suite receipt survives reconstruction and handles ${changed}
   expect(await host.deps.publicationSuite(measured.value)).toMatchObject({ kind: 'known' })
   expect(suites).toBe(changed === 'none' ? 1 : 2)
   expect(f.world.dispatches).toHaveLength(0)
+}, 120_000)
+
+test('shared dependency hardlink churn retains one host suite through publication', async () => {
+  const f = await fixture({ bunWorkspace: true })
+  const originalSuite = f.context.runSuite!
+  const originalInstall = f.context.runInstall!
+  let suites = 0, installs = 0, measuredChurn = 0
+  f.context.runInstall = Object.assign(async (...args: Parameters<typeof originalInstall>) => {
+    if (!args[0][2]!.includes('verify-workspace-deps.ts')) installs++
+    return originalInstall(...args)
+  }, { writesDiffOutput: true as const })
+  f.context.runSuite = async (...args) => {
+    suites++
+    const worktree = f.store.get(f.row.id)!.worktree!
+    const input = await realpath(Bun.resolveSync('fixture-dependency', join(worktree, 'app', 'check.ts')))
+    const before = await stat(input, { bigint: true }), bytes = await readFile(input)
+    const independent = join(f.dir, 'independent-install.js')
+    await link(input, independent)
+    expect((await stat(independent, { bigint: true })).ino).toBe(before.ino)
+    const result = await originalSuite(...args)
+    await rm(independent)
+    expect((await stat(input, { bigint: true })).ctimeNs).not.toBe(before.ctimeNs)
+    expect(await readFile(input)).toEqual(bytes)
+    measuredChurn++
+    return result
+  }
+  const outcome = await drive(f)
+  expect(outcome.kind, why(f, outcome)).toBe('merged')
+  expect({ suites, installs, measuredChurn }).toEqual({ suites: 1, installs: 1, measuredChurn: 1 })
 }, 120_000)
 
 test('workspace scratch churn permits host receipt reuse while generated content changes require fresh proof', async () => {

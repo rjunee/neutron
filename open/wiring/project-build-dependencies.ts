@@ -29,6 +29,7 @@ const quote = (value: string): string => `'${value.replaceAll("'", "'\\''")}'`
 
 const hostDirectory = fileURLToPath(new URL('../../', import.meta.url))
 const hostVerifier = join(hostDirectory, 'scripts/ci/verify-workspace-deps.ts')
+const hostInstalledTreeProbe = fileURLToPath(new URL('./project-build-installed-tree.py', import.meta.url))
 const RECEIPT_VERSION = 2
 
 // Run resolution in a new host-controlled process: Bun caches resolutions in a
@@ -39,7 +40,6 @@ const RECEIPT_VERSION = 2
 const RESOLUTION_PROBE = `
 const fs = require('node:fs');
 const path = require('node:path');
-const crypto = require('node:crypto');
 const root = fs.realpathSync(process.argv[1]);
 const observations = [];
 for (const manifestPath of JSON.parse(process.argv[2])) {
@@ -52,11 +52,10 @@ for (const manifestPath of JSON.parse(process.argv[2])) {
     catch { observations.push([manifestPath, dependency, null]); continue; }
     const actual = fs.realpathSync(target);
     if (!actual.startsWith(root + path.sep)) process.exit(3);
-    const stat = fs.statSync(actual);
-    observations.push([manifestPath, dependency, path.relative(root, actual), stat.dev, stat.ino, stat.size, stat.mtimeMs, stat.ctimeMs]);
+    observations.push([manifestPath, dependency, path.relative(root, actual)]);
   }
 }
-console.log(crypto.createHash('sha256').update(JSON.stringify(observations)).digest('hex'));
+console.log(JSON.stringify(observations));
 `
 
 async function workspaceManifests(worktree: string, workspaces: unknown[]): Promise<string[] | null> {
@@ -73,8 +72,29 @@ async function resolutionKey(worktree: string, workspaces: unknown[], bun: strin
   if (!manifests) return null
   const result = await spawnCapture([bun, '--config=/dev/null', '--no-env-file', '--eval', RESOLUTION_PROBE,
     worktree, JSON.stringify(manifests)], hostDirectory, undefined, 30_000)
-  const key = result.stdout.trim()
-  return result.ok && !result.timed_out && /^[a-f0-9]{64}$/.test(key) ? key : null
+  if (!result.ok || result.timed_out || result.stdout.length > 1024 * 1024) return null
+  // A successful process is not proof of a complete resolution transcript.
+  // Keep unavailable resolution explicit, including repositories without a manifest.
+  let observations: unknown
+  try { observations = JSON.parse(result.stdout) } catch { return null }
+  if (!Array.isArray(observations) || !observations.every(row => Array.isArray(row) && row.length === 3
+    && typeof row[0] === 'string' && typeof row[1] === 'string' && (row[2] === null || typeof row[2] === 'string'))) return null
+  const root = await realpath(worktree)
+  const paths = [...new Set(observations.flatMap(row => row[2] === null ? [] : [resolve(root, row[2])]))].sort()
+  const measured = new Map<string, string[]>()
+  const deadline = performance.now() + 5000
+  // Bound argv as well as the native observation. Optional unresolved packages
+  // remain explicit nulls; resolved entrypoints get the same confined byte read.
+  for (let offset = 0; offset < paths.length; offset += 64) {
+    const fields = await installedEntries(root, paths.slice(offset, offset + 64), deadline, spawnCapture)
+    for (let index = 0; index < fields.length; index += 12) {
+      if (fields[index + 7] !== 'f') return null
+      measured.set(fields[index]!, fields.slice(index + 1, index + 12))
+    }
+  }
+  if (paths.some(path => !measured.has(path))) return null
+  return digest(JSON.stringify(observations.map(row => [...row,
+    row[2] === null ? null : measured.get(resolve(root, row[2]))])))
 }
 
 /** The receipt is a host observation, never a tracked project file. Hash all
@@ -88,10 +108,15 @@ async function preparationKey(worktree: string, workspaces: unknown[], executabl
     'scripts/ci/verify-workspace-deps.ts'])
   const hash = createHash('sha256')
   const tool = await lstat(executable)
+  const pythonCommand = Bun.which('python3', { PATH: process.env.PATH ?? '' })
+  if (!pythonCommand) return null
+  const python = await realpath(pythonCommand), pythonTool = await lstat(python)
   hash.update(JSON.stringify([RECEIPT_VERSION, await realpath(worktree), head.stdout.trim(),
     process.platform, process.arch, process.version, Bun.version, executable,
     [tool.dev, tool.ino, tool.size, tool.mtimeMs, tool.ctimeMs], await readFile(hostVerifier, 'utf8'),
-    RESOLUTION_PROBE, '--frozen-lockfile', '--ignore-scripts']))
+    RESOLUTION_PROBE, await readFile(hostInstalledTreeProbe, 'utf8'),
+    [python, pythonTool.dev, pythonTool.ino, pythonTool.size, pythonTool.mtimeMs, pythonTool.ctimeMs],
+    '--frozen-lockfile', '--ignore-scripts']))
   for (const path of [...files].sort()) {
     const full = resolve(worktree, path)
     if (!full.startsWith(`${resolve(worktree)}${sep}`)) return null
@@ -103,9 +128,51 @@ async function preparationKey(worktree: string, workspaces: unknown[], executabl
   return hash.digest('hex')
 }
 
-/** A bounded native metadata walk avoids one JS filesystem round trip per file.
+/** The host helper pins ancestry and regular files before reading bytes. Its
+ * transient ctime checks catch in-read writes; only the saved regular-file key
+ * omits ctime, which also changes when another installation links a cache inode. */
+async function installedEntries(root: string, batch: string[], deadline: number,
+  run: typeof spawnCapture): Promise<string[]> {
+  const remaining = Math.floor(deadline - performance.now())
+  if (remaining <= 0) throw Error('deadline')
+  const workspace = await lstat(root)
+  if (!workspace.isDirectory()) throw Error('workspace-not-directory')
+  const python = Bun.which('python3', { PATH: process.env.PATH ?? '' })
+  if (!python) throw Error('missing-python')
+  const measured = await run([await realpath(python), '-I', '-S', hostInstalledTreeProbe,
+    root, String(workspace.dev), String(workspace.ino), JSON.stringify(batch), String(remaining)],
+    hostDirectory, { LC_ALL: 'C' }, remaining)
+  if (measured.timed_out) throw Error('probe-timeout')
+  if (!measured.ok) throw Error('probe-exit')
+  if (measured.stdout.length > 64 * 1024 * 1024) throw Error('output-limit')
+  if (!measured.stdout.endsWith('\0') || measured.stdout.includes('\uFFFD')) throw Error('invalid-output')
+  const fields = measured.stdout.split('\0')
+  fields.pop()
+  if (fields.length === 0 || fields.length % 12 !== 0) throw Error('invalid-fields')
+  for (let index = 0; index < fields.length; index += 12) {
+    const path = fields[index]!
+    if (!batch.some(base => path === base || path.startsWith(`${base}${sep}`))) throw Error('path-outside-batch')
+    if (!fields.slice(index + 1, index + 5).every(value => /^\d+$/.test(value))
+      || !fields.slice(index + 5, index + 7).every(value => /^-?\d+$/.test(value))
+      || !fields.slice(index + 10, index + 12).every(value => /^\d+$/.test(value))) throw Error('invalid-metadata')
+    const kind = fields[index + 7]
+    if (kind !== 'f' && kind !== 'd' && kind !== 'l') throw Error('unsupported-entry')
+    if (kind === 'f') {
+      if (!/^[a-f0-9]{64}$/.test(fields[index + 9]!)) throw Error('missing-content')
+      fields[index + 6] = '0'
+    } else if (fields[index + 9] !== '') throw Error('unexpected-content')
+    if (kind === 'd' && !path.slice(root.length + 1).split(sep).includes('node_modules')) {
+      fields[index + 4] = '0'
+      fields[index + 5] = '0'
+      fields[index + 6] = '0'
+    }
+  }
+  return fields
+}
+
+/** A bounded native byte/metadata walk avoids one JS filesystem round trip per file.
  * NUL fields preserve arbitrary whitespace; undecodable names refuse reuse.
- * find never follows links: the host validates their targets before measuring
+ * The helper never follows links: the host validates their targets before measuring
  * additional local roots, so an external tree is never traversed. */
 export async function projectInstalledTreeIdentity(worktree: string,
   run: typeof spawnCapture = spawnCapture): Promise<string | null> {
@@ -125,40 +192,15 @@ export async function projectInstalledTreeIdentity(worktree: string,
   let pending = [modules]
   const deadline = performance.now() + 5000
   while (pending.length > 0) {
-    const remaining = Math.floor(deadline - performance.now())
-    if (remaining <= 0) return refuse('deadline')
     const batch = pending.sort()
     pending = []
     covered.push(...batch)
-    const measured = await run(['find', '-P', ...batch, '-printf', '%p\\0%D\\0%i\\0%m\\0%s\\0%T@\\0%C@\\0%y\\0%l\\0'],
-      root, { LC_ALL: 'C' }, remaining)
-    if (measured.timed_out) return refuse('find-timeout')
-    if (!measured.ok) return refuse('find-exit')
-    if (measured.stdout.length > 64 * 1024 * 1024) return refuse('output-limit')
-    if (!measured.stdout.endsWith('\0') || measured.stdout.includes('\uFFFD')) return refuse('invalid-output')
-    const fields = measured.stdout.split('\0')
-    fields.pop()
-    if (fields.length === 0 || fields.length % 9 !== 0) return refuse('invalid-fields')
+    const fields = await installedEntries(root, batch, deadline, run)
     const links: string[] = []
-    for (let index = 0; index < fields.length; index += 9) {
+    for (let index = 0; index < fields.length; index += 12) {
       const path = fields[index]!
-      if (!batch.some(base => path === base || path.startsWith(`${base}${sep}`))) return refuse('path-outside-batch')
-      if (!fields.slice(index + 1, index + 5).every(value => /^\d+$/.test(value))
-        || !fields.slice(index + 5, index + 7).every(value => /^-?\d+(?:\.\d+)?$/.test(value))) return refuse('invalid-metadata')
       const kind = fields[index + 7]
       if (kind === 'l') links.push(path)
-      else if (kind !== 'f' && kind !== 'd') return refuse('unsupported-entry')
-      // Workspace links reach first-party directories where tests create and
-      // remove scratch entries. Their size/mtime/ctime describe that churn, not
-      // surviving inputs. Keep directory identity and permissions, every child,
-      // and all metadata inside installed trees (including nested node_modules).
-      const canonicalizeWorkspaceDirectory = kind === 'd'
-        && !path.slice(root.length + 1).split(sep).includes('node_modules')
-      if (canonicalizeWorkspaceDirectory) {
-        fields[index + 4] = '0'
-        fields[index + 5] = '0'
-        fields[index + 6] = '0'
-      }
     }
     hash.update(fields.join('\0') + '\0')
     // Resolve only links, in bounded groups; ordinary files require no JS stat.
@@ -174,7 +216,11 @@ export async function projectInstalledTreeIdentity(worktree: string,
   }
   if (performance.now() >= deadline) return refuse('deadline')
   return hash.digest('hex')
-  } catch { return refuse('filesystem-or-process-error') }
+  } catch (error) {
+    const reason = error instanceof Error && /^(deadline|probe-timeout|probe-exit|output-limit|invalid-output|invalid-fields|path-outside-batch|invalid-metadata|unsupported-entry|missing-content|unexpected-content|workspace-not-directory|missing-python)$/.test(error.message)
+      ? error.message : 'filesystem-or-process-error'
+    return refuse(reason)
+  }
 }
 
 /** Fresh host measurement for suite reuse. Unknown or dirty inputs never reuse
