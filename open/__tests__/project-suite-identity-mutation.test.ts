@@ -14,6 +14,43 @@ function imports(text: string, importer: string, subject?: string): string {
       ? subject : name.startsWith('.') ? resolve(dirname(importer), name) : Bun.resolveSync(name, importer)}${quote}`)
 }
 
+test('installed identity deadline mutations reject both false unavailability and unbounded acceptance', async () => {
+  const directory = await mkdtemp(join(tmpdir(), 'identity-deadline-mutants-'))
+  const subject = join(directory, 'dependencies.ts'), suite = join(directory, 'identity.test.ts')
+  try {
+    const prepared = imports(await readFile(modulePath, 'utf8'), modulePath)
+      .replace("const hostDirectory = fileURLToPath(new URL('../../', import.meta.url))", `const hostDirectory = ${JSON.stringify(root)}`)
+      .replace("const hostInstalledTreeProbe = fileURLToPath(new URL('./project-build-installed-tree.py', import.meta.url))", `const hostInstalledTreeProbe = ${JSON.stringify(helperPath)}`)
+    await writeFile(suite, imports(await readFile(identityTests, 'utf8'), identityTests, subject))
+    const run = async () => {
+      const child = Bun.spawn([process.execPath, 'test', suite, '-t', 'installed identity deadline'],
+        { cwd: root, stdout: 'pipe', stderr: 'pipe' })
+      const timer = setTimeout(() => child.kill(), 10_000)
+      try {
+        const [code, stdout, stderr] = await Promise.all([child.exited, new Response(child.stdout).text(), new Response(child.stderr).text()])
+        return { code, output: stdout + stderr }
+      } finally { clearTimeout(timer) }
+    }
+    await writeFile(subject, prepared)
+    const control = await run()
+    expect(control.code, control.output).toBe(0)
+    expect(control.output).toContain('3 pass')
+    for (const [find, replacement, failed] of [
+      ['export const PROJECT_INSTALLED_IDENTITY_TIMEOUT_MS = 30_000', 'export const PROJECT_INSTALLED_IDENTITY_TIMEOUT_MS = 5000', 'admits a complete slow walk'],
+      ["  if (performance.now() >= deadline) return refuse('deadline')\n  return hash.digest('hex')", "  return hash.digest('hex')", 'refuses complete output'],
+      ['installedEntries(root, batch, deadline, run)', 'installedEntries(root, batch, performance.now() + PROJECT_INSTALLED_IDENTITY_TIMEOUT_MS, run)', 'carries the remaining budget'],
+    ]) {
+      expect(prepared.split(find!)).toHaveLength(2)
+      await writeFile(subject, prepared.replace(find!, replacement!))
+      const mutant = await run()
+      expect(mutant.code, mutant.output).not.toBe(0)
+      expect(mutant.output).toContain(`(fail) installed identity deadline ${failed}`)
+      expect(mutant.output).toContain('error: expect(received)')
+      expect(mutant.output).not.toContain('SyntaxError')
+    }
+  } finally { await rm(directory, { recursive: true, force: true }) }
+}, 45_000)
+
 test('byte identity mutations preserve hardlink siblings and catch changed bytes and unsafe reads', async () => {
   const directory = await mkdtemp(join(tmpdir(), 'byte-identity-mutants-'))
   const subject = join(directory, 'dependencies.ts'), helper = join(directory, 'probe.py')
