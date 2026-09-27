@@ -53,3 +53,15 @@ integration gate is separate. The workspace dependency verifier passed. These ar
 checks, not evidence of a live host reboot or deployment restoration. Live
 preparation, signing-key provisioning, physical restart and dispatch acceptance
 remain separate operator-controlled deployment work.
+
+The first combined host gate executed all 1,725 declared test files and refused
+publication on two failing lanes. Three explicit migration-ledger expectations
+omitted migration 161; adding that ordinal preserved their exact-order, drift
+and skip assertions, and all 27 affected tests passed. The reaper startup timer
+fixture also invoked the real process-signalling sweep while polling a deadline.
+It now holds a local command stub until stop drainage, asserting immediate
+startup, the exact Python command, default cadence and timer clearing without
+signalling host processes. Its focused test passed; independent mutations that
+disabled immediate startup or changed the default cadence failed their semantic
+assertions. These necessary fixture repairs do not substitute for the final
+combined gate on the frozen repaired candidate.
