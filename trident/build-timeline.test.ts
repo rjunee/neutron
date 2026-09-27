@@ -95,6 +95,24 @@ const observation = (overrides: Partial<DirectObservation> = {}): DirectObservat
   ...overrides,
 })
 
+test('PR creation time stays independent of earlier work and unknown lifecycle endpoints', () => {
+  const source = catalogue()
+  source.repositories[0]!.prs[0]!.closedAt = null
+  source.repositories[0]!.prs[0]!.mergedAt = null
+  const cards = combineTimelineSources(source, [observation({ startedAt: at(5) })], [], at(40)).cards
+  expect(cards.find(card => card.key === 'example/open#2')).toMatchObject({ createdAt: at(20), start: at(5) })
+  expect(cards.find(card => card.key === 'example/open#1')).toMatchObject({ createdAt: at(1), start: null })
+  for (const createdAt of ['', 'invalid', iso(41), '1969-12-31T23:59:59Z']) {
+    source.repositories[0]!.prs[1]!.createdAt = createdAt
+    expect(combineTimelineSources(source, [observation()], [], at(40)).cards.find(card => card.key === 'example/open#2')!.createdAt).toBeNull()
+  }
+  source.repositories[0]!.prs[1]!.createdAt = '1970-01-01T00:00:00Z'
+  expect(combineTimelineSources(source, [], [], at(40)).cards.find(card => card.key === 'example/open#2')!.createdAt).toBe(0)
+  const directOnly = combineTimelineSources({ observedAt: at(40), repositories: [] }, [observation()], [], at(40)).cards[0]!
+  expect(directOnly.start).toBe(at(22))
+  expect(directOnly.createdAt).toBeUndefined()
+})
+
 test('real legacy PR sentinels stay separate run-only rows before SQLite group limiting', async () => {
   const dir = mkdtempSync(join(tmpdir(), 'timeline-sentinel-')); temporary.push(dir)
   const path = join(dir, 'project.db'); seedMigratedDb(path)
