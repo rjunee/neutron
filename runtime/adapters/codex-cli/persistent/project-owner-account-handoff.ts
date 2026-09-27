@@ -4,7 +4,7 @@ import { basename, dirname, isAbsolute, join, relative, sep } from 'node:path'
 import { isDeepStrictEqual } from 'node:util'
 import type { CodexOwnerBindingFacts } from './project-control-bootstrap.ts'
 import { assertOwnerScope, privatePath } from './project-owner-helper-protocol.ts'
-import { readCompletedOwnerRetirement, type CodexOwnerRetirementReceipt, type CodexOwnerResume } from './project-owner-retirement.ts'
+import { readCompletedOwnerRetirement, type CodexOwnerRetirementReceipt } from './project-owner-retirement-receipt.ts'
 import { readCrashedOwner } from './project-owner-crash-recovery.ts'
 import { nextOwnerDirectory } from './project-owner-generation.ts'
 
@@ -199,7 +199,9 @@ export function readAccountHandoff(locator: AccountHandoffLocator): AccountHando
 
 /** Only transcript bytes cross homes, never auth, configuration, or refresh
  * ownership. Interrupted partial writes remain fenced instead of overwritten. */
-export function stageAccountHandoff(locator: AccountHandoffLocator): CodexOwnerResume {
+export function stageAccountHandoff(locator: AccountHandoffLocator): {
+  predecessorDirectory: string; receipt: CodexOwnerRetirementReceipt; handoff: AccountHandoffLocator
+} {
   const handoff = readAccountHandoff(locator)
   for (const directory of [handoff.stateDirectory, dirname(handoff.rolloutPath)]) {
     let ancestor = handoff.target.codexHome

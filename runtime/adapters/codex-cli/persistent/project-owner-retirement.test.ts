@@ -4,6 +4,7 @@ import { tmpdir } from 'node:os'
 import { join } from 'node:path'
 import { helperIdentity } from './project-owner-helper-protocol.ts'
 import { assertOwnerProcessDead, nextOwnerDirectory, readCompletedOwnerRetirement, validateOwnerResume, type CodexOwnerRetirementReceipt } from './project-owner-retirement.ts'
+import { readCompletedOwnerRetirement as readReceiptEvidence } from './project-owner-retirement-receipt.ts'
 
 test('recorded live process refuses retirement recovery; its proven exit permits the same record', async () => {
   const child = Bun.spawn(['sleep', '30'], { stdout: 'ignore', stderr: 'ignore' })
@@ -38,6 +39,20 @@ test('completed generation preserves history and permits only its exact successo
     expect(() => readCompletedOwnerRetirement(dir)).toThrow('still live')
     child.kill(); await child.exited
     expect(readCompletedOwnerRetirement(dir)).toEqual(receipt)
+    expect(readCompletedOwnerRetirement).toBe(readReceiptEvidence)
+    // Each process-death assertion must stand alone; another dead process is
+    // not authority to resume while this native, terminal or helper is alive.
+    const live = helperIdentity()
+    for (const role of ['native', 'terminal', 'helper'] as const) {
+      const uncertain: CodexOwnerRetirementReceipt = { ...receipt,
+        ...(role === 'native' ? { native: { ...receipt.native, identity: live } } : { [role]: live }) }
+      writeFileSync(path, JSON.stringify(uncertain), { mode: 0o600 })
+      writeFileSync(join(dir, '.neutron-owner-authority.json'), JSON.stringify({ facts: receipt.facts, helper: uncertain.helper }), { mode: 0o600 })
+      expect(() => readReceiptEvidence(dir)).toThrow('still live')
+    }
+    writeFileSync(path, JSON.stringify(receipt), { mode: 0o600 })
+    writeFileSync(join(dir, '.neutron-owner-authority.json'), JSON.stringify({ facts: receipt.facts, helper: identity }), { mode: 0o600 })
+    expect(readReceiptEvidence(dir)).toEqual(receipt)
     const resume = { predecessorDirectory: dir, receipt }
     expect(() => validateOwnerResume(nextOwnerDirectory(receipt.facts), resume, dir, dir)).not.toThrow()
     expect(() => validateOwnerResume(dir, resume, dir, dir)).toThrow('predecessor')
