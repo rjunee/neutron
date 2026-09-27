@@ -70,3 +70,20 @@ fixture. Assertions and production behavior are unchanged. The focused host-suit
 run passed 26 tests; deliberately breaking the logger link failed its positive
 control, and restoration returned all 26 tests to green. Independent review
 approved this fixture correction. A corrected complete gate remains required.
+
+The corrected complete gate subsequently passed at clean source revision
+`76c9e96344dbb1d28e6c2b92983de14287dc82f2`:
+`python3 -B trident/process-test-isolation.py -- bash scripts/check-shared-host.sh`
+exited 0 under the ordinary host identity and private PID/proc containment.
+All 51 TypeScript configurations passed, including root and Trident. The coverage
+audit recorded 1,727 declared, Bun-discovered, assigned and executed files
+(1,491 general, 22 database, 43 device and 171 real-HTTP), across 18 settled lanes
+with zero failed lanes. It included the consuming project-build E2E and corrected
+report-fixture positive control. Source aggregate
+`a93fdd6b1bc58e628e1f95b38b7412398b71af1d24f68260a4dbbd668f4fae03`
+and clean HEAD were unchanged before and after. The full log SHA-256 is
+`f3231b803953ed934be54e63d54e1081674ddd44b74060b4bc9a60091656a56b`.
+Optional external-provider, PTY and system-manager cases explicitly skipped by
+the suite remain unverified by this receipt. This final receipt-only addition
+does not transfer local evidence to a different source identity; exact publication
+head CI, deployment and a fresh unattended live build remain separate gates.
