@@ -902,16 +902,24 @@ for (const phase of ['open', 'stat', 'read'] as const) {
       })
       const first = run(firstInput)
       let second: ReturnType<typeof run> | undefined
+      const realReadFile = fs.readFile
+      // A result read slower than the former 40 ms sampling window must still
+      // prove the second turn's completion and release, without more budget.
+      const delayedResult = spyOn(fs, 'readFile').mockImplementation((async (...args: Parameters<typeof fs.readFile>) => {
+        if (args[0] === f.input.request.result.path && f.commands.length === 2) await Bun.sleep(80)
+        return realReadFile(...args)
+      }) as typeof fs.readFile)
       try {
         await opening
         if (stop === 'caller') controller.abort()
         const result = await Promise.race([first, Bun.sleep(stop === 'deadline' ? 150 : 20).then(() => undefined)])
         second = run({ ...f.input, timeout_ms: 1000, request: { ...f.input.request, budget: { wall_ms: 1000 } } })
-        await Promise.race([second, Bun.sleep(40)])
+        // Completion owns the release receipt. Keep the first transcript I/O
+        // blocked while proving the next turn completes under its own budget.
+        expect(await second).toEqual({ kind: 'turn-ended' })
         expect(f.commands).toHaveLength(2)
         expect(releases).toBe(2)
         expect(result).toEqual({ kind: 'unknown', detail: expect.stringContaining('transcript could not be read') })
-        expect(await second).toEqual({ kind: 'turn-ended' })
         unblock()
         await fileClosed
         expect(lateStats).toBe(phase === 'open' ? 0 : 1)
@@ -923,6 +931,7 @@ for (const phase of ['open', 'stat', 'read'] as const) {
         await second
         await fileClosed
         probe.mockRestore()
+        delayedResult.mockRestore()
       }
     })
   }

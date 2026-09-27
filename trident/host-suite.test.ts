@@ -1,7 +1,7 @@
 import { expect, spyOn, test } from 'bun:test'
-import { mkdtemp, readFile, rm, symlink, writeFile } from 'node:fs/promises'
+import { mkdir, mkdtemp, readFile, rm, symlink, writeFile } from 'node:fs/promises'
 import { tmpdir } from 'node:os'
-import { join } from 'node:path'
+import { dirname, join } from 'node:path'
 import { fileURLToPath, pathToFileURL } from 'node:url'
 import { assertProcessTestIsolation } from './process-test-isolation.ts'
 
@@ -16,7 +16,11 @@ async function withReportedOwner<T>(options: { unknown?: boolean; interrupt?: bo
   consume: (run: typeof runHostSuite) => Promise<T>): Promise<T> {
   const dir = await mkdtemp(join(tmpdir(), 'suite-report-proof-'))
   try {
-    await symlink(fileURLToPath(new URL('./node_modules', import.meta.url)), join(dir, 'node_modules'))
+    // Resolve from the production module's location: workspace dependencies may
+    // live at the repository root rather than in trident's node_modules.
+    const logger = dirname(Bun.resolveSync('@neutronai/logger', dirname(fileURLToPath(import.meta.url))))
+    await mkdir(join(dir, 'node_modules', '@neutronai'), { recursive: true })
+    await symlink(logger, join(dir, 'node_modules', '@neutronai', 'logger'))
     await writeFile(join(dir, 'host-suite.ts'), await readFile(new URL('./host-suite.ts', import.meta.url), 'utf8'))
     await writeFile(join(dir, 'lane-processes.py'), `import importlib.util,json,os,signal,sys
 from pathlib import Path

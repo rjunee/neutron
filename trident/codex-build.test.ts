@@ -3180,10 +3180,11 @@ test('lane ownership reaches the real Codex shell policy', () => {
   const line = r.codexEnv.split('\n').find((value) => value.startsWith('NEUTRON_LANE_CLAIM='))
   expect(line).toBeDefined()
   const raw = line!.slice('NEUTRON_LANE_CLAIM='.length)
-  const claim = JSON.parse(raw) as { id: string; pid: number; start: string; boot: string }
+  const claim = JSON.parse(raw) as { id: string; pid: number; start: string; boot: string; pidns: string }
   expect(claim.id).toMatch(/^[0-9a-f]{32}$/)
   expect(claim.pid).toBeGreaterThan(1)
   expect(claim.start).toMatch(/^\d+$/)
+  expect(claim.pidns).toMatch(/^pid:\[\d+\]$/)
   expect(r.codexArgv).toContain(`shell_environment_policy.set.NEUTRON_LANE_CLAIM='${raw}'`)
 })
 
