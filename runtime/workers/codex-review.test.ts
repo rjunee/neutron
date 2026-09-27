@@ -78,6 +78,18 @@ if (mode === 'worker-usage') envelope.usage = {input_tokens:999,output_tokens:99
 if (mode === 'blocked') { envelope.kind='blocked'; delete envelope.result; envelope.on='cannot inspect revision'; }
 if (mode !== 'missing') writeFileSync(args[args.indexOf('-o')+1], mode === 'malformed' ? '{' : JSON.stringify({envelope}));
 writeFileSync(1, JSON.stringify({type:'thread.started',thread_id:args[1] === 'resume' ? args[2] : 'recorded-thread'})+'\\n');
+if (mode === 'zero-credits') writeFileSync(1, JSON.stringify({type:'token_count',rate_limits:{limit_id:'premium',primary:null,secondary:null,
+  credits:{has_credits:false,unlimited:false,balance:'0'},rate_limit_reached_type:null}})+'\\n');
+if (mode.startsWith('limit-')) {
+  const message = "You've hit your usage limit. Visit https://chatgpt.com/codex/settings/usage to purchase more credits or try again later.";
+  const event = mode === 'limit-quoted' ? {type:'item.completed',item:{type:'agent_message',text:message,error:{message}}}
+    : mode === 'limit-generic-error' ? {type:'error',message}
+    : {type:'turn.failed',error:{message:mode === 'limit-ambiguous' ? 'The server quoted: '+message : mode === 'limit-curly' ? message.replace("'",'’') : message}};
+  if (mode === 'limit-conflict') writeFileSync(1, JSON.stringify({type:'thread.started',thread_id:'other-thread'})+'\\n');
+  if (mode === 'limit-malformed') writeFileSync(1, '{bad json}\\n');
+  writeFileSync(1,JSON.stringify(event)+(mode === 'limit-partial' ? '' : '\\n'));
+  if (mode !== 'limit-completed') process.exit(mode === 'limit-zero-exit' ? 0 : 1);
+}
 if (mode !== 'no-completion') writeFileSync(1, JSON.stringify({type:mode==='turn-failed'?'turn.failed':'turn.completed',
   usage:['missing-usage','worker-usage'].includes(mode)?undefined:mode==='zero-usage'?{input_tokens:0,output_tokens:0,cached_input_tokens:0}:{input_tokens:17,output_tokens:3,cached_input_tokens:11}})+(mode==='no-newline'?'':'\\n'));
 if (mode==='duplicate-completion') writeFileSync(1, JSON.stringify({type:'turn.completed',usage:{input_tokens:17,output_tokens:3,cached_input_tokens:11}})+'\\n');
@@ -243,6 +255,28 @@ for (const mode of ['run_id', 'step_id', 'schema', 'payload', 'extra', 'missing'
     expect(await f.calls()).toHaveLength(1)
   })
 }
+
+test.each(['limit-exact', 'limit-curly'])('native provider %s is a request-scoped usage limit', async mode => {
+  const f = await fixture(mode)
+  expect(await f.run()).toMatchObject({ kind: 'failed', class: 'rate-limit' })
+  await expect(readFile(f.req.result.path)).rejects.toMatchObject({ code: 'ENOENT' })
+  expect(await f.calls()).toHaveLength(1)
+})
+
+test('zero purchased credits and null premium windows do not veto a valid review', async () => {
+  const f = await fixture('zero-credits')
+  expect(await f.run()).toMatchObject({ kind: 'completed', result: { verdict: 'APPROVE' } })
+})
+
+test.each(['limit-quoted', 'limit-generic-error', 'limit-ambiguous', 'limit-conflict', 'limit-malformed', 'limit-partial'])('unowned or ambiguous %s stays infrastructure failure', async mode => {
+  const f = await fixture(mode)
+  expect(await f.run()).toMatchObject({ kind: 'failed', class: 'infra' })
+})
+
+test.each(['limit-zero-exit', 'limit-completed'])('contradictory %s never becomes usage-limit authority', async mode => {
+  const f = await fixture(mode)
+  expect(await f.run()).toMatchObject({ kind: 'unknown' })
+})
 
 test('a blocked result remains blocked on resume', async () => {
   const f = await fixture('blocked')

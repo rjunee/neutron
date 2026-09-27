@@ -344,6 +344,7 @@ function projectReviewSource(input: ProjectReviewSourceOptions, purpose: 'review
       if (outcome.kind === 'refused') return unavailable(outcome.reason)
       // A worker block has no retryability evidence (it may be a rate limit).
       if (outcome.kind === 'blocked') return unavailable(outcome.on)
+      if (outcome.kind === 'failed' && outcome.class === 'rate-limit') return { ...identity, status: 'rate-limited', payload: { reason: 'provider usage limit for this review request' } }
       if (outcome.kind === 'failed' && outcome.class === 'infra') return { ...identity, status: 'deferred', payload: { reason: 'host runner infrastructure failure' } }
       throw Error(`Review seat ${seat.id}: ${outcome.kind} observation`)
     } catch { throw Error(`Review seat ${seat.id}: host dispatch or observation failed`) }

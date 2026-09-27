@@ -60,6 +60,25 @@ async function durableFixture() {
   return f
 }
 
+test('provider usage limit persists the required seat veto without a retry, including replacement sources', async () => {
+  const f = await durableFixture()
+  f.answer(async () => ({ kind: 'failed', class: 'rate-limit', detail: 'provider usage limit' }))
+  const source = f.source()
+  expect(await f.check(source)).toMatchObject({ kind: 'blocked', on: expect.stringContaining('rate-limited') })
+  expect(f.calls).toHaveLength(1)
+  await expect(source.retrySeat(source.seats[1]!, snapshot, 1)).rejects.toThrow('retry unavailable for rate-limited')
+  expect(await f.check(f.source())).toMatchObject({ kind: 'blocked', on: expect.stringContaining('rate-limited') })
+  expect(f.calls).toHaveLength(1)
+  expect(f.options.accounting.ledger.list(f.options.runId)).toHaveLength(1)
+})
+
+test('ordinary transport failure still consumes one bounded deferred retry', async () => {
+  const f = await durableFixture()
+  f.answer(async () => ({ kind: 'failed', class: 'infra', detail: 'connection closed' }))
+  expect(await f.check()).toMatchObject({ kind: 'blocked', on: expect.stringContaining('deferred') })
+  expect(f.calls).toHaveLength(2)
+})
+
 test('evidence-only reconciliation reuses completed seats and synthesis without dispatch', async () => {
   const f = await durableFixture()
   expect(await f.check()).toEqual({ kind: 'approve' })
