@@ -910,6 +910,60 @@ describe('the multi-seat credential service', () => {
     expect(spent?.used_percent).toBe(99.7)
   })
 
+  for (const entry of ['status', 'run'] as const) {
+    for (const evidence of ['healthy', 'absent', 'stale', 'pre-connect', 'capped', 'unauthorized', 'unauthorized-capped'] as const) {
+      test(`${entry} refreshes inactive seat: ${evidence}`, async () => {
+        let clock = NOW
+        const svc = newService(() => clock)
+        await svc.connectAccount(OWNER, subscriptionAuth())
+        await svc.connectAccount(OWNER, subscriptionAuth(undefined, 'acct-work'), { slot: 'work' })
+        const rotation = new SqliteCodexRotationStore(db)
+        svc.resolveActiveCodexHome(OWNER, 'proj')
+        rotation.setActiveSlot(OWNER, 'work', clock)
+        for (const slot of ['default', 'work']) rotation.setCooldown(OWNER, slot, {
+          cooling_until: NOW + 6 * 86_400_000,
+          cooling_reason: slot === 'default' && evidence.startsWith('unauthorized') ? 'unauthorized' : 'long-window',
+        })
+        if (evidence !== 'absent') writeRollout(codexHome, 'rollout-inactive.jsonl', [tokenCountLine({
+          used_percent: evidence.endsWith('capped') ? 99.9 : 5,
+          window_minutes: 10080,
+          ...(evidence === 'stale' ? { resets_at: Math.floor((NOW - 86_400_000) / 1000) } : {}),
+        })], evidence === 'pre-connect' ? NOW / 1000 - 60 : 1_800_000_000)
+        const read = () => entry === 'status'
+          ? svc.accountsView(OWNER).next?.slot
+          : svc.resolveActiveCodexHome(OWNER, 'proj')
+        // Same-minute reads cannot evade the existing per-seat throttle.
+        expect(read()).toBe(entry === 'status' ? 'work' : join(codexHome, 'accounts', 'work'))
+        clock += 5 * 60_000
+        const recovered = evidence === 'healthy'
+        expect(read()).toBe(entry === 'status'
+          ? (recovered ? 'default' : 'work')
+          : (recovered ? codexHome : join(codexHome, 'accounts', 'work')))
+        const inactive = rotation.listSlots(OWNER).find(s => s.slot === 'default')!
+        expect(inactive.cooling_until === null).toBe(recovered)
+        if (recovered) expect(inactive.usage.used_percent).toBe(5)
+        if (evidence.startsWith('unauthorized')) expect(inactive.cooling_reason).toBe('unauthorized')
+        expect(rotation.getActiveSlot(OWNER)).toBe(entry === 'run' && recovered ? 'default' : 'work')
+      })
+    }
+
+    test(`${entry} cools newly capped inactive seat before selecting`, async () => {
+      let clock = NOW
+      const svc = newService(() => clock)
+      await svc.connectAccount(OWNER, subscriptionAuth())
+      await svc.connectAccount(OWNER, subscriptionAuth(undefined, 'acct-work'), { slot: 'work' })
+      const rotation = new SqliteCodexRotationStore(db)
+      svc.resolveActiveCodexHome(OWNER, 'proj')
+      rotation.setActiveSlot(OWNER, 'work', clock)
+      rotation.setCooldown(OWNER, 'work', { cooling_until: NOW + 86_400_000, cooling_reason: 'long-window' })
+      writeRollout(codexHome, 'rollout-capped-inactive.jsonl', [tokenCountLine({ used_percent: 99.9, window_minutes: 10080 })], 1_800_000_000)
+      clock += 5 * 60_000
+      if (entry === 'status') expect(svc.accountsView(OWNER).next).toEqual({ slot: 'work', exhausted: true })
+      else expect(svc.resolveActiveCodexHome(OWNER, 'proj')).toBe(join(codexHome, 'accounts', 'work'))
+      expect(rotation.listSlots(OWNER).find(s => s.slot === 'default')?.cooling_reason).toBe('long-window')
+    })
+  }
+
   // MUTATION: delete the `setCooldown(..., null)` arm from `harvestSlot`, i.e.
   // go back to doing nothing when `signalToCooldown` returns null.
   //

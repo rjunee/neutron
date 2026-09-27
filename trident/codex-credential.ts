@@ -879,9 +879,9 @@ export class CodexCredentialService {
     const previousActive = this.rotation.getActiveSlot(owner_slug) ?? slots[0]?.slot ?? null
     if (previousActive === null) return null
 
-    // Harvest BEFORE selecting, so a seat that ran itself into its cap during the
-    // last run is already cooling by the time this run picks a seat.
-    this.harvestSlot(owner_slug, previousActive, slots.find((s) => s.slot === previousActive))
+    // Refresh the whole connected pool before selecting. Inactive seats can
+    // acquire newer usage evidence too; an old cooldown must not hide recovery.
+    for (const slot of slots) this.harvestSlot(owner_slug, slot.slot, slot)
 
     // SYNC THE SEAT THAT JUST RAN, NOT ONLY THE ONE ABOUT TO RUN. The CLI
     // refreshes `auth.json` during a run, so the bundle that just went stale in
@@ -1040,6 +1040,9 @@ export class CodexCredentialService {
       },
       now,
     )
+    // Usage can update the gauge, but cannot replace an authentication refusal
+    // with a finite quota timer (which would make it eligible after that timer).
+    if (current?.cooling_reason === 'unauthorized') return
     const cooldown = signalToCooldown(outcome, now)
     if (cooldown !== null) {
       this.rotation.setCooldown(owner_slug, slot, cooldown)
@@ -1072,7 +1075,6 @@ export class CodexCredentialService {
     const fresh = outcome.snapshot.windows.some((w) => !w.expired)
     if (!fresh) return
     if (current === undefined || current.cooling_until === null) return
-    if (current.cooling_reason === 'unauthorized') return
     this.rotation.setCooldown(owner_slug, slot, null)
     this.log('codex_rotation_uncooled', {
       slot,
@@ -1474,7 +1476,7 @@ export class CodexCredentialService {
    * as-of-the-last-run — a seat that capped itself an hour ago shows as cooling
    * when he opens the pane, instead of looking healthy until the next run
    * discovers otherwise. The scan is throttled to once a minute per seat
-   * (`HARVEST_MIN_INTERVAL_MS`), so polling costs one directory walk a minute.
+   * (`HARVEST_MIN_INTERVAL_MS`), so polling costs one directory walk per seat a minute.
    * Selection is NOT persisted here: reading status must not rotate the pool.
    */
   accountsView(owner_slug: OwnerHandle): {
@@ -1483,11 +1485,8 @@ export class CodexCredentialService {
   } {
     const synced = this.syncSlots(owner_slug)
     const active = this.rotation.getActiveSlot(owner_slug)
-    const incumbent = active ?? synced[0]?.slot ?? null
-    if (incumbent !== null) {
-      this.harvestSlot(owner_slug, incumbent, synced.find((s) => s.slot === incumbent))
-    }
-    // Re-read: the harvest may have just cooled (or released) the incumbent, and
+    for (const slot of synced) this.harvestSlot(owner_slug, slot.slot, slot)
+    // Re-read: the harvest may have just cooled (or released) any seat, and
     // reporting the pre-harvest picture would show the owner the state we had
     // one statement ago.
     const slots = this.rotation.listSlots(owner_slug)
