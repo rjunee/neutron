@@ -146,7 +146,8 @@ class LaneProcesses(unittest.TestCase):
         self.assertIsNone(lanes.environment_claim(unclaimed.pid))
         # Prove the fallback would apply if this repository were configured.
         self.assertTrue(lanes.deleted_root(unclaimed.pid, [str(self.root)], []))
-        claim = {'id': 'c' * 32, 'pid': os.getpid(), 'start': lanes.birth(os.getpid())[0], 'boot': 'previous-boot'}
+        claim = {'id': 'c' * 32, 'pid': os.getpid(), 'start': lanes.birth(os.getpid())[0],
+                 'boot': 'previous-boot', 'pidns': lanes.pid_namespace()}
         claimed, claimedfd = self.child(claim)
         report = lanes.sweep(grace=.02)
         self.assertIn(claimed.pid, report['reaped'])
@@ -196,6 +197,80 @@ class LaneProcesses(unittest.TestCase):
         lanes.sweep(finished=c, grace=.02)
         self.assertTrue(select.select([fd], [], [], 0)[0])
         self.assertFalse(select.select([strangerfd], [], [], 0)[0])
+
+    def test_foreign_pid_namespace_and_unreadable_namespace_preserve_children(self):
+        _, c = self.owner()
+        # Even a locally absent/reused PID is not evidence about a foreign owner.
+        foreign = dict(c, pidns='pid:[0]', start='0')
+        child, fd = self.child(foreign)
+        self.assertEqual(lanes.owner_state(foreign), 'unknown')
+        report = lanes.sweep(grace=.02)
+        self.assertGreater(report['unknown'], 0)
+        self.assert_survives(child, fd, 'foreign PID namespace', report)
+        observed = lanes.census()
+        foreign_lane = next(lane for lane in observed['lanes'] if lane['id'] == foreign['id'])
+        self.assertEqual(foreign_lane['owner'], 'unknown')
+        self.assertIn(child.pid, [process['pid'] for process in foreign_lane['processes']])
+        with patch.object(lanes, 'pid_namespace', side_effect=FileNotFoundError()):
+            self.assertEqual(lanes.owner_state(c), 'unknown')
+        for status in ('Name:\tfixture\n', f'NSpid:\t0\t{os.getpid()}\n', 'NSpid:\t0\n'):
+            with patch.object(lanes.Path, 'read_text', return_value=status):
+                with self.assertRaises(OSError):
+                    lanes.pid_namespace()
+        # Namespace uncertainty limits independent liveness inference, not
+        # the explicit teardown authority for this exact random claim.
+        report = lanes.sweep(finished=foreign, grace=.02)
+        self.assertIn(child.pid, report['reaped'])
+        self.assertTrue(select.select([fd], [], [], 0)[0])
+
+    def test_claim_without_pid_namespace_remains_visible_and_unknown(self):
+        _, c = self.owner()
+        del c['pidns']
+        c['start'] = '0'
+        child, fd = self.child(c)
+        report = lanes.sweep(grace=.02)
+        self.assertGreater(report['unknown'], 0)
+        self.assert_survives(child, fd, 'claim predating namespace evidence', report)
+        self.assertEqual(lanes.environment_claim(child.pid), c)
+        observed = lanes.census()
+        legacy = next(lane for lane in observed['lanes'] if lane['id'] == c['id'])
+        self.assertEqual(legacy['owner'], 'unknown')
+        self.assertIn(child.pid, [process['pid'] for process in legacy['processes']])
+
+    def test_private_proc_admits_but_real_ancestor_proc_refuses_namespace_evidence(self):
+        code = "import importlib.util,sys; s=importlib.util.spec_from_file_location('lanes',sys.argv[1]); m=importlib.util.module_from_spec(s); s.loader.exec_module(m); print(m.pid_namespace())"
+        for private_proc in (False, True):
+            with self.subTest(private_proc=private_proc):
+                command = ['bwrap', '--unshare-user', '--uid', str(os.getuid()), '--gid', str(os.getgid()),
+                           '--unshare-pid', '--die-with-parent', '--bind', '/', '/']
+                if private_proc:
+                    command += ['--proc', '/proc']
+                observed = subprocess.run([*command, sys.executable, '-B', '-c', code, lanes.__file__],
+                                          capture_output=True, text=True, timeout=5)
+                if private_proc:
+                    self.assertEqual(observed.returncode, 0, observed.stderr)
+                    self.assertRegex(observed.stdout, r'^pid:\[[0-9]+\]\n$')
+                else:
+                    self.assertNotEqual(observed.returncode, 0)
+                    self.assertIn('proc does not address the current PID namespace', observed.stderr)
+
+    def test_mint_works_when_foreign_uid_init_namespace_is_unreadable(self):
+        original_readlink = lanes.os.readlink
+        def protected_init(path, *args, **kwargs):
+            if str(path) == '/proc/1/ns/pid':
+                raise PermissionError('foreign UID init namespace')
+            return original_readlink(path, *args, **kwargs)
+        receipt = self.root / 'minted-claim'
+        code = "import os,sys; from pathlib import Path; Path(sys.argv[1]).write_text(os.environ['NEUTRON_LANE_CLAIM'])"
+        with patch.object(lanes.os, 'readlink', side_effect=protected_init):
+            # Positive control: this fixture really denies the formerly required read.
+            with self.assertRaises(PermissionError):
+                lanes.os.readlink('/proc/1/ns/pid')
+            self.assertEqual(lanes.run([sys.executable, '-B', '-c', code, str(receipt)]), 0)
+        minted = lanes.parse_claim(receipt.read_text())
+        self.assertIsNotNone(minted)
+        self.assertEqual(minted['pidns'], lanes.pid_namespace())
+        self.assertEqual(lanes.owner_state(minted), 'live')
 
     def test_deleted_worktree_root_only(self):
         repo = self.root / 'repo'
@@ -314,15 +389,16 @@ class LaneProcesses(unittest.TestCase):
         self.assertFalse(select.select([fd], [], [], 0)[0])
 
     def test_claim_schema_refuses_unusable_identity_and_liveness(self):
-        valid = {'id': 'a' * 32, 'pid': 2, 'start': '12', 'boot': 'boot-proof'}
+        valid = {'id': 'a' * 32, 'pid': 2, 'start': '12', 'boot': 'boot-proof', 'pidns': 'pid:[123]'}
         self.assertEqual(lanes.parse_claim(json.dumps(valid)), valid)
-        for field, value in [('id', 'broken'), ('pid', 0), ('pid', True), ('start', 'invalid'), ('boot', '')]:
+        for field, value in [('id', 'broken'), ('pid', 0), ('pid', True), ('start', 'invalid'), ('boot', ''),
+                             ('pidns', ''), ('pidns', 123), ('pidns', 'mnt:[123]')]:
             self.assertIsNone(lanes.parse_claim(json.dumps(dict(valid, **{field: value}))))
         self.assertIsNone(lanes.parse_claim('{}'))
         self.assertIsNone(lanes.parse_claim('invalid'))
 
     def test_self_and_nonprocess_entries_are_not_targets(self):
-        c = {'id': 'a' * 32, 'pid': 2, 'start': '0', 'boot': 'old'}
+        c = {'id': 'a' * 32, 'pid': 2, 'start': '0', 'boot': 'old', 'pidns': lanes.pid_namespace()}
         with patch.object(lanes.os, 'listdir', return_value=[str(os.getpid())]), patch.object(lanes, 'environment_claim', return_value=c), patch.object(lanes, 'owner_state', return_value='dead'), patch.object(lanes.signal, 'pidfd_send_signal') as send:
             lanes.sweep(grace=0)
         send.assert_not_called()
@@ -541,7 +617,8 @@ class Census(unittest.TestCase):
     wait_file = LaneProcesses.wait_file
 
     def claimed(self, claim_id='a' * 32):
-        claim = {'id': claim_id, 'pid': os.getpid(), 'start': lanes.birth(os.getpid())[0], 'boot': lanes.boot()}
+        claim = {'id': claim_id, 'pid': os.getpid(), 'start': lanes.birth(os.getpid())[0],
+                 'boot': lanes.boot(), 'pidns': lanes.pid_namespace()}
         marker = f'ready-{len(self.children)}'
         child = self.launch([sys.executable, '-c', f"from pathlib import Path; import time; Path({marker!r}).write_text('ready'); time.sleep(60)"],
                             cwd=self.root, env=dict(os.environ, NEUTRON_LANE_CLAIM=json.dumps(claim),

@@ -19,11 +19,14 @@ Herdr's explicit socket spawn environment. Ordinary wrapper completion reaps
 only that claim. The gateway independently sweeps at startup and every fifteen
 minutes; it does not depend on a dead build executing its own cleanup.
 
-The owner PID, kernel start time and boot ID supply liveness evidence. The
-random claim supplies ownership identity. Missing owner processes, exited
-owners and mismatched process incarnations establish death; unreadable evidence
-preserves children. Signals address opened pidfds, never a PID pattern or a
-previously recorded numeric PID.
+The owner PID, PID namespace, kernel start time and boot ID supply liveness
+evidence. The random claim supplies ownership identity. Within the owner's PID
+namespace, missing owner processes, exited owners and mismatched process
+incarnations establish death. A foreign or unreadable PID namespace, a proc
+mount addressing another namespace, or an older claim without namespace evidence
+preserves children as unknown. Claims remain inherited across namespace entry;
+the originating owner retains exact-claim teardown authority. Signals address
+opened pidfds, never a PID pattern or a previously recorded numeric PID.
 
 For older unclaimed processes, the fallback is restricted to a kernel-unlinked
 cwd beneath an absent `.claude/worktrees/wf_*` root in a configured repository.
@@ -38,6 +41,12 @@ repository all refuse cleanup. A deleted subdirectory alone is insufficient.
 - [x] A broker-created child outside the owner's process tree is reaped after
   owner death, while another live lane's child survives the same sweep.
 - [x] Normal teardown cannot revoke another claim; unknown liveness refuses.
+- [x] A real composer startup in a private PID namespace preserves its inherited
+  live parent-namespace claim. The same consuming project/composer invocation
+  passes without a claim; same-namespace dead-owner cleanup still terminates its
+  children. Verify: `bun test trident/lane-processes.test.ts` (including the
+  `open/__tests__/project-build-e2e.test.ts` and `route-slot-coverage.test.ts`
+  consuming pair).
 - [x] PID reuse cannot redirect a signal to a successor; TERM precedes KILL.
 - [x] Removed-root cleanup preserves live roots, recreated roots, unrelated
   repositories, live store claims, and directories literally ending in the
