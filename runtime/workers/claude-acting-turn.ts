@@ -11,6 +11,9 @@ import type { ReplSession } from '../adapters/claude-code/persistent/repl-sessio
 import { projectTrailerStep, type ProjectActingTurn } from './project-runners.ts'
 import { bindNativeChildWorkspace, nativeChildCensusKnown, ownsNativeChildWorkspace, type NativeChildWorkspace } from './native-child-workspace.ts'
 
+export type ClaudeNativeDispatchEvidence = { kind: 'submission-started' | 'not-submitted' } |
+  { kind: 'child-bound'; nativeAgentId: string }
+
 /** Host-owned launch observation, bound to this exact live session. The host must
  * replace this binding when the session is replaced; never derive it from a request.
  * The child must come from HerdrHost, whose submitLine uses herdrCall via its RPC. */
@@ -25,6 +28,9 @@ export interface ClaudeActingSession {
   /** Ends the chat-only preparation exemption immediately before the first
    * possible submission; it does not release the durable child lease. */
   onDispatchSubmitted?: () => void
+  /** Synchronous durable writer bound by composition to the original request,
+   * session and generation. A failed write must prevent subsequent actuation. */
+  onNativeDispatchEvidence?: (event: ClaudeNativeDispatchEvidence) => void
 }
 
 const toolRank: Record<ToolGrant, number> = { none: 0, 'read-only': 1, edit: 2, 'edit-and-run': 3 }
@@ -56,6 +62,7 @@ interface SubagentObservation {
   readonly rateLimited?: boolean
   /** Unique child transcript proves the complete request and provider identity. */
   readonly bound?: boolean
+  readonly nativeAgentId?: string
 }
 
 async function childOwnsRequest(path: string, agentId: string, sessionId: string, request: BoundedWorkRequest): Promise<boolean> {
@@ -104,7 +111,7 @@ async function observeSubagents(directory: string, description: string, request:
     join(directory, `agent-${children[0]}.jsonl`), children[0]!, sessionId, request)
   const bound = children.length === 1 && await childOwnsRequest(
     join(directory, `agent-${children[0]}.jsonl`), children[0]!, sessionId, request)
-  return { directory: 'readable', metaFiles, matched, rateLimited, bound }
+  return { directory: 'readable', metaFiles, matched, rateLimited, bound, ...(bound ? { nativeAgentId: children[0]! } : {}) }
 }
 
 type DispatchConsumption = 'consumed' | 'not-consumed' | 'unreadable'
@@ -187,6 +194,8 @@ export function createClaudeActingTurn(binding: ClaudeActingSession, clock: Obse
   const transcript = sessionJsonlPath(session.sessionId, session.cwd, binding.projects_dir)
   const subagents = join(transcript.slice(0, -'.jsonl'.length), 'subagents')
   const actingTurn: ProjectActingTurn = async ({ conversation, request, spec, timeout_ms, deadline_ms, signal }) => {
+    let submitted = false
+    try {
     const refuse = (detail: string) => ({ kind: 'refused' as const, reason: 'capability-unsupported' as const, detail })
     if (conversation.provider !== 'anthropic') return refuse(`Claude acting turn refuses provider ${conversation.provider}.`)
     if (conversation.project_id !== project_id || conversation.topic_id !== topic_id) return refuse('Project conversation does not match the bound Claude session.')
@@ -225,8 +234,15 @@ export function createClaudeActingTurn(binding: ClaudeActingSession, clock: Obse
     // The late-acquired slot releases itself, and checks the deadline before any
     // actuation. Racing acquisition must never dispatch after the caller times out.
     let readingConsumption = false
-    let submitted = false
     let releaseTurn: (() => void) | undefined
+    let recordedNativeId: string | undefined
+    const recordBoundChild = (seen: SubagentObservation) => {
+      if (!binding.onNativeDispatchEvidence || !seen.nativeAgentId) return
+      if (recordedNativeId && recordedNativeId !== seen.nativeAgentId) throw new Error('Native child identity changed during dispatch observation')
+      if (recordedNativeId) return
+      binding.onNativeDispatchEvidence?.({ kind: 'child-bound', nativeAgentId: seen.nativeAgentId })
+      recordedNativeId = seen.nativeAgentId
+    }
     const observe = async () => {
       let yieldDispatch: (() => void) | undefined
       const readOnly = !request.writable && toolRank[request.tools] <= toolRank['read-only']
@@ -260,6 +276,7 @@ export function createClaudeActingTurn(binding: ClaudeActingSession, clock: Obse
         if (expired()) return beforeDispatchExpired()
         binding.onDispatchSubmitted?.()
         submitted = true
+        binding.onNativeDispatchEvidence?.({ kind: 'submission-started' })
         await child.submitLine!(dispatch, stopped)
         const dispatchDeadline = Math.min(deadline, clock.now() + DISPATCH_TIMEOUT_MS)
         let accepted = false
@@ -269,6 +286,9 @@ export function createClaudeActingTurn(binding: ClaudeActingSession, clock: Obse
             const trailer = await stat(request.result.path)
             if (trailer.isFile()) {
               if (projectTrailerStep(await readFile(request.result.path, 'utf8'), request) !== 'not-current-step') {
+                if (binding.onNativeDispatchEvidence) {
+                  recordBoundChild(await observeSubagents(subagents, `${request.role}: ${request.step_id}`, request, session.sessionId))
+                }
                 return { kind: 'turn-ended' as const }
               }
             } else {
@@ -278,6 +298,7 @@ export function createClaudeActingTurn(binding: ClaudeActingSession, clock: Obse
             if ((error as NodeJS.ErrnoException).code !== 'ENOENT') throw error
           }
           seen = await observeSubagents(subagents, `${request.role}: ${request.step_id}`, request, session.sessionId)
+          recordBoundChild(seen)
           if (seen.rateLimited) return { kind: 'blocked' as const, on: 'Claude child stopped at the provider rate limit (HTTP 429).' }
           // Terminal acknowledgement, parent consumption, and description-only
           // metadata cannot transfer ownership. A uniquely bound reader or
@@ -342,6 +363,11 @@ export function createClaudeActingTurn(binding: ClaudeActingSession, clock: Obse
       ])
     } finally {
       timer.abort()
+    }
+    } finally {
+      // The inner deadline controller is aborted first. A late acquisition can
+      // only release its slot; it cannot submit after this receipt is written.
+      if (!submitted) binding.onNativeDispatchEvidence?.({ kind: 'not-submitted' })
     }
   }
   actingTurn.observeUsage = request => observeClaudeChildUsage(subagents, session.sessionId, request)
