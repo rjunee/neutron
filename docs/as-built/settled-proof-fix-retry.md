@@ -60,7 +60,25 @@ Final integrated local receipt:
 - Final fixture typing corrections preserve all refusal controls without casts
   or readonly mutation. The consuming focused rerun passed 13 cases and 209
   assertions; the binding fixture passed one case and 11 assertions.
-- This final narrative is the only addition after the measured local gate.
-  Required CI must pass on the publication head. Deployment and a fresh live
+- Required CI must pass on the publication head. Deployment and a fresh live
   proof-only retry remain unverified; neither this receipt nor the earlier
   unattended single-build merge demonstrates this new importer in production.
+
+Required layering CI subsequently caught a runtime import cycle between the
+checkpoint parser and settlement helper. The helper now accepts the owner's
+canonical parser, bound to the original run and terminal-source validation,
+instead of importing it at runtime. Its type-only state import remains. No
+parser is duplicated, and eligibility predicates and evidence reads are unchanged.
+
+- `bash scripts/ci/depcruise.sh` reproduced the one cycle before this repair,
+  then passed with 3,147 modules and 8,592 dependencies. The eight existing
+  baseline violations and layering configuration were not changed.
+- The focused command above passed again: 13 tests, 209 assertions, including
+  the current-worker binding fixture and consuming retry cases.
+- `bunx tsc -p <config> --noEmit` passed for `tsconfig.json`,
+  `trident/tsconfig.json` and `open/tsconfig.json`; `git diff --check` passed.
+- The full integrated suite was not repeated for this dependency-only repair.
+  The earlier semantic mutation results apply to the unchanged eligibility
+  surface; required CI must still pass on the final publication head.
+- Independent Astra delta review and bounded root Claude Opus review approved
+  the identical canonical-parser binding and unchanged refusal semantics.

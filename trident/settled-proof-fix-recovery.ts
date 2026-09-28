@@ -4,7 +4,7 @@ import { readdirSync } from 'node:fs'
 import { isDeepStrictEqual as equal } from 'node:util'
 import type { BoundedWorkRequest } from '@neutronai/runtime/bounded-work.ts'
 import type { ResumeCheckpoint } from './build-run.ts'
-import { parseBuildModeState, type BuildModeState } from './build-mode-state.ts'
+import type { BuildModeState } from './build-mode-state.ts'
 import type { TridentRun, TridentRunStore } from './store.ts'
 import { evidenceReader } from './settled-review-recovery.ts'
 import { briefIntegrity } from './gates/brief-integrity.ts'
@@ -39,7 +39,7 @@ const approves = (value: unknown): boolean => {
  * pre-existing failure is deliberately irrelevant. The original red suite and
  * terminal checkpoint remain immutable. This import buys fresh proof and review. */
 export function settledProofFixRecovery(store: TridentRunStore, run: TridentRun,
-  state: BuildModeState): ProofFixBindings | null {
+  state: BuildModeState, parseState: (meta: string | null) => BuildModeState): ProofFixBindings | null {
   try {
     const c = state.checkpoint
     const fix = c.pending?.recovery
@@ -58,10 +58,10 @@ export function settledProofFixRecovery(store: TridentRunStore, run: TridentRun,
     const modes = events.filter(event => event.stage === 'build-mode-state')
     // These are the immediate construction sites, not a search for an older good state.
     if (modes.length !== 7) return null
-    const planning = parseBuildModeState(modes[0]!.meta, run, true).checkpoint.pending
+    const planning = parseState(modes[0]!.meta).checkpoint.pending
     if (planning?.phase !== 'plan' || !planning.recovery) return null
     const [building, built, reviewing, rejected, latest] = modes.slice(-5)
-      .map(event => parseBuildModeState(event.meta, run, true))
+      .map(event => parseState(event.meta))
     const { pending: _pending, ...settled } = c
     if (!equal(latest, state) || !equal(rejected!.checkpoint, settled)
       || built!.checkpoint.stage !== 'built' || built!.checkpoint.head !== c.head

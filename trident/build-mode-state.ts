@@ -124,7 +124,8 @@ export function retryModeSource(store: TridentRunStore, prior: TridentRun, seen 
   // build may retry publication/review only when its host checkpoint records an
   // empty validated plan. Legacy/partial builds cannot establish that fact.
   if (checkpoint.head === null) return null
-  const proofFix = checkpoint.pending?.phase === 'fix' ? settledProofFixRecovery(store, prior, state) : null
+  const proofFix = checkpoint.pending?.phase === 'fix'
+    ? settledProofFixRecovery(store, prior, state, meta => parseBuildModeState(meta, prior, true)) : null
   if (proofFix) {
     // The old run still failed G042. Only this new import view retires the settled
     // reservation and charges its consumed fix round; no approval or proof crosses.
