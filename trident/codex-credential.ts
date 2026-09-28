@@ -1120,6 +1120,13 @@ export class CodexCredentialService {
     if (!shouldHarvestBack(diskRefresh, storedRefresh)) return
     const validated = validateCodexSubscriptionAuth(onDisk, this.now)
     if (!validated.ok || validated.normalized === undefined) return
+    // Freshness cannot authorize a different account, or establish an unknown
+    // identity. Explicit connect/adopt owns custody changes; harvest only refreshes.
+    const storedAccount = readAccountId(storedPlaintext)
+    if (storedAccount === null || readAccountId(onDisk) !== storedAccount) {
+      this.log('codex_credential_harvest_refused', { service, reason: 'account_identity_unconfirmed' })
+      return
+    }
     // Fire-and-forget: the resolver is synchronous by contract (the orchestrator
     // calls it at fire time) and a failed re-encrypt must not fail a run — the
     // stored copy simply stays stale until the next resolve tries again.

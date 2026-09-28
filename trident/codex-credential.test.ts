@@ -563,6 +563,53 @@ describe('one ChatGPT account cannot occupy two seats', () => {
   })
 })
 
+describe('harvest account identity', () => {
+  for (const slot of ['default', 'work', 'project'] as const) {
+    test.each(['foreign', 'duplicate', 'missing-disk', 'missing-stored', 'missing-both', 'same'])(`${slot}: %s identity preserves custody and grant metadata`, async (identity) => {
+      const svc = newService()
+      const other = JSON.parse(subscriptionAuth())
+      other.tokens.account_id = 'other-account'
+      await svc.connectAccount(OWNER, subscriptionAuth())
+      await svc.connectAccount(OWNER, JSON.stringify(other), { slot: 'work' })
+      const project = slot === 'project' ? 'alpha' : ''
+      if (project) await svc.connect(OWNER, subscriptionAuth(), { scope: 'project', project_id: project })
+      const service = slot === 'work' ? 'codex-acct-work' : CODEX_CREDENTIAL_SERVICE
+      const home = project ? codexProjectHome(codexHome, project) : svc.slotHome(slot)
+      const original = JSON.parse(slot === 'work' ? JSON.stringify(other) : subscriptionAuth())
+      const refreshed = JSON.parse(JSON.stringify(original))
+      refreshed.tokens.access_token = 'new-synthetic-access'
+      refreshed.last_refresh = '2026-09-24T00:00:00.000Z'
+      if (identity === 'foreign') refreshed.tokens.account_id = 'foreign-account'
+      if (identity === 'duplicate') refreshed.tokens.account_id = slot === 'work' ? 'a' : 'other-account'
+      if (identity === 'missing-disk' || identity === 'missing-both') delete refreshed.tokens.account_id
+      if (identity === 'missing-stored' || identity === 'missing-both') delete original.tokens.account_id
+      await store.set(OWNER, { service, plaintext: JSON.stringify(original), scope: project ? 'project' : 'global',
+        project_id: project, label: 'Preserved finite grant', expires_at: '2999-01-01T00:00:00.000Z' })
+      const before = store.resolve(OWNER, project, service)!.plaintext
+      const metadata = store.getMeta(OWNER, project, service)
+      const disk = JSON.stringify(refreshed)
+      writeFileSync(codexAuthPath(home), disk)
+      if (slot === 'work') new SqliteCodexRotationStore(db).setActiveSlot(OWNER, slot, Date.now())
+      const persist = spyOn(store, 'set')
+      try {
+        expect(svc.resolveActiveCodexHome(OWNER, project || 'review-project')).toBe(home)
+        await new Promise(resolve => setTimeout(resolve, 0))
+        const after = store.resolve(OWNER, project, service)!.plaintext
+        if (identity === 'same') {
+          expect(persist).toHaveBeenCalled()
+          expect(JSON.parse(after)).toEqual({ tokens: refreshed.tokens, last_refresh: refreshed.last_refresh })
+          expect(store.getMeta(OWNER, project, service)).toMatchObject({ label: metadata!.label, expires_at: metadata!.expires_at })
+        } else {
+          expect(persist).not.toHaveBeenCalled()
+          expect(after).toBe(before)
+          expect(store.getMeta(OWNER, project, service)).toEqual(metadata)
+        }
+        expect(readMaterializedAuth(home)).toBe(disk)
+      } finally { persist.mockRestore() }
+    })
+  }
+})
+
 describe('project directory ownership', () => {
   test('native owner never resolves a global seat; exact project connection is the positive control', async () => {
     const svc = newService()

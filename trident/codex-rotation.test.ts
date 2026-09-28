@@ -1217,7 +1217,7 @@ describe('the multi-seat credential service', () => {
     const workHome = join(codexHome, 'accounts', 'work')
     // 'work' ran itself into its weekly cap AND refreshed its bundle on disk.
     writeRollout(workHome, 'rollout-spent.jsonl', [tokenCountLine({ used_percent: 99.8, window_minutes: 10080 })], 1_800_000_000)
-    const refreshed = subscriptionAuth('2026-08-17T09:00:00.000Z')
+    const refreshed = subscriptionAuth('2026-08-17T09:00:00.000Z', 'acct-work')
     writeFileSync(codexAuthPath(workHome), refreshed)
 
     // The run rotates AWAY from 'work' to the healthy first seat…
