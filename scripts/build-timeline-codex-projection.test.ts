@@ -20,6 +20,24 @@ test('malformed valid JSON roots and payloads preserve coverage, while blank lin
   }
 })
 
+test('malformed nested field contents never enter retained evidence and failed PR creates retain no output', async () => {
+  const nested = { opaque: 'PRIVATE PROMPT AND OUTPUT' }
+  const receipts = [command(['bun', 'test'], { cwd: nested }), command(['bun', 'test'], { id: nested }),
+    command(['bun', 'test'], { status: nested }), command(['bun', 'test'], { exit_code: nested }),
+    row('turn_context', { turn_id: nested, model: nested }),
+    row('event_msg', { type: 'task_complete', turn_id: nested, started_at: nested, completed_at: nested }),
+    row('token_usage_record', { thread_id: 'session-1', turn_id: 'turn-1', turn_token_usage: { input_tokens: nested, output_tokens: 3, cached_input_tokens: 0 } }),
+    row('token_usage_record', { thread_id: nested, turn_id: nested, turn_token_usage: nested }),
+    command(['gh', 'pr', 'create'], { exit_code: 1, stdout: 'https://github.com/private/repository/pull/4' }),
+    command(['gh', 'pr', 'create'], { status: 'running', stdout: 'https://github.com/private/repository/pull/4' })]
+  for (const receipt of receipts) {
+    const source = [...initial, receipt], projected = project(source)
+    expect(await importCodexOperations(projected, options)).toEqual(await importCodexOperations(source, options))
+    expect(projected.join('\n')).not.toContain('PRIVATE')
+    expect(projected.join('\n')).not.toContain('private/repository')
+  }
+})
+
 test('receipt projection preserves exact observations and coverage for each command grammar, including refusal controls', async () => {
   for (const [argv, extra] of [
     [['bun', 'test', 'private-selector.test.ts'], {}], [['npm', 'test'], {}], [['pnpm', 'test'], {}], [['yarn', 'test'], {}],
@@ -32,7 +50,7 @@ test('receipt projection preserves exact observations and coverage for each comm
     [['bash', '-lc', 'MODE=1 gh pr merge 7 -R example/project'], {}],
     [['gh', 'pr', 'merge', '7'], {}], [['gh', 'pr', 'create'], { stdout: 'a mention https://github.com/example/project/pull/9' }],
     [['bash', '-lc', 'bun test; echo PRIVATE'], {}], [['echo', 'PRIVATE BODY'], {}], [null, {}],
-    [['bun', 'test'], { id: null }], [['bun', 'test'], { status: 'running' }],
+    [['bun', 'test'], { id: null }], [['bun', 'test'], { status: 'running' }], [['bun', 'test'], { status: ['completed'] }],
   ] as Array<[unknown, object]>) {
     const source = [...initial, command(argv, extra)]
     const projected = project(source)

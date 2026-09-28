@@ -9,6 +9,8 @@ boundaries, model context, exact per-turn usage and required PR evidence. Full
 command output, test selectors, PR bodies and prompt/context text are discarded.
 Malformed records retain compact markers; usage regression and unknown attribution
 keep their existing semantics. Older bounded checkpoints are compacted on replay.
+Wrong-type nested values in scalar receipt fields are normalized without retaining
+their contents; failed or incomplete PR-create records retain no output URL.
 
 The 1 GiB source, 128 MiB receipt journal, 8 MiB line and one-million-record limits
 are unchanged. An oversized legacy checkpoint still refuses before projection.

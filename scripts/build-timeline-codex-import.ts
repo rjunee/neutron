@@ -107,6 +107,8 @@ function directLink(args: string[], item: Obj, allowed: Set<string>): Link | nul
  * a later exact registration can replay the same native receipts. */
 export function projectCodexReceipt(line: string): string | null {
   const malformed = '{"type":"turn_context","payload":null}'
+  const stringField = (value: unknown) => typeof value === 'string' ? value : null
+  const numberField = (value: unknown) => typeof value === 'number' ? value : null
   if (!line.trim()) return ''
   let r: unknown
   try { r = JSON.parse(line) } catch { return malformed }
@@ -117,13 +119,13 @@ export function projectCodexReceipt(line: string): string | null {
   let payload: Obj
   if (r.type === 'session_meta') {
     const spawn = object(p.source) && object(p.source.subagent) && object(p.source.subagent.thread_spawn) ? p.source.subagent.thread_spawn : null
-    payload = { id: p.id, ...(spawn ? { source: { subagent: { thread_spawn: { parent_thread_id: spawn.parent_thread_id } } } } : {}) }
-  } else if (r.type === 'turn_context') payload = { turn_id: p.turn_id, model: p.model }
+    payload = { id: stringField(p.id), ...(spawn ? { source: { subagent: { thread_spawn: { parent_thread_id: stringField(spawn.parent_thread_id) } } } } : {}) }
+  } else if (r.type === 'turn_context') payload = { turn_id: stringField(p.turn_id), model: stringField(p.model) }
   else if (r.type === 'token_usage_record') {
-    const usage = object(p.turn_token_usage) ? { input_tokens: p.turn_token_usage.input_tokens,
-      output_tokens: p.turn_token_usage.output_tokens, cached_input_tokens: p.turn_token_usage.cached_input_tokens } : null
-    payload = { thread_id: p.thread_id, turn_id: p.turn_id, turn_token_usage: usage }
-  } else if (p.type === 'task_complete') payload = { type: p.type, turn_id: p.turn_id, started_at: p.started_at, completed_at: p.completed_at }
+    const usage = object(p.turn_token_usage) ? { input_tokens: numberField(p.turn_token_usage.input_tokens),
+      output_tokens: numberField(p.turn_token_usage.output_tokens), cached_input_tokens: numberField(p.turn_token_usage.cached_input_tokens) } : null
+    payload = { thread_id: stringField(p.thread_id), turn_id: stringField(p.turn_id), turn_token_usage: usage }
+  } else if (p.type === 'task_complete') payload = { type: p.type, turn_id: stringField(p.turn_id), started_at: numberField(p.started_at), completed_at: numberField(p.completed_at) }
   else if (!object(p.item) || p.item.type !== 'CommandExecution') payload = { type: 'item_completed' }
   else {
     const item = p.item, args = argv(item.command), classification = args && classify(args)
@@ -145,13 +147,17 @@ export function projectCodexReceipt(line: string): string | null {
           classification.label === 'Shared-host validation' ? ['bash', 'scripts/check-shared-host.sh'] : ['bun', 'test']
       }
     }
-    const stdout = typeof item.stdout === 'string' && /^https:\/\/github\.com\/[\w.-]+\/[\w.-]+\/pull\/[1-9]\d*$/.test(item.stdout.trim()) ? item.stdout.trim() : undefined
-    payload = { type: p.type, thread_id: p.thread_id, turn_id: p.turn_id,
-      ...(classification ? { started_at_ms: p.started_at_ms, completed_at_ms: p.completed_at_ms } : {}),
-      item: { type: item.type, id: item.id, command, ...(classification ? { cwd: item.cwd,
-        status: item.status, exit_code: item.exit_code, ...(args?.[0] === 'gh' && args[2] === 'create' ? { stdout } : {}) } : {}) } }
+    const status = ['completed', 'failed'].includes(String(item.status)) ? String(item.status) : null
+    const usable = typeof p.thread_id === 'string' && typeof p.turn_id === 'string' && typeof item.id === 'string' && !!item.id &&
+      stamp(p.started_at_ms) && stamp(p.completed_at_ms) && p.completed_at_ms >= p.started_at_ms && status !== null
+    const stdout = usable && item.exit_code === 0 && typeof item.stdout === 'string' && /^https:\/\/github\.com\/[\w.-]+\/[\w.-]+\/pull\/[1-9]\d*$/.test(item.stdout.trim()) ? item.stdout.trim() : undefined
+    payload = { type: p.type, thread_id: stringField(p.thread_id), turn_id: stringField(p.turn_id),
+      ...(classification ? { started_at_ms: numberField(p.started_at_ms), completed_at_ms: numberField(p.completed_at_ms) } : {}),
+      item: { type: item.type, id: stringField(item.id), command, ...(classification ? { cwd: stringField(item.cwd),
+        status,
+        exit_code: numberField(item.exit_code), ...(args?.[0] === 'gh' && args[2] === 'create' ? { stdout } : {}) } : {}) } }
   }
-  return JSON.stringify({ type: r.type, ...(r.type === 'turn_context' ? { timestamp: r.timestamp } : {}), payload })
+  return JSON.stringify({ type: r.type, ...(r.type === 'turn_context' ? { timestamp: stringField(r.timestamp) } : {}), payload })
 }
 
 export async function importCodexOperations(lines: AsyncIterable<string> | Iterable<string>, options: CodexImportOptions): Promise<{ observations: DirectPhaseObservation[]; coverage: CodexImportCoverage }> {
