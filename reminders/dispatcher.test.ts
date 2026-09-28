@@ -510,15 +510,18 @@ describe('buildReminderDispatcher — degrade routes are visible at warn', () =>
   test('compose throws → warn names route=compose_failed and the cause', async () => {
     const cap = captureWarns()
     try {
+      const intent = 'pay the rent'
       const outbound = recordingOutbound()
       const llm: ReminderLlm = { compose: async () => { throw new Error('substrate down') } }
       const d = buildReminderDispatcher({ outbound, llm })
-      await d.dispatch(makeReminder({ message: 'pay the rent' }))
+      await d.dispatch(makeReminder({ message: intent }))
       const hit = cap.lines.find((l) => l.includes('event=nudge_degraded'))
       expect(hit).toBeDefined()
       expect(hit!).toContain('route=compose_failed')
       expect(hit!).toContain('substrate down')
-      expect(hit!).not.toContain('rent')
+      // The reason includes a stack with the checkout path. Check the stored
+      // intent itself; a path segment can coincidentally contain one of its words.
+      expect(hit!).not.toContain(intent)
     } finally {
       cap.restore()
     }
