@@ -1140,9 +1140,6 @@ export function buildOpenGraphComposer(
       generalAuthorityPath: joinPath(owner_home, '.neutron-general-codex-owner.json'),
       ...codexCredentialService.resolveGeneralOwnerCredential(asOwnerHandle(owner_handle), retainedHome), env,
       projectWorkspace: codexWorkspaceFor(null) }))
-    const codexOwnerProjects = (await projectSettingsStore.list(project_slug))
-      .filter(project => resolveModelProvider(project.id).provider === 'openai-codex')
-      .map(project => project.id)
     // O6 — NOTICE-FAMILY + RECOVERED-REPLY sinks for the owner's WARM conversational
     // substrate (`cc-agent-*`). The persistent REPL fires four DI seams on the
     // rising edge of otherwise-invisible states — a mid-turn API 5xx dead turn, a
@@ -1339,7 +1336,6 @@ export function buildOpenGraphComposer(
       ...conversationalProviderCtx,
       providerResolver,
       startCodexOwner: (projectId, spec) => codexOwnerBindings.start(projectId, spec),
-      codexOwnerProjects,
       ...(liveAgentNoticeSinks !== undefined ? { liveAgentNoticeSinks } : {}),
       ...(backgroundNoticeSinks !== undefined ? { backgroundNoticeSinks } : {}),
       ...(liveAgentRecoveredReplySink !== undefined
@@ -1433,7 +1429,7 @@ export function buildOpenGraphComposer(
     // spawns a fresh `cc-dispatch-*` REPL per turn via the SAME factory. The
     // turn is CANCELLABLE (`buildCancellableDispatchTurn`): a `/dispatch stop` or
     // a watchdog reap actually terminates the subprocess. Gated on the same
-    // credential availability as Trident (no credential → unregistered; no flag).
+    // Claude credential availability (no credential → unregistered; no flag).
     // Work Board Phase 2b — the dispatch board binder. The canonical
     // `workBoardStore` is constructed later (it needs `appWsRegistry`), so the
     // dispatch service reaches it through this late-bound holder (same pattern
@@ -2540,11 +2536,9 @@ export function buildOpenGraphComposer(
       })
     const tridentCodeChatCommandFilter = buildTridentCodeChatCommandFilter({
       resolve_context: (input) => {
-        // No credential → no substrate → the tick loop can never advance a run
-        // (`tridentFireInnerWorkflow` is null on an LLM-less boot). Returning null
-        // makes the filter STILL claim `/code` and answer honestly "unavailable"
-        // rather than writing a row that would sit un-driven forever. `/code` is
-        // never silently handed to the model.
+        // This legacy command requires the Claude credential pool. Returning
+        // null keeps its explicit unavailable reply; native project builds use
+        // the project-aware board admission and launcher.
         if (llmPool === null) return null
         return {
           store: tridentCodeRunStore,
@@ -6224,8 +6218,7 @@ export function buildOpenGraphComposer(
         : null
 
     // Layer B (SPEC WAVE 3.5) — the periodic orchestrator context-reset policy.
-    // Only wired when the live-agent substrate exists (an LLM-less boot has NO
-    // warm `cc-agent-*` sessions to sweep, so there is nothing to reset). Every
+    // Wired with the live dispatcher; an empty warm pool is a no-op. Every
     // tick sweeps the owner's warm orchestrator pool; a session whose post-compact
     // transcript grew ≥ 2 MB since its last reset is idle-gated `/clear`-ed, and
     // its scope is emitted on the SAME reset bus the `/reset` command uses so the
@@ -7544,12 +7537,12 @@ export function buildOpenGraphComposer(
         },
       },
       // The typed project launcher starts the host driver and persists outcomes
-      // in inner_result for the outer loop. Credential-free boots omit this bag.
+      // in inner_result for the outer loop. Keep it available before the first
+      // native project is configured; admission checks its provider credentials.
       // The on_run_terminal
       // observer fires Skill Forge's auto-skillify audit (parity gap #5) on every
-      // terminal run — the audit drops non-`done` runs. Wired only on the live
-      // (dispatch) path; an LLM-less box never advances a run to terminal, so
-      // there is nothing to skillify.
+      // terminal run — the audit drops non-`done` runs. Credential refusal
+      // happens at admission before a build can reach this terminal observer.
       ...(tridentFireInnerWorkflow !== null
         ? {
             trident: {

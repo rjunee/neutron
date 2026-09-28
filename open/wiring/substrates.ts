@@ -61,7 +61,7 @@ export interface WiredSubstrates {
   /** Onboarding is complete: stop helper admission and retire its owned worker. */
   retireSetup: () => Promise<void>
   retireLegacyBackground: (projectIds: readonly string[]) => Promise<void>
-  /** Warm live-chat substrate (`cc-agent-*`, tool-bridge on); null LLM-less. */
+  /** Live-chat dispatcher; available with a native owner binding even before a project selects it. */
   liveAgentSubstrate: Substrate | null
   /** Build a live-chat substrate pinned to one project for lazy REPL creation. */
   makeProjectLiveAgentSubstrate: (project_id: string) => Substrate | null
@@ -241,12 +241,14 @@ export function wireSubstrates(ctx: OpenWiringContext): WiredSubstrates {
       })
     : null
 
-  // Dedicated WARM conversational substrate for post-onboarding live chat
-  // turns (no `ephemeral`; keyed per-dispatch on metering_context).
+  // Keep the shared intake alive when native owners can be admitted later.
+  // Provider selection and project credentials are checked at dispatch, not
+  // against the boot inventory. Pinned factories still refuse unavailable
+  // providers; constructing this dispatcher never starts an owner.
   const makeLiveAgentSubstrate = (projectIdResolver?: () => string): LlmCallSubstrate | null =>
     (conversationalAvailable || ctx.startCodexOwner !== undefined
-      && ((ctx.providerResolver?.(projectIdResolver?.(), 'conversation')?.provider ?? ctx.provider) === 'openai-codex'
-        || projectIdResolver === undefined && (ctx.codexOwnerProjects?.length ?? 0) > 0))
+      && (projectIdResolver === undefined
+        || (ctx.providerResolver?.(projectIdResolver(), 'conversation')?.provider ?? ctx.provider) === 'openai-codex'))
       ? buildLlmCallSubstrate({
           ...anthropicPoolArg,
           substrate_instance_id: `cc-agent-${owner_handle}`,

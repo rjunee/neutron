@@ -1154,20 +1154,38 @@ describe('wireSubstrates — on-demand helpers', () => {
     expect(admitted).toEqual([undefined, 'general'])
   })
 
-  test('owner Codex binding availability preserves credential-less Claude and admits selected Codex', async () => {
-    const { ctx } = makeCtx({ llmPool: null, startCodexOwner: () => cannedHandle('native-owner'),
-      providerResolver: projectId => ({ provider: projectId === 'codex-project' ? 'openai-codex' : 'anthropic', source: 'project' }) })
+  test('first Codex selection after boot reaches shared intake; credentialless Claude and revoked grants refuse', async () => {
+    let selected = false
+    let granted = true
+    const admitted: (string | undefined)[] = []
+    const { ctx, captured } = makeCtx({ llmPool: null, startCodexOwner: projectId => {
+      if (!granted) throw new Error('Project credential revoked')
+      admitted.push(projectId)
+      return cannedHandle('native-owner')
+    }, providerResolver: projectId => ({ provider: selected && projectId === 'codex-project' ? 'openai-codex' : 'anthropic', source: 'project' }) })
     const wired = wireSubstrates(ctx)
-    expect(wired.liveAgentSubstrate).toBeNull()
+    expect(wired.liveAgentSubstrate).not.toBeNull()
+    expect(admitted).toEqual([])
+    expect(wired.llmCallSubstrate).toBeNull()
+    expect(wired.utilitySubstrate).toBeNull()
+    expect(wired.reminderComposeSubstrate).toBeNull()
+    expect(wired.makeProjectLiveAgentSubstrate('codex-project')).toBeNull()
     expect(wired.makeProjectLiveAgentSubstrate('claude-project')).toBeNull()
-    const codex = wired.makeProjectLiveAgentSubstrate('codex-project')
-    expect(codex).not.toBeNull()
-    const events = []
-    for await (const event of codex!.start(SESSIONLESS_SPEC).events) events.push(event)
+    const spec = { ...SESSIONLESS_SPEC, metering_context: { conversationProjectId: 'codex-project' } }
+    const unavailable = await Array.fromAsync(wired.liveAgentSubstrate!.start(spec).events)
+    expect(unavailable).toContainEqual(expect.objectContaining({ kind: 'error', code: 'no_credentials', retryable: false }))
+    selected = true
+    expect(wired.makeProjectLiveAgentSubstrate('codex-project')).not.toBeNull()
+    const events = await Array.fromAsync(wired.liveAgentSubstrate!.start(spec).events)
     expect(events.at(-1)).toMatchObject({ kind: 'completion', substrate_instance_id: 'native-owner' })
-    const inventoried = wireSubstrates({ ...ctx, codexOwnerProjects: ['codex-project'] })
-    expect(inventoried.liveAgentSubstrate).not.toBeNull()
-    expect(inventoried.makeProjectLiveAgentSubstrate('claude-project')).toBeNull()
+    expect(admitted).toEqual(['codex-project'])
+    granted = false
+    expect(() => wired.liveAgentSubstrate!.start(spec)).toThrow('Project credential revoked')
+    selected = false
+    const switchedBack = await Array.fromAsync(wired.liveAgentSubstrate!.start(spec).events)
+    expect(switchedBack).toContainEqual(expect.objectContaining({ kind: 'error', code: 'no_credentials' }))
+    expect(admitted).toEqual(['codex-project'])
+    expect(captured).toEqual([])
   })
 
   test('LLM-less: warm substrates null, prewarm skipped (settled true), factories throw', () => {
