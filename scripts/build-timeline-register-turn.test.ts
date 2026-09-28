@@ -39,7 +39,9 @@ test('manual active registration reaches the actual authenticated dashboard only
     expect(imported.observations).toHaveLength(1)
     expect(imported.observations[0]!.source.parentSessionId).toBe(child ? 'parent-1' : undefined)
     await appendChangedPhaseObservations(options.observations, imported.observations)
-    const handler = createTimelineHandler({ username: 'viewer', password: 'fixture', read: timelineSourceReader({ observations: options.observations, databases: [] }) })
+    const catalogue = options.config + '.catalogue'
+    await writeFile(catalogue, JSON.stringify({ observedAt: Date.now(), repositories: [] }))
+    const handler = createTimelineHandler({ username: 'viewer', password: 'fixture', read: timelineSourceReader({ catalogue, observations: options.observations, databases: [] }) })
     const response = await handler(new Request('http://localhost/api/timeline', { headers: { authorization: `Basic ${Buffer.from('viewer:fixture').toString('base64')}` } }))
     expect(response.status).toBe(200)
     const text = await response.text(), data = JSON.parse(text)
