@@ -21,6 +21,11 @@ fail. Both mutations were reverted and the focused suites rerun successfully.
 The changed-file purity scan is silent; the full-tree local scan reports
 pre-existing baseline findings and the linked worktree metadata path.
 
+Publication timing deviation: draft PR #1380 was opened before the required
+shared-host gate while its admission lock was held by another change. The draft
+must remain unready until the exact candidate passes that gate and review. No
+deployment followed publication. Subsequent pushes require the gate to be green.
+
 This change supplies a manual registration seam. It does not intercept native
 dispatch, discover new rollout/config sources, emit active task intervals, infer
 historical phases or prove automatic all-PR coverage. Those producer limitations
