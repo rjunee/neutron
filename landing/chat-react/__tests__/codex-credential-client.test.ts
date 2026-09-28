@@ -119,6 +119,18 @@ describe('WebCodexCredentialClient', () => {
     expect((cap.calls[0]?.body as { auth: string }).auth).toContain('refresh_token')
   })
 
+  it('named rotation preserves either target and the authenticated refusal', async () => {
+    for (const to of ['default', 'work']) {
+      const cap = capture(jsonRes({ ok: true, active: to }))
+      const client = new WebCodexCredentialClient({ base_url: BASE, token: TOKEN, fetchImpl: cap.fetchImpl })
+      expect((await client.rotateToAccount(to)).active).toBe(to)
+      expect(cap.calls).toEqual([{ url: `${BASE}/api/app/codex-auth/rotate`, method: 'POST', body: { to }, auth: `Bearer ${TOKEN}` }])
+    }
+    const cap = capture(jsonRes({ ok: false, code: 'custody_unavailable', message: 'Account custody unavailable' }, 409))
+    await expect(new WebCodexCredentialClient({ base_url: BASE, token: TOKEN, fetchImpl: cap.fetchImpl }).rotateToAccount('default'))
+      .rejects.toMatchObject({ status: 409, code: 'custody_unavailable' })
+  })
+
   it('disconnectAllSeats → the UNQUALIFIED DELETE, which now removes every seat', async () => {
     // Renamed from `disconnectGlobal`. The route did not change; what the server
     // does with it did — a bare DELETE maps to `disconnectAllAccounts`. A name

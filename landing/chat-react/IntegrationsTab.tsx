@@ -225,6 +225,7 @@ export function IntegrationsTab({
   const [rotationBusy, setRotationBusy] = useState(false)
   const [rotationError, setRotationError] = useState<string | null>(null)
   const [rotationNotice, setRotationNotice] = useState<string | null>(null)
+  const [rotationTarget, setRotationTarget] = useState('')
   const rotationReadId = useRef(0)
   /** Covers all Codex writes before React can render their disabled states. */
   const codexWriteInFlight = useRef(false)
@@ -251,11 +252,20 @@ export function IntegrationsTab({
   const rotationIncumbent = rotation?.active ?? rotation?.accounts[0]?.slot ?? null
   const hasAlternate = rotation?.accounts.some(
     (account) => account.slot !== rotationIncumbent &&
+      account.cooling_reason !== 'unauthorized' &&
       (account.cooling_until === null || account.cooling_until <= Date.now()),
   ) ?? false
 
-  const rotateCodex = useCallback((): void => {
-    if (codexWriteInFlight.current || codexBusy || !hasAlternate) return
+  const namedTarget = rotation?.accounts.find(account => account.slot === rotationTarget && account.slot !== rotationIncumbent)
+  const targetHasCooldown = namedTarget !== undefined &&
+    (namedTarget.cooling_until !== null || namedTarget.cooling_reason !== null)
+
+  const rotateCodex = useCallback((to?: string): void => {
+    if (codexWriteInFlight.current || codexBusy) return
+    const target = to === undefined ? undefined : rotation?.accounts.find(account => account.slot === to && account.slot !== rotationIncumbent)
+    if (to === undefined ? !hasAlternate : !target) return
+    if (target && (target.cooling_until !== null || target.cooling_reason !== null) &&
+      !doConfirm(`Switch to ${target.slot} and clear its stored cooldown or quarantine? This does not add quota or confirm account availability.`)) return
     codexWriteInFlight.current = true
     // An earlier metadata read cannot overwrite the pointer returned by this write.
     ++rotationReadId.current
@@ -264,7 +274,7 @@ export function IntegrationsTab({
     setRotationNotice(null)
     void (async () => {
       try {
-        const result = await codexClient.rotateToNextAccount()
+        const result = await (to === undefined ? codexClient.rotateToNextAccount() : codexClient.rotateToAccount(to))
         if (!mountedRef.current) return
         setRotation((current) => current === null ? current : { ...current, active: result.active })
         setRotationNotice(result.status === 'rotated'
@@ -288,7 +298,7 @@ export function IntegrationsTab({
         if (mountedRef.current) setRotationBusy(false)
       }
     })()
-  }, [codexClient, codexBusy, hasAlternate, loadRotation])
+  }, [codexClient, codexBusy, hasAlternate, loadRotation, rotation, rotationIncumbent, doConfirm])
 
   /**
    * The connected seats, and whether Codex is usable AT ALL — both asked of the
@@ -1345,18 +1355,47 @@ export function IntegrationsTab({
                   <p className="cint-row-sub" data-testid="cint-codex-active-account">
                     Active account: {rotation.active ?? 'none selected'}
                   </p>
+                  <p className="cint-row-sub">This changes the global account selection, not just review runs. General chat keeps its existing handoff safety checks.</p>
                   <button
                     type="button"
                     className="cdoc-btn"
                     data-testid="cint-codex-rotate"
                     disabled={codexBusy || rotationBusy || !hasAlternate}
-                    onClick={rotateCodex}
+                    onClick={() => rotateCodex()}
                   >
                     {rotationBusy ? 'Switching…' : 'Switch to next available account'}
                   </button>
                   {!hasAlternate ? (
                     <p className="cint-row-sub">No other available account to switch to.</p>
                   ) : null}
+                  <label>
+                    Choose an account
+                    <select
+                      data-testid="cint-codex-target"
+                      value={namedTarget?.slot ?? ''}
+                      disabled={codexBusy || rotationBusy}
+                      onChange={(event) => setRotationTarget(event.target.value)}
+                    >
+                      <option value="">Select an account</option>
+                      {rotation.accounts.filter(account => account.slot !== rotationIncumbent).map(account => (
+                        <option key={account.slot} value={account.slot}>
+                          {account.label ? `${account.label} (${account.slot})` : account.slot}
+                        </option>
+                      ))}
+                    </select>
+                  </label>
+                  {targetHasCooldown ? (
+                    <p className="cint-row-sub">Explicit selection clears this account's stored cooldown or quarantine. It does not add quota or confirm availability.</p>
+                  ) : null}
+                  <button
+                    type="button"
+                    className="cdoc-btn"
+                    data-testid="cint-codex-switch-selected"
+                    disabled={codexBusy || rotationBusy || !namedTarget}
+                    onClick={() => { if (namedTarget) rotateCodex(namedTarget.slot) }}
+                  >
+                    {rotationBusy ? 'Switching…' : targetHasCooldown ? 'Switch and clear cooldown' : 'Switch to selected account'}
+                  </button>
                 </div>
               ) : null}
               {rotationNotice !== null ? <p role="status">{rotationNotice}</p> : null}
