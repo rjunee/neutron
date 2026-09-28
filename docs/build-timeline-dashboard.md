@@ -148,8 +148,18 @@ a native `turn_context` record. Put the single binding object (the object inside
 bun scripts/build-timeline-register-turn.ts PRIVATE-CONFIG.json ROLLOUT.jsonl OBSERVATIONS.jsonl PRIVATE-BINDING.json
 ```
 
+Before first use, the operator adds `observationJournal` to that existing private
+import config, with the exact absolute journal path already used by its refresh
+service. This is a one-time registration setup: retain all existing fields and
+bindings, and do not change the service's journal or rewrite observations. The
+importer ignores this extra config field, so installed refresh behavior continues
+unchanged. A config without the field still imports normally but cannot accept
+registration through this command.
+
 Use the existing refresh source's config/rollout pair and its observation journal.
-The command shares the refresher/recorder's `OBSERVATIONS.jsonl.lock`, validates
+The command derives the refresher/recorder's `OBSERVATIONS.jsonl.lock` from the
+trusted config; the supplied journal argument must match exactly and cannot select
+another lock. It validates
 the config's repository allowlist and exact native identity, and atomically writes
 the config with mode 0600. Identical registration is a no-op; changing an existing
 turn's phase or PR links is refused. A busy lock or partial native JSON record

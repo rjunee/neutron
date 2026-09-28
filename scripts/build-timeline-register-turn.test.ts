@@ -15,7 +15,7 @@ async function fixture(child = false) {
   const dir = await mkdtemp(join(tmpdir(), 'native-register-')); dirs.push(dir)
   const options = { config: join(dir, 'config.json'), rollout: join(dir, 'private-transcript.jsonl'), observations: join(dir, 'phases.jsonl'),
     binding: { sessionId: 'session-1', turnId: 'turn-1', phase: 'build' as const, links: [{ repository: 'example/project', prNumber: 7 }] } }
-  await writeFile(options.config, JSON.stringify({ repositories: ['example/project'], evidenceRef: 'codex:fixture' }))
+  await writeFile(options.config, JSON.stringify({ repositories: ['example/project'], evidenceRef: 'codex:fixture', observationJournal: options.observations }))
   await writeFile(options.rollout, row('session_meta', { id: 'session-1', ...(child ? { source: { subagent: { thread_spawn: { parent_thread_id: 'parent-1' } } } } : {}) }) +
     row('turn_context', { turn_id: 'turn-1', model: 'model-a' }) + row('response_item', { text: 'private transcript marker' }))
   return options
@@ -85,6 +85,8 @@ test('refresh lock refuses registration and cannot be removed by the rejected ca
   const options = await fixture()
   const before = await readFile(options.config, 'utf8')
   await writeFile(options.observations + '.lock', 'refresh holds lock')
+  await expect(registerNativeTurn({ ...options, observations: options.observations + '.wrong' })).rejects.toThrow('must match exactly')
+  expect(await Bun.file(options.observations + '.wrong.lock').exists()).toBe(false)
   await expect(registerNativeTurn(options)).rejects.toThrow()
   expect(await readFile(options.config, 'utf8')).toBe(before)
   expect(await readFile(options.observations + '.lock', 'utf8')).toBe('refresh holds lock')
@@ -92,6 +94,21 @@ test('refresh lock refuses registration and cannot be removed by the rejected ca
   await registerNativeTurn(options)
   await complete(options, false)
   expect((await importCodexFile(options.rollout, JSON.parse(await readFile(options.config, 'utf8')))).observations[0]).toMatchObject({ inputTokens: null, outputTokens: null })
+})
+
+test('missing trusted journal binding refuses; concurrent registrations share one lock and preserve the winning config', async () => {
+  const options = await fixture()
+  const original = await readFile(options.config, 'utf8')
+  const { observationJournal: _journal, ...legacy } = JSON.parse(original)
+  await writeFile(options.config, JSON.stringify(legacy))
+  await expect(registerNativeTurn(options)).rejects.toThrow('Configured observation journal required')
+  expect(await readFile(options.config, 'utf8')).toBe(JSON.stringify(legacy))
+  await writeFile(options.config, original)
+  const outcomes = await Promise.allSettled([registerNativeTurn(options), registerNativeTurn(options)])
+  expect(outcomes.filter(result => result.status === 'fulfilled')).toHaveLength(1)
+  expect(outcomes.filter(result => result.status === 'rejected')).toHaveLength(1)
+  expect(JSON.parse(await readFile(options.config, 'utf8')).turnBindings).toEqual([options.binding])
+  expect(await registerNativeTurn(options)).toBe('already-registered')
 })
 
 test('CLI refuses malformed source with generic diagnostics that do not expose private paths', async () => {

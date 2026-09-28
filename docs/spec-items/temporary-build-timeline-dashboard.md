@@ -113,6 +113,9 @@ spans carry unknown tokens unless a provider actually attributed usage.
       repository allowlist before atomically adding an immutable phase/PR binding
       to a private import config. Identical retries are idempotent; foreign turns,
       conflicting reassignments and a held refresh lock refuse without writes.
+      The private config binds the authoritative observation journal; a caller
+      cannot bypass its held lock by supplying another writable journal path.
+      Concurrent registrations serialize through that configured lock.
       Root and child turns consume the same completion-receipt path through the
       authenticated dashboard API. Missing usage remains unknown. Registration
       does not claim automatic source discovery or active-task timing.

@@ -3,19 +3,21 @@
 The native task importer required operators to hand-edit private turn bindings.
 The registration command now verifies a native session/turn context and the
 existing config's repository scope before adding one explicit phase/PR binding.
-It uses the refresh/recorder observation lock, writes the private config by atomic
+It derives the refresh/recorder observation lock from the operator's trusted
+`observationJournal` config field; a caller-supplied path must match exactly.
+It writes the private config by atomic
 replacement at mode 0600, treats identical retries as no-ops, and refuses changed
 attribution. Existing observation journal bytes are never edited.
 
-Five focused tests, with 104 assertions, exercise root and child build/fix/review/test
+Six focused tests, with 112 assertions, exercise root and child build/fix/review/test
 tasks through native completion import and the authenticated dashboard API. They
 also prove wrong session/turn/repository and duplicate-link rejection, immutable
 attribution, shared-lock refusal, private transcript/path exclusion and unknown
 tokens when receipts are missing. Start/end, model and disjoint token counts come
 from native receipts, not registration time or parent ownership.
 
-The registration, importer and dashboard API suites together pass 34 tests with
-359 assertions. Inverting native-turn existence causes four test failures;
+The registration, importer and dashboard API suites together pass 35 tests with
+367 assertions. Inverting native-turn existence causes four test failures;
 weakening the attribution-conflict predicate causes the immutability test to
 fail. Both mutations were reverted and the focused suites rerun successfully.
 The changed-file purity scan is silent; the full-tree local scan reports

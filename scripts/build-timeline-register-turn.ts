@@ -3,10 +3,22 @@
 import { open, readFile, rename, unlink, writeFile } from 'node:fs/promises'
 import { createInterface } from 'node:readline'
 import { randomUUID } from 'node:crypto'
+import { isAbsolute, resolve } from 'node:path'
 import { importCodexOperations, type CodexImportOptions } from './build-timeline-codex-import.ts'
 
 type Binding = NonNullable<CodexImportOptions['turnBindings']>[number]
 type Registration = { config: string; rollout: string; observations: string; binding: Binding }
+type RegistrationConfig = CodexImportOptions & { observationJournal?: string }
+
+function journal(config: RegistrationConfig, requested: string): string {
+  // This setting belongs to the operator's existing refresh source config. The
+  // caller may confirm it, but cannot choose a different lock namespace.
+  const configured = config.observationJournal
+  if (typeof configured !== 'string' || !isAbsolute(configured) || resolve(configured) !== configured || requested !== configured) {
+    throw new Error('Configured observation journal required; caller must match exactly')
+  }
+  return configured
+}
 
 async function attestTurn(path: string, binding: Binding): Promise<void> {
   const file = await open(path, 'r')
@@ -38,11 +50,13 @@ async function attestTurn(path: string, binding: Binding): Promise<void> {
 export async function registerNativeTurn(options: Registration): Promise<'registered' | 'already-registered'> {
   if (!options.config || !options.rollout || !options.observations ||
       new Set([options.config, options.rollout, options.observations]).size !== 3) throw new Error('Distinct private paths required')
-  const lockPath = `${options.observations}.lock`
+  const initial: RegistrationConfig = JSON.parse(await readFile(options.config, 'utf8'))
+  const lockPath = `${journal(initial, options.observations)}.lock`
   const lock = await open(lockPath, 'wx', 0o600)
   const temporary = `${options.config}.${randomUUID()}.tmp`
   try {
-    const config: CodexImportOptions = JSON.parse(await readFile(options.config, 'utf8'))
+    const config: RegistrationConfig = JSON.parse(await readFile(options.config, 'utf8'))
+    journal(config, options.observations)
     // Reuse the importer's scope/category/duplicate validator, before touching disk.
     await importCodexOperations([], { ...config, turnBindings: [options.binding] })
     await importCodexOperations([], config)
