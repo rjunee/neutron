@@ -33,6 +33,17 @@ The final focused actor, parser, dispatch-evidence, and Herdr-key suites passed
 167 tests; the three consuming Herdr cases and both root and Trident typechecks
 also passed.
 
+CI additionally exercised the identity-environment registry and the adoption
+claim suite. The margin extractor now slices before the already-validated rule
+glyph: the earlier zero-width whitespace regex matched every identity candidate
+in the registry's deliberately conservative regex audit. The registry remains
+unchanged. The adoption fixture now supplies guarded input and a rendered screen,
+with a draft refusal before its original successful native-result assertions.
+The corrected registry, composer, acting-turn, and adoption suites passed 181
+tests, plus the three consuming cases and both typechecks. Bypassing the draft
+guard, blocking the empty composer, and discarding the margin each failed their
+semantic controls.
+
 This is a screen observation, not an editor transaction. It cannot exclude manual
 typing from another client between the read and the terminal writes, or prove
 hidden editor state from rendered text. Screen text reproducing composer chrome

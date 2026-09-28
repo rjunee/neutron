@@ -332,6 +332,23 @@ describe('two incarnations racing for one row', () => {
     }
     const acting = createClaudeActingTurn({ project_id: 'proj', topic_id: 'topic', session,
       grants: { roots: [], tools: 'read-only', writable: false, network: false } })
+    // This adoption fixture exposes a durable pane, so dispatch uses the same
+    // guarded-input capability as a real Herdr child. The transport is simulated;
+    // the preflight and adoption/turn ownership checks remain real.
+    let screen = '────────\n❯ unsent draft\n────────'
+    session.child.readScreen = async () => screen
+    session.child.submitLineGuarded = async (line, preflight, signal) => {
+      await preflight()
+      await session.child.submitLine!(line, signal)
+    }
+    expect(await acting({
+      conversation: { project_id: 'proj', topic_id: 'topic', provider: 'anthropic', spec },
+      request, spec: { ...spec, prompt: 'Invoke Agent\n' + JSON.stringify({
+        subagent_type: 'general-purpose', model: request.model_id, prompt: JSON.stringify(request),
+      }) }, timeout_ms: 1000, signal: new AbortController().signal,
+    })).toMatchObject({ kind: 'blocked', on: expect.stringContaining('dispatch was not submitted') })
+    expect(commands).toEqual([])
+    screen = '────────\n❯\n────────\n  1 agent running'
     const runner = claudeInReplRunner({ topic_id: 'topic', state_dir: dir, spec,
       composeActingTurn: async (_topic, childSpec, opts) => {
         expect(await acting({

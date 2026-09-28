@@ -12,7 +12,7 @@ export function claudeComposerEmpty(screen: string): boolean {
   const top = lines.slice(0, bottom).findLastIndex(rule)
   if (top < 0 || lines[top] !== lines[bottom]) return false
   const input = lines.slice(top + 1, bottom).filter(line => line.trim() !== '')
-  const margin = /^\s*/.exec(lines[bottom]!)![0]
+  const margin = lines[bottom]!.slice(0, lines[bottom]!.indexOf('─'))
   // A continuation line is indented inside the composer. It cannot stand in
   // for the outer prompt or rule merely because it quotes their glyphs.
   if (input.length !== 1 || !input[0]!.startsWith(`${margin}❯`) || input[0]!.slice(margin.length + 1).trim() !== '') return false
