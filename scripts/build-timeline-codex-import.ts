@@ -15,6 +15,13 @@ export interface CodexOperationBinding {
 export interface CodexImportOptions {
   repositories: string[]
   bindings?: CodexOperationBinding[]
+  /** Operator-attested task ownership and category, never inferred from transcript prose. */
+  turnBindings?: Array<{
+    sessionId: string
+    turnId: string
+    phase: 'plan' | 'build' | 'fix' | 'review' | 'test' | 'ci' | 'deploy'
+    links: Link[]
+  }>
   /** Opaque private evidence reference, not transcript text or an absolute path. */
   evidenceRef: string
   maxBytes?: number
@@ -29,6 +36,8 @@ export interface CodexImportCoverage {
   incomplete: number
   malformed: number
   duplicate: number
+  turnReceipts: number
+  emittedTurns: number
   tokenCoverage: 'unknown'
 }
 type Obj = Record<string, unknown>
@@ -93,11 +102,22 @@ export async function importCodexOperations(lines: AsyncIterable<string> | Itera
   for (const b of bindings) {
     if (!b.cwd || !stamp(b.startedAt) || !stamp(b.endedAt) || b.endedAt < b.startedAt || !b.links.length || !b.links.every(l => allowed.has(l.repository) && Number.isSafeInteger(l.prNumber) && l.prNumber > 0)) throw new Error('Invalid explicit worktree binding')
   }
+  const turnBindings = options.turnBindings ?? []
+  const turnKeys = new Set<string>()
+  for (const b of turnBindings) {
+    const key = JSON.stringify([b.sessionId, b.turnId])
+    if (typeof b.sessionId !== 'string' || !b.sessionId || typeof b.turnId !== 'string' || !b.turnId || turnKeys.has(key) ||
+        !['plan', 'build', 'fix', 'review', 'test', 'ci', 'deploy'].includes(b.phase) ||
+        !b.links.length || !b.links.every(l => allowed.has(l.repository) && Number.isSafeInteger(l.prNumber) && l.prNumber > 0) ||
+        new Set(b.links.map(l => `${l.repository}#${l.prNumber}`)).size !== b.links.length) throw new Error('Invalid explicit turn binding')
+    turnKeys.add(key)
+  }
   const maxBytes = options.maxBytes ?? 512 * 1024 * 1024, maxLines = options.maxLines ?? 1_000_000
   if (!stamp(maxBytes) || !stamp(maxLines) || !maxBytes || !maxLines) throw new Error('Invalid import bounds')
-  const coverage: CodexImportCoverage = { lines: 0, commandReceipts: 0, emitted: 0, unsupportedCommands: 0, unbound: 0, incomplete: 0, malformed: 0, duplicate: 0, tokenCoverage: 'unknown' }
+  const coverage: CodexImportCoverage = { lines: 0, commandReceipts: 0, emitted: 0, unsupportedCommands: 0, unbound: 0, incomplete: 0, malformed: 0, duplicate: 0, turnReceipts: 0, emittedTurns: 0, tokenCoverage: 'unknown' }
   const observations: DirectPhaseObservation[] = [], seen = new Set<string>()
   const contexts = new Map<string, Array<{ at: number; model: string }>>()
+  const turns: Array<{ turnId: string; start: number; end: number }> = []
   let sessionId: string | undefined, parentSessionId: string | undefined, bytes = 0
   for await (const line of lines) {
     coverage.lines++
@@ -118,6 +138,17 @@ export async function importCodexOperations(lines: AsyncIterable<string> | Itera
     if (r.type === 'turn_context' && typeof p.turn_id === 'string' && typeof p.model === 'string' && p.model) {
       const at = typeof r.timestamp === 'string' ? Date.parse(r.timestamp) : NaN
       if (stamp(at)) { const history = contexts.get(p.turn_id) ?? []; history.push({ at, model: p.model }); contexts.set(p.turn_id, history) }
+      continue
+    }
+    if (r.type === 'event_msg' && p.type === 'task_complete') {
+      coverage.turnReceipts++
+      // Native task receipt boundaries are epoch seconds. Do not use transcript
+      // observation time, duration subtraction, or file mtime as task boundaries.
+      if (!sessionId || typeof p.turn_id !== 'string' || !p.turn_id || !stamp(p.started_at) || !stamp(p.completed_at) ||
+          !stamp(p.started_at * 1000) || !stamp(p.completed_at * 1000) || p.completed_at < p.started_at) {
+        coverage.incomplete++; continue
+      }
+      turns.push({ turnId: p.turn_id, start: p.started_at * 1000, end: p.completed_at * 1000 })
       continue
     }
     if (r.type !== 'event_msg' || p.type !== 'item_completed' || !object(p.item) || p.item.type !== 'CommandExecution') continue
@@ -142,10 +173,31 @@ export async function importCodexOperations(lines: AsyncIterable<string> | Itera
       startedAt: p.started_at_ms, endedAt: p.completed_at_ms,
       inputTokens: null, outputTokens: null, cacheReadTokens: null, cacheCreationTokens: null, costUsd: null,
       source: { kind: 'codex-log', sessionId, turnId: p.turn_id, ...(parentSessionId ? { parentSessionId } : {}), sourceEventId: item.id,
-        evidenceRef: `${options.evidenceRef}:${coverage.lines}`, attribution: 'reconstructed',
+        evidenceRef: `${options.evidenceRef}:command:${item.id}`, attribution: 'reconstructed',
         basis: `${exact ? 'Successful native GitHub command identifies PR' : 'Explicit time-bounded worktree-to-PR binding'}; native operation timestamps; model is invoking Codex model; exit ${item.exit_code}; shell-operation token attribution unknown` },
       observedAt: p.completed_at_ms,
     })
+  }
+  for (const turn of turns) {
+    const binding = turnBindings.find(b => b.sessionId === sessionId && b.turnId === turn.turnId)
+    if (!binding) { coverage.unbound++; continue }
+    const id = `codex-turn:${sessionId}:${turn.turnId}`
+    if (seen.has(id)) { coverage.duplicate++; continue }
+    seen.add(id)
+    // One turn may change model. A mixed or absent model remains unknown rather
+    // than attributing the entire envelope to the most recent context.
+    const models = new Set((contexts.get(turn.turnId) ?? []).filter(c => c.at >= turn.start && c.at < turn.end + 1000).map(c => c.model))
+    observations.push({
+      eventId: id, phaseId: id, links: binding.links, phase: binding.phase,
+      label: `Native ${binding.phase} task`, model: models.size === 1 ? [...models][0]! : null,
+      startedAt: turn.start, endedAt: turn.end,
+      inputTokens: null, outputTokens: null, cacheReadTokens: null, cacheCreationTokens: null, costUsd: null,
+      source: { kind: 'codex-log', sessionId: binding.sessionId, turnId: turn.turnId, ...(parentSessionId ? { parentSessionId } : {}),
+        sourceEventId: turn.turnId, evidenceRef: `${options.evidenceRef}:turn:${turn.turnId}`, attribution: 'reconstructed',
+        basis: 'Explicit session-and-turn PR and phase binding; native completed task envelope at one-second resolution; nested commands may overlap; task usage attribution unknown' },
+      observedAt: turn.end,
+    })
+    coverage.emittedTurns++
   }
   coverage.emitted = observations.length
   return { observations, coverage }
@@ -190,7 +242,17 @@ export async function importCodexFile(path: string, options: CodexImportOptions,
       }
     }
     try {
-      const result = await importCodexOperations(scopedLines(), { ...options, evidenceRef: startByte > 0 ? `${options.evidenceRef}:tail-${startByte}` : options.evidenceRef })
+      // Scan offsets describe coverage, not event provenance: a growing file
+      // moves this window while the native session/operation identity stays put.
+      const result = await importCodexOperations(scopedLines(), options)
+      // A tail may retain only the last model of a multi-model task. Unlike an
+      // individual command, a whole task needs complete context to claim one model.
+      // Keep unknown even when this window happens to contain one context.
+      if (startByte > 0) {
+        for (const observation of result.observations) {
+          if (observation.phaseId.startsWith('codex-turn:')) observation.model = null
+        }
+      }
       return { ...result, scan: { sourceBytes: stat.size, startByte, partial: startByte > 0,
         detail: startByte > 0 ? 'Recent byte window only; older phases and model contexts may be missing. Retain previous observations; run a full import for historical coverage.' : 'Full source snapshot; attribution coverage is reported separately.' } }
     } finally { input.close(); stream.destroy() }
