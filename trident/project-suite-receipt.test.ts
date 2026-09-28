@@ -7,9 +7,62 @@ import { seedMigratedDb } from '../tests/support/migrated-db.ts'
 import { TridentRunStore } from './store.ts'
 import { createProjectSuiteReceipts, SUITE_IDENTITY_COMPONENTS, type SuiteIdentityComponents } from './project-suite-receipt.ts'
 import { readBuildRetrySource } from './build-mode-state.ts'
+import type { ReviewSuiteSource, SuiteObservation } from './gates/review-suite.ts'
 
 const cleanups: (() => Promise<void>)[] = []
 afterEach(async () => { for (const cleanup of cleanups.splice(0)) await cleanup() })
+
+for (const changed of ['none', 'red', 'head', 'round', 'strategy', 'scope', 'identity', 'environment', 'unknown', 'throws', 'terminal', 'owner', 'independent-owner'] as const)
+test(`concurrent suite acquisition drains and remeasures ${changed}`, async () => {
+  const dir = await mkdtemp(join(tmpdir(), 'suite-concurrent-'))
+  const path = join(dir, 'project.db')
+  seedMigratedDb(path)
+  const db = ProjectDb.open(path)
+  cleanups.push(async () => { db.close(); await rm(dir, { recursive: true, force: true }) })
+  const store = new TridentRunStore(db)
+  const run = await store.create({ slug: 'suite', project_slug: 'fixture', repo_path: dir, task: 'test' })
+  const snapshot = { head: 'a'.repeat(40), diff: '+code', pr: null }
+  let identity = 'before', portableIdentity = 'c'.repeat(64), calls = 0, active = 0
+  let release!: () => void, started!: () => void
+  const hold = new Promise<void>(resolve => { release = resolve })
+  const entered = new Promise<void>(resolve => { started = resolve })
+  const receipts = createProjectSuiteReceipts({ store, run, identity: async () => ({ identity, portableIdentity }) })
+  const source = (strategy: string, scope: SuiteObservation['scope'], runId = run.id): ReviewSuiteSource => ({ observe: async (subject, round) => {
+    const call = ++calls
+    active++
+    try {
+      expect(active).toBe(changed === 'independent-owner' ? call : 1)
+      if (call === 1) { started(); await hold }
+      if (call === 1 && changed === 'throws') throw Error('first acquisition failed')
+      if (call === 1 && changed === 'unknown') return { kind: 'unknown', detail: 'first acquisition unavailable' }
+      return { kind: 'known', runId, head: subject.head, round, strategy, scope,
+        report: { hostExitCode: changed === 'red' ? 1 : 0 } }
+    } finally { active-- }
+  } })
+  const first = receipts.observe(source('bun test', 'full-suite'), snapshot, 1, 'bun test', 'full-suite')
+    .catch(error => ({ kind: 'unknown' as const, detail: String(error) }))
+  await entered
+  if (changed === 'identity') identity = 'after'
+  if (changed === 'environment') portableIdentity = 'd'.repeat(64)
+  if (changed === 'terminal') await store.update(run.id, { phase: 'stopped' })
+  if (changed === 'owner') await store.update(run.id, { branch: 'another-owner' })
+  const strategy = changed === 'strategy' ? 'bash scripts/run-tests.sh' : 'bun test'
+  const scope = changed === 'scope' ? 'subset' : 'full-suite'
+  const secondRun = changed === 'independent-owner'
+    ? await store.create({ slug: 'other', project_slug: 'other', repo_path: dir, task: 'test' }) : run
+  const secondReceipts = changed === 'independent-owner'
+    ? createProjectSuiteReceipts({ store, run: secondRun, identity: async () => ({ identity, portableIdentity }) }) : receipts
+  const second = secondReceipts.observe(source(strategy, scope, secondRun.id),
+    changed === 'head' ? { ...snapshot, head: 'b'.repeat(40) } : snapshot,
+    changed === 'round' ? 2 : 1, strategy, scope)
+  try {
+    await new Promise(resolve => setTimeout(resolve, 0))
+    expect(calls).toBe(changed === 'independent-owner' ? 2 : 1)
+  } finally { release(); await first }
+  expect(await second).toMatchObject({ kind: changed === 'terminal' || changed === 'owner' ? 'unknown' : 'known' })
+  expect(calls).toBe(['none', 'red', 'terminal', 'owner'].includes(changed) ? 1 : 2)
+  expect(active).toBe(0)
+})
 
 for (const after of ['unchanged', 'changed', 'unavailable', 'throws'] as const) {
   for (const exit of [0, 1]) test(`suite observation retains exit ${exit} with ${after} identity`, async () => {
