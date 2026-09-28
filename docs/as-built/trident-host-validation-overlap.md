@@ -86,11 +86,17 @@ failed nine changed-input/failure controls; dropping the portable digest change
 refusal failed its environment control. The restored owner passed all focused
 checks above, with the nine existing cross-run suite counts unchanged.
 
-Full consuming E2E, a green canonical shared-host gate, independent review of the
-receipt-owner repair, exact-head CI and deployed acceptance remain unverified
-for the repaired candidate. Publication is
-deferred until the active cutover acceptance allows a safe window. These focused
-results are not a full-suite receipt. Supplied historical timestamps bound a
+The integrated candidate `822a2b6eda1a532c32f59d6035f29b5cd271bc04`
+passed `bash scripts/check-shared-host.sh`: all 51 TypeScript configurations
+and all 1,751 discovered test files across 19 groups, including the complete
+consuming E2E file, executed with zero failing groups. Suite-input identity
+`78ff635358b585d606b27119dc2c3985bed9723df38676161eeb9f74c499588b`
+was unchanged before and after the checks. Independent Astra review cleared the
+receipt-owner repair at `b3af9caff4faa9a98b156d0b52f857a7e043e6b8`;
+bounded cross-model review cleared the exact integrated candidate. This final
+receipt update is prose-only. The initial failed gate remains a failure;
+this is a separate completed run on the repaired candidate. Exact publication-
+head CI and deployed acceptance remain unverified. Supplied historical timestamps bound a
 possible saving at zero to 10 minutes 5.016 seconds, assuming immediate suite
 eligibility and unchanged runtime at the upper bound; no deployed saving has
 been measured. Waiting for both owners may delay a readiness refusal until the

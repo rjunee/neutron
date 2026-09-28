@@ -63,5 +63,16 @@ candidate-production refusal while valid and missing-provenance controls remain
 green. Dropping recovered worker bindings kills the changed-model refusal while
 unchanged retry still passes. Omitting forward-base refresh kills the disjoint
 advance case while unchanged and unknown-base controls still pass. All mutants
-were restored. Full CI, combined-candidate verification and deployment are separate
-integration work; this record does not claim a live retry or merge succeeded.
+were restored.
+
+The integrated candidate `822a2b6eda1a532c32f59d6035f29b5cd271bc04`
+subsequently passed `bash scripts/check-shared-host.sh`: all 51 TypeScript
+configurations (including root and Trident) and all 1,751 discovered test files
+executed across 19 groups, with zero failing groups. The measured suite-input
+identity was unchanged before and after execution:
+`78ff635358b585d606b27119dc2c3985bed9723df38676161eeb9f74c499588b`.
+Independent Astra review cleared the corrected source at
+`14b10b55bc63e6986ea7521be221d5399f8e81d6`; bounded cross-model review
+cleared the exact integrated candidate. This final receipt update changes prose
+only, not tested code. Exact publication-head CI, deployment and a fresh live
+retry remain separate requirements; no sequence merge or savings are claimed.
