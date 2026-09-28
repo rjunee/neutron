@@ -29,6 +29,8 @@ import type { SubstrateNoticeSinks } from '@neutronai/gateway/http/substrate-not
 
 export interface OpenWiringContext {
   startCodexOwner?: import('@neutronai/gateway/wiring/build-llm-call-substrate.ts').BuildLlmCallSubstrateInput['startCodexOwner']
+  /** Read the current project provider choices when rendering the credential setup gate. */
+  hasCodexOwnerProject?: () => boolean
   /**
    * #1226 — the owner conversation's project-workspace terminal. Wired onto the
    * live-chat (`cc-agent-*`) family ONLY: every Claude conversation spawn is placed

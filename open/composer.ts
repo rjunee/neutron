@@ -1336,6 +1336,8 @@ export function buildOpenGraphComposer(
       ...conversationalProviderCtx,
       providerResolver,
       startCodexOwner: (projectId, spec) => codexOwnerBindings.start(projectId, spec),
+      hasCodexOwnerProject: () => db.all<{ id: string }>('SELECT id FROM projects WHERE deleted_at IS NULL')
+        .some(project => resolveModelProvider(project.id).provider === 'openai-codex'),
       ...(liveAgentNoticeSinks !== undefined ? { liveAgentNoticeSinks } : {}),
       ...(backgroundNoticeSinks !== undefined ? { backgroundNoticeSinks } : {}),
       ...(liveAgentRecoveredReplySink !== undefined

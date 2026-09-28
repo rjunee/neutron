@@ -1670,14 +1670,17 @@ describe('Open foundational-Trident prod-boot wiring', () => {
       expect(composition.trident?.fire_inner_workflow).toBeFunction()
       expect(composition.trident_build_dispatch).toBeDefined()
       expect(admissions).toEqual([])
+      const page = () => composition.landing_server!.fetch(new Request('http://127.0.0.1/chat'), {} as never)
+      expect((await page()).status).toBe(503)
       await new SqliteProjectSettingsStore(db).update('owner', 'late-project', { name: 'Late Project', model_provider: 'openai-codex' })
+      expect((await page()).status).not.toBe(503)
       const response = await composition.app_ws_surface!.handler(new Request('http://127.0.0.1/api/app/chat/send', {
         method: 'POST', headers: { authorization: 'Bearer dev:owner', 'content-type': 'application/json' },
         body: JSON.stringify({ body: 'Hello from the first project', project_id: 'late-project', client_msg_id: 'first-codex' }),
       }), {} as never)
       expect(response?.status).toBe(200)
       // The HTTP response is only an echo; require the durable agent reply.
-      let reply: { body: string } | undefined
+      let reply: { body: string } | null = null
       for (let i = 0; i < 200; i++) {
         reply = db.prepare<{ body: string }, []>("SELECT body FROM app_chat_messages WHERE role = 'agent' AND project_id = 'late-project' ORDER BY seq DESC LIMIT 1").get()
         if (reply) break
@@ -1686,6 +1689,8 @@ describe('Open foundational-Trident prod-boot wiring', () => {
       expect(reply?.body).toContain('built it')
       expect(admissions).toEqual(['late-project'])
       expect(prompts).toHaveLength(1)
+      await new SqliteProjectSettingsStore(db).update('owner', 'late-project', { model_provider: 'anthropic' })
+      expect((await page()).status).toBe(503)
     } finally {
       start.mockRestore()
       for (const cleanup of composition.realmode_cleanups ?? []) cleanup()

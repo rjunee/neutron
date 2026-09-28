@@ -1171,7 +1171,7 @@ describe('wireSubstrates — on-demand helpers', () => {
     expect(wired.reminderComposeSubstrate).toBeNull()
     expect(wired.makeProjectLiveAgentSubstrate('codex-project')).toBeNull()
     expect(wired.makeProjectLiveAgentSubstrate('claude-project')).toBeNull()
-    const spec = { ...SESSIONLESS_SPEC, metering_context: { conversationProjectId: 'codex-project' } }
+    const spec = { ...SESSIONLESS_SPEC, metering_context: { project_id: 'codex-project', conversationProjectId: 'codex-project' } }
     const unavailable = await Array.fromAsync(wired.liveAgentSubstrate!.start(spec).events)
     expect(unavailable).toContainEqual(expect.objectContaining({ kind: 'error', code: 'no_credentials', retryable: false }))
     selected = true

@@ -56,10 +56,11 @@ is a local credential check, not a claim of live owner/build/restart acceptance 
 - [x] Unset projects follow a live instance change; explicit projects retain their choice.
   Verify: `open/__tests__/instance-model-provider.test.ts`.
 - [x] A first Codex project selected after credentialless boot reaches chat intake
-  without a restart. Missing credentials and revoked grants still refuse; switching
+  and opens the browser chat page without a restart. Missing credentials and revoked grants still refuse; switching
   away from Codex does not reuse its owner. Verify:
   `open/__tests__/open-wiring-substrates.test.ts`,
-  `open/__tests__/open-trident-prod-boot-wiring.test.ts`.
+  `open/__tests__/open-trident-prod-boot-wiring.test.ts`,
+  `open/__tests__/open-wiring-landing.test.ts`.
 - [x] Dispatch with a project ID resolves that project's provider independently of
   the active chat fallback. Verify:
   `gateway/wiring/__tests__/build-llm-call-substrate-provider.test.ts`.

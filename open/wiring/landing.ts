@@ -129,7 +129,7 @@ export function wireLandingStack(
         // This is the legacy Claude credential setup page, not app identity
         // authentication. Native projects authenticate at the shared binding;
         // their chat UI must remain reachable without an Anthropic/API pool.
-        if (ctx.startCodexOwner !== undefined && ((ctx.codexOwnerProjects?.length ?? 0) > 0
+        if (ctx.startCodexOwner !== undefined && (ctx.hasCodexOwnerProject?.() === true
           || (ctx.providerResolver?.(undefined, 'conversation')?.provider ?? ctx.provider) === 'openai-codex')) return false
         // SWAPPABLE PROVIDER (audit Medium) — key on the SELECTED provider's
         // credentials FIRST. When openai is selected, the OpenAI key is what gates
