@@ -14,7 +14,10 @@ async function fixture(projectId: string | null = 'one') {
   const path = join(dir, 'journal.json'), manager = new ProjectWorkspaceManager(path)
   const server = new FakeHerdrWorkspaceServer(), placement = { ...scope, projectId }
   server.ownedEmptyWorkspaceRetirement = true
-  const created = await manager.applyLayout(server, root, placement)
+  const applied = await manager.applyLayout(server, root, placement)
+  const workspace_id = applied.layout.workspace_id
+  if (!workspace_id) throw new Error('fixture creation did not return a workspace identity')
+  const created = { ...applied, layout: { ...applied.layout, workspace_id } }
   const observed = await manager.inspectChat(server, placement)
   server.panes.delete(created.layout.root.pane_id)
   const read = () => Object.values(JSON.parse(readFileSync(path, 'utf8')))[0] as Record<string, any>

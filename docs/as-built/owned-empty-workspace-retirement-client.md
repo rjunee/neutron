@@ -38,6 +38,11 @@ lint of every changed TypeScript file passed. The runtime/placement/host/spec-in
 selection passed 110 tests; consuming sleep and credential-handoff fixtures passed
 38 tests. No live pane, server or socket was changed.
 
+Hosted typecheck additionally covers the runtime test files: it caught the fixture
+using the wire reply's optional workspace ID as a required map key. Fixture setup
+now checks that identity before returning it, preserving all behavioral assertions
+without a non-null cast. Runtime and root typechecks cover this regression.
+
 The server operation, authority-preserving live daemon handover, safe adopted-pane
 handle migration, Codex sleep authority and a fresh deployed live cycle remain
 open. No #1226 acceptance box is ticked and this client change does not complete
