@@ -128,8 +128,11 @@ Large session histories with explicit source registrations use the library API
 instead of enumerating the tree. Each call reads exactly one canonical absolute
 dated rollout, applies only that source's options, and returns observations,
 coverage, private source identity, scan byte counts and a serializable checkpoint.
-The initial backfill streams at most 1 GiB; later calls read only bytes after the
-checkpoint's captured byte boundary. Only importer-consumed receipt fields are
+The initial backfill covers at most 1 GiB of source bytes; later calls read only
+bytes after the checkpoint's captured byte boundary. Each new range is fingerprinted
+and then parsed in 64 KiB chunks, rejecting changed bytes even when timestamps alias.
+`scan.readBytes` reports total physical bytes read, the sum of `parsedBytes` and
+`verificationBytes`; a successful nonempty range is read twice. Only importer-consumed receipt fields are
 retained in a private journal capped at 128 MiB and one million records. Command
 output, test selectors, PR body text, prompts and other context are discarded;
 successful PR-create output retains only an exact GitHub PR URL. Native identities,
@@ -153,8 +156,9 @@ records include native receipt details and paths. Export only observations and
 aggregate coverage. Report coverage as registered-source scope; unregistered
 history is unknown, not zero. Missing checkpoints trigger bounded backfill;
 invalid checkpoints, replacements, truncation and same-size rewrites refuse.
-As with snapshot collection, append-only growth is assumed; rewriting an earlier
-prefix while also growing the file cannot be detected by stat identity checks.
+Append-only growth is assumed for the durable checkpoint prefix, which is never
+reread. Rewriting that earlier prefix while growing the file, or a same-size
+rewrite whose timestamps alias, cannot be detected by stat identity checks.
 
 Native in-conversation work has no child command to wrap. For completed tasks,
 the importer also accepts operator-attested `turnBindings` in its private config:

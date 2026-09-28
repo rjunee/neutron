@@ -1,4 +1,6 @@
-import { afterEach, expect, test } from 'bun:test'
+import { afterEach, expect, spyOn, test } from 'bun:test'
+import * as fs from 'node:fs/promises'
+import type { FileHandle } from 'node:fs/promises'
 import { appendFile, mkdir, mkdtemp, rename, rm, symlink, truncate, writeFile } from 'node:fs/promises'
 import { tmpdir } from 'node:os'
 import { join } from 'node:path'
@@ -30,6 +32,29 @@ async function fixture() {
         status: 'completed', exit_code: 0, stdout: 'PRIVATE OUTPUT' } }, 4000),
   ].join('\n') + '\n'
   return { home, root, day, cwd, options, rollout }
+}
+
+// Real file writes and reads, with deterministic coarse-clock metadata aliasing.
+async function withAliasedTimes(path: string, run: (reads: Array<{ position: number; bytes: number }>) => Promise<void>) {
+  const handle = await fs.open(path)
+  const prototype = Object.getPrototypeOf(handle) as {
+    stat: FileHandle['stat']
+    read: (buffer: Buffer, offset: number, length: number, position: number) => Promise<{ bytesRead: number; buffer: Buffer }>
+  }
+  await handle.close()
+  const actualStat = prototype.stat, actualLstat = fs.lstat, actualRead = prototype.read
+  const alias = <T extends object>(stat: T): T => 'mtimeNs' in stat ? Object.assign(stat, { mtimeNs: 1n, ctimeNs: 1n }) : stat
+  const reads: Array<{ position: number; bytes: number }> = []
+  const statSpy = spyOn(prototype, 'stat').mockImplementation((async function(this: FileHandle, options: Parameters<FileHandle['stat']>[0]) {
+    return alias(await actualStat.call(this, options))
+  }) as FileHandle['stat'])
+  const lstatSpy = spyOn(fs, 'lstat').mockImplementation((async (path, options) => alias(await actualLstat(path, options))) as typeof fs.lstat)
+  const readSpy = spyOn(prototype, 'read').mockImplementation(async function(this: FileHandle, buffer, offset, length, position) {
+    const result = await actualRead.call(this, buffer, offset, length, position)
+    reads.push({ position, bytes: result.bytesRead })
+    return result
+  })
+  try { await run(reads) } finally { readSpy.mockRestore(); lstatSpy.mockRestore(); statSpy.mockRestore() }
 }
 
 test('a newly created dated rollout is discovered and its attested command reaches the authenticated dashboard', async () => {
@@ -163,9 +188,11 @@ test('a same-size rewrite during descriptor capture is refused', async () => {
   const { root, day, rollout } = await fixture()
   const path = join(day, 'rollout-a.jsonl'), original = rollout('thread-1', 'exec-1')
   await writeFile(path, original)
-  await expect(discoverCodexRollouts(root, async () => {
-    await writeFile(path, original.replace('exec-1', 'exec-2'))
-  })).rejects.toThrow('changed during read')
+  await withAliasedTimes(path, async () => {
+    await expect(discoverCodexRollouts(root, async () => {
+      await writeFile(path, original.replace('exec-1', 'exec-2'))
+    })).rejects.toThrow('changed during read')
+  })
 })
 
 test('a rollout replaced after discovery cannot escape the authorized root', async () => {
@@ -260,18 +287,49 @@ test('registered snapshots retain append boundaries and reject replacement or re
   const path = join(day, 'rollout-live.jsonl'), original = rollout('thread-1', 'exec-1')
   await writeFile(path, original)
   const selected = await importRegisteredCodexRollout(root, path, options, undefined, async () => { await appendFile(path, '\n') })
-  expect(selected.scan.readBytes).toBe(Buffer.byteLength(original))
+  expect(selected.scan).toMatchObject({ readBytes: 2 * Buffer.byteLength(original),
+    parsedBytes: Buffer.byteLength(original), verificationBytes: Buffer.byteLength(original) })
   expect(selected.observations).toHaveLength(1)
-  expect((await importRegisteredCodexRollout(root, path, options, selected.checkpoint)).scan.readBytes).toBe(1)
+  expect((await importRegisteredCodexRollout(root, path, options, selected.checkpoint)).scan.readBytes).toBe(2)
   await rename(path, join(day, 'moved.jsonl'))
   await writeFile(path, original)
   await expect(importRegisteredCodexRollout(root, path, options, selected.checkpoint)).rejects.toThrow('checkpoint')
-  await expect(importRegisteredCodexRollout(root, path, options, undefined, async () => {
-    await writeFile(path, original.replace('exec-1', 'exec-2'))
-  })).rejects.toThrow('changed during read')
+  await withAliasedTimes(path, async () => {
+    await expect(importRegisteredCodexRollout(root, path, options, undefined, async () => {
+      await writeFile(path, original.replace('exec-1', 'exec-2'))
+    })).rejects.toThrow('changed during read')
+  })
   await writeFile(path, '')
   const empty = await importRegisteredCodexRollout(root, path, options)
   expect(empty.coverage.incomplete).toBe(1)
+})
+
+test('range verification reads only new bytes, accepts appends, and performs zero unchanged I/O', async () => {
+  const { root, day, options, rollout } = await fixture()
+  const path = join(day, 'rollout-range.jsonl'), original = rollout('thread-1', 'exec-1')
+  await writeFile(path, original)
+  await withAliasedTimes(path, async reads => {
+    const initial = await importRegisteredCodexRollout(root, path, options)
+    expect(initial.scan.readBytes).toBe(reads.reduce((sum, read) => sum + read.bytes, 0))
+    reads.length = 0
+    const unchanged = await importRegisteredCodexRollout(root, path, options, initial.checkpoint)
+    expect(unchanged.scan).toMatchObject({ readBytes: 0, parsedBytes: 0, verificationBytes: 0 })
+    expect(reads).toEqual([])
+    const later = original.trim().split('\n')[2]!.replace('exec-1', 'exec-2') + '\n'
+    await appendFile(path, later)
+    const appended = await importRegisteredCodexRollout(root, path, options, initial.checkpoint,
+      async () => { await appendFile(path, '\n') })
+    expect(appended.observations.map(row => row.phaseId)).toEqual(['codex:thread-1:exec-1', 'codex:thread-1:exec-2'])
+    expect(appended.scan.readBytes).toBe(reads.reduce((sum, read) => sum + read.bytes, 0))
+    expect(appended.scan).toMatchObject({ parsedBytes: Buffer.byteLength(later), verificationBytes: Buffer.byteLength(later) })
+    expect(reads.length).toBeGreaterThan(0)
+    expect(reads.every(read => read.position >= initial.checkpoint.offset && read.bytes <= 64 * 1024)).toBe(true)
+    // A valid-JSON rewrite of the new range must fail even though size and times alias.
+    await writeFile(path, original + later)
+    await expect(importRegisteredCodexRollout(root, path, options, initial.checkpoint, async () => {
+      await writeFile(path, original + later.replace('exec-2', 'exec-3'))
+    })).rejects.toThrow('changed during read')
+  })
 })
 
 test('checkpoint restart preserves historical turn context and only reads newly appended bytes', async () => {
@@ -288,7 +346,7 @@ test('checkpoint restart preserves historical turn context and only reads newly 
   // An unfinished JSON line remains unread by the parser and resumes on restart.
   await appendFile(path, task.slice(0, 20))
   const partial = await importRegisteredCodexRollout(root, path, scoped, checkpoint)
-  expect(partial.scan).toMatchObject({ readBytes: 20, partial: true })
+  expect(partial.scan).toMatchObject({ readBytes: 40, parsedBytes: 20, verificationBytes: 20, partial: true })
   expect(partial.coverage.incomplete).toBe(1)
   expect(partial.checkpoint.offset).toBe(checkpoint.offset + 20)
   const unchangedPartial = await importRegisteredCodexRollout(root, path, scoped, JSON.parse(JSON.stringify(partial.checkpoint)))
@@ -297,7 +355,8 @@ test('checkpoint restart preserves historical turn context and only reads newly 
   expect(unchangedPartial.checkpoint).toEqual(partial.checkpoint)
   await appendFile(path, task.slice(20))
   const resumed = await importRegisteredCodexRollout(root, path, scoped, JSON.parse(JSON.stringify(partial.checkpoint)))
-  expect(resumed.scan).toMatchObject({ readBytes: Buffer.byteLength(task) - 20, partial: false })
+  expect(resumed.scan).toMatchObject({ readBytes: 2 * (Buffer.byteLength(task) - 20),
+    parsedBytes: Buffer.byteLength(task) - 20, verificationBytes: Buffer.byteLength(task) - 20, partial: false })
   expect(resumed.observations).toHaveLength(2)
   expect(resumed.observations[1]).toMatchObject({ phase: 'build', model: 'model-a', inputTokens: 15, outputTokens: 5, cacheReadTokens: 10 })
   expect((await importRegisteredCodexRollout(root, path, scoped, resumed.checkpoint)).scan.readBytes).toBe(0)

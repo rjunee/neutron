@@ -1,5 +1,7 @@
 /** Discover native rollout receipts under one operator-authorized session tree. */
 import { constants } from 'node:fs'
+import { createHash } from 'node:crypto'
+import type { FileHandle } from 'node:fs/promises'
 import { lstat, open, readFile, readdir, realpath } from 'node:fs/promises'
 import { basename, isAbsolute, join, relative, resolve, sep } from 'node:path'
 import { importCodexOperations, projectCodexReceipt, type CodexImportOptions } from './build-timeline-codex-import.ts'
@@ -30,7 +32,19 @@ function matchesIdentity(stat: { dev: bigint; ino: bigint; size: bigint; mtimeNs
     (stat.size > BigInt(source.size) || (stat.mtimeNs === source.mtimeNs && stat.ctimeNs === source.ctimeNs))
 }
 
-/** Capture the discovered first N bytes once, before later appends can move the window. */
+/** Only fingerprint the range this call will consume; never reread a durable cursor's prefix. */
+async function fingerprintRange(file: FileHandle, start: number, end: number): Promise<string> {
+  const hash = createHash('sha256'), chunk = Buffer.alloc(64 * 1024)
+  for (let position = start; position < end;) {
+    const { bytesRead } = await file.read(chunk, 0, Math.min(chunk.length, end - position), position)
+    if (!bytesRead) throw new Error('Native rollout changed during read')
+    hash.update(chunk.subarray(0, bytesRead))
+    position += bytesRead
+  }
+  return hash.digest('hex')
+}
+
+/** Capture and verify the discovered first N bytes before later appends can move the window. */
 async function captureRollout(root: string, source: RolloutIdentity, beforeRead?: (path: string) => Promise<void>): Promise<Buffer> {
   const file = await open(source.path, constants.O_RDONLY | constants.O_NOFOLLOW | constants.O_NONBLOCK)
   try {
@@ -39,16 +53,19 @@ async function captureRollout(root: string, source: RolloutIdentity, beforeRead?
     if (!stat.isFile() || !insideRoot(root, resolved) || !matchesIdentity(stat, source)) {
       throw new Error('Native rollout changed after discovery')
     }
+    const fingerprint = await fingerprintRange(file, 0, source.size)
     await beforeRead?.(source.path)
     const buffer = Buffer.alloc(source.size)
     let offset = 0
     while (offset < buffer.length) {
-      const { bytesRead } = await file.read(buffer, offset, buffer.length - offset, offset)
+      const { bytesRead } = await file.read(buffer, offset, Math.min(64 * 1024, buffer.length - offset), offset)
       if (!bytesRead) throw new Error('Native rollout changed during read')
       offset += bytesRead
     }
     const after = await file.stat({ bigint: true })
-    if (!matchesIdentity(after, source)) throw new Error('Native rollout changed during read')
+    if (!matchesIdentity(after, source) || createHash('sha256').update(buffer).digest('hex') !== fingerprint) {
+      throw new Error('Native rollout changed during read')
+    }
     return buffer
   } finally { await file.close() }
 }
@@ -113,18 +130,22 @@ export async function importRegisteredCodexRollout(sessionsRoot: string, path: s
   }
   let retainedBytes = lines.reduce((sum, line) => sum + Buffer.byteLength(line) + 1, 0)
   if (retainedBytes > MAX_SOURCE_BYTES) throw new Error('Native receipt journal exceeds bounds')
-  let position = checkpoint?.offset ?? 0, scanned = 0, readBytes = 0
+  let position = checkpoint?.offset ?? 0, scanned = 0, parsedBytes = 0
+  const verificationBytes = size - position
   const file = await open(path, constants.O_RDONLY | constants.O_NOFOLLOW | constants.O_NONBLOCK)
   try {
     const current = await file.stat({ bigint: true })
     if (!current.isFile() || await realpath(path) !== path || !matchesIdentity(current, source)) throw new Error('Native rollout changed after discovery')
+    const fingerprint = await fingerprintRange(file, position, size)
     await beforeRead?.(path)
+    const parsedHash = createHash('sha256')
     const chunk = Buffer.alloc(64 * 1024)
     while (position < size) {
       const { bytesRead } = await file.read(chunk, 0, Math.min(chunk.length, size - position), position)
       if (!bytesRead) throw new Error('Native rollout changed during read')
       position += bytesRead
-      readBytes += bytesRead
+      parsedBytes += bytesRead
+      parsedHash.update(chunk.subarray(0, bytesRead))
       pending = Buffer.concat([pending, chunk.subarray(0, bytesRead)])
       let start = 0, end: number
       while ((end = pending.indexOf(10, start)) !== -1) {
@@ -142,7 +163,8 @@ export async function importRegisteredCodexRollout(sessionsRoot: string, path: s
     }
     const after = await file.stat({ bigint: true })
     const named = await lstat(path, { bigint: true })
-    if (!matchesIdentity(after, source) || !named.isFile() || !matchesIdentity(named, source) || await realpath(path) !== path) {
+    if (parsedHash.digest('hex') !== fingerprint || !matchesIdentity(after, source) ||
+        !named.isFile() || !matchesIdentity(named, source) || await realpath(path) !== path) {
       throw new Error('Native rollout changed during read')
     }
   } finally { await file.close() }
@@ -151,7 +173,8 @@ export async function importRegisteredCodexRollout(sessionsRoot: string, path: s
   const next: CodexRolloutCheckpoint = { version: 1, path, dev: String(stat.dev), ino: String(stat.ino),
     size, mtimeNs: String(stat.mtimeNs), ctimeNs: String(stat.ctimeNs), offset: size, pending: pending.toString('base64'), lines }
   return { ...result, source: { dev: stat.dev, ino: stat.ino },
-    scan: { sourceBytes: size, readBytes, partial: pending.length > 0 }, checkpoint: next }
+    scan: { sourceBytes: size, readBytes: parsedBytes + verificationBytes, parsedBytes, verificationBytes,
+      partial: pending.length > 0 }, checkpoint: next }
 }
 
 /** The dated native layout is the discovery boundary; unrelated files are ignored. */
