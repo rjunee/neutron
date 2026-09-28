@@ -82,6 +82,7 @@ branch is cut (standard §3.1, §3.2).
 | [`run-head-hash-width`](run-head-hash-width.md) | Accept full SHA-1 and SHA-256 run heads and checkpoints | P1 | — |
 | [`trident-install-disk-admission`](trident-install-disk-admission.md) | Admit dependency installation only with measured disk headroom | P1 | — |
 | [`work-board-attempt-provenance`](work-board-attempt-provenance.md) | Preserve terminal Work Board attempts across retry and shelving | P1 | yes |
+| [`ci-app-co-residency-shard-balance`](ci-app-co-residency-shard-balance.md) | Rebalance the full app co-residency CI check onto shard 4 | P2 | — |
 | [`codex-control-socket-path-fits-sun-len`](codex-control-socket-path-fits-sun-len.md) | Keep Codex control sockets within Linux sun_path | P2 | — |
 | [`codex-project-directory-names-its-owner`](codex-project-directory-names-its-owner.md) | Codex project credential directories name their owning project | P2 | — |
 | [`surface-infra-retries-to-the-owner`](surface-infra-retries-to-the-owner.md) | Surface infrastructure retries to the owner | P2 | — |
