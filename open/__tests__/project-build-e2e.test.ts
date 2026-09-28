@@ -2623,11 +2623,13 @@ test.each(['current', 'historical', 'historical after fix'] as const)('a %s sett
   expect(standaloneReview(f.world).measuredHead).toBe(String(checkpoint.head))
 }, 300_000)
 
-for (const scenario of ['in-run', 'historical', 'ceiling', 'model', 'policy', 'brief'] as const)
+for (const scenario of ['in-run', 'historical', 'ceiling', 'model', 'policy', 'brief', 'binding-chain'] as const)
 test(`base drift refresh retains terminal task work and renews release evidence: ${scenario}`, async () => {
   const historical = scenario !== 'in-run'
   const task = 'Record a note and preserve completed work across an overlapping base advance'
   const f = await fixture({ dispatchTask: task, taskSequence: true, maxRounds: 3 })
+  await f.store.update(f.row.id, { task_iteration: 2 })
+  f.input.run = f.store.get(f.row.id)!
   const host = await createProjectBuildHost(await f.prepare())
   const mergeGate = host.deps.mergeGate
   let oldHead = ''
@@ -2712,6 +2714,13 @@ test(`base drift refresh retains terminal task work and renews release evidence:
       return
     }
     const retry = await createProjectBuildHost(await f.prepare())
+    if (scenario === 'binding-chain') {
+      await retry.deps.modes!.loadResume()
+      await f.store.update(dispatched.run.id, { phase: 'failed' })
+      expect(retryModeSource(f.store, f.store.get(dispatched.run.id)!)?.mergeRefresh).toEqual(source!.mergeRefresh)
+      expect(f.world.dispatches.some(call => call.role === 'fix')).toBe(false)
+      return
+    }
     outcome = await retry.run({ mode: 'implementation', start: 'resume' }, new AbortController().signal)
   }
   if (scenario === 'ceiling') {

@@ -2872,6 +2872,31 @@ test('imported merge stop refreshes before spending another review or rebuilding
   expect(f.state.commits).toEqual([])
 })
 
+test('pending base refresh recovers its original fix and both ancestry pins before fresh review', async () => {
+  const f = modeFixture('single')
+  Object.assign(f.resume(), { remainingTasks: 0, refreshBeforeReview: true })
+  let gates = 0
+  const originalHead = f.snapshot.head
+  const baseHead = 'e'.repeat(40)
+  f.deps.mergeGate = async snapshot => ++gates === 1 ? { kind: 'blocked', on: 'overlap',
+    baseDrift: { head: snapshot.head, base: 'main', baseHead, overlap: ['shared.ts'] } } : { kind: 'allow' }
+  f.outcomes.set('run:fix:1', { kind: 'unknown', detail: 'Original worker acknowledgment lost' })
+  expect(await f.run()).toMatchObject({ kind: 'unknown', phase: 'fix' })
+  const checkpoint = f.state.checkpoints.at(-1)!
+  expect(checkpoint).toMatchObject({ round: 1, stage: 'built', refreshBeforeReview: true,
+    baseDrift: { head: originalHead, baseHead }, pending: { phase: 'fix', step_id: 'run:fix:1' } })
+  f.state.resume = structuredClone(checkpoint)
+  f.input.workers.fix.runner = { ...f.runner, recover: f.runner.run }
+  f.outcomes.set('run:fix:1', f.completed())
+  const pins: string[] = []
+  f.deps.checkFixLineage = async (_snapshot, pin) => { pins.push(pin); return { kind: 'allow' } }
+  expect(await f.run()).toMatchObject({ kind: 'merged' })
+  expect(pins).toEqual([originalHead, baseHead])
+  expect(f.runner.calls.map(call => call.step_id)).toEqual(['run:fix:1', 'run:fix:1'])
+  expect(f.cross.calls.map(call => call.step_id)).toEqual([`run:review:2:head:${f.snapshot.head}`])
+  expect(f.state.checkpoints.at(-1)?.baseDrift).toBeUndefined()
+})
+
 test('same-run task-sequence intermediate checkpoint resumes its handoff without reviewing', async () => {
   const f = modeFixture()
   f.resume().remainingTasks = 1

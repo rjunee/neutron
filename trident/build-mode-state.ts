@@ -152,7 +152,13 @@ export function retryModeSource(store: TridentRunStore, prior: TridentRun, seen 
   }
   if (checkpoint.round >= 1 && (checkpoint.stage === 'fixed' || (checkpoint.stage === 'built'
     && (prior.execution_strategy === 'single' || checkpoint.remainingTasks === 0)))) {
-    return { prior, eventId: event.id, state }
+    // Re-persisting an imported build before preparation fails does not turn it
+    // into locally produced implementation or discard its original input pins.
+    const linkEvent = store.stageEvents(prior.id).filter(row => row.stage === 'build-retry-source').at(-1)
+    const link = linkEvent ? JSON.parse(linkEvent.meta ?? 'null') : null
+    const inherited = link?.head === checkpoint.head ? readBuildRetrySource(store, prior, seen) : null
+    return { prior, eventId: event.id, state,
+      ...(inherited?.mergeRefresh ? { mergeRefresh: inherited.mergeRefresh } : {}) }
   }
   return taskContinuationSource(prior, state) ? { prior, eventId: event.id, state } : null
 }
@@ -195,10 +201,16 @@ function mergeStopBuildSource(store: TridentRunStore, run: TridentRun, state: Bu
     const attempts = store.attempts(run.id)
     if (!attempts.length || attempts.some(row => row.ended_at === null || row.outcome === null
       || row.outcome === 'unknown' || row.outcome === 'interrupted')) return null
-    const completed = (step: string, role: string) => attempts.some(row => row.step_id === step
-      && row.role === role && row.attempt_id === 'dispatch' && row.outcome === 'completed'
-      && row.prepared_at !== null && row.started_at !== null)
-    if (!completed(build.request.step_id, build.request.role) || !completed(pending.step_id, 'review')
+    const completed = (request: typeof build.request, head: string) => {
+      const worker = review.inputs.workers[request.role]
+      return worker && equal(request, { ...worker.request, run_id: run.id, step_id: request.step_id,
+        role: request.role, needs_approval_decision: false }) && attempts.some(row => row.step_id === request.step_id
+        && row.run_id === run.id && row.role === request.role && row.head_sha === head && row.review_seat === null
+        && row.provider === worker.provider && row.resolved_model === request.model_id
+        && row.attempt_id === 'dispatch' && row.outcome === 'completed'
+        && row.prepared_at !== null && row.started_at !== null)
+    }
+    if (!completed(build.request, build.snapshot.head) || !completed(review.request, c.head!)
       || !attempts.some(row => row.role === 'synthesis' && row.head_sha === c.head
         && row.step_id.endsWith(`:${c.round}:0`) && row.outcome === 'completed')) return null
     const root = dirname(review.request.result.path)
