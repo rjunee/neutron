@@ -540,6 +540,88 @@ export class HerdrHost implements AdoptableHost {
       releaseOutput?.()
     }
 
+    const submitLine = async (command: string, signal?: AbortSignal, beforeSubmit?: () => Promise<void>): Promise<void> => {
+      // ACKNOWLEDGED, IN ORDER, AND NOT NO-OP-SAFE. `write`/`writeKey` are
+      // fire-and-forget by interface; this is the variant a caller may build a
+      // claim on, so every way it can fail has to reach the caller — including
+      // "the child is already gone", which a silent no-op would report as a
+      // completed reset.
+      const goneAfterExit = (): Error =>
+        new Error(
+          `herdr-host: submitLine(${JSON.stringify(command)}) after exit — the pane is gone, so ` +
+            'the command was not submitted. Reporting success here would let a caller record a ' +
+            'context reset that never happened.',
+        )
+      /** DISTINCT FROM `goneAfterExit`, because the facts are opposite: there the pane
+       *  is gone, here the pane is alive and this wrapper has given it up. Both must
+       *  throw rather than resolve — `submitLine` is the acknowledged seam a caller
+       *  REPORTS an outcome from, and a silent no-op would record a context reset that
+       *  never happened. Typing into a pane we handed over is the worse of the two. */
+      const goneAfterDetach = (): Error =>
+        new Error(
+          `herdr-host: submitLine(${JSON.stringify(command)}) after DETACH — this wrapper has given ` +
+            'up the pane and must not type into it. The pane is still running and belongs to ' +
+            'whichever incarnation adopted it; nothing was submitted.',
+        )
+      const throwIfAbandoned = (): void => {
+        if (signal?.aborted) {
+          throw new DOMException(
+            `herdr-host: submitLine(${JSON.stringify(command)}) was abandoned before submission`,
+            'AbortError',
+          )
+        }
+      }
+      // No abandonment check HERE. There was one, and it was redundant: the guard at the
+      // head of the enqueued work below catches an already-abandoned caller a tick
+      // later, and removing this one left every case green while removing both went
+      // red — two guards for one property. The enqueued guard is the one that also
+      // covers abandonment that lands WHILE a prior actuation holds the queue, so it
+      // is the one that stays.
+      if (exited) throw goneAfterExit()
+      if (detached) throw goneAfterDetach()
+      if (command.includes('\r') || command.includes('\n')) {
+        throw new Error(
+          'herdr-host: submitLine() refuses an embedded submit character (\\r or \\n) — ' +
+            'pane.send_text does not submit, so it would be typed literally. Pass the bare ' +
+            'command; submitLine sends the Enter key itself.',
+        )
+      }
+      // Text first, then Enter, each awaited: an unacknowledged text followed by a
+      // blind Enter submits whatever was already at the prompt. The PAIR is queued
+      // as one unit, so a fire-and-forget actuation from another caller cannot land
+      // between the text and the Enter that submits it.
+      await enqueue(async () => {
+        // RE-CHECKED HERE, AND IT IS NOT THE SAME CHECK AS THE ONE AT THE DOOR.
+        //
+        // A QUEUE MOVES THE MOMENT OF EXECUTION AWAY FROM THE MOMENT OF THE CHECK, so
+        // every precondition tested before enqueueing is a claim about a world that
+        // may have moved by the time the work runs. The window is real: hold an
+        // earlier actuation, call this, let polling settle the child, release the
+        // hold — without this line the text and Enter go to a vanished pane.
+        //
+        // It THROWS rather than dropping, which is where it differs from the
+        // fire-and-forget path's identical-looking guard. `write`/`writeKey` are
+        // no-op-safe by contract and a queued one is simply discarded; this is the
+        // acknowledged seam a caller REPORTS an outcome from, so "the child went while
+        // you were waiting" has to reach that caller. Resolving quietly would record a
+        // context reset that never happened — the defect this whole method exists for.
+        throwIfAbandoned()
+        if (exited) throw goneAfterExit()
+        if (detached) throw goneAfterDetach()
+        await beforeSubmit?.()
+        throwIfAbandoned()
+        if (exited) throw goneAfterExit()
+        if (detached) throw goneAfterDetach()
+        if (command !== '') {
+          await client.call('pane.send_text', { pane_id: paneId, text: frameBracketedPaste(command) })
+        }
+        // The text RPC can outlive the caller. Its late acknowledgement must not
+        // authorize the submission-bearing Enter after that caller has given up.
+        throwIfAbandoned()
+        await client.call('pane.send_keys', { pane_id: paneId, keys: herdrKeyNames(['enter']) })
+      })
+    }
+
     const child: PtyChild = {
       async readScreen() {
         const result = await client.call('pane.read', {
@@ -616,83 +698,8 @@ export class HerdrHost implements AdoptableHost {
           })
         })
       },
-      async submitLine(command, signal) {
-        // ACKNOWLEDGED, IN ORDER, AND NOT NO-OP-SAFE. `write`/`writeKey` are
-        // fire-and-forget by interface; this is the variant a caller may build a
-        // claim on, so every way it can fail has to reach the caller — including
-        // "the child is already gone", which a silent no-op would report as a
-        // completed reset.
-        const goneAfterExit = (): Error =>
-          new Error(
-            `herdr-host: submitLine(${JSON.stringify(command)}) after exit — the pane is gone, so ` +
-              'the command was not submitted. Reporting success here would let a caller record a ' +
-              'context reset that never happened.',
-          )
-        /** DISTINCT FROM `goneAfterExit`, because the facts are opposite: there the pane
-         *  is gone, here the pane is alive and this wrapper has given it up. Both must
-         *  throw rather than resolve — `submitLine` is the acknowledged seam a caller
-         *  REPORTS an outcome from, and a silent no-op would record a context reset that
-         *  never happened. Typing into a pane we handed over is the worse of the two. */
-        const goneAfterDetach = (): Error =>
-          new Error(
-            `herdr-host: submitLine(${JSON.stringify(command)}) after DETACH — this wrapper has given ` +
-              'up the pane and must not type into it. The pane is still running and belongs to ' +
-              'whichever incarnation adopted it; nothing was submitted.',
-          )
-        const throwIfAbandoned = (): void => {
-          if (signal?.aborted) {
-            throw new DOMException(
-              `herdr-host: submitLine(${JSON.stringify(command)}) was abandoned before submission`,
-              'AbortError',
-            )
-          }
-        }
-        // No abandonment check HERE. There was one, and it was redundant: the guard at the
-        // head of the enqueued work below catches an already-abandoned caller a tick
-        // later, and removing this one left every case green while removing both went
-        // red — two guards for one property. The enqueued guard is the one that also
-        // covers abandonment that lands WHILE a prior actuation holds the queue, so it
-        // is the one that stays.
-        if (exited) throw goneAfterExit()
-        if (detached) throw goneAfterDetach()
-        if (command.includes('\r') || command.includes('\n')) {
-          throw new Error(
-            'herdr-host: submitLine() refuses an embedded submit character (\\r or \\n) — ' +
-              'pane.send_text does not submit, so it would be typed literally. Pass the bare ' +
-              'command; submitLine sends the Enter key itself.',
-          )
-        }
-        // Text first, then Enter, each awaited: an unacknowledged text followed by a
-        // blind Enter submits whatever was already at the prompt. The PAIR is queued
-        // as one unit, so a fire-and-forget actuation from another caller cannot land
-        // between the text and the Enter that submits it.
-        await enqueue(async () => {
-          // RE-CHECKED HERE, AND IT IS NOT THE SAME CHECK AS THE ONE AT THE DOOR.
-          //
-          // A QUEUE MOVES THE MOMENT OF EXECUTION AWAY FROM THE MOMENT OF THE CHECK, so
-          // every precondition tested before enqueueing is a claim about a world that
-          // may have moved by the time the work runs. The window is real: hold an
-          // earlier actuation, call this, let polling settle the child, release the
-          // hold — without this line the text and Enter go to a vanished pane.
-          //
-          // It THROWS rather than dropping, which is where it differs from the
-          // fire-and-forget path's identical-looking guard. `write`/`writeKey` are
-          // no-op-safe by contract and a queued one is simply discarded; this is the
-          // acknowledged seam a caller REPORTS an outcome from, so "the child went while
-          // you were waiting" has to reach that caller. Resolving quietly would record a
-          // context reset that never happened — the defect this whole method exists for.
-          throwIfAbandoned()
-          if (exited) throw goneAfterExit()
-          if (detached) throw goneAfterDetach()
-          if (command !== '') {
-            await client.call('pane.send_text', { pane_id: paneId, text: frameBracketedPaste(command) })
-          }
-          // The text RPC can outlive the caller. Its late acknowledgement must not
-          // authorize the submission-bearing Enter after that caller has given up.
-          throwIfAbandoned()
-          await client.call('pane.send_keys', { pane_id: paneId, keys: herdrKeyNames(['enter']) })
-        })
-      },
+      submitLine,
+      submitLineGuarded: (command, beforeSubmit, signal) => submitLine(command, signal, beforeSubmit),
       kill(signal) {
         if (exited) return
         // CLASSIFY BEFORE LATCHING. SIGINT is the one real signal herdr can deliver

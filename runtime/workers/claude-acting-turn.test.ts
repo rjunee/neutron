@@ -38,6 +38,7 @@ async function fixture() {
     project_id: 'project', topic_id: 'topic', grants: { roots: [], tools: 'edit-and-run', writable: true, network: true },
     session: { sessionId: 'session', cwd: dir, toolSurface: LIVE_AGENT_TOOL_NAMES.join(','), acquireTurn: async () => { acquired++; return () => { released++ } },
       child: { pid: 123, write() {}, kill() {}, hasExited: () => false, exited: new Promise(() => {}),
+        readScreen: async () => '────────\n❯\n────────\n? for shortcuts',
         submitLine: async text => { commands.push(text); await writeFile(input.request.result.path, '{}') } } },
   }
   return { dir, input, binding, commands, released: () => released, acquired: () => acquired, run: () => createClaudeActingTurn(binding)(input) }
@@ -49,6 +50,53 @@ test('Claude positive control forwards spec and effort into one acknowledged lin
   expect(f.commands).toHaveLength(1)
   expect(f.commands[0]).not.toMatch(/[\r\n]/)
   expect(JSON.parse(f.commands[0]!.slice(f.commands[0]!.indexOf('{')))).toEqual({ ...f.input.spec, effort: 'high' })
+  expect(f.released()).toBe(1)
+})
+
+test.each(['draft', 'multiline', 'busy', 'unreadable', 'unavailable', 'unguarded'] as const)('composer %s blocks before terminal input or submission evidence, then an empty composer works', async state => {
+  const f = await fixture()
+  f.binding.session = { ...f.binding.session, child: { ...f.binding.session.child, paneHandle: 'fixture-pane',
+    submitLineGuarded: async (line, preflight, signal) => { await preflight(); await f.binding.session.child.submitLine!(line, signal) } } }
+  const submitted: string[] = []
+  f.binding.onDispatchSubmitted = () => submitted.push('dispatch')
+  f.binding.onNativeDispatchEvidence = event => submitted.push(event.kind)
+  const clear = f.binding.session.child.readScreen!
+  const guarded = f.binding.session.child.submitLineGuarded!
+  if (state === 'unguarded') delete f.binding.session.child.submitLineGuarded
+  else if (state === 'unavailable') delete f.binding.session.child.readScreen
+  else f.binding.session.child.readScreen = async () => {
+    if (state === 'unreadable') throw new Error('transport lost')
+    const input = state === 'draft' ? '❯ private draft' : state === 'multiline' ? '❯\n  unsent continuation' : '❯'
+    return `────────\n${input}\n────────\n${state === 'busy' ? 'esc to interrupt' : '? for shortcuts'}`
+  }
+  const outcome = await f.run()
+  expect(outcome).toMatchObject({ kind: 'blocked', on: expect.stringContaining('dispatch was not submitted') })
+  expect(JSON.stringify(outcome)).not.toContain('private draft')
+  expect(f.commands).toEqual([])
+  expect(submitted).toEqual(['not-submitted'])
+  expect(f.released()).toBe(1)
+  f.binding.session.child.readScreen = clear
+  f.binding.session.child.submitLineGuarded = guarded
+  expect(await f.run()).toEqual({ kind: 'turn-ended' })
+  expect(f.commands).toHaveLength(1)
+  expect(submitted).toEqual(['not-submitted', 'dispatch', 'submission-started'])
+})
+
+test('a screen read that returns after abandonment never pastes or presses Enter', async () => {
+  const f = await fixture()
+  f.binding.session = { ...f.binding.session, child: { ...f.binding.session.child, paneHandle: 'fixture-pane',
+    submitLineGuarded: async (line, preflight, signal) => { await preflight(); await f.binding.session.child.submitLine!(line, signal) } } }
+  const read = barrier(), finish = barrier()
+  f.binding.session.child.readScreen = async () => { read.release(); await finish.reached; return '────────\n❯\n────────' }
+  const controller = new AbortController()
+  f.input.signal = controller.signal
+  const running = f.run()
+  await read.reached
+  controller.abort()
+  expect((await running).kind).toBe('unknown')
+  finish.release()
+  await Bun.sleep(10)
+  expect(f.commands).toEqual([])
   expect(f.released()).toBe(1)
 })
 
@@ -432,6 +480,7 @@ test('project runner preserves the correlated provider block and never replays t
 test('real HerdrHost child submits text then Enter in the existing pane', async () => {
   const f = await fixture()
   const server = new FakeHerdrServer()
+  server.screen = '────────\n❯\n────────\n? for shortcuts'
   const calls: string[] = []
   const host = new HerdrHost({ connect: async () => ({ call: async (method, params) => {
     const result = await server.call(method, params)
@@ -449,9 +498,61 @@ test('real HerdrHost child submits text then Enter in the existing pane', async 
   expect(calls).toEqual(['pane.send_text', 'pane.send_keys'])
 })
 
+test('a queued Herdr write becomes a draft before dispatch preflight and is never submitted', async () => {
+  const f = await fixture()
+  const server = new FakeHerdrServer()
+  server.screen = '────────\n❯\n────────'
+  const prior = barrier(), drain = barrier()
+  const host = new HerdrHost({ connect: async () => ({ call: async (method, params) => {
+    if (method === 'pane.send_text' && params?.text === 'queued draft') {
+      prior.release()
+      await drain.reached
+      server.screen = '────────\n❯ queued draft\n────────'
+    }
+    return server.call(method, params)
+  } }), pollIntervalMs: 1000 })
+  const child = await host.attach(server.paneId, { cwd: f.dir, env: {} })
+  cleanups.push(async () => { child.detach?.() })
+  f.binding.session = { ...f.binding.session, child }
+  const evidence: string[] = []
+  f.binding.onNativeDispatchEvidence = event => evidence.push(event.kind)
+  child.write('queued draft')
+  await prior.reached
+  const running = f.run()
+  await Bun.sleep(10)
+  drain.release()
+  expect(await running).toMatchObject({ kind: 'blocked', on: expect.stringContaining('dispatch was not submitted') })
+  expect(evidence).toEqual(['not-submitted'])
+  expect(server.delivered.filter(call => call.method === 'pane.send_text' || call.method === 'pane.send_keys'))
+    .toEqual([{ method: 'pane.send_text', params: { pane_id: server.paneId, text: 'queued draft' } }])
+})
+
+test('retained Bun PTY dispatch remains usable without an external pane or rendered screen', async () => {
+  const f = await fixture()
+  f.input.timeout_ms = 2000
+  f.input.request = { ...f.input.request, budget: { wall_ms: 2000 } }
+  const { bunTerminalHost } = await import('../adapters/claude-code/persistent/bun-terminal-host.ts')
+  let received = '', recorded = false
+  const child = await bunTerminalHost.spawn(['/bin/cat'], { cwd: f.dir, env: {}, onScreen: screen => {
+    received = screen
+    if (!recorded && screen.includes('Execute the prompt in this JSON dispatch specification: ')) {
+      recorded = true
+      void writeFile(f.input.request.result.path, '{}')
+    }
+  } })
+  child.beginOutput?.()
+  cleanups.push(async () => { child.kill(); await child.exited })
+  expect(child.paneHandle).toBeUndefined()
+  expect(child.readScreen).toBeUndefined()
+  f.binding.session = { ...f.binding.session, child }
+  expect(await f.run()).toEqual({ kind: 'turn-ended' })
+  expect(received).toContain('Execute the prompt in this JSON dispatch specification: ')
+})
+
 test('host budget abandonment prevents a late herdr text acknowledgement from submitting Enter', async () => {
   const f = await fixture()
   const server = new FakeHerdrServer()
+  server.screen = '────────\n❯\n────────\n? for shortcuts'
   let releaseText!: () => void
   const textHeld = new Promise<void>(resolve => { releaseText = resolve })
   const calls: string[] = []
@@ -483,6 +584,7 @@ test('host budget abandonment prevents a late herdr text acknowledgement from su
 test('abandonment while a PRIOR actuation holds the herdr queue stops before send_text', async () => {
   const f = await fixture()
   const server = new FakeHerdrServer()
+  server.screen = '────────\n❯\n────────\n? for shortcuts'
   let releasePrior!: () => void
   const priorHeld = new Promise<void>(resolve => { releasePrior = resolve })
   const calls: string[] = []

@@ -1,5 +1,6 @@
 import { open, readdir, readFile, stat } from 'node:fs/promises'
 import { SUBAGENT_TOOL_NAME } from './claude-tool-contract.ts'
+import { claudeComposerEmpty } from './claude-composer.ts'
 import { join, relative, resolve, sep } from 'node:path'
 import { setTimeout as delay } from 'node:timers/promises'
 import { isDeepStrictEqual } from 'node:util'
@@ -34,6 +35,8 @@ export interface ClaudeActingSession {
 }
 
 const toolRank: Record<ToolGrant, number> = { none: 0, 'read-only': 1, edit: 2, 'edit-and-run': 3 }
+
+class ComposerBlocked extends Error {}
 
 export const DISPATCH_TIMEOUT_MS = 35_000
 
@@ -274,10 +277,36 @@ export function createClaudeActingTurn(binding: ClaudeActingSession, clock: Obse
         const dispatch = 'Execute the prompt in this JSON dispatch specification: ' + JSON.stringify({ ...spec, effort: request.effort })
         const boundary = await transcriptBoundary(transcript)
         if (expired()) return beforeDispatchExpired()
-        binding.onDispatchSubmitted?.()
-        submitted = true
-        binding.onNativeDispatchEvidence?.({ kind: 'submission-started' })
-        await child.submitLine!(dispatch, stopped)
+        const markSubmitted = () => {
+          binding.onDispatchSubmitted?.()
+          submitted = true
+          binding.onNativeDispatchEvidence?.({ kind: 'submission-started' })
+        }
+        if (child.paneHandle !== undefined) {
+          // Externally addressable panes can contain input from another client.
+          // Check inside the host's actuation queue, after earlier writes drain,
+          // and before submission evidence. The retained in-process PTY has no
+          // external pane; its acknowledged dispatch contract remains unchanged.
+          try {
+            if (!child.submitLineGuarded) throw new ComposerBlocked('cannot guard input')
+            await child.submitLineGuarded(dispatch, async () => {
+              if (!child.readScreen) throw new ComposerBlocked('cannot be observed')
+              let screen: string
+              try { screen = await child.readScreen() }
+              catch { throw new ComposerBlocked('could not be read') }
+              stopped.throwIfAborted()
+              if (expired()) throw new DOMException('Dispatch budget expired', 'AbortError')
+              if (!claudeComposerEmpty(screen)) throw new ComposerBlocked('is occupied, busy, or unrecognized')
+              markSubmitted()
+            }, stopped)
+          } catch (error) {
+            if (!(error instanceof ComposerBlocked)) throw error
+            return { kind: 'blocked' as const, on: `Claude composer ${error.message}; dispatch was not submitted. Preserve the draft and retry after the composer is empty.` }
+          }
+        } else {
+          markSubmitted()
+          await child.submitLine!(dispatch, stopped)
+        }
         const dispatchDeadline = Math.min(deadline, clock.now() + DISPATCH_TIMEOUT_MS)
         let accepted = false
         let seen: SubagentObservation = { directory: 'absent', metaFiles: 0, matched: false }
