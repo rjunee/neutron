@@ -77,3 +77,26 @@ included the worktree metadata pointer and reported pre-existing tree findings
 against the local denylist. Publication still requires the canonical exported
 tree purity gate, complete shared-host checks, and exact-head CI. No live run
 was restarted and no deployment was performed by this change.
+
+The first CI run exposed fixture inheritance of `NEUTRON_TEST_SHARD` from
+the outer CI runner (`.github/workflows/ci.yml:467`). Production intentionally
+refuses portable proof for that subset selector
+(`open/wiring/project-build-dependencies.ts:273`). The nested complete-suite
+fixtures now scope out and restore only that outer selector
+(`open/__tests__/project-suite-identity.test.ts:9`,
+`open/__tests__/project-build-e2e.test.ts:2838`). Paired controls explicitly
+retain shard refusal for both admitted command forms and recover portability
+after removal (`open/__tests__/project-suite-identity.test.ts:188`, `:230`).
+The deadline mutation fixture also anchors the final deadline guard at its
+current location, still requiring an assertion failure when it is removed
+(`open/__tests__/project-suite-identity-mutation.test.ts:40`). Production code
+and receipt admission were unchanged by this CI correction.
+
+Correction verification with an inherited CI shard selector: all 30 identity
+and deadline/byte mutation tests passed (249 assertions); the final five portable
+identity cases, including both shard-refusal controls, passed (49 assertions).
+All nine prepared retry cases plus shell startup exclusion passed (204
+assertions). Both TypeScript checks passed. The complete 395-case E2E file was
+not repeated for this fixture-only correction; the earlier full-file result
+above remains attributed to its measured revision. Exact-head CI remains the
+publication gate.

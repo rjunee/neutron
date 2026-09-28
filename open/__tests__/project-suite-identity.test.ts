@@ -1,4 +1,4 @@
-import { afterEach, expect, spyOn, test } from 'bun:test'
+import { afterEach, beforeEach, expect, spyOn, test } from 'bun:test'
 import { chmod, copyFile, link, mkdir, mkdtemp, readFile, rename, rm, stat, symlink, utimes, writeFile } from 'node:fs/promises'
 import { join } from 'node:path'
 import { tmpdir } from 'node:os'
@@ -6,6 +6,16 @@ import { PROJECT_INSTALLED_IDENTITY_TIMEOUT_MS, projectInstalledTreeIdentity, pr
 import { spawnCapture } from '@neutronai/trident/git-mode.ts'
 
 const roots: string[] = []
+let outerShard: string | undefined
+beforeEach(() => {
+  // CI shards this test file; the nested fixture represents a complete suite.
+  outerShard = process.env.NEUTRON_TEST_SHARD
+  delete process.env.NEUTRON_TEST_SHARD
+})
+afterEach(() => {
+  if (outerShard === undefined) delete process.env.NEUTRON_TEST_SHARD
+  else process.env.NEUTRON_TEST_SHARD = outerShard
+})
 const projectSuiteIdentityMeasurement = (root: string, head?: string) => measureSuiteIdentity(root, head, 'bun test')
 afterEach(async () => { for (const root of roots.splice(0)) await rm(root, { recursive: true, force: true }) })
 async function fixture() {
@@ -178,6 +188,13 @@ test('portable identity pins effective environment and host executable bytes wit
 test('portable proof admits only a measured command closure and refuses tracked external inputs', async () => {
   const { root, git } = await fixture()
   expect((await projectSuiteIdentityMeasurement(root))?.portableIdentity).toMatch(/^[a-f0-9]{64}$/)
+  try {
+    process.env.NEUTRON_TEST_SHARD = '1/4'
+    const sharded = await projectSuiteIdentityMeasurement(root)
+    expect(sharded?.identity).toMatch(/^[a-f0-9]{64}$/)
+    expect(sharded?.portableIdentity).toBeUndefined()
+  } finally { delete process.env.NEUTRON_TEST_SHARD }
+  expect((await projectSuiteIdentityMeasurement(root))?.portableIdentity).toMatch(/^[a-f0-9]{64}$/)
   for (const command of [undefined, 'npm test', 'bun test; echo passed', 'bun test test.ts', 'export UNKNOWN=1\nbun test']) {
     const observed = await measureSuiteIdentity(root, undefined, command)
     expect(observed?.identity).toMatch(/^[a-f0-9]{64}$/)
@@ -210,6 +227,13 @@ test('portable first-party runner requires exact host source and measures utilit
   const command = 'export NEUTRON_TEST_JOBS=1\nexport NEUTRON_TEST_CONCURRENCY=2\nbash scripts/run-tests.sh'
   const before = await measureSuiteIdentity(root, undefined, command)
   expect(before?.portableIdentity).toMatch(/^[a-f0-9]{64}$/)
+  try {
+    process.env.NEUTRON_TEST_SHARD = '1/4'
+    const sharded = await measureSuiteIdentity(root, undefined, command)
+    expect(sharded?.identity).toMatch(/^[a-f0-9]{64}$/)
+    expect(sharded?.portableIdentity).toBeUndefined()
+  } finally { delete process.env.NEUTRON_TEST_SHARD }
+  expect((await measureSuiteIdentity(root, undefined, command))?.portableIdentity).toBe(before!.portableIdentity)
   const toolDir = await mkdtemp(join(tmpdir(), 'portable-runner-tools-')); roots.push(toolDir)
   const oldPath = process.env.PATH, tool = join(toolDir, 'awk')
   await writeFile(tool, '#!/bin/sh\nexit 0\n', { mode: 0o755 })

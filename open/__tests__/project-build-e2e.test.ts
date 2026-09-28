@@ -2835,6 +2835,13 @@ test(`prepared host suite receipt survives reconstruction and handles ${changed}
 
 for (const changed of ['none', 'head', 'dependencies', 'environment', 'strategy', 'subset', 'legacy', 'red', 'invalidated'] as const)
 test(`prepared cross-run suite proof handles ${changed} inputs in a distinct retry worktree`, async () => {
+  // The outer CI shard selects this test, not the nested project's full suite.
+  const outerShard = process.env.NEUTRON_TEST_SHARD
+  cleanups.push(() => {
+    if (outerShard === undefined) delete process.env.NEUTRON_TEST_SHARD
+    else process.env.NEUTRON_TEST_SHARD = outerShard
+  })
+  delete process.env.NEUTRON_TEST_SHARD
   const task = 'Record a note in NOTES.md and verify the resulting change with the complete regression suite'
   const f = await fixture({ bunWorkspace: true, bunWorkspaceDefaultConfig: true, dispatchTask: task,
     testStrategy: 'TEST EXECUTION: run the card regression.\n\nFull suite (stage 2), run exactly this:\n\n  bun test\n' })
