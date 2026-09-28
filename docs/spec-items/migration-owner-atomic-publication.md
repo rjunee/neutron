@@ -31,12 +31,18 @@ also allowed the losing runner to migrate under an unverified owner.
       exclusive first claim never grants migration authority. An unreadable
       dangling marker is not treated as absence.
       verify: `bun test gateway/nexus/__tests__/init-contention.test.ts migrations/__tests__/migrate-owner-refusal.test.ts`
+- [x] A complete same-checkout claim published at the existence-check boundary
+      is read and validated, preserving both competing appends and one ledger
+      row. Foreign, malformed, and dangling claims arriving at that boundary
+      still refuse without schema or ledger writes; existence is checked before
+      reading so an earlier ENOENT cannot misclassify a newly published owner.
+      verify: `bun test gateway/nexus/__tests__/init-contention.test.ts`
 - [x] An unsuccessful private first-claim write leaves no public malformed
       marker. Existing tolerance for an absent marker on unwritable media and
       in-memory databases remains usable. Failure to publish completed bytes
       on writable media refuses rather than silently proceeding unclaimed.
       verify: the same consuming and ownership-refusal suites
-- [x] Semantic mutants for partial publication, skipped winner validation,
+- [x] Semantic mutants for read-before-stat, partial publication, skipped winner validation,
       foreign-owner admission, and own-owner refusal make the Nexus consuming
       assertions fail while the unchanged control passes.
       verify: `bun test migrations/__tests__/migrate-owner-publication-mutation.test.ts`

@@ -1438,14 +1438,15 @@ export function applyMigrations(db: Database, dir: string = HERE): ApplyResult {
     const runnerOwner = canonicalOwnerPath(HERE)
     const readMarker = (): string | null => {
       try {
+        // Establish absence before reading. A read-first ENOENT followed by a
+        // successful stat can be a complete claim published between the calls.
+        // lstat also preserves dangling symlinks as existing, unreadable claims.
+        try { lstatSync(markerPath) } catch (statError) {
+          if (statError instanceof Error && 'code' in statError && statError.code === 'ENOENT') return null
+          throw statError
+        }
         return readFileSync(markerPath, 'utf8')
       } catch (err) {
-        if (err instanceof Error && 'code' in err && err.code === 'ENOENT') {
-          // A dangling symlink is an existing unreadable claim, not an empty home.
-          try { lstatSync(markerPath) } catch (statError) {
-            if (statError instanceof Error && 'code' in statError && statError.code === 'ENOENT') return null
-          }
-        }
         const detail = err instanceof Error ? err.message : String(err)
         throw new Error(
           formatOwnerRefusal(
