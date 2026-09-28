@@ -188,10 +188,11 @@ refresh imports the task after its native completion receipt is available.
 
 This is an explicit operator seam, not automatic dispatch instrumentation. Repeat
 registration for every intended root or child turn, including follow-up turns;
-parent linkage does not inherit PR ownership or phase. A newly spawned session's
-rollout/config pair must also be registered in the private refresh service. This
-tool neither discovers those sources nor intercepts the native `spawn_agent`
-tool. An active registered turn has no imported phase until native completion;
+parent linkage does not inherit PR ownership or phase. The separate configured
+session-root collector above discovers a newly spawned session's rollout without
+per-file registration. This registration tool neither discovers those sources
+nor intercepts the native `spawn_agent` tool. An active registered turn has no
+imported phase until native completion;
 registration time is not a task start. Unregistered turns remain unknown. An
 automatic dispatcher producer and open-task native snapshots remain outstanding
 under #1313. Successful manual registration does not establish all-PR coverage.

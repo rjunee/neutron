@@ -120,6 +120,14 @@ spans carry unknown tokens unless a provider actually attributed usage.
       authenticated dashboard API. Missing usage remains unknown. Registration
       does not claim automatic source discovery or active-task timing.
       Verify: `bun test scripts/build-timeline-register-turn.test.ts`.
+- [ ] A collector configured with one authorized native `sessions` root discovers
+      new dated rollout receipts without per-file registration. A bounded scan
+      refuses symlink/path replacement and changed file identity, and does not
+      export transcript content or paths. Discovery alone does not attribute
+      command or task phases: ordinary commands need explicit time-scoped PR
+      binding (or exact successful GitHub PR evidence), and completed tasks need
+      exact session/turn PR and phase bindings.
+      Verify: `bun test scripts/build-timeline-codex-discover.test.ts`.
 - [ ] Page/fragment/JSON deny anonymous and incorrect credentials and serve valid
       credentials. Missing credentials refuse startup; read-only SQLite does not
       migrate or write workflow state. Browser refresh is 30 seconds, with stale
