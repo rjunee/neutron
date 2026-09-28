@@ -55,7 +55,7 @@ import { CodegenTaskNotFoundError, type CodegenOrchestrator } from '@neutronai/c
 import { buildTridentTerminator } from '@neutronai/trident/terminate.ts'
 import { projectInstallAvailableBytes } from '../wiring/project-build-dependencies.ts'
 import { afterAll, afterEach, beforeEach, expect, spyOn, test } from 'bun:test'
-import { chmod, copyFile, cp, link, lstat, mkdir, mkdtemp, readFile, readdir, realpath, rename, rm, stat, symlink, utimes, writeFile } from 'node:fs/promises'
+import { chmod, copyFile, cp, link, lstat, mkdir, mkdtemp, open, readFile, readdir, realpath, rename, rm, stat, symlink, utimes, writeFile } from 'node:fs/promises'
 import { tmpdir } from 'node:os'
 import { dirname, join } from 'node:path'
 import { fileURLToPath } from 'node:url'
@@ -947,6 +947,7 @@ async function fixture(options: { taskSequence?: boolean; moreTasks?: boolean; s
   /** See `WorkerWorld.hostLedger` (default `false`). */
   hostLedger?: boolean
   bunWorkspace?: boolean
+  bunWorkspaceDefaultConfig?: boolean
   bunWorkspacePeer?: boolean
   bunWorkspaceSibling?: boolean
   manifest?: Record<string, unknown>
@@ -1014,6 +1015,7 @@ async function fixture(options: { taskSequence?: boolean; moreTasks?: boolean; s
   const gitSeedKey = JSON.stringify({ suiteExit: options.suiteExit ?? 0,
     namedSuiteFailure: options.namedSuiteFailure ?? false, verboseSuiteDiagnostic: options.verboseSuiteDiagnostic ?? false,
     manifest: options.manifest, bunWorkspace: options.bunWorkspace ?? false,
+    bunWorkspaceDefaultConfig: options.bunWorkspaceDefaultConfig ?? false,
     bunWorkspacePeer: options.bunWorkspacePeer ?? false, bunWorkspaceSibling: options.bunWorkspaceSibling ?? false,
     spec: options.spec ?? false, seedLedger: options.seedLedger ?? true, moreTasks: options.moreTasks ?? false })
   // Workspace fixtures prove real pack/install/lifecycle behavior on every
@@ -1059,7 +1061,7 @@ async function fixture(options: { taskSequence?: boolean; moreTasks?: boolean; s
       await writeFile(join(repo, '.gitignore'), 'node_modules/\n')
       await writeFile(join(repo, 'package.json'), JSON.stringify({ name: 'fixture', private: true, workspaces: options.bunWorkspaceSibling ? ['app', 'cores/sdk'] : ['app'],
         scripts: { postinstall: 'touch lifecycle-ran' } }))
-      await writeFile(join(repo, 'bunfig.toml'), '[install]\nlinker = "isolated"\n')
+      if (!options.bunWorkspaceDefaultConfig) await writeFile(join(repo, 'bunfig.toml'), '[install]\nlinker = "isolated"\n')
       await writeFile(join(repo, 'vendor', 'package', 'package.json'), JSON.stringify({ name: 'fixture-dependency', version: '1.0.0', main: 'index.js' }))
       await writeFile(join(repo, 'vendor', 'package', 'index.js'), 'exports.message = "dependency consumed"\n')
       const packed = await spawnCapture(['tar', '-czf', 'dependency.tgz', 'package'], join(repo, 'vendor'))
@@ -2831,6 +2833,138 @@ test(`prepared host suite receipt survives reconstruction and handles ${changed}
   expect(f.world.dispatches).toHaveLength(0)
 }, 120_000)
 
+for (const changed of ['none', 'head', 'dependencies', 'environment', 'strategy', 'subset', 'legacy', 'red', 'invalidated'] as const)
+test(`prepared cross-run suite proof handles ${changed} inputs in a distinct retry worktree`, async () => {
+  // The outer CI shard selects this test, not the nested project's full suite.
+  const outerShard = process.env.NEUTRON_TEST_SHARD
+  cleanups.push(() => {
+    if (outerShard === undefined) delete process.env.NEUTRON_TEST_SHARD
+    else process.env.NEUTRON_TEST_SHARD = outerShard
+  })
+  delete process.env.NEUTRON_TEST_SHARD
+  const task = 'Record a note in NOTES.md and verify the resulting change with the complete regression suite'
+  const f = await fixture({ bunWorkspace: true, bunWorkspaceDefaultConfig: true, dispatchTask: task,
+    testStrategy: 'TEST EXECUTION: run the card regression.\n\nFull suite (stage 2), run exactly this:\n\n  bun test\n' })
+  let suites = 0
+  const original = f.context.runSuite!
+  f.context.runSuite = async (...args) => { suites++; return original(...args) }
+  const preparedFirst = await f.prepare()
+  const sourceWorktree = f.store.get(f.row.id)!.worktree!
+  await writeFile(join(sourceWorktree, 'app', 'proof.test.ts'),
+    'import { expect, test } from "bun:test"\nimport { message } from "fixture-dependency"\n'
+    + `test("installed dependency is consumed", () => expect(message).toBe(${JSON.stringify(changed === 'red' ? 'wrong dependency' : 'dependency consumed')}))\n`)
+  expect((await spawnCapture(['git', 'add', 'app/proof.test.ts'], sourceWorktree)).ok).toBe(true)
+  expect((await spawnCapture(['git', 'commit', '-m', 'test: real portable suite'], sourceWorktree)).ok).toBe(true)
+  const first = await createProjectBuildHost(preparedFirst)
+  // Keep the removed directory's inode allocated until the destination exists;
+  // otherwise the filesystem may legitimately recycle it after host cleanup.
+  const sourceDirectory = await open(sourceWorktree, 'r')
+  cleanups.push(() => sourceDirectory.close())
+  const sourceInode = (await sourceDirectory.stat()).ino
+  first.deps.reviewReadiness = async snapshot => {
+    const assessment = await first.deps.reviewSuite!(snapshot, 1)
+    expect(assessment).toMatchObject({ kind: 'known' })
+    if (assessment.kind === 'known') expect(assessment.findings.length).toBe(changed === 'red' ? 1 : 0)
+    return { kind: 'unknown', detail: 'Publication interruption after completed full-suite proof' }
+  }
+  const interrupted = await first.run({ mode: 'implementation', start: 'fresh' }, new AbortController().signal)
+  expect(interrupted.kind, why(f, interrupted)).toBe('unknown')
+  expect(suites).toBe(1)
+  const source = f.store.stageEvents(f.row.id).filter(event => event.stage === 'build-suite-receipt').at(-1)!
+  const saved = JSON.parse(source.meta!)
+  expect(saved).toMatchObject({ version: 2, receipt: { runId: f.row.id, round: 1, scope: 'full-suite', report: { hostExitCode: changed === 'red' ? 1 : 0 } } })
+  expect(saved.portableIdentity).toMatch(/^[a-f0-9]{64}$/)
+  if (['subset', 'legacy', 'invalidated'].includes(changed)) {
+    const value = JSON.parse(source.meta!)
+    if (changed === 'subset') value.receipt.scope = 'subset'
+    if (changed === 'legacy') { value.version = 1; delete value.portableIdentity }
+    if (changed === 'invalidated') delete value.receipt
+    await f.store.recordStageEvent(f.row.id, 'build-suite-receipt', JSON.stringify(value))
+  }
+  await f.store.update(f.row.id, { phase: 'failed', worktree: null })
+  const dispatched = await dispatchBoardBoundBuild({ task, board_item_id: 'retry-card' }, {
+    store: f.store, projectAdmission: fixtureDispatchAdmission(f.db), project_slug: 'project', repo_path: f.repo,
+    board: { get: () => ({ id: 'retry-card', title: task, design_doc_ref: null, linked_run_id: f.row.id }), attachRun: async () => {} },
+    resolveBuildRepo: async () => f.repo, resolveMergeMode: async () => 'pr',
+  })
+  expect(dispatched.ok, JSON.stringify(dispatched)).toBe(true)
+  if (!dispatched.ok) throw Error('Expected dispatched retry')
+  f.input.run = dispatched.run
+  if (changed === 'strategy') f.input.test_strategy += '\nAdditional host strategy identity.'
+  if (changed === 'environment') {
+    const previous = process.env.PORTABLE_SUITE_FIXTURE_INPUT
+    cleanups.push(() => {
+      if (previous === undefined) delete process.env.PORTABLE_SUITE_FIXTURE_INPUT
+      else process.env.PORTABLE_SUITE_FIXTURE_INPUT = previous
+    })
+    process.env.PORTABLE_SUITE_FIXTURE_INPUT = 'changed'
+  }
+  const prepared = await f.prepare()
+  const destination = f.store.get(dispatched.run.id)!.worktree!
+  expect(destination).not.toBe(sourceWorktree)
+  expect((await stat(destination)).ino).not.toBe(sourceInode)
+  if (changed === 'head') expect((await spawnCapture(['git', 'commit', '--allow-empty', '-m', 'test: moved suite revision'], destination)).ok).toBe(true)
+  if (changed === 'dependencies') await writeFile(join(destination, 'node_modules', 'proof-input'), 'changed installed input')
+  const host = await createProjectBuildHost(prepared)
+  const measured = await host.deps.measure()
+  if (measured.kind !== 'known') throw Error('Expected measured retry')
+  if (changed === 'head') {
+    // The review gate additionally binds the build checkpoint. A moved head
+    // cannot inherit that authority even after publication acquires fresh proof.
+    expect(await host.deps.reviewSuite!(measured.value, 1)).toMatchObject({ kind: 'unknown' })
+    expect(await host.deps.publicationSuite(measured.value)).toMatchObject({ kind: 'known', findings: [] })
+  } else {
+    const assessment = await host.deps.reviewSuite!(measured.value, 1)
+    expect(assessment).toMatchObject({ kind: 'known' })
+    if (assessment.kind === 'known') expect(assessment.findings.length).toBe(changed === 'red' ? 1 : 0)
+  }
+  expect(suites).toBe(changed === 'none' ? 1 : 2)
+  const adopted = JSON.parse(f.store.stageEvents(dispatched.run.id).filter(event => event.stage === 'build-suite-receipt').at(-1)!.meta!)
+  expect(adopted.receipt).toMatchObject({ runId: dispatched.run.id, head: measured.value.head, round: 1, scope: 'full-suite' })
+  if (changed === 'none') expect(adopted.adoptedFrom).toEqual({ runId: f.row.id, eventId: source.id, round: 1 })
+  else expect(adopted.adoptedFrom).toBeUndefined()
+  expect(f.store.stageEvents(f.row.id).find(event => event.id === source.id)!.meta).toBe(source.meta)
+  expect(f.world.dispatches.map(dispatch => dispatch.role)).toEqual(['plan', 'build'])
+  if (changed === 'none') {
+    f.world.dispatches.length = 0
+    const completed = await host.run({ mode: 'implementation', start: 'resume' }, new AbortController().signal)
+    expect(completed.kind, why(f, completed)).toBe('merged')
+    expect(suites).toBe(1)
+    expect(f.world.dispatches.some(dispatch => ['plan', 'build', 'fix'].includes(dispatch.role))).toBe(false)
+    expect(standaloneReview(f.world).measuredHead).toBe(measured.value.head)
+  }
+}, 120_000)
+
+test('prepared host suite excludes shell startup files while executing the full suite', async () => {
+  const f = await fixture({ bunWorkspace: true })
+  const shellHome = join(f.dir, 'suite-shell-home')
+  await mkdir(shellHome)
+  const profile = join(shellHome, '.bash_profile')
+  const startup = join(shellHome, 'startup.sh')
+  const sentinel = join(shellHome, 'startup-consumed')
+  await writeFile(profile, 'printf profile >> "$HOME/startup-consumed"\n')
+  await writeFile(startup, 'printf environment >> "$HOME/startup-consumed"\n')
+  // Both tripwires really write when consumed. The host must exclude both.
+  expect((await spawnCapture(['bash', '--noprofile', '--norc', '-c', '. "$HOME/.bash_profile"'], shellHome,
+    { HOME: shellHome, BASH_ENV: startup })).ok).toBe(true)
+  expect(await readFile(sentinel, 'utf8')).toContain('environment')
+  expect(await readFile(sentinel, 'utf8')).toContain('profile')
+  await rm(sentinel)
+  const original = f.context.runSuite!
+  let suites = 0
+  f.context.runSuite = async (argv, cwd, env, timeout) => {
+    suites++
+    expect(argv.slice(0, 4)).toEqual(['bash', '--noprofile', '--norc', '-c'])
+    return original(argv, cwd, { HOME: shellHome, BASH_ENV: startup, ...env }, timeout)
+  }
+  const host = await createProjectBuildHost(await f.prepare())
+  const measured = await host.deps.measure()
+  if (measured.kind !== 'known') throw Error('Expected measured suite fixture')
+  expect(await host.deps.publicationSuite(measured.value)).toMatchObject({ kind: 'known', findings: [] })
+  expect(suites).toBe(1)
+  expect(await lstat(sentinel).then(() => true, () => false)).toBe(false)
+}, 120_000)
+
 test('shared dependency hardlink churn retains one host suite through publication', async () => {
   const f = await fixture({ bunWorkspace: true })
   const originalSuite = f.context.runSuite!
@@ -4368,7 +4502,7 @@ async function efficiencyBenchmark(scenario: EfficiencyScenario, scheduling: Eff
     expect(lastCheckpoint(f).pending).toBeUndefined()
   } else await run('fresh')
   for (const call of f.world.dispatches) counts[call.role as 'plan' | 'build' | 'fix' | 'review' | 'synthesis']++
-  counts.proof = f.commands.filter(argv => argv[0] === 'bash' && argv[1] === '-lc' && (argv[2] ?? '').includes('bash scripts/ci/suite.sh')).length
+  counts.proof = f.commands.filter(argv => argv[0] === 'bash' && argv[1] === '--noprofile' && (argv[4] ?? '').includes('bash scripts/ci/suite.sh')).length
   // Both schedules run in this test. Retire the first fixture's identity so the
   // second project's acquisition cannot select the predecessor's granted roots.
   pool.delete(f.key)
@@ -4427,10 +4561,10 @@ test('pr mode drives plan, build, review, publish and merge to a terminal merged
   // pinned the WRAPPER's shape as if it were the contract; what this case actually
   // owns is that the named command ran exactly once, in the worktree.
   const suiteRuns = f.commands.filter(argv =>
-    argv[0] === 'bash' && argv[1] === '-lc' && (argv[2] ?? '').includes('bash scripts/ci/suite.sh'))
+    argv[0] === 'bash' && argv[1] === '--noprofile' && (argv[4] ?? '').includes('bash scripts/ci/suite.sh'))
   expect(suiteRuns).toHaveLength(1)
   // And the transcript is redirected away from the gateway rather than captured.
-  expect(suiteRuns[0]![2]).toMatch(/>>.*suite-round-\d+\.log.* 2>&1/)
+  expect(suiteRuns[0]![4]).toMatch(/>>.*suite-round-\d+\.log.* 2>&1/)
 
   // Publication and merge really happened: real push, real PR, real base move.
   expect(f.github.prs).toHaveLength(1)
@@ -4451,7 +4585,7 @@ test('owned draft reaches ready only after approval, host suite and merge gates,
     expect(f.github.prs[0]?.isDraft).toBe(true)
     expect(f.store.get(f.row.id)?.published_pr).toBe(f.github.prs[0]?.number)
     expect(f.world.dispatches.some(dispatch => dispatch.role === 'synthesis')).toBe(true)
-    expect(f.commands.some(argv => argv[0] === 'bash' && (argv[2] ?? '').includes('bash scripts/ci/suite.sh'))).toBe(true)
+    expect(f.commands.some(argv => argv[0] === 'bash' && (argv[4] ?? '').includes('bash scripts/ci/suite.sh'))).toBe(true)
     const result = await mergeGate(...args)
     gatePassed = result.kind === 'allow'
     return result
@@ -4579,8 +4713,8 @@ test.each(['missing', 'reconciled'] as const)('fresh retry with %s prior work re
   expect(roles.slice(0, 3)).toEqual(['plan', 'build', 'review'])
   expect(roles.filter(role => role === 'review').length).toBeGreaterThanOrEqual(2)
   expect(roles).toContain('synthesis')
-  expect(f.commands.filter(argv => argv[0] === 'bash' && argv[1] === '-lc'
-    && (argv[2] ?? '').includes('bash scripts/ci/suite.sh'))).toHaveLength(1)
+  expect(f.commands.filter(argv => argv[0] === 'bash' && argv[1] === '--noprofile'
+    && (argv[4] ?? '').includes('bash scripts/ci/suite.sh'))).toHaveLength(1)
 }, 300_000)
 
 test('fresh retry refuses an open PR whose durable publication provenance names another PR', async () => {
@@ -4707,7 +4841,7 @@ test('a missing full-suite command stops with its own cause and runs no suite', 
     expect(outcome.detail).toContain('No full-suite command is derivable from the test strategy')
     expect(outcome.detail).not.toContain('Host-observed review suite exit code is missing or unreadable')
   }
-  expect(f.commands.filter(argv => argv[0] === 'bash' && argv[1] === '-lc' && (argv[2] ?? '').includes('suite.sh'))).toEqual([])
+  expect(f.commands.filter(argv => argv[0] === 'bash' && argv[1] === '--noprofile' && (argv[4] ?? '').includes('suite.sh'))).toEqual([])
 }, 300_000)
 
 test('task_sequence strategy with a single task reaches the same terminal merged outcome', async () => {

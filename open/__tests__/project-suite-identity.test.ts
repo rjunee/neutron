@@ -1,11 +1,22 @@
-import { afterEach, expect, spyOn, test } from 'bun:test'
+import { afterEach, beforeEach, expect, spyOn, test } from 'bun:test'
 import { chmod, copyFile, link, mkdir, mkdtemp, readFile, rename, rm, stat, symlink, utimes, writeFile } from 'node:fs/promises'
 import { join } from 'node:path'
 import { tmpdir } from 'node:os'
-import { PROJECT_INSTALLED_IDENTITY_TIMEOUT_MS, projectInstalledTreeIdentity, projectSuiteIdentity, projectSuiteIdentityMeasurement } from '../wiring/project-build-dependencies.ts'
+import { PROJECT_INSTALLED_IDENTITY_TIMEOUT_MS, projectInstalledTreeIdentity, projectSuiteIdentity, projectSuiteIdentityMeasurement as measureSuiteIdentity } from '../wiring/project-build-dependencies.ts'
 import { spawnCapture } from '@neutronai/trident/git-mode.ts'
 
 const roots: string[] = []
+let outerShard: string | undefined
+beforeEach(() => {
+  // CI shards this test file; the nested fixture represents a complete suite.
+  outerShard = process.env.NEUTRON_TEST_SHARD
+  delete process.env.NEUTRON_TEST_SHARD
+})
+afterEach(() => {
+  if (outerShard === undefined) delete process.env.NEUTRON_TEST_SHARD
+  else process.env.NEUTRON_TEST_SHARD = outerShard
+})
+const projectSuiteIdentityMeasurement = (root: string, head?: string) => measureSuiteIdentity(root, head, 'bun test')
 afterEach(async () => { for (const root of roots.splice(0)) await rm(root, { recursive: true, force: true }) })
 async function fixture() {
   const root = await mkdtemp(join(tmpdir(), 'suite-identity-'))
@@ -86,6 +97,183 @@ test('suite component evidence describes the same aggregate and isolates install
   for (const privateValue of [root, 'private-input.js', 'private original bytes', 'private modified bytes']) {
     expect(JSON.stringify([before, after])).not.toContain(privateValue)
   }
+})
+
+test('portable suite proof matches distinct installations but binds bytes, permissions, links and ignored inputs', async () => {
+  const { root, git } = await fixture()
+  await writeFile(join(root, '.gitignore'), 'node_modules/\n.env\n')
+  await git('add', '.gitignore')
+  await git('commit', '-qm', 'ignored environment fixture')
+  const sibling = `${root}-retry`; roots.push(sibling)
+  await git('worktree', 'add', '--detach', sibling, 'HEAD')
+  // Deliberately reverse creation order; readdir order is not identity.
+  for (const [tree, entries] of [[root, ['a.js', 'b.js']], [sibling, ['b.js', 'a.js']]] as const) {
+    await mkdir(join(tree, 'node_modules'))
+    for (const name of entries) await writeFile(join(tree, 'node_modules', name), 'same bytes')
+    await symlink('a.js', join(tree, 'node_modules', 'selected.js'))
+    await mkdir(join(tree, 'app', 'node_modules'), { recursive: true })
+    await symlink('../../node_modules/a.js', join(tree, 'app', 'node_modules', 'local.js'))
+  }
+  const source = await projectSuiteIdentityMeasurement(root)
+  const retry = await projectSuiteIdentityMeasurement(sibling)
+  expect(source?.portableIdentity).toMatch(/^[a-f0-9]{64}$/)
+  expect(retry?.portableIdentity).toBe(source!.portableIdentity)
+  expect(retry?.identity).not.toBe(source!.identity)
+  const input = join(sibling, 'node_modules', 'a.js')
+  const originalMode = (await stat(input)).mode & 0o777
+  await writeFile(input, 'different bytes')
+  expect((await projectSuiteIdentityMeasurement(sibling))?.portableIdentity).not.toBe(source!.portableIdentity)
+  await writeFile(input, 'same bytes')
+  expect((await projectSuiteIdentityMeasurement(sibling))?.portableIdentity).toBe(source!.portableIdentity)
+  await chmod(input, 0o755)
+  expect((await projectSuiteIdentityMeasurement(sibling))?.portableIdentity).not.toBe(source!.portableIdentity)
+  await chmod(input, originalMode)
+  const selected = join(sibling, 'node_modules', 'selected.js')
+  await rm(selected)
+  await symlink('b.js', selected)
+  expect((await projectSuiteIdentityMeasurement(sibling))?.portableIdentity).not.toBe(source!.portableIdentity)
+  await rm(selected)
+  await symlink('a.js', selected)
+  expect((await projectSuiteIdentityMeasurement(sibling))?.portableIdentity).toBe(source!.portableIdentity)
+  await writeFile(join(sibling, '.env'), 'PRIVATE_FIXTURE_VALUE=hidden')
+  const unknown = await projectSuiteIdentityMeasurement(sibling)
+  expect(unknown?.identity).toMatch(/^[a-f0-9]{64}$/)
+  expect(unknown?.portableIdentity).toBeUndefined()
+  await rm(join(sibling, '.env'))
+  expect((await projectSuiteIdentityMeasurement(sibling))?.portableIdentity).toBe(source!.portableIdentity)
+  await rm(selected)
+  await symlink(input, selected)
+  expect((await projectSuiteIdentityMeasurement(sibling))?.portableIdentity).toBeUndefined()
+})
+
+test('portable identity pins effective environment and host executable bytes without exposing either', async () => {
+  const { root } = await fixture()
+  const first = await projectSuiteIdentityMeasurement(root)
+  expect(first?.portableIdentity).toMatch(/^[a-f0-9]{64}$/)
+  const previousStartup = process.env.BASH_ENV
+  try {
+    process.env.BASH_ENV = '/unread/ambient-startup'
+    expect((await projectSuiteIdentityMeasurement(root))?.portableIdentity).toBe(first!.portableIdentity)
+  } finally {
+    if (previousStartup === undefined) delete process.env.BASH_ENV
+    else process.env.BASH_ENV = previousStartup
+  }
+  const previous = process.env.NEUTRON_SUITE_IDENTITY_TEST
+  try {
+    process.env.NEUTRON_SUITE_IDENTITY_TEST = 'private test environment'
+    const changed = await projectSuiteIdentityMeasurement(root)
+    expect(changed?.portableIdentity).toMatch(/^[a-f0-9]{64}$/)
+    expect(changed?.portableIdentity).not.toBe(first!.portableIdentity)
+    expect(JSON.stringify(changed)).not.toContain('private test environment')
+  } finally {
+    if (previous === undefined) delete process.env.NEUTRON_SUITE_IDENTITY_TEST
+    else process.env.NEUTRON_SUITE_IDENTITY_TEST = previous
+  }
+  expect((await projectSuiteIdentityMeasurement(root))?.portableIdentity).toBe(first!.portableIdentity)
+  const toolDir = await mkdtemp(join(tmpdir(), 'portable-suite-tools-')); roots.push(toolDir)
+  const shell = join(toolDir, 'bash'), oldPath = process.env.PATH
+  await writeFile(shell, '#!/bin/sh\nexit 0\n', { mode: 0o755 })
+  try {
+    process.env.PATH = `${toolDir}:${oldPath ?? ''}`
+    const before = await projectSuiteIdentityMeasurement(root)
+    expect(before?.portableIdentity).toMatch(/^[a-f0-9]{64}$/)
+    await writeFile(shell, '#!/bin/sh\nexit 1\n', { mode: 0o755 })
+    expect((await projectSuiteIdentityMeasurement(root))?.portableIdentity).not.toBe(before!.portableIdentity)
+  } finally {
+    if (oldPath === undefined) delete process.env.PATH
+    else process.env.PATH = oldPath
+  }
+})
+
+test('portable proof admits only a measured command closure and refuses tracked external inputs', async () => {
+  const { root, git } = await fixture()
+  expect((await projectSuiteIdentityMeasurement(root))?.portableIdentity).toMatch(/^[a-f0-9]{64}$/)
+  try {
+    process.env.NEUTRON_TEST_SHARD = '1/4'
+    const sharded = await projectSuiteIdentityMeasurement(root)
+    expect(sharded?.identity).toMatch(/^[a-f0-9]{64}$/)
+    expect(sharded?.portableIdentity).toBeUndefined()
+  } finally { delete process.env.NEUTRON_TEST_SHARD }
+  expect((await projectSuiteIdentityMeasurement(root))?.portableIdentity).toMatch(/^[a-f0-9]{64}$/)
+  for (const command of [undefined, 'npm test', 'bun test; echo passed', 'bun test test.ts', 'export UNKNOWN=1\nbun test']) {
+    const observed = await measureSuiteIdentity(root, undefined, command)
+    expect(observed?.identity).toMatch(/^[a-f0-9]{64}$/)
+    expect(observed?.portableIdentity).toBeUndefined()
+  }
+  const previous = process.env.NEUTRON_TEST_ROOT
+  try {
+    process.env.NEUTRON_TEST_ROOT = '/unmeasured/fixture'
+    expect((await projectSuiteIdentityMeasurement(root))?.portableIdentity).toBeUndefined()
+  } finally {
+    if (previous === undefined) delete process.env.NEUTRON_TEST_ROOT
+    else process.env.NEUTRON_TEST_ROOT = previous
+  }
+  await symlink('/unmeasured/external-fixture', join(root, 'external-fixture'))
+  await git('add', 'external-fixture')
+  await git('commit', '-qm', 'tracked link fixture')
+  const linked = await projectSuiteIdentityMeasurement(root)
+  expect(linked?.identity).toMatch(/^[a-f0-9]{64}$/)
+  expect(linked?.portableIdentity).toBeUndefined()
+})
+
+test('portable first-party runner requires exact host source and measures utility tools', async () => {
+  const { root, git } = await fixture()
+  const paths = ['scripts/run-tests.sh', 'scripts/lib/discover-test-files.sh', 'scripts/ci/verify-workspace-deps.ts']
+  await mkdir(join(root, 'scripts', 'lib'), { recursive: true })
+  await mkdir(join(root, 'scripts', 'ci'), { recursive: true })
+  for (const path of paths) await copyFile(new URL(`../../${path}`, import.meta.url), join(root, path))
+  await git('add', 'scripts')
+  await git('commit', '-qm', 'host runner fixture')
+  const command = 'export NEUTRON_TEST_JOBS=1\nexport NEUTRON_TEST_CONCURRENCY=2\nbash scripts/run-tests.sh'
+  const before = await measureSuiteIdentity(root, undefined, command)
+  expect(before?.portableIdentity).toMatch(/^[a-f0-9]{64}$/)
+  try {
+    process.env.NEUTRON_TEST_SHARD = '1/4'
+    const sharded = await measureSuiteIdentity(root, undefined, command)
+    expect(sharded?.identity).toMatch(/^[a-f0-9]{64}$/)
+    expect(sharded?.portableIdentity).toBeUndefined()
+  } finally { delete process.env.NEUTRON_TEST_SHARD }
+  expect((await measureSuiteIdentity(root, undefined, command))?.portableIdentity).toBe(before!.portableIdentity)
+  const toolDir = await mkdtemp(join(tmpdir(), 'portable-runner-tools-')); roots.push(toolDir)
+  const oldPath = process.env.PATH, tool = join(toolDir, 'awk')
+  await writeFile(tool, '#!/bin/sh\nexit 0\n', { mode: 0o755 })
+  try {
+    process.env.PATH = `${toolDir}:${oldPath ?? ''}`
+    const original = await measureSuiteIdentity(root, undefined, command)
+    expect(original?.portableIdentity).toMatch(/^[a-f0-9]{64}$/)
+    await writeFile(tool, '#!/bin/sh\nexit 1\n', { mode: 0o755 })
+    expect((await measureSuiteIdentity(root, undefined, command))?.portableIdentity).not.toBe(original!.portableIdentity)
+  } finally {
+    if (oldPath === undefined) delete process.env.PATH
+    else process.env.PATH = oldPath
+  }
+  await writeFile(join(root, paths[1]!), '# modified discovery\n')
+  await git('add', 'scripts')
+  await git('commit', '-qm', 'changed runner fixture')
+  expect((await measureSuiteIdentity(root, undefined, command))?.portableIdentity).toBeUndefined()
+})
+
+test('portable Bun configuration permits confined tracked first-party preloads and refuses external config', async () => {
+  const { root, git } = await fixture()
+  const measure = () => projectSuiteIdentityMeasurement(root)
+  expect((await measure())?.portableIdentity).toMatch(/^[a-f0-9]{64}$/)
+  const config = await readFile(new URL('../../bunfig.toml', import.meta.url), 'utf8')
+  await writeFile(join(root, 'bunfig.toml'), config)
+  await git('add', 'bunfig.toml')
+  await git('commit', '-qm', 'missing preload fixture')
+  expect((await measure())?.portableIdentity).toBeUndefined()
+  const preloads = (Bun.TOML.parse(config) as { test: { preload: string[] } }).test.preload
+  await mkdir(join(root, 'tests', 'support'), { recursive: true })
+  for (const preload of preloads) await copyFile(new URL(`../../${preload}`, import.meta.url), join(root, preload))
+  await git('add', 'tests')
+  await git('commit', '-qm', 'confined tracked preloads fixture')
+  expect((await measure())?.portableIdentity).toMatch(/^[a-f0-9]{64}$/)
+  await writeFile(join(root, 'bunfig.toml'), '[test]\npreload = ["/unmeasured/external-preload.ts"]\n')
+  await git('add', 'bunfig.toml')
+  await git('commit', '-qm', 'external preload config fixture')
+  const external = await measure()
+  expect(external?.identity).toMatch(/^[a-f0-9]{64}$/)
+  expect(external?.portableIdentity).toBeUndefined()
 })
 
 test('manifest resolution refuses incomplete successful output but accepts a complete empty mapping', async () => {

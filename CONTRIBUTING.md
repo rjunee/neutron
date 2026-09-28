@@ -190,8 +190,10 @@ validation. Run both required local checks, then record their exact local receip
 once they finish: tested revision, commands, outcomes and any unverified work.
 Freeze and push one final publication head containing that record before starting
 CI. Reuse proof only when its existing measured identity contract matches; a
-subset, another checkout or a changed identity is not a full-suite pass. Recording
-evidence does not transfer a receipt to a different identity. Avoid cosmetic
+subset or a changed identity is not a full-suite pass. Another checkout requires
+the explicit host-measured portable retry-proof contract in
+`docs/spec-items/trident-build-efficiency.md`; recording evidence alone does not
+transfer a receipt. Avoid cosmetic
 follow-up commits that invalidate exact-head CI. Necessary fixes require their
 affected proof again.
 

@@ -165,13 +165,13 @@ test('option sources preserve pin, selected provider, workflow and unavailable s
   })
   // The command still reaches the shell verbatim; what is new is that the child's
   // own output goes to the run's transcript file instead of into the gateway's heap.
-  expect(f.commands.at(-1)!.slice(0, 2)).toEqual(['bash', '-lc'])
+  expect(f.commands.at(-1)!.slice(0, 4)).toEqual(['bash', '--noprofile', '--norc', '-c'])
   const log = join(f.dir, 'state', encodeURIComponent(f.input.run.id), 'suite-round-2.log')
-  expect(f.commands.at(-1)![2]!).toBe(suiteScript('bun test', log))
+  expect(f.commands.at(-1)![4]!).toBe(suiteScript('bun test', log))
   // Not only "whatever `suiteScript` says" — the log the round writes to is named
   // here independently, and the redirect and the command are both asserted present.
-  expect(f.commands.at(-1)![2]!).toContain(`>>'${log}' 2>&1`)
-  expect(f.commands.at(-1)![2]!).toContain('\nbun test\n')
+  expect(f.commands.at(-1)![4]!).toContain(`>>'${log}' 2>&1`)
+  expect(f.commands.at(-1)![4]!).toContain('\nbun test\n')
   // A claim about a DIFFERENT revision answers nothing.
   expect(await options.policy.reviewSuite!.readCheckpoint({ head: 'b'.repeat(40), diff: '', pr: null }, 2)).toBeNull()
   const strategy = f.input.test_strategy
@@ -316,7 +316,7 @@ test('review always selects the full suite even when intermediate worker instruc
     .toEqual({ hostExitCode: 0 })
   const suites = f.commands.slice(before).filter(argv => argv[0] === 'bash')
   expect(suites).toHaveLength(2)
-  expect(suites[0]![2]).toContain('\nbun test\n')
+  expect(suites[0]![4]).toContain('\nbun test\n')
 })
 
 test('publication describes the completed change and retains the card as supporting context', async () => {
@@ -937,7 +937,7 @@ test('the full-suite command parses from the real generator, knob and plain shap
     const seen: string[] = []
     const host = f.context.runSuite!
     f.context.runSuite = async (argv, cwd, env, timeoutMs) => {
-      if (argv[0] === 'bash') { seen.push(argv[2]!); return { ok: true, exit_code: 0, stdout: '', stderr: '' } }
+      if (argv[0] === 'bash') { seen.push(argv[4]!); return { ok: true, exit_code: 0, stdout: '', stderr: '' } }
       return host(argv, cwd, env, timeoutMs)
     }
     const report = (await options.policy.reviewSuite!.readCheckpoint({ head, diff: '', pr: null }, 1))?.report

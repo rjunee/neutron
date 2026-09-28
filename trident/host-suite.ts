@@ -24,6 +24,10 @@ type SuiteCommandResult = HostCommandResult & { cleanup?: SuiteCleanupReport }
 export type SuiteCommandRunner = (argv: string[], cwd?: string, env?: Record<string, string>,
   timeoutMs?: number, signal?: AbortSignal) => Promise<SuiteCommandResult>
 
+/** Governed suites use an explicit non-login shell. Inherited startup hooks
+ * must not add unmeasured commands or change the suite environment. */
+export const HOST_SUITE_ENV = Object.freeze({ BASH_ENV: '' })
+
 const log = createLogger('trident')
 const ownershipError = () => new Error('Host suite process ownership or cleanup was not confirmed')
 
@@ -124,6 +128,7 @@ const spawnOwnedSuite: SuiteCommandRunner = async (argv, cwd, env, timeoutMs, si
 export async function runHostSuite(options: {
   argv: string[]
   cwd: string
+  env?: Record<string, string>
   timeoutMs: number
   signal: AbortSignal
   isRunActive(): boolean
@@ -141,7 +146,7 @@ export async function runHostSuite(options: {
   const poll = setInterval(observe, 100)
   poll.unref()
   try {
-    const result = await (options.run ?? spawnOwnedSuite)(options.argv, options.cwd, undefined, options.timeoutMs, controller.signal)
+    const result = await (options.run ?? spawnOwnedSuite)(options.argv, options.cwd, options.env, options.timeoutMs, controller.signal)
     // Cancellation concurrent with a zero exit cannot mint a success receipt.
     observe()
     if (controller.signal.aborted) throw new Error(String(controller.signal.reason))

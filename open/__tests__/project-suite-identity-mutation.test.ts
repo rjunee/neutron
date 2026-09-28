@@ -37,7 +37,7 @@ test('installed identity deadline mutations reject both false unavailability and
     expect(control.output).toContain('3 pass')
     for (const [find, replacement, failed] of [
       ['export const PROJECT_INSTALLED_IDENTITY_TIMEOUT_MS = 30_000', 'export const PROJECT_INSTALLED_IDENTITY_TIMEOUT_MS = 5000', 'admits a complete slow walk'],
-      ["  if (performance.now() >= deadline) return refuse('deadline')\n  return hash.digest('hex')", "  return hash.digest('hex')", 'refuses complete output'],
+      ["  if (performance.now() >= deadline) return refuse('deadline')\n  if (portable", "  if (portable", 'refuses complete output'],
       ['installedEntries(root, batch, deadline, run)', 'installedEntries(root, batch, performance.now() + PROJECT_INSTALLED_IDENTITY_TIMEOUT_MS, run)', 'carries the remaining budget'],
     ]) {
       expect(prepared.split(find!)).toHaveLength(2)

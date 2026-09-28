@@ -1,6 +1,6 @@
 import { resolveTranscriptProjectsDir } from '@neutronai/runtime/adapters/claude-code/persistent/signatures.ts'
 import { spawnCapture, type HostCommandResult } from '@neutronai/trident/git-mode.ts'
-import { runHostSuite, type SuiteCommandRunner } from '@neutronai/trident/host-suite.ts'
+import { HOST_SUITE_ENV, runHostSuite, type SuiteCommandRunner } from '@neutronai/trident/host-suite.ts'
 import { isTerminalPhase } from '@neutronai/trident/state-machine.ts'
 import { runWorktreePath } from '@neutronai/trident/merge.ts'
 import { mkdir, readFile, writeFile, lstat, open } from 'node:fs/promises'
@@ -342,7 +342,8 @@ export async function prepareProjectBuild(input: InnerLoopInput, context: Projec
   const run = { ...input.run, branch: input.run.branch ?? `trident/${input.run.slug}`,
     worktree: input.run.worktree ?? runWorktreePath(input.run.repo_path, input.run) }
   const runSuite = (command: string, logPath: string) => runHostSuite({
-    argv: ['bash', '-lc', suiteScript(command, logPath)], cwd: run.worktree,
+    argv: ['bash', '--noprofile', '--norc', '-c', suiteScript(command, logPath)], cwd: run.worktree,
+    env: HOST_SUITE_ENV,
     timeoutMs: REVIEW_SUITE_TIMEOUT_MS, signal,
     isRunActive: () => {
       const current = context.store.get(run.id)
@@ -933,7 +934,7 @@ export async function prepareProjectBuild(input: InnerLoopInput, context: Projec
   }
   return {
     substrate, workers, requestedModels, attempts: context.attempts,
-    suiteIdentity: snapshot => projectSuiteIdentityMeasurement(run.worktree, snapshot.head),
+    suiteIdentity: snapshot => projectSuiteIdentityMeasurement(run.worktree, snapshot.head, fullSuiteCommand(input.test_strategy) ?? undefined),
     testStrategies: { full: input.test_strategy ?? '', intermediate: input.test_strategy_intermediate ?? null },
     production: { store: context.store, runId: run.id, projectSlug: run.project_slug,
       repo: run.repo_path, worktree: run.worktree, branch: run.branch, baseBranch: input.base_branch,

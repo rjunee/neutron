@@ -1,8 +1,10 @@
-import { appendFile, lstat, readFile, readdir, realpath, rename, statfs, unlink, writeFile } from 'node:fs/promises'
+import { appendFile, lstat, open, readFile, readdir, realpath, rename, statfs, unlink, writeFile } from 'node:fs/promises'
 import { join, resolve, sep } from 'node:path'
+import { hostname, release } from 'node:os'
 import { createHash, randomUUID } from 'node:crypto'
 import { fileURLToPath } from 'node:url'
 import { spawnCapture } from '@neutronai/trident/git-mode.ts'
+import { HOST_SUITE_ENV } from '@neutronai/trident/host-suite.ts'
 import { createLogger } from '@neutronai/logger'
 import type { SuiteIdentityMeasurement } from '@neutronai/trident/project-suite-receipt.ts'
 
@@ -71,7 +73,8 @@ async function workspaceManifests(worktree: string, workspaces: unknown[]): Prom
   return [...files].sort()
 }
 
-async function resolutionKey(worktree: string, workspaces: unknown[], bun: string): Promise<string | null> {
+async function resolutionKey(worktree: string, workspaces: unknown[], bun: string,
+  portable?: { resolution?: string }): Promise<string | null> {
   const manifests = await workspaceManifests(worktree, workspaces)
   if (!manifests) return null
   const result = await spawnCapture([bun, '--config=/dev/null', '--no-env-file', '--eval', RESOLUTION_PROBE,
@@ -97,6 +100,11 @@ async function resolutionKey(worktree: string, workspaces: unknown[], bun: strin
     }
   }
   if (paths.some(path => !measured.has(path))) return null
+  if (portable) portable.resolution = digest(JSON.stringify(observations.map(row => [...row,
+    row[2] === null ? null : (() => {
+      const fields = measured.get(resolve(root, row[2]))!
+      return [fields[2], fields[6], fields[8], fields[9], fields[10]]
+    })()])))
   return digest(JSON.stringify(observations.map(row => [...row,
     row[2] === null ? null : measured.get(resolve(root, row[2]))])))
 }
@@ -179,7 +187,8 @@ async function installedEntries(root: string, batch: string[], deadline: number,
  * The helper never follows links: the host validates their targets before measuring
  * additional local roots, so an external tree is never traversed. */
 export async function projectInstalledTreeIdentity(worktree: string,
-  run: typeof spawnCapture = spawnCapture): Promise<string | null> {
+  run: typeof spawnCapture = spawnCapture,
+  portable?: { installed?: string; covered?: string[] }): Promise<string | null> {
   const started = performance.now()
   const refuse = (reason: string): null => {
     log.warn('suite_installed_identity_unavailable', { workspace: digest(worktree), reason,
@@ -189,10 +198,14 @@ export async function projectInstalledTreeIdentity(worktree: string,
   try {
   const root = await realpath(worktree)
   const modules = join(root, 'node_modules')
-  if (!await exists(modules)) return 'absent'
+  if (!await exists(modules)) {
+    if (portable) { portable.installed = digest('absent'); portable.covered = [] }
+    return 'absent'
+  }
   if (!(await lstat(modules)).isDirectory()) return refuse('modules-not-directory')
   const hash = createHash('sha256')
   const covered: string[] = []
+  const portableEntries = new Map<string, string[]>()
   let pending = [modules]
   const deadline = performance.now() + PROJECT_INSTALLED_IDENTITY_TIMEOUT_MS
   while (pending.length > 0) {
@@ -205,26 +218,195 @@ export async function projectInstalledTreeIdentity(worktree: string,
       const path = fields[index]!
       const kind = fields[index + 7]
       if (kind === 'l') links.push(path)
+      // Filesystem identities remain in the installation key and in the native
+      // race checks. Cross-workspace proof compares relative names and bytes.
+      if (portable) portableEntries.set(path.slice(root.length + 1), [fields[index + 3]!, kind!,
+        fields[index + 8]!, fields[index + 9]!, fields[index + 10]!, fields[index + 11]!])
     }
     hash.update(fields.join('\0') + '\0')
     // Resolve only links, in bounded groups; ordinary files require no JS stat.
     for (let offset = 0; offset < links.length; offset += 64) {
       if (performance.now() >= deadline) return refuse('deadline')
       const targets = await Promise.all(links.slice(offset, offset + 64).map(path => realpath(path)))
-      for (const actual of targets) {
+      for (const [index, actual] of targets.entries()) {
         if (!actual.startsWith(`${root}${sep}`)) return refuse('external-link')
+        if (portable) {
+          const entry = portableEntries.get(links[offset + index]!.slice(root.length + 1))!
+          // Keep the declared relative target as well as its final resolution.
+          // Absolute links are location dependent, even when currently local.
+          if (entry[2]!.startsWith('/')) portable.installed = 'nonportable'
+          entry.push(actual.slice(root.length + 1))
+        }
         if (!covered.some(base => actual === base || actual.startsWith(`${base}${sep}`))
           && !pending.includes(actual)) pending.push(actual)
       }
     }
   }
   if (performance.now() >= deadline) return refuse('deadline')
+  if (portable && portable.installed !== 'nonportable') {
+    portable.installed = digest(JSON.stringify([...portableEntries].sort(([a], [b]) => a < b ? -1 : a > b ? 1 : 0)))
+    portable.covered = covered.map(path => path.slice(root.length + 1))
+  }
   return hash.digest('hex')
   } catch (error) {
     const reason = error instanceof Error && /^(deadline|probe-timeout|probe-exit|output-limit|invalid-output|invalid-fields|path-outside-batch|invalid-metadata|unsupported-entry|missing-content|unexpected-content|workspace-not-directory|missing-python)$/.test(error.message)
       ? error.message : 'filesystem-or-process-error'
     return refuse(reason)
   }
+}
+
+const toolDigests = new Map<string, string>()
+const PORTABLE_RUNNER_FILES = ['scripts/run-tests.sh', 'scripts/lib/discover-test-files.sh',
+  'scripts/ci/verify-workspace-deps.ts']
+const PORTABLE_RUNNER_TUNING = new Set(['NEUTRON_TEST_JOBS', 'NEUTRON_TEST_CONCURRENCY',
+  'NEUTRON_TEST_CHUNK_SIZE', 'NEUTRON_TEST_TIMEOUT', 'NEUTRON_TEST_PGLITE_RETRIES',
+  'NEUTRON_TEST_PGLITE_CONCURRENCY', 'NEUTRON_TEST_PGLITE_TIMEOUT'])
+
+/** Only commands whose launcher closure the host knows can carry portable proof.
+ * An identical command string does not measure an arbitrary external runtime. */
+async function portableCommandTools(worktree: string, command?: string): Promise<string[] | null> {
+  if (!command) return null
+  for (const [name, value] of Object.entries(process.env)) {
+    if (name.startsWith('BASH_FUNC_') || name === 'NEUTRON_BUN_BIN'
+      || ['NODE_OPTIONS', 'BUN_OPTIONS', 'LD_PRELOAD', 'LD_LIBRARY_PATH'].includes(name)
+      || name.startsWith('DYLD_')) return null
+    if (name.startsWith('NEUTRON_TEST_') && (!PORTABLE_RUNNER_TUNING.has(name) || !/^\d+$/.test(value ?? ''))) return null
+  }
+  const lines = command.split('\n')
+  const executable = lines.pop()
+  for (const line of lines) {
+    const match = /^export (NEUTRON_TEST_[A-Z_]+)=([0-9]+)$/.exec(line)
+    if (!match || !PORTABLE_RUNNER_TUNING.has(match[1]!)) return null
+  }
+  if (executable === 'bun test') return []
+  if (executable !== 'bash scripts/run-tests.sh') return null
+  for (const path of PORTABLE_RUNNER_FILES) {
+    if (!(await readFile(join(worktree, path))).equals(await readFile(join(hostDirectory, path)))) return null
+  }
+  const identities: string[] = []
+  for (const name of ['dirname', 'sysctl', 'nproc', 'find', 'sort', 'grep', 'tail', 'awk',
+    'mktemp', 'rm', 'sed', 'cat', 'wc', 'tr', 'sleep']) {
+    const path = Bun.which(name, { PATH: process.env.PATH ?? '' })
+    if (!path && name !== 'sysctl' && name !== 'nproc') return null
+    identities.push(digest(JSON.stringify([name, path ? await toolContentIdentity(path) : null])))
+  }
+  return identities
+}
+/** Cache only a host tool whose complete inode signature is unchanged. Reads
+ * retain ctime and inode checks; only the portable digest omits that metadata. */
+async function toolContentIdentity(path: string): Promise<string> {
+  const actual = await realpath(path)
+  const handle = await open(actual, 'r')
+  try {
+    const before = await handle.stat({ bigint: true })
+    if (!before.isFile()) throw Error('nonregular-tool')
+    const signature = (value: typeof before) => JSON.stringify([actual, value.dev, value.ino,
+      value.mode, value.size, value.mtimeNs, value.ctimeNs].map(String))
+    const key = signature(before)
+    let content = toolDigests.get(key)
+    if (!content) {
+      const hash = createHash('sha256')
+      for await (const bytes of handle.createReadStream({ autoClose: false })) hash.update(bytes)
+      content = hash.digest('hex')
+    }
+    if (signature(await handle.stat({ bigint: true })) !== key
+      || signature(await lstat(actual, { bigint: true })) !== key) throw Error('tool-changed')
+    if (toolDigests.size > 64) toolDigests.clear()
+    toolDigests.set(key, content)
+    return digest(JSON.stringify([actual, String(before.mode), content]))
+  } finally { await handle.close() }
+}
+
+async function portableSuiteIdentity(worktree: string, revision: string, bun: string,
+  measured: { installed?: string; resolution?: string; covered?: string[] }, environment: string,
+  command?: string): Promise<string | undefined> {
+  try {
+    if (!measured.installed || measured.installed === 'nonportable' || !measured.resolution || !measured.covered) return undefined
+    const commandTools = await portableCommandTools(worktree, command)
+    if (!commandTools) return undefined
+    // A clean tracked symlink/gitlink can still read mutable external data.
+    // This first portable contract admits ordinary tracked files only.
+    const tracked = await spawnCapture(['git', 'ls-files', '--stage', '-z'], worktree)
+    if (!tracked.ok || tracked.stdout.split('\0').filter(Boolean)
+      .some(entry => !/^(100644|100755) [a-f0-9]{40,64} 0\t/.test(entry))) return undefined
+    // Bun loads project test preloads before discovery. An unchanged config can
+    // name mutable external code, so only the known first-party config belongs
+    // to this portable contract, with each preload a confined tracked file.
+    const bunfig = join(worktree, 'bunfig.toml')
+    if (await exists(bunfig)) {
+      const known = await readFile(join(hostDirectory, 'bunfig.toml'))
+      if (!(await readFile(bunfig)).equals(known)) return undefined
+      const parsed = Bun.TOML.parse(known.toString()) as { test?: { preload?: unknown } }
+      const preloads = parsed.test?.preload
+      if (!Array.isArray(preloads) || !preloads.every(path => typeof path === 'string' && path.startsWith('./'))) return undefined
+      const root = await realpath(worktree)
+      const trackedPaths = new Set(tracked.stdout.split('\0').filter(Boolean).map(entry => entry.slice(entry.indexOf('\t') + 1)))
+      for (const preload of preloads) {
+        const path = resolve(root, preload)
+        if (!path.startsWith(`${root}${sep}`) || !trackedPaths.has(path.slice(root.length + 1))
+          || !(await lstat(path)).isFile() || await realpath(path) !== path) return undefined
+      }
+    }
+    // Ignored dotenv, generated artifacts and other unmeasured suite inputs
+    // cannot become invisible merely because git reports a clean checkout.
+    const ignored = await spawnCapture(['git', 'ls-files', '--others', '--ignored', '--exclude-standard', '-z'], worktree)
+    if (!ignored.ok || ignored.stdout.length > 16 * 1024 * 1024) return undefined
+    const supplemental = new Set<string>()
+    for (const path of ignored.stdout.split('\0').filter(Boolean)) {
+      if (measured.covered.some(base => path === base || path.startsWith(`${base}/`))) continue
+      const parts = path.split('/'), modulesIndex = parts.indexOf('node_modules')
+      if (modulesIndex < 0) return undefined
+      supplemental.add(parts.slice(0, modulesIndex + 1).join('/'))
+    }
+    // Bun also creates workspace-local node_modules links. They may resolve
+    // into the already measured root store but their own declared targets and
+    // permissions still need evidence. Keep this out of installation identity.
+    const additional: [string, string[]][] = []
+    const root = await realpath(worktree)
+    const deadline = performance.now() + PROJECT_INSTALLED_IDENTITY_TIMEOUT_MS
+    for (const base of [...supplemental].sort()) {
+      const fields = await installedEntries(root, [join(root, base)], deadline, spawnCapture)
+      for (let index = 0; index < fields.length; index += 12) {
+        if (performance.now() >= deadline) return undefined
+        const path = fields[index]!, kind = fields[index + 7]!
+        const entry = [fields[index + 3]!, kind, fields[index + 8]!, fields[index + 9]!, fields[index + 10]!, fields[index + 11]!]
+        if (kind === 'l') {
+          if (entry[2]!.startsWith('/')) return undefined
+          const target = await realpath(path)
+          if (!target.startsWith(`${root}${sep}`)) return undefined
+          const relative = target.slice(root.length + 1)
+          if (![...measured.covered, ...supplemental].some(base => relative === base || relative.startsWith(`${base}/`))) return undefined
+          entry.push(relative)
+        }
+        additional.push([path.slice(root.length + 1), entry])
+      }
+    }
+    if (performance.now() >= deadline) return undefined
+    additional.sort(([a], [b]) => a < b ? -1 : a > b ? 1 : 0)
+    const tools: string[] = []
+    for (const name of ['bash', 'git', 'python3']) {
+      const path = Bun.which(name, { PATH: process.env.PATH ?? '' })
+      if (!path) return undefined
+      tools.push(await toolContentIdentity(path))
+    }
+    tools.push(await toolContentIdentity(bun), await toolContentIdentity(process.execPath))
+    const runner = createHash('sha256')
+    for (const path of [...PORTABLE_RUNNER_FILES, 'trident/host-suite.ts', 'trident/lane-processes.py', 'trident/git-mode.ts', 'open/wiring/project-build.ts',
+      'open/wiring/project-build-dependencies.ts', 'open/wiring/project-build-installed-tree.py', 'scripts/ci/verify-workspace-deps.ts']) {
+      runner.update(path).update(await readFile(join(hostDirectory, path)))
+    }
+    if (environment !== executionEnvironmentIdentity()) return undefined
+    return digest(JSON.stringify(['portable-suite-v1', 'controlled-shell-v1', command, commandTools, revision, measured.installed, measured.resolution, additional,
+      process.platform, process.arch, release(), hostname(), process.version, Bun.version,
+      process.getuid?.(), process.getgid?.(), process.getgroups?.().sort((a, b) => a - b), process.umask(),
+      tools, runner.digest('hex'), environment]))
+  } catch { return undefined }
+}
+
+function executionEnvironmentIdentity(): string {
+  // Only the digest leaves this function; environment values can be credentials.
+  return digest(JSON.stringify(Object.entries({ ...process.env, ...HOST_SUITE_ENV })
+    .sort(([a], [b]) => a < b ? -1 : a > b ? 1 : 0)))
 }
 
 /** Fresh host measurement for suite reuse. Unknown or dirty inputs never reuse
@@ -234,7 +416,8 @@ export async function projectSuiteIdentity(worktree: string, expectedHead?: stri
 }
 
 /** The aggregate and its diagnostic components come from one measurement. */
-export async function projectSuiteIdentityMeasurement(worktree: string, expectedHead?: string): Promise<SuiteIdentityMeasurement | null> {
+export async function projectSuiteIdentityMeasurement(worktree: string, expectedHead?: string,
+  command?: string): Promise<SuiteIdentityMeasurement | null> {
   const started = performance.now()
   let probe = 'revision'
   const refuse = (reason: string): null => {
@@ -243,6 +426,7 @@ export async function projectSuiteIdentityMeasurement(worktree: string, expected
     return null
   }
   try {
+    const environment = executionEnvironmentIdentity()
     const revision = await spawnCapture(['git', 'rev-parse', '--verify', 'HEAD'], worktree)
     if (!revision.ok) return refuse('unreadable')
     if (expectedHead !== undefined && revision.stdout.trim() !== expectedHead) return refuse('head-mismatch')
@@ -263,10 +447,11 @@ export async function projectSuiteIdentityMeasurement(worktree: string, expected
     const key = await preparationKey(worktree, workspaces, bun)
     if (!key) return refuse('unavailable')
     probe = 'resolution'
-    const resolution = await resolutionKey(worktree, workspaces, bun)
+    const portable: { installed?: string; resolution?: string; covered?: string[] } = {}
+    const resolution = await resolutionKey(worktree, workspaces, bun, portable)
     if (await exists(manifestPath) && !resolution) return refuse('unavailable')
     probe = 'installed-tree'
-    const installed = await projectInstalledTreeIdentity(worktree)
+    const installed = await projectInstalledTreeIdentity(worktree, spawnCapture, portable)
     // Repositories without a manifest have no package resolution contract.
     if (!installed) return refuse('unavailable')
     probe = 'installation'
@@ -285,7 +470,8 @@ export async function projectSuiteIdentityMeasurement(worktree: string, expected
       resolution, installed, installation: digest(JSON.stringify(installation)),
       workspace_identity: digest(JSON.stringify([workspace.dev, workspace.ino])),
       elapsed_ms: Math.round(performance.now() - started) })
-    return { identity, components: { preparation: key, resolution: resolution ?? digest('null'),
+    const portableIdentity = await portableSuiteIdentity(worktree, revision.stdout.trim(), bun, portable, environment, command)
+    return { identity, ...(portableIdentity ? { portableIdentity } : {}), components: { preparation: key, resolution: resolution ?? digest('null'),
       installed: installed === 'absent' ? digest('absent') : installed,
       installation: digest(JSON.stringify(installation)),
       workspace: digest(JSON.stringify([workspace.dev, workspace.ino])) } }
