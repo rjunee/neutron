@@ -23,6 +23,34 @@ function deferred<T>() {
   const promise = new Promise<T>((yes, no) => { resolve = yes; reject = no })
   return { promise, resolve, reject }
 }
+
+for (const sibling of ['completed', 'active', 'unknown', 'wrong-head', 'deferred', 'invalid'] as const)
+test(`rate limit releases review reservation only with a settled valid sibling: ${sibling}`, async () => {
+  const f = fixture()
+  const held = deferred<SeatObservation>()
+  f.source.readSeat = async config => {
+    const row = { ...f.seat, provider: config.provider, modelId: config.modelId }
+    if (config.id === 'core') return { ...row, status: 'rate-limited' }
+    if (sibling === 'active') return held.promise
+    if (sibling === 'unknown') throw Error('Provider completion unknown')
+    if (sibling === 'wrong-head') return { ...row, head: 'b'.repeat(40) }
+    if (sibling === 'deferred') return { ...row, status: 'deferred' }
+    if (sibling === 'invalid') return { ...row, payload: null }
+    return row
+  }
+  let finished = false
+  const observing = observeReviewPanel(f.source, snapshot, 1, 'run').then(result => { finished = true; return result })
+  if (sibling === 'active') {
+    await drain()
+    expect(finished).toBe(false)
+    held.reject(Error('Provider completion remains unknown'))
+  }
+  const observed = await observing
+  expect(observed.kind).toBe('blocked')
+  if (sibling === 'completed') expect(observed).toMatchObject({ settledRateLimit: { runId: 'run', snapshot, round: 1 } })
+  else expect(observed).not.toHaveProperty('settledRateLimit')
+  expect(decideReviewPanel(approve, observed, snapshot, 1, 'run').kind).toBe('blocked')
+})
 // Drain runnable promise continuations without a wall-clock latency assertion.
 const drain = () => new Promise<void>(resolve => setImmediate(resolve))
 

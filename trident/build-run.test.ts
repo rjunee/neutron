@@ -124,6 +124,25 @@ test('fresh to merged with a fix, host gates and fake runners', async () => {
   expect([...f.runner.calls, ...f.cross.calls].every(c => c.needs_approval_decision === false)).toBe(true)
 })
 
+for (const fault of ['none', 'run', 'head', 'round', 'standalone-unknown', 'standalone-invalid'] as const)
+test(`settled rate-limit checkpoint release validates both producers: ${fault}`, async () => {
+  const f = modeFixture('single')
+  f.outcomes.set('run:review:1', fault === 'standalone-unknown'
+    ? { kind: 'unknown', detail: 'Original provider is unresolved' }
+    : f.completed({ ...f.snapshot, payload: fault === 'standalone-invalid' ? null : { verdict: 'APPROVE', findings: [] } }))
+  f.deps.observeReview = async (snapshot, round) => ({ kind: 'blocked', on: 'Review seat is rate-limited',
+    settledRateLimit: { runId: fault === 'run' ? 'another' : 'run', round: fault === 'round' ? round + 1 : round,
+      snapshot: { ...snapshot, ...(fault === 'head' ? { head: 'b'.repeat(40) } : {}) } } })
+  f.deps.reviewGate = async () => ({ kind: 'blocked', on: 'Review seat is rate-limited' })
+  const outcome = await f.run()
+  expect(outcome.kind).not.toBe('merged')
+  const latest = f.state.checkpoints.at(-1)!
+  expect(latest.stage).toBe('built')
+  expect(latest.round).toBe(1)
+  expect(latest.pending === undefined).toBe(fault === 'none')
+  expect(f.events.includes('merge')).toBe(false)
+})
+
 function pendingStrategyFixture(strategy: 'single' | 'task_sequence') {
   const f = modeFixture(strategy)
   delete f.input.executionStrategy // Omitting the hint must still require planner selection.

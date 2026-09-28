@@ -69,7 +69,11 @@ export async function readReviewSeat(source: ReviewSource, seat: ReviewSeat, sna
 
 export type ReviewPanelObservation =
   | { kind: 'observed'; runId: string; snapshot: BuildSnapshot; round: number; verdicts: VerdictTrailer[]; checkpoint: string }
-  | Extract<ReviewDecision, { kind: 'blocked' | 'unknown' }>
+  | (Extract<ReviewDecision, { kind: 'blocked' }> & {
+    /** Host evidence that every enabled producer settled, not review approval. */
+    settledRateLimit?: { runId: string; snapshot: BuildSnapshot; round: number }
+  })
+  | Extract<ReviewDecision, { kind: 'unknown' }>
 
 /** Observe independent producers without requiring the standalone verdict first. */
 export async function observeReviewPanel(source: ReviewSource | undefined, snapshot: BuildSnapshot, round: number, runId: string, builder?: Pick<ReviewSeat, 'provider' | 'modelId' | 'family'>): Promise<ReviewPanelObservation> {
@@ -88,6 +92,19 @@ export async function observeReviewPanel(source: ReviewSource | undefined, snaps
     // Consume results in configuration order so completion timing cannot choose
     // the reported refusal or reorder finding provenance.
     const observations = await Promise.allSettled(seats.map(seat => readReviewSeat(source, seat, snapshot, round)))
+    // A joined promise alone cannot establish settlement: a read may have failed
+    // while its provider still runs. Only authoritative, exact-scope observations
+    // can release a pending review for a later run. Missing/unknown/deferred work
+    // keeps its reservation, and no approval crosses this boundary.
+    const settledRateLimit = observations.every((result, index) => {
+      if (result.status !== 'fulfilled' || !result.value) return false
+      const observed = result.value
+      const seat = seats[index]!
+      return observed.runId === runId && observed.head === snapshot.head && observed.round === round
+        && observed.provider === seat.provider && observed.modelId === seat.modelId
+        && (observed.status === 'rate-limited' || (observed.status === 'completed'
+          && validateTrailer('verdict', unmarked(observed.payload)).ok))
+    })
     for (const [index, seat] of seats.entries()) {
       const result = observations[index]!
       if (result.status === 'rejected') throw result.reason
@@ -100,7 +117,9 @@ export async function observeReviewPanel(source: ReviewSource | undefined, snaps
         if (observed.status === 'deferred' && payload?.repair && typeof payload.reason === 'string') {
           return infrastructure(`Review seat ${seat.id} repair exhausted: ${payload.reason.slice(0, TERMINAL_CAUSE_MAX)}`)
         }
-        return blocked(`Review seat ${seat.id} (${seat.provider}) is ${observed.status}`)
+        return { ...blocked(`Review seat ${seat.id} (${seat.provider}) is ${observed.status}`),
+          ...(observed.status === 'rate-limited' && settledRateLimit
+            ? { settledRateLimit: { runId, snapshot: structuredClone(snapshot), round } } : {}) }
       }
       const checked = validateTrailer('verdict', unmarked(observed.payload))
       if (!checked.ok) return infrastructure(`Review seat ${seat.id} (${seat.provider}) verdict is unusable`)
@@ -125,7 +144,8 @@ export async function observeReviewPanel(source: ReviewSource | undefined, snaps
 export function decideReviewPanel(payload: unknown, observed: ReviewPanelObservation, snapshot: BuildSnapshot, round: number, runId: string, replansUsed = 0, recordProgress?: (value: ReviewProgress) => void): ReviewDecision {
   const trailer = validateTrailer('verdict', unmarked(payload))
   if (!trailer.ok) return infrastructure(`Review trailer ${trailer.reason} at ${trailer.path}`)
-  if (observed.kind !== 'observed') return observed
+  if (observed.kind === 'blocked') return blocked(observed.on)
+  if (observed.kind === 'unknown') return observed
   if (observed.runId !== runId || observed.round !== round || observed.snapshot.head !== snapshot.head
       || observed.snapshot.diff !== snapshot.diff || observed.snapshot.pr?.number !== snapshot.pr?.number
       || observed.snapshot.pr?.head !== snapshot.pr?.head || observed.snapshot.pr?.state !== snapshot.pr?.state) {

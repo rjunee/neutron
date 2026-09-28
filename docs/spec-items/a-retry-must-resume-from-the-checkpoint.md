@@ -50,6 +50,23 @@ must not be the thing that recovers continuity — it only sets `pr`, and it sil
 
 ## Acceptance
 
+### Settled review infrastructure stops
+
+A required review seat's rate-limit refusal must preserve the completed build
+for a later ordinary retry when the host proves the standalone review completed
+with a valid result and every enabled panel seat settled with a valid completion
+or a rate-limit refusal for the same run, head and round. The stop still refuses
+merge. Clear only the pending reservation; retain the checkpoint, review round,
+strategy and spend. The next run obtains its own reviews and release evidence.
+An active, unknown, missing, malformed, deferred or wrong-scope sibling cannot
+authorize clearing the reservation. Historical pending checkpoints without this
+host settlement proof remain subject to the existing refusal.
+
+Verify: `trident/gates/review-panel.test.ts`, `trident/build-run.test.ts`, and
+`open/__tests__/project-build-e2e.test.ts` (settled rate-limit cross-run retry).
+
+### Existing continuity criteria
+
 All three are met. #628 once ticked all three on evidence that did not hold; the
 measurements under `## Closed` are what these ticks rest on, and they name the loop each
 one is measured on.
