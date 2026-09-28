@@ -13,6 +13,10 @@ test.each([
 test.each([
   '', '❯', 'Some output\n❯\nMore output',
   '────────\n❯ unsent owner draft\n────────\n? for shortcuts',
+  // Styling is not input-buffer authority. Existing/adopted suggestions remain
+  // refused, just like genuine drafts; construction disables future suggestions.
+  '────────\n❯ \x1b[2msuggested continuation\x1b[22m\n────────\n? for shortcuts',
+  '────────\n❯ genuine draft\x1b[2m suggested suffix\x1b[22m\n────────\n? for shortcuts',
   '────────\n❯\n  continuation of a multiline draft\n────────\n? for shortcuts',
   '────────\n❯ quoted composer\n  ────────\n  ❯\n────────\n? for shortcuts',
   '────────\n  ❯\n────────\n? for shortcuts',

@@ -154,6 +154,25 @@ beforeEach(() => {
 })
 
 describe('wireSubstrates — instance ids + tool-bridge invariants', () => {
+  test('owner project and General constructors disable suggestions without changing unrelated substrates', async () => {
+    const { ctx, captured } = makeCtx()
+    const w = wireSubstrates(ctx)
+    expect(captured).toEqual([]) // Construction does not spawn a warm spare.
+    await drainEveryWiredSubstrate(w)
+    await drain(w.makeProjectLiveAgentSubstrate('review-project')!)
+    const owners = captured.filter(o => o.substrate_instance_id === 'cc-agent-owner')
+    expect(owners).toHaveLength(2)
+    expect(owners.map(o => o.project_id)).toContain('review-project')
+    for (const opts of owners) {
+      expect(opts.env?.CLAUDE_CODE_ENABLE_PROMPT_SUGGESTION).toBe('false')
+      expect(opts.ephemeral).not.toBe(true)
+      expect(opts.enableToolBridge).toBe(true)
+    }
+    const unrelated = captured.filter(o => o.substrate_instance_id !== 'cc-agent-owner')
+    expect(unrelated.length).toBeGreaterThan(0)
+    for (const opts of unrelated) expect(opts.env?.CLAUDE_CODE_ENABLE_PROMPT_SUGGESTION).toBeUndefined()
+  })
+
   test('cc-llm-* phase-spec substrate omits the tool bridge', async () => {
     const { ctx, captured } = makeCtx()
     const w = wireSubstrates(ctx)

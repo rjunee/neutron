@@ -1480,7 +1480,7 @@ async function drive(f: Awaited<ReturnType<typeof fixture>>): Promise<ProjectBui
   return host.run({ mode: 'implementation', start: 'fresh' }, new AbortController().signal)
 }
 
-test.each(['draft', 'unreadable', 'empty'] as const)('adopted project composer %s preserves input or completes the build through Herdr', async state => {
+test.each(['draft', 'suggestion', 'busy', 'unreadable', 'empty'] as const)('adopted project composer %s preserves input or completes the build through Herdr', async state => {
   const { HerdrHost } = await import('@neutronai/runtime/adapters/claude-code/persistent/herdr-host.ts')
   const { FakeHerdrServer } = await import('@neutronai/runtime/adapters/claude-code/persistent/__tests__/herdr-fake-server.ts')
   const f = await fixture()
@@ -1490,7 +1490,9 @@ test.each(['draft', 'unreadable', 'empty'] as const)('adopted project composer %
   const server = new FakeHerdrServer()
   let draft = state === 'draft' ? 'unsent owner text' : ''
   const original = draft
-  server.screen = `────────\n❯ ${draft}\n────────\n? for shortcuts`
+  const displayed = state === 'suggestion' ? '\x1b[2msuggested continuation\x1b[22m' : draft
+  server.screen = `────────\n❯ ${displayed}\n────────\n${state === 'busy' ? 'Working (esc to interrupt)' : '? for shortcuts'}`
+  const originalScreen = server.screen
   server.readFails = state === 'unreadable'
   const submitted: string[] = []
   let pasted = ''
@@ -1522,6 +1524,7 @@ test.each(['draft', 'unreadable', 'empty'] as const)('adopted project composer %
     expect(submitted).toEqual([])
     expect(server.delivered.filter(call => call.method === 'pane.send_text' || call.method === 'pane.send_keys')).toEqual([])
     expect(draft).toBe(original)
+    expect(server.screen).toBe(originalScreen)
     expect(f.world.dispatches).toEqual([])
     expect(f.admission.listLeases('liveChild')).toEqual([])
   }

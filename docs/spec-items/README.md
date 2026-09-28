@@ -130,6 +130,7 @@ branch is cut (standard §3.1, §3.2).
 | [`native-bun-cache-hardlinks`](native-bun-cache-hardlinks.md) | Native scratch installs reuse Bun cache hardlinks | P0 | yes |
 | [`project-herdr-workspaces`](project-herdr-workspaces.md) | Project-owned Herdr workspaces and sleep lifecycle | P0 | yes |
 | [`an-abandoned-dispatch-cannot-actuate-later`](an-abandoned-dispatch-cannot-actuate-later.md) | An abandoned dispatch cannot actuate later | P1 | — |
+| [`claude-project-prompt-suggestions`](claude-project-prompt-suggestions.md) | Keep generated suggestions out of machine-dispatched Claude composers | P1 | — |
 | [`configured-models-for-review-and-chat`](configured-models-for-review-and-chat.md) | Configure models once for review and project chat | P1 | — |
 | [`instance-project-provider-resolution`](instance-project-provider-resolution.md) | Resolve the model provider per instance and project | P1 | — |
 | [`live-agent-turn-must-know-the-owner-timezone`](live-agent-turn-must-know-the-owner-timezone.md) | Give the live agent turn the owner's timezone and local time | P1 | — |
