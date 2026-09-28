@@ -23,6 +23,7 @@ import type { ResolvedOwnerMcpServer } from '@neutronai/runtime/mcp-servers.ts'
 import { assertOwnerScope, privatePath } from '@neutronai/runtime/adapters/codex-cli/persistent/project-owner-helper-protocol.ts'
 import { abortAccountHandoff, completeAccountHandoff, prepareAccountHandoff, readGeneralOwnerAuthority } from '@neutronai/runtime/adapters/codex-cli/persistent/project-owner-account-handoff.ts'
 import { probeCodexAccountViability } from '@neutronai/runtime/adapters/codex-cli/persistent/project-account-probe.ts'
+import type { ProjectWorkspaceLaunch } from '@neutronai/runtime/adapters/claude-code/persistent/project-workspace-host.ts'
 
 class CodexWorkRecoveryRequired extends Error {}
 interface BoundedOwnerWork {
@@ -58,6 +59,7 @@ export interface CodexOwnerProject {
   env: NodeJS.ProcessEnv
   /** Fixed instance locator, independent of the selected global credential home. */
   generalAuthorityPath?: string
+  projectWorkspace?: ProjectWorkspaceLaunch
 }
 
 async function refreshOwner(owner: CodexOwnerBootstrap): Promise<void> {
@@ -375,6 +377,7 @@ export class CodexOwnerBindings {
         openingAttempted = true
         const owner = await this.bootstrap({ projectId, binary: 'codex', socketPath: join(project.codexHome, 'owner.sock'),
           cwd: project.cwd, codexHome: project.codexHome, env,
+          ...(project.projectWorkspace ? { projectWorkspace: project.projectWorkspace } : {}),
           ...(projectId === null ? { generalAuthorityPath: project.generalAuthorityPath } : {}) })
         try {
           const facts = this.readBinding(owner.binding)
@@ -474,7 +477,8 @@ export class CodexOwnerBindings {
       // Recheck the configured target after retirement, before native launch.
       await this.revalidateProject(null, target, await this.general!())
       const owner = await this.bootstrap({ projectId: null, binary: 'codex', socketPath: join(target.codexHome, 'owner.sock'),
-        cwd: target.cwd, codexHome: target.codexHome, env, generalAuthorityPath: target.generalAuthorityPath })
+        cwd: target.cwd, codexHome: target.codexHome, env, generalAuthorityPath: target.generalAuthorityPath,
+        ...(target.projectWorkspace ? { projectWorkspace: target.projectWorkspace } : {}) })
       try {
         const successor = this.readBinding(owner.binding)
         const committed = readGeneralOwnerAuthority(target.generalAuthorityPath)

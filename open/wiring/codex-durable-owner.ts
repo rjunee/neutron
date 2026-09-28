@@ -1,4 +1,4 @@
-import { createHash } from 'node:crypto'
+import { createHash, randomUUID } from 'node:crypto'
 import { existsSync, lstatSync, mkdirSync, readFileSync, writeFileSync } from 'node:fs'
 import { join } from 'node:path'
 import { isDeepStrictEqual } from 'node:util'
@@ -6,12 +6,16 @@ import { attachCodexOwner, readCodexOwnerBinding, type bootstrapCodexOwner, type
 import { assertOwnerScope, helperIdentity, privatePath, readOwnerHelperDescriptor } from '@neutronai/runtime/adapters/codex-cli/persistent/project-owner-helper-protocol.ts'
 import { HerdrHost } from '@neutronai/runtime/adapters/claude-code/persistent/herdr-host.ts'
 import { createHerdrRpc } from '@neutronai/runtime/adapters/claude-code/persistent/herdr-client.ts'
+import { createProjectWorkspaceHost, type ProjectWorkspaceLaunch } from '@neutronai/runtime/adapters/claude-code/persistent/project-workspace-host.ts'
+import { codexOwnerWorkspace } from '@neutronai/runtime/adapters/codex-cli/persistent/project-owner-workspace.ts'
 import { readAccountId, validateCodexSubscriptionAuth } from '@neutronai/trident/codex-auth.ts'
 import { nextOwnerDirectory, readCompletedOwnerRetirement, type CodexOwnerResume } from '@neutronai/runtime/adapters/codex-cli/persistent/project-owner-retirement.ts'
 import { observeOwnerNativeStop, readCrashedOwner, recordCrashedOwner } from '@neutronai/runtime/adapters/codex-cli/persistent/project-owner-crash-recovery.ts'
 import { acknowledgeAccountHandoff, readGeneralOwnerAuthority, stageAccountHandoff } from '@neutronai/runtime/adapters/codex-cli/persistent/project-owner-account-handoff.ts'
 
-export type OwnerLaunch = Parameters<typeof bootstrapCodexOwner>[0] & { projectId: string | null; generalAuthorityPath?: string }
+export type OwnerLaunch = Parameters<typeof bootstrapCodexOwner>[0] & { projectId: string | null; generalAuthorityPath?: string;
+  /** Optional only for adopting an existing pre-cutover owner. Fresh launches require it. */
+  projectWorkspace?: ProjectWorkspaceLaunch }
 
 /** Only pre-attachment host inspection is retryable; uncertain launch is not. */
 export class CodexOwnerRecoveryUnavailable extends Error {}
@@ -69,6 +73,7 @@ export function codexOwnerCredentialIdentity(bytes: string): string {
  * positively dead, sealed owners resume only in their reserved next generation. */
 export async function openDurableCodexOwner(options: OwnerLaunch): Promise<CodexOwnerAttachment> {
   assertOwnerScope(options.codexHome, options.projectId)
+  if (options.projectWorkspace !== undefined) codexOwnerWorkspace(options.projectWorkspace, options.projectId)
   const general = options.projectId === null && options.generalAuthorityPath
     ? readGeneralOwnerAuthority(options.generalAuthorityPath) : undefined
   if (general?.preparing) throw new Error('General account retirement preparation requires corroborated completion before owner admission')
@@ -88,8 +93,9 @@ export async function openDurableCodexOwner(options: OwnerLaunch): Promise<Codex
   const authorityPath = join(stateDirectory, '.neutron-owner-authority.json')
   const panePath = join(stateDirectory, '.neutron-owner-pane.json')
   const socketPath = options.env.HERDR_SOCKET_PATH
-  const host = new HerdrHost({ ...(socketPath ? { connect: async () => createHerdrRpc({ socketPath }) } : {}),
-    ...(options.env.HERDR_WORKSPACE_ID ? { workspaceId: options.env.HERDR_WORKSPACE_ID } : {}) })
+  const connect = socketPath ? { connect: async () => createHerdrRpc({ socketPath }) } : {}
+  // Inspection adopts the exact saved pane; it never needs inherited placement.
+  const host = new HerdrHost(connect)
   const credentialPath = join(options.codexHome, 'auth.json')
   privatePath(credentialPath, 'file')
   const credential = codexOwnerCredentialIdentity(readFileSync(credentialPath, 'utf8'))
@@ -138,6 +144,13 @@ export async function openDurableCodexOwner(options: OwnerLaunch): Promise<Codex
     privatePath(launchPath, 'file'); privatePath(authorityPath, 'file')
     const previous = JSON.parse(readFileSync(launchPath, 'utf8'))
     if (!isDeepStrictEqual(previous.scope, scope)) throw new Error('Codex owner launch credential or project changed')
+    if (previous.projectWorkspace !== undefined) {
+      const saved = codexOwnerWorkspace(previous.projectWorkspace, options.projectId)
+      const current = codexOwnerWorkspace(options.projectWorkspace, options.projectId)
+      if (saved.journalPath !== current.journalPath || saved.placement.instanceId !== current.placement.instanceId) {
+        throw new Error('Codex owner workspace authority changed')
+      }
+    }
     authority = JSON.parse(readFileSync(authorityPath, 'utf8'))
     // A failed live descriptor is never itself evidence of death. The crash
     // path independently corroborates all process and immutable binding facts.
@@ -152,11 +165,17 @@ export async function openDurableCodexOwner(options: OwnerLaunch): Promise<Codex
     }
   } else {
     if (existsSync(descriptorPath) || existsSync(authorityPath)) throw new Error('Codex owner launch provenance is missing')
+    const workspace = codexOwnerWorkspace(options.projectWorkspace, options.projectId)
+    const placementHost = createProjectWorkspaceHost(workspace.journalPath, connect)
+    const helperOperationId = `codex-owner-helper:${randomUUID()}`
     // Exclusive creation is the no-second-owner guard across gateway processes.
-    writeFileSync(launchPath, JSON.stringify({ ...options, scope, gatewayIdentity: helperIdentity() }), { flag: 'wx', mode: 0o600 })
-    const child = await host.spawn([process.execPath,
+    writeFileSync(launchPath, JSON.stringify({ ...options, projectWorkspace: workspace, helperOperationId,
+      scope, gatewayIdentity: helperIdentity() }), { flag: 'wx', mode: 0o600 })
+    const child = await placementHost.spawn([process.execPath,
       new URL('../../runtime/adapters/codex-cli/persistent/project-owner-helper-main.ts', import.meta.url).pathname, launchPath],
-    { cwd: options.cwd, env: options.env, onScreen() {} })
+    { cwd: options.cwd, env: options.env, onScreen() {}, projectPlacement: {
+      ...workspace.placement, role: 'worker', taskLabel: 'Owner helper · Codex', operationId: helperOperationId,
+    } })
     child.detach?.()
     launchedPid = child.pid
     if (!child.paneHandle) throw new Error('Codex helper has no durable pane authority')

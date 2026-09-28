@@ -10,6 +10,7 @@ import type { CodexOwnerBinding, CodexOwnerBindingFacts, CodexOwnerBootstrap } f
 import * as probe from '@neutronai/runtime/adapters/codex-cli/persistent/project-account-probe.ts'
 import { acknowledgeAccountHandoff, readGeneralOwnerAuthority, stageAccountHandoff } from '@neutronai/runtime/adapters/codex-cli/persistent/project-owner-account-handoff.ts'
 import type { CodexOwnerRetirementReceipt } from '@neutronai/runtime/adapters/codex-cli/persistent/project-owner-retirement.ts'
+import { ownerWorkspaceLaunch } from '../wiring/project-build-terminal.ts'
 
 const cleanup: (() => void)[] = []
 afterEach(() => { for (const close of cleanup.splice(0).reverse()) close() })
@@ -29,6 +30,7 @@ function fixture(alias = false) {
     return createHash('sha256').update(JSON.stringify(['chatgpt-account', account])).digest('hex')
   })
   const authorityPath = join(root, 'general.json')
+  const projectWorkspace = ownerWorkspaceLaunch(root, { instanceId: 'instance', projectId: null, projectLabel: 'Neutron General' })
   const facts = new Map<CodexOwnerBinding, CodexOwnerBindingFacts>()
   const events: string[] = []
   let selected = 0, nativeStatus: 'idle' | 'busy' | 'unknown' = 'idle', failLaunch = false, missingAck = false
@@ -48,9 +50,10 @@ function fixture(alias = false) {
     if (!configured.has(home)) throw new Error('Account grant unavailable')
     return { cwd: alias ? aliasRoot : root, codexHome: alias ? join(aliasRoot, homes.indexOf(home) === 0 ? 'first' : 'second') : home,
       credentialIdentity: credentials[homes.indexOf(home)]!, generalAuthorityPath: authorityPath,
-      env: { OPENAI_API_KEY: 'must-not-reach-native' } }
+      env: { OPENAI_API_KEY: 'must-not-reach-native' }, projectWorkspace }
   }
   const makeBindings = () => new CodexOwnerBindings(async () => { throw new Error('Explicit project grant required') }, async options => {
+    expect(options.projectWorkspace).toEqual(projectWorkspace)
     const index = homes.indexOf(options.codexHome)
     events.push(`launch:${index}`)
     const scope = { projectId: null, cwd: root, codexHome: options.codexHome, credential: credentials[index] }
