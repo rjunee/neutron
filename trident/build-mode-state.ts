@@ -3,10 +3,11 @@ import type { TridentRun, TridentRunStore } from './store.ts'
 import { isExecutionStrategy, legacyCheckpointName } from './execution-strategy.ts'
 import { normalizeLegacyStoredExecutionPlan } from './legacy-execution-compat.ts'
 import { settledReviewRecovery } from './settled-review-recovery.ts'
+import { settledProofFixRecovery, type ProofFixBindings } from './settled-proof-fix-recovery.ts'
 
 const oid = /^(?:[0-9a-f]{40}|[0-9a-f]{64})$/
 export type BuildModeState = { checkpoint: ResumeCheckpoint; iteration: number; consumed?: { round: number; head: string } }
-type BuildRetrySource = { prior: TridentRun; eventId: number; state: BuildModeState }
+type BuildRetrySource = { prior: TridentRun; eventId: number; state: BuildModeState; proofFix?: ProofFixBindings }
 
 export const retrySourceIdentity = (run: TridentRun): string =>
   JSON.stringify([run.id, run.project_slug, run.repo_path, run.branch, run.task, run.merge_mode, run.execution_strategy])
@@ -115,7 +116,7 @@ export function retryModeSource(store: TridentRunStore, prior: TridentRun, seen 
     // is still validated, and a real mode event below always supersedes the link.
     const inherited = readBuildRetrySource(store, prior, seen)
     const link = store.stageEvents(prior.id).filter(event => event.stage === 'build-retry-source').at(-1)
-    return inherited && link ? { prior, eventId: link.id, state: inherited.state } : null
+    return inherited && link ? { ...inherited, prior, eventId: link.id } : null
   }
   const state = parseBuildModeState(event.meta, prior, true)
   const checkpoint = state.checkpoint
@@ -123,6 +124,16 @@ export function retryModeSource(store: TridentRunStore, prior: TridentRun, seen 
   // build may retry publication/review only when its host checkpoint records an
   // empty validated plan. Legacy/partial builds cannot establish that fact.
   if (checkpoint.head === null) return null
+  const proofFix = checkpoint.pending?.phase === 'fix'
+    ? settledProofFixRecovery(store, prior, state, meta => parseBuildModeState(meta, prior, true)) : null
+  if (proofFix) {
+    // The old run still failed G042. Only this new import view retires the settled
+    // reservation and charges its consumed fix round; no approval or proof crosses.
+    checkpoint.stage = 'built'
+    checkpoint.round++
+    delete checkpoint.pending
+    return { prior, eventId: event.id, state, proofFix }
+  }
   if (checkpoint.pending !== undefined) {
     if (!settledReviewRecovery(store, prior, state)) return null
     if (store.stageEvents(prior.id).filter(row => row.stage === 'build-mode-state').at(-1)?.id !== event.id) return null

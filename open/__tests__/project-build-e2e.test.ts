@@ -57,7 +57,7 @@ import { projectInstallAvailableBytes } from '../wiring/project-build-dependenci
 import { afterAll, afterEach, beforeEach, expect, spyOn, test } from 'bun:test'
 import { chmod, copyFile, cp, link, lstat, mkdir, mkdtemp, open, readFile, readdir, realpath, rename, rm, stat, symlink, utimes, writeFile } from 'node:fs/promises'
 import { tmpdir } from 'node:os'
-import { dirname, join } from 'node:path'
+import { basename, dirname, join } from 'node:path'
 import { fileURLToPath } from 'node:url'
 import { createHash } from 'node:crypto'
 import { AsyncLocalStorage } from 'node:async_hooks'
@@ -445,6 +445,8 @@ interface WorkerWorld {
    * (`trident/build-run.ts`, the task-sequence handoff).
    */
   hostLedger?: boolean
+  /** A completed diagnostic fix may leave the already published candidate unchanged. */
+  unchangedFix?: boolean
   synthesisShape: 'legacy' | 'schema-guided' | 'malformed' | 'independent'
   verdictRepair?: 'repairs' | 'exhausts'
   repairPaths: string[]
@@ -661,6 +663,11 @@ async function performRole(world: WorkerWorld, request: BoundedWorkRequest, brie
   }
 
   if (request.role === 'build' || request.role === 'fix') {
+    if (request.role === 'fix' && world.unchangedFix) {
+      const built = JSON.parse(await readFile(join(dirname(request.result.path), 'build.result'), 'utf8'))
+      return { ...snapshot, payload: { ...built.result.payload,
+        ...(await world.suiteReport?.(request.role, context) ?? {}) } }
+    }
     if (request.role === 'build') {
       const row = world.readSelectedRun(request.run_id)!
       world.builderObservations.push({ strategy: row.execution_strategy, rationale: row.strategy_rationale,
@@ -2601,6 +2608,190 @@ test.each(['current', 'historical', 'historical after fix'] as const)('a %s sett
   expect(f.world.dispatches.some(row => ['plan', 'build', 'fix'].includes(row.role))).toBe(false)
   expect(standaloneReview(f.world).measuredHead).toBe(String(checkpoint.head))
 }, 300_000)
+
+for (const retryCase of ['healthy', 'still-red', 'ceiling', 'model', 'policy', 'brief'] as const)
+test(`settled proof-only fix retry retains the candidate but buys fresh proof and review: ${retryCase}`, async () => {
+  const task = 'Record a note and verify the completed candidate with the required regression suite'
+  const f = await fixture({ dispatchTask: task, suiteExit: 1, maxRounds: 3 })
+  if (retryCase === 'healthy') f.world.mutationArgv = 'valid'
+  f.world.unchangedFix = true
+  f.world.suiteReport = async () => ({ testsPassed: false, suiteOutcome: 'deferred', suiteEvidence: '' })
+  let suites = 0
+  let repairedEnvironment = false
+  const runSuite = f.context.runSuite!
+  f.context.runSuite = async (...args) => {
+    suites++
+    const result = await runSuite(...args)
+    return repairedEnvironment ? { ...result, ok: true, exit_code: 0 } : result
+  }
+  const first = await drive(f)
+  expect(first).toMatchObject({ kind: 'failed', detail: 'Fix round did not move the measured branch head' })
+  const original = lastCheckpoint(f)
+  expect(original).toMatchObject({ stage: 'rejected', round: 1, pending: { phase: 'fix' },
+    previousReview: { findings: [], blockingCount: 1, unknownIdentities: true } })
+  const originalHead = original.head
+  if (typeof originalHead !== 'string') throw new Error('Expected the settled proof-only fixture to retain its measured head')
+  const originalEvents = f.store.stageEvents(f.row.id)
+  await f.store.update(f.row.id, { phase: 'failed', worktree: null,
+    failure_reason: first.kind === 'failed' ? first.detail : 'Unexpected fixture outcome' })
+  const prior = f.store.get(f.row.id)!
+  const source = retryModeSource(f.store, prior)
+  expect(source?.state.checkpoint).toMatchObject({ stage: 'built', head: original.head, round: 2,
+    previousReview: original.previousReview, findings: original.findings })
+  expect(source?.state.checkpoint.pending).toBeUndefined()
+  const dispatched = await dispatchBoardBoundBuild({ task, board_item_id: 'proof-retry-card' }, {
+    store: f.store, projectAdmission: fixtureDispatchAdmission(f.db), project_slug: 'project', repo_path: f.repo,
+    max_rounds: retryCase === 'ceiling' ? 1 : 3,
+    board: { get: () => ({ id: 'proof-retry-card', title: task, design_doc_ref: null, linked_run_id: prior.id }), attachRun: async () => {} },
+    resolveBuildRepo: async () => f.repo, resolveMergeMode: async () => 'pr',
+  })
+  expect(dispatched.ok, JSON.stringify(dispatched)).toBe(true)
+  if (!dispatched.ok) return
+  expect(dispatched.run.inner_checkpoint_head).toBe(originalHead)
+  expect(dispatched.run.task_iteration).toBe(prior.task_iteration)
+  expect(dispatched.run.max_task_iterations).toBe(prior.max_task_iterations)
+  const before = suites
+  const commandsBeforeRetry = f.commands.length
+  repairedEnvironment = retryCase !== 'still-red'
+  f.world.dispatches.length = 0
+  f.input.run = dispatched.run
+  if (retryCase === 'model' || retryCase === 'policy' || retryCase === 'brief') {
+    if (retryCase === 'model') f.input.phase_models = { ...f.input.phase_models, build: { model: 'sonnet' } }
+    else if (retryCase === 'policy') f.input.phase_models = { ...f.input.phase_models, build: { model: 'opus', effort: 'low' } }
+    else f.input.reflection_context = 'Changed implementation instructions.'
+    await expect(f.prepare()).rejects.toThrow('model, authority or brief changed')
+    expect(f.world.dispatches).toEqual([])
+    expect(suites).toBe(before)
+    return
+  }
+  const host = await createProjectBuildHost(await f.prepare())
+  const outcome = await host.run({ mode: 'implementation', start: 'resume' }, new AbortController().signal)
+  expect(outcome.kind, why(f, outcome)).toBe(retryCase === 'healthy' ? 'merged' : 'blocked')
+  expect(f.world.dispatches.some(call => ['plan', 'build', 'fix'].includes(call.role))).toBe(false)
+  if (retryCase === 'ceiling') {
+    expect(outcome).toMatchObject({ kind: 'blocked', on: 'Review requires orchestrator arbitration: round ceiling' })
+    expect(f.world.dispatches).toEqual([])
+    expect(suites).toBe(before)
+    return
+  }
+  if (retryCase === 'still-red') expect(outcome).toMatchObject({ kind: 'blocked', on: 'Review requires orchestrator arbitration: no-progress' })
+  expect(standaloneReview(f.world).measuredHead).toBe(originalHead)
+  expect(standaloneReview(f.world).step_id).toContain(':review:2:')
+  expect(suites).toBe(before + 1)
+  if (retryCase === 'healthy') expect(f.commands.slice(commandsBeforeRetry).some(argv =>
+    argv.includes('worktree') && argv.includes('add') && argv.includes(originalHead)
+      && argv.some(arg => arg.includes('/proof-') && arg.endsWith(dispatched.run.id.slice(0, 8))))).toBe(true)
+  expect(f.store.stageEvents(prior.id)).toEqual(originalEvents)
+  const receipts = f.store.stageEvents(dispatched.run.id).filter(event => event.stage === 'build-suite-receipt')
+  expect(receipts.some(event => JSON.parse(event.meta!).adoptedFrom !== undefined)).toBe(false)
+}, 120_000)
+
+test('settled proof-only fix retry rejects incomplete, altered or non-approving evidence', async () => {
+  const f = await fixture({ suiteExit: 1, maxRounds: 3 })
+  f.world.unchangedFix = true
+  f.world.suiteReport = async () => ({ testsPassed: false, suiteOutcome: 'deferred', suiteEvidence: '' })
+  const first = await drive(f)
+  expect(first).toMatchObject({ kind: 'failed', detail: 'Fix round did not move the measured branch head' })
+  await f.store.update(f.row.id, { phase: 'failed', worktree: null,
+    failure_reason: first.kind === 'failed' ? first.detail : 'Unexpected outcome' })
+  const prior = f.store.get(f.row.id)!
+  const check = () => retryModeSource(f.store, prior)
+  expect(check()).not.toBeNull()
+  const events = f.store.stageEvents(prior.id)
+  const latest = events.filter(event => event.stage === 'build-mode-state').at(-1)!
+  const source = JSON.parse(latest.meta!)
+  const root = join(f.context.stateRoot, prior.id)
+  const files = (await readdir(root)).filter(name => /^review-[a-f0-9]{64}$/.test(name))
+  const paths = [source.checkpoint.pending.recovery.request.result.path,
+    source.checkpoint.pending.recovery.request.brief.path,
+    ...files.flatMap(name => ['receipt.json', 'request.json', 'brief.json', 'result.json'].map(file => join(root, name, file)))]
+  for (const path of paths) {
+    const bytes = await readFile(path, 'utf8')
+    await rm(path)
+    expect(check(), `missing ${basename(path)}`).toBeNull()
+    await writeFile(path, bytes)
+    expect(check(), `restored ${basename(path)}`).not.toBeNull()
+  }
+  const changeJson = async (path: string, change: (value: any) => void) => {
+    const bytes = await readFile(path, 'utf8')
+    const value = JSON.parse(bytes); change(value)
+    await writeFile(path, JSON.stringify(value))
+    expect(check(), path).toBeNull()
+    await writeFile(path, bytes)
+    expect(check()).not.toBeNull()
+  }
+  const fixRequest = source.checkpoint.pending.recovery.request
+  const fixJournal = join(root, `attempt-request-${createHash('sha256').update(JSON.stringify([prior.id, fixRequest.step_id, 'dispatch'])).digest('hex')}.json`)
+  await changeJson(fixJournal, value => { value.request.budget.wall_ms++ })
+  await changeJson(fixJournal, value => { value.request.model_id = 'foreign' })
+  await changeJson(fixRequest.result.path, value => { value.step_id = `${prior.id}:fix:2` })
+  await changeJson(fixRequest.result.path, value => { value.result.head = 'f'.repeat(40) })
+  await changeJson(`${fixRequest.brief.path}.context.json`, value => { value.previous = [] })
+  for (const name of files) {
+    const receipt = join(root, name, 'receipt.json')
+    for (const [field, value] of [['runId', 'foreign'], ['head', 'f'.repeat(40)], ['round', 2],
+      ['provider', 'pi'], ['modelId', 'foreign'], ['status', 'unknown']] as const)
+      await changeJson(receipt, record => { record.observation[field] = value })
+    await changeJson(receipt, record => { record.observation.payload.verdict = 'REQUEST_CHANGES' })
+    await changeJson(receipt, record => { record.state = 'pending' })
+    await changeJson(receipt, record => { record.invalidated = 'input-changed' })
+    await changeJson(join(root, name, 'request.json'), record => { record.network = !record.network })
+  }
+  for (const change of [
+    (record: any) => { record.checkpoint.reviewStop = { trigger: 'no-progress' } },
+    (record: any) => { record.checkpoint.replansUsed = 1 },
+    (record: any) => { record.checkpoint.pending.recovery.request.model_id = 'changed-model' },
+    (record: any) => { record.checkpoint.pending.recovery.request.network = false },
+    (record: any) => { record.checkpoint.pending.recovery.request.budget.wall_ms++ },
+    (record: any) => { delete record.checkpoint.pending.recovery },
+  ]) {
+    const value = structuredClone(source); change(value)
+    const read = spyOn(f.store, 'stageEvents').mockImplementation(() => events.map(event => event.id === latest.id
+      ? { ...event, meta: JSON.stringify(value) } : event))
+    try { expect(check()).toBeNull() } finally { read.mockRestore() }
+    expect(check()).not.toBeNull()
+  }
+  const attempts = f.store.attempts(prior.id)
+  const fix = attempts.find(row => row.role === 'fix')!
+  for (const patch of [{ outcome: null, ended_at: null }, { resolved_model: 'foreign' }, { head_sha: 'f'.repeat(40) }]) {
+    const read = spyOn(f.store, 'attempts').mockImplementation(() => attempts.map(row => row === fix ? { ...row, ...patch } : row))
+    try { expect(check()).toBeNull() } finally { read.mockRestore() }
+    expect(check()).not.toBeNull()
+  }
+  // Remove an admitted seat from both discovery and the ledger. Its immutable
+  // journal and the authenticated synthesis input still require that producer.
+  const seat = attempts.find(row => row.role === 'review' && row.review_seat !== null)!
+  const seatDirectory = join(root, seat.step_id.split(':')[0]!)
+  const seatJournal = join(root, `attempt-request-${createHash('sha256').update(JSON.stringify([prior.id, seat.step_id, 'dispatch'])).digest('hex')}.json`)
+  const census = spyOn(f.store, 'attempts').mockImplementation(() => attempts.filter(row => row !== seat))
+  await rename(seatDirectory, `${seatDirectory}.saved`)
+  await rename(seatJournal, `${seatJournal}.saved`)
+  try { expect(check()).toBeNull() } finally {
+    await rename(`${seatDirectory}.saved`, seatDirectory)
+    await rename(`${seatJournal}.saved`, seatJournal)
+    census.mockRestore()
+  }
+  expect(check()).not.toBeNull()
+  const suite = events.filter(event => event.stage === 'build-suite-receipt').at(-1)!
+  const changedSuite = JSON.parse(suite.meta!); changedSuite.receipt.report.hostExitCode = 0
+  const read = spyOn(f.store, 'stageEvents').mockImplementation(() => events.map(event => event.id === suite.id
+    ? { ...event, meta: JSON.stringify(changedSuite) } : event))
+  try { expect(check()).toBeNull() } finally { read.mockRestore() }
+  expect(check()).not.toBeNull()
+  expect(f.store.stageEvents(prior.id)).toEqual(events)
+}, 120_000)
+
+test('settled proof-only fix retry never converts genuine code findings into proof-only eligibility', async () => {
+  const f = await fixture({ suiteExit: 1, blockersByRound: [0, 1], maxRounds: 3 })
+  f.world.unchangedFix = true
+  f.world.suiteReport = async () => ({ testsPassed: false, suiteOutcome: 'failed-preexisting', suiteEvidence: 'Worker claims the environment was at fault.' })
+  const first = await drive(f)
+  expect(first).toMatchObject({ kind: 'failed', detail: 'Fix round did not move the measured branch head' })
+  await f.store.update(f.row.id, { phase: 'failed', worktree: null,
+    failure_reason: first.kind === 'failed' ? first.detail : 'Unexpected outcome' })
+  expect(retryModeSource(f.store, f.store.get(f.row.id)!)).toBeNull()
+  expect(lastCheckpoint(f)).toMatchObject({ stage: 'rejected', pending: { phase: 'fix' } })
+}, 120_000)
 
 test('historical review import refuses incomplete or foreign evidence and never edits the source', async () => {
   const f = await fixture({ codexReview: 'usage-limit' })

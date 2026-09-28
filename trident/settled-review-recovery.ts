@@ -13,7 +13,7 @@ const digest = (value: unknown) => createHash('sha256').update(JSON.stringify(va
 /** Synchronous because retry-source admission and its launch-time revalidation
  * share the synchronous store boundary. Never follow a result symlink or wait
  * on a pipe; bound both each file and the complete evidence collection. */
-function evidenceReader() {
+export function evidenceReader() {
   let remaining = 32 * 1024 * 1024
   const measured = new Map<string, Stats>()
   const unchanged = (before: Stats, after: Stats) => before.dev === after.dev && before.ino === after.ino
