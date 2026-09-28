@@ -117,7 +117,7 @@ export async function importCodexOperations(lines: AsyncIterable<string> | Itera
   const coverage: CodexImportCoverage = { lines: 0, commandReceipts: 0, emitted: 0, unsupportedCommands: 0, unbound: 0, incomplete: 0, malformed: 0, duplicate: 0, turnReceipts: 0, emittedTurns: 0, tokenCoverage: 'unknown' }
   const observations: DirectPhaseObservation[] = [], seen = new Set<string>()
   const contexts = new Map<string, Array<{ at: number; model: string }>>()
-  const turns: Array<{ turnId: string; start: number; end: number; line: number }> = []
+  const turns: Array<{ turnId: string; start: number; end: number }> = []
   let sessionId: string | undefined, parentSessionId: string | undefined, bytes = 0
   for await (const line of lines) {
     coverage.lines++
@@ -148,7 +148,7 @@ export async function importCodexOperations(lines: AsyncIterable<string> | Itera
           !stamp(p.started_at * 1000) || !stamp(p.completed_at * 1000) || p.completed_at < p.started_at) {
         coverage.incomplete++; continue
       }
-      turns.push({ turnId: p.turn_id, start: p.started_at * 1000, end: p.completed_at * 1000, line: coverage.lines })
+      turns.push({ turnId: p.turn_id, start: p.started_at * 1000, end: p.completed_at * 1000 })
       continue
     }
     if (r.type !== 'event_msg' || p.type !== 'item_completed' || !object(p.item) || p.item.type !== 'CommandExecution') continue
@@ -173,7 +173,7 @@ export async function importCodexOperations(lines: AsyncIterable<string> | Itera
       startedAt: p.started_at_ms, endedAt: p.completed_at_ms,
       inputTokens: null, outputTokens: null, cacheReadTokens: null, cacheCreationTokens: null, costUsd: null,
       source: { kind: 'codex-log', sessionId, turnId: p.turn_id, ...(parentSessionId ? { parentSessionId } : {}), sourceEventId: item.id,
-        evidenceRef: `${options.evidenceRef}:${coverage.lines}`, attribution: 'reconstructed',
+        evidenceRef: `${options.evidenceRef}:command:${item.id}`, attribution: 'reconstructed',
         basis: `${exact ? 'Successful native GitHub command identifies PR' : 'Explicit time-bounded worktree-to-PR binding'}; native operation timestamps; model is invoking Codex model; exit ${item.exit_code}; shell-operation token attribution unknown` },
       observedAt: p.completed_at_ms,
     })
@@ -193,7 +193,7 @@ export async function importCodexOperations(lines: AsyncIterable<string> | Itera
       startedAt: turn.start, endedAt: turn.end,
       inputTokens: null, outputTokens: null, cacheReadTokens: null, cacheCreationTokens: null, costUsd: null,
       source: { kind: 'codex-log', sessionId: binding.sessionId, turnId: turn.turnId, ...(parentSessionId ? { parentSessionId } : {}),
-        sourceEventId: turn.turnId, evidenceRef: `${options.evidenceRef}:${turn.line}`, attribution: 'reconstructed',
+        sourceEventId: turn.turnId, evidenceRef: `${options.evidenceRef}:turn:${turn.turnId}`, attribution: 'reconstructed',
         basis: 'Explicit session-and-turn PR and phase binding; native completed task envelope at one-second resolution; nested commands may overlap; task usage attribution unknown' },
       observedAt: turn.end,
     })
@@ -242,7 +242,9 @@ export async function importCodexFile(path: string, options: CodexImportOptions,
       }
     }
     try {
-      const result = await importCodexOperations(scopedLines(), { ...options, evidenceRef: startByte > 0 ? `${options.evidenceRef}:tail-${startByte}` : options.evidenceRef })
+      // Scan offsets describe coverage, not event provenance: a growing file
+      // moves this window while the native session/operation identity stays put.
+      const result = await importCodexOperations(scopedLines(), options)
       return { ...result, scan: { sourceBytes: stat.size, startByte, partial: startByte > 0,
         detail: startByte > 0 ? 'Recent byte window only; older phases and model contexts may be missing. Retain previous observations; run a full import for historical coverage.' : 'Full source snapshot; attribution coverage is reported separately.' } }
     } finally { input.close(); stream.destroy() }

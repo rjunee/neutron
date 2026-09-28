@@ -1,9 +1,9 @@
 import { describe, expect, test } from 'bun:test'
-import { mkdtemp, rm, writeFile } from 'node:fs/promises'
+import { appendFile, mkdtemp, rm, writeFile } from 'node:fs/promises'
 import { tmpdir } from 'node:os'
 import { join } from 'node:path'
 import { importCodexFile, importCodexOperations, type CodexImportOptions } from './build-timeline-codex-import.ts'
-import { validatePhaseObservation } from './build-timeline-sources.ts'
+import { appendChangedPhaseObservations, readPhaseObservations, validatePhaseObservation } from './build-timeline-sources.ts'
 import { combineTimelineSources } from '../trident/build-timeline-catalogue.ts'
 import { createTimelineHandler } from './build-timeline-server.ts'
 
@@ -74,6 +74,39 @@ describe('bounded native Codex operation reconstruction', () => {
     expect((await importCodexOperations([meta, task()], turnOptions)).observations[0]!.model).toBeNull()
     expect((await run([context('model-b', 4000), task()], turnOptions)).observations[0]!.model).toBeNull()
     expect((await run([context('foreign', 4000, 'other-turn'), task()], turnOptions)).observations[0]!.model).toBe('model-a')
+  })
+  test('moving bounded tails replay native task and command receipts into one consumed phase each', async () => {
+    const directory = await mkdtemp(join(tmpdir(), 'codex-turn-replay-'))
+    try {
+      const path = join(directory, 'rollout.jsonl'), journal = join(directory, 'phases.jsonl')
+      const body = [context(), command(), task()].join('\n') + '\n'
+      await writeFile(path, [meta, record('response_item', { text: 'padding'.repeat(1000) })].join('\n') + '\n' + body)
+      const tailBytes = Buffer.byteLength(body) + 500
+      const first = await importCodexFile(path, turnOptions, tailBytes)
+      expect(first.scan.partial).toBe(true)
+      expect(first.observations).toHaveLength(2)
+      expect(await appendChangedPhaseObservations(journal, first.observations)).toBe(2)
+      await appendFile(path, record('response_item', { text: 'new unrelated data' }) + '\n')
+      const second = await importCodexFile(path, turnOptions, tailBytes)
+      expect(second.scan.startByte).toBeGreaterThan(first.scan.startByte)
+      expect(second.observations).toEqual(first.observations)
+      expect(await appendChangedPhaseObservations(journal, second.observations)).toBe(0)
+      const full = await importCodexFile(path, turnOptions)
+      expect(await appendChangedPhaseObservations(journal, full.observations)).toBe(0)
+      const observations = await readPhaseObservations(journal)
+      expect(observations).toHaveLength(2)
+      const native = observations.find(o => o.phase === 'build')!
+      expect(native.source).toMatchObject({ evidenceRef: 'codex:fixture:turn:turn-1',
+        sessionId: 'thread-1', turnId: 'turn-1', sourceEventId: 'turn-1' })
+      const snapshot = combineTimelineSources({ observedAt: 10000, repositories: [] }, observations, [], 10000)
+      const handler = createTimelineHandler({ username: 'viewer', password: 'fixture', read: () => snapshot })
+      const response = await handler(new Request('http://localhost/api/timeline', {
+        headers: { authorization: `Basic ${Buffer.from('viewer:fixture').toString('base64')}` },
+      }))
+      expect(response.status).toBe(200)
+      const consumed = await response.json() as { cards: Array<{ segments: Array<{ phase: string }> }> }
+      expect(consumed.cards[0]!.segments.map(s => s.phase).sort()).toEqual(['build', 'test'])
+    } finally { await rm(directory, { recursive: true, force: true }) }
   })
   test('uses exact operation envelope, invoking model and explicit binding without charging tokens', async () => {
     const { observations, coverage } = await run([command()])
@@ -159,7 +192,8 @@ describe('bounded native Codex operation reconstruction', () => {
       expect(tail.observations[0]!.eventId).toBe(full.observations[0]!.eventId)
       expect(tail.observations[0]!.model).toBeNull()
       expect(tail.observations[0]!.source.parentSessionId).toBe('parent-1')
-      expect(tail.observations[0]!.source.evidenceRef).toContain(':tail-')
+      expect(tail.observations[0]!.source.evidenceRef).toBe(full.observations[0]!.source.evidenceRef)
+      expect(tail.observations[0]!.source.evidenceRef).toBe('codex:fixture:command:exec-1')
       expect(validatePhaseObservation(tail.observations[0])).toEqual(tail.observations[0]!)
       await expect(importCodexFile(path, options, -1)).rejects.toThrow('tail')
     } finally { await rm(directory, { recursive: true, force: true }) }

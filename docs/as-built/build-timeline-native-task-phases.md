@@ -23,7 +23,14 @@ unbound, incomplete and mixed-model controls cover the rejection/unknown cases.
 Removing the session comparison made one regression fail; reversing the turn
 comparison made four regressions fail. Both semantic mutations were restored.
 
-Validation: 64 tests across the importer, recorder, sources, projection, HTML and
+Independent review caught a replay defect: tail-relative line/byte references
+changed the payload of the same stable event when the source grew. Evidence now
+names the opaque source and native receipt ID; scan offsets stay in coverage.
+The journal-consuming regression imports two moving tails and a full scan,
+verifies repeat imports append zero events, and serves exactly one task and one
+nested command phase. Reintroducing the tail offset made that regression fail.
+
+Validation: 65 tests across the importer, recorder, sources, projection, HTML and
 popover suites passed; both root and Trident TypeScript checks passed. Including
 the server suite produced 71 passes and one environment failure when the sandbox
 denied its loopback listener. The shared-host admission check refused because the

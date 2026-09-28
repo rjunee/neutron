@@ -115,6 +115,10 @@ nested tests or review commands, so their overlapping durations are not additive
 Usage remains unknown. Register each rollout/config pair with the private refresh
 service; adding importer support alone does not discover new orchestration lanes.
 Use explicit start/completion records for forward work while a task is still open.
+Evidence references identify the opaque source and native receipt ID; session and
+turn identities remain separate source fields. Bounded-tail byte offsets belong
+to scan coverage, so a growing log does not change an already imported receipt's
+provenance or create a second phase on replay.
 
 The implementation does not establish past planning/build/fix intervals where
 no producer recorded them. It does not estimate cost or savings. Future Core
