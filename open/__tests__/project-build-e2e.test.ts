@@ -2502,6 +2502,35 @@ test.each(['usage-limit', 'transport-error'] as const)('Codex %s retains reviewe
   expect(calls).toHaveLength(codexReview === 'usage-limit' ? 1 : 2)
   expect(calls.every(call => call.request.role === 'review')).toBe(true)
   expect(JSON.stringify(outcome)).toContain(codexReview === 'usage-limit' ? 'rate-limited' : 'deferred')
+  expect(lastCheckpoint(f).pending === undefined).toBe(codexReview === 'usage-limit')
+}, 300_000)
+
+test('a settled rate-limit refusal lets a new run review the published build without rebuilding', async () => {
+  const task = 'Record a note in NOTES.md and verify the resulting change with the complete regression suite'
+  const f = await fixture({ codexReview: 'usage-limit', dispatchTask: task })
+  const first = await drive(f)
+  expect(first.kind, why(f, first)).toBe('blocked')
+  const checkpoint = lastCheckpoint(f)
+  expect(checkpoint).toMatchObject({ stage: 'built', round: 1 })
+  expect(checkpoint.pending).toBeUndefined()
+  const prior = f.store.get(f.row.id)!
+  await f.store.update(prior.id, { phase: 'failed', worktree: null })
+  const dispatched = await dispatchBoardBoundBuild({ task, board_item_id: 'retry-card' }, {
+    store: f.store, projectAdmission: fixtureDispatchAdmission(f.db), project_slug: 'project', repo_path: f.repo,
+    board: { get: () => ({ id: 'retry-card', title: task, design_doc_ref: null, linked_run_id: prior.id }), attachRun: async () => {} },
+    resolveBuildRepo: async () => f.repo, resolveMergeMode: async () => 'pr',
+  })
+  expect(dispatched.ok, JSON.stringify(dispatched)).toBe(true)
+  if (!dispatched.ok) return
+  expect(dispatched.run.inner_checkpoint_head).toBe(String(checkpoint.head))
+  await writeFile(join(f.dir, 'bin', 'codex'), fakeCodex(f.codexCalls, 'valid'))
+  f.input.run = dispatched.run
+  f.world.dispatches.length = 0
+  const host = await createProjectBuildHost(await f.prepare())
+  const outcome = await host.run({ mode: 'implementation', start: 'resume' }, new AbortController().signal)
+  expect(outcome.kind, why(f, outcome)).toBe('merged')
+  expect(f.world.dispatches.some(row => ['plan', 'build', 'fix'].includes(row.role))).toBe(false)
+  expect(standaloneReview(f.world).measuredHead).toBe(String(checkpoint.head))
 }, 300_000)
 
 test('operator-adopted Codex accounts preserve custody and selected home reaches the merged build', async () => {

@@ -758,6 +758,18 @@ export async function buildRun(input: BuildRunInput, deps: BuildRunDeps, signal:
         return { stop: blocked('Reviewed revision changed during review') }
       }
       snapshot = measured
+      if (role === 'review' && review?.kind === 'blocked' && review.settledRateLimit) {
+        const settled = review.settledRateLimit
+        if (settled.runId !== input.run_id || settled.round !== round || !corroborates(settled.snapshot, measured)
+          || !validateTrailer('verdict', result.payload).ok) {
+          return { stop: unknown('Settled review refusal does not match the current run, revision and round') }
+        }
+        // Both producers are settled: the standalone envelope was validated above
+        // and the panel proved every enabled seat completed or hit a rate limit.
+        // Retain the completed build and all counters, but do not leave a phantom
+        // reservation that prevents the next run from reviewing that same build.
+        await checkpoint({ pending: undefined })
+      }
       // The host records the produced head before returning it, so a crash after a
       // build or fix resumes from what was made rather than redoing it. `result` is
       // the trailer AFTER the measured head replaced any claim, which is the value
