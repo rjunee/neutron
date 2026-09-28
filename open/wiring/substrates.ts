@@ -278,6 +278,12 @@ export function wireSubstrates(ctx: OpenWiringContext): WiredSubstrates {
           // Security knobs live on the profile — see substrate-profiles.ts. Kept
           // DISTINCT from the untrusted-import profile even though identical today.
           profile: PROFILE_WARM_CHAT,
+          // This same owner REPL dispatches unattended native Agent work. Claude's
+          // rendered prompt suggestions look occupied to the conservative composer
+          // guard. Disable their production, not that guard: real drafts still block.
+          // Applies to newly created children only, never an adopted live session.
+          // Direct terminal users of these project/General sessions lose suggestions.
+          extra_env: async () => ({ CLAUDE_CODE_ENABLE_PROMPT_SUGGESTION: 'false' }),
           // P0-1 — the owner's WARM conversational REPL is the ONE substrate
           // that opts into the native-MCP tool bridge, so the live chat agent
           // can call Cores/doc-search/memory/reminders mid-reasoning over a
