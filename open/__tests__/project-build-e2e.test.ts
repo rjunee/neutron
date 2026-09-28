@@ -2629,6 +2629,8 @@ test(`settled proof-only fix retry retains the candidate but buys fresh proof an
   const original = lastCheckpoint(f)
   expect(original).toMatchObject({ stage: 'rejected', round: 1, pending: { phase: 'fix' },
     previousReview: { findings: [], blockingCount: 1, unknownIdentities: true } })
+  const originalHead = original.head
+  if (typeof originalHead !== 'string') throw new Error('Expected the settled proof-only fixture to retain its measured head')
   const originalEvents = f.store.stageEvents(f.row.id)
   await f.store.update(f.row.id, { phase: 'failed', worktree: null,
     failure_reason: first.kind === 'failed' ? first.detail : 'Unexpected fixture outcome' })
@@ -2645,7 +2647,7 @@ test(`settled proof-only fix retry retains the candidate but buys fresh proof an
   })
   expect(dispatched.ok, JSON.stringify(dispatched)).toBe(true)
   if (!dispatched.ok) return
-  expect(dispatched.run.inner_checkpoint_head).toBe(original.head)
+  expect(dispatched.run.inner_checkpoint_head).toBe(originalHead)
   expect(dispatched.run.task_iteration).toBe(prior.task_iteration)
   expect(dispatched.run.max_task_iterations).toBe(prior.max_task_iterations)
   const before = suites
@@ -2673,11 +2675,11 @@ test(`settled proof-only fix retry retains the candidate but buys fresh proof an
     return
   }
   if (retryCase === 'still-red') expect(outcome).toMatchObject({ kind: 'blocked', on: 'Review requires orchestrator arbitration: no-progress' })
-  expect(standaloneReview(f.world).measuredHead).toBe(original.head!)
+  expect(standaloneReview(f.world).measuredHead).toBe(originalHead)
   expect(standaloneReview(f.world).step_id).toContain(':review:2:')
   expect(suites).toBe(before + 1)
   if (retryCase === 'healthy') expect(f.commands.slice(commandsBeforeRetry).some(argv =>
-    argv.includes('worktree') && argv.includes('add') && argv.includes(original.head!)
+    argv.includes('worktree') && argv.includes('add') && argv.includes(originalHead)
       && argv.some(arg => arg.includes('/proof-') && arg.endsWith(dispatched.run.id.slice(0, 8))))).toBe(true)
   expect(f.store.stageEvents(prior.id)).toEqual(originalEvents)
   const receipts = f.store.stageEvents(dispatched.run.id).filter(event => event.stage === 'build-suite-receipt')
