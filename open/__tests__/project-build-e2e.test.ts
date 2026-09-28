@@ -69,6 +69,10 @@ import { SqliteCodexRotationStore } from '@neutronai/trident/codex-rotation-stor
 import { seedMigratedDb } from '../../tests/support/migrated-db.ts'
 // eslint-disable-next-line import/no-relative-packages -- tests/ is root test-support, not a workspace package; no @neutronai specifier exists (same reason as the tests/support exceptions in eslint.config.mjs)
 import { summarizeUsageCoverage } from '../../tests/fixtures/trident-usage-coverage/summarize.ts'
+// eslint-disable-next-line import/no-relative-packages -- tests/ is root test-support, not a workspace package; no @neutronai specifier exists (same reason as the tests/support exceptions in eslint.config.mjs)
+import type { SequenceEventKind, SequenceTrace, SequenceTraceEvent } from '../../tests/fixtures/trident-sequence-trace/decode.ts'
+// eslint-disable-next-line import/no-relative-packages -- tests/ is root test-support, not a workspace package; no @neutronai specifier exists (same reason as the tests/support exceptions in eslint.config.mjs)
+import { validateSequenceTrace } from '../../tests/fixtures/trident-sequence-trace/validate.ts'
 import { TridentRunStore } from '@neutronai/trident/store.ts'
 import { retryModeSource, readBuildRetrySource } from '@neutronai/trident/build-mode-state.ts'
 import { WorkBoardStore, workBoardProjectIdForKey } from '@neutronai/work-board/store.ts'
@@ -4352,6 +4356,12 @@ function lastCheckpoint(f: Awaited<ReturnType<typeof fixture>>) {
   return JSON.parse(events.at(-1)!.meta!).checkpoint as Record<string, unknown>
 }
 
+/** An observed host outcome kind as a sequence-trace event kind; anything else throws, never coerces. */
+function sequenceEventKind(kind: string): SequenceEventKind {
+  if (kind === 'continued' || kind === 'merged') return kind
+  throw new Error(`outcome kind ${kind} is not a sequence event kind`)
+}
+
 /** Recover through the outer gateway and its actual project launcher. */
 async function restartThroughGateway(f: Awaited<ReturnType<typeof fixture>>) {
   const before = f.store.get(f.row.id)!
@@ -5370,6 +5380,14 @@ test(`same-run task-sequence crash ${boundary} in ${mergeMode} cannot publish un
   expect(committed.stdout.trim()).toBe('- [x] T1 record the note\n- [ ] T2 record another note')
   const main = await spawnCapture(['git', '-C', mergeMode === 'pr' ? f.origin : f.repo, 'show', 'main:NOTES.md'], f.repo)
   expect(main.stdout.trim()).toBe('seed')
+  // The sequence-trace fixture is a synthetic consumer of this run's observed
+  // outcomes, not authentication of live run evidence.
+  expect(outcome.kind).toBe('continued')
+  if (outcome.kind !== 'continued') throw new Error('task one outcome was asserted continued')
+  const taskOne: SequenceTraceEvent = { task: 1, kind: sequenceEventKind(outcome.kind), remainingTasks: outcome.remainingTasks }
+  const partialTrace: SequenceTrace = { runId: f.row.id, taskCount: 2, events: [taskOne] }
+  expect(validateSequenceTrace(partialTrace)).toBe('incomplete')
+  const eventsBeforeTerminal = f.store.stageEvents(f.row.id).length
 
   // Recovery produced a real continuation: its next reader can build T2.
   const next = await createProjectBuildHost(await f.prepare())
@@ -5379,6 +5397,18 @@ test(`same-run task-sequence crash ${boundary} in ${mergeMode} cannot publish un
   expect(f.world.selectedTasks).toEqual(['- [ ] T1 record the note', '- [ ] T2 record another note'])
   expect(f.world.dispatches[0]).toMatchObject({ role: 'plan', step_id: `${f.row.id}:task:1:plan:0` })
   if (mergeMode === 'local') expect(f.commands.some(argv => argv[0] === 'gh')).toBe(false)
+  const terminalBuilt = f.store.stageEvents(f.row.id).slice(eventsBeforeTerminal)
+    .filter(event => event.stage === 'build-mode-state')
+    .map(event => JSON.parse(event.meta!).checkpoint as Record<string, unknown>)
+    .filter(checkpoint => checkpoint.stage === 'built' && typeof checkpoint.head === 'string' && checkpoint.pending === undefined)
+  expect(terminalBuilt.length).toBeGreaterThan(0)
+  const terminalRemainder = terminalBuilt.at(-1)!.remainingTasks
+  expect(terminalRemainder).toBe(0)
+  if (typeof terminalRemainder !== 'number') throw new Error('terminal built checkpoint carries no remainder')
+  const taskTwo: SequenceTraceEvent = { task: 2, kind: sequenceEventKind(terminal.kind), remainingTasks: terminalRemainder }
+  const completedTrace: SequenceTrace = { runId: f.row.id, taskCount: 2, events: [taskOne, taskTwo] }
+  expect(validateSequenceTrace(completedTrace)).toBe('accepted')
+  expect(validateSequenceTrace({ ...completedTrace, events: [{ ...taskOne, kind: 'merged' }, taskTwo] })).toBe('rejected')
 }, 300_000)
 
 for (const cap of [1, 2])
