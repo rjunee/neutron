@@ -183,12 +183,12 @@ export function createBuildHost(options: BuildHostOptions): { deps: BuildRunDeps
       let integration: BaseIntegration | undefined
       try { integration = options.mutation.readBaseIntegration?.() }
       catch { return unknown('Integrated mutation base checkpoint is unreadable') }
-      const checkIntegration = () => mutationBaseReadiness(options.mutation.run_host,
+      const checkIntegration = (allowRefresh = false) => mutationBaseReadiness(options.mutation.run_host,
         options.mutation.run.repo_path, options.mutation.run.branch ?? `trident/${options.mutation.run.slug}`,
-        options.mutation.base_branch, snapshot, integration!)
+        options.mutation.base_branch, snapshot, integration!, allowRefresh)
       if (integration !== undefined) {
         if (mergeMode === 'local') return unknown('A local run cannot use PR base integration provenance')
-        const provenance = await checkIntegration()
+        const provenance = await checkIntegration(true)
         if (provenance.kind !== 'allow') return provenance
       }
       // Only the observed, ancestry-verified PR integration may replace the

@@ -2623,9 +2623,11 @@ test.each(['current', 'historical', 'historical after fix'] as const)('a %s sett
   expect(standaloneReview(f.world).measuredHead).toBe(String(checkpoint.head))
 }, 300_000)
 
-for (const scenario of ['in-run', 'production', 'historical', 'historical-fixed', 'ceiling', 'model', 'policy', 'brief', 'binding-chain'] as const)
+for (const scenario of ['in-run', 'production', 'historical', 'historical-fixed', 'historical-fixed-model', 'historical-fixed-policy', 'historical-fixed-brief', 'historical-fixed-chain', 'historical-fixed-overlap', 'historical-fixed-disjoint', 'historical-fixed-unknown-base', 'ceiling', 'model', 'policy', 'brief', 'binding-chain'] as const)
 test(`base drift refresh retains terminal task work and renews release evidence: ${scenario}`, async () => {
-  const historical = scenario !== 'in-run' && scenario !== 'production' && scenario !== 'historical-fixed'
+  const historicalFixed = scenario.startsWith('historical-fixed')
+  const advanced = scenario === 'historical-fixed-overlap' || scenario === 'historical-fixed-disjoint'
+  const historical = scenario !== 'in-run' && scenario !== 'production' && !historicalFixed
   const task = 'Record a note and preserve completed work across an overlapping base advance'
   const f = await fixture({ dispatchTask: task, taskSequence: true, maxRounds: 3 })
   f.world.extraBuildFiles = { 'tests/candidate.test.ts': "import { test, expect } from 'bun:test'\ntest('candidate', () => expect(true).toBe(true))\n" }
@@ -2633,7 +2635,7 @@ test(`base drift refresh retains terminal task work and renews release evidence:
   f.input.run = f.store.get(f.row.id)!
   const host = await createProjectBuildHost(await f.prepare())
   const launchBase = f.store.get(f.row.id)!.base_sha
-  if (scenario === 'historical-fixed') {
+  if (historicalFixed) {
     // The deployed producer persisted the settled FIX, but discarded baseDrift.
     const append = f.store.appendBuildModeState.bind(f.store)
     spyOn(f.store, 'appendBuildModeState').mockImplementation((id, version, meta) => {
@@ -2670,7 +2672,7 @@ test(`base drift refresh retains terminal task work and renews release evidence:
     return historical && gate.kind === 'blocked' ? { kind: 'blocked', on: gate.on } : gate
   }
   let outcome = await host.run({ mode: 'implementation', start: 'fresh' }, new AbortController().signal)
-  if (scenario === 'historical-fixed') {
+  if (historicalFixed) {
     expect(outcome).toMatchObject({ kind: 'blocked', phase: 'publish' })
     const completedHead = String(lastCheckpoint(f).head)
     expect(lastCheckpoint(f)).toMatchObject({ stage: 'fixed', round: 2, remainingTasks: 0 })
@@ -2712,7 +2714,43 @@ test(`base drift refresh retains terminal task work and renews release evidence:
     // New hosts retain the recovered observation under the retry's own identity.
     ;(f.store.appendBuildModeState as ReturnType<typeof spyOn>).mockRestore()
     f.input.run = dispatched.run
+    if (scenario === 'historical-fixed-model' || scenario === 'historical-fixed-policy' || scenario === 'historical-fixed-brief') {
+      if (scenario === 'historical-fixed-model') f.input.phase_models = { ...f.input.phase_models, build: { model: 'sonnet' } }
+      else if (scenario === 'historical-fixed-policy') f.input.phase_models = { ...f.input.phase_models, build: { model: 'opus', effort: 'low' } }
+      else f.input.reflection_context = 'Changed implementation instructions.'
+      await expect(f.prepare()).rejects.toThrow('model, authority or brief changed')
+      return
+    }
+    if (advanced) {
+      const file = scenario === 'historical-fixed-overlap' ? 'NOTES.md' : 'new-upstream.ts'
+      await writeFile(join(f.repo, file), scenario === 'historical-fixed-overlap' ? 'changed seed\nsecond base advance\n' : 'export const second = true\n')
+      await gitOut(f.context.runHost, f.repo, ['add', file])
+      await gitOut(f.context.runHost, f.repo, ['commit', '-m', 'test: advance base after settled integration'])
+      baseHead = await gitOut(f.context.runHost, f.repo, ['rev-parse', 'HEAD'])
+      await gitOut(f.context.runHost, f.repo, ['push', 'origin', 'main'])
+      f.world.integrateBase = baseHead
+    }
+    if (scenario === 'historical-fixed-unknown-base') {
+      const run = f.context.runHost
+      f.context.runHost = async (argv, ...args) => {
+        const result = await run(argv, ...args)
+        if (argv[0] === 'gh' && argv.some(arg => arg.includes('baseRefOid'))) {
+          const value = JSON.parse(result.stdout)
+          delete value.baseRefOid
+          return { ...result, stdout: JSON.stringify(value) }
+        }
+        return result
+      }
+    }
     const retry = await createProjectBuildHost(await f.prepare())
+    if (scenario === 'historical-fixed-chain') {
+      await retry.deps.modes!.loadResume()
+      await f.store.update(dispatched.run.id, { phase: 'failed' })
+      expect(retryModeSource(f.store, f.store.get(dispatched.run.id)!)?.mergeRefresh).toBeDefined()
+      expect(retryModeSource(f.store, f.store.get(dispatched.run.id)!)?.mergeRefresh)
+        .toEqual(retryModeSource(f.store, prior)?.mergeRefresh)
+      return
+    }
     outcome = await retry.run({ mode: 'implementation', start: 'resume' }, new AbortController().signal)
   }
   if (historical) {
@@ -2797,16 +2835,22 @@ test(`base drift refresh retains terminal task work and renews release evidence:
     expect(f.world.dispatches.filter(call => call.role === 'fix')).toHaveLength(1)
     return
   }
+  if (scenario === 'historical-fixed-unknown-base') {
+    expect(outcome).toMatchObject({ kind: 'unknown', phase: 'publish' })
+    expect(f.world.dispatches.filter(call => call.role === 'fix')).toHaveLength(1)
+    expect(f.github.prs.some(pr => pr.state === 'MERGED')).toBe(false)
+    return
+  }
   expect(outcome.kind, why(f, outcome)).toBe('merged')
   expect(f.store.get(f.row.id)!.base_sha).toBe(launchBase)
   expect(f.world.dispatches.filter(call => call.role === 'plan')).toHaveLength(1)
   expect(f.world.dispatches.filter(call => call.role === 'build')).toHaveLength(1)
-  expect(f.world.dispatches.filter(call => call.role === 'fix')).toHaveLength(1)
+  expect(f.world.dispatches.filter(call => call.role === 'fix')).toHaveLength(advanced ? 2 : 1)
   const reviews = f.world.dispatches.filter(call => call.role === 'review' && call.schema === 'project-review')
   expect(reviews).toHaveLength(2)
   const newHead = reviews[1]!.measuredHead!
   expect(newHead).not.toBe(oldHead)
-  expect(reviews[1]!.step_id).toContain(':review:2:')
+  expect(reviews[1]!.step_id).toContain(advanced ? ':review:3:' : ':review:2:')
   for (const ancestor of [oldHead, baseHead]) expect((await f.context.runHost(
     ['git', '-C', f.repo, 'merge-base', '--is-ancestor', ancestor, newHead], f.repo)).ok).toBe(true)
   expect(await gitOut(f.context.runHost, f.repo, ['show', `${newHead}:NOTES.md`])).toContain('changed seed')

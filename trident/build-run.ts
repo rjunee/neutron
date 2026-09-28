@@ -39,7 +39,11 @@ export interface BuildSnapshot {
 }
 export type Measurement = { kind: 'known'; value: BuildSnapshot } | { kind: 'unknown'; detail: string }
 /** Positive host observation; a refusal remains a refusal until fresh work is reviewed. */
-export interface BaseDriftRefresh { head: string; base: string; baseHead: string; overlap: readonly string[] }
+export interface BaseDriftRefresh {
+  head: string; base: string; baseHead: string; overlap: readonly string[]
+  /** A host-measured forward advance beyond an already integrated base. */
+  previousBaseHead?: string
+}
 export interface BaseIntegration extends BaseDriftRefresh { integratedHead: string; pr: number }
 export type GateResult = { kind: 'allow' } | { kind: 'blocked'; on: string; reviewStop?: ReviewStop; baseDrift?: BaseDriftRefresh } | { kind: 'unknown'; detail: string }
 export type NominationRepair = { kind: 'repair-nomination'; finding: string }
@@ -289,7 +293,8 @@ const fullOid = (head: string | null): head is string => typeof head === 'string
 function validBaseDrift(value: BaseDriftRefresh | undefined, head: string | null): value is BaseDriftRefresh {
   return !!value && value.head === head && fullOid(value.head) && fullOid(value.baseHead)
     && typeof value.base === 'string' && value.base.trim().length > 0
-    && Array.isArray(value.overlap) && value.overlap.length > 0
+    && Array.isArray(value.overlap) && (value.overlap.length > 0
+      || (fullOid(value.previousBaseHead ?? null) && value.previousBaseHead !== value.baseHead))
     && value.overlap.every(path => typeof path === 'string' && path.length > 0)
 }
 const uncheckedLine = /^\s*- \[ \]\s+/
@@ -997,7 +1002,7 @@ export async function buildRun(input: BuildRunInput, deps: BuildRunDeps, signal:
       const fix = await work('fix', round)
       return 'stop' in fix ? fix.stop : null
     }
-    async function publishCandidate(): Promise<BuildRunOutcome | NominationRepair | null> {
+    async function publishCandidate(): Promise<BuildRunOutcome | NominationRepair | { kind: 'refresh-base'; gate: Extract<GateResult, { kind: 'blocked' }> } | null> {
       const candidate = snapshot
       phase = 'publish'
       step_id = null
@@ -1015,6 +1020,7 @@ export async function buildRun(input: BuildRunInput, deps: BuildRunDeps, signal:
       if (!diff.allow) return blocked(diff.reason)
       const assessment = await deps.publishGate(snapshot, input.merge_mode)
       if (assessment.kind === 'repair-nomination') return assessment
+      if (assessment.kind === 'blocked' && assessment.baseDrift) return { kind: 'refresh-base', gate: assessment }
       const publishGate = gateStop(assessment)
       if (publishGate) return publishGate
       const beforePublish = await deps.measure()
@@ -1082,6 +1088,11 @@ export async function buildRun(input: BuildRunInput, deps: BuildRunDeps, signal:
         if (!fullOid(snapshot.head) || !snapshot.diff.trim()) return unknown('Review requires a full branch head and nonempty diff artifact')
         if (!local) {
           const stop = await publishCandidate()
+          if (stop?.kind === 'refresh-base') {
+            const refusal = await refreshBase(stop.gate, round)
+            if (refusal) return refusal
+            continue
+          }
           if (stop?.kind === 'repair-nomination') {
             const refusal = await repairNomination(stop, round)
             if (refusal) return refusal
@@ -1198,6 +1209,12 @@ export async function buildRun(input: BuildRunInput, deps: BuildRunDeps, signal:
 
       if (local || approved) {
         const stop = await publishCandidate()
+        if (stop?.kind === 'refresh-base') {
+          const refusal = await refreshBase(stop.gate, firstRound)
+          if (refusal) return refusal
+          firstRound++
+          continue
+        }
         if (stop?.kind === 'repair-nomination') {
           const refusal = await repairNomination(stop, firstRound)
           if (refusal) return refusal
