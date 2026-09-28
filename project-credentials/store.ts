@@ -61,6 +61,7 @@
  */
 
 import type { ProjectDb, OwnerHandle } from '@neutronai/persistence/index.ts'
+import { CodexCredentialMaintenance } from './codex-maintenance.ts'
 import { CodexServiceCustodyGate } from './codex-custody-gate.ts'
 
 // All stores constructed over the same live DB share the process-local gate.
@@ -297,6 +298,7 @@ function resolveScopeProjectId(scope: CredentialScope, project_id: string | unde
 
 export class ProjectCredentialStore {
   readonly codexCustody: CodexServiceCustodyGate
+  readonly codexMaintenance: CodexCredentialMaintenance
   private readonly db: ProjectDb
   private readonly crypto: SecretCrypto
   private readonly now: () => string
@@ -309,6 +311,7 @@ export class ProjectCredentialStore {
     this.crypto = opts.crypto
     this.now = opts.now ?? ((): string => new Date().toISOString())
     this.ulid = opts.ulid ?? defaultUlid
+    this.codexMaintenance = new CodexCredentialMaintenance(db, this.crypto, this.codexCustody, this.now)
   }
 
   /**

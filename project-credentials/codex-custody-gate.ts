@@ -49,6 +49,7 @@ interface AdmittedWriter extends CodexCustodyWriterLease { context: WriterContex
 
 export class CodexServiceCustodyGate {
   private readonly owners = new Map<string, OwnerAdmission>()
+  private readonly maintenanceOwners = new WeakMap<CodexCustodyMaintenanceLease, { owner: string; assertHeld(): void }>()
   private readonly context = new AsyncLocalStorage<ReadonlyMap<string, WriterContext>>()
 
   /** Use for synchronous file work or a lifetime whose actual completion is
@@ -136,9 +137,17 @@ export class CodexServiceCustodyGate {
         resolve(lease)
       },
     }
+    this.maintenanceOwners.set(lease, { owner, assertHeld })
     state.maintenance = request
     request.drain()
     return { drained }
+  }
+
+  /** Bind privileged maintenance to this gate, owner and exact unreleased lease. */
+  assertMaintenance(owner: string, lease: CodexCustodyMaintenanceLease): void {
+    const authority = this.maintenanceOwners.get(lease)
+    if (authority?.owner !== owner) throw new CodexCustodyAdmissionError()
+    authority.assertHeld()
   }
 
   /** Stored process-local state only. This is never a native-health reading. */

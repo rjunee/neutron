@@ -13,6 +13,28 @@ is introduced.
 
 ## Acceptance
 
+- [ ] A separate offline maintenance primitive may reconcile only an existing
+      default global credential under the exact drained owner lease and an
+      independently enforced continuous host writer fence. It checks trusted
+      issuer signatures, audiences, signed account bindings and expiry against
+      independently supplied account digests; unsigned refresh timestamps are
+      ordering checks, never provider usability attestations. The bounded case
+      has exactly one named peer, whose stored/native token bytes agree apart
+      from surrounding whitespace. Extra unverified homes refuse.
+      An encrypted, authenticated receipt is persisted and fsynced before a
+      full-row conditional update; auth/key drift, stale signed-input snapshots,
+      expired grants, triggers and inbound foreign keys refuse. Only default
+      ciphertext and updated_at can change; labels, expiry, identity, named rows,
+      rotation slots/history and active pointer remain unchanged. Conditional
+      rollback requires the exact installed snapshot and unchanged inputs under
+      the same continuous fence; post-maintenance rotations make it ineligible.
+      Refusals print no credential contents or underlying error details.
+      Verify: `bun test trident/codex-custody-reconciliation.test.ts`.
+      This library is not a host exclusion adapter or permission for live use.
+      Recovery also refuses expired signed tokens or grants; delayed recovery
+      remains fenced and needs a separately reviewed operation. The external
+      authority must protect receipt storage and every mutable ancestor against
+      replacement as well as excluding native/service credential writers.
 - [ ] Generic credential create, overwrite and delete refuse normalized `codex`
       and `codex-acct-*`, including the reserved-write entry points for other
       modules. Explicit Codex-owned writes remain available. Existing credential
@@ -84,8 +106,11 @@ is introduced.
       `open/__tests__/project-build-e2e.test.ts`.
 
 Adoption is bounded to the service's established default and named account
-directories. Arbitrary path import, live account migration and copying one login
-into multiple live directories are outside this change.
+directories. Its identity guards remain unchanged. Offline maintenance is a
+separate, privileged operation requiring the contract above; arbitrary path
+import through adoption and copying one login into multiple live directories
+remain outside this change. No live maintenance entry point is supplied until
+the host's continuous native and privileged writer exclusion is implemented.
 
 ## Operator contract
 
