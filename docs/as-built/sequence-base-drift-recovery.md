@@ -58,5 +58,27 @@ attempt identity tightening, the three focused Trident files pass 529 tests and
 refresh'` passes seven cases and 81 assertions. Both `bunx --no-install tsc -p
 tsconfig.json --noEmit` and its `trident/tsconfig.json` counterpart pass again.
 
-The final publication gate must validate the frozen candidate. Deployment and an
-unattended live retry remain separate acceptance evidence.
+Root's consolidated `bash scripts/check-shared-host.sh` gate passed on frozen
+`ada64f80d50ed8b5d64767faab6f0e9e421e17c6`: all 51 TypeScript configurations,
+all 1,751 discovered test files across 19 bounded-memory groups, zero failed
+groups, and unchanged suite-input identity
+`bbad82aa8a5abed28bf9262d2b4995dba3870aeab154f27faa91895ae9c6a4e2`.
+It ran from 19:46:07 to 20:08:01 UTC. The full consuming E2E file ran in its
+ordinary group. The dependency gate also passed: 3,147 modules and 8,594 edges,
+with no new cross-band violations.
+
+Root Opus review raised a later-round counter concern. The source already sets
+`firstRound = round` on approval, so independent Astra review and bounded Fable
+arbitration refuted that finding. Two delivered controls now exercise rejection
+at round one, approval at round two, then base overlap: cap three requires
+`fix:2` and fresh review three; cap two refuses before another fix. Removing
+only the counter assignment killed both semantic assertions, and restoration
+passed both. Independent Astra reviewed the test-only delta. The integrated
+controls pass two tests and 22 assertions; both explicit TypeScript checks pass
+again.
+
+After the consolidated receipt, only those 43 test lines and this verification
+record changed; production source did not. The prior full-suite identity is not
+claimed as a receipt for the new publication head. Exact-head publication CI
+must validate that final head. Deployment and an unattended live retry remain
+separate acceptance evidence.

@@ -2857,6 +2857,49 @@ test(`measured base drift recovery preserves gates and bounded review: ${scenari
   } else expect(f.events).not.toContain('merge')
 })
 
+for (const maxRounds of [3, 2])
+test(`measured base drift recovery after round-two approval preserves fix binding and ceiling: ${maxRounds}`, async () => {
+  const f = modeFixture('single')
+  const original = f.snapshot.head
+  const ordinaryFixHead = 'b'.repeat(40)
+  const baseFixHead = 'c'.repeat(40)
+  const baseHead = 'e'.repeat(40)
+  const reviewHeads: string[] = []
+  const suiteHeads: string[] = []
+  const lineagePins: string[] = []
+  let assessments = 0
+  f.decisions.push({ kind: 'fix', findings: ['ordinary code defect'] }, { kind: 'approve' })
+  f.deps.readReviewCap = async () => ({ kind: 'known', max_rounds: maxRounds })
+  f.deps.reviewSuite = async snapshot => { suiteHeads.push(snapshot.head); return { kind: 'known', findings: [] } }
+  const observe = f.deps.observeReview
+  f.deps.observeReview = async (...args) => { reviewHeads.push(args[0].head); return observe(...args) }
+  f.deps.checkFixLineage = async (_snapshot, pin) => { lineagePins.push(pin); return { kind: 'allow' } }
+  f.deps.mergeGate = async snapshot => ++assessments === 1
+    ? { kind: 'blocked', on: 'Base drift overlaps reviewed changes',
+      baseDrift: { head: snapshot.head, base: 'release', baseHead, overlap: ['shared.ts'] } }
+    : { kind: 'allow' }
+  const outcome = await f.run()
+  expect(outcome).toMatchObject(maxRounds === 3 ? { kind: 'merged' }
+    : { kind: 'blocked', on: 'Review requires orchestrator arbitration: round ceiling' })
+  expect(f.runner.calls.map(call => call.step_id)).toEqual(['run:plan:0', 'run:build:0', 'run:fix:1',
+    ...(maxRounds === 3 ? ['run:fix:2'] : [])])
+  expect(reviewHeads).toEqual([original, ordinaryFixHead, ...(maxRounds === 3 ? [baseFixHead] : [])])
+  expect(suiteHeads).toEqual(reviewHeads)
+  expect(f.cross.calls.map(call => call.step_id)).toEqual([
+    `run:review:1:head:${original}`, `run:review:2:head:${ordinaryFixHead}`,
+    ...(maxRounds === 3 ? [`run:review:3:head:${baseFixHead}`] : [])])
+  expect(lineagePins).toEqual([original, ...(maxRounds === 3 ? [ordinaryFixHead, baseHead] : [])])
+  const fixes = f.prepared.filter(call => call.role === 'fix')
+  expect(fixes).toHaveLength(maxRounds === 3 ? 2 : 1)
+  expect(fixes[0]!.findings).toEqual(['ordinary code defect'])
+  if (maxRounds === 3) {
+    expect(fixes[1]!.findings[0]).toContain(baseHead)
+    expect(fixes[1]!.findings[0]).toContain(ordinaryFixHead)
+    expect(f.events.filter(event => event === 'publicationSuite')).toHaveLength(2)
+  } else expect(f.events).not.toContain('merge')
+  expect(f.state.advances).toBe(0)
+})
+
 test('imported merge stop refreshes before spending another review or rebuilding terminal tasks', async () => {
   const f = modeFixture()
   f.plan.remainingTasks = 0
