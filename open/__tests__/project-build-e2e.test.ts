@@ -384,6 +384,7 @@ interface WorkerWorld {
   strategy: 'single' | 'task_sequence'
   plannerPatch?: Record<string, unknown>
   planProbe?: (request: BoundedWorkRequest, brief: string) => Promise<void>
+  builderProbe?: (request: BoundedWorkRequest, brief: string, context: { suiteScope: string; testStrategy: string }) => void
   builderObservations: { strategy: unknown; rationale: unknown; plan: unknown; scope: unknown; previous: unknown; contextStrategy: unknown; snapshotHead: string }[]
   readSelectedRun: (runId: string) => ReturnType<TridentRunStore['get']>
   reviewVeto?: 'standalone' | 'synthesis'
@@ -665,6 +666,7 @@ async function performRole(world: WorkerWorld, request: BoundedWorkRequest, brie
   }
 
   if (request.role === 'build' || request.role === 'fix') {
+    world.builderProbe?.(request, brief, context)
     if (request.role === 'fix' && world.integrateBase) {
       expect(context.findings.join('\n')).toContain(world.integrateBase)
       const candidate = await readFile(join(cwd, 'NOTES.md'), 'utf8')
@@ -1806,6 +1808,35 @@ for (const taskSequence of [false, true]) test(`terminal ${taskSequence ? 'task-
   const receipts = f.store.stageEvents(f.row.id).filter(event => event.stage === 'build-suite-receipt' && JSON.parse(event.meta!).receipt)
   expect(receipts).toHaveLength(1)
   expect(JSON.parse(receipts[0]!.meta!).receipt).toMatchObject({ scope: 'full-suite', round: 1, report: { hostExitCode: 0 } })
+}, 120_000)
+
+test('host-suite BUILD and FIX receive behavioral case selection and truthful subset guidance', async () => {
+  const f = await fixture({ blockersByRound: [0, 1, 0] })
+  const roles: string[] = []
+  // Observe the request's actual brief and written context at the worker seam.
+  // This proves delivery, not whether a model obeys the instructions.
+  f.world.builderProbe = (request, brief, context) => {
+    roles.push(request.role)
+    expect(context.suiteScope).toBe('host-suite')
+    expect(brief).toContain('host context `testStrategy`')
+    expect(brief).toContain('`full-suite` requires the worker full suite for a wave member')
+    expect(context.testStrategy).toContain('select affected behavioral cases within large consuming test files')
+    expect(context.testStrategy).toContain('`bun test <file> -t <pattern>`')
+    expect(context.testStrategy).toContain('positive and negative controls')
+    expect(context.testStrategy).toContain('keep every required consuming file explicit')
+    expect(context.testStrategy).toContain('nonzero\ntest count')
+    expect(context.testStrategy).toContain('zero matches, skipped-only output or a missing summary is not a green stage 1')
+    expect(context.testStrategy).toContain('exact commands, selected cases, observed counts and failures')
+    expect(context.testStrategy).toContain('subset evidence only, never a full-suite pass')
+    expect(context.testStrategy).toContain('Preserve all explicitly required typechecks and consuming-surface checks')
+    expect(context.testStrategy).toContain('does not waive them or override a requirement to run a whole file')
+    expect(context.testStrategy).toContain('STAGE 2 — HOST OWNED. Do not run the full suite')
+    expect(context.testStrategy).toContain("Report testsPassed=false and suiteOutcome='deferred'")
+  }
+  f.world.suiteReport = async () => ({ testsPassed: false, suiteOutcome: 'deferred', suiteEvidence: '' })
+  const outcome = await drive(f)
+  expect(outcome.kind, why(f, outcome)).toBe('merged')
+  expect(roles).toEqual(['build', 'fix'])
 }, 120_000)
 
 test('v2 pending builder reconstruction preserves every brief and its later fix contract', async () => {

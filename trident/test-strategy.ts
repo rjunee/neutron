@@ -784,6 +784,17 @@ function stage1Lines(baseBranch: string): string[] {
 /** Terminal workers perform the blast-radius check; the host owns stage 2. */
 export function renderHostSuiteWorkerStrategy(baseBranch: string): string {
   return ['TEST EXECUTION', '', ...stage1Lines(baseBranch), '',
+    'HOST-SUITE STAGE 1 — select affected behavioral cases within large consuming test files.',
+    'Use the project runner\'s supported case selector (e.g. `bun test <file> -t <pattern>`) when',
+    'running a whole selected file would exceed the fail-fast scope. Include the changed behavior',
+    'and its positive and negative controls; keep every required consuming file explicit in the',
+    'command and report. Confirm the runner actually executed the intended cases with a nonzero',
+    'test count: zero matches, skipped-only output or a missing summary is not a green stage 1.',
+    'Report the exact commands, selected cases, observed counts and failures, and coverage left',
+    'for host stage 2. A filtered pass is subset evidence only, never a full-suite pass.',
+    'Preserve all explicitly required typechecks and consuming-surface checks; case selection',
+    'does not waive them or override a requirement to run a whole file.',
+    '',
     'STAGE 2 — HOST OWNED. Do not run the full suite: host review runs it and publication consumes the same identity-bound receipt.',
     "Report testsPassed=false and suiteOutcome='deferred' after a green stage 1.",
     'If host findings contain a red suite log, inspect that exact log and repair its named failures. A stage-1 pre-existing failure cannot explain host stage-2 red.',
