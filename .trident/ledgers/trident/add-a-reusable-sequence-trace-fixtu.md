@@ -1,0 +1,3 @@
+- [x] T1: Add the pure typed sequence-trace decoder (decode.ts) and its structure/immutability tests under tests/fixtures/trident-sequence-trace/
+- [ ] T2: Add the pure sequence-trace validator (validate.ts) consuming the decoded type, with two-/three-task positives, proper-prefix incomplete cases, every rejection, and two killed semantic mutations
+- [ ] T3: Add the standalone Bun CLI (cli.ts) with real-subprocess tests, consume the validator in the same-run task-sequence crash E2E test, and add the docs/as-built/trident-sequence-trace-fixture.md shard
