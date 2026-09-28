@@ -124,13 +124,16 @@ are `plan`, `build`, `fix`, `review`, `test`, `ci` and `deploy`. The native
 `task_complete` receipt supplies its own start/end at one-second resolution.
 Absent completion stays unimported. An exact native `token_usage_record` for the
 same session and turn supplies input, output and cached-input counts for that
-attested task only. Native input includes cached input, so the displayed input
+attested task only. Native usage records are cumulative within a turn, so the
+last monotonic snapshot in the scan supplies its totals; malformed or regressing
+matching snapshots leave them unknown. Native input includes cached input, so the displayed input
 field excludes cached input and the cache-read field carries it separately.
-Missing, malformed or conflicting matching receipts leave tokens unknown;
+Missing receipts leave tokens unknown;
 cache creation and provider cost remain unknown. Nested command spans retain
 unknown tokens. A unique recorded invoking model is shown only from a full source
 scan; missing, mixed or partial task contexts remain unknown. A tail can omit a
-usage receipt, and one model in a tail cannot prove the task used only that model.
+usage receipt; such a partial task is deferred instead of recording unknown usage
+permanently. One model in a tail cannot prove the task used only that model.
 These are task envelopes that can contain
 nested tests or review commands, so their overlapping durations are not additive.
 Register each rollout/config pair with the private refresh

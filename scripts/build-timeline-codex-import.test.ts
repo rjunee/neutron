@@ -46,12 +46,12 @@ describe('bounded native Codex operation reconstruction', () => {
     const zero = (await run([usage({ input_tokens: 0, output_tokens: 0, cached_input_tokens: 0 }), task()], turnOptions)).observations[0]!
     expect(zero).toMatchObject({ inputTokens: 0, outputTokens: 0, cacheReadTokens: 0 })
   })
-  test('missing, foreign, malformed and conflicting usage never charge an attested task', async () => {
+  test('missing, foreign, malformed and regressing usage never charge an attested task', async () => {
     const variants = [[], [usage(undefined, { thread_id: 'foreign' })], [usage(undefined, { turn_id: 'other' })],
       [usage(undefined, { thread_id: undefined })],
       [usage({ input_tokens: 4, output_tokens: 1, cached_input_tokens: 5 })],
       [usage({ input_tokens: 2.5, output_tokens: 1, cached_input_tokens: 0 })],
-      [usage(), usage({ input_tokens: 26, output_tokens: 2, cached_input_tokens: 5 })],
+      [usage(), usage({ input_tokens: 24, output_tokens: 2, cached_input_tokens: 5 })],
       [usage(), usage({ input_tokens: 25, output_tokens: 2, cached_input_tokens: -1 })]]
     for (const receipts of variants) {
       const result = await run([...receipts, task()], turnOptions)
@@ -60,6 +60,10 @@ describe('bounded native Codex operation reconstruction', () => {
     }
     const repeated = await run([usage(), usage(), task()], turnOptions)
     expect(repeated.observations[0]).toMatchObject({ inputTokens: 20, outputTokens: 2, cacheReadTokens: 5 })
+    const progress = await run([usage({ input_tokens: 10, output_tokens: 1, cached_input_tokens: 3 }), usage(), task()], turnOptions)
+    expect(progress.observations[0]).toMatchObject({ inputTokens: 20, outputTokens: 2, cacheReadTokens: 5 })
+    const afterCompletion = await run([task(), usage()], turnOptions)
+    expect(afterCompletion.observations[0]).toMatchObject({ inputTokens: 20, outputTokens: 2, cacheReadTokens: 5 })
     const unbound = await run([usage(), task()])
     expect(unbound.observations).toEqual([])
     const noCompletion = await run([usage()], turnOptions)
@@ -151,7 +155,7 @@ describe('bounded native Codex operation reconstruction', () => {
       expect(consumed.cards[0]!.segments.map(s => s.phase).sort()).toEqual(['build', 'test'])
     } finally { await rm(directory, { recursive: true, force: true }) }
   })
-  test('partial native task context cannot upgrade a mixed-model envelope; replay retains recorded receipts', async () => {
+  test('partial native task without usage is deferred before journal write', async () => {
     const directory = await mkdtemp(join(tmpdir(), 'codex-turn-model-replay-'))
     try {
       for (const mixed of [false, true]) {
@@ -163,9 +167,10 @@ describe('bounded native Codex operation reconstruction', () => {
         const tail = await importCodexFile(path, turnOptions, Buffer.byteLength(tailBody) + 25)
         expect(tail.scan.partial).toBe(true)
         expect(full.observations[0]!.model).toBe(mixed ? null : 'model-b')
-        expect(tail.observations[0]!.model).toBeNull()
-        // Private refreshers may enrich an unknown model from a richer import.
-        // A partial task import must never claim that enrichment is available.
+        expect(tail.observations).toEqual([])
+        expect(tail.coverage.deferredTurns).toBe(1)
+        // Once a full scan establishes the receipt, a later bounded tail may
+        // omit it without overwriting the immutable journal row.
         const retained = new Map(full.observations.map(o => [o.eventId, o]))
         for (const incoming of tail.observations) {
           const prior = retained.get(incoming.eventId)
@@ -184,6 +189,24 @@ describe('bounded native Codex operation reconstruction', () => {
         expect(consumed.cards[0]!.segments).toHaveLength(1)
         expect(consumed.cards[0]!.segments[0]!.model).toBe(mixed ? null : 'model-b')
       }
+    } finally { await rm(directory, { recursive: true, force: true }) }
+  })
+  test('a bounded-tail task before its usage receipt cannot freeze unknown tokens in the journal', async () => {
+    const directory = await mkdtemp(join(tmpdir(), 'codex-turn-usage-tail-'))
+    try {
+      const path = join(directory, 'rollout.jsonl'), journal = join(directory, 'phases.jsonl')
+      const completion = task() + '\n'
+      await writeFile(path, [meta, record('response_item', { text: 'padding'.repeat(1000) }), context(), completion.trimEnd()].join('\n') + '\n')
+      const early = await importCodexFile(path, turnOptions, Buffer.byteLength(completion) + 25)
+      expect(early.scan.partial).toBe(true)
+      expect(early.observations).toEqual([])
+      expect(early.coverage.deferredTurns).toBe(1)
+      expect(await appendChangedPhaseObservations(journal, early.observations)).toBe(0)
+      await appendFile(path, usage() + '\n')
+      const complete = await importCodexFile(path, turnOptions)
+      expect(complete.observations[0]).toMatchObject({ inputTokens: 20, outputTokens: 2, cacheReadTokens: 5 })
+      expect(await appendChangedPhaseObservations(journal, complete.observations)).toBe(1)
+      expect((await readPhaseObservations(journal))[0]).toMatchObject({ inputTokens: 20, outputTokens: 2, cacheReadTokens: 5 })
     } finally { await rm(directory, { recursive: true, force: true }) }
   })
   test('uses exact operation envelope, invoking model and explicit binding without charging tokens', async () => {

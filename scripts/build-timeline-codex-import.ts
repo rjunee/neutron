@@ -38,6 +38,7 @@ export interface CodexImportCoverage {
   duplicate: number
   turnReceipts: number
   emittedTurns: number
+  deferredTurns: number
   tokenCoverage: 'unknown' | 'partial'
 }
 type Obj = Record<string, unknown>
@@ -120,7 +121,7 @@ export async function importCodexOperations(lines: AsyncIterable<string> | Itera
   }
   const maxBytes = options.maxBytes ?? 512 * 1024 * 1024, maxLines = options.maxLines ?? 1_000_000
   if (!stamp(maxBytes) || !stamp(maxLines) || !maxBytes || !maxLines) throw new Error('Invalid import bounds')
-  const coverage: CodexImportCoverage = { lines: 0, commandReceipts: 0, emitted: 0, unsupportedCommands: 0, unbound: 0, incomplete: 0, malformed: 0, duplicate: 0, turnReceipts: 0, emittedTurns: 0, tokenCoverage: 'unknown' }
+  const coverage: CodexImportCoverage = { lines: 0, commandReceipts: 0, emitted: 0, unsupportedCommands: 0, unbound: 0, incomplete: 0, malformed: 0, duplicate: 0, turnReceipts: 0, emittedTurns: 0, deferredTurns: 0, tokenCoverage: 'unknown' }
   const observations: DirectPhaseObservation[] = [], seen = new Set<string>()
   const contexts = new Map<string, Array<{ at: number; model: string }>>()
   const turns: Array<{ turnId: string; start: number; end: number }> = []
@@ -154,8 +155,12 @@ export async function importCodexOperations(lines: AsyncIterable<string> | Itera
       const next = nativeTurnUsage(p.turn_token_usage)
       const prior = usageByTurn.get(p.turn_id)
       if (!usageByTurn.has(p.turn_id)) usageByTurn.set(p.turn_id, next)
-      else if (prior == null || next === null || prior.input !== next.input ||
-          prior.output !== next.output || prior.cached !== next.cached) usageByTurn.set(p.turn_id, null)
+      // Native records are cumulative snapshots within a turn. The last valid
+      // monotonic snapshot for the exact turn is authoritative; a regression or
+      // malformed matching snapshot poisons that turn instead of guessing.
+      else if (prior == null || next === null || next.input < prior.input ||
+          next.output < prior.output || next.cached < prior.cached) usageByTurn.set(p.turn_id, null)
+      else usageByTurn.set(p.turn_id, next)
       continue
     }
     if (r.type === 'event_msg' && p.type === 'task_complete') {
@@ -273,8 +278,22 @@ export async function importCodexFile(path: string, options: CodexImportOptions,
       // individual command, a whole task needs complete context to claim one model.
       // Keep unknown even when this window happens to contain one context.
       if (startByte > 0) {
-        for (const observation of result.observations) {
-          if (observation.phaseId.startsWith('codex-turn:')) observation.model = null
+        result.observations = result.observations.filter(observation => {
+          if (!observation.phaseId.startsWith('codex-turn:')) return true
+          // The window may include completion but omit its earlier usage. Do
+          // not freeze an unknown receipt in an append-only journal when a
+          // later/full scan can still recover exact native usage.
+          if (observation.inputTokens === null) {
+            result.coverage.deferredTurns++
+            result.coverage.emittedTurns--
+            return false
+          }
+          observation.model = null
+          return true
+        })
+        result.coverage.emitted = result.observations.length
+        if (!result.observations.some(o => o.phaseId.startsWith('codex-turn:') && o.inputTokens !== null)) {
+          result.coverage.tokenCoverage = 'unknown'
         }
       }
       return { ...result, scan: { sourceBytes: stat.size, startByte, partial: startByte > 0,
