@@ -68,6 +68,7 @@ import { CodexCredentialService } from '@neutronai/trident/codex-credential.ts'
 import { SqliteCodexRotationStore } from '@neutronai/trident/codex-rotation-store.ts'
 import { seedMigratedDb } from '../../tests/support/migrated-db.ts'
 import { TridentRunStore } from '@neutronai/trident/store.ts'
+import { retryModeSource, readBuildRetrySource } from '@neutronai/trident/build-mode-state.ts'
 import { WorkBoardStore, workBoardProjectIdForKey } from '@neutronai/work-board/store.ts'
 import { dispatchBoardBoundBuild, type BoardBoundBuildDeps } from '@neutronai/trident/board-dispatch.ts'
 import { DispatchHoldStore } from '@neutronai/trident/dispatch-holds.ts'
@@ -2505,14 +2506,31 @@ test.each(['usage-limit', 'transport-error'] as const)('Codex %s retains reviewe
   expect(lastCheckpoint(f).pending === undefined).toBe(codexReview === 'usage-limit')
 }, 300_000)
 
-test('a settled rate-limit refusal lets a new run review the published build without rebuilding', async () => {
+test.each(['current', 'historical', 'historical after fix'] as const)('a %s settled rate-limit refusal lets a new run review the published build without rebuilding', async version => {
   const task = 'Record a note in NOTES.md and verify the resulting change with the complete regression suite'
-  const f = await fixture({ codexReview: 'usage-limit', dispatchTask: task })
-  const first = await drive(f)
+  const afterFix = version === 'historical after fix'
+  const f = await fixture({ codexReview: afterFix ? 'valid' : 'usage-limit', dispatchTask: task,
+    ...(afterFix ? { blockersByRound: [0, 1, 0] } : {}) })
+  const firstHost = await createProjectBuildHost(await f.prepare())
+  if (afterFix) {
+    const runner = firstHost.workers.fix.runner
+    firstHost.workers.fix.runner = { ...runner, run: async (...args) => {
+      await writeFile(join(f.dir, 'bin', 'codex'), fakeCodex(f.codexCalls, 'usage-limit'))
+      return runner.run(...args)
+    } }
+  }
+  const first = await firstHost.run({ mode: 'implementation', start: 'fresh' }, new AbortController().signal)
   expect(first.kind, why(f, first)).toBe('blocked')
   const checkpoint = lastCheckpoint(f)
-  expect(checkpoint).toMatchObject({ stage: 'built', round: 1 })
+  expect(checkpoint).toMatchObject({ stage: afterFix ? 'fixed' : 'built', round: afterFix ? 2 : 1 })
   expect(checkpoint.pending).toBeUndefined()
+  if (version !== 'current') {
+    // Reproduce the pre-repair producer: all workers settled, but its latest
+    // durable checkpoint still holds the original review reservation.
+    const historical = f.store.stageEvents(f.row.id).filter(event => event.stage === 'build-mode-state'
+      && JSON.parse(event.meta!).checkpoint.pending?.phase === 'review').at(-1)!
+    await f.store.recordStageEvent(f.row.id, 'build-mode-state', historical.meta)
+  }
   const prior = f.store.get(f.row.id)!
   await f.store.update(prior.id, { phase: 'failed', worktree: null })
   const dispatched = await dispatchBoardBoundBuild({ task, board_item_id: 'retry-card' }, {
@@ -2523,6 +2541,19 @@ test('a settled rate-limit refusal lets a new run review the published build wit
   expect(dispatched.ok, JSON.stringify(dispatched)).toBe(true)
   if (!dispatched.ok) return
   expect(dispatched.run.inner_checkpoint_head).toBe(String(checkpoint.head))
+  expect(dispatched.run.task_iteration).toBe(prior.task_iteration)
+  expect(dispatched.run.max_task_iterations).toBe(prior.max_task_iterations)
+  if (version !== 'current') {
+    expect(lastCheckpoint(f).pending).toMatchObject({ phase: 'review' })
+    expect(readBuildRetrySource(f.store, dispatched.run)?.state.checkpoint as unknown).toEqual(checkpoint)
+    const directory = join(f.context.stateRoot, prior.id)
+    const seat = (await readdir(directory)).find(name => /^review-[a-f0-9]{64}$/.test(name))!
+    const receiptPath = join(directory, seat, 'receipt.json')
+    const receipt = await readFile(receiptPath, 'utf8')
+    await writeFile(receiptPath, JSON.stringify({ ...JSON.parse(receipt), invalidated: 'input-changed' }))
+    expect(() => readBuildRetrySource(f.store, dispatched.run)).toThrow('checkpoint changed')
+    await writeFile(receiptPath, receipt)
+  }
   await writeFile(join(f.dir, 'bin', 'codex'), fakeCodex(f.codexCalls, 'valid'))
   f.input.run = dispatched.run
   f.world.dispatches.length = 0
@@ -2531,6 +2562,93 @@ test('a settled rate-limit refusal lets a new run review the published build wit
   expect(outcome.kind, why(f, outcome)).toBe('merged')
   expect(f.world.dispatches.some(row => ['plan', 'build', 'fix'].includes(row.role))).toBe(false)
   expect(standaloneReview(f.world).measuredHead).toBe(String(checkpoint.head))
+}, 300_000)
+
+test('historical review import refuses incomplete or foreign evidence and never edits the source', async () => {
+  const f = await fixture({ codexReview: 'usage-limit' })
+  expect((await drive(f)).kind).toBe('blocked')
+  const historical = f.store.stageEvents(f.row.id).filter(event => event.stage === 'build-mode-state'
+    && JSON.parse(event.meta!).checkpoint.pending?.phase === 'review').at(-1)!
+  await f.store.recordStageEvent(f.row.id, 'build-mode-state', historical.meta)
+  await f.store.update(f.row.id, { phase: 'failed', worktree: null })
+  const prior = f.store.get(f.row.id)!
+  const original = JSON.parse(historical.meta!)
+  const root = join(f.context.stateRoot, prior.id)
+  const names = (await readdir(root)).filter(name => /^review-[a-f0-9]{64}$/.test(name))
+  const seats = await Promise.all(names.map(async name => ({ name,
+    receipt: JSON.parse(await readFile(join(root, name, 'receipt.json'), 'utf8')) })))
+  const completed = seats.find(seat => seat.receipt.observation.status === 'completed')!
+  const limited = seats.find(seat => seat.receipt.observation.status === 'rate-limited')!
+  const check = () => retryModeSource(f.store, prior)
+  expect(check()?.state.checkpoint.pending).toBeUndefined()
+  expect(check()?.state.checkpoint.head).toBe(original.checkpoint.head)
+  for (const stage of ['task-built', 'approved', 'rejected']) {
+    await f.store.recordStageEvent(prior.id, 'build-mode-state', JSON.stringify({ ...original,
+      checkpoint: { ...original.checkpoint, stage } }))
+    expect(check(), stage).toBeNull()
+  }
+  await f.store.recordStageEvent(prior.id, 'build-mode-state', historical.meta)
+  const changes: Array<[string, (value: any) => void]> = [
+    ['run', value => { value.observation.runId = 'another-run' }],
+    ['head', value => { value.observation.head = 'f'.repeat(40) }],
+    ['round', value => { value.observation.round++ }],
+    ['provider', value => { value.observation.provider = 'pi' }],
+    ['model', value => { value.observation.modelId = 'another-model' }],
+    ['hash', value => { value.requestHash = '0'.repeat(64) }],
+    ['invalidated', value => { value.invalidated = 'input-changed' }],
+    ['pending', value => { value.state = 'pending' }],
+    ['unknown', value => { value.observation.status = 'unknown' }],
+    ['deferred', value => { value.observation.status = 'deferred' }],
+    ['verdict', value => { value.observation.payload = { verdict: 'APPROVE' } }],
+  ]
+  const receiptPath = join(root, completed.name, 'receipt.json')
+  const receiptBytes = await readFile(receiptPath, 'utf8')
+  for (const [name, change] of changes) {
+    const value = JSON.parse(receiptBytes); change(value)
+    await writeFile(receiptPath, JSON.stringify(value))
+    expect(check(), name).toBeNull()
+    await writeFile(receiptPath, receiptBytes)
+    expect(check(), `${name} restored`).not.toBeNull()
+  }
+  for (const path of [original.checkpoint.pending.recovery.request.result.path,
+    original.checkpoint.pending.recovery.request.brief.path,
+    original.checkpoint.pending.recovery.request.brief.path + '.context.json',
+    join(root, limited.name, 'request.json')]) {
+    const bytes = await readFile(path, 'utf8')
+    await writeFile(path, '{}')
+    expect(check(), path).toBeNull()
+    await writeFile(path, bytes)
+  }
+  const req = JSON.parse(await readFile(join(root, completed.name, 'request.json'), 'utf8'))
+  const journalName = `attempt-request-${createHash('sha256').update(JSON.stringify([prior.id, req.step_id, 'dispatch'])).digest('hex')}.json`
+  // Independent census: deleting BOTH files cannot erase an admitted sibling.
+  await rename(join(root, completed.name), join(f.dir, 'saved-review-seat'))
+  await rename(join(root, journalName), join(f.dir, 'saved-review-journal'))
+  expect(check()).toBeNull()
+  await rename(join(f.dir, 'saved-review-seat'), join(root, completed.name))
+  await rename(join(f.dir, 'saved-review-journal'), join(root, journalName))
+  const journalOnly = JSON.parse(await readFile(join(root, journalName), 'utf8'))
+  journalOnly.request.step_id = 'unaccounted-review'
+  const journalOnlyPath = join(root, `attempt-request-${createHash('sha256')
+    .update(JSON.stringify([prior.id, journalOnly.request.step_id, 'dispatch'])).digest('hex')}.json`)
+  await writeFile(journalOnlyPath, JSON.stringify(journalOnly))
+  expect(check()).toBeNull()
+  await rm(journalOnlyPath)
+  const standalone = original.checkpoint.pending.recovery.request
+  const armPath = join(root, `claude-step-${createHash('sha256').update(JSON.stringify([prior.id, standalone.step_id])).digest('hex')}.json`)
+  const arm = await readFile(armPath, 'utf8')
+  await writeFile(armPath, JSON.stringify(standalone))
+  expect(check()).toBeNull()
+  await writeFile(armPath, arm)
+  // A result symlink is not host-owned evidence, even when its bytes are valid.
+  await rename(receiptPath, join(f.dir, 'saved-review-receipt'))
+  await symlink(join(f.dir, 'saved-review-receipt'), receiptPath)
+  expect(check()).toBeNull()
+  await rm(receiptPath)
+  await rename(join(f.dir, 'saved-review-receipt'), receiptPath)
+  expect(check()).not.toBeNull()
+  expect(lastCheckpoint(f)).toEqual(original.checkpoint)
+  expect(f.github.prs.every(pr => pr.state === 'OPEN')).toBe(true)
 }, 300_000)
 
 test('operator-adopted Codex accounts preserve custody and selected home reaches the merged build', async () => {

@@ -17,6 +17,7 @@
  */
 
 import { createLogger } from '@neutronai/logger'
+import { TridentAttemptLedger } from './attempt-ledger.ts'
 import { isDeployRestartKillReason, isUndeterminedLauncherDeathReason } from './deploy-kill-reason.ts'
 import type { Topic } from '@neutronai/channels/types.ts'
 import type { ProjectDb } from '@neutronai/persistence/index.ts'
@@ -658,6 +659,9 @@ export class TridentRunStore {
     /** Injectable clock for tests; defaults to wall-clock ISO-8601. */
     private readonly now: () => string = () => new Date().toISOString(),
   ) {}
+
+  /** Read-only dispatch census; outcomes alone never authorize result reuse. */
+  attempts(runId: string) { return new TridentAttemptLedger(this.db).list(runId) }
 
   /** Persist the host-validated first decision; retries may repeat the exact decision. */
   async selectExecutionStrategy(
