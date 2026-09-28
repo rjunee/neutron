@@ -6366,7 +6366,8 @@ for (const seam of ['submitLine', 'acquireTurn', 'silent-worker'] as const) {
       return { ...child, release: async () => { const result = await child.release(); released(); return result } }
     } }
     const options = await f.prepare()
-    // The real wall is 15 minutes (`PROJECT_BUILD_WALL_MS.plan`); only its LENGTH is
+    expect(options.workers.plan.request.budget.wall_ms).toBe(1_800_000)
+    // The real wall is 30 minutes (`PROJECT_BUILD_WALL_MS.plan`); only its LENGTH is
     // shortened here, not the mechanism that enforces it.
     options.workers.plan.request = { ...options.workers.plan.request, budget: { wall_ms: 1_500 } }
     let acquisitions = 0, submissions = 0

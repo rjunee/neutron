@@ -6,7 +6,9 @@
  * source unit: the worker API consumes milliseconds and prose derives minutes.
  */
 export const PROJECT_BUILD_WALL_MS = {
-  plan: 15 * 60_000,
+  // Allow slow project probes to finish; this remains a finite host wall,
+  // not permission to move builder validation into planning.
+  plan: 30 * 60_000,
   review: 15 * 60_000,
   build: 90 * 60_000,
   fix: 90 * 60_000,

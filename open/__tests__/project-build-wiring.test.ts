@@ -780,7 +780,7 @@ test('each role carries its own wall budget, and a builder gets room for a suite
     roles.map(role => [role, options.workers[role].request.budget.wall_ms]),
   ) as Record<(typeof roles)[number], number>
   expect(walls).toEqual({
-    plan: 900_000,
+    plan: 1_800_000,
     review: 900_000,
     build: 5_400_000,
     fix: 5_400_000,

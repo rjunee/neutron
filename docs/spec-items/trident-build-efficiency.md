@@ -200,6 +200,15 @@ barrier at `trident/build-run.ts:691-697`.
   action is refused and its legitimate sibling still succeeds. A parser error is
   not a semantic mutation result.
 
+  The planning role has a finite 30-minute host wall; review remains 15 minutes,
+  and build and fix remain 90 minutes each. This planning-only allowance accommodates
+  slow project REPL probes. It does not authorize candidate acceptance validation
+  during planning, reset a pending attempt, or establish that a child stopped when
+  observation expires. Unconfirmed completion remains unknown with existing
+  ownership protections. Verify exact role budgets through
+  `open/__tests__/project-build-wiring.test.ts` and finite plan-wall enforcement
+  through the hung native-seam cases in `open/__tests__/project-build-e2e.test.ts`.
+
 - [ ] **The improvement is measured through the deployed path.** A deterministic
   benchmark covers fresh build, a code-fix round, unchanged-head recovery,
   moved-head recovery and infrastructure interruption using fixed task inputs
