@@ -2743,6 +2743,13 @@ test(`workspace Python import with bytecode suppression ${suppressBytecode} pres
   }
   expect(await observe()).toMatchObject(suppressBytecode ? { kind: 'known', findings: [] }
     : { kind: 'unknown', detail: 'Suite inputs changed during host observation' })
+  const receipt = JSON.parse(f.store.stageEvents(f.row.id).filter(event => event.stage === 'build-suite-receipt').at(-1)!.meta!)
+  expect(receipt.observation.delta).toEqual({ kind: 'known', changed: suppressBytecode ? [] : ['installed'] })
+  expect(receipt.observation.hostExitCode).toBe(0)
+  if (!suppressBytecode) expect(receipt).not.toHaveProperty('receipt')
+  for (const privateValue of [worktree, module, 'observed.py', '__pycache__']) {
+    expect(JSON.stringify(receipt.observation)).not.toContain(privateValue)
+  }
   expect(suites).toBe(1)
   expect((await spawnCapture(['git', 'status', '--porcelain', '--untracked-files=all'], worktree)).stdout).toBe('')
   expect(await observe()).toMatchObject({ kind: 'known', findings: [] })

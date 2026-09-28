@@ -37,7 +37,7 @@ import { modelTier } from '@neutronai/trident/model-tiers.ts'
 import { readProjectRepos } from '@neutronai/trident/project-repos.ts'
 import { buildReflectionGuidance } from '@neutronai/trident/reflection-guidance.ts'
 import { PROJECT_BUILD_WALL_MS } from '@neutronai/trident/project-build-budget.ts'
-import { prepareProjectDependencies, projectSuiteIdentity, type projectInstallAvailableBytes } from './project-build-dependencies.ts'
+import { prepareProjectDependencies, projectSuiteIdentityMeasurement, type projectInstallAvailableBytes } from './project-build-dependencies.ts'
 import { parseBuildModeState, readBuildRetrySource } from '@neutronai/trident/build-mode-state.ts'
 import { pendingReviewCheckoutHead } from '@neutronai/trident/pending-review-checkout.ts'
 import { normalizeLegacyStoredExecutionPlan } from '@neutronai/trident/legacy-execution-compat.ts'
@@ -933,7 +933,7 @@ export async function prepareProjectBuild(input: InnerLoopInput, context: Projec
   }
   return {
     substrate, workers, requestedModels, attempts: context.attempts,
-    suiteIdentity: snapshot => projectSuiteIdentity(run.worktree, snapshot.head),
+    suiteIdentity: snapshot => projectSuiteIdentityMeasurement(run.worktree, snapshot.head),
     testStrategies: { full: input.test_strategy ?? '', intermediate: input.test_strategy_intermediate ?? null },
     production: { store: context.store, runId: run.id, projectSlug: run.project_slug,
       repo: run.repo_path, worktree: run.worktree, branch: run.branch, baseBranch: input.base_branch,
