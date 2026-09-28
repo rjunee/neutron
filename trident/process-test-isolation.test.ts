@@ -46,7 +46,7 @@ test('private namespace init reaps exited orphans and preserves live children an
   const [status, stdout, stderr] = await Promise.all([child.exited,
     new Response(child.stdout).text(), new Response(child.stderr).text()])
   expect({ status, stdout, stderr: status === 0 ? '' : stderr }).toEqual({ status: 0, stdout: '', stderr: '' })
-  expect(stderr).toContain('Ran 3 tests')
+  expect(stderr).toContain('Ran 4 tests')
 })
 
 for (const installed of [true, false]) test(`private boundary isolates operator authority with installed=${installed} and preserves neighboring configuration`, async () => {
