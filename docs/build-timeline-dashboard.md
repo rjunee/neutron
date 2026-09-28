@@ -89,6 +89,33 @@ refresh process can publish importer status separately. Ambiguous, incomplete or
 unbound history stays unknown. Raw commands, outputs and local paths are not
 included in imported public-facing labels.
 
+Native in-conversation work has no child command to wrap. For completed tasks,
+the importer also accepts operator-attested `turnBindings` in its private config:
+
+```json
+{
+  "repositories": ["example/project"],
+  "evidenceRef": "codex:task-receipts",
+  "turnBindings": [{
+    "sessionId": "recorded-session-id",
+    "turnId": "recorded-turn-id",
+    "phase": "build",
+    "links": [{ "repository": "example/project", "prNumber": 7 }]
+  }]
+}
+```
+
+The operator must attest both the task's PR ownership and its phase; a checkout,
+PR mention, agent name or task title is not that attestation. Supported categories
+are `plan`, `build`, `fix`, `review`, `test`, `ci` and `deploy`. The native
+`task_complete` receipt supplies its own start/end at one-second resolution.
+Absent completion stays unimported. A unique recorded invoking model is shown;
+missing or mixed models remain unknown. These are task envelopes that can contain
+nested tests or review commands, so their overlapping durations are not additive.
+Usage remains unknown. Register each rollout/config pair with the private refresh
+service; adding importer support alone does not discover new orchestration lanes.
+Use explicit start/completion records for forward work while a task is still open.
+
 The implementation does not establish past planning/build/fix intervals where
 no producer recorded them. It does not estimate cost or savings. Future Core
 installation and identity remain [separate unspecified work](spec-items/build-timeline-core.md).
