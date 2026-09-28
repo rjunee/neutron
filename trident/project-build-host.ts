@@ -122,7 +122,8 @@ export async function createProjectBuildHost(options: ProjectBuildHostOptions) {
     workers, runners,
     reviewed_head: run.inner_checkpoint_head,
     leak: { ...options.policy.leak, run_host: config.runHost, repo_path: config.repo, branch: config.branch, base_sha: run.base_sha },
-    mutation: { ...options.policy.mutation, run, run_host: config.runHost, base_branch: config.baseBranch },
+    mutation: { ...options.policy.mutation, run, run_host: config.runHost, base_branch: config.baseBranch,
+      readBaseIntegration: production.readBaseIntegration },
     replProvider: options.substrate.provider,
     effects: { ...production.effects, async prepareWork(request, context) {
       const strategies = options.testStrategies

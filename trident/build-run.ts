@@ -40,6 +40,7 @@ export interface BuildSnapshot {
 export type Measurement = { kind: 'known'; value: BuildSnapshot } | { kind: 'unknown'; detail: string }
 /** Positive host observation; a refusal remains a refusal until fresh work is reviewed. */
 export interface BaseDriftRefresh { head: string; base: string; baseHead: string; overlap: readonly string[] }
+export interface BaseIntegration extends BaseDriftRefresh { integratedHead: string; pr: number }
 export type GateResult = { kind: 'allow' } | { kind: 'blocked'; on: string; reviewStop?: ReviewStop; baseDrift?: BaseDriftRefresh } | { kind: 'unknown'; detail: string }
 export type NominationRepair = { kind: 'repair-nomination'; finding: string }
 export type PublicationGateResult = GateResult | NominationRepair
@@ -86,6 +87,8 @@ export interface ResumeCheckpoint {
   refreshBeforeReview?: boolean | undefined
   /** Retained through an armed base-integration fix, including crash recovery. */
   baseDrift?: BaseDriftRefresh | undefined
+  /** Host-observed base integrated by a settled fix; never changes the launch pin. */
+  baseIntegration?: BaseIntegration | undefined
   /** Completed intermediate task: spend is durable before the Git ledger write. */
   handoff?: TaskHandoffIntent | undefined
   findings: readonly { kind: 'code' | 'lane'; actionable: boolean; text: string }[]
@@ -799,6 +802,9 @@ export async function buildRun(input: BuildRunInput, deps: BuildRunDeps, signal:
         await checkpoint({ head: measured.head, stage: role === 'fix' ? 'fixed' : 'built',
           round: role === 'fix' ? round + 1 : Math.max(durable.round, 1, round + 1), pending: undefined, findings: [],
           ...(role === 'fix' ? { baseDrift: undefined, refreshBeforeReview: undefined } : {}),
+          ...(role === 'fix' && durable.baseDrift && measured.pr ? {
+            baseIntegration: { ...durable.baseDrift, integratedHead: measured.head, pr: measured.pr.number },
+          } : {}),
           ...(role === 'build' ? { remainingTasks: strategy === 'task_sequence' ? plan!.remainingTasks : 0,
             handoff: strategy === 'task_sequence' && plan!.remainingTasks > 0
               ? { iteration: taskIteration, builtHead: measured.head, body: tickTopTask(plan!.implementationPlan) } : undefined } : {}) })

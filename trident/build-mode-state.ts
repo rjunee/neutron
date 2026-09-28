@@ -67,7 +67,34 @@ export function readBuildModeState(
   run: TridentRun,
 ): BuildModeState | null {
   const event = events.filter(event => event.stage === 'build-mode-state').at(-1)
-  return event ? parseBuildModeState(event.meta ?? null, run) : null
+  if (!event) return null
+  const state = parseBuildModeState(event.meta ?? null, run)
+  recoverBaseIntegration(events, run, state)
+  return state
+}
+
+/** Older hosts dropped the base observation at fix settlement. Reconstruct only
+ * the adjacent armed integration → settled fix transition, never worker prose. */
+function recoverBaseIntegration(events: ReadonlyArray<{ stage: string; meta?: string | null }>,
+  run: TridentRun, state: BuildModeState): void {
+  if (state.checkpoint.baseIntegration !== undefined || state.checkpoint.stage !== 'fixed'
+    || state.checkpoint.pending !== undefined) return
+  const modes = events.filter(event => event.stage === 'build-mode-state')
+  if (modes.length < 2) return
+  const previous = parseBuildModeState(modes.at(-2)!.meta ?? null, run, true)
+  const c = previous.checkpoint
+  const pending = c.pending
+  const recovery = pending?.recovery
+  const drift = c.baseDrift
+  if (!drift || c.refreshBeforeReview !== true || c.stage !== 'built'
+    || pending?.phase !== 'fix' || !recovery || recovery.request.role !== 'fix'
+    || recovery.request.run_id !== run.id || recovery.request.step_id !== pending.step_id
+    || recovery.snapshot.head !== c.head || drift.head !== c.head || !recovery.snapshot.pr
+    || recovery.snapshot.pr.state !== 'OPEN' || recovery.snapshot.pr.head !== c.head
+    || state.checkpoint.head === c.head || state.checkpoint.head === null
+    || state.checkpoint.round !== c.round + 1 || recovery.round !== c.round
+    || state.iteration !== previous.iteration) return
+  state.checkpoint.baseIntegration = { ...drift, integratedHead: state.checkpoint.head, pr: recovery.snapshot.pr.number }
 }
 
 /** Validate the original writer's identity before any state is consumed. */
@@ -124,6 +151,7 @@ export function retryModeSource(store: TridentRunStore, prior: TridentRun, seen 
     return inherited && link ? { ...inherited, prior, eventId: link.id } : null
   }
   const state = parseBuildModeState(event.meta, prior, true)
+  recoverBaseIntegration(store.stageEvents(prior.id), prior, state)
   const checkpoint = state.checkpoint
   if (checkpoint.stage === 'approved') {
     const recovered = mergeStopBuildSource(store, prior, state)

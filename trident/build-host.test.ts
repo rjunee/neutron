@@ -9,6 +9,7 @@ import { createBuildHost, type BuildHostOptions } from './build-host.ts'
 import { briefIntegrity } from './gates/brief-integrity.ts'
 import { publicationReadiness, pinnedMergeReadiness } from './gates/release-readiness.ts'
 import { MERGE_DIFF_BYTES_MAX } from './merge.ts'
+import type { BaseIntegration } from './build-run.ts'
 
 const head = 'a'.repeat(40)
 const snapshot: BuildSnapshot = { head, diff: '+code', pr: null }
@@ -106,6 +107,57 @@ async function fixture() {
   const input = (host: ReturnType<typeof make>): BuildRunInput => ({ run_id: 'test', mode: 'implementation', start: 'fresh', merge_mode: 'pr', repl_provider: options.replProvider, workers: host.workers })
   return { options, make, input, path, calls, setDrift: (value: typeof drift) => { drift = value }, prose: () => { diff = 'M\0README.md\0' }, clean: () => { leakCode = 0; leakOutput = 'LEAK GATE: SILENT' } }
 }
+
+test.each(['valid', 'production', 'missing', 'forged-base', 'missing-base', 'moving-base',
+  'wrong-pr', 'wrong-branch', 'foreign-repo', 'wrong-candidate-ancestry', 'wrong-base-ancestry',
+  'wrong-integrated-ancestry', 'unreadable', 'changed-checkpoint'] as const)(
+  'integrated mutation range retains proof and provenance guards: %s', async fault => {
+    const f = await fixture()
+    const launchBase = 'f'.repeat(40)
+    f.options.leak.base_sha = launchBase
+    const baseHead = 'b'.repeat(40)
+    const integration: BaseIntegration = { head: 'c'.repeat(40), base: 'base', baseHead,
+      integratedHead: 'd'.repeat(40), pr: 12, overlap: ['README.md'] }
+    let reads = 0
+    f.options.mutation.readBaseIntegration = () => fault === 'missing' ? undefined
+      : fault === 'changed-checkpoint' && reads > 0 ? { ...integration, pr: 99 } : integration
+    let prReads = 0
+    const original = f.options.mutation.run_host
+    f.options.mutation.run_host = async (argv, ...args) => {
+      if (argv[0] === 'gh' && argv.some(arg => arg.includes('baseRefOid'))) {
+        prReads++
+        return { ok: fault !== 'unreadable', exit_code: fault === 'unreadable' ? 1 : 0, stderr: '', stdout: JSON.stringify({
+          number: fault === 'wrong-pr' ? 99 : 12, state: 'OPEN', headRefName: fault === 'wrong-branch' ? 'other' : 'change',
+          headRefOid: head, baseRefName: 'base', isCrossRepository: fault === 'foreign-repo',
+          baseRefOid: fault === 'missing-base' ? undefined : fault === 'forged-base' || (fault === 'moving-base' && prReads > 1)
+            ? 'e'.repeat(40) : baseHead,
+        }) }
+      }
+      if (argv.includes('--is-ancestor')) {
+        const ancestor = argv.at(-2)
+        const bad = fault === 'wrong-candidate-ancestry' && ancestor === integration.head
+          || fault === 'wrong-base-ancestry' && ancestor === integration.baseHead
+          || fault === 'wrong-integrated-ancestry' && ancestor === integration.integratedHead
+        return { ok: !bad, exit_code: bad ? 1 : 0, stderr: '', stdout: '' }
+      }
+      if (argv.includes('diff') && argv.includes('--name-status')) {
+        reads++
+        const integrated = argv.some(arg => arg.startsWith(baseHead + '...'))
+        const diff = fault === 'production' || !integrated ? 'M\0src/code.ts\0' : 'M\0README.md\0'
+        const output = argv.find(arg => arg.startsWith('--output='))
+        if (output) await writeFile(output.slice('--output='.length), diff)
+        return { ok: true, exit_code: 0, stderr: '', stdout: diff }
+      }
+      return original(argv, ...args)
+    }
+    const result = await f.make().deps.publishGate(published, 'pr')
+    if (fault === 'valid') expect(result).toEqual({ kind: 'allow' })
+    else if (fault === 'production' || fault === 'missing') {
+      expect(result.kind).toBe('blocked')
+      expect(JSON.stringify(result)).toContain('nominated no mutation')
+    } else expect(result.kind).toBe('unknown')
+    expect(f.options.leak.base_sha).toBe(launchBase)
+  })
 
 test('missing provider is refused by the driver before effects', async () => {
   const f = await fixture()
