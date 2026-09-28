@@ -26,4 +26,9 @@ attribution without inventing ownership. Legacy checkpoint replay is covered.
 Semantic mutation controls fail when projection retains raw private fields and
 when it drops a required input-token field. The malformed-root regression was
 observed failing before its correction and passing afterwards. Mutations were
-restored. Shared-host and exact-head CI evidence remains a publication prerequisite.
+restored. Independent review of the frozen implementation passed its focused
+suite and a 792-case command/status/exit/output equivalence comparison. Under an
+explicit disk-capacity constraint, local bulk fixtures and the shared-host gate
+were not rerun after the scalar-privacy correction. Publication is authorized
+with full exact-head CI authoritative before merge; no local full-gate pass is
+claimed for this change.
