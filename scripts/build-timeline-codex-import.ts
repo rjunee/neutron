@@ -102,6 +102,58 @@ function directLink(args: string[], item: Obj, allowed: Set<string>): Link | nul
   return { repository: match[1]!, prNumber: Number(match[2]) }
 }
 
+/** Retain only evidence consumed by this importer, never full native command
+ * output, prompts or context. This projection is independent of PR bindings so
+ * a later exact registration can replay the same native receipts. */
+export function projectCodexReceipt(line: string): string | null {
+  const malformed = '{"type":"turn_context","payload":null}'
+  if (!line.trim()) return ''
+  let r: unknown
+  try { r = JSON.parse(line) } catch { return malformed }
+  if (!object(r) || !object(r.payload)) return malformed
+  if (!['session_meta', 'turn_context', 'token_usage_record'].includes(String(r.type)) &&
+      !(r.type === 'event_msg' && object(r.payload) && ['item_completed', 'task_complete'].includes(String(r.payload.type)))) return null
+  const p = r.payload
+  let payload: Obj
+  if (r.type === 'session_meta') {
+    const spawn = object(p.source) && object(p.source.subagent) && object(p.source.subagent.thread_spawn) ? p.source.subagent.thread_spawn : null
+    payload = { id: p.id, ...(spawn ? { source: { subagent: { thread_spawn: { parent_thread_id: spawn.parent_thread_id } } } } : {}) }
+  } else if (r.type === 'turn_context') payload = { turn_id: p.turn_id, model: p.model }
+  else if (r.type === 'token_usage_record') {
+    const usage = object(p.turn_token_usage) ? { input_tokens: p.turn_token_usage.input_tokens,
+      output_tokens: p.turn_token_usage.output_tokens, cached_input_tokens: p.turn_token_usage.cached_input_tokens } : null
+    payload = { thread_id: p.thread_id, turn_id: p.turn_id, turn_token_usage: usage }
+  } else if (p.type === 'task_complete') payload = { type: p.type, turn_id: p.turn_id, started_at: p.started_at, completed_at: p.completed_at }
+  else if (!object(p.item) || p.item.type !== 'CommandExecution') payload = { type: 'item_completed' }
+  else {
+    const item = p.item, args = argv(item.command), classification = args && classify(args)
+    let command: string[] = []
+    if (args && classification) {
+      // The importer only uses shell argv to classify a command or extract an
+      // exact GitHub PR/repository. Test selectors, scripts and --body text are
+      // not evidence and can be arbitrarily large or private.
+      if (args[0] === 'gh' && args[1] === 'pr') {
+        const repoAt = args.findIndex(a => a === '--repo' || a === '-R')
+        const repo = repoAt >= 0 ? args[repoAt + 1] : args.find(a => a.startsWith('--repo='))?.slice(7)
+        command = ['gh', 'pr', args[2]!, ...(args[2] === 'merge' ? [args[3] ?? ''] : []), ...(repo === undefined ? [] : ['--repo', repo])]
+      } else if (classification.phase !== 'test') {
+        command = ['ATTRIBUTION_UNBOUND=1', 'gh', 'pr', classification.phase === 'merge' ? 'merge' : 'create']
+      } else {
+        // Preserve environment-prefix semantics: those classify as tests but
+        // never become direct GitHub ownership evidence.
+        command = classification.label === 'Host test suite' ? ['bash', 'scripts/run-tests.sh'] :
+          classification.label === 'Shared-host validation' ? ['bash', 'scripts/check-shared-host.sh'] : ['bun', 'test']
+      }
+    }
+    const stdout = typeof item.stdout === 'string' && /^https:\/\/github\.com\/[\w.-]+\/[\w.-]+\/pull\/[1-9]\d*$/.test(item.stdout.trim()) ? item.stdout.trim() : undefined
+    payload = { type: p.type, thread_id: p.thread_id, turn_id: p.turn_id,
+      ...(classification ? { started_at_ms: p.started_at_ms, completed_at_ms: p.completed_at_ms } : {}),
+      item: { type: item.type, id: item.id, command, ...(classification ? { cwd: item.cwd,
+        status: item.status, exit_code: item.exit_code, ...(args?.[0] === 'gh' && args[2] === 'create' ? { stdout } : {}) } : {}) } }
+  }
+  return JSON.stringify({ type: r.type, ...(r.type === 'turn_context' ? { timestamp: r.timestamp } : {}), payload })
+}
+
 export async function importCodexOperations(lines: AsyncIterable<string> | Iterable<string>, options: CodexImportOptions): Promise<{ observations: DirectPhaseObservation[]; coverage: CodexImportCoverage }> {
   if (!options.repositories.length || !options.repositories.every(repository) || !/^[\w:./-]{1,240}$/.test(options.evidenceRef) || options.evidenceRef.startsWith('/')) throw new Error('Invalid import scope or opaque evidence reference')
   const allowed = new Set(options.repositories)

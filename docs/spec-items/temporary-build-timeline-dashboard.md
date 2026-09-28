@@ -140,6 +140,13 @@ spans carry unknown tokens unless a provider actually attributed usage.
       refuse; valid appends remain readable. Checkpoint journal and cursor persist
       atomically together in the private consumer; crashes cannot lose receipts.
       Registered-source coverage does not claim to inventory unregistered history.
+      Retained receipts contain only importer-consumed fields, not full command
+      output, prompts or unrelated context. A synthetic source whose command output
+      alone exceeds the retained-journal cap must still preserve the bounded receipt
+      set, exact phase boundaries/model/tokens, restart replay and late explicit
+      registration. Existing source, line and journal bounds remain enforced.
+      Projection preserves malformed coverage and never creates PR ownership from
+      unsupported commands or unrelated native turns.
       Verify: `bun test scripts/build-timeline-codex-discover.test.ts` and the
       deploying consumer's durable checkpoint/registration tests.
 - [ ] Page/fragment/JSON deny anonymous and incorrect credentials and serve valid
