@@ -286,7 +286,10 @@ export async function pinnedMergeReadiness(
     const drift = await assessBaseDrift(run, repo, base, branch)
     if (!drift.assessable) return unknown('Base drift could not be assessed')
     if (drift.branch_head_sha !== snapshot.head) return blocked('Fetched PR head differs from reviewed head')
-    if (shouldHoldForBaseDrift(drift, new Set(), { hold_when_unassessable: true })) return blocked('Base drift overlaps reviewed changes')
+    if (shouldHoldForBaseDrift(drift, new Set(), { hold_when_unassessable: true })) return {
+      kind: 'blocked', on: 'Base drift overlaps reviewed changes',
+      baseDrift: { head: snapshot.head, base: pr.baseRefName, baseHead: drift.current_base_sha!, overlap: drift.overlap },
+    }
     return { kind: 'allow' }
   } catch (error) { return unknownCause('Merge host observation could not be decoded', error, runId) }
 }

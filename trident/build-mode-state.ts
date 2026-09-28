@@ -4,10 +4,15 @@ import { isExecutionStrategy, legacyCheckpointName } from './execution-strategy.
 import { normalizeLegacyStoredExecutionPlan } from './legacy-execution-compat.ts'
 import { settledReviewRecovery } from './settled-review-recovery.ts'
 import { settledProofFixRecovery, type ProofFixBindings } from './settled-proof-fix-recovery.ts'
+import { evidenceReader } from './settled-review-recovery.ts'
+import { basename, dirname, join } from 'node:path'
+import { isDeepStrictEqual as equal } from 'node:util'
+import { briefIntegrity } from './gates/brief-integrity.ts'
+import { validateTrailer } from './gates/result-contract.ts'
 
 const oid = /^(?:[0-9a-f]{40}|[0-9a-f]{64})$/
 export type BuildModeState = { checkpoint: ResumeCheckpoint; iteration: number; consumed?: { round: number; head: string } }
-type BuildRetrySource = { prior: TridentRun; eventId: number; state: BuildModeState; proofFix?: ProofFixBindings }
+type BuildRetrySource = { prior: TridentRun; eventId: number; state: BuildModeState; proofFix?: ProofFixBindings; mergeRefresh?: ProofFixBindings }
 
 export const retrySourceIdentity = (run: TridentRun): string =>
   JSON.stringify([run.id, run.project_slug, run.repo_path, run.branch, run.task, run.merge_mode, run.execution_strategy])
@@ -120,6 +125,10 @@ export function retryModeSource(store: TridentRunStore, prior: TridentRun, seen 
   }
   const state = parseBuildModeState(event.meta, prior, true)
   const checkpoint = state.checkpoint
+  if (checkpoint.stage === 'approved') {
+    const recovered = mergeStopBuildSource(store, prior, state)
+    return recovered ? { prior, eventId: event.id, state: recovered.state, mergeRefresh: recovered.bindings } : null
+  }
   // Never inherit approval or an unresolved worker reservation. A terminal task-sequence
   // build may retry publication/review only when its host checkpoint records an
   // empty validated plan. Legacy/partial builds cannot establish that fact.
@@ -143,9 +152,97 @@ export function retryModeSource(store: TridentRunStore, prior: TridentRun, seen 
   }
   if (checkpoint.round >= 1 && (checkpoint.stage === 'fixed' || (checkpoint.stage === 'built'
     && (prior.execution_strategy === 'single' || checkpoint.remainingTasks === 0)))) {
-    return { prior, eventId: event.id, state }
+    // Re-persisting an imported build before preparation fails does not turn it
+    // into locally produced implementation or discard its original input pins.
+    const linkEvent = store.stageEvents(prior.id).filter(row => row.stage === 'build-retry-source').at(-1)
+    const link = linkEvent ? JSON.parse(linkEvent.meta ?? 'null') : null
+    const inherited = link?.head === checkpoint.head ? readBuildRetrySource(store, prior, seen) : null
+    return { prior, eventId: event.id, state,
+      ...(inherited?.mergeRefresh ? { mergeRefresh: inherited.mergeRefresh } : {}) }
   }
   return taskContinuationSource(prior, state) ? { prior, eventId: event.id, state } : null
+}
+
+/** Import completed implementation from a settled merge refusal. The old approval
+ * establishes spent work only; a fresh host observation must authorize any repair,
+ * and the new run obtains all release evidence under its own identity. */
+function mergeStopBuildSource(store: TridentRunStore, run: TridentRun, state: BuildModeState):
+  { state: BuildModeState; bindings: ProofFixBindings } | null {
+  try {
+    const approved = state.checkpoint
+    const terminal = JSON.parse(run.inner_result ?? 'null')
+    if (run.merge_mode !== 'pr' || terminal?.projectBuild?.kind !== 'blocked'
+      || terminal.projectBuild.phase !== 'merge' || terminal.projectBuild.recipient !== 'orchestrator'
+      || terminal.projectBuild.reviewStop !== undefined || terminal.ok !== false || terminal.prMerged !== false
+      || terminal.checkpoint !== 'inner-error' || approved.pending !== undefined || approved.reviewStop !== undefined
+      || approved.handoff !== undefined || approved.head === null || approved.round < 1
+      || approved.remainingTasks !== 0 || !run.strategy_plan) return null
+    const plan = JSON.parse(run.strategy_plan)
+    if (!validateTrailer('plan', plan).ok || plan.remainingTasks !== 0 || plan.strategy !== run.execution_strategy) return null
+    const events = store.stageEvents(run.id)
+    const modes = events.filter(event => event.stage === 'build-mode-state')
+    if (modes.length < 4) return null
+    const [building, built, reviewing, latest] = modes.slice(-4).map(event => parseBuildModeState(event.meta, run, true))
+    const pending = reviewing!.checkpoint.pending
+    const review = pending?.recovery
+    const build = building!.checkpoint.pending?.recovery
+    const c = built!.checkpoint
+    if (!equal(latest, state) || c.pending !== undefined || c.reviewStop !== undefined
+      || !['built', 'fixed'].includes(c.stage) || c.head !== approved.head || c.round !== approved.round
+      || c.remainingTasks !== 0 || c.replansUsed !== approved.replansUsed
+      || built!.iteration !== state.iteration || reviewing!.iteration !== state.iteration
+      || !equal(reviewing!.checkpoint, { ...c, pending }) || pending?.phase !== 'review' || !review || !build
+      || !['build', 'fix'].includes(build.request.role) || review.round !== c.round
+      || review.snapshot.head !== c.head || !equal(build.inputs, review.inputs)
+      || !equal(review.plan, plan) || review.executionStrategy !== run.execution_strategy
+      || Reflect.get(review.inputs, 'run_id') !== run.id || Reflect.get(review.inputs, 'mode') !== 'implementation'
+      || Reflect.get(review.inputs, 'merge_mode') !== 'pr' || review.inputs.taskIteration !== state.iteration
+      || pending.step_id !== `${run.id}${run.execution_strategy === 'task_sequence' ? `:task:${state.iteration}` : ''}:review:${c.round}:head:${c.head}`) return null
+    const attempts = store.attempts(run.id)
+    if (!attempts.length || attempts.some(row => row.ended_at === null || row.outcome === null
+      || row.outcome === 'unknown' || row.outcome === 'interrupted')) return null
+    const completed = (request: typeof build.request, head: string) => {
+      const worker = review.inputs.workers[request.role]
+      return worker && equal(request, { ...worker.request, run_id: run.id, step_id: request.step_id,
+        role: request.role, needs_approval_decision: false }) && attempts.some(row => row.step_id === request.step_id
+        && row.run_id === run.id && row.role === request.role && row.head_sha === head && row.review_seat === null
+        && row.provider === worker.provider && row.resolved_model === request.model_id
+        && row.attempt_id === 'dispatch' && row.outcome === 'completed'
+        && row.prepared_at !== null && row.started_at !== null)
+    }
+    if (!completed(build.request, build.snapshot.head) || !completed(review.request, c.head!)
+      || !attempts.some(row => row.role === 'synthesis' && row.head_sha === c.head
+        && row.step_id.endsWith(`:${c.round}:0`) && row.outcome === 'completed')) return null
+    const root = dirname(review.request.result.path)
+    if (basename(root) !== encodeURIComponent(run.id)) return null
+    const evidence = evidenceReader()
+    evidence.directory(root)
+    const bindings: ProofFixBindings = { workers: review.inputs.workers, briefs: {} }
+    for (const role of ['plan', 'build', 'review', 'fix'] as const) {
+      const worker = bindings.workers[role]
+      if (!worker) return null
+      const version = role === 'plan' ? 'v4' : 'v3'
+      const brief = evidence.read(join(root, `${role}.strategy-${version}.brief`))
+      const hosted = evidence.read(worker.request.brief.path)
+      if (dirname(worker.request.brief.path) !== root || !brief.startsWith(`${run.task}\n\n`)
+        || hosted !== `${brief}\n\nRead the host turn context at ${worker.request.brief.path}.context.json before doing this task.\n`
+        || briefIntegrity(hosted) !== worker.request.brief.integrity) return null
+      bindings.briefs[role] = brief
+    }
+    const request = build.request
+    const context = JSON.parse(evidence.read(`${request.brief.path}.context.json`))
+    const result = JSON.parse(evidence.read(request.result.path))
+    const payload = validateTrailer('forge', result?.result?.payload)
+    if (request.run_id !== run.id || dirname(request.result.path) !== root
+      || !equal(context.request, request) || !equal(context.snapshot, build.snapshot)
+      || result.kind !== 'completed' || result.schema !== 'project-build' || result.run_id !== run.id
+      || result.step_id !== request.step_id || result.result.head !== c.head || !payload.ok
+      || payload.value.commitSha !== c.head || payload.value.branch !== run.branch
+      || payload.value.worktreePath !== request.cwd || payload.value.deviatedFromSpec === true) return null
+    if (!evidence.stable() || !equal(store.attempts(run.id), attempts)
+      || !equal(store.stageEvents(run.id), events) || !equal(store.get(run.id), run)) return null
+    return { state: { ...built!, checkpoint: { ...c, refreshBeforeReview: true } }, bindings }
+  } catch { return null }
 }
 
 /**

@@ -2816,6 +2816,130 @@ test('terminal retry repeats publication proof and review without planning or re
   expect(f.events).toContain('publicationSuite')
 })
 
+for (const scenario of ['repaired', 'unreadable', 'untyped', 'ceiling', 'base-not-integrated', 'moved-head'] as const)
+test(`measured base drift recovery preserves gates and bounded review: ${scenario}`, async () => {
+  const f = modeFixture('single')
+  const original = f.snapshot.head
+  const baseHead = 'e'.repeat(40)
+  let assessments = 0
+  const reviewHeads: string[] = []
+  const suiteHeads: string[] = []
+  const lineagePins: string[] = []
+  f.deps.readReviewCap = async () => ({ kind: 'known', max_rounds: scenario === 'ceiling' ? 1 : 3 })
+  f.deps.reviewSuite = async snapshot => { suiteHeads.push(snapshot.head); return { kind: 'known', findings: [] } }
+  const observe = f.deps.observeReview
+  f.deps.observeReview = async (...args) => { reviewHeads.push(args[0].head); return observe(...args) }
+  f.deps.checkFixLineage = async (_snapshot, pin) => {
+    lineagePins.push(pin)
+    return scenario === 'base-not-integrated' && pin === baseHead
+      ? { kind: 'blocked', on: 'Base is not an ancestor' } : { kind: 'allow' }
+  }
+  f.deps.mergeGate = async snapshot => {
+    if (++assessments > 1) return { kind: 'allow' }
+    if (scenario === 'unreadable') return { kind: 'unknown', detail: 'Base unreadable' }
+    if (scenario === 'moved-head') f.snapshot.head = 'f'.repeat(40)
+    return { kind: 'blocked', on: 'Base drift overlaps reviewed changes',
+      ...(scenario === 'untyped' ? {} : { baseDrift: { head: snapshot.head, base: 'release', baseHead, overlap: ['shared.ts'] } }) }
+  }
+  const outcome = await f.run()
+  expect(outcome.kind).toBe(scenario === 'repaired' ? 'merged' : scenario === 'unreadable' ? 'unknown' : 'blocked')
+  expect(f.runner.calls.map(call => call.role)).toEqual(['plan', 'build',
+    ...(['repaired', 'base-not-integrated'].includes(scenario) ? ['fix' as const] : [])])
+  if (scenario === 'repaired') {
+    expect(reviewHeads).toEqual([original, f.snapshot.head])
+    expect(suiteHeads).toEqual(reviewHeads)
+    expect(lineagePins).toEqual([original, baseHead])
+    expect(f.cross.calls.map(call => call.step_id)).toEqual([
+      `run:review:1:head:${original}`, `run:review:2:head:${f.snapshot.head}`])
+    expect(f.state.advances).toBe(0)
+    expect(f.prepared.find(call => call.role === 'fix')!.findings[0]).toContain(baseHead)
+    expect(f.events.filter(event => event === 'publicationSuite')).toHaveLength(2)
+  } else expect(f.events).not.toContain('merge')
+})
+
+for (const maxRounds of [3, 2])
+test(`measured base drift recovery after round-two approval preserves fix binding and ceiling: ${maxRounds}`, async () => {
+  const f = modeFixture('single')
+  const original = f.snapshot.head
+  const ordinaryFixHead = 'b'.repeat(40)
+  const baseFixHead = 'c'.repeat(40)
+  const baseHead = 'e'.repeat(40)
+  const reviewHeads: string[] = []
+  const suiteHeads: string[] = []
+  const lineagePins: string[] = []
+  let assessments = 0
+  f.decisions.push({ kind: 'fix', findings: ['ordinary code defect'] }, { kind: 'approve' })
+  f.deps.readReviewCap = async () => ({ kind: 'known', max_rounds: maxRounds })
+  f.deps.reviewSuite = async snapshot => { suiteHeads.push(snapshot.head); return { kind: 'known', findings: [] } }
+  const observe = f.deps.observeReview
+  f.deps.observeReview = async (...args) => { reviewHeads.push(args[0].head); return observe(...args) }
+  f.deps.checkFixLineage = async (_snapshot, pin) => { lineagePins.push(pin); return { kind: 'allow' } }
+  f.deps.mergeGate = async snapshot => ++assessments === 1
+    ? { kind: 'blocked', on: 'Base drift overlaps reviewed changes',
+      baseDrift: { head: snapshot.head, base: 'release', baseHead, overlap: ['shared.ts'] } }
+    : { kind: 'allow' }
+  const outcome = await f.run()
+  expect(outcome).toMatchObject(maxRounds === 3 ? { kind: 'merged' }
+    : { kind: 'blocked', on: 'Review requires orchestrator arbitration: round ceiling' })
+  expect(f.runner.calls.map(call => call.step_id)).toEqual(['run:plan:0', 'run:build:0', 'run:fix:1',
+    ...(maxRounds === 3 ? ['run:fix:2'] : [])])
+  expect(reviewHeads).toEqual([original, ordinaryFixHead, ...(maxRounds === 3 ? [baseFixHead] : [])])
+  expect(suiteHeads).toEqual(reviewHeads)
+  expect(f.cross.calls.map(call => call.step_id)).toEqual([
+    `run:review:1:head:${original}`, `run:review:2:head:${ordinaryFixHead}`,
+    ...(maxRounds === 3 ? [`run:review:3:head:${baseFixHead}`] : [])])
+  expect(lineagePins).toEqual([original, ...(maxRounds === 3 ? [ordinaryFixHead, baseHead] : [])])
+  const fixes = f.prepared.filter(call => call.role === 'fix')
+  expect(fixes).toHaveLength(maxRounds === 3 ? 2 : 1)
+  expect(fixes[0]!.findings).toEqual(['ordinary code defect'])
+  if (maxRounds === 3) {
+    expect(fixes[1]!.findings[0]).toContain(baseHead)
+    expect(fixes[1]!.findings[0]).toContain(ordinaryFixHead)
+    expect(f.events.filter(event => event === 'publicationSuite')).toHaveLength(2)
+  } else expect(f.events).not.toContain('merge')
+  expect(f.state.advances).toBe(0)
+})
+
+test('imported merge stop refreshes before spending another review or rebuilding terminal tasks', async () => {
+  const f = modeFixture()
+  f.plan.remainingTasks = 0
+  Object.assign(f.resume(), { remainingTasks: 0, refreshBeforeReview: true })
+  f.input.taskIteration = 2
+  let calls = 0
+  f.deps.mergeGate = async snapshot => ++calls === 1 ? { kind: 'blocked', on: 'overlap',
+    baseDrift: { head: snapshot.head, base: 'main', baseHead: 'e'.repeat(40), overlap: ['shared.ts'] } } : { kind: 'allow' }
+  expect(await f.run()).toMatchObject({ kind: 'merged' })
+  expect(f.runner.calls.map(call => call.role)).toEqual(['fix'])
+  expect(f.cross.calls.map(call => call.step_id)).toEqual([`run:task:2:review:2:head:${f.snapshot.head}`])
+  expect(f.state.advances).toBe(0)
+  expect(f.state.commits).toEqual([])
+})
+
+test('pending base refresh recovers its original fix and both ancestry pins before fresh review', async () => {
+  const f = modeFixture('single')
+  Object.assign(f.resume(), { remainingTasks: 0, refreshBeforeReview: true })
+  let gates = 0
+  const originalHead = f.snapshot.head
+  const baseHead = 'e'.repeat(40)
+  f.deps.mergeGate = async snapshot => ++gates === 1 ? { kind: 'blocked', on: 'overlap',
+    baseDrift: { head: snapshot.head, base: 'main', baseHead, overlap: ['shared.ts'] } } : { kind: 'allow' }
+  f.outcomes.set('run:fix:1', { kind: 'unknown', detail: 'Original worker acknowledgment lost' })
+  expect(await f.run()).toMatchObject({ kind: 'unknown', phase: 'fix' })
+  const checkpoint = f.state.checkpoints.at(-1)!
+  expect(checkpoint).toMatchObject({ round: 1, stage: 'built', refreshBeforeReview: true,
+    baseDrift: { head: originalHead, baseHead }, pending: { phase: 'fix', step_id: 'run:fix:1' } })
+  f.state.resume = structuredClone(checkpoint)
+  f.input.workers.fix.runner = { ...f.runner, recover: f.runner.run }
+  f.outcomes.set('run:fix:1', f.completed())
+  const pins: string[] = []
+  f.deps.checkFixLineage = async (_snapshot, pin) => { pins.push(pin); return { kind: 'allow' } }
+  expect(await f.run()).toMatchObject({ kind: 'merged' })
+  expect(pins).toEqual([originalHead, baseHead])
+  expect(f.runner.calls.map(call => call.step_id)).toEqual(['run:fix:1', 'run:fix:1'])
+  expect(f.cross.calls.map(call => call.step_id)).toEqual([`run:review:2:head:${f.snapshot.head}`])
+  expect(f.state.checkpoints.at(-1)?.baseDrift).toBeUndefined()
+})
+
 test('same-run task-sequence intermediate checkpoint resumes its handoff without reviewing', async () => {
   const f = modeFixture()
   f.resume().remainingTasks = 1
