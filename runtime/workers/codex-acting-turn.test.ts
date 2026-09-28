@@ -1,5 +1,5 @@
 import { afterEach, expect, spyOn, test } from 'bun:test'
-import { mkdtemp, rm, writeFile } from 'node:fs/promises'
+import { mkdtemp, rename, rm, writeFile } from 'node:fs/promises'
 import { tmpdir } from 'node:os'
 import { join } from 'node:path'
 import type { AdoptableHost, PtyChild, PtySpawnOpts } from '../adapters/claude-code/persistent/pty-host.ts'
@@ -113,7 +113,12 @@ test('a valid trailer for another step does not end the acting turn', async () =
   let replaced = false
   f.binding.session!.submitLine = async () => {
     await writeFile(f.input.request.result.path, JSON.stringify({ run_id: 'run', step_id: 'older-step' }))
-    void Bun.sleep(35).then(async () => { await writeFile(f.input.request.result.path, '{}'); replaced = true })
+    void Bun.sleep(35).then(async () => {
+      const replacement = join(f.dir, 'replacement-result')
+      await writeFile(replacement, '{}')
+      replaced = true
+      await rename(replacement, f.input.request.result.path)
+    })
   }
   expect(await f.run()).toEqual({ kind: 'turn-ended' })
   expect(replaced).toBe(true)
