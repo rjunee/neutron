@@ -293,6 +293,8 @@ const fullOid = (head: string | null): head is string => typeof head === 'string
 function validBaseDrift(value: BaseDriftRefresh | undefined, head: string | null): value is BaseDriftRefresh {
   return !!value && value.head === head && fullOid(value.head) && fullOid(value.baseHead)
     && typeof value.base === 'string' && value.base.trim().length > 0
+    && (value.previousBaseHead === undefined
+      || (fullOid(value.previousBaseHead) && value.previousBaseHead !== value.baseHead))
     && Array.isArray(value.overlap) && (value.overlap.length > 0
       || (fullOid(value.previousBaseHead ?? null) && value.previousBaseHead !== value.baseHead))
     && value.overlap.every(path => typeof path === 'string' && path.length > 0)

@@ -108,7 +108,7 @@ async function fixture() {
   return { options, make, input, path, calls, setDrift: (value: typeof drift) => { drift = value }, prose: () => { diff = 'M\0README.md\0' }, clean: () => { leakCode = 0; leakOutput = 'LEAK GATE: SILENT' } }
 }
 
-test.each(['valid', 'production', 'missing', 'forged-base', 'missing-base', 'moving-base',
+test.each(['valid', 'production', 'missing', 'forged-base', 'missing-base', 'moving-base', 'mutable-previous-base', 'equal-previous-base',
   'wrong-pr', 'wrong-branch', 'foreign-repo', 'wrong-candidate-ancestry', 'wrong-base-ancestry',
   'wrong-integrated-ancestry', 'unreadable', 'changed-checkpoint'] as const)(
   'integrated mutation range retains proof and provenance guards: %s', async fault => {
@@ -118,6 +118,8 @@ test.each(['valid', 'production', 'missing', 'forged-base', 'missing-base', 'mov
     const baseHead = 'b'.repeat(40)
     const integration: BaseIntegration = { head: 'c'.repeat(40), base: 'base', baseHead,
       integratedHead: 'd'.repeat(40), pr: 12, overlap: ['README.md'] }
+    if (fault === 'mutable-previous-base') integration.previousBaseHead = 'main'
+    if (fault === 'equal-previous-base') integration.previousBaseHead = baseHead
     let reads = 0
     f.options.mutation.readBaseIntegration = () => fault === 'missing' ? undefined
       : fault === 'changed-checkpoint' && reads > 0 ? { ...integration, pr: 99 } : integration

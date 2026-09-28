@@ -2957,6 +2957,20 @@ test('imported merge stop refreshes before spending another review or rebuilding
   expect(f.state.commits).toEqual([])
 })
 
+test.each(['main', 'e'.repeat(40), 'f'.repeat(40)])('base refresh validates every supplied prior-base pin: %s', async previousBaseHead => {
+  const f = modeFixture('single')
+  Object.assign(f.resume(), { remainingTasks: 0, refreshBeforeReview: true,
+    baseDrift: { head: f.snapshot.head, base: 'main', baseHead: 'e'.repeat(40),
+      previousBaseHead, overlap: ['shared.ts'] } })
+  const result = await f.run()
+  if (previousBaseHead === 'f'.repeat(40)) expect(result.kind).toBe('merged')
+  else {
+    expect(result).toMatchObject({ kind: 'unknown', detail: 'Base refresh checkpoint is invalid' })
+    expect(f.runner.calls).toHaveLength(0)
+    expect(f.cross.calls).toHaveLength(0)
+  }
+})
+
 test('pending base refresh recovers its original fix and both ancestry pins before fresh review', async () => {
   const f = modeFixture('single')
   Object.assign(f.resume(), { remainingTasks: 0, refreshBeforeReview: true })

@@ -10,6 +10,8 @@ export async function mutationBaseReadiness(run: RunHostCommand, repo: string, b
   try {
     if (!integration || !oid(integration.head) || !oid(integration.baseHead) || !oid(integration.integratedHead)
       || integration.head === integration.integratedHead || integration.base !== baseBranch
+      || (integration.previousBaseHead !== undefined
+        && (!oid(integration.previousBaseHead) || integration.previousBaseHead === integration.baseHead))
       || !Array.isArray(integration.overlap) || (!integration.overlap.length
         && (!oid(integration.previousBaseHead) || integration.previousBaseHead === integration.baseHead))
       || !integration.overlap.every(path => typeof path === 'string' && path.trim())

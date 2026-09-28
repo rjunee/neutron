@@ -46,11 +46,13 @@ Validation: 687 tests passed across build-host, build-run, cross-run retry and
 production-host-effects suites. The sixteen bounded consuming base-drift scenarios
 passed, including same-run integration, terminal FIX retry, genuine candidate
 production refusal, task-budget preservation and existing binding/ceiling
-controls. Fourteen focused publication controls cover valid, absent, forged,
+controls. Sixteen focused publication controls cover valid, absent, forged,
 moving and unreadable provenance, PR identity, ancestry and checkpoint changes.
 The historical fixture also rejects missing/corrupt reservation provenance,
 changed worker inputs and a missing actual PR base; both kinds of forward base
 advance reach fresh proof and review without repeating completed task work.
+Additional driver and publication controls reject a supplied previous-base pin
+that is mutable or equal to the current base, even when overlap is nonempty.
 Root and Trident TypeScript checks, changed-file lint and whitespace validation
 passed.
 
