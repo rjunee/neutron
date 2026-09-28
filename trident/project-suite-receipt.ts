@@ -3,6 +3,20 @@ import type { ReviewSuiteSource, SuiteObservation } from './gates/review-suite.t
 import type { TridentRun, TridentRunStore } from './store.ts'
 
 const STAGE = 'build-suite-receipt'
+export const SUITE_IDENTITY_COMPONENTS = ['preparation', 'resolution', 'installed', 'installation', 'workspace'] as const
+export type SuiteIdentityComponents = Record<typeof SUITE_IDENTITY_COMPONENTS[number], string>
+export interface SuiteIdentityMeasurement {
+  identity: string
+  components?: SuiteIdentityComponents
+}
+
+// Persist only the fixed vocabulary and digests, never arbitrary probe fields.
+const safeComponents = (measurement: SuiteIdentityMeasurement | null): SuiteIdentityComponents | null => {
+  const components = measurement?.components
+  if (!components || !SUITE_IDENTITY_COMPONENTS.every(key =>
+    typeof components[key] === 'string' && /^[a-f0-9]{64}$/.test(components[key]))) return null
+  return Object.fromEntries(SUITE_IDENTITY_COMPONENTS.map(key => [key, components[key]])) as SuiteIdentityComponents
+}
 const unknown = (detail: string) => ({ kind: 'unknown' as const, detail })
 const owner = (run: TridentRun) => JSON.stringify([run.id, run.project_slug, run.repo_path,
   run.worktree, run.branch, run.base_sha])
@@ -12,7 +26,7 @@ const owner = (run: TridentRun) => JSON.stringify([run.id, run.project_slug, run
 export function createProjectSuiteReceipts(options: {
   store: TridentRunStore
   run: TridentRun
-  identity: ((snapshot: BuildSnapshot) => Promise<string | null>) | undefined
+  identity: ((snapshot: BuildSnapshot) => Promise<SuiteIdentityMeasurement | null>) | undefined
 }) {
   const { store, run } = options
   const latest = () => store.stageEvents(run.id).filter(event => event.stage === STAGE).at(-1)
@@ -40,8 +54,9 @@ export function createProjectSuiteReceipts(options: {
   return {
     async observe(source: ReviewSuiteSource, snapshot: BuildSnapshot, round: number,
       strategy: string | undefined, scope: SuiteObservation['scope'] | undefined) {
-      const identity = await measure(snapshot)
-      const before = { identity, at: new Date().toISOString() }
+      const measuredBefore = await measure(snapshot)
+      const identity = measuredBefore?.identity ?? null
+      const before = { identity, components: safeComponents(measuredBefore), at: new Date().toISOString() }
       const event = latest()
       const prior = scope === 'full-suite' && strategy !== undefined
         ? decode(event?.meta, snapshot, round, strategy, identity) : null
@@ -52,10 +67,15 @@ export function createProjectSuiteReceipts(options: {
         JSON.stringify({ version: 1, owner: boundOwner, observation: { before } }))
       if (version === null) return unknown('Suite acquisition ownership changed or run stopped')
       const receipt = await source.observe(snapshot, round)
-      const after = await measure(snapshot)
+      const measuredAfter = await measure(snapshot)
+      const after = measuredAfter?.identity ?? null
+      const componentsAfter = safeComponents(measuredAfter)
       // Keep measurements independently of reusable proof. Unknown is not a
       // changed hash, and neither may hide the host's already observed exit.
-      const observation = { before, after: { identity: after, at: new Date().toISOString() },
+      const observation = { before, after: { identity: after, components: componentsAfter, at: new Date().toISOString() },
+        delta: before.components && componentsAfter
+          ? { kind: 'known', changed: SUITE_IDENTITY_COMPONENTS.filter(key => before.components![key] !== componentsAfter[key]) }
+          : { kind: 'unavailable' },
         hostExitCode: receipt.kind === 'known' && Number.isInteger(receipt.report?.hostExitCode)
           ? receipt.report!.hostExitCode : null }
       if (identity && after !== identity) {

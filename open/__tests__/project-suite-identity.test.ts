@@ -2,7 +2,7 @@ import { afterEach, expect, spyOn, test } from 'bun:test'
 import { chmod, copyFile, link, mkdir, mkdtemp, readFile, rename, rm, stat, symlink, utimes, writeFile } from 'node:fs/promises'
 import { join } from 'node:path'
 import { tmpdir } from 'node:os'
-import { PROJECT_INSTALLED_IDENTITY_TIMEOUT_MS, projectInstalledTreeIdentity, projectSuiteIdentity } from '../wiring/project-build-dependencies.ts'
+import { PROJECT_INSTALLED_IDENTITY_TIMEOUT_MS, projectInstalledTreeIdentity, projectSuiteIdentity, projectSuiteIdentityMeasurement } from '../wiring/project-build-dependencies.ts'
 import { spawnCapture } from '@neutronai/trident/git-mode.ts'
 
 const roots: string[] = []
@@ -67,6 +67,25 @@ test('manifest-free suite identity remains known and still binds installed bytes
   const after = await projectSuiteIdentity(root)
   expect(after).toMatch(/^[a-f0-9]{64}$/)
   expect(after).not.toBe(before)
+})
+
+test('suite component evidence describes the same aggregate and isolates installed-byte changes', async () => {
+  const { root } = await fixture()
+  await mkdir(join(root, 'node_modules'))
+  const input = join(root, 'node_modules', 'private-input.js')
+  await writeFile(input, 'private original bytes')
+  const before = await projectSuiteIdentityMeasurement(root)
+  expect(before?.identity ?? null).toBe(await projectSuiteIdentity(root))
+  expect(await projectSuiteIdentityMeasurement(root)).toEqual(before)
+  await writeFile(input, 'private modified bytes')
+  const after = await projectSuiteIdentityMeasurement(root)
+  expect(after?.identity).not.toBe(before?.identity)
+  expect(after?.components).toEqual({ ...before!.components!, installed: expect.any(String) })
+  expect(after!.components!.installed).not.toBe(before!.components!.installed)
+  for (const component of Object.values(after!.components!)) expect(component).toMatch(/^[a-f0-9]{64}$/)
+  for (const privateValue of [root, 'private-input.js', 'private original bytes', 'private modified bytes']) {
+    expect(JSON.stringify([before, after])).not.toContain(privateValue)
+  }
 })
 
 test('manifest resolution refuses incomplete successful output but accepts a complete empty mapping', async () => {

@@ -56,7 +56,7 @@ async function fixture() {
   const runner = fakeRunner('pi', { supports: (_role, placement) => { placements.push(placement); return { ok: true } } })
   const options: ProjectBuildHostOptions = {
     requestedModels: { plan: 'test', build: 'test', fix: 'test', review: 'test' },
-    suiteIdentity: async () => 'measured-fixture-identity',
+    suiteIdentity: async () => ({ identity: 'measured-fixture-identity' }),
     substrate: { provider: 'pi', inRepl: runner, headless: {} },
     // The real store over the same database, so the composition's write is the
     // write production performs rather than a stub that cannot fail.
@@ -139,7 +139,7 @@ for (const change of ['none', 'head', 'round', 'strategy', 'subset', 'identity',
     if (change === 'round') await host.deps.modes!.saveCheckpoint!({ ...checkpoint, round: 3 })
     if (change === 'strategy') f.options.policy.publicationSuite.strategy = 'bash suite.sh'
     if (change === 'subset') f.options.policy.publicationSuite.scope = 'subset'
-    if (change === 'identity') f.options.suiteIdentity = async () => 'changed-dependencies-or-tools'
+    if (change === 'identity') f.options.suiteIdentity = async () => ({ identity: 'changed-dependencies-or-tools' })
     if (change === 'unknown identity') f.options.suiteIdentity = async () => null
     if (change === 'corrupt' || change === 'missing') await f.options.production.store.recordStageEvent(f.options.production.runId, 'build-suite-receipt', change === 'corrupt' ? '{' : null)
     if (change === 'run') {
@@ -165,11 +165,11 @@ test('durable suite invalidation survives failure and stale completion cannot re
   } }
   const host = await createProjectBuildHost(f.options)
   await host.deps.publicationSuite(subject)
-  f.options.suiteIdentity = async () => 'changed'
+  f.options.suiteIdentity = async () => ({ identity: 'changed' })
   f.options.policy.publicationSuite.readCheckpoint = async () => { throw new Error('interrupted') }
   const failing = await createProjectBuildHost(f.options)
   expect(await failing.deps.publicationSuite(subject)).toMatchObject({ kind: 'unknown' })
-  f.options.suiteIdentity = async () => 'measured-fixture-identity'
+  f.options.suiteIdentity = async () => ({ identity: 'measured-fixture-identity' })
   f.options.policy.publicationSuite.readCheckpoint = async (snapshot, round) => {
     calls++
     await f.options.production.store.recordStageEvent(f.options.production.runId, 'build-suite-receipt', null)
@@ -184,7 +184,7 @@ test('durable suite invalidation survives failure and stale completion cannot re
 test('suite inputs changing during execution cannot publish or preserve a reusable proof', async () => {
   const f = await fixture()
   let identity = 'before'
-  f.options.suiteIdentity = async () => identity
+  f.options.suiteIdentity = async () => ({ identity })
   f.options.policy.publicationSuite = { strategy: 'bun test', scope: 'full-suite', readCheckpoint: async (snapshot, round) => {
     identity = 'after'
     return { runId: f.options.production.runId, head: snapshot.head, round, report: { hostExitCode: 0 } }
@@ -212,8 +212,8 @@ test('invalidation during identity measurement cannot revive an older suite rece
   const paused = new Promise<string>(resolve => { release = resolve })
   let once = true
   f.options.suiteIdentity = async () => {
-    if (once) { once = false; measured(); return paused }
-    return 'measured-fixture-identity'
+    if (once) { once = false; measured(); return { identity: await paused } }
+    return { identity: 'measured-fixture-identity' }
   }
   const restarted = await createProjectBuildHost(f.options)
   const result = restarted.deps.publicationSuite(subject)

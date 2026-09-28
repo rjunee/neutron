@@ -4,6 +4,7 @@ import { createHash, randomUUID } from 'node:crypto'
 import { fileURLToPath } from 'node:url'
 import { spawnCapture } from '@neutronai/trident/git-mode.ts'
 import { createLogger } from '@neutronai/logger'
+import type { SuiteIdentityMeasurement } from '@neutronai/trident/project-suite-receipt.ts'
 
 const log = createLogger('project-build')
 const digest = (value: string) => createHash('sha256').update(value).digest('hex')
@@ -229,6 +230,11 @@ export async function projectInstalledTreeIdentity(worktree: string,
 /** Fresh host measurement for suite reuse. Unknown or dirty inputs never reuse
  * proof. This shares preparation's manifest/toolchain and local-resolution keys. */
 export async function projectSuiteIdentity(worktree: string, expectedHead?: string): Promise<string | null> {
+  return (await projectSuiteIdentityMeasurement(worktree, expectedHead))?.identity ?? null
+}
+
+/** The aggregate and its diagnostic components come from one measurement. */
+export async function projectSuiteIdentityMeasurement(worktree: string, expectedHead?: string): Promise<SuiteIdentityMeasurement | null> {
   const started = performance.now()
   let probe = 'revision'
   const refuse = (reason: string): null => {
@@ -279,7 +285,10 @@ export async function projectSuiteIdentity(worktree: string, expectedHead?: stri
       resolution, installed, installation: digest(JSON.stringify(installation)),
       workspace_identity: digest(JSON.stringify([workspace.dev, workspace.ino])),
       elapsed_ms: Math.round(performance.now() - started) })
-    return identity
+    return { identity, components: { preparation: key, resolution: resolution ?? digest('null'),
+      installed: installed === 'absent' ? digest('absent') : installed,
+      installation: digest(JSON.stringify(installation)),
+      workspace: digest(JSON.stringify([workspace.dev, workspace.ino])) } }
   } catch { return refuse('filesystem-or-process-error') }
 }
 

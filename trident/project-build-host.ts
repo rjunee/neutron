@@ -49,7 +49,7 @@ export interface ProjectBuildHostOptions {
   /** Rendered strategies selected only after the driver validates this task's plan. */
   testStrategies?: { full: string; intermediate: string | null }
   /** Host-measured dependency/toolchain/workspace identity; unknown forbids reuse. */
-  suiteIdentity?: (snapshot: BuildSnapshot) => Promise<string | null>
+  suiteIdentity?: Parameters<typeof createProjectSuiteReceipts>[0]['identity']
 }
 
 export type ProjectBuildOutcome = BuildRunOutcome & { cleanup: CleanupOutcome }
