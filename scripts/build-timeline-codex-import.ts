@@ -245,6 +245,14 @@ export async function importCodexFile(path: string, options: CodexImportOptions,
       // Scan offsets describe coverage, not event provenance: a growing file
       // moves this window while the native session/operation identity stays put.
       const result = await importCodexOperations(scopedLines(), options)
+      // A tail may retain only the last model of a multi-model task. Unlike an
+      // individual command, a whole task needs complete context to claim one model.
+      // Keep unknown even when this window happens to contain one context.
+      if (startByte > 0) {
+        for (const observation of result.observations) {
+          if (observation.phaseId.startsWith('codex-turn:')) observation.model = null
+        }
+      }
       return { ...result, scan: { sourceBytes: stat.size, startByte, partial: startByte > 0,
         detail: startByte > 0 ? 'Recent byte window only; older phases and model contexts may be missing. Retain previous observations; run a full import for historical coverage.' : 'Full source snapshot; attribution coverage is reported separately.' } }
     } finally { input.close(); stream.destroy() }

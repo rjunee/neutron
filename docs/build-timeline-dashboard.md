@@ -83,8 +83,21 @@ bun scripts/build-timeline-codex-import.ts rollout.jsonl bindings.json --tail-by
 
 It prints observation NDJSON to stdout and coverage to stderr. Bindings specify
 allowed repositories, an opaque evidence reference and explicit time-bounded
-checkout-to-PR links. Do not replace historical observations with a bounded tail:
-merge validated new records using `appendChangedPhaseObservations`. A private
+checkout-to-PR links. Do not replace historical observations with a bounded tail.
+Native receipts have immutable event IDs: retain previously recorded IDs before
+passing new receipts to `appendChangedPhaseObservations`. Passing every raw tail
+directly to that append-only writer is unsafe: a tail can lose model context and
+change a receipt's model to unknown without creating a new event. For example:
+
+```ts
+const recorded = new Set((await readPhaseObservations(journal)).map(row => row.eventId))
+await appendChangedPhaseObservations(journal, imported.observations.filter(row => !recorded.has(row.eventId)))
+```
+
+This retains the original receipt, including an originally unknown model. A private
+refresher that atomically merges its journal by event ID can preserve richer known
+models when later tails lose context; it must not downgrade them or manufacture
+new phase snapshots to bypass immutable identity checks. A private
 refresh process can publish importer status separately. Ambiguous, incomplete or
 unbound history stays unknown. Raw commands, outputs and local paths are not
 included in imported public-facing labels.
@@ -109,8 +122,10 @@ The operator must attest both the task's PR ownership and its phase; a checkout,
 PR mention, agent name or task title is not that attestation. Supported categories
 are `plan`, `build`, `fix`, `review`, `test`, `ci` and `deploy`. The native
 `task_complete` receipt supplies its own start/end at one-second resolution.
-Absent completion stays unimported. A unique recorded invoking model is shown;
-missing or mixed models remain unknown. These are task envelopes that can contain
+Absent completion stays unimported. A unique recorded invoking model is shown
+only from a full source scan; missing, mixed or partial task contexts remain
+unknown. A tail containing one model cannot prove the task used only that model.
+These are task envelopes that can contain
 nested tests or review commands, so their overlapping durations are not additive.
 Usage remains unknown. Register each rollout/config pair with the private refresh
 service; adding importer support alone does not discover new orchestration lanes.

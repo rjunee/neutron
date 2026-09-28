@@ -85,6 +85,8 @@ describe('bounded native Codex operation reconstruction', () => {
       const first = await importCodexFile(path, turnOptions, tailBytes)
       expect(first.scan.partial).toBe(true)
       expect(first.observations).toHaveLength(2)
+      expect(first.observations.find(o => o.phase === 'test')!.model).toBe('model-a')
+      expect(first.observations.find(o => o.phase === 'build')!.model).toBeNull()
       expect(await appendChangedPhaseObservations(journal, first.observations)).toBe(2)
       await appendFile(path, record('response_item', { text: 'new unrelated data' }) + '\n')
       const second = await importCodexFile(path, turnOptions, tailBytes)
@@ -92,7 +94,10 @@ describe('bounded native Codex operation reconstruction', () => {
       expect(second.observations).toEqual(first.observations)
       expect(await appendChangedPhaseObservations(journal, second.observations)).toBe(0)
       const full = await importCodexFile(path, turnOptions)
-      expect(await appendChangedPhaseObservations(journal, full.observations)).toBe(0)
+      // Native receipts are immutable events. Retain an existing eventId before
+      // using the append-only writer; later context may differ across scans.
+      const recordedIds = new Set((await readPhaseObservations(journal)).map(o => o.eventId))
+      expect(await appendChangedPhaseObservations(journal, full.observations.filter(o => !recordedIds.has(o.eventId)))).toBe(0)
       const observations = await readPhaseObservations(journal)
       expect(observations).toHaveLength(2)
       const native = observations.find(o => o.phase === 'build')!
@@ -106,6 +111,41 @@ describe('bounded native Codex operation reconstruction', () => {
       expect(response.status).toBe(200)
       const consumed = await response.json() as { cards: Array<{ segments: Array<{ phase: string }> }> }
       expect(consumed.cards[0]!.segments.map(s => s.phase).sort()).toEqual(['build', 'test'])
+    } finally { await rm(directory, { recursive: true, force: true }) }
+  })
+  test('partial native task context cannot upgrade a mixed-model envelope; replay retains recorded receipts', async () => {
+    const directory = await mkdtemp(join(tmpdir(), 'codex-turn-model-replay-'))
+    try {
+      for (const mixed of [false, true]) {
+        const path = join(directory, `rollout-${mixed}.jsonl`), journal = join(directory, `phases-${mixed}.jsonl`)
+        const tailBody = [context('model-b', 4000), task()].join('\n') + '\n'
+        await writeFile(path, [meta, ...(mixed ? [context('model-a')] : []),
+          record('response_item', { text: 'padding'.repeat(1000) })].join('\n') + '\n' + tailBody)
+        const full = await importCodexFile(path, turnOptions)
+        const tail = await importCodexFile(path, turnOptions, Buffer.byteLength(tailBody) + 25)
+        expect(tail.scan.partial).toBe(true)
+        expect(full.observations[0]!.model).toBe(mixed ? null : 'model-b')
+        expect(tail.observations[0]!.model).toBeNull()
+        // Private refreshers may enrich an unknown model from a richer import.
+        // A partial task import must never claim that enrichment is available.
+        const retained = new Map(full.observations.map(o => [o.eventId, o]))
+        for (const incoming of tail.observations) {
+          const prior = retained.get(incoming.eventId)
+          if (!prior || (prior.model === null && typeof incoming.model === 'string')) retained.set(incoming.eventId, incoming)
+        }
+        expect(await appendChangedPhaseObservations(journal, [...retained.values()])).toBe(1)
+        const recordedIds = new Set((await readPhaseObservations(journal)).map(o => o.eventId))
+        expect(await appendChangedPhaseObservations(journal, tail.observations.filter(o => !recordedIds.has(o.eventId)))).toBe(0)
+        const observations = await readPhaseObservations(journal)
+        const snapshot = combineTimelineSources({ observedAt: 10000, repositories: [] }, observations, [], 10000)
+        const handler = createTimelineHandler({ username: 'viewer', password: 'fixture', read: () => snapshot })
+        const response = await handler(new Request('http://localhost/api/timeline', {
+          headers: { authorization: `Basic ${Buffer.from('viewer:fixture').toString('base64')}` },
+        }))
+        const consumed = await response.json() as { cards: Array<{ segments: Array<{ model: string | null }> }> }
+        expect(consumed.cards[0]!.segments).toHaveLength(1)
+        expect(consumed.cards[0]!.segments[0]!.model).toBe(mixed ? null : 'model-b')
+      }
     } finally { await rm(directory, { recursive: true, force: true }) }
   })
   test('uses exact operation envelope, invoking model and explicit binding without charging tokens', async () => {

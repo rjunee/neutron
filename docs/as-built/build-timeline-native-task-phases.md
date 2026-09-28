@@ -29,8 +29,15 @@ names the opaque source and native receipt ID; scan offsets stay in coverage.
 The journal-consuming regression imports two moving tails and a full scan,
 verifies repeat imports append zero events, and serves exactly one task and one
 nested command phase. Reintroducing the tail offset made that regression fail.
+The integration retains immutable event IDs before passing new imports to the
+append-only writer: losing model context in a later tail is not a new snapshot.
+Partial task imports always leave the whole-task model unknown. Otherwise a
+tail containing only the last model of a mixed-model task could incorrectly
+enrich an unknown full-scan model. A consuming control preserves a full scan's
+known model on replay and keeps a mixed-model envelope unknown through the
+private refresher's enrichment rule and the authenticated dashboard.
 
-Validation: 65 tests across the importer, recorder, sources, projection, HTML and
+Validation: 66 tests across the importer, recorder, sources, projection, HTML and
 popover suites passed; both root and Trident TypeScript checks passed. Including
 the server suite produced 71 passes and one environment failure when the sandbox
 denied its loopback listener. The shared-host admission check refused because the
