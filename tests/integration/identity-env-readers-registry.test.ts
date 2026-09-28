@@ -247,6 +247,8 @@ const KNOWN_READERS: Readonly<Record<string, string>> = {
     'Broad project-id validation regex matches an identity-name candidate; registered conservatively. No identity env access.',
   'runtime/adapters/codex-cli/persistent/project-owner-helper-registry.ts':
     'Broad client-id validation regex matches an identity-name candidate; registered conservatively. No identity env access.',
+  'runtime/adapters/codex-cli/persistent/project-owner-workspace.ts':
+    'Broad project-id validation regex matches identity-name candidates; registered conservatively. No env access: validates explicit scope from the private owner launch descriptor before building the strict workspace host. Exact project/General scope and missing or foreign descriptor refusal are pinned in open/__tests__/codex-workspace-placement.test.ts; production scope propagation is pinned in open/__tests__/codex-workspace-composition.test.ts.',
   'runtime/workers/codex-build-observation.ts':
     'Broad thread-id validation regexes in isCodexBuildObservation and codexBuildObservation match identity-name candidates; registered conservatively. No env access. Provider observation behavior is pinned in runtime/workers/codex-build-observation.test.ts.',
   'runtime/workers/codex-headless.ts':

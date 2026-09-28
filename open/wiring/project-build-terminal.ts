@@ -19,7 +19,7 @@ import { join } from 'node:path'
 import { configuredPtyHost } from '@neutronai/runtime/adapters/claude-code/persistent/configured-pty-host.ts'
 import { herdrHost, type HerdrHostDeps } from '@neutronai/runtime/adapters/claude-code/persistent/herdr-host.ts'
 import { createHerdrRpc } from '@neutronai/runtime/adapters/claude-code/persistent/herdr-client.ts'
-import { createProjectWorkspaceHost } from '@neutronai/runtime/adapters/claude-code/persistent/project-workspace-host.ts'
+import { createProjectWorkspaceHost, type ProjectWorkspaceLaunch } from '@neutronai/runtime/adapters/claude-code/persistent/project-workspace-host.ts'
 import type { PtyHost } from '@neutronai/runtime/adapters/claude-code/persistent/pty-host.ts'
 import type { WorkerPlacementHost, WorkerPlacementScope } from '@neutronai/runtime/workers/worker-placement.ts'
 import { workBoardProjectIdForKey } from '@neutronai/work-board/store.ts'
@@ -27,6 +27,12 @@ import { workBoardProjectIdForKey } from '@neutronai/work-board/store.ts'
 /** Private directory (under the build state root) holding the workspace journal. The
  * state reaper only removes directories named for a terminal run, so it keeps this. */
 export const WORKER_TERMINAL_DIR = 'herdr-workspaces'
+
+/** Native owner helpers and bounded workers share the same durable scope journal. */
+export function ownerWorkspaceLaunch(stateRoot: string, scope: WorkerPlacementScope): ProjectWorkspaceLaunch {
+  return { journalPath: join(stateRoot, WORKER_TERMINAL_DIR, 'project-workspaces.json'),
+    placement: { ...scope, role: 'chat' } }
+}
 
 /** The shared worker terminal host, or null when this process does not run on Herdr. */
 export function createWorkerTerminalHost(stateRoot: string, options: {

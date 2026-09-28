@@ -103,6 +103,16 @@ cleanup. No acceptance box is ticked: conversation placement, General
 owner admission and sleep/retirement remain open. See
 `docs/as-built/place-cross-provider-bounded-workers.md`.
 
+2026-09-28 (refs #1226): fresh native Codex owners now receive the same durable
+workspace journal as bounded workers from production Open composition. The helper
+occupies `Owner helper · Codex`; its existing native TUI occupies `Chat`. General
+remains null, distinct from a project named `general`. Missing or mismatched
+placement refuses new launch; successor generations and General account handoff
+retain the explicit scope. Existing live owners are adopted in place without
+moving or retiring their panes. See `docs/as-built/codex-project-workspace-placement.md`.
+Claude conversation credential handoff, full sleep activation and the fresh
+deployed live cycle remain open; no acceptance box is ticked by this slice.
+
 ## Production composition investigation
 
 General already follows the instance provider choice
@@ -112,8 +122,9 @@ and native owner admission uses the selected configured global seat in place
 null owner namespace through conversation, controls, installed MCP and helper
 admission; project owners still require their own complete project marker and
 credential grant. Missing General credentials refuse visibly without reviewer
-rotation or credential copies. This owner integration does not yet establish
-production terminal placement or safe workspace retirement. The terminal manager's
+rotation or credential copies. Fresh Codex owner terminal placement is wired as
+recorded above; Claude conversation placement and safe workspace retirement remain
+open. The terminal manager's
 `null` General scope must never become the literal project id `general` to bypass
 those checks. Adapter placement propagation alone does not complete this criterion.
 

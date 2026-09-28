@@ -4,7 +4,7 @@ import { buildSubstrateWorkflowFire, buildWorkflowFirer } from '@neutronai/tride
 import { prepareProjectBuild } from './wiring/project-build.ts'
 import { buildProjectLiveness } from './wiring/project-liveness.ts'
 import { buildProjectMaintenance } from './wiring/project-maintenance.ts'
-import { createWorkerTerminalHost, workerPlacementScope } from './wiring/project-build-terminal.ts'
+import { createWorkerTerminalHost, ownerWorkspaceLaunch, workerPlacementScope } from './wiring/project-build-terminal.ts'
 import type { WorkerPlacementHost } from '@neutronai/runtime/workers/worker-placement.ts'
 import { CodexOwnerBindings } from './wiring/codex-owner-binding.ts'
 import { nativeOwnerQuestionText } from './wiring/codex-owner-controls.ts'
@@ -1109,15 +1109,23 @@ export function buildOpenGraphComposer(
     const providerResolver = createOpenConversationProviderResolver(
       resolveModelProvider, () => chatSessionProjects.getActive(OWNER_USER_ID),
     )
+    const projectBuildStateRoot = joinPath(owner_home, '.trident', 'project-builds')
+    const codexWorkspaceFor = (projectId: string | null) => ownerWorkspaceLaunch(projectBuildStateRoot, {
+      instanceId: owner_handle, projectId,
+      projectLabel: projectId === null ? 'Neutron General' : db.prepare<{ name: string }, [string]>(
+        'SELECT name FROM projects WHERE id = ? AND deleted_at IS NULL').get(projectId)?.name?.trim() || projectId,
+    })
     const codexOwnerBindings = new CodexOwnerBindings(async projectId => {
       if (!(await projectSettingsStore.list(project_slug)).some(project => project.id === projectId)) {
         throw new Error('Codex owner project is unavailable')
       }
       const credential = codexCredentialService.resolveProjectOwnerCredential(asOwnerHandle(owner_handle), projectId)
-      return { cwd: joinPath(owner_home, 'Projects', projectId), ...credential, env }
+      return { cwd: joinPath(owner_home, 'Projects', projectId), ...credential, env,
+        projectWorkspace: codexWorkspaceFor(projectId) }
     }, undefined, undefined, async retainedHome => ({ cwd: owner_home,
       generalAuthorityPath: joinPath(owner_home, '.neutron-general-codex-owner.json'),
-      ...codexCredentialService.resolveGeneralOwnerCredential(asOwnerHandle(owner_handle), retainedHome), env }))
+      ...codexCredentialService.resolveGeneralOwnerCredential(asOwnerHandle(owner_handle), retainedHome), env,
+      projectWorkspace: codexWorkspaceFor(null) }))
     const codexOwnerProjects = (await projectSettingsStore.list(project_slug))
       .filter(project => resolveModelProvider(project.id).provider === 'openai-codex')
       .map(project => project.id)
@@ -4513,7 +4521,6 @@ export function buildOpenGraphComposer(
     // phase/round/elapsed/stalled from its `linked_run_id`'s `code_trident_runs`
     // row. Stateless wrapper — a second instance elsewhere is harmless.
     const boardRunStore = new TridentRunStore(db)
-    const projectBuildStateRoot = joinPath(owner_home, '.trident', 'project-builds')
     const reconcileNativeDispatches = async () => {
       const result = await reconcileClaudeNativeDispatches({
         stateRoot: projectBuildStateRoot, admission: projectAdmission, runs: boardRunStore,

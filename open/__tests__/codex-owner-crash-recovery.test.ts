@@ -9,6 +9,7 @@ import * as crash from '@neutronai/runtime/adapters/codex-cli/persistent/project
 import * as protocol from '@neutronai/runtime/adapters/codex-cli/persistent/project-owner-helper-protocol.ts'
 import { HerdrHost } from '@neutronai/runtime/adapters/claude-code/persistent/herdr-host.ts'
 import { nextOwnerDirectory } from '@neutronai/runtime/adapters/codex-cli/persistent/project-owner-retirement.ts'
+import { ownerWorkspaceLaunch } from '../wiring/project-build-terminal.ts'
 
 const dirs: string[] = []
 const restores: (() => void)[] = []
@@ -109,6 +110,38 @@ test('completed explicit retirement stays asleep, and interrupted host work is n
   await interrupted.bindings.close()
 })
 
+test('workspace cutover adopts a live pre-cutover owner without moving panes, rewriting history or spawning', async () => {
+  const f = fixture()
+  const helper = protocol.helperIdentity()
+  const descriptor = { version: 1 as const, token: 'a'.repeat(64), socketPath: join(f.home, 'helper.sock'),
+    socketIdentity: '1:1', facts: f.facts, helper }
+  const scope = { projectId: 'project-one', cwd: f.dir, codexHome: f.home, credential: codexOwnerCredentialIdentity(f.auth) }
+  f.write('.neutron-owner-launch.json', { scope })
+  f.write('.neutron-owner-authority.json', descriptor)
+  f.write('.neutron-owner-pane.json', { handle: 'legacy-helper', identity: helper })
+  mkdirSync(join(f.home, 'sessions'))
+  writeFileSync(f.facts.rolloutPath, 'existing native history\n')
+  const originalLaunch = readFileSync(join(f.home, '.neutron-owner-launch.json'), 'utf8')
+  const read = spyOn(protocol, 'readOwnerHelperDescriptor').mockReturnValue(descriptor)
+  const inspect = spyOn(HerdrHost.prototype, 'inspectHandle').mockResolvedValue({ kind: 'live', pid: process.pid, argv: [] })
+  const attach = spyOn(bootstrap, 'attachCodexOwner').mockResolvedValue(f.owner as bootstrap.CodexOwnerAttachment)
+  const binding = spyOn(bootstrap, 'readCodexOwnerBinding').mockReturnValue(f.facts)
+  const spawn = spyOn(HerdrHost.prototype, 'spawn').mockImplementation(async () => { throw new Error('No spawn during adoption') })
+  const close = spyOn(HerdrHost.prototype, 'closeHandle').mockImplementation(async () => { throw new Error('No close during adoption') })
+  restores.push(() => read.mockRestore(), () => inspect.mockRestore(), () => attach.mockRestore(),
+    () => binding.mockRestore(), () => spawn.mockRestore(), () => close.mockRestore())
+  const projectWorkspace = ownerWorkspaceLaunch(f.dir, { instanceId: 'instance', projectId: 'project-one', projectLabel: 'Same name' })
+  const options = { projectId: 'project-one', binary: 'must-not-launch', cwd: f.dir, codexHome: f.home,
+    socketPath: join(f.home, 'owner.sock'), env: {}, projectWorkspace }
+  expect((await openDurableCodexOwner(options)).recoveryKind).toBe('adopted')
+  expect((await openDurableCodexOwner(options)).recoveryKind).toBe('adopted')
+  expect(spawn).not.toHaveBeenCalled()
+  expect(close).not.toHaveBeenCalled()
+  expect(readFileSync(join(f.home, '.neutron-owner-launch.json'), 'utf8')).toBe(originalLaunch)
+  expect(readFileSync(f.facts.rolloutPath, 'utf8')).toBe('existing native history\n')
+  expect(existsSync(projectWorkspace.journalPath)).toBe(false)
+})
+
 for (const failure of ['dead-helper', 'dead-native', 'descriptor-race', 'pane-race', 'binding-race', 'draining-native', 'unknown-native', 'foreign-native']) test(`durable recovery ${failure}: exact successor or fenced refusal`, async () => {
   const f = fixture()
   const oldHelper = { pid: 10, boot: 'fixture-prior-boot', start: '10' }
@@ -162,7 +195,9 @@ for (const failure of ['dead-helper', 'dead-native', 'descriptor-race', 'pane-ra
     if (failure === 'binding-race' && bindingReads++ === 0) throw new Error('Stale owner binding')
     return current.facts
   }); restores.push(() => readBinding.mockRestore())
-  const options = { projectId: 'project-one', binary: 'must-not-launch', cwd: f.dir, codexHome: f.home, socketPath: join(f.home, 'owner.sock'), env: {}, timeoutMs: failure === 'dead-native' ? 200 : 1 }
+  const projectWorkspace = ownerWorkspaceLaunch(f.dir, { instanceId: 'instance', projectId: 'project-one', projectLabel: 'Same name' })
+  const options = { projectId: 'project-one', binary: 'must-not-launch', cwd: f.dir, codexHome: f.home, socketPath: join(f.home, 'owner.sock'), env: {},
+    projectWorkspace, timeoutMs: failure === 'dead-native' ? 200 : 1 }
   if (failure === 'draining-native' || failure === 'unknown-native' || failure === 'foreign-native') {
     if (failure === 'draining-native') await expect(openDurableCodexOwner(options)).rejects.toBeInstanceOf(CodexOwnerRecoveryUnavailable)
     else if (failure === 'foreign-native') await expect(openDurableCodexOwner(options)).rejects.toThrow('Competing native owner')
@@ -177,6 +212,7 @@ for (const failure of ['dead-helper', 'dead-native', 'descriptor-race', 'pane-ra
   expect(launch.resume.receipt.facts.threadId).toBe('thread-one')
   expect(launch.resume.predecessorDirectory).toBe(f.home)
   expect(launch.scope).toEqual(scope)
+  expect(launch.projectWorkspace).toEqual(projectWorkspace)
   expect((await openDurableCodexOwner(options)).recoveryKind).toBe('adopted')
   expect(spawns).toBe(1)
   expect(record).toHaveBeenCalledTimes(failure === 'dead-native' ? 2 : 1)
