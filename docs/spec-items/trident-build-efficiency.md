@@ -187,6 +187,33 @@ barrier at `trident/build-run.ts:691-697`.
   Paired consuming tests demonstrate a saved preparation/suite invocation and
   a required invocation when each relevant identity input changes.
 
+  A direct retry may adopt its failed predecessor's original version-2 green
+  full-suite proof when host measurements agree on the exact revision, strategy,
+  toolchain, controlled shell environment, and canonical dependency contents and
+  local resolution. Distinct checkout paths and inode numbers are not semantic
+  differences; confinement and stable-read checks must still be performed in each
+  checkout. Unmeasured ignored files, external dependency links, missing inputs,
+  changed environment or policy, legacy receipts, red/subset receipts and later
+  source invalidation require fresh proof. The destination durably records source
+  run/event/round provenance under atomic ownership before using the observation.
+  An adopted receipt is not itself a source for another cross-run adoption in
+  this slice. No approval or mutation proof is imported by this mechanism.
+  Portable proof is limited to exact `bun test`, or the byte-verified first-party
+  `bash scripts/run-tests.sh` runner and its discovery/dependency helpers, with
+  documented numeric performance exports. Selected runtime and runner utility
+  executables are measured. Other strategies still run normally but cannot mint
+  portable proof. Tracked symlinks/gitlinks and unmeasured runtime/runner overrides
+  refuse portability; this does not claim hermetic execution of arbitrary tests.
+
+  Governed host suites execute the explicit configured command in a non-login
+  Bash shell (`--noprofile --norc -c`) with `BASH_ENV` cleared. The inherited
+  environment otherwise remains explicit measurement input; login profiles and
+  inherited shell startup hooks cannot supply hidden suite setup. Projects must
+  put required setup in their configured suite command or tracked scripts.
+  Verify real prepared retry reuse and refusal, continued review/merge gates,
+  and profile-hook exclusion in `open/__tests__/project-build-e2e.test.ts`, with
+  identity and predecessor mutations in the focused suite-receipt tests.
+
 - [ ] **Efficiency cannot reset budgets or bypass a gate.** Review rounds, one
   bounded re-plan, infrastructure retry ceilings/backoff and atomic claims retain
   their existing durable limits across recovery. Changed scheduling preserves
