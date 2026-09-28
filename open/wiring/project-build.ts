@@ -412,18 +412,7 @@ export async function prepareProjectBuild(input: InnerLoopInput, context: Projec
   const topic = run.chat_id ?? context.projectId
   const observerPath = (step: string) => join(state, `claude-observer-${createHash('sha256').update(step).digest('hex')}.json`)
   const codexEnv = { ...context.env, ...(input.codex_home ? { CODEX_HOME: input.codex_home } : {}) }
-  const trailer: ProjectTrailerDecoder = { schemas: new Map([
-    ['project-plan-v2', (value: unknown) => validSnapshot(value, 'plan')],
-    ['project-plan', (value: unknown) => {
-      assertProjectSnapshot(value)
-      const current = context.store.get(run.id)
-      return current?.strategy_source === 'legacy'
-        && normalizeLegacyStoredExecutionPlan(value.payload, current) !== null
-    }],
-    ['project-build', (value: unknown) => validSnapshot(value, 'forge')],
-    ['project-review', (value: unknown) => validSnapshot(value, 'verdict')],
-    ['verdict', (value: unknown) => validateTrailer('verdict', value).ok],
-  ]), metadata: () => undefined }
+  const trailer = projectBuildTrailerDecoder(() => context.store.get(run.id))
   const parsed = parsePhaseModelConfig(input.phase_models ?? {})
   if (parsed.errors.length) throw Error(`Invalid project phase models: ${parsed.errors.join('; ')}`)
   const config = parsed.config
@@ -1043,4 +1032,20 @@ export async function prepareProjectBuild(input: InnerLoopInput, context: Projec
 export function validSnapshot(value: unknown, kind: 'plan' | 'forge' | 'verdict'): boolean {
   assertProjectSnapshot(value)
   return validateTrailer(kind, value.payload).ok
+}
+
+/** Live execution and passive late-result recovery share the same validators. */
+export function projectBuildTrailerDecoder(currentRun: () => ReturnType<ProjectBuildContext['store']['get']>): ProjectTrailerDecoder {
+  return { schemas: new Map([
+    ['project-plan-v2', (value: unknown) => validSnapshot(value, 'plan')],
+    ['project-plan', (value: unknown) => {
+      assertProjectSnapshot(value)
+      const current = currentRun()
+      return current?.strategy_source === 'legacy'
+        && normalizeLegacyStoredExecutionPlan(value.payload, current) !== null
+    }],
+    ['project-build', (value: unknown) => validSnapshot(value, 'forge')],
+    ['project-review', (value: unknown) => validSnapshot(value, 'verdict')],
+    ['verdict', (value: unknown) => validateTrailer('verdict', value).ok],
+  ]), metadata: () => undefined }
 }

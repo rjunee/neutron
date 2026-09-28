@@ -4520,11 +4520,12 @@ export function buildOpenGraphComposer(
         attempts: new TridentAttemptLedger(db), listProjectIds,
         projectIdForRun: run => workBoardProjectIdForKey(project_slug, run.project_slug) ?? null,
       })
-      if (result.status === 'unavailable') log.warn('native_dispatch_refusals_unavailable')
-      else if (result.released > 0) log.info('native_dispatch_refusals_reconciled', result)
+      if (result.status === 'unavailable') log.warn('native_dispatch_reconciliation_unavailable')
+      else if (result.released > 0) log.info('native_dispatch_leases_reconciled', result)
     }
-    // Includes failed/terminal runs excluded by the workflow tick. Only a signed
-    // original pre-input refusal can release; terminal status alone never does.
+    // Includes terminal runs excluded by the workflow tick: a signed original
+    // refusal or an authenticated request's validated late result can release.
+    // Terminal status alone never does.
     await reconcileNativeDispatches()
     // #1237 — RESTART RECONCILIATION of build leases, ONCE, before any loop that
     // could create, advance or terminalize a run starts (the tick loop, the hold

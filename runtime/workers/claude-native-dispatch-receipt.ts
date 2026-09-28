@@ -151,10 +151,22 @@ export function readClaudeNativeDispatchReceipt(directory: string, request: Pick
 }
 
 export function verifyNativeDispatchNotSubmitted(receipt: unknown, request: BoundedWorkRequest, lease: NativeDispatchLease): boolean {
+  return verifyNativeDispatchRecord(receipt, request, lease, 'not-submitted')
+}
+
+/** Authenticates the original submitted request, not its completion. The host
+ * must independently validate its reserved result before releasing ownership. */
+export function verifyNativeDispatchChildBound(receipt: unknown, request: BoundedWorkRequest, lease: NativeDispatchLease): boolean {
+  return verifyNativeDispatchRecord(receipt, request, lease, 'child-bound')
+}
+
+function verifyNativeDispatchRecord(receipt: unknown, request: BoundedWorkRequest, lease: NativeDispatchLease, phase: 'not-submitted' | 'child-bound'): boolean {
   try {
     if (typeof receipt !== 'object' || receipt === null) return false
     const signed = receipt as SignedNativeDispatchRecord
-    if (signed.body?.version !== 1 || signed.body.phase !== 'not-submitted' || signed.body.nativeAgentId !== null
+    if (signed.body?.version !== 1 || signed.body.phase !== phase
+      || (phase === 'not-submitted' ? signed.body.nativeAgentId !== null
+        : typeof signed.body.nativeAgentId !== 'string' || !signed.body.nativeAgentId.trim() || !signed.body.parent)
       || !isDeepStrictEqual(signed.body.request, request) || !isDeepStrictEqual(signed.body.lease, lease)
       || lease.workRef !== JSON.stringify([request.run_id, request.step_id]) || lease.reason !== 'liveChild'
       || !/^native-child:.+:[a-f0-9]{64}$/.test(lease.producer)

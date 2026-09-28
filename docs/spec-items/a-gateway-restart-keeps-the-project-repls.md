@@ -494,6 +494,32 @@ unresolved durable work/lease evidence stays fenced until its authoritative
 workflow reconciliation establishes what can continue; restored chat readiness
 alone is not a workflow-continuation receipt.
 
+### Passive late-result reconciliation
+
+A native child may finish after the host stops observing its bounded request.
+The failed workflow remains failed. Startup and periodic recovery inspect such
+terminal runs without dispatching another actor or synthesizing a conversation.
+The original signed child-bound dispatch must authenticate the full stored
+lease and request; the canonical attempt must agree on provider, placement,
+role and model. An exact armed reservation and a result at the canonical role
+path must then pass the same envelope and payload validators as live execution.
+This uses the existing validated-result completion contract, not parent-process
+death: the persistent project REPL can remain alive after its native task ends.
+
+- [ ] A late completed or blocked result releases only its original token and
+      generation; duplicate identities and other project leases survive. Repeated
+      recovery is idempotent, and neither the failed run nor attempt outcome is
+      rewritten. Verify: `bun test open/wiring/__tests__/claude-native-dispatch-boot.test.ts`.
+- [ ] Missing or unarmed reservations, malformed payloads, foreign steps or
+      schemas, forged receipts, changed tokens or generations, and nonterminal
+      runs retain ownership. The positive completed case must fail if recovery
+      is disabled; negative cases must fail if validation is bypassed. Verify:
+      the same suite with bidirectional mutations.
+- [ ] Actual Open composition consumes a late result at startup and on a later
+      recovery tick with no native turn, and ordinary project-build execution
+      retains its existing validator behavior. Verify: the same suite and
+      `bun test open/__tests__/project-build-e2e.test.ts`.
+
 ### Prepared whole-host termination of unresolved native work
 
 An independent host/operator authority may prepare physical recovery of an exact
