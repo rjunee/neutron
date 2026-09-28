@@ -165,6 +165,17 @@ barrier at `trident/build-run.ts:691-697`.
   #1192. Verify through `trident/cross-run-retry-checkpoint.test.ts`,
   `trident/build-run.test.ts`, and `open/__tests__/project-build-e2e.test.ts`.
 
+  A positively measured overlapping base advance retains G108's merge refusal.
+  A bounded fix may integrate the observed actual PR base while preserving both
+  candidate and base ancestry, then obtain fresh proof, suite and review for the
+  resulting head. An authenticated settled terminal merge refusal may import its
+  preceding completed build, never its approval, without repeating completed
+  task planning or building. Preserve task spend, the review-round ceiling,
+  existing review vetoes, pending reservations and worker input bindings. Unknown
+  drift or human error text alone cannot authorize repair. Verify the `base drift
+  refresh` consuming cases and `measured base drift recovery` driver controls in
+  those same tests.
+
 - [ ] **Continuation consumes this card's verified plan.** The plan ledger's
   ownership survives task handoff and eligible retry and is verified alongside
   its committed bytes and counts. A valid owned plan enables the continuation

@@ -39,6 +39,7 @@ import { buildReflectionGuidance } from '@neutronai/trident/reflection-guidance.
 import { PROJECT_BUILD_WALL_MS } from '@neutronai/trident/project-build-budget.ts'
 import { prepareProjectDependencies, projectSuiteIdentityMeasurement, type projectInstallAvailableBytes } from './project-build-dependencies.ts'
 import { parseBuildModeState, readBuildRetrySource } from '@neutronai/trident/build-mode-state.ts'
+import { proofFixWorkerMatches } from '@neutronai/trident/settled-proof-fix-recovery.ts'
 import { pendingReviewCheckoutHead } from '@neutronai/trident/pending-review-checkout.ts'
 import { normalizeLegacyStoredExecutionPlan } from '@neutronai/trident/legacy-execution-compat.ts'
 import { assertProjectSnapshot, PROJECT_SNAPSHOT_SCHEMA } from './project-build-snapshot.ts'
@@ -819,6 +820,18 @@ export async function prepareProjectBuild(input: InnerLoopInput, context: Projec
     throw new Error(`Legacy v2 ${role} brief was rendered from different ${cause === 'task' ? 'task text' : 'reflection guidance'}; its reserved result is invalidated and the step must be re-executed`)
   }
   const bodyFile = join(state, 'publication.md')
+  const retainedSource = readBuildRetrySource(context.store, context.store.get(run.id)!)
+  const proofRetry = retainedSource?.proofFix ?? retainedSource?.mergeRefresh
+  if (proofRetry) {
+    // This exception retains implementation only under its original model and
+    // instructions. Proof uses this run's current environment and new receipts.
+    for (const role of ['plan', 'build', 'review', 'fix'] as const) {
+      if (!proofFixWorkerMatches(proofRetry, role, workers[role]!,
+        await readFile(join(state, `${role}.strategy-${role === 'plan' ? 'v4' : 'v3'}.brief`), 'utf8'))) {
+        throw new Error(`Settled proof fix retry ${role} model, authority or brief changed; the retained candidate cannot be reused`)
+      }
+    }
+  }
   // A retried build keeps its completed worker artifacts under the ORIGINAL
   // run's directory. Read through the dispatch-minted source chain; never move
   // receipts or relabel worker envelopes as if this run had produced them.
