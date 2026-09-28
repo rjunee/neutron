@@ -290,10 +290,19 @@ describe('parallel CI aggregator', () => {
     expect(yml).toMatch(/^\s+fail-fast: false$/m)
   })
 
-  test('one shard leg runs the whole app suite co-resident with per-file isolation', () => {
+  test('shard 4 alone runs the full app suite before its ordinary slice', () => {
     const shard = yml.match(/^ {2}shard:\n[\s\S]*?(?=^ {2}[a-z][a-z0-9-]*:\n)/m)?.[0] ?? ''
-    expect(shard).toContain('if: matrix.shard == 1')
-    expect(shard).toContain('run: bun test --isolate app/__tests__/ --max-concurrency=4')
+    const members = shard.match(/^        shard: \[([^\]]+)\]$/m)?.[1]?.split(',').map(value => Number(value.trim()))
+    expect(members).toEqual([1, 2, 3, 4])
+    const appSteps = [...shard.matchAll(/^      - name: App suite — every file co-resident and isolated\n        if: matrix\.shard == (\d+)\n        run: (.+)$/gm)]
+    expect(appSteps).toHaveLength(1)
+    expect(Number(appSteps[0]![1])).toBe(4)
+    expect(members).toContain(Number(appSteps[0]![1]))
+    expect(appSteps[0]![2]).toBe('bun test --isolate app/__tests__/ --max-concurrency=4')
+    expect(shard.match(/^        run: bun test --isolate app\/__tests__\/ --max-concurrency=4$/gm)).toHaveLength(1)
+    expect(shard.indexOf(appSteps[0]![0])).toBeLessThan(shard.indexOf('      - name: Test (shard'))
+    expect(shard).toContain('NEUTRON_TEST_SHARD: ${{ matrix.shard }}/4')
+    expect(shard).toContain('run: bash scripts/run-tests.sh')
   })
 
   test('the layering job checks out full history for the ratchet-growth guard', () => {

@@ -460,7 +460,7 @@ jobs:
       # independent of NEUTRON_TEST_SHARD means changing the matrix cannot remove
       # the co-residency check by changing which ordinary shard receives a file.
       - name: App suite — every file co-resident and isolated
-        if: matrix.shard == 1
+        if: matrix.shard == 4
         run: bun test --isolate app/__tests__/ --max-concurrency=4
       - name: Test (shard ${{ matrix.shard }} of 4)
         env:
