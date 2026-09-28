@@ -102,6 +102,27 @@ refresh process can publish importer status separately. Ambiguous, incomplete or
 unbound history stays unknown. Raw commands, outputs and local paths are not
 included in imported public-facing labels.
 
+For recurring collection, give the private refresher one authorized Codex
+`sessions` root rather than registering each rollout separately:
+
+```sh
+bun scripts/build-timeline-codex-discover.ts "$TIMELINE_CODEX_SESSIONS_ROOT" bindings.json
+```
+
+This scans only `sessions/YYYY/MM/DD/rollout-*.jsonl`, skips symlinks, and refuses
+more than 256 files, 4,096 directory entries or 128 MiB of source data in one scan.
+It reads each rollout through a verified file descriptor into a fixed-size
+snapshot, then prints observation NDJSON to stdout and aggregate coverage to
+stderr. An append after the snapshot's N-byte boundary is picked up on the next
+scan; an empty newly created file contributes incomplete coverage until bytes
+arrive. Replacement, truncation below N, and same-size rewrites refuse. The
+private refresher retains journal event IDs and appends
+only new observations as above. The directory root authorizes reading native
+receipts; it does not attest PR ownership or phase. Command spans still need an
+explicit time-bounded checkout-to-PR binding (or an exact successful GitHub
+command), and in-conversation tasks still need exact `turnBindings`. New unbound
+rollouts appear in coverage without generating attributed phases.
+
 Native in-conversation work has no child command to wrap. For completed tasks,
 the importer also accepts operator-attested `turnBindings` in its private config:
 
@@ -136,8 +157,9 @@ usage receipt; such a partial task is deferred instead of recording unknown usag
 permanently. One model in a tail cannot prove the task used only that model.
 These are task envelopes that can contain
 nested tests or review commands, so their overlapping durations are not additive.
-Register each rollout/config pair with the private refresh
-service; adding importer support alone does not discover new orchestration lanes.
+Register the session root and private binding config with the refresher; the
+discovery command then picks up new rollout files without per-file registration.
+New orchestration lanes still require explicit binding records.
 Use explicit start/completion records for forward work while a task is still open.
 
 Manual native task registration is available once the exact session and turn have
@@ -169,10 +191,11 @@ refresh imports the task after its native completion receipt is available.
 
 This is an explicit operator seam, not automatic dispatch instrumentation. Repeat
 registration for every intended root or child turn, including follow-up turns;
-parent linkage does not inherit PR ownership or phase. A newly spawned session's
-rollout/config pair must also be registered in the private refresh service. This
-tool neither discovers those sources nor intercepts the native `spawn_agent`
-tool. An active registered turn has no imported phase until native completion;
+parent linkage does not inherit PR ownership or phase. The separate configured
+session-root collector above discovers a newly spawned session's rollout without
+per-file registration. This registration tool neither discovers those sources
+nor intercepts the native `spawn_agent` tool. An active registered turn has no
+imported phase until native completion;
 registration time is not a task start. Unregistered turns remain unknown. An
 automatic dispatcher producer and open-task native snapshots remain outstanding
 under #1313. Successful manual registration does not establish all-PR coverage.
