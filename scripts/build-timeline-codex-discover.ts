@@ -2,7 +2,7 @@
 import { constants } from 'node:fs'
 import { lstat, open, readFile, readdir, realpath } from 'node:fs/promises'
 import { basename, isAbsolute, join, relative, resolve, sep } from 'node:path'
-import { importCodexOperations, type CodexImportOptions } from './build-timeline-codex-import.ts'
+import { importCodexOperations, projectCodexReceipt, type CodexImportOptions } from './build-timeline-codex-import.ts'
 import type { DirectPhaseObservation } from './build-timeline-sources.ts'
 
 const MAX_ROLLOUTS = 256
@@ -101,7 +101,11 @@ export async function importRegisteredCodexRollout(sessionsRoot: string, path: s
       checkpoint.lines.some(line => typeof line !== 'string' || Buffer.byteLength(line) > MAX_LINE_BYTES))) {
     throw new Error('Invalid or changed native checkpoint')
   }
-  const lines = checkpoint ? [...checkpoint.lines] : []
+  if (checkpoint && checkpoint.lines.reduce((sum, line) => sum + Buffer.byteLength(line) + 1, 0) > MAX_SOURCE_BYTES) {
+    throw new Error('Native receipt journal exceeds bounds')
+  }
+  // Normalize older checkpoints too; raw context/output is not receipt evidence.
+  const lines = checkpoint ? checkpoint.lines.map(projectCodexReceipt).filter((line): line is string => line !== null) : []
   let pending: Buffer = checkpoint ? Buffer.from(checkpoint.pending, 'base64') : Buffer.alloc(0)
   if (pending.length > MAX_LINE_BYTES || pending.length > (checkpoint?.size ?? 0) ||
       (checkpoint && pending.toString('base64') !== checkpoint.pending) || pending.includes(10)) {
@@ -125,17 +129,9 @@ export async function importRegisteredCodexRollout(sessionsRoot: string, path: s
       let start = 0, end: number
       while ((end = pending.indexOf(10, start)) !== -1) {
         if (++scanned > 1_000_000 || end - start > MAX_LINE_BYTES) throw new Error('Native discovery exceeds bounds')
-        const line = pending.subarray(start, end).toString('utf8')
+        const line = projectCodexReceipt(pending.subarray(start, end).toString('utf8'))
         start = end + 1
-        // Keep invalid records as evidence of malformed coverage; bound them just
-        // like relevant receipts. Valid transcript-only records can be discarded.
-        let keep = true
-        try {
-          const row = JSON.parse(line)
-          keep = ['session_meta', 'turn_context', 'token_usage_record'].includes(row?.type) ||
-            (row?.type === 'event_msg' && ['item_completed', 'task_complete'].includes(row?.payload?.type))
-        } catch { /* importer records malformed coverage */ }
-        if (keep) {
+        if (line !== null) {
           retainedBytes += Buffer.byteLength(line) + 1
           if (retainedBytes > MAX_SOURCE_BYTES || lines.length >= 1_000_000) throw new Error('Native receipt journal exceeds bounds')
           lines.push(line)

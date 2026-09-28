@@ -337,3 +337,55 @@ test('checkpoint rejects a same-size rewrite and retained journal overflow', asy
   await expect(importRegisteredCodexRollout(root, path, options, { ...fresh.checkpoint,
     lines: Array(17).fill('x'.repeat(8 * 1024 * 1024)) })).rejects.toThrow('journal exceeds bounds')
 })
+
+test('large command output backfill stays bounded by receipt evidence and replays through the authenticated API', async () => {
+  const { root, day, options, rollout } = await fixture()
+  options.turnBindings = [{ sessionId: 'thread-1', turnId: 'turn-1', phase: 'build', links: [{ repository: 'example/project', prNumber: 7 }] }]
+  const path = join(day, 'rollout-command-output.jsonl')
+  await writeFile(path, rollout('thread-1', 'initial'))
+  const output = 'PRIVATE COMMAND OUTPUT '.repeat(48_000)
+  // More than the unchanged 128 MiB retained-journal cap, but each native line
+  // remains below the unchanged 8 MiB line cap. Stream the fixture to disk.
+  for (let index = 0; index < 130; index++) {
+    const receipt = JSON.parse(rollout('thread-1', `exec-${index}`).trim().split('\n')[2]!)
+    receipt.payload.item.stdout = output
+    await appendFile(path, JSON.stringify(receipt) + '\n')
+  }
+  await appendFile(path, JSON.stringify({ type: 'token_usage_record', payload: { thread_id: 'thread-1', turn_id: 'turn-1',
+    turn_token_usage: { input_tokens: 20, output_tokens: 3, cached_input_tokens: 5 } } }) + '\n' +
+    JSON.stringify({ type: 'event_msg', payload: { type: 'task_complete', turn_id: 'turn-1', started_at: 1, completed_at: 9 } }) + '\n')
+  const first = await importRegisteredCodexRollout(root, path, options)
+  expect(first.scan.sourceBytes).toBeGreaterThan(128 * 1024 * 1024)
+  expect(first.observations).toHaveLength(132)
+  const checkpoint = JSON.stringify(first.checkpoint)
+  expect(Buffer.byteLength(checkpoint)).toBeLessThan(100_000)
+  expect(checkpoint).not.toContain('PRIVATE COMMAND OUTPUT')
+  const replay = await importRegisteredCodexRollout(root, path, options, JSON.parse(checkpoint))
+  expect(replay.scan.readBytes).toBe(0)
+  expect(replay.observations).toEqual(first.observations)
+  const unbound = await importRegisteredCodexRollout(root, path, { ...options, bindings: [], turnBindings: [] }, replay.checkpoint)
+  expect(unbound.observations).toEqual([])
+  const rebound = await importRegisteredCodexRollout(root, path, options, unbound.checkpoint)
+  expect(rebound.observations).toHaveLength(132)
+  const handler = createTimelineHandler({ username: 'viewer', password: 'fixture', read: () =>
+    combineTimelineSources({ observedAt: 10000, repositories: [] }, rebound.observations, [], 10000) })
+  const response = await handler(new Request('http://localhost/api/timeline', { headers: { authorization: `Basic ${Buffer.from('viewer:fixture').toString('base64')}` } }))
+  expect(response.status).toBe(200)
+  const data = await response.json() as { cards: Array<{ segments: Array<{ phase: string }> }> }
+  expect(data.cards[0]!.segments).toHaveLength(132)
+  expect(data.cards[0]!.segments.find(segment => segment.phase === 'build')).toMatchObject({ start: 1000, end: 9000,
+    model: 'model-a', usage: { input: 15, output: 3, cacheRead: 5, tokens: 23, costUsd: null } })
+}, 20_000)
+
+test('legacy checkpoint receipts are compacted on zero-byte replay without losing observations', async () => {
+  const { root, day, options, rollout } = await fixture()
+  const path = join(day, 'rollout-legacy.jsonl'), original = rollout('thread-1', 'exec-1')
+  await writeFile(path, original)
+  const first = await importRegisteredCodexRollout(root, path, options)
+  const legacy = { ...first.checkpoint, lines: original.trim().split('\n') }
+  expect(JSON.stringify(legacy)).toContain('PRIVATE OUTPUT')
+  const resumed = await importRegisteredCodexRollout(root, path, options, legacy)
+  expect(resumed.scan.readBytes).toBe(0)
+  expect(resumed.observations).toEqual(first.observations)
+  expect(JSON.stringify(resumed.checkpoint)).not.toContain('PRIVATE OUTPUT')
+})

@@ -102,6 +102,70 @@ function directLink(args: string[], item: Obj, allowed: Set<string>): Link | nul
   return { repository: match[1]!, prNumber: Number(match[2]) }
 }
 
+/** Retain only evidence consumed by this importer, never full native command
+ * output, prompts or context. This projection is independent of PR bindings so
+ * a later exact registration can replay the same native receipts. */
+export function projectCodexReceipt(line: string): string | null {
+  const malformed = '{"type":"turn_context","payload":null}'
+  const stringField = (value: unknown) => typeof value === 'string' ? value : null
+  const numberField = (value: unknown) => typeof value === 'number' ? value : null
+  if (!line.trim()) return ''
+  let r: unknown
+  try { r = JSON.parse(line) } catch { return malformed }
+  if (!object(r) || !object(r.payload)) return malformed
+  if (!(typeof r.type === 'string' && ['session_meta', 'turn_context', 'token_usage_record'].includes(r.type)) &&
+      !(r.type === 'event_msg' && typeof r.payload.type === 'string' && ['item_completed', 'task_complete'].includes(r.payload.type))) return null
+  const p = r.payload
+  let payload: Obj
+  if (r.type === 'session_meta') {
+    const spawn = object(p.source) && object(p.source.subagent) && object(p.source.subagent.thread_spawn) ? p.source.subagent.thread_spawn : null
+    payload = { id: stringField(p.id), ...(spawn ? { source: { subagent: { thread_spawn: { parent_thread_id: stringField(spawn.parent_thread_id) } } } } : {}) }
+  } else if (r.type === 'turn_context') payload = { turn_id: stringField(p.turn_id), model: stringField(p.model) }
+  else if (r.type === 'token_usage_record') {
+    const usage = object(p.turn_token_usage) ? { input_tokens: numberField(p.turn_token_usage.input_tokens),
+      output_tokens: numberField(p.turn_token_usage.output_tokens), cached_input_tokens: numberField(p.turn_token_usage.cached_input_tokens) } : null
+    payload = { thread_id: stringField(p.thread_id), turn_id: stringField(p.turn_id), turn_token_usage: usage }
+  } else if (p.type === 'task_complete') payload = { type: p.type, turn_id: stringField(p.turn_id), started_at: numberField(p.started_at), completed_at: numberField(p.completed_at) }
+  else if (!object(p.item) || p.item.type !== 'CommandExecution') payload = { type: 'item_completed' }
+  else {
+    const item = p.item, args = argv(item.command), classification = args && classify(args)
+    let command: string[] = []
+    if (args && classification) {
+      // The importer only uses shell argv to classify a command or extract an
+      // exact GitHub PR/repository. Test selectors, scripts and --body text are
+      // not evidence and can be arbitrarily large or private.
+      if (args[0] === 'gh' && args[1] === 'pr') {
+        const repoAt = args.findIndex(a => a === '--repo' || a === '-R')
+        const repo = repoAt >= 0 ? args[repoAt + 1] : args.find(a => a.startsWith('--repo='))?.slice(7)
+        command = ['gh', 'pr', args[2]!, ...(args[2] === 'merge' ? [args[3] ?? ''] : []), ...(repo === undefined ? [] : ['--repo', repo])]
+      } else if (classification.phase !== 'test') {
+        command = ['ATTRIBUTION_UNBOUND=1', 'gh', 'pr', classification.phase === 'merge' ? 'merge' : 'create']
+      } else {
+        // Preserve environment-prefix semantics: those classify as tests but
+        // never become direct GitHub ownership evidence.
+        command = classification.label === 'Host test suite' ? ['bash', 'scripts/run-tests.sh'] :
+          classification.label === 'Shared-host validation' ? ['bash', 'scripts/check-shared-host.sh'] : ['bun', 'test']
+      }
+    }
+    let status: unknown = null
+    try { if (['completed', 'failed'].includes(String(item.status))) status = String(item.status) }
+    catch {
+      // Preserve String(status)'s refusal only if the importer reaches that
+      // check, without retaining the malformed object's arbitrary contents.
+      status = { toString: null, valueOf: null }
+    }
+    const usable = typeof p.thread_id === 'string' && typeof p.turn_id === 'string' && typeof item.id === 'string' && !!item.id &&
+      stamp(p.started_at_ms) && stamp(p.completed_at_ms) && p.completed_at_ms >= p.started_at_ms && typeof status === 'string'
+    const stdout = usable && item.exit_code === 0 && typeof item.stdout === 'string' && /^https:\/\/github\.com\/[\w.-]+\/[\w.-]+\/pull\/[1-9]\d*$/.test(item.stdout.trim()) ? item.stdout.trim() : undefined
+    payload = { type: p.type, thread_id: stringField(p.thread_id), turn_id: stringField(p.turn_id),
+      ...(classification ? { started_at_ms: numberField(p.started_at_ms), completed_at_ms: numberField(p.completed_at_ms) } : {}),
+      item: { type: item.type, id: stringField(item.id), command, ...(classification ? { cwd: stringField(item.cwd),
+        status,
+        exit_code: numberField(item.exit_code), ...(args?.[0] === 'gh' && args[2] === 'create' ? { stdout } : {}) } : {}) } }
+  }
+  return JSON.stringify({ type: r.type, ...(r.type === 'turn_context' ? { timestamp: stringField(r.timestamp) } : {}), payload })
+}
+
 export async function importCodexOperations(lines: AsyncIterable<string> | Iterable<string>, options: CodexImportOptions): Promise<{ observations: DirectPhaseObservation[]; coverage: CodexImportCoverage }> {
   if (!options.repositories.length || !options.repositories.every(repository) || !/^[\w:./-]{1,240}$/.test(options.evidenceRef) || options.evidenceRef.startsWith('/')) throw new Error('Invalid import scope or opaque evidence reference')
   const allowed = new Set(options.repositories)

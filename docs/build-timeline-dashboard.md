@@ -129,9 +129,15 @@ instead of enumerating the tree. Each call reads exactly one canonical absolute
 dated rollout, applies only that source's options, and returns observations,
 coverage, private source identity, scan byte counts and a serializable checkpoint.
 The initial backfill streams at most 1 GiB; later calls read only bytes after the
-checkpoint's captured byte boundary. Context and receipt records are retained in a
-private journal capped at 128 MiB and one million records; transcript-only records
-are discarded. Each scan also caps lines at one million and individual lines at
+checkpoint's captured byte boundary. Only importer-consumed receipt fields are
+retained in a private journal capped at 128 MiB and one million records. Command
+output, test selectors, PR body text, prompts and other context are discarded;
+successful PR-create output retains only an exact GitHub PR URL. Native identities,
+boundaries, model history and per-turn usage retain their original meaning, including
+malformed and regressing usage. Malformed JSON/root/payload records retain a compact
+marker so coverage cannot silently improve. Older valid checkpoints are projected
+on replay without reading rollout bytes again. Each scan also caps lines at one
+million and individual lines at
 8 MiB. Bounded unfinished final-line bytes persist in the checkpoint and are
 prepended to the next append before parsing; they explicitly report incomplete coverage.
 Unchanged sources read zero rollout bytes. Retained receipts are reinterpreted
