@@ -42,6 +42,25 @@ Focused verification on the working change based on `ed1c4a205dd2`:
   new import failed candidate reuse; bypassing settlement authentication failed
   missing-evidence refusal. Each mutant retained a passing G042 control. The
   restored focused run above passed; neither kill was a parser or import error.
-- `git diff --check` passed. Final integrated TypeScript checks, complete local
-  gates and exact-head CI remain the publication gate; these focused results do
-  not establish a served cutover or close #1196.
+- `git diff --check` passed. These focused results do not establish a served
+  cutover or close #1196.
+
+Final integrated local receipt:
+
+- Reviewed implementation was rebased without content changes onto merge
+  `e8e8ed40e5cae2e4736f846659e7fe0d94091438`; the two implementation commits
+  remained identical under `git range-diff`. Integrated tested revision:
+  `3c482747d87af2696137c01b19f3114ad0a23c81`.
+- `bash scripts/check-shared-host.sh` passed once on that revision: all 51
+  TypeScript configurations, including root, Trident and Open, and all 1,751
+  declared/discovered/executed test files across 19 lanes, with zero failed
+  lanes. The complete consuming `open/__tests__/project-build-e2e.test.ts`
+  ran in that suite. The wrapper retained unchanged suite-input identity
+  `3c5dc59fadea786b1e578658a4686f6a3e0249afed97d36ada1953f7fb6ae5fb`.
+- Final fixture typing corrections preserve all refusal controls without casts
+  or readonly mutation. The consuming focused rerun passed 13 cases and 209
+  assertions; the binding fixture passed one case and 11 assertions.
+- This final narrative is the only addition after the measured local gate.
+  Required CI must pass on the publication head. Deployment and a fresh live
+  proof-only retry remain unverified; neither this receipt nor the earlier
+  unattended single-build merge demonstrates this new importer in production.
