@@ -151,6 +151,11 @@ export class WebCodexCredentialClient {
     return this.req<CodexRotationResult>(`${this.globalPath}/rotate`, { method: 'POST', body: {} })
   }
 
+  /** Explicit selection also releases the destination's stored cooldown. */
+  async rotateToAccount(to: string): Promise<CodexRotationResult> {
+    return this.req<CodexRotationResult>(`${this.globalPath}/rotate`, { method: 'POST', body: { to } })
+  }
+
   /**
    * Connect a Codex subscription. Throws on a metered key.
    *

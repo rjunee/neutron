@@ -1120,7 +1120,7 @@ describe('Codex seats — the web pane can destroy them, so it must say so', () 
     root.unmount()
   })
 
-  it('switches through the global operator route and renders the returned active account', async () => {
+  it('plain-switches to an expired rate-limit account and renders the returned active account', async () => {
     let active = 'default'
     const { container, root, act, requests } = await mount((url, init) => {
       if (url.endsWith('/api/cores/integrations')) return json(STATUS)
@@ -1128,7 +1128,7 @@ describe('Codex seats — the web pane can destroy them, so it must say so', () 
       if (url.endsWith('/api/app/codex-auth')) return json(TWO_SEATS)
       if (url.endsWith('/api/app/codex-auth/rotation')) return json({ active, accounts: [
         { slot: 'default', label: null, cooling_until: null, cooling_reason: null },
-        { slot: 'work', label: null, cooling_until: null, cooling_reason: null },
+        { slot: 'work', label: null, cooling_until: Date.now() - 60_000, cooling_reason: 'rate_limited' },
       ] })
       if (url.endsWith('/api/app/codex-auth/rotate') && init?.method === 'POST') {
         active = 'work'
@@ -1153,6 +1153,53 @@ describe('Codex seats — the web pane can destroy them, so it must say so', () 
     expect(container.textContent).not.toContain(config.token)
     root.unmount()
   })
+
+  for (const [from, to, reason] of [
+    ['work', 'default', 'rate_limited'], ['default', 'work', 'rate_limited'],
+    ['work', 'default', 'unauthorized'], ['default', 'work', 'unauthorized'],
+  ] as const) {
+    for (const confirm of [false, true]) {
+      it(`explicitly selects cooled ${to} from ${from}, reason=${reason}, confirm=${confirm}`, async () => {
+        let active: string = from
+        const { container, root, act, requests, confirmed } = await mount((url, init) => {
+          if (url.endsWith('/api/cores/integrations')) return json(STATUS)
+          if (url.endsWith('/api/app/projects/archived')) return json({ archived: [] })
+          if (url.endsWith('/api/app/codex-auth')) return json(TWO_SEATS)
+          if (url.endsWith('/api/app/codex-auth/rotation')) return json({ active, accounts: [from, to].map(slot => ({
+            slot, label: null, cooling_until: slot === to && reason === 'rate_limited' ? Date.now() + 60_000 : null,
+            cooling_reason: slot === to ? reason : null,
+          })) })
+          if (url.endsWith('/api/app/codex-auth/rotate') && init?.method === 'POST') {
+            active = to
+            return json({ ok: true, status: 'rotated', changed: true, from, to, active })
+          }
+          return null
+        }, { confirm })
+        expect((container.querySelector('[data-testid="cint-codex-rotate"]') as HTMLButtonElement).disabled).toBe(true)
+        const select = container.querySelector('[data-testid="cint-codex-target"]') as HTMLSelectElement
+        const button = container.querySelector('[data-testid="cint-codex-switch-selected"]') as HTMLButtonElement
+        expect(button.disabled).toBe(true)
+        expect(Array.from(select.options).map(option => option.value)).toEqual(['', to])
+        await act(() => { select.value = to; select.dispatchEvent(new Event('change', { bubbles: true })) })
+        expect(button.disabled).toBe(false)
+        expect(button.textContent).toContain('clear cooldown')
+        expect(container.textContent).toContain('does not add quota or confirm availability')
+        expect(requests.filter(request => request.method === 'POST')).toHaveLength(0)
+        await act(async () => { button.click(); await tick(); await tick() })
+        expect(confirmed).toEqual([`Switch to ${to} and clear its stored cooldown or quarantine? This does not add quota or confirm account availability.`])
+        expect(requests.filter(request => request.url.endsWith('/api/app/codex-auth/rotate'))).toEqual(confirm ? [
+          { method: 'POST', url: 'https://sam.neutron.test/api/app/codex-auth/rotate', body: { to } },
+        ] : [])
+        expect(container.querySelector('[data-testid="cint-codex-active-account"]')?.textContent).toContain(confirm ? to : from)
+        if (confirm) {
+          expect(select.value).toBe('')
+          expect(button.disabled).toBe(true)
+        }
+        expect(container.textContent).not.toContain(config.token)
+        root.unmount()
+      })
+    }
+  }
 
   it('holds the switch control busy until the operator write settles', async () => {
     let finish!: (response: Response) => void
@@ -1255,7 +1302,8 @@ describe('Codex seats — the web pane can destroy them, so it must say so', () 
     root.unmount()
   })
 
-  it('blocks connect and disconnect while a switch response is pending, then allows them', async () => {
+  for (const named of [false, true]) {
+  it(`blocks connect and disconnect while a switch response is pending, then allows them (named=${named})`, async () => {
     let active = 'default'
     let seats = ['default', 'work']
     let connects = 0
@@ -1295,7 +1343,12 @@ describe('Codex seats — the web pane can destroy them, so it must say so', () 
       setValue(container.querySelector('#cint-codex-account') as HTMLInputElement, 'new')
       await tick()
     })
-    const rotate = container.querySelector('[data-testid="cint-codex-rotate"]') as HTMLButtonElement
+    if (named) await act(() => {
+      const select = container.querySelector('[data-testid="cint-codex-target"]') as HTMLSelectElement
+      select.value = 'work'
+      select.dispatchEvent(new Event('change', { bubbles: true }))
+    })
+    const rotate = container.querySelector(`[data-testid="${named ? 'cint-codex-switch-selected' : 'cint-codex-rotate'}"]`) as HTMLButtonElement
     const connect = container.querySelector('[data-testid="cint-codex-connect"]') as HTMLButtonElement
     const remove = container.querySelector('[data-testid="cint-codex-seat-remove-work"]') as HTMLButtonElement
     const disconnectAll = container.querySelector('[data-testid="cint-codex-disconnect-all"]') as HTMLButtonElement
@@ -1324,7 +1377,7 @@ describe('Codex seats — the web pane can destroy them, so it must say so', () 
     root.unmount()
   })
 
-  it('blocks a same-tick switch while connect is pending, then permits a valid switch', async () => {
+  it(`blocks a same-tick switch while connect is pending, then permits a valid switch (named=${named})`, async () => {
     let finishConnect!: (response: Response) => void
     const pendingConnect = new Promise<Response>((resolve) => { finishConnect = resolve })
     let connects = 0
@@ -1358,7 +1411,12 @@ describe('Codex seats — the web pane can destroy them, so it must say so', () 
       await tick()
     })
     const connect = container.querySelector('[data-testid="cint-codex-connect"]') as HTMLButtonElement
-    const rotate = container.querySelector('[data-testid="cint-codex-rotate"]') as HTMLButtonElement
+    if (named) await act(() => {
+      const select = container.querySelector('[data-testid="cint-codex-target"]') as HTMLSelectElement
+      select.value = 'work'
+      select.dispatchEvent(new Event('change', { bubbles: true }))
+    })
+    const rotate = container.querySelector(`[data-testid="${named ? 'cint-codex-switch-selected' : 'cint-codex-rotate'}"]`) as HTMLButtonElement
     await act(() => { connect.click(); rotate.click() })
     expect(connects).toBe(1)
     expect(rotations).toBe(0)
@@ -1371,7 +1429,10 @@ describe('Codex seats — the web pane can destroy them, so it must say so', () 
     root.unmount()
   })
 
-  it('re-reads selection after a 409 while keeping the refusal visible', async () => {
+  }
+
+  for (const named of [false, true]) {
+  it(`re-reads selection after a 409 while keeping the refusal visible (named=${named})`, async () => {
     let cooled = false
     let reads = 0
     const { container, root, act } = await mount((url, init) => {
@@ -1392,16 +1453,22 @@ describe('Codex seats — the web pane can destroy them, so it must say so', () 
       return null
     })
     const before = reads
-    const button = container.querySelector('[data-testid="cint-codex-rotate"]') as HTMLButtonElement
+    if (named) await act(() => {
+      const select = container.querySelector('[data-testid="cint-codex-target"]') as HTMLSelectElement
+      select.value = 'work'
+      select.dispatchEvent(new Event('change', { bubbles: true }))
+    })
+    const button = container.querySelector(`[data-testid="${named ? 'cint-codex-switch-selected' : 'cint-codex-rotate'}"]`) as HTMLButtonElement
     expect(button.disabled).toBe(false)
     await act(async () => { button.click(); await tick(); await tick() })
     expect(reads).toBeGreaterThan(before)
-    expect(button.disabled).toBe(true)
+    expect(button.disabled).toBe(!named)
     expect(container.textContent).toContain('No other Codex account is eligible.')
     expect(container.textContent).toContain('The active account was not changed.')
     expect(container.querySelector('[data-testid="cint-codex-active-account"]')?.textContent).toContain('default')
     root.unmount()
   })
+  }
 
   it('disables switching when no alternate exists and reports a server refusal without claiming a switch', async () => {
     const { container, root, act, requests } = await mount((url, init) => {

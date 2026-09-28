@@ -47,6 +47,15 @@ is introduced.
       overlap a switch in either direction, including same-tick submits. A 409
       re-reads stored selection without erasing the refusal. It is reachable in
       General and absent from named projects. No credential or bearer bytes render.
+      An explicit named-account selector additionally sends `{ to }`, including
+      destinations with stored cooldown/quarantine; it never silently falls back
+      to plain rotation. A cooled target requires confirmation naming that target
+      and explaining that selection clears stored cooling, not provider quota.
+      Cancel sends no write. Both account directions, refusals and the shared
+      connect/disconnect mutation boundary are tested through this action too.
+      Selection is global, not a review-only account override. Existing server
+      custody checks and General handoff admission/viability checks remain intact;
+      switching itself does not attest fresh provider capacity.
       Verify: `bun test landing/chat-react/__tests__/codex-credential-client.test.ts
       landing/chat-react/__tests__/integrations-tab.test.tsx
       landing/chat-react/__tests__/reachability.test.tsx`.

@@ -105,8 +105,10 @@ const USAGE_READING = {
 interface Mounted {
   root: HTMLElement
   requests: string[]
+  rotations: unknown[]
   typeDraft(): Promise<void>
   openAdmin(): Promise<void>
+  switchCodexAccount(to: string): Promise<void>
   unmount(): Promise<void>
 }
 
@@ -157,7 +159,9 @@ async function mountShell(
   // Everything the shell reads over HTTP, answered from literals. Anything the
   // shell asks for that is not listed 404s, exactly as a real older gateway would.
   const requests: string[] = []
-  const fetchImpl = async (url: string): Promise<Response> => {
+  const rotations: unknown[] = []
+  let active = 'default'
+  const fetchImpl = async (url: string, init?: RequestInit): Promise<Response> => {
     requests.push(url)
     const json = (body: unknown): Response =>
       new Response(JSON.stringify(body), {
@@ -175,12 +179,19 @@ async function mountShell(
     if (url.endsWith('/api/app/github-auth')) return json({ status: 'not_connected' })
     if (url.endsWith('/api/cores/integrations')) return json({ ok: true, oauth: [], api_keys: [] })
     if (url.endsWith('/api/app/codex-auth/rotation') && codexAccounts) return json({
-      active: 'default',
+      active,
       accounts: [
         { slot: 'default', label: null, cooling_until: null, cooling_reason: null },
         { slot: 'work', label: null, cooling_until: null, cooling_reason: null },
       ],
     })
+    if (url.endsWith('/api/app/codex-auth/rotate') && init?.method === 'POST' && codexAccounts) {
+      const body = JSON.parse(String(init.body)) as { to: string }
+      rotations.push(body)
+      const from = active
+      active = body.to
+      return json({ ok: true, status: 'rotated', changed: true, from, to: active, active })
+    }
     if (url.endsWith('/api/app/codex-auth')) return json(codexAccounts
       ? { status: 'connected', accounts: [
           { slot: 'default', label: null, status: 'connected', cooling: false, cooling_until: null, cooling_reason: null, used_percent: null, window_minutes: null, plan_type: null, active: true },
@@ -251,6 +262,19 @@ async function mountShell(
   return {
     root: container,
     requests,
+    rotations,
+    async switchCodexAccount(to: string): Promise<void> {
+      const select = container.querySelector('[data-testid="cint-codex-target"]') as HTMLSelectElement
+      await act(() => {
+        select.value = to
+        select.dispatchEvent(new Event('change', { bubbles: true }))
+      })
+      await act(async () => {
+        ;(container.querySelector('[data-testid="cint-codex-switch-selected"]') as HTMLButtonElement).click()
+        await tick()
+        await tick()
+      })
+    },
     /** Type into the real composer the way a keyboard does, so React sees it. */
     async typeDraft(): Promise<void> {
       const input = container.querySelector('.car-input') as HTMLTextAreaElement | null
@@ -376,6 +400,12 @@ describe('reachability — the app shell, in every layout we ship', () => {
           .toContain('default')
         expect(mounted.requests.some((url) => url.endsWith('/api/app/tabs'))).toBe(true)
         expect(mounted.requests.some((url) => url.endsWith(`/api/app/projects/${PROJECT}/tabs`))).toBe(false)
+        await mounted.switchCodexAccount('work')
+        expect(mounted.rotations).toEqual([{ to: 'work' }])
+        expect(mounted.root.querySelector('[data-testid="cint-codex-active-account"]')?.textContent).toContain('work')
+        await mounted.switchCodexAccount('default')
+        expect(mounted.rotations).toEqual([{ to: 'work' }, { to: 'default' }])
+        expect(mounted.root.querySelector('[data-testid="cint-codex-active-account"]')?.textContent).toContain('default')
       } finally {
         await mounted.unmount()
       }
@@ -391,6 +421,7 @@ describe('reachability — the app shell, in every layout we ship', () => {
       expect(mounted.requests.some((url) => url.endsWith('/api/app/codex-auth/rotation'))).toBe(false)
       expect(mounted.root.querySelector('[data-testid="header-menu-item-admin"]')).toBeNull()
       expect(mounted.root.querySelector('[data-testid="cint-codex-rotate"]')).toBeNull()
+      expect(mounted.root.querySelector('[data-testid="cint-codex-target"]')).toBeNull()
     } finally {
       await mounted.unmount()
     }
