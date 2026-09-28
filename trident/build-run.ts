@@ -1085,10 +1085,21 @@ export async function buildRun(input: BuildRunInput, deps: BuildRunDeps, signal:
           phase = 'review'
         }
         if (!deps.reviewReadiness) return unknown('Review readiness host is missing')
-        const readiness = gateStop(await deps.reviewReadiness(snapshot, signal, input.merge_mode))
+        // Independent host validation may overlap, but both operations must settle
+        // before dispatch or cleanup. In particular, a thrown readiness observer
+        // cannot let cleanup remove the worktree underneath a running suite.
+        const [readinessResult, suiteResult] = await Promise.allSettled([
+          Promise.resolve().then(() => deps.reviewReadiness!(snapshot, signal, input.merge_mode)),
+          Promise.resolve().then(() => deps.reviewSuite
+            ? deps.reviewSuite(snapshot, round)
+            : { kind: 'unknown' as const, detail: 'Review suite host is missing' }),
+        ])
+        // Keep the former serial error precedence after draining both owners.
+        if (readinessResult.status === 'rejected') throw readinessResult.reason
+        const readiness = gateStop(readinessResult.value)
         if (readiness) return readiness
-        if (!deps.reviewSuite) return unknown('Review suite host is missing')
-        const suite = await deps.reviewSuite(snapshot, round)
+        if (suiteResult.status === 'rejected') throw suiteResult.reason
+        const suite = suiteResult.value
         if (suite.kind === 'unknown') return unknown(suite.detail)
         if (!deps.reviewCi) return unknown('Review CI host is missing')
         const ciBefore = await deps.reviewCi(snapshot, input.merge_mode, signal)

@@ -4733,6 +4733,90 @@ test.each(['approve', 'standalone', 'synthesis', 'missing-seat'] as const)('all-
   if (verdict !== 'approve') expect(f.github.prs.every(pr => pr.state === 'OPEN')).toBe(true)
 }, 30_000)
 
+for (const [first, fault] of [
+  ['readiness', 'none'], ['suite', 'none'],
+  ['readiness', 'readiness-unknown'], ['readiness', 'readiness-throw'],
+  ['suite', 'suite-unknown'], ['suite', 'suite-throw'],
+  ['suite', 'red'], ['suite', 'moved-head'],
+] as const)
+test(`consuming host admission overlaps without early dispatch or cleanup: ${first} first, ${fault}`, async () => {
+  const producers: string[] = [], started: string[] = [], finished: string[] = []
+  const f = await fixture({ suiteExit: fault === 'red' ? 1 : 0,
+    reviewChild: async (_request, seat) => { producers.push(seat) } })
+  f.input.phase_models = { ...f.input.phase_models, review_rubric: { model: 'fable' } }
+  const releases = { readiness: () => {}, suite: () => {} }
+  const held = (name: keyof typeof releases) => new Promise<void>(resolve => { releases[name] = resolve })
+  const readinessHold = held('readiness'), suiteHold = held('suite')
+  let bothStarted!: () => void
+  const entered = new Promise<void>(resolve => { bothStarted = resolve })
+  const start = (name: string) => { started.push(name); if (started.length === 2) bothStarted() }
+  const runSuite = f.context.runSuite!, runHost = f.context.runHost
+  let suiteCalls = 0, cleanupCalls = 0
+  f.context.runHost = Object.assign(async (...args: Parameters<typeof runHost>) => {
+    if (args[0].some(value => value.endsWith('/worktree-cleanup.sh'))) cleanupCalls++
+    return runHost(...args)
+  }, { writesDiffOutput: true as const })
+  f.context.runSuite = async (...args) => {
+    suiteCalls++
+    if (suiteCalls === 1) {
+      start('suite'); await suiteHold; finished.push('suite')
+      if (fault === 'suite-throw') throw Error('fixture suite acquisition failed')
+      if (fault === 'suite-unknown') return { ok: false, exit_code: 1, stdout: '', stderr: '', timed_out: true }
+      if (fault === 'moved-head') {
+        expect((await spawnCapture(['git', 'commit', '--allow-empty', '-m', 'test: move review candidate'],
+          f.store.get(f.row.id)!.worktree!)).ok).toBe(true)
+      }
+    }
+    return runSuite(...args)
+  }
+  const host = await createProjectBuildHost(await f.prepare())
+  const readiness = host.deps.reviewReadiness!
+  let readinessCalls = 0
+  host.deps.reviewReadiness = async (...args) => {
+    if (++readinessCalls === 1) {
+      start('readiness'); await readinessHold; finished.push('readiness')
+      if (fault === 'readiness-throw') throw Error('fixture readiness acquisition failed')
+      if (fault === 'readiness-unknown') return { kind: 'unknown', detail: 'fixture readiness unavailable' }
+    }
+    return readiness(...args)
+  }
+  let settled = false, timer: ReturnType<typeof setTimeout> | undefined
+  const running = host.run({ mode: 'implementation', start: 'fresh' }, new AbortController().signal)
+    .then(outcome => { settled = true; return outcome })
+  try {
+    await Promise.race([entered, new Promise<never>((_, reject) => {
+      timer = setTimeout(() => reject(Error(`Host checks did not overlap: ${started}`)), 10_000)
+    })])
+    releases[first]()
+    await until(() => finished.includes(first) || undefined)
+    // Allow the released observer to propagate an exception/refusal to the driver.
+    await new Promise(resolve => setTimeout(resolve, 0))
+    expect(settled).toBe(false)
+    expect(cleanupCalls).toBe(0)
+    expect(producers).toEqual([])
+    expect(f.world.dispatches.map(call => call.role)).toEqual(['plan', 'build'])
+  } finally {
+    clearTimeout(timer); releases.readiness(); releases.suite(); await running
+  }
+  const outcome = await running
+  expect(cleanupCalls).toBe(1)
+  if (fault === 'none') {
+    expect(outcome.kind, why(f, outcome)).toBe('merged')
+    expect([...producers].sort()).toEqual(['review_adversarial', 'review_rubric', 'standalone'])
+    expect(suiteCalls).toBe(1) // Publication retains the existing receipt.
+  } else {
+    expect(outcome.kind, why(f, outcome)).toBe(fault === 'red' ? 'blocked' : 'unknown')
+    expect(f.github.prs.every(pr => pr.state === 'OPEN')).toBe(true)
+    if (fault === 'red') {
+      expect(producers.length).toBeGreaterThan(0) // Red proof enters review with its veto intact.
+      expect(outcome).toMatchObject({ on: expect.stringContaining('Review') })
+    } else {
+      expect(producers).toEqual([])
+      if (fault === 'moved-head') expect(outcome).toMatchObject({ detail: 'Suite input identity is unavailable after host observation' })
+    }
+  }
+}, 60_000)
+
 test.each(['readiness', 'ci', 'artifact'] as const)('unavailable admission prevents every review producer in the consuming host: %s', async stop => {
   const started: string[] = []
   const f = await fixture({ reviewChild: async (_request, seat) => { started.push(seat) } })

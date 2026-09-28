@@ -2118,6 +2118,48 @@ test('G043 fix erasing the diff cannot spend another panel', async () => {
   expect(f.events).not.toContain('merge')
 })
 
+for (const first of ['readiness', 'suite'] as const)
+for (const fault of ['none', 'readiness-unknown', 'readiness-throw', 'suite-unknown', 'suite-throw', 'both-throw', 'readiness-unknown-suite-throw'] as const)
+test(`host admission overlaps and drains before review: ${first} first, ${fault}`, async () => {
+  const f = fixture()
+  const started: string[] = [], finished: string[] = []
+  const releases = { readiness: () => {}, suite: () => {} }
+  const held = (name: keyof typeof releases) => new Promise<void>(resolve => { releases[name] = resolve })
+  const readinessHold = held('readiness'), suiteHold = held('suite')
+  let bothStarted!: () => void
+  const entered = new Promise<void>(resolve => { bothStarted = resolve })
+  const start = (name: string) => { started.push(name); if (started.length === 2) bothStarted() }
+  f.deps.reviewReadiness = async () => {
+    start('readiness'); await readinessHold; finished.push('readiness')
+    if (fault === 'readiness-throw' || fault === 'both-throw') throw Error('readiness failed')
+    return fault.startsWith('readiness-unknown') ? { kind: 'unknown', detail: 'readiness unavailable' } : { kind: 'allow' }
+  }
+  f.deps.reviewSuite = async () => {
+    start('suite'); await suiteHold; finished.push('suite')
+    if (fault === 'suite-throw' || fault === 'both-throw' || fault === 'readiness-unknown-suite-throw') throw Error('suite failed')
+    return fault === 'suite-unknown' ? { kind: 'unknown', detail: 'suite unavailable' } : { kind: 'known', findings: [] }
+  }
+  let settled = false, timer: ReturnType<typeof setTimeout> | undefined
+  const running = f.run().then(outcome => { settled = true; return outcome })
+  try {
+    await Promise.race([entered, new Promise<never>((_, reject) => {
+      timer = setTimeout(() => reject(Error(`Host admission did not overlap: ${started}`)), 1_000)
+    })])
+    releases[first]()
+    await new Promise(resolve => setTimeout(resolve, 0))
+    expect(finished).toEqual([first])
+    expect(settled).toBe(false)
+    expect(f.cross.calls).toHaveLength(0)
+    expect(f.events).not.toContain('merge')
+  } finally {
+    clearTimeout(timer); releases.readiness(); releases.suite(); await running
+  }
+  const outcome = await running
+  expect(outcome.kind).toBe(fault === 'none' ? 'merged' : 'unknown')
+  if (outcome.kind === 'unknown') expect(outcome.detail).toContain(fault.startsWith('suite') ? 'suite' : 'readiness')
+  expect(f.cross.calls).toHaveLength(fault === 'none' ? 1 : 0)
+})
+
 test('readiness runs before each paid panel and cannot default to permission', async () => {
   for (const kind of ['blocked', 'unknown', 'missing'] as const) {
     const f = fixture()
