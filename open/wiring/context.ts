@@ -29,6 +29,8 @@ import type { SubstrateNoticeSinks } from '@neutronai/gateway/http/substrate-not
 
 export interface OpenWiringContext {
   startCodexOwner?: import('@neutronai/gateway/wiring/build-llm-call-substrate.ts').BuildLlmCallSubstrateInput['startCodexOwner']
+  /** Read the current project provider choices when rendering the credential setup gate. */
+  hasCodexOwnerProject?: () => boolean
   /**
    * #1226 — the owner conversation's project-workspace terminal. Wired onto the
    * live-chat (`cc-agent-*`) family ONLY: every Claude conversation spawn is placed
@@ -42,8 +44,6 @@ export interface OpenWiringContext {
    * spawns (a verified handoff, never a second Chat).
    */
   conversationLifecycle?: import('@neutronai/gateway/wiring/build-llm-call-substrate.ts').ConversationLifecycle
-  /** Stored native-provider projects at boot; keeps their shared chat intake reachable without API pools. */
-  codexOwnerProjects?: readonly string[]
   /**
    * Resolved single-owner Anthropic credential pool (`resolveOpenLlmPool(env)`),
    * or `null` when the box boots LLM-less. Every substrate construction gates on

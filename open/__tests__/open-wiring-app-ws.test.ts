@@ -109,6 +109,7 @@ function buildDeps() {
     buildClarifyPoster,
     appWsRegistry: new InMemoryAppWsSessionRegistry(),
     appWsChatTurn: null,
+    canDispatchLiveAgent: () => true,
     scribeOnUserTurn: undefined,
     chatCommandFilter: { match: async () => null } as ChatCommandFilter,
     // `/task` deps. `null` = "Tasks Core not installed for this instance", which

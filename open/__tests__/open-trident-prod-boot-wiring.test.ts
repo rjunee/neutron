@@ -12,6 +12,8 @@ import { spyOn } from 'bun:test'
 import { asOwnerHandle } from '@neutronai/persistence/index.ts'
 import { CodexCredentialService } from '@neutronai/trident/codex-credential.ts'
 import * as durableCodexOwner from '../wiring/codex-durable-owner.ts'
+import { CodexOwnerBindings } from '../wiring/codex-owner-binding.ts'
+import { SqliteOnboardingStateStore } from '@neutronai/onboarding/interview/sqlite-state-store.ts'
 /** Production boot and typed project-launch composition checks. */
 
 import { afterEach, beforeEach, describe, expect, test } from 'bun:test'
@@ -1652,21 +1654,50 @@ describe('Open foundational-Trident prod-boot wiring', () => {
     expect(dispatchDepsSites(inlineOpenMutant).filter((site) => !siteIsWired(site)).length).toBe(1)
   })
 
-  test('an LLM-less boot (no credential) leaves composition.trident unset (clean degrade)', async () => {
+  test('a credentialless boot admits its first Codex project through served chat without recomposition', async () => {
     delete process.env['ANTHROPIC_API_KEY']
     delete process.env['OPENAI_API_KEY']
+    await new SqliteOnboardingStateStore({ db }).upsert({ owner_slug: 'owner', user_id: 'owner', phase: 'completed' })
+    const admissions: (string | undefined)[] = []
+    const prompts: string[] = []
+    const start = spyOn(CodexOwnerBindings.prototype, 'start').mockImplementation((projectId, spec) => {
+      admissions.push(projectId)
+      return recordingSubstrate(prompts).start(spec)
+    })
     const composer = buildOpenGraphComposer({ env: process.env })
     const composition = await composer({ db, project_slug: 'owner' })
-
-    expect(composition.trident).toBeUndefined()
-    expect(composition.trident_build_dispatch).toBeUndefined()
-
-    for (const cleanup of composition.realmode_cleanups ?? []) {
-      try {
-        cleanup()
-      } catch {
-        /* best-effort */
+    try {
+      expect(composition.trident?.fire_inner_workflow).toBeFunction()
+      expect(composition.trident?.fire_review_panel).toBeUndefined()
+      expect(composition.trident?.arbitrate).toBeUndefined()
+      expect(composition.trident?.resolve_conflict).toBeUndefined()
+      expect(composition.trident?.fix_leak_findings).toBeUndefined()
+      expect(composition.trident_build_dispatch).toBeDefined()
+      expect(admissions).toEqual([])
+      const page = () => composition.landing_server!.fetch(new Request('http://127.0.0.1/chat'), {} as never)
+      expect((await page()).status).toBe(503)
+      await new SqliteProjectSettingsStore(db).update('owner', 'late-project', { name: 'Late Project', model_provider: 'openai-codex' })
+      expect((await page()).status).not.toBe(503)
+      const response = await composition.app_ws_surface!.handler(new Request('http://127.0.0.1/api/app/chat/send', {
+        method: 'POST', headers: { authorization: 'Bearer dev:owner', 'content-type': 'application/json' },
+        body: JSON.stringify({ body: 'Hello from the first project', project_id: 'late-project', client_msg_id: 'first-codex' }),
+      }), {} as never)
+      expect(response?.status).toBe(200)
+      // The HTTP response is only an echo; require the durable agent reply.
+      let reply: { body: string } | null = null
+      for (let i = 0; i < 200; i++) {
+        reply = db.prepare<{ body: string }, []>("SELECT body FROM app_chat_messages WHERE role = 'agent' AND project_id = 'late-project' ORDER BY seq DESC LIMIT 1").get()
+        if (reply) break
+        await Bun.sleep(10)
       }
+      expect(reply?.body).toContain('built it')
+      expect(admissions).toEqual(['late-project'])
+      expect(prompts).toHaveLength(1)
+      await new SqliteProjectSettingsStore(db).update('owner', 'late-project', { model_provider: 'anthropic' })
+      expect((await page()).status).toBe(503)
+    } finally {
+      start.mockRestore()
+      for (const cleanup of composition.realmode_cleanups ?? []) cleanup()
     }
   }, 20_000)
 })

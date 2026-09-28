@@ -321,8 +321,9 @@ export interface WireAppWsDeps {
    * while he's reading it in the browser" one decision rather than two.
    */
   webPresence: WebPresenceReporter
-  /** The live-agent turn runner, or null on an LLM-less box. */
+  /** Shared intake; native projects can become available after boot. */
   appWsChatTurn: ((turn: LiveAgentTurnRequest) => Promise<LiveAgentTurnResult>) | null
+  canDispatchLiveAgent: (project_id?: string) => boolean
   /** The entity-scribe user-turn hook (undefined on an LLM-less box). */
   scribeOnUserTurn: ((input: UserTurnInput) => void) | undefined
   /**
@@ -446,6 +447,7 @@ export function wireAppWs(ctx: OpenWiringContext, deps: WireAppWsDeps): WiredApp
     appWsRegistry,
     webPresence,
     appWsChatTurn,
+    canDispatchLiveAgent,
     scribeOnUserTurn,
     attachmentTranscript,
     chatCommandFilter,
@@ -963,7 +965,7 @@ export function wireAppWs(ctx: OpenWiringContext, deps: WireAppWsDeps): WiredApp
           ? `${event.channel_topic_id}:${project_id}`
           : event.channel_topic_id
       const sendReply = buildAppWsSendReply(event.channel_topic_id, project_id)
-      if (appWsChatTurn === null) {
+      if (appWsChatTurn === null || !canDispatchLiveAgent(project_id)) {
         sendReply({
           type: 'agent_message',
           body:
@@ -1253,7 +1255,7 @@ export function wireAppWs(ctx: OpenWiringContext, deps: WireAppWsDeps): WiredApp
         // the deterministic per-project opening finalize already delivered. A
         // materialized project is always steady-state, so never seed it.
         const isGeneralTopic = channel_topic_id === appWsTopicId(user_id)
-        if (isGeneralTopic && appWsChatTurn !== null) {
+        if (isGeneralTopic && appWsChatTurn !== null && canDispatchLiveAgent()) {
           // Two gates, in this order:
           //  1. DURABLE — has this topic already been greeted? Survives a
           //     restart/redeploy, which the old per-process Set did not: a fresh
@@ -1401,7 +1403,7 @@ export function wireAppWs(ctx: OpenWiringContext, deps: WireAppWsDeps): WiredApp
       freeform_text,
     }) => {
       const now = Date.now()
-      if (appWsChatTurn === null) return
+      if (appWsChatTurn === null || !canDispatchLiveAgent(project_id)) return
       const turnTopicId =
         project_id !== undefined && project_id.length > 0
           ? `${appWsTopicId(user_id)}:${project_id}`

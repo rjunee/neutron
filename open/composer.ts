@@ -1140,9 +1140,6 @@ export function buildOpenGraphComposer(
       generalAuthorityPath: joinPath(owner_home, '.neutron-general-codex-owner.json'),
       ...codexCredentialService.resolveGeneralOwnerCredential(asOwnerHandle(owner_handle), retainedHome), env,
       projectWorkspace: codexWorkspaceFor(null) }))
-    const codexOwnerProjects = (await projectSettingsStore.list(project_slug))
-      .filter(project => resolveModelProvider(project.id).provider === 'openai-codex')
-      .map(project => project.id)
     // O6 — NOTICE-FAMILY + RECOVERED-REPLY sinks for the owner's WARM conversational
     // substrate (`cc-agent-*`). The persistent REPL fires four DI seams on the
     // rising edge of otherwise-invisible states — a mid-turn API 5xx dead turn, a
@@ -1339,7 +1336,8 @@ export function buildOpenGraphComposer(
       ...conversationalProviderCtx,
       providerResolver,
       startCodexOwner: (projectId, spec) => codexOwnerBindings.start(projectId, spec),
-      codexOwnerProjects,
+      hasCodexOwnerProject: () => db.all<{ id: string }>('SELECT id FROM projects WHERE deleted_at IS NULL')
+        .some(project => resolveModelProvider(project.id).provider === 'openai-codex'),
       ...(liveAgentNoticeSinks !== undefined ? { liveAgentNoticeSinks } : {}),
       ...(backgroundNoticeSinks !== undefined ? { backgroundNoticeSinks } : {}),
       ...(liveAgentRecoveredReplySink !== undefined
@@ -1368,6 +1366,8 @@ export function buildOpenGraphComposer(
       retireSetup,
       retireLegacyBackground,
       liveAgentSubstrate,
+      canDispatchLiveAgent,
+      ephemeralSubstrateAvailable,
       makeProjectLiveAgentSubstrate,
       adoptLiveAgentRepls,
       recoverLiveAgentRepls,
@@ -1421,7 +1421,7 @@ export function buildOpenGraphComposer(
     // Bound panels supply their stable launcher_repo_path so this warm cache
     // never retains disposable review worktrees; workflow args keep those paths.
     const tridentFireReviewPanel =
-      liveAgentSubstrate !== null
+      ephemeralSubstrateAvailable
         ? buildWorkflowFirer({ fire: buildSubstrateWorkflowFire({ build_substrate: makeWarmFireSubstrate }) })
         : null
 
@@ -1433,7 +1433,7 @@ export function buildOpenGraphComposer(
     // spawns a fresh `cc-dispatch-*` REPL per turn via the SAME factory. The
     // turn is CANCELLABLE (`buildCancellableDispatchTurn`): a `/dispatch stop` or
     // a watchdog reap actually terminates the subprocess. Gated on the same
-    // credential availability as Trident (no credential → unregistered; no flag).
+    // Claude credential availability (no credential → unregistered; no flag).
     // Work Board Phase 2b — the dispatch board binder. The canonical
     // `workBoardStore` is constructed later (it needs `appWsRegistry`), so the
     // dispatch service reaches it through this late-bound holder (same pattern
@@ -2540,11 +2540,9 @@ export function buildOpenGraphComposer(
       })
     const tridentCodeChatCommandFilter = buildTridentCodeChatCommandFilter({
       resolve_context: (input) => {
-        // No credential → no substrate → the tick loop can never advance a run
-        // (`tridentFireInnerWorkflow` is null on an LLM-less boot). Returning null
-        // makes the filter STILL claim `/code` and answer honestly "unavailable"
-        // rather than writing a row that would sit un-driven forever. `/code` is
-        // never silently handed to the model.
+        // This legacy command requires the Claude credential pool. Returning
+        // null keeps its explicit unavailable reply; native project builds use
+        // the project-aware board admission and launcher.
         if (llmPool === null) return null
         return {
           store: tridentCodeRunStore,
@@ -6224,8 +6222,7 @@ export function buildOpenGraphComposer(
         : null
 
     // Layer B (SPEC WAVE 3.5) — the periodic orchestrator context-reset policy.
-    // Only wired when the live-agent substrate exists (an LLM-less boot has NO
-    // warm `cc-agent-*` sessions to sweep, so there is nothing to reset). Every
+    // Wired with the live dispatcher; an empty warm pool is a no-op. Every
     // tick sweeps the owner's warm orchestrator pool; a session whose post-compact
     // transcript grew ≥ 2 MB since its last reset is idle-gated `/clear`-ed, and
     // its scope is emitted on the SAME reset bus the `/reset` command uses so the
@@ -6479,6 +6476,7 @@ export function buildOpenGraphComposer(
       appWsRegistry,
       webPresence,
       appWsChatTurn,
+      canDispatchLiveAgent,
       scribeOnUserTurn,
       // M2 task 5 — resolve a voice note's transcript for the SCRIBE text (voice
       // → text → gbrain parity). The resolver sets `transcript` only for audio,
@@ -6645,11 +6643,11 @@ export function buildOpenGraphComposer(
 
     // #342 — bounded Forge merge-conflict resolver: a fresh ephemeral REPL rooted
     // in the conflicted worktree, reusing the SAME per-cwd factory the dispatch
-    // family uses. Gated on the live-credential predicate (a resolver can only run
-    // where builds run). Absent → a rebase conflict escalates a specific question
+    // family uses. Gated on that factory's credential pools; a native owner alone
+    // cannot run this helper. Absent → a rebase conflict escalates a specific question
     // to chat rather than auto-resolving.
     const tridentConflictResolver =
-      tridentFireInnerWorkflow !== null
+      ephemeralSubstrateAvailable
         ? buildForgeConflictResolver({
             build_substrate: makeEphemeralSubstrate('cc-trident-resolve'),
           })
@@ -6664,8 +6662,8 @@ export function buildOpenGraphComposer(
     // was removed because it let an untrusted judge steer a credentialed agent —
     // and `approve`/`merge`/`skip-review` cannot even enter the option set
     // (`FORBIDDEN_OPTION_IDS`). Instance prefix per `arbiter.ts`. Gated on the SAME
-    // live-credential predicate as the resolver: an arbiter can only run where
-    // builds run. Unavailability remains evidence for the project decision turn.
+    // helper-credential predicate as the resolver. Unavailability remains
+    // evidence for the project decision turn.
     //
     // CREDENTIAL-FREE BY PROFILE, not by prompt — the `PROFILE_LEAK_FIXER` rule
     // fourteen lines below, and this turn needs it MORE than that one does. On the
@@ -6679,7 +6677,7 @@ export function buildOpenGraphComposer(
     // drops the grant, so the authority the option set excludes structurally is
     // absent from the environment too.
     const tridentArbiter =
-      tridentFireInnerWorkflow !== null
+      ephemeralSubstrateAvailable
         ? buildFableArbiter({
             build_substrate: makeEphemeralSubstrate('cc-trident-arbiter', PROFILE_ARBITER),
           })
@@ -6688,14 +6686,14 @@ export function buildOpenGraphComposer(
     // Purity-preflight fixer (2026-08-31): a fresh ephemeral REPL rooted in the
     // preflight's scratch worktree rewords gate-flagged prose so a finding is a
     // fixable defect in THIS round instead of a guaranteed-red PR. Same gating
-    // as the conflict resolver — a fixer can only run where builds run. Absent →
+    // as the conflict resolver — a native owner alone cannot run this helper. Absent →
     // findings are annotated on the PR and CI stays the enforcement of record.
     // CREDENTIAL-FREE BY PROFILE, not by prompt. The reword turn never commits, never pushes and
     // never opens a PR — the outer preflight does all three — so it runs on `PROFILE_LEAK_FIXER`,
     // which is `PROFILE_EPHEMERAL` minus the GitHub grant. It is the one dispatch here that reads
     // text the gate has already objected to, and it needs nothing that publishes.
     const tridentLeakFixer =
-      tridentFireInnerWorkflow !== null
+      ephemeralSubstrateAvailable
         ? buildLeakPreflightFixer({
             build_substrate: makeEphemeralSubstrate('cc-trident-leakfix', PROFILE_LEAK_FIXER),
           })
@@ -7544,17 +7542,17 @@ export function buildOpenGraphComposer(
         },
       },
       // The typed project launcher starts the host driver and persists outcomes
-      // in inner_result for the outer loop. Credential-free boots omit this bag.
+      // in inner_result for the outer loop. Keep it available before the first
+      // native project is configured; admission checks its provider credentials.
       // The on_run_terminal
       // observer fires Skill Forge's auto-skillify audit (parity gap #5) on every
-      // terminal run — the audit drops non-`done` runs. Wired only on the live
-      // (dispatch) path; an LLM-less box never advances a run to terminal, so
-      // there is nothing to skillify.
+      // terminal run — the audit drops non-`done` runs. Credential refusal
+      // happens at admission before a build can reach this terminal observer.
       ...(tridentFireInnerWorkflow !== null
         ? {
             trident: {
               fire_inner_workflow: tridentFireInnerWorkflow,
-              fire_review_panel: tridentFireReviewPanel!,
+              ...(tridentFireReviewPanel !== null ? { fire_review_panel: tridentFireReviewPanel } : {}),
               on_run_terminal: async (run): Promise<void> => {
                 await tridentOnRunTerminal(run)
                 const resolvedHome = codexCredentialService.resolveActiveCodexHome(

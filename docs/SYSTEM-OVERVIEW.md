@@ -6830,7 +6830,9 @@ deleted, no dual path):
   `trident/project-launcher.ts:54`). The gateway forwards the typed input directly.
   Terminal outcomes use `inner_result`; unknown outcomes retain the worker and
   step for reconciliation (`trident/project-launcher.ts:12`,
-  `trident/orchestrator.ts:6342`). Credential-free boots retain the null launcher.
+  `trident/orchestrator.ts:6342`). The native owner binding keeps chat intake and
+  the launcher available before the first Codex project is configured; each turn
+  resolves its current provider and admission checks its current credentials.
 - **Evidence limits.** The suite report reader currently returns no record
   (`open/wiring/project-build.ts:123`). Non-Claude acting-turn bindings and
   unsupported review transports remain explicit unavailable outcomes. This wiring
