@@ -8,8 +8,27 @@ const consumer = join(repo, 'gateway/nexus/__tests__/init-contention.test.ts')
 
 test('Nexus ownership publication rejects partial publication and both ownership guard mutations', async () => {
   const original = readFileSync(join(migrations, 'runner.ts'), 'utf8')
+  // Restore the former read/stat ordering, including its absent-entry behavior,
+  // so the must-fail control exercises the race rather than refusing all claims.
+  const statCheck = `        try { lstatSync(markerPath) } catch (statError) {
+          if (statError instanceof Error && 'code' in statError && statError.code === 'ENOENT') return null
+          throw statError
+        }
+`
+  const readBeforeStat = original.replace(statCheck, '').replace(
+    '      } catch (err) {\n        const detail',
+    `      } catch (err) {
+        if (err instanceof Error && 'code' in err && err.code === 'ENOENT') {
+          try { lstatSync(markerPath) } catch (statError) {
+            if (statError instanceof Error && 'code' in statError && statError.code === 'ENOENT') return null
+          }
+        }
+        const detail`,
+  )
+  expect(original).toContain(statCheck)
   const cases = [
     { name: 'control', source: original, green: true },
+    { name: 'read-before-stat', source: readBeforeStat, green: false },
     { name: 'public-before-complete', source: original.replace('          stagedMarker,', '          markerPath,'), green: false },
     { name: 'ignore-winning-owner', source: original.replace('      marker = readMarker()', '      marker = null'), green: false },
     { name: 'admit-foreign-owner', source: original.replace('return canonicalOwnerPath(recorded) !== canonicalOwnerPath(here)', 'return false'), green: false },
@@ -38,6 +57,9 @@ test('Nexus ownership publication rejects partial publication and both ownership
           expect(exit, `${variant.name}: ${output}`).not.toBe(0)
           expect(output).toContain('error: expect(received)')
           expect(output).toContain('(fail) migration ownership publication')
+          if (variant.name === 'read-before-stat') {
+            expect(output).toContain('(fail) migration ownership publication consumes a complete competing claim at the existence check')
+          }
         }
       } finally {
         clearTimeout(deadline)

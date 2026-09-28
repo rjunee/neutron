@@ -75,7 +75,18 @@ test('migration ownership publication tolerates a failed private write without p
   expect(result.staging).toEqual([])
 })
 
-for (const mode of ['foreign', 'foreign-winner', 'malformed', 'malformed-winner']) {
+test('migration ownership publication consumes a complete competing claim at the existence check', async () => {
+  const result = await ownerProbe('publish-at-stat')
+  expect(result.injected).toBe(true)
+  expect(result.contender).toEqual({ exit: 0, error: null })
+  expect(result.error).toBeNull()
+  expect(result.events).toEqual([{ body: 'contender owner' }, { body: 'published owner' }])
+  expect(result.ledger).toEqual([{ name: 'rc1_initial_schema' }])
+  expect(result.marker).toContain('claimed_by=migrations/runner.ts')
+  expect(result.staging).toEqual([])
+})
+
+for (const mode of ['foreign', 'foreign-winner', 'foreign-at-stat', 'malformed', 'malformed-winner', 'malformed-at-stat']) {
   test(`migration ownership publication refuses ${mode} before any schema or ledger write`, async () => {
     const result = await ownerProbe(mode)
     expect(result.error).not.toBeNull()
@@ -86,6 +97,7 @@ for (const mode of ['foreign', 'foreign-winner', 'malformed', 'malformed-winner'
     expect(result.ledger).toEqual([])
     expect(result.tables).toEqual([])
     expect(result.staging).toEqual([])
+    if (mode.endsWith('-at-stat')) expect(result.injected).toBe(true)
   })
 }
 
@@ -98,6 +110,17 @@ test('migration ownership publication refuses an unreadable dangling marker with
   expect(result.events).toEqual([])
   expect(result.ledger).toEqual([])
   expect(result.tables).toEqual([])
+})
+
+test('migration ownership publication refuses a dangling marker published at the existence check', async () => {
+  const result = await ownerProbe('dangling-at-stat')
+  expect(result.injected).toBe(true)
+  expect(result.error).toContain('the ownership marker could not be read')
+  expect(result.dangling).toBe('missing-owner')
+  expect(result.events).toEqual([])
+  expect(result.ledger).toEqual([])
+  expect(result.tables).toEqual([])
+  expect(result.staging).toEqual([])
 })
 
 test('migration ownership publication refuses a failed publish on writable media', async () => {
