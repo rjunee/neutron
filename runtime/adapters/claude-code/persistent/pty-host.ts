@@ -203,6 +203,12 @@ export interface PtyChild {
   /** Submit one line and acknowledge its text and Enter. If `signal` aborts before
    *  the submission-bearing operation, the implementation must not actuate it. */
   submitLine?(command: string, signal?: AbortSignal): Promise<void>
+  /** For externally addressable panes: run a fresh input preflight inside the
+   * same actuation queue as the subsequent text and Enter. A rejected preflight
+   * sends neither. The caller records submission evidence within the preflight,
+   * immediately before input. This cannot exclude another client typing directly.
+   * Hosts without an externally addressable pane need not expose this capability. */
+  submitLineGuarded?(command: string, beforeSubmit: () => Promise<void>, signal?: AbortSignal): Promise<void>
   /**
    * Resize the terminal (cols × rows). No-op-safe after exit.
    *

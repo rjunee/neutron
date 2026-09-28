@@ -1476,6 +1476,53 @@ async function drive(f: Awaited<ReturnType<typeof fixture>>): Promise<ProjectBui
   return host.run({ mode: 'implementation', start: 'fresh' }, new AbortController().signal)
 }
 
+test.each(['draft', 'unreadable', 'empty'] as const)('adopted project composer %s preserves input or completes the build through Herdr', async state => {
+  const { HerdrHost } = await import('@neutronai/runtime/adapters/claude-code/persistent/herdr-host.ts')
+  const { FakeHerdrServer } = await import('@neutronai/runtime/adapters/claude-code/persistent/__tests__/herdr-fake-server.ts')
+  const f = await fixture()
+  f.register()
+  const session = (await pool.get(f.key))!
+  const worker = session.child.submitLine!
+  const server = new FakeHerdrServer()
+  let draft = state === 'draft' ? 'unsent owner text' : ''
+  const original = draft
+  server.screen = `────────\n❯ ${draft}\n────────\n? for shortcuts`
+  server.readFails = state === 'unreadable'
+  const submitted: string[] = []
+  let pasted = ''
+  const host = new HerdrHost({ connect: async () => ({ call: async (method, params) => {
+    const result = await server.call(method, params)
+    if (method === 'pane.send_text') {
+      pasted = String(params?.text).replace(/^\x1b\[200~/, '').replace(/\x1b\[201~$/, '')
+      draft += pasted
+    }
+    if (method === 'pane.send_keys') {
+      submitted.push(draft)
+      draft = ''
+      // The terminal records the entire submitted composer; the model seam
+      // remains the fixture's literal worker over the host's dispatch payload.
+      await worker(pasted)
+    }
+    return result
+  } }), pollIntervalMs: 1000 })
+  const child = await host.attach(server.paneId, { cwd: session.cwd, env: {} })
+  cleanups.push(() => child.detach?.())
+  pool.set(f.key, Promise.resolve({ ...session, child } as ReplSession))
+  const outcome = await drive(f)
+  if (state === 'empty') {
+    expect(outcome.kind, why(f, outcome)).toBe('merged')
+    expect(submitted.length).toBeGreaterThan(0)
+    expect(submitted.every(line => line.startsWith('Execute the prompt in this JSON dispatch specification: '))).toBe(true)
+  } else {
+    expect(outcome).toMatchObject({ kind: 'blocked', on: expect.stringContaining('dispatch was not submitted') })
+    expect(submitted).toEqual([])
+    expect(server.delivered.filter(call => call.method === 'pane.send_text' || call.method === 'pane.send_keys')).toEqual([])
+    expect(draft).toBe(original)
+    expect(f.world.dispatches).toEqual([])
+    expect(f.admission.listLeases('liveChild')).toEqual([])
+  }
+}, 60_000)
+
 test.each(['missing', 'replayed'] as const)('published branch preservation consumes fresh build with %s earlier work', async mode => {
   const f = await fixture()
   const git = async (repo: string, args: string[]) => {

@@ -42,6 +42,20 @@ is the thing being rebuilt.
       harness. Both directions asserted: a same-model task that spawns a headless process
       fails, and a cross-model task that tries to run in-REPL fails.
 
+- [x] **A dispatch into an externally addressable Claude pane checks its composer.**
+      Only a screen recognized as the current empty composer permits input.
+      Single-line and multiline drafts in that composer, unreadable screens, and
+      unknown layouts block before text, Enter, or submission evidence; the cause
+      reaches the build outcome and the unused native-child lease is released.
+      The check runs inside the host actuation queue, after earlier queued input.
+      A recognized empty composer still completes the same in-REPL build. The
+      retained Bun PTY, which has no externally addressable pane, keeps its
+      existing acknowledged dispatch behavior. This check is not an atomic
+      exclusion of another client's input, nor an authoritative read of hidden
+      editor state.
+      Verify: `bun test runtime/workers/claude-composer.test.ts runtime/workers/claude-acting-turn.test.ts`
+      and `bun test open/__tests__/project-build-e2e.test.ts -t 'adopted project composer'`.
+
 - [ ] **A headless worker never talks to the owner.** It returns "blocked on X" to the
       orchestrator, which decides whether that reaches him. Asserted by a test in which a
       worker attempts to ask and the attempt is refused or routed — and its complement, that
