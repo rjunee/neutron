@@ -120,6 +120,15 @@ spans carry unknown tokens unless a provider actually attributed usage.
       authenticated dashboard API. Missing usage remains unknown. Registration
       does not claim automatic source discovery or active-task timing.
       Verify: `bun test scripts/build-timeline-register-turn.test.ts`.
+- [ ] Explicit phase recording, manual native registration and scheduled native
+      refresh use the same observation-journal mutex. A live holder refuses every
+      other writer; process death releases the mutex without unlinking or replacing
+      its inode, so a pre-checkpoint partial append can be replayed exactly once.
+      An empty or foreign marker from the former create/unlink protocol refuses
+      until the operator verifies that no former writer is running and clears it.
+      No caller treats a PID string or a marker's age as proof of abandonment.
+      Verify: `bun test scripts/build-timeline-sources.test.ts scripts/build-timeline-register-turn.test.ts`
+      and the deploying consumer's process-kill replay test.
 - [ ] A collector configured with one authorized native `sessions` root discovers
       new dated rollout receipts without per-file registration. A bounded scan
       refuses symlink/path replacement and changed file identity, and does not

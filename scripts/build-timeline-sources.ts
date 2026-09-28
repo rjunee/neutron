@@ -1,8 +1,9 @@
 #!/usr/bin/env bun
 
 /** Sources for a build timeline. GitHub describes PRs; only attributed observations describe work. */
-import { appendFile, open, readFile, rename, unlink, writeFile } from 'node:fs/promises'
+import { appendFile, readFile, rename, writeFile } from 'node:fs/promises'
 import { randomUUID } from 'node:crypto'
+import { acquireObservationJournalLock } from './build-timeline-observation-lock.ts'
 
 export type CataloguePullRequest = {
   number: number
@@ -474,15 +475,13 @@ export async function readPhaseObservations(file: string): Promise<DirectPhaseOb
 
 export async function appendPhaseObservation(file: string, value: DirectPhaseObservation): Promise<void> {
   const observation = validatePhaseObservation(value)
-  // Exclusive lock makes duplicate/conflict checking and append one operation across writers.
-  const lockFile = `${file}.lock`
-  const lock = await open(lockFile, 'wx')
+  // Kernel lock makes duplicate/conflict checking and append one operation across writers.
+  const releaseLock = acquireObservationJournalLock(file)
   try {
     resolveObservations([...await readObservationEvents(file), observation])
     await appendFile(file, `${JSON.stringify(observation)}\n`, { encoding: 'utf8', flag: 'a' })
   } finally {
-    await lock.close()
-    await unlink(lockFile)
+    releaseLock()
   }
 }
 
