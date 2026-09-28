@@ -2,6 +2,7 @@ import type { BuildSnapshot } from './build-run.ts'
 import type { ReviewSuiteSource, SuiteObservation } from './gates/review-suite.ts'
 import type { TridentRun, TridentRunStore } from './store.ts'
 import { readBuildRetrySource } from './build-mode-state.ts'
+import { isTerminalPhase } from './state-machine.ts'
 
 const STAGE = 'build-suite-receipt'
 export const SUITE_IDENTITY_COMPONENTS = ['preparation', 'resolution', 'installed', 'installation', 'workspace'] as const
@@ -88,7 +89,7 @@ export function createProjectSuiteReceipts(options: {
       return { event, receipt }
     } catch { return null }
   }
-  return {
+  const receipts = {
     async observe(source: ReviewSuiteSource, snapshot: BuildSnapshot, round: number,
       strategy: string | undefined, scope: SuiteObservation['scope'] | undefined) {
       const measuredBefore = await measure(snapshot)
@@ -138,7 +139,7 @@ export function createProjectSuiteReceipts(options: {
           : { kind: 'unavailable' },
         hostExitCode: receipt.kind === 'known' && Number.isInteger(receipt.report?.hostExitCode)
           ? receipt.report!.hostExitCode : null }
-      if (identity && after !== identity) {
+      if (identity && (after !== identity || portableIdentity !== portableAfter)) {
         const saved = await store.appendSuiteReceipt(run.id, version,
           JSON.stringify({ version: 1, owner: boundOwner, observation }))
         if (saved === null) return unknown('Suite completion ownership changed or run stopped')
@@ -155,6 +156,25 @@ export function createProjectSuiteReceipts(options: {
         if (saved === null) return unknown('Suite completion ownership changed or run stopped')
       }
       return receipt
+    },
+  }
+  // One owner can be asked for proof by concurrent admission consumers. Drain
+  // the current acquisition before measuring the next request: only the durable
+  // receipt's existing identity checks may authorize reuse. An in-flight
+  // invalidation is neither a reusable receipt nor permission to replace its
+  // writer. Failed acquisition leaves the queue usable, never implicit proof.
+  let pending: Promise<void> = Promise.resolve()
+  return {
+    observe(...args: Parameters<typeof receipts.observe>) {
+      const result = pending.then(() => {
+        const current = store.get(run.id)
+        if (!current || isTerminalPhase(current.phase) || owner(current) !== boundOwner) {
+          return unknown('Suite acquisition ownership changed or run stopped')
+        }
+        return receipts.observe(...args)
+      })
+      pending = result.then(() => {}, () => {})
+      return result
     },
   }
 }

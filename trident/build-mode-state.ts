@@ -67,7 +67,34 @@ export function readBuildModeState(
   run: TridentRun,
 ): BuildModeState | null {
   const event = events.filter(event => event.stage === 'build-mode-state').at(-1)
-  return event ? parseBuildModeState(event.meta ?? null, run) : null
+  if (!event) return null
+  const state = parseBuildModeState(event.meta ?? null, run)
+  recoverBaseIntegration(events, run, state)
+  return state
+}
+
+/** Older hosts dropped the base observation at fix settlement. Reconstruct only
+ * the adjacent armed integration → settled fix transition, never worker prose. */
+function recoverBaseIntegration(events: ReadonlyArray<{ stage: string; meta?: string | null }>,
+  run: TridentRun, state: BuildModeState): void {
+  if (state.checkpoint.baseIntegration !== undefined || state.checkpoint.stage !== 'fixed'
+    || state.checkpoint.pending !== undefined) return
+  const modes = events.filter(event => event.stage === 'build-mode-state')
+  if (modes.length < 2) return
+  const previous = parseBuildModeState(modes.at(-2)!.meta ?? null, run, true)
+  const c = previous.checkpoint
+  const pending = c.pending
+  const recovery = pending?.recovery
+  const drift = c.baseDrift
+  if (!drift || c.refreshBeforeReview !== true || c.stage !== 'built'
+    || pending?.phase !== 'fix' || !recovery || recovery.request.role !== 'fix'
+    || recovery.request.run_id !== run.id || recovery.request.step_id !== pending.step_id
+    || recovery.snapshot.head !== c.head || drift.head !== c.head || !recovery.snapshot.pr
+    || recovery.snapshot.pr.state !== 'OPEN' || recovery.snapshot.pr.head !== c.head
+    || state.checkpoint.head === c.head || state.checkpoint.head === null
+    || state.checkpoint.round !== c.round + 1 || recovery.round !== c.round
+    || state.iteration !== previous.iteration) return
+  state.checkpoint.baseIntegration = { ...drift, integratedHead: state.checkpoint.head, pr: recovery.snapshot.pr.number }
 }
 
 /** Validate the original writer's identity before any state is consumed. */
@@ -124,6 +151,7 @@ export function retryModeSource(store: TridentRunStore, prior: TridentRun, seen 
     return inherited && link ? { ...inherited, prior, eventId: link.id } : null
   }
   const state = parseBuildModeState(event.meta, prior, true)
+  recoverBaseIntegration(store.stageEvents(prior.id), prior, state)
   const checkpoint = state.checkpoint
   if (checkpoint.stage === 'approved') {
     const recovered = mergeStopBuildSource(store, prior, state)
@@ -157,8 +185,11 @@ export function retryModeSource(store: TridentRunStore, prior: TridentRun, seen 
     const linkEvent = store.stageEvents(prior.id).filter(row => row.stage === 'build-retry-source').at(-1)
     const link = linkEvent ? JSON.parse(linkEvent.meta ?? 'null') : null
     const inherited = link?.head === checkpoint.head ? readBuildRetrySource(store, prior, seen) : null
+    const integrationBindings = inherited?.mergeRefresh ?? (checkpoint.baseIntegration
+      ? integratedFixBindings(store, prior, state) : null)
+    if (checkpoint.baseIntegration && !integrationBindings) return null
     return { prior, eventId: event.id, state,
-      ...(inherited?.mergeRefresh ? { mergeRefresh: inherited.mergeRefresh } : {}) }
+      ...(integrationBindings ? { mergeRefresh: integrationBindings } : {}) }
   }
   return taskContinuationSource(prior, state) ? { prior, eventId: event.id, state } : null
 }
@@ -213,11 +244,37 @@ function mergeStopBuildSource(store: TridentRunStore, run: TridentRun, state: Bu
     if (!completed(build.request, build.snapshot.head) || !completed(review.request, c.head!)
       || !attempts.some(row => row.role === 'synthesis' && row.head_sha === c.head
         && row.step_id.endsWith(`:${c.round}:0`) && row.outcome === 'completed')) return null
-    const root = dirname(review.request.result.path)
+    const bindings = completedBuildBindings(store, run, build, c.head!)
+    if (!bindings || !equal(store.attempts(run.id), attempts)
+      || !equal(store.stageEvents(run.id), events) || !equal(store.get(run.id), run)) return null
+    return { state: { ...built!, checkpoint: { ...c, refreshBeforeReview: true } }, bindings }
+  } catch { return null }
+}
+
+type BuildRecovery = NonNullable<NonNullable<ResumeCheckpoint['pending']>['recovery']>
+
+/** Authenticate the paid worker's input policy and completed artifact before
+ * reusing implementation. Both merge-stop and integrated-FIX retries share it. */
+function completedBuildBindings(store: TridentRunStore, run: TridentRun, build: BuildRecovery,
+  producedHead: string): ProofFixBindings | null {
+  try {
+    const events = store.stageEvents(run.id)
+    const attempts = store.attempts(run.id)
+    const request = build.request
+    const worker = build.inputs.workers[request.role]
+    if (!worker || !['build', 'fix'].includes(request.role)
+      || !equal(request, { ...worker.request, run_id: run.id, step_id: request.step_id,
+        role: request.role, needs_approval_decision: false })
+      || !attempts.some(row => row.step_id === request.step_id && row.run_id === run.id
+        && row.role === request.role && row.head_sha === build.snapshot.head && row.review_seat === null
+        && row.provider === worker.provider && row.resolved_model === request.model_id
+        && row.attempt_id === 'dispatch' && row.outcome === 'completed' && row.ended_at !== null
+        && row.prepared_at !== null && row.started_at !== null)) return null
+    const root = dirname(request.result.path)
     if (basename(root) !== encodeURIComponent(run.id)) return null
     const evidence = evidenceReader()
     evidence.directory(root)
-    const bindings: ProofFixBindings = { workers: review.inputs.workers, briefs: {} }
+    const bindings: ProofFixBindings = { workers: build.inputs.workers, briefs: {} }
     for (const role of ['plan', 'build', 'review', 'fix'] as const) {
       const worker = bindings.workers[role]
       if (!worker) return null
@@ -229,19 +286,41 @@ function mergeStopBuildSource(store: TridentRunStore, run: TridentRun, state: Bu
         || briefIntegrity(hosted) !== worker.request.brief.integrity) return null
       bindings.briefs[role] = brief
     }
-    const request = build.request
     const context = JSON.parse(evidence.read(`${request.brief.path}.context.json`))
     const result = JSON.parse(evidence.read(request.result.path))
     const payload = validateTrailer('forge', result?.result?.payload)
     if (request.run_id !== run.id || dirname(request.result.path) !== root
       || !equal(context.request, request) || !equal(context.snapshot, build.snapshot)
       || result.kind !== 'completed' || result.schema !== 'project-build' || result.run_id !== run.id
-      || result.step_id !== request.step_id || result.result.head !== c.head || !payload.ok
-      || payload.value.commitSha !== c.head || payload.value.branch !== run.branch
+      || result.step_id !== request.step_id || result.result.head !== producedHead || !payload.ok
+      || payload.value.commitSha !== producedHead || payload.value.branch !== run.branch
       || payload.value.worktreePath !== request.cwd || payload.value.deviatedFromSpec === true) return null
     if (!evidence.stable() || !equal(store.attempts(run.id), attempts)
       || !equal(store.stageEvents(run.id), events) || !equal(store.get(run.id), run)) return null
-    return { state: { ...built!, checkpoint: { ...c, refreshBeforeReview: true } }, bindings }
+    return bindings
+  } catch { return null }
+}
+
+function integratedFixBindings(store: TridentRunStore, run: TridentRun, state: BuildModeState): ProofFixBindings | null {
+  try {
+    const c = state.checkpoint
+    const integration = c.baseIntegration
+    if (!integration || c.stage !== 'fixed' || c.pending !== undefined || c.reviewStop !== undefined
+      || c.remainingTasks !== 0 || c.head !== integration.integratedHead) return null
+    const modes = store.stageEvents(run.id).filter(event => event.stage === 'build-mode-state')
+    if (modes.length < 2) return null
+    const prior = parseBuildModeState(modes.at(-2)!.meta, run, true)
+    const before = prior.checkpoint
+    const recovery = before.pending?.recovery
+    if (!recovery || before.pending?.phase !== 'fix' || before.stage !== 'built' || !before.refreshBeforeReview
+      || before.head !== integration.head || recovery.snapshot.head !== integration.head
+      || recovery.round !== before.round || c.round !== before.round + 1 || prior.iteration !== state.iteration
+      || recovery.request.step_id !== before.pending.step_id || recovery.request.role !== 'fix'
+      || !equal(before.baseDrift, { head: integration.head, base: integration.base,
+        baseHead: integration.baseHead, overlap: integration.overlap,
+        ...(integration.previousBaseHead ? { previousBaseHead: integration.previousBaseHead } : {}) })
+      || recovery.snapshot.pr?.number !== integration.pr) return null
+    return completedBuildBindings(store, run, recovery, integration.integratedHead)
   } catch { return null }
 }
 

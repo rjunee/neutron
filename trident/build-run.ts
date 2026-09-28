@@ -39,7 +39,12 @@ export interface BuildSnapshot {
 }
 export type Measurement = { kind: 'known'; value: BuildSnapshot } | { kind: 'unknown'; detail: string }
 /** Positive host observation; a refusal remains a refusal until fresh work is reviewed. */
-export interface BaseDriftRefresh { head: string; base: string; baseHead: string; overlap: readonly string[] }
+export interface BaseDriftRefresh {
+  head: string; base: string; baseHead: string; overlap: readonly string[]
+  /** A host-measured forward advance beyond an already integrated base. */
+  previousBaseHead?: string
+}
+export interface BaseIntegration extends BaseDriftRefresh { integratedHead: string; pr: number }
 export type GateResult = { kind: 'allow' } | { kind: 'blocked'; on: string; reviewStop?: ReviewStop; baseDrift?: BaseDriftRefresh } | { kind: 'unknown'; detail: string }
 export type NominationRepair = { kind: 'repair-nomination'; finding: string }
 export type PublicationGateResult = GateResult | NominationRepair
@@ -86,6 +91,8 @@ export interface ResumeCheckpoint {
   refreshBeforeReview?: boolean | undefined
   /** Retained through an armed base-integration fix, including crash recovery. */
   baseDrift?: BaseDriftRefresh | undefined
+  /** Host-observed base integrated by a settled fix; never changes the launch pin. */
+  baseIntegration?: BaseIntegration | undefined
   /** Completed intermediate task: spend is durable before the Git ledger write. */
   handoff?: TaskHandoffIntent | undefined
   findings: readonly { kind: 'code' | 'lane'; actionable: boolean; text: string }[]
@@ -286,7 +293,10 @@ const fullOid = (head: string | null): head is string => typeof head === 'string
 function validBaseDrift(value: BaseDriftRefresh | undefined, head: string | null): value is BaseDriftRefresh {
   return !!value && value.head === head && fullOid(value.head) && fullOid(value.baseHead)
     && typeof value.base === 'string' && value.base.trim().length > 0
-    && Array.isArray(value.overlap) && value.overlap.length > 0
+    && (value.previousBaseHead === undefined
+      || (fullOid(value.previousBaseHead) && value.previousBaseHead !== value.baseHead))
+    && Array.isArray(value.overlap) && (value.overlap.length > 0
+      || (fullOid(value.previousBaseHead ?? null) && value.previousBaseHead !== value.baseHead))
     && value.overlap.every(path => typeof path === 'string' && path.length > 0)
 }
 const uncheckedLine = /^\s*- \[ \]\s+/
@@ -799,6 +809,9 @@ export async function buildRun(input: BuildRunInput, deps: BuildRunDeps, signal:
         await checkpoint({ head: measured.head, stage: role === 'fix' ? 'fixed' : 'built',
           round: role === 'fix' ? round + 1 : Math.max(durable.round, 1, round + 1), pending: undefined, findings: [],
           ...(role === 'fix' ? { baseDrift: undefined, refreshBeforeReview: undefined } : {}),
+          ...(role === 'fix' && durable.baseDrift && measured.pr ? {
+            baseIntegration: { ...durable.baseDrift, integratedHead: measured.head, pr: measured.pr.number },
+          } : {}),
           ...(role === 'build' ? { remainingTasks: strategy === 'task_sequence' ? plan!.remainingTasks : 0,
             handoff: strategy === 'task_sequence' && plan!.remainingTasks > 0
               ? { iteration: taskIteration, builtHead: measured.head, body: tickTopTask(plan!.implementationPlan) } : undefined } : {}) })
@@ -991,7 +1004,7 @@ export async function buildRun(input: BuildRunInput, deps: BuildRunDeps, signal:
       const fix = await work('fix', round)
       return 'stop' in fix ? fix.stop : null
     }
-    async function publishCandidate(): Promise<BuildRunOutcome | NominationRepair | null> {
+    async function publishCandidate(): Promise<BuildRunOutcome | NominationRepair | { kind: 'refresh-base'; gate: Extract<GateResult, { kind: 'blocked' }> } | null> {
       const candidate = snapshot
       phase = 'publish'
       step_id = null
@@ -1009,6 +1022,7 @@ export async function buildRun(input: BuildRunInput, deps: BuildRunDeps, signal:
       if (!diff.allow) return blocked(diff.reason)
       const assessment = await deps.publishGate(snapshot, input.merge_mode)
       if (assessment.kind === 'repair-nomination') return assessment
+      if (assessment.kind === 'blocked' && assessment.baseDrift) return { kind: 'refresh-base', gate: assessment }
       const publishGate = gateStop(assessment)
       if (publishGate) return publishGate
       const beforePublish = await deps.measure()
@@ -1076,6 +1090,11 @@ export async function buildRun(input: BuildRunInput, deps: BuildRunDeps, signal:
         if (!fullOid(snapshot.head) || !snapshot.diff.trim()) return unknown('Review requires a full branch head and nonempty diff artifact')
         if (!local) {
           const stop = await publishCandidate()
+          if (stop?.kind === 'refresh-base') {
+            const refusal = await refreshBase(stop.gate, round)
+            if (refusal) return refusal
+            continue
+          }
           if (stop?.kind === 'repair-nomination') {
             const refusal = await repairNomination(stop, round)
             if (refusal) return refusal
@@ -1085,10 +1104,21 @@ export async function buildRun(input: BuildRunInput, deps: BuildRunDeps, signal:
           phase = 'review'
         }
         if (!deps.reviewReadiness) return unknown('Review readiness host is missing')
-        const readiness = gateStop(await deps.reviewReadiness(snapshot, signal, input.merge_mode))
+        // Independent host validation may overlap, but both operations must settle
+        // before dispatch or cleanup. In particular, a thrown readiness observer
+        // cannot let cleanup remove the worktree underneath a running suite.
+        const [readinessResult, suiteResult] = await Promise.allSettled([
+          Promise.resolve().then(() => deps.reviewReadiness!(snapshot, signal, input.merge_mode)),
+          Promise.resolve().then(() => deps.reviewSuite
+            ? deps.reviewSuite(snapshot, round)
+            : { kind: 'unknown' as const, detail: 'Review suite host is missing' }),
+        ])
+        // Keep the former serial error precedence after draining both owners.
+        if (readinessResult.status === 'rejected') throw readinessResult.reason
+        const readiness = gateStop(readinessResult.value)
         if (readiness) return readiness
-        if (!deps.reviewSuite) return unknown('Review suite host is missing')
-        const suite = await deps.reviewSuite(snapshot, round)
+        if (suiteResult.status === 'rejected') throw suiteResult.reason
+        const suite = suiteResult.value
         if (suite.kind === 'unknown') return unknown(suite.detail)
         if (!deps.reviewCi) return unknown('Review CI host is missing')
         const ciBefore = await deps.reviewCi(snapshot, input.merge_mode, signal)
@@ -1181,6 +1211,12 @@ export async function buildRun(input: BuildRunInput, deps: BuildRunDeps, signal:
 
       if (local || approved) {
         const stop = await publishCandidate()
+        if (stop?.kind === 'refresh-base') {
+          const refusal = await refreshBase(stop.gate, firstRound)
+          if (refusal) return refusal
+          firstRound++
+          continue
+        }
         if (stop?.kind === 'repair-nomination') {
           const refusal = await repairNomination(stop, firstRound)
           if (refusal) return refusal

@@ -18,6 +18,8 @@ import { ciReadinessForHead, type CiRunObservation } from './ci-readiness.ts'
 import { runLeakGatePreflight } from './leak-preflight.ts'
 import { assessMergeDiff, diffBaseRef, localMergeReadiness, refResolves } from './merge.ts'
 import { mutationFailureSummary, runMutationProofGate, type MutationGateInput } from './mutation-prover.ts'
+import { mutationBaseReadiness } from './gates/mutation-base.ts'
+import type { BaseIntegration } from './build-run.ts'
 
 type Workers = BuildRunInput['workers']
 type Role = keyof Workers
@@ -35,6 +37,7 @@ export interface BuildHostOptions {
   mutation: Omit<MutationGateInput, 'expected_head' | 'claim'> & {
     run: MutationGateInput['run'] & { max_rounds?: number | undefined }
     readClaim(snapshot: BuildSnapshot): Promise<MutationGateInput['claim']>
+    readBaseIntegration?(): BaseIntegration | undefined
   }
   /** Persisted previous review pin; explicit null for a fresh first round. */
   reviewed_head: string | null
@@ -177,12 +180,31 @@ export function createBuildHost(options: BuildHostOptions): { deps: BuildRunDeps
     reviewGate: async (payload, observation, snapshot, round, replansUsed, recordProgress) => decideReviewPanel(payload, observation, snapshot, round, options.mutation.run.id, replansUsed, recordProgress),
     async publishGate(snapshot, mergeMode) {
       const claim = await options.mutation.readClaim(snapshot)
-      // The launch pin owns the changed-file range. A stale local base branch
-      // includes unrelated upstream production changes in the mutation requirement.
-      // Keep the branch name for publication readiness, which checks the PR base.
-      const baseRef = await diffBaseRef(options.mutation.base_branch, options.leak.base_sha,
+      let integration: BaseIntegration | undefined
+      try { integration = options.mutation.readBaseIntegration?.() }
+      catch { return unknown('Integrated mutation base checkpoint is unreadable') }
+      const checkIntegration = (allowRefresh = false) => mutationBaseReadiness(options.mutation.run_host,
+        options.mutation.run.repo_path, options.mutation.run.branch ?? `trident/${options.mutation.run.slug}`,
+        options.mutation.base_branch, snapshot, integration!, allowRefresh)
+      if (integration !== undefined) {
+        if (mergeMode === 'local') return unknown('A local run cannot use PR base integration provenance')
+        const provenance = await checkIntegration(true)
+        if (provenance.kind !== 'allow') return provenance
+      }
+      // Only the observed, ancestry-verified PR integration may replace the
+      // launch pin for mutation scope. All other release gates retain that pin.
+      const baseRef = integration?.baseHead ?? await diffBaseRef(options.mutation.base_branch, options.leak.base_sha,
         ref => refResolves(options.mutation.run_host, options.mutation.run.repo_path, ref))
       const proof = await runMutationProofGate({ ...options.mutation, base_branch: baseRef, claim, expected_head: snapshot.head })
+      if (integration !== undefined) {
+        try {
+          if (JSON.stringify(options.mutation.readBaseIntegration?.()) !== JSON.stringify(integration)) {
+            return unknown('Integrated mutation base checkpoint changed during proof')
+          }
+        } catch { return unknown('Integrated mutation base checkpoint is unreadable') }
+        const provenance = await checkIntegration()
+        if (provenance.kind !== 'allow') return provenance
+      }
       if (!proof.ok) return proof.repair
         ? { kind: 'repair-nomination', finding: `Mutation nomination is invalid: ${proof.repair.detail}. Supply a corrected nomination for the repaired commit; the mutation prover must still pass.` }
         : { kind: 'blocked', on: [proof.reason, mutationFailureSummary(proof.evidence)].filter(Boolean).join('; ') }

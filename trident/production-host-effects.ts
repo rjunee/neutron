@@ -16,7 +16,7 @@ import type { TridentRun, TridentRunStore } from './store.ts'
 import { isTerminalPhase } from './state-machine.ts'
 import { TRIDENT_SCRIPT_DIR } from './script-dir.ts'
 import { BUILDER_COMMIT_RECOVERY, recoverBuilderCommit } from './recover-builder-commit.ts'
-import { parseBuildModeState, readBuildRetrySource, type BuildModeState } from './build-mode-state.ts'
+import { readBuildModeState, readBuildRetrySource, type BuildModeState } from './build-mode-state.ts'
 import { isPlainBranchName } from './mutation-prover.ts'
 import { readPublicationResponse, recordPublicationResponse } from './project-publication-receipt.ts'
 
@@ -285,7 +285,7 @@ export function createProductionHostEffects(options: ProductionHostOptions) {
     row()
     const event = latestModeEvent()
     if (!event) return null
-    const state = parseBuildModeState(event.meta, row())
+    const state = readBuildModeState(store.stageEvents(runId), row())!
     if (state.checkpoint.handoff && !store.taskHandoffSpendMatches(runId, state.checkpoint.handoff.iteration)) {
       throw new Error('Task ledger intent no longer matches run or card spend')
     }
@@ -692,5 +692,6 @@ export function createProductionHostEffects(options: ProductionHostOptions) {
     publish: snapshot => requireAllow(publishChecked(snapshot)),
     merge: snapshot => requireAllow(mergeChecked(snapshot)),
   }
-  return { effects, modes, taskIteration, admission, observeCi, publishChecked, mergeChecked, cleanup }
+  return { effects, modes, taskIteration, admission, observeCi, publishChecked, mergeChecked, cleanup,
+    readBaseIntegration: () => readModeState()?.checkpoint.baseIntegration }
 }

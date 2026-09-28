@@ -2623,14 +2623,31 @@ test.each(['current', 'historical', 'historical after fix'] as const)('a %s sett
   expect(standaloneReview(f.world).measuredHead).toBe(String(checkpoint.head))
 }, 300_000)
 
-for (const scenario of ['in-run', 'historical', 'ceiling', 'model', 'policy', 'brief', 'binding-chain'] as const)
+for (const scenario of ['in-run', 'production', 'historical', 'historical-fixed', 'historical-fixed-model', 'historical-fixed-policy', 'historical-fixed-brief', 'historical-fixed-chain', 'historical-fixed-overlap', 'historical-fixed-disjoint', 'historical-fixed-unknown-base', 'ceiling', 'model', 'policy', 'brief', 'binding-chain'] as const)
 test(`base drift refresh retains terminal task work and renews release evidence: ${scenario}`, async () => {
-  const historical = scenario !== 'in-run'
+  const historicalFixed = scenario.startsWith('historical-fixed')
+  const advanced = scenario === 'historical-fixed-overlap' || scenario === 'historical-fixed-disjoint'
+  const historical = scenario !== 'in-run' && scenario !== 'production' && !historicalFixed
   const task = 'Record a note and preserve completed work across an overlapping base advance'
   const f = await fixture({ dispatchTask: task, taskSequence: true, maxRounds: 3 })
+  f.world.extraBuildFiles = { 'tests/candidate.test.ts': "import { test, expect } from 'bun:test'\ntest('candidate', () => expect(true).toBe(true))\n" }
   await f.store.update(f.row.id, { task_iteration: 2 })
   f.input.run = f.store.get(f.row.id)!
   const host = await createProjectBuildHost(await f.prepare())
+  const launchBase = f.store.get(f.row.id)!.base_sha
+  if (historicalFixed) {
+    // The deployed producer persisted the settled FIX, but discarded baseDrift.
+    const append = f.store.appendBuildModeState.bind(f.store)
+    spyOn(f.store, 'appendBuildModeState').mockImplementation((id, version, meta) => {
+      const state = JSON.parse(meta)
+      delete state.checkpoint.baseIntegration
+      return append(id, version, JSON.stringify(state))
+    })
+    const proof = host.deps.publishGate
+    host.deps.publishGate = async (...args) => lastCheckpoint(f).stage === 'fixed'
+      ? { kind: 'blocked', on: 'Legacy mutation range includes upstream production' }
+      : proof(...args)
+  }
   const mergeGate = host.deps.mergeGate
   let oldHead = ''
   let baseHead = ''
@@ -2640,11 +2657,14 @@ test(`base drift refresh retains terminal task work and renews release evidence:
       // The base and candidate changed the same file. The bounded worker must
       // preserve both sides, including a textual conflict in this small fixture.
       await writeFile(join(f.repo, 'NOTES.md'), 'changed seed\n')
-      await gitOut(f.context.runHost, f.repo, ['add', 'NOTES.md'])
+      // Upstream production belongs to the observed base, not this notes card.
+      await writeFile(join(f.repo, 'upstream.ts'), 'export const upstream = true\n')
+      await gitOut(f.context.runHost, f.repo, ['add', 'NOTES.md', 'upstream.ts'])
       await gitOut(f.context.runHost, f.repo, ['commit', '-m', 'test: advance overlapping base'])
       baseHead = await gitOut(f.context.runHost, f.repo, ['rev-parse', 'HEAD'])
       await gitOut(f.context.runHost, f.repo, ['push', 'origin', 'main'])
       f.world.integrateBase = baseHead
+      if (scenario === 'production') f.world.extraBuildFiles = { ...f.world.extraBuildFiles, 'candidate.ts': 'export const candidate = true\n' }
     }
     const gate = await mergeGate(...args)
     // Reproduce the deployed host's unstructured G108 refusal. This retains
@@ -2652,6 +2672,87 @@ test(`base drift refresh retains terminal task work and renews release evidence:
     return historical && gate.kind === 'blocked' ? { kind: 'blocked', on: gate.on } : gate
   }
   let outcome = await host.run({ mode: 'implementation', start: 'fresh' }, new AbortController().signal)
+  if (historicalFixed) {
+    expect(outcome).toMatchObject({ kind: 'blocked', phase: 'publish' })
+    const completedHead = String(lastCheckpoint(f).head)
+    expect(lastCheckpoint(f)).toMatchObject({ stage: 'fixed', round: 2, remainingTasks: 0 })
+    expect(lastCheckpoint(f).baseIntegration).toBeUndefined()
+    await f.store.update(f.row.id, { phase: 'failed', worktree: null,
+      inner_result: projectBuildResult(outcome, { ...f.input, run: f.store.get(f.row.id)! }) })
+    const prior = f.store.get(f.row.id)!
+    expect(retryModeSource(f.store, prior)?.state.checkpoint.baseIntegration).toMatchObject({
+      head: oldHead, baseHead, integratedHead: completedHead,
+    })
+    const history = f.store.stageEvents(prior.id)
+    for (const fault of ['observation', 'reservation', 'snapshot', 'round', 'identity'] as const) {
+      const changed = structuredClone(history)
+      const event = changed.filter(row => row.stage === 'build-mode-state').at(-2)!
+      const meta = JSON.parse(event.meta!)
+      if (fault === 'observation') delete meta.checkpoint.baseDrift
+      else if (fault === 'reservation') delete meta.checkpoint.pending
+      else if (fault === 'snapshot') meta.checkpoint.pending.recovery.snapshot.head = 'f'.repeat(40)
+      else if (fault === 'round') meta.checkpoint.round++
+      else meta.runId = 'foreign'
+      event.meta = JSON.stringify(meta)
+      const observed = spyOn(f.store, 'stageEvents').mockReturnValue(changed)
+      try {
+        if (fault === 'identity') expect(() => retryModeSource(f.store, prior)).toThrow()
+        else expect(retryModeSource(f.store, prior)?.state.checkpoint.baseIntegration).toBeUndefined()
+      } finally { observed.mockRestore() }
+    }
+    // The outer preservation harvest publishes this settled head to the same PR.
+    await gitOut(f.context.runHost, f.repo, ['push', 'origin', `${completedHead}:refs/heads/${prior.branch}`])
+    const dispatched = await dispatchBoardBoundBuild({ task, board_item_id: 'integrated-retry' }, {
+      store: f.store, projectAdmission: fixtureDispatchAdmission(f.db), project_slug: 'project', repo_path: f.repo,
+      board: { get: () => ({ id: 'integrated-retry', title: task, design_doc_ref: null, linked_run_id: prior.id }), attachRun: async () => {} },
+      resolveBuildRepo: async () => f.repo, resolveMergeMode: async () => 'pr', max_rounds: 3,
+    })
+    expect(dispatched.ok, JSON.stringify(dispatched)).toBe(true)
+    if (!dispatched.ok) return
+    expect(dispatched.run.base_sha).toBe(launchBase)
+    expect(dispatched.run.inner_checkpoint_head).toBe(completedHead)
+    // New hosts retain the recovered observation under the retry's own identity.
+    ;(f.store.appendBuildModeState as ReturnType<typeof spyOn>).mockRestore()
+    f.input.run = dispatched.run
+    if (scenario === 'historical-fixed-model' || scenario === 'historical-fixed-policy' || scenario === 'historical-fixed-brief') {
+      if (scenario === 'historical-fixed-model') f.input.phase_models = { ...f.input.phase_models, build: { model: 'sonnet' } }
+      else if (scenario === 'historical-fixed-policy') f.input.phase_models = { ...f.input.phase_models, build: { model: 'opus', effort: 'low' } }
+      else f.input.reflection_context = 'Changed implementation instructions.'
+      await expect(f.prepare()).rejects.toThrow('model, authority or brief changed')
+      return
+    }
+    if (advanced) {
+      const file = scenario === 'historical-fixed-overlap' ? 'NOTES.md' : 'new-upstream.ts'
+      await writeFile(join(f.repo, file), scenario === 'historical-fixed-overlap' ? 'changed seed\nsecond base advance\n' : 'export const second = true\n')
+      await gitOut(f.context.runHost, f.repo, ['add', file])
+      await gitOut(f.context.runHost, f.repo, ['commit', '-m', 'test: advance base after settled integration'])
+      baseHead = await gitOut(f.context.runHost, f.repo, ['rev-parse', 'HEAD'])
+      await gitOut(f.context.runHost, f.repo, ['push', 'origin', 'main'])
+      f.world.integrateBase = baseHead
+    }
+    if (scenario === 'historical-fixed-unknown-base') {
+      const run = f.context.runHost
+      f.context.runHost = async (argv, ...args) => {
+        const result = await run(argv, ...args)
+        if (argv[0] === 'gh' && argv.some(arg => arg.includes('baseRefOid'))) {
+          const value = JSON.parse(result.stdout)
+          delete value.baseRefOid
+          return { ...result, stdout: JSON.stringify(value) }
+        }
+        return result
+      }
+    }
+    const retry = await createProjectBuildHost(await f.prepare())
+    if (scenario === 'historical-fixed-chain') {
+      await retry.deps.modes!.loadResume()
+      await f.store.update(dispatched.run.id, { phase: 'failed' })
+      expect(retryModeSource(f.store, f.store.get(dispatched.run.id)!)?.mergeRefresh).toBeDefined()
+      expect(retryModeSource(f.store, f.store.get(dispatched.run.id)!)?.mergeRefresh)
+        .toEqual(retryModeSource(f.store, prior)?.mergeRefresh)
+      return
+    }
+    outcome = await retry.run({ mode: 'implementation', start: 'resume' }, new AbortController().signal)
+  }
   if (historical) {
     expect(outcome).toMatchObject({ kind: 'blocked', phase: 'merge' })
     expect(lastCheckpoint(f)).toMatchObject({ stage: 'approved', round: 1, remainingTasks: 0, head: oldHead })
@@ -2728,18 +2829,35 @@ test(`base drift refresh retains terminal task work and renews release evidence:
     expect(f.world.dispatches.filter(call => call.role === 'fix')).toEqual([])
     return
   }
+  if (scenario === 'production') {
+    expect(outcome).toMatchObject({ kind: 'blocked', phase: 'publish', on: expect.stringContaining('candidate.ts') })
+    expect(f.github.prs.some(pr => pr.state === 'MERGED')).toBe(false)
+    expect(f.world.dispatches.filter(call => call.role === 'fix')).toHaveLength(1)
+    return
+  }
+  if (scenario === 'historical-fixed-unknown-base') {
+    expect(outcome).toMatchObject({ kind: 'unknown', phase: 'publish' })
+    expect(f.world.dispatches.filter(call => call.role === 'fix')).toHaveLength(1)
+    expect(f.github.prs.some(pr => pr.state === 'MERGED')).toBe(false)
+    return
+  }
   expect(outcome.kind, why(f, outcome)).toBe('merged')
+  expect(f.store.get(f.row.id)!.base_sha).toBe(launchBase)
   expect(f.world.dispatches.filter(call => call.role === 'plan')).toHaveLength(1)
   expect(f.world.dispatches.filter(call => call.role === 'build')).toHaveLength(1)
-  expect(f.world.dispatches.filter(call => call.role === 'fix')).toHaveLength(1)
+  expect(f.world.dispatches.filter(call => call.role === 'fix')).toHaveLength(advanced ? 2 : 1)
   const reviews = f.world.dispatches.filter(call => call.role === 'review' && call.schema === 'project-review')
   expect(reviews).toHaveLength(2)
   const newHead = reviews[1]!.measuredHead!
   expect(newHead).not.toBe(oldHead)
-  expect(reviews[1]!.step_id).toContain(':review:2:')
+  expect(reviews[1]!.step_id).toContain(advanced ? ':review:3:' : ':review:2:')
   for (const ancestor of [oldHead, baseHead]) expect((await f.context.runHost(
     ['git', '-C', f.repo, 'merge-base', '--is-ancestor', ancestor, newHead], f.repo)).ok).toBe(true)
   expect(await gitOut(f.context.runHost, f.repo, ['show', `${newHead}:NOTES.md`])).toContain('changed seed')
+  expect(await gitOut(f.context.runHost, f.repo, ['diff', '--name-only', `${launchBase}...${newHead}`])).toContain('upstream.ts')
+  const changed = await gitOut(f.context.runHost, f.repo, ['diff', '--name-only', `${baseHead}...${newHead}`])
+  expect(changed).toContain('tests/candidate.test.ts')
+  expect(changed).not.toContain('upstream.ts')
 }, 120_000)
 
 for (const retryCase of ['healthy', 'still-red', 'ceiling', 'model', 'policy', 'brief'] as const)
@@ -4732,6 +4850,90 @@ test.each(['approve', 'standalone', 'synthesis', 'missing-seat'] as const)('all-
   expect(f.world.dispatches.filter(call => call.role === 'synthesis')).toHaveLength(verdict === 'missing-seat' ? 0 : 1)
   if (verdict !== 'approve') expect(f.github.prs.every(pr => pr.state === 'OPEN')).toBe(true)
 }, 30_000)
+
+for (const [first, fault] of [
+  ['readiness', 'none'], ['suite', 'none'],
+  ['readiness', 'readiness-unknown'], ['readiness', 'readiness-throw'],
+  ['suite', 'suite-unknown'], ['suite', 'suite-throw'],
+  ['suite', 'red'], ['suite', 'moved-head'],
+] as const)
+test(`consuming host admission overlaps without early dispatch or cleanup: ${first} first, ${fault}`, async () => {
+  const producers: string[] = [], started: string[] = [], finished: string[] = []
+  const f = await fixture({ suiteExit: fault === 'red' ? 1 : 0,
+    reviewChild: async (_request, seat) => { producers.push(seat) } })
+  f.input.phase_models = { ...f.input.phase_models, review_rubric: { model: 'fable' } }
+  const releases = { readiness: () => {}, suite: () => {} }
+  const held = (name: keyof typeof releases) => new Promise<void>(resolve => { releases[name] = resolve })
+  const readinessHold = held('readiness'), suiteHold = held('suite')
+  let bothStarted!: () => void
+  const entered = new Promise<void>(resolve => { bothStarted = resolve })
+  const start = (name: string) => { started.push(name); if (started.length === 2) bothStarted() }
+  const runSuite = f.context.runSuite!, runHost = f.context.runHost
+  let suiteCalls = 0, cleanupCalls = 0
+  f.context.runHost = Object.assign(async (...args: Parameters<typeof runHost>) => {
+    if (args[0].some(value => value.endsWith('/worktree-cleanup.sh'))) cleanupCalls++
+    return runHost(...args)
+  }, { writesDiffOutput: true as const })
+  f.context.runSuite = async (...args) => {
+    suiteCalls++
+    if (suiteCalls === 1) {
+      start('suite'); await suiteHold; finished.push('suite')
+      if (fault === 'suite-throw') throw Error('fixture suite acquisition failed')
+      if (fault === 'suite-unknown') return { ok: false, exit_code: 1, stdout: '', stderr: '', timed_out: true }
+      if (fault === 'moved-head') {
+        expect((await spawnCapture(['git', 'commit', '--allow-empty', '-m', 'test: move review candidate'],
+          f.store.get(f.row.id)!.worktree!)).ok).toBe(true)
+      }
+    }
+    return runSuite(...args)
+  }
+  const host = await createProjectBuildHost(await f.prepare())
+  const readiness = host.deps.reviewReadiness!
+  let readinessCalls = 0
+  host.deps.reviewReadiness = async (...args) => {
+    if (++readinessCalls === 1) {
+      start('readiness'); await readinessHold; finished.push('readiness')
+      if (fault === 'readiness-throw') throw Error('fixture readiness acquisition failed')
+      if (fault === 'readiness-unknown') return { kind: 'unknown', detail: 'fixture readiness unavailable' }
+    }
+    return readiness(...args)
+  }
+  let settled = false, timer: ReturnType<typeof setTimeout> | undefined
+  const running = host.run({ mode: 'implementation', start: 'fresh' }, new AbortController().signal)
+    .then(outcome => { settled = true; return outcome })
+  try {
+    await Promise.race([entered, new Promise<never>((_, reject) => {
+      timer = setTimeout(() => reject(Error(`Host checks did not overlap: ${started}`)), 10_000)
+    })])
+    releases[first]()
+    await until(() => finished.includes(first) || undefined)
+    // Allow the released observer to propagate an exception/refusal to the driver.
+    await new Promise(resolve => setTimeout(resolve, 0))
+    expect(settled).toBe(false)
+    expect(cleanupCalls).toBe(0)
+    expect(producers).toEqual([])
+    expect(f.world.dispatches.map(call => call.role)).toEqual(['plan', 'build'])
+  } finally {
+    clearTimeout(timer); releases.readiness(); releases.suite(); await running
+  }
+  const outcome = await running
+  expect(cleanupCalls).toBe(1)
+  if (fault === 'none') {
+    expect(outcome.kind, why(f, outcome)).toBe('merged')
+    expect([...producers].sort()).toEqual(['review_adversarial', 'review_rubric', 'standalone'])
+    expect(suiteCalls).toBe(1) // Publication retains the existing receipt.
+  } else {
+    expect(outcome.kind, why(f, outcome)).toBe(fault === 'red' ? 'blocked' : 'unknown')
+    expect(f.github.prs.every(pr => pr.state === 'OPEN')).toBe(true)
+    if (fault === 'red') {
+      expect(producers.length).toBeGreaterThan(0) // Red proof enters review with its veto intact.
+      expect(outcome).toMatchObject({ on: expect.stringContaining('Review') })
+    } else {
+      expect(producers).toEqual([])
+      if (fault === 'moved-head') expect(outcome).toMatchObject({ detail: 'Suite input identity is unavailable after host observation' })
+    }
+  }
+}, 60_000)
 
 test.each(['readiness', 'ci', 'artifact'] as const)('unavailable admission prevents every review producer in the consuming host: %s', async stop => {
   const started: string[] = []
