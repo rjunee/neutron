@@ -131,6 +131,17 @@ spans carry unknown tokens unless a provider actually attributed usage.
       binding (or exact successful GitHub PR evidence), and completed tasks need
       exact session/turn PR and phase bindings.
       Verify: `bun test scripts/build-timeline-codex-discover.test.ts`.
+- [ ] Explicit registered sources can be collected without reading unrelated
+      dated history. A bounded streaming backfill preserves historical native
+      context; restartable private checkpoints read only appended bytes, defer
+      unfinished lines, and replay historical receipts under that source's config.
+      Unchanged sources read zero rollout bytes. Foreign checkpoints, inode
+      replacement, truncation, same-size rewrite, aliases and bounds violations
+      refuse; valid appends remain readable. Checkpoint journal and cursor persist
+      atomically together in the private consumer; crashes cannot lose receipts.
+      Registered-source coverage does not claim to inventory unregistered history.
+      Verify: `bun test scripts/build-timeline-codex-discover.test.ts` and the
+      deploying consumer's durable checkpoint/registration tests.
 - [ ] Page/fragment/JSON deny anonymous and incorrect credentials and serve valid
       credentials. Missing credentials refuse startup; read-only SQLite does not
       migrate or write workflow state. Browser refresh is 30 seconds, with stale

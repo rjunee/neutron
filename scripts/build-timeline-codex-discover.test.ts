@@ -4,7 +4,7 @@ import { tmpdir } from 'node:os'
 import { join } from 'node:path'
 import { combineTimelineSources } from '@neutronai/trident/build-timeline-catalogue.ts'
 import { createTimelineHandler } from './build-timeline-server.ts'
-import { discoverCodexRollouts, importCodexSessionTree, importDiscoveredCodexRollouts, readDiscoveredRollout } from './build-timeline-codex-discover.ts'
+import { discoverCodexRollouts, importRegisteredCodexRollout, importCodexSessionTree, importDiscoveredCodexRollouts, readDiscoveredRollout } from './build-timeline-codex-discover.ts'
 import type { CodexImportOptions } from './build-timeline-codex-import.ts'
 
 const temporary: string[] = []
@@ -211,4 +211,129 @@ test('a scan refuses more than its configured rollout count', async () => {
   const { root, day } = await fixture()
   await Promise.all(Array.from({ length: 257 }, (_, index) => writeFile(join(day, `rollout-${index}.jsonl`), '{}\n')))
   await expect(discoverCodexRollouts(root)).rejects.toThrow('bounds')
+})
+
+test('registered discovery reaches the dashboard despite unrelated history exceeding both scan limits', async () => {
+  const { root, day, options, rollout, home } = await fixture()
+  await Promise.all(Array.from({ length: 257 }, (_, index) => writeFile(join(day, `rollout-history-${index}.jsonl`), '{}\n')))
+  const oversized = join(day, 'rollout-history-large.jsonl')
+  await writeFile(oversized, '')
+  await truncate(oversized, 1024 * 1024 * 1024 + 1)
+  const selected = join(day, 'rollout-selected.jsonl')
+  await writeFile(selected, rollout('selected', 'exec-selected'))
+  const result = await importRegisteredCodexRollout(root, selected, options)
+  expect(result.coverage).toMatchObject({ emitted: 1, unbound: 0, incomplete: 0 })
+  const snapshot = combineTimelineSources({ observedAt: 10000, repositories: [] }, result.observations, [], 10000)
+  const handler = createTimelineHandler({ username: 'viewer', password: 'fixture', read: () => snapshot })
+  const response = await handler(new Request('http://localhost/api/timeline', {
+    headers: { authorization: `Basic ${Buffer.from('viewer:fixture').toString('base64')}` },
+  }))
+  const body = await response.text()
+  expect(response.status).toBe(200)
+  expect(JSON.parse(body).cards[0].segments).toHaveLength(1)
+  expect(body).not.toContain(home)
+  expect(body).not.toContain('PRIVATE OUTPUT')
+  const unbound = await importRegisteredCodexRollout(root, selected, { ...options, bindings: [] }, result.checkpoint)
+  expect(unbound).toMatchObject({ observations: [], coverage: { unbound: 1 } })
+  expect(unbound.scan.readBytes).toBe(0)
+  await expect(importRegisteredCodexRollout(root, oversized, options)).rejects.toThrow('bounds')
+})
+
+test('registered discovery rejects outside, non-dated, noncanonical and symlink aliases', async () => {
+  const { root, day, home, rollout, options } = await fixture()
+  const selected = join(day, 'rollout-selected.jsonl')
+  await writeFile(selected, rollout('selected', 'exec-selected'))
+  expect((await importRegisteredCodexRollout(root, selected, options)).checkpoint.path).toBe(selected)
+  const outside = join(home, 'rollout-outside.jsonl')
+  await writeFile(outside, rollout('outside', 'exec-outside'))
+  const alias = join(day, 'rollout-alias.jsonl')
+  await symlink(selected, alias)
+  for (const path of [outside, `${day}/../28/rollout-selected.jsonl`, alias, 'rollout-selected.jsonl']) {
+    await expect(importRegisteredCodexRollout(root, path, options)).rejects.toThrow()
+  }
+  await symlink(day, join(root, '2026', '09', '29'))
+  await expect(importRegisteredCodexRollout(root, join(root, '2026', '09', '29', 'rollout-selected.jsonl'), options)).rejects.toThrow('Aliased')
+})
+
+test('registered snapshots retain append boundaries and reject replacement or rewrite', async () => {
+  const { root, day, options, rollout } = await fixture()
+  const path = join(day, 'rollout-live.jsonl'), original = rollout('thread-1', 'exec-1')
+  await writeFile(path, original)
+  const selected = await importRegisteredCodexRollout(root, path, options, undefined, async () => { await appendFile(path, '\n') })
+  expect(selected.scan.readBytes).toBe(Buffer.byteLength(original))
+  expect(selected.observations).toHaveLength(1)
+  expect((await importRegisteredCodexRollout(root, path, options, selected.checkpoint)).scan.readBytes).toBe(1)
+  await rename(path, join(day, 'moved.jsonl'))
+  await writeFile(path, original)
+  await expect(importRegisteredCodexRollout(root, path, options, selected.checkpoint)).rejects.toThrow('checkpoint')
+  await expect(importRegisteredCodexRollout(root, path, options, undefined, async () => {
+    await writeFile(path, original.replace('exec-1', 'exec-2'))
+  })).rejects.toThrow('changed during read')
+  await writeFile(path, '')
+  const empty = await importRegisteredCodexRollout(root, path, options)
+  expect(empty.coverage.incomplete).toBe(1)
+})
+
+test('checkpoint restart preserves historical turn context and only reads newly appended bytes', async () => {
+  const { root, day, options, rollout } = await fixture()
+  const path = join(day, 'rollout-live.jsonl')
+  const scoped = { ...options, turnBindings: [{ sessionId: 'thread-1', turnId: 'turn-1', phase: 'build' as const,
+    links: [{ repository: 'example/project', prNumber: 7 }] }] }
+  const usage = JSON.stringify({ type: 'token_usage_record', payload: { thread_id: 'thread-1', turn_id: 'turn-1',
+    turn_token_usage: { input_tokens: 25, output_tokens: 5, cached_input_tokens: 10 } } }) + '\n'
+  await writeFile(path, rollout('thread-1', 'exec-1') + usage)
+  const initial = await importRegisteredCodexRollout(root, path, scoped)
+  const checkpoint = JSON.parse(JSON.stringify(initial.checkpoint))
+  const task = JSON.stringify({ type: 'event_msg', payload: { type: 'task_complete', turn_id: 'turn-1', started_at: 1, completed_at: 9 } }) + '\n'
+  // An unfinished JSON line remains unread by the parser and resumes on restart.
+  await appendFile(path, task.slice(0, 20))
+  const partial = await importRegisteredCodexRollout(root, path, scoped, checkpoint)
+  expect(partial.scan).toMatchObject({ readBytes: 20, partial: true })
+  expect(partial.coverage.incomplete).toBe(1)
+  expect(partial.checkpoint.offset).toBe(checkpoint.offset + 20)
+  const unchangedPartial = await importRegisteredCodexRollout(root, path, scoped, JSON.parse(JSON.stringify(partial.checkpoint)))
+  expect(unchangedPartial.scan).toMatchObject({ readBytes: 0, partial: true })
+  expect(unchangedPartial.coverage.incomplete).toBe(1)
+  expect(unchangedPartial.checkpoint).toEqual(partial.checkpoint)
+  await appendFile(path, task.slice(20))
+  const resumed = await importRegisteredCodexRollout(root, path, scoped, JSON.parse(JSON.stringify(partial.checkpoint)))
+  expect(resumed.scan).toMatchObject({ readBytes: Buffer.byteLength(task) - 20, partial: false })
+  expect(resumed.observations).toHaveLength(2)
+  expect(resumed.observations[1]).toMatchObject({ phase: 'build', model: 'model-a', inputTokens: 15, outputTokens: 5, cacheReadTokens: 10 })
+  expect((await importRegisteredCodexRollout(root, path, scoped, resumed.checkpoint)).scan.readBytes).toBe(0)
+  // Replaying an older persisted cursor after a crash is deterministic.
+  expect((await importRegisteredCodexRollout(root, path, scoped, checkpoint)).observations).toEqual(resumed.observations)
+  const foreign = join(day, 'rollout-foreign.jsonl')
+  await writeFile(foreign, rollout('thread-foreign', 'exec-other'))
+  await expect(importRegisteredCodexRollout(root, foreign, scoped, checkpoint)).rejects.toThrow('checkpoint')
+  await truncate(path, 0)
+  await expect(importRegisteredCodexRollout(root, path, scoped, resumed.checkpoint)).rejects.toThrow('checkpoint')
+})
+
+test('registered backfill streams beyond the full-tree byte limit and retains only receipt context', async () => {
+  const { root, day, options, rollout } = await fixture()
+  const path = join(day, 'rollout-large.jsonl')
+  await writeFile(path, rollout('thread-1', 'exec-1'))
+  const transcript = JSON.stringify({ type: 'response_item', payload: { text: 'x'.repeat(64 * 1024) } }) + '\n'
+  const block = transcript.repeat(16)
+  for (let index = 0; index < 129; index++) await appendFile(path, block)
+  const result = await importRegisteredCodexRollout(root, path, options)
+  expect(result.scan.sourceBytes).toBeGreaterThan(128 * 1024 * 1024)
+  expect(result.observations).toHaveLength(1)
+  expect(result.checkpoint.lines).toHaveLength(3)
+  expect((await importRegisteredCodexRollout(root, path, options, result.checkpoint)).scan.readBytes).toBe(0)
+  await appendFile(path, 'x'.repeat(8 * 1024 * 1024 + 1))
+  await expect(importRegisteredCodexRollout(root, path, options, result.checkpoint)).rejects.toThrow('bounds')
+})
+
+test('checkpoint rejects a same-size rewrite and retained journal overflow', async () => {
+  const { root, day, options, rollout } = await fixture()
+  const path = join(day, 'rollout-live.jsonl'), original = rollout('thread-1', 'exec-1')
+  await writeFile(path, original)
+  const result = await importRegisteredCodexRollout(root, path, options)
+  await writeFile(path, original.replace('exec-1', 'exec-2'))
+  await expect(importRegisteredCodexRollout(root, path, options, result.checkpoint)).rejects.toThrow('checkpoint')
+  const fresh = await importRegisteredCodexRollout(root, path, options)
+  await expect(importRegisteredCodexRollout(root, path, options, { ...fresh.checkpoint,
+    lines: Array(17).fill('x'.repeat(8 * 1024 * 1024)) })).rejects.toThrow('journal exceeds bounds')
 })

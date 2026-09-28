@@ -1,7 +1,7 @@
 /** Discover native rollout receipts under one operator-authorized session tree. */
 import { constants } from 'node:fs'
 import { lstat, open, readFile, readdir, realpath } from 'node:fs/promises'
-import { basename, join, relative, sep } from 'node:path'
+import { basename, isAbsolute, join, relative, resolve, sep } from 'node:path'
 import { importCodexOperations, type CodexImportOptions } from './build-timeline-codex-import.ts'
 import type { DirectPhaseObservation } from './build-timeline-sources.ts'
 
@@ -51,6 +51,111 @@ async function captureRollout(root: string, source: RolloutIdentity, beforeRead?
     if (!matchesIdentity(after, source)) throw new Error('Native rollout changed during read')
     return buffer
   } finally { await file.close() }
+}
+
+export interface CodexRolloutCheckpoint {
+  version: 1
+  path: string
+  dev: string
+  ino: string
+  size: number
+  mtimeNs: string
+  ctimeNs: string
+  offset: number
+  /** Base64 bytes of the unfinished final line, not yet passed to the parser. */
+  pending: string
+  lines: string[]
+}
+
+const MAX_REGISTERED_BYTES = 1024 * 1024 * 1024
+const MAX_LINE_BYTES = 8 * 1024 * 1024
+
+/** Incremental receipt journal, private trusted state persisted atomically by the
+ * caller. Attribution is recomputed with this source's current config on every
+ * call; transcript-only records are discarded. No directory enumeration occurs. */
+export async function importRegisteredCodexRollout(sessionsRoot: string, path: string,
+  options: CodexImportOptions, checkpoint?: CodexRolloutCheckpoint,
+  beforeRead?: (path: string) => Promise<void>) {
+  await importCodexOperations([], options)
+  const root = await authorizedRoot(sessionsRoot)
+  if (!isAbsolute(path) || resolve(path) !== path ||
+      !/^\d{4}\/\d{2}\/\d{2}\/rollout-[^/]+\.jsonl$/.test(relative(root, path))) {
+    throw new Error('Invalid registered rollout path')
+  }
+  // Exact canonical paths forbid aliases through any dated directory, including
+  // symlinks that happen to point back inside the authorized tree.
+  if (await realpath(path) !== path) throw new Error('Aliased registered rollout')
+  const stat = await lstat(path, { bigint: true })
+  if (!stat.isFile() || stat.isSymbolicLink()) throw new Error('Invalid registered rollout')
+  const size = Number(stat.size)
+  if (!Number.isSafeInteger(size) || size < 0 || size > MAX_REGISTERED_BYTES) throw new Error('Native discovery exceeds bounds')
+  const source = { path, dev: stat.dev, ino: stat.ino, size, mtimeNs: stat.mtimeNs, ctimeNs: stat.ctimeNs }
+  if (checkpoint && (checkpoint.version !== 1 || checkpoint.path !== path ||
+      checkpoint.dev !== String(stat.dev) || checkpoint.ino !== String(stat.ino) ||
+      !Number.isSafeInteger(checkpoint.size) || checkpoint.size < 0 || checkpoint.size > size ||
+      checkpoint.offset !== checkpoint.size || typeof checkpoint.pending !== 'string' ||
+      checkpoint.pending.length > Math.ceil(MAX_LINE_BYTES / 3) * 4 ||
+      !/^\d+$/.test(checkpoint.mtimeNs) || !/^\d+$/.test(checkpoint.ctimeNs) ||
+      (checkpoint.size === size && (checkpoint.mtimeNs !== String(stat.mtimeNs) || checkpoint.ctimeNs !== String(stat.ctimeNs))) ||
+      !Array.isArray(checkpoint.lines) || checkpoint.lines.length > 1_000_000 ||
+      checkpoint.lines.some(line => typeof line !== 'string' || Buffer.byteLength(line) > MAX_LINE_BYTES))) {
+    throw new Error('Invalid or changed native checkpoint')
+  }
+  const lines = checkpoint ? [...checkpoint.lines] : []
+  let pending: Buffer = checkpoint ? Buffer.from(checkpoint.pending, 'base64') : Buffer.alloc(0)
+  if (pending.length > MAX_LINE_BYTES || pending.length > (checkpoint?.size ?? 0) ||
+      (checkpoint && pending.toString('base64') !== checkpoint.pending) || pending.includes(10)) {
+    throw new Error('Invalid native checkpoint pending bytes')
+  }
+  let retainedBytes = lines.reduce((sum, line) => sum + Buffer.byteLength(line) + 1, 0)
+  if (retainedBytes > MAX_SOURCE_BYTES) throw new Error('Native receipt journal exceeds bounds')
+  let position = checkpoint?.offset ?? 0, scanned = 0, readBytes = 0
+  const file = await open(path, constants.O_RDONLY | constants.O_NOFOLLOW | constants.O_NONBLOCK)
+  try {
+    const current = await file.stat({ bigint: true })
+    if (!current.isFile() || await realpath(path) !== path || !matchesIdentity(current, source)) throw new Error('Native rollout changed after discovery')
+    await beforeRead?.(path)
+    const chunk = Buffer.alloc(64 * 1024)
+    while (position < size) {
+      const { bytesRead } = await file.read(chunk, 0, Math.min(chunk.length, size - position), position)
+      if (!bytesRead) throw new Error('Native rollout changed during read')
+      position += bytesRead
+      readBytes += bytesRead
+      pending = Buffer.concat([pending, chunk.subarray(0, bytesRead)])
+      let start = 0, end: number
+      while ((end = pending.indexOf(10, start)) !== -1) {
+        if (++scanned > 1_000_000 || end - start > MAX_LINE_BYTES) throw new Error('Native discovery exceeds bounds')
+        const line = pending.subarray(start, end).toString('utf8')
+        start = end + 1
+        // Keep invalid records as evidence of malformed coverage; bound them just
+        // like relevant receipts. Valid transcript-only records can be discarded.
+        let keep = true
+        try {
+          const row = JSON.parse(line)
+          keep = ['session_meta', 'turn_context', 'token_usage_record'].includes(row?.type) ||
+            (row?.type === 'event_msg' && ['item_completed', 'task_complete'].includes(row?.payload?.type))
+        } catch { /* importer records malformed coverage */ }
+        if (keep) {
+          retainedBytes += Buffer.byteLength(line) + 1
+          if (retainedBytes > MAX_SOURCE_BYTES || lines.length >= 1_000_000) throw new Error('Native receipt journal exceeds bounds')
+          lines.push(line)
+        }
+      }
+      pending = Buffer.from(pending.subarray(start))
+      if (pending.length > MAX_LINE_BYTES) throw new Error('Native discovery exceeds bounds')
+    }
+    const after = await file.stat({ bigint: true })
+    const named = await lstat(path, { bigint: true })
+    if (!matchesIdentity(after, source) || !named.isFile() || !matchesIdentity(named, source) || await realpath(path) !== path) {
+      throw new Error('Native rollout changed during read')
+    }
+  } finally { await file.close() }
+  const result = await importCodexOperations(lines, options)
+  if (pending.length || size === 0) result.coverage.incomplete++
+  const next: CodexRolloutCheckpoint = { version: 1, path, dev: String(stat.dev), ino: String(stat.ino),
+    size, mtimeNs: String(stat.mtimeNs), ctimeNs: String(stat.ctimeNs), offset: size, pending: pending.toString('base64'), lines }
+  return { ...result, source: { dev: stat.dev, ino: stat.ino },
+    scan: { sourceBytes: size, readBytes, partial: pending.length > 0 }, checkpoint: next }
 }
 
 /** The dated native layout is the discovery boundary; unrelated files are ignored. */

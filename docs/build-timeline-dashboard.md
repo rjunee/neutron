@@ -102,7 +102,7 @@ refresh process can publish importer status separately. Ambiguous, incomplete or
 unbound history stays unknown. Raw commands, outputs and local paths are not
 included in imported public-facing labels.
 
-For recurring collection, give the private refresher one authorized Codex
+For bounded whole-tree collection, give the private refresher one authorized Codex
 `sessions` root rather than registering each rollout separately:
 
 ```sh
@@ -122,6 +122,33 @@ receipts; it does not attest PR ownership or phase. Command spans still need an
 explicit time-bounded checkout-to-PR binding (or an exact successful GitHub
 command), and in-conversation tasks still need exact `turnBindings`. New unbound
 rollouts appear in coverage without generating attributed phases.
+
+Large session histories with explicit source registrations use the library API
+`importRegisteredCodexRollout(sessionsRoot, rolloutPath, options, checkpoint?)`
+instead of enumerating the tree. Each call reads exactly one canonical absolute
+dated rollout, applies only that source's options, and returns observations,
+coverage, private source identity, scan byte counts and a serializable checkpoint.
+The initial backfill streams at most 1 GiB; later calls read only bytes after the
+checkpoint's captured byte boundary. Context and receipt records are retained in a
+private journal capped at 128 MiB and one million records; transcript-only records
+are discarded. Each scan also caps lines at one million and individual lines at
+8 MiB. Bounded unfinished final-line bytes persist in the checkpoint and are
+prepended to the next append before parsing; they explicitly report incomplete coverage.
+Unchanged sources read zero rollout bytes. Retained receipts are reinterpreted
+under the current source config, preserving historical turn model/usage context.
+
+The caller owns trusted private checkpoint storage: serialize refreshes, validate
+unique registered paths and inode identities, process sources sequentially, and
+atomically persist each complete checkpoint including its receipt journal. Never
+persist a cursor separately from its journal. A crash before persistence safely
+replays the old cursor; returned historical observations allow the output journal
+to recover even after checkpoint persistence. Keep both journals private: checkpoint
+records include native receipt details and paths. Export only observations and
+aggregate coverage. Report coverage as registered-source scope; unregistered
+history is unknown, not zero. Missing checkpoints trigger bounded backfill;
+invalid checkpoints, replacements, truncation and same-size rewrites refuse.
+As with snapshot collection, append-only growth is assumed; rewriting an earlier
+prefix while also growing the file cannot be detected by stat identity checks.
 
 Native in-conversation work has no child command to wrap. For completed tasks,
 the importer also accepts operator-attested `turnBindings` in its private config:
