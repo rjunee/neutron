@@ -81,6 +81,26 @@ function get(url: string): Request {
   return new Request(url, { headers: { authorization: 'Bearer good' } })
 }
 
+describe('Codex write ownership preserves generic credential reads', () => {
+  test.each(['codex', 'codex-acct-second', ' CODEX ', ' Codex-Acct-SECOND '])('generic writes refuse %s without changing the row', async raw => {
+    const service = raw.trim().toLowerCase()
+    await store.setCodex(OWNER, { service, plaintext: 'synthetic-owned-codex-value', scope: 'global' })
+    const before = store.getMeta(OWNER, '', service), plaintext = store.resolve(OWNER, '', service)?.plaintext
+    const create = await handler(post(GLOBAL_URL, { service: raw, token: 'replacement-synthetic-token' }))
+    expect(create?.status).toBe(400)
+    expect(await create?.json()).toMatchObject({ code: 'reserved_service' })
+    const remove = await handler(del(`${GLOBAL_URL}/${encodeURIComponent(raw)}`))
+    expect(remove?.status).toBe(400)
+    expect(store.getMeta(OWNER, '', service)).toEqual(before)
+    expect(store.resolve(OWNER, '', service)?.plaintext).toBe(plaintext)
+    const list = await handler(get(GLOBAL_URL))
+    expect(list?.status).toBe(200)
+    const ordinary = await handler(post(GLOBAL_URL, { service: 'codex-extra', token: 'unrelated-synthetic-token' }))
+    expect(ordinary?.status).toBe(201)
+    expect((await handler(del(`${GLOBAL_URL}/codex-extra`)))?.status).toBe(200)
+  })
+})
+
 describe('the project route cannot write instance-wide state', () => {
   test('a project POST asking for scope=global is refused AND writes nothing', async () => {
     const res = await handler(post(PROJECT_URL, { service: 'openai', token: 'sk-credential-123456', scope: 'global' }))

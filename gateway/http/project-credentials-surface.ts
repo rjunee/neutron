@@ -61,6 +61,7 @@ import {
   PROJECT_CREDENTIAL_MIN_SECRET_CHARS,
   isReservedService,
   RESERVED_SERVICE_PREFIXES,
+  isCodexCustodyService,
   type CredentialScope,
   type ProjectCredentialStore,
 } from '@neutronai/project-credentials/store.ts'
@@ -261,6 +262,9 @@ async function handleSet(
   // A `token` alias is accepted alongside `plaintext` for a friendlier client.
   const rawToken = fields['plaintext'] ?? fields['token']
   const rawService = fields['service']
+  if (typeof rawService === 'string' && isCodexCustodyService(rawService)) {
+    return jsonError(400, 'reserved_service', 'Codex credentials are managed by their credential service')
+  }
   // THE RESERVED NAMESPACE IS REFUSED ON THE SERVICE, BEFORE THE TOKEN IS JUDGED.
   //
   // `store.set` already checks this first (`project-credentials/store.ts:295-307`),

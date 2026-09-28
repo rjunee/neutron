@@ -448,6 +448,11 @@ export class CodexCredentialService {
     target?: CodexTarget,
     opts?: { label?: string | null },
   ): Promise<CodexConnectResult> {
+    return this.store.codexCustody.run(owner_slug, () => this.connectAdmitted(owner_slug, pasted, target, opts))
+  }
+
+  private async connectAdmitted(owner_slug: OwnerHandle, pasted: unknown, target?: CodexTarget,
+    opts?: { label?: string | null }): Promise<CodexConnectResult> {
     const { scope, project_id } = this.normalizeTarget(target)
     const v = validateCodexSubscriptionAuth(pasted, this.now)
     if (!v.ok || v.normalized === undefined) {
@@ -459,7 +464,7 @@ export class CodexCredentialService {
     // then dropped on the floor by this delegation.
     const supplied = typeof opts?.label === 'string' && opts.label.trim().length > 0 ? opts.label.trim() : null
     this.homeFor(scope, project_id)
-    await this.store.set(owner_slug, {
+    await this.store.setCodex(owner_slug, {
       service: CODEX_CREDENTIAL_SERVICE,
       plaintext: v.normalized,
       scope,
@@ -484,6 +489,10 @@ export class CodexCredentialService {
    * the global default. `scope` names which supplied it.
    */
   status(owner_slug: OwnerHandle, target?: CodexTarget): CodexStatusResult {
+    return this.store.codexCustody.runSync(owner_slug, () => this.statusAdmitted(owner_slug, target))
+  }
+
+  private statusAdmitted(owner_slug: OwnerHandle, target?: CodexTarget): CodexStatusResult {
     const project_id = (target?.project_id ?? '').trim()
     const resolved = this.store.resolve(owner_slug, project_id, CODEX_CREDENTIAL_SERVICE)
     const stored = resolved?.plaintext ?? null
@@ -546,6 +555,10 @@ export class CodexCredentialService {
   }
 
   projectOwnerCredentialStatus(owner: OwnerHandle, projectId: string): CodexOwnerCredentialStatus {
+    return this.store.codexCustody.runSync(owner, () => this.projectOwnerCredentialStatusAdmitted(owner, projectId))
+  }
+
+  private projectOwnerCredentialStatusAdmitted(owner: OwnerHandle, projectId: string): CodexOwnerCredentialStatus {
     const checked_at = new Date(this.now()).toISOString()
     try {
       this.inspectProjectOwnerCredential(owner, projectId)
@@ -558,6 +571,10 @@ export class CodexCredentialService {
   }
 
   resolveProjectOwnerCredential(owner: OwnerHandle, projectId: string): { codexHome: string; credentialIdentity: string } {
+    return this.store.codexCustody.runSync(owner, () => this.resolveProjectOwnerCredentialAdmitted(owner, projectId))
+  }
+
+  private resolveProjectOwnerCredentialAdmitted(owner: OwnerHandle, projectId: string): { codexHome: string; credentialIdentity: string } {
     const credential = this.inspectProjectOwnerCredential(owner, projectId)
     this.selfHealAndHarvestBack(owner, CODEX_CREDENTIAL_SERVICE, credential.home, credential.plaintext, {
       scope: 'project', project_id: projectId,
@@ -622,6 +639,10 @@ export class CodexCredentialService {
    * fired-and-forgotten elsewhere.
    */
   async refreshSeatLiveness(owner_slug: OwnerHandle, target?: CodexTarget): Promise<void> {
+    return this.store.codexCustody.run(owner_slug, () => this.refreshSeatLivenessAdmitted(owner_slug, target))
+  }
+
+  private async refreshSeatLivenessAdmitted(owner_slug: OwnerHandle, target?: CodexTarget): Promise<void> {
     const jobs: Array<Promise<void>> = []
     const project_id = (target?.project_id ?? '').trim()
     if (project_id.length > 0) {
@@ -830,6 +851,10 @@ export class CodexCredentialService {
    * healthy seat in a pool means rotation has somewhere to go.
    */
   everySeatRevoked(owner_slug: OwnerHandle): boolean {
+    return this.store.codexCustody.runSync(owner_slug, () => this.everySeatRevokedAdmitted(owner_slug))
+  }
+
+  private everySeatRevokedAdmitted(owner_slug: OwnerHandle): boolean {
     const slots = this.syncSlots(owner_slug)
     if (slots.length === 0) return false
     return slots.every((s) => s.cooling_reason === 'unauthorized')
@@ -842,10 +867,14 @@ export class CodexCredentialService {
    * project overrides intact.
    */
   async disconnect(owner_slug: OwnerHandle, target?: CodexTarget): Promise<{ ok: boolean }> {
+    return this.store.codexCustody.run(owner_slug, () => this.disconnectAdmitted(owner_slug, target))
+  }
+
+  private async disconnectAdmitted(owner_slug: OwnerHandle, target?: CodexTarget): Promise<{ ok: boolean }> {
     const { scope, project_id } = this.normalizeTarget(target)
     if (scope === 'global') return this.removeAccount(owner_slug, DEFAULT_SLOT)
     this.homeFor(scope, project_id)
-    const removed = await this.store.delete(owner_slug, project_id, CODEX_CREDENTIAL_SERVICE)
+    const removed = await this.store.deleteCodex(owner_slug, project_id, CODEX_CREDENTIAL_SERVICE)
     removeCodexAuth(this.homeFor(scope, project_id))
     return { ok: removed }
   }
@@ -859,6 +888,10 @@ export class CodexCredentialService {
    * connected" → Claude-only review, never a blocker).
    */
   resolveActiveCodexHome(owner_slug: OwnerHandle, project_id?: string): string | null {
+    return this.store.codexCustody.runSync(owner_slug, () => this.resolveActiveCodexHomeAdmitted(owner_slug, project_id))
+  }
+
+  private resolveActiveCodexHomeAdmitted(owner_slug: OwnerHandle, project_id?: string): string | null {
     // A per-project override wins and is OUT of rotation entirely — it exists
     // precisely to pin one project to one subscription, so rotating it would
     // defeat the feature. This branch runs BEFORE any rotation bookkeeping so
@@ -1120,6 +1153,13 @@ export class CodexCredentialService {
     if (!shouldHarvestBack(diskRefresh, storedRefresh)) return
     const validated = validateCodexSubscriptionAuth(onDisk, this.now)
     if (!validated.ok || validated.normalized === undefined) return
+    // Freshness cannot authorize a different account, or establish an unknown
+    // identity. Explicit connect/adopt owns custody changes; harvest only refreshes.
+    const storedAccount = readAccountId(storedPlaintext)
+    if (storedAccount === null || readAccountId(onDisk) !== storedAccount) {
+      this.log('codex_credential_harvest_refused', { service, reason: 'account_identity_unconfirmed' })
+      return
+    }
     // Fire-and-forget: the resolver is synchronous by contract (the orchestrator
     // calls it at fire time) and a failed re-encrypt must not fail a run — the
     // stored copy simply stays stale until the next resolve tries again.
@@ -1130,7 +1170,7 @@ export class CodexCredentialService {
     fireAndForget(
       'codex_credential_harvest_back',
       this.store
-        .set(owner_slug, {
+        .setCodex(owner_slug, {
           service,
           plaintext: validated.normalized,
           scope: target.scope,
@@ -1204,6 +1244,11 @@ export class CodexCredentialService {
   }
 
   private async serializeAccountMutation<T>(owner_slug: OwnerHandle, action: () => Promise<T>): Promise<T> {
+    // Admit BEFORE queueing so maintenance drains both running and queued work.
+    return this.store.codexCustody.run(owner_slug, () => this.serializeAdmittedAccountMutation(owner_slug, action))
+  }
+
+  private async serializeAdmittedAccountMutation<T>(owner_slug: OwnerHandle, action: () => Promise<T>): Promise<T> {
     // Serialize per owner so the duplicate check and the write that follows it
     // cannot interleave with another connect. Chained rather than locked: the
     // previous call's REJECTION must not poison the queue, hence the catch.
@@ -1353,7 +1398,7 @@ export class CodexCredentialService {
       const changed = stored?.plaintext !== disk || registered === undefined ||
         (initial?.usageSince !== undefined && (registered.connected_at === null || initial.usageSince > registered.connected_at)) ||
         (initial?.active === true && active === null)
-      if (stored?.plaintext !== disk) await this.store.set(owner, {
+      if (stored?.plaintext !== disk) await this.store.setCodex(owner, {
         service, plaintext: disk, scope: 'global', project_id: '', label: meta === null ? initial?.label ?? null : meta.label, expires_at: meta?.expires_at ?? null,
       })
       this.rotation.adoptSlot(owner, slot, { label: initial?.label ?? null, cooling_until: initial?.coolingUntil ?? null, usage_since: initial?.usageSince ?? null })
@@ -1442,7 +1487,7 @@ export class CodexCredentialService {
         slot: requested,
       }
     }
-    await this.store.set(owner_slug, {
+    await this.store.setCodex(owner_slug, {
       service: codexSlotService(requested),
       plaintext: v.normalized,
       scope: 'global',
@@ -1480,6 +1525,13 @@ export class CodexCredentialService {
    * Selection is NOT persisted here: reading status must not rotate the pool.
    */
   accountsView(owner_slug: OwnerHandle): {
+    accounts: CodexAccountSummary[]
+    next: { slot: string; exhausted: boolean } | null
+  } {
+    return this.store.codexCustody.runSync(owner_slug, () => this.accountsViewAdmitted(owner_slug))
+  }
+
+  private accountsViewAdmitted(owner_slug: OwnerHandle): {
     accounts: CodexAccountSummary[]
     next: { slot: string; exhausted: boolean } | null
   } {
@@ -1604,7 +1656,7 @@ export class CodexCredentialService {
   private async removeAccountSerialized(owner_slug: OwnerHandle, slot: string): Promise<{ ok: boolean }> {
     const normalized = normalizeSlot(slot)
     if (normalized === null) return { ok: false }
-    const removed = await this.store.delete(owner_slug, '', codexSlotService(normalized))
+    const removed = await this.store.deleteCodex(owner_slug, '', codexSlotService(normalized))
     removeCodexAuth(this.slotHome(normalized))
     this.rotation.removeSlot(owner_slug, normalized)
     return { ok: removed }
@@ -1618,6 +1670,10 @@ export class CodexCredentialService {
    * `resolveActiveCodexHome`.)
    */
   ensureMaterialized(owner_slug: OwnerHandle): boolean {
+    return this.store.codexCustody.runSync(owner_slug, () => this.ensureMaterializedAdmitted(owner_slug))
+  }
+
+  private ensureMaterializedAdmitted(owner_slug: OwnerHandle): boolean {
     if (readMaterializedAuth(this.codexHome) !== null) return true
     // Global-only lookup (project_id undefined → the resolver consults only the
     // global default), so a stray project override never materializes here.

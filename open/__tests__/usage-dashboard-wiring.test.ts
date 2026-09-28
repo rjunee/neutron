@@ -302,7 +302,7 @@ test('the Codex card is honestly empty — no accounts, no zeros, and a reason',
  * promise is one nothing in the binary can keep, and the owner would wait forever on
  * a poller that is not there.
  *
- * The credential is stored through the SAME store the Settings pane writes to, and
+ * The credential is stored through its Codex-owned store method, and
  * the dashboard is re-fetched from the SAME composition: the connection is resolved
  * PER REQUEST, so this also pins that the card follows the credential without a
  * restart. It reads a real value out of the composed response before asserting on
@@ -312,7 +312,7 @@ test('a Codex credential renders "no gauge", not a promise of a first reading', 
   const before = (await fetchPools()).find((p) => p.pool === 'codex')!
   expect(before.connection).toBe('not_connected')
 
-  await credentials.set(asOwnerHandle('owner'), {
+  await credentials.setCodex(asOwnerHandle('owner'), {
     scope: 'global',
     service: CODEX_CREDENTIAL_SERVICE,
     // The subscription bundle shape `validateCodexSubscriptionAuth` accepts. No real
@@ -343,7 +343,7 @@ test('a Codex credential renders "no gauge", not a promise of a first reading', 
   expect(capacityLine(view)).toBeNull()
 
   // Put the composition back the way the other tests found it — they share one boot.
-  await credentials.delete(asOwnerHandle('owner'), GLOBAL_PROJECT_ID, CODEX_CREDENTIAL_SERVICE)
+  await credentials.deleteCodex(asOwnerHandle('owner'), GLOBAL_PROJECT_ID, CODEX_CREDENTIAL_SERVICE)
 })
 
 test('each pool reports its connection from the SAME resolver the product uses', () => {

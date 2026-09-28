@@ -1157,7 +1157,7 @@ describe('the multi-seat credential service', () => {
     await svc.connectAccount(OWNER, subscriptionAuth())
     await svc.connectAccount(OWNER, subscriptionAuth(undefined, 'acct-work'), { slot: 'work' })
     svc.resolveActiveCodexHome(OWNER, 'proj')
-    await store.delete(OWNER, '', 'codex-acct-work')
+    await store.deleteCodex(OWNER, '', 'codex-acct-work')
     // A stale row would hand back a directory with no bundle in it.
     expect(svc.listAccounts(OWNER).map((a) => a.slot)).toEqual(['default'])
     expect(svc.resolveActiveCodexHome(OWNER, 'proj')).toBe(codexHome)
@@ -1179,7 +1179,7 @@ describe('the multi-seat credential service', () => {
     await svc.connectAccount(OWNER, subscriptionAuth(undefined, 'acct-work'), { slot: 'work' })
     // Aim the pointer at 'work', then expire its credential out from under it.
     rotation.setActiveSlot(OWNER, 'work', NOW)
-    await store.set(OWNER, {
+    await store.setCodex(OWNER, {
       service: codexSlotService('work'),
       plaintext: subscriptionAuth(),
       scope: 'global',
@@ -1217,7 +1217,7 @@ describe('the multi-seat credential service', () => {
     const workHome = join(codexHome, 'accounts', 'work')
     // 'work' ran itself into its weekly cap AND refreshed its bundle on disk.
     writeRollout(workHome, 'rollout-spent.jsonl', [tokenCountLine({ used_percent: 99.8, window_minutes: 10080 })], 1_800_000_000)
-    const refreshed = subscriptionAuth('2026-08-17T09:00:00.000Z')
+    const refreshed = subscriptionAuth('2026-08-17T09:00:00.000Z', 'acct-work')
     writeFileSync(codexAuthPath(workHome), refreshed)
 
     // The run rotates AWAY from 'work' to the healthy first seat…

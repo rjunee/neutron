@@ -338,6 +338,18 @@ references decisions by date; none is a second home for a decision.
 
 ## Decisions Log (immutable audit trail — NOT the build spec)
 
+### 2026-09-28 — Offline Codex custody reconciliation requires separate maintenance authority.
+
+Normal account adoption retains its strict identity guard. A narrowly scoped
+maintenance primitive may conditionally reconcile an existing default encrypted
+credential from its unchanged canonical native home only under independently
+enforced continuous host writer exclusion and the drained service owner lease.
+It verifies signed identity and independent mapping, preserves grant and rotation
+metadata, and requires durable encrypted recovery before mutation. Conditional
+rollback refuses intervening state changes. This library does not supply or
+attest the host exclusion mechanism; no live activation follows from synthetic
+fence callbacks. Acceptance lives in `docs/spec-items/codex-operator-custody.md`.
+
 ### 2026-09-27 — Codex operator custody stays with the credential service.
 
 Open owns account selection and credential custody through its owner-scoped
