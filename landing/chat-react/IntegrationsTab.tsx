@@ -78,7 +78,12 @@ import {
   groupOAuthAccounts,
   oauthAccountStatus,
 } from './integrations-oauth-view.ts'
-import { WebCodexCredentialClient, type CodexStatus } from './codex-credential-client.ts'
+import {
+  CodexClientError,
+  WebCodexCredentialClient,
+  type CodexRotationSelection,
+  type CodexStatus,
+} from './codex-credential-client.ts'
 import {
   WebGitHubConnectClient,
   type GitHubConnectState,
@@ -215,6 +220,75 @@ export function IntegrationsTab({
   )
   const [codexBusy, setCodexBusy] = useState(false)
   const [codexError, setCodexError] = useState<string | null>(null)
+  const [rotation, setRotation] = useState<CodexRotationSelection | null>(null)
+  const [rotationLoading, setRotationLoading] = useState(true)
+  const [rotationBusy, setRotationBusy] = useState(false)
+  const [rotationError, setRotationError] = useState<string | null>(null)
+  const [rotationNotice, setRotationNotice] = useState<string | null>(null)
+  const rotationReadId = useRef(0)
+  /** Covers all Codex writes before React can render their disabled states. */
+  const codexWriteInFlight = useRef(false)
+
+  const loadRotation = useCallback(async (preserveRefusal = false): Promise<void> => {
+    const readId = ++rotationReadId.current
+    try {
+      const selection = await codexClient.rotationSelection()
+      if (mountedRef.current && readId === rotationReadId.current) {
+        setRotation(selection)
+        if (!preserveRefusal) setRotationError(null)
+      }
+    } catch {
+      if (mountedRef.current && readId === rotationReadId.current && !preserveRefusal) {
+        setRotationError('Account selection is unavailable. Try again later.')
+      }
+    } finally {
+      if (mountedRef.current && readId === rotationReadId.current) setRotationLoading(false)
+    }
+  }, [codexClient])
+
+  useEffect(() => { void loadRotation() }, [loadRotation])
+
+  const rotationIncumbent = rotation?.active ?? rotation?.accounts[0]?.slot ?? null
+  const hasAlternate = rotation?.accounts.some(
+    (account) => account.slot !== rotationIncumbent &&
+      (account.cooling_until === null || account.cooling_until <= Date.now()),
+  ) ?? false
+
+  const rotateCodex = useCallback((): void => {
+    if (codexWriteInFlight.current || codexBusy || !hasAlternate) return
+    codexWriteInFlight.current = true
+    // An earlier metadata read cannot overwrite the pointer returned by this write.
+    ++rotationReadId.current
+    setRotationBusy(true)
+    setRotationError(null)
+    setRotationNotice(null)
+    void (async () => {
+      try {
+        const result = await codexClient.rotateToNextAccount()
+        if (!mountedRef.current) return
+        setRotation((current) => current === null ? current : { ...current, active: result.active })
+        setRotationNotice(result.status === 'rotated'
+          ? `Switched to ${result.active}.`
+          : `${result.active} is already active.`)
+        // Hold the control until the authoritative metadata read completes.
+        await loadRotation()
+      } catch (err: unknown) {
+        if (!mountedRef.current) return
+        const refused = err instanceof CodexClientError && err.status === 409
+        setRotationError(err instanceof CodexClientError && err.code === 'no_eligible_account'
+          ? 'No other Codex account is eligible. The active account was not changed.'
+          : refused
+            ? 'Account switch was refused. The active account was not changed.'
+            : 'Could not switch Codex account. Try again later.')
+        // A refusal may carry a newer pointer or cooling state. This GET is
+        // metadata only; keep the server's refusal visible after it settles.
+        if (refused) await loadRotation(true)
+      } finally {
+        codexWriteInFlight.current = false
+        if (mountedRef.current) setRotationBusy(false)
+      }
+    })()
+  }, [codexClient, codexBusy, hasAlternate, loadRotation])
 
   /**
    * The connected seats, and whether Codex is usable AT ALL — both asked of the
@@ -257,9 +331,12 @@ export function IntegrationsTab({
   useEffect(() => loadCodex(), [loadCodex])
 
   const connectCodex = useCallback((): void => {
-    if (codexAuth.trim().length === 0) return
+    if (codexWriteInFlight.current || codexAuth.trim().length === 0) return
+    codexWriteInFlight.current = true
+    ++rotationReadId.current
     setCodexBusy(true)
     setCodexError(null)
+    setRotationNotice(null)
     void codexClient
       .connectGlobal(codexAuth.trim(), codexAccount.trim().toLowerCase())
       // RE-READ THE POOL; DO NOT TRUST THE POST'S OWN REPLY. The POST answers
@@ -275,19 +352,23 @@ export function IntegrationsTab({
       // never saw the shape production actually sends. A stub that answers better
       // than reality is worse than no stub — it certifies the bug.
       .then(() => codexClient.statusGlobal())
-      .then((s) => {
+      .then(async (s) => {
         if (!mountedRef.current) return
         setCodexStatus(s)
+        await loadRotation()
+        if (!mountedRef.current) return
         setCodexAuth('')
         setCodexAccount('')
-        setCodexBusy(false)
       })
       .catch((err: unknown) => {
         if (!mountedRef.current) return
-        setCodexBusy(false)
         setCodexError(err instanceof Error ? err.message : 'failed to connect Codex')
       })
-  }, [codexClient, codexAuth, codexAccount])
+      .finally(() => {
+        codexWriteInFlight.current = false
+        if (mountedRef.current) setCodexBusy(false)
+      })
+  }, [codexClient, codexAuth, codexAccount, loadRotation])
 
   /**
    * Forget EVERY seat, after saying so and being agreed with.
@@ -307,6 +388,7 @@ export function IntegrationsTab({
    * a stray click is not an improvement.
    */
   const disconnectAllCodexSeats = useCallback((): void => {
+    if (codexWriteInFlight.current) return
     const count = codexStatus?.accounts?.length ?? 1
     const ok = doConfirm(
       count > 1
@@ -314,43 +396,56 @@ export function IntegrationsTab({
         : 'Disconnect Codex?\n\nThe connected subscription is removed and will need a fresh `codex login` to reconnect.',
     )
     if (!ok) return
+    codexWriteInFlight.current = true
+    ++rotationReadId.current
     setCodexBusy(true)
     setCodexError(null)
+    setRotationNotice(null)
     void codexClient
       .disconnectAllSeats()
-      .then(() => {
+      .then(async () => {
         if (!mountedRef.current) return
         setCodexStatus({ status: 'not_connected' })
-        setCodexBusy(false)
+        await loadRotation()
       })
       .catch((err: unknown) => {
         if (!mountedRef.current) return
-        setCodexBusy(false)
         setCodexError(err instanceof Error ? err.message : 'failed to disconnect Codex')
       })
-  }, [codexClient, codexStatus, doConfirm])
+      .finally(() => {
+        codexWriteInFlight.current = false
+        if (mountedRef.current) setCodexBusy(false)
+      })
+  }, [codexClient, codexStatus, doConfirm, loadRotation])
 
   /** Forget ONE seat, leaving the rest of the pool connected. */
   const disconnectCodexSeat = useCallback(
     (slot: string): void => {
+      if (codexWriteInFlight.current) return
       if (!doConfirm(`Remove Codex seat '${slot}'?\n\nThe other seats stay connected.`)) return
+      codexWriteInFlight.current = true
+      ++rotationReadId.current
       setCodexBusy(true)
       setCodexError(null)
+      setRotationNotice(null)
       void codexClient
         .disconnectSeat(slot)
         .then(() => codexClient.statusGlobal())
-        .then((s) => {
+        .then(async (s) => {
           if (!mountedRef.current) return
           setCodexStatus(s)
-          setCodexBusy(false)
+          await loadRotation()
         })
         .catch((err: unknown) => {
           if (!mountedRef.current) return
-          setCodexBusy(false)
           setCodexError(err instanceof Error ? err.message : 'failed to remove seat')
         })
+        .finally(() => {
+          codexWriteInFlight.current = false
+          if (mountedRef.current) setCodexBusy(false)
+        })
     },
-    [codexClient, doConfirm],
+    [codexClient, doConfirm, loadRotation],
   )
 
   // ── GitHub (GLOBAL, device flow) ──────────────────────────────────────────
@@ -1218,7 +1313,9 @@ export function IntegrationsTab({
                     <li key={seat.slot} className="cint-codex-seat" data-slot={seat.slot}>
                       <span className="cint-codex-seat-name">
                         {seat.slot}
-                        {seat.active ? <em className="cint-codex-seat-next"> — next</em> : null}
+                        {(rotation === null ? seat.active : rotation.active === seat.slot)
+                          ? <em className="cint-codex-seat-next"> — {rotation === null ? 'next' : 'active'}</em>
+                          : null}
                       </span>
                       <span className="cint-codex-seat-state" data-cooling={seat.cooling}>
                         {seat.cooling
@@ -1232,7 +1329,7 @@ export function IntegrationsTab({
                         type="button"
                         className="cdoc-btn"
                         data-testid={`cint-codex-seat-remove-${seat.slot}`}
-                        disabled={codexBusy}
+                        disabled={codexBusy || rotationBusy}
                         onClick={() => disconnectCodexSeat(seat.slot)}
                       >
                         Remove
@@ -1241,6 +1338,29 @@ export function IntegrationsTab({
                   ))}
                 </ul>
               ) : null}
+              {rotationLoading ? (
+                <p className="cint-row-sub">Loading account selection…</p>
+              ) : rotation !== null && rotation.accounts.length > 0 ? (
+                <div className="cint-key-actions" aria-label="Codex account selection">
+                  <p className="cint-row-sub" data-testid="cint-codex-active-account">
+                    Active account: {rotation.active ?? 'none selected'}
+                  </p>
+                  <button
+                    type="button"
+                    className="cdoc-btn"
+                    data-testid="cint-codex-rotate"
+                    disabled={codexBusy || rotationBusy || !hasAlternate}
+                    onClick={rotateCodex}
+                  >
+                    {rotationBusy ? 'Switching…' : 'Switch to next available account'}
+                  </button>
+                  {!hasAlternate ? (
+                    <p className="cint-row-sub">No other available account to switch to.</p>
+                  ) : null}
+                </div>
+              ) : null}
+              {rotationNotice !== null ? <p role="status">{rotationNotice}</p> : null}
+              {rotationError !== null ? <div className="cdoc-comments-error" role="alert">{rotationError}</div> : null}
               {codexStatus?.exhausted === true ? (
                 <div className="cdoc-comments-error" data-testid="cint-codex-exhausted">
                   Every seat is cooling. Runs continue on a capped seat — they will fail with a quota
@@ -1253,7 +1373,7 @@ export function IntegrationsTab({
                     type="button"
                     className="cdoc-btn"
                     data-testid="cint-codex-disconnect-all"
-                    disabled={codexBusy}
+                    disabled={codexBusy || rotationBusy}
                     onClick={disconnectAllCodexSeats}
                   >
                     {codexBusy
@@ -1299,7 +1419,7 @@ export function IntegrationsTab({
                     className="cdoc-btn cdoc-btn-primary"
                     data-testid="cint-codex-connect"
                     disabled={
-                      codexBusy ||
+                      codexBusy || rotationBusy ||
                       codexAuth.trim().length === 0 ||
                       (codexPool.length > 0 && codexAccount.trim().length === 0)
                     }

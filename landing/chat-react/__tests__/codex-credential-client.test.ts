@@ -90,6 +90,25 @@ describe('WebCodexCredentialClient', () => {
     expect(cap.calls[0]?.auth).toBe(`Bearer ${TOKEN}`)
   })
 
+  it('rotationSelection reads global metadata through the bearer-gated route', async () => {
+    const selection = { active: 'default', accounts: [{ slot: 'default', label: null, cooling_until: null, cooling_reason: null }] }
+    const cap = capture(jsonRes(selection))
+    const client = new WebCodexCredentialClient({ base_url: BASE, token: TOKEN, fetchImpl: cap.fetchImpl })
+    expect(await client.rotationSelection()).toEqual(selection)
+    expect(cap.calls).toEqual([{ url: `${BASE}/api/app/codex-auth/rotation`, method: 'GET', body: undefined, auth: `Bearer ${TOKEN}` }])
+  })
+
+  it('plain rotation POSTs an empty object and preserves a 409 refusal', async () => {
+    const success = capture(jsonRes({ ok: true, status: 'rotated', changed: true, from: 'default', to: 'work', active: 'work' }))
+    const client = new WebCodexCredentialClient({ base_url: BASE, token: TOKEN, fetchImpl: success.fetchImpl })
+    expect((await client.rotateToNextAccount()).active).toBe('work')
+    expect(success.calls).toEqual([{ url: `${BASE}/api/app/codex-auth/rotate`, method: 'POST', body: {}, auth: `Bearer ${TOKEN}` }])
+
+    const refusal = capture(jsonRes({ ok: false, code: 'no_eligible_account', message: 'No other Codex account is eligible' }, 409))
+    await expect(new WebCodexCredentialClient({ base_url: BASE, token: TOKEN, fetchImpl: refusal.fetchImpl }).rotateToNextAccount())
+      .rejects.toMatchObject({ status: 409, code: 'no_eligible_account' })
+  })
+
   it('connectGlobal → POST /api/app/codex-auth { auth }', async () => {
     const cap = capture(jsonRes({ ok: true, status: 'connected', scope: 'global' }, 201))
     const client = new WebCodexCredentialClient({ base_url: BASE, token: TOKEN, fetchImpl: cap.fetchImpl })

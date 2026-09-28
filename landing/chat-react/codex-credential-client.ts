@@ -1,7 +1,7 @@
 /**
- * landing/chat-react — web CODEX CONNECT API client (Settings tab, Part B).
+ * landing/chat-react — web Codex credential and operator client.
  *
- * A thin fetch wrapper over the gateway's Connect Codex surface
+ * A thin fetch wrapper over the gateway's Codex credential surface
  * (`gateway/http/codex-credential-surface.ts`), which stores the owner's ChatGPT
  * SUBSCRIPTION auth for the trident cross-model reviewer:
  *
@@ -71,6 +71,26 @@ export interface CodexStatus {
   override_present?: boolean
 }
 
+/** Stored operator selection; this metadata contains no credential material. */
+export interface CodexRotationSelection {
+  active: string | null
+  accounts: Array<{
+    slot: string
+    label: string | null
+    cooling_until: number | null
+    cooling_reason: string | null
+  }>
+}
+
+export interface CodexRotationResult {
+  ok: true
+  status: 'rotated' | 'already_active'
+  changed: boolean
+  from: string | null
+  to: string
+  active: string
+}
+
 interface ErrorBody {
   ok?: boolean
   code?: string
@@ -119,6 +139,16 @@ export class WebCodexCredentialClient {
   /** Global connection status (the trident-wide default). */
   async statusGlobal(): Promise<CodexStatus> {
     return this.req<CodexStatus>(this.globalPath)
+  }
+
+  /** Read the stored global selection without probing or choosing a successor. */
+  async rotationSelection(): Promise<CodexRotationSelection> {
+    return this.req<CodexRotationSelection>(`${this.globalPath}/rotation`)
+  }
+
+  /** Select the next eligible global account. A 409 is an explicit refusal. */
+  async rotateToNextAccount(): Promise<CodexRotationResult> {
+    return this.req<CodexRotationResult>(`${this.globalPath}/rotate`, { method: 'POST', body: {} })
   }
 
   /**

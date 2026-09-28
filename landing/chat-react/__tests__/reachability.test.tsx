@@ -82,16 +82,13 @@ afterAll(async () => {
   await GlobalRegistrator.unregister()
 })
 
-/** The tab set the resolver answers with — the shipped builtin shape.
- *
- *  `admin` is in here because the owner-facing INTEGRATIONS surface is an admin
- *  tab, and the shell routes it into the header menu rather than the tab band
- *  (`MENU_TARGETS`). Without it the menu holds nothing, `HeaderMenu` renders
- *  null, and every affordance behind it is invisible to this gate. */
-const RESOLVED_TABS = [
+/** Project tabs and global tabs are separate HTTP responses. Admin is global. */
+const PROJECT_TABS = [
   { key: 'chat', label: 'Chat', scope: 'project', source: 'builtin', order: 0, mount: { kind: 'builtin', target: 'chat' } },
   { key: 'work_board', label: 'Work', scope: 'project', source: 'builtin', order: 5, mount: { kind: 'builtin', target: 'workboard' } },
   { key: 'documents', label: 'Documents', scope: 'project', source: 'builtin', order: 10, mount: { kind: 'builtin', target: 'docs' } },
+]
+const GLOBAL_TABS = [
   { key: 'admin', label: 'Admin', scope: 'global', source: 'builtin', order: 20, mount: { kind: 'builtin', target: 'admin' } },
 ]
 
@@ -107,13 +104,18 @@ const USAGE_READING = {
 
 interface Mounted {
   root: HTMLElement
+  requests: string[]
   typeDraft(): Promise<void>
   openAdmin(): Promise<void>
   unmount(): Promise<void>
 }
 
 /** Mount the real shell at one layout and let it settle. */
-async function mountShell(layout: LayoutName): Promise<Mounted> {
+async function mountShell(
+  layout: LayoutName,
+  codexAccounts = false,
+  scope: 'general' | 'project' = 'general',
+): Promise<Mounted> {
   desktop = LAYOUTS[layout].desktop
   ;(window as unknown as { innerWidth: number }).innerWidth = LAYOUTS[layout].width
 
@@ -154,29 +156,44 @@ async function mountShell(layout: LayoutName): Promise<Mounted> {
 
   // Everything the shell reads over HTTP, answered from literals. Anything the
   // shell asks for that is not listed 404s, exactly as a real older gateway would.
+  const requests: string[] = []
   const fetchImpl = async (url: string): Promise<Response> => {
+    requests.push(url)
     const json = (body: unknown): Response =>
       new Response(JSON.stringify(body), {
         status: 200,
         headers: { 'content-type': 'application/json' },
       })
     if (url.endsWith(`/api/app/projects/${PROJECT}/tabs`)) {
-      return json({ ok: true, scope: 'project', project_id: PROJECT, tabs: RESOLVED_TABS })
+      return json({ ok: true, scope: 'project', project_id: PROJECT, tabs: PROJECT_TABS })
     }
+    if (url.endsWith('/api/app/tabs')) return json({ ok: true, scope: 'global', tabs: GLOBAL_TABS })
     if (url.endsWith('/api/app/usage')) return json(USAGE_READING)
     // The Admin surface's own reads. Answered as a FRESH install would answer —
     // nothing connected — because that is the state the owner is in at the exact
     // moment they need the control this gate is looking for.
     if (url.endsWith('/api/app/github-auth')) return json({ status: 'not_connected' })
     if (url.endsWith('/api/cores/integrations')) return json({ ok: true, oauth: [], api_keys: [] })
-    if (url.endsWith('/api/app/codex-auth')) return json({ status: 'not_connected' })
+    if (url.endsWith('/api/app/codex-auth/rotation') && codexAccounts) return json({
+      active: 'default',
+      accounts: [
+        { slot: 'default', label: null, cooling_until: null, cooling_reason: null },
+        { slot: 'work', label: null, cooling_until: null, cooling_reason: null },
+      ],
+    })
+    if (url.endsWith('/api/app/codex-auth')) return json(codexAccounts
+      ? { status: 'connected', accounts: [
+          { slot: 'default', label: null, status: 'connected', cooling: false, cooling_until: null, cooling_reason: null, used_percent: null, window_minutes: null, plan_type: null, active: true },
+          { slot: 'work', label: null, status: 'connected', cooling: false, cooling_until: null, cooling_reason: null, used_percent: null, window_minutes: null, plan_type: null, active: false },
+        ] }
+      : { status: 'not_connected' })
     if (url.endsWith('/api/app/credentials')) return json({ global: [] })
     if (url.endsWith('/api/app/projects/archived')) return json({ archived: [] })
     return new Response('not found', { status: 404 })
   }
 
   const controller = new NeutronChatController({
-    projectId: PROJECT,
+    projectId: scope === 'general' ? null : PROJECT,
     createSession: (sinks) =>
       new WebChatSession({
         url: 'wss://t/ws/app/chat',
@@ -193,7 +210,7 @@ async function mountShell(layout: LayoutName): Promise<Mounted> {
     wsUrl: 'wss://t/ws/app/chat',
     topicId: TOPIC,
     userId: 'owner',
-    projectId: PROJECT,
+    projectId: scope === 'general' ? null : PROJECT,
     projects: [
       { id: PROJECT, label: 'Acme' },
       { id: 'beta', label: 'Beta' },
@@ -233,6 +250,7 @@ async function mountShell(layout: LayoutName): Promise<Mounted> {
 
   return {
     root: container,
+    requests,
     /** Type into the real composer the way a keyboard does, so React sees it. */
     async typeDraft(): Promise<void> {
       const input = container.querySelector('.car-input') as HTMLTextAreaElement | null
@@ -345,6 +363,38 @@ describe('reachability — the app shell, in every layout we ship', () => {
       expect(report).toBe('')
     }, 30_000)
   }
+
+  for (const layout of Object.keys(LAYOUTS) as LayoutName[]) {
+    it(`the owner can reach manual Codex rotation in General Admin at ${layout}`, async () => {
+      const mounted = await mountShell(layout, true)
+      try {
+        await mounted.openAdmin()
+        const button = mounted.root.querySelector('[data-testid="cint-codex-rotate"]') as HTMLButtonElement | null
+        expect(button?.disabled).toBe(false)
+        expect(button?.textContent).toContain('Switch to next available account')
+        expect(mounted.root.querySelector('[data-testid="cint-codex-active-account"]')?.textContent)
+          .toContain('default')
+        expect(mounted.requests.some((url) => url.endsWith('/api/app/tabs'))).toBe(true)
+        expect(mounted.requests.some((url) => url.endsWith(`/api/app/projects/${PROJECT}/tabs`))).toBe(false)
+      } finally {
+        await mounted.unmount()
+      }
+    }, 30_000)
+  }
+
+  it('keeps the global Codex control out of a named project', async () => {
+    const mounted = await mountShell('wide', true, 'project')
+    try {
+      await mounted.openAdmin()
+      expect(mounted.requests.some((url) => url.endsWith(`/api/app/projects/${PROJECT}/tabs`))).toBe(true)
+      expect(mounted.requests.some((url) => url.endsWith('/api/app/tabs'))).toBe(false)
+      expect(mounted.requests.some((url) => url.endsWith('/api/app/codex-auth/rotation'))).toBe(false)
+      expect(mounted.root.querySelector('[data-testid="header-menu-item-admin"]')).toBeNull()
+      expect(mounted.root.querySelector('[data-testid="cint-codex-rotate"]')).toBeNull()
+    } finally {
+      await mounted.unmount()
+    }
+  }, 30_000)
 
   it('no capability quietly disappears between layouts', () => {
     const layouts = Object.keys(LAYOUTS) as LayoutName[]
