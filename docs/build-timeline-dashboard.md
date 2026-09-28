@@ -129,10 +129,11 @@ instead of enumerating the tree. Each call reads exactly one canonical absolute
 dated rollout, applies only that source's options, and returns observations,
 coverage, private source identity, scan byte counts and a serializable checkpoint.
 The initial backfill streams at most 1 GiB; later calls read only bytes after the
-checkpoint's last complete line. Context and receipt records are retained in a
+checkpoint's captured byte boundary. Context and receipt records are retained in a
 private journal capped at 128 MiB and one million records; transcript-only records
 are discarded. Each scan also caps lines at one million and individual lines at
-8 MiB. A partial final line is deferred and explicitly reports incomplete coverage.
+8 MiB. Bounded unfinished final-line bytes persist in the checkpoint and are
+prepended to the next append before parsing; they explicitly report incomplete coverage.
 Unchanged sources read zero rollout bytes. Retained receipts are reinterpreted
 under the current source config, preserving historical turn model/usage context.
 

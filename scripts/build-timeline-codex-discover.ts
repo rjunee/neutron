@@ -62,6 +62,8 @@ export interface CodexRolloutCheckpoint {
   mtimeNs: string
   ctimeNs: string
   offset: number
+  /** Base64 bytes of the unfinished final line, not yet passed to the parser. */
+  pending: string
   lines: string[]
 }
 
@@ -91,7 +93,8 @@ export async function importRegisteredCodexRollout(sessionsRoot: string, path: s
   if (checkpoint && (checkpoint.version !== 1 || checkpoint.path !== path ||
       checkpoint.dev !== String(stat.dev) || checkpoint.ino !== String(stat.ino) ||
       !Number.isSafeInteger(checkpoint.size) || checkpoint.size < 0 || checkpoint.size > size ||
-      !Number.isSafeInteger(checkpoint.offset) || checkpoint.offset < 0 || checkpoint.offset > checkpoint.size ||
+      checkpoint.offset !== checkpoint.size || typeof checkpoint.pending !== 'string' ||
+      checkpoint.pending.length > Math.ceil(MAX_LINE_BYTES / 3) * 4 ||
       !/^\d+$/.test(checkpoint.mtimeNs) || !/^\d+$/.test(checkpoint.ctimeNs) ||
       (checkpoint.size === size && (checkpoint.mtimeNs !== String(stat.mtimeNs) || checkpoint.ctimeNs !== String(stat.ctimeNs))) ||
       !Array.isArray(checkpoint.lines) || checkpoint.lines.length > 1_000_000 ||
@@ -99,9 +102,14 @@ export async function importRegisteredCodexRollout(sessionsRoot: string, path: s
     throw new Error('Invalid or changed native checkpoint')
   }
   const lines = checkpoint ? [...checkpoint.lines] : []
+  let pending: Buffer = checkpoint ? Buffer.from(checkpoint.pending, 'base64') : Buffer.alloc(0)
+  if (pending.length > MAX_LINE_BYTES || pending.length > (checkpoint?.size ?? 0) ||
+      (checkpoint && pending.toString('base64') !== checkpoint.pending) || pending.includes(10)) {
+    throw new Error('Invalid native checkpoint pending bytes')
+  }
   let retainedBytes = lines.reduce((sum, line) => sum + Buffer.byteLength(line) + 1, 0)
   if (retainedBytes > MAX_SOURCE_BYTES) throw new Error('Native receipt journal exceeds bounds')
-  let offset = checkpoint?.offset ?? 0, position = offset, pending = Buffer.alloc(0), scanned = 0
+  let position = checkpoint?.offset ?? 0, scanned = 0, readBytes = 0
   const file = await open(path, constants.O_RDONLY | constants.O_NOFOLLOW | constants.O_NONBLOCK)
   try {
     const current = await file.stat({ bigint: true })
@@ -112,12 +120,12 @@ export async function importRegisteredCodexRollout(sessionsRoot: string, path: s
       const { bytesRead } = await file.read(chunk, 0, Math.min(chunk.length, size - position), position)
       if (!bytesRead) throw new Error('Native rollout changed during read')
       position += bytesRead
+      readBytes += bytesRead
       pending = Buffer.concat([pending, chunk.subarray(0, bytesRead)])
       let start = 0, end: number
       while ((end = pending.indexOf(10, start)) !== -1) {
         if (++scanned > 1_000_000 || end - start > MAX_LINE_BYTES) throw new Error('Native discovery exceeds bounds')
         const line = pending.subarray(start, end).toString('utf8')
-        offset += end - start + 1
         start = end + 1
         // Keep invalid records as evidence of malformed coverage; bound them just
         // like relevant receipts. Valid transcript-only records can be discarded.
@@ -145,9 +153,9 @@ export async function importRegisteredCodexRollout(sessionsRoot: string, path: s
   const result = await importCodexOperations(lines, options)
   if (pending.length || size === 0) result.coverage.incomplete++
   const next: CodexRolloutCheckpoint = { version: 1, path, dev: String(stat.dev), ino: String(stat.ino),
-    size, mtimeNs: String(stat.mtimeNs), ctimeNs: String(stat.ctimeNs), offset, lines }
+    size, mtimeNs: String(stat.mtimeNs), ctimeNs: String(stat.ctimeNs), offset: size, pending: pending.toString('base64'), lines }
   return { ...result, source: { dev: stat.dev, ino: stat.ino },
-    scan: { sourceBytes: size, readBytes: size - (checkpoint?.offset ?? 0), partial: pending.length > 0 }, checkpoint: next }
+    scan: { sourceBytes: size, readBytes, partial: pending.length > 0 }, checkpoint: next }
 }
 
 /** The dated native layout is the discovery boundary; unrelated files are ignored. */

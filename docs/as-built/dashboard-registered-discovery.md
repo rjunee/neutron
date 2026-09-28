@@ -3,14 +3,15 @@
 The whole-tree collector snapshots all dated rollouts before a caller can select
 registered sources. Its aggregate file/byte limits therefore reject a large
 history even when the required registrations form a small subset
-(`scripts/build-timeline-codex-discover.ts:154`). Raising that aggregate limit
+(`scripts/build-timeline-codex-discover.ts:162`). Raising that aggregate limit
 would retain unrelated transcript data and repeat the full read every refresh.
 
 `importRegisteredCodexRollout` now validates one canonical dated path, opens a
 verified descriptor and streams a fixed initial byte boundary without enumerating
-the tree (`scripts/build-timeline-codex-discover.ts:74`). A private serializable
-checkpoint retains only relevant native context and receipts plus the complete-line
-cursor. Restarted refreshes read appended bytes; unchanged sources read none.
+the tree (`scripts/build-timeline-codex-discover.ts:76`). A private serializable
+checkpoint retains relevant native context and receipts plus the captured byte
+cursor and bounded unfinished-line bytes. Restarted refreshes read appended bytes;
+unchanged sources read none, including sources with an unfinished final line.
 Historical receipts are re-imported using the source's current attribution config,
 so the cursor never becomes permission to borrow another registration's binding.
 Incomplete final lines defer until completed. Hard bounds cover source size,
@@ -33,7 +34,11 @@ refusal, replacement, rewrite and truncation. Root and Trident TypeScript checks
 passed. Bidirectional semantic controls failed as intended: suppressing retained
 receipts broke the authenticated dashboard positive control; accepting a same-size
 checkpoint rewrite broke its refusal control. Restoring both changes returned all
-21 discovery tests to green.
+21 discovery tests to green. Review also required unchanged partial lines to read
+zero bytes. The checkpoint now persists bounded unfinished bytes with the captured
+cursor; both rereading those bytes and discarding them were separately mutated and
+rejected by the restart/append consuming test. The restored 56 focused tests and
+both TypeScript checks passed again.
 
 This change supplies the library mechanism and reviewed acceptance criteria.
 Private consumer durability, operator backfill and served activation remain
