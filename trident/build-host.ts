@@ -206,7 +206,7 @@ export function createBuildHost(options: BuildHostOptions): { deps: BuildRunDeps
         if (provenance.kind !== 'allow') return provenance
       }
       if (!proof.ok) return proof.repair
-        ? { kind: 'repair-nomination', finding: `Mutation nomination is invalid: ${proof.repair.detail}. Supply a corrected nomination for the repaired commit; the mutation prover must still pass.` }
+        ? { kind: 'repair-nomination', finding: `Mutation nomination is ${proof.repair.kind === 'missing-nomination' ? 'missing' : 'invalid'}: ${proof.repair.detail}. Supply a corrected nomination for the repaired commit; the mutation prover must still pass.` }
         : { kind: 'blocked', on: [proof.reason, mutationFailureSummary(proof.evidence)].filter(Boolean).join('; ') }
       const readiness = mergeMode === 'local' ? await localReadiness(snapshot) : await publicationReadiness(options.mutation.run_host, options.mutation.run.repo_path, options.mutation.run.branch ?? `trident/${options.mutation.run.slug}`, options.mutation.base_branch, options.leak.base_sha, snapshot, options.mutation.run.id)
       if (readiness.kind !== 'allow') return readiness

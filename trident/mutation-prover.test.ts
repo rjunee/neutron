@@ -5168,7 +5168,7 @@ describe('runMutationProofGate — the phase between APPROVE and merge', () => {
     }
   }
 
-  test('only deterministic invalid nominations are repairable; proof and infrastructure refusals stay terminal', async () => {
+  test('deterministic invalid or missing nominations are repairable; proof and infrastructure refusals stay terminal', async () => {
     for (const scenario of ['bare', 'valid', 'infrastructure', 'behaviour', 'missing', 'moved'] as const) {
       const fs = memFs({ [join(proofWorktreePath('/repo', RUN), CLAIM.file)]: SRC_BEFORE })
       const claim = scenario === 'missing' ? null : scenario === 'bare' || scenario === 'moved'
@@ -5186,10 +5186,41 @@ describe('runMutationProofGate — the phase between APPROVE and merge', () => {
       if (scenario === 'bare') {
         expect(out.repair).toMatchObject({ kind: 'invalid-nomination', detail: expect.stringContaining('not a test runner on the prover allowlist') })
         expect(out.evidence).toMatchObject({ proved: false, observed: null })
+      } else if (scenario === 'missing') {
+        expect(out.repair).toMatchObject({ kind: 'missing-nomination', detail: expect.stringContaining('src/limit.ts') })
+        expect(out.evidence).toBeNull()
+        expect(out.exempt).toBe(false)
       } else expect(out.repair).toBeUndefined()
       if (scenario === 'infrastructure') expect(out.reason).toContain('worktree')
       if (scenario === 'behaviour') expect(out.evidence?.observed).not.toBeNull()
       if (scenario === 'moved') expect(out.reason).toContain('branch moved')
+    }
+  })
+
+  test('missing nomination repair requires a readable diff, surviving executable target and stable known head', async () => {
+    for (const scenario of ['executable', 'fixture', 'config', 'deleted', 'unreadable', 'unknown', 'moved', 'wrong-pin', 'unauthenticated'] as const) {
+      const deps = gateDeps(scenario === 'config' ? '.github/workflows/ci.yml\0'
+        : scenario === 'fixture' ? 'tests/fixtures/cli.ts\0' : 'src/limit.ts\0')
+      const original = deps.run_host
+      let heads = 0
+      deps.run_host = async (...args) => {
+        if (args[0].includes('rev-parse')) {
+          heads++
+          if (scenario === 'unknown') return res(128, '')
+          if (scenario === 'moved' && heads > 1) return res(0, 'b'.repeat(40))
+        }
+        if (args[0].includes('--name-status')) {
+          if (scenario === 'unreadable') return res(128, '')
+          if (scenario === 'deleted') return diffRes('D\0src/limit.ts\0')
+        }
+        return original(...args)
+      }
+      const out = await runMutationProofGate({ run: RUN, claim: scenario === 'unauthenticated' ? undefined : null, base_branch: 'main', ...deps,
+        ...(scenario === 'wrong-pin' ? { expected_head: 'b'.repeat(40) } : {}) })
+      expect(out.ok).toBe(false)
+      expect(out.exempt).toBe(false)
+      expect(out.evidence).toBeNull()
+      expect(out.repair?.kind).toBe(['executable', 'fixture'].includes(scenario) ? 'missing-nomination' : undefined)
     }
   })
 

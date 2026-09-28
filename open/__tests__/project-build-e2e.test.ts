@@ -389,7 +389,8 @@ interface WorkerWorld {
   readSelectedRun: (runId: string) => ReturnType<TridentRunStore['get']>
   reviewVeto?: 'standalone' | 'synthesis'
   numericBuildPr?: boolean
-  mutationArgv?: 'bare' | 'valid'
+  mutationArgv?: 'bare' | 'valid' | 'missing'
+  mutationFile?: string
   commitAttribution?: 'direct' | 'wrapped'
   extraBuildFiles?: Record<string, string>
   run: Runner
@@ -717,12 +718,13 @@ async function performRole(world: WorkerWorld, request: BoundedWorkRequest, brie
       await gitOut(world.run, cwd, ['add', '--', file])
     }
     if (world.mutationArgv) {
-      await mkdir(join(cwd, 'src'), { recursive: true })
+      const mutationFile = world.mutationFile ?? 'src/limit.ts'
+      await mkdir(dirname(join(cwd, mutationFile)), { recursive: true })
       await mkdir(join(cwd, 'tests'), { recursive: true })
-      await writeFile(join(cwd, 'src/limit.ts'), 'export const limit = (n: number, max: number) => n > max ? max : n\n')
-      await writeFile(join(cwd, 'tests/limit.test.ts'), "import { test, expect } from 'bun:test'\nimport { limit } from '../src/limit.ts'\ntest('clamps', () => expect(limit(7, 3)).toBe(3))\n")
-      await writeFile(join(cwd, 'tests/control.test.ts'), "import { test, expect } from 'bun:test'\nimport { limit } from '../src/limit.ts'\ntest('preserves', () => expect(limit(2, 3)).toBe(2))\n")
-      await gitOut(world.run, cwd, ['add', '--', 'src/limit.ts', 'tests/limit.test.ts', 'tests/control.test.ts'])
+      await writeFile(join(cwd, mutationFile), 'export const limit = (n: number, max: number) => n > max ? max : n\n')
+      await writeFile(join(cwd, 'tests/limit.test.ts'), `import { test, expect } from 'bun:test'\nimport { limit } from '../${mutationFile}'\ntest('clamps', () => expect(limit(7, 3)).toBe(3))\n`)
+      await writeFile(join(cwd, 'tests/control.test.ts'), `import { test, expect } from 'bun:test'\nimport { limit } from '../${mutationFile}'\ntest('preserves', () => expect(limit(2, 3)).toBe(2))\n`)
+      await gitOut(world.run, cwd, ['add', '--', mutationFile, 'tests/limit.test.ts', 'tests/control.test.ts'])
     }
     await gitOut(world.run, cwd, ['add', '--', 'NOTES.md',
       ...(commitsPlan && !world.hostLedger ? ['IMPLEMENTATION_PLAN.md'] : [])])
@@ -752,7 +754,7 @@ async function performRole(world: WorkerWorld, request: BoundedWorkRequest, brie
     const head = await gitOut(world.run, world.repo, ['rev-parse', '--verify', `refs/heads/${branch}^{commit}`])
     const diff = await measureDiff(world.run, world.repo, snapshot.head, head, world.scratch)
     return { head, diff, pr: snapshot.pr, payload: {
-      mutationClaim: world.mutationArgv ? { file: 'src/limit.ts', find: 'n > max ? max : n', replace: 'n',
+      mutationClaim: world.mutationArgv && world.mutationArgv !== 'missing' ? { file: world.mutationFile ?? 'src/limit.ts', find: 'n > max ? max : n', replace: 'n',
         guard: [...(world.mutationArgv === 'valid' ? ['bun', 'test'] : []), 'tests/limit.test.ts'],
         control: [...(world.mutationArgv === 'valid' ? ['bun', 'test'] : []), 'tests/control.test.ts'] } : null,
       worktreePath: cwd, branch, commitSha: head, prNumber: null,
@@ -2304,7 +2306,8 @@ test(`publication mutation uses the launch pin with stale local main: ${producti
 
   const outcome = await drive(f)
   if (productionChange) {
-    expect(outcome, why(f, outcome)).toMatchObject({ kind: 'blocked', phase: 'publish', on: expect.stringContaining('nominated no mutation') })
+    expect(outcome, why(f, outcome)).toMatchObject({ kind: 'blocked', phase: 'publish', on: expect.stringContaining('repeated finding') })
+    expect(f.world.dispatches.filter(dispatch => dispatch.role === 'fix')).toHaveLength(1)
     expect(f.github.prs.some(pr => pr.state === 'MERGED')).toBe(false)
   } else {
     expect(outcome.kind, why(f, outcome)).toBe('merged')
@@ -2861,7 +2864,8 @@ test(`base drift refresh retains terminal task work and renews release evidence:
     return
   }
   if (scenario === 'production') {
-    expect(outcome).toMatchObject({ kind: 'blocked', phase: 'publish', on: expect.stringContaining('candidate.ts') })
+    expect(outcome).toMatchObject({ kind: 'blocked', phase: 'publish', on: expect.stringContaining('no-progress'),
+      reviewStop: { current: { findings: [expect.stringContaining('candidate.ts')] } } })
     expect(f.github.prs.some(pr => pr.state === 'MERGED')).toBe(false)
     expect(f.world.dispatches.filter(call => call.role === 'fix')).toHaveLength(1)
     return
@@ -6562,11 +6566,19 @@ test(`pending native fix recovery preserves repeated-finding enforcement with ${
   expect(f.github.prs[0]!.state).toBe('OPEN')
 }, 30_000)
 
-for (const scenario of ['bare', 'valid', 'repeated', 'exhausted', 'forged-fix', 'wrong-head-fix', 'wrong-run', 'wrong-step'] as const)
+for (const scenario of ['missing', 'missing-repeated', 'missing-exhausted', 'bare', 'valid', 'repeated', 'exhausted', 'forged-fix', 'wrong-head-fix', 'wrong-run', 'wrong-step'] as const)
 test(`unchanged-tip retry consumes prior ${scenario} mutation nomination despite new worker brief`, async () => {
-  const argv = scenario === 'valid' ? 'valid' : 'bare'
+  const missing = scenario.startsWith('missing')
+  const repeated = scenario === 'repeated' || scenario === 'missing-repeated'
+  const exhausted = scenario === 'exhausted' || scenario === 'missing-exhausted'
+  const argv = missing ? 'missing' : scenario === 'valid' ? 'valid' : 'bare'
   const task = 'Implement a bounded numeric limit and verify clamping and below-limit preservation with separate behavioural regression tests'
-  const f = await fixture({ dispatchTask: task, maxRounds: scenario === 'exhausted' ? 1 : 5 })
+  const f = await fixture({ dispatchTask: task, taskSequence: missing, maxRounds: exhausted ? 1 : 5 })
+  if (missing) {
+    f.world.mutationFile = 'tests/fixtures/trident-sequence-trace/cli.ts'
+    await f.store.update(f.row.id, { task_iteration: 2 })
+    f.input.run = f.store.get(f.row.id)!
+  }
   f.world.mutationArgv = argv
   f.github.refuse.add('create')
   const priorHost = await createProjectBuildHost(await f.prepare())
@@ -6578,7 +6590,7 @@ test(`unchanged-tip retry consumes prior ${scenario} mutation nomination despite
     return result.kind === 'repair-nomination' ? { kind: 'blocked', on: result.finding } : result
   }
   const first = await priorHost.run({ mode: 'implementation', start: 'fresh' }, new AbortController().signal)
-  expect(first.kind, why(f, first)).toBe(argv === 'bare' ? 'blocked' : 'unknown')
+  expect(first.kind, why(f, first)).toBe(argv !== 'valid' ? 'blocked' : 'unknown')
   const checkpoint = lastCheckpoint(f)
   expect(checkpoint).toMatchObject({ stage: 'built', round: 1 })
   expect(checkpoint.pending).toBeUndefined()
@@ -6590,7 +6602,8 @@ test(`unchanged-tip retry consumes prior ${scenario} mutation nomination despite
   f.github.prs.push({ number: 1, state: 'OPEN', headRefName: prior.branch!, baseRefName: 'main' })
   await f.store.update(prior.id, { phase: 'failed', worktree: null, pr: 1, published_pr: 1 })
   const originalArtifact = await readFile(join(f.context.stateRoot, prior.id, 'build.result'), 'utf8')
-  expect(JSON.parse(originalArtifact).result.payload.mutationClaim.guard)
+  if (missing) expect(JSON.parse(originalArtifact).result.payload.mutationClaim).toBeNull()
+  else expect(JSON.parse(originalArtifact).result.payload.mutationClaim.guard)
     .toEqual(argv === 'bare' ? ['tests/limit.test.ts'] : ['bun', 'test', 'tests/limit.test.ts'])
   if (scenario === 'forged-fix' || scenario === 'wrong-head-fix') {
     const forged = JSON.parse(originalArtifact)
@@ -6610,7 +6623,7 @@ test(`unchanged-tip retry consumes prior ${scenario} mutation nomination despite
   const retainedArtifact = await readFile(join(f.context.stateRoot, prior.id, 'build.result'), 'utf8')
   const dispatched = await dispatchBoardBoundBuild({ task, board_item_id: 'retry-card' }, {
     store: f.store, projectAdmission: fixtureDispatchAdmission(f.db), project_slug: 'project', repo_path: f.repo,
-    max_rounds: scenario === 'exhausted' ? 1 : 5,
+    max_rounds: exhausted ? 1 : 5,
     board: { get: () => ({ id: 'retry-card', title: task, design_doc_ref: null, linked_run_id: prior.id }), attachRun: async () => {} },
     resolveBuildRepo: async () => f.repo, resolveMergeMode: async () => 'pr',
   })
@@ -6618,11 +6631,13 @@ test(`unchanged-tip retry consumes prior ${scenario} mutation nomination despite
   if (!dispatched.ok) return
   expect(dispatched.run.inner_checkpoint_head).toBe(String(checkpoint.head))
   expect(dispatched.run.published_pr).toBe(1)
+  expect(dispatched.run.task_iteration).toBe(prior.task_iteration)
+  expect(dispatched.run.max_task_iterations).toBe(prior.max_task_iterations)
   f.world.dispatches.length = 0
   f.github.refuse.delete('create')
   // Any genuinely requested new worker could return the corrected executable
   // nomination; the reproduction proves whether the loop ever asks one.
-  f.world.mutationArgv = scenario === 'repeated' ? 'bare' : 'valid'
+  f.world.mutationArgv = repeated ? argv : 'valid'
   let settled!: () => void
   const completion = new Promise<void>(resolve => { settled = resolve })
   const record = f.store.recordStageEvent.bind(f.store)
@@ -6646,28 +6661,34 @@ test(`unchanged-tip retry consumes prior ${scenario} mutation nomination despite
   const terminal = await orch.step(f.store.get(dispatched.run.id)!)
   expect(await f.store.saveIfActive(terminal.run)).toBe(true)
   const result = JSON.parse(f.store.get(dispatched.run.id)!.inner_result!).projectBuild
-  const blocked = scenario === 'repeated' || scenario === 'exhausted' || invalidIdentity
+  const blocked = repeated || exhausted || invalidIdentity
   expect(result.kind, JSON.stringify(result)).toBe(blocked ? 'blocked' : 'merged')
-  if (blocked) expect(result.on).toContain(invalidIdentity ? 'mutation' : scenario === 'repeated' ? 'repeated finding' : 'round ceiling')
+  if (blocked) expect(result.on).toContain(invalidIdentity ? 'mutation' : repeated ? 'repeated finding' : 'round ceiling')
   expect(f.world.dispatches.some(dispatch => ['plan', 'build'].includes(dispatch.role))).toBe(false)
   expect(f.world.dispatches.filter(dispatch => dispatch.role === 'fix').map(dispatch => dispatch.step_id))
-    .toEqual(argv === 'bare' && scenario !== 'exhausted' && !invalidIdentity ? [`${dispatched.run.id}:fix:1`] : [])
+    .toEqual(argv !== 'valid' && !exhausted && !invalidIdentity ? [`${dispatched.run.id}${missing ? ':task:2' : ''}:fix:1`] : [])
   expect(f.github.prs[0]!.state).toBe(blocked ? 'OPEN' : 'MERGED')
   const checkpoints = f.store.stageEvents(dispatched.run.id).filter(event => event.stage === 'build-mode-state')
     .map(event => JSON.parse(event.meta!).checkpoint)
-  if (argv === 'bare' && !invalidIdentity) expect(checkpoints).toContainEqual(expect.objectContaining({ stage: 'rejected', head: checkpoint.head, round: 1 }))
-  if (scenario === 'repeated') expect(checkpoints.at(-1)).toMatchObject({ stage: 'rejected', round: 2 })
+  if (argv !== 'valid' && !invalidIdentity) expect(checkpoints).toContainEqual(expect.objectContaining({ stage: 'rejected', head: checkpoint.head, round: 1 }))
+  if (repeated) expect(checkpoints.at(-1)).toMatchObject({ stage: 'rejected', round: 2 })
+  if (missing && blocked) {
+    expect(f.store.get(dispatched.run.id)!.inner_verdict).toBe('REVIEW_NOT_RUN')
+    expect(f.world.dispatches.some(dispatch => dispatch.role === 'review')).toBe(false)
+  }
   expect(await readFile(join(f.context.stateRoot, prior.id, 'build.result'), 'utf8')).toBe(retainedArtifact)
 }, 300_000)
 
-test('local invalid nomination gets one bounded fix and a fresh review before local merge', async () => {
-  const f = await fixture({ mergeMode: 'local', maxRounds: 3 })
-  f.world.mutationArgv = 'bare'
+for (const nomination of ['bare', 'missing'] as const)
+for (const mergeMode of ['local', 'pr'] as const)
+test(`${mergeMode} ${nomination} nomination gets one bounded fix and a fresh review before merge`, async () => {
+  const f = await fixture({ mergeMode, maxRounds: 3 })
+  f.world.mutationArgv = nomination
   const host = await createProjectBuildHost(await f.prepare())
   const prepare = host.deps.prepareWork
   host.deps.prepareWork = async (request, context) => {
     if (request.role === 'fix') {
-      expect(context.findings.join('\n')).toContain('not a test runner on the prover allowlist')
+      expect(context.findings.join('\n')).toContain(nomination === 'missing' ? 'nominated no mutation' : 'not a test runner on the prover allowlist')
       f.world.mutationArgv = 'valid'
     }
     await prepare(request, context)
@@ -6676,8 +6697,9 @@ test('local invalid nomination gets one bounded fix and a fresh review before lo
   expect(outcome.kind, why(f, outcome)).toBe('merged')
   expect(f.world.dispatches.filter(dispatch => dispatch.step_id.startsWith(`${f.row.id}:`)
     && ['review', 'fix'].includes(dispatch.role)).map(dispatchStep))
-    .toEqual([`${f.row.id}:review:1`, `${f.row.id}:fix:1`, `${f.row.id}:review:2`])
-  expect(f.github.prs).toEqual([])
+    .toEqual([...(mergeMode === 'local' ? [`${f.row.id}:review:1`] : []), `${f.row.id}:fix:1`, `${f.row.id}:review:2`])
+  if (mergeMode === 'local') expect(f.github.prs).toEqual([])
+  else expect(f.github.prs[0]!.state).toBe('MERGED')
 }, 300_000)
 
 for (const mergeMode of ['pr', 'local'] as const)

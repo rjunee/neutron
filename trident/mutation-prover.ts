@@ -4180,7 +4180,7 @@ export async function spawnGuardCommand(
 
 export interface MutationGateOutcome {
   /** A deterministic nomination refusal, never a proof or infrastructure failure. */
-  repair?: { kind: 'invalid-nomination'; detail: string }
+  repair?: { kind: 'invalid-nomination' | 'missing-nomination'; detail: string }
   /** May this APPROVE proceed to merge? */
   ok: boolean
   /**
@@ -4207,7 +4207,8 @@ export interface MutationGateOutcome {
 export interface MutationGateInput {
   run: Pick<TridentRun, 'id' | 'slug' | 'repo_path' | 'branch'>
   /** The UNTRUSTED nomination harvested off the inner result. */
-  claim: MutationClaim | null
+  /** Null is a verified omission; undefined means no authenticated result. */
+  claim: MutationClaim | null | undefined
   base_branch: string
   run_host: RunHostCommand
   /**
@@ -4512,8 +4513,8 @@ export function legalMutationTargets(files: readonly string[] | null, deleted: r
  * so reaching it means the two disagreed — a gate defect, and the message
  * says so, naming a file it considered and why it was disqualified.
  */
-/** A source extension an allowlisted runner actually executes — used ONLY to
- *  pick which legal target the refusal names, never to decide legality. */
+/** A source extension an allowlisted runner executes. This narrows nomination
+ * repair eligibility and diagnostic hints, never proof exemptions. */
 const EXECUTABLE_SOURCE = /\.([cm]?[jt]sx?|go|py|rs)$/
 
 /**
@@ -4788,7 +4789,19 @@ export async function runMutationProofGate(input: MutationGateInput): Promise<Mu
   }
 
   if (input.claim === null || input.claim === undefined) {
-    return { ok: false, reason: missingClaimRefusalReason(files, deleted), exempt: false, evidence: null }
+    const reason = missingClaimRefusalReason(files, deleted)
+    // Only host-read, surviving executable targets can make an omission
+    // repairable. Unknown diffs, deletions and config-only changes stay closed.
+    // Recheck the pin just as the proof path does: a moved head cannot inherit
+    // even the measured eligibility of this candidate. Repair is never proof.
+    const executable = input.claim === null
+      && legalMutationTargets(files, deleted).some(file => EXECUTABLE_SOURCE.test(file))
+    if (executable && !await headStillAt(input, pinnedSha)) {
+      return { ok: false, reason: 'mutation proof rejected: the branch moved while nomination repair was being decided',
+        exempt: false, evidence: null }
+    }
+    return { ok: false, reason, exempt: false, evidence: null,
+      ...(executable ? { repair: { kind: 'missing-nomination' as const, detail: reason } } : {}) }
   }
 
   // BIND THE PROOF TO THIS PR. Without this the gate certifies nothing about the

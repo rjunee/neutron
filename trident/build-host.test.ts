@@ -155,7 +155,7 @@ test.each(['valid', 'production', 'missing', 'forged-base', 'missing-base', 'mov
     const result = await f.make().deps.publishGate(published, 'pr')
     if (fault === 'valid') expect(result).toEqual({ kind: 'allow' })
     else if (fault === 'production' || fault === 'missing') {
-      expect(result.kind).toBe('blocked')
+      expect(result.kind).toBe('repair-nomination')
       expect(JSON.stringify(result)).toContain('nominated no mutation')
     } else expect(result.kind).toBe('unknown')
     expect(f.options.leak.base_sha).toBe(launchBase)
@@ -253,10 +253,10 @@ test('complete diff size gate blocks oversized bytes', async () => {
   expect(deps.assessMergeDiff('x'.repeat(MERGE_DIFF_BYTES_MAX + 1))).toMatchObject({ allow: false })
 })
 
-test('mutation proof blocks missing nomination and pins the reviewed head', async () => {
+test('mutation proof requires repair for missing nomination and pins the reviewed head', async () => {
   const f = await fixture()
   const { deps } = f.make()
-  expect(await deps.publishGate(snapshot)).toMatchObject({ kind: 'blocked', on: expect.stringContaining('nominated no mutation') })
+  expect(await deps.publishGate(snapshot)).toMatchObject({ kind: 'repair-nomination', finding: expect.stringContaining('nominated no mutation') })
   f.prose()
   expect(await deps.publishGate(snapshot)).toMatchObject({ kind: 'allow' })
   expect(await deps.publishGate({ ...snapshot, head: 'c'.repeat(40) })).toMatchObject({ kind: 'blocked', on: expect.stringContaining('branch tip') })
