@@ -195,14 +195,22 @@ describe('conversation REPL model on phone', () => {
   });
 
   it('renders authoritative current/list and switches in the same session', async () => {
+    const modelUrl = 'https://example.test/api/app/projects/willow/repl-model';
     const screen = await mount();
-    expect(calls[0]).toMatchObject({ url: 'https://example.test/api/app/projects/willow/repl-model',
-      method: 'GET', token: 'Bearer test-token' });
+    expect(calls.filter(call => call.url === modelUrl && call.method === 'GET'))
+      .toContainEqual({ url: modelUrl, method: 'GET', body: null, token: 'Bearer test-token' });
+    // The full device lane once recorded an unrelated GET in this position.
+    // Preserve that ordering as a deterministic control for the POST assertion.
+    calls.splice(1, 0, { url: '/unrelated-model-read', method: 'GET', body: null, token: null });
+    expect(calls.some(call => call.url === '/unrelated-model-read' && call.method === 'GET')).toBe(true);
     expect(document.querySelector('[data-testid="repl-model-open"]')?.textContent).toContain('cheap');
     await press('repl-model-open');
     expect(document.querySelector('[data-testid="repl-model-option-frontier"]')).not.toBeNull();
     await press('repl-model-option-frontier');
-    expect(calls[1]).toMatchObject({ method: 'POST', body: { model: 'frontier', sessionId: 'session-one' } });
+    expect(calls.filter(call => call.url === modelUrl && call.method === 'POST')).toEqual([
+      { url: modelUrl, method: 'POST', body: { model: 'frontier', sessionId: 'session-one' },
+        token: 'Bearer test-token' },
+    ]);
     expect(document.querySelector('[data-testid="repl-model-open"]')?.textContent).toContain('frontier');
     screen.unmount();
   });
