@@ -96,7 +96,7 @@ test('refresh lock refuses registration and cannot be removed by the rejected ca
   expect((await importCodexFile(options.rollout, JSON.parse(await readFile(options.config, 'utf8')))).observations[0]).toMatchObject({ inputTokens: null, outputTokens: null })
 })
 
-test('missing trusted journal binding refuses; concurrent registrations share one lock and preserve the winning config', async () => {
+test('missing trusted journal binding refuses; a held registration lock rejects a distinct binding, whose retry preserves both', async () => {
   const options = await fixture()
   const original = await readFile(options.config, 'utf8')
   const { observationJournal: _journal, ...legacy } = JSON.parse(original)
@@ -104,10 +104,20 @@ test('missing trusted journal binding refuses; concurrent registrations share on
   await expect(registerNativeTurn(options)).rejects.toThrow('Configured observation journal required')
   expect(await readFile(options.config, 'utf8')).toBe(JSON.stringify(legacy))
   await writeFile(options.config, original)
-  const outcomes = await Promise.allSettled([registerNativeTurn(options), registerNativeTurn(options)])
-  expect(outcomes.filter(result => result.status === 'fulfilled')).toHaveLength(1)
-  expect(outcomes.filter(result => result.status === 'rejected')).toHaveLength(1)
-  expect(JSON.parse(await readFile(options.config, 'utf8')).turnBindings).toEqual([options.binding])
+  await appendFile(options.rollout, row('turn_context', { turn_id: 'turn-2', model: 'model-a' }))
+  const other = { ...options, binding: { ...options.binding, turnId: 'turn-2' } }
+  let entered!: () => void, release!: () => void
+  const locked = new Promise<void>(resolve => { entered = resolve })
+  const held = new Promise<void>(resolve => { release = resolve })
+  const first = registerNativeTurn(options, { afterLock: async () => { entered(); await held } })
+  try {
+    await locked
+    await expect(registerNativeTurn(other)).rejects.toThrow()
+    expect(await readFile(options.config, 'utf8')).toBe(original)
+  } finally { release() }
+  expect(await first).toBe('registered')
+  expect(await registerNativeTurn(other)).toBe('registered')
+  expect(JSON.parse(await readFile(options.config, 'utf8')).turnBindings).toEqual([options.binding, other.binding])
   expect(await registerNativeTurn(options)).toBe('already-registered')
 })
 

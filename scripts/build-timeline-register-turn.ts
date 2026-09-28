@@ -47,7 +47,10 @@ async function attestTurn(path: string, binding: Binding): Promise<void> {
 /** Serialize with the dashboard refresh/recorder. An atomic config replacement
  * lets an in-flight importer finish its old snapshot; the next refresh sees this binding.
  * The observation journal is never edited, and an existing attribution is immutable. */
-export async function registerNativeTurn(options: Registration): Promise<'registered' | 'already-registered'> {
+export async function registerNativeTurn(options: Registration, instrumentation: {
+  /** Observer barrier for deterministic contention tests; validation always follows. */
+  afterLock?: () => Promise<void>
+} = {}): Promise<'registered' | 'already-registered'> {
   if (!options.config || !options.rollout || !options.observations ||
       new Set([options.config, options.rollout, options.observations]).size !== 3) throw new Error('Distinct private paths required')
   const initial: RegistrationConfig = JSON.parse(await readFile(options.config, 'utf8'))
@@ -55,6 +58,7 @@ export async function registerNativeTurn(options: Registration): Promise<'regist
   const lock = await open(lockPath, 'wx', 0o600)
   const temporary = `${options.config}.${randomUUID()}.tmp`
   try {
+    await instrumentation.afterLock?.()
     const config: RegistrationConfig = JSON.parse(await readFile(options.config, 'utf8'))
     journal(config, options.observations)
     // Reuse the importer's scope/category/duplicate validator, before touching disk.

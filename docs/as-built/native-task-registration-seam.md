@@ -9,7 +9,7 @@ It writes the private config by atomic
 replacement at mode 0600, treats identical retries as no-ops, and refuses changed
 attribution. Existing observation journal bytes are never edited.
 
-Six focused tests, with 112 assertions, exercise root and child build/fix/review/test
+Six focused tests, with 114 assertions, exercise root and child build/fix/review/test
 tasks through native completion import and the authenticated dashboard API. They
 also prove wrong session/turn/repository and duplicate-link rejection, immutable
 attribution, shared-lock refusal, private transcript/path exclusion and unknown
@@ -17,7 +17,9 @@ tokens when receipts are missing. Start/end, model and disjoint token counts com
 from native receipts, not registration time or parent ownership.
 
 The registration, importer and dashboard API suites together pass 35 tests with
-367 assertions. Inverting native-turn existence causes four test failures;
+369 assertions. A deterministic barrier holds the first registration lock while
+a distinct turn is refused; retry after release preserves both bindings.
+Inverting native-turn existence causes four test failures;
 weakening the attribution-conflict predicate causes the immutability test to
 fail. Both mutations were reverted and the focused suites rerun successfully.
 The changed-file purity scan is silent; the full-tree local scan reports
