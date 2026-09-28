@@ -67,6 +67,8 @@ import { ProjectCredentialStore } from '@neutronai/project-credentials/store.ts'
 import { CodexCredentialService } from '@neutronai/trident/codex-credential.ts'
 import { SqliteCodexRotationStore } from '@neutronai/trident/codex-rotation-store.ts'
 import { seedMigratedDb } from '../../tests/support/migrated-db.ts'
+// eslint-disable-next-line import/no-relative-packages -- tests/ is root test-support, not a workspace package; no @neutronai specifier exists (same reason as the tests/support exceptions in eslint.config.mjs)
+import { summarizeUsageCoverage } from '../../tests/fixtures/trident-usage-coverage/summarize.ts'
 import { TridentRunStore } from '@neutronai/trident/store.ts'
 import { retryModeSource, readBuildRetrySource } from '@neutronai/trident/build-mode-state.ts'
 import { WorkBoardStore, workBoardProjectIdForKey } from '@neutronai/work-board/store.ts'
@@ -2317,6 +2319,16 @@ test('attempt accounting consumes native child measurements through the actual O
   expect(new TridentPhaseUsageStore(f.db).list(f.row.id)!.find(row => row.phase === 'review_adversarial')).toMatchObject({
     input_tokens: 14, output_tokens: 6, cache_read_tokens: 4,
   })
+  // Selected metric: each attempt's receipt input_tokens only. knownTokens is NOT total billed tokens, cache tokens or cost.
+  const supportedOutcomes: ReadonlyArray<string | null> = ['completed', 'failed']
+  const inputTokenRecords = attempts.map(attempt => {
+    // Supported outcomes are asserted, never coerced into completed/failed.
+    expect(supportedOutcomes).toContain(attempt.outcome)
+    const inputTokens = f.context.attempts.receipt(attempt)?.input_tokens ?? null
+    return { attemptId: JSON.stringify([attempt.run_id, attempt.step_id, attempt.attempt_id]), outcome: attempt.outcome, tokens: inputTokens }
+  })
+  // Five completed attempts, each measured at 7 input tokens; the host still merged above.
+  expect(summarizeUsageCoverage(inputTokenRecords)).toEqual({ knownTokens: 35, unknownAttempts: 0, complete: true })
 })
 
 test('attempt accounting keeps a provider-reported model without usage, merges unattended, and leaves every counter unknown', async () => {
@@ -2349,6 +2361,16 @@ test('attempt accounting keeps a provider-reported model without usage, merges u
     expect(receipt.model_reported).not.toBe(attempt.resolved_model)
   }
   expect(new TridentPhaseUsageStore(f.db).list(f.row.id)!.every(row => row.status === 'unknown' && row.input_tokens === null)).toBe(true)
+  // Selected metric: each attempt's receipt input_tokens only. knownTokens is NOT total billed tokens, cache tokens or cost.
+  const supportedOutcomes: ReadonlyArray<string | null> = ['completed', 'failed']
+  const inputTokenRecords = attempts.map(attempt => {
+    // Supported outcomes are asserted, never coerced into completed/failed.
+    expect(supportedOutcomes).toContain(attempt.outcome)
+    const inputTokens = f.context.attempts.receipt(attempt)?.input_tokens ?? null
+    return { attemptId: JSON.stringify([attempt.run_id, attempt.step_id, attempt.attempt_id]), outcome: attempt.outcome, tokens: inputTokens }
+  })
+  // All five input counts stay unknown (never zero); incomplete coverage did not veto the merge above.
+  expect(summarizeUsageCoverage(inputTokenRecords)).toEqual({ knownTokens: 0, unknownAttempts: 5, complete: false })
 }, 120_000)
 
 test('attempt accounting keeps explicit zero on successful work and partial usage on a failed build without authorizing it', async () => {
@@ -2372,6 +2394,16 @@ test('attempt accounting keeps explicit zero on successful work and partial usag
   expect(phases.find(row => row.phase === 'decomposition')).toMatchObject({ input_tokens: 0, output_tokens: 0, status: 'partial' })
   expect(phases.find(row => row.phase === 'build')).toMatchObject({ input_tokens: 23, output_tokens: 0, status: 'partial' })
   expect(f.github.prs.some(pr => pr.state === 'MERGED')).toBe(false)
+  // Selected metric: each attempt's receipt input_tokens only. knownTokens is NOT total billed tokens, cache tokens or cost.
+  const supportedOutcomes: ReadonlyArray<string | null> = ['completed', 'failed']
+  const inputTokenRecords = attempts.map(attempt => {
+    // Supported outcomes are asserted, never coerced into completed/failed.
+    expect(supportedOutcomes).toContain(attempt.outcome)
+    const inputTokens = f.context.attempts.receipt(attempt)?.input_tokens ?? null
+    return { attemptId: JSON.stringify([attempt.run_id, attempt.step_id, attempt.attempt_id]), outcome: attempt.outcome, tokens: inputTokens }
+  })
+  // Measured zero (plan) plus the failed build's 23 input tokens; complete coverage cannot authorize the failed run above.
+  expect(summarizeUsageCoverage(inputTokenRecords)).toEqual({ knownTokens: 23, unknownAttempts: 0, complete: true })
 })
 
 test('attempt accounting reopens the production host and consumes the same transport receipt without replay or double counting', async () => {
