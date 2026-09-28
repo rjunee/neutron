@@ -25,6 +25,9 @@ export function readStartupRepl(options: PersistentReplSubstrateOptions, session
   if (row !== undefined && !registryConversationScopeMatches(row, options)) {
     throw new Error('startup recovery conversation scope is ambiguous or mismatched')
   }
+  // Scope retirement preserves a resumable transcript, not authority to wake it
+  // during boot or the autonomous recovery sweep. A new admitted turn owns wake.
+  if (row?.asleep_at !== undefined) return undefined
   return row
 }
 

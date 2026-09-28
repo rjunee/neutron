@@ -13,9 +13,8 @@ import { join } from 'node:path'
 import { retiringSessionKeys } from '@neutronai/runtime/adapters/claude-code/persistent/pool-state.ts'
 import { resolveLiveProjectSessions } from '@neutronai/runtime/adapters/claude-code/persistent/live-project-sessions.ts'
 import { sessionJsonlPath } from '@neutronai/runtime/adapters/claude-code/persistent/jsonl-resumability.ts'
+import { readMcpServiceProof } from '@neutronai/runtime/adapters/claude-code/persistent/mcp-service-identity.ts'
 import {
-  DEFAULT_DEV_CHANNEL_PATH,
-  DEFAULT_TOOLS_BRIDGE_PATH,
   resolveTranscriptProjectsDir,
 } from '@neutronai/runtime/adapters/claude-code/persistent/signatures.ts'
 import type { ProjectAdmission } from '@neutronai/gateway/project-admission.ts'
@@ -30,7 +29,9 @@ import type { TridentRun } from '@neutronai/trident/store.ts'
 
 /** The census surface the composition exposes. `null` is General. */
 export interface ProjectLivenessSurface {
-  census(projectId: string | null): Promise<ProjectLivenessCensus>
+  /** Handoff excludes the requesting dispatch's scope activity; the exact pool
+   * session's turn state and all descendant evidence remain authoritative. */
+  census(projectId: string | null, options?: { excludePendingDispatch?: boolean }): Promise<ProjectLivenessCensus>
 }
 
 export interface ProjectLivenessProbeDeps {
@@ -48,7 +49,10 @@ const LIVE_RUNS_LIMIT = 1_000_000
 /**
  * The pool names General `'general'` or leaves it absent (`ReplSession.projectId`);
  * admission names it null. A real project whose id is literally `general` shares
- * that pool value today — the pool's existing boundary, not a new one.
+ * that pool value, so the sessions probe also drops candidates whose RECORDED
+ * conversation scope is positively another one (#1226: General and the literal
+ * `general` project are two scopes). A candidate with no recorded scope stays — it
+ * cannot be attributed, so it still reads ambiguous rather than absent.
  */
 function poolProjectIds(projectId: string | null): ReadonlyArray<string | undefined> {
   return projectId === null ? ['general', undefined] : [projectId]
@@ -57,7 +61,9 @@ function poolProjectIds(projectId: string | null): ReadonlyArray<string | undefi
 export function buildProjectLivenessProbes(deps: ProjectLivenessProbeDeps): ProjectLivenessProbes {
   return {
     sessions: async (projectId) => {
-      const resolved = await resolveLiveProjectSessions(poolProjectIds(projectId))
+      const resolved = await resolveLiveProjectSessions(poolProjectIds(projectId), {
+        excludeConversationScopesOtherThan: projectId,
+      })
       return {
         kind: 'answered',
         unresolved: resolved.unresolved,
@@ -78,6 +84,7 @@ export function buildProjectLivenessProbes(deps: ProjectLivenessProbeDeps): Proj
             poisoned: session.poisoned,
             retiring: retiringSessionKeys.has(sessionKey),
             subagentsDirectory,
+            mcpChannelName: session.channelName,
           }
         }),
       }
@@ -94,15 +101,24 @@ export function buildProjectLivenessProbes(deps: ProjectLivenessProbeDeps): Proj
         }
       : {}),
     subagentActivity: (directory, nowMs) => readSubagentActivity(directory, nowMs),
-    descendants: (pid) => walkProcessDescendants(pid, {
-      // The parent's own stdio MCP servers (the dev channel and the tools bridge)
-      // run for its whole life by design; they are not shells.
-      isOwnService: (argv) => argv.includes(DEFAULT_DEV_CHANNEL_PATH) || argv.includes(DEFAULT_TOOLS_BRIDGE_PATH),
-    }),
+    descendants: async (pid, owner) => {
+      if (owner === undefined || owner.pid !== pid) return { verdict: 'unknown', reasons: ['MCP owner spawn identity unavailable'] }
+      try {
+        return await walkProcessDescendants(pid, { serviceProof: readMcpServiceProof(owner) })
+      } catch {
+        return { verdict: 'unknown', reasons: ['MCP owner spawn evidence unreadable or mismatched'] }
+      }
+    },
   }
 }
 
 export function buildProjectLiveness(deps: ProjectLivenessProbeDeps): ProjectLivenessSurface {
   const probes = buildProjectLivenessProbes(deps)
-  return { census: (projectId) => runProjectLivenessCensus({ admission: deps.admission, probes }, projectId) }
+  return { census: (projectId, options) => runProjectLivenessCensus({
+    admission: deps.admission,
+    // A handoff's requesting dispatch is already visible to ActivityInspector,
+    // but has not entered the old owner. Its turn is measured by the pool's
+    // activeTurn/turnSlotHeld/poisoned evidence; descendants still need proof.
+    probes: options?.excludePendingDispatch === true ? { ...probes, turnInFlight: () => false } : probes,
+  }, projectId) }
 }

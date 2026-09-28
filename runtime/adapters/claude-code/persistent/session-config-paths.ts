@@ -23,6 +23,8 @@ export interface ReplSessionConfigPaths {
   dir: string
   /** `--mcp-config`: wires the dev-channel. CARRIES THE CHILD'S SINK CREDENTIAL. */
   mcpConfigPath: string
+  /** Write-once MCP marker receipt bound to the spawned parent's kernel identity. */
+  mcpIdentityPath: string
   /** `--settings`: the enforce-reply Stop hook (plus any write-containment block). */
   settingsPath: string
   /** The tool-bridge manifest — written ONLY when the bridge is attached. */
@@ -75,6 +77,7 @@ export function replSessionConfigPaths(channelName: string): ReplSessionConfigPa
   return {
     dir,
     mcpConfigPath: `${base}-mcp.json`,
+    mcpIdentityPath: `${base}-mcp-identity.json`,
     settingsPath: `${base}-settings.json`,
     toolsManifestPath: `${base}-tools.json`,
   }

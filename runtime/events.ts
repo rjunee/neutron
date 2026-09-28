@@ -75,6 +75,9 @@ export type SubstrateErrorClass =
   | 'oauth_refresh'
   | 'repl_unreconciled'
   | 'spawn_configuration'
+  | 'chat_handoff_busy'
+  | 'chat_handoff_refused'
+  | 'chat_handoff_unknown'
 
 export type Event =
   | { kind: 'token'; text: string }

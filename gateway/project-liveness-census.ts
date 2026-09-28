@@ -30,6 +30,7 @@
 import { readdir, readFile, stat } from 'node:fs/promises'
 import { join } from 'node:path'
 import { readProcessIdentity, type ProcessIdentity } from '@neutronai/runtime/adapters/claude-code/persistent/process-identity.ts'
+import { MCP_SERVICE_ID_ENV, type McpServiceOwner, type McpServiceProof } from '@neutronai/runtime/adapters/claude-code/persistent/mcp-service-identity.ts'
 import type { ProjectAdmission } from './project-admission.ts'
 import type { ProjectAdmissionScope } from './project-admission-store.ts'
 
@@ -59,6 +60,8 @@ export interface ParentObservation {
   retiring: boolean
   /** The parent transcript's `subagents` directory; null when it cannot be resolved. */
   subagentsDirectory: string | null
+  /** Original spawn channel; a legacy observation without it cannot prove services. */
+  mcpChannelName?: string
 }
 
 export type SessionsAnswer =
@@ -76,7 +79,7 @@ export interface ProjectLivenessProbes {
   /** Recent native-child transcript activity in a parent's `subagents` directory. */
   subagentActivity(directory: string, nowMs: number): Promise<ProbeAnswer>
   /** Any descendant process of the parent pid. */
-  descendants(pid: number): Promise<ProbeAnswer>
+  descendants(pid: number, owner?: McpServiceOwner): Promise<ProbeAnswer>
   /** Optional terminal-host view of the parent's pane (herdr `pane.process_info`). */
   paneForeground?(sessionKey: string): Promise<ProbeAnswer>
 }
@@ -214,7 +217,10 @@ export async function runProjectLivenessCensus(deps: {
     evidence.subagents = parent.subagentsDirectory === null
       ? { verdict: 'unknown', reasons: ['native-child directory unresolvable'] }
       : await guard(deps.probes.subagentActivity(parent.subagentsDirectory, now()), 'native-child directory')
-    evidence.descendants = await guard(deps.probes.descendants(parent.pid), 'shell')
+    evidence.descendants = await guard(deps.probes.descendants(parent.pid, parent.mcpChannelName === undefined ? undefined : {
+      sessionKey: parent.sessionKey, childGeneration: parent.childGeneration,
+      channelName: parent.mcpChannelName, pid: parent.pid,
+    }), 'shell')
     if (deps.probes.paneForeground !== undefined) {
       evidence.pane = await guard(deps.probes.paneForeground(parent.sessionKey), 'pane')
     }
@@ -255,9 +261,8 @@ export interface ProcWalkDeps {
   readFile?: (path: string) => Promise<string>
   readdir?: (path: string) => Promise<string[]>
   identity?: (pid: number) => ProcessIdentity | undefined
-  /** A DIRECT child the parent always runs by design (its own stdio MCP servers):
-   *  not a shell. Its descendants are still walked. */
-  isOwnService?: (argv: string[]) => boolean
+  /** Immutable spawn evidence for this exact parent, never current settings. */
+  serviceProof?: McpServiceProof
 }
 
 const sameIdentity = (a: ProcessIdentity | undefined, b: ProcessIdentity | undefined): boolean =>
@@ -276,6 +281,10 @@ export async function walkProcessDescendants(pid: number, deps: ProcWalkDeps = {
   const identity = deps.identity ?? ((p: number) => readProcessIdentity(p))
   const before = identity(pid)
   if (before === undefined) return { verdict: 'unknown', reasons: ['parent process identity unreadable'] }
+  if (deps.serviceProof !== undefined && (deps.serviceProof.ownerPid !== pid
+    || !sameIdentity(before, deps.serviceProof.ownerIdentity))) {
+    return { verdict: 'unknown', reasons: ['MCP spawn evidence does not identify this parent process'] }
+  }
 
   const childrenOf = async (p: number): Promise<number[] | null> => {
     let tids: string[]
@@ -308,6 +317,7 @@ export async function walkProcessDescendants(pid: number, deps: ProcWalkDeps = {
   if (rootChildren === null) return { verdict: 'unknown', reasons: ['parent process tree unreadable'] }
   const shells: string[] = []
   let unreadable = false
+  const provedServices: Array<{ pid: number; identity: ProcessIdentity }> = []
   const seen = new Set<number>([pid])
   const queue = rootChildren.map((child) => ({ pid: child, direct: true }))
   while (queue.length > 0) {
@@ -315,11 +325,23 @@ export async function walkProcessDescendants(pid: number, deps: ProcWalkDeps = {
     if (seen.has(next.pid)) continue
     seen.add(next.pid)
     let own = false
-    if (next.direct && deps.isOwnService !== undefined) {
+    if (next.direct && deps.serviceProof !== undefined) {
       try {
-        const argv = (await readText(`/proc/${next.pid}/cmdline`)).split('\0').filter(Boolean)
-        own = deps.isOwnService(argv)
-      } catch { /* vanished or unreadable: counted as a shell below if still listed */ }
+        const start = identity(next.pid)
+        const markers = (await readText(`/proc/${next.pid}/environ`)).split('\0')
+          .filter(entry => entry.startsWith(`${MCP_SERVICE_ID_ENV}=`))
+        const marker = markers.length === 1 ? markers[0]!.slice(MCP_SERVICE_ID_ENV.length + 1) : undefined
+        if (marker !== undefined && deps.serviceProof.markers.has(marker)) {
+          // The earlier children list is not current parentage; a reparented or
+          // recycled process cannot borrow the old edge in that sample.
+          const parent = /^PPid:\s*(\d+)$/m.exec(await readText(`/proc/${next.pid}/status`))
+          if (parent === null || start === undefined) unreadable = true
+          else if (Number(parent[1]) === pid && sameIdentity(start, identity(next.pid))) {
+            own = true
+            provedServices.push({ pid: next.pid, identity: start })
+          }
+        }
+      } catch { unreadable = true }
     }
     if (!own) {
       let comm = 'unknown'
@@ -333,6 +355,12 @@ export async function walkProcessDescendants(pid: number, deps: ProcWalkDeps = {
   }
 
   if (!sameIdentity(before, identity(pid))) return { verdict: 'unknown', reasons: ['parent pid changed identity during the census'] }
+  for (const service of provedServices) {
+    if (!sameIdentity(service.identity, identity(service.pid))) unreadable = true
+    try {
+      if (Number(/^PPid:\s*(\d+)$/m.exec(await readText(`/proc/${service.pid}/status`))?.[1]) !== pid) unreadable = true
+    } catch { unreadable = true }
+  }
   if (shells.length === 0) return unreadable
     ? { verdict: 'unknown', reasons: ['descendant process tree unreadable'] }
     : { verdict: 'idle', reasons: [] }

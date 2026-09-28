@@ -29,6 +29,19 @@ import type { SubstrateNoticeSinks } from '@neutronai/gateway/http/substrate-not
 
 export interface OpenWiringContext {
   startCodexOwner?: import('@neutronai/gateway/wiring/build-llm-call-substrate.ts').BuildLlmCallSubstrateInput['startCodexOwner']
+  /**
+   * #1226 — the owner conversation's project-workspace terminal. Wired onto the
+   * live-chat (`cc-agent-*`) family ONLY: every Claude conversation spawn is placed
+   * as its dispatch's `Chat` tab through the shared strict host. Undefined off Herdr.
+   */
+  conversationTerminal?: import('@neutronai/runtime/adapters/claude-code/persistent/project-workspace-host.ts').ConversationTerminal
+  /**
+   * #1226 — the project-scope lifecycle owner (`project-scope-lifecycle.ts`). Wired onto
+   * the live-chat family ONLY, beside `conversationTerminal`: the scope's Chat credential
+   * is pinned while usable and a re-key retires the old exact owner before the new Chat
+   * spawns (a verified handoff, never a second Chat).
+   */
+  conversationLifecycle?: import('@neutronai/gateway/wiring/build-llm-call-substrate.ts').ConversationLifecycle
   /** Stored native-provider projects at boot; keeps their shared chat intake reachable without API pools. */
   codexOwnerProjects?: readonly string[]
   /**

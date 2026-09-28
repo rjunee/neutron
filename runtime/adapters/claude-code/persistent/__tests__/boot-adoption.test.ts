@@ -19,7 +19,8 @@
  */
 
 import { afterEach, beforeAll, beforeEach, describe, expect, it } from 'bun:test'
-import { mkdirSync, mkdtempSync, readFileSync, rmSync, writeFileSync } from 'node:fs'
+import { existsSync, mkdirSync, mkdtempSync, readFileSync, rmSync, writeFileSync } from 'node:fs'
+import { randomBytes } from 'node:crypto'
 import { tmpdir } from 'node:os'
 import { dirname, join } from 'node:path'
 import {
@@ -30,7 +31,9 @@ import {
   resetBootAdoptionForTests,
 } from '../boot-adoption.ts'
 import { childByKey, pool, sink, supervisedBySessionKey } from '../pool-state.ts'
-import { shutdownAllPersistentRepls } from '../pool.ts'
+import { retirePersistentRepl, shutdownAllPersistentRepls } from '../pool.ts'
+import { replSessionConfigPaths } from '../session-config-paths.ts'
+import { readMcpServiceProof, recordMcpServiceOwner } from '../mcp-service-identity.ts'
 import { deriveChildSinkToken } from '../sink-coordinates.ts'
 import { ReplSession } from '../repl-session.ts'
 import type { ReplRegistry, ReplRegistryRecord } from '../repl-registry.ts'
@@ -190,6 +193,53 @@ afterEach(() => {
 })
 
 describe('the adopt direction', () => {
+  for (const bridge of [false, true]) {
+    it(`an adopted MCP receipt survives busy refusal and is removed on idle retirement (bridge=${bridge})`, async () => {
+      const channelName = `neutron-${randomBytes(16).toString('hex')}`
+      const paths = replSessionConfigPaths(channelName)
+      mkdirSync(paths.dir, { mode: 0o700 })
+      dirs.push(paths.dir)
+      const owner = { sessionKey: KEY, childGeneration: GENERATION, channelName, pid: process.pid }
+      const marker = randomBytes(32).toString('hex')
+      recordMcpServiceOwner(owner, [marker])
+      const receipt = readFileSync(paths.mcpIdentityPath, 'utf8')
+      const f = fixture({ record: { channelName, pid: process.pid,
+        reuse: { tool_surface: 'Read,Bash', tool_bridge: bridge, auth_fingerprint: 'fp-abc' } },
+        argv: oursArgv(SESSION_ID, channelName) })
+      f.host.addPane(HANDLE, { argv: oursArgv(SESSION_ID, channelName), screens: ['idle screen'], pid: process.pid })
+      supervisedBySessionKey.set(KEY, f.options)
+      expect((await run(f)).kind).toBe('adopted')
+      expect(readMcpServiceProof(owner).markers.has(marker)).toBe(true)
+      const session = (await pool.get(KEY))!
+      session.child.readScreen = async () => 'esc to interrupt'
+      expect(await retirePersistentRepl(KEY, { registryPath: f.registryPath, requireFreshIdle: true })).toBe('refused')
+      expect(readFileSync(paths.mcpIdentityPath, 'utf8')).toBe(receipt)
+      expect(f.host.panes.has(HANDLE)).toBe(true)
+      session.child.readScreen = async () => '❯ '
+      expect(await retirePersistentRepl(KEY, { registryPath: f.registryPath, requireFreshIdle: true })).toBe('retired')
+      expect(existsSync(paths.mcpIdentityPath)).toBe(false)
+      expect(f.host.panes.has(HANDLE)).toBe(false)
+    })
+  }
+
+  it('gateway shutdown preserves the adopted MCP receipt and live pane for the next owner', async () => {
+    const channelName = `neutron-${randomBytes(16).toString('hex')}`
+    const paths = replSessionConfigPaths(channelName)
+    mkdirSync(paths.dir, { mode: 0o700 })
+    dirs.push(paths.dir)
+    const owner = { sessionKey: KEY, childGeneration: GENERATION, channelName, pid: process.pid }
+    const marker = randomBytes(32).toString('hex')
+    recordMcpServiceOwner(owner, [marker])
+    const f = fixture({ record: { channelName, pid: process.pid }, argv: oursArgv(SESSION_ID, channelName) })
+    f.host.addPane(HANDLE, { argv: oursArgv(SESSION_ID, channelName), screens: ['idle screen'], pid: process.pid })
+    supervisedBySessionKey.set(KEY, f.options)
+    expect((await run(f)).kind).toBe('adopted')
+    await shutdownAllPersistentRepls()
+    expect(f.host.panes.has(HANDLE)).toBe(true)
+    expect(f.host.attached[0]?.detached).toBe(true)
+    expect(readMcpServiceProof(owner).markers.has(marker)).toBe(true)
+  })
+
   it('a cached successful adoption cannot relabel an unmarked row as General', async () => {
     const f = fixture()
     const deps = { host: f.host, health: async () => true, log: () => {} }

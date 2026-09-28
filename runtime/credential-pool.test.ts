@@ -10,6 +10,7 @@ import {
   reportFailure,
   reportSuccess,
   selectCredential,
+  selectCredentialById,
   soonestCooldownUntil,
 } from './credential-pool.ts'
 
@@ -52,6 +53,76 @@ describe('credential-pool', () => {
     reportFailure(pool, 'k2', 429)
     expect(selectCredential(pool)?.id).toBe('k3')
     expect(selectCredential(pool)?.id).toBe('k1')
+  })
+
+  test('selectCredentialById picks a usable named credential, accounts it, and leaves the round-robin cursor alone', () => {
+    const pool = newCredentialPool({ strategy: 'round_robin', credentials: baseCreds })
+    expect(selectCredential(pool)?.id).toBe('k1')
+    const cursor = pool.cursor
+    const before = Date.now()
+    expect(selectCredentialById(pool, 'k3')?.id).toBe('k3')
+    expect(selectCredentialById(pool, 'k3')?.id).toBe('k3')
+    const k3 = pool.credentials.find((c) => c.id === 'k3')!
+    expect(k3.use_count).toBe(2)
+    expect(k3.last_used_at).toBeGreaterThanOrEqual(before)
+    expect(pool.cursor).toBe(cursor)
+    // The strategy continues exactly where it was.
+    expect(selectCredential(pool)?.id).toBe('k2')
+  })
+
+  test('selectCredentialById refuses a parked or absent credential without accounting', () => {
+    const pool = newCredentialPool({ strategy: 'fill_first', credentials: baseCreds })
+    reportFailure(pool, 'k1', 429)
+    expect(selectCredentialById(pool, 'k1')).toBeNull()
+    expect(selectCredentialById(pool, 'nope')).toBeNull()
+    expect(pool.credentials.find((c) => c.id === 'k1')!.use_count).toBe(0)
+    // An elapsed park is usable again, with the same predicate selectCredential uses.
+    pool.credentials.find((c) => c.id === 'k1')!.cooldown_until = Date.now() - 1
+    expect(selectCredentialById(pool, 'k1')?.id).toBe('k1')
+  })
+
+  // #1226 relaunch (CodeQL js/insecure-randomness): the random strategy draws its
+  // index from `crypto.randomInt`. These assert membership and accounting only —
+  // never a specific pick — so they stay deterministic without stubbing crypto.
+  test('random with one available credential picks it and accounts it', () => {
+    const pool = newCredentialPool({ strategy: 'random', credentials: [baseCreds[0]!] })
+    const before = Date.now()
+    expect(selectCredential(pool)?.id).toBe('k1')
+    const k1 = pool.credentials[0]!
+    expect(k1.use_count).toBe(1)
+    expect(k1.last_used_at).toBeGreaterThanOrEqual(before)
+  })
+
+  test('random never picks a credential in cooldown', () => {
+    const pool = newCredentialPool({ strategy: 'random', credentials: baseCreds })
+    reportFailure(pool, 'k2', 429)
+    for (let i = 0; i < 200; i++) {
+      const pick = selectCredential(pool)?.id
+      expect(['k1', 'k3']).toContain(pick as string)
+    }
+    const count = (id: string): number => pool.credentials.find((c) => c.id === id)!.use_count
+    expect(count('k2')).toBe(0)
+    expect(count('k1') + count('k3')).toBe(200)
+  })
+
+  test('random returns null when every credential is cooling down', () => {
+    const pool = newCredentialPool({ strategy: 'random', credentials: baseCreds })
+    reportFailure(pool, 'k1', 429)
+    reportFailure(pool, 'k2', 429)
+    reportFailure(pool, 'k3', 429)
+    expect(selectCredential(pool)).toBeNull()
+    for (const c of pool.credentials) expect(c.use_count).toBe(0)
+  })
+
+  test('random leaves the round-robin cursor and the pinned owner selection alone', () => {
+    const pool = newCredentialPool({ strategy: 'random', credentials: baseCreds })
+    const cursor = pool.cursor
+    for (let i = 0; i < 20; i++) {
+      expect(['k1', 'k2', 'k3']).toContain(selectCredential(pool)?.id as string)
+    }
+    expect(pool.cursor).toBe(cursor)
+    expect(selectCredentialById(pool, 'k3')?.id).toBe('k3')
+    expect(pool.cursor).toBe(cursor)
   })
 
   test('least_used picks the credential with the smallest use_count', () => {

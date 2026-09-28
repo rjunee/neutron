@@ -2504,8 +2504,8 @@ async function adoptRow(
   // sink credential in plaintext.
   const cfg = replSessionConfigPaths(record.channelName)
   session.configPaths = reuse.tool_bridge
-    ? [cfg.mcpConfigPath, cfg.settingsPath, cfg.toolsManifestPath]
-    : [cfg.mcpConfigPath, cfg.settingsPath]
+    ? [cfg.mcpConfigPath, cfg.mcpIdentityPath, cfg.settingsPath, cfg.toolsManifestPath]
+    : [cfg.mcpConfigPath, cfg.mcpIdentityPath, cfg.settingsPath]
   // The port we just PROVED, and with it `session.ready` — which every turn awaits and
   // which nothing else would ever resolve for an adopted session: `/channel-ready` was
   // POSTed once, to a gateway that no longer exists.

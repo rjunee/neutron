@@ -153,6 +153,18 @@ export const SUBSTRATE_ERROR_CODES: Readonly<Record<SubstrateErrorClass, Substra
     retryable: true,
     description: 'Every credential is in cooldown (429/402/401) — retry once the window passes.',
   },
+  chat_handoff_busy: {
+    retryable: true,
+    description: 'A credential rotation re-keyed the owner Chat, and its old exact owner was still in a turn when the bounded handoff wait elapsed (#1226). Nothing spawned and the old Chat is untouched; the pool has fenced it and retires it once the turn leaves, so the next turn hands off. NOT a credential fault: the pool is never cooled for it.',
+  },
+  chat_handoff_refused: {
+    retryable: true,
+    description: 'A credential rotation re-keyed the owner Chat, and retiring the old exact owner was refused — an unresolved native child, or ownership/exit the pool could not confirm (#1226). Nothing spawned and the old Chat is exactly as it was. NOT a credential fault: the pool is never cooled for it.',
+  },
+  chat_handoff_unknown: {
+    retryable: true,
+    description: "A credential rotation re-keyed the owner Chat, but the scope's liveness could not be established (ambiguous or unidentified owner, legacy parent, unknown census) (#1226). Unknown liveness never licenses closure, so nothing was retired or spawned. NOT a credential fault: the pool is never cooled for it.",
+  },
   repl_unreconciled: {
     retryable: true,
     description:

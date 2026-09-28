@@ -194,24 +194,63 @@ describe('the /proc descendant walk', () => {
 
   test('own services are not shells, but their descendants are; names only', async () => {
     const tree: Record<number, number[]> = { 10: [11, 12], 11: [13], 12: [], 13: [] }
-    const argv: Record<number, string> = { 11: 'bun\0dev-channel\0', 12: 'bun\0tools-bridge\0', 13: 'bash\0-c\0secret\0' }
+    const env: Record<number, string> = { 11: 'NEUTRON_MCP_SERVICE_ID=dev\0', 12: 'NEUTRON_MCP_SERVICE_ID=tools\0', 13: 'NEUTRON_MCP_SERVICE_ID=dev\0' }
     const deps = {
       identity: () => ({ start_ticks: 1, boot_id: 'b' }) as never,
       readdir: async (path: string) => [path.split('/')[2]!],
       readFile: async (path: string) => {
         const pid = Number(path.split('/')[2])
         if (path.endsWith('/children')) return (tree[pid] ?? []).join(' ')
-        if (path.endsWith('/cmdline')) return argv[pid] ?? ''
+        if (path.endsWith('/environ')) return env[pid] ?? ''
+        if (path.endsWith('/status')) return `PPid:\t${pid === 13 ? 11 : 10}\n`
         if (path.endsWith('/comm')) return pid === 13 ? 'bash\n' : 'bun\n'
         throw new Error('unexpected')
       },
-      isOwnService: (a: string[]) => a.includes('dev-channel') || a.includes('tools-bridge'),
+      serviceProof: { ownerPid: 10, ownerIdentity: { start_ticks: 1, boot_id: 'b' }, markers: new Set(['dev', 'tools']) },
     }
     const out = await walkProcessDescendants(10, deps)
     expect(out).toEqual({ verdict: 'busy', reasons: ['parent descendants running: 1 (bash)'] })
     // Control: with no grandchild, the own services alone are idle.
     tree[11] = []
     expect(await walkProcessDescendants(10, deps)).toEqual({ verdict: 'idle', reasons: [] })
+  })
+
+  test('the spawn marker is bound to the owner kernel identity, direct parent edge and service identity', async () => {
+    const tree: Record<number, number[]> = { 10: [11], 11: [], 12: [] }
+    let marker = 'service'
+    let ppid = 10
+    let parentStart = 1
+    let serviceStart = 1
+    const deps = {
+      identity: (pid: number) => ({ start_ticks: pid === 10 ? parentStart : serviceStart, boot_id: 'b' }),
+      readdir: async (path: string) => [path.split('/')[2]!],
+      readFile: async (path: string) => {
+        const pid = Number(path.split('/')[2])
+        if (path.endsWith('/children')) return (tree[pid] ?? []).join(' ')
+        if (path.endsWith('/environ')) return `NEUTRON_MCP_SERVICE_ID=${marker}\0`
+        if (path.endsWith('/status')) return `PPid:\t${ppid}\n`
+        if (path.endsWith('/comm')) return pid === 12 ? 'bash\n' : 'server-a\n'
+        throw new Error('unexpected')
+      },
+      serviceProof: { ownerPid: 10, ownerIdentity: { start_ticks: 1, boot_id: 'b' }, markers: new Set(['service']) },
+    }
+    expect((await walkProcessDescendants(10, deps)).verdict).toBe('idle')
+    marker = 'foreign'
+    expect((await walkProcessDescendants(10, deps)).verdict).toBe('busy')
+    marker = 'service'
+    ppid = 99
+    expect((await walkProcessDescendants(10, deps)).verdict).toBe('busy')
+    ppid = 10
+    parentStart = 2
+    expect((await walkProcessDescendants(10, deps)).verdict).toBe('unknown')
+    parentStart = 1
+    expect((await walkProcessDescendants(10, { ...deps, identity: pid => {
+      if (pid === 11) serviceStart++
+      return deps.identity(pid)
+    } })).verdict).not.toBe('idle')
+    serviceStart = 1
+    tree[11] = [12]
+    expect(await walkProcessDescendants(10, deps)).toEqual({ verdict: 'busy', reasons: ['parent descendants running: 1 (bash)'] })
   })
 
   test('a real child process reads busy while it runs and idle after it exits', async () => {

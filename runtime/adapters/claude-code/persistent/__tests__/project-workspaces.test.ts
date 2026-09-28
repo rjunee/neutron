@@ -654,3 +654,59 @@ test.if(process.platform === 'linux')('real placeholder exec clears inherited sy
     expect(readFileSync(`/proc/${child.pid}/environ`, 'utf8')).not.toContain('NEUTRON_TEST_INHERITED_SECRET')
   } finally { child.kill(); await child.exited }
 })
+
+test('#1226 reconciliation: a pending Chat record whose workspace is POSITIVELY gone is recreated; a surviving workspace still refuses', async () => {
+  const { manager, server, path } = fixture()
+  server.failure = 'tab.move'
+  await expect(manager.applyLayout(server, root, scope())).rejects.toThrow('transport unavailable')
+  server.failure = undefined
+  expect(Object.values(JSON.parse(readFileSync(path, 'utf8'))).map((row: any) => row.state)).toEqual(['pending'])
+  // The workspace survives: uncertain work is never reclaimed.
+  await expect(new ProjectWorkspaceManager(path).applyLayout(server, root, scope())).rejects.toThrow('pending')
+  expect(server.count('workspace.create')).toBe(1)
+  // The operator closes it (or it vanished): positive absence recreates the scope.
+  server.workspaces.clear()
+  const chat = await new ProjectWorkspaceManager(path).applyLayout(server, root, scope())
+  expect(server.count('workspace.create')).toBe(2)
+  expect(Object.values(JSON.parse(readFileSync(path, 'utf8'))).map((row: any) => row.state)).toEqual(['ready'])
+  expect(server.panes.has(chat.layout.root.pane_id)).toBe(true)
+  expect(server.count('workspace.close')).toBe(0)
+})
+
+test('#1226 reconciliation never probes a pending record with no workspace (a creation reply may be lost)', async () => {
+  const { server, path } = fixture()
+  const client: HerdrRpc = { async call(method, params) {
+    if (method === 'workspace.create') { await server.call(method, params); throw new Error('reply lost after allocation') }
+    return server.call(method, params)
+  } }
+  await expect(new ProjectWorkspaceManager(path).applyLayout(client, root, scope())).rejects.toThrow('reply lost')
+  server.workspaces.clear()
+  await expect(new ProjectWorkspaceManager(path).applyLayout(server, root, scope())).rejects.toThrow('pending')
+  expect(server.count('workspace.create')).toBe(1)
+})
+
+test('#1226 a pending record never skips the same-ID worker check: changed payload and retry refuse before any RPC; a distinct ID still recreates', async () => {
+  const { manager, server, path } = fixture()
+  const worker = scope('one', 'worker')
+  await manager.applyLayout(server, root, worker)
+  // A later Chat placement fails mid-flight: the record is left pending, naming its workspace.
+  server.failure = 'tab.move'
+  await expect(manager.applyLayout(server, root, scope())).rejects.toThrow('transport unavailable')
+  server.failure = undefined
+  const row = () => Object.values(JSON.parse(readFileSync(path, 'utf8')))[0] as any
+  expect(row().state).toBe('pending')
+  expect(Object.values(row().workers).map((value: any) => value.state)).toEqual(['completed'])
+  // The workspace is POSITIVELY gone, which alone would license recreation.
+  server.workspaces.clear()
+  const calls = server.calls.length
+  const changed = { ...root, command: ['another-agent'] }
+  await expect(new ProjectWorkspaceManager(path).applyLayout(server, changed, worker)).rejects.toThrow('worker operation payload changed')
+  await expect(new ProjectWorkspaceManager(path).applyLayout(server, root, worker)).rejects.toThrow('worker operation completed; reconcile before retry')
+  expect(server.calls.length).toBe(calls)
+  expect(server.count('workspace.create')).toBe(1)
+  // Control: a DISTINCT operation after proven absence recreates the scope as before.
+  const distinct = await new ProjectWorkspaceManager(path).applyLayout(server, root, scope('one', 'worker'))
+  expect(server.count('workspace.create')).toBe(2)
+  expect(server.panes.has(distinct.layout.root.pane_id)).toBe(true)
+  expect(Object.values(row().workers).map((value: any) => value.state)).toEqual(['completed', 'completed'])
+})

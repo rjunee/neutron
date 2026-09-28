@@ -71,6 +71,17 @@ test('absent/retired authority stays asleep, while a captured active row resumes
   expect(await f.recover()).toEqual({ status: 'resumed' })
 })
 
+test('explicit sleep preserves its durable row and transcript without a startup wake', async () => {
+  const f = fixture()
+  const sleeping = { ...f.row, asleep_at: Date.now() }
+  expect(await f.recover(sleeping)).toEqual({ status: 'skipped' })
+  expect(f.calls).toHaveLength(0)
+  expect(JSON.parse(readFileSync(f.options.replRegistryPath!, 'utf8'))[key]).toEqual(sleeping)
+  expect(readFileSync(f.transcript, 'utf8')).toContain('retained')
+  expect(await f.recover()).toEqual({ status: 'resumed' })
+  expect(f.calls).toHaveLength(1)
+})
+
 test.each([
   ['changed credential', { reuse: { tool_surface: 'Read', tool_bridge: false, auth_fingerprint: 'changed' } }],
   ['foreign project', { conversationProjectId: 'project-b' }],

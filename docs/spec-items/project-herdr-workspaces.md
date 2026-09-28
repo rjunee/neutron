@@ -112,6 +112,55 @@ retain the explicit scope. Existing live owners are adopted in place without
 moving or retiring their panes. See `docs/as-built/codex-project-workspace-placement.md`.
 Claude conversation credential handoff, full sleep activation and the fresh
 deployed live cycle remain open; no acceptance box is ticked by this slice.
+2026-09-25 (refs #1226): production composition now places every owner
+conversation (Claude REPL and Codex native owner) as its scope's `Chat` through
+the shared strict host, for the dispatch's exact scope (General is the manager's
+null scope; a literal `general` project keeps its id); a missing manager on Herdr
+refuses rather than inherit a workspace. A credential rotation is a verified
+handoff through the ONE composer lifecycle owner
+(`open/wiring/project-scope-lifecycle.ts`): the old exact REPL is retired through
+the pool before the manager places the new Chat. The same owner adds safe sleep:
+it reads the #1237 leases (any boot), pending approvals, the liveness census and
+owner foreground activity read-only, refuses busy/queued/build/approval/child/
+uncertain/foreign/unverified scopes, and retires an idle owned Chat pane-only with
+its transcript and a resumable registry row kept; wake is the next admitted
+dispatch, which resumes the same session in a fresh Chat of the same workspace;
+the wake pin is the durable registry row (`asleep_at`), so it survives a gateway
+restart. A per-scope lifecycle lock plus the pool's fenced, synchronous re-read of
+the admitted evidence immediately before termination refuses work admitted during
+a sleep. An idle timer (`NEUTRON_PROJECT_SLEEP_IDLE_MS`, default 30 min, `0`
+disables) re-arms on every exit of a dispatch. A live survivor adopted on boot is
+never slept blind (a pre-#1237 parent reads `legacy-unknown`). Deferred: no
+producer admits an `approval` lease yet (pending approvals are read from
+`tool_approvals`; instance grants are skipped, and any other approval whose topic
+cannot be attributed keeps every scope awake); #1237's maintenance fence was not
+used for sleep because it bumps the generation and survives a crash; the scope
+lifecycle does not consume Codex retirement authority, so Codex sleep refuses;
+the workspace itself is never closed until an
+atomic server-side guard exists. No acceptance box is ticked: the live-cycle box
+needs a fresh deployed live cycle. See
+`docs/as-built/project-herdr-workspaces-routing-and-sleep.md`.
+
+2026-09-25 review round (refs #1226): a live Claude -> Codex switch hands the
+Claude Chat off resumably before the Codex owner starts; Codex -> Claude is
+refused up front with its recovery path (Codex retirement is not wired into this
+scope lifecycle). The
+handoff re-censuses after waiting the owner's turn out and needs the exact pooled
+owner's parent turn (excluding the pending requesting dispatch's inspector signal),
+children and shells positively idle. A spawn in flight is never absence. Sleep
+checks that the manager's live Chat is the pool owner's pane. A pending record
+whose workspace is positively absent is recreated; other pending records still
+refuse (operator remedy recorded in the as-built). Still no acceptance box ticked.
+2026-09-28 review (refs #1226, PR #1309): the census exempts a direct MCP service
+only through an immutable receipt of the parent's exact spawn generation and
+kernel identity, corroborated by the child's marker, identity and current parent
+edge. Current approval settings cannot relabel an already running process.
+Missing original evidence remains unknown. The receipt survives gateway handover
+and is reclaimed when its adopted child retires. A `refused` handoff is yielded non-retryable with its
+recovery path; `busy` and `unknown` stay retryable. An ambiguous Chat owner never
+licenses a new Chat spawn: only a same-key join onto a survivor proceeds. A
+pending workspace record no longer skips the same-ID worker digest and state check
+(:63-68).
 
 ## Production composition investigation
 
@@ -123,8 +172,9 @@ null owner namespace through conversation, controls, installed MCP and helper
 admission; project owners still require their own complete project marker and
 credential grant. Missing General credentials refuse visibly without reviewer
 rotation or credential copies. Fresh Codex owner terminal placement is wired as
-recorded above; Claude conversation placement and safe workspace retirement remain
-open. The terminal manager's
+recorded above; Claude conversation placement and pane retirement are wired by
+the scope lifecycle above. Workspace closure and live acceptance remain open.
+The terminal manager's
 `null` General scope must never become the literal project id `general` to bypass
 those checks. Adapter placement propagation alone does not complete this criterion.
 
