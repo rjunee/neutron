@@ -1,5 +1,6 @@
 """Real init wait proofs; every fixture runs behind the verified PID boundary."""
 
+import errno
 import importlib.util
 import os
 from pathlib import Path
@@ -8,6 +9,7 @@ import subprocess
 import sys
 import time
 import unittest
+from unittest.mock import patch
 
 spec = importlib.util.spec_from_file_location('isolation', Path(__file__).with_name('process-test-isolation.py'))
 isolation = importlib.util.module_from_spec(spec)
@@ -20,7 +22,26 @@ except RuntimeError:
     sys.exit(isolation.enter([sys.executable, '-B', str(Path(__file__).resolve()), *sys.argv[1:]]))
 
 
+def proc_status_exists(status):
+    try:
+        return status.exists()
+    except ProcessLookupError:
+        return False
+
+
 class InitWait(unittest.TestCase):
+    def test_proc_status_disappearance_only_accepts_esrch(self):
+        status = Path('/proc/123/status')
+        for present in (True, False):
+            with self.subTest(present=present), patch.object(Path, 'exists', return_value=present):
+                self.assertEqual(proc_status_exists(status), present)
+        with patch.object(Path, 'exists', side_effect=ProcessLookupError(errno.ESRCH, 'gone')):
+            self.assertFalse(proc_status_exists(status))
+        for error in (PermissionError(errno.EACCES, 'denied'), OSError(errno.EIO, 'I/O error')):
+            with self.subTest(error=error), patch.object(Path, 'exists', side_effect=error):
+                with self.assertRaises(type(error)):
+                    proc_status_exists(status)
+
     def test_exited_orphan_is_reaped_while_foreground_runs_and_live_child_is_preserved(self):
         release_read, release_write = os.pipe()
         report_read, report_write = os.pipe()
@@ -45,13 +66,14 @@ os._exit(0)
             fd = os.pidfd_open(child)
             status = Path(f'/proc/{child}/status')
             self.assertIn('PPid:\t1\n', status.read_text())
+            self.assertTrue(proc_status_exists(status), 'live orphan has no proc status')
             self.assertFalse(select.select([fd], [], [], 0)[0], 'live orphan was not preserved')
             os.write(release_write, b'x')
             self.assertTrue(select.select([fd], [], [], 3)[0], 'released child did not exit')
             deadline = time.monotonic() + 3
-            while status.exists() and time.monotonic() < deadline:
+            while proc_status_exists(status) and time.monotonic() < deadline:
                 time.sleep(.01)
-            self.assertFalse(status.exists(), 'exited orphan remains unreaped under namespace init')
+            self.assertFalse(proc_status_exists(status), 'exited orphan remains unreaped under namespace init')
         finally:
             os.close(report_read)
             os.close(release_write)
