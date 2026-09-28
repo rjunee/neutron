@@ -4,7 +4,7 @@ import { tmpdir } from 'node:os'
 import { join } from 'node:path'
 import { importCodexFile, importCodexOperations, type CodexImportOptions } from './build-timeline-codex-import.ts'
 import { appendChangedPhaseObservations, readPhaseObservations, validatePhaseObservation } from './build-timeline-sources.ts'
-import { combineTimelineSources } from '../trident/build-timeline-catalogue.ts'
+import { combineTimelineSources } from '@neutronai/trident/build-timeline-catalogue.ts'
 import { createTimelineHandler } from './build-timeline-server.ts'
 
 const repo = 'example/project'
