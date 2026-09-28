@@ -1,7 +1,7 @@
 import { isAbsolute } from 'node:path'
 import { createHerdrRpc } from './herdr-client.ts'
 import { HerdrHost, type HerdrHostDeps } from './herdr-host.ts'
-import { ProjectWorkspaceManager, type ChatInspection, type ProjectPanePlacement } from './project-workspaces.ts'
+import { ProjectWorkspaceManager, type ChatInspection, type ProjectPanePlacement, type WorkspaceRetirement } from './project-workspaces.ts'
 import type { PtyHost, PtySpawnOpts } from './pty-host.ts'
 
 /** Serializable across the durable Codex helper boundary. Null alone is General. */
@@ -23,11 +23,13 @@ export interface ConversationTerminal {
   /** #1226 sleep: a READ-ONLY sample of the scope's Chat slot through the shared
    * manager. Present only with the strict host; it never closes anything. */
   inspectChat?(conversationProjectId: string | null): Promise<ChatInspection>
+  retireEmptyWorkspace?(conversationProjectId: string | null, expected: ChatInspection): Promise<WorkspaceRetirement>
 }
 
 /** The strict host's read-only Chat inspection (#1226 sleep). */
 export interface ProjectChatInspector {
   inspectChat(placement: ProjectPanePlacement): Promise<ChatInspection>
+  retireEmptyWorkspace?(placement: ProjectPanePlacement, expected: ChatInspection): Promise<WorkspaceRetirement>
 }
 
 export function isProjectChatInspector(host: unknown): host is ProjectChatInspector {
@@ -52,6 +54,12 @@ export function createProjectWorkspaceHost(journalPath: string,
         return { status: 'refused', reason: `herdr unreachable: ${error instanceof Error ? error.message : String(error)}` }
       }
       return manager.inspectChat(client, placement)
+    }
+    async retireEmptyWorkspace(placement: ProjectPanePlacement, expected: ChatInspection): Promise<WorkspaceRetirement> {
+      try {
+        const client = await (deps.connect ?? (async () => createHerdrRpc()))()
+        return await manager.retireEmptyWorkspace(client, placement, expected)
+      } catch (error) { return { status: 'unknown', reason: String(error) } }
     }
   }
   return new ScopedHost({ ...deps, projectWorkspaces: manager })

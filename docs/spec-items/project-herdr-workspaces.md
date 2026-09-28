@@ -43,6 +43,33 @@ owned panes and leave the workspace for lifecycle reconciliation. A real Chat
 gets a fresh tab before the inert placeholder pane is retired; unrelated splits
 in the former placeholder tab survive.
 
+Empty workspace retirement uses a separately advertised protocol capability,
+`owned_empty_workspace_retirement`, and the single atomic RPC
+`workspace.retire_empty_owned`. Its request binds `workspace_id`, the exact
+`workspace_token_key`/`workspace_token_value` ownership marker, and a durable
+`operation_id`. The server checks the marker and that **no pane remains** at the
+mutation boundary, with no intervening operation; it must not close a pane,
+process, tab group or sibling workspace as a side effect. A workspace id reused
+with another marker returns `mismatch`, never `gone`. An absent workspace returns
+`gone`; the exact empty owned workspace returns `retired`; a populated workspace
+returns `not_empty` without mutation. The `workspace_retirement` reply echoes all
+four request fields. Both an unsupported server and a refused or uncertain reply
+leave the workspace ownership claim intact; no raw `workspace.close` fallback is
+permitted. This is a required server contract, not a claim that released Herdr
+already supplies the capability.
+
+The client reserves the exact workspace/Chat observation and operation under the
+existing scope journal lock before this RPC. A stale observation, mismatched
+acknowledgement or concurrent journal change cannot erase ownership. Lost replies
+remain reserved across gateway restart; retry reuses the same operation and marker.
+An exactly correlated `not_empty` or `mismatch` refusal may release only the
+retirement reservation under compare-and-swap, retaining ownership with a new
+observation revision; uncertainty never releases it. A foreign pane's arrival
+must not permanently strand the next verified Chat wake.
+Confirmed retirement clears workspace/Chat claims but retains worker operation
+tombstones, so sleep/wake cannot re-dispatch an already completed operation. Wake
+can then create a fresh workspace and resume the same conversation transcript.
+
 A project is awake while a conversation, queued dispatch, build, pending
 approval, or unresolved live child requires it. After work and foreground
 activity end, retirement preserves transcripts, closes verified owned panes,
@@ -80,6 +107,14 @@ Gateway restart preserves active work and is not a sleep event.
       an idle owned workspace closes without deleting conversation history and
       resumes on wake. Restart adopts surviving work without duplication.
       Verify lifecycle integration tests and a fresh deployed live cycle.
+- [ ] Empty-workspace cleanup uses only the advertised atomic operation: an empty
+      owned workspace retires; an arriving foreign pane or changed ownership survives.
+      Lost replies, stale acknowledgements and concurrent journal rewrites never
+      clear a newer claim; exact retry survives restart, with worker tombstones and
+      conversation history retained. Unsupported servers keep pane-only behavior.
+      Verify `owned-empty-workspace.test.ts` and consuming
+      `open/__tests__/project-scope-sleep.test.ts`, including both accepting and
+      refusing controls; complete the server contract and deployed live cycle.
 
 The first change supplies workspace ownership and terminal placement only.
 Production composition and safe sleep/retirement are subsequent slices; this
@@ -124,7 +159,8 @@ it reads the #1237 leases (any boot), pending approvals, the liveness census and
 owner foreground activity read-only, refuses busy/queued/build/approval/child/
 uncertain/foreign/unverified scopes, and retires an idle owned Chat pane-only with
 its transcript and a resumable registry row kept; wake is the next admitted
-dispatch, which resumes the same session in a fresh Chat of the same workspace;
+dispatch, which resumes the same session in a fresh Chat (of the same workspace
+when the server does not support atomic empty-workspace retirement);
 the wake pin is the durable registry row (`asleep_at`), so it survives a gateway
 restart. A per-scope lifecycle lock plus the pool's fenced, synchronous re-read of
 the admitted evidence immediately before termination refuses work admitted during
@@ -140,6 +176,15 @@ the workspace itself is never closed until an
 atomic server-side guard exists. No acceptance box is ticked: the live-cycle box
 needs a fresh deployed live cycle. See
 `docs/as-built/project-herdr-workspaces-routing-and-sleep.md`.
+
+2026-09-28 (refs #1226): the client now consumes the atomic empty-workspace
+retirement contract above after exact Claude Chat retirement, and retries an
+uncertain completion from the durable reservation on a subsequent sleep request
+after gateway restart (not automatic boot reconciliation). A
+capability-negative server retains the pane-only behavior. The server operation,
+safe live-server handover, adopted-pane migration and live acceptance remain open;
+Codex sleep is still refused. No acceptance box is ticked by these client fixtures.
+See `docs/as-built/owned-empty-workspace-retirement-client.md`.
 
 2026-09-25 review round (refs #1226): a live Claude -> Codex switch hands the
 Claude Chat off resumably before the Codex owner starts; Codex -> Claude is

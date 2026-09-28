@@ -2,7 +2,7 @@ import { randomUUID, createHash } from 'node:crypto'
 import { closeSync, constants, fstatSync, fsyncSync, mkdirSync, openSync, readFileSync, renameSync, writeFileSync, lstatSync } from 'node:fs'
 import { dirname } from 'node:path'
 import { HerdrError, type HerdrRpc } from './herdr-client.ts'
-import type { HerdrLayoutApply, HerdrLayoutPaneNode, HerdrProjectLayoutParams } from './herdr-protocol.ts'
+import { HERDR_PROTOCOL_VERSION, type HerdrLayoutApply, type HerdrLayoutPaneNode, type HerdrProjectLayoutParams } from './herdr-protocol.ts'
 import { withFlockSync } from './registry-lock.ts'
 
 /** Null is General; the literal project id "general" is a different scope. */
@@ -29,8 +29,9 @@ interface ChatSlot { tab: string; pane: string; placeholderArgv?: string[] }
  * any other error). Refused never licenses a close.
  */
 export type ChatInspection =
-  | { status: 'live' | 'gone' | 'placeholder' | 'none'; workspace?: string; pane?: string }
+  | { status: 'live' | 'gone' | 'placeholder' | 'none'; workspace?: string; pane?: string; revision?: string }
   | { status: 'refused'; reason: string }
+export type WorkspaceRetirement = { status: 'retired' | 'unsupported' } | { status: 'refused' | 'unknown'; reason: string }
 interface WorkerOperation {
   digest: string
   state: 'pending' | 'ambiguous' | 'completed'
@@ -42,10 +43,11 @@ interface WorkspaceRecord {
   revision: string
   scope: [string, string | null]
   token: string
-  state: 'pending' | 'ready'
+  state: 'pending' | 'ready' | 'retiring' | 'retired'
   workspace?: string
   chat?: ChatSlot
   workers?: Record<string, WorkerOperation>
+  retirement?: { operationId: string; revision: string }
 }
 
 const TOKEN = 'neutron_project_owner'
@@ -141,8 +143,8 @@ export class ProjectWorkspaceRefusal extends Error {
 }
 
 /** Library boundary only: composition supplies the real scope; lifecycle code will
- * own sleep/retirement. This manager never closes an existing workspace or moves a
- * pane between workspaces. A saved marker correlates identity, not a secret credential. */
+ * own provider retirement. Empty workspace removal requires the separately advertised
+ * atomic server guard. A saved marker correlates identity, not a secret credential. */
 export class ProjectWorkspaceManager {
   private readonly journal: WorkspaceJournal
   private readonly operations = new Map<string, Promise<unknown>>()
@@ -196,6 +198,13 @@ export class ProjectWorkspaceManager {
           // Completed is not an adoption API. HerdrHost would treat the returned
           // handle as newly created and might close an already-owned pane.
           throw new ProjectWorkspaceRefusal(`project-workspaces: worker operation ${operation.state}; reconcile before retry`)
+        }
+        if (existing.version === 1 && JSON.stringify(existing.scope) === JSON.stringify(scope)
+          && existing.state === 'retired' && nonempty(existing.token) && nonempty(existing.revision)) {
+          const next: WorkspaceRecord = { version: 1, revision: randomUUID(), scope, token: randomUUID(),
+            state: 'pending', workers: existing.workers ?? {} }
+          rows[key] = next
+          return next
         }
         if (existing.version === 1 && JSON.stringify(existing.scope) === JSON.stringify(scope) && nonempty(existing.token)
           && existing.state === 'pending' && nonempty(existing.workspace)) {
@@ -342,9 +351,8 @@ export class ProjectWorkspaceManager {
 
   /**
    * Sample the scope's Chat slot without ANY mutation (#1226 sleep): no close, no
-   * journal write, never `workspace.close` (Herdr has no atomic ownership/contents
-   * guard for a workspace or whole-tab close, so the workspace is always left for
-   * lifecycle reconciliation). Serialized with this scope's placements, so a Chat
+   * journal write, never `workspace.close`. The separate retirement operation needs
+   * an explicitly advertised atomic server guard. Serialized with this scope's placements, so a Chat
    * being placed right now is observed after it settles.
    */
   async inspectChat(client: HerdrRpc, placement: Omit<ProjectPanePlacement, 'role' | 'taskLabel' | 'operationId'>): Promise<ChatInspection> {
@@ -359,24 +367,97 @@ export class ProjectWorkspaceManager {
     try { return await operation } finally { if (this.operations.get(key) === operation) this.operations.delete(key) }
   }
 
+  /** Never substitute workspace.close or a sampled empty pane list for this RPC.
+   * Reservation survives uncertain replies and excludes other processes' placement. */
+  async retireEmptyWorkspace(client: HerdrRpc, placement: ProjectPanePlacement, expected: ChatInspection): Promise<WorkspaceRetirement> {
+    let scope: [string, string | null]
+    try { scope = scopeOf(placement) } catch (error) { return { status: 'refused', reason: String(error) } }
+    const key = createHash('sha256').update(JSON.stringify(scope)).digest('hex')
+    const prior = this.operations.get(key) ?? Promise.resolve()
+    const operation = prior.catch(() => undefined).then(async (): Promise<WorkspaceRetirement> => {
+      try {
+        if ((expected.status !== 'live' && expected.status !== 'gone') || !nonempty(expected.revision)
+          || !nonempty(expected.workspace) || !nonempty(expected.pane)) return { status: 'refused', reason: 'missing original Chat observation' }
+        const pong = object(await client.call('ping', {}))
+        if (pong.type !== 'pong' || pong.protocol !== HERDR_PROTOCOL_VERSION
+          || object(pong.capabilities ?? {}).owned_empty_workspace_retirement !== true) return { status: 'unsupported' }
+        const record = this.journal.update(rows => {
+          const current = rows[key]
+          if (!current || current.version !== 1 || JSON.stringify(current.scope) !== JSON.stringify(scope)
+            || current.workspace !== expected.workspace || current.chat?.pane !== expected.pane
+            || !nonempty(current.token) || !['ready', 'retiring'].includes(current.state)
+            || (current.retirement?.revision ?? current.revision) !== expected.revision) {
+            throw new Error('workspace retirement observation changed')
+          }
+          if (current.state === 'retiring' && (!current.retirement || !nonempty(current.retirement.operationId))) {
+            throw new Error('workspace retirement reservation is invalid')
+          }
+          const next: WorkspaceRecord = { ...current, state: 'retiring',
+            retirement: current.retirement ?? { operationId: randomUUID(), revision: current.revision } }
+          rows[key] = next
+          return structuredClone(next)
+        })
+        const target = { workspace_id: record.workspace!, workspace_token_key: TOKEN,
+          workspace_token_value: record.token, operation_id: record.retirement!.operationId }
+        const reply = object(await client.call('workspace.retire_empty_owned', target))
+        if (reply.type !== 'workspace_retirement' || Object.entries(target).some(([field, value]) => reply[field] !== value)) {
+          throw new Error('workspace retirement acknowledgement does not match reservation')
+        }
+        if (reply.status !== 'retired' && reply.status !== 'gone') {
+          if (reply.status === 'not_empty' || reply.status === 'mismatch') {
+            // The contract guarantees these correlated refusals did not mutate.
+            // Keep ownership, but allow a fresh verified placement/observation.
+            this.journal.update(rows => {
+              if (JSON.stringify(rows[key]) !== JSON.stringify(record)) throw new Error('workspace retirement journal changed')
+              const { retirement: _completed, ...retained } = record
+              rows[key] = { ...retained, state: 'ready', revision: randomUUID() }
+            })
+            return { status: 'refused', reason: `workspace retirement ${reply.status}` }
+          }
+          return { status: 'unknown', reason: `workspace retirement ${String(reply.status)}` }
+        }
+        this.journal.update(rows => {
+          if (JSON.stringify(rows[key]) !== JSON.stringify(record)) throw new Error('workspace retirement journal changed')
+          // Keep worker operation tombstones: sleep must never make an old dispatch
+          // allocatable again. Only the workspace/Chat ownership claims are cleared.
+          rows[key] = { version: 1, revision: randomUUID(), scope, token: record.token,
+            state: 'retired', workers: record.workers ?? {} }
+        })
+        return { status: 'retired' }
+      } catch (error) { return { status: 'unknown', reason: error instanceof Error ? error.message : String(error) } }
+    })
+    this.operations.set(key, operation)
+    try { return await operation } finally { if (this.operations.get(key) === operation) this.operations.delete(key) }
+  }
+
   private async inspect(client: HerdrRpc, scope: [string, string | null], key: string): Promise<ChatInspection> {
     try {
       // A read under the journal lock: nothing is written.
       const record = this.journal.read(rows => rows[key] === undefined ? undefined : structuredClone(rows[key]!))
       if (record === undefined) return { status: 'none' }
-      if (record.version !== 1 || JSON.stringify(record.scope) !== JSON.stringify(scope) || !nonempty(record.token)
-        || record.state !== 'ready' || !nonempty(record.workspace) || !record.chat
+      if (record.version !== 1 || JSON.stringify(record.scope) !== JSON.stringify(scope)
+        || !nonempty(record.token) || !nonempty(record.revision)) {
+        return { status: 'refused', reason: 'workspace ownership is invalid' }
+      }
+      if (record.state === 'retired') return { status: 'none' }
+      if (!['ready', 'retiring'].includes(record.state) || !nonempty(record.workspace) || !record.chat
         || !nonempty(record.chat.tab) || !nonempty(record.chat.pane)) {
         return { status: 'refused', reason: 'workspace ownership is invalid or pending' }
       }
       const workspace = record.workspace
-      const found = object(object(await client.call('workspace.get', { workspace_id: workspace })).workspace)
+      const revision = record.retirement?.revision ?? record.revision
+      let found: Record<string, unknown>
+      try { found = object(object(await client.call('workspace.get', { workspace_id: workspace })).workspace) }
+      catch (error) {
+        if (error instanceof HerdrError && error.code === 'workspace_not_found') return { status: 'gone', workspace, pane: record.chat.pane, revision }
+        throw error
+      }
       if (found.workspace_id !== workspace || object(found.tokens)[TOKEN] !== record.token) {
         return { status: 'refused', reason: 'live workspace ownership mismatch' }
       }
       const live = await this.verifyChat(client, workspace, record.chat)
-      if (!live) return { status: 'gone', workspace, pane: record.chat.pane }
-      return { status: record.chat.placeholderArgv ? 'placeholder' : 'live', workspace, pane: record.chat.pane }
+      if (!live) return { status: 'gone', workspace, pane: record.chat.pane, revision }
+      return { status: record.chat.placeholderArgv ? 'placeholder' : 'live', workspace, pane: record.chat.pane, revision }
     } catch (error) {
       return { status: 'refused', reason: error instanceof Error ? error.message : String(error) }
     }

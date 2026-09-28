@@ -26,6 +26,8 @@ interface FakePane { pane_id: string; workspace_id: string; tab_id: string; argv
 interface FakeTab { tab_id: string; workspace_id: string; label: string }
 
 export class FakeHerdrWorkspaceServer implements HerdrRpc {
+  ownedEmptyWorkspaceRetirement = false
+  beforeEmptyWorkspaceRetirement?: () => void
   readonly calls: RecordedCall[] = []
   readonly workspaces = new Map<string, { workspace_id: string; label: string; tokens: Record<string, unknown> }>()
   readonly tabs = new Map<string, FakeTab>()
@@ -73,7 +75,17 @@ export class FakeHerdrWorkspaceServer implements HerdrRpc {
       case 'ping':
         // Independently pin the measured server contract; importing the client's
         // expected protocol would hide drift in the compatibility gate.
-        return { type: 'pong', version: '0.9.1', protocol: 22 }
+        return { type: 'pong', version: '0.9.1', protocol: 22,
+          capabilities: { owned_empty_workspace_retirement: this.ownedEmptyWorkspaceRetirement } }
+      case 'workspace.retire_empty_owned': {
+        this.beforeEmptyWorkspaceRetirement?.()
+        const workspace = this.workspaces.get(String(params['workspace_id']))
+        const status = !workspace ? 'gone'
+          : workspace.tokens[String(params['workspace_token_key'])] !== params['workspace_token_value'] ? 'mismatch'
+          : [...this.panes.values()].some(pane => pane.workspace_id === workspace.workspace_id) ? 'not_empty' : 'retired'
+        if (status === 'retired') this.workspaces.delete(String(params['workspace_id']))
+        return { type: 'workspace_retirement', ...params, status }
+      }
       case 'workspace.create': {
         const workspace_id = this.next('workspace')
         const tab_id = this.next('tab')
