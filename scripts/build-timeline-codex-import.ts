@@ -38,11 +38,17 @@ export interface CodexImportCoverage {
   duplicate: number
   turnReceipts: number
   emittedTurns: number
-  tokenCoverage: 'unknown'
+  tokenCoverage: 'unknown' | 'partial'
 }
 type Obj = Record<string, unknown>
 const object = (x: unknown): x is Obj => x !== null && typeof x === 'object' && !Array.isArray(x)
 const stamp = (x: unknown): x is number => typeof x === 'number' && Number.isSafeInteger(x) && x >= 0
+type TurnUsage = { input: number; output: number; cached: number }
+function nativeTurnUsage(value: unknown): TurnUsage | null {
+  if (!object(value) || !stamp(value.input_tokens) || !stamp(value.output_tokens) ||
+      !stamp(value.cached_input_tokens) || value.cached_input_tokens > value.input_tokens) return null
+  return { input: value.input_tokens, output: value.output_tokens, cached: value.cached_input_tokens }
+}
 const repository = (x: string): boolean => /^[a-zA-Z0-9_.-]+\/[a-zA-Z0-9_.-]+$/.test(x)
 function cwd(value: unknown): string | null {
   if (typeof value !== 'string') return null
@@ -118,6 +124,7 @@ export async function importCodexOperations(lines: AsyncIterable<string> | Itera
   const observations: DirectPhaseObservation[] = [], seen = new Set<string>()
   const contexts = new Map<string, Array<{ at: number; model: string }>>()
   const turns: Array<{ turnId: string; start: number; end: number }> = []
+  const usageByTurn = new Map<string, TurnUsage | null>()
   let sessionId: string | undefined, parentSessionId: string | undefined, bytes = 0
   for await (const line of lines) {
     coverage.lines++
@@ -138,6 +145,17 @@ export async function importCodexOperations(lines: AsyncIterable<string> | Itera
     if (r.type === 'turn_context' && typeof p.turn_id === 'string' && typeof p.model === 'string' && p.model) {
       const at = typeof r.timestamp === 'string' ? Date.parse(r.timestamp) : NaN
       if (stamp(at)) { const history = contexts.get(p.turn_id) ?? []; history.push({ at, model: p.model }); contexts.set(p.turn_id, history) }
+      continue
+    }
+    if (r.type === 'token_usage_record') {
+      // The native per-turn receipt is the only usage source here. A session
+      // total or a record without both native identities cannot charge a task.
+      if (!sessionId || p.thread_id !== sessionId || typeof p.turn_id !== 'string' || !p.turn_id) continue
+      const next = nativeTurnUsage(p.turn_token_usage)
+      const prior = usageByTurn.get(p.turn_id)
+      if (!usageByTurn.has(p.turn_id)) usageByTurn.set(p.turn_id, next)
+      else if (prior == null || next === null || prior.input !== next.input ||
+          prior.output !== next.output || prior.cached !== next.cached) usageByTurn.set(p.turn_id, null)
       continue
     }
     if (r.type === 'event_msg' && p.type === 'task_complete') {
@@ -187,17 +205,23 @@ export async function importCodexOperations(lines: AsyncIterable<string> | Itera
     // One turn may change model. A mixed or absent model remains unknown rather
     // than attributing the entire envelope to the most recent context.
     const models = new Set((contexts.get(turn.turnId) ?? []).filter(c => c.at >= turn.start && c.at < turn.end + 1000).map(c => c.model))
+    const usage = usageByTurn.get(turn.turnId) ?? null
     observations.push({
       eventId: id, phaseId: id, links: binding.links, phase: binding.phase,
       label: `Native ${binding.phase} task`, model: models.size === 1 ? [...models][0]! : null,
       startedAt: turn.start, endedAt: turn.end,
-      inputTokens: null, outputTokens: null, cacheReadTokens: null, cacheCreationTokens: null, costUsd: null,
+      // Native input includes cached input. Keep disjoint fields so the chart's
+      // token sum does not count cached tokens twice.
+      inputTokens: usage === null ? null : usage.input - usage.cached,
+      outputTokens: usage?.output ?? null, cacheReadTokens: usage?.cached ?? null,
+      cacheCreationTokens: null, costUsd: null,
       source: { kind: 'codex-log', sessionId: binding.sessionId, turnId: turn.turnId, ...(parentSessionId ? { parentSessionId } : {}),
         sourceEventId: turn.turnId, evidenceRef: `${options.evidenceRef}:turn:${turn.turnId}`, attribution: 'reconstructed',
-        basis: 'Explicit session-and-turn PR and phase binding; native completed task envelope at one-second resolution; nested commands may overlap; task usage attribution unknown' },
+        basis: `Explicit session-and-turn PR and phase binding; native completed task envelope at one-second resolution; nested commands may overlap; ${usage === null ? 'task usage attribution unknown' : 'exact native per-turn token receipt; cache creation and cost unknown'}` },
       observedAt: turn.end,
     })
     coverage.emittedTurns++
+    if (usage !== null) coverage.tokenCoverage = 'partial'
   }
   coverage.emitted = observations.length
   return { observations, coverage }

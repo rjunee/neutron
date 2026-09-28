@@ -28,6 +28,43 @@ describe('bounded native Codex operation reconstruction', () => {
   const turnOptions: CodexImportOptions = { ...options, turnBindings: [{
     sessionId: 'thread-1', turnId: 'turn-1', phase: 'build', links: [{ repository: repo, prNumber: 7 }],
   }] }
+  const usage = (totals: Record<string, unknown> = { input_tokens: 25, output_tokens: 2, cached_input_tokens: 5 },
+    identity: Record<string, unknown> = {}) => record('token_usage_record', {
+      thread_id: 'thread-1', turn_id: 'turn-1', turn_token_usage: totals, ...identity,
+    }, 8000)
+  test('an exact native turn receipt supplies disjoint token fields and leaves unreported metrics unknown', async () => {
+    const result = await run([command(), usage(), task()], turnOptions)
+    expect(result.observations).toHaveLength(2)
+    expect(result.observations[0]).toMatchObject({ inputTokens: null, outputTokens: null, cacheReadTokens: null })
+    const turn = result.observations[1]!
+    expect(validatePhaseObservation(turn)).toMatchObject({ model: 'model-a', inputTokens: 20, outputTokens: 2,
+      cacheReadTokens: 5, cacheCreationTokens: null, costUsd: null })
+    expect(result.coverage.tokenCoverage).toBe('partial')
+    const snapshot = combineTimelineSources({ observedAt: 10000, repositories: [] }, [turn], [], 10000)
+    expect(snapshot.cards[0]!.segments[0]!.usage).toMatchObject({ tokens: 27, coverage: 'partial', input: 20,
+      output: 2, cacheRead: 5, cacheCreation: null, costUsd: null })
+    const zero = (await run([usage({ input_tokens: 0, output_tokens: 0, cached_input_tokens: 0 }), task()], turnOptions)).observations[0]!
+    expect(zero).toMatchObject({ inputTokens: 0, outputTokens: 0, cacheReadTokens: 0 })
+  })
+  test('missing, foreign, malformed and conflicting usage never charge an attested task', async () => {
+    const variants = [[], [usage(undefined, { thread_id: 'foreign' })], [usage(undefined, { turn_id: 'other' })],
+      [usage(undefined, { thread_id: undefined })],
+      [usage({ input_tokens: 4, output_tokens: 1, cached_input_tokens: 5 })],
+      [usage({ input_tokens: 2.5, output_tokens: 1, cached_input_tokens: 0 })],
+      [usage(), usage({ input_tokens: 26, output_tokens: 2, cached_input_tokens: 5 })],
+      [usage(), usage({ input_tokens: 25, output_tokens: 2, cached_input_tokens: -1 })]]
+    for (const receipts of variants) {
+      const result = await run([...receipts, task()], turnOptions)
+      expect(result.observations[0]).toMatchObject({ inputTokens: null, outputTokens: null, cacheReadTokens: null })
+      expect(result.coverage.tokenCoverage).toBe('unknown')
+    }
+    const repeated = await run([usage(), usage(), task()], turnOptions)
+    expect(repeated.observations[0]).toMatchObject({ inputTokens: 20, outputTokens: 2, cacheReadTokens: 5 })
+    const unbound = await run([usage(), task()])
+    expect(unbound.observations).toEqual([])
+    const noCompletion = await run([usage()], turnOptions)
+    expect(noCompletion.observations).toEqual([])
+  })
   test('explicit native task envelopes reach authenticated dashboard phases with recorded boundaries and model', async () => {
     for (const phase of ['build', 'review', 'fix'] as const) {
       const result = await run([command(), task()], { ...turnOptions, turnBindings: [{ ...turnOptions.turnBindings![0]!, phase }] })
@@ -79,7 +116,7 @@ describe('bounded native Codex operation reconstruction', () => {
     const directory = await mkdtemp(join(tmpdir(), 'codex-turn-replay-'))
     try {
       const path = join(directory, 'rollout.jsonl'), journal = join(directory, 'phases.jsonl')
-      const body = [context(), command(), task()].join('\n') + '\n'
+      const body = [context(), command(), usage(), task()].join('\n') + '\n'
       await writeFile(path, [meta, record('response_item', { text: 'padding'.repeat(1000) })].join('\n') + '\n' + body)
       const tailBytes = Buffer.byteLength(body) + 500
       const first = await importCodexFile(path, turnOptions, tailBytes)
@@ -87,6 +124,7 @@ describe('bounded native Codex operation reconstruction', () => {
       expect(first.observations).toHaveLength(2)
       expect(first.observations.find(o => o.phase === 'test')!.model).toBe('model-a')
       expect(first.observations.find(o => o.phase === 'build')!.model).toBeNull()
+      expect(first.observations.find(o => o.phase === 'build')).toMatchObject({ inputTokens: 20, outputTokens: 2, cacheReadTokens: 5 })
       expect(await appendChangedPhaseObservations(journal, first.observations)).toBe(2)
       await appendFile(path, record('response_item', { text: 'new unrelated data' }) + '\n')
       const second = await importCodexFile(path, turnOptions, tailBytes)
