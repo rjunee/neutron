@@ -269,6 +269,25 @@ for (const stage of ['approved', 'rejected', 'task-built-deviated', 'built'] as 
   expect(f.store.stageEvents(result.run.id)).toHaveLength(0)
 })
 
+test('settled proof-only retry cannot revive an older build behind an unproved terminal fix', async () => {
+  const f = await fixture({ checkpoint: { stage: 'built', round: 1, remainingTasks: 0 } })
+  const built = f.store.stageEvents(f.prior.id).filter(event => event.stage === 'build-mode-state').at(-1)!
+  const state = JSON.parse(built.meta!)
+  state.checkpoint.stage = 'rejected'
+  state.checkpoint.findings = [{ kind: 'code', actionable: true, text: 'FULL SUITE NOT PROVEN: worker claims environment failure' }]
+  state.checkpoint.pending = { phase: 'fix', step_id: `${f.prior.id}:fix:1` }
+  await f.store.recordStageEvent(f.prior.id, 'build-mode-state', JSON.stringify(state))
+  const before = f.store.stageEvents(f.prior.id)
+  const result = await f.dispatch()
+  expect(result.ok, JSON.stringify(result)).toBe(true)
+  if (!result.ok) return
+  expect(result.run.inner_checkpoint).toBeNull()
+  expect(readBuildRetrySource(f.store, result.run)).toBeNull()
+  expect(result.run.task_iteration).toBe(4)
+  expect(result.run.max_task_iterations).toBe(8)
+  expect(f.store.stageEvents(f.prior.id)).toEqual(before)
+})
+
 test('a stopped run and a changed task do not donate typed state', async () => {
   const stopped = await fixture({ phase: 'stopped' })
   const first = await stopped.dispatch()

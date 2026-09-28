@@ -1151,6 +1151,40 @@ test('iteration 2 continues from the ledger iteration 1 committed, not a regener
     implementationPlan: '- [x] T1: first\n- [ ] T2: second', topTask: '- [ ] T2: second', remainingTasks: 0 })
 })
 
+test('settled proof-only recovery leaves the original G042 failure and armed checkpoint intact', async () => {
+  const f = modeFixture('single')
+  f.deps.reviewSuite = async () => ({ kind: 'known', findings: [
+    { title: 'FULL SUITE NOT PROVEN', evidence: 'Host suite failed', advisory: false, identity: null },
+  ] })
+  const run = f.runner.run.bind(f.runner)
+  f.runner.run = async (request, ...args) => request.role === 'fix'
+    ? f.completed(structuredClone(f.snapshot)) : run(request, ...args)
+  expect(await f.run()).toMatchObject({ kind: 'failed', detail: 'Fix round did not move the measured branch head' })
+  expect(f.state.checkpoints.at(-1)).toMatchObject({ stage: 'rejected', round: 1,
+    head: f.snapshot.head, pending: { phase: 'fix', step_id: 'run:fix:1' },
+    previousReview: { findings: [], blockingCount: 1, unknownIdentities: true } })
+  expect(f.state.checkpoints.some(state => state.stage === 'fixed')).toBe(false)
+  expect(f.events).not.toContain('merge')
+})
+
+for (const repaired of [true, false])
+test(`settled proof-only recovery retained baseline requires fresh suite progress: ${repaired}`, async () => {
+  const f = modeFixture('single')
+  const checkpoint = f.resume('built', 2, { findings: [], blockingCount: 1, unknownIdentities: true })
+  checkpoint.findings = [{ kind: 'code', actionable: true, text: 'FULL SUITE NOT PROVEN: Host suite failed' }]
+  let suites = 0
+  f.deps.reviewSuite = async () => { suites++; return { kind: 'known', findings: repaired ? [] : [
+    { title: 'FULL SUITE NOT PROVEN', evidence: 'Host suite failed', advisory: false, identity: null },
+  ] } }
+  const outcome = await f.run()
+  expect(outcome.kind).toBe(repaired ? 'merged' : 'blocked')
+  if (!repaired) expect(outcome).toMatchObject({ on: 'Review requires orchestrator arbitration: no-progress' })
+  expect(suites).toBe(1)
+  expect(f.runner.calls).toHaveLength(0)
+  expect(f.cross.calls.map(call => call.step_id)).toEqual([`run:review:2:head:${f.snapshot.head}`])
+  expect(f.state.advances).toBe(0)
+})
+
 test('G038 exact full resume head skips build; moved missing and short heads rebuild', async () => {
   for (const head of [null, 'short', 'b'.repeat(40), 'a'.repeat(40)]) {
     const f = modeFixture('single'); const checkpoint = f.resume('approved', 1, { findings: [], blockingCount: 0 }); checkpoint.head = head
