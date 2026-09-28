@@ -38,7 +38,9 @@ export interface BuildSnapshot {
   pr: { number: number; head: string; state: 'OPEN' | 'CLOSED' | 'MERGED' } | null
 }
 export type Measurement = { kind: 'known'; value: BuildSnapshot } | { kind: 'unknown'; detail: string }
-export type GateResult = { kind: 'allow' } | { kind: 'blocked'; on: string; reviewStop?: ReviewStop } | { kind: 'unknown'; detail: string }
+/** Positive host observation; a refusal remains a refusal until fresh work is reviewed. */
+export interface BaseDriftRefresh { head: string; base: string; baseHead: string; overlap: readonly string[] }
+export type GateResult = { kind: 'allow' } | { kind: 'blocked'; on: string; reviewStop?: ReviewStop; baseDrift?: BaseDriftRefresh } | { kind: 'unknown'; detail: string }
 export type NominationRepair = { kind: 'repair-nomination'; finding: string }
 export type PublicationGateResult = GateResult | NominationRepair
 export type ReviewDecision =
@@ -80,6 +82,10 @@ export interface ResumeCheckpoint {
   previousBlockingCount?: number
   /** Host-validated plan remainder at the completed task-sequence build; absent is unknown. */
   remainingTasks?: number | undefined
+  /** A terminal merge stop imported completed build evidence, never its approval. */
+  refreshBeforeReview?: boolean | undefined
+  /** Retained through an armed base-integration fix, including crash recovery. */
+  baseDrift?: BaseDriftRefresh | undefined
   /** Completed intermediate task: spend is durable before the Git ledger write. */
   handoff?: TaskHandoffIntent | undefined
   findings: readonly { kind: 'code' | 'lane'; actionable: boolean; text: string }[]
@@ -277,6 +283,12 @@ function claimMatches(value: unknown, measured: BuildSnapshot): value is BuildSn
 }
 
 const fullOid = (head: string | null): head is string => typeof head === 'string' && /^(?:[a-f0-9]{40}|[a-f0-9]{64})$/i.test(head)
+function validBaseDrift(value: BaseDriftRefresh | undefined, head: string | null): value is BaseDriftRefresh {
+  return !!value && value.head === head && fullOid(value.head) && fullOid(value.baseHead)
+    && typeof value.base === 'string' && value.base.trim().length > 0
+    && Array.isArray(value.overlap) && value.overlap.length > 0
+    && value.overlap.every(path => typeof path === 'string' && path.length > 0)
+}
 const uncheckedLine = /^\s*- \[ \]\s+/
 const unchecked = (body: string): string[] => body.split('\n').filter(line => uncheckedLine.test(line))
 
@@ -388,6 +400,11 @@ export async function buildRun(input: BuildRunInput, deps: BuildRunDeps, signal:
     }
     let acceptedPlan = selected?.plan ?? null
     const resume = input.start === 'resume' ? await modes!.loadResume() : null
+    if (resume && ((resume.refreshBeforeReview !== undefined && resume.refreshBeforeReview !== true)
+      || (resume.baseDrift !== undefined && (!resume.refreshBeforeReview || !validBaseDrift(resume.baseDrift, resume.head)
+        || resume.stage !== 'built' || (resume.pending !== undefined && resume.pending.phase !== 'fix'))))) {
+      return unknown('Base refresh checkpoint is invalid')
+    }
     if (input.mode === 'implementation' && strategy === null && resume && resume.pending?.phase !== 'plan') {
       return unknown('Resume requires a persisted execution strategy before completed work can be reused')
     }
@@ -742,6 +759,10 @@ export async function buildRun(input: BuildRunInput, deps: BuildRunDeps, signal:
         if (!deps.checkFixLineage) return { stop: unknown('Fix lineage host is missing') }
         const lineage = gateStop(await deps.checkFixLineage(measured, snapshot.head))
         if (lineage) return { stop: lineage }
+        if (durable.baseDrift) {
+          const baseLineage = gateStop(await deps.checkFixLineage(measured, durable.baseDrift.baseHead))
+          if (baseLineage) return { stop: baseLineage }
+        }
       }
       if ((role === 'build' || role === 'fix') && result && typeof result === 'object'
           && 'head' in result && typeof result.head === 'string' && result.head !== measured.head
@@ -777,6 +798,7 @@ export async function buildRun(input: BuildRunInput, deps: BuildRunDeps, signal:
       if (role === 'build' || role === 'fix') {
         await checkpoint({ head: measured.head, stage: role === 'fix' ? 'fixed' : 'built',
           round: role === 'fix' ? round + 1 : Math.max(durable.round, 1, round + 1), pending: undefined, findings: [],
+          ...(role === 'fix' ? { baseDrift: undefined, refreshBeforeReview: undefined } : {}),
           ...(role === 'build' ? { remainingTasks: strategy === 'task_sequence' ? plan!.remainingTasks : 0,
             handoff: strategy === 'task_sequence' && plan!.remainingTasks > 0
               ? { iteration: taskIteration, builtHead: measured.head, body: tickTopTask(plan!.implementationPlan) } : undefined } : {}) })
@@ -1005,6 +1027,46 @@ export async function buildRun(input: BuildRunInput, deps: BuildRunDeps, signal:
       return null
     }
 
+    async function refreshBase(gate: Extract<GateResult, { kind: 'blocked' }>, round: number): Promise<BuildRunOutcome | null> {
+      const drift = gate.baseDrift
+      if (local || !validBaseDrift(drift, snapshot.head)) {
+        return blocked(gate.on)
+      }
+      if (round >= maxRounds) return blocked('Review requires orchestrator arbitration: round ceiling')
+      const measured = await deps.measure()
+      if (measured.kind === 'unknown') return unknown(measured.detail)
+      if (!corroborates(snapshot, measured.value)) return blocked('Revision changed before base refresh')
+      findings = [`Base drift blocks merge: integrate the observed PR base ${JSON.stringify(drift.base)} at ${drift.baseHead} into the candidate ${drift.head} with an ancestry-preserving merge. Preserve all completed work and the task ledger. Resolve interactions in ${JSON.stringify(drift.overlap)}. Both commits must remain ancestors of the result. Obtain fresh proof for the resulting head; do not publish or merge the PR.`]
+      // This is a measured merge blocker, not a fabricated code-review verdict.
+      // Its own baseline makes the pending fix recoverable without borrowing an
+      // old approval or erasing the existing review/task ceilings.
+      previousReview = { findings: [`base-drift:${drift.baseHead}:${drift.head}`], blockingCount: 1 }
+      reviewBaseline = 'required'
+      approved = false
+      await checkpoint({ head: snapshot.head, stage: 'built', round, pending: undefined,
+        refreshBeforeReview: true, baseDrift: structuredClone(drift),
+        findings: findings.map(text => ({ kind: 'lane' as const, actionable: true, text })) })
+      const fixed = await work('fix', round)
+      return 'stop' in fixed ? fixed.stop : null
+    }
+
+    if (durable.refreshBeforeReview && !recovery) {
+      phase = 'merge'
+      const gate = await deps.mergeGate(snapshot, input.merge_mode)
+      if (gate.kind === 'blocked' && gate.baseDrift) {
+        const stop = await refreshBase(gate, firstRound)
+        if (stop) return stop
+      } else {
+        const stop = gateStop(gate)
+        if (stop) return stop
+        // The previous run already spent this review round. Even a base which
+        // no longer overlaps cannot make that old approval this run's receipt.
+        if (firstRound >= maxRounds) return blocked('Review requires orchestrator arbitration: round ceiling')
+        await checkpoint({ stage: 'built', round: firstRound + 1, refreshBeforeReview: undefined, baseDrift: undefined })
+      }
+      firstRound++
+    }
+
     for (;;) {
       for (let round = firstRound; !approved; round++) {
         if (round > maxRounds) return blocked('Review requires orchestrator arbitration: round ceiling')
@@ -1127,34 +1189,39 @@ export async function buildRun(input: BuildRunInput, deps: BuildRunDeps, signal:
         }
         if (stop) return stop
       }
-      break
+      const reviewed = snapshot
+      phase = 'merge'
+      const published = await deps.measure()
+      if (published.kind === 'unknown') return unknown(published.detail)
+      snapshot = published.value
+      if (local ? !corroborates(reviewed, snapshot) || snapshot.pr !== null : !corroborates(reviewed, snapshot) || snapshot.pr?.state !== 'OPEN' || snapshot.pr.head !== reviewed.head) {
+        return blocked(local ? 'Local revision changed before merge' : 'Published PR does not match reviewed revision')
+      }
+      const readiness = await deps.mergeGate(snapshot, input.merge_mode)
+      if (readiness.kind === 'blocked' && readiness.baseDrift) {
+        const stop = await refreshBase(readiness, firstRound)
+        if (stop) return stop
+        firstRound++
+        continue
+      }
+      const mergeGate = gateStop(readiness)
+      if (mergeGate) return mergeGate
+      const beforeMerge = await deps.measure()
+      if (beforeMerge.kind === 'unknown') return unknown(beforeMerge.detail)
+      if (!corroborates(snapshot, beforeMerge.value)) return blocked('Revision changed during merge gates')
+      // The merge effect must atomically enforce the reviewed head and assessed base.
+      await deps.merge(snapshot)
+      const merged = await deps.measure()
+      if (merged.kind === 'unknown') return unknown(merged.detail)
+      if (local) {
+        if (merged.value.head !== reviewed.head || merged.value.pr !== null) return blocked('Local revision changed during merge')
+        const confirmation = gateStop(await deps.confirmLocalMerge!(reviewed))
+        if (confirmation) return confirmation
+      } else if (merged.value.pr?.state !== 'MERGED' || merged.value.pr.number !== snapshot.pr!.number || merged.value.pr.head !== reviewed.head) {
+        return blocked('Merge not confirmed for reviewed PR')
+      }
+      return { kind: 'merged', snapshot: merged.value }
     }
-
-    const reviewed = snapshot
-    phase = 'merge'
-    const published = await deps.measure()
-    if (published.kind === 'unknown') return unknown(published.detail)
-    snapshot = published.value
-    if (local ? !corroborates(reviewed, snapshot) || snapshot.pr !== null : !corroborates(reviewed, snapshot) || snapshot.pr?.state !== 'OPEN' || snapshot.pr.head !== reviewed.head) {
-      return blocked(local ? 'Local revision changed before merge' : 'Published PR does not match reviewed revision')
-    }
-    const mergeGate = gateStop(await deps.mergeGate(snapshot, input.merge_mode))
-    if (mergeGate) return mergeGate
-    const beforeMerge = await deps.measure()
-    if (beforeMerge.kind === 'unknown') return unknown(beforeMerge.detail)
-    if (!corroborates(snapshot, beforeMerge.value)) return blocked('Revision changed during merge gates')
-    // The merge effect must atomically enforce the reviewed head and assessed base.
-    await deps.merge(snapshot)
-    const merged = await deps.measure()
-    if (merged.kind === 'unknown') return unknown(merged.detail)
-    if (local) {
-      if (merged.value.head !== reviewed.head || merged.value.pr !== null) return blocked('Local revision changed during merge')
-      const confirmation = gateStop(await deps.confirmLocalMerge!(reviewed))
-      if (confirmation) return confirmation
-    } else if (merged.value.pr?.state !== 'MERGED' || merged.value.pr.number !== snapshot.pr!.number || merged.value.pr.head !== reviewed.head) {
-      return blocked('Merge not confirmed for reviewed PR')
-    }
-    return { kind: 'merged', snapshot: merged.value }
   } catch (error) {
     // A host exception can follow a successful external write. Preserve uncertainty.
     return unknown(error instanceof Error ? error.message : String(error))

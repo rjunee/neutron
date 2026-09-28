@@ -820,7 +820,8 @@ export async function prepareProjectBuild(input: InnerLoopInput, context: Projec
     throw new Error(`Legacy v2 ${role} brief was rendered from different ${cause === 'task' ? 'task text' : 'reflection guidance'}; its reserved result is invalidated and the step must be re-executed`)
   }
   const bodyFile = join(state, 'publication.md')
-  const proofRetry = readBuildRetrySource(context.store, context.store.get(run.id)!)?.proofFix
+  const retainedSource = readBuildRetrySource(context.store, context.store.get(run.id)!)
+  const proofRetry = retainedSource?.proofFix ?? retainedSource?.mergeRefresh
   if (proofRetry) {
     // This exception retains implementation only under its original model and
     // instructions. Proof uses this run's current environment and new receipts.

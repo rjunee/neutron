@@ -83,7 +83,7 @@ import { buildTridentTerminalObserver } from '../wiring/trident-nexus-observer.t
 import { NexusStore } from '@neutronai/gateway/nexus/nexus-store.ts'
 import { fixtureDispatchAdmission } from '@neutronai/trident/__tests__/dispatch-admission-fixture.ts'
 import { buildTridentOrchestrator } from '@neutronai/trident/orchestrator.ts'
-import { createProjectLauncher } from '@neutronai/trident/project-launcher.ts'
+import { createProjectLauncher, projectBuildResult } from '@neutronai/trident/project-launcher.ts'
 import { buildBoardReconcileObserver } from '@neutronai/trident/board-reconcile.ts'
 import { deriveEscalationBlock } from '@neutronai/trident/escalation-block.ts'
 import { buildTerminalBuildWakePrompt } from '@neutronai/gateway/proactive/terminal-build-wake.ts'
@@ -447,6 +447,8 @@ interface WorkerWorld {
   hostLedger?: boolean
   /** A completed diagnostic fix may leave the already published candidate unchanged. */
   unchangedFix?: boolean
+  /** A mechanical base refresh remains ordinary bounded worker work. */
+  integrateBase?: string
   synthesisShape: 'legacy' | 'schema-guided' | 'malformed' | 'independent'
   verdictRepair?: 'repairs' | 'exhausts'
   repairPaths: string[]
@@ -663,6 +665,18 @@ async function performRole(world: WorkerWorld, request: BoundedWorkRequest, brie
   }
 
   if (request.role === 'build' || request.role === 'fix') {
+    if (request.role === 'fix' && world.integrateBase) {
+      expect(context.findings.join('\n')).toContain(world.integrateBase)
+      const candidate = await readFile(join(cwd, 'NOTES.md'), 'utf8')
+      const merged = await world.run(['git', '-C', cwd, '-c', 'user.email=w@example.invalid', '-c', 'user.name=Worker',
+        'merge', '--no-edit', world.integrateBase], cwd)
+      if (!merged.ok) {
+        expect(await gitOut(world.run, cwd, ['diff', '--name-only', '--diff-filter=U'])).toBe('NOTES.md')
+        await writeFile(join(cwd, 'NOTES.md'), candidate.replace(/^seed\n/, 'changed seed\n'))
+        await gitOut(world.run, cwd, ['add', 'NOTES.md'])
+        await gitOut(world.run, cwd, ['-c', 'user.email=w@example.invalid', '-c', 'user.name=Worker', 'commit', '--no-edit'])
+      }
+    }
     if (request.role === 'fix' && world.unchangedFix) {
       const built = JSON.parse(await readFile(join(dirname(request.result.path), 'build.result'), 'utf8'))
       return { ...snapshot, payload: { ...built.result.payload,
@@ -2608,6 +2622,116 @@ test.each(['current', 'historical', 'historical after fix'] as const)('a %s sett
   expect(f.world.dispatches.some(row => ['plan', 'build', 'fix'].includes(row.role))).toBe(false)
   expect(standaloneReview(f.world).measuredHead).toBe(String(checkpoint.head))
 }, 300_000)
+
+for (const scenario of ['in-run', 'historical', 'ceiling', 'model', 'policy', 'brief'] as const)
+test(`base drift refresh retains terminal task work and renews release evidence: ${scenario}`, async () => {
+  const historical = scenario !== 'in-run'
+  const task = 'Record a note and preserve completed work across an overlapping base advance'
+  const f = await fixture({ dispatchTask: task, taskSequence: true, maxRounds: 3 })
+  const host = await createProjectBuildHost(await f.prepare())
+  const mergeGate = host.deps.mergeGate
+  let oldHead = ''
+  let baseHead = ''
+  host.deps.mergeGate = async (...args) => {
+    if (!baseHead) {
+      oldHead = args[0].head
+      // The base and candidate changed the same file. The bounded worker must
+      // preserve both sides, including a textual conflict in this small fixture.
+      await writeFile(join(f.repo, 'NOTES.md'), 'changed seed\n')
+      await gitOut(f.context.runHost, f.repo, ['add', 'NOTES.md'])
+      await gitOut(f.context.runHost, f.repo, ['commit', '-m', 'test: advance overlapping base'])
+      baseHead = await gitOut(f.context.runHost, f.repo, ['rev-parse', 'HEAD'])
+      await gitOut(f.context.runHost, f.repo, ['push', 'origin', 'main'])
+      f.world.integrateBase = baseHead
+    }
+    const gate = await mergeGate(...args)
+    // Reproduce the deployed host's unstructured G108 refusal. This retains
+    // the same gate and exact approved checkpoint while ending the old run.
+    return historical && gate.kind === 'blocked' ? { kind: 'blocked', on: gate.on } : gate
+  }
+  let outcome = await host.run({ mode: 'implementation', start: 'fresh' }, new AbortController().signal)
+  if (historical) {
+    expect(outcome).toMatchObject({ kind: 'blocked', phase: 'merge' })
+    expect(lastCheckpoint(f)).toMatchObject({ stage: 'approved', round: 1, remainingTasks: 0, head: oldHead })
+    await f.store.update(f.row.id, { phase: 'failed', worktree: null,
+      inner_result: projectBuildResult(outcome, { ...f.input, run: f.store.get(f.row.id)! }) })
+    const prior = f.store.get(f.row.id)!
+    const source = retryModeSource(f.store, prior)
+    expect(source?.state.checkpoint).toMatchObject({ stage: 'built', head: oldHead, refreshBeforeReview: true })
+    if (scenario === 'historical') {
+      // The same real settled build is the positive control for every refusal.
+      for (const inner_result of [JSON.stringify({ terminalCause: 'Base drift overlaps reviewed changes' }),
+        JSON.stringify({ ...JSON.parse(prior.inner_result!), projectBuild: { kind: 'blocked', phase: 'review', recipient: 'orchestrator' } })]) {
+        expect(retryModeSource(f.store, { ...prior, inner_result })).toBeNull()
+      }
+      const events = f.store.stageEvents(prior.id)
+      for (const fault of ['head', 'pending', 'reviewStop', 'remainingTasks', 'identity'] as const) {
+        const changed = structuredClone(events)
+        const event = changed.filter(event => event.stage === 'build-mode-state').at(-1)!
+        const meta = JSON.parse(event.meta!)
+        if (fault === 'identity') meta.runId = 'foreign'
+        else if (fault === 'head') meta.checkpoint.head = 'f'.repeat(40)
+        else if (fault === 'pending') meta.checkpoint.pending = { phase: 'review', step_id: `${prior.id}:unknown` }
+        else if (fault === 'reviewStop') meta.checkpoint.reviewStop = { trigger: 'no-progress' }
+        else meta.checkpoint.remainingTasks = 1
+        event.meta = JSON.stringify(meta)
+        const observed = spyOn(f.store, 'stageEvents').mockReturnValue(changed)
+        try {
+          if (fault === 'identity') expect(() => retryModeSource(f.store, prior)).toThrow()
+          else expect(retryModeSource(f.store, prior)).toBeNull()
+        } finally { observed.mockRestore() }
+      }
+      for (const fault of ['unended', 'unknown', 'missing'] as const) {
+        const attempts = structuredClone(f.store.attempts(prior.id))
+        const synthesis = attempts.find(row => row.role === 'synthesis')!
+        if (fault === 'unended') synthesis.ended_at = null
+        else if (fault === 'unknown') synthesis.outcome = 'unknown'
+        else attempts.splice(attempts.indexOf(synthesis), 1)
+        const observed = spyOn(f.store, 'attempts').mockReturnValue(attempts)
+        try { expect(retryModeSource(f.store, prior)).toBeNull() } finally { observed.mockRestore() }
+      }
+      expect(retryModeSource(f.store, prior)?.state.checkpoint.stage).toBe('built')
+    }
+    const dispatched = await dispatchBoardBoundBuild({ task, board_item_id: 'drift-retry' }, {
+      store: f.store, projectAdmission: fixtureDispatchAdmission(f.db), project_slug: 'project', repo_path: f.repo,
+      board: { get: () => ({ id: 'drift-retry', title: task, design_doc_ref: null, linked_run_id: prior.id }), attachRun: async () => {} },
+      resolveBuildRepo: async () => f.repo, resolveMergeMode: async () => 'pr', max_rounds: scenario === 'ceiling' ? 1 : 3,
+    })
+    expect(dispatched.ok, JSON.stringify(dispatched)).toBe(true)
+    if (!dispatched.ok) return
+    expect(dispatched.run.inner_checkpoint_head).toBe(oldHead)
+    expect(dispatched.run.task_iteration).toBe(prior.task_iteration)
+    f.input.run = dispatched.run
+    if (scenario === 'model' || scenario === 'policy' || scenario === 'brief') {
+      f.world.dispatches.length = 0
+      if (scenario === 'model') f.input.phase_models = { ...f.input.phase_models, build: { model: 'sonnet' } }
+      else if (scenario === 'policy') f.input.phase_models = { ...f.input.phase_models, build: { model: 'opus', effort: 'low' } }
+      else f.input.reflection_context = 'Changed implementation instructions.'
+      await expect(f.prepare()).rejects.toThrow('model, authority or brief changed')
+      expect(f.world.dispatches).toEqual([])
+      return
+    }
+    const retry = await createProjectBuildHost(await f.prepare())
+    outcome = await retry.run({ mode: 'implementation', start: 'resume' }, new AbortController().signal)
+  }
+  if (scenario === 'ceiling') {
+    expect(outcome).toMatchObject({ kind: 'blocked', on: 'Review requires orchestrator arbitration: round ceiling' })
+    expect(f.world.dispatches.filter(call => call.role === 'fix')).toEqual([])
+    return
+  }
+  expect(outcome.kind, why(f, outcome)).toBe('merged')
+  expect(f.world.dispatches.filter(call => call.role === 'plan')).toHaveLength(1)
+  expect(f.world.dispatches.filter(call => call.role === 'build')).toHaveLength(1)
+  expect(f.world.dispatches.filter(call => call.role === 'fix')).toHaveLength(1)
+  const reviews = f.world.dispatches.filter(call => call.role === 'review' && call.schema === 'project-review')
+  expect(reviews).toHaveLength(2)
+  const newHead = reviews[1]!.measuredHead!
+  expect(newHead).not.toBe(oldHead)
+  expect(reviews[1]!.step_id).toContain(':review:2:')
+  for (const ancestor of [oldHead, baseHead]) expect((await f.context.runHost(
+    ['git', '-C', f.repo, 'merge-base', '--is-ancestor', ancestor, newHead], f.repo)).ok).toBe(true)
+  expect(await gitOut(f.context.runHost, f.repo, ['show', `${newHead}:NOTES.md`])).toContain('changed seed')
+}, 120_000)
 
 for (const retryCase of ['healthy', 'still-red', 'ceiling', 'model', 'policy', 'brief'] as const)
 test(`settled proof-only fix retry retains the candidate but buys fresh proof and review: ${retryCase}`, async () => {
@@ -6836,8 +6960,9 @@ test('local merge mode reaches merged with no PR, no push and no gh call', async
  *    dispatched from a RESUMED rejection, `build-run.ts:461-472`) is driven
  *    alongside the fresh fix path.
  *  • THE REST OF RESUME. The cases here resume `built`, `pending`, `rejected` and
- *    `task-built` checkpoints. An `approved` checkpoint and a regenerated
- *    diff that disagrees with the measurement are not driven.
+ *    `task-built` checkpoints, plus an authenticated terminal merge stop whose
+ *    `approved` checkpoint imports only its completed build for base refresh.
+ *    A regenerated diff that disagrees with the measurement is not driven.
  *  • KIMI AND THE REST OF HEADLESS PLACEMENT. Codex review's successful first
  *    call and wrong-run envelope are driven above; resume and concurrency are
  *    owned by the runner suite. Kimi remains configured off here.
