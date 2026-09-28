@@ -38,6 +38,20 @@ test('malformed nested field contents never enter retained evidence and failed P
   }
 })
 
+test('uncoercible status preserves deferred refusal without retaining its malformed contents', async () => {
+  const status = { toString: null, valueOf: null, opaque: 'PRIVATE STATUS' }
+  const valid = [...initial, command(['bun', 'test'], { status })]
+  await expect(importCodexOperations(valid, options)).rejects.toThrow()
+  const projected = project(valid)
+  expect(projected.join('\n')).not.toContain('PRIVATE')
+  await expect(importCodexOperations(projected, options)).rejects.toThrow()
+  expect(project(projected)).toEqual(projected)
+  for (const receipt of [command(['echo', 'ignored'], { status }), command(['bun', 'test'], { id: null, status })]) {
+    const source = [...initial, receipt]
+    expect(await importCodexOperations(project(source), options)).toEqual(await importCodexOperations(source, options))
+  }
+})
+
 test('receipt projection preserves exact observations and coverage for each command grammar, including refusal controls', async () => {
   for (const [argv, extra] of [
     [['bun', 'test', 'private-selector.test.ts'], {}], [['npm', 'test'], {}], [['pnpm', 'test'], {}], [['yarn', 'test'], {}],

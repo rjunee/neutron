@@ -113,8 +113,8 @@ export function projectCodexReceipt(line: string): string | null {
   let r: unknown
   try { r = JSON.parse(line) } catch { return malformed }
   if (!object(r) || !object(r.payload)) return malformed
-  if (!['session_meta', 'turn_context', 'token_usage_record'].includes(String(r.type)) &&
-      !(r.type === 'event_msg' && object(r.payload) && ['item_completed', 'task_complete'].includes(String(r.payload.type)))) return null
+  if (!(typeof r.type === 'string' && ['session_meta', 'turn_context', 'token_usage_record'].includes(r.type)) &&
+      !(r.type === 'event_msg' && typeof r.payload.type === 'string' && ['item_completed', 'task_complete'].includes(r.payload.type))) return null
   const p = r.payload
   let payload: Obj
   if (r.type === 'session_meta') {
@@ -147,9 +147,15 @@ export function projectCodexReceipt(line: string): string | null {
           classification.label === 'Shared-host validation' ? ['bash', 'scripts/check-shared-host.sh'] : ['bun', 'test']
       }
     }
-    const status = ['completed', 'failed'].includes(String(item.status)) ? String(item.status) : null
+    let status: unknown = null
+    try { if (['completed', 'failed'].includes(String(item.status))) status = String(item.status) }
+    catch {
+      // Preserve String(status)'s refusal only if the importer reaches that
+      // check, without retaining the malformed object's arbitrary contents.
+      status = { toString: null, valueOf: null }
+    }
     const usable = typeof p.thread_id === 'string' && typeof p.turn_id === 'string' && typeof item.id === 'string' && !!item.id &&
-      stamp(p.started_at_ms) && stamp(p.completed_at_ms) && p.completed_at_ms >= p.started_at_ms && status !== null
+      stamp(p.started_at_ms) && stamp(p.completed_at_ms) && p.completed_at_ms >= p.started_at_ms && typeof status === 'string'
     const stdout = usable && item.exit_code === 0 && typeof item.stdout === 'string' && /^https:\/\/github\.com\/[\w.-]+\/[\w.-]+\/pull\/[1-9]\d*$/.test(item.stdout.trim()) ? item.stdout.trim() : undefined
     payload = { type: p.type, thread_id: stringField(p.thread_id), turn_id: stringField(p.turn_id),
       ...(classification ? { started_at_ms: numberField(p.started_at_ms), completed_at_ms: numberField(p.completed_at_ms) } : {}),
