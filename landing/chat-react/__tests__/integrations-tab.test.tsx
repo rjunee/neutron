@@ -1119,4 +1119,330 @@ describe('Codex seats — the web pane can destroy them, so it must say so', () 
     expect((posted[0] as { account?: string }).account).toBe('laptop')
     root.unmount()
   })
+
+  it('switches through the global operator route and renders the returned active account', async () => {
+    let active = 'default'
+    const { container, root, act, requests } = await mount((url, init) => {
+      if (url.endsWith('/api/cores/integrations')) return json(STATUS)
+      if (url.endsWith('/api/app/projects/archived')) return json({ archived: [] })
+      if (url.endsWith('/api/app/codex-auth')) return json(TWO_SEATS)
+      if (url.endsWith('/api/app/codex-auth/rotation')) return json({ active, accounts: [
+        { slot: 'default', label: null, cooling_until: null, cooling_reason: null },
+        { slot: 'work', label: null, cooling_until: null, cooling_reason: null },
+      ] })
+      if (url.endsWith('/api/app/codex-auth/rotate') && init?.method === 'POST') {
+        active = 'work'
+        return json({ ok: true, status: 'rotated', changed: true, from: 'default', to: 'work', active })
+      }
+      return null
+    })
+    const button = container.querySelector('[data-testid="cint-codex-rotate"]') as HTMLButtonElement
+    expect(button.disabled).toBe(false)
+    expect(container.querySelector('[data-testid="cint-codex-active-account"]')?.textContent).toContain('default')
+    await act(async () => {
+      button.click()
+      await tick()
+      await tick()
+    })
+    expect(requests.filter((r) => r.url.endsWith('/api/app/codex-auth/rotate'))).toEqual([
+      { method: 'POST', url: 'https://sam.neutron.test/api/app/codex-auth/rotate', body: {} },
+    ])
+    expect(container.querySelector('[data-testid="cint-codex-active-account"]')?.textContent).toContain('work')
+    expect(container.textContent).toContain('Switched to work.')
+    expect(container.querySelector('[data-slot="work"]')?.textContent).toContain('active')
+    expect(container.textContent).not.toContain(config.token)
+    root.unmount()
+  })
+
+  it('holds the switch control busy until the operator write settles', async () => {
+    let finish!: (response: Response) => void
+    const pending = new Promise<Response>((resolve) => { finish = resolve })
+    const { container, root, act } = await mount((url, init) => {
+      if (url.endsWith('/api/cores/integrations')) return json(STATUS)
+      if (url.endsWith('/api/app/projects/archived')) return json({ archived: [] })
+      if (url.endsWith('/api/app/codex-auth')) return json(TWO_SEATS)
+      if (url.endsWith('/api/app/codex-auth/rotation')) return json({ active: 'default', accounts: [
+        { slot: 'default', label: null, cooling_until: null, cooling_reason: null },
+        { slot: 'work', label: null, cooling_until: null, cooling_reason: null },
+      ] })
+      if (url.endsWith('/api/app/codex-auth/rotate') && init?.method === 'POST') return pending
+      return null
+    })
+    const button = container.querySelector('[data-testid="cint-codex-rotate"]') as HTMLButtonElement
+    await act(() => { button.click() })
+    expect(button.disabled).toBe(true)
+    expect(button.textContent).toContain('Switching')
+    finish(json({ ok: true, status: 'rotated', changed: true, from: 'default', to: 'work', active: 'work' }))
+    await act(async () => { await tick(); await tick() })
+    expect(button.disabled).toBe(false)
+    root.unmount()
+  })
+
+  it('waits for a delayed selection read before another switch and keeps the final pointer current', async () => {
+    let active = 'default'
+    let posts = 0
+    let firstReadDelayed = false
+    let finishFirstRead!: (response: Response) => void
+    const firstRead = new Promise<Response>((resolve) => { finishFirstRead = resolve })
+    const selection = (selected: string): Response => json({ active: selected, accounts: [
+      { slot: 'default', label: null, cooling_until: null, cooling_reason: null },
+      { slot: 'work', label: null, cooling_until: null, cooling_reason: null },
+    ] })
+    const { container, root, act } = await mount((url, init) => {
+      if (url.endsWith('/api/cores/integrations')) return json(STATUS)
+      if (url.endsWith('/api/app/projects/archived')) return json({ archived: [] })
+      if (url.endsWith('/api/app/codex-auth')) return json(TWO_SEATS)
+      if (url.endsWith('/api/app/codex-auth/rotation')) {
+        if (posts === 1 && !firstReadDelayed) {
+          firstReadDelayed = true
+          return firstRead
+        }
+        return selection(active)
+      }
+      if (url.endsWith('/api/app/codex-auth/rotate') && init?.method === 'POST') {
+        posts += 1
+        const from = active
+        active = active === 'default' ? 'work' : 'default'
+        return json({ ok: true, status: 'rotated', changed: true, from, to: active, active })
+      }
+      return null
+    })
+    const button = container.querySelector('[data-testid="cint-codex-rotate"]') as HTMLButtonElement
+    await act(async () => { button.click(); await tick() })
+    expect(firstReadDelayed).toBe(true)
+    expect(button.disabled).toBe(true)
+    expect(button.textContent).toContain('Switching')
+    await act(() => { button.click() })
+    expect(posts).toBe(1)
+
+    finishFirstRead(selection('work'))
+    await act(async () => { await tick(); await tick() })
+    expect(button.disabled).toBe(false)
+    await act(async () => { button.click(); await tick(); await tick() })
+    expect(posts).toBe(2)
+    expect(active).toBe('default')
+    expect(container.querySelector('[data-testid="cint-codex-active-account"]')?.textContent).toContain('default')
+    expect(container.textContent).toContain('Switched to default.')
+    expect(container.querySelector('[data-slot="default"]')?.textContent).toContain('active')
+    root.unmount()
+  })
+
+  it('ignores an older account read that settles after a newer selection', async () => {
+    let reads = 0
+    let finishOldRead!: (response: Response) => void
+    const oldRead = new Promise<Response>((resolve) => { finishOldRead = resolve })
+    const selection = (selected: string): Response => json({ active: selected, accounts: [
+      { slot: 'default', label: null, cooling_until: null, cooling_reason: null },
+      { slot: 'work', label: null, cooling_until: null, cooling_reason: null },
+    ] })
+    const { container, root, act } = await mount((url) => {
+      if (url.endsWith('/api/cores/integrations')) return json(STATUS)
+      if (url.endsWith('/api/app/projects/archived')) return json({ archived: [] })
+      if (url.endsWith('/api/app/codex-auth/rotation')) {
+        reads += 1
+        return reads === 1 ? oldRead : selection('work')
+      }
+      if (url.endsWith('/api/app/codex-auth')) return json(TWO_SEATS)
+      return null
+    })
+    // StrictMode starts two reads. The later response is authoritative even
+    // when the older request eventually arrives out of order.
+    expect(reads).toBeGreaterThanOrEqual(2)
+    expect(container.querySelector('[data-testid="cint-codex-active-account"]')?.textContent).toContain('work')
+    finishOldRead(selection('default'))
+    await act(async () => { await tick(); await tick() })
+    expect(container.querySelector('[data-testid="cint-codex-active-account"]')?.textContent).toContain('work')
+    root.unmount()
+  })
+
+  it('blocks connect and disconnect while a switch response is pending, then allows them', async () => {
+    let active = 'default'
+    let seats = ['default', 'work']
+    let connects = 0
+    let deletes = 0
+    let finishRotation!: (response: Response) => void
+    const pendingRotation = new Promise<Response>((resolve) => { finishRotation = resolve })
+    const { container, root, act, confirmed } = await mount((url, init) => {
+      if (url.endsWith('/api/cores/integrations')) return json(STATUS)
+      if (url.endsWith('/api/app/projects/archived')) return json({ archived: [] })
+      if (url.endsWith('/api/app/codex-auth/rotation')) return json({ active, accounts: seats.map((slot) => ({
+        slot, label: null, cooling_until: null, cooling_reason: null,
+      })) })
+      if (url.endsWith('/api/app/codex-auth/rotate') && init?.method === 'POST') {
+        active = 'work'
+        return pendingRotation
+      }
+      if (url.endsWith('/api/app/codex-auth') && init?.method === 'POST') {
+        connects += 1
+        return json({ ok: true, status: 'connected' }, 201)
+      }
+      if (url.includes('/api/app/codex-auth') && init?.method === 'DELETE') {
+        deletes += 1
+        seats = []
+        active = 'default'
+        return json({ ok: true })
+      }
+      if (url.endsWith('/api/app/codex-auth')) return json(TWO_SEATS)
+      return null
+    })
+    const setValue = (el: HTMLTextAreaElement | HTMLInputElement, value: string): void => {
+      const setter = Object.getOwnPropertyDescriptor(Object.getPrototypeOf(el) as object, 'value')?.set
+      setter?.call(el, value)
+      el.dispatchEvent(new Event('input', { bubbles: true }))
+    }
+    await act(async () => {
+      setValue(container.querySelector('#cint-codex-auth') as HTMLTextAreaElement, '{"tokens":{}}')
+      setValue(container.querySelector('#cint-codex-account') as HTMLInputElement, 'new')
+      await tick()
+    })
+    const rotate = container.querySelector('[data-testid="cint-codex-rotate"]') as HTMLButtonElement
+    const connect = container.querySelector('[data-testid="cint-codex-connect"]') as HTMLButtonElement
+    const remove = container.querySelector('[data-testid="cint-codex-seat-remove-work"]') as HTMLButtonElement
+    const disconnectAll = container.querySelector('[data-testid="cint-codex-disconnect-all"]') as HTMLButtonElement
+    await act(() => { rotate.click() })
+    expect(connect.disabled).toBe(true)
+    expect(remove.disabled).toBe(true)
+    expect(disconnectAll.disabled).toBe(true)
+    await act(() => {
+      // A programmatic submit must also respect the shared mutation guard.
+      connect.closest('form')?.dispatchEvent(new Event('submit', { bubbles: true, cancelable: true }))
+      remove.click()
+      disconnectAll.click()
+    })
+    expect(connects).toBe(0)
+    expect(deletes).toBe(0)
+    expect(confirmed).toHaveLength(0)
+
+    finishRotation(json({ ok: true, status: 'rotated', changed: true, from: 'default', to: 'work', active: 'work' }))
+    await act(async () => { await tick(); await tick() })
+    expect(container.querySelector('[data-testid="cint-codex-active-account"]')?.textContent).toContain('work')
+    await act(async () => { connect.click(); await tick(); await tick() })
+    expect(connects).toBe(1)
+    await act(async () => { disconnectAll.click(); await tick(); await tick() })
+    expect(deletes).toBe(1)
+    expect(container.textContent).not.toContain('Switched to work.')
+    root.unmount()
+  })
+
+  it('blocks a same-tick switch while connect is pending, then permits a valid switch', async () => {
+    let finishConnect!: (response: Response) => void
+    const pendingConnect = new Promise<Response>((resolve) => { finishConnect = resolve })
+    let connects = 0
+    let rotations = 0
+    const { container, root, act } = await mount((url, init) => {
+      if (url.endsWith('/api/cores/integrations')) return json(STATUS)
+      if (url.endsWith('/api/app/projects/archived')) return json({ archived: [] })
+      if (url.endsWith('/api/app/codex-auth/rotation')) return json({ active: 'default', accounts: [
+        { slot: 'default', label: null, cooling_until: null, cooling_reason: null },
+        { slot: 'work', label: null, cooling_until: null, cooling_reason: null },
+      ] })
+      if (url.endsWith('/api/app/codex-auth/rotate') && init?.method === 'POST') {
+        rotations += 1
+        return json({ ok: true, status: 'rotated', changed: true, from: 'default', to: 'work', active: 'work' })
+      }
+      if (url.endsWith('/api/app/codex-auth') && init?.method === 'POST') {
+        connects += 1
+        return pendingConnect
+      }
+      if (url.endsWith('/api/app/codex-auth')) return json(TWO_SEATS)
+      return null
+    })
+    const setValue = (el: HTMLTextAreaElement | HTMLInputElement, value: string): void => {
+      const setter = Object.getOwnPropertyDescriptor(Object.getPrototypeOf(el) as object, 'value')?.set
+      setter?.call(el, value)
+      el.dispatchEvent(new Event('input', { bubbles: true }))
+    }
+    await act(async () => {
+      setValue(container.querySelector('#cint-codex-auth') as HTMLTextAreaElement, '{"tokens":{}}')
+      setValue(container.querySelector('#cint-codex-account') as HTMLInputElement, 'new')
+      await tick()
+    })
+    const connect = container.querySelector('[data-testid="cint-codex-connect"]') as HTMLButtonElement
+    const rotate = container.querySelector('[data-testid="cint-codex-rotate"]') as HTMLButtonElement
+    await act(() => { connect.click(); rotate.click() })
+    expect(connects).toBe(1)
+    expect(rotations).toBe(0)
+    expect(rotate.disabled).toBe(true)
+    finishConnect(json({ ok: true, status: 'connected' }, 201))
+    await act(async () => { await tick(); await tick() })
+    expect(rotate.disabled).toBe(false)
+    await act(async () => { rotate.click(); await tick(); await tick() })
+    expect(rotations).toBe(1)
+    root.unmount()
+  })
+
+  it('re-reads selection after a 409 while keeping the refusal visible', async () => {
+    let cooled = false
+    let reads = 0
+    const { container, root, act } = await mount((url, init) => {
+      if (url.endsWith('/api/cores/integrations')) return json(STATUS)
+      if (url.endsWith('/api/app/projects/archived')) return json({ archived: [] })
+      if (url.endsWith('/api/app/codex-auth/rotation')) {
+        reads += 1
+        return json({ active: 'default', accounts: [
+          { slot: 'default', label: null, cooling_until: null, cooling_reason: null },
+          { slot: 'work', label: null, cooling_until: cooled ? Date.now() + 60_000 : null, cooling_reason: cooled ? 'rate_limited' : null },
+        ] })
+      }
+      if (url.endsWith('/api/app/codex-auth/rotate') && init?.method === 'POST') {
+        cooled = true
+        return json({ ok: false, code: 'no_eligible_account', message: 'No other Codex account is eligible' }, 409)
+      }
+      if (url.endsWith('/api/app/codex-auth')) return json(TWO_SEATS)
+      return null
+    })
+    const before = reads
+    const button = container.querySelector('[data-testid="cint-codex-rotate"]') as HTMLButtonElement
+    expect(button.disabled).toBe(false)
+    await act(async () => { button.click(); await tick(); await tick() })
+    expect(reads).toBeGreaterThan(before)
+    expect(button.disabled).toBe(true)
+    expect(container.textContent).toContain('No other Codex account is eligible.')
+    expect(container.textContent).toContain('The active account was not changed.')
+    expect(container.querySelector('[data-testid="cint-codex-active-account"]')?.textContent).toContain('default')
+    root.unmount()
+  })
+
+  it('disables switching when no alternate exists and reports a server refusal without claiming a switch', async () => {
+    const { container, root, act, requests } = await mount((url, init) => {
+      if (url.endsWith('/api/cores/integrations')) return json(STATUS)
+      if (url.endsWith('/api/app/projects/archived')) return json({ archived: [] })
+      if (url.endsWith('/api/app/codex-auth')) return json(TWO_SEATS)
+      if (url.endsWith('/api/app/codex-auth/rotation')) return json({ active: 'default', accounts: [
+        { slot: 'default', label: null, cooling_until: null, cooling_reason: null },
+      ] })
+      if (url.endsWith('/api/app/codex-auth/rotate') && init?.method === 'POST') {
+        return json({ ok: false, code: 'no_eligible_account', message: 'No other Codex account is eligible' }, 409)
+      }
+      return null
+    })
+    const button = container.querySelector('[data-testid="cint-codex-rotate"]') as HTMLButtonElement
+    expect(button.disabled).toBe(true)
+    expect(container.textContent).toContain('No other available account')
+    await act(async () => { button.click(); await tick() })
+    expect(requests.filter((r) => r.url.endsWith('/api/app/codex-auth/rotate'))).toHaveLength(0)
+
+    await act(async () => { root.unmount() })
+    const second = await mount((url, init) => {
+      if (url.endsWith('/api/cores/integrations')) return json(STATUS)
+      if (url.endsWith('/api/app/projects/archived')) return json({ archived: [] })
+      if (url.endsWith('/api/app/codex-auth')) return json(TWO_SEATS)
+      if (url.endsWith('/api/app/codex-auth/rotation')) return json({ active: 'default', accounts: [
+        { slot: 'default', label: null, cooling_until: null, cooling_reason: null },
+        { slot: 'work', label: null, cooling_until: null, cooling_reason: null },
+      ] })
+      if (url.endsWith('/api/app/codex-auth/rotate') && init?.method === 'POST') {
+        return json({ ok: false, code: 'no_eligible_account', message: 'No other Codex account is eligible' }, 409)
+      }
+      return null
+    })
+    const secondButton = second.container.querySelector('[data-testid="cint-codex-rotate"]') as HTMLButtonElement
+    expect(secondButton.disabled).toBe(false)
+    await second.act(async () => { secondButton.click(); await tick(); await tick() })
+    expect(second.requests.filter((r) => r.url.endsWith('/api/app/codex-auth/rotate'))).toHaveLength(1)
+    expect(second.container.textContent).toContain('The active account was not changed.')
+    expect(second.container.textContent).not.toContain('Switched to')
+    expect(second.container.querySelector('[data-testid="cint-codex-active-account"]')?.textContent).toContain('default')
+    second.root.unmount()
+  })
 })

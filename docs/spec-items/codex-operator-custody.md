@@ -38,6 +38,18 @@ is introduced.
       global pool and request-body owner fields cannot select another owner.
       GET `/api/app/codex-auth/rotation` reports the stored pointer and configured
       account metadata without probing, harvesting, or choosing a successor.
+- [ ] General Admin shows the stored active Codex account and offers a manual
+      "Switch to next available account" action. The action uses authenticated
+      global metadata and plain rotation routes, disables when no alternate is
+      available, holds the control busy through the confirming metadata read,
+      ignores stale reads, shows the returned selection after success, and reports
+      a 409 refusal without claiming a change. Connect and disconnect cannot
+      overlap a switch in either direction, including same-tick submits. A 409
+      re-reads stored selection without erasing the refusal. It is reachable in
+      General and absent from named projects. No credential or bearer bytes render.
+      Verify: `bun test landing/chat-react/__tests__/codex-credential-client.test.ts
+      landing/chat-react/__tests__/integrations-tab.test.tsx
+      landing/chat-react/__tests__/reachability.test.tsx`.
 - [ ] Synthetic service and HTTP tests exercise both success and refusal, and
       semantic mutations fail those checks. General account handoff retains idle
       admission, target viability and pre/post-retirement revalidation; explicit
