@@ -275,17 +275,18 @@ async function typeOne(id: string, body: string): Promise<ProbeResult> {
       .filter((f) => f['type'] === 'agent_message')
       .map((f) => (typeof f['body'] === 'string' ? (f['body'] as string) : ''))
 
-  const claimed = await waitFor(
-    () => bodiesSince().some((b) => b.includes(CHEATSHEET_MARKER)),
-    10_000,
-  )
+  const hasTaskReply = (): boolean => bodiesSince().some((b) => b.includes(CHEATSHEET_MARKER))
+  const hasModelReply = (): boolean => bodiesSince().some((b) => b.includes(AGENT_REPLY_BODY))
+  // Both are observed outcomes. The /taskfoo control deliberately takes the
+  // model path, so waiting only for a Tasks reply spends the entire deadline
+  // after the answer has already arrived. Silence still pays the same deadline.
+  await waitFor(() => hasTaskReply() || hasModelReply(), 10_000)
   // Settle either way. On a claim this proves the router SHORT-CIRCUITED the
   // model rather than racing it; on a miss it lets the failure say WHERE the
   // message went, which is a materially more useful line than "no result".
-  await sleep(claimed ? 1_000 : 1_500)
-  const wentToModel =
-    bodiesSince().some((b) => b.includes(AGENT_REPLY_BODY)) || agentRowCount(db) > rowBaseline
-  return { claimed, wentToModel }
+  await sleep(hasTaskReply() ? 1_000 : 1_500)
+  const wentToModel = hasModelReply() || agentRowCount(db) > rowBaseline
+  return { claimed: hasTaskReply(), wentToModel }
 }
 
 beforeAll(async () => {
