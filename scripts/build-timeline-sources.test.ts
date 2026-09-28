@@ -1,7 +1,9 @@
 import { describe, expect, test } from 'bun:test'
-import { mkdtemp, readFile, rm, writeFile } from 'node:fs/promises'
+import { link, mkdtemp, readFile, rm, stat, writeFile } from 'node:fs/promises'
 import { tmpdir } from 'node:os'
 import { join } from 'node:path'
+import { pathToFileURL } from 'node:url'
+import { acquireObservationJournalLock } from './build-timeline-observation-lock.ts'
 import {
   appendPhaseObservation,
   appendChangedPhaseObservations,
@@ -198,6 +200,58 @@ describe('timeline catalogue', () => {
 })
 
 describe('direct phase observations', () => {
+  test('shared lock refuses a live writer, then recovers after SIGKILL without replacing its inode', async () => withLog(async (file) => {
+    const ready = `${file}.ready`
+    const holderScript = `${file}.holder.ts`
+    await writeFile(holderScript, `
+      import { writeFileSync } from 'node:fs'
+      import { acquireObservationJournalLock } from ${JSON.stringify(pathToFileURL(join(import.meta.dir, 'build-timeline-observation-lock.ts')).href)}
+      const release = acquireObservationJournalLock(${JSON.stringify(file)})
+      writeFileSync(${JSON.stringify(ready)}, 'held')
+      await Bun.sleep(60_000)
+      release()
+    `)
+    const holder = Bun.spawn([process.execPath, holderScript], { stdout: 'ignore', stderr: 'pipe' })
+    try {
+      const deadline = Date.now() + 3000
+      while (!(await Bun.file(ready).exists())) {
+        if (Date.now() > deadline) throw new Error('lock holder did not start')
+        await Bun.sleep(10)
+      }
+      await expect(appendPhaseObservation(file, observation())).rejects.toThrow('lock unavailable')
+    } finally {
+      holder.kill('SIGKILL')
+      await holder.exited
+    }
+    const before = await stat(`${file}.lock`)
+    await appendPhaseObservation(file, observation())
+    const after = await stat(`${file}.lock`)
+    expect(after.ino).toBe(before.ino)
+    expect((await readPhaseObservations(file)).map(row => row.eventId)).toEqual(['event-1'])
+  }))
+
+  test('legacy and foreign lock markers fail closed, rather than guessed stale', async () => withLog(async (file) => {
+    await writeFile(`${file}.lock`, '')
+    await expect(appendPhaseObservation(file, observation())).rejects.toThrow('lock unavailable')
+    await writeFile(`${file}.lock`, 'foreign')
+    await expect(appendPhaseObservation(file, observation())).rejects.toThrow('lock unavailable')
+    expect(await Bun.file(file).exists()).toBe(false)
+  }))
+
+  test('SIGKILL after atomic publication but before temp unlink retains one usable lock inode', async () => withLog(async (file) => {
+    const temporary = `${file}.lock.publication.tmp`
+    await writeFile(temporary, 'neutron-observation-lock-v2\n', { mode: 0o600 })
+    await link(temporary, `${file}.lock`)
+    const before = await stat(`${file}.lock`)
+    expect(before.nlink).toBe(2)
+    const release = acquireObservationJournalLock(file)
+    try { await expect(appendPhaseObservation(file, observation())).rejects.toThrow('lock unavailable') }
+    finally { release() }
+    await appendPhaseObservation(file, observation())
+    expect((await stat(`${file}.lock`)).ino).toBe(before.ino)
+    expect((await readPhaseObservations(file)).map(row => row.eventId)).toEqual(['event-1'])
+  }))
+
   test('timestamp revisions stay forbidden outside exact GitHub CI check identity', async () => withLog(async (file) => {
     await appendPhaseObservation(file, observation())
     await expect(appendPhaseObservation(file, observation({ eventId: 'revised', observedAt: 4000, startedAt: 1001 })))

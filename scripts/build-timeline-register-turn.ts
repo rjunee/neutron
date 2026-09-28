@@ -5,6 +5,7 @@ import { createInterface } from 'node:readline'
 import { randomUUID } from 'node:crypto'
 import { isAbsolute, resolve } from 'node:path'
 import { importCodexOperations, type CodexImportOptions } from './build-timeline-codex-import.ts'
+import { acquireObservationJournalLock } from './build-timeline-observation-lock.ts'
 
 type Binding = NonNullable<CodexImportOptions['turnBindings']>[number]
 type Registration = { config: string; rollout: string; observations: string; binding: Binding }
@@ -54,8 +55,7 @@ export async function registerNativeTurn(options: Registration, instrumentation:
   if (!options.config || !options.rollout || !options.observations ||
       new Set([options.config, options.rollout, options.observations]).size !== 3) throw new Error('Distinct private paths required')
   const initial: RegistrationConfig = JSON.parse(await readFile(options.config, 'utf8'))
-  const lockPath = `${journal(initial, options.observations)}.lock`
-  const lock = await open(lockPath, 'wx', 0o600)
+  const releaseLock = acquireObservationJournalLock(journal(initial, options.observations))
   const temporary = `${options.config}.${randomUUID()}.tmp`
   try {
     await instrumentation.afterLock?.()
@@ -77,8 +77,7 @@ export async function registerNativeTurn(options: Registration, instrumentation:
     return 'registered'
   } finally {
     await unlink(temporary).catch(() => {})
-    await lock.close()
-    await unlink(lockPath)
+    releaseLock()
   }
 }
 

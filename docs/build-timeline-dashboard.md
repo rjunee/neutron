@@ -208,7 +208,13 @@ registration through this command.
 Use the existing refresh source's config/rollout pair and its observation journal.
 The command derives the refresher/recorder's `OBSERVATIONS.jsonl.lock` from the
 trusted config; the supplied journal argument must match exactly and cannot select
-another lock. It validates
+another lock. All three writers hold an advisory lock on one permanent mode-0600
+marker inode. The kernel releases it after process death without relying on PID
+reuse or marker age. A pre-existing empty or foreign marker from the former
+create/unlink protocol is refused; during upgrade, fence old writers and confirm
+they have exited before removing that marker. Never remove a valid new marker,
+even when no writer is active, because replacing its inode would split the mutex.
+The command validates
 the config's repository allowlist and exact native identity, and atomically writes
 the config with mode 0600. Identical registration is a no-op; changing an existing
 turn's phase or PR links is refused. A busy lock or partial native JSON record
