@@ -2,6 +2,7 @@ import type { ResumeCheckpoint } from './build-run.ts'
 import type { TridentRun, TridentRunStore } from './store.ts'
 import { isExecutionStrategy, legacyCheckpointName } from './execution-strategy.ts'
 import { normalizeLegacyStoredExecutionPlan } from './legacy-execution-compat.ts'
+import { settledReviewRecovery } from './settled-review-recovery.ts'
 
 const oid = /^(?:[0-9a-f]{40}|[0-9a-f]{64})$/
 export type BuildModeState = { checkpoint: ResumeCheckpoint; iteration: number; consumed?: { round: number; head: string } }
@@ -121,7 +122,14 @@ export function retryModeSource(store: TridentRunStore, prior: TridentRun, seen 
   // Never inherit approval or an unresolved worker reservation. A terminal task-sequence
   // build may retry publication/review only when its host checkpoint records an
   // empty validated plan. Legacy/partial builds cannot establish that fact.
-  if (checkpoint.pending !== undefined || checkpoint.head === null) return null
+  if (checkpoint.head === null) return null
+  if (checkpoint.pending !== undefined) {
+    if (!settledReviewRecovery(store, prior, state)) return null
+    if (store.stageEvents(prior.id).filter(row => row.stage === 'build-mode-state').at(-1)?.id !== event.id) return null
+    // This is an import view, never a rewrite of the terminal producer's event.
+    // Every reader re-proves original settlement; no old approval is inherited.
+    delete checkpoint.pending
+  }
   if (checkpoint.round >= 1 && (checkpoint.stage === 'fixed' || (checkpoint.stage === 'built'
     && (prior.execution_strategy === 'single' || checkpoint.remainingTasks === 0)))) {
     return { prior, eventId: event.id, state }

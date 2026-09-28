@@ -62,6 +62,21 @@ An active, unknown, missing, malformed, deferred or wrong-scope sibling cannot
 authorize clearing the reservation. Historical pending checkpoints without this
 host settlement proof remain subject to the existing refusal.
 
+Historical terminal checkpoints may establish settlement from their original
+host evidence before retry-source admission. The persisted attempt ledger is the
+independent census of admitted work: each review request must have its matching
+journal, and every admitted panel seat must have an exact-scope, settled receipt
+with a valid completion or a rate-limit refusal. At least one rate-limit refusal
+and the original standalone request's armed reservation, intact brief/context and
+valid completed result are required. Missing, pending, deferred, malformed,
+foreign or changing evidence refuses import, including a ledger seat whose
+journal and directory both disappeared. Historical configuration is not inferred
+from current settings: this proves settlement of admitted work, never complete
+review coverage or approval. The new run executes its full configured panel.
+Only the import view drops pending; original events and receipts remain intact.
+Revalidate that proof whenever the retry source is consumed, retaining the
+completed head, original review round, strategy, iteration spend and baseline.
+
 Verify: `trident/gates/review-panel.test.ts`, `trident/build-run.test.ts`, and
 `open/__tests__/project-build-e2e.test.ts` (settled rate-limit cross-run retry).
 
