@@ -74,6 +74,9 @@ async function refreshOwner(owner: CodexOwnerBootstrap): Promise<void> {
  */
 export class CodexOwnerBindings {
   resolveApprovedServers?: (projectId: string | null) => Promise<readonly ResolvedOwnerMcpServer[]>
+  /** #1226 — the composition's shared strict host, used for the gateway-side helper-tab
+   * placement of a placed launch (never serialized across the helper boundary). */
+  projectWorkspaceHost?: OwnerLaunch['projectWorkspaceHost']
   private readonly installedMcp = new Map<string | null, DurableOwnerMcp>()
   private readonly owners = new Map<string | null, Promise<{ owner: CodexOwnerBootstrap; project: CodexOwnerProject }>>()
   private readonly busy = new Set<string | null>()
@@ -374,10 +377,12 @@ export class CodexOwnerBindings {
         }
         env.CODEX_HOME = project.codexHome
         beforeOpening?.(project)
+        const projectWorkspace = project.projectWorkspace
         openingAttempted = true
         const owner = await this.bootstrap({ projectId, binary: 'codex', socketPath: join(project.codexHome, 'owner.sock'),
           cwd: project.cwd, codexHome: project.codexHome, env,
-          ...(project.projectWorkspace ? { projectWorkspace: project.projectWorkspace } : {}),
+          ...(projectWorkspace === undefined ? {} : { projectWorkspace,
+            ...(this.projectWorkspaceHost === undefined ? {} : { projectWorkspaceHost: this.projectWorkspaceHost }) }),
           ...(projectId === null ? { generalAuthorityPath: project.generalAuthorityPath } : {}) })
         try {
           const facts = this.readBinding(owner.binding)
@@ -478,7 +483,8 @@ export class CodexOwnerBindings {
       await this.revalidateProject(null, target, await this.general!())
       const owner = await this.bootstrap({ projectId: null, binary: 'codex', socketPath: join(target.codexHome, 'owner.sock'),
         cwd: target.cwd, codexHome: target.codexHome, env, generalAuthorityPath: target.generalAuthorityPath,
-        ...(target.projectWorkspace ? { projectWorkspace: target.projectWorkspace } : {}) })
+        ...(target.projectWorkspace ? { projectWorkspace: target.projectWorkspace,
+          ...(this.projectWorkspaceHost === undefined ? {} : { projectWorkspaceHost: this.projectWorkspaceHost }) } : {}) })
       try {
         const successor = this.readBinding(owner.binding)
         const committed = readGeneralOwnerAuthority(target.generalAuthorityPath)

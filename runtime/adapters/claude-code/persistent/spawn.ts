@@ -66,6 +66,7 @@ import type { PersistentReplSubstrateOptions, ResumeDirective } from './types.ts
 import { ReplSession, authFingerprintFor, httpHealth, mergeEnv, terminateChild, unlinkSessionConfigs } from './repl-session.ts'
 import { wireChildExit } from './child-exit-wiring.ts'
 import { replSessionConfigPaths } from './session-config-paths.ts'
+import { MCP_SERVICE_ID_ENV, recordMcpServiceOwner } from './mcp-service-identity.ts'
 import { registerReplDetectors } from './repl-detectors.ts'
 import { adoptionPermitsSpawn, armSelfFence, beginBootAdoption } from './boot-adoption.ts'
 import { fireAndForget } from '@neutronai/logger/fire-and-forget.ts'
@@ -76,12 +77,28 @@ export type ReplSpawnProfile = {
   model_preference: readonly string[]
 } & Partial<Omit<AgentSpec, 'tools' | 'model_preference'>>
 
+// A rejected pool promise is not proof that its child died. Keep failed setup
+// ownership separately: unsupervised callers have no durable reservation, and a
+// supervised reservation's TTL must not license another locally known live child.
+const failedSpawnSetups = new Map<string, { child: PtyChild; cleanup: () => void }>()
+
+function assertFailedSpawnReaped(sessionKey: string): void {
+  const failed = failedSpawnSetups.get(sessionKey)
+  if (failed === undefined) return
+  if (!failed.child.hasExited()) {
+    throw new PaneOwnershipRefusedError('persistent-repl: failed spawn setup; child exit is unproven, refusing another spawn')
+  }
+  failed.cleanup()
+  if (failedSpawnSetups.get(sessionKey) === failed) failedSpawnSetups.delete(sessionKey)
+}
+
 async function spawnSession(
   sessionKey: string,
   options: PersistentReplSubstrateOptions,
   spec: ReplSpawnProfile,
   resume?: ResumeDirective,
 ): Promise<ReplSession> {
+  assertFailedSpawnReaped(sessionKey)
   const cwd = requireReplCwd(options.cwd)
   // ISSUES #537 — start the sink on its DERIVED-PER-INSTANCE port with its
   // PERSISTED token, both keyed off this substrate's state dir (`sinkTokenPath`,
@@ -192,7 +209,7 @@ async function spawnSession(
   // is the exposure WINDOW — from one process lifetime to indefinitely — a
   // deliberate trade for letting a REPL outlive its gateway, spelled out in
   // `sink-coordinates.ts`'s header where the token is loaded.
-  const { dir: cfgDir, mcpConfigPath, settingsPath, toolsManifestPath } =
+  const { dir: cfgDir, mcpConfigPath, mcpIdentityPath, settingsPath, toolsManifestPath } =
     replSessionConfigPaths(channelName)
   mkdirSync(cfgDir, { recursive: true, mode: 0o700 })
 
@@ -203,7 +220,7 @@ async function spawnSession(
   // manifest file NOW (the registry is fully populated post-compose) so the
   // bridge's discovery is deterministic + race-free. `toolBridgeActive` gates the
   // `--allowedTools` namespace below.
-  const mcpServers: Record<string, unknown> = {
+  const mcpServers: Record<string, { command: string; args: string[]; env: Record<string, string> }> = {
     [channelName]: {
       command: 'bun',
       args: [devChannelPath],
@@ -276,6 +293,13 @@ async function spawnSession(
     }
     wiredExtraNames.push(server.name)
   }
+
+  // Stamp the exact generated service entries, never the parent's environment.
+  const serviceMarkers = Object.values(mcpServers).map(server => {
+    const marker = randomBytes(32).toString('hex')
+    server.env[MCP_SERVICE_ID_ENV] = marker
+    return marker
+  })
 
   // The config carries the dev-channel token AND (now) every installed server's
   // secrets, so the 0600 mode on this write and the 0700 mode on `cfgDir` above are
@@ -385,8 +409,8 @@ async function spawnSession(
   // ephemeral one-shots write a fresh pair per call; leaked otherwise). The tools
   // manifest is only written when the bridge is active; include it when so.
   session.configPaths = toolBridgeActive
-    ? [mcpConfigPath, settingsPath, toolsManifestPath]
-    : [mcpConfigPath, settingsPath]
+    ? [mcpConfigPath, mcpIdentityPath, settingsPath, toolsManifestPath]
+    : [mcpConfigPath, mcpIdentityPath, settingsPath]
   // Stamp the auth fingerprint the child is being spawned with so the warm-reuse
   // freshness guard can evict on a same-credential-id token refresh (Codex r2 P1).
   session.authFingerprint = authFingerprintFor(options.env, options.sinkTokenPath)
@@ -399,6 +423,7 @@ async function spawnSession(
   // interactive REPL doesn't wedge on a blocking Ink dialog before it loads
   // the dev-channel MCP server (the `no-channel-ready` failure class).
   const childEnv = mergeEnv(options.env)
+  delete childEnv[MCP_SERVICE_ID_ENV]
   // Force `claude` to load the `--mcp-config` dev-channel SYNCHRONOUSLY (await the
   // stdio MCP connect group at startup) instead of its default async, non-blocking
   // load. `claude`'s loader reads `MCP_CONNECTION_NONBLOCKING`: an explicit
@@ -520,12 +545,10 @@ async function spawnSession(
   // `Awaited<...>`: `PtyHost.spawn` is ASYNC under herdr — it connects, applies the
   // layout and learns the pane's pid before it can hand back a child, and `child.pid`
   // is read synchronously just below.
-  // RELEASED ON EVERY PATH OUT, which is why it is a `finally` rather than a release at the
-  // sites that happen to be on the success route. A reservation left behind blocks its own
-  // key until the TTL — a bounded cost, but a self-inflicted one, and this function has many
-  // ways to fail between the spawn and the ownership write (a readiness handshake, a config
-  // write, a watcher). Once the row records ownership the claim protects the key, so the
-  // reservation has done its whole job by the time this returns either way.
+  // Released in `finally` after ownership is published or setup fails without a
+  // surviving child. If setup returned a child whose exit cannot be proven, keep
+  // the reservation through its TTL, together with the exact handle and configs;
+  // a failed receipt write must not immediately license a second transcript owner.
   // REGISTERED BEHIND THE RESERVATION, AND IMMEDIATELY BEFORE THE SPAWN (r47 ordering,
   // corrected r63).
   //
@@ -539,6 +562,7 @@ async function spawnSession(
   // satisfies both — after the reservation is won, before `PtyHost.spawn` — and a registration
   // the sink refuses fails this turn rather than serving a child nothing can authorize.
   sink.register(sessionId, session)
+  let retainSpawnReservation = false
   try {
     let startupReady = false
     let startupResumeRejected = false
@@ -587,6 +611,7 @@ async function spawnSession(
     })
     scanChild = child
     session.attachChild(child)
+    recordMcpServiceOwner({ sessionKey, childGeneration, channelName, pid: child.pid }, serviceMarkers)
     // Synchronous handle mirror so a respawn can detect alive-but-wedged without
     // awaiting the pool promise (Argus r3 BLOCKER 1). Newest spawn wins the key.
     childByKey.set(sessionKey, child)
@@ -667,11 +692,37 @@ async function spawnSession(
       registryPath: options.replRegistryPath,
     })
     } catch (e) {
-      // The spawn never produced a child, so the registration it was made for must not
-      // outlive it. `unregisterIf` rather than `unregister`: a concurrent respawn may
-      // already hold this session id, and evicting ITS credential would turn our failure
-      // into a second one. The configs go too — they carry the credential in plaintext.
+      // Setup can fail after the host returns a child (for example while persisting
+      // its MCP receipt). Revoke its capability, then end that exact child before
+      // deleting its configuration or releasing its spawn reservation.
       sink.unregisterIf(sessionId, session)
+      if (scanChild !== undefined) {
+        await terminateChild(scanChild)
+        if (!scanChild.hasExited()) {
+          retainSpawnReservation = true
+          if (!childByKey.has(sessionKey)) childByKey.set(sessionKey, scanChild)
+          const failedChild = scanChild
+          const retained = { child: failedChild, cleanup: () => {
+            if (childByKey.get(sessionKey) === failedChild) childByKey.delete(sessionKey)
+            session.deadTurnWatcher?.stop()
+            session.sizeWatchdog?.stop()
+            liveHandle?.unregister()
+            unlinkSessionConfigs(session)
+            releaseSpawnReservation(options, sessionKey, spawnReserver)
+          } }
+          failedSpawnSetups.set(sessionKey, retained)
+          fireAndForget('persistent-repl.failed-setup-exit', failedChild.exited.then(() => {
+            if (failedSpawnSetups.get(sessionKey) === retained && failedChild.hasExited()) {
+              assertFailedSpawnReaped(sessionKey)
+            }
+          }))
+          throw new PaneOwnershipRefusedError('persistent-repl: failed spawn setup; child exit is unproven, retaining its reservation and configuration')
+        }
+        if (childByKey.get(sessionKey) === scanChild) childByKey.delete(sessionKey)
+        session.deadTurnWatcher?.stop()
+        session.sizeWatchdog?.stop()
+        liveHandle?.unregister()
+      }
       unlinkSessionConfigs(session)
       throw e
     }
@@ -867,6 +918,8 @@ async function spawnSession(
             // a predecessor would let an unstamped child read as participating. It is
             // re-stated below only when this spawn stamped one.
             admission_generation: _priorAdmissionGeneration,
+            // #1226 — this child is running: the row is no longer an asleep conversation.
+            asleep_at: _wasAsleep,
             ...merged
           } = prev ? { ...prev, ...record } : record
           if (record.admission_generation !== undefined) (merged as ReplRegistryRecord).admission_generation = record.admission_generation
@@ -1036,7 +1089,7 @@ async function spawnSession(
 
     return session
   } finally {
-    releaseSpawnReservation(options, sessionKey, spawnReserver)
+    if (!retainSpawnReservation) releaseSpawnReservation(options, sessionKey, spawnReserver)
   }
 }
 
@@ -1496,6 +1549,7 @@ export async function getOrSpawnSession(
    *  (see the stale-turn branch below). Callers pass nothing. */
   staleTurnReentries: number = 0,
 ): Promise<ReplSession> {
+  assertFailedSpawnReaped(sessionKey)
   // #539 — NOTHING MAY SPAWN ON A KEY WHOSE SURVIVING REPL HAS NOT BEEN RECONCILED.
   // Under the herdr host a gateway restart leaves the previous REPL running, so a
   // cold spawn here would put a second `claude` on a transcript that still has an

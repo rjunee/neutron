@@ -18,6 +18,19 @@ export interface ProjectPanePlacement {
 }
 
 interface ChatSlot { tab: string; pane: string; placeholderArgv?: string[] }
+
+/**
+ * A READ-ONLY sample of a scope's Chat slot (#1226 sleep). `live`: an owned,
+ * placed real Chat pane is running. `gone`: the slot's pane is positively gone
+ * (`pane_not_found`) — the next Chat placement already treats that as an empty slot.
+ * `placeholder`: the verified inert asleep placeholder. `none`: this manager has no
+ * record for the scope. `refused`: anything unverified or foreign (a changed
+ * workspace token, a moved pane, a modified placeholder, a pending/invalid record,
+ * any other error). Refused never licenses a close.
+ */
+export type ChatInspection =
+  | { status: 'live' | 'gone' | 'placeholder' | 'none'; workspace?: string; pane?: string }
+  | { status: 'refused'; reason: string }
 interface WorkerOperation {
   digest: string
   state: 'pending' | 'ambiguous' | 'completed'
@@ -75,6 +88,16 @@ class WorkspaceJournal {
   constructor(private readonly path: string) {}
 
   update<T>(fn: (rows: Record<string, WorkspaceRecord>) => T): T {
+    return this.locked(fn, true)
+  }
+
+  /** A read under the same lock and file checks that writes NOTHING (#1226 sleep's
+   * read-only Chat sample). */
+  read<T>(fn: (rows: Readonly<Record<string, WorkspaceRecord>>) => T): T {
+    return this.locked(fn, false)
+  }
+
+  private locked<T>(fn: (rows: Record<string, WorkspaceRecord>) => T, write: boolean): T {
     mkdirSync(dirname(this.path), { recursive: true, mode: 0o700 })
     const directory = lstatSync(dirname(this.path))
     if (!directory.isDirectory() || (directory.mode & 0o077) !== 0 || directory.uid !== process.getuid?.()) {
@@ -96,6 +119,7 @@ class WorkspaceJournal {
         if ((error as NodeJS.ErrnoException).code !== 'ENOENT') throw error
       } finally { if (fd !== undefined) closeSync(fd) }
       const result = fn(rows)
+      if (!write) return result
       const temporary = `${this.path}.${randomUUID()}.tmp`
       const out = openSync(temporary, 'wx', 0o600)
       try { writeFileSync(out, JSON.stringify(rows)); fsyncSync(out) } finally { closeSync(out) }
@@ -105,6 +129,15 @@ class WorkspaceJournal {
       return result
     }, acquired => { held = acquired })
   }
+}
+
+/**
+ * A placement refused by the journal's own precondition, BEFORE any Herdr RPC: nothing
+ * was created, so a caller holding a launch reservation for this placement may unwind
+ * it (#1226: the durable Codex owner's exclusive launch file).
+ */
+export class ProjectWorkspaceRefusal extends Error {
+  override readonly name = 'ProjectWorkspaceRefusal'
 }
 
 /** Library boundary only: composition supplies the real scope; lifecycle code will
@@ -136,28 +169,43 @@ export class ProjectWorkspaceManager {
       scope, root: { type: root.type, command: root.command, cwd: root.cwd,
         env: Object.entries(root.env ?? {}).sort(([a], [b]) => a < b ? -1 : a > b ? 1 : 0), label: placement.taskLabel },
     })).digest('hex')
+    // #1226 reconciliation: a PENDING record (an interrupted or failed placement) is
+    // otherwise a permanent refusal. When it names a workspace, that workspace is
+    // probed: only POSITIVE absence (`workspace_not_found`) proves nothing of it
+    // survives, and the scope is then recreated. A surviving workspace, or a pending
+    // record with no workspace (a creation whose reply may have been lost), still
+    // refuses — uncertain work is never reclaimed.
+    let probePendingAbsence = false
     let record = this.journal.update(rows => {
       const existing = rows[key]
       if (existing !== undefined) {
-        if (existing.version !== 1 || JSON.stringify(existing.scope) !== JSON.stringify(scope)
-          || !nonempty(existing.token) || existing.state !== 'ready' || !nonempty(existing.workspace)
-          || !existing.chat || !nonempty(existing.chat.tab) || !nonempty(existing.chat.pane)) {
-          throw new Error('project-workspaces: existing ownership is invalid or pending; reconcile before retry')
-        }
+        // The worker reservations are checked for EVERY existing record, pending
+        // included (spec :63-68): a same-ID retry must never reach the pending-absence
+        // recreation below and be placed a second time, nor change its payload.
         if (existing.workers !== undefined) {
           for (const operation of Object.values(object(existing.workers))) {
             const saved = object(operation)
             if (!nonempty(saved.digest) || !['pending', 'ambiguous', 'completed'].includes(saved.state as string)) {
-              throw new Error('project-workspaces: invalid worker operation reservation')
+              throw new ProjectWorkspaceRefusal('project-workspaces: invalid worker operation reservation')
             }
           }
         }
         if (workerKey && existing.workers?.[workerKey]) {
           const operation = existing.workers[workerKey]!
-          if (operation.digest !== digest) throw new Error('project-workspaces: worker operation payload changed')
+          if (operation.digest !== digest) throw new ProjectWorkspaceRefusal('project-workspaces: worker operation payload changed')
           // Completed is not an adoption API. HerdrHost would treat the returned
           // handle as newly created and might close an already-owned pane.
-          throw new Error(`project-workspaces: worker operation ${operation.state}; reconcile before retry`)
+          throw new ProjectWorkspaceRefusal(`project-workspaces: worker operation ${operation.state}; reconcile before retry`)
+        }
+        if (existing.version === 1 && JSON.stringify(existing.scope) === JSON.stringify(scope) && nonempty(existing.token)
+          && existing.state === 'pending' && nonempty(existing.workspace)) {
+          probePendingAbsence = true
+          return existing
+        }
+        if (existing.version !== 1 || JSON.stringify(existing.scope) !== JSON.stringify(scope)
+          || !nonempty(existing.token) || existing.state !== 'ready' || !nonempty(existing.workspace)
+          || !existing.chat || !nonempty(existing.chat.tab) || !nonempty(existing.chat.pane)) {
+          throw new ProjectWorkspaceRefusal('project-workspaces: existing ownership is invalid or pending; reconcile before retry')
         }
         return existing
       }
@@ -169,6 +217,9 @@ export class ProjectWorkspaceManager {
     if (record.workspace) {
       try {
         const found = object(object(await client.call('workspace.get', { workspace_id: record.workspace })).workspace)
+        if (probePendingAbsence) {
+          throw new ProjectWorkspaceRefusal('project-workspaces: existing ownership is invalid or pending; reconcile before retry')
+        }
         if (found.workspace_id !== record.workspace || object(found.tokens)[TOKEN] !== record.token) {
           throw new Error('project-workspaces: live workspace ownership mismatch')
         }
@@ -287,6 +338,48 @@ export class ProjectWorkspaceManager {
       throw error
     }
     return applied
+  }
+
+  /**
+   * Sample the scope's Chat slot without ANY mutation (#1226 sleep): no close, no
+   * journal write, never `workspace.close` (Herdr has no atomic ownership/contents
+   * guard for a workspace or whole-tab close, so the workspace is always left for
+   * lifecycle reconciliation). Serialized with this scope's placements, so a Chat
+   * being placed right now is observed after it settles.
+   */
+  async inspectChat(client: HerdrRpc, placement: Omit<ProjectPanePlacement, 'role' | 'taskLabel' | 'operationId'>): Promise<ChatInspection> {
+    let scope: [string, string | null]
+    try { scope = scopeOf({ ...placement, role: 'chat' }) } catch (error) {
+      return { status: 'refused', reason: error instanceof Error ? error.message : String(error) }
+    }
+    const key = createHash('sha256').update(JSON.stringify(scope)).digest('hex')
+    const prior = this.operations.get(key) ?? Promise.resolve()
+    const operation = prior.catch(() => undefined).then(() => this.inspect(client, scope, key))
+    this.operations.set(key, operation)
+    try { return await operation } finally { if (this.operations.get(key) === operation) this.operations.delete(key) }
+  }
+
+  private async inspect(client: HerdrRpc, scope: [string, string | null], key: string): Promise<ChatInspection> {
+    try {
+      // A read under the journal lock: nothing is written.
+      const record = this.journal.read(rows => rows[key] === undefined ? undefined : structuredClone(rows[key]!))
+      if (record === undefined) return { status: 'none' }
+      if (record.version !== 1 || JSON.stringify(record.scope) !== JSON.stringify(scope) || !nonempty(record.token)
+        || record.state !== 'ready' || !nonempty(record.workspace) || !record.chat
+        || !nonempty(record.chat.tab) || !nonempty(record.chat.pane)) {
+        return { status: 'refused', reason: 'workspace ownership is invalid or pending' }
+      }
+      const workspace = record.workspace
+      const found = object(object(await client.call('workspace.get', { workspace_id: workspace })).workspace)
+      if (found.workspace_id !== workspace || object(found.tokens)[TOKEN] !== record.token) {
+        return { status: 'refused', reason: 'live workspace ownership mismatch' }
+      }
+      const live = await this.verifyChat(client, workspace, record.chat)
+      if (!live) return { status: 'gone', workspace, pane: record.chat.pane }
+      return { status: record.chat.placeholderArgv ? 'placeholder' : 'live', workspace, pane: record.chat.pane }
+    } catch (error) {
+      return { status: 'refused', reason: error instanceof Error ? error.message : String(error) }
+    }
   }
 
   /** A failed observation is not absence. Only a positively gone pane licenses a

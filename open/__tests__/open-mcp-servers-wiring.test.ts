@@ -25,7 +25,7 @@
  */
 
 import { afterEach, beforeEach, describe, expect, spyOn, test } from 'bun:test'
-import { mkdtempSync, rmSync } from 'node:fs'
+import { mkdirSync, mkdtempSync, readFileSync, rmSync } from 'node:fs'
 import { tmpdir } from 'node:os'
 import { dirname, join } from 'node:path'
 import { fileURLToPath } from 'node:url'
@@ -37,11 +37,16 @@ import type { SessionHandle } from '@neutronai/runtime/session-handle.ts'
 import type { Substrate } from '@neutronai/runtime/substrate.ts'
 import type { ClaudeCodeSubstrateOptions } from '@neutronai/runtime/adapters/claude-code/index.ts'
 import type { ReplSession } from '@neutronai/runtime/adapters/claude-code/persistent/repl-session.ts'
+import { randomBytes } from 'node:crypto'
+import { replSessionConfigPaths } from '@neutronai/runtime/adapters/claude-code/persistent/session-config-paths.ts'
+import { recordMcpServiceOwner } from '@neutronai/runtime/adapters/claude-code/persistent/mcp-service-identity.ts'
 import type { PtyChild } from '@neutronai/runtime/adapters/claude-code/persistent/pty-host.ts'
 import {
   childByKey,
   pool,
+  supervisedBySessionKey,
 } from '@neutronai/runtime/adapters/claude-code/persistent/pool-state.ts'
+import type { PersistentReplSubstrateOptions } from '@neutronai/runtime/adapters/claude-code/persistent/types.ts'
 import { buildOpenGraphComposer } from '../composer.ts'
 import { CodexOwnerBindings } from '../wiring/codex-owner-binding.ts'
 
@@ -346,6 +351,73 @@ describe('the production composer wires installable MCP servers end to end', () 
       childByKey.delete('mcp-wiring-probe')
       b.cleanup()
       codexRetirement.mockRestore()
+    }
+  })
+
+  test.if(process.platform === 'linux')('approving a server cannot relabel an existing process; the census requires its spawn receipt', async () => {
+    // Current settings are not evidence of what this parent actually launched.
+    // Only the immutable receipt and a matching direct child's marker prove it.
+    const sleepPath = Bun.which('sleep')
+    if (sleepPath === null) throw new Error('sleep is required')
+    const marker = randomBytes(32).toString('hex')
+    const channelName = `neutron-${randomBytes(16).toString('hex')}`
+    const paths = replSessionConfigPaths(channelName)
+    mkdirSync(paths.dir, { mode: 0o700 })
+    const parent = Bun.spawn(['/bin/sh', '-c',
+      'env NEUTRON_MCP_SERVICE_ID="$1" "$2" 30 & child=$!; trap \'kill "$child" 2>/dev/null; wait "$child" 2>/dev/null\' EXIT; trap \'exit 0\' TERM INT; wait "$child"',
+      'mcp-fixture', marker, sleepPath], { stdout: 'ignore', stderr: 'ignore' })
+    const limit = Date.now() + 5000
+    for (;;) {
+      try {
+        const child = readFileSync(`/proc/${parent.pid}/task/${parent.pid}/children`, 'utf8').trim().split(/\s+/)[0]
+        if (child && readFileSync(`/proc/${child}/cmdline`, 'utf8') === `${sleepPath}\x0030\x00`) break
+      } catch { /* not started yet */ }
+      if (Date.now() > limit) throw new Error('the server stand-in never started')
+      await Bun.sleep(10)
+    }
+    const KEY = 'cc-agent-census-probe'
+    const b = await boot()
+    try {
+      const child = { pid: parent.pid, hasExited: (): boolean => false, kill: (): void => {}, exited: Promise.resolve(0) }
+      const session = {
+        sessionId: 'census-probe', cwd: tmpDir!, childGeneration: 'census-probe-gen', channelName, child,
+        admissionGeneration: undefined, activeTurn: undefined, turnSlotHeld: 0, poisoned: false,
+        hasChildExited: (): boolean => false,
+      }
+      supervisedBySessionKey.set(KEY, { substrate_instance_id: 'cc-agent-census-probe', project_id: 'general',
+        conversationProjectId: null, cwd: tmpDir! } as unknown as PersistentReplSubstrateOptions)
+      pool.set(KEY, Promise.resolve(session as unknown as ReplSession))
+      childByKey.set(KEY, child as unknown as PtyChild)
+      const liveness = b.composition['project_liveness'] as
+        | { census(projectId: string | null): Promise<{ parent: { kind: string }; shells: string }> }
+        | undefined
+      if (liveness === undefined) throw new Error('composition did not expose the census')
+
+      // No original spawn receipt: the census cannot establish service ownership.
+      const before = await liveness.census(null)
+      expect(before.parent.kind).not.toBe('absent')
+      expect(before.shells).toBe('unknown')
+
+      const installed = await b.api('POST', '/api/app/mcp-servers', { name: 'census-server', command: sleepPath, args: ['30'] })
+      expect(installed.status).toBe(200)
+      expect((await liveness.census(null)).shells).toBe('unknown')
+      const rows = ((await installed.json()) as { servers: Array<{ grant_hash: string }> }).servers
+      const decided = await b.api('POST', '/api/app/mcp-servers/decision', {
+        name: 'census-server', decision: 'approve', grant_hash: rows[0]!.grant_hash,
+      })
+      expect(decided.status).toBe(200)
+      expect((await liveness.census(null)).shells).toBe('unknown')
+      recordMcpServiceOwner({ sessionKey: KEY, childGeneration: session.childGeneration,
+        channelName, pid: parent.pid }, [marker])
+      expect((await liveness.census(null)).shells).toBe('idle')
+    } finally {
+      supervisedBySessionKey.delete(KEY)
+      pool.delete(KEY)
+      childByKey.delete(KEY)
+      b.cleanup()
+      parent.kill()
+      await parent.exited
+      rmSync(paths.dir, { recursive: true, force: true })
     }
   })
 

@@ -1,5 +1,5 @@
 import { createHash, randomUUID } from 'node:crypto'
-import { existsSync, lstatSync, mkdirSync, readFileSync, writeFileSync } from 'node:fs'
+import { existsSync, lstatSync, mkdirSync, readFileSync, unlinkSync, writeFileSync } from 'node:fs'
 import { join } from 'node:path'
 import { isDeepStrictEqual } from 'node:util'
 import { attachCodexOwner, readCodexOwnerBinding, type bootstrapCodexOwner, type CodexOwnerAttachment, type CodexOwnerBindingFacts, type CodexOwnerRetirement } from '@neutronai/runtime/adapters/codex-cli/persistent/project-control-bootstrap.ts'
@@ -8,6 +8,8 @@ import { HerdrHost } from '@neutronai/runtime/adapters/claude-code/persistent/he
 import { createHerdrRpc } from '@neutronai/runtime/adapters/claude-code/persistent/herdr-client.ts'
 import { createProjectWorkspaceHost, type ProjectWorkspaceLaunch } from '@neutronai/runtime/adapters/claude-code/persistent/project-workspace-host.ts'
 import { codexOwnerWorkspace } from '@neutronai/runtime/adapters/codex-cli/persistent/project-owner-workspace.ts'
+import { ProjectWorkspaceRefusal } from '@neutronai/runtime/adapters/claude-code/persistent/project-workspaces.ts'
+import type { HerdrHost as HerdrHostType } from '@neutronai/runtime/adapters/claude-code/persistent/herdr-host.ts'
 import { readAccountId, validateCodexSubscriptionAuth } from '@neutronai/trident/codex-auth.ts'
 import { nextOwnerDirectory, readCompletedOwnerRetirement, type CodexOwnerResume } from '@neutronai/runtime/adapters/codex-cli/persistent/project-owner-retirement.ts'
 import { observeOwnerNativeStop, readCrashedOwner, recordCrashedOwner } from '@neutronai/runtime/adapters/codex-cli/persistent/project-owner-crash-recovery.ts'
@@ -15,7 +17,11 @@ import { acknowledgeAccountHandoff, readGeneralOwnerAuthority, stageAccountHando
 
 export type OwnerLaunch = Parameters<typeof bootstrapCodexOwner>[0] & { projectId: string | null; generalAuthorityPath?: string;
   /** Optional only for adopting an existing pre-cutover owner. Fresh launches require it. */
-  projectWorkspace?: ProjectWorkspaceLaunch }
+  projectWorkspace?: ProjectWorkspaceLaunch
+  /** Shared in-process placement owner; never serialized into the helper launch. */
+  projectWorkspaceHost?: HerdrHostType }
+
+export const CODEX_OWNER_HELPER_TAB = 'Owner helper · Codex'
 
 /** Only pre-attachment host inspection is retryable; uncertain launch is not. */
 export class CodexOwnerRecoveryUnavailable extends Error {}
@@ -166,16 +172,24 @@ export async function openDurableCodexOwner(options: OwnerLaunch): Promise<Codex
   } else {
     if (existsSync(descriptorPath) || existsSync(authorityPath)) throw new Error('Codex owner launch provenance is missing')
     const workspace = codexOwnerWorkspace(options.projectWorkspace, options.projectId)
-    const placementHost = createProjectWorkspaceHost(workspace.journalPath, connect)
+    const { projectWorkspaceHost, ...launchOptions } = options
+    const placementHost = projectWorkspaceHost ?? createProjectWorkspaceHost(workspace.journalPath, connect)
     const helperOperationId = `codex-owner-helper:${randomUUID()}`
     // Exclusive creation is the no-second-owner guard across gateway processes.
-    writeFileSync(launchPath, JSON.stringify({ ...options, projectWorkspace: workspace, helperOperationId,
+    writeFileSync(launchPath, JSON.stringify({ ...launchOptions, projectWorkspace: workspace, helperOperationId,
       scope, gatewayIdentity: helperIdentity() }), { flag: 'wx', mode: 0o600 })
-    const child = await placementHost.spawn([process.execPath,
-      new URL('../../runtime/adapters/codex-cli/persistent/project-owner-helper-main.ts', import.meta.url).pathname, launchPath],
-    { cwd: options.cwd, env: options.env, onScreen() {}, projectPlacement: {
-      ...workspace.placement, role: 'worker', taskLabel: 'Owner helper · Codex', operationId: helperOperationId,
-    } })
+    let child: Awaited<ReturnType<typeof placementHost.spawn>>
+    try {
+      child = await placementHost.spawn([process.execPath,
+        new URL('../../runtime/adapters/codex-cli/persistent/project-owner-helper-main.ts', import.meta.url).pathname, launchPath],
+      { cwd: options.cwd, env: options.env, onScreen() {}, label: CODEX_OWNER_HELPER_TAB, projectPlacement: {
+        ...workspace.placement, role: 'worker', taskLabel: CODEX_OWNER_HELPER_TAB, operationId: helperOperationId,
+      } })
+    } catch (error) {
+      // Only a pre-RPC placement refusal proves no helper was launched.
+      if (error instanceof ProjectWorkspaceRefusal) unlinkSync(launchPath)
+      throw error
+    }
     child.detach?.()
     launchedPid = child.pid
     if (!child.paneHandle) throw new Error('Codex helper has no durable pane authority')

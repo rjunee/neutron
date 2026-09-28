@@ -35,6 +35,9 @@ const ALL_CLASSES: readonly SubstrateErrorClass[] = [
   'oauth_refresh',
   'repl_unreconciled',
   'spawn_configuration',
+  'chat_handoff_busy',
+  'chat_handoff_refused',
+  'chat_handoff_unknown',
 ]
 
 describe('SUBSTRATE_ERROR_CODES — registered code table', () => {
@@ -49,6 +52,10 @@ describe('SUBSTRATE_ERROR_CODES — registered code table', () => {
     // turn_timeout stays retryable on the same credential; channel_wedged does not.
     expect(SUBSTRATE_ERROR_CODES.turn_timeout.retryable).toBe(true)
     expect(SUBSTRATE_ERROR_CODES.channel_wedged.retryable).toBe(false)
+    // #1226 — a Chat handoff that could not proceed is retried by the next turn.
+    expect(SUBSTRATE_ERROR_CODES.chat_handoff_busy.retryable).toBe(true)
+    expect(SUBSTRATE_ERROR_CODES.chat_handoff_refused.retryable).toBe(true)
+    expect(SUBSTRATE_ERROR_CODES.chat_handoff_unknown.retryable).toBe(true)
   })
 
   test('every entry carries a non-empty description', () => {

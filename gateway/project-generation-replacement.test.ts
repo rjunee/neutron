@@ -126,7 +126,7 @@ describe('legitimate exact-generation replacement', () => {
       const fail = (code: string): never => { throw Object.assign(new Error(code), { code }) }
       const descendants = () => walkProcessDescendants(OLD.pid, {
         identity: () => IDENTITY,
-        isOwnService: (argv) => argv.includes('own-service'),
+        serviceProof: { ownerPid: OLD.pid, ownerIdentity: IDENTITY, markers: new Set(['own-service']) },
         readdir: async (path) => {
           if (path === '/proc/11/task') {
             if (mode === 'permission-list') fail('EACCES')
@@ -136,7 +136,8 @@ describe('legitimate exact-generation replacement', () => {
         },
         readFile: async (path) => {
           if (path === `/proc/${OLD.pid}/task/${OLD.pid}/children`) return '11'
-          if (path === '/proc/11/cmdline') return 'bun\0own-service\0'
+          if (path === '/proc/11/environ') return 'NEUTRON_MCP_SERVICE_ID=own-service\0'
+          if (path === '/proc/11/status') return `PPid:\t${OLD.pid}\n`
           if (path === '/proc/11/task/11/children') {
             if (mode === 'permission-read') fail('EACCES')
             if (mode === 'thread-vanished') fail('ENOENT')

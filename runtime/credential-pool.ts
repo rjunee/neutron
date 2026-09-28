@@ -25,6 +25,8 @@
  * keys, etc.) — the caller is responsible for never mixing owners.
  */
 
+import { randomInt } from 'node:crypto'
+
 export type CredentialStrategy = 'fill_first' | 'round_robin' | 'random' | 'least_used'
 
 // `ambient` — no secret material of our own; the downstream substrate spawns
@@ -241,7 +243,7 @@ export function selectCredential(pool: CredentialPool): PooledCredential | null 
       break
     }
     case 'random': {
-      const idx = Math.floor(Math.random() * available.length)
+      const idx = randomInt(available.length)
       const candidate = available[idx]
       if (candidate === undefined) return null
       pick = candidate
@@ -256,6 +258,23 @@ export function selectCredential(pool: CredentialPool): PooledCredential | null 
     }
   }
 
+  pick.use_count++
+  pick.last_used_at = now
+  return pick
+}
+
+/**
+ * Select ONE named credential when it is usable (#1226 Chat credential pin). The
+ * availability predicate is exactly {@link selectCredential}'s, and a pick is
+ * accounted the same way (`use_count`, `last_used_at`), but the round-robin
+ * cursor is NOT moved: a pinned owner conversation must not skew the strategy's
+ * rotation for every other lane. Returns null when the id is absent or parked,
+ * so the caller falls back to the pool's strategy.
+ */
+export function selectCredentialById(pool: CredentialPool, id: string): PooledCredential | null {
+  const now = Date.now()
+  const pick = pool.credentials.find((c) => c.id === id)
+  if (pick === undefined || (pick.cooldown_until && pick.cooldown_until > now)) return null
   pick.use_count++
   pick.last_used_at = now
   return pick

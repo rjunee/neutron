@@ -48,6 +48,8 @@ import { poolKeyFor } from '../pool.ts'
 // The supervision respawn's own entry point (`supervision.ts` calls exactly this), used
 // by the no-dispatch eviction test to reproduce a spawn with no turn driver behind it.
 import { getOrSpawnSession } from '../spawn.ts'
+import { MCP_SERVICE_ID_ENV } from '../mcp-service-identity.ts'
+import { replSessionConfigPaths } from '../session-config-paths.ts'
 import type { ReplSession } from '../repl-session.ts'
 import {
   createPersistentReplSubstrate,
@@ -255,10 +257,10 @@ function allowedTools(argv: string[]): string[] {
 describe('an approved server reaches BOTH the config and the allow-list', () => {
   it('appears in mcpServers with its exact command, args and env', async () => {
     setReplToolBridge(bridge())
-    const { host, argvs } = makeCapturingHost()
-    const sub = createPersistentReplSubstrate(
-      opts(host, { enableToolBridge: true, resolveExtraMcpServers: async () => [EXAMPLE] }),
-    )
+    const { host, argvs, envs } = makeCapturingHost()
+    const options = opts(host, { enableToolBridge: true, resolveExtraMcpServers: async () => [EXAMPLE],
+      env: { [MCP_SERVICE_ID_ENV]: 'must-not-reach-parent' } })
+    const sub = createPersistentReplSubstrate(options)
     await drain(sub.start(spec('hi')))
 
     const entry = mcpConfig(argvs[0]!).mcpServers['example-server']
@@ -266,7 +268,19 @@ describe('an approved server reaches BOTH the config and the allow-list', () => 
     // The exact argv the approval prompt described — not a normalised variant.
     expect(entry!.command).toBe('/usr/local/bin/example-mcp')
     expect(entry!.args).toEqual(['--stdio', '--region', 'eu'])
-    expect(entry!.env).toEqual({ EXAMPLE_API_KEY: 'sk-not-a-real-key' })
+    expect(entry!.env).toEqual({ EXAMPLE_API_KEY: 'sk-not-a-real-key',
+      [MCP_SERVICE_ID_ENV]: expect.stringMatching(/^[0-9a-f]{64}$/) })
+    const markers = Object.values(mcpConfig(argvs[0]!).mcpServers).map(server => server.env[MCP_SERVICE_ID_ENV])
+    expect(markers).toHaveLength(3)
+    expect(new Set(markers).size).toBe(3)
+    expect(markers.every(marker => typeof marker === 'string' && /^[0-9a-f]{64}$/.test(marker))).toBe(true)
+    expect(envs[0]?.[MCP_SERVICE_ID_ENV]).toBeUndefined()
+    const sessionKey = poolKeyFor(options)
+    const session = (await pool.get(sessionKey))!
+    const receipt = JSON.parse(readFileSync(replSessionConfigPaths(session.channelName).mcpIdentityPath, 'utf8'))
+    expect(receipt.owner).toEqual({ sessionKey, childGeneration: session.childGeneration,
+      channelName: session.channelName, pid: session.child.pid })
+    expect(receipt.markers).toEqual(markers)
   })
 
   it('gets its OWN mcp__<name> grant, alongside the tool bridge\'s', async () => {

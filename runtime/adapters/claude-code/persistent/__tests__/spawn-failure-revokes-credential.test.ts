@@ -14,13 +14,15 @@
  */
 
 import { describe, expect, test } from 'bun:test'
-import { existsSync, readFileSync } from 'node:fs'
+import { existsSync, readFileSync, writeFileSync } from 'node:fs'
 
 import { createPersistentReplSubstrate } from '../persistent-repl-substrate.ts'
 import type { PersistentReplSubstrateOptions } from '../types.ts'
 import type { PtyHost } from '../pty-host.ts'
 import { ReplSession } from '../repl-session.ts'
-import { sink } from '../pool-state.ts'
+import { childByKey, sink } from '../pool-state.ts'
+import { poolKeyFor } from '../pool.ts'
+import { lifecycleReplHost } from './lifecycle-repl-host.ts'
 import { getReplSinkInfo } from '../repl-sink.ts'
 
 function mcpConfigPathFrom(argv: readonly string[]): string {
@@ -28,6 +30,50 @@ function mcpConfigPathFrom(argv: readonly string[]): string {
   if (i < 0 || argv[i + 1] === undefined) throw new Error(`no --mcp-config in argv: ${argv.join(' ')}`)
   return argv[i + 1] as string
 }
+
+test.each([false, true])('MCP receipt persistence failure ends the exact returned child before config cleanup (failure=%s)', async failure => {
+  const peer = lifecycleReplHost()
+  let configPath = ''
+  let receiptPath = ''
+  let configPresentAtKill = false
+  let kills = 0
+  const host: PtyHost = { async spawn(argv, options) {
+    configPath = mcpConfigPathFrom(argv)
+    receiptPath = configPath.replace(/-mcp\.json$/, '-mcp-identity.json')
+    if (failure) writeFileSync(receiptPath, 'occupied receipt', { flag: 'wx', mode: 0o600 })
+    const child = await peer.host.spawn(argv, options)
+    const kill = child.kill.bind(child)
+    child.kill = signal => { kills++; configPresentAtKill = existsSync(configPath); kill(signal) }
+    return child
+  } }
+  const options: PersistentReplSubstrateOptions = { substrate_instance_id: `receipt-failure-${failure}`,
+    cwd: '/tmp', ptyHost: host, skipTrustSeed: true, idleQuietMs: 0 }
+  const sub = createPersistentReplSubstrate(options)
+  try {
+    const events = []
+    for await (const event of sub.start({ prompt: 'hello', tools: [], model_preference: ['claude-opus-4-7'] }).events) events.push(event)
+    expect(peer.children).toHaveLength(1)
+    const child = peer.children[0]!.child
+    if (failure) {
+      expect(kills).toBe(1)
+      expect(events.some(event => event.kind === 'error' && event.message.includes('EEXIST'))).toBe(true)
+      expect(configPresentAtKill).toBe(true)
+      expect(child.hasExited()).toBe(true)
+      expect(childByKey.has(poolKeyFor(options))).toBe(false)
+      expect(existsSync(configPath)).toBe(false)
+      expect(existsSync(receiptPath)).toBe(false)
+    } else {
+      expect(events.some(event => event.kind === 'completion')).toBe(true)
+      expect(kills).toBe(0)
+      expect(child.hasExited()).toBe(false)
+      expect(childByKey.get(poolKeyFor(options))).toBe(child)
+      expect(existsSync(configPath)).toBe(true)
+      expect(existsSync(receiptPath)).toBe(true)
+    }
+  } finally {
+    for (const { child } of peer.children) { child.kill(); await child.exited }
+  }
+})
 
 describe('a spawn that throws revokes what its registration granted', () => {
   test('the credential is refused afterwards and the config is gone', async () => {
