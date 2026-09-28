@@ -123,7 +123,10 @@ spans carry unknown tokens unless a provider actually attributed usage.
 - [ ] A collector configured with one authorized native `sessions` root discovers
       new dated rollout receipts without per-file registration. A bounded scan
       refuses symlink/path replacement and changed file identity, and does not
-      export transcript content or paths. Discovery alone does not attribute
+      export transcript content or paths. Appends after a captured N-byte
+      snapshot leave that snapshot valid; the next scan sees new bytes. An
+      empty newly created rollout reports incomplete coverage until it grows.
+      Discovery alone does not attribute
       command or task phases: ordinary commands need explicit time-scoped PR
       binding (or exact successful GitHub PR evidence), and completed tasks need
       exact session/turn PR and phase bindings.

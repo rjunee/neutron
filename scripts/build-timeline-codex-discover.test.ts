@@ -1,10 +1,10 @@
 import { afterEach, expect, test } from 'bun:test'
-import { mkdir, mkdtemp, rename, rm, symlink, writeFile } from 'node:fs/promises'
+import { appendFile, mkdir, mkdtemp, rename, rm, symlink, truncate, writeFile } from 'node:fs/promises'
 import { tmpdir } from 'node:os'
 import { join } from 'node:path'
 import { combineTimelineSources } from '@neutronai/trident/build-timeline-catalogue.ts'
 import { createTimelineHandler } from './build-timeline-server.ts'
-import { discoverCodexRollouts, importCodexSessionTree, importDiscoveredCodexRollouts } from './build-timeline-codex-discover.ts'
+import { discoverCodexRollouts, importCodexSessionTree, importDiscoveredCodexRollouts, readDiscoveredRollout } from './build-timeline-codex-discover.ts'
 import type { CodexImportOptions } from './build-timeline-codex-import.ts'
 
 const temporary: string[] = []
@@ -29,7 +29,7 @@ async function fixture() {
       item: { type: 'CommandExecution', id: commandId, command: ['/bin/bash', '-lc', command], cwd,
         status: 'completed', exit_code: 0, stdout: 'PRIVATE OUTPUT' } }, 4000),
   ].join('\n') + '\n'
-  return { home, root, day, options, rollout }
+  return { home, root, day, cwd, options, rollout }
 }
 
 test('a newly created dated rollout is discovered and its attested command reaches the authenticated dashboard', async () => {
@@ -108,6 +108,66 @@ test('duplicate native receipt identities across files are refused', async () =>
   await expect(importCodexSessionTree(root, options)).rejects.toThrow('Duplicate native receipt')
 })
 
+test('append after discovery preserves the bounded prefix and the next scan gains the new command', async () => {
+  const { root, day, cwd, options, rollout } = await fixture()
+  const path = join(day, 'rollout-live.jsonl')
+  await writeFile(path, rollout('thread-1', 'exec-1'))
+  const discovered = await discoverCodexRollouts(root)
+  const later = JSON.stringify({ type: 'event_msg', timestamp: new Date(5000).toISOString(), payload: {
+    type: 'item_completed', thread_id: 'thread-1', turn_id: 'turn-1', started_at_ms: 4500, completed_at_ms: 5000,
+    item: { type: 'CommandExecution', id: 'exec-2', command: ['/bin/bash', '-lc', 'bun test second.test.ts'], cwd,
+      status: 'completed', exit_code: 0, stdout: '' },
+  } }) + '\n'
+  await appendFile(path, later)
+  const bounded = await importDiscoveredCodexRollouts(root, discovered, options)
+  expect(bounded.observations.map(row => row.phaseId)).toEqual(['codex:thread-1:exec-1'])
+  const refreshed = await importCodexSessionTree(root, options)
+  expect(refreshed.observations.map(row => row.phaseId)).toEqual(['codex:thread-1:exec-1', 'codex:thread-1:exec-2'])
+})
+
+test('append between descriptor verification and read leaves the captured prefix intact', async () => {
+  const { root, day, options, rollout } = await fixture()
+  const path = join(day, 'rollout-live.jsonl'), original = rollout('thread-1', 'exec-1')
+  await writeFile(path, original)
+  const [discovered] = await discoverCodexRollouts(root, async () => {
+    await appendFile(path, JSON.stringify({ type: 'response_item', payload: { text: 'later' } }) + '\n')
+  })
+  const snapshot = await readDiscoveredRollout(root, discovered!)
+  expect(snapshot).toBe(original)
+  expect((await importDiscoveredCodexRollouts(root, [discovered!], options)).observations).toHaveLength(1)
+})
+
+test('empty just-created rollout is incomplete until the next scan observes bytes', async () => {
+  const { root, day, options, rollout } = await fixture()
+  const path = join(day, 'rollout-new.jsonl')
+  await writeFile(path, '')
+  const empty = await importCodexSessionTree(root, options)
+  expect(empty).toMatchObject({ observations: [], coverage: { discovered: 1, emitted: 0, incomplete: 1 } })
+  await appendFile(path, rollout('thread-1', 'exec-1'))
+  const next = await importCodexSessionTree(root, options)
+  expect(next).toMatchObject({ coverage: { discovered: 1, emitted: 1, incomplete: 0 } })
+})
+
+test('a truncated or rewritten captured prefix is refused', async () => {
+  const { root, day, options, rollout } = await fixture()
+  const path = join(day, 'rollout-a.jsonl'), original = rollout('thread-1', 'exec-1')
+  await writeFile(path, original)
+  const discovered = await discoverCodexRollouts(root)
+  await truncate(path, Buffer.byteLength(original) - 1)
+  await expect(importDiscoveredCodexRollouts(root, discovered, options)).rejects.toThrow('changed')
+  await writeFile(path, original.replace('exec-1', 'exec-2'))
+  await expect(importDiscoveredCodexRollouts(root, discovered, options)).rejects.toThrow('changed')
+})
+
+test('a same-size rewrite during descriptor capture is refused', async () => {
+  const { root, day, rollout } = await fixture()
+  const path = join(day, 'rollout-a.jsonl'), original = rollout('thread-1', 'exec-1')
+  await writeFile(path, original)
+  await expect(discoverCodexRollouts(root, async () => {
+    await writeFile(path, original.replace('exec-1', 'exec-2'))
+  })).rejects.toThrow('changed during read')
+})
+
 test('a rollout replaced after discovery cannot escape the authorized root', async () => {
   const { home, root, day, options, rollout } = await fixture()
   const first = join(day, 'rollout-a.jsonl'), second = join(day, 'rollout-b.jsonl')
@@ -122,6 +182,16 @@ test('a rollout replaced after discovery cannot escape the authorized root', asy
   await rename(second, join(home, 'original-b.jsonl'))
   await symlink(outside, second)
   await expect(importDiscoveredCodexRollouts(root, discovered, options)).rejects.toThrow()
+})
+
+test('a regular file replaced inside the root cannot impersonate the discovered inode', async () => {
+  const { root, day, options, rollout } = await fixture()
+  const path = join(day, 'rollout-a.jsonl'), original = rollout('thread-a', 'exec-a')
+  await writeFile(path, original)
+  const discovered = await discoverCodexRollouts(root)
+  await rename(path, join(day, 'moved-original.jsonl'))
+  await writeFile(path, original + '\n')
+  await expect(importDiscoveredCodexRollouts(root, discovered, options)).rejects.toThrow('changed')
 })
 
 test('a dated parent replaced after discovery cannot redirect an opened rollout', async () => {

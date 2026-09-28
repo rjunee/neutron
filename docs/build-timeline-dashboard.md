@@ -113,7 +113,10 @@ This scans only `sessions/YYYY/MM/DD/rollout-*.jsonl`, skips symlinks, and refus
 more than 256 files, 4,096 directory entries or 128 MiB of source data in one scan.
 It reads each rollout through a verified file descriptor into a fixed-size
 snapshot, then prints observation NDJSON to stdout and aggregate coverage to
-stderr. The private refresher retains journal event IDs and appends
+stderr. An append after the snapshot's N-byte boundary is picked up on the next
+scan; an empty newly created file contributes incomplete coverage until bytes
+arrive. Replacement, truncation below N, and same-size rewrites refuse. The
+private refresher retains journal event IDs and appends
 only new observations as above. The directory root authorizes reading native
 receipts; it does not attest PR ownership or phase. Command spans still need an
 explicit time-bounded checkout-to-PR binding (or an exact successful GitHub

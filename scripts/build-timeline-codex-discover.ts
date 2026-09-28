@@ -8,7 +8,10 @@ import type { DirectPhaseObservation } from './build-timeline-sources.ts'
 const MAX_ROLLOUTS = 256
 const MAX_SOURCE_BYTES = 128 * 1024 * 1024
 const MAX_ENTRIES = 4096
-export type DiscoveredCodexRollout = { path: string; dev: number; ino: number; size: number }
+type RolloutIdentity = {
+  path: string; dev: bigint; ino: bigint; size: number; mtimeNs: bigint; ctimeNs: bigint
+}
+export type DiscoveredCodexRollout = RolloutIdentity & { snapshot: Buffer }
 
 async function authorizedRoot(sessionsRoot: string): Promise<string> {
   if (!sessionsRoot || basename(sessionsRoot) !== 'sessions') throw new Error('Invalid native session root')
@@ -22,8 +25,36 @@ function insideRoot(root: string, path: string): boolean {
   return !!inside && inside !== '..' && !inside.startsWith(`..${sep}`) && !inside.startsWith(sep)
 }
 
+function matchesIdentity(stat: { dev: bigint; ino: bigint; size: bigint; mtimeNs: bigint; ctimeNs: bigint }, source: RolloutIdentity): boolean {
+  return stat.dev === source.dev && stat.ino === source.ino && stat.size >= BigInt(source.size) &&
+    (stat.size > BigInt(source.size) || (stat.mtimeNs === source.mtimeNs && stat.ctimeNs === source.ctimeNs))
+}
+
+/** Capture the discovered first N bytes once, before later appends can move the window. */
+async function captureRollout(root: string, source: RolloutIdentity, beforeRead?: (path: string) => Promise<void>): Promise<Buffer> {
+  const file = await open(source.path, constants.O_RDONLY | constants.O_NOFOLLOW | constants.O_NONBLOCK)
+  try {
+    const stat = await file.stat({ bigint: true })
+    const resolved = await realpath(source.path)
+    if (!stat.isFile() || !insideRoot(root, resolved) || !matchesIdentity(stat, source)) {
+      throw new Error('Native rollout changed after discovery')
+    }
+    await beforeRead?.(source.path)
+    const buffer = Buffer.alloc(source.size)
+    let offset = 0
+    while (offset < buffer.length) {
+      const { bytesRead } = await file.read(buffer, offset, buffer.length - offset, offset)
+      if (!bytesRead) throw new Error('Native rollout changed during read')
+      offset += bytesRead
+    }
+    const after = await file.stat({ bigint: true })
+    if (!matchesIdentity(after, source)) throw new Error('Native rollout changed during read')
+    return buffer
+  } finally { await file.close() }
+}
+
 /** The dated native layout is the discovery boundary; unrelated files are ignored. */
-export async function discoverCodexRollouts(sessionsRoot: string): Promise<DiscoveredCodexRollout[]> {
+export async function discoverCodexRollouts(sessionsRoot: string, beforeRead?: (path: string) => Promise<void>): Promise<DiscoveredCodexRollout[]> {
   const root = await authorizedRoot(sessionsRoot)
   const files: DiscoveredCodexRollout[] = []
   let totalBytes = 0, scannedEntries = 0
@@ -47,40 +78,32 @@ export async function discoverCodexRollouts(sessionsRoot: string): Promise<Disco
       if (!entry.isFile() || !/^rollout-[^/]+\.jsonl$/.test(entry.name)) continue
       const resolved = await realpath(path)
       if (!insideRoot(root, resolved)) throw new Error('Native rollout escaped authorized root')
-      const stat = await lstat(path)
+      const stat = await lstat(path, { bigint: true })
       if (!stat.isFile() || stat.isSymbolicLink()) continue
-      files.push({ path, dev: stat.dev, ino: stat.ino, size: stat.size })
-      totalBytes += stat.size
-      if (files.length > MAX_ROLLOUTS || totalBytes > MAX_SOURCE_BYTES) throw new Error('Native discovery exceeds bounds')
+      const size = Number(stat.size)
+      totalBytes += size
+      if (files.length + 1 > MAX_ROLLOUTS || totalBytes > MAX_SOURCE_BYTES) throw new Error('Native discovery exceeds bounds')
+      const source = { path, dev: stat.dev, ino: stat.ino, size, mtimeNs: stat.mtimeNs, ctimeNs: stat.ctimeNs }
+      files.push({ ...source, snapshot: await captureRollout(root, source, beforeRead) })
     }
   }
   await visit(root, 0)
   return files.sort((a, b) => a.path.localeCompare(b.path))
 }
 
-/** Read the same inode discovered under the root, with a fixed byte budget. */
-async function readDiscoveredRollout(root: string, source: DiscoveredCodexRollout): Promise<string> {
-  if (!Number.isSafeInteger(source.size) || source.size < 1 || source.size > MAX_SOURCE_BYTES ||
-      !insideRoot(root, source.path)) throw new Error('Invalid discovered rollout')
+/** Revalidate the path, then use the immutable captured bytes without a second full read. */
+export async function readDiscoveredRollout(root: string, source: DiscoveredCodexRollout): Promise<string> {
+  if (!Number.isSafeInteger(source.size) || source.size < 0 || source.size > MAX_SOURCE_BYTES ||
+      !insideRoot(root, source.path) || source.snapshot.length !== source.size) throw new Error('Invalid discovered rollout')
   // A path replaced with a FIFO must not block before fstat can reject it.
   const file = await open(source.path, constants.O_RDONLY | constants.O_NOFOLLOW | constants.O_NONBLOCK)
   try {
-    const stat = await file.stat()
+    const stat = await file.stat({ bigint: true })
     const resolved = await realpath(source.path)
-    if (!stat.isFile() || !insideRoot(root, resolved) || stat.dev !== source.dev ||
-        stat.ino !== source.ino || stat.size !== source.size) throw new Error('Native rollout changed after discovery')
-    const buffer = Buffer.alloc(source.size)
-    let offset = 0
-    while (offset < buffer.length) {
-      const { bytesRead } = await file.read(buffer, offset, buffer.length - offset, offset)
-      if (!bytesRead) throw new Error('Native rollout changed during read')
-      offset += bytesRead
+    if (!stat.isFile() || !insideRoot(root, resolved) || !matchesIdentity(stat, source)) {
+      throw new Error('Native rollout changed after discovery')
     }
-    const after = await file.stat()
-    if (after.dev !== source.dev || after.ino !== source.ino || after.size !== source.size) {
-      throw new Error('Native rollout changed during read')
-    }
-    return buffer.toString('utf8')
+    return source.snapshot.toString('utf8')
   } finally { await file.close() }
 }
 
@@ -99,6 +122,7 @@ export async function importDiscoveredCodexRollouts(sessionsRoot: string, files:
   let unbound = 0, incomplete = 0
   for (const file of files) {
     const snapshot = await readDiscoveredRollout(root, file)
+    if (file.size === 0) { incomplete++; continue }
     const result = await importCodexOperations(snapshot.split(/\r?\n/), options)
     for (const observation of result.observations) {
       if (ids.has(observation.eventId)) throw new Error('Duplicate native receipt across rollouts')
