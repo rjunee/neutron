@@ -109,6 +109,14 @@ spans carry unknown tokens unless a provider actually attributed usage.
 - [ ] Unknown, partial and complete metrics remain distinct, costs are never
       estimated, and phase totals cannot double-count attempt receipts. Multi-PR
       linked observations are marked shared and not summed.
+- [ ] Manual native registration verifies the exact session and turn context and
+      repository allowlist before atomically adding an immutable phase/PR binding
+      to a private import config. Identical retries are idempotent; foreign turns,
+      conflicting reassignments and a held refresh lock refuse without writes.
+      Root and child turns consume the same completion-receipt path through the
+      authenticated dashboard API. Missing usage remains unknown. Registration
+      does not claim automatic source discovery or active-task timing.
+      Verify: `bun test scripts/build-timeline-register-turn.test.ts`.
 - [ ] Page/fragment/JSON deny anonymous and incorrect credentials and serve valid
       credentials. Missing credentials refuse startup; read-only SQLite does not
       migrate or write workflow state. Browser refresh is 30 seconds, with stale

@@ -139,6 +139,34 @@ nested tests or review commands, so their overlapping durations are not additive
 Register each rollout/config pair with the private refresh
 service; adding importer support alone does not discover new orchestration lanes.
 Use explicit start/completion records for forward work while a task is still open.
+
+Manual native task registration is available once the exact session and turn have
+a native `turn_context` record. Put the single binding object (the object inside
+`turnBindings` above) in a private JSON file, then run:
+
+```sh
+bun scripts/build-timeline-register-turn.ts PRIVATE-CONFIG.json ROLLOUT.jsonl OBSERVATIONS.jsonl PRIVATE-BINDING.json
+```
+
+Use the existing refresh source's config/rollout pair and its observation journal.
+The command shares the refresher/recorder's `OBSERVATIONS.jsonl.lock`, validates
+the config's repository allowlist and exact native identity, and atomically writes
+the config with mode 0600. Identical registration is a no-op; changing an existing
+turn's phase or PR links is refused. A busy lock or partial native JSON record
+refuses without changing the config; retry once the writer finishes. The tool
+never changes existing observation bytes or guesses usage. The next successful
+refresh imports the task after its native completion receipt is available.
+
+This is an explicit operator seam, not automatic dispatch instrumentation. Repeat
+registration for every intended root or child turn, including follow-up turns;
+parent linkage does not inherit PR ownership or phase. A newly spawned session's
+rollout/config pair must also be registered in the private refresh service. This
+tool neither discovers those sources nor intercepts the native `spawn_agent`
+tool. An active registered turn has no imported phase until native completion;
+registration time is not a task start. Unregistered turns remain unknown. An
+automatic dispatcher producer and open-task native snapshots remain outstanding
+under #1313. Successful manual registration does not establish all-PR coverage.
+
 Evidence references identify the opaque source and native receipt ID; session and
 turn identities remain separate source fields. Bounded-tail byte offsets belong
 to scan coverage, so a growing log does not change an already imported receipt's
